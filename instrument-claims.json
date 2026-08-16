@@ -720,6 +720,45 @@
       "budget_row": null,
       "corpus_refs": [],
       "notes": "Valve/crook delta-L minting: bore-extractor receipts certified against CAD centerline arc length (refuse-outside band; a wrong crook is a data error, never a silently detuned horn), interior-station port-area continuity vs the DECLARED junction step (undeclared mismatch refuses; declared step passes \u2014 feature vs error distinguished), slide ranges from endpoint pairs. COMPOSED ORACLE EXECUTED: extracted dL=0.4364 m moves the TMM first peak -936.1 cents vs -931.6 predicted (4.5 cents in a 12-cent band) \u2014 the emergent-pitch precondition. X-Est via the bore extractor; the fixture is authored CAD-like geometry (real trumpet CAD slots through the same seam)."
+    },
+    {
+      "filling": "gesture",
+      "image": "typed-schedule",
+      "qoi": "replayable-performance",
+      "owner_crates": [
+        "fs-scenario"
+      ],
+      "exactness": [
+        "X-Exact"
+      ],
+      "gate": "ungated",
+      "live_default": "no",
+      "determinism": "one-host",
+      "evidence": [
+        {
+          "kind": "test",
+          "ref": "crates/fs-scenario/src/gesture.rs::gs_001_deterministic_sampling_and_ramps"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-scenario/src/gesture.rs::gs_002_round_trip_and_content_hash"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-scenario/src/gesture.rs::gs_003_refusals_by_name"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-scenario/src/gesture.rs::gs_004_fret_is_length_plus_obstacle"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/tests/gesture_schedule.rs::schedule_driven_render_is_bitwise_identical_to_inline"
+        }
+      ],
+      "budget_row": null,
+      "corpus_refs": [],
+      "notes": "Typed gesture schedules: the full player-action table (valves/holes/slides/tension/frets/bow/hammers/pedals incl. una corda + sostenuto/termination swaps/breath) as replayable data with type-level unit discipline, integer-tick deterministic sampling, canonical bytes + content hash, and refuse-by-name (incl. the unknown-control-id falsifier \u2014 never a silent no-op). X-Exact: sampling is exact arithmetic on the schedule; the e2e proves schedule-vs-inline BITWISE equality through the render API. No MIDI anywhere; a fret is a length + obstacle, never a mechanism."
     }
   ]
 }

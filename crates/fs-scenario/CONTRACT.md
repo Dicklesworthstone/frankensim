@@ -283,6 +283,27 @@ flagships.
   domain-separated preimage — never a rendered string — so provenance is part
   of the declaration rather than decoration.
 
+- `gesture` module (music bead 3ez8g.2.3): typed gesture schedules —
+  gesture is GEOMETRY IN TIME, not MIDI. `GestureSchedule` carries the
+  complete player-action table as typed tracks: valve inserted lengths,
+  tone-hole sigma, continuous slide length, string TENSION trajectories
+  (a bend is tension state, never a frequency), FRET events (speaking
+  length AND obstacle engagement, hammer-on/pull-off with velocity),
+  bow trajectories, hammer-strike events, sustain/una-corda/sostenuto
+  pedal states, TERMINATION SWAPS by content digest with a D17 fade,
+  and breath controls (pressure, pre-stress, rest aperture, jet
+  speed/angle). UNIT DISCIPLINE is type-level: each target names the
+  ONE `GestureValue` variant it accepts, so a pressure literally cannot
+  enter a length control (`UnitMismatch` at admission). Sampling is a
+  pure function of the integer control tick (fixed control clock, no
+  wall time); continuous targets ramp linearly, event targets belong
+  to exactly one tick and take step events only. Canonical bytes +
+  domain-separated content hash make a performance a receipt-able,
+  replayable artifact; decode re-runs every admission law. An unknown
+  control id REFUSES BY NAME — never a silent no-op. MIDI import is
+  deliberately absent (note numbers never become omega in any physics
+  path); mechanism simulation is out of scope by the plan's boundary.
+
 ## Invariants
 
 1. **Round-trip losslessness and source identity**:
@@ -577,6 +598,17 @@ Zero `unsafe`.
 ## Feature flags
 
 None.
+
+The gesture invariant set (gs-001..gs-004): deterministic
+ramp/step sampling bitwise-repeatable over the tick clock; canonical
+round-trip with hash stability and tamper detection; every refusal arm
+by name (unit mismatch, out-of-range sigma, non-monotone time, ramped
+event target, unknown control id — the falsifier); and the fret event
+carrying BOTH plan-mandated sides (length change + obstacle
+engagement) applied to a `PrestressedString` description. The e2e
+bitwise gate lives in fs-couple (`tests/gesture_schedule.rs`): the
+same performance driven from a schedule at block boundaries vs inline
+control code renders BITWISE identical audio through the render API.
 
 ## Conformance tests
 

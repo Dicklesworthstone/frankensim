@@ -22,6 +22,7 @@ pub mod ensemble;
 pub mod entity;
 pub mod envelope;
 pub mod frame;
+pub mod gesture;
 pub mod ir;
 pub mod payload;
 pub mod scenario;
