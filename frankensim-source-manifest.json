@@ -2,7 +2,7 @@
   "schema": "frankensim-source-manifest-v1",
   "identity_domain": "org.frankensim.xtask.source-manifest.v1",
   "identity_version": 1,
-  "manifest_identity": "035b149538d31356f78a5163f14b1735f83ea47a5805f6c74ac54770f879c322",
+  "manifest_identity": "de388b9ddec8308fbcfc870c4906f46d4d216b3f3b7ecc531c3e93f365409524",
   "bead_id": "frankensim-extreal-program-f85xj.13.2",
   "authority": "canonical structural inventory over exact Git-index non-tracker bytes; release observations are intentionally unbound here",
   "release_binding": {
@@ -15,7 +15,7 @@
     "repository": "https://github.com/Dicklesworthstone/frankensim",
     "workspace_version": "0.0.1",
     "source_root_domain": "org.frankensim.xtask.source-root.v1",
-    "source_root": "dfcb0e98f6282d4385ef9760ff0209925cdaca4d1250c5db863a0a6b1a7308b7",
+    "source_root": "db23cf60e4f21e3eea7344fc29984bfe9eeede5027e1dfeef39b0277bd5c2a2c",
     "tracked_file_count": 2458,
     "excluded_paths": [".beads/**", "frankensim-source-manifest.json", "frankensim-source-manifest.spdx.json"],
     "files": [
@@ -2456,7 +2456,7 @@
       {"path": "xtask/src/constellation_drift.rs", "git_mode": "100644", "bytes": 27214, "content_blake3": "da4782ddee5bdfe180428cf1a028485e913698aa367c3cf2a835948a5d6bd8cf"},
       {"path": "xtask/src/critical_path.rs", "git_mode": "100644", "bytes": 22801, "content_blake3": "24ac2ed2c3d0cb4da9d9a41ba856bbc49c87813438dfe201c9467f8126837bda"},
       {"path": "xtask/src/depgraph.rs", "git_mode": "100644", "bytes": 79944, "content_blake3": "2df1e07c5f1b826bcb88b25056a2430e2001ebfbbf453bc44a914a3eefa207d4"},
-      {"path": "xtask/src/identities.rs", "git_mode": "100644", "bytes": 941813, "content_blake3": "098236fa714689d52eb72bf12091000d732d2f1defac0295f862657ab1f5bc8c"},
+      {"path": "xtask/src/identities.rs", "git_mode": "100644", "bytes": 945541, "content_blake3": "f833daafd28554ac18cc56cd06bce1e2fbacf3dd3933529f4f798a5b24eb8349"},
       {"path": "xtask/src/instrument_claims.rs", "git_mode": "100644", "bytes": 41463, "content_blake3": "105abc48857908062f34701c427cda2ed7a4be4b305dd052ef8d43e22a1ddc4e"},
       {"path": "xtask/src/main.rs", "git_mode": "100644", "bytes": 477670, "content_blake3": "a919e512e2e766d8c86b2ceefb71f8feb21ed0111106dc05d50c5b4f8e21ed40"},
       {"path": "xtask/src/manifest_fixture.rs", "git_mode": "100644", "bytes": 60356, "content_blake3": "bd3d1f7aafd48f2955d2f5fb6c132604bfd4da063f5c78dea530e37f6d743ad8"},
