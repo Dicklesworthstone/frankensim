@@ -442,6 +442,7 @@
     "crates/fs-couple/tests/acoustic_assembly.rs",
     "crates/fs-couple/tests/bakeoff_string.rs",
     "crates/fs-couple/tests/couple.rs",
+    "crates/fs-couple/tests/felt_hammer_island.rs",
     "crates/fs-couple/tests/listening_receipt_mint.rs",
     "crates/fs-couple/tests/music_render_cli.rs",
     "crates/fs-couple/tests/render_blocks.rs",

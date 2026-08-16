@@ -451,7 +451,8 @@ impl WoolFelt {
             && eps_densify > eps_ref)
         {
             return Err(MaterialError::Parameters {
-                what: "wool felt needs f_ref>0, eps_ref>0, p>1, q>=p, 0<crush<1, densify>ref",
+                what: "wool felt needs f_ref>0, eps_ref>0, p>1, q>=p, 0<crush<1, densify>ref"
+                    .to_string(),
             });
         }
         Ok(Self {

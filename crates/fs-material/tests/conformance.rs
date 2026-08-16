@@ -167,11 +167,12 @@ fn mt_001_consistent_tangent_gate_every_law() {
     // Mander path takes via distinct path values).
     let felt = WoolFelt::new(2.0e6, 0.2, 2.5, 3.0, 0.25, 0.7).expect("felt");
     let mut felt_state = felt.initial_state();
-    let felt_path = [0.05, 0.15, 0.30, 0.22, 0.12, 0.30, 0.45, 0.20, 0.50];
+    let felt_path = [0.05, 0.15, 0.30, 0.22, 0.12, 0.28, 0.45, 0.20, 0.50];
     for &eps in &felt_path {
         let tan = felt.tangent(eps, &felt_state);
         let h = 1e-9;
-        let fd = (felt.stress(eps + h, &felt_state) - felt.stress(eps - h, &felt_state)) / (2.0 * h);
+        let fd =
+            (felt.stress(eps + h, &felt_state) - felt.stress(eps - h, &felt_state)) / (2.0 * h);
         let scale = tan.abs().max(1e5);
         assert!(
             (tan - fd).abs() / scale < 1e-4,
@@ -395,10 +396,97 @@ fn mt_004_hysteresis_fixtures() {
         (mander.stress(0.007, &st) - env7).abs() / env7 < 1e-12,
         "rejoins envelope"
     );
+    // Wool felt (music 87zbd): stiffening envelope, crush, and the
+    // ANALYTIC dissipation pin the law's construction proof promises.
+    let felt = WoolFelt::new(2.0e6, 0.2, 2.5, 3.0, 0.25, 0.7).expect("felt");
+    // (a) Envelope stiffens with exactly the declared exponent:
+    //     sigma(2*eps_ref)/sigma(eps_ref) = 2^p.
+    let (s1, _) = felt.envelope(0.2);
+    let (s2, _) = felt.envelope(0.4);
+    let measured_p = fs_math::det::ln(s2 / s1) / core::f64::consts::LN_2;
+    assert!(
+        (measured_p - 2.5).abs() < 1e-12,
+        "envelope exponent {measured_p} vs declared 2.5"
+    );
+    // (b) Soft first touch: the p>1 envelope tangent vanishes at zero
+    //     strain (the grazing-contact-friendly property).
+    assert!(
+        felt.envelope(1e-9).1 < 1.0,
+        "tangent must vanish at first touch"
+    );
+    // (c) Crush: unloading from eps_max reaches zero stress at
+    //     c * eps_max and stays zero below it.
+    let mut st = felt.initial_state();
+    st = felt.update_state(0.4, &st);
+    let eps_r = felt.eps_residual(&st);
+    assert!((eps_r - 0.1).abs() < 1e-15, "residual = 0.25 * 0.4");
+    assert!(
+        felt.stress(eps_r, &st).abs() < 1e-12,
+        "zero stress at crush"
+    );
+    assert!(felt.stress(0.5 * eps_r, &st) == 0.0, "zero below crush");
+    // (d) The virgin-cycle loop area matches the closed form
+    //     W_env - W_ret = sig_max * (eps_max/(p+1) - (eps_max-eps_r)/(q+1)).
+    let mut state = felt.initial_state();
+    let mut area = 0.0f64;
+    let mut prev = (0.0f64, 0.0f64);
+    let steps = 4000;
+    let eps_top = 0.4f64;
+    for k in 0..=(2 * steps) {
+        let eps = if k <= steps {
+            eps_top * f64::from(k) / f64::from(steps)
+        } else {
+            eps_top * f64::from(2 * steps - k) / f64::from(steps)
+        };
+        let sig = felt.stress(eps, &state);
+        if k > 0 {
+            area += f64::midpoint(sig, prev.1) * (eps - prev.0);
+        }
+        state = felt.update_state(eps, &state);
+        prev = (eps, sig);
+    }
+    let sig_top = felt.envelope(eps_top).0;
+    let analytic = sig_top * (eps_top / (2.5 + 1.0) - (eps_top - 0.25 * eps_top) / (3.0 + 1.0));
+    assert!(analytic > 0.0, "construction proof: strictly dissipative");
+    assert!(
+        (area - analytic).abs() / analytic < 1e-3,
+        "felt loop area {area} vs closed form {analytic}"
+    );
+    // (e) Closed sub-loops inside the committed excursion are elastic
+    //     (their loss is the Prony island's claim, not this law's):
+    //     retrace eps_r -> mid -> eps_r and accumulate ~zero area.
+    let mid = f64::midpoint(eps_r, eps_top);
+    let mut sub_area = 0.0f64;
+    let mut prev = (eps_r, felt.stress(eps_r, &state));
+    for k in 1..=200 {
+        let t = f64::from(k) / 100.0;
+        let eps = if k <= 100 {
+            eps_r + (mid - eps_r) * t
+        } else {
+            mid - (mid - eps_r) * (t - 1.0)
+        };
+        let sig = felt.stress(eps, &state);
+        sub_area += f64::midpoint(sig, prev.1) * (eps - prev.0);
+        prev = (eps, sig);
+    }
+    assert!(
+        sub_area.abs() < analytic * 1e-9,
+        "sub-loops are elastic in the rate-independent law (area {sub_area})"
+    );
+    // (f) Reloading past the old peak rejoins the envelope exactly.
+    let mut st = felt.initial_state();
+    st = felt.update_state(0.3, &st);
+    st = felt.update_state(0.45, &st);
+    let (env45, _) = felt.envelope(0.45);
+    assert!(
+        (felt.stress(0.45, &st) - env45).abs() / env45 < 1e-12,
+        "rejoins the envelope beyond the previous maximum"
+    );
     verdict(
         "mt-004",
         "M-P asymptote/tangents/Bauschinger/dissipating loop; Mander peak/softening/\
-         unload-reload fixture behavior",
+         unload-reload; wool-felt exponent/crush/analytic-loop-area/elastic-sub-loop \
+         fixture behavior",
     );
 }
 

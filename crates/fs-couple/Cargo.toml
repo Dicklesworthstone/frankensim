@@ -30,6 +30,9 @@ fs-tribo = { path = "../fs-tribo" }
 fs-vfit = { path = "../fs-vfit" }
 
 [dev-dependencies]
+fs-alloc = { path = "../fs-alloc" }
+fs-contact = { path = "../fs-contact" }
+fs-geom = { path = "../fs-geom" }
 fs-psycho = { path = "../fs-psycho" }
 fs-substrate = { path = "../fs-substrate" }
 fs-bem = { path = "../fs-bem" }

@@ -486,7 +486,13 @@ const ABSENCES: &[AcousticAbsence] = &[
         id: "acoustic-absent-felt-coupon",
         title: "wool-felt force-compression coupon",
         what: "cited felt loading/unloading force-compression data with measurement protocol",
-        why: "not yet hunted under the PD/CC-BY two-source recipe",
+        why: "hunted 2026-08-15: sources IDENTIFIED (Stulov JASA 97(4):2577 1995 hysteretic \
+              hammer model; Chabassier/Chaigne/Joly INRIA RR-8181 hal-00768234 parameter \
+              tables; ISMA 2014 paper quoting F0/p/eps/tau values; published p ranges \
+              1.5-2.8 new / 2.5-3.9 used hammers) but PDF RETENTION BLOCKED by HAL/IoC \
+              anti-bot on every route tried - no pack row can be minted under the \
+              saved-PDF + verbatim-quote transcription law; retry vein: browser-assisted \
+              download or HAL API token",
         unblocks: "frankensim-music-t-piano-felt-87zbd (the Uniaxial fit) and the piano \
                    tilt-vs-velocity gate (3ez8g.5.3)",
     },

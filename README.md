@@ -36,7 +36,7 @@ edge is valid.
 | Standalone `fs-*` workspaces | 1 (`fs-wasm`) |
 | Tracked `fs-*` crate directories | 156 |
 | Tracked `CONTRACT.md` files | 156 of 156 |
-| Tracked crate integration-test files | 695 |
+| Tracked crate integration-test files | 696 |
 | `fs-*` layer inventory | `UTIL=15`, `L0=7`, `L1=14`, `L2=19`, `L3=37`, `L4=32`, `L5=4`, `L6=27`, `TOOL=1` |
 <!-- END GENERATED FRANKENSIM DOC FACTS -->
 

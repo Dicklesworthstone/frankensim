@@ -318,6 +318,53 @@
         "vvreg:acoustic-carcagno-2018-mode3"
       ],
       "notes": "The plate x cavity x radiation coupling engine (energy identities exact, added-mass quartering verified in fs-couple tests); the exact 2-DOF invariant f1*f2 = f_helmholtz*f_top is the free engine-exactness oracle. Composed-guitar gates on the Carcagno corpus: bead 3ez8g.7.4. Fixture traps recorded there: midline braces sit on nodal lines; the sign convention is phase-only observable."
+    },
+    {
+      "filling": "hammer-felt",
+      "image": "hysteresis-island",
+      "qoi": "velocity-tilt-mechanism",
+      "owner_crates": [
+        "fs-material",
+        "fs-couple"
+      ],
+      "exactness": [
+        "X-Struct",
+        "X-Est"
+      ],
+      "gate": "ungated",
+      "live_default": "no",
+      "determinism": "one-host",
+      "evidence": [
+        {
+          "kind": "test",
+          "ref": "crates/fs-material/tests/conformance.rs::mt-001/mt-004 WoolFelt enrollment"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/tests/felt_hammer_island.rs::contact_duration_falls_with_velocity_unlike_the_linear_spring"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/tests/felt_hammer_island.rs::spectral_tilt_rises_with_velocity_beyond_the_linear_control"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/tests/felt_hammer_island.rs::the_felt_loop_dissipates_and_the_ledger_closes"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/tests/felt_hammer_island.rs::prony_chain_covers_the_hammer_band_and_refuses_outside"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/tests/felt_hammer_island.rs::the_phs_string_island_ledger_closes_with_sampled_geometry"
+        }
+      ],
+      "budget_row": null,
+      "corpus_refs": [
+        "vvreg:acoustic-absent-felt-coupon"
+      ],
+      "notes": "WoolFelt (fs-material Uniaxial: stiffening p>1 envelope, crush-anchored unload, dissipation by construction) driving a substepped hammer-string island: contact duration FALLS with velocity while the matched linear spring stays amplitude-independent; spectral tilt rises >1.2x and >1.5x the linear control; strike ledger closes within 15% with felt loss >2% KE_in; rate half lowered via lower_to_prony over 50Hz-5kHz with the FS-MAT-VISCO-OUT-OF-BAND refusal live; island geometry sampled by the certified fs-contact chart-to-gap pipeline and the string stepped under fs_phs::step (per-step discrete-gradient ledger closure). X-Est because ALL felt parameters are authored Estimate values: the licensed coupon hunt identified Stulov 1995 / Chabassier RR-8181 but PDF retention was blocked (the cited absence row records the hunt); green awaits a coupon-backed pack + the piano gates review (3ez8g.5.1)."
     }
   ]
 }
