@@ -75,8 +75,10 @@ the current tree (verified 2026-08-16):
   campaign. The Wright Flyer sim is a sibling flagship with a real-time loop instead of
   a campaign loop.
 - **`fs-mbd`** provides deterministic quaternion rigid-body dynamics; **`fs-time`**
-  provides structure-preserving (symplectic) integrators; **`fs-contact`** provides
-  capability-routed contact for the skid/rail/sand interactions; **`fs-lbm`** provides
+  provides structure-preserving and Lie-group rigid-body integrators;
+  **`fs-contact`** provides certified continuous-collision verification for the
+  offline truth plane (real-time skid/rail contact is a light model owned by
+  `fs-flyer` — see the corrected §5.1.5); **`fs-lbm`** provides
   D2Q9/D3Q19 lattice-Boltzmann cores for the offline high-fidelity validation tier;
   **`fs-vpm`** provides the desingularized Biot–Savart vortex core; **`fs-viz`**
   provides scientific-visualization primitives with analytic ground truth.
@@ -319,7 +321,7 @@ around reproducing them (each maps to a validation case in §10):
 │ fs-wing (lifting-surface aero: strips + unsteady states + VLM tier)    │
 │ fs-airscrew (prop BEMT + engine + chain drive)                         │
 │ fs-atmo (wind profile + div-free turbulence + gust events)             │
-│ on: fs-mbd, fs-time, fs-contact, fs-vpm, fs-bem, fs-exec, fs-math det, │
+│ on: fs-mbd, fs-time, fs-vpm, fs-bem, fs-exec, fs-math det,            │
 │     fs-rand philox, fs-blake3 identity, fs-qty units, fs-scenario      │
 ├────────────────────────────────────────────────────────────────────────┤
 │ TRUTH PLANE (native FrankenSim, offline)                               │
@@ -373,8 +375,13 @@ SharedArrayBuffer:  state ring buffer (sim→render), field buffers (field→ren
 - SharedArrayBuffer requires COOP/COEP headers; the app must also run (degraded to
   `postMessage` transfer, single-threaded wasm) when cross-origin isolation is absent.
   Feature detection with an honest banner ("running in compatibility mode: Tier A").
-- wasm SIMD128 used in the Biot–Savart and BEMT inner loops via `fs-simd`'s tier
-  discipline (Tier 0 scalar reference always available and always the goldens' referee).
+- wasm SIMD128 for the Biot–Savart and BEMT inner loops. **Corrected (audit
+  2026-08-16):** `fs-simd` today ships Tier 0 scalar + Tier 1 NEON/AVX2 capsules and
+  has NO wasm tier — task E0.5 adds a `std::arch::wasm32` SIMD128 Tier-1w capsule
+  under the same registered-unsafe-capsule discipline (Tier 0 scalar stays the
+  referee). Until E0.5 lands, everything runs scalar: re-budgeted, the Tier-B wake at
+  ~192k kernel evals/wake-step is ~190 MFLOP/s scalar and still fits, so SIMD is an
+  optimization, not a load-bearing assumption.
 
 ### 4.4 Data flow (one frame)
 
@@ -408,7 +415,8 @@ consume replay files, never screen recordings.
 **Owns:** the parametric airframe (geometry+mass), control system model, pilot models,
 launch systems, ground interaction, the per-step orchestration, KPI accumulation, and
 the scenario schema. Depends on `fs-wing`, `fs-airscrew`, `fs-atmo`, `fs-mbd`,
-`fs-time`, `fs-contact`, `fs-qty`, `fs-scenario`, `fs-blake3`, `fs-exec`.
+`fs-time`, `fs-qty`, `fs-scenario`, `fs-blake3`, `fs-exec` (real-time), with
+`fs-contact` as an OFFLINE dev-dependency of the truth-plane replay verifier only.
 
 #### 5.1.1 Parametric airframe
 
@@ -463,8 +471,14 @@ the asymmetry), fuselage/strut/wire parasite drag (flat-plate build-up with the 
 own strut-fairing insight), ground/rail contact.
 
 Integrator: fixed dt = 1/120 s primary; substep to 1/240 s automatically when contact
-is active (rail run, landing). Semi-implicit symplectic base from `fs-time`; quaternion
-renormalization per `fs-mbd`'s canonical convention. dt-refinement study is a validation
+is active (rail run, landing). **Audit finding (good news):** `fs-time` already ships
+Lie-group rigid-body integrators (`lie::rigid_body_step`, `quat_exp_step`, SE(3)
+exponential steps with renormalization variants) — the right tool for quaternion
+dynamics with velocity-dependent aero forces; use those rather than the plainer
+semi-implicit scheme originally assumed. Quaternion canonicalization per `fs-mbd`'s
+documented convention. Note an integration seam found in audit: `fs-mbd` defines its
+own `Vec3`/`UnitQuaternion` types distinct from `fs-geom`'s — `fs-flyer` owns the
+thin type adapters at that boundary (small, but budgeted as part of E3.2). dt-refinement study is a validation
 task (V-05), mirroring the Euler-disc "no full-duration dt convergence certificate"
 honesty note until it exists.
 
@@ -490,10 +504,16 @@ actual mechanism, not an aileron abstraction).
   as a small deterministic perturbation (seeded).
 - **Catapult (Huffman):** weight-drop energy → rope tension profile → dolly force;
   configurable drop mass/height (defaults [V?] from 1904 accounts).
-- **Skid–sand contact:** `fs-contact` capability-routed pairs; regularized Coulomb
-  friction + plastic normal model for sand (tunable "sink" parameter); landing quality
-  feeds the smoothness KPI and a damage flag (canard breakage as on flight 4 —
-  threshold on nose-down impact energy [V?]).
+- **Skid–sand contact:** a lightweight real-time contact model OWNED BY `fs-flyer`
+  (heightfield penetration springs + regularized Coulomb friction + plastic "sink"
+  parameter for sand); landing quality feeds the smoothness KPI and a damage flag
+  (canard breakage as on flight 4 — threshold on nose-down impact energy [V?]).
+  **Corrected (audit 2026-08-16):** `fs-contact` is a *certified spacetime CCD*
+  library (`CertifiedMotorTube`, `certified_ccd`, SDF window refinement) — it answers
+  "prove these motions cannot have missed a contact," not "give me forces each step."
+  Its honest role here is OFFLINE: an optional replay-verification pass that certifies
+  no missed skid/terrain penetration in a recorded flight (a truth-plane check),
+  never the per-step force path.
 - **Terrain queries:** heightfield + material map (sand/grass/marsh) sampled by contact
   and by `fs-atmo` (roughness z₀ varies by material).
 
@@ -681,7 +701,7 @@ attempt; fs-aeroac/fs-phs offer a v2 path to honest aeroacoustic estimates).
 | fs-atmo sampling (strips+props+probes ~80 pts) | 0.10 ms | 0.20 |
 | fs-wing strips (36 strips × states + 3-D solve) | 0.25 ms | 0.50 |
 | fs-airscrew (2 props × 24 stations) | 0.06 ms | 0.12 |
-| fs-contact + rail | 0.03 ms | 0.06 |
+| ground contact (fs-flyer) + rail | 0.03 ms | 0.06 |
 | fs-mbd + fs-time integrate | 0.02 ms | 0.04 |
 | KPIs, ring buffer, bookkeeping | 0.05 ms | 0.10 |
 | **Sim worker total** | **~0.5 ms** | **~1.0 ms** |
@@ -916,19 +936,19 @@ production CLI (`fs-flyer` native binary) — never parallel logic.
 | Crate | Role here | Notes |
 |---|---|---|
 | fs-wasm | pattern + infra precedent for browser workspace, CI lane, wasm-pack recipe | fs-flyer-wasm copies its protections |
-| fs-bem (+fs-fmm) | Tier C offline force referee; live one-shot interference tables | already wasm32-proven |
-| fs-vpm | Biot–Savart core for wake; extend to 3-D filaments/particles upstream | 2-D today (verified header) |
+| fs-bem (+fs-fmm) | Tier C offline force referee; live one-shot interference tables | wasm32-proven (in fs-wasm); `panel3d` module confirmed; needs the coarse screening-preset mode (§11.4) for bounded in-browser one-shots |
+| fs-vpm | Biot–Savart core for wake; extend to 3-D filaments/particles upstream | 2-D today; kernel IS exposed (`induced_velocity`, `advect` — verified) but O(N²) unbinned: needs the optional fast path (§11.4) |
 | fs-lbm | Tier D wind-over-terrain truth runs | D3Q19 + boundaries exist |
-| fs-mbd | 6-DOF rigid body, canonical quaternions | unconstrained core, by design |
-| fs-contact | skid/rail/sand contact routing | |
-| fs-time | symplectic/structure-preserving integrators | |
+| fs-mbd | 6-DOF rigid body, canonical quaternions; force/impulse-at-point API verified | leaf crate (no deps); wasm32 compile PROVEN by audit probe 2026-08-16 |
+| fs-contact | OFFLINE certified no-missed-contact verification of replays (optional truth-plane pass) | corrected role — certified spacetime CCD, not per-step forces; real-time contact lives in fs-flyer |
+| fs-time | Lie-group rigid-body + symplectic integrators (`lie::rigid_body_step`, verlet, rk45) | wasm32 compile PROVEN by audit probe 2026-08-16 |
 | fs-exec | Cx, budgets, cancellation, deterministic mode | wasm-proven via fs-wasm |
 | fs-math | det:: transcendentals (libm doctrine) | determinism backbone |
 | fs-rand | philox streams | |
 | fs-blake3 | identity domains for config/replay/tables | register identities on introduction |
 | fs-qty | unit-checked quantities at seams | |
-| fs-scenario | scenario schema conventions | |
-| fs-simd | SIMD tiers for Biot–Savart/BEMT kernels | Tier 0 scalar = referee |
+| fs-scenario | boundary-condition/load-case algebra with fs-qty dimensions + provenance (verified: it is a general scenario algebra, not domain-specific) | wasm32-proven (in fs-wasm) |
+| fs-simd | SIMD tiers for Biot–Savart/BEMT kernels | NO wasm tier today — E0.5 adds a SIMD128 Tier-1w capsule; scalar referee fits the budget meanwhile |
 | fs-viz | field-viz primitive algorithms w/ analytic ground truth | CPU side of streamlines etc. |
 | fs-uq / fs-surrogate / fs-bo / fs-dfo | sweeps, surrogates, optimization hook | already in fs-wasm |
 | fs-vvreg (+ vv-scorecard) | validation receipts + reporting | standing infra |
@@ -949,6 +969,54 @@ production CLI (`fs-flyer` native binary) — never parallel logic.
 Each ships CONTRACT.md, no-claims block, refusal vocabulary, and registered identity
 constants from day one (workspace law; cheaper at birth than at audit).
 
+### 11.3 wasm/real-time readiness audit (EXECUTED 2026-08-16, round 0.5)
+
+Every reuse claim above was audited against the tree, not assumed. Evidence:
+
+| Crate | wasm32 evidence | Real-time verdict |
+|---|---|---|
+| fs-exec, fs-alloc, fs-rand, fs-math, fs-qty, fs-la, fs-viz, fs-uq, fs-lbm, fs-bem, fs-vpm, fs-scenario, fs-render | already in `fs-wasm`'s shipping dependency list (its CI lane builds them with wasm-pack) | proven by standing CI |
+| fs-mbd, fs-time | dedicated probe crate compiled `RigidBodyState` + `lie::rigid_body_step` to `wasm32-unknown-unknown` clean (asupersync `wasm-browser-prod` profile feature, which the fs-flyer-wasm workspace will set exactly as fs-wasm does) | proven by this audit |
+| fs-simd | NOT wasm-capable today (NEON/AVX2 capsules only) | extension required (E0.5); scalar fallback fits budget |
+| fs-contact | not probed | reclassified offline-only (see corrected §5.1.5) |
+| fs-fmm | not probed | offline Tier C only; no browser claim made |
+
+Audit also confirmed API shapes the plan depends on: `fs-vpm` exposes the reusable
+kernel functions (`induced_velocity`, `advect`) rather than a closed simulation
+loop; `fs-la` has dense factor/GEMM modules; `fs-time` has the Lie-group steps;
+`fs-mbd` exposes force/impulse application at body points; `fs-bem` has a
+`panel3d` module. One standing caveat: wasm builds of the fs-exec cone require the
+asupersync canonical wasm profile feature — the fs-flyer-wasm workspace must pin
+`wasm-browser-prod` (or `-deterministic`) exactly as fs-wasm does, and E0.3
+inherits that as an explicit DONE-WHEN clause.
+
+### 11.4 Optional-fidelity doctrine for shared crates (new, from audit)
+
+The real-time tier will need cheaper paths inside shared crates. The rule that keeps
+this honest and keeps offline users whole:
+
+1. **Additive, never mutative.** Every approximation lands as a NEW flagged mode
+   (constructor variant or explicit budget parameter), never a change to the exact
+   path's defaults or semantics. The exact path remains the referee and its goldens
+   do not move.
+2. **Self-describing lossiness.** Each fast mode names its approximation (e.g.
+   `WakeInduction::BinnedTruncated { cell, cutoff }`) and its receipt records the
+   mode, so a result can never silently claim exact-kernel provenance.
+3. **Paired error battery.** Each fast mode ships a battery bounding its deviation
+   from the exact path on pinned fixtures (relative-error envelope pinned like any
+   other golden), so "slightly lossy" is a measured phrase.
+4. **Same identity discipline.** Mode + parameters enter the run's content identity;
+   a Tier-A replay can therefore never be confused with a Tier-C rerun.
+
+Concrete planned extensions under this doctrine:
+
+| Crate | New optional mode | Consumer |
+|---|---|---|
+| fs-vpm | 3-D particles/filaments (exact) + `BinnedTruncated` fast induction + Γ-conserving pairwise merge | fs-wing Tier B wake |
+| fs-bem | coarse-panel "screening preset" with declared panel budget + one-shot influence-table export | in-browser interference tables (E4.8) |
+| fs-simd | wasm32 SIMD128 Tier-1w capsule (scalar-referee discipline unchanged) | Biot–Savart/BEMT inner loops |
+| fs-la | reuse-factorization API for repeated same-structure dense solves (if absent after E3-time inspection) | lifting-line per-step solve |
+
 ---
 
 ## 12. Milestones & Dependency-Aware Task Graph
@@ -962,8 +1030,16 @@ executed, E2E runner discipline).
 - **E0.2** `apps/wright-flyer` scaffold (Vite+TS+three.js, COOP/COEP dev server,
   CI lint/build lane). DONE-WHEN: blank scene at 60 fps deployed to a static host.
 - **E0.3** `fs-flyer-wasm` scaffold on the fs-wasm pattern (own workspace, nested
-  lock, wasm-pack CI lane cloned incl. lock-drift gate, hello-kernel exposed and
-  called from E0.2's page). → blocks all wasm integration tasks.
+  lock, wasm-pack CI lane cloned incl. lock-drift gate, asupersync canonical wasm
+  profile feature pinned, hello-kernel exposed and called from E0.2's page).
+  → blocks all wasm integration tasks.
+- **E0.4** wasm32 CI guard for the flyer cone: a `cargo check --target
+  wasm32-unknown-unknown` lane over fs-mbd/fs-time/fs-vpm/fs-wing/fs-airscrew/
+  fs-atmo/fs-flyer so native-lane edits cannot silently break the browser build
+  (extends the audit probe of §11.3 into standing CI). Depends E0.3.
+- **E0.5** fs-simd wasm32 SIMD128 Tier-1w capsule (`std::arch::wasm32` v128,
+  registered-unsafe-capsule discipline, scalar referee tests). Unblocks nothing —
+  pure optimization; schedule opportunistically after E4.7 profiling.
 
 ### E1 — Historical grounding & data
 - **E1.1** Source dossier: assemble A1–A6 datasets, licenses, citations. → E4, E10.
@@ -989,8 +1065,9 @@ executed, E2E runner discipline).
   loop; state ring buffer; replay record/playback bit-identity test. → E3.4, E6.1.
 - **E3.3** `fs-atmo` v0: log-law mean + frozen div-free turbulence + seeds; battery:
   spectra, div=0, determinism. (Parallel to E3.2.)
-- **E3.4** Rail launch + skid contact + terrain heightfield queries (fs-contact).
-  DONE-WHEN: dolly run, liftoff hand-off, sliding landing all stable at 240 Hz substep.
+- **E3.4** Rail launch + fs-flyer-owned skid/ground contact + terrain heightfield
+  queries. DONE-WHEN: dolly run, liftoff hand-off, sliding landing all stable at
+  240 Hz substep with no energy-ledger violation.
 
 ### E4 — Aerodynamics & propulsion (the physics heart)
 - **E4.1** Section layer: cambered thin-airfoil + stall blend + Re correction,
@@ -1006,12 +1083,17 @@ executed, E2E runner discipline).
 - **E4.6** Integration: full force build-up into E3.2's 6-DOF; trim solver; live
   linearization + stability derivatives. DONE-WHEN: V-02 porpoising signature
   reproduced (period band), static margin negative per A4.
-- **E4.7** fs-vpm 3-D extension (filaments/particles, desingularized kernel, cell
-  binning) upstreamed in fs-vpm; Tier B wake shed/feedback in fs-wing @40 Hz with
-  particle cap + merge. Depends E4.2; SIMD via fs-simd. DONE-WHEN: Tier A vs Tier B
-  KPI deltas within V-05 band on reference scenarios.
+- **E4.7** fs-vpm 3-D extension (filaments/particles, desingularized kernel) plus
+  the §11.4 `BinnedTruncated` optional fast induction and Γ-conserving merge,
+  upstreamed in fs-vpm under the optional-fidelity doctrine (exact-path goldens
+  untouched; paired error battery); Tier B wake shed/feedback in fs-wing @40 Hz
+  with particle cap. Depends E4.2. DONE-WHEN: Tier A vs Tier B KPI deltas within
+  V-05 band on reference scenarios AND fast-vs-exact induction error battery green.
 - **E4.8** Interference-table one-shot via fs-bem on design change (cached by
-  geometry hash). Depends E4.2.
+  geometry hash), using the new §11.4 coarse screening preset (declared panel
+  budget; bounded runtime with fs-exec budget + cancellation; refusal rather than
+  stall on budget exhaustion). Depends E4.2; adds the preset to fs-bem under the
+  optional-fidelity doctrine.
 
 ### E5 — Browser integration (playable alpha)
 - **E5.1** fs-flyer-wasm API v1: init(scenario), step-loop in sim worker, state ring,
@@ -1060,6 +1142,10 @@ executed, E2E runner discipline).
 - **E10.4** Cinematic export path: replay → native trajectory → fs-render scene
   bridge → EXR/ProRes via existing mux adapter; one hero clip produced. Depends E6.1;
   reuses h7xu5 machinery.
+- **E10.5** Certified-contact replay pass (optional): feed a recorded flight's
+  motion through `fs-contact` spacetime CCD against the terrain to certify no missed
+  skid/ground penetration in the real-time contact model; publish as a receipt.
+  Depends E6.1, E3.4.
 
 ### Critical path
 
@@ -1082,7 +1168,8 @@ E10.2 (beta). Terrain/assets (E1.3, E2.x) parallel the physics spine. The wake t
 | 7 | Scope creep toward general flight sim | high | §1.4 non-goals; new-aircraft requests become v2 beads, never v1 scope |
 | 8 | Instability makes the game feel "broken" to casual users | high | assist ladder default = Wright-hands, authentic opt-in; onboarding explains WHY it porpoises (the instability is the story, told as such) |
 | 9 | Determinism vs three.js frame jitter confusion | low | fixed-step sim + interpolation; replay hashes computed in sim plane only |
-| 10 | fs-vpm 3-D extension underestimated | med | Tier A ships without it; E4.7 has its own falsifier battery and can slip without gating first-flyable |
+| 10 | fs-vpm 3-D extension underestimated | med | Tier A ships without it; E4.7 has its own falsifier battery and can slip without gating first-flyable; audit confirmed the reusable kernel surface exists |
+| 11 | Real-time contact model (now fs-flyer-owned) under-damped/jittery on landings | med | fixed 240 Hz substep + regularized friction; fs-contact offline certification pass as the honesty backstop |
 
 ---
 
@@ -1161,8 +1248,9 @@ period/phugoid; x_np from ∂Cm/∂CL root-solve.
 N = 2,000 particles; shed 36/step at 40 Hz → cap reached in ~1.4 s of wake age →
 merge policy (Γ-weighted pairwise within cells, oldest-first) holds N. Advance:
 mutual induction via 32³ cell binning ⇒ ~N·k evals, k≈60 neighbors ⇒ 120k kernel
-evals + strip feedback 36×2,000 = 72k ⇒ ~192k evals/wake-step ≈ 5.8 Mevals/s at
-40 Hz ⇒ with 4-wide SIMD ≈ 25 flops/eval ⇒ ~36 MFLOP/s — comfortable. Field grid
+evals + strip feedback 36×2,000 = 72k ⇒ ~192k evals/wake-step ≈ 7.7 Mevals/s at
+40 Hz ⇒ at ~25 flops/eval ≈ 190 MFLOP/s SCALAR — comfortable even before the E0.5
+SIMD128 tier (which buys ~3–4× headroom for particle-count or grid growth). Field grid
 32³ = 33k points × (2,000 particles via binned far-field truncation + analytic
 ambient) at 15 Hz ⇒ budget ~40 ms/refresh in its own worker — fits.
 
@@ -1190,5 +1278,6 @@ pilot-aircraft pitch oscillation. Warp: the Wrights' roll control via wing twist
 | Round | Reviewer | Date | Disposition |
 |---|---|---|---|
 | 0 | (this draft) NobleLion / Claude | 2026-08-16 | initial comprehensive plan |
+| 0.5 | self-audit (fresh-eyes + executed wasm32 probes) | 2026-08-16 | corrected fs-contact role, fs-simd wasm claim, fs-time integrator choice; added §11.3 readiness-audit evidence, §11.4 optional-fidelity doctrine, E0.4/E0.5 |
 | 1 | — | — | pending (GPT Pro Extended Reasoning, EXACT PROMPT) |
 | 2–4+ | — | — | pending; convert to beads only at steady-state |
