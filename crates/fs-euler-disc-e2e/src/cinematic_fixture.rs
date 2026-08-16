@@ -11,8 +11,10 @@ use std::{
     fs::{self, File, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
     sync::Arc,
+    thread,
+    time::{Duration, Instant},
 };
 
 use crate::audio_resampling::{DecimatedModalAcceleration, MechanicsModalAccelerationDecimator};
@@ -1615,8 +1617,7 @@ impl CinematicFixtureConfig {
             if !(chirp.final_supported_frequency_hz.is_finite()
                 && chirp.terminal_growth_per_s.is_finite()
                 && chirp.terminal_growth_per_s >= 0.0
-                && chirp.final_supported_frequency_hz
-                    >= crate::terminal_sound::CHIRP_MIN_START_HZ
+                && chirp.final_supported_frequency_hz >= crate::terminal_sound::CHIRP_MIN_START_HZ
                 && chirp.final_supported_frequency_hz
                     <= crate::terminal_sound::CHIRP_FREQUENCY_CAP_HZ)
             {
@@ -2072,11 +2073,44 @@ pub struct CinematicFixtureReport {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// Evidence of one successful QUARANTINED encode: derived media authority
+/// only — this report can never mint render, simulation, or acoustic
+/// claims (the canonical EXR/PNG/WAV artifacts remain the product).
+struct MuxReport {
+    /// Movie file name relative to the bundle root.
+    output_relative: PathBuf,
+    /// Domain-hashed identity of the retained movie bytes.
+    output_identity: ContentHash,
+    /// Encoder executable exactly as configured.
+    executable: String,
+    /// First line of `<encoder> -version`, bounded.
+    version_line: String,
+    /// Exact argv (no shell interpolation anywhere in this path).
+    arguments: Vec<String>,
+    /// Bounded tail of the encoder's retained stderr log.
+    stderr_tail: String,
+}
+
 enum MuxOutcome {
     Disabled,
-    Unavailable(String),
-    Failed(i32),
-    Written(PathBuf),
+    /// The encoder cannot run here. Canonical artifacts are complete;
+    /// `manual_command` reproduces the encode from the bundle root.
+    Unavailable {
+        detail: String,
+        manual_command: String,
+    },
+    Failed {
+        exit_code: i32,
+        stderr_tail: String,
+        manual_command: String,
+    },
+    /// The encoder exceeded its budget and was killed (process cleanup
+    /// performed); no partial movie is reported as written.
+    TimedOut {
+        budget_seconds: u64,
+        manual_command: String,
+    },
+    Written(MuxReport),
 }
 
 struct FixtureAudio {
@@ -6016,12 +6050,17 @@ pub fn run_cinematic_fixture(
     let movie_path = staging_directory.join("euler-disc-critique-prores4444-pcm24.mov");
     let mux = if config.mux_with_ffmpeg {
         progress("stage=mux begin");
-        mux_movie(config, &staging_directory, &movie_path)
+        mux_movie(
+            &config.ffmpeg_executable,
+            &staging_directory,
+            &movie_path,
+            MUX_TIMEOUT_SECONDS,
+        )
     } else {
         MuxOutcome::Disabled
     };
     let completed_movie = match &mux {
-        MuxOutcome::Written(path) => Some(path.clone()),
+        MuxOutcome::Written(report) => Some(report.output_relative.clone()),
         _ => None,
     };
     let manifest_path = staging_directory.join("critique-manifest.json");
@@ -9580,63 +9619,265 @@ fn apply_initial_fade(
     Ok(())
 }
 
+/// Encoder wall-clock budget: the child is killed past this point.
+const MUX_TIMEOUT_SECONDS: u64 = 600;
+/// Bounded stderr retention read back into the manifest.
+const MUX_LOG_TAIL_BYTES: u64 = 2048;
+/// Versioned identity domain for retained movie bytes.
+const MUX_OUTPUT_IDENTITY_DOMAIN: &str = "org.frankensim.euler-disc.mux-output.v1";
+
+/// The exact encoder argv (relative inputs; run from the bundle root).
+/// Pure so tests can pin construction, including hostile file names
+/// passing through VERBATIM as a single argv element.
+fn mux_arguments(movie_name: &str) -> Vec<String> {
+    let mut arguments: Vec<String> = [
+        "-hide_banner",
+        "-loglevel",
+        "warning",
+        "-n",
+        "-framerate",
+        "24",
+        "-i",
+        "preview/frame-%06d.png",
+        "-i",
+        "sound/physical-listening-master.pcm24.wav",
+        "-map",
+        "0:v:0",
+        "-map",
+        "1:a:0",
+        "-c:v",
+        "prores_ks",
+        "-profile:v",
+        "4",
+        "-pix_fmt",
+        "yuva444p10le",
+        "-color_primaries",
+        "bt709",
+        "-color_trc",
+        "bt709",
+        "-colorspace",
+        "bt709",
+        "-c:a",
+        "pcm_s24le",
+        "-ar",
+        "48000",
+        "-ac",
+        "2",
+        "-disposition:a:0",
+        "default",
+        "-shortest",
+        "-movflags",
+        "+faststart",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    arguments.push(movie_name.to_owned());
+    arguments
+}
+
+/// Copy-paste reproduction command (relative paths; from the bundle root).
+fn manual_mux_command(executable: &Path, arguments: &[String]) -> String {
+    format!(
+        "(from the bundle root) {} {}",
+        executable.display(),
+        arguments.join(" ")
+    )
+}
+
+/// First line of `<executable> -version`, bounded to 256 bytes.
+fn encoder_version_line(executable: &Path) -> Result<String, String> {
+    let output = Command::new(executable)
+        .arg("-version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        return Err(format!(
+            "version probe exited with {:?}",
+            output.status.code()
+        ));
+    }
+    let first = output
+        .stdout
+        .split(|&byte| byte == b'\n')
+        .next()
+        .unwrap_or(&[]);
+    let mut line = String::from_utf8_lossy(first).into_owned();
+    line.truncate(256);
+    Ok(line)
+}
+
+/// Bounded tail of a retained log file (never keeps more than the cap).
+fn bounded_file_tail(path: &Path, cap_bytes: u64) -> String {
+    let Ok(bytes) = fs::read(path) else {
+        return String::new();
+    };
+    let start = bytes.len().saturating_sub(cap_bytes as usize);
+    let mut tail = String::from_utf8_lossy(&bytes[start..]).into_owned();
+    tail.truncate(cap_bytes as usize);
+    tail
+}
+
+/// Quarantined out-of-process encode: explicit argv (no shell anywhere),
+/// bounded retained stderr (mux-stderr.log), a wall-clock budget with
+/// kill-and-reap cleanup, encoder version capture, and a domain-hashed
+/// output identity. Every non-written outcome carries the copy-paste
+/// manual command; canonical artifacts are never deleted on any path.
 fn mux_movie(
-    config: &CinematicFixtureConfig,
+    executable: &Path,
     output_directory: &Path,
     movie_path: &Path,
+    budget_seconds: u64,
 ) -> MuxOutcome {
-    let Some(movie_name) = movie_path.file_name() else {
-        return MuxOutcome::Unavailable("movie path has no file name".into());
+    let Some(movie_name) = movie_path.file_name().and_then(|name| name.to_str()) else {
+        return MuxOutcome::Unavailable {
+            detail: "movie path has no UTF-8 file name".into(),
+            manual_command: String::new(),
+        };
     };
-    let status = Command::new(&config.ffmpeg_executable)
-        .current_dir(output_directory)
-        .args([
-            "-hide_banner",
-            "-loglevel",
-            "warning",
-            "-n",
-            "-framerate",
-            "24",
-            "-i",
-            "preview/frame-%06d.png",
-            "-i",
-            "sound/physical-listening-master.pcm24.wav",
-            "-map",
-            "0:v:0",
-            "-map",
-            "1:a:0",
-            "-c:v",
-            "prores_ks",
-            "-profile:v",
-            "4",
-            "-pix_fmt",
-            "yuva444p10le",
-            "-color_primaries",
-            "bt709",
-            "-color_trc",
-            "bt709",
-            "-colorspace",
-            "bt709",
-            "-c:a",
-            "pcm_s24le",
-            "-ar",
-            "48000",
-            "-ac",
-            "2",
-            "-disposition:a:0",
-            "default",
-            "-shortest",
-            "-movflags",
-            "+faststart",
-        ])
-        .arg(movie_name)
-        .status();
-    match status {
-        Ok(status) if status.success() && movie_path.is_file() => {
-            MuxOutcome::Written(PathBuf::from("euler-disc-critique-prores4444-pcm24.mov"))
+    let arguments = mux_arguments(movie_name);
+    let manual_command = manual_mux_command(executable, &arguments);
+    let version_line = match encoder_version_line(executable) {
+        Ok(line) => line,
+        Err(detail) => {
+            return MuxOutcome::Unavailable {
+                detail: format!("encoder unavailable: {detail}"),
+                manual_command,
+            };
         }
-        Ok(status) => MuxOutcome::Failed(status.code().unwrap_or(-1)),
-        Err(error) => MuxOutcome::Unavailable(error.to_string()),
+    };
+    let stderr_path = output_directory.join("mux-stderr.log");
+    let stderr_file = match File::create(&stderr_path) {
+        Ok(file) => file,
+        Err(error) => {
+            return MuxOutcome::Unavailable {
+                detail: format!("cannot retain encoder log: {error}"),
+                manual_command,
+            };
+        }
+    };
+    let mut child = match Command::new(executable)
+        .current_dir(output_directory)
+        .args(&arguments)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(stderr_file))
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(error) => {
+            return MuxOutcome::Unavailable {
+                detail: error.to_string(),
+                manual_command,
+            };
+        }
+    };
+    let deadline = Instant::now() + Duration::from_secs(budget_seconds);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return MuxOutcome::TimedOut {
+                        budget_seconds,
+                        manual_command,
+                    };
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return MuxOutcome::Unavailable {
+                    detail: error.to_string(),
+                    manual_command,
+                };
+            }
+        }
+    };
+    let stderr_tail = bounded_file_tail(&stderr_path, MUX_LOG_TAIL_BYTES);
+    if status.success() && movie_path.is_file() {
+        match fs::read(movie_path) {
+            Ok(bytes) if !bytes.is_empty() => MuxOutcome::Written(MuxReport {
+                output_relative: PathBuf::from(movie_name),
+                output_identity: hash_domain(MUX_OUTPUT_IDENTITY_DOMAIN, &bytes),
+                executable: executable.display().to_string(),
+                version_line,
+                arguments,
+                stderr_tail,
+            }),
+            Ok(_) => MuxOutcome::Failed {
+                exit_code: 0,
+                stderr_tail: format!("{stderr_tail}\n(encoder exited 0 but wrote an empty movie)"),
+                manual_command,
+            },
+            Err(error) => MuxOutcome::Unavailable {
+                detail: format!("cannot hash written movie: {error}"),
+                manual_command,
+            },
+        }
+    } else {
+        MuxOutcome::Failed {
+            exit_code: status.code().unwrap_or(-1),
+            stderr_tail,
+            manual_command,
+        }
+    }
+}
+
+/// One shared manifest rendering for every consumer of [`MuxOutcome`].
+fn mux_manifest_json(mux: &MuxOutcome) -> String {
+    match mux {
+        MuxOutcome::Disabled => "{\"status\":\"disabled\"}".to_owned(),
+        MuxOutcome::Unavailable {
+            detail,
+            manual_command,
+        } => format!(
+            "{{\"status\":\"unavailable\",\"detail\":\"{}\",\"manual_command\":\"{}\"}}",
+            json_escape(detail),
+            json_escape(manual_command)
+        ),
+        MuxOutcome::Failed {
+            exit_code,
+            stderr_tail,
+            manual_command,
+        } => format!(
+            "{{\"status\":\"failed\",\"exit_code\":{exit_code},\"stderr_tail\":\"{}\",\"manual_command\":\"{}\"}}",
+            json_escape(stderr_tail),
+            json_escape(manual_command)
+        ),
+        MuxOutcome::TimedOut {
+            budget_seconds,
+            manual_command,
+        } => format!(
+            "{{\"status\":\"timed-out\",\"budget_seconds\":{budget_seconds},\"manual_command\":\"{}\"}}",
+            json_escape(manual_command)
+        ),
+        MuxOutcome::Written(report) => format!(
+            concat!(
+                "{{\"status\":\"written\",\"path\":\"{}\",",
+                "\"authority\":\"derived-media-only\",",
+                "\"executable\":\"{}\",\"version\":\"{}\",",
+                "\"arguments\":[{}],\"output_identity\":\"{}\",",
+                "\"stderr_tail\":\"{}\"}}"
+            ),
+            json_escape(&report.output_relative.display().to_string()),
+            json_escape(&report.executable),
+            json_escape(&report.version_line),
+            report
+                .arguments
+                .iter()
+                .map(|argument| format!("\"{}\"", json_escape(argument)))
+                .collect::<Vec<_>>()
+                .join(","),
+            report.output_identity.to_hex(),
+            json_escape(&report.stderr_tail)
+        ),
     }
 }
 
@@ -9926,20 +10167,7 @@ fn canonical_media_fixture_manifest(
     mux: &MuxOutcome,
 ) -> Result<String, CinematicFixtureError> {
     let rendered_frames = config.render_frame_range()?;
-    let mux_json = match mux {
-        MuxOutcome::Disabled => "{\"status\":\"disabled\"}".to_owned(),
-        MuxOutcome::Unavailable(message) => format!(
-            "{{\"status\":\"unavailable\",\"detail\":\"{}\"}}",
-            json_escape(message)
-        ),
-        MuxOutcome::Failed(code) => {
-            format!("{{\"status\":\"failed\",\"exit_code\":{code}}}")
-        }
-        MuxOutcome::Written(path) => format!(
-            "{{\"status\":\"written\",\"path\":\"{}\"}}",
-            json_escape(&path.display().to_string())
-        ),
-    };
+    let mux_json = mux_manifest_json(mux);
     let sampling =
         fixture_sampling_manifest_json(config, adaptive_sampling, independent_pilot_sampling);
     let metadata = trajectory.trajectory().metadata();
@@ -10083,20 +10311,7 @@ fn production_fixture_manifest(
         .map(|interval| interval.normal_impulse_n_s)
         .sum();
     let impulse_residual_n_s = (fine_impulse_n_s - coarse_impulse_n_s).abs();
-    let mux_json = match mux {
-        MuxOutcome::Disabled => "{\"status\":\"disabled\"}".to_owned(),
-        MuxOutcome::Unavailable(message) => format!(
-            "{{\"status\":\"unavailable\",\"detail\":\"{}\"}}",
-            json_escape(message)
-        ),
-        MuxOutcome::Failed(code) => {
-            format!("{{\"status\":\"failed\",\"exit_code\":{code}}}")
-        }
-        MuxOutcome::Written(path) => format!(
-            "{{\"status\":\"written\",\"path\":\"{}\"}}",
-            json_escape(&path.display().to_string())
-        ),
-    };
+    let mux_json = mux_manifest_json(mux);
     let adaptive_json =
         fixture_sampling_manifest_json(config, adaptive_sampling, independent_pilot_sampling);
     let disc_json = resolved_disc_manifest_json(&config.disc, physical_disc);
@@ -10411,20 +10626,7 @@ fn fixture_manifest(
     let relative_energy_defect = run.energy_closure_residual_j.abs()
         / first_source_sample.energy_j.abs().max(f64::MIN_POSITIVE);
     let trajectory_identity = trajectory.receipt().artifact_identity();
-    let mux_json = match mux {
-        MuxOutcome::Disabled => "{\"status\":\"disabled\"}".to_owned(),
-        MuxOutcome::Unavailable(message) => format!(
-            "{{\"status\":\"unavailable\",\"detail\":\"{}\"}}",
-            json_escape(message)
-        ),
-        MuxOutcome::Failed(code) => {
-            format!("{{\"status\":\"failed\",\"exit_code\":{code}}}")
-        }
-        MuxOutcome::Written(path) => format!(
-            "{{\"status\":\"written\",\"path\":\"{}\"}}",
-            json_escape(&path.display().to_string())
-        ),
-    };
+    let mux_json = mux_manifest_json(mux);
     let spatialization_json = spatialization.map_or_else(
         || "{\"enabled\":false,\"path\":\"canonical-dry-stereo\"}".to_owned(),
         |spatial| {
@@ -10761,6 +10963,161 @@ mod tests {
     use fs_exec::{Budget, CancelGate, ExecMode, StreamKey};
 
     use super::*;
+
+    /// Scratch directory for the quarantined-mux process tests.
+    fn mux_test_dir(label: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("fsim-mux-adapter-{label}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A stub encoder: answers `-version`, then runs the given body for a
+    /// real mux invocation. POSIX sh, executable bit set.
+    fn stub_encoder(dir: &Path, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+        let path = dir.join("fake-ffmpeg.sh");
+        let script = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then echo 'ffmpeg version fake-1.0 (stub)'; exit 0; fi\n{body}\n"
+        );
+        fs::write(&path, script).unwrap();
+        let mut permissions = fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&path, permissions).unwrap();
+        path
+    }
+
+    #[test]
+    fn mux_arguments_pass_hostile_movie_names_verbatim_as_one_argv_element() {
+        let hostile = "a movie; $(rm -rf /) && `x` |.mov";
+        let arguments = mux_arguments(hostile);
+        // The hostile name is EXACTLY the final element — one element,
+        // byte-identical, never joined into a shell string.
+        assert_eq!(arguments.last().map(String::as_str), Some(hostile));
+        assert_eq!(
+            arguments.iter().filter(|a| a.contains("rm -rf")).count(),
+            1,
+            "the hostile bytes exist only in the single verbatim element"
+        );
+        // Construction is deterministic and pins the media contract.
+        let again = mux_arguments(hostile);
+        assert_eq!(arguments, again);
+        for pinned in ["prores_ks", "pcm_s24le", "bt709", "-shortest"] {
+            assert!(
+                arguments.iter().any(|argument| argument == pinned),
+                "media contract argument {pinned} missing"
+            );
+        }
+    }
+
+    #[test]
+    fn mux_missing_encoder_is_typed_capability_absence_with_manual_command() {
+        let dir = mux_test_dir("missing");
+        let outcome = mux_movie(
+            Path::new("/nonexistent/definitely-missing-ffmpeg-4xz"),
+            &dir,
+            &dir.join("out.mov"),
+            5,
+        );
+        let MuxOutcome::Unavailable {
+            detail,
+            manual_command,
+        } = outcome
+        else {
+            panic!("missing encoder must be Unavailable");
+        };
+        assert!(detail.contains("encoder unavailable"), "{detail}");
+        assert!(
+            manual_command.contains("prores_ks") && manual_command.contains("out.mov"),
+            "manual command must be copy-paste complete: {manual_command}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn mux_nonzero_exit_reports_failed_with_bounded_stderr_tail() {
+        let dir = mux_test_dir("failed");
+        let encoder = stub_encoder(&dir, "echo boom-diagnostic >&2; exit 3");
+        let outcome = mux_movie(&encoder, &dir, &dir.join("out.mov"), 30);
+        let MuxOutcome::Failed {
+            exit_code,
+            stderr_tail,
+            ..
+        } = outcome
+        else {
+            panic!("nonzero exit must be Failed");
+        };
+        assert_eq!(exit_code, 3);
+        assert!(stderr_tail.contains("boom-diagnostic"), "{stderr_tail}");
+        assert!(stderr_tail.len() <= MUX_LOG_TAIL_BYTES as usize + 64);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn mux_zero_exit_without_output_is_failed_not_written() {
+        let dir = mux_test_dir("silent");
+        let encoder = stub_encoder(&dir, "exit 0");
+        let outcome = mux_movie(&encoder, &dir, &dir.join("out.mov"), 30);
+        assert!(
+            matches!(outcome, MuxOutcome::Failed { exit_code: 0, .. }),
+            "an encoder that exits 0 without writing the movie must not report Written"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn mux_timeout_kills_the_child_and_reports_timed_out() {
+        let dir = mux_test_dir("timeout");
+        let encoder = stub_encoder(&dir, "sleep 3600");
+        let started = std::time::Instant::now();
+        let outcome = mux_movie(&encoder, &dir, &dir.join("out.mov"), 1);
+        assert!(
+            matches!(
+                outcome,
+                MuxOutcome::TimedOut {
+                    budget_seconds: 1,
+                    ..
+                }
+            ),
+            "budget exhaustion must be TimedOut"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "the child must be killed at the budget, not awaited"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn mux_written_report_captures_version_arguments_and_output_identity() {
+        let dir = mux_test_dir("written");
+        // The stub writes the movie (last argv element) and warns once.
+        let encoder = stub_encoder(
+            &dir,
+            "for a; do last=$a; done; printf 'MOVBYTES' > \"$last\"; echo one-warning >&2; exit 0",
+        );
+        let movie = dir.join("out.mov");
+        let outcome = mux_movie(&encoder, &dir, &movie, 30);
+        let MuxOutcome::Written(report) = outcome else {
+            panic!("stub success must be Written");
+        };
+        assert_eq!(report.output_relative, PathBuf::from("out.mov"));
+        assert!(report.version_line.starts_with("ffmpeg version fake-1.0"));
+        assert_eq!(
+            report.output_identity,
+            hash_domain(MUX_OUTPUT_IDENTITY_DOMAIN, b"MOVBYTES"),
+            "output identity must be the domain hash of the retained bytes"
+        );
+        assert!(report.stderr_tail.contains("one-warning"));
+        assert_eq!(report.arguments, mux_arguments("out.mov"));
+        // The manifest rendering is valid JSON with the derived-media
+        // authority and never any other claim class.
+        let json = mux_manifest_json(&MuxOutcome::Written(report));
+        assert!(json.contains("\"authority\":\"derived-media-only\""));
+        assert!(json.contains("\"output_identity\""));
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     fn with_test_cx<R>(operation: impl FnOnce(&Cx<'_>) -> R) -> R {
         let gate = CancelGate::new_clock_free();

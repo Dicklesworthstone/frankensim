@@ -354,14 +354,23 @@ if isinstance(primary, str):
     if not os.path.isfile(primary_path) or os.path.getsize(primary_path) == 0:
         refuse(f"declared audio primary missing or empty: {primary}")
 mux = manifest.get("mux", {})
-if isinstance(mux, dict) and mux.get("status") == "written":
+mux_status = mux.get("status") if isinstance(mux, dict) else None
+movs = [f for f in os.listdir(root) if f.endswith(".mov")]
+if mux_status == "written":
     mux_name = os.path.basename(str(mux.get("path", "")))
     mux_path = os.path.join(root, mux_name)
     if not mux_name or not os.path.isfile(mux_path) or os.path.getsize(mux_path) == 0:
         refuse(f"manifest declares written mux but artifact is missing/empty: {mux_name!r}")
-movs = [f for f in os.listdir(root) if f.endswith(".mov")]
-if not movs:
-    refuse("no mux output retained")
+    if not movs:
+        refuse("no mux output retained")
+elif mux_status in ("unavailable", "timed-out", "failed"):
+    # Typed capability absence/failure: canonical artifacts remain the
+    # product, but the manifest must keep the copy-paste manual command
+    # (except legacy failed records that predate the adapter contract).
+    if mux_status != "failed" and not mux.get("manual_command"):
+        refuse(f"mux status {mux_status!r} without a manual_command escape hatch")
+elif mux_status not in ("disabled", None):
+    refuse(f"unknown mux status {mux_status!r}")
 for name in movs:
     if os.path.getsize(os.path.join(root, name)) == 0:
         refuse(f"empty mux output {name}")
