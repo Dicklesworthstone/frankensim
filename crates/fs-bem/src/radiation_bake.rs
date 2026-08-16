@@ -305,22 +305,63 @@ pub fn lathe_profile(
             triangles.push([lo[jn], hi[jn], hi[j]]);
         }
     }
-    // Throat cap at min x, outward normal -x: fan (center, t_jn, t_j).
-    let throat_center = [profile[0].0, 0.0, 0.0];
-    let first = &rings[0];
-    for j in 0..circumferential {
-        let jn = (j + 1) % circumferential;
-        triangles.push([throat_center, first[jn], first[j]]);
-    }
-    // Mouth cap at max x, outward normal +x: fan (center, m_j, m_jn) —
-    // the DRIVEN piston, kept LAST so the mask is a suffix.
+    // Caps are subdivided into CONCENTRIC ANNULI so cap panels stay at
+    // the wall panel scale: a single fan on a wide mouth makes panels
+    // whose centroid quadrature drives the known Burton-Miller
+    // resistance artifact (executed: a 60 mm single-fan mouth turned
+    // every BM row's Re Z negative by a near-constant offset).
+    let mean_axial_step = (profile[profile.len() - 1].0 - profile[0].0)
+        / (profile.len() - 1) as f64;
+    let cap = |x: f64,
+               r_cap: f64,
+               outward_plus_x: bool,
+               triangles: &mut Vec<[[f64; 3]; 3]>| {
+        let m = ((r_cap / mean_axial_step.max(1e-9)).ceil() as usize).max(1);
+        let radii: Vec<f64> = (0..=m).map(|i| r_cap * i as f64 / m as f64).collect();
+        let ring_at = |r: f64| -> Vec<[f64; 3]> {
+            (0..circumferential)
+                .map(|j| {
+                    let th = core::f64::consts::TAU * j as f64 / circumferential as f64;
+                    [x, r * th.cos(), r * th.sin()]
+                })
+                .collect()
+        };
+        let center = [x, 0.0, 0.0];
+        let inner = ring_at(radii[1]);
+        for j in 0..circumferential {
+            let jn = (j + 1) % circumferential;
+            if outward_plus_x {
+                triangles.push([center, inner[j], inner[jn]]);
+            } else {
+                triangles.push([center, inner[jn], inner[j]]);
+            }
+        }
+        for i in 1..m {
+            let a = ring_at(radii[i]);
+            let b = ring_at(radii[i + 1]);
+            for j in 0..circumferential {
+                let jn = (j + 1) % circumferential;
+                if outward_plus_x {
+                    triangles.push([a[j], b[j], a[jn]]);
+                    triangles.push([a[jn], b[j], b[jn]]);
+                } else {
+                    triangles.push([a[j], a[jn], b[j]]);
+                    triangles.push([a[jn], b[jn], b[j]]);
+                }
+            }
+        }
+    };
+    // Throat cap at min x, outward normal -x.
+    cap(profile[0].0, profile[0].1, false, &mut triangles);
+    // Mouth cap at max x, outward normal +x — the DRIVEN piston, kept
+    // LAST so the mask is a suffix.
     let mouth_start = triangles.len();
-    let mouth_center = [profile[profile.len() - 1].0, 0.0, 0.0];
-    let last = &rings[rings.len() - 1];
-    for j in 0..circumferential {
-        let jn = (j + 1) % circumferential;
-        triangles.push([mouth_center, last[j], last[jn]]);
-    }
+    cap(
+        profile[profile.len() - 1].0,
+        profile[profile.len() - 1].1,
+        true,
+        &mut triangles,
+    );
     Ok(LathedBell {
         triangles,
         mouth_start,
@@ -466,7 +507,8 @@ mod tests {
         let rel = (vol - analytic).abs() / analytic;
         let mask = bell.driven_mask();
         let mouth_count = mask.iter().filter(|&&d| d).count();
-        let pass = vol > 0.0 && rel < 0.05 && mouth_count == 24;
+        // Mouth cap = fan + annuli: 24*(2m-1) triangles with m rings.
+        let pass = vol > 0.0 && rel < 0.05 && mouth_count % 24 == 0 && mouth_count >= 24;
         verdict(
             "zb-003-lathe-closed-outward",
             pass,
