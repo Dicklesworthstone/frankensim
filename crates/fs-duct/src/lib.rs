@@ -60,8 +60,10 @@
 //! jump at `r_v = 10`).
 //! Lossy cones cascade spherical substations at local radius
 //! (lossless stays the exact one-shot `e^{±ikx}/x` 2-port).
-//! Deferred: fingering tables (slice 3 of the bead) and BEM-computed
-//! radiation loads. The multimodal horn expansion LANDED as the
+//! Deferred: (none of the original list remains) — fingering tables
+//! landed as [`FingeringTable`] (bead 3ez8g.6.1), BEM-computed
+//! radiation loads are consumed by the tabulated-load lane (bead
+//! zolja). The multimodal horn expansion LANDED as the
 //! [`modal`] module (music bead 3ez8g.4.1) — its recorded trigger was
 //! executed: a trumpet-like flare's plane-wave peaks miss the
 //! multimodal structure by ~15 cents.
@@ -3642,5 +3644,96 @@ mod bell_bake_artifact {
             lo / core::f64::consts::TAU,
             hi / core::f64::consts::TAU
         );
+    }
+}
+
+/// One named fingering: the hole states applied to a duct template
+/// (music bead 3ez8g.6.1 — the chart-side fingering data both the TMM
+/// and characteristic images consume; typed data, never inline code).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Fingering {
+    /// Label (e.g. `xxxo`).
+    pub label: String,
+    /// One state per tone hole, mouthpiece-first order.
+    pub holes: Vec<HoleState>,
+}
+
+/// A fingering table over a duct template: the template's tone holes
+/// are re-stated per fingering; geometry never changes, only states.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FingeringTable {
+    template: Duct,
+    fingerings: Vec<Fingering>,
+}
+
+impl FingeringTable {
+    /// Admit a table: the template must carry at least one tone hole and
+    /// every fingering exactly one state per hole; labels unique.
+    ///
+    /// # Errors
+    /// [`DuctError::BadParameter`] naming the violated rule.
+    pub fn try_new(template: Duct, fingerings: Vec<Fingering>) -> Result<Self, DuctError> {
+        let n_holes = template
+            .segments
+            .iter()
+            .filter(|s| matches!(s, Segment::ToneHole { .. }))
+            .count();
+        if n_holes == 0 {
+            return Err(DuctError::BadParameter {
+                what: "fingering table needs a template with tone holes",
+            });
+        }
+        if fingerings.is_empty() {
+            return Err(DuctError::BadParameter {
+                what: "fingering table needs at least one fingering",
+            });
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for f in &fingerings {
+            if f.label.trim().is_empty() || !seen.insert(f.label.clone()) {
+                return Err(DuctError::BadParameter {
+                    what: "fingering labels must be non-empty and unique",
+                });
+            }
+            if f.holes.len() != n_holes {
+                return Err(DuctError::BadParameter {
+                    what: "each fingering needs exactly one state per template hole",
+                });
+            }
+        }
+        Ok(FingeringTable {
+            template,
+            fingerings,
+        })
+    }
+
+    /// The fingering labels in table order.
+    #[must_use]
+    pub fn labels(&self) -> Vec<&str> {
+        self.fingerings.iter().map(|f| f.label.as_str()).collect()
+    }
+
+    /// The duct for a named fingering (template with the hole states
+    /// substituted). An unknown label REFUSES by name.
+    ///
+    /// # Errors
+    /// [`DuctError::BadParameter`].
+    pub fn duct(&self, label: &str) -> Result<Duct, DuctError> {
+        let fingering =
+            self.fingerings
+                .iter()
+                .find(|f| f.label == label)
+                .ok_or(DuctError::BadParameter {
+                    what: "unknown fingering label (refused by name, never a silent no-op)",
+                })?;
+        let mut segments = self.template.segments.clone();
+        let mut hole_index = 0usize;
+        for segment in &mut segments {
+            if let Segment::ToneHole { state, .. } = segment {
+                *state = fingering.holes[hole_index];
+                hole_index += 1;
+            }
+        }
+        Ok(Duct { segments })
     }
 }

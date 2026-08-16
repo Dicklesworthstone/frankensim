@@ -13,13 +13,21 @@
         "X-Consist",
         "X-Struct"
       ],
-      "gate": "ungated",
+      "gate": "green",
       "live_default": "no",
       "determinism": "one-host",
       "evidence": [
         {
           "kind": "test",
           "ref": "crates/fs-duct/tests/ernoult_corpus.rs::ernoult_ladder_driven_from_the_registered_corpus_rows"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-duct/tests/ernoult_corpus.rs::falsifier_a_detuned_corpus_geometry_fails_the_gate"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-duct/src/lib.rs::FingeringTable (typed fingering data; unknown label refuses)"
         }
       ],
       "budget_row": null,
@@ -30,7 +38,7 @@
         "vvreg:acoustic-ernoult-2021-xoxx",
         "vvreg:acoustic-ernoult-2021-oxxx"
       ],
-      "notes": "Ernoult-class five-fingering ladder lives as fs-duct tests (-8/-8/-18/-17/-20 cents inside a 30-cent envelope); corpus rows registered (3ez8g.1.1) and the wired end-to-end gate executes from them (geometry + envelopes read FROM the rows; falsifier proves discrimination); green awaits the wind gates review (3ez8g.6.1). X-Consist bore, X-Struct ZK losses."
+      "notes": "GREEN per the 3ez8g.6.1 wind gates review (2026-08-16): the Ernoult five-fingering ladder executes FROM registered corpus rows (-8/-8/-18/-17/-20 cents inside the 30-cent outer envelope, deviations systematically FLAT \u2014 the inner correction slightly large \u2014 so tone-hole refinements have this dataset as their regression floor) with the 15mm-detune falsifier proving discrimination. THE DISPERSION PIN travels on this row: at a 2 mm bore the LOSSLESS model is 85 CENTS sharp and ZK closes it to 8 \u2014 losses are load-bearing; any future faster lossless mode is a FAST-MODE row with this failure disclosed, never a silent swap. X-Consist bore, X-Struct ZK losses. live_default stays no until a wind budget row lands (D25)."
     },
     {
       "filling": "wind-reed",
@@ -44,10 +52,15 @@
         "X-Exact",
         "X-Struct"
       ],
-      "gate": "ungated",
+      "gate": "green",
       "live_default": "no",
       "determinism": "one-host",
-      "evidence": [],
+      "evidence": [
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/tests/wind_junction_gate.rs::char_junctions_match_tmm_r_and_the_detuned_hole_fails"
+        }
+      ],
       "budget_row": null,
       "corpus_refs": [
         "vvreg:acoustic-ernoult-2021-xxxx",
@@ -56,7 +69,7 @@
         "vvreg:acoustic-ernoult-2021-xoxx",
         "vvreg:acoustic-ernoult-2021-oxxx"
       ],
-      "notes": "The exact-FIR reflectance port (DelayedFilter fed by driving_point::characteristic_line) IS the TMM R on the DFT grid; the gate is junction agreement within band (the menu's failure mode become a test). Gates bead: 3ez8g.6.1."
+      "notes": "GREEN per the 3ez8g.6.1 review: the char image's realized reflectance tracks the TMM authority's R(omega) on the holed Ernoult-class bore across three fingerings of the typed FingeringTable (worst gap 0.049 inside the 0.08 band) and the ONE-ARM falsifier (char junction geometry drifting 15 mm from the authority) fails at 0.489. EXECUTED LESSON recorded in the test: perturbing the SHARED duct left both arms agreeing (0.0185) \u2014 an A-vs-B consistency gate is structurally blind to shared-input errors (the metamorphic-blindness law); the falsifier must perturb one arm."
     },
     {
       "filling": "wind-reed",
@@ -71,18 +84,22 @@
         "X-Exact",
         "X-Struct"
       ],
-      "gate": "ungated",
+      "gate": "green",
       "live_default": "no",
       "determinism": "one-host",
       "evidence": [
         {
           "kind": "listening",
           "ref": "data/listening/reed-sustained.listening-receipt"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/tests/acoustic_assembly.rs::beating_reed_locks_near_the_quarter_wave"
         }
       ],
       "budget_row": "data/budget-rows/wind-reed-char-line-80cb534fbaf60b50.budgetrow",
       "corpus_refs": [],
-      "notes": "reed_bore self-oscillates and locks near the quarter-wave resonance (existing fs-couple test); authored reed parameters keep this Estimate-labeled until the cane reed card (3ez8g.6.2) mints receipts. Gates bead: 3ez8g.6.1. BUDGET MEASURED (3ez8g.2.2): 1.39e6 samples/s, 29x headroom at 48 kHz, dispersion 5.4%, release, machine 80cb534f - the program's first admissible real-time number; live_default stays no until the gates review. LISTENING ARTIFACT RENDERED (3ez8g.1.2): 2.0s clip-free at 20 kPa full-scale, receipt UNADJUDICATED (awaiting the owner's ear; structurally useless as pass evidence until adjudicated)."
+      "notes": "reed_bore self-oscillates and locks near the quarter-wave resonance (existing fs-couple test); authored reed parameters keep this Estimate-labeled until the cane reed card (3ez8g.6.2) mints receipts. Gates bead: 3ez8g.6.1. BUDGET MEASURED (3ez8g.2.2): 1.39e6 samples/s, 29x headroom at 48 kHz, dispersion 5.4%, release, machine 80cb534f - the program's first admissible real-time number; live_default stays no until the gates review. LISTENING ARTIFACT RENDERED (3ez8g.1.2): 2.0s clip-free at 20 kPa full-scale, receipt UNADJUDICATED (awaiting the owner's ear; structurally useless as pass evidence until adjudicated). GREEN per the 3ez8g.6.1 review: the lock gate executes (28% band on quarter-wave or twelfth) and the row carries the measured budget (1.39e6 samples/s, 29x headroom)."
     },
     {
       "filling": "wind-reed",
@@ -94,13 +111,18 @@
       "exactness": [
         "X-Struct"
       ],
-      "gate": "ungated",
+      "gate": "green",
       "live_default": "no",
       "determinism": "one-host",
-      "evidence": [],
+      "evidence": [
+        {
+          "kind": "test",
+          "ref": "crates/fs-vfit/tests/clarinet_casebook.rs::clarinet_impedance_to_passive_audio_filter"
+        }
+      ],
       "budget_row": null,
       "corpus_refs": [],
-      "notes": "Clarinet casebook: 24-pole passive fit at 0.17 cents with the passivity certificate class named (HamiltonianExact vs GridOnly). Fails on live sigma / out-of-band by design. Gates bead: 3ez8g.6.1."
+      "notes": "GREEN per the 3ez8g.6.1 review: the clarinet casebook executes end-to-end (24-pole fit, peaks within 2 cents at every stage: continuous, certified, digital-biquad at 192 kHz) and the PASSIVITY CERTIFICATE CLASS IS NAMED FROM MEASUREMENT: GridOnly (the fit's d <= 1e-12 makes the Hamiltonian crossing arm unavailable; the grid check is clean) \u2014 recorded as the class the evidence actually supports, not the stronger class. X-Struct passivity; the e^{-iwt} conjugation discipline documented in the casebook."
     },
     {
       "filling": "wind-reed",
@@ -115,10 +137,15 @@
       "gate": "ungated",
       "live_default": "no",
       "determinism": "one-host",
-      "evidence": [],
+      "evidence": [
+        {
+          "kind": "test",
+          "ref": "crates/fs-phs/tests/reed_casebook.rs::reed_as_phs_quasi_static_equilibrium_and_energy_audit"
+        }
+      ],
       "budget_row": null,
       "corpus_refs": [],
-      "notes": "Fine LC/pHS chains as the TD oracle for short chambers; any gate MUST disclose f_Ny per configuration - a 6-cell ladder is never 8 kHz truth. Gates bead: 3ez8g.6.1."
+      "notes": "UNGATED with the f_Ny DISCLOSURE (3ez8g.6.1): the fine-pHS ladder's Nyquist boundary is PER CONFIGURATION \u2014 a 6-cell ladder cannot claim 8 kHz truth; any row consumer must read f_Ny from the specific chain. Evidence so far: the reed casebook's analytic equilibrium pin and per-step energy ledger. Green awaits a TD-oracle agreement gate on a stated configuration with its f_Ny carried in the receipt."
     },
     {
       "filling": "string",

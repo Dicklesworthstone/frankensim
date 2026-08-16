@@ -89,6 +89,14 @@ pipe `Z_in = +i Zc cot(kL)`.
   loads the PLANE mode; higher modes keep the disclosed matched-mouth
   closure (tl-001..tl-004).
 
+- `FingeringTable` / `Fingering` (music bead 3ez8g.6.1 — the deferred
+  fingering-tables slice consumed): typed chart-side fingering data
+  over a duct template. The template's tone-hole GEOMETRY never
+  changes; a fingering re-states only the hole states, and both the
+  TMM and characteristic images consume the same table. Admission:
+  template must carry holes, one state per hole per fingering, unique
+  labels; an unknown label REFUSES by name (never a silent no-op).
+
 ## Invariants
 
 1. Segment 2-ports are built numerically from exact analytic basis
