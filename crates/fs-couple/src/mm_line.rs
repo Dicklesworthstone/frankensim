@@ -317,9 +317,14 @@ impl MmLineBank {
             let mut ir: Vec<f64> = buf.iter().map(|c| c.re).collect();
             // Passivity is enforced ON THE STORED TAPS (a valve switch
             // rebuilds from them; enforcing only the live line would
-            // resurrect an unenforced reflectance mid-performance).
-            let grid: Vec<f64> = (1..=n_fft / 2)
-                .map(|k| core::f64::consts::TAU * k as f64 / (n_fft as f64 * dt))
+            // resurrect an unenforced reflectance mid-performance), and
+            // on a 4x OVERSAMPLED grid: the DTFT of the realized FIR can
+            // overshoot |R| > 1 BETWEEN the realization bins (Gibbs
+            // ringing), and an inter-bin active line screams at a
+            // parasitic frequency (executed: a crook combo locked onto a
+            // 7.3 kHz inter-bin overshoot until this densification).
+            let grid: Vec<f64> = (1..=2 * n_fft)
+                .map(|k| core::f64::consts::TAU * k as f64 / (4.0 * n_fft as f64 * dt))
                 .collect();
             let peak = dtft_peak(&ir, dt, &grid);
             if peak > 1.0 {
