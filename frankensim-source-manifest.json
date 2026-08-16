@@ -2,7 +2,7 @@
   "schema": "frankensim-source-manifest-v1",
   "identity_domain": "org.frankensim.xtask.source-manifest.v1",
   "identity_version": 1,
-  "manifest_identity": "4c711821145d9ef86497908b69b6873c070f51d37feb703e0318d1054e9824fe",
+  "manifest_identity": "646ac4c995f15c548f45032ee48c9556e6d5913143b3591a27288fb96f0b1c78",
   "bead_id": "frankensim-extreal-program-f85xj.13.2",
   "authority": "canonical structural inventory over exact Git-index non-tracker bytes; release observations are intentionally unbound here",
   "release_binding": {
@@ -15,7 +15,7 @@
     "repository": "https://github.com/Dicklesworthstone/frankensim",
     "workspace_version": "0.0.1",
     "source_root_domain": "org.frankensim.xtask.source-root.v1",
-    "source_root": "ba59d9d0aad4818ef191b9276065bce6541649ed4f42375e775e5953e1247817",
+    "source_root": "401a19ae6ff2e7aa78db3d7bab8e753535edf16805381ead0035101a868ff6c3",
     "tracked_file_count": 2463,
     "excluded_paths": [".beads/**", "frankensim-source-manifest.json", "frankensim-source-manifest.spdx.json"],
     "files": [
@@ -1941,7 +1941,7 @@
       {"path": "crates/fs-vessel/tests/battery.rs", "git_mode": "100644", "bytes": 12343, "content_blake3": "a3ed936565584678b1a812ac07f9400be96a8af0c5a6e34d4f3ef34bb02dd834"},
       {"path": "crates/fs-vfit/CONTRACT.md", "git_mode": "100644", "bytes": 10253, "content_blake3": "9888b1eea31dc82b2b3f33acc4cdd74334dea85f6d16c92ce98f95f5c5cc6690"},
       {"path": "crates/fs-vfit/Cargo.toml", "git_mode": "100644", "bytes": 669, "content_blake3": "30c471e8e180196cf784396e890fca6a10bd34c2a305fe5ca52a27050803b7df"},
-      {"path": "crates/fs-vfit/src/discretize.rs", "git_mode": "100644", "bytes": 45636, "content_blake3": "897c1d50e75e363d98ab66192746ab4c07f39aa25a6f425ceef5b02bde6cddf9"},
+      {"path": "crates/fs-vfit/src/discretize.rs", "git_mode": "100644", "bytes": 45682, "content_blake3": "258a074fe57455799b0baca83b3b619605a1f51bace754cc288c69778027ee9d"},
       {"path": "crates/fs-vfit/src/lib.rs", "git_mode": "100644", "bytes": 1823, "content_blake3": "43ee4ba68608328373c8c16f1a23d1b42d32d287ef23316dc3d0a2b51e3001b0"},
       {"path": "crates/fs-vfit/src/loewner.rs", "git_mode": "100644", "bytes": 13174, "content_blake3": "4abf116c75b986bf0206d486c7fa976bf7f75897be3e633e20c1146a154a1603"},
       {"path": "crates/fs-vfit/src/model.rs", "git_mode": "100644", "bytes": 7550, "content_blake3": "6b2b4d33e79153098b24edbe940315cb7150937241ce061f2040eda808142e0c"},
