@@ -1296,6 +1296,18 @@ pub struct CinematicCanonicalMediaSource {
     pub listening_master_identity: ContentHash,
 }
 
+/// Declared artistic terminal-chirp parameters (bead h7xu5.7.7).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CinematicTerminalChirpConfig {
+    /// Instantaneous drive frequency at the last supported sample [Hz].
+    pub final_supported_frequency_hz: f64,
+    /// Exponential frequency growth per second from the final trend (>= 0).
+    pub terminal_growth_per_s: f64,
+    /// Explicit edit intent: required because the production clip is
+    /// horizon-censored; without it the policy module refuses by design.
+    pub explicit_edit_intent: bool,
+}
+
 /// Bounded settings for one watchable critique artifact.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CinematicFixtureConfig {
@@ -1360,6 +1372,14 @@ pub struct CinematicFixtureConfig {
     /// Fixed listening-master calibration [digital full scale / Pa]. This is a
     /// presentation mapping only; it never changes the physical pressure field.
     pub listening_gain_fs_per_pa: f64,
+    /// Optional artistic terminal chirp (bead h7xu5.7.7). `None` is the
+    /// default taper-at-last-supported policy and leaves the soundtrack
+    /// byte-identical to a build without this field. The production clip is
+    /// horizon-censored by construction (it ends at the declared frame
+    /// count, not at a physical stop), so the chirp REQUIRES the explicit
+    /// edit-intent flag and every synthesized sample is counted in the
+    /// manifest receipt.
+    pub terminal_chirp: Option<CinematicTerminalChirpConfig>,
     /// One parameterized geometry, mass, and material state shared by all domains.
     pub disc: CinematicDiscSpecimenConfig,
     /// Disc FEM/BEM resolution and work bounds; no prescribed modal preset.
@@ -1418,6 +1438,7 @@ impl Default for CinematicFixtureConfig {
             denoise_previews: true,
             retain_full_aov_exr: true,
             spatialize_audio: true,
+            terminal_chirp: None,
             listening_gain_fs_per_pa: PressureListeningMasterPolicy::CRITIQUE
                 .digital_gain_fs_per_pa,
             disc: CinematicDiscSpecimenConfig::default(),
@@ -1579,6 +1600,30 @@ impl CinematicFixtureConfig {
             return Err(CinematicFixtureError::InvalidConfig(
                 "listening_gain_fs_per_pa must be finite and positive",
             ));
+        }
+        if let Some(chirp) = &self.terminal_chirp {
+            // Fail at ADMISSION, not after minutes of mechanics: the
+            // production clip is horizon-censored, so the chirp needs
+            // explicit edit intent, and its trend must sit in the policy
+            // module's admitted band (mirrored here so the run refuses in
+            // milliseconds; terminal_sound re-checks authoritatively).
+            if !chirp.explicit_edit_intent {
+                return Err(CinematicFixtureError::InvalidConfig(
+                    "terminal chirp on a horizon-censored clip requires --terminal-edit-intent",
+                ));
+            }
+            if !(chirp.final_supported_frequency_hz.is_finite()
+                && chirp.terminal_growth_per_s.is_finite()
+                && chirp.terminal_growth_per_s >= 0.0
+                && chirp.final_supported_frequency_hz
+                    >= crate::terminal_sound::CHIRP_MIN_START_HZ
+                && chirp.final_supported_frequency_hz
+                    <= crate::terminal_sound::CHIRP_FREQUENCY_CAP_HZ)
+            {
+                return Err(CinematicFixtureError::InvalidConfig(
+                    "terminal chirp trend is outside the admitted band",
+                ));
+            }
         }
         if self.mux_with_ffmpeg && (self.width % 2 != 0 || self.height % 2 != 0) {
             return Err(CinematicFixtureError::InvalidConfig(
@@ -2056,6 +2101,9 @@ struct FixtureAudio {
 
 struct FixturePhysicalAudio {
     master: PhysicalPressureListeningMaster,
+    /// Pre-rendered terminal-sound receipt JSON ("null" under the default
+    /// taper policy; the full synthesis receipt when the chirp ran).
+    terminal_sound_json: String,
     disc_material_state_identity: ContentHash,
     plate_material_state_identity: ContentHash,
     plate_optical_model_identity: ContentHash,
@@ -8940,8 +8988,81 @@ fn build_physical_audio(
         left_sources.push(rigid_left);
         right_sources.push(rigid_right);
     }
-    let left = superpose_pressure_signals(&left_sources, cx).map_err(pipeline)?;
-    let right = superpose_pressure_signals(&right_sources, cx).map_err(pipeline)?;
+    let mut left = superpose_pressure_signals(&left_sources, cx).map_err(pipeline)?;
+    let mut right = superpose_pressure_signals(&right_sources, cx).map_err(pipeline)?;
+    // Optional artistic terminal chirp (bead h7xu5.7.7): applied to the
+    // PRESSURE stems so the listening master's peak gate, fades, and
+    // identity all govern the chirped signal like any other sound. The
+    // production clip is horizon-censored (it ends at the declared frame
+    // count), so the policy module refuses without explicit edit intent;
+    // the receipt counting every synthesized sample lands in the manifest.
+    let terminal_sound_receipt = if let Some(chirp) = config.terminal_chirp {
+        let request = crate::terminal_sound::ChirpRequest {
+            final_supported_frequency_hz: chirp.final_supported_frequency_hz,
+            terminal_growth_per_s: chirp.terminal_growth_per_s,
+            // fs-domain reference peak converted into pascals through the
+            // declared presentation gain, so the chirp lands at the same
+            // loudness the fs constant names after mastering.
+            peak_amplitude: crate::terminal_sound::CHIRP_PEAK_FS / config.listening_gain_fs_per_pa,
+            explicit_edit_intent: chirp.explicit_edit_intent,
+        };
+        let mut receipt = None;
+        for channel in [&mut left, &mut right] {
+            let (samples, channel_receipt) = crate::terminal_sound::apply_terminal_policy(
+                &channel.pressure_pa,
+                crate::terminal_sound::TerminalDispositionClass::HorizonCensored,
+                crate::terminal_sound::TerminalSoundPolicy::ArtisticChirp,
+                Some(request),
+            )
+            .map_err(|error| {
+                CinematicFixtureError::Pipeline(format!("terminal-sound policy refused: {error}"))
+            })?;
+            channel.pressure_pa = samples;
+            channel.peak_abs_pressure_pa = channel
+                .pressure_pa
+                .iter()
+                .fold(0.0_f64, |peak, value| peak.max(value.abs()));
+            // Derived identity: the chirped stem is a NEW artifact bound to
+            // its source and the exact synthesis receipt.
+            let mut payload = Vec::new();
+            payload.extend_from_slice(channel.identity.as_bytes());
+            payload.extend_from_slice(&channel_receipt.synthesized_sample_frames.to_le_bytes());
+            payload
+                .extend_from_slice(&request.final_supported_frequency_hz.to_bits().to_le_bytes());
+            payload.extend_from_slice(&request.terminal_growth_per_s.to_bits().to_le_bytes());
+            payload.extend_from_slice(&request.peak_amplitude.to_bits().to_le_bytes());
+            channel.identity = fs_blake3::hash_domain(
+                "org.frankensim.euler-disc.terminal-chirped-pressure.v1",
+                &payload,
+            );
+            receipt = Some(channel_receipt);
+        }
+        receipt
+    } else {
+        None
+    };
+    let terminal_sound_json = match &terminal_sound_receipt {
+        None => "null".to_owned(),
+        Some(receipt) => {
+            let chirp = receipt
+                .chirp
+                .as_ref()
+                .expect("a chirp receipt carries its law");
+            format!(
+                "{{\"policy\":\"artistic-chirp\",\"disposition\":\"horizon-censored\",                 \"explicit_edit_intent\":{},\"synthesized_sample_frames\":{},                 \"crossfade_sample_frames\":{},\"law\":{{\"start_hz\":{:.17e},                 \"growth_per_s\":{:.17e},\"cap_hz\":{:.17e},\"cap_crossing_frame\":{},                 \"duration_sample_frames\":{}}},                 \"no_claim\":\"every synthesized frame is presentation, not physics\"}}",
+                receipt.explicit_edit_intent,
+                receipt.synthesized_sample_frames,
+                receipt.crossfade_sample_frames,
+                chirp.start_hz,
+                chirp.growth_per_s,
+                chirp.cap_hz,
+                chirp
+                    .cap_crossing_frame
+                    .map_or("null".to_owned(), |frame| frame.to_string()),
+                chirp.duration_sample_frames,
+            )
+        }
+    };
     let left_pressure_identity = left.identity;
     let right_pressure_identity = right.identity;
     let metadata = WavMetadata::try_new(Some(
@@ -9046,6 +9167,7 @@ fn build_physical_audio(
     };
     Ok(FixturePhysicalAudio {
         master,
+        terminal_sound_json,
         disc_material_state_identity: physical_disc.specimen.material_state_identity,
         plate_material_state_identity: physical_plate.elastic.resolved().identity(),
         plate_optical_model_identity: physical_plate.optical_model_identity,
@@ -10016,6 +10138,7 @@ fn production_fixture_manifest(
             "\"trajectory_identity\":\"{}\",\"disc\":{},",
             "\"contact_surfaces\":{{\"disc\":{},\"support\":{}}}}},\n",
             "  \"audio\": {{\"primary\":\"physical-listening-master.pcm24.wav\",",
+            "\"terminal_sound\":{},",
             "\"source_trajectory\":\"trajectory/euler-audio-preroll-trajectory.fset\",",
             "\"source_trajectory_identity\":\"{}\",\"wav_identity\":\"{}\",",
             "\"source_peak_abs_pressure_pa\":{:.17e},",
@@ -10086,6 +10209,7 @@ fn production_fixture_manifest(
         disc_json,
         disc_surface_json,
         support_surface_json,
+        physical_audio.terminal_sound_json.clone(),
         audio_preroll_trajectory
             .receipt()
             .artifact_identity()

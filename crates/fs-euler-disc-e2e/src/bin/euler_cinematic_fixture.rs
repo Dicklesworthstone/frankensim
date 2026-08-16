@@ -34,6 +34,9 @@ fn run() -> Result<(), String> {
     let mut frame_count = None;
     let mut uniform_spp_seen = false;
     let mut canonical_trajectory_path = None;
+    let mut terminal_chirp_start_hz: Option<f64> = None;
+    let mut terminal_chirp_growth_per_s: Option<f64> = None;
+    let mut terminal_edit_intent = false;
     let mut canonical_trajectory_identity = None;
     let mut canonical_listening_master_path = None;
     let mut canonical_listening_master_identity = None;
@@ -215,6 +218,19 @@ fn run() -> Result<(), String> {
                     "canonical-listening-master-identity",
                 )?);
             }
+            "--terminal-chirp-start-hz" => {
+                terminal_chirp_start_hz = Some(parse(
+                    &next_value(&mut args, "--terminal-chirp-start-hz")?,
+                    "terminal-chirp-start-hz",
+                )?);
+            }
+            "--terminal-chirp-growth-per-s" => {
+                terminal_chirp_growth_per_s = Some(parse(
+                    &next_value(&mut args, "--terminal-chirp-growth-per-s")?,
+                    "terminal-chirp-growth-per-s",
+                )?);
+            }
+            "--terminal-edit-intent" => terminal_edit_intent = true,
             "--listening-gain-fs-per-pa" => {
                 config.listening_gain_fs_per_pa = parse(
                     &next_value(&mut args, "--listening-gain-fs-per-pa")?,
@@ -352,6 +368,25 @@ fn run() -> Result<(), String> {
         }
         _ => {
             return Err("--frame-start and --frame-count must be supplied together".to_owned());
+        }
+    }
+
+    match (terminal_chirp_start_hz, terminal_chirp_growth_per_s) {
+        (None, None) => {}
+        (Some(start_hz), Some(growth_per_s)) => {
+            config.terminal_chirp = Some(
+                fs_euler_disc_e2e::cinematic_fixture::CinematicTerminalChirpConfig {
+                    final_supported_frequency_hz: start_hz,
+                    terminal_growth_per_s: growth_per_s,
+                    explicit_edit_intent: terminal_edit_intent,
+                },
+            );
+        }
+        _ => {
+            return Err(
+                "--terminal-chirp-start-hz and --terminal-chirp-growth-per-s must be supplied together"
+                    .to_owned(),
+            );
         }
     }
 
