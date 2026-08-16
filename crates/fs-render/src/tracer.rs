@@ -17639,6 +17639,167 @@ mod tests {
     }
 
     #[test]
+    fn brushed_detail_is_shading_only_for_intersection_fingerprints_and_motion_vectors() {
+        use crate::camera::{Aperture, CameraProjection};
+        use crate::motion_vectors::{
+            MotionFrame, MotionVectorComputation, PrimarySurfaceSample, RasterSize,
+            compute_motion_vectors,
+        };
+        let detail = crate::surface_detail::SurfaceDetail::try_new(
+            0.12,
+            3.0,
+            crate::surface_detail::BrushingPattern::Circular,
+            0.2,
+            Some(crate::surface_detail::RadialMark {
+                azimuth_rad: 0.4,
+                half_width_rad: 0.1,
+            }),
+        )
+        .unwrap();
+        let optics = ConductorOptics::representative_stainless_steel();
+        let brushed = Material::BrushedConductor {
+            optics: optics.clone(),
+            detail,
+        };
+        let base = Material::Conductor {
+            optics,
+            surface: ConductorSurface::try_rough(0.12).unwrap(),
+        };
+        assert_ne!(
+            brushed.content_identity(),
+            base.content_identity(),
+            "detail must mint a distinct material identity"
+        );
+        let half = std::f64::consts::FRAC_1_SQRT_2;
+        let placement = RigidTransform::try_new([0.0, 0.0, half, half], [0.1, -0.2, 0.0]).unwrap();
+        let scene_with = |material: Material| Scene {
+            primitives: vec![Primitive {
+                shape: Shape::Instance(
+                    GeometryInstance::try_new(
+                        11,
+                        hash_domain("org.frankensim.fs-render.test.brushed-mv-slab", &[11]),
+                        SharedGeometry::mesh(closed_test_slab(-0.25, 0.0)),
+                        placement,
+                    )
+                    .unwrap(),
+                ),
+                material,
+                emission: None,
+            }],
+            lights: vec![],
+            environment: None,
+            camera: Camera {
+                eye: Point3::new(0.0, 0.0, 2.0),
+                forward: Vec3::new(0.0, 0.0, -1.0),
+                up: Vec3::new(0.0, 1.0, 0.0),
+                half_tan: 0.25,
+            },
+        };
+        let brushed_scene = scene_with(brushed.clone());
+        let base_scene = scene_with(base.clone());
+        with_test_cx(|cx| {
+            let ray = Ray {
+                origin: Point3::new(0.3, 0.15, 1.5),
+                dir: Vec3::new(0.0, 0.0, -1.0),
+            };
+            let hit_a = intersect(&brushed_scene, cx, &ray, None).unwrap().unwrap();
+            let hit_b = intersect(&base_scene, cx, &ray, None).unwrap().unwrap();
+            // Shading detail may never move geometry: world hit, local hit,
+            // and every stable fingerprint agree bit for bit.
+            assert_eq!(hit_a.hit.t.to_bits(), hit_b.hit.t.to_bits());
+            let ia = hit_a.instance_hit.as_ref().unwrap();
+            let ib = hit_b.instance_hit.as_ref().unwrap();
+            assert_eq!(ia.geometry_identity, ib.geometry_identity);
+            assert_eq!(ia.frame_identity, ib.frame_identity);
+            assert_eq!(ia.local_hit.t.to_bits(), ib.local_hit.t.to_bits());
+            assert_eq!(
+                ia.local_hit.point.x.to_bits(),
+                ib.local_hit.point.x.to_bits()
+            );
+            assert_eq!(
+                ia.local_hit.point.y.to_bits(),
+                ib.local_hit.point.y.to_bits()
+            );
+            assert_eq!(
+                ia.local_hit.point.z.to_bits(),
+                ib.local_hit.point.z.to_bits()
+            );
+
+            // Motion vectors read the geometric instance hit, never the
+            // brushed shading frame: identical samples under both materials.
+            let raster = RasterSize::try_new(64, 64).unwrap();
+            let camera = PhysicalCamera::try_look_at(
+                Point3::new(0.0, 0.0, 2.0),
+                Point3::new(0.0, 0.0, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+                CameraProjection::try_half_tangent(0.5).unwrap(),
+                5.0,
+                Aperture::try_circular(0.0).unwrap(),
+            )
+            .unwrap();
+            let Shape::Instance(instance) = &brushed_scene.primitives[0].shape else {
+                unreachable!()
+            };
+            let frame_at =
+                |time: f64| MotionFrame::from_instance(time, 7, camera.clone(), instance).unwrap();
+            let mv = |instance_hit: &InstanceHit, material: &Material| {
+                let sample = PrimarySurfaceSample::try_from_instance_hit(
+                    instance_hit,
+                    material.content_identity(),
+                )
+                .unwrap();
+                compute_motion_vectors(
+                    sample,
+                    &frame_at(0.0),
+                    &frame_at(0.1),
+                    &frame_at(0.2),
+                    raster,
+                )
+                .unwrap()
+            };
+            let mv_brushed = mv(ia, &brushed);
+            let mv_base = mv(ib, &base);
+            let (
+                MotionVectorComputation::Available(sample_a),
+                MotionVectorComputation::Available(sample_b),
+            ) = (mv_brushed, mv_base)
+            else {
+                panic!("both materials must yield available motion vectors");
+            };
+            // Everything except the material identity label agrees exactly.
+            assert_eq!(sample_a.identity.object_id(), sample_b.identity.object_id());
+            assert_eq!(
+                sample_a.identity.geometry_identity(),
+                sample_b.identity.geometry_identity()
+            );
+            assert_eq!(
+                format!("{:?}", sample_a.identity.feature()),
+                format!("{:?}", sample_b.identity.feature())
+            );
+            assert_eq!(
+                format!("{:?}", sample_a.current),
+                format!("{:?}", sample_b.current)
+            );
+            assert_eq!(
+                format!("{:?}", sample_a.previous),
+                format!("{:?}", sample_b.previous)
+            );
+            assert_eq!(
+                format!("{:?}", sample_a.next),
+                format!("{:?}", sample_b.next)
+            );
+            assert_eq!(
+                format!("{:?}", sample_a.geometric_normal_world),
+                format!("{:?}", sample_b.geometric_normal_world)
+            );
+            assert_eq!(
+                format!("{:?}", sample_a.shading_normal_world),
+                format!("{:?}", sample_b.shading_normal_world)
+            );
+        });
+    }
+
+    #[test]
     fn lighting_admission_cancellation_preserves_tracer_cancellation_authority() {
         assert_eq!(
             TracerError::from(LightingError::Cancelled),
