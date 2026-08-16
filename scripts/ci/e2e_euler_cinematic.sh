@@ -374,6 +374,31 @@ elif mux_status not in ("disabled", None):
 for name in movs:
     if os.path.getsize(os.path.join(root, name)) == 0:
         refuse(f"empty mux output {name}")
+# Independent media probe where available: the derivative movie must
+# preserve the declared duration. An absent probe tool is explicit
+# NO-DATA, never a silent pass of the probe itself.
+import shutil, subprocess
+if mux_status == "written" and movs:
+    if shutil.which("ffprobe"):
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1",
+             os.path.join(root, movs[0])],
+            capture_output=True, text=True, timeout=60,
+        )
+        if probe.returncode != 0:
+            refuse(f"independent media probe failed on {movs[0]}")
+        movie_duration = float(probe.stdout.strip())
+        if isinstance(declared, (int, float)) and isinstance(fps, (int, float)) and fps > 0:
+            if abs(movie_duration - declared) > 1.0 / fps:
+                refuse(
+                    "muxed movie duration diverges from the declared picture window",
+                    expected=declared,
+                    observed=movie_duration,
+                )
+        print(f"media probe: movie duration {movie_duration:.3f}s (ffprobe)")
+    else:
+        print("media probe: NO-DATA (ffprobe unavailable; existence/size checks only)")
 print(f"verify OK: {len(raw_frames)} frame(s), WAV {duration:.3f}s, {len(movs)} mux output(s), manifest coherent")
 PYEOF
 }
@@ -635,7 +660,7 @@ json.dump({"schema": "frankensim-euler-disc-production-critique-v1",
                         "denoise": {"applied_frames": 0}},
            "mechanics": {"control_sample_rate_hz": 48000},
            "audio": {"primary": "physical-listening-master.pcm24.wav"},
-           "mux": {"status": "written", "path": "euler-disc-critique.mov"}},
+           "mux": {"status": "disabled"}},
           open(f"{root}/critique-manifest.json", "w"))
 PYFIX
         verify_bundle "$ROOT" >/dev/null 2>&1 || die "$EXIT_USAGE" "twin precondition: synthetic bundle must verify clean"
@@ -685,8 +710,11 @@ elif case == "rate-mismatch":
 elif case == "dropped-preview":
     os.remove(f"{root}/preview/frame-000000.png")
 elif case == "stale-mux":
+    # Promote the manifest to a written-mux claim, then drop the artifact.
+    manifest = json.load(open(manifest_path))
+    manifest["mux"] = {"status": "written", "path": "euler-disc-critique.mov"}
+    json.dump(manifest, open(manifest_path, "w"))
     os.remove(f"{root}/euler-disc-critique.mov")
-    open(f"{root}/other-output.mov", "w").write("MOVDATA")
 PYCORRUPT
         if verify_bundle "$ROOT" >/dev/null 2>&1; then
           log_event "twin" "negative-missed" '{"exit_class":43}'
