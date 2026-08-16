@@ -408,6 +408,58 @@
       "budget_row": null,
       "corpus_refs": [],
       "notes": "Multimodal (m=0) TMM: reflection-matrix recursion (bounded under evanescence), in-crate dd-series Bessel + J1 roots (no transcribed constants; self-certified + independent quadrature oracles), Lommel junction projections, staircased flares. THE TRIGGER EXECUTED: plane-wave misses the trumpet-like flare's MM peak structure by 14.9 cents (>=8 authored) with the mode ladder settled at 0.18 cents N4->N5 and the staircase-density term disclosed at 6.7 cents (the first measure run caught a coarse-staircase artifact posing as a treble mode shift \u2014 both trigger arms therefore run on the fine staircase). X-Consist: the gate cites the LADDER, not a single N. v1 boundaries disclosed in CONTRACT: matched-mouth higher modes (tabulated bell load = zolja), per-mode loss through the lossy plane wavenumber, no tone holes, no mean flow. Green awaits measured-impedance brass gates (3ez8g.4.x)."
+    },
+    {
+      "filling": "brass",
+      "image": "zl-bake",
+      "qoi": "bell-load-table",
+      "owner_crates": [
+        "fs-bem",
+        "fs-duct"
+      ],
+      "exactness": [
+        "X-Struct"
+      ],
+      "gate": "ungated",
+      "live_default": "no",
+      "determinism": "one-host",
+      "evidence": [
+        {
+          "kind": "test",
+          "ref": "crates/fs-bem/src/radiation_bake.rs::zb_001_bake_reproduces_the_pulsating_sphere"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-bem/src/radiation_bake.rs::zb_002_bake_refusals"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-bem/src/radiation_bake.rs::zb_003_lathe_is_closed_and_outward"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-duct/src/lib.rs::tl_001_table_admission_interpolation_and_refusals"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-duct/src/lib.rs::tl_002_the_ka_lift"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-duct/src/lib.rs::tl_003_bell_bake_end_to_end"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-duct/src/lib.rs::tl_004_modal_plane_load_plays_the_table"
+        },
+        {
+          "kind": "receipt",
+          "ref": "data/radiation/bell-fixture-zl.tsv"
+        }
+      ],
+      "budget_row": null,
+      "corpus_refs": [],
+      "notes": "Offline Z_L(omega) bake (fs_bem::radiation_bake over solve_radiation; CBIE below mouth ka 0.5, Burton-Miller above; per-row ppw/condition/passivity receipts; refuses past the mesh resolution bound) played back through fs_duct::TabulatedLoad (passivity-gated admission, linear interpolation, out-of-table refusal) \u2014 THE ka LIFT: analytic fits keep MAX_RADIATION_KA, tables play inside their own support (tl-002 asserts refusal and success at the same omega). Committed authored bell fixture (8mm throat -> 60mm mouth, 480 panels, 25 rows 150-1446 Hz, all-passive) at data/radiation/bell-fixture-zl.tsv, schema/resolution/passivity gated every run. Executed lesson in fs-bem CONTRACT: single-fan wide mouth caps drive the BM centroid-quadrature resistance artifact negative \u2014 caps are concentric annuli at the wall scale. X-Struct: passivity + refusal structure certified; the bell geometry is AUTHORED (a measured bell mesh slots through the same seam); green awaits measured-impedance brass gates. No rational fit performed (fs-vfit certificate class lane = the .4.2 runtime consumer)."
     }
   ]
 }

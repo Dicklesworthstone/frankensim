@@ -162,9 +162,7 @@ pub fn bake_radiation_load(
             what: "at least one bake frequency",
         });
     }
-    if !omegas
-        .windows(2)
-        .all(|w| w[0].is_finite() && w[1] > w[0])
+    if !omegas.windows(2).all(|w| w[0].is_finite() && w[1] > w[0])
         || !(omegas[0].is_finite() && omegas[0] > 0.0)
     {
         return Err(HelmholtzError::BadParameter {
@@ -310,12 +308,9 @@ pub fn lathe_profile(
     // whose centroid quadrature drives the known Burton-Miller
     // resistance artifact (executed: a 60 mm single-fan mouth turned
     // every BM row's Re Z negative by a near-constant offset).
-    let mean_axial_step = (profile[profile.len() - 1].0 - profile[0].0)
-        / (profile.len() - 1) as f64;
-    let cap = |x: f64,
-               r_cap: f64,
-               outward_plus_x: bool,
-               triangles: &mut Vec<[[f64; 3]; 3]>| {
+    let mean_axial_step =
+        (profile[profile.len() - 1].0 - profile[0].0) / (profile.len() - 1) as f64;
+    let cap = |x: f64, r_cap: f64, outward_plus_x: bool, triangles: &mut Vec<[[f64; 3]; 3]>| {
         let m = ((r_cap / mean_axial_step.max(1e-9)).ceil() as usize).max(1);
         let radii: Vec<f64> = (0..=m).map(|i| r_cap * i as f64 / m as f64).collect();
         let ring_at = |r: f64| -> Vec<[f64; 3]> {
@@ -434,25 +429,12 @@ mod tests {
         let driven = vec![true; n];
         // Past the mesh's panels-per-wavelength bound: refuse, never
         // extrapolate.
-        let too_fine = bake_radiation_load(
-            &surface,
-            &driven,
-            &[1.0e6],
-            medium,
-            2,
-            "test/refusal/v1",
-        );
+        let too_fine =
+            bake_radiation_load(&surface, &driven, &[1.0e6], medium, 2, "test/refusal/v1");
         let coarse_refused = matches!(too_fine, Err(HelmholtzError::TooCoarse { .. }));
         let empty = bake_radiation_load(&surface, &driven, &[], medium, 2, "t");
         let mask = bake_radiation_load(&surface, &driven[1..], &[100.0], medium, 2, "t");
-        let nobody = bake_radiation_load(
-            &surface,
-            &vec![false; n],
-            &[100.0],
-            medium,
-            2,
-            "t",
-        );
+        let nobody = bake_radiation_load(&surface, &vec![false; n], &[100.0], medium, 2, "t");
         let unsorted = bake_radiation_load(&surface, &driven, &[200.0, 100.0], medium, 2, "t");
         let pass = coarse_refused
             && matches!(empty, Err(HelmholtzError::BadParameter { .. }))
@@ -499,8 +481,7 @@ mod tests {
         for w in profile.windows(2) {
             let (x0, r0) = w[0];
             let (x1, r1) = w[1];
-            analytic +=
-                core::f64::consts::PI / 3.0 * (x1 - x0) * (r0 * r0 + r0 * r1 + r1 * r1);
+            analytic += core::f64::consts::PI / 3.0 * (x1 - x0) * (r0 * r0 + r0 * r1 + r1 * r1);
         }
         // The 24-gon lathe underestimates the circle by sin(t)/t factors;
         // accept a 5% band and REQUIRE the sign.

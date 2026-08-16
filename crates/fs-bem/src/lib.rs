@@ -218,9 +218,9 @@ impl From<FmmError> for BemError {
 }
 
 pub mod helmholtz;
-pub mod radiation_bake;
 pub mod panel2d;
 pub mod panel3d;
+pub mod radiation_bake;
 pub mod wake2d;
 
 pub use panel2d::{

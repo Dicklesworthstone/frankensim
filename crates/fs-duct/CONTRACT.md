@@ -72,6 +72,18 @@ pipe `Z_in = +i Zc cot(kL)`.
   convergence-ladder disclosure. Tone holes refuse in this image
   (`BadParameter`); the plane-wave image keeps them (mm-001..mm-006).
 
+- `TabulatedLoad` + `input_impedance_load` / `input_impedance_tabulated`
+  / `modal::mm_input_impedance_tabulated`: the measured/baked mouth-load
+  lane (bead zolja). The TABLE is the source of truth: admission
+  enforces strictly increasing positive omegas, finite rows, and
+  passivity (`Re Z >= -tol |Z|`); queries linearly interpolate and
+  REFUSE outside the support (`FS-DUCT-OUT-OF-TABLE`) — nothing
+  extrapolates. THE `ka` LIFT: the low-`ka` analytic fits keep their
+  `MAX_RADIATION_KA` refusal exactly as before; only tabulated loads
+  play above it, inside their own support. In the modal image the table
+  loads the PLANE mode; higher modes keep the disclosed matched-mouth
+  closure (tl-001..tl-004).
+
 ## Invariants
 
 1. Segment 2-ports are built numerically from exact analytic basis
@@ -131,6 +143,18 @@ pipe `Z_in = +i Zc cot(kL)`.
     top (N=4 vs N=5 <= 1 cent, measured 0.18) — THE recorded trigger for
     the multimodal expansion, executed (mm-001..mm-005).
 
+12. Tabulated-load gates (bead zolja): admission refuses short,
+    unsorted, non-finite, and non-passive tables; interpolation is
+    exact at nodes and linear between them; out-of-table refuses on
+    both sides; the analytic `UnflangedOpen` still refuses at
+    `ka > 1` while a table covering the same frequency plays
+    (tl-001/tl-002); and an fs-bem-baked bell table moves a throat
+    cylinder's dominant peak by hundreds of cents relative to the bare
+    unflanged fit, on the record (tl-003: 1188 -> 852 Hz, -576 cents).
+    The committed bake artifact `data/radiation/bell-fixture-zl.tsv`
+    is schema-, resolution- (ppw >= 6), and passivity-gated on every
+    run; minting is an explicit `--ignored` test.
+
 ## Error model
 
 Typed `DuctError` refusals with stable codes; validity is refused by
@@ -177,6 +201,16 @@ measure-mode run caught a coarse-staircase artifact posing as a treble
 mode shift — the trigger is therefore judged with BOTH arms on the fine
 staircase).
 
+`src/lib.rs` `tabulated_load_tests` + `bell_bake_artifact`, cases
+tl-001..tl-004 and the committed-artifact gate — table admission /
+interpolation / refusals, the `ka` lift (analytic refusal and tabulated
+success at the same frequency), the fs-bem end-to-end bell bake with the
+logged peak shift, and the modal plane-mode table lane. The bake driver
+itself is certified in fs-bem (`radiation_bake`, zb-001..zb-003:
+pulsating-sphere oracle inside the solver's own tested bands, sweep
+refusals including too-coarse-never-extrapolate, and the
+divergence-theorem closure/orientation pin on the lathe).
+
 ## No-claim boundaries
 
 - Wide-tube first order refuses `rv < 10`. [`LossModel::AllRegime`]
@@ -199,10 +233,11 @@ staircase).
   trumpet-like flare). Its own v1 boundaries: m = 0 modes only
   (axisymmetric bores and sources), no tone holes, no mean flow;
   higher modes terminate into their own characteristic impedance at
-  the mouth (a matched-mouth approximation, disclosed — the
-  tabulated bell load lands with bead zolja and the plane mode
-  already carries the scalar radiation impedance and its `ka`
-  refusals); per-mode viscothermal loss is carried through the
+  the mouth (a matched-mouth approximation, disclosed — the plane
+  mode can now play a TABULATED bell load via
+  `mm_input_impedance_tabulated` (bead zolja), while the analytic
+  plane load keeps its `ka` refusals; the higher-mode mouth coupling
+  remains the disclosed boundary); per-mode viscothermal loss is carried through the
   LOSSY plane wavenumber (`k_n^2 = k_0^2 - (gamma_n/R)^2`), so the
   wide-tube validity boundary binds per mode through the plane
   mode's shear number, and no independent higher-mode boundary-layer

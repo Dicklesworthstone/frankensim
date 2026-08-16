@@ -273,3 +273,33 @@ NASA marks it as U.S. Government work with public use permitted.
   piston closed form (small-ka series only until the duct bead's special
   functions land). Finite-point admission is a non-certifying discrete
   solid-angle guard and retains centroid-panel error.
+
+## radiation_bake (bead zolja)
+
+- `bake_radiation_load(surface, driven, omegas, medium, l_max,
+  source_id) -> RadiationLoadBake`: an OFFLINE frequency sweep over
+  `solve_radiation` producing an area-averaged `Z_L(omega)` table
+  (specific and acoustic normalizations both retained) plus
+  per-frequency SH directivity for a driven mouth on a closed exterior
+  mesh. Formulation policy: plain CBIE below mouth `ka = 0.5` (the
+  recorded Burton-Miller low-`ka` resistance boundary), Burton-Miller
+  above. Every row keeps the guardrail receipts
+  (panels-per-wavelength, condition lower bound, radiated power,
+  passivity margin); the sweep REFUSES past the mesh's
+  panels-per-wavelength bound rather than extrapolating.
+- `lathe_profile(profile, circumferential) -> LathedBell`: a closed
+  bell fixture (flare wall + throat cap rigid, mouth cap = the driven
+  piston, panel order suffix-masked). Caps are subdivided into
+  CONCENTRIC ANNULI at the wall panel scale — an executed lesson: a
+  single-fan 60 mm mouth cap made every Burton-Miller row's `Re Z`
+  negative by a near-constant offset (the centroid-quadrature
+  resistance artifact scales with panel size); annular caps restored
+  positive, smooth margins across the band.
+- Conformance: zb-001 (the bake reproduces the pulsating sphere inside
+  the solver's own tested bands: CBIE < 4%, Burton-Miller < 8%),
+  zb-002 (sweep refusals), zb-003 (divergence-theorem closure and
+  outward orientation of the lathe against the frustum-stack volume).
+- No-claim: the bake certifies nothing beyond the solver's own bands;
+  table consumers own interpolation and out-of-support refusal
+  (fs-duct `TabulatedLoad`); no rational realization is performed here
+  (the fs-vfit certificate-class lane belongs to the runtime consumer).

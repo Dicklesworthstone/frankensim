@@ -1144,7 +1144,14 @@ pub fn input_impedance_wall(
     termination: Termination,
     wall: Option<&WallPin>,
 ) -> Result<DuctResponse, DuctError> {
-    input_impedance_core(duct, state, omega, loss, LoadSpec::Analytic(termination), wall)
+    input_impedance_core(
+        duct,
+        state,
+        omega,
+        loss,
+        LoadSpec::Analytic(termination),
+        wall,
+    )
 }
 
 /// How the mouth load is supplied to the chain.
@@ -3248,12 +3255,8 @@ mod tabulated_load_tests {
         let z = |re: f64, im: f64| C64::new(re, im);
         // Admission refusals, one per rule.
         let short = TabulatedLoad::try_new(vec![100.0], vec![z(1.0, 0.0)], "t", 0.0);
-        let unsorted = TabulatedLoad::try_new(
-            vec![200.0, 100.0],
-            vec![z(1.0, 0.0), z(1.0, 0.0)],
-            "t",
-            0.0,
-        );
+        let unsorted =
+            TabulatedLoad::try_new(vec![200.0, 100.0], vec![z(1.0, 0.0), z(1.0, 0.0)], "t", 0.0);
         let non_finite = TabulatedLoad::try_new(
             vec![100.0, 200.0],
             vec![z(f64::NAN, 0.0), z(1.0, 0.0)],
@@ -3339,19 +3342,16 @@ mod tabulated_load_tests {
             .iter()
             .map(|&w| {
                 let ka = w * 0.025 / state.sound_speed;
-                C64::new(z0 * (ka * ka) / (1.0 + ka * ka), -z0 * 0.3 * ka / (1.0 + ka * ka))
+                C64::new(
+                    z0 * (ka * ka) / (1.0 + ka * ka),
+                    -z0 * 0.3 * ka / (1.0 + ka * ka),
+                )
             })
             .collect();
         let table =
             TabulatedLoad::try_new(omegas, zs, "test/authored-lift/v1", 0.0).expect("table");
-        let lifted = input_impedance_tabulated(
-            &duct,
-            &state,
-            omega,
-            LossModel::WideTube,
-            &table,
-            None,
-        );
+        let lifted =
+            input_impedance_tabulated(&duct, &state, omega, LossModel::WideTube, &table, None);
         let pass = refused && lifted.is_ok();
         verdict(
             "tl-002-ka-lift",
@@ -3424,16 +3424,10 @@ mod tabulated_load_tests {
             )
             .expect("analytic")
             .impedance;
-            let t = input_impedance_tabulated(
-                &duct,
-                &state,
-                omega,
-                LossModel::WideTube,
-                &table,
-                None,
-            )
-            .expect("tabulated")
-            .impedance;
+            let t =
+                input_impedance_tabulated(&duct, &state, omega, LossModel::WideTube, &table, None)
+                    .expect("tabulated")
+                    .impedance;
             moved.push((f, a.abs(), t.abs()));
         }
         // Peak of |Z| under each load (coarse argmax is enough to log
@@ -3512,7 +3506,11 @@ mod tabulated_load_tests {
         verdict(
             "tl-004-modal-tabulated-plane-load",
             pass,
-            &format!("inside ok {}, outside refused {}", inside.is_ok(), outside.is_err()),
+            &format!(
+                "inside ok {}, outside refused {}",
+                inside.is_ok(),
+                outside.is_err()
+            ),
         );
     }
 }
@@ -3564,6 +3562,9 @@ mod bell_bake_artifact {
             "frankensim/bell-fixture/authored-8mm-60mm/v1",
         )
         .expect("bake");
+        for line in bake.receipt_lines() {
+            println!("{line}");
+        }
         assert!(bake.is_passive(1.0e-6), "minted table must be passive");
         let mut out = String::new();
         out.push_str(&format!(
@@ -3622,7 +3623,11 @@ mod bell_bake_artifact {
             let ppw = cols[4].parse::<f64>().expect("ppw");
             assert!(ppw >= 6.0, "committed row below the mesh resolution bound");
         }
-        assert!(omegas.len() >= 20, "expected a real sweep, got {} rows", omegas.len());
+        assert!(
+            omegas.len() >= 20,
+            "expected a real sweep, got {} rows",
+            omegas.len()
+        );
         let table = TabulatedLoad::try_new(omegas, zs, "committed/bell-fixture", 1.0e-6)
             .expect("committed table admits (passivity + ordering)");
         let (lo, hi) = table.support();

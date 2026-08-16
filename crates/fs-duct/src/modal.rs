@@ -414,7 +414,15 @@ pub fn mm_input_impedance(
     n_modes: usize,
     extra_slices: usize,
 ) -> Result<ModalResponse, DuctError> {
-    mm_core(duct, state, omega, loss, MmLoad::Analytic(termination), n_modes, extra_slices)
+    mm_core(
+        duct,
+        state,
+        omega,
+        loss,
+        MmLoad::Analytic(termination),
+        n_modes,
+        extra_slices,
+    )
 }
 
 /// Plane-mode mouth load selector for the modal image.
@@ -440,7 +448,15 @@ pub fn mm_input_impedance_tabulated(
     n_modes: usize,
     extra_slices: usize,
 ) -> Result<ModalResponse, DuctError> {
-    mm_core(duct, state, omega, loss, MmLoad::Tabulated(table), n_modes, extra_slices)
+    mm_core(
+        duct,
+        state,
+        omega,
+        loss,
+        MmLoad::Tabulated(table),
+        n_modes,
+        extra_slices,
+    )
 }
 
 #[allow(clippy::too_many_lines)] // one recursion, kept whole on purpose
@@ -480,10 +496,7 @@ fn mm_core(
     let mouth = stations.last().map_or(0.0, |s| s.radius);
     let (zl_plane, mouth_ka) = match load {
         MmLoad::Analytic(termination) => termination_impedance(termination, state, mouth, omega)?,
-        MmLoad::Tabulated(table) => (
-            Some(table.z_at(omega)?),
-            omega * mouth / state.sound_speed,
-        ),
+        MmLoad::Tabulated(table) => (Some(table.z_at(omega)?), omega * mouth / state.sound_speed),
     };
     let mouth_wave = modal_wave(state, mouth, omega, loss, &gammas)?;
     let mut min_shear = mouth_wave.shear_number;
