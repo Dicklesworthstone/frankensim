@@ -413,16 +413,15 @@ fn realize_hold_line(
         .iter()
         .map(|r| reflectance(r.impedance, zc).conj())
         .collect();
-    let length: f64 = duct
-        .segments
-        .iter()
-        .map(|s| match *s {
-            fs_duct::Segment::Cylinder { length, .. } | fs_duct::Segment::Cone { length, .. } => {
-                length
-            }
-            fs_duct::Segment::ToneHole { .. } => 0.0,
-        })
-        .sum();
+    let length: f64 =
+        duct.segments
+            .iter()
+            .map(|s| match *s {
+                fs_duct::Segment::Cylinder { length, .. }
+                | fs_duct::Segment::Cone { length, .. } => length,
+                fs_duct::Segment::ToneHole { .. } => 0.0,
+            })
+            .sum();
     let delay_samples = 2.0 * length / gas.sound_speed / dt;
     let mut opts = FitOptions::new(12);
     opts.iterations = 12;
@@ -442,7 +441,7 @@ fn realize_hold_line(
 #[cfg(test)]
 mod wind_articulation_tests {
     pub(crate) mod helpers {
-        pub(crate) use super::{air20, fingerings, Loop};
+        pub(crate) use super::{Loop, air20, fingerings};
     }
     use super::*;
     use crate::reed_bore::{blowing_envelope, solve_reed_wave};
@@ -544,15 +543,9 @@ mod wind_articulation_tests {
         pub(crate) fn new(table: &FingeringTable, gas: &GasState, vfit_green: bool) -> Loop {
             let bore = 0.0075f64;
             let zc = gas.characteristic_impedance / (core::f64::consts::PI * bore * bore);
-            let bank = WindLineBank::new(
-                table,
-                gas,
-                Termination::FlangedOpen,
-                RATE,
-                zc,
-                vfit_green,
-            )
-            .expect("bank");
+            let bank =
+                WindLineBank::new(table, gas, Termination::FlangedOpen, RATE, zc, vfit_green)
+                    .expect("bank");
             Loop {
                 bank,
                 zc,
@@ -616,9 +609,7 @@ mod wind_articulation_tests {
             }
             *slot = acc / e0;
         }
-        let best = ac[lag_min..=lag_max]
-            .iter()
-            .fold(0.0f64, |m, &v| m.max(v));
+        let best = ac[lag_min..=lag_max].iter().fold(0.0f64, |m, &v| m.max(v));
         if best <= 0.0 {
             return 0.0;
         }
@@ -670,7 +661,8 @@ mod wind_articulation_tests {
             .fold(f64::INFINITY, f64::min);
         let up_cents = 1200.0 * (f_short / f_low).log2();
         // The short fingering opens the big foot hole: the pitch RISES.
-        let pass = up_cents > 150.0 && up_cents < 600.0 && through_min > 0.4 * pre_rms && f_low > 150.0;
+        let pass =
+            up_cents > 150.0 && up_cents < 600.0 && through_min > 0.4 * pre_rms && f_low > 150.0;
         verdict(
             "wa-001-sigma-slur",
             pass,
@@ -734,9 +726,7 @@ mod wind_articulation_tests {
             impedance_peaks(&sweep)
                 .iter()
                 .map(|&i| sweep[i].omega / core::f64::consts::TAU)
-                .min_by(|a, b| {
-                    (a - f).abs().partial_cmp(&(b - f).abs()).expect("finite")
-                })
+                .min_by(|a, b| (a - f).abs().partial_cmp(&(b - f).abs()).expect("finite"))
                 .expect("peaks")
         };
         let cents = |a: f64, b: f64| (1200.0 * (b / a).log2()).abs();
@@ -779,9 +769,7 @@ mod wind_articulation_tests {
         let seg = &signal[12 * len..12 * len + 4096];
         let n = 4096usize;
         let mean = seg.iter().sum::<f64>() / seg.len() as f64;
-        let mut buf: Vec<FftC64> = (0..n)
-            .map(|k| FftC64::new(seg[k] - mean, 0.0))
-            .collect();
+        let mut buf: Vec<FftC64> = (0..n).map(|k| FftC64::new(seg[k] - mean, 0.0)).collect();
         let mut scratch = vec![FftC64::new(0.0, 0.0); n];
         Fft::new(n).forward(&mut buf, &mut scratch);
         let df = f64::from(RATE) / n as f64;
@@ -791,10 +779,7 @@ mod wind_articulation_tests {
             .collect();
         let peak = mags.iter().fold(0.0f64, |m, &v| m.max(v));
         for k in ((40.0 / df) as usize)..((1000.0 / df) as usize) {
-            if mags[k] > 0.05 * peak
-                && mags[k] > mags[k - 1]
-                && mags[k] > mags[k + 1]
-            {
+            if mags[k] > 0.05 * peak && mags[k] > mags[k - 1] && mags[k] > mags[k + 1] {
                 println!("line at {:.1} Hz, rel {:.3}", k as f64 * df, mags[k] / peak);
             }
         }
@@ -896,9 +881,8 @@ mod wind_hop_tests {
             lp.block(&mut block);
             signal.extend_from_slice(&block);
             let mean = block.iter().sum::<f64>() / len as f64;
-            let rms = (block.iter().map(|x| (x - mean) * (x - mean)).sum::<f64>()
-                / len as f64)
-                .sqrt();
+            let rms =
+                (block.iter().map(|x| (x - mean) * (x - mean)).sum::<f64>() / len as f64).sqrt();
             if rms_prev > 0.0 && ((rms - rms_prev) / rms_prev).abs() < SETTLE_EPS {
                 consec += 1;
             } else {
@@ -915,9 +899,8 @@ mod wind_hop_tests {
         // normalized by the pre-hop RMS.
         let pre = &signal[(hop_block - 2) * len..hop_block * len];
         let mean = pre.iter().sum::<f64>() / pre.len() as f64;
-        let pre_rms = (pre.iter().map(|x| (x - mean) * (x - mean)).sum::<f64>()
-            / pre.len() as f64)
-            .sqrt();
+        let pre_rms =
+            (pre.iter().map(|x| (x - mean) * (x - mean)).sum::<f64>() / pre.len() as f64).sqrt();
         let seg = &signal[hop_block * len..(hop_block + 3) * len];
         seg.windows(2)
             .map(|w| (w[1] - w[0]).abs())
@@ -1026,7 +1009,10 @@ mod wind_hop_tests {
         assert!(text.starts_with("# frankensim-wind-hop-policy-v1"));
         let mut settled_clicks = Vec::new();
         let mut attack_clicks = Vec::new();
-        for line in text.lines().filter(|l| !l.starts_with('#') && !l.starts_with("hop_block")) {
+        for line in text
+            .lines()
+            .filter(|l| !l.starts_with('#') && !l.starts_with("hop_block"))
+        {
             let cols: Vec<&str> = line.split('\t').collect();
             let block: usize = cols[0].parse().expect("block");
             let settled: bool = cols[1].parse().expect("settled");

@@ -790,6 +790,50 @@
       "budget_row": null,
       "corpus_refs": [],
       "notes": "Typed gesture schedules: the full player-action table (valves/holes/slides/tension/frets/bow/hammers/pedals incl. una corda + sostenuto/termination swaps/breath) as replayable data with type-level unit discipline, integer-tick deterministic sampling, canonical bytes + content hash, and refuse-by-name (incl. the unknown-control-id falsifier \u2014 never a silent no-op). X-Exact: sampling is exact arithmetic on the schedule; the e2e proves schedule-vs-inline BITWISE equality through the render API. No MIDI anywhere; a fret is a length + obstacle, never a mechanism."
+    },
+    {
+      "filling": "wind-reed",
+      "image": "articulation-hop",
+      "qoi": "measured-hop-policy",
+      "owner_crates": [
+        "fs-couple"
+      ],
+      "exactness": [
+        "X-Struct",
+        "X-Est"
+      ],
+      "gate": "ungated",
+      "live_default": "no",
+      "determinism": "one-host",
+      "evidence": [
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/src/wind_line.rs::wa_001_sigma_transient_and_slur"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/src/wind_line.rs::wa_002_register_vent_flips_the_twelfth"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/src/wind_line.rs::wa_003_gate_refusal_is_structural"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/src/wind_line.rs::wa_004_hop_policy_is_measured_data"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/src/wind_line.rs::committed_hop_policy_is_consistent"
+        },
+        {
+          "kind": "receipt",
+          "ref": "data/claims/wind-hop-policy.tsv (settle eps=0.05 m=4; settled click 0.50-0.60 vs attack 0.86)"
+        }
+      ],
+      "budget_row": null,
+      "corpus_refs": [],
+      "notes": "Wind articulation: per-fingering char-line bank (carry+fade), sigma slur (+265 cents, envelope held), REGISTER VENT measured (inertive vent flips the twelfth at 0.70L \u2014 the classic pressure-release L/3 rule INVERTS for a chimneyed vent; the lock lands 18 cents from the TMM authority's own peak), char->VFIT hop with the replay-prime D17 lift and STRUCTURAL gate refusal (an ungated image cannot be entered mid-performance). THE POLICY IS DATA: committed wind-hop-policy.tsv (settle detector params + click-vs-timing table; the detector errs conservatively late). Estimator lesson bank grew: even-HPS blind on odd-harmonic spectra; odd products self-similar under 3x; AUTOCORRELATION is the unambiguous fundamental estimator for closed-pipe locks."
     }
   ]
 }

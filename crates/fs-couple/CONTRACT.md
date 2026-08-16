@@ -630,6 +630,27 @@ None.
   the lock estimate, gap statistics, blow/bore work, and the lip
   island's supply defect.
 
+- `wind_line` module (bead 3ez8g.6.3): the wind articulation runtime —
+  `WindLineBank` holds per-fingering exact-FIR characteristic lines
+  over a typed `FingeringTable` with the carry-history + crossfade
+  switch (the MM bank's D17 lift, plane-wave edition), and the
+  char -> VFIT hop: a settled note may leave the exact-FIR phrase
+  image for the cheaper rational hold image via the REPLAY-PRIME lift
+  (the incoming IIR line is fed the recent outgoing history, outputs
+  discarded, before the crossfade), hopping back on gesture
+  resumption. Hop-readiness is GATED: entering an image whose
+  registry gate is not green refuses structurally
+  (`ImageNotGated`). "When to hop" is MEASURED DATA
+  (`data/claims/wind-hop-policy.tsv`: settle-detector parameters +
+  click-vs-hop-timing table, minted by the fixture, gated on every
+  run), not doctrine. Fundamental estimation in the fixtures is
+  AUTOCORRELATION — three estimator traps were executed en route:
+  a global FFT peak returns the dominant harmonic; even-factor HPS is
+  structurally blind on odd-harmonic (closed-pipe) spectra (the
+  |X(2f)| factor lands on the absent even harmonic); odd-factor
+  products cannot disambiguate f0 from 3f0 (the odd series is
+  self-similar under 3x). The period domain has neither ambiguity.
+
 ## Conformance tests
 
 `src/broadband_radiation.rs`: G0 complex/real-SH round trip/reconstruction against
@@ -712,6 +733,19 @@ falsifier collapses to 40% RMS); structural honesty + refusal arms;
 and the radiated-observer demonstration from the SAME bake's SH
 directivity table at the lock frequency (compact-mouth near-omni is
 the correct physics at ka 0.09).
+
+`src/wind_line.rs` `wind_articulation_tests` + `wind_hop_tests`,
+cases wa-001..wa-004 + the committed-policy gate — the sigma slur
+(+265 cents with the envelope held through the change), the register
+vent (MEASURED, not the textbook sketch: with an INERTIVE 1.8 mm /
+6 mm-chimney vent the twelfth-class flip happens at 0.70L, x3.36,
+18 cents from the TMM authority's own peak, while the 0.30L vent
+leaves the lock in the low regime — position matters AND the lock
+follows the impedance peaks), the structural gate refusal, and the
+hop policy (settled hop click 0.504 vs the early-hop falsifier 0.864;
+the note survives on the hold image; the committed policy artifact
+re-gated every run with the measured nuance that the settle detector
+is conservatively late — the right side to err).
 
 ## No-claim boundaries
 
@@ -833,3 +867,9 @@ the correct physics at ka 0.09).
   `broadband_radiation`); valve changes are discrete combos with the
   crossfade lift — a trombone's continuous slide needs the wind
   epic's fractional-delay bead, a dependency of claim, not of code.
+- The wind articulation runtime inherits the char image's plane-wave
+  scope; the hold-image realization here is a fixture-grade 12-pole
+  fit (the certified hold lane is the clarinet casebook's); the
+  register-vent finding is geometry-specific (an inertive chimney
+  vent inverts the classic pressure-release node rule — recorded as a
+  measured hypothesis, not a general law).
