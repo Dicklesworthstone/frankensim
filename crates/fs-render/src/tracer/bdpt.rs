@@ -226,7 +226,10 @@ impl Vertex {
                     }),
                 )
             }
-            Material::Lambertian { .. } | Material::Ggx { .. } | Material::Conductor { .. } => {
+            Material::Lambertian { .. }
+            | Material::Ggx { .. }
+            | Material::Conductor { .. }
+            | Material::BrushedConductor { .. } => {
                 let medium = stack.last().copied();
                 (medium, medium)
             }
@@ -257,7 +260,8 @@ impl Vertex {
                     Material::Dielectric { surface, .. } => !surface.is_delta(),
                     Material::Lambertian { .. }
                     | Material::Ggx { .. }
-                    | Material::Conductor { .. } => true,
+                    | Material::Conductor { .. }
+                    | Material::BrushedConductor { .. } => true,
                 }
             }
         }
@@ -471,8 +475,10 @@ fn surface_scattering(
                 next_direction,
                 wavelength_nm,
                 medium,
+                None,
             )
         }
+        Material::BrushedConductor { .. } => Err(TracerError::BrushedConductorUnsupported),
         Material::Dielectric { surface, .. } => {
             let Some(alpha) = surface.roughness_alpha() else {
                 return Ok(0.0);
@@ -521,9 +527,16 @@ fn surface_pdf_solid_angle(
     let normal =
         oriented_normal(vertex, predecessor_direction).ok_or(TracerError::MissingNormal)?;
     match material {
-        Material::Lambertian { .. } | Material::Ggx { .. } | Material::Conductor { .. } => Ok(
-            bsdf_pdf(material, normal, predecessor_direction, next_direction),
-        ),
+        Material::Lambertian { .. } | Material::Ggx { .. } | Material::Conductor { .. } => {
+            Ok(bsdf_pdf(
+                material,
+                normal,
+                predecessor_direction,
+                next_direction,
+                None,
+            ))
+        }
+        Material::BrushedConductor { .. } => Err(TracerError::BrushedConductorUnsupported),
         Material::Dielectric { surface, .. } => {
             let Some(alpha) = surface.roughness_alpha() else {
                 return Ok(0.0);
@@ -563,15 +576,24 @@ fn sample_surface(
     let material = &scene.primitives[primitive_index].material;
     let normal = oriented_normal(vertex, wo).ok_or(TracerError::MissingNormal)?;
     match material {
+        Material::BrushedConductor { .. } => Err(TracerError::BrushedConductorUnsupported),
         Material::Lambertian { .. } | Material::Ggx { .. } | Material::Conductor { .. } => {
-            let Some((wi, pdf_fwd)) = bsdf_sample(material, normal, wo, random[0], random[1])
+            let Some((wi, pdf_fwd)) = bsdf_sample(material, normal, wo, random[0], random[1], None)
             else {
                 return Ok(None);
             };
             let cosine = normal.dot(wi).max(0.0);
             let incident_medium = vertex.medium_toward(wo).map(|entry| entry.glass);
-            let value = opaque_bsdf_eval(material, normal, wo, wi, wavelength_nm, incident_medium)?;
-            let pdf_rev = bsdf_pdf(material, normal, wi, wo);
+            let value = opaque_bsdf_eval(
+                material,
+                normal,
+                wo,
+                wi,
+                wavelength_nm,
+                incident_medium,
+                None,
+            )?;
+            let pdf_rev = bsdf_pdf(material, normal, wi, wo, None);
             let weight = value * cosine / pdf_fwd;
             Ok(
                 (weight.is_finite() && weight > 0.0).then_some(ScatterSample {

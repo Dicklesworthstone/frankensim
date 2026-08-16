@@ -768,6 +768,18 @@ pub enum Material {
         /// Validated isotropic GGX roughness.
         surface: ConductorSurface,
     },
+    /// Brushed conductor: the same exact complex-IOR Fresnel over the
+    /// ANISOTROPIC GGX pair derived from a validated surface-detail
+    /// parameter set (bead h7xu5.4.3). Detail is shading-only: the
+    /// tangent frame comes from the hit's object-local coordinates and
+    /// never touches intersection or motion.
+    BrushedConductor {
+        /// Validated absolute complex-index table and honest provenance.
+        optics: ConductorOptics,
+        /// Validated shading-detail parameters (alpha pair, brushing
+        /// pattern, bounded normal perturbation, optional spin mark).
+        detail: crate::surface_detail::SurfaceDetail,
+    },
     /// Homogeneous spectral dielectric boundary. Geometry must be a closed,
     /// consistently outward-oriented solid; encountered violations refuse
     /// through the path-local medium stack.
@@ -836,6 +848,16 @@ impl Material {
                 hasher.update(&CONDUCTOR_BSDF_SEMANTICS_VERSION.to_le_bytes());
                 hasher.update(optics.content_identity().as_bytes());
                 update_material_scalar(&mut hasher, surface.roughness_alpha());
+            }
+            Self::BrushedConductor { optics, detail } => {
+                // Additive family tag 5 (4 is reserved by the dielectric
+                // provenance byte-space note above). The complete detail
+                // identity binds every shading parameter, so an anisotropy
+                // or spin-mark swap re-keys the material.
+                hasher.update(&[5]);
+                hasher.update(&CONDUCTOR_BSDF_SEMANTICS_VERSION.to_le_bytes());
+                hasher.update(optics.content_identity().as_bytes());
+                hasher.update(detail.identity().as_bytes());
             }
         }
         hasher.finalize()
@@ -2758,6 +2780,9 @@ pub enum TracerError {
     ProgressiveTimeModeMismatch,
     /// The v1 NEE light is static metadata and cannot name animated geometry.
     AnimatedLightUnsupported,
+    /// Bidirectional transport does not yet carry the body-locked brushed
+    /// tangent frame; brushed conductors refuse rather than render isotropic.
+    BrushedConductorUnsupported,
     /// Rectangular light metadata did not name a matching emissive primitive.
     LightPrimitiveMismatch {
         /// Primitive index named by the rejected light.
@@ -2848,6 +2873,9 @@ impl core::fmt::Display for TracerError {
             }
             Self::ProgressiveTimeModeMismatch => {
                 formatter.write_str("progressive film camera/time checkpoint mismatch")
+            }
+            Self::BrushedConductorUnsupported => {
+                formatter.write_str("bidirectional transport does not support brushed conductors")
             }
             Self::AnimatedLightUnsupported => {
                 formatter.write_str("animated area-light geometry is unsupported")
@@ -8788,7 +8816,9 @@ impl AovAlbedoCache {
                     ]))
                 }
             }
-            Material::Conductor { .. } | Material::Dielectric { .. } => Ok(None),
+            Material::Conductor { .. }
+            | Material::BrushedConductor { .. }
+            | Material::Dielectric { .. } => Ok(None),
         }) {
             Ok(albedo) => Ok(albedo),
             Err(()) => Err(CinematicAovError::InvalidPrimary),
@@ -9716,7 +9746,10 @@ fn discover_parallel_slab(
     )?;
     let (glass, surface) = match scene.primitives[boundary_primitive].material {
         Material::Dielectric { glass, surface } => (glass, surface),
-        Material::Lambertian { .. } | Material::Ggx { .. } | Material::Conductor { .. } => {
+        Material::Lambertian { .. }
+        | Material::Ggx { .. }
+        | Material::Conductor { .. }
+        | Material::BrushedConductor { .. } => {
             return Err(slab_nee_refusal(
                 boundary_primitive,
                 "first connection blocker is not dielectric",
@@ -10356,6 +10389,63 @@ fn placed_instanced_geometry(
     }
 }
 
+/// Derive the brushed tangent frame for the current bounce, if the hit
+/// primitive is a [`Material::BrushedConductor`].
+///
+/// Brushing is BODY-LOCKED: the frame is derived in the geometry's local
+/// coordinates (where the radial-mark chart lives) and rotated to world
+/// through the validated rigid placement, so a spinning disc carries its
+/// grooves with it. Non-instanced shapes are authored in world coordinates,
+/// so body frame == world frame there.
+///
+/// `Ok(None)` for non-brushed materials AND for the pole refusal
+/// ([`SurfaceDetailError::PoleTangentUndefined`]): on the spin axis brushing
+/// has no direction, and callers fall back to the isotropic base alpha.
+fn brushed_shading_frame(
+    scene: &Scene,
+    primitive_index: usize,
+    instance_hit: Option<&InstanceHit>,
+    hit: &Hit,
+    oriented_normal: Vec3,
+    ray_time: Option<&PathTime>,
+) -> Result<Option<crate::surface_detail::ShadingFrame>, TracerError> {
+    let Material::BrushedConductor { detail, .. } = &scene.primitives[primitive_index].material
+    else {
+        return Ok(None);
+    };
+    let placement = match instance_hit {
+        Some(_) => Some(
+            placed_instanced_geometry(scene, primitive_index, ray_time)
+                .ok_or(TracerError::InvalidInput)?
+                .1,
+        ),
+        None => None,
+    };
+    let (local_point, local_normal) = match (instance_hit, &placement) {
+        (Some(instance_hit), Some(transform)) => (
+            instance_hit.local_hit.point,
+            transform
+                .inverse()
+                .map_err(|_| TracerError::InvalidInput)?
+                .transform_vector(oriented_normal),
+        ),
+        _ => (hit.point, oriented_normal),
+    };
+    match crate::surface_detail::shading_frame(detail, local_point, local_normal) {
+        Ok(local_frame) => Ok(Some(match &placement {
+            Some(transform) => crate::surface_detail::ShadingFrame {
+                geometric_normal: transform.transform_vector(local_frame.geometric_normal),
+                shading_normal: transform.transform_vector(local_frame.shading_normal),
+                tangent: transform.transform_vector(local_frame.tangent),
+                bitangent: transform.transform_vector(local_frame.bitangent),
+            },
+            None => local_frame,
+        })),
+        Err(crate::surface_detail::SurfaceDetailError::PoleTangentUndefined) => Ok(None),
+        Err(_) => Err(TracerError::InvalidInput),
+    }
+}
+
 fn mesh_is_convex_with_outward_faces(mesh: &TriMesh) -> bool {
     let coordinate_scale = mesh
         .vertices
@@ -10470,7 +10560,10 @@ fn discover_planar_manifold_boundary(
     let boundary_primitive = first_hit.primitive_index;
     let (glass, surface) = match scene.primitives[boundary_primitive].material {
         Material::Dielectric { glass, surface } => (glass, surface),
-        Material::Lambertian { .. } | Material::Ggx { .. } | Material::Conductor { .. } => {
+        Material::Lambertian { .. }
+        | Material::Ggx { .. }
+        | Material::Conductor { .. }
+        | Material::BrushedConductor { .. } => {
             return Err(slab_nee_refusal(
                 boundary_primitive,
                 "first manifold blocker is not dielectric",
@@ -12625,6 +12718,8 @@ fn trace_path(
             });
         }
         let n = frame.oriented;
+        let brushed_frame =
+            brushed_shading_frame(scene, prim_idx, instance_hit.as_ref(), &hit, n, ray_time)?;
         if let Some((spec, scale)) = &prim.emission {
             // MIS weight against NEE for this light, seen from the
             // previous vertex.
@@ -12739,7 +12834,10 @@ fn trace_path(
                 frame.entering,
                 &medium_stack,
             )?),
-            Material::Lambertian { .. } | Material::Ggx { .. } | Material::Conductor { .. } => None,
+            Material::Lambertian { .. }
+            | Material::Ggx { .. }
+            | Material::Conductor { .. }
+            | Material::BrushedConductor { .. } => None,
         };
 
         // Next-event estimation.
@@ -12870,7 +12968,10 @@ fn trace_path(
                         }
                     }
                 }
-                Material::Lambertian { .. } | Material::Ggx { .. } | Material::Conductor { .. } => {
+                Material::Lambertian { .. }
+                | Material::Ggx { .. }
+                | Material::Conductor { .. }
+                | Material::BrushedConductor { .. } => {
                     // Preserve the opaque tracer-v1 arithmetic and draw order
                     // expression-for-expression so the frozen Cornell path is
                     // unaffected by enabling dielectric support.
@@ -12954,6 +13055,7 @@ fn trace_path(
                                             n,
                                             wo,
                                             connection.incident_direction,
+                                            brushed_frame.as_ref(),
                                         );
                                         let competing_bsdf_path_is_evaluated =
                                             depth.checked_add(4).is_some_and(|emitter_depth| {
@@ -12977,6 +13079,7 @@ fn trace_path(
                                             connection.incident_direction,
                                             lambda,
                                             None,
+                                            brushed_frame.as_ref(),
                                         )?;
                                         let before = radiance[lane];
                                         radiance[lane] += throughput[lane]
@@ -13014,7 +13117,8 @@ fn trace_path(
                                 }
                                 let pdf_nee = direct.pdf_solid_angle;
                                 let wo = ray.dir.scale(-1.0);
-                                let bsdf_pdf = bsdf_pdf(&prim.material, n, wo, wi);
+                                let bsdf_pdf =
+                                    bsdf_pdf(&prim.material, n, wo, wi, brushed_frame.as_ref());
                                 let weight = match s.strategy {
                                     DirectStrategy::Mis | DirectStrategy::PowerMis
                                         if depth + 1 == s.max_depth
@@ -13043,6 +13147,7 @@ fn trace_path(
                                                 wi,
                                                 l,
                                                 Some(active.glass),
+                                                brushed_frame.as_ref(),
                                             )?;
                                             let attenuation = medium_transmittance(
                                                 Some(active.glass),
@@ -13072,8 +13177,15 @@ fn trace_path(
                                     // Keep the ambient opaque tracer-v1 arithmetic
                                     // bit-for-bit identical to its frozen path.
                                     for (k, &l) in lambdas.iter().enumerate() {
-                                        let f =
-                                            opaque_bsdf_eval(&prim.material, n, wo, wi, l, None)?;
+                                        let f = opaque_bsdf_eval(
+                                            &prim.material,
+                                            n,
+                                            wo,
+                                            wi,
+                                            l,
+                                            None,
+                                            brushed_frame.as_ref(),
+                                        )?;
                                         let before = radiance[k];
                                         radiance[k] +=
                                             throughput[k] * f * cos_s * espec.eval(l) * escale
@@ -13192,6 +13304,7 @@ fn trace_path(
                                                 n,
                                                 wo,
                                                 connection.incident_direction,
+                                                brushed_frame.as_ref(),
                                             );
                                             let competing_bsdf_path_is_evaluated =
                                                 depth.checked_add(3).is_some_and(|emitter_depth| {
@@ -13215,6 +13328,7 @@ fn trace_path(
                                                 connection.incident_direction,
                                                 lambda,
                                                 None,
+                                                brushed_frame.as_ref(),
                                             )?;
                                             let before = radiance[lane];
                                             radiance[lane] += throughput[lane]
@@ -13617,8 +13731,13 @@ fn trace_path(
                     dir: sampled.direction,
                 };
             }
-            Material::Lambertian { .. } | Material::Ggx { .. } | Material::Conductor { .. } => {
-                let Some((wi, pdf)) = bsdf_sample(&prim.material, n, wo, u1, u2) else {
+            Material::Lambertian { .. }
+            | Material::Ggx { .. }
+            | Material::Conductor { .. }
+            | Material::BrushedConductor { .. } => {
+                let Some((wi, pdf)) =
+                    bsdf_sample(&prim.material, n, wo, u1, u2, brushed_frame.as_ref())
+                else {
                     break;
                 };
                 let cos_s = n.dot(wi).max(0.0);
@@ -13633,12 +13752,16 @@ fn trace_path(
                         wi,
                         l,
                         medium_stack.last().map(|active| active.glass),
+                        brushed_frame.as_ref(),
                     )? * cos_s
                         / pdf;
                 }
                 previous_bsdf = Some(PreviousBsdf {
-                    pdf: DirectionalPdfPair::continuous(pdf, bsdf_pdf(&prim.material, n, wi, wo))
-                        .ok_or(TracerError::InvalidInput)?,
+                    pdf: DirectionalPdfPair::continuous(
+                        pdf,
+                        bsdf_pdf(&prim.material, n, wi, wo, brushed_frame.as_ref()),
+                    )
+                    .ok_or(TracerError::InvalidInput)?,
                     opaque_source_geometric_normal: Some(n),
                     smooth_slab: None,
                 });
@@ -17044,7 +17167,8 @@ mod tests {
                         (0.55, 0.79),
                         (0.93, 0.97),
                     ] {
-                        let Some((wi, sampled_pdf)) = bsdf_sample(&material, normal, wo, u1, u2)
+                        let Some((wi, sampled_pdf)) =
+                            bsdf_sample(&material, normal, wo, u1, u2, None)
                         else {
                             continue;
                         };
@@ -17052,7 +17176,7 @@ mod tests {
                         assert!(wi.x.is_finite() && wi.y.is_finite() && wi.z.is_finite());
                         assert!((wi.norm() - 1.0).abs() <= 3.0e-12);
                         assert!(normal.dot(wi) > 0.0);
-                        let evaluated_pdf = bsdf_pdf(&material, normal, wo, wi);
+                        let evaluated_pdf = bsdf_pdf(&material, normal, wo, wi, None);
                         let tolerance = 4.0e-12 * sampled_pdf.abs().max(1.0);
                         assert!(
                             (evaluated_pdf - sampled_pdf).abs() <= tolerance,
@@ -17087,11 +17211,11 @@ mod tests {
             for x in 0..SIDE {
                 let azimuth = 2.0 * PI * (f64::from(x) + 0.5) / f64::from(SIDE);
                 let wi = Vec3::new(radial * det::cos(azimuth), radial * det::sin(azimuth), z);
-                pdf_sum += bsdf_pdf(&material, normal, wo, wi);
+                pdf_sum += bsdf_pdf(&material, normal, wo, wi, None);
 
                 let u1 = (f64::from(x) + 0.5) / f64::from(SIDE);
                 let u2 = (f64::from(y) + 0.5) / f64::from(SIDE);
-                if bsdf_sample(&material, normal, wo, u1, u2).is_some() {
+                if bsdf_sample(&material, normal, wo, u1, u2, None).is_some() {
                     accepted += 1;
                 }
             }
@@ -17145,7 +17269,8 @@ mod tests {
         let Some((wi, pdf)) = sample else {
             return 0.0;
         };
-        opaque_bsdf_eval(material, normal, wo, wi, 550.0, None).unwrap() * normal.dot(wi) / pdf
+        opaque_bsdf_eval(material, normal, wo, wi, 550.0, None, None).unwrap() * normal.dot(wi)
+            / pdf
     }
 
     #[test]
@@ -17179,7 +17304,7 @@ mod tests {
                 &material,
                 normal,
                 wo,
-                bsdf_sample(&material, normal, wo, u1, u2),
+                bsdf_sample(&material, normal, wo, u1, u2, None),
             );
             ndf.push([ndf_sample; 3]).unwrap();
             vndf.push([vndf_sample; 3]).unwrap();
@@ -17191,7 +17316,8 @@ mod tests {
                 let u1 = (f64::from(x) + 0.5) / f64::from(REFERENCE_SIDE);
                 let u2 = (f64::from(y) + 0.5) / f64::from(REFERENCE_SIDE);
                 let (wi, _) = cosine_sample(normal, u1, u2);
-                reference += opaque_bsdf_eval(&material, normal, wo, wi, 550.0, None).unwrap() * PI;
+                reference +=
+                    opaque_bsdf_eval(&material, normal, wo, wi, 550.0, None, None).unwrap() * PI;
             }
         }
         reference /= f64::from(REFERENCE_SIDE * REFERENCE_SIDE);
@@ -17233,8 +17359,8 @@ mod tests {
                 optics,
                 surface: ConductorSurface::try_rough(0.18).unwrap(),
             };
-            let forward = opaque_bsdf_eval(&material, normal, wo, wi, 550.0, None).unwrap();
-            let reverse = opaque_bsdf_eval(&material, normal, wi, wo, 550.0, None).unwrap();
+            let forward = opaque_bsdf_eval(&material, normal, wo, wi, 550.0, None, None).unwrap();
+            let reverse = opaque_bsdf_eval(&material, normal, wi, wo, 550.0, None, None).unwrap();
             assert!(forward.is_finite() && forward >= 0.0);
             assert!((forward - reverse).abs() <= 2.0e-14 * forward.abs().max(1.0));
 
@@ -17245,6 +17371,7 @@ mod tests {
                 wi,
                 550.0,
                 Some(DielectricGlass::representative_crown()),
+                None,
             )
             .unwrap();
             assert_ne!(
@@ -17261,7 +17388,7 @@ mod tests {
                     let u2 = (f64::from(y) + 0.5) / f64::from(SIDE);
                     let (sampled_wi, _) = cosine_sample(normal, u1, u2);
                     reflected_energy +=
-                        opaque_bsdf_eval(&material, normal, normal, sampled_wi, 550.0, None)
+                        opaque_bsdf_eval(&material, normal, normal, sampled_wi, 550.0, None, None)
                             .unwrap()
                             * PI;
                 }
@@ -17272,6 +17399,243 @@ mod tests {
                 "single-scattering conductor furnace escaped its energy bound: {reflected_energy:.17e}"
             );
         }
+    }
+
+    #[test]
+    fn brushed_conductor_zero_detail_and_pole_fallback_match_isotropic_conductor() {
+        let optics = ConductorOptics::representative_stainless_steel();
+        let detail = crate::surface_detail::SurfaceDetail::none(0.18);
+        let brushed = Material::BrushedConductor {
+            optics: optics.clone(),
+            detail,
+        };
+        let conductor = Material::Conductor {
+            optics,
+            surface: ConductorSurface::try_rough(0.18).unwrap(),
+        };
+        let n = Vec3::new(0.0, 0.0, 1.0);
+        let frame =
+            crate::surface_detail::shading_frame(&detail, Point3::new(0.4, 0.25, 0.1), n).unwrap();
+        let cos_o = 0.42_f64;
+        let wo = Vec3::new((1.0 - cos_o * cos_o).sqrt(), 0.0, cos_o);
+        let cos_i = 0.77_f64;
+        let radial = (1.0 - cos_i * cos_i).sqrt();
+        let wi = Vec3::new(
+            radial * 0.31,
+            radial * (1.0 - 0.31_f64 * 0.31).sqrt(),
+            cos_i,
+        );
+
+        // Zero-detail through the derived frame: the aniso kernels collapse
+        // to the isotropic ones (within the proven 1e-12 reduction bound).
+        let iso = opaque_bsdf_eval(&conductor, n, wo, wi, 550.0, None, None).unwrap();
+        let zero_detail = opaque_bsdf_eval(&brushed, n, wo, wi, 550.0, None, Some(&frame)).unwrap();
+        assert!(iso > 0.0);
+        assert!(
+            (zero_detail - iso).abs() <= 1.0e-11 * iso,
+            "zero-detail brushed eval diverged from isotropic: {zero_detail:.17e} vs {iso:.17e}"
+        );
+        let iso_pdf = bsdf_pdf(&conductor, n, wo, wi, None);
+        let zero_detail_pdf = bsdf_pdf(&brushed, n, wo, wi, Some(&frame));
+        assert!(
+            (zero_detail_pdf - iso_pdf).abs() <= 1.0e-11 * iso_pdf,
+            "zero-detail brushed pdf diverged: {zero_detail_pdf:.17e} vs {iso_pdf:.17e}"
+        );
+
+        // Pole fallback (no derivable frame): EXACTLY the isotropic
+        // conductor at the base alpha, bit for bit.
+        let pole = opaque_bsdf_eval(&brushed, n, wo, wi, 550.0, None, None).unwrap();
+        assert_eq!(pole.to_bits(), iso.to_bits());
+        assert_eq!(
+            bsdf_pdf(&brushed, n, wo, wi, None).to_bits(),
+            iso_pdf.to_bits()
+        );
+        let iso_sample = bsdf_sample(&conductor, n, wo, 0.37, 0.61, None).unwrap();
+        let pole_sample = bsdf_sample(&brushed, n, wo, 0.37, 0.61, None).unwrap();
+        assert_eq!(pole_sample.0.x.to_bits(), iso_sample.0.x.to_bits());
+        assert_eq!(pole_sample.0.y.to_bits(), iso_sample.0.y.to_bits());
+        assert_eq!(pole_sample.0.z.to_bits(), iso_sample.0.z.to_bits());
+        assert_eq!(pole_sample.1.to_bits(), iso_sample.1.to_bits());
+    }
+
+    #[test]
+    fn brushed_conductor_anisotropy_is_real_reciprocal_and_sample_pdf_consistent() {
+        let detail = crate::surface_detail::SurfaceDetail::try_new(
+            0.12,
+            3.0,
+            crate::surface_detail::BrushingPattern::Circular,
+            0.0,
+            None,
+        )
+        .unwrap();
+        let brushed = Material::BrushedConductor {
+            optics: ConductorOptics::representative_stainless_steel(),
+            detail,
+        };
+        let n = Vec3::new(0.0, 0.0, 1.0);
+        let frame =
+            crate::surface_detail::shading_frame(&detail, Point3::new(0.5, -0.2, 0.0), n).unwrap();
+
+        // The anisotropy must be OBSERVABLE: equal polar angle, azimuth
+        // along the groove tangent vs across it, materially different lobes.
+        let wo = Vec3::new(0.0, 0.0, 1.0);
+        let cos_i = 0.6_f64;
+        let radial = (1.0 - cos_i * cos_i).sqrt();
+        let along = Vec3::new(
+            radial * frame.tangent.x + cos_i * n.x,
+            radial * frame.tangent.y + cos_i * n.y,
+            radial * frame.tangent.z + cos_i * n.z,
+        );
+        let across = Vec3::new(
+            radial * frame.bitangent.x + cos_i * n.x,
+            radial * frame.bitangent.y + cos_i * n.y,
+            radial * frame.bitangent.z + cos_i * n.z,
+        );
+        let f_along = opaque_bsdf_eval(&brushed, n, wo, along, 550.0, None, Some(&frame)).unwrap();
+        let f_across =
+            opaque_bsdf_eval(&brushed, n, wo, across, 550.0, None, Some(&frame)).unwrap();
+        assert!(f_along > 0.0 && f_across > 0.0);
+        assert!(
+            f_across > 1.5 * f_along,
+            "3:1 groove anisotropy must widen the cross-groove lobe: along={f_along:.6e}, across={f_across:.6e}"
+        );
+
+        // Helmholtz reciprocity: D and Smith G are wo/wi symmetric and the
+        // conductor Fresnel reads the shared half vector.
+        let wo_grazing = Vec3::new(0.55, 0.35, (1.0 - 0.55_f64 * 0.55 - 0.35 * 0.35).sqrt());
+        let forward =
+            opaque_bsdf_eval(&brushed, n, wo_grazing, across, 550.0, None, Some(&frame)).unwrap();
+        let reverse =
+            opaque_bsdf_eval(&brushed, n, across, wo_grazing, 550.0, None, Some(&frame)).unwrap();
+        assert!(forward.is_finite() && forward > 0.0);
+        assert!((forward - reverse).abs() <= 2.0e-14 * forward.abs().max(1.0));
+
+        // Sampled directions must report their own pdf through bsdf_pdf.
+        let mut accepted = 0_usize;
+        for (u1, u2) in [
+            (0.02, 0.11),
+            (0.23, 0.47),
+            (0.5, 0.5),
+            (0.71, 0.09),
+            (0.88, 0.93),
+        ] {
+            let Some((wi, sampled_pdf)) =
+                bsdf_sample(&brushed, n, wo_grazing, u1, u2, Some(&frame))
+            else {
+                continue;
+            };
+            accepted += 1;
+            assert!((wi.norm() - 1.0).abs() <= 3.0e-12);
+            assert!(n.dot(wi) > 0.0);
+            let evaluated_pdf = bsdf_pdf(&brushed, n, wo_grazing, wi, Some(&frame));
+            assert!(
+                (evaluated_pdf - sampled_pdf).abs() <= 4.0e-12 * sampled_pdf.abs().max(1.0),
+                "brushed VNDF sample/pdf mismatch: sampled={sampled_pdf:.17e}, evaluated={evaluated_pdf:.17e}"
+            );
+        }
+        assert!(
+            accepted >= 3,
+            "too few admitted brushed samples: {accepted}"
+        );
+    }
+
+    #[test]
+    fn brushed_shading_frame_is_body_locked_through_instance_placement() {
+        let detail = crate::surface_detail::SurfaceDetail::try_new(
+            0.12,
+            3.0,
+            crate::surface_detail::BrushingPattern::Circular,
+            0.0,
+            None,
+        )
+        .unwrap();
+        let material = Material::BrushedConductor {
+            optics: ConductorOptics::representative_stainless_steel(),
+            detail,
+        };
+        // 90-degree yaw about z: a body-locked groove chart must rotate WITH
+        // the geometry, so the world tangent rotates by the same yaw.
+        let half = std::f64::consts::FRAC_1_SQRT_2;
+        let placement = RigidTransform::try_new([0.0, 0.0, half, half], [0.0; 3]).unwrap();
+        let mesh = closed_test_slab(-0.25, 0.0);
+        let placed = Scene {
+            primitives: vec![Primitive {
+                shape: Shape::Instance(
+                    GeometryInstance::try_new(
+                        9,
+                        hash_domain("org.frankensim.fs-render.test.brushed-slab", &[9]),
+                        SharedGeometry::mesh(mesh.clone()),
+                        placement,
+                    )
+                    .unwrap(),
+                ),
+                material: material.clone(),
+                emission: None,
+            }],
+            lights: vec![],
+            environment: None,
+            camera: Camera {
+                eye: Point3::new(0.0, 0.0, 2.0),
+                forward: Vec3::new(0.0, 0.0, -1.0),
+                up: Vec3::new(0.0, 1.0, 0.0),
+                half_tan: 0.25,
+            },
+        };
+        let identity = Scene {
+            primitives: vec![Primitive {
+                shape: Shape::Mesh(mesh),
+                material: material.clone(),
+                emission: None,
+            }],
+            lights: vec![],
+            environment: None,
+            camera: Camera {
+                eye: Point3::new(0.0, 0.0, 2.0),
+                forward: Vec3::new(0.0, 0.0, -1.0),
+                up: Vec3::new(0.0, 1.0, 0.0),
+                half_tan: 0.25,
+            },
+        };
+        with_test_cx(|cx| {
+            let ray = Ray {
+                origin: Point3::new(0.25, 0.4, 1.0),
+                dir: Vec3::new(0.0, 0.0, -1.0),
+            };
+            let placed_hit = intersect(&placed, cx, &ray, None).unwrap().unwrap();
+            let n = surface_frame(&placed_hit.hit, &ray).unwrap().oriented;
+            let placed_frame = brushed_shading_frame(
+                &placed,
+                0,
+                placed_hit.instance_hit.as_ref(),
+                &placed_hit.hit,
+                n,
+                None,
+            )
+            .unwrap()
+            .expect("off-axis hit must derive a groove frame");
+            // Same MATERIAL point queried without placement: local frame.
+            let local_ray = Ray {
+                origin: placement
+                    .inverse()
+                    .unwrap()
+                    .transform_point(Point3::new(0.25, 0.4, 1.0)),
+                dir: Vec3::new(0.0, 0.0, -1.0),
+            };
+            let local_hit = intersect(&identity, cx, &local_ray, None).unwrap().unwrap();
+            let n_local = surface_frame(&local_hit.hit, &local_ray).unwrap().oriented;
+            let local_frame =
+                brushed_shading_frame(&identity, 0, None, &local_hit.hit, n_local, None)
+                    .unwrap()
+                    .expect("off-axis hit must derive a groove frame");
+            let rotated = placement.transform_vector(local_frame.tangent);
+            assert!(
+                (rotated.x - placed_frame.tangent.x).abs() <= 1.0e-12
+                    && (rotated.y - placed_frame.tangent.y).abs() <= 1.0e-12
+                    && (rotated.z - placed_frame.tangent.z).abs() <= 1.0e-12,
+                "instance groove tangent must be the rotated body tangent: rotated={rotated:?}, placed={:?}",
+                placed_frame.tangent
+            );
+        });
     }
 
     #[test]
@@ -18012,9 +18376,27 @@ fn bsdf_eval(mat: &Material, n: Vec3, wo: Vec3, wi: Vec3, lambda: f64) -> f64 {
             let f = schlick(reflectance.eval(lambda), wo.dot(m).max(0.0));
             d * g * f / (4.0 * cos_o * cos_i)
         }
-        Material::Conductor { .. } => 0.0,
+        Material::Conductor { .. } | Material::BrushedConductor { .. } => 0.0,
         Material::Dielectric { .. } => 0.0,
     }
+}
+
+/// World<->local mapping for the brushed tangent frame: the BSDF math runs
+/// in the frame's local coordinates (tangent, bitangent, shading normal).
+fn brushed_local(frame: &crate::surface_detail::ShadingFrame, v: Vec3) -> [f64; 3] {
+    [
+        frame.tangent.dot(v),
+        frame.bitangent.dot(v),
+        frame.shading_normal.dot(v),
+    ]
+}
+
+fn brushed_world(frame: &crate::surface_detail::ShadingFrame, v: [f64; 3]) -> Vec3 {
+    Vec3::new(
+        v[0] * frame.tangent.x + v[1] * frame.bitangent.x + v[2] * frame.shading_normal.x,
+        v[0] * frame.tangent.y + v[1] * frame.bitangent.y + v[2] * frame.shading_normal.y,
+        v[0] * frame.tangent.z + v[1] * frame.bitangent.z + v[2] * frame.shading_normal.z,
+    )
 }
 
 fn opaque_bsdf_eval(
@@ -18024,7 +18406,45 @@ fn opaque_bsdf_eval(
     wi: Vec3,
     lambda: f64,
     incident_medium: Option<DielectricGlass>,
+    brushed: Option<&crate::surface_detail::ShadingFrame>,
 ) -> Result<f64, TracerError> {
+    if let Material::BrushedConductor { optics, detail } = mat {
+        // Anisotropic evaluation in the brushed tangent frame. A pole
+        // (no derivable radial tangent) falls back to the isotropic base
+        // alpha: brushing has no direction on the spin axis by definition.
+        let Some(frame) = brushed else {
+            let fallback = Material::Conductor {
+                optics: optics.clone(),
+                surface: ConductorSurface::try_rough(detail.alpha_pair().0)
+                    .map_err(|_| TracerError::InvalidInput)?,
+            };
+            return opaque_bsdf_eval(&fallback, n, wo, wi, lambda, incident_medium, None);
+        };
+        let (cos_o, cos_i) = (n.dot(wo), n.dot(wi));
+        if cos_o <= 0.0 || cos_i <= 0.0 {
+            return Ok(0.0);
+        }
+        let hsum = Vec3::new(wo.x + wi.x, wo.y + wi.y, wo.z + wi.z);
+        let hn = hsum.norm();
+        if hn < 1.0e-12 {
+            return Ok(0.0);
+        }
+        let microfacet_normal = hsum.scale(1.0 / hn);
+        let (alpha_x, alpha_y) = detail.alpha_pair();
+        let m_local = brushed_local(frame, microfacet_normal);
+        let wo_local = brushed_local(frame, wo);
+        let wi_local = brushed_local(frame, wi);
+        let d = ggx_d_aniso(alpha_x, alpha_y, m_local);
+        let g =
+            smith_g1_aniso(alpha_x, alpha_y, wo_local) * smith_g1_aniso(alpha_x, alpha_y, wi_local);
+        let incident_eta = medium_ior(incident_medium, lambda)?;
+        let fresnel = optics.fresnel(
+            lambda,
+            incident_eta,
+            wo.dot(microfacet_normal).clamp(0.0, 1.0),
+        )?;
+        return Ok(d * g * fresnel / (4.0 * cos_o * cos_i));
+    }
     let Material::Conductor { optics, surface } = mat else {
         // Keep the frozen Lambertian/GGX arithmetic in `bsdf_eval`; merely
         // adding the conductor family must not perturb legacy image bits.
@@ -18052,7 +18472,13 @@ fn opaque_bsdf_eval(
     Ok(d * g * fresnel / (4.0 * cos_o * cos_i))
 }
 
-fn bsdf_pdf(mat: &Material, n: Vec3, wo: Vec3, wi: Vec3) -> f64 {
+fn bsdf_pdf(
+    mat: &Material,
+    n: Vec3,
+    wo: Vec3,
+    wi: Vec3,
+    brushed: Option<&crate::surface_detail::ShadingFrame>,
+) -> f64 {
     let cos_i = n.dot(wi);
     if cos_i <= 0.0 || n.dot(wo) <= 0.0 {
         return 0.0;
@@ -18077,11 +18503,37 @@ fn bsdf_pdf(mat: &Material, n: Vec3, wo: Vec3, wi: Vec3) -> f64 {
             let m = hsum.scale(1.0 / hn);
             ggx_vndf_reflection_pdf(surface.roughness_alpha(), n, wo, m)
         }
+        Material::BrushedConductor { detail, .. } => {
+            let hsum = Vec3::new(wo.x + wi.x, wo.y + wi.y, wo.z + wi.z);
+            let hn = hsum.norm();
+            if hn < 1e-12 {
+                return 0.0;
+            }
+            let m = hsum.scale(1.0 / hn);
+            let (alpha_x, alpha_y) = detail.alpha_pair();
+            match brushed {
+                Some(frame) => ggx_vndf_reflection_pdf_aniso(
+                    alpha_x,
+                    alpha_y,
+                    brushed_local(frame, wo),
+                    brushed_local(frame, m),
+                ),
+                // Pole fallback: isotropic base alpha (see opaque_bsdf_eval).
+                None => ggx_vndf_reflection_pdf(alpha_x, n, wo, m),
+            }
+        }
         Material::Dielectric { .. } => 0.0,
     }
 }
 
-fn bsdf_sample(mat: &Material, n: Vec3, wo: Vec3, u1: f64, u2: f64) -> Option<(Vec3, f64)> {
+fn bsdf_sample(
+    mat: &Material,
+    n: Vec3,
+    wo: Vec3,
+    u1: f64,
+    u2: f64,
+    brushed: Option<&crate::surface_detail::ShadingFrame>,
+) -> Option<(Vec3, f64)> {
     match mat {
         Material::Lambertian { .. } => {
             let (wi, pdf) = cosine_sample(n, u1, u2);
@@ -18090,6 +18542,26 @@ fn bsdf_sample(mat: &Material, n: Vec3, wo: Vec3, u1: f64, u2: f64) -> Option<(V
         Material::Ggx { alpha, .. } => sample_ggx_vndf_reflection(n, wo, *alpha, u1, u2),
         Material::Conductor { surface, .. } => {
             sample_ggx_vndf_reflection(n, wo, surface.roughness_alpha(), u1, u2)
+        }
+        Material::BrushedConductor { detail, .. } => {
+            let (alpha_x, alpha_y) = detail.alpha_pair();
+            match brushed {
+                Some(frame) => {
+                    let (wi_local, pdf) = sample_ggx_vndf_reflection_aniso(
+                        brushed_local(frame, wo),
+                        alpha_x,
+                        alpha_y,
+                        u1,
+                        u2,
+                    )?;
+                    let wi = brushed_world(frame, wi_local);
+                    // The frame's shading normal may be tilted; the sampled
+                    // direction must still leave the GEOMETRIC hemisphere.
+                    (n.dot(wi) > 0.0 && pdf > 0.0).then_some((wi, pdf))
+                }
+                // Pole fallback: isotropic base alpha.
+                None => sample_ggx_vndf_reflection(n, wo, alpha_x, u1, u2),
+            }
         }
         Material::Dielectric { .. } => None,
     }
