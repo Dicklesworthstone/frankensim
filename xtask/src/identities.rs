@@ -6348,8 +6348,10 @@ fn rust_use_alias_index(
             }
             if tokens[alias].text != "as" {
                 let symbol = tokens[alias].text;
+                // `_` here is the anonymous `as _` binding target: it
+                // introduces no name (see the `as` branch below).
                 let is_leaf = canonical_symbol(symbol)
-                    && !matches!(symbol, "crate" | "self" | "super")
+                    && !matches!(symbol, "crate" | "self" | "super" | "_")
                     && tokens
                         .get(alias + 1)
                         .is_some_and(|next| matches!(next.text, "," | "}" | ";"));
@@ -6365,7 +6367,12 @@ fn rust_use_alias_index(
                 continue;
             };
             if symbol == "_" {
-                saw_glob = true;
+                // `use path::Trait as _;` binds NO name: it cannot shadow
+                // any nominal spelling, so it must not be modeled as a
+                // glob. Its only semantic effect — trait-impl/method
+                // availability — is guarded independently by the syntactic
+                // receiver/comparison proofs, which never consult this
+                // index (mirrors the `extern crate ... as _` branch).
                 continue;
             }
             if !canonical_symbol(symbol) {
@@ -20089,6 +20096,81 @@ mod right { pub const DUPLICATE: u32 = 2; }
             .expect_err("an imported helper cannot be inferred as file-local authority");
             assert!(error.contains("imported helper authority"), "{error}");
         }
+    }
+
+    #[test]
+    fn anonymous_trait_import_does_not_shadow_primitive_spellings() {
+        // Regression for bead m3h2e: `use path::Trait as _;` binds no
+        // name and must not poison primitive type spellings the way a
+        // real glob does.
+        for source in [
+            concat!(
+                "use std::fmt::Write as _;\n",
+                "pub fn semantic_tag(bytes: &[u8]) -> usize { bytes.len() }\n",
+            ),
+            concat!(
+                "use std::fmt::Write as _;\n",
+                "pub fn helper() -> String { let mut s = String::new(); ",
+                "let _ = write!(s, \"x\"); s }\n",
+                "pub fn semantic_tag(bytes: &[u8]) -> usize { bytes.len() }\n",
+            ),
+        ] {
+            normalized_rust_schema_authority_with_index(
+                source,
+                &RustSourceIndex::new(source),
+                "semantic_tag",
+            )
+            .expect("an anonymous trait import binds no name and shadows nothing");
+        }
+
+        // The anonymous binding target must not register as an importable
+        // name either: `_` appears constantly as a closure/pattern token
+        // inside identity fns and must never resolve "through binding _".
+        let closure = concat!(
+            "use std::fmt::Write as _;\n",
+            "pub fn semantic_tag(bytes: &[u8]) -> usize { ",
+            "let _ = bytes; let counter = |_: usize| 1usize; counter(0) }\n",
+        );
+        normalized_rust_schema_authority_with_index(
+            closure,
+            &RustSourceIndex::new(closure),
+            "semantic_tag",
+        )
+        .expect("closure underscore patterns must not resolve through the anonymous import");
+
+        // FALSIFIER 1: a real glob still poisons primitive spellings —
+        // the fix must not weaken genuine wildcard conservatism.
+        let glob = concat!(
+            "mod helpers { pub struct Marker; }\n",
+            "use helpers::*;\n",
+            "pub fn semantic_tag(bytes: &[u8]) -> usize { bytes.len() }\n",
+        );
+        let error = normalized_rust_schema_authority_with_index(
+            glob,
+            &RustSourceIndex::new(glob),
+            "semantic_tag",
+        )
+        .expect_err("a genuine glob import can emit any nominal spelling");
+        assert!(error.contains("shadowable primitive spelling"), "{error}");
+
+        // FALSIFIER 2: the trait-impl reality of `as _` stays guarded by
+        // the SYNTACTIC receiver proof, which never consults the alias
+        // index: a method call on an unproven receiver still refuses even
+        // though the only import is anonymous.
+        let method = concat!(
+            "use std::fmt::Write as _;\n",
+            "pub fn semantic_tag(value: &str) -> usize { value.mystery_len() }\n",
+        );
+        let error = normalized_rust_schema_authority_with_index(
+            method,
+            &RustSourceIndex::new(method),
+            "semantic_tag",
+        )
+        .expect_err("an unproven receiver method must refuse regardless of import shape");
+        assert!(
+            error.contains("method-call syntax on a receiver"),
+            "{error}"
+        );
     }
 
     #[test]
