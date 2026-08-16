@@ -102,6 +102,15 @@ pub enum DuctError {
         /// Measured `ka` at the radiating mouth.
         ka: f64,
     },
+    /// A tabulated load was queried outside its frequency support.
+    OutOfTable {
+        /// The refused query frequency [rad/s].
+        omega: f64,
+        /// Table lower bound [rad/s].
+        omega_lo: f64,
+        /// Table upper bound [rad/s].
+        omega_hi: f64,
+    },
     /// The duct has no segments.
     EmptyDuct,
     /// A dense solve refused (degenerate basis).
@@ -121,6 +130,15 @@ impl core::fmt::Display for DuctError {
                 f,
                 "FS-DUCT-RADIATION-KA: ka = {ka:.3} beyond the low-ka fit ceiling \
                  {MAX_RADIATION_KA}"
+            ),
+            DuctError::OutOfTable {
+                omega,
+                omega_lo,
+                omega_hi,
+            } => write!(
+                f,
+                "FS-DUCT-OUT-OF-TABLE: omega = {omega:.4e} outside the tabulated load support \
+                 [{omega_lo:.4e}, {omega_hi:.4e}] (tables never extrapolate)"
             ),
             DuctError::EmptyDuct => write!(f, "FS-DUCT-EMPTY: a duct needs at least one segment"),
             DuctError::Singular => write!(f, "FS-DUCT-SINGULAR: basis solve refused"),
@@ -1126,6 +1144,51 @@ pub fn input_impedance_wall(
     termination: Termination,
     wall: Option<&WallPin>,
 ) -> Result<DuctResponse, DuctError> {
+    input_impedance_core(duct, state, omega, loss, LoadSpec::Analytic(termination), wall)
+}
+
+/// How the mouth load is supplied to the chain.
+enum LoadSpec {
+    /// One of the closed analytic terminations (with their own validity
+    /// refusals, including the low-`ka` ceiling).
+    Analytic(Termination),
+    /// A pre-computed load `Z_L` [Pa s/m^3] — measured or baked; carries
+    /// NO `ka` ceiling (that lift is the point of tabulated loads).
+    Fixed(C64),
+}
+
+/// Input impedance with an explicit pre-computed mouth load `Z_L`
+/// [Pa s/m^3] — the seam every tabulated/measured radiation load plays
+/// through. No `ka` refusal fires on this path: the load's own validity
+/// is its producer's receipt (bake table bounds, mesh resolution), not a
+/// low-`ka` fit ceiling.
+///
+/// # Errors
+/// As [`input_impedance`], minus the radiation-fit refusals.
+pub fn input_impedance_load(
+    duct: &Duct,
+    state: &GasState,
+    omega: f64,
+    loss: LossModel,
+    z_load: C64,
+    wall: Option<&WallPin>,
+) -> Result<DuctResponse, DuctError> {
+    if !(z_load.re.is_finite() && z_load.im.is_finite()) {
+        return Err(DuctError::BadParameter {
+            what: "tabulated load must be finite",
+        });
+    }
+    input_impedance_core(duct, state, omega, loss, LoadSpec::Fixed(z_load), wall)
+}
+
+fn input_impedance_core(
+    duct: &Duct,
+    state: &GasState,
+    omega: f64,
+    loss: LossModel,
+    load: LoadSpec,
+    wall: Option<&WallPin>,
+) -> Result<DuctResponse, DuctError> {
     if duct.segments.is_empty() {
         return Err(DuctError::EmptyDuct);
     }
@@ -1239,7 +1302,12 @@ pub fn input_impedance_wall(
         .last()
         .expect("non-empty checked above")
         .outlet_radius();
-    let (z_load, mouth_ka) = termination_impedance(termination, state, mouth_radius, omega)?;
+    let (z_load, mouth_ka) = match load {
+        LoadSpec::Analytic(termination) => {
+            termination_impedance(termination, state, mouth_radius, omega)?
+        }
+        LoadSpec::Fixed(zl) => (Some(zl), omega * mouth_radius / state.sound_speed),
+    };
     // Z_in = (A Z_L + B)/(C Z_L + D); U_mouth/U_in = 1/(C Z_L + D).
     // Closed (U_mouth = 0) is the C, D limit of Z_in with a zero mouth ratio.
     let (impedance, u_mouth_over_u_in, p_mouth_over_u_in) = match z_load {
@@ -1261,6 +1329,127 @@ pub fn input_impedance_wall(
         u_mouth_over_u_in,
         p_mouth_over_u_in,
     })
+}
+
+/// A tabulated mouth load `Z_L(omega)` [Pa s/m^3] — the playback side of
+/// an offline radiation bake (fs-bem) or a measured bell impedance. The
+/// TABLE is the source of truth: queries linearly interpolate between
+/// samples and REFUSE outside the support (`FS-DUCT-OUT-OF-TABLE`);
+/// nothing extrapolates. Construction enforces passivity
+/// (`Re Z >= -tol * |Z|` on every row) so a non-passive table refuses at
+/// admission, not mid-synthesis.
+#[derive(Debug, Clone)]
+pub struct TabulatedLoad {
+    omegas: Vec<f64>,
+    z: Vec<C64>,
+    source_id: String,
+}
+
+impl TabulatedLoad {
+    /// Admit a table: strictly increasing positive omegas, finite loads,
+    /// passivity within `passivity_tolerance` (relative to each row's
+    /// magnitude; 0 demands `Re Z >= 0` exactly).
+    ///
+    /// # Errors
+    /// [`DuctError::BadParameter`] naming the violated admission rule.
+    pub fn try_new(
+        omegas: Vec<f64>,
+        z: Vec<C64>,
+        source_id: &str,
+        passivity_tolerance: f64,
+    ) -> Result<TabulatedLoad, DuctError> {
+        if omegas.len() < 2 || omegas.len() != z.len() {
+            return Err(DuctError::BadParameter {
+                what: "tabulated load needs >= 2 rows with matching lengths",
+            });
+        }
+        if !(omegas[0].is_finite() && omegas[0] > 0.0)
+            || !omegas.windows(2).all(|w| w[1].is_finite() && w[1] > w[0])
+        {
+            return Err(DuctError::BadParameter {
+                what: "tabulated omegas must be finite, positive, strictly increasing",
+            });
+        }
+        if !(passivity_tolerance.is_finite() && passivity_tolerance >= 0.0) {
+            return Err(DuctError::BadParameter {
+                what: "passivity tolerance must be finite and non-negative",
+            });
+        }
+        for zi in &z {
+            if !(zi.re.is_finite() && zi.im.is_finite()) {
+                return Err(DuctError::BadParameter {
+                    what: "tabulated loads must be finite",
+                });
+            }
+            if zi.re < -passivity_tolerance * zi.abs() {
+                return Err(DuctError::BadParameter {
+                    what: "tabulated load is not passive (Re Z < 0 beyond tolerance)",
+                });
+            }
+        }
+        Ok(TabulatedLoad {
+            omegas,
+            z,
+            source_id: source_id.to_string(),
+        })
+    }
+
+    /// The caller-supplied provenance identity.
+    #[must_use]
+    pub fn source_id(&self) -> &str {
+        &self.source_id
+    }
+
+    /// Frequency support [rad/s].
+    #[must_use]
+    pub fn support(&self) -> (f64, f64) {
+        (self.omegas[0], self.omegas[self.omegas.len() - 1])
+    }
+
+    /// Linearly interpolated `Z_L(omega)`; refuses outside the support.
+    ///
+    /// # Errors
+    /// [`DuctError::OutOfTable`].
+    pub fn z_at(&self, omega: f64) -> Result<C64, DuctError> {
+        let (lo, hi) = self.support();
+        if !(omega >= lo && omega <= hi) {
+            return Err(DuctError::OutOfTable {
+                omega,
+                omega_lo: lo,
+                omega_hi: hi,
+            });
+        }
+        let idx = match self
+            .omegas
+            .binary_search_by(|w| w.partial_cmp(&omega).expect("finite by admission"))
+        {
+            Ok(i) => return Ok(self.z[i]),
+            Err(i) => i,
+        };
+        let (wa, wb) = (self.omegas[idx - 1], self.omegas[idx]);
+        let t = (omega - wa) / (wb - wa);
+        let (za, zb) = (self.z[idx - 1], self.z[idx]);
+        Ok(za + (zb - za).scale(t))
+    }
+}
+
+/// Input impedance against a tabulated mouth load — the `ka` LIFT: the
+/// low-`ka` analytic fits keep their `MAX_RADIATION_KA` refusal exactly
+/// as before, while measured/baked tables play at any frequency INSIDE
+/// their own support and refuse outside it.
+///
+/// # Errors
+/// As [`input_impedance_load`], plus [`DuctError::OutOfTable`].
+pub fn input_impedance_tabulated(
+    duct: &Duct,
+    state: &GasState,
+    omega: f64,
+    loss: LossModel,
+    table: &TabulatedLoad,
+    wall: Option<&WallPin>,
+) -> Result<DuctResponse, DuctError> {
+    let z_load = table.z_at(omega)?;
+    input_impedance_load(duct, state, omega, loss, z_load, wall)
 }
 
 /// Uniformly sampled input-impedance sweep (inclusive endpoints).
