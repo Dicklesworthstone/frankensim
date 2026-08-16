@@ -326,3 +326,154 @@ pub fn lathe_profile(
         mouth_start,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn verdict(case: &str, pass: bool, detail: &str) {
+        println!(
+            "{{\"suite\":\"fs-bem\",\"case\":\"{case}\",\"verdict\":\"{}\",\"detail\":\"{detail}\"}}",
+            if pass { "pass" } else { "fail" }
+        );
+        assert!(pass, "case {case}: {detail}");
+    }
+
+    #[test]
+    fn zb_001_bake_reproduces_the_pulsating_sphere() {
+        // All panels driven on an icosphere = the pulsating sphere; the
+        // bake's area-averaged rows must land inside the SAME bands the
+        // solver's own oracle tests pin (PlainCbie < 4% below ka 0.5,
+        // Burton-Miller < 8% above).
+        let radius = 1.0f64;
+        let surface = SpherePanels::icosphere(radius, 2).expect("icosphere");
+        let n = surface.areas().len();
+        let medium = Medium::air();
+        let c = medium.sound_speed;
+        let kas = [0.2f64, 0.5, 1.0, 2.0];
+        let omegas: Vec<f64> = kas.iter().map(|ka| ka * c / radius).collect();
+        let driven = vec![true; n];
+        let bake = bake_radiation_load(&surface, &driven, &omegas, medium, 4, "test/icosphere2/v1")
+            .expect("bake");
+        for line in bake.receipt_lines() {
+            println!("{line}");
+        }
+        let rho_c = medium.density * c;
+        let mut worst_cbie = 0.0f64;
+        let mut worst_bm = 0.0f64;
+        for (row, &ka) in bake.rows.iter().zip(&kas) {
+            let analytic = C64::new(ka * ka, -ka).scale(rho_c / (1.0 + ka * ka));
+            let rel = (row.z_specific - analytic).abs() / analytic.abs();
+            if ka < 0.5 {
+                assert!(matches!(row.formulation, Formulation::PlainCbie));
+                worst_cbie = worst_cbie.max(rel);
+            } else {
+                assert!(matches!(row.formulation, Formulation::BurtonMiller));
+                worst_bm = worst_bm.max(rel);
+            }
+        }
+        let passive = bake.is_passive(0.0);
+        let pass = worst_cbie < 0.04 && worst_bm < 0.08 && passive;
+        verdict(
+            "zb-001-pulsating-sphere-bake",
+            pass,
+            &format!(
+                "cbie worst {worst_cbie:.3e}, burton-miller worst {worst_bm:.3e}, \
+                 passive {passive}, worst margin {:.3e}",
+                bake.worst_passivity_margin()
+            ),
+        );
+    }
+
+    #[test]
+    fn zb_002_bake_refusals() {
+        let surface = SpherePanels::icosphere(1.0, 1).expect("icosphere");
+        let n = surface.areas().len();
+        let medium = Medium::air();
+        let driven = vec![true; n];
+        // Past the mesh's panels-per-wavelength bound: refuse, never
+        // extrapolate.
+        let too_fine = bake_radiation_load(
+            &surface,
+            &driven,
+            &[1.0e6],
+            medium,
+            2,
+            "test/refusal/v1",
+        );
+        let coarse_refused = matches!(too_fine, Err(HelmholtzError::TooCoarse { .. }));
+        let empty = bake_radiation_load(&surface, &driven, &[], medium, 2, "t");
+        let mask = bake_radiation_load(&surface, &driven[1..], &[100.0], medium, 2, "t");
+        let nobody = bake_radiation_load(
+            &surface,
+            &vec![false; n],
+            &[100.0],
+            medium,
+            2,
+            "t",
+        );
+        let unsorted = bake_radiation_load(&surface, &driven, &[200.0, 100.0], medium, 2, "t");
+        let pass = coarse_refused
+            && matches!(empty, Err(HelmholtzError::BadParameter { .. }))
+            && matches!(mask, Err(HelmholtzError::ShapeMismatch { .. }))
+            && matches!(nobody, Err(HelmholtzError::BadParameter { .. }))
+            && matches!(unsorted, Err(HelmholtzError::BadParameter { .. }));
+        verdict(
+            "zb-002-bake-refusals",
+            pass,
+            &format!(
+                "too-coarse {coarse_refused}, empty {}, mask {}, undriven {}, unsorted {}",
+                empty.is_err(),
+                mask.is_err(),
+                nobody.is_err(),
+                unsorted.is_err()
+            ),
+        );
+    }
+
+    #[test]
+    fn zb_003_lathe_is_closed_and_outward() {
+        // Divergence theorem: (1/3) sum centroid . normal * area equals
+        // the enclosed volume for a CLOSED outward surface — the sign
+        // and the frustum-stack analytic volume verify orientation and
+        // closure in one number.
+        let profile = [
+            (0.0f64, 0.01f64),
+            (0.05, 0.014),
+            (0.10, 0.020),
+            (0.15, 0.032),
+            (0.18, 0.05),
+        ];
+        let bell = lathe_profile(&profile, 24).expect("lathe");
+        let surface = SpherePanels::from_triangles(bell.triangles.clone()).expect("panels");
+        let mut vol = 0.0f64;
+        for i in 0..surface.areas().len() {
+            let c = surface.centroids()[i];
+            let nrm = surface.normals()[i];
+            vol += (c[0] * nrm[0] + c[1] * nrm[1] + c[2] * nrm[2]) * surface.areas()[i];
+        }
+        vol /= 3.0;
+        // Analytic frustum-stack volume of the profile.
+        let mut analytic = 0.0f64;
+        for w in profile.windows(2) {
+            let (x0, r0) = w[0];
+            let (x1, r1) = w[1];
+            analytic +=
+                core::f64::consts::PI / 3.0 * (x1 - x0) * (r0 * r0 + r0 * r1 + r1 * r1);
+        }
+        // The 24-gon lathe underestimates the circle by sin(t)/t factors;
+        // accept a 5% band and REQUIRE the sign.
+        let rel = (vol - analytic).abs() / analytic;
+        let mask = bell.driven_mask();
+        let mouth_count = mask.iter().filter(|&&d| d).count();
+        let pass = vol > 0.0 && rel < 0.05 && mouth_count == 24;
+        verdict(
+            "zb-003-lathe-closed-outward",
+            pass,
+            &format!(
+                "divergence volume {vol:.6e} vs frustum stack {analytic:.6e} (rel {rel:.3e}), \
+                 mouth panels {mouth_count}"
+            ),
+        );
+    }
+}
