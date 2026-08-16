@@ -547,6 +547,44 @@
       "budget_row": null,
       "corpus_refs": [],
       "notes": "Offline lip/reed reduce lab: mesh + material card -> (K,M) -> certified modes -> ValveCard (face-unit-translation normalization keeps physical units; retained-compliance vs exact static K^-1 refusal; orifice measured from the mesh; provenance chain + tamper-refusing canonical bytes; beating_reed() mint matching the runtime face convention). EXECUTED falsification recorded: the base-excitation participation phi^T M r retained 1e-11 of the compliance \u2014 the force projection phi^T r is the correct modal-compliance projection. X-Est: the battery's tissue card is synthetic-authored (NO soft-tissue pack exists in data/matdb; recorded upgrade path); one lab serves lips/cane/vocal folds. Green awaits measured coupons + track gates (.4.3/.6.2/voice)."
+    },
+    {
+      "filling": "brass",
+      "image": "playing-loop",
+      "qoi": "emergent-lock",
+      "owner_crates": [
+        "fs-couple",
+        "fs-phs",
+        "fs-duct"
+      ],
+      "exactness": [
+        "X-Struct",
+        "X-Est"
+      ],
+      "gate": "ungated",
+      "live_default": "no",
+      "determinism": "one-host",
+      "evidence": [
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/src/brass_loop.rs::bl_001_005_emergent_gates"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/src/brass_loop.rs::bl_006_no_click_valve_change"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/src/brass_loop.rs::bl_007_structural_honesty_and_refusals"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/src/brass_loop.rs::bl_008_radiated_observer_from_the_bake"
+        }
+      ],
+      "budget_row": null,
+      "corpus_refs": [],
+      "notes": "The composed brass loop: outward-striking lip MSD island x MM char lines x D18 cup, PITCH NEVER ASSIGNED (grep-enforced control surface). Emergent: lock in the outward band above the cup-loaded column peak (238 cents above peak, 281 from the lip alone); tension walks partials (209->445 Hz); valves drop the series monotonically (-125/-200 cents); slotting (+78 cents in-slot, 1310 between); cold horn -50.4 cents vs -48.6 predicted; no-click valve lift with executed hard-cut falsifier; observer weights from the bake's SH table. NUMERICS LESSON in CONTRACT: one-sample-delayed Bernoulli flow is anti-dissipative above fs/4 (7.3 kHz parasitic executed) \u2014 closed-form implicit flow/junction solve fixed it; line-tap passivity needs a 4x-oversampled grid (inter-bin Gibbs). X-Est: authored card-scale lip; the trumpet CLAIM is decided in .4.4 with measured-impedance gates."
     }
   ]
 }

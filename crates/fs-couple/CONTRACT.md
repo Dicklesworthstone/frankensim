@@ -609,6 +609,27 @@ None.
   arm within 1 cent of the dominant line with a plane-mode energy
   fraction above 0.999 at 9x the cost.
 
+- `brass_loop` module (bead 3ez8g.4.3): the composed brass playing
+  loop — no `Trumpet` type. `BrassVoice` = a 1-DOF
+  `fs_phs::mass_spring_damper` lip island (outward-striking; parameters
+  at reduce-lab card scale with provenance labels on every input) x the
+  per-valve multimodal characteristic lines x the D18 cup junction.
+  PITCH IS NEVER ASSIGNED: the control surface is blowing pressure,
+  lip tension, valve combination — structurally enforced by the
+  battery's source grep. THE NUMERICS LESSON (executed): an explicit
+  Bernoulli flow computed from the previous sample's bore pressure
+  carries a one-sample delay whose phase flips the aperture's
+  small-signal conductance ANTI-dissipative above fs/4 — a crook combo
+  locked onto a 7.3 kHz parasitic scream; the fix is the closed-form
+  IMPLICIT flow/junction solve (the linear cup relation substituted
+  into the Bernoulli law gives a quadratic in the flow), leaving no
+  delay in the flow path while the lip gap stays explicit (lip mass
+  filters it). Passivity on the line taps is additionally enforced on
+  a 4x-oversampled DTFT grid (inter-bin Gibbs overshoot makes a
+  grid-only |R| <= 1 claim insufficient). Per-block diagnostics carry
+  the lock estimate, gap statistics, blow/bore work, and the lip
+  island's supply defect.
+
 ## Conformance tests
 
 `src/broadband_radiation.rs`: G0 complex/real-SH round trip/reconstruction against
@@ -676,6 +697,21 @@ hard-cut falsifier is at least 2x worse), per-line passivity on the
 stored taps, the cup shunt vs its analytic transform, and
 causality/splice/refusal arms (the causality gate is the executable
 witness of the e^{-i omega t} conjugation discipline).
+
+`src/brass_loop.rs` `brass_gate_tests` + `brass_observer_tests`, cases
+bl-001..bl-008 — the EMERGENT gates: lock 238 cents above the
+cup-loaded column peak (outward-striking band) and 281 cents from the
+lip alone at 10.4 kPa; tension walks the lock 208.9 -> 445.1 Hz across
+distinct column peaks; valves drop the whole series (-125/-200 cents,
+monotone, no pitch anywhere in the inputs); slotting (+78 cents of
+continuous lipping inside a slot, 1310-cent jumps between); the cold
+horn plays -50.4 cents flat vs the -48.6 sound-speed prediction with
+temperature entering ONLY through the gas card; the no-click valve
+change (envelope held through the switch; the fresh-voice hard-cut
+falsifier collapses to 40% RMS); structural honesty + refusal arms;
+and the radiated-observer demonstration from the SAME bake's SH
+directivity table at the lock frequency (compact-mouth near-omni is
+the correct physics at ka 0.09).
 
 ## No-claim boundaries
 
@@ -787,3 +823,13 @@ witness of the e^{-i omega t} conjugation discipline).
   the realization cost is O(n_fft) MACs per sample per line (the
   matrix arm is N^2 of that) with no real-time claim until a budget
   row exists.
+- The brass loop is Estimate end to end (authored card-scale lip; the
+  claim decision is the brass-gates bead). Its own v1 boundaries: the
+  lip pressure-collection face area is authored ABOVE the
+  orifice-strip area (mouth-side lip face; disclosed in provenance);
+  no WallPin lane through the multimodal image yet; the radiated
+  observer is demonstrated per-direction at the lock frequency, not as
+  a broadband convolution (the broadband lane is
+  `broadband_radiation`); valve changes are discrete combos with the
+  crossfade lift — a trombone's continuous slide needs the wind
+  epic's fractional-delay bead, a dependency of claim, not of code.
