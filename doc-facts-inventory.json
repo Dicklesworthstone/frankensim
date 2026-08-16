@@ -817,6 +817,7 @@
     "crates/fs-query/tests/codim.rs",
     "crates/fs-query/tests/conformance.rs",
     "crates/fs-query/tests/convex.rs",
+    "crates/fs-query/tests/crook.rs",
     "crates/fs-query/tests/deform.rs",
     "crates/fs-query/tests/features.rs",
     "crates/fs-query/tests/gap.rs",

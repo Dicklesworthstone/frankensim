@@ -206,6 +206,21 @@ answers to the MULTI-CHART AGREEMENT discipline (same abstract region
   `Unavailable { claim }` - never a downgraded number. Authority of every
   non-closure output is `Estimate` by construction (gb-001..gb-007).
 
+- `extract_crook_delta` -> `ValveChartDelta` + `certify_slide_range`
+  -> `SlideRange` (music bead 3ez8g.3.2): per-valve inserted-length
+  receipts minted by the bore extractor and CERTIFIED against the
+  CAD's declared centerline arc length — outside the authored band the
+  extraction REFUSES by name (`DeltaLengthOutOfBand`: a crook that
+  measures wrong is a data error, not a detuned horn). Port areas are
+  read at near-end INTERIOR stations (the extractor's cut-face end
+  stations carry the disclosed tangent-tilt term) and checked against
+  the DECLARED junction step: an undeclared mismatch refuses
+  (`JunctionAreaMismatch`) while the same geometry with the step
+  declared passes — the acoustic-feature-vs-extraction-error
+  distinction. Slide ranges certify from two endpoint extractions;
+  runtime switching lifts belong to the performance images
+  (gk-001..gk-003).
+
 ## Invariants
 
 1. Closest points agree with analytic truth across all four chart
@@ -423,6 +438,16 @@ the OBJ-cylinder end-to-end through the fs-io quarantine (24-gon section
 truth, `NoClaim` closure recorded, cap-less variant refused at
 promotion).
 
+`tests/crook.rs`, cases gk-001..gk-003 — the three-valve fixture
+(bent-torus lumens with analytic arc lengths; worst CAD deviation
+0.0148 inside the 0.10 band; delta ordering certified; slide range +
+inverted-endpoint refusal), the band refusals by name (lying CAD
+length; undeclared vs declared port step), and THE COMPOSED ORACLE:
+inserting the extracted delta into a cylinder duct moves the TMM first
+impedance peak -936.1 cents vs the -931.6 quarter-wave-plus-end-
+correction prediction (4.5 cents inside the authored 12-cent band) —
+the emergent-pitch precondition, executed.
+
 ## No-claim boundaries
 
 - General Minkowski sums (non-ball structuring elements, max-plus /
@@ -516,3 +541,8 @@ promotion).
   exact-distance charts; imported meshes (`MeshChart`, `NoClaim`) record
   `VolumeClosure::Unavailable` - there is no certified-volume route for a
   mesh anywhere in the workspace, and this module does not invent one.
+- The crook certificate is CONSISTENCY against CAD intent, not a
+  measurement of a physical horn; it inherits the bore extractor's
+  Estimate authority and tube-only topology. Continuous-slide
+  sub-sample delay interpolation is the wind epic's fractional-delay
+  bead (a dependency of claim, not of code).

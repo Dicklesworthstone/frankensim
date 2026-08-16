@@ -688,6 +688,38 @@
       "budget_row": null,
       "corpus_refs": [],
       "notes": "fs-contact's EXISTING HuntCrossleySphere as the DEBUG/second hammer image, scope DECIDED by the committed receipt (D21: narrowed, never deleted; D24: no third HC implementation anywhere \u2014 every force in the bake-off came from NormalPatchRequest::evaluate). Measured on the shared 87zbd strike island: contact duration falls with velocity like a hammer should, tilt trend 17.2x (real but 1.67x flatter than the felt's 28.8x), residual strain IDENTICALLY ZERO at every velocity (memoryless law \u2014 the structural gap the receipt quantifies). EXECUTED CALIBRATION LESSON: the 1+c*rate factor needs restitution-scale coefficients (c ~ 3(1-e)/2v); the first mint's c=8 s/m was a 33x loading multiplier at forte that INVERTED the contact-duration trend."
+    },
+    {
+      "filling": "brass",
+      "image": "crook-delta",
+      "qoi": "cad-band-certificate",
+      "owner_crates": [
+        "fs-query"
+      ],
+      "exactness": [
+        "X-Consist",
+        "X-Est"
+      ],
+      "gate": "ungated",
+      "live_default": "no",
+      "determinism": "one-host",
+      "evidence": [
+        {
+          "kind": "test",
+          "ref": "crates/fs-query/tests/crook.rs::gk_001_three_valve_fixture_and_slide_range"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-query/tests/crook.rs::gk_002_band_refusals_by_name"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-query/tests/crook.rs::gk_003_composed_peak_shift_oracle"
+        }
+      ],
+      "budget_row": null,
+      "corpus_refs": [],
+      "notes": "Valve/crook delta-L minting: bore-extractor receipts certified against CAD centerline arc length (refuse-outside band; a wrong crook is a data error, never a silently detuned horn), interior-station port-area continuity vs the DECLARED junction step (undeclared mismatch refuses; declared step passes \u2014 feature vs error distinguished), slide ranges from endpoint pairs. COMPOSED ORACLE EXECUTED: extracted dL=0.4364 m moves the TMM first peak -936.1 cents vs -931.6 predicted (4.5 cents in a 12-cent band) \u2014 the emergent-pitch precondition. X-Est via the bore extractor; the fixture is authored CAD-like geometry (real trumpet CAD slots through the same seam)."
     }
   ]
 }

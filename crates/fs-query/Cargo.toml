@@ -23,7 +23,9 @@ fs-rep-sdf = { path = "../fs-rep-sdf" }
 [dev-dependencies]
 asupersync = { path = "../../../asupersync" }
 fs-alloc = { path = "../fs-alloc" }
+fs-duct = { path = "../fs-duct" }
 fs-io = { path = "../fs-io" }
+fs-material = { path = "../fs-material" }
 
 [lints]
 workspace = true

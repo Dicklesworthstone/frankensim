@@ -45,6 +45,7 @@ use fs_rep_mesh::Soup;
 mod bore;
 mod codim;
 mod convex;
+mod crook;
 mod deform;
 mod features;
 mod gap;
@@ -56,6 +57,10 @@ pub use bore::{BoreConfig, BoreError, BoreExtraction, BoreStation, VolumeClosure
 pub use codim::{
     CodimGap, CodimThickness, CodimVerdict, codim_gap, codim_gap_from_separation,
     codim_gap_with_inflation,
+};
+pub use crook::{
+    CrookCadIntent, CrookConfig, CrookError, SlideRange, ValveChartDelta, certify_slide_range,
+    extract_crook_delta,
 };
 pub use deform::{DeformationMap, DeformedChart};
 
