@@ -502,10 +502,21 @@ impl DelayedFilter {
         let n = self.buf.len();
         self.buf[self.write] = outgoing;
         if !self.fir.is_empty() {
+            // Fused inner loop (music bead 3ez8g.15, strict mode): tap k
+            // reads `buf[(write + n - k) % n]`, i.e. buf[..=write]
+            // REVERSED then buf[write+1..] REVERSED. Splitting into two
+            // contiguous runs removes the per-tap modulo while keeping
+            // the accumulation order IDENTICAL — bit-for-bit with the
+            // modulo loop by construction (proven by the equivalence
+            // test against a retained reference implementation).
             let mut acc = 0.0;
-            for (k, &h) in self.fir.iter().enumerate() {
-                let idx = (self.write + n - k) % n;
-                acc += h * self.buf[idx];
+            let split = (self.write + 1).min(self.fir.len());
+            let (head_taps, tail_taps) = self.fir.split_at(split);
+            for (&h, &b) in head_taps.iter().zip(self.buf[..=self.write].iter().rev()) {
+                acc += h * b;
+            }
+            for (&h, &b) in tail_taps.iter().zip(self.buf[self.write + 1..].iter().rev()) {
+                acc += h * b;
             }
             if !acc.is_finite() {
                 return Err(DiscretizeError::NonFiniteRuntimeValue {
@@ -1227,5 +1238,59 @@ mod runtime_tests {
         assert!((peak - 1.4).abs() < 1.0e-12);
         assert!(filter.peak_abs(&omegas) <= 1.0 + 1.0e-12);
         assert!((filter.direct - 1.0).abs() < 1.0e-12);
+    }
+}
+
+#[cfg(test)]
+mod fusion_equivalence {
+    use super::*;
+
+    /// The RETAINED reference: the pre-fusion modulo convolution, kept
+    /// verbatim so the strict-mode law is checkable forever.
+    fn reference_push(buf: &mut [f64], write: &mut usize, fir: &[f64], x: f64) -> f64 {
+        let n = buf.len();
+        buf[*write] = x;
+        let mut acc = 0.0;
+        for (k, &h) in fir.iter().enumerate() {
+            let idx = (*write + n - k) % n;
+            acc += h * buf[idx];
+        }
+        *write = (*write + 1) % n;
+        acc
+    }
+
+    #[test]
+    fn fused_fir_is_bitwise_identical_to_the_modulo_reference() {
+        // Deterministic splitmix64 streams; several lengths incl. the
+        // production 256..4096 class and awkward small ones.
+        let mut seed = 0x9e3779b97f4a7c15u64;
+        let mut rng = move || {
+            seed = seed.wrapping_add(0x9e3779b97f4a7c15);
+            let mut z = seed;
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
+            (z ^ (z >> 31)) as f64 / u64::MAX as f64 - 0.5
+        };
+        for len in [4usize, 7, 64, 256, 1024] {
+            let fir: Vec<f64> = (0..len).map(|_| rng()).collect();
+            let mut line =
+                DelayedFilter::from_impulse_response(1.0 / 48_000.0, fir.clone()).expect("line");
+            let mut ref_buf = vec![0.0f64; len];
+            let mut ref_write = 0usize;
+            for step in 0..3 * len {
+                let x = rng();
+                let fused = line.push(x).expect("push");
+                let reference = reference_push(&mut ref_buf, &mut ref_write, &fir, x);
+                assert_eq!(
+                    fused.to_bits(),
+                    reference.to_bits(),
+                    "len {len} step {step}: fused {fused} vs reference {reference}"
+                );
+            }
+        }
+        println!(
+            "{{\"suite\":\"fs-vfit\",\"case\":\"fusion-fir-bitwise\",\"verdict\":\"pass\",\
+             \"lengths\":[4,7,64,256,1024]}}"
+        );
     }
 }
