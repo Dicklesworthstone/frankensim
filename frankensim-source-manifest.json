@@ -2,7 +2,7 @@
   "schema": "frankensim-source-manifest-v1",
   "identity_domain": "org.frankensim.xtask.source-manifest.v1",
   "identity_version": 1,
-  "manifest_identity": "fc3c1eefbaa6c3ab1e12142fddbf8a2947578eb72bb1d3e2b97a1b5082f8a4b0",
+  "manifest_identity": "541fc4b8d1d09f427eddf4b8d2fbc3eb633e72de0ec1bd8a0d55cbe4a559c194",
   "bead_id": "frankensim-extreal-program-f85xj.13.2",
   "authority": "canonical structural inventory over exact Git-index non-tracker bytes; release observations are intentionally unbound here",
   "release_binding": {
@@ -15,7 +15,7 @@
     "repository": "https://github.com/Dicklesworthstone/frankensim",
     "workspace_version": "0.0.1",
     "source_root_domain": "org.frankensim.xtask.source-root.v1",
-    "source_root": "24b763141d3af2f5999b4fc2820e8f8a8c09ad2000b2e805a658a61c6f0357a9",
+    "source_root": "6ea95ba005387a38002e8edd4e9975fbdb7156b3910751d2dd0fd3266ecf648d",
     "tracked_file_count": 2445,
     "excluded_paths": [".beads/**", "frankensim-source-manifest.json", "frankensim-source-manifest.spdx.json"],
     "files": [
@@ -1469,7 +1469,7 @@
       {"path": "crates/fs-render/src/spectral.rs", "git_mode": "100644", "bytes": 14626, "content_blake3": "8469189fed3403d32c0d4f7f1393c7e0234eac63fc475aa8ed20c25eab055871"},
       {"path": "crates/fs-render/src/surface_detail.rs", "git_mode": "100644", "bytes": 18121, "content_blake3": "74d1c1eafafa46b77b6fe7981d1d26bc606b67429871191fdba6a40e276c8f8b"},
       {"path": "crates/fs-render/src/temporal_accumulation.rs", "git_mode": "100644", "bytes": 21257, "content_blake3": "d62d408ca6f258c4153432916b2c1654822979d7541f3f7107ec6f790b6621b8"},
-      {"path": "crates/fs-render/src/tlas.rs", "git_mode": "100644", "bytes": 36880, "content_blake3": "0b574af003a9e313a733b5c6409b1aab3d47d0cdeac28520c3f7136cda53703b"},
+      {"path": "crates/fs-render/src/tlas.rs", "git_mode": "100644", "bytes": 46401, "content_blake3": "16d5c91e82d1998fa802900cb68959e76b0f7500671922af30037c494ff42419"},
       {"path": "crates/fs-render/src/tracer.rs", "git_mode": "100644", "bytes": 727537, "content_blake3": "6de5981465484dcbc6b8079f3a97b0426c589bb5c1cab82ada6eedcc2abeea9a"},
       {"path": "crates/fs-render/src/tracer/bdpt.rs", "git_mode": "100644", "bytes": 128025, "content_blake3": "d064bbd68ebcc7992583ce6a846ae80953b3106f5bb4e8f9d60f54f09b94b6c1"},
       {"path": "crates/fs-render/src/tracer/checkpoint.rs", "git_mode": "100644", "bytes": 106571, "content_blake3": "5ebd53aa859fa9ccc71793ce4a1d9cdb3ec9bfbbea235eed8bbdd97ad0be499f"},
