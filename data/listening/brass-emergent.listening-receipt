@@ -1,0 +1,13 @@
+frankensim-listening-receipt-v1
+listener	pending
+session	2026-08-16
+artifact	be75f4e29b35123a4c298bb5d051f87980e0f1856f7e390874c08e0b48dca959
+artifact-ref	data/listening/brass-emergent.provenance.json
+question	do the attack, slot change, and valve change read as a brass instrument?
+verdict	unadjudicated
+observations	2.0 s emergent brass loop: slot-1 attack, embouchure walk to slot 2, crossfaded valve during the note; awaiting the owner's ear
+loudness-sone	absent
+sharpness-acum	absent
+log-attack-time	1.5939171564900415e-1
+spl-db	absent
+law	psychoacoustic metrics are never a substitute for human listening

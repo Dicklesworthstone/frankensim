@@ -497,6 +497,19 @@ const ABSENCES: &[AcousticAbsence] = &[
                    tilt-vs-velocity gate (3ez8g.5.3)",
     },
     AcousticAbsence {
+        id: "acoustic-absent-trumpet-impedance",
+        title: "measured trumpet input-impedance curves",
+        what: "licensed measured Z_in(f) for a named trumpet (open + valve combinations) \
+               with measurement chain",
+        why: "not yet hunted as of 2026-08-16; candidate veins: university impedance-rig \
+              datasets (BIAS-class), CC-BY acta acustica supplements; the brass claim \
+              gates (3ez8g.4.4) recorded machinery evidence and the bake-off receipt but \
+              the trumpet-claim row stays UNGATED until this corpus registers and the \
+              cents gate runs against it",
+        unblocks: "the trumpet claim's corpus gate (3ez8g.4.4 promotion) and MM staircase \
+                   density calibration against a real bell",
+    },
+    AcousticAbsence {
         id: "acoustic-absent-glottal-lf",
         title: "published glottal-flow waveform parameters",
         what: "LF-model-class glottal flow parameter sets with license",
