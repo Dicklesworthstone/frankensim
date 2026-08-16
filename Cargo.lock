@@ -1168,6 +1168,7 @@ dependencies = [
  "fs-psycho",
  "fs-qty",
  "fs-scenario",
+ "fs-solid",
  "fs-substrate",
  "fs-tribo",
  "fs-vfit",

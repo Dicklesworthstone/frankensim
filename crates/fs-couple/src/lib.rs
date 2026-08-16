@@ -36,6 +36,7 @@ pub mod air_path;
 pub mod bakeoff;
 pub mod bernoulli_aperture;
 pub mod broadband_radiation;
+pub mod brass_loop;
 pub mod cavity_phs;
 pub mod driving_point;
 pub mod mm_line;
