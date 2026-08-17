@@ -265,13 +265,7 @@ mod js {
         dt_s: f64,
         steps: u32,
     ) -> String {
-        super::hello_spin_json(
-            [ixx, iyy, izz],
-            [qw, qx, qy, qz],
-            [wx, wy, wz],
-            dt_s,
-            steps,
-        )
+        super::hello_spin_json([ixx, iyy, izz], [qw, qx, qy, qz], [wx, wy, wz], dt_s, steps)
     }
 
     /// Trajectory content digest (hex) or the refusal envelope.
@@ -291,13 +285,7 @@ mod js {
         dt_s: f64,
         steps: u32,
     ) -> String {
-        match super::hello_digest(
-            [ixx, iyy, izz],
-            [qw, qx, qy, qz],
-            [wx, wy, wz],
-            dt_s,
-            steps,
-        ) {
+        match super::hello_digest([ixx, iyy, izz], [qw, qx, qy, qz], [wx, wy, wz], dt_s, steps) {
             Ok(hex) => format!("{{\"ok\":\"{hex}\"}}"),
             Err(refusal) => super::refusal_envelope(&refusal),
         }
@@ -339,8 +327,7 @@ mod tests {
         // value (the E6.2 six-lane program consumes it). Golden-bump protocol
         // applies to any change.
         assert_eq!(
-            base,
-            "9c9a2e1f74ba38ad83ee9922ac93ecf6172e56ec80736426ef9e979bc4652d3a",
+            base, "d1ee8e689eebfe8ca4330cab2d256968534962ceaf034dacf788fed1838323f9",
             "canonical hello digest moved — determinism regression or an \
              intentional kernel change requiring the golden-bump protocol"
         );

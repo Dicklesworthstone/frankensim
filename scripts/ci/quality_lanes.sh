@@ -368,6 +368,37 @@ else
 fi
 
 # ---- fs-wasm standalone workspace (native tests) ----
+# ---- fs-flyer-wasm: Wright Flyer browser boundary (bead wf-root-guzez.1.3) ----
+# Same standalone-workspace doctrine as fs-wasm: native tests + a nested-lock
+# drift gate (a build that mutates the reviewed lock fails the lane).
+FLYER_WASM_MANIFEST="crates/fs-flyer-wasm/Cargo.toml"
+FLYER_WASM_LOCK="crates/fs-flyer-wasm/Cargo.lock"
+FLYER_WASM_LOG="$LOG_DIR/fs-flyer-wasm-native.log"
+if [[ -f "$FLYER_WASM_MANIFEST" ]]; then
+  if ! FLYER_LOCK_BEFORE=$(shasum -a 256 "$FLYER_WASM_LOCK" | awk '{print $1}'); then
+    printf '%s\n' "required nested lock $FLYER_WASM_LOCK is missing" >"$FLYER_WASM_LOG"
+    row "fs-flyer-wasm-native" "fail" "required nested Cargo.lock is missing" "$FLYER_WASM_LOG"
+    FAILURES=$((FAILURES + 1))
+  else
+    if env CARGO_TARGET_DIR="$QUALITY_TARGET_DIR"         cargo test --locked --manifest-path "$FLYER_WASM_MANIFEST" >"$FLYER_WASM_LOG" 2>&1; then
+      FLYER_LOCK_AFTER=$(shasum -a 256 "$FLYER_WASM_LOCK" | awk '{print $1}')
+      if [[ "$FLYER_LOCK_AFTER" == "$FLYER_LOCK_BEFORE" ]]; then
+        row "fs-flyer-wasm-native" "pass" "standalone workspace native tests + lock stable" "$FLYER_WASM_LOG"
+      else
+        row "fs-flyer-wasm-native" "fail" "build mutated the reviewed nested Cargo.lock" "$FLYER_WASM_LOG"
+        FAILURES=$((FAILURES + 1))
+      fi
+    else
+      row "fs-flyer-wasm-native" "fail" "standalone workspace native tests — see full log" "$FLYER_WASM_LOG"
+      FAILURES=$((FAILURES + 1))
+    fi
+  fi
+else
+  printf '%s\n' "required manifest $FLYER_WASM_MANIFEST is missing" >"$FLYER_WASM_LOG"
+  row "fs-flyer-wasm-native" "fail" "required standalone workspace manifest is missing" "$FLYER_WASM_LOG"
+  FAILURES=$((FAILURES + 1))
+fi
+
 WASM_MANIFEST="crates/fs-wasm/Cargo.toml"
 WASM_LOCK="crates/fs-wasm/Cargo.lock"
 WASM_LOG="$LOG_DIR/fs-wasm-native.log"
