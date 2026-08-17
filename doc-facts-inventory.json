@@ -755,6 +755,7 @@
     "crates/fs-material/tests/identifiability.rs",
     "crates/fs-material/tests/identifiability_authority.rs",
     "crates/fs-material/tests/identifiability_retrospective.rs",
+    "crates/fs-material/tests/tissue_pack.rs",
     "crates/fs-math/tests/conformance.rs",
     "crates/fs-math/tests/core_regression.rs",
     "crates/fs-math/tests/extensions_battery.rs",

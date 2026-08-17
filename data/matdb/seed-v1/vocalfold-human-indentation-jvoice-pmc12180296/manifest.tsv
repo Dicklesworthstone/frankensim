@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	vocalfold-human-indentation-jvoice-pmc12180296
+redistribution	permitted	CC BY 4.0 per the article's own license line; retain authors, journal, DOI
+citation	Michaud-Dorko J., Dion G.R., Farbos de Luzan C., Gutmark E., Oren L. (2024), Characterization of the Vertical Stiffness Gradient in Cadaveric Human and Excised Canine Larynges, Journal of Voice; https://doi.org/10.1016/j.jvoice.2024.08.011 (PMC12180296)
+license	CC-BY-4.0
+source	primary	properties.tsv	material-tsv-v1

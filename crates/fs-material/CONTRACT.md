@@ -224,6 +224,22 @@ None.
   exists (Obataya/Taillard/Kawasaki are publisher-copyrighted) — the
   absence is asserted, not papered over.
 
+- Tissue packs (music bead 3ez8g.3.7): the vocal-fold/lip population
+  for the reduce lab and glottis islands — SIX CC-BY packs where a
+  refusal was expected: human vertical stiffness gradient
+  (3.2/5.5/7.0 kPa indentation with full protocol), porcine dynamic
+  modulus across the phonation band (postmortem time typed per row),
+  the felid shear rheometry loss-factor find (tan delta 0.33/0.15 —
+  the only licensable native-tissue damping), the lone in-vivo lip
+  stiffness (45 kPa WITH the hard-teeth-in-series caveat), the
+  canonical two-mass MODEL CARD behind a register firewall
+  (model_-prefixed names, declared not-constitutive), and the
+  STATED-not-measured soft-tissue density register (1.04 g/cm3 as
+  stated; the measured Perlman-Titze chain is unlicensable and no
+  pack claims it). Method-scale disjointness is a first-class fact:
+  Pa-scale matrix shear vs kPa-scale indentation registers are
+  recorded separately, never averaged.
+
 ## Conformance tests
 
 `tests/conformance.rs` (JSON verdicts, suite `fs-material/conformance`):
@@ -268,6 +284,15 @@ blank-vs-heel DISJOINT-zones assertion with the gradient named in both
 observations, the derived loss factor delta/pi in the woody class with
 conversion ownership stated, and the named-absence assertion that no
 shear row exists without a source.
+
+`tests/tissue_pack.rs` g2 gate — positivity + schema hygiene, the
+human vertical gradient (the source's own finding), method-scale
+disjointness with named method dependence in every observation,
+postmortem-time separation, loss tangents in the soft-tissue class
+with tiger above lion, the lip teeth-caveat presence, the model-card
+firewall (model_ prefix + declared register), and the
+stated-density assertions (no measured tissue-density row may exist
+without a licensable source).
 
 ## No-claim boundaries
 

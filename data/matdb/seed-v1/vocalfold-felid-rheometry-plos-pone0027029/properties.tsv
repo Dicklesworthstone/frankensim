@@ -1,0 +1,20 @@
+frankensim.matdb-source.v1
+observation	felid-vf-rheometry	Tiger and lion vocal-fold lamina propria, excised, hydrated, room temperature	Parallel-plate shear rheometry 0.1-100 Hz; tensile tests along the dorso-ventral (longitudinal) axis to 60 percent strain	THE LOSS-FACTOR FIND: tan delta 0.33 +- 0.04 (tigers, across all frequencies) and 0.15 +- 0.02 (lion) - the only licensable native-tissue damping constants found (2026-08-17 hunt); storage/loss moduli printed as ranges across frequency; large-felid tissue, NOT human - species is load-bearing provenance; the shear-rheometry method register (matrix-level Pa scale) sits orders below indentation registers and the values are recorded separately, never averaged across methods; the 1020 kg/m3 density used in their wave-speed equations is ASSUMED by the source, not measured - it is deliberately NOT a row here (see the stated-density pack for the register that carries such statements)
+scalar	g-storage-low	felid-vf-rheometry	shear_storage_modulus_printed_range_low	100	Pa	constant
+uncertainty	g-storage-low	unstated	-	-	-	-
+validity	g-storage-low	frequency	0.1	100	Hz
+scalar	g-storage-high	felid-vf-rheometry	shear_storage_modulus_printed_range_high	2000	Pa	constant
+uncertainty	g-storage-high	unstated	-	-	-	-
+validity	g-storage-high	frequency	0.1	100	Hz
+scalar	g-loss-low	felid-vf-rheometry	shear_loss_modulus_printed_range_low	40	Pa	constant
+uncertainty	g-loss-low	unstated	-	-	-	-
+validity	g-loss-low	frequency	0.1	100	Hz
+scalar	g-loss-high	felid-vf-rheometry	shear_loss_modulus_printed_range_high	600	Pa	constant
+uncertainty	g-loss-high	unstated	-	-	-	-
+validity	g-loss-high	frequency	0.1	100	Hz
+scalar	tan-delta-tiger	felid-vf-rheometry	loss_tangent_tiger	0.33	1	constant
+uncertainty	tan-delta-tiger	absolute	0.04	1	0.68	1
+validity	tan-delta-tiger	frequency	0.1	100	Hz
+scalar	tan-delta-lion	felid-vf-rheometry	loss_tangent_lion	0.15	1	constant
+uncertainty	tan-delta-lion	absolute	0.02	1	0.68	1
+validity	tan-delta-lion	frequency	0.1	100	Hz

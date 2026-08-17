@@ -1,0 +1,11 @@
+frankensim.matdb-source.v1
+observation	perioral-invivo-indentation	Healthy male in his 20s (clinical test n=1), in vivo, supine, relaxed lips (back teeth in contact, mouth not fully closed)	Self-weight indentation apparatus (3.8 N), sensor diameter 9 mm, 3 mm displacement, quasi-static ~10 s hold, three repeats ~1 min apart	THE LONE LICENSABLE IN-VIVO LIP STIFFNESS (2026-08-17 hunt): upper lip 45 kPa vs cheeks 4.0/9.9 kPa - and the source's own caveat is LOAD-BEARING: the lip value "can be attributed to the influence of hard teeth behind the lip", i.e. a STRUCTURE-IN-SERIES effective stiffness, not a pure orbicularis-oris modulus; n=1, quasi-static, in vivo; a brass-embouchure card consuming this must carry the structural caveat forward
+scalar	e-upper-lip	perioral-invivo-indentation	young_modulus_effective_upper_lip	45	kPa	constant
+uncertainty	e-upper-lip	unstated	-	-	-	-
+validity	e-upper-lip	indentation_displacement	3	3	mm
+scalar	e-cheek-left	perioral-invivo-indentation	young_modulus_effective_cheek_left	4.0	kPa	constant
+uncertainty	e-cheek-left	unstated	-	-	-	-
+validity	e-cheek-left	indentation_displacement	3	3	mm
+scalar	e-cheek-right	perioral-invivo-indentation	young_modulus_effective_cheek_right	9.9	kPa	constant
+uncertainty	e-cheek-right	unstated	-	-	-	-
+validity	e-cheek-right	indentation_displacement	3	3	mm

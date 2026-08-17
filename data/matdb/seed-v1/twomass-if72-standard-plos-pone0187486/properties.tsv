@@ -1,0 +1,20 @@
+frankensim.matdb-source.v1
+observation	twomass-standard-set	MODEL parameters, NOT tissue properties: the Ishizaka-Flanagan / Steinecke-Herzel standard two-mass set	Table 1 "Standard parameters of the 2MM" (Steinecke-Herzel cgs-ms convention; stiffnesses converted to SI: 0.08 g/ms^2 = 80 N/m)	THIS PACK IS A MODEL CARD: lumped-element two-mass-model parameters that FIT observed fold dynamics - they are not constitutive tissue data and must never be laundered into a tissue modulus; masses/stiffnesses/damping are the canonical S-H defaults (their optimization study varied them per subject, subglottal pressures 10.1-45.7 cmH2O); consumers = glottis-island beads (.8.2), registered distinctly from the constitutive vocal-fold packs
+scalar	mass-1	twomass-standard-set	model_mass_lower	0.125	g	constant
+uncertainty	mass-1	unstated	-	-	-	-
+validity	mass-1	model_convention_steinecke_herzel	1	1	1
+scalar	mass-2	twomass-standard-set	model_mass_upper	0.025	g	constant
+uncertainty	mass-2	unstated	-	-	-	-
+validity	mass-2	model_convention_steinecke_herzel	1	1	1
+scalar	stiffness-1	twomass-standard-set	model_stiffness_lower	80	N/m	constant
+uncertainty	stiffness-1	unstated	-	-	-	-
+validity	stiffness-1	model_convention_steinecke_herzel	1	1	1
+scalar	stiffness-2	twomass-standard-set	model_stiffness_upper	8	N/m	constant
+uncertainty	stiffness-2	unstated	-	-	-	-
+validity	stiffness-2	model_convention_steinecke_herzel	1	1	1
+scalar	stiffness-coupling	twomass-standard-set	model_stiffness_coupling	25	N/m	constant
+uncertainty	stiffness-coupling	unstated	-	-	-	-
+validity	stiffness-coupling	model_convention_steinecke_herzel	1	1	1
+scalar	fold-length	twomass-standard-set	model_fold_length	1.4	cm	constant
+uncertainty	fold-length	unstated	-	-	-	-
+validity	fold-length	model_convention_steinecke_herzel	1	1	1

@@ -1,0 +1,11 @@
+frankensim.matdb-source.v1
+observation	human-vf-indentation	Cadaveric human vocal folds (3 elderly larynges), mid-coronal medial surface	Spherical indentation r=2.5 mm to 2 mm depth (Green strain 0.32), 2 mm/s load/unload with 1 s hold, unloading-curve effective modulus; refrigerated saline storage, 15 min PBS equilibration	THE VERTICAL STIFFNESS GRADIENT is the source's finding: superior 3.2 -> medial 5.5 -> inferior 7.0 kPa, rising further toward anterior/posterior ends (6.7-69.8 percent); indentation normal to the medial surface measures a through-thickness EFFECTIVE modulus of the layered composite, NOT a layer constitutive constant - method dependence is why these kPa-scale values coexist with the Pa-scale felid shear-matrix pack and the tens-of-kPa porcine dynamic pack (different methods, different strain scales, different tissues; recorded separately, never averaged); elderly cadaveric tissue, hydration by PBS
+scalar	e-superior	human-vf-indentation	young_modulus_effective_superior	3.2	kPa	constant
+uncertainty	e-superior	unstated	-	-	-	-
+validity	e-superior	green_strain	0.32	0.32	1
+scalar	e-medial	human-vf-indentation	young_modulus_effective_medial	5.5	kPa	constant
+uncertainty	e-medial	unstated	-	-	-	-
+validity	e-medial	green_strain	0.32	0.32	1
+scalar	e-inferior	human-vf-indentation	young_modulus_effective_inferior	7.0	kPa	constant
+uncertainty	e-inferior	unstated	-	-	-	-
+validity	e-inferior	green_strain	0.32	0.32	1
