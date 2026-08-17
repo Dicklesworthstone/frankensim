@@ -1,10 +1,11 @@
 # COMPREHENSIVE PLAN: Real-Time Wright Flyer Simulation with FrankenSim
 
 **Working title:** *First Flight — Kitty Hawk, December 17, 1903*
-**Document status:** Planning-workflow ROUND 4 (closure audit integrated;
-Round-4 verdict was "ROUND 5 REQUIRED" — six structural closure defects + twelve
-polish groups + seven question decisions, all integrated below; Round 5 is a
-narrow integration-verification and mechanical name-scan).
+**Document status:** Planning-workflow ROUND 5 (verification report integrated;
+Round-5 verdict was "ROUND 6 REQUIRED" on mechanical-closure grounds only — all
+blocking and non-blocking findings are integrated below; the physics
+architecture, prelaunch contract, A1 lane, A/B semantics, and graph acyclicity
+were verified intact. Round 6 re-runs the same verification charter).
 **Process:** This document follows `/planning-workflow`. The Round 1 review (GPT Pro
 Extended Reasoning) accepted the architecture and required a major physics-and-
 validation revision, integrated throughout this version. A "Review round log" at the
@@ -30,7 +31,7 @@ Verified/Validated/Estimated).
 11. [Crate Reuse Matrix & New Crates](#11-crate-reuse-matrix--new-crates)
 12. [Milestones & Dependency-Aware Task Graph](#12-milestones--dependency-aware-task-graph)
 13. [Risks & Mitigations](#13-risks--mitigations)
-14. [Round-5 Verification Charter](#14-round-5-verification-charter)
+14. [Round-6 Verification Charter](#14-round-6-verification-charter)
 15. [Appendices](#15-appendices)
 
 ---
@@ -417,7 +418,7 @@ activate a reduced physics schedule of any kind.
 Main thread:        three.js render loop; UI; input capture (tick-quantized)
 Worker "sim":       wasm physics @ fixed 120 Hz (+admission-selected 40/60/80 Hz
                     full wake-advection schedule in Tier B)
-Worker "field":     wasm field-sampling service (immutable FieldSourceSnapshots)
+Worker "field":     wasm field-sampling service (immutable FieldSourceSnapshotV1s)
 Worker pool (0–N):  parameter sweeps, replay re-runs
 SharedArrayBuffer:  seqlock state ring, field buffers (when cross-origin isolated)
 ```
@@ -461,8 +462,8 @@ and canonical serialization (`identity-authorities.json` at introduction).
 The closed preimage is `RunIdentityBasisV1 { physical_scenario_id, model_id,
 artifact_id, physical_uncertainty_realization_id,
 model_uncertainty_realization_id, accepted_tick0_state_digest,
-input_trace_schema_id }`; `RunIntentId = H("fs-flyer/run-intent/v1",
-canonical(RunIdentityBasisV1))` (Round-4 S-01):
+input_trace_schema_id }` (the NORMATIVE `RunIntentId`/`RunId` formulas appear
+once, in the lifecycle paragraph below — Round-5 dedup):
 
 | Identity | Contents |
 |---|---|
@@ -470,7 +471,7 @@ canonical(RunIdentityBasisV1))` (Round-4 S-01):
 | `ModelId` | tier, every approximation/fast mode + parameters, correction-table selections, discretizations, timestep, solver modes |
 | `ArtifactId` | hash of the COMPLETE physics execution closure: wasm/native physics binary, physics-affecting JS glue, deterministic host-import implementation, host-ABI + memory-layout contract, schema adapters, deterministic-math tables, complete physics-data manifest, toolchain/build lock (pure rendering assets stay under `PresentationId`) |
 | `InputTraceId` | hash of `InputTraceV1` { schema_id, end_tick_exclusive, ordered ResolvedAppliedEvent(channel, applied_tick, ordinal_within_tick, quantized_value) } — the trace EXTENT is part of the domain (two event-free runs stopped at different ticks differ), and acquisition-clock metadata stays in a replay attachment (Round-4 S-01) |
-| `RunId` | `H("fs-flyer/run/v1", RunIntentId, InputTraceId)` — a closed two-input definition, never "hash of the quintuple" (which was self-referential) |
+| `RunId` | the closed two-input definition of the lifecycle paragraph (never "hash of the quintuple," which was self-referential) |
 
 "Same physical scenario, different model" is thus expressible without pretending two
 runs share a complete identity; cross-fidelity receipts explicitly bind the pair.
@@ -479,16 +480,16 @@ runs share a complete identity; cross-fidelity receipts explicitly bind the pair
 function of (physical distribution, realization seed, dedicated
 `PhysicalRealizationAlgorithmId`) — NOT the whole ArtifactId, so an unrelated
 binary rebuild cannot change the wind realization and common-random-number
-comparisons survive artifact changes. `ModelUncertaintyRealizationId` derives
-independently from the model-uncertainty spec + its algorithm id. An interactive
+comparisons survive artifact changes. An interactive
 run's final `InputTraceId` cannot exist at launch, so neither can its `RunId`:
 
 `RunIntentId = H("fs-flyer/run-intent/v1", canonical(RunIdentityBasisV1))` —
 minted only AFTER prelaunch closes and tick 0 is frozen. When the trace closes,
 `InputTraceId` and `RunId = H("fs-flyer/run/v1", RunIntentId, InputTraceId)`
-are minted. `ModelUncertaintyRealizationId` derives from (model-uncertainty
-spec, realization seed, `ModelRealizationAlgorithmId`) — both algorithm ids and
-their canonical manifests are carried in ReplayEnvelopeV1 (Round-4). `RunAnchor = Intent(RunIntentId) | Final(RunId)`:
+are minted. `ModelUncertaintyRealizationId` is a pure function of
+(model-uncertainty spec, realization seed, `ModelRealizationAlgorithmId`) —
+THE single authoritative preimage (Round-5 closed the duplicate); both
+algorithm ids and their canonical manifests are carried in ReplayEnvelopeV1. `RunAnchor = Intent(RunIntentId) | Final(RunId)`:
 active subordinate objects bind to the anchor; final persisted objects mint new
 final ids — no provisional identifier is ever relabeled. Physical uncertainty (wind, temperature, pilot mass, sourced
 geometry variation) and model uncertainty (section residual coefficients, hinge
@@ -510,8 +511,40 @@ source_tick, complete_source_state_digest, snapshot_schema_id)`;
 components, grid, induction_approximation, field_backend, precision,
 derivative_and_masking_profile)` — bound to the actual sampled STATE, not just
 the run (two ticks of one run are distinct — Round-4 S-02);
-`PresentationId` (assets/camera/render/audio); `CheckpointId` (RunAnchor +
-tick + complete state snapshot).
+`PresentationId = H("fs-flyer/presentation/v1",
+presentation_schema_id, canonical(asset manifest, camera configuration,
+render configuration, audio configuration))`;
+`CheckpointId = H("fs-flyer/checkpoint/v1", RunAnchor, tick,
+checkpoint_schema_id, canonical(CheckpointStateV1))`.
+
+**Leaf identity closures (Round-5 — every hashed field must itself be
+defined):**
+- `PhysicalRealizationAlgorithmId` = content hash of the canonical
+  physical-realization algorithm manifest: algorithm name+version, the
+  StationaryOuPathV1 anchor constant, modal-basis construction id, stream
+  partition map, and quantization rules.
+- `ModelRealizationAlgorithmId` = the same, for the model-uncertainty
+  realization algorithm (residual-coefficient draw method, hinge-friction draw
+  method, etc.).
+- `InputPolicyId` = content hash of { input_trace_schema_id,
+  InputTransducerMode + parameters, device-mapping table id, quantization
+  rules, LateInputPolicy }.
+- `PilotPopulationHypothesisId` = content hash of the pilot-population
+  distribution artifact + its pilot/day/flight dependency-structure
+  declaration (a PhysicalScenarioId ingredient).
+- `PerceptionModelId` = content hash of { cue-set declaration, per-cue
+  delay/noise/filter parameters, occlusion-geometry abstraction id,
+  PerceptionSchedule, causal-order convention } (a ModelId ingredient).
+- `FieldBackendId` = content hash of { backend kind (cpu-wasm | webgpu-v1.5),
+  kernel version, precision profile, masking profile } (a FieldQueryId
+  ingredient).
+- `BladeCollisionProxyArtifactId` = content hash of { source blade-geometry
+  artifact (E1.6), construction algorithm version, capsule count/rails/radii,
+  cover-error certificate } — the id named by the §5.1.5 proxy contract.
+- `EvidenceLineageId` = content hash of the canonical lineage record
+  { source_artifact_ids[], derivation_steps[], independence_group,
+  permitted_claims[], forbidden_claims[], calibration_or_holdout,
+  convention_uncertainty } (a §10.1 ingredient).
 
 ### 4.5 Replay envelope
 
@@ -1208,8 +1241,6 @@ that first reconstructs and publishes the identified snapshot). A stale
 snapshot yields a valid HISTORICAL result under its own
 `FieldSourceSnapshotId`, never mislabeled current. Persistent tracers bind the
 ordered PAIR of snapshot ids for temporal interpolation.
-```
-```
 
 Selectable components: mean atmosphere, turbulent atmosphere, gust event, bound
 circulation, physical wake, ground images, propeller induced field,
@@ -1227,7 +1258,7 @@ the Round-1 API — Round-2 consistency fix.)
   field does not determine pressure. Kinematic quantities only; Bernoulli proxy only
   on explicitly irrotational components, labeled; surface Cp only from models that
   actually produce it.
-- Consumes an immutable **FieldSourceSnapshot** (tick, physical state, bound
+- Consumes an immutable **FieldSourceSnapshotV1** (tick, physical state, bound
   circulation, wake buffer references, image-plane state,
   `AtmosphereStateSnapshot { modal_state_or_immutable_handle, schedule_phase,
   state_digest }`, kernel/core parameters, model identities) — Round-3 S-06:
@@ -1267,9 +1298,11 @@ path is v1.5+ (Round-1 Q10).
    device_sample_time, quantized_value, requested_tick, sequence_number }`;
    worker clock synchronized to the main-thread monotonic clock at startup with
    periodic drift checks; `LateInputPolicy::ApplyNextEligibleTickAndFlag` — NO
-   interactive rollback; the trace records requested_tick, applied_tick, and
-   late_by_ticks, and replay uses applied_tick (replays reproduce what occurred,
-   not what the UI intended). Active-tab pacing follows a monotonic target
+   interactive rollback; the `InputAcquisitionTrace` ATTACHMENT records
+   requested_tick, applied_tick, and late_by_ticks, while the canonical
+   `InputTraceV1` carries only resolved applied events (Round-5 boundary fix —
+   one InputTraceId preimage, not two); replay uses applied_tick (replays
+   reproduce what occurred, not what the UI intended). Active-tab pacing follows a monotonic target
    schedule integrating only fixed dt; at most a small declared number of overdue
    ticks may run in one burst — beyond that, pause with a typed performance
    refusal.
@@ -1391,8 +1424,8 @@ isolated/contended, cold/warm, SAB/transferable variants.
   payload writes ordered before the publish store; readers acquire through the
   matching atomic load and retry on torn/odd sequence. Checksummed snapshots.
   Wasm relaxed-SIMD is excluded from deterministic tiers.
-- **FieldSourceSnapshot LEASED ring, minimum 3 slots (Round-2 — a double buffer
-  is unsafe while a reader holds a slot):** FREE → WRITING → PUBLISHED → LEASED
+- **FieldSourceSnapshotV1 LEASED ring, minimum 3 slots (Round-2 — a double
+  buffer is unsafe while a reader holds a slot):** FREE → WRITING → PUBLISHED → LEASED
   → FREE via atomic state transitions; payload ownership is immutable while
   LEASED; the sim NEVER blocks on the field worker — with no free slot it skips
   publication and increments `field_snapshot_drop_count` (surfaced by the
@@ -1577,10 +1610,18 @@ for the four flights, Huffman 1904, Flyer III 1905, challenges.
   nearest valid operating point.
 - **Sweeps:** worker-pool batches over config grids with common-random-number
   ensembles (same realization seeds across design points); progress-streamed;
-  cacheable BEFORE execution by a distinct `RunSpecId` (the complete
-  `RunIdentityBasisV1` preimage + `InputPolicyId`); completed results are
-  indexed by final `RunId` — no partial field list is ever described as "all
-  RunId ingredients" (Round-4 S-01).
+  cacheable BEFORE execution by a distinct
+  `RunSpecId = H("fs-flyer/run-spec/v1", PhysicalScenarioId, ModelId,
+  ArtifactId, PhysicalUncertaintyRealizationId,
+  ModelUncertaintyRealizationId, input_trace_schema_id, InputPolicyId)` —
+  the PRE-EXECUTION subset of RunIdentityBasisV1, deliberately EXCLUDING the
+  accepted tick-0 digest, which does not exist until prelaunch closes
+  (Round-5 lifecycle fix: every RunSpecId field exists at minting time; for a
+  deterministic scenario+model+policy, prelaunch is a pure function of these
+  fields, so RunSpecId remains a sound pre-execution cache key). Completed
+  results are indexed by final `RunId`; no partial field list is ever
+  described as "all RunId ingredients."
+
 - **Optimization (v1.5, Round-1 gated):** robust multiobjective exploration over
   uncertainty via fs-bo/fs-dfo — requires active structural model,
   applicability-domain enforcement, correction-model holdouts, and CRN ensembles.
@@ -1714,14 +1755,24 @@ stage (`PriorPredictive` | `LeaveOneFlightOutPredictive { held_out_flight,
 conditioning_artifact_id }` | `FullDataPosteriorPredictiveDiagnostic {
 conditioning_artifact_id }`), frozen registry version, campaign model id,
 scenario family id, artifact ids, requested member count, deterministic
-PER-MEMBER allocations for day-weather, pilot-effect (Orville/Wilbur levels),
-and flight-effect realizations (never one campaign-wide realization),
-per-member×flight RunIntent SPECS, shard function, merge order, refusal
-policy, and the Monte-Carlo stopping rule — `conditioning_artifact_id` MUST be
-absent for PriorPredictive. `HistoricalCampaignReceiptV1` (POST-execution)
-carries the completed member×flight RunIds, refusal accounting, actual member
-count, deterministic merge digest, stopping receipt, and score/region artifact
-ids — final RunIds appear only in receipts, never in intent manifests. **Surrogate rule:** no
+PER-MEMBER allocations at every hierarchy level of the §4.4 pilot-uncertainty
+partition — day-weather realization, per-pilot (Orville/Wilbur) population-
+member draws under the named `PilotPopulationHypothesisId`, flight-level
+residual realizations, and model-deficiency realizations, each with its own
+allocation domain (never one campaign-wide or undifferentiated pilot_effect
+field — Round-5), per-member×flight `CampaignMemberRunSpecV1` entries (=
+RunSpecId preimages + the member's allocated realization ids; final
+RunIntentIds/RunIds arise only at execution), shard function, merge order,
+refusal policy, and the Monte-Carlo stopping rule — `conditioning_artifact_id` MUST be
+absent for PriorPredictive. `HistoricalCampaignReceiptV1` (POST-execution, emitted by the E10.2b
+EXECUTOR) carries the completed member×flight RunIds, refusal accounting,
+actual member count, deterministic merge digest, and stopping receipt — and
+NOTHING scorer-owned (Round-5 de-circularization: the executor owns no
+scoring). `HistoricalCampaignScoreArtifactV1` (emitted by the E10.2c
+ORCHESTRATOR) references the receipt id and carries the proper scores, joint
+regions, prior-sensitivity summaries, and browser-artifact ids. Final RunIds
+appear only in receipts; scores only in score artifacts; neither appears in
+intent manifests. **Surrogate rule:** no
 surrogate-generated endpoint enters a final H-07 region, score, tail, or
 coverage number — fs-surrogate may allocate exact runs, locate boundaries,
 select fidelity, or serve as a control variate WITH an exact-simulation
@@ -1993,7 +2044,7 @@ Planned extensions:
   battery. Depends E4.2, E3.2a.
 - **E4.3** Complete `AeroEffectOwners` contract: chordwise reduced time with
   exact Δs transitions, exact-reference kernels (V-08a), ownership admission
-  refusals, separation lag. Depends E4.2, E3.3.
+  refusals, separation lag. Depends E4.2, E3.3a.
 - **E4.3b1** Full-order `PrescribedWakeReference3d` operator INCLUDING the
   complete FlatPlaneVortexImageExact contribution for every prescribed wake
   row, + a frozen operating/linearization grid explicitly spanning h/b, pitch,
@@ -2066,7 +2117,7 @@ Planned extensions:
   S-05).
 
 ### E5 — Browser integration
-- **E5.0** Versioned worker ABI + leased FieldSourceSnapshot ring. Depends
+- **E5.0** Versioned worker ABI + leased FieldSourceSnapshotV1 ring. Depends
   E0.7, E0.8, E0.9, E3.5.
 - **E5.1** fs-flyer-wasm API v1 (init/step/control/refusals). Depends E0.3,
   E5.0, E3.1, E3.2, E3.2a, E3.2b, E3.3a, E3.4, E3.5, E4.6a.
@@ -2103,17 +2154,22 @@ Planned extensions:
 - **E7.2** Glyph/streamline/vorticity/divergence renderers + probe gizmos.
   Depends E7.1, E5.2.
 - **E7.3** Force overlay + strip loads + probes with strip-charts.
-- **E7.4** "Why it porpoises" view (flagship; depends E4.6b/c, E7.3).
-- **E7.4b** "Why it rolls and yaws" view (depends E4.6b0, lateral pilot model,
-  augmented lateral linearization).
+- **E7.4** "Why it porpoises" view (flagship; depends E4.6b, E4.6c, E7.3).
+- **E7.4b** "Why it rolls and yaws" view. Depends E4.6b0 (loaded-warp
+  lateral claims), E4.6c (the lateral pilot model lives there), and E8.2
+  (which owns the augmented-linearization ENGINE and eigenmode view — Round-5
+  ownership closure).
 - **E7.5** Lesson scaffolding + pilot-perception view.
 - **E7.6** (v1.5 candidate) WebGPU field-compute experiment per §8.1 promotion
   gates; CPU/wasm remains canonical.
 
 ### E8 — Experiments & evidence surfacing
 - **E8.1** Worker-pool sweep engine with CRN ensembles + plots + CSV.
-- **E8.2** Design panel v2: augmented eigenmode view, polar redraw, decomposed
-  design-diff cards.
+- **E8.2** Design panel v2: the augmented-linearization ENGINE
+  (rigid + aero-memory + actuator + rotor [+ pilot] states, per §9.3) and its
+  eigenmode view, polar redraw, decomposed design-diff cards (Round-5: this
+  task owns the linearization implementation, not only the view). Depends
+  E4.6a; pilot-state columns depend E4.6c.
 - **E8.3a** Evidence/applicability plumbing + empty-receipt UX (early).
 - **E8.3b** Populate final validated receipts. Depends E10.2.
 - **E8.4** (v1.5) Robust optimization (gated per §9.3).
@@ -2126,7 +2182,7 @@ Planned extensions:
 - **E10.0** Registry-CONFORMANCE audit (the freeze itself moved to E1.7):
   confirm no partition, metric, prior, or band changed after protected results
   were observed.
-- **E10.1** Referee harness (begins incrementally via E4.9): batch re-runs at
+- **E10.1** Referee harness (begins incrementally via E4.9a/E4.9b): batch re-runs at
   pinned configs; discrepancy receipts; optional correction tables under §4.2 rules.
 - **E10.2a** H-07 Bayesian INFERENCE ENGINE + signed conditioning artifacts:
   the frozen prior/likelihood (or simulation-based inference) contract, four
@@ -2140,9 +2196,10 @@ Planned extensions:
   orchestration (surrogates allocate, never replace). (PRE-SPLIT.)
 - **E10.2c** H-07 stage ORCHESTRATOR + scorer: exact prior-predictive
   campaign → four LOFO conditioning fits → four exact held-out predictive
-  campaigns → full-data posterior-predictive diagnostic campaign → proper
-  scores, joint regions, prior-sensitivity summaries, final signed browser
-  artifacts. Depends E10.2a, E10.2b. (PRE-SPLIT.)
+  campaigns → full-data posterior-predictive diagnostic campaign → emits
+  `HistoricalCampaignScoreArtifactV1` (proper scores, joint regions,
+  prior-sensitivity summaries, browser-artifact ids) referencing the E10.2b
+  receipts. Depends E10.2a, E10.2b. (PRE-SPLIT.)
 - **E10.2** Aggregate every case in the FROZEN V/H registry + the E10.2a/b/c
   receipts into fs-vvreg/vv-scorecard (component V-cases execute incrementally
   with E3/E4; E10.2 is aggregation, not first execution).
@@ -2194,31 +2251,33 @@ fs-phs/fs-aeroac-grounded audio.
 
 ---
 
-## 14. Round-5 Verification Charter
+## 14. Round-6 Verification Charter
 
-Rounds 1–4 answered 49 posed questions; the architecture and all closure
-contracts are integrated. Round 5 is NOT a design round — its charter, per the
-Round-4 verdict, is narrow integration verification:
+Round 5 executed the verification charter and returned "ROUND 6 REQUIRED" on
+mechanical-closure grounds only; every blocking and non-blocking finding is
+integrated (see the round log). Round 6 re-runs THE SAME four checks:
 
-1. **Diff-integration check:** confirm every Round-4 S-01…S-06 and P-01…P-12
-   revision was integrated consistently (the review's exact diffs vs this
-   text).
-2. **Mechanical name scan:** zero undefined case/task/mode names; zero stale
-   pre-split identifiers; zero duplicate contract formulations (the same
-   contract stated twice in different words).
-3. **Preimage audit:** every identity definition (`RunIdentityBasisV1`,
-   `RunIntentId`, `InputTraceV1`, `RunId`, `FieldSourceSnapshotId`,
-   `FieldQueryId`, `RunSpecId`, campaign manifests) has exactly one closed
-   formula with no self-reference and no partial-field alias.
-4. **DAG check:** the task graph is acyclic, every dependency names an
-   existing task, and the A1/referee lane (E4.3b1/2, E4.9b, E4.3b3) provably
+1. **Diff-integration check** — confirm the Round-5 blocking fixes:
+   single `ModelUncertaintyRealizationId` preimage; §6 input-trace/attachment
+   boundary; pre-execution `RunSpecId` (tick-0 digest excluded); receipt/score
+   artifact split (`HistoricalCampaignScoreArtifactV1`); four-level pilot
+   allocation + `CampaignMemberRunSpecV1` in the intent manifest; leaf identity
+   closures (`PhysicalRealizationAlgorithmId`, `ModelRealizationAlgorithmId`,
+   `InputPolicyId`, `PilotPopulationHypothesisId`, `PerceptionModelId`,
+   `FieldBackendId`, `BladeCollisionProxyArtifactId`, `EvidenceLineageId`,
+   `PresentationId`, `CheckpointId`); task-graph closure (E3.3a, E4.9a/b,
+   E7.4b/E8.2 linearization ownership).
+2. **Mechanical name scan** — zero undefined references, zero stale names,
+   zero divergent contract duplicates.
+3. **Identity-preimage audit** — every identity has exactly one closed,
+   lifecycle-valid formula; every hashed field is defined.
+4. **DAG audit** — acyclic; every dependency resolves; the A1/referee lane
    gates only E5.3b.
-5. **Verdict:** "BEADS READY" or "BEADS READY AFTER LISTED POLISH" is expected
-   if 1–4 pass; any genuinely structural finding forces Round 6 with the same
-   charter.
 
-Upon a beads-ready verdict: execute E0.1 (epic/leaf conversion under the
-conversion gate), then begin E0/E1 leaves.
+Verdict vocabulary unchanged: "BEADS READY," "BEADS READY AFTER LISTED
+POLISH," or "ROUND 7 REQUIRED" (genuinely structural findings only). Upon a
+beads-ready verdict: execute E0.1 under the conversion gate, then begin E0/E1
+leaves.
 
 ---
 
@@ -2331,7 +2390,8 @@ bare "AR" for a biplane.
 | 0 | NobleLion / Claude | 2026-08-16 | initial comprehensive plan |
 | 0.5 | self-audit (fresh eyes + executed wasm32 probes) | 2026-08-16 | corrected fs-contact role, fs-simd wasm claim, fs-time integrator choice; added §11.3 audit evidence, §11.4 optional-fidelity doctrine |
 | 1 | GPT Pro Extended Reasoning (external) | 2026-08-16 | **architecture accepted; major physics-and-validation revision required and integrated**: longitudinal contract split (open-loop / canard mechanics / closed-loop), effect-ownership graph, coupled multisurface Tier A, flat-plane-exact ground images, generalized added mass, rotor dynamics + CT/CQ maps, wall-compatible atmosphere + ensemble historical presets, hybrid near/mid/far wake, unilateral rail release, structural claims mode-gated, identity quintuple, referee-plane rename, validation rebuilt on identifiability/holdouts/pre-registration, corrected budget arithmetic + perf acceptance contract, worker ABI/QoS protocol, fs-airfoil L2 crate, product-copy neutrality, "why it porpoises" flagship view, BPF audio fix, historical-claims table revisions |
-| 2 | GPT Pro Extended Reasoning (external) | 2026-08-16 | **"NOT BEADS READY" verdict integrated**: AeroEffectOwners record + chordwise reduced time (the |U| clock bug); prescribed-wake Tier-A candidate A1 + V-08b selection; hinge-load ownership moved to fs-wing + branch/set-valued free-control stability + ModelSafetyLimits split; cue-based two-axis pilot + perception model + InputTransducerMode; AddedMassMode ladder + energy-consistent bias + HeldOnRailEquilibrated prelaunch; two-way prop coupling + warm-started station solve default + J≈0.7–0.8 Dec-17 correction + gyroscopic moments; FlatSiteLogLaw solenoidality fix + Mann-class tensor target + exact-discrete OU + air-state API; 120 Hz shedding + core-evolution modes + moment-complete conversions + mixed-norm errors; FlatPlaneVortexImageExact rename + FlatnessCertificate + swept contact proxies; ReducedAeroelasticWarp; corrected 3.23/4.26 budget + kernel-subtotal honesty + tick view + field memory; service/lateness/backlog metrics + vsync-relative render gates; leased ≥3-slot snapshot ring + non-SAB pack/copy; input-tick sync + ApplyNextEligibleTickAndFlag; hysteretic QoS machine; evidence lineage/independence groups; V/H-case split + hierarchical H-07 + unstable-system convergence protocol + anti-vacuity baselines; RunIntentId + derived weather realization + CheckpointStateV1 + artifact archive; joint historical parameter model + attribution honesty; copy fixes; "why it rolls and yaws"; historical flags (30-ft derrick, 20–21 ft² rudder, AR conventions, anhedral intent, engine-mass boundary) |
+| 2 | GPT Pro Extended Reasoning (external) | 2026-08-16 | **"NOT BEADS READY" verdict integrated**: AeroEffectOwners record + chordwise reduced time (the |U| clock bug); prescribed-wake Tier-A candidate A1 + V-08b selection; hinge-load ownership moved to fs-wing + branch/set-valued free-control stability + ModelSafetyLimits split; cue-based two-axis pilot + perception model + InputTransducerMode; AddedMassMode ladder + energy-consistent bias + HeldOnRailEquilibrated prelaunch; two-way prop coupling + warm-started station solve default + J≈0.7–0.8 Dec-17 correction + gyroscopic moments; FlatSiteLogLaw solenoidality fix + Mann-class tensor target + exact-discrete OU + air-state API; 120 Hz shedding + core-evolution modes + moment-complete conversions + mixed-norm errors; FlatPlaneVortexImageExact rename + FlatnessCertificate + swept contact proxies; ReducedAeroelasticWarp; corrected 3.23/4.26 budget + kernel-subtotal honesty + tick view + field memory; service/lateness/backlog metrics + vsync-relative render gates; leased ≥3-slot snapshot ring + non-SAB pack/copy; input-tick sync + ApplyNextEligibleTickAndFlag; hysteretic QoS machine; evidence lineage/independence groups; V/H-case split + hierarchical H-07 + unstable-system convergence protocol + anti-vacuity baselines; RunIntentId + derived weather realization + CheckpointStateV1 + artifact archive; joint historical parameter model + attribution honesty; copy fixes; "why it rolls and yaws"; historical flags (30-ft derrick, 20–21 ft² rudder, AR conventions, anhedral intent, engine-mass boundary) [historical names: then-unsplit V-08b/V-04b] |
 | 3 | GPT Pro Extended Reasoning (external) | 2026-08-16 | **"ROUND 4 REQUIRED" — 23 structural + 16 polish items, ALL integrated**: joint (6+nc) added-mass solve; fs-flyer-owned prop coupling (L3 siblings decoupled) + Aitken scheme + immutable schedules; stationary-draw prelaunch initialization + E4.6d closure task; PhysicalRealizationAlgorithmId + RunAnchor + applied-trace-only InputTraceId; checkpoint algorithmic history; AtmosphereStateSnapshot in field snapshots; FOM/ROM split with shared-basis rational-Krylov + two receipts; E3.3a/b/c atmosphere workstream + full-tensor fitting; fixed-control-first gate ordering + ControlConstraintCase; E4.4a/E4.7b/E1.10 dependency closure; mandatory LOFO H-07 + offline full-Bayes + campaign manifest + no-surrogate-finals; A7a/A7b split (GO, Wright Experience candidate); persistent tracer service replacing the dense history ring; hard lateness gates + V-18 field-noninterference; runtime mode-immutability triad; phase-resolved blade capsules + TerminalEvent semantics; archive hosting/signing/sandbox/retention contract; deterministic perception service (V-16b); SmoothedTangentPlane boundary-work accounting; A.4 BEMT appendix aligned; WebGPU strictly v1.5 (E7.6); epic/leaf beads rule with pre-split list; 16 polish fixes (copy neutrality, stale refs, milestone renames, status labels, six-lane goldens naming, deferred-mode backlog) |
 | 4 | GPT Pro Extended Reasoning (external closure audit) | 2026-08-17 | **"ROUND 5 REQUIRED" — six structural + twelve polish groups + seven decisions, ALL integrated**: closed identity preimages (RunIdentityBasisV1, two-input RunId, trace-extent-bearing InputTraceV1, execution-closure ArtifactId, RNG realization-rooting, RunSpecId cache); state-bound field identities (FieldSourceSnapshotId, snapshot-lease API); branch-aware CRN-preserving prelaunch (StationaryOuPathV1 −32 s anchor, PhysicalInitializationSpec + ControlEquilibriumSelection, partitioned alternate starts, numerical closure bands); de-circularized H-07 (intent-manifest/receipt split, per-member allocations, E10.2a/b/c); A1 image/referee ownership (common image kernel in E4.4a, image-aware FOM/ROM, independent E4.9b referee); terminal-safe A/B (ABComparisonReceiptV1, user-intent counterfactual channel); Aitken candidate family; 16→24 blade capsules with generated radii; 120 Hz perception baseline; ratified R2+ObjectLock archive with verifier-mediated dual publication + trusted-loader boundary; prelaunch policy numbers; conversion gate + expanded pre-split; V-05d/V-11c/V-21 receipts, V-20 expansion, A7a promotion path; seqlock run-epoch; pilot-uncertainty allocation; stale-name sweep; budget-row honesty; schedule inventory; tangent-plane v1.5 deferral; risk reorder |
-| 5+ | — | — | pending; narrow verification charter (§14); convert to beads at steady state |
+| 5 | GPT Pro Extended Reasoning (external verification) | 2026-08-17 | **"ROUND 6 REQUIRED" — mechanical closure only; architecture verified intact** (S-03/S-05/S-06 + 9 polish groups INTEGRATED; graph acyclic; A1 lane correct; registry complete). Blocking fixes integrated: single ModelUncertaintyRealizationId preimage; §6 trace/attachment boundary (one InputTraceId preimage); RunSpecId redefined over pre-execution fields only; HistoricalCampaignReceiptV1 stripped of scorer-owned ids + new HistoricalCampaignScoreArtifactV1 (E10.2c); intent manifest carries the four-level pilot-uncertainty allocation + CampaignMemberRunSpecV1; eight leaf identities closed (PhysicalRealizationAlgorithmId, ModelRealizationAlgorithmId, InputPolicyId, PilotPopulationHypothesisId, PerceptionModelId, FieldBackendId, BladeCollisionProxyArtifactId, EvidenceLineageId) + PresentationId/CheckpointId formulas; E4.3→E3.3a; E10.1→E4.9a/b; E7.4b dependencies resolved to E4.6b0/E4.6c/E8.2 with E8.2 owning the augmented-linearization engine. Non-blocking cleanup: stray fences removed, FieldSourceSnapshotV1 normalized, E4.6b/c expanded, historical V-08b annotated, RunIntentId/RunId formulas deduplicated to one normative site |
+| 6+ | — | — | pending; same verification charter; convert to beads at steady state |
