@@ -1,0 +1,34 @@
+[package]
+name = "fs-flyer-wasm"
+version = "0.0.1"
+edition = "2024"
+publish = false
+description = "Browser (WASM) surface for the Wright Flyer simulation — real FrankenSim physics in the browser, typed refusals at the JS boundary, no mocks."
+
+# Its own workspace (the fs-wasm pattern): the wasm binding crate is decoupled
+# from the native workspace so a browser build never depends on the state of
+# unrelated in-progress crates. Bead frankensim-wf-root-guzez.1.3 (E0.3).
+[workspace]
+
+[lib]
+name = "fs_flyer_wasm"
+crate-type = ["cdylib", "rlib"]
+
+[package.metadata.frankensim]
+layer = "L6"
+
+[dependencies]
+fs-mbd = { path = "../fs-mbd" }
+fs-time = { path = "../fs-time" }
+fs-blake3 = { path = "../fs-blake3" }
+
+# wasm-bindgen only enters the wasm32 build — native builds stay dependency-clean.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+# asupersync in browser mode + JS-backed entropy for wasm32 (canonical wasm
+# profile feature pinned per plan §7.1 / audit §11.3).
+asupersync = { path = "../../../asupersync", default-features = false, features = ["wasm-browser-prod"] }
+getrandom = { version = "0.4", features = ["wasm_js"] }
+
+[lints.rust]
+unsafe_code = "forbid"

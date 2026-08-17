@@ -1,0 +1,391 @@
+//! fs-flyer-wasm — the browser (WASM) surface for the Wright Flyer
+//! simulation. Layer: L6. Bead frankensim-wf-root-guzez.1.3 (E0.3).
+//!
+//! This crate is the ONLY boundary between the Wright Flyer presentation
+//! plane (three.js) and the simulation plane (FrankenSim physics). It follows
+//! the proven `fs-wasm` pattern: its own decoupled workspace, `cdylib` +
+//! `rlib`, wasm-bindgen confined to wasm32, and the asupersync canonical
+//! browser profile pinned so the fs-exec cone builds on wasm32.
+//!
+//! v0 scope (the E0.3 scaffold): the HELLO KERNEL — a deterministic free
+//! rigid-body spin integrated by `fs_time::lie::rigid_body_step` — plus the
+//! two contracts every later API entry inherits:
+//!
+//! - **Typed-refusal JS envelope.** Every fallible entry returns a JSON
+//!   envelope `{"ok": ...}` or `{"refusal": {"code", "message",
+//!   "ranked_repairs"}}`. Nothing is silently clamped and nothing traps.
+//! - **Determinism digest.** The state trajectory is content-hashed with
+//!   `fs-blake3` under a versioned domain, so bit-identical replays are a
+//!   checkable claim from the very first kernel, native AND wasm.
+//!
+//! No-claims: the hello kernel is a torque-free rigid body — it makes no
+//! aerodynamic, historical, or Flyer-specific claim. It exists to prove the
+//! toolchain, the envelope, and the determinism discipline end to end.
+
+use fs_blake3::hash_domain;
+use fs_time::lie::rigid_body_step;
+
+/// Versioned identity domain for hello-kernel trajectory digests.
+pub const HELLO_DIGEST_DOMAIN: &str = "org.frankensim.fs-flyer-wasm.hello-trajectory.v1";
+
+/// Hard cap on requested integration steps (typed refusal above; the cap is
+/// asserted at cap AND cap+1 by the battery per workspace law).
+pub const MAX_HELLO_STEPS: u32 = 1_000_000;
+
+/// Admitted timestep domain [s] (open interval refusals outside).
+pub const MIN_DT_S: f64 = 1.0e-9;
+pub const MAX_DT_S: f64 = 1.0;
+
+/// A typed refusal crossing the JS boundary.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Refusal {
+    /// Stable machine-readable code.
+    pub code: &'static str,
+    /// Human-readable diagnosis.
+    pub message: String,
+    /// Ranked repairs, most likely fix first.
+    pub ranked_repairs: Vec<String>,
+}
+
+/// Final state of a hello-kernel run.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HelloState {
+    /// Unit quaternion (w, x, y, z), body→world.
+    pub quaternion: [f64; 4],
+    /// Body-frame angular velocity [rad/s].
+    pub omega_body: [f64; 3],
+    /// Steps actually integrated.
+    pub steps: u32,
+}
+
+/// Deterministic free rigid-body spin: principal inertia `inertia_kg_m2`,
+/// initial unit quaternion `q0`, body angular velocity `omega0`, fixed
+/// timestep `dt_s`, `steps` steps of the CG2 Lie-group integrator.
+///
+/// # Errors
+/// Typed refusals for non-finite inputs, non-positive inertia, a non-unit
+/// quaternion, an out-of-domain timestep, or a step count above
+/// [`MAX_HELLO_STEPS`].
+pub fn hello_spin(
+    inertia_kg_m2: [f64; 3],
+    q0: [f64; 4],
+    omega0: [f64; 3],
+    dt_s: f64,
+    steps: u32,
+) -> Result<HelloState, Refusal> {
+    let finite = inertia_kg_m2.iter().all(|v| v.is_finite())
+        && q0.iter().all(|v| v.is_finite())
+        && omega0.iter().all(|v| v.is_finite())
+        && dt_s.is_finite();
+    if !finite {
+        return Err(Refusal {
+            code: "non-finite-input",
+            message: "every hello-kernel input must be finite".into(),
+            ranked_repairs: vec![
+                "replace NaN/inf fields with finite values".into(),
+                "check JS-side unit conversions for overflow".into(),
+            ],
+        });
+    }
+    if inertia_kg_m2.iter().any(|&i| i <= 0.0) {
+        return Err(Refusal {
+            code: "non-positive-inertia",
+            message: format!("principal inertia must be positive, got {inertia_kg_m2:?}"),
+            ranked_repairs: vec!["supply a physically valid principal inertia triple".into()],
+        });
+    }
+    let norm2: f64 = q0.iter().map(|v| v * v).sum();
+    if (norm2 - 1.0).abs() > 1.0e-9 {
+        return Err(Refusal {
+            code: "non-unit-quaternion",
+            message: format!("q0 must be unit-norm (|q|² − 1 = {:.3e})", norm2 - 1.0),
+            ranked_repairs: vec![
+                "normalize the quaternion before the call".into(),
+                "pass identity [1,0,0,0] if no initial attitude is intended".into(),
+            ],
+        });
+    }
+    if !(MIN_DT_S..=MAX_DT_S).contains(&dt_s) {
+        return Err(Refusal {
+            code: "timestep-outside-domain",
+            message: format!("dt_s = {dt_s:e} outside admitted [{MIN_DT_S:e}, {MAX_DT_S:e}]"),
+            ranked_repairs: vec!["use a fixed timestep inside the admitted domain".into()],
+        });
+    }
+    if steps > MAX_HELLO_STEPS {
+        return Err(Refusal {
+            code: "step-budget-exceeded",
+            message: format!("steps = {steps} exceeds the admitted cap {MAX_HELLO_STEPS}"),
+            ranked_repairs: vec![
+                format!("request at most {MAX_HELLO_STEPS} steps per call"),
+                "advance long runs in bounded chunks from JS".into(),
+            ],
+        });
+    }
+    let (mut q, mut w) = (q0, omega0);
+    for _ in 0..steps {
+        (q, w) = rigid_body_step(q, w, inertia_kg_m2, dt_s);
+    }
+    Ok(HelloState {
+        quaternion: q,
+        omega_body: w,
+        steps,
+    })
+}
+
+/// Content digest of a hello-kernel trajectory: every intermediate state's
+/// exact bits, hashed under [`HELLO_DIGEST_DOMAIN`]. Bit-identical runs —
+/// including native-vs-wasm under the det:: doctrine — produce identical
+/// hex digests; this is the seed of the six-lane golden program (E6.2).
+///
+/// # Errors
+/// The same typed refusals as [`hello_spin`].
+pub fn hello_digest(
+    inertia_kg_m2: [f64; 3],
+    q0: [f64; 4],
+    omega0: [f64; 3],
+    dt_s: f64,
+    steps: u32,
+) -> Result<String, Refusal> {
+    // Admission is shared with hello_spin by running step zero's checks.
+    hello_spin(inertia_kg_m2, q0, omega0, dt_s, 0)?;
+    let mut payload = Vec::with_capacity(8 * (7 * steps as usize + 11));
+    for value in inertia_kg_m2
+        .iter()
+        .chain(q0.iter())
+        .chain(omega0.iter())
+        .chain([dt_s].iter())
+    {
+        payload.extend_from_slice(&value.to_bits().to_le_bytes());
+    }
+    payload.extend_from_slice(&steps.to_le_bytes());
+    let (mut q, mut w) = (q0, omega0);
+    for _ in 0..steps {
+        (q, w) = rigid_body_step(q, w, inertia_kg_m2, dt_s);
+        for value in q.iter().chain(w.iter()) {
+            payload.extend_from_slice(&value.to_bits().to_le_bytes());
+        }
+    }
+    Ok(hash_domain(HELLO_DIGEST_DOMAIN, &payload).to_hex())
+}
+
+// ---------------------------------------------------------------------------
+// JSON envelope (manual, dependency-free: the boundary speaks documented SI
+// doubles; floats are serialized exactly via shortest-roundtrip formatting).
+// ---------------------------------------------------------------------------
+
+fn json_escape(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => {
+                use core::fmt::Write as _;
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Render a refusal as the JS envelope.
+#[must_use]
+pub fn refusal_envelope(refusal: &Refusal) -> String {
+    let repairs = refusal
+        .ranked_repairs
+        .iter()
+        .map(|r| format!("\"{}\"", json_escape(r)))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "{{\"refusal\":{{\"code\":\"{}\",\"message\":\"{}\",\"ranked_repairs\":[{}]}}}}",
+        json_escape(refusal.code),
+        json_escape(&refusal.message),
+        repairs
+    )
+}
+
+/// Render a hello-kernel success as the JS envelope.
+#[must_use]
+pub fn hello_envelope(state: &HelloState) -> String {
+    format!(
+        "{{\"ok\":{{\"quaternion\":[{},{},{},{}],\"omega_body\":[{},{},{}],\"steps\":{}}}}}",
+        state.quaternion[0],
+        state.quaternion[1],
+        state.quaternion[2],
+        state.quaternion[3],
+        state.omega_body[0],
+        state.omega_body[1],
+        state.omega_body[2],
+        state.steps
+    )
+}
+
+/// Envelope-producing entry shared by native tests and the wasm boundary.
+#[must_use]
+pub fn hello_spin_json(
+    inertia_kg_m2: [f64; 3],
+    q0: [f64; 4],
+    omega0: [f64; 3],
+    dt_s: f64,
+    steps: u32,
+) -> String {
+    match hello_spin(inertia_kg_m2, q0, omega0, dt_s, steps) {
+        Ok(state) => hello_envelope(&state),
+        Err(refusal) => refusal_envelope(&refusal),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// wasm32-only JS boundary.
+// ---------------------------------------------------------------------------
+#[cfg(target_arch = "wasm32")]
+mod js {
+    use wasm_bindgen::prelude::wasm_bindgen;
+
+    /// Deterministic free rigid-body spin; returns the typed JSON envelope.
+    #[wasm_bindgen]
+    #[must_use]
+    pub fn flyer_hello_spin(
+        ixx: f64,
+        iyy: f64,
+        izz: f64,
+        qw: f64,
+        qx: f64,
+        qy: f64,
+        qz: f64,
+        wx: f64,
+        wy: f64,
+        wz: f64,
+        dt_s: f64,
+        steps: u32,
+    ) -> String {
+        super::hello_spin_json(
+            [ixx, iyy, izz],
+            [qw, qx, qy, qz],
+            [wx, wy, wz],
+            dt_s,
+            steps,
+        )
+    }
+
+    /// Trajectory content digest (hex) or the refusal envelope.
+    #[wasm_bindgen]
+    #[must_use]
+    pub fn flyer_hello_digest(
+        ixx: f64,
+        iyy: f64,
+        izz: f64,
+        qw: f64,
+        qx: f64,
+        qy: f64,
+        qz: f64,
+        wx: f64,
+        wy: f64,
+        wz: f64,
+        dt_s: f64,
+        steps: u32,
+    ) -> String {
+        match super::hello_digest(
+            [ixx, iyy, izz],
+            [qw, qx, qy, qz],
+            [wx, wy, wz],
+            dt_s,
+            steps,
+        ) {
+            Ok(hex) => format!("{{\"ok\":\"{hex}\"}}"),
+            Err(refusal) => super::refusal_envelope(&refusal),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const INERTIA: [f64; 3] = [0.9, 1.1, 1.7];
+    const IDENTITY_Q: [f64; 4] = [1.0, 0.0, 0.0, 0.0];
+    const OMEGA: [f64; 3] = [0.3, -1.2, 2.1];
+    const DT: f64 = 1.0 / 120.0;
+
+    #[test]
+    fn hello_spin_is_deterministic_and_norm_preserving() {
+        let a = hello_spin(INERTIA, IDENTITY_Q, OMEGA, DT, 4_800).unwrap();
+        let b = hello_spin(INERTIA, IDENTITY_Q, OMEGA, DT, 4_800).unwrap();
+        // Bit identity across two runs in one process.
+        for i in 0..4 {
+            assert_eq!(a.quaternion[i].to_bits(), b.quaternion[i].to_bits());
+        }
+        for i in 0..3 {
+            assert_eq!(a.omega_body[i].to_bits(), b.omega_body[i].to_bits());
+        }
+        // Lie-group update preserves the unit norm by construction.
+        let norm2: f64 = a.quaternion.iter().map(|v| v * v).sum();
+        assert!((norm2 - 1.0).abs() < 1.0e-12, "norm² drift {norm2:e}");
+    }
+
+    #[test]
+    fn hello_digest_is_stable_and_input_sensitive() {
+        let base = hello_digest(INERTIA, IDENTITY_Q, OMEGA, DT, 480).unwrap();
+        let again = hello_digest(INERTIA, IDENTITY_Q, OMEGA, DT, 480).unwrap();
+        assert_eq!(base, again, "identical runs must digest identically");
+        // GOLDEN: pinned trajectory digest for the canonical hello scenario.
+        // Native aarch64/x86 and wasm-in-node must all reproduce this exact
+        // value (the E6.2 six-lane program consumes it). Golden-bump protocol
+        // applies to any change.
+        assert_eq!(
+            base,
+            "9c9a2e1f74ba38ad83ee9922ac93ecf6172e56ec80736426ef9e979bc4652d3a",
+            "canonical hello digest moved — determinism regression or an \
+             intentional kernel change requiring the golden-bump protocol"
+        );
+        let mut omega = OMEGA;
+        omega[2] += 1.0e-12;
+        let perturbed = hello_digest(INERTIA, IDENTITY_Q, omega, DT, 480).unwrap();
+        assert_ne!(base, perturbed, "a 1e-12 input change must move the digest");
+    }
+
+    #[test]
+    fn refusals_are_typed_ranked_and_cap_exact() {
+        // Cap AND cap+1 (workspace law).
+        assert!(hello_spin(INERTIA, IDENTITY_Q, OMEGA, DT, MAX_HELLO_STEPS - 1).is_ok());
+        let at_cap = hello_spin(INERTIA, IDENTITY_Q, OMEGA, DT, MAX_HELLO_STEPS);
+        assert!(at_cap.is_ok(), "the cap itself is admitted");
+        let over = hello_spin(INERTIA, IDENTITY_Q, OMEGA, DT, MAX_HELLO_STEPS + 1).unwrap_err();
+        assert_eq!(over.code, "step-budget-exceeded");
+        assert!(!over.ranked_repairs.is_empty());
+
+        let nan = hello_spin([f64::NAN, 1.0, 1.0], IDENTITY_Q, OMEGA, DT, 1).unwrap_err();
+        assert_eq!(nan.code, "non-finite-input");
+        let neg = hello_spin([-1.0, 1.0, 1.0], IDENTITY_Q, OMEGA, DT, 1).unwrap_err();
+        assert_eq!(neg.code, "non-positive-inertia");
+        let skew = hello_spin(INERTIA, [1.0, 0.5, 0.0, 0.0], OMEGA, DT, 1).unwrap_err();
+        assert_eq!(skew.code, "non-unit-quaternion");
+        let dt = hello_spin(INERTIA, IDENTITY_Q, OMEGA, 2.0, 1).unwrap_err();
+        assert_eq!(dt.code, "timestep-outside-domain");
+    }
+
+    #[test]
+    fn json_envelope_is_wellformed_for_ok_and_refusal() {
+        let ok = hello_spin_json(INERTIA, IDENTITY_Q, OMEGA, DT, 10);
+        assert!(ok.starts_with("{\"ok\":{"), "{ok}");
+        assert!(ok.contains("\"steps\":10"));
+        let bad = hello_spin_json(INERTIA, IDENTITY_Q, OMEGA, -1.0, 10);
+        assert!(bad.starts_with("{\"refusal\":{"), "{bad}");
+        assert!(bad.contains("\"code\":\"timestep-outside-domain\""));
+        assert!(bad.contains("ranked_repairs"));
+        // Hostile message content must escape cleanly.
+        let hostile = refusal_envelope(&Refusal {
+            code: "x",
+            message: "quote\" backslash\\ newline\n".into(),
+            ranked_repairs: vec!["tab\there".into()],
+        });
+        assert!(hostile.contains("quote\\\" backslash\\\\ newline\\n"));
+        assert!(hostile.contains("tab\\there"));
+    }
+}
