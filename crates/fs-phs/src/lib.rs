@@ -4487,6 +4487,7 @@ pub fn quasistatic_aperture_opening(
 }
 
 pub mod circuit;
+pub mod device;
 
 #[cfg(test)]
 mod valve_ports {
