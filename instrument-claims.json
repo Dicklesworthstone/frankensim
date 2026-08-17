@@ -1,1314 +1,1358 @@
 {
-  "schema": "frankensim-instrument-claims-v1",
-  "doctrine": "Music-program claims registry (bead frankensim-music-claims-registry-mc31g; program root frankensim-music-v8-root-3ez8g). D19: a claim is a (filling, image, qoi) row, never prose. D21: rows transition gate status (ungated|green|refused) and are never deleted; xtask check-instrument-claims refuses removal against the committed predecessor. D25: live_default=yes requires gate=green AND a budget_row (real-time is a measured claim). Seed state 2026-08-14: every currently-live image enters ungated with empty evidence - nothing is green until a per-track gates bead lands reviewed evidence. Flags are string enums because the in-house JSON parser collapses booleans.",
-  "rows": [
+ "schema": "frankensim-instrument-claims-v1",
+ "doctrine": "Music-program claims registry (bead frankensim-music-claims-registry-mc31g; program root frankensim-music-v8-root-3ez8g). D19: a claim is a (filling, image, qoi) row, never prose. D21: rows transition gate status (ungated|green|refused) and are never deleted; xtask check-instrument-claims refuses removal against the committed predecessor. D25: live_default=yes requires gate=green AND a budget_row (real-time is a measured claim). Seed state 2026-08-14: every currently-live image enters ungated with empty evidence - nothing is green until a per-track gates bead lands reviewed evidence. Flags are string enums because the in-house JSON parser collapses booleans.",
+ "rows": [
+  {
+   "filling": "wind-reed",
+   "image": "tmm",
+   "qoi": "fingering-peak-cents",
+   "owner_crates": [
+    "fs-duct"
+   ],
+   "exactness": [
+    "X-Consist",
+    "X-Struct"
+   ],
+   "gate": "green",
+   "live_default": "no",
+   "determinism": "one-host",
+   "evidence": [
     {
-      "filling": "wind-reed",
-      "image": "tmm",
-      "qoi": "fingering-peak-cents",
-      "owner_crates": [
-        "fs-duct"
-      ],
-      "exactness": [
-        "X-Consist",
-        "X-Struct"
-      ],
-      "gate": "green",
-      "live_default": "no",
-      "determinism": "one-host",
-      "evidence": [
-        {
-          "kind": "test",
-          "ref": "crates/fs-duct/tests/ernoult_corpus.rs::ernoult_ladder_driven_from_the_registered_corpus_rows"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-duct/tests/ernoult_corpus.rs::falsifier_a_detuned_corpus_geometry_fails_the_gate"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-duct/src/lib.rs::FingeringTable (typed fingering data; unknown label refuses)"
-        }
-      ],
-      "budget_row": null,
-      "corpus_refs": [
-        "vvreg:acoustic-ernoult-2021-xxxx",
-        "vvreg:acoustic-ernoult-2021-xxxo",
-        "vvreg:acoustic-ernoult-2021-xxox",
-        "vvreg:acoustic-ernoult-2021-xoxx",
-        "vvreg:acoustic-ernoult-2021-oxxx"
-      ],
-      "notes": "GREEN per the 3ez8g.6.1 wind gates review (2026-08-16): the Ernoult five-fingering ladder executes FROM registered corpus rows (-8/-8/-18/-17/-20 cents inside the 30-cent outer envelope, deviations systematically FLAT \u2014 the inner correction slightly large \u2014 so tone-hole refinements have this dataset as their regression floor) with the 15mm-detune falsifier proving discrimination. THE DISPERSION PIN travels on this row: at a 2 mm bore the LOSSLESS model is 85 CENTS sharp and ZK closes it to 8 \u2014 losses are load-bearing; any future faster lossless mode is a FAST-MODE row with this failure disclosed, never a silent swap. X-Consist bore, X-Struct ZK losses. live_default stays no until a wind budget row lands (D25)."
+     "kind": "test",
+     "ref": "crates/fs-duct/tests/ernoult_corpus.rs::ernoult_ladder_driven_from_the_registered_corpus_rows"
     },
     {
-      "filling": "wind-reed",
-      "image": "char-line",
-      "qoi": "junction-match-tmm-r",
-      "owner_crates": [
-        "fs-vfit",
-        "fs-couple"
-      ],
-      "exactness": [
-        "X-Exact",
-        "X-Struct"
-      ],
-      "gate": "green",
-      "live_default": "no",
-      "determinism": "one-host",
-      "evidence": [
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/tests/wind_junction_gate.rs::char_junctions_match_tmm_r_and_the_detuned_hole_fails"
-        },
-        {
-          "kind": "bakeoff",
-          "ref": "crates/fs-couple/tests/receipts/wind-fracdelay-linear-vs-thiran.bakeoff (c997b03756525680): continuous-pitch POLICY decided \u2014 the current linear-frac law KEEPS the lane (clicks 1.53 vs Thiran 5.97; landing 5.3 vs 8.3 cents); naive time-varying Thiran REFUSED on the measured passivity law (5.6x energy pumping on fast ramps); stepped zipper baseline quantified (10.5 click). Trombone slide + voice articulation cite this receipt."
-        }
-      ],
-      "budget_row": null,
-      "corpus_refs": [
-        "vvreg:acoustic-ernoult-2021-xxxx",
-        "vvreg:acoustic-ernoult-2021-xxxo",
-        "vvreg:acoustic-ernoult-2021-xxox",
-        "vvreg:acoustic-ernoult-2021-xoxx",
-        "vvreg:acoustic-ernoult-2021-oxxx"
-      ],
-      "notes": "GREEN per the 3ez8g.6.1 review: the char image's realized reflectance tracks the TMM authority's R(omega) on the holed Ernoult-class bore across three fingerings of the typed FingeringTable (worst gap 0.049 inside the 0.08 band) and the ONE-ARM falsifier (char junction geometry drifting 15 mm from the authority) fails at 0.489. EXECUTED LESSON recorded in the test: perturbing the SHARED duct left both arms agreeing (0.0185) \u2014 an A-vs-B consistency gate is structurally blind to shared-input errors (the metamorphic-blindness law); the falsifier must perturb one arm."
+     "kind": "test",
+     "ref": "crates/fs-duct/tests/ernoult_corpus.rs::falsifier_a_detuned_corpus_geometry_fails_the_gate"
     },
     {
-      "filling": "wind-reed",
-      "image": "char-line",
-      "qoi": "quarter-wave-lock",
-      "owner_crates": [
-        "fs-couple",
-        "fs-phs",
-        "fs-dcontact"
-      ],
-      "exactness": [
-        "X-Exact",
-        "X-Struct"
-      ],
-      "gate": "green",
-      "live_default": "no",
-      "determinism": "one-host",
-      "evidence": [
-        {
-          "kind": "listening",
-          "ref": "data/listening/reed-sustained.listening-receipt"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/tests/acoustic_assembly.rs::beating_reed_locks_near_the_quarter_wave"
-        }
-      ],
-      "budget_row": "data/budget-rows/wind-reed-char-line-80cb534fbaf60b50.budgetrow",
-      "corpus_refs": [],
-      "notes": "reed_bore self-oscillates and locks near the quarter-wave resonance (existing fs-couple test); authored reed parameters keep this Estimate-labeled until the cane reed card (3ez8g.6.2) mints receipts. Gates bead: 3ez8g.6.1. BUDGET MEASURED (3ez8g.2.2): 1.39e6 samples/s, 29x headroom at 48 kHz, dispersion 5.4%, release, machine 80cb534f - the program's first admissible real-time number; live_default stays no until the gates review. LISTENING ARTIFACT RENDERED (3ez8g.1.2): 2.0s clip-free at 20 kPa full-scale, receipt UNADJUDICATED (awaiting the owner's ear; structurally useless as pass evidence until adjudicated). GREEN per the 3ez8g.6.1 review: the lock gate executes (28% band on quarter-wave or twelfth) and the row carries the measured budget (1.39e6 samples/s, 29x headroom)."
-    },
-    {
-      "filling": "wind-reed",
-      "image": "vfit-hold",
-      "qoi": "held-fingering-cents",
-      "owner_crates": [
-        "fs-vfit"
-      ],
-      "exactness": [
-        "X-Struct"
-      ],
-      "gate": "green",
-      "live_default": "no",
-      "determinism": "one-host",
-      "evidence": [
-        {
-          "kind": "test",
-          "ref": "crates/fs-vfit/tests/clarinet_casebook.rs::clarinet_impedance_to_passive_audio_filter"
-        }
-      ],
-      "budget_row": null,
-      "corpus_refs": [],
-      "notes": "GREEN per the 3ez8g.6.1 review: the clarinet casebook executes end-to-end (24-pole fit, peaks within 2 cents at every stage: continuous, certified, digital-biquad at 192 kHz) and the PASSIVITY CERTIFICATE CLASS IS NAMED FROM MEASUREMENT: GridOnly (the fit's d <= 1e-12 makes the Hamiltonian crossing arm unavailable; the grid check is clean) \u2014 recorded as the class the evidence actually supports, not the stronger class. X-Struct passivity; the e^{-iwt} conjugation discipline documented in the casebook."
-    },
-    {
-      "filling": "wind-reed",
-      "image": "phs-chain",
-      "qoi": "td-oracle-agreement",
-      "owner_crates": [
-        "fs-phs"
-      ],
-      "exactness": [
-        "X-Consist"
-      ],
-      "gate": "ungated",
-      "live_default": "no",
-      "determinism": "one-host",
-      "evidence": [
-        {
-          "kind": "test",
-          "ref": "crates/fs-phs/tests/reed_casebook.rs::reed_as_phs_quasi_static_equilibrium_and_energy_audit"
-        }
-      ],
-      "budget_row": null,
-      "corpus_refs": [],
-      "notes": "UNGATED with the f_Ny DISCLOSURE (3ez8g.6.1): the fine-pHS ladder's Nyquist boundary is PER CONFIGURATION \u2014 a 6-cell ladder cannot claim 8 kHz truth; any row consumer must read f_Ny from the specific chain. Evidence so far: the reed casebook's analytic equilibrium pin and per-step energy ledger. Green awaits a TD-oracle agreement gate on a stated configuration with its f_Ny carried in the receipt."
-    },
-    {
-      "filling": "string",
-      "image": "modal-zoh",
-      "qoi": "pluck-partial-decay",
-      "owner_crates": [
-        "fs-couple",
-        "fs-modal"
-      ],
-      "exactness": [
-        "X-Exact"
-      ],
-      "gate": "green",
-      "live_default": "no",
-      "determinism": "one-host",
-      "evidence": [
-        {
-          "kind": "bakeoff",
-          "ref": "crates/fs-couple/tests/receipts/string-modal-zoh-vs-phs-bank.bakeoff"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/tests/bakeoff_string.rs::string_bakeoff_receipt_is_reproduced_and_golden_pinned"
-        },
-        {
-          "kind": "bakeoff",
-          "ref": "crates/fs-couple/tests/receipts/string-modal-zoh-vs-phs-bank.bakeoff (the truncation cross-check vs the fine-pHS authority: exact per-sample map on the retained basis; missing high modes ABSENT not approximated \u2014 the disclosed failure mode)"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/src/piano_vertical.rs::pv_002_partials_follow_the_inharmonicity_law"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/tests/vibration_gates.rs::vg_001_truncation_gate_and_under_truncated_falsifier"
-        }
-      ],
-      "budget_row": null,
-      "corpus_refs": [],
-      "notes": "GREEN per the 3ez8g.7.1 vibration gates review: X-Exact ON THE TRUNCATED BASIS (the row's N travels with every fixture; missing high modes are absent, never approximated \u2014 the .1.4 bake-off receipt is the executed cross-check vs the fine-pHS authority). The truncation gate (vg-001) DISCLOSES the retained-energy fraction per fixture and its falsifier proves an under-truncated config fails. Exact-ZOH per-sample map at zero solver cost; tension frozen per admission (a ramp needs re-admission - the KC image owns tension dynamics)."
-    },
-    {
-      "filling": "string",
-      "image": "phs-modal-bank",
-      "qoi": "truncation-authority",
-      "owner_crates": [
-        "fs-phs"
-      ],
-      "exactness": [
-        "X-Consist"
-      ],
-      "gate": "green",
-      "live_default": "no",
-      "determinism": "one-host",
-      "evidence": [
-        {
-          "kind": "bakeoff",
-          "ref": "crates/fs-couple/tests/receipts/string-modal-zoh-vs-phs-bank.bakeoff"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/tests/bakeoff_string.rs::string_bakeoff_receipt_is_reproduced_and_golden_pinned"
-        },
-        {
-          "kind": "bakeoff",
-          "ref": "crates/fs-couple/tests/receipts/string-modal-zoh-vs-phs-bank.bakeoff (KeepBoth: authority/cross-check role)"
-        }
-      ],
-      "budget_row": null,
-      "corpus_refs": [],
-      "notes": "GREEN for the AUTHORITY/CROSS-CHECK claim set per the .7.1 review (like the linear-spring null row: its claim IS being the arbiter): Dirac-composable, energy-ledgered, O((w dt)^2) midpoint phase disclosed in the receipt. Never the performance image (Newton per sample); the ZOH rows cite it for truncation truth."
-    },
-    {
-      "filling": "plate",
-      "image": "dkt-modal",
-      "qoi": "literature-modes",
-      "owner_crates": [
-        "fs-plate",
-        "fs-modal"
-      ],
-      "exactness": [
-        "X-Exact"
-      ],
-      "gate": "green",
-      "live_default": "no",
-      "determinism": "one-host",
-      "evidence": [
-        {
-          "kind": "test",
-          "ref": "crates/fs-plate/src/lib.rs::olson_hazell_stiffened_panel_matches_literature"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/tests/piano_gates.rs::pg_001_board_from_the_fs_plate_authority"
-        }
-      ],
-      "budget_row": null,
-      "corpus_refs": [
-        "vvreg:acoustic-leissa-clamped-square-lambda1",
-        "vvreg:acoustic-olson-hazell-1977-mode1",
-        "vvreg:acoustic-olson-hazell-1977-mode2",
-        "vvreg:acoustic-olson-hazell-1977-mode3",
-        "vvreg:acoustic-olson-hazell-1977-mode4",
-        "vvreg:acoustic-olson-hazell-1977-mode5"
-      ],
-      "notes": "GREEN per the .7.1 review: the DKT orthotropic modal image validated against the REGISTERED literature corpus (Olson-Hazell 1977 stiffened panel: five modes within 1.7% of theory under an 8% gate; Leissa clamped-square eigenvalue), inertia-certified through fs-modal, and consumed downstream as the piano board authority (pg-001). X-Exact truncated; truncation N travels per fixture."
-    },
-    {
-      "filling": "plate",
-      "image": "vfit-driving-point",
-      "qoi": "passive-one-port",
-      "owner_crates": [
-        "fs-vfit"
-      ],
-      "exactness": [
-        "X-Struct"
-      ],
-      "gate": "ungated",
-      "live_default": "no",
-      "determinism": "one-host",
-      "evidence": [
-        {
-          "kind": "test",
-          "ref": "crates/fs-vfit/src/passivity.rs::check_passivity (the certificate machinery the 1-port will cite; no executed plate-fit artifact yet)"
-        }
-      ],
-      "budget_row": null,
-      "corpus_refs": [],
-      "notes": "Cheap body-as-1-port on the bridge; passivity certificate class must be named at gate time; fails on a nonlinear top by design. Gates bead: 3ez8g.7.1. .7.1 review: UNGATED with the missing item NAMED \u2014 no EXECUTED plate-1-port fit artifact exists yet (the clarinet casebook certifies the BORE lane; the plate lane needs its own fit + named certificate class before green)."
-    },
-    {
-      "filling": "string-plate-nl",
-      "image": "kc-vonkarman",
-      "qoi": "pitch-glide-analytic",
-      "owner_crates": [
-        "fs-nlmodal"
-      ],
-      "exactness": [
-        "X-Consist"
-      ],
-      "gate": "green",
-      "live_default": "no",
-      "determinism": "one-host",
-      "evidence": [
-        {
-          "kind": "test",
-          "ref": "crates/fs-nlmodal/tests/nlmodal.rs::kirchhoff_carrier_beta_matches_hand_formula_and_glide"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-nlmodal/tests/nlmodal.rs::unsymmetrized_tensor_admission_and_trajectory_falsifier"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/tests/acoustic_assembly.rs::kirchhoff_carrier_loud_pluck_raises_pitch"
-        }
-      ],
-      "budget_row": null,
-      "corpus_refs": [],
-      "notes": "GREEN per the .7.1 review: the KC/von-Karman reduced-pHS image with ANALYTIC-PIN evidence \u2014 the exact KC channel constants and the pitch-glide law (3/32)(EA/T0)(k pi A/L)^2 both pinned at 1e-12, plus the composed loud-pluck glide e2e. THE GONZALEZ CAVEAT travels on this row (scope-4): conservation under discrete-gradient stepping is STRUCTURALLY BLIND to gradient errors, so the evidence cites the FD-gradient/trajectory FALSIFIER oracle, never energy conservation. The linear<->nonlinear selector threshold is committed data (vibration-selector-thresholds.tsv)."
-    },
-    {
-      "filling": "bowed",
-      "image": "modal-stribeck",
-      "qoi": "stick-slip-mechanism",
-      "owner_crates": [
-        "fs-tribo",
-        "fs-couple"
-      ],
-      "exactness": [
-        "X-Exact",
-        "X-Struct"
-      ],
-      "gate": "ungated",
-      "live_default": "no",
-      "determinism": "one-host",
-      "evidence": [
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/tests/acoustic_assembly.rs::bow_stroke_is_a_live_excitation"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/tests/acoustic_assembly.rs::bowed_rich_spectrum_has_even_partials"
-        }
-      ],
-      "budget_row": null,
-      "corpus_refs": [],
-      "notes": "Modal string + Stribeck island (parts live). Determinism is CAPPED at one-host: fs-tribo declares no cross-ISA bit-stability (platform hypot) - bead 3ez8g.7.3 resolves or re-declares. Emergent Helmholtz-motion gates are bead 3ez8g.7.5; a forced Helmholtz oscillator is forbidden. .7.1 review: live-excitation + spectrum evidence attached; UNGATED until the stick-slip mechanism gates land (.7.5's lane) and the fs-tribo hypot determinism cap resolves (.7.3). .7.3 RESOLVED the fs-tribo determinism cap by det-routing (cross-ISA golden verified aarch64+x86-64); the row stays one-host until the COMPOSED bowed path's remaining operands are audited."
-    },
-    {
-      "filling": "brass",
-      "image": "plane-wave-char",
-      "qoi": "mute-debug-only",
-      "owner_crates": [
-        "fs-duct",
-        "fs-vfit",
-        "fs-couple"
-      ],
-      "exactness": [
-        "X-Exact",
-        "X-Struct"
-      ],
-      "gate": "ungated",
-      "live_default": "no",
-      "determinism": "one-host",
-      "evidence": [
-        {
-          "kind": "bakeoff",
-          "ref": "crates/fs-couple/tests/receipts/brass-mm-vs-plane.bakeoff (f905d0552cc772d5): plane worst flare-peak residual >3x MM; KeepForSubset(plane-wave-char -> mute/debug + tone-hole wind bores, never the trumpet flare claim)"
-        }
-      ],
-      "budget_row": null,
-      "corpus_refs": [],
-      "notes": "Plane-wave column + valve island produces A note but NOT a trumpet: the trumpet claim requires multimodal lines (3ez8g.4.1/.4.2) + a real bell load (zolja). This row's claim set is permanently restricted to mute/debug studies; it stays on the menu per D21. Gates bead: 3ez8g.4.4. SCOPING DECIDED 2026-08-16 by the committed brass bake-off receipt (3ez8g.4.4): plane-wave keeps mute/debug + tone-hole (wind) claims; the trumpet flare claim belongs to mm-tmm (D21: narrowed, never deleted)."
-    },
-    {
-      "filling": "jet",
-      "image": "lbm-jetlab-2d",
-      "qoi": "edge-tone-stage-i-strouhal",
-      "owner_crates": [
-        "fs-aeroac",
-        "fs-lbm"
-      ],
-      "exactness": [
-        "X-Est"
-      ],
-      "gate": "ungated",
-      "live_default": "no",
-      "determinism": "one-host",
-      "evidence": [],
-      "budget_row": null,
-      "corpus_refs": [],
-      "notes": "Authority lab, never a runtime image. Stage-I edge tone validated vs Brown 1937 (+3.0%, inside bin quantization); the 2-D rig is pinned TONAL (inverse cascade; flatness ~1e-18) and cataloging its rows as broadband flute noise is a typed refusal in fs-aeroac. X-Struct only when a residual is issued against lab data; absolute SPL is never claimed. Gates bead: 3ez8g.10.4."
-    },
-    {
-      "filling": "string-plate-cavity",
-      "image": "vibroacoustic-modal",
-      "qoi": "two-dof-product-invariant",
-      "owner_crates": [
-        "fs-couple"
-      ],
-      "exactness": [
-        "X-Exact"
-      ],
-      "gate": "ungated",
-      "live_default": "no",
-      "determinism": "one-host",
-      "evidence": [
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/src/vibroacoustic.rs::rectangular_cavity_and_resonator_pins"
-        }
-      ],
-      "budget_row": null,
-      "corpus_refs": [
-        "vvreg:acoustic-carcagno-2018-mode1",
-        "vvreg:acoustic-carcagno-2018-mode2",
-        "vvreg:acoustic-carcagno-2018-mode3"
-      ],
-      "notes": "The plate x cavity x radiation coupling engine (energy identities exact, added-mass quartering verified in fs-couple tests); the exact 2-DOF invariant f1*f2 = f_helmholtz*f_top is the free engine-exactness oracle. Composed-guitar gates on the Carcagno corpus: bead 3ez8g.7.4. Fixture traps recorded there: midline braces sit on nodal lines; the sign convention is phase-only observable. .7.1 review: cavity/resonator pin evidence attached; UNGATED pending the composed-guitar Carcagno gate (.7.4)."
-    },
-    {
-      "filling": "hammer-felt",
-      "image": "hysteresis-island",
-      "qoi": "velocity-tilt-mechanism",
-      "owner_crates": [
-        "fs-material",
-        "fs-couple"
-      ],
-      "exactness": [
-        "X-Struct",
-        "X-Est"
-      ],
-      "gate": "ungated",
-      "live_default": "no",
-      "determinism": "one-host",
-      "evidence": [
-        {
-          "kind": "test",
-          "ref": "crates/fs-material/tests/conformance.rs::mt-001/mt-004 WoolFelt enrollment"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/tests/felt_hammer_island.rs::contact_duration_falls_with_velocity_unlike_the_linear_spring"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/tests/felt_hammer_island.rs::spectral_tilt_rises_with_velocity_beyond_the_linear_control"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/tests/felt_hammer_island.rs::the_felt_loop_dissipates_and_the_ledger_closes"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/tests/felt_hammer_island.rs::prony_chain_covers_the_hammer_band_and_refuses_outside"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/tests/felt_hammer_island.rs::the_phs_string_island_ledger_closes_with_sampled_geometry"
-        },
-        {
-          "kind": "bakeoff",
-          "ref": "crates/fs-couple/tests/receipts/piano-felt-vs-hc.bakeoff (3d9df8e509435370): felt residual grows 0.028->0.071 with velocity while HC's is identically zero; felt tilt trend 28.8x vs HC 17.2x \u2014 the hysteresis island is the felt authority"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/tests/piano_gates.rs::pg_002_hammer_band_out_of_band_refuses"
-        }
-      ],
-      "budget_row": null,
-      "corpus_refs": [
-        "vvreg:acoustic-absent-felt-coupon"
-      ],
-      "notes": "WoolFelt (fs-material Uniaxial: stiffening p>1 envelope, crush-anchored unload, dissipation by construction) driving a substepped hammer-string island: contact duration FALLS with velocity while the matched linear spring stays amplitude-independent; spectral tilt rises >1.2x and >1.5x the linear control; strike ledger closes within 15% with felt loss >2% KE_in; rate half lowered via lower_to_prony over 50Hz-5kHz with the FS-MAT-VISCO-OUT-OF-BAND refusal live; island geometry sampled by the certified fs-contact chart-to-gap pipeline and the string stepped under fs_phs::step (per-step discrete-gradient ledger closure). X-Est because ALL felt parameters are authored Estimate values: the licensed coupon hunt identified Stulov 1995 / Chabassier RR-8181 but PDF retention was blocked (the cited absence row records the hunt); green awaits a coupon-backed pack + the piano gates review (3ez8g.5.1)."
-    },
-    {
-      "filling": "brass",
-      "image": "mm-tmm",
-      "qoi": "flare-peak-trigger",
-      "owner_crates": [
-        "fs-duct"
-      ],
-      "exactness": [
-        "X-Consist"
-      ],
-      "gate": "ungated",
-      "live_default": "no",
-      "determinism": "one-host",
-      "evidence": [
-        {
-          "kind": "test",
-          "ref": "crates/fs-duct/src/modal.rs::mm_001_bessel_self_certified"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-duct/src/modal.rs::mm_002_cutoffs_are_analytic"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-duct/src/modal.rs::mm_003_n1_degenerates_to_the_plane_image"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-duct/src/modal.rs::mm_004_junction_adds_evanescent_inertance"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-duct/src/modal.rs::mm_005_flare_ladder_and_trigger"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-duct/src/modal.rs::mm_006_refusals_and_bitwise_repeats"
-        },
-        {
-          "kind": "bakeoff",
-          "ref": "crates/fs-couple/tests/receipts/brass-mm-vs-plane.bakeoff: MM is the flare authority (ladder settled 0.18 cents; plane misses 14.9)"
-        }
-      ],
-      "budget_row": null,
-      "corpus_refs": [
-        "vvreg:acoustic-absent-trumpet-impedance"
-      ],
-      "notes": "Multimodal (m=0) TMM: reflection-matrix recursion (bounded under evanescence), in-crate dd-series Bessel + J1 roots (no transcribed constants; self-certified + independent quadrature oracles), Lommel junction projections, staircased flares. THE TRIGGER EXECUTED: plane-wave misses the trumpet-like flare's MM peak structure by 14.9 cents (>=8 authored) with the mode ladder settled at 0.18 cents N4->N5 and the staircase-density term disclosed at 6.7 cents (the first measure run caught a coarse-staircase artifact posing as a treble mode shift \u2014 both trigger arms therefore run on the fine staircase). X-Consist: the gate cites the LADDER, not a single N. v1 boundaries disclosed in CONTRACT: matched-mouth higher modes (tabulated bell load = zolja), per-mode loss through the lossy plane wavenumber, no tone holes, no mean flow. Green awaits measured-impedance brass gates (3ez8g.4.x)."
-    },
-    {
-      "filling": "brass",
-      "image": "zl-bake",
-      "qoi": "bell-load-table",
-      "owner_crates": [
-        "fs-bem",
-        "fs-duct"
-      ],
-      "exactness": [
-        "X-Struct"
-      ],
-      "gate": "ungated",
-      "live_default": "no",
-      "determinism": "one-host",
-      "evidence": [
-        {
-          "kind": "test",
-          "ref": "crates/fs-bem/src/radiation_bake.rs::zb_001_bake_reproduces_the_pulsating_sphere"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-bem/src/radiation_bake.rs::zb_002_bake_refusals"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-bem/src/radiation_bake.rs::zb_003_lathe_is_closed_and_outward"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-duct/src/lib.rs::tl_001_table_admission_interpolation_and_refusals"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-duct/src/lib.rs::tl_002_the_ka_lift"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-duct/src/lib.rs::tl_003_bell_bake_end_to_end"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-duct/src/lib.rs::tl_004_modal_plane_load_plays_the_table"
-        },
-        {
-          "kind": "receipt",
-          "ref": "data/radiation/bell-fixture-zl.tsv"
-        }
-      ],
-      "budget_row": null,
-      "corpus_refs": [],
-      "notes": "Offline Z_L(omega) bake (fs_bem::radiation_bake over solve_radiation; CBIE below mouth ka 0.5, Burton-Miller above; per-row ppw/condition/passivity receipts; refuses past the mesh resolution bound) played back through fs_duct::TabulatedLoad (passivity-gated admission, linear interpolation, out-of-table refusal) \u2014 THE ka LIFT: analytic fits keep MAX_RADIATION_KA, tables play inside their own support (tl-002 asserts refusal and success at the same omega). Committed authored bell fixture (8mm throat -> 60mm mouth, 480 panels, 25 rows 150-1446 Hz, all-passive) at data/radiation/bell-fixture-zl.tsv, schema/resolution/passivity gated every run. Executed lesson in fs-bem CONTRACT: single-fan wide mouth caps drive the BM centroid-quadrature resistance artifact negative \u2014 caps are concentric annuli at the wall scale. X-Struct: passivity + refusal structure certified; the bell geometry is AUTHORED (a measured bell mesh slots through the same seam); green awaits measured-impedance brass gates. No rational fit performed (fs-vfit certificate class lane = the .4.2 runtime consumer)."
-    },
-    {
-      "filling": "brass",
-      "image": "mm-char-line",
-      "qoi": "held-fingering-cents",
-      "owner_crates": [
-        "fs-couple",
-        "fs-vfit",
-        "fs-duct"
-      ],
-      "exactness": [
-        "X-Consist",
-        "X-Struct"
-      ],
-      "gate": "ungated",
-      "live_default": "no",
-      "determinism": "one-host",
-      "evidence": [
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/src/mm_line.rs::ml_001_held_fingering_matches_the_authority"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/src/mm_line.rs::ml_002_realization_bakeoff_receipt"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/src/mm_line.rs::ml_003_valve_switch_carries_state_without_click"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/src/mm_line.rs::ml_004_passivity_and_receipts"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/src/mm_line.rs::ml_005_mouthpiece_cup_matches_the_analytic_shunt"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/src/mm_line.rs::ml_006_causality_splice_and_refusals"
-        },
-        {
-          "kind": "bakeoff",
-          "ref": "ml-002-bakeoff-receipt: dominant R00 vs N^2 matrix \u2014 <1 cent apart, plane energy fraction >0.999, 9x cost; dominant is the play image, matrix retained for higher-mode sources"
-        }
-      ],
-      "budget_row": null,
-      "corpus_refs": [],
-      "notes": "MM characteristic-line runtime: per-valve exact-FIR R00 lines from the fs-duct MM authority (8 round trips; a 4-trip tail cost 92 cents on the lowest peak \u2014 executed), tabulated bell load with disclosed splice, passivity enforced ON STORED TAPS, carry-history + crossfade valve lift (hard-cut falsifier executed), trapezoidal D18 cup junction. Line fidelity 0.39 cents vs authority over 3 combos; explicit-junction loop skew disclosed (38 cents at a 127-sample period, shared with the reed voice). X-Consist through the MM ladder; X-Struct passivity/lift structure. Green awaits the brass playing loop + measured-impedance gates (.4.3)."
-    },
-    {
-      "filling": "valve",
-      "image": "reduce-lab",
-      "qoi": "cantilever-reduction",
-      "owner_crates": [
-        "fs-solid",
-        "fs-modal"
-      ],
-      "exactness": [
-        "X-Consist",
-        "X-Est"
-      ],
-      "gate": "ungated",
-      "live_default": "no",
-      "determinism": "one-host",
-      "evidence": [
-        {
-          "kind": "test",
-          "ref": "crates/fs-solid/src/reduce.rs::rl_001_cantilever_oracle"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-solid/src/reduce.rs::rl_002_card_drives_the_valve_island"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-solid/src/reduce.rs::rl_003_refusals"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-solid/src/reduce.rs::rl_004_card_round_trip_and_tamper"
-        }
-      ],
-      "budget_row": null,
-      "corpus_refs": [],
-      "notes": "Offline lip/reed reduce lab: mesh + material card -> (K,M) -> certified modes -> ValveCard (face-unit-translation normalization keeps physical units; retained-compliance vs exact static K^-1 refusal; orifice measured from the mesh; provenance chain + tamper-refusing canonical bytes; beating_reed() mint matching the runtime face convention). EXECUTED falsification recorded: the base-excitation participation phi^T M r retained 1e-11 of the compliance \u2014 the force projection phi^T r is the correct modal-compliance projection. X-Est: the battery's tissue card is synthetic-authored (NO soft-tissue pack exists in data/matdb; recorded upgrade path); one lab serves lips/cane/vocal folds. Green awaits measured coupons + track gates (.4.3/.6.2/voice)."
-    },
-    {
-      "filling": "brass",
-      "image": "playing-loop",
-      "qoi": "emergent-lock",
-      "owner_crates": [
-        "fs-couple",
-        "fs-phs",
-        "fs-duct"
-      ],
-      "exactness": [
-        "X-Struct",
-        "X-Est"
-      ],
-      "gate": "ungated",
-      "live_default": "no",
-      "determinism": "one-host",
-      "evidence": [
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/src/brass_loop.rs::bl_001_005_emergent_gates"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/src/brass_loop.rs::bl_006_no_click_valve_change"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/src/brass_loop.rs::bl_007_structural_honesty_and_refusals"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/src/brass_loop.rs::bl_008_radiated_observer_from_the_bake"
-        },
-        {
-          "kind": "listening",
-          "ref": "data/listening/brass-emergent.listening-receipt (artifact be75f4e29b35123a; UNADJUDICATED - supports_pass()==false until the owner's ear rules)"
-        }
-      ],
-      "budget_row": null,
-      "corpus_refs": [],
-      "notes": "The composed brass loop: outward-striking lip MSD island x MM char lines x D18 cup, PITCH NEVER ASSIGNED (grep-enforced control surface). Emergent: lock in the outward band above the cup-loaded column peak (238 cents above peak, 281 from the lip alone); tension walks partials (209->445 Hz); valves drop the series monotonically (-125/-200 cents); slotting (+78 cents in-slot, 1310 between); cold horn -50.4 cents vs -48.6 predicted; no-click valve lift with executed hard-cut falsifier; observer weights from the bake's SH table. NUMERICS LESSON in CONTRACT: one-sample-delayed Bernoulli flow is anti-dissipative above fs/4 (7.3 kHz parasitic executed) \u2014 closed-form implicit flow/junction solve fixed it; line-tap passivity needs a 4x-oversampled grid (inter-bin Gibbs). X-Est: authored card-scale lip; the trumpet CLAIM is decided in .4.4 with measured-impedance gates."
-    },
-    {
-      "filling": "brass",
-      "image": "hb-lock-oracle",
-      "qoi": "periodic-orbit-agreement",
-      "owner_crates": [
-        "fs-vmanifest"
-      ],
-      "exactness": [
-        "X-Consist"
-      ],
-      "gate": "ungated",
-      "live_default": "no",
-      "determinism": "one-host",
-      "evidence": [],
-      "budget_row": null,
-      "corpus_refs": [],
-      "notes": "PLACEHOLDER (3ez8g.4.4 scope 1): the harmonic-balance lock oracle lands with the HB epic (3ez8g.11) in its D23-reserved home, the fs-vmanifest::i09 periodic-orbit slot (a general service; never a music-local kernel, never inside fs-duct). This row exists so the brass gate summary enumerates the whole image menu honestly. Ungated with empty evidence until the epic delivers; the periodic-orbit cross-check will arbitrate the time-domain loop's lock frequencies."
-    },
-    {
-      "filling": "brass",
-      "image": "trumpet-vertical",
-      "qoi": "corpus-cents-gate",
-      "owner_crates": [
-        "fs-couple",
-        "fs-duct",
-        "fs-bem"
-      ],
-      "exactness": [
-        "X-Est"
-      ],
-      "gate": "ungated",
-      "live_default": "no",
-      "determinism": "one-host",
-      "evidence": [
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/src/brass_loop.rs::bl_001_005_emergent_gates (lock/series/valves/slotting/c(T) all executed)"
-        },
-        {
-          "kind": "bakeoff",
-          "ref": "crates/fs-couple/tests/receipts/brass-mm-vs-plane.bakeoff (image scoping decided)"
-        },
-        {
-          "kind": "listening",
-          "ref": "data/listening/brass-emergent.listening-receipt (UNADJUDICATED)"
-        },
-        {
-          "kind": "corpus",
-          "ref": "vvreg:acoustic-absent-trumpet-impedance (the corpus gate CANNOT run yet)"
-        }
-      ],
-      "budget_row": null,
-      "corpus_refs": [
-        "vvreg:acoustic-absent-trumpet-impedance"
-      ],
-      "notes": "THE TRUMPET CLAIM, decided honestly (3ez8g.4.4): UNGATED. What holds: the emergent mechanism executes end to end (lock in the outward-striking band, tension walks partials, valves drop the series with no pitch input, slotting, c(T) within 2 cents of the sound-speed law); the MM image owns the flare per the committed bake-off; the bell load is baked and passive; every fixture input is provenance-labeled. What is MISSING for green, by name: (1) the measured trumpet-impedance corpus (absence row registered - the cents gate cannot run against nothing); (2) an ADJUDICATED listening receipt (committed one is Unadjudicated, supports_pass()==false); (3) a budget row for live_default (D25). No partial credit: machinery-complete is not claim-green."
-    },
-    {
-      "filling": "hammer-felt",
-      "image": "hunt-crossley",
-      "qoi": "transient-point-contact",
-      "owner_crates": [
-        "fs-contact"
-      ],
-      "exactness": [
-        "X-Struct"
-      ],
-      "gate": "ungated",
-      "live_default": "no",
-      "determinism": "one-host",
-      "evidence": [
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/tests/bakeoff_felt.rs::committed_felt_bakeoff_receipt_shows_the_structural_gap"
-        },
-        {
-          "kind": "bakeoff",
-          "ref": "crates/fs-couple/tests/receipts/piano-felt-vs-hc.bakeoff: KeepForSubset(hunt-crossley -> debug/second-hammer + generic transient point contacts; never the piano felt claim)"
-        }
-      ],
-      "budget_row": null,
-      "corpus_refs": [],
-      "notes": "fs-contact's EXISTING HuntCrossleySphere as the DEBUG/second hammer image, scope DECIDED by the committed receipt (D21: narrowed, never deleted; D24: no third HC implementation anywhere \u2014 every force in the bake-off came from NormalPatchRequest::evaluate). Measured on the shared 87zbd strike island: contact duration falls with velocity like a hammer should, tilt trend 17.2x (real but 1.67x flatter than the felt's 28.8x), residual strain IDENTICALLY ZERO at every velocity (memoryless law \u2014 the structural gap the receipt quantifies). EXECUTED CALIBRATION LESSON: the 1+c*rate factor needs restitution-scale coefficients (c ~ 3(1-e)/2v); the first mint's c=8 s/m was a 33x loading multiplier at forte that INVERTED the contact-duration trend."
-    },
-    {
-      "filling": "brass",
-      "image": "crook-delta",
-      "qoi": "cad-band-certificate",
-      "owner_crates": [
-        "fs-query"
-      ],
-      "exactness": [
-        "X-Consist",
-        "X-Est"
-      ],
-      "gate": "ungated",
-      "live_default": "no",
-      "determinism": "one-host",
-      "evidence": [
-        {
-          "kind": "test",
-          "ref": "crates/fs-query/tests/crook.rs::gk_001_three_valve_fixture_and_slide_range"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-query/tests/crook.rs::gk_002_band_refusals_by_name"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-query/tests/crook.rs::gk_003_composed_peak_shift_oracle"
-        }
-      ],
-      "budget_row": null,
-      "corpus_refs": [],
-      "notes": "Valve/crook delta-L minting: bore-extractor receipts certified against CAD centerline arc length (refuse-outside band; a wrong crook is a data error, never a silently detuned horn), interior-station port-area continuity vs the DECLARED junction step (undeclared mismatch refuses; declared step passes \u2014 feature vs error distinguished), slide ranges from endpoint pairs. COMPOSED ORACLE EXECUTED: extracted dL=0.4364 m moves the TMM first peak -936.1 cents vs -931.6 predicted (4.5 cents in a 12-cent band) \u2014 the emergent-pitch precondition. X-Est via the bore extractor; the fixture is authored CAD-like geometry (real trumpet CAD slots through the same seam)."
-    },
-    {
-      "filling": "gesture",
-      "image": "typed-schedule",
-      "qoi": "replayable-performance",
-      "owner_crates": [
-        "fs-scenario"
-      ],
-      "exactness": [
-        "X-Exact"
-      ],
-      "gate": "ungated",
-      "live_default": "no",
-      "determinism": "one-host",
-      "evidence": [
-        {
-          "kind": "test",
-          "ref": "crates/fs-scenario/src/gesture.rs::gs_001_deterministic_sampling_and_ramps"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-scenario/src/gesture.rs::gs_002_round_trip_and_content_hash"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-scenario/src/gesture.rs::gs_003_refusals_by_name"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-scenario/src/gesture.rs::gs_004_fret_is_length_plus_obstacle"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/tests/gesture_schedule.rs::schedule_driven_render_is_bitwise_identical_to_inline"
-        }
-      ],
-      "budget_row": null,
-      "corpus_refs": [],
-      "notes": "Typed gesture schedules: the full player-action table (valves/holes/slides/tension/frets/bow/hammers/pedals incl. una corda + sostenuto/termination swaps/breath) as replayable data with type-level unit discipline, integer-tick deterministic sampling, canonical bytes + content hash, and refuse-by-name (incl. the unknown-control-id falsifier \u2014 never a silent no-op). X-Exact: sampling is exact arithmetic on the schedule; the e2e proves schedule-vs-inline BITWISE equality through the render API. No MIDI anywhere; a fret is a length + obstacle, never a mechanism."
-    },
-    {
-      "filling": "wind-reed",
-      "image": "articulation-hop",
-      "qoi": "measured-hop-policy",
-      "owner_crates": [
-        "fs-couple"
-      ],
-      "exactness": [
-        "X-Struct",
-        "X-Est"
-      ],
-      "gate": "ungated",
-      "live_default": "no",
-      "determinism": "one-host",
-      "evidence": [
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/src/wind_line.rs::wa_001_sigma_transient_and_slur"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/src/wind_line.rs::wa_002_register_vent_flips_the_twelfth"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/src/wind_line.rs::wa_003_gate_refusal_is_structural"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/src/wind_line.rs::wa_004_hop_policy_is_measured_data"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/src/wind_line.rs::committed_hop_policy_is_consistent"
-        },
-        {
-          "kind": "receipt",
-          "ref": "data/claims/wind-hop-policy.tsv (settle eps=0.05 m=4; settled click 0.50-0.60 vs attack 0.86)"
-        }
-      ],
-      "budget_row": null,
-      "corpus_refs": [],
-      "notes": "Wind articulation: per-fingering char-line bank (carry+fade), sigma slur (+265 cents, envelope held), REGISTER VENT measured (inertive vent flips the twelfth at 0.70L \u2014 the classic pressure-release L/3 rule INVERTS for a chimneyed vent; the lock lands 18 cents from the TMM authority's own peak), char->VFIT hop with the replay-prime D17 lift and STRUCTURAL gate refusal (an ungated image cannot be entered mid-performance). THE POLICY IS DATA: committed wind-hop-policy.tsv (settle detector params + click-vs-timing table; the detector errs conservatively late). Estimator lesson bank grew: even-HPS blind on odd-harmonic spectra; odd products self-similar under 3x; AUTOCORRELATION is the unambiguous fundamental estimator for closed-pipe locks."
-    },
-    {
-      "filling": "hammer-felt",
-      "image": "piano-vertical",
-      "qoi": "emergent-aftersound",
-      "owner_crates": [
-        "fs-couple",
-        "fs-material"
-      ],
-      "exactness": [
-        "X-Consist",
-        "X-Est"
-      ],
-      "gate": "ungated",
-      "live_default": "no",
-      "determinism": "one-host",
-      "evidence": [
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/src/piano_vertical.rs::pv_001_tilt_contrast_survives_the_composition"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/src/piano_vertical.rs::pv_002_partials_follow_the_inharmonicity_law"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/src/piano_vertical.rs::pv_003_two_stage_decay_and_beats"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/src/piano_vertical.rs::pv_004_pedals_change_decay_topology"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/src/piano_vertical.rs::pv_005_ledger_and_bitwise_replay"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/tests/piano_gates.rs::pg_001_board_from_the_fs_plate_authority"
-        },
-        {
-          "kind": "listening",
-          "ref": "data/listening/piano-ladder.listening-receipt (artifact 966d5adee719c41d; UNADJUDICATED - supports_pass()==false until the owner's ear rules on the pp->ff tilt)"
-        }
-      ],
-      "budget_row": null,
-      "corpus_refs": [
-        "vvreg:acoustic-absent-felt-coupon",
-        "vvreg:acoustic-absent-measured-frf-trace"
-      ],
-      "notes": "The composed piano vertical: unison+duplex+board (power-conjugate bridge)+felt island+pedal states. EMERGENT: tilt contrast survives the composition (felt trend 159.7 vs linear control 1.0 \u2014 the strongest tilt discrimination in the program); inharmonicity B measured in audio (4.2 cents, B=0 falsifier 3.6x worse); Weinreich two-stage decay (3.28 vs 1.15 /s) with detune-scaling audio-envelope beats; damper/una-corda topology; ledger non-increasing + bitwise replay. FOUR measurement laws in CONTRACT (each an executed misread first): read string laws from string state (board spectra carry board lines); board envelopes are blind to antisymmetric survivors; strong detune suppresses EXCHANGE but not the heard chorus (audio envelope); smoothers must sit between coupling slosh (33 Hz) and detune beats (2-4 Hz). X-Est: authored board/bridge geometry; promotion in .5.3. GATES REVIEW (.5.3): the board now also runs FROM the fs-plate modal authority (pg-001: aftersound survives the authority board); the tilt-vs-COUPON gate and the measured-board-FRF loop stay NAMED on their absence rows \u2014 ungated until those corpora land."
-    },
-    {
-      "filling": "hammer-felt",
-      "image": "linear-spring",
-      "qoi": "debug-control",
-      "owner_crates": [
-        "fs-couple"
-      ],
-      "exactness": [
-        "X-Exact"
-      ],
-      "gate": "green",
-      "live_default": "no",
-      "determinism": "one-host",
-      "evidence": [
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/tests/felt_hammer_island.rs::contact_duration_falls_with_velocity_unlike_the_linear_spring"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/src/piano_vertical.rs::pv_001_tilt_contrast_survives_the_composition"
-        }
-      ],
-      "budget_row": null,
-      "corpus_refs": [],
-      "notes": "The matched-secant linear spring as the DEBUG/control hammer image only \u2014 its claim IS being the null hypothesis: amplitude-independent contact duration (within 1 sample) and a flat tilt trend (1.000 on the composed vertical vs the felt's 159.7). GREEN for exactly that debug-control claim set and nothing else; it can never carry an attack claim (the contrast gates exist to prove it cannot)."
-    },
-    {
-      "filling": "string",
-      "image": "waveguide-dispersive",
-      "qoi": "budget-hero-string",
-      "owner_crates": [
-        "fs-vfit",
-        "fs-couple"
-      ],
-      "exactness": [
-        "X-Est"
-      ],
-      "gate": "ungated",
-      "live_default": "no",
-      "determinism": "one-host",
-      "evidence": [
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/tests/bakeoff_dispersion.rs::committed_dispersion_receipt_decides_and_modal_rows_are_untouched"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/tests/bakeoff_dispersion.rs::dispersion_stage_is_passive_and_the_control_is_harmonic"
-        },
-        {
-          "kind": "bakeoff",
-          "ref": "crates/fs-couple/tests/receipts/string-modal-zoh-vs-waveguide-dispersive.bakeoff (KeepBoth: modal keeps every certified claim; the waveguide earns the budget-constrained hero-string scope)"
-        }
-      ],
-      "budget_row": null,
-      "corpus_refs": [],
-      "notes": "The [F] alternative earned by bake-off (3ez8g.7.2): stiffness as DISPERSION ON THE LINE \u2014 a first-order allpass cascade in fs_vfit::DelayedFilter (|H|=1 structurally passive; |a|>=1 and zero sections refuse). On the shared music-wire card (E=200GPa d=1mm L=0.65m T=700N) the executed receipt measured B_hat/B=1.014 with worst partial 9.8 cents (the linear-fractional-interpolation phase is the named residual owner) while the DISPERSIONLESS control missed the law by 41 cents \u2014 the stage carries the physics. Budget honesty: modal holds FEWER states on this card (108 vs 173); the differing shape is OPS (~10x fewer flops/sample) and flat scaling in partial count. NEVER the certified-partial image: modal-zoh keeps every certified claim (D21 asserted in the gate test against the live registry)."
-    },
-    {
-      "filling": "bar",
-      "image": "modal-zoh",
-      "qoi": "freefree-ratio-gate",
-      "owner_crates": [
-        "fs-couple"
-      ],
-      "exactness": [
-        "X-Exact",
-        "X-Est"
-      ],
-      "gate": "green",
-      "live_default": "no",
-      "determinism": "one-host",
-      "evidence": [
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/tests/xylophone_bar.rs::xb_001_roots_self_verify_and_match_the_tabulated_values"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/tests/xylophone_bar.rs::xb_002_ratio_gate_holds_and_the_pinned_falsifier_fails_it"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/tests/xylophone_bar.rs::xb_003_striking_a_node_suppresses_the_partial"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/tests/xylophone_bar.rs::xb_004_committed_receipt_matches_the_committed_artifact"
-        },
-        {
-          "kind": "listening",
-          "ref": "data/listening/xylophone-strike.listening-receipt (artifact fc174bd883cca151; UNADJUDICATED - supports_pass()==false until the owner's ear rules)"
-        }
-      ],
-      "budget_row": null,
-      "corpus_refs": [],
-      "notes": "The cheapest FULL filling: free-free Euler-Bernoulli bar (Indian-rosewood pack E_L=13.53 GPa; density = SG*1000 authored Estimate, disclosed) + exact-ZOH runtime + Hertz mallet island. GREEN FOR THE UNIFORM PRISMATIC BAR EXACTLY AND ONLY THAT: beta*L roots computed in-fixture by deterministic Newton (self-verified at machine zero, cross-checked vs the classical table at 1e-8), rendered ratio gate f2/f1=2.7565 f3/f1=5.4039 within 1%, and the BOUNDARY-CONDITION FALSIFIER executed (the pinned n^2 family measures f2/f1=4.000 and fails the same gate \u2014 the bead's recorded polish catch made executable). Node physics emergent: mode-1 node found in-fixture at 0.2242 (the cord-mount point); striking it suppresses the fundamental ~8 orders; center strike kills partial 2. NAMED SUCCESSOR: real bars are ARCHED to tune f2/f1 toward 3-4 \u2014 needs a varying-section solver; not claimed. Listening artifact minted, unadjudicated."
-    },
-    {
-      "filling": "wind-reed",
-      "image": "reduced-cane-card",
-      "qoi": "threshold-brightness-sensitivity",
-      "owner_crates": [
-        "fs-couple",
-        "fs-solid",
-        "fs-material"
-      ],
-      "exactness": [
-        "X-Consist",
-        "X-Est"
-      ],
-      "gate": "ungated",
-      "live_default": "no",
-      "determinism": "one-host",
-      "evidence": [
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/tests/cane_reed_card.rs::cr_001_the_minted_card_carries_the_provenance_chain"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/tests/cane_reed_card.rs::cr_002_threshold_and_brightness_follow_cane_and_lay"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/tests/cane_reed_card.rs::cr_003_refusals_fire_by_name"
-        }
-      ],
-      "budget_row": null,
-      "corpus_refs": [],
-      "notes": "Shaped like a reed, made of cane: tapered vamp mesh + the CC-BY cane packs through the reduce lab (f1=2709 Hz - the measured clarinet-reed class), driving the EXISTING realize_reed_bore loop; the authored-parameter path remains the Estimate debug image. Provenance chain: mesh digest + material resolution identity (heel E_L 5.0 GPa dry; blank-zone density DISCLOSED mismatch; eta=delta/pi from the damping pack) + reduction options + retained-compliance disclosure (0.965). The LAY is a measured-geometry chart (tip opening + facing length -> arc radius 0.145 m), v1 consumed as the rest gap; rolling-stiffness hardening is the named successor. MEASURED sensitivities: more-open lay +46% threshold (2044->2992 Pa, clarinet-class); harder cane (+1 sigma from the pack) reads BRIGHTER at matched breath above both thresholds (+1.9% centroid) with the ordering INVERTING near the soft threshold (both regimes recorded); cane-stiffness threshold shift is below the 1.21x ladder rung (logged, not overclaimed). TWO vacuous-gate traps caught en route: an absolute 1e-4 Pa speak detector fired on ringing at every rung, twice - the shipped detector demands SUSTAINED output at 2% of blowing pressure. Isotropic-reduction disclosure: E_L only; the 10x E_T anisotropy unrepresented."
-    },
-    {
-      "filling": "voice-glottis",
-      "image": "one-dof-surface-wave",
-      "qoi": "phonation-onset-curve",
-      "owner_crates": [
-        "fs-couple",
-        "fs-phs",
-        "fs-dcontact"
-      ],
-      "exactness": [
-        "X-Consist",
-        "X-Est"
-      ],
-      "gate": "ungated",
-      "live_default": "no",
-      "determinism": "one-host",
-      "evidence": [
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/src/glottis.rs::gl_001_both_islands_self_oscillate_with_onset_curves"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/src/glottis.rs::gl_002_collision_ledger_and_passivity"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/src/glottis.rs::gl_003_two_mass_phase_and_flow_skew"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/src/glottis.rs::gl_004_bakeoff_fixture_qois_on_identical_tract_and_card"
-        },
-        {
-          "kind": "bakeoff",
-          "ref": "crates/fs-couple/tests/receipts/glottis-one-dof-vs-two-mass.bakeoff (KeepBoth: cheap-ensemble scope earned)"
-        }
-      ],
-      "budget_row": null,
-      "corpus_refs": [],
-      "notes": "EARNED SCOPE (executed bake-off receipt, KeepBoth): CHEAP-ENSEMBLE \u2014 2 states, robust limit cycle, loud-pressure onset class, rough-source character. The 1-DOF glottal island (Titze surface-wave delay; c_mucosal=1 m/s authored). RE-BASED under the CORRECTED volume-normalized tract load (the original close's numbers were measured against a flat-R load - the zc defect found by the tract lane): onset ~5.8 kPa (loud-pressure class, NOT physiological speech; part of the bake-off record) and NON-monotone in stiffness (the fixed delay's phase tuning moves with fold frequency - the mechanism's real behavior, recorded); at its own drive f0 173 Hz, OQ 0.945, slope -12.4 dB/oct, jitter 0.105 (rough/breathy characterization). The five-bug debugging arc remains recorded in-code."
-    },
-    {
-      "filling": "voice-glottis",
-      "image": "two-mass",
-      "qoi": "phonation-onset-curve",
-      "owner_crates": [
-        "fs-couple",
-        "fs-phs",
-        "fs-dcontact"
-      ],
-      "exactness": [
-        "X-Consist",
-        "X-Est"
-      ],
-      "gate": "ungated",
-      "live_default": "no",
-      "determinism": "one-host",
-      "evidence": [
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/src/glottis.rs::gl_001_both_islands_self_oscillate_with_onset_curves"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/src/glottis.rs::gl_002_collision_ledger_and_passivity"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/src/glottis.rs::gl_003_two_mass_phase_and_flow_skew"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/src/glottis.rs::gl_004_bakeoff_fixture_qois_on_identical_tract_and_card"
-        },
-        {
-          "kind": "bakeoff",
-          "ref": "crates/fs-couple/tests/receipts/glottis-one-dof-vs-two-mass.bakeoff (KeepBoth: solo-realism scope earned)"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/tests/vowel_gates.rs::vw_002_sung_interaction_pulls_near_the_first_formant"
-        },
-        {
-          "kind": "listening",
-          "ref": "data/listening/vowel-ladder.listening-receipt (artifact b54127c96c2223eb; UNADJUDICATED)"
-        }
-      ],
-      "budget_row": null,
-      "corpus_refs": [],
-      "notes": "EARNED SCOPE (executed bake-off receipt, KeepBoth): SOLO-REALISM \u2014 physiological onsets, the vertical-phase mechanism, low jitter; the voice claims build on it (vw-002 sung interaction: f0 pulled ~35% above free by the load with a REGISTER BREAK at the F1 ceiling \u2014 the vocoder-impossible physics, measured). The two-mass glottal island (coupling inside the Hamiltonian; corrected S-H driving; asymmetric seed; dcontact collision). RE-BASED under the CORRECTED volume-normalized tract load: onsets 404/488/715 Pa rising with stiffness (physiological - the structural vertical-phase mechanism is robust to the load correction), upper lags lower 0.462 rad (STRONGER than under the defective load), f0 178 Hz, OQ 0.813, slope -12.7 dB/oct, jitter 0.0009. Flow skew measured near-symmetric (0.97) - LOGGED not asserted; glottal-duct inertance is the named upgrade for skew. Masses/stiffnesses/length receipted from the licensed pack."
-    },
-    {
-      "filling": "voice-tract",
-      "image": "char-line-chart",
-      "qoi": "formant-oracle-agreement",
-      "owner_crates": [
-        "fs-couple",
-        "fs-duct"
-      ],
-      "exactness": [
-        "X-Consist",
-        "X-Est"
-      ],
-      "gate": "ungated",
-      "live_default": "no",
-      "determinism": "one-host",
-      "evidence": [
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/src/tract.rs::vt_001_static_vowels_match_the_tmm_oracle_and_differ"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/src/tract.rs::vt_002_yielding_walls_raise_the_first_formant"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/src/tract.rs::vt_003_u_to_a_morph_is_click_free_with_formant_tracks"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/src/tract.rs::vt_004_refusals_fire_by_name"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/tests/vowel_gates.rs::vw_001_formant_class_gate_and_the_shifted_falsifier"
-        }
-      ],
-      "budget_row": null,
-      "corpus_refs": [
-        "vvreg:acoustic-assaneo-2011-tract-a",
-        "vvreg:acoustic-assaneo-2011-tract-u"
-      ],
-      "notes": "The tract as A(x,t): LICENSED charts (Assaneo 2011 PLOS CC-BY Table 2 - the authors' own 10-tube /a/ and /u/, transcribed + pdftotext-verified; Spanish, acoustically-inverted, formant-valid register disclosed; Story 1996 unlicensable, Dresden CC0 meshes = named MRI upgrade vein). D22 EXECUTED as a whole-curve gate: char impulse-spectrum vs TMM |Z_in| envelope correlation 0.87/0.90 with dominant resonances within 50 Hz; yielding tissue walls raise F1 340->401 Hz (nearest-peak comparison - the wall contributes its own ~100 Hz mode); the u->a morph at 100 Hz control rate with the carry + p-minus-continuity lift clicks 18x less than the five-cut waypoint control (0.116 vs 2.083 on the REFLECTED wave - the raw metric saturates on excitation pulses), F1 track 353->806 Hz. THE LANE'S STRUCTURAL FIND: characteristic_line consumers must pass VOLUME-normalized zc (rho c/S) - an area-free rho*c flattens R to +1 and erases the shape (the glottis module carried this defect; its gates were re-based); rigid-wall short tracts realize ACTIVELY (IR outlasts the window - the walls are required for the realization itself); dense n_fft=4096 via characteristic_line_dense."
-    },
-    {
-      "filling": "voice-tract",
-      "image": "vfit-hold",
-      "qoi": "held-vowel-only",
-      "owner_crates": [
-        "fs-vfit",
-        "fs-couple"
-      ],
-      "exactness": [
-        "X-Est"
-      ],
-      "gate": "ungated",
-      "live_default": "no",
-      "determinism": "one-host",
-      "evidence": [],
-      "budget_row": null,
-      "corpus_refs": [],
-      "notes": "The VFIT rational-hold image for a HELD vowel only \u2014 STRUCTURALLY FAILS on articulation (a rational fit cannot morph; the row says so, per the .8.3 scope). NAMED MISSING: no executed tract 1-port fit exists yet (the wind-hop precedent supplies the machinery); until one is fit and certified this row stays evidence-free and ungated \u2014 registered so the menu shows the hole instead of hiding it."
-    },
-    {
-      "filling": "electric-string",
-      "image": "faraday-pickup-port",
-      "qoi": "station-voicing-comb",
-      "owner_crates": [
-        "fs-couple",
-        "fs-phs"
-      ],
-      "exactness": [
-        "X-Consist",
-        "X-Est"
-      ],
-      "gate": "ungated",
-      "live_default": "no",
-      "determinism": "one-host",
-      "evidence": [
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/src/pickup.rs::pk_001_station_voicing_matches_the_window_weighted_prediction"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/src/pickup.rs::pk_002_two_pickups_comb_when_mixed"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/src/pickup.rs::pk_003_point_limit_and_no_state_duplication"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/src/pickup.rs::pk_005_emf_drives_the_dae_circuit_end_to_end"
-        }
-      ],
-      "budget_row": null,
-      "corpus_refs": [],
-      "notes": "The Faraday pickup as a PURE-READER PORT (D20 as structure: pose + per-mode window gains only; emf() reads the string owner's modal velocities \u2014 no step, no state, no re-discretization). Window-weighted flux map (raised-cosine aperture, unit-normalized so the point-pickup limit is EXACT \u2014 gated at 5e-4); bridge/neck voicing emerges (centroid 452 vs 328 Hz) with every per-mode EMF line matching the INDEPENDENT Simpson-integrated analytic gain within 5%; two mixed pickups comb per the gain-sum prediction with an executed notch. EMF drives the .9.1 circuit DAE end-to-end (RC load rolloff matches first-order analytic at 0.25x/4x cutoff; supply defect 1e-21). AUTHORED Estimate v1: linearized flux, dipole-like height profile; the MAGNETOSTATIC BAKE is the recorded follow-up. EN ROUTE: the .9.1 commit had shipped fs_phs::circuit behind a stolen cfg(test) (invisible to consumers) \u2014 fixed here."
-    },
-    {
-      "filling": "electric-string",
-      "image": "ts-driver-cabinet",
-      "qoi": "sealed-box-ts-algebra",
-      "owner_crates": [
-        "fs-couple",
-        "fs-phs"
-      ],
-      "exactness": [
-        "X-Consist",
-        "X-Est"
-      ],
-      "gate": "ungated",
-      "live_default": "no",
-      "determinism": "one-host",
-      "evidence": [
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/src/speaker.rs::ts_001_sealed_box_shift_matches_the_ts_algebra"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/src/speaker.rs::ts_002_impedance_curve_shows_the_motional_peak"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/src/speaker.rs::ts_003_panel_mode_colors_the_response_and_is_disclosed"
-        },
-        {
-          "kind": "test",
-          "ref": "crates/fs-couple/src/speaker.rs::ts_004_excursion_refuses_past_the_card_limit"
-        }
-      ],
-      "budget_row": null,
-      "corpus_refs": [],
-      "notes": "The Thiele-Small driver + sealed cabinet as ONE pHS: the Bl gyrator is an antisymmetric J pair (power-exact by construction), the box is Sd^2 rho c^2/V extra stiffness on the cone (which is WHY the classic fc = fs sqrt(1+Vas/Vb) algebra holds - measured 64.7 vs 65.1 Hz analytic, 0.6%), the motional impedance peak matches the analytic TS curve to the printed digit at 0.5/1/2/6x fs, and ONE fs-plate-class panel mode couples through the shared cavity term (coloration 1-1.5% near its resonance, ZERO far - executed contrast; X-Consist with one retained mode, disclosed). EXCURSION HONESTY: past x_max REFUSES (suspension nonlinearity unmodeled - no silent linear forte). Card = authored datasheet-class Estimate; low-ka piston load disclosed; NO cabinet IR packs anywhere (charts + cards, never convolution). Ledger defect 3e-19. Vented box + full piston impedance + manufacturer-sheet ingest = recorded follow-ups."
+     "kind": "test",
+     "ref": "crates/fs-duct/src/lib.rs::FingeringTable (typed fingering data; unknown label refuses)"
     }
-  ]
+   ],
+   "budget_row": null,
+   "corpus_refs": [
+    "vvreg:acoustic-ernoult-2021-xxxx",
+    "vvreg:acoustic-ernoult-2021-xxxo",
+    "vvreg:acoustic-ernoult-2021-xxox",
+    "vvreg:acoustic-ernoult-2021-xoxx",
+    "vvreg:acoustic-ernoult-2021-oxxx"
+   ],
+   "notes": "GREEN per the 3ez8g.6.1 wind gates review (2026-08-16): the Ernoult five-fingering ladder executes FROM registered corpus rows (-8/-8/-18/-17/-20 cents inside the 30-cent outer envelope, deviations systematically FLAT \u2014 the inner correction slightly large \u2014 so tone-hole refinements have this dataset as their regression floor) with the 15mm-detune falsifier proving discrimination. THE DISPERSION PIN travels on this row: at a 2 mm bore the LOSSLESS model is 85 CENTS sharp and ZK closes it to 8 \u2014 losses are load-bearing; any future faster lossless mode is a FAST-MODE row with this failure disclosed, never a silent swap. X-Consist bore, X-Struct ZK losses. live_default stays no until a wind budget row lands (D25)."
+  },
+  {
+   "filling": "wind-reed",
+   "image": "char-line",
+   "qoi": "junction-match-tmm-r",
+   "owner_crates": [
+    "fs-vfit",
+    "fs-couple"
+   ],
+   "exactness": [
+    "X-Exact",
+    "X-Struct"
+   ],
+   "gate": "green",
+   "live_default": "no",
+   "determinism": "one-host",
+   "evidence": [
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/tests/wind_junction_gate.rs::char_junctions_match_tmm_r_and_the_detuned_hole_fails"
+    },
+    {
+     "kind": "bakeoff",
+     "ref": "crates/fs-couple/tests/receipts/wind-fracdelay-linear-vs-thiran.bakeoff (c997b03756525680): continuous-pitch POLICY decided \u2014 the current linear-frac law KEEPS the lane (clicks 1.53 vs Thiran 5.97; landing 5.3 vs 8.3 cents); naive time-varying Thiran REFUSED on the measured passivity law (5.6x energy pumping on fast ramps); stepped zipper baseline quantified (10.5 click). Trombone slide + voice articulation cite this receipt."
+    }
+   ],
+   "budget_row": null,
+   "corpus_refs": [
+    "vvreg:acoustic-ernoult-2021-xxxx",
+    "vvreg:acoustic-ernoult-2021-xxxo",
+    "vvreg:acoustic-ernoult-2021-xxox",
+    "vvreg:acoustic-ernoult-2021-xoxx",
+    "vvreg:acoustic-ernoult-2021-oxxx"
+   ],
+   "notes": "GREEN per the 3ez8g.6.1 review: the char image's realized reflectance tracks the TMM authority's R(omega) on the holed Ernoult-class bore across three fingerings of the typed FingeringTable (worst gap 0.049 inside the 0.08 band) and the ONE-ARM falsifier (char junction geometry drifting 15 mm from the authority) fails at 0.489. EXECUTED LESSON recorded in the test: perturbing the SHARED duct left both arms agreeing (0.0185) \u2014 an A-vs-B consistency gate is structurally blind to shared-input errors (the metamorphic-blindness law); the falsifier must perturb one arm."
+  },
+  {
+   "filling": "wind-reed",
+   "image": "char-line",
+   "qoi": "quarter-wave-lock",
+   "owner_crates": [
+    "fs-couple",
+    "fs-phs",
+    "fs-dcontact"
+   ],
+   "exactness": [
+    "X-Exact",
+    "X-Struct"
+   ],
+   "gate": "green",
+   "live_default": "no",
+   "determinism": "one-host",
+   "evidence": [
+    {
+     "kind": "listening",
+     "ref": "data/listening/reed-sustained.listening-receipt"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/tests/acoustic_assembly.rs::beating_reed_locks_near_the_quarter_wave"
+    }
+   ],
+   "budget_row": "data/budget-rows/wind-reed-char-line-80cb534fbaf60b50.budgetrow",
+   "corpus_refs": [],
+   "notes": "reed_bore self-oscillates and locks near the quarter-wave resonance (existing fs-couple test); authored reed parameters keep this Estimate-labeled until the cane reed card (3ez8g.6.2) mints receipts. Gates bead: 3ez8g.6.1. BUDGET MEASURED (3ez8g.2.2): 1.39e6 samples/s, 29x headroom at 48 kHz, dispersion 5.4%, release, machine 80cb534f - the program's first admissible real-time number; live_default stays no until the gates review. LISTENING ARTIFACT RENDERED (3ez8g.1.2): 2.0s clip-free at 20 kPa full-scale, receipt UNADJUDICATED (awaiting the owner's ear; structurally useless as pass evidence until adjudicated). GREEN per the 3ez8g.6.1 review: the lock gate executes (28% band on quarter-wave or twelfth) and the row carries the measured budget (1.39e6 samples/s, 29x headroom)."
+  },
+  {
+   "filling": "wind-reed",
+   "image": "vfit-hold",
+   "qoi": "held-fingering-cents",
+   "owner_crates": [
+    "fs-vfit"
+   ],
+   "exactness": [
+    "X-Struct"
+   ],
+   "gate": "green",
+   "live_default": "no",
+   "determinism": "one-host",
+   "evidence": [
+    {
+     "kind": "test",
+     "ref": "crates/fs-vfit/tests/clarinet_casebook.rs::clarinet_impedance_to_passive_audio_filter"
+    }
+   ],
+   "budget_row": null,
+   "corpus_refs": [],
+   "notes": "GREEN per the 3ez8g.6.1 review: the clarinet casebook executes end-to-end (24-pole fit, peaks within 2 cents at every stage: continuous, certified, digital-biquad at 192 kHz) and the PASSIVITY CERTIFICATE CLASS IS NAMED FROM MEASUREMENT: GridOnly (the fit's d <= 1e-12 makes the Hamiltonian crossing arm unavailable; the grid check is clean) \u2014 recorded as the class the evidence actually supports, not the stronger class. X-Struct passivity; the e^{-iwt} conjugation discipline documented in the casebook."
+  },
+  {
+   "filling": "wind-reed",
+   "image": "phs-chain",
+   "qoi": "td-oracle-agreement",
+   "owner_crates": [
+    "fs-phs"
+   ],
+   "exactness": [
+    "X-Consist"
+   ],
+   "gate": "ungated",
+   "live_default": "no",
+   "determinism": "one-host",
+   "evidence": [
+    {
+     "kind": "test",
+     "ref": "crates/fs-phs/tests/reed_casebook.rs::reed_as_phs_quasi_static_equilibrium_and_energy_audit"
+    }
+   ],
+   "budget_row": null,
+   "corpus_refs": [],
+   "notes": "UNGATED with the f_Ny DISCLOSURE (3ez8g.6.1): the fine-pHS ladder's Nyquist boundary is PER CONFIGURATION \u2014 a 6-cell ladder cannot claim 8 kHz truth; any row consumer must read f_Ny from the specific chain. Evidence so far: the reed casebook's analytic equilibrium pin and per-step energy ledger. Green awaits a TD-oracle agreement gate on a stated configuration with its f_Ny carried in the receipt."
+  },
+  {
+   "filling": "string",
+   "image": "modal-zoh",
+   "qoi": "pluck-partial-decay",
+   "owner_crates": [
+    "fs-couple",
+    "fs-modal"
+   ],
+   "exactness": [
+    "X-Exact"
+   ],
+   "gate": "green",
+   "live_default": "no",
+   "determinism": "one-host",
+   "evidence": [
+    {
+     "kind": "bakeoff",
+     "ref": "crates/fs-couple/tests/receipts/string-modal-zoh-vs-phs-bank.bakeoff"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/tests/bakeoff_string.rs::string_bakeoff_receipt_is_reproduced_and_golden_pinned"
+    },
+    {
+     "kind": "bakeoff",
+     "ref": "crates/fs-couple/tests/receipts/string-modal-zoh-vs-phs-bank.bakeoff (the truncation cross-check vs the fine-pHS authority: exact per-sample map on the retained basis; missing high modes ABSENT not approximated \u2014 the disclosed failure mode)"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/src/piano_vertical.rs::pv_002_partials_follow_the_inharmonicity_law"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/tests/vibration_gates.rs::vg_001_truncation_gate_and_under_truncated_falsifier"
+    }
+   ],
+   "budget_row": null,
+   "corpus_refs": [],
+   "notes": "GREEN per the 3ez8g.7.1 vibration gates review: X-Exact ON THE TRUNCATED BASIS (the row's N travels with every fixture; missing high modes are absent, never approximated \u2014 the .1.4 bake-off receipt is the executed cross-check vs the fine-pHS authority). The truncation gate (vg-001) DISCLOSES the retained-energy fraction per fixture and its falsifier proves an under-truncated config fails. Exact-ZOH per-sample map at zero solver cost; tension frozen per admission (a ramp needs re-admission - the KC image owns tension dynamics)."
+  },
+  {
+   "filling": "string",
+   "image": "phs-modal-bank",
+   "qoi": "truncation-authority",
+   "owner_crates": [
+    "fs-phs"
+   ],
+   "exactness": [
+    "X-Consist"
+   ],
+   "gate": "green",
+   "live_default": "no",
+   "determinism": "one-host",
+   "evidence": [
+    {
+     "kind": "bakeoff",
+     "ref": "crates/fs-couple/tests/receipts/string-modal-zoh-vs-phs-bank.bakeoff"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/tests/bakeoff_string.rs::string_bakeoff_receipt_is_reproduced_and_golden_pinned"
+    },
+    {
+     "kind": "bakeoff",
+     "ref": "crates/fs-couple/tests/receipts/string-modal-zoh-vs-phs-bank.bakeoff (KeepBoth: authority/cross-check role)"
+    }
+   ],
+   "budget_row": null,
+   "corpus_refs": [],
+   "notes": "GREEN for the AUTHORITY/CROSS-CHECK claim set per the .7.1 review (like the linear-spring null row: its claim IS being the arbiter): Dirac-composable, energy-ledgered, O((w dt)^2) midpoint phase disclosed in the receipt. Never the performance image (Newton per sample); the ZOH rows cite it for truncation truth."
+  },
+  {
+   "filling": "plate",
+   "image": "dkt-modal",
+   "qoi": "literature-modes",
+   "owner_crates": [
+    "fs-plate",
+    "fs-modal"
+   ],
+   "exactness": [
+    "X-Exact"
+   ],
+   "gate": "green",
+   "live_default": "no",
+   "determinism": "one-host",
+   "evidence": [
+    {
+     "kind": "test",
+     "ref": "crates/fs-plate/src/lib.rs::olson_hazell_stiffened_panel_matches_literature"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/tests/piano_gates.rs::pg_001_board_from_the_fs_plate_authority"
+    }
+   ],
+   "budget_row": null,
+   "corpus_refs": [
+    "vvreg:acoustic-leissa-clamped-square-lambda1",
+    "vvreg:acoustic-olson-hazell-1977-mode1",
+    "vvreg:acoustic-olson-hazell-1977-mode2",
+    "vvreg:acoustic-olson-hazell-1977-mode3",
+    "vvreg:acoustic-olson-hazell-1977-mode4",
+    "vvreg:acoustic-olson-hazell-1977-mode5"
+   ],
+   "notes": "GREEN per the .7.1 review: the DKT orthotropic modal image validated against the REGISTERED literature corpus (Olson-Hazell 1977 stiffened panel: five modes within 1.7% of theory under an 8% gate; Leissa clamped-square eigenvalue), inertia-certified through fs-modal, and consumed downstream as the piano board authority (pg-001). X-Exact truncated; truncation N travels per fixture."
+  },
+  {
+   "filling": "plate",
+   "image": "vfit-driving-point",
+   "qoi": "passive-one-port",
+   "owner_crates": [
+    "fs-vfit"
+   ],
+   "exactness": [
+    "X-Struct"
+   ],
+   "gate": "ungated",
+   "live_default": "no",
+   "determinism": "one-host",
+   "evidence": [
+    {
+     "kind": "test",
+     "ref": "crates/fs-vfit/src/passivity.rs::check_passivity (the certificate machinery the 1-port will cite; no executed plate-fit artifact yet)"
+    }
+   ],
+   "budget_row": null,
+   "corpus_refs": [],
+   "notes": "Cheap body-as-1-port on the bridge; passivity certificate class must be named at gate time; fails on a nonlinear top by design. Gates bead: 3ez8g.7.1. .7.1 review: UNGATED with the missing item NAMED \u2014 no EXECUTED plate-1-port fit artifact exists yet (the clarinet casebook certifies the BORE lane; the plate lane needs its own fit + named certificate class before green)."
+  },
+  {
+   "filling": "string-plate-nl",
+   "image": "kc-vonkarman",
+   "qoi": "pitch-glide-analytic",
+   "owner_crates": [
+    "fs-nlmodal"
+   ],
+   "exactness": [
+    "X-Consist"
+   ],
+   "gate": "green",
+   "live_default": "no",
+   "determinism": "one-host",
+   "evidence": [
+    {
+     "kind": "test",
+     "ref": "crates/fs-nlmodal/tests/nlmodal.rs::kirchhoff_carrier_beta_matches_hand_formula_and_glide"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-nlmodal/tests/nlmodal.rs::unsymmetrized_tensor_admission_and_trajectory_falsifier"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/tests/acoustic_assembly.rs::kirchhoff_carrier_loud_pluck_raises_pitch"
+    }
+   ],
+   "budget_row": null,
+   "corpus_refs": [],
+   "notes": "GREEN per the .7.1 review: the KC/von-Karman reduced-pHS image with ANALYTIC-PIN evidence \u2014 the exact KC channel constants and the pitch-glide law (3/32)(EA/T0)(k pi A/L)^2 both pinned at 1e-12, plus the composed loud-pluck glide e2e. THE GONZALEZ CAVEAT travels on this row (scope-4): conservation under discrete-gradient stepping is STRUCTURALLY BLIND to gradient errors, so the evidence cites the FD-gradient/trajectory FALSIFIER oracle, never energy conservation. The linear<->nonlinear selector threshold is committed data (vibration-selector-thresholds.tsv)."
+  },
+  {
+   "filling": "bowed",
+   "image": "modal-stribeck",
+   "qoi": "stick-slip-mechanism",
+   "owner_crates": [
+    "fs-tribo",
+    "fs-couple"
+   ],
+   "exactness": [
+    "X-Exact",
+    "X-Struct"
+   ],
+   "gate": "ungated",
+   "live_default": "no",
+   "determinism": "one-host",
+   "evidence": [
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/tests/acoustic_assembly.rs::bow_stroke_is_a_live_excitation"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/tests/acoustic_assembly.rs::bowed_rich_spectrum_has_even_partials"
+    }
+   ],
+   "budget_row": null,
+   "corpus_refs": [],
+   "notes": "Modal string + Stribeck island (parts live). Determinism is CAPPED at one-host: fs-tribo declares no cross-ISA bit-stability (platform hypot) - bead 3ez8g.7.3 resolves or re-declares. Emergent Helmholtz-motion gates are bead 3ez8g.7.5; a forced Helmholtz oscillator is forbidden. .7.1 review: live-excitation + spectrum evidence attached; UNGATED until the stick-slip mechanism gates land (.7.5's lane) and the fs-tribo hypot determinism cap resolves (.7.3). .7.3 RESOLVED the fs-tribo determinism cap by det-routing (cross-ISA golden verified aarch64+x86-64); the row stays one-host until the COMPOSED bowed path's remaining operands are audited."
+  },
+  {
+   "filling": "brass",
+   "image": "plane-wave-char",
+   "qoi": "mute-debug-only",
+   "owner_crates": [
+    "fs-duct",
+    "fs-vfit",
+    "fs-couple"
+   ],
+   "exactness": [
+    "X-Exact",
+    "X-Struct"
+   ],
+   "gate": "ungated",
+   "live_default": "no",
+   "determinism": "one-host",
+   "evidence": [
+    {
+     "kind": "bakeoff",
+     "ref": "crates/fs-couple/tests/receipts/brass-mm-vs-plane.bakeoff (f905d0552cc772d5): plane worst flare-peak residual >3x MM; KeepForSubset(plane-wave-char -> mute/debug + tone-hole wind bores, never the trumpet flare claim)"
+    }
+   ],
+   "budget_row": null,
+   "corpus_refs": [],
+   "notes": "Plane-wave column + valve island produces A note but NOT a trumpet: the trumpet claim requires multimodal lines (3ez8g.4.1/.4.2) + a real bell load (zolja). This row's claim set is permanently restricted to mute/debug studies; it stays on the menu per D21. Gates bead: 3ez8g.4.4. SCOPING DECIDED 2026-08-16 by the committed brass bake-off receipt (3ez8g.4.4): plane-wave keeps mute/debug + tone-hole (wind) claims; the trumpet flare claim belongs to mm-tmm (D21: narrowed, never deleted)."
+  },
+  {
+   "filling": "jet",
+   "image": "lbm-jetlab-2d",
+   "qoi": "edge-tone-stage-i-strouhal",
+   "owner_crates": [
+    "fs-aeroac",
+    "fs-lbm"
+   ],
+   "exactness": [
+    "X-Est"
+   ],
+   "gate": "ungated",
+   "live_default": "no",
+   "determinism": "one-host",
+   "evidence": [],
+   "budget_row": null,
+   "corpus_refs": [],
+   "notes": "Authority lab, never a runtime image. Stage-I edge tone validated vs Brown 1937 (+3.0%, inside bin quantization); the 2-D rig is pinned TONAL (inverse cascade; flatness ~1e-18) and cataloging its rows as broadband flute noise is a typed refusal in fs-aeroac. X-Struct only when a residual is issued against lab data; absolute SPL is never claimed. Gates bead: 3ez8g.10.4."
+  },
+  {
+   "filling": "string-plate-cavity",
+   "image": "vibroacoustic-modal",
+   "qoi": "two-dof-product-invariant",
+   "owner_crates": [
+    "fs-couple"
+   ],
+   "exactness": [
+    "X-Exact"
+   ],
+   "gate": "ungated",
+   "live_default": "no",
+   "determinism": "one-host",
+   "evidence": [
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/src/vibroacoustic.rs::rectangular_cavity_and_resonator_pins"
+    }
+   ],
+   "budget_row": null,
+   "corpus_refs": [
+    "vvreg:acoustic-carcagno-2018-mode1",
+    "vvreg:acoustic-carcagno-2018-mode2",
+    "vvreg:acoustic-carcagno-2018-mode3"
+   ],
+   "notes": "The plate x cavity x radiation coupling engine (energy identities exact, added-mass quartering verified in fs-couple tests); the exact 2-DOF invariant f1*f2 = f_helmholtz*f_top is the free engine-exactness oracle. Composed-guitar gates on the Carcagno corpus: bead 3ez8g.7.4. Fixture traps recorded there: midline braces sit on nodal lines; the sign convention is phase-only observable. .7.1 review: cavity/resonator pin evidence attached; UNGATED pending the composed-guitar Carcagno gate (.7.4)."
+  },
+  {
+   "filling": "hammer-felt",
+   "image": "hysteresis-island",
+   "qoi": "velocity-tilt-mechanism",
+   "owner_crates": [
+    "fs-material",
+    "fs-couple"
+   ],
+   "exactness": [
+    "X-Struct",
+    "X-Est"
+   ],
+   "gate": "ungated",
+   "live_default": "no",
+   "determinism": "one-host",
+   "evidence": [
+    {
+     "kind": "test",
+     "ref": "crates/fs-material/tests/conformance.rs::mt-001/mt-004 WoolFelt enrollment"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/tests/felt_hammer_island.rs::contact_duration_falls_with_velocity_unlike_the_linear_spring"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/tests/felt_hammer_island.rs::spectral_tilt_rises_with_velocity_beyond_the_linear_control"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/tests/felt_hammer_island.rs::the_felt_loop_dissipates_and_the_ledger_closes"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/tests/felt_hammer_island.rs::prony_chain_covers_the_hammer_band_and_refuses_outside"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/tests/felt_hammer_island.rs::the_phs_string_island_ledger_closes_with_sampled_geometry"
+    },
+    {
+     "kind": "bakeoff",
+     "ref": "crates/fs-couple/tests/receipts/piano-felt-vs-hc.bakeoff (3d9df8e509435370): felt residual grows 0.028->0.071 with velocity while HC's is identically zero; felt tilt trend 28.8x vs HC 17.2x \u2014 the hysteresis island is the felt authority"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/tests/piano_gates.rs::pg_002_hammer_band_out_of_band_refuses"
+    }
+   ],
+   "budget_row": null,
+   "corpus_refs": [
+    "vvreg:acoustic-absent-felt-coupon"
+   ],
+   "notes": "WoolFelt (fs-material Uniaxial: stiffening p>1 envelope, crush-anchored unload, dissipation by construction) driving a substepped hammer-string island: contact duration FALLS with velocity while the matched linear spring stays amplitude-independent; spectral tilt rises >1.2x and >1.5x the linear control; strike ledger closes within 15% with felt loss >2% KE_in; rate half lowered via lower_to_prony over 50Hz-5kHz with the FS-MAT-VISCO-OUT-OF-BAND refusal live; island geometry sampled by the certified fs-contact chart-to-gap pipeline and the string stepped under fs_phs::step (per-step discrete-gradient ledger closure). X-Est because ALL felt parameters are authored Estimate values: the licensed coupon hunt identified Stulov 1995 / Chabassier RR-8181 but PDF retention was blocked (the cited absence row records the hunt); green awaits a coupon-backed pack + the piano gates review (3ez8g.5.1)."
+  },
+  {
+   "filling": "brass",
+   "image": "mm-tmm",
+   "qoi": "flare-peak-trigger",
+   "owner_crates": [
+    "fs-duct"
+   ],
+   "exactness": [
+    "X-Consist"
+   ],
+   "gate": "ungated",
+   "live_default": "no",
+   "determinism": "one-host",
+   "evidence": [
+    {
+     "kind": "test",
+     "ref": "crates/fs-duct/src/modal.rs::mm_001_bessel_self_certified"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-duct/src/modal.rs::mm_002_cutoffs_are_analytic"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-duct/src/modal.rs::mm_003_n1_degenerates_to_the_plane_image"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-duct/src/modal.rs::mm_004_junction_adds_evanescent_inertance"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-duct/src/modal.rs::mm_005_flare_ladder_and_trigger"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-duct/src/modal.rs::mm_006_refusals_and_bitwise_repeats"
+    },
+    {
+     "kind": "bakeoff",
+     "ref": "crates/fs-couple/tests/receipts/brass-mm-vs-plane.bakeoff: MM is the flare authority (ladder settled 0.18 cents; plane misses 14.9)"
+    }
+   ],
+   "budget_row": null,
+   "corpus_refs": [
+    "vvreg:acoustic-absent-trumpet-impedance"
+   ],
+   "notes": "Multimodal (m=0) TMM: reflection-matrix recursion (bounded under evanescence), in-crate dd-series Bessel + J1 roots (no transcribed constants; self-certified + independent quadrature oracles), Lommel junction projections, staircased flares. THE TRIGGER EXECUTED: plane-wave misses the trumpet-like flare's MM peak structure by 14.9 cents (>=8 authored) with the mode ladder settled at 0.18 cents N4->N5 and the staircase-density term disclosed at 6.7 cents (the first measure run caught a coarse-staircase artifact posing as a treble mode shift \u2014 both trigger arms therefore run on the fine staircase). X-Consist: the gate cites the LADDER, not a single N. v1 boundaries disclosed in CONTRACT: matched-mouth higher modes (tabulated bell load = zolja), per-mode loss through the lossy plane wavenumber, no tone holes, no mean flow. Green awaits measured-impedance brass gates (3ez8g.4.x)."
+  },
+  {
+   "filling": "brass",
+   "image": "zl-bake",
+   "qoi": "bell-load-table",
+   "owner_crates": [
+    "fs-bem",
+    "fs-duct"
+   ],
+   "exactness": [
+    "X-Struct"
+   ],
+   "gate": "ungated",
+   "live_default": "no",
+   "determinism": "one-host",
+   "evidence": [
+    {
+     "kind": "test",
+     "ref": "crates/fs-bem/src/radiation_bake.rs::zb_001_bake_reproduces_the_pulsating_sphere"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-bem/src/radiation_bake.rs::zb_002_bake_refusals"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-bem/src/radiation_bake.rs::zb_003_lathe_is_closed_and_outward"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-duct/src/lib.rs::tl_001_table_admission_interpolation_and_refusals"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-duct/src/lib.rs::tl_002_the_ka_lift"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-duct/src/lib.rs::tl_003_bell_bake_end_to_end"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-duct/src/lib.rs::tl_004_modal_plane_load_plays_the_table"
+    },
+    {
+     "kind": "receipt",
+     "ref": "data/radiation/bell-fixture-zl.tsv"
+    }
+   ],
+   "budget_row": null,
+   "corpus_refs": [],
+   "notes": "Offline Z_L(omega) bake (fs_bem::radiation_bake over solve_radiation; CBIE below mouth ka 0.5, Burton-Miller above; per-row ppw/condition/passivity receipts; refuses past the mesh resolution bound) played back through fs_duct::TabulatedLoad (passivity-gated admission, linear interpolation, out-of-table refusal) \u2014 THE ka LIFT: analytic fits keep MAX_RADIATION_KA, tables play inside their own support (tl-002 asserts refusal and success at the same omega). Committed authored bell fixture (8mm throat -> 60mm mouth, 480 panels, 25 rows 150-1446 Hz, all-passive) at data/radiation/bell-fixture-zl.tsv, schema/resolution/passivity gated every run. Executed lesson in fs-bem CONTRACT: single-fan wide mouth caps drive the BM centroid-quadrature resistance artifact negative \u2014 caps are concentric annuli at the wall scale. X-Struct: passivity + refusal structure certified; the bell geometry is AUTHORED (a measured bell mesh slots through the same seam); green awaits measured-impedance brass gates. No rational fit performed (fs-vfit certificate class lane = the .4.2 runtime consumer)."
+  },
+  {
+   "filling": "brass",
+   "image": "mm-char-line",
+   "qoi": "held-fingering-cents",
+   "owner_crates": [
+    "fs-couple",
+    "fs-vfit",
+    "fs-duct"
+   ],
+   "exactness": [
+    "X-Consist",
+    "X-Struct"
+   ],
+   "gate": "ungated",
+   "live_default": "no",
+   "determinism": "one-host",
+   "evidence": [
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/src/mm_line.rs::ml_001_held_fingering_matches_the_authority"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/src/mm_line.rs::ml_002_realization_bakeoff_receipt"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/src/mm_line.rs::ml_003_valve_switch_carries_state_without_click"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/src/mm_line.rs::ml_004_passivity_and_receipts"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/src/mm_line.rs::ml_005_mouthpiece_cup_matches_the_analytic_shunt"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/src/mm_line.rs::ml_006_causality_splice_and_refusals"
+    },
+    {
+     "kind": "bakeoff",
+     "ref": "ml-002-bakeoff-receipt: dominant R00 vs N^2 matrix \u2014 <1 cent apart, plane energy fraction >0.999, 9x cost; dominant is the play image, matrix retained for higher-mode sources"
+    }
+   ],
+   "budget_row": null,
+   "corpus_refs": [],
+   "notes": "MM characteristic-line runtime: per-valve exact-FIR R00 lines from the fs-duct MM authority (8 round trips; a 4-trip tail cost 92 cents on the lowest peak \u2014 executed), tabulated bell load with disclosed splice, passivity enforced ON STORED TAPS, carry-history + crossfade valve lift (hard-cut falsifier executed), trapezoidal D18 cup junction. Line fidelity 0.39 cents vs authority over 3 combos; explicit-junction loop skew disclosed (38 cents at a 127-sample period, shared with the reed voice). X-Consist through the MM ladder; X-Struct passivity/lift structure. Green awaits the brass playing loop + measured-impedance gates (.4.3)."
+  },
+  {
+   "filling": "valve",
+   "image": "reduce-lab",
+   "qoi": "cantilever-reduction",
+   "owner_crates": [
+    "fs-solid",
+    "fs-modal"
+   ],
+   "exactness": [
+    "X-Consist",
+    "X-Est"
+   ],
+   "gate": "ungated",
+   "live_default": "no",
+   "determinism": "one-host",
+   "evidence": [
+    {
+     "kind": "test",
+     "ref": "crates/fs-solid/src/reduce.rs::rl_001_cantilever_oracle"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-solid/src/reduce.rs::rl_002_card_drives_the_valve_island"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-solid/src/reduce.rs::rl_003_refusals"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-solid/src/reduce.rs::rl_004_card_round_trip_and_tamper"
+    }
+   ],
+   "budget_row": null,
+   "corpus_refs": [],
+   "notes": "Offline lip/reed reduce lab: mesh + material card -> (K,M) -> certified modes -> ValveCard (face-unit-translation normalization keeps physical units; retained-compliance vs exact static K^-1 refusal; orifice measured from the mesh; provenance chain + tamper-refusing canonical bytes; beating_reed() mint matching the runtime face convention). EXECUTED falsification recorded: the base-excitation participation phi^T M r retained 1e-11 of the compliance \u2014 the force projection phi^T r is the correct modal-compliance projection. X-Est: the battery's tissue card is synthetic-authored (NO soft-tissue pack exists in data/matdb; recorded upgrade path); one lab serves lips/cane/vocal folds. Green awaits measured coupons + track gates (.4.3/.6.2/voice)."
+  },
+  {
+   "filling": "brass",
+   "image": "playing-loop",
+   "qoi": "emergent-lock",
+   "owner_crates": [
+    "fs-couple",
+    "fs-phs",
+    "fs-duct"
+   ],
+   "exactness": [
+    "X-Struct",
+    "X-Est"
+   ],
+   "gate": "ungated",
+   "live_default": "no",
+   "determinism": "one-host",
+   "evidence": [
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/src/brass_loop.rs::bl_001_005_emergent_gates"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/src/brass_loop.rs::bl_006_no_click_valve_change"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/src/brass_loop.rs::bl_007_structural_honesty_and_refusals"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/src/brass_loop.rs::bl_008_radiated_observer_from_the_bake"
+    },
+    {
+     "kind": "listening",
+     "ref": "data/listening/brass-emergent.listening-receipt (artifact be75f4e29b35123a; UNADJUDICATED - supports_pass()==false until the owner's ear rules)"
+    }
+   ],
+   "budget_row": null,
+   "corpus_refs": [],
+   "notes": "The composed brass loop: outward-striking lip MSD island x MM char lines x D18 cup, PITCH NEVER ASSIGNED (grep-enforced control surface). Emergent: lock in the outward band above the cup-loaded column peak (238 cents above peak, 281 from the lip alone); tension walks partials (209->445 Hz); valves drop the series monotonically (-125/-200 cents); slotting (+78 cents in-slot, 1310 between); cold horn -50.4 cents vs -48.6 predicted; no-click valve lift with executed hard-cut falsifier; observer weights from the bake's SH table. NUMERICS LESSON in CONTRACT: one-sample-delayed Bernoulli flow is anti-dissipative above fs/4 (7.3 kHz parasitic executed) \u2014 closed-form implicit flow/junction solve fixed it; line-tap passivity needs a 4x-oversampled grid (inter-bin Gibbs). X-Est: authored card-scale lip; the trumpet CLAIM is decided in .4.4 with measured-impedance gates."
+  },
+  {
+   "filling": "brass",
+   "image": "hb-lock-oracle",
+   "qoi": "periodic-orbit-agreement",
+   "owner_crates": [
+    "fs-vmanifest"
+   ],
+   "exactness": [
+    "X-Consist"
+   ],
+   "gate": "ungated",
+   "live_default": "no",
+   "determinism": "one-host",
+   "evidence": [],
+   "budget_row": null,
+   "corpus_refs": [],
+   "notes": "PLACEHOLDER (3ez8g.4.4 scope 1): the harmonic-balance lock oracle lands with the HB epic (3ez8g.11) in its D23-reserved home, the fs-vmanifest::i09 periodic-orbit slot (a general service; never a music-local kernel, never inside fs-duct). This row exists so the brass gate summary enumerates the whole image menu honestly. Ungated with empty evidence until the epic delivers; the periodic-orbit cross-check will arbitrate the time-domain loop's lock frequencies."
+  },
+  {
+   "filling": "brass",
+   "image": "trumpet-vertical",
+   "qoi": "corpus-cents-gate",
+   "owner_crates": [
+    "fs-couple",
+    "fs-duct",
+    "fs-bem"
+   ],
+   "exactness": [
+    "X-Est"
+   ],
+   "gate": "ungated",
+   "live_default": "no",
+   "determinism": "one-host",
+   "evidence": [
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/src/brass_loop.rs::bl_001_005_emergent_gates (lock/series/valves/slotting/c(T) all executed)"
+    },
+    {
+     "kind": "bakeoff",
+     "ref": "crates/fs-couple/tests/receipts/brass-mm-vs-plane.bakeoff (image scoping decided)"
+    },
+    {
+     "kind": "listening",
+     "ref": "data/listening/brass-emergent.listening-receipt (UNADJUDICATED)"
+    },
+    {
+     "kind": "corpus",
+     "ref": "vvreg:acoustic-absent-trumpet-impedance (the corpus gate CANNOT run yet)"
+    }
+   ],
+   "budget_row": null,
+   "corpus_refs": [
+    "vvreg:acoustic-absent-trumpet-impedance"
+   ],
+   "notes": "THE TRUMPET CLAIM, decided honestly (3ez8g.4.4): UNGATED. What holds: the emergent mechanism executes end to end (lock in the outward-striking band, tension walks partials, valves drop the series with no pitch input, slotting, c(T) within 2 cents of the sound-speed law); the MM image owns the flare per the committed bake-off; the bell load is baked and passive; every fixture input is provenance-labeled. What is MISSING for green, by name: (1) the measured trumpet-impedance corpus (absence row registered - the cents gate cannot run against nothing); (2) an ADJUDICATED listening receipt (committed one is Unadjudicated, supports_pass()==false); (3) a budget row for live_default (D25). No partial credit: machinery-complete is not claim-green."
+  },
+  {
+   "filling": "hammer-felt",
+   "image": "hunt-crossley",
+   "qoi": "transient-point-contact",
+   "owner_crates": [
+    "fs-contact"
+   ],
+   "exactness": [
+    "X-Struct"
+   ],
+   "gate": "ungated",
+   "live_default": "no",
+   "determinism": "one-host",
+   "evidence": [
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/tests/bakeoff_felt.rs::committed_felt_bakeoff_receipt_shows_the_structural_gap"
+    },
+    {
+     "kind": "bakeoff",
+     "ref": "crates/fs-couple/tests/receipts/piano-felt-vs-hc.bakeoff: KeepForSubset(hunt-crossley -> debug/second-hammer + generic transient point contacts; never the piano felt claim)"
+    }
+   ],
+   "budget_row": null,
+   "corpus_refs": [],
+   "notes": "fs-contact's EXISTING HuntCrossleySphere as the DEBUG/second hammer image, scope DECIDED by the committed receipt (D21: narrowed, never deleted; D24: no third HC implementation anywhere \u2014 every force in the bake-off came from NormalPatchRequest::evaluate). Measured on the shared 87zbd strike island: contact duration falls with velocity like a hammer should, tilt trend 17.2x (real but 1.67x flatter than the felt's 28.8x), residual strain IDENTICALLY ZERO at every velocity (memoryless law \u2014 the structural gap the receipt quantifies). EXECUTED CALIBRATION LESSON: the 1+c*rate factor needs restitution-scale coefficients (c ~ 3(1-e)/2v); the first mint's c=8 s/m was a 33x loading multiplier at forte that INVERTED the contact-duration trend."
+  },
+  {
+   "filling": "brass",
+   "image": "crook-delta",
+   "qoi": "cad-band-certificate",
+   "owner_crates": [
+    "fs-query"
+   ],
+   "exactness": [
+    "X-Consist",
+    "X-Est"
+   ],
+   "gate": "ungated",
+   "live_default": "no",
+   "determinism": "one-host",
+   "evidence": [
+    {
+     "kind": "test",
+     "ref": "crates/fs-query/tests/crook.rs::gk_001_three_valve_fixture_and_slide_range"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-query/tests/crook.rs::gk_002_band_refusals_by_name"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-query/tests/crook.rs::gk_003_composed_peak_shift_oracle"
+    }
+   ],
+   "budget_row": null,
+   "corpus_refs": [],
+   "notes": "Valve/crook delta-L minting: bore-extractor receipts certified against CAD centerline arc length (refuse-outside band; a wrong crook is a data error, never a silently detuned horn), interior-station port-area continuity vs the DECLARED junction step (undeclared mismatch refuses; declared step passes \u2014 feature vs error distinguished), slide ranges from endpoint pairs. COMPOSED ORACLE EXECUTED: extracted dL=0.4364 m moves the TMM first peak -936.1 cents vs -931.6 predicted (4.5 cents in a 12-cent band) \u2014 the emergent-pitch precondition. X-Est via the bore extractor; the fixture is authored CAD-like geometry (real trumpet CAD slots through the same seam)."
+  },
+  {
+   "filling": "gesture",
+   "image": "typed-schedule",
+   "qoi": "replayable-performance",
+   "owner_crates": [
+    "fs-scenario"
+   ],
+   "exactness": [
+    "X-Exact"
+   ],
+   "gate": "ungated",
+   "live_default": "no",
+   "determinism": "one-host",
+   "evidence": [
+    {
+     "kind": "test",
+     "ref": "crates/fs-scenario/src/gesture.rs::gs_001_deterministic_sampling_and_ramps"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-scenario/src/gesture.rs::gs_002_round_trip_and_content_hash"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-scenario/src/gesture.rs::gs_003_refusals_by_name"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-scenario/src/gesture.rs::gs_004_fret_is_length_plus_obstacle"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/tests/gesture_schedule.rs::schedule_driven_render_is_bitwise_identical_to_inline"
+    }
+   ],
+   "budget_row": null,
+   "corpus_refs": [],
+   "notes": "Typed gesture schedules: the full player-action table (valves/holes/slides/tension/frets/bow/hammers/pedals incl. una corda + sostenuto/termination swaps/breath) as replayable data with type-level unit discipline, integer-tick deterministic sampling, canonical bytes + content hash, and refuse-by-name (incl. the unknown-control-id falsifier \u2014 never a silent no-op). X-Exact: sampling is exact arithmetic on the schedule; the e2e proves schedule-vs-inline BITWISE equality through the render API. No MIDI anywhere; a fret is a length + obstacle, never a mechanism."
+  },
+  {
+   "filling": "wind-reed",
+   "image": "articulation-hop",
+   "qoi": "measured-hop-policy",
+   "owner_crates": [
+    "fs-couple"
+   ],
+   "exactness": [
+    "X-Struct",
+    "X-Est"
+   ],
+   "gate": "ungated",
+   "live_default": "no",
+   "determinism": "one-host",
+   "evidence": [
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/src/wind_line.rs::wa_001_sigma_transient_and_slur"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/src/wind_line.rs::wa_002_register_vent_flips_the_twelfth"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/src/wind_line.rs::wa_003_gate_refusal_is_structural"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/src/wind_line.rs::wa_004_hop_policy_is_measured_data"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/src/wind_line.rs::committed_hop_policy_is_consistent"
+    },
+    {
+     "kind": "receipt",
+     "ref": "data/claims/wind-hop-policy.tsv (settle eps=0.05 m=4; settled click 0.50-0.60 vs attack 0.86)"
+    }
+   ],
+   "budget_row": null,
+   "corpus_refs": [],
+   "notes": "Wind articulation: per-fingering char-line bank (carry+fade), sigma slur (+265 cents, envelope held), REGISTER VENT measured (inertive vent flips the twelfth at 0.70L \u2014 the classic pressure-release L/3 rule INVERTS for a chimneyed vent; the lock lands 18 cents from the TMM authority's own peak), char->VFIT hop with the replay-prime D17 lift and STRUCTURAL gate refusal (an ungated image cannot be entered mid-performance). THE POLICY IS DATA: committed wind-hop-policy.tsv (settle detector params + click-vs-timing table; the detector errs conservatively late). Estimator lesson bank grew: even-HPS blind on odd-harmonic spectra; odd products self-similar under 3x; AUTOCORRELATION is the unambiguous fundamental estimator for closed-pipe locks."
+  },
+  {
+   "filling": "hammer-felt",
+   "image": "piano-vertical",
+   "qoi": "emergent-aftersound",
+   "owner_crates": [
+    "fs-couple",
+    "fs-material"
+   ],
+   "exactness": [
+    "X-Consist",
+    "X-Est"
+   ],
+   "gate": "ungated",
+   "live_default": "no",
+   "determinism": "one-host",
+   "evidence": [
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/src/piano_vertical.rs::pv_001_tilt_contrast_survives_the_composition"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/src/piano_vertical.rs::pv_002_partials_follow_the_inharmonicity_law"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/src/piano_vertical.rs::pv_003_two_stage_decay_and_beats"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/src/piano_vertical.rs::pv_004_pedals_change_decay_topology"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/src/piano_vertical.rs::pv_005_ledger_and_bitwise_replay"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/tests/piano_gates.rs::pg_001_board_from_the_fs_plate_authority"
+    },
+    {
+     "kind": "listening",
+     "ref": "data/listening/piano-ladder.listening-receipt (artifact 966d5adee719c41d; UNADJUDICATED - supports_pass()==false until the owner's ear rules on the pp->ff tilt)"
+    }
+   ],
+   "budget_row": null,
+   "corpus_refs": [
+    "vvreg:acoustic-absent-felt-coupon",
+    "vvreg:acoustic-absent-measured-frf-trace"
+   ],
+   "notes": "The composed piano vertical: unison+duplex+board (power-conjugate bridge)+felt island+pedal states. EMERGENT: tilt contrast survives the composition (felt trend 159.7 vs linear control 1.0 \u2014 the strongest tilt discrimination in the program); inharmonicity B measured in audio (4.2 cents, B=0 falsifier 3.6x worse); Weinreich two-stage decay (3.28 vs 1.15 /s) with detune-scaling audio-envelope beats; damper/una-corda topology; ledger non-increasing + bitwise replay. FOUR measurement laws in CONTRACT (each an executed misread first): read string laws from string state (board spectra carry board lines); board envelopes are blind to antisymmetric survivors; strong detune suppresses EXCHANGE but not the heard chorus (audio envelope); smoothers must sit between coupling slosh (33 Hz) and detune beats (2-4 Hz). X-Est: authored board/bridge geometry; promotion in .5.3. GATES REVIEW (.5.3): the board now also runs FROM the fs-plate modal authority (pg-001: aftersound survives the authority board); the tilt-vs-COUPON gate and the measured-board-FRF loop stay NAMED on their absence rows \u2014 ungated until those corpora land."
+  },
+  {
+   "filling": "hammer-felt",
+   "image": "linear-spring",
+   "qoi": "debug-control",
+   "owner_crates": [
+    "fs-couple"
+   ],
+   "exactness": [
+    "X-Exact"
+   ],
+   "gate": "green",
+   "live_default": "no",
+   "determinism": "one-host",
+   "evidence": [
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/tests/felt_hammer_island.rs::contact_duration_falls_with_velocity_unlike_the_linear_spring"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/src/piano_vertical.rs::pv_001_tilt_contrast_survives_the_composition"
+    }
+   ],
+   "budget_row": null,
+   "corpus_refs": [],
+   "notes": "The matched-secant linear spring as the DEBUG/control hammer image only \u2014 its claim IS being the null hypothesis: amplitude-independent contact duration (within 1 sample) and a flat tilt trend (1.000 on the composed vertical vs the felt's 159.7). GREEN for exactly that debug-control claim set and nothing else; it can never carry an attack claim (the contrast gates exist to prove it cannot)."
+  },
+  {
+   "filling": "string",
+   "image": "waveguide-dispersive",
+   "qoi": "budget-hero-string",
+   "owner_crates": [
+    "fs-vfit",
+    "fs-couple"
+   ],
+   "exactness": [
+    "X-Est"
+   ],
+   "gate": "ungated",
+   "live_default": "no",
+   "determinism": "one-host",
+   "evidence": [
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/tests/bakeoff_dispersion.rs::committed_dispersion_receipt_decides_and_modal_rows_are_untouched"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/tests/bakeoff_dispersion.rs::dispersion_stage_is_passive_and_the_control_is_harmonic"
+    },
+    {
+     "kind": "bakeoff",
+     "ref": "crates/fs-couple/tests/receipts/string-modal-zoh-vs-waveguide-dispersive.bakeoff (KeepBoth: modal keeps every certified claim; the waveguide earns the budget-constrained hero-string scope)"
+    }
+   ],
+   "budget_row": null,
+   "corpus_refs": [],
+   "notes": "The [F] alternative earned by bake-off (3ez8g.7.2): stiffness as DISPERSION ON THE LINE \u2014 a first-order allpass cascade in fs_vfit::DelayedFilter (|H|=1 structurally passive; |a|>=1 and zero sections refuse). On the shared music-wire card (E=200GPa d=1mm L=0.65m T=700N) the executed receipt measured B_hat/B=1.014 with worst partial 9.8 cents (the linear-fractional-interpolation phase is the named residual owner) while the DISPERSIONLESS control missed the law by 41 cents \u2014 the stage carries the physics. Budget honesty: modal holds FEWER states on this card (108 vs 173); the differing shape is OPS (~10x fewer flops/sample) and flat scaling in partial count. NEVER the certified-partial image: modal-zoh keeps every certified claim (D21 asserted in the gate test against the live registry)."
+  },
+  {
+   "filling": "bar",
+   "image": "modal-zoh",
+   "qoi": "freefree-ratio-gate",
+   "owner_crates": [
+    "fs-couple"
+   ],
+   "exactness": [
+    "X-Exact",
+    "X-Est"
+   ],
+   "gate": "green",
+   "live_default": "no",
+   "determinism": "one-host",
+   "evidence": [
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/tests/xylophone_bar.rs::xb_001_roots_self_verify_and_match_the_tabulated_values"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/tests/xylophone_bar.rs::xb_002_ratio_gate_holds_and_the_pinned_falsifier_fails_it"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/tests/xylophone_bar.rs::xb_003_striking_a_node_suppresses_the_partial"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/tests/xylophone_bar.rs::xb_004_committed_receipt_matches_the_committed_artifact"
+    },
+    {
+     "kind": "listening",
+     "ref": "data/listening/xylophone-strike.listening-receipt (artifact fc174bd883cca151; UNADJUDICATED - supports_pass()==false until the owner's ear rules)"
+    }
+   ],
+   "budget_row": null,
+   "corpus_refs": [],
+   "notes": "The cheapest FULL filling: free-free Euler-Bernoulli bar (Indian-rosewood pack E_L=13.53 GPa; density = SG*1000 authored Estimate, disclosed) + exact-ZOH runtime + Hertz mallet island. GREEN FOR THE UNIFORM PRISMATIC BAR EXACTLY AND ONLY THAT: beta*L roots computed in-fixture by deterministic Newton (self-verified at machine zero, cross-checked vs the classical table at 1e-8), rendered ratio gate f2/f1=2.7565 f3/f1=5.4039 within 1%, and the BOUNDARY-CONDITION FALSIFIER executed (the pinned n^2 family measures f2/f1=4.000 and fails the same gate \u2014 the bead's recorded polish catch made executable). Node physics emergent: mode-1 node found in-fixture at 0.2242 (the cord-mount point); striking it suppresses the fundamental ~8 orders; center strike kills partial 2. NAMED SUCCESSOR: real bars are ARCHED to tune f2/f1 toward 3-4 \u2014 needs a varying-section solver; not claimed. Listening artifact minted, unadjudicated."
+  },
+  {
+   "filling": "wind-reed",
+   "image": "reduced-cane-card",
+   "qoi": "threshold-brightness-sensitivity",
+   "owner_crates": [
+    "fs-couple",
+    "fs-solid",
+    "fs-material"
+   ],
+   "exactness": [
+    "X-Consist",
+    "X-Est"
+   ],
+   "gate": "ungated",
+   "live_default": "no",
+   "determinism": "one-host",
+   "evidence": [
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/tests/cane_reed_card.rs::cr_001_the_minted_card_carries_the_provenance_chain"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/tests/cane_reed_card.rs::cr_002_threshold_and_brightness_follow_cane_and_lay"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/tests/cane_reed_card.rs::cr_003_refusals_fire_by_name"
+    }
+   ],
+   "budget_row": null,
+   "corpus_refs": [],
+   "notes": "Shaped like a reed, made of cane: tapered vamp mesh + the CC-BY cane packs through the reduce lab (f1=2709 Hz - the measured clarinet-reed class), driving the EXISTING realize_reed_bore loop; the authored-parameter path remains the Estimate debug image. Provenance chain: mesh digest + material resolution identity (heel E_L 5.0 GPa dry; blank-zone density DISCLOSED mismatch; eta=delta/pi from the damping pack) + reduction options + retained-compliance disclosure (0.965). The LAY is a measured-geometry chart (tip opening + facing length -> arc radius 0.145 m), v1 consumed as the rest gap; rolling-stiffness hardening is the named successor. MEASURED sensitivities: more-open lay +46% threshold (2044->2992 Pa, clarinet-class); harder cane (+1 sigma from the pack) reads BRIGHTER at matched breath above both thresholds (+1.9% centroid) with the ordering INVERTING near the soft threshold (both regimes recorded); cane-stiffness threshold shift is below the 1.21x ladder rung (logged, not overclaimed). TWO vacuous-gate traps caught en route: an absolute 1e-4 Pa speak detector fired on ringing at every rung, twice - the shipped detector demands SUSTAINED output at 2% of blowing pressure. Isotropic-reduction disclosure: E_L only; the 10x E_T anisotropy unrepresented."
+  },
+  {
+   "filling": "voice-glottis",
+   "image": "one-dof-surface-wave",
+   "qoi": "phonation-onset-curve",
+   "owner_crates": [
+    "fs-couple",
+    "fs-phs",
+    "fs-dcontact"
+   ],
+   "exactness": [
+    "X-Consist",
+    "X-Est"
+   ],
+   "gate": "ungated",
+   "live_default": "no",
+   "determinism": "one-host",
+   "evidence": [
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/src/glottis.rs::gl_001_both_islands_self_oscillate_with_onset_curves"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/src/glottis.rs::gl_002_collision_ledger_and_passivity"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/src/glottis.rs::gl_003_two_mass_phase_and_flow_skew"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/src/glottis.rs::gl_004_bakeoff_fixture_qois_on_identical_tract_and_card"
+    },
+    {
+     "kind": "bakeoff",
+     "ref": "crates/fs-couple/tests/receipts/glottis-one-dof-vs-two-mass.bakeoff (KeepBoth: cheap-ensemble scope earned)"
+    }
+   ],
+   "budget_row": null,
+   "corpus_refs": [],
+   "notes": "EARNED SCOPE (executed bake-off receipt, KeepBoth): CHEAP-ENSEMBLE \u2014 2 states, robust limit cycle, loud-pressure onset class, rough-source character. The 1-DOF glottal island (Titze surface-wave delay; c_mucosal=1 m/s authored). RE-BASED under the CORRECTED volume-normalized tract load (the original close's numbers were measured against a flat-R load - the zc defect found by the tract lane): onset ~5.8 kPa (loud-pressure class, NOT physiological speech; part of the bake-off record) and NON-monotone in stiffness (the fixed delay's phase tuning moves with fold frequency - the mechanism's real behavior, recorded); at its own drive f0 173 Hz, OQ 0.945, slope -12.4 dB/oct, jitter 0.105 (rough/breathy characterization). The five-bug debugging arc remains recorded in-code."
+  },
+  {
+   "filling": "voice-glottis",
+   "image": "two-mass",
+   "qoi": "phonation-onset-curve",
+   "owner_crates": [
+    "fs-couple",
+    "fs-phs",
+    "fs-dcontact"
+   ],
+   "exactness": [
+    "X-Consist",
+    "X-Est"
+   ],
+   "gate": "ungated",
+   "live_default": "no",
+   "determinism": "one-host",
+   "evidence": [
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/src/glottis.rs::gl_001_both_islands_self_oscillate_with_onset_curves"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/src/glottis.rs::gl_002_collision_ledger_and_passivity"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/src/glottis.rs::gl_003_two_mass_phase_and_flow_skew"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/src/glottis.rs::gl_004_bakeoff_fixture_qois_on_identical_tract_and_card"
+    },
+    {
+     "kind": "bakeoff",
+     "ref": "crates/fs-couple/tests/receipts/glottis-one-dof-vs-two-mass.bakeoff (KeepBoth: solo-realism scope earned)"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/tests/vowel_gates.rs::vw_002_sung_interaction_pulls_near_the_first_formant"
+    },
+    {
+     "kind": "listening",
+     "ref": "data/listening/vowel-ladder.listening-receipt (artifact b54127c96c2223eb; UNADJUDICATED)"
+    }
+   ],
+   "budget_row": null,
+   "corpus_refs": [],
+   "notes": "EARNED SCOPE (executed bake-off receipt, KeepBoth): SOLO-REALISM \u2014 physiological onsets, the vertical-phase mechanism, low jitter; the voice claims build on it (vw-002 sung interaction: f0 pulled ~35% above free by the load with a REGISTER BREAK at the F1 ceiling \u2014 the vocoder-impossible physics, measured). The two-mass glottal island (coupling inside the Hamiltonian; corrected S-H driving; asymmetric seed; dcontact collision). RE-BASED under the CORRECTED volume-normalized tract load: onsets 404/488/715 Pa rising with stiffness (physiological - the structural vertical-phase mechanism is robust to the load correction), upper lags lower 0.462 rad (STRONGER than under the defective load), f0 178 Hz, OQ 0.813, slope -12.7 dB/oct, jitter 0.0009. Flow skew measured near-symmetric (0.97) - LOGGED not asserted; glottal-duct inertance is the named upgrade for skew. Masses/stiffnesses/length receipted from the licensed pack."
+  },
+  {
+   "filling": "voice-tract",
+   "image": "char-line-chart",
+   "qoi": "formant-oracle-agreement",
+   "owner_crates": [
+    "fs-couple",
+    "fs-duct"
+   ],
+   "exactness": [
+    "X-Consist",
+    "X-Est"
+   ],
+   "gate": "ungated",
+   "live_default": "no",
+   "determinism": "one-host",
+   "evidence": [
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/src/tract.rs::vt_001_static_vowels_match_the_tmm_oracle_and_differ"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/src/tract.rs::vt_002_yielding_walls_raise_the_first_formant"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/src/tract.rs::vt_003_u_to_a_morph_is_click_free_with_formant_tracks"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/src/tract.rs::vt_004_refusals_fire_by_name"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/tests/vowel_gates.rs::vw_001_formant_class_gate_and_the_shifted_falsifier"
+    }
+   ],
+   "budget_row": null,
+   "corpus_refs": [
+    "vvreg:acoustic-assaneo-2011-tract-a",
+    "vvreg:acoustic-assaneo-2011-tract-u"
+   ],
+   "notes": "The tract as A(x,t): LICENSED charts (Assaneo 2011 PLOS CC-BY Table 2 - the authors' own 10-tube /a/ and /u/, transcribed + pdftotext-verified; Spanish, acoustically-inverted, formant-valid register disclosed; Story 1996 unlicensable, Dresden CC0 meshes = named MRI upgrade vein). D22 EXECUTED as a whole-curve gate: char impulse-spectrum vs TMM |Z_in| envelope correlation 0.87/0.90 with dominant resonances within 50 Hz; yielding tissue walls raise F1 340->401 Hz (nearest-peak comparison - the wall contributes its own ~100 Hz mode); the u->a morph at 100 Hz control rate with the carry + p-minus-continuity lift clicks 18x less than the five-cut waypoint control (0.116 vs 2.083 on the REFLECTED wave - the raw metric saturates on excitation pulses), F1 track 353->806 Hz. THE LANE'S STRUCTURAL FIND: characteristic_line consumers must pass VOLUME-normalized zc (rho c/S) - an area-free rho*c flattens R to +1 and erases the shape (the glottis module carried this defect; its gates were re-based); rigid-wall short tracts realize ACTIVELY (IR outlasts the window - the walls are required for the realization itself); dense n_fft=4096 via characteristic_line_dense."
+  },
+  {
+   "filling": "voice-tract",
+   "image": "vfit-hold",
+   "qoi": "held-vowel-only",
+   "owner_crates": [
+    "fs-vfit",
+    "fs-couple"
+   ],
+   "exactness": [
+    "X-Est"
+   ],
+   "gate": "ungated",
+   "live_default": "no",
+   "determinism": "one-host",
+   "evidence": [],
+   "budget_row": null,
+   "corpus_refs": [],
+   "notes": "The VFIT rational-hold image for a HELD vowel only \u2014 STRUCTURALLY FAILS on articulation (a rational fit cannot morph; the row says so, per the .8.3 scope). NAMED MISSING: no executed tract 1-port fit exists yet (the wind-hop precedent supplies the machinery); until one is fit and certified this row stays evidence-free and ungated \u2014 registered so the menu shows the hole instead of hiding it."
+  },
+  {
+   "filling": "electric-string",
+   "image": "faraday-pickup-port",
+   "qoi": "station-voicing-comb",
+   "owner_crates": [
+    "fs-couple",
+    "fs-phs"
+   ],
+   "exactness": [
+    "X-Consist",
+    "X-Est"
+   ],
+   "gate": "ungated",
+   "live_default": "no",
+   "determinism": "one-host",
+   "evidence": [
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/src/pickup.rs::pk_001_station_voicing_matches_the_window_weighted_prediction"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/src/pickup.rs::pk_002_two_pickups_comb_when_mixed"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/src/pickup.rs::pk_003_point_limit_and_no_state_duplication"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/src/pickup.rs::pk_005_emf_drives_the_dae_circuit_end_to_end"
+    }
+   ],
+   "budget_row": null,
+   "corpus_refs": [],
+   "notes": "The Faraday pickup as a PURE-READER PORT (D20 as structure: pose + per-mode window gains only; emf() reads the string owner's modal velocities \u2014 no step, no state, no re-discretization). Window-weighted flux map (raised-cosine aperture, unit-normalized so the point-pickup limit is EXACT \u2014 gated at 5e-4); bridge/neck voicing emerges (centroid 452 vs 328 Hz) with every per-mode EMF line matching the INDEPENDENT Simpson-integrated analytic gain within 5%; two mixed pickups comb per the gain-sum prediction with an executed notch. EMF drives the .9.1 circuit DAE end-to-end (RC load rolloff matches first-order analytic at 0.25x/4x cutoff; supply defect 1e-21). AUTHORED Estimate v1: linearized flux, dipole-like height profile; the MAGNETOSTATIC BAKE is the recorded follow-up. EN ROUTE: the .9.1 commit had shipped fs_phs::circuit behind a stolen cfg(test) (invisible to consumers) \u2014 fixed here."
+  },
+  {
+   "filling": "electric-string",
+   "image": "ts-driver-cabinet",
+   "qoi": "sealed-box-ts-algebra",
+   "owner_crates": [
+    "fs-couple",
+    "fs-phs"
+   ],
+   "exactness": [
+    "X-Consist",
+    "X-Est"
+   ],
+   "gate": "ungated",
+   "live_default": "no",
+   "determinism": "one-host",
+   "evidence": [
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/src/speaker.rs::ts_001_sealed_box_shift_matches_the_ts_algebra"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/src/speaker.rs::ts_002_impedance_curve_shows_the_motional_peak"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/src/speaker.rs::ts_003_panel_mode_colors_the_response_and_is_disclosed"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/src/speaker.rs::ts_004_excursion_refuses_past_the_card_limit"
+    }
+   ],
+   "budget_row": null,
+   "corpus_refs": [],
+   "notes": "The Thiele-Small driver + sealed cabinet as ONE pHS: the Bl gyrator is an antisymmetric J pair (power-exact by construction), the box is Sd^2 rho c^2/V extra stiffness on the cone (which is WHY the classic fc = fs sqrt(1+Vas/Vb) algebra holds - measured 64.7 vs 65.1 Hz analytic, 0.6%), the motional impedance peak matches the analytic TS curve to the printed digit at 0.5/1/2/6x fs, and ONE fs-plate-class panel mode couples through the shared cavity term (coloration 1-1.5% near its resonance, ZERO far - executed contrast; X-Consist with one retained mode, disclosed). EXCURSION HONESTY: past x_max REFUSES (suspension nonlinearity unmodeled - no silent linear forte). Card = authored datasheet-class Estimate; low-ka piston load disclosed; NO cabinet IR packs anywhere (charts + cards, never convolution). Ledger defect 3e-19. Vented box + full piston impedance + manufacturer-sheet ingest = recorded follow-ups."
+  },
+  {
+   "filling": "electric-string",
+   "image": "valve-device-islands",
+   "qoi": "emergent-harmonic-ladder",
+   "owner_crates": [
+    "fs-phs"
+   ],
+   "exactness": [
+    "X-Consist",
+    "X-Est"
+   ],
+   "gate": "ungated",
+   "live_default": "no",
+   "determinism": "one-host",
+   "evidence": [
+    {
+     "kind": "test",
+     "ref": "crates/fs-phs/src/device.rs::dv_000_midpoint_read_law"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-phs/src/device.rs::dv_001_stage_gain_matches_the_small_signal_derivation"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-phs/src/device.rs::dv_002_even_harmonics_rise_before_odd"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-phs/src/device.rs::dv_003_diode_clipper_matches_a_method_diverse_solve"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-phs/src/device.rs::dv_004_refusals_fire_by_name"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-phs/src/device.rs::dv_005_islands_are_deterministic_with_fixed_budgets"
+    }
+   ],
+   "budget_row": null,
+   "corpus_refs": [],
+   "notes": "Device CARDS + nonlinear circuit ISLANDS (music bead 3ez8g.9.3): Koren-class 12AX7 triode + Shockley-class silicon diode pair as typed cards (provenance, validity regions, matdb-shaped). Split-circuit image: the linear network steps through the .9.1 descriptor DAE; the device Gauss-Seidel-iterates against it with a load-line-damped island update (fixed caps, analytic Jacobians). Bias admission = DC Newton refusal. Small-signal gain 60.9 matches the card's own plate-curve-derived mu*RL/(RL+rp); the harmonic ladder EMERGES (H2 0.26%->3.2% across drive 0.05->0.6, H2>>H3 throughout \u2014 curvature at the bias point, nothing shaped); clipper vs in-test bisection at residual <=1e-19. SCOPE: this row covers the triode stage AND the diode clipper (one module, one battery). Card constants are authored-typical fits, NOT measured-tube ingest. The dv-000 case pins the descriptor READ LAW (algebraic efforts are midpoints of stored coordinates; raw potential reads are 2x by construction) \u2014 the bug class the first implementation hit. The split-vs-full-DAE bake-off belongs to .9.5."
+  }
+ ]
 }
