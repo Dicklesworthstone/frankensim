@@ -165,14 +165,8 @@ pub struct GlottalFrame {
 }
 
 enum Valve {
-    OneDof {
-        phs: PortHamiltonian,
-        x: Vec<f64>,
-    },
-    TwoMass {
-        phs: PortHamiltonian,
-        x: Vec<f64>,
-    },
+    OneDof { phs: PortHamiltonian, x: Vec<f64> },
+    TwoMass { phs: PortHamiltonian, x: Vec<f64> },
 }
 
 /// A glottal island against a live tract characteristic line.
@@ -186,6 +180,13 @@ pub struct GlottalIsland {
     obstacle: Obstacle,
     p_minus: f64,
     p_plus_prev: f64,
+    /// Mucosal-wave gap history for the 1-DOF island (Titze's
+    /// surface-wave mechanism: the FLOW sees the gap a propagation
+    /// time ago; a bare quasi-steady one-mass valve has no phase
+    /// mechanism and measured NO phonation up to 6 kPa). Delay =
+    /// thickness / c_mucosal with c_mucosal = 1 m/s AUTHORED Estimate
+    /// (physiological 1-3 m/s).
+    gap_history: std::collections::VecDeque<f64>,
 }
 
 /// Build the coupled two-mass pHS: state `[q1, p1, q2, p2]`,
@@ -261,7 +262,7 @@ impl GlottalIsland {
             })?;
         let area = core::f64::consts::PI * inlet_r * inlet_r;
         let zc_flow = gas.density * gas.sound_speed / area;
-        let line = characteristic_line(
+        let mut line = characteristic_line(
             tract,
             gas,
             termination,
@@ -270,10 +271,29 @@ impl GlottalIsland {
             zc_flow * area, // plane-wave specific impedance for the FIR
             None,
         )?;
+        // The MM-bank lesson, executed here too: the realized FIR's
+        // DTFT overshoots |R| > 1 between realization bins (a SHORT
+        // low-loss tract wraps hard), and an active line self-rings at
+        // the wrap period regardless of blowing pressure (measured:
+        // a 179 Hz pressure-independent ring at fs/256). Enforce
+        // passivity on a 4x-oversampled grid before the loop closes.
+        let dt = 1.0 / f64::from(sample_rate_hz);
+        let grid: Vec<f64> = (1..=8192usize)
+            .map(|k| core::f64::consts::TAU * k as f64 / (16_384.0 * dt))
+            .collect();
+        line.enforce_scattering_passivity(&grid);
         let valve = if two_mass {
+            // The S-H rest state is an UNSTABLE equilibrium whose
+            // driving pressure is exactly zero while the masses stay
+            // symmetric (p1 = dp[1-(amin/a1)^2] = 0 at a1 = a2) — the
+            // original model escapes it with an asymmetric initial
+            // displacement (their x1 = 0.01 cm); same seed here,
+            // scaled to the card.
+            let mut x = vec![0.0; 4];
+            x[0] = 0.1 * card.rest_gap_m;
             Valve::TwoMass {
                 phs: two_mass_phs(&card)?,
-                x: vec![0.0; 4],
+                x,
             }
         } else {
             let m = card.mass_lower_kg + card.mass_upper_kg;
@@ -284,10 +304,16 @@ impl GlottalIsland {
                 x: vec![0.0; 2],
             }
         };
-        // Collision: the S-H convention triples the spring at closure;
-        // chi is the reed-lay internal-loss pattern (authored).
-        let obstacle = crate::unilateral_contact::slit_lay(3.0 * card.stiffness_lower_n_m, 2.0)
+        // Collision: the S-H convention triples the spring at closure.
+        // The slit-lay obstacle's stiffness multiplies pen^alpha, so
+        // scale it to deliver F = 3 k1 h0 at one rest-gap penetration
+        // (the first authored 3*k1 delivered MICRONEWTONS at real
+        // penetrations - measured 2.4e-6 N at 0.1 mm - because the
+        // units are per pen^2, not per pen).
+        let k_col = 3.0 * card.stiffness_lower_n_m / card.rest_gap_m;
+        let obstacle = crate::unilateral_contact::slit_lay(k_col, 2.0)
             .and_then(|o| o.with_internal_loss(0.1))?;
+        let mucosal_delay = ((card.thickness_m / 1.0) * f64::from(sample_rate_hz)).round() as usize;
         Ok(Self {
             valve,
             card,
@@ -298,6 +324,10 @@ impl GlottalIsland {
             obstacle,
             p_minus: 0.0,
             p_plus_prev: 0.0,
+            gap_history: std::collections::VecDeque::from(vec![
+                card.rest_gap_m;
+                mucosal_delay.max(1)
+            ]),
         })
     }
 
@@ -318,23 +348,41 @@ impl GlottalIsland {
     /// pHS step or line refusal (non-finite state).
     pub fn step(&mut self, p_sub_pa: f64) -> Result<GlottalFrame, GlottisError> {
         let gap = self.gap_m();
-        let p_supra = 2.0 * self.p_minus + self.zc_flow * 0.0; // provisional
-        // Flow from the PREVIOUS gap against the incident wave; then
-        // the junction pressure includes the flow's own loading.
-        let dp0 = p_sub_pa - (2.0 * self.p_minus);
-        let mut flow = bernoulli_volume_flow(self.card.fold_length_m, gap.max(0.0), dp0, self.rho);
-        // One fixed-point refinement of the junction coupling:
-        // p_supra = 2 p_minus + Zc U, and the transglottal drop uses it.
-        for _ in 0..3 {
-            let p_supra_now = 2.0 * self.p_minus + self.zc_flow * flow;
-            let dp = p_sub_pa - p_supra_now;
-            flow = bernoulli_volume_flow(self.card.fold_length_m, gap.max(0.0), dp, self.rho);
-        }
-        let p_supra = if gap > 0.0 {
-            2.0 * self.p_minus + self.zc_flow * flow
-        } else {
-            2.0 * self.p_minus
+        // The 1-DOF island's flow sees the DELAYED gap (the Titze
+        // surface-wave mechanism); the two-mass island's vertical
+        // phase difference plays that role structurally.
+        let flow_gap = match &self.valve {
+            Valve::OneDof { .. } => {
+                let delayed = self.gap_history.pop_front().unwrap_or(gap);
+                self.gap_history.push_back(gap);
+                delayed
+            }
+            Valve::TwoMass { .. } => gap,
         };
+        // IMPLICIT junction solve (the brass-loop lesson, executed here
+        // after a Picard iteration failed to contract: Zc U is
+        // comparable to the drive, and the non-contracting fixed point
+        // acted as a negative resistance that rang the loop at ANY
+        // blowing pressure). With P = p_sub - 2 p_minus and
+        // U = w h sqrt(2 (P - Zc U)/rho), U solves the QUADRATIC
+        // U^2 + a Zc U - a P = 0, a = 2 (w h)^2 / rho - closed form,
+        // unconditionally dissipative at the junction.
+        let h_open = flow_gap.max(0.0);
+        let p_drive = p_sub_pa - 2.0 * self.p_minus;
+        let flow = if h_open > 0.0 && p_drive.abs() > 1.0e-12 {
+            let wh = self.card.fold_length_m * h_open;
+            let a_coef = 2.0 * wh * wh / self.rho;
+            let mag = 0.5
+                * (-a_coef * self.zc_flow
+                    + det::sqrt(
+                        a_coef * a_coef * self.zc_flow * self.zc_flow
+                            + 4.0 * a_coef * p_drive.abs(),
+                    ));
+            if p_drive < 0.0 { -mag } else { mag }
+        } else {
+            0.0
+        };
+        let p_supra = 2.0 * self.p_minus + self.zc_flow * flow;
         let dp = p_sub_pa - p_supra;
         let face = self.card.fold_length_m * self.card.thickness_m;
         let record = match &mut self.valve {
@@ -356,16 +404,20 @@ impl GlottalIsland {
                 let h1 = self.card.rest_gap_m + x[0];
                 let h2 = self.card.rest_gap_m + x[2];
                 let hmin = h1.min(h2);
-                let recovery = if h1 > 0.0 && hmin > 0.0 {
-                    1.0 - (hmin / h1) * (hmin / h1)
-                } else {
-                    0.0
-                };
+                // Steinecke-Herzel driving pressure on the LOWER
+                // mass: p1 = dp * (1 - (a_min/a1)^2) — HIGH when the
+                // upper mass constricts (pressure builds below the
+                // narrowing), ~zero when the lower mass is itself the
+                // jet constriction. The FIRST implementation inverted
+                // this factor and the limit cycle locked antiphase
+                // onto the tract resonance at 500 Hz (measured) — the
+                // vertical-phase energy mechanism runs on exactly this
+                // asymmetry, so its sign is load-bearing.
                 let drive1 = if h1 > 0.0 && h2 > 0.0 {
-                    face * dp * (1.0 - recovery)
+                    let ratio = (hmin / h1) * (hmin / h1);
+                    face * dp * (1.0 - ratio)
                 } else if h1 > 0.0 {
-                    // Upper closed: the lower face sees the full
-                    // subglottal pressure (stagnation).
+                    // Upper closed: stagnation under the lower mass.
                     face * p_sub_pa
                 } else {
                     0.0
@@ -377,15 +429,12 @@ impl GlottalIsland {
                 rec
             }
         };
-        // Scatter into the tract: p+ = p_supra - p-, then advance the
-        // line one sample to produce the next incident wave.
+        // Scatter into the tract: p+ = p_supra - p-, pushed THIS step
+        // (a stale one-sample push added junction phase slip).
         let p_plus = p_supra - self.p_minus;
-        self.p_minus = self
-            .line
-            .push(self.p_plus_prev)
-            .map_err(|_| GlottisError::Invalid {
-                what: "tract line left the finite set",
-            })?;
+        self.p_minus = self.line.push(p_plus).map_err(|_| GlottisError::Invalid {
+            what: "tract line left the finite set",
+        })?;
         self.p_plus_prev = p_plus;
         let fold_energy_j = record.delta_h; // per-step ledger delta
         Ok(GlottalFrame {
@@ -413,50 +462,91 @@ pub struct GlottalQois {
 }
 
 /// Measure the bake-off QoIs from a flow record sampled at `rate`.
+///
+/// f0 comes from AUTOCORRELATION of the mean-subtracted flow (the
+/// estimator lesson bank: closure-event counting dies when the limit
+/// cycle does not fully close — which is a legitimate phonation
+/// regime, reported as open quotient 1.0, not an error).
 #[must_use]
 pub fn glottal_qois(flow: &[f64], gaps: &[f64], rate: f64) -> GlottalQois {
-    // Periods from positive-going gap-opening instants.
-    let mut openings = Vec::new();
-    for k in 1..gaps.len() {
-        if gaps[k] > 0.0 && gaps[k - 1] <= 0.0 {
-            openings.push(k);
+    let mean_flow = flow.iter().sum::<f64>() / flow.len() as f64;
+    let ac: Vec<f64> = flow.iter().map(|v| v - mean_flow).collect();
+    // Autocorrelation peak between 2 ms and 25 ms (40..500 Hz).
+    let lo = (rate / 500.0) as usize;
+    let hi = ((rate / 40.0) as usize).min(ac.len() / 2);
+    let mut best = (0usize, f64::MIN);
+    for lag in lo..hi {
+        let mut acc = 0.0;
+        for i in 0..ac.len() - lag {
+            acc += ac[i] * ac[i + lag];
+        }
+        if acc > best.1 {
+            best = (lag, acc);
         }
     }
-    let (f0_hz, jitter, open_quotient) = if openings.len() >= 4 {
-        let periods: Vec<f64> = openings.windows(2).map(|w| (w[1] - w[0]) as f64).collect();
-        let mean = periods.iter().sum::<f64>() / periods.len() as f64;
-        let var = periods.iter().map(|p| (p - mean) * (p - mean)).sum::<f64>()
-            / periods.len() as f64;
-        let open: f64 = gaps[openings[0]..*openings.last().expect("nonempty")]
-            .iter()
-            .map(|&g| f64::from(u8::from(g > 0.0)))
-            .sum();
-        (
-            rate / mean,
-            var.sqrt() / mean,
-            open / (openings.last().expect("nonempty") - openings[0]) as f64,
-        )
+    let period = best.0 as f64;
+    let f0_hz = if period > 0.0 { rate / period } else { 0.0 };
+    // Cycle marks: positive-going mean-crossings of the AC flow; the
+    // jitter is their period spread.
+    let mut marks = Vec::new();
+    for k in 1..ac.len() {
+        if ac[k] > 0.0 && ac[k - 1] <= 0.0 {
+            marks.push(k);
+        }
+    }
+    let jitter = if marks.len() >= 4 {
+        let periods: Vec<f64> = marks
+            .windows(2)
+            .map(|w| (w[1] - w[0]) as f64)
+            .filter(|p| *p > 0.5 * period)
+            .collect();
+        if periods.len() >= 3 {
+            let mean = periods.iter().sum::<f64>() / periods.len() as f64;
+            let var =
+                periods.iter().map(|p| (p - mean) * (p - mean)).sum::<f64>() / periods.len() as f64;
+            var.sqrt() / mean
+        } else {
+            f64::NAN
+        }
     } else {
-        (0.0, f64::NAN, 1.0)
+        f64::NAN
     };
+    // Open quotient: fraction of samples with the gap open; 1.0 when
+    // the cycle never closes (honest, not an error).
+    let open: f64 = gaps
+        .iter()
+        .map(|&g| f64::from(u8::from(g > 0.0)))
+        .sum::<f64>()
+        / gaps.len() as f64;
+    let open_quotient = open;
     // Harmonic magnitudes 1..6 by Goertzel-style projection.
     let slope = if f0_hz > 0.0 {
         let mut levels = Vec::new();
         for n in 1..=6 {
             let omega = core::f64::consts::TAU * f0_hz * n as f64 / rate;
             let (mut re, mut im) = (0.0f64, 0.0f64);
-            for (k, &v) in flow.iter().enumerate() {
+            for (k, &v) in ac.iter().enumerate() {
                 re += v * det::cos(omega * k as f64);
                 im -= v * det::sin(omega * k as f64);
             }
-            levels.push(20.0 * det::ln((re * re + im * im).sqrt().max(1e-30)) / core::f64::consts::LN_10 / 1.0);
+            levels.push(
+                20.0 * det::ln((re * re + im * im).sqrt().max(1e-30))
+                    / core::f64::consts::LN_10
+                    / 1.0,
+            );
         }
         // dB per octave via a log2-frequency regression.
         let n = levels.len() as f64;
-        let xs: Vec<f64> = (1..=6).map(|k| det::ln(f64::from(k)) / core::f64::consts::LN_2).collect();
+        let xs: Vec<f64> = (1..=6)
+            .map(|k| det::ln(f64::from(k)) / core::f64::consts::LN_2)
+            .collect();
         let mx = xs.iter().sum::<f64>() / n;
         let my = levels.iter().sum::<f64>() / n;
-        let num: f64 = xs.iter().zip(&levels).map(|(x, y)| (x - mx) * (y - my)).sum();
+        let num: f64 = xs
+            .iter()
+            .zip(&levels)
+            .map(|(x, y)| (x - mx) * (y - my))
+            .sum();
         let den: f64 = xs.iter().map(|x| (x - mx) * (x - mx)).sum();
         num / den
     } else {
@@ -496,8 +586,15 @@ mod glottis_tests {
         card.stiffness_lower_n_m *= k_scale;
         card.stiffness_upper_n_m *= k_scale;
         card.coupling_n_m *= k_scale;
-        GlottalIsland::new(card, two_mass, &tract(), &air(), Termination::IdealOpen, RATE)
-            .expect("island admits")
+        GlottalIsland::new(
+            card,
+            two_mass,
+            &tract(),
+            &air(),
+            Termination::IdealOpen,
+            RATE,
+        )
+        .expect("island admits")
     }
 
     /// Sustained-oscillation detector (the .6.2 lesson: absolute
@@ -514,9 +611,29 @@ mod glottis_tests {
             gaps.push(frame.gap_m);
         }
         let win = n / 5;
+        // LINEARLY DETRENDED std: a slow settling ramp measured
+        // tail AC == mid AC == 5.2e-5 at 60 Pa on the first run and
+        // read as phonation - oscillation must survive detrending.
         let ac = |seg: &[f64]| -> f64 {
-            let mean = seg.iter().sum::<f64>() / seg.len() as f64;
-            (seg.iter().map(|v| (v - mean) * (v - mean)).sum::<f64>() / seg.len() as f64).sqrt()
+            let len = seg.len() as f64;
+            let mx = (len - 1.0) / 2.0;
+            let my = seg.iter().sum::<f64>() / len;
+            let mut num = 0.0;
+            let mut den = 0.0;
+            for (i, &v) in seg.iter().enumerate() {
+                num += (i as f64 - mx) * (v - my);
+                den += (i as f64 - mx) * (i as f64 - mx);
+            }
+            let slope = if den > 0.0 { num / den } else { 0.0 };
+            (seg.iter()
+                .enumerate()
+                .map(|(i, &v)| {
+                    let r = v - my - slope * (i as f64 - mx);
+                    r * r
+                })
+                .sum::<f64>()
+                / len)
+                .sqrt()
         };
         let tail = ac(&flows[n - win..]);
         let mid = ac(&flows[n - 2 * win..n - win]);
@@ -556,19 +673,26 @@ mod glottis_tests {
                 rows.push((two_mass, ks, p));
             }
         }
+        for (tm, ks, p) in &rows {
+            println!(
+                "{{\"suite\":\"fs-couple\",\"case\":\"gl-001-onset\",\"two_mass\":{tm},\
+                 \"k_scale\":{ks},\"onset_pa\":{p}}}"
+            );
+        }
         for w in rows.chunks(3) {
             assert!(
                 w[0].2 <= w[2].2,
                 "onset must not FALL with stiffness ({w:?})"
             );
         }
-        // Below threshold: silent (the detector, not wishful thinking).
-        let mut soft = island(false, 1.0);
-        assert!(!speaks(&mut soft, 40.0, 0.4).0, "sub-threshold must be silent");
+        // Non-vacuity: no onset may sit on the ladder FLOOR (a floor
+        // hit means the ladder resolved nothing — the .6.2 lesson);
+        // the sub-onset rung being silent is then inherent in the
+        // ladder's own definition (first rung that speaks).
         for (tm, ks, p) in &rows {
-            println!(
-                "{{\"suite\":\"fs-couple\",\"case\":\"gl-001-onset\",\"two_mass\":{tm},\
-                 \"k_scale\":{ks},\"onset_pa\":{p}}}"
+            assert!(
+                *p > 60.0 * 1.21,
+                "onset for (two_mass={tm}, k x {ks}) sits on the ladder floor ({p} Pa)"
             );
         }
     }
@@ -639,27 +763,31 @@ mod glottis_tests {
             }
         }
         let tail = n / 3;
-        // Phase via cross-correlation argmax over +-2 ms.
+        // Phase at the fundamental via projection (a raw
+        // cross-correlation window narrower than the period found a
+        // secondary peak on the first run — measured lesson).
         let seg1 = &q1[n - tail..];
         let seg2 = &q2[n - tail..];
-        let max_lag = (0.002 * f64::from(RATE)) as isize;
-        let mut best = (0isize, f64::MIN);
-        for lag in -max_lag..=max_lag {
-            let mut acc = 0.0;
-            for i in 0..seg1.len() {
-                let j = i as isize + lag;
-                if j >= 0 && (j as usize) < seg2.len() {
-                    acc += seg1[i] * seg2[j as usize];
-                }
+        let q = glottal_qois(&flows[n - tail..], &vec![1.0; tail], f64::from(RATE));
+        assert!(q.f0_hz > 40.0, "limit cycle must have a fundamental");
+        let omega = core::f64::consts::TAU * q.f0_hz / f64::from(RATE);
+        let project = |seg: &[f64]| -> (f64, f64) {
+            let mean = seg.iter().sum::<f64>() / seg.len() as f64;
+            let (mut re, mut im) = (0.0, 0.0);
+            for (k, &v) in seg.iter().enumerate() {
+                re += (v - mean) * fs_math::det::cos(omega * k as f64);
+                im -= (v - mean) * fs_math::det::sin(omega * k as f64);
             }
-            if acc > best.1 {
-                best = (lag, acc);
-            }
-        }
+            (re, im)
+        };
+        let (r1, i1) = project(seg1);
+        let (r2, i2) = project(seg2);
+        let dphi = fs_math::det::atan2(i2, r2) - fs_math::det::atan2(i1, r1);
+        let dphi = (dphi + core::f64::consts::PI).rem_euclid(core::f64::consts::TAU)
+            - core::f64::consts::PI;
         assert!(
-            best.0 > 0,
-            "the upper mass must LAG the lower (best lag {} samples)",
-            best.0
+            dphi < 0.0 && dphi > -core::f64::consts::PI,
+            "the upper mass must LAG the lower at the fundamental (dphi {dphi:.3} rad)"
         );
         // Flow skew: at the limit cycle the steepest descent must be
         // steeper than the steepest rise (closing faster than opening).
@@ -672,8 +800,7 @@ mod glottis_tests {
         );
         println!(
             "{{\"suite\":\"fs-couple\",\"case\":\"gl-003-mechanism\",\"verdict\":\"pass\",\
-             \"upper_lag_samples\":{},\"skew_ratio\":{:.2}}}",
-            best.0,
+             \"upper_lag_rad\":{dphi:.3},\"skew_ratio\":{:.2}}}",
             -steepest_fall / steepest_rise
         );
     }

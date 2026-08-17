@@ -1080,6 +1080,82 @@
       "budget_row": null,
       "corpus_refs": [],
       "notes": "Shaped like a reed, made of cane: tapered vamp mesh + the CC-BY cane packs through the reduce lab (f1=2709 Hz - the measured clarinet-reed class), driving the EXISTING realize_reed_bore loop; the authored-parameter path remains the Estimate debug image. Provenance chain: mesh digest + material resolution identity (heel E_L 5.0 GPa dry; blank-zone density DISCLOSED mismatch; eta=delta/pi from the damping pack) + reduction options + retained-compliance disclosure (0.965). The LAY is a measured-geometry chart (tip opening + facing length -> arc radius 0.145 m), v1 consumed as the rest gap; rolling-stiffness hardening is the named successor. MEASURED sensitivities: more-open lay +46% threshold (2044->2992 Pa, clarinet-class); harder cane (+1 sigma from the pack) reads BRIGHTER at matched breath above both thresholds (+1.9% centroid) with the ordering INVERTING near the soft threshold (both regimes recorded); cane-stiffness threshold shift is below the 1.21x ladder rung (logged, not overclaimed). TWO vacuous-gate traps caught en route: an absolute 1e-4 Pa speak detector fired on ringing at every rung, twice - the shipped detector demands SUSTAINED output at 2% of blowing pressure. Isotropic-reduction disclosure: E_L only; the 10x E_T anisotropy unrepresented."
+    },
+    {
+      "filling": "voice-glottis",
+      "image": "one-dof-surface-wave",
+      "qoi": "phonation-onset-curve",
+      "owner_crates": [
+        "fs-couple",
+        "fs-phs",
+        "fs-dcontact"
+      ],
+      "exactness": [
+        "X-Consist",
+        "X-Est"
+      ],
+      "gate": "ungated",
+      "live_default": "no",
+      "determinism": "one-host",
+      "evidence": [
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/src/glottis.rs::gl_001_both_islands_self_oscillate_with_onset_curves"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/src/glottis.rs::gl_002_collision_ledger_and_passivity"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/src/glottis.rs::gl_003_two_mass_phase_and_flow_skew"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/src/glottis.rs::gl_004_bakeoff_fixture_qois_on_identical_tract_and_card"
+        }
+      ],
+      "budget_row": null,
+      "corpus_refs": [],
+      "notes": "The 1-DOF glottal island: fs_phs mass-spring-damper + implicit Bernoulli junction + the TITZE SURFACE-WAVE mechanism (the flow sees the gap one mucosal propagation time late; c_mucosal=1 m/s AUTHORED Estimate) \u2014 a bare quasi-steady one-mass valve measured NO phonation to 6 kPa, the delay is the mechanism. Onset 188-276 Pa rising with stiffness (physiological range); f0 152 Hz, OQ 0.78, slope -6.6 dB/oct on the bake-off fixture. FIVE energy/mechanism bugs executed en route and recorded in-code (FIR-wrap passivity, Picard non-contraction at the junction, stale line push, S-H sign inversion, symmetric-rest deadlock)."
+    },
+    {
+      "filling": "voice-glottis",
+      "image": "two-mass",
+      "qoi": "phonation-onset-curve",
+      "owner_crates": [
+        "fs-couple",
+        "fs-phs",
+        "fs-dcontact"
+      ],
+      "exactness": [
+        "X-Consist",
+        "X-Est"
+      ],
+      "gate": "ungated",
+      "live_default": "no",
+      "determinism": "one-host",
+      "evidence": [
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/src/glottis.rs::gl_001_both_islands_self_oscillate_with_onset_curves"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/src/glottis.rs::gl_002_collision_ledger_and_passivity"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/src/glottis.rs::gl_003_two_mass_phase_and_flow_skew"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/src/glottis.rs::gl_004_bakeoff_fixture_qois_on_identical_tract_and_card"
+        }
+      ],
+      "budget_row": null,
+      "corpus_refs": [],
+      "notes": "The two-mass glottal island: 4-state coupled pHS (coupling INSIDE the Hamiltonian \u2014 discrete-gradient ledger exact), corrected Steinecke-Herzel driving (p1 = dp(1-(amin/a1)^2); the INVERTED factor locked antiphase onto the tract resonance \u2014 the sign is load-bearing), asymmetric seed escaping the unstable symmetric rest (S-H's own x1 seed), dcontact collision in pen^alpha units. VERTICAL PHASE MEASURED: upper lags lower 0.306 rad at the fundamental; flow closes faster than it opens. Onset 404-865 Pa rising with stiffness; f0 173 Hz, OQ 0.82, slope -10.0 dB/oct \u2014 steeper than the 1-DOF on the identical fixture (the bake-off discriminant, receipt minted in .8.3). Masses/stiffnesses/length RECEIPTED from the licensed pack twomass-if72-standard-plos-pone0187486; damping/rest-gap/collision authored Estimate."
     }
   ]
 }

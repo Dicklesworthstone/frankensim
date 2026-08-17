@@ -735,6 +735,28 @@ None.
   stiffness threshold shift is below the ladder rung (logged, never
   overclaimed).
 
+- `glottis` module (bead 3ez8g.8.2): the glottis as the SAME object
+  as a lip reed and relief valve — two islands on the menu (D21): the
+  1-DOF image with the TITZE SURFACE-WAVE mechanism (the flow sees the
+  gap one mucosal propagation time late; a bare quasi-steady one-mass
+  valve measured NO phonation to 6 kPa — the delay IS the mechanism;
+  wave speed authored Estimate) and the two-mass image (4-state
+  coupled pHS with the coupling INSIDE the Hamiltonian, corrected
+  Steinecke-Herzel driving, asymmetric seed escaping the unstable
+  symmetric rest, dcontact collision). FIVE energy/mechanism defects
+  were EXECUTED en route and their causes are recorded in-code where
+  each was fixed: the short low-loss tract's FIR wraps non-passively
+  (4x-oversampled enforcement, the MM-bank lesson); the junction
+  Picard iteration does not contract when Zc U rivals the drive
+  (closed-form quadratic solve, the brass lesson); a stale one-sample
+  line push adds junction phase slip; the S-H recovery factor's SIGN
+  is load-bearing (inverted, the cycle locks antiphase onto the tract
+  resonance); and the symmetric rest state is a driving-pressure
+  deadlock (S-H's own displacement seed). Fold parameters:
+  masses/stiffnesses/length RECEIPTED from the licensed two-mass pack;
+  damping, rest gap, collision, mucosal speed authored Estimate — the
+  honesty ladder's permitted rung, card-driven either way.
+
 ## Conformance tests
 
 `src/broadband_radiation.rs`: G0 complex/real-SH round trip/reconstruction against
@@ -879,6 +901,18 @@ fired on ringing at every rung, twice, before this); and refusals by
 name (a card without a modulus cannot resolve; lay-chart nonsense;
 an empty orifice face).
 
+`src/glottis.rs` `glottis_tests`, cases gl-001..gl-005 — both islands
+self-oscillate against the live tract with onset curves in the
+physiological range (1-DOF 188-276 Pa, two-mass 404-865 Pa, rising
+with stiffness, none on the ladder floor — the detector demands
+DETRENDED sustained output after a settling ramp read as phonation on
+the first run); the collision/damping ledger (undriven kick decays,
+per-step dissipation non-negative); the two-mass vertical phase
+(upper lags lower 0.306 rad at the fundamental) with faster-closing
+flow; the bake-off FIXTURE QoIs on the identical tract + card (f0
+152/173 Hz, OQ 0.78/0.82, slope -6.6/-10.0 dB/oct — the receipt is
+vowel-gates' to mint); refusals by name.
+
 ## No-claim boundaries
 
 - `acoustic_realize` is a composed description→waveform, not a named
@@ -1019,3 +1053,9 @@ an empty orifice face).
   executed plate-1-port fit artifact); bowed and vibroacoustic rows
   carry evidence but await their own mechanism/corpus gates (.7.3-.7.5,
   .7.4).
+- The glottal islands claim PHONATION MECHANISMS, not vowels: no
+  formant filters, no vocoder, no glottal-waveform playback (the
+  waveform emerges from the valve + tract loop or not at all). The
+  uniform 17.5 cm tract is a fixture, not an articulation model
+  (.8.1's lane); the bake-off receipt between the two islands is
+  minted in vowel-gates (.8.3), not here.
