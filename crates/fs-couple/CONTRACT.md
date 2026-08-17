@@ -757,6 +757,24 @@ None.
   damping, rest gap, collision, mucosal speed authored Estimate — the
   honesty ladder's permitted rung, card-driven either way.
 
+- `tract` module (bead 3ez8g.8.1): the tract as A(x,t) with LICENSED
+  charts (Assaneo 2011 PLOS CC-BY Table 2 — the authors' own 10-tube
+  /a/ and /u/; Spanish, acoustically-inverted, formant-valid register
+  disclosed; Story 1996 is unlicensable and the Dresden CC0 meshes are
+  the named MRI-grade upgrade vein). D22 as a WHOLE-CURVE gate: char
+  impulse-spectrum envelope vs the TMM |Z_in| envelope of the SAME
+  walled chart. STRUCTURAL FINDS the lane earned: characteristic_line
+  consumers must pass VOLUME-normalized zc (rho c/S — an area-free
+  rho*c flattens R to +1 and silently erases the tract shape; the
+  glottis module carried this defect and its gates were re-based under
+  the corrected load); a rigid-wall short tract realizes ACTIVELY (its
+  ringing outlasts the FIR window and time-aliasing makes |R| > 1 —
+  the tissue walls are required for the REALIZATION, not just the
+  physics); a uniform passivity clip that fires flattens the shape
+  (backstop only); dense realization via characteristic_line_dense
+  (n_fft override). The morph carry needs p-minus CONTINUITY or every
+  rebuild micro-clicks.
+
 ## Conformance tests
 
 `src/broadband_radiation.rs`: G0 complex/real-SH round trip/reconstruction against
@@ -913,6 +931,19 @@ flow; the bake-off FIXTURE QoIs on the identical tract + card (f0
 152/173 Hz, OQ 0.78/0.82, slope -6.6/-10.0 dB/oct — the receipt is
 vowel-gates' to mint); refusals by name.
 
+`src/tract.rs` `tract_tests`, cases vt-001..vt-004 — the whole-curve
+D22 gate (envelope correlation 0.87//a/ and 0.90//u/ with dominant
+resonances within 50 Hz; identity /a/ >> /u/); the yielding-wall F1
+raise (340 -> 401 Hz, nearest-peak comparison past the wall's own
+~100 Hz mode); the u->a morph (100 Hz control rate, carried, clicks
+18x less than the five-cut waypoint control on the REFLECTED wave,
+F1 track 353 -> 806 Hz logged); licensing-first refusals (unlicensed
+data refuses by name). The glottis module's gates were RE-MEASURED
+under the corrected load in the same change (two-mass onsets
+404-715 Pa physiological and monotone; the 1-DOF's ~5.8 kPa
+non-monotone onsets recorded as the fixed-delay mechanism's real
+behavior; flow skew logged, not asserted).
+
 ## No-claim boundaries
 
 - `acoustic_realize` is a composed description→waveform, not a named
@@ -1059,3 +1090,8 @@ vowel-gates' to mint); refusals by name.
   uniform 17.5 cm tract is a fixture, not an articulation model
   (.8.1's lane); the bake-off receipt between the two islands is
   minted in vowel-gates (.8.3), not here.
+- The tract module claims chart realization and morph mechanics, not
+  vowels-with-a-glottis (.8.3 composes them); no fricative jet, no
+  nasal branch (named refusals); mouth radiation is IdealOpen v1 (the
+  compact-mouth Z bake is the recorded refinement — the radiation-fit
+  ka ceiling forbids UnflangedOpen at full audio band).

@@ -1117,7 +1117,7 @@
       ],
       "budget_row": null,
       "corpus_refs": [],
-      "notes": "The 1-DOF glottal island: fs_phs mass-spring-damper + implicit Bernoulli junction + the TITZE SURFACE-WAVE mechanism (the flow sees the gap one mucosal propagation time late; c_mucosal=1 m/s AUTHORED Estimate) \u2014 a bare quasi-steady one-mass valve measured NO phonation to 6 kPa, the delay is the mechanism. Onset 188-276 Pa rising with stiffness (physiological range); f0 152 Hz, OQ 0.78, slope -6.6 dB/oct on the bake-off fixture. FIVE energy/mechanism bugs executed en route and recorded in-code (FIR-wrap passivity, Picard non-contraction at the junction, stale line push, S-H sign inversion, symmetric-rest deadlock)."
+      "notes": "The 1-DOF glottal island (Titze surface-wave delay; c_mucosal=1 m/s authored). RE-BASED under the CORRECTED volume-normalized tract load (the original close's numbers were measured against a flat-R load - the zc defect found by the tract lane): onset ~5.8 kPa (loud-pressure class, NOT physiological speech; part of the bake-off record) and NON-monotone in stiffness (the fixed delay's phase tuning moves with fold frequency - the mechanism's real behavior, recorded); at its own drive f0 173 Hz, OQ 0.945, slope -12.4 dB/oct, jitter 0.105 (rough/breathy characterization). The five-bug debugging arc remains recorded in-code."
     },
     {
       "filling": "voice-glottis",
@@ -1155,7 +1155,44 @@
       ],
       "budget_row": null,
       "corpus_refs": [],
-      "notes": "The two-mass glottal island: 4-state coupled pHS (coupling INSIDE the Hamiltonian \u2014 discrete-gradient ledger exact), corrected Steinecke-Herzel driving (p1 = dp(1-(amin/a1)^2); the INVERTED factor locked antiphase onto the tract resonance \u2014 the sign is load-bearing), asymmetric seed escaping the unstable symmetric rest (S-H's own x1 seed), dcontact collision in pen^alpha units. VERTICAL PHASE MEASURED: upper lags lower 0.306 rad at the fundamental; flow closes faster than it opens. Onset 404-865 Pa rising with stiffness; f0 173 Hz, OQ 0.82, slope -10.0 dB/oct \u2014 steeper than the 1-DOF on the identical fixture (the bake-off discriminant, receipt minted in .8.3). Masses/stiffnesses/length RECEIPTED from the licensed pack twomass-if72-standard-plos-pone0187486; damping/rest-gap/collision authored Estimate."
+      "notes": "The two-mass glottal island (coupling inside the Hamiltonian; corrected S-H driving; asymmetric seed; dcontact collision). RE-BASED under the CORRECTED volume-normalized tract load: onsets 404/488/715 Pa rising with stiffness (physiological - the structural vertical-phase mechanism is robust to the load correction), upper lags lower 0.462 rad (STRONGER than under the defective load), f0 178 Hz, OQ 0.813, slope -12.7 dB/oct, jitter 0.0009. Flow skew measured near-symmetric (0.97) - LOGGED not asserted; glottal-duct inertance is the named upgrade for skew. Masses/stiffnesses/length receipted from the licensed pack."
+    },
+    {
+      "filling": "voice-tract",
+      "image": "char-line-chart",
+      "qoi": "formant-oracle-agreement",
+      "owner_crates": [
+        "fs-couple",
+        "fs-duct"
+      ],
+      "exactness": [
+        "X-Consist",
+        "X-Est"
+      ],
+      "gate": "ungated",
+      "live_default": "no",
+      "determinism": "one-host",
+      "evidence": [
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/src/tract.rs::vt_001_static_vowels_match_the_tmm_oracle_and_differ"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/src/tract.rs::vt_002_yielding_walls_raise_the_first_formant"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/src/tract.rs::vt_003_u_to_a_morph_is_click_free_with_formant_tracks"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/src/tract.rs::vt_004_refusals_fire_by_name"
+        }
+      ],
+      "budget_row": null,
+      "corpus_refs": [],
+      "notes": "The tract as A(x,t): LICENSED charts (Assaneo 2011 PLOS CC-BY Table 2 - the authors' own 10-tube /a/ and /u/, transcribed + pdftotext-verified; Spanish, acoustically-inverted, formant-valid register disclosed; Story 1996 unlicensable, Dresden CC0 meshes = named MRI upgrade vein). D22 EXECUTED as a whole-curve gate: char impulse-spectrum vs TMM |Z_in| envelope correlation 0.87/0.90 with dominant resonances within 50 Hz; yielding tissue walls raise F1 340->401 Hz (nearest-peak comparison - the wall contributes its own ~100 Hz mode); the u->a morph at 100 Hz control rate with the carry + p-minus-continuity lift clicks 18x less than the five-cut waypoint control (0.116 vs 2.083 on the REFLECTED wave - the raw metric saturates on excitation pulses), F1 track 353->806 Hz. THE LANE'S STRUCTURAL FIND: characteristic_line consumers must pass VOLUME-normalized zc (rho c/S) - an area-free rho*c flattens R to +1 and erases the shape (the glottis module carried this defect; its gates were re-based); rigid-wall short tracts realize ACTIVELY (IR outlasts the window - the walls are required for the realization itself); dense n_fft=4096 via characteristic_line_dense."
     }
   ]
 }
