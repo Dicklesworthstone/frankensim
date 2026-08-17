@@ -1,0 +1,81 @@
+{
+ "schema": "org.frankensim.wright-flyer.perf-baseline.v1",
+ "bead": "frankensim-wf-root-guzez.1.6.1",
+ "host": {
+  "kind": "node-headless",
+  "node": "v25.4.0",
+  "cpu": "Apple M4 Pro",
+  "cores": 14,
+  "note": "SHARED loaded development host — indicative baseline only; acceptance rows come from qualified quiet devices (E0.6b)"
+ },
+ "rows": [
+  {
+   "name": "biot-savart-2000x60",
+   "batchSize": 120000,
+   "samples": 30,
+   "p50_us": 0.0033,
+   "p95_us": 0.1371,
+   "p99_us": 0.1984,
+   "opsPerSec": 60518610
+  },
+  {
+   "name": "dense-lu-80",
+   "batchSize": 1,
+   "samples": 60,
+   "p50_us": 127.208,
+   "p95_us": 871.75,
+   "p99_us": 127136.458,
+   "opsPerSec": 425
+  },
+  {
+   "name": "transcendental-4096",
+   "batchSize": 4096,
+   "samples": 60,
+   "p50_us": 0.0341,
+   "p95_us": 0.0765,
+   "p99_us": 0.1842,
+   "opsPerSec": 29499460
+  },
+  {
+   "name": "seqlock-publish-256f64",
+   "batchSize": 1,
+   "samples": 200,
+   "p50_us": 3.084,
+   "p95_us": 8.125,
+   "p99_us": 424.625,
+   "opsPerSec": 85740
+  },
+  {
+   "name": "pool-pack-512f64",
+   "batchSize": 1,
+   "samples": 200,
+   "p50_us": 0.459,
+   "p95_us": 0.584,
+   "p99_us": 2.209,
+   "opsPerSec": 1891164
+  },
+  {
+   "name": "f32-downconvert-98k",
+   "batchSize": 98304,
+   "samples": 60,
+   "p50_us": 0.0014,
+   "p95_us": 0.4554,
+   "p99_us": 1.2962,
+   "opsPerSec": 21723608
+  }
+ ],
+ "no_data": [
+  {
+   "name": "float32-gpu-upload",
+   "reason": "requires a real browser/GPU context (E0.6c)"
+  },
+  {
+   "name": "wasm-aero-kernels",
+   "reason": "real kernels land with E4.2/E4.5/E4.7 (E0.6c)"
+  },
+  {
+   "name": "browser-device-matrix",
+   "reason": "E0.6b via the E6.4 automation harness"
+  }
+ ]
+}
