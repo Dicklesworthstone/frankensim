@@ -2,7 +2,7 @@
   "schema": "frankensim-source-manifest-v1",
   "identity_domain": "org.frankensim.xtask.source-manifest.v1",
   "identity_version": 1,
-  "manifest_identity": "361ffeffeb687bfd60a6804f198e8d8875edff76aed89afc31f9894107341de9",
+  "manifest_identity": "5143064acabb95f3d77cf3baf6318648bed1d5f8571a055947bbd847a04d2eef",
   "bead_id": "frankensim-extreal-program-f85xj.13.2",
   "authority": "canonical structural inventory over exact Git-index non-tracker bytes; release observations are intentionally unbound here",
   "release_binding": {
@@ -15,7 +15,7 @@
     "repository": "https://github.com/Dicklesworthstone/frankensim",
     "workspace_version": "0.0.1",
     "source_root_domain": "org.frankensim.xtask.source-root.v1",
-    "source_root": "f8332026f2f2acca6e1a96ba67b8cb46a7e643086efdb1fc0f73756b1b0424dc",
+    "source_root": "2478da17d7f4c1f7b427ef49ea9f0216aff573a1ef335b257998c8ad26798ede",
     "tracked_file_count": 2517,
     "excluded_paths": [".beads/**", "frankensim-source-manifest.json", "frankensim-source-manifest.spdx.json"],
     "files": [
@@ -2447,7 +2447,7 @@
       {"path": "scripts/ci/generate_portfolio_candidate.py", "git_mode": "100755", "bytes": 14764, "content_blake3": "766ae3341b338704f072e579196292480b429720b475504f522d5f7bb2859d2d"},
       {"path": "scripts/ci/new_domains_e2e.sh", "git_mode": "100755", "bytes": 22585, "content_blake3": "fc384373d07aefa11878dba25469fb13095d38f76a69d3ba9e05dbed90cc4aef"},
       {"path": "scripts/ci/new_domains_e2e_selftest.sh", "git_mode": "100755", "bytes": 13739, "content_blake3": "dd7675c3bfa67517572d80537f41b21ac49bd44a1e58e0fc004675daaee4a8f4"},
-      {"path": "scripts/ci/quality_lanes.sh", "git_mode": "100755", "bytes": 24291, "content_blake3": "44a0259c57e47c1fa557188b9a96f77e5f81c94f6b33cf6e5c749fc0256c177c"},
+      {"path": "scripts/ci/quality_lanes.sh", "git_mode": "100755", "bytes": 25450, "content_blake3": "fefb1adcc5a6b1185f55b7586cd0dd09ff20dbac00c57784179aa285e97de636"},
       {"path": "scripts/ci/runner_v2_acceptance_registry.py", "git_mode": "100644", "bytes": 16436, "content_blake3": "629f4c2b3e6dab3549d5dee81a6727ee3ca80a5242f18b3ec58a795222b41e1a"},
       {"path": "scripts/ci/solve_stage_producers_e2e.sh", "git_mode": "100755", "bytes": 16020, "content_blake3": "5ec3a00587dbfba5fbf445f24146e5ab4c5e6a5f14e102398aa3eaf58f93d687"},
       {"path": "scripts/ci/trust_root_determinism_matrix.sh", "git_mode": "100755", "bytes": 6118, "content_blake3": "840f5e93195b75dec8f31d5c45fb17f5212d4e661a6f225d18e657bc43862780"},
