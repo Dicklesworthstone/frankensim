@@ -1,11 +1,12 @@
 # COMPREHENSIVE PLAN: Real-Time Wright Flyer Simulation with FrankenSim
 
 **Working title:** *First Flight — Kitty Hawk, December 17, 1903*
-**Document status:** Planning-workflow ROUND 5 (verification report integrated;
-Round-5 verdict was "ROUND 6 REQUIRED" on mechanical-closure grounds only — all
-blocking and non-blocking findings are integrated below; the physics
-architecture, prelaunch contract, A1 lane, A/B semantics, and graph acyclicity
-were verified intact. Round 6 re-runs the same verification charter).
+**Document status:** STEADY STATE — Round-6 verdict: **BEADS READY AFTER
+LISTED POLISH** (all six polish edits applied in this revision). All four
+verification checks passed: diff integration, mechanical name scan (91 tasks /
+38 cases / zero undefined references), identity-preimage audit (every identity
+closed and lifecycle-valid), DAG audit (acyclic, A1 lane gates only E5.3b).
+E0.1 beads conversion is authorized and in progress.
 **Process:** This document follows `/planning-workflow`. The Round 1 review (GPT Pro
 Extended Reasoning) accepted the architecture and required a major physics-and-
 validation revision, integrated throughout this version. A "Review round log" at the
@@ -31,7 +32,7 @@ Verified/Validated/Estimated).
 11. [Crate Reuse Matrix & New Crates](#11-crate-reuse-matrix--new-crates)
 12. [Milestones & Dependency-Aware Task Graph](#12-milestones--dependency-aware-task-graph)
 13. [Risks & Mitigations](#13-risks--mitigations)
-14. [Round-6 Verification Charter](#14-round-6-verification-charter)
+14. [Round-6 Verification Charter (CLOSED)](#14-round-6-verification-charter-closed)
 15. [Appendices](#15-appendices)
 
 ---
@@ -470,7 +471,7 @@ once, in the lifecycle paragraph below — Round-5 dedup):
 | `PhysicalScenarioId` | aircraft design, site, initial conditions, weather *distribution*, pilot hypothesis, launch system |
 | `ModelId` | tier, every approximation/fast mode + parameters, correction-table selections, discretizations, timestep, solver modes |
 | `ArtifactId` | hash of the COMPLETE physics execution closure: wasm/native physics binary, physics-affecting JS glue, deterministic host-import implementation, host-ABI + memory-layout contract, schema adapters, deterministic-math tables, complete physics-data manifest, toolchain/build lock (pure rendering assets stay under `PresentationId`) |
-| `InputTraceId` | hash of `InputTraceV1` { schema_id, end_tick_exclusive, ordered ResolvedAppliedEvent(channel, applied_tick, ordinal_within_tick, quantized_value) } — the trace EXTENT is part of the domain (two event-free runs stopped at different ticks differ), and acquisition-clock metadata stays in a replay attachment (Round-4 S-01) |
+| `InputTraceId` | hash of `InputTraceV1` { input_trace_schema_id, end_tick_exclusive, ordered ResolvedAppliedEvent(channel, applied_tick, ordinal_within_tick, quantized_value) } — the trace EXTENT is part of the domain (two event-free runs stopped at different ticks differ), and acquisition-clock metadata stays in a replay attachment (Round-4 S-01) |
 | `RunId` | the closed two-input definition of the lifecycle paragraph (never "hash of the quintuple," which was self-referential) |
 
 "Same physical scenario, different model" is thus expressible without pretending two
@@ -506,9 +507,9 @@ ALGORITHM → ModelId; explicit residual model-deficiency draws →
 ModelUncertaintyRealizationId. H-07 manifests name each hierarchy level; a
 single undifferentiated pilot_effect field is forbidden. Subordinate
 identities never alter the quintuple: `FieldSourceSnapshotId = H("fs-flyer/field-source-snapshot/v1", RunAnchor,
-source_tick, complete_source_state_digest, snapshot_schema_id)`;
+source_tick, source_state_digest, snapshot_schema_id)`;
 `FieldQueryId = H("fs-flyer/field-query/v1", FieldSourceSnapshotId,
-components, grid, induction_approximation, field_backend, precision,
+components, grid, induction_approximation, field_backend_id (a FieldBackendId), precision,
 derivative_and_masking_profile)` — bound to the actual sampled STATE, not just
 the run (two ticks of one run are distinct — Round-4 S-02);
 `PresentationId = H("fs-flyer/presentation/v1",
@@ -917,7 +918,7 @@ calibration.
   blade-solid cell + digitization/interpolation/numerical margins (hand-entered
   radii forbidden); no capsule crosses the rotation axis or covers the hub
   void (hub/drivetrain is a separate proxy); acceptance = full cover, excess ≤
-  max(5 mm, geometry uncertainty), radial segments ≤ 0.125 R; artifact id +
+  max(5 mm, geometry uncertainty), radial segments ≤ 0.125 R; `BladeCollisionProxyArtifactId` +
   cover certificate enter the manifests; > 24 needed → the blade-strike CLAIM
   refuses and only the disk warning remains. The propeller-DISK envelope
   remains a conservative clearance WARNING only. A blade strike, or any impact whose continuation would need an
@@ -1614,7 +1615,8 @@ for the four flights, Huffman 1904, Flyer III 1905, challenges.
   `RunSpecId = H("fs-flyer/run-spec/v1", PhysicalScenarioId, ModelId,
   ArtifactId, PhysicalUncertaintyRealizationId,
   ModelUncertaintyRealizationId, input_trace_schema_id, InputPolicyId)` —
-  the PRE-EXECUTION subset of RunIdentityBasisV1, deliberately EXCLUDING the
+  a PRE-EXECUTION cache-key projection of RunIdentityBasisV1, plus
+  `InputPolicyId`, deliberately EXCLUDING the
   accepted tick-0 digest, which does not exist until prelaunch closes
   (Round-5 lifecycle fix: every RunSpecId field exists at minting time; for a
   deterministic scenario+model+policy, prelaunch is a pure function of these
@@ -2251,7 +2253,10 @@ fs-phs/fs-aeroac-grounded audio.
 
 ---
 
-## 14. Round-6 Verification Charter
+## 14. Round-6 Verification Charter (CLOSED)
+
+> Executed 2026-08-17; verdict BEADS READY AFTER LISTED POLISH; polish applied.
+> Retained for the record. E0.1 conversion is the active step.
 
 Round 5 executed the verification charter and returned "ROUND 6 REQUIRED" on
 mechanical-closure grounds only; every blocking and non-blocking finding is
@@ -2393,5 +2398,5 @@ bare "AR" for a biplane.
 | 2 | GPT Pro Extended Reasoning (external) | 2026-08-16 | **"NOT BEADS READY" verdict integrated**: AeroEffectOwners record + chordwise reduced time (the |U| clock bug); prescribed-wake Tier-A candidate A1 + V-08b selection; hinge-load ownership moved to fs-wing + branch/set-valued free-control stability + ModelSafetyLimits split; cue-based two-axis pilot + perception model + InputTransducerMode; AddedMassMode ladder + energy-consistent bias + HeldOnRailEquilibrated prelaunch; two-way prop coupling + warm-started station solve default + J≈0.7–0.8 Dec-17 correction + gyroscopic moments; FlatSiteLogLaw solenoidality fix + Mann-class tensor target + exact-discrete OU + air-state API; 120 Hz shedding + core-evolution modes + moment-complete conversions + mixed-norm errors; FlatPlaneVortexImageExact rename + FlatnessCertificate + swept contact proxies; ReducedAeroelasticWarp; corrected 3.23/4.26 budget + kernel-subtotal honesty + tick view + field memory; service/lateness/backlog metrics + vsync-relative render gates; leased ≥3-slot snapshot ring + non-SAB pack/copy; input-tick sync + ApplyNextEligibleTickAndFlag; hysteretic QoS machine; evidence lineage/independence groups; V/H-case split + hierarchical H-07 + unstable-system convergence protocol + anti-vacuity baselines; RunIntentId + derived weather realization + CheckpointStateV1 + artifact archive; joint historical parameter model + attribution honesty; copy fixes; "why it rolls and yaws"; historical flags (30-ft derrick, 20–21 ft² rudder, AR conventions, anhedral intent, engine-mass boundary) [historical names: then-unsplit V-08b/V-04b] |
 | 3 | GPT Pro Extended Reasoning (external) | 2026-08-16 | **"ROUND 4 REQUIRED" — 23 structural + 16 polish items, ALL integrated**: joint (6+nc) added-mass solve; fs-flyer-owned prop coupling (L3 siblings decoupled) + Aitken scheme + immutable schedules; stationary-draw prelaunch initialization + E4.6d closure task; PhysicalRealizationAlgorithmId + RunAnchor + applied-trace-only InputTraceId; checkpoint algorithmic history; AtmosphereStateSnapshot in field snapshots; FOM/ROM split with shared-basis rational-Krylov + two receipts; E3.3a/b/c atmosphere workstream + full-tensor fitting; fixed-control-first gate ordering + ControlConstraintCase; E4.4a/E4.7b/E1.10 dependency closure; mandatory LOFO H-07 + offline full-Bayes + campaign manifest + no-surrogate-finals; A7a/A7b split (GO, Wright Experience candidate); persistent tracer service replacing the dense history ring; hard lateness gates + V-18 field-noninterference; runtime mode-immutability triad; phase-resolved blade capsules + TerminalEvent semantics; archive hosting/signing/sandbox/retention contract; deterministic perception service (V-16b); SmoothedTangentPlane boundary-work accounting; A.4 BEMT appendix aligned; WebGPU strictly v1.5 (E7.6); epic/leaf beads rule with pre-split list; 16 polish fixes (copy neutrality, stale refs, milestone renames, status labels, six-lane goldens naming, deferred-mode backlog) |
 | 4 | GPT Pro Extended Reasoning (external closure audit) | 2026-08-17 | **"ROUND 5 REQUIRED" — six structural + twelve polish groups + seven decisions, ALL integrated**: closed identity preimages (RunIdentityBasisV1, two-input RunId, trace-extent-bearing InputTraceV1, execution-closure ArtifactId, RNG realization-rooting, RunSpecId cache); state-bound field identities (FieldSourceSnapshotId, snapshot-lease API); branch-aware CRN-preserving prelaunch (StationaryOuPathV1 −32 s anchor, PhysicalInitializationSpec + ControlEquilibriumSelection, partitioned alternate starts, numerical closure bands); de-circularized H-07 (intent-manifest/receipt split, per-member allocations, E10.2a/b/c); A1 image/referee ownership (common image kernel in E4.4a, image-aware FOM/ROM, independent E4.9b referee); terminal-safe A/B (ABComparisonReceiptV1, user-intent counterfactual channel); Aitken candidate family; 16→24 blade capsules with generated radii; 120 Hz perception baseline; ratified R2+ObjectLock archive with verifier-mediated dual publication + trusted-loader boundary; prelaunch policy numbers; conversion gate + expanded pre-split; V-05d/V-11c/V-21 receipts, V-20 expansion, A7a promotion path; seqlock run-epoch; pilot-uncertainty allocation; stale-name sweep; budget-row honesty; schedule inventory; tangent-plane v1.5 deferral; risk reorder |
-| 5 | GPT Pro Extended Reasoning (external verification) | 2026-08-17 | **"ROUND 6 REQUIRED" — mechanical closure only; architecture verified intact** (S-03/S-05/S-06 + 9 polish groups INTEGRATED; graph acyclic; A1 lane correct; registry complete). Blocking fixes integrated: single ModelUncertaintyRealizationId preimage; §6 trace/attachment boundary (one InputTraceId preimage); RunSpecId redefined over pre-execution fields only; HistoricalCampaignReceiptV1 stripped of scorer-owned ids + new HistoricalCampaignScoreArtifactV1 (E10.2c); intent manifest carries the four-level pilot-uncertainty allocation + CampaignMemberRunSpecV1; eight leaf identities closed (PhysicalRealizationAlgorithmId, ModelRealizationAlgorithmId, InputPolicyId, PilotPopulationHypothesisId, PerceptionModelId, FieldBackendId, BladeCollisionProxyArtifactId, EvidenceLineageId) + PresentationId/CheckpointId formulas; E4.3→E3.3a; E10.1→E4.9a/b; E7.4b dependencies resolved to E4.6b0/E4.6c/E8.2 with E8.2 owning the augmented-linearization engine. Non-blocking cleanup: stray fences removed, FieldSourceSnapshotV1 normalized, E4.6b/c expanded, historical V-08b annotated, RunIntentId/RunId formulas deduplicated to one normative site |
-| 6+ | — | — | pending; same verification charter; convert to beads at steady state |
+| 5 | GPT Pro Extended Reasoning (external verification) | 2026-08-17 | **"ROUND 6 REQUIRED" — mechanical closure only; architecture verified intact** (S-03/S-05/S-06 + 9 polish groups INTEGRATED; graph acyclic; A1 lane correct; registry complete). Blocking fixes integrated: single ModelUncertaintyRealizationId preimage; §6 trace/attachment boundary (one InputTraceId preimage); RunSpecId redefined over pre-execution fields only; HistoricalCampaignReceiptV1 stripped of scorer-owned ids + new HistoricalCampaignScoreArtifactV1 (E10.2c); intent manifest carries the four-level pilot-uncertainty allocation + CampaignMemberRunSpecV1; eight leaf identities closed (PhysicalRealizationAlgorithmId, ModelRealizationAlgorithmId, InputPolicyId, PilotPopulationHypothesisId, PerceptionModelId, FieldBackendId, BladeCollisionProxyArtifactId, EvidenceLineageId) + PresentationId/CheckpointId formulas; E4.3→E3.3a; E10.1→E4.9a/b; E7.4b dependencies resolved to E4.6b0/E4.6c/E8.2 with E8.2 owning the augmented-linearization engine. Non-blocking cleanup: stray fences removed, FieldSourceSnapshotV1 normalized, E4.6b/c expanded, historical V-08b annotated, RunIntentId/RunId formulas deduplicated to one normative site, trace-phrase rebinding (Training Assist user-intent channel + SameInputTrace source-schedule semantics) |
+| 6 | GPT Pro Extended Reasoning (external verification) | 2026-08-17 | **"BEADS READY AFTER LISTED POLISH"** — all four checks PASS (zero undefined names, zero divergent duplicates, all preimages closed and lifecycle-valid, DAG acyclic with the A1 lane correctly gating only E5.3b); six mechanical polish edits enumerated and applied in this revision (input_trace_schema_id, source_state_digest, field_backend_id, BladeCollisionProxyArtifactId spelled at the proxy contract, RunSpecId descriptor corrected to "projection + InputPolicyId", Round-5 log completed). STEADY STATE REACHED — E0.1 conversion authorized |
