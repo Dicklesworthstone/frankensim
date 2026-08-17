@@ -3645,6 +3645,78 @@ mod bell_bake_artifact {
             hi / core::f64::consts::TAU
         );
     }
+
+    #[test]
+    fn breath_versus_hall_is_physics_not_a_detune_knob() {
+        // The EMERGENT demonstration moist air exists for (music bead
+        // 3ez8g.3.5): one clarinet-scale bore, three ambient states,
+        // first-impedance-peak pitch logged in cents. Cold dry hall vs
+        // the player's warm saturated breath is a >1-semitone shift —
+        // and holding T fixed at body temperature, HUMIDITY ALONE
+        // moves the peak by the audible ~17-cent class (Estimate band
+        // authored from the mixture rule's own uplift, cross-checked
+        // against the analytic c-ratio below, NOT against another
+        // quantity from the same GasState).
+        let hall = GasState::try_new_moist_air(283.15, 101_325.0, 0.0).expect("hall");
+        let warm_dry = GasState::try_new_moist_air(310.15, 101_325.0, 0.0).expect("warm dry");
+        let breath = GasState::try_new_moist_air(310.15, 101_325.0, 1.0).expect("breath");
+        let duct = Duct {
+            segments: vec![Segment::Cylinder {
+                radius: 0.0075,
+                length: 0.5,
+            }],
+        };
+        let first_peak_hz = |state: &GasState| -> f64 {
+            let mut best = (0.0f64, 0.0f64);
+            let mut f = 120.0;
+            while f <= 260.0 {
+                let omega = core::f64::consts::TAU * f;
+                let z = input_impedance(
+                    &duct,
+                    state,
+                    omega,
+                    LossModel::Bessel,
+                    Termination::UnflangedOpen,
+                )
+                .expect("in band")
+                .impedance;
+                let mag = (z.re * z.re + z.im * z.im).sqrt();
+                if mag > best.1 {
+                    best = (f, mag);
+                }
+                f += 0.05;
+            }
+            best.0
+        };
+        let f_hall = first_peak_hz(&hall);
+        let f_warm_dry = first_peak_hz(&warm_dry);
+        let f_breath = first_peak_hz(&breath);
+        let cents = |a: f64, b: f64| 1200.0 * det::ln(a / b) / core::f64::consts::LN_2;
+        let total = cents(f_breath, f_hall);
+        let humidity_only = cents(f_breath, f_warm_dry);
+        assert!(
+            (80.0..115.0).contains(&total),
+            "breath vs hall must be a >semitone-class shift ({total:.1} cents)"
+        );
+        assert!(
+            (10.0..25.0).contains(&humidity_only),
+            "humidity alone at body T must be the ~17-cent class ({humidity_only:.1} cents)"
+        );
+        // Independent cross-check: in the lossless quarter-wave limit
+        // the peak ratio IS the sound-speed ratio; the executed duct
+        // (viscothermal losses + radiation end correction) must land
+        // within a few cents of the analytic prediction.
+        let predicted = cents(breath.sound_speed, warm_dry.sound_speed);
+        assert!(
+            (humidity_only - predicted).abs() < 3.0,
+            "duct shift {humidity_only:.2} vs analytic c-ratio {predicted:.2} cents"
+        );
+        println!(
+            "{{\"suite\":\"fs-duct\",\"case\":\"breath-vs-hall\",\"verdict\":\"pass\",\
+             \"f_hall\":{f_hall:.2},\"f_breath\":{f_breath:.2},\"total_cents\":{total:.1},\
+             \"humidity_only_cents\":{humidity_only:.1},\"predicted_cents\":{predicted:.1}}}"
+        );
+    }
 }
 
 /// One named fingering: the hole states applied to a duct template

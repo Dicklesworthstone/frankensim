@@ -194,6 +194,14 @@ frequency. No `Cx` integration (tracked with the workspace-wide
 
 None.
 
+- Breath vs hall (music bead 3ez8g.3.5): the emergent demonstration
+  that ambient state is physics — one clarinet-scale bore, three
+  moist-air states, first-impedance-peak pitch in cents. Cold dry
+  hall (10 °C) vs warm saturated breath (37 °C): 94.7 cents; at fixed
+  body temperature HUMIDITY ALONE moves the peak 17.5 cents, within
+  0.2 cents of the analytic sound-speed-ratio prediction (17.3) — the
+  executed duct and the mixture rule agree independently.
+
 ## Conformance tests
 
 Inline `tests` module: lossless closed forms; quarter-wave end

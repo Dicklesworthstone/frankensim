@@ -53,6 +53,33 @@
 //! is the gas-phase EXTRAPOLATION, never evidence the gas phase
 //! exists there.
 //!
+//! MOIST AIR (music bead 3ez8g.3.5): [`GasState::try_new_moist_air`]
+//! derives the ideal dry-air + water-vapor mixture from relative
+//! humidity — a player's warm humid breath vs a cold dry hall is a
+//! real ~0.3%-class sound-speed effect, physics rather than a detune
+//! knob. Mixture rules, both EXACT for an ideal mixture: molar mass
+//! linear in the vapor mole fraction, and the isochoric-heat identity
+//! `1/(γ_mix−1) = Σ x_i/(γ_i−1)`. The vapor fraction comes from the
+//! Buck 1996 saturation fit over liquid water
+//! (`e_s = 611.21 exp((18.678 − t/234.5) t/(257.14 + t))` Pa, t in
+//! °C; quoted for −20..+50 °C — refused outside when RH > 0). Water
+//! vapor spec provenance: `M = 18.01528e-3` kg/mol (CODATA/IUPAC),
+//! `γ = 1.3291` from NIST-JANAF `cp(H2O g, 298.15 K) = 33.58`
+//! J/(mol K) via `γ = cp/(cp − R)`, Sutherland `β = 2.418e-6`,
+//! `S = 1064 K` (White, *Viscous Fluid Flow*, steam constants;
+//! reproduces `μ(373 K) ≈ 1.21e-5` Pa s).
+//!
+//! MOIST-AIR NO-CLAIMS, stated honestly: (a) transport coefficients
+//! (μ, κ) REMAIN THE DRY-AIR FITS — humidity's transport effect is
+//! sub-1% at musical vapor fractions and ~2%-class at the admitted
+//! ceiling `x_w ≤ 0.15` (refused above: the disclosed approximation
+//! band, estimated tier). (b) The saturation ENHANCEMENT FACTOR of
+//! moist air over the pure-phase `e_s` (~0.5% at 1 atm) is neglected.
+//! (c) RH > 1 is REFUSED — a supersaturated input describes a
+//! condensing state the ideal-gas model cannot represent, so the
+//! phase no-claim is structural at this constructor's input; the
+//! plain [`GasState::try_new`] window no-claim above still stands.
+//!
 //! Determinism: pure `f64` arithmetic with `fs_math::det` for the
 //! non-IEEE transcendentals; repeat evaluations are bitwise identical.
 
@@ -105,6 +132,46 @@ impl GasSpec {
             conductivity: ConductivityModel::Ussa1976AirFit,
         }
     }
+
+    /// Water vapor: `M = 18.01528e-3` kg/mol (CODATA/IUPAC),
+    /// `gamma = 1.3291` from NIST-JANAF `cp(H2O g, 298.15 K) = 33.58`
+    /// J/(mol K) via `gamma = cp/(cp - R)`, Sutherland steam constants
+    /// `beta = 2.418e-6`, `S = 1064 K` (White, *Viscous Fluid Flow*;
+    /// gives `mu(373 K) ~ 1.21e-5` Pa s vs the tabulated ~1.2e-5),
+    /// Eucken conductivity.
+    #[must_use]
+    pub const fn water_vapor_nist() -> GasSpec {
+        GasSpec {
+            molar_mass: 18.01528e-3,
+            gamma: 1.3291,
+            sutherland_beta: 2.418e-6,
+            sutherland_s: 1064.0,
+            conductivity: ConductivityModel::Eucken,
+        }
+    }
+}
+
+/// Saturation vapor pressure of water over the LIQUID phase [Pa] —
+/// the Buck 1996 fit `e_s = 611.21 exp((18.678 - t/234.5) t /
+/// (257.14 + t))` with `t` in Celsius, quoted for −20..+50 °C
+/// (253.15..323.15 K). Named provenance: A. L. Buck, *New equations
+/// for computing vapor pressure and enhancement factor* (J. Appl.
+/// Meteorol. 20, 1981; revised constants 1996). The pure-phase value:
+/// the moist-air enhancement factor (~0.5% at 1 atm) is NOT applied.
+///
+/// # Errors
+/// [`MaterialError::Parameters`] outside the fit's quoted window.
+pub fn saturation_pressure_water_pa(temperature: f64) -> Result<f64, MaterialError> {
+    if !((253.15..=323.15).contains(&temperature)) {
+        return Err(MaterialError::Parameters {
+            what: format!(
+                "temperature {temperature} K outside the Buck-1996 liquid-water \
+                 window [253.15, 323.15] K (−20..+50 °C)"
+            ),
+        });
+    }
+    let t = temperature - 273.15;
+    Ok(611.21 * det::exp((18.678 - t / 234.5) * t / (257.14 + t)))
 }
 
 /// The complete derived ambient state of a gas at (T, p): everything a
@@ -133,6 +200,9 @@ pub struct GasState {
     pub prandtl: f64,
     /// Characteristic acoustic impedance rho c [Pa s/m].
     pub characteristic_impedance: f64,
+    /// Water-vapor mole fraction `x_w` (0 for every dry
+    /// construction; set by [`GasState::try_new_moist_air`]).
+    pub water_mole_fraction: f64,
 }
 
 impl GasState {
@@ -206,7 +276,72 @@ impl GasState {
             specific_heat_cp,
             prandtl,
             characteristic_impedance: density * sound_speed,
+            water_mole_fraction: 0.0,
         })
+    }
+
+    /// Moist air from `(T, p, relative humidity)`: the ideal dry-air +
+    /// water-vapor mixture (see the module doc's MOIST AIR section for
+    /// provenance and no-claims). Both mixture rules are exact for an
+    /// ideal mixture: `M_mix = M_a + x_w (M_w − M_a)` and the
+    /// isochoric-heat identity `1/(γ_mix−1) = (1−x_w)/(γ_a−1) +
+    /// x_w/(γ_v−1)`. Transport coefficients remain the DRY-AIR fits
+    /// (disclosed, estimated tier, `x_w ≤ 0.15` refused above).
+    ///
+    /// `relative_humidity == 0` takes the plain dry-air path — the dry
+    /// limit is the SAME CODE, bitwise.
+    ///
+    /// # Errors
+    /// [`MaterialError::Parameters`] for RH outside `[0, 1]`
+    /// (supersaturation is a condensing state the ideal-gas model
+    /// cannot represent — the structural phase refusal), a temperature
+    /// outside the Buck fit's window when RH > 0, a vapor fraction
+    /// above the disclosed 0.15 approximation ceiling, or the plain
+    /// [`GasState::try_new`] window refusals.
+    pub fn try_new_moist_air(
+        temperature: f64,
+        pressure: f64,
+        relative_humidity: f64,
+    ) -> Result<Self, MaterialError> {
+        if !(relative_humidity.is_finite() && (0.0..=1.0).contains(&relative_humidity)) {
+            return Err(MaterialError::Parameters {
+                what: format!(
+                    "relative humidity {relative_humidity} outside [0, 1] (RH > 1 is a \
+                     condensing state the ideal-gas mixture cannot represent)"
+                ),
+            });
+        }
+        let dry = GasSpec::dry_air_ussa1976();
+        if relative_humidity == 0.0 {
+            return Self::try_new(&dry, temperature, pressure);
+        }
+        let vapor = GasSpec::water_vapor_nist();
+        let e_sat = saturation_pressure_water_pa(temperature)?;
+        if !(pressure > 0.0 && pressure.is_finite()) {
+            return Err(MaterialError::Parameters {
+                what: format!("pressure {pressure} Pa must be positive and finite"),
+            });
+        }
+        let x_w = relative_humidity * e_sat / pressure;
+        if x_w > 0.15 {
+            return Err(MaterialError::Parameters {
+                what: format!(
+                    "water mole fraction {x_w:.4} above the 0.15 ceiling of the \
+                     dry-air-transport approximation (disclosed band)"
+                ),
+            });
+        }
+        let molar_mass = dry.molar_mass + x_w * (vapor.molar_mass - dry.molar_mass);
+        let inv_gm1 = (1.0 - x_w) / (dry.gamma - 1.0) + x_w / (vapor.gamma - 1.0);
+        let gamma = 1.0 + 1.0 / inv_gm1;
+        let mixture = GasSpec {
+            molar_mass,
+            gamma,
+            ..dry
+        };
+        let mut state = Self::try_new(&mixture, temperature, pressure)?;
+        state.water_mole_fraction = x_w;
+        Ok(state)
     }
 
     /// Classical Stokes–Kirchhoff absorption coefficient [1/m].
@@ -443,6 +578,182 @@ mod tests {
         }
         println!(
             "{{\"suite\":\"fs-material-gas\",\"case\":\"monatomic-eucken-exact\",\"verdict\":\"pass\"}}"
+        );
+    }
+
+    #[test]
+    fn moist_saturation_fit_two_sources_and_published_pins() {
+        // TWO-SOURCE RULE on the RH -> vapor step: the implemented Buck
+        // 1996 fit against the INDEPENDENT Magnus fit with the
+        // Alduchov–Eskridge 1996 constants (e_s = 610.94 exp(17.625 t /
+        // (243.04 + t))) across the full quoted window, plus published
+        // absolute pins: IAPWS gives e_s(0.01 C) = 611.657 Pa and
+        // e_s(20 C) = 2339.2 Pa.
+        // (-20 C exactly is 253.14999... in floats — the window edges
+        // are asserted in Kelvin below instead.)
+        for t_c in -19..=50 {
+            let t = f64::from(t_c);
+            let buck = saturation_pressure_water_pa(t + 273.15).expect("in window");
+            let magnus = 610.94 * det::exp(17.625 * t / (243.04 + t));
+            let rel = ((buck - magnus) / magnus).abs();
+            assert!(
+                rel < 5.0e-3,
+                "Buck vs Magnus at {t} C: {buck:.2} vs {magnus:.2} (rel {rel:.2e})"
+            );
+        }
+        let e0 = saturation_pressure_water_pa(273.16).expect("triple point");
+        assert!((608.0..615.0).contains(&e0), "e_s(0.01 C) = {e0:.2} Pa");
+        let e20 = saturation_pressure_water_pa(293.15).expect("20 C");
+        assert!((2329.0..2349.0).contains(&e20), "e_s(20 C) = {e20:.1} Pa");
+        assert!(saturation_pressure_water_pa(253.15).is_ok());
+        assert!(saturation_pressure_water_pa(323.15).is_ok());
+        assert!(saturation_pressure_water_pa(250.0).is_err());
+        assert!(saturation_pressure_water_pa(330.0).is_err());
+        println!(
+            "{{\"suite\":\"fs-material-gas\",\"case\":\"moist-sat-two-sources\",\"e0\":{e0:.2},\"e20\":{e20:.1},\"verdict\":\"pass\"}}"
+        );
+    }
+
+    #[test]
+    fn moist_density_hits_the_oiml_conventional_anchor() {
+        // The metrology community's CONVENTIONAL air density (OIML
+        // R 111 / CIPM): rho = 1.2 kg/m^3 is DEFINED at exactly
+        // (20 C, 101325 Pa, 50% RH). An independent published anchor
+        // for the whole mixture chain — our ideal mixture (no CO2, no
+        // real-gas Z, no enhancement factor) must land within 0.2%.
+        // And the classic counterintuitive: humid air is LIGHTER.
+        let moist = GasState::try_new_moist_air(293.15, 101_325.0, 0.5).expect("moist");
+        let dry = GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101_325.0).expect("dry");
+        assert!(
+            (moist.density - 1.2).abs() < 2.4e-3,
+            "rho(20C, 50% RH) = {} vs the OIML conventional 1.2",
+            moist.density
+        );
+        assert!(
+            moist.density < dry.density,
+            "humid air must be LIGHTER ({} vs {})",
+            moist.density,
+            dry.density
+        );
+        println!(
+            "{{\"suite\":\"fs-material-gas\",\"case\":\"moist-oiml-anchor\",\"rho\":{:.5},\"x_w\":{:.5},\"verdict\":\"pass\"}}",
+            moist.density, moist.water_mole_fraction
+        );
+    }
+
+    #[test]
+    fn moist_dry_limit_is_bitwise() {
+        // DONE-WHEN clause: RH = 0 degenerates to the existing dry
+        // path EXACTLY (same code path, so every field is bit-equal
+        // and no golden anywhere can move).
+        let via_moist = GasState::try_new_moist_air(288.15, 101_325.0, 0.0).expect("rh0");
+        let dry = GasState::try_new(&GasSpec::dry_air_ussa1976(), 288.15, 101_325.0).expect("dry");
+        for (a, b, what) in [
+            (via_moist.density, dry.density, "rho"),
+            (via_moist.sound_speed, dry.sound_speed, "c"),
+            (via_moist.dynamic_viscosity, dry.dynamic_viscosity, "mu"),
+            (
+                via_moist.thermal_conductivity,
+                dry.thermal_conductivity,
+                "kappa",
+            ),
+            (via_moist.gamma, dry.gamma, "gamma"),
+            (via_moist.prandtl, dry.prandtl, "Pr"),
+        ] {
+            assert_eq!(
+                a.to_bits(),
+                b.to_bits(),
+                "dry limit must be bitwise in {what}"
+            );
+        }
+        println!(
+            "{{\"suite\":\"fs-material-gas\",\"case\":\"moist-dry-limit-bitwise\",\"verdict\":\"pass\"}}"
+        );
+    }
+
+    #[test]
+    fn moist_mixture_rules_match_independent_expressions() {
+        // TAUTOLOGY GUARD (the bead's recorded lesson): never compare
+        // two quantities derived from the same GasState. Here the
+        // molar mass and gamma are recomputed IN THE TEST from raw
+        // literals and the public saturation fn, then matched against
+        // what the constructor derived — the mu-cancelling identity
+        // route for gamma (cv mixing) vs the constructor's own path.
+        let (t, p, rh) = (303.15, 98_000.0, 0.73);
+        let state = GasState::try_new_moist_air(t, p, rh).expect("moist");
+        let x = rh * saturation_pressure_water_pa(t).expect("es") / p;
+        assert!(
+            (state.water_mole_fraction - x).abs() < 1e-15,
+            "x_w must be recorded on the state"
+        );
+        let m_indep = 28.9644e-3 * (1.0 - x) + 18.01528e-3 * x;
+        let m_state = R_USSA_1976 / state.specific_gas_constant;
+        assert!(
+            ((m_state - m_indep) / m_indep).abs() < 1e-12,
+            "mixture molar mass: state {m_state:.9e} vs independent {m_indep:.9e}"
+        );
+        let gamma_indep = 1.0 + 1.0 / ((1.0 - x) / 0.4 + x / 0.3291);
+        assert!(
+            ((state.gamma - gamma_indep) / gamma_indep).abs() < 1e-12,
+            "mixture gamma: state {} vs independent {gamma_indep}",
+            state.gamma
+        );
+        // The humidity direction on both audible quantities, at fixed
+        // (T, p): faster sound, lighter air — monotonically in RH.
+        let mut last_c = 0.0;
+        let mut last_rho = f64::INFINITY;
+        for rh_step in [0.0, 0.25, 0.5, 0.75, 1.0] {
+            let s = GasState::try_new_moist_air(293.15, 101_325.0, rh_step).expect("sweep");
+            assert!(s.sound_speed > last_c, "c must rise with RH");
+            assert!(s.density < last_rho, "rho must fall with RH");
+            last_c = s.sound_speed;
+            last_rho = s.density;
+        }
+        // The published magnitude class (Wong 1986 / Cramer 1993:
+        // saturation at 20 C raises c by ~0.35%): authored Estimate
+        // band 0.8..1.8 m/s.
+        let dry = GasState::try_new_moist_air(293.15, 101_325.0, 0.0).expect("dry");
+        let wet = GasState::try_new_moist_air(293.15, 101_325.0, 1.0).expect("wet");
+        let uplift = wet.sound_speed - dry.sound_speed;
+        assert!(
+            (0.8..1.8).contains(&uplift),
+            "saturated 20 C uplift {uplift:.3} m/s outside the published class"
+        );
+        println!(
+            "{{\"suite\":\"fs-material-gas\",\"case\":\"moist-mixture-rules\",\"gamma\":{:.6},\"uplift_ms\":{uplift:.3},\"verdict\":\"pass\"}}",
+            state.gamma
+        );
+    }
+
+    #[test]
+    fn moist_refusals_fire_and_repeats_are_bitwise() {
+        // RH outside [0,1] (the structural phase refusal), the Buck
+        // window when RH > 0 (while RH = 0 keeps the full dry window),
+        // and the vapor-fraction ceiling of the dry-transport
+        // approximation.
+        assert!(GasState::try_new_moist_air(293.15, 101_325.0, -0.1).is_err());
+        assert!(GasState::try_new_moist_air(293.15, 101_325.0, 1.1).is_err());
+        assert!(GasState::try_new_moist_air(293.15, 101_325.0, f64::NAN).is_err());
+        assert!(
+            GasState::try_new_moist_air(240.0, 101_325.0, 0.3).is_err(),
+            "240 K with RH > 0 is outside the Buck window"
+        );
+        assert!(
+            GasState::try_new_moist_air(240.0, 101_325.0, 0.0).is_ok(),
+            "RH = 0 keeps the full dry validity window"
+        );
+        // 50 C saturated at 0.6 atm: x_w = e_s/p ~ 0.20 > 0.15.
+        assert!(
+            GasState::try_new_moist_air(323.15, 60_000.0, 1.0).is_err(),
+            "the vapor-fraction ceiling must refuse"
+        );
+        let a = GasState::try_new_moist_air(310.15, 99_000.0, 0.9).expect("a");
+        let b = GasState::try_new_moist_air(310.15, 99_000.0, 0.9).expect("b");
+        assert_eq!(a.sound_speed.to_bits(), b.sound_speed.to_bits());
+        assert_eq!(a.density.to_bits(), b.density.to_bits());
+        assert_eq!(a.gamma.to_bits(), b.gamma.to_bits());
+        println!(
+            "{{\"suite\":\"fs-material-gas\",\"case\":\"moist-refusals\",\"verdict\":\"pass\"}}"
         );
     }
 

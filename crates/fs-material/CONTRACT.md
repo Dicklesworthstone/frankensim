@@ -198,6 +198,19 @@ Zero `unsafe`.
 
 None.
 
+- Moist air (music bead 3ez8g.3.5): `GasState::try_new_moist_air`
+  derives the ideal dry-air + water-vapor mixture from relative
+  humidity — breath vs hall as physics, not a detune knob. Both
+  mixture rules are EXACT for an ideal mixture (molar mass linear in
+  `x_w`; the isochoric-heat identity `1/(γ−1) = Σ x_i/(γ_i−1)`); the
+  RH → vapor-fraction step is the Buck 1996 liquid-water fit
+  (`e_s = 611.21 exp((18.678 − t/234.5)t/(257.14 + t))` Pa, quoted
+  −20..+50 °C, refused outside when RH > 0). Water-vapor spec
+  provenance: M = 18.01528e-3 (CODATA/IUPAC), γ = 1.3291 from
+  NIST-JANAF cp(H2O g, 298.15 K) = 33.58 J/(mol K), Sutherland steam
+  constants β = 2.418e-6, S = 1064 K (White). The dry limit RH = 0 is
+  the SAME CODE PATH — bitwise, so no golden anywhere moves.
+
 ## Conformance tests
 
 `tests/conformance.rs` (JSON verdicts, suite `fs-material/conformance`):
@@ -218,6 +231,20 @@ recovery from an offset start with negated-loss mutation refusal,
 degenerate-input refusals, and the η ≥ 0 / monotone-relaxation property
 sweep. `visco_casebook` is the end-to-end lane (fit noise floor,
 certified lowering, ring-down η within an authored, measured gate).
+
+`src/gas.rs` moist battery — the two-source saturation rule (Buck vs
+the independent Alduchov–Eskridge Magnus constants, ≤0.5% across the
+window; IAPWS absolute pins 611.657 Pa at the triple point and
+2339.2 Pa at 20 °C, measured 611.65/2338.3); the OIML R 111 / CIPM
+conventional-density anchor (ρ = 1.2 kg/m³ DEFINED at 20 °C, 101325
+Pa, 50% RH; measured 1.19885 — an independent metrology-community
+check on the whole mixture chain, and humid air comes out LIGHTER);
+the bitwise dry limit; mixture rules re-derived in the test from raw
+literals (the anti-tautology discipline: never compare two quantities
+off the same GasState); RH-monotone c/ρ with the saturated-20 °C
+uplift in the published 0.8–1.8 m/s class (measured 1.263, the
+Wong-1986/Cramer-1993 ~0.35% class); refusals (RH ∉ [0,1], Buck
+window, the x_w ≤ 0.15 transport ceiling) and bitwise repeats.
 
 ## No-claim boundaries
 
@@ -938,3 +965,11 @@ caught only by its own gates/fixtures); free-energy and reciprocity
 gates run at caller-chosen points and prove nothing globally;
 objectivity/frame-indifference remains per-law fixture scope, not a
 graph-level proof.
+- Moist air no-claims: transport coefficients (μ, κ) REMAIN the
+  dry-air fits (sub-1% at musical vapor fractions, ~2%-class at the
+  refused x_w = 0.15 ceiling — estimated tier, disclosed); the
+  saturation ENHANCEMENT FACTOR (~0.5% at 1 atm) is neglected; RH > 1
+  is refused (a condensing state the ideal-gas mixture cannot
+  represent — the phase no-claim made structural at this constructor's
+  input; the plain try_new window no-claim stands). CO2 fraction is
+  not modeled (the USSA dry-air M already carries the standard CO2).
