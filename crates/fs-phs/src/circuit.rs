@@ -483,7 +483,10 @@ mod circuit_tests {
             let mut x = dae
                 .consistent_initial_state(&vec![0.0; dae.system.state_dim()], &[0.0])
                 .expect("ics");
-            let n = (6.0 / f / dt) as usize;
+            // 14 cycles: the transient (tau = 2L/R ~ 0.9 ms) must be
+            // gone before measuring — the 6-cycle window read a 13%
+            // transient beat at 1.8x resonance on the first run.
+            let n = (14.0 / f / dt) as usize;
             let mut peak = 0.0f64;
             let mut worst_defect = 0.0f64;
             for k in 0..n {
@@ -491,7 +494,7 @@ mod circuit_tests {
                 let (rec, defect) = dae.step_audited(&x, &u, dt).expect("step");
                 x = rec.x;
                 worst_defect = worst_defect.max(defect);
-                if k > n / 2 {
+                if k > 2 * n / 3 {
                     // Inductor current IS the series current.
                     let i_l = x[dae.flux_index[0]] / l_h;
                     peak = peak.max(i_l.abs());
@@ -582,14 +585,22 @@ mod circuit_tests {
             .expect("ics");
         let dt = 1.0e-5;
         let mut worst_defect = 0.0f64;
+        let mut last_y = vec![0.0];
         for _ in 0..200 {
             let (rec, defect) = dae.step_audited(&x, &[12.0], dt).expect("step");
             x = rec.x;
+            last_y = rec.y.clone();
             worst_defect = worst_defect.max(defect);
         }
-        // Primary current from the source port output y = −i_V.
-        let y = dae.system.output(&x);
-        let i1 = -y[0];
+        // Primary current from the STEP record's port output (the
+        // step's effort carries the multipliers; the static output()
+        // uses grad H alone, which is ZERO on multipliers — reading it
+        // for a source current returns exactly 0, measured).
+        // Sign convention, measured: y[0] = -i_V is already the current
+        // the source DELIVERS into its + terminal (the first read
+        // negated it again and matched the analytic value to the digit
+        // with the wrong sign).
+        let i1 = last_y[0];
         let expected = 12.0 / (r1 + n_ratio * n_ratio * r2);
         let rel = (i1 - expected).abs() / expected.abs();
         assert!(
