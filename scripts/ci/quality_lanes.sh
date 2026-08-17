@@ -368,6 +368,24 @@ else
 fi
 
 # ---- fs-wasm standalone workspace (native tests) ----
+# ---- fs-flyer-wasm wasm32 guard (bead wf-root-guzez.1.4, E0.4): native-lane
+# edits must not silently break the browser build. Checks the whole flyer cone
+# transitively (fs-mbd, fs-time, and every future flyer crate the manifest
+# reaches) against wasm32-unknown-unknown with the reviewed lock. ----
+FLYER_W32_LOG="$LOG_DIR/fs-flyer-wasm-wasm32.log"
+if [[ -f "crates/fs-flyer-wasm/Cargo.toml" ]]; then
+  if ! rustup target list --installed 2>/dev/null | grep -q '^wasm32-unknown-unknown$'; then
+    printf '%s\n' "required Rust target wasm32-unknown-unknown is not installed" >"$FLYER_W32_LOG"
+    row "fs-flyer-wasm-wasm32" "fail" "wasm32-unknown-unknown target missing" "$FLYER_W32_LOG"
+    FAILURES=$((FAILURES + 1))
+  elif env CARGO_TARGET_DIR="$QUALITY_TARGET_DIR"       cargo check --locked --manifest-path "crates/fs-flyer-wasm/Cargo.toml"         --target wasm32-unknown-unknown >"$FLYER_W32_LOG" 2>&1; then
+    row "fs-flyer-wasm-wasm32" "pass" "flyer cone checks clean on wasm32" "$FLYER_W32_LOG"
+  else
+    row "fs-flyer-wasm-wasm32" "fail" "flyer cone broken on wasm32 — see full log" "$FLYER_W32_LOG"
+    FAILURES=$((FAILURES + 1))
+  fi
+fi
+
 # ---- fs-flyer-wasm: Wright Flyer browser boundary (bead wf-root-guzez.1.3) ----
 # Same standalone-workspace doctrine as fs-wasm: native tests + a nested-lock
 # drift gate (a build that mutates the reviewed lock fails the lane).
