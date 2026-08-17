@@ -775,6 +775,23 @@ None.
   (n_fft override). The morph carry needs p-minus CONTINUITY or every
   rebuild micro-clicks.
 
+- Vowel gates (bead 3ez8g.8.3, completing T-Voice): the first voice
+  claims — the vowel from the licensed area function, the source from
+  the self-oscillating folds, their INTERACTION through the load at
+  the glottis. The corpus loop closes (rows
+  acoustic-assaneo-2011-tract-{a,u}): the charts' TMM F1 lands in the
+  published Spanish vowel CLASS bands (827 / 340 Hz; a class check,
+  never a per-subject match) and the length-shifted falsifier fails
+  the same gate at 1104 Hz. THE FLAGSHIP EMERGENT GATE: sweeping the
+  fold frequency toward F1(/u/), the phonated f0 rides ~35% above the
+  free-fold frequency (load stiffening) and REGISTER-BREAKS at the F1
+  ceiling (deviation -147 Hz at the top of the sweep) — the physics a
+  source-filter vocoder structurally cannot have, measured. The
+  1-DOF-vs-two-mass bake-off receipt is EXECUTED (KeepBoth:
+  cheap-ensemble vs solo-realism; slope -6.6 vs -11.5 dB/oct on the
+  identical fixture); the ooh/aah ladder is minted for the owner's
+  ear.
+
 ## Conformance tests
 
 `src/broadband_radiation.rs`: G0 complex/real-SH round trip/reconstruction against
@@ -943,6 +960,14 @@ under the corrected load in the same change (two-mass onsets
 404-715 Pa physiological and monotone; the 1-DOF's ~5.8 kPa
 non-monotone onsets recorded as the fixed-delay mechanism's real
 behavior; flow skew logged, not asserted).
+
+`tests/vowel_gates.rs`, cases vw-001..vw-004 — the formant class gate
+with its executed length-shift falsifier (a uniform AREA scale would
+not move formants; the falsifier must shift LENGTH); the sung
+interaction sweep (ten stiffness points crossing F1 with per-point
+f_free/f0/deviation logging); the committed bake-off receipt gate
+(KeepBoth scopes + both rows alive in the registry); and the
+vowel-ladder listening chain (Unadjudicated).
 
 ## No-claim boundaries
 

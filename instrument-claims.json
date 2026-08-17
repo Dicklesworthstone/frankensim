@@ -1113,11 +1113,15 @@
         {
           "kind": "test",
           "ref": "crates/fs-couple/src/glottis.rs::gl_004_bakeoff_fixture_qois_on_identical_tract_and_card"
+        },
+        {
+          "kind": "bakeoff",
+          "ref": "crates/fs-couple/tests/receipts/glottis-one-dof-vs-two-mass.bakeoff (KeepBoth: cheap-ensemble scope earned)"
         }
       ],
       "budget_row": null,
       "corpus_refs": [],
-      "notes": "The 1-DOF glottal island (Titze surface-wave delay; c_mucosal=1 m/s authored). RE-BASED under the CORRECTED volume-normalized tract load (the original close's numbers were measured against a flat-R load - the zc defect found by the tract lane): onset ~5.8 kPa (loud-pressure class, NOT physiological speech; part of the bake-off record) and NON-monotone in stiffness (the fixed delay's phase tuning moves with fold frequency - the mechanism's real behavior, recorded); at its own drive f0 173 Hz, OQ 0.945, slope -12.4 dB/oct, jitter 0.105 (rough/breathy characterization). The five-bug debugging arc remains recorded in-code."
+      "notes": "EARNED SCOPE (executed bake-off receipt, KeepBoth): CHEAP-ENSEMBLE \u2014 2 states, robust limit cycle, loud-pressure onset class, rough-source character. The 1-DOF glottal island (Titze surface-wave delay; c_mucosal=1 m/s authored). RE-BASED under the CORRECTED volume-normalized tract load (the original close's numbers were measured against a flat-R load - the zc defect found by the tract lane): onset ~5.8 kPa (loud-pressure class, NOT physiological speech; part of the bake-off record) and NON-monotone in stiffness (the fixed delay's phase tuning moves with fold frequency - the mechanism's real behavior, recorded); at its own drive f0 173 Hz, OQ 0.945, slope -12.4 dB/oct, jitter 0.105 (rough/breathy characterization). The five-bug debugging arc remains recorded in-code."
     },
     {
       "filling": "voice-glottis",
@@ -1151,11 +1155,23 @@
         {
           "kind": "test",
           "ref": "crates/fs-couple/src/glottis.rs::gl_004_bakeoff_fixture_qois_on_identical_tract_and_card"
+        },
+        {
+          "kind": "bakeoff",
+          "ref": "crates/fs-couple/tests/receipts/glottis-one-dof-vs-two-mass.bakeoff (KeepBoth: solo-realism scope earned)"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/tests/vowel_gates.rs::vw_002_sung_interaction_pulls_near_the_first_formant"
+        },
+        {
+          "kind": "listening",
+          "ref": "data/listening/vowel-ladder.listening-receipt (artifact b54127c96c2223eb; UNADJUDICATED)"
         }
       ],
       "budget_row": null,
       "corpus_refs": [],
-      "notes": "The two-mass glottal island (coupling inside the Hamiltonian; corrected S-H driving; asymmetric seed; dcontact collision). RE-BASED under the CORRECTED volume-normalized tract load: onsets 404/488/715 Pa rising with stiffness (physiological - the structural vertical-phase mechanism is robust to the load correction), upper lags lower 0.462 rad (STRONGER than under the defective load), f0 178 Hz, OQ 0.813, slope -12.7 dB/oct, jitter 0.0009. Flow skew measured near-symmetric (0.97) - LOGGED not asserted; glottal-duct inertance is the named upgrade for skew. Masses/stiffnesses/length receipted from the licensed pack."
+      "notes": "EARNED SCOPE (executed bake-off receipt, KeepBoth): SOLO-REALISM \u2014 physiological onsets, the vertical-phase mechanism, low jitter; the voice claims build on it (vw-002 sung interaction: f0 pulled ~35% above free by the load with a REGISTER BREAK at the F1 ceiling \u2014 the vocoder-impossible physics, measured). The two-mass glottal island (coupling inside the Hamiltonian; corrected S-H driving; asymmetric seed; dcontact collision). RE-BASED under the CORRECTED volume-normalized tract load: onsets 404/488/715 Pa rising with stiffness (physiological - the structural vertical-phase mechanism is robust to the load correction), upper lags lower 0.462 rad (STRONGER than under the defective load), f0 178 Hz, OQ 0.813, slope -12.7 dB/oct, jitter 0.0009. Flow skew measured near-symmetric (0.97) - LOGGED not asserted; glottal-duct inertance is the named upgrade for skew. Masses/stiffnesses/length receipted from the licensed pack."
     },
     {
       "filling": "voice-tract",
@@ -1188,11 +1204,37 @@
         {
           "kind": "test",
           "ref": "crates/fs-couple/src/tract.rs::vt_004_refusals_fire_by_name"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/tests/vowel_gates.rs::vw_001_formant_class_gate_and_the_shifted_falsifier"
         }
       ],
       "budget_row": null,
-      "corpus_refs": [],
+      "corpus_refs": [
+        "vvreg:acoustic-assaneo-2011-tract-a",
+        "vvreg:acoustic-assaneo-2011-tract-u"
+      ],
       "notes": "The tract as A(x,t): LICENSED charts (Assaneo 2011 PLOS CC-BY Table 2 - the authors' own 10-tube /a/ and /u/, transcribed + pdftotext-verified; Spanish, acoustically-inverted, formant-valid register disclosed; Story 1996 unlicensable, Dresden CC0 meshes = named MRI upgrade vein). D22 EXECUTED as a whole-curve gate: char impulse-spectrum vs TMM |Z_in| envelope correlation 0.87/0.90 with dominant resonances within 50 Hz; yielding tissue walls raise F1 340->401 Hz (nearest-peak comparison - the wall contributes its own ~100 Hz mode); the u->a morph at 100 Hz control rate with the carry + p-minus-continuity lift clicks 18x less than the five-cut waypoint control (0.116 vs 2.083 on the REFLECTED wave - the raw metric saturates on excitation pulses), F1 track 353->806 Hz. THE LANE'S STRUCTURAL FIND: characteristic_line consumers must pass VOLUME-normalized zc (rho c/S) - an area-free rho*c flattens R to +1 and erases the shape (the glottis module carried this defect; its gates were re-based); rigid-wall short tracts realize ACTIVELY (IR outlasts the window - the walls are required for the realization itself); dense n_fft=4096 via characteristic_line_dense."
+    },
+    {
+      "filling": "voice-tract",
+      "image": "vfit-hold",
+      "qoi": "held-vowel-only",
+      "owner_crates": [
+        "fs-vfit",
+        "fs-couple"
+      ],
+      "exactness": [
+        "X-Est"
+      ],
+      "gate": "ungated",
+      "live_default": "no",
+      "determinism": "one-host",
+      "evidence": [],
+      "budget_row": null,
+      "corpus_refs": [],
+      "notes": "The VFIT rational-hold image for a HELD vowel only \u2014 STRUCTURALLY FAILS on articulation (a rational fit cannot morph; the row says so, per the .8.3 scope). NAMED MISSING: no executed tract 1-port fit exists yet (the wind-hop precedent supplies the machinery); until one is fit and certified this row stays evidence-free and ungated \u2014 registered so the menu shows the hole instead of hiding it."
     }
   ]
 }

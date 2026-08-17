@@ -457,6 +457,7 @@
     "crates/fs-couple/tests/render_no_alloc.rs",
     "crates/fs-couple/tests/vibration_gates.rs",
     "crates/fs-couple/tests/vibroacoustic_casebook.rs",
+    "crates/fs-couple/tests/vowel_gates.rs",
     "crates/fs-couple/tests/wind_junction_gate.rs",
     "crates/fs-couple/tests/xylophone_bar.rs",
     "crates/fs-crosswalk/tests/crosswalk.rs",
