@@ -359,6 +359,13 @@ pub struct DelayedFilter {
     /// Residual (or full) impulse response. Empty means the IIR bank.
     fir: Vec<f64>,
     last: f64,
+    /// Dispersion stage: shared first-order allpass coefficient
+    /// (empty state vectors = stage inert).
+    disp_a: f64,
+    /// Per-section previous input of the allpass cascade.
+    disp_x1: Vec<f64>,
+    /// Per-section previous output of the allpass cascade.
+    disp_y1: Vec<f64>,
 }
 
 impl DelayedFilter {
@@ -391,7 +398,65 @@ impl DelayedFilter {
             filter,
             fir: Vec::new(),
             last: 0.0,
+            disp_a: 0.0,
+            disp_x1: Vec::new(),
+            disp_y1: Vec::new(),
         })
+    }
+
+    /// Add a DISPERSION stage (music bead 3ez8g.7.2): a cascade of
+    /// `sections` identical first-order allpasses
+    /// `H(z) = (a + z^-1)/(1 + a z^-1)` applied to the line output.
+    /// `|H| = 1` EXACTLY at every frequency, so the stage is passive
+    /// BY STRUCTURE — it can reshape the loop's phase (stiff-string
+    /// dispersion) but can never pump energy; the existing passivity
+    /// enforcement on the residual filter is untouched. A negative
+    /// `a` delays low frequencies more than high ones (group delay
+    /// `(1-a^2)/(1+2a cos Ω+a^2)`), which is the stiff-string
+    /// direction: sharp upper partials.
+    ///
+    /// # Errors
+    /// A non-finite or unit-circle-touching coefficient (`|a| >= 1`
+    /// is unstable), or zero sections.
+    pub fn with_dispersion(mut self, a: f64, sections: usize) -> Result<Self, DiscretizeError> {
+        if !(a.is_finite() && a.abs() < 1.0) {
+            return Err(DiscretizeError::NonFiniteRuntimeValue {
+                field: "dispersion_coefficient",
+                index: None,
+            });
+        }
+        if sections == 0 {
+            return Err(DiscretizeError::InvalidRuntimeDimensions {
+                field: "dispersion_sections",
+                expected: 1,
+                actual: 0,
+            });
+        }
+        self.disp_a = a;
+        self.disp_x1 = vec![0.0; sections];
+        self.disp_y1 = vec![0.0; sections];
+        Ok(self)
+    }
+
+    /// Group delay [samples] of ONE first-order allpass section
+    /// `H(z) = (a + z^-1)/(1 + a z^-1)` at normalized frequency
+    /// `omega_norm = 2 pi f / fs` — the closed form the dispersion
+    /// design solves against.
+    #[must_use]
+    pub fn first_order_allpass_group_delay(a: f64, omega_norm: f64) -> f64 {
+        (1.0 - a * a) / (1.0 + 2.0 * a * omega_norm.cos() + a * a)
+    }
+
+    fn apply_dispersion(&mut self, input: f64) -> f64 {
+        let a = self.disp_a;
+        let mut x = input;
+        for k in 0..self.disp_x1.len() {
+            let y = a * (x - self.disp_y1[k]) + self.disp_x1[k];
+            self.disp_x1[k] = x;
+            self.disp_y1[k] = y;
+            x = y;
+        }
+        x
     }
 
     /// A characteristic port whose reflectance is a tabulated impulse
@@ -435,6 +500,9 @@ impl DelayedFilter {
             filter,
             fir: ir,
             last: 0.0,
+            disp_a: 0.0,
+            disp_x1: Vec::new(),
+            disp_y1: Vec::new(),
         })
     }
 
@@ -528,14 +596,16 @@ impl DelayedFilter {
                 });
             }
             self.write = (self.write + 1) % n;
-            self.last = acc;
-            return Ok(acc);
+            let dispersed = self.apply_dispersion(acc);
+            self.last = dispersed;
+            return Ok(dispersed);
         }
         let i1 = (self.write + n - self.delay_int) % n;
         let i0 = (i1 + n - 1) % n;
         let delayed = (1.0 - self.frac) * self.buf[i1] + self.frac * self.buf[i0];
         self.write = (self.write + 1) % n;
-        self.last = self.filter.step(&mut self.state, delayed)?;
+        let filtered = self.filter.step(&mut self.state, delayed)?;
+        self.last = self.apply_dispersion(filtered);
         Ok(self.last)
     }
 
