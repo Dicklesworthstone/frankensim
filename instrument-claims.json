@@ -398,6 +398,10 @@
         {
           "kind": "bakeoff",
           "ref": "crates/fs-couple/tests/receipts/piano-felt-vs-hc.bakeoff (3d9df8e509435370): felt residual grows 0.028->0.071 with velocity while HC's is identically zero; felt tilt trend 28.8x vs HC 17.2x \u2014 the hysteresis island is the felt authority"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/tests/piano_gates.rs::pg_002_hammer_band_out_of_band_refuses"
         }
       ],
       "budget_row": null,
@@ -870,11 +874,49 @@
         {
           "kind": "test",
           "ref": "crates/fs-couple/src/piano_vertical.rs::pv_005_ledger_and_bitwise_replay"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/tests/piano_gates.rs::pg_001_board_from_the_fs_plate_authority"
+        },
+        {
+          "kind": "listening",
+          "ref": "data/listening/piano-ladder.listening-receipt (artifact 966d5adee719c41d; UNADJUDICATED - supports_pass()==false until the owner's ear rules on the pp->ff tilt)"
+        }
+      ],
+      "budget_row": null,
+      "corpus_refs": [
+        "vvreg:acoustic-absent-felt-coupon",
+        "vvreg:acoustic-absent-measured-frf-trace"
+      ],
+      "notes": "The composed piano vertical: unison+duplex+board (power-conjugate bridge)+felt island+pedal states. EMERGENT: tilt contrast survives the composition (felt trend 159.7 vs linear control 1.0 \u2014 the strongest tilt discrimination in the program); inharmonicity B measured in audio (4.2 cents, B=0 falsifier 3.6x worse); Weinreich two-stage decay (3.28 vs 1.15 /s) with detune-scaling audio-envelope beats; damper/una-corda topology; ledger non-increasing + bitwise replay. FOUR measurement laws in CONTRACT (each an executed misread first): read string laws from string state (board spectra carry board lines); board envelopes are blind to antisymmetric survivors; strong detune suppresses EXCHANGE but not the heard chorus (audio envelope); smoothers must sit between coupling slosh (33 Hz) and detune beats (2-4 Hz). X-Est: authored board/bridge geometry; promotion in .5.3. GATES REVIEW (.5.3): the board now also runs FROM the fs-plate modal authority (pg-001: aftersound survives the authority board); the tilt-vs-COUPON gate and the measured-board-FRF loop stay NAMED on their absence rows \u2014 ungated until those corpora land."
+    },
+    {
+      "filling": "hammer-felt",
+      "image": "linear-spring",
+      "qoi": "debug-control",
+      "owner_crates": [
+        "fs-couple"
+      ],
+      "exactness": [
+        "X-Exact"
+      ],
+      "gate": "green",
+      "live_default": "no",
+      "determinism": "one-host",
+      "evidence": [
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/tests/felt_hammer_island.rs::contact_duration_falls_with_velocity_unlike_the_linear_spring"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/src/piano_vertical.rs::pv_001_tilt_contrast_survives_the_composition"
         }
       ],
       "budget_row": null,
       "corpus_refs": [],
-      "notes": "The composed piano vertical: unison+duplex+board (power-conjugate bridge)+felt island+pedal states. EMERGENT: tilt contrast survives the composition (felt trend 159.7 vs linear control 1.0 \u2014 the strongest tilt discrimination in the program); inharmonicity B measured in audio (4.2 cents, B=0 falsifier 3.6x worse); Weinreich two-stage decay (3.28 vs 1.15 /s) with detune-scaling audio-envelope beats; damper/una-corda topology; ledger non-increasing + bitwise replay. FOUR measurement laws in CONTRACT (each an executed misread first): read string laws from string state (board spectra carry board lines); board envelopes are blind to antisymmetric survivors; strong detune suppresses EXCHANGE but not the heard chorus (audio envelope); smoothers must sit between coupling slosh (33 Hz) and detune beats (2-4 Hz). X-Est: authored board/bridge geometry; promotion in .5.3."
+      "notes": "The matched-secant linear spring as the DEBUG/control hammer image only \u2014 its claim IS being the null hypothesis: amplitude-independent contact duration (within 1 sample) and a flat tilt trend (1.000 on the composed vertical vs the felt's 159.7). GREEN for exactly that debug-control claim set and nothing else; it can never carry an attack claim (the contrast gates exist to prove it cannot)."
     }
   ]
 }

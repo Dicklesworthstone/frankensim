@@ -1,0 +1,13 @@
+frankensim-listening-receipt-v1
+listener	pending
+session	2026-08-16
+artifact	966d5adee719c41db0b4c1d74cab807d70fd2824c42179b884e7f58739991738
+artifact-ref	data/listening/piano-ladder.provenance.json
+question	does the attack brighten from pp to ff the way piano felt does?
+verdict	unadjudicated
+observations	three strikes 0.6/2.0/4.5 m/s on the composed vertical (felt island, detuned unison, duplex, board); awaiting the owner's ear
+loudness-sone	absent
+sharpness-acum	absent
+log-attack-time	1.78437339252861e-1
+spl-db	absent
+law	psychoacoustic metrics are never a substitute for human listening

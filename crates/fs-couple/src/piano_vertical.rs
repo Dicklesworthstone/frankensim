@@ -148,6 +148,40 @@ impl PianoVertical {
         pedals: PedalState,
         bridge_coupling: f64,
     ) -> Result<PianoVertical, String> {
+        // Authored spruce-scale board (the fs-plate-derived board enters
+        // through `new_with_board` — the .5.3 simulate-vs-authority seam).
+        Self::new_with_board(
+            base,
+            unison_detune_cents,
+            law,
+            pedals,
+            bridge_coupling,
+            &[
+                (95.0, 0.02, 1.0),
+                (183.0, 0.025, 0.7),
+                (297.0, 0.03, 0.5),
+                (416.0, 0.035, 0.4),
+            ],
+        )
+    }
+
+    /// Compose with an EXPLICIT board modal set `(f_hz, zeta, shape)` —
+    /// the seam through which the fs-plate orthotropic authority's own
+    /// modes drive the vertical (bead 3ez8g.5.3's cross-check).
+    ///
+    /// # Errors
+    /// Admission errors from the modal images or the felt law.
+    pub fn new_with_board(
+        base: PianoStringSpec,
+        unison_detune_cents: f64,
+        law: HammerLaw,
+        pedals: PedalState,
+        bridge_coupling: f64,
+        board_modes: &[(f64, f64, f64)],
+    ) -> Result<PianoVertical, String> {
+        if board_modes.is_empty() {
+            return Err("board needs at least one mode".to_string());
+        }
         let mut specs = Vec::new();
         for detune in [-unison_detune_cents, 0.0, unison_detune_cents] {
             specs.push(PianoStringSpec {
@@ -189,24 +223,16 @@ impl PianoVertical {
             );
         }
         let struck = vec![true, true, !pedals.una_corda, false];
-        // A small orthotropic-board-flavored modal set (authored spruce
-        // scale; the full fs-plate chart upgrade is the piano-gates
-        // lane): frequencies at board scale, moderately lossy.
-        let board = [
-            (95.0f64, 0.02, 1.0),
-            (183.0, 0.025, 0.7),
-            (297.0, 0.03, 0.5),
-            (416.0, 0.035, 0.4),
-        ]
-        .iter()
-        .map(|&(f, zeta, shape)| BoardMode {
-            omega: core::f64::consts::TAU * f,
-            zeta,
-            shape,
-            q: 0.0,
-            v: 0.0,
-        })
-        .collect();
+        let board = board_modes
+            .iter()
+            .map(|&(f, zeta, shape)| BoardMode {
+                omega: core::f64::consts::TAU * f,
+                zeta,
+                shape,
+                q: 0.0,
+                v: 0.0,
+            })
+            .collect();
         let felt = WoolFelt::new(4.0e5, 0.2, 2.5, 3.2, 0.25, 0.8)
             .map_err(|e| format!("felt admits: {e:?}"))?;
         let felt_state = felt.initial_state();

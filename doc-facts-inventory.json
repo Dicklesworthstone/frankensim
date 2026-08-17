@@ -449,6 +449,7 @@
     "crates/fs-couple/tests/gesture_schedule.rs",
     "crates/fs-couple/tests/listening_receipt_mint.rs",
     "crates/fs-couple/tests/music_render_cli.rs",
+    "crates/fs-couple/tests/piano_gates.rs",
     "crates/fs-couple/tests/render_blocks.rs",
     "crates/fs-couple/tests/render_budget_lane.rs",
     "crates/fs-couple/tests/render_no_alloc.rs",

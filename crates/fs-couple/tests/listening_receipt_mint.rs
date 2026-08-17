@@ -322,3 +322,122 @@ fn committed_brass_receipt_matches_the_committed_artifact() {
         receipt.verdict.name()
     );
 }
+
+// ---------------------------------------------------------------------
+// Piano note ladder (bead 3ez8g.5.3): pp -> mf -> ff strikes from the
+// composed vertical — does the tilt read as piano felt?
+// ---------------------------------------------------------------------
+
+#[test]
+#[ignore = "minting run: renders data/listening/piano-ladder.{wav,provenance.json} + receipt bytes"]
+fn mint_piano_ladder_artifact() {
+    use fs_couple::piano_vertical::{HammerLaw, PedalState, PianoStringSpec, PianoVertical};
+    let spec = PianoStringSpec {
+        f0_hz: 220.0,
+        b_inharmonicity: 3.5e-4,
+        detune_cents: 0.0,
+        n_modes: 12,
+        damping_ratio: 4.0e-4,
+    };
+    let mut signal = Vec::new();
+    for &v0 in &[0.6f64, 2.0, 4.5] {
+        let mut pv = PianoVertical::new(
+            spec,
+            1.2,
+            HammerLaw::Felt,
+            PedalState {
+                sustain: false,
+                una_corda: false,
+            },
+            0.02,
+        )
+        .expect("vertical");
+        pv.strike(v0);
+        // 1.4 s per note at 24 kHz; dampers give a natural release.
+        for _ in 0..33_600usize {
+            signal.push(pv.step());
+        }
+        signal.extend(std::iter::repeat_n(0.0, 2_400));
+    }
+    let mean = signal.iter().sum::<f64>() / signal.len() as f64;
+    for s in &mut signal {
+        *s -= mean;
+    }
+    let peak = signal.iter().fold(0.0f64, |m, &s| m.max(s.abs()));
+    // Bridge velocity is the observer proxy; full scale with headroom.
+    let full_scale = peak * 1.4;
+    let (wav, clipped) =
+        fs_couple::pcm_wav::encode_pcm16_wav(&signal, 24_000, full_scale).expect("wav");
+    assert_eq!(clipped, 0, "never clip a listening artifact");
+    let hash = fs_blake3::hash_domain("org.frankensim.music-render.wav.v1", &wav);
+    let rms = (signal.iter().map(|s| s * s).sum::<f64>() / signal.len() as f64).sqrt();
+    let root = repo_root();
+    std::fs::write(root.join("data/listening/piano-ladder.wav"), &wav).expect("wav write");
+    let provenance = format!(
+        "{{\"schema\":\"frankensim-music-render-provenance-v1\",\"fixture\":\"piano-ladder \
+         (pp/mf/ff strikes 0.6/2.0/4.5 m/s, damped release; composed vertical: unison + \
+         duplex + board + felt island; bridge-velocity observer, normalized full scale)\",\
+         \"sample_rate_hz\":24000,\"samples\":{},\"block\":33600,\
+         \"full_scale_pa\":{full_scale:e},\"clipped_samples\":0,\"peak_pa\":{peak:e},\
+         \"rms_pa\":{rms:e},\"wav_blake3\":\"{}\",\"encoder\":\"fs_couple::pcm_wav (mono \
+         PCM16, never peak-normalized)\"}}\n",
+        signal.len(),
+        hash.to_hex()
+    );
+    std::fs::write(
+        root.join("data/listening/piano-ladder.provenance.json"),
+        provenance,
+    )
+    .expect("sidecar write");
+    let lat = fs_psycho::log_attack_time(&signal, 24_000.0, 240).expect("attack time");
+    let receipt = ListeningReceipt {
+        listener: "pending".to_string(),
+        session: "2026-08-16".to_string(),
+        artifact_hex: hash.to_hex(),
+        artifact_ref: "data/listening/piano-ladder.provenance.json".to_string(),
+        question: "does the attack brighten from pp to ff the way piano felt does?".to_string(),
+        verdict: ListeningVerdict::Unadjudicated,
+        observations: "three strikes 0.6/2.0/4.5 m/s on the composed vertical (felt island, \
+                       detuned unison, duplex, board); awaiting the owner's ear"
+            .to_string(),
+        metrics: fs_psycho::receipt::AttachedMetrics {
+            loudness_sone: None,
+            sharpness_acum: None,
+            log_attack_time: Some(lat),
+            spl_db: None,
+        },
+    };
+    let bytes = receipt.to_canonical_bytes().expect("encode");
+    std::fs::write(
+        root.join("data/listening/piano-ladder.listening-receipt"),
+        &bytes,
+    )
+    .expect("receipt write");
+    println!(
+        "minted piano-ladder: {} samples, peak {peak:.3e}, rms {rms:.3e}, hash {}",
+        signal.len(),
+        hash.to_hex()
+    );
+}
+
+#[test]
+fn committed_piano_receipt_matches_the_committed_artifact() {
+    let root = repo_root();
+    let receipt_bytes = std::fs::read(root.join("data/listening/piano-ladder.listening-receipt"))
+        .expect("committed piano receipt (mint test)");
+    let receipt = ListeningReceipt::from_canonical_bytes(&receipt_bytes).expect("receipt decodes");
+    let sidecar = std::fs::read_to_string(root.join("data/listening/piano-ladder.provenance.json"))
+        .expect("committed sidecar");
+    assert_eq!(receipt.artifact_hex, sidecar_field(&sidecar, "wav_blake3"));
+    let wav = std::fs::read(root.join("data/listening/piano-ladder.wav")).expect("wav");
+    let hash = fs_blake3::hash_domain("org.frankensim.music-render.wav.v1", &wav);
+    assert_eq!(hash.to_hex(), receipt.artifact_hex, "WAV bytes drifted");
+    assert_eq!(receipt.verdict, ListeningVerdict::Unadjudicated);
+    assert!(!receipt.supports_pass());
+    println!(
+        "{{\"suite\":\"fs-couple\",\"case\":\"piano-listening-chain\",\"artifact\":\"{}\",\
+         \"verdict\":\"{}\"}}",
+        receipt.artifact_hex,
+        receipt.verdict.name()
+    );
+}
