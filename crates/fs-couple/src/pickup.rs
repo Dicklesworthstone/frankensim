@@ -210,7 +210,7 @@ mod pickup_tests {
             let mut omega = Vec::new();
             for k in 1..=n_modes {
                 let w = core::f64::consts::TAU * f0 * k as f64;
-                let zeta = 1.0e-4;
+                let zeta = 1.0e-4_f64;
                 let wd = w * (1.0 - zeta * zeta).sqrt();
                 let decay = det::exp(-zeta * w * dt);
                 rot.push((decay * det::cos(wd * dt), decay * det::sin(wd * dt)));
