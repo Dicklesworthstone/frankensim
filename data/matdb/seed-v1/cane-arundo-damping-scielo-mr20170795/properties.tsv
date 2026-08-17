@@ -1,0 +1,18 @@
+frankensim.matdb-source.v1
+observation	whole-wall-dma-rt	Arundo donax whole-wall strips 40 x 3 x 2 mm cut parallel to fibers (Departement Var, France; Donati SARL)	Dynamic mechanical analysis 20-200 Hz (storage modulus, forced vibration, max strain 2.5e-3) and torsion free-decay logarithmic decrement (strain 3e-5 to ~1e-3), room temperature	Moisture content NOT stated by the source (room-temperature laboratory conditioning; treat as air-dry unconditioned - a named unknown); the two samples' storage moduli differ by 1000 MPa "depending on ageing at RT" so the printed range is recorded low/high, never averaged; the source states these are comparable to literature values 4000-7000 MPa; logarithmic decrement delta rises 0.06 to 0.10 with strain amplitude - consumers wanting a loss factor apply eta = delta/pi THEMSELVES (that conversion is not the source's statement); shear modulus was measured in torsion but printed only graphically, so NO shear row exists here (a named absence, not an omission)
+scalar	storage-modulus-low	whole-wall-dma-rt	storage_modulus_printed_range_low	5250	MPa	constant
+uncertainty	storage-modulus-low	unstated	-	-	-	-
+validity	storage-modulus-low	frequency	20	200	Hz
+validity	storage-modulus-low	moisture_content_known	0	0	1
+scalar	storage-modulus-high	whole-wall-dma-rt	storage_modulus_printed_range_high	6250	MPa	constant
+uncertainty	storage-modulus-high	unstated	-	-	-	-
+validity	storage-modulus-high	frequency	20	200	Hz
+validity	storage-modulus-high	moisture_content_known	0	0	1
+scalar	log-decrement-low	whole-wall-dma-rt	logarithmic_decrement_printed_range_low	0.06	1	constant
+uncertainty	log-decrement-low	unstated	-	-	-	-
+validity	log-decrement-low	strain_amplitude	3e-5	1e-3	1
+validity	log-decrement-low	moisture_content_known	0	0	1
+scalar	log-decrement-high	whole-wall-dma-rt	logarithmic_decrement_printed_range_high	0.10	1	constant
+uncertainty	log-decrement-high	unstated	-	-	-	-
+validity	log-decrement-high	strain_amplitude	3e-5	1e-3	1
+validity	log-decrement-high	moisture_content_known	0	0	1

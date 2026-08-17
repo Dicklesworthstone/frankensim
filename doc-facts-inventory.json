@@ -748,6 +748,7 @@
     "crates/fs-matdb/tests/pcb.rs",
     "crates/fs-matdb/tests/query.rs",
     "crates/fs-matdb/tests/species_pack.rs",
+    "crates/fs-material/tests/cane_pack.rs",
     "crates/fs-material/tests/conformance.rs",
     "crates/fs-material/tests/graph.rs",
     "crates/fs-material/tests/identifiability.rs",

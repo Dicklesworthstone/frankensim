@@ -1,0 +1,14 @@
+frankensim.matdb-source.v1
+observation	reed-heel-static-bending	Arundo donax tenor-saxophone reed HEEL material (Vandoren strength 3), bars 14 x 2 x ~1 mm	Static three-point bending, longitudinal (fiber) and transversal directions, dry as-delivered and after 15 minutes water immersion (Table 2)	Reed HEEL material is the inner vascular-bundle/parenchyma zone left after reed manufacture removes the stiff outer cortex - softer than the blank/cortex zone (see cane-arundo-reedblank-mdpi-ma18122759 and its radial-gradient power law); the anisotropy ratio E_L/E_T is 10.0 +- 2.1 dry and 24.3 +- 8.0 wet; the paper found no measurable change from longer immersion (several hours vs 15 minutes); wet-cane bending hysteresis 12-41 percent energy loss per cycle is reported in its Table 3 (dry cane and synthetic reeds showed none) - recorded here as provenance context, not a loss-factor row; axis convention: longitudinal = L per the instrument-axis-convention file
+scalar	young-modulus-longitudinal-dry	reed-heel-static-bending	young_modulus_longitudinal	5000	MPa	constant
+uncertainty	young-modulus-longitudinal-dry	absolute	700	MPa	0.68	1
+validity	young-modulus-longitudinal-dry	moisture_content_known	0	0	1
+scalar	young-modulus-transverse-dry	reed-heel-static-bending	young_modulus_transverse	500	MPa	constant
+uncertainty	young-modulus-transverse-dry	absolute	30	MPa	0.68	1
+validity	young-modulus-transverse-dry	moisture_content_known	0	0	1
+scalar	young-modulus-longitudinal-wet	reed-heel-static-bending	young_modulus_longitudinal_water_soaked	3100	MPa	constant
+uncertainty	young-modulus-longitudinal-wet	absolute	400	MPa	0.68	1
+validity	young-modulus-longitudinal-wet	water_immersion_minutes	15	15	min
+scalar	young-modulus-transverse-wet	reed-heel-static-bending	young_modulus_transverse_water_soaked	100	MPa	constant
+uncertainty	young-modulus-transverse-wet	absolute	50	MPa	0.68	1
+validity	young-modulus-transverse-wet	water_immersion_minutes	15	15	min

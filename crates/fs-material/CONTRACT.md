@@ -211,6 +211,19 @@ None.
   constants β = 2.418e-6, S = 1064 K (White). The dry limit RH = 0 is
   the SAME CODE PATH — bitwise, so no golden anywhere moves.
 
+- Cane packs (music bead 3ez8g.3.6): the reed card's material
+  population, licensing-first — three CC-BY primaries in
+  data/matdb/seed-v1 (reed-BLANK density + E_L with the radial cortex
+  gradient named, Karczewski 2025 MDPI; reed-HEEL E_L/E_T dry AND
+  water-soaked, Ukshini & Dirckx 2020 MDPI; whole-wall DMA storage
+  modulus + logarithmic decrement, Weidenfeller 2018 SciELO). Blank
+  and heel measure DIFFERENT zones of one plant (cortex-weighted vs
+  inner) — recorded separately, never averaged; moisture conditions
+  recorded per row (unstated conditions carry a
+  moisture_content_known 0 flag). NO licensable shear modulus or E_R
+  exists (Obataya/Taillard/Kawasaki are publisher-copyrighted) — the
+  absence is asserted, not papered over.
+
 ## Conformance tests
 
 `tests/conformance.rs` (JSON verdicts, suite `fs-material/conformance`):
@@ -245,6 +258,16 @@ off the same GasState); RH-monotone c/ρ with the saturated-20 °C
 uplift in the published 0.8–1.8 m/s class (measured 1.263, the
 Wong-1986/Cramer-1993 ~0.35% class); refusals (RH ∉ [0,1], Buck
 window, the x_w ≤ 0.15 transport ceiling) and bitwise repeats.
+
+`tests/cane_pack.rs` g2 gate — positivity + schema hygiene (every
+scalar carries uncertainty + validity rows), fiber anisotropy in the
+source's own band (E_L/E_T = 10 dry, wider wet), the moisture law
+(water softens both axes, transverse more), cross-source RANGE OVERLAP
+between the heel's static band and the whole-wall DMA range, the
+blank-vs-heel DISJOINT-zones assertion with the gradient named in both
+observations, the derived loss factor delta/pi in the woody class with
+conversion ownership stated, and the named-absence assertion that no
+shear row exists without a source.
 
 ## No-claim boundaries
 

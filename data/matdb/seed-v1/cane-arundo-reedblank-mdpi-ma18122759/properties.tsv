@@ -1,0 +1,14 @@
+frankensim.matdb-source.v1
+observation	reed-blank-dry	Arundo donax commercial reed blanks (three brands from southern France), dry thin strips ~3 x 0.5 x 92 mm	Density by mass/volume of dry strips; Young modulus by four-point bending of the same strips (Tables 1 and 3)	Reed BLANKS are outer-wall-weighted material (inner parenchyma partly gouged away, polished) - stiffer and denser than whole-wall or heel material; the paper quantifies the radial gradient as power laws rho(h)=rho0*h^n and E(h)=E0*h^n with n between -1.28 and -1.82 for E (Table 2): thinner strips closer to the pure cortex are much stiffer, which is why these values sit far above reed-HEEL packs (see cane-arundo-reedheel-mdpi-ma13204566) - two zones of one plant, recorded separately, never averaged; strips are commercially dried with no stated relative humidity, so moisture stays a named unknown; per-brand means recorded as a printed range low/high (brands P=778.9 and M=963.3 kg/m3; E brands P=15.0 and M=24.8 GPa), never averaged across brands
+scalar	density-low	reed-blank-dry	density_printed_range_low	778.9	kg/m3	constant
+uncertainty	density-low	absolute	52.4	kg/m3	0.68	1
+validity	density-low	moisture_content_known	0	0	1
+scalar	density-high	reed-blank-dry	density_printed_range_high	963.3	kg/m3	constant
+uncertainty	density-high	absolute	74.4	kg/m3	0.68	1
+validity	density-high	moisture_content_known	0	0	1
+scalar	young-modulus-longitudinal-low	reed-blank-dry	young_modulus_longitudinal_printed_range_low	15000	MPa	constant
+uncertainty	young-modulus-longitudinal-low	absolute	4100	MPa	0.68	1
+validity	young-modulus-longitudinal-low	moisture_content_known	0	0	1
+scalar	young-modulus-longitudinal-high	reed-blank-dry	young_modulus_longitudinal_printed_range_high	24800	MPa	constant
+uncertainty	young-modulus-longitudinal-high	absolute	8200	MPa	0.68	1
+validity	young-modulus-longitudinal-high	moisture_content_known	0	0	1
