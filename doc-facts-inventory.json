@@ -441,6 +441,7 @@
     "crates/fs-convection/tests/robin_seam.rs",
     "crates/fs-couple/tests/acoustic_assembly.rs",
     "crates/fs-couple/tests/bakeoff_brass.rs",
+    "crates/fs-couple/tests/bakeoff_dispersion.rs",
     "crates/fs-couple/tests/bakeoff_felt.rs",
     "crates/fs-couple/tests/bakeoff_fracdelay.rs",
     "crates/fs-couple/tests/bakeoff_string.rs",

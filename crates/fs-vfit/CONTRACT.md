@@ -138,6 +138,17 @@ Pure synchronous computation; longest call (24-pole auto-order fit on
 
 None.
 
+- Dispersion stage (music bead 3ez8g.7.2): `DelayedFilter::with_dispersion`
+  adds a cascade of identical first-order allpasses
+  `H(z) = (a + z^-1)/(1 + a z^-1)` to the line output — stiffness
+  realized as frequency-dependent loop delay instead of modal
+  frequencies. `|H| = 1` EXACTLY at every frequency, so the stage is
+  passive BY STRUCTURE (it reshapes phase, never energy); `|a| >= 1`
+  and zero sections refuse; the stage is inert unless requested, so
+  every existing consumer is bit-unchanged.
+  `first_order_allpass_group_delay` publishes the closed form the
+  design math solves against.
+
 ## Conformance tests
 
 `tests/vfit.rs` (12): realization parity (two routes, on and off

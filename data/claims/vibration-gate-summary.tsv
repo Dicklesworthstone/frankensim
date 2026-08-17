@@ -12,3 +12,4 @@ plate	vfit-driving-point	passive-one-port	ungated	NAMED MISSING: no executed pla
 string-plate-nl	kc-vonkarman	pitch-glide-analytic	green	1e-12 analytic pins + FD-gradient/trajectory falsifier (Gonzalez caveat: NEVER cite energy conservation); selector threshold is committed data
 bowed	modal-stribeck	stick-slip-mechanism	ungated	live-excitation + spectrum evidence attached; awaits .7.5 mechanism gates + .7.3 tribo determinism
 string-plate-cavity	vibroacoustic-modal	two-dof-product-invariant	ungated	cavity/resonator pins attached; awaits .7.4 composed-guitar Carcagno gate
+string	waveguide-dispersive	budget-hero-string	ungated	earned by the executed bake-off receipt (KeepBoth); B ladder within 9.8 cents on the shared card; ops-budget scope, never certified partials

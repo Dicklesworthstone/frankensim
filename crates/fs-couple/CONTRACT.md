@@ -688,6 +688,20 @@ None.
   evidence cites FD-gradient/trajectory oracles, never energy
   conservation.
 
+- Dispersive-waveguide bake-off (bead 3ez8g.7.2): the [F] string
+  alternative measured against modal ZOH on ONE shared music-wire card
+  with the analytic stiff law `f_n = n f0 sqrt(1 + B n^2)`,
+  `B = pi^2 E I/(T L^2)` derived from the card, as the oracle. The
+  executed receipt decided KeepBoth: modal keeps every certified claim
+  (D21 asserted against the live registry in the gate test); the
+  waveguide earns the budget-constrained hero-string scope
+  (B_hat/B = 1.014, worst partial 9.8 cents with the linear
+  fractional-interpolation phase as the named residual owner, ~10x
+  fewer flops per sample, state cost flat in partial count — while
+  modal holds FEWER states on this card, recorded honestly). The
+  DISPERSIONLESS control on the same loop misses the law by 41 cents:
+  the allpass stage, not the loop, carries the stiffness.
+
 ## Conformance tests
 
 `src/broadband_radiation.rs`: G0 complex/real-SH round trip/reconstruction against
@@ -805,6 +819,14 @@ against the committed artifact), and the gate-summary enumeration
 `data/claims/vibration-gate-summary.tsv` with a status MATCHING the
 registry; the plate 1-port's honestly-ungated row is asserted by
 name).
+
+`tests/bakeoff_dispersion.rs` — the committed-receipt gate (bytes
+decode, hash, KeepBoth outcome, D21 modal-row-untouched against the
+live registry, the newcomer's own row present) and the
+passivity/control gate (loop bounded and decaying under g < 1 with the
+unit-magnitude stage; constructor refusals; the dispersionless
+control's partial 8 sits within 20% of harmonic while the law demands
++18 cents).
 
 ## No-claim boundaries
 

@@ -974,6 +974,38 @@
       "budget_row": null,
       "corpus_refs": [],
       "notes": "The matched-secant linear spring as the DEBUG/control hammer image only \u2014 its claim IS being the null hypothesis: amplitude-independent contact duration (within 1 sample) and a flat tilt trend (1.000 on the composed vertical vs the felt's 159.7). GREEN for exactly that debug-control claim set and nothing else; it can never carry an attack claim (the contrast gates exist to prove it cannot)."
+    },
+    {
+      "filling": "string",
+      "image": "waveguide-dispersive",
+      "qoi": "budget-hero-string",
+      "owner_crates": [
+        "fs-vfit",
+        "fs-couple"
+      ],
+      "exactness": [
+        "X-Est"
+      ],
+      "gate": "ungated",
+      "live_default": "no",
+      "determinism": "one-host",
+      "evidence": [
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/tests/bakeoff_dispersion.rs::committed_dispersion_receipt_decides_and_modal_rows_are_untouched"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/tests/bakeoff_dispersion.rs::dispersion_stage_is_passive_and_the_control_is_harmonic"
+        },
+        {
+          "kind": "bakeoff",
+          "ref": "crates/fs-couple/tests/receipts/string-modal-zoh-vs-waveguide-dispersive.bakeoff (KeepBoth: modal keeps every certified claim; the waveguide earns the budget-constrained hero-string scope)"
+        }
+      ],
+      "budget_row": null,
+      "corpus_refs": [],
+      "notes": "The [F] alternative earned by bake-off (3ez8g.7.2): stiffness as DISPERSION ON THE LINE \u2014 a first-order allpass cascade in fs_vfit::DelayedFilter (|H|=1 structurally passive; |a|>=1 and zero sections refuse). On the shared music-wire card (E=200GPa d=1mm L=0.65m T=700N) the executed receipt measured B_hat/B=1.014 with worst partial 9.8 cents (the linear-fractional-interpolation phase is the named residual owner) while the DISPERSIONLESS control missed the law by 41 cents \u2014 the stage carries the physics. Budget honesty: modal holds FEWER states on this card (108 vs 173); the differing shape is OPS (~10x fewer flops/sample) and flat scaling in partial count. NEVER the certified-partial image: modal-zoh keeps every certified claim (D21 asserted in the gate test against the live registry)."
     }
   ]
 }
