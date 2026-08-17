@@ -108,9 +108,9 @@ fn g1_hertz_and_block_on_incline_match_closed_forms() {
     };
     let mass_kg = 3.0;
     let gravity_m_per_s2 = 9.806_65;
-    let theta = static_mu.atan();
-    let normal_force = mass_kg * gravity_m_per_s2 * theta.cos();
-    let downslope_force = mass_kg * gravity_m_per_s2 * theta.sin();
+    let theta = static_mu.atan(); // det-ok: test-only incline oracle
+    let normal_force = mass_kg * gravity_m_per_s2 * theta.cos(); // det-ok: test-only incline oracle
+    let downslope_force = mass_kg * gravity_m_per_s2 * theta.sin(); // det-ok: test-only incline oracle
     let response = law.evaluate(&interface(), normal_force, slip(0.0)).unwrap();
     close(response.static_limit, downslope_force);
 }

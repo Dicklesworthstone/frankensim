@@ -14,6 +14,8 @@
 
 use core::fmt;
 
+use fs_math::det;
+
 const EPSILON: f64 = 128.0 * f64::EPSILON;
 
 /// Stable identity for this bounded constitutive rung.
@@ -245,8 +247,8 @@ impl TangentFrame {
     /// Rotates tangent axes by `angle_rad`, preserving the physical normal.
     pub fn rotated(self, angle_rad: f64) -> Result<Self, PartialSlipError> {
         finite(angle_rad, "tangent_rotation_rad")?;
-        let c = angle_rad.cos();
-        let s = angle_rad.sin();
+        let c = det::cos(angle_rad);
+        let s = det::sin(angle_rad);
         finite(c, "tangent_rotation_cos")?;
         finite(s, "tangent_rotation_sin")?;
         let longitudinal = add(
@@ -887,7 +889,7 @@ impl CoulombCapacity {
     fn utilization(self, force: [f64; 2], torque_nm: f64) -> Result<f64, PartialSlipError> {
         let force_ratio = norm2(force, "force_utilization")? / self.static_force_n;
         let torque_ratio = torque_nm.abs() / self.static_torque_nm;
-        let value = force_ratio.hypot(torque_ratio);
+        let value = det::hypot(force_ratio, torque_ratio);
         finite(value, "coulomb_utilization")?;
         Ok(value)
     }
@@ -1224,7 +1226,7 @@ fn dot2(left: [f64; 2], right: [f64; 2], field: &'static str) -> Result<f64, Par
 }
 
 fn norm2(value: [f64; 2], field: &'static str) -> Result<f64, PartialSlipError> {
-    let result = value[0].hypot(value[1]);
+    let result = det::hypot(value[0], value[1]);
     finite(result, field)?;
     Ok(result)
 }
@@ -1290,7 +1292,7 @@ fn cross(
 }
 
 fn normalize(value: [f64; 3], field: &'static str) -> Result<[f64; 3], PartialSlipError> {
-    let magnitude = value[0].hypot(value[1]).hypot(value[2]);
+    let magnitude = det::hypot(det::hypot(value[0], value[1]), value[2]);
     positive(magnitude, field)?;
     scale3(value, 1.0 / magnitude, field)
 }
@@ -1502,8 +1504,11 @@ mod tests {
         let angle = 0.37;
         let rotated = base.rotated(angle).expect("rotation");
         let creepage = [6.0, 2.0];
-        let c = angle.cos();
-        let s = angle.sin();
+        // det-ok: the INDEPENDENT oracle arm stays on the platform
+        // sequence so the comparison is cross-implementation, not
+        // self-referential (tolerance absorbs the ULP-class gap).
+        let c = angle.cos(); // det-ok: independent oracle arm (platform)
+        let s = angle.sin(); // det-ok: independent oracle arm (platform)
         let rotated_creepage = [
             c * creepage[0] + s * creepage[1],
             -s * creepage[0] + c * creepage[1],

@@ -338,7 +338,7 @@
       ],
       "budget_row": null,
       "corpus_refs": [],
-      "notes": "Modal string + Stribeck island (parts live). Determinism is CAPPED at one-host: fs-tribo declares no cross-ISA bit-stability (platform hypot) - bead 3ez8g.7.3 resolves or re-declares. Emergent Helmholtz-motion gates are bead 3ez8g.7.5; a forced Helmholtz oscillator is forbidden. .7.1 review: live-excitation + spectrum evidence attached; UNGATED until the stick-slip mechanism gates land (.7.5's lane) and the fs-tribo hypot determinism cap resolves (.7.3)."
+      "notes": "Modal string + Stribeck island (parts live). Determinism is CAPPED at one-host: fs-tribo declares no cross-ISA bit-stability (platform hypot) - bead 3ez8g.7.3 resolves or re-declares. Emergent Helmholtz-motion gates are bead 3ez8g.7.5; a forced Helmholtz oscillator is forbidden. .7.1 review: live-excitation + spectrum evidence attached; UNGATED until the stick-slip mechanism gates land (.7.5's lane) and the fs-tribo hypot determinism cap resolves (.7.3). .7.3 RESOLVED the fs-tribo determinism cap by det-routing (cross-ISA golden verified aarch64+x86-64); the row stays one-host until the COMPOSED bowed path's remaining operands are audited."
     },
     {
       "filling": "brass",

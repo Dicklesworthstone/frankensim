@@ -13,6 +13,8 @@ pub mod surface_excitation;
 use core::fmt;
 use std::collections::BTreeSet;
 
+use fs_math::det;
+
 const EPSILON: f64 = 64.0 * f64::EPSILON;
 
 /// Bounded exactly-once key ownership for arbitrary or strictly sequential work.
@@ -520,7 +522,7 @@ impl FrictionLaw {
             } => {
                 let ratio = speed / characteristic_speed;
                 finite(ratio, "stribeck_speed_ratio")?;
-                let decay = (-(ratio * ratio)).exp();
+                let decay = det::exp(-(ratio * ratio));
                 finite(decay, "stribeck_decay")?;
                 checked_add(
                     checked_add(
@@ -902,7 +904,10 @@ impl HertzSpherePlane {
                 self.reduced_modulus,
                 checked_mul(
                     self.effective_radius.sqrt(),
-                    indentation_m.powf(1.5),
+                    // x^{3/2} as x*sqrt(x): mul and the correctly-rounded
+                    // sqrt are IEEE-exact, so this is bit-stable on every
+                    // conforming target (det routing, bead 3ez8g.7.3).
+                    indentation_m * indentation_m.sqrt(),
                     "normal_force",
                 )?,
                 "normal_force",
@@ -1667,7 +1672,7 @@ fn checked_sqrt(value: f64, field: &'static str) -> Result<f64, TriboError> {
     Ok(root)
 }
 fn stable_norm(values: [f64; 3], field: &'static str) -> Result<f64, TriboError> {
-    let value = values[0].hypot(values[1]).hypot(values[2]);
+    let value = det::hypot(det::hypot(values[0], values[1]), values[2]);
     finite(value, field)?;
     Ok(value)
 }
@@ -1724,6 +1729,75 @@ mod tests {
     }
 
     #[test]
+    fn cross_isa_golden_hash_over_the_routed_friction_paths() {
+        // Bead 3ez8g.7.3 (bowed-path determinism): with every
+        // solver-state transcendental routed through fs_math::det
+        // (hypot / exp / sin / cos; x^{3/2} rewritten as the
+        // IEEE-exact x*sqrt(x)), the friction physics is bit-stable
+        // on EVERY conforming target — so the cross-ISA golden is ONE
+        // committed number, not a per-ISA pair. Minted on aarch64,
+        // verified on x86-64; any regression to a platform libm call
+        // in these paths flips the hash.
+        let law = FrictionLaw::Stribeck {
+            static_mu: 0.45,
+            kinetic_mu: 0.28,
+            characteristic_speed: 0.07,
+            viscous_per_speed: 0.012,
+        };
+        let interface = synthetic_dry();
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut absorb = |value: f64| {
+            // FNV-1a over the exact result bits.
+            for byte in value.to_bits().to_le_bytes() {
+                hash ^= u64::from(byte);
+                hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        };
+        let mut speed = 1.0e-3;
+        for i in 0..40 {
+            speed *= 1.35; // iterated IEEE multiply: exact-op determinism, no powi
+            let vx = speed * 0.6;
+            let vy = speed * 0.8;
+            let response = law
+                .evaluate(&interface, 3.0 + f64::from(i), tangent([vx, vy, 0.0]))
+                .expect("bowed-class evaluation");
+            absorb(response.static_limit);
+            absorb(response.kinetic_coefficient.unwrap_or(0.0));
+            for t in response.traction_n {
+                absorb(t);
+            }
+            absorb(response.dissipated_power_w);
+        }
+        // The partial-slip tangent frame: det::sin/cos rotation and
+        // the det::hypot normalize chain.
+        let frame = crate::partial_slip::TangentFrame::new([0.1, -0.2, 3.0], [1.0, 0.4, 0.0])
+            .expect("frame");
+        for k in 0..16 {
+            let rotated = frame.rotated(0.37 * f64::from(k)).expect("rotated");
+            for axis in [rotated.longitudinal(), rotated.lateral()] {
+                for component in axis {
+                    absorb(component);
+                }
+            }
+        }
+        assert_eq!(
+            hash, GOLDEN_HASH,
+            "routed friction bits moved: hash {hash:#018x} vs golden {GOLDEN_HASH:#018x} \
+             (a platform-libm regression, a det-kernel change, or a fixture edit — \
+             re-mint ONLY with a recorded cause per the golden-bump protocol)"
+        );
+        println!(
+            "{{\"suite\":\"fs-tribo\",\"case\":\"cross-isa-golden\",\"hash\":\"{hash:#018x}\",\"verdict\":\"pass\"}}"
+        );
+    }
+    /// The one cross-ISA golden (minted 2026-08-16 on aarch64-apple-darwin,
+    /// verified on x86-64 Linux via a remote worker; bead 3ez8g.7.3).
+    /// Re-mint cause log: 0x1c18d3c28b56ab73 became this value when the
+    /// fixture's `powi` speed ladder became an iterated multiply
+    /// (check-powi doctrine; fixture edit, not a physics change).
+    const GOLDEN_HASH: u64 = 0x56d2_c712_59d8_755b;
+
+    #[test]
     fn g0_refuses_bad_interface_and_normal_slip() {
         assert!(matches!(
             InterfaceSystemRef::new(
@@ -1763,6 +1837,7 @@ mod tests {
             .unwrap();
         assert_eq!(response.regime, FrictionRegime::Sticking);
         close(response.static_limit, 10.0);
+        // det-ok: test-only round-trip oracle on the platform sequence.
         close((response.static_limit / 20.0).atan().tan(), 0.5);
     }
 

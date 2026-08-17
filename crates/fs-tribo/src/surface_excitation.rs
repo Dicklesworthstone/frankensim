@@ -338,7 +338,7 @@ impl PeriodicHarmonicSurface {
             for harmonic in &self.harmonics {
                 let phase =
                     core::f64::consts::TAU * f64::from(harmonic.cycles_per_track) * phase_fraction;
-                let (sine, cosine) = phase.sin_cos();
+                let (sine, cosine) = (det::sin(phase), det::cos(phase));
                 height_m = harmonic.cosine_amplitude_m.mul_add(cosine, height_m);
                 height_m = harmonic.sine_amplitude_m.mul_add(sine, height_m);
             }
@@ -648,7 +648,8 @@ impl ProjectedHertzFootprint {
                 field: "travel_angle_from_major_rad",
             });
         }
-        let (sine, cosine) = self.travel_angle_from_major_rad.sin_cos();
+        let angle = self.travel_angle_from_major_rad;
+        let (sine, cosine) = (det::sin(angle), det::cos(angle));
         let half_width_m = (self.semi_major_axis_m * self.semi_major_axis_m * cosine * cosine
             + self.semi_minor_axis_m * self.semi_minor_axis_m * sine * sine)
             .sqrt();

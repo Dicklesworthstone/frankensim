@@ -160,9 +160,21 @@ candidate.
 
 ## Determinism class
 
-Pure scalar operations are deterministic for the same input and ISA. Norms use
-the platform `hypot` sequence to avoid avoidable intermediate overflow. No
-cross-ISA bit-stability claim is made.
+Pure scalar operations are deterministic for the same input and ISA. Every
+solver-state transcendental is routed through `fs_math::det` (bead
+3ez8g.7.3): norms use `det::hypot`, which is overflow/underflow-safe BY
+CONSTRUCTION (max-scaling, so the ratio never exceeds 1) — the original
+platform-`hypot` rationale is preserved, and the kernel is bit-identical on
+every conforming target; the Stribeck decay uses `det::exp`, tangent-frame
+rotation `det::sin`/`det::cos`, and the Hertz `x^{3/2}` is the IEEE-exact
+`x*sqrt(x)`. CROSS-ISA BIT-STABILITY IS CLAIMED for these friction paths and
+enforced by a single committed golden hash executed on both aarch64 and
+x86-64 (`cross_isa_golden_hash_over_the_routed_friction_paths`), plus the
+workspace `check-libm` lint (fs-tribo is a doctrine crate). The recorded
+counter-argument: platform `hypot` is near-correctly-rounded while
+`det::hypot` spends up to 2 ULP — a cost orders below Stribeck-parameter
+uncertainty, accepted for reproducibility. Composed images (e.g. the bowed
+string) remain capped by their OTHER operands until audited.
 
 ## Cancellation behavior
 
