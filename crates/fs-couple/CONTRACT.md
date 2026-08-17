@@ -815,6 +815,25 @@ None.
   Card = authored datasheet-class Estimate; low-ka piston load
   disclosed; cabinet IR packs are FORBIDDEN and absent.
 
+- Electric chain (bead 3ez8g.9.5): `tests/electric_chain.rs`
+  composes string -> pickup -> tone RC -> triode island -> TS driver
+  with every stage a named, receipted object. The composition laws:
+  ONE string owner (a bare string stepped alongside stays BITWISE
+  identical — the chain reads, never owns); voicing survives the
+  chain (per-harmonic bridge/neck output ratios = pickup window-gain
+  ratios on string-carried lines); the harmonic ladder is
+  DEVICE-made (single-mode string, so 2f0/3f0 at the speaker is
+  constitutive curvature); the box composes transparently
+  (chain-measured excursion-per-volt = driver-alone). The
+  split-vs-full-DAE bake-off receipt
+  (`tests/receipts/electric-split-vs-full-dae.bakeoff`, KeepBoth)
+  pins the split image to the analytic gain and to the monolithic
+  1e-14 authority. MEASUREMENT LAW recorded: harmonic line
+  projections need INTEGER-CYCLE windows — at a non-integer cycle
+  count the fundamental leaks ~1.7% into every harmonic line,
+  drive-independent, and read as a 27% violation of a ratio law
+  that holds.
+
 ## Conformance tests
 
 `src/broadband_radiation.rs`: G0 complex/real-SH round trip/reconstruction against
@@ -1012,7 +1031,24 @@ contrast against the rigid box); a 60 V resonance drive trips the
 excursion refusal while a gentle drive never does; refusals by name
 plus the supply-defect ledger at 3e-19.
 
+`tests/electric_chain.rs` (7 + 2 mints): ec-001 compose + logging +
+the one-owner witness; ec-002 voicing ratios within 6% (gain-floored
+to string-carried lines); ec-003 H2 0.07% -> 0.86% across grid drive
+0.03 -> 0.40 V RMS with H2 >> H3; ec-004 composed-vs-direct box
+transfer within 0.04% at 65/260 Hz; ec-006 committed bake-off
+receipt re-asserted (split gain 59.950 = authority 59.950, analytic
+59.923; pluck L2 4.6e-12); ec-008 listening digest chain
+(electric-clean-vs-driven, Unadjudicated); ec-009 the electric
+gate-summary artifact enumerates every registry row.
+
 ## No-claim boundaries
+
+- The electric chain claims NOTHING about the string (one owner; the
+  vibration epic's rows carry it) and nothing about perceived tone
+  until the listening receipt is adjudicated. The preamp input gain
+  is a measured-calibration volume knob (disclosed, not physical);
+  budget rows wait on the budget lane covering this chain (D25);
+  live-default stays no.
 
 - `acoustic_realize` is a composed description→waveform, not a named
   instrument product and not a 3D jet. Bow is regularized friction, not

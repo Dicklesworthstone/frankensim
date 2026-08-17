@@ -49,7 +49,16 @@ use fs_phs::device::{TriodeCard, TriodeStage};
 use fs_psycho::receipt::{ListeningReceipt, ListeningVerdict};
 
 const RATE: f64 = 48_000.0;
-const F0: f64 = 110.0;
+/// 400 samples per cycle EXACTLY: the 16000-sample projection
+/// windows then hold an integer cycle count of every harmonic, so
+/// cross-harmonic projection leakage is zero by discrete
+/// orthogonality. MEASURED at 110 Hz (non-integer cycles): the
+/// fundamental leaked ~1.7% into every harmonic line —
+/// drive-independent — inflating the weak neck mode-3 line 27% and
+/// flooring the ladder's H2 at ~0.7%.
+const F0: f64 = 120.0;
+/// The bake-off pluck stays at the receipt's minted frequency.
+const BAKEOFF_PLUCK_HZ: f64 = 110.0;
 const N_MODES: usize = 6;
 const SUPPLY_V: f64 = 300.0;
 const RL_OHM: f64 = 100.0e3;
@@ -334,13 +343,14 @@ fn ec_002_voicing_survives_the_chain() {
     };
     let (cb, cn) = (centroid(bridge_lines), centroid(neck_lines));
     assert!(cb > cn, "bridge centroid {cb:.0} <= neck {cn:.0}");
-    // The ratio law holds where the line is STRING-carried. Near a
-    // station node the string line vanishes and the device's own
-    // harmonic content at the same frequency dominates (a real
-    // composition effect, seen at the neck's mode-3 node: measured
-    // 3.88 vs predicted 3.04 at grid 0.02 V RMS) — those lines are
-    // excluded by a gain floor, and the drive is kept at 0.005 V RMS
-    // so constitutive H2/H3 sits far below every kept line.
+    // The ratio law holds where the line is STRING-carried: the gain
+    // floor excludes lines parked on a station node (where nothing
+    // string-borne remains to compare), and the 0.005 V RMS drive
+    // keeps constitutive H2/H3 far below every kept line. The
+    // integer-cycle window (see F0) is what makes the per-line
+    // comparison exact — at 110 Hz the leakage of the fundamental
+    // into the weak neck mode-3 line read as a drive-independent 27%
+    // "violation" of a law that in fact holds.
     let floor = |gains: &[f64]| 0.10 * gains.iter().fold(0.0f64, |m, g| m.max(g.abs()));
     let (fb, fn_) = (floor(&gains_by_pose[0]), floor(&gains_by_pose[1]));
     let mut worst_rel = 0.0f64;
@@ -565,7 +575,7 @@ fn bakeoff_drive_pluck(amp: f64, n: usize) -> Vec<f64> {
     (0..n)
         .map(|k| {
             let t = k as f64 / RATE;
-            amp * det::exp(-t / 0.15) * det::sin(core::f64::consts::TAU * F0 * t)
+            amp * det::exp(-t / 0.15) * det::sin(core::f64::consts::TAU * BAKEOFF_PLUCK_HZ * t)
         })
         .collect()
 }
@@ -792,7 +802,7 @@ fn ec_007_mint_electric_listening_artifact() {
     .expect("wav");
     let provenance = format!(
         "{{\"schema\":\"frankensim-music-render-provenance-v1\",\"fixture\":\"electric-clean-\
-         vs-driven (same 110 Hz pluck; grid RMS 0.03 V then 0.40 V through pickup -> tone RC \
+         vs-driven (same 120 Hz pluck; grid RMS 0.03 V then 0.40 V through pickup -> tone RC \
          -> 12AX7 stage -> sealed-box TS driver; signal = model far-field pressure at 1 m)\",\
          \"sample_rate_hz\":48000,\"samples\":{},\"block\":480,\
          \"full_scale_pa\":{full_scale_pa:e},\"clipped_samples\":0,\"peak_pa\":{peak:e},\
