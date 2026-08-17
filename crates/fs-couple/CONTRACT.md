@@ -792,6 +792,17 @@ None.
   identical fixture); the ooh/aah ladder is minted for the owner's
   ear.
 
+- `pickup` module (bead 3ez8g.9.2): the Faraday pickup as a
+  PURE-READER PORT — D20 as structure (pose + per-mode window gains
+  only; `emf()` reads the string owner's modal velocities; no step, no
+  state, no re-discretization anywhere). The raised-cosine aperture
+  window is unit-normalized so the point-pickup limit is EXACT; the
+  window is what makes bridge-vs-neck voicing physical. v1 provenance:
+  linearized flux with an authored dipole-like height profile
+  (Estimate, disclosed); the MAGNETOSTATIC BAKE (offline B-map lab,
+  the lips/jet authority pattern) is the recorded follow-up that
+  upgrades provenance without changing the runtime shape.
+
 ## Conformance tests
 
 `src/broadband_radiation.rs`: G0 complex/real-SH round trip/reconstruction against
@@ -968,6 +979,17 @@ interaction sweep (ten stiffness points crossing F1 with per-point
 f_free/f0/deviation logging); the committed bake-off receipt gate
 (KeepBoth scopes + both rows alive in the registry); and the
 vowel-ladder listening chain (Unadjudicated).
+
+`src/pickup.rs` `pickup_tests`, cases pk-001..pk-005 — station
+voicing with every per-mode EMF line matching an INDEPENDENT
+Simpson-integrated analytic gain within 5% (bridge centroid 452 Hz vs
+neck 328 Hz); two mixed pickups combing per the gain-sum prediction
+with an executed notch; the exact point-pickup limit (5e-4) plus the
+pure-reader law (identical repeated reads; EMF recomputable from the
+public gains and the same state slice); refusals by name; and the EMF
+driving the .9.1 circuit DAE end-to-end (RC-load rolloff matching the
+first-order analytic response at 0.25x and 4x cutoff with supply
+defects at 1e-21).
 
 ## No-claim boundaries
 

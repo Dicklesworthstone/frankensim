@@ -79,8 +79,7 @@ impl Pickup {
     /// aperture outside (0, 0.5], a non-positive height, or zero
     /// modes.
     pub fn bind(pose: PickupPose, n_modes: usize) -> Result<Self, PickupError> {
-        if !(pose.station_frac.is_finite() && pose.station_frac > 0.0 && pose.station_frac < 1.0)
-        {
+        if !(pose.station_frac.is_finite() && pose.station_frac > 0.0 && pose.station_frac < 1.0) {
             return Err(PickupError::Invalid {
                 what: "station must lie strictly inside the speaking length",
             });
@@ -118,9 +117,7 @@ impl Pickup {
             // Raised cosine centered on the station.
             let w = 0.5
                 + 0.5
-                    * det::cos(
-                        core::f64::consts::PI * (x - pose.station_frac) / half.max(1e-300),
-                    );
+                    * det::cos(core::f64::consts::PI * (x - pose.station_frac) / half.max(1e-300));
             norm += w * dx;
             for (k, g) in gains.iter_mut().enumerate() {
                 *g += w * det::sin((k + 1) as f64 * core::f64::consts::PI * x) * dx;
@@ -210,13 +207,15 @@ mod pickup_tests {
             let mut omega = Vec::new();
             for k in 1..=n_modes {
                 let w = core::f64::consts::TAU * f0 * k as f64;
-                let zeta = 1.0e-4_f64;
+                // Near-undamped: at 1e-4 the mode-3 amplitude decays
+                // ~10% across the projection window and the line reads
+                // 5% low (measured, exactly at the band edge).
+                let zeta = 1.0e-5_f64;
                 let wd = w * (1.0 - zeta * zeta).sqrt();
                 let decay = det::exp(-zeta * w * dt);
                 rot.push((decay * det::cos(wd * dt), decay * det::sin(wd * dt)));
                 // Pluck shape: q_k(0) ~ sin(k pi x_p)/k^2.
-                let q0 = det::sin(k as f64 * core::f64::consts::PI * pluck_frac)
-                    / (k * k) as f64;
+                let q0 = det::sin(k as f64 * core::f64::consts::PI * pluck_frac) / (k * k) as f64;
                 state.push((q0, 0.0));
                 omega.push(w);
             }
@@ -289,9 +288,7 @@ mod pickup_tests {
                 let hi = station + half;
                 let h = (hi - lo) / (steps - 1) as f64;
                 let f = |x: f64| -> (f64, f64) {
-                    let w = 0.5
-                        + 0.5
-                            * det::cos(core::f64::consts::PI * (x - station) / half);
+                    let w = 0.5 + 0.5 * det::cos(core::f64::consts::PI * (x - station) / half);
                     (w, w * det::sin(k as f64 * core::f64::consts::PI * x))
                 };
                 let mut wsum = 0.0;
@@ -313,12 +310,13 @@ mod pickup_tests {
             };
             for k in 1..=n_modes {
                 let q0 = det::sin(k as f64 * core::f64::consts::PI * 0.22) / (k * k) as f64;
-                let expected =
-                    (pickup.flux_gain_v_s_per_m() * analytic_gain(k) * core::f64::consts::TAU
-                        * f0
-                        * k as f64
-                        * q0)
-                        .abs();
+                let expected = (pickup.flux_gain_v_s_per_m()
+                    * analytic_gain(k)
+                    * core::f64::consts::TAU
+                    * f0
+                    * k as f64
+                    * q0)
+                    .abs();
                 let measured = lines[k - 1] / (0.5 * RATE * 0.5); // projection norm
                 if expected > 1.0e-8 {
                     let rel = (measured - expected).abs() / expected;
@@ -452,7 +450,9 @@ mod pickup_tests {
                 .map(|(g, vv)| g * vv)
                 .sum::<f64>();
         assert!((e1 - manual).abs() < 1e-18);
-        println!("{{\"suite\":\"fs-couple\",\"case\":\"pk-003-point-limit\",\"verdict\":\"pass\"}}");
+        println!(
+            "{{\"suite\":\"fs-couple\",\"case\":\"pk-003-point-limit\",\"verdict\":\"pass\"}}"
+        );
     }
 
     #[test]

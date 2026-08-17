@@ -1235,6 +1235,43 @@
       "budget_row": null,
       "corpus_refs": [],
       "notes": "The VFIT rational-hold image for a HELD vowel only \u2014 STRUCTURALLY FAILS on articulation (a rational fit cannot morph; the row says so, per the .8.3 scope). NAMED MISSING: no executed tract 1-port fit exists yet (the wind-hop precedent supplies the machinery); until one is fit and certified this row stays evidence-free and ungated \u2014 registered so the menu shows the hole instead of hiding it."
+    },
+    {
+      "filling": "electric-string",
+      "image": "faraday-pickup-port",
+      "qoi": "station-voicing-comb",
+      "owner_crates": [
+        "fs-couple",
+        "fs-phs"
+      ],
+      "exactness": [
+        "X-Consist",
+        "X-Est"
+      ],
+      "gate": "ungated",
+      "live_default": "no",
+      "determinism": "one-host",
+      "evidence": [
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/src/pickup.rs::pk_001_station_voicing_matches_the_window_weighted_prediction"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/src/pickup.rs::pk_002_two_pickups_comb_when_mixed"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/src/pickup.rs::pk_003_point_limit_and_no_state_duplication"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/src/pickup.rs::pk_005_emf_drives_the_dae_circuit_end_to_end"
+        }
+      ],
+      "budget_row": null,
+      "corpus_refs": [],
+      "notes": "The Faraday pickup as a PURE-READER PORT (D20 as structure: pose + per-mode window gains only; emf() reads the string owner's modal velocities \u2014 no step, no state, no re-discretization). Window-weighted flux map (raised-cosine aperture, unit-normalized so the point-pickup limit is EXACT \u2014 gated at 5e-4); bridge/neck voicing emerges (centroid 452 vs 328 Hz) with every per-mode EMF line matching the INDEPENDENT Simpson-integrated analytic gain within 5%; two mixed pickups comb per the gain-sum prediction with an executed notch. EMF drives the .9.1 circuit DAE end-to-end (RC load rolloff matches first-order analytic at 0.25x/4x cutoff; supply defect 1e-21). AUTHORED Estimate v1: linearized flux, dipole-like height profile; the MAGNETOSTATIC BAKE is the recorded follow-up. EN ROUTE: the .9.1 commit had shipped fs_phs::circuit behind a stolen cfg(test) (invisible to consumers) \u2014 fixed here."
     }
   ]
 }
