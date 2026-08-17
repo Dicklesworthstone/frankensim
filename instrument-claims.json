@@ -1006,6 +1006,46 @@
       "budget_row": null,
       "corpus_refs": [],
       "notes": "The [F] alternative earned by bake-off (3ez8g.7.2): stiffness as DISPERSION ON THE LINE \u2014 a first-order allpass cascade in fs_vfit::DelayedFilter (|H|=1 structurally passive; |a|>=1 and zero sections refuse). On the shared music-wire card (E=200GPa d=1mm L=0.65m T=700N) the executed receipt measured B_hat/B=1.014 with worst partial 9.8 cents (the linear-fractional-interpolation phase is the named residual owner) while the DISPERSIONLESS control missed the law by 41 cents \u2014 the stage carries the physics. Budget honesty: modal holds FEWER states on this card (108 vs 173); the differing shape is OPS (~10x fewer flops/sample) and flat scaling in partial count. NEVER the certified-partial image: modal-zoh keeps every certified claim (D21 asserted in the gate test against the live registry)."
+    },
+    {
+      "filling": "bar",
+      "image": "modal-zoh",
+      "qoi": "freefree-ratio-gate",
+      "owner_crates": [
+        "fs-couple"
+      ],
+      "exactness": [
+        "X-Exact",
+        "X-Est"
+      ],
+      "gate": "green",
+      "live_default": "no",
+      "determinism": "one-host",
+      "evidence": [
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/tests/xylophone_bar.rs::xb_001_roots_self_verify_and_match_the_tabulated_values"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/tests/xylophone_bar.rs::xb_002_ratio_gate_holds_and_the_pinned_falsifier_fails_it"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/tests/xylophone_bar.rs::xb_003_striking_a_node_suppresses_the_partial"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/tests/xylophone_bar.rs::xb_004_committed_receipt_matches_the_committed_artifact"
+        },
+        {
+          "kind": "listening",
+          "ref": "data/listening/xylophone-strike.listening-receipt (artifact fc174bd883cca151; UNADJUDICATED - supports_pass()==false until the owner's ear rules)"
+        }
+      ],
+      "budget_row": null,
+      "corpus_refs": [],
+      "notes": "The cheapest FULL filling: free-free Euler-Bernoulli bar (Indian-rosewood pack E_L=13.53 GPa; density = SG*1000 authored Estimate, disclosed) + exact-ZOH runtime + Hertz mallet island. GREEN FOR THE UNIFORM PRISMATIC BAR EXACTLY AND ONLY THAT: beta*L roots computed in-fixture by deterministic Newton (self-verified at machine zero, cross-checked vs the classical table at 1e-8), rendered ratio gate f2/f1=2.7565 f3/f1=5.4039 within 1%, and the BOUNDARY-CONDITION FALSIFIER executed (the pinned n^2 family measures f2/f1=4.000 and fails the same gate \u2014 the bead's recorded polish catch made executable). Node physics emergent: mode-1 node found in-fixture at 0.2242 (the cord-mount point); striking it suppresses the fundamental ~8 orders; center strike kills partial 2. NAMED SUCCESSOR: real bars are ARCHED to tune f2/f1 toward 3-4 \u2014 needs a varying-section solver; not claimed. Listening artifact minted, unadjudicated."
     }
   ]
 }

@@ -702,6 +702,21 @@ None.
   DISPERSIONLESS control on the same loop misses the law by 41 cents:
   the allpass stage, not the loop, carries the stiffness.
 
+- Xylophone bar (bead 3ez8g.12.1): the cheapest FULL filling — a pure
+  composition of live parts (analytic free-free bar modes + exact-ZOH
+  runtime + a Hertz mallet island; no new physics, only binding and
+  gates). THE BOUNDARY CONDITION IS LOAD-BEARING: the free-free
+  `beta L` values are the `cosh cos = 1` roots computed in-fixture by
+  deterministic Newton (self-verified at machine zero, never
+  transcription-trust), giving the non-harmonic ladder
+  f2/f1 = 2.7565, f3/f1 = 5.4039; the executed falsifier proves the
+  gate discriminates (the PINNED n^2 family measures f2/f1 = 4.000 and
+  fails). Material: the Indian-rosewood matdb pack (E_L = 13.53 GPa;
+  density = SG*1000 as an authored Estimate, disclosed). The named
+  successor is the ARCHED bar (ratio tuning toward 3-4, a
+  varying-section solver) — v1 claims the uniform prismatic bar
+  exactly and only that.
+
 ## Conformance tests
 
 `src/broadband_radiation.rs`: G0 complex/real-SH round trip/reconstruction against
@@ -827,6 +842,15 @@ passivity/control gate (loop bounded and decaying under g < 1 with the
 unit-magnitude stage; constructor refusals; the dispersionless
 control's partial 8 sits within 20% of harmonic while the law demands
 +18 cents).
+
+`tests/xylophone_bar.rs`, cases xb-001..xb-004 — root self-verification
+(residual at machine zero, classical table at 1e-8, asymptote check) +
+named refusals; the rendered ratio gate within 1% with the executed
+pinned-family falsifier; strike-position physics emergent (mode-1 node
+found in-fixture at 0.2242 = the cord-mount point; striking it kills
+the fundamental ~8 orders, the center strike kills partial 2, and the
+non-noded partials keep speaking); and the listening chain gate
+(WAV -> sidecar -> receipt, Unadjudicated).
 
 ## No-claim boundaries
 
