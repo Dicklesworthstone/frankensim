@@ -1,0 +1,56 @@
+{
+  "schema": "org.frankensim.wright-flyer.geometry-conventions.v1",
+  "status": "frozen-conventions",
+  "bead": "frankensim-wf-root-guzez.2.9",
+  "spec": "COMPREHENSIVE_PLAN_FOR_REAL_TIME_WRIGHT_FLYER_SIM_WITH_FRANKENSIM.md (ROUND 6 steady state), E1.9 / plan Round-3+4 convention decisions",
+  "no_claims": [
+    "this dossier freezes CONVENTIONS (definitions, symbols, denominators, boundaries); the NUMERICAL values quoted as examples remain [V]/[V?] pending E1.2 source verification and must not be pinned into goldens from here",
+    "code-side identity registration of this schema constant lands with its first consumer (fs-flyer, E3.1), per register-at-introduction law"
+  ],
+  "aspect_ratio": {
+    "rule": "bare 'AR' is BANNED in UI, dossiers, validation receipts, and code identifiers; every use names its denominator",
+    "AR_plane": {
+      "definition": "b^2 / S_one_plane — span squared over ONE wing plane's area",
+      "symbol": "AR_plane",
+      "example_value_pending_E1_2": 6.4
+    },
+    "AR_system": {
+      "definition": "b^2 / S_both_planes — span squared over the TOTAL biplane lifting area",
+      "symbol": "AR_system",
+      "example_value_pending_E1_2": 3.2
+    }
+  },
+  "span_symbols": {
+    "b": "FULL wingspan [m]; never the semispan (many aerodynamics texts use b for semispan — this project does not)",
+    "s": "semispan = b/2 [m]; the only admitted semispan symbol",
+    "example_b_m_pending_E1_2": 12.29
+  },
+  "ground_effect_reference": {
+    "h": "height of the LOWER main-wing quarter-chord reference plane above the aerodynamic ground plane [m]",
+    "b": "FULL wingspan (per span_symbols)",
+    "h_over_b": "the primary ground-effect similarity variable; UI additionally displays h/c and lower-surface clearance",
+    "aerodynamic_ground_plane": "the FlatnessCertificate's fitted plane, NOT raw terrain height under the CG"
+  },
+  "control_surface_areas": {
+    "convention": "PROJECTED planform area onto the surface's reference plane (not developed/fabric area, not including framing gaps)",
+    "canard": "sum of BOTH elevator planes' projected areas; per-plane values always available alongside the sum",
+    "rudder": "sum of both movable vertical-surface projected areas; the 20-vs-21 ft^2 source discrepancy is a VALUE question for E1.2 under this convention, not a convention question",
+    "reference_area_for_coefficients": "S_both_planes (total biplane lifting area) for aircraft-level coefficients; per-surface coefficients use that surface's own projected area, always labeled"
+  },
+  "mass_boundaries": {
+    "rule": "no single ambiguous 'engine weight' may enter the mass build-up; every mass names its boundary",
+    "engine_dry_kg": "block, pistons, crank, valvetrain, intake — no fluids, no accessories",
+    "engine_installed_kg": "engine_dry + mounts + fuel plumbing at the engine",
+    "cooling_system_kg": "radiators + water + piping",
+    "ignition_kg": "magneto/ignition components + wiring",
+    "drivetrain_kg": "chains, sprockets, guides, propeller shafts and their bearings",
+    "propellers_kg": "both airscrews",
+    "propulsion_total_kg": "sum of the above six buckets; the ONLY admitted aggregate",
+    "note": "the NPS 170 lb vs ~180 lb literature spread is expected to resolve as different boundary choices; E1.2 assigns sourced values per bucket"
+  },
+  "provenance": {
+    "frozen_on": "2026-08-17",
+    "derivation": "plan Round-3 finding #4 (AR conventions), Round-3 historical flags (rudder area, engine mass), Round-2 Q20 (h/b), integrated through the six-round review",
+    "consumers": "fs-flyer derived-quantity panel (E3.1), FlatnessCertificate (E4.4a), V-06 ground-effect cases, evidence-UX displays (E8.3a), flyer-reference.json (E1.2)"
+  }
+}
