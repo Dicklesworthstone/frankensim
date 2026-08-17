@@ -1,0 +1,97 @@
+{
+ "schema": "org.frankensim.wright-flyer.replay-identity-schema.v1",
+ "bead": "frankensim-wf-root-guzez.1.9.1",
+ "status": "FROZEN",
+ "source": "COMPREHENSIVE_PLAN_FOR_REAL_TIME_WRIGHT_FLYER_SIM_WITH_FRANKENSIM.md §4.4/§4.5 (ROUND 6 steady state; preimage closure externally audited Rounds 5-6)",
+ "freeze_semantics": "Fields listed here are the v1 contract. Any change mints a v2 schema id beside this one; v1 is never edited in place. Rust types + identity-authorities.json registration land with the first executing consumer (E3.2/E5.1) and must transcribe THIS artifact.",
+ "hash_function": "fs-blake3, domain-separated, canonical serialization",
+ "domain_separators": {
+  "RunIntentId": "fs-flyer/run-intent/v1",
+  "RunId": "fs-flyer/run/v1",
+  "FieldSourceSnapshotId": "fs-flyer/field-source-snapshot/v1",
+  "FieldQueryId": "fs-flyer/field-query/v1",
+  "PresentationId": "fs-flyer/presentation/v1",
+  "CheckpointId": "fs-flyer/checkpoint/v1"
+ },
+ "run_identity_basis_v1": {
+  "fields": [
+   "physical_scenario_id",
+   "model_id",
+   "artifact_id",
+   "physical_uncertainty_realization_id",
+   "model_uncertainty_realization_id",
+   "accepted_tick0_state_digest",
+   "input_trace_schema_id"
+  ],
+  "note": "Minted only AFTER prelaunch closes and the mode-complete tick-0 state is frozen (accepted_tick0_state_digest exists then)."
+ },
+ "formulas": {
+  "RunIntentId": "H('fs-flyer/run-intent/v1', canonical(RunIdentityBasisV1))",
+  "RunId": "H('fs-flyer/run/v1', RunIntentId, InputTraceId) — the closed two-input definition; NEVER 'hash of the quintuple' (self-referential)",
+  "RunAnchor": "Intent(RunIntentId) | Final(RunId) — active subordinate objects bind the anchor; final persisted objects mint new final ids; no provisional identifier is ever relabeled",
+  "RunSpecId": "H('fs-flyer/run-spec/v1', pre-execution projection of RunIdentityBasisV1 fields existing at minting time + InputPolicyId) — cache key only, excludes accepted_tick0_state_digest",
+  "InputTraceId": "hash of InputTraceV1 { input_trace_schema_id, end_tick_exclusive, ordered ResolvedAppliedEvent(channel, applied_tick, ordinal_within_tick, quantized_value) } — trace EXTENT is part of the domain; acquisition-clock metadata lives ONLY in the replay attachment",
+  "FieldSourceSnapshotId": "H('fs-flyer/field-source-snapshot/v1', RunAnchor, source_tick, source_state_digest, snapshot_schema_id)",
+  "FieldQueryId": "H('fs-flyer/field-query/v1', FieldSourceSnapshotId, components, grid, induction_approximation, field_backend_id, precision, derivative_and_masking_profile)",
+  "PresentationId": "H('fs-flyer/presentation/v1', presentation_schema_id, canonical(asset manifest, camera configuration, render configuration, audio configuration))",
+  "CheckpointId": "H('fs-flyer/checkpoint/v1', RunAnchor, tick, checkpoint_schema_id, canonical(CheckpointStateV1))",
+  "PhysicalUncertaintyRealizationId": "pure function of (physical distribution, realization seed, PhysicalRealizationAlgorithmId) — NOT ArtifactId, so binary rebuilds preserve CRN wind realizations",
+  "ModelUncertaintyRealizationId": "pure function of (model-uncertainty spec, realization seed, ModelRealizationAlgorithmId) — the single authoritative preimage"
+ },
+ "leaf_identity_closures": {
+  "PhysicalRealizationAlgorithmId": "content hash of the canonical physical-realization algorithm manifest: algorithm name+version, StationaryOuPathV1 anchor constant, modal-basis construction id, stream partition map, quantization rules",
+  "ModelRealizationAlgorithmId": "same shape for the model-uncertainty realization algorithm (residual-coefficient draw method, hinge-friction draw method, ...)",
+  "InputPolicyId": "content hash of { input_trace_schema_id, InputTransducerMode + parameters, device-mapping table id, quantization rules, LateInputPolicy }",
+  "PilotPopulationHypothesisId": "content hash of the pilot-population distribution artifact + pilot/day/flight dependency-structure declaration (PhysicalScenarioId ingredient)",
+  "PerceptionModelId": "content hash of { cue-set declaration, per-cue delay/noise/filter parameters, occlusion-geometry abstraction id, PerceptionSchedule, causal-order convention } (ModelId ingredient)",
+  "FieldBackendId": "content hash of { backend kind (cpu-wasm | webgpu-v1.5), kernel version, precision profile, masking profile } (FieldQueryId ingredient)",
+  "BladeCollisionProxyArtifactId": "content hash of { source blade-geometry artifact (E1.6), construction algorithm version, capsule count/rails/radii, cover-error certificate }",
+  "EvidenceLineageId": "content hash of { source_artifact_ids[], derivation_steps[], independence_group, permitted_claims[], forbidden_claims[], calibration_or_holdout, convention_uncertainty }"
+ },
+ "uncertainty_separation": "Physical uncertainty (wind, temperature, pilot mass, sourced geometry variation) and model uncertainty (section residuals, hinge friction, wake closure) are SEPARATE identity-bound realizations; both enter RunId via the basis, but only physical uncertainty belongs to the reconstructed scenario distribution — model deficiency can never masquerade as weather. Pilot allocation: population hypothesis → PhysicalScenarioId; member draw incl. remnant realization → PhysicalUncertaintyRealizationId; perception/controller algorithms → ModelId; residual deficiency draws → ModelUncertaintyRealizationId. A single undifferentiated pilot_effect field is FORBIDDEN.",
+ "replay_envelope_v1_fields": [
+  "run_identity_basis_v1 (expanded)",
+  "run_intent_id",
+  "input_trace_v1 + input_trace_id (canonical applied events only)",
+  "run_id",
+  "physical_realization_algorithm_manifest",
+  "model_realization_algorithm_manifest",
+  "artifact_manifest (binary hash, data/terrain/table/prop-geometry/correction hashes, dossier version)",
+  "conventions_block (axes, handedness, moment signs, reference areas, span/semispan definitions, units schema, floating-point + deterministic-math profiles)",
+  "integer_ratio_schedules (all)",
+  "checkpoint_state_v1_at_tick0 (complete)",
+  "input_acquisition_trace ATTACHMENT (device_sample_time, requested_tick, applied_tick, late_by_ticks, sequence_number, input_transducer_mode)",
+  "event_refusal_log (liftoff, saturations, separation transitions, wake-mode events, contact, touchdown, QoS attachments)",
+  "optional_full_checkpoints (mandatory digests)",
+  "evidence_receipts",
+  "migration_history",
+  "optional_signature"
+ ],
+ "checkpoint_state_v1_fields": [
+  "rigid_body", "rail_contact", "canard_mechanical", "warp_rudder_mechanical",
+  "aero_memory", "separation_state", "bound_circulation", "physical_wake_and_core_state",
+  "rotor_engine_drivetrain", "pilot_perception_controller", "atmosphere_modal_ou_state",
+  "rng_stream_counter_manifest", "work_ledgers", "subsystem_digests",
+  "algorithmic_history:nonlinear_continuation_branch_and_last_accepted_iterate",
+  "algorithmic_history:reduced_wake_scheduling_state",
+  "algorithmic_history:prop_coupling_predictor_and_relaxation_history",
+  "algorithmic_history:wake_feedback_predictor",
+  "algorithmic_history:pruning_audit_schedule_status",
+  "algorithmic_history:tangent_plane_filter_and_hysteresis_state",
+  "algorithmic_history:integer_ratio_schedule_phases",
+  "algorithmic_history:admission_certificate_states"
+ ],
+ "checkpoint_cache_exclusion_rule": "A cache may be excluded only after a checkpoint/resume hostile twin proves its deterministic rebuild reproduces every subsequent subsystem digest.",
+ "replay_attachment_rule": "Presentation quality, QoS transitions, device metadata, and field queries are replay ATTACHMENTS, excluded from RunId unless they altered the applied input trace.",
+ "migration_semantics": "Migrations parse old envelopes, mint new identities, preserve originals, and state which semantics changed — never silently reinterpret an old replay under new physics.",
+ "archive_contract": {
+  "ratified_vendors": "Cloudflare R2 Standard content-addressed serving primary (native prefix-scoped bucket locks after promotion — R2's S3 API does NOT implement AWS object-lock headers) + AWS S3 Standard with versioning + Object Lock compliance mode in a SEPARATELY ADMINISTERED account as WORM mirror",
+  "git_carries": "signed trust roots, manifests, indexes, small schema fixtures only (no LFS production binaries)",
+  "publication": "VERIFIER-MEDIATED dual publication: independent uploads, read-back size+BLAKE3 verification, retention controls, then TUF targets publication — never provider-native replication; source deletions never propagate",
+  "encryption": "SSE-S3 on the mirror unless independently escrowed KMS retention exists (a deleted KMS key makes locked objects unreadable)",
+  "signing": "TUF-style roles: offline threshold root, delegated targets, short-lived timestamp, snapshot metadata, rollback/freeze protection — BLAKE3 is content identity, not publisher authenticity",
+  "vendor_swap": "only via a written equivalence receipt (failure/admin domains, immutable retention, conditional create, multipart integrity, audit export, retrieval, regions, budget); S3 API compatibility alone is not equivalence",
+  "cost_basis": "~1 TiB dual-stored ≈ $39/month (planning estimate, re-verify at provisioning — E0.9b)"
+ },
+ "no_claims": "This artifact freezes CONTRACTS. It does not claim any executing implementation, registered identity authority, or provisioned archive; those are E0.9b/E0.9c and the E3.2/E5.1 consumers."
+}
