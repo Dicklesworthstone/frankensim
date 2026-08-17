@@ -48,6 +48,7 @@ mod convex;
 mod crook;
 mod deform;
 mod features;
+mod felt;
 mod gap;
 mod inflation;
 mod moments;
@@ -63,6 +64,10 @@ pub use crook::{
     extract_crook_delta,
 };
 pub use deform::{DeformationMap, DeformedChart};
+pub use felt::{
+    FeltCoordinateUnits, FeltError, FeltFieldReceipt, FeltStation, FeltThicknessChart,
+    FeltThicknessField,
+};
 
 pub use features::{
     Feature, FeatureComplex, MAX_COMPLEX_FEATURES, ccd_candidates, ccd_candidates_with_inflation,

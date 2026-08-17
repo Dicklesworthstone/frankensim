@@ -340,6 +340,26 @@ None. `#![forbid(unsafe_code)]` via workspace lints; no capsules.
 
 None.
 
+- `felt` module (music bead 3ez8g.3.4): felt thickness-field chart
+  ingestion — the missing field -> chart + receipt side of the piano
+  hammer's contact geometry (the sampler side already existed in
+  fs-contact). A validated station profile (crowned t(theta) or a
+  manufacturer strip t(s)) with an EXPLICIT units declaration
+  (undocumented units refuse, never guess), an ingest receipt (FNV-1a
+  digest over exact bits, thickness statistics min/max/crown, largest
+  uncertainty half-width, authority = Estimate ALWAYS), and
+  `FeltThicknessChart`: the hammer solid (core cylinder + felt +
+  width-rounding sag, slab-bounded) as a `Chart` with sign-exact
+  nominal, `Estimate` certificates whose band is the station
+  half-width, and `TraceStepClaim::NoClaim` — the AxisymmetricChart
+  authority precedent, so gap sampling runs under AllowEstimate and
+  the receipt authority is never promoted. LINEAGE (corpus law): the
+  committed manufacturer fixture
+  `data/felt/steinway-us5125310-strip-taper.tsv` is TRANSCRIBED (not
+  digitized) from the public text of US patent US5125310 (Steinway,
+  1992) and records exactly the stated endpoint values; the linear
+  interpolation between stations is the module's declared rule.
+
 ## Conformance tests
 
 `tests/conformance.rs`, cases gq-001..gq-007 (+ typed trace refusal checks)
@@ -448,6 +468,19 @@ impedance peak -936.1 cents vs the -931.6 quarter-wave-plus-end-
 correction prediction (4.5 cents inside the authored 12-cent band) —
 the emergent-pitch precondition, executed.
 
+`src/felt.rs` in-module battery, cases gf-001..gf-004 — refusals by
+name (non-positive/non-finite thickness, unsorted stations, missing
+lineage, units mismatch, bad chart geometry), deterministic digest +
+stats (a one-bit thickness change moves the digest), chart signs with
+the shoulder clamp and Estimate certificates containing the nominal,
+and the committed Steinway strip ingesting with the patent's exact
+stated values (1 in -> 1/8 in outer, 1/4 in -> 3/32 in under). The
+COMPOSED check lives at L3 (fs-couple felt_hammer_island): ingested
+field -> AllowEstimate gap sampling -> convergence-checked response
+curve -> FiniteGapPoint, with the constant-thickness control matching
+the exact cylinder+width-sag closed form at 1e-8 and grid refinement
+at rel 0.016 (band 0.05).
+
 ## No-claim boundaries
 
 - General Minkowski sums (non-ball structuring elements, max-plus /
@@ -546,3 +579,11 @@ the emergent-pitch precondition, executed.
   Estimate authority and tube-only topology. Continuous-slide
   sub-sample delay interpolation is the wind epic's fractional-delay
   bead (a dependency of claim, not of code).
+- The felt chart is contact GEOMETRY ingest only: the felt
+  CONSTITUTIVE card is bead 87zbd's (the licensed-coupon absence row
+  records that hunt); felt-as-absorber (JCA) is a different bead and
+  claim; a 3-D felt continuum would be an offline authority lab. The
+  width-rounding sag is an authored geometric model (real hammers are
+  crowned across the width); the strip fixture's linear interpolation
+  between the patent's stated endpoints is the ingest rule, not a
+  patent statement.

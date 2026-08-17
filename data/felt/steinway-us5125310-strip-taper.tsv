@@ -1,0 +1,24 @@
+# frankensim-felt-field-v1
+# Manufacturer felt-strip cross-section taper, TRANSCRIBED (not digitized)
+# from the text of US patent US5125310 ("Piano forte hammer and method of
+# making same", James M. Lombino, Steinway Inc., granted 1992). US patent
+# text is a public record; retention of these stated values is lawful.
+# Stated: outer felt strip height Ho tapers from 1 inch (bass end) to
+# 1/8 inch (treble end) over a strip of about 44 inches; under felt
+# height Hu tapers from 1/4 inch to 3/32 inch. Coordinates are meters
+# along the strip from the bass end (44 in = 1.1176 m, "about" per the
+# patent); thickness in meters (exact inch->m conversion of the stated
+# fractions). half_width_m = 0: these are the patent's exact stated
+# fractions, not measurements with digitization error. The linear
+# interpolation between endpoints is the ingest module's declared rule
+# (fs_query::felt), NOT a statement of the patent. The strip WIDTH taper
+# (4.5->3.5 in outer; 1.5->1 in under) is recorded here as provenance
+# but is not a thickness field: width_outer_bass_m=0.1143,
+# width_outer_treble_m=0.0889, width_under_bass_m=0.0381,
+# width_under_treble_m=0.0254, strip_length_note="about 44 inches".
+# gated by fs-query gf-004 (crates/fs-query/src/felt.rs).
+series	coordinate_m	thickness_m	half_width_m
+outer	0.0	0.0254	0.0
+outer	1.1176	0.003175	0.0
+under	0.0	0.00635	0.0
+under	1.1176	0.00238125	0.0

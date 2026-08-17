@@ -569,3 +569,246 @@ fn the_phs_string_island_ledger_closes_with_sampled_geometry() {
          \"felt_loss_j\":{felt_loss:.4e}}}"
     );
 }
+
+/// Composed check for the INGESTED felt geometry (music bead
+/// `frankensim-music-v8-root-3ez8g.3.4`): a `fs_query::felt` thickness
+/// field drives the whole certified chain — chart -> `AllowEstimate`
+/// gap sampling -> convergence-checked dense response curve ->
+/// `FiniteGapPoint` — with the authority held at Estimate end to end
+/// and the constant-thickness control matching the closed-form
+/// cylinder sagitta.
+#[test]
+fn the_ingested_field_drives_the_certified_response_chain() {
+    use fs_contact::normal_patch::{
+        FiniteGapChartEvidenceRequirement, FiniteGapChartSamplingAuthority,
+        FiniteGapChartSamplingRequest, FiniteGapContactFrame, FiniteGapGrid,
+        FiniteGapResponseCurveRequest, NormalPatchLaw, build_finite_gap_response_curve,
+        sample_finite_gap_from_chart,
+    };
+    use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
+    use fs_geom::{Point3, Vec3};
+    use fs_query::{FeltCoordinateUnits, FeltStation, FeltThicknessChart, FeltThicknessField};
+
+    const CORE_R: f64 = 8.0e-3;
+    const T_APEX: f64 = 9.0e-3;
+    let field = |crown_c: f64, tag: &str| -> FeltThicknessField {
+        let stations: Vec<FeltStation> = (0..41)
+            .map(|i| {
+                let theta = -1.0 + 0.05 * f64::from(i);
+                FeltStation {
+                    coordinate: theta,
+                    thickness_m: T_APEX - crown_c * theta * theta,
+                    half_width_m: 0.0,
+                }
+            })
+            .collect();
+        FeltThicknessField::try_new(
+            stations,
+            FeltCoordinateUnits::RadiansAroundCore,
+            tag,
+            "authored fixture (this test)",
+            "authored analytic profile; Estimate by authorship",
+        )
+        .expect("field admits")
+    };
+    let grid = FiniteGapGrid {
+        cells_x: 7,
+        cells_y: 7,
+        cell_width_m: 6.0e-4,
+        cell_depth_m: 6.0e-4,
+    };
+    let sample = |chart: &FeltThicknessChart, grid: FiniteGapGrid, id: &str| {
+        let request = FiniteGapChartSamplingRequest {
+            chart,
+            source_geometry_id: id,
+            grid,
+            frame: FiniteGapContactFrame {
+                surface_point_m: Point3::new(0.0, 0.0, 0.0),
+                outward_normal: Vec3::new(0.0, 0.0, -1.0),
+                tangent_x: Vec3::new(1.0, 0.0, 0.0),
+                tangent_y: Vec3::new(0.0, 1.0, 0.0),
+            },
+            evidence_requirement: FiniteGapChartEvidenceRequirement::AllowEstimate,
+            outside_probe_m: 1.0e-3,
+            maximum_inward_search_m: 8.0e-3,
+            root_tolerance_m: 1.0e-9,
+            maximum_bisection_steps: 64,
+        };
+        let gate = CancelGate::new_clock_free();
+        let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+        pool.scope(|arena| {
+            let cx = Cx::new(
+                &gate,
+                arena,
+                StreamKey {
+                    seed: 7,
+                    kernel_id: 13,
+                    tile: 0,
+                    iteration: 0,
+                },
+                Budget::INFINITE,
+                ExecMode::Deterministic,
+            );
+            sample_finite_gap_from_chart(&request, &cx).expect("ingested chart samples")
+        })
+    };
+
+    // CONTROL: constant thickness -> the outer surface is a cylinder of
+    // radius R0 = core + t and the gap field must match the closed-form
+    // sagitta R0 - sqrt(R0^2 - x^2), y-invariant (an oracle wholly
+    // independent of the chart code).
+    const WIDTH_R: f64 = 9.0e-3;
+    let cylinder = FeltThicknessChart::try_new(
+        field(0.0, "music/felt-crown/constant-control/v1"),
+        CORE_R,
+        6.0e-3,
+        WIDTH_R,
+    )
+    .expect("control chart");
+    let control = sample(&cylinder, grid, "music/felt-ingest/control/v1");
+    assert_eq!(control.authority, FiniteGapChartSamplingAuthority::Estimate);
+    let r0 = CORE_R + T_APEX;
+    for iy in 0..7usize {
+        for ix in 0..7usize {
+            let x = (ix as f64 + 0.5 - 3.5) * 6.0e-4;
+            let y = (iy as f64 + 0.5 - 3.5) * 6.0e-4;
+            // Exact closed form: the width sag shrinks the RADIUS, so
+            // the surface along the vertical ray sits at
+            // R0 - sqrt((R0 - sag)^2 - x^2).
+            let shrunk = r0 - y * y / (2.0 * WIDTH_R);
+            let expected = r0 - (shrunk * shrunk - x * x).sqrt();
+            let got = control.undeformed_gap_m[iy * 7 + ix];
+            assert!(
+                (got - expected).abs() < 1.0e-8,
+                "cylinder sagitta at cell ({ix},{iy}): got {got:.3e} expected {expected:.3e}"
+            );
+        }
+    }
+
+    // CROWNED: the same core with a real crown curves TIGHTER, so every
+    // off-apex column shows a LARGER gap than the constant control.
+    let crowned = FeltThicknessChart::try_new(
+        field(4.0e-3, "music/felt-crown/authored-parabolic/v1"),
+        CORE_R,
+        6.0e-3,
+        WIDTH_R,
+    )
+    .expect("crowned chart");
+    let receipt = crowned.field_receipt();
+    let sampling = sample(&crowned, grid, "music/felt-ingest/crowned/v1");
+    assert_eq!(
+        sampling.authority,
+        FiniteGapChartSamplingAuthority::Estimate
+    );
+    let apex = sampling.undeformed_gap_m[3 * 7 + 3];
+    assert!(apex.abs() < 1.0e-6, "the apex touches the tangent plane");
+    let edge_crowned = sampling.undeformed_gap_m[3 * 7];
+    let edge_control = control.undeformed_gap_m[3 * 7];
+    assert!(
+        edge_crowned > edge_control,
+        "crowning must open the off-apex gap ({edge_crowned:.3e} vs {edge_control:.3e})"
+    );
+
+    // THE CHAIN: receipt -> convergence-checked response curve ->
+    // FiniteGapPoint, authority never promoted.
+    let build = |sampling: &fs_contact::normal_patch::FiniteGapChartSamplingReceipt,
+                 grid: FiniteGapGrid| {
+        let request = FiniteGapResponseCurveRequest {
+            gap_source_identity: sampling.identity,
+            gap_source_authority: sampling.authority,
+            grid,
+            undeformed_gap_m: sampling.undeformed_gap_m.clone(),
+            reduced_modulus_pa: 5.0e8,
+            // Dense near zero: the F ~ delta^(3/2) ramp makes the first
+            // trapezoid the worst integral segment, and the curve's own
+            // energy gate refuses a too-coarse ladder (it did).
+            approach_nodes_m: vec![
+                0.0, 2.0e-6, 5.0e-6, 1.0e-5, 1.5e-5, 2.2e-5, 3.0e-5, 4.0e-5, 5.0e-5, 6.0e-5,
+            ],
+            maximum_active_set_iterations: 200,
+            complementarity_tolerance_m: 1.0e-12,
+            boundary_clearance_cells: 1,
+            absolute_energy_tolerance_j: 1.0e-12,
+            relative_energy_tolerance: 0.20,
+        };
+        let gate = CancelGate::new_clock_free();
+        let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+        pool.scope(|arena| {
+            let cx = Cx::new(
+                &gate,
+                arena,
+                StreamKey {
+                    seed: 7,
+                    kernel_id: 17,
+                    tile: 0,
+                    iteration: 0,
+                },
+                Budget::INFINITE,
+                ExecMode::Deterministic,
+            );
+            build_finite_gap_response_curve(&request, &cx).expect("response curve certifies")
+        })
+    };
+    let curve = build(&sampling, grid);
+    assert_eq!(
+        curve.gap_source_authority,
+        FiniteGapChartSamplingAuthority::Estimate
+    );
+    assert_eq!(curve.gap_source_identity, sampling.identity);
+    let response = curve.evaluate(4.0e-5).expect("interpolates");
+    assert!(response.normal_force_n > 0.0 && response.normal_force_n.is_finite());
+    let mut semiaxes = response.equivalent_pressure_semiaxes_m;
+    if semiaxes[1] > semiaxes[0] {
+        semiaxes.swap(0, 1);
+    }
+    let law = NormalPatchLaw::FiniteGapPoint {
+        response_identity: curve.identity,
+        reference_radius_m: 1.16e-2,
+        elastic_force_n: response.normal_force_n,
+        elastic_tangent_n_per_m: response.normal_tangent_n_per_m,
+        reversible_energy_j: response.reversible_energy_j,
+        peak_pressure_pa: response.peak_pressure_pa,
+        equivalent_pressure_semiaxes_m: semiaxes,
+        dissipation_s_per_m: 0.0,
+    };
+    // The binding: every value in the law came from ONE evaluate call
+    // on the identity-carrying curve.
+    match law {
+        NormalPatchLaw::FiniteGapPoint {
+            response_identity,
+            elastic_force_n,
+            ..
+        } => {
+            assert_eq!(response_identity, curve.identity);
+            assert!((elastic_force_n - response.normal_force_n).abs() == 0.0);
+        }
+        _ => unreachable!(),
+    }
+
+    // REFINEMENT: a finer grid over the same ingested field agrees on
+    // the force within the family's own convergence class.
+    let fine_grid = FiniteGapGrid {
+        cells_x: 11,
+        cells_y: 11,
+        cell_width_m: 3.8e-4,
+        cell_depth_m: 3.8e-4,
+    };
+    let fine_sampling = sample(&crowned, fine_grid, "music/felt-ingest/crowned-fine/v1");
+    let fine_curve = build(&fine_sampling, fine_grid);
+    let fine = fine_curve.evaluate(4.0e-5).expect("fine interpolates");
+    let rel = ((fine.normal_force_n - response.normal_force_n) / fine.normal_force_n).abs();
+    // Measured 2026-08-17: rel = 0.016 (16.56 N vs 16.30 N); band =
+    // 3x headroom.
+    assert!(
+        rel < 0.05,
+        "grid refinement must converge (coarse {:.4} N vs fine {:.4} N, rel {rel:.3})",
+        response.normal_force_n,
+        fine.normal_force_n
+    );
+    println!(
+        "{{\"suite\":\"fs-couple\",\"case\":\"felt-ingest-chain\",\"verdict\":\"pass\",\
+         \"field_digest\":\"{:#018x}\",\"force_n\":{:.4},\"fine_force_n\":{:.4},\
+         \"refinement_rel\":{rel:.4},\"authority\":\"Estimate\"}}",
+        receipt.digest, response.normal_force_n, fine.normal_force_n
+    );
+}

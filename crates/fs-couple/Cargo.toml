@@ -39,6 +39,7 @@ fs-bem = { path = "../fs-bem" }
 fs-material = { path = "../fs-material" }
 fs-modal = { path = "../fs-modal" }
 fs-plate = { path = "../fs-plate" }
+fs-query = { path = "../fs-query" }
 
 [lints]
 workspace = true
