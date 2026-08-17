@@ -42,6 +42,7 @@ pub mod driving_point;
 pub mod mm_line;
 pub mod modal_acoustic_time;
 pub mod pcm_wav;
+pub mod piano_vertical;
 pub mod reed_bore;
 pub mod render;
 pub mod stribeck_friction;

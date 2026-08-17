@@ -834,6 +834,47 @@
       "budget_row": null,
       "corpus_refs": [],
       "notes": "Wind articulation: per-fingering char-line bank (carry+fade), sigma slur (+265 cents, envelope held), REGISTER VENT measured (inertive vent flips the twelfth at 0.70L \u2014 the classic pressure-release L/3 rule INVERTS for a chimneyed vent; the lock lands 18 cents from the TMM authority's own peak), char->VFIT hop with the replay-prime D17 lift and STRUCTURAL gate refusal (an ungated image cannot be entered mid-performance). THE POLICY IS DATA: committed wind-hop-policy.tsv (settle detector params + click-vs-timing table; the detector errs conservatively late). Estimator lesson bank grew: even-HPS blind on odd-harmonic spectra; odd products self-similar under 3x; AUTOCORRELATION is the unambiguous fundamental estimator for closed-pipe locks."
+    },
+    {
+      "filling": "hammer-felt",
+      "image": "piano-vertical",
+      "qoi": "emergent-aftersound",
+      "owner_crates": [
+        "fs-couple",
+        "fs-material"
+      ],
+      "exactness": [
+        "X-Consist",
+        "X-Est"
+      ],
+      "gate": "ungated",
+      "live_default": "no",
+      "determinism": "one-host",
+      "evidence": [
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/src/piano_vertical.rs::pv_001_tilt_contrast_survives_the_composition"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/src/piano_vertical.rs::pv_002_partials_follow_the_inharmonicity_law"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/src/piano_vertical.rs::pv_003_two_stage_decay_and_beats"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/src/piano_vertical.rs::pv_004_pedals_change_decay_topology"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/src/piano_vertical.rs::pv_005_ledger_and_bitwise_replay"
+        }
+      ],
+      "budget_row": null,
+      "corpus_refs": [],
+      "notes": "The composed piano vertical: unison+duplex+board (power-conjugate bridge)+felt island+pedal states. EMERGENT: tilt contrast survives the composition (felt trend 159.7 vs linear control 1.0 \u2014 the strongest tilt discrimination in the program); inharmonicity B measured in audio (4.2 cents, B=0 falsifier 3.6x worse); Weinreich two-stage decay (3.28 vs 1.15 /s) with detune-scaling audio-envelope beats; damper/una-corda topology; ledger non-increasing + bitwise replay. FOUR measurement laws in CONTRACT (each an executed misread first): read string laws from string state (board spectra carry board lines); board envelopes are blind to antisymmetric survivors; strong detune suppresses EXCHANGE but not the heard chorus (audio envelope); smoothers must sit between coupling slosh (33 Hz) and detune beats (2-4 Hz). X-Est: authored board/bridge geometry; promotion in .5.3."
     }
   ]
 }

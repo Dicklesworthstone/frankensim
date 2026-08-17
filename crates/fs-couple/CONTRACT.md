@@ -651,6 +651,27 @@ None.
   products cannot disambiguate f0 from 3f0 (the odd series is
   self-similar under 3x). The period domain has neither ambiguity.
 
+- `piano_vertical` module (bead 3ez8g.5.1): the piano vertical
+  composition — still no `Piano` type. Three unison strings (exact-ZOH
+  modal images whose mode series carries the stiff-string
+  inharmonicity law `f_n = n f0 sqrt(1 + B n^2)`; tension is state) +
+  a duplex segment + a small modal board coupled through the
+  POWER-CONJUGATE bridge (`F = sum c_k v_k` in, `g_k = -c_k v_b`
+  back) + the 87zbd felt hammer island + pedals as coupling states
+  (dampers = viscous drag through the strings' own force ports; una
+  corda = struck-string count). The Weinreich aftersound EMERGES:
+  in-phase unison motion pumps the lossy board (fast early decay);
+  the surviving quasi-antisymmetric configuration barely couples
+  (slow aftersound). MEASUREMENT LAWS learned executing the gates
+  (each an executed misread first): the board-velocity spectrum
+  carries the BOARD's own lines — the string law must be read from
+  the string state; the board envelope is structurally BLIND to the
+  antisymmetric survivors — the two-stage fit runs on the string
+  ensemble energy; strong detune SUPPRESSES energy exchange (real
+  physics) — the beat gate reads the AUDIO envelope, whose chorus
+  modulation persists; and envelope smoothers must be scaled between
+  the coupling slosh (~33 Hz, measured) and the detune beat (2-4 Hz).
+
 ## Conformance tests
 
 `src/broadband_radiation.rs`: G0 complex/real-SH round trip/reconstruction against
@@ -746,6 +767,19 @@ hop policy (settled hop click 0.504 vs the early-hop falsifier 0.864;
 the note survives on the hold image; the committed policy artifact
 re-gated every run with the measured nuance that the settle detector
 is conservatively late — the right side to err).
+
+`src/piano_vertical.rs` `piano_vertical_tests`, cases pv-001..pv-005 —
+THE TILT CONTRAST on the composed vertical (felt trend 159.7 vs the
+matched linear spring's 1.000: the hysteresis is audible, not
+asserted); the inharmonicity law measured in the audio (worst 4.23
+cents over partials {1..5,7} with the B=0 falsifier missing by 15.04;
+partial 6 disclosed as the duplex collision line, partial 8 as
+weakly-excited at the strike point); the two-stage decay (string
+ensemble 3.28/s early vs 1.15/s late) with audio-envelope beats
+scaling with detune (0.370 s -> 0.239 s at doubled detune); pedal
+topology (dampers collapse the note; una corda energy ratio 0.67 with
+the third string still fed through the bridge); and the dissipation
+ledger + bitwise replay (worst per-window growth 0.0).
 
 ## No-claim boundaries
 
@@ -873,3 +907,10 @@ is conservatively late — the right side to err).
   register-vent finding is geometry-specific (an inertive chimney
   vent inverts the classic pressure-release node rule — recorded as a
   measured hypothesis, not a general law).
+- The piano vertical's board is an authored spruce-scale modal set (the
+  full fs-plate orthotropic chart with rib stiffeners is the
+  piano-gates upgrade lane); bridge geometry is authored v1 (the
+  ingest lane upgrades later); the explicit board coupling is
+  semi-implicit at audio rate (the ledger gate bounds it); cabinet,
+  room, and JCA linings stay out by the bead's own boundary. Claim
+  promotion happens in piano-gates (.5.3), not here.
