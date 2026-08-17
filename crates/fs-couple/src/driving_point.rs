@@ -58,6 +58,31 @@ pub fn characteristic_line(
     zc: f64,
     wall: Option<&WallPin>,
 ) -> Result<DelayedFilter, DrivingPointError> {
+    characteristic_line_dense(physics, gas, termination, sample_rate_hz, n, zc, wall, None)
+}
+
+/// [`characteristic_line`] with an explicit realization length.
+///
+/// `n_fft_override` sets the reflectance sampling density (power of
+/// two, clamped to [256, 8192]); `None` keeps the default 4 round
+/// trips. A SHORT low-loss duct (a 17 cm vocal tract) rings far past
+/// 4 round trips, and the wrapped/truncated FIR shifts its upper
+/// resonances measurably (F2 of the /a/ tract measured 19% low at the
+/// default) — densify for chart-fidelity consumers.
+///
+/// # Errors
+/// As [`characteristic_line`].
+#[allow(clippy::too_many_arguments)]
+pub fn characteristic_line_dense(
+    physics: &Duct,
+    gas: &GasState,
+    termination: Termination,
+    sample_rate_hz: u32,
+    n: usize,
+    zc: f64,
+    wall: Option<&WallPin>,
+    n_fft_override: Option<usize>,
+) -> Result<DelayedFilter, DrivingPointError> {
     let length: f64 = physics
         .segments
         .iter()
@@ -80,9 +105,14 @@ pub fn characteristic_line(
             what: "round-trip delay does not fit the realized history",
         });
     }
-    let n_fft = ((4.0 * geo_delay).ceil() as usize)
-        .next_power_of_two()
-        .clamp(256, 4096);
+    let n_fft = n_fft_override.map_or_else(
+        || {
+            ((4.0 * geo_delay).ceil() as usize)
+                .next_power_of_two()
+                .clamp(256, 4096)
+        },
+        |v| v.next_power_of_two().clamp(256, 8192),
+    );
     let fft = Fft::new(n_fft);
     let mut buf = vec![FftC64::new(0.0, 0.0); n_fft];
     buf[0] = match termination {

@@ -268,7 +268,9 @@ impl GlottalIsland {
             termination,
             sample_rate_hz,
             8192,
-            zc_flow * area, // plane-wave specific impedance for the FIR
+            zc_flow, // VOLUME-normalized zc (rho c / S) — input_impedance
+                     // returns volume impedance; the specific rho*c here
+                     // flattened R toward +1 (found via the tract lane)
             None,
         )?;
         // The MM-bank lesson, executed here too: the realized FIR's
