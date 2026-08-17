@@ -1,0 +1,202 @@
+{
+ "schema": "org.frankensim.wright-flyer.source-dossier.v1",
+ "bead": "frankensim-wf-root-guzez.2.1",
+ "status": "ACTIVE",
+ "doctrine": "Every record carries the full EvidenceLineageId preimage (frozen in replay-identity-schema-v1.json) BEFORE any model fitting. Independence groups gate corroboration: same-origin evidence counts ONCE; a record may never corroborate another record in its own group. calibration_or_holdout = not-yet-partitioned-no-fitting-allowed is a HARD FITTING BLOCK until E1.2/E4 consumers partition it.",
+ "attribution_correction": "The plan's 'Deters/Selig 2004 prop reconstruction data' attribution is WRONG (verified 2026-08-17): AIAA 2004-0211 (Deters/Broughton/Selig) is a simulation-model retrospective built on the Ames tunnel data and contains no UIUC propeller tunnel tests. The actual propeller-reproduction tunnel campaign is Wright Experience/ODU at the Langley Full Scale Tunnel (records a2-props-bentend). Consumers citing 'Deters prop data' must repoint to a2-props-bentend.",
+ "records": [
+  {
+   "id": "a1-wright-1901-tunnel",
+   "role": "section trends and convention validation",
+   "citations": [
+    "Wright 1901 wind-tunnel tables, enclosed with Wilbur Wright to Octave Chanute, 1902-01-05; Wilbur and Orville Wright Papers, Manuscript Division, Library of Congress (digitized)",
+    "McFarland, M.W. (ed.), The Papers of Wilbur and Orville Wright, 2 vols., McGraw-Hill, 1953 (annotated reproduction)"
+   ],
+   "access": "LOC digitized; Wrights' unpublished writings dedicated to the public (public domain). McFarland 1953 editorial apparatus is publisher-copyrighted.",
+   "independence_group": "wright-1901-tunnel",
+   "derivation_steps": ["primary measurement by the Wrights, 1901 balance instruments"],
+   "permitted_claims": ["section lift/drag TRENDS", "historical convention identification (Smeaton coefficient, reference areas)"],
+   "forbidden_claims": ["absolute force levels at modern accuracy", "Reynolds-corrected section data without an explicit correction model"],
+   "calibration_or_holdout": "not-yet-partitioned-no-fitting-allowed",
+   "convention_uncertainty": "1901 balance conventions + Smeaton coefficient usage must be re-derived per E1.4 before ANY quantitative use",
+   "unverified_residue": ["renewal status of the McFarland 1953 copyright"]
+  },
+  {
+   "id": "a2-ames-fullscale-1999",
+   "role": "full-scale planform forces/moments, primary tunnel anchor",
+   "citations": [
+    "Cherne, J., Culick, F.E.C., Zell, P., 'The AIAA 1903 Wright Flyer Project Prior to Full-Scale Tests at NASA Ames Research Center', AIAA 2000-0511",
+    "Jex, H., Grimm, R., Latz, J.P., Hange, C., 'Full-Scale 1903 Wright Flyer Wind Tunnel Test Results From the NASA Ames Research Center', AIAA 2000-0512",
+    "'Wind Tunnel Boundary Corrections for a Full Scale 1903 Wright Flyer Replica', Journal of Aircraft, DOI 10.2514/1.12223"
+   ],
+   "access": "AIAA-copyrighted papers with data reproduced in them; project archive at legacy.wrightflyer.org",
+   "independence_group": "ames-aiaa-1999",
+   "derivation_steps": ["AIAA LA-section replica build", "NASA Ames 40x80 test, March 1999", "boundary corrections per the JoA paper"],
+   "permitted_claims": ["planform force/moment levels within replica-fidelity + correction uncertainty", "trim/derivative anchors for V-02a-adjacent checks"],
+   "forbidden_claims": ["exact-1903-artifact claims (replica differs in structure/covering)", "corroboration by a2-simmodels-deters (derived, same origin)"],
+   "calibration_or_holdout": "not-yet-partitioned-no-fitting-allowed",
+   "convention_uncertainty": "replica geometry deltas + tunnel boundary-correction model are declared uncertainty axes",
+   "unverified_residue": ["page ranges for AIAA 2000-0511/0512"]
+  },
+  {
+   "id": "a2-lfst-wrightexperience",
+   "role": "1901/1902 glider + 1903 Flyer reproduction aerodynamics (Langley Full Scale Tunnel)",
+   "citations": [
+    "Kochersberger, K., Ash, R., Britcher, C., Landman, D., Hyde, K., 'Evaluation of the Wright 1901 Glider Using Full-Scale Wind-Tunnel Data', Journal of Aircraft 40(3), 2003, DOI 10.2514/2.3122 (companion AIAA 2002-1134)",
+    "Kochersberger, K., Player, J., Ash, R., et al., 'Performance Analysis of the 1902 Wright Glider Using Full-Scale Wind Tunnel Data', AIAA 2003-0096",
+    "Britcher, C.P., Landman, D., Ash, R., Kochersberger, K., Hyde, K., 'Predicted Flight Performance of the Wright Flyer Based on Full-Scale Tunnel Data', AIAA 2004-0104",
+    "Landman, Alvarez, Ash, Blackburn, Hyde, 'Wind-Tunnel Testing of the Wright Brothers Model B Airfoil', Journal of Aircraft 39(1), 2002"
+   ],
+   "access": "AIAA-copyrighted; AIAA 2002-1134 free at centennialofflight.net; related ODU study at DTIC ADA437187",
+   "independence_group": "lfst-wright-experience",
+   "derivation_steps": ["Wright Experience reproductions", "ODU-operated Langley Full Scale Tunnel campaigns 2001-2003"],
+   "permitted_claims": ["independent second tunnel anchor for planform aerodynamics", "glider-lineage trend corroboration"],
+   "forbidden_claims": ["treating LFST glider/Flyer/prop entries as MUTUALLY independent (same team, same rig, one group)"],
+   "calibration_or_holdout": "not-yet-partitioned-no-fitting-allowed",
+   "convention_uncertainty": "reproduction fidelity + LFST flow-quality corrections",
+   "unverified_residue": []
+  },
+  {
+   "id": "a2-props-bentend",
+   "role": "propeller CT/CQ/eta and static thrust (reproduction tests) — the CORRECT prop-data source",
+   "citations": [
+    "Ash, R.L., Miley, S.J., Landman, D., Hyde, K.W., 'Evolution of Wright Flyer Propellers Between 1903 and 1912', AIAA 2001-0309",
+    "'Propeller Performance of Wright Brothers Bent End Propellers', AIAA 2000-3152; journal version Journal of Aircraft 39(2), 2002, DOI 10.2514/2.2944",
+    "'Computational Predictions of the Performance of Wright Bent End Propellers', NASA NTRS 20020080869"
+   ],
+   "access": "AIAA-copyrighted with data reproduced; NTRS item free (US-gov funded)",
+   "independence_group": "lfst-wright-experience",
+   "derivation_steps": ["Wright Experience propeller reproductions (1903/1904/1911)", "Langley Full Scale Tunnel performance tests", "companion computational study"],
+   "permitted_claims": ["prop CT/CQ/eta curves within reproduction fidelity (peak eta > 0.85 near J~1 for bent-end)", "static-thrust anchors"],
+   "forbidden_claims": ["exact-1903-artifact prop claims", "corroborating a2-lfst-wrightexperience aerodynamics (same group)"],
+   "calibration_or_holdout": "not-yet-partitioned-no-fitting-allowed",
+   "convention_uncertainty": "reproduction blade-geometry provenance; J-definition and tip-correction conventions per E1.4",
+   "unverified_residue": ["full author list of the JoA 39(2) paper (Kochersberger inclusion unconfirmed)"]
+  },
+  {
+   "id": "a2-simmodels-deters",
+   "role": "simulation-model retrospective (DERIVED source; historical attribution corrected)",
+   "citations": [
+    "Deters, R.W., Broughton, B.A., Selig, M.S., 'A Retrospective: Development of Simulation Models for the 1903 and 1905 Wright Flyers', AIAA 2004-0211 (free author-posted PDF at m-selig.ae.illinois.edu)"
+   ],
+   "access": "AIAA copyright, author-posted PDF freely accessible",
+   "independence_group": "ames-aiaa-1999",
+   "derivation_steps": ["panel-method modeling", "calibration against the Ames 40x80 data", "FlightGear simulation construction"],
+   "permitted_claims": ["modeling-approach reference", "sanity envelope for simulator trim states"],
+   "forbidden_claims": ["ANY independent corroboration of a2-ames-fullscale-1999 (it is derived from that data)", "propeller test data claims (contains none — see attribution_correction)"],
+   "calibration_or_holdout": "not-yet-partitioned-no-fitting-allowed",
+   "convention_uncertainty": "inherits every Ames uncertainty axis plus panel-method closure choices",
+   "unverified_residue": []
+  },
+  {
+   "id": "a2-synthesized-stall",
+   "role": "synthesized post-stall section extension (constructed, not measured)",
+   "citations": ["constructed per E4.0 from flat-plate asymptotics + generic post-stall blending (no Wright-specific measurement exists)"],
+   "access": "internal artifact (will carry its own content id at construction)",
+   "independence_group": "synthesized-internal",
+   "derivation_steps": ["flat-plate high-alpha asymptote", "blend to attached-flow sections", "uncertainty inflation per E4.0"],
+   "permitted_claims": ["bounded plausible post-stall continuation for simulation robustness"],
+   "forbidden_claims": ["validating Wright-specific deep stall (MAY NOT — plan law)", "any Verified/Validated evidence color; ceiling is Estimated"],
+   "calibration_or_holdout": "not-applicable-synthesized",
+   "convention_uncertainty": "entire construction is a declared model-uncertainty axis",
+   "unverified_residue": []
+  },
+  {
+   "id": "a3-dec17-records",
+   "role": "probabilistic end-to-end anchors (four flights, wind, distances, durations)",
+   "citations": [
+    "Orville Wright pocket diary, 'Diaries and Notebooks: 1903', Wilbur and Orville Wright Papers, LOC (loc.gov/resource/mss46706.01007) — 120 ft/12 s; ~175 ft; ~200 ft/15 s; 852 ft/59 s",
+    "Telegram, Orville Wright to Milton Wright, 1903-12-17, LOC items mcc.061 / 2003680165 ('against twenty one mile wind')",
+    "Orville Wright, 'How We Made the First Flight', Flying, Dec. 1913 (pre-1930 publication, public domain) — reports the 24-27 mph Weather Bureau anemometer range"
+   ],
+   "access": "public domain (LOC dedication + pre-1930 publication)",
+   "independence_group": "dec17-flight-records",
+   "derivation_steps": ["primary contemporaneous records"],
+   "permitted_claims": ["distance/duration/wind DISTRIBUTIONS for H-case anchors", "the 21 vs 24-27 mph discrepancy is itself data (measurement-location uncertainty)"],
+   "forbidden_claims": ["treating any single wind number as exact (telegram and Weather Bureau disagree)", "deterministic trajectory reconstruction"],
+   "calibration_or_holdout": "holdout-only-by-doctrine (end-to-end anchors are never fitted)",
+   "convention_uncertainty": "anemometer height/siting unknown; ground-roll vs air-distance convention per E1.4",
+   "unverified_residue": ["original Kitty Hawk Weather Bureau station log not located online (NOAA archives candidate)"]
+  },
+  {
+   "id": "a4-culick-stability",
+   "role": "open-loop derivative/pole reference",
+   "citations": [
+    "Jex, H.R., Culick, F.E.C., 'Flight Control Dynamics of the 1903 Wright Flyer', AIAA 85-1804-CP, 1985",
+    "Culick, F.E.C., Jex, H.R., 'Aerodynamics, Stability, and Control of the 1903 Wright Flyer', in Wolko (ed.), The Wright Flyer: An Engineering Perspective, Smithsonian, 1987 (archive.org + Caltech Authors open copies)",
+    "Culick, F.E.C., 'What the Wright Brothers Did and Did Not Understand About Flight Mechanics', AIAA 2001-3385",
+    "Papachristodoulou, A.N., Culick, F.E.C., 'Flight Mechanics of the Wright Aircraft 1903-1912', AIAA 2003-0097",
+    "Culick, F.E.C., 'The Wright Brothers: First Aeronautical Engineers and Test Pilots', AIAA Journal 41(6), 2003, DOI 10.2514/2.2046"
+   ],
+   "access": "AIAA/Smithsonian copyrighted; open copies at Caltech Authors + Internet Archive",
+   "independence_group": "culick-jex-analyses",
+   "derivation_steps": ["theoretical reconstruction + wind-tunnel-informed derivative estimation", "root-locus/pole analyses"],
+   "permitted_claims": ["pole-structure and derivative-sign reference for V-02a within declared reconstruction uncertainty", "pitch time-to-double order of magnitude"],
+   "forbidden_claims": ["independence from a2-ames-fullscale-1999 personnel (Culick/Jex appear in BOTH — correlated-analyst axis is declared, corroboration between these groups is DISCOUNTED not doubled)"],
+   "calibration_or_holdout": "holdout-only-by-doctrine (V-02a gate reference)",
+   "convention_uncertainty": "derivative reconstruction assumptions; axes/sign conventions per E1.4",
+   "unverified_residue": ["'The Wright Way' title does not exist as a Culick paper (plan-era folklore; corrected here)"]
+  },
+  {
+   "id": "a5-biplane-theory",
+   "role": "verification fixtures (analytic biplane interference + induced drag)",
+   "citations": [
+    "Munk, M.M., 'General Biplane Theory', NACA Report No. 151 (NTRS 19930091216)",
+    "Munk, M.M., 'The Minimum Induced Drag of Aerofoils', NACA Report No. 121",
+    "Prandtl, L., 'Applications of Modern Hydrodynamics to Aeronautics', NACA Report No. 116 (NTRS 19930091180)",
+    "Prandtl, L., 'Induced Drag of Multiplanes', NACA TN 182, 1924"
+   ],
+   "access": "US-government works, public domain, free on NTRS",
+   "independence_group": "naca-analytic-theory",
+   "derivation_steps": ["closed-form classical theory"],
+   "permitted_claims": ["analytic verification fixtures for E4 solvers (biplane gap/stagger interference, induced-drag minima)"],
+   "forbidden_claims": ["validation of Wright-specific viscous/separated behavior (inviscid theory)"],
+   "calibration_or_holdout": "verification-fixture (neither calibration nor validation data)",
+   "convention_uncertainty": "report-number citation is authoritative; cover years ambiguous between NTRS (1923 compilation) and conventional citations (1921/1922)",
+   "unverified_residue": ["canonical publication years TR-116/121/151"]
+  },
+  {
+   "id": "a6-bl-meteorology",
+   "role": "atmosphere statistics (surface-layer relations + Tier D LBM runs)",
+   "citations": [
+    "standard surface-layer similarity relations (log-law + Monin-Obukhov class) as codified in boundary-layer meteorology references; specific edition pinned at E3.3a consumption",
+    "FrankenSim Tier D fs-lbm terrain runs (internal, content-addressed at generation)"
+   ],
+   "access": "textbook relations (facts, uncopyrightable); internal runs self-hosted",
+   "independence_group": "bl-meteorology",
+   "derivation_steps": ["published similarity theory", "site-conditioned Tier D synthesis per E3.3"],
+   "permitted_claims": ["wind-profile and turbulence-statistics priors for the Kitty Hawk site class"],
+   "forbidden_claims": ["site-exact 1903-12-17 turbulence realization claims (only distributions are supported)"],
+   "calibration_or_holdout": "not-yet-partitioned-no-fitting-allowed",
+   "convention_uncertainty": "stability-class assumption for the Dec-17 conditions is a declared axis",
+   "unverified_residue": ["edition pin deferred to E3.3a"]
+  },
+  {
+   "id": "a7a-canard-rig",
+   "role": "PLANNED instrumented canard/linkage dry-rig + wind-on campaign (quantitative control-mechanics evidence for V-02b)",
+   "citations": ["pre-registration per E1.10; lead-partner candidate The Wright Experience, pending capability/data-rights audit"],
+   "access": "future campaign; data rights unresolved",
+   "independence_group": "a7a-rig-future",
+   "derivation_steps": ["campaign not yet executed"],
+   "permitted_claims": [],
+   "forbidden_claims": ["ANY claim before the campaign executes and E1.10 pre-registration freezes the protocol"],
+   "calibration_or_holdout": "pre-registered-holdout (promotion path per plan §5.1.3)",
+   "convention_uncertainty": "to be declared in the E1.10 pre-registration",
+   "unverified_residue": ["partner capability/data-rights audit outstanding"]
+  },
+  {
+   "id": "a7b-replica-fixture",
+   "role": "PLANNED optional instrumented human-in-loop replica/control fixture (independent generic-pilot evidence for V-02c1)",
+   "citations": ["optional per plan; no partner selected"],
+   "access": "future campaign",
+   "independence_group": "a7b-replica-future",
+   "derivation_steps": ["campaign not yet executed"],
+   "permitted_claims": [],
+   "forbidden_claims": ["ANY claim before execution"],
+   "calibration_or_holdout": "pre-registered-holdout",
+   "convention_uncertainty": "to be declared at pre-registration",
+   "unverified_residue": []
+  }
+ ],
+ "no_claims": "This dossier is an evidence REGISTRY: it asserts citations, access status, and claim boundaries. It does not assert any physics value; values enter via E1.2 with per-value verification against these records."
+}
