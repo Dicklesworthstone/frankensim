@@ -48,6 +48,7 @@ pub mod reed_bore;
 pub mod render;
 pub mod stribeck_friction;
 pub mod thin_plate;
+pub mod pickup;
 pub mod tract;
 pub mod traveling_wave_line;
 pub mod unilateral_contact;
