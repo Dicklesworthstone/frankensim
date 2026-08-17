@@ -4487,6 +4487,8 @@ pub fn quasistatic_aperture_opening(
 }
 
 #[cfg(test)]
+pub mod circuit;
+
 mod valve_ports {
     use super::{bernoulli_volume_flow, quasistatic_aperture_opening};
 
