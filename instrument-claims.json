@@ -1272,6 +1272,43 @@
       "budget_row": null,
       "corpus_refs": [],
       "notes": "The Faraday pickup as a PURE-READER PORT (D20 as structure: pose + per-mode window gains only; emf() reads the string owner's modal velocities \u2014 no step, no state, no re-discretization). Window-weighted flux map (raised-cosine aperture, unit-normalized so the point-pickup limit is EXACT \u2014 gated at 5e-4); bridge/neck voicing emerges (centroid 452 vs 328 Hz) with every per-mode EMF line matching the INDEPENDENT Simpson-integrated analytic gain within 5%; two mixed pickups comb per the gain-sum prediction with an executed notch. EMF drives the .9.1 circuit DAE end-to-end (RC load rolloff matches first-order analytic at 0.25x/4x cutoff; supply defect 1e-21). AUTHORED Estimate v1: linearized flux, dipole-like height profile; the MAGNETOSTATIC BAKE is the recorded follow-up. EN ROUTE: the .9.1 commit had shipped fs_phs::circuit behind a stolen cfg(test) (invisible to consumers) \u2014 fixed here."
+    },
+    {
+      "filling": "electric-string",
+      "image": "ts-driver-cabinet",
+      "qoi": "sealed-box-ts-algebra",
+      "owner_crates": [
+        "fs-couple",
+        "fs-phs"
+      ],
+      "exactness": [
+        "X-Consist",
+        "X-Est"
+      ],
+      "gate": "ungated",
+      "live_default": "no",
+      "determinism": "one-host",
+      "evidence": [
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/src/speaker.rs::ts_001_sealed_box_shift_matches_the_ts_algebra"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/src/speaker.rs::ts_002_impedance_curve_shows_the_motional_peak"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/src/speaker.rs::ts_003_panel_mode_colors_the_response_and_is_disclosed"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/src/speaker.rs::ts_004_excursion_refuses_past_the_card_limit"
+        }
+      ],
+      "budget_row": null,
+      "corpus_refs": [],
+      "notes": "The Thiele-Small driver + sealed cabinet as ONE pHS: the Bl gyrator is an antisymmetric J pair (power-exact by construction), the box is Sd^2 rho c^2/V extra stiffness on the cone (which is WHY the classic fc = fs sqrt(1+Vas/Vb) algebra holds - measured 64.7 vs 65.1 Hz analytic, 0.6%), the motional impedance peak matches the analytic TS curve to the printed digit at 0.5/1/2/6x fs, and ONE fs-plate-class panel mode couples through the shared cavity term (coloration 1-1.5% near its resonance, ZERO far - executed contrast; X-Consist with one retained mode, disclosed). EXCURSION HONESTY: past x_max REFUSES (suspension nonlinearity unmodeled - no silent linear forte). Card = authored datasheet-class Estimate; low-ka piston load disclosed; NO cabinet IR packs anywhere (charts + cards, never convolution). Ledger defect 3e-19. Vented box + full piston impedance + manufacturer-sheet ingest = recorded follow-ups."
     }
   ]
 }

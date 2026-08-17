@@ -803,6 +803,18 @@ None.
   the lips/jet authority pattern) is the recorded follow-up that
   upgrades provenance without changing the runtime shape.
 
+- `speaker` module (bead 3ez8g.9.4): the Thiele-Small driver + sealed
+  cabinet as ONE port-Hamiltonian — the Bl gyrator is an antisymmetric
+  J pair (power-exact by construction), the sealed box is
+  `Sd^2 rho c^2 / V` extra cone stiffness (exactly why the classic
+  resonance-shift algebra holds), and one fs-plate-class panel mode
+  couples through the shared cavity term (the cabinet sound as
+  physics; X-Consist with ONE retained mode, disclosed). Excursion
+  past the card's x_max REFUSES — the suspension nonlinearity is not
+  modeled and silent linear forte is the lie the refusal prevents.
+  Card = authored datasheet-class Estimate; low-ka piston load
+  disclosed; cabinet IR packs are FORBIDDEN and absent.
+
 ## Conformance tests
 
 `src/broadband_radiation.rs`: G0 complex/real-SH round trip/reconstruction against
@@ -990,6 +1002,15 @@ public gains and the same state slice); refusals by name; and the EMF
 driving the .9.1 circuit DAE end-to-end (RC-load rolloff matching the
 first-order analytic response at 0.25x and 4x cutoff with supply
 defects at 1e-21).
+
+`src/speaker.rs` `speaker_tests`, cases ts-001..ts-005 — the sealed
+box shifts resonance per fc = fs sqrt(1+Vas/Vb) (measured 64.7 vs
+65.1 Hz analytic); the electrical impedance matches the analytic TS
+motional curve to the printed digit at four frequencies; the panel
+colors the response near its resonance and NOT far away (executed
+contrast against the rigid box); a 60 V resonance drive trips the
+excursion refusal while a gentle drive never does; refusals by name
+plus the supply-defect ledger at 3e-19.
 
 ## No-claim boundaries
 
