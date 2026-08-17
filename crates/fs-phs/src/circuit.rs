@@ -38,9 +38,7 @@
 //! (the admission catches the classic pathologies; an exotic graph
 //! that stalls Newton refuses loudly rather than silently drifting).
 
-use crate::{
-    DescriptorPortHamiltonian, PhsError, QuadraticStorage, StepRecord, step_descriptor,
-};
+use crate::{DescriptorPortHamiltonian, PhsError, QuadraticStorage, StepRecord, step_descriptor};
 
 /// One circuit branch between two node indices (node 0 is GROUND).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -274,7 +272,11 @@ pub fn assemble_circuit(graph: &CircuitGraph) -> Result<CircuitDae, CircuitError
     let off_it = off_iv + n_v;
     // Node potential coordinate for node k (k >= 1).
     let vcoord = |node: usize| -> Option<usize> {
-        if node == 0 { None } else { Some(off_v + node - 1) }
+        if node == 0 {
+            None
+        } else {
+            Some(off_v + node - 1)
+        }
     };
 
     let mut j = vec![0.0; n * n];
@@ -392,9 +394,7 @@ pub fn assemble_circuit(graph: &CircuitGraph) -> Result<CircuitDae, CircuitError
         g,
         storage,
     };
-    let node_potential_index = (1..graph.node_count)
-        .map(|k| off_v + k - 1)
-        .collect();
+    let node_potential_index = (1..graph.node_count).map(|k| off_v + k - 1).collect();
     Ok(CircuitDae {
         system,
         flux_index,

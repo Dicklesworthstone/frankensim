@@ -200,6 +200,15 @@ solve. No `Cx` integration (workspace `frankensim-ccmn` effort).
 
 None.
 
+- Circuit DAE battery (`src/circuit.rs`, cases kd-001..kd-005):
+  series RLC vs the analytic impedance at three frequencies straddling
+  resonance with the supply-defect audit below 1e-9 throughout; the
+  pure LC loop (the index-relevant case) holding energy to ~1e-16
+  over 1e5 discrete-gradient steps; the ideal-transformer two-loop
+  fixture matching the reflected-load current analytically with the
+  voltage law pinned; refusals by name; and the audit non-vacuity
+  falsifier (a sign-flipped supply fails by >1e3x).
+
 ## Conformance tests
 
 `tests/phs.rs` (9): admission rejections; Gonzalez identity +
@@ -232,9 +241,28 @@ matches the dissipation ledger within 2%.
 
 ## No-claim boundaries
 
-- ODE-form only: constrained/DAE Dirac structures (rigid
-  interconnection, Kirchhoff laws) are DEFERRED with the stated
-  trigger (first consumer needing constraints).
+- THE DAE DEFERRAL IS CONSUMED (music bead 3ez8g.9.1; the
+  electric-guitar track was the named first consumer): the `circuit`
+  module assembles R/L/C/source/ideal-transformer graphs into
+  `DescriptorPortHamiltonian` systems where KCL/KVL are algebraic
+  Dirac constraints. Each constraint enters the composite `J` once
+  and ANTISYMMETRY manufactures its dual (the inductor's KVL row
+  transposes into its KCL current; the capacitor branch row into both
+  charge dynamics and node currents; the transformer's single voltage
+  row into the power-exact current pair) — passivity by construction,
+  never bookkeeping. Admission is loud (floating node, shorted or
+  parallel ideal sources, non-physical elements refuse BY NAME);
+  consistent ICs solve as a dt=0 descriptor step and a stall refuses
+  as inconsistent rather than NaN-ing later. The ledger stays exact
+  through constraints, and `step_audited` returns the SUPPLY-DEFECT
+  residual |dH + dissipated - supplied| — the independent check
+  (balance alone is tautological under sign mutations; the audit's
+  non-vacuity is itself tested by a sign-flip falsifier). Remaining
+  DAE no-claims: no event switching in v1 (diodes/triodes arrive as
+  smooth device laws in the device bead; switching topologies are a
+  later, named extension); index analysis is structural (admission
+  catches the classic pathologies; exotic graphs that stall Newton
+  refuse loudly).
 - Non-quadratic storage through `reduce_galerkin` is deferred with the
   same trigger; the refusal is typed.
 - A-priori trajectory/H-error bounds for reduction are a no-claim; the
