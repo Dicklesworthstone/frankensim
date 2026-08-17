@@ -1353,6 +1353,74 @@
    "budget_row": null,
    "corpus_refs": [],
    "notes": "Device CARDS + nonlinear circuit ISLANDS (music bead 3ez8g.9.3): Koren-class 12AX7 triode + Shockley-class silicon diode pair as typed cards (provenance, validity regions, matdb-shaped). Split-circuit image: the linear network steps through the .9.1 descriptor DAE; the device Gauss-Seidel-iterates against it with a load-line-damped island update (fixed caps, analytic Jacobians). Bias admission = DC Newton refusal. Small-signal gain 60.9 matches the card's own plate-curve-derived mu*RL/(RL+rp); the harmonic ladder EMERGES (H2 0.26%->3.2% across drive 0.05->0.6, H2>>H3 throughout \u2014 curvature at the bias point, nothing shaped); clipper vs in-test bisection at residual <=1e-19. SCOPE: this row covers the triode stage AND the diode clipper (one module, one battery). Card constants are authored-typical fits, NOT measured-tube ingest. The dv-000 case pins the descriptor READ LAW (algebraic efforts are midpoints of stored coordinates; raw potential reads are 2x by construction) \u2014 the bug class the first implementation hit. The split-vs-full-DAE bake-off belongs to .9.5."
+  },
+  {
+   "filling": "electric-string",
+   "image": "split-circuit-image",
+   "qoi": "chain-composition",
+   "owner_crates": [
+    "fs-couple",
+    "fs-phs"
+   ],
+   "exactness": [
+    "X-Consist",
+    "X-Est"
+   ],
+   "gate": "ungated",
+   "live_default": "no",
+   "determinism": "one-host",
+   "evidence": [
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/tests/electric_chain.rs::ec_001_chain_composes_with_one_string_owner"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/tests/electric_chain.rs::ec_002_voicing_survives_the_chain"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/tests/electric_chain.rs::ec_003_harmonic_ladder_through_the_chain"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/tests/electric_chain.rs::ec_004_box_transfer_composes_transparently"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/tests/electric_chain.rs::ec_008_committed_listening_chain_holds"
+    }
+   ],
+   "budget_row": null,
+   "corpus_refs": [],
+   "notes": "The COMPOSED electric chain (bead 3ez8g.9.5): plucked modal string (one owner) -> Faraday pickup (pure reader) -> tone RC -> Koren 12AX7 island stage -> sealed-box TS driver. Gates: NO-STRING-REDUPLICATION witness (bare string stepped alongside stays BITWISE identical); bridge/neck voicing survives the chain (per-harmonic output ratios = pickup window-gain ratios within 6% at linear drive); the harmonic ladder composes (single-mode string, so 2f0/3f0 content is DEVICE-made: H2 rises >4x with drive, H2>H3); box transfer composes transparently (chain-measured excursion/volt = driver-alone within 5% at 65 and 260 Hz). Listening artifact electric-clean-vs-driven (same pluck at grid 0.03 then 0.40 V RMS; signal = model far-field pressure at 1 m) digest-chained wav->sidecar->receipt, Unadjudicated. SCOPE: the chain claims NOTHING about the string (inherited from the vibration epic); preamp input gain is a measured-calibration volume knob (disclosed). Budget rows deferred to the budget lane (D25); live_default no."
+  },
+  {
+   "filling": "electric-string",
+   "image": "full-dae-authority",
+   "qoi": "bakeoff-agreement",
+   "owner_crates": [
+    "fs-phs"
+   ],
+   "exactness": [
+    "X-Consist"
+   ],
+   "gate": "ungated",
+   "live_default": "no",
+   "determinism": "one-host",
+   "evidence": [
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/tests/electric_chain.rs::ec_005_mint_split_vs_full_dae_receipt"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/tests/electric_chain.rs::ec_006_committed_bakeoff_receipt_holds_its_verdict"
+    }
+   ],
+   "budget_row": null,
+   "corpus_refs": [],
+   "notes": "The AUTHORITY image for the electric gain stage (bead 3ez8g.9.5): per-sample monolithic Newton on the SAME constitutive equations ((supply-vp)/RL = Ip(vp,vg)) to 1e-14 relative \u2014 no split, no sweep budget. Bake-off vs split-circuit-image on a tone-RC + 12AX7 fixture, receipt at crates/fs-couple/tests/receipts/electric-split-vs-full-dae.bakeoff: split gain 59.950 = authority 59.950 (analytic 59.923), H2 at drive 0.35 identical to 5 decimals, pluck-transient L2 4.6e-12 \u2014 on this memoryless fixture the 3-sweep load-line-damped split CONVERGES to the authority; the split's claim to fame is the HARD per-sample budget (216000 fixed vs 244257 data-dependent iterations). Outcome KeepBoth (split = budget lane, monolith = authority/verification lane; D14 factorization). Reference for the nonlinear QoIs is authority-measured (disclosed in the receipt rationale); gain reference is analytic from the card partials."
   }
  ]
 }

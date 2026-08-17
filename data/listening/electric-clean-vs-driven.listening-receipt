@@ -1,0 +1,13 @@
+frankensim-listening-receipt-v1
+listener	pending
+session	2026-08-17
+artifact	edd6dd623bdd416098d69f839c71622ff86064f223c66f6d480ea2ea7c53f222
+artifact-ref	data/listening/electric-clean-vs-driven.provenance.json
+question	does the second (driven) pluck read as tube drive — thicker, compressed, even-harmonic — rather than fuzz or clipping artifacts?
+verdict	unadjudicated
+observations	same pluck twice: clean (grid 0.03 V RMS) then driven (0.40 V RMS); H2-led ladder measured in ec-003; awaiting the owner's ear
+loudness-sone	absent
+sharpness-acum	absent
+log-attack-time	-2.028994896372264e0
+spl-db	absent
+law	psychoacoustic metrics are never a substitute for human listening
