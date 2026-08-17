@@ -45,6 +45,24 @@ and the simulation plane (FrankenSim physics), compiled to
 | `hello_digest` / `flyer_hello_digest` | pure / wasm | full-trajectory bit-exact content digest (hex) under the versioned domain |
 | `hello_spin_json`, `refusal_envelope`, `hello_envelope` | pure | the JS envelope renderers (shared by native tests and the boundary) |
 
+## Archive-loader surface (E0.9c slice, bead guzez.1.9.3)
+
+`archive::` implements the verifying-loader mechanics of the frozen E0.9a
+contract (`data/wright-flyer/replay-identity-schema-v1.json`) against a
+LOCAL content-addressed store (`data/wright-flyer/archive-fixture/`):
+
+| Entry | Contract |
+|---|---|
+| `verify_target_bytes` | size check BEFORE hashing, then BLAKE3 content identity vs the targets manifest |
+| `verify_dual_publication` | both copies verified independently + byte equality (the read-back rule; never provider-native replication) |
+| `parse_hello_envelope` | STRICT fail-closed v1 parser — exact nine keys in canonical order; any deviation refuses (a tolerant line reader is how a gate dies silently) |
+| `replay_generation` | backward playback: re-executes the archived generation, compares trajectory digests; divergence is a typed refusal, the "old-exact" contract's teeth |
+
+The fixture archives generation 0 (the canonical hello scenario, dt as the
+integer ratio 1/120) with its pinned trajectory digest; the battery drives
+corruption, truncation, mirror-divergence, malformed-envelope, and
+wrong-kernel-replay twins.
+
 ## No-claims
 
 - The hello kernel is a torque-free rigid body. It makes **no aerodynamic,
@@ -59,4 +77,7 @@ and the simulation plane (FrankenSim physics), compiled to
 ## Refusal vocabulary (v0)
 
 `non-finite-input`, `non-positive-inertia`, `non-unit-quaternion`,
-`timestep-outside-domain`, `step-budget-exceeded`.
+`timestep-outside-domain`, `step-budget-exceeded`; archive loader:
+`archive-size-mismatch`, `archive-content-digest-mismatch`,
+`archive-mirror-divergence`, `archive-envelope-malformed`,
+`archive-replay-digest-mismatch`.

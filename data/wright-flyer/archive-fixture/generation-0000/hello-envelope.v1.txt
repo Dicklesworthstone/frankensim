@@ -1,0 +1,9 @@
+schema=org.frankensim.wright-flyer.hello-archive-envelope.v1
+generation=0
+inertia=0.9,1.1,1.7
+q0=1,0,0,0
+omega0=0.3,-1.2,2.1
+dt_num=1
+dt_den=120
+steps=480
+trajectory_digest=d1ee8e689eebfe8ca4330cab2d256968534962ceaf034dacf788fed1838323f9

@@ -25,6 +25,8 @@
 use fs_blake3::hash_domain;
 use fs_time::lie::rigid_body_step;
 
+pub mod archive;
+
 /// Versioned identity domain for hello-kernel trajectory digests.
 pub const HELLO_DIGEST_DOMAIN: &str = "org.frankensim.fs-flyer-wasm.hello-trajectory.v1";
 
