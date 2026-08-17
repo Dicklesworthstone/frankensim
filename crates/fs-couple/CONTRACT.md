@@ -672,6 +672,22 @@ None.
   modulation persists; and envelope smoothers must be scaled between
   the coupling slosh (~33 Hz, measured) and the detune beat (2-4 Hz).
 
+- vibration gates (bead 3ez8g.7.1): the string/plate/nonlinear
+  registry review. The TRUNCATION GATE makes modal honesty executable:
+  a row's retained series must have converged (top-retained-mode energy
+  share below the authored gate), and the deliberately under-truncated
+  falsifier (N=3 at 220 Hz, whose top mode sits mid-band where the felt
+  hammer still delivers ~1e-1 of the energy) FAILS the same gate the
+  disclosed N=12 fixture passes at 6e-20. The linear<->nonlinear
+  SELECTOR THRESHOLD is committed data with fixture provenance
+  (`data/claims/vibration-selector-thresholds.tsv`), re-derived every
+  run from the KC glide law the fs-nlmodal battery pins at 1e-12 — a
+  hand-edited threshold fails. THE GONZALEZ CAVEAT travels with the
+  KC/von-Karman promotion: conservation under discrete-gradient
+  stepping is structurally blind to gradient errors, so nonlinear
+  evidence cites FD-gradient/trajectory oracles, never energy
+  conservation.
+
 ## Conformance tests
 
 `src/broadband_radiation.rs`: G0 complex/real-SH round trip/reconstruction against
@@ -780,6 +796,15 @@ scaling with detune (0.370 s -> 0.239 s at doubled detune); pedal
 topology (dampers collapse the note; una corda energy ratio 0.67 with
 the third string still fed through the bridge); and the dissipation
 ledger + bitwise replay (worst per-window growth 0.0).
+
+`tests/vibration_gates.rs`, cases vg-001..vg-003 — the truncation gate
+with its executed under-truncation falsifier (6.2e-20 vs 1.0e-1 across
+a 2e-3 gate), the selector-threshold re-derivation pin (relative 1e-8
+against the committed artifact), and the gate-summary enumeration
+(every vibration-filling registry row must appear in
+`data/claims/vibration-gate-summary.tsv` with a status MATCHING the
+registry; the plate 1-port's honestly-ungated row is asserted by
+name).
 
 ## No-claim boundaries
 
@@ -914,3 +939,10 @@ ledger + bitwise replay (worst per-window growth 0.0).
   semi-implicit at audio rate (the ledger gate bounds it); cabinet,
   room, and JCA linings stay out by the bead's own boundary. Claim
   promotion happens in piano-gates (.5.3), not here.
+- The vibration gate review promotes claims on EXISTING evidence (the
+  .1.4 bake-off receipt, the fs-plate Olson-Hazell battery, the
+  fs-nlmodal analytic pins); it mints no new physics. The plate
+  vfit-driving-point row stays ungated with the missing item named (no
+  executed plate-1-port fit artifact); bowed and vibroacoustic rows
+  carry evidence but await their own mechanism/corpus gates (.7.3-.7.5,
+  .7.4).

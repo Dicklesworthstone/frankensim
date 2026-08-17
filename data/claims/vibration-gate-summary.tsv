@@ -1,0 +1,14 @@
+# frankensim-vibration-gate-summary-v1
+# Vibration-lane gate review (music bead 3ez8g.7.1). One row per
+# string/plate/nonlinear registry claim; an omitted row is a red test
+# (vg-003 enumerates against instrument-claims.json). The selector
+# threshold rides in vibration-selector-thresholds.tsv (vg-002
+# re-derives it; a hand-edited value fails).
+filling	image	qoi	gate	note
+string	modal-zoh	pluck-partial-decay	green	X-Exact on the retained basis; truncation cross-check = string-modal-zoh-vs-phs-bank.bakeoff; per-fixture N disclosed; vg-001 truncation gate
+string	phs-modal-bank	truncation-authority	green	authority/cross-check claim only; never the performance image (Newton per sample)
+plate	dkt-modal	literature-modes	green	Olson-Hazell 1977 five modes + Leissa pin; piano board authority (pg-001)
+plate	vfit-driving-point	passive-one-port	ungated	NAMED MISSING: no executed plate-1-port fit artifact; certificate machinery exists (fs-vfit passivity)
+string-plate-nl	kc-vonkarman	pitch-glide-analytic	green	1e-12 analytic pins + FD-gradient/trajectory falsifier (Gonzalez caveat: NEVER cite energy conservation); selector threshold is committed data
+bowed	modal-stribeck	stick-slip-mechanism	ungated	live-excitation + spectrum evidence attached; awaits .7.5 mechanism gates + .7.3 tribo determinism
+string-plate-cavity	vibroacoustic-modal	two-dof-product-invariant	ungated	cavity/resonator pins attached; awaits .7.4 composed-guitar Carcagno gate

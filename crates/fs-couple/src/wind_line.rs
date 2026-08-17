@@ -179,6 +179,12 @@ impl WindLineBank {
         self.image
     }
 
+    /// The active fingering's label (from the [`FingeringTable`]).
+    #[must_use]
+    pub fn active_label(&self) -> &str {
+        &self.labels[self.active]
+    }
+
     /// The lift log.
     #[must_use]
     pub fn lift_log(&self) -> &[WindLiftRecord] {

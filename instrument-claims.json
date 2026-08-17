@@ -162,7 +162,7 @@
       "exactness": [
         "X-Exact"
       ],
-      "gate": "ungated",
+      "gate": "green",
       "live_default": "no",
       "determinism": "one-host",
       "evidence": [
@@ -173,11 +173,23 @@
         {
           "kind": "test",
           "ref": "crates/fs-couple/tests/bakeoff_string.rs::string_bakeoff_receipt_is_reproduced_and_golden_pinned"
+        },
+        {
+          "kind": "bakeoff",
+          "ref": "crates/fs-couple/tests/receipts/string-modal-zoh-vs-phs-bank.bakeoff (the truncation cross-check vs the fine-pHS authority: exact per-sample map on the retained basis; missing high modes ABSENT not approximated \u2014 the disclosed failure mode)"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/src/piano_vertical.rs::pv_002_partials_follow_the_inharmonicity_law"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/tests/vibration_gates.rs::vg_001_truncation_gate_and_under_truncated_falsifier"
         }
       ],
       "budget_row": null,
       "corpus_refs": [],
-      "notes": "Exact-ZOH modal runtime (bit-equal sub-sample splitting proven in fs-couple tests); X-Exact for the TRUNCATED basis - the row must carry N and the missing-high-modes failure disclosure at gate time. Bake-off vs the pHS bank executed (keep-both: ZOH residual rounding-level vs the analytic damped-oscillator closed form, zero solver cost). Gates bead: 3ez8g.7.1."
+      "notes": "GREEN per the 3ez8g.7.1 vibration gates review: X-Exact ON THE TRUNCATED BASIS (the row's N travels with every fixture; missing high modes are absent, never approximated \u2014 the .1.4 bake-off receipt is the executed cross-check vs the fine-pHS authority). The truncation gate (vg-001) DISCLOSES the retained-energy fraction per fixture and its falsifier proves an under-truncated config fails. Exact-ZOH per-sample map at zero solver cost; tension frozen per admission (a ramp needs re-admission - the KC image owns tension dynamics)."
     },
     {
       "filling": "string",
@@ -189,7 +201,7 @@
       "exactness": [
         "X-Consist"
       ],
-      "gate": "ungated",
+      "gate": "green",
       "live_default": "no",
       "determinism": "one-host",
       "evidence": [
@@ -200,11 +212,15 @@
         {
           "kind": "test",
           "ref": "crates/fs-couple/tests/bakeoff_string.rs::string_bakeoff_receipt_is_reproduced_and_golden_pinned"
+        },
+        {
+          "kind": "bakeoff",
+          "ref": "crates/fs-couple/tests/receipts/string-modal-zoh-vs-phs-bank.bakeoff (KeepBoth: authority/cross-check role)"
         }
       ],
       "budget_row": null,
       "corpus_refs": [],
-      "notes": "Many-mode pHS bank as the truncation cross-check for the ZOH rows (authority role, not a live default candidate). Bake-off vs modal-ZOH executed (keep-both): its phase error matches the implicit-midpoint dispersion model (2/dt)atan(omega dt/2) to 4 significant figures per mode - the failure mode is pinned to its mechanism; energy envelope within 1.5e-3. Gates bead: 3ez8g.7.1."
+      "notes": "GREEN for the AUTHORITY/CROSS-CHECK claim set per the .7.1 review (like the linear-spring null row: its claim IS being the arbiter): Dirac-composable, energy-ledgered, O((w dt)^2) midpoint phase disclosed in the receipt. Never the performance image (Newton per sample); the ZOH rows cite it for truncation truth."
     },
     {
       "filling": "plate",
@@ -217,10 +233,19 @@
       "exactness": [
         "X-Exact"
       ],
-      "gate": "ungated",
+      "gate": "green",
       "live_default": "no",
       "determinism": "one-host",
-      "evidence": [],
+      "evidence": [
+        {
+          "kind": "test",
+          "ref": "crates/fs-plate/src/lib.rs::olson_hazell_stiffened_panel_matches_literature"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/tests/piano_gates.rs::pg_001_board_from_the_fs_plate_authority"
+        }
+      ],
       "budget_row": null,
       "corpus_refs": [
         "vvreg:acoustic-leissa-clamped-square-lambda1",
@@ -230,7 +255,7 @@
         "vvreg:acoustic-olson-hazell-1977-mode4",
         "vvreg:acoustic-olson-hazell-1977-mode5"
       ],
-      "notes": "Orthotropic DKT + stiffeners + inertia-certified slice_window; Leissa pins and the Olson-Hazell 1977 stiffened plate (1.7% on five modes) live as tests - promotion needs their corpus rows (3ez8g.1.1). Gates bead: 3ez8g.7.1."
+      "notes": "GREEN per the .7.1 review: the DKT orthotropic modal image validated against the REGISTERED literature corpus (Olson-Hazell 1977 stiffened panel: five modes within 1.7% of theory under an 8% gate; Leissa clamped-square eigenvalue), inertia-certified through fs-modal, and consumed downstream as the piano board authority (pg-001). X-Exact truncated; truncation N travels per fixture."
     },
     {
       "filling": "plate",
@@ -245,10 +270,15 @@
       "gate": "ungated",
       "live_default": "no",
       "determinism": "one-host",
-      "evidence": [],
+      "evidence": [
+        {
+          "kind": "test",
+          "ref": "crates/fs-vfit/src/passivity.rs::check_passivity (the certificate machinery the 1-port will cite; no executed plate-fit artifact yet)"
+        }
+      ],
       "budget_row": null,
       "corpus_refs": [],
-      "notes": "Cheap body-as-1-port on the bridge; passivity certificate class must be named at gate time; fails on a nonlinear top by design. Gates bead: 3ez8g.7.1."
+      "notes": "Cheap body-as-1-port on the bridge; passivity certificate class must be named at gate time; fails on a nonlinear top by design. Gates bead: 3ez8g.7.1. .7.1 review: UNGATED with the missing item NAMED \u2014 no EXECUTED plate-1-port fit artifact exists yet (the clarinet casebook certifies the BORE lane; the plate lane needs its own fit + named certificate class before green)."
     },
     {
       "filling": "string-plate-nl",
@@ -260,13 +290,26 @@
       "exactness": [
         "X-Consist"
       ],
-      "gate": "ungated",
+      "gate": "green",
       "live_default": "no",
       "determinism": "one-host",
-      "evidence": [],
+      "evidence": [
+        {
+          "kind": "test",
+          "ref": "crates/fs-nlmodal/tests/nlmodal.rs::kirchhoff_carrier_beta_matches_hand_formula_and_glide"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-nlmodal/tests/nlmodal.rs::unsymmetrized_tensor_admission_and_trajectory_falsifier"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/tests/acoustic_assembly.rs::kirchhoff_carrier_loud_pluck_raises_pitch"
+        }
+      ],
       "budget_row": null,
       "corpus_refs": [],
-      "notes": "Kirchhoff-Carrier exact channel constants and the pitch-glide law (3/32)(EA/T0)(k*pi*A/L)^2 are pinned at 1e-12 in fs-nlmodal tests. Gate-time caveat: under Gonzalez stepping, conservation is structurally blind to gradient errors - evidence must cite the FD-gradient oracles, never energy balance alone. Gates bead: 3ez8g.7.1."
+      "notes": "GREEN per the .7.1 review: the KC/von-Karman reduced-pHS image with ANALYTIC-PIN evidence \u2014 the exact KC channel constants and the pitch-glide law (3/32)(EA/T0)(k pi A/L)^2 both pinned at 1e-12, plus the composed loud-pluck glide e2e. THE GONZALEZ CAVEAT travels on this row (scope-4): conservation under discrete-gradient stepping is STRUCTURALLY BLIND to gradient errors, so the evidence cites the FD-gradient/trajectory FALSIFIER oracle, never energy conservation. The linear<->nonlinear selector threshold is committed data (vibration-selector-thresholds.tsv)."
     },
     {
       "filling": "bowed",
@@ -283,10 +326,19 @@
       "gate": "ungated",
       "live_default": "no",
       "determinism": "one-host",
-      "evidence": [],
+      "evidence": [
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/tests/acoustic_assembly.rs::bow_stroke_is_a_live_excitation"
+        },
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/tests/acoustic_assembly.rs::bowed_rich_spectrum_has_even_partials"
+        }
+      ],
       "budget_row": null,
       "corpus_refs": [],
-      "notes": "Modal string + Stribeck island (parts live). Determinism is CAPPED at one-host: fs-tribo declares no cross-ISA bit-stability (platform hypot) - bead 3ez8g.7.3 resolves or re-declares. Emergent Helmholtz-motion gates are bead 3ez8g.7.5; a forced Helmholtz oscillator is forbidden."
+      "notes": "Modal string + Stribeck island (parts live). Determinism is CAPPED at one-host: fs-tribo declares no cross-ISA bit-stability (platform hypot) - bead 3ez8g.7.3 resolves or re-declares. Emergent Helmholtz-motion gates are bead 3ez8g.7.5; a forced Helmholtz oscillator is forbidden. .7.1 review: live-excitation + spectrum evidence attached; UNGATED until the stick-slip mechanism gates land (.7.5's lane) and the fs-tribo hypot determinism cap resolves (.7.3)."
     },
     {
       "filling": "brass",
@@ -346,14 +398,19 @@
       "gate": "ungated",
       "live_default": "no",
       "determinism": "one-host",
-      "evidence": [],
+      "evidence": [
+        {
+          "kind": "test",
+          "ref": "crates/fs-couple/src/vibroacoustic.rs::rectangular_cavity_and_resonator_pins"
+        }
+      ],
       "budget_row": null,
       "corpus_refs": [
         "vvreg:acoustic-carcagno-2018-mode1",
         "vvreg:acoustic-carcagno-2018-mode2",
         "vvreg:acoustic-carcagno-2018-mode3"
       ],
-      "notes": "The plate x cavity x radiation coupling engine (energy identities exact, added-mass quartering verified in fs-couple tests); the exact 2-DOF invariant f1*f2 = f_helmholtz*f_top is the free engine-exactness oracle. Composed-guitar gates on the Carcagno corpus: bead 3ez8g.7.4. Fixture traps recorded there: midline braces sit on nodal lines; the sign convention is phase-only observable."
+      "notes": "The plate x cavity x radiation coupling engine (energy identities exact, added-mass quartering verified in fs-couple tests); the exact 2-DOF invariant f1*f2 = f_helmholtz*f_top is the free engine-exactness oracle. Composed-guitar gates on the Carcagno corpus: bead 3ez8g.7.4. Fixture traps recorded there: midline braces sit on nodal lines; the sign convention is phase-only observable. .7.1 review: cavity/resonator pin evidence attached; UNGATED pending the composed-guitar Carcagno gate (.7.4)."
     },
     {
       "filling": "hammer-felt",

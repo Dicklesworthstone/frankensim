@@ -1,5 +1,5 @@
 # frankensim-piano-gate-summary-v1
-# derived from instrument-claims.json (blake2b-128 9a8ae9a348c2d24f10c7381b96760045); regenerate when hammer-felt rows change (gated by piano_gates.rs)
+# derived from instrument-claims.json (blake2b-128 0ad41609655b1767c172937a6aaa13af); regenerate when hammer-felt rows change (gated by piano_gates.rs)
 # STRUCTURAL NON-ROW: the air-column image was never legal for this filling (asserted by pg-003, not refused)
 image	qoi	gate	live_default	exactness	owners	evidence_count	evidence_refs
 hunt-crossley	transient-point-contact	ungated	no	X-Struct	fs-contact	2	test:crates/fs-couple/tests/bakeoff_felt.rs::committed_felt_bakeoff_receipt_shows_the_structural_gap; bakeoff:crates/fs-couple/tests/receipts/piano-felt-vs-hc.bakeoff: KeepForSubset(hunt-crossley -> debug/second-hammer + generic transient point contacts; never the piano felt claim)
