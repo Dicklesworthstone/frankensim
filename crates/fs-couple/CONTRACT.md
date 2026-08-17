@@ -717,6 +717,24 @@ None.
   varying-section solver) — v1 claims the uniform prismatic bar
   exactly and only that.
 
+- Cane reed card (bead 3ez8g.6.2, completing T-Wind): "shaped like a
+  reed, made of cane" — a tapered vamp mesh + the CC-BY cane packs
+  through the fs-solid reduce lab (f1 = 2709 Hz, the measured
+  clarinet-reed class) driving the EXISTING realize_reed_bore loop;
+  the authored-parameter path remains the Estimate debug image. The
+  LAY is a measured-geometry chart (tip opening + facing length ->
+  circular-arc radius) consumed as the rest gap, rolling-stiffness
+  hardening the named successor; contact stays the fs-dcontact
+  Obstacle pattern. Provenance chain in the card: mesh digest,
+  material resolution identity (heel E_L dry; the blank-zone density
+  mismatch and the 10x E_T anisotropy DISCLOSED; eta = delta/pi from
+  the damping pack), reduction options, retained-compliance
+  disclosure. Measured sensitivities: more-open lay +46% threshold;
+  harder cane brighter at matched breath (+1.9%) with the ordering
+  inverting near the soft threshold (both regimes recorded); the
+  stiffness threshold shift is below the ladder rung (logged, never
+  overclaimed).
+
 ## Conformance tests
 
 `src/broadband_radiation.rs`: G0 complex/real-SH round trip/reconstruction against
@@ -851,6 +869,15 @@ found in-fixture at 0.2242 = the cord-mount point; striking it kills
 the fundamental ~8 orders, the center strike kills partial 2, and the
 non-noded partials keep speaking); and the listening chain gate
 (WAV -> sidecar -> receipt, Unadjudicated).
+
+`tests/cane_reed_card.rs`, cases cr-001..cr-003 — the provenance-chain
+card mint (identity reproducibility, retained-compliance floor, the
+reed-class f1 band, the lay's facing-scale radius); the sensitivity
+sweeps with a SUSTAINED-oscillation speak detector (tail at 2% of
+blowing pressure and non-decaying — the absolute-threshold detector
+fired on ringing at every rung, twice, before this); and refusals by
+name (a card without a modulus cannot resolve; lay-chart nonsense;
+an empty orifice face).
 
 ## No-claim boundaries
 

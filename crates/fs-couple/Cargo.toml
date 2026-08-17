@@ -40,6 +40,9 @@ fs-material = { path = "../fs-material" }
 fs-modal = { path = "../fs-modal" }
 fs-plate = { path = "../fs-plate" }
 fs-query = { path = "../fs-query" }
+fs-solid = { path = "../fs-solid" }
+fs-matdb = { path = "../fs-matdb" }
+fs-evidence = { path = "../fs-evidence" }
 
 [lints]
 workspace = true

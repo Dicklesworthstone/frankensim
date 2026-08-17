@@ -1,5 +1,5 @@
 # frankensim-wind-gate-summary-v1
-# derived from instrument-claims.json (blake2b-128 669374116bd41e3b4020e81fe8b09dcf); regenerate when wind rows change (gated by wind_junction_gate.rs)
+# derived from instrument-claims.json (blake2b-128 f18b2fbdcfed16db0a5adf30f85ac006); regenerate when wind rows change (gated by wind_junction_gate.rs)
 image	qoi	gate	live_default	exactness	owners	evidence_count	evidence_refs
 char-line	junction-match-tmm-r	green	no	X-Exact+X-Struct	fs-vfit,fs-couple	1	test:crates/fs-couple/tests/wind_junction_gate.rs::char_junctions_match_tmm_r_and_the_detuned_hole_fails
 char-line	quarter-wave-lock	green	no	X-Exact+X-Struct	fs-couple,fs-phs,fs-dcontact	2	listening:data/listening/reed-sustained.listening-receipt; test:crates/fs-couple/tests/acoustic_assembly.rs::beating_reed_locks_near_the_quarter_wave
@@ -7,3 +7,4 @@ phs-chain	td-oracle-agreement	ungated	no	X-Consist	fs-phs	1	test:crates/fs-phs/t
 tmm	fingering-peak-cents	green	no	X-Consist+X-Struct	fs-duct	3	test:crates/fs-duct/tests/ernoult_corpus.rs::ernoult_ladder_driven_from_the_registered_corpus_rows; test:crates/fs-duct/tests/ernoult_corpus.rs::falsifier_a_detuned_corpus_geometry_fails_the_gate; test:crates/fs-duct/src/lib.rs::FingeringTable (typed fingering data; unknown label refuses)
 vfit-hold	held-fingering-cents	green	no	X-Struct	fs-vfit	1	test:crates/fs-vfit/tests/clarinet_casebook.rs::clarinet_impedance_to_passive_audio_filter
 articulation-hop	measured-hop-policy	ungated	no	X-Struct+X-Est	fs-couple	6	test:crates/fs-couple/src/wind_line.rs::wa_001_sigma_transient_and_slur; test:crates/fs-couple/src/wind_line.rs::wa_002_register_vent_flips_the_twelfth; test:crates/fs-couple/src/wind_line.rs::wa_003_gate_refusal_is_structural; test:crates/fs-couple/src/wind_line.rs::wa_004_hop_policy_is_measured_data; test:crates/fs-couple/src/wind_line.rs::committed_hop_policy_is_consistent; receipt:data/claims/wind-hop-policy.tsv (settle eps=0.05 m=4; settled click 0.50-0.60 vs attack 0.86)
+reduced-cane-card	threshold-brightness-sensitivity	ungated	no	X-Consist+X-Est	fs-couple,fs-solid,fs-material	3	test:crates/fs-couple/tests/cane_reed_card.rs::cr_001_the_minted_card_carries_the_provenance_chain; test:crates/fs-couple/tests/cane_reed_card.rs::cr_002_threshold_and_brightness_follow_cane_and_lay; test:crates/fs-couple/tests/cane_reed_card.rs::cr_003_refusals_fire_by_name

@@ -1,5 +1,5 @@
 # frankensim-brass-gate-summary-v1
-# derived from instrument-claims.json (blake2b-128 669374116bd41e3b4020e81fe8b09dcf); regenerate when brass rows change (gated by bakeoff_brass.rs)
+# derived from instrument-claims.json (blake2b-128 f18b2fbdcfed16db0a5adf30f85ac006); regenerate when brass rows change (gated by bakeoff_brass.rs)
 image	qoi	gate	live_default	exactness	owners	evidence_count	evidence_refs
 hb-lock-oracle	periodic-orbit-agreement	ungated	no	X-Consist	fs-vmanifest	0	(none - placeholder)
 mm-char-line	held-fingering-cents	ungated	no	X-Consist+X-Struct	fs-couple,fs-vfit,fs-duct	7	test:crates/fs-couple/src/mm_line.rs::ml_001_held_fingering_matches_the_authority; test:crates/fs-couple/src/mm_line.rs::ml_002_realization_bakeoff_receipt; test:crates/fs-couple/src/mm_line.rs::ml_003_valve_switch_carries_state_without_click; test:crates/fs-couple/src/mm_line.rs::ml_004_passivity_and_receipts; test:crates/fs-couple/src/mm_line.rs::ml_005_mouthpiece_cup_matches_the_analytic_shunt; test:crates/fs-couple/src/mm_line.rs::ml_006_causality_splice_and_refusals; bakeoff:ml-002-bakeoff-receipt: dominant R00 vs N^2 matrix — <1 cent apart, plane energy fraction >0.999, 9x cost; dominant is the play image, matrix retained for higher-mode sources
