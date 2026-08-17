@@ -1,0 +1,523 @@
+{
+ "schema": "org.frankensim.wright-flyer.flyer-reference.v1",
+ "bead": "frankensim-wf-root-guzez.2.2",
+ "status": "ACTIVE",
+ "doctrine": "Single source of physics defaults for the Wright Flyer program. Every value carries per-value sources, a dossier record link, a convention label, and a status: verified (primary/authoritative agreement), verified-range (range is solid, point value is not), tunable-with-provenance (sources disagree or boundary undocumented — simulation exposes it as a config with the variants listed), absent-by-verification (verified to NOT exist in primary sources; any number used is inference and labeled so). Silent keeping of unverifiable values is forbidden.",
+ "verified_on": "2026-08-17",
+ "values": {
+  "wingspan_m": {
+   "value": 12.29,
+   "original": "40 ft 4 in",
+   "status": "verified",
+   "sources": [
+    "Smithsonian NASM A19610048000",
+    "NPS Wright Flyer article",
+    "wright-brothers.org Flyer_I"
+   ],
+   "dossier_record": "a1-wright-1901-tunnel",
+   "convention": "tip-to-tip full span b (geometry-conventions-v1: b is ALWAYS full span)",
+   "variants": []
+  },
+  "chord_m": {
+   "value": 1.981,
+   "original": "6 ft 6 in",
+   "status": "verified",
+   "sources": [
+    "wright-brothers.org spec sheet",
+    "AIAA 2004-0211 (6.5 ft)"
+   ],
+   "dossier_record": "a2-simmodels-deters",
+   "convention": "rib chord, both planes equal",
+   "variants": []
+  },
+  "wing_area_both_m2": {
+   "value": 47.38,
+   "original": "510 ft²",
+   "status": "verified",
+   "sources": [
+    "Smithsonian NASM A19610048000",
+    "NPS",
+    "AIAA 2004-0211"
+   ],
+   "dossier_record": "a2-simmodels-deters",
+   "convention": "projected planform, both planes (geometry-conventions-v1)",
+   "variants": [
+    {
+     "value_original": "518 ft²",
+     "source": "wrightflyerproject.org (AIAA-LA replica project)",
+     "note": "outlier vs NASM/NPS 510"
+    }
+   ]
+  },
+  "aspect_ratio_plane": {
+   "value": 6.38,
+   "original": "b²/S_one_plane",
+   "status": "verified",
+   "sources": [
+    "derived: 12.29²/(47.38/2)"
+   ],
+   "dossier_record": "a1-wright-1901-tunnel",
+   "convention": "AR_plane = b²/S_one_plane; bare 'AR' banned (geometry-conventions-v1)",
+   "variants": []
+  },
+  "aspect_ratio_system": {
+   "value": 3.19,
+   "original": "b²/S_both",
+   "status": "verified",
+   "sources": [
+    "derived: 12.29²/47.38"
+   ],
+   "dossier_record": "a1-wright-1901-tunnel",
+   "convention": "AR_system = b²/S_both; bare 'AR' banned",
+   "variants": []
+  },
+  "wing_gap_m": {
+   "value": 1.89,
+   "original": "6.2 ft (189 cm) separation",
+   "status": "tunable-with-provenance",
+   "sources": [
+    "wright-brothers.org Flyer_I (single source; NASM/NPS publish no gap)"
+   ],
+   "dossier_record": "a1-wright-1901-tunnel",
+   "convention": "vertical separation between plane chords; whether leading-edge or quarter-chord datum is UNSTATED by the source",
+   "variants": [
+    {
+     "value_original": "~6 ft",
+     "source": "plan prior",
+     "note": "superseded by the sourced 6.2 ft"
+    }
+   ]
+  },
+  "camber_ratio": {
+   "value": 0.05,
+   "original": "1/20 as flown 1903",
+   "status": "verified",
+   "sources": [
+    "wright-brothers.org spec sheet",
+    "AIAA papers"
+   ],
+   "dossier_record": "a1-wright-1901-tunnel",
+   "convention": "max camber depth / chord",
+   "variants": []
+  },
+  "anhedral_droop_m": {
+   "value": 0.254,
+   "original": "10 in (0.83 ft) droop across span",
+   "status": "verified",
+   "sources": [
+    "wright-brothers.org spec sheet + Flyer_I",
+    "AIAA 2004-0211 (modeled distributed)"
+   ],
+   "dossier_record": "a2-simmodels-deters",
+   "convention": "total tip droop relative to center section",
+   "variants": []
+  },
+  "anhedral_intent": {
+   "value": "gust-response (crosswind roll rejection)",
+   "original": "Wright-era statement",
+   "status": "verified",
+   "sources": [
+    "Orville (1902, after restoring droop): 'the trouble experienced heretofore with a crosswind turning up the first wing it struck had been overcome' — NASM 'Researching the Wright Way' + Wright-diary-derived accounts"
+   ],
+   "dossier_record": "a3-dec17-records",
+   "convention": "PROMOTION over the plan's Round-2 demotion: a direct Wright-era source exists, so lesson copy MAY state gust-response intent with this citation",
+   "variants": []
+  },
+  "canard_area_m2": {
+   "value": 4.46,
+   "original": "48 ft² total, biplane",
+   "status": "verified",
+   "sources": [
+    "wright-brothers.org spec sheet",
+    "AIAA 2004-0211 (span 12 ft, chord 2.5 ft per surface)",
+    "wrightflyerproject.org"
+   ],
+   "dossier_record": "a2-simmodels-deters",
+   "convention": "both canard planes, projected",
+   "variants": []
+  },
+  "canard_arm_m": {
+   "value": 2.23,
+   "original": "7.32 ft wing-to-canard (1903)",
+   "status": "tunable-with-provenance",
+   "sources": [
+    "AIAA 2004-0211 citing Culick (single source); 1905 increased to 11.7 ft"
+   ],
+   "dossier_record": "a2-simmodels-deters",
+   "convention": "WING-to-canard distance, NOT CG-to-canard; CG arm must be derived from the mass build-up, never assumed equal",
+   "variants": [
+    {
+     "value_original": "~7 ft ahead of CG",
+     "source": "plan prior",
+     "note": "conflated wing-datum with CG-datum; corrected"
+    }
+   ]
+  },
+  "canard_travel_deg": {
+   "value": 30,
+   "original": "±30° photo-inferred",
+   "status": "absent-by-verification",
+   "sources": [
+    "AIAA 2004-0211 verbatim: canard deflection limits 'have not been reported in the literature nor in the blueprints of the Smithsonian'; ±30° obtained by 3D-model matching against the first-flight photograph; beyond 30° adds no control power. ±15° is documented only for the 1905 Flyer."
+   ],
+   "dossier_record": "a2-simmodels-deters",
+   "convention": "VERIFIED ABSENT from primary sources; simulation exposes travel as a tunable with the photo-inference provenance; E1.5 owns any refinement",
+   "variants": [
+    {
+     "value_original": "±15°",
+     "source": "1905 Flyer documentation",
+     "note": "different aircraft; not a 1903 value"
+    }
+   ]
+  },
+  "rudder_area_m2": {
+   "value": 1.86,
+   "original": "20 ft²",
+   "status": "tunable-with-provenance",
+   "sources": [
+    "AIAA 2004-0211 + wrightflyerproject.org + legacy.wrightflyer.org: 20 ft² (avg span 6.9 ft, chord 1.5 ft) — engineering lineage",
+    "wright-brothers.org Flyer_I: 21 ft²"
+   ],
+   "dossier_record": "a2-simmodels-deters",
+   "convention": "projected area, both movable surfaces; 20 ft² default (stronger engineering pedigree), 21 exposed as variant; NASM publishes none",
+   "variants": [
+    {
+     "value_original": "21 ft²",
+     "source": "wright-brothers.org",
+     "note": "live variant, convention difference unresolved (E1.9 projected-vs-developed candidate)"
+    }
+   ]
+  },
+  "rudder_warp_slaving": {
+   "value": 2.5,
+   "original": "δr = 2.5·δw, warp limits ±8.5°",
+   "status": "verified",
+   "sources": [
+    "AIAA 2004-0211 (1903 rudder slaved to warping)"
+   ],
+   "dossier_record": "a2-simmodels-deters",
+   "convention": "1903 configuration: rudder NOT independently pilot-controlled",
+   "variants": []
+  },
+  "empty_weight_kg": {
+   "value": 274.4,
+   "original": "605 lb",
+   "status": "verified",
+   "sources": [
+    "Smithsonian NASM A19610048000",
+    "NPS",
+    "AIAA 2004-0211"
+   ],
+   "dossier_record": "a2-simmodels-deters",
+   "convention": "empty, no pilot, engine installed",
+   "variants": []
+  },
+  "gross_weight_kg": {
+   "value": 340.2,
+   "original": "750 lb (pilot ~145 lb)",
+   "status": "verified",
+   "sources": [
+    "NASM ('Empty 605; Gross 750')",
+    "wright-brothers.org (pilot ≈145 lb; arithmetic-consistent)"
+   ],
+   "dossier_record": "a2-simmodels-deters",
+   "convention": "gross = empty + pilot; pilot mass itself single-source, exposed as tunable in H-cases",
+   "variants": []
+  },
+  "engine_displacement_m3": {
+   "value": 0.003294,
+   "original": "201 in³ (4.0 in bore × 4.0 in stroke, 4 cyl)",
+   "status": "verified",
+   "sources": [
+    "wright-brothers.org 1903_Engine",
+    "NPS"
+   ],
+   "dossier_record": "a2-simmodels-deters",
+   "convention": "swept volume",
+   "variants": []
+  },
+  "engine_power_w": {
+   "value": 8948,
+   "original": "12 hp sustained at ~1025 rpm; ~16 hp cold at start, dropping as it heats",
+   "status": "verified",
+   "sources": [
+    "wright-brothers.org 1903_Engine (12/16 hp behavior)",
+    "NASM + NPS (12 hp)"
+   ],
+   "dossier_record": "a2-simmodels-deters",
+   "convention": "sustained shaft power; the cold-start transient is a SEPARATE modeled effect (E4 propulsion), never averaged in",
+   "variants": [
+    {
+     "value_original": "~16 hp first seconds",
+     "source": "wright-brothers.org",
+     "note": "thermal transient, load-bearing for the launch phase"
+    }
+   ]
+  },
+  "engine_mass_kg": {
+   "value": 81.6,
+   "original": "180 lb (boundary undocumented)",
+   "status": "tunable-with-provenance",
+   "sources": [
+    "NPS: 170 lb (boundary unstated)",
+    "wright-brothers.org: 180 lb (magneto/flywheel/water inclusion unstated; 20-lb flywheel drives the magneto)",
+    "wrightflyerproject.org: ~200 lb with fuel"
+   ],
+   "dossier_record": "a2-simmodels-deters",
+   "convention": "NO source defines the mass boundary; the E1.9 six-bucket convention (dry/installed/cooling/ignition/drivetrain/propellers) must be populated by E1.5/E1.6 dossier work; until then the mass build-up uses 180 lb 'installed-ambiguous' with these variants exposed",
+   "variants": [
+    {
+     "value_original": "170 lb",
+     "source": "NPS"
+    },
+    {
+     "value_original": "~200 lb w/fuel",
+     "source": "wrightflyerproject.org"
+    }
+   ]
+  },
+  "chain_ratio": {
+   "value": 2.875,
+   "original": "23:8 (8T crank, 23T propshaft), one chain crossed for counter-rotation",
+   "status": "verified",
+   "sources": [
+    "wright-brothers.org spec PDF; arithmetic-consistent: 1025 rpm × 8/23 ≈ 357 ≈ reported ~350 prop rpm"
+   ],
+   "dossier_record": "a2-simmodels-deters",
+   "convention": "reduction crank→prop; crossed chain in guide tube",
+   "variants": []
+  },
+  "prop_diameter_m": {
+   "value": 2.59,
+   "original": "8 ft 6 in",
+   "status": "verified",
+   "sources": [
+    "NPS",
+    "Smithsonian propeller record A19830381000 (8½ ft; two laminations 1¾-in spruce, linen tips, aluminum-varnish)"
+   ],
+   "dossier_record": "a2-props-bentend",
+   "convention": "diameter; wright-brothers.org's '8 ft' is a rounding outlier",
+   "variants": [
+    {
+     "value_original": "8 ft",
+     "source": "wright-brothers.org",
+     "note": "rounding outlier"
+    }
+   ]
+  },
+  "prop_rpm_flight": {
+   "value": 350,
+   "original": "~350 in flight; design point 330 rpm at 24 mph",
+   "status": "verified-range",
+   "sources": [
+    "Smithsonian/NPS-linked accounts (~350)",
+    "Wilbur's design point (330)"
+   ],
+   "dossier_record": "a2-props-bentend",
+   "convention": "operating range 330-357; exact per-flight rpm unknowable",
+   "variants": []
+  },
+  "prop_efficiency": {
+   "value": 0.75,
+   "original": "modern measured >75% at first-flight conditions, peak ~82%",
+   "status": "verified-range",
+   "sources": [
+    "Wright Experience AIAA 2001-0309 (measured)",
+    "Smithsonian: 66% is WILBUR'S OWN CALCULATED figure, not a measurement"
+   ],
+   "dossier_record": "a2-props-bentend",
+   "convention": "convention with every number (plan law): 66% = Wilbur-calculated; 75-82% = modern tunnel-measured on reproductions; simulation targets come from a2-props-bentend curves, never the 66% folklore",
+   "variants": [
+    {
+     "value_original": "66%",
+     "source": "Wilbur's calculation, repeated by Smithsonian",
+     "note": "historical calculation, not a measurement"
+    }
+   ]
+  },
+  "airspeed_dec17_mps": {
+   "value": 13.86,
+   "original": "~31 mph through air (telegram); NPS 30-34 mph range",
+   "status": "verified-range",
+   "sources": [
+    "LOC telegram: 'average speed through air thirty-one miles'",
+    "NPS teaching materials: 6.8 mph ground into 27 mph wind ≈ 34 mph air"
+   ],
+   "dossier_record": "a3-dec17-records",
+   "convention": "AIRSPEED; ground speed ~7-10 mph; range honest because the wind measurement itself varies",
+   "variants": []
+  },
+  "static_pitch_stability": {
+   "value": "unstable",
+   "original": "statically unstable; barely stabilizable by trained pilot",
+   "status": "verified",
+   "sources": [
+    "Culick/Jex analyses (AIAA 85-1804-CP, Smithsonian 1987, AIAA Journal 41(6))"
+   ],
+   "dossier_record": "a4-culick-stability",
+   "convention": "open-loop longitudinal; quantitative poles are V-02a gate territory",
+   "variants": []
+  },
+  "flight1_distance_m": {
+   "value": 36.6,
+   "original": "120 ft / 12 s (canonical)",
+   "status": "verified-range",
+   "sources": [
+    "NPS Four Powered Flights (canonical 120 ft/12 s)",
+    "Orville's DIARY (day-of): 'out about 100 feet from the end of the tracks... Time about 12 seconds (not known exactly as watch was not promptly stopped)'",
+    "120 ft figure lineage: Orville's 1913 Flying article"
+   ],
+   "dossier_record": "a3-dec17-records",
+   "convention": "H-case anchors use DISTRIBUTIONS: diary says ~100 ft from track end, canonical 120 ft is later-account; both lineages recorded per WindReference doctrine",
+   "variants": [
+    {
+     "value_original": "~100 ft from track end",
+     "source": "Orville diary (day-of)",
+     "note": "primary; datum ambiguity (track end vs liftoff point)"
+    }
+   ]
+  },
+  "flight2_distance_m": {
+   "value": 53.3,
+   "original": "~175 ft, ~12 s",
+   "status": "verified-range",
+   "sources": [
+    "Orville diary: 'Dist. not measured but about 175 ft'"
+   ],
+   "dossier_record": "a3-dec17-records",
+   "convention": "diary-estimated, not measured",
+   "variants": []
+  },
+  "flight3_distance_m": {
+   "value": 61.0,
+   "original": "~200 ft / 15 s (canonical)",
+   "status": "tunable-with-provenance",
+   "sources": [
+    "DIARY gives NO distance or time for flight 3 ('out about the same distance as Will's', height 'probably 12 to 14 feet'); 200 ft/15 s comes from Orville's 1913 later account"
+   ],
+   "dossier_record": "a3-dec17-records",
+   "convention": "weakest-sourced flight; H-case weighting must reflect that",
+   "variants": []
+  },
+  "flight4_distance_m": {
+   "value": 259.7,
+   "original": "852 ft / 59 s",
+   "status": "verified",
+   "sources": [
+    "Orville diary: 'The distance over the ground was 852 feet in 59 seconds' — the ONLY precisely measured flight; telegram's '57 seconds' is a transmission error"
+   ],
+   "dossier_record": "a3-dec17-records",
+   "convention": "ground distance; landing broke the canard frame; the machine-destroying gust rollover was a SEPARATE later event (John T. Daniels caught inside)",
+   "variants": []
+  },
+  "wind_dec17_mps": {
+   "value": 10.73,
+   "original": "diary: 'a little over 20 miles (corrected) 27 miles according to the Government anemometer'; telegram: 21 mph; later account: 24-27 mph over the flights",
+   "status": "verified-range",
+   "sources": [
+    "Orville diary (verbatim, both instruments)",
+    "LOC telegram mcc.061",
+    "1913 Flying article (24-27 range)"
+   ],
+   "dossier_record": "a3-dec17-records",
+   "convention": "WindReference disaggregation (E1.8): Wrights' hand-held Richard anemometer ~20+ mph vs government Weather Bureau 27 mph; heights unrecorded; the simulation treats wind as a distribution spanning instruments, never one number",
+   "variants": []
+  },
+  "launch_rail_length_m": {
+   "value": 18.3,
+   "original": "60 ft monorail (four 15-ft 2x4s), metal-capped edge, bicycle-hub dolly; liftoff after ~40 ft run on Dec 17",
+   "status": "verified",
+   "sources": [
+    "NPS Four Powered Flights",
+    "Smithsonian annotated first-flight photo"
+   ],
+   "dossier_record": "a3-dec17-records",
+   "convention": "level ground per telegram ('started from level')",
+   "variants": []
+  },
+  "derrick_height_m": {
+   "value": 6.1,
+   "original": "20-ft tower / 16-ft weight drop (technical literature) vs 30-ft derrick (NPS/National-Register lineage)",
+   "status": "tunable-with-provenance",
+   "sources": [
+    "wright-brothers.org catapult reconstruction: ~20-ft salvaged windmill tower, seven 200-lb weights (max 1400 lb), 16-ft drop, 3:1 pulley SPEED multiplication (1 ft drop → ~3 ft pull, ~466 lb continuous pull, ~50 ft of pull)",
+    "NPS CLI/1971 National Register lineage: 1600 lb from a 30-ft derrick"
+   ],
+   "dossier_record": "a3-dec17-records",
+   "convention": "PLAN CORRECTION: the plan's '30 ft (not 16)' flag mixed quantities — 16 ft is the DROP DISTANCE in the 20-ft-tower lineage, not a competing tower height; both lineages live; pulleys multiply DISTANCE not force; first catapult use 1904-09-07",
+   "variants": [
+    {
+     "value_original": "30 ft derrick, 1600 lb",
+     "source": "NPS/NR lineage",
+     "note": "possibly the later heavier configuration"
+    }
+   ]
+  },
+  "huffman_prairie": {
+   "value": "84 acres",
+   "original": "cow pasture (Torrence Huffman, rent-free); first circle 1904-09-20 (Wilbur, ~4080 ft in 1:16); witness Amos I. Root (Gleanings in Bee Culture, 1905-01-01)",
+   "status": "verified",
+   "sources": [
+    "NPS Cultural Landscape article",
+    "USAF Museum",
+    "Library of America / LOC (Root)"
+   ],
+   "dossier_record": "a3-dec17-records",
+   "convention": "site preset provenance",
+   "variants": []
+  },
+  "flight_1905_oct5": {
+   "value": "24.2 mi / 39:23.8",
+   "original": "24 1/5 mi in 39 min 23.8 s, ~29-30 circuits, ended by fuel exhaustion",
+   "status": "verified",
+   "sources": [
+    "Wrights' own record (primary preset per plan §3.3 choice)",
+    "variant: Bishop Milton Wright's diary '24 miles in 38:04'"
+   ],
+   "dossier_record": "a3-dec17-records",
+   "convention": "PRIMARY = Wrights' record; distance is circuit-length × laps (computed ground track), stays inside the 2x2 km tile (E1.3 validates)",
+   "variants": [
+    {
+     "value_original": "24 mi / 38:04",
+     "source": "Milton Wright diary",
+     "note": "eyewitness variant, kept in provenance"
+    }
+   ]
+  },
+  "big_kill_devil_hill_m": {
+   "value": 27.4,
+   "original": "~90 ft today (stabilized); ~100 ft bare shifting dune in 1900-03",
+   "status": "verified-range",
+   "sources": [
+    "NPS monument page (state both epochs)"
+   ],
+   "dossier_record": "a3-dec17-records",
+   "convention": "powered flights from the LEVEL PLAIN north of the hill, not the dune; camp = 1901 shed (lengthened, living quarters ~42x16 ft) + 1903 hangar (~44-48x16 ft, NPS internal variants)",
+   "variants": []
+  },
+  "sand_roughness_z0_m": {
+   "value": 0.003,
+   "original": "1e-3 to 1e-2 m band; bare smooth patches near 1e-4 to 1e-3",
+   "status": "verified-range",
+   "sources": [
+    "Davenport-Wieringa classification (AMS Glossary; featureless sand 0.0002-0.005 m, short grass 0.008-0.03 m)",
+    "Levin et al. 2008 coastal-dune z0 measurements"
+   ],
+   "dossier_record": "a6-bl-meteorology",
+   "convention": "no Kitty-Hawk-specific measurement exists; z0 is a distribution axis in E1.8/E3.3, never a point claim",
+   "variants": []
+  },
+  "glides_1902": {
+   "value": "700-1000",
+   "original": "the Wrights' own estimate, Sept 19 - Oct 24 1902; no complete log kept",
+   "status": "verified-range",
+   "sources": [
+    "Britannica/NASM/wright-brothers.org tracing to Wright correspondence (McFarland)"
+   ],
+   "dossier_record": "a1-wright-1901-tunnel",
+   "convention": "'almost 1000' is the top of the estimate range; any single number is unsupported (narrative use only)",
+   "variants": []
+  }
+ },
+ "no_claims": "Reference values, not model claims. Evidence colors for simulation outputs are assigned by the V-case program; a 'verified' status here means the HISTORICAL value is well-sourced, not that any model reproduces it."
+}
