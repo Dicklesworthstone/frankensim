@@ -368,6 +368,24 @@ else
 fi
 
 # ---- fs-wasm standalone workspace (native tests) ----
+# ---- wright-flyer app lint (bead wf-root-guzez.1.2, E0.2): strict TypeScript
+# typecheck of the browser app; requires node_modules (npm ci) which the DSR
+# host may not have — an absent install is an explicit skip-with-reason row,
+# never a silent pass. ----
+FLYER_APP_LOG="$LOG_DIR/wright-flyer-app-lint.log"
+if [[ -f "apps/wright-flyer/package.json" ]]; then
+  if [[ ! -d "apps/wright-flyer/node_modules" ]]; then
+    printf '%s\n' "node_modules missing (run npm ci in apps/wright-flyer)" >"$FLYER_APP_LOG"
+    row "wright-flyer-app-lint" "fail" "NO-DATA: node_modules absent — npm ci required" "$FLYER_APP_LOG"
+    FAILURES=$((FAILURES + 1))
+  elif (cd apps/wright-flyer && npm run lint) >"$FLYER_APP_LOG" 2>&1; then
+    row "wright-flyer-app-lint" "pass" "strict tsc typecheck clean" "$FLYER_APP_LOG"
+  else
+    row "wright-flyer-app-lint" "fail" "tsc typecheck failed — see full log" "$FLYER_APP_LOG"
+    FAILURES=$((FAILURES + 1))
+  fi
+fi
+
 # ---- fs-flyer-wasm wasm32 guard (bead wf-root-guzez.1.4, E0.4): native-lane
 # edits must not silently break the browser build. Checks the whole flyer cone
 # transitively (fs-mbd, fs-time, and every future flyer crate the manifest

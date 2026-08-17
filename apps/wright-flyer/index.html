@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>First Flight — Wright Flyer</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        overflow: hidden;
+        background: #0b0e12;
+        color: #d8dce2;
+        font-family: system-ui, sans-serif;
+      }
+      #app {
+        position: fixed;
+        inset: 0;
+      }
+      #capability-banner {
+        position: fixed;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        padding: 4px 10px;
+        font-size: 12px;
+        background: rgba(10, 14, 20, 0.85);
+        border-top: 1px solid #2a3140;
+        display: flex;
+        gap: 16px;
+        justify-content: space-between;
+        z-index: 10;
+      }
+      #capability-banner .warn {
+        color: #e0b34d;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <div id="capability-banner">
+      <span id="capability-text">probing capabilities…</span>
+      <span id="fps-text">— fps</span>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
