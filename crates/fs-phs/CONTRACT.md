@@ -209,6 +209,18 @@ None.
   voltage law pinned; refusals by name; and the audit non-vacuity
   falsifier (a sign-flipped supply fails by >1e3x).
 
+- Device battery (`src/device.rs`, cases dv-000..dv-005): the
+  descriptor READ-LAW regression (algebraic efforts are midpoints of
+  the stored coordinate — the consistent-IC raw read is 2x and a
+  direct potential read is a bug by construction); single-triode
+  small-signal gain matching the plate-curve-derived
+  `mu*RL/(RL+rp)` from the card's own finite differences (60.9 vs
+  60.9); the EMERGENT harmonic ladder (H2 rising 0.26%->3.2% across
+  drives 0.05->0.6 with H2 >> H3 throughout — asymmetry from the
+  card + bias, nothing shaped); the diode clipper vs an in-test
+  bisection oracle at residuals <=1e-19; refusals by name (validity
+  region, bias admission); bitwise determinism across re-runs.
+
 ## Conformance tests
 
 `tests/phs.rs` (9): admission rejections; Gonzalez identity +
@@ -263,6 +275,22 @@ matches the dissipation ledger within 2%.
   later, named extension); index analysis is structural (admission
   catches the classic pathologies; exotic graphs that stall Newton
   refuse loudly).
+- DEVICE CARDS + ISLANDS (music bead 3ez8g.9.3): the `device` module
+  carries Koren-class triode and Shockley-class diode-pair CARDS
+  (typed parameters, named provenance, validity regions in the matdb
+  shape) and couples them to `circuit` DAEs as nonlinear ISLANDS —
+  the split-circuit image: the linear network steps through the
+  descriptor machinery while the device iterates against it
+  (Gauss-Seidel sweeps with a load-line-damped island update; fixed
+  caps; analytic Jacobians only — the laws are smooth). Bias
+  admission is a DC Newton refusal, not silent garbage. Distortion is
+  CONSTITUTIVE: the harmonic ladder emerges from curvature at the
+  operating point. No-claims: the split image is the BUDGET solver —
+  the full-DAE monolith is the authority image and the bake-off
+  belongs to the electric-gates bead; parameter provenance is
+  authored-typical (Koren 12AX7 fit constants, silicon-class diode),
+  not a measured-tube ingest; no matdb migration yet (schema is
+  migration-shaped by construction).
 - Non-quadratic storage through `reduce_galerkin` is deferred with the
   same trigger; the refusal is typed.
 - A-priori trajectory/H-error bounds for reduction are a no-claim; the

@@ -332,8 +332,7 @@ impl TriodeStage {
             )
             .map_err(crate::circuit::CircuitError::from)?;
             // Midpoint read (see the constructor's descriptor-read law).
-            let v_p =
-                0.5 * (self.x[self.plate_node_coord] + rec.x[self.plate_node_coord]);
+            let v_p = 0.5 * (self.x[self.plate_node_coord] + rec.x[self.plate_node_coord]);
             x_next = rec.x;
             if v_p > self.card.plate_v_max {
                 return Err(DeviceError::OutsideValidity {
@@ -434,8 +433,12 @@ impl DiodeClipper {
 mod device_tests {
     use super::*;
 
+    /// Pins the descriptor READ LAW this module depends on: algebraic
+    /// efforts are midpoints of the stored coordinate, so the dt=0
+    /// consistency solve from a zero seed stores 2x the true potential
+    /// and every potential read must be a midpoint across the step.
     #[test]
-    fn dv_000_probe() {
+    fn dv_000_midpoint_read_law() {
         let card = TriodeCard::koren_12ax7();
         let (supply, rl, bias) = (300.0, 100.0e3, -1.5);
         // Re-run the bias Newton by hand.
@@ -443,7 +446,9 @@ mod device_tests {
         for _ in 0..80 {
             let (ip, dip_dvp, _) = card.plate_current(v_p, bias);
             let f = (supply - v_p) / rl - ip;
-            if f.abs() < 1.0e-15 { break; }
+            if f.abs() < 1.0e-15 {
+                break;
+            }
             v_p -= f / (-1.0 / rl - dip_dvp);
             v_p = v_p.clamp(1.0, supply);
         }
@@ -459,17 +464,23 @@ mod device_tests {
             transformers: vec![],
         };
         let dae = crate::circuit::assemble_circuit(&graph).expect("assemble");
-        for sign in [1.0f64, -1.0] {
-            let x = dae
-                .consistent_initial_state(&vec![0.0; dae.system.state_dim()], &[supply, sign * ip0])
-                .expect("ics");
-            println!(
-                "u=[300, {}ip0]: v1 {:.3}, v2 {:.3}",
-                if sign > 0.0 { "+" } else { "-" },
-                x[dae.node_potential_index[0]],
-                x[dae.node_potential_index[1]]
-            );
-        }
+        let x = dae
+            .consistent_initial_state(&vec![0.0; dae.system.state_dim()], &[supply, -ip0])
+            .expect("ics");
+        // Midpoints against the zero seed ARE the physical potentials:
+        // v1 = the supply exactly, v2 = the bias plate voltage from the
+        // independent Newton. Raw reads are 2x and MUST NOT be used.
+        let v1_mid = 0.5 * x[dae.node_potential_index[0]];
+        let v2_mid = 0.5 * x[dae.node_potential_index[1]];
+        assert!((v1_mid - supply).abs() < 1.0e-9, "v1 mid {v1_mid}");
+        assert!(
+            (v2_mid - v_p).abs() < 1.0e-6 * v_p.abs(),
+            "v2 mid {v2_mid} vs bias {v_p}"
+        );
+        assert!(
+            (x[dae.node_potential_index[0]] - supply).abs() > 100.0,
+            "raw read unexpectedly physical; the midpoint law changed"
+        );
     }
 
     const RATE: f64 = 96_000.0;
@@ -527,8 +538,7 @@ mod device_tests {
         let card = TriodeCard::koren_12ax7();
         let mut rows = Vec::new();
         for &amp in &[0.05f64, 0.2, 0.6] {
-            let mut stage =
-                TriodeStage::new(card.clone(), 300.0, 100.0e3, -1.5).expect("bias");
+            let mut stage = TriodeStage::new(card.clone(), 300.0, 100.0e3, -1.5).expect("bias");
             let dt = 1.0 / RATE;
             let f = 200.0;
             let n = (30.0 / f / dt) as usize;
@@ -573,8 +583,7 @@ mod device_tests {
         // The island's Newton vs a BISECTION solve of the same scalar
         // equation in-test (method diversity), plus the knee sanity:
         // far above the knee the output compresses logarithmically.
-        let clipper =
-            DiodeClipper::new(DiodePairCard::silicon_class(), 4.7e3).expect("clipper");
+        let clipper = DiodeClipper::new(DiodePairCard::silicon_class(), 4.7e3).expect("clipper");
         let card = DiodePairCard::silicon_class();
         for &vin in &[0.05f64, 0.3, 1.0, 3.0] {
             let (v_newton, iters, res) = clipper.solve(vin).expect("newton");
@@ -650,13 +659,11 @@ mod device_tests {
         // telemetry discloses iterations/residual/drift.
         let run = || -> (Vec<u64>, IslandTelemetry) {
             let mut stage =
-                TriodeStage::new(TriodeCard::koren_12ax7(), 300.0, 100.0e3, -1.5)
-                    .expect("bias");
+                TriodeStage::new(TriodeCard::koren_12ax7(), 300.0, 100.0e3, -1.5).expect("bias");
             let dt = 1.0 / RATE;
             let mut bits = Vec::new();
             for k in 0..2000 {
-                let vin =
-                    0.3 * crate::det::sin(core::f64::consts::TAU * 200.0 * k as f64 * dt);
+                let vin = 0.3 * crate::det::sin(core::f64::consts::TAU * 200.0 * k as f64 * dt);
                 bits.push(stage.step(vin, dt).expect("step").to_bits());
             }
             (bits, stage.telemetry())
