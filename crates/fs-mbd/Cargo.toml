@@ -7,8 +7,14 @@ repository.workspace = true
 authors.workspace = true
 description = "Deterministic safe-Rust foundations for unconstrained rigid-body dynamics"
 
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+
 [package.metadata.frankensim]
 layer = "L3"
+
 
 [lints]
 workspace = true

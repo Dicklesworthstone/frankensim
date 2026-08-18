@@ -1,0 +1,24 @@
+[package]
+name = "fs-goddard-wasm"
+version = "0.0.1"
+edition = "2024"
+publish = false
+description = "Browser (WASM) surface for the Goddard Rocket simulation — real FrankenSim physics in the browser."
+
+[workspace]
+
+[lib]
+name = "fs_goddard_wasm"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+fs-mbd = { path = "../fs-mbd" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+asupersync = { path = "../../../asupersync", default-features = false, features = ["wasm-browser-prod"] }
+
+[lints.rust]
+unsafe_code = "forbid"

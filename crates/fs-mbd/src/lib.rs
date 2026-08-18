@@ -15,6 +15,8 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod goddard;
+
 use core::fmt;
 
 /// A three-dimensional vector in an explicitly documented frame.
