@@ -161,8 +161,6 @@ members = [
     "crates/fs-project",
     "crates/fs-cli",
     "crates/fs-evidence-runner",
-    "crates/fs-tesla-wasm",
-    "crates/fs-goddard-wasm",
     "xtask",
 ]
 
