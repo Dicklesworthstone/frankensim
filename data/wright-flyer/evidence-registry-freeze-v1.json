@@ -1,0 +1,127 @@
+{
+ "schema": "org.frankensim.wright-flyer.evidence-registry-freeze.v1",
+ "beads": {
+  "e1_10": "frankensim-wf-root-guzez.2.10",
+  "e1_7": "frankensim-wf-root-guzez.2.7"
+ },
+ "status": "FROZEN",
+ "frozen_on": "2026-08-18",
+ "a7_decision": {
+  "decision": "A7NoGo-v1",
+  "revisable": true,
+  "audit": {
+   "candidate": "The Wright Experience (Warrenton, VA)",
+   "capability": "CONFIRMED capable: holds the complete private digital 1903 reconstruction (rapid-prototyping grade), built the LFST-tested reproductions (E1.6 research, 2026-08-18)",
+   "data_rights": "their scans/data have NEVER been publicly released; access requires a negotiated agreement — an outward-facing partnership action reserved to the project owner",
+   "status_at_freeze": "no signed feasibility or instrumentation agreement exists"
+  },
+  "consequence": "per plan §E1.10 'no agreement means the Estimated ceiling stands': quantitative canard hinge-moment levels remain Estimated (canard-mechanics-v1 overbalance_evidence ceiling); V-02b validates SIGN/tendency only; H-02c stays a compatibility check that cannot promote",
+  "revival_path": "a later signed agreement opens a NEW campaign: fresh pre-registration (protocol frozen BEFORE data), A7a/A7b as distinct independence groups (a7a-rig-future / a7b-replica-future in source-dossier-v1), holdout-only consumption per §5.1.3; this freeze does not have to be reopened — the new campaign adds evidence, it never edits frozen partitions",
+  "no_historical_endpoint_substitutes": true
+ },
+ "frozen_artifacts": {
+  "doctrine": "the registry FREEZES the evidence artifacts by content hash (fs-blake3 of the exact bytes). The battery recomputes every hash; ANY post-hoc edit to a frozen artifact — including a 'harmless' widening of a band, partition, or claim — turns CI red. Legitimate evolution mints a v2 artifact beside the frozen v1 and records a predecessor link; in-place edits are the attack this freeze exists to stop.",
+  "files": {
+   "source-dossier-v1.json": "0a75f54d5669c1ad9f8c0cee9e17472b794a48b50f448a5609f1e13fd02b161a",
+   "flyer-reference.json": "355b53b4028bccdc32b7c07d5a4c076b9532f75c47a8def9b0c85da7891e8307",
+   "canard-mechanics-v1.json": "cd3d30a8e350b2babfd90914fa7187425b3e35a86c6b40df4f9fe29e7e39a6e9",
+   "prop-geometry-v1.json": "dcfe3697214af15efaf81efb423f4b791ad075e330b4971093b6433a7104223a",
+   "air-state-v1.json": "89d69b3cb955b27946d4db6526f5cb7f8f647598a3ff0decd24f2b479f496080",
+   "geometry-conventions-v1.json": "771c2911ce666980f0d1f07e66abe1843908efaefd3f39a71e45572437b1a061",
+   "frame-conventions-v1.json": "dc5ccfe0fad931c5154533f3dac60069812d38b7618eddec8faaa00bc3f23a95",
+   "replay-identity-schema-v1.json": "c8ac2f16fde73409fef04517df33a4e80c63a0f7a10ba83c04712c6bcc456319"
+  }
+ },
+ "partitions_summary": {
+  "calibration": [
+   "prop-geometry-v1: curves_1911_bentend (BEMT method validation)",
+   "a5-biplane-theory (verification fixtures, neither cal nor val)"
+  ],
+  "holdout_only": [
+   "a3-dec17-records (end-to-end anchors, never fitted)",
+   "a4-culick-stability (V-02a gate reference)",
+   "prop-geometry-v1: static_1903/static_1904/eta_band_1903",
+   "flight distances/durations/wind distributions"
+  ],
+  "blocked_pending_data": [
+   "a2-ames-fullscale-1999 + a2-lfst-wrightexperience force/moment TABLES: not yet in-repo; partition assigned AT INGEST under reexpression-v1 with this registry's rules; ingest without partition assignment refuses"
+  ],
+  "prohibitions": [
+   "a2-synthesized-stall may never validate Wright-specific deep stall (Estimated ceiling)",
+   "a2-simmodels-deters may never corroborate its Ames origin",
+   "cross-group corroboration involving shared personnel (Culick/Jex in both A2-Ames and A4) is DISCOUNTED"
+  ]
+ },
+ "provisional_bands_10_5": {
+  "note": "frozen verbatim from plan §10.5; E10.0 audits conformance; changing any band = a v2 registry with predecessor link",
+  "indicial_kernels": {
+   "step_response_err_max": 0.02,
+   "gain_err_max": 0.02,
+   "phase_err_max_deg": 3.0,
+   "channels": "lift AND moment over the declared reduced-frequency band"
+  },
+  "airborne_timestep_convergence": {
+   "principal_kpis_max": 0.01,
+   "protocol": "unstable-system: poles within ratified bands, SHORT-WINDOW trajectory norms local, long-horizon energy/Wasserstein inside pre-registered MC CI; full-duration RMS diagnostic only"
+  },
+  "contact": {
+   "timing_impulse_max": 0.02
+  },
+  "atmosphere": {
+   "ti_and_integral_scales": 0.2,
+   "reynolds_stress_ratios": 0.25,
+   "gust_quantiles": 0.2,
+   "spectral_tensor": "declared estimator/windows/bins/realizations/CIs per V-04b1/V-04b2"
+  },
+  "wake_fast_modes": {
+   "mixed_norm_rms_max": 0.03,
+   "max_outside_cores": 0.1,
+   "circulation_residual_max": 0.005,
+   "impulse_residual_max": 0.01
+  },
+  "real_time": {
+   "service_p99_ms": 6.0,
+   "note": "plus lateness/backlog gates per §7.2.1; ratification requires qualified quiet devices (E0.6b)"
+  },
+  "ensembles": {
+   "browser_presets": [
+    32,
+    128,
+    256,
+    512
+   ],
+   "offline_h_program_start": 4096,
+   "rule": "doubling until pre-registered precision criteria; validation counts never limited by the browser"
+  },
+  "historical_endpoints": "pre-registered joint predictive regions — NO universal multiplicative band"
+ },
+ "anti_vacuity_baselines": {
+  "doctrine": "every V-case comparison must ALSO run its deficient baseline and show the gate DISCRIMINATES (the deficient model must fail); a gate both models pass is vacuous and counts as red",
+  "registered": [
+   {
+    "id": "rigid-plate-canard",
+    "deficient_because": "understates control power vs the Ames-measured variable-camber effectiveness (canard-mechanics kinematics)"
+   },
+   {
+    "id": "uncoupled-no-memory-aero",
+    "deficient_because": "plan §V table: uncoupled canard/wing, no unsteady memory, total-speed reduced time, one-way prop coupling — the four Round-2 correction axes"
+   },
+   {
+    "id": "standard-atmosphere-air",
+    "deficient_because": "ignores the measured cold-day density (air-state-v1: rho 1.294 vs 1.225, ~6%)"
+   },
+   {
+    "id": "j-only-prop-map",
+    "deficient_because": "CT/CQ not single-valued in J under rotor acceleration/distorted inflow (plan §5.3); admitted only where the paired error battery passes"
+   }
+  ]
+ },
+ "h_case_protocol": {
+  "prior_predictive": "H-case ensembles draw from the PRE-REGISTERED distributions (air-state-v1 dec17 preregistration; canard-mechanics priors; flyer-reference variants as distribution support) BEFORE seeing endpoint data",
+  "lofo_mandatory": "leave-one-flight-out is mandatory for any H-07-class historical-consistency claim; per-member allocations per the intent-manifest machinery (E10.2a/b/c)",
+  "no_gust_trace": "no member ever claims a recovered historical gust trace (air-state law, battery-gated)",
+  "scoring": "joint predictive regions over (distance, duration, wind) with the diary-vs-canonical lineage widths from flyer-reference"
+ },
+ "identity": "this registry's own content hash (at commit, via the source manifest) is the EvidenceRegistryId; consumers cite it; E10.0 audits conformance against exactly this hash",
+ "no_claims": "A freeze of partitions, bands, baselines, and protocol — not a validation of anything. Every band is provisional until its V-case executes; the freeze makes post-hoc widening detectable, not results correct."
+}
