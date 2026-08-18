@@ -64,6 +64,13 @@ pub enum PlateError {
         /// Its doubled signed area.
         twice_area: f64,
     },
+    /// A boundary list references a node outside the mesh.
+    BadBoundary {
+        /// The offending node index.
+        node: usize,
+        /// Mesh node count.
+        node_count: usize,
+    },
     /// A stiffener path references nodes outside the mesh or is too short.
     BadStiffener {
         /// Diagnostic.
@@ -83,6 +90,10 @@ impl core::fmt::Display for PlateError {
             } => write!(
                 f,
                 "FS-PLATE-DEGENERATE-ELEMENT: element {element} has 2A = {twice_area:.3e}"
+            ),
+            PlateError::BadBoundary { node, node_count } => write!(
+                f,
+                "FS-PLATE-BAD-BOUNDARY: boundary node {node} outside the {node_count}-node mesh"
             ),
             PlateError::BadStiffener { what } => write!(f, "FS-PLATE-BAD-STIFFENER: {what}"),
             PlateError::Modal(e) => write!(f, "FS-PLATE-MODAL: {e}"),
@@ -536,7 +547,16 @@ pub fn assemble(
 ) -> Result<PlateModel, PlateError> {
     let nn = mesh.node_count();
     let ndof = 3 * nn;
-    // DOF elimination map.
+    // DOF elimination map. Out-of-range boundary nodes refuse BY NAME
+    // (found by the conformance battery: this used to panic).
+    for &node in boundary {
+        if node >= nn {
+            return Err(PlateError::BadBoundary {
+                node,
+                node_count: nn,
+            });
+        }
+    }
     let mut fixed = vec![false; ndof];
     for &node in boundary {
         match opts.support {
