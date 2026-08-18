@@ -15,8 +15,8 @@ LCP, no bespoke scheme).
 
 - `Obstacle` — collocation matrix `Phi[i][k]`, per-point gaps and
   quadrature weights, shared `(K, alpha)` power law with a PROVENANCE
-  string (logged, never invented; matdb lookup deferred until packs
-  carrying contact-law parameters exist — no fake wiring). Fields are
+  string (logged, never invented; receipted construction via
+  `Obstacle::from_receipt` from fs-matdb contact packs). Fields are
   PRIVATE so admission is mandatory (accessors + a documented
   `from_raw_parts` trust escape for mutation batteries). Admission
   refuses NaN/non-finite entries, negative weights/stiffness, and
@@ -129,6 +129,14 @@ typed parameter refusals.
   refusal, executed) — stiff grazing fixtures should use
   `alpha >= 2`, and a globalized Newton is a potential fs-phs
   follow-up.
-- Contact-law `(K, alpha)` materials data: no packs exist yet; the
-  provenance field is the wiring point when they do.
+- Contact-law `(K, alpha)` materials data: WIRED (music bead
+  3ez8g.13.1). fs-matdb's `ContactLawCard`/`ContactReceipt` carry
+  the pair + geometry context, identification, force/velocity
+  validity, and the graze advisory; `Obstacle::from_receipt` builds
+  from the receipt verbatim and formats the provenance from the pack
+  identity. Absent packs refuse upstream BY NAME (no default K
+  anywhere on the path); out-of-validity lookups refuse in fs-matdb
+  rather than extrapolate. The jawari fixture's migration to the
+  receipted card is proven PROVENANCE-ONLY (bitwise-identical
+  2000-step trajectory, `contact_pack_migration_is_provenance_only`).
 - Obstacles are static (no moving frets/bridges) in v1.

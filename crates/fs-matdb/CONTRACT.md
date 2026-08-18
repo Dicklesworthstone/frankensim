@@ -309,6 +309,23 @@ super-linear.
 
 None.
 
+- Contact-law packs (music bead 3ez8g.13.1): `contact_pack` —
+  `frankensim.matdb-contact.v1` TSV grammar where the PAIR + GEOMETRY
+  context is required identity (a contact law without its pair
+  context is not a datum: incomplete rows REFUSE), with
+  identification method, force/velocity validity, and a REQUIRED
+  graze advisory (doctrine from the executed jawari fixture:
+  `1 < alpha < 2` laws carry an unbounded contact Hessian at the
+  boundary and stall FD-Jacobian Newton in tight-graze regimes —
+  grazing fixtures carry `alpha >= 2` cards). `lookup(force, vel)`
+  mints a typed `ContactReceipt` and REFUSES outside the declared
+  validity (never extrapolates — falsifier executed). Seed packs v1:
+  contact-jawari-bone-bridge (identified-from-fixture, the executed
+  graded-bridge calibration), contact-cane-reed-on-mouthpiece-lay
+  and contact-string-on-fret-nickel (authored-typical Estimates,
+  labeled; the fret card's alpha = 1.5 Hertz value carries the
+  advisory that rattle fixtures need the alpha >= 2 variant).
+
 ## Conformance tests
 
 `tests/conformance.rs`: scalar and curve round-trips with dims checks
@@ -476,6 +493,14 @@ pinning the aluminum-alloy configuration, incomplete process identity, crack,
 local breakthrough, and foreshortened-run caveats. It refuses to infer a wear
 rate, friction law, coating thickness, transferable durability, or generic
 Wankel-housing authority.
+
+`src/contact_pack.rs` `contact_pack_tests` (cp-001..cp-004): all
+three committed packs load with bitwise round-trip through the
+receipt; pair-context completeness refusals per stripped field;
+the out-of-validity lookup falsifier (epsilon outside each axis
+refuses); law refusals (alpha < 1, K <= 0, chi < 0, unordered
+validity) and the absent-pack refusal by name. The consumer-side
+migration equivalence lives in fs-dcontact's battery.
 
 ## No-claim boundaries
 
