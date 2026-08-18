@@ -135,7 +135,11 @@ where
     admit_step(state, dt_s)?;
     let l0 = loads(t_s, state);
     let inv_m = 1.0 / body.mass_kg;
-    let a0 = [l0.force_n[0] * inv_m, l0.force_n[1] * inv_m, l0.force_n[2] * inv_m];
+    let a0 = [
+        l0.force_n[0] * inv_m,
+        l0.force_n[1] * inv_m,
+        l0.force_n[2] * inv_m,
+    ];
     // Drift: x+ = x + v·dt + a0·dt²/2.
     let mut pos = *state;
     for i in 0..3 {
@@ -156,7 +160,11 @@ where
         predictor.omega_body[i] = w_free[i];
     }
     let l1 = loads(t_s + dt_s, &predictor);
-    let a1 = [l1.force_n[0] * inv_m, l1.force_n[1] * inv_m, l1.force_n[2] * inv_m];
+    let a1 = [
+        l1.force_n[0] * inv_m,
+        l1.force_n[1] * inv_m,
+        l1.force_n[2] * inv_m,
+    ];
     for i in 0..3 {
         pos.vel_mps[i] = state.vel_mps[i] + 0.5 * (a0[i] + a1[i]) * dt_s;
         pos.omega_body[i] = w_free[i] + l1.moment_nm[i] / body.inertia_kgm2[i] * half;

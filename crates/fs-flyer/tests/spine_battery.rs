@@ -5,7 +5,7 @@
 //! pinned trajectory golden.
 //! Repro: cargo test -p fs-flyer --test spine_battery
 
-use fs_flyer::spine::{advance, step, tick_digest, Loads, RigidBody, SixDofState, MAX_STEPS};
+use fs_flyer::spine::{Loads, MAX_STEPS, RigidBody, SixDofState, advance, step, tick_digest};
 
 fn jlog(case: &str, payload: &str) {
     println!("{{\"suite\":\"fs-flyer-spine\",\"case\":\"{case}\",{payload}}}");
@@ -14,7 +14,10 @@ fn jlog(case: &str, payload: &str) {
 const DT: f64 = 1.0 / 120.0;
 
 fn body() -> RigidBody {
-    RigidBody { mass_kg: 340.17, inertia_kgm2: [1787.0, 367.4, 1820.9] }
+    RigidBody {
+        mass_kg: 340.17,
+        inertia_kgm2: [1787.0, 367.4, 1820.9],
+    }
 }
 
 fn rest() -> SixDofState {
@@ -45,7 +48,10 @@ fn ballistic_parabola_is_near_machine_exact() {
     assert!((end.pos_m[0] - exact_x).abs() < 1e-9, "x {}", end.pos_m[0]);
     assert!((end.pos_m[2] - exact_z).abs() < 1e-9, "z {}", end.pos_m[2]);
     assert!((end.vel_mps[2] - (-5.0 + g * t)).abs() < 1e-9);
-    jlog("ballistic", &format!("\"x\":{},\"z\":{}", end.pos_m[0], end.pos_m[2]));
+    jlog(
+        "ballistic",
+        &format!("\"x\":{},\"z\":{}", end.pos_m[0], end.pos_m[2]),
+    );
 }
 
 #[test]
@@ -68,14 +74,20 @@ fn single_axis_spinup_matches_closed_form() {
     // Quaternion still unit-norm after the split steps.
     let norm2: f64 = end.quat.iter().map(|v| v * v).sum();
     assert!((norm2 - 1.0).abs() < 1e-10, "norm² {norm2}");
-    jlog("spinup", &format!("\"omega\":{},\"exact\":{exact}", end.omega_body[1]));
+    jlog(
+        "spinup",
+        &format!("\"omega\":{},\"exact\":{exact}", end.omega_body[1]),
+    );
 }
 
 #[test]
 fn richardson_order_is_two_on_time_varying_force() {
     // F(t) = sin(2t) on x: exact velocity v(t) = (1−cos 2t)/2m …with m=1.
     // Measure global order by halving dt twice and fitting the slope.
-    let unit = RigidBody { mass_kg: 1.0, inertia_kgm2: [1.0, 1.0, 1.0] };
+    let unit = RigidBody {
+        mass_kg: 1.0,
+        inertia_kgm2: [1.0, 1.0, 1.0],
+    };
     let t_end = 1.0;
     let err_at = |n: u32| -> f64 {
         let dt = t_end / f64::from(n);
@@ -115,8 +127,15 @@ fn bit_identity_across_runs_and_digest_sensitivity() {
     assert_ne!(tick_digest(0, &a), tick_digest(1, &a));
     let mut nudged = a;
     nudged.pos_m[0] = f64::from_bits(a.pos_m[0].to_bits() ^ 1);
-    assert_ne!(tick_digest(0, &a), tick_digest(0, &nudged), "1-ulp must move the digest");
-    jlog("bit-identity", &format!("\"ticks\":480,\"final_digest\":\"{}\"", da.last().unwrap()));
+    assert_ne!(
+        tick_digest(0, &a),
+        tick_digest(0, &nudged),
+        "1-ulp must move the digest"
+    );
+    jlog(
+        "bit-identity",
+        &format!("\"ticks\":480,\"final_digest\":\"{}\"", da.last().unwrap()),
+    );
 }
 
 #[test]
@@ -139,11 +158,17 @@ fn refusals_at_cap_and_cap_plus_one() {
         moment_nm: [0.0; 3],
     });
     assert_eq!(bad_dt.unwrap_err().code, "timestep-outside-domain");
-    let bad_body = RigidBody { mass_kg: 0.0, inertia_kgm2: [1.0; 3] };
+    let bad_body = RigidBody {
+        mass_kg: 0.0,
+        inertia_kgm2: [1.0; 3],
+    };
     assert_eq!(
-        step(&bad_body, &rest(), 0.0, DT, |_, _| Loads { force_n: [0.0; 3], moment_nm: [0.0; 3] })
-            .unwrap_err()
-            .code,
+        step(&bad_body, &rest(), 0.0, DT, |_, _| Loads {
+            force_n: [0.0; 3],
+            moment_nm: [0.0; 3]
+        })
+        .unwrap_err()
+        .code,
         "mass-outside-domain"
     );
     let mut nan_state = rest();
@@ -172,7 +197,7 @@ fn trajectory_golden() {
     let last = digests.last().unwrap().clone();
     jlog("golden", &format!("\"digest\":\"{last}\""));
     assert_eq!(
-        last, "PLACEHOLDER-MEASURE-THEN-PIN",
+        last, "816e722d0ddbf5d9e864aa3eab7a9cd21b0b1a6fad3d64cf4b76eb4b30c156e5",
         "spine trajectory digest moved — determinism regression or an \
          intentional integrator change requiring the golden-bump protocol"
     );
