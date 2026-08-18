@@ -52,7 +52,7 @@ fn run_checkpointed(
         // The load model (deterministic stand-in for aero+propulsion).
         let mut loads_now = Loads {
             force_n: [5.0 * (2.0 * t).sin(), 1.0, 3336.0 - 30.0 * s.vel_mps[2]],
-            moment_nm: [2.0, 8.0 * t.cos(), -1.0 * s.omega_body[2]],
+            moment_nm: [2.0, 8.0 * t.cos(), -s.omega_body[2]],
         };
         if perturb_loads && fault_tick == Some(tick) {
             // A small RELATIVE fault (1e-9): large enough to survive the
