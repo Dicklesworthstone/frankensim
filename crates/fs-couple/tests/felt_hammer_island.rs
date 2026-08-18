@@ -54,8 +54,8 @@ fn string_model() -> ModalAcousticTimeModel {
     let wave_speed = (60.0f64 / 6.0e-4).sqrt();
     let modes = (1..=3)
         .map(|k| ModalAcousticMode {
-            angular_frequency_rad_s: k as f64 * core::f64::consts::PI * wave_speed / 0.65,
-            damping_ratio: 5.0e-4 * k as f64,
+            angular_frequency_rad_s: f64::from(k) * core::f64::consts::PI * wave_speed / 0.65,
+            damping_ratio: 5.0e-4 * f64::from(k),
             pressure_per_modal_velocity: fs_math::c64::C64::new(1.0, 0.0),
         })
         .collect();
@@ -115,7 +115,7 @@ fn strike(mut hammer: Hammer, v0: f64) -> StrikeOutcome {
     // Mode shapes at the strike point (normalized sin(k pi x0/L), x0/L = 0.12
     // — near-bridge-ish striking point).
     let phi: Vec<f64> = (1..=3)
-        .map(|k| fs_math::det::sin(k as f64 * core::f64::consts::PI * 0.12))
+        .map(|k| fs_math::det::sin(f64::from(k) * core::f64::consts::PI * 0.12))
         .collect();
     let dt = 1.0 / f64::from(RATE);
     let h = dt / SUBSTEPS as f64;
@@ -578,6 +578,8 @@ fn the_phs_string_island_ledger_closes_with_sampled_geometry() {
 /// and the constant-thickness control matching the closed-form
 /// cylinder sagitta.
 #[test]
+#[allow(clippy::too_many_lines)] // one coherent ingest-to-response chain
+#[allow(clippy::items_after_statements)] // fixture constants live next to their stage
 fn the_ingested_field_drives_the_certified_response_chain() {
     use fs_contact::normal_patch::{
         FiniteGapChartEvidenceRequirement, FiniteGapChartSamplingAuthority,
@@ -780,7 +782,10 @@ fn the_ingested_field_drives_the_certified_response_chain() {
             ..
         } => {
             assert_eq!(response_identity, curve.identity);
-            assert!((elastic_force_n - response.normal_force_n).abs() == 0.0);
+            #[allow(clippy::float_cmp)] // EXACT zero-difference pin (never weakened for a lint)
+            {
+                assert_eq!(elastic_force_n, response.normal_force_n);
+            }
         }
         _ => unreachable!(),
     }

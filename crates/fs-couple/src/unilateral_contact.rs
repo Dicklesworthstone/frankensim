@@ -129,6 +129,7 @@ pub fn modal_contact_forces(
             let ft = law
                 .regularized_traction_1d(-v, normal, 1.0e-3)
                 .unwrap_or(0.0);
+            #[allow(clippy::needless_range_loop)] // the modal index spans forces and shapes
             for k in 0..string.n_modes {
                 let ph = det::sin((k + 1) as f64 * pi * s) / mass_scale;
                 forces[k] += ft * ph;
@@ -198,6 +199,7 @@ pub fn modal_friction_forces(
             let ft = law
                 .regularized_traction_1d(-v, normal, 1.0e-3)
                 .unwrap_or(0.0);
+            #[allow(clippy::needless_range_loop)] // the modal index spans forces and shapes
             for k in 0..string.n_modes {
                 let ph = det::sin((k + 1) as f64 * pi * s) / mass_scale;
                 forces[k] += ft * ph;

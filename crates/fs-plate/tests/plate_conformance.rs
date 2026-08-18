@@ -32,6 +32,7 @@ fn steel() -> PlateSection {
     PlateSection::isotropic(200e9, 0.3, 0.002, 7800.0).expect("steel")
 }
 
+#[allow(clippy::too_many_arguments)] // one coherent physics record/assembler
 fn fundamental(
     sec: &PlateSection,
     a: f64,

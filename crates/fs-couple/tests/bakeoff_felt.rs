@@ -54,8 +54,8 @@ fn string_model() -> ModalAcousticTimeModel {
     let wave_speed = (60.0f64 / 6.0e-4).sqrt();
     let modes = (1..=3)
         .map(|k| ModalAcousticMode {
-            angular_frequency_rad_s: k as f64 * core::f64::consts::PI * wave_speed / 0.65,
-            damping_ratio: 5.0e-4 * k as f64,
+            angular_frequency_rad_s: f64::from(k) * core::f64::consts::PI * wave_speed / 0.65,
+            damping_ratio: 5.0e-4 * f64::from(k),
             pressure_per_modal_velocity: fs_math::c64::C64::new(1.0, 0.0),
         })
         .collect();
@@ -142,7 +142,7 @@ struct StrikeOutcome {
 fn strike(mut hammer: Hammer, v0: f64) -> StrikeOutcome {
     let mut string = string_model();
     let phi: Vec<f64> = (1..=3)
-        .map(|k| fs_math::det::sin(k as f64 * core::f64::consts::PI * 0.12))
+        .map(|k| fs_math::det::sin(f64::from(k) * core::f64::consts::PI * 0.12))
         .collect();
     let dt = 1.0 / f64::from(RATE);
     let h = dt / SUBSTEPS as f64;
@@ -331,6 +331,7 @@ fn committed_felt_bakeoff_receipt_shows_the_structural_gap() {
     let hc_m = &receipt.contenders[1].measured;
     // Structural gap 1: HC holds NO residual strain at any velocity; the
     // felt's residual GROWS with velocity.
+    #[allow(clippy::float_cmp)] // EXACT receipt echo (never weakened for a lint)
     for tag in ["v0.8", "v2.0", "v4.0"] {
         assert_eq!(
             hc_m[&format!("residual-strain-{tag}")],

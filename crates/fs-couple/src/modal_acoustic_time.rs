@@ -583,6 +583,7 @@ impl ModalAcousticTimeModel {
     /// # Errors
     /// Refuses nonpositive/nonfinite duration and every condition documented
     /// by [`Self::step`]. A refusal leaves every modal state unchanged.
+    #[allow(clippy::too_many_lines)] // one coherent block loop
     pub fn step_duration(
         &mut self,
         generalized_force_n_per_sqrt_kg: &[f64],
@@ -736,11 +737,13 @@ fn check_limit(what: &'static str, value: f64, limit: f64) -> Result<(), ModalAc
 }
 
 fn modal_energy(mode: ModalAcousticMode, state: ModalAcousticState) -> f64 {
-    0.5 * (state.velocity_m_sqrt_kg_per_s * state.velocity_m_sqrt_kg_per_s
-        + mode.angular_frequency_rad_s
+    f64::midpoint(
+        state.velocity_m_sqrt_kg_per_s * state.velocity_m_sqrt_kg_per_s,
+        mode.angular_frequency_rad_s
             * mode.angular_frequency_rad_s
             * state.displacement_m_sqrt_kg
-            * state.displacement_m_sqrt_kg)
+            * state.displacement_m_sqrt_kg,
+    )
 }
 
 fn exact_zoh_coefficients(mode: ModalAcousticMode, dt: f64) -> ExactZohCoefficients {

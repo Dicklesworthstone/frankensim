@@ -150,9 +150,7 @@ fn plucked_height_scales_pressure_and_does_not_peak_normalize() {
     assert!(a > 0.0 && b > 0.0, "radiated pressure must be live");
     assert!(
         (b / a - 2.0).abs() < 0.05,
-        "linear radiation must track pluck height, got {} / {}",
-        b,
-        a
+        "linear radiation must track pluck height, got {b} / {a}",
     );
 }
 

@@ -16,6 +16,8 @@ use crate::unilateral_contact::{
     modal_contact_forces, modal_friction_forces, modal_hunt_crossley_forces, slit_contact_force,
     slit_lay,
 };
+const SECTION_SECTION_BUDGET: f64 = 8.0;
+
 use fs_duct::{Duct, DuctError, HoleState, MAX_RADIATION_KA, Segment, Termination};
 use fs_material::gas::{GasSpec, GasState};
 use fs_material::visco::{GeneralizedMaxwell, RayleighDamping};
@@ -102,6 +104,7 @@ pub struct RealizedAssembly {
 /// # Errors
 /// Empty assemblies, invalid events, gas/domain refusals, stepper or TMM
 /// refusals.
+#[allow(clippy::too_many_lines)] // one coherent realization dispatcher
 pub fn realize_assembly(
     assembly: &AcousticAssembly,
 ) -> Result<RealizedAssembly, AcousticRealizeError> {
@@ -257,6 +260,8 @@ pub fn realize_assembly(
 /// support does no work (`φ(0)=0`) so the members share a clock
 /// but not a force — the chain is driven only by blow/reed.
 /// Shared clock, not FIR.
+#[allow(clippy::too_many_lines)] // one coherent coupled realization
+#[allow(clippy::needless_range_loop)] // the sample index is the time axis
 fn realize_coupled_ode(
     assembly: &AcousticAssembly,
     gas: &GasState,
@@ -301,7 +306,7 @@ fn realize_coupled_ode(
                 what: "ODE coupled duct expected a linear plate bank",
             })?
         };
-        let face = if inlets == 2 { 1 } else { 0 };
+        let face = usize::from(inlets == 2);
         transformer(plate, chain, 1, face, 1.0)
             .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?
     } else {
@@ -461,6 +466,7 @@ fn realize_coupled_ode(
     Ok(finish_observer(assembly, gas, out))
 }
 
+#[allow(clippy::too_many_arguments)] // one coherent chain step record
 fn step_string_chain(
     body: &fs_phs::PortHamiltonian,
     x: &[f64],
@@ -518,6 +524,7 @@ fn step_chain_inlet(
     step(body, x, &u, dt).map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))
 }
 
+#[allow(clippy::too_many_arguments)] // one coherent chain step record
 fn step_plate_chain(
     body: &fs_phs::PortHamiltonian,
     x: &[f64],
@@ -588,6 +595,8 @@ fn plate_chain_radiation(
 /// One shared clock: string, plate, and duct exchange force and flow
 /// every sample via the characteristic FIR. Used when the duct is
 /// not a cylindrical chain.
+#[allow(clippy::too_many_lines)] // one coherent coupled realization
+#[allow(clippy::needless_range_loop)] // the sample index is the time axis
 fn realize_coupled(
     assembly: &AcousticAssembly,
     gas: &GasState,
@@ -700,9 +709,8 @@ fn realize_coupled(
         let u_body = plates.volume_velocity();
         let t = i as f64 * dt;
         let p_plus = if let Some(reed) = assembly.reed {
-            let p_m = if reed.attack_s <= 0.0 {
-                reed.blowing_pressure_pa
-            } else if t >= reed.attack_s {
+            // No ramp configured OR ramp finished: full pressure.
+            let p_m = if reed.attack_s <= 0.0 || t >= reed.attack_s {
                 reed.blowing_pressure_pa
             } else {
                 let x = t / reed.attack_s;
@@ -811,9 +819,8 @@ fn realize_coupled_kc(
         let u_body = plates.volume_velocity();
         let t = i as f64 * dt;
         let p_plus = if let Some(reed) = assembly.reed {
-            let p_m = if reed.attack_s <= 0.0 {
-                reed.blowing_pressure_pa
-            } else if t >= reed.attack_s {
+            // No ramp configured OR ramp finished: full pressure.
+            let p_m = if reed.attack_s <= 0.0 || t >= reed.attack_s {
                 reed.blowing_pressure_pa
             } else {
                 let frac = t / reed.attack_s;
@@ -913,7 +920,7 @@ fn finish_observer(
     RealizedAssembly {
         sample_rate_hz: assembly.sample_rate_hz,
         pressure_pa,
-        gas: gas.clone(),
+        gas: *gas,
     }
 }
 
@@ -946,6 +953,7 @@ pub fn string_mode_omega(string: PrestressedString, k: usize) -> f64 {
 /// modes have vanishing monopole area; they radiate as compact
 /// dipoles (`p ∝ ρ Π̈ / 4π r c`). Both are the same Green's-function
 /// family — not a BEM field and not a 3-D jet.
+#[allow(clippy::too_many_arguments)] // one coherent field record
 fn string_mode_h_im(
     string: PrestressedString,
     k: usize,
@@ -1032,8 +1040,7 @@ fn prony_internal_zeta(string: PrestressedString, omega: f64) -> f64 {
     let omega1 = string_mode_omega(string, 1);
     let eta0 = (2.0 * z0).min(0.99);
     GeneralizedMaxwell::matching_loss(1.0, omega1.max(1.0), eta0)
-        .map(|gm| 0.5 * gm.loss_factor(omega))
-        .unwrap_or(z0)
+        .map_or(z0, |gm| 0.5 * gm.loss_factor(omega))
 }
 
 /// Two-way Dirac realize: moving-end waveguide ⊕ plate ⊕ optional
@@ -1101,8 +1108,8 @@ fn realize_dirac_join(
                 gas,
                 line.wall,
             )?;
-            let chain_face = if inlets == 2 { 1 } else { 0 };
-            let radius = sections.first().map(|s| s.radius).unwrap_or(0.0);
+            let chain_face = usize::from(inlets == 2);
+            let radius = sections.first().map_or(0.0, |s| s.radius);
             let area = core::f64::consts::PI * radius * radius;
             (
                 Some(
@@ -1151,7 +1158,7 @@ fn realize_dirac_join(
                 gas,
                 line.wall,
             )?;
-            let chain_face = if inlets == 2 { 1 } else { 0 };
+            let chain_face = usize::from(inlets == 2);
             let plate_line = transformer(plate, chain, 1, chain_face, 1.0)
                 .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
             (
@@ -1175,8 +1182,7 @@ fn realize_dirac_join(
             0.0;
             waveguide
                 .as_ref()
-                .map(fs_phs::PortHamiltonian::state_dim)
-                .unwrap_or(n_string)
+                .map_or(n_string, fs_phs::PortHamiltonian::state_dim)
         ],
     };
     if let Some(pluck) = pluck {
@@ -1323,6 +1329,8 @@ fn moving_end_string_phs(
     }
 }
 
+#[allow(clippy::too_many_arguments)] // one coherent solver probe
+#[allow(clippy::unnecessary_wraps)] // uniform Result surface with the ODE twin
 fn leftover_u(
     sys: &fs_phs::DescriptorPortHamiltonian,
     x: &[f64],
@@ -1381,6 +1389,8 @@ fn leftover_u(
     Ok(u)
 }
 
+#[allow(clippy::too_many_arguments)] // one coherent solver probe
+#[allow(clippy::unnecessary_wraps)] // uniform Result surface with the DAE twin
 fn leftover_u_ode(
     sys: &fs_phs::PortHamiltonian,
     x: &[f64],
@@ -1527,8 +1537,7 @@ fn helmholtz_flow_cavity(
         omega0,
         MouthFlange::Unflanged,
     )
-    .map(|(r, _)| r)
-    .unwrap_or(0.0);
+    .map_or(0.0, |(r, _)| r);
     helmholtz_resonator_flow(
         cavity.volume_m3,
         cavity.neck_radius_m,
@@ -1540,6 +1549,8 @@ fn helmholtz_flow_cavity(
     .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))
 }
 
+#[allow(clippy::too_many_arguments)] // one coherent realization record
+#[allow(clippy::needless_range_loop)] // modal index spans state and shape arrays
 fn realize_string(
     string: PrestressedString,
     pluck: Option<Pluck>,
@@ -1944,6 +1955,7 @@ fn step_kc_member(
             v_string,
             texture.delta_n(bow.velocity_m_s - v_string, dt),
         );
+        #[allow(clippy::needless_range_loop)] // the modal index spans u and shapes
         for k in 0..string.n_modes {
             let phi = det::sin((k + 1) as f64 * pi * bow.station_frac) / mass_scale;
             u[k] = f_bow * phi;
@@ -1968,6 +1980,7 @@ fn step_kc_member(
     member.x = rec.x;
     let mut p = 0.0;
     let mut q_phys = vec![0.0; string.n_modes];
+    #[allow(clippy::needless_range_loop)] // the modal index spans state and outputs
     for k in 0..string.n_modes {
         let q = member.x[2 * k];
         q_phys[k] = q / mass_scale;
@@ -2004,8 +2017,7 @@ fn bow_force(bow: BowStroke, v_string: f64, normal_delta_n: f64) -> f64 {
     let normal = (bow.normal_force_n + normal_delta_n).max(0.0);
     // Driven-body sign: + when the driver is faster.
     law.regularized_traction_1d(bow.velocity_m_s - v_string, normal, bow.stribeck_m_s)
-        .map(|f| -f)
-        .unwrap_or(0.0)
+        .map_or(0.0, |f| -f)
 }
 
 /// Declared surface-height drive of the contact normal.
@@ -2103,8 +2115,7 @@ impl TextureDrive {
             path_speed_m_per_s: 0.0,
         };
         evaluate_point_surface_pair(&inner.iface, motion_a, motion_b)
-            .map(|r| inner.kn * r.combined_effective_height_m)
-            .unwrap_or(0.0)
+            .map_or(0.0, |r| inner.kn * r.combined_effective_height_m)
     }
 }
 
@@ -2243,10 +2254,9 @@ fn bore_spec(duct: &ViscothermalDuct) -> Option<(Vec<AcousticSection>, Vec<Acous
     if !(total > 0.0) {
         return None;
     }
-    const BUDGET: f64 = 8.0;
     let mut sections = Vec::new();
     for s in &duct.segments {
-        let n = ((BUDGET * s.length_m / total).round() as usize).max(2);
+        let n = ((SECTION_BUDGET * s.length_m / total).round() as usize).max(2);
         sections.push(AcousticSection {
             length: s.length_m,
             radius: s.radius_m,
@@ -2285,7 +2295,7 @@ fn realize_blown_ode(
     n: usize,
     wall: Option<LocallyReactingWall>,
 ) -> Result<Vec<f64>, AcousticRealizeError> {
-    let radius = sections.first().map(|s| s.radius).unwrap_or(0.0);
+    let radius = sections.first().map_or(0.0, |s| s.radius);
     let area = core::f64::consts::PI * radius * radius;
     let inlets = if plates.linear.is_empty() { 1 } else { 2 };
     let line = ode_bore_chain(sections, mouth, inlets, taps, gas, wall)?;
@@ -2361,7 +2371,7 @@ fn realize_reed_ode(
             what: "reed parameters must be physical and finite",
         });
     }
-    let radius = sections.first().map(|s| s.radius).unwrap_or(0.0);
+    let radius = sections.first().map_or(0.0, |s| s.radius);
     let area = core::f64::consts::PI * radius * radius;
     let inlets = if plates.linear.is_empty() { 1 } else { 2 };
     let line = ode_bore_chain(sections, mouth, inlets, taps, gas, wall)?;
@@ -2411,8 +2421,7 @@ fn realize_reed_ode(
             sys.output(&x).first().copied().unwrap_or(0.0)
         } else {
             line.as_ref()
-                .map(|s| s.output(&x).first().copied().unwrap_or(0.0))
-                .unwrap_or(0.0)
+                .map_or(0.0, |s| s.output(&x).first().copied().unwrap_or(0.0))
         };
         let u = if let Some((reed_phs, face, lay)) = &massive {
             let q = x_reed[0];
@@ -2521,6 +2530,8 @@ fn realize_blown_duct(
     // a body, filled with IFFT[Z] rather than IFFT[R]. A vented
     // reflectance FIR does not ring a measurable period; the
     // impedance FIR does, so tone-hole shortening stays TMM-emergent.
+    #[allow(clippy::items_after_statements)]
+    // the import documents WHERE the line law comes from
     use crate::driving_point::impedance_line;
     let mut line = impedance_line(
         &physics,
@@ -2548,6 +2559,8 @@ fn realize_blown_duct(
     Ok(out)
 }
 
+#[allow(clippy::too_many_arguments)] // one coherent realization record
+#[allow(clippy::needless_range_loop)] // the sample index is the time axis
 fn realize_blown_with_body(
     physics: &Duct,
     blow: VolumeVelocityPulse,

@@ -745,10 +745,10 @@ fn stick_slip_on_a_modal_string_locks_the_bow() {
     // in a linear pluck at that point? No — sin(n π/4) is 1 at n=2.
     // The nonlinear force just has to put energy into mode 2.
     let omega1 = 2.0 * core::f64::consts::PI * 40.0;
-    let omegas: Vec<f64> = (1..=4).map(|n| omega1 * n as f64).collect();
+    let omegas: Vec<f64> = (1..=4).map(|n| omega1 * f64::from(n)).collect();
     let zetas = vec![0.004; 4];
     let drive: Vec<f64> = (1..=4)
-        .map(|n| fs_math::det::sin(n as f64 * core::f64::consts::PI * 0.25))
+        .map(|n| fs_math::det::sin(f64::from(n) * core::f64::consts::PI * 0.25))
         .collect();
     let string = modal_bank(&omegas, &zetas, &drive).expect("string");
     let mut xs = vec![0.0; 8];
@@ -757,8 +757,8 @@ fn stick_slip_on_a_modal_string_locks_the_bow() {
         let f = regularized_coulomb(0.6, 8.0, v - 0.05, 0.004);
         xs = step(&string, &xs, &[f], 5.0e-5).expect("string").x;
     }
-    let e1 = 0.5 * (xs[1] * xs[1] + omegas[0] * omegas[0] * xs[0] * xs[0]);
-    let e2 = 0.5 * (xs[3] * xs[3] + omegas[1] * omegas[1] * xs[2] * xs[2]);
+    let e1 = f64::midpoint(xs[1] * xs[1], omegas[0] * omegas[0] * xs[0] * xs[0]);
+    let e2 = f64::midpoint(xs[3] * xs[3], omegas[1] * omegas[1] * xs[2] * xs[2]);
     assert!(
         e1 > 0.0 && e2 > 0.05 * e1,
         "even string mode from friction ({e2} vs {e1})"
@@ -799,11 +799,7 @@ fn common_effort_capacitor_shares_pressure() {
     x = step(&c, &x, &[1.0e-4, 2.0e-4], 1.0e-4).expect("step").x;
     let y = c.output(&x);
     assert_eq!(y.len(), 2);
-    assert!(
-        (y[0] - y[1]).abs() < 1.0e-15,
-        "ports must share p ({:?})",
-        y
-    );
+    assert!((y[0] - y[1]).abs() < 1.0e-15, "ports must share p ({y:?})");
     assert!(y[0] > 0.0, "injected volume must raise pressure");
     assert!(common_effort_capacitor(0.0).is_err());
 }
@@ -974,7 +970,7 @@ fn acoustic_cylinder_rings_at_the_quarter_wave() {
     let mut p = Vec::new();
     for i in 0..640 {
         let u = if i < 16 {
-            2.0e-5 * (core::f64::consts::PI * i as f64 / 16.0).sin()
+            2.0e-5 * (core::f64::consts::PI * f64::from(i) / 16.0).sin()
         } else {
             0.0
         };
@@ -1010,7 +1006,7 @@ fn open_cylinder_rings_at_the_corrected_quarter_wave() {
         let mut p = Vec::new();
         for i in 0..2400 {
             let u = if i < 48 {
-                2.0e-5 * (core::f64::consts::PI * i as f64 / 48.0).sin()
+                2.0e-5 * (core::f64::consts::PI * f64::from(i) / 48.0).sin()
             } else {
                 0.0
             };
@@ -1125,7 +1121,7 @@ fn open_tap_raises_the_waveguide_frequency() {
         let mut p = Vec::new();
         for i in 0..640 {
             let u = if i < 16 {
-                2.0e-5 * (core::f64::consts::PI * i as f64 / 16.0).sin()
+                2.0e-5 * (core::f64::consts::PI * f64::from(i) / 16.0).sin()
             } else {
                 0.0
             };
@@ -1158,7 +1154,10 @@ fn side_hole_inner_length_shortens_on_a_finite_bore() {
     assert!((t - (1.7e-3 + on_bore + 0.8216 * b)).abs() < 1.0e-15);
     let ts = side_hole_series_length(b, 2.0e-3);
     assert!(ts < 0.0 && ts > -b);
-    assert_eq!(side_hole_series_length(b, 0.0), 0.0);
+    #[allow(clippy::float_cmp)] // EXACT zero-return pin (never weakened for a lint)
+    {
+        assert_eq!(side_hole_series_length(b, 0.0), 0.0);
+    }
     let a = 2.0e-3;
     let near = side_hole_mutual_length(b, b, a, a);
     let far = side_hole_mutual_length(b, b, a, 20.0 * a);
@@ -1167,7 +1166,10 @@ fn side_hole_inner_length_shortens_on_a_finite_bore() {
         far.abs() < 1.0e-6 * near.abs(),
         "mutual series must vanish at s/a ≫ 1 ({far} vs {near})"
     );
-    assert_eq!(side_hole_mutual_length(b, b, a, 0.0), 0.0);
+    #[allow(clippy::float_cmp)] // EXACT zero-return pin (never weakened for a lint)
+    {
+        assert_eq!(side_hole_mutual_length(b, b, a, 0.0), 0.0);
+    }
 }
 
 #[test]
@@ -1200,7 +1202,7 @@ fn viscothermal_tap_damps_more_than_the_inviscid_vent() {
         let mut p = Vec::new();
         for i in 0..640 {
             let u = if i < 16 {
-                2.0e-5 * (core::f64::consts::PI * i as f64 / 16.0).sin()
+                2.0e-5 * (core::f64::consts::PI * f64::from(i) / 16.0).sin()
             } else {
                 0.0
             };
@@ -1452,7 +1454,7 @@ fn mouth_foster_is_not_the_pin_radiation_r() {
         let mut p = Vec::new();
         for i in 0..320 {
             let u = if i < 16 {
-                2.0e-5 * (core::f64::consts::PI * i as f64 / 16.0).sin()
+                2.0e-5 * (core::f64::consts::PI * f64::from(i) / 16.0).sin()
             } else {
                 0.0
             };
@@ -1527,7 +1529,7 @@ fn locally_reacting_wall_is_not_a_rigid_bore() {
         let mut p = Vec::new();
         for i in 0..640 {
             let u = if i < 16 {
-                2.0e-5 * (core::f64::consts::PI * i as f64 / 16.0).sin()
+                2.0e-5 * (core::f64::consts::PI * f64::from(i) / 16.0).sin()
             } else {
                 0.0
             };
@@ -1600,7 +1602,7 @@ fn pad_foster_is_not_the_lumped_thermal_g() {
         let mut p = Vec::new();
         for i in 0..320 {
             let u = if i < 16 {
-                2.0e-5 * (core::f64::consts::PI * i as f64 / 16.0).sin()
+                2.0e-5 * (core::f64::consts::PI * f64::from(i) / 16.0).sin()
             } else {
                 0.0
             };
@@ -1650,7 +1652,7 @@ fn closed_pad_is_the_tmm_cavity_compliance() {
         let mut p = Vec::new();
         for i in 0..640 {
             let u = if i < 16 {
-                2.0e-5 * (core::f64::consts::PI * i as f64 / 16.0).sin()
+                2.0e-5 * (core::f64::consts::PI * f64::from(i) / 16.0).sin()
             } else {
                 0.0
             };
@@ -1697,7 +1699,7 @@ fn half_vent_sits_between_open_and_closed() {
         let mut p = Vec::new();
         for i in 0..640 {
             let u = if i < 16 {
-                2.0e-5 * (core::f64::consts::PI * i as f64 / 16.0).sin()
+                2.0e-5 * (core::f64::consts::PI * f64::from(i) / 16.0).sin()
             } else {
                 0.0
             };
@@ -1752,7 +1754,7 @@ fn two_close_open_holes_are_not_two_far_open_holes() {
         let mut p = Vec::new();
         for i in 0..480 {
             let u = if i < 16 {
-                2.0e-5 * (core::f64::consts::PI * i as f64 / 16.0).sin()
+                2.0e-5 * (core::f64::consts::PI * f64::from(i) / 16.0).sin()
             } else {
                 0.0
             };
@@ -1804,7 +1806,7 @@ fn equal_radius_chain_matches_a_uniform_waveguide() {
     let mut x2 = vec![0.0; two.state_dim()];
     for i in 0..32 {
         let u = if i < 8 {
-            2.0e-5 * (core::f64::consts::PI * i as f64 / 8.0).sin()
+            2.0e-5 * (core::f64::consts::PI * f64::from(i) / 8.0).sin()
         } else {
             0.0
         };
@@ -1855,7 +1857,7 @@ fn a_constriction_shifts_the_chain_period() {
         let mut p = Vec::new();
         for i in 0..640 {
             let u = if i < 16 {
-                2.0e-5 * (core::f64::consts::PI * i as f64 / 16.0).sin()
+                2.0e-5 * (core::f64::consts::PI * f64::from(i) / 16.0).sin()
             } else {
                 0.0
             };
@@ -1922,7 +1924,7 @@ fn viscothermal_pin_damps_the_chain() {
         let mut p = Vec::new();
         for i in 0..640 {
             let u = if i < 16 {
-                2.0e-5 * (core::f64::consts::PI * i as f64 / 16.0).sin()
+                2.0e-5 * (core::f64::consts::PI * f64::from(i) / 16.0).sin()
             } else {
                 0.0
             };
@@ -2000,7 +2002,7 @@ fn narrow_tube_pin_uses_poiseuille_and_still_damps() {
         let mut p = Vec::new();
         for i in 0..400 {
             let u = if i < 8 {
-                1.0e-8 * (core::f64::consts::PI * i as f64 / 8.0).sin()
+                1.0e-8 * (core::f64::consts::PI * f64::from(i) / 8.0).sin()
             } else {
                 0.0
             };
@@ -2070,7 +2072,7 @@ fn foster_sqrt_omega_matches_the_wall_law_and_adds_states() {
         let mut p = Vec::new();
         for i in 0..480 {
             let u = if i < 16 {
-                2.0e-5 * (core::f64::consts::PI * i as f64 / 16.0).sin()
+                2.0e-5 * (core::f64::consts::PI * f64::from(i) / 16.0).sin()
             } else {
                 0.0
             };
@@ -2122,7 +2124,7 @@ fn linear_taper_is_not_the_inlet_cylinder() {
         let mut p = Vec::new();
         for i in 0..640 {
             let u = if i < 16 {
-                2.0e-5 * (core::f64::consts::PI * i as f64 / 16.0).sin()
+                2.0e-5 * (core::f64::consts::PI * f64::from(i) / 16.0).sin()
             } else {
                 0.0
             };
@@ -2174,7 +2176,7 @@ fn spherical_cone_is_not_a_broken_line_horn() {
         let mut p = Vec::new();
         for i in 0..480 {
             let u = if i < 16 {
-                2.0e-5 * (core::f64::consts::PI * i as f64 / 16.0).sin()
+                2.0e-5 * (core::f64::consts::PI * f64::from(i) / 16.0).sin()
             } else {
                 0.0
             };
@@ -2236,7 +2238,7 @@ fn mixed_cylinder_and_taper_is_not_the_pipe_or_the_full_cone() {
         let mut p = Vec::new();
         for i in 0..480 {
             let u = if i < 16 {
-                2.0e-5 * (core::f64::consts::PI * i as f64 / 16.0).sin()
+                2.0e-5 * (core::f64::consts::PI * f64::from(i) / 16.0).sin()
             } else {
                 0.0
             };

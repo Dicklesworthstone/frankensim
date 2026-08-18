@@ -28,6 +28,7 @@ use fs_scenario::BeatingReed;
 ///
 /// # Errors
 /// Domain, TMM, or solver refusals.
+#[allow(clippy::too_many_arguments)] // one coherent realization record
 pub fn realize_reed_bore(
     physics: &Duct,
     gas: &GasState,
@@ -107,6 +108,7 @@ pub(crate) fn aperture_of(reed: BeatingReed) -> BernoulliAperture {
     }
 }
 
+#[allow(clippy::too_many_arguments)] // one coherent reed-step record
 pub(crate) fn step_massive_reed(
     reed: BeatingReed,
     rho: f64,
@@ -143,6 +145,8 @@ pub(crate) fn step_massive_reed(
     Ok((p_plus, y1, v1))
 }
 
+#[allow(clippy::too_many_arguments)] // one coherent junction record
+#[allow(clippy::unnecessary_wraps)] // uniform Result surface across the reed solvers
 pub(crate) fn solve_reed_wave(
     reed: BeatingReed,
     rho: f64,
@@ -177,7 +181,7 @@ pub(crate) fn solve_reed_wave(
         let mut best_a =
             reed_flow_mismatch(reed, rho, zc, r0, p_minus_hist, p_m, guess, u_body).abs();
         for k in 0..21 {
-            let x = -span + (2.0 * span) * k as f64 / 20.0;
+            let x = -span + (2.0 * span) * f64::from(k) / 20.0;
             let a = reed_flow_mismatch(reed, rho, zc, r0, p_minus_hist, p_m, x, u_body).abs();
             if a < best_a {
                 best_a = a;
@@ -186,9 +190,9 @@ pub(crate) fn solve_reed_wave(
         }
         return Ok(best);
     }
-    let mut mid = 0.5 * (lo + hi);
+    let mut mid = f64::midpoint(lo, hi);
     for _ in 0..48 {
-        mid = 0.5 * (lo + hi);
+        mid = f64::midpoint(lo, hi);
         let f_mid = reed_flow_mismatch(reed, rho, zc, r0, p_minus_hist, p_m, mid, u_body);
         if f_mid.abs() < 1.0e-8 * (1.0 + p_m.abs()) {
             return Ok(mid);
@@ -205,6 +209,7 @@ pub(crate) fn solve_reed_wave(
     Ok(mid)
 }
 
+#[allow(clippy::too_many_arguments)] // one coherent junction record
 fn reed_flow_mismatch(
     reed: BeatingReed,
     rho: f64,

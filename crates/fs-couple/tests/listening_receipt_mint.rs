@@ -31,7 +31,9 @@ fn repo_root() -> std::path::PathBuf {
 fn wav_to_pascals(bytes: &[u8], full_scale_pa: f64) -> Vec<f64> {
     assert_eq!(&bytes[0..4], b"RIFF", "committed artifact must be a WAV");
     bytes[44..]
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| f64::from(i16::from_le_bytes([c[0], c[1]])) / f64::from(i16::MAX) * full_scale_pa)
         .collect()
 }
@@ -135,6 +137,7 @@ fn mint_receipt_bytes_for_the_committed_artifact() {
 
 #[test]
 #[ignore = "minting run: renders data/listening/brass-emergent.{wav,provenance.json} + receipt bytes"]
+#[allow(clippy::too_many_lines)] // one coherent minting run
 fn mint_brass_listening_artifact() {
     use fs_couple::brass_loop::{BrassControl, BrassVoice, LipIsland};
     use fs_couple::mm_line::{MmLineConfig, MmLoad};

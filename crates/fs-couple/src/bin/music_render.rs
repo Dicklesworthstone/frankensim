@@ -89,8 +89,8 @@ fn string_context(block: usize) -> RenderContext {
     let wave_speed = (60.0f64 / 6.0e-4).sqrt();
     let modes = (1..=3)
         .map(|k| ModalAcousticMode {
-            angular_frequency_rad_s: k as f64 * core::f64::consts::PI * wave_speed / 0.65,
-            damping_ratio: 1.0e-3 * k as f64,
+            angular_frequency_rad_s: f64::from(k) * core::f64::consts::PI * wave_speed / 0.65,
+            damping_ratio: 1.0e-3 * f64::from(k),
             pressure_per_modal_velocity: fs_math::c64::C64::new(2.0, 0.0),
         })
         .collect::<Vec<_>>();
@@ -179,6 +179,7 @@ fn main() {
     let (wav, clipped) = encode_pcm16_wav(&pressure, RATE, full_scale_pa)
         .unwrap_or_else(|e| fail(&format!("encode refused: {e}")));
     let wav_hash = hash_domain(WAV_HASH_DOMAIN, &wav);
+    #[allow(clippy::format_collect)] // 16-byte hex dump; clarity over a fold
     let hash_hex: String = wav_hash.0.iter().map(|b| format!("{b:02x}")).collect();
     let peak = pressure.iter().fold(0.0f64, |m, p| m.max(p.abs()));
     let rms = (pressure.iter().map(|p| p * p).sum::<f64>() / pressure.len() as f64).sqrt();

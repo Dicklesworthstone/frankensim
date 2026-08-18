@@ -141,7 +141,7 @@ impl VkBody {
     }
 
     fn from_ss_sine(plate: ThinPlate, with_area: bool) -> Result<Self, AcousticRealizeError> {
-        let n = plate.n_modes.max(1).min(3);
+        let n = plate.n_modes.clamp(1, 3);
         let disp = odd_odd_modes(n);
         // Extra Airy channels above (2,1) trip the nlmodal quadrature
         // certificate on this mesh; more displacement modes still
@@ -188,6 +188,7 @@ impl VkBody {
         finish_vk(model.storage, &zetas, &drive, areas, with_area)
     }
 
+    #[allow(clippy::too_many_lines)] // one coherent FE sampling stage
     fn from_sampled_fe(plate: ThinPlate, with_area: bool) -> Result<Self, AcousticRealizeError> {
         if plate.n_modes == 0 {
             return Err(AcousticRealizeError::InvalidDescription {
@@ -264,7 +265,7 @@ impl VkBody {
                 lx: plate.length_m,
                 ly: plate.width_m,
                 h: plate.thickness_m,
-                young: 0.5 * (plate.e1_pa + plate.e2_pa),
+                young: f64::midpoint(plate.e1_pa, plate.e2_pa),
                 nu: plate.nu12,
                 rho: plate.density_kg_m3,
                 pretension_n_m: plate.pretension_n_m,
@@ -510,8 +511,7 @@ impl PlateBank {
             omega0,
             fs_phs::MouthFlange::Unflanged,
         )
-        .map(|(r, _)| r)
-        .unwrap_or(0.0);
+        .map_or(0.0, |(r, _)| r);
         let sys = fs_phs::helmholtz_resonator_flow(
             cavity.volume_m3,
             cavity.neck_radius_m,
@@ -542,6 +542,7 @@ impl PlateBank {
 ///
 /// # Errors
 /// Section, mesh, or modal-window refusals.
+#[allow(clippy::too_many_lines)] // one coherent certification stage
 pub fn certified_radiators(plate: ThinPlate) -> Result<Vec<CompactBody>, AcousticRealizeError> {
     if plate.n_modes == 0 {
         return Err(AcousticRealizeError::InvalidDescription {

@@ -230,9 +230,9 @@ pub fn assemble(
             });
         }
     }
-    let mut g = vec![0.0; (2 * n) * 1];
+    let mut g = vec![0.0; 2 * n];
     for k in 0..n {
-        g[(2 * k + 1) * 1] = strike_weights[k];
+        g[2 * k + 1] = strike_weights[k];
     }
     let omegas = storage.omegas.clone();
     assemble_storage(n, &omegas, zetas, 1, g, Box::new(storage))
@@ -662,7 +662,6 @@ pub fn von_karman_sampled_plate(
         h,
         young,
         rho,
-        pretension_n_m: _,
         ..
     } = *params;
     let dx = lx / (nx - 1) as f64;
@@ -687,10 +686,11 @@ pub fn von_karman_sampled_plate(
     let kmin2 = (pi / lx) * (pi / lx) + (pi / ly) * (pi / ly);
     // Mass-normalized φ ~ 1/√(ρ h A); a nonzero raw integral is ~ k⁴/(ρ h).
     let char_scale = kmin2 * kmin2 / (rho * h).max(1.0e-30);
+    type RawChannel = (f64, Vec<(usize, usize, f64, f64)>, f64);
     let mut channels = Vec::with_capacity(stress_modes.len());
     let mut worst_rel = 0.0f64;
     let mut global_scale = f64::MIN_POSITIVE;
-    let mut raw: Vec<(f64, Vec<(usize, usize, f64, f64)>, f64)> = Vec::new();
+    let mut raw: Vec<RawChannel> = Vec::new();
     for &sm in stress_modes {
         let xi4 = {
             let k2 = (sm.m as f64 * pi / lx).powi(2) + (sm.n as f64 * pi / ly).powi(2);
@@ -789,6 +789,7 @@ fn fd_dxy(w: &[f64], nx: usize, i: usize, j: usize, dx: f64, dy: f64) -> f64 {
         / (4.0 * dx * dy)
 }
 
+#[allow(clippy::too_many_arguments)] // one coherent physics record/assembler
 fn fd_coupling(
     psi: &[f64],
     a: &[f64],

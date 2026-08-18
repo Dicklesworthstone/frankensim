@@ -239,7 +239,7 @@ fn composed_guitar() -> GuitarBody {
     let mut merged: Vec<(f64, Vec<f64>)> = Vec::new();
     for (w, s) in &top.modes {
         let mut shape = s.clone();
-        shape.extend(std::iter::repeat(0.0).take(n_nodes));
+        shape.extend(std::iter::repeat_n(0.0, n_nodes));
         merged.push((*w, shape));
     }
     for (w, s) in &back.modes {
@@ -368,6 +368,8 @@ fn bridge_peaks(body: &GuitarBody) -> Vec<(f64, f64, f64)> {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // one coherent triad gate
+#[allow(clippy::items_after_statements)] // the authored envelope lives next to its gate
 fn gt_001_composed_triad_vs_carcagno() {
     let body = composed_guitar();
     let all_peaks = bridge_peaks(&body);
@@ -625,7 +627,7 @@ fn wolf_fixture(f_string: f64) -> (PortHamiltonian, Vec<f64>) {
     q[n + 1] = 1.0 / m_s;
     q[3 * n + 3] = 1.0 / m_b;
     let mut j = vec![0.0; n * n];
-    let mut set = |j: &mut Vec<f64>, r_: usize, c: usize, v: f64| {
+    let set = |j: &mut Vec<f64>, r_: usize, c: usize, v: f64| {
         j[r_ * n + c] += v;
         j[c * n + r_] -= v;
     };
@@ -894,8 +896,8 @@ fn render_strum(seconds: f64, rate: f64) -> Vec<f64> {
     let mut strings: Vec<DrivenModes> = string_f0
         .iter()
         .map(|f0| {
-            let freqs: Vec<f64> = (1..=6).map(|k| f0 * k as f64).collect();
-            let qs: Vec<f64> = (1..=6).map(|k| 2500.0 / k as f64).collect();
+            let freqs: Vec<f64> = (1..=6).map(|k| f0 * f64::from(k)).collect();
+            let qs: Vec<f64> = (1..=6).map(|k| 2500.0 / f64::from(k)).collect();
             DrivenModes::new(&freqs, &qs, rate)
         })
         .collect();

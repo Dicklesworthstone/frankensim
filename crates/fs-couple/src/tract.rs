@@ -368,7 +368,9 @@ impl TractVoice {
         line.enforce_scattering_passivity(&grid);
         // Carry: replay the recent outgoing history into the fresh
         // line so its state is primed, not zeroed.
-        if !history.is_empty() {
+        if history.is_empty() {
+            self.line = line;
+        } else {
             let mut primed = line;
             for &h in history.iter().rev().take(4096).rev() {
                 let _ = primed.push(h);
@@ -379,8 +381,6 @@ impl TractVoice {
             // line's (the mismatch injected a micro-click per rebuild
             // - measured as the morph out-clicking the hard switch).
             self.p_minus = self.line.incoming();
-        } else {
-            self.line = line;
         }
         self.chart = chart;
         self.zc_flow = self.gas_density * self.gas_sound_speed / self.chart.sections[0].area_m2;

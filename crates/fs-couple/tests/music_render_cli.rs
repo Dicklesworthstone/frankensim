@@ -184,8 +184,10 @@ fn full_scale_is_physics_not_normalization() {
     let peak_sample = |path: &Path| -> i32 {
         let bytes = std::fs::read(path).expect("wav");
         bytes[44..]
-            .chunks_exact(2)
-            .map(|c| i32::from(i16::from_le_bytes([c[0], c[1]])).abs())
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| i32::from(i16::from_le_bytes(*c)).abs())
             .max()
             .unwrap_or(0)
     };

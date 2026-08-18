@@ -306,16 +306,16 @@ impl Obstacle {
                 continue;
             }
             let mut pdot = 0.0;
-            for k in 0..n_modes {
-                pdot += self.collocation[i * n_modes + k] * velocities[k];
+            for (k, v) in velocities.iter().enumerate().take(n_modes) {
+                pdot += self.collocation[i * n_modes + k] * v;
             }
             let f = self.weights[i]
                 * self.internal_loss
                 * self.stiffness
                 * det::pow(p, self.alpha)
                 * pdot;
-            for k in 0..n_modes {
-                forces[k] -= f * self.collocation[i * n_modes + k];
+            for (k, slot) in forces.iter_mut().enumerate().take(n_modes) {
+                *slot -= f * self.collocation[i * n_modes + k];
             }
         }
         forces

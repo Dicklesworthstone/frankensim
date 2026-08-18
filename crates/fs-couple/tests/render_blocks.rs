@@ -118,8 +118,7 @@ fn one_shot_and_every_block_partition_are_bitwise_identical() {
             .position(|(a, b)| a.to_bits() != b.to_bits());
         println!(
             "{{\"suite\":\"fs-couple\",\"case\":\"render-block-invariance\",\"block_len\":{block_len},\
-             \"samples\":{N},\"rms\":{rms:.3},\"first_divergence\":{:?}}}",
-            first_diff
+             \"samples\":{N},\"rms\":{rms:.3},\"first_divergence\":{first_diff:?}}}"
         );
         assert!(
             first_diff.is_none(),

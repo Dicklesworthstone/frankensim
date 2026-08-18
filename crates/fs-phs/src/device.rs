@@ -332,7 +332,7 @@ impl TriodeStage {
             )
             .map_err(crate::circuit::CircuitError::from)?;
             // Midpoint read (see the constructor's descriptor-read law).
-            let v_p = 0.5 * (self.x[self.plate_node_coord] + rec.x[self.plate_node_coord]);
+            let v_p = f64::midpoint(self.x[self.plate_node_coord], rec.x[self.plate_node_coord]);
             x_next = rec.x;
             if v_p > self.card.plate_v_max {
                 return Err(DeviceError::OutsideValidity {
@@ -352,7 +352,7 @@ impl TriodeStage {
             self.ip_last += res / denom.max(1.0e-6);
             iterations += 1;
         }
-        let v_p = 0.5 * (self.x[self.plate_node_coord] + x_next[self.plate_node_coord]);
+        let v_p = f64::midpoint(self.x[self.plate_node_coord], x_next[self.plate_node_coord]);
         self.x = x_next;
         self.telemetry = IslandTelemetry {
             iterations,
@@ -591,14 +591,14 @@ mod device_tests {
             let f = |v: f64| (vin - v) / 4.7e3 - card.current(v).0;
             let (mut lo, mut hi) = (0.0f64, vin.min(1.0));
             for _ in 0..200 {
-                let mid = 0.5 * (lo + hi);
+                let mid = f64::midpoint(lo, hi);
                 if f(mid) > 0.0 {
                     lo = mid;
                 } else {
                     hi = mid;
                 }
             }
-            let v_bisect = 0.5 * (lo + hi);
+            let v_bisect = f64::midpoint(lo, hi);
             assert!(
                 (v_newton - v_bisect).abs() < 1.0e-9,
                 "vin {vin}: Newton {v_newton:.9} vs bisection {v_bisect:.9}"
@@ -663,7 +663,7 @@ mod device_tests {
             let dt = 1.0 / RATE;
             let mut bits = Vec::new();
             for k in 0..2000 {
-                let vin = 0.3 * crate::det::sin(core::f64::consts::TAU * 200.0 * k as f64 * dt);
+                let vin = 0.3 * crate::det::sin(core::f64::consts::TAU * 200.0 * f64::from(k) * dt);
                 bits.push(stage.step(vin, dt).expect("step").to_bits());
             }
             (bits, stage.telemetry())

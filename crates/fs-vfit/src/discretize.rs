@@ -565,6 +565,11 @@ impl DelayedFilter {
         Ok(line)
     }
 
+    /// Push one outgoing sample into the line and return the delayed,
+    /// filtered incoming sample.
+    ///
+    /// # Errors
+    /// Non-finite input.
     pub fn push(&mut self, outgoing: f64) -> Result<f64, DiscretizeError> {
         require_finite_scalar("outgoing", outgoing)?;
         let n = self.buf.len();
@@ -632,6 +637,7 @@ impl DelayedFilter {
             return;
         }
         let h = self.filter.eval(omega).abs();
+        #[allow(clippy::nonminimal_bool)] // NaN-aware: the "simpler" form drops the NaN refusal
         if !(h > 1.0e-12) || !(target_abs >= 0.0 && target_abs.is_finite()) {
             return;
         }
@@ -1126,6 +1132,7 @@ mod runtime_tests {
     }
 
     #[test]
+    #[allow(clippy::float_cmp)] // EXACT recurrence pins (never weakened for a lint)
     fn g0_runtime_step_matches_analytic_first_order_recurrence() {
         let system = first_order();
         let mut runtime = system.try_runtime().expect("proper realization");
@@ -1190,7 +1197,7 @@ mod runtime_tests {
         let mut measured = C64::ZERO;
         for sample in 0..96 {
             let output = runtime.step(if sample == 0 { 1.0 } else { 0.0 }).unwrap();
-            let phase = -(sample as f64) * omega * system.t_s;
+            let phase = -f64::from(sample) * omega * system.t_s;
             measured = measured + C64::new(det::cos(phase), det::sin(phase)).scale(output);
         }
         assert!((measured - expected).abs() < 1.0e-12);

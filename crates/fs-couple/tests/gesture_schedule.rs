@@ -82,6 +82,7 @@ fn schedule_driven_render_is_bitwise_identical_to_inline() {
     let mut last = f64::NAN;
     for b in 0..blocks {
         let p = s.sample("blow", b as u64).expect("sample");
+        #[allow(clippy::float_cmp)] // exact change detection on a deterministic schedule
         if p != last {
             ctx_a
                 .apply_controls(&[ControlDelta::SetBlowingPressure {

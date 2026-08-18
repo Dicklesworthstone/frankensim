@@ -193,8 +193,16 @@ all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
 # Pedantic exceptions that fight numerical-kernel idioms; each is deliberate.
 cast_possible_truncation = "allow"
+cast_possible_wrap = "allow"
 cast_precision_loss = "allow"
 cast_sign_loss = "allow"
+# `!(a < b)` on floats is a deliberate NaN-aware guard in the numerics
+# kernels: the suggested `a >= b` rewrite CHANGES SEMANTICS under NaN
+# (the negated form fails closed). The lint is wrong for this idiom.
+neg_cmp_op_on_partial_ord = "allow"
+# `0.5 * (a + b)` in the physics kernels is a HALF-SUM (energies,
+# trapezoids), not a midpoint; f64::midpoint would obscure the formula.
+manual_midpoint = "allow"
 similar_names = "allow"
 many_single_char_names = "allow"
 unreadable_literal = "allow"

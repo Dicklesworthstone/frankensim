@@ -171,7 +171,7 @@ fn design_waveguide(card: &Card, sections: usize) -> WgDesign {
             lo = m1;
         }
     }
-    let (worst, d, a) = residual(0.5 * (lo + hi));
+    let (worst, d, a) = residual(f64::midpoint(lo, hi));
     WgDesign {
         delay_samples: d,
         a,
@@ -303,6 +303,7 @@ fn qois(m: &Measured, card: &Card) -> BTreeMap<String, f64> {
 
 #[test]
 #[ignore = "minting run: measures both contenders and prints fresh receipt bytes"]
+#[allow(clippy::too_many_lines)] // one coherent minting run
 fn mint_dispersion_bakeoff_receipt() {
     let card = card();
     println!(
@@ -318,9 +319,14 @@ fn mint_dispersion_bakeoff_receipt() {
     );
     let wg_states = design.delay_samples.ceil() as usize + 2 * design.sections;
     let wg = measure_against_law(&card, &run_waveguide(&design, true), wg_states);
-    let control = measure_against_law(&card, &run_waveguide(&control_design(&card, 8), false), wg_states);
+    let control = measure_against_law(
+        &card,
+        &run_waveguide(&control_design(&card, 8), false),
+        wg_states,
+    );
     // The modal image needs two states per audio-band mode to SOUND
     // like the full string; count modes under 20 kHz from the law.
+    #[allow(clippy::maybe_infinite_iter)] // the partial law is monotone; take_while terminates
     let full_band_modes = (1..)
         .take_while(|&n| partial_law_hz(&card, n) < 20_000.0)
         .count();
@@ -539,7 +545,8 @@ fn dispersion_stage_is_passive_and_the_control_is_harmonic() {
     // harmonic (the residual is the fractional-interp phase), while
     // against the STIFF law it must miss by the stiffness gap — the
     // stage is the thing that closes it.
-    let control_partial8_vs_harmonic = cents(control.partials_hz[7], 8.0 * partial_law_hz(&card, 1));
+    let control_partial8_vs_harmonic =
+        cents(control.partials_hz[7], 8.0 * partial_law_hz(&card, 1));
     // Measured 2026-08-17: -9.3 cents (the linear-interp phase at
     // partial 8 on a frac=0.16 line) vs a 27.0-cent stiff-law miss —
     // the comparative band is the honest one: the control's residual

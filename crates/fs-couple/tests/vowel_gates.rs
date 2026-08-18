@@ -182,7 +182,7 @@ fn mint_glottis_bakeoff_receipt() {
     // /u/ tract + licensed card, spectral QoIs, KeepBoth expected —
     // the receipt decides.
     let chart = TractChart::assaneo_u();
-    let mut measure = |two_mass: bool, p_sub: f64| -> BTreeMap<String, f64> {
+    let measure = |two_mass: bool, p_sub: f64| -> BTreeMap<String, f64> {
         let card = FoldCard::two_mass_standard();
         let mut island = GlottalIsland::new(
             card,

@@ -33,7 +33,7 @@ use fs_dcontact::{DContactError, Obstacle};
 use fs_duct::{Duct, Termination};
 use fs_material::gas::GasState;
 use fs_math::det;
-use fs_phs::{PhsError, PortHamiltonian, bernoulli_volume_flow, mass_spring_damper};
+use fs_phs::{PhsError, PortHamiltonian, mass_spring_damper};
 use fs_vfit::discretize::DelayedFilter;
 
 /// Where a fold card's numbers came from.
@@ -374,12 +374,12 @@ impl GlottalIsland {
         let flow = if h_open > 0.0 && p_drive.abs() > 1.0e-12 {
             let wh = self.card.fold_length_m * h_open;
             let a_coef = 2.0 * wh * wh / self.rho;
-            let mag = 0.5
-                * (-a_coef * self.zc_flow
-                    + det::sqrt(
-                        a_coef * a_coef * self.zc_flow * self.zc_flow
-                            + 4.0 * a_coef * p_drive.abs(),
-                    ));
+            let mag = f64::midpoint(
+                -a_coef * self.zc_flow,
+                det::sqrt(
+                    a_coef * a_coef * self.zc_flow * self.zc_flow + 4.0 * a_coef * p_drive.abs(),
+                ),
+            );
             if p_drive < 0.0 { -mag } else { mag }
         } else {
             0.0
@@ -394,7 +394,7 @@ impl GlottalIsland {
                 let f_col = slit_contact_force(&self.obstacle, h)?;
                 let f = face * dp + f_col;
                 let rec = fs_phs::step(phs, x, &[f], self.dt)?;
-                *x = rec.x.clone();
+                x.clone_from(&rec.x);
                 rec
             }
             Valve::TwoMass { phs, x } => {
@@ -427,7 +427,7 @@ impl GlottalIsland {
                 let f1 = drive1 + slit_contact_force(&self.obstacle, h1)?;
                 let f2 = slit_contact_force(&self.obstacle, h2)?;
                 let rec = fs_phs::step(phs, x, &[f1, f2], self.dt)?;
-                *x = rec.x.clone();
+                x.clone_from(&rec.x);
                 rec
             }
         };
@@ -525,7 +525,7 @@ pub fn glottal_qois(flow: &[f64], gaps: &[f64], rate: f64) -> GlottalQois {
     let slope = if f0_hz > 0.0 {
         let mut levels = Vec::new();
         for n in 1..=6 {
-            let omega = core::f64::consts::TAU * f0_hz * n as f64 / rate;
+            let omega = core::f64::consts::TAU * f0_hz * f64::from(n) / rate;
             let (mut re, mut im) = (0.0f64, 0.0f64);
             for (k, &v) in ac.iter().enumerate() {
                 re += v * det::cos(omega * k as f64);

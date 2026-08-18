@@ -286,7 +286,7 @@ pub fn assemble_circuit(graph: &CircuitGraph) -> Result<CircuitDae, CircuitError
     let mut flux_index = Vec::new();
     let mut charge_index = Vec::new();
     let (mut l_seen, mut c_seen, mut v_seen) = (0usize, 0usize, 0usize);
-    let mut set_j = |j: &mut Vec<f64>, row: usize, col: usize, val: f64| {
+    let set_j = |j: &mut Vec<f64>, row: usize, col: usize, val: f64| {
         j[row * n + col] += val;
         j[col * n + row] -= val;
     };
@@ -711,7 +711,7 @@ mod circuit_tests {
         let mut honest = 0.0f64;
         let mut flipped = 0.0f64;
         for k in 0..2000 {
-            let u = [10.0 * det::sin(omega * k as f64 * dt)];
+            let u = [10.0 * det::sin(omega * f64::from(k) * dt)];
             let (rec, defect) = dae.step_audited(&x, &u, dt).expect("step");
             x = rec.x;
             honest = honest.max(defect);

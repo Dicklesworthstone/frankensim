@@ -847,7 +847,6 @@ mod wind_articulation_tests {
 #[cfg(test)]
 mod wind_hop_tests {
     use super::wind_articulation_tests::helpers::*;
-    use super::*;
     use fs_duct::Termination;
 
     fn verdict(case: &str, pass: bool, detail: &str) {

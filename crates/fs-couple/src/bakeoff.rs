@@ -309,6 +309,8 @@ impl BakeoffReceipt {
     ///
     /// # Errors
     /// [`BakeoffError::Decode`] naming the first offending line.
+    #[allow(clippy::too_many_lines)] // one coherent canonical decoder
+    #[allow(clippy::items_after_statements)] // local decode helpers live next to their use
     pub fn from_canonical_bytes(bytes: &[u8]) -> Result<Self, BakeoffError> {
         let text = std::str::from_utf8(bytes).map_err(|_| BakeoffError::Decode {
             line: 0,
@@ -355,7 +357,7 @@ impl BakeoffReceipt {
                 });
             }
             let mut out = [0u8; 32];
-            for (index, chunk) in bytes.chunks_exact(2).enumerate() {
+            for (index, chunk) in bytes.as_chunks::<2>().0.iter().enumerate() {
                 let hi = hex_val(chunk[0]).ok_or(BakeoffError::Decode {
                     line,
                     what: "hex digit",

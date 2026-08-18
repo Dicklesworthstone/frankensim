@@ -150,12 +150,12 @@ impl TsDriver {
         panel: Option<PanelMode>,
     ) -> Result<Self, SpeakerError> {
         card.validate()?;
-        if let Some(v) = box_volume_m3 {
-            if !(v.is_finite() && v > 0.0) {
-                return Err(SpeakerError::Invalid {
-                    what: "box volume must be positive",
-                });
-            }
+        if let Some(v) = box_volume_m3
+            && !(v.is_finite() && v > 0.0)
+        {
+            return Err(SpeakerError::Invalid {
+                what: "box volume must be positive",
+            });
         }
         if panel.is_some() && box_volume_m3.is_none() {
             return Err(SpeakerError::Invalid {
@@ -197,7 +197,7 @@ impl TsDriver {
             }
         }
         let mut j = vec![0.0; n * n];
-        let mut set = |j: &mut Vec<f64>, r_: usize, c: usize, v: f64| {
+        let set = |j: &mut Vec<f64>, r_: usize, c: usize, v: f64| {
             j[r_ * n + c] += v;
             j[c * n + r_] -= v;
         };
@@ -237,7 +237,7 @@ impl TsDriver {
     pub fn step(&mut self, u_v: f64, dt: f64) -> Result<(StepRecord, f64), SpeakerError> {
         let v_before = self.x[2]; // momentum, for acceleration estimate
         let rec = fs_phs::step(&self.phs, &self.x, &[u_v], dt)?;
-        self.x = rec.x.clone();
+        self.x.clone_from(&rec.x);
         let excursion = self.x[self.ix_cone];
         if excursion.abs() > self.card.x_max_m {
             return Err(SpeakerError::ExcursionExceeded {

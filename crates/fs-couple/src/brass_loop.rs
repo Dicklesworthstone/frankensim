@@ -589,7 +589,7 @@ pub(crate) mod brass_loop_tests {
             1.5e-6,
         )
         .expect("voice");
-        let mut run = |voice: &mut BrassVoice, combo: usize, tension: f64| -> (f64, f64) {
+        let run = |voice: &mut BrassVoice, combo: usize, tension: f64| -> (f64, f64) {
             voice.reset().expect("reset");
             voice
                 .apply(BrassControl::SetValve {

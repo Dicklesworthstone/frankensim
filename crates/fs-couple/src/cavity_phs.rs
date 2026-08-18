@@ -114,8 +114,7 @@ pub fn realize_plate_cavity(
         omega0,
         MouthFlange::Unflanged,
     )
-    .map(|(r, _)| r)
-    .unwrap_or(0.0);
+    .map_or(0.0, |(r, _)| r);
     let cavity = helmholtz_resonator_flow(
         spec.volume_m3,
         spec.neck_radius_m,

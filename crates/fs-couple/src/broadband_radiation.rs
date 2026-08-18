@@ -253,6 +253,7 @@ impl BroadbandRadiationArtifact {
 
 impl BroadbandRadiationRuntime<'_> {
     /// State of one input/channel filter, or `None` outside the bank.
+    #[must_use]
     pub fn filter_state(&self, input: usize, channel: usize) -> Option<&[f64]> {
         let channel_count = self.artifact.channels.len();
         if input >= self.artifact.inputs.len() || channel >= channel_count {
@@ -314,6 +315,7 @@ fn preflight_filter_step(filter: &DiscreteStateSpace, state: &[f64], input: f64)
     }
     for row in 0..filter.n {
         let mut next = 0.0;
+        #[allow(clippy::needless_range_loop)] // row-major matrix walk; the index spans two arrays
         for column in 0..filter.n {
             next += filter.a[row * filter.n + column] * state[column];
         }
@@ -437,6 +439,7 @@ pub fn evaluate_real_tesseral(
 /// intended physical response at the original digital frequency. A caller may
 /// admit constant direct feedthrough through `controls.fit_d`; the improper
 /// `s*e` term is always disabled.
+#[allow(clippy::too_many_lines)] // one coherent artifact build
 pub fn build_broadband_radiation_artifact(
     samples: &SampledRadiationData,
     controls: BroadbandRadiationControls,
@@ -480,6 +483,7 @@ pub fn build_broadband_radiation_artifact(
     let mut artifact_inputs = Vec::with_capacity(samples.input_ids.len());
     for (input_index, id) in samples.input_ids.iter().enumerate() {
         let mut filters = Vec::with_capacity(channel_count);
+        #[allow(clippy::needless_range_loop)] // channel index spans the nested sample table
         for channel in 0..channel_count {
             let response: Vec<C64> = training_samples[input_index][channel]
                 .iter()
@@ -594,6 +598,7 @@ pub fn build_broadband_radiation_artifact(
     })
 }
 
+#[allow(clippy::too_many_lines)] // one coherent admission door
 fn validate_inputs(
     samples: &SampledRadiationData,
     controls: BroadbandRadiationControls,
@@ -660,10 +665,11 @@ fn validate_inputs(
             2.0 * controls.sample_rate_hz * det::tan(omega / (2.0 * controls.sample_rate_hz));
         if !(omega > 0.0 && omega.is_finite() && omega < nyquist && warped.is_finite())
             || index > 0 && samples.held_out[index - 1].omega_rad_s >= omega
-            || samples
-                .training
-                .iter()
-                .any(|training| training.omega_rad_s == omega)
+            || samples.training.iter().any(|training| {
+                #[allow(clippy::float_cmp)] // exact-sample identity, not a tolerance test
+                let same = training.omega_rad_s == omega;
+                same
+            })
         {
             return Err(invalid(
                 "held-out frequencies must be increasing, Tustin-warpable, below Nyquist, and disjoint from training",
@@ -867,6 +873,7 @@ impl DirectionalFarFieldTable {
         }
         let mut last = 0.0;
         for (i, (&w, f)) in omegas.iter().zip(&amplitudes).enumerate() {
+            #[allow(clippy::nonminimal_bool)] // NaN-aware: the "simpler" form drops the NaN refusal
             if !(w > 0.0 && w.is_finite()) || !f.re.is_finite() || !f.im.is_finite() {
                 return Err(BroadbandRadiationError::InvalidInput(
                     "far-field samples must be finite and positive-frequency",
@@ -943,6 +950,7 @@ pub fn far_field_observer_pressure(
     k: f64,
     range_m: f64,
 ) -> Result<C64, BroadbandRadiationError> {
+    #[allow(clippy::nonminimal_bool)] // NaN-aware: the "simpler" form drops the NaN refusal
     if !(range_m > 0.0 && range_m.is_finite()) || !(k > 0.0 && k.is_finite()) {
         return Err(BroadbandRadiationError::InvalidInput(
             "observer wavenumber and range must be finite and positive",

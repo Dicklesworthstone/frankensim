@@ -618,9 +618,7 @@ pub fn common_effort_star(
         }
     }
     let mut g = vec![0.0; n];
-    for i in 0..systems[last].n {
-        g[o_last + i] = systems[last].g[i];
-    }
+    g[o_last..o_last + systems[last].n].copy_from_slice(&systems[last].g[..systems[last].n]);
     require_skew(&j, n, "J")?;
     require_symmetric(&r, n, "R")?;
     require_psd(&r, n, "R")?;
@@ -661,6 +659,7 @@ pub fn common_effort_star(
 ///
 /// # Errors
 /// Dimension / `dt` refusals; [`PhsError::NewtonStalled`].
+#[allow(clippy::too_many_lines)] // one coherent physics stage
 pub fn step_descriptor(
     sys: &DescriptorPortHamiltonian,
     x0: &[f64],
@@ -1739,6 +1738,7 @@ fn apply_t_junction_series(q: &mut [f64], n: usize, flux: usize, l_add: f64) {
 /// `rad_foster = Some((off, n_br))` replaces the pin `R` with a
 /// Foster match of `Re Z(ω)` (mass still comes from pin `X`).
 /// Closed ends skip this.
+#[allow(clippy::too_many_arguments)] // one coherent physics record/assembler
 fn apply_open_mouth_radiation(
     q: &mut [f64],
     r: &mut [f64],
@@ -1754,13 +1754,13 @@ fn apply_open_mouth_radiation(
 ) -> Result<(), PhsError> {
     let (rr, xx) = mouth_impedance(density, sound_speed, radius, omega, flange)?;
     apply_t_junction_series(q, n, last_flux, (-xx / omega) * scale);
-    if let Some((off, n_br)) = rad_foster {
-        if n_br > 0 {
-            let terms =
-                foster_radiation_series(density, sound_speed, radius, omega, scale, flange, n_br)?;
-            apply_foster_series_on_flux(q, r, n, last_flux, &terms, off);
-            return Ok(());
-        }
+    if let Some((off, n_br)) = rad_foster
+        && n_br > 0
+    {
+        let terms =
+            foster_radiation_series(density, sound_speed, radius, omega, scale, flange, n_br)?;
+        apply_foster_series_on_flux(q, r, n, last_flux, &terms, off);
+        return Ok(());
     }
     r[last_flux * n + last_flux] += rr * scale;
     Ok(())
@@ -1879,12 +1879,8 @@ pub fn series_impedance_ports(
         }
     }
     let mut g = vec![0.0; n];
-    for i in 0..na {
-        g[i] = a.g[i];
-    }
-    for i in 0..nb {
-        g[na + i] = b.g[i];
-    }
+    g[..na].copy_from_slice(&a.g[..na]);
+    g[na..na + nb].copy_from_slice(&b.g[..nb]);
     let storage = Box::new(SumStorage {
         a: (a.storage, na),
         b: (b.storage, nb),
@@ -1978,6 +1974,7 @@ pub fn kirchhoff_parallel_step(
 /// complementary constraint.
 #[must_use]
 pub fn regularized_coulomb(mu: f64, normal_n: f64, velocity: f64, v_reg: f64) -> f64 {
+    #[allow(clippy::nonminimal_bool)] // NaN-aware: the "simpler" form drops the NaN refusal
     if !(mu >= 0.0 && v_reg > 0.0 && mu.is_finite() && v_reg.is_finite())
         || !normal_n.is_finite()
         || !velocity.is_finite()
@@ -2292,6 +2289,7 @@ impl AcousticSection {
 ///
 /// # Errors
 /// As [`acoustic_cylinder`], plus a bad tap station or neck.
+#[allow(clippy::too_many_arguments)] // one coherent physics record/assembler
 pub fn acoustic_waveguide(
     length: f64,
     radius: f64,
@@ -2335,6 +2333,7 @@ pub fn acoustic_waveguide(
 /// # Errors
 /// Non-physical taper, `cells < 2`, `inlets` not in `{1, 2}`,
 /// a bad tap, a bad pin, or a radiation-fit refusal.
+#[allow(clippy::too_many_arguments)] // one coherent physics record/assembler
 pub fn spherical_cone(
     inlet_radius: f64,
     outlet_radius: f64,
@@ -2362,6 +2361,8 @@ pub fn spherical_cone(
     )
 }
 
+#[allow(clippy::too_many_arguments)] // one coherent physics record/assembler
+#[allow(clippy::too_many_lines)] // one coherent physics stage
 fn spherical_cone_wall(
     inlet_radius: f64,
     outlet_radius: f64,
@@ -2386,19 +2387,18 @@ fn spherical_cone_wall(
             what: "spherical cone parameters",
         });
     }
-    if let Some(pin) = viscothermal {
-        if !(pin.dynamic_viscosity >= 0.0
+    if let Some(pin) = viscothermal
+        && (!(pin.dynamic_viscosity >= 0.0
             && pin.dynamic_viscosity.is_finite()
             && pin.gamma > 1.0
             && pin.gamma.is_finite()
             && pin.prandtl > 0.0
             && pin.prandtl.is_finite())
-            || pin.foster_branches > 8
-        {
-            return Err(PhsError::NotPsd {
-                what: "viscothermal pin parameters",
-            });
-        }
+            || pin.foster_branches > 8)
+    {
+        return Err(PhsError::NotPsd {
+            what: "viscothermal pin parameters",
+        });
     }
     let x_in = inlet_radius / slope;
     let x_out = outlet_radius / slope;
@@ -2406,7 +2406,7 @@ fn spherical_cone_wall(
     let dx = length / cells as f64;
     let n_line = 2 * cells;
     let n_nf = cells;
-    let n_br = viscothermal.map(|p| p.foster_branches).unwrap_or(0);
+    let n_br = viscothermal.map_or(0, |p| p.foster_branches);
     let foster = n_br > 0 && viscothermal.is_some_and(|p| p.dynamic_viscosity > 0.0);
     let n_foster = if foster { cells * n_br * 2 } else { 0 };
     let l_psi = density * dx / alpha;
@@ -2633,8 +2633,7 @@ fn spherical_cone_wall(
             omega_pin,
             MouthFlange::Flanged,
         )
-        .map(|(rr, _)| rr)
-        .unwrap_or(0.0);
+        .map_or(0.0, |(rr, _)| rr);
         apply_tap_neck_wall(
             &mut q,
             &mut r,
@@ -2686,6 +2685,8 @@ fn section_is_taper(s: AcousticSection) -> bool {
 /// Interface coupling is the transformer `J ∝ x_L / x_R` so
 /// physical `p` and `U` match (`x = 1` on a cylinder). Near-field
 /// shunts live only on cone cells.
+#[allow(clippy::too_many_arguments)] // one coherent physics record/assembler
+#[allow(clippy::too_many_lines)] // one coherent physics stage
 fn hybrid_sphere_cylinder_chain(
     sections: &[AcousticSection],
     density: f64,
@@ -2716,19 +2717,18 @@ fn hybrid_sphere_cylinder_chain(
             what: "acoustic chain parameters",
         });
     }
-    if let Some(pin) = viscothermal {
-        if !(pin.dynamic_viscosity >= 0.0
+    if let Some(pin) = viscothermal
+        && (!(pin.dynamic_viscosity >= 0.0
             && pin.dynamic_viscosity.is_finite()
             && pin.gamma > 1.0
             && pin.gamma.is_finite()
             && pin.prandtl > 0.0
             && pin.prandtl.is_finite())
-            || pin.foster_branches > 8
-        {
-            return Err(PhsError::NotPsd {
-                what: "viscothermal pin parameters",
-            });
-        }
+            || pin.foster_branches > 8)
+    {
+        return Err(PhsError::NotPsd {
+            what: "viscothermal pin parameters",
+        });
     }
     let mut inertances = Vec::with_capacity(n_cells);
     let mut compliances = Vec::with_capacity(n_cells);
@@ -2791,7 +2791,7 @@ fn hybrid_sphere_cylinder_chain(
     let omega_pin = core::f64::consts::PI * sound_speed / (2.0 * total_length);
     let n_line = 2 * n_cells;
     let n_nf = is_cone.iter().filter(|&&b| b).count();
-    let n_br = viscothermal.map(|p| p.foster_branches).unwrap_or(0);
+    let n_br = viscothermal.map_or(0, |p| p.foster_branches);
     let foster = n_br > 0 && viscothermal.is_some_and(|p| p.dynamic_viscosity > 0.0);
     let n_foster = if foster { n_cells * n_br * 2 } else { 0 };
     let (n_tap_states, n_tap_foster) = tap_open_budget(
@@ -3106,8 +3106,7 @@ fn hybrid_sphere_cylinder_chain(
             omega_pin,
             MouthFlange::Flanged,
         )
-        .map(|(rr, _)| rr)
-        .unwrap_or(0.0);
+        .map_or(0.0, |(rr, _)| rr);
         apply_tap_neck_wall(
             &mut q,
             &mut r,
@@ -3254,6 +3253,8 @@ pub fn acoustic_chain_mouth(
 ///
 /// # Errors
 /// As [`acoustic_chain`], plus a bad wall pin.
+#[allow(clippy::too_many_arguments)] // one coherent physics record/assembler
+#[allow(clippy::too_many_lines)] // one coherent physics stage
 pub fn acoustic_chain_mouth_wall(
     sections: &[AcousticSection],
     density: f64,
@@ -3313,19 +3314,18 @@ pub fn acoustic_chain_mouth_wall(
             what: "acoustic chain parameters",
         });
     }
-    if let Some(pin) = viscothermal {
-        if !(pin.dynamic_viscosity >= 0.0
+    if let Some(pin) = viscothermal
+        && (!(pin.dynamic_viscosity >= 0.0
             && pin.dynamic_viscosity.is_finite()
             && pin.gamma > 1.0
             && pin.gamma.is_finite()
             && pin.prandtl > 0.0
             && pin.prandtl.is_finite())
-            || pin.foster_branches > 8
-        {
-            return Err(PhsError::NotPsd {
-                what: "viscothermal pin parameters",
-            });
-        }
+            || pin.foster_branches > 8)
+    {
+        return Err(PhsError::NotPsd {
+            what: "viscothermal pin parameters",
+        });
     }
     let n_line = 2 * n_cells;
     let mut inertances = Vec::with_capacity(n_cells);
@@ -3352,7 +3352,7 @@ pub fn acoustic_chain_mouth_wall(
     }
     let total_length = x_acc;
     let omega_pin = core::f64::consts::PI * sound_speed / (2.0 * total_length);
-    let n_br = viscothermal.map(|p| p.foster_branches).unwrap_or(0);
+    let n_br = viscothermal.map_or(0, |p| p.foster_branches);
     let mut cell_foster = vec![false; n_cells];
     if let Some(pin) = viscothermal {
         for cell in 0..n_cells {
@@ -3556,8 +3556,7 @@ pub fn acoustic_chain_mouth_wall(
             omega_pin,
             MouthFlange::Flanged,
         )
-        .map(|(rr, _)| rr)
-        .unwrap_or(0.0);
+        .map_or(0.0, |(rr, _)| rr);
         apply_tap_neck_wall(
             &mut q,
             &mut r,
@@ -3631,6 +3630,7 @@ fn tap_cell(station: f64, length: f64, cell_x0: &[f64]) -> usize {
     cell
 }
 
+#[allow(clippy::too_many_arguments)] // one coherent physics record/assembler
 fn apply_closed_pad(
     q: &mut [f64],
     r: &mut [f64],
@@ -3656,20 +3656,21 @@ fn apply_closed_pad(
     let c0 = 1.0 / q[tap_q * n + tap_q];
     q[tap_q * n + tap_q] = 1.0 / (c0 + c_h);
     if let Some(p) = pin {
-        if let Some(off) = foster_off {
-            if p.foster_branches > 0 && p.dynamic_viscosity > 0.0 {
-                let terms = foster_bessel_shunt(
-                    c_h,
-                    tap.neck_radius,
-                    density,
-                    p,
-                    omega / 8.0,
-                    omega * 8.0,
-                    p.foster_branches,
-                )?;
-                apply_foster_series_on_flux(q, r, n, tap_q, &terms, off);
-                return Ok(());
-            }
+        if let Some(off) = foster_off
+            && p.foster_branches > 0
+            && p.dynamic_viscosity > 0.0
+        {
+            let terms = foster_bessel_shunt(
+                c_h,
+                tap.neck_radius,
+                density,
+                p,
+                omega / 8.0,
+                omega * 8.0,
+                p.foster_branches,
+            )?;
+            apply_foster_series_on_flux(q, r, n, tap_q, &terms, off);
+            return Ok(());
         }
         let (_, g, _) = all_regime_series_and_shunt(0.0, c_h, tap.neck_radius, density, omega, p);
         r[tap_q * n + tap_q] += g;
@@ -3730,6 +3731,7 @@ fn wall_state_count(n_cells: usize, wall: Option<&WallPin>) -> Result<usize, Phs
     Ok(2 * n_cells)
 }
 
+#[allow(clippy::too_many_arguments)] // one coherent physics record/assembler
 fn apply_cell_wall(
     q: &mut [f64],
     j: &mut [f64],
@@ -3822,7 +3824,7 @@ fn tap_open_budget(
     sound_speed: f64,
     pin: Option<&ViscothermalPin>,
 ) -> Result<(usize, usize), PhsError> {
-    let n_br = pin.map(|p| p.foster_branches).unwrap_or(0);
+    let n_br = pin.map_or(0, |p| p.foster_branches);
     let foster_on = n_br > 0 && pin.is_some_and(|p| p.dynamic_viscosity > 0.0);
     let mut n_tap_states = 0usize;
     let mut n_tap_foster = 0usize;
@@ -3853,6 +3855,7 @@ fn tap_open_budget(
 /// drives the first inductor (same hook as a lumped neck); each
 /// later `L` sits between the previous `C` and its own `C`. Last
 /// flux carries the same flanged `(R, X)` as the TMM chimney.
+#[allow(clippy::too_many_arguments)] // one coherent physics record/assembler
 fn apply_tap_line(
     q: &mut [f64],
     j: &mut [f64],
@@ -3957,6 +3960,7 @@ fn apply_tap_line(
 
 /// Lumped all-regime neck `R`, or the same Foster series the bore
 /// already uses (`R0` + residual) when `foster_off` is set.
+#[allow(clippy::too_many_arguments)] // one coherent physics record/assembler
 fn apply_tap_neck_wall(
     q: &mut [f64],
     r: &mut [f64],
@@ -3970,23 +3974,24 @@ fn apply_tap_neck_wall(
     pin: Option<&ViscothermalPin>,
     foster_off: Option<usize>,
 ) -> Result<(), PhsError> {
-    if let (Some(p), Some(off)) = (pin, foster_off) {
-        if p.foster_branches > 0 && p.dynamic_viscosity > 0.0 {
-            q[phi * n + phi] = 1.0 / l_h.max(1.0e-18);
-            let r0 = 8.0 * p.dynamic_viscosity / (density * neck_radius * neck_radius) * l_h;
-            r[phi * n + phi] = r_ac + r0.max(0.0);
-            let terms = foster_bessel_series(
-                l_h,
-                neck_radius,
-                density,
-                p.dynamic_viscosity,
-                omega / 8.0,
-                omega * 8.0,
-                p.foster_branches,
-            )?;
-            apply_foster_series_on_flux(q, r, n, phi, &terms, off);
-            return Ok(());
-        }
+    if let (Some(p), Some(off)) = (pin, foster_off)
+        && p.foster_branches > 0
+        && p.dynamic_viscosity > 0.0
+    {
+        q[phi * n + phi] = 1.0 / l_h.max(1.0e-18);
+        let r0 = 8.0 * p.dynamic_viscosity / (density * neck_radius * neck_radius) * l_h;
+        r[phi * n + phi] = r_ac + r0.max(0.0);
+        let terms = foster_bessel_series(
+            l_h,
+            neck_radius,
+            density,
+            p.dynamic_viscosity,
+            omega / 8.0,
+            omega * 8.0,
+            p.foster_branches,
+        )?;
+        apply_foster_series_on_flux(q, r, n, phi, &terms, off);
+        return Ok(());
     }
     let (r_wall, l_used) = tap_viscothermal(l_h, neck_radius, density, omega, pin);
     q[phi * n + phi] = 1.0 / l_used;
@@ -4005,6 +4010,7 @@ fn all_regime_series_and_shunt(
     omega: f64,
     pin: &ViscothermalPin,
 ) -> (f64, f64, f64) {
+    const WIDE_TUBE_SHEAR: f64 = 10.0;
     if !(pin.dynamic_viscosity > 0.0 && omega > 0.0 && radius > 0.0 && density > 0.0) {
         return (0.0, 0.0, 1.0);
     }
@@ -4012,7 +4018,6 @@ fn all_regime_series_and_shunt(
     if !(rv > 0.0 && rv.is_finite()) {
         return (0.0, 0.0, 1.0);
     }
-    const WIDE_TUBE_SHEAR: f64 = 10.0;
     if rv >= WIDE_TUBE_SHEAR {
         let eps = core::f64::consts::SQRT_2 / rv;
         let r_series = omega * inertance * eps;
@@ -4137,7 +4142,7 @@ fn bessel_j0_j1_series(z: C64) -> (C64, C64) {
     let mut j0 = term0;
     let mut j1 = term1;
     for k in 1..=48 {
-        let kk = k as f64;
+        let kk = f64::from(k);
         term0 = (term0 * half_sq).scale(-1.0 / (kk * kk));
         j0 = j0 + term0;
         term1 = (term1 * half_sq).scale(-1.0 / (kk * (kk + 1.0)));
@@ -4502,10 +4507,14 @@ mod valve_ports {
         assert!((-100.0) * back >= 0.0);
         let u4 = bernoulli_volume_flow(0.01, 4.0e-4, 400.0, 1.2);
         assert!((u4 / u - 2.0).abs() < 1.0e-12);
-        assert_eq!(bernoulli_volume_flow(0.01, 0.0, 100.0, 1.2), 0.0);
+        #[allow(clippy::float_cmp)] // EXACT zero-return pin (never weakened for a lint)
+        {
+            assert_eq!(bernoulli_volume_flow(0.01, 0.0, 100.0, 1.2), 0.0);
+        }
     }
 
     #[test]
+    #[allow(clippy::float_cmp)] // EXACT closure pin (never weakened for a lint)
     fn quasistatic_aperture_closes_at_the_named_pressure() {
         assert_eq!(quasistatic_aperture_opening(4.0e-4, 1_000.0, 1_000.0), 0.0);
         assert!((quasistatic_aperture_opening(4.0e-4, 1_000.0, 0.0) - 4.0e-4).abs() < 1.0e-16);

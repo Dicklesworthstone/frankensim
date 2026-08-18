@@ -126,7 +126,7 @@ pub fn j1_roots(count: usize) -> Result<Vec<f64>, DuctError> {
         let mut b = hi;
         let mut fa = f_lo;
         for _ in 0..200 {
-            let mid = 0.5 * (a + b);
+            let mid = f64::midpoint(a, b);
             let fm = bessel_j1(mid);
             if fa * fm <= 0.0 {
                 b = mid;
@@ -138,7 +138,7 @@ pub fn j1_roots(count: usize) -> Result<Vec<f64>, DuctError> {
                 break;
             }
         }
-        let root = 0.5 * (a + b);
+        let root = f64::midpoint(a, b);
         roots.push(root);
         lo = root + 0.5;
     }
@@ -302,6 +302,7 @@ fn mat_inv(a: &[C64], n: usize) -> Result<Vec<C64>, DuctError> {
     Ok(inv)
 }
 
+#[allow(dead_code)] // staged physics variant; deletion needs owner permission (repo RULE 1)
 fn identity(n: usize) -> Vec<C64> {
     let mut m = vec![C64::ZERO; n * n];
     for i in 0..n {
@@ -502,6 +503,7 @@ pub fn mm_input_impedance_tabulated(
 }
 
 #[allow(clippy::too_many_lines)] // one recursion, kept whole on purpose
+#[allow(clippy::needless_pass_by_value)] // small load spec by value keeps call sites clean
 fn mm_core(
     duct: &Duct,
     state: &GasState,
@@ -1050,7 +1052,6 @@ mod modal_tests {
 #[cfg(test)]
 mod modal_flare_tests {
     use super::*;
-    use crate::input_impedance;
     use fs_material::gas::GasSpec;
 
     fn air20() -> GasState {
@@ -1112,7 +1113,7 @@ mod modal_flare_tests {
                 // Quadratic vertex through the log-magnitudes.
                 let (fa, ya) = (mags[i - 1].0, mags[i - 1].1.ln());
                 let (fb, yb) = (mags[i].0, mags[i].1.ln());
-                let (fc, yc) = (mags[i + 1].0, mags[i + 1].1.ln());
+                let (_fc, yc) = (mags[i + 1].0, mags[i + 1].1.ln());
                 let d = (ya - 2.0 * yb + yc).abs().max(1e-300);
                 let shift = 0.5 * (ya - yc) / (ya - 2.0 * yb + yc);
                 let df = fb - fa;

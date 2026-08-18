@@ -398,10 +398,10 @@ fn lanczos_sweep(
                 continue;
             }
             let lambda = sigma + 1.0 / th;
-            if let Some((lo, hi)) = window {
-                if !(lambda > lo && lambda <= hi) {
-                    continue;
-                }
+            if let Some((lo, hi)) = window
+                && !(lambda > lo && lambda <= hi)
+            {
+                continue;
             }
             let est = beta * y[(jn - 1) * jn + ri].abs();
             if est <= tol * th.abs().max(f64::MIN_POSITIVE) {

@@ -75,8 +75,8 @@ use fs_material::gas::GasState;
 use fs_math::c64::C64;
 use fs_math::det;
 use fs_phs::{
-    WallPin, side_hole_inner_length, side_hole_mutual_length, side_hole_neck_length,
-    side_hole_series_length, wall_admittance_per_metre, zwikker_kosten_f,
+    WallPin, side_hole_inner_length, side_hole_mutual_length, side_hole_series_length,
+    wall_admittance_per_metre, zwikker_kosten_f,
 };
 
 /// Wide-tube validity floor: below this shear number the first-order
@@ -502,6 +502,7 @@ fn wide_tube_wave(
 
 /// Narrow-tube (Poiseuille) series impedance plus an isothermal-tending
 /// thermal shunt. Used only below [`MIN_SHEAR_NUMBER`].
+#[allow(clippy::unnecessary_wraps)] // uniform Result surface across the wave constructors
 fn poiseuille_wave(
     state: &GasState,
     radius: f64,
@@ -633,6 +634,7 @@ fn basis_pair(segment: &Segment, wave: &SegmentWave, t: f64, forward: bool) -> (
 /// hole is too short for a 2-port wave: this is the same lumped
 /// all-regime / Bessel pin the bore uses, never a WideTube
 /// refusal (chimneys sit below `r_v = 10`).
+#[allow(dead_code)] // staged physics variant; deletion needs owner permission (repo RULE 1)
 fn chimney_series(
     state: &GasState,
     radius: f64,
@@ -684,6 +686,7 @@ fn chimney_series(
     }
 }
 
+#[allow(dead_code)] // staged physics variant; deletion needs owner permission (repo RULE 1)
 fn chimney_thermal_g(
     state: &GasState,
     radius: f64,
@@ -698,15 +701,15 @@ fn chimney_thermal_g(
     if !(rv > 0.0 && rv.is_finite()) {
         return 0.0;
     }
-    if matches!(loss, LossModel::Bessel) {
-        if let Ok(mut f_t) = zwikker_kosten_f(rv * state.prandtl.sqrt()) {
-            // Y' = iω C (1 + (γ-1) F_t); Re Y is G per metre.
-            // A sign flip of Im F keeps G ≥ 0 (same pin as bessel_wave).
-            if f_t.im > 0.0 {
-                f_t = C64::new(f_t.re, -f_t.im);
-            }
-            return (omega * compliance * (state.gamma - 1.0) * (-f_t.im)).max(0.0);
+    if matches!(loss, LossModel::Bessel)
+        && let Ok(mut f_t) = zwikker_kosten_f(rv * state.prandtl.sqrt())
+    {
+        // Y' = iω C (1 + (γ-1) F_t); Re Y is G per metre.
+        // A sign flip of Im F keeps G ≥ 0 (same pin as bessel_wave).
+        if f_t.im > 0.0 {
+            f_t = C64::new(f_t.re, -f_t.im);
         }
+        return (omega * compliance * (state.gamma - 1.0) * (-f_t.im)).max(0.0);
     }
     if rv >= MIN_SHEAR_NUMBER {
         let eps = core::f64::consts::SQRT_2 / rv;
@@ -757,6 +760,7 @@ pub fn tone_hole_shunt(
 ///
 /// # Errors
 /// As [`tone_hole_shunt`].
+#[allow(clippy::too_many_arguments)] // one coherent physics record/assembler
 pub fn tone_hole_shunt_wall(
     state: &GasState,
     hole_radius: f64,
@@ -855,6 +859,7 @@ fn mul2(a: [C64; 4], b: [C64; 4]) -> [C64; 4] {
 /// `Z_s = −i ω ρ t_s / S` under `e^{-iωt}` with Nederveen
 /// [`side_hole_series_length`] (open holes only; a closed pad is
 /// still a pure shunt).
+#[allow(clippy::too_many_arguments)] // one coherent physics record/assembler
 fn tone_hole_t_junction(
     state: &GasState,
     hole_radius: f64,
@@ -1190,6 +1195,8 @@ pub fn input_impedance_load(
     input_impedance_core(duct, state, omega, loss, LoadSpec::Fixed(z_load), wall)
 }
 
+#[allow(clippy::too_many_lines)] // one coherent physics stage
+#[allow(clippy::needless_pass_by_value)] // small spec taken by value keeps the public call sites clean
 fn input_impedance_core(
     duct: &Duct,
     state: &GasState,
@@ -1372,6 +1379,7 @@ impl TabulatedLoad {
                 what: "tabulated load needs >= 2 rows with matching lengths",
             });
         }
+        #[allow(clippy::nonminimal_bool)] // NaN-aware: the "simpler" form drops the NaN refusal
         if !(omegas[0].is_finite() && omegas[0] > 0.0)
             || !omegas.windows(2).all(|w| w[1].is_finite() && w[1] > w[0])
         {
