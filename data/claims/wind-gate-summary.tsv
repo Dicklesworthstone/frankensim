@@ -1,5 +1,5 @@
 # frankensim-wind-gate-summary-v1
-# derived from instrument-claims.json (blake2b-128 c7a720e2896f77319d4172eef7fd6800); regenerate when wind rows change (gated by wind_junction_gate.rs)
+# derived from instrument-claims.json (blake2b-128 64ed5167fea0bfb48e936eaa765325f6); regenerate when wind rows change (gated by wind_junction_gate.rs)
 image	qoi	gate	live_default	exactness	owners	evidence_count	evidence_refs
 char-line	junction-match-tmm-r	green	no	X-Exact+X-Struct	fs-vfit,fs-couple	1	test:crates/fs-couple/tests/wind_junction_gate.rs::char_junctions_match_tmm_r_and_the_detuned_hole_fails
 char-line	quarter-wave-lock	green	no	X-Exact+X-Struct	fs-couple,fs-phs,fs-dcontact	2	listening:data/listening/reed-sustained.listening-receipt; test:crates/fs-couple/tests/acoustic_assembly.rs::beating_reed_locks_near_the_quarter_wave

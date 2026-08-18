@@ -11,5 +11,6 @@ plate	dkt-modal	literature-modes	green	Olson-Hazell 1977 five modes + Leissa pin
 plate	vfit-driving-point	passive-one-port	ungated	NAMED MISSING: no executed plate-1-port fit artifact; certificate machinery exists (fs-vfit passivity)
 string-plate-nl	kc-vonkarman	pitch-glide-analytic	green	1e-12 analytic pins + FD-gradient/trajectory falsifier (Gonzalez caveat: NEVER cite energy conservation); selector threshold is committed data
 bowed	modal-stribeck	stick-slip-mechanism	ungated	live-excitation + spectrum evidence attached; awaits .7.5 mechanism gates + .7.3 tribo determinism
-string-plate-cavity	vibroacoustic-modal	two-dof-product-invariant	ungated	cavity/resonator pins attached; awaits .7.4 composed-guitar Carcagno gate
+string-plate-cavity	vibroacoustic-modal	two-dof-product-invariant	green	cavity/resonator pins attached; consumed by the .7.4 composed-guitar Carcagno gate (gt-001 re-executes the product invariant, defect 0.0)
+string-plate-cavity	composed-guitar-carcagno	bridge-admittance-triad	green	Carcagno 2018 BR-guitar triad: F1 +5.9% / F2 +9.9% (15% envelopes), F3 -32.6% (40% envelope, no-X-bracing mechanism disclosed = weakest claim); wolf-note + midline-brace negative control executed; guitar-strum listening receipt Unadjudicated
 string	waveguide-dispersive	budget-hero-string	ungated	earned by the executed bake-off receipt (KeepBoth); B ladder within 9.8 cents on the shared card; ops-budget scope, never certified partials

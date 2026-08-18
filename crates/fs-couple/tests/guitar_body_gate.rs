@@ -7,7 +7,7 @@
 //! Helmholtz cavity; the coupled model's BRIDGE ADMITTANCE is peak-
 //! picked and gated against the corpus rows for the BR-rosewood
 //! guitar of Carcagno et al. 2018 (JASA 144(6):3533, CC-BY, Table I;
-//! rows acoustic-li-2018-mode1/2 + acoustic-carcagno-2018-mode3:
+//! rows acoustic-carcagno-2018-mode1/2/3:
 //! F1 97 Hz Q 34, F2 177 Hz Q 18, F3 336 Hz Q 36).
 //!
 //! HONESTY ENVELOPE: the tops are SHAPE SURROGATES (rectangles +

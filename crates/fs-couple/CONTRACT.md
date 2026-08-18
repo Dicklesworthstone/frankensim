@@ -834,6 +834,27 @@ None.
   drive-independent, and read as a 27% violation of a ratio law
   that holds.
 
+- Composed guitar body (bead 3ez8g.7.4): `tests/guitar_body_gate.rs`
+  gates the braced-top + ladder-braced-back + Helmholtz model's
+  BRIDGE-ADMITTANCE triad against the Carcagno 2018 BR-guitar corpus
+  rows (F1 +5.9%, F2 +9.9% in 15% envelopes; F3 -32.6% in an
+  authored 40% envelope with the mechanism DISCLOSED — the flat
+  rectangle surrogate has no X-bracing/arching, so its third
+  breathing family sits low: the named weakest claim). Executed
+  falsifiers: the midline-brace order flip (frequency-order breathing
+  selection picks a 6e-15-volume mode; select by max |INT phi dA|)
+  and the MEASURED refutation of nodal-line folklore (an ECCENTRIC
+  brace on the nodal line shifts the mode 11.6% via torsion +
+  eccentric-membrane coupling). The wolf note is a pHS pair: tune
+  EFFECTIVE frequencies (k = m w^2 - k_c; the coupling spring detunes
+  a naive pair by 10% and no hybridization happens), then the string
+  on the breather beats at DETRENDED depth 0.046 (the estimator
+  lesson: divide out decay before measuring modulation) vs 0.990
+  clean off-resonance. Truncation sensitivity is PER-FREQUENCY
+  (spread 23.6x) and its direction is fixture-specific: here
+  between-peaks suffers more than on-peak because low-index resonant
+  modes survive basis halving.
+
 ## Conformance tests
 
 `src/broadband_radiation.rs`: G0 complex/real-SH round trip/reconstruction against
@@ -1040,6 +1061,12 @@ receipt re-asserted (split gain 59.950 = authority 59.950, analytic
 59.923; pluck L2 4.6e-12); ec-008 listening digest chain
 (electric-clean-vs-driven, Unadjudicated); ec-009 the electric
 gate-summary artifact enumerates every registry row.
+
+`tests/guitar_body_gate.rs` (5 + 1 mint): gt-001 triad + product
+invariant (defect 0.0) + damping honesty (material-only Q 39/54/78
+above measured 34/18/36 as it must be); gt-002 the executed
+midline-brace negative control; gt-003 wolf note; gt-004 truncation
+spread; gt-006 guitar-strum listening digest chain (Unadjudicated).
 
 ## No-claim boundaries
 

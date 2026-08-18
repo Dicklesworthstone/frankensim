@@ -395,7 +395,7 @@
    "exactness": [
     "X-Exact"
    ],
-   "gate": "ungated",
+   "gate": "green",
    "live_default": "no",
    "determinism": "one-host",
    "evidence": [
@@ -410,7 +410,7 @@
     "vvreg:acoustic-carcagno-2018-mode2",
     "vvreg:acoustic-carcagno-2018-mode3"
    ],
-   "notes": "The plate x cavity x radiation coupling engine (energy identities exact, added-mass quartering verified in fs-couple tests); the exact 2-DOF invariant f1*f2 = f_helmholtz*f_top is the free engine-exactness oracle. Composed-guitar gates on the Carcagno corpus: bead 3ez8g.7.4. Fixture traps recorded there: midline braces sit on nodal lines; the sign convention is phase-only observable. .7.1 review: cavity/resonator pin evidence attached; UNGATED pending the composed-guitar Carcagno gate (.7.4)."
+   "notes": "The plate x cavity x radiation coupling engine (energy identities exact, added-mass quartering verified in fs-couple tests); the exact 2-DOF invariant f1*f2 = f_helmholtz*f_top is the free engine-exactness oracle. Composed-guitar gates LANDED (bead 3ez8g.7.4, guitar_body_gate.rs; gt-001 re-executes the product invariant at defect 0.0). Fixture traps recorded there: midline braces sit on nodal lines; the sign convention is phase-only observable. .7.1 review: cavity/resonator pin evidence attached; UNGATED pending the composed-guitar Carcagno gate (.7.4)."
   },
   {
    "filling": "hammer-felt",
@@ -1421,6 +1421,52 @@
    "budget_row": null,
    "corpus_refs": [],
    "notes": "The AUTHORITY image for the electric gain stage (bead 3ez8g.9.5): per-sample monolithic Newton on the SAME constitutive equations ((supply-vp)/RL = Ip(vp,vg)) to 1e-14 relative \u2014 no split, no sweep budget. Bake-off vs split-circuit-image on a tone-RC + 12AX7 fixture, receipt at crates/fs-couple/tests/receipts/electric-split-vs-full-dae.bakeoff: split gain 59.950 = authority 59.950 (analytic 59.923), H2 at drive 0.35 identical to 5 decimals, pluck-transient L2 4.6e-12 \u2014 on this memoryless fixture the 3-sweep load-line-damped split CONVERGES to the authority; the split's claim to fame is the HARD per-sample budget (216000 fixed vs 244257 data-dependent iterations). Outcome KeepBoth (split = budget lane, monolith = authority/verification lane; D14 factorization). Reference for the nonlinear QoIs is authority-measured (disclosed in the receipt rationale); gain reference is analytic from the card partials."
+  },
+  {
+   "filling": "string-plate-cavity",
+   "image": "composed-guitar-carcagno",
+   "qoi": "bridge-admittance-triad",
+   "owner_crates": [
+    "fs-couple",
+    "fs-plate",
+    "fs-phs"
+   ],
+   "exactness": [
+    "X-Consist",
+    "X-Est"
+   ],
+   "gate": "green",
+   "live_default": "no",
+   "determinism": "one-host",
+   "evidence": [
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/tests/guitar_body_gate.rs::gt_001_composed_triad_vs_carcagno"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/tests/guitar_body_gate.rs::gt_002_midline_brace_negative_control"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/tests/guitar_body_gate.rs::gt_003_wolf_note_on_the_breather"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/tests/guitar_body_gate.rs::gt_004_truncation_sensitivity_is_per_frequency"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/tests/guitar_body_gate.rs::gt_006_committed_listening_chain_holds"
+    }
+   ],
+   "budget_row": null,
+   "corpus_refs": [
+    "vvreg:acoustic-carcagno-2018-mode1",
+    "vvreg:acoustic-carcagno-2018-mode2",
+    "vvreg:acoustic-carcagno-2018-mode3"
+   ],
+   "notes": "The COMPOSED guitar body (bead 3ez8g.7.4): braced sitka top (spruce-sitka-fpl-gtr282) + ladder-braced Brazilian-rosewood back (rosewood-brazilian-fpl-gtr282; SG-0.8 density basis caveat disclosed) + Helmholtz cavity; bridge-admittance peaks gated vs the Carcagno 2018 BR-guitar rows. MEASURED: F1 +5.9%, F2 +9.9% (authored 15% envelopes; beats the 2-DOF casebook), F3 -32.6% inside an authored 40% envelope with the mechanism DISCLOSED \u2014 the flat rectangle surrogate has no X-bracing/arching so its third breathing family sits low; THE NAMED WEAKEST CLAIM. Exact 2-DOF product invariant defect 0.0. Damping honesty: material-only Q (39/54/78) exceeds measured (34/18/36) as it must. NEGATIVE CONTROL executed: a deep midline brace flips the mode order (lowest mode volume 6e-15 vs breather 0.22 \u2014 frequency-order breathing selection fails; select by max |INT phi dA|); ALSO MEASURED: the a-brace-on-the-nodal-line-has-no-effect folklore is FALSE for eccentric braces (11.6% shift via torsion + eccentric-membrane coupling). WOLF NOTE: string tuned onto the breather beats at detrended depth 0.046 with 8 nulls vs 0.990 clean off-resonance (body ratio 2.5); the coupling spring DETUNES the pair unless effective frequencies are tuned (k = m w^2 - k_c). Truncation sensitivity is per-frequency (spread 23.6x; on THIS fixture between-peaks suffers MORE than on-peak \u2014 direction is fixture-specific). Listening artifact guitar-strum (Unadjudicated)."
   }
  ]
 }
