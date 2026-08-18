@@ -1,0 +1,272 @@
+{
+ "schema": "org.frankensim.wright-flyer.prop-geometry.v1",
+ "bead": "frankensim-wf-root-guzez.2.6",
+ "status": "ACTIVE",
+ "verified_on": "2026-08-18",
+ "dossier_record": "a2-props-bentend",
+ "convention_block": {
+  "axes_id": "frd-body-v1",
+  "moment_signs_id": "moment-signs-v1",
+  "angles_id": "angles-v1",
+  "reference_area_convention": "propeller disk conventions below; blade station chords in metres",
+  "wind_reference": "not-applicable (tunnel/bench data carry their own q)"
+ },
+ "identity_note": "This artifact's content identity is its fs-blake3 hash at commit (tracked via the source manifest); consumers pin the hash, not the path.",
+ "coefficient_conventions": {
+  "CT": "T / (rho * n^2 * D^4), n in rev/s",
+  "CP": "P / (rho * n^3 * D^5)",
+  "J": "V / (n * D)",
+  "eta": "J * CT / CP",
+  "phi_station": "chord inclination from the ROTATION PLANE, atan((z_le-z_te)/(x_le-x_te)) per NTRS 20020080869"
+ },
+ "overall_geometry": {
+  "diameter_m": {
+   "value": 2.5908,
+   "original": "8 ft 6 in (102 in), same for 1903/1904/1911",
+   "status": "verified",
+   "sources": [
+    "AIAA 2001-0309",
+    "NPS",
+    "NASM A19830381000"
+   ]
+  },
+  "blade_count": 2,
+  "pair": "counter-rotating (one chain crossed); torque/gyroscopic cancellation",
+  "material_1903": "THREE spruce boards glued face-to-face (wright-brothers.org); 1911 bent-end adds muslin tip sheaths",
+  "tip_shape_1903": "STRAIGHT wide-tip paddle — the 'bent end' (rearward-swept tip) design emerged from 1905 testing and is standard only ~1912+; the tested LFST reproductions with published curves are circa-1911 BENT-END props, NOT the 1903 geometry",
+  "sparse_1903_numbers": {
+   "tip_width_in": 8,
+   "root_width_in": 2,
+   "length_in": 102,
+   "mass_lb_original": 6.5,
+   "mass_lb_repro_spruce": 7.5,
+   "pitch_1904_deg": 25.8,
+   "sources": [
+    "wright-brothers.org via Lippincott/McFarland",
+    "AIAA 2001-0309"
+   ]
+  }
+ },
+ "radial_geometry_1903": {
+  "status": "absent-by-verification",
+  "finding": "NO station-by-station c(r)/beta(r) table for the 1903 propeller exists in the open literature (verified 2026-08-18 across NTRS, CiteSeerX, DTIC, AIAA listings). AIAA 2001-0309 describes the laser scan of the broken originals and promises the data 'in a subsequent publication' that never openly appeared. The Wright Experience holds the complete private digital reconstruction.",
+  "reconstruction_paths": [
+   {
+    "path": "digitize sections from the Smithsonian CC0 3-D scan of the whole Flyer (3d.si.edu, OBJ/GLB, exhibit-scale — envelope/twist sanity, NOT airfoil-section fidelity)",
+    "evidence_ceiling": "Estimated"
+   },
+   {
+    "path": "scale the 1911 NTRS planform trend to the sparse 1903 numbers (tip width 8 in, straight tip, pitch lineage)",
+    "evidence_ceiling": "Estimated"
+   },
+   {
+    "path": "reconstruct via the Wrights' own design method (constant-alpha blade element, McFarland design pitch) as Carroll & Carroll 2005 did",
+    "evidence_ceiling": "Estimated"
+   },
+   {
+    "path": "contact The Wright Experience for the private scan (data-rights negotiation, E1.10 adjacent)",
+    "evidence_ceiling": "Verified if granted"
+   }
+  ],
+  "sim_rule": "any 1903 radial table the simulation uses is a RECONSTRUCTION artifact carrying its path + Estimated ceiling; it can never be promoted by agreement with the 1911 table (different geometry)"
+ },
+ "radial_geometry_1911_bentend": {
+  "status": "verified",
+  "warning": "1911 BENT-END geometry — NOT the 1903 flight propeller. Published use: BEMT method-validation fixture (V-03 calibration), planform-trend prior.",
+  "source": "NASA NTRS 20020080869 (Wang/Ash/Bobbitt), measured at NASA Langley; R = 51 in, D = 8.5 ft; sections at r/R 0.96 and 1.0 reuse the 0.9 airfoil; cambered concave-lower sections with blunt TE",
+  "stations": [
+   {
+    "r_over_R": 0.2,
+    "chord_in": 5.7546,
+    "phi_deg": 61.578,
+    "area_in2": 4.605,
+    "perimeter_in": 12.238
+   },
+   {
+    "r_over_R": 0.3,
+    "chord_in": 6.3967,
+    "phi_deg": 52.827,
+    "area_in2": 4.184,
+    "perimeter_in": 13.367
+   },
+   {
+    "r_over_R": 0.4,
+    "chord_in": 7.4621,
+    "phi_deg": 44.821,
+    "area_in2": 4.33,
+    "perimeter_in": 15.489
+   },
+   {
+    "r_over_R": 0.5,
+    "chord_in": 8.697,
+    "phi_deg": 38.567,
+    "area_in2": 4.647,
+    "perimeter_in": 18.004
+   },
+   {
+    "r_over_R": 0.6,
+    "chord_in": 10.0083,
+    "phi_deg": 33.92,
+    "area_in2": 4.895,
+    "perimeter_in": 20.63
+   },
+   {
+    "r_over_R": 0.7,
+    "chord_in": 11.2063,
+    "phi_deg": 29.64,
+    "area_in2": 4.985,
+    "perimeter_in": 22.973
+   },
+   {
+    "r_over_R": 0.8,
+    "chord_in": 10.967,
+    "phi_deg": 26.509,
+    "area_in2": 4.17,
+    "perimeter_in": 22.397
+   },
+   {
+    "r_over_R": 0.9,
+    "chord_in": 10.7179,
+    "phi_deg": 23.298,
+    "area_in2": 3.35,
+    "perimeter_in": 21.834
+   }
+  ],
+  "section_coordinates": "published as report FIGURES only (Figs 1.01-2.08); the (x,z) files are NOT open — mean thickness estimable from area/chord"
+ },
+ "performance_fixtures": {
+  "static_1903": {
+   "partition": "holdout",
+   "wrights_bench": "132-136 lb PAIR at 350 rpm (Dayton outdoor, 1903-11-21) => 67 +/- 1 lb per prop",
+   "lfst_reproduction": "64.2 +/- 1.1 lb at 350.1 +/- 0.6 rpm (46 F, 29.97 inHg) — 'very good to excellent' CT agreement with the Wrights' reduction",
+   "sources": [
+    "AIAA 2001-0309"
+   ]
+  },
+  "static_1904": {
+   "partition": "holdout",
+   "wrights_bench": "160 lb pair at 377 rpm (1905-06-08, indoor)",
+   "lfst_reproduction": "82.66 lb at 377.8 rpm (48 F, 30.06 inHg)",
+   "sources": [
+    "AIAA 2001-0309"
+   ]
+  },
+  "eta_band_1903": {
+   "partition": "holdout",
+   "value": "0.75-0.82 near J = 0.75-0.92",
+   "lineage": "SECONDARY (Ash/Britcher/Hyde centennial article via cites; wright-brothers.org says ~0.70; Wilbur's own 66% is a CALCULATION) — a band, never a datum; no open 1903 CT(J)/CP(J) curve exists",
+   "sim_rule": "1903 forward-flight validation anchors are the static point + this band; fitting to the band is forbidden (holdout)"
+  },
+  "curves_1911_bentend": {
+   "partition": "calibration",
+   "warning": "1911 geometry — validates the BEMT METHOD, never 1903 values",
+   "eta_vs_J": [
+    [
+     0.2,
+     0.2
+    ],
+    [
+     0.4,
+     0.412
+    ],
+    [
+     0.6,
+     0.63
+    ],
+    [
+     0.8,
+     0.752
+    ],
+    [
+     1.0,
+     0.83
+    ],
+    [
+     1.1,
+     0.859
+    ],
+    [
+     1.15,
+     0.87
+    ],
+    [
+     1.2,
+     0.854
+    ],
+    [
+     1.3,
+     0.79
+    ]
+   ],
+   "cp_vs_J": [
+    [
+     0.2,
+     0.212
+    ],
+    [
+     0.4,
+     0.185
+    ],
+    [
+     0.6,
+     0.175
+    ],
+    [
+     0.8,
+     0.163
+    ],
+    [
+     1.0,
+     0.143
+    ],
+    [
+     1.1,
+     0.13
+    ],
+    [
+     1.15,
+     0.115
+    ],
+    [
+     1.2,
+     0.108
+    ],
+    [
+     1.3,
+     0.082
+    ]
+   ],
+   "notes": "experimental stall at J ~ 1.29; CT column partially OCR-garbled in the open scan (individual CT points +/- 0.02); CFD (FLO_MG + Adkins-Liebeck) within a few percent over J 0.6-1.15",
+   "sources": [
+    "NTRS 20020080869 Tables 3.01-3.03",
+    "AIAA 2000-3152 / JoA 39(2) 10.2514/2.2944 (peak >0.85 slightly above J=1)"
+   ]
+  }
+ },
+ "operating_points": {
+  "note": "arithmetic re-derived and battery-checked against flyer-reference values",
+  "J_rail_dec17": {
+   "value": 0.708,
+   "derivation": "V_air = headwind 10.73 m/s (24 mph), n = 350 rpm = 5.833 rev/s, D = 2.5908 m => J = 10.73/15.11",
+   "plan_check": "the plan's held-on-rail J ~ 0.7-0.8 CONFIRMED (0.80 at 27 mph gusts)"
+  },
+  "J_liftoff_dec17": {
+   "value": 0.917,
+   "derivation": "V_air ~ 13.86 m/s at 350 rpm => J = 13.86/15.11; J sweeps 0.71 -> 0.92 during the run"
+  },
+  "J_design_wilbur": {
+   "value": 0.753,
+   "derivation": "design point 90 lb total at 24 mph and 330 rpm: 10.73/(5.5*2.5908)",
+   "sources": [
+    "wright-brothers.org via McFarland"
+   ]
+  }
+ },
+ "blade_solid_for_collision_proxy": {
+  "consumer": "BladeCollisionProxyV1 (plan §5.1.5; BladeCollisionProxyArtifactId preimage in replay-identity-schema-v1)",
+  "open_source_geometry": "Smithsonian CC0 3-D scan of NASM A19610048000 (props installed), 3d.si.edu OBJ/GLB/GLTF/USDZ — the ONLY open 3-D source; exhibit-scale",
+  "private_geometry": "Wright Experience complete digital 1903 reconstruction (rapid-prototyping grade) — exists, never released",
+  "rule": "the proxy's cover-error certificate must be measured against whichever solid is actually used, and the artifact id binds that choice"
+ },
+ "no_claims": "Registry of published propeller geometry/performance evidence and its boundaries. The 1911 table validates methods, not 1903 values; every 1903 radial table in the sim is a labeled reconstruction; the eta band is secondary lineage and holdout-only."
+}
