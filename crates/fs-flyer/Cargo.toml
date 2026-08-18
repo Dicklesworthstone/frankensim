@@ -12,6 +12,7 @@ layer = "L4"
 
 [dependencies]
 fs-blake3 = { path = "../fs-blake3" }
+fs-time = { path = "../fs-time" }
 
 [lints]
 workspace = true

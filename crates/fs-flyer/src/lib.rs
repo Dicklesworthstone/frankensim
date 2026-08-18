@@ -20,6 +20,8 @@
 
 use fs_blake3::hash_domain;
 
+pub mod spine;
+
 /// Identity domain for design digests.
 pub const DESIGN_DIGEST_DOMAIN: &str = "org.frankensim.fs-flyer.design.v1";
 

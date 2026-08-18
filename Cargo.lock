@@ -1469,6 +1469,7 @@ name = "fs-flyer"
 version = "0.0.1"
 dependencies = [
  "fs-blake3",
+ "fs-time",
 ]
 
 [[package]]
