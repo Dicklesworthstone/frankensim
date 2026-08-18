@@ -1,0 +1,19 @@
+[package]
+name = "fs-atmo"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Atmosphere: FlatSiteLogLaw mean wind, wall-compatible solenoidal turbulence, provenance-bound air-state sampling."
+
+[package.metadata.frankensim]
+layer = "L2"
+
+[dependencies]
+fs-blake3 = { path = "../fs-blake3" }
+fs-math = { path = "../fs-math" }
+fs-rand = { path = "../fs-rand" }
+
+[lints]
+workspace = true

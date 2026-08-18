@@ -967,6 +967,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-atmo"
+version = "0.0.1"
+dependencies = [
+ "fs-blake3",
+ "fs-math",
+ "fs-rand",
+]
+
+[[package]]
 name = "fs-bem"
 version = "0.0.1"
 dependencies = [
@@ -2975,6 +2984,7 @@ dependencies = [
  "fsqlite-wal",
  "hashbrown 0.17.1",
  "parking_lot",
+ "rand 0.10.2",
  "smallvec",
  "tracing",
  "xxhash-rust",
