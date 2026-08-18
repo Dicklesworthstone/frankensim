@@ -1,0 +1,262 @@
+{
+ "schema": "org.frankensim.wright-flyer.canard-mechanics.v1",
+ "bead": "frankensim-wf-root-guzez.2.5",
+ "status": "ACTIVE",
+ "verified_on": "2026-08-18",
+ "dossier_records": [
+  "a2-simmodels-deters",
+  "a4-culick-stability",
+  "a3-dec17-records",
+  "a2-ames-fullscale-1999"
+ ],
+ "convention_block": {
+  "axes_id": "frd-body-v1",
+  "moment_signs_id": "moment-signs-v1",
+  "angles_id": "angles-v1",
+  "control_signs_id": "control-signs-v1",
+  "reference_area_convention": "canard = both planes projected (geometry-conventions-v1)",
+  "wind_reference": "not-applicable"
+ },
+ "geometry": {
+  "planes": 2,
+  "span_ft": {
+   "value": 12,
+   "status": "verified",
+   "sources": [
+    "AIAA 2004-0211",
+    "wright-brothers.org"
+   ]
+  },
+  "chord_ft": {
+   "value": 2.5,
+   "status": "verified",
+   "sources": [
+    "AIAA 2004-0211"
+   ]
+  },
+  "area_ft2": {
+   "value": 48,
+   "status": "tunable-with-provenance",
+   "variants": [
+    {
+     "value": 51.6,
+     "source": "Papachristodoulou/Culick AIAA 2003-0097 Table 5.2 (scaled from McFarland drawings; AR 5.58)"
+    },
+    {
+     "value": 52.75,
+     "source": "Crouch via AIAA 2004-0211 (pre-enlargement)"
+    }
+   ],
+   "note": "48 / 51.6 / 52.75 all live; likely projected-vs-gross/flexed convention difference, unreconciled by any source"
+  },
+  "canard_gap_ft": {
+   "value": 2.09,
+   "status": "tunable-with-provenance",
+   "sources": [
+    "AIAA 2003-0097 Table 5.2 (drawing-scaled, SINGLE-SOURCE)"
+   ],
+   "note": "1905: 2.95 ft"
+  },
+  "stagger": {
+   "status": "not-published",
+   "qualitative": "photos/drawings show essentially zero stagger"
+  },
+  "arm_wing_to_canard_ft": {
+   "value": 7.32,
+   "status": "verified",
+   "note": "1905: 11.7 ft (diary says 'about 12 ft'); wing-datum NOT CG-datum per flyer-reference"
+  },
+  "height_vs_lower_wing": {
+   "status": "not-published",
+   "note": "exists only in the 1985 NASM drawings — measurement task, not a lookup"
+  }
+ },
+ "kinematics": {
+  "variable_camber": {
+   "status": "verified-qualitative",
+   "finding": "the canard is NOT a rigid pivoting plate: the mechanism varies CAMBER with incidence (front/rear spar linkage; the surface both pitches and bows toward the lift direction)",
+   "sources": [
+    "Lawrence & Padfield JoA 43(5) 2006 Fig 5 ('varied the camber with incidence'; their tunnel model substituted a parallelogram deflection + analytic flexure correction)",
+    "Jex et al. AIAA 2000-0512 (Ames replica used the 'flexible canard'; 'Due to accurate modeling of the variable camber canard, pitching moment effectiveness is higher than Northrop (1/8) and GALCIT (1/6) [rigid] models')"
+   ],
+   "sim_rule": "a rigid-plate canard model UNDERSTATES control power — the effectiveness delta vs rigid models is itself Ames-measured evidence; linkage dimensions are not published, so the camber-vs-incidence map is a model-uncertainty axis"
+  },
+  "hinge_axis_chordwise": {
+   "status": "not-published",
+   "primary_evidence": "Orville: 'balanced too near the center' — the hinge sat near the surface centre of pressure (large balance area ahead of the hinge)"
+  },
+  "balance_fraction": {
+   "status": "not-published",
+   "note": "no drawing-derived number in open literature; deriving it = scaling the purchasable 1985 NASM drawings (flagged as a measurement task); Hooven (Sci.Am. Dec 1978; Wolko 1987 chapter) analyzes the overbalance as a probable PIO cause — print/paywalled"
+  }
+ },
+ "control_interface": {
+  "layout": {
+   "status": "verified",
+   "finding": "LEFT hand on the elevator lever (rod along the lower-wing leading edge; pull back = nose up); hips in the cradle drive warp + slaved rudder",
+   "sources": [
+    "wright-brothers.org",
+    "NASA GRC",
+    "wrightstories"
+   ]
+  },
+  "lever_gearing": {
+   "status": "not-published",
+   "note": "no lever throw or lever-to-surface ratio anywhere; the FlightGear/JSBSim ±0.35 rad full-stick mapping is a MODELING CHOICE (tagged UIUC), not a measurement"
+  }
+ },
+ "travel_stops": {
+  "surface_deflection_1903": {
+   "status": "absent-by-verification",
+   "value_deg": 30,
+   "note": "±30° photo-inferred (AIAA 2004-0211 verbatim absence statement; consistent with flyer-reference canard_travel_deg); 30° is already highly stalled"
+  },
+  "surface_deflection_1905": {
+   "status": "verified",
+   "value_deg": 15,
+   "sources": [
+    "1905 blueprints, Carillon Historical Park (Selig ref 14)"
+   ],
+   "note": "different aircraft — never a 1903 value"
+  },
+  "lever_stops": {
+   "status": "not-published"
+  }
+ },
+ "mass_inertia": {
+  "aircraft_inertia_slugft2": {
+   "Ixx": 1318,
+   "Iyy": 271,
+   "Izz": 1343,
+   "status": "single-lineage",
+   "lineage": "Jex & Culick AIAA 85-1804-CP via the UIUC JSBSim model (paper itself paywalled); 1905 comparison: 1331/563/1645 built by swapping canard+rudder structure contributions",
+   "note": "canard-structure component inertias exist inside 85-1804 but are not openly published"
+  },
+  "cg_neutral_point": {
+   "status": "verified",
+   "cg_pct_chord_aft_of_wing_le": 29.7,
+   "neutral_point_pct_chord": 3.9,
+   "static_margin_pct": -25.8,
+   "sources": [
+    "Papachristodoulou/Culick via AIAA 2004-0211"
+   ]
+  },
+  "canard_structure_weight": {
+   "status": "not-published"
+  }
+ },
+ "overbalance_evidence": {
+  "evidence_class": "sign-tendency-only",
+  "quantitative_ceiling": "Estimated",
+  "promotion_path": "independent A7a holdout receipt per plan §5.1.3 — nothing else can promote quantitative hinge-moment levels",
+  "diary_1903_verbatim": "I found the control of the front rudder quite difficult on account of its being balanced too near the center and thus had a tendency to turn itself when started so that the rudder was turned too far on one side and then too far on the other. As a result the machine would rise suddenly to about 10 ft. and then as suddenly, on turning the rudder, dart for the ground.",
+  "flying_1913_verbatim": "The control of the front rudder was difficult on account of its being balanced too near the center. This gave it a tendency to turn itself when started; so that it turned too far on one side and then too far on the other.",
+  "v02b_sourced_envelope": [
+   "hinge-moment SIGN: self-driving (statically unstable hinge moment) once deflection starts — both primary quotes",
+   "closed-loop consequence: pitch excursions to ~10 ft then dart for the ground (flight-1 undulation)",
+   "variable-camber effectiveness EXCEEDS rigid-plate models (Ames-measured comparative)",
+   "stop behavior: surfaces reached large deflections repeatedly without mechanism failure on Dec 17 (frame broke only at the flight-4 LANDING)"
+  ],
+  "conflation_warning": "1905-diary 'overbalanced rudder' complaints refer to the VERTICAL rudder — do not import them into canard evidence"
+ },
+ "fixes_1904_05": {
+  "ballast_lb_time_series": {
+   "values": [
+    70,
+    150,
+    28
+   ],
+   "note": "varied through the seasons (L&P: 70 lb early 1904 moving CG 5 in forward; Culick/Jex: up to 150 lb at the forward canard post; end-1905 with enlarged canard: 28 lb) — a TIME SERIES, never one number"
+  },
+  "enlargement": "canard to ~83-84 ft², arm 7.32 -> 11.7 ft (1905)",
+  "blinkers": "two semicircular vertical vanes between canard planes, ~7 ft² total, added 1905 against sideslip, soon REMOVED (hurt directional stability)",
+  "deflection_limit": "±15° per the 1905 blueprints",
+  "hinge_relocation": {
+   "status": "not-published",
+   "note": "no source documents moving the hinge axis on the surfaces themselves"
+  }
+ },
+ "hip_cradle": {
+  "warp_limits_deg": {
+   "value": 8.5,
+   "status": "verified",
+   "sources": [
+    "AIAA 2004-0211 verbatim: 'the wing warping deflection limits were ±8.5 deg'"
+   ]
+  },
+  "rudder_slaving": {
+   "value": 2.5,
+   "status": "verified",
+   "sources": [
+    "AIAA 2004-0211 verbatim: 'δr = 2.5∗δw'"
+   ],
+   "note": "consistent with flyer-reference rudder_warp_slaving"
+  },
+  "ames_sweeps": "δW = i_right − i_left swept ±8°, rudder −5.3/+5.1°, interlink disconnected for the test; adverse yaw Cn/Cl|δw ≈ −0.2; interlink 'would be effective in canceling most of the adverse yaw' (AIAA 2000-0512)",
+  "structural_enablers": "aft spar loose within ribs, spring-metal rib caps, hinged aft-spar joints at center section, bias-cut fabric; outboard ~40% of aft spars wire-trussed (Culick/Jex)",
+  "cradle_travel": {
+   "status": "not-published"
+  },
+  "cradle_force_lb": {
+   "value": 14,
+   "status": "tunable-with-provenance",
+   "sources": [
+    "wrightstories.com (Ames-derived, SINGLE-SOURCE)"
+   ]
+  }
+ },
+ "unknown_priors": {
+  "doctrine": "every not-published parameter carries an explicit WIDE prior (lo < hi, stated basis) — point guesses are forbidden (DONE-WHEN clause; battery-gated). Priors are PhysicalScenarioId/ModelId inputs per uncertainty-v1.",
+  "priors": [
+   {
+    "parameter": "hinge_axis_pct_chord_from_le",
+    "lo": 25,
+    "hi": 50,
+    "basis": "'balanced too near the center' places the hinge near the CP band of a cambered thin surface at small alpha"
+   },
+   {
+    "parameter": "balance_area_fraction",
+    "lo": 0.2,
+    "hi": 0.5,
+    "basis": "area ahead of hinge implied by the hinge-axis prior over a near-rectangular planform"
+   },
+   {
+    "parameter": "lever_to_surface_gearing_rad_per_rad",
+    "lo": 0.5,
+    "hi": 2.0,
+    "basis": "plausible linkage range; JSBSim's 0.35-rad full-stick mapping sits inside"
+   },
+   {
+    "parameter": "canard_structure_mass_lb",
+    "lo": 18,
+    "hi": 45,
+    "basis": "48-53 ft² spruce+muslin at wing-class areal density plus booms/linkage"
+   },
+   {
+    "parameter": "cradle_travel_in",
+    "lo": 3,
+    "hi": 10,
+    "basis": "prone-pilot lateral hip motion envelope"
+   },
+   {
+    "parameter": "stagger_ft",
+    "lo": -0.2,
+    "hi": 0.2,
+    "basis": "photos show essentially zero stagger; prior brackets zero"
+   },
+   {
+    "parameter": "canard_height_vs_lower_wing_ft",
+    "lo": -1.0,
+    "hi": 2.0,
+    "basis": "photo envelope pending NASM-drawing measurement"
+   },
+   {
+    "parameter": "camber_vs_incidence_gain",
+    "lo": 0.0,
+    "hi": 0.6,
+    "basis": "variable-camber linkage bows the surface toward lift; rigid plate = 0; Ames effectiveness delta bounds the high side"
+   }
+  ]
+ },
+ "no_claims": "Evidence registry + prior declarations. The overbalance account licenses SIGN/TENDENCY claims only; quantitative hinge-moment levels stay Estimated absent an A7a holdout receipt. Nothing here is a fitted model."
+}
