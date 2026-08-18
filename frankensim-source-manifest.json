@@ -2,7 +2,7 @@
   "schema": "frankensim-source-manifest-v1",
   "identity_domain": "org.frankensim.xtask.source-manifest.v1",
   "identity_version": 1,
-  "manifest_identity": "f8577586cc4a5eb6963a1c7e096e549c924cab994af6fd505bcb53416d9db7a5",
+  "manifest_identity": "00cddd5927d385444462e598914b7475c28adfcb999092640d92f435f669fb64",
   "bead_id": "frankensim-extreal-program-f85xj.13.2",
   "authority": "canonical structural inventory over exact Git-index non-tracker bytes; release observations are intentionally unbound here",
   "release_binding": {
@@ -15,8 +15,8 @@
     "repository": "https://github.com/Dicklesworthstone/frankensim",
     "workspace_version": "0.0.1",
     "source_root_domain": "org.frankensim.xtask.source-root.v1",
-    "source_root": "b604f7a9ce70d3a29f70e69be4b703c998bd936d65bc645b63442b1c20d665d7",
-    "tracked_file_count": 2615,
+    "source_root": "83d2909f20a44e5b02d41273ce864b0f625d918e38fa229c8d359c27af982927",
+    "tracked_file_count": 2619,
     "excluded_paths": [".beads/**", "frankensim-source-manifest.json", "frankensim-source-manifest.spdx.json"],
     "files": [
       {"path": ".cargo/config.toml", "git_mode": "100644", "bytes": 2368, "content_blake3": "894765ed5d604b92d4e713d3c80116ab8210044ea665697e159ed234807c3537"},
@@ -33,8 +33,8 @@
       {"path": "COMPREHENSIVE_PLAN_FOR_OPTIMAL_MUSIC_ORIENTED_BUILDING_BLOCKS.md", "git_mode": "100644", "bytes": 65423, "content_blake3": "d40d5259a1bba357db7f80e7d70a1b3531b0e4193a5ef4ebaeca76f5fc5c9a5f"},
       {"path": "COMPREHENSIVE_PLAN_FOR_REAL_TIME_WRIGHT_FLYER_SIM_WITH_FRANKENSIM.md", "git_mode": "100644", "bytes": 168239, "content_blake3": "4b105819b59eef92aeab11c84167a3d7302fcc69c2535fc4e3a897fd4331b533"},
       {"path": "COMPREHENSIVE_PLAN_TO_EXTEND_FRANKENSIM_TO_NEW_DOMAINS.md", "git_mode": "100644", "bytes": 241888, "content_blake3": "b9c796585162f7c7b473f041fd1332fd8fafa1a22b7035a4da53bc4fa626d2b7"},
-      {"path": "Cargo.lock", "git_mode": "100644", "bytes": 91937, "content_blake3": "6ed9333d687a2f538a1282ebab8db897cc7f0d94a7fa7dd42e32cb19f44daba8"},
-      {"path": "Cargo.toml", "git_mode": "100644", "bytes": 7774, "content_blake3": "e2aafcfbabc5e9f811e0a293e0634f3736c1d6f64160f21cbaaea959e0bde83b"},
+      {"path": "Cargo.lock", "git_mode": "100644", "bytes": 92058, "content_blake3": "5b2ee17b64e4534820af0ddfcd61684d870c4a9bfcdc1b04f0ccbc2b10679428"},
+      {"path": "Cargo.toml", "git_mode": "100644", "bytes": 7796, "content_blake3": "fc17541a1f4bad4a1f46870f77836545a1e156d9a39a5d9e1262c49734339940"},
       {"path": "LICENSE", "git_mode": "100644", "bytes": 3939, "content_blake3": "1a54e7681c481b4eeeb3f5c324ff4229036e9480b6822ed3b3f310602ece6d7d"},
       {"path": "README.md", "git_mode": "100644", "bytes": 126962, "content_blake3": "54f6c942ab4ab4190a240d075b53db5b46a96720b0b951a417a29ec4a14a48b9"},
       {"path": "apps/wright-flyer/.gitignore", "git_mode": "100644", "bytes": 20, "content_blake3": "9c51c760d35ed1a3df5f709ec9a5683cdf7dc62be53fc4edbd3499780fe91986"},
@@ -228,6 +228,10 @@
       {"path": "crates/fs-assimilate/tests/factor.rs", "git_mode": "100644", "bytes": 22402, "content_blake3": "ff662958dccc40844796920d357685b0bb7bbdf0e0c0327855e4ec6016c4a41e"},
       {"path": "crates/fs-assimilate/tests/nonlinear.rs", "git_mode": "100644", "bytes": 9557, "content_blake3": "74cc1fcd03db694cd66c89a9216f721bb8ce29f8481cbb9fc7fb7b452a6392ba"},
       {"path": "crates/fs-assimilate/tests/robust.rs", "git_mode": "100644", "bytes": 22473, "content_blake3": "3f6667e9cc9f4bcbe7bda40ed36fb4a99123706415ca1af05994943332261019"},
+      {"path": "crates/fs-atmo/CONTRACT.md", "git_mode": "100644", "bytes": 4188, "content_blake3": "84362c85493a5519ac31c819fd6e71703c745572eb6470e83b6a709f7380532f"},
+      {"path": "crates/fs-atmo/Cargo.toml", "git_mode": "100644", "bytes": 477, "content_blake3": "5c9399708dbea68075a2422cc1410da7702fca0cb3201b554ded3910185f4e97"},
+      {"path": "crates/fs-atmo/src/lib.rs", "git_mode": "100644", "bytes": 16625, "content_blake3": "206a97d5e81ffba7412ae482ebb72033853ca756b539ff6c2a4bbfa3b7c2624e"},
+      {"path": "crates/fs-atmo/tests/v04a_battery.rs", "git_mode": "100644", "bytes": 10584, "content_blake3": "3e6a973d63402a7c64885a46425564ce0e1967865e0e34cb8dbfda080363d4b6"},
       {"path": "crates/fs-bem/CONTRACT.md", "git_mode": "100644", "bytes": 17658, "content_blake3": "bc77736120a7e10a71f1ed87753cbda0d6334e169b8f4f0e2d7605d6aa12dd37"},
       {"path": "crates/fs-bem/Cargo.toml", "git_mode": "100644", "bytes": 713, "content_blake3": "886d4e73f3c912336bf6a48b4a65ee2663c407ef975d40d15bfaf42536469581"},
       {"path": "crates/fs-bem/src/bin/helmholtz_casebook.rs", "git_mode": "100644", "bytes": 6380, "content_blake3": "110f1c9f0f9362eee4a992e42a668421dcbf63c839f0dd573627fe7734e2652c"},
@@ -2659,7 +2663,7 @@
     "release_host_status": "required-in-e13.3-release-envelope"
   },
   "workspace": {
-    "native_fs_crates": 157,
+    "native_fs_crates": 158,
     "standalone_fs_crates": 4,
     "crates": [
       {"name": "fs-ad", "version": "0.0.1", "layer": "L1", "manifest": "crates/fs-ad/Cargo.toml", "workspace": "native", "unsafe_capsules": 0},
@@ -2673,6 +2677,7 @@
       {"name": "fs-asbuilt", "version": "0.0.1", "layer": "L2", "manifest": "crates/fs-asbuilt/Cargo.toml", "workspace": "native", "unsafe_capsules": 0},
       {"name": "fs-ascent", "version": "0.0.1", "layer": "L4", "manifest": "crates/fs-ascent/Cargo.toml", "workspace": "native", "unsafe_capsules": 0},
       {"name": "fs-assimilate", "version": "0.0.1", "layer": "L4", "manifest": "crates/fs-assimilate/Cargo.toml", "workspace": "native", "unsafe_capsules": 0},
+      {"name": "fs-atmo", "version": "0.0.1", "layer": "L2", "manifest": "crates/fs-atmo/Cargo.toml", "workspace": "native", "unsafe_capsules": 0},
       {"name": "fs-bem", "version": "0.0.1", "layer": "L3", "manifest": "crates/fs-bem/Cargo.toml", "workspace": "native", "unsafe_capsules": 0},
       {"name": "fs-benchmark", "version": "0.0.1", "layer": "UTIL", "manifest": "crates/fs-benchmark/Cargo.toml", "workspace": "native", "unsafe_capsules": 0},
       {"name": "fs-bisect", "version": "0.0.1", "layer": "L6", "manifest": "crates/fs-bisect/Cargo.toml", "workspace": "native", "unsafe_capsules": 0},
