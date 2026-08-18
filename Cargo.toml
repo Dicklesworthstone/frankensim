@@ -32,6 +32,7 @@ members = [
     "crates/fs-opdsl",
     "crates/fs-solver",
     "crates/fs-adjoint",
+    "crates/fs-airfoil",
     "crates/fs-ascent",
     "crates/fs-topopt",
     "crates/fs-bo",

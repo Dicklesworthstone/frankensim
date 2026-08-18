@@ -1,0 +1,20 @@
+[package]
+name = "fs-airfoil"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Generic airfoil section models: analytic baselines, provenance-bound tables, constrained residuals, uncertainty, applicability-domain refusals."
+
+[package.metadata.frankensim]
+layer = "L2"
+
+[dependencies]
+fs-math = { path = "../fs-math" }
+
+[dev-dependencies]
+fs-blake3 = { path = "../fs-blake3" }
+
+[lints]
+workspace = true
