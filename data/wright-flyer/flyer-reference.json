@@ -68,7 +68,7 @@
     "derived: 12.29²/47.38"
    ],
    "dossier_record": "a1-wright-1901-tunnel",
-   "convention": "AR_system = b²/S_both; bare 'AR' banned",
+   "convention": "AR_system = b²/S_both; bare 'AR' banned (geometry-conventions-v1)",
    "variants": []
   },
   "wing_gap_m": {

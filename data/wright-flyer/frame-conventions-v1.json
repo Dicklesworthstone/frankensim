@@ -1,0 +1,81 @@
+{
+ "schema": "org.frankensim.wright-flyer.frame-conventions.v1",
+ "status": "frozen-conventions",
+ "bead": "frankensim-wf-root-guzez.2.4",
+ "spec": "COMPREHENSIVE_PLAN_FOR_REAL_TIME_WRIGHT_FLYER_SIM_WITH_FRANKENSIM.md (ROUND 6 steady state), E1.4; sibling of geometry-conventions-v1 (E1.9)",
+ "body_axes": {
+  "id": "frd-body-v1",
+  "definition": "right-handed body frame Fixed to the airframe: +x forward along the longitudinal datum, +y toward the RIGHT wingtip, +z DOWN (standard flight-dynamics FRD)",
+  "x_unit": [
+   1,
+   0,
+   0
+  ],
+  "y_unit": [
+   0,
+   1,
+   0
+  ],
+  "z_unit": [
+   0,
+   0,
+   1
+  ],
+  "handedness": "right (x cross y = z, machine-checked by the battery)",
+  "origin": "the CG REFERENCE POINT of the mass build-up (a declared point on the airframe datum, NOT the instantaneous CG — the instantaneous CG offset is state)",
+  "world_frame": "NED (north-east-down) at the site anchor; the FlatnessCertificate plane defines local level",
+  "quaternion": "unit quaternion (w, x, y, z), BODY-to-WORLD rotation (matches fs-flyer-wasm HelloState)"
+ },
+ "moment_signs": {
+  "id": "moment-signs-v1",
+  "roll_L": "positive about +x: RIGHT wing down",
+  "pitch_M": "positive about +y: NOSE UP",
+  "yaw_N": "positive about +z: NOSE RIGHT",
+  "moment_reference": "moments about the CG reference point; pitch reference length = mean chord c; roll/yaw reference length = full span b (geometry-conventions-v1 symbols)",
+  "note": "matches the Culick/Jex flight-dynamics literature so V-02a pole/derivative comparisons need no sign flips; any dataset in a different convention is re-expressed at ingest, never at comparison time"
+ },
+ "angle_conventions": {
+  "id": "angles-v1",
+  "alpha": "angle of attack, positive nose-up relative to the free-stream velocity projected in the body x-z plane [rad in code, deg in UI]",
+  "beta": "sideslip, positive wind-from-the-right [rad]",
+  "units_rule": "radians in ALL code and stored artifacts; degrees only at the presentation boundary (fs-qty enforces)"
+ },
+ "control_signs": {
+  "id": "control-signs-v1",
+  "doctrine": "control-surface signs are defined by their COMMANDED MOMENT at trim, not by geometry; the geometric realization (which edge moves which way) is E1.5 dossier territory and is recorded alongside, never load-bearing",
+  "canard_dc": "positive canard command produces POSITIVE pitch moment (nose up)",
+  "warp_dw": "positive warp command produces POSITIVE roll moment (right wing down)",
+  "rudder_dr": "positive rudder command produces POSITIVE yaw moment (nose right); 1903 configuration: dr = 2.5 * dw SLAVED (flyer-reference rudder_warp_slaving) — the sign pairing is chosen so the slaving counters adverse yaw (positive warp command yields positive dr)",
+  "trace_rule": "InputTraceV1 quantized_value stores the COMMAND in these sign conventions; transducer geometry lives in InputPolicyId"
+ },
+ "wind_reference": {
+  "id": "wind-reference-v1",
+  "schema_fields": [
+   "instrument",
+   "height_m_or_null",
+   "averaging_interval_s_or_null",
+   "provenance"
+  ],
+  "instruments": {
+   "wrights-hand-richard": "the Wrights' hand-held Richard anemometer ('a little over 20 miles, corrected' — Orville diary, Dec 17)",
+   "government-weather-bureau": "the Kitty Hawk Weather Bureau instrument (27 mph at the first flight per the diary; 24-27 over the flights per the 1913 account)",
+   "modeled": "simulation-generated wind statistics (fs-atmo), which must cite the height and averaging interval explicitly"
+  },
+  "unrecorded_rule": "heights and averaging intervals for BOTH 1903 instruments are UNRECORDED: height_m is null with a declared prior (hand-held ~1.5-2 m; station exposure unknown, prior 3-10 m), never a silent point value",
+  "dec17_doctrine": "the Dec-17 wind is a DISTRIBUTION spanning instruments and their unknown heights under the log-law (flyer-reference wind_dec17_mps + sand_roughness_z0_m); H-case ensembles draw from it; no single mph number is ever 'the' wind"
+ },
+ "uncertainty_doctrine": {
+  "id": "uncertainty-v1",
+  "digitization": "geometry digitized from drawings/photos carries a per-source digitization class: drawings ±2-5 mm at scale, photo-inference (e.g. canard travel) is absent-by-verification per flyer-reference and enters as a model-uncertainty axis, never a measured value",
+  "historical_inputs": "historical-input distributions live in PhysicalScenarioId (wind, pilot mass 145 lb single-source, engine power 12-16 hp thermal transient); model deficiencies live in ModelUncertaintyRealizationId — the separation is the frozen identity law (replay-identity-schema-v1)",
+  "coherent_draws": "uncertainty is realized as COHERENT DRAWS bound to realization ids; per-query independent intervals are forbidden (E4.0 contract inherits this)",
+  "variant_rule": "where flyer-reference records variants (engine mass, rudder area, derrick), the variant set IS the support of the input distribution; deleting a variant requires a source, not a preference"
+ },
+ "dataset_reexpression_rule": {
+  "id": "reexpression-v1",
+  "rule": "every ingested A-dataset MUST declare {axes_id, moment_signs_id, angles_id, reference_area_convention, wind_reference} resolving to ids frozen HERE and in geometry-conventions-v1 BEFORE any value enters a fit or gate; ingest without the block is a typed refusal (consumers implement; this artifact is the authority)",
+  "reexpressed_now": "all 36 flyer-reference values carry convention labels resolving to these ids; the Ames/LFST force-moment TABLES are not yet in-repo — their ingest (E4 lanes) is bound by this rule",
+  "identity": "this conventions block enters ReplayEnvelopeV1.conventions_block and artifact manifests by content hash; code-side registration lands with the first consumer per register-at-introduction law"
+ },
+ "no_claims": "Conventions only. No physics value is asserted here; values live in flyer-reference.json under these labels."
+}
