@@ -3,6 +3,9 @@ name = "fs-goddard-wasm"
 version = "0.0.1"
 edition = "2024"
 publish = false
+
+[package.metadata.frankensim]
+layer = "L6"
 description = "Browser (WASM) surface for the Goddard Rocket simulation — real FrankenSim physics in the browser."
 
 [workspace]
