@@ -51,6 +51,7 @@ pub mod speaker;
 pub mod stribeck_friction;
 pub mod thin_plate;
 pub mod tract;
+// TOMBSTONE-3ez8g.13.5: dead module, deny new consumers (see its header).
 pub mod traveling_wave_line;
 pub mod unilateral_contact;
 pub mod vibroacoustic;

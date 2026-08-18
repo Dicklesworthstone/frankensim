@@ -1,19 +1,33 @@
-//! One-dimensional traveling-wave line: fractional delay of `2L/c`
-//! with a reflection gain from a termination and a mild viscothermal
-//! one-pole.
+//! TOMBSTONE-3ez8g.13.5 — DO NOT WIRE NEW CONSUMERS.
 //!
-//! This is the time-domain characteristic-impedance port of an
-//! [`fs_duct::Duct`]: the same object as a pulse tube, an exhaust,
-//! an HVAC run, or a vocal tract. The frequency-domain law lives in
-//! fs-duct (`input_impedance`, `segment_wave`). This module is the
-//! coupling-time consumer until fs-duct can own the time stepper
-//! (its `lib.rs` is reserved by another agent).
+//! This one-pole `TravelingWaveLine` is DEAD CODE, superseded by the
+//! exact-FIR characteristic line (`DelayedFilter` + `driving_point`).
+//! It has ZERO in-tree consumers (swept at disposition time) and the
+//! crate CONTRACT negates it twice: "There is no one-pole
+//! TravelingWaveLine fallback on those paths" and "The one-pole
+//! TravelingWaveLine is not that path". The program NEVER list bans
+//! resurrecting it; this header makes the ban physical (music bead
+//! `frankensim-music-v8-root-3ez8g.13.5`, tombstone option — deletion
+//! requires explicit written owner permission and remains available).
+//!
+//! Every public item is `#[deprecated]` and `#[doc(hidden)]`: wiring
+//! it in is LOUD. If you believe you need this module, you need the
+//! exact-FIR characteristic line instead.
+//!
+//! Original description (retained for the record): a 1-D
+//! traveling-wave line — fractional delay of `2L/c` with a reflection
+//! gain from a termination and a mild viscothermal one-pole; the
+//! frequency-domain law lives in fs-duct.
 
 use fs_duct::{Duct, DuctError, LossModel, Termination, input_impedance, segment_wave};
 use fs_material::gas::GasState;
 use fs_math::det;
 
 /// Typed refusal from a traveling-wave line.
+#[deprecated(note = "TOMBSTONE-3ez8g.13.5: dead code superseded by the exact-FIR \
+            characteristic line (DelayedFilter + driving_point); the CONTRACT \
+            forbids one-pole fallbacks on the characteristic paths")]
+#[doc(hidden)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum TravelingWaveError {
     /// Geometry or delay is not realizable.
@@ -25,6 +39,7 @@ pub enum TravelingWaveError {
     Duct(DuctError),
 }
 
+#[allow(deprecated)]
 impl core::fmt::Display for TravelingWaveError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
@@ -34,9 +49,14 @@ impl core::fmt::Display for TravelingWaveError {
     }
 }
 
+#[allow(deprecated)]
 impl std::error::Error for TravelingWaveError {}
 
 /// Fractional-delay traveling-wave line.
+#[deprecated(note = "TOMBSTONE-3ez8g.13.5: dead code superseded by the exact-FIR \
+            characteristic line (DelayedFilter + driving_point); the CONTRACT \
+            forbids one-pole fallbacks on the characteristic paths")]
+#[doc(hidden)]
 #[derive(Debug, Clone)]
 pub struct TravelingWaveLine {
     buf: Vec<f64>,
@@ -48,6 +68,7 @@ pub struct TravelingWaveLine {
     y: f64,
 }
 
+#[allow(deprecated)]
 impl TravelingWaveLine {
     /// Build a round-trip line from a TMM duct.
     ///

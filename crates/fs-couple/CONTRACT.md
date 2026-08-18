@@ -1070,6 +1070,13 @@ spread; gt-006 guitar-strum listening digest chain (Unadjudicated).
 
 ## No-claim boundaries
 
+- TOMBSTONE-3ez8g.13.5: `traveling_wave_line` is dead code with zero
+  in-tree consumers, superseded by the exact-FIR characteristic line;
+  every public item is deprecated + doc(hidden) and the module header
+  denies new consumers. No music image may cite it (standing law).
+  Deletion stays available on explicit written owner permission.
+
+
 - The electric chain claims NOTHING about the string (one owner; the
   vibration epic's rows carry it) and nothing about perceived tone
   until the listening receipt is adjudicated. The preamp input gain
