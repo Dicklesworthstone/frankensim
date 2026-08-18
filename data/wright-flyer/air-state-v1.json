@@ -1,0 +1,199 @@
+{
+ "schema": "org.frankensim.wright-flyer.air-state.v1",
+ "bead": "frankensim-wf-root-guzez.2.8",
+ "status": "ACTIVE",
+ "verified_on": "2026-08-18",
+ "dossier_records": [
+  "a3-dec17-records",
+  "a6-bl-meteorology"
+ ],
+ "convention_block": {
+  "axes_id": "frd-body-v1",
+  "moment_signs_id": "moment-signs-v1",
+  "angles_id": "angles-v1",
+  "reference_area_convention": "not-applicable (scalar air state)",
+  "wind_reference": "wind-reference-v1 records below"
+ },
+ "dec17_1903_records": {
+  "temperature": {
+   "weather_bureau_daily_f": {
+    "max": 37,
+    "min": 33,
+    "source": "Kitty Hawk Weather Bureau daily form, ECU digitization (digital.lib.ecu.edu/exhibits/wright/weather/19031217.html)",
+    "status": "verified",
+    "note": "daily-summary form; NO hourly Bureau record exists"
+   },
+   "life_saving_station_log_f": {
+    "midnight": 34,
+    "sunrise": 33,
+    "noon": 34,
+    "sunset": 32,
+    "source": "Kitty Hawk Life Saving Station log (same ECU page)",
+    "status": "verified"
+   },
+   "ice_on_puddles": {
+    "status": "verified-with-attribution",
+    "note": "the famous ice line is from Orville's 1913 'How We Made the First Flight', NOT the day-of diary (which records only wind)"
+   }
+  },
+  "pressure": {
+   "station_inhg": {
+    "value": 30.1,
+    "observations": 4,
+    "source": "Life Saving Station log: 30.1 inHg at midnight/sunrise/noon/sunset",
+    "status": "single-source",
+    "note": "one instrument, 0.1-inHg resolution; near-sea-level station pressure ~101.9 kPa"
+   }
+  },
+  "wind": {
+   "diary_verbatim": "The wind, according to our anemometers at this time, was blowing a little over 20 miles (corrected) 27 miles according to the Government anemometer",
+   "bureau_ledger": {
+    "status": "verified-negative",
+    "finding": "the surviving Weather Bureau daily form records wind velocity as literally 'No Record' — the 27 mph government reading survives ONLY via Orville reporting observer Joseph J. Dosher's number; no government hourly wind sequence exists"
+   },
+   "lss_log": "qualitative 'Fresh' N/NNW only",
+   "gust_accounts": [
+    "flight 3: 'a strong gust from the left'",
+    "after flight 4: a 'sudden gust' rolled and wrecked the machine (separate from the landing damage)"
+   ],
+   "turbulence_intensity": {
+    "status": "not-published",
+    "note": "no modern paper publishes a Dec-17 TI estimate; any value is a derivation"
+   }
+  },
+  "station_metadata": {
+   "location": "co-located with the Kitty Hawk Life Saving Station, Kitty Hawk village beach, ~4 mi N of the Kill Devil Hills camp; weather office 1875-1904; observer Joseph J. Dosher",
+   "anemometer": {
+    "status": "not-published",
+    "note": "type and mounting height undocumented; Robinson cup was the era-standard Bureau instrument (inference, not record); the Wrights calibrated their Richard hand anemometers against this station"
+   }
+  }
+ },
+ "derived_air_state": {
+  "doctrine": "DERIVED values carry their derivation and are re-computed by the battery; they are never presented as measurements",
+  "rho_kg_m3": {
+   "value": 1.294,
+   "derivation": "p/(R*T) with p = 30.1 inHg = 101.9 kPa, T = 34 F = 274.3 K, R = 287.05",
+   "note": "~6% DENSER than standard sea level (1.225) — and the sim papers (Deters 2004-0211 effectively standard atmosphere; Culick/Jex coefficient-form) never used the cold-day density; Lawrence & Padfield credit 'low temperatures, high-density air, high winds' qualitatively",
+   "slug_ft3": 0.002511
+  },
+  "mu_kg_m_s": {
+   "value": 1.721e-05,
+   "derivation": "Sutherland: 1.458e-6*T^1.5/(T+110.4) at T = 274.3 K",
+   "status": "derived"
+  },
+  "nu_m2_s": {
+   "value": 1.331e-05,
+   "derivation": "mu/rho",
+   "status": "derived"
+  },
+  "reynolds_flight": {
+   "value_band": [
+    2000000.0,
+    2300000.0
+   ],
+   "derivation": "rho*V*c/mu, V = 13.4-15.2 m/s, c = 1.981 m",
+   "literature_note": "the literature's '~1e6' (Lawrence & Padfield, single source) is an order-of-magnitude convention, not a computed Dec-17 value; L&P also quote ~10% CLmax loss at model Re 1e5"
+  }
+ },
+ "wind_reference_records": [
+  {
+   "instrument": "wrights-hand-richard",
+   "value_mph": "a little over 20 (corrected)",
+   "height_m_or_null": null,
+   "height_prior_m": [
+    1.5,
+    2.0
+   ],
+   "averaging_interval_s_or_null": null,
+   "provenance": "Orville diary, hand-held reading near the rail"
+  },
+  {
+   "instrument": "government-weather-bureau",
+   "value_mph": 27,
+   "height_m_or_null": null,
+   "height_prior_m": [
+    3.0,
+    10.0
+   ],
+   "averaging_interval_s_or_null": null,
+   "provenance": "Dosher's reading as reported in Orville's diary; the ledger itself records No Record; 1913 article extends to 24-27 over the flights"
+  }
+ ],
+ "neutral_stability_declaration": {
+  "declared_class": "neutral",
+  "basis": "strong mechanically-mixed surface wind (>10 m/s), overcast winter morning over cold sea-adjacent sand — shear production dominates buoyancy",
+  "caveat": "stability class remains a DECLARED uncertainty axis (frame-conventions uncertainty-v1); the H-case ensemble may include weakly-stable members, labeled"
+ },
+ "surface": {
+  "z0_m_prior": {
+   "lo": 0.0003,
+   "hi": 0.01,
+   "basis": "bare sand with sparse beach-grass tufts per 1903 photos; spans the Davenport-Wieringa sand band and the flyer-reference range; the site was grass-stabilized in the 1930s so MODERN roughness is not representative",
+   "status": "not-published-site-specific"
+  },
+  "displacement_height_m_prior": {
+   "lo": 0.0,
+   "hi": 0.05,
+   "basis": "sparse tufts, no canopy; essentially zero with allowance",
+   "status": "not-published"
+  }
+ },
+ "dec17_ensemble_preregistration": {
+  "doctrine": "PRE-REGISTERED distribution parameters for the H-case ensemble. The historical control traces and gust time-series are UNKNOWN: any specific gust sequence is a REALIZATION drawn from these parameters bound to a PhysicalUncertaintyRealizationId — never a claimed reconstruction. This artifact must NEVER contain a gust trace (battery-gated).",
+  "parameters": [
+   {
+    "name": "wind_mean_mps_at_instrument",
+    "distribution": "instrument mixture: wrights-hand-richard N(9.2, 0.5) | government-weather-bureau N(12.1, 0.7), reconciled through the log-law with the height priors",
+    "wide": true
+   },
+   {
+    "name": "wind_direction_deg",
+    "distribution": "N/NNE sector: uniform [0, 30] deg from true north",
+    "wide": true
+   },
+   {
+    "name": "turbulence_intensity_sigma_u_over_U",
+    "distribution": "uniform [0.10, 0.18]",
+    "basis": "DERIVED (neutral surface layer over the z0 prior) — not a source value",
+    "wide": true
+   },
+   {
+    "name": "temperature_k",
+    "distribution": "N(274.3, 0.6)",
+    "basis": "four LSS observations spanning 32-34 F",
+    "wide": true
+   },
+   {
+    "name": "pressure_kpa",
+    "distribution": "N(101.9, 0.17)",
+    "basis": "30.1 inHg at 0.1-inHg instrument resolution",
+    "wide": true
+   },
+   {
+    "name": "z0_m",
+    "distribution": "log-uniform [3e-4, 1e-2]",
+    "wide": true
+   },
+   {
+    "name": "stability_class",
+    "distribution": "neutral (0.85) | weakly-stable (0.15)",
+    "wide": true
+   }
+  ],
+  "gust_realization_rule": "gust time-series are generated by fs-atmo (E3.3) from these parameters under the exact-discrete OU / Mann-class machinery; realization identity binds PhysicalRealizationAlgorithmId"
+ },
+ "huffman_1904_05": {
+  "elevation_ft": 815,
+  "conditions": "light/variable winds vs Kitty Hawk (qualitative, universal); catapult from 1904-09-07 to reach flying speed in near-calm",
+  "density_altitude_arithmetic": {
+   "status": "not-published",
+   "note": "no source computes the summer-Dayton vs winter-KDH density/headwind trade explicitly; closest are L&P's qualitative sentence and AIAA 2001-0309's 1000-ft Dayton pressure-altitude convention (which applies to the Nov-21 Dayton prop tests, NOT Dec-17)"
+  },
+  "per_flight_logs": {
+   "status": "not-published",
+   "note": "no published 1904-05 per-flight wind/temperature log; the Wrights' LoC diaries are the primary source to mine (future task)"
+  }
+ },
+ "no_claims": "Records + derivations + pre-registered distributions. No reconstructed gust trace exists or may ever be added here; derived values are battery-recomputed; sim papers' standard-atmosphere assumption is a recorded correction opportunity, not an error claim."
+}
