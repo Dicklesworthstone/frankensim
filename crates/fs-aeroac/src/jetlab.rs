@@ -297,9 +297,7 @@ impl Rig {
     /// Set the uniform relaxation time on every cell (the ramp's
     /// per-step actuator; viscosity = (tau - 1/2)/3).
     fn set_tau(&mut self, tau: f64) {
-        for t in &mut self.grid.tau {
-            *t = tau;
-        }
+        self.grid.tau.fill(tau);
     }
 
     /// Typed stability guard (executed hazard: at delta = 12 lu,

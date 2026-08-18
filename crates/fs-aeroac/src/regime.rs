@@ -255,9 +255,9 @@ impl SlotJet3dFollowUp {
         if self.nx == 0
             || self.ny == 0
             || self.nz == 0
-            || self.nx % 4 != 0
-            || self.ny % 4 != 0
-            || self.nz % 4 != 0
+            || !self.nx.is_multiple_of(4)
+            || !self.ny.is_multiple_of(4)
+            || !self.nz.is_multiple_of(4)
         {
             return Err(AeroacError::InvalidParameter {
                 what: "3D slot-jet extents must be positive multiples of the D3Q19 tile size 4",

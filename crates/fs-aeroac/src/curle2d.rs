@@ -145,6 +145,7 @@ pub fn tonal_lock_frequency(reynolds: f64, u_jet: f64, slot_width: f64) -> Optio
 ///
 /// # Errors
 /// [`AeroacError`] from the dipole kernel, or missing Strouhal lock.
+#[allow(clippy::too_many_arguments)] // one coherent observer record
 pub fn tonal_dipole_observer(
     density: f64,
     u_jet: f64,

@@ -631,6 +631,7 @@ pub struct SampledPlateMode {
 /// FD-stencil disagreement above `0.9` of the channel scale
 /// (FE Hessians are first-order; the sine reprint test is the
 /// accuracy pin).
+#[allow(clippy::items_after_statements)] // the channel alias lives next to its consumers
 pub fn von_karman_sampled_plate(
     params: &VkPlateParams,
     disp: &[SampledPlateMode],
