@@ -14,6 +14,7 @@
 pub mod ale;
 pub mod bdm;
 pub mod gas_film;
+pub mod lc;
 pub mod ns;
 pub mod reduced_aero;
 pub mod trimesh;
