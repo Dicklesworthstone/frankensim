@@ -1,0 +1,8 @@
+frankensim.matdb-contact.v1
+pair	material_a	steel-string	material_b	shaped-bone-bridge	geometry	jawari-graded-parabolic
+law	penalty-power	k_n_per_m_alpha	1.0e8	alpha	2.0	chi_s_per_m	0.0
+identification	identified-from-fixture	fs-dcontact jawari_bridge_enriches_high_band_vs_clean_termination: parabolic graded profile over x in [0.02, 0.08] m, gaps 0.15-1.5 mm, 12 collocation points; the executed fixture pumps ~75 percent of pluck energy into the high band; (K, alpha) are the fixture-calibrated values, receipted verbatim
+validity	force_n	0.0	50.0
+validity	velocity_m_s	0.0	5.0
+graze-advisory	alpha >= 2 REQUIRED for this family: the jawari grazes by design, and 1 < alpha < 2 laws carry an unbounded contact Hessian at the boundary (d2f ~ p^(alpha-2)) that stalls FD-Jacobian Newton in tight-graze regimes (executed in the fixture history)
+citation	FrankenSim original work (authored fixture calibration, bead 3ez8g.13.1); no external source

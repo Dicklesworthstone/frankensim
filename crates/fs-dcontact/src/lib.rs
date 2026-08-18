@@ -224,6 +224,46 @@ impl Obstacle {
         self.internal_loss
     }
 
+    /// Build an obstacle from a matdb CONTACT RECEIPT (music bead
+    /// 3ez8g.13.1): the typed wiring this crate's CONTRACT reserved
+    /// for the provenance field. `(K, alpha, chi)` come from the
+    /// receipt VERBATIM and the provenance string is formatted from
+    /// the pack identity — so migrating a fixture from authored
+    /// parameters to a receipted card is provenance-only (the
+    /// equivalence test in `tests/` proves bitwise-unchanged
+    /// physics). Absent packs refuse upstream in fs-matdb by name;
+    /// there is no default K anywhere on this path.
+    ///
+    /// # Errors
+    /// Typed [`DContactError`] (same admission door as [`Obstacle::new`]).
+    pub fn from_receipt(
+        collocation: Vec<f64>,
+        n_points: usize,
+        n_modes: usize,
+        gaps: Vec<f64>,
+        weights: Vec<f64>,
+        receipt: &fs_matdb::ContactReceipt,
+    ) -> Result<Self, DContactError> {
+        let obstacle = Obstacle::new(
+            collocation,
+            n_points,
+            n_modes,
+            gaps,
+            weights,
+            receipt.k_n_per_m_alpha,
+            receipt.alpha,
+            format!(
+                "matdb:{} {} — {}",
+                receipt.pack_id, receipt.pair_label, receipt.identification
+            ),
+        )?;
+        if receipt.chi_s_per_m > 0.0 {
+            obstacle.with_internal_loss(receipt.chi_s_per_m)
+        } else {
+            Ok(obstacle)
+        }
+    }
+
     /// Contact-law provenance (logged, never invented).
     #[must_use]
     pub fn provenance(&self) -> &str {

@@ -747,3 +747,95 @@ fn refusals_are_typed() {
         .is_err()
     );
 }
+
+#[test]
+fn contact_pack_migration_is_provenance_only() {
+    // The 3ez8g.13.1 wiring e2e: the jawari fixture, rebuilt from the
+    // RECEIPTED contact card (matdb pack contact-jawari-bone-bridge)
+    // instead of authored (K, alpha), must produce BITWISE-identical
+    // physics — the migration touches provenance and nothing else.
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("workspace root")
+        .to_path_buf();
+    let card =
+        fs_matdb::ContactLawCard::load(&root.join("data/matdb/seed-v1/contact-jawari-bone-bridge"))
+            .expect("committed jawari pack");
+    // In-validity operating point (the fixture's regime); the
+    // out-of-validity refusal falsifier executes in fs-matdb cp-003.
+    let receipt = card.lookup(1.0, 1.0).expect("in-validity lookup");
+    let (length, tension, mu) = (0.65, 70.0, 5.0e-3);
+    let n_modes = 12;
+    let dt = 2.5e-6;
+    let steps = 2_000;
+    let jaw_pts: Vec<f64> = (0i32..12)
+        .map(|i| 0.02 + 0.06 * f64::from(i) / 11.0)
+        .collect();
+    let profile: Vec<(f64, f64)> = (0i32..12)
+        .map(|i| {
+            let t = f64::from(i) / 11.0;
+            (0.02 + 0.06 * t, 1.5e-4 + 1.35e-3 * t * t)
+        })
+        .collect();
+    let gaps = polyline_heights(&profile, &jaw_pts).expect("gaps");
+    let seg = 0.06 / 12.0;
+    let coll = string_collocation(length, mu, &jaw_pts, n_modes).expect("collocation");
+    let authored = Obstacle::new(
+        coll.clone(),
+        jaw_pts.len(),
+        n_modes,
+        gaps.clone(),
+        vec![seg; jaw_pts.len()],
+        1.0e8,
+        2.0,
+        "test-fixture: jawari-class graded profile (authored)".to_string(),
+    )
+    .expect("authored");
+    let receipted = Obstacle::from_receipt(
+        coll,
+        jaw_pts.len(),
+        n_modes,
+        gaps,
+        vec![seg; jaw_pts.len()],
+        &receipt,
+    )
+    .expect("receipted");
+    assert!(
+        receipted
+            .provenance()
+            .starts_with("matdb:contact-jawari-bone-bridge"),
+        "typed receipt provenance: {}",
+        receipted.provenance()
+    );
+    let run = |obstacle: Obstacle| -> Vec<f64> {
+        let (storage, _) = string_storage(length, tension, mu, n_modes);
+        let cs = ContactStorage::new(Box::new(storage), n_modes, vec![obstacle]).expect("cs");
+        let sys = PortHamiltonian::new(
+            2 * n_modes,
+            0,
+            symplectic_j(n_modes),
+            vec![0.0; 4 * n_modes * n_modes],
+            vec![],
+            Box::new(cs),
+        )
+        .expect("sys");
+        let mut x = pluck(n_modes, -4.0e-3);
+        for _ in 0..steps {
+            x = step(&sys, &x, &[], dt).expect("step").x;
+        }
+        x
+    };
+    let (xa, xr) = (run(authored), run(receipted));
+    for (k, (a, r)) in xa.iter().zip(&xr).enumerate() {
+        assert!(
+            a.to_bits() == r.to_bits(),
+            "state {k} diverged: {a:e} vs {r:e} — the migration is not provenance-only"
+        );
+    }
+    println!(
+        "{{\"suite\":\"fs-dcontact\",\"case\":\"pack-migration\",\"pack\":\"{}\",\
+         \"pair\":\"{}\",\"steps\":{steps},\"verdict\":\"bitwise-identical\"}}",
+        receipt.pack_id, receipt.pair_label
+    );
+}

@@ -1,0 +1,8 @@
+frankensim.matdb-contact.v1
+pair	material_a	cane-reed	material_b	hard-rubber-mouthpiece-lay	geometry	curved-lay-line-contact
+law	penalty-power	k_n_per_m_alpha	1.0e7	alpha	2.0	chi_s_per_m	1.0e-4
+identification	authored-typical	Estimate-class values for a wet cane reed beating against a hard-rubber facing curve: soft distributed contact (K an order below the bone bridge), alpha 2 per the graze doctrine (the reed grazes the lay every cycle), small Hunt-Crossley loss for the wet-reed contact; no measured identification exists yet - the beating-reed rig identification is the recorded upgrade
+validity	force_n	0.0	5.0
+validity	velocity_m_s	0.0	2.0
+graze-advisory	alpha >= 2 REQUIRED: the beating reed is the canonical tight-graze fixture; sub-2 exponents stall FD-Jacobian Newton at the contact boundary
+citation	FrankenSim original work (authored-typical Estimate, bead 3ez8g.13.1); no external source

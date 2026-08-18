@@ -31,6 +31,7 @@ use fs_evidence::ValidityDomain;
 use fs_qty::Dims;
 
 mod cards;
+mod contact_pack;
 mod interface;
 mod interface_pack;
 mod material_pack;
@@ -46,6 +47,7 @@ pub use cards::{
     CANONICAL_PARAMETER_BLOCK_IDENTITY_VERSION, ConstitutiveModelCard, InitialStatePolicy, LawId,
     LawParameter, MATDB_SCHEMA_VERSION, MaterialCard, MaterialStateId,
 };
+pub use contact_pack::{ContactLawCard, ContactPackError, ContactReceipt};
 pub use interface::{InterfaceSystemCard, SurfaceSpec, SystemContext};
 pub use interface_pack::{
     INTERFACE_PACK_SCHEMA_VERSION, INTERFACE_PACK_TARGET_BASIS, NormalizedInterfacePack,
