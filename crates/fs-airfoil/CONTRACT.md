@@ -41,7 +41,21 @@ domains, and indicial kernels.
   `ConventionBlock` against the frozen E1.4 ids), SurfaceKind-separated
   (Wing/Canard/Rudder/Prop), regime patches tiling α; `eval` refuses
   outside the FITTED partition (`alpha-outside-table`) — distinct from the
-  global admission domain.
+  global admission domain; `eval_strict` additionally refuses when the
+  covering patch's log Re / δ box is exceeded
+  (`query-outside-fitted-domain`, box stated) instead of the spline clamp.
+- `uncertainty::UncertainSurface` — mean + low-rank coefficient modes
+  (≤ 16); `realize(realization_id)` is the ONLY uncertain-query path
+  (coherent draw; per-query independent intervals are impossible by
+  construction); weights are a pure fs-blake3 function of the id under
+  `org.frankensim.fs-airfoil.coef-realization.v1`.
+- `indicial::IndicialKernel` — two-pole φ(s) = 1 − a₁e^(−b₁s) − a₂e^(−b₂s)
+  with registered constants `WAGNER_JONES` (φ(0) = 0.5) and
+  `KUSSNER_2POLE` (ψ(0) = 0); `IndicialState` advances by the EXACT
+  diagonal exponential (sub-step composition is bit-tight);
+  `reduced_time_increment` implements the CHORDWISE clock
+  ds = 2·U_conv·dt/c — freezes at U_conv = 0, REFUSES reversed flow
+  (`indicial-flow-reversed`), never |U|.
 
 ## Invariants
 
@@ -62,7 +76,10 @@ path. Codes: `non-finite-input`, `alpha-outside-domain`,
 `fit-normal-equations-singular`, `fit-constraint-violated`,
 `regime-boundary-mismatch`, `regime-boundary-discontinuity`,
 `convention-block-mismatch`, `convention-block-missing`, `table-empty`,
-`alpha-outside-table`. Applicability-domain refusals STATE the admitted domain.
+`alpha-outside-table`, `query-outside-fitted-domain`,
+`uncertainty-modes-invalid`, `realization-id-empty`,
+`kernel-params-invalid`, `reduced-time-increment-invalid`,
+`timestep-invalid`, `indicial-flow-reversed`. Applicability-domain refusals STATE the admitted domain.
 Caps are tested at cap AND cap+1 (workspace law).
 
 ## Determinism class
@@ -92,6 +109,14 @@ reproduction; synthetic 3-D fit round-trip (off-grid < 1e-8); constraint
 falsifier (non-monotone data under a monotone constraint refuses, and fits
 without it); sample caps at n and n−1; regime-continuity twins; convention/
 provenance falsifiers; pinned fit golden f25f5e76.
+
+`tests/uncertainty_indicial_battery.rs`: coherent-draw law (same id →
+bit-identical surface; two-point mode-structure prediction; anonymous-draw
++ mode-shape falsifiers; mode caps at 16 and 17); strict OOD twins (box
+edge admitted, next float refused with the box stated); Wagner/Küssner
+exact references (φ(0), ψ(0), monotonicity, closed-form tracking to 1e-13,
+sub-step composition to 1e-14); chordwise-clock freeze/refusal battery;
+pinned Wagner-trace golden 7897e5d7.
 
 `tests/analytic_battery.rs`: thin-airfoil exact classical results (zero-lift
 angle, 4πf at α = 0, 2π slope by central difference, α-independent cm_c/4,

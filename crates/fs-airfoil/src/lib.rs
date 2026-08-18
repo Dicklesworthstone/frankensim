@@ -22,7 +22,9 @@
 use fs_math::det;
 
 pub mod fit;
+pub mod indicial;
 pub mod table;
+pub mod uncertainty;
 
 /// Admitted angle-of-attack domain [rad], inclusive: the full circle
 /// expressed as [−π, π]. Queries outside refuse (they indicate an

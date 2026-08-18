@@ -11,10 +11,8 @@ description = "Generic airfoil section models: analytic baselines, provenance-bo
 layer = "L2"
 
 [dependencies]
-fs-math = { path = "../fs-math" }
-
-[dev-dependencies]
 fs-blake3 = { path = "../fs-blake3" }
+fs-math = { path = "../fs-math" }
 
 [lints]
 workspace = true

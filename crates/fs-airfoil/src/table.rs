@@ -180,4 +180,39 @@ impl CoefficientTable {
             ],
         })
     }
+
+    /// Strict fitted-domain evaluation (E4.0c): refuses when ANY axis of
+    /// the selected patch is exceeded, instead of the spline's silent
+    /// clamp on the secondary axes. This is the applicability-domain law
+    /// for queries: out-of-domain gets a refusal that STATES the fitted
+    /// box, never an unconstrained extrapolation.
+    ///
+    /// # Errors
+    /// `alpha-outside-table` (no patch covers α);
+    /// `query-outside-fitted-domain` (the covering patch's log Re or δ
+    /// box is exceeded — the box is stated).
+    pub fn eval_strict(&self, x: [f64; 3]) -> Result<f64, Refusal> {
+        for patch in &self.patches {
+            let ax = &patch.surface.axes;
+            if x[0] >= ax[0].lo && x[0] <= ax[0].hi {
+                for (axis, value) in ax.iter().zip(x.iter()).skip(1) {
+                    if axis.n_coef != 1 && (*value < axis.lo || *value > axis.hi) {
+                        return Err(Refusal {
+                            code: "query-outside-fitted-domain",
+                            message: format!(
+                                "{} = {} outside the fitted box [{}, {}] of the covering regime patch",
+                                axis.name, value, axis.lo, axis.hi
+                            ),
+                            ranked_repairs: vec![
+                                "the table does not extrapolate; the analytic baseline alone applies out here".into(),
+                                "widen the fitted box only with sourced data".into(),
+                            ],
+                        });
+                    }
+                }
+                return Ok(patch.surface.eval(x));
+            }
+        }
+        self.eval(x) // reuse the alpha-outside-table refusal path
+    }
 }
