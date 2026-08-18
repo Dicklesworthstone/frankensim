@@ -20,7 +20,8 @@ pub fn step_tesla_coil(params: &TeslaCoilParams) -> TeslaCoilResult {
     let primary_l = 0.012; // mH
     let secondary_l = 85.0; // mH
     let transformation_ratio = (secondary_l / primary_l as f64).sqrt();
-    let secondary_potential_mv = ((params.input_kv * 1000.0 * transformation_ratio * params.q_factor) / 1e6) * (params.spark_gap_mm / 15.0);
+    let k = 0.18;
+    let secondary_potential_mv = ((params.input_kv * transformation_ratio * k * params.q_factor.sqrt()) / 1000.0) * (params.spark_gap_mm / 15.0);
     let streamer_length_inches = secondary_potential_mv * 28.0;
 
     TeslaCoilResult {

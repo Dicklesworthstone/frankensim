@@ -21,12 +21,13 @@ pub struct GoddardResult {
 pub fn step_goddard_rocket(params: &GoddardParams) -> GoddardResult {
     let chamber_pressure_pa = params.chamber_pressure_psi * 6894.76;
     let gamma = 1.24; // Combustion products heat capacity ratio
-    let combustion_temp_k = 2850.0;
+    let chamber_temp_k = (2400.0 + (chamber_pressure_pa / 2.4e6) * 400.0).round();
     let gas_constant_r = 365.0; // J/(kg*K) for gasoline + liquid O2
+    let expansion = params.expansion_ratio.max(1.4);
 
     // Supersonic Mach number at exit via area-Mach relation
     let mach_exit = ((2.0 / (gamma - 1.0)) * (params.expansion_ratio.powf(2.0 / (gamma + 1.0)) - 1.0)).sqrt();
-    let exhaust_velocity_mps = (((2.0 * gamma) / (gamma - 1.0)) * gas_constant_r * combustion_temp_k * (1.0 - 1.0 / params.expansion_ratio.powf(gamma - 1.0))).sqrt().round();
+    let exhaust_velocity_mps = (((2.0 * gamma) / (gamma - 1.0)) * gas_constant_r * chamber_temp_k * (1.0 - 1.0 / expansion.powf(gamma - 1.0))).sqrt().round();
     let thrust_newtons = (params.fuel_flow_kg_per_sec * exhaust_velocity_mps).round();
     let specific_impulse_sec = exhaust_velocity_mps / 9.80665;
 
