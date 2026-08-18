@@ -31,6 +31,17 @@ domains, and indicial kernels.
   ca = 0, cp walking c/4 → c/2; the low envelope of post-stall.
 - `wind_to_body` / `body_to_wind` — exact rotation pair; `transfer_moment` —
   cm_B = cm_A + cn·(x_B − x_A).
+- `fit::BsplineAxis` — clamped uniform cubic axis (n_coef = 1 ⇒ degenerate/
+  constant axis); `fit::ResidualSurface` — tensor-product surface over
+  (α, log Re, δ) with declared `DiffConstraint`s, penalized-LS `fit` (dense
+  Cholesky, deterministic ridge) and FAIL-CLOSED constraint verification
+  (`fit-constraint-violated`, never silent projection);
+  `fit::verify_regime_continuity` — C⁰ face check between abutting patches.
+- `table::CoefficientTable` — provenance-bound (dossier record + validated
+  `ConventionBlock` against the frozen E1.4 ids), SurfaceKind-separated
+  (Wing/Canard/Rudder/Prop), regime patches tiling α; `eval` refuses
+  outside the FITTED partition (`alpha-outside-table`) — distinct from the
+  global admission domain.
 
 ## Invariants
 
@@ -46,7 +57,12 @@ domains, and indicial kernels.
 Typed `Refusal { code, message, ranked_repairs }` — never panics on the query
 path. Codes: `non-finite-input`, `alpha-outside-domain`,
 `reynolds-outside-domain`, `chord-outside-domain`, `camber-outside-domain`,
-`provenance-missing`. Applicability-domain refusals STATE the admitted domain.
+`provenance-missing`; fit/table layer: `axis-domain-invalid`,
+`axis-coef-count-invalid`, `constraint-axis-invalid`, `insufficient-samples`,
+`fit-normal-equations-singular`, `fit-constraint-violated`,
+`regime-boundary-mismatch`, `regime-boundary-discontinuity`,
+`convention-block-mismatch`, `convention-block-missing`, `table-empty`,
+`alpha-outside-table`. Applicability-domain refusals STATE the admitted domain.
 Caps are tested at cap AND cap+1 (workspace law).
 
 ## Determinism class
@@ -70,6 +86,12 @@ None. (E4.0b/c additions stay feature-free; fidelity is data-driven, not
 cfg-driven.)
 
 ## Conformance tests
+
+`tests/fit_battery.rs`: basis partition-of-unity + Greville linear
+reproduction; synthetic 3-D fit round-trip (off-grid < 1e-8); constraint
+falsifier (non-monotone data under a monotone constraint refuses, and fits
+without it); sample caps at n and n−1; regime-continuity twins; convention/
+provenance falsifiers; pinned fit golden f25f5e76.
 
 `tests/analytic_battery.rs`: thin-airfoil exact classical results (zero-lift
 angle, 4πf at α = 0, 2π slope by central difference, α-independent cm_c/4,

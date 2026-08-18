@@ -21,6 +21,9 @@
 
 use fs_math::det;
 
+pub mod fit;
+pub mod table;
+
 /// Admitted angle-of-attack domain [rad], inclusive: the full circle
 /// expressed as [−π, π]. Queries outside refuse (they indicate an
 /// un-normalized angle upstream, not a physical state).
