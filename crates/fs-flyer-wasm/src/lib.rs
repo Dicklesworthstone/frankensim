@@ -228,6 +228,57 @@ pub fn hello_envelope(state: &HelloState) -> String {
     )
 }
 
+/// One CG2 step with an external body torque [N·m].
+/// Split: apply `I⁻¹ τ Δt`, then the torque-free `rigid_body_step`.
+/// This is the aero kernel; `hello_spin` remains torque-free.
+///
+/// # Errors
+/// Same admissions as [`hello_spin`], plus non-finite torque.
+pub fn aero_step(
+    inertia_kg_m2: [f64; 3],
+    q0: [f64; 4],
+    omega0: [f64; 3],
+    torque_n_m: [f64; 3],
+    dt_s: f64,
+    steps: u32,
+) -> Result<HelloState, Refusal> {
+    hello_spin(inertia_kg_m2, q0, omega0, dt_s, 0)?;
+    if !torque_n_m.iter().all(|v| v.is_finite()) {
+        return Err(Refusal {
+            code: "non-finite-torque",
+            message: "aero torque must be finite".into(),
+            ranked_repairs: vec!["replace NaN/inf torque with a finite body wrench".into()],
+        });
+    }
+    let (mut q, mut w) = (q0, omega0);
+    for _ in 0..steps {
+        w[0] += torque_n_m[0] / inertia_kg_m2[0] * dt_s;
+        w[1] += torque_n_m[1] / inertia_kg_m2[1] * dt_s;
+        w[2] += torque_n_m[2] / inertia_kg_m2[2] * dt_s;
+        (q, w) = rigid_body_step(q, w, inertia_kg_m2, dt_s);
+    }
+    Ok(HelloState {
+        quaternion: q,
+        omega_body: w,
+        steps,
+    })
+}
+
+#[must_use]
+pub fn aero_step_json(
+    inertia_kg_m2: [f64; 3],
+    q0: [f64; 4],
+    omega0: [f64; 3],
+    torque_n_m: [f64; 3],
+    dt_s: f64,
+    steps: u32,
+) -> String {
+    match aero_step(inertia_kg_m2, q0, omega0, torque_n_m, dt_s, steps) {
+        Ok(state) => hello_envelope(&state),
+        Err(refusal) => refusal_envelope(&refusal),
+    }
+}
+
 /// Envelope-producing entry shared by native tests and the wasm boundary.
 #[must_use]
 pub fn hello_spin_json(
@@ -270,6 +321,36 @@ mod js {
         super::hello_spin_json([ixx, iyy, izz], [qw, qx, qy, qz], [wx, wy, wz], dt_s, steps)
     }
 
+    /// CG2 attitude step with a body-frame torque [N·m].
+    #[wasm_bindgen]
+    #[must_use]
+    pub fn flyer_aero_step(
+        ixx: f64,
+        iyy: f64,
+        izz: f64,
+        qw: f64,
+        qx: f64,
+        qy: f64,
+        qz: f64,
+        wx: f64,
+        wy: f64,
+        wz: f64,
+        tx: f64,
+        ty: f64,
+        tz: f64,
+        dt_s: f64,
+        steps: u32,
+    ) -> String {
+        super::aero_step_json(
+            [ixx, iyy, izz],
+            [qw, qx, qy, qz],
+            [wx, wy, wz],
+            [tx, ty, tz],
+            dt_s,
+            steps,
+        )
+    }
+
     /// Trajectory content digest (hex) or the refusal envelope.
     #[wasm_bindgen]
     #[must_use]
@@ -302,6 +383,19 @@ mod tests {
     const IDENTITY_Q: [f64; 4] = [1.0, 0.0, 0.0, 0.0];
     const OMEGA: [f64; 3] = [0.3, -1.2, 2.1];
     const DT: f64 = 1.0 / 120.0;
+
+    #[test]
+    fn aero_step_yaws_when_torque_is_applied() {
+        let free = hello_spin(INERTIA, IDENTITY_Q, [0.0, 0.0, 0.0], DT, 120).unwrap();
+        let yawed = aero_step(INERTIA, IDENTITY_Q, [0.0, 0.0, 0.0], [0.0, 4.0, 0.0], DT, 120)
+            .unwrap();
+        assert!(
+            (yawed.omega_body[1] - free.omega_body[1]).abs() > 1.0e-6,
+            "yaw torque must change ω_y"
+        );
+        let n2: f64 = yawed.quaternion.iter().map(|v| v * v).sum();
+        assert!((n2 - 1.0).abs() < 1.0e-12);
+    }
 
     #[test]
     fn hello_spin_is_deterministic_and_norm_preserving() {
