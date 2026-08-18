@@ -24,6 +24,7 @@ pub mod identifiability;
 pub mod iso9613;
 pub mod phase;
 pub mod plastic;
+pub mod porous;
 pub mod state_point;
 pub mod tensor;
 pub mod visco;

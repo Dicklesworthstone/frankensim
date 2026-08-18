@@ -240,6 +240,26 @@ None.
   Pa-scale matrix shear vs kPa-scale indentation registers are
   recorded separately, never averaged.
 
+- Porous-absorber facility (music bead 3ez8g.5.4): `porous` module
+  — JCA(L) equivalent fluid (five transport parameters + optional
+  Lafarge thermal permeability; `None` degrades to Champoux–Allard
+  with the degeneracy EXPLICIT: k0' = φΛ'²/8) yielding effective
+  density/bulk, characteristic impedance/wavenumber, rigid-backed
+  surface impedance, and normal-incidence absorption. Cards are
+  licensing-first: Nguyen 2024 measured melamine characterization
+  (CC-BY, uncertainties quoted in provenance) and the FOAM 02
+  Basotect/Pinta identified rows (CC-BY, thick-sample fits only —
+  thin-sample rows pin parameters at fit bounds and are refused as
+  card material). ORACLE: the committed FOAM 02 measured mean
+  spectra (machine-readable CC-BY data; no figure digitization) —
+  the model reproduces measured absorption to worst 0.041 / mean
+  0.018 (Basotect 60 mm) and 0.029 / 0.006 (Pinta 50 mm) inside
+  authored 0.06/0.03 bands. D23 SEAM: fs-duct's locally-reacting
+  wall path and fs-phs's wall-pin family consume
+  `surface_impedance_rigid` as a wall admittance through thin
+  adapters — displacement note: no porous model may be
+  re-implemented there.
+
 ## Conformance tests
 
 `tests/conformance.rs` (JSON verdicts, suite `fs-material/conformance`):
@@ -294,7 +314,28 @@ firewall (model_ prefix + declared register), and the
 stated-density assertions (no measured tissue-density row may exist
 without a licensable source).
 
+`src/porous.rs` `porous_tests` (pa-001..pa-006): both measured-
+spectrum oracles; analytic degeneracies (thin layer -> 0, rigid-
+backed compliance limit Zs -> K/(jωd) at 7e-5, air-like card ->
+free-medium Zc within the disclosed 0.07% constant mismatch);
+refusals by name (parameters, out-of-band frequency, negative
+thickness); the composed lined-tube demonstration (a simulated
+ISO-10534-2 two-microphone rig recovers the direct absorption to
+2e-16, and the melamine-lined tube's fundamental decays at
+T60 = 0.13 s where the rigid tube never decays); card validation +
+bitwise determinism.
+
 ## No-claim boundaries
+
+- The porous facility claims LININGS (surface impedance/absorption
+  of a rigid-framed layer), never the hammer's compression stack;
+  no elastic-frame Biot waves (equivalent fluid only — frame-wave
+  escalation is a named successor); no room acoustics; no oblique
+  incidence in v1 (normal incidence + locally-reacting consumption).
+  Pinta Plano Polar is polyester-fleece FELT-CLASS nonwoven, not
+  wool piano felt — the wool-felt characterization is a recorded
+  vein.
+
 
 - **Ogden is staged, not shipped**: its principal-stretch energy needs
   eigenvalue derivatives through fs-ad duals. The upstream blocker is

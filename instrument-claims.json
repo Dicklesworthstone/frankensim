@@ -1467,6 +1467,50 @@
     "vvreg:acoustic-carcagno-2018-mode3"
    ],
    "notes": "The COMPOSED guitar body (bead 3ez8g.7.4): braced sitka top (spruce-sitka-fpl-gtr282) + ladder-braced Brazilian-rosewood back (rosewood-brazilian-fpl-gtr282; SG-0.8 density basis caveat disclosed) + Helmholtz cavity; bridge-admittance peaks gated vs the Carcagno 2018 BR-guitar rows. MEASURED: F1 +5.9%, F2 +9.9% (authored 15% envelopes; beats the 2-DOF casebook), F3 -32.6% inside an authored 40% envelope with the mechanism DISCLOSED \u2014 the flat rectangle surrogate has no X-bracing/arching so its third breathing family sits low; THE NAMED WEAKEST CLAIM. Exact 2-DOF product invariant defect 0.0. Damping honesty: material-only Q (39/54/78) exceeds measured (34/18/36) as it must. NEGATIVE CONTROL executed: a deep midline brace flips the mode order (lowest mode volume 6e-15 vs breather 0.22 \u2014 frequency-order breathing selection fails; select by max |INT phi dA|); ALSO MEASURED: the a-brace-on-the-nodal-line-has-no-effect folklore is FALSE for eccentric braces (11.6% shift via torsion + eccentric-membrane coupling). WOLF NOTE: string tuned onto the breather beats at detrended depth 0.046 with 8 nulls vs 0.990 clean off-resonance (body ratio 2.5); the coupling spring DETUNES the pair unless effective frequencies are tuned (k = m w^2 - k_c). Truncation sensitivity is per-frequency (spread 23.6x; on THIS fixture between-peaks suffers MORE than on-peak \u2014 direction is fixture-specific). Listening artifact guitar-strum (Unadjudicated)."
+  },
+  {
+   "filling": "piano-lining",
+   "image": "jca-equivalent-fluid",
+   "qoi": "absorption-oracle",
+   "owner_crates": [
+    "fs-material"
+   ],
+   "exactness": [
+    "X-Consist",
+    "X-Est"
+   ],
+   "gate": "green",
+   "live_default": "no",
+   "determinism": "one-host",
+   "evidence": [
+    {
+     "kind": "test",
+     "ref": "crates/fs-material/src/porous.rs::pa_001_basotect_reproduces_the_measured_spectrum"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-material/src/porous.rs::pa_002_pinta_reproduces_the_measured_spectrum"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-material/src/porous.rs::pa_003_analytic_degeneracies"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-material/src/porous.rs::pa_004_refusals_fire_by_name"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-material/src/porous.rs::pa_005_lined_tube_composition"
+    }
+   ],
+   "budget_row": null,
+   "corpus_refs": [
+    "vvreg:acoustic-foam02-basotect-alpha500",
+    "vvreg:acoustic-foam02-basotect-alpha1150",
+    "vvreg:acoustic-foam02-pinta-alpha750"
+   ],
+   "notes": "The LININGS claim (bead 3ez8g.5.4; NOT the hammer): JCA(L) equivalent fluid in fs_material::porous with licensing-first cards \u2014 Nguyen 2024 measured melamine characterization (CC-BY; k0->sigma, uncertainties in provenance) + FOAM 02 Basotect/Pinta identified rows (CC-BY; thick-sample fits only, thin-sample bound-pinned fits REFUSED as cards). ORACLE: committed FOAM 02 measured mean spectra (machine-readable CC-BY data, 36 measurements each; no figure digitization): worst |model-measured| 0.041/0.029, means 0.018/0.006 inside authored 0.06/0.03 bands. Degeneracies analytic (thin->0, compliance limit 7e-5, air-like->free medium). Composed demo: simulated ISO-10534-2 two-mic rig = direct alpha to 2e-16; melamine-lined tube T60 0.13 s vs rigid never. D23 seam: fs-duct wall path + fs-phs wall pins consume surface_impedance_rigid via thin adapters (displacement note in CONTRACT). SCOPE: normal incidence, rigid frame, no Biot frame waves, no room acoustics; Pinta is polyester-fleece felt-CLASS (wool piano felt = recorded vein)."
   }
  ]
 }

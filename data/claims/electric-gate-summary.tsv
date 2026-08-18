@@ -1,5 +1,5 @@
 # frankensim-electric-gate-summary-v1
-# derived from instrument-claims.json (blake2b-128 64ed5167fea0bfb48e936eaa765325f6); regenerate when electric-string rows change (gated by electric_chain.rs)
+# derived from instrument-claims.json (blake2b-128 3a1e586c1e3104f42625e706bae98f97); regenerate when electric-string rows change (gated by electric_chain.rs)
 image	qoi	gate	live_default	exactness	owners	evidence_count	evidence_refs
 faraday-pickup-port	station-voicing-comb	ungated	no	X-Consist+X-Est	fs-couple+fs-phs	4	crates/fs-couple/src/pickup.rs::pk_001_station_voicing_matches_the_window_weighted_prediction;crates/fs-couple/src/pickup.rs::pk_002_two_pickups_comb_when_mixed;crates/fs-couple/src/pickup.rs::pk_003_point_limit_and_no_state_duplication;crates/fs-couple/src/pickup.rs::pk_005_emf_drives_the_dae_circuit_end_to_end
 ts-driver-cabinet	sealed-box-ts-algebra	ungated	no	X-Consist+X-Est	fs-couple+fs-phs	4	crates/fs-couple/src/speaker.rs::ts_001_sealed_box_shift_matches_the_ts_algebra;crates/fs-couple/src/speaker.rs::ts_002_impedance_curve_shows_the_motional_peak;crates/fs-couple/src/speaker.rs::ts_003_panel_mode_colors_the_response_and_is_disclosed;crates/fs-couple/src/speaker.rs::ts_004_excursion_refuses_past_the_card_limit
