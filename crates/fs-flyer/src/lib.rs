@@ -20,6 +20,7 @@
 
 use fs_blake3::hash_domain;
 
+pub mod replay;
 pub mod spine;
 
 /// Identity domain for design digests.
