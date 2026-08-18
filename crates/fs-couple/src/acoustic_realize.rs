@@ -2530,10 +2530,7 @@ fn realize_blown_duct(
     // a body, filled with IFFT[Z] rather than IFFT[R]. A vented
     // reflectance FIR does not ring a measurable period; the
     // impedance FIR does, so tone-hole shortening stays TMM-emergent.
-    #[allow(clippy::items_after_statements)]
-    // the import documents WHERE the line law comes from
-    use crate::driving_point::impedance_line;
-    let mut line = impedance_line(
+    let mut line = crate::driving_point::impedance_line(
         &physics,
         gas,
         termination,

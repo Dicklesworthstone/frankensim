@@ -680,13 +680,13 @@ pub fn von_karman_sampled_plate(
         fields.push(mode.w.iter().map(|v| v * scale).collect::<Vec<_>>());
         omegas.push(mode.omega);
     }
+    type RawChannel = (f64, Vec<(usize, usize, f64, f64)>, f64);
     let nq = fields.len();
     let pi = core::f64::consts::PI;
     let psi_norm = det::sqrt(4.0 / (lx * ly));
     let kmin2 = (pi / lx) * (pi / lx) + (pi / ly) * (pi / ly);
     // Mass-normalized φ ~ 1/√(ρ h A); a nonzero raw integral is ~ k⁴/(ρ h).
     let char_scale = kmin2 * kmin2 / (rho * h).max(1.0e-30);
-    type RawChannel = (f64, Vec<(usize, usize, f64, f64)>, f64);
     let mut channels = Vec::with_capacity(stress_modes.len());
     let mut worst_rel = 0.0f64;
     let mut global_scale = f64::MIN_POSITIVE;
