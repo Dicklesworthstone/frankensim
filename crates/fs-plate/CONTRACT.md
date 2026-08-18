@@ -99,6 +99,20 @@ None. Workspace `unsafe_code = "deny"`.
 None.
 
 ## Conformance tests
+
+`tests/plate_conformance.rs` (bead 3ez8g.13.2; the reimplementation
+contract through the public surface): pt-001 the SS isotropic plate
+lands on the exact Navier frequency with mesh convergence (0.12%
+fine); pt-002 the clamped square lands on Leissa 35.992 (0.28%);
+pt-003 the fs-qty front door is BIT-IDENTICAL to the plain door
+through assemble + modes; pt-004 stiffener term isolation (a
+vanishing rib is a no-op at 3e-10, a real rib stiffens 56%); pt-005
+the Olson-Hazell fundamental-region pin (709.6 vs 718.1 Hz theory,
+1.2%; the full five-mode gate lives inline; corpus row
+acoustic-olson-hazell-1977-mode3); pt-006 refusals by name — this
+battery FOUND that an out-of-range boundary node PANICKED inside
+assemble; it now refuses as `PlateError::BadBoundary`. Inline unit
+modules untouched.
 In-crate: element patch tests (symmetry, rigid-body, constant-curvature
 exactness); SS Navier and clamped Leissa two-density convergence ladders
 with trend assertions; orthotropic Navier + E_L/E_R swap mutation;

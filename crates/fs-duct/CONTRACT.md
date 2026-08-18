@@ -204,6 +204,20 @@ None.
 
 ## Conformance tests
 
+`tests/duct_conformance.rs` (bead 3ez8g.13.2; the reimplementation
+contract through the public surface, independent oracles): dt-001
+the closed lossless cylinder matches `Z_in = +i Z0 cot(kL)` under
+e^{-i omega t} to 1e-16 (the -i form belongs to e^{+i omega t});
+dt-002 the vanishing-taper cone degenerates to the cylinder (8e-6)
+and the ideal-open pipe peaks at c/4L (2e-4); dt-003 wide-tube Q
+follows the sqrt-frequency law across the first two resonances
+(0.3%); dt-004 refusals by name (narrow-tube shear floor,
+non-physical parameters, empty duct); dt-005 the unflanged
+(0.6133 a) and flanged (0.8216 a) end corrections move the
+quarter-wave peak by the textbook effective-length ratios (3e-4).
+`tests/ernoult_corpus.rs` carries the registered corpus fixture.
+Inline unit modules stay where they are cheap; nothing was weakened.
+
 Inline `tests` module: lossless closed forms; quarter-wave end
 correction + dispersion deficit; four cone oracles; Kirchhoff-Q;
 passivity/flattening/thermal-share pins; hot-duct sqrt(T) law; named
