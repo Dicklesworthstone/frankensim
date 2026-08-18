@@ -1,0 +1,17 @@
+[package]
+name = "fs-flyer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Wright Flyer aircraft-level model: design schema, admission, mass/inertia build-up, derived stability panel."
+
+[package.metadata.frankensim]
+layer = "L4"
+
+[dependencies]
+fs-blake3 = { path = "../fs-blake3" }
+
+[lints]
+workspace = true

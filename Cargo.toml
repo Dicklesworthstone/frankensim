@@ -140,6 +140,7 @@ members = [
     "crates/fs-bem",
     "crates/fs-truss",
     "crates/fs-flux",
+    "crates/fs-flyer",
     "crates/fs-thrust-e2e",
     "crates/fs-robustopt-e2e",
     "crates/fs-schedule-e2e",
