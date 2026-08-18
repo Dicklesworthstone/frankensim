@@ -88,7 +88,7 @@ fn ring_window_semantics_and_caps() {
     // Live window is the trailing 8 ticks: 12..=19.
     assert!(ring.get(11).is_none(), "evicted tick must be gone");
     assert!(ring.get(12).is_some() && ring.get(19).is_some());
-    assert_eq!(ring.get(15).unwrap().pos_m[0], 15.0);
+    assert_eq!(ring.get(15).unwrap().pos_m[0].to_bits(), 15.0f64.to_bits());
     assert_eq!(ring.pushes(), 20);
     // Capacity caps at cap AND cap+1 (plus zero).
     assert!(StateRing::new(MAX_RING_CAPACITY).is_ok());

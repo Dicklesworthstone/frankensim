@@ -12,6 +12,8 @@ layer = "L4"
 
 [dependencies]
 fs-blake3 = { path = "../fs-blake3" }
+fs-geom = { path = "../fs-geom" }
+fs-mbd = { path = "../fs-mbd" }
 fs-time = { path = "../fs-time" }
 
 [lints]

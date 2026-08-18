@@ -142,14 +142,14 @@ where
     ];
     // Drift: x+ = x + v·dt + a0·dt²/2.
     let mut pos = *state;
-    for i in 0..3 {
-        pos.pos_m[i] += state.vel_mps[i] * dt_s + 0.5 * a0[i] * dt_s * dt_s;
+    for ((x, v), a) in pos.pos_m.iter_mut().zip(&state.vel_mps).zip(&a0) {
+        *x += v * dt_s + 0.5 * a * dt_s * dt_s;
     }
     // Rotation: half-kick, torque-free Lie step, half-kick.
     let half = 0.5 * dt_s;
     let mut w = state.omega_body;
-    for i in 0..3 {
-        w[i] += l0.moment_nm[i] / body.inertia_kgm2[i] * half;
+    for ((wi, m), inertia) in w.iter_mut().zip(&l0.moment_nm).zip(&body.inertia_kgm2) {
+        *wi += m / inertia * half;
     }
     let (q_new, w_free) = rigid_body_step(state.quat, w, body.inertia_kgm2, dt_s);
     pos.quat = q_new;
