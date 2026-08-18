@@ -21,6 +21,7 @@
 use fs_blake3::hash_domain;
 
 pub mod adapter;
+pub mod checkpoint;
 pub mod replay;
 pub mod spine;
 
