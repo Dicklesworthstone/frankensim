@@ -6,7 +6,7 @@
 //! Repro: cargo test -p fs-flyer --test replay_battery
 
 use fs_flyer::replay::{
-    record, run_recorded, verify_replay, AppliedEvent, InputTrace, StateRing, MAX_RING_CAPACITY,
+    AppliedEvent, InputTrace, MAX_RING_CAPACITY, StateRing, record, run_recorded, verify_replay,
 };
 use fs_flyer::spine::{Loads, RigidBody, SixDofState};
 
@@ -17,7 +17,10 @@ fn jlog(case: &str, payload: &str) {
 const DT: f64 = 1.0 / 120.0;
 
 fn body() -> RigidBody {
-    RigidBody { mass_kg: 340.17, inertia_kgm2: [1787.0, 367.4, 1820.9] }
+    RigidBody {
+        mass_kg: 340.17,
+        inertia_kgm2: [1787.0, 367.4, 1820.9],
+    }
 }
 
 fn rest() -> SixDofState {
@@ -33,7 +36,11 @@ fn rest() -> SixDofState {
 // thrust command (a deterministic stand-in for the real aero model).
 fn loads(t: f64, s: &SixDofState, c: &[f64]) -> Loads {
     Loads {
-        force_n: [200.0 * c[1] + 5.0 * (2.0 * t).sin(), 0.0, 3336.0 - 30.0 * s.vel_mps[2]],
+        force_n: [
+            200.0 * c[1] + 5.0 * (2.0 * t).sin(),
+            0.0,
+            3336.0 - 30.0 * s.vel_mps[2],
+        ],
         moment_nm: [0.0, 400.0 * c[0] - 50.0 * s.omega_body[1], 0.0],
     }
 }
@@ -42,10 +49,30 @@ fn demo_trace() -> InputTrace {
     InputTrace {
         end_tick_exclusive: 360,
         events: vec![
-            AppliedEvent { channel: 1, applied_tick: 0, ordinal_within_tick: 0, quantized_value: 0.75 },
-            AppliedEvent { channel: 0, applied_tick: 120, ordinal_within_tick: 0, quantized_value: 0.25 },
-            AppliedEvent { channel: 1, applied_tick: 120, ordinal_within_tick: 1, quantized_value: 1.0 },
-            AppliedEvent { channel: 0, applied_tick: 240, ordinal_within_tick: 0, quantized_value: -0.25 },
+            AppliedEvent {
+                channel: 1,
+                applied_tick: 0,
+                ordinal_within_tick: 0,
+                quantized_value: 0.75,
+            },
+            AppliedEvent {
+                channel: 0,
+                applied_tick: 120,
+                ordinal_within_tick: 0,
+                quantized_value: 0.25,
+            },
+            AppliedEvent {
+                channel: 1,
+                applied_tick: 120,
+                ordinal_within_tick: 1,
+                quantized_value: 1.0,
+            },
+            AppliedEvent {
+                channel: 0,
+                applied_tick: 240,
+                ordinal_within_tick: 0,
+                quantized_value: -0.25,
+            },
         ],
     }
 }
@@ -65,9 +92,15 @@ fn ring_window_semantics_and_caps() {
     assert_eq!(ring.pushes(), 20);
     // Capacity caps at cap AND cap+1 (plus zero).
     assert!(StateRing::new(MAX_RING_CAPACITY).is_ok());
-    assert_eq!(StateRing::new(MAX_RING_CAPACITY + 1).unwrap_err().code, "ring-capacity-invalid");
+    assert_eq!(
+        StateRing::new(MAX_RING_CAPACITY + 1).unwrap_err().code,
+        "ring-capacity-invalid"
+    );
     assert_eq!(StateRing::new(0).unwrap_err().code, "ring-capacity-invalid");
-    jlog("ring", "\"window\":\"trailing-8 verified, caps at cap/cap+1\"");
+    jlog(
+        "ring",
+        "\"window\":\"trailing-8 verified, caps at cap/cap+1\"",
+    );
 }
 
 #[test]
@@ -100,7 +133,10 @@ fn divergence_localizes_to_the_tampered_tick() {
     // And the id gate alone catches silent trace edits.
     let mut silent = rec.clone();
     silent.trace.events[3].quantized_value = -0.26;
-    assert_eq!(verify_replay(&silent, loads).unwrap_err().code, "replay-trace-id-mismatch");
+    assert_eq!(
+        verify_replay(&silent, loads).unwrap_err().code,
+        "replay-trace-id-mismatch"
+    );
     jlog("localization", "\"tampered_tick\":240,\"localized\":true");
 }
 
@@ -120,12 +156,19 @@ fn input_trace_id_frozen_law() {
         payload.extend_from_slice(&e.quantized_value.to_bits().to_le_bytes());
     }
     let hand = fs_blake3::hash_domain("fs-flyer/applied-input-trace/v1", &payload).to_hex();
-    assert_eq!(id, hand, "trace id must match the hand-computed frozen preimage");
+    assert_eq!(
+        id, hand,
+        "trace id must match the hand-computed frozen preimage"
+    );
     // EXTENT law: identical events, different end_tick_exclusive → different
     // id (two event-free runs stopped at different ticks differ).
     let mut longer = trace.clone();
     longer.end_tick_exclusive = 361;
-    assert_ne!(id, longer.trace_id(), "the trace EXTENT is part of the domain");
+    assert_ne!(
+        id,
+        longer.trace_id(),
+        "the trace EXTENT is part of the domain"
+    );
     // Ordinal sensitivity: swapping same-tick ordinals changes the id.
     let mut swapped = trace.clone();
     swapped.events.swap(1, 2);
@@ -144,21 +187,27 @@ fn trace_admission_refusals() {
         quantized_value: 0.0,
     });
     assert_eq!(
-        run_recorded(&body(), &rest(), DT, &out, 8, loads).unwrap_err().code,
+        run_recorded(&body(), &rest(), DT, &out, 8, loads)
+            .unwrap_err()
+            .code,
         "trace-extent-invalid"
     );
     // Broken canonical order (regressing tick).
     let mut disorder = demo_trace();
     disorder.events.swap(1, 3);
     assert_eq!(
-        run_recorded(&body(), &rest(), DT, &disorder, 8, loads).unwrap_err().code,
+        run_recorded(&body(), &rest(), DT, &disorder, 8, loads)
+            .unwrap_err()
+            .code,
         "trace-order-invalid"
     );
     // Channel above the cap.
     let mut wide = demo_trace();
     wide.events[0].channel = 16;
     assert_eq!(
-        run_recorded(&body(), &rest(), DT, &wide, 8, loads).unwrap_err().code,
+        run_recorded(&body(), &rest(), DT, &wide, 8, loads)
+            .unwrap_err()
+            .code,
         "channel-outside-domain"
     );
     jlog("admission", "\"gates\":\"extent, order, channel\"");

@@ -87,8 +87,8 @@ impl InputTrace {
                         ],
                     });
                 }
-            } else if e.ordinal_within_tick != 0 && self.events.first().map(|f| f.applied_tick)
-                == Some(e.applied_tick)
+            } else if e.ordinal_within_tick != 0
+                && self.events.first().map(|f| f.applied_tick) == Some(e.applied_tick)
             {
                 return Err(Refusal {
                     code: "trace-order-invalid",
@@ -143,7 +143,11 @@ impl StateRing {
                 ranked_repairs: vec!["a few seconds of ticks is the intended window".into()],
             });
         }
-        Ok(StateRing { slots: Vec::with_capacity(capacity), next: 0, count: 0 })
+        Ok(StateRing {
+            slots: Vec::with_capacity(capacity),
+            next: 0,
+            count: 0,
+        })
     }
 
     /// Push a tick's state (overwrites the oldest slot when full).
@@ -207,7 +211,11 @@ where
     F: FnMut(f64, &SixDofState, &[f64]) -> Loads,
 {
     trace.admit()?;
-    if trace.events.iter().any(|e| e.channel as usize >= MAX_CHANNELS) {
+    if trace
+        .events
+        .iter()
+        .any(|e| e.channel as usize >= MAX_CHANNELS)
+    {
         return Err(Refusal {
             code: "channel-outside-domain",
             message: format!("channel above cap {MAX_CHANNELS}"),
@@ -254,7 +262,14 @@ where
 {
     let (_, digests, _) = run_recorded(body, initial, dt_s, &trace, 64, loads)?;
     let input_trace_id = trace.trace_id();
-    Ok(RunRecord { initial: *initial, body: *body, dt_s, trace, input_trace_id, tick_digests: digests })
+    Ok(RunRecord {
+        initial: *initial,
+        body: *body,
+        dt_s,
+        trace,
+        input_trace_id,
+        tick_digests: digests,
+    })
 }
 
 /// Replay a record and verify bit-identity, LOCALIZING any divergence.
@@ -274,8 +289,14 @@ where
             ranked_repairs: vec!["the record was tampered with or corrupted; restore it".into()],
         });
     }
-    let (_, digests, _) =
-        run_recorded(&record.body, &record.initial, record.dt_s, &record.trace, 64, loads)?;
+    let (_, digests, _) = run_recorded(
+        &record.body,
+        &record.initial,
+        record.dt_s,
+        &record.trace,
+        64,
+        loads,
+    )?;
     if digests.len() != record.tick_digests.len() {
         return Err(Refusal {
             code: "replay-digest-mismatch",
