@@ -24,6 +24,7 @@ pub mod adapter;
 pub mod addedmass;
 pub mod checkpoint;
 pub mod partitioned;
+pub mod rail;
 pub mod replay;
 pub mod spine;
 
