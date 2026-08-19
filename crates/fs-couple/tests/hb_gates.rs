@@ -143,15 +143,19 @@ fn hb_speaks(problem: &ReedHb, omega_guess: f64, harmonics: usize) -> bool {
         max_newton: 60,
         tolerance: 1.0e-9,
     };
-    matches!(
-        solve_hb(
-            problem,
-            HbAnchor::Autonomous { omega_guess },
-            0.25 * problem.blowing_pressure_pa / problem.closing_pressure_pa,
-            &budget,
-        ),
-        Ok(_)
-    )
+    // Large seeds reach the orbit basin (measured: the equilibrium
+    // basin swallows small seeds); deterministic guess ladder.
+    [0.6f64, 0.35].iter().any(|&guess| {
+        matches!(
+            solve_hb(
+                problem,
+                HbAnchor::Autonomous { omega_guess },
+                guess,
+                &budget
+            ),
+            Ok(_)
+        )
+    })
 }
 
 /// Bisect the HB speaking threshold in blowing pressure [Pa].
@@ -216,6 +220,51 @@ fn td_onset(candidates: &[f64]) -> f64 {
         }
     }
     f64::INFINITY
+}
+
+#[test]
+fn hb_000_diagnostic_scan() {
+    // Measure-first probe: per-pressure solver outcome.
+    let gas = air();
+    let duct = clarinet_bore();
+    let omega_res = first_resonance(&duct, &gas);
+    println!(
+        "omega_res = {omega_res:.2} rad/s ({:.1} Hz)",
+        omega_res / TAU
+    );
+    for pm in [400.0f64, 700.0, 900.0, 1100.0, 1400.0, 1700.0] {
+        let problem = ReedHb {
+            duct: clarinet_bore(),
+            gas: air(),
+            rest_opening_m: 4.0e-4,
+            width_m: 1.2e-2,
+            closing_pressure_pa: 2_000.0,
+            blowing_pressure_pa: pm,
+        };
+        for guess in [0.1f64, 0.3, 0.6] {
+            let out = solve_hb(
+                &problem,
+                HbAnchor::Autonomous {
+                    omega_guess: omega_res,
+                },
+                guess,
+                &HbBudget {
+                    harmonics: 9,
+                    max_newton: 60,
+                    tolerance: 1.0e-9,
+                },
+            );
+            match out {
+                Ok(o) => println!(
+                    "pm {pm} guess {guess}: OK omega {:.1} amp {:.4} res {:.2e}",
+                    o.omega,
+                    o.first_harmonic_amplitude(0),
+                    o.residual
+                ),
+                Err(e) => println!("pm {pm} guess {guess}: {e}"),
+            }
+        }
+    }
 }
 
 #[test]
@@ -367,19 +416,23 @@ fn hb_002_brass_slot_map_locks_on_impedance_peaks() {
             face_area_m2: 1.2e-4,
             blowing_pressure_pa: 3_000.0,
         };
-        let orbit = solve_hb(
-            &problem,
-            HbAnchor::Autonomous {
-                omega_guess: TAU * f_lip,
-            },
-            2.0e-4,
-            &HbBudget {
-                harmonics: 7,
-                max_newton: 80,
-                tolerance: 1.0e-8,
-            },
-        );
-        if let Ok(orbit) = orbit {
+        let budget = HbBudget {
+            harmonics: 7,
+            max_newton: 80,
+            tolerance: 1.0e-8,
+        };
+        let orbit = [2.0e-4f64, 4.0e-4].iter().find_map(|&guess| {
+            solve_hb(
+                &problem,
+                HbAnchor::Autonomous {
+                    omega_guess: TAU * f_lip,
+                },
+                guess,
+                &budget,
+            )
+            .ok()
+        });
+        if let Some(orbit) = orbit {
             locks.push((f_lip, orbit.omega / TAU));
         }
     }

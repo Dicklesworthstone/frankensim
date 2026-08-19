@@ -552,8 +552,37 @@ pub fn solve_hb_seeded<P: OrbitProblem>(
         };
         let mut step: Vec<f64> = r.clone();
         factorized.solve(&mut step);
+        // Deterministic backtracking: halve the step (up to 8 times)
+        // until the residual does not grow — the undamped Newton
+        // overshoots island problems into the equilibrium basin
+        // (measured on the reed gate).
+        let mut best_alpha = 1.0f64;
+        let mut best_norm = f64::INFINITY;
+        let mut trial = vec![0.0f64; pack.coeff_len()];
+        let mut alpha = 1.0f64;
+        for _ in 0..8 {
+            let mut u_try = u.clone();
+            for (col, &ui) in free.iter().enumerate() {
+                u_try[ui] -= alpha * step[col];
+            }
+            hb_residual(problem, &pack, &u_try, omega_fixed, &mut trial);
+            let mut tn: f64 = kept.iter().map(|&i| trial[i] * trial[i]).sum();
+            if amplitude_row.is_some() {
+                let ar = amp_residual(&u_try);
+                tn += ar * ar;
+            }
+            let tn = det::sqrt(tn);
+            if tn < best_norm {
+                best_norm = tn;
+                best_alpha = alpha;
+            }
+            if tn < rn {
+                break;
+            }
+            alpha *= 0.5;
+        }
         for (col, &ui) in free.iter().enumerate() {
-            u[ui] -= step[col];
+            u[ui] -= best_alpha * step[col];
         }
         let _ = iter;
     }
@@ -735,11 +764,38 @@ pub fn solve_shooting<P: OrbitProblem>(
         };
         let mut step: Vec<f64> = r.clone();
         factorized.solve(&mut step);
+        let mut best = (1.0f64, f64::INFINITY);
+        let mut alpha = 1.0f64;
+        for _ in 0..6 {
+            let (mut xp, mut pp) = (x0.clone(), period);
+            for col in 0..nn {
+                if auto && col == 0 {
+                    pp -= alpha * step[col];
+                } else {
+                    xp[col] -= alpha * step[col];
+                }
+            }
+            if pp > 0.0 && pp.is_finite() {
+                let xt_try = flow(problem, &xp, pp, budget.steps_per_period);
+                let tn = det::sqrt(
+                    (0..d)
+                        .map(|i| (xt_try[i] - xp[i]) * (xt_try[i] - xp[i]))
+                        .sum::<f64>(),
+                );
+                if tn < best.1 {
+                    best = (alpha, tn);
+                }
+                if tn < rn {
+                    break;
+                }
+            }
+            alpha *= 0.5;
+        }
         for col in 0..nn {
             if auto && col == 0 {
-                period -= step[col];
+                period -= best.0 * step[col];
             } else {
-                x0[col] -= step[col];
+                x0[col] -= best.0 * step[col];
             }
         }
         if !(period > 0.0 && period.is_finite()) {
