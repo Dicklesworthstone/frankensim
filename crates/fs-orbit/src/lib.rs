@@ -219,8 +219,8 @@ impl HbOrbit {
     #[must_use]
     pub fn peak(&self, k: usize) -> f64 {
         let mut peak = f64::NEG_INFINITY;
-        for j in 0..256 {
-            peak = peak.max(self.sample(k, TAU * j as f64 / 256.0));
+        for j in 0..256i32 {
+            peak = peak.max(self.sample(k, TAU * f64::from(j) / 256.0));
         }
         peak
     }
@@ -533,18 +533,17 @@ pub fn solve_hb_seeded<P: OrbitProblem>(
         // Conservative families carry a parity nullspace; a fixed
         // Tikhonov jitter keeps the step deterministic and the
         // converged residual is still the only accepted evidence.
-        let factorized = match lu(&jac, nn) {
-            Ok(f) => f,
-            Err(_) => {
-                let scale_j = jac.iter().fold(0.0f64, |m, v| m.max(v.abs()));
-                let delta = 1.0e-10 * scale_j.max(1.0);
-                for i in 0..nn {
-                    jac[i * nn + i] += delta;
-                }
-                match lu(&jac, nn) {
-                    Ok(f) => f,
-                    Err(_) => return Err(OrbitError::SingularJacobian),
-                }
+        let factorized = if let Ok(f) = lu(&jac, nn) {
+            f
+        } else {
+            let scale_j = jac.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+            let delta = 1.0e-10 * scale_j.max(1.0);
+            for i in 0..nn {
+                jac[i * nn + i] += delta;
+            }
+            match lu(&jac, nn) {
+                Ok(f) => f,
+                Err(_) => return Err(OrbitError::SingularJacobian),
             }
         };
         let mut step: Vec<f64> = r.clone();

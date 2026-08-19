@@ -91,7 +91,9 @@ fn i09_claims() -> Vec<ClaimSpec> {
                 independent: true,
                 tcb_overlap: "none",
             },
-            activation: "first implementation bead of the I09 problem-IR leaf opens",
+            activation: "OPENED: fs-orbit (music bead 3ez8g.11.1) carries the first \
+                         implementation — HB/AFT + shooting/Floquet + pseudo-arclength \
+                         over the island-plus-linear-port problem IR",
             kill: "any accepted malformed problem or refused valid problem returns the \
                    IR to design review with the disagreeing fixture as receipt",
             fallback: "explicit user-supplied normal form with per-field validation",

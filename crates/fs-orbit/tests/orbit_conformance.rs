@@ -101,13 +101,16 @@ fn ob_001_duffing_backbone_matches_the_pinned_law() {
         .expect("backbone point");
         let pinned = fs_nlmodal::duffing_backbone(1.0, eps, amplitude);
         // The pinned law is FIRST order; the HB answer carries the
-        // higher orders, so the band is the eps^2 a^4 term's scale.
-        let band = 0.02 * eps * eps * amplitude.powi(4) + 1.0e-6;
+        // higher orders, so the authored band is the NAMED
+        // second-order Lindstedt coefficient (15/256) eps^2 a^4 with
+        // 50% headroom for third order (measured: a=0.2 dev 9.4e-7,
+        // a=0.5 dev 3.6e-5 — the deviation IS the second-order term).
+        let band = 1.5 * (15.0 / 256.0) * eps * eps * amplitude.powi(4) + 2.0e-6;
         let dev = (orbit.omega - pinned).abs();
         worst = worst.max(dev / pinned);
         assert!(
-            dev < band.max(2.0e-4),
-            "a={amplitude}: HB omega {:.8} vs pinned {pinned:.8}",
+            dev < band,
+            "a={amplitude}: HB omega {:.8} vs pinned {pinned:.8} (band {band:.2e})",
             orbit.omega
         );
         println!(
@@ -160,6 +163,7 @@ fn ob_002_van_der_pol_matches_published_values() {
     )
     .expect("mu=1 vdP");
     let period = TAU / orbit.omega;
+    #[allow(clippy::excessive_precision)] // the published value, quoted verbatim
     let t_amore = 6.663_286_859_323_130;
     let t_gasull = 6.663_286_6;
     assert!(
@@ -441,7 +445,7 @@ fn ob_006_bitwise_determinism() {
         &budget,
     )
     .expect("second");
-    assert!(a.omega.to_bits() == b.omega.to_bits());
+    assert_eq!(a.omega.to_bits(), b.omega.to_bits());
     for (ca, cb) in a.coeffs.iter().zip(&b.coeffs) {
         for (x, y) in ca.iter().zip(cb) {
             assert!(x.re.to_bits() == y.re.to_bits() && x.im.to_bits() == y.im.to_bits());
