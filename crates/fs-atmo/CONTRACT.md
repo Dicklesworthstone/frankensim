@@ -42,12 +42,24 @@ spectral-tensor fit; E3.3c the optional FetchAdjustedMassConsistent mode.
 - Mode draws are a pure function of (seed, kernel, tile): independent of
   mode count and of other fields built in between.
 
+- `ou::OuMode::from_correlation_time(sigma_st, tau)` — exact-discrete
+  ρ = e^(−Δt/τ), σ_innov = σ_st·√(1−ρ²) (the stationary law is a FIXED
+  POINT of the transition, battery-proven).
+- `ou::StationaryOuPath` — StationaryOuPathV1: exact stationary draw at
+  the FIXED anchor tick −3840; philox counter-addressed innovations
+  (pure function of (seed, OU_KERNEL, mode, tick)); sequential
+  `advance_to` (never backwards, span-capped), `checkpoint`/`resume`
+  with BITWISE reconstruction equivalence; every preroll window is a
+  suffix of ONE physical path.
+
 ## Error model
 
 Typed `Refusal { code, message, ranked_repairs }`. Codes:
 `non-finite-input`, `z0-outside-domain`, `displacement-invalid`,
 `reference-height-invalid`, `reference-speed-invalid`,
-`mode-count-invalid`, `turbulence-params-invalid`, `below-surface-query`.
+`mode-count-invalid`, `turbulence-params-invalid`, `below-surface-query`;
+OU layer: `ou-params-invalid`, `ou-advance-backwards`,
+`ou-advance-span-exceeded`, `ou-checkpoint-invalid`.
 Caps tested at cap AND cap+1.
 
 ## Determinism class
@@ -77,6 +89,13 @@ Richardson order ≈ 2 with finest-step error < 1e-6; air-state consistency
 provenance string); seed determinism bit-identical + counter-addressed
 partition law; refusal caps; log-law identities (U(d+z₀) = 0 exactly,
 monotone, instrument-height ordering); pinned golden. JSONL receipts.
+
+`tests/ou_battery.rs` — E3.3b-i / V-17 core: exact-discrete relations vs
+hand closed forms + the stationary fixed point; no-spin-up window
+variances; the suffix property (pause/resume vs straight advance,
+bitwise); checkpoint reconstruction equivalence (bitwise) + checkpoint
+refusals; the 39-minute (284k-tick) recurrence battery in checkpointed
+chunks; caps at cap AND cap+1; pinned OU golden.
 
 ## No-claim boundaries
 

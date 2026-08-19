@@ -32,6 +32,8 @@
 use fs_math::det;
 use fs_rand::StreamKey;
 
+pub mod ou;
+
 /// Registered fs-rand kernel id for atmosphere draws ("ATMO").
 pub const ATMO_KERNEL: u32 = 0x41544D4F;
 /// von Kármán constant (declared model constant).
@@ -56,7 +58,7 @@ pub struct Refusal {
     pub ranked_repairs: Vec<String>,
 }
 
-fn refuse(code: &'static str, message: String, repair: &str) -> Refusal {
+pub(crate) fn refuse(code: &'static str, message: String, repair: &str) -> Refusal {
     Refusal {
         code,
         message,
