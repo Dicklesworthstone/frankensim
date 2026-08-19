@@ -67,3 +67,25 @@ test("non-finite controls refuse", () => {
   assert.throws(() => computePose({ ...base, warpDeg: Number.NaN }), /finite/);
   assert.throws(() => computePose({ ...base, propAngleRad: Infinity }), /finite/);
 });
+
+test("scripted driver is deterministic, periodic, and stays legal", async () => {
+  const { scriptedState } = await import("../src/airframe/applyPose.ts");
+  const { computePose: cp } = await import("../src/airframe/pose.ts");
+  // Deterministic + 12 s periodic.
+  assert.deepEqual(scriptedState(1.5), scriptedState(13.5)); // 13.5 % 12 is exact in binary
+  // Every sampled instant computes a legal pose with no clamping (the
+  // script must exercise the envelope WITHOUT sitting on the stops).
+  for (let i = 0; i <= 120; i++) {
+    const t = (i * 12) / 120;
+    const pose = cp(scriptedState(t));
+    assert.equal(pose.clamped, false, `script clamps at t=${t}`);
+    assert.equal(pose.schematicPreview, false);
+  }
+  // The script actually moves all three channels at some point.
+  const speak = (f: (t: number) => number): number =>
+    Math.max(...Array.from({ length: 121 }, (_, i) => Math.abs(f((i * 12) / 120))));
+  assert.ok(speak((t) => scriptedState(t).canardDeg) > 5);
+  assert.ok(speak((t) => scriptedState(t).warpDeg) > 5);
+  assert.ok(speak((t) => scriptedState(t).propAngleRad) > 1);
+  console.log(JSON.stringify({ suite: "wf-pose", case: "scripted", periodS: 12 }));
+});
