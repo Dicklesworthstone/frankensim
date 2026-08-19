@@ -40,6 +40,28 @@ test("the file is a structurally valid glTF-2 binary with draco required", () =>
   );
 });
 
+test("STL companion matches its record and is a valid binary STL", () => {
+  const stl = load(`assets/smithsonian-nasm-1903-flyer.cc0.stl`);
+  assert.equal(stl.length, provenance.asset_stl.bytes, "STL byte length matches the record");
+  // Binary STL: 80-byte header + u32 tri count + 50 bytes/tri.
+  const tris = stl.readUInt32LE(80);
+  assert.equal(84 + tris * 50, stl.length, "binary-STL structure must be self-consistent");
+  assert.ok(tris > 100_000, `high-res source expected (${tris} tris)`);
+  console.log(JSON.stringify({ suite: "wf-asset", case: "stl", tris }));
+});
+
+test("patent facsimile matches its provenance sha256", () => {
+  const pdf = load(`patent/us-821393-wright-flyer.pdf`);
+  const rec = JSON.parse(load(`patent/patent-us821393-v1.json`).toString());
+  const sha = createHash("sha256").update(pdf).digest("hex");
+  assert.equal(sha, rec.source_identity.facsimile_sha256, "patent facsimile immutable");
+  const transcript = load(`patent/us-821393-transcript.md`).toString();
+  assert.match(transcript, /twisted or warped in opposite directions/);
+  assert.match(transcript, /rudder in conjunction with the movement/);
+  assert.match(rec.claim_boundaries.forbidden[0], /QUANTITATIVE/);
+  console.log(JSON.stringify({ suite: "wf-asset", case: "patent", sha256: sha.slice(0, 8) }));
+});
+
 test("provenance carries the license verdict, caveat, and role boundary", () => {
   assert.equal(provenance.license.verdict, "CC0 1.0 (Smithsonian Open Access)");
   assert.ok(provenance.license.confirmations.length >= 3, "three independent confirmations");

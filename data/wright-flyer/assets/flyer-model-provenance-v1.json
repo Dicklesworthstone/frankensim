@@ -28,11 +28,34 @@
   "physics_binding": "E2.2's rig binds this visual to the FlyerDesign schema (E3.1); dimension mismatches between scan and dossier values are RESOLVED IN FAVOR OF THE DOSSIERS and recorded, never silently scaled away."
  },
  "alternatives_ranked": [
-  {"rank": 1, "source": "same model via Smithsonian official Sketchfab (CC0, download enabled)", "use": "mirror if the CDN moves"},
-  {"rank": 2, "source": "higher-res per-part GLB/OBJ derivatives from the same 3d-api CDN (engine/filler/wings, up to ~3.9 MB per part)", "use": "close-up presentation tiers (E2.3)"},
-  {"rank": 3, "source": "NASA-3D-Resources (GitHub; US-gov public domain)", "use": "fallback if Smithsonian access ever regresses"},
-  {"rank": 4, "source": "commissioned model", "use": "only if all free-license paths fail (fallback decision recorded per DONE-WHEN; NOT needed)"}
+  {
+   "rank": 1,
+   "source": "same model via Smithsonian official Sketchfab (CC0, download enabled)",
+   "use": "mirror if the CDN moves"
+  },
+  {
+   "rank": 2,
+   "source": "higher-res per-part GLB/OBJ derivatives from the same 3d-api CDN (engine/filler/wings, up to ~3.9 MB per part)",
+   "use": "close-up presentation tiers (E2.3)"
+  },
+  {
+   "rank": 3,
+   "source": "NASA-3D-Resources (GitHub; US-gov public domain)",
+   "use": "fallback if Smithsonian access ever regresses"
+  },
+  {
+   "rank": 4,
+   "source": "commissioned model",
+   "use": "only if all free-license paths fail (fallback decision recorded per DONE-WHEN; NOT needed)"
+  }
  ],
  "loader_note": "draco-compressed: the three.js pipeline must register DRACOLoader (E2.2); Blender imports natively.",
- "no_claims": "License and provenance registry for one presentation asset. No geometric fidelity claim beyond 'exhibit-scale scan of the original artifact'."
+ "no_claims": "License and provenance registry for one presentation asset. No geometric fidelity claim beyond 'exhibit-scale scan of the original artifact'.",
+ "asset_stl": {
+  "path": "data/wright-flyer/assets/smithsonian-nasm-1903-flyer.cc0.stl",
+  "bytes": 14834534,
+  "role": "HIGH-RES GEOMETRY source (~280k tris, no textures): hero-LOD base, calibration-overlay reference, BladeCollisionProxyV1 candidate solid — the textured draco GLB stays the runtime presentation mesh",
+  "license": "CC0 1.0 (same Smithsonian scan; ATTRIBUTION at stl-attribution.md)",
+  "lineage": "Smithsonian 3D / Sketchfab, mirrored via Wikimedia Commons; imported from the owner's classic-patents.com project 2026-08-18"
+ }
 }

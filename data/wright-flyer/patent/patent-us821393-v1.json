@@ -1,0 +1,32 @@
+{
+ "schema": "org.frankensim.wright-flyer.patent-evidence.v1",
+ "bead": "frankensim-wf-root-guzez.3.2",
+ "status": "ACTIVE",
+ "acquired_on": "2026-08-18",
+ "source_identity": {
+  "patent": "US 821,393 — 'Flying-Machine', Orville and Wilbur Wright, Dayton, Ohio",
+  "filed": "1903-03-23",
+  "granted": "1906-05-22",
+  "rights": "public domain (US patent granted 1906)",
+  "facsimile": "data/wright-flyer/patent/us-821393-wright-flyer.pdf",
+  "facsimile_sha256": "678bea5d81cb4e90a15c998bc932d2cf01bc87cfc3fcc53f0ecbdbdc70097966",
+  "facsimile_pages": 10,
+  "transcript": "data/wright-flyer/patent/us-821393-transcript.md",
+  "provenance_lineage": "classic-patents.com provenance receipt (owner's sibling project; 300-DPI facsimile review 2026-08-18, page map recorded there); PDF sha256 re-verified at import"
+ },
+ "independence_group": "wright-primary",
+ "group_note": "the Wrights' OWN description — same independence group as the diary/telegram evidence (a3) and the 1901 tunnel materials (a1); it may corroborate third-party measurements but never other wright-primary records",
+ "evidences": [
+  "wing warping: lateral margins 'twisted or warped in opposite directions' via cables + operating mechanism connected to the cradle — the mechanism topology behind the E1.5 hip-cradle record, in the inventors' words, FILED BEFORE first flight (1903-03-23)",
+  "warp-rudder coordination: a vertical rudder 'operated in conjunction with the movement of the lateral margins... to counteract adverse yaw' — primary corroboration of the slaved-rudder topology (LateralControlTopology::WarpWithSlavedRudder)",
+  "front-rudder construction: flexible ribs, springs, rollers, and links (facsimile pp. 7-8) — primary-source corroboration that the canard is a FLEXIBLE variable-camber mechanism, not a rigid plate (the E1.5 Ames/L&P finding, now grounded in a 1903-filed document)",
+  "structure: superposed flexible surfaces, pivoted posts, stay-wires (the warp-enabling structure the Culick/Jex report describes)"
+ ],
+ "claim_boundaries": {
+  "permitted": ["mechanism TOPOLOGY and intent (what connects to what, what flexes)", "corroborating the variable-camber canard and slaved-rudder findings"],
+  "forbidden": ["any QUANTITATIVE ratio, travel, or dimension from patent prose (the patent describes the invention class, not the as-flown 1903 rigging; the flown slaving ratio 2.5 keeps its AIAA provenance)", "treating patent drawings as dimensioned engineering drawings"],
+  "note_on_folk_ratios": "third-party demos derive small rudder-per-warp ratios (~0.45) from patent-claim readings; any such number is a PATENT-LINEAGE model choice, distinct in provenance and configuration from the flown 2.5 (flyer-reference rudder_warp_slaving) — never merge the two"
+ },
+ "registry_note": "NEW evidence artifact beside the frozen registry (E1.7 freeze law: frozen v1 files are never edited; this file is additive). Integration into a source-dossier v2 happens when the dossier next mints a version.",
+ "no_claims": "Primary-source registry entry. No physics value enters from here; topology and intent only."
+}
