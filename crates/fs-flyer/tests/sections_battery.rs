@@ -20,12 +20,20 @@ fn four_datasets_build_with_lineage_and_roles() {
     let ds = build_v1_datasets().unwrap();
     assert_eq!(ds.len(), 4);
     let kinds: Vec<_> = ds.iter().map(|d| d.kind).collect();
-    for want in [SurfaceKind::Wing, SurfaceKind::Canard, SurfaceKind::Rudder, SurfaceKind::Prop] {
+    for want in [
+        SurfaceKind::Wing,
+        SurfaceKind::Canard,
+        SurfaceKind::Rudder,
+        SurfaceKind::Prop,
+    ] {
         assert!(kinds.contains(&want), "{want:?} dataset missing");
     }
     for d in &ds {
         assert!(!d.lineage.dossier_record.is_empty() && !d.lineage.independence_group.is_empty());
-        assert_eq!(d.lineage.ceiling, "Estimated", "v1 ceiling is Estimated everywhere");
+        assert_eq!(
+            d.lineage.ceiling, "Estimated",
+            "v1 ceiling is Estimated everywhere"
+        );
         d.residual.validate(1e-9).unwrap();
         jlog(
             "lineage",
@@ -52,8 +60,14 @@ fn trend_holdout_anchor_12_at_5_degrees() {
     let cl = cl_3d(wing, 5.0 * DEG, RE, 6.0).unwrap();
     let anchor = 0.659;
     assert!(cl > 0.0, "sign");
-    assert!(cl / anchor > 0.5 && cl / anchor < 2.0, "order: {cl} vs anchor {anchor}");
-    jlog("anchor-12", &format!("\"cl\":{cl},\"anchor_modern\":{anchor}"));
+    assert!(
+        cl / anchor > 0.5 && cl / anchor < 2.0,
+        "order: {cl} vs anchor {anchor}"
+    );
+    jlog(
+        "anchor-12",
+        &format!("\"cl\":{cl},\"anchor_modern\":{anchor}"),
+    );
 }
 
 #[test]
@@ -66,8 +80,14 @@ fn trend_holdout_anchor_7_high_alpha() {
     let cl = cl_3d(wing, 17.5 * DEG, RE, 6.0).unwrap();
     let anchor = 1.523;
     assert!(cl > 0.8, "high-alpha lift must remain large: {cl}");
-    assert!(cl / anchor > 0.5 && cl / anchor < 2.0, "order: {cl} vs {anchor}");
-    jlog("anchor-7", &format!("\"cl\":{cl},\"anchor_modern\":{anchor}"));
+    assert!(
+        cl / anchor > 0.5 && cl / anchor < 2.0,
+        "order: {cl} vs {anchor}"
+    );
+    jlog(
+        "anchor-7",
+        &format!("\"cl\":{cl},\"anchor_modern\":{anchor}"),
+    );
 }
 
 #[test]
@@ -84,12 +104,22 @@ fn trend_camber_ordering_and_zero_lift_signs() {
     let cl20 = cl_3d(wing, 5.0 * DEG, RE, 6.0).unwrap();
     let cl12 = cl_3d(&deeper, 5.0 * DEG, RE, 6.0).unwrap();
     assert!(cl12 > cl20, "curvature must raise lift ({cl12} vs {cl20})");
-    assert_eq!(cl_3d(rudder, 0.0, RE, 3.0).unwrap(), 0.0, "symmetric zero-lift");
-    assert!(cl_3d(wing, 0.0, RE, 6.0).unwrap() > 0.0, "cambered lifts at zero alpha");
+    assert_eq!(
+        cl_3d(rudder, 0.0, RE, 3.0).unwrap(),
+        0.0,
+        "symmetric zero-lift"
+    );
+    assert!(
+        cl_3d(wing, 0.0, RE, 6.0).unwrap() > 0.0,
+        "cambered lifts at zero alpha"
+    );
     // Blend continuity: no jump crossing the attached limit.
     let a = cl_3d(wing, 0.299, RE, 6.0).unwrap();
     let b = cl_3d(wing, 0.301, RE, 6.0).unwrap();
-    assert!((a - b).abs() < 0.05, "blend must be continuous ({a} vs {b})");
+    assert!(
+        (a - b).abs() < 0.05,
+        "blend must be continuous ({a} vs {b})"
+    );
     jlog("trends", &format!("\"cl20\":{cl20},\"cl12\":{cl12}"));
 }
 
@@ -100,7 +130,10 @@ fn convention_gate_falsifier() {
     let ds = build_v1_datasets().unwrap();
     let mut broken = ds[0].residual.clone();
     broken.conventions.axes_id = "z-up-graphics".into();
-    assert_eq!(broken.validate(1e-9).unwrap_err().code, "convention-block-mismatch");
+    assert_eq!(
+        broken.validate(1e-9).unwrap_err().code,
+        "convention-block-mismatch"
+    );
 }
 
 #[test]
@@ -117,7 +150,7 @@ fn sections_golden_digest() {
     let digest = fs_blake3::hash_domain("org.frankensim.fs-flyer.v01-golden.v1", &payload).to_hex();
     jlog("golden", &format!("\"digest\":\"{digest}\""));
     assert_eq!(
-        digest, "PLACEHOLDER-MEASURE-THEN-PIN",
+        digest, "78693a7b06ca3b119ccb4f156b64f1881484d26b3197c4c85b4af452f4cb4009",
         "sections golden moved — determinism regression or an intentional \
          dataset change requiring the golden-bump protocol"
     );

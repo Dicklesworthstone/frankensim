@@ -12,10 +12,10 @@
 //! tables arrive they ingest under reexpression-v1 with partition
 //! assignment, replacing the zero residuals dataset-by-dataset.
 
+use crate::Refusal;
 use fs_airfoil::fit::{BsplineAxis, ResidualSurface};
 use fs_airfoil::table::{CoefficientTable, ConventionBlock, RegimePatch, SurfaceKind};
 use fs_airfoil::{flat_plate_separated, thin_airfoil};
-use crate::Refusal;
 
 /// Evidence-lineage metadata every dataset carries (E4.1 DONE-WHEN).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -60,9 +60,24 @@ fn zero_residual(kind: SurfaceKind, record: &'static str) -> CoefficientTable {
     // shape constraint and C0 continuity.
     let surface = ResidualSurface {
         axes: [
-            BsplineAxis { name: "alpha_rad", lo: -0.35, hi: 0.35, n_coef: 4 },
-            BsplineAxis { name: "log10_re", lo: 4.0, hi: 8.0, n_coef: 1 },
-            BsplineAxis { name: "delta_rad", lo: -0.6, hi: 0.6, n_coef: 1 },
+            BsplineAxis {
+                name: "alpha_rad",
+                lo: -0.35,
+                hi: 0.35,
+                n_coef: 4,
+            },
+            BsplineAxis {
+                name: "log10_re",
+                lo: 4.0,
+                hi: 8.0,
+                n_coef: 1,
+            },
+            BsplineAxis {
+                name: "delta_rad",
+                lo: -0.6,
+                hi: 0.6,
+                n_coef: 1,
+            },
         ],
         coef: vec![0.0; 4],
         constraints: vec![],
@@ -72,7 +87,10 @@ fn zero_residual(kind: SurfaceKind, record: &'static str) -> CoefficientTable {
         channel: "cl-residual",
         dossier_record: record.into(),
         conventions: conventions(),
-        patches: vec![RegimePatch { regime: "attached", surface }],
+        patches: vec![RegimePatch {
+            regime: "attached",
+            surface,
+        }],
     }
 }
 
@@ -83,21 +101,43 @@ fn zero_residual(kind: SurfaceKind, record: &'static str) -> CoefficientTable {
 /// residual, but the gate RUNS — a corrupted convention id would refuse).
 pub fn build_v1_datasets() -> Result<Vec<SectionDataset>, Refusal> {
     let specs: [(SurfaceKind, f64, &'static str, &'static str, &'static str); 4] = [
-        (SurfaceKind::Wing, 0.05, "a1-wright-1901-tunnel", "wright-1901-tunnel",
-         "flown 1/20 camber (flyer-reference camber_ratio, verified)"),
-        (SurfaceKind::Canard, 0.05, "a2-simmodels-deters", "ames-aiaa-1999",
-         "canard camber assumed = wing class (variable-camber mechanism is E4.6b's model axis)"),
-        (SurfaceKind::Rudder, 0.0, "a2-simmodels-deters", "ames-aiaa-1999",
-         "symmetric vertical surfaces"),
-        (SurfaceKind::Prop, 0.05, "a2-props-bentend", "lfst-wright-experience",
-         "prop sections are an Estimated reconstruction (prop-geometry-v1 1903-absence rule)"),
+        (
+            SurfaceKind::Wing,
+            0.05,
+            "a1-wright-1901-tunnel",
+            "wright-1901-tunnel",
+            "flown 1/20 camber (flyer-reference camber_ratio, verified)",
+        ),
+        (
+            SurfaceKind::Canard,
+            0.05,
+            "a2-simmodels-deters",
+            "ames-aiaa-1999",
+            "canard camber assumed = wing class (variable-camber mechanism is E4.6b's model axis)",
+        ),
+        (
+            SurfaceKind::Rudder,
+            0.0,
+            "a2-simmodels-deters",
+            "ames-aiaa-1999",
+            "symmetric vertical surfaces",
+        ),
+        (
+            SurfaceKind::Prop,
+            0.05,
+            "a2-props-bentend",
+            "lfst-wright-experience",
+            "prop sections are an Estimated reconstruction (prop-geometry-v1 1903-absence rule)",
+        ),
     ];
     let mut out = Vec::with_capacity(4);
     for (kind, camber, record, group, _why) in specs {
         let residual = zero_residual(kind, record);
-        residual
-            .validate(1e-9)
-            .map_err(|e| Refusal { code: e.code, message: format!("{kind:?}: {}", e.message), ranked_repairs: e.ranked_repairs })?;
+        residual.validate(1e-9).map_err(|e| Refusal {
+            code: e.code,
+            message: format!("{kind:?}: {}", e.message),
+            ranked_repairs: e.ranked_repairs,
+        })?;
         out.push(SectionDataset {
             kind,
             camber_ratio: camber,
@@ -133,7 +173,8 @@ pub fn cl_3d(ds: &SectionDataset, alpha_rad: f64, log10_re: f64, ar: f64) -> Res
         message: e.message,
         ranked_repairs: e.ranked_repairs,
     };
-    let thin = thin_airfoil(alpha_rad.clamp(-0.35, 0.35), ds.camber_ratio, log10_re).map_err(map_err)?;
+    let thin =
+        thin_airfoil(alpha_rad.clamp(-0.35, 0.35), ds.camber_ratio, log10_re).map_err(map_err)?;
     let resid = ds
         .residual
         .eval([alpha_rad.clamp(-0.35, 0.35), log10_re, 0.0])
