@@ -1,0 +1,38 @@
+{
+ "schema": "org.frankensim.wright-flyer.model-provenance.v1",
+ "bead": "frankensim-wf-root-guzez.3.1",
+ "status": "ACQUIRED",
+ "verified_on": "2026-08-18",
+ "asset": {
+  "path": "data/wright-flyer/assets/flyer-smithsonian.glb",
+  "bytes": 630156,
+  "sha256": "eacaea3ffefa99951b637062043c4b62c7d9438ce5b77870e166e073b5607cfc",
+  "format": "glTF 2.0 binary (GLB), draco-compressed (extensionsRequired: KHR_draco_mesh_compression)",
+  "content": "combined whole-aircraft AR derivative, 100k faces, 2048px textures, 1 mesh / 1 node / 2 textures",
+  "source_url": "https://cdn.3d-api.si.edu/d8c62e5e-4ebc-11ea-b77f-2e728ce88125/1903WrightFlyer-100k-2048_std_draco.glb",
+  "object_page": "https://3d.si.edu/object/3d/1903-wright-flyer:d8c62e5e-4ebc-11ea-b77f-2e728ce88125",
+  "museum_object": "Smithsonian NASM A19610048000 (the original 1903 Wright Flyer)"
+ },
+ "license": {
+  "verdict": "CC0 1.0 (Smithsonian Open Access)",
+  "confirmations": [
+   "Smithsonian's official Sketchfab upload of this model states 'CC0 Public Domain' (creativecommons.org/publicdomain/zero/1.0/): 'copy, modify, and distribute this work without contacting the Smithsonian'",
+   "si.edu object record nasm_A19610048000: 'restrictions and rights marked as CC0... This media is in the public domain (free of copyright restrictions)... The metadata usage is also CC0'",
+   "the 3d.si.edu object is served under the open_access EDAN facet (the Smithsonian Open Access corpus is CC0 by definition)"
+  ],
+  "caveat": "the Voyager scene document.json carries a boilerplate generator field '(c) Smithsonian Institution. All rights reserved.' — that is the Voyager document-format asset header present on all scenes, NOT the object's media license; the EDAN Open Access designation and the official CC0 statement govern. No 'Usage Conditions Apply' flag exists for this object.",
+  "in_app_attribution": "Attribution not legally required under CC0; the app credits 'Smithsonian Institution, National Air and Space Museum (CC0)' as a courtesy and for provenance display (plan: provenance recorded in-app)."
+ },
+ "role_boundary": {
+  "visual_only": "this scan is the PRESENTATION mesh (PresentationId ingredient). It is exhibit-scale: usable for envelope/proportion sanity, NEVER as a source of section geometry, hinge locations, or any physics-bearing dimension — those come from the E1 dossiers (prop-geometry-v1 records the same rule for blades).",
+  "physics_binding": "E2.2's rig binds this visual to the FlyerDesign schema (E3.1); dimension mismatches between scan and dossier values are RESOLVED IN FAVOR OF THE DOSSIERS and recorded, never silently scaled away."
+ },
+ "alternatives_ranked": [
+  {"rank": 1, "source": "same model via Smithsonian official Sketchfab (CC0, download enabled)", "use": "mirror if the CDN moves"},
+  {"rank": 2, "source": "higher-res per-part GLB/OBJ derivatives from the same 3d-api CDN (engine/filler/wings, up to ~3.9 MB per part)", "use": "close-up presentation tiers (E2.3)"},
+  {"rank": 3, "source": "NASA-3D-Resources (GitHub; US-gov public domain)", "use": "fallback if Smithsonian access ever regresses"},
+  {"rank": 4, "source": "commissioned model", "use": "only if all free-license paths fail (fallback decision recorded per DONE-WHEN; NOT needed)"}
+ ],
+ "loader_note": "draco-compressed: the three.js pipeline must register DRACOLoader (E2.2); Blender imports natively.",
+ "no_claims": "License and provenance registry for one presentation asset. No geometric fidelity claim beyond 'exhibit-scale scan of the original artifact'."
+}
