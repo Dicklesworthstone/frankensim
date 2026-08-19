@@ -8,7 +8,12 @@
     "noImplicitOverride": true,
     "isolatedModules": true,
     "skipLibCheck": true,
-    "types": ["vite/client"]
+    "types": [
+      "vite/client"
+    ],
+    "allowImportingTsExtensions": true
   },
-  "include": ["src"]
+  "include": [
+    "src"
+  ]
 }

@@ -3,7 +3,7 @@
 // meter. The sim/field workers (E5.*) and real scenes (E2.*) land later.
 
 import { describeCapabilities, probeCapabilities } from "./capability";
-import { createPlaceholderRenderer } from "./renderer";
+import { createFlyerSceneRenderer } from "./flyerScene.ts";
 
 function main(): void {
   const app = document.getElementById("app");
@@ -27,7 +27,7 @@ function main(): void {
     }),
   );
 
-  const renderer = createPlaceholderRenderer(app);
+  const renderer = createFlyerSceneRenderer(app);
   const resize = (): void =>
     renderer.resize(app.clientWidth, app.clientHeight);
   window.addEventListener("resize", resize);
