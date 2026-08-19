@@ -171,6 +171,12 @@ pub struct HbBudget {
     pub max_newton: usize,
     /// Relative residual tolerance.
     pub tolerance: f64,
+    /// Deflate the equilibrium manifold: multiply the residual used
+    /// for STEPS by `1 + (s0/|X_1|)^2` (s0 = a tenth of the seed's
+    /// first-harmonic norm) so Newton is repelled from constant
+    /// solutions. Convergence is still judged on the PLAIN residual —
+    /// deflation shapes the search, never the evidence.
+    pub deflate_equilibrium: bool,
 }
 
 impl Default for HbBudget {
@@ -179,6 +185,7 @@ impl Default for HbBudget {
             harmonics: 9,
             max_newton: 40,
             tolerance: 1.0e-10,
+            deflate_equilibrium: false,
         }
     }
 }
@@ -471,6 +478,30 @@ pub fn solve_hb_seeded<P: OrbitProblem>(
     let nn = free.len();
     let mut res = vec![0.0f64; pack.coeff_len()];
     let mut trace = Vec::new();
+    let first_harm_norm = |u: &[f64]| -> f64 {
+        det::sqrt(
+            (0..d)
+                .map(|k| {
+                    let re = u[pack.re_index(1, k)];
+                    let im = u[pack.im_index(1, k)];
+                    re * re + im * im
+                })
+                .sum::<f64>(),
+        )
+    };
+    let deflation_s0 = if budget.deflate_equilibrium {
+        0.1 * first_harm_norm(&u).max(1.0e-12)
+    } else {
+        0.0
+    };
+    let deflate = |u: &[f64]| -> f64 {
+        if deflation_s0 > 0.0 {
+            let h1 = first_harm_norm(u).max(1.0e-15);
+            1.0 + (deflation_s0 / h1) * (deflation_s0 / h1)
+        } else {
+            1.0
+        }
+    };
     let amp_residual = |u: &[f64]| -> f64 {
         amplitude_row.map_or(0.0, |a| {
             let re = u[pack.re_index(1, 0)];
@@ -521,17 +552,19 @@ pub fn solve_hb_seeded<P: OrbitProblem>(
         let mut jac = vec![0.0f64; nn * nn];
         let mut res2 = vec![0.0f64; pack.coeff_len()];
         let amp0 = amp_residual(&u);
+        let m0 = deflate(&u);
         for (col, &ui) in free.iter().enumerate() {
             let h = 1.0e-7 * u[ui].abs().max(1.0);
             let saved = u[ui];
             u[ui] = saved + h;
             hb_residual(problem, &pack, &u, omega_fixed, &mut res2);
+            let m1 = deflate(&u);
             if amplitude_row.is_some() {
                 jac[kept.len() * nn + col] = (amp_residual(&u) - amp0) / h;
             }
             u[ui] = saved;
             for (row, &ri) in kept.iter().enumerate() {
-                jac[row * nn + col] = (res2[ri] - res[ri]) / h;
+                jac[row * nn + col] = (m1 * res2[ri] - m0 * res[ri]) / h;
             }
         }
         // Conservative families carry a parity nullspace; a fixed
@@ -550,7 +583,8 @@ pub fn solve_hb_seeded<P: OrbitProblem>(
                 Err(_) => return Err(OrbitError::SingularJacobian),
             }
         };
-        let mut step: Vec<f64> = r.clone();
+        let m_now = deflate(&u);
+        let mut step: Vec<f64> = r.iter().map(|v| v * m_now).collect();
         factorized.solve(&mut step);
         // Deterministic backtracking: halve the step (up to 8 times)
         // until the residual does not grow — the undamped Newton
@@ -571,12 +605,12 @@ pub fn solve_hb_seeded<P: OrbitProblem>(
                 let ar = amp_residual(&u_try);
                 tn += ar * ar;
             }
-            let tn = det::sqrt(tn);
+            let tn = det::sqrt(tn) * deflate(&u_try);
             if tn < best_norm {
                 best_norm = tn;
                 best_alpha = alpha;
             }
-            if tn < rn {
+            if tn < rn * m_now {
                 break;
             }
             alpha *= 0.5;
@@ -987,6 +1021,48 @@ pub fn continue_branch<P: ContinuableProblem>(
     Err(OrbitError::ContinuationExhausted {
         steps: points.len(),
     })
+}
+
+impl HbOrbit {
+    /// Repack this orbit as a `solve_hb_seeded` seed for the given
+    /// anchor — the warm-restart primitive sweeps and continuations
+    /// build on.
+    #[must_use]
+    pub fn packed_seed(&self, anchor: &HbAnchor) -> Vec<f64> {
+        pack_orbit(self, anchor)
+    }
+}
+
+/// Build a `solve_hb_seeded` seed from per-state FIRST-harmonic
+/// coefficients (a physics-consistent seed reaches orbit basins the
+/// generic amplitude seed cannot — e.g. the mouth-pressure harmonic
+/// of a valve problem, computable from the port at the guess
+/// frequency). DC and higher harmonics start at zero.
+#[must_use]
+pub fn seed_from_first_harmonics(first: &[C64], n_harm: usize, anchor: &HbAnchor) -> Vec<f64> {
+    let d = first.len();
+    let pack = Packing {
+        d,
+        n_harm,
+        omega_slot: match anchor {
+            HbAnchor::Forced { .. } => None,
+            _ => Some(d * (2 * n_harm + 1)),
+        },
+    };
+    let mut u = vec![0.0f64; pack.len()];
+    for (k, c) in first.iter().enumerate() {
+        u[pack.re_index(1, k)] = c.re;
+        u[pack.im_index(1, k)] = c.im;
+    }
+    if let Some(slot) = pack.omega_slot {
+        u[slot] = match anchor {
+            HbAnchor::Autonomous { omega_guess } | HbAnchor::Backbone { omega_guess, .. } => {
+                *omega_guess
+            }
+            HbAnchor::Forced { .. } => unreachable!(),
+        };
+    }
+    u
 }
 
 /// Repack an orbit as a seed vector for the given anchor.
