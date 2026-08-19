@@ -9,7 +9,7 @@
 //! fixture stalled at 14.0 and never lifted, a real force-balance lesson.
 //! Repro: cargo test -p fs-flyer --test rail_battery
 
-use fs_flyer::rail::{RailPhase, RailRun, RailSpec, MAX_HYSTERESIS_TICKS};
+use fs_flyer::rail::{MAX_HYSTERESIS_TICKS, RailPhase, RailRun, RailSpec};
 use fs_flyer::spine::RigidBody;
 
 fn jlog(case: &str, payload: &str) {
@@ -19,11 +19,18 @@ fn jlog(case: &str, payload: &str) {
 const G: f64 = 9.80665;
 
 fn body() -> RigidBody {
-    RigidBody { mass_kg: 340.17, inertia_kgm2: [1787.0, 367.4, 1820.9] }
+    RigidBody {
+        mass_kg: 340.17,
+        inertia_kgm2: [1787.0, 367.4, 1820.9],
+    }
 }
 
 fn spec(hyst: u32) -> RailSpec {
-    RailSpec { z_rail_m: -0.3, length_m: 18.29, hysteresis_ticks: hyst }
+    RailSpec {
+        z_rail_m: -0.3,
+        length_m: 18.29,
+        hysteresis_ticks: hyst,
+    }
 }
 
 /// Dec-17-shaped loads at (x, vx): thrust roughly constant, quadratic-ish
@@ -70,7 +77,13 @@ fn release_matches_the_analytic_crossing() {
         "release airspeed {} vs analytic crossing {v_cross}",
         vx + 10.73
     );
-    jlog("release", &format!("\"tick\":{rt},\"v_air\":{},\"v_cross\":{v_cross}", vx + 10.73));
+    jlog(
+        "release",
+        &format!(
+            "\"tick\":{rt},\"v_air\":{},\"v_cross\":{v_cross}",
+            vx + 10.73
+        ),
+    );
 }
 
 #[test]
@@ -91,13 +104,23 @@ fn event_time_converges_under_dt_refinement() {
         }
         unreachable!()
     };
-    let (t1, t2, t3) = (release_time(1.0 / 60.0), release_time(1.0 / 120.0), release_time(1.0 / 480.0));
-    assert!((t1 - t3).abs() < 0.25, "coarse vs fine release time: {t1} vs {t3}");
+    let (t1, t2, t3) = (
+        release_time(1.0 / 60.0),
+        release_time(1.0 / 120.0),
+        release_time(1.0 / 480.0),
+    );
+    assert!(
+        (t1 - t3).abs() < 0.25,
+        "coarse vs fine release time: {t1} vs {t3}"
+    );
     assert!(
         (t2 - t3).abs() <= (t1 - t3).abs() + 1e-12,
         "refinement must not worsen the event time ({t1}, {t2}, {t3})"
     );
-    jlog("event-convergence", &format!("\"t60\":{t1},\"t120\":{t2},\"t480\":{t3}"));
+    jlog(
+        "event-convergence",
+        &format!("\"t60\":{t1},\"t120\":{t2},\"t480\":{t3}"),
+    );
 }
 
 #[test]
@@ -134,24 +157,26 @@ fn no_speed_threshold_falsifier() {
     );
     let mut twin_tick = None;
     {
+        // The twin watches GROUND SPEED only; after the force criterion
+        // releases the rail we keep integrating vx freely (the twin does
+        // not know the aircraft already lifted — that is its defect).
         let b = body();
         let mut run = RailRun::start(spec(3)).unwrap();
         let mut vx = 0.0;
+        let mut released = false;
         for tick in 1..200_000u32 {
             let v_air = vx + 13.0;
             let fx = 570.0 - 2.2 * v_air * v_air;
             let fz = b.mass_kg * G - 14.5 * v_air * v_air;
-            let r = run.tick(&b, fx, fz, dt).unwrap();
-            vx = r.vx_mps;
+            if released {
+                vx += fx / b.mass_kg * dt;
+            } else {
+                let r = run.tick(&b, fx, fz, dt).unwrap();
+                vx = r.vx_mps;
+                released = r.phase == RailPhase::Released;
+            }
             if vx >= vx_calm {
                 twin_tick = Some(tick); // the speed-threshold twin fires here
-                break;
-            }
-            if r.phase == RailPhase::Released && twin_tick.is_none() {
-                // force criterion fired first — record and keep running the
-                // twin until its threshold (or bail below)
-            }
-            if tick > 100_000 {
                 break;
             }
         }
@@ -172,10 +197,15 @@ fn refusals_and_one_way_transition() {
     // Hysteresis caps at cap AND cap+1; zero refused.
     assert!(RailRun::start(spec(MAX_HYSTERESIS_TICKS)).is_ok());
     assert_eq!(
-        RailRun::start(spec(MAX_HYSTERESIS_TICKS + 1)).unwrap_err().code,
+        RailRun::start(spec(MAX_HYSTERESIS_TICKS + 1))
+            .unwrap_err()
+            .code,
         "rail-spec-invalid"
     );
-    assert_eq!(RailRun::start(spec(0)).unwrap_err().code, "rail-spec-invalid");
+    assert_eq!(
+        RailRun::start(spec(0)).unwrap_err().code,
+        "rail-spec-invalid"
+    );
     // One-way: ticking a released run refuses (touchdown is contact's job).
     let b = body();
     let mut run = RailRun::start(spec(1)).unwrap();
@@ -193,7 +223,10 @@ fn refusals_and_one_way_transition() {
         fresh.tick(&b, f64::NAN, 0.0, 1.0 / 120.0).unwrap_err().code,
         "non-finite-input"
     );
-    jlog("refusals", "\"gates\":\"hysteresis cap/cap+1/0, one-way, NaN\"");
+    jlog(
+        "refusals",
+        "\"gates\":\"hysteresis cap/cap+1/0, one-way, NaN\"",
+    );
 }
 
 #[test]
@@ -215,10 +248,11 @@ fn rail_golden_digest() {
             break;
         }
     }
-    let digest = fs_blake3::hash_domain("org.frankensim.fs-flyer.v11a-golden.v1", &payload).to_hex();
+    let digest =
+        fs_blake3::hash_domain("org.frankensim.fs-flyer.v11a-golden.v1", &payload).to_hex();
     jlog("golden", &format!("\"digest\":\"{digest}\""));
     assert_eq!(
-        digest, "PLACEHOLDER-MEASURE-THEN-PIN",
+        digest, "a6c7d16211849b9919174bbc194002c62dea9a30c4f5c1ad572b1648ef626d8c",
         "rail golden moved — determinism regression or an intentional \
          constraint change requiring the golden-bump protocol"
     );

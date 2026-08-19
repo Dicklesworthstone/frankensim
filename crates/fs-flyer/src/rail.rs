@@ -22,7 +22,11 @@ use crate::spine::RigidBody;
 pub const MAX_HYSTERESIS_TICKS: u32 = 120;
 
 fn refuse(code: &'static str, message: String, repair: &str) -> Refusal {
-    Refusal { code, message, ranked_repairs: vec![repair.into()] }
+    Refusal {
+        code,
+        message,
+        ranked_repairs: vec![repair.into()],
+    }
 }
 
 /// Rail configuration.
@@ -53,7 +57,10 @@ impl RailSpec {
         if self.hysteresis_ticks == 0 || self.hysteresis_ticks > MAX_HYSTERESIS_TICKS {
             return Err(refuse(
                 "rail-spec-invalid",
-                format!("hysteresis {} outside [1, {MAX_HYSTERESIS_TICKS}]", self.hysteresis_ticks),
+                format!(
+                    "hysteresis {} outside [1, {MAX_HYSTERESIS_TICKS}]",
+                    self.hysteresis_ticks
+                ),
                 "2-6 ticks is the intended band",
             ));
         }
@@ -108,7 +115,13 @@ impl RailRun {
     /// Spec refusals.
     pub fn start(spec: RailSpec) -> Result<RailRun, Refusal> {
         spec.admit()?;
-        Ok(RailRun { spec, phase: RailPhase::OnRail, x_m: 0.0, vx_mps: 0.0, streak: 0 })
+        Ok(RailRun {
+            spec,
+            phase: RailPhase::OnRail,
+            x_m: 0.0,
+            vx_mps: 0.0,
+            streak: 0,
+        })
     }
 
     /// Current phase.
@@ -127,8 +140,13 @@ impl RailRun {
     /// `non-finite-input`; `rail-already-released` (the transition is
     /// one-way; a released run never re-enters the constraint here —
     /// touchdown is contact's job, E3.4-ii).
-    pub fn tick(&mut self, body: &RigidBody, force_x_n: f64, force_z_n: f64, dt_s: f64)
-    -> Result<RailTick, Refusal> {
+    pub fn tick(
+        &mut self,
+        body: &RigidBody,
+        force_x_n: f64,
+        force_z_n: f64,
+        dt_s: f64,
+    ) -> Result<RailTick, Refusal> {
         body.admit()?;
         if !(force_x_n.is_finite() && force_z_n.is_finite() && dt_s.is_finite() && dt_s > 0.0) {
             return Err(refuse(
@@ -162,7 +180,11 @@ impl RailRun {
         Ok(RailTick {
             phase: self.phase,
             // Once released this tick, the constraint force is zero.
-            normal_n: if self.phase == RailPhase::Released { 0.0 } else { normal_n },
+            normal_n: if self.phase == RailPhase::Released {
+                0.0
+            } else {
+                normal_n
+            },
             gap_m: 0.0,
             x_m: self.x_m,
             vx_mps: self.vx_mps,
