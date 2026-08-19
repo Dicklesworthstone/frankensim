@@ -21,7 +21,11 @@ use crate::Refusal;
 pub const MAX_PENETRATION_M: f64 = 0.5;
 
 fn refuse(code: &'static str, message: String, repair: &str) -> Refusal {
-    Refusal { code, message, ranked_repairs: vec![repair.into()] }
+    Refusal {
+        code,
+        message,
+        ranked_repairs: vec![repair.into()],
+    }
 }
 
 /// Sand-contact parameters (per skid).
@@ -115,7 +119,11 @@ pub fn contact_tick(
         || !dt_s.is_finite()
         || dt_s <= 0.0
     {
-        return Err(refuse("non-finite-input", "penetration/rate/v_t/dt".into(), "finite, dt>0"));
+        return Err(refuse(
+            "non-finite-input",
+            "penetration/rate/v_t/dt".into(),
+            "finite, dt>0",
+        ));
     }
     if penetration_m > MAX_PENETRATION_M {
         return Err(refuse(
