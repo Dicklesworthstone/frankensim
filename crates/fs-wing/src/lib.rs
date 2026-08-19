@@ -22,6 +22,8 @@
 
 use fs_math::det;
 
+pub mod nonlinear;
+
 /// Panel-count cap (refusals at cap AND cap+1).
 pub const MAX_PANELS: usize = 512;
 /// Condition-estimate cap: beyond this the solve refuses (near-singular
@@ -101,7 +103,12 @@ fn norm(a: [f64; 3]) -> f64 {
 /// Induced velocity at `p` of a UNIT-strength horseshoe: bound segment
 /// a→b plus two trailing legs to −∞ along `stream` (unit vector,
 /// downstream). Classical Biot–Savart with a hard-core guard.
-fn horseshoe_velocity(p: [f64; 3], a: [f64; 3], b: [f64; 3], stream: [f64; 3]) -> [f64; 3] {
+pub(crate) fn horseshoe_velocity(
+    p: [f64; 3],
+    a: [f64; 3],
+    b: [f64; 3],
+    stream: [f64; 3],
+) -> [f64; 3] {
     const CORE: f64 = 1.0e-8;
     let seg = |p1: [f64; 3], p2: [f64; 3]| -> [f64; 3] {
         let r1 = sub(p, p1);
@@ -357,4 +364,48 @@ pub fn flat_surface(
         }
     }
     Ok(out)
+}
+
+/// Crate-internal re-export for the nonlinear module (kept out of the
+/// public API: the kernel is an implementation detail).
+pub(crate) fn horseshoe_velocity_pub(
+    p: [f64; 3],
+    a: [f64; 3],
+    b: [f64; 3],
+    stream: [f64; 3],
+) -> [f64; 3] {
+    horseshoe_velocity(p, a, b, stream)
+}
+
+/// Trailing-legs-only induced velocity (no bound segment): the induced-
+/// angle probe of the NONLINEAR closure. Classical nonlinear lifting-line
+/// evaluates the induced angle from the TRAILING sheet only — a bound
+/// segment's near field (especially a strip's own second chordwise row,
+/// ~1 m away) is 2-D physics the section data already contains, and
+/// including it double-counts (the first battery run refused to converge
+/// because of exactly this).
+pub(crate) fn trailing_velocity_pub(
+    p: [f64; 3],
+    a: [f64; 3],
+    b: [f64; 3],
+    stream: [f64; 3],
+) -> [f64; 3] {
+    let full = horseshoe_velocity(p, a, b, stream);
+    // Subtract the bound-segment contribution (recompute it alone).
+    let bound = {
+        const CORE: f64 = 1.0e-8;
+        let r1 = sub(p, a);
+        let r2 = sub(p, b);
+        let (n1, n2) = (norm(r1), norm(r2));
+        let c = cross3(r1, r2);
+        let c2 = dot(c, c);
+        if c2 < CORE || n1 < CORE || n2 < CORE {
+            [0.0; 3]
+        } else {
+            let r0 = sub(b, a);
+            let k = (dot(r0, r1) / n1 - dot(r0, r2) / n2) / (4.0 * core::f64::consts::PI * c2);
+            [c[0] * k, c[1] * k, c[2] * k]
+        }
+    };
+    [full[0] - bound[0], full[1] - bound[1], full[2] - bound[2]]
 }
