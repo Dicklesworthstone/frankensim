@@ -25,6 +25,7 @@ pub mod addedmass;
 pub mod checkpoint;
 pub mod contact;
 pub mod partitioned;
+pub mod prelaunch;
 pub mod rail;
 pub mod replay;
 pub mod spine;
