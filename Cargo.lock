@@ -1940,6 +1940,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-orbit"
+version = "0.0.1"
+dependencies = [
+ "fs-la",
+ "fs-math",
+ "fs-nlmodal",
+]
+
+[[package]]
 name = "fs-ornith"
 version = "0.0.1"
 dependencies = [
