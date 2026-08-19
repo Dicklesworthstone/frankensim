@@ -761,7 +761,10 @@ mod modal_tests {
                 let want = (-want_sq).sqrt();
                 pass &= (got.im - want).abs() < 1e-9 * want && got.re.abs() < 1e-12;
             }
-            detail.push_str(&format!("{label}: k1=({:.4},{:.4}); ", got.re, got.im));
+            let _ = core::fmt::Write::write_fmt(
+                &mut detail,
+                format_args!("{label}: k1=({:.4},{:.4}); ", got.re, got.im),
+            );
         }
         verdict("mm-002-analytic-cutoffs", pass, &detail);
     }
@@ -931,6 +934,7 @@ mod modal_tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // one coherent refusal battery
     fn mm_006_refusals_and_bitwise_repeats() {
         let state = air20();
         let duct = Duct {

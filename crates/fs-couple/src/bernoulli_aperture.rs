@@ -40,8 +40,11 @@ mod tests {
             width_m: 0.01,
             closing_pressure_pa: 1_000.0,
         };
-        assert_eq!(a.opening_m(1_000.0), 0.0);
-        assert_eq!(a.volume_flow(1_200.0, 1.2), 0.0);
+        #[allow(clippy::float_cmp)] // EXACT zero pins (never weakened for a lint)
+        {
+            assert_eq!(a.opening_m(1_000.0), 0.0);
+            assert_eq!(a.volume_flow(1_200.0, 1.2), 0.0);
+        }
         assert!((a.opening_m(0.0) - 4.0e-4).abs() < 1.0e-16);
         let u1 = a.volume_flow(100.0, 1.2);
         let u4 = a.volume_flow(400.0, 1.2);

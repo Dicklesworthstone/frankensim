@@ -130,6 +130,7 @@ fn frame_pitch(frame: &[f64], expect_hz: f64) -> f64 {
     (best as f64 - shift) * RATE / n as f64
 }
 
+#[allow(clippy::struct_field_names)] // worst-* is the honest QoI naming
 struct Measured {
     worst_cents: f64,
     worst_click: f64,
@@ -210,6 +211,7 @@ fn qois(m_slide: &Measured, m_voice: &Measured) -> BTreeMap<String, f64> {
 
 #[test]
 #[ignore = "minting run: measures all three laws and writes the receipt"]
+#[allow(clippy::too_many_lines)] // one coherent minting run
 fn mint_fracdelay_bakeoff_receipt() {
     // Slide-like: 100 -> 80 samples over 0.5 s (a ~4-semitone glide).
     // Voice-like: 100 -> 60 samples over 0.06 s (fast articulation).

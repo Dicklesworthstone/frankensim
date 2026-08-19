@@ -266,6 +266,7 @@ fn clarinet_bore() -> Duct {
 }
 
 /// Render and return (tail rms, mid rms, spectral centroid [Hz]).
+#[allow(clippy::items_after_statements)] // stage-local imports document provenance
 fn render(card: &ValveCard, blowing_pa: f64, seconds: f64) -> (f64, f64, f64) {
     let n = (seconds * f64::from(RATE)) as usize;
     let reed = card.beating_reed(blowing_pa, 0.02);
@@ -290,7 +291,6 @@ fn render(card: &ValveCard, blowing_pa: f64, seconds: f64) -> (f64, f64, f64) {
     let rms = (tail.iter().map(|v| v * v).sum::<f64>() / tail.len() as f64).sqrt();
     let mid_rms = (mid.iter().map(|v| v * v).sum::<f64>() / mid.len() as f64).sqrt();
     // Spectral centroid of the tail via Goertzel-free coarse FFT.
-    #[allow(clippy::items_after_statements)] // the import documents where the FFT comes from
     use fs_fft::{C64, Fft};
     let m = 8192usize;
     let mut buf: Vec<C64> = (0..m)

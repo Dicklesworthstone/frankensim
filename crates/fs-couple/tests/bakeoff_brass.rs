@@ -150,6 +150,7 @@ fn flare_peaks_hz(n_modes: usize) -> Vec<f64> {
 }
 
 /// Composed-loop lock for a mode count on the brass bore.
+#[allow(clippy::items_after_statements)] // stage-local imports document provenance
 fn loop_lock_hz(n_modes: usize) -> f64 {
     let gas = air20();
     let cfg = MmLineConfig {

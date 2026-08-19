@@ -71,7 +71,7 @@ mod tests {
         let n = 256;
         let dt = 1.0 / 8_000.0;
         let mut near: Vec<f64> = (0..n)
-            .map(|i| (core::f64::consts::TAU * 2_000.0 * i as f64 * dt).sin())
+            .map(|i| (core::f64::consts::TAU * 2_000.0 * f64::from(i) * dt).sin())
             .collect();
         let mut far = near.clone();
         absorb_pressure_history(&mut near, dt, 1.0, &gas, 0.50);

@@ -571,6 +571,7 @@ pub(crate) mod brass_loop_tests {
 
     #[test]
     #[ignore = "operating-point probe: valve ladder, slot walk, temperature"]
+    #[allow(clippy::too_many_lines)] // one coherent probe
     fn zz_probe_gates_measurements() {
         let cfg = config();
         let load = MmLoad::Analytic(Termination::FlangedOpen);

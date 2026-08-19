@@ -2511,6 +2511,8 @@ mod review_regressions {
 
 #[cfg(test)]
 mod tone_hole_tests {
+    use fs_phs::side_hole_neck_length;
+
     use super::*;
     use fs_material::gas::{GasSpec, GasState};
 
@@ -2975,6 +2977,7 @@ mod tone_hole_tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // one coherent wall fixture
     fn locally_reacting_wall_is_not_a_rigid_tmm() {
         let state = air20();
         let duct = Duct {
@@ -3577,30 +3580,36 @@ mod bell_bake_artifact {
         }
         assert!(bake.is_passive(1.0e-6), "minted table must be passive");
         let mut out = String::new();
-        out.push_str(&format!(
-            "# {SCHEMA}\tsource_id={}\tpanels={}\tdriven={}\tmouth_area_m2={:.9e}\t\
+        let _ = core::fmt::Write::write_fmt(
+            &mut out,
+            format_args!(
+                "# {SCHEMA}\tsource_id={}\tpanels={}\tdriven={}\tmouth_area_m2={:.9e}\t\
              fingerprint={:016x}\tdensity={:.6}\tsound_speed={:.3}\n\
              # omega_rad_s\tz_acoustic_re\tz_acoustic_im\tpassivity_margin\t\
              panels_per_wavelength\tmouth_ka\tcaptured_fraction\n",
-            bake.source_id,
-            bake.panel_count,
-            bake.driven_count,
-            bake.mouth_area_m2,
-            bake.surface_fingerprint,
-            bake.medium.density,
-            bake.medium.sound_speed,
-        ));
+                bake.source_id,
+                bake.panel_count,
+                bake.driven_count,
+                bake.mouth_area_m2,
+                bake.surface_fingerprint,
+                bake.medium.density,
+                bake.medium.sound_speed,
+            ),
+        );
         for r in &bake.rows {
-            out.push_str(&format!(
-                "{:.9e}\t{:.9e}\t{:.9e}\t{:.6e}\t{:.3}\t{:.4}\t{:.5}\n",
-                r.omega,
-                r.z_acoustic.re,
-                r.z_acoustic.im,
-                r.passivity_margin,
-                r.panels_per_wavelength,
-                r.mouth_ka,
-                r.directivity.captured_fraction,
-            ));
+            let _ = core::fmt::Write::write_fmt(
+                &mut out,
+                format_args!(
+                    "{:.9e}\t{:.9e}\t{:.9e}\t{:.6e}\t{:.3}\t{:.4}\t{:.5}\n",
+                    r.omega,
+                    r.z_acoustic.re,
+                    r.z_acoustic.im,
+                    r.passivity_margin,
+                    r.panels_per_wavelength,
+                    r.mouth_ka,
+                    r.directivity.captured_fraction,
+                ),
+            );
         }
         std::fs::write(ARTIFACT, out).expect("write artifact");
         for line in bake.receipt_lines() {

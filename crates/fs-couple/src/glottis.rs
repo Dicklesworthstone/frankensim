@@ -567,6 +567,7 @@ mod glottis_tests {
     use super::*;
     use fs_duct::Segment;
     use fs_material::gas::GasSpec;
+    use fs_phs::bernoulli_volume_flow;
 
     const RATE: u32 = 48_000;
 

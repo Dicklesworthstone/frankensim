@@ -604,6 +604,7 @@ fn measure_qois(split: bool) -> (BTreeMap<String, f64>, usize, Vec<f64>) {
 
 #[test]
 #[ignore = "minting run: measures both images and writes the bake-off receipt"]
+#[allow(clippy::too_many_lines)] // one coherent minting run
 fn ec_005_mint_split_vs_full_dae_receipt() {
     let (mut split_qois, split_iters, split_pluck) = measure_qois(true);
     let (mut full_qois, full_iters, full_pluck) = measure_qois(false);
@@ -786,7 +787,7 @@ fn ec_007_mint_electric_listening_artifact() {
     let clean = render_chain_pressure(0.03, 1.6);
     let driven = render_chain_pressure(0.40, 1.6);
     let mut signal = clean;
-    signal.extend(std::iter::repeat(0.0).take((0.1 * RATE) as usize));
+    signal.extend(std::iter::repeat_n(0.0, (0.1 * RATE) as usize));
     signal.extend(driven);
     let peak = signal.iter().fold(0.0f64, |m, v| m.max(v.abs()));
     let rms_pa = rms(&signal);

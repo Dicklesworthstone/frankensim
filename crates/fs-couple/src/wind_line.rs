@@ -977,14 +977,17 @@ mod wind_hop_tests {
         }
         let mut out = String::new();
         out.push_str("# frankensim-wind-hop-policy-v1\n");
-        out.push_str(&format!(
-            "# settle detector: relative windowed-RMS drift < {SETTLE_EPS} for {SETTLE_M} \
+        let _ = core::fmt::Write::write_fmt(
+            &mut out,
+            format_args!(
+                "# settle detector: relative windowed-RMS drift < {SETTLE_EPS} for {SETTLE_M} \
              consecutive 25ms blocks; first settled block (control run): {first_settled}\n"
-        ));
+            ),
+        );
         out.push_str("# minted by wind_hop_tests::mint_hop_policy_artifact (fs-couple)\n");
         out.push_str("hop_block\tsettled_at_hop\tclick_metric\n");
         for (b, s, c) in &rows {
-            out.push_str(&format!("{b}\t{s}\t{c:.4}\n"));
+            let _ = core::fmt::Write::write_fmt(&mut out, format_args!("{b}\t{s}\t{c:.4}\n"));
         }
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()

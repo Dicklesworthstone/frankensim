@@ -875,7 +875,10 @@ mod mm_line_tests {
                 worst_line = worst_line.max(cents(a, nearest(&line, a)).abs());
                 worst_loop = worst_loop.max(cents(a, nearest(&looped, a)).abs());
             }
-            detail.push_str(&format!("{label}: {} auth peaks; ", auth.len().min(4)));
+            let _ = core::fmt::Write::write_fmt(
+                &mut detail,
+                format_args!("{label}: {} auth peaks; ", auth.len().min(4)),
+            );
         }
         // AUTHORED bands: the realized LINE must track the authority
         // tightly; the explicit junction LOOP additionally carries its
@@ -916,9 +919,7 @@ mod mm_line_tests {
             let u = if k == 0 { 1.0 } else { 0.0 };
             let mut outgoing = vec![0.0f64; n];
             outgoing[0] = incoming[0] + zc0 * u;
-            for m in 1..n {
-                outgoing[m] = incoming[m]; // rigid source closure
-            }
+            outgoing[1..n].copy_from_slice(&incoming[1..n]); // rigid source closure
             let b = matrix.push(&outgoing).expect("push");
             p_mat.push(outgoing[0] + incoming[0]);
             incoming.copy_from_slice(b);

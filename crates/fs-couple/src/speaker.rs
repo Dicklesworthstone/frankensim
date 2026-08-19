@@ -489,7 +489,7 @@ mod speaker_tests {
         let dt = 1.0 / RATE;
         let mut worst = 0.0f64;
         for k in 0..4000 {
-            let u = 2.0 * det::sin(core::f64::consts::TAU * 100.0 * k as f64 * dt);
+            let u = 2.0 * det::sin(core::f64::consts::TAU * 100.0 * f64::from(k) * dt);
             let (rec, _) = d.step(u, dt).expect("step");
             worst = worst.max((rec.delta_h + rec.dissipated - rec.supplied).abs());
         }

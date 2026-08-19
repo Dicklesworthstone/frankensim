@@ -620,7 +620,10 @@ mod tests {
         assert!((residuals["q1"] - 1e-3).abs() < 1e-12);
         assert!((residuals["v1"] - 1e-3).abs() < 1e-12);
         let exact = receipt.residuals(0);
-        assert_eq!(exact["q1"], 0.0);
+        #[allow(clippy::float_cmp)] // EXACT zero-residual pin
+        {
+            assert_eq!(exact["q1"], 0.0);
+        }
     }
 
     #[test]

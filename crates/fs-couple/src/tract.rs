@@ -438,6 +438,7 @@ mod tract_tests {
         out
     }
 
+    #[allow(dead_code)] // retained listening-diagnostic helper (owner-permission rule for deletion)
     fn render(chart: TractChart, seconds: f64, f0: f64) -> Vec<f64> {
         let mut voice = TractVoice::new(chart, &air(), RATE, Some(&tissue_wall())).expect("voice");
         let n = (seconds * f64::from(RATE)) as usize;
@@ -460,6 +461,7 @@ mod tract_tests {
         out
     }
 
+    #[allow(dead_code)] // retained listening-diagnostic helper (owner-permission rule for deletion)
     fn spectral_peak_near(signal: &[f64], expected_hz: f64, half_width_hz: f64) -> f64 {
         use fs_fft::{C64, Fft};
         let n = 1usize << 15;
@@ -653,6 +655,7 @@ mod tract_tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // one coherent articulation fixture
     fn vt_003_u_to_a_morph_is_click_free_with_formant_tracks() {
         // The articulation fixture: /u/ -> /a/ over 0.4 s at 100 Hz
         // control rate with the carry lift, against a HARD-SWITCH
@@ -680,7 +683,7 @@ mod tract_tests {
                     / (morph_len as f64 * (1.0 - frac_now).max(0.05)))
                 .min(1.0);
                 voice.morph_step(&target, step_frac, &gas).expect("morph");
-                if (k - morph_start) % (4 * control_block) == 0 {
+                if (k - morph_start).is_multiple_of(4 * control_block) {
                     // RIGID oracle for the TRACK: the walled peak list leads
                     // with the wall's own ~100 Hz mode (measured: the track
                     // followed it), and the gesture log wants the formant.
@@ -722,7 +725,7 @@ mod tract_tests {
         for k in 0..n {
             if k >= morph_start
                 && k < morph_start + morph_len
-                && (k - morph_start) % (morph_len / waypoints) == 0
+                && (k - morph_start).is_multiple_of(morph_len / waypoints)
             {
                 let frac = (k - morph_start) as f64 / morph_len as f64;
                 let mixed: Vec<TractSection> = TractChart::assaneo_u()

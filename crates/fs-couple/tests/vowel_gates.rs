@@ -177,6 +177,7 @@ fn vw_002_sung_interaction_pulls_near_the_first_formant() {
 
 #[test]
 #[ignore = "minting run: measures both islands and writes the receipt"]
+#[allow(clippy::too_many_lines)] // one coherent minting run
 fn mint_glottis_bakeoff_receipt() {
     // The .8.2-prepared fixture, executed into a receipt: identical
     // /u/ tract + licensed card, spectral QoIs, KeepBoth expected —

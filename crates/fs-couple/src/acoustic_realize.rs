@@ -16,7 +16,8 @@ use crate::unilateral_contact::{
     modal_contact_forces, modal_friction_forces, modal_hunt_crossley_forces, slit_contact_force,
     slit_lay,
 };
-const SECTION_SECTION_BUDGET: f64 = 8.0;
+/// Sections-per-metre budget for slicing a duct into lumped cells.
+const SECTION_BUDGET: f64 = 8.0;
 
 use fs_duct::{Duct, DuctError, HoleState, MAX_RADIATION_KA, Segment, Termination};
 use fs_material::gas::{GasSpec, GasState};
@@ -676,6 +677,7 @@ fn realize_coupled(
     }
     let mut p_plus_prev = 5.0;
     let mut out = vec![0.0; n];
+    #[allow(clippy::needless_range_loop)] // the sample index is the time axis
     for i in 0..n {
         let mut p_string = 0.0;
         let mut fb = 0.0;
@@ -790,6 +792,7 @@ fn realize_coupled_kc(
     let dt = 1.0 / f64::from(assembly.sample_rate_hz);
     let mut p_plus_prev = 5.0;
     let mut out = vec![0.0; n];
+    #[allow(clippy::needless_range_loop)] // the sample index is the time axis
     for i in 0..n {
         let mut p_string = 0.0;
         let mut fb = 0.0;
@@ -1051,6 +1054,7 @@ fn prony_internal_zeta(string: PrestressedString, omega: f64) -> f64 {
 /// storage. Hunt–Crossley and Stribeck stay port forces, not terms
 /// in `H`.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)] // one coherent realization
 fn realize_dirac_join(
     string: PrestressedString,
     pluck: Option<Pluck>,
@@ -2348,6 +2352,7 @@ fn realize_blown_ode(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)] // one coherent realization
 fn realize_reed_ode(
     sections: &[AcousticSection],
     mouth: Option<MouthFlange>,

@@ -1095,17 +1095,25 @@ mod tests {
         second.id = "second-input".to_owned();
         artifact.inputs.push(second);
         let direct = artifact.inputs[0].filters[0].d;
-        assert_ne!(direct, 0.0);
+        #[allow(clippy::float_cmp)] // EXACT nonzero pin (never weakened for a lint)
+        {
+            assert_ne!(direct, 0.0);
+        }
         let mut runtime = artifact.try_runtime().unwrap();
         let initial = runtime.step(&[1.0, 2.0]).unwrap()[0];
         assert_eq!(initial.to_bits(), (direct + 2.0 * direct).to_bits());
         let tail = runtime.step(&[0.0, 0.0]).unwrap()[0];
-        assert_ne!(tail, 0.0);
+        #[allow(clippy::float_cmp)] // EXACT nonzero pin (never weakened for a lint)
+        {
+            assert_ne!(tail, 0.0);
+        }
         let before = [
             runtime.filter_state(0, 0).unwrap().to_vec(),
             runtime.filter_state(1, 0).unwrap().to_vec(),
         ];
         assert!(runtime.step(&[f64::NAN, 0.0]).is_err());
+        #[allow(clippy::needless_range_loop)] // the index spans runtime and snapshot
+        #[allow(clippy::float_cmp)] // EXACT state-unchanged pin
         for input in 0..2 {
             assert_eq!(runtime.filter_state(input, 0).unwrap(), before[input]);
         }
