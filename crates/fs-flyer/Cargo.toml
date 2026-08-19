@@ -11,6 +11,7 @@ description = "Wright Flyer aircraft-level model: design schema, admission, mass
 layer = "L4"
 
 [dependencies]
+fs-airfoil = { path = "../fs-airfoil" }
 fs-blake3 = { path = "../fs-blake3" }
 fs-geom = { path = "../fs-geom" }
 fs-math = { path = "../fs-math" }

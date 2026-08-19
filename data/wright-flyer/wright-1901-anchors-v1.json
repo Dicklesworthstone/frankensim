@@ -1,0 +1,24 @@
+{
+ "schema": "org.frankensim.wright-flyer.1901-anchors.v1",
+ "bead": "frankensim-wf-root-guzez.5.2",
+ "status": "ACTIVE",
+ "fetched_on": "2026-08-19",
+ "dossier_record": "a1-wright-1901-tunnel",
+ "machine_readable_absence": "The FULL per-angle 1901 tables exist only as photographs of the handwritten data books (GRC/Franklin Institute) and in the in-copyright McFarland edition — verified 2026-08-19 across GRC, NTRS SP-4409, DTIC, LOC, archive.org. The anchors below are the machine-readable subset with verbatim provenance; transcribing the data-book photographs is a recorded follow-on (the underlying 1901 data is public domain).",
+ "conventions": {
+  "coefficient": "1901 coefficients are force relative to a flat plate of EQUAL AREA NORMAL to the flow (flat-plate cd = 1.0 in that system); modern-equivalent CL ~ 1.28 x Wright value (NASA GRC liftold.html)",
+  "equations": "L = k V^2 A cl with V in mph, A in ft^2, force in lb; k = Smeaton coefficient",
+  "smeaton": {"traditional": 0.005, "wrights": 0.0033, "modern": 0.00326, "note": "Wilbur's diary: 'I see no good reason for using a greater coefficient than .0033'"},
+  "test_schedule_deg": [0, 2.5, 5, 7.5, 10, 12.5, 15, 17.5, 20, 25, 30, 35, 40, 45],
+  "claimed_accuracy": "'possible error is less than one twentieth' (5%); ~2% relative (Wilbur, 1901-12-15)"
+ },
+ "anchors": [
+  {"model": 12, "geometry": "parabolic section, camber 1/20, AR 6.0, 6 sq in, steel", "alpha_deg": 5.0, "cl_wright": 0.515, "cl_modern_equiv": 0.659, "source": "AFIT ADA437187 p.126 (Tables 6.12/6.13, quoting the Wrights' measurement); modern replica re-tests read 0.55-0.63 (Wrights ~6-18% low, low tunnel Re)", "partition": "holdout"},
+  {"model": 7, "alpha_deg": 17.5, "cl_wright": 1.19, "cl_modern_equiv": 1.523, "source": "Wilbur Wright to Spratt/Chanute 1901-12-15 verbatim (NASA SP-4409 v1 pp.274-282): 'a lift of one hundred and nineteen per cent at 17 1/2 degrees. Lilienthal only claims about 80 per cent.'", "partition": "holdout"},
+  {"model": 12, "qualitative": "'#12 has the highest dynamic efficiency of all the surfaces shown' (Wilbur P.S.); the 1902 wing averaged models 12, 9, 35", "partition": "holdout"},
+  {"trend": "camber-lift ordering", "statement": "curvature raises lift AND drag; 1/20 chosen over 1/12 for lower drift at similar lift (GRC results.html + Wilbur: 'less drift with surfaces 1/20 deep than with curves 1/12 deep')", "partition": "holdout"}
+ ],
+ "permitted_claims": ["TREND/convention validation of section datasets (sign, ordering, order-of-magnitude) per the frozen a1 record"],
+ "forbidden_claims": ["quantitative full-scale polar validation (1901 tunnel Re ~5e4, coefficients read low; the dossier's a1 boundary)"],
+ "no_claims": "Anchor registry. The full tables remain un-transcribed; nothing here was or may be fitted (holdout by doctrine)."
+}

@@ -28,6 +28,7 @@ pub mod partitioned;
 pub mod prelaunch;
 pub mod rail;
 pub mod replay;
+pub mod sections;
 pub mod spine;
 
 /// Identity domain for design digests.
