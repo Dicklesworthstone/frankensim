@@ -5,7 +5,12 @@
 import * as THREE from "three";
 import { buildWrightFlyerAirframe } from "./airframe/parametricAirframe.ts";
 import { driveScripted } from "./airframe/applyPose.ts";
-import { arrivalCamera, buildTerrainArrays } from "./terrainMesh.ts";
+import { buildTerrainArrays } from "./terrainMesh.ts";
+import { type CameraPreset, PRESET_KEYS, cameraFor } from "./camera.ts";
+import { NEUTRAL, keysFrom, stepCommand } from "./input.ts";
+import { hudLines } from "./hud.ts";
+import { computePose } from "./airframe/pose.ts";
+import { applyPose, scriptedState } from "./airframe/applyPose.ts";
 import kdhGrid from "../../../data/wright-flyer/terrain/kill-devil-hills-17x17-v1.json";
 import type { FlyerRenderer } from "./renderer.ts";
 
@@ -35,15 +40,61 @@ export function createFlyerSceneRenderer(container: HTMLElement): FlyerRenderer 
   airframe.group.position.set(launch[0], launch[1] + 1.2, launch[2]);
   scene.add(airframe.group);
   let elapsedS = 0;
+  // E2.4: input, cameras, HUD. The pilot takes over from the script the
+  // first time a control key goes down.
+  const down = new Set<string>();
+  let preset: CameraPreset = "free";
+  let manual = false;
+  let command = NEUTRAL;
+  const hud = document.createElement("div");
+  hud.style.cssText =
+    "position:fixed;left:12px;bottom:12px;font:12px/1.5 monospace;color:#f5efe0;" +
+    "background:rgba(20,24,30,.55);padding:8px 10px;border-radius:6px;white-space:pre";
+  container.appendChild(hud);
+  const onKey = (e: KeyboardEvent, isDown: boolean): void => {
+    if (isDown && PRESET_KEYS[e.code]) {
+      preset = PRESET_KEYS[e.code]!;
+      return;
+    }
+    if (isDown) manual = manual || ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "KeyW", "KeyA", "KeyS", "KeyD", "Space"].includes(e.code);
+    if (isDown) down.add(e.code);
+    else down.delete(e.code);
+  };
+  const keydown = (e: KeyboardEvent): void => onKey(e, true);
+  const keyup = (e: KeyboardEvent): void => onKey(e, false);
+  window.addEventListener("keydown", keydown);
+  window.addEventListener("keyup", keyup);
   return {
     render(dtS: number): void {
       elapsedS += dtS;
-      const pose = driveScripted(airframe, elapsedS);
+      let pose;
+      if (manual) {
+        command = stepCommand(command, keysFrom(down), dtS);
+        pose = computePose({
+          canardDeg: command.canard * 30,
+          warpDeg: command.warp * 8.5,
+          rudderDeg: 0,
+          coupled: true,
+          propAngleRad: scriptedState(elapsedS).propAngleRad,
+        });
+        applyPose(airframe, pose);
+      } else {
+        pose = driveScripted(airframe, elapsedS);
+      }
       airframe.group.rotation.z = 0.02 * Math.sin(elapsedS * 0.8); // idle sway
-      // The arrival shot owns the camera for the first 14 s, then holds.
-      const cam = arrivalCamera(elapsedS, launch);
+      const ac: [number, number, number] = [
+        airframe.group.position.x, airframe.group.position.y, airframe.group.position.z,
+      ];
+      const cam = cameraFor(preset, elapsedS, launch, ac);
       camera.position.set(cam.pos[0], cam.pos[1], cam.pos[2]);
       camera.lookAt(cam.look[0], cam.look[1], cam.look[2]);
+      hud.textContent = hudLines({
+        airspeedMps: 10.73,
+        elapsedS,
+        engineRpm: Math.min(1025, elapsedS * 180),
+        camera: manual ? `${preset} (manual)` : preset,
+        pose,
+      }).join("\n");
       if (pose.clamped) {
         console.warn(JSON.stringify({ suite: "wf-scene", event: "control-stop", t: elapsedS }));
       }
@@ -55,6 +106,9 @@ export function createFlyerSceneRenderer(container: HTMLElement): FlyerRenderer 
       camera.updateProjectionMatrix();
     },
     dispose(): void {
+      window.removeEventListener("keydown", keydown);
+      window.removeEventListener("keyup", keyup);
+      container.removeChild(hud);
       renderer.dispose();
       container.removeChild(renderer.domElement);
     },
