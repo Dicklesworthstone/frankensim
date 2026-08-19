@@ -33,6 +33,7 @@ fs-vfit = { path = "../fs-vfit" }
 fs-alloc = { path = "../fs-alloc" }
 fs-contact = { path = "../fs-contact" }
 fs-geom = { path = "../fs-geom" }
+fs-orbit = { path = "../fs-orbit" }
 fs-psycho = { path = "../fs-psycho" }
 fs-substrate = { path = "../fs-substrate" }
 fs-bem = { path = "../fs-bem" }
