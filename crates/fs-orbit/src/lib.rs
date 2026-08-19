@@ -486,7 +486,11 @@ pub fn solve_hb_seeded<P: OrbitProblem>(
         }
         let rn = norm(&r);
         trace.push(rn);
-        let scale = norm(&u).max(1.0);
+        // Scale over the COEFFICIENTS only: the omega slot is in
+        // rad/s and would inflate the relative gate (measured: a
+        // sub-threshold reed "converged" at 7.7e-7 because omega
+        // ~1600 stretched the scale).
+        let scale = norm(&u[..pack.coeff_len()]).max(1.0);
         if rn < budget.tolerance * scale {
             // Trivial-collapse guard: an all-zero harmonic content is
             // the equilibrium, not an orbit.
@@ -868,7 +872,7 @@ pub fn continue_branch<P: ContinuableProblem>(
                 - step;
             r.push(arc);
             let rn = norm(&r);
-            let scale = norm(&zp).max(1.0);
+            let scale = norm(&zp[..nc]).max(1.0);
             if rn < budget.hb.tolerance * scale {
                 converged = true;
                 break;
