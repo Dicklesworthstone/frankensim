@@ -22,6 +22,7 @@
 
 use fs_math::det;
 
+pub mod hinge;
 pub mod images;
 pub mod nonlinear;
 
