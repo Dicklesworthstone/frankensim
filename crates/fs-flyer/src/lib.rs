@@ -31,6 +31,7 @@ pub mod checkpoint;
 pub mod contact;
 pub mod dragledger;
 pub mod effectowners;
+pub mod equilibrate;
 pub mod freecontrol;
 pub mod longitudinal;
 pub mod partitioned;

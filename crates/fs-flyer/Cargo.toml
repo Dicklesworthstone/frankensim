@@ -20,6 +20,7 @@ fs-rand = { path = "../fs-rand" }
 fs-time = { path = "../fs-time" }
 fs-wing = { path = "../fs-wing" }
 fs-airscrew = { path = "../fs-airscrew" }
+fs-atmo = { path = "../fs-atmo" }
 
 [lints]
 workspace = true
