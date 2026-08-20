@@ -24,6 +24,7 @@ pub mod adapter;
 pub mod addedmass;
 pub mod checkpoint;
 pub mod contact;
+pub mod dragledger;
 pub mod effectowners;
 pub mod partitioned;
 pub mod prelaunch;
