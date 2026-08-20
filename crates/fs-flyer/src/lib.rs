@@ -32,6 +32,7 @@ pub mod effectowners;
 pub mod freecontrol;
 pub mod longitudinal;
 pub mod partitioned;
+pub mod perception;
 pub mod prelaunch;
 pub mod propcoupling;
 pub mod rail;

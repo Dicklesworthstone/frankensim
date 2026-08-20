@@ -16,6 +16,7 @@ fs-blake3 = { path = "../fs-blake3" }
 fs-geom = { path = "../fs-geom" }
 fs-math = { path = "../fs-math" }
 fs-mbd = { path = "../fs-mbd" }
+fs-rand = { path = "../fs-rand" }
 fs-time = { path = "../fs-time" }
 fs-wing = { path = "../fs-wing" }
 fs-airscrew = { path = "../fs-airscrew" }
