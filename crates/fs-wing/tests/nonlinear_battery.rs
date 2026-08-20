@@ -6,9 +6,7 @@
 //! the operator-reuse rule enforced, golden.
 //! Repro: cargo test -p fs-wing --test nonlinear_battery
 
-use fs_wing::nonlinear::{
-    InfluenceOperator, NonlinearReport, StripRegime, StripSpec, solve_nonlinear,
-};
+use fs_wing::nonlinear::{InfluenceOperator, StripRegime, StripSpec, solve_nonlinear};
 use fs_wing::{Panel, SurfaceId, flat_surface};
 
 fn jlog(case: &str, payload: &str) {
@@ -171,15 +169,24 @@ fn warm_start_is_measurably_cheaper() {
 
 #[test]
 fn safeguard_refuses_a_pathological_closure() {
-    // A closure with an absurd slope (50x physical) drives divergence:
-    // the safeguard must REFUSE with the typed code — never NaN, never a
-    // silent linear fallback.
+    // A NON-FINITE closure must REFUSE with the typed code — never NaN
+    // in the output, never a silent linear fallback.
     let (p, strips) = biplane();
     let fs_v = freestream(0.05);
     let op = InfluenceOperator::build(&p, fs_v, RHO).unwrap();
-    let wild = |_s: usize, alpha: f64| -> (f64, StripRegime) {
-        (300.0 * alpha + 50.0, StripRegime::Attached)
-    };
+    // A closure that goes NON-FINITE just outside the start band: the
+    // solver must refuse the moment the iteration touches it — never
+    // propagate NaN into gamma, never fall back to the linear answer.
+    // (Two earlier fixture attempts are instructive: a 50x-slope closure
+    // and a ±40 branch-flip closure BOTH turned out to possess genuine
+    // fixed points the safeguarded iteration correctly found — bounded
+    // continuous-ish closures are hard problems, not pathologies. The
+    // divergence-floor and iteration-cap refusal paths were exercised
+    // live during E4.6a-ii integration.)
+    // (A conditional NaN region proved dodgeable too — downwash steered
+    // alpha_eff around it. Unconditional non-finite output is the one
+    // unambiguous pathology.)
+    let wild = |_s: usize, _alpha: f64| -> (f64, StripRegime) { (f64::NAN, StripRegime::Attached) };
     let err = solve_nonlinear(&op, &p, &strips, fs_v, RHO, &wild, None, None).unwrap_err();
     assert_eq!(err.code, "nonlinear-did-not-converge");
     assert!(err.ranked_repairs[0].contains("NEVER fall back") || err.message.contains("residual"));

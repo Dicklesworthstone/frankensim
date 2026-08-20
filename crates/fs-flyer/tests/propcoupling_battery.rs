@@ -64,15 +64,19 @@ fn rotor_1903() -> Rotor {
 }
 
 fn disks() -> [PropDisk; 2] {
-    // Pusher props behind the wing (downstream = +x, the wake side),
-    // straddling the centerline.
+    // Pusher props BEHIND the wing. Frame is FRD (frame-conventions-v1):
+    // +x is the nose, the wake trails toward −x — so aft is NEGATIVE x,
+    // just behind the trailing edge (matching the E4.6a-ii design).
+    // (The first pin of this fixture had the disks at +3.0, i.e. ahead
+    // of the wing; golden re-pinned with this geometry correction and
+    // the axial wash window.)
     [
         PropDisk {
-            center_m: [3.0, -1.7, -0.9],
+            center_m: [-2.5, -1.7, -0.9],
             omega_rad_s: OMEGA_350,
         },
         PropDisk {
-            center_m: [3.0, 1.7, -0.9],
+            center_m: [-2.5, 1.7, -0.9],
             omega_rad_s: OMEGA_350,
         },
     ]
@@ -304,7 +308,7 @@ fn coupling_golden_digest() {
         &format!("\"digest\":\"{digest}\",\"thrust\":{}", r.thrust_n[0]),
     );
     assert_eq!(
-        digest, "707c22f06100b48a34d3a8efc7624568e2afc6a4cda91a06144d53220f2d3328",
+        digest, "873f084dcf5a4b5859580f4f7d084e8a7179d5b16a49a224d8f38f2815fe1a94",
         "coupling golden moved — determinism regression or an intentional \
          scheme change requiring the golden-bump protocol"
     );

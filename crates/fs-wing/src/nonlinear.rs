@@ -24,7 +24,11 @@ use crate::{MAX_PANELS, Panel, Refusal, SolveReport, solve_weissinger_linear};
 use fs_blake3::hash_domain;
 
 /// Iteration cap (refusals at cap AND cap+1 by the safeguard test).
-pub const MAX_ITERATIONS: u32 = 200;
+// 600, not 200: the full wing+canard multisurface system converges
+// linearly at ~0.94/iteration through the cross-coupling (measured in
+// E4.6a-ii), needing ~370 iterations to GAMMA_TOL; single-surface cases
+// stay well under 100.
+pub const MAX_ITERATIONS: u32 = 600;
 /// Convergence tolerance on the relative circulation update.
 pub const GAMMA_TOL: f64 = 1.0e-10;
 /// Relaxation start / floor.
@@ -239,6 +243,7 @@ pub fn solve_nonlinear(
     };
     scatter(&strip_gamma, &mut gamma);
     let mut omega = OMEGA_START;
+    let mut growth_streak = 0u32;
     let mut residual = f64::INFINITY;
     let mut regimes = vec![StripRegime::Attached; strips.len()];
     let mut iterations = 0u32;
@@ -264,6 +269,13 @@ pub fn solve_nonlinear(
             // composite sign; a wrong sign fails both.
             let alpha_eff = alpha_free + spec.twist_rad + (w / vmag);
             let (cl, regime) = closure(s, alpha_eff);
+            if !cl.is_finite() {
+                return Err(refuse(
+                    "nonlinear-did-not-converge",
+                    format!("closure returned non-finite cl at strip {s} (alpha_eff {alpha_eff})"),
+                    "the closure must be finite over the reachable alpha range; NEVER fall back silently to the linear answer",
+                ));
+            }
             regimes[s] = regime;
             // Prop slipstream: the washed strip sees a higher local speed
             // (axial increment du) — the REAL prop->wing coupling arm.
@@ -280,17 +292,32 @@ pub fn solve_nonlinear(
             next[s] = strip_gamma[s] + omega * (target - strip_gamma[s]);
         }
         if worst > residual * 1.25 {
-            // Residual grew: halve the relaxation and RETRY from the
-            // current state (safeguard; never accept the growing step).
-            omega *= 0.5;
-            if omega < OMEGA_MIN {
-                return Err(refuse(
-                    "nonlinear-did-not-converge",
-                    format!("relaxation floor: residual {residual:e} at iteration {iterations}"),
-                    "the closure/geometry pair is outside the admitted domain; NEVER fall back silently to the linear answer",
-                ));
+            growth_streak += 1;
+            if growth_streak >= 2 {
+                // Two CONSECUTIVE growths: halve the relaxation and RETRY
+                // from the current state (safeguard; never accept a
+                // persistently growing step). A SINGLE growth is accepted:
+                // in a multisurface system a settling surface legitimately
+                // forces a one-iteration residual spike on the surfaces it
+                // washes (canard -> wing, measured in E4.6a-ii), and
+                // halving on first growth floors omega during a convergent
+                // joint transient. A truly divergent closure grows every
+                // iteration and still hits the floor refusal.
+                omega *= 0.5;
+                growth_streak = 0;
+                if omega < OMEGA_MIN {
+                    return Err(refuse(
+                        "nonlinear-did-not-converge",
+                        format!(
+                            "relaxation floor: residual {residual:e} at iteration {iterations}"
+                        ),
+                        "the closure/geometry pair is outside the admitted domain; NEVER fall back silently to the linear answer",
+                    ));
+                }
+                continue;
             }
-            continue;
+        } else {
+            growth_streak = 0;
         }
         strip_gamma = next;
         scatter(&strip_gamma, &mut gamma);

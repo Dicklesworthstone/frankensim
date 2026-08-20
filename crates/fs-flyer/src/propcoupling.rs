@@ -84,6 +84,9 @@ pub struct CoupledStep {
     pub torque_nm: [f64; 2],
     /// Wing total lift under the converged slipstream [N].
     pub wing_lift_n: f64,
+    /// Converged per-panel circulations (the washed solve's Γ — the
+    /// moment build-up consumes these; not part of the golden payload).
+    pub gamma: Vec<f64>,
     /// Aitken corrections used.
     pub corrections: u32,
     /// Final joint residual (relative).
@@ -92,7 +95,11 @@ pub struct CoupledStep {
     pub spec_digest: String,
 }
 
-/// Strips washed by a disk: |y_strip − y_disk| < R.
+/// Strips washed by a disk: |y_strip − y_disk| < R AND within the axial
+/// influence window |x_strip − x_disk| < 2R (an actuator disk's velocity
+/// perturbation decays over ~R upstream and the full slipstream lives
+/// downstream — a surface many radii away in x, like the canard 5 m
+/// ahead of the 1903 pusher disks, is NOT washed).
 fn wash_map(
     strips: &[StripSpec],
     panels: &[Panel],
@@ -104,10 +111,12 @@ fn wash_map(
         .map(|s| {
             let p = &panels[s.panel_indices[0]];
             let y = (p.a[1] + p.b[1]) / 2.0;
-            [
-                (y - disks[0].center_m[1]).abs() < radius,
-                (y - disks[1].center_m[1]).abs() < radius,
-            ]
+            let x = (p.a[0] + p.b[0]) / 2.0;
+            let hit = |k: usize| -> bool {
+                (y - disks[k].center_m[1]).abs() < radius
+                    && (x - disks[k].center_m[0]).abs() < 2.0 * radius
+            };
+            [hit(0), hit(1)]
         })
         .collect()
 }
@@ -152,7 +161,8 @@ pub fn coupled_prop_airframe_step(
     let mut unrelaxed_done = false;
     // One evaluation of the fixed-point map G(x): wing under slipstream x,
     // disk inflows, BEMT, momentum slipstream.
-    let evaluate = |x: &[f64; 2]| -> Result<([f64; 2], [f64; 2], [f64; 2], f64), Refusal> {
+    type EvalOut = ([f64; 2], [f64; 2], [f64; 2], f64, Vec<f64>);
+    let evaluate = |x: &[f64; 2]| -> Result<EvalOut, Refusal> {
         let du: Vec<f64> = wash
             .iter()
             .map(|w| 0.5 * (if w[0] { x[0] } else { 0.0 } + if w[1] { x[1] } else { 0.0 }))
@@ -181,10 +191,10 @@ pub fn coupled_prop_airframe_step(
             let disc = v_disk * v_disk + 4.0 * t_term;
             g[k] = 0.5 * (-v_disk + disc.sqrt());
         }
-        Ok((g, thrust, torque, wing.total_lift_n))
+        Ok((g, thrust, torque, wing.total_lift_n, wing.gamma))
     };
     loop {
-        let (g, thrust, torque, lift) = evaluate(&x)?;
+        let (g, thrust, torque, lift, gamma) = evaluate(&x)?;
         let r = [g[0] - x[0], g[1] - x[1]];
         let res = (r[0] * r[0] + r[1] * r[1]).sqrt() / (x[0].hypot(x[1]) + 1e-6);
         if res < spec.tol {
@@ -193,6 +203,7 @@ pub fn coupled_prop_airframe_step(
                 thrust_n: thrust,
                 torque_nm: torque,
                 wing_lift_n: lift,
+                gamma,
                 corrections,
                 residual: res,
                 spec_digest: spec.digest(),
