@@ -39,15 +39,25 @@ pub struct PropCouplingSolverSpec {
 }
 
 /// The ratified candidate A.
-pub const CANDIDATE_A: PropCouplingSolverSpec =
-    PropCouplingSolverSpec { omega0: 0.5, clamp: (0.25, 0.80), cap: 4, tol: 1e-3 };
+pub const CANDIDATE_A: PropCouplingSolverSpec = PropCouplingSolverSpec {
+    omega0: 0.5,
+    clamp: (0.25, 0.80),
+    cap: 4,
+    tol: 1e-3,
+};
 
 impl PropCouplingSolverSpec {
     /// Content digest (ModelId ingredient).
     #[must_use]
     pub fn digest(&self) -> String {
         let mut p = Vec::new();
-        for v in [self.omega0, self.clamp.0, self.clamp.1, f64::from(self.cap), self.tol] {
+        for v in [
+            self.omega0,
+            self.clamp.0,
+            self.clamp.1,
+            f64::from(self.cap),
+            self.tol,
+        ] {
             p.extend_from_slice(&v.to_bits().to_le_bytes());
         }
         hash_domain("org.frankensim.fs-flyer.prop-coupling-spec.v1", &p).to_hex()
@@ -83,7 +93,12 @@ pub struct CoupledStep {
 }
 
 /// Strips washed by a disk: |y_strip − y_disk| < R.
-fn wash_map(strips: &[StripSpec], panels: &[Panel], disks: &[PropDisk; 2], radius: f64) -> Vec<[bool; 2]> {
+fn wash_map(
+    strips: &[StripSpec],
+    panels: &[Panel],
+    disks: &[PropDisk; 2],
+    radius: f64,
+) -> Vec<[bool; 2]> {
     strips
         .iter()
         .map(|s| {
@@ -142,8 +157,17 @@ pub fn coupled_prop_airframe_step(
             .iter()
             .map(|w| 0.5 * (if w[0] { x[0] } else { 0.0 } + if w[1] { x[1] } else { 0.0 }))
             .collect();
-        let wing = solve_nonlinear(op, panels, strips, freestream, rho, closure, Some(&du), None)
-            .map_err(map_err)?;
+        let wing = solve_nonlinear(
+            op,
+            panels,
+            strips,
+            freestream,
+            rho,
+            closure,
+            Some(&du),
+            None,
+        )
+        .map_err(map_err)?;
         let mut g = [0.0f64; 2];
         let mut thrust = [0.0f64; 2];
         let mut torque = [0.0f64; 2];
@@ -193,7 +217,8 @@ pub fn coupled_prop_airframe_step(
                 message: format!("cap {} exhausted: joint residual {res:e}", spec.cap),
                 ranked_repairs: vec![
                     "never switch to one-way coupling silently (plan law)".into(),
-                    "the candidate family (B-F) or a finer schedule is the sanctioned escape".into(),
+                    "the candidate family (B-F) or a finer schedule is the sanctioned escape"
+                        .into(),
                 ],
             });
         }

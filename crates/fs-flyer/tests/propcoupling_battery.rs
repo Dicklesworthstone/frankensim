@@ -29,12 +29,36 @@ fn rotor_1903() -> Rotor {
         n_blades: 2,
         camber_ratio: 0.04,
         stations: vec![
-            BladeStation { r_over_r: 0.30, chord_m: 0.13, beta_rad: 40.0 * deg },
-            BladeStation { r_over_r: 0.45, chord_m: 0.17, beta_rad: 30.0 * deg },
-            BladeStation { r_over_r: 0.60, chord_m: 0.20, beta_rad: 23.0 * deg },
-            BladeStation { r_over_r: 0.75, chord_m: 0.21, beta_rad: 18.5 * deg },
-            BladeStation { r_over_r: 0.88, chord_m: 0.20, beta_rad: 15.5 * deg },
-            BladeStation { r_over_r: 0.96, chord_m: 0.16, beta_rad: 14.0 * deg },
+            BladeStation {
+                r_over_r: 0.30,
+                chord_m: 0.13,
+                beta_rad: 40.0 * deg,
+            },
+            BladeStation {
+                r_over_r: 0.45,
+                chord_m: 0.17,
+                beta_rad: 30.0 * deg,
+            },
+            BladeStation {
+                r_over_r: 0.60,
+                chord_m: 0.20,
+                beta_rad: 23.0 * deg,
+            },
+            BladeStation {
+                r_over_r: 0.75,
+                chord_m: 0.21,
+                beta_rad: 18.5 * deg,
+            },
+            BladeStation {
+                r_over_r: 0.88,
+                chord_m: 0.20,
+                beta_rad: 15.5 * deg,
+            },
+            BladeStation {
+                r_over_r: 0.96,
+                chord_m: 0.16,
+                beta_rad: 14.0 * deg,
+            },
         ],
     }
 }
@@ -43,21 +67,34 @@ fn disks() -> [PropDisk; 2] {
     // Pusher props behind the wing (downstream = +x, the wake side),
     // straddling the centerline.
     [
-        PropDisk { center_m: [3.0, -1.7, -0.9], omega_rad_s: OMEGA_350 },
-        PropDisk { center_m: [3.0, 1.7, -0.9], omega_rad_s: OMEGA_350 },
+        PropDisk {
+            center_m: [3.0, -1.7, -0.9],
+            omega_rad_s: OMEGA_350,
+        },
+        PropDisk {
+            center_m: [3.0, 1.7, -0.9],
+            omega_rad_s: OMEGA_350,
+        },
     ]
 }
 
 fn wing_setup() -> (Vec<fs_wing::Panel>, Vec<StripSpec>) {
     let p = flat_surface(SurfaceId::WingLower, 12.29, 1.981, 0.0, 0.0, 8, 2).unwrap();
     let strips = (0..8)
-        .map(|s| StripSpec { panel_indices: vec![s, 8 + s], chord_m: 1.981, twist_rad: 0.0 })
+        .map(|s| StripSpec {
+            panel_indices: vec![s, 8 + s],
+            chord_m: 1.981,
+            twist_rad: 0.0,
+        })
         .collect();
     (p, strips)
 }
 
 fn camber_closure(_s: usize, alpha: f64) -> (f64, fs_wing::nonlinear::StripRegime) {
-    (2.0 * std::f64::consts::PI * (alpha + 0.1), fs_wing::nonlinear::StripRegime::Attached)
+    (
+        2.0 * std::f64::consts::PI * (alpha + 0.1),
+        fs_wing::nonlinear::StripRegime::Attached,
+    )
 }
 
 #[test]
@@ -66,15 +103,34 @@ fn converges_within_candidate_a_and_is_two_way_live() {
     let fs_v = freestream();
     let op = InfluenceOperator::build(&p, fs_v, RHO).unwrap();
     let r = coupled_prop_airframe_step(
-        &op, &p, &strips, &camber_closure, &rotor_1903(), &disks(), fs_v, RHO, &CANDIDATE_A, None,
+        &op,
+        &p,
+        &strips,
+        &camber_closure,
+        &rotor_1903(),
+        &disks(),
+        fs_v,
+        RHO,
+        &CANDIDATE_A,
+        None,
     )
     .unwrap();
-    assert!(r.corrections <= 4, "candidate-A cap respected ({})", r.corrections);
-    assert!(r.residual < CANDIDATE_A.tol, "accepted above spec tol: {}", r.residual);
+    assert!(
+        r.corrections <= 4,
+        "candidate-A cap respected ({})",
+        r.corrections
+    );
+    assert!(
+        r.residual < CANDIDATE_A.tol,
+        "accepted above spec tol: {}",
+        r.residual
+    );
     // ANTI-VACUITY, both arms:
     // (a) wing -> prop: the coupled disk inflow differs from freestream, so
     //     coupled thrust differs from the uncoupled BEMT at V_infinity.
-    let uncoupled = bemt_solve(&rotor_1903(), RHO, fs_v[0], OMEGA_350).unwrap().thrust_n;
+    let uncoupled = bemt_solve(&rotor_1903(), RHO, fs_v[0], OMEGA_350)
+        .unwrap()
+        .thrust_n;
     assert!(
         (r.thrust_n[0] - uncoupled).abs() > 0.05,
         "wing->prop arm dead: {} vs uncoupled {uncoupled}",
@@ -83,7 +139,14 @@ fn converges_within_candidate_a_and_is_two_way_live() {
     // (b) prop -> wing: the converged slipstream changes the wing lift vs
     //     the unwashed solve.
     let unwashed = fs_wing::nonlinear::solve_nonlinear(
-        &op, &p, &strips, fs_v, RHO, &camber_closure, None, None,
+        &op,
+        &p,
+        &strips,
+        fs_v,
+        RHO,
+        &camber_closure,
+        None,
+        None,
     )
     .unwrap()
     .total_lift_n;
@@ -109,21 +172,57 @@ fn determinism_and_warm_start() {
     let fs_v = freestream();
     let op = InfluenceOperator::build(&p, fs_v, RHO).unwrap();
     let a = coupled_prop_airframe_step(
-        &op, &p, &strips, &camber_closure, &rotor_1903(), &disks(), fs_v, RHO, &CANDIDATE_A, None,
+        &op,
+        &p,
+        &strips,
+        &camber_closure,
+        &rotor_1903(),
+        &disks(),
+        fs_v,
+        RHO,
+        &CANDIDATE_A,
+        None,
     )
     .unwrap();
     let b = coupled_prop_airframe_step(
-        &op, &p, &strips, &camber_closure, &rotor_1903(), &disks(), fs_v, RHO, &CANDIDATE_A, None,
+        &op,
+        &p,
+        &strips,
+        &camber_closure,
+        &rotor_1903(),
+        &disks(),
+        fs_v,
+        RHO,
+        &CANDIDATE_A,
+        None,
     )
     .unwrap();
-    assert_eq!(a.w_slip[0].to_bits(), b.w_slip[0].to_bits(), "bitwise repeat");
+    assert_eq!(
+        a.w_slip[0].to_bits(),
+        b.w_slip[0].to_bits(),
+        "bitwise repeat"
+    );
     let warm = coupled_prop_airframe_step(
-        &op, &p, &strips, &camber_closure, &rotor_1903(), &disks(), fs_v, RHO, &CANDIDATE_A,
+        &op,
+        &p,
+        &strips,
+        &camber_closure,
+        &rotor_1903(),
+        &disks(),
+        fs_v,
+        RHO,
+        &CANDIDATE_A,
         Some(a.w_slip),
     )
     .unwrap();
-    assert!(warm.corrections <= a.corrections, "warm start must not cost more");
-    jlog("determinism", &format!("\"cold\":{},\"warm\":{}", a.corrections, warm.corrections));
+    assert!(
+        warm.corrections <= a.corrections,
+        "warm start must not cost more"
+    );
+    jlog(
+        "determinism",
+        &format!("\"cold\":{},\"warm\":{}", a.corrections, warm.corrections),
+    );
 }
 
 #[test]
@@ -134,19 +233,41 @@ fn nonconvergence_is_typed_and_spec_identity_is_sensitive() {
     // A zero-cap spec cannot converge from a cold start: typed refusal.
     // cap 0 AND an unreachable tolerance: the free unrelaxed evaluation
     // alone must not satisfy it, so the cap gate is what fires.
-    let strangled = PropCouplingSolverSpec { cap: 0, tol: 1e-15, ..CANDIDATE_A };
+    let strangled = PropCouplingSolverSpec {
+        cap: 0,
+        tol: 1e-15,
+        ..CANDIDATE_A
+    };
     let err = coupled_prop_airframe_step(
-        &op, &p, &strips, &camber_closure, &rotor_1903(), &disks(), fs_v, RHO, &strangled, None,
+        &op,
+        &p,
+        &strips,
+        &camber_closure,
+        &rotor_1903(),
+        &disks(),
+        fs_v,
+        RHO,
+        &strangled,
+        None,
     )
     .unwrap_err();
     assert_eq!(err.code, "PropAirframeCouplingDidNotConverge");
-    assert!(err.ranked_repairs[0].contains("never switch"), "the no-one-way law travels");
+    assert!(
+        err.ranked_repairs[0].contains("never switch"),
+        "the no-one-way law travels"
+    );
     // Spec digests: candidate A is stable; any tuple change moves it.
     assert_eq!(CANDIDATE_A.digest(), CANDIDATE_A.digest());
     assert_ne!(CANDIDATE_A.digest(), strangled.digest());
-    let clamped = PropCouplingSolverSpec { clamp: (0.10, 1.00), ..CANDIDATE_A };
+    let clamped = PropCouplingSolverSpec {
+        clamp: (0.10, 1.00),
+        ..CANDIDATE_A
+    };
     assert_ne!(CANDIDATE_A.digest(), clamped.digest());
-    jlog("refusal+identity", &format!("\"specA\":\"{}\"", &CANDIDATE_A.digest()[..12]));
+    jlog(
+        "refusal+identity",
+        &format!("\"specA\":\"{}\"", &CANDIDATE_A.digest()[..12]),
+    );
 }
 
 #[test]
@@ -155,16 +276,33 @@ fn coupling_golden_digest() {
     let fs_v = freestream();
     let op = InfluenceOperator::build(&p, fs_v, RHO).unwrap();
     let r = coupled_prop_airframe_step(
-        &op, &p, &strips, &camber_closure, &rotor_1903(), &disks(), fs_v, RHO, &CANDIDATE_A, None,
+        &op,
+        &p,
+        &strips,
+        &camber_closure,
+        &rotor_1903(),
+        &disks(),
+        fs_v,
+        RHO,
+        &CANDIDATE_A,
+        None,
     )
     .unwrap();
     let mut payload = Vec::new();
-    for v in [r.w_slip[0], r.w_slip[1], r.thrust_n[0], r.thrust_n[1], r.wing_lift_n] {
+    for v in [
+        r.w_slip[0],
+        r.w_slip[1],
+        r.thrust_n[0],
+        r.thrust_n[1],
+        r.wing_lift_n,
+    ] {
         payload.extend_from_slice(&v.to_bits().to_le_bytes());
     }
-    let digest =
-        fs_blake3::hash_domain("org.frankensim.fs-flyer.v15-golden.v1", &payload).to_hex();
-    jlog("golden", &format!("\"digest\":\"{digest}\",\"thrust\":{}", r.thrust_n[0]));
+    let digest = fs_blake3::hash_domain("org.frankensim.fs-flyer.v15-golden.v1", &payload).to_hex();
+    jlog(
+        "golden",
+        &format!("\"digest\":\"{digest}\",\"thrust\":{}", r.thrust_n[0]),
+    );
     assert_eq!(
         digest, "707c22f06100b48a34d3a8efc7624568e2afc6a4cda91a06144d53220f2d3328",
         "coupling golden moved — determinism regression or an intentional \

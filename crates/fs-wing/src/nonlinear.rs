@@ -150,6 +150,7 @@ fn induced_w(p: [f64; 3], panels: &[Panel], gamma: &[f64], stream_unit: [f64; 3]
 /// `nonlinear-did-not-converge` (iteration cap or relaxation floor hit;
 /// the message reports residual/ω/iterations — never a silent fallback
 /// to the linear answer).
+#[allow(clippy::too_many_arguments)] // the physics inputs are irreducible
 pub fn solve_nonlinear(
     op: &InfluenceOperator,
     panels: &[Panel],
@@ -201,14 +202,14 @@ pub fn solve_nonlinear(
         freestream[2] / vmag,
     ];
     let alpha_free = freestream[2].atan2(freestream[0]);
-    if let Some(du) = strip_du_axial {
-        if du.len() != strips.len() || !du.iter().all(|v| v.is_finite()) {
-            return Err(refuse(
-                "strips-invalid",
-                "strip_du_axial length/finiteness".into(),
-                "one finite axial increment per strip (prop slipstream)",
-            ));
-        }
+    if let Some(du) = strip_du_axial
+        && (du.len() != strips.len() || !du.iter().all(|v| v.is_finite()))
+    {
+        return Err(refuse(
+            "strips-invalid",
+            "strip_du_axial length/finiteness".into(),
+            "one finite axial increment per strip (prop slipstream)",
+        ));
     }
     // Row-split ratios from the linear solution; strip totals start from
     // the warm start (or the linear totals).

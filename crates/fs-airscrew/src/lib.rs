@@ -17,7 +17,7 @@
 //! I_eq·Ω̇ = Q_engine − ΣQ_prop − Q_drivetrain with the declared engine
 //! torque curve. fs-wing never sees a disk (plan ownership).
 
-use fs_airfoil::{flat_plate_separated, thin_airfoil};
+use fs_airfoil::flat_plate_separated;
 use fs_math::det;
 
 /// Station-count cap (refusals at cap AND cap+1).
@@ -190,7 +190,7 @@ pub fn bemt_solve(
         ));
     }
     let r_tip = rotor.radius_m;
-    let b = rotor.n_blades as f64;
+    let b = f64::from(rotor.n_blades);
     let r_root = rotor.stations[0].r_over_r * 0.8; // hub cutout fraction
     let mut thrust = 0.0;
     let mut torque = 0.0;

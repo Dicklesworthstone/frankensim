@@ -191,17 +191,20 @@ fn post_stall_branch_identity_is_distinct_and_repeatable() {
     let (p, strips) = biplane();
     let fs_lo = freestream(0.05);
     let op_lo = InfluenceOperator::build(&p, fs_lo, RHO).unwrap();
-    let attached = solve_nonlinear(&op_lo, &p, &strips, fs_lo, RHO, &camber_closure, None, None).unwrap();
+    let attached =
+        solve_nonlinear(&op_lo, &p, &strips, fs_lo, RHO, &camber_closure, None, None).unwrap();
     let fs_hi = freestream(0.42);
     let op_hi = InfluenceOperator::build(&p, fs_hi, RHO).unwrap();
-    let stalled = solve_nonlinear(&op_hi, &p, &strips, fs_hi, RHO, &camber_closure, None, None).unwrap();
+    let stalled =
+        solve_nonlinear(&op_hi, &p, &strips, fs_hi, RHO, &camber_closure, None, None).unwrap();
     assert_ne!(
         attached.branch_id, stalled.branch_id,
         "branches must be distinct"
     );
     assert!(stalled.regimes.iter().any(|r| *r != StripRegime::Attached));
     // Bitwise repeatability of the branch id AND the solution.
-    let again = solve_nonlinear(&op_hi, &p, &strips, fs_hi, RHO, &camber_closure, None, None).unwrap();
+    let again =
+        solve_nonlinear(&op_hi, &p, &strips, fs_hi, RHO, &camber_closure, None, None).unwrap();
     assert_eq!(stalled.branch_id, again.branch_id);
     for (a, b) in stalled.gamma.iter().zip(&again.gamma) {
         assert_eq!(a.to_bits(), b.to_bits());
