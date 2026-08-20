@@ -25,6 +25,7 @@ pub mod fit;
 pub mod indicial;
 pub mod table;
 pub mod uncertainty;
+pub mod unsteady;
 
 /// Admitted angle-of-attack domain [rad], inclusive: the full circle
 /// expressed as [−π, π]. Queries outside refuse (they indicate an
