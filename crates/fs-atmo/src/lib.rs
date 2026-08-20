@@ -32,6 +32,7 @@
 use fs_math::det;
 use fs_rand::StreamKey;
 
+pub mod fit;
 pub mod mann;
 pub mod ou;
 
@@ -173,25 +174,25 @@ impl FlatSiteLogLaw {
 
 /// One turbulence mode of the wall-compatible vector potential.
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct Mode {
+pub(crate) struct Mode {
     /// Horizontal wavevector components [rad/m].
-    kx: f64,
-    ky: f64,
+    pub(crate) kx: f64,
+    pub(crate) ky: f64,
     /// Vertical wavenumber [rad/m].
-    kh: f64,
+    pub(crate) kh: f64,
     /// Potential amplitudes (a_x, a_y, a_z) [m²/s].
-    a: [f64; 3],
+    pub(crate) a: [f64; 3],
     /// Phase offset [rad].
-    phi: f64,
+    pub(crate) phi: f64,
 }
 
 /// The E3.3a turbulence field: a static per-realization modal draw with
 /// deterministic mean-advection phase (OU evolution is E3.3b).
 #[derive(Clone, Debug, PartialEq)]
 pub struct TurbulenceField {
-    modes: Vec<Mode>,
+    pub(crate) modes: Vec<Mode>,
     /// Advection speed for the frozen-phase clock [m/s].
-    u_adv_mps: f64,
+    pub(crate) u_adv_mps: f64,
 }
 
 /// Sampled velocity + exact analytic gradient at one point.
