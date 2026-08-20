@@ -81,7 +81,7 @@ fn attached_regime_tracks_the_linear_fixture() {
         .collect();
     let fs_v = freestream(0.05);
     let op = InfluenceOperator::build(&p, fs_v, RHO).unwrap();
-    let r = solve_nonlinear(&op, &p, &strips, fs_v, RHO, &flat_closure, None).unwrap();
+    let r = solve_nonlinear(&op, &p, &strips, fs_v, RHO, &flat_closure, None, None).unwrap();
     let lin = op.linear().total_lift_n;
     assert!(
         r.residual < 1e-10 && r.iterations < 200,
@@ -99,7 +99,7 @@ fn attached_regime_tracks_the_linear_fixture() {
     // The biplane formulation delta: measured and LOGGED as data.
     let (bp, bstrips) = biplane();
     let bop = InfluenceOperator::build(&bp, fs_v, RHO).unwrap();
-    let br = solve_nonlinear(&bop, &bp, &bstrips, fs_v, RHO, &flat_closure, None).unwrap();
+    let br = solve_nonlinear(&bop, &bp, &bstrips, fs_v, RHO, &flat_closure, None, None).unwrap();
     let delta = br.total_lift_n / bop.linear().total_lift_n - 1.0;
     assert!(
         delta.abs() < 0.35,
@@ -123,7 +123,7 @@ fn camber_closure_reaches_the_weight_class() {
     let (p, strips) = biplane();
     let fs_v = freestream(0.07);
     let op = InfluenceOperator::build(&p, fs_v, RHO).unwrap();
-    let r = solve_nonlinear(&op, &p, &strips, fs_v, RHO, &camber_closure, None).unwrap();
+    let r = solve_nonlinear(&op, &p, &strips, fs_v, RHO, &camber_closure, None, None).unwrap();
     assert!(
         r.total_lift_n > 2500.0 && r.total_lift_n < 5500.0,
         "camber-closed lift {} N outside the weight class",
@@ -140,10 +140,10 @@ fn warm_start_is_measurably_cheaper() {
     let (p, strips) = biplane();
     let fs1 = freestream(0.05);
     let op1 = InfluenceOperator::build(&p, fs1, RHO).unwrap();
-    let r1 = solve_nonlinear(&op1, &p, &strips, fs1, RHO, &camber_closure, None).unwrap();
+    let r1 = solve_nonlinear(&op1, &p, &strips, fs1, RHO, &camber_closure, None, None).unwrap();
     let fs2 = freestream(0.06);
     let op2 = InfluenceOperator::build(&p, fs2, RHO).unwrap();
-    let cold = solve_nonlinear(&op2, &p, &strips, fs2, RHO, &camber_closure, None).unwrap();
+    let cold = solve_nonlinear(&op2, &p, &strips, fs2, RHO, &camber_closure, None, None).unwrap();
     let warm = solve_nonlinear(
         &op2,
         &p,
@@ -151,6 +151,7 @@ fn warm_start_is_measurably_cheaper() {
         fs2,
         RHO,
         &camber_closure,
+        None,
         Some(&r1.gamma),
     )
     .unwrap();
@@ -179,7 +180,7 @@ fn safeguard_refuses_a_pathological_closure() {
     let wild = |_s: usize, alpha: f64| -> (f64, StripRegime) {
         (300.0 * alpha + 50.0, StripRegime::Attached)
     };
-    let err = solve_nonlinear(&op, &p, &strips, fs_v, RHO, &wild, None).unwrap_err();
+    let err = solve_nonlinear(&op, &p, &strips, fs_v, RHO, &wild, None, None).unwrap_err();
     assert_eq!(err.code, "nonlinear-did-not-converge");
     assert!(err.ranked_repairs[0].contains("NEVER fall back") || err.message.contains("residual"));
     jlog("safeguard", "\"refused\":true");
@@ -190,17 +191,17 @@ fn post_stall_branch_identity_is_distinct_and_repeatable() {
     let (p, strips) = biplane();
     let fs_lo = freestream(0.05);
     let op_lo = InfluenceOperator::build(&p, fs_lo, RHO).unwrap();
-    let attached = solve_nonlinear(&op_lo, &p, &strips, fs_lo, RHO, &camber_closure, None).unwrap();
+    let attached = solve_nonlinear(&op_lo, &p, &strips, fs_lo, RHO, &camber_closure, None, None).unwrap();
     let fs_hi = freestream(0.42);
     let op_hi = InfluenceOperator::build(&p, fs_hi, RHO).unwrap();
-    let stalled = solve_nonlinear(&op_hi, &p, &strips, fs_hi, RHO, &camber_closure, None).unwrap();
+    let stalled = solve_nonlinear(&op_hi, &p, &strips, fs_hi, RHO, &camber_closure, None, None).unwrap();
     assert_ne!(
         attached.branch_id, stalled.branch_id,
         "branches must be distinct"
     );
     assert!(stalled.regimes.iter().any(|r| *r != StripRegime::Attached));
     // Bitwise repeatability of the branch id AND the solution.
-    let again = solve_nonlinear(&op_hi, &p, &strips, fs_hi, RHO, &camber_closure, None).unwrap();
+    let again = solve_nonlinear(&op_hi, &p, &strips, fs_hi, RHO, &camber_closure, None, None).unwrap();
     assert_eq!(stalled.branch_id, again.branch_id);
     for (a, b) in stalled.gamma.iter().zip(&again.gamma) {
         assert_eq!(a.to_bits(), b.to_bits());
@@ -221,13 +222,13 @@ fn operator_reuse_rule_is_enforced() {
     let fs_v = freestream(0.05);
     let op = InfluenceOperator::build(&p, fs_v, RHO).unwrap();
     // Same geometry: reuse fine.
-    assert!(solve_nonlinear(&op, &p, &strips, fs_v, RHO, &camber_closure, None).is_ok());
+    assert!(solve_nonlinear(&op, &p, &strips, fs_v, RHO, &camber_closure, None, None).is_ok());
     // ANY geometry change (a canard-deflection-scale nudge on one panel)
     // makes the operator stale: typed refusal, not a wrong answer.
     let mut moved = p.clone();
     moved[3].ctrl[2] += 0.01;
     assert_eq!(
-        solve_nonlinear(&op, &moved, &strips, fs_v, RHO, &camber_closure, None)
+        solve_nonlinear(&op, &moved, &strips, fs_v, RHO, &camber_closure, None, None)
             .unwrap_err()
             .code,
         "influence-operator-stale"
@@ -241,6 +242,7 @@ fn operator_reuse_rule_is_enforced() {
             freestream(0.051),
             RHO,
             &camber_closure,
+            None,
             None
         )
         .unwrap_err()
@@ -258,7 +260,7 @@ fn nonlinear_golden_digest() {
     let (p, strips) = biplane();
     let fs_v = freestream(0.07);
     let op = InfluenceOperator::build(&p, fs_v, RHO).unwrap();
-    let r = solve_nonlinear(&op, &p, &strips, fs_v, RHO, &camber_closure, None).unwrap();
+    let r = solve_nonlinear(&op, &p, &strips, fs_v, RHO, &camber_closure, None, None).unwrap();
     let mut payload = Vec::new();
     for g in &r.gamma {
         payload.extend_from_slice(&g.to_bits().to_le_bytes());

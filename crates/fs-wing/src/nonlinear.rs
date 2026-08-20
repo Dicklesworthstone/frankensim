@@ -157,6 +157,7 @@ pub fn solve_nonlinear(
     freestream: [f64; 3],
     rho: f64,
     closure: SectionClosure<'_>,
+    strip_du_axial: Option<&[f64]>,
     warm_start: Option<&[f64]>,
 ) -> Result<NonlinearReport, Refusal> {
     if geometry_hash(panels, freestream) != op.geometry_hash {
@@ -200,6 +201,15 @@ pub fn solve_nonlinear(
         freestream[2] / vmag,
     ];
     let alpha_free = freestream[2].atan2(freestream[0]);
+    if let Some(du) = strip_du_axial {
+        if du.len() != strips.len() || !du.iter().all(|v| v.is_finite()) {
+            return Err(refuse(
+                "strips-invalid",
+                "strip_du_axial length/finiteness".into(),
+                "one finite axial increment per strip (prop slipstream)",
+            ));
+        }
+    }
     // Row-split ratios from the linear solution; strip totals start from
     // the warm start (or the linear totals).
     let lin = &op.linear.gamma;
@@ -254,11 +264,14 @@ pub fn solve_nonlinear(
             let alpha_eff = alpha_free + spec.twist_rad + (w / vmag);
             let (cl, regime) = closure(s, alpha_eff);
             regimes[s] = regime;
+            // Prop slipstream: the washed strip sees a higher local speed
+            // (axial increment du) — the REAL prop->wing coupling arm.
+            let v_local = vmag + strip_du_axial.map_or(0.0, |du| du[s]);
             // The solver's Γ sign convention (BC with −z normals, a→b
             // along +y) is NEGATIVE for lift-up — the first battery run
             // converged to −5420 N because the closure assumed the
             // opposite sign. Match the solver, not the textbook.
-            let target = -0.5 * vmag * spec.chord_m * cl;
+            let target = -0.5 * v_local * spec.chord_m * cl;
             // Residual = the OMEGA-INDEPENDENT fixed-point mismatch (the
             // step-size metric shrank with every safeguard halving and
             // faked progress — a measured lesson).

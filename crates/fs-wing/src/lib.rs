@@ -410,3 +410,28 @@ pub(crate) fn trailing_velocity_pub(
     };
     [full[0] - bound[0], full[1] - bound[1], full[2] - bound[2]]
 }
+
+/// Free-air induced velocity of a solved system at any point (the
+/// prop-disk inflow probe for the E4.5-ii coupling).
+#[must_use]
+pub fn induced_velocity_free(
+    p: [f64; 3],
+    panels: &[Panel],
+    gamma: &[f64],
+    freestream_mps: [f64; 3],
+) -> [f64; 3] {
+    let vmag = norm(freestream_mps);
+    let stream = [
+        freestream_mps[0] / vmag,
+        freestream_mps[1] / vmag,
+        freestream_mps[2] / vmag,
+    ];
+    let mut out = [0.0f64; 3];
+    for (j, panel) in panels.iter().enumerate() {
+        let v = horseshoe_velocity(p, panel.a, panel.b, stream);
+        for k in 0..3 {
+            out[k] += gamma[j] * v[k];
+        }
+    }
+    out
+}
