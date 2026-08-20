@@ -1,0 +1,45 @@
+{
+  "schema": "org.frankensim.wright-flyer.culick-a4-anchors.v1",
+  "bead": "frankensim-wf-root-guzez.5.13.3",
+  "spec": "COMPREHENSIVE_PLAN_FOR_REAL_TIME_WRIGHT_FLYER_SIM_WITH_FRANKENSIM.md (ROUND 6 steady state), V-02a",
+  "dossier_record": "a4-culick-stability",
+  "independence_group": "culick-jex-analyses",
+  "claim_level": "the dossier PERMITS pole-structure and derivative-sign references plus pitch time-to-double order of magnitude; it FORBIDS quantitative pole-value claims until the full derivative tables are transcribed under declared axis conventions (machine_readable_absence below)",
+  "anchors": {
+    "static_pitch_stability": {
+      "value": "unstable",
+      "gate_form": "at least one open-loop longitudinal eigenvalue with positive real part MUST be present",
+      "sources": [
+        "Culick/Jex, AIAA 85-1804-CP (1985)",
+        "Culick & Jex in Wolko (ed.), The Wright Flyer: An Engineering Perspective, Smithsonian 1987"
+      ]
+    },
+    "pitch_time_to_double_s": {
+      "order_band": [0.15, 3.0],
+      "central_citation": "roughly half a second",
+      "gate_form": "ln(2)/Re(lambda_max) inside the order band; the VALUE is reported, never asserted to a point",
+      "sources": [
+        "Culick, 'What the Wright Brothers Did and Did Not Understand About Flight Mechanics', AIAA 2001-3385 (pitch instability, time to double amplitude roughly 1/2 second)"
+      ],
+      "band_rationale": "order-of-magnitude claim widened by the declared reconstruction uncertainty (derivative reconstruction assumptions; axes/sign conventions per E1.4); the band is a factor ~4 each side of the 0.5-1 s citation range"
+    },
+    "derivative_signs": {
+      "cm_alpha": "+",
+      "cm_q": "-",
+      "gate_form": "signs of dM/dalpha (destabilizing, canard configuration with the cg near the wing quarter-chord) and dM/dq (pitch damping from surface plunge) must match",
+      "sources": ["Culick/Jex analyses (root-locus discussion, static margin)"]
+    },
+    "pitch_inertia_iyy_kg_m2": {
+      "value": 392.0,
+      "original": "~289 slug-ft^2 class (Culick/Jex mass reconstruction)",
+      "status": "estimated",
+      "uncertainty_frac": 0.25,
+      "note": "reconstruction value; enters the q-dot row scaling only — pole SIGNS are insensitive to it, time-to-double scales as ~1/sqrt(Iyy) near the divergence"
+    }
+  },
+  "machine_readable_absence": {
+    "finding": "the full Culick/Jex longitudinal derivative tables (X_u, Z_w, M_w, M_q ... with axis conventions) are published in AIAA-copyrighted papers and are not openly redistributable as data; only the structure/sign/order claims above are frozen here",
+    "follow_on": "transcription under license or independent re-derivation from the Ames a2 tunnel data is the sanctioned path to quantitative V-02a levels (owner action recorded in the dossier)"
+  },
+  "conventions": "frd body axes, pitch +M nose-up (frame-conventions-v1); matches the Culick/Jex literature so no sign flips at comparison time"
+}

@@ -338,6 +338,7 @@ impl OpenLoopDesign {
         alpha_rad: f64,
         delta_canard_rad: f64,
         omega_prop_rad_s: f64,
+        q_pitch_rad_s: f64,
         rho_kg_m3: f64,
     ) -> Result<ForceBuildup, Refusal> {
         if !(v_mps.is_finite()
@@ -348,6 +349,8 @@ impl OpenLoopDesign {
             && delta_canard_rad.abs() < 0.6
             && omega_prop_rad_s.is_finite()
             && (10.0..=120.0).contains(&omega_prop_rad_s)
+            && q_pitch_rad_s.is_finite()
+            && q_pitch_rad_s.abs() < 3.0
             && rho_kg_m3.is_finite()
             && rho_kg_m3 > 0.0)
         {
@@ -362,7 +365,19 @@ impl OpenLoopDesign {
             message: e.message,
             ranked_repairs: e.ranked_repairs,
         };
-        let (panels, strips) = self.layout(delta_canard_rad)?;
+        let (panels, mut strips) = self.layout(delta_canard_rad)?;
+        // Pitch-rate plunge: a strip at dx ahead of the CG swings upward
+        // under +q and sees Δα = −q·dx/V (the tail-aft mirror gives the
+        // classical +q·l_t/V — both are DAMPING). Quasi-steady, enters
+        // as strip twist; q = 0 leaves the strips bitwise untouched.
+        if q_pitch_rad_s != 0.0 {
+            for st in &mut strips {
+                let p0 = &panels[st.panel_indices[0]];
+                let dx = 0.5 * (p0.a[0] + p0.b[0]) - self.cg_m[0];
+                st.twist_rad -= q_pitch_rad_s * dx / v_mps;
+            }
+        }
+        let strips = strips;
         // Body-axes airspeed (u = V cos α, w = V sin α, FRD).
         let fs_v = [
             v_mps * det::cos(alpha_rad),
@@ -506,7 +521,7 @@ impl OpenLoopDesign {
         let tol = [0.5, 0.5, 0.5, 0.5]; // N, N, N·m, N·m
         let mut iterations = 0u32;
         loop {
-            let b = self.force_buildup(x[0], x[1], x[2], x[3], rho_kg_m3)?;
+            let b = self.force_buildup(x[0], x[1], x[2], x[3], 0.0, rho_kg_m3)?;
             let r = [
                 b.force_n[0],
                 b.force_n[2],
@@ -553,13 +568,13 @@ impl OpenLoopDesign {
                 let mut hh = h[c];
                 let mut xp = x;
                 xp[c] += hh;
-                let bp = match self.force_buildup(xp[0], xp[1], xp[2], xp[3], rho_kg_m3) {
+                let bp = match self.force_buildup(xp[0], xp[1], xp[2], xp[3], 0.0, rho_kg_m3) {
                     Ok(b) => b,
                     Err(_) => {
                         hh = -h[c];
                         let mut xm = x;
                         xm[c] += hh;
-                        self.force_buildup(xm[0], xm[1], xm[2], xm[3], rho_kg_m3)?
+                        self.force_buildup(xm[0], xm[1], xm[2], xm[3], 0.0, rho_kg_m3)?
                     }
                 };
                 let rp = [
@@ -590,7 +605,9 @@ impl OpenLoopDesign {
                     (x[2] + lambda * dx[2]).clamp(-0.5, 0.5),
                     (x[3] + lambda * dx[3]).clamp(15.0, 90.0),
                 ];
-                if let Ok(bc) = self.force_buildup(cand[0], cand[1], cand[2], cand[3], rho_kg_m3) {
+                if let Ok(bc) =
+                    self.force_buildup(cand[0], cand[1], cand[2], cand[3], 0.0, rho_kg_m3)
+                {
                     let rc = [
                         bc.force_n[0],
                         bc.force_n[2],

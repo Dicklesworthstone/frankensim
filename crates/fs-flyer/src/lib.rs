@@ -27,6 +27,7 @@ pub mod checkpoint;
 pub mod contact;
 pub mod dragledger;
 pub mod effectowners;
+pub mod longitudinal;
 pub mod partitioned;
 pub mod prelaunch;
 pub mod propcoupling;

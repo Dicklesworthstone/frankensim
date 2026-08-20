@@ -15,7 +15,7 @@ const RHO: f64 = 1.294;
 #[test]
 fn force_buildup_per_axis_oracles() {
     let d = wright_openloop_v1();
-    let b = d.force_buildup(13.86, 0.06, 0.05, 40.0, RHO).unwrap();
+    let b = d.force_buildup(13.86, 0.06, 0.05, 40.0, 0.0, RHO).unwrap();
     // Per-axis oracles against independent recomputation. lift_n is the
     // z-component of the KJ forces; KJ acts perpendicular to the local
     // freestream, so its x-component is EXACTLY lift_n·tan(alpha) (the
@@ -56,8 +56,8 @@ fn force_buildup_per_axis_oracles() {
 fn canard_command_sign_matches_the_frozen_convention() {
     // control-signs-v1: positive canard command -> POSITIVE pitch moment.
     let d = wright_openloop_v1();
-    let lo = d.force_buildup(13.86, 0.06, 0.00, 40.0, RHO).unwrap();
-    let hi = d.force_buildup(13.86, 0.06, 0.10, 40.0, RHO).unwrap();
+    let lo = d.force_buildup(13.86, 0.06, 0.00, 40.0, 0.0, RHO).unwrap();
+    let hi = d.force_buildup(13.86, 0.06, 0.10, 40.0, 0.0, RHO).unwrap();
     assert!(
         hi.moment_y_nm > lo.moment_y_nm + 10.0,
         "positive dc must raise M_y: {} -> {}",
@@ -166,21 +166,25 @@ fn untrimmable_configuration_refuses_typed() {
 fn state_domain_refusals() {
     let d = wright_openloop_v1();
     assert_eq!(
-        d.force_buildup(0.5, 0.06, 0.0, 40.0, RHO).unwrap_err().code,
-        "state-invalid"
-    );
-    assert_eq!(
-        d.force_buildup(13.0, 0.7, 0.0, 40.0, RHO).unwrap_err().code,
-        "state-invalid"
-    );
-    assert_eq!(
-        d.force_buildup(13.0, 0.06, 0.0, 200.0, RHO)
+        d.force_buildup(0.5, 0.06, 0.0, 40.0, 0.0, RHO)
             .unwrap_err()
             .code,
         "state-invalid"
     );
     assert_eq!(
-        d.force_buildup(13.0, 0.06, 0.0, 40.0, f64::NAN)
+        d.force_buildup(13.0, 0.7, 0.0, 40.0, 0.0, RHO)
+            .unwrap_err()
+            .code,
+        "state-invalid"
+    );
+    assert_eq!(
+        d.force_buildup(13.0, 0.06, 0.0, 200.0, 0.0, RHO)
+            .unwrap_err()
+            .code,
+        "state-invalid"
+    );
+    assert_eq!(
+        d.force_buildup(13.0, 0.06, 0.0, 40.0, 0.0, f64::NAN)
             .unwrap_err()
             .code,
         "state-invalid"
