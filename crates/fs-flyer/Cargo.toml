@@ -17,6 +17,8 @@ fs-geom = { path = "../fs-geom" }
 fs-math = { path = "../fs-math" }
 fs-mbd = { path = "../fs-mbd" }
 fs-time = { path = "../fs-time" }
+fs-wing = { path = "../fs-wing" }
+fs-airscrew = { path = "../fs-airscrew" }
 
 [lints]
 workspace = true

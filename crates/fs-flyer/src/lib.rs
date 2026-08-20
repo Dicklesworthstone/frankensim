@@ -26,6 +26,7 @@ pub mod checkpoint;
 pub mod contact;
 pub mod partitioned;
 pub mod prelaunch;
+pub mod propcoupling;
 pub mod rail;
 pub mod replay;
 pub mod sections;

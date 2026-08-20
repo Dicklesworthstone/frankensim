@@ -1488,11 +1488,13 @@ name = "fs-flyer"
 version = "0.0.1"
 dependencies = [
  "fs-airfoil",
+ "fs-airscrew",
  "fs-blake3",
  "fs-geom",
  "fs-math",
  "fs-mbd",
  "fs-time",
+ "fs-wing",
 ]
 
 [[package]]
