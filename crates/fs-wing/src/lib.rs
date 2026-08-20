@@ -22,6 +22,7 @@
 
 use fs_math::det;
 
+pub mod images;
 pub mod nonlinear;
 
 /// Panel-count cap (refusals at cap AND cap+1).

@@ -23,6 +23,15 @@ safeguarded iteration, branch identity).
 - `solve_weissinger_linear(panels, freestream, rho) -> SolveReport
   { gamma, condition_est, surface_lift_n, total_lift_n }`.
 
+- `images::CertifiedGround` + `solve_weissinger_ground` — the exact
+  vortex-image system across the certified flat plane (mirrored corners,
+  a/b swapped, mirrored-stream trailing legs); admissible ONLY inside the
+  FlatnessCertificate bands (cross-linked with fs-flyer::prelaunch;
+  `ground-uncertified` otherwise); `aircraft-below-ground` refusal.
+- `nonlinear::solve_nonlinear` — the production force path: strip-level
+  section closure vs TRAILING-SHEET induced alpha, warm-started
+  safeguarded relaxation, branch identity, enforced operator-reuse rule.
+
 ## Invariants
 
 - No scalar biplane factor anywhere: interference EMERGES from the
