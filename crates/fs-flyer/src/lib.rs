@@ -24,6 +24,7 @@ pub mod adapter;
 pub mod addedmass;
 pub mod aerowarp;
 pub mod aircraft;
+pub mod assist;
 pub mod canardmech;
 pub mod checkpoint;
 pub mod contact;
