@@ -26,6 +26,7 @@ use fs_blake3::hash_domain;
 use fs_time::lie::rigid_body_step;
 
 pub mod archive;
+pub mod ring;
 
 /// Versioned identity domain for hello-kernel trajectory digests.
 pub const HELLO_DIGEST_DOMAIN: &str = "org.frankensim.fs-flyer-wasm.hello-trajectory.v1";
@@ -387,8 +388,15 @@ mod tests {
     #[test]
     fn aero_step_yaws_when_torque_is_applied() {
         let free = hello_spin(INERTIA, IDENTITY_Q, [0.0, 0.0, 0.0], DT, 120).unwrap();
-        let yawed = aero_step(INERTIA, IDENTITY_Q, [0.0, 0.0, 0.0], [0.0, 4.0, 0.0], DT, 120)
-            .unwrap();
+        let yawed = aero_step(
+            INERTIA,
+            IDENTITY_Q,
+            [0.0, 0.0, 0.0],
+            [0.0, 4.0, 0.0],
+            DT,
+            120,
+        )
+        .unwrap();
         assert!(
             (yawed.omega_body[1] - free.omega_body[1]).abs() > 1.0e-6,
             "yaw torque must change ω_y"

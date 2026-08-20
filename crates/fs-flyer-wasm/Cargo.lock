@@ -51,7 +51,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "asupersync"
-version = "0.4.7"
+version = "0.4.9"
 dependencies = [
  "aes-gcm",
  "asupersync-macros",
@@ -102,7 +102,7 @@ dependencies = [
 
 [[package]]
 name = "asupersync-macros"
-version = "0.4.7"
+version = "0.4.9"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -486,7 +486,7 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "franken-decision"
-version = "0.4.7"
+version = "0.4.9"
 dependencies = [
  "franken-evidence",
  "franken-kernel",
@@ -495,7 +495,7 @@ dependencies = [
 
 [[package]]
 name = "franken-evidence"
-version = "0.4.7"
+version = "0.4.9"
 dependencies = [
  "serde",
  "serde_json",
@@ -503,7 +503,7 @@ dependencies = [
 
 [[package]]
 name = "franken-kernel"
-version = "0.4.7"
+version = "0.4.9"
 dependencies = [
  "serde",
 ]
@@ -617,6 +617,10 @@ version = "0.0.1"
 [[package]]
 name = "fs-mbd"
 version = "0.0.1"
+dependencies = [
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "fs-obs"
