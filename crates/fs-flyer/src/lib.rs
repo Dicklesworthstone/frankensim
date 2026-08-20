@@ -23,6 +23,7 @@ use fs_blake3::hash_domain;
 pub mod adapter;
 pub mod addedmass;
 pub mod aircraft;
+pub mod canardmech;
 pub mod checkpoint;
 pub mod contact;
 pub mod dragledger;
