@@ -905,6 +905,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-airscrew"
+version = "0.0.1"
+dependencies = [
+ "fs-airfoil",
+ "fs-blake3",
+ "fs-math",
+]
+
+[[package]]
 name = "fs-alloc"
 version = "0.0.1"
 dependencies = [

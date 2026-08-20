@@ -34,6 +34,7 @@ members = [
     "crates/fs-solver",
     "crates/fs-adjoint",
     "crates/fs-airfoil",
+    "crates/fs-airscrew",
     "crates/fs-atmo",
     "crates/fs-ascent",
     "crates/fs-topopt",

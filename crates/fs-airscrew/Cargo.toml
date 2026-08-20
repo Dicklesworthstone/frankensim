@@ -1,0 +1,19 @@
+[package]
+name = "fs-airscrew"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Propulsion: BEMT rotor kernels on fs-airfoil sections, rotor/engine/drivetrain dynamics."
+
+[package.metadata.frankensim]
+layer = "L3"
+
+[dependencies]
+fs-airfoil = { path = "../fs-airfoil" }
+fs-blake3 = { path = "../fs-blake3" }
+fs-math = { path = "../fs-math" }
+
+[lints]
+workspace = true
