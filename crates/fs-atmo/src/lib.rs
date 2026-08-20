@@ -32,6 +32,7 @@
 use fs_math::det;
 use fs_rand::StreamKey;
 
+pub mod mann;
 pub mod ou;
 
 /// Registered fs-rand kernel id for atmosphere draws ("ATMO").
