@@ -1496,6 +1496,7 @@ dependencies = [
  "fs-mbd",
  "fs-rand",
  "fs-time",
+ "fs-wakeref",
  "fs-wing",
 ]
 

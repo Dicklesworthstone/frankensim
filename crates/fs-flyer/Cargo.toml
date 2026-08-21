@@ -18,6 +18,7 @@ fs-math = { path = "../fs-math" }
 fs-mbd = { path = "../fs-mbd" }
 fs-rand = { path = "../fs-rand" }
 fs-time = { path = "../fs-time" }
+fs-wakeref = { path = "../fs-wakeref" }
 fs-wing = { path = "../fs-wing" }
 fs-airscrew = { path = "../fs-airscrew" }
 fs-atmo = { path = "../fs-atmo" }
