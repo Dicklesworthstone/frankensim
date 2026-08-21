@@ -92,18 +92,16 @@ fn state_envelope(s: &SimStateOut, envelope_code: Option<&str>) -> String {
     )
 }
 
-/// The 1-second canonical self-test scenario goldens, PER LANE.
-/// Cross-lane identity is tracked at bead guzez.7.2.1 (FMA-contraction
-/// class, measured 2026-08-21); until it lands each lane pins its own
-/// golden and the CI records the cross-lane pair as EXPECTED-DIVERGENT
-/// — loudly, never silently.
-#[cfg(target_arch = "wasm32")]
+/// The 1-second canonical self-test scenario golden — ONE value for
+/// EVERY lane (bead guzez.7.2.1, closed 2026-08-21). The old per-lane
+/// split was never FP contraction: the true cause was platform libm
+/// reaching the tick path through `f64::acos` in the fs-airscrew
+/// Prandtl tip/root factors and `f64::tanh` in fs-flyer ground-contact
+/// friction; both are det::-routed now and native (aarch64 debug +
+/// release) and wasm (node debug + release) produce this digest
+/// bit-for-bit. Cross-lane identity is REQUIRED from here on.
 pub const SELFTEST_GOLDEN: &str =
-    "f088689ae4c60ec33a2034ec7020c85772bfc016968fa9ae5f6d92a308fcbbb6";
-/// Native (aarch64/x86 pending the six-lane matrix) canonical golden.
-#[cfg(not(target_arch = "wasm32"))]
-pub const SELFTEST_GOLDEN: &str =
-    "823d9f59dd162c8bc0764e144236d2f00abc48a12142095688a22e59ae95ca9d";
+    "975c44f0ffd8c0f7c40f9c39986e51b62bb9e67beab1e3183dce82efc3886018";
 
 /// Run the canonical 1-second scenario and compare against a golden
 /// (the startup self-test core; the shipped entry uses

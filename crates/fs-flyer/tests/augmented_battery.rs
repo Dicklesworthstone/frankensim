@@ -273,8 +273,11 @@ fn determinism_and_golden() {
     let digest =
         fs_blake3::hash_domain("org.frankensim.fs-flyer.e82i-golden.v1", &payload).to_hex();
     jlog("golden", &format!("\"digest\":\"{digest}\""));
+    // Golden bump 2026-08-21 (bead guzez.7.2.1): det::-routing of
+    // Prandtl acos + contact tanh moved the trim point by ulps;
+    // the spectrum golden follows the trim it linearizes about.
     assert_eq!(
-        digest, "151c25bc8a833708bbdd4f32601e79b08d0be38db192836bb9c1ca06d5e069a0",
+        digest, "389e2a7c4f5a97e8c8507e011979571d10cb87d50c3f57d0b06cd38955d29321",
         "augmented-spectrum golden moved — determinism regression or an \
          intentional model change requiring the golden-bump protocol"
     );

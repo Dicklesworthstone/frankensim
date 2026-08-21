@@ -215,8 +215,11 @@ fn trim_golden_digest() {
     let digest =
         fs_blake3::hash_domain("org.frankensim.fs-flyer.e46aii-golden.v1", &payload).to_hex();
     jlog("golden", &format!("\"digest\":\"{digest}\""));
+    // Golden bump 2026-08-21 (bead guzez.7.2.1): fs-airscrew Prandtl
+    // acos + fs-flyer contact tanh routed through det::, unifying the
+    // native and wasm lanes; the trim point moved by ulps.
     assert_eq!(
-        digest, "e9e131e0cf3e973d8a6929e4b2df7d43a0a485b26190a6d7054b5bb773d8e12d",
+        digest, "cb6efe9fcc135822d43376baea3c48815257eb4a473e48b7d2b50e933dd3563c",
         "trim golden moved — determinism regression or an intentional \
          model change requiring the golden-bump protocol"
     );

@@ -5,14 +5,17 @@
 #   aarch64 x {debug, release}     — runs here (native goldens)
 #   wasm-in-node x {debug, release}— runs here (wasm golden)
 #   x86 x {debug, release}         — needs an x86 CI host (recorded)
-# Cross-lane identity (native vs wasm) is EXPECTED-DIVERGENT until the
-# FMA-contraction remediation lands (bead guzez.7.2.1) — the pair is
-# compared and reported LOUDLY either way.
+# Cross-lane identity (native vs wasm) is REQUIRED-IDENTICAL (bead
+# guzez.7.2.1 closed 2026-08-21: the divergence was platform libm —
+# acos in the fs-airscrew Prandtl factors, tanh in fs-flyer contact
+# friction — routed through det::, NOT FP contraction). ONE golden
+# now pins all lanes and a cross-lane mismatch FAILS the run.
 # Repro: tools/wf-ci/golden_lanes.sh
 set -u
 cd "$(dirname "$0")/../.."
-NATIVE_GOLDEN="823d9f59dd162c8bc0764e144236d2f00abc48a12142095688a22e59ae95ca9d"
-WASM_GOLDEN="f088689ae4c60ec33a2034ec7020c85772bfc016968fa9ae5f6d92a308fcbbb6"
+GOLDEN="975c44f0ffd8c0f7c40f9c39986e51b62bb9e67beab1e3183dce82efc3886018"
+NATIVE_GOLDEN="$GOLDEN"
+WASM_GOLDEN="$GOLDEN"
 PKG="${WF_PKG_DIR:-/tmp/wf-ci-pkg}"
 fail=0
 lane() { # name digest golden
@@ -39,8 +42,9 @@ lane "wasm-node-debug" "$WDBG" "$WASM_GOLDEN"
 echo "{\"suite\":\"wf-golden-ci\",\"lane\":\"x86-release\",\"pass\":null,\"status\":\"NO-DATA: needs an x86 CI host\"}"
 echo "{\"suite\":\"wf-golden-ci\",\"lane\":\"x86-debug\",\"pass\":null,\"status\":\"NO-DATA: needs an x86 CI host\"}"
 if [ "$REL" = "$WREL" ]; then
-  echo "{\"suite\":\"wf-golden-ci\",\"check\":\"cross-lane-identity\",\"pass\":true,\"note\":\"REMEDIATED? flip guzez.7.2.1 and unify the goldens\"}"
+  echo "{\"suite\":\"wf-golden-ci\",\"check\":\"cross-lane-identity\",\"pass\":true,\"digest\":\"$REL\"}"
 else
-  echo "{\"suite\":\"wf-golden-ci\",\"check\":\"cross-lane-identity\",\"pass\":false,\"expected_divergent\":true,\"tracked\":\"guzez.7.2.1\",\"native\":\"$REL\",\"wasm\":\"$WREL\"}"
+  echo "{\"suite\":\"wf-golden-ci\",\"check\":\"cross-lane-identity\",\"pass\":false,\"required_identical\":true,\"closed\":\"guzez.7.2.1\",\"native\":\"$REL\",\"wasm\":\"$WREL\"}"
+  fail=1
 fi
 exit $fail
