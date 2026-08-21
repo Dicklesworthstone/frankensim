@@ -7,6 +7,7 @@ import { createFlyerSceneRenderer } from "./flyerScene.ts";
 import { SimClient } from "./sim/simClient.ts";
 import { MODE_FIXED, MODE_HISTORICAL, dec17Scenario, huffmanScenario } from "./sim/protocol.ts";
 import { recordedToScenario, replayVerdict, type FlightRecording } from "./sim/replay.ts";
+import { cardLines, computeKpis, kpiRecomputeDivergence } from "./sim/resultsCard.ts";
 import { MODE_HUMAN } from "./sim/protocol.ts";
 import { LatencyLedger, toPhysical } from "./sim/humanControls.ts";
 import { NEUTRAL, keysFrom, stepCommand, type PilotCommand } from "./input.ts";
@@ -43,6 +44,12 @@ function main(): void {
   // E5.3a: latency decomposition ledger (device→sent→ack→published→
   // present), JSONL per completed control sample.
   const ledger = new LatencyLedger((line) => console.info(line));
+  // E5.5 results-card overlay (hidden until a run ends).
+  const resultsCardEl = document.createElement("pre");
+  resultsCardEl.style.cssText =
+    "position:fixed;right:12px;top:48px;display:none;font:12px/1.5 monospace;" +
+    "color:#f5efe0;background:rgba(20,24,30,.85);padding:10px 12px;border-radius:6px;max-width:44ch";
+  document.body.appendChild(resultsCardEl);
   let simClient: SimClient | undefined;
   let renderer = createFlyerSceneRenderer(app);
   const resize = (): void => renderer.resize(app.clientWidth, app.clientHeight);
@@ -71,6 +78,23 @@ function main(): void {
       },
       onTerminal(info): void {
         console.info(JSON.stringify({ suite: "wright-flyer-app", stage: "sim-terminal", ...info }));
+        // E5.5: the results card — KPIs recomputed from the sim-plane
+        // transcript, gated by the recompute check before display.
+        const recording = client.takeRecording();
+        if (recording !== null) {
+          const kpis = computeKpis(recording);
+          const divergence = kpiRecomputeDivergence(recording, kpis);
+          const site = params.get("site") === "huffman" ? "Huffman Prairie" : "Kill Devil Hills";
+          const lines =
+            divergence === null
+              ? cardLines(kpis, site)
+              : [`RESULTS CARD WITHHELD — KPI recompute divergence: ${divergence}`];
+          resultsCardEl.textContent = lines.join("\n");
+          resultsCardEl.style.display = "block";
+          console.info(
+            JSON.stringify({ suite: "wright-flyer-app", stage: "results-card", kpis, divergence }),
+          );
+        }
         // E5.2c: replay identity verdict against the previous run —
         // the engine's chained digest, surfaced on screen and in the log.
         if (expected !== undefined) {
@@ -154,6 +178,7 @@ function main(): void {
       if (recording === null) {
         return; // run not finished yet
       }
+      resultsCardEl.style.display = "none";
       simClient.dispose();
       simClient = makeClient(recording);
       simClient.start(recordedToScenario(recording.scenario));
