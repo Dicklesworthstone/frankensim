@@ -49,9 +49,11 @@ pub fn buildup_spread_json() -> String {
         match design.force_buildup(p[0], p[1], p[2], p[3], 0.0, 1.294) {
             Ok(b) => {
                 out.push_str(&format!(
-                    "\"p{i}\":[\"{}\",\"{}\",{}],",
+                    "\"p{i}\":[\"{}\",\"{}\",\"{}\",\"{}\",{}],",
+                    b.force_n[0].to_bits(),
                     b.force_n[2].to_bits(),
                     b.moment_y_nm.to_bits(),
+                    b.torque_imbalance_nm.to_bits(),
                     b.coupled.corrections
                 ));
             }
@@ -60,6 +62,67 @@ pub fn buildup_spread_json() -> String {
     }
     out.pop();
     out.push('}');
+    out
+}
+
+/// Pinned-input BEMT bit probe (guzez.7.2.1 lane bisection, level 3):
+/// `bemt_solve` at the canonical rotor/rho/omega across a v_disk sweep
+/// bracketing the diverging p0 spread state. If thrust bits differ at
+/// PINNED inputs the divergence lives inside fs-airscrew; if not, it
+/// lives upstream in the disk-inflow projection.
+#[must_use]
+pub fn bemt_probe_json() -> String {
+    use fs_airscrew::bemt_solve;
+    use fs_flyer::aircraft::wright_rotor_v1;
+    let rotor = wright_rotor_v1();
+    let sweep = [12.9, 13.0, 13.05, 13.1, 13.2, 14.05];
+    let mut out = String::from("{");
+    for (i, v) in sweep.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        match bemt_solve(&rotor, 1.294, *v, 45.0) {
+            Ok(s) => out.push_str(&format!(
+                "\"v{i}\":[\"{}\",\"{}\"]",
+                s.thrust_n.to_bits(),
+                s.torque_nm.to_bits()
+            )),
+            Err(e) => out.push_str(&format!("\"v{i}\":\"{}\"", e.code)),
+        }
+    }
+    out.push('}');
+    out
+}
+
+/// Bit-exact trim iterate trace at the canonical start (guzez.7.2.1
+/// lane bisection): the first differing iterate across lanes localizes
+/// where cross-lane divergence enters the trim search.
+#[must_use]
+pub fn trim_trace_json() -> String {
+    use fs_flyer::aircraft::wright_openloop_v1;
+    let design = wright_openloop_v1();
+    let mut trace = Vec::new();
+    let outcome = design.trim_traced(1.294, [13.0, 0.06, 0.1, 45.0], &mut trace);
+    let mut out = String::from("{\"iters\":[");
+    for (i, x) in trace.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str(&format!(
+            "[\"{}\",\"{}\",\"{}\",\"{}\"]",
+            x[0], x[1], x[2], x[3]
+        ));
+    }
+    match outcome {
+        Ok(t) => out.push_str(&format!(
+            "],\"alpha\":\"{}\",\"v\":\"{}\",\"dc\":\"{}\",\"omega\":\"{}\"}}",
+            t.alpha_rad.to_bits(),
+            t.v_mps.to_bits(),
+            t.delta_canard_rad.to_bits(),
+            t.omega_prop_rad_s.to_bits(),
+        )),
+        Err(e) => out.push_str(&format!("],\"refusal\":\"{}\"}}", e.code)),
+    }
     out
 }
 
@@ -451,6 +514,20 @@ mod js {
     #[must_use]
     pub fn flyer_selftest() -> String {
         super::engine::selftest()
+    }
+
+    /// Trim iterate bit-trace (guzez.7.2.1 lane bisection).
+    #[wasm_bindgen]
+    #[must_use]
+    pub fn flyer_trim_trace() -> String {
+        crate::trim_trace_json()
+    }
+
+    /// Pinned-input BEMT bit probe (guzez.7.2.1 lane bisection).
+    #[wasm_bindgen]
+    #[must_use]
+    pub fn flyer_bemt_probe() -> String {
+        crate::bemt_probe_json()
     }
 
     /// Spread probe (E6.2 lane bisection).

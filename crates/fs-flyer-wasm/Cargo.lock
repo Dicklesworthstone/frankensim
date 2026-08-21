@@ -624,6 +624,7 @@ name = "fs-flyer-wasm"
 version = "0.0.1"
 dependencies = [
  "asupersync",
+ "fs-airscrew",
  "fs-blake3",
  "fs-flyer",
  "fs-math",
