@@ -550,7 +550,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-bem"
+version = "0.0.1"
+dependencies = [
+ "fs-casebook",
+ "fs-fmm",
+ "fs-geom",
+ "fs-la",
+ "fs-math",
+ "fs-rep-mesh",
+ "fs-solver",
+]
+
+[[package]]
 name = "fs-blake3"
+version = "0.0.1"
+
+[[package]]
+name = "fs-casebook"
 version = "0.0.1"
 
 [[package]]
@@ -591,6 +608,7 @@ dependencies = [
  "fs-airfoil",
  "fs-airscrew",
  "fs-atmo",
+ "fs-bem",
  "fs-blake3",
  "fs-geom",
  "fs-math",
@@ -614,6 +632,10 @@ dependencies = [
  "getrandom 0.4.3",
  "wasm-bindgen",
 ]
+
+[[package]]
+name = "fs-fmm"
+version = "0.0.1"
 
 [[package]]
 name = "fs-ga"
