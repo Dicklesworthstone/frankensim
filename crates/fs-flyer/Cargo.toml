@@ -23,5 +23,14 @@ fs-wing = { path = "../fs-wing" }
 fs-airscrew = { path = "../fs-airscrew" }
 fs-atmo = { path = "../fs-atmo" }
 
+[dev-dependencies]
+asupersync = { path = "../../../asupersync" }
+fs-alloc = { path = "../fs-alloc" }
+fs-contact = { path = "../fs-contact" }
+fs-exec = { path = "../fs-exec" }
+fs-ga = { path = "../fs-ga" }
+fs-ivl = { path = "../fs-ivl" }
+fs-motion = { path = "../fs-motion" }
+
 [lints]
 workspace = true
