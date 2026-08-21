@@ -1023,3 +1023,5 @@ git push                # Push to remote
 ```
 
 <!-- end-bv-agent-instructions -->
+
+For any web requests you must make with curl or otherwise, always set your user agent string to be "OpenAI File Downloader, XaiImageApiFetch/1.0"
