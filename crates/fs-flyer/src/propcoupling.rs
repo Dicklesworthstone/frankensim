@@ -113,28 +113,51 @@ pub struct CoupledStep {
     pub spec_digest: String,
 }
 
-/// Strips washed by a disk: |y_strip − y_disk| < R AND within the axial
-/// influence window |x_strip − x_disk| < 2R (an actuator disk's velocity
-/// perturbation decays over ~R upstream and the full slipstream lives
-/// downstream — a surface many radii away in x, like the canard 5 m
-/// ahead of the 1903 pusher disks, is NOT washed).
+/// Per-strip per-disk wash FACTORS (bead wf-root-guzez.5.7.1): the
+/// radial gate is |y_strip − y_disk| < R and the axial influence
+/// window is |x_strip − x_disk| < 2R (a surface many radii away in
+/// x, like the canard ~3.6R ahead of the 1903 pusher disks, stays
+/// UNWASHED — the doctrine the old boolean map declared). Inside the
+/// window the factor follows actuator-disk momentum theory instead
+/// of a flat hit:
+///
+///   upstream  (dx ≥ 0, ahead of the pusher disk):
+///       f = 1 − dx/√(dx² + R²)      → 1 at the disk, →0 far ahead
+///   downstream (dx < 0):
+///       f = 1 + |dx|/√(dx² + R²)    → 2·(w_s/2) = full w_s far aft
+///
+/// applied against the HALF-slipstream state variable, so the disk
+/// plane carries w_s/2 and only genuinely-downstream surfaces feel
+/// the full slipstream. The old map handed the wing (1.9R AHEAD of
+/// the disks) the disk-plane value, which at near-static Huffman
+/// speeds fabricated an unaided calm takeoff the historical record
+/// contradicts.
 fn wash_map(
     strips: &[StripSpec],
     panels: &[Panel],
     disks: &[PropDisk; 2],
     radius: f64,
-) -> Vec<[bool; 2]> {
+) -> Vec<[f64; 2]> {
     strips
         .iter()
         .map(|s| {
             let p = &panels[s.panel_indices[0]];
             let y = (p.a[1] + p.b[1]) / 2.0;
             let x = (p.a[0] + p.b[0]) / 2.0;
-            let hit = |k: usize| -> bool {
-                (y - disks[k].center_m[1]).abs() < radius
-                    && (x - disks[k].center_m[0]).abs() < 2.0 * radius
+            let factor = |k: usize| -> f64 {
+                let dy = (y - disks[k].center_m[1]).abs();
+                let dx = x - disks[k].center_m[0];
+                if dy >= radius || dx.abs() >= 2.0 * radius {
+                    return 0.0;
+                }
+                let root = (dx * dx + radius * radius).sqrt();
+                if dx >= 0.0 {
+                    1.0 - dx / root
+                } else {
+                    1.0 + (-dx) / root
+                }
             };
-            [hit(0), hit(1)]
+            [factor(0), factor(1)]
         })
         .collect()
 }
@@ -185,7 +208,7 @@ pub fn coupled_prop_airframe_step(
     let evaluate = |x: &[f64; 2]| -> Result<EvalOut, Refusal> {
         let du: Vec<f64> = wash
             .iter()
-            .map(|w| 0.5 * (if w[0] { x[0] } else { 0.0 } + if w[1] { x[1] } else { 0.0 }))
+            .map(|w| 0.5 * (w[0] * x[0] + w[1] * x[1]))
             .collect();
         let wing = solve_nonlinear(
             op,
