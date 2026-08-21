@@ -26,6 +26,7 @@ use fs_blake3::hash_domain;
 use fs_time::lie::rigid_body_step;
 
 pub mod archive;
+pub mod engine;
 pub mod ring;
 
 /// Versioned identity domain for hello-kernel trajectory digests.
@@ -177,7 +178,7 @@ pub fn hello_digest(
 // doubles; floats are serialized exactly via shortest-roundtrip formatting).
 // ---------------------------------------------------------------------------
 
-fn json_escape(value: &str) -> String {
+pub(crate) fn json_escape(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for ch in value.chars() {
         match ch {
@@ -300,7 +301,58 @@ pub fn hello_spin_json(
 // ---------------------------------------------------------------------------
 #[cfg(target_arch = "wasm32")]
 mod js {
+    use core::cell::RefCell;
     use wasm_bindgen::prelude::wasm_bindgen;
+
+    thread_local! {
+        static ENGINE: RefCell<super::engine::EngineSlot> =
+            RefCell::new(super::engine::EngineSlot::default());
+    }
+
+    /// Initialize the Wright Flyer lifecycle engine (E5.1). Replaces
+    /// any prior run in this worker. mode: 0=fixed, 1=historical
+    /// (member selects the registered pilot), 2=human. Returns the
+    /// init envelope (run_intent_id, tick0_digest, trim) or a typed
+    /// refusal envelope.
+    #[wasm_bindgen]
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn flyer_engine_init(
+        seed: u64,
+        rho_kg_m3: f64,
+        headwind_mps: f64,
+        mode: u32,
+        member: u32,
+        rail_length_m: f64,
+        max_ticks: u64,
+    ) -> String {
+        ENGINE.with(|e| {
+            e.borrow_mut().init(
+                seed,
+                rho_kg_m3,
+                headwind_mps,
+                mode,
+                member,
+                rail_length_m,
+                max_ticks,
+            )
+        })
+    }
+
+    /// One 120 Hz engine step. `has_input` gates whether (lever, warp)
+    /// is a ControlInput (Human mode requires it every tick).
+    #[wasm_bindgen]
+    #[must_use]
+    pub fn flyer_engine_step(has_input: bool, lever_force_n: f64, warp_cmd_rad: f64) -> String {
+        ENGINE.with(|e| e.borrow_mut().step(has_input, lever_force_n, warp_cmd_rad))
+    }
+
+    /// The chained lifecycle digest envelope.
+    #[wasm_bindgen]
+    #[must_use]
+    pub fn flyer_engine_digest() -> String {
+        ENGINE.with(|e| e.borrow().digest())
+    }
 
     /// Deterministic free rigid-body spin; returns the typed JSON envelope.
     #[wasm_bindgen]

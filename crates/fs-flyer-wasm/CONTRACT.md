@@ -63,6 +63,29 @@ integer ratio 1/120) with its pinned trajectory digest; the battery drives
 corruption, truncation, mirror-divergence, malformed-envelope, and
 wrong-kernel-replay twins.
 
+## Engine surface v1 (E5.1, bead guzez.6.2)
+
+`engine::EngineSlot` wraps the REAL `fs_flyer::simloop::SimLoop` (the
+E4-certified physics: equilibrated tick-0 closure, coupled prop–airframe
+force build-up per tick, canard mechanism, perception/pilot family, OU
+gust). Scalars in, envelopes out — no JSON parsing at the boundary, no
+serde, no mocks. The wasm exports are 1:1 wrappers over a thread-local
+slot; the SAME functions are battle-tested natively (`engine_battery`)
+and from node against the actual wasm binary
+(`node-harness/engine_harness.mjs`).
+
+| Entry | Contract |
+|---|---|
+| `flyer_engine_init(seed, rho, headwind, mode, member, rail_m, max_ticks)` | admission (caps at cap AND cap+1) → equilibrate → RunIntentId minted AFTER the tick-0 digest; returns run identity + trim; replaces any prior run (the E5.0 ring epoch bump is the consumer-side guard) |
+| `flyer_engine_step(has_input, lever_n, warp_rad)` | one 120 Hz step; mode words: 0=fixed, 1=historical(member), 2=human (input REQUIRED every tick — absent or non-finite input is a typed refusal, never a silent zero-hold) |
+| `flyer_engine_digest()` | chained per-tick blake3 digest (`org.frankensim.wf.sim-digest.v1`) — bit-identical lifecycles are checkable |
+
+Terminal events arrive IN-BAND as `phase` words (`ended:ground-contact`,
+`ended:rail-end-without-lift`, `ended:max-ticks`,
+`ended:envelope-exceeded`); a mid-flight aero refusal ENDS the run as
+`ended:envelope-exceeded` with `envelope_refusal_code` carried in the
+same envelope — the UI gets a receipted flight ending, never a trap.
+
 ## No-claims
 
 - The hello kernel is a torque-free rigid body. It makes **no aerodynamic,
@@ -80,4 +103,10 @@ wrong-kernel-replay twins.
 `timestep-outside-domain`, `step-budget-exceeded`; archive loader:
 `archive-size-mismatch`, `archive-content-digest-mismatch`,
 `archive-mirror-divergence`, `archive-envelope-malformed`,
-`archive-replay-digest-mismatch`.
+`archive-replay-digest-mismatch`; ring (E5.0): `ring-config-invalid`,
+`ring-abi-mismatch`, `ring-publish-invalid`, `ring-lease-torn`,
+`ring-epoch-stale`; engine (E5.1): `engine-not-initialized`,
+`mode-invalid`, `scenario-invalid`, `control-input-missing`,
+`run-ended` (+ native physics refusals pass through verbatim at init;
+mid-flight aero refusals become the `ended:envelope-exceeded`
+terminal).

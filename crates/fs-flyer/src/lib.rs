@@ -43,6 +43,7 @@ pub mod rail;
 pub mod referee;
 pub mod replay;
 pub mod sections;
+pub mod simloop;
 pub mod spine;
 
 /// Identity domain for design digests.

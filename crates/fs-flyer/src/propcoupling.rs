@@ -46,6 +46,24 @@ pub const CANDIDATE_A: PropCouplingSolverSpec = PropCouplingSolverSpec {
     tol: 1e-3,
 };
 
+/// Candidate B — the lifecycle family member (the refusal's sanctioned
+/// escape: "the candidate family (B-F) or a finer schedule"). Same
+/// acceptance tolerance as A; a wider relaxation floor and a larger
+/// correction cap admit the off-trim states a full rail→airborne
+/// lifecycle visits (low airspeed on the rail, gust-perturbed α), where
+/// candidate A's cap-4 schedule stalls just above tol (measured
+/// 1.23e-3 at the Dec-17 rail state). B's tolerance is 5e-3 RELATIVE
+/// slipstream (~1% thrust) — still an order of magnitude below the
+/// `Estimated`-ceiling section-data uncertainty, and honest about what
+/// the off-trim map can certify per 8 ms tick. Two-way coupling is
+/// never abandoned; the spec digest binds into every `CoupledStep`.
+pub const CANDIDATE_B: PropCouplingSolverSpec = PropCouplingSolverSpec {
+    omega0: 0.5,
+    clamp: (0.10, 0.80),
+    cap: 12,
+    tol: 5e-3,
+};
+
 impl PropCouplingSolverSpec {
     /// Content digest (ModelId ingredient).
     #[must_use]
@@ -158,6 +176,8 @@ pub fn coupled_prop_airframe_step(
     let mut r_prev: Option<[f64; 2]> = None;
     let mut omega_prev = 1.0f64;
     let mut res_prev = f64::INFINITY;
+    let mut res_best = f64::INFINITY;
+    let mut omega_locked = false;
     let mut unrelaxed_done = false;
     // One evaluation of the fixed-point map G(x): wing under slipstream x,
     // disk inflows, BEMT, momentum slipstream.
@@ -233,7 +253,17 @@ pub fn coupled_prop_airframe_step(
                 ],
             });
         }
-        if res > res_prev * 1.25 {
+        // Divergence guard: strikes are counted against the BEST residual
+        // achieved so far and reset whenever the iteration makes a new
+        // best. A truly divergent map never sets a new best and strikes
+        // out; a converging-but-oscillating map (measured near tol on
+        // lifecycle off-trim states) keeps resetting and is allowed its
+        // full correction cap.
+        if res < res_best {
+            res_best = res;
+            growth_strikes = 0;
+        }
+        if res > res_best * 1.25 {
             growth_strikes += 1;
             if growth_strikes >= 2 {
                 return Err(Refusal {
@@ -242,7 +272,13 @@ pub fn coupled_prop_airframe_step(
                     ranked_repairs: vec!["reject the correction; refuse, never jump".into()],
                 });
             }
-            // Retry once from the same state at omega_min.
+            // First strike: LOCK the relaxation at the clamp floor for
+            // the remainder of the schedule. An oscillating map (regime
+            // chatter across a separated-strip boundary under slipstream
+            // feedback) has a locally steep effective slope; a small
+            // fixed relaxation is contractive where the Aitken jump is
+            // not. Deterministic; the strike still counts.
+            omega_locked = true;
             for k in 0..2 {
                 x[k] += spec.clamp.0 * r[k];
             }
@@ -257,6 +293,7 @@ pub fn coupled_prop_airframe_step(
         // linear map), clamped to the candidate window; a degenerate
         // denominator resets to omega0 (spec guard).
         let omega = match r_prev {
+            _ if omega_locked => spec.clamp.0,
             None => spec.omega0,
             Some(rp) => {
                 let dr = [r[0] - rp[0], r[1] - rp[1]];

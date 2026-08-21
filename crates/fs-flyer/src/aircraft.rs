@@ -341,6 +341,35 @@ impl OpenLoopDesign {
         q_pitch_rad_s: f64,
         rho_kg_m3: f64,
     ) -> Result<ForceBuildup, Refusal> {
+        self.force_buildup_warm(
+            v_mps,
+            alpha_rad,
+            delta_canard_rad,
+            omega_prop_rad_s,
+            q_pitch_rad_s,
+            rho_kg_m3,
+            None,
+        )
+    }
+
+    /// `force_buildup` with a warm-start slipstream for the coupled
+    /// solve (a lifecycle loop hands the previous tick's converged
+    /// `w_slip` — the converged answer is the same fixed point, reached
+    /// in fewer corrections; `None` is bitwise `force_buildup`).
+    ///
+    /// # Errors
+    /// As `force_buildup`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn force_buildup_warm(
+        &self,
+        v_mps: f64,
+        alpha_rad: f64,
+        delta_canard_rad: f64,
+        omega_prop_rad_s: f64,
+        q_pitch_rad_s: f64,
+        rho_kg_m3: f64,
+        warm: Option<[f64; 2]>,
+    ) -> Result<ForceBuildup, Refusal> {
         if !(v_mps.is_finite()
             && v_mps > 1.0
             && alpha_rad.is_finite()
@@ -374,7 +403,14 @@ impl OpenLoopDesign {
             for st in &mut strips {
                 let p0 = &panels[st.panel_indices[0]];
                 let dx = 0.5 * (p0.a[0] + p0.b[0]) - self.cg_m[0];
-                st.twist_rad -= q_pitch_rad_s * dx / v_mps;
+                // Tier clamp (declared): the quasi-steady plunge twist is
+                // bounded to ±0.25 rad so a violent pitch rate (PIO at the
+                // stops, |q| ~ 2.8 rad/s measured in the H-02c family)
+                // keeps the strips inside the closure's admitted domain.
+                // Damping stays monotone up to the bound; beyond it the
+                // model saturates rather than handing the wing solver a
+                // ±0.7 rad twist it cannot converge.
+                st.twist_rad -= (q_pitch_rad_s * dx / v_mps).clamp(-0.25, 0.25);
             }
         }
         let strips = strips;
@@ -423,7 +459,7 @@ impl OpenLoopDesign {
             fs_v,
             rho_kg_m3,
             &self.coupling,
-            None,
+            warm,
         )?;
         let q = 0.5 * rho_kg_m3 * v_mps * v_mps;
         let vhat = [fs_v[0] / v_mps, 0.0, fs_v[2] / v_mps];

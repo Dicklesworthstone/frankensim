@@ -517,10 +517,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-airfoil"
+version = "0.0.1"
+dependencies = [
+ "fs-blake3",
+ "fs-math",
+]
+
+[[package]]
+name = "fs-airscrew"
+version = "0.0.1"
+dependencies = [
+ "fs-airfoil",
+ "fs-blake3",
+ "fs-math",
+]
+
+[[package]]
 name = "fs-alloc"
 version = "0.0.1"
 dependencies = [
  "fs-obs",
+]
+
+[[package]]
+name = "fs-atmo"
+version = "0.0.1"
+dependencies = [
+ "fs-blake3",
+ "fs-math",
+ "fs-rand",
 ]
 
 [[package]]
@@ -559,11 +585,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-flyer"
+version = "0.0.1"
+dependencies = [
+ "fs-airfoil",
+ "fs-airscrew",
+ "fs-atmo",
+ "fs-blake3",
+ "fs-geom",
+ "fs-math",
+ "fs-mbd",
+ "fs-rand",
+ "fs-time",
+ "fs-wing",
+]
+
+[[package]]
 name = "fs-flyer-wasm"
 version = "0.0.1"
 dependencies = [
  "asupersync",
  "fs-blake3",
+ "fs-flyer",
  "fs-mbd",
  "fs-time",
  "getrandom 0.4.3",
@@ -740,6 +783,15 @@ dependencies = [
  "fs-la",
  "fs-math",
  "fs-solver",
+]
+
+[[package]]
+name = "fs-wing"
+version = "0.0.1"
+dependencies = [
+ "fs-airfoil",
+ "fs-blake3",
+ "fs-math",
 ]
 
 [[package]]
