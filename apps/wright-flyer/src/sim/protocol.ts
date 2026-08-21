@@ -62,10 +62,17 @@ export interface ScenarioInit {
   readonly member: number;
   readonly railLengthM: number;
   readonly maxTicks: bigint;
+  /** E5.3c: ratified bounded assist (ASSIST_V1, authority 0.3). */
+  readonly assist: boolean;
 }
 
 /** The Dec-17 reference scenario (mirror of dec17_scenario). */
-export function dec17Scenario(seed: bigint, mode: number, member = 0): ScenarioInit {
+export function dec17Scenario(
+  seed: bigint,
+  mode: number,
+  member = 0,
+  assist = false,
+): ScenarioInit {
   return {
     seed,
     rhoKgM3: 1.294,
@@ -74,6 +81,7 @@ export function dec17Scenario(seed: bigint, mode: number, member = 0): ScenarioI
     member,
     railLengthM: 18.3,
     maxTicks: 2400n,
+    assist,
   };
 }
 

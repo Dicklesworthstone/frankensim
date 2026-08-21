@@ -19,6 +19,7 @@
 //!     EnvelopeExceeded terminal instead of erroring, by design).
 
 use crate::{Refusal, json_escape, refusal_envelope};
+use fs_flyer::assist::ASSIST_V1;
 use fs_flyer::simloop::{
     ControlInput, Phase, PilotMode, ScenarioSpec, SimLoop, SimStateOut, TerminalEvent,
 };
@@ -70,7 +71,7 @@ fn state_envelope(s: &SimStateOut, envelope_code: Option<&str>) -> String {
         format!(",\"envelope_refusal_code\":\"{}\"", json_escape(c))
     });
     format!(
-        "{{\"ok\":{{\"tick\":{},\"phase\":\"{}\",\"x_m\":{},\"h_m\":{},\"u_mps\":{},\"w_mps\":{},\"q_rad_s\":{},\"theta_rad\":{},\"dc_rad\":{},\"warp_rad\":{},\"omega_prop_rad_s\":{},\"gust_w_mps\":{},\"assist_active\":{}{}}}}}",
+        "{{\"ok\":{{\"tick\":{},\"phase\":\"{}\",\"x_m\":{},\"h_m\":{},\"u_mps\":{},\"w_mps\":{},\"q_rad_s\":{},\"theta_rad\":{},\"dc_rad\":{},\"warp_rad\":{},\"omega_prop_rad_s\":{},\"gust_w_mps\":{},\"assist_active\":{},\"assist_dc_rad\":{}{}}}}}",
         s.tick,
         phase_word(s.phase),
         s.x_m,
@@ -84,6 +85,7 @@ fn state_envelope(s: &SimStateOut, envelope_code: Option<&str>) -> String {
         s.omega_prop_rad_s,
         s.gust_w_mps,
         s.assist_active,
+        s.assist_dc_rad,
         envelope_field,
     )
 }
@@ -91,6 +93,7 @@ fn state_envelope(s: &SimStateOut, envelope_code: Option<&str>) -> String {
 impl EngineSlot {
     /// Initialize a lifecycle (replaces any prior run in this slot).
     /// Returns the init envelope: run intent id, tick-0 digest, trim.
+    #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
     pub fn init(
         &mut self,
         seed: u64,
@@ -100,6 +103,7 @@ impl EngineSlot {
         member: u32,
         rail_length_m: f64,
         max_ticks: u64,
+        assist: bool,
     ) -> String {
         let pilot_mode = match mode {
             MODE_FIXED => PilotMode::FixedControls,
@@ -118,7 +122,10 @@ impl EngineSlot {
             rho_kg_m3,
             headwind_mps,
             pilot_mode,
-            assist: None,
+            // E5.3c: the ratified bounded assist (authority 0.3 of the
+            // canard stop, HUD-flagged; historical parameter identity
+            // is untouched — assist is scenario intent, not model).
+            assist: assist.then_some(ASSIST_V1),
             rail_length_m,
             max_ticks,
         };

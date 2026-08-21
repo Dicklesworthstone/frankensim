@@ -325,6 +325,7 @@ mod js {
         member: u32,
         rail_length_m: f64,
         max_ticks: u64,
+        assist: bool,
     ) -> String {
         ENGINE.with(|e| {
             e.borrow_mut().init(
@@ -335,6 +336,7 @@ mod js {
                 member,
                 rail_length_m,
                 max_ticks,
+                assist,
             )
         })
     }

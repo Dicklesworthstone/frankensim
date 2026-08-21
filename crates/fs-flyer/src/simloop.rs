@@ -156,6 +156,9 @@ pub struct SimStateOut {
     pub gust_w_mps: f64,
     /// Assist active this tick.
     pub assist_active: bool,
+    /// Assist canard contribution this tick [rad] (0 when no assist —
+    /// envelope-only visibility; NOT part of the frozen ring payload).
+    pub assist_dc_rad: f64,
 }
 
 /// The engine.
@@ -422,6 +425,7 @@ impl SimLoop {
         // Assist (bounded, flagged).
         let mut dc_eff = self.mech.delta_rad;
         let mut assist_active = false;
+        let mut assist_dc = 0.0;
         if let Some(a) = &self.spec.assist {
             let out = a.apply(
                 self.q,
@@ -430,6 +434,7 @@ impl SimLoop {
             )?;
             dc_eff += out.dc_assist_rad;
             assist_active = out.active;
+            assist_dc = out.dc_assist_rad;
         }
         // Aerodynamics at the CURRENT state (+ gust alpha increment).
         let alpha = det::atan2(self.w, self.u) + gust_w / v_air;
@@ -452,7 +457,7 @@ impl SimLoop {
                 // to the UI, never a silent fallback model.
                 self.phase = Phase::Ended(TerminalEvent::EnvelopeExceeded);
                 self.envelope_refusal = Some(refusal);
-                let out = self.state_out(gust_w, assist_active);
+                let out = self.state_out(gust_w, assist_active, assist_dc);
                 let mut bytes = self.digest_acc.to_vec();
                 for v in self.snapshot_payload(&out) {
                     bytes.extend_from_slice(&v.to_bits().to_le_bytes());
@@ -511,7 +516,7 @@ impl SimLoop {
             self.phase = Phase::Ended(TerminalEvent::MaxTicks);
         }
         // Chain the digest.
-        let out = self.state_out(gust_w, assist_active);
+        let out = self.state_out(gust_w, assist_active, assist_dc);
         let mut bytes = self.digest_acc.to_vec();
         for v in self.snapshot_payload(&out) {
             bytes.extend_from_slice(&v.to_bits().to_le_bytes());
@@ -520,7 +525,7 @@ impl SimLoop {
         Ok(out)
     }
 
-    fn state_out(&self, gust_w: f64, assist_active: bool) -> SimStateOut {
+    fn state_out(&self, gust_w: f64, assist_active: bool, assist_dc_rad: f64) -> SimStateOut {
         SimStateOut {
             tick: self.tick,
             phase: self.phase,
@@ -535,6 +540,7 @@ impl SimLoop {
             omega_prop_rad_s: self.omega,
             gust_w_mps: gust_w,
             assist_active,
+            assist_dc_rad,
         }
     }
 

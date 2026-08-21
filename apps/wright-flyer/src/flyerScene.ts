@@ -142,6 +142,9 @@ export function createFlyerSceneRenderer(
           pose,
         });
         lines.push(`phase ${hudIn.phase}  h ${snap.hM.toFixed(1)} m  x ${snap.xM.toFixed(1)} m`);
+        if (snap.assistActive) {
+          lines.push("ASSIST ACTIVE (bounded authority 0.3 of canard stop — model aid, not history)");
+        }
         const banner = phaseBanner(snap, simClient?.envelopeRefusalCode());
         if (banner !== null) {
           lines.push(banner);

@@ -37,6 +37,7 @@ interface WasmEngine {
     member: number,
     railM: number,
     maxTicks: bigint,
+    assist: boolean,
   ): string;
   flyer_engine_step(hasInput: boolean, leverN: number, warpRad: number): string;
   flyer_engine_digest(): string;
@@ -141,6 +142,7 @@ async function handleInit(msg: Extract<MainToWorker, { kind: "init" }>): Promise
     msg.scenario.member,
     msg.scenario.railLengthM,
     msg.scenario.maxTicks,
+    msg.scenario.assist,
   );
   const init = parseInitEnvelope(initJson);
   if (init.kind === "refusal") {

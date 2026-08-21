@@ -134,6 +134,7 @@ if (pkgPath === undefined) {
         scenario.member,
         scenario.railLengthM,
         scenario.maxTicks,
+        scenario.assist,
       ),
     );
     assert.equal(init.kind, "ok");

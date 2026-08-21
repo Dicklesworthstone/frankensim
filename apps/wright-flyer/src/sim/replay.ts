@@ -20,6 +20,7 @@ export interface RecordedScenario {
   readonly member: number;
   readonly railLengthM: number;
   readonly maxTicks: string;
+  readonly assist: boolean;
 }
 
 export interface FlightRecording {
@@ -45,6 +46,7 @@ export function scenarioToRecorded(s: ScenarioInit): RecordedScenario {
     member: s.member,
     railLengthM: s.railLengthM,
     maxTicks: s.maxTicks.toString(),
+    assist: s.assist,
   };
 }
 
@@ -57,6 +59,7 @@ export function recordedToScenario(r: RecordedScenario): ScenarioInit {
     member: r.member,
     railLengthM: r.railLengthM,
     maxTicks: BigInt(r.maxTicks),
+    assist: r.assist,
   };
 }
 

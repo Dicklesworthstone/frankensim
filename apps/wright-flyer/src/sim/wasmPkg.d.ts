@@ -11,6 +11,7 @@ declare module "*/wasm-pkg/fs_flyer_wasm.js" {
     member: number,
     rail_length_m: number,
     max_ticks: bigint,
+    assist: boolean,
   ): string;
   export function flyer_engine_step(
     has_input: boolean,
