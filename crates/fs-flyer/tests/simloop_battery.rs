@@ -466,8 +466,12 @@ fn golden_digest() {
     let (sim, _, _, _) = run_lifecycle(PilotMode::FixedControls);
     let digest = sim.digest_hex();
     jlog("golden", &format!("\"digest\":\"{digest}\""));
+    // Golden bump 2026-08-21 (bead guzez.7.2.1): ground-contact
+    // friction moved off platform tanh onto det::tanh (and the
+    // Prandtl factors off platform acos), unifying the native
+    // and wasm lanes; the lifecycle trajectory shifted by ulps.
     assert_eq!(
-        digest, "2a0c4433ed1584d8d734833d6734e32e23bc33ab3ba4308c15630a1235616ba9",
+        digest, "56253f5d814fc0b4be428d0776c9d6d02f22853338237223abfda5ead94e8412",
         "lifecycle golden moved — determinism regression or an \
          intentional physics change requiring the golden-bump protocol"
     );
