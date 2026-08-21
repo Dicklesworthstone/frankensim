@@ -26,6 +26,7 @@ pub mod hinge;
 pub mod images;
 pub mod nonlinear;
 pub mod prescribedwake;
+pub mod rom;
 
 /// Panel-count cap (refusals at cap AND cap+1).
 pub const MAX_PANELS: usize = 512;
