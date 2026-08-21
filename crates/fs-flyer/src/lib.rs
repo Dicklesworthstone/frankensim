@@ -38,6 +38,7 @@ pub mod fieldsvc;
 pub mod freecontrol;
 pub mod hcampaign;
 pub mod hinference;
+pub mod horchestrator;
 pub mod longitudinal;
 pub mod partitioned;
 pub mod perception;
