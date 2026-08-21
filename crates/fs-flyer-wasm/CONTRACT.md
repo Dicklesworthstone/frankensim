@@ -4,7 +4,9 @@ Layer: L6. Bead: frankensim-wf-root-guzez.1.3 (E0.3, Wright Flyer program).
 Spec: COMPREHENSIVE_PLAN_FOR_REAL_TIME_WRIGHT_FLYER_SIM_WITH_FRANKENSIM.md
 (ROUND 6 steady state), §7.1.
 
-## What this crate IS
+## Purpose and layer
+
+Layer L6 (boundary crate). What this crate IS:
 
 The single boundary between the Wright Flyer presentation plane (three.js)
 and the simulation plane (FrankenSim physics), compiled to
@@ -22,7 +24,9 @@ and the simulation plane (FrankenSim physics), compiled to
   this workspace pins it so downstream flyer crates inherit a working
   wasm32 build (plan §11.3 standing caveat).
 
-## Boundary contracts (inherited by every future API entry)
+## Invariants
+
+Boundary contracts, inherited by every future API entry:
 
 1. **Typed-refusal JS envelope.** Every fallible entry returns
    `{"ok": ...}` or `{"refusal": {"code", "message", "ranked_repairs"}}`.
@@ -37,7 +41,9 @@ and the simulation plane (FrankenSim physics), compiled to
 3. **Admission caps are exact.** Refusal boundaries are tested at cap AND
    cap+1 (workspace law).
 
-## v0 surface (E0.3 scaffold)
+## Public types and semantics
+
+### v0 surface (E0.3 scaffold)
 
 | Entry | Kind | Contract |
 |---|---|---|
@@ -45,7 +51,7 @@ and the simulation plane (FrankenSim physics), compiled to
 | `hello_digest` / `flyer_hello_digest` | pure / wasm | full-trajectory bit-exact content digest (hex) under the versioned domain |
 | `hello_spin_json`, `refusal_envelope`, `hello_envelope` | pure | the JS envelope renderers (shared by native tests and the boundary) |
 
-## Archive-loader surface (E0.9c slice, bead guzez.1.9.3)
+### Archive-loader surface (E0.9c slice, bead guzez.1.9.3)
 
 `archive::` implements the verifying-loader mechanics of the frozen E0.9a
 contract (`data/wright-flyer/replay-identity-schema-v1.json`) against a
@@ -63,7 +69,7 @@ integer ratio 1/120) with its pinned trajectory digest; the battery drives
 corruption, truncation, mirror-divergence, malformed-envelope, and
 wrong-kernel-replay twins.
 
-## Engine surface v1 (E5.1, bead guzez.6.2)
+### Engine surface v1 (E5.1, bead guzez.6.2)
 
 `engine::EngineSlot` wraps the REAL `fs_flyer::simloop::SimLoop` (the
 E4-certified physics: equilibrated tick-0 closure, coupled prop–airframe
@@ -86,7 +92,7 @@ Terminal events arrive IN-BAND as `phase` words (`ended:ground-contact`,
 `ended:envelope-exceeded` with `envelope_refusal_code` carried in the
 same envelope — the UI gets a receipted flight ending, never a trap.
 
-## No-claims
+## No-claim boundaries
 
 - The hello kernel is a torque-free rigid body. It makes **no aerodynamic,
   historical, or Flyer-specific claim**; it exists to prove the toolchain,
@@ -97,7 +103,11 @@ same envelope — the UI gets a receipted flight ending, never a trap.
 - Nothing here allocates authority over the FlyerScenario/ModelId identity
   machinery (E0.9); the envelope carries no identity claims yet.
 
-## Refusal vocabulary (v0)
+## Error model
+
+Every fallible entry returns the typed-refusal JS envelope
+(`{"refusal": {"code", "message", "ranked_repairs"}}`); codes are
+stable machine-readable strings tested at cap AND cap+1. Vocabulary:
 
 `non-finite-input`, `non-positive-inertia`, `non-unit-quaternion`,
 `timestep-outside-domain`, `step-budget-exceeded`; archive loader:
@@ -110,3 +120,42 @@ same envelope — the UI gets a receipted flight ending, never a trap.
 `run-ended` (+ native physics refusals pass through verbatim at init;
 mid-flight aero refusals become the `ended:envelope-exceeded`
 terminal).
+
+## Determinism class
+
+Bit-exact within a lane: identical inputs produce identical trajectories
+and identical `fs-blake3` digests under versioned domains (per-lane
+SELFTEST goldens: native aarch64 debug+release, wasm-node dev+release).
+Cross-lane identity is enforced by the E6.2 six-lane golden program;
+the tracked cross-lane divergence class is bead guzez.7.2.1. All
+transcendentals route through `fs-math det::`; randomness is philox
+counter-addressed (no wall-clock, no thread order).
+
+## Cancellation behavior
+
+The boundary is synchronous and single-shot per call: no entry blocks,
+polls, or spawns. Cancellation is the CALLER's concern (the worker drops
+the slot; a new `flyer_engine_init` replaces any prior run, with the
+E5.0 ring epoch bump as the consumer-side stale-guard). Long-running
+loops live sim-side under `fs-exec` checkpoints, not here.
+
+## Unsafe boundary
+
+No `unsafe` in this crate. The wasm ABI surface is wasm-bindgen-generated;
+shared-memory transport (SAB seqlock) lives in the JS worker against the
+protocol invariants tested by `ring_battery` and the node harness.
+
+## Feature flags
+
+None. The wasm32 target gates wasm-bindgen via
+`[target.'cfg(target_arch = "wasm32")'.dependencies]`; native builds are
+dependency-clean. No cargo features alter semantics.
+
+## Conformance tests
+
+`tests/engine_battery.rs` (lifecycle vs native goldens),
+`tests/ring_battery.rs` (E5.0 seqlock/lease/epoch laws),
+`tests/archive_fixture.rs` (verifying-loader twins),
+`tests/fieldlease_battery.rs` (E7.1-ii lease/staleness/claims), and
+`node-harness/engine_harness.mjs` (the SAME exports exercised against
+the actual wasm binary). Repro: `cd crates/fs-flyer-wasm && cargo test`.

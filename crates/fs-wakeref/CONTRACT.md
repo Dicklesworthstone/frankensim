@@ -4,7 +4,9 @@ Layer: L3. Bead: frankensim-wf-root-guzez.5.22 (E4.9b, Wright Flyer program).
 Spec: COMPREHENSIVE_PLAN_FOR_REAL_TIME_WRIGHT_FLYER_SIM_WITH_FRANKENSIM.md
 (ROUND 6 steady state), V-08b1.
 
-## What this crate IS
+## Purpose and layer
+
+Layer L3 (independent referee leaf). What this crate IS:
 
 The INDEPENDENT unsteady prescribed-wake referee — the dense reference
 leaf the E4.3b3 campaign compares the A1 FOM/ROM lane against. Its whole
@@ -14,7 +16,9 @@ or fs-wing (strip solver / prescribed-wake operator), and even the
 Biot–Savart segment kernel is written here from the formula. The battery
 pins the dependency closure.
 
-## Model tier (declared)
+## Invariants
+
+Model tier, DECLARED (these are the referee's structural laws):
 
 Single-chordwise-ring unsteady vortex lattice over canard + wing:
 - PRESCRIBED wake — rings shed each step convect rigidly downstream at
@@ -31,7 +35,7 @@ Single-chordwise-ring unsteady vortex lattice over canard + wing:
 - Wake memory capped (`MAX_WAKE_ROWS`, oldest dropped) — the cap is in
   the receipt; truncation is never silent.
 
-## Surface
+## Public types and semantics
 
 | Entry | Contract |
 |---|---|
@@ -40,13 +44,16 @@ Single-chordwise-ring unsteady vortex lattice over canard + wing:
 | `run_case` | one dense march → per-step wing lift, canard lift, hinge moment (40 %-chord axis, declared) + bitwise series digest |
 | `emit_v08b1_receipt` | the V-08b1 receipt: per-case digests, steady values, Wagner-convention ratio (step rows sample step 3 — after the non-circulatory spike), receipt digest (golden-pinned) |
 
-## Refusal vocabulary
+## Error model
+
+Typed refusals (`Refusal { code, message, ranked_repairs }`), caps
+tested at cap AND cap+1. Vocabulary:
 
 `referee-case-invalid` (caps at cap AND cap+1: v [5,40], |alpha0| ≤ 0.3,
 rho (0.5,2.0), dt (0,0.05], steps [1,2400], convection [0.5,1.5], ground
 strictly below both surfaces); `referee-system-singular`.
 
-## No-claims
+## No-claim boundaries
 
 - No real-time claim — dense and slow on purpose; never a sim-loop path.
 - No historical-fidelity claim: the geometry is the registered reference,
@@ -54,3 +61,33 @@ strictly below both surfaces); `referee-system-singular`.
   DELTAS (E4.3b3), not absolute truth.
 - Hinge moment is the quarter-chord lift about the 40 %-chord axis — a
   declared tier, not the E4.2b mechanism model.
+
+## Determinism class
+
+Bit-exact: fixed-shape marches, `fs-math det::` transcendentals only,
+no RNG, no wall-clock. Every series carries a bitwise `fs-blake3`
+digest; the V-08b1 receipt digest is golden-pinned (measure-then-pin,
+golden-bump protocol on any change).
+
+## Cancellation behavior
+
+None: `run_case` is a bounded synchronous march (steps capped at 2400)
+with no I/O, no threads, and no checkpoint surface. Callers budget by
+choosing `n_steps`; the cap refuses, never truncates.
+
+## Unsafe boundary
+
+No `unsafe`. No FFI. The dependency closure (`fs-math` + `fs-blake3`
+only) is pinned by the battery — structural independence IS the crate's
+value and any new dependency is a contract change.
+
+## Feature flags
+
+None. No cargo features alter semantics.
+
+## Conformance tests
+
+`tests/` battery: dependency-closure pin, geometry digest stability,
+case-cap refusals both sides, per-fixture series goldens, the receipt
+golden (c439dbce class), and the Wagner-convention sampling rule.
+Repro: `cargo test -p fs-wakeref`.
