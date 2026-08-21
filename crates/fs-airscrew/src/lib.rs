@@ -207,7 +207,7 @@ pub fn bemt_solve(
         while iters < MAX_STATION_ITERS {
             iters += 1;
             let u_ax = v_axial_mps + w;
-            let phi = u_ax.atan2(u_tan);
+            let phi = det::atan2(u_ax, u_tan);
             alpha = st.beta_rad - phi;
             let (cl, cd) = section_cl_cd(alpha, rotor.camber_ratio);
             let u2 = u_ax * u_ax + u_tan * u_tan;

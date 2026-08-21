@@ -22,6 +22,7 @@
 
 use crate::{MAX_PANELS, Panel, Refusal, SolveReport, solve_weissinger_linear};
 use fs_blake3::hash_domain;
+use fs_math::det;
 
 /// Iteration cap (refusals at cap AND cap+1 by the safeguard test).
 // 600, not 200: the full wing+canard multisurface system converges
@@ -205,7 +206,7 @@ pub fn solve_nonlinear(
         freestream[1] / vmag,
         freestream[2] / vmag,
     ];
-    let alpha_free = freestream[2].atan2(freestream[0]);
+    let alpha_free = det::atan2(freestream[2], freestream[0]);
     if let Some(du) = strip_du_axial
         && (du.len() != strips.len() || !du.iter().all(|v| v.is_finite()))
     {

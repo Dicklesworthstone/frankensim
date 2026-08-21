@@ -216,7 +216,9 @@ pub fn coupled_prop_airframe_step(
     loop {
         let (g, thrust, torque, lift, gamma) = evaluate(&x)?;
         let r = [g[0] - x[0], g[1] - x[1]];
-        let res = (r[0] * r[0] + r[1] * r[1]).sqrt() / (x[0].hypot(x[1]) + 1e-6);
+        // det doctrine: sqrt is IEEE-exact; hypot is platform libm and
+        // broke native-vs-wasm digest identity (E6.2 measurement).
+        let res = (r[0] * r[0] + r[1] * r[1]).sqrt() / ((x[0] * x[0] + x[1] * x[1]).sqrt() + 1e-6);
         if res < spec.tol {
             return Ok(CoupledStep {
                 w_slip: g,
