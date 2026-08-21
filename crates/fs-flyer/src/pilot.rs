@@ -26,8 +26,9 @@ use fs_rand::{Stream, StreamKey};
 pub const MAX_REACTION_TICKS: usize = 120;
 
 /// Registered family size (members 0..FAMILY_SIZE; index cap tested at
-/// cap AND cap+1).
-pub const FAMILY_SIZE: u32 = 3;
+/// cap AND cap+1). Extended 3→4 by the E5.3b-i pre-registration event
+/// (member 3, nonlinear-plant calibration — see `pilot_family_v1`).
+pub const FAMILY_SIZE: u32 = 4;
 
 /// Pilot remnant draws per tick (one per axis).
 pub const DRAWS_PER_TICK: u64 = 2;
@@ -101,6 +102,24 @@ pub fn pilot_family_v1(member: u32) -> Result<PilotGains, Refusal> {
             reaction_ticks: 18,
             ..base
         }),
+        // Member 3 — the NONLINEAR-plant demonstrator (E5.3b-i
+        // pre-registration event, bead wf-root-guzez.6.5.1). Members
+        // 0-2 were tuned on the linear plant and PIO out of the full
+        // nonlinear Dec-17 lifecycle within ~1-5 s airborne. The
+        // pilot_nonlinear_sweep bin (2026-08-20) measured this tuple
+        // across seeds 1900-1915: 14/16 fly 7.6-13.5 s airborne with
+        // 3-6 undulations over ~36-57 m, ending in ground contact or an
+        // envelope exit during the final plunge; 2/16 fail to lift off
+        // the 18.3 m rail (gust variance — the historical Dec-14/17
+        // attempt record also includes failed starts). Reaction 6 ticks
+        // (50 ms) is anticipatory-fast: this member is a SIM-PLANT
+        // CALIBRATION, never a human-parameter claim.
+        3 => Ok(PilotGains {
+            k_theta: 0.55,
+            k_q: 0.25,
+            reaction_ticks: 6,
+            ..base
+        }),
         _ => Err(Refusal {
             code: "pilot-member-invalid",
             message: format!("member {member} outside the registered family (size {FAMILY_SIZE})"),
@@ -152,13 +171,22 @@ impl PilotWrightModel {
     /// # Errors
     /// `pilot-member-invalid`; `pilot-gains-invalid`.
     pub fn new(member: u32, seed: u64) -> Result<Self, Refusal> {
-        let gains = pilot_family_v1(member)?;
+        Self::from_gains(pilot_family_v1(member)?, seed)
+    }
+
+    /// Build from explicit gains (sweep/calibration harness entry — the
+    /// registered family remains the only identity-bearing path; a
+    /// candidate that wins a sweep is REGISTERED before any claim).
+    ///
+    /// # Errors
+    /// `pilot-gains-invalid`.
+    pub fn from_gains(gains: PilotGains, seed: u64) -> Result<Self, Refusal> {
         let m = PilotWrightModel {
             gains,
             stream_key: StreamKey {
                 seed,
                 kernel: 0x4643_504C, // "FCPL" — pilot kernel id
-                tile: member,
+                tile: gains.member,
             },
         };
         m.admit()?;

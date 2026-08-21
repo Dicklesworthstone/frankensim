@@ -241,6 +241,79 @@ fn rail_phase_produces_receipted_transition() {
 }
 
 #[test]
+fn member3_flies_the_dec17_class_undulating_flight() {
+    // E5.3b-i (bead guzez.6.5.1): the nonlinear-calibrated member 3
+    // must fly the Dec-17 flight-1 CLASS on the full nonlinear plant:
+    // a long undulating flight ending in GROUND CONTACT (the
+    // historical ending) — not an envelope exit, not a tick timeout.
+    // Per-item oracles on the flight-class metrics; run twice
+    // bit-identically (the registration is deterministic evidence).
+    let run = || {
+        let mut sim = SimLoop::init(dec17_scenario(1903, PilotMode::Historical(3))).unwrap();
+        let mut liftoff = None;
+        let mut undulation_flips = 0u32;
+        let mut last_sign = 0i8;
+        let mut end = None;
+        loop {
+            let out = sim.step(None).unwrap();
+            if matches!(out.phase, Phase::Airborne) {
+                if liftoff.is_none() {
+                    liftoff = Some(out.tick);
+                }
+                let s = if out.q_rad_s > 1e-3 {
+                    1i8
+                } else if out.q_rad_s < -1e-3 {
+                    -1i8
+                } else {
+                    0
+                };
+                if s != 0 && last_sign != 0 && s != last_sign {
+                    undulation_flips += 1;
+                }
+                if s != 0 {
+                    last_sign = s;
+                }
+            }
+            if let Phase::Ended(e) = out.phase {
+                end = Some((e, out.tick, out.x_m));
+                break;
+            }
+        }
+        let digest = sim.digest_hex();
+        (liftoff.unwrap(), undulation_flips / 2, end.unwrap(), digest)
+    };
+    let (liftoff, undulations, (terminal, end_tick, x_end), digest) = run();
+    // Measured class (16-seed sweep receipt in pilot.rs): the flight
+    // ends in ground contact or an envelope exit DURING the final
+    // plunge of a full-length flight — never a tick timeout, never a
+    // failure to leave the rail at this seed.
+    assert!(
+        matches!(
+            terminal,
+            TerminalEvent::GroundContact | TerminalEvent::EnvelopeExceeded
+        ),
+        "the crash-class ending: {terminal:?}"
+    );
+    let airborne_s = (end_tick - liftoff) as f64 / 120.0;
+    assert!(airborne_s >= 8.0, "flight-1 class duration: {airborne_s} s");
+    assert!(undulations >= 3, "undulating flight: {undulations}");
+    assert!(
+        (25.0..90.0).contains(&x_end),
+        "ground distance in the historical tens-of-meters class: {x_end} m"
+    );
+    // Deterministic registration evidence.
+    let (_, _, _, digest2) = run();
+    assert_eq!(digest, digest2, "bit-identical twice");
+    jlog(
+        "member3-flight",
+        &format!(
+            "\"airborne_s\":{airborne_s},\"undulations\":{undulations},\"x_end_m\":{x_end},\"digest\":\"{}\"",
+            &digest[..16]
+        ),
+    );
+}
+
+#[test]
 fn golden_digest() {
     let (sim, _, _, _) = run_lifecycle(PilotMode::FixedControls);
     let digest = sim.digest_hex();

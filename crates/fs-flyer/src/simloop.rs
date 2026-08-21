@@ -303,6 +303,27 @@ impl SimLoop {
         })
     }
 
+    /// Sweep-harness twin of `init`: replace the Historical pilot's
+    /// gains with an explicit candidate. Calibration driver ONLY — the
+    /// registered family is the sole identity-bearing path, so nothing
+    /// built here may mint a claim.
+    ///
+    /// # Errors
+    /// As `init`; `pilot-gains-invalid`.
+    #[doc(hidden)]
+    pub fn init_with_pilot_gains(
+        spec: ScenarioSpec,
+        gains: crate::pilot::PilotGains,
+    ) -> Result<SimLoop, Refusal> {
+        let mut sim = SimLoop::init(spec)?;
+        if sim.pilot.is_some() {
+            let m = PilotWrightModel::from_gains(gains, sim.spec.seed)?;
+            let st = m.init()?;
+            sim.pilot = Some((m, st));
+        }
+        Ok(sim)
+    }
+
     /// The tick-0 state (already digest-frozen).
     #[must_use]
     pub fn tick0(&self) -> &Tick0State {
