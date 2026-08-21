@@ -41,6 +41,7 @@ members = [
     "crates/fs-bo",
     "crates/fs-uq",
     "crates/fs-vessel",
+    "crates/fs-wakeref",
     "crates/fs-wing",
     "crates/fs-tilelang-macros",
     "crates/fs-soa-derive",

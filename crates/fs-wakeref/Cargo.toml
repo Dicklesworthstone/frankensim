@@ -1,0 +1,16 @@
+[package]
+name = "fs-wakeref"
+version = "0.0.1"
+edition = "2024"
+publish = false
+description = "Independent unsteady prescribed-wake referee (V-08b1 dense reference leaf) — structurally independent of the A1 FOM: no fs-airfoil, no fs-wing."
+
+[package.metadata.frankensim]
+layer = "L3"
+
+[dependencies]
+fs-blake3 = { path = "../fs-blake3" }
+fs-math = { path = "../fs-math" }
+
+[lints]
+workspace = true
