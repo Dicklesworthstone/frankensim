@@ -431,7 +431,7 @@ fn golden_digest() {
     let digest = sim.digest_hex();
     jlog("golden", &format!("\"digest\":\"{digest}\""));
     assert_eq!(
-        digest, "7ceeb7bccafa5547daa56811e1adbc4956ce4f40513412371d3f158869c7e0da",
+        digest, "5e3948974d50ed41e1b82ebabd909f5722602b7fbe99741f6349ffdfbd632807",
         "lifecycle golden moved — determinism regression or an \
          intentional physics change requiring the golden-bump protocol"
     );

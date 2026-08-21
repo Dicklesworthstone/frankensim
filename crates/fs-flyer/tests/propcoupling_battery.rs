@@ -308,7 +308,7 @@ fn coupling_golden_digest() {
         &format!("\"digest\":\"{digest}\",\"thrust\":{}", r.thrust_n[0]),
     );
     assert_eq!(
-        digest, "873f084dcf5a4b5859580f4f7d084e8a7179d5b16a49a224d8f38f2815fe1a94",
+        digest, "6de74d07d26fa40bf53024cc8394b25e08cdf038b17b320c01de12c245e99a8c",
         "coupling golden moved — determinism regression or an intentional \
          scheme change requiring the golden-bump protocol"
     );

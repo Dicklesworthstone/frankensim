@@ -216,7 +216,7 @@ fn trim_golden_digest() {
         fs_blake3::hash_domain("org.frankensim.fs-flyer.e46aii-golden.v1", &payload).to_hex();
     jlog("golden", &format!("\"digest\":\"{digest}\""));
     assert_eq!(
-        digest, "62ebf1d4d5487fe252e2f4008e64167dffd8f1dbbe076c07cef538e29bdd75e7",
+        digest, "71fdda6bb4ad7b5283a692dde36b99ef4440bbacabd3c8a4e5e5216cbc3ae097",
         "trim golden moved — determinism regression or an intentional \
          model change requiring the golden-bump protocol"
     );

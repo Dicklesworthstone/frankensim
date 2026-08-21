@@ -270,10 +270,52 @@ pub fn attribute_modes(engine: &AugmentedEngine) -> Result<Vec<LabeledPole>, Ref
             }
         }
     }
-    Ok(base
+    // Structural-membership fallback (E6.2 hardening): a block that is
+    // DECOUPLED by design (the m_aero = 0 actuator tier) barely moves
+    // under ANY freeze, so its winner rests on sub-ulp noise and can
+    // flip with unrelated code changes (measured 2026-08-21). Below the
+    // resolution floor, attribute by which family's ISOLATED block owns
+    // the pole instead — exact for decoupled blocks, inert otherwise.
+    const SHIFT_FLOOR: f64 = 1.0e-9;
+    let mut labeled: Vec<(Pole, ModeFamily, f64)> = base
+        .iter()
+        .zip(best.iter())
+        .map(|(p, (f, s))| (*p, *f, *s))
+        .collect();
+    for (pole, family, shift) in &mut labeled {
+        if *shift >= SHIFT_FLOOR {
+            continue;
+        }
+        let mut best_member: Option<(ModeFamily, f64)> = None;
+        for (fam, range) in families {
+            let mut isolated = engine.a.clone();
+            for i in 0..engine.n {
+                for j in 0..engine.n {
+                    if !(range.contains(&i) && range.contains(&j)) {
+                        isolated[i][j] = 0.0;
+                    }
+                }
+            }
+            let iso = eig_dense(&isolated)?;
+            let d = iso
+                .iter()
+                .map(|m| ((m.re - pole.re).powi(2) + (m.im - pole.im).powi(2)).sqrt())
+                .fold(f64::INFINITY, f64::min);
+            if best_member.is_none_or(|(_, bd)| d < bd) {
+                best_member = Some((*fam, d));
+            }
+        }
+        if let Some((fam, d)) = best_member {
+            // Only claim membership when the isolated block genuinely
+            // owns the pole (an isolated-system pole sits on it).
+            if d < 1.0e-6 {
+                *family = fam;
+            }
+        }
+    }
+    Ok(labeled
         .into_iter()
-        .zip(best)
-        .map(|(pole, (family, shift))| LabeledPole {
+        .map(|(pole, family, shift)| LabeledPole {
             pole,
             family,
             attribution_shift: shift,

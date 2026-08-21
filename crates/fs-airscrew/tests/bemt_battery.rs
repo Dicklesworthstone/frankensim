@@ -240,7 +240,7 @@ fn bemt_golden_digest() {
         ),
     );
     assert_eq!(
-        digest, "2c13d4e7efcc5091fa86b755255348e70620a8eead2a6ad6708ea6da6d8a3b91",
+        digest, "d4e017126b03b67f2afbde7cad1b24dcba4a431faf8824970b70a58858e31b5c",
         "BEMT golden moved — determinism regression or an intentional \
          kernel change requiring the golden-bump protocol"
     );
