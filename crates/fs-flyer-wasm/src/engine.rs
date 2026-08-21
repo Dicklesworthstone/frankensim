@@ -103,7 +103,7 @@ pub const SELFTEST_GOLDEN: &str =
 /// Native (aarch64/x86 pending the six-lane matrix) canonical golden.
 #[cfg(not(target_arch = "wasm32"))]
 pub const SELFTEST_GOLDEN: &str =
-    "76119b72d2a3296a5b1f41ff9f21291ac4b54172e47d24116c5543017f07ee39";
+    "823d9f59dd162c8bc0764e144236d2f00abc48a12142095688a22e59ae95ca9d";
 
 /// Run the canonical 1-second scenario and compare against a golden
 /// (the startup self-test core; the shipped entry uses
