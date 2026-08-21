@@ -13,8 +13,20 @@ import { computePose } from "./airframe/pose.ts";
 import { applyPose, scriptedState } from "./airframe/applyPose.ts";
 import kdhGrid from "../../../data/wright-flyer/terrain/kill-devil-hills-17x17-v1.json";
 import type { FlyerRenderer } from "./renderer.ts";
+import type { SimClient } from "./sim/simClient.ts";
+import {
+  advanceProp,
+  controlStateFrom,
+  hudInputsFrom,
+  phaseBanner,
+  worldTransformFrom,
+  type SimDriveState,
+} from "./sim/snapshotView.ts";
 
-export function createFlyerSceneRenderer(container: HTMLElement): FlyerRenderer {
+export function createFlyerSceneRenderer(
+  container: HTMLElement,
+  simClient?: SimClient,
+): FlyerRenderer {
   const renderer = new THREE.WebGLRenderer({ antialias: true });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   container.appendChild(renderer.domElement);
@@ -64,9 +76,44 @@ export function createFlyerSceneRenderer(container: HTMLElement): FlyerRenderer 
   const keyup = (e: KeyboardEvent): void => onKey(e, false);
   window.addEventListener("keydown", keydown);
   window.addEventListener("keyup", keyup);
+  // E5.2b: the sim drive (REAL engine state) supersedes both the
+  // script and manual pose play when a SimClient is attached.
+  let drive: SimDriveState = { propAngleRad: 0 };
   return {
     render(dtS: number): void {
       elapsedS += dtS;
+      const snap = simClient?.sample(performance.now()) ?? null;
+      if (snap !== null) {
+        drive = advanceProp(drive, snap, dtS);
+        const pose = computePose(controlStateFrom(snap, drive));
+        applyPose(airframe, pose);
+        const world = worldTransformFrom(snap, launch);
+        airframe.group.position.set(world.position[0], world.position[1] + 1.2, world.position[2]);
+        airframe.group.rotation.set(0, 0, world.pitchRad);
+        const cam = cameraFor(preset, elapsedS, launch, [
+          world.position[0],
+          world.position[1] + 1.2,
+          world.position[2],
+        ]);
+        camera.position.set(cam.pos[0], cam.pos[1], cam.pos[2]);
+        camera.lookAt(cam.look[0], cam.look[1], cam.look[2]);
+        const hudIn = hudInputsFrom(snap);
+        const lines = hudLines({
+          airspeedMps: hudIn.airspeedMps,
+          elapsedS: hudIn.elapsedS,
+          engineRpm: hudIn.engineRpm,
+          camera: `${preset} (sim)`,
+          pose,
+        });
+        lines.push(`phase ${hudIn.phase}  h ${snap.hM.toFixed(1)} m  x ${snap.xM.toFixed(1)} m`);
+        const banner = phaseBanner(snap, simClient?.envelopeRefusalCode());
+        if (banner !== null) {
+          lines.push(banner);
+        }
+        hud.textContent = lines.join("\n");
+        renderer.render(scene, camera);
+        return;
+      }
       let pose;
       if (manual) {
         command = stepCommand(command, keysFrom(down), dtS);

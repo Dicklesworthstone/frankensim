@@ -13,6 +13,9 @@ const crossOriginIsolationHeaders = {
 export default defineConfig({
   server: { headers: crossOriginIsolationHeaders },
   preview: { headers: crossOriginIsolationHeaders },
+  // The sim worker is a module worker whose wasm-pkg import code-splits;
+  // ES format is the only one rollup supports for that (E5.2a).
+  worker: { format: "es" },
   build: {
     target: "es2022",
     sourcemap: true,

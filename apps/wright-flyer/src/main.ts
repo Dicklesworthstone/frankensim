@@ -4,6 +4,8 @@
 
 import { describeCapabilities, probeCapabilities } from "./capability";
 import { createFlyerSceneRenderer } from "./flyerScene.ts";
+import { SimClient } from "./sim/simClient.ts";
+import { MODE_FIXED, MODE_HISTORICAL, dec17Scenario } from "./sim/protocol.ts";
 
 function main(): void {
   const app = document.getElementById("app");
@@ -27,7 +29,36 @@ function main(): void {
     }),
   );
 
-  const renderer = createFlyerSceneRenderer(app);
+  // E5.2b: ?sim=1 drives the scene from the REAL wasm engine (E5.1)
+  // via the sim worker; without the flag the E2.2 scripted demo runs.
+  // ?mode=historical selects the registered pilot family member 0.
+  const params = new URLSearchParams(window.location.search);
+  let simClient: SimClient | undefined;
+  if (params.get("sim") === "1") {
+    simClient = new SimClient({
+      onReady(info): void {
+        simClient?.bindAnchor(info.tick0Digest);
+        console.info(
+          JSON.stringify({ suite: "wright-flyer-app", stage: "sim-ready", ...info }),
+        );
+      },
+      onRefusal(stage, refusal): void {
+        capabilityText.textContent = `sim ${stage} refusal: ${refusal.code} — ${refusal.message}`;
+        capabilityText.className = "warn";
+        console.warn(
+          JSON.stringify({ suite: "wright-flyer-app", stage: "sim-refusal", at: stage, ...refusal }),
+        );
+      },
+      onTerminal(info): void {
+        console.info(
+          JSON.stringify({ suite: "wright-flyer-app", stage: "sim-terminal", ...info }),
+        );
+      },
+    });
+    const mode = params.get("mode") === "historical" ? MODE_HISTORICAL : MODE_FIXED;
+    simClient.start(dec17Scenario(1903n, mode));
+  }
+  const renderer = createFlyerSceneRenderer(app, simClient);
   const resize = (): void =>
     renderer.resize(app.clientWidth, app.clientHeight);
   window.addEventListener("resize", resize);
