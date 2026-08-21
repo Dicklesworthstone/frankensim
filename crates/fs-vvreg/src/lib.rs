@@ -62,6 +62,7 @@ pub mod scorecard;
 
 /// Reference-only Level-A thermal analytic values and G1 order targets.
 pub mod thermal_level_a;
+pub mod wf_level_a;
 
 /// Level-B thermal cross-code frozen references with fail-closed
 /// spec-echo and mesh-parity binding.

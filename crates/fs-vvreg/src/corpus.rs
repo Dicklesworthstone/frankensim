@@ -26,6 +26,7 @@ use crate::thermal_level_b::{
     THERMAL_LEVEL_B_MANIFEST, THERMAL_LEVEL_B_MANIFEST_LOCATOR, ThermalLevelBCase,
     ThermalLevelBReference, thermal_level_b_cases, thermal_level_b_reference,
 };
+use crate::wf_level_a::{WF_LEVEL_A_MANIFEST, WfKind, WfLevelACase, wf_level_a_cases};
 
 /// Current canonical corpus wire and identity schema.
 ///
@@ -1103,6 +1104,7 @@ static CORPUS: LazyLock<CorpusRegistry> = LazyLock::new(|| {
             .expect("verification guarantees every catalog case has a manifest block");
         seed_thermal_level_b_dataset(case, reference)
     }));
+    datasets.extend(wf_level_a_cases().iter().map(seed_wf_level_a_dataset));
     datasets.sort_by(|a, b| a.id.cmp(&b.id));
     CorpusRegistry {
         datasets,
@@ -1219,6 +1221,102 @@ fn seed_thermal_level_a_dataset(case: &ThermalLevelACase) -> CorpusDataset {
             regime: context_of_use,
         }],
         evidence_level: EvidenceLevel::Analytic,
+    }
+}
+
+/// Seed one Wright Flyer receipt-bound row (bead wf-root-guzez.11.6.1
+/// aggregation; the retained manifest carries the binding receipt
+/// digests — every value was EXECUTED by its own battery first).
+fn seed_wf_level_a_dataset(case: &WfLevelACase) -> CorpusDataset {
+    let retained = hash_bytes(WF_LEVEL_A_MANIFEST);
+    let context_of_use = case
+        .context
+        .iter()
+        .map(|axis| ContextRange {
+            name: axis.name.to_string(),
+            lo: QtyAny::new(axis.lo, axis.dims),
+            hi: QtyAny::new(axis.hi, axis.dims),
+        })
+        .collect::<Vec<_>>();
+    CorpusDataset {
+        id: case.id.to_string(),
+        title: case.title.to_string(),
+        raw_payload: PayloadRetention::DerivedOnly {
+            retained: CorpusArtifact {
+                digest: retained,
+                byte_len: WF_LEVEL_A_MANIFEST.len() as u64,
+                media_type: "text/tab-separated-values".to_string(),
+                locator: "data/vv-corpus/wright-flyer/wf-level-a-v1.tsv".to_string(),
+            },
+            reason: "an authored receipt-bound aggregation manifest; the underlying evidence \
+                     lives in the cited batteries' executed receipts, not in sensor data"
+                .to_string(),
+        },
+        sensors: vec![SensorRecord {
+            id: "receipt-bound-reference".to_string(),
+            instrument_id: unavailable(
+                "a battery-executed receipt value has no physical instrument",
+            ),
+            raw_channel: case.metric.to_string(),
+            quantity_dims: case.metric_dims,
+            calibration: unavailable(
+                "the binding is a content-hash receipt, not a calibration certificate",
+            ),
+            placement: unavailable(
+                "simulation receipts have declared configurations, not sensor placements",
+            ),
+            uncertainty: MeasurementUncertainty::Unstated,
+        }],
+        geometry: unavailable(
+            "the registered 1903 geometry lives in the frozen E1 dossier artifacts, \
+             cited by the receipts; no standalone geometry artifact is bound to this row",
+        ),
+        environment: unavailable(
+            "simulation receipts record scenario parameters, not a physical acquisition environment",
+        ),
+        partition: DatasetPartition::Validation,
+        preprocessing: PreprocessingLineage::Complete(vec![PreprocessingStep {
+            ordinal: 0,
+            operation: "receipt-bound-manifest-identity-import".to_string(),
+            version: "1".to_string(),
+            input: retained,
+            output: retained,
+        }]),
+        final_artifact: retained,
+        context_of_use: context_of_use.clone(),
+        license: Availability::Available(CorpusLicense {
+            identifier: "MIT".to_string(),
+            terms: "Repository-authored receipt aggregation manifest; redistribution allowed"
+                .to_string(),
+            redistribution: RedistributionPolicy::Allowed,
+        }),
+        provenance: AcquisitionProvenance {
+            measured_by: format!("Wright Flyer battery receipt {}", case.receipt_digest),
+            organization: "FrankenSim".to_string(),
+            measured_on: unavailable(
+                "the row is a versioned receipt aggregation, not a dated physical acquisition",
+            ),
+            source_record: format!("data/vv-corpus/wright-flyer/wf-level-a-v1.tsv:{}", case.id),
+        },
+        retention: RetentionPolicy {
+            class: RetentionClass::Permanent,
+            preserve_raw: true,
+            preserve_calibration: true,
+            policy_id: "frankensim-vv-corpus-permanent-v1".to_string(),
+        },
+        acceptance_envelopes: vec![AcceptanceRecord {
+            metric: case.metric.to_string(),
+            dims: case.metric_dims,
+            envelope: CorpusEnvelope::Tolerance {
+                atol: case.atol,
+                rtol: case.rtol,
+            },
+            regime: context_of_use,
+        }],
+        evidence_level: match case.kind {
+            WfKind::AnalyticReference => EvidenceLevel::Analytic,
+            WfKind::CrossCodeReference => EvidenceLevel::CrossCode,
+        },
     }
 }
 

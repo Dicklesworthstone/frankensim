@@ -747,6 +747,7 @@ fn audit_is_deterministic_and_warns_for_seed_gaps() {
         audit.rows().len(),
         5 + thermal_level_a_cases().len()
             + fs_vvreg::thermal_level_b::thermal_level_b_cases().len()
+            + fs_vvreg::wf_level_a::wf_level_a_cases().len()
     );
     for row in audit.rows() {
         assert_eq!(row.mandatory_present(), 15);
