@@ -29,6 +29,60 @@ pub mod archive;
 pub mod engine;
 pub mod ring;
 
+/// A SPREAD of pinned build-ups, bit-dumped (E6.2 lane bisection —
+/// the Newton walks these input classes).
+#[must_use]
+pub fn buildup_spread_json() -> String {
+    use fs_flyer::aircraft::wright_openloop_v1;
+    let design = wright_openloop_v1();
+    let probes = [
+        [13.05, 0.06, 0.1, 45.0],
+        [13.0, 0.062, 0.1, 45.0],
+        [13.0, 0.06, 0.102, 45.0],
+        [13.0, 0.06, 0.1, 45.25],
+        [14.3, 0.041, 0.137, 50.4],
+        [11.2, 0.18, 0.05, 60.0],
+    ];
+    let mut out = String::from("{");
+    for (i, p) in probes.iter().enumerate() {
+        match design.force_buildup(p[0], p[1], p[2], p[3], 0.0, 1.294) {
+            Ok(b) => {
+                out.push_str(&format!(
+                    "\"p{i}\":[\"{}\",\"{}\",{}],",
+                    b.force_n[2].to_bits(),
+                    b.moment_y_nm.to_bits(),
+                    b.coupled.corrections
+                ));
+            }
+            Err(e) => out.push_str(&format!("\"p{i}\":\"{}\",", e.code)),
+        }
+    }
+    out.pop();
+    out.push('}');
+    out
+}
+
+/// One pinned force build-up, bit-dumped (E6.2 lane bisection).
+#[must_use]
+pub fn buildup_probe_json() -> String {
+    use fs_flyer::aircraft::wright_openloop_v1;
+    let design = wright_openloop_v1();
+    match design.force_buildup(13.0, 0.06, 0.1, 45.0, 0.0, 1.294) {
+        Ok(b) => format!(
+            "{{\"fx\":\"{}\",\"fz\":\"{}\",\"my\":\"{}\",\"lift\":\"{}\",\"thrust\":\"{}\",\"wslip\":\"{}\",\"corr\":{},\"res\":\"{}\"}}",
+            b.force_n[0].to_bits(),
+            b.force_n[2].to_bits(),
+            b.moment_y_nm.to_bits(),
+            b.lift_n.to_bits(),
+            b.thrust_n[0].to_bits(),
+            b.coupled.w_slip[0].to_bits(),
+            b.coupled.corrections,
+            b.coupled.residual.to_bits(),
+        ),
+        Err(e) => format!("{{\"refusal\":\"{}\"}}", e.code),
+    }
+}
+
 /// Determinism probe payload (shared by native tests and the wasm
 /// export): bit patterns of the det kernel + fma on this platform.
 #[must_use]
@@ -381,6 +435,28 @@ mod js {
     #[must_use]
     pub fn flyer_det_probe() -> String {
         super::det_probe_json()
+    }
+
+    /// Pinned force-buildup bit probe (E6.2 lane bisection).
+    #[wasm_bindgen]
+    #[must_use]
+    pub fn flyer_buildup_probe() -> String {
+        super::buildup_probe_json()
+    }
+
+    /// The startup determinism self-test (per-lane golden; the app
+    /// shows the failure badge on a refusal envelope).
+    #[wasm_bindgen]
+    #[must_use]
+    pub fn flyer_selftest() -> String {
+        super::engine::selftest()
+    }
+
+    /// Spread probe (E6.2 lane bisection).
+    #[wasm_bindgen]
+    #[must_use]
+    pub fn flyer_buildup_spread() -> String {
+        super::buildup_spread_json()
     }
 
     /// Deterministic free rigid-body spin; returns the typed JSON envelope.

@@ -91,6 +91,69 @@ fn state_envelope(s: &SimStateOut, envelope_code: Option<&str>) -> String {
     )
 }
 
+/// The 1-second canonical self-test scenario goldens, PER LANE.
+/// Cross-lane identity is tracked at bead guzez.7.2.1 (FMA-contraction
+/// class, measured 2026-08-21); until it lands each lane pins its own
+/// golden and the CI records the cross-lane pair as EXPECTED-DIVERGENT
+/// — loudly, never silently.
+#[cfg(target_arch = "wasm32")]
+pub const SELFTEST_GOLDEN: &str =
+    "57e7f8769ab0e6c6252aa716681b34e65760649ac4f8080343287d4f3eb2a5ef";
+/// Native (aarch64/x86 pending the six-lane matrix) canonical golden.
+#[cfg(not(target_arch = "wasm32"))]
+pub const SELFTEST_GOLDEN: &str =
+    "76119b72d2a3296a5b1f41ff9f21291ac4b54172e47d24116c5543017f07ee39";
+
+/// Run the canonical 1-second scenario and compare against a golden
+/// (the startup self-test core; the shipped entry uses
+/// [`SELFTEST_GOLDEN`], the battery's falsifier passes a wrong one).
+#[must_use]
+pub fn selftest_against(golden: &str) -> String {
+    let mut slot = EngineSlot::default();
+    let init = slot.init(1903, 1.294, 11.0, MODE_FIXED, 0, 18.3, 120, false, false);
+    if !init.starts_with("{\"ok\"") {
+        return refusal_envelope(&Refusal {
+            code: "determinism-selftest-failed",
+            message: format!("canonical init refused: {init}"),
+            ranked_repairs: vec!["the build is broken; do not trust results".into()],
+        });
+    }
+    for _ in 0..120 {
+        let s = slot.step(false, 0.0, 0.0);
+        if !s.starts_with("{\"ok\"") {
+            return refusal_envelope(&Refusal {
+                code: "determinism-selftest-failed",
+                message: format!("canonical step refused: {s}"),
+                ranked_repairs: vec!["the build is broken; do not trust results".into()],
+            });
+        }
+    }
+    let d = slot.digest();
+    let key = "\"digest\":\"";
+    let digest = d
+        .find(key)
+        .map(|i| &d[i + key.len()..i + key.len() + 64])
+        .unwrap_or("");
+    if digest == golden {
+        format!("{{\"ok\":{{\"digest\":\"{digest}\",\"matched\":true}}}}")
+    } else {
+        refusal_envelope(&Refusal {
+            code: "determinism-selftest-failed",
+            message: format!("canonical digest {digest} != golden {golden}"),
+            ranked_repairs: vec![
+                "show the determinism-failure badge; results are untrusted".into(),
+                "a perturbed build or platform drift moved the physics".into(),
+            ],
+        })
+    }
+}
+
+/// The shipped startup self-test (per-lane golden).
+#[must_use]
+pub fn selftest() -> String {
+    selftest_against(SELFTEST_GOLDEN)
+}
+
 impl EngineSlot {
     /// Initialize a lifecycle (replaces any prior run in this slot).
     /// Returns the init envelope: run intent id, tick-0 digest, trim.

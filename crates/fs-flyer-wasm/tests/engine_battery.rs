@@ -176,6 +176,21 @@ fn assist_visibility_and_counterfactual_receipt() {
 }
 
 #[test]
+fn selftest_matches_its_lane_golden_and_the_falsifier_fires() {
+    // The shipped self-test (per-lane golden) passes on this build...
+    let ok = fs_flyer_wasm::engine::selftest();
+    assert!(ok.contains("\"matched\":true"), "{ok}");
+    // ...and the DELIBERATELY PERTURBED golden fires the determinism
+    // badge refusal (the DONE-WHEN falsifier, executed).
+    let bad = fs_flyer_wasm::engine::selftest_against(&"0".repeat(64));
+    assert!(
+        bad.contains("\"code\":\"determinism-selftest-failed\""),
+        "{bad}"
+    );
+    jlog("selftest", "\"lane_golden\":true,\"falsifier\":true");
+}
+
+#[test]
 fn short_lifecycle_is_bit_identical_twice() {
     let run = || {
         let mut slot = EngineSlot::default();
