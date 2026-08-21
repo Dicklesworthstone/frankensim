@@ -24,6 +24,7 @@ import {
 } from "./protocol.ts";
 import { SeqlockWriter } from "../transport/seqlock.ts";
 import { TickScheduler } from "../transport/schedule.ts";
+import { ControlHold } from "./humanControls.ts";
 
 const TICK_MS = 1000 / 120;
 
@@ -47,8 +48,10 @@ let scheduler: TickScheduler | null = null;
 let mode = 0;
 let running = false;
 let ended = false;
-let control = { leverForceN: 0, warpCmdRad: 0, fresh: false };
-let payloadScratch = new Float64Array(PAYLOAD_F64S);
+// E5.3a: Human-mode hold law (ApplyNextEligibleTickAndFlag) + the sim
+// epoch for requested-tick targeting (worker monotonic clock).
+let hold = new ControlHold();
+let simEpochMs = 0;
 
 function post(msg: WorkerToMain, transfer?: Transferable[]): void {
   (self as unknown as Worker).postMessage(msg, transfer ?? []);
@@ -68,14 +71,25 @@ function runTick(tick: number): void {
   if (engine === null || ended) {
     return;
   }
-  const hasInput = mode === MODE_HUMAN && control.fresh;
-  const json = engine.flyer_engine_step(hasInput, control.leverForceN, control.warpCmdRad);
-  control = { ...control, fresh: mode === MODE_HUMAN ? control.fresh : false };
+  // E5.3a Human mode: the ControlHold supplies the zero-order-held
+  // control every tick; before the FIRST admitted control the sim
+  // waits (no step, no refusal spam — the run starts at first touch).
+  let hasInput = false;
+  let lever = 0;
+  let warp = 0;
+  if (mode === MODE_HUMAN) {
+    const held = hold.valueAt(tick);
+    if (held === null) {
+      return;
+    }
+    hasInput = true;
+    lever = held.leverForceN;
+    warp = held.warpCmdRad;
+  }
+  const json = engine.flyer_engine_step(hasInput, lever, warp);
   const step = parseStepEnvelope(json);
   if (step.kind === "refusal") {
     post({ kind: "refusal", stage: "step", refusal: step.refusal });
-    // control-input-missing in Human mode: hold the schedule, wait for
-    // input (ApplyNextEligibleTickAndFlag semantics land in E5.3a).
     return;
   }
   if (step.kind === "malformed") {
@@ -118,6 +132,7 @@ async function handleInit(msg: Extract<MainToWorker, { kind: "init" }>): Promise
   engine = engine ?? (await loadEngine());
   mode = msg.scenario.mode;
   ended = false;
+  hold = new ControlHold();
   const initJson = engine.flyer_engine_init(
     msg.scenario.seed,
     msg.scenario.rhoKgM3,
@@ -157,7 +172,8 @@ async function handleInit(msg: Extract<MainToWorker, { kind: "init" }>): Promise
   } else {
     writer = null;
   }
-  scheduler = new TickScheduler(TICK_MS, performance.now());
+  simEpochMs = performance.now();
+  scheduler = new TickScheduler(TICK_MS, simEpochMs);
   running = true;
   post({
     kind: "ready",
@@ -176,8 +192,28 @@ self.addEventListener("message", (event: MessageEvent<MainToWorker>) => {
     case "init":
       void handleInit(msg);
       break;
-    case "control":
-      control = { leverForceN: msg.leverForceN, warpCmdRad: msg.warpCmdRad, fresh: true };
+    case "control": {
+      // Requested tick from the device time (already translated into
+      // this worker's clock) under the minimum-lead rule; the ack is
+      // the ApplyNextEligibleTickAndFlag receipt.
+      const currentTick = scheduler?.currentTick() ?? 0;
+      const requested = Math.ceil((msg.deviceWorkerMs - simEpochMs) / TICK_MS) + 1;
+      const receipt = hold.admit(
+        msg.sequence,
+        { leverForceN: msg.leverForceN, warpCmdRad: msg.warpCmdRad },
+        requested,
+        currentTick,
+      );
+      post({ kind: "control-ack", sequence: msg.sequence, ...receipt });
+      break;
+    }
+    case "ping":
+      post({
+        kind: "pong",
+        nonce: msg.nonce,
+        localSentMs: msg.localSentMs,
+        remoteMs: performance.now(),
+      });
       break;
     case "pause":
       running = false;

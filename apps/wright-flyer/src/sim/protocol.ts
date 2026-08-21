@@ -87,7 +87,17 @@ export type MainToWorker =
       readonly slots?: number;
       readonly runEpoch: number;
     }
-  | { readonly kind: "control"; readonly leverForceN: number; readonly warpCmdRad: number }
+  | {
+      readonly kind: "control";
+      readonly leverForceN: number;
+      readonly warpCmdRad: number;
+      /** E5.3a: identity of this device sample in the latency ledger. */
+      readonly sequence: number;
+      /** Device timestamp TRANSLATED into the worker's monotonic clock
+       * (main applies the ping-exchange offset before sending). */
+      readonly deviceWorkerMs: number;
+    }
+  | { readonly kind: "ping"; readonly nonce: number; readonly localSentMs: number }
   | { readonly kind: "pause" }
   | { readonly kind: "resume" };
 
@@ -125,4 +135,18 @@ export type WorkerToMain =
       readonly ticksRun: number;
       readonly reanchors: number;
       readonly maxBacklogObserved: number;
+    }
+  | {
+      /** E5.3a clock-sync reply (estimateClockOffsetMs consumes these). */
+      readonly kind: "pong";
+      readonly nonce: number;
+      readonly localSentMs: number;
+      readonly remoteMs: number;
+    }
+  | {
+      /** E5.3a ApplyNextEligibleTickAndFlag receipt for one control. */
+      readonly kind: "control-ack";
+      readonly sequence: number;
+      readonly appliedTick: number;
+      readonly lateByTicks: number;
     };

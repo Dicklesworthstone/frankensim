@@ -16,6 +16,7 @@ import {
 import { SeqlockReader, seqlockBytes } from "../transport/seqlock.ts";
 import { decodeSnapshot, interpolateSnapshots, type SimSnapshot } from "./snapshotView.ts";
 import { FlightRecorder, type FlightRecording } from "./replay.ts";
+import { estimateClockOffsetMs, type ClockSyncSample } from "../transport/inputClock.ts";
 
 const RING_SLOTS = 4;
 const SIM_TICK_S = 1 / 120;
@@ -29,6 +30,8 @@ export interface SimClientEvents {
     digest: string;
     envelopeRefusalCode?: string;
   }): void;
+  /** E5.3a: ApplyNextEligibleTickAndFlag receipt for one control. */
+  onControlAck?(ack: { sequence: number; appliedTick: number; lateByTicks: number }): void;
 }
 
 export class SimClient {
@@ -46,6 +49,10 @@ export class SimClient {
   private scenario: ScenarioInit | null = null;
   private ready: { runIntentId: string; tick0Digest: string } | null = null;
   private recording: FlightRecording | null = null;
+  // E5.3a clock sync (main→worker monotonic offset).
+  private readonly syncSamples: ClockSyncSample[] = [];
+  private clockOffsetMs = 0;
+  private pingNonce = 0;
 
   constructor(events: SimClientEvents, workerFactory?: () => Worker) {
     this.worker =
@@ -83,6 +90,19 @@ export class SimClient {
         }
         case "metrics":
           console.info(JSON.stringify({ suite: "wf-sim-client", stage: "metrics", ...msg }));
+          break;
+        case "pong": {
+          // Clock sync: worker ≈ main + offset (min-RTT midpoint).
+          this.syncSamples.push({
+            localSentMs: msg.localSentMs,
+            remoteMs: msg.remoteMs,
+            localReceivedMs: performance.now(),
+          });
+          this.clockOffsetMs = estimateClockOffsetMs(this.syncSamples);
+          break;
+        }
+        case "control-ack":
+          events.onControlAck?.(msg);
           break;
       }
     });
@@ -126,8 +146,26 @@ export class SimClient {
     }
   }
 
-  sendControl(leverForceN: number, warpCmdRad: number): void {
-    this.worker.postMessage({ kind: "control", leverForceN, warpCmdRad } satisfies MainToWorker);
+  /** Send a control sample. `deviceMs` is the MAIN-clock device event
+   * time; the ping-derived offset translates it into the worker clock. */
+  sendControl(leverForceN: number, warpCmdRad: number, sequence: number, deviceMs: number): void {
+    this.worker.postMessage({
+      kind: "control",
+      leverForceN,
+      warpCmdRad,
+      sequence,
+      deviceWorkerMs: deviceMs + this.clockOffsetMs,
+    } satisfies MainToWorker);
+  }
+
+  /** One clock-sync ping (call a few times; min-RTT sample wins). */
+  sendPing(): void {
+    this.pingNonce += 1;
+    this.worker.postMessage({
+      kind: "ping",
+      nonce: this.pingNonce,
+      localSentMs: performance.now(),
+    } satisfies MainToWorker);
   }
 
   private push(snap: SimSnapshot): void {
@@ -166,6 +204,11 @@ export class SimClient {
 
   envelopeRefusalCode(): string | undefined {
     return this.terminalCode;
+  }
+
+  /** Newest sim tick seen by this client (0 before the first snapshot). */
+  latestTick(): number {
+    return this.latest?.tick ?? 0;
   }
 
   /** The sealed recording of the finished run (null until terminal).

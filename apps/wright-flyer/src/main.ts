@@ -7,6 +7,9 @@ import { createFlyerSceneRenderer } from "./flyerScene.ts";
 import { SimClient } from "./sim/simClient.ts";
 import { MODE_FIXED, MODE_HISTORICAL, dec17Scenario } from "./sim/protocol.ts";
 import { recordedToScenario, replayVerdict, type FlightRecording } from "./sim/replay.ts";
+import { MODE_HUMAN } from "./sim/protocol.ts";
+import { LatencyLedger, toPhysical } from "./sim/humanControls.ts";
+import { NEUTRAL, keysFrom, stepCommand, type PilotCommand } from "./input.ts";
 
 function main(): void {
   const app = document.getElementById("app");
@@ -34,7 +37,12 @@ function main(): void {
   // via the sim worker; without the flag the E2.2 scripted demo runs.
   // ?mode=historical selects the registered pilot family member 0.
   const params = new URLSearchParams(window.location.search);
-  const mode = params.get("mode") === "historical" ? MODE_HISTORICAL : MODE_FIXED;
+  const modeWord = params.get("mode");
+  const mode =
+    modeWord === "historical" ? MODE_HISTORICAL : modeWord === "human" ? MODE_HUMAN : MODE_FIXED;
+  // E5.3a: latency decomposition ledger (device→sent→ack→published→
+  // present), JSONL per completed control sample.
+  const ledger = new LatencyLedger((line) => console.info(line));
   let simClient: SimClient | undefined;
   let renderer = createFlyerSceneRenderer(app);
   const resize = (): void => renderer.resize(app.clientWidth, app.clientHeight);
@@ -43,6 +51,15 @@ function main(): void {
     const client: SimClient = new SimClient({
       onReady(info): void {
         client.bindAnchor(info.tick0Digest);
+        // Clock-sync burst (min-RTT sample wins inside the client).
+        for (let i = 0; i < 5; i += 1) {
+          client.sendPing();
+        }
+        // Human mode: the run starts at the first admitted control —
+        // send neutral so the rail run begins immediately.
+        if (mode === MODE_HUMAN) {
+          sendHumanControl(NEUTRAL, performance.now());
+        }
         console.info(JSON.stringify({ suite: "wright-flyer-app", stage: "sim-ready", ...info }));
       },
       onRefusal(stage, refusal): void {
@@ -69,9 +86,47 @@ function main(): void {
         }
         capabilityText.textContent += "  [R replays with ghost]";
       },
+      onControlAck(ack): void {
+        ledger.acked(ack.sequence, ack.appliedTick, ack.lateByTicks, performance.now());
+      },
     });
     return client;
   };
+
+  // E5.3a human-control pump: keyboard-rate transducer → quantized
+  // command → physical units → worker (with the latency ledger fed).
+  let controlSeq = 0;
+  let command: PilotCommand = NEUTRAL;
+  let lastSent: PilotCommand | null = null;
+  let lastSentMs = 0;
+  const heldKeys = new Set<string>();
+  const sendHumanControl = (cmd: PilotCommand, deviceMs: number): void => {
+    if (simClient === undefined) {
+      return;
+    }
+    controlSeq += 1;
+    const phys = toPhysical(cmd);
+    ledger.sent(controlSeq, deviceMs, performance.now());
+    simClient.sendControl(phys.leverForceN, phys.warpCmdRad, controlSeq, deviceMs);
+    lastSent = cmd;
+    lastSentMs = performance.now();
+  };
+  const pumpHuman = (nowMs: number, dtS: number): void => {
+    if (mode !== MODE_HUMAN || simClient === undefined) {
+      return;
+    }
+    command = stepCommand(command, keysFrom(heldKeys), dtS);
+    const changed =
+      lastSent === null || command.canard !== lastSent.canard || command.warp !== lastSent.warp;
+    // Send on change, plus a 100 ms heartbeat (the worker holds ZOH).
+    if (changed || nowMs - lastSentMs > 100) {
+      sendHumanControl(command, nowMs);
+    }
+  };
+  if (mode === MODE_HUMAN) {
+    window.addEventListener("keydown", (e: KeyboardEvent) => heldKeys.add(e.code));
+    window.addEventListener("keyup", (e: KeyboardEvent) => heldKeys.delete(e.code));
+  }
 
   if (params.get("sim") === "1") {
     simClient = makeClient();
@@ -112,8 +167,18 @@ function main(): void {
   let frames = 0;
   let windowStartMs = performance.now();
   let lastMs = windowStartMs;
+  let lastPublishedTick = 0;
   const frame = (nowMs: number): void => {
-    renderer.render((nowMs - lastMs) / 1000);
+    const dtS = (nowMs - lastMs) / 1000;
+    pumpHuman(nowMs, dtS);
+    renderer.render(dtS);
+    // Latency ledger: publication (new sim tick visible) then present.
+    const tick = simClient?.latestTick() ?? 0;
+    if (tick > lastPublishedTick) {
+      lastPublishedTick = tick;
+      ledger.published(tick, nowMs);
+    }
+    ledger.presented(performance.now());
     lastMs = nowMs;
     frames += 1;
     if (nowMs - windowStartMs >= 1000) {
