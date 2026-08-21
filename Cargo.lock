@@ -1487,13 +1487,20 @@ dependencies = [
 name = "fs-flyer"
 version = "0.0.1"
 dependencies = [
+ "asupersync",
  "fs-airfoil",
  "fs-airscrew",
+ "fs-alloc",
  "fs-atmo",
  "fs-blake3",
+ "fs-contact",
+ "fs-exec",
+ "fs-ga",
  "fs-geom",
+ "fs-ivl",
  "fs-math",
  "fs-mbd",
+ "fs-motion",
  "fs-rand",
  "fs-time",
  "fs-wakeref",
