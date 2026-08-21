@@ -397,14 +397,19 @@ fn catapult_mechanics_and_the_huffman_low_speed_block() {
     assert_eq!(CATAPULT_1904_V1.pull_force_n, 2073.0);
     assert_eq!(CATAPULT_1904_V1.pull_length_m, 14.6);
 
-    // Part 2 — the LIVING MARKER (honest, executed): the near-calm
-    // Huffman rail run is OUTSIDE the coupled core's admitted envelope
-    // (probe 2026-08-20: headwinds 2-8 m/s all end EnvelopeExceeded
-    // within ~16 rail ticks; the admitted floor sits near the Dec-17
-    // 11 m/s class). The run ends with a RECEIPTED envelope exit —
-    // never a silent fallback. When the low-speed coupling tier lands
-    // (bead guzez.5.7.1 upstream-wash decay + near-static schedule),
-    // THIS assertion is the one that must flip to a liftoff claim.
+    // Part 2 — the LIVING MARKER (honest, executed). 5.7.1's
+    // upstream-wash decay LANDED 2026-08-21 and moved the floor: the
+    // flat wash map used to hand the wing the disk-plane slipstream,
+    // which (a) fabricated calm-takeoff lift the historical record
+    // contradicts and (b) blew up the coupled solve at 4-8 m/s
+    // (probe 2026-08-20: 2-8 all EnvelopeExceeded). With the decay,
+    // the probe 2026-08-21 reads: 2-3 m/s REFUSE (the near-calm run
+    // stays outside the admitted envelope — the honest outcome; the
+    // near-static solve schedule remains future work), 4-8 m/s LIFT
+    // unaided (the fabrication crash is gone). The floor bracket is
+    // asserted below; THIS near-calm assertion flips to a liftoff
+    // claim only if a near-static solve tier ever lands AND the
+    // historical catapult requirement is re-argued.
     let mut sim = SimLoop::init(huffman_scenario(1904, PilotMode::FixedControls)).unwrap();
     let end = loop {
         let out = sim.step(None).unwrap();
@@ -422,6 +427,37 @@ fn catapult_mechanics_and_the_huffman_low_speed_block() {
     jlog(
         "huffman-blocked",
         &format!("\"code\":\"{}\",\"tracked\":\"guzez.5.7.1\"", receipt.code),
+    );
+
+    // Part 3 — the 5.7.1 FLOOR BRACKET (executed both sides): at
+    // 3 m/s the coupled core still refuses (calm-class Huffman needs
+    // the catapult, matching the record); at 4 m/s the same scenario
+    // lifts unaided within the 30 m rail. Both outcomes are receipts,
+    // not assumptions.
+    let outcome_at = |headwind: f64| -> (bool, bool) {
+        let mut spec = huffman_scenario(1904, PilotMode::FixedControls);
+        spec.headwind_mps = headwind;
+        let mut sim = SimLoop::init(spec).unwrap();
+        loop {
+            let out = sim.step(None).unwrap();
+            if matches!(out.phase, Phase::Airborne) {
+                return (true, false);
+            }
+            if let Phase::Ended(e) = out.phase {
+                return (false, e == TerminalEvent::EnvelopeExceeded);
+            }
+        }
+    };
+    let (lift3, refused3) = outcome_at(3.0);
+    assert!(!lift3 && refused3, "3 m/s must refuse (calm class)");
+    let (lift4, _) = outcome_at(4.0);
+    assert!(
+        lift4,
+        "4 m/s must lift unaided (the fabrication crash is gone)"
+    );
+    jlog(
+        "huffman-floor-bracket",
+        "\"refuses_at\":3.0,\"lifts_at\":4.0",
     );
 }
 

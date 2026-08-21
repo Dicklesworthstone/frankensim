@@ -11,8 +11,8 @@
 # Repro: tools/wf-ci/golden_lanes.sh
 set -u
 cd "$(dirname "$0")/../.."
-NATIVE_GOLDEN="76119b72d2a3296a5b1f41ff9f21291ac4b54172e47d24116c5543017f07ee39"
-WASM_GOLDEN="57e7f8769ab0e6c6252aa716681b34e65760649ac4f8080343287d4f3eb2a5ef"
+NATIVE_GOLDEN="823d9f59dd162c8bc0764e144236d2f00abc48a12142095688a22e59ae95ca9d"
+WASM_GOLDEN="f088689ae4c60ec33a2034ec7020c85772bfc016968fa9ae5f6d92a308fcbbb6"
 PKG="${WF_PKG_DIR:-/tmp/wf-ci-pkg}"
 fail=0
 lane() { # name digest golden

@@ -99,7 +99,7 @@ fn state_envelope(s: &SimStateOut, envelope_code: Option<&str>) -> String {
 /// — loudly, never silently.
 #[cfg(target_arch = "wasm32")]
 pub const SELFTEST_GOLDEN: &str =
-    "57e7f8769ab0e6c6252aa716681b34e65760649ac4f8080343287d4f3eb2a5ef";
+    "f088689ae4c60ec33a2034ec7020c85772bfc016968fa9ae5f6d92a308fcbbb6";
 /// Native (aarch64/x86 pending the six-lane matrix) canonical golden.
 #[cfg(not(target_arch = "wasm32"))]
 pub const SELFTEST_GOLDEN: &str =
