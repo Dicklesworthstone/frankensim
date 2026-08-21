@@ -597,6 +597,7 @@ dependencies = [
  "fs-mbd",
  "fs-rand",
  "fs-time",
+ "fs-wakeref",
  "fs-wing",
 ]
 
@@ -607,6 +608,7 @@ dependencies = [
  "asupersync",
  "fs-blake3",
  "fs-flyer",
+ "fs-math",
  "fs-mbd",
  "fs-time",
  "getrandom 0.4.3",
@@ -783,6 +785,14 @@ dependencies = [
  "fs-la",
  "fs-math",
  "fs-solver",
+]
+
+[[package]]
+name = "fs-wakeref"
+version = "0.0.1"
+dependencies = [
+ "fs-blake3",
+ "fs-math",
 ]
 
 [[package]]

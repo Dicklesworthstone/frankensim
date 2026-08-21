@@ -29,6 +29,23 @@ pub mod archive;
 pub mod engine;
 pub mod ring;
 
+/// Determinism probe payload (shared by native tests and the wasm
+/// export): bit patterns of the det kernel + fma on this platform.
+#[must_use]
+pub fn det_probe_json() -> String {
+    use fs_math::det;
+    let fma = 0.1f64.mul_add(0.2, 0.3);
+    format!(
+        "{{\"exp\":\"{}\",\"sin\":\"{}\",\"ln\":\"{}\",\"atan2\":\"{}\",\"cos\":\"{}\",\"fma\":\"{}\"}}",
+        det::exp(0.1).to_bits(),
+        det::sin(0.3).to_bits(),
+        det::ln(2.5).to_bits(),
+        det::atan2(1.0, 2.0).to_bits(),
+        det::cos(0.7).to_bits(),
+        fma.to_bits(),
+    )
+}
+
 /// Versioned identity domain for hello-kernel trajectory digests.
 pub const HELLO_DIGEST_DOMAIN: &str = "org.frankensim.fs-flyer-wasm.hello-trajectory.v1";
 
@@ -356,6 +373,14 @@ mod js {
     #[must_use]
     pub fn flyer_engine_digest() -> String {
         ENGINE.with(|e| e.borrow().digest())
+    }
+
+    /// Determinism probe (E6.2 six-lane diagnostics; doc-hidden class):
+    /// bit patterns of the det:: kernel + fma on this platform.
+    #[wasm_bindgen]
+    #[must_use]
+    pub fn flyer_det_probe() -> String {
+        super::det_probe_json()
     }
 
     /// Deterministic free rigid-body spin; returns the typed JSON envelope.

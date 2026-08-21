@@ -19,6 +19,7 @@ layer = "L6"
 
 [dependencies]
 fs-flyer = { path = "../fs-flyer" }
+fs-math = { path = "../fs-math" }
 fs-mbd = { path = "../fs-mbd" }
 fs-time = { path = "../fs-time" }
 fs-blake3 = { path = "../fs-blake3" }
