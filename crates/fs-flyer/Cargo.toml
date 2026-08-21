@@ -22,6 +22,7 @@ fs-wakeref = { path = "../fs-wakeref" }
 fs-wing = { path = "../fs-wing" }
 fs-airscrew = { path = "../fs-airscrew" }
 fs-atmo = { path = "../fs-atmo" }
+fs-bem = { path = "../fs-bem" }
 
 [dev-dependencies]
 asupersync = { path = "../../../asupersync" }

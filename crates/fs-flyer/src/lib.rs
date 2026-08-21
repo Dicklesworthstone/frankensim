@@ -28,6 +28,7 @@ pub mod aerowarp;
 pub mod aircraft;
 pub mod assist;
 pub mod augmented;
+pub mod bemscreen;
 pub mod campaign;
 pub mod canardmech;
 pub mod checkpoint;
