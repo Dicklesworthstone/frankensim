@@ -2700,6 +2700,7 @@ dependencies = [
  "fs-alloc",
  "fs-blake3",
  "fs-exec",
+ "fs-wakeref",
 ]
 
 [[package]]
