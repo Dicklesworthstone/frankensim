@@ -291,58 +291,7 @@ impl FarField {
                 core2_num += w_row * (row.core2_m2 + spread);
                 core2_den += w_row;
             }
-            // Circulation-weighted centroid over segment midpoints.
-            let mut cw = [0.0f64; 3];
-            let mut wt = 0.0;
-            for (a, b, g) in &segs {
-                let w = g.abs() * dist(*a, *b);
-                for k in 0..3 {
-                    cw[k] += w * 0.5 * (a[k] + b[k]);
-                }
-                wt += w;
-            }
-            let wt = wt.max(1e-12);
-            let centroid = [cw[0] / wt, cw[1] / wt, cw[2] / wt];
-            // Moments about the centroid.
-            let mut w_sum = [0.0f64; 3];
-            let mut w_abs_sum = 0.0;
-            let mut dip = [[0.0f64; 3]; 3];
-            let mut quad = [[[0.0f64; 3]; 3]; 3];
-            let mut radius: f64 = 0.0;
-            for (a, b, g) in &segs {
-                let w = [g * (b[0] - a[0]), g * (b[1] - a[1]), g * (b[2] - a[2])];
-                let mid = [
-                    0.5 * (a[0] + b[0]),
-                    0.5 * (a[1] + b[1]),
-                    0.5 * (a[2] + b[2]),
-                ];
-                let d = [
-                    mid[0] - centroid[0],
-                    mid[1] - centroid[1],
-                    mid[2] - centroid[2],
-                ];
-                w_abs_sum += g.abs() * dist(*a, *b);
-                for j in 0..3 {
-                    w_sum[j] += w[j];
-                    for l in 0..3 {
-                        dip[j][l] += w[j] * d[l];
-                        for m in 0..3 {
-                            quad[j][l][m] += w[j] * d[l] * d[m];
-                        }
-                    }
-                }
-                radius = radius.max(dist(*a, centroid)).max(dist(*b, centroid));
-            }
-            cells.push(FarCell {
-                centroid,
-                radius_m: radius,
-                w_sum,
-                w_abs_sum,
-                dip,
-                quad,
-                core2_m2: core2_num / core2_den.max(1e-12),
-                segs,
-            });
+            cells.push(cell_from_segs(segs, core2_num / core2_den.max(1e-12)));
         }
         wake.rows.drain(0..n_rows);
         Ok(FarField { mode, cells })
@@ -591,6 +540,66 @@ pub fn emit_v10_receipt(
         scale_note: V10_SCALE_NOTE,
         receipt_digest: hash_domain("org.frankensim.wf.v10-receipt.v1", &b).to_hex(),
     })
+}
+
+/// Build one multipole cell from exact segments (shared by
+/// aggregation AND image construction so the two paths are
+/// arithmetically IDENTICAL — the conversion-symmetry battery relies
+/// on this).
+#[must_use]
+pub fn cell_from_segs(segs: Vec<([f64; 3], [f64; 3], f64)>, core2_m2: f64) -> FarCell {
+    // Circulation-weighted centroid over segment midpoints.
+    let mut cw = [0.0f64; 3];
+    let mut wt = 0.0;
+    for (a, b, g) in &segs {
+        let w = g.abs() * dist(*a, *b);
+        for k in 0..3 {
+            cw[k] += w * 0.5 * (a[k] + b[k]);
+        }
+        wt += w;
+    }
+    let wt = wt.max(1e-12);
+    let centroid = [cw[0] / wt, cw[1] / wt, cw[2] / wt];
+    // Moments about the centroid.
+    let mut w_sum = [0.0f64; 3];
+    let mut w_abs_sum = 0.0;
+    let mut dip = [[0.0f64; 3]; 3];
+    let mut quad = [[[0.0f64; 3]; 3]; 3];
+    let mut radius: f64 = 0.0;
+    for (a, b, g) in &segs {
+        let w = [g * (b[0] - a[0]), g * (b[1] - a[1]), g * (b[2] - a[2])];
+        let mid = [
+            0.5 * (a[0] + b[0]),
+            0.5 * (a[1] + b[1]),
+            0.5 * (a[2] + b[2]),
+        ];
+        let d = [
+            mid[0] - centroid[0],
+            mid[1] - centroid[1],
+            mid[2] - centroid[2],
+        ];
+        w_abs_sum += g.abs() * dist(*a, *b);
+        for j in 0..3 {
+            w_sum[j] += w[j];
+            for l in 0..3 {
+                dip[j][l] += w[j] * d[l];
+                for m in 0..3 {
+                    quad[j][l][m] += w[j] * d[l] * d[m];
+                }
+            }
+        }
+        radius = radius.max(dist(*a, centroid)).max(dist(*b, centroid));
+    }
+    FarCell {
+        centroid,
+        radius_m: radius,
+        w_sum,
+        w_abs_sum,
+        dip,
+        quad,
+        core2_m2,
+        segs,
+    }
 }
 
 fn dist(a: [f64; 3], b: [f64; 3]) -> f64 {

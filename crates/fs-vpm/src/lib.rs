@@ -20,6 +20,7 @@ use fs_exec::{AdmittedBudget, BudgetConsumption, BudgetRefusal, Cx};
 pub mod coarsen3d;
 pub mod farfield3d;
 pub mod filament3d;
+pub mod images3d;
 
 /// Maximum completed logical work units between production-path checkpoints.
 ///
