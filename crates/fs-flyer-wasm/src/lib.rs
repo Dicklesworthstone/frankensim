@@ -27,6 +27,7 @@ use fs_time::lie::rigid_body_step;
 
 pub mod archive;
 pub mod engine;
+pub mod fieldlease;
 pub mod ring;
 
 /// A SPREAD of pinned build-ups, bit-dumped (E6.2 lane bisection —
@@ -457,6 +458,14 @@ mod js {
     #[must_use]
     pub fn flyer_buildup_spread() -> String {
         super::buildup_spread_json()
+    }
+
+    /// E7.1-ii field-lease self-test: ring -> lease -> §5.5 sample ->
+    /// bounded JSON (or a typed refusal envelope).
+    #[wasm_bindgen]
+    #[must_use]
+    pub fn flyer_field_selftest() -> String {
+        super::fieldlease::field_selftest_json()
     }
 
     /// Deterministic free rigid-body spin; returns the typed JSON envelope.

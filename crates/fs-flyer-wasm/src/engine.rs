@@ -64,6 +64,7 @@ fn phase_word(phase: Phase) -> &'static str {
         Phase::Ended(TerminalEvent::RailEndWithoutLift) => "ended:rail-end-without-lift",
         Phase::Ended(TerminalEvent::MaxTicks) => "ended:max-ticks",
         Phase::Ended(TerminalEvent::EnvelopeExceeded) => "ended:envelope-exceeded",
+        Phase::Ended(TerminalEvent::DamageModelUnavailable) => "ended:damage-model-unavailable",
     }
 }
 

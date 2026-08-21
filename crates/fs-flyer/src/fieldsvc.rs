@@ -22,7 +22,7 @@
 //!     the total-flow claim.
 
 use crate::{Refusal, refuse};
-use fs_atmo::Atmosphere;
+use fs_atmo::{Atmosphere, DEC17_AIR, FlatSiteLogLaw, TurbulenceField};
 use fs_blake3::hash_domain;
 use fs_math::det;
 
@@ -185,6 +185,100 @@ impl FieldSourceStateV1 {
         b.extend_from_slice(&self.tick.to_le_bytes());
         b.extend_from_slice(&self.supported_components().to_le_bytes());
         hash_domain("org.frankensim.wf.field-source-snapshot.v1", &b).to_hex()
+    }
+}
+
+/// The canonical v1 ambient atmosphere for lease-side field sampling
+/// (Kill Devil Hills sand-plain roughness; declared analytic
+/// turbulence tier). Consumers that never touch fs-atmo directly
+/// (the wasm binding crate) build through here.
+///
+/// # Errors
+/// fs-atmo admission refusals (headwind < 0, non-finite).
+pub fn ambient_atmosphere_v1(seed: u64, headwind_mps: f64) -> Result<Atmosphere, Refusal> {
+    let mean = FlatSiteLogLaw {
+        scenario_effective_z0_m: 5.0e-3,
+        displacement_height_m: 0.02,
+        reference_height_m: 10.0,
+        reference_speed_mps: headwind_mps,
+    };
+    mean.admit().map_err(|e| {
+        refuse(
+            "field-atmosphere-invalid",
+            format!("log law: {}", e.message),
+            "finite non-negative headwind",
+        )
+    })?;
+    let turbulence = TurbulenceField::build(seed, 16, 0.9, 20.0, headwind_mps).map_err(|e| {
+        refuse(
+            "field-atmosphere-invalid",
+            format!("turbulence: {}", e.message),
+            "finite non-negative headwind",
+        )
+    })?;
+    Ok(Atmosphere {
+        mean,
+        turbulence,
+        air: DEC17_AIR,
+    })
+}
+
+/// 1903 gross mass for the v1 payload-derived bound system [kg]
+/// (E1 dossier: ~274 kg empty + pilot; the exact split lives in
+/// fs-flyer-wasm's mass spec — this is the field-service display
+/// tier, provenance-labeled, never a force path).
+pub const V1_GROSS_MASS_KG: f64 = 338.0;
+
+/// 1903 wing span [m].
+pub const V1_SPAN_M: f64 = 12.29;
+
+impl FieldSourceStateV1 {
+    /// Build the v1 state from a leased E5.0 ring payload
+    /// (fs-flyer-wasm binds this under the snapshot lease — E7.1-ii).
+    /// Payload layout: [x, h, u, w, q, theta, dc, warp, omega, gust,
+    /// assist, phase]. An AIRBORNE payload derives a lift-carrying
+    /// bound system (Kutta–Joukowski at the published gross mass with
+    /// elliptic-loading span efficiency); any other phase publishes
+    /// atmosphere only, and the omission is named by the meta as
+    /// usual.
+    ///
+    /// # Errors
+    /// `field-payload-invalid` (wrong length or non-finite entries).
+    pub fn from_ring_payload(
+        tick: u64,
+        source_state_digest: String,
+        payload: &[f64],
+        atmosphere: Atmosphere,
+        rho_kg_m3: f64,
+    ) -> Result<Self, Refusal> {
+        if payload.len() < 12 || payload.iter().any(|v| !v.is_finite()) {
+            return Err(refuse(
+                "field-payload-invalid",
+                format!("{} floats", payload.len()),
+                "the E5.0 payload is 12 finite floats",
+            ));
+        }
+        let (x, h, u, w, phase) = (payload[0], payload[1], payload[2], payload[3], payload[11]);
+        let airborne = phase == 1.0;
+        let speed = det::sqrt(u * u + w * w);
+        let bound = if airborne && speed > 1.0 {
+            Some(BoundSystem {
+                gamma_m2ps: V1_GROSS_MASS_KG * 9.80665 / (rho_kg_m3 * speed * 0.9 * V1_SPAN_M),
+                tip_left_m: [x, -0.5 * V1_SPAN_M, h],
+                tip_right_m: [x, 0.5 * V1_SPAN_M, h],
+                trail_m: 40.0,
+                core_m: 0.05,
+            })
+        } else {
+            None
+        };
+        Ok(FieldSourceStateV1 {
+            tick,
+            source_state_digest,
+            atmosphere,
+            images_active: bound.is_some(),
+            bound,
+        })
     }
 }
 
