@@ -11,6 +11,7 @@ description = "Vortex particle method (fs-vpm): 2-D inviscid vortex dynamics by 
 layer = "L3"
 
 [dependencies]
+fs-blake3 = { path = "../fs-blake3" }
 fs-exec = { path = "../fs-exec" }
 
 [dev-dependencies]
