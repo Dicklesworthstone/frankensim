@@ -171,7 +171,7 @@ fn replay_certify(
                     }
                     (CcdVerdict::ClearWindow { .. }, PairVerdict::Possible { .. }) => {}
                     (CcdVerdict::PossibleContact { windows }, v) => {
-                        let lo = windows.first().map_or(t0, Interval::lo);
+                        let lo = windows.first().map_or(t0, |w| w.lo());
                         if matches!(v, PairVerdict::Clear { .. }) {
                             *v = PairVerdict::Possible {
                                 first_window_lo: lo,
