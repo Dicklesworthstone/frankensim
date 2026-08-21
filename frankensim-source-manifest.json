@@ -2,7 +2,7 @@
   "schema": "frankensim-source-manifest-v1",
   "identity_domain": "org.frankensim.xtask.source-manifest.v1",
   "identity_version": 1,
-  "manifest_identity": "2418eea01b28286a9ed5aab521dca2f0d59054fa503ff474c5abbc8a3b702c7c",
+  "manifest_identity": "362f24a0f00f7066eb14c96cfe86ff98aa8e7dfdcf95fa8b7eee9fc042a57ffe",
   "bead_id": "frankensim-extreal-program-f85xj.13.2",
   "authority": "canonical structural inventory over exact Git-index non-tracker bytes; release observations are intentionally unbound here",
   "release_binding": {
@@ -15,8 +15,8 @@
     "repository": "https://github.com/Dicklesworthstone/frankensim",
     "workspace_version": "0.0.1",
     "source_root_domain": "org.frankensim.xtask.source-root.v1",
-    "source_root": "84521a4d4f25f6c4f735d5f3752acac02dfba8531b8d3ae3fccee68dd212883f",
-    "tracked_file_count": 2764,
+    "source_root": "9ca1d87f4f5d118b07e09462ae7d40b74c6a7e87b2f7a7735c96c69988b91be6",
+    "tracked_file_count": 2765,
     "excluded_paths": [".beads/**", "frankensim-source-manifest.json", "frankensim-source-manifest.spdx.json"],
     "files": [
       {"path": ".cargo/config.toml", "git_mode": "100644", "bytes": 2368, "content_blake3": "894765ed5d604b92d4e713d3c80116ab8210044ea665697e159ed234807c3537"},
@@ -2689,6 +2689,7 @@
       {"path": "scripts/ci/depgraph_receipt_e2e.sh", "git_mode": "100755", "bytes": 20278, "content_blake3": "7690e1ef99af33314f2051e9b365d2f13e4f6c5cfed2a28cdd8412cbe31bd309"},
       {"path": "scripts/ci/e2e_euler_cinematic.sh", "git_mode": "100755", "bytes": 40718, "content_blake3": "465bf24b2c8d34b30354851d331df11a2ca6a71fe12a109285a36a720183ffe4"},
       {"path": "scripts/ci/e2e_extreal_arithmetic_audit.sh", "git_mode": "100755", "bytes": 12934, "content_blake3": "a836424d70fda342a93660d3170293c9d82ef039a0877acfabf7bb978f5b82a2"},
+      {"path": "scripts/ci/e2e_wright_flyer.sh", "git_mode": "100755", "bytes": 10013, "content_blake3": "fc7a08d359fb37fd72600657a04145988aa45d2456bd73c034ec5c6c782800a9"},
       {"path": "scripts/ci/euler_disc_contract_e2e.sh", "git_mode": "100755", "bytes": 345281, "content_blake3": "c4c363a3107a428aa42dab5688cfdedac539b99daf66f3d01e83ef0b3bc6cbf7"},
       {"path": "scripts/ci/generate_portfolio_candidate.py", "git_mode": "100755", "bytes": 14764, "content_blake3": "766ae3341b338704f072e579196292480b429720b475504f522d5f7bb2859d2d"},
       {"path": "scripts/ci/new_domains_e2e.sh", "git_mode": "100755", "bytes": 22585, "content_blake3": "fc384373d07aefa11878dba25469fb13095d38f76a69d3ba9e05dbed90cc4aef"},
