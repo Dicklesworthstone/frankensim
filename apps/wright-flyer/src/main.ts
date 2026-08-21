@@ -6,6 +6,7 @@ import { describeCapabilities, probeCapabilities } from "./capability";
 import { createFlyerSceneRenderer } from "./flyerScene.ts";
 import { SimClient } from "./sim/simClient.ts";
 import { MODE_FIXED, MODE_HISTORICAL, dec17Scenario } from "./sim/protocol.ts";
+import { recordedToScenario, replayVerdict, type FlightRecording } from "./sim/replay.ts";
 
 function main(): void {
   const app = document.getElementById("app");
@@ -33,14 +34,16 @@ function main(): void {
   // via the sim worker; without the flag the E2.2 scripted demo runs.
   // ?mode=historical selects the registered pilot family member 0.
   const params = new URLSearchParams(window.location.search);
+  const mode = params.get("mode") === "historical" ? MODE_HISTORICAL : MODE_FIXED;
   let simClient: SimClient | undefined;
-  if (params.get("sim") === "1") {
-    simClient = new SimClient({
+  let renderer = createFlyerSceneRenderer(app);
+  const resize = (): void => renderer.resize(app.clientWidth, app.clientHeight);
+
+  const makeClient = (expected?: FlightRecording): SimClient => {
+    const client: SimClient = new SimClient({
       onReady(info): void {
-        simClient?.bindAnchor(info.tick0Digest);
-        console.info(
-          JSON.stringify({ suite: "wright-flyer-app", stage: "sim-ready", ...info }),
-        );
+        client.bindAnchor(info.tick0Digest);
+        console.info(JSON.stringify({ suite: "wright-flyer-app", stage: "sim-ready", ...info }));
       },
       onRefusal(stage, refusal): void {
         capabilityText.textContent = `sim ${stage} refusal: ${refusal.code} — ${refusal.message}`;
@@ -50,17 +53,57 @@ function main(): void {
         );
       },
       onTerminal(info): void {
-        console.info(
-          JSON.stringify({ suite: "wright-flyer-app", stage: "sim-terminal", ...info }),
-        );
+        console.info(JSON.stringify({ suite: "wright-flyer-app", stage: "sim-terminal", ...info }));
+        // E5.2c: replay identity verdict against the previous run —
+        // the engine's chained digest, surfaced on screen and in the log.
+        if (expected !== undefined) {
+          const verdict = replayVerdict(expected, info.digest);
+          capabilityText.textContent =
+            verdict.kind === "identical"
+              ? `REPLAY IDENTICAL — digest ${info.digest.slice(0, 16)}…`
+              : `REPLAY DIVERGED — expected ${verdict.expectedDigest.slice(0, 16)}… observed ${verdict.observedDigest.slice(0, 16)}…`;
+          capabilityText.className = verdict.kind === "identical" ? "" : "warn";
+          console.info(
+            JSON.stringify({ suite: "wright-flyer-app", stage: "replay-verdict", ...verdict }),
+          );
+        }
+        capabilityText.textContent += "  [R replays with ghost]";
       },
     });
-    const mode = params.get("mode") === "historical" ? MODE_HISTORICAL : MODE_FIXED;
+    return client;
+  };
+
+  if (params.get("sim") === "1") {
+    simClient = makeClient();
     simClient.start(dec17Scenario(1903n, mode));
+    renderer.dispose();
+    renderer = createFlyerSceneRenderer(app, simClient);
+    // R after a terminal: rebuild the scene with the finished run as a
+    // ghost and rerun the SAME scenario for the on-screen overlay test.
+    window.addEventListener("keydown", (e: KeyboardEvent) => {
+      if (e.code !== "KeyR" || simClient === undefined) {
+        return;
+      }
+      const recording = simClient.takeRecording();
+      if (recording === null) {
+        return; // run not finished yet
+      }
+      simClient.dispose();
+      simClient = makeClient(recording);
+      simClient.start(recordedToScenario(recording.scenario));
+      renderer.dispose();
+      renderer = createFlyerSceneRenderer(app, simClient, recording);
+      resize();
+      console.info(
+        JSON.stringify({
+          suite: "wright-flyer-app",
+          stage: "replay-start",
+          frames: recording.ticks.length,
+          expectedDigest: recording.finalDigest,
+        }),
+      );
+    });
   }
-  const renderer = createFlyerSceneRenderer(app, simClient);
-  const resize = (): void =>
-    renderer.resize(app.clientWidth, app.clientHeight);
   window.addEventListener("resize", resize);
   resize();
 

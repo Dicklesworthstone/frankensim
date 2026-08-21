@@ -22,10 +22,12 @@ import {
   worldTransformFrom,
   type SimDriveState,
 } from "./sim/snapshotView.ts";
+import { ghostAt, type FlightRecording } from "./sim/replay.ts";
 
 export function createFlyerSceneRenderer(
   container: HTMLElement,
   simClient?: SimClient,
+  ghost?: FlightRecording,
 ): FlyerRenderer {
   const renderer = new THREE.WebGLRenderer({ antialias: true });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -79,11 +81,41 @@ export function createFlyerSceneRenderer(
   // E5.2b: the sim drive (REAL engine state) supersedes both the
   // script and manual pose play when a SimClient is attached.
   let drive: SimDriveState = { propAngleRad: 0 };
+  // E5.2c: the replay ghost — the PREVIOUS run's recorded flight as a
+  // translucent twin, driven tick-locked to the live run.
+  let ghostFrame: ReturnType<typeof buildWrightFlyerAirframe> | null = null;
+  let ghostDrive: SimDriveState = { propAngleRad: 0 };
+  if (ghost !== undefined) {
+    ghostFrame = buildWrightFlyerAirframe();
+    ghostFrame.group.traverse((obj) => {
+      const mesh = obj as THREE.Mesh;
+      if (mesh.isMesh) {
+        const src = mesh.material as THREE.Material;
+        const mat = src.clone();
+        mat.transparent = true;
+        mat.opacity = 0.3;
+        mat.depthWrite = false;
+        mesh.material = mat;
+      }
+    });
+    ghostFrame.group.position.set(launch[0], launch[1] + 1.2, launch[2]);
+    scene.add(ghostFrame.group);
+  }
   return {
     render(dtS: number): void {
       elapsedS += dtS;
       const snap = simClient?.sample(performance.now()) ?? null;
       if (snap !== null) {
+        if (ghostFrame !== null && ghost !== undefined) {
+          const g = ghostAt(ghost, snap.tick);
+          if (g !== null) {
+            ghostDrive = advanceProp(ghostDrive, g, dtS);
+            applyPose(ghostFrame, computePose(controlStateFrom(g, ghostDrive)));
+            const gw = worldTransformFrom(g, launch);
+            ghostFrame.group.position.set(gw.position[0], gw.position[1] + 1.2, gw.position[2]);
+            ghostFrame.group.rotation.set(0, 0, gw.pitchRad);
+          }
+        }
         drive = advanceProp(drive, snap, dtS);
         const pose = computePose(controlStateFrom(snap, drive));
         applyPose(airframe, pose);

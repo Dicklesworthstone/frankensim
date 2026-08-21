@@ -15,6 +15,7 @@ import {
 } from "./protocol.ts";
 import { SeqlockReader, seqlockBytes } from "../transport/seqlock.ts";
 import { decodeSnapshot, interpolateSnapshots, type SimSnapshot } from "./snapshotView.ts";
+import { FlightRecorder, type FlightRecording } from "./replay.ts";
 
 const RING_SLOTS = 4;
 const SIM_TICK_S = 1 / 120;
@@ -39,6 +40,12 @@ export class SimClient {
   private latest: SimSnapshot | null = null;
   private latestArrivalMs = 0;
   private terminalCode: string | undefined;
+  // E5.2c: every run records itself; the sealed recording drives the
+  // replay ghost and the digest-identity verdict.
+  private recorder = new FlightRecorder();
+  private scenario: ScenarioInit | null = null;
+  private ready: { runIntentId: string; tick0Digest: string } | null = null;
+  private recording: FlightRecording | null = null;
 
   constructor(events: SimClientEvents, workerFactory?: () => Worker) {
     this.worker =
@@ -49,6 +56,7 @@ export class SimClient {
       const msg = event.data;
       switch (msg.kind) {
         case "ready":
+          this.ready = { runIntentId: msg.runIntentId, tick0Digest: msg.tick0Digest };
           events.onReady(msg);
           break;
         case "refusal":
@@ -56,10 +64,20 @@ export class SimClient {
           break;
         case "terminal":
           this.terminalCode = msg.envelopeRefusalCode;
+          if (this.scenario !== null && this.ready !== null && this.recorder.frameCount() > 0) {
+            this.recording = this.recorder.seal({
+              scenario: this.scenario,
+              runIntentId: this.ready.runIntentId,
+              tick0Digest: this.ready.tick0Digest,
+              terminalPhase: msg.phase,
+              finalDigest: msg.digest,
+            });
+          }
           events.onTerminal(msg);
           break;
         case "snapshot": {
           // postMessage fallback transport.
+          this.recorder.append(msg.tick, msg.payload);
           this.push(decodeSnapshot(msg.tick, msg.payload));
           break;
         }
@@ -72,6 +90,9 @@ export class SimClient {
 
   /** Start a run. Uses the SAB ring iff the environment grants SAB. */
   start(scenario: ScenarioInit, runEpoch = 1): void {
+    this.scenario = scenario;
+    this.recorder = new FlightRecorder();
+    this.recording = null;
     let init: Extract<MainToWorker, { kind: "init" }>;
     if (typeof SharedArrayBuffer !== "undefined" && crossOriginIsolated) {
       const sab = new SharedArrayBuffer(
@@ -127,6 +148,7 @@ export class SimClient {
       const result = this.reader.read(this.scratch);
       if (typeof result === "number") {
         if (this.latest === null || result > this.latest.tick) {
+          this.recorder.append(result, this.scratch);
           this.push(decodeSnapshot(result, this.scratch));
         }
       }
@@ -144,6 +166,15 @@ export class SimClient {
 
   envelopeRefusalCode(): string | undefined {
     return this.terminalCode;
+  }
+
+  /** The sealed recording of the finished run (null until terminal).
+   * NOTE (declared): the SAB path records at the RENDER sample rate —
+   * frames the reader never leased are not in the transcript; the
+   * DIGEST identity is still exact because it is the engine's chained
+   * digest, not a transcript hash. */
+  takeRecording(): FlightRecording | null {
+    return this.recording;
   }
 
   dispose(): void {
