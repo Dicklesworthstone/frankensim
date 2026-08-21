@@ -2,13 +2,15 @@
   "name": "wright-flyer",
   "private": true,
   "version": "0.0.1",
-  "description": "First Flight — browser front end for the FrankenSim Wright Flyer simulation (bead wf-root-guzez.1.2, E0.2)",
+  "description": "First Flight \u2014 browser front end for the FrankenSim Wright Flyer simulation (bead wf-root-guzez.1.2, E0.2)",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "wasm": "wasm-pack build ../../crates/fs-flyer-wasm --target web --release --out-dir ../../apps/wright-flyer/src/wasm-pkg",
+    "test:sim": "node --test test/simFacade.test.ts"
   },
   "devDependencies": {
     "@types/three": "^0.185.4",
