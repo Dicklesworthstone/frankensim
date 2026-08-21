@@ -100,7 +100,12 @@ pub struct A1Lti {
 }
 
 /// Gauss solve AX = B for X (B holds multiple columns), in place.
-fn solve_multi(a: &mut [f64], b: &mut [f64], n: usize, ncols: usize) -> Result<(), Refusal> {
+pub(crate) fn solve_multi(
+    a: &mut [f64],
+    b: &mut [f64],
+    n: usize,
+    ncols: usize,
+) -> Result<(), Refusal> {
     for col in 0..n {
         let mut piv = col;
         for row in (col + 1)..n {
