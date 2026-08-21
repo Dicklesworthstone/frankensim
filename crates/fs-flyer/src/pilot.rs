@@ -143,6 +143,72 @@ pub struct PilotState {
     tick: u64,
 }
 
+impl PilotState {
+    /// Canonical checkpoint bytes (E6.1-i; bit-exact).
+    #[must_use]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        for ring in [&self.ring_long, &self.ring_lat] {
+            out.extend_from_slice(&(ring.len() as u32).to_le_bytes());
+            for v in ring {
+                out.extend_from_slice(&v.to_bits().to_le_bytes());
+            }
+        }
+        out.extend_from_slice(&self.nm_long.to_bits().to_le_bytes());
+        out.extend_from_slice(&self.nm_lat.to_bits().to_le_bytes());
+        out.extend_from_slice(&self.tick.to_le_bytes());
+        out
+    }
+
+    /// Rebuild from canonical bytes (fail-closed).
+    ///
+    /// # Errors
+    /// `checkpoint-malformed`.
+    pub fn from_bytes(bytes: &[u8]) -> Result<(Self, usize), Refusal> {
+        let bad = || Refusal {
+            code: "checkpoint-malformed",
+            message: "pilot state truncated".into(),
+            ranked_repairs: vec!["re-export the checkpoint".into()],
+        };
+        let mut pos = 0usize;
+        let take = |pos: &mut usize, n: usize| -> Result<&[u8], Refusal> {
+            let s = bytes.get(*pos..*pos + n).ok_or_else(bad)?;
+            *pos += n;
+            Ok(s)
+        };
+        let mut rings: [Vec<f64>; 2] = [Vec::new(), Vec::new()];
+        for ring in &mut rings {
+            let len = u32::from_le_bytes(take(&mut pos, 4)?.try_into().expect("4")) as usize;
+            if len > 4096 {
+                return Err(bad());
+            }
+            for _ in 0..len {
+                ring.push(f64::from_bits(u64::from_le_bytes(
+                    take(&mut pos, 8)?.try_into().expect("8"),
+                )));
+            }
+        }
+        let [ring_long, ring_lat] = rings;
+        let nm_long = f64::from_bits(u64::from_le_bytes(
+            take(&mut pos, 8)?.try_into().expect("8"),
+        ));
+        let nm_lat = f64::from_bits(u64::from_le_bytes(
+            take(&mut pos, 8)?.try_into().expect("8"),
+        ));
+        let tick = u64::from_le_bytes(take(&mut pos, 8)?.try_into().expect("8"));
+        Ok((
+            PilotState {
+                ring_long,
+                ring_lat,
+                nm_long,
+                nm_lat,
+                tick,
+            },
+            pos,
+        ))
+    }
+}
+
 /// One tick's commands.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PilotCommand {

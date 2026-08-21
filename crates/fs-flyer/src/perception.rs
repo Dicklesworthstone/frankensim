@@ -92,6 +92,77 @@ pub struct PerceptionState {
     tick: u64,
 }
 
+impl PerceptionState {
+    /// Canonical checkpoint bytes (E6.1-i; bit-exact).
+    #[must_use]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&(self.rings.len() as u32).to_le_bytes());
+        for ring in &self.rings {
+            out.extend_from_slice(&(ring.len() as u32).to_le_bytes());
+            for v in ring {
+                out.extend_from_slice(&v.to_bits().to_le_bytes());
+            }
+        }
+        for f in &self.filters {
+            out.extend_from_slice(&f.to_bits().to_le_bytes());
+        }
+        out.extend_from_slice(&self.tick.to_le_bytes());
+        out
+    }
+
+    /// Rebuild from canonical bytes (fail-closed).
+    ///
+    /// # Errors
+    /// `checkpoint-malformed`.
+    pub fn from_bytes(bytes: &[u8]) -> Result<(Self, usize), Refusal> {
+        let bad = || Refusal {
+            code: "checkpoint-malformed",
+            message: "perception state truncated".into(),
+            ranked_repairs: vec!["re-export the checkpoint".into()],
+        };
+        let mut pos = 0usize;
+        let take = |pos: &mut usize, n: usize| -> Result<&[u8], Refusal> {
+            let s = bytes.get(*pos..*pos + n).ok_or_else(bad)?;
+            *pos += n;
+            Ok(s)
+        };
+        let n_rings = u32::from_le_bytes(take(&mut pos, 4)?.try_into().expect("4")) as usize;
+        if n_rings > 64 {
+            return Err(bad());
+        }
+        let mut rings = Vec::with_capacity(n_rings);
+        for _ in 0..n_rings {
+            let len = u32::from_le_bytes(take(&mut pos, 4)?.try_into().expect("4")) as usize;
+            if len > 4096 {
+                return Err(bad());
+            }
+            let mut ring = Vec::with_capacity(len);
+            for _ in 0..len {
+                ring.push(f64::from_bits(u64::from_le_bytes(
+                    take(&mut pos, 8)?.try_into().expect("8"),
+                )));
+            }
+            rings.push(ring);
+        }
+        let mut filters = [0.0f64; N_CUES];
+        for f in &mut filters {
+            *f = f64::from_bits(u64::from_le_bytes(
+                take(&mut pos, 8)?.try_into().expect("8"),
+            ));
+        }
+        let tick = u64::from_le_bytes(take(&mut pos, 8)?.try_into().expect("8"));
+        Ok((
+            PerceptionState {
+                rings,
+                filters,
+                tick,
+            },
+            pos,
+        ))
+    }
+}
+
 /// One tick's perceived cues.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PerceivedCues {

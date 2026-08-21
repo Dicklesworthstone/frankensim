@@ -413,6 +413,188 @@ impl SimLoop {
         self.envelope_refusal.as_ref()
     }
 
+    /// Serialize the FULL dynamic state as CheckpointStateV1 bytes
+    /// (bead guzez.7.1.1, E6.1-i): bit-exact capture with an embedded
+    /// blake3 integrity digest. The OU path is counter-addressed and
+    /// reconstructs from the tick alone (philox doctrine).
+    ///
+    /// # Errors
+    /// `checkpoint-after-terminal` (a finished run has its replay
+    /// envelope; checkpoints are for live runs).
+    pub fn save_checkpoint(&self) -> Result<Vec<u8>, Refusal> {
+        if matches!(self.phase, Phase::Ended(_)) {
+            return Err(Refusal {
+                code: "checkpoint-after-terminal",
+                message: format!("terminal at tick {}", self.tick),
+                ranked_repairs: vec!["export the replay envelope instead".into()],
+            });
+        }
+        let mut b = Vec::new();
+        b.extend_from_slice(&1u32.to_le_bytes()); // version
+        b.extend_from_slice(&self.tick.to_le_bytes());
+        b.push(match self.phase {
+            Phase::OnRail => 0,
+            Phase::Airborne => 1,
+            Phase::Ended(_) => unreachable!("guarded above"),
+        });
+        for v in [
+            self.x_m,
+            self.h_m,
+            self.u,
+            self.w,
+            self.q,
+            self.theta,
+            self.omega,
+            self.warp,
+            self.mech.delta_rad,
+            self.mech.rate_rad_s,
+        ] {
+            b.extend_from_slice(&v.to_bits().to_le_bytes());
+        }
+        match self.warm_slip {
+            Some(ws) => {
+                b.push(1);
+                b.extend_from_slice(&ws[0].to_bits().to_le_bytes());
+                b.extend_from_slice(&ws[1].to_bits().to_le_bytes());
+            }
+            None => {
+                b.push(0);
+                b.extend_from_slice(&0u64.to_le_bytes());
+                b.extend_from_slice(&0u64.to_le_bytes());
+            }
+        }
+        b.extend_from_slice(&self.digest_acc);
+        let ps = self.perception_state.to_bytes();
+        b.extend_from_slice(&(ps.len() as u32).to_le_bytes());
+        b.extend_from_slice(&ps);
+        match &self.pilot {
+            Some((_, st)) => {
+                b.push(1);
+                let pb = st.to_bytes();
+                b.extend_from_slice(&(pb.len() as u32).to_le_bytes());
+                b.extend_from_slice(&pb);
+            }
+            None => b.push(0),
+        }
+        let digest = hash_domain("org.frankensim.wf.checkpoint-state.v1", &b);
+        b.extend_from_slice(digest.as_bytes());
+        Ok(b)
+    }
+
+    /// Rebuild a live run from a checkpoint (the spec MUST be the
+    /// original scenario — init re-derives tick0/RunIntentId, which is
+    /// what makes the bit-identity claim checkable downstream).
+    ///
+    /// # Errors
+    /// `checkpoint-too-large` (cap AND cap+1 at 1 MiB);
+    /// `checkpoint-tampered` (embedded digest mismatch);
+    /// `checkpoint-malformed`; init refusals pass through.
+    pub fn restore_checkpoint(spec: ScenarioSpec, bytes: &[u8]) -> Result<SimLoop, Refusal> {
+        const MAX: usize = 1 << 20;
+        if bytes.len() > MAX {
+            return Err(Refusal {
+                code: "checkpoint-too-large",
+                message: format!("{} bytes > {MAX}", bytes.len()),
+                ranked_repairs: vec!["a v1 checkpoint is a few KiB".into()],
+            });
+        }
+        let bad = |m: &str| Refusal {
+            code: "checkpoint-malformed",
+            message: m.into(),
+            ranked_repairs: vec!["re-export the checkpoint".into()],
+        };
+        if bytes.len() < 32 {
+            return Err(bad("shorter than the digest"));
+        }
+        let (body, tail) = bytes.split_at(bytes.len() - 32);
+        let expect = hash_domain("org.frankensim.wf.checkpoint-state.v1", body);
+        if expect.as_bytes() != tail {
+            return Err(Refusal {
+                code: "checkpoint-tampered",
+                message: "embedded digest mismatch".into(),
+                ranked_repairs: vec!["the checkpoint bytes were altered; refuse".into()],
+            });
+        }
+        let mut pos = 0usize;
+        let take = |pos: &mut usize, n: usize| -> Result<&[u8], Refusal> {
+            let s = body.get(*pos..*pos + n).ok_or_else(|| bad("truncated"))?;
+            *pos += n;
+            Ok(s)
+        };
+        let version = u32::from_le_bytes(take(&mut pos, 4)?.try_into().expect("4"));
+        if version != 1 {
+            return Err(bad("unknown version"));
+        }
+        let tick = u64::from_le_bytes(take(&mut pos, 8)?.try_into().expect("8"));
+        let phase_code = take(&mut pos, 1)?[0];
+        let mut f = [0.0f64; 10];
+        for v in &mut f {
+            *v = f64::from_bits(u64::from_le_bytes(
+                take(&mut pos, 8)?.try_into().expect("8"),
+            ));
+        }
+        let warm_flag = take(&mut pos, 1)?[0];
+        let w0 = f64::from_bits(u64::from_le_bytes(
+            take(&mut pos, 8)?.try_into().expect("8"),
+        ));
+        let w1 = f64::from_bits(u64::from_le_bytes(
+            take(&mut pos, 8)?.try_into().expect("8"),
+        ));
+        let mut digest_acc = [0u8; 32];
+        digest_acc.copy_from_slice(take(&mut pos, 32)?);
+        let ps_len = u32::from_le_bytes(take(&mut pos, 4)?.try_into().expect("4")) as usize;
+        let ps_bytes = take(&mut pos, ps_len)?.to_vec();
+        let (perception_state, used) = PerceptionState::from_bytes(&ps_bytes)?;
+        if used != ps_len {
+            return Err(bad("perception length mismatch"));
+        }
+        let pilot_flag = take(&mut pos, 1)?[0];
+        let pilot_state = if pilot_flag == 1 {
+            let pl = u32::from_le_bytes(take(&mut pos, 4)?.try_into().expect("4")) as usize;
+            let pb = take(&mut pos, pl)?.to_vec();
+            let (st, used) = crate::pilot::PilotState::from_bytes(&pb)?;
+            if used != pl {
+                return Err(bad("pilot length mismatch"));
+            }
+            Some(st)
+        } else {
+            None
+        };
+        let mut sim = SimLoop::init(spec)?;
+        if pilot_state.is_some() != sim.pilot.is_some() {
+            return Err(bad("pilot presence disagrees with the scenario"));
+        }
+        sim.tick = tick;
+        sim.phase = match phase_code {
+            0 => Phase::OnRail,
+            1 => Phase::Airborne,
+            _ => return Err(bad("phase code")),
+        };
+        sim.x_m = f[0];
+        sim.h_m = f[1];
+        sim.u = f[2];
+        sim.w = f[3];
+        sim.q = f[4];
+        sim.theta = f[5];
+        sim.omega = f[6];
+        sim.warp = f[7];
+        sim.mech = MechState {
+            delta_rad: f[8],
+            rate_rad_s: f[9],
+        };
+        sim.warm_slip = (warm_flag == 1).then_some([w0, w1]);
+        sim.digest_acc = digest_acc;
+        sim.perception_state = perception_state;
+        if let (Some(st), Some((_, slot))) = (pilot_state, sim.pilot.as_mut()) {
+            *slot = st;
+        }
+        // The OU path is counter-addressed: advance to the checkpoint
+        // tick (the next step advances to tick+1 exactly as the
+        // uninterrupted run would).
+        sim.ou.advance_to(tick as i64).map_err(map_atmo)?;
+        Ok(sim)
+    }
+
     /// One 120 Hz step.
     ///
     /// # Errors
