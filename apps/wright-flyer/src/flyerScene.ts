@@ -23,6 +23,7 @@ import {
   type SimDriveState,
 } from "./sim/snapshotView.ts";
 import { ghostAt, type FlightRecording } from "./sim/replay.ts";
+import { CaptionStream, formatCaption } from "./sim/captions.ts";
 
 export function createFlyerSceneRenderer(
   container: HTMLElement,
@@ -81,6 +82,9 @@ export function createFlyerSceneRenderer(
   // E5.2b: the sim drive (REAL engine state) supersedes both the
   // script and manual pose play when a SimClient is attached.
   let drive: SimDriveState = { propAngleRad: 0 };
+  // E5.3b-ii: the honest caption stream (every claim labeled).
+  const captions = new CaptionStream();
+  let lastCaptionTick = -1;
   // E5.2c: the replay ghost — the PREVIOUS run's recorded flight as a
   // translucent twin, driven tick-locked to the live run.
   let ghostFrame: ReturnType<typeof buildWrightFlyerAirframe> | null = null;
@@ -141,6 +145,14 @@ export function createFlyerSceneRenderer(
         const banner = phaseBanner(snap, simClient?.envelopeRefusalCode());
         if (banner !== null) {
           lines.push(banner);
+        }
+        // Labeled ride-along captions (latest two).
+        if (snap.tick > lastCaptionTick) {
+          lastCaptionTick = snap.tick;
+          captions.feed(snap);
+        }
+        for (const c of captions.upTo(snap.tick).slice(-2)) {
+          lines.push(formatCaption(c));
         }
         hud.textContent = lines.join("\n");
         renderer.render(scene, camera);

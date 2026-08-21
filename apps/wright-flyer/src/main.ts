@@ -130,7 +130,10 @@ function main(): void {
 
   if (params.get("sim") === "1") {
     simClient = makeClient();
-    simClient.start(dec17Scenario(1903n, mode));
+    // Historical mode flies the NONLINEAR-calibrated member 3 (the
+    // E5.3b-i registration; members 0-2 are linear-plant tuned and
+    // PIO out of the full lifecycle — kept for the H-campaigns).
+    simClient.start(dec17Scenario(1903n, mode, mode === MODE_HISTORICAL ? 3 : 0));
     renderer.dispose();
     renderer = createFlyerSceneRenderer(app, simClient);
     // R after a terminal: rebuild the scene with the finished run as a

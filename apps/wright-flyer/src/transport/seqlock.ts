@@ -44,10 +44,20 @@ function payloadOffsetF64(layout: SeqlockLayout, slot: number): number {
   return alignedBytes / 8 + slot * layout.payloadF64s;
 }
 
+// MEMORY-MODEL LAW (measured, not theoretical): the ES spec gives
+// UNORDERED (plain) SAB accesses no ordering against the seq-cst
+// Atomics — on Apple-Silicon ARM a writer's plain payload stores were
+// OBSERVED becoming visible before its odd-mark store, and the
+// transport battery consumed a torn payload (2026-08-20, wf-transport
+// seqlock-stress, 2/3 repro in isolation). Every payload word
+// therefore moves through Atomics on an i32 view (f64 split into two
+// i32 halves via a thread-local scratch); the f64 view exists only for
+// the scratch conversion. Do NOT "optimize" this back to a bulk copy.
 export class SeqlockWriter {
   private readonly i32: Int32Array;
-  private readonly f64: Float64Array;
   private readonly layout: SeqlockLayout;
+  private readonly scratchF64: Float64Array;
+  private readonly scratchI32: Int32Array;
   private next = 0;
 
   constructor(
@@ -58,8 +68,9 @@ export class SeqlockWriter {
     anchorPrefix: number,
   ) {
     this.i32 = new Int32Array(sab);
-    this.f64 = new Float64Array(sab);
     this.layout = layout;
+    this.scratchF64 = new Float64Array(layout.payloadF64s);
+    this.scratchI32 = new Int32Array(this.scratchF64.buffer);
     Atomics.store(this.i32, H_ABI_VERSION, ABI_VERSION);
     Atomics.store(this.i32, H_LAYOUT_HASH, layoutHash | 0);
     Atomics.store(this.i32, H_PAYLOAD_F64S, layout.payloadF64s);
@@ -71,15 +82,20 @@ export class SeqlockWriter {
     }
   }
 
-  /** Publish one snapshot; never blocks. */
+  /** Publish one snapshot; never blocks. `fill` writes into a scratch
+   * buffer; the transfer to shared memory is fully atomic (see the
+   * memory-model law above). */
   publish(tick: number, fill: (payload: Float64Array) => void): void {
     const slot = this.next;
     this.next = (this.next + 1) % this.layout.slots;
     const si = seqIndex(slot);
     const seq = Atomics.load(this.i32, si);
     Atomics.store(this.i32, si, seq + 1); // odd: write in progress
-    const base = payloadOffsetF64(this.layout, slot);
-    fill(this.f64.subarray(base, base + this.layout.payloadF64s));
+    fill(this.scratchF64);
+    const baseI32 = payloadOffsetF64(this.layout, slot) * 2;
+    for (let k = 0; k < this.scratchI32.length; k += 1) {
+      Atomics.store(this.i32, baseI32 + k, this.scratchI32[k]!);
+    }
     Atomics.store(this.i32, H_TICK_LO, tick & 0x7fffffff);
     Atomics.store(this.i32, H_TICK_HI, Math.floor(tick / 0x80000000));
     Atomics.store(this.i32, si, seq + 2); // even: published
@@ -98,8 +114,9 @@ export type SeqlockRejection =
 
 export class SeqlockReader {
   private readonly i32: Int32Array;
-  private readonly f64: Float64Array;
   private readonly layout: SeqlockLayout;
+  private readonly scratchF64: Float64Array;
+  private readonly scratchI32: Int32Array;
   private readonly expect: {
     runEpoch: number;
     layoutHash: number;
@@ -112,8 +129,9 @@ export class SeqlockReader {
     expect: { runEpoch: number; layoutHash: number; anchorPrefix: number },
   ) {
     this.i32 = new Int32Array(sab);
-    this.f64 = new Float64Array(sab);
     this.layout = layout;
+    this.scratchF64 = new Float64Array(layout.payloadF64s);
+    this.scratchI32 = new Int32Array(this.scratchF64.buffer);
     this.expect = expect;
   }
 
@@ -149,12 +167,17 @@ export class SeqlockReader {
       if ((before & 1) === 1) {
         continue; // write in progress
       }
-      const base = payloadOffsetF64(this.layout, slot);
-      out.set(this.f64.subarray(base, base + this.layout.payloadF64s));
+      // Atomic payload copy (memory-model law above) into the scratch,
+      // then out — `out` is only touched on a validated read.
+      const baseI32 = payloadOffsetF64(this.layout, slot) * 2;
+      for (let k = 0; k < this.scratchI32.length; k += 1) {
+        this.scratchI32[k] = Atomics.load(this.i32, baseI32 + k);
+      }
       const tickLo = Atomics.load(this.i32, H_TICK_LO);
       const tickHi = Atomics.load(this.i32, H_TICK_HI);
       const after = Atomics.load(this.i32, si);
       if (after === before) {
+        out.set(this.scratchF64);
         return tickHi * 0x80000000 + tickLo;
       }
     }
