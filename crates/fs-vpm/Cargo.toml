@@ -16,6 +16,7 @@ fs-exec = { path = "../fs-exec" }
 
 [dev-dependencies]
 fs-alloc = { path = "../fs-alloc" }
+fs-wakeref = { path = "../fs-wakeref" }
 
 [lints]
 workspace = true
