@@ -142,7 +142,8 @@ fn induced_w(p: [f64; 3], panels: &[Panel], gamma: &[f64], stream_unit: [f64; 3]
     let mut w = 0.0;
     for (j, panel) in panels.iter().enumerate() {
         let v = crate::trailing_velocity_pub(p, panel.a, panel.b, stream_unit);
-        w += gamma[j] * v[2];
+        let term = gamma[j] * v[2];
+        w += term;
     }
     w
 }
@@ -290,7 +291,10 @@ pub fn solve_nonlinear(
             // step-size metric shrank with every safeguard halving and
             // faked progress — a measured lesson).
             worst = worst.max((target - strip_gamma[s]).abs() / (strip_gamma[s].abs() + 1e-9));
-            next[s] = strip_gamma[s] + omega * (target - strip_gamma[s]);
+            // Statement-split (guzez.7.2.1): a + omega*(t-a) is a
+            // fusable mul-add; bind the update first.
+            let upd = omega * (target - strip_gamma[s]);
+            next[s] = strip_gamma[s] + upd;
         }
         if worst > residual * 1.25 {
             growth_streak += 1;
@@ -348,12 +352,17 @@ pub fn solve_nonlinear(
     let mut total = 0.0;
     for (j, p) in panels.iter().enumerate() {
         let seg = [p.b[0] - p.a[0], p.b[1] - p.a[1], p.b[2] - p.a[2]];
-        let f = [
-            freestream[1] * seg[2] - freestream[2] * seg[1],
-            freestream[2] * seg[0] - freestream[0] * seg[2],
-            freestream[0] * seg[1] - freestream[1] * seg[0],
-        ];
-        total += -rho * gamma[j] * f[2];
+        // Statement-split (guzez.7.2.1): no within-expression
+        // mul-sub/mul-add for LLVM to contract into FMA.
+        let fx1 = freestream[1] * seg[2];
+        let fx2 = freestream[2] * seg[1];
+        let fy1 = freestream[2] * seg[0];
+        let fy2 = freestream[0] * seg[2];
+        let fz1 = freestream[0] * seg[1];
+        let fz2 = freestream[1] * seg[0];
+        let f = [fx1 - fx2, fy1 - fy2, fz1 - fz2];
+        let term = -rho * gamma[j] * f[2];
+        total += term;
     }
     Ok(NonlinearReport {
         gamma,

@@ -15,6 +15,7 @@
 //!   the tick rate) while saturating at μ·N.
 
 use crate::Refusal;
+use fs_math::det;
 
 /// Penetration cap [m] — beyond this the model is out of its domain
 /// (a crash, not a landing; refusals at cap AND cap+1 ulp).
@@ -150,7 +151,7 @@ pub fn contact_tick(
     state.sink_m += p.sink_rate_per_s * over_yield * dt_s;
     let p_e = (penetration_m - state.sink_m).max(0.0);
     let normal = (p.stiffness_n_m * p_e + p.damping_n_s_m * pen_rate_mps).max(0.0);
-    let friction = -p.mu * normal * (v_t_mps / p.v_reg_mps).tanh();
+    let friction = -p.mu * normal * det::tanh(v_t_mps / p.v_reg_mps);
     Ok(ContactTick {
         normal_n: normal,
         friction_n: friction,

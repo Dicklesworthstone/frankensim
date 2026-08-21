@@ -222,7 +222,12 @@ pub fn coupled_prop_airframe_step(
     let evaluate = |x: &[f64; 2]| -> Result<EvalOut, Refusal> {
         let du: Vec<f64> = wash
             .iter()
-            .map(|w| 0.5 * (w[0] * x[0] + w[1] * x[1]))
+            .map(|w| {
+                // Statement-split (guzez.7.2.1): no fused mul-add.
+                let a = w[0] * x[0];
+                let b = w[1] * x[1];
+                0.5 * (a + b)
+            })
             .collect();
         let wing = solve_nonlinear(
             op,
@@ -255,7 +260,11 @@ pub fn coupled_prop_airframe_step(
         let r = [g[0] - x[0], g[1] - x[1]];
         // det doctrine: sqrt is IEEE-exact; hypot is platform libm and
         // broke native-vs-wasm digest identity (E6.2 measurement).
-        let res = (r[0] * r[0] + r[1] * r[1]).sqrt() / ((x[0] * x[0] + x[1] * x[1]).sqrt() + 1e-6);
+        let r02 = r[0] * r[0];
+        let r12 = r[1] * r[1];
+        let x02 = x[0] * x[0];
+        let x12 = x[1] * x[1];
+        let res = (r02 + r12).sqrt() / ((x02 + x12).sqrt() + 1e-6);
         if res < spec.tol {
             return Ok(CoupledStep {
                 w_slip: g,

@@ -148,7 +148,9 @@ impl CanardMechanism {
         } else {
             0.0
         };
-        let net = m_aero + pilot_n * self.lever_gain_nm_per_n - friction + stop;
+        // Statement-split (guzez.7.2.1): no fused mul-add.
+        let pilot_nm = pilot_n * self.lever_gain_nm_per_n;
+        let net = m_aero + pilot_nm - friction + stop;
         (net, friction, stop)
     }
 

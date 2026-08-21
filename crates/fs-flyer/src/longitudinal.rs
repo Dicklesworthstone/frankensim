@@ -108,7 +108,9 @@ pub fn linearize(
     let dw = 0.05f64;
     let dq = 0.01f64;
     let eval = |u: f64, w: f64, q: f64| -> Result<[f64; 3], Refusal> {
-        let v = det::sqrt(u * u + w * w);
+        let uu = u * u;
+        let ww = w * w;
+        let v = det::sqrt(uu + ww);
         let alpha = det::atan2(w, u);
         let b = design.force_buildup(v, alpha, dc, om, q, rho_kg_m3)?;
         Ok([b.force_n[0], b.force_n[2], b.moment_y_nm])
@@ -228,8 +230,13 @@ pub fn eig4(a: &[[f64; 4]; 4]) -> [Pole; 4] {
     let (mut zr, mut zi) = ([0.0f64; 4], [0.0f64; 4]);
     let (mut pr, mut pi) = (1.0f64, 0.0f64);
     for k in 0..4 {
-        let nr = pr * 0.4 - pi * 0.9;
-        let ni = pr * 0.9 + pi * 0.4;
+        // Statement-split (guzez.7.2.1): complex mul without FMA.
+        let nr_a = pr * 0.4;
+        let nr_b = pi * 0.9;
+        let nr = nr_a - nr_b;
+        let ni_a = pr * 0.9;
+        let ni_b = pi * 0.4;
+        let ni = ni_a + ni_b;
         pr = nr;
         pi = ni;
         zr[k] = pr;
@@ -239,8 +246,12 @@ pub fn eig4(a: &[[f64; 4]; 4]) -> [Pole; 4] {
         // Horner for p(z), z = x+iy, coeffs [1, c3, c2, c1, c0].
         let (mut ar, mut ai) = (1.0f64, 0.0f64);
         for &cc in &[c[3], c[2], c[1], c[0]] {
-            let nr = ar * x - ai * y + cc;
-            let ni = ar * y + ai * x;
+            let nr_a = ar * x;
+            let nr_b = ai * y;
+            let nr = (nr_a - nr_b) + cc;
+            let ni_a = ar * y;
+            let ni_b = ai * x;
+            let ni = ni_a + ni_b;
             ar = nr;
             ai = ni;
         }
@@ -254,16 +265,26 @@ pub fn eig4(a: &[[f64; 4]; 4]) -> [Pole; 4] {
             for j in 0..4 {
                 if j != k {
                     let (ur, ui) = (zr[k] - zr[j], zi[k] - zi[j]);
-                    let nr = dr * ur - di * ui;
-                    let ni = dr * ui + di * ur;
+                    let nr_a = dr * ur;
+                    let nr_b = di * ui;
+                    let nr = nr_a - nr_b;
+                    let ni_a = dr * ui;
+                    let ni_b = di * ur;
+                    let ni = ni_a + ni_b;
                     dr = nr;
                     di = ni;
                 }
             }
-            let den = dr * dr + di * di;
+            let den_a = dr * dr;
+            let den_b = di * di;
+            let den = den_a + den_b;
             if den > 1e-300 {
-                let qr = (pvr * dr + pvi * di) / den;
-                let qi = (pvi * dr - pvr * di) / den;
+                let qr_a = pvr * dr;
+                let qr_b = pvi * di;
+                let qr = (qr_a + qr_b) / den;
+                let qi_a = pvi * dr;
+                let qi_b = pvr * di;
+                let qi = (qi_a - qi_b) / den;
                 zr[k] -= qr;
                 zi[k] -= qi;
             }

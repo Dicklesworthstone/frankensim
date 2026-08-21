@@ -410,7 +410,8 @@ impl OpenLoopDesign {
                 // Damping stays monotone up to the bound; beyond it the
                 // model saturates rather than handing the wing solver a
                 // ±0.7 rad twist it cannot converge.
-                st.twist_rad -= (q_pitch_rad_s * dx / v_mps).clamp(-0.25, 0.25);
+                let twist_upd = (q_pitch_rad_s * dx / v_mps).clamp(-0.25, 0.25);
+                st.twist_rad -= twist_upd;
             }
         }
         let strips = strips;
@@ -468,9 +469,21 @@ impl OpenLoopDesign {
         let mut m_y = 0.0f64;
         for (j, p) in panels.iter().enumerate() {
             let seg = [p.b[0] - p.a[0], p.b[1] - p.a[1], p.b[2] - p.a[2]];
-            let fx = fs_v[1] * seg[2] - fs_v[2] * seg[1];
-            let fy = fs_v[2] * seg[0] - fs_v[0] * seg[2];
-            let fz = fs_v[0] * seg[1] - fs_v[1] * seg[0];
+            // Statement-split (bead guzez.7.2.1): every fusable
+            // mul-add/mul-sub in this assembly binds its products to
+            // locals first — LLVM's within-expression FP contraction
+            // (FMA on aarch64, none on wasm32) cannot cross
+            // statements, and this loop is where the +3 ulp
+            // cross-lane divergence was bisected to.
+            let fx_a = fs_v[1] * seg[2];
+            let fx_b = fs_v[2] * seg[1];
+            let fx = fx_a - fx_b;
+            let fy_a = fs_v[2] * seg[0];
+            let fy_b = fs_v[0] * seg[2];
+            let fy = fy_a - fy_b;
+            let fz_a = fs_v[0] * seg[1];
+            let fz_b = fs_v[1] * seg[0];
+            let fz = fz_a - fz_b;
             let s = rho_kg_m3 * coupled.gamma[j];
             let f = [s * fx, s * fy, s * fz];
             let mid = [
@@ -481,7 +494,10 @@ impl OpenLoopDesign {
             force[0] += f[0];
             force[1] += f[1];
             force[2] += f[2];
-            m_y += mid[2] * f[0] - mid[0] * f[2];
+            let m_a = mid[2] * f[0];
+            let m_b = mid[0] * f[2];
+            let m_term = m_a - m_b;
+            m_y += m_term;
         }
         let lift = -force[2];
         // Per-strip quarter-chord camber moments (thin airfoil cm0 = −π·camber)
@@ -492,7 +508,8 @@ impl OpenLoopDesign {
             let p0 = &panels[st.panel_indices[0]];
             let width = (p0.b[1] - p0.a[1]).abs();
             let c = st.chord_m;
-            m_y += q * c * c * width * cm0;
+            let cm_term = q * c * c * width * cm0;
+            m_y += cm_term;
             let dp = q * c * width * self.cd0_wing;
             d_prof += dp;
             let mid = [
@@ -503,7 +520,10 @@ impl OpenLoopDesign {
             let f = [-dp * vhat[0], 0.0, -dp * vhat[2]];
             force[0] += f[0];
             force[2] += f[2];
-            m_y += mid[2] * f[0] - mid[0] * f[2];
+            let m_a = mid[2] * f[0];
+            let m_b = mid[0] * f[2];
+            let m_term = m_a - m_b;
+            m_y += m_term;
         }
         // Induced drag: declared classical term at the CG line (the
         // freestream-KJ panel forces exclude it by construction).
@@ -511,26 +531,37 @@ impl OpenLoopDesign {
         let ar = self.wing_span_m * self.wing_span_m / (s_ref / 2.0);
         let cl = lift / (q * s_ref);
         let d_ind = q * s_ref * cl * cl / (core::f64::consts::PI * ar * self.oswald_e);
-        force[0] -= d_ind * vhat[0];
-        force[2] -= d_ind * vhat[2];
+        let dix = d_ind * vhat[0];
+        let diz = d_ind * vhat[2];
+        force[0] -= dix;
+        force[2] -= diz;
         // Parasite ledger at its declared line.
         let ledger_rep = self.ledger.evaluate(rho_kg_m3, v_mps)?;
         let dp = ledger_rep.total_parasite_n;
-        force[0] -= dp * vhat[0];
-        force[2] -= dp * vhat[2];
-        m_y += (self.drag_z_m - self.cg_m[2]) * (-dp * vhat[0]) - 0.0 * (-dp * vhat[2]);
+        let dpx = dp * vhat[0];
+        let dpz = dp * vhat[2];
+        force[0] -= dpx;
+        force[2] -= dpz;
+        let drag_arm = self.drag_z_m - self.cg_m[2];
+        let drag_moment = drag_arm * (-dpx);
+        m_y += drag_moment;
         // Thrust along +x at the disk lines.
         for (k, d) in disks.iter().enumerate() {
             let t = coupled.thrust_n[k];
             force[0] += t;
-            m_y += (d.center_m[2] - self.cg_m[2]) * t;
+            let t_arm = d.center_m[2] - self.cg_m[2];
+            let t_moment = t_arm * t;
+            m_y += t_moment;
         }
         // Gravity in body axes at θ = α (level flight): mg(−sinθ, 0, cosθ).
         let w = self.gross_mass_kg * 9.80665;
-        force[0] -= w * det::sin(alpha_rad);
-        force[2] += w * det::cos(alpha_rad);
-        let torque_imbalance_nm = fs_airscrew::engine_torque_at_prop_nm(omega_prop_rad_s)
-            - 0.5 * (coupled.torque_nm[0] + coupled.torque_nm[1]);
+        let wx = w * det::sin(alpha_rad);
+        let wz = w * det::cos(alpha_rad);
+        force[0] -= wx;
+        force[2] += wz;
+        let mean_prop_torque = 0.5 * (coupled.torque_nm[0] + coupled.torque_nm[1]);
+        let torque_imbalance_nm =
+            fs_airscrew::engine_torque_at_prop_nm(omega_prop_rad_s) - mean_prop_torque;
         Ok(ForceBuildup {
             force_n: force,
             moment_y_nm: m_y,
@@ -552,11 +583,31 @@ impl OpenLoopDesign {
     /// `trim-not-found` (cap or domain exit; the message carries the
     /// residual trajectory) — never a silent best-effort state.
     pub fn trim(&self, rho_kg_m3: f64, start: [f64; 4]) -> Result<TrimResult, Refusal> {
+        let mut trace = Vec::new();
+        self.trim_traced(rho_kg_m3, start, &mut trace)
+    }
+
+    /// [`Self::trim`] with a bit-exact iterate trace (guzez.7.2.1 lane
+    /// bisection instrument): pushes `x.to_bits()` at the top of every
+    /// iteration so cross-lane divergence localizes to the first
+    /// differing iterate. Identical arithmetic to `trim` BY DELEGATION.
+    pub fn trim_traced(
+        &self,
+        rho_kg_m3: f64,
+        start: [f64; 4],
+        trace: &mut Vec<[u64; 4]>,
+    ) -> Result<TrimResult, Refusal> {
         let mut x = start; // (V, alpha, delta_c, omega)
         let mut trail: Vec<String> = Vec::new();
         let tol = [0.5, 0.5, 0.5, 0.5]; // N, N, N·m, N·m
         let mut iterations = 0u32;
         loop {
+            trace.push([
+                x[0].to_bits(),
+                x[1].to_bits(),
+                x[2].to_bits(),
+                x[3].to_bits(),
+            ]);
             let b = self.force_buildup(x[0], x[1], x[2], x[3], 0.0, rho_kg_m3)?;
             let r = [
                 b.force_n[0],
@@ -564,7 +615,13 @@ impl OpenLoopDesign {
                 b.moment_y_nm,
                 b.torque_imbalance_nm,
             ];
-            let rn = (r[0] * r[0] + r[1] * r[1] + r[2] * r[2] + r[3] * r[3]).sqrt();
+            // Statement-split (guzez.7.2.1): no fused mul-adds in
+            // the trim residual norm.
+            let r0 = r[0] * r[0];
+            let r1 = r[1] * r[1];
+            let r2 = r[2] * r[2];
+            let r3 = r[3] * r[3];
+            let rn = (((r0 + r1) + r2) + r3).sqrt();
             trail.push(format!("[{iterations}] |r| {rn:.3}"));
             if r[0].abs() < tol[0]
                 && r[1].abs() < tol[1]
@@ -650,8 +707,11 @@ impl OpenLoopDesign {
                         bc.moment_y_nm,
                         bc.torque_imbalance_nm,
                     ];
-                    let rcn =
-                        (rc[0] * rc[0] + rc[1] * rc[1] + rc[2] * rc[2] + rc[3] * rc[3]).sqrt();
+                    let c0 = rc[0] * rc[0];
+                    let c1 = rc[1] * rc[1];
+                    let c2 = rc[2] * rc[2];
+                    let c3 = rc[3] * rc[3];
+                    let rcn = (((c0 + c1) + c2) + c3).sqrt();
                     if rcn < rn {
                         x = cand;
                         accepted = true;
@@ -698,16 +758,20 @@ fn solve4(a: &[[f64; 4]; 4], b: &[f64; 4]) -> Option<[f64; 4]> {
         for r in (col + 1)..4 {
             let f = m[r][col] / m[col][col];
             for c in col..4 {
-                m[r][c] -= f * m[col][c];
+                // Statement-split (guzez.7.2.1): no fused mul-sub.
+                let upd = f * m[col][c];
+                m[r][c] -= upd;
             }
-            v[r] -= f * v[col];
+            let vupd = f * v[col];
+            v[r] -= vupd;
         }
     }
     let mut out = [0.0f64; 4];
     for r in (0..4).rev() {
         let mut s = v[r];
         for c in (r + 1)..4 {
-            s -= m[r][c] * out[c];
+            let upd = m[r][c] * out[c];
+            s -= upd;
         }
         out[r] = s / m[r][r];
     }

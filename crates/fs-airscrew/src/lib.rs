@@ -152,7 +152,9 @@ pub struct BemtSolution {
 fn section_cl_cd(alpha: f64, camber: f64) -> (f64, f64) {
     let a = alpha.clamp(-1.3, 1.3);
     let attached_cl = 2.0 * core::f64::consts::PI * (a + 2.0 * camber);
-    let cd0 = 0.012 + 0.8 * a * a; // declared profile-drag model
+    // Statement-split (guzez.7.2.1): no fused mul-add.
+    let a2 = 0.8 * a * a;
+    let cd0 = 0.012 + a2; // declared profile-drag model
     let mag = a.abs();
     if mag <= 0.25 {
         (attached_cl, cd0)
@@ -161,9 +163,14 @@ fn section_cl_cd(alpha: f64, camber: f64) -> (f64, f64) {
         let sep = flat_plate_separated(a, 6.0).expect("domain-clamped");
         let (cl_s, cd_s) = fs_airfoil::body_to_wind(sep.cn, sep.ca, a);
         let t = ((mag - 0.25) / 0.2).min(1.0);
-        let s = t * t * (3.0 - 2.0 * t);
+        let t2 = t * t;
+        let s = t2 * (3.0 - 2.0 * t);
         (
-            attached_cl * (1.0 - s) + cl_s * s,
+            {
+                let u = attached_cl * (1.0 - s);
+                let v = cl_s * s;
+                u + v
+            },
             cd0 * (1.0 - s) + cd_s.abs() * s,
         )
     }
@@ -210,22 +217,28 @@ pub fn bemt_solve(
             let phi = det::atan2(u_ax, u_tan);
             alpha = st.beta_rad - phi;
             let (cl, cd) = section_cl_cd(alpha, rotor.camber_ratio);
-            let u2 = u_ax * u_ax + u_tan * u_tan;
+            let ua2 = u_ax * u_ax;
+            let ut2 = u_tan * u_tan;
+            let u2 = ua2 + ut2;
             let q = 0.5 * rho_kg_m3 * u2;
             let (sin_phi, cos_phi) = (det::sin(phi), det::cos(phi));
-            dt_be = q * st.chord_m * (cl * cos_phi - cd * sin_phi) * b;
-            dq_be = q * st.chord_m * (cl * sin_phi + cd * cos_phi) * b * r;
+            let lift_ax = cl * cos_phi;
+            let drag_ax = cd * sin_phi;
+            dt_be = q * st.chord_m * (lift_ax - drag_ax) * b;
+            let lift_tan = cl * sin_phi;
+            let drag_tan = cd * cos_phi;
+            dq_be = q * st.chord_m * (lift_tan + drag_tan) * b * r;
             // Prandtl tip + root factors.
             // Prandtl: F = (2/pi)·acos(e^(−f)).
             let f_tip = if sin_phi.abs() > 1e-9 {
                 let ft = b / 2.0 * (r_tip - r) / (r * sin_phi.abs());
-                2.0 / core::f64::consts::PI * det::exp(-ft).acos()
+                2.0 / core::f64::consts::PI * det::acos(det::exp(-ft))
             } else {
                 1.0
             };
             let f_root = if sin_phi.abs() > 1e-9 {
                 let fr = b / 2.0 * (r - r_root * r_tip) / (r * sin_phi.abs());
-                2.0 / core::f64::consts::PI * det::exp(-fr).acos()
+                2.0 / core::f64::consts::PI * det::acos(det::exp(-fr))
             } else {
                 1.0
             };
@@ -236,10 +249,13 @@ pub fn bemt_solve(
             let denom = 4.0 * core::f64::consts::PI * r * rho_kg_m3 * f_prandtl;
             let target_prod = dt_be / denom; // (V + w)·w target
             // Solve (V + w_new)·w_new = target_prod for w_new >= 0.
-            let disc = v_axial_mps * v_axial_mps + 4.0 * target_prod.max(0.0);
+            let va2 = v_axial_mps * v_axial_mps;
+            let tp4 = 4.0 * target_prod.max(0.0);
+            let disc = va2 + tp4;
             let w_new = 0.5 * (-v_axial_mps + det::sqrt(disc));
             let step = w_new - w;
-            w += 0.5 * step;
+            let half_step = 0.5 * step;
+            w += half_step;
             if step.abs() <= W_TOL * (w.abs() + 1e-9) {
                 converged = true;
                 break;
@@ -267,8 +283,10 @@ pub fn bemt_solve(
             (st.r_over_r + rotor.stations[si + 1].r_over_r) / 2.0
         };
         let dr = (r_hi - r_lo) * r_tip;
-        thrust += dt_be * dr;
-        torque += dq_be * dr;
+        let dthrust = dt_be * dr;
+        thrust += dthrust;
+        let dtorque = dq_be * dr;
+        torque += dtorque;
         receipts.push(StationReceipt {
             r_over_r: st.r_over_r,
             w_mps: w,

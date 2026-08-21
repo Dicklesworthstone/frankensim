@@ -163,9 +163,10 @@ pub(crate) fn settle_mech(
         {
             return Ok((st, tick));
         }
-        let force = ((3000.0 * (target_rad - st.delta_rad) - 180.0 * st.rate_rad_s)
-            / mech.lever_gain_nm_per_n)
-            .clamp(-220.0, 220.0);
+        // Statement-split (guzez.7.2.1): no fused mul-sub.
+        let spring = 3000.0 * (target_rad - st.delta_rad);
+        let damper = 180.0 * st.rate_rad_s;
+        let force = ((spring - damper) / mech.lever_gain_nm_per_n).clamp(-220.0, 220.0);
         st = mech.step(st, 0.0, force, dt)?.0;
     }
     Err(Refusal {

@@ -271,7 +271,9 @@ impl PerceptionModelSpec {
             let a = det::exp(-dt / c.filter_tau_s);
             state.filters[i] = delayed + (state.filters[i] - delayed) * a;
             let remnant = c.remnant_sigma * stream.next_normal();
-            values[i] = c.gain * state.filters[i] + remnant;
+            // Statement-split (guzez.7.2.1): no fused mul-add.
+            let gained = c.gain * state.filters[i];
+            values[i] = gained + remnant;
         }
         let out = PerceivedCues {
             values,

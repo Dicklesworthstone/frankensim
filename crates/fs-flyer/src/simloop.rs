@@ -626,7 +626,10 @@ impl SimLoop {
             .enumerate()
             .map(|(i, a)| a * 0.12 / (1.0 + i as f64))
             .sum();
-        let v_air = (self.u * self.u + self.w * self.w).sqrt().max(0.1);
+        // Statement-split (guzez.7.2.1): no fused mul-add.
+        let u2 = self.u * self.u;
+        let w2 = self.w * self.w;
+        let v_air = (u2 + w2).sqrt().max(0.1);
         // Perception + control.
         let wdot_est = 0.0; // heave cue at the reduced tier (declared)
         let cues = self.perception.step(
@@ -748,9 +751,12 @@ impl SimLoop {
                     _ => 0.0,
                 };
                 let du_ground = (thrust + tow - b.drag_n - RAIL_MU * normal) / m;
-                self.u += dt * du_ground;
-                self.x_m += dt * (self.u - self.spec.headwind_mps).max(0.0);
-                self.omega += dt * b.torque_imbalance_nm / 1.6;
+                let inc_u = dt * du_ground;
+                self.u += inc_u;
+                let inc_x = dt * (self.u - self.spec.headwind_mps).max(0.0);
+                self.x_m += inc_x;
+                let inc_om = dt * b.torque_imbalance_nm / 1.6;
+                self.omega += inc_om;
                 if lift >= weight {
                     self.phase = Phase::Airborne;
                 } else if self.x_m > self.spec.rail_length_m {
@@ -762,17 +768,24 @@ impl SimLoop {
                 let du = b.force_n[0] / m - self.q * self.w;
                 let dw = b.force_n[2] / m + self.q * self.u;
                 let dq = b.moment_y_nm / IYY_KG_M2;
-                self.u += dt * du;
-                self.w += dt * dw;
-                self.q += dt * dq;
-                self.theta += dt * self.q;
-                self.omega += dt * b.torque_imbalance_nm / 1.6;
+                let inc_u = dt * du;
+                self.u += inc_u;
+                let inc_w = dt * dw;
+                self.w += inc_w;
+                let inc_q = dt * dq;
+                self.q += inc_q;
+                let inc_th = dt * self.q;
+                self.theta += inc_th;
+                let inc_om = dt * b.torque_imbalance_nm / 1.6;
+                self.omega += inc_om;
                 let climb = self.u * det::sin(self.theta) - self.w * det::cos(self.theta);
-                self.h_m += dt * climb;
+                let inc_h = dt * climb;
+                self.h_m += inc_h;
                 let ground_speed = (self.u * det::cos(self.theta) + self.w * det::sin(self.theta)
                     - self.spec.headwind_mps)
                     .max(0.0);
-                self.x_m += dt * ground_speed;
+                let inc_x = dt * ground_speed;
+                self.x_m += inc_x;
                 if self.h_m <= 0.0 {
                     self.h_m = 0.0;
                     self.phase = Phase::Ended(TerminalEvent::GroundContact);

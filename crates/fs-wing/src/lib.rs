@@ -92,15 +92,27 @@ pub struct Panel {
 fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
     [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
 }
+// Statement-split kernels (bead guzez.7.2.1): LLVM contracts
+// within-expression mul-add/mul-sub into FMA on aarch64 (wasm32 has
+// no FMA), which broke cross-lane bit identity at +3 ulps in the
+// trim path. Binding every product to a local before combining keeps
+// both lanes on the same rounding sequence — contraction cannot
+// cross statements.
 fn cross3(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
+    let x1 = a[1] * b[2];
+    let x2 = a[2] * b[1];
+    let y1 = a[2] * b[0];
+    let y2 = a[0] * b[2];
+    let z1 = a[0] * b[1];
+    let z2 = a[1] * b[0];
+    [x1 - x2, y1 - y2, z1 - z2]
 }
 fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+    let p0 = a[0] * b[0];
+    let p1 = a[1] * b[1];
+    let p2 = a[2] * b[2];
+    let s01 = p0 + p1;
+    s01 + p2
 }
 fn norm(a: [f64; 3]) -> f64 {
     det::sqrt(dot(a, a))
@@ -258,7 +270,9 @@ pub fn solve_weissinger_linear(
             let f = lu[pr * n + k] / lu[pk * n + k];
             lu[pr * n + k] = f;
             for c in (k + 1)..n {
-                lu[pr * n + c] -= f * lu[pk * n + c];
+                // Statement-split (guzez.7.2.1): no fused mul-sub.
+                let upd = f * lu[pk * n + c];
+                lu[pr * n + c] -= upd;
             }
         }
     }
@@ -267,14 +281,16 @@ pub fn solve_weissinger_linear(
         for r in 0..n {
             let mut s = b_in[perm[r]];
             for c in 0..r {
-                s -= lu[perm[r] * n + c] * y[c];
+                let upd = lu[perm[r] * n + c] * y[c];
+                s -= upd;
             }
             y[r] = s;
         }
         for r in (0..n).rev() {
             let mut s = y[r];
             for c in (r + 1)..n {
-                s -= lu[perm[r] * n + c] * y[c];
+                let upd = lu[perm[r] * n + c] * y[c];
+                s -= upd;
             }
             y[r] = s / lu[perm[r] * n + r];
         }
@@ -435,7 +451,8 @@ pub fn induced_velocity_free(
     for (j, panel) in panels.iter().enumerate() {
         let v = horseshoe_velocity(p, panel.a, panel.b, stream);
         for k in 0..3 {
-            out[k] += gamma[j] * v[k];
+            let term = gamma[j] * v[k];
+            out[k] += term;
         }
     }
     out
