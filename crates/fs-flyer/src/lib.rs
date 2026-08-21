@@ -36,6 +36,7 @@ pub mod effectowners;
 pub mod equilibrate;
 pub mod fieldsvc;
 pub mod freecontrol;
+pub mod hcampaign;
 pub mod hinference;
 pub mod longitudinal;
 pub mod partitioned;
