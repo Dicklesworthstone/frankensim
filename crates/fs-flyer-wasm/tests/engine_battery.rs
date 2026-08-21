@@ -15,7 +15,7 @@ const DEC17: (f64, f64, f64, u64) = (1.294, 11.0, 18.3, 40);
 
 fn init_short(slot: &mut EngineSlot, seed: u64, mode: u32, member: u32) -> String {
     let (rho, wind, rail, ticks) = DEC17;
-    slot.init(seed, rho, wind, mode, member, rail, ticks, false)
+    slot.init(seed, rho, wind, mode, member, rail, ticks, false, false)
 }
 
 #[test]
@@ -67,11 +67,21 @@ fn every_documented_surface_refusal_code_executes() {
     let e2 = fresh.digest();
     assert!(e2.contains("\"code\":\"engine-not-initialized\""), "{e2}");
     // mode-invalid (3 is one past the last mode word — cap AND cap+1).
-    let e3 = fresh.init(1, 1.294, 11.0, 3, 0, 18.3, 40, false);
+    let e3 = fresh.init(1, 1.294, 11.0, 3, 0, 18.3, 40, false, false);
     assert!(e3.contains("\"code\":\"mode-invalid\""), "{e3}");
     // scenario-invalid (headwind past the cap; refuses before any
     // heavy equilibration work).
-    let e4 = fresh.init(1, 1.294, 20.0_f64.next_up(), MODE_FIXED, 0, 18.3, 40, false);
+    let e4 = fresh.init(
+        1,
+        1.294,
+        20.0_f64.next_up(),
+        MODE_FIXED,
+        0,
+        18.3,
+        40,
+        false,
+        false,
+    );
     assert!(e4.contains("\"code\":\"scenario-invalid\""), "{e4}");
     // control-input-missing: Human mode without input, then with a
     // non-finite lever force.
@@ -86,7 +96,7 @@ fn every_documented_surface_refusal_code_executes() {
     // here too so THIS test alone covers the documented list.
     let mut ended = EngineSlot::default();
     let (rho, wind, rail, _) = DEC17;
-    let env = ended.init(1, rho, wind, MODE_FIXED, 0, rail, 2, false);
+    let env = ended.init(1, rho, wind, MODE_FIXED, 0, rail, 2, false, false);
     assert!(env.starts_with("{\"ok\":{"), "{env}");
     ended.step(false, 0.0, 0.0);
     ended.step(false, 0.0, 0.0);
@@ -128,7 +138,7 @@ fn assist_visibility_and_counterfactual_receipt() {
     // replay path, E6.1's ABComparisonReceipt scope).
     let (rho, wind, rail, _) = DEC17;
     let mut on = EngineSlot::default();
-    let env = on.init(1903, rho, wind, MODE_FIXED, 0, rail, 30, true);
+    let env = on.init(1903, rho, wind, MODE_FIXED, 0, rail, 30, true, false);
     assert!(env.starts_with("{\"ok\":{"), "{env}");
     let mut saw_active = false;
     for _ in 0..30 {
@@ -147,7 +157,7 @@ fn assist_visibility_and_counterfactual_receipt() {
     assert!(saw_active, "assist visibility: the flag must surface");
     let d_on = on.digest();
     let mut off = EngineSlot::default();
-    let env = off.init(1903, rho, wind, MODE_FIXED, 0, rail, 30, false);
+    let env = off.init(1903, rho, wind, MODE_FIXED, 0, rail, 30, false, false);
     assert!(env.starts_with("{\"ok\":{"), "{env}");
     for _ in 0..30 {
         let s = off.step(false, 0.0, 0.0);

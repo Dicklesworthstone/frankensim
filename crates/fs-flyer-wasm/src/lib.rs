@@ -326,6 +326,7 @@ mod js {
         rail_length_m: f64,
         max_ticks: u64,
         assist: bool,
+        catapult: bool,
     ) -> String {
         ENGINE.with(|e| {
             e.borrow_mut().init(
@@ -337,6 +338,7 @@ mod js {
                 rail_length_m,
                 max_ticks,
                 assist,
+                catapult,
             )
         })
     }

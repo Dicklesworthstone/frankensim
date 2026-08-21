@@ -20,6 +20,7 @@
 
 use crate::{Refusal, json_escape, refusal_envelope};
 use fs_flyer::assist::ASSIST_V1;
+use fs_flyer::simloop::CATAPULT_1904_V1;
 use fs_flyer::simloop::{
     ControlInput, Phase, PilotMode, ScenarioSpec, SimLoop, SimStateOut, TerminalEvent,
 };
@@ -104,6 +105,7 @@ impl EngineSlot {
         rail_length_m: f64,
         max_ticks: u64,
         assist: bool,
+        catapult: bool,
     ) -> String {
         let pilot_mode = match mode {
             MODE_FIXED => PilotMode::FixedControls,
@@ -126,6 +128,11 @@ impl EngineSlot {
             // canard stop, HUD-flagged; historical parameter identity
             // is untouched — assist is scenario intent, not model).
             assist: assist.then_some(ASSIST_V1),
+            // E5.4: the registered 1904 catapult tow (rail assist;
+            // near-calm Huffman remains outside the coupled core's
+            // admitted envelope — the run ends with a receipted
+            // envelope exit, tracked at guzez.5.7.1).
+            catapult: catapult.then_some(CATAPULT_1904_V1),
             rail_length_m,
             max_ticks,
         };

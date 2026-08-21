@@ -147,7 +147,7 @@ if (pkgPath === undefined) {
 
   test("LIVE: init envelope from the real engine parses with identity fields", () => {
     const init = parseInitEnvelope(
-      wasm.flyer_engine_init(1903n, 1.294, 11.0, MODE_FIXED, 0, 18.3, 24n, false),
+      wasm.flyer_engine_init(1903n, 1.294, 11.0, MODE_FIXED, 0, 18.3, 24n, false, false),
     );
     assert.equal(init.kind, "ok");
     if (init.kind !== "ok") return;
@@ -180,7 +180,7 @@ if (pkgPath === undefined) {
     if (past.kind === "refusal") {
       assert.equal(past.refusal.code, "run-ended");
     }
-    const bad = parseInitEnvelope(wasm.flyer_engine_init(1n, 1.294, 11.0, 3, 0, 18.3, 24n, false));
+    const bad = parseInitEnvelope(wasm.flyer_engine_init(1n, 1.294, 11.0, 3, 0, 18.3, 24n, false, false));
     assert.equal(bad.kind, "refusal");
     if (bad.kind === "refusal") {
       assert.equal(bad.refusal.code, "mode-invalid");

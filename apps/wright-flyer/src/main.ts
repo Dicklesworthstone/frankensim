@@ -5,7 +5,7 @@
 import { describeCapabilities, probeCapabilities } from "./capability";
 import { createFlyerSceneRenderer } from "./flyerScene.ts";
 import { SimClient } from "./sim/simClient.ts";
-import { MODE_FIXED, MODE_HISTORICAL, dec17Scenario } from "./sim/protocol.ts";
+import { MODE_FIXED, MODE_HISTORICAL, dec17Scenario, huffmanScenario } from "./sim/protocol.ts";
 import { recordedToScenario, replayVerdict, type FlightRecording } from "./sim/replay.ts";
 import { MODE_HUMAN } from "./sim/protocol.ts";
 import { LatencyLedger, toPhysical } from "./sim/humanControls.ts";
@@ -133,8 +133,14 @@ function main(): void {
     // Historical mode flies the NONLINEAR-calibrated member 3 (the
     // E5.3b-i registration; members 0-2 are linear-plant tuned and
     // PIO out of the full lifecycle — kept for the H-campaigns).
+    // E5.4: ?site=huffman selects the 1904-05 catapult scenario (the
+    // near-calm run currently ends with a receipted envelope exit —
+    // guzez.5.7.1 — surfaced on the HUD, never silently).
+    const member = mode === MODE_HISTORICAL ? 3 : 0;
     simClient.start(
-      dec17Scenario(1903n, mode, mode === MODE_HISTORICAL ? 3 : 0, params.get("assist") === "1"),
+      params.get("site") === "huffman"
+        ? huffmanScenario(1903n, mode, member)
+        : dec17Scenario(1903n, mode, member, params.get("assist") === "1"),
     );
     renderer.dispose();
     renderer = createFlyerSceneRenderer(app, simClient);

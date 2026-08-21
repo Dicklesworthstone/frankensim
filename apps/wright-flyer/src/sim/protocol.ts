@@ -64,6 +64,8 @@ export interface ScenarioInit {
   readonly maxTicks: bigint;
   /** E5.3c: ratified bounded assist (ASSIST_V1, authority 0.3). */
   readonly assist: boolean;
+  /** E5.4: registered 1904 catapult tow (CATAPULT_1904_V1). */
+  readonly catapult: boolean;
 }
 
 /** The Dec-17 reference scenario (mirror of dec17_scenario). */
@@ -82,6 +84,26 @@ export function dec17Scenario(
     railLengthM: 18.3,
     maxTicks: 2400n,
     assist,
+    catapult: false,
+  };
+}
+
+/** The Huffman Prairie 1904-05 preset (mirror of huffman_scenario).
+ * HONEST STATUS: the near-calm rail run is outside the coupled aero
+ * core's admitted envelope — the engine ends it with a receipted
+ * envelope exit within the first rail seconds (tracked guzez.5.7.1);
+ * the site loads and the refusal surfaces on the HUD, never silently. */
+export function huffmanScenario(seed: bigint, mode: number, member = 0): ScenarioInit {
+  return {
+    seed,
+    rhoKgM3: 1.17,
+    headwindMps: 2.0,
+    mode,
+    member,
+    railLengthM: 30.0,
+    maxTicks: 2400n,
+    assist: false,
+    catapult: true,
   };
 }
 

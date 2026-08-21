@@ -12,6 +12,7 @@ import { hudLines } from "./hud.ts";
 import { computePose } from "./airframe/pose.ts";
 import { applyPose, scriptedState } from "./airframe/applyPose.ts";
 import kdhGrid from "../../../data/wright-flyer/terrain/kill-devil-hills-17x17-v1.json";
+import huffmanGrid from "../../../data/wright-flyer/terrain/huffman-prairie-17x17-v1.json";
 import type { FlyerRenderer } from "./renderer.ts";
 import type { SimClient } from "./sim/simClient.ts";
 import {
@@ -42,8 +43,10 @@ export function createFlyerSceneRenderer(
   const sun = new THREE.DirectionalLight(0xfff1dd, 2.2);
   sun.position.set(-40, 25, 20);
   scene.add(sun, new THREE.HemisphereLight(0xbcd0e8, 0x8a7d64, 0.9));
-  // The REAL Kill Devil Hills tile (E1.3 3DEP grid): heightfield + splat.
-  const terrain = buildTerrainArrays(kdhGrid, 96);
+  // The REAL site tile (E1.3 3DEP grids): heightfield + splat.
+  // E5.4: ?site=huffman loads the Huffman Prairie grid.
+  const site = new URLSearchParams(window.location.search).get("site");
+  const terrain = buildTerrainArrays(site === "huffman" ? huffmanGrid : kdhGrid, 96);
   const tGeo = new THREE.BufferGeometry();
   tGeo.setAttribute("position", new THREE.BufferAttribute(terrain.positions, 3));
   tGeo.setAttribute("color", new THREE.BufferAttribute(terrain.colors, 3));

@@ -38,11 +38,49 @@ pub const MAX_TICKS: u64 = 72_000;
 /// Headwind admission cap [m/s].
 pub const MAX_HEADWIND_MPS: f64 = 20.0;
 
+/// Headwind admission FLOOR [m/s]: the aero core's admitted domain
+/// starts at 1 m/s airspeed, and the rail start's airspeed IS the
+/// headwind — a scenario below this floor would refuse at tick 1
+/// inside the coupled solve instead of at admission. 1.5 keeps a
+/// margin above the domain edge; a true dead-calm start needs a
+/// low-speed rail tier that does not exist yet (declared).
+
 /// Rail length cap [m] (the 1903 rail was 60 ft ≈ 18.3 m).
 pub const MAX_RAIL_M: f64 = 60.0;
 
+/// See [`MAX_HEADWIND_MPS`]'s floor note.
+pub const MIN_HEADWIND_MPS: f64 = 1.5;
+
 /// Rail rolling-friction coefficient (declared Estimated).
 pub const RAIL_MU: f64 = 0.05;
+
+/// Catapult pull-force cap [N] (absurd-input guard).
+pub const MAX_CATAPULT_FORCE_N: f64 = 5_000.0;
+
+/// Catapult pull-length cap [m].
+pub const MAX_CATAPULT_PULL_M: f64 = 60.0;
+
+/// The 1904 Huffman catapult (registered variant; flyer-reference
+/// 'tunable-with-provenance'). Primary lineage (wright-brothers.org
+/// reconstruction): ~1400 lb of weights, 16 ft drop, 3:1 pulley SPEED
+/// multiplication — pulleys multiply DISTANCE not force, so the tow is
+/// ~1400/3 lb ≈ 466 lb ≈ 2073 N over ~48 ft ≈ 14.6 m of pull. The NPS
+/// 1600 lb / 30 ft derrick lineage remains a declared variant axis.
+/// Constant-force tow is the declared Estimated tier (rope/pulley
+/// dynamics unmodeled).
+pub const CATAPULT_1904_V1: CatapultSpec = CatapultSpec {
+    pull_force_n: 2_073.0,
+    pull_length_m: 14.6,
+};
+
+/// Catapult launch assist (rail tow until the drop exhausts).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CatapultSpec {
+    /// Constant tow force along the rail [N].
+    pub pull_force_n: f64,
+    /// Pull length along the rail [m] (drop × pulley ratio).
+    pub pull_length_m: f64,
+}
 
 /// Snapshot payload length (frozen; matches ring::PAYLOAD_LAYOUT_V1
 /// spirit: pos2 + attitude + rates + controls + rotor + phase + gust).
@@ -107,6 +145,9 @@ pub struct ScenarioSpec {
     pub pilot_mode: PilotMode,
     /// Optional assist (HUD-flagged; calibration-isolated).
     pub assist: Option<AssistSpec>,
+    /// Optional catapult tow (Huffman launch option; None = rail
+    /// headwind alone, the Dec-17 procedure).
+    pub catapult: Option<CatapultSpec>,
     /// Rail length [m].
     pub rail_length_m: f64,
     /// Tick budget.
@@ -122,8 +163,27 @@ pub fn dec17_scenario(seed: u64, pilot_mode: PilotMode) -> ScenarioSpec {
         headwind_mps: 11.0,
         pilot_mode,
         assist: None,
+        catapult: None,
         rail_length_m: 18.3,
         max_ticks: 2_400, // 20 s
+    }
+}
+
+/// The Huffman Prairie 1904-05 reference scenario: near-calm wind
+/// (the reason the catapult existed), summer-Dayton density at 815 ft
+/// (Estimated — no source publishes the density arithmetic; declared),
+/// catapult tow, longer rail.
+#[must_use]
+pub fn huffman_scenario(seed: u64, pilot_mode: PilotMode) -> ScenarioSpec {
+    ScenarioSpec {
+        seed,
+        rho_kg_m3: 1.17,
+        headwind_mps: 2.0, // near-calm, above the admission floor
+        pilot_mode,
+        assist: None,
+        catapult: Some(CATAPULT_1904_V1),
+        rail_length_m: 30.0,
+        max_ticks: 2_400,
     }
 }
 
@@ -202,18 +262,26 @@ impl SimLoop {
             && spec.rho_kg_m3 > 0.5
             && spec.rho_kg_m3 < 2.0
             && spec.headwind_mps.is_finite()
-            && (0.0..=MAX_HEADWIND_MPS).contains(&spec.headwind_mps)
+            && (MIN_HEADWIND_MPS..=MAX_HEADWIND_MPS).contains(&spec.headwind_mps)
             && spec.rail_length_m.is_finite()
             && spec.rail_length_m > 0.0
             && spec.rail_length_m <= MAX_RAIL_M
             && spec.max_ticks > 0
-            && spec.max_ticks <= MAX_TICKS;
+            && spec.max_ticks <= MAX_TICKS
+            && spec.catapult.is_none_or(|c| {
+                c.pull_force_n.is_finite()
+                    && c.pull_force_n > 0.0
+                    && c.pull_force_n <= MAX_CATAPULT_FORCE_N
+                    && c.pull_length_m.is_finite()
+                    && c.pull_length_m > 0.0
+                    && c.pull_length_m <= MAX_CATAPULT_PULL_M
+            });
         if !ok {
             return Err(Refusal {
                 code: "scenario-invalid",
                 message: format!("{spec:?}"),
                 ranked_repairs: vec![format!(
-                    "headwind [0, {MAX_HEADWIND_MPS}]; rail (0, {MAX_RAIL_M}]; ticks [1, {MAX_TICKS}]; rho (0.5, 2.0)"
+                    "headwind [{MIN_HEADWIND_MPS}, {MAX_HEADWIND_MPS}]; rail (0, {MAX_RAIL_M}]; ticks [1, {MAX_TICKS}]; rho (0.5, 2.0)"
                 )],
             });
         }
@@ -263,6 +331,12 @@ impl SimLoop {
             p.extend_from_slice(&m.to_le_bytes());
         }
         p.push(u8::from(spec.assist.is_some()));
+        // Catapult is intent-bearing scenario state.
+        p.push(u8::from(spec.catapult.is_some()));
+        if let Some(c) = &spec.catapult {
+            p.extend_from_slice(&c.pull_force_n.to_bits().to_le_bytes());
+            p.extend_from_slice(&c.pull_length_m.to_bits().to_le_bytes());
+        }
         let run_intent_id = hash_domain("org.frankensim.wf.run-intent.v1", &p).to_hex();
         let perception = perception_v1(spec.seed);
         let perception_state = perception.init()?;
@@ -479,7 +553,14 @@ impl SimLoop {
                 let weight = m * 9.80665;
                 let normal = (weight - lift).max(0.0);
                 let thrust = b.thrust_n[0] + b.thrust_n[1];
-                let du_ground = (thrust - b.drag_n - RAIL_MU * normal) / m;
+                // Catapult tow: constant force while the pull lasts
+                // (x_m measures rail distance; the drop exhausts at
+                // pull_length — constant-force tier, declared).
+                let tow = match &self.spec.catapult {
+                    Some(c) if self.x_m < c.pull_length_m => c.pull_force_n,
+                    _ => 0.0,
+                };
+                let du_ground = (thrust + tow - b.drag_n - RAIL_MU * normal) / m;
                 self.u += dt * du_ground;
                 self.x_m += dt * (self.u - self.spec.headwind_mps).max(0.0);
                 self.omega += dt * b.torque_imbalance_nm / 1.6;

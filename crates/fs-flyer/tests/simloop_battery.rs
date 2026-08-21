@@ -8,8 +8,8 @@
 //! Repro: cargo test -p fs-flyer --test simloop_battery
 
 use fs_flyer::simloop::{
-    ControlInput, MAX_HEADWIND_MPS, MAX_RAIL_M, MAX_TICKS, Phase, PilotMode, ScenarioSpec, SimLoop,
-    TerminalEvent, dec17_scenario,
+    ControlInput, MAX_HEADWIND_MPS, MAX_RAIL_M, MAX_TICKS, MIN_HEADWIND_MPS, Phase, PilotMode,
+    ScenarioSpec, SimLoop, TerminalEvent, dec17_scenario,
 };
 
 fn jlog(case: &str, payload: &str) {
@@ -201,6 +201,14 @@ fn scenario_caps_at_cap_and_cap_plus_one() {
         mk(&|s| s.headwind_mps = MAX_HEADWIND_MPS.next_up()),
         Err(e) if e.code == "scenario-invalid"
     ));
+    // The FLOOR too (E5.4): at the floor admits, one below refuses —
+    // a sub-floor start would refuse inside the coupled solve at tick
+    // 1 instead of at admission (measured on the calm Huffman twin).
+    assert!(mk(&|s| s.headwind_mps = MIN_HEADWIND_MPS).is_ok());
+    assert!(matches!(
+        mk(&|s| s.headwind_mps = MIN_HEADWIND_MPS.next_down()),
+        Err(e) if e.code == "scenario-invalid"
+    ));
     assert!(mk(&|s| s.rail_length_m = MAX_RAIL_M).is_ok());
     assert!(matches!(
         mk(&|s| s.rail_length_m = MAX_RAIL_M.next_up()),
@@ -310,6 +318,110 @@ fn member3_flies_the_dec17_class_undulating_flight() {
             "\"airborne_s\":{airborne_s},\"undulations\":{undulations},\"x_end_m\":{x_end},\"digest\":\"{}\"",
             &digest[..16]
         ),
+    );
+}
+
+#[test]
+fn catapult_mechanics_and_the_huffman_low_speed_block() {
+    // E5.4 (bead guzez.6.7). Part 1 — catapult mechanics INSIDE the
+    // certified envelope: the Dec-17 KDH scenario with the registered
+    // 1904 catapult lifts off substantially earlier than unaided
+    // (executed comparative discriminator), the tow binds into
+    // RunIntentId but never the tick-0 digest, and both catapult axes
+    // cap at cap AND cap+1.
+    use fs_flyer::simloop::{
+        CATAPULT_1904_V1, CatapultSpec, MAX_CATAPULT_FORCE_N, MAX_CATAPULT_PULL_M, huffman_scenario,
+    };
+    let liftoff_x = |catapult: Option<CatapultSpec>| -> f64 {
+        let mut spec = dec17_scenario(1903, PilotMode::FixedControls);
+        spec.catapult = catapult;
+        let mut sim = SimLoop::init(spec).unwrap();
+        loop {
+            let out = sim.step(None).unwrap();
+            if matches!(out.phase, Phase::Airborne) {
+                return out.x_m;
+            }
+            assert!(!matches!(out.phase, Phase::Ended(_)), "must lift: {out:?}");
+        }
+    };
+    let x_unaided = liftoff_x(None);
+    let x_cat = liftoff_x(Some(CATAPULT_1904_V1));
+    assert!(
+        x_cat < 0.6 * x_unaided,
+        "the catapult must shorten the run substantially: {x_cat} vs {x_unaided} m"
+    );
+    jlog(
+        "catapult",
+        &format!("\"liftoff_x_m\":{x_cat},\"unaided_liftoff_x_m\":{x_unaided}"),
+    );
+    // Caps at cap AND cap+1 on both catapult axes.
+    let mk = |c: CatapultSpec| {
+        let mut s = dec17_scenario(1, PilotMode::FixedControls);
+        s.catapult = Some(c);
+        SimLoop::init(s)
+    };
+    assert!(
+        mk(CatapultSpec {
+            pull_force_n: MAX_CATAPULT_FORCE_N,
+            pull_length_m: MAX_CATAPULT_PULL_M
+        })
+        .is_ok()
+    );
+    for bad in [
+        CatapultSpec {
+            pull_force_n: MAX_CATAPULT_FORCE_N.next_up(),
+            pull_length_m: 10.0,
+        },
+        CatapultSpec {
+            pull_force_n: 1000.0,
+            pull_length_m: MAX_CATAPULT_PULL_M.next_up(),
+        },
+        CatapultSpec {
+            pull_force_n: 0.0,
+            pull_length_m: 10.0,
+        },
+    ] {
+        assert!(
+            matches!(mk(bad), Err(e) if e.code == "scenario-invalid"),
+            "{bad:?}"
+        );
+    }
+    // Intent binding: catapult present/absent changes RunIntentId,
+    // never the tick-0 digest.
+    let mut with_spec = dec17_scenario(1, PilotMode::FixedControls);
+    with_spec.catapult = Some(CATAPULT_1904_V1);
+    let with = SimLoop::init(with_spec).unwrap();
+    let without = SimLoop::init(dec17_scenario(1, PilotMode::FixedControls)).unwrap();
+    assert_ne!(with.run_intent_id, without.run_intent_id);
+    assert_eq!(with.tick0().digest, without.tick0().digest);
+    assert_eq!(CATAPULT_1904_V1.pull_force_n, 2073.0);
+    assert_eq!(CATAPULT_1904_V1.pull_length_m, 14.6);
+
+    // Part 2 — the LIVING MARKER (honest, executed): the near-calm
+    // Huffman rail run is OUTSIDE the coupled core's admitted envelope
+    // (probe 2026-08-20: headwinds 2-8 m/s all end EnvelopeExceeded
+    // within ~16 rail ticks; the admitted floor sits near the Dec-17
+    // 11 m/s class). The run ends with a RECEIPTED envelope exit —
+    // never a silent fallback. When the low-speed coupling tier lands
+    // (bead guzez.5.7.1 upstream-wash decay + near-static schedule),
+    // THIS assertion is the one that must flip to a liftoff claim.
+    let mut sim = SimLoop::init(huffman_scenario(1904, PilotMode::FixedControls)).unwrap();
+    let end = loop {
+        let out = sim.step(None).unwrap();
+        assert!(
+            !matches!(out.phase, Phase::Airborne),
+            "low-speed tier landed? move this test to a liftoff claim \
+             and close guzez.5.7.1's DONE-WHEN"
+        );
+        if let Phase::Ended(e) = out.phase {
+            break e;
+        }
+    };
+    assert_eq!(end, TerminalEvent::EnvelopeExceeded);
+    let receipt = sim.envelope_refusal().expect("receipt kept");
+    jlog(
+        "huffman-blocked",
+        &format!("\"code\":\"{}\",\"tracked\":\"guzez.5.7.1\"", receipt.code),
     );
 }
 
