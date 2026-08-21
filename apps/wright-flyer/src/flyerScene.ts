@@ -197,6 +197,15 @@ export function createFlyerSceneRenderer(
       }
       renderer.render(scene, camera);
     },
+    applyQuality(profile): void {
+      // Atomic presentation-only application (E5.6): pixel ratio cap
+      // and ghost visibility; terrain re-tessellation is a rebuild
+      // concern (deferred, logged by the governor's JSONL).
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, profile.pixelRatioCap));
+      if (ghostFrame !== null) {
+        ghostFrame.group.visible = profile.ghostVisible;
+      }
+    },
     resize(width: number, height: number): void {
       renderer.setSize(width, height);
       camera.aspect = width / Math.max(1, height);

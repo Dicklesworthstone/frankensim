@@ -22,6 +22,9 @@ export interface FlyerRenderer {
   render(dtS: number): void;
   resize(width: number, height: number): void;
   dispose(): void;
+  /** E5.6: apply an ATOMIC presentation profile (QoS governor output —
+   * presentation only; the physics tier is immutable by construction). */
+  applyQuality?(profile: import("./qos.ts").PresentationProfile): void;
 }
 
 /**

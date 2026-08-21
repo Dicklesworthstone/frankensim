@@ -8,6 +8,7 @@ import { SimClient } from "./sim/simClient.ts";
 import { MODE_FIXED, MODE_HISTORICAL, dec17Scenario, huffmanScenario } from "./sim/protocol.ts";
 import { recordedToScenario, replayVerdict, type FlightRecording } from "./sim/replay.ts";
 import { cardLines, computeKpis, kpiRecomputeDivergence } from "./sim/resultsCard.ts";
+import { QosGovernor } from "./qos.ts";
 import { MODE_HUMAN } from "./sim/protocol.ts";
 import { LatencyLedger, toPhysical } from "./sim/humanControls.ts";
 import { NEUTRAL, keysFrom, stepCommand, type PilotCommand } from "./input.ts";
@@ -203,9 +204,31 @@ function main(): void {
   let frames = 0;
   let windowStartMs = performance.now();
   let lastMs = windowStartMs;
+  // E5.6: the hysteretic QoS governor — presentation only, badge
+  // honest, one typed refusal on a persistent budget miss.
+  const qos = new QosGovernor();
+  const badgeEl = document.createElement("div");
+  badgeEl.style.cssText =
+    "position:fixed;left:12px;top:12px;display:none;font:12px monospace;" +
+    "color:#1a1a1a;background:#e8c76a;padding:4px 8px;border-radius:4px";
+  document.body.appendChild(badgeEl);
   let lastPublishedTick = 0;
   const frame = (nowMs: number): void => {
     const dtS = (nowMs - lastMs) / 1000;
+    const q = qos.sample(Math.max(0, nowMs - lastMs));
+    if (q.changed) {
+      renderer.applyQuality?.(q.profile);
+      badgeEl.style.display = q.profile.badge !== null ? "block" : "none";
+      badgeEl.textContent = q.profile.badge ?? "";
+      console.info(
+        JSON.stringify({ suite: "wright-flyer-app", stage: "qos", state: q.state, ...q.profile }),
+      );
+    }
+    if (q.refusal !== undefined) {
+      console.warn(JSON.stringify({ suite: "wright-flyer-app", stage: "qos-refusal", ...q.refusal }));
+      capabilityText.textContent = `${q.refusal.code}: ${q.refusal.message}`;
+      capabilityText.className = "warn";
+    }
     pumpHuman(nowMs, dtS);
     renderer.render(dtS);
     // Latency ledger: publication (new sim tick visible) then present.
