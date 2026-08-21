@@ -130,6 +130,11 @@ pub enum TerminalEvent {
     /// The flight left the certified aero envelope: a physics solve
     /// refused mid-run (receipt kept via `envelope_refusal`).
     EnvelopeExceeded,
+    /// A swept-feature strike (blade/hub) whose continuation would
+    /// need an unavailable breakage model: the physical run closes at
+    /// the LOCALIZED event time (E3.4b; cinematic continuation is
+    /// presentation, never physics).
+    DamageModelUnavailable,
 }
 
 /// The scenario (enters RunIntentId).
@@ -829,6 +834,7 @@ impl SimLoop {
                 Phase::Ended(TerminalEvent::RailEndWithoutLift) => 3.0,
                 Phase::Ended(TerminalEvent::MaxTicks) => 4.0,
                 Phase::Ended(TerminalEvent::EnvelopeExceeded) => 5.0,
+                Phase::Ended(TerminalEvent::DamageModelUnavailable) => 6.0,
             },
         ]
     }

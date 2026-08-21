@@ -73,6 +73,7 @@ fn phase_code(phase: Phase) -> u8 {
         Phase::Ended(TerminalEvent::RailEndWithoutLift) => 3,
         Phase::Ended(TerminalEvent::MaxTicks) => 4,
         Phase::Ended(TerminalEvent::EnvelopeExceeded) => 5,
+        Phase::Ended(TerminalEvent::DamageModelUnavailable) => 6,
     }
 }
 

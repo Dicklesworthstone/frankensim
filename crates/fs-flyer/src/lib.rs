@@ -48,6 +48,7 @@ pub mod replayenv;
 pub mod sections;
 pub mod simloop;
 pub mod spine;
+pub mod sweptevents;
 
 /// Identity domain for design digests.
 pub const DESIGN_DIGEST_DOMAIN: &str = "org.frankensim.fs-flyer.design.v1";

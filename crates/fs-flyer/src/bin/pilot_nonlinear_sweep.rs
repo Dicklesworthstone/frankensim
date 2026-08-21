@@ -57,6 +57,7 @@ fn classify(mut sim: SimLoop) -> FlightClass {
                         TerminalEvent::RailEndWithoutLift => "rail-end-without-lift",
                         TerminalEvent::MaxTicks => "max-ticks",
                         TerminalEvent::EnvelopeExceeded => "envelope-exceeded",
+                        TerminalEvent::DamageModelUnavailable => "damage-model-unavailable",
                     };
                     break;
                 }
