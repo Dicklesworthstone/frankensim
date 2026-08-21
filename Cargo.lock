@@ -1492,6 +1492,7 @@ dependencies = [
  "fs-airscrew",
  "fs-alloc",
  "fs-atmo",
+ "fs-bem",
  "fs-blake3",
  "fs-contact",
  "fs-exec",
