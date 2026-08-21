@@ -96,6 +96,10 @@ pub struct ShedRow {
     pub nodes: Vec<[f64; 3]>,
     /// Bound circulations captured at shed time (n_stations).
     pub gamma: Vec<f64>,
+    /// Streamwise core second moment [m²] accumulated by coarsening
+    /// (0 for freshly shed rows; parallel-axis bookkeeping — the
+    /// E4.7-iii WakeCoreEvolutionMode consumes it).
+    pub core2_m2: f64,
 }
 
 /// The connected near-wake.
@@ -180,6 +184,7 @@ impl FilamentWake {
         self.rows.push(ShedRow {
             nodes: self.line_nodes.clone(),
             gamma: gamma.to_vec(),
+            core2_m2: 0.0,
         });
         self.ticks += 1;
         Ok(())
@@ -269,6 +274,7 @@ impl FilamentWake {
             for g in &row.gamma {
                 b.extend_from_slice(&g.to_bits().to_le_bytes());
             }
+            b.extend_from_slice(&row.core2_m2.to_bits().to_le_bytes());
         }
         hash_domain("org.frankensim.fs-vpm.filament3d.v1", &b).to_hex()
     }

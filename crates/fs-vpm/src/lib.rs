@@ -17,6 +17,7 @@
 use core::f64::consts::PI;
 use fs_exec::{AdmittedBudget, BudgetConsumption, BudgetRefusal, Cx};
 
+pub mod coarsen3d;
 pub mod filament3d;
 
 /// Maximum completed logical work units between production-path checkpoints.

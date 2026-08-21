@@ -178,7 +178,7 @@ fn shed_determinism_golden() {
     assert_eq!(a, run(), "bit-identical twice");
     jlog("golden", &format!("\"digest\":\"{a}\""));
     assert_eq!(
-        a, "75ab76b2867a68e013101f3eb9c5467c940fe5108bb27905c55eb4117b8745fe",
+        a, "50b186032a5e875793063557fc5336e9a55ad011ae5128d4ff467adf0dd53b55",
         "filament shed golden moved — determinism regression or an \
          intentional lattice change requiring the golden-bump protocol"
     );
