@@ -154,8 +154,13 @@ fn converges_within_candidate_a_and_is_two_way_live() {
     )
     .unwrap()
     .total_lift_n;
+    // Re-measured 2026-08-21 under the 5.7.1 upstream-wash decay: the
+    // wing (ahead of the disks) now feels the DECAYED factor, so the
+    // live-arm delta is 0.587 N at this fixture (was ~a few N under
+    // the flat map). 0.2 keeps ~3x headroom while still proving the
+    // arm carries real coupling, not float noise.
     assert!(
-        (r.wing_lift_n - unwashed).abs() > 1.0,
+        (r.wing_lift_n - unwashed).abs() > 0.2,
         "prop->wing arm dead: {} vs unwashed {unwashed}",
         r.wing_lift_n
     );
@@ -308,8 +313,54 @@ fn coupling_golden_digest() {
         &format!("\"digest\":\"{digest}\",\"thrust\":{}", r.thrust_n[0]),
     );
     assert_eq!(
-        digest, "6de74d07d26fa40bf53024cc8394b25e08cdf038b17b320c01de12c245e99a8c",
+        digest, "72c7190ca739e2a3dcba8b161be989499791211ac30058a2821a9a0e8c214e77",
         "coupling golden moved — determinism regression or an intentional \
          scheme change requiring the golden-bump protocol"
+    );
+}
+
+#[test]
+fn wash_factor_law_upstream_decay_and_downstream_growth() {
+    // Bead wf-root-guzez.5.7.1: the per-pair factor LAW, pinned
+    // against the actuator-disk momentum forms (per-point oracles).
+    use fs_flyer::propcoupling::wash_factor;
+    let r: f64 = 1.2954;
+    // At the disk plane: exactly 1 (the half-slipstream disk value).
+    assert!((wash_factor(0.0, 0.0, r) - 1.0).abs() < 1e-15);
+    // Upstream 1.9R (the wing's station): 1 - 1.9/sqrt(1.9^2+1).
+    let dx: f64 = 1.9 * r;
+    let expect = 1.0 - dx / (dx * dx + r * r).sqrt();
+    assert!((wash_factor(dx, 0.0, r) - expect).abs() < 1e-15);
+    assert!(
+        expect < 0.12,
+        "the wing's upstream factor is SMALL: {expect}"
+    );
+    // Downstream mirror grows toward the full slipstream (factor 2).
+    let down = wash_factor(-dx, 0.0, r);
+    assert!((down - (1.0 + dx / (dx * dx + r * r).sqrt())).abs() < 1e-15);
+    assert!(down > 1.88);
+    // Monotone decay upstream (per-point over the window).
+    let mut prev = wash_factor(0.0, 0.0, r);
+    for k in 1..20 {
+        let f = wash_factor(k as f64 * 0.1 * r, 0.0, r);
+        assert!(f < prev, "monotone at {k}");
+        prev = f;
+    }
+    // Gates: AT the axial window edge and beyond -> 0; radial gate.
+    assert_eq!(wash_factor(2.0 * r, 0.0, r), 0.0);
+    assert_eq!(wash_factor(-2.0 * r, 0.0, r), 0.0);
+    assert_eq!(
+        wash_factor(3.65 * r, 0.0, r),
+        0.0,
+        "the canard stays unwashed"
+    );
+    assert_eq!(wash_factor(0.5, r, r), 0.0, "radial gate AT R");
+    assert!(
+        wash_factor(0.5, 0.99 * r, r) > 0.0,
+        "inside the radial gate"
+    );
+    jlog(
+        "wash-factor-law",
+        &format!("\"upstream_1p9R\":{expect},\"downstream_1p9R\":{down}"),
     );
 }

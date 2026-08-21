@@ -132,6 +132,26 @@ pub struct CoupledStep {
 /// the disks) the disk-plane value, which at near-static Huffman
 /// speeds fabricated an unaided calm takeoff the historical record
 /// contradicts.
+
+/// The actuator-disk axial wash factor for one strip×disk pair
+/// (bead wf-root-guzez.5.7.1; multiplies the HALF-slipstream state):
+/// 0 outside the radial gate (dy ≥ R) or the axial window
+/// (|dx| ≥ 2R); inside, 1 − dx/√(dx²+R²) upstream (dx ≥ 0, ahead of
+/// the pusher disk) and 1 + |dx|/√(dx²+R²) downstream. Exposed so
+/// the battery pins the LAW, not just the digest.
+#[must_use]
+pub fn wash_factor(dx: f64, dy_abs: f64, radius: f64) -> f64 {
+    if dy_abs >= radius || dx.abs() >= 2.0 * radius {
+        return 0.0;
+    }
+    let root = (dx * dx + radius * radius).sqrt();
+    if dx >= 0.0 {
+        1.0 - dx / root
+    } else {
+        1.0 + (-dx) / root
+    }
+}
+
 fn wash_map(
     strips: &[StripSpec],
     panels: &[Panel],
@@ -145,17 +165,11 @@ fn wash_map(
             let y = (p.a[1] + p.b[1]) / 2.0;
             let x = (p.a[0] + p.b[0]) / 2.0;
             let factor = |k: usize| -> f64 {
-                let dy = (y - disks[k].center_m[1]).abs();
-                let dx = x - disks[k].center_m[0];
-                if dy >= radius || dx.abs() >= 2.0 * radius {
-                    return 0.0;
-                }
-                let root = (dx * dx + radius * radius).sqrt();
-                if dx >= 0.0 {
-                    1.0 - dx / root
-                } else {
-                    1.0 + (-dx) / root
-                }
+                wash_factor(
+                    x - disks[k].center_m[0],
+                    (y - disks[k].center_m[1]).abs(),
+                    radius,
+                )
             };
             [factor(0), factor(1)]
         })

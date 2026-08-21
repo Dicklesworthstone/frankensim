@@ -221,7 +221,7 @@ fn golden_digest() {
     let t0 = equilibrate(&d, &CANARD_MECH_V1, &spec()).unwrap();
     jlog("golden", &format!("\"digest\":\"{}\"", t0.digest));
     assert_eq!(
-        t0.digest, "291558e6a4f234791f5f9c2cf7c7ceae97c6b5c85682bf8156378b5d4c6d4cce",
+        t0.digest, "62c7f865c5625edc7c85208b379b658423b0abc81d55f9c48fd0b2c5e4e0cab9",
         "tick-0 golden moved — determinism regression or an intentional \
          closure change requiring the golden-bump protocol"
     );

@@ -274,7 +274,7 @@ fn determinism_and_golden() {
         fs_blake3::hash_domain("org.frankensim.fs-flyer.e82i-golden.v1", &payload).to_hex();
     jlog("golden", &format!("\"digest\":\"{digest}\""));
     assert_eq!(
-        digest, "3a5d275350f9704aa0a0404bdc615b55acaa02f6f860fb4748464e6c974e11d6",
+        digest, "151c25bc8a833708bbdd4f32601e79b08d0be38db192836bb9c1ca06d5e069a0",
         "augmented-spectrum golden moved — determinism regression or an \
          intentional model change requiring the golden-bump protocol"
     );

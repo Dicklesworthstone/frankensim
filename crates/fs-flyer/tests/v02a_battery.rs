@@ -199,7 +199,7 @@ fn v02a_golden_digest() {
         &format!("\"digest\":\"{digest}\",\"t2\":{}", rep.time_to_double_s),
     );
     assert_eq!(
-        digest, "9d97aadd85219571537fbdf6c01ac76e65048104fc94eebdf5a32e50d373f270",
+        digest, "75da093380b8018496bf0245957a9cfdec693bb02e2cd020851eb8627f9ea115",
         "V-02a pole golden moved — determinism regression or an \
          intentional model change requiring the golden-bump protocol"
     );
