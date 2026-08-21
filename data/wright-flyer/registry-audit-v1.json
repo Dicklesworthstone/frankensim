@@ -1,0 +1,18 @@
+{
+ "schema": "org.frankensim.wf.registry-audit.v1",
+ "evidence_registry_id": "896ce76924b33b3b7af4c85a5e5bd19ae62323c6abd93261091e44c257d2006c",
+ "registry_status": "FROZEN",
+ "rows": [
+  {"file": "source-dossier-v1.json", "frozen": "0a75f54d5669c1ad9f8c0cee9e17472b794a48b50f448a5609f1e13fd02b161a", "current": "0a75f54d5669c1ad9f8c0cee9e17472b794a48b50f448a5609f1e13fd02b161a", "conformant": true},
+  {"file": "flyer-reference.json", "frozen": "355b53b4028bccdc32b7c07d5a4c076b9532f75c47a8def9b0c85da7891e8307", "current": "355b53b4028bccdc32b7c07d5a4c076b9532f75c47a8def9b0c85da7891e8307", "conformant": true},
+  {"file": "canard-mechanics-v1.json", "frozen": "cd3d30a8e350b2babfd90914fa7187425b3e35a86c6b40df4f9fe29e7e39a6e9", "current": "cd3d30a8e350b2babfd90914fa7187425b3e35a86c6b40df4f9fe29e7e39a6e9", "conformant": true},
+  {"file": "prop-geometry-v1.json", "frozen": "dcfe3697214af15efaf81efb423f4b791ad075e330b4971093b6433a7104223a", "current": "dcfe3697214af15efaf81efb423f4b791ad075e330b4971093b6433a7104223a", "conformant": true},
+  {"file": "air-state-v1.json", "frozen": "89d69b3cb955b27946d4db6526f5cb7f8f647598a3ff0decd24f2b479f496080", "current": "89d69b3cb955b27946d4db6526f5cb7f8f647598a3ff0decd24f2b479f496080", "conformant": true},
+  {"file": "geometry-conventions-v1.json", "frozen": "771c2911ce666980f0d1f07e66abe1843908efaefd3f39a71e45572437b1a061", "current": "771c2911ce666980f0d1f07e66abe1843908efaefd3f39a71e45572437b1a061", "conformant": true},
+  {"file": "frame-conventions-v1.json", "frozen": "dc5ccfe0fad931c5154533f3dac60069812d38b7618eddec8faaa00bc3f23a95", "current": "dc5ccfe0fad931c5154533f3dac60069812d38b7618eddec8faaa00bc3f23a95", "conformant": true},
+  {"file": "replay-identity-schema-v1.json", "frozen": "c8ac2f16fde73409fef04517df33a4e80c63a0f7a10ba83c04712c6bcc456319", "current": "c8ac2f16fde73409fef04517df33a4e80c63a0f7a10ba83c04712c6bcc456319", "conformant": true}
+ ],
+ "violations": 0,
+ "verdict": "CONFORMANT",
+ "receipt_digest": "6febdb9d6116fa230006a87bb90d347c047acdde67349d02e02dda0ff297c910"
+}

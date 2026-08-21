@@ -44,6 +44,7 @@ pub mod prelaunch;
 pub mod propcoupling;
 pub mod rail;
 pub mod referee;
+pub mod registryaudit;
 pub mod replay;
 pub mod replayenv;
 pub mod sections;
