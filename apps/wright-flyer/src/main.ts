@@ -12,6 +12,88 @@ import { QosGovernor } from "./qos.ts";
 import { MODE_HUMAN } from "./sim/protocol.ts";
 import { LatencyLedger, toPhysical } from "./sim/humanControls.ts";
 import { NEUTRAL, keysFrom, stepCommand, type PilotCommand } from "./input.ts";
+import {
+  DEFAULT_SELECTION,
+  KEY_LINES,
+  MODE_CARDS,
+  menuQuery,
+  type MenuSelection,
+} from "./menu.ts";
+
+/** Landing menu overlay (game front door). The scripted demo keeps
+ * running behind it as the attract mode; every button just navigates
+ * to the URL params the app already honors. */
+function buildMenu(container: HTMLElement): void {
+  let sel: MenuSelection = DEFAULT_SELECTION;
+  const overlay = document.createElement("div");
+  overlay.id = "wf-menu";
+  const card = document.createElement("div");
+  card.id = "wf-menu-card";
+  card.innerHTML =
+    `<div id="wf-menu-title">FIRST FLIGHT</div>` +
+    `<div id="wf-menu-sub">Wright Flyer · December 17, 1903 · a FrankenSim reconstruction</div>`;
+  const modeRow = document.createElement("div");
+  modeRow.className = "wf-menu-row";
+  const modeButtons = new Map<string, HTMLButtonElement>();
+  const refresh = (): void => {
+    for (const [mode, btn] of modeButtons) {
+      btn.classList.toggle("selected", mode === sel.mode);
+    }
+    assistBtn.classList.toggle("selected", sel.assist);
+    assistBtn.disabled = sel.mode !== "human";
+    siteBtn.textContent =
+      sel.site === "kdh" ? "SITE: KILL DEVIL HILLS 1903" : "SITE: HUFFMAN PRAIRIE 1904-05 (catapult)";
+    go.textContent = `LAUNCH ${sel.site === "huffman" ? "BY CATAPULT" : "INTO THE HEADWIND"} →`;
+  };
+  for (const c of MODE_CARDS) {
+    const btn = document.createElement("button");
+    btn.className = "wf-mode-btn";
+    btn.innerHTML = `<b>${c.title}</b><span>${c.blurb}</span>`;
+    btn.addEventListener("click", () => {
+      sel = { ...sel, mode: c.mode };
+      refresh();
+    });
+    modeButtons.set(c.mode, btn);
+    modeRow.appendChild(btn);
+  }
+  card.appendChild(modeRow);
+  const optRow = document.createElement("div");
+  optRow.className = "wf-menu-row";
+  const siteBtn = document.createElement("button");
+  siteBtn.className = "wf-opt-btn";
+  siteBtn.addEventListener("click", () => {
+    sel = { ...sel, site: sel.site === "kdh" ? "huffman" : "kdh" };
+    refresh();
+  });
+  const assistBtn = document.createElement("button");
+  assistBtn.className = "wf-opt-btn";
+  assistBtn.textContent = "TRAINING ASSIST (bounded aid — not history)";
+  assistBtn.addEventListener("click", () => {
+    sel = { ...sel, assist: !sel.assist };
+    refresh();
+  });
+  optRow.appendChild(siteBtn);
+  optRow.appendChild(assistBtn);
+  card.appendChild(optRow);
+  const go = document.createElement("button");
+  go.id = "wf-go-btn";
+  go.addEventListener("click", () => {
+    window.location.search = menuQuery(sel);
+  });
+  card.appendChild(go);
+  const keys = document.createElement("pre");
+  keys.id = "wf-menu-keys";
+  keys.textContent = KEY_LINES.join("\n");
+  card.appendChild(keys);
+  const demo = document.createElement("a");
+  demo.id = "wf-demo-link";
+  demo.href = "?demo=1";
+  demo.textContent = "just watch the scripted demo";
+  card.appendChild(demo);
+  overlay.appendChild(card);
+  container.appendChild(overlay);
+  refresh();
+}
 
 function main(): void {
   const app = document.getElementById("app");
@@ -47,9 +129,8 @@ function main(): void {
   const ledger = new LatencyLedger((line) => console.info(line));
   // E5.5 results-card overlay (hidden until a run ends).
   const resultsCardEl = document.createElement("pre");
-  resultsCardEl.style.cssText =
-    "position:fixed;right:12px;top:48px;display:none;font:12px/1.5 monospace;" +
-    "color:#f5efe0;background:rgba(20,24,30,.85);padding:10px 12px;border-radius:6px;max-width:44ch";
+  resultsCardEl.id = "wf-results-card";
+  resultsCardEl.style.display = "none";
   document.body.appendChild(resultsCardEl);
   let simClient: SimClient | undefined;
   let renderer = createFlyerSceneRenderer(app);
@@ -195,6 +276,11 @@ function main(): void {
         }),
       );
     });
+  }
+  // Landing menu: front door when neither a sim run nor the explicit
+  // scripted-demo view was requested (the demo keeps playing behind it).
+  if (params.get("sim") !== "1" && params.get("demo") !== "1") {
+    buildMenu(document.body);
   }
   window.addEventListener("resize", resize);
   resize();

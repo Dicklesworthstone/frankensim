@@ -25,6 +25,8 @@ import {
 } from "./sim/snapshotView.ts";
 import { ghostAt, type FlightRecording } from "./sim/replay.ts";
 import { CaptionStream, formatCaption } from "./sim/captions.ts";
+import { IDLE_INPUTS, phaseDisplay } from "./gauges.ts";
+import { createHudDials, createPhaseBanner } from "./hudDials.ts";
 
 export function createFlyerSceneRenderer(
   container: HTMLElement,
@@ -64,12 +66,22 @@ export function createFlyerSceneRenderer(
   let preset: CameraPreset = "free";
   let manual = false;
   let command = NEUTRAL;
+  // Telemetry text panel (the honest raw numbers; T toggles, kept ON
+  // by default — the dials never replace the telemetry, they front it).
   const hud = document.createElement("div");
+  hud.id = "wf-telemetry";
   hud.style.cssText =
-    "position:fixed;left:12px;bottom:12px;font:12px/1.5 monospace;color:#f5efe0;" +
-    "background:rgba(20,24,30,.55);padding:8px 10px;border-radius:6px;white-space:pre";
+    "position:fixed;right:12px;bottom:12px;font:11px/1.5 monospace;color:#f5efe0;" +
+    "background:rgba(20,24,30,.55);padding:8px 10px;border-radius:6px;white-space:pre;z-index:5";
   container.appendChild(hud);
+  // Game HUD: analog dial panel + phase banner (tested math in gauges.ts).
+  const dials = createHudDials(container);
+  const phaseEl = createPhaseBanner(container);
   const onKey = (e: KeyboardEvent, isDown: boolean): void => {
+    if (isDown && e.code === "KeyT") {
+      hud.style.display = hud.style.display === "none" ? "block" : "none";
+      return;
+    }
     if (isDown && PRESET_KEYS[e.code]) {
       preset = PRESET_KEYS[e.code]!;
       return;
@@ -152,6 +164,19 @@ export function createFlyerSceneRenderer(
         if (banner !== null) {
           lines.push(banner);
         }
+        // Analog panel + phase card (dials are fronting, not replacing,
+        // the telemetry lines above).
+        dials.update({
+          airspeedMps: hudIn.airspeedMps,
+          engineRpm: hudIn.engineRpm,
+          elapsedS: hudIn.elapsedS,
+          hM: snap.hM,
+          thetaRad: snap.thetaRad,
+          dcRad: snap.dcRad,
+          warpRad: snap.warpRad,
+        });
+        const disp = phaseDisplay(snap.phase, banner);
+        phaseEl.set(disp.text, disp.tone);
         // Labeled ride-along captions (latest two).
         if (snap.tick > lastCaptionTick) {
           lastCaptionTick = snap.tick;
@@ -192,6 +217,17 @@ export function createFlyerSceneRenderer(
         camera: manual ? `${preset} (manual)` : preset,
         pose,
       }).join("\n");
+      // Attract-mode dials: scripted demo numbers where they exist,
+      // rest position elsewhere (no fabricated altitude/pitch).
+      dials.update({
+        ...IDLE_INPUTS,
+        airspeedMps: 10.73,
+        elapsedS,
+        engineRpm: Math.min(1025, elapsedS * 180),
+        dcRad: pose.canardRad,
+        warpRad: pose.warpTipRad,
+      });
+      phaseEl.set(null, "info");
       if (pose.clamped) {
         console.warn(JSON.stringify({ suite: "wf-scene", event: "control-stop", t: elapsedS }));
       }
@@ -215,6 +251,8 @@ export function createFlyerSceneRenderer(
       window.removeEventListener("keydown", keydown);
       window.removeEventListener("keyup", keyup);
       container.removeChild(hud);
+      dials.dispose();
+      phaseEl.dispose();
       renderer.dispose();
       container.removeChild(renderer.domElement);
     },
