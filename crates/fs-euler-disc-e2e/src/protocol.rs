@@ -775,8 +775,9 @@ pub enum DeclaredEvidenceAccessClass {
 }
 
 impl DeclaredEvidenceAccessClass {
+    // Stable machine code for retained logs. Plain comment: attached
+    // rustdoc on dependency fragments is refused by the identity gate.
     #[must_use]
-    /// Stable machine code for retained logs.
     pub const fn code(self) -> &'static str {
         match self {
             Self::NotApplicable => "not-applicable",
@@ -801,8 +802,9 @@ pub enum ReportedScientificDisposition {
 }
 
 impl ReportedScientificDisposition {
+    // Stable machine code for retained logs. Plain comment: attached
+    // rustdoc on dependency fragments is refused by the identity gate.
     #[must_use]
-    /// Stable machine code for retained logs.
     pub const fn code(self) -> &'static str {
         match self {
             Self::Positive => "positive",
@@ -830,8 +832,9 @@ pub enum AssessmentDisposition {
 }
 
 impl AssessmentDisposition {
+    // Stable machine code for retained logs. Plain comment: attached
+    // rustdoc on dependency fragments is refused by the identity gate.
     #[must_use]
-    /// Stable machine code for retained logs.
     pub const fn code(self) -> &'static str {
         match self {
             Self::ReferenceCompleteCandidate => "reference-complete-candidate-unreadmitted",

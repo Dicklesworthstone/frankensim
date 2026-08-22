@@ -3172,7 +3172,7 @@ fn rust_preceding_textual_macro_generator_paths(
                     )
                     .is_ok()
                         && rust_macro_transcriber_primitive_type_names(fragment)
-                            .is_ok_and(|(_, binds_idents)| !binds_idents)
+                            .is_ok_and(|(_, binds_idents, _)| !binds_idents)
                 });
         if !provably_inert {
             hazards.insert(format!(
@@ -3190,6 +3190,26 @@ fn rust_preceding_textual_macro_generator_paths(
     hazards
 }
 
+/// Nearest preceding token at the scanner's own depth: deeper groups are
+/// skipped wholesale because their interiors were never part of the item
+/// stream under analysis.
+fn transcriber_stream_previous_token<'a>(
+    tokens: &[RustAuthorityToken<'a>],
+    delimiter_depth: &[usize],
+    range_start: usize,
+    position: usize,
+    range_depth: usize,
+) -> Option<&'a str> {
+    let mut cursor = position;
+    while cursor > range_start {
+        cursor -= 1;
+        if delimiter_depth[cursor] == range_depth {
+            return Some(tokens[cursor].text);
+        }
+    }
+    None
+}
+
 /// Over-approximate primitive-named nominal items emitted by one exact local
 /// `macro_rules!` definition while ignoring matcher-only tokens.
 ///
@@ -3202,7 +3222,7 @@ fn rust_preceding_textual_macro_generator_paths(
 #[allow(clippy::too_many_lines)] // Matcher exclusion and every fail-closed transcriber case form one audit boundary.
 fn rust_macro_transcriber_primitive_type_names(
     fragment: &str,
-) -> Result<(BTreeSet<String>, bool), ()> {
+) -> Result<(BTreeSet<String>, bool, bool), ()> {
     let tokens = rust_authority_tokens(fragment).map_err(|_| ())?;
     let (pairs, delimiter_depth) = rust_authority_delimiters(&tokens).map_err(|_| ())?;
     let definition = tokens
@@ -3230,6 +3250,7 @@ fn rust_macro_transcriber_primitive_type_names(
     let mut cursor = definition_open + 1;
     let mut primitive_names = BTreeSet::new();
     let mut binds_invocation_type_idents = false;
+    let mut binds_meta_attributes = false;
     let mut arm_count = 0usize;
     while cursor < definition_close {
         while cursor < definition_close
@@ -3299,83 +3320,188 @@ fn rust_macro_transcriber_primitive_type_names(
         }
 
         let output_depth = delimiter_depth[transcriber_open] + 1;
-        for position in transcriber_open + 1..transcriber_close {
-            if delimiter_depth[position] != output_depth {
-                continue;
-            }
-            let token = tokens[position].text;
-            if matches!(token, "#" | "use" | "extern") {
-                return Err(());
-            }
-            if rust_macro_identifier_tail(token)
-                && tokens
-                    .get(position + 1)
-                    .is_some_and(|next| next.text == "!")
-            {
-                return Err(());
-            }
-            if matches!(token, "struct" | "enum" | "union" | "trait" | "type") {
-                let Some(name) = tokens.get(position + 1).map(|token| token.text) else {
+        // Item-stream scanner. Regions that cannot introduce module-scope
+        // nominal names (attribute groups and every brace/bracket/paren
+        // group: field lists, argument lists, nested blocks, fn/impl/mod
+        // bodies) are skipped wholesale; only the residual item stream is
+        // analyzed. This keeps every nominal-item hazard while no longer
+        // poisoning primitives for benign constructs such as attribute
+        // repetitions or expression-position nested macros inside impls.
+        let mut scan_stack = Vec::<(usize, usize, usize)>::new();
+        scan_stack.push((transcriber_open + 1, transcriber_close, output_depth));
+        while let Some((range_start, range_end, range_depth)) = scan_stack.pop() {
+            let mut position = range_start;
+            while position < range_end {
+                if delimiter_depth[position] != range_depth {
+                    position += 1;
+                    continue;
+                }
+                let token = tokens[position].text;
+                if token == "#" {
+                    // Attributes are only inert when their path is a
+                    // literal from a closed non-generating set (doc/cfg/
+                    // derive/lints never emit nominal items). Any other
+                    // literal path could be a proc-macro attribute that
+                    // generates arbitrary items, and a capture path is only
+                    // safe when it binds a `meta` matcher whose invocation
+                    // arguments the caller audits.
+                    match tokens.get(position + 1).map(|token| token.text) {
+                        Some("[") => {
+                            let open = position + 1;
+                            let close = pairs.get(open).copied().flatten().ok_or(())?;
+                            let first = tokens.get(open + 1).map(|token| token.text);
+                            let inert = match first {
+                                Some(
+                                    "allow"
+                                    | "automatically_derived"
+                                    | "cfg"
+                                    | "cfg_attr"
+                                    | "cold"
+                                    | "deny"
+                                    | "derive"
+                                    | "deprecated"
+                                    | "doc"
+                                    | "forbid"
+                                    | "inline"
+                                    | "must_use"
+                                    | "no_mangle"
+                                    | "non_exhaustive"
+                                    | "repr"
+                                    | "track_caller"
+                                    | "warn",
+                                ) => true,
+                                Some("$") => {
+                                    let meta_capture = tokens
+                                        .get(open + 2)
+                                        .map(|token| token.text)
+                                        .and_then(|name| matcher_kinds.get(name))
+                                        .is_some_and(|kind| kind == "meta");
+                                    if meta_capture {
+                                        binds_meta_attributes = true;
+                                    }
+                                    meta_capture
+                                }
+                                _ => false,
+                            };
+                            if !inert {
+                                return Err(());
+                            }
+                            position = close + 1;
+                        }
+                        _ => return Err(()),
+                    }
+                    continue;
+                }
+                if matches!(token, "use" | "extern") {
+                    // A use item can bind a primitive spelling through an
+                    // imported alias even inside generated code.
                     return Err(());
-                };
-                if name == "$" {
-                    // A metavariable-named type item is bounded by the
-                    // ACTUAL invocation arguments when the capture is an
-                    // `ident`: the caller resolves those arguments per
-                    // invocation. Any other capture kind stays unbounded.
-                    let ident_capture = tokens
-                        .get(position + 2)
-                        .map(|capture| capture.text)
-                        .is_some_and(|capture| {
-                            matcher_kinds
-                                .get(capture)
-                                .is_some_and(|kind| kind == "ident")
-                        });
-                    if !ident_capture {
+                }
+                if matches!(token, "struct" | "enum" | "union" | "trait" | "type") {
+                    let Some(name) = tokens.get(position + 1).map(|token| token.text) else {
+                        return Err(());
+                    };
+                    if name == "$" {
+                        // A metavariable-named type item is bounded by the
+                        // ACTUAL invocation arguments when the capture is an
+                        // `ident`: the caller resolves those arguments per
+                        // invocation. Any other capture kind stays unbounded.
+                        let ident_capture = tokens
+                            .get(position + 2)
+                            .map(|capture| capture.text)
+                            .is_some_and(|capture| {
+                                matcher_kinds
+                                    .get(capture)
+                                    .is_some_and(|kind| kind == "ident")
+                            });
+                        if !ident_capture {
+                            return Err(());
+                        }
+                        binds_invocation_type_idents = true;
+                    } else if rust_primitive_type_name(name) {
+                        primitive_names.insert(name.to_string());
+                    }
+                    position += 2;
+                    continue;
+                }
+                if token == "$" {
+                    let Some(next) = tokens.get(position + 1).map(|token| token.text) else {
+                        return Err(());
+                    };
+                    if matches!(next, "(" | "[" | "{") {
+                        // A repetition splices at its own site; its body is
+                        // scanned recursively at the inner depth so hazards
+                        // such as `use` or item macros inside repetitions
+                        // stay refused.
+                        let Some(body_close) = pairs.get(position + 1).copied().flatten() else {
+                            return Err(());
+                        };
+                        scan_stack.push((position + 2, body_close, range_depth + 1));
+                        position = body_close + 1;
+                        continue;
+                    }
+                    if !canonical_symbol(next) {
                         return Err(());
                     }
-                    binds_invocation_type_idents = true;
-                } else if rust_primitive_type_name(name) {
-                    primitive_names.insert(name.to_string());
+                    if next == "crate" {
+                        position += 2;
+                        continue;
+                    }
+                    // A transcriber `$name` occurrence is a USE of a
+                    // matcher variable: its capture kind was declared once
+                    // in the matcher, never at the use site. Reference-only
+                    // captures expand to single tokens that cannot declare
+                    // a nominal name outside the declaration-keyword case
+                    // handled above. Any other kind is hazardous only where
+                    // it could constitute a whole nominal item; splices in
+                    // type/value reference positions expand to types and
+                    // expressions, which declare nothing.
+                    let Some(kind) = matcher_kinds.get(next) else {
+                        return Err(());
+                    };
+                    if !matches!(kind.as_str(), "ident" | "meta" | "lifetime" | "literal") {
+                        let previous = transcriber_stream_previous_token(
+                            &tokens,
+                            &delimiter_depth,
+                            range_start,
+                            position,
+                            range_depth,
+                        );
+                        let at_item_boundary =
+                            previous.is_none_or(|text| matches!(text, ";" | "{" | "}"));
+                        if at_item_boundary {
+                            return Err(());
+                        }
+                    }
+                    position += 2;
+                    continue;
                 }
-            }
-            if token != "$" {
-                continue;
-            }
-            let Some(name) = tokens
-                .get(position + 1)
-                .map(|token| token.text)
-                .filter(|name| canonical_symbol(name))
-            else {
-                return Err(());
-            };
-            let previous = position
-                .checked_sub(1)
-                .and_then(|position| tokens.get(position))
-                .map(|token| token.text);
-            let safe_ident_slot = matches!(
-                previous,
-                Some(
-                    "impl"
-                        | "fn"
-                        | "const"
-                        | "static"
-                        | "struct"
-                        | "enum"
-                        | "union"
-                        | "trait"
-                        | "type"
-                )
-            ) && matcher_kinds.get(name).is_some_and(|kind| kind == "ident");
-            if !safe_ident_slot {
-                return Err(());
+                if rust_macro_identifier_tail(token)
+                    && tokens
+                        .get(position + 1)
+                        .is_some_and(|next| next.text == "!")
+                {
+                    // Outside skipped groups every nested macro invocation
+                    // sits in the item stream, where its expansion could
+                    // declare arbitrary nominal items.
+                    return Err(());
+                }
+                if matches!(token, "(" | "[" | "{") {
+                    position = pairs.get(position).copied().flatten().ok_or(())? + 1;
+                    continue;
+                }
+                position += 1;
             }
         }
         arm_count += 1;
         cursor = transcriber_close + 1;
     }
     (arm_count != 0)
-        .then_some((primitive_names, binds_invocation_type_idents))
+        .then_some((
+            primitive_names,
+            binds_invocation_type_idents,
+            binds_meta_attributes,
+        ))
         .ok_or(())
 }
 
@@ -3428,6 +3554,148 @@ fn rust_invocation_primitive_ident_arguments(
     Some(names)
 }
 
+/// Every same-module invocation of `macro_path` must supply only inert
+/// literal-path attributes wherever the transcriber binds a `meta` capture
+/// into attribute position: a proc-macro attribute could generate arbitrary
+/// nominal items, including primitive-named ones. Returns false when any
+/// argument list cannot be delimited or any attribute path is not a known
+/// non-generating literal (fail closed).
+fn rust_invocation_meta_attributes_are_inert(
+    index: &RustSourceIndex<'_>,
+    module: &str,
+    macro_path: &str,
+) -> bool {
+    for invocation in &index.generated_item_macro_invocations {
+        if invocation.module != module || invocation.path != macro_path {
+            continue;
+        }
+        let Some(rest) = index.text.get(invocation.start..) else {
+            return false;
+        };
+        let Ok(tokens) = rust_authority_tokens(rest) else {
+            return false;
+        };
+        let Some(bang) = tokens.iter().position(|token| token.text == "!") else {
+            return false;
+        };
+        let open = bang + 1;
+        if !tokens
+            .get(open)
+            .is_some_and(|token| matches!(token.text, "(" | "[" | "{"))
+        {
+            return false;
+        }
+        let mut depth = 0usize;
+        let mut closed = false;
+        let mut position = open;
+        while position < tokens.len() {
+            match tokens[position].text {
+                "(" | "[" | "{" => depth += 1,
+                ")" | "]" | "}" => {
+                    depth = match depth.checked_sub(1) {
+                        Some(next) => next,
+                        None => return false,
+                    };
+                    if depth == 0 {
+                        closed = true;
+                        break;
+                    }
+                }
+                "#" => {
+                    let mut next = position + 1;
+                    if tokens.get(next).is_some_and(|token| token.text == "!") {
+                        // Inner attributes cannot appear in invocation args.
+                        return false;
+                    }
+                    let Some("[") = tokens.get(next).map(|token| token.text) else {
+                        return false;
+                    };
+                    next += 1;
+                    match tokens.get(next).map(|token| token.text) {
+                        Some(
+                            "allow"
+                            | "automatically_derived"
+                            | "cfg"
+                            | "cfg_attr"
+                            | "cold"
+                            | "deny"
+                            | "derive"
+                            | "deprecated"
+                            | "doc"
+                            | "forbid"
+                            | "inline"
+                            | "must_use"
+                            | "no_mangle"
+                            | "non_exhaustive"
+                            | "repr"
+                            | "track_caller"
+                            | "warn",
+                        ) => {}
+                        _ => return false,
+                    }
+                }
+                _ => {}
+            }
+            position += 1;
+        }
+        if !closed {
+            return false;
+        }
+    }
+    true
+}
+
+/// Whether any visible same-module item macro could generate a nominal item
+/// named `dep`. Macros that fail exact binding, linkage, or analysis keep
+/// the conservative refusal (true). Proven-clean macros contribute their
+/// literal declaration names plus every canonical token supplied by
+/// same-module invocations when they bind ident captures.
+fn rust_visible_generated_names_can_cover(
+    index: &RustSourceIndex<'_>,
+    module: &str,
+    dep: &str,
+) -> bool {
+    for macro_path in rust_visible_generated_item_macros(index, module) {
+        let Ok((fragment, _)) = exact_root_macro_rules_fragment_with_index(index, &macro_path)
+        else {
+            return true;
+        };
+        if validate_local_item_macro_linkage(index, module, &macro_path, fragment).is_err() {
+            return true;
+        }
+        let Ok((primitive_names, binds_invocation_type_idents, _)) =
+            rust_macro_transcriber_primitive_type_names(fragment)
+        else {
+            return true;
+        };
+        if primitive_names.contains(dep) {
+            return true;
+        }
+        if !binds_invocation_type_idents {
+            continue;
+        }
+        for invocation in &index.generated_item_macro_invocations {
+            if invocation.module != module || invocation.path != macro_path {
+                continue;
+            }
+            let Some(text) = index.text.get(invocation.start..) else {
+                return true;
+            };
+            let Ok(tokens) = rust_authority_tokens(text) else {
+                return true;
+            };
+            let Some(bang) = tokens.iter().position(|token| token.text == "!") else {
+                return true;
+            };
+            for token in tokens.iter().skip(bang + 1) {
+                if token.text == dep && canonical_symbol(token.text) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
 fn rust_macro_matcher_token_indexes(fragment: &str) -> Result<BTreeSet<usize>, String> {
     let tokens = rust_authority_tokens(fragment)?;
     let (pairs, delimiter_depth) = rust_authority_delimiters(&tokens)?;
@@ -3859,13 +4127,18 @@ fn rust_visible_generated_primitive_type_names(
             continue;
         }
         match rust_macro_transcriber_primitive_type_names(fragment) {
-            Ok((names, binds_invocation_type_idents)) => {
+            Ok((names, binds_invocation_type_idents, binds_meta_attributes)) => {
                 shadowed.extend(names);
                 if binds_invocation_type_idents {
                     match rust_invocation_primitive_ident_arguments(index, module, &macro_path) {
                         Some(bound) => shadowed.extend(bound),
                         None => shadowed.extend(all_primitives()),
                     }
+                }
+                if binds_meta_attributes
+                    && !rust_invocation_meta_attributes_are_inert(index, module, &macro_path)
+                {
+                    shadowed.extend(all_primitives());
                 }
             }
             Err(()) => shadowed.extend(all_primitives()),
@@ -9779,6 +10052,7 @@ fn reject_imported_function_dependencies(
         }
         if !generated_item_macros.is_empty()
             && matches!(namespace, RustNameNamespace::Type)
+            && rust_visible_generated_names_can_cover(index, module, token.text)
             && !candidates.iter().any(|candidate| {
                 rust_candidate_is_direct_source_item(index, candidate, RustNameNamespace::Type)
             })
@@ -14786,7 +15060,15 @@ fn discover_identity_candidates(
             } else if file_type.is_dir() {
                 if matches!(
                     entry.file_name().to_str(),
-                    Some(".git" | ".beads" | ".bv" | ".doctor" | ".wrangler" | "target")
+                    Some(
+                        ".git"
+                            | ".beads"
+                            | ".bv"
+                            | ".doctor"
+                            | ".wrangler"
+                            | "target"
+                            | "node_modules"
+                    )
                 ) {
                     continue;
                 }
@@ -20297,19 +20579,92 @@ mod right { pub const DUPLICATE: u32 = 2; }
         .expect_err("an invoked primitive name is a genuine shadow");
         assert!(error.contains("shadowable primitive spelling"), "{error}");
 
-        // FALSIFIER 2: a non-ident capture in type position stays
-        // unbounded and poisons every primitive.
-        let unbounded = concat!(
+        // FALSIFIER 2 (refined for m3h2e): a non-reference capture spliced
+        // at a true item boundary constitutes a whole item from the
+        // invocation and poisons every primitive. The former blanket rule
+        // (poison on ANY non-reference capture) was unsound-conservative:
+        // a `$ty` splice in a type-value position such as
+        // `pub type Alias = $name;` cannot declare a nominal name, so it is
+        // now proven safe instead.
+        let item_splice = concat!(
+            "#![allow(non_camel_case_types)] ",
+            "macro_rules! mk { ($item:item) => { $item } } ",
+            "mk!(struct u64); ",
+            "pub fn semantic_tag(left: u64, right: u64) -> bool { left == right }\n",
+        );
+        let error = normalized_rust_schema_authority_with_index(
+            item_splice,
+            &RustSourceIndex::new(item_splice),
+            "semantic_tag",
+        )
+        .expect_err("an item capture at an item boundary can carry a primitive-named type");
+        assert!(error.contains("shadowable primitive spelling"), "{error}");
+
+        let ty_alias_reference = concat!(
             "macro_rules! mk { ($name:ty) => { pub type Alias = $name; } }\n",
             "mk!(u32);\n",
             "pub fn semantic_tag(bytes: &[u8]) -> usize { bytes.len() }\n",
         );
-        let error = normalized_rust_schema_authority_with_index(
-            unbounded,
-            &RustSourceIndex::new(unbounded),
+        normalized_rust_schema_authority_with_index(
+            ty_alias_reference,
+            &RustSourceIndex::new(ty_alias_reference),
             "semantic_tag",
         )
-        .expect_err("a non-ident type capture stays conservatively unbounded");
+        .expect("a type splice in type-value position declares no nominal name");
+    }
+
+    #[test]
+    fn meta_capture_attributes_stay_audited_at_each_invocation() {
+        // A transcriber that splices a `meta` capture into attribute
+        // position stays safe while every same-module invocation supplies
+        // only inert literal-path attributes, and poisons every primitive
+        // the moment any invocation supplies an unknown path that could be
+        // a proc-macro attribute generating arbitrary items.
+        let inert = concat!(
+            "macro_rules! wrap { ($(#[$meta:meta])* $name:ident) => { ",
+            "$( #[$meta] )* pub struct $name; } }\n",
+            "wrap!(\n",
+            "    /// docs\n",
+            "    Marker);\n",
+            "pub fn semantic_tag(bytes: &[u8]) -> usize { bytes.len() }\n",
+        );
+        normalized_rust_schema_authority_with_index(
+            inert,
+            &RustSourceIndex::new(inert),
+            "semantic_tag",
+        )
+        .expect("doc attributes through a meta capture generate nothing");
+
+        let hostile = concat!(
+            "#![allow(non_camel_case_types)] ",
+            "macro_rules! wrap { ($(#[$meta:meta])* $name:ident) => { ",
+            "#[$meta] pub struct $name; } } ",
+            "wrap!(#[make_u64] Marker); ",
+            "pub fn semantic_tag(left: u64, right: u64) -> bool { left == right }\n",
+        );
+        let error = normalized_rust_schema_authority_with_index(
+            hostile,
+            &RustSourceIndex::new(hostile),
+            "semantic_tag",
+        )
+        .expect_err("an unknown attribute path through a meta capture is a proc-macro hazard");
+        assert!(error.contains("shadowable primitive spelling"), "{error}");
+
+        // Item-position nested macros inside repetition bodies stay
+        // refused: the repetition splices them straight into the item
+        // stream where their expansion could declare nominal items.
+        let repetition = concat!(
+            "#![allow(non_camel_case_types)] ",
+            "macro_rules! gen { ($($n:ident)*) => { $( inject_one!(); )* }; } ",
+            "gen!(A B); ",
+            "pub fn semantic_tag(left: u64, right: u64) -> bool { left == right }\n",
+        );
+        let error = normalized_rust_schema_authority_with_index(
+            repetition,
+            &RustSourceIndex::new(repetition),
+            "semantic_tag",
+        )
+        .expect_err("a nested macro inside a repetition body stays item-position hazardous");
         assert!(error.contains("shadowable primitive spelling"), "{error}");
     }
 

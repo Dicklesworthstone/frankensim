@@ -572,7 +572,6 @@ fn classify_claim_identity_fields(claim: &Claim) {
     );
 }
 
-#[allow(clippy::items_after_statements)]
 impl Claim {
     fn sealed(
         id: impl Into<String>,
@@ -816,6 +815,7 @@ impl Claim {
     }
 
     fn declared_source_certificate_subject_hash_with_domain(&self, domain: &str) -> ContentHash {
+        use core::fmt::Write as _;
         let mut subject = self.clone();
         let semantic_identity = subject
             .semantic_witness
@@ -844,7 +844,6 @@ impl Claim {
             Some((family, schema_version)) => {
                 canonical.push_str("portable-semantic-identity|");
                 push_atom(&mut canonical, &family);
-                use core::fmt::Write as _;
                 let _ = write!(canonical, "{schema_version}|");
             }
             None => canonical.push_str("no-portable-semantic-identity|"),
