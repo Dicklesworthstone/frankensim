@@ -2987,95 +2987,14 @@ impl DelegatedMemoryLease<'_> {
         site: &'static str,
         bytes: u64,
     ) -> Result<DelegatedLeaseCharge<'lease>, DelegatedLeaseRefusal> {
-        let mut state = self.root.lock_state();
-        let sequence = next_sequence(&mut state);
-        let root_identity = state
-            .root_identity
-            .expect("delegated roots have typed identities");
-        let root_id = state.root_id.expect("delegated roots are configured");
-        let index = state
-            .delegations
-            .iter()
-            .position(|record| record.identity == self.identity)
-            .expect("delegated record retained for root lifetime");
-        let record = &state.delegations[index];
-        let used = record.used_bytes;
-        let reason = if state.sealed {
-            Some(DelegatedReservationRefusalReason::RootSealed)
-        } else if record.disposition == DelegationDisposition::Returned {
-            Some(DelegatedReservationRefusalReason::ChildReturned)
-        } else if state.counter_overflowed
-            || record
-                .allocation_granted_bytes
-                .checked_add(u128::from(bytes))
-                .is_none()
-            || state
-                .child_granted_bytes
-                .checked_add(u128::from(bytes))
-                .is_none()
-        {
-            Some(DelegatedReservationRefusalReason::CounterOverflow)
-        } else if used
-            .checked_add(bytes)
-            .is_none_or(|next| next > record.capacity_bytes)
-        {
-            Some(DelegatedReservationRefusalReason::Capacity)
-        } else {
-            None
-        };
-        if let Some(reason) = reason {
-            if reason == DelegatedReservationRefusalReason::CounterOverflow {
-                state.counter_overflowed = true;
-            }
-            let next_refused_requests = state.delegations[index].refused_requests.checked_add(1);
-            let next_refused_bytes = state.delegations[index]
-                .refused_bytes
-                .checked_add(u128::from(bytes));
-            if let (Some(requests), Some(refused_bytes)) =
-                (next_refused_requests, next_refused_bytes)
-            {
-                let record = &mut state.delegations[index];
-                record.refused_requests = requests;
-                record.refused_bytes = refused_bytes;
-            } else {
-                state.counter_overflowed = true;
-            }
-            record_semantic_refusal(
-                &mut state,
-                reason_code_delegated_reservation(reason),
-                Some(self.identity),
-                site,
-                Some(bytes),
-                used,
-                self.capacity_bytes,
-                sequence,
-            );
-            return Err(DelegatedLeaseRefusal {
-                root_identity,
-                identity: self.identity,
-                root_id,
-                logical_path: self.logical_path,
-                site,
-                requested_bytes: bytes,
-                used_bytes: used,
-                limit_bytes: self.capacity_bytes,
-                reason,
-                sequence,
-            });
-        }
-        state.child_granted_bytes += u128::from(bytes);
-        let record = &mut state.delegations[index];
-        record.used_bytes += bytes;
-        record.peak_used_bytes = record.peak_used_bytes.max(record.used_bytes);
-        record.allocation_granted_bytes += u128::from(bytes);
-        drop(state);
-        Ok(DelegatedLeaseCharge {
-            root: self.root.clone(),
-            identity: self.identity,
+        reserve_delegated_charge(
+            &self.root,
+            self.identity,
+            self.capacity_bytes,
+            self.logical_path,
+            site,
             bytes,
-            active: true,
-            _owner: PhantomData,
-        })
+        )
     }
 
     /// Transfer capacity to a deterministic full descendant path.
@@ -3841,6 +3760,108 @@ fn close_published_transfer(
     Ok(receipt)
 }
 
+/// One serialized delegated-reservation admission, shared by the owner
+/// method and typed restaging after a rollback. Keeping the refusal table,
+/// refusal bookkeeping, and grant counters under one lock here means the
+/// owner method and the typed layer cannot drift.
+#[allow(clippy::result_large_err)]
+fn reserve_delegated_charge<'owner>(
+    root: &OperationMemoryLease,
+    identity: LeaseIdentity,
+    capacity_bytes: u64,
+    logical_path: &'static str,
+    site: &'static str,
+    bytes: u64,
+) -> Result<DelegatedLeaseCharge<'owner>, DelegatedLeaseRefusal> {
+    let mut state = root.lock_state();
+    let sequence = next_sequence(&mut state);
+    let root_identity = state
+        .root_identity
+        .expect("delegated roots have typed identities");
+    let root_id = state.root_id.expect("delegated roots are configured");
+    let index = state
+        .delegations
+        .iter()
+        .position(|record| record.identity == identity)
+        .expect("delegated record retained for root lifetime");
+    let record = &state.delegations[index];
+    let used = record.used_bytes;
+    let reason = if state.sealed {
+        Some(DelegatedReservationRefusalReason::RootSealed)
+    } else if record.disposition == DelegationDisposition::Returned {
+        Some(DelegatedReservationRefusalReason::ChildReturned)
+    } else if state.counter_overflowed
+        || record
+            .allocation_granted_bytes
+            .checked_add(u128::from(bytes))
+            .is_none()
+        || state
+            .child_granted_bytes
+            .checked_add(u128::from(bytes))
+            .is_none()
+    {
+        Some(DelegatedReservationRefusalReason::CounterOverflow)
+    } else if used
+        .checked_add(bytes)
+        .is_none_or(|next| next > capacity_bytes)
+    {
+        Some(DelegatedReservationRefusalReason::Capacity)
+    } else {
+        None
+    };
+    if let Some(reason) = reason {
+        if reason == DelegatedReservationRefusalReason::CounterOverflow {
+            state.counter_overflowed = true;
+        }
+        let next_refused_requests = state.delegations[index].refused_requests.checked_add(1);
+        let next_refused_bytes = state.delegations[index]
+            .refused_bytes
+            .checked_add(u128::from(bytes));
+        if let (Some(requests), Some(refused_bytes)) = (next_refused_requests, next_refused_bytes) {
+            let record = &mut state.delegations[index];
+            record.refused_requests = requests;
+            record.refused_bytes = refused_bytes;
+        } else {
+            state.counter_overflowed = true;
+        }
+        record_semantic_refusal(
+            &mut state,
+            reason_code_delegated_reservation(reason),
+            Some(identity),
+            site,
+            Some(bytes),
+            used,
+            capacity_bytes,
+            sequence,
+        );
+        return Err(DelegatedLeaseRefusal {
+            root_identity,
+            identity,
+            root_id,
+            logical_path,
+            site,
+            requested_bytes: bytes,
+            used_bytes: used,
+            limit_bytes: capacity_bytes,
+            reason,
+            sequence,
+        });
+    }
+    state.child_granted_bytes += u128::from(bytes);
+    let record = &mut state.delegations[index];
+    record.used_bytes += bytes;
+    record.peak_used_bytes = record.peak_used_bytes.max(record.used_bytes);
+    record.allocation_granted_bytes += u128::from(bytes);
+    drop(state);
+    Ok(DelegatedLeaseCharge {
+        root: root.clone(),
+        identity,
+        bytes,
+        active: true,
+        _owner: PhantomData,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn record_published_transfer_refusal(
     state: &mut LeaseState,
@@ -4434,6 +4455,581 @@ fn reason_code_root_reservation(reason: LeaseRefusalReason) -> &'static str {
         LeaseRefusalReason::Capacity => "capacity",
         LeaseRefusalReason::Sealed => "sealed",
         LeaseRefusalReason::CounterOverflow => "counter_overflow",
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Typed two-phase publication guard (bead 6ys.21.1.3.2)
+//
+// The byte-level transfer surface above proves the ledger transitions; this
+// layer binds exactly one live `T` to the same authority so a committed value
+// can never escape beside raw bytes. Refusals hand staging and value back
+// UNCHANGED by calling the module-free transition functions directly instead
+// of the consuming byte-level wrappers, whose error paths release staging.
+
+/// Charged authority bytes for one `T`.
+///
+/// A zero-sized value still occupies one counted authority byte: every
+/// publication remains a counted authority even when the payload occupies
+/// none, and the ledger's zero-byte preparation refusal stays intact.
+#[must_use]
+pub fn authority_bytes_for<T>() -> u64 {
+    size_of::<T>().max(1) as u64
+}
+
+/// Allocator-originated staging for exactly one live `T`.
+///
+/// Constructed only through [`DelegatedMemoryLease::allocate`]; the charged
+/// staging envelope is exactly [`authority_bytes_for::<T>`] declared as pure
+/// payload. Dropping the allocation releases the charge and destroys the
+/// value normally; preparing consumes it into an affine two-phase handle.
+pub struct LeasedAllocation<'owner, T> {
+    inner: Option<StagedAllocation<'owner, T>>,
+}
+
+struct StagedAllocation<'owner, T> {
+    charge: DelegatedLeaseCharge<'owner>,
+    capacity_bytes: u64,
+    logical_path: &'static str,
+    value: T,
+}
+
+impl<T: fmt::Debug> fmt::Debug for LeasedAllocation<'_, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.inner.as_ref() {
+            Some(staged) => f
+                .debug_struct("LeasedAllocation")
+                .field("bytes", &staged.charge.bytes)
+                .field("value", &staged.value)
+                .finish_non_exhaustive(),
+            None => f.debug_struct("LeasedAllocation").finish_non_exhaustive(),
+        }
+    }
+}
+
+impl<'owner> DelegatedMemoryLease<'owner> {
+    /// Reserve exact staging authority for and bind one live `T`.
+    ///
+    /// The charged envelope is [`authority_bytes_for::<T>`] as pure payload;
+    /// a zero-sized value charges one counted authority byte. On reservation
+    /// refusal the candidate value is dropped — reserve capacity first when
+    /// losing the value would matter.
+    ///
+    /// # Errors
+    ///
+    /// Returns the ordinary delegated-reservation refusal unchanged.
+    #[allow(clippy::result_large_err)]
+    pub fn allocate<T>(
+        &'owner self,
+        site: &'static str,
+        value: T,
+    ) -> Result<LeasedAllocation<'owner, T>, DelegatedLeaseRefusal> {
+        let charge = self.reserve(site, authority_bytes_for::<T>())?;
+        Ok(LeasedAllocation {
+            inner: Some(StagedAllocation {
+                charge,
+                capacity_bytes: self.capacity_bytes,
+                logical_path: self.logical_path,
+                value,
+            }),
+        })
+    }
+}
+
+impl<'owner, T> LeasedAllocation<'owner, T> {
+    /// Exact charged staging bytes.
+    #[must_use]
+    pub fn bytes(&self) -> u64 {
+        self.inner.as_ref().map_or(0, |staged| staged.charge.bytes)
+    }
+
+    /// Consume staging ownership and admit one prepared publication of the
+    /// bound value under one exact binding tuple.
+    ///
+    /// Attempt generations are caller discipline: after a non-mutating
+    /// rollback the same value and staging may be re-prepared under a fresh
+    /// binding (typically a regenerated occurrence identity); the ledger's
+    /// duplicate-binding refusal rejects reused tuples deterministically.
+    ///
+    /// # Errors
+    ///
+    /// Every preparation refusal returns the allocation UNCHANGED — staging
+    /// charge still active, value untouched — inside the rejection, so a
+    /// corrected retry loses nothing.
+    #[allow(clippy::result_large_err)]
+    pub fn prepare(
+        mut self,
+        binding: PublishedTransferBinding,
+    ) -> Result<TypedPreparedPublication<'owner, T>, TypedPrepareRejection<'owner, T>> {
+        let mut staged = self
+            .inner
+            .take()
+            .expect("affine staging consumed at most once");
+        let bytes = staged.charge.bytes;
+        let envelope = PublishedTransferEnvelope::payload_only(bytes);
+        let prepared_sequence = match prepare_published_transfer(
+            &staged.charge.root,
+            staged.charge.identity,
+            bytes,
+            binding,
+            envelope,
+        ) {
+            Ok(prepared_sequence) => prepared_sequence,
+            Err(refusal) => {
+                return Err(TypedPrepareRejection {
+                    allocation: Self {
+                        inner: Some(staged),
+                    },
+                    refusal,
+                });
+            }
+        };
+        // The prepared record owns the staging disposition now; the charge
+        // must not release its bytes on drop.
+        staged.charge.active = false;
+        Ok(TypedPreparedPublication {
+            root: staged.charge.root.clone(),
+            child_identity: staged.charge.identity,
+            binding,
+            envelope,
+            bytes,
+            child_capacity: staged.capacity_bytes,
+            child_path: staged.logical_path,
+            prepared_sequence,
+            resolved: false,
+            value: Some(staged.value),
+            _owner: PhantomData,
+        })
+    }
+}
+/// Affine prepared publication that carries the staged value itself.
+///
+/// Must resolve as exactly one successful commit or one rollback; dropping
+/// without resolution performs the fail-closed implicit rollback (with the
+/// same invariant-violation accounting as the byte-level surface) and
+/// destroys the value.
+#[must_use = "prepared output must commit or roll back"]
+pub struct TypedPreparedPublication<'owner, T> {
+    root: OperationMemoryLease,
+    child_identity: LeaseIdentity,
+    binding: PublishedTransferBinding,
+    envelope: PublishedTransferEnvelope,
+    bytes: u64,
+    child_capacity: u64,
+    child_path: &'static str,
+    prepared_sequence: u128,
+    resolved: bool,
+    value: Option<T>,
+    _owner: PhantomData<&'owner ()>,
+}
+
+impl<T> fmt::Debug for TypedPreparedPublication<'_, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TypedPreparedPublication")
+            .field("child_identity", &self.child_identity)
+            .field("binding", &self.binding)
+            .field("envelope", &self.envelope)
+            .field("bytes", &self.bytes)
+            .field("prepared_sequence", &self.prepared_sequence)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'owner, T> TypedPreparedPublication<'owner, T> {
+    /// Exact publication identity tuple.
+    #[must_use]
+    pub fn binding(&self) -> PublishedTransferBinding {
+        self.binding
+    }
+
+    /// Serialized preparation sequence.
+    #[must_use]
+    pub fn prepared_sequence(&self) -> u128 {
+        self.prepared_sequence
+    }
+
+    /// Commit exactly once: transfer staging authority to the destination
+    /// and bind the live value into the resulting published allocation.
+    ///
+    /// A publish already prepared before the seal cut may complete during
+    /// drain rather than admitting new work.
+    ///
+    /// # Errors
+    ///
+    /// Every refusal returns the prepared publication UNCHANGED — record
+    /// still prepared, value intact — inside the rejection, so commit may be
+    /// retried after diagnosing or replaced by rollback.
+    #[allow(clippy::result_large_err)]
+    pub fn commit(mut self) -> Result<PublishedAllocation<T>, TypedCommitRejection<'owner, T>> {
+        let value = self
+            .value
+            .take()
+            .expect("carried value lives until resolution");
+        match publish_prepared_transfer(
+            &self.root,
+            self.child_identity,
+            self.binding,
+            self.envelope,
+            self.bytes,
+            self.prepared_sequence,
+        ) {
+            Ok(receipt) => {
+                self.resolved = true;
+                Ok(PublishedAllocation {
+                    root: self.root.clone(),
+                    receipt,
+                    value: Some(value),
+                    destroyed: false,
+                    closed: false,
+                })
+            }
+            Err(refusal) => {
+                self.value = Some(value);
+                Err(TypedCommitRejection {
+                    prepared: self,
+                    refusal,
+                })
+            }
+        }
+    }
+
+    /// Roll back exactly once, then genuinely re-reserve the freed staging
+    /// so the returned allocation carries live authority again — never a
+    /// fabricated charge over bytes the ledger no longer counts.
+    ///
+    /// # Errors
+    ///
+    /// If the ledger refuses the rollback itself, the prepared publication
+    /// is returned UNCHANGED inside the rejection. If the rollback succeeded
+    /// but re-reservation was refused (for example a concurrent seal cut),
+    /// the untouched value and the verified rollback receipt are returned
+    /// instead; the staging authority is already back with the child pool.
+    #[allow(clippy::result_large_err)]
+    pub fn rollback(
+        mut self,
+    ) -> Result<TypedRollback<'owner, T>, TypedRollbackRejection<'owner, T>> {
+        let value = self
+            .value
+            .take()
+            .expect("carried value lives until resolution");
+        let receipt = match rollback_prepared_transfer(
+            &self.root,
+            self.child_identity,
+            self.binding,
+            self.envelope,
+            self.bytes,
+            self.prepared_sequence,
+            false,
+        ) {
+            Ok(receipt) => receipt,
+            Err(refusal) => {
+                self.value = Some(value);
+                return Err(TypedRollbackRejection::Prepared(self, refusal));
+            }
+        };
+        self.resolved = true;
+        let charge = match reserve_delegated_charge(
+            &self.root,
+            self.child_identity,
+            self.child_capacity,
+            self.child_path,
+            "restaged-output",
+            self.bytes,
+        ) {
+            Ok(charge) => charge,
+            Err(refusal) => {
+                return Err(TypedRollbackRejection::Released(value, receipt, refusal));
+            }
+        };
+        Ok(TypedRollback {
+            allocation: LeasedAllocation {
+                inner: Some(StagedAllocation {
+                    charge,
+                    capacity_bytes: self.child_capacity,
+                    logical_path: self.child_path,
+                    value,
+                }),
+            },
+            receipt,
+        })
+    }
+}
+
+impl<T> Drop for TypedPreparedPublication<'_, T> {
+    fn drop(&mut self) {
+        drop(self.value.take());
+        if !self.resolved {
+            let _ = rollback_prepared_transfer(
+                &self.root,
+                self.child_identity,
+                self.binding,
+                self.envelope,
+                self.bytes,
+                self.prepared_sequence,
+                true,
+            );
+            self.resolved = true;
+        }
+    }
+}
+
+/// Affine ownership of one successfully published value.
+///
+/// Supports shared observation and consuming authority-preserving handoff
+/// only: no raw parts, no mutable access, no growth, no detached value
+/// serialization, no clone. Close destroys the value first and only then
+/// records the destination close, so a destructor panic can never be
+/// promoted to a successful close.
+///
+/// ```compile_fail
+/// use fs_alloc::{LeaseIdentity, OperationMemoryLease, PublishedAllocation};
+///
+/// let forged = PublishedAllocation {
+///     root_identity_placeholder: (),
+/// };
+/// ```
+#[must_use = "published ownership must be explicitly closed or dropped"]
+pub struct PublishedAllocation<T> {
+    root: OperationMemoryLease,
+    receipt: PublishedTransferReceipt,
+    value: Option<T>,
+    /// Set only after value destruction completed WITHOUT panicking; a
+    /// destructor panic leaves it false so no close is ever recorded.
+    destroyed: bool,
+    closed: bool,
+}
+
+impl<T> fmt::Debug for PublishedAllocation<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PublishedAllocation")
+            .field("binding", &self.receipt.binding)
+            .field("bytes", &self.receipt.bytes)
+            .field("published_sequence", &self.receipt.published_sequence)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<T> PublishedAllocation<T> {
+    /// Shared observation of the published value.
+    ///
+    /// # Panics
+    ///
+    /// Never on a live guard: the value lives until close consumes it.
+    #[must_use]
+    pub fn observe(&self) -> &T {
+        self.value
+            .as_ref()
+            .expect("published value lives until close")
+    }
+
+    /// Verified successful publication receipt.
+    #[must_use]
+    pub fn receipt(&self) -> &PublishedTransferReceipt {
+        &self.receipt
+    }
+
+    /// Exact publication identity tuple.
+    #[must_use]
+    pub fn binding(&self) -> PublishedTransferBinding {
+        self.receipt.binding
+    }
+
+    /// Charged authority bytes (one counted byte for zero-sized values).
+    #[must_use]
+    pub fn bytes(&self) -> u64 {
+        self.receipt.bytes
+    }
+
+    /// Explicitly close exactly once: destroy the value first, then record
+    /// the destination close against the exact published record.
+    ///
+    /// If the value destructor panics, unwinding destroys this guard with
+    /// `destroyed` still false, so no close is recorded: the published record
+    /// stays open and root seal refuses — fail-closed no-liveness, never a
+    /// fabricated success.
+    ///
+    /// # Errors
+    ///
+    /// A refused close returns the guard with the value already destroyed
+    /// (close semantics are destroy-then-record); its eventual drop retries
+    /// the close implicitly.
+    #[allow(clippy::result_large_err)]
+    pub fn close(mut self) -> Result<PublishedTransferCloseReceipt, TypedCloseRejection<T>> {
+        let value = self.value.take();
+        if let Some(value) = value {
+            drop(value);
+        }
+        self.destroyed = true;
+        match close_published_transfer(&self.root, &self.receipt, false) {
+            Ok(receipt) => {
+                self.closed = true;
+                Ok(receipt)
+            }
+            Err(refusal) => Err(TypedCloseRejection {
+                published: self,
+                refusal,
+            }),
+        }
+    }
+}
+
+impl<T> Drop for PublishedAllocation<T> {
+    fn drop(&mut self) {
+        if let Some(value) = self.value.take() {
+            drop(value);
+            self.destroyed = true;
+        }
+        if !self.closed && self.destroyed {
+            let _ = close_published_transfer(&self.root, &self.receipt, true);
+            self.closed = true;
+        }
+        // A destructor panic mid-close leaves `destroyed == false`: recording
+        // any close here would fabricate success after incomplete value
+        // destruction. The published record stays open — fail-closed
+        // no-liveness, exactly like deliberate forget.
+    }
+}
+
+/// Preparation refusal carrying the allocation back unchanged.
+impl<'owner, T> fmt::Debug for TypedPrepareRejection<'owner, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TypedPrepareRejection")
+            .field("refusal", &self.refusal)
+            .finish_non_exhaustive()
+    }
+}
+
+pub struct TypedPrepareRejection<'owner, T> {
+    allocation: LeasedAllocation<'owner, T>,
+    refusal: PublishedTransferRefusal,
+}
+
+impl<'owner, T> TypedPrepareRejection<'owner, T> {
+    /// Structured ledger refusal.
+    #[must_use]
+    pub fn refusal(&self) -> &PublishedTransferRefusal {
+        &self.refusal
+    }
+
+    /// Recover the unchanged allocation for a corrected retry.
+    #[must_use]
+    pub fn into_allocation(self) -> LeasedAllocation<'owner, T> {
+        self.allocation
+    }
+}
+
+/// Commit refusal carrying the prepared publication back unchanged.
+impl<'owner, T> fmt::Debug for TypedCommitRejection<'owner, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TypedCommitRejection")
+            .field("refusal", &self.refusal)
+            .finish_non_exhaustive()
+    }
+}
+
+pub struct TypedCommitRejection<'owner, T> {
+    prepared: TypedPreparedPublication<'owner, T>,
+    refusal: PublishedTransferRefusal,
+}
+
+impl<'owner, T> TypedCommitRejection<'owner, T> {
+    /// Structured ledger refusal.
+    #[must_use]
+    pub fn refusal(&self) -> &PublishedTransferRefusal {
+        &self.refusal
+    }
+
+    /// Recover the unchanged prepared publication.
+    #[must_use]
+    pub fn into_prepared(self) -> TypedPreparedPublication<'owner, T> {
+        self.prepared
+    }
+}
+
+/// Rollback refusal, split by the phase that refused.
+pub enum TypedRollbackRejection<'owner, T> {
+    /// The ledger refused the rollback itself; the prepared publication is
+    /// returned unchanged — record still prepared, value intact.
+    Prepared(
+        TypedPreparedPublication<'owner, T>,
+        PublishedTransferRefusal,
+    ),
+    /// The rollback committed but re-reservation was refused (for example a
+    /// concurrent seal cut); the untouched value and the verified receipt
+    /// are returned, with the staging authority back in the child pool.
+    Released(T, PublishedTransferRollbackReceipt, DelegatedLeaseRefusal),
+}
+
+impl<'owner, T> fmt::Debug for TypedRollbackRejection<'owner, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Prepared(_, refusal) => f
+                .debug_struct("TypedRollbackRejection::Prepared")
+                .field("refusal", refusal)
+                .finish_non_exhaustive(),
+            Self::Released(_, _, refusal) => f
+                .debug_struct("TypedRollbackRejection::Released")
+                .field("refusal", refusal)
+                .finish_non_exhaustive(),
+        }
+    }
+}
+
+/// Successful non-mutating rollback: staging plus untouched value.
+impl<'owner, T> fmt::Debug for TypedRollback<'owner, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TypedRollback")
+            .field("receipt", &self.receipt)
+            .finish_non_exhaustive()
+    }
+}
+
+pub struct TypedRollback<'owner, T> {
+    allocation: LeasedAllocation<'owner, T>,
+    receipt: PublishedTransferRollbackReceipt,
+}
+
+impl<'owner, T> TypedRollback<'owner, T> {
+    /// Verified rollback receipt.
+    #[must_use]
+    pub fn receipt(&self) -> &PublishedTransferRollbackReceipt {
+        &self.receipt
+    }
+
+    /// Restaged allocation with the untouched value, ready to re-prepare
+    /// under a fresh attempt generation or to drop normally.
+    #[must_use]
+    pub fn into_allocation(self) -> LeasedAllocation<'owner, T> {
+        self.allocation
+    }
+}
+
+/// Close refusal carrying the guard whose value was already destroyed.
+impl<T> fmt::Debug for TypedCloseRejection<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TypedCloseRejection")
+            .field("refusal", &self.refusal)
+            .finish_non_exhaustive()
+    }
+}
+
+pub struct TypedCloseRejection<T> {
+    published: PublishedAllocation<T>,
+    refusal: PublishedTransferRefusal,
+}
+
+impl<T> TypedCloseRejection<T> {
+    /// Structured ledger refusal.
+    #[must_use]
+    pub fn refusal(&self) -> &PublishedTransferRefusal {
+        &self.refusal
+    }
+
+    /// Recover the guard; its value is destroyed and its eventual drop
+    /// retries the close implicitly.
+    #[must_use]
+    pub fn into_published(self) -> PublishedAllocation<T> {
+        self.published
     }
 }
 

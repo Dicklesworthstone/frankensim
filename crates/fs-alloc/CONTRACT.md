@@ -45,6 +45,23 @@ recorded, sharded object pools, and diffable allocation-site accounting
   `ShardedPoolStats::to_event_kind`, `HugepageDecision::to_json` — canonical
   JSON payloads riding `fs_obs::EventKind::Custom` toward the ledger.
 
+- `LeasedAllocation<'owner, T>` / `TypedPreparedPublication<'owner, T>` /
+  `PublishedAllocation<T>` (bead 6ys.21.1.3.2) — the allocator-originated
+  two-phase publication guard binding exactly one live `T` to delegated
+  authority. `DelegatedMemoryLease::allocate` charges
+  `authority_bytes_for::<T>()` (one counted authority byte for zero-sized
+  values) declared as pure payload. `prepare` consumes staging into an
+  affine prepared handle; every refusal hands staging and value back
+  UNCHANGED. Attempt generations are caller discipline via distinct
+  bindings; the ledger's duplicate-binding refusal rejects reused tuples.
+  `commit` produces `PublishedAllocation<T>` (shared observation and
+  consuming authority-preserving handoff only: no raw parts, no mutable
+  access, no clone); `rollback` genuinely re-reserves the freed staging so
+  the restaged allocation carries live authority. Close destroys the value
+  first and only then records the destination close; a destructor panic or
+  deliberate forget leaves the published record open forever (typed
+  fail-closed no-liveness) and can never be promoted to a successful close.
+
 ## Invariants
 1. Every allocation is aligned to `max(align_of::<T>(), 128)` and its byte
    range is disjoint from every other allocation's (G0 law, conformance
