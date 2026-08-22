@@ -161,7 +161,10 @@ function box(
 
 /* ------------------------- environment --------------------------- */
 
-/** Sky dome (BackSide sphere) — replaces the flat clear color. */
+/** Sky dome (BackSide sphere) — replaces the flat clear color. The
+ * caller lifts it to the SITE's base elevation: the horizon band sits
+ * on the dome's equator, and Huffman Prairie is ~250 m above the
+ * KDH sea-level datum (absolute-elevation grids). */
 export function buildSky(): THREE.Mesh {
   const geo = new THREE.SphereGeometry(2600, 32, 18);
   const mat = new THREE.MeshBasicMaterial({
@@ -175,8 +178,10 @@ export function buildSky(): THREE.Mesh {
   return sky;
 }
 
-/** Drifting cloud billboards (updated by animateDressing). */
-export function buildClouds(): THREE.Group {
+/** Drifting cloud billboards (updated by animateDressing). Heights
+ * are relative to the site's base elevation — at Huffman's ~250 m
+ * datum, absolute 190-350 m cloud bases would sit UNDERGROUND. */
+export function buildClouds(baseY: number): THREE.Group {
   const group = new THREE.Group();
   const rand = lcg(1908);
   for (let i = 0; i < 9; i += 1) {
@@ -191,7 +196,7 @@ export function buildClouds(): THREE.Group {
     const cloud = new THREE.Mesh(new THREE.PlaneGeometry(w, w * 0.42), mat);
     mat.side = THREE.DoubleSide;
     cloud.rotation.x = -Math.PI / 2 + 0.35; // near-horizontal, tipped at the camera
-    cloud.position.set(0, 190 + rand() * 160, -900 + rand() * 1800);
+    cloud.position.set(0, baseY + 190 + rand() * 160, -900 + rand() * 1800);
     cloud.userData["baseX"] = -900 + rand() * 1800;
     cloud.userData["driftMps"] = 1.5 + rand() * 2.2;
     group.add(cloud);
@@ -202,7 +207,11 @@ export function buildClouds(): THREE.Group {
 /** Sand skirt far beyond the surveyed tile so the horizon is never
  * void, plus (Kill Devil Hills only) the Atlantic to the EAST —
  * Huffman Prairie is landlocked Ohio pasture and gets NO ocean. */
-export function buildOuterGround(tileExtentM: number, withOcean: boolean): THREE.Group {
+export function buildOuterGround(
+  tileExtentM: number,
+  withOcean: boolean,
+  baseY: number,
+): THREE.Group {
   const group = new THREE.Group();
   const sand = sandTexture();
   sand.wrapS = THREE.RepeatWrapping;
@@ -213,7 +222,9 @@ export function buildOuterGround(tileExtentM: number, withOcean: boolean): THREE
     new THREE.MeshStandardMaterial({ map: sand, color: 0xcabb95, roughness: 1 }),
   );
   skirt.rotation.x = -Math.PI / 2;
-  skirt.position.y = -0.35; // tucked under the surveyed tile
+  // Tucked just under the tile's LOWEST elevation (grids store
+  // absolute heights: KDH ~0 m, Huffman ~242 m).
+  skirt.position.y = baseY - 0.35;
   group.add(skirt);
   if (!withOcean) {
     return group;
@@ -503,13 +514,16 @@ export function buildDressing(
   railLengthM: number,
   tileExtentM: number,
   withOcean: boolean,
+  baseY: number,
   groundY: (xRel: number, zRel: number) => number,
 ): Dressing {
   const group = new THREE.Group();
-  group.add(buildSky());
-  const clouds = buildClouds();
+  const sky = buildSky();
+  sky.position.y = baseY;
+  group.add(sky);
+  const clouds = buildClouds(baseY);
   group.add(clouds);
-  group.add(buildOuterGround(tileExtentM, withOcean));
+  group.add(buildOuterGround(tileExtentM, withOcean, baseY));
   const rail = buildRail(railLengthM);
   rail.position.set(launch[0], launch[1], launch[2]);
   group.add(rail);

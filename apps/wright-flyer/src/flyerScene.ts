@@ -78,11 +78,15 @@ export function createFlyerSceneRenderer(
   const grid = site === "huffman" ? huffmanGrid : kdhGrid;
   const tileExtent = (grid.grid_n - 1) * grid.spacing_m;
   const half = tileExtent / 2;
+  // Grids store ABSOLUTE elevations (KDH ~0 m, Huffman ~242 m); the
+  // dome, clouds, and sand skirt anchor to the tile's lowest point.
+  const baseY = Math.min(...grid.rows_south_to_north.flat());
   const dressing = buildDressing(
     launch,
     site === "huffman" ? 30.0 : 18.3,
     tileExtent,
     site !== "huffman", // the Atlantic is a Kill Devil Hills fact
+    baseY,
     (xRel, zRel) =>
       heightAt(grid, launch[0] + xRel + half, -(launch[2] + zRel) + half) - launch[1],
   );
