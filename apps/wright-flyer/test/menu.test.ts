@@ -15,6 +15,7 @@ import {
   menuQuery,
 } from "../src/menu.ts";
 import { keysFrom } from "../src/input.ts";
+import { journeyNextUrl, journeyStage, JOURNEY_STAGES } from "../src/journey.ts";
 
 function jlog(kase: string, payload: string): void {
   console.log(`{"suite":"wf-app-menu","case":"${kase}",${payload}}`);
@@ -91,4 +92,40 @@ test("key card mirrors input.ts bindings (the ONLY binding authority)", () => {
     assert.ok(joined.includes(word), `card mentions ${word}`);
   }
   jlog("key-card", `"lines":${KEY_LINES.length}`);
+});
+
+test("flight param emits only for valid missions at Kill Devil Hills", () => {
+  assert.equal(menuQuery({ mode: "human", site: "kdh", assist: false, flight: 4 }), "?sim=1&mode=human&flight=4");
+  assert.equal(menuQuery({ mode: "human", site: "kdh", assist: true, flight: 1 }), "?sim=1&mode=human&assist=1&flight=1");
+  // Huffman drops the mission (the URL never claims what will not run).
+  assert.equal(
+    menuQuery({ mode: "historical", site: "huffman", assist: false, flight: 2 }),
+    "?sim=1&mode=historical&site=huffman",
+  );
+  // Out-of-range ids emit nothing (no third config path, no junk params).
+  assert.equal(menuQuery({ mode: "fixed", site: "kdh", assist: false, flight: 0 }), "?sim=1");
+  assert.equal(menuQuery({ mode: "fixed", site: "kdh", assist: false, flight: 9 }), "?sim=1");
+  jlog("flight-gating", `"cases":5`);
+});
+
+test("journey stages chain watch -> assist -> authentic with honest copy", () => {
+  assert.equal(JOURNEY_STAGES.length, 3);
+  assert.equal(journeyStage(null), null);
+  assert.equal(journeyStage("0"), null);
+  assert.equal(journeyStage("4"), null);
+  assert.equal(journeyStage("abc"), null);
+  const s2 = journeyStage("2")!;
+  assert.match(s2.url, /mode=human&assist=1&journey=2/);
+  // Copy law: stage 1 names itself a hypothesis; no stage promises an outcome.
+  assert.match(journeyStage("1")!.caption, /hypothesis/);
+  for (const s of JOURNEY_STAGES) {
+    assert.ok(!/will (fly|reach|travel)/i.test(s.caption), `no promises in stage ${s.index}`);
+    for (const other of JOURNEY_STAGES) {
+      if (other.index === s.index + 1) {
+        assert.equal(journeyNextUrl(s.index), other.url, `stage ${s.index} chains to ${other.index}`);
+      }
+    }
+  }
+  assert.equal(journeyNextUrl(3), null, "stage 3 ends the journey");
+  jlog("journey-chain", `"stages":${JOURNEY_STAGES.length}`);
 });

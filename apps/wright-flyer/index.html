@@ -272,6 +272,57 @@
           flex-direction: column;
         }
       }
+      /* ---- guided journey overlay ---- */
+      #wf-journey {
+        position: fixed;
+        left: 50%;
+        bottom: 118px;
+        transform: translateX(-50%);
+        max-width: 76vw;
+        text-align: center;
+        z-index: 9;
+        pointer-events: none;
+      }
+      .wf-journey-caption {
+        font: 13px Georgia, serif;
+        color: #e8dcbf;
+        background: rgba(32, 22, 12, 0.78);
+        border: 1px solid #8a6a38;
+        border-radius: 6px;
+        padding: 8px 14px;
+        line-height: 1.5;
+      }
+      .wf-journey-next {
+        margin-top: 6px;
+        font: 700 13px Georgia, serif;
+        letter-spacing: 1px;
+      }
+      .wf-journey-next a {
+        color: #eed9a4;
+        pointer-events: auto;
+      }
+      /* ---- photo mode (body class, presentation-only grade) ---- */
+      body.wf-photo #wf-telemetry,
+      body.wf-photo #wf-dial-panel,
+      body.wf-photo #wf-phase-banner,
+      body.wf-photo #wf-results-card,
+      body.wf-photo #wf-journey,
+      body.wf-photo #capability-banner,
+      body.wf-photo #wf-qos-badge {
+        display: none !important;
+      }
+      body.wf-photo #app canvas {
+        filter: sepia(0.55) contrast(1.06) brightness(1.02) saturate(0.85);
+      }
+      body.wf-photo::after {
+        content: "";
+        position: fixed;
+        inset: 10px;
+        border: 2px solid rgba(243, 233, 210, 0.85);
+        box-shadow: inset 0 0 60px rgba(20, 14, 6, 0.35);
+        pointer-events: none;
+        z-index: 30;
+      }
     </style>
   </head>
   <body>

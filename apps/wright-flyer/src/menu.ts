@@ -3,10 +3,17 @@
 // no third configuration path, it just types the params for the player.
 // Repro: node --test test/menu.test.ts
 
+import { flightByIndex } from "./missions/flights.ts";
+
 export interface MenuSelection {
   readonly mode: "human" | "historical" | "fixed";
   readonly site: "kdh" | "huffman";
   readonly assist: boolean;
+  /** Mission preset: the 1-based Dec-17 flight number, or undefined
+   * for the default ensemble. Missions are Kill Devil Hills facts —
+   * a Huffman selection silently drops it (like assist), because the
+   * URL must never claim a scenario the engine would not run. */
+  readonly flight?: number;
 }
 
 export const DEFAULT_SELECTION: MenuSelection = { mode: "human", site: "kdh", assist: false };
@@ -21,8 +28,9 @@ export function assistAvailable(sel: Pick<MenuSelection, "mode" | "site">): bool
 
 /** The query string for a selection. Fixed mode omits `mode` (the
  * app default); Kill Devil Hills omits `site`; `assist` appears only
- * where it can engage (see assistAvailable) — the URL never claims an
- * aid the scenario would silently drop. */
+ * where it can engage (see assistAvailable); `flight` appears only
+ * for a valid mission id at KDH — the URL never claims a scenario the
+ * engine would silently drop. */
 export function menuQuery(sel: MenuSelection): string {
   const parts = ["sim=1"];
   if (sel.mode !== "fixed") {
@@ -34,8 +42,19 @@ export function menuQuery(sel: MenuSelection): string {
   if (sel.assist && assistAvailable(sel)) {
     parts.push("assist=1");
   }
+  if (sel.site === "kdh" && flightByIndex(sel.flight ?? 0) !== null) {
+    parts.push(`flight=${sel.flight}`);
+  }
   return `?${parts.join("&")}`;
 }
+
+/** Mission selector chips (labels from missions/flights.ts data). */
+export const FLIGHT_CHIPS: readonly { readonly id: number; readonly label: string }[] = [
+  { id: 1, label: "F1 · Orville" },
+  { id: 2, label: "F2 · Wilbur" },
+  { id: 3, label: "F3 · Orville" },
+  { id: 4, label: "F4 · Wilbur" },
+];
 
 /** Mode cards shown on the landing menu. */
 export const MODE_CARDS: readonly {
@@ -66,5 +85,7 @@ export const KEY_LINES: readonly string[] = [
   "W / ↑  push canard (nose down)",
   "A / ←  warp left     D / →  warp right",
   "Space  recenter      R  replay with ghost",
-  "T  telemetry panel",
+  "T  telemetry panel   P  photo mode",
+  "Drag the view = hip cradle   Gamepad left stick = warp/pull",
+  "J  guided journey (watch → assist → authentic)",
 ];

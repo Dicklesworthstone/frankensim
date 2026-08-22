@@ -11,15 +11,27 @@ import { cardLines, computeKpis, kpiRecomputeDivergence } from "./sim/resultsCar
 import { QosGovernor } from "./qos.ts";
 import { MODE_HUMAN } from "./sim/protocol.ts";
 import { LatencyLedger, toPhysical } from "./sim/humanControls.ts";
-import { NEUTRAL, keysFrom, stepCommand, type PilotCommand } from "./input.ts";
+import {
+  NEUTRAL,
+  cradleFromPointer,
+  decayCradle,
+  keysFrom,
+  sampleGamepad,
+  stepCommand,
+  type PilotCommand,
+} from "./input.ts";
 import {
   DEFAULT_SELECTION,
+  FLIGHT_CHIPS,
   KEY_LINES,
   MODE_CARDS,
   assistAvailable,
   menuQuery,
   type MenuSelection,
 } from "./menu.ts";
+import { flightByIndex, flightSeed, missionOutcome } from "./missions/flights.ts";
+import { JOURNEY_STAGES, journeyNextUrl, journeyStage } from "./journey.ts";
+import { togglePhotoMode } from "./photoMode.ts";
 
 /** Landing menu overlay (game front door). The scripted demo keeps
  * running behind it as the attract mode; every button just navigates
@@ -36,6 +48,7 @@ function buildMenu(container: HTMLElement): void {
   const modeRow = document.createElement("div");
   modeRow.className = "wf-menu-row";
   const modeButtons = new Map<string, HTMLButtonElement>();
+  const flightChips = new Map<number, HTMLButtonElement>();
   const refresh = (): void => {
     for (const [mode, btn] of modeButtons) {
       btn.classList.toggle("selected", mode === sel.mode);
@@ -43,6 +56,11 @@ function buildMenu(container: HTMLElement): void {
     const canAssist = assistAvailable(sel);
     assistBtn.classList.toggle("selected", sel.assist && canAssist);
     assistBtn.disabled = !canAssist;
+    for (const [id, chip] of flightChips) {
+      const usable = sel.site === "kdh";
+      chip.classList.toggle("selected", usable && sel.flight === id);
+      chip.disabled = !usable;
+    }
     siteBtn.textContent =
       sel.site === "kdh" ? "SITE: KILL DEVIL HILLS 1903" : "SITE: HUFFMAN PRAIRIE 1904-05 (catapult)";
     go.textContent = `LAUNCH ${sel.site === "huffman" ? "BY CATAPULT" : "INTO THE HEADWIND"} →`;
@@ -77,6 +95,30 @@ function buildMenu(container: HTMLElement): void {
   optRow.appendChild(siteBtn);
   optRow.appendChild(assistBtn);
   card.appendChild(optRow);
+  // Mission chips: the four Dec-17 flights as scenario presets (KDH
+  // only — Huffman disables them, mirroring the query-string law).
+  const flightRow = document.createElement("div");
+  flightRow.className = "wf-menu-row";
+  const freeChip = document.createElement("button");
+  freeChip.className = "wf-opt-btn";
+  freeChip.textContent = "FREE ENSEMBLE";
+  freeChip.addEventListener("click", () => {
+    sel = { ...sel, flight: undefined };
+    refresh();
+  });
+  flightRow.appendChild(freeChip);
+  for (const c of FLIGHT_CHIPS) {
+    const chip = document.createElement("button");
+    chip.className = "wf-opt-btn";
+    chip.textContent = c.label;
+    chip.addEventListener("click", () => {
+      sel = { ...sel, flight: c.id };
+      refresh();
+    });
+    flightChips.set(c.id, chip);
+    flightRow.appendChild(chip);
+  }
+  card.appendChild(flightRow);
   const go = document.createElement("button");
   go.id = "wf-go-btn";
   go.addEventListener("click", () => {
@@ -92,6 +134,13 @@ function buildMenu(container: HTMLElement): void {
   demo.href = "?demo=1";
   demo.textContent = "just watch the scripted demo";
   card.appendChild(demo);
+  const journeyBtn = document.createElement("button");
+  journeyBtn.className = "wf-opt-btn";
+  journeyBtn.textContent = "GUIDED JOURNEY — watch a modeled pilot, then fly (assist first)";
+  journeyBtn.addEventListener("click", () => {
+    window.location.search = JOURNEY_STAGES[0]!.url;
+  });
+  card.appendChild(journeyBtn);
   overlay.appendChild(card);
   container.appendChild(overlay);
   refresh();
@@ -134,6 +183,26 @@ function main(): void {
   resultsCardEl.id = "wf-results-card";
   resultsCardEl.style.display = "none";
   document.body.appendChild(resultsCardEl);
+  // Guided journey overlay (?journey=N): caption while the stage runs,
+  // continue-link when its run ends (J advances early). Presentation
+  // only — the stage chain lives in journey.ts and advances by URL.
+  const stage = journeyStage(params.get("journey"));
+  let journeyEl: HTMLDivElement | null = null;
+  if (stage !== null) {
+    journeyEl = document.createElement("div");
+    journeyEl.id = "wf-journey";
+    const captionEl = document.createElement("div");
+    captionEl.className = "wf-journey-caption";
+    captionEl.textContent = stage.caption;
+    const nextEl = document.createElement("div");
+    nextEl.className = "wf-journey-next";
+    journeyEl.appendChild(captionEl);
+    journeyEl.appendChild(nextEl);
+    document.body.appendChild(journeyEl);
+    console.info(
+      JSON.stringify({ suite: "wright-flyer-app", stage: "journey-stage", index: stage.index }),
+    );
+  }
   let simClient: SimClient | undefined;
   let renderer = createFlyerSceneRenderer(app);
   const resize = (): void => renderer.resize(app.clientWidth, app.clientHeight);
@@ -169,10 +238,19 @@ function main(): void {
           const kpis = computeKpis(recording);
           const divergence = kpiRecomputeDivergence(recording, kpis);
           const site = params.get("site") === "huffman" ? "Huffman Prairie" : "Kill Devil Hills";
-          const lines =
+          const base =
             divergence === null
               ? cardLines(kpis, site)
               : [`RESULTS CARD WITHHELD — KPI recompute divergence: ${divergence}`];
+          const flightNum = Number(params.get("flight"));
+          const mission =
+            params.get("site") !== "huffman" && Number.isInteger(flightNum)
+              ? flightByIndex(flightNum)
+              : null;
+          const lines =
+            mission !== null && divergence === null
+              ? [...base, ...missionOutcome(mission, kpis.downrangeM, kpis.airborneS).lines]
+              : base;
           resultsCardEl.textContent = lines.join("\n");
           resultsCardEl.style.display = "block";
           console.info(
@@ -193,6 +271,15 @@ function main(): void {
           );
         }
         capabilityText.textContent += "  [R replays with ghost]";
+        if (stage !== null && journeyEl !== null) {
+          const nextUrl = journeyNextUrl(stage.index);
+          const slot = journeyEl.children[1] as HTMLElement;
+          slot.textContent = "";
+          const link = document.createElement("a");
+          link.href = nextUrl ?? "?demo=1";
+          link.textContent = nextUrl !== null ? `${stage.prompt}  CONTINUE →` : `${stage.prompt}  FINISH`;
+          slot.appendChild(link);
+        }
       },
       onControlAck(ack): void {
         ledger.acked(ack.sequence, ack.appliedTick, ack.lateByTicks, performance.now());
@@ -201,13 +288,27 @@ function main(): void {
     return client;
   };
 
-  // E5.3a human-control pump: keyboard-rate transducer → quantized
-  // command → physical units → worker (with the latency ledger fed).
+  // E5.3a human-control pump, extended for plan §2.3 devices: three
+  // transducer families (keyboard-rate slew, pointer hip-cradle
+  // position, gamepad-stick position) feed ONE quantized path — the
+  // 1/4096 grid is the trace identity, so engine and replays see the
+  // same command shape regardless of device. Priority: cradle (while
+  // grabbed or springing back) > gamepad (while deflected, until
+  // another device is touched) > keyboard.
   let controlSeq = 0;
   let command: PilotCommand = NEUTRAL;
   let lastSent: PilotCommand | null = null;
   let lastSentMs = 0;
   const heldKeys = new Set<string>();
+  const CONTROL_KEY: Record<string, true> = {
+    ArrowUp: true, ArrowDown: true, ArrowLeft: true, ArrowRight: true,
+    KeyW: true, KeyA: true, KeyS: true, KeyD: true, Space: true,
+  };
+  let cradleActive = false;
+  let cradleCmd: PilotCommand | null = null; // non-null = the cradle owns the pump
+  let grabX = 0;
+  let grabY = 0;
+  let padOwned = false;
   const sendHumanControl = (cmd: PilotCommand, deviceMs: number): void => {
     if (simClient === undefined) {
       return;
@@ -223,7 +324,30 @@ function main(): void {
     if (mode !== MODE_HUMAN || simClient === undefined) {
       return;
     }
-    command = stepCommand(command, keysFrom(heldKeys), dtS);
+    let padCmd: PilotCommand | null = null;
+    if (typeof navigator.getGamepads === "function") {
+      for (const pad of navigator.getGamepads()) {
+        const sampled = sampleGamepad(pad);
+        if (sampled !== null) {
+          padCmd = sampled;
+          break;
+        }
+      }
+    }
+    if (padCmd !== null && (padCmd.canard !== 0 || padCmd.warp !== 0)) {
+      padOwned = true;
+    }
+    let next: PilotCommand;
+    if (cradleCmd !== null) {
+      next = cradleActive ? cradleCmd : decayCradle(cradleCmd, dtS);
+      cradleCmd = !cradleActive && next.canard === 0 && next.warp === 0 ? null : next;
+    } else if (padOwned && padCmd !== null) {
+      next = padCmd;
+    } else {
+      next = stepCommand(command, keysFrom(heldKeys), dtS);
+      padOwned = false;
+    }
+    command = next;
     const changed =
       lastSent === null || command.canard !== lastSent.canard || command.warp !== lastSent.warp;
     // Send on change, plus a 100 ms heartbeat (the worker holds ZOH).
@@ -232,8 +356,40 @@ function main(): void {
     }
   };
   if (mode === MODE_HUMAN) {
-    window.addEventListener("keydown", (e: KeyboardEvent) => heldKeys.add(e.code));
+    window.addEventListener("keydown", (e: KeyboardEvent) => {
+      heldKeys.add(e.code);
+      if (CONTROL_KEY[e.code] === true) {
+        padOwned = false;
+        cradleActive = false;
+        cradleCmd = null; // last device touched wins
+      }
+    });
     window.addEventListener("keyup", (e: KeyboardEvent) => heldKeys.delete(e.code));
+    // Hip cradle: drag anywhere on the view. Listeners live on the
+    // persistent #app container because renderer canvases are swapped
+    // by replay/restart, and pointer events bubble from them.
+    app.addEventListener("pointerdown", (e: PointerEvent) => {
+      if (!e.isPrimary || e.button !== 0) {
+        return;
+      }
+      grabX = e.clientX;
+      grabY = e.clientY;
+      cradleActive = true;
+      cradleCmd = cradleFromPointer(0, 0);
+      padOwned = false;
+      e.preventDefault();
+    });
+    window.addEventListener("pointermove", (e: PointerEvent) => {
+      if (!cradleActive || !e.isPrimary) {
+        return;
+      }
+      cradleCmd = cradleFromPointer(e.clientX - grabX, e.clientY - grabY);
+    });
+    const endCradle = (): void => {
+      cradleActive = false; // spring-back decay proceeds in the pump
+    };
+    window.addEventListener("pointerup", endCradle);
+    window.addEventListener("pointercancel", endCradle);
   }
 
   if (params.get("sim") === "1") {
@@ -245,10 +401,17 @@ function main(): void {
     // near-calm run currently ends with a receipted envelope exit —
     // guzez.5.7.1 — surfaced on the HUD, never silently).
     const member = mode === MODE_HISTORICAL ? 3 : 0;
+    // Mission preset (?flight=N): each Dec-17 flight flies its own
+    // deterministic wind ensemble; anything else keeps the 1903 base.
+    const missionNum = Number(params.get("flight"));
+    const missionSeed =
+      params.get("site") !== "huffman" && Number.isInteger(missionNum) && missionNum >= 1 && missionNum <= 4
+        ? flightSeed(missionNum)
+        : 1903n;
     simClient.start(
       params.get("site") === "huffman"
-        ? huffmanScenario(1903n, mode, member)
-        : dec17Scenario(1903n, mode, member, params.get("assist") === "1"),
+        ? huffmanScenario(missionSeed, mode, member)
+        : dec17Scenario(missionSeed, mode, member, params.get("assist") === "1"),
     );
     renderer.dispose();
     renderer = createFlyerSceneRenderer(app, simClient);
@@ -286,6 +449,16 @@ function main(): void {
   }
   window.addEventListener("resize", resize);
   resize();
+  // P toggles photo mode anywhere (HUD hide + plate grade, CSS-only).
+  window.addEventListener("keydown", (e: KeyboardEvent) => {
+    if (e.code === "KeyP" && !e.repeat) {
+      const t = togglePhotoMode(document);
+      console.info(
+        JSON.stringify({ suite: "wright-flyer-app", stage: "photo-mode", active: t.active }),
+      );
+    }
+  });
+
 
   // FPS meter over a 1-second window (presentation-plane measurement only;
   // sim-tick metrics are E0.8's separate contract).
@@ -302,7 +475,12 @@ function main(): void {
   document.body.appendChild(badgeEl);
   let lastPublishedTick = 0;
   const frame = (nowMs: number): void => {
-    const dtS = (nowMs - lastMs) / 1000;
+    // Clamp negatives: the FIRST rAF timestamp can precede the setup
+    // capture (frame queued before module eval finished), and a
+    // negative dt threw advanceProp's domain refusal, killing the
+    // whole loop on frame 1. Presentation-plane only — the sim worker
+    // never sees this number.
+    const dtS = Math.min(0.25, Math.max(0, (nowMs - lastMs) / 1000));
     const q = qos.sample(Math.max(0, nowMs - lastMs));
     if (q.changed) {
       renderer.applyQuality?.(q.profile);
