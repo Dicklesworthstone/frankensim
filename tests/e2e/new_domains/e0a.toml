@@ -14,6 +14,7 @@ owning_bead = "frankensim-ext-epic-e0a-2kec"
 gauntlet_tier = "G0"
 entry_command = ["cargo", "run", "-q", "-p", "xtask", "--", "check-schemas"]
 expected_output_pattern = "policy OK"
+profiles = ["smoke"]
 seed = 0
 seed_overridable = false
 max_wall_seconds = 900
@@ -48,5 +49,16 @@ expected_refusal_pattern = "unknown command"
 seed = 0
 seed_overridable = false
 max_wall_seconds = 900
+profiles = ["smoke"]
 determinism_class = "repo-deterministic"
 qoi_notes = "refusal case; acceptance is the typed unknown-command diagnostic, not silence"
+
+# Frozen runner-contract negatives for this phase battery (bead
+# frankensim-ext-epic-gov-rjoq.8): each probe executes a source-closed
+# refusal path of the shared runner itself and must land exactly on its
+# declared stable exit class.
+[[negative]]
+id = "e0a-negative-schema-mismatch"
+purpose = "the shared runner refuses any manifest whose schema string is not the admitted case-manifest schema"
+probe = "schema-mismatch"
+expect_exit = 10

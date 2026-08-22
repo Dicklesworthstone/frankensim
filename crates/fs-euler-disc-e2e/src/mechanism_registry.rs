@@ -570,6 +570,37 @@ pub fn campaign_registry() -> Result<MechanismRegistry, RegistryError> {
         ]),
     })?;
 
+    // Registered 2026-08-22 with explicit custodian approval (bead
+    // t6314.1.2): locator and metadata verified against the arXiv abs
+    // page; v1 preprint, explicitly NOT consensus.
+    registry.register_source(RegisteredSource {
+        id: "thorne-2026-arxiv".into(),
+        source_type: SourceType::Preprint,
+        version_or_date: "v1, 2026-03-15".into(),
+        locator: "Thorne, B.G., Zareei, A., Mahadevan, K., Rubinstein, S.M., Amir, A., Air Drag Controls the Finite-Time Singularity of Euler's Disk, arXiv:2603.14520 (2026)".into(),
+        license: "arXiv non-exclusive license".into(),
+        model_equations: Vec::new(),
+        assumptions: text(&[
+            "late-time dissipation dominated by viscous air drag from sub-disc boundary-layer shear",
+            "early-time dissipation dominated by rolling friction with sublinear mass scaling on glass, suggesting adhesion-based rolling resistance",
+        ]),
+        measured_configurations: text(&[
+            "stereoscopic high-speed imaging of disks of varying mass and radius on different surfaces",
+            "partial-vacuum runs",
+            "steel-ring geometric control",
+        ]),
+        qois: text(&[
+            "mass dependence of settling dynamics",
+            "terminal exponent near the singularity",
+            "early-time rolling-friction mass scaling",
+        ]),
+        reported_uncertainty: "not stated in the abstract; retained as unreported pending full-text review".into(),
+        transfer_limitations: text(&[
+            "preprint: not peer-reviewed at v1; not consensus",
+            "results are specific to their disks, surfaces, gas, and load; not transferable to different finish, support, gas, or scale without re-derivation",
+            "vacuum is partial, not zero-air",
+        ]),
+    })?;
     // Rival mechanism cards. Exponent families use the precession-rate
     // convention Omega ~ (t_f - t)^(-n) stated per-card in observables;
     // the OVERLAP among families is deliberate and load-bearing.
@@ -903,7 +934,7 @@ mod tests {
     #[test]
     fn the_campaign_registry_registers_clean_and_is_deterministic() {
         let registry = campaign_registry().expect("shipped rows register");
-        assert_eq!(registry.source_count(), 7);
+        assert_eq!(registry.source_count(), 8);
         assert_eq!(registry.card_count(), 8);
         // Identity determinism across rebuilds.
         let again = campaign_registry().expect("registers again");

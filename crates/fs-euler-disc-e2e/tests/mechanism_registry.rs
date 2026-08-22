@@ -138,7 +138,7 @@ fn registry_log_is_deterministic_bounded_and_content_addressed() {
         "rebuilds must be byte-identical"
     );
     assert_eq!(first.identity(), replay.identity());
-    assert_eq!(first.source_count(), 7);
+    assert_eq!(first.source_count(), 8);
     assert_eq!(first.card_count(), 8);
     assert!(
         first.canonical_bytes().len() < 65_536,
