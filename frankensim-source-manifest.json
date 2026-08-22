@@ -2,7 +2,7 @@
   "schema": "frankensim-source-manifest-v1",
   "identity_domain": "org.frankensim.xtask.source-manifest.v1",
   "identity_version": 1,
-  "manifest_identity": "55efcb880305667bebef37c3d94631d06ee53366e5fe3ba49fe25194fab4a02a",
+  "manifest_identity": "cd0503023ef15a52986b2c1c6c2a506e2b63af3e6785d8daddfba561c8822803",
   "bead_id": "frankensim-extreal-program-f85xj.13.2",
   "authority": "canonical structural inventory over exact Git-index non-tracker bytes; release observations are intentionally unbound here",
   "release_binding": {
@@ -15,7 +15,7 @@
     "repository": "https://github.com/Dicklesworthstone/frankensim",
     "workspace_version": "0.0.1",
     "source_root_domain": "org.frankensim.xtask.source-root.v1",
-    "source_root": "1009f7f2a56cd18c385896f6552c09998e7a6da35b25f08d0a6d3d9ea6903ef5",
+    "source_root": "fa2280ab1507b09e4c3686fa6e2643f1da8856454bf1f22b974d30e2bceea3bd",
     "tracked_file_count": 2843,
     "excluded_paths": [".beads/**", "frankensim-source-manifest.json", "frankensim-source-manifest.spdx.json"],
     "files": [
@@ -813,7 +813,7 @@
       {"path": "crates/fs-exec/src/pool.rs", "git_mode": "100644", "bytes": 280977, "content_blake3": "6130bd0b984443f8ec7b2bbb6ac208f4b0cc957c384f56d9e6a2ddd3c0bc1e48"},
       {"path": "crates/fs-exec/src/race.rs", "git_mode": "100644", "bytes": 27320, "content_blake3": "a61535a407084da73ea1492e7c46a7fe3fca4ade6caee543a44a75cfa1733a80"},
       {"path": "crates/fs-exec/src/reduce.rs", "git_mode": "100644", "bytes": 16127, "content_blake3": "930f31bea60ce8044b4100055c1d9a84ae2ab9253ad9eb3c0f1b97a24588d59e"},
-      {"path": "crates/fs-exec/src/solver.rs", "git_mode": "100644", "bytes": 376347, "content_blake3": "3b604e746a66cbbfd085d6589086ba87066866a9628d539ee0f988c7ba180341"},
+      {"path": "crates/fs-exec/src/solver.rs", "git_mode": "100644", "bytes": 376425, "content_blake3": "499961336689ac47d5bda1c59cf21926070be44f5fd59eadb2f024c45365886d"},
       {"path": "crates/fs-exec/src/tune.rs", "git_mode": "100644", "bytes": 189828, "content_blake3": "6ab9198fc5dce2747254839f01c551d436018c70b37f3130b0518c390260a76d"},
       {"path": "crates/fs-exec/tests/conformance.rs", "git_mode": "100644", "bytes": 33749, "content_blake3": "b6996dda2281e5fd514099f2d24cbbd7d47c265bd90f32f9973aaa4500a1eb1a"},
       {"path": "crates/fs-exec/tests/constellation_smoke.rs", "git_mode": "100644", "bytes": 1664, "content_blake3": "b4dd860b859218dcf276291f384cf37d9bdbe5d78e481bd845437ea5ad2bcb88"},
