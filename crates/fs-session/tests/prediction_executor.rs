@@ -10,7 +10,7 @@ use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_blake3::ContentHash;
 use fs_evidence::prediction_bundle::{
     AccessPolicy, ModelRungPolicy, OutputArtifactRef, OutputFamily, PredictionExecutionInput,
-    PredictionOutputBundle, RandomStreamDesign, SampleAccounting,
+    PredictionOutputBundle, RandomStreamDesign,
 };
 use fs_evidence::vv::{ApplicabilityPolicy, ArtifactId, ArtifactKind, ArtifactRef};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
