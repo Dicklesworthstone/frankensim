@@ -2698,6 +2698,16 @@ pub mod snapshot_v2 {
             /// First divergent identity role.
             field: SnapshotContextFieldV2,
         },
+        /// The pinned identities match a RETAINED historical charter of
+        /// this exact owner and family (bead sj31i.52.5.2.1 era
+        /// quarantine): the artifact is recognizable for audit/replay
+        /// routing but is not activation authority under the live charter.
+        StateCharterEraRetired {
+            /// Owner of the family whose retained era matched.
+            owner: &'static str,
+            /// Family whose retained era matched.
+            state_family: &'static str,
+        },
         /// Payload codec requested resources outside its explicit envelope.
         CodecResourceLimitExceeded {
             /// Stable resource category.
@@ -2833,6 +2843,12 @@ pub mod snapshot_v2 {
                     "declared {} constant disagrees with the owner-bound charter derivation; \
                      pin the charter-derived value instead of copying bytes",
                     field.as_str()
+                ),
+                Self::StateCharterEraRetired { owner, state_family } => write!(
+                    formatter,
+                    "snapshot identities match a retained historical charter of owner \
+                     {owner:?} family {state_family:?}; route the artifact to that era for \
+                     replay or archive: the live charter is the only activation authority",
                 ),
                 Self::CodecResourceLimitExceeded {
                     resource,
@@ -4997,13 +5013,20 @@ pub mod snapshot_v2 {
         inspection.expected_context = Some(expected_context.clone());
         Ok(inspection)
     }
-
     pub(super) fn decode_admitted<S: SolverStateV2, C: CancellationProbe>(
         inspection: SnapshotInspectionV2<'_>,
         limits: SnapshotLimitsV2,
         mut cancellation: C,
     ) -> Result<OpenedSnapshotV2<S>, SnapshotV2Error> {
         if !inspection.context.matches_state::<S>() {
+            if let Some(refusal) = state_era_refusal::<S>(
+                inspection.context.state_type,
+                inspection.context.state_schema,
+                inspection.context.state_codec,
+                inspection.context.state_codec_version,
+            ) {
+                return Err(refusal);
+            }
             return Err(SnapshotV2Error::WrongStateSchema);
         }
         if inspection.admission == SnapshotAdmissionV2::UnanchoredConsistencyOnly {
@@ -5141,12 +5164,86 @@ pub mod snapshot_v2 {
         Ok(())
     }
 
+    /// Era classification of one pinned identity set against a state
+    /// family's live charter and retained history (bead sj31i.52.5.2.1).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum StateCharterEraClassV2 {
+        /// The identities match the family's LIVE charter: full authority.
+        Live,
+        /// The identities match exactly one RETAINED historical charter:
+        /// recognizable for audit/replay routing, quarantined from
+        /// activation under the live charter.
+        Retained {
+            /// Zero-based retention order of the matching history entry.
+            index: usize,
+            /// The matching retained charter (Copy).
+            charter: StateIdentityCharterV2,
+        },
+        /// No live or retained derivation matches: impostor or foreign era.
+        Unknown,
+    }
+
+    /// Classify pinned identity constants against `S`'s charter and
+    /// retained history. Deterministic: the live charter wins first,
+    /// then history entries in declaration order.
+    #[must_use]
+    pub fn state_charter_era_class<S: super::SolverStateV2>(
+        type_id: SnapshotStateTypeIdV2,
+        schema_id: SnapshotStateSchemaIdV2,
+        codec_id: SnapshotStateCodecIdV2,
+        codec_version: u32,
+    ) -> StateCharterEraClassV2 {
+        if let Some(charter) = S::charter()
+            && charter
+                .first_mismatch(type_id, schema_id, codec_id, codec_version)
+                .is_none()
+        {
+            return StateCharterEraClassV2::Live;
+        }
+        for (index, charter) in S::charter_history().iter().enumerate() {
+            if charter
+                .first_mismatch(type_id, schema_id, codec_id, codec_version)
+                .is_none()
+            {
+                return StateCharterEraClassV2::Retained {
+                    index,
+                    charter: *charter,
+                };
+            }
+        }
+        StateCharterEraClassV2::Unknown
+    }
+
+    /// Typed decode-gate refusal for a pinned identity set that belongs to
+    /// `S`'s own retained history: `Some(StateCharterEraRetired)` when the
+    /// set classifies as retained, `None` otherwise so foreign/impostor
+    /// sets keep the generic [`SnapshotV2Error::WrongStateSchema`] path.
+    /// Crate-visible for the era-quarantine battery; the decode gate is
+    /// the only production caller.
+    pub(crate) fn state_era_refusal<S: super::SolverStateV2>(
+        type_id: SnapshotStateTypeIdV2,
+        schema_id: SnapshotStateSchemaIdV2,
+        codec_id: SnapshotStateCodecIdV2,
+        codec_version: u32,
+    ) -> Option<SnapshotV2Error> {
+        match state_charter_era_class::<S>(type_id, schema_id, codec_id, codec_version) {
+            StateCharterEraClassV2::Retained { charter, .. } => {
+                Some(SnapshotV2Error::StateCharterEraRetired {
+                    owner: charter.owner,
+                    state_family: charter.state_family,
+                })
+            }
+            _ => None,
+        }
+    }
+
     /// Explicit collision registry over charters: duplicate (owner, family)
     /// pairs with differing grammar refuse deterministically; re-registering
     /// an identical charter is idempotent.
     #[derive(Debug, Default)]
     pub struct CharterRegistryV2 {
         entries: std::collections::BTreeMap<(&'static str, &'static str), StateIdentityCharterV2>,
+        retained: std::collections::BTreeMap<(&'static str, &'static str), Vec<StateIdentityCharterV2>>,
     }
 
     /// Typed collision refusal from [`CharterRegistryV2::register`].
@@ -5155,6 +5252,15 @@ pub mod snapshot_v2 {
         /// Owner of the colliding charter.
         pub owner: &'static str,
         /// Family of the colliding charter.
+        pub state_family: &'static str,
+    }
+
+    /// Typed refusal from [`CharterRegistryV2::retire`].
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct CharterRetireRefusalV2 {
+        /// Owner of the charter that cannot be retired.
+        pub owner: &'static str,
+        /// Family of the charter that cannot be retired.
         pub state_family: &'static str,
     }
 
@@ -5198,6 +5304,77 @@ pub mod snapshot_v2 {
         #[must_use]
         pub fn is_empty(&self) -> bool {
             self.entries.is_empty()
+        }
+
+        /// Retire a superseded charter into the family's retained history:
+        /// its derived identities stay recognizable for audit/replay
+        /// routing but never regain activation authority. Identical
+        /// re-retirement is idempotent.
+        ///
+        /// # Errors
+        /// [`CharterRetireRefusalV2`] when the charter is the family's
+        /// LIVE registration: the live charter is not history.
+        pub fn retire(
+            &mut self,
+            charter: StateIdentityCharterV2,
+        ) -> Result<(), CharterRetireRefusalV2> {
+            let key = (charter.owner, charter.state_family);
+            if self.entries.get(&key) == Some(&charter) {
+                return Err(CharterRetireRefusalV2 {
+                    owner: charter.owner,
+                    state_family: charter.state_family,
+                });
+            }
+            let history = self.retained.entry(key).or_default();
+            if !history.contains(&charter) {
+                history.push(charter);
+            }
+            Ok(())
+        }
+
+        /// Classify a pinned identity set against one family's live and
+        /// retained charters. Live wins first; retention order then
+        /// decides, deterministically.
+        #[must_use]
+        pub fn classify(
+            &self,
+            owner: &'static str,
+            state_family: &'static str,
+            type_id: SnapshotStateTypeIdV2,
+            schema_id: SnapshotStateSchemaIdV2,
+            codec_id: SnapshotStateCodecIdV2,
+            codec_version: u32,
+        ) -> StateCharterEraClassV2 {
+            let key = (owner, state_family);
+            if let Some(live) = self.entries.get(&key)
+                && live
+                    .first_mismatch(type_id, schema_id, codec_id, codec_version)
+                    .is_none()
+            {
+                return StateCharterEraClassV2::Live;
+            }
+            if let Some(history) = self.retained.get(&key) {
+                for (index, charter) in history.iter().enumerate() {
+                    if charter
+                        .first_mismatch(type_id, schema_id, codec_id, codec_version)
+                        .is_none()
+                    {
+                        return StateCharterEraClassV2::Retained {
+                            index,
+                            charter: *charter,
+                        };
+                    }
+                }
+            }
+            StateCharterEraClassV2::Unknown
+        }
+
+        /// Retained (quarantined) charter count for one family.
+        #[must_use]
+        pub fn retained_len(&self, owner: &'static str, state_family: &'static str) -> usize {
+            self.retained
+                .get(&(owner, state_family))
+                .map_or(0, Vec::len)
         }
     }
 
@@ -6107,6 +6284,15 @@ pub trait SolverStateV2: Sized {
     /// keeps the pre-charter no-claim for legacy implementations.
     fn charter() -> Option<&'static snapshot_v2::StateIdentityCharterV2> {
         None
+    }
+
+    /// Retained historical charters for this state family (bead
+    /// sj31i.52.5.2.1 era quarantine): superseded revisions whose derived
+    /// identities still belong to this owner and family. Snapshots sealed
+    /// under them stay recognizable for audit/replay routing, but only
+    /// [`Self::charter`] is activation authority. Default empty.
+    fn charter_history() -> &'static [snapshot_v2::StateIdentityCharterV2] {
+        &[]
     }
 
     /// Full-width nominal identity of this exact Rust state type.
@@ -9451,5 +9637,235 @@ mod tests {
                 field: snapshot_v2::SnapshotContextFieldV2::StateType,
             }
         );
+    }
+
+    // --- Era quarantine / retained-charter routing (52.5.2.1) ---
+
+    /// Superseded schema-grammar revision of the Jacobi family: rotates the
+    /// schema/codec identities while the type identity stays
+    /// grammar-independent.
+    const JACOBI_PREV_ERA_CHARTER: snapshot_v2::StateIdentityCharterV2 =
+        snapshot_v2::StateIdentityCharterV2 {
+            owner: "fs-exec::tests::jacobi",
+            state_family: "jacobi-iteration",
+            schema_grammar: "x: [f64; le]; iter: u64; residual: f32",
+            codec_grammar: "v2 framed, f64-le slice + u64",
+            codec_version: 1,
+        };
+
+    /// Live-era stand-in that adopts its charter plus the retained previous
+    /// era, mirroring pin-from-derivation adoption for a real family.
+    #[derive(Debug, Clone, PartialEq)]
+    struct JacobiWithHistory {
+        x: Vec<f64>,
+        iter: u64,
+    }
+
+    impl SolverStateV2 for JacobiWithHistory {
+        const STATE_TYPE_ID_V2: snapshot_v2::SnapshotStateTypeIdV2 = JacobiState::STATE_TYPE_ID_V2;
+        const STATE_SCHEMA_ID_V2: snapshot_v2::SnapshotStateSchemaIdV2 =
+            JacobiState::STATE_SCHEMA_ID_V2;
+        const STATE_CODEC_ID_V2: snapshot_v2::SnapshotStateCodecIdV2 =
+            JacobiState::STATE_CODEC_ID_V2;
+        const STATE_CODEC_VERSION_V2: u32 = JacobiState::STATE_CODEC_VERSION_V2;
+
+        fn charter() -> Option<&'static snapshot_v2::StateIdentityCharterV2> {
+            static CHARTER: snapshot_v2::StateIdentityCharterV2 =
+                snapshot_v2::StateIdentityCharterV2 {
+                    owner: "fs-exec::tests::jacobi",
+                    state_family: "jacobi-iteration",
+                    schema_grammar: "x: [f64; le]; iter: u64",
+                    codec_grammar: "v2 framed, f64-le slice + u64",
+                    codec_version: 1,
+                };
+            Some(&CHARTER)
+        }
+
+        fn charter_history() -> &'static [snapshot_v2::StateIdentityCharterV2] {
+            static HISTORY: [snapshot_v2::StateIdentityCharterV2; 1] = [JACOBI_PREV_ERA_CHARTER];
+            &HISTORY
+        }
+
+        fn encode_v2(
+            &self,
+            encoder: &mut snapshot_v2::SnapshotEncoderV2<'_>,
+        ) -> Result<(), snapshot_v2::SnapshotV2Error> {
+            encoder.put_u64(self.iter)?;
+            encoder.put_f64_slice(&self.x)
+        }
+
+        fn decode_v2(
+            decoder: &mut snapshot_v2::SnapshotDecoderV2<'_, '_>,
+        ) -> Result<Self, snapshot_v2::SnapshotV2Error> {
+            Ok(Self {
+                iter: decoder.get_u64()?,
+                x: decoder.get_f64_vec()?,
+            })
+        }
+    }
+
+    #[test]
+    fn retained_era_classifies_deterministically_and_routes_refusals() {
+        let prev_type = JACOBI_PREV_ERA_CHARTER.state_type_id();
+        let prev_schema = JACOBI_PREV_ERA_CHARTER.state_schema_id();
+        let prev_codec = JACOBI_PREV_ERA_CHARTER.state_codec_id();
+        // The retained era is recognizable and names its exact entry.
+        assert_eq!(
+            snapshot_v2::state_charter_era_class::<JacobiWithHistory>(
+                prev_type,
+                prev_schema,
+                prev_codec,
+                JACOBI_PREV_ERA_CHARTER.codec_version,
+            ),
+            snapshot_v2::StateCharterEraClassV2::Retained {
+                index: 0,
+                charter: JACOBI_PREV_ERA_CHARTER,
+            }
+        );
+        // The live era keeps full authority: the state's pinned constants
+        // must be exactly its live-charter derivations (pin-from-derivation
+        // discipline), so classification uses those derived values.
+        assert_eq!(
+            snapshot_v2::state_charter_era_class::<JacobiWithHistory>(
+                JACOBI_CHARTER.state_type_id(),
+                JACOBI_CHARTER.state_schema_id(),
+                JACOBI_CHARTER.state_codec_id(),
+                JACOBI_CHARTER.codec_version,
+            ),
+            snapshot_v2::StateCharterEraClassV2::Live
+        );
+        // A foreign owner with identical grammar stays Unknown (role
+        // separation): history never validates across owners.
+        let foreign = snapshot_v2::StateIdentityCharterV2 {
+            owner: "fs-exec::tests::impostor",
+            ..JACOBI_PREV_ERA_CHARTER
+        };
+        assert_eq!(
+            snapshot_v2::state_charter_era_class::<JacobiWithHistory>(
+                foreign.state_type_id(),
+                foreign.state_schema_id(),
+                foreign.state_codec_id(),
+                foreign.codec_version,
+            ),
+            snapshot_v2::StateCharterEraClassV2::Unknown
+        );
+        // The decode gate maps ONLY the retained era to the typed refusal.
+        assert_eq!(
+            snapshot_v2::state_era_refusal::<JacobiWithHistory>(
+                prev_type,
+                prev_schema,
+                prev_codec,
+                JACOBI_PREV_ERA_CHARTER.codec_version,
+            ),
+            Some(snapshot_v2::SnapshotV2Error::StateCharterEraRetired {
+                owner: "fs-exec::tests::jacobi",
+                state_family: "jacobi-iteration",
+            })
+        );
+        assert_eq!(
+            snapshot_v2::state_era_refusal::<JacobiWithHistory>(
+                foreign.state_type_id(),
+                foreign.state_schema_id(),
+                foreign.state_codec_id(),
+                foreign.codec_version,
+            ),
+            None,
+            "impostor identities must keep the generic WrongStateSchema path"
+        );
+    }
+
+    #[test]
+    fn registry_retirement_quarantines_without_regaining_authority() {
+        let mut registry = snapshot_v2::CharterRegistryV2::new();
+        registry.register(JACOBI_CHARTER).expect("live registration");
+        registry
+            .retire(JACOBI_PREV_ERA_CHARTER)
+            .expect("superseded revision retires");
+        assert_eq!(
+            registry.retained_len(JACOBI_CHARTER.owner, JACOBI_CHARTER.state_family),
+            1
+        );
+        // Idempotent re-retirement does not duplicate history entries.
+        registry
+            .retire(JACOBI_PREV_ERA_CHARTER)
+            .expect("identical re-retirement is idempotent");
+        assert_eq!(
+            registry.retained_len(JACOBI_CHARTER.owner, JACOBI_CHARTER.state_family),
+            1
+        );
+        // The LIVE charter is not history: retiring it refuses.
+        let refusal = registry.retire(JACOBI_CHARTER).expect_err("live refuses");
+        assert_eq!(refusal.owner, JACOBI_CHARTER.owner);
+        assert_eq!(refusal.state_family, JACOBI_CHARTER.state_family);
+        // Classification through the assembled registry matches the
+        // trait-static path: live wins, retained quarantines, unknown
+        // families stay unknown.
+        assert_eq!(
+            registry.classify(
+                JACOBI_CHARTER.owner,
+                JACOBI_CHARTER.state_family,
+                JACOBI_CHARTER.state_type_id(),
+                JACOBI_CHARTER.state_schema_id(),
+                JACOBI_CHARTER.state_codec_id(),
+                JACOBI_CHARTER.codec_version,
+            ),
+            snapshot_v2::StateCharterEraClassV2::Live
+        );
+        assert!(matches!(
+            registry.classify(
+                JACOBI_CHARTER.owner,
+                JACOBI_CHARTER.state_family,
+                JACOBI_PREV_ERA_CHARTER.state_type_id(),
+                JACOBI_PREV_ERA_CHARTER.state_schema_id(),
+                JACOBI_PREV_ERA_CHARTER.state_codec_id(),
+                JACOBI_PREV_ERA_CHARTER.codec_version,
+            ),
+            snapshot_v2::StateCharterEraClassV2::Retained { index: 0, .. }
+        ));
+        assert_eq!(
+            registry.classify(
+                "fs-exec::tests::nobody",
+                "jacobi-iteration",
+                JACOBI_PREV_ERA_CHARTER.state_type_id(),
+                JACOBI_PREV_ERA_CHARTER.state_schema_id(),
+                JACOBI_PREV_ERA_CHARTER.state_codec_id(),
+                JACOBI_PREV_ERA_CHARTER.codec_version,
+            ),
+            snapshot_v2::StateCharterEraClassV2::Unknown
+        );
+    }
+
+    #[test]
+    fn multiple_retained_eras_route_by_exact_derivation_order() {
+        // Two distinct historical revisions: a schema revision and a later
+        // codec bump. Each pinned set must classify to exactly its own era.
+        let codec_bump_era = snapshot_v2::StateIdentityCharterV2 {
+            codec_version: 2,
+            ..JACOBI_CHARTER
+        };
+        let mut registry = snapshot_v2::CharterRegistryV2::new();
+        registry.register(JACOBI_CHARTER).expect("live");
+        registry.retire(JACOBI_PREV_ERA_CHARTER).expect("era one");
+        registry.retire(codec_bump_era).expect("era two");
+        assert_eq!(
+            registry.retained_len(JACOBI_CHARTER.owner, JACOBI_CHARTER.state_family),
+            2
+        );
+        for (expected_index, era) in [(0usize, JACOBI_PREV_ERA_CHARTER), (1, codec_bump_era)] {
+            assert_eq!(
+                registry.classify(
+                    JACOBI_CHARTER.owner,
+                    JACOBI_CHARTER.state_family,
+                    era.state_type_id(),
+                    era.state_schema_id(),
+                    era.state_codec_id(),
+                    era.codec_version,
+                ),
+                snapshot_v2::StateCharterEraClassV2::Retained {
+                    index: expected_index,
+                    charter: era,
+                }
+            );
+        }
     }
 }
