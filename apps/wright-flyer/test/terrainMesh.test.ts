@@ -49,9 +49,16 @@ test("material classes match the committed E1.3 map per cell", () => {
 });
 
 test("vertex arrays are consistent and centered", () => {
-  const { positions, colors, indices, launch } = buildTerrainArrays(grid, 64);
+  const { positions, colors, uvs, indices, launch } = buildTerrainArrays(grid, 64);
   assert.equal(positions.length, 65 * 65 * 3);
   assert.equal(colors.length, positions.length);
+  assert.equal(uvs.length, 65 * 65 * 2);
+  // Planar UVs span [0,1] corner-to-corner (a textured material is
+  // blind without them — guzez.13 regression).
+  assert.equal(uvs[0], 0);
+  assert.equal(uvs[1], 0);
+  assert.equal(uvs[uvs.length - 2], 1);
+  assert.equal(uvs[uvs.length - 1], 1);
   assert.equal(indices.length, 64 * 64 * 6);
   // Every index in range; corners at ±1000.
   for (const ix of indices) assert.ok(ix < 65 * 65);

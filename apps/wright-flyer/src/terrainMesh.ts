@@ -44,12 +44,22 @@ const COLORS: Record<string, [number, number, number]> = {
 export function buildTerrainArrays(
   g: TerrainGridJson,
   res: number,
-): { positions: Float32Array; colors: Float32Array; indices: Uint32Array; launch: [number, number, number] } {
+): {
+  positions: Float32Array;
+  colors: Float32Array;
+  uvs: Float32Array;
+  indices: Uint32Array;
+  launch: [number, number, number];
+} {
   const extent = (g.grid_n - 1) * g.spacing_m; // 2000 m
   const half = extent / 2;
   const nv = res + 1;
   const positions = new Float32Array(nv * nv * 3);
   const colors = new Float32Array(nv * nv * 3);
+  // Planar UVs over the tile: a textured material samples NOTHING
+  // without them (WebGL zero-fills missing attributes, collapsing the
+  // whole map to one texel).
+  const uvs = new Float32Array(nv * nv * 2);
   for (let j = 0; j <= res; j++) {
     for (let i = 0; i <= res; i++) {
       const east = (i / res) * extent;
@@ -63,6 +73,9 @@ export function buildTerrainArrays(
       colors[k] = c[0];
       colors[k + 1] = c[1];
       colors[k + 2] = c[2];
+      const ku = (j * nv + i) * 2;
+      uvs[ku] = i / res;
+      uvs[ku + 1] = j / res;
     }
   }
   const indices = new Uint32Array(res * res * 6);
@@ -86,7 +99,7 @@ export function buildTerrainArrays(
     heightAt(g, launchEast, launchNorth),
     -(launchNorth - half),
   ];
-  return { positions, colors, indices, launch };
+  return { positions, colors, uvs, indices, launch };
 }
 
 /** The arrival-shot camera path (pure in t): a slow descending dolly from

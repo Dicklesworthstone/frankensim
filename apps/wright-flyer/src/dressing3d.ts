@@ -90,15 +90,21 @@ function plankTexture(): THREE.CanvasTexture {
 /** Sky: horizon-to-zenith gradient with a low December sun glow. */
 function skyTexture(): THREE.CanvasTexture {
   return canvasTexture(1024, (ctx, s) => {
+    // Sphere v = 1 - y/s and the HORIZON is the equator at v = 0.5,
+    // i.e. canvas y = 0.5s — the pale sea haze belongs THERE, not at
+    // the bottom pole (which points underground).
     const grad = ctx.createLinearGradient(0, s, 0, 0);
-    grad.addColorStop(0, "#d8dfe6"); // sea haze at the horizon
-    grad.addColorStop(0.28, "#b6c9dd");
-    grad.addColorStop(0.62, "#7fa3cd");
+    grad.addColorStop(0, "#cfd8de"); // below the horizon (rarely seen)
+    grad.addColorStop(0.5, "#d8dfe6"); // sea haze AT the horizon
+    grad.addColorStop(0.68, "#b6c9dd");
+    grad.addColorStop(0.85, "#7fa3cd");
     grad.addColorStop(1, "#4f7cb4"); // zenith
     ctx.fillStyle = grad;
     ctx.fillRect(0, 0, s, s);
-    // Low winter sun (south-east): a soft radial glow.
-    const sun = ctx.createRadialGradient(s * 0.68, s * 0.7, 8, s * 0.68, s * 0.7, s * 0.3);
+    // Low winter sun (south-east), just above the dome's equator —
+    // canvas y maps to sphere v = 1 - y/s, and the horizon sits at
+    // v = 0.5, so y must be < 0.5s or the sun paints underground.
+    const sun = ctx.createRadialGradient(s * 0.68, s * 0.43, 8, s * 0.68, s * 0.43, s * 0.28);
     sun.addColorStop(0, "rgba(255,244,214,0.95)");
     sun.addColorStop(0.12, "rgba(255,238,200,0.5)");
     sun.addColorStop(1, "rgba(255,238,200,0)");
@@ -130,7 +136,6 @@ function cloudTexture(seed: number): THREE.CanvasTexture {
 const WOOD = new THREE.MeshStandardMaterial({ color: 0x6f5231, roughness: 0.9 });
 const WOOD_DARK = new THREE.MeshStandardMaterial({ color: 0x4c3a22, roughness: 0.95 });
 const IRON = new THREE.MeshStandardMaterial({ color: 0x3a3f45, roughness: 0.6, metalness: 0.55 });
-const CANVAS_CLOTH = new THREE.MeshStandardMaterial({ color: 0xd9cfae, roughness: 0.92 });
 const SUIT = new THREE.MeshStandardMaterial({ color: 0x2d2c33, roughness: 0.9 });
 const SKIN = new THREE.MeshStandardMaterial({ color: 0xc99b78, roughness: 0.8 });
 const GULL_BODY = new THREE.MeshStandardMaterial({ color: 0xe8e8e4, roughness: 0.85 });
@@ -195,8 +200,9 @@ export function buildClouds(): THREE.Group {
 }
 
 /** Sand skirt far beyond the surveyed tile so the horizon is never
- * void, plus the Atlantic to the EAST of Kill Devil Hills. */
-export function buildOuterGround(tileExtentM: number): THREE.Group {
+ * void, plus (Kill Devil Hills only) the Atlantic to the EAST —
+ * Huffman Prairie is landlocked Ohio pasture and gets NO ocean. */
+export function buildOuterGround(tileExtentM: number, withOcean: boolean): THREE.Group {
   const group = new THREE.Group();
   const sand = sandTexture();
   sand.wrapS = THREE.RepeatWrapping;
@@ -209,6 +215,9 @@ export function buildOuterGround(tileExtentM: number): THREE.Group {
   skirt.rotation.x = -Math.PI / 2;
   skirt.position.y = -0.35; // tucked under the surveyed tile
   group.add(skirt);
+  if (!withOcean) {
+    return group;
+  }
   const ocean = new THREE.Mesh(
     new THREE.PlaneGeometry(2600, 5200),
     new THREE.MeshStandardMaterial({
@@ -493,13 +502,14 @@ export function buildDressing(
   launch: readonly [number, number, number],
   railLengthM: number,
   tileExtentM: number,
+  withOcean: boolean,
   groundY: (xRel: number, zRel: number) => number,
 ): Dressing {
   const group = new THREE.Group();
   group.add(buildSky());
   const clouds = buildClouds();
   group.add(clouds);
-  group.add(buildOuterGround(tileExtentM));
+  group.add(buildOuterGround(tileExtentM, withOcean));
   const rail = buildRail(railLengthM);
   rail.position.set(launch[0], launch[1], launch[2]);
   group.add(rail);

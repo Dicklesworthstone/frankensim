@@ -5,7 +5,7 @@
 import * as THREE from "three";
 import { buildWrightFlyerAirframe } from "./airframe/parametricAirframe.ts";
 import { driveScripted } from "./airframe/applyPose.ts";
-import { buildTerrainArrays } from "./terrainMesh.ts";
+import { buildTerrainArrays, heightAt } from "./terrainMesh.ts";
 import { type CameraPreset, PRESET_KEYS, cameraFor } from "./camera.ts";
 import { NEUTRAL, keysFrom, stepCommand } from "./input.ts";
 import { hudLines } from "./hud.ts";
@@ -27,7 +27,6 @@ import { ghostAt, type FlightRecording } from "./sim/replay.ts";
 import { CaptionStream, formatCaption } from "./sim/captions.ts";
 import { IDLE_INPUTS, phaseDisplay } from "./gauges.ts";
 import { createHudDials, createPhaseBanner } from "./hudDials.ts";
-import { heightAt } from "./terrainMesh.ts";
 import { orvilleReachableX } from "./dressing.ts";
 import { buildDressing, buildProneWilbur, sandTileMaterial } from "./dressing3d.ts";
 
@@ -36,7 +35,10 @@ export function createFlyerSceneRenderer(
   simClient?: SimClient,
   ghost?: FlightRecording,
 ): FlyerRenderer {
-  const renderer = new THREE.WebGLRenderer({ antialias: true });
+  // Logarithmic depth: the diorama spans 0.1 m (cockpit) to 2.6 km
+  // (sky dome); a linear 24-bit buffer z-fights the ocean/skirt/tile
+  // layers at that range.
+  const renderer = new THREE.WebGLRenderer({ antialias: true, logarithmicDepthBuffer: true });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   container.appendChild(renderer.domElement);
   const scene = new THREE.Scene();
@@ -59,6 +61,7 @@ export function createFlyerSceneRenderer(
   const tGeo = new THREE.BufferGeometry();
   tGeo.setAttribute("position", new THREE.BufferAttribute(terrain.positions, 3));
   tGeo.setAttribute("color", new THREE.BufferAttribute(terrain.colors, 3));
+  tGeo.setAttribute("uv", new THREE.BufferAttribute(terrain.uvs, 2));
   tGeo.setIndex(new THREE.BufferAttribute(terrain.indices, 1));
   tGeo.computeVertexNormals();
   scene.add(new THREE.Mesh(tGeo, sandTileMaterial()));
@@ -79,6 +82,7 @@ export function createFlyerSceneRenderer(
     launch,
     site === "huffman" ? 30.0 : 18.3,
     tileExtent,
+    site !== "huffman", // the Atlantic is a Kill Devil Hills fact
     (xRel, zRel) =>
       heightAt(grid, launch[0] + xRel + half, -(launch[2] + zRel) + half) - launch[1],
   );
