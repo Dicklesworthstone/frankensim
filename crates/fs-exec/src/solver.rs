@@ -5384,6 +5384,15 @@ pub mod snapshot_v2 {
     /// says about the stochastic cursor and budget state.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct DecodedStateManifestV2 {
+        /// State-type identity pinned by the decoded value's Rust type,
+        /// compared against the retained context during preparation.
+        pub state_type: SnapshotStateTypeIdV2,
+        /// State-schema identity pinned by the decoded value's Rust type.
+        pub state_schema: SnapshotStateSchemaIdV2,
+        /// Payload-codec identity pinned by the decoded value's Rust type.
+        pub state_codec: SnapshotStateCodecIdV2,
+        /// Codec version pinned by the decoded value's Rust type.
+        pub state_codec_version: u32,
         /// Stochastic cursor recomputed from the decoded state.
         pub rng_counter: SnapshotRngCounterIdV2,
         /// Budget state recomputed from the decoded state.
@@ -5406,6 +5415,9 @@ pub mod snapshot_v2 {
             /// Divergent manifest field.
             field: SnapshotContextFieldV2,
         },
+        /// Cancellation was requested while preparing; nothing was bound
+        /// and the opened snapshot was not consumed.
+        Cancelled,
     }
 
     impl fmt::Display for PrepareResumeErrorV2 {
@@ -5423,12 +5435,31 @@ pub mod snapshot_v2 {
                      disagrees with the retained context",
                     field.as_str()
                 ),
+                Self::Cancelled => write!(
+                    formatter,
+                    "prepare-resume refused: cancellation was requested \
+                     before a resume could be prepared"
+                ),
             }
         }
     }
 
     impl core::error::Error for PrepareResumeErrorV2 {}
 
+    impl PrepareResumeErrorV2 {
+        /// The first divergent semantic field, when the refusal is a
+        /// solver-context or post-decode-manifest disagreement; `None`
+        /// for lifecycle refusals such as cancellation.
+        #[must_use]
+        pub const fn field(&self) -> Option<SnapshotContextFieldV2> {
+            match self {
+                Self::SolverContextMismatch { field } | Self::DecodedManifestMismatch { field } => {
+                    Some(*field)
+                }
+                Self::Cancelled => None,
+            }
+        }
+    }
     /// Activation-ready resume: decoded state bound to the actual solver
     /// instance's expectation AND a post-decode recomputed manifest.
     ///
@@ -5515,14 +5546,20 @@ pub mod snapshot_v2 {
     ///
     /// # Errors
     /// [`PrepareResumeErrorV2::SolverContextMismatch`] naming the first
-    /// divergent field, or [`PrepareResumeErrorV2::DecodedManifestMismatch`].
-    pub fn prepare_resume<R>(
+    /// divergent field, [`PrepareResumeErrorV2::DecodedManifestMismatch`],
+    /// or [`PrepareResumeErrorV2::Cancelled`].
+    pub fn prepare_resume<R, C>(
         solver: &R,
         opened: OpenedSnapshotV2<R::State>,
+        mut cancellation: C,
     ) -> Result<PreparedResume<R::State>, PrepareResumeErrorV2>
     where
         R: super::PreparableSolverV2,
+        C: FnMut() -> bool,
     {
+        if cancellation() {
+            return Err(PrepareResumeErrorV2::Cancelled);
+        }
         if let Err(SnapshotV2Error::CharterMismatch { field }) = verify_state_charter::<R::State>()
         {
             return Err(PrepareResumeErrorV2::SolverContextMismatch { field });
@@ -5536,6 +5573,26 @@ pub mod snapshot_v2 {
         }
         let manifest = solver.decoded_state_manifest(opened.state());
         let retained = opened.expected_context().context();
+        if manifest.state_type != retained.state_type() {
+            return Err(PrepareResumeErrorV2::DecodedManifestMismatch {
+                field: SnapshotContextFieldV2::StateType,
+            });
+        }
+        if manifest.state_schema != retained.state_schema() {
+            return Err(PrepareResumeErrorV2::DecodedManifestMismatch {
+                field: SnapshotContextFieldV2::StateSchema,
+            });
+        }
+        if manifest.state_codec != retained.state_codec() {
+            return Err(PrepareResumeErrorV2::DecodedManifestMismatch {
+                field: SnapshotContextFieldV2::StateCodec,
+            });
+        }
+        if manifest.state_codec_version != retained.state_codec_version() {
+            return Err(PrepareResumeErrorV2::DecodedManifestMismatch {
+                field: SnapshotContextFieldV2::StateCodecVersion,
+            });
+        }
         if manifest.rng_counter != retained.rng_counter {
             return Err(PrepareResumeErrorV2::DecodedManifestMismatch {
                 field: SnapshotContextFieldV2::RngCounter,
@@ -5545,6 +5602,11 @@ pub mod snapshot_v2 {
             return Err(PrepareResumeErrorV2::DecodedManifestMismatch {
                 field: SnapshotContextFieldV2::Budget,
             });
+        }
+        // Final probe: refuse binding a receipt for work that was cancelled
+        // while it was being prepared (bead sj31i.52.5.2 acceptance).
+        if cancellation() {
+            return Err(PrepareResumeErrorV2::Cancelled);
         }
         let OpenedSnapshotV2 {
             state,
@@ -6457,9 +6519,10 @@ pub trait PreparableSolverV2: ResumableSolverV2 {
     /// from the candidate snapshot) is the whole point.
     fn expected_resume_context(&self) -> snapshot_v2::ExpectedResumeContextV2;
 
-    /// Recompute the stochastic-cursor and budget manifest from a decoded
-    /// state. Called only after envelope admission; must be a pure
-    /// function of the state.
+    /// Recompute the post-decode manifest from a decoded state: the
+    /// stochastic cursor, the budget state, and the state-type/schema/codec
+    /// identities pinned by `Self::State`. Called only after envelope
+    /// admission; must be a pure function of the state.
     fn decoded_state_manifest(&self, state: &Self::State) -> snapshot_v2::DecodedStateManifestV2;
 }
 
@@ -9356,13 +9419,24 @@ mod tests {
         }
     }
 
+    fn jacobi_identity_manifest(
+        rng_counter: snapshot_v2::SnapshotRngCounterIdV2,
+        budget: snapshot_v2::SnapshotBudgetStateIdV2,
+    ) -> snapshot_v2::DecodedStateManifestV2 {
+        snapshot_v2::DecodedStateManifestV2 {
+            state_type: <JacobiState as SolverStateV2>::STATE_TYPE_ID_V2,
+            state_schema: <JacobiState as SolverStateV2>::STATE_SCHEMA_ID_V2,
+            state_codec: <JacobiState as SolverStateV2>::STATE_CODEC_ID_V2,
+            state_codec_version: <JacobiState as SolverStateV2>::STATE_CODEC_VERSION_V2,
+            rng_counter,
+            budget,
+        }
+    }
+
     fn matching_manifest(
         context: &snapshot_v2::ExpectedResumeContextV2,
     ) -> snapshot_v2::DecodedStateManifestV2 {
-        snapshot_v2::DecodedStateManifestV2 {
-            rng_counter: context.context().rng_counter(),
-            budget: context.context().budget(),
-        }
+        jacobi_identity_manifest(context.context().rng_counter(), context.context().budget())
     }
 
     fn opened_jacobi() -> (JacobiState, snapshot_v2::OpenedSnapshotV2<JacobiState>) {
@@ -9386,7 +9460,7 @@ mod tests {
         };
         let content_id = opened.content_id();
         let resume_id = opened.resume_id();
-        let prepared = snapshot_v2::prepare_resume(&solver, opened).expect("prepares");
+        let prepared = snapshot_v2::prepare_resume(&solver, opened, || false).expect("prepares");
         assert_eq!(prepared.state(), &state);
         assert_eq!(prepared.content_id(), content_id);
         assert_eq!(prepared.resume_id(), resume_id);
@@ -9397,7 +9471,7 @@ mod tests {
         // Deterministic preparation receipt: preparing the same snapshot
         // again binds identical identities and manifest.
         let (_, reopened) = opened_jacobi();
-        let again = snapshot_v2::prepare_resume(&solver, reopened).expect("prepares");
+        let again = snapshot_v2::prepare_resume(&solver, reopened, || false).expect("prepares");
         assert_eq!(again.content_id(), prepared.content_id());
         assert_eq!(again.resume_id(), prepared.resume_id());
         assert_eq!(again.manifest(), prepared.manifest());
@@ -9442,7 +9516,7 @@ mod tests {
             manifest: matching_manifest(&wrong_version),
             context: wrong_version,
         };
-        let error = snapshot_v2::prepare_resume(&solver, opened).expect_err("must refuse");
+        let error = snapshot_v2::prepare_resume(&solver, opened, || false).expect_err("must refuse");
         assert_eq!(
             error,
             snapshot_v2::PrepareResumeErrorV2::SolverContextMismatch {
@@ -9467,7 +9541,7 @@ mod tests {
             manifest: matching_manifest(&wrong_problem),
             context: wrong_problem,
         };
-        let error = snapshot_v2::prepare_resume(&solver, opened).expect_err("must refuse");
+        let error = snapshot_v2::prepare_resume(&solver, opened, || false).expect_err("must refuse");
         assert_eq!(
             error,
             snapshot_v2::PrepareResumeErrorV2::SolverContextMismatch {
@@ -9482,13 +9556,13 @@ mod tests {
         // RNG cursor drifted between retained context and decoded state.
         let (_, opened) = opened_jacobi();
         let solver = PreparableJacobi {
-            manifest: snapshot_v2::DecodedStateManifestV2 {
-                rng_counter: snapshot_v2::SnapshotRngCounterIdV2::from_bytes([0x99; 32]),
-                budget: context.context().budget(),
-            },
+            manifest: jacobi_identity_manifest(
+                snapshot_v2::SnapshotRngCounterIdV2::from_bytes([0x99; 32]),
+                context.context().budget(),
+            ),
             context: context.clone(),
         };
-        let error = snapshot_v2::prepare_resume(&solver, opened).expect_err("must refuse");
+        let error = snapshot_v2::prepare_resume(&solver, opened, || false).expect_err("must refuse");
         assert_eq!(
             error,
             snapshot_v2::PrepareResumeErrorV2::DecodedManifestMismatch {
@@ -9499,13 +9573,13 @@ mod tests {
         // Budget state drifted.
         let (_, opened) = opened_jacobi();
         let solver = PreparableJacobi {
-            manifest: snapshot_v2::DecodedStateManifestV2 {
-                rng_counter: context.context().rng_counter(),
-                budget: snapshot_v2::SnapshotBudgetStateIdV2::from_bytes([0x98; 32]),
-            },
+            manifest: jacobi_identity_manifest(
+                context.context().rng_counter(),
+                snapshot_v2::SnapshotBudgetStateIdV2::from_bytes([0x98; 32]),
+            ),
             context: context.clone(),
         };
-        let error = snapshot_v2::prepare_resume(&solver, opened).expect_err("must refuse");
+        let error = snapshot_v2::prepare_resume(&solver, opened, || false).expect_err("must refuse");
         assert_eq!(
             error,
             snapshot_v2::PrepareResumeErrorV2::DecodedManifestMismatch {
@@ -9519,14 +9593,20 @@ mod tests {
     /// naming that exact field (bead sj31i.52.5.2 acceptance: wrong
     /// mode/fingerprint/provenance and every pause-request/generation/
     /// run/worker-boundary component). StateType, StateSchema,
-    /// StateCodec, and StateCodecVersion cannot surface here as firsts:
-    /// both sides of one prepare call derive from one state type, and
-    /// cross-family envelopes are already refused by the open path's
-    /// `matches_state` charter gate plus era quarantine. DrainDrained and
-    /// DrainReport are unreachable as firsts through this fixture because
-    /// finalize drains every registered worker and binds the report
-    /// identity to the same run/workers/era inputs, so a worker-count
-    /// perturbation always diverges DrainRegistered first.
+    /// StateCodec, and StateCodecVersion are ALSO compared on the
+    /// post-decode side (manifest vs retained), but cannot surface as
+    /// firsts through honest public paths in one prepare call: both
+    /// sides of one call pin them from one Rust type, and contexts
+    /// declaring foreign identities are refused by seal/open
+    /// (`matches_state` charter gate plus era quarantine) before prepare
+    /// runs. That comparison exists for downstream lanes receiving
+    /// retained contexts across crates (52.5.3 ledger, 52.5.4 session),
+    /// which keep an activation-time gate even when admission took a
+    /// different path. DrainDrained and DrainReport are unreachable as
+    /// firsts through this fixture because finalize drains every
+    /// registered worker and binds the report identity to the same
+    /// run/workers/era inputs, so a worker-count perturbation always
+    /// diverges DrainRegistered first.
     #[test]
     fn prepare_resume_refuses_each_first_divergent_context_field() {
         let cases = [
@@ -9599,7 +9679,8 @@ mod tests {
                 manifest: matching_manifest(&context),
                 context,
             };
-            let error = snapshot_v2::prepare_resume(&solver, opened).expect_err(field.as_str());
+            let error =
+                snapshot_v2::prepare_resume(&solver, opened, || false).expect_err(field.as_str());
             assert_eq!(
                 error,
                 snapshot_v2::PrepareResumeErrorV2::SolverContextMismatch { field },
@@ -9607,6 +9688,69 @@ mod tests {
                 field.as_str(),
             );
         }
+    }
+
+    /// Cancellation inside prepare itself must refuse with `Cancelled`
+    /// and bind nothing (bead sj31i.52.5.2 acceptance). Both probe points
+    /// are exercised: entry and pre-publication.
+    #[test]
+    fn prepare_resume_refuses_cancellation_at_both_probe_points() {
+        let context = base_v2_context::<JacobiState>();
+        let solver = PreparableJacobi {
+            manifest: matching_manifest(&context),
+            context,
+        };
+
+        // Cancelled before any work: nothing is derived or decoded.
+        let (_, opened) = opened_jacobi();
+        let error =
+            snapshot_v2::prepare_resume(&solver, opened, || true).expect_err("entry refusal");
+        assert_eq!(error, snapshot_v2::PrepareResumeErrorV2::Cancelled);
+        assert_eq!(error.field(), None);
+
+        // Cancelled only at the pre-publication probe: the entry poll
+        // passes, the publication poll refuses, and no third probe runs.
+        let (_, opened) = opened_jacobi();
+        let mut polls = 0usize;
+        let error = snapshot_v2::prepare_resume(&solver, opened, || {
+            polls += 1;
+            polls > 1
+        })
+        .expect_err("pre-publication refusal");
+        assert_eq!(error, snapshot_v2::PrepareResumeErrorV2::Cancelled);
+        assert_eq!(polls, 2, "exactly the entry and publication probes ran");
+    }
+
+    /// Field-specific diagnostics: each mismatch variant names its field
+    /// programmatically and in Display text (bead sj31i.52.5.2 actionable
+    /// diagnostics acceptance); cancellation refuses without a field.
+    #[test]
+    fn prepare_resume_errors_name_their_field_in_accessor_and_display() {
+        let cases = [
+            (
+                snapshot_v2::PrepareResumeErrorV2::SolverContextMismatch {
+                    field: snapshot_v2::SnapshotContextFieldV2::AlgorithmVersion,
+                },
+                snapshot_v2::SnapshotContextFieldV2::AlgorithmVersion,
+                "solver instance",
+            ),
+            (
+                snapshot_v2::PrepareResumeErrorV2::DecodedManifestMismatch {
+                    field: snapshot_v2::SnapshotContextFieldV2::RngCounter,
+                },
+                snapshot_v2::SnapshotContextFieldV2::RngCounter,
+                "post-decode",
+            ),
+        ];
+        for (error, field, phrase) in cases {
+            assert_eq!(error.field(), Some(field));
+            let text = error.to_string();
+            assert!(text.contains(field.as_str()), "missing {field:?}: {text}");
+            assert!(text.contains(phrase), "missing {phrase}: {text}");
+        }
+        let cancelled = snapshot_v2::PrepareResumeErrorV2::Cancelled;
+        assert_eq!(cancelled.field(), None);
+        assert!(cancelled.to_string().contains("cancellation"));
     }
     /// Charter fixture for the registry/derivation battery (52.5.2.1).
     const JACOBI_CHARTER: snapshot_v2::StateIdentityCharterV2 =
