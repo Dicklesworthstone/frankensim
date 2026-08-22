@@ -122,7 +122,9 @@ test("arm aiming: axis points and refusals", () => {
 });
 
 test("pose constants stay within joint limits", () => {
-  assert.ok(PRONE_POSE.headPitchRad < 0, "prone head looks UP");
+  // Rz(+θ) on the +x face tips it toward +y: positive = looking UP
+  // (regression: the original -0.55 stared into the wing fabric).
+  assert.ok(PRONE_POSE.headPitchRad > 0, "prone head looks UP");
   assert.ok(PRONE_POSE.shoulderForwardRad > 0 && PRONE_POSE.shoulderForwardRad < Math.PI);
   assert.ok(BINOCULAR_POSE.shoulderForwardRad > Math.PI / 2, "hands reach the face");
   assert.ok(BINOCULAR_POSE.elbowFlexRad > 0 && BINOCULAR_POSE.elbowFlexRad < 2.2);

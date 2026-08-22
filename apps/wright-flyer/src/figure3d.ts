@@ -61,6 +61,18 @@ function headMaterial(brother: Brother): THREE.MeshStandardMaterial {
   return mat;
 }
 
+
+/** Every figure mesh casts into the scene's shadow map (the sun's
+ * shadow pass is presentation-owned by flyerScene; a figure that
+ * casts nothing reads as floating). */
+function castAll(root: THREE.Object3D): void {
+  root.traverse((obj) => {
+    if ((obj as THREE.Mesh).isMesh) {
+      obj.castShadow = true;
+    }
+  });
+}
+
 function taperedLimb(
   topR: number,
   botR: number,
@@ -198,6 +210,7 @@ export function createBrotherFigure(brother: Brother): BrotherFigure {
   let glassesUp = false;
   let leftAim: readonly [number, number, number] | null = null;
   const armLShoulderY = s.shoulderHeightM;
+  castAll(group);
   return {
     group,
     spec: s,
@@ -234,7 +247,7 @@ export function createBrotherFigure(brother: Brother): BrotherFigure {
         armR.mid.rotation.z = p.elbowR;
       }
       glasses.visible = glassesUp;
-      headG.rotation.z = glassesUp ? -0.12 : 0;
+      headG.rotation.z = glassesUp ? 0.12 : 0; // eyes UP at the machine
     },
     setGlasses(up: boolean): void {
       glassesUp = up;
@@ -259,7 +272,8 @@ export function createProneBrother(brother: Brother): ProneFigure {
   const group = new THREE.Group();
   // Torso lying +x with a slight back arch; scale keeps the cradle fit.
   const torso = new THREE.Mesh(new THREE.CapsuleGeometry(0.14 * g, s.torsoLenM * 0.7, 4, 10), SUIT);
-  torso.rotation.z = Math.PI / 2 - PRONE_POSE.backArchRad;
+  // Capsule +y end fore-and-up = chest raised on the cradle.
+  torso.rotation.z = -Math.PI / 2 + PRONE_POSE.backArchRad;
   torso.scale.set(1.25, 1, 0.7);
   torso.position.set(0.05, 0.11, 0);
   group.add(torso);
@@ -305,6 +319,7 @@ export function createProneBrother(brother: Brother): ProneFigure {
     group.add(limb.root);
     armRoots.push(limb.root);
   }
+  castAll(group);
   return {
     group,
     setLever(dcRad: number): void {
@@ -314,7 +329,7 @@ export function createProneBrother(brother: Brother): ProneFigure {
       for (const root of armRoots) {
         root.rotation.z = PRONE_POSE.shoulderForwardRad + pull;
       }
-      headG.rotation.z = PRONE_POSE.headPitchRad - pull * 0.25;
+      headG.rotation.z = PRONE_POSE.headPitchRad + pull * 0.25;
     },
   };
 }

@@ -184,7 +184,9 @@ export function armAimAngles(
  * convention as GaitPose. */
 export const PRONE_POSE = {
   backArchRad: 0.18,
-  headPitchRad: -0.55, // head up (rotation about z of a +x-lying body)
+  // Rz(+θ) tips the +x-facing face toward +y — POSITIVE is head-UP
+  // (the -0.55 originally shipped here stared into the wing fabric).
+  headPitchRad: 0.55,
   hipFlexRad: 0.08,
   kneeFlexRad: 0.12,
   shoulderForwardRad: 1.35,
