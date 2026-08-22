@@ -45,6 +45,9 @@ export interface FlyerAirframe {
   muslinMat: THREE.MeshStandardMaterial;
   spruceMat: THREE.MeshStandardMaterial;
   textures: THREE.Texture[];
+  /** The prone pilot's hand elevator lever — articulated from live
+   * canard state so the cockpit view shows the control moving. */
+  elevatorLever: THREE.Mesh;
 }
 
 /**
@@ -1014,9 +1017,9 @@ export function buildWrightFlyerAirframe(): FlyerAirframe {
     muslinMat,
     spruceMat,
     textures,
+    elevatorLever,
   };
 }
-
 /**
  * Updates Wright Flyer propeller rotation, wing warp deflection, elevator canard pitch, rudder yaw, wire tension colors, and fabric cutaway.
  */
