@@ -3,8 +3,11 @@
 #![allow(clippy::wildcard_imports)]
 
 use fs_blake3::identity::{
-    AuthorityAdmitter, AuthorityRef, AuthorityVerifier, ContentId, ExternalAnchorRef,
-    IdentityReceipt, ObservedIdentity,
+    AuthorityAdmitter, AuthorityRef, AuthorityVerifier, ByteObservation, ContentId,
+    ExternalAnchorRef, IdentityReceipt, ObservedIdentity, OwnerPromotionAdmitter,
+    OwnerPromotionCapabilities, OwnerPromotionVerifier, PromotionAdmissionRequest,
+    PromotionCapabilityDescriptor, PromotionCapabilityVerdict, PromotionDecisionRequest,
+    PromotionDecisionScope, PromotionTrustRoot,
 };
 use fs_qty::{Dims, Time};
 use fs_spectral::adapter::*;
@@ -570,6 +573,57 @@ impl
     }
 }
 
+/// Owner-executed promotion capability approving every request from the
+/// fixture's own root; identity axes are enforced by `ExactAuthority` above.
+/// The retired configuration-only `admit_for_promotion` refuses
+/// unconditionally under the V3 owner-executed promotion protocol.
+#[derive(Debug, Clone, Copy)]
+struct AdapterApprovalCapability {
+    descriptor: PromotionCapabilityDescriptor,
+}
+
+fn adapter_approval_capability() -> AdapterApprovalCapability {
+    let implementation = b"fs-spectral-adapter-test capability executable";
+    let configuration = b"fs-spectral-adapter-test capability config";
+    AdapterApprovalCapability {
+        descriptor: PromotionCapabilityDescriptor::new(
+            ByteObservation::new(
+                ContentId::of_bytes(implementation),
+                implementation.len() as u64,
+            ),
+            ByteObservation::new(
+                ContentId::of_bytes(configuration),
+                configuration.len() as u64,
+            ),
+            1,
+        ),
+    }
+}
+
+impl OwnerPromotionVerifier for AdapterApprovalCapability {
+    fn descriptor(&self) -> PromotionCapabilityDescriptor {
+        self.descriptor
+    }
+
+    fn verify(&self, _request: &PromotionDecisionRequest) -> PromotionCapabilityVerdict {
+        PromotionCapabilityVerdict::Approve {
+            statement: ContentId::of_bytes(b"fs-spectral-adapter-test verification approval"),
+        }
+    }
+}
+
+impl OwnerPromotionAdmitter for AdapterApprovalCapability {
+    fn descriptor(&self) -> PromotionCapabilityDescriptor {
+        self.descriptor
+    }
+
+    fn admit(&self, _request: &PromotionAdmissionRequest) -> PromotionCapabilityVerdict {
+        PromotionCapabilityVerdict::Approve {
+            statement: ContentId::of_bytes(b"fs-spectral-adapter-test admission approval"),
+        }
+    }
+}
+
 fn admitted_witness(receipt: IdentityReceipt<SpectralPropositionId>) -> AdmittedSpectralWitnessV1 {
     let authority = ExactAuthority {
         proposition: receipt.id(),
@@ -589,15 +643,30 @@ fn admitted_witness(receipt: IdentityReceipt<SpectralPropositionId>) -> Admitted
         .unwrap()
         .admit(&authority)
         .unwrap();
-    let root = spectral_promotion_trust_root(authority.verifier, authority.policy).unwrap();
+    let mut root = PromotionTrustRoot::configure_owner_executed(
+        ObservedIdentity::from_receipt(authority.verifier),
+        ObservedIdentity::from_receipt(authority.policy),
+        SPECTRAL_PROMOTION_CONTEXT_V1,
+        1,
+        adapter_approval_capability(),
+        adapter_approval_capability(),
+    )
+    .unwrap();
     let promotion = root
-        .admit_for_promotion(
+        .decide_for_promotion(
             &admitted,
             ObservedIdentity::from_receipt(authority.verifier).bytes(),
             ObservedIdentity::from_receipt(authority.policy).bytes(),
+            PromotionDecisionScope::fresh(
+                ContentId::of_bytes(b"fs-spectral-adapter-test decision scope"),
+                ContentId::of_bytes(b"fs-spectral-adapter-test/decision-context/v1"),
+                1,
+                1,
+            ),
         )
         .unwrap();
-    AdmittedSpectralWitnessV1::from_authority(&admitted, promotion, root.charter()).unwrap()
+    let charter = root.charter();
+    AdmittedSpectralWitnessV1::from_authority(&admitted, promotion, charter).unwrap()
 }
 
 fn structured_problem(seed: u8) -> ValidatedSpectralProblemV1 {

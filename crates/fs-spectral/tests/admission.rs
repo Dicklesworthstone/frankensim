@@ -9,8 +9,10 @@
 use fs_blake3::identity::{
     AuthorityAdmitter, AuthorityRef, AuthorityVerifier, ByteObservation, CanonicalSchema,
     ContentId, ExternalAnchorRef, IdentityAdjudication, IdentityReceipt, NoClaimState,
-    ObservedIdentity, PromotionRefusal, PromotionRootCharter, StrongIdentity as _, TrustState,
-    adjudicate,
+    ObservedIdentity, OwnerPromotionAdmitter, OwnerPromotionCapabilities, OwnerPromotionVerifier,
+    PromotionAdmissionRequest, PromotionCapabilityDescriptor, PromotionCapabilityVerdict,
+    PromotionDecisionRequest, PromotionDecisionScope, PromotionRefusal, PromotionRootCharter,
+    PromotionTrustRoot, StrongIdentity as _, TrustState, adjudicate,
 };
 use fs_qty::{Angle, Dims, QtyAny, Time};
 use fs_spectral::admission::*;
@@ -162,6 +164,91 @@ fn present(
     )
 }
 
+/// Owner-executed promotion capabilities that approve every request their own
+/// root presents. The generic ExactAuthority ladder above already enforces
+/// the exact identity axes; these fixtures exist only so the V3
+/// owner-executed promotion path can mint — the retired configuration-only
+/// `admit_for_promotion` now refuses unconditionally
+/// (`PromotionRefusal::OwnerCapabilitiesUnavailable`).
+#[derive(Debug, Clone, Copy)]
+struct ApprovalCapability {
+    descriptor: PromotionCapabilityDescriptor,
+}
+
+fn approval_capability() -> ApprovalCapability {
+    let implementation = b"fs-spectral-test promotion capability executable";
+    let configuration = b"fs-spectral-test promotion capability config";
+    ApprovalCapability {
+        descriptor: PromotionCapabilityDescriptor::new(
+            ByteObservation::new(
+                ContentId::of_bytes(implementation),
+                implementation.len() as u64,
+            ),
+            ByteObservation::new(
+                ContentId::of_bytes(configuration),
+                configuration.len() as u64,
+            ),
+            1,
+        ),
+    }
+}
+
+impl OwnerPromotionVerifier for ApprovalCapability {
+    fn descriptor(&self) -> PromotionCapabilityDescriptor {
+        self.descriptor
+    }
+
+    fn verify(&self, _request: &PromotionDecisionRequest) -> PromotionCapabilityVerdict {
+        PromotionCapabilityVerdict::Approve {
+            statement: ContentId::of_bytes(b"fs-spectral-test verification approval"),
+        }
+    }
+}
+
+impl OwnerPromotionAdmitter for ApprovalCapability {
+    fn descriptor(&self) -> PromotionCapabilityDescriptor {
+        self.descriptor
+    }
+
+    fn admit(&self, _request: &PromotionAdmissionRequest) -> PromotionCapabilityVerdict {
+        PromotionCapabilityVerdict::Approve {
+            statement: ContentId::of_bytes(b"fs-spectral-test admission approval"),
+        }
+    }
+}
+
+/// Owner-executed spectral root over the same retained verifier and policy
+/// receipts the fixture's generic ladder admitted with. Each call returns a
+/// fresh root instance, so the fixed decision epoch/sequence below never
+/// replays within one instance.
+fn spectral_owner_promotion_root(
+    verifier: IdentityReceipt<SpectralAuthorityVerifierIdV1>,
+    policy: IdentityReceipt<SpectralAuthorityPolicyIdV1>,
+) -> PromotionTrustRoot<
+    SpectralVerifierIdentitySchemaV1,
+    SpectralAuthorityPolicySchemaV1,
+    OwnerPromotionCapabilities<ApprovalCapability, ApprovalCapability>,
+> {
+    PromotionTrustRoot::configure_owner_executed(
+        ObservedIdentity::from_receipt(verifier),
+        ObservedIdentity::from_receipt(policy),
+        SPECTRAL_PROMOTION_CONTEXT_V1,
+        1,
+        approval_capability(),
+        approval_capability(),
+    )
+    .expect("owner-executed spectral promotion root configures")
+}
+
+fn promotion_scope() -> PromotionDecisionScope {
+    PromotionDecisionScope::fresh(
+        ContentId::of_bytes(b"fs-spectral-test decision scope"),
+        ContentId::of_bytes(b"fs-spectral-test/decision-context/v1"),
+        1,
+        1,
+    )
+}
+
 fn policy_relative_and_promotion(
     receipt: IdentityReceipt<SpectralPropositionId>,
     authority: ExactAuthority,
@@ -175,15 +262,17 @@ fn policy_relative_and_promotion(
         .unwrap()
         .admit(&authority)
         .unwrap();
-    let root = spectral_promotion_trust_root(authority.verifier, authority.policy).unwrap();
+    let mut root = spectral_owner_promotion_root(authority.verifier, authority.policy);
     let promotion = root
-        .admit_for_promotion(
+        .decide_for_promotion(
             &admitted,
             ObservedIdentity::from_receipt(authority.verifier).bytes(),
             ObservedIdentity::from_receipt(authority.policy).bytes(),
+            promotion_scope(),
         )
         .unwrap();
-    (admitted, promotion, root.charter())
+    let charter = root.charter();
+    (admitted, promotion, charter)
 }
 
 fn admit_receipt(
@@ -741,17 +830,21 @@ fn favorable_witness_pairing_refuses_every_mismatched_promotion_axis() {
         Err(SpectralPromotionBindingErrorV1::KeyPolicy)
     );
 
-    let wrong_context_root = SpectralPromotionTrustRootV1::configure(
+    let mut wrong_context_root = PromotionTrustRoot::configure_owner_executed(
         ObservedIdentity::from_receipt(authority.verifier),
         ObservedIdentity::from_receipt(authority.policy),
         "org.frankensim.fs-spectral.wrong-promotion-context",
+        1,
+        approval_capability(),
+        approval_capability(),
     )
     .unwrap();
     let wrong_context = wrong_context_root
-        .admit_for_promotion(
+        .decide_for_promotion(
             &admitted,
             ObservedIdentity::from_receipt(authority.verifier).bytes(),
             ObservedIdentity::from_receipt(authority.policy).bytes(),
+            promotion_scope(),
         )
         .unwrap();
     assert_eq!(
@@ -2512,17 +2605,21 @@ fn problem_identity_is_permutation_stable_and_semantic_axis_sensitive() {
         .unwrap();
     let changed_observation =
         ByteObservation::new(ContentId::of_bytes(b"independent-verifier-observation"), 37);
-    let observation_root = SpectralPromotionTrustRootV1::configure(
+    let mut observation_root = PromotionTrustRoot::configure_owner_executed(
         ObservedIdentity::presented(authority.verifier.id(), changed_observation),
         ObservedIdentity::from_receipt(authority.policy),
         SPECTRAL_PROMOTION_CONTEXT_V1,
+        1,
+        approval_capability(),
+        approval_capability(),
     )
     .unwrap();
     let reobserved_promotion = observation_root
-        .admit_for_promotion(
+        .decide_for_promotion(
             &admitted,
             changed_observation,
             ObservedIdentity::from_receipt(authority.policy).bytes(),
+            promotion_scope(),
         )
         .unwrap();
     let reobserved_descriptor = RegularityClaimV1::new(
@@ -2546,17 +2643,21 @@ fn problem_identity_is_permutation_stable_and_semantic_axis_sensitive() {
     assert_ne!(first.problem_id(), reobserved.problem_id());
 
     let changed_length = ByteObservation::new(changed_observation.content_id(), 38);
-    let length_root = SpectralPromotionTrustRootV1::configure(
+    let mut length_root = PromotionTrustRoot::configure_owner_executed(
         ObservedIdentity::presented(authority.verifier.id(), changed_length),
         ObservedIdentity::from_receipt(authority.policy),
         SPECTRAL_PROMOTION_CONTEXT_V1,
+        1,
+        approval_capability(),
+        approval_capability(),
     )
     .unwrap();
     let length_promotion = length_root
-        .admit_for_promotion(
+        .decide_for_promotion(
             &admitted,
             changed_length,
             ObservedIdentity::from_receipt(authority.policy).bytes(),
+            promotion_scope(),
         )
         .unwrap();
     let changed_length_descriptor = RegularityClaimV1::new(
@@ -2581,17 +2682,21 @@ fn problem_identity_is_permutation_stable_and_semantic_axis_sensitive() {
 
     let changed_policy_observation =
         ByteObservation::new(ContentId::of_bytes(b"independent-policy-observation"), 29);
-    let policy_root = SpectralPromotionTrustRootV1::configure(
+    let mut policy_root = PromotionTrustRoot::configure_owner_executed(
         ObservedIdentity::from_receipt(authority.verifier),
         ObservedIdentity::presented(authority.policy.id(), changed_policy_observation),
         SPECTRAL_PROMOTION_CONTEXT_V1,
+        1,
+        approval_capability(),
+        approval_capability(),
     )
     .unwrap();
     let policy_promotion = policy_root
-        .admit_for_promotion(
+        .decide_for_promotion(
             &admitted,
             ObservedIdentity::from_receipt(authority.verifier).bytes(),
             changed_policy_observation,
+            promotion_scope(),
         )
         .unwrap();
     let changed_policy_descriptor = RegularityClaimV1::new(
@@ -4340,16 +4445,31 @@ fn exact_theorem_closure_is_support_and_definiteness_aware() {
         0.0,
         50,
     );
+    // Unknown definiteness cannot establish the nondegenerate inner product
+    // an adjoint needs, so admission refuses the witnessed SelfAdjoint claim
+    // outright (the same fail-closed gate the Normal sibling pins). That is
+    // the strongest form of the property this block always wanted: no
+    // real-spectrum theorem can be forged from a premise that never admits.
+    let report = validate_problem(default_spec(
+        indefinite_axes.clone(),
+        vec![self_adjoint, nonreal],
+        Vec::new(),
+        SpectralOrderingV1::SetValued,
+        CompletenessScopeV1::CandidateOnly,
+    ))
+    .expect_err(
+        "unknown-definiteness self-adjointness must fail closed, not forge a \
+         real-spectrum theorem",
+    );
     assert!(
-        validate_problem(default_spec(
-            indefinite_axes.clone(),
-            vec![self_adjoint, nonreal],
-            Vec::new(),
-            SpectralOrderingV1::SetValued,
-            CompletenessScopeV1::CandidateOnly,
-        ))
-        .is_ok(),
-        "indefinite/unknown-metric self-adjointness must not forge a real-spectrum theorem"
+        has_admission_issue(&report, |issue| matches!(
+            issue,
+            SpectralAdmissionIssueV1::InvalidStructureSupport {
+                property: StructurePropertyV1::SelfAdjoint,
+                ..
+            }
+        )),
+        "expected InvalidStructureSupport for SelfAdjoint on unknown definiteness: {report:?}"
     );
 
     let singular_id = SpectralMetricId::from_bytes([50; 32]);
@@ -6294,12 +6414,24 @@ fn self_configured_root_witnesses_fail_the_pinned_charter() {
             .unwrap()
             .admit(&PermitAll)
             .unwrap();
-    let rogue_root = spectral_promotion_trust_root(rogue_verifier, rogue_policy).unwrap();
+    // The V3 protocol requires owner-executed capabilities to mint; the
+    // adversary owns those too, so the self-configured lane still produces a
+    // witness whose only distinguishing axis is its configuration charter.
+    let mut rogue_root = PromotionTrustRoot::configure_owner_executed(
+        ObservedIdentity::from_receipt(rogue_verifier),
+        ObservedIdentity::from_receipt(rogue_policy),
+        SPECTRAL_PROMOTION_CONTEXT_V1,
+        1,
+        approval_capability(),
+        approval_capability(),
+    )
+    .unwrap();
     let rogue_witness = rogue_root
-        .admit_for_promotion(
+        .decide_for_promotion(
             &rogue_admitted,
             ObservedIdentity::from_receipt(rogue_verifier).bytes(),
             ObservedIdentity::from_receipt(rogue_policy).bytes(),
+            promotion_scope(),
         )
         .expect("a self-configured root promotes its own binding by design");
 
