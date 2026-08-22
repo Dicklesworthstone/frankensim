@@ -27,6 +27,9 @@ import { ghostAt, type FlightRecording } from "./sim/replay.ts";
 import { CaptionStream, formatCaption } from "./sim/captions.ts";
 import { IDLE_INPUTS, phaseDisplay } from "./gauges.ts";
 import { createHudDials, createPhaseBanner } from "./hudDials.ts";
+import { heightAt } from "./terrainMesh.ts";
+import { orvilleReachableX } from "./dressing.ts";
+import { buildDressing, buildProneWilbur, sandTileMaterial } from "./dressing3d.ts";
 
 export function createFlyerSceneRenderer(
   container: HTMLElement,
@@ -37,9 +40,13 @@ export function createFlyerSceneRenderer(
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   container.appendChild(renderer.domElement);
   const scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x8fa8c8); // overcast December morning
-  scene.fog = new THREE.Fog(0x8fa8c8, 60, 240);
-  const camera = new THREE.PerspectiveCamera(50, 1, 0.1, 500);
+  // December-morning haze: the sky dome carries the color now; the fog
+  // starts far enough out that the DUNES are visible (the old 60..240 m
+  // fog erased the ground the moment the machine climbed).
+  scene.background = new THREE.Color(0xc3d0dd);
+  scene.fog = new THREE.Fog(0xc3d0dd, 300, 2100);
+  // Far plane must clear the sky dome (2600 m) and the Atlantic.
+  const camera = new THREE.PerspectiveCamera(50, 1, 0.1, 5000);
   camera.position.set(9, 3.2, 11);
   camera.lookAt(0, 1.2, 0);
   const sun = new THREE.DirectionalLight(0xfff1dd, 2.2);
@@ -48,17 +55,38 @@ export function createFlyerSceneRenderer(
   // The REAL site tile (E1.3 3DEP grids): heightfield + splat.
   // E5.4: ?site=huffman loads the Huffman Prairie grid.
   const site = new URLSearchParams(window.location.search).get("site");
-  const terrain = buildTerrainArrays(site === "huffman" ? huffmanGrid : kdhGrid, 96);
+  const terrain = buildTerrainArrays(site === "huffman" ? huffmanGrid : kdhGrid, 192);
   const tGeo = new THREE.BufferGeometry();
   tGeo.setAttribute("position", new THREE.BufferAttribute(terrain.positions, 3));
   tGeo.setAttribute("color", new THREE.BufferAttribute(terrain.colors, 3));
   tGeo.setIndex(new THREE.BufferAttribute(terrain.indices, 1));
   tGeo.computeVertexNormals();
-  scene.add(new THREE.Mesh(tGeo, new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 1 })));
+  scene.add(new THREE.Mesh(tGeo, sandTileMaterial()));
   const airframe = buildWrightFlyerAirframe();
   const launch = terrain.launch;
   airframe.group.position.set(launch[0], launch[1] + 1.2, launch[2]);
   scene.add(airframe.group);
+  // The player's pilot: Wilbur prone on the lower wing at the cradle.
+  const wilbur = buildProneWilbur();
+  wilbur.position.set(-0.1, 0.12, 0.06);
+  airframe.cradleGroup.add(wilbur);
+  // The Kitty Hawk diorama (bead guzez.13): sky, clouds, outer sand +
+  // Atlantic, the launch rail, the 1903 camp, Orville, and the gulls.
+  const grid = site === "huffman" ? huffmanGrid : kdhGrid;
+  const tileExtent = (grid.grid_n - 1) * grid.spacing_m;
+  const half = tileExtent / 2;
+  const dressing = buildDressing(
+    launch,
+    site === "huffman" ? 30.0 : 18.3,
+    tileExtent,
+    (xRel, zRel) =>
+      heightAt(grid, launch[0] + xRel + half, -(launch[2] + zRel) + half) - launch[1],
+  );
+  scene.add(dressing.group);
+  // Orville's release point is LATCHED the first frame the machine is
+  // off the rail (pure pose math needs the release constants).
+  let orvilleReleaseX: number | null = null;
+  let orvilleReleaseT: number | null = null;
   let elapsedS = 0;
   // E2.4: input, cameras, HUD. The pilot takes over from the script the
   // first time a control key goes down.
@@ -177,6 +205,19 @@ export function createFlyerSceneRenderer(
         });
         const disp = phaseDisplay(snap.phase, banner);
         phaseEl.set(disp.text, disp.tone);
+        // Diorama: Orville chases while the machine is ON the rail,
+        // lets go at the first off-rail frame (latched), then watches.
+        const onRail = snap.phase === "on-rail";
+        if (!onRail && orvilleReleaseX === null) {
+          orvilleReleaseX = orvilleReachableX(hudIn.elapsedS, snap.xM);
+          orvilleReleaseT = hudIn.elapsedS;
+        }
+        dressing.animate(hudIn.elapsedS, {
+          onRail,
+          aircraftX: snap.xM,
+          releaseX: orvilleReleaseX,
+          releaseT: orvilleReleaseT,
+        });
         // Labeled ride-along captions (latest two).
         if (snap.tick > lastCaptionTick) {
           lastCaptionTick = snap.tick;
@@ -228,6 +269,14 @@ export function createFlyerSceneRenderer(
         warpRad: pose.warpTipRad,
       });
       phaseEl.set(null, "info");
+      // Attract-mode diorama: the machine idles at the rail head, so
+      // Orville stands at the wingtip; gulls and the fire still live.
+      dressing.animate(elapsedS, {
+        onRail: true,
+        aircraftX: 0,
+        releaseX: null,
+        releaseT: null,
+      });
       if (pose.clamped) {
         console.warn(JSON.stringify({ suite: "wf-scene", event: "control-stop", t: elapsedS }));
       }
