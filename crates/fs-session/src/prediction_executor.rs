@@ -1,9 +1,9 @@
 //! Target-inaccessible ensemble executor with complete sample accounting
-//! (bead frankensim-jmh21.2, core slice).
+//! (bead frankensim-jmh21.2).
 //!
 //! Executes one deterministic seeded ensemble against an admitted
 //! [`PredictionExecutionInput`] and produces the UNSEALED payload that the
-//! bundle sealer later commits. Three properties hold by construction:
+//! bundle sealer later commits. Five properties hold by construction:
 //!
 //! - **Target inaccessibility**: the model callback receives ONLY logical
 //!   sample coordinates and coordinate-derived seeds. No executor API
@@ -17,11 +17,30 @@
 //!   function of (stream declaration, sample index) through a versioned
 //!   hash domain. Worker identity, execution order, and wall clock never
 //!   reach a seed, so replay at any concurrency is bit-identical.
+//! - **Explicit capability admission**: filesystem and network access are
+//!   granted per run through [`ExecutionCapabilities`]. The grant binds
+//!   checkpoint lineage and run-log identity, and resume refuses any
+//!   grant other than the prefix's own, so a prefix cannot be laundered
+//!   through a broader (or narrower) environment.
+//! - **Adaptive diagnostics only**: the adaptive driver exposes the
+//!   RETAINED prediction-side outcome prefix to the model — successes,
+//!   refusals, and failures alike, so deletion is unrepresentable — and
+//!   nothing else. No target type exists in this crate and the rung is
+//!   fixed by the executor, so target-informed sampling and rung
+//!   substitution have no API to reach.
+//!
+//! Forks are honest by construction: [`fork_ensemble`] records the parent
+//! checkpoint identity on the child run, so a forked continuation can
+//! never pose as the plain ensemble.
 //!
 //! No-claims: target inaccessibility protects process separation only. It
 //! cannot prove the model, the uncertainty distribution, or the physical
 //! prediction correct, and a sealed output of a completed run remains
-//! exactly as scoreable-or-not as its referenced artifacts.
+//! exactly as scoreable-or-not as its referenced artifacts. Capability
+//! admission is a declaration-and-audit boundary inside one process: safe
+//! Rust cannot sandbox a closure against `std::fs`, so the grant makes
+//! undeclared access a lineage-visible contract violation, not a physical
+//! impossibility.
 
 use std::collections::BTreeMap;
 
@@ -36,6 +55,70 @@ pub const SAMPLE_SEED_DOMAIN: &str = "org.frankensim.fs-session.prediction-sampl
 /// Hard ceiling on ensemble size (admission refuses beyond it).
 pub const MAX_ENSEMBLE_SAMPLES: u64 = 1 << 20;
 
+/// Versioned domain for executor capability-set identities.
+pub const CAPABILITY_IDENTITY_DOMAIN: &str =
+    "org.frankensim.fs-session.prediction-executor-capabilities.v1";
+
+/// The execution environment granted to one ensemble run.
+///
+/// Compute is implicit — an executor that may not compute is absurd — so
+/// the explicit axes are filesystem and network access. The grant is
+/// recorded on the run, binds checkpoint lineage and run-log identity,
+/// and resume requires the exact grant the executed prefix ran under.
+///
+/// No-claim: this is a declaration-and-audit boundary, not a sandbox.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExecutionCapabilities {
+    filesystem: bool,
+    network: bool,
+}
+
+impl ExecutionCapabilities {
+    /// Compute only: no filesystem, no network.
+    #[must_use]
+    pub const fn compute_only() -> Self {
+        Self {
+            filesystem: false,
+            network: false,
+        }
+    }
+
+    /// Grant filesystem access.
+    #[must_use]
+    pub const fn granting_filesystem(mut self) -> Self {
+        self.filesystem = true;
+        self
+    }
+
+    /// Grant network access.
+    #[must_use]
+    pub const fn granting_network(mut self) -> Self {
+        self.network = true;
+        self
+    }
+
+    /// Whether filesystem access is admitted.
+    #[must_use]
+    pub const fn admits_filesystem(self) -> bool {
+        self.filesystem
+    }
+
+    /// Whether network access is admitted.
+    #[must_use]
+    pub const fn admits_network(self) -> bool {
+        self.network
+    }
+
+    /// Content identity of the capability set.
+    #[must_use]
+    pub fn identity(self) -> fs_blake3::ContentHash {
+        fs_blake3::hash_domain(
+            CAPABILITY_IDENTITY_DOMAIN,
+            &[self.filesystem as u8, self.network as u8],
+        )
+    }
+}
+
 /// Logical coordinates of one sample: everything the model may see.
 ///
 /// There is deliberately no field through which a target outcome, an
@@ -46,6 +129,8 @@ pub struct SampleCoordinates {
     pub sample_index: u64,
     /// The admitted model rung this run executes.
     pub rung: String,
+    /// The execution environment granted to this run.
+    pub capabilities: ExecutionCapabilities,
 }
 
 /// Coordinate-derived seeds, one per declared random stream.
@@ -130,7 +215,8 @@ pub enum RunDisposition {
 
 /// The unsealed run payload: retained outcomes plus derived accounting.
 ///
-/// Constructed only by [`execute_ensemble`]; the outcome vector and the
+/// Constructed only by [`execute_ensemble`], [`execute_ensemble_adaptive`],
+/// [`resume_ensemble`], or [`fork_ensemble`]; the outcome vector and the
 /// accounting can never disagree because the accounting is a projection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnsembleRun {
@@ -138,6 +224,8 @@ pub struct EnsembleRun {
     rung: String,
     outcomes: Vec<SampleOutcome>,
     disposition: RunDisposition,
+    capabilities: ExecutionCapabilities,
+    fork_parent: Option<fs_blake3::ContentHash>,
 }
 
 impl EnsembleRun {
@@ -159,9 +247,22 @@ impl EnsembleRun {
         self.input_root
     }
 
+    /// The capability grant this run executed under.
+    #[must_use]
+    pub const fn capabilities(&self) -> ExecutionCapabilities {
+        self.capabilities
+    }
+
+    /// Parent checkpoint identity for a forked continuation; `None` for a
+    /// plain or resumed run.
+    #[must_use]
+    pub const fn fork_parent(&self) -> Option<fs_blake3::ContentHash> {
+        self.fork_parent
+    }
+
     /// Extract the resumable checkpoint from a cancelled run: the executed
-    /// prefix, bound to input root and rung. A completed run has nothing to
-    /// resume and refuses.
+    /// prefix, bound to input root, rung, and capability grant. A completed
+    /// run has nothing to resume and refuses.
     ///
     /// # Errors
     /// Refuses on a completed run.
@@ -177,6 +278,7 @@ impl EnsembleRun {
             rung: self.rung.clone(),
             executed: self.outcomes[..usize::try_from(drained_from).expect("bounded by cap")]
                 .to_vec(),
+            capabilities: self.capabilities,
         })
     }
 
@@ -243,6 +345,9 @@ pub fn sample_seeds(input: &PredictionExecutionInput, sample_index: u64) -> Samp
 /// cancellation every unexecuted sample gets the drain marker and the run
 /// finalizes with the cancelled disposition.
 ///
+/// The `capabilities` grant is recorded on the run, its checkpoint, and
+/// its log; see [`ExecutionCapabilities`].
+///
 /// # Errors
 /// Admission refusals: zero or over-cap `requested`, a `rung` outside the
 /// input's admitted set (silent rung substitution is a refusal, never a
@@ -253,11 +358,66 @@ pub fn execute_ensemble<M>(
     input: &PredictionExecutionInput,
     rung: &str,
     requested: u64,
+    capabilities: ExecutionCapabilities,
     mut model: M,
 ) -> Result<EnsembleRun, ExecutorRefusal>
 where
     M: FnMut(&SampleCoordinates, &SampleSeeds) -> SampleOutcome,
 {
+    execute_ensemble_adaptive(
+        cx,
+        input,
+        rung,
+        requested,
+        capabilities,
+        |coordinates, seeds, _| model(coordinates, seeds),
+    )
+}
+
+/// Execute one deterministic ADAPTIVE ensemble.
+///
+/// Identical contract to [`execute_ensemble`] except the model also sees
+/// the RETAINED prefix of prior outcomes — prediction-side diagnostics
+/// only: successes, refusals, and failures alike, verbatim and in order.
+/// Because the view IS the retained vector, failure deletion is
+/// unrepresentable; because no target type exists in this crate and the
+/// rung is fixed by the executor, target-informed sampling and rung
+/// substitution have no API to reach.
+pub fn execute_ensemble_adaptive<M>(
+    cx: &Cx<'_>,
+    input: &PredictionExecutionInput,
+    rung: &str,
+    requested: u64,
+    capabilities: ExecutionCapabilities,
+    mut model: M,
+) -> Result<EnsembleRun, ExecutorRefusal>
+where
+    M: FnMut(&SampleCoordinates, &SampleSeeds, &[SampleOutcome]) -> SampleOutcome,
+{
+    let input_root = admit_run(input, rung, requested)?;
+    drive_ensemble(
+        cx,
+        input,
+        input_root,
+        rung,
+        requested,
+        Vec::new(),
+        capabilities,
+        None,
+        &mut model,
+    )
+}
+
+/// Shared admission for one ensemble invocation: bounds, rung admission,
+/// and the sealed input root.
+///
+/// # Errors
+/// Bounds, rung-admission, and input-identity refusals verbatim.
+fn admit_run(
+    input: &PredictionExecutionInput,
+    rung: &str,
+    requested: u64,
+) -> Result<fs_blake3::ContentHash, ExecutorRefusal> {
     if requested == 0 || requested > MAX_ENSEMBLE_SAMPLES {
         return Err(refuse(
             "prediction-executor-ensemble-bounds",
@@ -278,16 +438,42 @@ where
             ),
         ));
     }
-    let input_root = input.identity().map_err(|error: PredictionBundleError| {
+    input.identity().map_err(|error: PredictionBundleError| {
         refuse(
             "prediction-executor-input-identity",
             format!("cannot derive the input root: {error}"),
         )
-    })?;
+    })
+}
 
-    let mut outcomes = Vec::with_capacity(usize::try_from(requested).unwrap_or(0));
+/// The single execution driver behind plain, adaptive, resumed, and forked
+/// runs: one loop, one drain discipline, one reserved-marker rule.
+///
+/// # Errors
+/// Only a model returning the reserved [`SampleOutcome::Cancelled`] marker
+/// refuses here; everything else was admitted upstream.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one driver keeps the four public entries from drifting apart; \
+              each argument is a distinct authority the callers owe"
+)]
+fn drive_ensemble<M>(
+    cx: &Cx<'_>,
+    input: &PredictionExecutionInput,
+    input_root: fs_blake3::ContentHash,
+    rung: &str,
+    requested: u64,
+    prefix: Vec<SampleOutcome>,
+    capabilities: ExecutionCapabilities,
+    fork_parent: Option<fs_blake3::ContentHash>,
+    model: &mut M,
+) -> Result<EnsembleRun, ExecutorRefusal>
+where
+    M: FnMut(&SampleCoordinates, &SampleSeeds, &[SampleOutcome]) -> SampleOutcome,
+{
+    let mut outcomes = prefix;
     let mut disposition = RunDisposition::Completed;
-    for sample_index in 0..requested {
+    for sample_index in outcomes.len() as u64..requested {
         if cx.checkpoint().is_err() {
             // Drain: mark every unexecuted sample, finalize honestly.
             for _ in sample_index..requested {
@@ -301,9 +487,10 @@ where
         let coordinates = SampleCoordinates {
             sample_index,
             rung: rung.to_string(),
+            capabilities,
         };
         let seeds = sample_seeds(input, sample_index);
-        let outcome = model(&coordinates, &seeds);
+        let outcome = model(&coordinates, &seeds, outcomes.as_slice());
         if outcome == SampleOutcome::Cancelled {
             return Err(refuse(
                 "prediction-executor-reserved-outcome",
@@ -318,21 +505,26 @@ where
         rung: rung.to_string(),
         outcomes,
         disposition,
+        capabilities,
+        fork_parent,
     })
 }
 
-/// The executed prefix of a cancelled run, bound to its input root and
-/// rung so resume lineage is attestable: [`EnsembleCheckpoint::identity`]
-/// moves if ANY retained outcome, the rung, or the input root changes.
+/// The executed prefix of a cancelled run, bound to its input root, rung,
+/// and capability grant so resume lineage is attestable:
+/// [`EnsembleCheckpoint::identity`] moves if ANY retained outcome, the
+/// rung, the grant, or the input root changes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnsembleCheckpoint {
     input_root: fs_blake3::ContentHash,
     rung: String,
     executed: Vec<SampleOutcome>,
+    capabilities: ExecutionCapabilities,
 }
 
-/// Versioned domain for checkpoint lineage identities.
-pub const CHECKPOINT_IDENTITY_DOMAIN: &str = "org.frankensim.fs-session.prediction-checkpoint.v1";
+/// Versioned domain for checkpoint lineage identities. v2 binds the
+/// capability grant into the lineage.
+pub const CHECKPOINT_IDENTITY_DOMAIN: &str = "org.frankensim.fs-session.prediction-checkpoint.v2";
 
 impl EnsembleCheckpoint {
     /// Number of executed samples in the prefix.
@@ -341,8 +533,14 @@ impl EnsembleCheckpoint {
         self.executed.len() as u64
     }
 
-    /// Lineage identity binding input root, rung, and every retained
-    /// prefix outcome byte-exactly.
+    /// The capability grant the prefix was executed under.
+    #[must_use]
+    pub const fn capabilities(&self) -> ExecutionCapabilities {
+        self.capabilities
+    }
+
+    /// Lineage identity binding input root, rung, capability grant, and
+    /// every retained prefix outcome byte-exactly.
     #[must_use]
     pub fn identity(&self) -> fs_blake3::ContentHash {
         let mut payload = Vec::new();
@@ -371,54 +569,51 @@ impl EnsembleCheckpoint {
                 SampleOutcome::Cancelled => payload.push(4),
             }
         }
+        payload.extend_from_slice(self.capabilities.identity().as_bytes());
         fs_blake3::hash_domain(CHECKPOINT_IDENTITY_DOMAIN, &payload)
     }
 }
 
-/// Resume a cancelled ensemble from its checkpoint.
+/// Resume a cancelled ensemble from its checkpoint under the SAME
+/// capability grant.
 ///
 /// The retained prefix is trusted verbatim (its lineage identity is the
 /// caller's attestation surface); execution continues from the first
 /// unexecuted sample with the SAME coordinate-derived seeds, so an
-/// uninterrupted run and a resumed run are bit-identical.
+/// uninterrupted run and a resumed run are bit-identical. Resuming is
+/// continuing THE run: any grant other than the prefix's own refuses
+/// rather than laundering the prefix through a different environment.
+/// To continue under a DIFFERENT declared environment, use
+/// [`fork_ensemble`], which records the branch honestly.
 ///
 /// # Errors
 /// Admission refusals plus: a checkpoint whose input root differs from
-/// this input, whose rung differs from the requested rung, whose prefix
-/// contains a drain marker, or whose prefix is not shorter than
-/// `requested`.
+/// this input, whose rung differs from the requested rung, a capability
+/// grant differing from the checkpoint's, whose prefix contains a drain
+/// marker, or whose prefix is not shorter than `requested`.
 pub fn resume_ensemble<M>(
     cx: &Cx<'_>,
     input: &PredictionExecutionInput,
     checkpoint: &EnsembleCheckpoint,
     requested: u64,
+    capabilities: ExecutionCapabilities,
     mut model: M,
 ) -> Result<EnsembleRun, ExecutorRefusal>
 where
     M: FnMut(&SampleCoordinates, &SampleSeeds) -> SampleOutcome,
 {
-    if requested == 0 || requested > MAX_ENSEMBLE_SAMPLES {
-        return Err(refuse(
-            "prediction-executor-ensemble-bounds",
-            format!("requested must lie in 1..={MAX_ENSEMBLE_SAMPLES}, got {requested}"),
-        ));
-    }
-    let input_root = input.identity().map_err(|error: PredictionBundleError| {
-        refuse(
-            "prediction-executor-input-identity",
-            format!("cannot derive the input root: {error}"),
-        )
-    })?;
+    let input_root = admit_run(input, &checkpoint.rung, requested)?;
     if checkpoint.input_root != input_root {
         return Err(refuse(
             "prediction-executor-foreign-checkpoint",
             "checkpoint binds a different input root; resuming it here would              splice two ensembles",
         ));
     }
-    if !input.model_rungs().allowed_rungs.contains(&checkpoint.rung) {
+    if checkpoint.capabilities != capabilities {
         return Err(refuse(
-            "prediction-executor-rung-not-admitted",
-            format!("checkpoint rung {:?} is not admitted", checkpoint.rung),
+            "prediction-executor-capability-mismatch",
+            "resume must continue under the exact grant the executed prefix \
+             ran under; narrowing or broadening both misrepresent it",
         ));
     }
     if checkpoint.executed.len() as u64 >= requested {
@@ -436,45 +631,83 @@ where
             "a checkpoint prefix holds executed outcomes only; a drain marker              inside it means the checkpoint was cut past the cancellation point",
         ));
     }
-
-    let mut outcomes = checkpoint.executed.clone();
-    let mut disposition = RunDisposition::Completed;
-    for sample_index in checkpoint.executed.len() as u64..requested {
-        if cx.checkpoint().is_err() {
-            for _ in sample_index..requested {
-                outcomes.push(SampleOutcome::Cancelled);
-            }
-            disposition = RunDisposition::Cancelled {
-                drained_from: sample_index,
-            };
-            break;
-        }
-        let coordinates = SampleCoordinates {
-            sample_index,
-            rung: checkpoint.rung.clone(),
-        };
-        let seeds = sample_seeds(input, sample_index);
-        let outcome = model(&coordinates, &seeds);
-        if outcome == SampleOutcome::Cancelled {
-            return Err(refuse(
-                "prediction-executor-reserved-outcome",
-                "the Cancelled drain marker is the executor's alone",
-            ));
-        }
-        outcomes.push(outcome);
-    }
-    Ok(EnsembleRun {
+    drive_ensemble(
+        cx,
+        input,
         input_root,
-        rung: checkpoint.rung.clone(),
-        outcomes,
-        disposition,
-    })
+        &checkpoint.rung,
+        requested,
+        checkpoint.executed.clone(),
+        capabilities,
+        None,
+        &mut |coordinates, seeds, _history| model(coordinates, seeds),
+    )
 }
 
-/// Versioned domain for run-log content addresses.
-pub const RUN_LOG_IDENTITY_DOMAIN: &str = "org.frankensim.fs-session.prediction-run-log.v1";
-/// Run-log schema identity.
-pub const RUN_LOG_SCHEMA: &str = "frankensim.fs-session.prediction-run-log.v1";
+/// Fork a cancelled ensemble from its checkpoint into a NEW lineage.
+///
+/// Structural validation matches [`resume_ensemble`] (same input root,
+/// admitted rung, strict prefix, no drain markers), but two things differ
+/// BY CONSTRUCTION: any capability set may be declared for the
+/// continuation because it is RECORDED on the child rather than inherited
+/// silently, and the child run carries the parent checkpoint identity in
+/// [`EnsembleRun::fork_parent`] — a forked continuation can never be
+/// substituted for, or scored as, the plain uninterrupted ensemble.
+///
+/// # Errors
+/// Same structural refusals as resume.
+pub fn fork_ensemble<M>(
+    cx: &Cx<'_>,
+    input: &PredictionExecutionInput,
+    checkpoint: &EnsembleCheckpoint,
+    requested: u64,
+    capabilities: ExecutionCapabilities,
+    mut model: M,
+) -> Result<EnsembleRun, ExecutorRefusal>
+where
+    M: FnMut(&SampleCoordinates, &SampleSeeds) -> SampleOutcome,
+{
+    let input_root = admit_run(input, &checkpoint.rung, requested)?;
+    if checkpoint.input_root != input_root {
+        return Err(refuse(
+            "prediction-executor-foreign-checkpoint",
+            "checkpoint binds a different input root; forking it here would              splice two ensembles",
+        ));
+    }
+    if checkpoint.executed.len() as u64 >= requested {
+        return Err(refuse(
+            "prediction-executor-checkpoint-bounds",
+            format!(
+                "checkpoint holds {} executed sample(s), not a strict prefix of {requested}",
+                checkpoint.executed.len()
+            ),
+        ));
+    }
+    if checkpoint.executed.contains(&SampleOutcome::Cancelled) {
+        return Err(refuse(
+            "prediction-executor-checkpoint-bounds",
+            "a checkpoint prefix holds executed outcomes only; a drain marker              inside it means the checkpoint was cut past the cancellation point",
+        ));
+    }
+    drive_ensemble(
+        cx,
+        input,
+        input_root,
+        &checkpoint.rung,
+        requested,
+        checkpoint.executed.clone(),
+        capabilities,
+        Some(checkpoint.identity()),
+        &mut |coordinates, seeds, _history| model(coordinates, seeds),
+    )
+}
+
+/// Versioned domain for run-log content addresses. v2 adds the capability
+/// grant identity and the fork-parent binding.
+pub const RUN_LOG_IDENTITY_DOMAIN: &str = "org.frankensim.fs-session.prediction-run-log.v2";
+/// Run-log schema identity. v2 adds the capability grant identity and the
+/// fork-parent binding.
+pub const RUN_LOG_SCHEMA: &str = "frankensim.fs-session.prediction-run-log.v2";
 
 /// Bounded, deterministic, content-addressed log of one ensemble run.
 ///
@@ -482,7 +715,10 @@ pub const RUN_LOG_SCHEMA: &str = "frankensim.fs-session.prediction-run-log.v1";
 /// time, process identity, host identity, worker identity, or filesystem
 /// paths, so none can leak into the buffered or hashed bytes. Two replays
 /// of the same run produce byte-identical logs (the determinism test
-/// executes this claim).
+/// executes this claim). v2 additionally binds the capability grant
+/// identity and — for forks — the parent checkpoint identity, so runs
+/// that differ only in granted environment or lineage are attestably
+/// different logs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnsembleRunLog {
     input_root: fs_blake3::ContentHash,
@@ -497,6 +733,10 @@ pub struct EnsembleRunLog {
     /// First non-succeeded sample index, the log's "first divergence".
     first_divergence: Option<u64>,
     disposition: RunDisposition,
+    /// Content identity of the capability grant in force.
+    capabilities_identity: fs_blake3::ContentHash,
+    /// Parent checkpoint identity for a forked continuation.
+    fork_parent: Option<fs_blake3::ContentHash>,
 }
 
 impl EnsembleRunLog {
@@ -529,6 +769,14 @@ impl EnsembleRunLog {
             RunDisposition::Cancelled { drained_from } => {
                 bytes.push(1);
                 bytes.extend_from_slice(&drained_from.to_le_bytes());
+            }
+        }
+        bytes.extend_from_slice(self.capabilities_identity.as_bytes());
+        match self.fork_parent {
+            None => bytes.push(0),
+            Some(parent) => {
+                bytes.push(1);
+                bytes.extend_from_slice(parent.as_bytes());
             }
         }
         bytes
@@ -596,6 +844,8 @@ impl EnsembleRun {
                 .collect(),
             first_divergence,
             disposition: self.disposition,
+            capabilities_identity: self.capabilities.identity(),
+            fork_parent: self.fork_parent,
         }
     }
 }
