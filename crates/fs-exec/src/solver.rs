@@ -9514,6 +9514,100 @@ mod tests {
         );
     }
 
+    /// Every semantic context field that can diverge FIRST between the
+    /// actual solver expectation and the retained snapshot must refuse
+    /// naming that exact field (bead sj31i.52.5.2 acceptance: wrong
+    /// mode/fingerprint/provenance and every pause-request/generation/
+    /// run/worker-boundary component). StateType, StateSchema,
+    /// StateCodec, and StateCodecVersion cannot surface here as firsts:
+    /// both sides of one prepare call derive from one state type, and
+    /// cross-family envelopes are already refused by the open path's
+    /// `matches_state` charter gate plus era quarantine. DrainDrained and
+    /// DrainReport are unreachable as firsts through this fixture because
+    /// finalize drains every registered worker and binds the report
+    /// identity to the same run/workers/era inputs, so a worker-count
+    /// perturbation always diverges DrainRegistered first.
+    #[test]
+    fn prepare_resume_refuses_each_first_divergent_context_field() {
+        let cases = [
+            (
+                snapshot_v2::SnapshotContextFieldV2::Determinism,
+                snapshot_v2::SnapshotDeterminismV2::Fast,
+                0x3f,
+                0x55,
+                paused_boundary(0x66, 9, 17, 2),
+            ),
+            (
+                snapshot_v2::SnapshotContextFieldV2::ExecutionFingerprint,
+                snapshot_v2::SnapshotDeterminismV2::Deterministic,
+                0x40,
+                0x55,
+                paused_boundary(0x66, 9, 17, 2),
+            ),
+            (
+                snapshot_v2::SnapshotContextFieldV2::Provenance,
+                snapshot_v2::SnapshotDeterminismV2::Deterministic,
+                0x3f,
+                0x56,
+                paused_boundary(0x66, 9, 17, 2),
+            ),
+            (
+                snapshot_v2::SnapshotContextFieldV2::PauseRequest,
+                snapshot_v2::SnapshotDeterminismV2::Deterministic,
+                0x3f,
+                0x55,
+                paused_boundary(0x67, 9, 17, 2),
+            ),
+            (
+                snapshot_v2::SnapshotContextFieldV2::GateGeneration,
+                snapshot_v2::SnapshotDeterminismV2::Deterministic,
+                0x3f,
+                0x55,
+                paused_boundary(0x66, 10, 17, 2),
+            ),
+            (
+                snapshot_v2::SnapshotContextFieldV2::DrainRun,
+                snapshot_v2::SnapshotDeterminismV2::Deterministic,
+                0x3f,
+                0x55,
+                paused_boundary(0x66, 9, 18, 2),
+            ),
+            (
+                snapshot_v2::SnapshotContextFieldV2::DrainRegistered,
+                snapshot_v2::SnapshotDeterminismV2::Deterministic,
+                0x3f,
+                0x55,
+                paused_boundary(0x66, 9, 17, 3),
+            ),
+        ];
+        for (field, determinism, fingerprint, provenance, pause_boundary) in cases {
+            // One-argument divergence from the base context per case: the
+            // walker must report that field, not an earlier or later one.
+            let context = v2_context::<JacobiState>(
+                0x11,
+                7,
+                0x22,
+                0x33,
+                determinism,
+                fingerprint,
+                0x44,
+                provenance,
+                pause_boundary,
+            );
+            let (_, opened) = opened_jacobi();
+            let solver = PreparableJacobi {
+                manifest: matching_manifest(&context),
+                context,
+            };
+            let error = snapshot_v2::prepare_resume(&solver, opened).expect_err(field.as_str());
+            assert_eq!(
+                error,
+                snapshot_v2::PrepareResumeErrorV2::SolverContextMismatch { field },
+                "first divergence must be named {}",
+                field.as_str(),
+            );
+        }
+    }
     /// Charter fixture for the registry/derivation battery (52.5.2.1).
     const JACOBI_CHARTER: snapshot_v2::StateIdentityCharterV2 =
         snapshot_v2::StateIdentityCharterV2 {
