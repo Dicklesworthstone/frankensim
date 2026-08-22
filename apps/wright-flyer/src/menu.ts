@@ -81,11 +81,11 @@ export const MODE_CARDS: readonly {
 
 /** Key bindings card (mirrors input.ts, the ONLY binding authority). */
 export const KEY_LINES: readonly string[] = [
-  "S / ↓  pull canard (nose up)",
-  "W / ↑  push canard (nose down)",
+  "S / ↓  pull canard (nose UP)   W / ↑  push (nose DOWN)",
   "A / ←  warp left     D / →  warp right",
-  "Space  recenter      R  replay with ghost",
-  "T  telemetry panel   P  photo mode",
+  "Space  recenter      V  camera: behind ↔ pilot's eyes",
+  "M  sound on/off      H  controls card   T  telemetry",
+  "R  replay with ghost P  photo mode",
   "Drag the view = hip cradle   Gamepad left stick = warp/pull",
   "J  guided journey (watch → assist → authentic)",
 ];

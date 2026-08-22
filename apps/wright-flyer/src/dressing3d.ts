@@ -1311,6 +1311,9 @@ export interface Dressing {
       machine?: { x: number; rpm01: number; gust01: number; dustT?: number };
     },
   ): void;
+  /** QoS presentation budget (T0.6): 0 = full, 1 = secondary plumes
+   * off, 2 = every particle system hidden. Presentation-only. */
+  setParticleLevel(level: 0 | 1 | 2): void;
 }
 
 /** Named contract for the camp flagpole rig. */
@@ -1536,6 +1539,7 @@ export function buildDressing(
   // Daniels' flash latch: fires once per run release, presentation-only.
   let flashAtT: number | null = null;
   let armedRelease: number | null = null;
+  let lastFlashFop = 0;
   return {
     group,
     animate(t, orville): void {
@@ -1622,9 +1626,12 @@ export function buildDressing(
         }
         const pts: { x: number; y: number; z: number }[] = [];
         for (let s = 0; s <= STREAMER_SEGS; s += 1) {
-          pts.push(streamerPoint(i, s, STREAMER_SEGS, t, windMps));
+          const p = streamerPoint(i, s, STREAMER_SEGS, t, windMps);
+          // Ride the terrain along the whole ribbon (the anchors run
+          // past the launch flat, where dune relief is nonzero).
+          p.y += groundY(p.x, p.z);
+          pts.push(p);
         }
-        pts[0]!.y += groundY(pts[0]!.x, pts[0]!.z);
         r.write(pts);
       }
       // Camp flag cloth.
@@ -1681,6 +1688,42 @@ export function buildDressing(
         propwash.hideAll();
         exhaust.hideAll();
       }
+      // Landing dust burst (T3.5): outward ring from the touchdown spot.
+      const dustT = orville.machine?.dustT;
+      if (dustT !== undefined && withLife) {
+        for (let i = 0; i < 14; i += 1) {
+          const d = landingDust(i, dustT, t);
+          if (d === null) {
+            dust.hideAll(); // past the burst window: no frozen sprites
+            continue;
+          }
+          dust.set(
+            i,
+            launch[0] + orville.aircraftX + d.dx,
+            launch[1] + d.dy,
+            launch[2] + d.dz,
+            d.scale,
+            d.opacity,
+          );
+        }
+      } else {
+        dust.hideAll();
+      }
+      // Distant flock drifts downwind (-x), wrapping across the sky.
+      if (withLife) {
+        const span = 1400;
+        for (const spr of farFlock.children) {
+          const fx = spr.userData["fx"] as number;
+          const fs = spr.userData["fs"] as number;
+          spr.position.set(
+            launch[0] +
+              ((((fx - windMps * 0.35 * t * fs + span / 2) % span) + span) % span) -
+              span / 2,
+            launch[1] + (spr.userData["fy"] as number) + 2.2 * Math.sin(t * 0.21 * fs + fs),
+            launch[2] + (spr.userData["fz"] as number),
+          );
+        }
+      }
       // Daniels' plate: ONE flash when THIS run's release is latched
       // (the historic first-photo beat); re-arms per new run.
       if (orville.releaseT !== null && armedRelease !== orville.releaseT) {
@@ -1689,8 +1732,28 @@ export function buildDressing(
       }
       const fsince = flashAtT === null ? Number.POSITIVE_INFINITY : t - flashAtT;
       const fop = fsince >= 0 && fsince <= 0.26 ? Math.sin((fsince / 0.26) * Math.PI) : 0;
+      // Shutter sound seam: one rising-edge pulse per flash (main
+      // thread listens; audio stays out of the visual module).
+      if (fop > 0.5 && lastFlashFop <= 0.5) {
+        window.dispatchEvent(new CustomEvent("wf-flash"));
+      }
+      lastFlashFop = fop;
       (daniels.flash.material as THREE.SpriteMaterial).opacity = fop;
       daniels.lamp.intensity = 30 * fop;
+    },
+    setParticleLevel(level): void {
+      // Secondary plumes go first, everything airborne at Critical.
+      const reduced = level >= 1;
+      const none = level >= 2;
+      exhaust.group.visible = !reduced && !none;
+      dust.group.visible = !reduced && !none;
+      embers.group.visible = !none;
+      propwash.group.visible = !none;
+      smoke.group.visible = !none;
+      for (const [, r] of streamers) {
+        r.mesh.visible = !none;
+      }
+      farFlock.visible = !none;
     },
   };
 }

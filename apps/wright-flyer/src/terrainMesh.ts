@@ -73,9 +73,15 @@ export interface DuneDetailOptions {
 }
 
 const DUNE_DEFAULTS: Required<DuneDetailOptions> = {
+  // 55 m keeps rail + camp + landing flat true (the shack corner sits
+  // at 42 m, the camp's far corner at 45 m); full amplitude by ~175 m
+  // so dunes fill the mid-ground.
   flatRadiusM: 55,
-  featherM: 130,
-  amplitudeM: 3.6,
+  featherM: 120,
+  // Full-amplitude crest height. The 1903 accounts describe a rolling
+  // dune sea around the launch flat (they chose the ONE level plain);
+  // single-digit amplitudes read as ripples from cockpit height.
+  amplitudeM: 9.5,
 };
 
 /** Launch-relative dune displacement [m] for the render mesh. Ridged
@@ -98,18 +104,58 @@ export function duneDetail(
   }
   const t = Math.min(1, (dist - o.flatRadiusM) / o.featherM);
   const mask = t * t * (3 - 2 * t);
-  // Crests elongated east-west (x compressed less than z).
+  // Crests elongated east-west (x compressed less than z), three
+  // octaves: near ripple ridges, mid bays, and a ~300 m dune-sea
+  // swell so the horizon gets large forms, not just texture.
   const nx = xRel * 0.0135;
   const nz = zRel * 0.021;
-  let ridge = (1 - Math.abs(2 * valueNoise2(nx, nz) - 1)) * 0.68;
-  ridge += (1 - Math.abs(2 * valueNoise2(nx * 2.3 + 7.3, nz * 2.3 + 3.1) - 1)) * 0.32;
+  let ridge = (1 - Math.abs(2 * valueNoise2(nx, nz) - 1)) * 0.5;
+  ridge += (1 - Math.abs(2 * valueNoise2(nx * 2.3 + 7.3, nz * 2.3 + 3.1) - 1)) * 0.24;
+  ridge += (1 - Math.abs(2 * valueNoise2(nx * 0.38 + 13.1, nz * 0.38 + 8.7) - 1)) * 0.26;
   const swell = valueNoise2(xRel * 0.006 + 11.7, zRel * 0.006 + 5.9) - 0.5;
-  return mask * (o.amplitudeM * ridge + o.amplitudeM * 0.9 * swell);
+  // Flight-fan suppression: the machine crosses the flat 3–6 m up, so
+  // east of the rail crests are held LOW near the flight line and grow
+  // to full height off-axis — the pilot skims the swale while the
+  // horizon keeps its dune sea (0.22 floor ≈ 3.7 m max on the line).
+  const fan = xRel > 0 ? Math.min(1, 0.22 + Math.abs(zRel) / 130) : 1;
+  return mask * fan * (o.amplitudeM * ridge + o.amplitudeM * 0.75 * swell);
 }
 
-/** Slope/crest shade multiplier in [0.72, 1.14] for vertex tinting:
- * lee faces darken, crests catch light. Samples the SAME detail fn —
- * colors and geometry can never disagree. */
+/** Big Kill Devil Hill: the ~90 ft living dune southwest of the camp,
+ * the landmark in every period photograph. The 17x17 survey grid
+ * samples it only as a gentle swell at 125 m spacing, so the render
+ * layer authors it explicitly — labeled reconstruction, presentation
+ * only (heightAt stays untouched). Pure; zero far from the mound. */
+export const BIG_HILL_CENTER_M = { x: -235, z: 205 } as const;
+export const BIG_HILL_PEAK_M = 26;
+
+export function bigHillDetail(xRel: number, zRel: number): number {
+  if (!Number.isFinite(xRel) || !Number.isFinite(zRel)) {
+    throw new RangeError(`big hill coords must be finite, got ${xRel}, ${zRel}`);
+  }
+  // The launch/camp corridor stays EXACTLY at survey height (same law
+  // as duneDetail's mask) — the mound sits far outside it anyway.
+  if (Math.hypot(xRel, zRel) <= DUNE_DEFAULTS.flatRadiusM) {
+    return 0;
+  }
+  const dx = (xRel - BIG_HILL_CENTER_M.x) / 165;
+  const dz = (zRel - BIG_HILL_CENTER_M.z) / 125;
+  const r2 = dx * dx + dz * dz;
+  if (r2 > 7) {
+    return 0;
+  }
+  // Gaussian core with a noise-roughened shoulder so the silhouette
+  // is a weathered dune, not a perfect bell.
+  const roughen = 0.86 + 0.14 * valueNoise2(xRel * 0.02 + 3.7, zRel * 0.02 + 9.2);
+  return BIG_HILL_PEAK_M * Math.exp(-r2 * 2.1) * roughen;
+}
+
+const COLORS: Record<string, [number, number, number]> = {
+  water: [0.23, 0.36, 0.45],
+  sand: [0.72, 0.66, 0.51],
+  dune: [0.78, 0.7, 0.52],
+};
+
 export function duneShade(
   detailAt: (x: number, z: number) => number,
   x: number,
@@ -120,23 +166,17 @@ export function duneShade(
   const dz = detailAt(x, z + e) - detailAt(x, z - e);
   const slope = Math.hypot(dx, dz) / (2 * e); // ~tan of the local grade
   const self = detailAt(x, z);
-  const crest = Math.max(0, self) * 0.05; // brighten standing crests a touch
-  return Math.max(0.72, Math.min(1.14, 1 - Math.min(slope * 0.55, 0.28) + crest));
+  const crest = Math.max(0, self) * 0.04; // brighten standing crests a touch
+  // Gentle tint only — FORM comes from the sun + shadow maps; a heavy
+  // vertex darkening turned the far field into a black silhouette.
+  return Math.max(0.86, Math.min(1.18, 1 - Math.min(slope * 0.35, 0.14) + crest));
 }
-
-const COLORS: Record<string, [number, number, number]> = {
-  water: [0.23, 0.36, 0.45],
-  sand: [0.72, 0.66, 0.51],
-  dune: [0.78, 0.7, 0.52],
-};
-
-/** Two-ring LOD (T1.1): `warpAxis` maps the vertex-index fraction u∈[0,1]
- * along one axis to the FRACTIONAL tile position, clustering vertices
- * around the launch line (fraction `lf`) with a power ease. Endpoints
- * stay exact; monotone by construction; pure. gamma>1 ⇒ local spacing
- * near the launch is extent/(res·gamma) while the far field stretches.
- * Heights still come ONLY from the heightAt oracle — the warp moves
- * WHERE we sample, never WHAT the ground is. */
+/** Two-ring LOD (T1.1): `warpAxis` maps the vertex-index fraction
+ * u∈[0,1] along one axis to the FRACTIONAL tile position, clustering
+ * vertices around the launch line (fraction `lf`) with a power ease.
+ * Endpoints exact; monotone; pure. Heights still come ONLY from the
+ * heightAt oracle — the warp moves WHERE we sample, never WHAT the
+ * ground is. */
 export function warpAxis(u: number, lf: number, gamma = 2.2): number {
   const l = Math.min(0.85, Math.max(0.15, lf));
   const uu = Math.min(1, Math.max(0, u));

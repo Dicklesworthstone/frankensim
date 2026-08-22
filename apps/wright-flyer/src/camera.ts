@@ -24,7 +24,10 @@ export function cameraFor(
     case "free":
       return arrivalCamera(t, launch);
     case "chase":
-      return { pos: [aircraft[0] - 18, aircraft[1] + 4.5, aircraft[2] + 7], look };
+      // Directly BEHIND the machine, close enough to read Wilbur on
+      // the cradle (the old 18-m back / 7-m side framing read as a
+      // detached observer, not a piloting view).
+      return { pos: [aircraft[0] - 11, aircraft[1] + 3.2, aircraft[2] + 0.001], look };
     case "wingtip":
       return { pos: [aircraft[0] + 0.5, aircraft[1] + 1.4, aircraft[2] - 7.5], look };
     case "daniels":

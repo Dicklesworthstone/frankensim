@@ -5,7 +5,13 @@
 import * as THREE from "three";
 import { buildWrightFlyerAirframe } from "./airframe/parametricAirframe.ts";
 import { driveScripted } from "./airframe/applyPose.ts";
-import { buildTerrainArrays, heightAt } from "./terrainMesh.ts";
+import { FlightAudio } from "./audio.ts";
+import {
+  bigHillDetail,
+  buildTerrainArrays,
+  duneDetail,
+  heightAt,
+} from "./terrainMesh.ts";
 import {
   type CameraPreset,
   type CameraState,
@@ -43,6 +49,21 @@ import {
   sandTileMaterial,
 } from "./dressing3d.ts";
 import { createProneBrother } from "./figure3d.ts";
+
+// ONE soundscape for the whole app — module-level singleton so scene
+// rebuilds (R replay) never stack AudioContexts or event listeners.
+// The context starts on the first user gesture; M toggles mute (T4.3);
+// Daniels' flash publishes `wf-flash` for the shutter click.
+const AUDIO = new FlightAudio({ withOcean: true });
+const onFirstGesture = (): void => {
+  AUDIO.ensureStarted();
+  window.removeEventListener("pointerdown", onFirstGesture);
+  window.removeEventListener("keydown", onFirstGesture);
+};
+window.addEventListener("pointerdown", onFirstGesture);
+window.addEventListener("keydown", onFirstGesture);
+window.addEventListener("wf-flash", () => AUDIO.shutter());
+
 
 export function createFlyerSceneRenderer(
   container: HTMLElement,
@@ -101,7 +122,15 @@ export function createFlyerSceneRenderer(
   // The REAL site tile (E1.3 3DEP grids): heightfield + splat.
   // E5.4: ?site=huffman loads the Huffman Prairie grid.
   const site = new URLSearchParams(window.location.search).get("site");
-  const terrain = buildTerrainArrays(site === "huffman" ? huffmanGrid : kdhGrid, 256);
+  // Presentation-only relief layer (terrainMesh.ts): rolling dune sea
+  // Big Kill Devil Hill at Kill Devil Hills; gentle swells only for
+  // landlocked Huffman pasture. The launch/camp corridor stays at
+  // survey height by the mask inside duneDetail.
+  const siteRelief = (xRel: number, zRel: number): number =>
+    site === "huffman"
+      ? duneDetail(xRel, zRel, { amplitudeM: 2.2 })
+      : duneDetail(xRel, zRel) + bigHillDetail(xRel, zRel);
+  const terrain = buildTerrainArrays(site === "huffman" ? huffmanGrid : kdhGrid, 256, siteRelief);
   const tGeo = new THREE.BufferGeometry();
   tGeo.setAttribute("position", new THREE.BufferAttribute(terrain.positions, 3));
   tGeo.setAttribute("color", new THREE.BufferAttribute(terrain.colors, 3));
@@ -135,9 +164,14 @@ export function createFlyerSceneRenderer(
     site !== "huffman", // the Atlantic is a Kill Devil Hills fact
     baseY,
     (xRel, zRel) =>
-      heightAt(grid, launch[0] + xRel + half, -(launch[2] + zRel) + half) - launch[1],
+      heightAt(grid, launch[0] + xRel + half, -(launch[2] + zRel) + half) -
+      launch[1] +
+      siteRelief(xRel, zRel),
     windMps,
   );
+  // Trim prop speed [rad/s] — engine 1025 rpm through the 23:8 chain —
+  // the normalization for the plume strength (presentation-only).
+  const TRIM_PROP_OMEGA = ((1025 * (8 / 23)) / 60) * 2 * Math.PI;
   scene.add(dressing.group);
   // Orville's release point is LATCHED the first frame the machine is
   // off the rail (pure pose math needs the release constants).
@@ -149,7 +183,10 @@ export function createFlyerSceneRenderer(
   // pilot's seat (T3.4) — you are Wilbur.
   const down = new Set<string>();
   const humanMode = new URLSearchParams(window.location.search).get("mode") === "human";
-  let preset: CameraPreset = humanMode ? "onboard" : "free";
+  // Third person BEHIND Wilbur is the default piloting view (booting
+  // straight into the prone first-person eye was disorienting: no
+  // aircraft in frame, sand rushing). V toggles chase <-> onboard.
+  let preset: CameraPreset = humanMode ? "chase" : "free";
   let manual = false;
   let command = NEUTRAL;
   // The takeoff dolly (T2.1): under the skids on the rail; it STAYS on
@@ -160,21 +197,57 @@ export function createFlyerSceneRenderer(
   let dollyDropped = false;
   // Trim prop speed [rad/s] — engine 1025 rpm through the 23:8 chain —
   // the normalization for the plume strength (presentation-only).
-  const TRIM_PROP_OMEGA = ((1025 * (8 / 23)) / 60) * 2 * Math.PI;
-  // Telemetry text panel (the honest raw numbers; T toggles, kept ON
-  // by default — the dials never replace the telemetry, they front it).
+  // Landing latch: once the machine is DOWN, Orville runs to it and
+  // the dust burst fires (T2.6/T3.5).
+  let landedX: number | null = null;
+  let landedT: number | null = null;
   const hud = document.createElement("div");
   hud.id = "wf-telemetry";
   hud.style.cssText =
     "position:fixed;right:12px;bottom:12px;font:11px/1.5 monospace;color:#f5efe0;" +
     "background:rgba(20,24,30,.55);padding:8px 10px;border-radius:6px;white-space:pre;z-index:5";
+  hud.style.display = "none"; // raw telemetry opt-in via T (clutter fix)
   container.appendChild(hud);
   // Game HUD: analog dial panel + phase banner (tested math in gauges.ts).
   const dials = createHudDials(container);
   const phaseEl = createPhaseBanner(container);
+  // Always-visible controls card (H hides it): the fix for "the
+  // controls are confusing" is showing them, in flight, at all times.
+  const helpCard = document.createElement("div");
+  helpCard.id = "wf-help-card";
+  helpCard.style.cssText =
+    "position:fixed;left:12px;bottom:12px;font:12px/1.7 monospace;color:#f0e4c8;" +
+    "background:rgba(32,22,12,.78);border:1px solid #8a6a38;padding:10px 12px;" +
+    "border-radius:6px;white-space:pre;z-index:6";
+  helpCard.textContent = simClient
+    ? "CONTROLS\n" +
+      "S or ↓   pull — nose UP\n" +
+      "W or ↑   push — nose DOWN\n" +
+      "A/D ←/→  wing warp (bank)\n" +
+      "Space    recenter controls\n" +
+      "V        camera: behind ↔ pilot's eyes\n" +
+      "M sound · H hide this · T telemetry"
+    : "1-5 cameras · M sound · H hide";
+  container.appendChild(helpCard);
   const onKey = (e: KeyboardEvent, isDown: boolean): void => {
     if (isDown && e.code === "KeyT" && !e.repeat) {
       hud.style.display = hud.style.display === "none" ? "block" : "none";
+      return;
+    }
+    if (isDown && e.code === "KeyM" && !e.repeat) {
+      console.info(
+        JSON.stringify({ suite: "wf-scene", event: "audio-mute", muted: AUDIO.toggleMute() }),
+      );
+      return;
+    }
+    // V: the one camera key a player needs — third person behind
+    // Wilbur <-> his own eyes (number keys still reach every preset).
+    if (isDown && e.code === "KeyV" && !e.repeat) {
+      preset = preset === "onboard" ? "chase" : "onboard";
+      return;
+    }
+    if (isDown && e.code === "KeyH" && !e.repeat) {
+      helpCard.style.display = helpCard.style.display === "none" ? "block" : "none";
       return;
     }
     if (isDown && PRESET_KEYS[e.code]) {
@@ -227,7 +300,11 @@ export function createFlyerSceneRenderer(
             applyPose(ghostFrame, computePose(controlStateFrom(g, ghostDrive)));
             const gw = worldTransformFrom(g, launch);
             ghostFrame.group.position.set(gw.position[0], gw.position[1] + 1.2, gw.position[2]);
-            ghostFrame.group.rotation.set(0, 0, gw.pitchRad);
+            // Nose-frame mapping (visual-verification fix): the airframe's
+            // nose is LOCAL +z; flight runs WORLD +x. Ry(-pi/2) leftmost
+            // ('YXZ' order) maps nose->+x and wingspan->z AFTER the pitch.
+            ghostFrame.group.rotation.order = "YXZ";
+            ghostFrame.group.rotation.set(0, -Math.PI / 2, gw.pitchRad);
           }
         }
         drive = advanceProp(drive, snap, dtS);
@@ -235,9 +312,12 @@ export function createFlyerSceneRenderer(
         applyPose(airframe, pose);
         const world = worldTransformFrom(snap, launch);
         airframe.group.position.set(world.position[0], world.position[1] + 1.2, world.position[2]);
-        airframe.group.rotation.set(0, 0, world.pitchRad);
-        // Cockpit feel (T3.4): Wilbur's hands ride the REAL canard
-        // deflection; his own lever mirrors it in the airframe.
+        // Nose-frame mapping (visual-verification fix): the airframe's
+        // nose is LOCAL +z; flight runs WORLD +x. Ry(-pi/2) leftmost
+        // ('YXZ' order) maps nose->+x and wingspan->z AFTER the pitch.
+        airframe.group.rotation.order = "YXZ";
+        airframe.group.rotation.set(0, -Math.PI / 2, world.pitchRad);
+        // Cockpit feel (T3.4): the pilot's lever mirrors live canard.
         airframe.elevatorLever.rotation.z = -0.22 - pose.canardRad * 0.9;
         wilburFig.setLever(pose.canardRad);
         const gust01 = Math.min(1, Math.abs(snap.gustWMps) / 1.5);
@@ -305,27 +385,36 @@ export function createFlyerSceneRenderer(
           orvilleReleaseX = orvilleReachableX(hudIn.elapsedS, snap.xM);
           orvilleReleaseT = hudIn.elapsedS;
         }
+        if (snap.phase === "ended:ground-contact") {
+          if (landedX === null) {
+            landedX = snap.xM;
+            landedT = hudIn.elapsedS;
+          }
+        }
         dressing.animate(hudIn.elapsedS, {
           onRail,
           aircraftX: snap.xM,
           releaseX: orvilleReleaseX,
           releaseT: orvilleReleaseT,
+          landedX,
           // Machine state feeds the plume systems (propwash sand blast
-          // + exhaust) — presentation-only normalization.
+          // + exhaust + landing dust) — presentation-only normalization.
           machine: {
             x: snap.xM,
             rpm01: Math.min(1, Math.max(0, snap.omegaPropRadS / TRIM_PROP_OMEGA)),
             gust01,
+            dustT: landedT ?? undefined,
           },
         });
         // The dolly rides the rail under the machine until liftoff,
-        // then STAYS at the drop spot for the rest of the run (T2.1).
-        if (!dollyDropped && !onRail) {
-          dollyDropped = true;
-        }
-        dolly.visible = onRail || !dollyDropped;
+        // then STAYS VISIBLE at the drop spot for the rest of the run
+        // (T2.1 — a real object left on the track, never hidden).
         if (!dollyDropped) {
-          dolly.position.x = launch[0] + snap.xM;
+          if (!onRail) {
+            dollyDropped = true;
+          } else {
+            dolly.position.x = launch[0] + snap.xM;
+          }
         }
         // Labeled ride-along captions (latest two).
         if (snap.tick > lastCaptionTick) {
@@ -336,6 +425,14 @@ export function createFlyerSceneRenderer(
           lines.push(formatCaption(c));
         }
         hud.textContent = lines.join("\n");
+        // Live mix (T4.3): engine/wind/rail from the real state.
+        AUDIO.update({
+          propOmegaRadS: snap.omegaPropRadS,
+          airspeedMps: Math.hypot(snap.uMps, snap.wMps),
+          onRail,
+          groundSpeedMps: onRail ? Math.max(0, snap.xM / Math.max(hudIn.elapsedS, 0.5)) : 0,
+          nowS: hudIn.elapsedS,
+        });
         renderer.render(scene, camera);
         return;
       }
@@ -395,6 +492,14 @@ export function createFlyerSceneRenderer(
       });
       dolly.visible = true;
       dolly.position.x = launch[0];
+      // Attract mix: the scripted demo's engine ramp, no rail motion.
+      AUDIO.update({
+        propOmegaRadS: (Math.min(350, elapsedS * 180) / 60) * 2 * Math.PI,
+        airspeedMps: 0,
+        onRail: true,
+        groundSpeedMps: 0,
+        nowS: elapsedS,
+      });
       if (pose.clamped) {
         console.warn(JSON.stringify({ suite: "wf-scene", event: "control-stop", t: elapsedS }));
       }
@@ -424,6 +529,7 @@ export function createFlyerSceneRenderer(
         });
       }
       particleLevel = profile.fieldThrottle;
+      dressing.setParticleLevel(particleLevel);
     },
     resize(width: number, height: number): void {
       renderer.setSize(width, height);
@@ -434,6 +540,7 @@ export function createFlyerSceneRenderer(
       window.removeEventListener("keydown", keydown);
       window.removeEventListener("keyup", keyup);
       container.removeChild(hud);
+      helpCard.remove();
       dials.dispose();
       phaseEl.dispose();
       renderer.dispose();

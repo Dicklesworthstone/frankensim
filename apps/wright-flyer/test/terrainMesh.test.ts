@@ -10,10 +10,13 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import {
   arrivalCamera,
+  bigHillDetail,
+  BIG_HILL_CENTER_M,
+  BIG_HILL_PEAK_M,
   buildTerrainArrays,
+  duneDetail,
   heightAt,
   materialClass,
-  type TerrainGridJson,
   warpAxis,
 } from "../src/terrainMesh.ts";
 
@@ -118,4 +121,41 @@ test("LOD terrain keeps survey corners and packs vertices near launch", () => {
   }
   assert.ok(best < 8, `inner ring too coarse near launch: ${best.toFixed(2)} m`);
   void extent;
+});
+
+/* ---------- presentation relief (PurpleCliff flat-dunes fix) -------- */
+
+test("dune relief keeps the launch/camp corridor at survey height", () => {
+  // The whole rail run, camp, and landing flat: exactly zero detail.
+  for (const [x, z] of [
+    [0, 0], [18.3, 0], [-40, -13], [-26, -21], [30, 12],
+  ] as const) {
+    assert.equal(duneDetail(x, z), 0, `corridor (${x},${z})`);
+    assert.equal(bigHillDetail(x, z), 0, `far from Big Hill (${x},${z})`);
+  }
+  assert.throws(() => duneDetail(Number.NaN, 0), /finite/);
+  assert.throws(() => bigHillDetail(0, Number.POSITIVE_INFINITY), /finite/);
+});
+
+test("dune sea is bounded, dramatic beyond the feather, and deterministic", () => {
+  let maxAbs = 0;
+  for (let x = -900; x <= 900; x += 37) {
+    for (let z = -900; z <= 900; z += 41) {
+      const d = duneDetail(x, z);
+      assert.ok(Number.isFinite(d) && Math.abs(d) <= 14, `bounded at (${x},${z}): ${d}`);
+      maxAbs = Math.max(maxAbs, Math.abs(d));
+    }
+  }
+  assert.ok(maxAbs > 6, `relief must actually sculpt (max |d| = ${maxAbs.toFixed(1)} m)`);
+  // Determinism: identical inputs, identical sand.
+  assert.equal(duneDetail(321, -417), duneDetail(321, -417));
+});
+
+test("Big Kill Devil Hill peaks near its authored summit and fades out", () => {
+  const peak = bigHillDetail(BIG_HILL_CENTER_M.x, BIG_HILL_CENTER_M.z);
+  assert.equal(bigHillDetail(BIG_HILL_CENTER_M.x + 600, BIG_HILL_CENTER_M.z), 0, "zero far field");
+  // Continuous: neighbors differ by less than the mesh can alias.
+  const a = bigHillDetail(BIG_HILL_CENTER_M.x + 50, BIG_HILL_CENTER_M.z + 20);
+  const b = bigHillDetail(BIG_HILL_CENTER_M.x + 52, BIG_HILL_CENTER_M.z + 22);
+  assert.ok(Math.abs(a - b) < 2, "no cliffs between samples");
 });

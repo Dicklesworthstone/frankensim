@@ -253,6 +253,10 @@ function main(): void {
               : base;
           resultsCardEl.textContent = lines.join("\n");
           resultsCardEl.style.display = "block";
+          // Telegram slide-in (T3.5): restart the animation each run.
+          resultsCardEl.classList.remove("wf-card-in");
+          void resultsCardEl.offsetWidth;
+          resultsCardEl.classList.add("wf-card-in");
           console.info(
             JSON.stringify({ suite: "wright-flyer-app", stage: "results-card", kpis, divergence }),
           );
