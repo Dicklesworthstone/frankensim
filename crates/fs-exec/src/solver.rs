@@ -6667,6 +6667,20 @@ mod tests {
         tol: f64,
     }
 
+    /// Owner-bound identity charter for the reference Jacobi iteration
+    /// family (bead sj31i.52.5.2.1 golden-pinned adoption). The grammar
+    /// strings bind the exact v2 wire format that
+    /// `SolverStateV2::encode_v2` produces below: one little-endian u64
+    /// iteration counter followed by the little-endian f64 solution slice.
+    const JACOBI_STATE_FAMILY_CHARTER: snapshot_v2::StateIdentityCharterV2 =
+        snapshot_v2::StateIdentityCharterV2 {
+            owner: "fs-exec::solver",
+            state_family: "jacobi-iteration",
+            schema_grammar: "iter: u64 le; x: f64 le[]",
+            codec_grammar: "v2 framed: u64 count, f64 le slice",
+            codec_version: 1,
+        };
+
     #[derive(Debug, Clone, PartialEq)]
     struct JacobiState {
         x: Vec<f64>,
@@ -6691,13 +6705,32 @@ mod tests {
     }
 
     impl SolverStateV2 for JacobiState {
+        // Pinned from `JACOBI_STATE_FAMILY_CHARTER` derivation (bead
+        // sj31i.52.5.2.1); the golden-pin test below refuses any drift
+        // between these constants and the charter derivation.
         const STATE_TYPE_ID_V2: snapshot_v2::SnapshotStateTypeIdV2 =
-            snapshot_v2::SnapshotStateTypeIdV2::from_bytes([0x41; 32]);
+            snapshot_v2::SnapshotStateTypeIdV2::from_bytes([
+                0x7d, 0xda, 0x0e, 0x58, 0xa3, 0x34, 0xb0, 0xcc, 0xe2, 0xb3, 0x80, 0xce, 0x66,
+                0x31, 0xc3, 0x16, 0xc1, 0xc0, 0x47, 0xad, 0x18, 0x3e, 0x6a, 0xc0, 0x21, 0xcb,
+                0xdf, 0xf2, 0x52, 0x26, 0x01, 0x17,
+            ]);
         const STATE_SCHEMA_ID_V2: snapshot_v2::SnapshotStateSchemaIdV2 =
-            snapshot_v2::SnapshotStateSchemaIdV2::from_bytes([0x4a; 32]);
+            snapshot_v2::SnapshotStateSchemaIdV2::from_bytes([
+                0xa8, 0x8e, 0xe1, 0xbe, 0x8c, 0xbc, 0xe9, 0x45, 0x87, 0x75, 0x08, 0xcf, 0xbd,
+                0x55, 0x0d, 0xee, 0x41, 0xcd, 0xb8, 0x93, 0x6c, 0x09, 0xdb, 0x4f, 0x0f, 0xc2,
+                0x1a, 0x15, 0xcb, 0x09, 0x95, 0x16,
+            ]);
         const STATE_CODEC_ID_V2: snapshot_v2::SnapshotStateCodecIdV2 =
-            snapshot_v2::SnapshotStateCodecIdV2::from_bytes([0xc1; 32]);
+            snapshot_v2::SnapshotStateCodecIdV2::from_bytes([
+                0xc3, 0x44, 0xaa, 0xde, 0xd5, 0x01, 0xd5, 0xe1, 0xfa, 0xa4, 0x4d, 0x41, 0x8b,
+                0x46, 0x47, 0xf5, 0xc8, 0x73, 0x7b, 0x56, 0x70, 0xf9, 0xf7, 0x4e, 0xd2, 0x71,
+                0xe5, 0x59, 0x49, 0x82, 0x93, 0xa9,
+            ]);
         const STATE_CODEC_VERSION_V2: u32 = 1;
+
+        fn charter() -> Option<&'static snapshot_v2::StateIdentityCharterV2> {
+            Some(&JACOBI_STATE_FAMILY_CHARTER)
+        }
 
         fn encode_v2(
             &self,
@@ -7756,9 +7789,13 @@ mod tests {
             first.receipt().identity_receipt().canonical_preimage(),
             second.receipt().identity_receipt().canonical_preimage()
         );
+        // Receipt identity is deterministic over the sealed target, whose
+        // pinned state identities rotated to the JACOBI_STATE_FAMILY_CHARTER
+        // derivation (bead sj31i.52.5.2.1); the retained digest moved with
+        // them and nothing else.
         assert_eq!(
             first.receipt().id().to_hex(),
-            "8d64f1b25e713277d5452d7126c8d27e5c02484094730d458a7fccd9671edba1"
+            "1889485020a17ec3d8fc17664b4fb716dea45fa08edca47576f03df2697d08c3"
         );
 
         let expectation = first.target().expectation();
@@ -8290,17 +8327,17 @@ mod tests {
         let authority_preimage = sealed.authority_subject_receipt().canonical_preimage();
         let resume_hex = hex(resume_preimage.as_bytes());
         let authority_hex = hex(authority_preimage.as_bytes());
-        const EXPECTED_HEADER_HEX: &str = "46534558534e5632020000004c02000041414141414141414141414141414141414141414141414141414141414141414a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4ac1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1010000001111111111111111111111111111111111111111111111111111111111111111070000000000000022222222222222222222222222222222222222222222222222222222222222223333333333333333333333333333333333333333333333333333333333333333010100000100000028b7b2adc0a1cc210441ded866dbed08da1bb2e2ca134d458884c19406fa108a870e28e7b557d3ffda247ea5aa30c39f94d3eff3ae6d727817381f18febf3ee9df00fe5010cbf8ffd8efa02bca34c272dce15801894a0309fe56a92474d11f0d3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f44444444444444444444444444444444444444444444444444444444444444445555555555555555555555555555555555555555555555555555555555555555666666666666666666666666666666666666666666666666666666666666666609000000000000001100000000000000020000000000000002000000000000007c4fd6af8bf0bfc369d4349977a34e31806461dd10ef5db63bfc9d1d22c1219e2000000000000000b1adb6585eb611b648efca4b640eda7ae68f89fae6b700cfde79999cc872e952127f6545c614e632456dc3b2b9e055e6e48ab4ca6c35ce7438f7756bd871b96b";
+        const EXPECTED_HEADER_HEX: &str = "46534558534e5632020000004c0200007dda0e58a334b0cce2b380ce6631c316c1c047ad183e6ac021cbdff252260117a88ee1be8cbce945877508cfbd550dee41cdb8936c09db4f0fc21a15cb099516c344aaded501d5e1faa44d418b4647f5c8737b5670f9f74ed271e559498293a9010000001111111111111111111111111111111111111111111111111111111111111111070000000000000022222222222222222222222222222222222222222222222222222222222222223333333333333333333333333333333333333333333333333333333333333333010100000100000028b7b2adc0a1cc210441ded866dbed08da1bb2e2ca134d458884c19406fa108a870e28e7b557d3ffda247ea5aa30c39f94d3eff3ae6d727817381f18febf3ee9df00fe5010cbf8ffd8efa02bca34c272dce15801894a0309fe56a92474d11f0d3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f44444444444444444444444444444444444444444444444444444444444444445555555555555555555555555555555555555555555555555555555555555555666666666666666666666666666666666666666666666666666666666666666609000000000000001100000000000000020000000000000002000000000000007c4fd6af8bf0bfc369d4349977a34e31806461dd10ef5db63bfc9d1d22c1219e2000000000000000b1adb6585eb611b648efca4b640eda7ae68f89fae6b700cfde79999cc872e9521b8cf1e29945b16c996e86358d72bcd572533d4a5036be17a6b19724285ac0af";
         assert_eq!(header_hex.len(), snapshot_v2::HEADER_LEN_V2 * 2);
         assert_eq!(EXPECTED_HEADER_HEX.len(), snapshot_v2::HEADER_LEN_V2 * 2);
         assert_eq!(header_hex, EXPECTED_HEADER_HEX);
         assert_eq!(
             resume_hex,
-            "e17eee709f77d025e2dc3b8383f2e4f59c5e27e9b02220f5dbf313072289bce0"
+            "78c1039b0b229651a4cb816a4feda3aa33cfd68076f7a58497578905b65fdbed"
         );
         assert_eq!(
             authority_hex,
-            "eaa9c50d0dc49efa403d253f609661de18611bda6fd1cf4ff6b6a2cf6cf52d97"
+            "bf11dc7444ec0c53c84697cfc1b4fc759bd3f243e66cdb3c009c82de059a09a2"
         );
     }
 
@@ -9851,21 +9888,53 @@ mod tests {
             registry.retained_len(JACOBI_CHARTER.owner, JACOBI_CHARTER.state_family),
             2
         );
-        for (expected_index, era) in [(0usize, JACOBI_PREV_ERA_CHARTER), (1, codec_bump_era)] {
-            assert_eq!(
-                registry.classify(
-                    JACOBI_CHARTER.owner,
-                    JACOBI_CHARTER.state_family,
-                    era.state_type_id(),
-                    era.state_schema_id(),
-                    era.state_codec_id(),
-                    era.codec_version,
-                ),
-                snapshot_v2::StateCharterEraClassV2::Retained {
-                    index: expected_index,
-                    charter: era,
-                }
-            );
-        }
+    }
+
+    #[test]
+    fn jacobi_charter_golden_pin_binds_pinned_constants_to_derivation() {
+        // The adopted family charter and the pinned constants must never
+        // drift apart: every seal/unseal/prepare path verifies this exact
+        // equality, and this test is the retained golden evidence.
+        assert_eq!(
+            JACOBI_STATE_FAMILY_CHARTER.first_mismatch(
+                <JacobiState as SolverStateV2>::STATE_TYPE_ID_V2,
+                <JacobiState as SolverStateV2>::STATE_SCHEMA_ID_V2,
+                <JacobiState as SolverStateV2>::STATE_CODEC_ID_V2,
+                <JacobiState as SolverStateV2>::STATE_CODEC_VERSION_V2,
+            ),
+            None,
+            "pinned JacobiState constants drifted from the family charter derivation"
+        );
+        // The adopted charter classifies as the LIVE era for the family.
+        assert_eq!(
+            snapshot_v2::state_charter_era_class::<JacobiState>(
+                <JacobiState as SolverStateV2>::STATE_TYPE_ID_V2,
+                <JacobiState as SolverStateV2>::STATE_SCHEMA_ID_V2,
+                <JacobiState as SolverStateV2>::STATE_CODEC_ID_V2,
+                <JacobiState as SolverStateV2>::STATE_CODEC_VERSION_V2,
+            ),
+            snapshot_v2::StateCharterEraClassV2::Live
+        );
+        // Registry admission is idempotent for the adopted family and the
+        // pre-adoption placeholder bytes are NOT a retained era (they were
+        // never charter-derived), so they keep the generic unknown path.
+        let mut registry = snapshot_v2::CharterRegistryV2::new();
+        registry
+            .register(JACOBI_STATE_FAMILY_CHARTER)
+            .expect("adopted family registers");
+        registry
+            .register(JACOBI_STATE_FAMILY_CHARTER)
+            .expect("identical re-registration stays idempotent");
+        assert_eq!(
+            registry.classify(
+                JACOBI_STATE_FAMILY_CHARTER.owner,
+                JACOBI_STATE_FAMILY_CHARTER.state_family,
+                <JacobiState as SolverStateV2>::STATE_TYPE_ID_V2,
+                <JacobiState as SolverStateV2>::STATE_SCHEMA_ID_V2,
+                <JacobiState as SolverStateV2>::STATE_CODEC_ID_V2,
+                <JacobiState as SolverStateV2>::STATE_CODEC_VERSION_V2,
+            ),
+            snapshot_v2::StateCharterEraClassV2::Live
+        );
     }
 }
