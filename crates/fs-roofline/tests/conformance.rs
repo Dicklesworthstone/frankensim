@@ -501,12 +501,13 @@ fn rf_006_cli_smoke_prints_report_and_ledgers() {
         "unregistered §14.1 targets remain explicitly uncovered"
     );
     assert!(
-        stdout.contains("\"ledgered\":true"),
-        "ledger receipt present"
+        stdout.contains("\"schema\":\"fs-roofline-recorded-evidence-v2\"")
+            && stdout.contains("\"recorded\":true"),
+        "recorded-evidence receipt present"
     );
     assert!(
-        stdout.contains("\"baseline\":null"),
-        "a CLI run without an operator baseline must bind an explicit null selection"
+        stdout.contains("\"fresh_run_receipt\":null"),
+        "a CLI run without an operator baseline must publish no fresh-evidence receipt"
     );
     assert!(
         stdout.contains("\"citable\":false"),
