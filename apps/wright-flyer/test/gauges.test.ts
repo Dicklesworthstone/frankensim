@@ -121,7 +121,31 @@ test("stopwatch clock text rolls the minute", () => {
   assert.equal(clockText(59.94), "0:59.9");
   assert.equal(clockText(60), "1:00.0");
   assert.equal(clockText(-5), "0:00.0", "negative time pins at zero");
+  // Regression (fresh-eyes review): rounding must precede decomposition
+  // or 59.96 renders the impossible "0:60.0".
+  assert.equal(clockText(59.96), "1:00.0");
+  assert.equal(clockText(119.97), "2:00.0");
   jlog("clock", `"minute_roll":"1:00.0"`);
+});
+
+test("tick labels divide by labelDiv (tachometer x100 face)", () => {
+  const dials = dialSetFrom(IDLE_INPUTS);
+  const byId = new Map(dials.map((d) => [d.id, d]));
+  assert.equal(byId.get("revcounter")!.labelDiv, 100);
+  assert.ok(byId.get("revcounter")!.label.includes("×100"), "face declares its scale");
+  for (const id of ["anemometer", "stopwatch", "altimeter", "inclinometer"]) {
+    assert.equal(byId.get(id)!.labelDiv, 1, id);
+  }
+  jlog("label-div", `"revcounter":100`);
+});
+
+test("mirrored-redline precondition: pitch dial is symmetric", () => {
+  // The panel mirrors the danger arc only when min = -max and the
+  // redline sits in the positive half; the pitch spec must satisfy
+  // that or nose-down danger loses its face marking silently.
+  assert.equal(INCLINOMETER_SPEC.min, -INCLINOMETER_SPEC.max);
+  assert.ok(INCLINOMETER_SPEC.redline![0] > 0);
+  jlog("mirror-precondition", `"symmetric":true`);
 });
 
 test("levers pin at the stop and report AT-STOP", () => {

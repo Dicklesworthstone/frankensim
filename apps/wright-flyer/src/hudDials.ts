@@ -4,7 +4,9 @@
 // period aesthetic, walnut panel, red danger arcs.
 
 import {
+  IDLE_INPUTS,
   type DialView,
+  type GaugeSpec,
   type HudDialInputs,
   type LeverView,
   dialSetFrom,
@@ -46,6 +48,14 @@ interface DialDom {
   needle: SVGLineElement;
   reading: SVGTextElement;
   face: SVGCircleElement;
+  /** Pivot coordinate (the rotate() origin) — owned by buildDial so
+   * update() never re-derives it from the dial's id. */
+  center: number;
+}
+
+/** Needle angle for a VALUE position on the face (arc endpoints). */
+function valueDeg(value: number, spec: GaugeSpec): number {
+  return spec.startDeg + ((value - spec.min) / (spec.max - spec.min)) * spec.sweepDeg;
 }
 
 function buildDial(view: DialView, size: number): { svg: SVGSVGElement; dom: DialDom } {
@@ -60,28 +70,32 @@ function buildDial(view: DialView, size: number): { svg: SVGSVGElement; dom: Dia
   svg.appendChild(el("circle", { cx: `${c}`, cy: `${c}`, r: `${c - 3}`, fill: BRASS }));
   const face = el("circle", { cx: `${c}`, cy: `${c}`, r: `${c - 7}`, fill: FACE });
   svg.appendChild(face);
-  // Danger arc.
+  // Danger arc(s). A symmetric dial (min = −max) whose danger is felt
+  // in MAGNITUDE (the pitch dial) gets the mirrored arc too, so the
+  // face marks nose-down danger exactly as loudly as nose-up.
   if (view.spec.redline !== null) {
     const [from, to] = view.spec.redline;
-    const f = tickMarks(view.spec, 2); // reuse pinning for ends
-    void f;
-    const fromDeg =
-      view.spec.startDeg +
-      ((from - view.spec.min) / (view.spec.max - view.spec.min)) * view.spec.sweepDeg;
-    const toDeg =
-      view.spec.startDeg +
-      ((to - view.spec.min) / (view.spec.max - view.spec.min)) * view.spec.sweepDeg;
-    svg.appendChild(
-      el("path", {
-        d: arcPath(c, c, c - 12, fromDeg, toDeg),
-        stroke: RED,
-        "stroke-width": "4",
-        fill: "none",
-      }),
-    );
+    const drawArc = (loVal: number, hiVal: number): void => {
+      svg.appendChild(
+        el("path", {
+          d: arcPath(c, c, c - 12, valueDeg(loVal, view.spec), valueDeg(hiVal, view.spec)),
+          stroke: RED,
+          "stroke-width": "4",
+          fill: "none",
+        }),
+      );
+    };
+    drawArc(from, to);
+    if (view.spec.min === -view.spec.max && from > 0) {
+      drawArc(-to, -from);
+    }
   }
-  // Ticks + numerals.
-  for (const [i, t] of tickMarks(view.spec, view.majorTicks).entries()) {
+  // Ticks + numerals. A full-circle face (360° sweep) would draw its
+  // last tick ON its first — skip the duplicate.
+  const fullCircle = view.spec.sweepDeg === 360;
+  const allTicks = tickMarks(view.spec, view.majorTicks);
+  const drawnTicks = fullCircle ? allTicks.slice(0, -1) : allTicks;
+  for (const [i, t] of drawnTicks.entries()) {
     const [x0, y0] = polar(c, c, c - 9, t.deg);
     const [x1, y1] = polar(c, c, c - 16, t.deg);
     svg.appendChild(
@@ -105,7 +119,7 @@ function buildDial(view: DialView, size: number): { svg: SVGSVGElement; dom: Dia
         fill: INK,
         "font-family": "Georgia, serif",
       });
-      label.textContent = String(Math.round(t.value));
+      label.textContent = String(Math.round(t.value / view.labelDiv));
       svg.appendChild(label);
     }
   }
@@ -154,7 +168,7 @@ function buildDial(view: DialView, size: number): { svg: SVGSVGElement; dom: Dia
     "font-weight": "bold",
   });
   svg.appendChild(reading);
-  return { svg, dom: { needle, reading, face } };
+  return { svg, dom: { needle, reading, face, center: c } };
 }
 
 interface LeverDom {
@@ -175,10 +189,12 @@ function buildLever(view: LeverView): { root: HTMLDivElement; dom: LeverDom } {
   center.className = "wf-lever-center";
   const pointer = document.createElement("div");
   pointer.className = "wf-lever-pointer";
+  pointer.style.left = `${(50 + view.fraction * 46).toFixed(1)}%`;
   track.appendChild(center);
   track.appendChild(pointer);
   const value = document.createElement("div");
   value.className = "wf-lever-value";
+  value.textContent = view.reading;
   root.appendChild(label);
   root.appendChild(track);
   root.appendChild(value);
@@ -194,17 +210,8 @@ export interface HudDials {
 export function createHudDials(container: HTMLElement): HudDials {
   const panel = document.createElement("div");
   panel.id = "wf-dial-panel";
-  const dialViews = dialSetFrom({
-    airspeedMps: 0,
-    engineRpm: 0,
-    elapsedS: 0,
-    hM: 0,
-    thetaRad: 0,
-    dcRad: 0,
-    warpRad: 0,
-  });
   const dialDom = new Map<string, DialDom>();
-  for (const view of dialViews) {
+  for (const view of dialSetFrom(IDLE_INPUTS)) {
     const cell = document.createElement("div");
     cell.className = "wf-dial";
     const { svg, dom } = buildDial(view, view.id === "anemometer" ? 128 : 108);
@@ -215,15 +222,7 @@ export function createHudDials(container: HTMLElement): HudDials {
   const leverWrap = document.createElement("div");
   leverWrap.id = "wf-lever-stack";
   const leverDom = new Map<string, LeverDom>();
-  for (const view of leverSetFrom({
-    airspeedMps: 0,
-    engineRpm: 0,
-    elapsedS: 0,
-    hM: 0,
-    thetaRad: 0,
-    dcRad: 0,
-    warpRad: 0,
-  })) {
+  for (const view of leverSetFrom(IDLE_INPUTS)) {
     const { root, dom } = buildLever(view);
     leverWrap.appendChild(root);
     leverDom.set(view.id, dom);
@@ -237,9 +236,14 @@ export function createHudDials(container: HTMLElement): HudDials {
         if (dom === undefined) {
           continue;
         }
-        const c = view.id === "anemometer" ? 64 : 54;
+        const c = dom.center;
         dom.needle.setAttribute("transform", `rotate(${view.needleDeg.toFixed(2)} ${c} ${c})`);
-        dom.reading.textContent = view.unit === "" ? view.reading : `${view.reading} ${view.unit}`;
+        dom.reading.textContent =
+          view.unit === ""
+            ? view.reading
+            : view.unit === "°"
+              ? `${view.reading}°`
+              : `${view.reading} ${view.unit}`;
         dom.face.setAttribute("fill", view.danger ? "#f0d3c5" : FACE);
       }
       for (const view of leverSetFrom(input)) {

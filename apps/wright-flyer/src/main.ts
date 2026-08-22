@@ -16,6 +16,7 @@ import {
   DEFAULT_SELECTION,
   KEY_LINES,
   MODE_CARDS,
+  assistAvailable,
   menuQuery,
   type MenuSelection,
 } from "./menu.ts";
@@ -39,8 +40,9 @@ function buildMenu(container: HTMLElement): void {
     for (const [mode, btn] of modeButtons) {
       btn.classList.toggle("selected", mode === sel.mode);
     }
-    assistBtn.classList.toggle("selected", sel.assist);
-    assistBtn.disabled = sel.mode !== "human";
+    const canAssist = assistAvailable(sel);
+    assistBtn.classList.toggle("selected", sel.assist && canAssist);
+    assistBtn.disabled = !canAssist;
     siteBtn.textContent =
       sel.site === "kdh" ? "SITE: KILL DEVIL HILLS 1903" : "SITE: HUFFMAN PRAIRIE 1904-05 (catapult)";
     go.textContent = `LAUNCH ${sel.site === "huffman" ? "BY CATAPULT" : "INTO THE HEADWIND"} →`;

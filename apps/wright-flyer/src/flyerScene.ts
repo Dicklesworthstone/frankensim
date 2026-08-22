@@ -78,7 +78,7 @@ export function createFlyerSceneRenderer(
   const dials = createHudDials(container);
   const phaseEl = createPhaseBanner(container);
   const onKey = (e: KeyboardEvent, isDown: boolean): void => {
-    if (isDown && e.code === "KeyT") {
+    if (isDown && e.code === "KeyT" && !e.repeat) {
       hud.style.display = hud.style.display === "none" ? "block" : "none";
       return;
     }

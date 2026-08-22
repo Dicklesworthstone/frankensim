@@ -11,10 +11,18 @@ export interface MenuSelection {
 
 export const DEFAULT_SELECTION: MenuSelection = { mode: "human", site: "kdh", assist: false };
 
+/** True when the assist toggle can actually engage for a selection:
+ * the menu offers it as a human-pilot aid, and the Huffman scenario
+ * factory pins assist OFF (protocol.ts huffmanScenario), so a Huffman
+ * URL must never claim it. */
+export function assistAvailable(sel: Pick<MenuSelection, "mode" | "site">): boolean {
+  return sel.mode === "human" && sel.site === "kdh";
+}
+
 /** The query string for a selection. Fixed mode omits `mode` (the
- * app default); Kill Devil Hills omits `site`; assist appears only in
- * human mode (it is a human-pilot aid — other modes ignore it, so the
- * URL never claims an aid that cannot engage). */
+ * app default); Kill Devil Hills omits `site`; `assist` appears only
+ * where it can engage (see assistAvailable) — the URL never claims an
+ * aid the scenario would silently drop. */
 export function menuQuery(sel: MenuSelection): string {
   const parts = ["sim=1"];
   if (sel.mode !== "fixed") {
@@ -23,7 +31,7 @@ export function menuQuery(sel: MenuSelection): string {
   if (sel.site === "huffman") {
     parts.push("site=huffman");
   }
-  if (sel.assist && sel.mode === "human") {
+  if (sel.assist && assistAvailable(sel)) {
     parts.push("assist=1");
   }
   return `?${parts.join("&")}`;

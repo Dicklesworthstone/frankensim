@@ -26,16 +26,26 @@ export interface GaugeSpec {
  * the stop, they never wrap or extrapolate). */
 export function needleDeg(value: number, spec: GaugeSpec): number {
   if (!(spec.max > spec.min) || !(spec.sweepDeg > 0)) {
-    throw new RangeError(`malformed gauge spec: [${spec.min}, ${spec.max}] sweep ${spec.sweepDeg}`);
+    throw new RangeError(
+      `malformed gauge spec: [${spec.min}, ${spec.max}] sweep ${spec.sweepDeg}`,
+    );
   }
-  const v = Number.isNaN(value) ? spec.min : Math.min(spec.max, Math.max(spec.min, value));
-  return spec.startDeg + ((v - spec.min) / (spec.max - spec.min)) * spec.sweepDeg;
+  const v = Number.isNaN(value)
+    ? spec.min
+    : Math.min(spec.max, Math.max(spec.min, value));
+  return (
+    spec.startDeg + ((v - spec.min) / (spec.max - spec.min)) * spec.sweepDeg
+  );
 }
 
 /** True when the value sits inside the dial's danger arc (closed at
  * both ends: AT the redline is IN the redline). */
 export function inRedline(value: number, spec: GaugeSpec): boolean {
-  return spec.redline !== null && value >= spec.redline[0] && value <= spec.redline[1];
+  return (
+    spec.redline !== null &&
+    value >= spec.redline[0] &&
+    value <= spec.redline[1]
+  );
 }
 
 /** Major tick positions: `count` evenly spaced values from min to max
@@ -55,11 +65,13 @@ export function tickMarks(
   return out;
 }
 
-/** Stopwatch face text, mm:ss.t (the Wrights timed 12 to 59 seconds). */
+/** Stopwatch face text, mm:ss.t (the Wrights timed 12 to 59 seconds).
+ * Rounds to tenths BEFORE decomposing so 59.96 s rolls to "1:00.0",
+ * never the impossible "0:60.0". */
 export function clockText(elapsedS: number): string {
-  const s = Math.max(0, elapsedS);
-  const mm = Math.floor(s / 60);
-  const rest = s - mm * 60;
+  const tenths = Math.round(Math.max(0, elapsedS) * 10);
+  const mm = Math.floor(tenths / 600);
+  const rest = (tenths - mm * 600) / 10;
   return `${mm}:${rest < 10 ? "0" : ""}${rest.toFixed(1)}`;
 }
 
@@ -76,8 +88,10 @@ export interface DialView {
   readonly reading: string;
   readonly unit: string;
   readonly danger: boolean;
-  /** Major tick label multiplier (labels print value/labelDiv). */
+  /** Number of major ticks, min..max inclusive. */
   readonly majorTicks: number;
+  /** Tick labels print value/labelDiv (tachometer "×100" style). */
+  readonly labelDiv: number;
 }
 
 /** Linear (lever/warp) indicator view model. */
@@ -173,10 +187,11 @@ export function dialSetFrom(input: HudDialInputs): readonly DialView[] {
       unit: "mph",
       danger: inRedline(mph, ANEMOMETER_SPEC),
       majorTicks: 10,
+      labelDiv: 1,
     },
     {
       id: "revcounter",
-      label: "ENGINE",
+      label: "ENGINE ×100",
       provenance: "PERIOD",
       spec: REV_COUNTER_SPEC,
       needleDeg: needleDeg(input.engineRpm, REV_COUNTER_SPEC),
@@ -184,6 +199,7 @@ export function dialSetFrom(input: HudDialInputs): readonly DialView[] {
       unit: "rpm",
       danger: inRedline(input.engineRpm, REV_COUNTER_SPEC),
       majorTicks: 9,
+      labelDiv: 100,
     },
     {
       id: "stopwatch",
@@ -195,6 +211,7 @@ export function dialSetFrom(input: HudDialInputs): readonly DialView[] {
       unit: "",
       danger: false,
       majorTicks: 13,
+      labelDiv: 1,
     },
     {
       id: "altimeter",
@@ -206,6 +223,7 @@ export function dialSetFrom(input: HudDialInputs): readonly DialView[] {
       unit: "ft",
       danger: false,
       majorTicks: 9,
+      labelDiv: 1,
     },
     {
       id: "inclinometer",
@@ -217,13 +235,15 @@ export function dialSetFrom(input: HudDialInputs): readonly DialView[] {
       unit: "°",
       danger: inRedline(Math.abs(pitchDeg), INCLINOMETER_SPEC),
       majorTicks: 7,
+      labelDiv: 1,
     },
   ];
 }
 
 /** Build the two control-position indicators for one frame. */
 export function leverSetFrom(input: HudDialInputs): readonly LeverView[] {
-  const pin = (v: number): number => Math.min(1, Math.max(-1, Number.isNaN(v) ? 0 : v));
+  const pin = (v: number): number =>
+    Math.min(1, Math.max(-1, Number.isNaN(v) ? 0 : v));
   const canard = pin(input.dcRad / CANARD_STOP_RAD);
   const warp = pin(input.warpRad / WARP_STOP_RAD);
   return [
