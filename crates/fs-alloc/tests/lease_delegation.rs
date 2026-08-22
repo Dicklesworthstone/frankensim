@@ -1641,3 +1641,83 @@ fn pure_model_enumerates_publish_rollback_seal_and_destination_close_interleavin
     }
     assert_eq!(explored, 4096);
 }
+
+/// Deliberate `mem::forget` of a child owner skips its `Drop`, so no implicit
+/// return exists to reclaim the record. The honest outcome is permanent,
+/// diagnosable no-liveness: the root never seals, every seal observation
+/// refuses with the same typed cause, and nothing fabricates a return.
+#[test]
+fn forgotten_child_owner_blocks_seal_and_never_falsely_returns() {
+    let root = OperationMemoryLease::bounded(8);
+    let root_id = root_identity(91);
+    let child_id = child_identity(root_id, 92, 1);
+    root.enable_delegation(root_id, "run", 1)
+        .expect("pristine bounded root admits delegation");
+    let child = root
+        .delegate_capacity(child_id, "run/forgotten", 0)
+        .expect("zero-capacity children are real affine authority");
+    std::mem::forget(child);
+
+    assert_eq!(root.active_delegations(), 1);
+    assert!(!root.is_sealed());
+
+    let first = root
+        .seal()
+        .expect_err("forgotten authority must block the terminal receipt");
+    assert_eq!(first.reason(), "live_capacity");
+    assert_eq!(first.active_delegations(), 1);
+    assert_eq!(first.used_bytes(), 0);
+    assert_eq!(first.release_invariant_violations(), 0);
+
+    // Retry after the undrainable refusal refuses again deterministically:
+    // same frozen seal sequence, strictly later observation, still no
+    // fabricated return and no invented invariant violation.
+    let second = root
+        .seal()
+        .expect_err("authority leaked by forget can never drain");
+    assert_eq!(second.reason(), "live_capacity");
+    assert!(second.observation_sequence() > first.observation_sequence());
+    assert_eq!(second.seal_sequence(), first.seal_sequence());
+    assert_eq!(second.release_invariant_violations(), 0);
+    assert_eq!(root.active_delegations(), 1);
+
+    // The first observation froze the admission cut: new delegation refuses.
+    let late = root
+        .delegate_capacity(child_identity(root_id, 93, 2), "run/late", 0)
+        .expect_err("the seal cut freezes new admission");
+    assert_eq!(late.reason(), "root_sealed");
+}
+
+/// Forgetting a charge keeps its bytes charged inside the child. The explicit
+/// close refuses with `live_allocation`; because the refused close already
+/// marked the envelope resolved, dropping it afterwards must not mint a
+/// second return or an internal invariant violation — one refusal, one truth.
+#[test]
+fn forgotten_charge_holds_live_allocation_and_close_refuses_exactly_once() {
+    let root = OperationMemoryLease::bounded(8);
+    let root_id = root_identity(94);
+    let child_id = child_identity(root_id, 95, 1);
+    root.enable_delegation(root_id, "run", 1)
+        .expect("pristine bounded root admits delegation");
+    let child = root
+        .delegate_capacity(child_id, "run/staging", 8)
+        .expect("capacity fits under the root limit");
+    let charge = child.reserve("payload", 8).expect("8 bytes fit exactly");
+    std::mem::forget(charge); // release_delegated never runs.
+
+    let closed = child
+        .close()
+        .expect_err("live staging bytes must refuse the return");
+    assert_eq!(closed.reason(), "live_allocation");
+    assert_eq!(closed.used_bytes(), 8);
+    assert_eq!(closed.logical_path(), "run/staging");
+
+    // The child record is still live and its bytes are still charged; the
+    // failed close did not silently convert itself into a return.
+    let refusal = root
+        .seal()
+        .expect_err("charged bytes were never released by anyone");
+    assert_eq!(refusal.reason(), "live_capacity");
+    assert_eq!(refusal.active_delegations(), 1);
+    assert_eq!(refusal.release_invariant_violations(), 0);
+}
