@@ -62,13 +62,15 @@ function headMaterial(brother: Brother): THREE.MeshStandardMaterial {
 }
 
 
-/** Every figure mesh casts into the scene's shadow map (the sun's
- * shadow pass is presentation-owned by flyerScene; a figure that
- * casts nothing reads as floating). */
+/** Every figure mesh casts AND receives in the scene's shadow map
+ * (the sun's shadow pass is presentation-owned by flyerScene): a
+ * figure that casts nothing reads as floating, and one that receives
+ * nothing stays lit under the wing that shades him. */
 function castAll(root: THREE.Object3D): void {
   root.traverse((obj) => {
     if ((obj as THREE.Mesh).isMesh) {
       obj.castShadow = true;
+      obj.receiveShadow = true;
     }
   });
 }
