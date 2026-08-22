@@ -15,12 +15,19 @@ import {
   MAX_GULLS,
   ORVILLE_MAX_MPS,
   RAIL_CLEAR_HALF_WIDTH_M,
+  SCRUB_FLAT_RADIUS_M,
   campLayout,
+  flagPoint,
+  gullAttitude,
   gullFleet,
   gullPose,
+  landingDust,
   lcg,
   orvillePose,
   railTies,
+  scrubField,
+  smokePuff,
+  streamerPoint,
 } from "../src/dressing.ts";
 
 function jlog(kase: string, payload: string): void {
@@ -141,4 +148,55 @@ test("lcg is deterministic and in [0,1)", () => {
     assert.ok(va >= 0 && va < 1);
   }
   jlog("lcg", `"draws":1000`);
+});
+
+test("scrub field is deterministic and honors the clearing laws", () => {
+  const counts = { tufts: 300, bushes: 50, pines: 12 };
+  const a = scrubField(counts, 1903);
+  const b = scrubField(counts, 1903);
+  assert.deepEqual(a, b, "same seed, same field");
+  assert.equal(a.length, 362);
+  for (const p of a) {
+    assert.ok(Math.hypot(p.x, p.z) >= SCRUB_FLAT_RADIUS_M, `outside flat at (${p.x},${p.z})`);
+    const inRail = Math.abs(p.z) < 10 && p.x > -8 && p.x < 42;
+    assert.ok(!inRail, `out of rail corridor at (${p.x},${p.z})`);
+    const inCamp = p.x > -48 && p.x < -8 && p.z > -27 && p.z < -3;
+    assert.ok(!inCamp, `out of camp clearing at (${p.x},${p.z})`);
+    assert.ok(p.scale > 0.4 && p.scale < 2, `sane scale ${p.scale}`);
+  }
+  const kinds = new Set(a.map((p) => p.kind));
+  assert.deepEqual([...kinds].sort(), ["bush", "pine", "tuft"]);
+  assert.throws(() => scrubField({ tufts: 2000, bushes: 0, pines: 0 }, 1), RangeError);
+});
+
+test("streamers, flag, and smoke all advect DOWNWIND (-x)", () => {
+  for (let i = 0; i < 6; i++) {
+    for (let seg = 0; seg <= 8; seg++) {
+      const sp = streamerPoint(i, seg, 8, 3.3, 11);
+      assert.ok(sp.y >= 0 && sp.y < 1.2, `streamer low at seg ${seg}`);
+      const fp = flagPoint(seg, 8, 2.5, 11);
+      assert.ok(fp.x <= 0.001, "flag streams toward -x");
+      const smoke = smokePuff(i, 9.7, 11, 1);
+      assert.ok(smoke.x <= 0.31, "smoke bends downwind");
+      assert.ok(smoke.opacity >= 0 && smoke.opacity <= 0.35);
+    }
+  }
+  // Stronger wind stretches the flag farther from the pole.
+  const calm = flagPoint(8, 8, 1.0, 2);
+  const windy = flagPoint(8, 8, 1.0, 16);
+  assert.ok(windy.x < calm.x, "more wind, longer reach");
+});
+
+test("Orville runs to the machine after a landing; dust bursts once", () => {
+  const watching = orvillePose(10, false, 60, 5, 5);
+  assert.equal(watching.glassesUp, true);
+  const run = orvillePose(12, false, 60, 5, 5, 60);
+  assert.ok(run.gaitRad !== 0, "he is moving toward the machine");
+  const arrived = orvillePose(40, false, 60, 5, 5, 60);
+  assert.ok(arrived.x >= 57.75, "reached a hand's reach of the wingtip");
+  assert.equal(arrived.gaitRad, 0, "stopped when there");
+  assert.equal(landingDust(0, 5, 4), null, "no dust before touchdown");
+  const d = landingDust(0, 5, 6);
+  assert.ok(d !== null && d.opacity > 0 && d.dy >= 0);
+  assert.equal(landingDust(0, 5, 9), null, "burst ends");
 });

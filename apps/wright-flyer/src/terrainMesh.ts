@@ -130,7 +130,23 @@ const COLORS: Record<string, [number, number, number]> = {
   dune: [0.78, 0.7, 0.52],
 };
 
-/** Dense (res+1)² vertex grid over the tile: positions are three.js
+/** Two-ring LOD (T1.1): `warpAxis` maps the vertex-index fraction u∈[0,1]
+ * along one axis to the FRACTIONAL tile position, clustering vertices
+ * around the launch line (fraction `lf`) with a power ease. Endpoints
+ * stay exact; monotone by construction; pure. gamma>1 ⇒ local spacing
+ * near the launch is extent/(res·gamma) while the far field stretches.
+ * Heights still come ONLY from the heightAt oracle — the warp moves
+ * WHERE we sample, never WHAT the ground is. */
+export function warpAxis(u: number, lf: number, gamma = 2.2): number {
+  const l = Math.min(0.85, Math.max(0.15, lf));
+  const uu = Math.min(1, Math.max(0, u));
+  if (uu <= l) {
+    return l === 0 ? 0 : l * Math.pow(uu / l, gamma);
+  }
+  return l + (1 - l) * (1 - Math.pow((1 - uu) / (1 - l), gamma));
+}
+
+/** Dense vertex grid over the tile: positions are three.js
  * world coords CENTERED on the tile (y-up, north = -z); colors follow the
  * material classes. Launch-flat origin: the scene places the rail at the
  * E1.3 launch region's center, which this function reports.
@@ -171,8 +187,12 @@ export function buildTerrainArrays(
   const uvs = new Float32Array(nv * nv * 2);
   for (let j = 0; j <= res; j++) {
     for (let i = 0; i <= res; i++) {
-      const east = (i / res) * extent;
-      const north = (j / res) * extent;
+      // Two-ring LOD: warp BOTH axes' vertex fractions toward the
+      // launch line — x clusters at the tile center (launch wx = 0),
+      const eastFrac = warpAxis(i / res, (launch[0] + half) / extent);
+      const northFrac = warpAxis(j / res, (half - launch[2]) / extent);
+      const east = eastFrac * extent;
+      const north = northFrac * extent;
       const wx = east - half;
       const wz = -(north - half);
       const xRel = wx - launch[0];
@@ -192,9 +212,12 @@ export function buildTerrainArrays(
       colors[k] = c[0];
       colors[k + 1] = c[1];
       colors[k + 2] = c[2];
+      // UVs follow WORLD position, not vertex index: texel density of
+      // the sand map stays constant even though vertex density is
+      // warped (a stretched far field must not stretch the texture).
       const ku = (j * nv + i) * 2;
-      uvs[ku] = i / res;
-      uvs[ku + 1] = j / res;
+      uvs[ku] = eastFrac;
+      uvs[ku + 1] = northFrac;
     }
   }
   const indices = new Uint32Array(res * res * 6);

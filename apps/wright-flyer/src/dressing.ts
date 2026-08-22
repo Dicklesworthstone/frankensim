@@ -130,6 +130,10 @@ export function orvillePose(
   aircraftX: number,
   releaseX: number | null,
   releaseT: number | null,
+  /** When set (machine down, ground contact), he RUNS to the machine
+   * after watching — starting GLASSES_DELAY_S after release, clamped
+   * to his top speed and a hand's reach short of the wingtip. */
+  landedX: number | null = null,
 ): OrvillePose {
   // Chasing: clamp his x to what his legs allow from a standing start.
   const reachable = orvilleReachableX(t, aircraftX);
@@ -142,17 +146,56 @@ export function orvillePose(
       glassesUp: false,
     };
   }
-  // Released: coast half a metre past the release point, stand, watch.
+  // Released: coast half a metre past the release point, stand, watch…
   const rx = releaseX ?? reachable;
   const rt = releaseT ?? t;
   const since = Math.max(0, t - rt);
   const coast = Math.min(0.5 * since, 0.6);
+  if (landedX !== null && since >= GLASSES_DELAY_S) {
+    // …then sprint to the machine (the famous run to the landed Flyer).
+    const target = landedX - 2.2;
+    const runStart = rt + GLASSES_DELAY_S;
+    const runT = Math.max(0, t - runStart);
+    const x = Math.min(rx + ORVILLE_MAX_MPS * runT, target);
+    const moving = x < target - 0.05;
+    return {
+      x,
+      z: ORVILLE_SIDE_OFFSET_M,
+      headingRad: moving ? 0 : Math.atan2(ORVILLE_SIDE_OFFSET_M, Math.max(target - x, 0.5)),
+      gaitRad: moving ? 2.9 * Math.PI * t : 0,
+      glassesUp: false,
+    };
+  }
   return {
     x: rx + coast,
     z: ORVILLE_SIDE_OFFSET_M,
     headingRad: 0,
     gaitRad: 0,
     glassesUp: since >= GLASSES_DELAY_S,
+  };
+}
+
+/** Landing-dust burst (T3.5): one grain thrown outward from the
+ * touchdown point in MACHINE-LOCAL offsets. A 1.8 s closed burst once
+ * `t` passes `t0`; null before it starts. */
+export function landingDust(
+  i: number,
+  t0: number,
+  t: number,
+): { dx: number; dy: number; dz: number; scale: number; opacity: number } | null {
+  const durS = 1.8;
+  const u = (t - t0) / durS;
+  if (u < 0 || u > 1) {
+    return null;
+  }
+  const ang = hash01(i * 89 + 1) * Math.PI * 2;
+  const reach = (1.5 + hash01(i * 97 + 3) * 4.5) * Math.sqrt(u);
+  return {
+    dx: Math.cos(ang) * reach,
+    dy: 0.15 + 0.9 * u * (1 - u) * (1 + hash01(i * 101)),
+    dz: Math.sin(ang) * reach * 0.8,
+    scale: 0.7 + u * 2.4,
+    opacity: (1 - u) * 0.42,
   };
 }
 
@@ -165,7 +208,11 @@ export interface CampPlacement {
     | "chair"
     | "barrel"
     | "workbench"
-    | "toolchest";
+    | "toolchest"
+    | "crate"
+    | "battery"
+    | "oilcan"
+    | "windpost";
   readonly x: number;
   readonly z: number;
   readonly rotY: number;
@@ -177,7 +224,9 @@ export const RAIL_CLEAR_HALF_WIDTH_M = 8;
 
 /** The 1903 camp: the two wooden buildings (hangar + living shack)
  * north-west of the rail, the campfire circle between them and the
- * rail, tools by the hangar door. Fixed layout — history does not
+ * rail, tools by the hangar door — plus the working clutter (T2.4):
+ * packing crates, the magneto/battery box for the engine, an oil can,
+ * and the hand-anemometer post. Fixed layout — history does not
  * reroll per visit. */
 export function campLayout(): readonly CampPlacement[] {
   return [
@@ -191,6 +240,12 @@ export function campLayout(): readonly CampPlacement[] {
     { kind: "barrel", x: -28.4, z: -15.2, rotY: 0.9 },
     { kind: "workbench", x: -22.5, z: -19.5, rotY: 0.2 },
     { kind: "toolchest", x: -24.5, z: -17.8, rotY: 1.7 },
+    { kind: "crate", x: -21.8, z: -16.9, rotY: 0.3 },
+    { kind: "crate", x: -21.1, z: -16.2, rotY: 0.85 },
+    { kind: "crate", x: -22.4, z: -16.3, rotY: 0.05 },
+    { kind: "battery", x: -23.9, z: -15.5, rotY: -0.4 },
+    { kind: "oilcan", x: -22.2, z: -18.8, rotY: 0 },
+    { kind: "windpost", x: -11.5, z: -7.0, rotY: 0 },
   ];
 }
 
@@ -395,5 +450,141 @@ export function emberAt(
     y: 0.45 + u * 2.3,
     z: Math.sin(swirlA) * r,
     opacity: (1 - u) * (0.55 + 0.45 * hash01(i)),
+  };
+}
+
+/* -------------------- wind-made-visible math ----------------------- */
+/* The December 17 headwind blows FROM the east: the machine flies +x
+ * INTO it, so the WIND VELOCITY points -x. Every streamer, flag, and
+ * smoke column below advects toward -x, scaled by the scenario's
+ * headwind. All closed loops in t — no state, replays identical. */
+
+/** Headwind the scene renders when no scenario value is supplied. */
+export const DEFAULT_HEADWIND_MPS = 11;
+
+/** One scrub-vegetation placement (launch-relative; y from terrain). */
+export interface ScrubPlacement {
+  readonly x: number;
+  readonly z: number;
+  readonly rotY: number;
+  readonly scale: number;
+  readonly kind: "tuft" | "bush" | "pine";
+}
+
+/** The launch/camp flat stays bare (same law as duneDetail's mask). */
+export const SCRUB_FLAT_RADIUS_M = 62;
+/** Half-extent of the scrub field around the diorama. */
+export const SCRUB_SPAN_M = 470;
+
+/** Deterministic scrub field: ring-rejection sampling outside the
+ * launch flat, the rail corridor, and the camp clearing. Same
+ * (counts, seed) -> same field, every run. */
+export function scrubField(
+  counts: { tufts: number; bushes: number; pines: number },
+  seed: number,
+): readonly ScrubPlacement[] {
+  const total = counts.tufts + counts.bushes + counts.pines;
+  if (!Number.isInteger(total) || total < 0 || total > 1200) {
+    throw new RangeError(`scrub total out of [0, 1200]: ${total}`);
+  }
+  const rand = lcg(seed ^ 0x9e3779b9);
+  const out: ScrubPlacement[] = [];
+  const inRailCorridor = (x: number, z: number): boolean =>
+    Math.abs(z) < 10 && x > -8 && x < 42;
+  const inCampClearing = (x: number, z: number): boolean =>
+    x > -48 && x < -8 && z > -27 && z < -3;
+  let guard = 0;
+  while (out.length < total && guard < total * 40) {
+    guard += 1;
+    const x = (rand() * 2 - 1) * SCRUB_SPAN_M;
+    const z = (rand() * 2 - 1) * SCRUB_SPAN_M;
+    if (Math.hypot(x, z) < SCRUB_FLAT_RADIUS_M) {
+      continue;
+    }
+    if (inRailCorridor(x, z) || inCampClearing(x, z)) {
+      continue;
+    }
+    const idx = out.length;
+    const kind: ScrubPlacement["kind"] =
+      idx < counts.pines ? "pine" : idx < counts.pines + counts.bushes ? "bush" : "tuft";
+    out.push({
+      x,
+      z,
+      rotY: rand() * Math.PI * 2,
+      scale: kind === "pine" ? 0.8 + rand() * 0.9 : 0.6 + rand() * 0.8,
+      kind,
+    });
+  }
+  if (out.length !== total) {
+    throw new RangeError(`scrub rejection sampling starved: ${out.length}/${total}`);
+  }
+  return out;
+}
+
+/** Sand streamer ribbon: `segs` points of one low ribbon of sand
+ * skittering downwind (-x) from a hash-anchored start. `i` picks the
+ * streamer, `seg` the point along it. Amplitude grows with wind. */
+export function streamerPoint(
+  i: number,
+  seg: number,
+  segs: number,
+  t: number,
+  windMps: number,
+): { x: number; y: number; z: number } {
+  const anchorX = -50 + hash01(i * 53 + 3) * 150;
+  const anchorZ = -70 + hash01(i * 59 + 7) * 140;
+  const lenM = 3.5 + hash01(i * 61 + 11) * 5.5;
+  const s = seg / segs;
+  const phase = t * (0.9 + hash01(i * 67 + 13) * 0.7);
+  const flutter = Math.sin(phase * 6.1 + s * 9.4 + hash01(i) * 6.28);
+  const lift = (0.06 + 0.3 * s) * (0.5 + 0.5 * Math.sin(phase * 3.3 + s * 5.1));
+  return {
+    x: anchorX - s * lenM * (0.6 + windMps / 14),
+    y: 0.05 + lift * (0.4 + windMps / 40) + 0.04 * flutter,
+    z: anchorZ + s * lenM * 0.16 * flutter,
+  };
+}
+
+/** Flag cloth point: `seg`/`segs` along a vertical-hinged strip that
+ * streams downwind (-x) from the pole top, with a traveling wave whose
+ * speed scales with the wind. FIRE-LOCAL to the pole (caller adds the
+ * pole position); y measured DOWN from the truck. */
+export function flagPoint(
+  seg: number,
+  segs: number,
+  t: number,
+  windMps: number,
+): { x: number; y: number; z: number } {
+  const s = seg / segs;
+  const wave = Math.sin(t * (2.2 + windMps * 0.35) - s * 7.5);
+  const droop = (1 - Math.min(1, windMps / 8)) * s * s * 1.1;
+  return {
+    x: -s * (0.9 + windMps * 0.05),
+    y: -droop + 0.06 * wave * s,
+    z: 0.10 * s * wave,
+  };
+}
+
+/** Campfire smoke: one smokelet in FIRE-LOCAL coordinates rising from
+ * the flames and bending downwind (-x) with height. Loops forever;
+ * `strength` in [0,1] scales the whole column (0 = no fire). */
+export function smokePuff(
+  i: number,
+  t: number,
+  windMps: number,
+  strength: number,
+): { x: number; y: number; z: number; scale: number; opacity: number } {
+  const lifeS = 5.5 + hash01(i * 71 + 5) * 3.5;
+  const u = FRACT(t / lifeS + hash01(i * 73 + 9));
+  const rise = 0.5 + u * (5.5 + hash01(i * 79 + 2) * 2.5);
+  const bend = (rise * rise) / 40 * (0.5 + windMps / 12);
+  const sway = 0.3 * Math.sin(u * 7 + hash01(i * 83 + 4) * 6.28) * u;
+  const fade = u < 0.12 ? u / 0.12 : 1 - (u - 0.12) / 0.88;
+  return {
+    x: -bend + sway,
+    y: rise,
+    z: 0.18 * Math.sin(u * 5.3 + hash01(i) * 6.28) * u,
+    scale: 0.35 + u * 2.6,
+    opacity: Math.max(0, Math.min(1, strength)) * Math.max(0, fade) * 0.34,
   };
 }

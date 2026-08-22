@@ -14,6 +14,7 @@ import {
   heightAt,
   materialClass,
   type TerrainGridJson,
+  warpAxis,
 } from "../src/terrainMesh.ts";
 
 const grid = JSON.parse(
@@ -79,4 +80,42 @@ test("arrival camera starts high and far, settles beside the rail", () => {
   assert.ok(distStart > 300 && distEnd < 40, `dolly ${distStart} -> ${distEnd}`);
   assert.deepEqual(end, later, "the shot settles (idempotent past 14 s)");
   assert.ok(end.pos[1] > launch[1] + 3, "settles above the sand");
+});
+
+test("warpAxis is monotone, endpoint-exact, and clusters at lf", () => {
+  for (const lf of [0.15, 0.5, 0.8125]) {
+    let prev = -Infinity;
+    for (let i = 0; i <= 64; i++) {
+      const v = warpAxis(i / 64, lf);
+      assert.ok(v >= prev, `monotone at ${i} (lf=${lf})`);
+      assert.ok(v >= 0 && v <= 1);
+      prev = v;
+    }
+    assert.equal(warpAxis(0, lf), 0);
+    assert.ok(Math.abs(warpAxis(1, lf) - 1) < 1e-12);
+    // Density: the local derivative AT lf exceeds the far-field one.
+    const near = warpAxis(lf + 1e-3, lf) - warpAxis(lf, lf);
+    const far = warpAxis(0.999, lf) - warpAxis(0.998, lf);
+    assert.ok(near / 1e-3 > far / 1e-3, "denser near launch than far field");
+  }
+});
+
+test("LOD terrain keeps survey corners and packs vertices near launch", () => {
+  const { positions } = buildTerrainArrays(grid, 96);
+  const nv = 97;
+  // Corners still land exactly on the tile bounds.
+  assert.equal(positions[0], -1000); // (j=0,i=0) wx
+  const last = (nv * nv - 1) * 3;
+  assert.equal(positions[last + 2], -1000); // north edge wz = -(1000-1000)
+  // Nearest-vertex distance to the LAUNCH FLAT center must beat the
+  // uniform-grid spacing (2000/96 ≈ 20.8 m): warped inner ring ≤ 8 m.
+  const extent = 2000;
+  let best = Infinity;
+  for (let v = 0; v < nv * nv; v++) {
+    const dx = positions[v * 3]! - 0;
+    const dz = positions[v * 3 + 2]! - (-625);
+    best = Math.min(best, Math.hypot(dx, dz));
+  }
+  assert.ok(best < 8, `inner ring too coarse near launch: ${best.toFixed(2)} m`);
+  void extent;
 });
