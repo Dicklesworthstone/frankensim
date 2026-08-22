@@ -208,3 +208,192 @@ export function railTies(railLengthM: number): readonly number[] {
   }
   return out;
 }
+
+/* ---------- presentation-flight math (gulls v2, particles) ----------
+ * Everything here stays PURE and stateless-in-(inputs, t): the scene
+ * feeds wall-clock sim time and gets poses; replays and tests see the
+ * exact same sky. No THREE.js types leak into this module. */
+
+/** Single-integer avalanche hash in [0, 1) — the per-index constant
+ * source for stateless particles (no allocator, no shared RNG state). */
+export function hash01(n: number): number {
+  let h = Math.imul(n | 0, 2654435761);
+  h ^= h >>> 15;
+  h = Math.imul(h, 2246822519);
+  h ^= h >>> 13;
+  return (h >>> 0) / 4294967296;
+}
+
+/** A gull's bank/pitch for frame orientation: bank comes from the
+ * orbit's centripetal requirement (v·ω / g, capped ~57°), pitch from
+ * the climb rate of the bob term (nose down on descent, up on climb,
+ * capped ±20°). Roll sign follows ω's sign — verify visually against
+ * the turn direction in the scene battery screenshot. */
+export function gullAttitude(
+  g: GullPath,
+  t: number,
+): { rollRad: number; pitchRad: number } {
+  const speed = Math.abs(g.omega) * g.radius;
+  const bank = Math.atan((speed * Math.abs(g.omega)) / 9.81);
+  const rollRad = Math.min(1.0, bank) * Math.sign(g.omega);
+  const climbMps = g.bob * 0.31 * Math.cos(0.31 * t + g.phase * 2);
+  const pitchRad = Math.max(
+    -0.35,
+    Math.min(0.35, -Math.atan2(climbMps, Math.max(speed, 0.5))),
+  );
+  return { rollRad, pitchRad };
+}
+
+/** Hard cap on low flyby count (asserted at cap AND cap+1). */
+export const MAX_FLYBYS = 6;
+
+/** One low pass: a STRAIGHT track through near-launch airspace, looped
+ * on a per-bird period so passes recur all day without accumulating
+ * state. `dir` is a unit travel vector; the bird lives while its
+ * along-track coordinate sits inside ±halfSpanM. */
+export interface FlybyPath {
+  /** Closest-approach point, launch-relative [m]. */
+  readonly cx: number;
+  readonly cz: number;
+  /** Track altitude above the launch flat [m]. */
+  readonly y: number;
+  /** Unit travel direction (heading = atan2(-dirZ, dirX) convention
+   * matches gullPose: Ry(-heading) faces travel). */
+  readonly dirX: number;
+  readonly dirZ: number;
+  readonly speedMps: number;
+  /** Recurrence period [s] and phase offset along the track [m]. */
+  readonly periodS: number;
+  readonly offsetM: number;
+  /** Active half-length of the track [m] (spawn/despawn past camera). */
+  readonly halfSpanM: number;
+  readonly flapHz: number;
+  readonly glide: number;
+  readonly phase: number;
+}
+
+/** Spawn a deterministic low-flyby fleet: same (n, seed) -> same birds.
+ * Tracks thread NEAR the diorama (5–16 m up, passing within ~30 m of
+ * the rail) so the flock reads as living around the player, not as
+ * distant specks. */
+export function flybyFleet(n: number, seed: number): readonly FlybyPath[] {
+  if (!Number.isInteger(n) || n < 1 || n > MAX_FLYBYS) {
+    throw new RangeError(`flyby count must be an integer in [1, ${MAX_FLYBYS}], got ${n}`);
+  }
+  const rand = lcg(seed ^ 0x5f3759df);
+  const out: FlybyPath[] = [];
+  for (let i = 0; i < n; i += 1) {
+    const heading = (rand() - 0.5) * 1.2 + (rand() < 0.5 ? 0 : Math.PI);
+    out.push({
+      cx: -30 + rand() * 60,
+      cz: -24 + rand() * 48,
+      y: 5 + rand() * 11,
+      dirX: Math.cos(heading),
+      dirZ: -Math.sin(heading),
+      speedMps: 8.5 + rand() * 4.5,
+      periodS: 26 + rand() * 30,
+      offsetM: rand() * 400,
+      halfSpanM: 150 + rand() * 60,
+      flapHz: 2.4 + rand() * 1.2,
+      glide: 0.25 + rand() * 0.35,
+      phase: rand() * Math.PI * 2,
+    });
+  }
+  return out;
+}
+
+/** A flyby's pose at time t, or NULL while the bird is outside its
+ * active span (the scene hides it — no off-camera mesh churn). */
+export function flybyPose(
+  p: FlybyPath,
+  t: number,
+): { x: number; y: number; z: number; headingRad: number; flapRad: number } | null {
+  const track = (((p.speedMps * t + p.offsetM) % (2 * p.halfSpanM)) + 2 * p.halfSpanM) %
+    (2 * p.halfSpanM);
+  const s = track - p.halfSpanM;
+  if (Math.abs(s) > p.halfSpanM - 8) {
+    return null;
+  }
+  // Gentle shallow descent across the pass — arriving high, leaving low
+  // reads as a bird hunting the flat rather than riding rails.
+  const y = p.y - (s / p.halfSpanM) * 2.2;
+  const cycle = Math.sin(0.23 * t + p.phase * 3);
+  const soaring = cycle < p.glide * 2 - 1;
+  const flapRad = soaring ? 0.3 : 0.7 * Math.sin(2 * Math.PI * p.flapHz * t + p.phase);
+  return {
+    x: p.cx + p.dirX * s,
+    y,
+    z: p.cz + p.dirZ * s,
+    headingRad: Math.atan2(-p.dirZ, p.dirX),
+    flapRad,
+  };
+}
+
+/* ------------------------- stateless particles ---------------------- */
+
+const FRACT = (v: number): number => v - Math.floor(v);
+
+/** Propwash sand: one grain-plume particle behind a pulling machine.
+ * Age wraps per-particle (closed loop in t), the plume streams BACK
+ * along -x (props push air aft over the rear-mounted engine), spreads
+ * laterally, arcs up then settles. `strength` in [0,1] fades the whole
+ * plume (0 = engine quiet -> invisible). Launch-relative metres. */
+export function propwashPuff(
+  i: number,
+  t: number,
+  machineX: number,
+  strength: number,
+): { x: number; y: number; z: number; scale: number; opacity: number } {
+  const lifeS = 0.9 + hash01(i * 3 + 11) * 0.9;
+  const u = FRACT(t / lifeS + hash01(i * 7 + 5));
+  const back = 2.5 + u * (9 + hash01(i * 13 + 1) * 8);
+  const side = (hash01(i * 17 + 3) - 0.5) * (1.5 + u * 7);
+  const lift = 0.2 + 2.4 * u * (1 - u) * (0.5 + hash01(i * 19 + 7));
+  const fade = u < 0.08 ? u / 0.08 : 1 - (u - 0.08) / 0.92;
+  return {
+    x: machineX - back,
+    y: lift,
+    z: side,
+    scale: 0.6 + u * 3.2,
+    opacity: Math.max(0, Math.min(1, strength)) * Math.max(0, fade) * 0.5,
+  };
+}
+
+/** Engine exhaust: one smokelet from the oil-smeared crank area, rising
+ * and thinning. Fire-and-forget closed loop, launch-relative offsets
+ * from the machine's tail (caller adds machineX). */
+export function exhaustPuff(
+  i: number,
+  t: number,
+  rpm01: number,
+): { dx: number; dy: number; dz: number; scale: number; opacity: number } {
+  const lifeS = 1.4 + hash01(i * 23 + 2) * 1.2;
+  const u = FRACT(t / lifeS + hash01(i * 29 + 9));
+  const rise = 0.35 + u * (1.6 + 0.8 * rpm01);
+  const wander = 0.22 * Math.sin(u * 9 + hash01(i * 31 + 4) * 6.28);
+  return {
+    dx: -2.9 - u * 1.6,
+    dy: rise,
+    dz: 0.18 + wander,
+    scale: 0.25 + u * 1.5,
+    opacity: Math.max(0, Math.min(1, rpm01 * 1.4)) * (1 - u) * 0.42,
+  };
+}
+
+/** Campfire ember: one spark rising off the flames in FIRE-LOCAL
+ * coordinates (caller places at the fire ring). Loops forever. */
+export function emberAt(
+  i: number,
+  t: number,
+): { x: number; y: number; z: number; opacity: number } {
+  const lifeS = 1.6 + hash01(i * 37 + 6) * 1.6;
+  const u = FRACT(t / lifeS + hash01(i * 41 + 8));
+  const swirlA = hash01(i * 43 + 10) * Math.PI * 2 + u * 5;
+  const r = 0.14 * (1 - u);
+  return {
+    x: Math.cos(swirlA) * r,
+    y: 0.45 + u * 2.3,
+    z: Math.sin(swirlA) * r,
+    opacity: (1 - u) * (0.55 + 0.45 * hash01(i)),
+  };
+}
