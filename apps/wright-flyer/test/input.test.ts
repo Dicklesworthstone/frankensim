@@ -5,7 +5,16 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { NEUTRAL, keysFrom, stepCommand } from "../src/input.ts";
+import {
+  CRADLE_FULL_TRAVEL_PX,
+  GAMEPAD_DEADZONE,
+  NEUTRAL,
+  cradleFromPointer,
+  decayCradle,
+  keysFrom,
+  sampleGamepad,
+  stepCommand,
+} from "../src/input.ts";
 import { hudLines } from "../src/hud.ts";
 import { computePose } from "../src/airframe/pose.ts";
 
@@ -82,4 +91,67 @@ test("all five camera presets work against scripted state", async () => {
   const d1 = cameraFor("daniels", 1, launch, aircraft);
   const d2 = cameraFor("daniels", 9, launch, [50, 8, -600]);
   assert.deepEqual(d1.pos, d2.pos, "the tripod never moves");
+});
+
+test("hip cradle maps drag offset to a quantized position command", () => {
+  // Center grab = neutral.
+  assert.deepEqual(cradleFromPointer(0, 0), { canard: 0, warp: 0, mode: "mouse-cradle" });
+  // Drag DOWN = pull (+canard), drag RIGHT = +warp (sign conventions).
+  const pull = cradleFromPointer(0, CRADLE_FULL_TRAVEL_PX);
+  assert.equal(pull.canard, 1);
+  const push = cradleFromPointer(0, -CRADLE_FULL_TRAVEL_PX);
+  assert.equal(push.canard, -1);
+  const right = cradleFromPointer(CRADLE_FULL_TRAVEL_PX, 0);
+  assert.equal(right.warp, 1);
+  // Overshoot clamps at full travel; diagonal lands on the grid.
+  const over = cradleFromPointer(4000, -4000);
+  assert.equal(over.warp, 1);
+  assert.equal(over.canard, -1);
+  const diag = cradleFromPointer(45, 22.5);
+  for (const v of [diag.canard, diag.warp]) {
+    assert.ok(Math.abs(v * 4096 - Math.round(v * 4096)) < 1e-9, "grid");
+  }
+  // Non-finite offsets refuse loudly.
+  assert.throws(() => cradleFromPointer(Number.NaN, 0), /finite/);
+});
+
+test("cradle release decays on the recenter spring and rests bit-neutral", () => {
+  let cmd = cradleFromPointer(CRADLE_FULL_TRAVEL_PX, CRADLE_FULL_TRAVEL_PX);
+  assert.throws(() => decayCradle(cmd, Number.NaN), /finite/);
+  assert.throws(() => decayCradle(cmd, -1), /finite/);
+  for (let i = 0; i < 600; i++) {
+    cmd = decayCradle(cmd, 1 / 120);
+    for (const v of [cmd.canard, cmd.warp]) {
+      assert.ok(Math.abs(v) <= 1, "bounded");
+    }
+  }
+  assert.equal(cmd.canard, 0, "exact neutral rest");
+  assert.equal(cmd.warp, 0, "exact neutral rest");
+  assert.equal(cmd.mode, "mouse-cradle", "mode label survives decay");
+  // Determinism: same replay of steps -> same bits.
+  let again = cradleFromPointer(CRADLE_FULL_TRAVEL_PX, CRADLE_FULL_TRAVEL_PX);
+  for (let i = 0; i < 600; i++) again = decayCradle(again, 1 / 120);
+  assert.deepEqual(cmd, again);
+});
+
+test("gamepad radial deadzone kills drift but preserves direction", () => {
+  assert.equal(sampleGamepad(null), null, "no pad");
+  assert.equal(sampleGamepad({ connected: false, axes: [0.5, 0.5] }), null, "disconnected");
+  assert.equal(sampleGamepad({ connected: true, axes: [] }), null, "too few axes");
+  const rest = sampleGamepad({ connected: true, axes: [0.05, -0.08] });
+  assert.ok(rest !== null && rest.canard === 0 && rest.warp === 0, "inside deadzone = neutral");
+  // Pure diagonal just past the zone keeps its direction (no snap).
+  const d = sampleGamepad({
+    connected: true,
+    axes: [GAMEPAD_DEADZONE + 0.01, GAMEPAD_DEADZONE + 0.01],
+  });
+  assert.ok(d !== null && d.warp > 0 && Math.abs(d.warp - d.canard) < 1e-9, "diagonal stays diagonal");
+  // Full deflection is exactly full travel on the grid; stick back pulls.
+  const full = sampleGamepad({ connected: true, axes: [0, 1] });
+  assert.ok(full !== null && full.canard === 1 && full.warp === 0);
+  const grid = sampleGamepad({ connected: true, axes: [0.7, -0.2] });
+  assert.ok(grid !== null);
+  for (const v of [grid.canard, grid.warp]) {
+    assert.ok(Math.abs(v * 4096 - Math.round(v * 4096)) < 1e-9, "grid");
+  }
 });
