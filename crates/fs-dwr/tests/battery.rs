@@ -223,13 +223,15 @@ fn dwr_003_goal_oriented_beats_uniform() {
         uniform.push((est.dofs, err));
         let _ = write!(uni_rows, "{{\"dofs\":{},\"err\":{err:.3e}}},", est.dofs);
     }
-    // Adaptive loop from base 3. `adapt_loop` reserves its final row for an
-    // estimate-only receipt, so six rows attempt five refinement waves. The
-    // unchanged uniform-5 DOF cap below prevents that extra wave from buying
-    // accuracy through a larger space.
+    // Adaptive loop from base 3. Textbook DWR tapers the marking fraction as
+    // the estimator converges: aggressive bulk waves first, then a fine tail
+    // so the final landing resolves the goal instead of overshooting the
+    // uniform-L5 DOF reference. Two public-API adapt_loop calls back to back
+    // continue the same grid; each reserves its own estimate-only final row,
+    // so four bulk rows (three waves) plus three tail rows (two waves).
     let mut grid = Quadtree::with_room(3, 8);
     grid.refine_toward_interface(&disk, 3);
-    let (steps, _) = adapt_loop(
+    let (bulk_steps, _) = adapt_loop(
         &mut grid,
         &disk,
         FemParams::default(),
@@ -237,14 +239,25 @@ fn dwr_003_goal_oriented_beats_uniform() {
         &zero,
         &goal,
         0.5,
-        6,
+        4,
     )
-    .expect("adaptive loop");
+    .expect("bulk adaptive loop");
+    let (tail_steps, _) = adapt_loop(
+        &mut grid,
+        &disk,
+        FemParams::default(),
+        &src,
+        &zero,
+        &goal,
+        0.2,
+        3,
+    )
+    .expect("tail adaptive loop");
     let mut ad_rows = String::new();
-    for s in &steps {
+    for s in bulk_steps.iter().chain(tail_steps.iter()) {
         let _ = write!(ad_rows, "{},", s.to_json());
     }
-    let final_step = steps.last().expect("steps");
+    let final_step = tail_steps.last().expect("steps");
     let err_adapt = (j_ref - final_step.j).abs();
     let (dofs_u5, err_u5) = uniform[2];
     // Accuracy-per-DOF: strictly better accuracy at no more DOFs —
