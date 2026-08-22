@@ -663,6 +663,223 @@ pub fn campaign_registry() -> Result<MechanismRegistry, RegistryError> {
     Ok(registry)
 }
 
+/// Versioned schema identity of the retained registry log.
+pub const REGISTRY_LOG_SCHEMA: &str = "frankensim.euler-disc.mechanism-registry-log.v1";
+/// Versioned content-address domain of the retained registry log.
+pub const REGISTRY_LOG_IDENTITY_DOMAIN: &str = "org.frankensim.euler-disc.registry-log.v1";
+
+/// One contract-side binding of a declared hypothesis source to its
+/// version-pinned registry row.
+///
+/// The contract's `HypothesisSource` carries only an id and a locator;
+/// this binding is where the rich pinned row joins a run. It exists so
+/// campaign assembly can FAIL CLOSED on citation drift: an unregistered
+/// id, or a locator that no longer matches the pinned row, is a typed
+/// refusal instead of a silently weaker provenance chain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceBinding {
+    source_id: String,
+    locator: String,
+    /// Content identity of the full registered row: version, equations,
+    /// assumptions, transfer limitations — any semantic edit is a NEW
+    /// declaration and moves this hash.
+    row_identity: ContentHash,
+    /// How many rival cards cite this source (informing, never validating).
+    citing_cards: usize,
+}
+
+impl SourceBinding {
+    /// Bound source id.
+    #[must_use]
+    pub fn source_id(&self) -> &str {
+        &self.source_id
+    }
+
+    /// Locator exactly as declared by the contract (verified equal to the
+    /// pinned row's).
+    #[must_use]
+    pub fn locator(&self) -> &str {
+        &self.locator
+    }
+
+    /// Content identity of the rich registered row behind this binding.
+    #[must_use]
+    pub const fn row_identity(&self) -> ContentHash {
+        self.row_identity
+    }
+
+    /// Rival cards citing this source.
+    #[must_use]
+    pub const fn citing_cards(&self) -> usize {
+        self.citing_cards
+    }
+}
+
+impl MechanismRegistry {
+    /// The registered row behind a source id, if any.
+    #[must_use]
+    pub fn source(&self, id: &str) -> Option<&RegisteredSource> {
+        self.sources.get(id)
+    }
+
+    /// Bind one declared contract source (id + locator as it appears on
+    /// the contract's `HypothesisSource`) to its version-pinned row.
+    ///
+    /// # Errors
+    /// Refuses an unregistered id (citation names alone cannot authorize
+    /// a model) and a locator that drifted from the pinned row: a locator
+    /// edit IS a new source declaration, so the contract must be corrected
+    /// or the row re-registered under a new id.
+    pub fn bind_contract_source(
+        &self,
+        id: &str,
+        locator: &str,
+    ) -> Result<SourceBinding, RegistryError> {
+        let row = self.sources.get(id).ok_or_else(|| {
+            refuse(
+                "euler-registry-unresolved-source",
+                id.to_string(),
+                "the contract declares a hypothesis source that is not \
+                 registered; register the version-pinned row first",
+            )
+        })?;
+        if row.locator != locator {
+            return Err(refuse(
+                "euler-registry-locator-drift",
+                id.to_string(),
+                format!(
+                    "contract locator {locator:?} does not match the pinned \
+                     row locator {:?}; a locator edit is a new declaration",
+                    row.locator
+                ),
+            ));
+        }
+        let citing_cards = self
+            .cards
+            .values()
+            .filter(|card| card.source_ids.iter().any(|source_id| source_id == id))
+            .count();
+        Ok(SourceBinding {
+            source_id: id.to_string(),
+            locator: locator.to_string(),
+            row_identity: row.identity(),
+            citing_cards,
+        })
+    }
+
+    /// Bind every declared source of one contract assembly, preserving the
+    /// declaration order and refusing duplicate declarations.
+    ///
+    /// # Errors
+    /// Per-pair bind refusals plus duplicate-id refusal. An empty
+    /// declaration list binds nothing (a vacuous success is honest here:
+    /// whether a campaign contract must declare sources is the contract
+    /// side's policy, not the registry's).
+    pub fn bind_contract_sources(
+        &self,
+        declared: &[(&str, &str)],
+    ) -> Result<Vec<SourceBinding>, RegistryError> {
+        let mut seen = std::collections::BTreeSet::new();
+        declared
+            .iter()
+            .map(|(id, locator)| {
+                if !seen.insert(*id) {
+                    return Err(refuse(
+                        "euler-registry-duplicate-binding",
+                        (*id).to_string(),
+                        "the same source id is declared twice; deduplicate the \
+                         contract assembly",
+                    ));
+                }
+                self.bind_contract_source(id, locator)
+            })
+            .collect()
+    }
+
+    /// Project the bounded deterministic retained log of the full registry
+    /// state: schema tag, row counts, then every source and card in
+    /// canonical id order with its content identity.
+    ///
+    /// Redaction is BY CONSTRUCTION: the schema has no field for wall-clock
+    /// time, host identity, process identity, or filesystem paths, so none
+    /// can leak into the buffered or hashed bytes. Two rebuilds of the same
+    /// registry produce byte-identical logs, and any semantic edit to any
+    /// row or card moves the content address.
+    #[must_use]
+    pub fn retained_log(&self) -> RegistryRetainedLog {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(REGISTRY_LOG_SCHEMA.as_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(&(self.sources.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&(self.cards.len() as u64).to_le_bytes());
+        for (id, row) in &self.sources {
+            bytes.push(1);
+            bytes.extend_from_slice(&(id.len() as u64).to_le_bytes());
+            bytes.extend_from_slice(id.as_bytes());
+            bytes.extend_from_slice(row.identity().as_bytes());
+        }
+        for (id, card) in &self.cards {
+            bytes.push(2);
+            bytes.extend_from_slice(&(id.len() as u64).to_le_bytes());
+            bytes.extend_from_slice(id.as_bytes());
+            bytes.extend_from_slice(card.identity().as_bytes());
+        }
+        let identity = fs_blake3::hash_domain(REGISTRY_LOG_IDENTITY_DOMAIN, &bytes);
+        RegistryRetainedLog {
+            source_count: self.sources.len() as u64,
+            card_count: self.cards.len() as u64,
+            bytes,
+            identity,
+        }
+    }
+}
+
+/// Bounded, deterministic, content-addressed log of one registry state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegistryRetainedLog {
+    source_count: u64,
+    card_count: u64,
+    bytes: Vec<u8>,
+    identity: ContentHash,
+}
+
+impl RegistryRetainedLog {
+    /// Canonical log bytes (schema-versioned, deterministic).
+    #[must_use]
+    pub fn canonical_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// Content address of the canonical bytes.
+    #[must_use]
+    pub const fn identity(&self) -> ContentHash {
+        self.identity
+    }
+
+    /// Registered source rows covered by this log.
+    #[must_use]
+    pub const fn source_count(&self) -> u64 {
+        self.source_count
+    }
+
+    /// Registered mechanism cards covered by this log.
+    #[must_use]
+    pub const fn card_count(&self) -> u64 {
+        self.card_count
+    }
+
+    /// Repository-relative reproduction command; no absolute paths.
+    #[must_use]
+    pub fn reproduction_command(&self) -> String {
+        format!(
+            "cargo test -p fs-euler-disc-e2e --test mechanism_registry -- \
+             registry_log_is_deterministic_bounded_and_content_addressed \
+             # log identity {}",
+            self.identity.to_hex()
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
