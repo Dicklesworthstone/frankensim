@@ -1,6 +1,4 @@
-use serde::{Deserialize, Serialize};
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Debug, Clone)]
 pub struct GoddardParams {
     pub chamber_pressure_psi: f64,
     pub fuel_flow_kg_per_sec: f64,
@@ -8,7 +6,7 @@ pub struct GoddardParams {
     pub expansion_ratio: f64,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Debug, Clone)]
 pub struct GoddardResult {
     pub chamber_pressure_psi: f64,
     pub chamber_pressure_pa: f64,
@@ -26,8 +24,14 @@ pub fn step_goddard_rocket(params: &GoddardParams) -> GoddardResult {
     let expansion = params.expansion_ratio.max(1.4);
 
     // Supersonic Mach number at exit via area-Mach relation
-    let mach_exit = ((2.0 / (gamma - 1.0)) * (params.expansion_ratio.powf(2.0 / (gamma + 1.0)) - 1.0)).sqrt();
-    let exhaust_velocity_mps = (((2.0 * gamma) / (gamma - 1.0)) * gas_constant_r * chamber_temp_k * (1.0 - 1.0 / expansion.powf(gamma - 1.0))).sqrt().round();
+    let mach_exit =
+        ((2.0 / (gamma - 1.0)) * (params.expansion_ratio.powf(2.0 / (gamma + 1.0)) - 1.0)).sqrt();
+    let exhaust_velocity_mps = (((2.0 * gamma) / (gamma - 1.0))
+        * gas_constant_r
+        * chamber_temp_k
+        * (1.0 - 1.0 / expansion.powf(gamma - 1.0)))
+    .sqrt()
+    .round();
     let thrust_newtons = (params.fuel_flow_kg_per_sec * exhaust_velocity_mps).round();
     let specific_impulse_sec = exhaust_velocity_mps / 9.80665;
 

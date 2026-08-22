@@ -1,6 +1,4 @@
-use serde::{Deserialize, Serialize};
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Debug, Clone)]
 pub struct TeslaCoilParams {
     pub resonant_freq_khz: f64,
     pub input_kv: f64,
@@ -8,7 +6,7 @@ pub struct TeslaCoilParams {
     pub q_factor: f64,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Debug, Clone)]
 pub struct TeslaCoilResult {
     pub resonant_freq_khz: f64,
     pub secondary_potential_mv: f64,
@@ -21,7 +19,9 @@ pub fn step_tesla_coil(params: &TeslaCoilParams) -> TeslaCoilResult {
     let secondary_l = 85.0; // mH
     let transformation_ratio = (secondary_l / primary_l as f64).sqrt();
     let k = 0.18;
-    let secondary_potential_mv = ((params.input_kv * transformation_ratio * k * params.q_factor.sqrt()) / 1000.0) * (params.spark_gap_mm / 15.0);
+    let secondary_potential_mv =
+        ((params.input_kv * transformation_ratio * k * params.q_factor.sqrt()) / 1000.0)
+            * (params.spark_gap_mm / 15.0);
     let streamer_length_inches = secondary_potential_mv * 28.0;
 
     TeslaCoilResult {
