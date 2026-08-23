@@ -1363,8 +1363,8 @@ fn validate_supersession_graph(drafts: &[StandardSourceDraft]) -> Result<(), Man
         }
         if drafts.binary_search_by(|row| row.key.cmp(by)).is_err() {
             return Err(ManifestError::UnknownSupersessionTarget {
-                key: draft.key.clone(),
-                target: by.clone(),
+                key: Box::new(draft.key.clone()),
+                target: Box::new(by.clone()),
             });
         }
     }
