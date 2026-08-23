@@ -52,20 +52,20 @@ pub enum CbcExecutionMode {
 /// mirroring schema constants or reconstructing limb-width formulas.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CbcExecutionSchedule {
-    candidate_visit_units: u128,
-    candidate_control_units: u128,
-    product_update_visit_units: u128,
-    initialization_visit_units: u128,
-    prefix_control_units: u128,
-    candidate_visit_limb_units: u128,
-    candidate_visit_scalar_units: u128,
-    candidate_control_limb_units: u128,
-    candidate_control_scalar_units: u128,
-    product_update_visit_limb_units: u128,
-    product_update_visit_scalar_units: u128,
-    certificate_candidate_units: u128,
-    certificate_score_copy_limb_units: u128,
-    certificate_fixed_prefix_units: u128,
+    candidate_visit: u128,
+    candidate_control: u128,
+    product_update_visit: u128,
+    initialization_visit: u128,
+    prefix_control: u128,
+    candidate_visit_limb: u128,
+    candidate_visit_scalar: u128,
+    candidate_control_limb: u128,
+    candidate_control_scalar: u128,
+    product_update_limb: u128,
+    product_update_scalar: u128,
+    certificate_candidate: u128,
+    certificate_score_copy_limb: u128,
+    certificate_fixed_prefix: u128,
 }
 
 impl CbcExecutionSchedule {
@@ -125,22 +125,22 @@ impl CbcExecutionSchedule {
             .checked_add(1)
             .ok_or_else(|| overflow("execution prefix control work"))?;
         Ok(Self {
-            candidate_visit_units,
-            candidate_control_units,
-            product_update_visit_units,
-            initialization_visit_units,
-            prefix_control_units,
-            candidate_visit_limb_units: visit_limb_units,
-            candidate_visit_scalar_units: visit_scalar_units,
-            candidate_control_limb_units,
-            candidate_control_scalar_units,
-            product_update_visit_limb_units: product_update_limb_units,
-            product_update_visit_scalar_units: visit_scalar_units,
-            certificate_candidate_units: CERTIFICATE_UNITS_PER_CANDIDATE,
-            certificate_score_copy_limb_units: score_capacity_limbs
+            candidate_visit: candidate_visit_units,
+            candidate_control: candidate_control_units,
+            product_update_visit: product_update_visit_units,
+            initialization_visit: initialization_visit_units,
+            prefix_control: prefix_control_units,
+            candidate_visit_limb: visit_limb_units,
+            candidate_visit_scalar: visit_scalar_units,
+            candidate_control_limb: candidate_control_limb_units,
+            candidate_control_scalar: candidate_control_scalar_units,
+            product_update_limb: product_update_limb_units,
+            product_update_scalar: visit_scalar_units,
+            certificate_candidate: CERTIFICATE_UNITS_PER_CANDIDATE,
+            certificate_score_copy_limb: score_capacity_limbs
                 .checked_mul(2)
                 .ok_or_else(|| overflow("certificate score-copy work"))?,
-            certificate_fixed_prefix_units: CERTIFICATE_FIXED_UNITS_PER_PREFIX,
+            certificate_fixed_prefix: CERTIFICATE_FIXED_UNITS_PER_PREFIX,
         })
     }
 
@@ -153,21 +153,21 @@ impl CbcExecutionSchedule {
         prefixes: u128,
     ) -> Result<u128, CbcAdmissionError> {
         candidate_visits
-            .checked_mul(self.candidate_visit_units)
+            .checked_mul(self.candidate_visit)
             .and_then(|units| {
                 candidate_count
-                    .checked_mul(self.candidate_control_units)
+                    .checked_mul(self.candidate_control)
                     .and_then(|control| units.checked_add(control))
             })
             .and_then(|units| {
                 product_update_visits
-                    .checked_mul(self.product_update_visit_units)
+                    .checked_mul(self.product_update_visit)
                     .and_then(|updates| units.checked_add(updates))
             })
             .and_then(|units| units.checked_add(initialization_points))
             .and_then(|units| {
                 prefixes
-                    .checked_mul(self.prefix_control_units)
+                    .checked_mul(self.prefix_control)
                     .and_then(|control| units.checked_add(control))
             })
             .ok_or_else(|| overflow("execution schedule upper bound"))
@@ -180,12 +180,12 @@ impl CbcExecutionSchedule {
         prefix_payload_words: u128,
     ) -> Result<u128, CbcAdmissionError> {
         candidate_count
-            .checked_mul(self.certificate_candidate_units)
+            .checked_mul(self.certificate_candidate)
             .and_then(|units| {
                 scanned_prefixes
                     .checked_mul(
-                        self.certificate_score_copy_limb_units
-                            .checked_add(self.certificate_fixed_prefix_units)?,
+                        self.certificate_score_copy_limb
+                            .checked_add(self.certificate_fixed_prefix)?,
                     )
                     .and_then(|prefix_units| units.checked_add(prefix_units))
             })
@@ -200,15 +200,15 @@ impl CbcExecutionSchedule {
         product_update_visits: u128,
     ) -> Result<u128, CbcAdmissionError> {
         candidate_visits
-            .checked_mul(self.candidate_visit_limb_units)
+            .checked_mul(self.candidate_visit_limb)
             .and_then(|units| {
                 candidate_count
-                    .checked_mul(self.candidate_control_limb_units)
+                    .checked_mul(self.candidate_control_limb)
                     .and_then(|control| units.checked_add(control))
             })
             .and_then(|units| {
                 product_update_visits
-                    .checked_mul(self.product_update_visit_limb_units)
+                    .checked_mul(self.product_update_limb)
                     .and_then(|updates| units.checked_add(updates))
             })
             .ok_or_else(|| overflow("execution limb schedule upper bound"))
@@ -223,55 +223,55 @@ impl CbcExecutionSchedule {
         prefixes: u128,
     ) -> Result<u128, CbcAdmissionError> {
         candidate_visits
-            .checked_mul(self.candidate_visit_scalar_units)
+            .checked_mul(self.candidate_visit_scalar)
             .and_then(|units| {
                 candidate_count
-                    .checked_mul(self.candidate_control_scalar_units)
+                    .checked_mul(self.candidate_control_scalar)
                     .and_then(|control| units.checked_add(control))
             })
             .and_then(|units| {
                 product_update_visits
-                    .checked_mul(self.product_update_visit_scalar_units)
+                    .checked_mul(self.product_update_scalar)
                     .and_then(|updates| units.checked_add(updates))
             })
             .and_then(|units| units.checked_add(initialization_points))
             .and_then(|units| {
                 prefixes
-                    .checked_mul(self.prefix_control_units)
+                    .checked_mul(self.prefix_control)
                     .and_then(|control| units.checked_add(control))
             })
             .ok_or_else(|| overflow("execution scalar schedule upper bound"))
     }
 
     pub(crate) const fn candidate_visit_units(self) -> u128 {
-        self.candidate_visit_units
+        self.candidate_visit
     }
 
     pub(crate) const fn candidate_control_units(self) -> u128 {
-        self.candidate_control_units
+        self.candidate_control
     }
 
     pub(crate) const fn product_update_visit_units(self) -> u128 {
-        self.product_update_visit_units
+        self.product_update_visit
     }
 
     pub(crate) const fn initialization_visit_units(self) -> u128 {
-        self.initialization_visit_units
+        self.initialization_visit
     }
 
     pub(crate) const fn prefix_control_units(self) -> u128 {
-        self.prefix_control_units
+        self.prefix_control
     }
 
     pub(crate) const fn certificate_candidate_units(self) -> u128 {
-        self.certificate_candidate_units
+        self.certificate_candidate
     }
 
     pub(crate) fn certificate_prefix_units(self, prefix_len: usize) -> Option<u128> {
         u128::try_from(prefix_len)
             .ok()?
-            .checked_add(self.certificate_score_copy_limb_units)?
-            .checked_add(self.certificate_fixed_prefix_units)
+            .checked_add(self.certificate_score_copy_limb)?
+            .checked_add(self.certificate_fixed_prefix)
     }
 }
 
@@ -288,7 +288,7 @@ impl CbcProblem {
     /// # Errors
     /// [`CbcAdmissionError::InvalidPointCount`] when `point_count < 3`, or
     /// [`CbcAdmissionError::InvalidDimension`] when `dimension == 0`.
-    #[must_use]
+    #[must_use = "a refused problem must not be admitted or executed"]
     pub const fn new(point_count: u32, dimension: usize) -> Result<Self, CbcAdmissionError> {
         if point_count < 3 {
             return Err(CbcAdmissionError::InvalidPointCount { point_count });
@@ -337,7 +337,7 @@ impl CbcProblem {
     /// length/byte allocation cannot be represented on this target or the
     /// simultaneously live logical state exceeds the target address-space
     /// cardinality.
-    #[must_use]
+    #[must_use = "the checked envelope feeds every downstream budget decision"]
     pub fn estimate(self) -> Result<CbcEstimate, CbcAdmissionError> {
         self.estimate_for(CbcExecutionMode::Construction)
     }
@@ -349,7 +349,7 @@ impl CbcProblem {
     /// # Errors
     /// The same structural, arithmetic, and target-capacity refusals as
     /// [`Self::estimate`].
-    #[must_use]
+    #[must_use = "the checked envelope feeds every downstream budget decision"]
     #[allow(clippy::too_many_lines)] // One checked derivation keeps the envelope auditable.
     pub fn estimate_for(self, mode: CbcExecutionMode) -> Result<CbcEstimate, CbcAdmissionError> {
         let points = u128::from(self.point_count);
@@ -658,7 +658,7 @@ impl CbcProblem {
             )?,
         };
         let certificate_limb_work_units = certificate_count
-            .checked_mul(execution_schedule.certificate_score_copy_limb_units)
+            .checked_mul(execution_schedule.certificate_score_copy_limb)
             .ok_or_else(|| overflow("certificate limb work"))?;
         let certificate_scalar_work_units = certificate_work_units
             .checked_sub(certificate_limb_work_units)
@@ -732,7 +732,7 @@ impl CbcProblem {
     /// [`CbcAdmissionError::TargetCapacityExceeded`],
     /// [`CbcAdmissionError::WorkBudgetExceeded`], or
     /// [`CbcAdmissionError::MemoryBudgetExceeded`].
-    #[must_use]
+    #[must_use = "admission refusal must gate construction"]
     pub fn admit(self, budget: CbcBudget) -> Result<CbcAdmission, CbcAdmissionError> {
         self.admit_for(CbcExecutionMode::Construction, budget)
     }
@@ -743,7 +743,7 @@ impl CbcProblem {
     ///
     /// # Errors
     /// The same estimate and budget refusals as [`Self::admit`].
-    #[must_use]
+    #[must_use = "admission refusal must gate construction"]
     pub fn admit_for(
         self,
         mode: CbcExecutionMode,
@@ -1381,7 +1381,7 @@ mod authority_tests {
         changed_schedule
             .estimate
             .execution_schedule
-            .candidate_visit_units += 1;
+            .candidate_visit += 1;
         assert!(matches!(
             CbcExecutor::new(changed_schedule),
             Err(CbcExecError::AdmissionAuthorityMismatch)
@@ -1424,7 +1424,7 @@ mod authority_tests {
         changed_schedule
             .estimate
             .execution_schedule
-            .candidate_visit_units += 1;
+            .candidate_visit += 1;
         assert_eq!(
             verify_consistency_admitted(changed_schedule, &certificate),
             Err(CbcCertError::AdmissionMismatch)

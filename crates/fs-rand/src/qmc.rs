@@ -543,7 +543,7 @@ impl Lattice {
     /// continue-only completion contract is ever broken. Allocation failure
     /// is not yet converted into a typed error; fallible exact storage is the
     /// subsequent CBC storage tranche.
-    #[must_use]
+    #[must_use = "the constructed lattice or typed refusal must be handled"]
     pub fn try_cbc(n: u32, dim: usize, budget: CbcBudget) -> Result<Self, CbcLatticeError> {
         let problem = CbcProblem::new(n, dim)?;
         let admission = problem.admit(budget)?;
@@ -747,7 +747,10 @@ mod tests {
         for index in [0, 1, 2, 7, 31, 255, u32::MAX] {
             directions.point_with_owen_scramble(index, &mut reused_point, 0x4655_4c4c_5041_5448);
             rebuilt.point(index, &mut rebuilt_point);
-            assert_eq!(reused_point, rebuilt_point);
+            assert_eq!(
+                reused_point.map(f64::to_bits),
+                rebuilt_point.map(f64::to_bits)
+            );
         }
     }
 

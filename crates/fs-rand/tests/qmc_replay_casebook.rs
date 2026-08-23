@@ -196,7 +196,7 @@ fn sobol_outcome() -> CaseOutcome {
 
     let count = usize::try_from(SOBOL_POINTS).expect("point count fits usize");
     let mut bins = vec![vec![0_u32; count]; SOBOL_DIM];
-    for row in materialized.chunks_exact(SOBOL_DIM) {
+    for row in materialized.as_chunks::<SOBOL_DIM>().0 {
         for (dimension, &value) in row.iter().enumerate() {
             if !(0.0..1.0).contains(&value) {
                 return qmc_failure(format!(
@@ -260,7 +260,7 @@ fn owen_outcome() -> CaseOutcome {
 
     let count = usize::try_from(OWEN_POINTS).expect("point count fits usize");
     let mut bins = vec![vec![0_u32; count]; OWEN_DIM];
-    for row in first.chunks_exact(OWEN_DIM) {
+    for row in first.as_chunks::<OWEN_DIM>().0 {
         for (dimension, &value) in row.iter().enumerate() {
             if !(0.0..1.0).contains(&value) {
                 return qmc_failure(format!(

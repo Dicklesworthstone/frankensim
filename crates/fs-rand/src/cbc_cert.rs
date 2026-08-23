@@ -152,7 +152,7 @@ pub enum CbcCertError {
 }
 
 fn validate_admission(
-    admission: CbcAdmission,
+    admission: &CbcAdmission,
     certificate: &CbcPrefixCertificate,
 ) -> Result<(), CbcCertError> {
     if !admission.has_current_authority()
@@ -232,7 +232,7 @@ fn score_for(n: u32, products: &[ExactNat], candidate: u32) -> ExactNat {
 
 /// Structural checks shared by both modes. Returns the scan prefix (the
 /// declared prefix without its certified last component).
-fn structural<'a>(certificate: &'a CbcPrefixCertificate) -> Result<&'a [u32], CbcCertError> {
+fn structural(certificate: &CbcPrefixCertificate) -> Result<&[u32], CbcCertError> {
     let n = certificate.point_count;
     if n < 3 {
         return Err(CbcCertError::InadmissiblePrefix);
@@ -309,7 +309,7 @@ pub fn verify_consistency_admitted(
     admission: CbcAdmission,
     certificate: &CbcPrefixCertificate,
 ) -> Result<(), CbcCertError> {
-    validate_admission(admission, certificate)?;
+    validate_admission(&admission, certificate)?;
     verify_consistency(certificate)
 }
 
@@ -324,7 +324,7 @@ pub fn audit_minimality_admitted(
     admission: CbcAdmission,
     certificate: &CbcPrefixCertificate,
 ) -> Result<(), CbcCertError> {
-    validate_admission(admission, certificate)?;
+    validate_admission(&admission, certificate)?;
     audit_minimality(certificate)
 }
 

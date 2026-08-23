@@ -538,292 +538,228 @@ impl CbcExecutor {
         tile: CbcTileShape,
         remaining: &mut u128,
     ) -> Result<CbcBoundary, CbcExecError> {
-        let n = self.problem.point_count();
-        let dimension = self.problem.dimension();
-        // Every charge comes from the sealed admission authority; this module
-        // owns no mirrored limb-width or scalar-debit constants.
-        let visit_units = self.schedule.candidate_visit_units();
-        let candidate_control_units = self
-            .schedule
-            .candidate_control_units()
-            .checked_add(if self.certifying {
-                self.schedule.certificate_candidate_units()
-            } else {
-                0
-            })
-            .expect("admission proved candidate charges fit u128");
-        let update_visit_units = self.schedule.product_update_visit_units();
-        let initialization_visit_units = self.schedule.initialization_visit_units();
-        let prefix_control_units = self.schedule.prefix_control_units();
-        let score_capacity_limbs = self.score_capacity_limbs;
-        let product_capacity_limbs = self.product_capacity_limbs;
-        let certifying = self.certifying;
-        let tie_capacity = self.admissible_candidates_per_prefix;
-
-        match &mut self.phase {
-            Phase::Init { next_point } => {
-                // Initialization charges one unit per point plus the update
-                // visits themselves (the estimate's `+ points + dimension`
-                // tail distributes here and at each z push).
-                let end = (*next_point).saturating_add(tile.point_block).min(n);
-                for point in *next_point..end {
-                    let point_index =
-                        usize::try_from(point).expect("admission proved point indices fit usize");
-                    let residue = lattice_residue(point_index, 1, n);
-                    self.products[point_index]
-                        .mul_assign_factor_with_capacity(
-                            exact_kernel_numerator(n, residue),
-                            product_capacity_limbs,
-                        )
-                        .map_err(|required_limbs| CbcExecError::StorageScheduleOverrun {
-                            required_limbs,
-                            admitted_limbs: product_capacity_limbs,
-                        })?;
+        let charges = TileCharges::sealed(self, tile);
+        // Dispatch by phase with each borrow released before the mutable method call.
+        if let Phase::Init { next_point } = &self.phase {
+            let cursor = *next_point;
+            return self.run_init_tile(cursor, charges.point_block, remaining);
+        }
+        if let Phase::Update { chosen, next_point } = &self.phase {
+            let (fold, cursor) = (*chosen, *next_point);
+            return self.run_update_tile(fold, cursor, charges.point_block, remaining);
+        }
+        if matches!(self.phase, Phase::Done) {
+            return Ok(CbcBoundary::Prefix);
+        }
+        let Phase::Scan {
+            candidate,
+            accum,
+            best,
+            runner_up,
+            tie_class,
+        } = &mut self.phase
+        else {
+            unreachable!("every executor phase was handled above");
+        };
+        let mut candidates_in_tile = 0_u32;
+        loop {
+            if *candidate == charges.n {
+                let (winning_score, chosen) = best
+                    .take()
+                    .expect("candidate 1 is coprime to every admitted n");
+                if charges.certifying {
+                    let prefix_len = self
+                        .z
+                        .len()
+                        .checked_add(1)
+                        .expect("admission proved the certificate prefix length fits usize");
+                    let certificate_units = self
+                        .schedule
+                        .certificate_prefix_units(prefix_len)
+                        .expect("admission proved certificate charges fit u128");
                     debit(
                         &mut self.work_spent,
-                        self.admitted_work_units,
+                        charges.admitted_work_units,
                         remaining,
-                        initialization_visit_units,
+                        certificate_units,
                     )?;
+                    let runner_up_limbs = runner_up
+                        .take()
+                        .map(|(score, who)| (score.limbs().to_vec(), who));
+                    let certificate = build_prefix_certificate(
+                        &self.z,
+                        &winning_score,
+                        chosen,
+                        runner_up_limbs,
+                        core::mem::take(tie_class),
+                        prefix_len,
+                        charges.n,
+                    );
+                    self.certificates.push(certificate);
                 }
-                *next_point = end;
-                if end == n {
-                    self.z.push(1);
-                    debit(
-                        &mut self.work_spent,
-                        self.admitted_work_units,
-                        remaining,
-                        prefix_control_units,
-                    )?;
-                    self.phase = if dimension == 1 {
-                        Phase::Done
-                    } else {
-                        Phase::Scan {
-                            candidate: 1,
-                            accum: None,
-                            best: None,
-                            runner_up: None,
-                            tie_class: if certifying {
-                                Vec::with_capacity(tie_capacity)
-                            } else {
-                                Vec::new()
-                            },
-                        }
-                    };
-                    Ok(CbcBoundary::Prefix)
-                } else {
-                    Ok(CbcBoundary::PointBlock)
-                }
+                self.phase = Phase::Update {
+                    chosen,
+                    next_point: 0,
+                };
+                return Ok(CbcBoundary::CandidateBlock);
             }
-            Phase::Scan {
+            match advance_scan_candidate(
                 candidate,
                 accum,
+                &mut candidates_in_tile,
+                &self.products,
+                &charges,
+                &mut self.work_spent,
+                remaining,
+            )? {
+                AdvanceScan::Boundary(boundary) => return Ok(boundary),
+                AdvanceScan::Accumulating => continue,
+                AdvanceScan::CandidateFinished => {}
+            }
+            let finished = accum.take().expect("accumulator finished this candidate");
+            let mut score = finished.score;
+            score.normalize();
+            apply_scan_verdict(
                 best,
                 runner_up,
                 tie_class,
-            } => {
-                let mut candidates_in_tile = 0_u32;
-                loop {
-                    if *candidate == n {
-                        let (winning_score, chosen) = best
-                            .take()
-                            .expect("candidate 1 is coprime to every admitted n");
-                        if certifying {
-                            let prefix_len = self.z.len().checked_add(1).expect(
-                                "admission proved the certificate prefix length fits usize",
-                            );
-                            let certificate_units = self
-                                .schedule
-                                .certificate_prefix_units(prefix_len)
-                                .expect("admission proved certificate charges fit u128");
-                            debit(
-                                &mut self.work_spent,
-                                self.admitted_work_units,
-                                remaining,
-                                certificate_units,
-                            )?;
-                            let mut prefix = Vec::with_capacity(prefix_len);
-                            prefix.extend_from_slice(&self.z);
-                            prefix.push(chosen);
-                            let denominator_exponent = u32::try_from(prefix.len())
-                                .expect("admitted dimensions fit u32 exponents");
-                            self.certificates.push(CbcPrefixCertificate {
-                                point_count: n,
-                                prefix,
-                                winning_score_limbs: winning_score.limbs().to_vec(),
-                                tie_class: core::mem::take(tie_class),
-                                runner_up: runner_up
-                                    .take()
-                                    .map(|(score, who)| (score.limbs().to_vec(), who)),
-                                denominator_exponent,
-                                tie_rule: TIE_RULE_LOWEST_CANDIDATE,
-                                admissible_rule: ADMISSIBLE_RULE_UNITS,
-                            });
-                        }
-                        self.phase = Phase::Update {
-                            chosen,
-                            next_point: 0,
-                        };
-                        return Ok(CbcBoundary::CandidateBlock);
-                    }
-                    if accum.is_none() {
-                        if candidates_in_tile == tile.candidate_block {
-                            return Ok(CbcBoundary::CandidateBlock);
-                        }
-                        candidates_in_tile += 1;
-                        debit(
-                            &mut self.work_spent,
-                            self.admitted_work_units,
-                            remaining,
-                            candidate_control_units,
-                        )?;
-                        if gcd(*candidate, n) != 1 {
-                            *candidate += 1;
-                            continue;
-                        }
-                        let mut score = ExactNat::zero();
-                        score.reserve_exact_limbs(score_capacity_limbs);
-                        *accum = Some(ScanAccum {
-                            score,
-                            next_point: 0,
-                        });
-                    }
-                    let running = accum.as_mut().expect("accumulator was just installed");
-                    let end = running.next_point.saturating_add(tile.point_block).min(n);
-                    for point in running.next_point..end {
-                        let point_index = usize::try_from(point)
-                            .expect("admission proved point indices fit usize");
-                        let residue = lattice_residue(point_index, *candidate, n);
-                        running
-                            .score
-                            .add_mul_factor_with_capacity(
-                                &self.products[point_index],
-                                exact_kernel_numerator(n, residue),
-                                score_capacity_limbs,
-                            )
-                            .map_err(|required_limbs| CbcExecError::StorageScheduleOverrun {
-                                required_limbs,
-                                admitted_limbs: score_capacity_limbs,
-                            })?;
-                        debit(
-                            &mut self.work_spent,
-                            self.admitted_work_units,
-                            remaining,
-                            visit_units,
-                        )?;
-                    }
-                    running.next_point = end;
-                    if end < n {
-                        return Ok(CbcBoundary::PointBlock);
-                    }
-                    let finished = accum.take().expect("accumulator finished this candidate");
-                    let mut score = finished.score;
-                    score.normalize();
-                    enum Verdict {
-                        NewBest,
-                        Tie,
-                        Above,
-                    }
-                    let verdict = match &*best {
-                        None => Verdict::NewBest,
-                        Some((best_score, _)) => match score.magnitude_cmp(best_score) {
-                            core::cmp::Ordering::Less => Verdict::NewBest,
-                            core::cmp::Ordering::Equal => Verdict::Tie,
-                            core::cmp::Ordering::Greater => Verdict::Above,
-                        },
-                    };
-                    match verdict {
-                        Verdict::NewBest => {
-                            // Candidates ascend, so a displaced best is the
-                            // smallest score strictly above the new winner.
-                            let displaced = best.replace((score, *candidate));
-                            if certifying {
-                                *runner_up = displaced;
-                                tie_class.clear();
-                                tie_class.push(*candidate);
-                            }
-                        }
-                        Verdict::Tie => {
-                            // Ascending order keeps the committed winner the
-                            // class minimum without re-comparison.
-                            if certifying {
-                                tie_class.push(*candidate);
-                            }
-                        }
-                        Verdict::Above => {
-                            if certifying {
-                                let replace_runner = match &*runner_up {
-                                    None => true,
-                                    Some((runner_score, _)) => {
-                                        score.magnitude_cmp(runner_score)
-                                            == core::cmp::Ordering::Less
-                                    }
-                                };
-                                if replace_runner {
-                                    *runner_up = Some((score, *candidate));
-                                }
-                            }
-                        }
-                    }
-                    *candidate += 1;
-                    if *remaining == 0 {
-                        return Ok(CbcBoundary::CandidateBlock);
-                    }
-                }
+                charges.certifying,
+                score,
+                *candidate,
+            );
+            *candidate += 1;
+            if *remaining == 0 {
+                return Ok(CbcBoundary::CandidateBlock);
             }
-            Phase::Update { chosen, next_point } => {
-                let chosen = *chosen;
-                let end = (*next_point).saturating_add(tile.point_block).min(n);
-                for point in *next_point..end {
-                    let point_index =
-                        usize::try_from(point).expect("admission proved point indices fit usize");
-                    let residue = lattice_residue(point_index, chosen, n);
-                    self.products[point_index]
-                        .mul_assign_factor_with_capacity(
-                            exact_kernel_numerator(n, residue),
-                            product_capacity_limbs,
-                        )
-                        .map_err(|required_limbs| CbcExecError::StorageScheduleOverrun {
-                            required_limbs,
-                            admitted_limbs: product_capacity_limbs,
-                        })?;
-                    debit(
-                        &mut self.work_spent,
-                        self.admitted_work_units,
-                        remaining,
-                        update_visit_units,
-                    )?;
-                }
-                *next_point = end;
-                if end == n {
-                    self.z.push(chosen);
-                    debit(
-                        &mut self.work_spent,
-                        self.admitted_work_units,
-                        remaining,
-                        prefix_control_units,
-                    )?;
-                    self.phase = if self.z.len() == dimension {
-                        Phase::Done
+        }
+    }
+
+    /// Initialize first-component products for one tile of points, then
+    /// seal the prefix and enter the first scan on completion.
+    fn run_init_tile(
+        &mut self,
+        next_point: u32,
+        point_block: u32,
+        remaining: &mut u128,
+    ) -> Result<CbcBoundary, CbcExecError> {
+        let n = self.problem.point_count();
+        let dimension = self.problem.dimension();
+        // Initialization charges one unit per point plus the update
+        // visits themselves (the estimate's `+ points + dimension`
+        // tail distributes here and at each z push).
+        let end = next_point.saturating_add(point_block).min(n);
+        for point in next_point..end {
+            let point_index =
+                usize::try_from(point).expect("admission proved point indices fit usize");
+            let residue = lattice_residue(point_index, 1, n);
+            self.products[point_index]
+                .mul_assign_factor_with_capacity(
+                    exact_kernel_numerator(n, residue),
+                    self.product_capacity_limbs,
+                )
+                .map_err(|required_limbs| CbcExecError::StorageScheduleOverrun {
+                    required_limbs,
+                    admitted_limbs: self.product_capacity_limbs,
+                })?;
+            debit(
+                &mut self.work_spent,
+                self.admitted_work_units,
+                remaining,
+                self.schedule.initialization_visit_units(),
+            )?;
+        }
+        if end == n {
+            self.z.push(1);
+            debit(
+                &mut self.work_spent,
+                self.admitted_work_units,
+                remaining,
+                self.schedule.prefix_control_units(),
+            )?;
+            self.phase = if dimension == 1 {
+                Phase::Done
+            } else {
+                Phase::Scan {
+                    candidate: 1,
+                    accum: None,
+                    best: None,
+                    runner_up: None,
+                    tie_class: if self.certifying {
+                        Vec::with_capacity(self.admissible_candidates_per_prefix)
                     } else {
-                        Phase::Scan {
-                            candidate: 1,
-                            accum: None,
-                            best: None,
-                            runner_up: None,
-                            tie_class: if certifying {
-                                Vec::with_capacity(tie_capacity)
-                            } else {
-                                Vec::new()
-                            },
-                        }
-                    };
-                    Ok(CbcBoundary::Prefix)
-                } else {
-                    Ok(CbcBoundary::PointBlock)
+                        Vec::new()
+                    },
                 }
-            }
-            Phase::Done => Ok(CbcBoundary::Prefix),
+            };
+            Ok(CbcBoundary::Prefix)
+        } else {
+            self.phase = Phase::Init { next_point: end };
+            Ok(CbcBoundary::PointBlock)
+        }
+    }
+
+    /// Fold the chosen candidate into the prefix products for one tile of
+    /// points, then seal the extended prefix or continue the fold.
+    fn run_update_tile(
+        &mut self,
+        chosen: u32,
+        next_point: u32,
+        point_block: u32,
+        remaining: &mut u128,
+    ) -> Result<CbcBoundary, CbcExecError> {
+        let n = self.problem.point_count();
+        let dimension = self.problem.dimension();
+        let end = next_point.saturating_add(point_block).min(n);
+        for point in next_point..end {
+            let point_index =
+                usize::try_from(point).expect("admission proved point indices fit usize");
+            let residue = lattice_residue(point_index, chosen, n);
+            self.products[point_index]
+                .mul_assign_factor_with_capacity(
+                    exact_kernel_numerator(n, residue),
+                    self.product_capacity_limbs,
+                )
+                .map_err(|required_limbs| CbcExecError::StorageScheduleOverrun {
+                    required_limbs,
+                    admitted_limbs: self.product_capacity_limbs,
+                })?;
+            debit(
+                &mut self.work_spent,
+                self.admitted_work_units,
+                remaining,
+                self.schedule.product_update_visit_units(),
+            )?;
+        }
+        if end == n {
+            self.z.push(chosen);
+            debit(
+                &mut self.work_spent,
+                self.admitted_work_units,
+                remaining,
+                self.schedule.prefix_control_units(),
+            )?;
+            self.phase = if self.z.len() == dimension {
+                Phase::Done
+            } else {
+                Phase::Scan {
+                    candidate: 1,
+                    accum: None,
+                    best: None,
+                    runner_up: None,
+                    tie_class: if self.certifying {
+                        Vec::with_capacity(self.admissible_candidates_per_prefix)
+                    } else {
+                        Vec::new()
+                    },
+                }
+            };
+            Ok(CbcBoundary::Prefix)
+        } else {
+            self.phase = Phase::Update {
+                chosen,
+                next_point: end,
+            };
+            Ok(CbcBoundary::PointBlock)
         }
     }
 }
@@ -851,6 +787,223 @@ fn debit(
     }
     *remaining = remaining.saturating_sub(units);
     Ok(())
+}
+
+/// Per-tile charge constants copied once from the sealed admission
+/// authority. A snapshot value, so the scan-tile helpers can be free
+/// functions borrowing executor fields disjointly.
+#[derive(Debug, Clone, Copy)]
+struct TileCharges {
+    n: u32,
+    certifying: bool,
+    score_capacity_limbs: usize,
+    admitted_work_units: u128,
+    visit_units: u128,
+    candidate_control_units: u128,
+    point_block: u32,
+    candidate_block: u32,
+}
+
+impl TileCharges {
+    fn sealed(executor: &CbcExecutor, tile: CbcTileShape) -> Self {
+        // Every charge comes from the sealed admission authority; this
+        // module owns no mirrored limb-width or scalar-debit constants.
+        Self {
+            n: executor.problem.point_count(),
+            certifying: executor.certifying,
+            score_capacity_limbs: executor.score_capacity_limbs,
+            admitted_work_units: executor.admitted_work_units,
+            visit_units: executor.schedule.candidate_visit_units(),
+            candidate_control_units: executor
+                .schedule
+                .candidate_control_units()
+                .checked_add(if executor.certifying {
+                    executor.schedule.certificate_candidate_units()
+                } else {
+                    0
+                })
+                .expect("admission proved candidate charges fit u128"),
+            point_block: tile.point_block,
+            candidate_block: tile.candidate_block,
+        }
+    }
+}
+
+/// Outcome of comparing a finished candidate score against the committed
+/// best. Candidates ascend, so ties never displace the class minimum.
+enum Verdict {
+    /// Strictly below every committed score: new winner, and a displaced
+    /// best becomes the runner-up.
+    NewBest,
+    /// Equal to the committed winner: joins the tie class.
+    Tie,
+    /// Strictly above the winner: may displace the runner-up.
+    Above,
+}
+
+/// Outcome of one scan-loop step after the candidate-completion check.
+enum AdvanceScan {
+    /// A tile boundary was reached; publish it to the caller.
+    Boundary(CbcBoundary),
+    /// The candidate advanced (possibly skipped as non-coprime) but its
+    /// score is not complete.
+    Accumulating,
+    /// The candidate's exact score is complete and still needs the
+    /// winner/runner-up verdict applied by the caller.
+    CandidateFinished,
+}
+
+/// Advance the scan loop one step: install the candidate's accumulator
+/// when absent (enforcing the per-tile candidate block boundary, debiting
+/// the control charge, skipping non-coprime candidates, and reserving the
+/// exact score capacity), then accumulate one point block of its running
+/// score with a per-visit debit. Returns the finished flag when the whole
+/// candidate score is complete.
+fn advance_scan_candidate(
+    candidate: &mut u32,
+    accum: &mut Option<ScanAccum>,
+    candidates_in_tile: &mut u32,
+    products: &[ExactNat],
+    charges: &TileCharges,
+    work_spent: &mut u128,
+    remaining: &mut u128,
+) -> Result<AdvanceScan, CbcExecError> {
+    if accum.is_none() {
+        if *candidates_in_tile == charges.candidate_block {
+            return Ok(AdvanceScan::Boundary(CbcBoundary::CandidateBlock));
+        }
+        *candidates_in_tile += 1;
+        debit(
+            work_spent,
+            charges.admitted_work_units,
+            remaining,
+            charges.candidate_control_units,
+        )?;
+        if gcd(*candidate, charges.n) != 1 {
+            *candidate += 1;
+            return Ok(AdvanceScan::Accumulating);
+        }
+        let mut score = ExactNat::zero();
+        score.reserve_exact_limbs(charges.score_capacity_limbs);
+        *accum = Some(ScanAccum {
+            score,
+            next_point: 0,
+        });
+    }
+    let n = charges.n;
+    let running = accum.as_mut().expect("accumulator was just installed");
+    let end = running
+        .next_point
+        .saturating_add(charges.point_block)
+        .min(n);
+    for point in running.next_point..end {
+        let point_index = usize::try_from(point).expect("admission proved point indices fit usize");
+        let residue = lattice_residue(point_index, *candidate, n);
+        running
+            .score
+            .add_mul_factor_with_capacity(
+                &products[point_index],
+                exact_kernel_numerator(n, residue),
+                charges.score_capacity_limbs,
+            )
+            .map_err(|required_limbs| CbcExecError::StorageScheduleOverrun {
+                required_limbs,
+                admitted_limbs: charges.score_capacity_limbs,
+            })?;
+        debit(
+            work_spent,
+            charges.admitted_work_units,
+            remaining,
+            charges.visit_units,
+        )?;
+    }
+    running.next_point = end;
+    if end < n {
+        return Ok(AdvanceScan::Boundary(CbcBoundary::PointBlock));
+    }
+    Ok(AdvanceScan::CandidateFinished)
+}
+
+/// Compare a finished candidate score against the committed best and
+/// update the winner/runner-up/tie-class state. Candidates ascend, so a
+/// displaced best is the smallest score strictly above the new winner and
+/// ties never displace the class minimum.
+fn apply_scan_verdict(
+    best: &mut Option<(ExactNat, u32)>,
+    runner_up: &mut Option<(ExactNat, u32)>,
+    tie_class: &mut Vec<u32>,
+    certifying: bool,
+    score: ExactNat,
+    candidate: u32,
+) {
+    let verdict = match &*best {
+        None => Verdict::NewBest,
+        Some((best_score, _)) => match score.magnitude_cmp(best_score) {
+            core::cmp::Ordering::Less => Verdict::NewBest,
+            core::cmp::Ordering::Equal => Verdict::Tie,
+            core::cmp::Ordering::Greater => Verdict::Above,
+        },
+    };
+    match verdict {
+        Verdict::NewBest => {
+            // Candidates ascend, so a displaced best is the
+            // smallest score strictly above the new winner.
+            let displaced = best.replace((score, candidate));
+            if certifying {
+                *runner_up = displaced;
+                tie_class.clear();
+                tie_class.push(candidate);
+            }
+        }
+        Verdict::Tie => {
+            // Ascending order keeps the committed winner the
+            // class minimum without re-comparison.
+            if certifying {
+                tie_class.push(candidate);
+            }
+        }
+        Verdict::Above => {
+            if certifying {
+                let replace_runner = match &*runner_up {
+                    None => true,
+                    Some((runner_score, _)) => {
+                        score.magnitude_cmp(runner_score) == core::cmp::Ordering::Less
+                    }
+                };
+                if replace_runner {
+                    *runner_up = Some((score, candidate));
+                }
+            }
+        }
+    }
+}
+
+/// Assemble the certified prefix record for a completed scan. Pure
+/// construction: the caller has already debited the certificate charge.
+fn build_prefix_certificate(
+    z: &[u32],
+    winning_score: &ExactNat,
+    chosen: u32,
+    runner_up: Option<(Vec<u32>, u32)>,
+    tie_class: Vec<u32>,
+    prefix_len: usize,
+    n: u32,
+) -> CbcPrefixCertificate {
+    let mut prefix = Vec::with_capacity(prefix_len);
+    prefix.extend_from_slice(z);
+    prefix.push(chosen);
+    let denominator_exponent =
+        u32::try_from(prefix.len()).expect("admitted dimensions fit u32 exponents");
+    CbcPrefixCertificate {
+        point_count: n,
+        prefix,
+        winning_score_limbs: winning_score.limbs().to_vec(),
+        tie_class,
+        runner_up,
+        denominator_exponent,
+        tie_rule: TIE_RULE_LOWEST_CANDIDATE,
+        admissible_rule: ADMISSIBLE_RULE_UNITS,
+    }
 }
 
 #[cfg(test)]
