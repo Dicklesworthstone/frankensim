@@ -50,9 +50,11 @@ what the constraints MEAN.
 - `interval_eval` (the in-house prover): dependency-aware interval
   inclusion formulas over fs-opt graphs per node; refuses (teaching
   reasons) on division through zero, domain violations, negative powers,
-  and PDE/stochastic nodes. The formulas are conservative over exact
-  endpoint operations, while theorem-strength binary64 endpoint authority
-  remains subject to the explicit outward-rounding no-claim below. Before
+  and PDE/stochastic nodes. Every arithmetic endpoint is computed on
+  fs-ivl's outward-rounded kernel (`frankensim-zup19`), so a rounded
+  endpoint can no longer move inward past the exact real bound;
+  enclosure rigor is conditional on fs-ivl's declared fs-math ULP
+  budgets (that crate's own no-claim section). Before
   memo allocation it checks the sealed root depth and
   aggregate admission-work receipt against fs-opt's default cap
   schedule, and the walk itself is EXPLICIT-STACK (reachability
@@ -73,13 +75,16 @@ what the constraints MEAN.
   A cleared structural bound returns the current `Proven` schema status
   plus a sealed `ProofArtifact` carrying both interval ends and a
   `ProofSubject` bound to the
-  full-width admitted fs-opt problem semantic identity, exact node, and
-  ordered endpoint bit patterns. Every `Proven` evidence value also
-  retains those exact proof-bound bits; the artifact/evidence verifier
-  requires the subject and both bound endpoints to match. Robust kinds
-  use the same admitted uncertainty-box path and carry ENCLOSURE
-  certificates; default theorem authority awaits the named outward
-  successor rather than treating fp-slack sampling as a proof.
+  full-width admitted fs-opt problem semantic identity, exact node,
+  ordered endpoint bit patterns, AND the arithmetic-kernel identity
+  (`INTERVAL_KERNEL_IDENTITY`); a proof minted under a different kernel
+  is a different theorem and fails binding. Every `Proven` evidence
+  value also retains those exact proof-bound bits; the artifact/evidence
+  verifier requires the subject (kernel included) and both bound
+  endpoints to match. Robust kinds use the same admitted uncertainty-box
+  path and carry ENCLOSURE certificates on the same outward-rounded
+  kernel; fp-slack sampling remains measured evidence and never promotes
+  itself to theorem authority.
 - `diagnose_infeasibility(problem, specs, domain, cx) -> Diagnosis`:
   elastic-relaxation solve (multi-start projected subgradient descent
   on total hinge violation, deterministic LCG starts) classifies
@@ -224,9 +229,14 @@ unchanged.
 
 ## No-claim boundaries
 
-- The interval prover rounds to-nearest; outward-rounded arithmetic
-  joins with fs-ivl (containment carries an fp-slack caveat until
-  P0 theorem/kernel successor `frankensim-zup19` is green). SOS
+- The interval prover computes every endpoint on fs-ivl's
+  outward-rounded kernel (`frankensim-zup19` is LANDED for this crate's
+  executable authority; the kernel identity is versioned into
+  `ProofSubject`). Remaining rigor conditions: fs-ivl's declared
+  fs-math ULP budgets, and the sealed independent proof RE-CHECKER
+  (replay/validate of every endpoint without trusting the producer's
+  status bit) is still future work — until it exists a consumer trusts
+  the producer's artifact rather than independently verifying it. SOS
   certificates are REPRESENTED (`ProofKind::Sos`), not executable —
   fs-sos is a later bead. Evaluation retains the explicit
   `NeedsProof { Sos }` intent, while the interval-only sealed artifact API

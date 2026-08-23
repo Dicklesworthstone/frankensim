@@ -165,6 +165,14 @@ pub enum ProofKind {
     Sos,
 }
 
+/// Identity of the executable arithmetic theorem behind interval proofs:
+/// fs-ivl's outward-rounded kernel under its declared fs-math ULP budgets
+/// (`bead frankensim-zup19`). A proof minted by a different kernel is a
+/// different theorem and cannot match this subject, so stale artifacts
+/// from the retired round-to-nearest engine fail binding instead of
+/// silently re-authorizing.
+pub const INTERVAL_KERNEL_IDENTITY: &str = "fs-ivl/outward-rounded-v1";
+
 /// Exact subject identity for a proof artifact.
 ///
 /// The problem component is the admitted, full-width semantic identity from
@@ -176,6 +184,7 @@ pub struct ProofSubject {
     problem: ProblemSemanticId,
     node: NodeId,
     domain_bits: Vec<(u64, u64)>,
+    kernel: &'static str,
 }
 
 impl ProofSubject {
@@ -197,12 +206,20 @@ impl ProofSubject {
         &self.domain_bits
     }
 
+    /// The arithmetic-kernel identity this proof was minted under.
+    #[must_use]
+    pub fn kernel(&self) -> &'static str {
+        self.kernel
+    }
+
     fn push_json(&self, out: &mut String) {
         use core::fmt::Write as _;
 
         out.push_str("{\"problem\":");
         push_json_string(out, &self.problem.to_hex());
-        let _ = write!(out, ",\"node\":{},\"domain_bits\":[", self.node.0);
+        let _ = write!(out, ",\"node\":{},\"kernel\":", self.node.0);
+        push_json_string(out, self.kernel);
+        out.push_str(",\"domain_bits\":[");
         for (index, &(lo, hi)) in self.domain_bits.iter().enumerate() {
             if index > 0 {
                 out.push(',');
@@ -1027,6 +1044,7 @@ fn proof_subject(
             .iter()
             .map(|&(lo, hi)| (lo.to_bits(), hi.to_bits()))
             .collect(),
+        kernel: INTERVAL_KERNEL_IDENTITY,
     })
 }
 

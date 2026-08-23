@@ -3,10 +3,14 @@
 //! constraints. Conservative inclusion per node; anything it cannot
 //! bound rigorously (division through zero, ln at nonpositive lo,
 //! PDE/stochastic nodes) REFUSES with a teaching reason rather than
-//! guessing. Rounding is to-nearest (outward-rounded arithmetic joins
-//! with fs-ivl — CONTRACT no-claim); the conformance battery separates
-//! the conservativeness law from that caveat with an fp-slack check.
+//! guessing. Every arithmetic endpoint is computed on fs-ivl's
+//! outward-rounded kernel (`bead frankensim-zup19`): a rounded endpoint
+//! can no longer move INWARD past the exact real bound, so a near-zero
+//! upper endpoint cannot clear zero while the real range does not.
+//! Remaining rigor conditions are fs-ivl's declared fs-math ULP budgets
+//! (CONTRACT no-claim section).
 
+use fs_ivl::Interval as Kernel;
 use fs_opt::{AdmissionCaps, Expr, NodeId, Problem};
 
 /// A closed interval.
@@ -23,18 +27,28 @@ impl Iv {
         Iv { lo: v, hi: v }
     }
 
-    fn add(self, o: Iv) -> Iv {
+    /// The fs-ivl outward-rounded kernel for this interval. Callers keep
+    /// endpoints ordered and NaN-free (boxes are validated at entry; every
+    /// kernel result re-validates at the `interval_eval` boundary), so the
+    /// kernel's structured panic on an inverted/NaN interval is a can-happen-
+    /// only-on-kernel-bug tripwire, not input handling.
+    fn kernel(self) -> Kernel {
+        Kernel::new(self.lo, self.hi)
+    }
+
+    fn from_kernel(k: Kernel) -> Iv {
         Iv {
-            lo: self.lo + o.lo,
-            hi: self.hi + o.hi,
+            lo: k.lo(),
+            hi: k.hi(),
         }
     }
 
+    fn add(self, o: Iv) -> Iv {
+        Self::from_kernel(self.kernel() + o.kernel())
+    }
+
     fn sub(self, o: Iv) -> Iv {
-        Iv {
-            lo: self.lo - o.hi,
-            hi: self.hi - o.lo,
-        }
+        Self::from_kernel(self.kernel() - o.kernel())
     }
 
     fn neg(self) -> Iv {
@@ -45,16 +59,7 @@ impl Iv {
     }
 
     fn mul(self, o: Iv) -> Iv {
-        let c = [
-            self.lo * o.lo,
-            self.lo * o.hi,
-            self.hi * o.lo,
-            self.hi * o.hi,
-        ];
-        Iv {
-            lo: c.iter().copied().fold(f64::INFINITY, f64::min),
-            hi: c.iter().copied().fold(f64::NEG_INFINITY, f64::max),
-        }
+        Self::from_kernel(self.kernel() * o.kernel())
     }
 
     fn square(self) -> Iv {
@@ -63,6 +68,29 @@ impl Iv {
             square.lo = square.lo.max(0.0);
         }
         square
+    }
+
+    fn div(self, o: Iv) -> Iv {
+        // Zero-straddling divisors are refused by the caller with the typed
+        // teaching error; the kernel would answer WHOLE, which the
+        // certificate boundary refuses anyway.
+        Self::from_kernel(self.kernel() / o.kernel())
+    }
+
+    fn sqrt(self) -> Iv {
+        Self::from_kernel(self.kernel().sqrt())
+    }
+
+    fn exp(self) -> Iv {
+        Self::from_kernel(self.kernel().exp())
+    }
+
+    fn ln(self) -> Iv {
+        Self::from_kernel(self.kernel().ln())
+    }
+
+    fn tanh(self) -> Iv {
+        Self::from_kernel(self.kernel().tanh())
     }
 
     fn min_iv(self, o: Iv) -> Iv {
@@ -89,13 +117,6 @@ impl Iv {
                 lo: 0.0,
                 hi: self.hi.max(-self.lo),
             }
-        }
-    }
-
-    fn monotone(self, f: impl Fn(f64) -> f64) -> Iv {
-        Iv {
-            lo: f(self.lo),
-            hi: f(self.hi),
         }
     }
 }
@@ -133,6 +154,9 @@ pub enum IvalError {
     },
     /// Negative `powi` exponents are deferred.
     NegativePow,
+    /// A constant node carries NaN or ±∞; no enclosure exists and
+    /// carrying it would poison every parent endpoint.
+    NonFiniteConstant,
     /// Binding count does not cover the variable's components.
     BadBindings,
 }
@@ -163,6 +187,10 @@ impl core::fmt::Display for IvalError {
                 )
             }
             IvalError::NegativePow => write!(f, "negative integer powers are deferred"),
+            IvalError::NonFiniteConstant => write!(
+                f,
+                "a constant node carries a non-finite value; no enclosure exists"
+            ),
             IvalError::BadBindings => {
                 write!(f, "the box bindings do not cover the variable components")
             }
@@ -289,7 +317,15 @@ fn ival_node(
                 IvVal::S(_) => unreachable!("builder enforced vector shape"),
             }
         }
-        Expr::Const { value, .. } => IvVal::S(Iv::point(*value)),
+        Expr::Const { value, .. } => {
+            if !value.is_finite() {
+                // A NaN/±∞ constant has no enclosure; silently carrying it
+                // would poison every parent endpoint (and the kernel's
+                // structured panic is not this API's contract).
+                return Err(IvalError::NonFiniteConstant);
+            }
+            IvVal::S(Iv::point(*value))
+        }
         Expr::Add(a, b) => {
             let (x, y) = (ev(*a), ev(*b));
             match (x, y) {
@@ -326,10 +362,10 @@ fn ival_node(
             if q.lo <= 0.0 && q.hi >= 0.0 {
                 return Err(IvalError::DivThroughZero);
             }
-            IvVal::S(p.mul(Iv {
-                lo: 1.0 / q.hi,
-                hi: 1.0 / q.lo,
-            }))
+            // Outward-rounded quotient on the kernel; a round-to-nearest
+            // reciprocal here could move an endpoint inward past the exact
+            // real bound (the frankensim-zup19 defect class).
+            IvVal::S(p.div(q))
         }
         Expr::Neg(a) => match ev(*a) {
             IvVal::S(p) => IvVal::S(p.neg()),
@@ -364,17 +400,17 @@ fn ival_node(
             if p.lo < 0.0 {
                 return Err(IvalError::Domain { op: "sqrt" });
             }
-            IvVal::S(p.monotone(f64::sqrt))
+            IvVal::S(p.sqrt())
         }
-        Expr::Exp(a) => IvVal::S(s(ev(*a)).monotone(f64::exp)),
+        Expr::Exp(a) => IvVal::S(s(ev(*a)).exp()),
         Expr::Ln(a) => {
             let p = s(ev(*a));
             if p.lo <= 0.0 {
                 return Err(IvalError::Domain { op: "ln" });
             }
-            IvVal::S(p.monotone(f64::ln))
+            IvVal::S(p.ln())
         }
-        Expr::Tanh(a) => IvVal::S(s(ev(*a)).monotone(f64::tanh)),
+        Expr::Tanh(a) => IvVal::S(s(ev(*a)).tanh()),
         Expr::Dot(a, b) => {
             let (x, y) = (ev(*a), ev(*b));
             match (x, y) {

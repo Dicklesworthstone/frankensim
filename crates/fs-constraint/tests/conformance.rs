@@ -1400,6 +1400,92 @@ fn interval_proofs_refuse_bad_boxes_and_wrong_proof_kinds_and_bind_subjects() {
 }
 
 #[test]
+fn interval_endpoints_are_outward_enclosed_on_the_fs_ivl_kernel() {
+    // G0 witnesses for frankensim-zup19. Round-to-nearest endpoints could
+    // move INWARD past the exact real bound — a false-certificate class:
+    // a near-zero upper endpoint could clear zero while the real range did
+    // not. Every endpoint now comes from fs-ivl's outward-rounded kernel.
+    let rn_third = f64::from_bits(0x3FD5_5555_5555_5555); // round-to-nearest 1/3
+
+    // Witness A — division inward drift. The RN quotient of 1/3 is
+    // strictly BELOW the exact real 1/3, so the retired engine returned a
+    // point whose UPPER endpoint excluded the true value.
+    let mut third_builder = ProblemBuilder::new();
+    let one = third_builder.konst(1.0, Dims::NONE).expect("one");
+    let three = third_builder.konst(3.0, Dims::NONE).expect("three");
+    let third = third_builder.div(one, three).expect("1/3 node");
+    third_builder
+        .objective(third, fs_opt::Sense::Minimize, 1.0)
+        .expect("objective");
+    let third_problem = third_builder.finish();
+    let bound = interval_eval(&third_problem, third, &[]).expect("enclosed quotient");
+    assert!(
+        bound.lo < rn_third,
+        "lo must fall strictly below the RN quotient: {:?} vs {rn_third:?}",
+        bound.lo
+    );
+    assert!(
+        bound.hi > rn_third,
+        "hi must rise strictly above the RN quotient: {:?}",
+        bound.hi
+    );
+    assert!(bound.lo > 0.0 && bound.hi.is_finite());
+
+    // The proof subject carries the kernel identity, so an artifact minted
+    // by the retired round-to-nearest engine cannot match this subject.
+    let spec = ConstraintSpec {
+        name: "kernel-bound".into(),
+        node: third,
+        kind: ConstraintKind::Certification {
+            proof: ProofKind::Interval,
+        },
+        active_tol: 0.0,
+    };
+    let (evidence, artifact) =
+        prove_interval(&third_problem, &spec, &[]).expect("kernel-bound proof");
+    assert_eq!(
+        artifact.subject().kernel(),
+        fs_constraint::INTERVAL_KERNEL_IDENTITY
+    );
+    assert!(artifact.verifies_evidence(&evidence));
+    assert!(
+        evidence
+            .to_ledger_row()
+            .contains(fs_constraint::INTERVAL_KERNEL_IDENTITY)
+    );
+
+    // Witness B — a non-finite constant refuses typed instead of poisoning
+    // every parent endpoint with NaN.
+    let mut nan_builder = ProblemBuilder::new();
+    let nan_node = nan_builder
+        .konst(f64::NAN, Dims::NONE)
+        .expect("nan constant node");
+    nan_builder
+        .objective(nan_node, fs_opt::Sense::Minimize, 1.0)
+        .expect("objective");
+    let nan_problem = nan_builder.finish();
+    assert!(matches!(
+        interval_eval(&nan_problem, nan_node, &[]),
+        Err(fs_constraint::IvalError::NonFiniteConstant)
+    ));
+
+    // Witness C — overflow collapses refuse at the boundary instead of
+    // minting an infinite-endpoint "enclosure": the kernel answers
+    // [MAX, +inf] for MAX*MAX and non-finite endpoints are refused.
+    let mut big_builder = ProblemBuilder::new();
+    let big = big_builder.konst(f64::MAX, Dims::NONE).expect("big");
+    let big_sq = big_builder.mul(big, big).expect("big squared");
+    big_builder
+        .objective(big_sq, fs_opt::Sense::Minimize, 1.0)
+        .expect("objective");
+    let big_problem = big_builder.finish();
+    assert!(matches!(
+        interval_eval(&big_problem, big_sq, &[]),
+        Err(fs_constraint::IvalError::BadBindings)
+    ));
+}
+
+#[test]
 #[allow(clippy::too_many_lines)] // Wire injectivity, subnormal/tie rounding neighbors, and raw-policy admission are one encoding story.
 fn fscon_v2_wire_encoding_is_injective_and_raw_policies_are_admitted() {
     let host = linear_host(&[(1.0, 0.0, 1.0)]);
