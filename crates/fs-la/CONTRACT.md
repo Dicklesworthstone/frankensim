@@ -144,11 +144,19 @@ Dense linear algebra: GEMM, batched small dense, factorizations, eigensolvers. L
   (m, row_block, n). For finite full-column-rank matrices, the exact-arithmetic
   QR theorem makes the positive-diagonal R unique; the current finite
   full-rank battery verifies covered tree-shape agreement within tolerance.
-  For rank-deficient inputs, fixed input bits and a fixed tree remain
-  deterministic, but neither a mathematically unique R nor tree-independent
-  bits/values are claimed; zero diagonal sign bits are retained as produced.
-  A stronger canonical rank-profile theorem and implementation remain an
-  explicit ambition target. `svd_jacobi` is one-sided cyclic Jacobi (thin
+  The rank-deficient target is frozen as explicit theorem tiers
+  (bead frankensim-epic-bedrock-6ys.5.1.1), each carried by a fixture in
+  `tests/tsqr_rank_deficient.rs`: T0 exact-arithmetic reconstruction
+  (`RᵀR = AᵀA`, `rank(R) = rank(A)`) at every rank and every admissible
+  `(m, row_block, n)` schedule; T1 same-ISA bitwise rerun stability for a
+  fixed tree at any rank; T2 cross-schedule agreement plus
+  positive-diagonal uniqueness restricted to finite full-column-rank
+  inputs; T3 an explicit NO-CLAIM on cross-schedule factor equality and on
+  absolute-threshold rank classification for rank-deficient inputs.
+  Canonical gauge construction is 6ys.5.1.3 scope; typed scale-aware
+  rank/threshold policy and non-finite input admission refusal are
+  6ys.5.1.2 scope.
+  `svd_jacobi` is one-sided cyclic Jacobi (thin
   U·Σ·Vᵀ, σ descending, deterministic order and tie-breaks).
 - `mixed::{solve_adaptive, ResidualTarget, Ladder, RefineReport}` —
   precision-ladder solves with iterative refinement AS POLICY:
@@ -633,12 +641,15 @@ diagonal) fixtures; 128-byte plane alignment; cross-ISA golden hash.
   fused WY GEMM form joins the perf lane).
 - `tsqr_r` returns R only; implicit-Q tree factors (for applying Qᵀ in
   parallel TSQR) join the fs-exec driver work.
-- Rank-deficient TSQR currently has deterministic fixed-tree execution but no
-  unique-R or tree-independence theorem. Canonical signed-zero handling,
-  rank-revealing decisions, and a stronger tree-independent canonical
-  rank-profile construction remain a deliberately ambitious future proof and
-  implementation target rather than an inferred property of diagonal sign
-  normalization.
+- Rank-deficient TSQR carries the tier contract frozen in
+  `tests/tsqr_rank_deficient.rs` (bead frankensim-epic-bedrock-6ys.5.1.1):
+  fixed-tree bitwise rerun stability (T1) and per-schedule reconstruction
+  validity (T0) hold today. Unique-R, cross-schedule factor equality,
+  canonical signed-zero handling, scale-aware rank-revealing decisions,
+  non-finite input admission refusal, and a tree-independent canonical
+  rank-profile construction remain deliberate 6ys.5.1.2 / 6ys.5.1.3
+  proof-and-implementation obligations, never inferred properties of
+  diagonal sign normalization.
 - `condition_1` is an estimate (typically within a small factor; a lower
   bound in theory) — not a certified bound (fs-ivl owns certified claims).
 - Jacobi SVD targets small/medium n (O(n²·m) per sweep); no blocked
