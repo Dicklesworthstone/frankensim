@@ -8,8 +8,10 @@
 #![allow(clippy::float_cmp)]
 
 use fs_conform::{
-    Composition, ConformanceSuite, Converter, ManufacturedCase, Tier, certify, check_adjoint,
-    check_functoriality, check_identity, check_tolerance_honesty,
+    ArithmeticRefusal, CONFORM_ARITHMETIC_SCHEMA_VERSION, CONFORM_DOT_DIMENSION_BUDGET,
+    Composition, ConformanceSuite, Converter, ExactStatus, ManufacturedCase, Tier, certify,
+    check_adjoint, check_adjoint_with_evidence, check_functoriality, check_identity,
+    check_tolerance_honesty,
 };
 use fs_propcheck::{
     Shrink, check,
@@ -978,5 +980,174 @@ fn g3_generated_conversion_paths_agree_exactly() {
         |stream| RelationCase::new((nonvacuous_functor_case(stream), 0_i64), 1_i64),
         &operator,
         &relation,
+    );
+}
+
+// ========================================================================
+// frankensim-i8iva — exact adjoint certificates and typed arithmetic evidence
+// ========================================================================
+
+/// A converter whose products underflow binary64 on both dot sides: every
+/// entry pair multiplies below the smallest subnormal. The historical DD
+/// rung refused (`leading_product == 0` with nonzero operands) and failed
+/// the converter; the exact superaccumulator decides it honestly.
+struct TinyDiagonal;
+impl Converter for TinyDiagonal {
+    fn id(&self) -> &str {
+        "tiny-diagonal"
+    }
+    fn source_dim(&self) -> usize {
+        2
+    }
+    fn target_dim(&self) -> usize {
+        2
+    }
+    fn apply(&self, x: &[f64]) -> Vec<f64> {
+        x.iter().map(|&v| v * 2f64.powi(-238)).collect()
+    }
+    fn adjoint(&self, y: &[f64]) -> Vec<f64> {
+        y.iter().map(|&v| v * 2f64.powi(-238)).collect()
+    }
+    fn declared_error(&self) -> f64 {
+        0.0
+    }
+}
+
+#[test]
+fn exact_adjoint_rescues_underflowing_dot_products() {
+    let x = [2f64.powi(-420), 2f64.powi(-420)];
+    // applied = adjoint = [2^-658, 2^-658]; every dot product is 2^-1078,
+    // which underflows f64 to zero although the exact two-term sum is
+    // 2^-1077 on both sides.
+    let outcome = check_adjoint_with_evidence(&TinyDiagonal, &[(x.to_vec(), x.to_vec())], 0.0);
+    assert_eq!(outcome.status, ExactStatus::Holds);
+    assert_eq!(
+        outcome.evidence.schema_version,
+        CONFORM_ARITHMETIC_SCHEMA_VERSION
+    );
+    assert_eq!(outcome.evidence.first_refusal, None);
+    // The boolean gate agrees with the typed verdict.
+    assert!(check_adjoint(
+        &TinyDiagonal,
+        &[(x.to_vec(), x.to_vec())],
+        0.0
+    ));
+}
+
+#[test]
+fn exact_adjoint_refusals_are_typed_and_deterministic() {
+    // Non-finite sample: refusal names the first offending pair site.
+    let outcome =
+        check_adjoint_with_evidence(&TinyDiagonal, &[(vec![1.0, 2.0], vec![1.0, f64::NAN])], 0.0);
+    assert_eq!(outcome.status, ExactStatus::Refused);
+    assert_eq!(
+        outcome.evidence.first_refusal,
+        Some((0, ArithmeticRefusal::NonFiniteInput))
+    );
+    // Dimension mismatch at a later site keeps the deterministic index.
+    let pairs = vec![
+        (vec![1.0, 2.0], vec![1.0, 2.0]),
+        (vec![1.0], vec![1.0, 2.0]),
+    ];
+    let outcome = check_adjoint_with_evidence(&TinyDiagonal, &pairs, 0.0);
+    assert_eq!(outcome.status, ExactStatus::Refused);
+    assert_eq!(
+        outcome.evidence.first_refusal,
+        Some((1, ArithmeticRefusal::DimensionMismatch))
+    );
+    // Re-running reproduces the identical record byte-for-byte semantics
+    // (Copy equality over stable codes).
+    let again = check_adjoint_with_evidence(&TinyDiagonal, &pairs, 0.0);
+    assert_eq!(again, outcome);
+}
+
+#[test]
+fn exact_adjoint_dimension_budget_refuses_max_plus_one() {
+    // The budget boundary itself stays admitted; only max+1 refuses. The
+    // oversized vectors live inside the converter fixture, so the test body
+    // allocates only the one refused witness pair.
+    struct Oversized;
+    impl Converter for Oversized {
+        fn id(&self) -> &str {
+            "oversized"
+        }
+        fn source_dim(&self) -> usize {
+            CONFORM_DOT_DIMENSION_BUDGET + 1
+        }
+        fn target_dim(&self) -> usize {
+            1
+        }
+        fn apply(&self, _x: &[f64]) -> Vec<f64> {
+            vec![1.0]
+        }
+        fn adjoint(&self, _y: &[f64]) -> Vec<f64> {
+            vec![0.0; CONFORM_DOT_DIMENSION_BUDGET + 1]
+        }
+        fn declared_error(&self) -> f64 {
+            0.0
+        }
+    }
+    let outcome = check_adjoint_with_evidence(
+        &Oversized,
+        &[(vec![0.0; CONFORM_DOT_DIMENSION_BUDGET + 1], vec![1.0])],
+        0.0,
+    );
+    assert_eq!(outcome.status, ExactStatus::Refused);
+    assert_eq!(
+        outcome.evidence.first_refusal,
+        Some((0, ArithmeticRefusal::DimensionBudgetExceeded))
+    );
+}
+
+#[test]
+fn zero_tolerance_decides_exact_equality_not_approximate() {
+    // A lying transpose that differs by exactly one part in 2^53 of the
+    // magnitude: with tol = 0 the verdict must be Inconsistent even though
+    // an approximate DD delta might round onto equality.
+    struct OneUlpAdjoint;
+    impl Converter for OneUlpAdjoint {
+        fn id(&self) -> &str {
+            "one-ulp-adjoint"
+        }
+        fn source_dim(&self) -> usize {
+            1
+        }
+        fn target_dim(&self) -> usize {
+            1
+        }
+        fn apply(&self, x: &[f64]) -> Vec<f64> {
+            vec![x[0]]
+        }
+        fn adjoint(&self, y: &[f64]) -> Vec<f64> {
+            vec![y[0] * (1.0 + f64::EPSILON)]
+        }
+        fn declared_error(&self) -> f64 {
+            0.0
+        }
+    }
+    let pairs = [(vec![1024.0], vec![1024.0])];
+    let outcome = check_adjoint_with_evidence(&OneUlpAdjoint, &pairs, 0.0);
+    assert_eq!(outcome.status, ExactStatus::Violated);
+    assert!(!check_adjoint(&OneUlpAdjoint, &pairs, 0.0));
+    // A tolerance above the one-ULP discrepancy is exactly consistent.
+    let outcome = check_adjoint_with_evidence(&OneUlpAdjoint, &pairs, 2.0);
+    assert_eq!(outcome.status, ExactStatus::Holds);
+}
+
+#[test]
+fn g3_adjoint_verdict_is_independent_of_pair_order() {
+    // Two witness pairs: one exactly consistent, one exactly off. Any order
+    // of presentation must produce the same typed verdict.
+    let honest_pairs = vec![
+        (vec![3.0, -5.0], vec![7.0, 11.0]),
+        (vec![-13.0, 17.0], vec![19.0, -23.0]),
+    ];
+    let consistent = check_adjoint_with_evidence(&TinyDiagonal, &honest_pairs, 0.0).status;
+    assert_eq!(consistent, ExactStatus::Holds);
+    let mut reordered = honest_pairs.clone();
+    reordered.reverse();
+    assert_eq!(
+        check_adjoint_with_evidence(&TinyDiagonal, &reordered, 0.0).status,
+        ExactStatus::Holds
     );
 }

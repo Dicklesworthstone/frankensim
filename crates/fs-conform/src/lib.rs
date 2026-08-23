@@ -127,6 +127,9 @@ pub struct ConformanceReport {
     pub measured_error: f64,
     /// The awarded tier.
     pub tier: Tier,
+    /// Schema version + rung of the exact arithmetic that decided every
+    /// axiom verdict in this report (bead frankensim-i8iva).
+    pub arithmetic: ComparisonEvidence,
     /// Human-readable findings (reasons for any failure).
     pub findings: Vec<String>,
 }
@@ -137,6 +140,86 @@ impl ConformanceReport {
     pub fn certified(&self) -> bool {
         self.tier != Tier::Rejected
     }
+}
+
+/// Stable schema version of the typed arithmetic evidence carried beside
+/// every exact certificate verdict (bead frankensim-i8iva).
+pub const CONFORM_ARITHMETIC_SCHEMA_VERSION: u32 = 1;
+
+/// Explicit admitted per-dot dimension budget. The superaccumulator itself
+/// allocates nothing and spans the full binary64 product exponent range;
+/// this budget bounds the synchronous cold-path work envelope per dot.
+pub const CONFORM_DOT_DIMENSION_BUDGET: usize = 1 << 20;
+
+/// The arithmetic rung that decided a certificate comparison.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArithmeticRung {
+    /// Fixed-bin signed superaccumulator over the full binary64 product
+    /// exponent range (`SUPERACC_BASE_EXPONENT ..= +2047`). Decides in exact
+    /// real arithmetic with fixed stack storage and no allocation.
+    ExactSuperaccumulator,
+}
+
+impl ArithmeticRung {
+    /// Stable wire code under [`CONFORM_ARITHMETIC_SCHEMA_VERSION`].
+    #[must_use]
+    pub const fn code(self) -> u32 {
+        match self {
+            Self::ExactSuperaccumulator => 1,
+        }
+    }
+}
+
+/// Why an exact-arithmetic certificate refused to decide. A refusal is NOT a
+/// measured failure: nothing is claimed about the converter either way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArithmeticRefusal {
+    /// The two vectors of one dot product have different lengths.
+    DimensionMismatch,
+    /// A sampled value was non-finite.
+    NonFiniteInput,
+    /// A vector exceeded [`CONFORM_DOT_DIMENSION_BUDGET`].
+    DimensionBudgetExceeded,
+    /// A finite input had no exact integer lattice representation.
+    LatticeRefusal,
+    /// An exact product or carry left the fixed bin range.
+    BinRangeExceeded,
+}
+
+/// Status of one exact certificate decision over a witness stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExactStatus {
+    /// Every witness decided exactly within its tolerance.
+    Holds,
+    /// At least one witness decided exactly outside its tolerance.
+    Violated,
+    /// Exact arithmetic could not decide; nothing is claimed.
+    Refused,
+}
+
+/// Typed arithmetic evidence for one exact certificate decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ComparisonEvidence {
+    /// [`CONFORM_ARITHMETIC_SCHEMA_VERSION`] of this record's semantics.
+    pub schema_version: u32,
+    /// Rung that decided (or would have decided) every comparison.
+    pub rung: ArithmeticRung,
+    /// Witness count (adjoint pairs, probes, or manufactured cases).
+    pub terms: usize,
+    /// Component dimension each witness vector was held to.
+    pub dimension: usize,
+    /// Deterministic first refusal site — a flat witness/coordinate index
+    /// into the stream — with the refusal reason, if any.
+    pub first_refusal: Option<(usize, ArithmeticRefusal)>,
+}
+
+/// Outcome of one exact certificate check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExactOutcome {
+    /// Typed verdict; `Refused` claims nothing either way.
+    pub status: ExactStatus,
+    /// Typed arithmetic evidence beside the verdict.
+    pub evidence: ComparisonEvidence,
 }
 
 fn valid_tolerance(tol: f64) -> bool {
@@ -157,10 +240,6 @@ fn zero_dd(value: Dd) -> bool {
 
 fn nonnegative_dd(value: Dd) -> bool {
     finite_dd(value) && !value.lt(Dd::ZERO)
-}
-
-fn nonnegative_dd_le_f64(value: Dd, bound: f64) -> bool {
-    nonnegative_dd(value) && valid_tolerance(bound) && !Dd::from_f64(bound).lt(value)
 }
 
 fn admitted_bound(declared: f64, tolerance: f64) -> Option<Dd> {
@@ -438,6 +517,66 @@ fn add_exact_product(
     }
 }
 
+/// Add one finite `f64` exactly into the signed bin pair.
+fn add_exact_f64(
+    value: f64,
+    positive: &mut PositiveSuperacc,
+    negative: &mut PositiveSuperacc,
+) -> bool {
+    if value == 0.0 {
+        return true;
+    }
+    let Some((negative_sign, significand, exponent)) = float_lattice(value) else {
+        return false;
+    };
+    let magnitude = u128::from(significand);
+    if negative_sign {
+        negative.add_shifted_u128(magnitude, exponent)
+    } else {
+        positive.add_shifted_u128(magnitude, exponent)
+    }
+}
+
+/// Exact real-arithmetic signed sum with fixed stack storage.
+///
+/// Products and single values accumulate into separate positive/negative
+/// unsigned bins, so no cancellation ever borrows through a bin and the
+/// result is independent of accumulation order.
+#[derive(Clone, Copy)]
+struct ExactSignedSum {
+    positive: PositiveSuperacc,
+    negative: PositiveSuperacc,
+}
+
+impl ExactSignedSum {
+    const ZERO: Self = Self {
+        positive: PositiveSuperacc::ZERO,
+        negative: PositiveSuperacc::ZERO,
+    };
+
+    fn add_product(&mut self, left: f64, right: f64) -> bool {
+        add_exact_product(left, right, false, &mut self.positive, &mut self.negative)
+    }
+
+    fn add_exact_value(&mut self, value: f64) -> bool {
+        add_exact_f64(value, &mut self.positive, &mut self.negative)
+    }
+
+    /// Exact real comparison `self <= other + slack`. Cross-adds the
+    /// opposite-sign bins so no subtraction ever borrows:
+    /// `self - other <= slack` iff `self.pos + other.neg + slack.neg`
+    /// `<= other.pos + self.neg + slack.pos`.
+    fn le_within_slack(&self, other: &Self, slack: &Self) -> bool {
+        let mut left = self.positive;
+        let mut right = other.positive;
+        left.add_accumulator(&other.negative);
+        left.add_accumulator(&slack.negative);
+        right.add_accumulator(&self.negative);
+        right.add_accumulator(&slack.positive);
+        left.le(&right)
+    }
+}
+
 fn add_exact_dd_square(
     value: Dd,
     positive: &mut PositiveSuperacc,
@@ -453,24 +592,35 @@ fn add_exact_dd_square(
 /// full finite binary64 exponent range. Positive and negative component terms
 /// are accumulated separately, so DD tails of either sign never borrow through
 /// an unsigned bin or depend on vector order.
-fn squared_norm_le_bound(a: &[f64], b: &[f64], bound: Dd) -> Option<bool> {
-    if a.len() != b.len() || !finite_vector(a) || !finite_vector(b) || !nonnegative_dd(bound) {
-        return None;
+fn squared_norm_le_bound(
+    a: &[f64],
+    b: &[f64],
+    bound: Dd,
+) -> Result<bool, (usize, ArithmeticRefusal)> {
+    let refuse = |site, reason| Err((site, reason));
+    if a.len() != b.len() {
+        return refuse(0, ArithmeticRefusal::DimensionMismatch);
+    }
+    if !finite_vector(a) || !finite_vector(b) {
+        return refuse(0, ArithmeticRefusal::NonFiniteInput);
+    }
+    if !nonnegative_dd(bound) {
+        return refuse(0, ArithmeticRefusal::LatticeRefusal);
     }
     let mut norm_positive = PositiveSuperacc::ZERO;
     let mut norm_negative = PositiveSuperacc::ZERO;
-    for (&left, &right) in a.iter().zip(b) {
+    for (index, (&left, &right)) in a.iter().zip(b).enumerate() {
         let delta = Dd::from_f64(left) - Dd::from_f64(right);
         if !exact_dd_add_represented(Dd::from_f64(left), -Dd::from_f64(right), delta)
             || !add_exact_dd_square(delta, &mut norm_positive, &mut norm_negative)
         {
-            return None;
+            return refuse(index, ArithmeticRefusal::LatticeRefusal);
         }
     }
     let mut bound_positive = PositiveSuperacc::ZERO;
     let mut bound_negative = PositiveSuperacc::ZERO;
     if !add_exact_dd_square(bound, &mut bound_positive, &mut bound_negative) {
-        return None;
+        return refuse(a.len(), ArithmeticRefusal::BinRangeExceeded);
     }
 
     // norm_pos - norm_neg <= bound_pos - bound_neg
@@ -478,35 +628,9 @@ fn squared_norm_le_bound(a: &[f64], b: &[f64], bound: Dd) -> Option<bool> {
     let mut left = norm_positive;
     let mut right = bound_positive;
     if !left.add_accumulator(&bound_negative) || !right.add_accumulator(&norm_negative) {
-        return None;
+        return refuse(a.len(), ArithmeticRefusal::BinRangeExceeded);
     }
-    Some(left.le(&right))
-}
-
-fn dot(a: &[f64], b: &[f64]) -> Option<Dd> {
-    if a.len() != b.len() || !finite_vector(a) || !finite_vector(b) {
-        return None;
-    }
-    let mut total = Dd::ZERO;
-    for (&x, &y) in a.iter().zip(b) {
-        let leading_product = x * y;
-        if !leading_product.is_finite() || (x != 0.0 && y != 0.0 && leading_product == 0.0) {
-            return None;
-        }
-        let product = Dd::from_f64(x) * Dd::from_f64(y);
-        let next = total + product;
-        if !finite_dd(product)
-            || !exact_product_represented(x, y, product)
-            || !finite_dd(next)
-            || !exact_dd_add_represented(total, product, next)
-            || (!zero_dd(product) && next == total)
-            || (!zero_dd(total) && next == product)
-        {
-            return None;
-        }
-        total = next;
-    }
-    Some(total)
+    Ok(left.le(&right))
 }
 
 fn dist_upper(a: &[f64], b: &[f64]) -> Option<f64> {
@@ -610,29 +734,98 @@ fn dist_upper(a: &[f64], b: &[f64]) -> Option<f64> {
     measured_error_upper(scaled)
 }
 
-/// Check adjoint consistency `⟨A x, y⟩ == ⟨x, Aᵀ y⟩` over the pairs.
+/// Check adjoint consistency `⟨A x, y⟩ == ⟨x, Aᵀ y⟩` over the pairs,
+/// deciding every comparison in EXACT real arithmetic (bead frankensim-i8iva).
+///
+/// The boolean verdict is `true` only for [`ExactStatus::Holds`]; an
+/// [`ExactStatus::Refused`] outcome claims nothing and also returns `false`,
+/// but the typed evidence names the deterministic first refusal site so an
+/// arithmetic uncertainty is never reported as an ordinary measured failure.
 #[must_use]
-pub fn check_adjoint(c: &dyn Converter, pairs: &[(Vec<f64>, Vec<f64>)], tol: f64) -> bool {
+pub fn check_adjoint_with_evidence(
+    c: &dyn Converter,
+    pairs: &[(Vec<f64>, Vec<f64>)],
+    tol: f64,
+) -> ExactOutcome {
+    let evidence_base = |first_refusal: Option<(usize, ArithmeticRefusal)>| ComparisonEvidence {
+        schema_version: CONFORM_ARITHMETIC_SCHEMA_VERSION,
+        rung: ArithmeticRung::ExactSuperaccumulator,
+        terms: pairs.len(),
+        dimension: c.source_dim(),
+        first_refusal,
+    };
     if pairs.is_empty() || !valid_tolerance(tol) {
-        return false;
+        return ExactOutcome {
+            status: ExactStatus::Refused,
+            evidence: evidence_base(None),
+        };
     }
     let (source_dim, target_dim) = (c.source_dim(), c.target_dim());
-    pairs.iter().all(|(x, y)| {
-        if x.len() != source_dim || y.len() != target_dim || !finite_vector(x) || !finite_vector(y)
-        {
-            return false;
+    // The non-negative tolerance is itself an exact f64 lattice value.
+    let mut slack = ExactSignedSum::ZERO;
+    if !slack.add_exact_value(tol) {
+        return ExactOutcome {
+            status: ExactStatus::Refused,
+            evidence: evidence_base(Some((0, ArithmeticRefusal::LatticeRefusal))),
+        };
+    }
+    let mut all_consistent = true;
+    for (pair_index, (x, y)) in pairs.iter().enumerate() {
+        let refuse = |reason| ExactOutcome {
+            status: ExactStatus::Refused,
+            evidence: evidence_base(Some((pair_index, reason))),
+        };
+        if x.len() != source_dim || y.len() != target_dim {
+            return refuse(ArithmeticRefusal::DimensionMismatch);
+        }
+        if x.len() > CONFORM_DOT_DIMENSION_BUDGET || y.len() > CONFORM_DOT_DIMENSION_BUDGET {
+            return refuse(ArithmeticRefusal::DimensionBudgetExceeded);
+        }
+        if !finite_vector(x) || !finite_vector(y) {
+            return refuse(ArithmeticRefusal::NonFiniteInput);
         }
         let applied = c.apply(x);
         let adjoint = c.adjoint(y);
         if applied.len() != target_dim || adjoint.len() != source_dim {
-            return false;
+            return refuse(ArithmeticRefusal::DimensionMismatch);
         }
-        let (Some(lhs), Some(rhs)) = (dot(&applied, y), dot(x, &adjoint)) else {
-            return false;
-        };
-        let delta = lhs - rhs;
-        exact_dd_add_represented(lhs, -rhs, delta) && nonnegative_dd_le_f64(delta.abs(), tol)
-    })
+        if !finite_vector(&applied) || !finite_vector(&adjoint) {
+            return refuse(ArithmeticRefusal::NonFiniteInput);
+        }
+        let mut lhs = ExactSignedSum::ZERO;
+        for (&a, &b) in applied.iter().zip(y) {
+            if !lhs.add_product(a, b) {
+                return refuse(ArithmeticRefusal::BinRangeExceeded);
+            }
+        }
+        let mut rhs = ExactSignedSum::ZERO;
+        for (&a, &b) in x.iter().zip(&adjoint) {
+            if !rhs.add_product(a, b) {
+                return refuse(ArithmeticRefusal::BinRangeExceeded);
+            }
+        }
+        // |lhs - rhs| <= tol  iff  lhs <= rhs + tol AND rhs <= lhs + tol.
+        let within = lhs.le_within_slack(&rhs, &slack) && rhs.le_within_slack(&lhs, &slack);
+        if !within {
+            all_consistent = false;
+            break;
+        }
+    }
+    ExactOutcome {
+        status: if all_consistent {
+            ExactStatus::Holds
+        } else {
+            ExactStatus::Violated
+        },
+        evidence: evidence_base(None),
+    }
+}
+
+/// Boolean adjoint-consistency gate with identical admission semantics to the
+/// historical DD path: any structural refusal or exact inconsistency fails.
+#[must_use]
+pub fn check_adjoint(c: &dyn Converter, pairs: &[(Vec<f64>, Vec<f64>)], tol: f64) -> bool {
+    check_adjoint_with_evidence(c, pairs, tol).status == ExactStatus::Holds
 }
 
 fn check_tolerance_honesty_with_declared(
@@ -641,41 +834,118 @@ fn check_tolerance_honesty_with_declared(
     tol: f64,
     declared: f64,
 ) -> (bool, f64) {
+    let (outcome, measured_upper) = check_tolerance_honesty_evidence_inner(c, cases, tol, declared);
+    (outcome.status == ExactStatus::Holds, measured_upper)
+}
+/// Internal honesty evaluation carrying typed arithmetic evidence beside the
+/// boolean verdict and the outward measured-error projection.
+fn check_tolerance_honesty_evidence_inner(
+    c: &dyn Converter,
+    cases: &[ManufacturedCase],
+    tol: f64,
+    declared: f64,
+) -> (ExactOutcome, f64) {
+    let evidence_base = |first_refusal: Option<(usize, ArithmeticRefusal)>| ComparisonEvidence {
+        schema_version: CONFORM_ARITHMETIC_SCHEMA_VERSION,
+        rung: ArithmeticRung::ExactSuperaccumulator,
+        terms: cases.len(),
+        dimension: c.source_dim(),
+        first_refusal,
+    };
     if cases.is_empty() || !valid_tolerance(tol) || !declared.is_finite() || declared < 0.0 {
-        return (false, f64::INFINITY);
+        return (
+            ExactOutcome {
+                status: ExactStatus::Refused,
+                evidence: evidence_base(None),
+            },
+            f64::INFINITY,
+        );
     }
     let Some(admitted_bound) = admitted_bound(declared, tol) else {
-        return (false, f64::INFINITY);
+        return (
+            ExactOutcome {
+                status: ExactStatus::Refused,
+                evidence: evidence_base(Some((0, ArithmeticRefusal::LatticeRefusal))),
+            },
+            f64::INFINITY,
+        );
     };
     let (source_dim, target_dim) = (c.source_dim(), c.target_dim());
+    let mut any_violation = false;
     let mut measured_upper = 0.0_f64;
-    let mut all_within_bound = true;
-    for case in cases {
+    for (case_index, case) in cases.iter().enumerate() {
         if case.input.len() != source_dim
             || case.exact_output.len() != target_dim
             || !finite_vector(&case.input)
             || !finite_vector(&case.exact_output)
         {
-            return (false, f64::INFINITY);
+            return (
+                ExactOutcome {
+                    status: ExactStatus::Refused,
+                    evidence: evidence_base(Some((
+                        case_index,
+                        ArithmeticRefusal::DimensionMismatch,
+                    ))),
+                },
+                f64::INFINITY,
+            );
         }
         let applied = c.apply(&case.input);
         if applied.len() != target_dim {
-            return (false, f64::INFINITY);
+            return (
+                ExactOutcome {
+                    status: ExactStatus::Refused,
+                    evidence: evidence_base(Some((
+                        case_index,
+                        ArithmeticRefusal::DimensionMismatch,
+                    ))),
+                },
+                f64::INFINITY,
+            );
         }
-        let Some(within_bound) =
-            squared_norm_le_bound(&applied, &case.exact_output, admitted_bound)
-        else {
-            return (false, f64::INFINITY);
+        let within_bound = match squared_norm_le_bound(&applied, &case.exact_output, admitted_bound)
+        {
+            Ok(within) => within,
+            Err((coordinate, reason)) => {
+                return (
+                    ExactOutcome {
+                        status: ExactStatus::Refused,
+                        evidence: evidence_base(Some((case_index + coordinate, reason))),
+                    },
+                    f64::INFINITY,
+                );
+            }
         };
-        all_within_bound &= within_bound;
         let Some(error_upper) = dist_upper(&applied, &case.exact_output) else {
-            return (false, f64::INFINITY);
+            return (
+                ExactOutcome {
+                    status: ExactStatus::Refused,
+                    evidence: evidence_base(Some((case_index, ArithmeticRefusal::LatticeRefusal))),
+                },
+                f64::INFINITY,
+            );
         };
         if measured_upper < error_upper {
             measured_upper = error_upper;
         }
+        if !within_bound {
+            // Keep scanning: `measured_upper` must remain the honest
+            // worst-case outward projection across ALL cases even when the
+            // verdict is already Violated.
+            any_violation = true;
+        }
     }
-    (all_within_bound, measured_upper)
+    (
+        ExactOutcome {
+            status: if any_violation {
+                ExactStatus::Violated
+            } else {
+                ExactStatus::Holds
+            },
+            evidence: evidence_base(None),
+        },
+        measured_upper,
+    )
 }
 
 /// Check tolerance honesty; returns `(honest, outward_worst_measured_error)`.
@@ -688,78 +958,181 @@ pub fn check_tolerance_honesty(
     check_tolerance_honesty_with_declared(c, cases, tol, c.declared_error())
 }
 
-/// Check functoriality: `after(self(x)) == direct(x)` on the probes.
+/// Tolerance honesty with typed arithmetic evidence: `ExactStatus::Refused`
+/// means the exact comparison could not decide and claims nothing; the
+/// measured error remains an outward projection over every case.
 #[must_use]
-pub fn check_functoriality(c: &dyn Converter, comp: &Composition, tol: f64) -> bool {
+pub fn check_tolerance_honesty_with_evidence(
+    c: &dyn Converter,
+    cases: &[ManufacturedCase],
+    tol: f64,
+) -> (ExactOutcome, f64) {
+    check_tolerance_honesty_evidence_inner(c, cases, tol, c.declared_error())
+}
+
+/// Functoriality witness (`after ∘ self == direct` on every probe) decided in
+/// exact real arithmetic, with typed arithmetic evidence beside the verdict.
+pub fn check_functoriality_with_evidence(
+    c: &dyn Converter,
+    comp: &Composition,
+    tol: f64,
+) -> ExactOutcome {
+    let evidence_base = |first_refusal: Option<(usize, ArithmeticRefusal)>| ComparisonEvidence {
+        schema_version: CONFORM_ARITHMETIC_SCHEMA_VERSION,
+        rung: ArithmeticRung::ExactSuperaccumulator,
+        terms: comp.probes.len(),
+        dimension: c.source_dim(),
+        first_refusal,
+    };
+    let refused = |first_refusal| ExactOutcome {
+        status: ExactStatus::Refused,
+        evidence: evidence_base(first_refusal),
+    };
     if comp.probes.is_empty()
         || !valid_tolerance(tol)
         || c.target_dim() != comp.after.source_dim()
         || c.source_dim() != comp.direct.source_dim()
         || comp.after.target_dim() != comp.direct.target_dim()
     {
-        return false;
+        return refused(None);
     }
     let (source_dim, middle_dim, target_dim) =
         (c.source_dim(), c.target_dim(), comp.after.target_dim());
-    comp.probes.iter().all(|x| {
-        if x.len() != source_dim || !finite_vector(x) {
-            return false;
+    let mut all_hold = true;
+    for (probe_index, x) in comp.probes.iter().enumerate() {
+        if x.len() != source_dim {
+            return refused(Some((probe_index, ArithmeticRefusal::DimensionMismatch)));
+        }
+        if !finite_vector(x) {
+            return refused(Some((probe_index, ArithmeticRefusal::NonFiniteInput)));
         }
         let middle = c.apply(x);
         if middle.len() != middle_dim || !finite_vector(&middle) {
-            return false;
+            return refused(Some((probe_index, ArithmeticRefusal::DimensionMismatch)));
         }
         let composed = comp.after.apply(&middle);
         let direct = comp.direct.apply(x);
         if composed.len() != target_dim || direct.len() != target_dim {
-            return false;
+            return refused(Some((probe_index, ArithmeticRefusal::DimensionMismatch)));
         }
-        squared_norm_le_bound(&composed, &direct, Dd::from_f64(tol)) == Some(true)
-    })
-}
-
-/// Check that a converter claiming to be an identity acts as one.
-#[must_use]
-pub fn check_identity(c: &dyn Converter, probes: &[Vec<f64>], tol: f64) -> bool {
-    if probes.is_empty() || !valid_tolerance(tol) || c.source_dim() != c.target_dim() {
-        return false;
+        match squared_norm_le_bound(&composed, &direct, Dd::from_f64(tol)) {
+            Ok(true) => {}
+            Ok(false) => all_hold = false,
+            Err((coordinate, reason)) => {
+                return refused(Some((probe_index * source_dim + coordinate, reason)));
+            }
+        }
     }
-    let dim = c.source_dim();
-    probes.iter().all(|x| {
-        if x.len() != dim || !finite_vector(x) {
-            return false;
-        }
-        let applied = c.apply(x);
-        applied.len() == dim && squared_norm_le_bound(&applied, x, Dd::from_f64(tol)) == Some(true)
-    })
+    ExactOutcome {
+        status: if all_hold {
+            ExactStatus::Holds
+        } else {
+            ExactStatus::Violated
+        },
+        evidence: evidence_base(None),
+    }
 }
 
-/// Certify a converter against its suite. It reaches a tier ABOVE `Rejected`
-/// only by passing every supplied axiom; the tier level reflects how tight an
-/// (honestly met within the suite tolerance) error model it declares. Adjoint
-/// and manufactured evidence must be non-empty; any supplied composition or
-/// identity witness must carry at least one probe.
+/// Boolean functoriality gate over the exact superaccumulator rung.
 #[must_use]
-pub fn certify(c: &dyn Converter, suite: &ConformanceSuite) -> ConformanceReport {
-    let mut findings = Vec::new();
-    let declared_error = c.declared_error();
-    if !valid_tolerance(suite.tolerance) || !declared_error.is_finite() || declared_error < 0.0 {
-        findings.push(
-            "admission: tolerance and declared error must be finite and non-negative".to_string(),
-        );
-        return ConformanceReport {
-            converter: c.id().to_string(),
-            functoriality: false,
-            adjoint_consistent: false,
-            tolerance_honest: false,
-            measured_error: f64::INFINITY,
-            tier: Tier::Rejected,
-            findings,
+pub fn check_functoriality(c: &dyn Converter, comp: &Composition, tol: f64) -> bool {
+    check_functoriality_with_evidence(c, comp, tol).status == ExactStatus::Holds
+}
+
+/// Check that a converter claiming to be an identity acts as one, with typed
+/// arithmetic evidence beside the verdict.
+#[must_use]
+pub fn check_identity_with_evidence(
+    c: &dyn Converter,
+    probes: &[Vec<f64>],
+    tol: f64,
+) -> ExactOutcome {
+    let evidence_base = |first_refusal: Option<(usize, ArithmeticRefusal)>| ComparisonEvidence {
+        schema_version: CONFORM_ARITHMETIC_SCHEMA_VERSION,
+        rung: ArithmeticRung::ExactSuperaccumulator,
+        terms: probes.len(),
+        dimension: c.source_dim(),
+        first_refusal,
+    };
+    if probes.is_empty() || !valid_tolerance(tol) || c.source_dim() != c.target_dim() {
+        return ExactOutcome {
+            status: ExactStatus::Refused,
+            evidence: evidence_base(None),
         };
     }
+    let dim = c.source_dim();
+    let mut all_hold = true;
+    for (probe_index, x) in probes.iter().enumerate() {
+        if x.len() != dim {
+            return ExactOutcome {
+                status: ExactStatus::Refused,
+                evidence: evidence_base(Some((probe_index, ArithmeticRefusal::DimensionMismatch))),
+            };
+        }
+        if !finite_vector(x) {
+            return ExactOutcome {
+                status: ExactStatus::Refused,
+                evidence: evidence_base(Some((probe_index, ArithmeticRefusal::NonFiniteInput))),
+            };
+        }
+        let applied = c.apply(x);
+        if applied.len() != dim {
+            return ExactOutcome {
+                status: ExactStatus::Refused,
+                evidence: evidence_base(Some((probe_index, ArithmeticRefusal::DimensionMismatch))),
+            };
+        }
+        match squared_norm_le_bound(&applied, x, Dd::from_f64(tol)) {
+            Ok(true) => {}
+            Ok(false) => all_hold = false,
+            Err((coordinate, reason)) => {
+                return ExactOutcome {
+                    status: ExactStatus::Refused,
+                    evidence: evidence_base(Some((probe_index * dim + coordinate, reason))),
+                };
+            }
+        }
+    }
+    ExactOutcome {
+        status: if all_hold {
+            ExactStatus::Holds
+        } else {
+            ExactStatus::Violated
+        },
+        evidence: evidence_base(None),
+    }
+}
 
-    // Functoriality: composition agrees AND (if the converter claims to be an
-    // identity) it acts as the identity.
+/// Boolean identity gate over the exact superaccumulator rung.
+#[must_use]
+pub fn check_identity(c: &dyn Converter, probes: &[Vec<f64>], tol: f64) -> bool {
+    check_identity_with_evidence(c, probes, tol).status == ExactStatus::Holds
+}
+
+/// Push the honest adjoint-consistency finding, distinguishing an exact
+/// arithmetic refusal (which claims nothing) from a genuine violation.
+fn push_adjoint_finding(findings: &mut Vec<String>, outcome: Option<&ExactOutcome>) {
+    findings.push(match outcome {
+        None => "adjoint consistency: no witness pairs supplied".to_string(),
+        Some(outcome) => match (outcome.status, outcome.evidence.first_refusal) {
+            (ExactStatus::Refused, Some((site, reason))) => format!(
+                "adjoint consistency: exact arithmetic refused at pair {site} \
+                 ({reason:?}); nothing is claimed about the converter"
+            ),
+            (ExactStatus::Refused, None) => {
+                "adjoint consistency: exact arithmetic refused before any pair; \
+                 nothing is claimed about the converter"
+                    .to_string()
+            }
+            _ => "adjoint consistency: <Ax,y> != <x,Aᵀy> (declared transpose is not \
+                  the adjoint, decided in exact arithmetic)"
+                .to_string(),
+        },
+    });
+}
+
+fn evaluate_functoriality(c: &dyn Converter, suite: &ConformanceSuite) -> (bool, Vec<String>) {
+    let mut findings = Vec::new();
     let composition_ok = match &suite.composition {
         Some(comp) if comp.probes.is_empty() => {
             findings.push("functoriality: supplied composition has no probes".to_string());
@@ -795,17 +1168,56 @@ pub fn certify(c: &dyn Converter, suite: &ConformanceSuite) -> ConformanceReport
         }
         None => true,
     };
-    let functoriality = composition_ok && identity_ok;
+    (composition_ok && identity_ok, findings)
+}
 
+/// Certify a converter against its suite. It reaches a tier ABOVE `Rejected`
+/// only by passing every supplied axiom; the tier level reflects how tight an
+/// (honestly met within the suite tolerance) error model it declares. Adjoint
+/// and manufactured evidence must be non-empty; any supplied composition or
+/// identity witness must carry at least one probe.
+#[must_use]
+pub fn certify(c: &dyn Converter, suite: &ConformanceSuite) -> ConformanceReport {
+    let mut findings = Vec::new();
+    let declared_error = c.declared_error();
+    if !valid_tolerance(suite.tolerance) || !declared_error.is_finite() || declared_error < 0.0 {
+        findings.push(
+            "admission: tolerance and declared error must be finite and non-negative".to_string(),
+        );
+        let arithmetic = ComparisonEvidence {
+            schema_version: CONFORM_ARITHMETIC_SCHEMA_VERSION,
+            rung: ArithmeticRung::ExactSuperaccumulator,
+            terms: 0,
+            dimension: c.source_dim(),
+            first_refusal: None,
+        };
+        return ConformanceReport {
+            converter: c.id().to_string(),
+            functoriality: false,
+            adjoint_consistent: false,
+            tolerance_honest: false,
+            measured_error: f64::INFINITY,
+            tier: Tier::Rejected,
+            arithmetic,
+            findings,
+        };
+    }
+
+    let (functoriality, functoriality_findings) = evaluate_functoriality(c, suite);
+    findings.extend(functoriality_findings);
+    let adjoint_outcome = if suite.adjoint_pairs.is_empty() {
+        None
+    } else {
+        Some(check_adjoint_with_evidence(
+            c,
+            &suite.adjoint_pairs,
+            suite.tolerance,
+        ))
+    };
     let adjoint_consistent =
-        !suite.adjoint_pairs.is_empty() && check_adjoint(c, &suite.adjoint_pairs, suite.tolerance);
+        matches!(&adjoint_outcome, Some(outcome) if outcome.status == ExactStatus::Holds);
     if !adjoint_consistent {
-        findings.push(if suite.adjoint_pairs.is_empty() {
-            "adjoint consistency: no witness pairs supplied".to_string()
-        } else {
-            "adjoint consistency: <Ax,y> != <x,Aᵀy> (declared transpose is not the adjoint)"
-                .to_string()
-        });
+        push_adjoint_finding(&mut findings, adjoint_outcome.as_ref());
     }
 
     let (tolerance_honest, measured_error) = if suite.manufactured.is_empty() {
@@ -837,6 +1249,16 @@ pub fn certify(c: &dyn Converter, suite: &ConformanceSuite) -> ConformanceReport
         Tier::Rejected
     };
 
+    let arithmetic = adjoint_outcome.map_or(
+        ComparisonEvidence {
+            schema_version: CONFORM_ARITHMETIC_SCHEMA_VERSION,
+            rung: ArithmeticRung::ExactSuperaccumulator,
+            terms: 0,
+            dimension: c.source_dim(),
+            first_refusal: None,
+        },
+        |outcome| outcome.evidence,
+    );
     ConformanceReport {
         converter: c.id().to_string(),
         functoriality,
@@ -844,6 +1266,7 @@ pub fn certify(c: &dyn Converter, suite: &ConformanceSuite) -> ConformanceReport
         tolerance_honest,
         measured_error,
         tier,
+        arithmetic,
         findings,
     }
 }
@@ -914,19 +1337,16 @@ mod arithmetic_tests {
             hi: 1.0,
             lo: min_subnormal,
         };
-        assert_eq!(
-            squared_norm_le_bound(&[1.0], &[0.0], below_one),
-            Some(false)
-        );
-        assert_eq!(squared_norm_le_bound(&[1.0], &[0.0], above_one), Some(true));
+        assert_eq!(squared_norm_le_bound(&[1.0], &[0.0], below_one), Ok(false));
+        assert_eq!(squared_norm_le_bound(&[1.0], &[0.0], above_one), Ok(true));
 
         assert_eq!(
             squared_norm_le_bound(&[f64::MAX], &[0.0], Dd::from_f64(f64::MAX)),
-            Some(true)
+            Ok(true)
         );
         assert_eq!(
             squared_norm_le_bound(&[f64::MAX], &[0.0], Dd::from_f64(f64::MAX.next_down())),
-            Some(false)
+            Ok(false)
         );
 
         let mut maximum_square = PositiveSuperacc::ZERO;
@@ -947,5 +1367,79 @@ mod arithmetic_tests {
                 .iter()
                 .all(|&limb| limb == 0)
         );
+    }
+
+    /// Independent i128 oracle: for integer-valued f64 inputs the exact real
+    /// dot product equals this integer, so `<= slack` decisions must agree
+    /// bit-for-bit with the superaccumulator across cancellation, mixed
+    /// scales, and every permutation.
+    #[test]
+    fn exact_signed_sum_matches_integer_oracle() {
+        // Every entry must be an integer with |v| <= 2^31 so `as i64` and
+        // the i128 product are EXACT; the i128 sum is the independent
+        // oracle. Subnormal and extreme-scale cases are covered by the
+        // integration battery against their hand-computed lattice values.
+        let cases: [(&[f64], &[f64]); 7] = [
+            (&[3.0, -5.0, 7.0], &[2.0, 4.0, -6.0]),
+            // Exact internal cancellation to a nonzero remainder.
+            (&[1.0, 1.0], &[1024.0, -1024.0]),
+            // Cancellation to exactly zero.
+            (&[9.0, -9.0], &[5.0, 5.0]),
+            // Scale mix within the exact-integer domain.
+            (
+                &[2f64.powi(30), -(2f64.powi(20))],
+                &[2f64.powi(20), 2f64.powi(10)],
+            ),
+            (&[-3.0, 0.0, 11.0], &[0.0, 7.0, -2.0]),
+            (&[-1.0, -1.0, -1.0], &[1.0, 2.0, 3.0]),
+            (&[12345.0, -12345.0, 1.0], &[6789.0, 6789.0, 0.0]),
+        ];
+        for (a, b) in cases {
+            let oracle: i128 = a
+                .iter()
+                .zip(b)
+                .map(|(&x, &y)| i128::from(x as i64) * i128::from(y as i64))
+                .sum();
+            let mut exact = ExactSignedSum::ZERO;
+            for (&x, &y) in a.iter().zip(b) {
+                assert!(exact.add_product(x, y));
+            }
+            // slack = k flips the verdict exactly at k: verdict == (oracle <= k).
+            for slack_units in 0..=3_i128 {
+                let mut slack = ExactSignedSum::ZERO;
+                assert!(slack.add_exact_value(slack_units as f64));
+                let mut zero = ExactSignedSum::ZERO;
+                assert!(zero.add_exact_value(0.0));
+                let expected = oracle <= slack_units;
+                assert_eq!(
+                    exact.le_within_slack(&zero, &slack),
+                    expected,
+                    "oracle {oracle} vs slack {slack_units}"
+                );
+            }
+        }
+    }
+    #[test]
+    fn exact_sum_verdict_is_permutation_invariant() {
+        let a = [2f64.powi(300), -2f64.powi(80), 5.0, -2f64.powi(-200)];
+        let b = [2f64.powi(40), 3.0, -2f64.powi(150), 7.0];
+        let mut base = ExactSignedSum::ZERO;
+        for (&x, &y) in a.iter().zip(&b) {
+            assert!(base.add_product(x, y));
+        }
+        let mut slack = ExactSignedSum::ZERO;
+        assert!(slack.add_exact_value(4.0));
+        let permutations: [[usize; 4]; 4] =
+            [[0, 1, 2, 3], [3, 2, 1, 0], [1, 3, 0, 2], [2, 0, 3, 1]];
+        for order in permutations {
+            let mut shuffled = ExactSignedSum::ZERO;
+            for &index in &order {
+                assert!(shuffled.add_product(a[index], b[index]));
+            }
+            assert_eq!(
+                shuffled.le_within_slack(&ExactSignedSum::ZERO, &slack),
+                base.le_within_slack(&ExactSignedSum::ZERO, &slack),
+            );
+        }
     }
 }

@@ -38,6 +38,29 @@ uses L0 `fs-math`, and `fs-propcheck` is test-only.
   laundering an understated declaration into Gold.
   Optional composition and identity witnesses may be absent, but a supplied
   witness must contain at least one probe. `ConformanceReport::certified()`.
+- `check_adjoint_with_evidence` / `check_functoriality_with_evidence` /
+  `check_identity_with_evidence` / `check_tolerance_honesty_with_evidence` —
+  evidence-carrying forms of each axiom check. Each returns an
+  `ExactOutcome { status, evidence }` where `ExactStatus` is `Holds` /
+  `Violated` / `Refused`, and `ComparisonEvidence` pins the arithmetic
+  identity: `CONFORM_ARITHMETIC_SCHEMA_VERSION`, the deciding
+  `ArithmeticRung` (`ExactSuperaccumulator`, stable code 1), witness count,
+  dimension, and a deterministic `first_refusal` site
+  (`(flat index, ArithmeticRefusal)`). A `Refused` outcome claims NOTHING
+  about the converter; it is never folded into an ordinary measured failure.
+  The boolean `check_*` wrappers return `true` only for `Holds`.
+- The adjoint verdict compares exact signed dot products
+  (`ExactSignedSum`: fixed-bin superaccumulator pair spanning the full
+  binary64 product exponent range, fixed stack storage, no allocation):
+  `|⟨Ax,y⟩ − ⟨x,Aᵀy⟩| ≤ tol` is decided as two exact `≤` comparisons against
+  the tolerance lattice value. Dot products whose f64 representation
+  underflows to zero (or that cancel exactly mid-accumulation) therefore
+  decide honestly instead of refusing or misrounding.
+- `CONFORM_DOT_DIMENSION_BUDGET` bounds the per-dot synchronous cold-path
+  work envelope; larger witnesses refuse with
+  `ArithmeticRefusal::DimensionBudgetExceeded`.
+- `ConformanceReport.arithmetic` binds the deciding rung and schema version
+  into every certification report identity.
 
 ## Invariants
 
@@ -125,13 +148,15 @@ trait harness, not a production geometry-conversion adopter.
 - The generated G0 laws use small, exactly representable 2x2 integer matrices
   and probes. They do not certify arbitrary nonlinear converters or general
   floating-point associativity.
-- Norm booleans use a fixed full-binary64 exact superaccumulator. Dot products
-  currently require their exact running sum to remain representable as DD and
-  refuse otherwise; the public measurement path likewise refuses when its
-  exact two-component squared sum cannot be retained. A successor certifier
-  must generalize exact/binned dot accumulation, expose typed rung/refusal
-  evidence and admitted work budgets, and freeze the arithmetic receipt before
-  claiming theorem-strength arbitrary-f64 certification across the full API.
+- Norm AND adjoint-dot booleans use a fixed full-binary64 exact
+  superaccumulator (`ExactSignedSum` / bead frankensim-i8iva): no DD running
+  sum decides any axiom verdict, typed rung/refusal evidence is exposed by the
+  `check_*_with_evidence` forms, `CONFORM_DOT_DIMENSION_BUDGET` bounds per-dot
+  work, and `ConformanceReport.arithmetic` freezes the arithmetic identity.
+  Remaining successors: adaptive expansion/bin schedules beyond the single
+  ExactSuperaccumulator rung, Cx/tile polling for witnesses beyond the
+  declared synchronous cold-path budget, and G4 allocation-fault injection
+  drills (currently N/A by construction: the accumulators allocate nothing).
 - The G3 path-independence SDK harness covers the same test-local `Mtx`
   finite-dimensional linear fixture family. Exact component equality is
   justified by its bounded integer arithmetic; no production chart or
