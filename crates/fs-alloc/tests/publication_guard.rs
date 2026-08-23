@@ -348,7 +348,7 @@ fn concurrent_publication_lifecycles_stay_exactly_counted() {
             std::thread::spawn(move || {
                 barrier.wait();
                 let child_id = root_identity(90)
-                    .child(subject((91 + lane) as u8), (lane + 1) as u64)
+                    .child(subject((91 + lane) as u8), u64::from(lane + 1))
                     .expect("identity depth bounded");
                 let child = root
                     .delegate_capacity(child_id, "run/lane", 512)
@@ -390,5 +390,5 @@ fn concurrent_publication_lifecycles_stay_exactly_counted() {
 
     let sealed = root.seal().expect("concurrent closes conserve");
     assert_eq!(sealed.published_transfer_count, 32);
-    assert_eq!(sealed.counter_overflowed, false);
+    assert!(!sealed.counter_overflowed);
 }
