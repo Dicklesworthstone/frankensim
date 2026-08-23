@@ -34,7 +34,6 @@ edge is valid.
 |---|---|
 |Native workspace `fs-*` crates|162|
 |Standalone `fs-*` workspaces|4 (`fs-flyer-wasm`, `fs-goddard-wasm`, `fs-tesla-wasm`, `fs-wasm`)|
-
 |Tracked `fs-*` crate directories|166|
 |Tracked `CONTRACT.md` files|166 of 166|
 |Tracked crate integration-test files|788|
