@@ -1488,6 +1488,7 @@ fn bisect_ritz(d: &[f64], e: &[f64], radius: f64, target: usize) -> Option<f64> 
     estimate.is_finite().then_some(estimate)
 }
 
+/// Crate version, re-exported for provenance stamping.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 #[allow(clippy::float_cmp)] // Tests pin analytic kappa values (single-Ritz projections are exactly 1) bit-exactly.
 #[cfg(test)]
