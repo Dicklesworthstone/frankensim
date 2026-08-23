@@ -14,10 +14,10 @@
 
 use asupersync::types::Budget;
 use fs_constraint::{
-    ChanceEstimator, ConError, ConstraintKind, ConstraintSpec, Diagnosis, DomainBox, DomainError,
-    DomainRangeError, ElasticReport, PenaltyLaw, ProofKind, RepairAction, RepairKind, Status,
-    Treatment, diagnose_infeasibility, elastic_solve, evaluate, interval_eval, parse_specs,
-    prove_interval, serialize_specs,
+    ChanceEstimator, ChanceEvalError, ChanceWorkPlan, ConError, ConstraintKind, ConstraintSpec,
+    Diagnosis, DomainBox, DomainError, DomainRangeError, ElasticReport, PenaltyLaw, ProofKind,
+    RepairAction, RepairKind, Status, Treatment, diagnose_infeasibility, elastic_solve, evaluate,
+    evaluate_chance_with_budget, interval_eval, parse_specs, prove_interval, serialize_specs,
 };
 use fs_exec::{CancelGate, Cx, ExecMode, StreamKey};
 use fs_opt::{AdmissionCaps, Manifold, NodeId, Problem, ProblemBuilder};
@@ -298,10 +298,15 @@ fn fscon_003_chance_bound_decides() {
         vec![r.unit(), 0.0]
     };
     let x = [0.2, 0.0];
-    let comfortable = evaluate(&host.problem, &spec(0.70), &x, Some(&noise)).expect("comfortable");
-    let squeezed = evaluate(&host.problem, &spec(0.78), &x, Some(&noise)).expect("squeezed");
-    let hopeless = evaluate(&host.problem, &spec(0.95), &x, Some(&noise)).expect("hopeless");
-    // Half-width at n=400, delta=0.05: sqrt(ln 20 / 800) ≈ 0.0612.
+    let plan = ChanceWorkPlan::plan(400, 2, 64).expect("chance work plan");
+    let run = |level_spec: &ConstraintSpec| {
+        with_cx(|cx| evaluate_chance_with_budget(&host.problem, level_spec, &x, &noise, plan, cx))
+            .expect("budgeted chance evaluation")
+            .0
+    };
+    let comfortable = run(&spec(0.70));
+    let squeezed = run(&spec(0.78));
+    let hopeless = run(&spec(0.95));
     let comfortable_ok = comfortable.status == Status::Satisfied;
     let squeezed_ok = matches!(
         squeezed.status,
@@ -371,33 +376,49 @@ fn evaluate_admits_the_single_rn_host_before_graph_or_noise_work() {
         Vec::new()
     };
 
+    let plan = ChanceWorkPlan::plan(1, 2, 1).expect("chance work plan");
     for (manifold, point) in [
         (Manifold::Sphere { ambient: 2 }, vec![1.0, 0.0]),
         (Manifold::So3, vec![1.0, 0.0, 0.0, 0.0]),
         (Manifold::Stiefel { n: 2, p: 1 }, vec![1.0, 0.0]),
     ] {
         let problem = problem_with(&[manifold]);
+        let error =
+            with_cx(|cx| evaluate_chance_with_budget(&problem, &spec, &point, &noise, plan, cx))
+                .err()
+                .expect("non-Euclidean host must refuse");
         assert_eq!(
-            evaluate(&problem, &spec, &point, Some(&noise)).unwrap_err(),
-            ConError::InvalidDomain(DomainError::HostVariableManifold { got: manifold })
+            error,
+            ChanceEvalError::Invalid(ConError::InvalidDomain(DomainError::HostVariableManifold {
+                got: manifold
+            }))
         );
         assert_eq!(noise_calls.get(), 0, "{manifold:?} invoked noise");
     }
 
     let multi = problem_with(&[Manifold::Rn { dim: 1 }, Manifold::Rn { dim: 1 }]);
+    let error =
+        with_cx(|cx| evaluate_chance_with_budget(&multi, &spec, &[0.0, 0.0], &noise, plan, cx))
+            .err()
+            .expect("multi-variable host must refuse");
     assert_eq!(
-        evaluate(&multi, &spec, &[0.0, 0.0], Some(&noise)).unwrap_err(),
-        ConError::InvalidDomain(DomainError::HostVariableCount { got: 2 })
+        error,
+        ChanceEvalError::Invalid(ConError::InvalidDomain(DomainError::HostVariableCount {
+            got: 2
+        }))
     );
     assert_eq!(noise_calls.get(), 0, "multi-variable host invoked noise");
 
     let rn = problem_with(&[Manifold::Rn { dim: 2 }]);
+    let error = with_cx(|cx| evaluate_chance_with_budget(&rn, &spec, &[0.0], &noise, plan, cx))
+        .err()
+        .expect("short Rn point must refuse");
     assert_eq!(
-        evaluate(&rn, &spec, &[0.0], Some(&noise)).unwrap_err(),
-        ConError::InvalidDomain(DomainError::DimensionMismatch {
+        error,
+        ChanceEvalError::Invalid(ConError::InvalidDomain(DomainError::DimensionMismatch {
             expected: 2,
             got: 1,
-        })
+        }))
     );
     assert_eq!(noise_calls.get(), 0, "short Rn point invoked noise");
 }
@@ -1414,8 +1435,9 @@ fn interval_endpoints_are_outward_enclosed_on_the_fs_ivl_kernel() {
     let one = third_builder.konst(1.0, Dims::NONE).expect("one");
     let three = third_builder.konst(3.0, Dims::NONE).expect("three");
     let third = third_builder.div(one, three).expect("1/3 node");
+    let neg_third = third_builder.neg(third).expect("-(1/3) node");
     third_builder
-        .objective(third, fs_opt::Sense::Minimize, 1.0)
+        .objective(neg_third, fs_opt::Sense::Minimize, 1.0)
         .expect("objective");
     let third_problem = third_builder.finish();
     let bound = interval_eval(&third_problem, third, &[]).expect("enclosed quotient");
@@ -1435,7 +1457,7 @@ fn interval_endpoints_are_outward_enclosed_on_the_fs_ivl_kernel() {
     // by the retired round-to-nearest engine cannot match this subject.
     let spec = ConstraintSpec {
         name: "kernel-bound".into(),
-        node: third,
+        node: neg_third,
         kind: ConstraintKind::Certification {
             proof: ProofKind::Interval,
         },
@@ -1454,24 +1476,19 @@ fn interval_endpoints_are_outward_enclosed_on_the_fs_ivl_kernel() {
             .contains(fs_constraint::INTERVAL_KERNEL_IDENTITY)
     );
 
-    // Witness B — a non-finite constant refuses typed instead of poisoning
-    // every parent endpoint with NaN.
+    // Witness B — a non-finite constant fails closed at the front door:
+    // fs-opt's admission refuses it before any interval work exists, so a
+    // NaN can never poison an endpoint. (The engine's own
+    // `IvalError::NonFiniteConstant` remains as defense in depth for
+    // direct callers of the internal evaluator.)
     let mut nan_builder = ProblemBuilder::new();
-    let nan_node = nan_builder
-        .konst(f64::NAN, Dims::NONE)
-        .expect("nan constant node");
-    nan_builder
-        .objective(nan_node, fs_opt::Sense::Minimize, 1.0)
-        .expect("objective");
-    let nan_problem = nan_builder.finish();
-    assert!(matches!(
-        interval_eval(&nan_problem, nan_node, &[]),
-        Err(fs_constraint::IvalError::NonFiniteConstant)
-    ));
+    let nan_admission = nan_builder.konst(f64::NAN, Dims::NONE);
+    assert!(nan_admission.is_err(), "NaN constants must not be admitted");
 
-    // Witness C — overflow collapses refuse at the boundary instead of
-    // minting an infinite-endpoint "enclosure": the kernel answers
-    // [MAX, +inf] for MAX*MAX and non-finite endpoints are refused.
+    // Witness C — overflow is an HONEST extended-real enclosure: the
+    // kernel answers [MAX, +inf] for MAX*MAX (the true square may lie
+    // beyond MAX), and such a bound is retained. An infinite endpoint can
+    // never falsely clear a zero threshold downstream.
     let mut big_builder = ProblemBuilder::new();
     let big = big_builder.konst(f64::MAX, Dims::NONE).expect("big");
     let big_sq = big_builder.mul(big, big).expect("big squared");
@@ -1479,10 +1496,9 @@ fn interval_endpoints_are_outward_enclosed_on_the_fs_ivl_kernel() {
         .objective(big_sq, fs_opt::Sense::Minimize, 1.0)
         .expect("objective");
     let big_problem = big_builder.finish();
-    assert!(matches!(
-        interval_eval(&big_problem, big_sq, &[]),
-        Err(fs_constraint::IvalError::BadBindings)
-    ));
+    let big_bound = interval_eval(&big_problem, big_sq, &[]).expect("overflow encloses");
+    assert_eq!(big_bound.hi, f64::INFINITY);
+    assert!(big_bound.lo >= f64::MAX);
 }
 
 #[test]
@@ -1785,8 +1801,15 @@ fn interval_eval_bounds_shared_dag_and_powi_work() {
 
     let enclosure = interval_eval(&problem, root, &[]).expect("bounded interval work");
     let expected = (1_u64 << 40) as f64 + 1.0;
-    assert_eq!(enclosure.lo.to_bits(), expected.to_bits());
-    assert_eq!(enclosure.hi.to_bits(), expected.to_bits());
+    // Outward-rounded kernel: the enclosure must CONTAIN the exact real
+    // 2^40 + 1 (endpoints may sit an ULP or so outside; they may never
+    // cut inside it).
+    assert!(
+        enclosure.lo <= expected && expected <= enclosure.hi,
+        "enclosure [{:?}, {:?}] must contain {expected:?}",
+        enclosure.lo,
+        enclosure.hi
+    );
 }
 
 /// G4 depth boundary: interval recursion is tied to fs-opt's admission

@@ -34,8 +34,8 @@ pub use diagnose::{
 pub use ival::{Iv, IvalError};
 
 use fs_evidence::{NumericalCertificate, NumericalKind, StatisticalCertificate};
-use fs_opt::{Manifold, NodeId, Problem, ProblemSemanticId};
 use fs_exec::{AdmittedBudget, BudgetConsumption, BudgetRefusal, Cx};
+use fs_opt::{Manifold, NodeId, Problem, ProblemSemanticId};
 
 /// Crate version, re-exported for provenance stamping.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -224,8 +224,8 @@ impl ChanceWorkPlan {
                 value: f64::from(tile_samples),
             });
         }
-        let per_dim = CHANCE_WORK_UNITS_PER_DIM_NOISE_DRAW
-            + CHANCE_WORK_UNITS_PER_DIM_SHIFTED_POINT;
+        let per_dim =
+            CHANCE_WORK_UNITS_PER_DIM_NOISE_DRAW + CHANCE_WORK_UNITS_PER_DIM_SHIFTED_POINT;
         let dims = u64::from(dimensions);
         let per_sample = dims
             .checked_mul(per_dim)
@@ -235,12 +235,12 @@ impl ChanceWorkPlan {
                 what: "chance work plan overflows per-sample work",
                 value: f64::from(dimensions),
             })?;
-        let total = per_sample.checked_mul(u64::from(samples)).ok_or(
-            ConError::BadParam {
+        let total = per_sample
+            .checked_mul(u64::from(samples))
+            .ok_or(ConError::BadParam {
                 what: "chance work plan overflows total work",
                 value: f64::from(samples),
-            },
-        )?;
+            })?;
         Ok(Self {
             schema_version: CHANCE_WORK_PLAN_SCHEMA_VERSION,
             samples,
@@ -310,6 +310,7 @@ pub enum ChanceEvalError {
 impl core::fmt::Display for ChanceEvalError {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::Invalid(error) => write!(formatter, "chance evaluation refused: {error}"),
             Self::Refused { refusal, receipt } => write!(
                 formatter,
                 "chance evaluation stopped after {} completed samples ({} hits): {refusal}",
@@ -375,17 +376,18 @@ pub fn evaluate_chance_with_budget(
             value: f64::from(plan.samples),
         }));
     }
-    let mut budget = AdmittedBudget::admit_ambient(cx, plan.total_work_units).map_err(|refusal| {
-        ChanceEvalError::Refused {
-            refusal,
-            receipt: ChanceWorkReceipt {
-                plan_identity: plan.identity(),
-                consumption: None,
-                completed_samples: 0,
-                hits: 0,
-            },
-        }
-    })?;
+    let mut budget =
+        AdmittedBudget::admit_ambient(cx, plan.total_work_units).map_err(|refusal| {
+            ChanceEvalError::Refused {
+                refusal,
+                receipt: ChanceWorkReceipt {
+                    plan_identity: plan.identity(),
+                    consumption: None,
+                    completed_samples: 0,
+                    hits: 0,
+                },
+            }
+        })?;
     let g = scalar_at(problem, spec.node, x).map_err(ChanceEvalError::Invalid)?;
     let finite = g.is_finite();
     let violation = if finite { g.max(0.0) } else { f64::INFINITY };
@@ -416,8 +418,9 @@ pub fn evaluate_chance_with_budget(
     let mut completed = 0u32;
     let mut hits = 0u32;
     while completed < samples {
-        budget.checkpoint("fs-constraint:chance-tile-poll", cx).map_err(|refusal| {
-            ChanceEvalError::Refused {
+        budget
+            .checkpoint("fs-constraint:chance-tile-poll", cx)
+            .map_err(|refusal| ChanceEvalError::Refused {
                 refusal,
                 receipt: ChanceWorkReceipt {
                     plan_identity: plan.identity(),
@@ -425,8 +428,7 @@ pub fn evaluate_chance_with_budget(
                     completed_samples: completed,
                     hits,
                 },
-            }
-        })?;
+            })?;
         let tile_n = plan.tile_samples.min(samples - completed);
         let mut tile_hits = 0u32;
         for j in 0..tile_n {
@@ -438,8 +440,7 @@ pub fn evaluate_chance_with_budget(
                 }));
             }
             let shifted: Vec<f64> = x.iter().zip(&draw).map(|(a, b)| a + b).collect();
-            if scalar_at(problem, spec.node, &shifted).map_err(ChanceEvalError::Invalid)? <= 0.0
-            {
+            if scalar_at(problem, spec.node, &shifted).map_err(ChanceEvalError::Invalid)? <= 0.0 {
                 tile_hits += 1;
             }
         }
@@ -1335,7 +1336,12 @@ pub fn interval_eval(
 ) -> Result<Iv, IvalError> {
     validate_interval_bindings(problem, boxes)?;
     let interval = ival::interval_eval(problem, node, boxes)?;
-    if !interval.lo.is_finite() || !interval.hi.is_finite() || interval.lo > interval.hi {
+    // Extended-real enclosures are HONEST answers: fs-ivl pushes an
+    // endpoint past ±MAX exactly when the true bound may lie beyond it
+    // (`frankensim-zup19`), and an infinite endpoint can never falsely
+    // clear a zero threshold downstream. Only NaN or an inverted span —
+    // impossible from the kernel, checked anyway — refuses here.
+    if interval.lo.is_nan() || interval.hi.is_nan() || interval.lo > interval.hi {
         return Err(IvalError::BadBindings);
     }
     Ok(interval)
@@ -1534,7 +1540,7 @@ pub fn evaluate(
             // silently running) a workload that may be u32::MAX samples.
             return Err(ConError::BadParam {
                 what: "chance constraints require evaluate_chance_with_budget with an admitted ChanceWorkPlan",
-                value: f64::from(samples),
+                value: f64::from(*samples),
             });
         }
         ConstraintKind::Robust { half_widths } => {
