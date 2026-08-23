@@ -1,4 +1,4 @@
-{"bead": "frankensim-epic-foundations-huq.24.6", "db_sha256": "f4318edac98646c2646ec2a580024e663d8128df1ef8529a7f9ef5d3bfefe6a8", "discovery_rule": {"family_prefix": "frankensim-epic-foundations-huq", "program_subtree": "frankensim-epic-foundations-huq.24", "title_marker": "Runner V2"}, "event": "registry-header", "formula_version": "huq246-slice1", "frozen_basis_utc": "2026-08-23T18:11:02.516228+00:00", "schema": "frankensim.runner-v2-registry-inventory.v1"}
+{"bead": "frankensim-epic-foundations-huq.24.6", "db_sha256": "1db0939b811134a1d1f1eac7a7188f615cf7223b90f0165c0b4653aadebfa3e7", "discovery_rule": {"family_prefix": "frankensim-epic-foundations-huq", "program_subtree": "frankensim-epic-foundations-huq.24", "title_marker": "Runner V2"}, "event": "registry-header", "formula_version": "huq246-slice1", "frozen_basis_utc": "2026-08-23T18:19:31.451472+00:00", "schema": "frankensim.runner-v2-registry-inventory.v1"}
 {"active_children": 147, "assignee": null, "estimated_minutes": 180, "event": "contract_record", "id": "frankensim-epic-foundations-huq.24", "issue_type": "epic", "priority": 0, "status": "blocked", "title": "CanonicalEvidenceRunnerV2 program: portable evidence, atomic publication, independent replay, contained execution, and rjoq handoff"}
 {"active_children": 38, "assignee": null, "estimated_minutes": 180, "event": "contract_record", "id": "frankensim-epic-foundations-huq.24.1", "issue_type": "epic", "priority": 0, "status": "blocked", "title": "Runner V2 frozen schema, canonical lifecycle, verifiable CLI outcomes, and TOOL governance rollup"}
 {"active_children": 25, "assignee": "jemanuel", "estimated_minutes": 150, "event": "contract_record", "id": "frankensim-epic-foundations-huq.24.1.1", "issue_type": "epic", "priority": 0, "status": "blocked", "title": "Runner V2 immutable schema and non-authority API exact-root rollup"}
@@ -147,14 +147,14 @@
 {"active_children": 0, "assignee": null, "estimated_minutes": 1680, "event": "contract_record", "id": "frankensim-epic-foundations-huq.24.5.3.2", "issue_type": "task", "priority": 0, "status": "open", "title": "Final no-mock Runner-to-rjoq admission journey, migration, recovery, and dual-chain replay"}
 {"active_children": 0, "assignee": null, "estimated_minutes": 720, "event": "contract_record", "id": "frankensim-epic-foundations-huq.24.5.3.3", "issue_type": "task", "priority": 0, "status": "open", "title": "Private 33-field admission-handoff conformance receipt, sealed joiner, and full-frame oracle"}
 {"active_children": 0, "assignee": null, "estimated_minutes": 1440, "event": "contract_record", "id": "frankensim-epic-foundations-huq.24.6", "issue_type": "task", "priority": 0, "status": "in_progress", "title": "Runner V2 acceptance-contract normalization and lossless clause-preservation ratchet"}
-{"class": "CLOSED_CONTAINER_OPEN_CHILD", "container": "frankensim-epic-addendum-xpck", "event": "conflict_row"}
-{"class": "CLOSED_CONTAINER_OPEN_CHILD", "container": "frankensim-epic-bedrock-6ys.5", "event": "conflict_row"}
-{"class": "CLOSED_CONTAINER_OPEN_CHILD", "container": "frankensim-epic-selfknow-knh1", "event": "conflict_row"}
-{"class": "CLOSED_CONTAINER_OPEN_CHILD", "container": "frankensim-epic-selfknow-knh1.4", "event": "conflict_row"}
-{"class": "CLOSED_CONTAINER_OPEN_CHILD", "container": "frankensim-semantic-bead-template-hygiene-961yr.1", "event": "conflict_row"}
-{"class": "OPEN_CONTAINER_ALL_CHILDREN_CLOSED", "container": "frankensim-8ll9", "event": "info_row"}
-{"class": "OPEN_CONTAINER_ALL_CHILDREN_CLOSED", "container": "frankensim-music-v8-root-3ez8g.1", "event": "info_row"}
-{"class": "OPEN_CONTAINER_ALL_CHILDREN_CLOSED", "container": "frankensim-vo8f2", "event": "info_row"}
+{"class": "CLOSED_CONTAINER_OPEN_CHILD", "container": "frankensim-epic-addendum-xpck", "event": "tracker_wide_conflict_row", "scope": "outside_runner_v2_corpus"}
+{"class": "CLOSED_CONTAINER_OPEN_CHILD", "container": "frankensim-epic-bedrock-6ys.5", "event": "tracker_wide_conflict_row", "scope": "outside_runner_v2_corpus"}
+{"class": "CLOSED_CONTAINER_OPEN_CHILD", "container": "frankensim-epic-selfknow-knh1", "event": "tracker_wide_conflict_row", "scope": "outside_runner_v2_corpus"}
+{"class": "CLOSED_CONTAINER_OPEN_CHILD", "container": "frankensim-epic-selfknow-knh1.4", "event": "tracker_wide_conflict_row", "scope": "outside_runner_v2_corpus"}
+{"class": "CLOSED_CONTAINER_OPEN_CHILD", "container": "frankensim-semantic-bead-template-hygiene-961yr.1", "event": "tracker_wide_conflict_row", "scope": "outside_runner_v2_corpus"}
+{"class": "OPEN_CONTAINER_ALL_CHILDREN_CLOSED", "container": "frankensim-8ll9", "event": "tracker_wide_info_row", "scope": "outside_runner_v2_corpus"}
+{"class": "OPEN_CONTAINER_ALL_CHILDREN_CLOSED", "container": "frankensim-music-v8-root-3ez8g.1", "event": "tracker_wide_info_row", "scope": "outside_runner_v2_corpus"}
+{"class": "OPEN_CONTAINER_ALL_CHILDREN_CLOSED", "container": "frankensim-vo8f2", "event": "tracker_wide_info_row", "scope": "outside_runner_v2_corpus"}
 {"class": "OWNER_MISSING", "event": "conflict_row", "id": "frankensim-epic-foundations-huq.24"}
 {"class": "OWNER_MISSING", "event": "conflict_row", "id": "frankensim-epic-foundations-huq.24.1"}
 {"class": "OWNER_MISSING", "event": "conflict_row", "id": "frankensim-epic-foundations-huq.24.1.1.1.2"}
@@ -300,5 +300,5 @@
 {"class": "OWNER_MISSING", "event": "conflict_row", "id": "frankensim-epic-foundations-huq.24.5.3.2"}
 {"class": "OWNER_MISSING", "event": "conflict_row", "id": "frankensim-epic-foundations-huq.24.5.3.3"}
 {"class": "OWNER_MISSING", "event": "conflict_row", "id": "frankensim-epic-foundations-huq.24.6"}
-{"closed_container_open_child_count": 5, "corpus_count": 148, "estimate_missing_count": 0, "event": "registry-summary", "hierarchy_duplication_count": 0, "missing_parent_count": 0, "owner_missing_count": 145, "stale_open_container_count": 3}
+{"closed_container_open_child_count": 0, "corpus_count": 148, "estimate_missing_count": 0, "event": "registry-summary", "hierarchy_duplication_count": 0, "missing_parent_count": 0, "owner_missing_count": 145, "stale_open_container_count": 0, "tracker_wide_closed_container_open_child_count": 5, "tracker_wide_stale_open_container_count": 3}
 {"event": "no-claim", "text": "structural conflicts are review findings, not verdicts; this registry grants no execution, scientific, or closeout authority and does not normalize any clause"}

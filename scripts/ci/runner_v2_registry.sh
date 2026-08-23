@@ -391,6 +391,7 @@ def main(argv):
             "tracker_wide_stale_open_container_count": sum(
                 1 for r in rows if r.get("class") == "OPEN_CONTAINER_ALL_CHILDREN_CLOSED"
                 and r.get("scope") == "outside_runner_v2_corpus"),
+            "missing_parent_count": sum(
                 1 for r in rows if r.get("class") == "MISSING_PARENT"),
             "owner_missing_count": sum(
                 1 for r in rows if r.get("class") == "OWNER_MISSING"),
