@@ -525,9 +525,9 @@ pub enum ManifestError {
     /// A supersession target is absent.
     UnknownSupersessionTarget {
         /// Historical source key.
-        key: StandardEditionKey,
+        key: Box<StandardEditionKey>,
         /// Missing target.
-        target: StandardEditionKey,
+        target: Box<StandardEditionKey>,
     },
     /// Supersession edges form a cycle.
     SupersessionCycle {
