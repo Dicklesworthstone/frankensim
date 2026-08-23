@@ -24,6 +24,8 @@ fn samples() -> Vec<[f64; 3]> {
     points
 }
 
+#[allow(clippy::too_many_lines)]
+// Illumination, target match, and per-simplification certificate re-verification are one campaign story; splitting would hide the flow.
 #[test]
 fn a_fabricable_program_family_is_illuminated_and_simplified_soundly() {
     let report = run_campaign(0.2, 0.03);

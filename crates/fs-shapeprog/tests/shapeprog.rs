@@ -2,6 +2,9 @@
 //! round-trip, SDF semantics, the load-bearing rewrite-safety property (SDF
 //! preserved within the declared certificate, checked by sampling),
 //! canonicalization/dedup, and seeded shape-grammar derivation.
+// Assertions pin bitwise-exact certificate bounds and deterministic SDF
+// samples; tolerances would weaken the load-bearing rewrite-safety pins.
+#![allow(clippy::float_cmp)]
 
 use fs_shapeprog::{
     BoundOperation, Certificate, Geom, ParseError, RewritePathStep, Simplified, SimplifyRefusal,

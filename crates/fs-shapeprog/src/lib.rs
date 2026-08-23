@@ -317,7 +317,10 @@ mod admissible_evaluation_tests {
             visits += 1;
         });
 
-        assert!(matches!(result, AdmissibleSdf::Finite(value) if value == -1.0));
+        assert!(
+            matches!(result, AdmissibleSdf::Finite(value) if value.to_bits() == (-1.0_f64).to_bits()),
+            "the sphere SDF at the origin is analytically -1.0"
+        );
         assert_eq!(
             visits,
             program.size(),
@@ -566,6 +569,8 @@ impl ErrorBound {
         if self.0 == 0.0 || absolute_factor == 0.0 {
             return Ok(Self::ZERO);
         }
+        #[allow(clippy::float_cmp)]
+        // Scaling by exactly 1.0 is a bitwise multiplicative identity; a tolerance would corrupt exact bounds.
         if absolute_factor == 1.0 {
             return Ok(self);
         }
@@ -577,6 +582,8 @@ impl ErrorBound {
         // Multiplication by two is an exact binary-exponent shift whenever the
         // result is finite (including the subnormal ladder). Other factors get
         // one conservative outward lattice step.
+        #[allow(clippy::float_cmp)]
+        // Detecting the exact factor 2.0 is the point; an epsilon would misroute exact shifts into outward nudging.
         let upper = if absolute_factor == 2.0 {
             product
         } else {
@@ -709,6 +716,7 @@ fn refused(g: &Geom, refusal: SimplifyRefusal) -> Simplified {
     }
 }
 
+#[allow(clippy::too_many_lines)] // One recursive pass keeps rewrite matching, bound charging, and path logging in lockstep; splitting would interleave them.
 fn rewrite_pass(
     g: &Geom,
     tol: f64,
