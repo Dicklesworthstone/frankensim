@@ -503,9 +503,9 @@ impl ContentHash {
     fn write_lower_hex(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         const DIGITS: &[u8; 16] = b"0123456789abcdef";
         let mut encoded = [0u8; 64];
-        for (pair, &byte) in encoded.chunks_exact_mut(2).zip(&self.0) {
-            pair[0] = DIGITS[usize::from(byte >> 4)];
-            pair[1] = DIGITS[usize::from(byte & 0x0f)];
+        for (i, &byte) in self.0.iter().enumerate() {
+            encoded[i * 2] = DIGITS[usize::from(byte >> 4)];
+            encoded[i * 2 + 1] = DIGITS[usize::from(byte & 0x0f)];
         }
         let rendered = core::str::from_utf8(&encoded).map_err(|_| fmt::Error)?;
         f.write_str(rendered)
