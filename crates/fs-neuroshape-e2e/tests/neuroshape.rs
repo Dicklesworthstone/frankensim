@@ -224,7 +224,11 @@ fn localization_schema_version_pins_the_wire_codes() {
 /// typed outcome with its bounded detail — never as an erased `None`.
 #[test]
 fn every_grid_error_maps_to_a_typed_localization_outcome() {
-    let cases: [(Grid2Error, SurfaceLocalizationStatus, LocalizationDiagnostic); 7] = [
+    let cases: [(
+        Grid2Error,
+        SurfaceLocalizationStatus,
+        LocalizationDiagnostic,
+    ); 7] = [
         (
             Grid2Error::InvalidDimensions { dimensions: [1, 9] },
             SurfaceLocalizationStatus::InvalidInput,
@@ -302,14 +306,8 @@ fn every_grid_error_maps_to_a_typed_localization_outcome() {
 #[test]
 fn every_contour_error_maps_to_a_typed_localization_outcome() {
     // Resource codes are frozen by NEUROSHAPE_LOCALIZATION_SCHEMA_VERSION = 1.
-    assert_eq!(
-        iso_contour_resource_code(IsoContourResource::Cells),
-        1
-    );
-    assert_eq!(
-        iso_contour_resource_code(IsoContourResource::WorkUnits),
-        13
-    );
+    assert_eq!(iso_contour_resource_code(IsoContourResource::Cells), 1);
+    assert_eq!(iso_contour_resource_code(IsoContourResource::WorkUnits), 13);
 
     let overflow = IsoContourError::PlanOverflow {
         resource: IsoContourResource::EdgeVisits,
@@ -331,7 +329,10 @@ fn every_contour_error_maps_to_a_typed_localization_outcome() {
     };
     match SurfaceLocalization::from(coincident) {
         SurfaceLocalization::Unrepresentable(detail) => {
-            assert_eq!(detail.diagnostic, LocalizationDiagnostic::IsoCoincidentLevelEdge);
+            assert_eq!(
+                detail.diagnostic,
+                LocalizationDiagnostic::IsoCoincidentLevelEdge
+            );
             assert_eq!(detail.first_index, (2u64 << 32) | 3);
             assert_eq!(detail.second_index, (2u64 << 32) | 4);
         }
@@ -436,7 +437,11 @@ fn every_cancellation_refusal_kind_is_retained() {
     for (refusal, kind) in refusals.into_iter().zip(kinds) {
         let outcome =
             SurfaceLocalization::from(IsoContourError::ExecutionBudgetRefused { refusal });
-        assert_eq!(outcome.status(), SurfaceLocalizationStatus::Cancelled, "{refusal}");
+        assert_eq!(
+            outcome.status(),
+            SurfaceLocalizationStatus::Cancelled,
+            "{refusal}"
+        );
         match &outcome {
             SurfaceLocalization::Cancelled(detail) => {
                 assert_eq!(detail.kind, kind, "{refusal}");

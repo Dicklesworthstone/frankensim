@@ -35,12 +35,12 @@
 //! Same-build bit-deterministic replay; retained cross-ISA evidence is required
 //! before attaching a portable G5 receipt.
 
+use fs_exec::BudgetRefusal;
 use fs_rep_neural::{
     Layer, MLP_ACTIVATION_SEMANTICS, MLP_ACTIVATION_SEMANTICS_VERSION, MLP_ACTIVATION_ULP_BUDGET,
     MlpSdf, NeuralFieldIdentity, SAFE_STEP_POLICY, SAFE_STEP_POLICY_VERSION, SafeStepDerivation,
     derive_safe_step,
 };
-use fs_exec::BudgetRefusal;
 use fs_viz::{CriticalKind, Grid2, Grid2Error, IsoContourError, Vec2, classify_hessian};
 use std::fmt;
 
@@ -216,10 +216,7 @@ impl StageDetail {
     /// A detail whose numeric slots are all undefined except `stage` and
     /// `diagnostic`.
     #[must_use]
-    pub const fn new(
-        stage: LocalizationStage,
-        diagnostic: LocalizationDiagnostic,
-    ) -> Self {
+    pub const fn new(stage: LocalizationStage, diagnostic: LocalizationDiagnostic) -> Self {
         Self {
             stage,
             diagnostic,
@@ -685,7 +682,8 @@ impl From<Grid2Error> for SurfaceLocalization {
         let stage = LocalizationStage::GridConstruction;
         match error {
             Grid2Error::InvalidDimensions { dimensions } => {
-                let mut detail = StageDetail::new(stage, LocalizationDiagnostic::GridInvalidDimensions);
+                let mut detail =
+                    StageDetail::new(stage, LocalizationDiagnostic::GridInvalidDimensions);
                 detail.first_index = dimensions[0] as u64;
                 detail.second_index = dimensions[1] as u64;
                 Self::InvalidInput(detail)
@@ -693,13 +691,15 @@ impl From<Grid2Error> for SurfaceLocalization {
             // A dimension product that overflows `usize` is an unadmittable
             // caller-requested scale, not a kernel fault.
             Grid2Error::NodeCountOverflow { dimensions } => {
-                let mut detail = StageDetail::new(stage, LocalizationDiagnostic::GridNodeCountOverflow);
+                let mut detail =
+                    StageDetail::new(stage, LocalizationDiagnostic::GridNodeCountOverflow);
                 detail.first_index = dimensions[0] as u64;
                 detail.second_index = dimensions[1] as u64;
                 Self::InvalidInput(detail)
             }
             Grid2Error::NodeBudgetExceeded { required, limit } => {
-                let mut detail = StageDetail::new(stage, LocalizationDiagnostic::GridNodeBudgetExceeded);
+                let mut detail =
+                    StageDetail::new(stage, LocalizationDiagnostic::GridNodeBudgetExceeded);
                 detail.required = required as u64;
                 detail.limit = limit as u64;
                 Self::ResourceRefused(detail)
@@ -718,8 +718,10 @@ impl From<Grid2Error> for SurfaceLocalization {
                 second_index,
                 second,
             } => {
-                let mut detail =
-                    StageDetail::new(stage, LocalizationDiagnostic::GridUnrepresentableCoordinates);
+                let mut detail = StageDetail::new(
+                    stage,
+                    LocalizationDiagnostic::GridUnrepresentableCoordinates,
+                );
                 detail.axis = axis as u32;
                 detail.first_index = first_index as u64;
                 detail.second_index = second_index as u64;
@@ -728,13 +730,15 @@ impl From<Grid2Error> for SurfaceLocalization {
                 Self::Unrepresentable(detail)
             }
             Grid2Error::NonFiniteValue { index, value } => {
-                let mut detail = StageDetail::new(stage, LocalizationDiagnostic::GridNonFiniteValue);
+                let mut detail =
+                    StageDetail::new(stage, LocalizationDiagnostic::GridNonFiniteValue);
                 detail.first_index = index as u64;
                 detail.scalar_bits = value.to_bits();
                 Self::Unrepresentable(detail)
             }
             Grid2Error::AllocationFailed { nodes } => {
-                let mut detail = StageDetail::new(stage, LocalizationDiagnostic::GridAllocationFailed);
+                let mut detail =
+                    StageDetail::new(stage, LocalizationDiagnostic::GridAllocationFailed);
                 detail.required = nodes as u64;
                 Self::AllocationRefused(detail)
             }
@@ -752,13 +756,15 @@ impl From<IsoContourError> for SurfaceLocalization {
                 Self::InvalidInput(detail)
             }
             IsoContourError::ZeroCrossingLimit => {
-                let mut detail = StageDetail::new(stage, LocalizationDiagnostic::IsoZeroCrossingLimit);
+                let mut detail =
+                    StageDetail::new(stage, LocalizationDiagnostic::IsoZeroCrossingLimit);
                 detail.required = 1;
                 detail.limit = 0;
                 Self::InvalidInput(detail)
             }
             IsoContourError::InvalidPollStride { items_per_poll } => {
-                let mut detail = StageDetail::new(stage, LocalizationDiagnostic::IsoInvalidPollStride);
+                let mut detail =
+                    StageDetail::new(stage, LocalizationDiagnostic::IsoInvalidPollStride);
                 detail.required = items_per_poll as u64;
                 Self::InvalidInput(detail)
             }
@@ -791,7 +797,8 @@ impl From<IsoContourError> for SurfaceLocalization {
                 Self::ResourceRefused(detail)
             }
             IsoContourError::CoincidentLevelEdge { first, second } => {
-                let mut detail = StageDetail::new(stage, LocalizationDiagnostic::IsoCoincidentLevelEdge);
+                let mut detail =
+                    StageDetail::new(stage, LocalizationDiagnostic::IsoCoincidentLevelEdge);
                 detail.first_index = pack_edge(first);
                 detail.second_index = pack_edge(second);
                 Self::Unrepresentable(detail)
@@ -807,8 +814,10 @@ impl From<IsoContourError> for SurfaceLocalization {
                 // The full endpoint/value bit dump stays in the fs-viz error at
                 // the source stage; this boundary retains offender identity,
                 // level bits, interpolation bits, and the collapse axis.
-                let mut detail =
-                    StageDetail::new(stage, LocalizationDiagnostic::IsoUnrepresentableIntersection);
+                let mut detail = StageDetail::new(
+                    stage,
+                    LocalizationDiagnostic::IsoUnrepresentableIntersection,
+                );
                 detail.first_index = pack_edge(first);
                 detail.second_index = pack_edge(second);
                 detail.scalar_bits = iso_bits;
@@ -817,7 +826,8 @@ impl From<IsoContourError> for SurfaceLocalization {
                 Self::Unrepresentable(detail)
             }
             IsoContourError::AllocationFailed { required } => {
-                let mut detail = StageDetail::new(stage, LocalizationDiagnostic::IsoAllocationFailed);
+                let mut detail =
+                    StageDetail::new(stage, LocalizationDiagnostic::IsoAllocationFailed);
                 detail.required = required as u64;
                 Self::AllocationRefused(detail)
             }

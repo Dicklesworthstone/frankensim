@@ -40,9 +40,9 @@ use fs_fab::min_feature_size;
 use fs_grammar_e2e::{SimplificationSummary, assess_simplification};
 use fs_lbm::{Lbm, plan_scaling, poiseuille_analytic};
 use fs_neuroshape_e2e::{
-    ComponentCountEvidence, LocalizationStage, NeuroShapeReport, SurfaceLocalization,
-    SurfaceLocalizationStatus, NEUROSHAPE_COMPONENT_EVIDENCE_SCHEMA_VERSION,
-    NEUROSHAPE_LOCALIZATION_SCHEMA_VERSION,
+    ComponentCountEvidence, LocalizationStage, NEUROSHAPE_COMPONENT_EVIDENCE_SCHEMA_VERSION,
+    NEUROSHAPE_LOCALIZATION_SCHEMA_VERSION, NeuroShapeReport, SurfaceLocalization,
+    SurfaceLocalizationStatus,
 };
 use fs_rep_neural::{Layer, MlpSdf, SafeStepStatus};
 use fs_schedule_e2e::{ScheduleDisposition, Study};
@@ -1217,9 +1217,7 @@ fn localization_stage_code(localization: &SurfaceLocalization) -> f64 {
     match localization.stage() {
         None => LOCALIZATION_STAGE_NONE,
         Some(LocalizationStage::GridConstruction) => LOCALIZATION_STAGE_GRID_CONSTRUCTION,
-        Some(LocalizationStage::IsoContourExtraction) => {
-            LOCALIZATION_STAGE_ISOCONTOUR_EXTRACTION
-        }
+        Some(LocalizationStage::IsoContourExtraction) => LOCALIZATION_STAGE_ISOCONTOUR_EXTRACTION,
     }
 }
 
@@ -1980,8 +1978,7 @@ mod tests {
             return Err("unsupported NeuroShape localization schema");
         }
         let status = encoded[26];
-        if !(LOCALIZATION_STATUS_LOCALIZED..=LOCALIZATION_STATUS_INTERNAL_FAULT)
-            .contains(&status)
+        if !(LOCALIZATION_STATUS_LOCALIZED..=LOCALIZATION_STATUS_INTERNAL_FAULT).contains(&status)
             || status.fract() != 0.0
         {
             return Err("unknown NeuroShape surface-localization status code");
@@ -2205,18 +2202,23 @@ mod tests {
             "component-evidence schema version"
         );
         assert_eq!(
-            v[26],
-            LOCALIZATION_STATUS_LOCALIZED,
+            v[26], LOCALIZATION_STATUS_LOCALIZED,
             "default campaign localizes the sampled zero set"
         );
-        assert_eq!(v[27], LOCALIZATION_STAGE_NONE, "success has no refusing stage");
+        assert_eq!(
+            v[27], LOCALIZATION_STAGE_NONE,
+            "success has no refusing stage"
+        );
         assert_eq!(
             v[28],
             f64::from(NEUROSHAPE_LOCALIZATION_SCHEMA_VERSION),
             "localization schema version"
         );
         assert_eq!(v[29], 0.0, "reserved header slot");
-        assert!(v[15] > 0.0 && !v[6].is_nan(), "derived crossing views stay populated");
+        assert!(
+            v[15] > 0.0 && !v[6].is_nan(),
+            "derived crossing views stay populated"
+        );
     }
 
     /// Regression for bead `frankensim-extreal-program-f85xj.2.39`.
@@ -2326,14 +2328,9 @@ mod tests {
         let inner = 0.3;
         let win_lo = -(ring_r + 0.5);
         let win_hi = ring_r + 0.5;
-        let field = Grid2::from_fn(
-            64,
-            64,
-            [win_lo, win_lo],
-            [win_hi, win_hi],
-            64 * 64,
-            |p| net.eval(&[p[0], p[1]]),
-        )
+        let field = Grid2::from_fn(64, 64, [win_lo, win_lo], [win_hi, win_hi], 64 * 64, |p| {
+            net.eval(&[p[0], p[1]])
+        })
         .expect("viz grid admits");
         neuroshape_payload(&report, &field, 64, win_lo, win_hi, ring_r, inner)
     }
@@ -2570,14 +2567,16 @@ mod tests {
             "component-evidence schema version"
         );
         assert_eq!(
-            v[26],
-            LOCALIZATION_STATUS_VALID_EMPTY,
+            v[26], LOCALIZATION_STATUS_VALID_EMPTY,
             "the all-positive lift-12 field has no zero crossing anywhere"
         );
         assert_eq!(v[27], LOCALIZATION_STAGE_NONE, "valid empty has no stage");
         assert_eq!(v[15], 0.0, "derived crossing count for a valid empty grid");
         assert_eq!(v[6], 0.0, "valid-empty nearest-surface sentinel");
-        assert!(v[7].is_infinite() && v[7] > 0.0, "valid-empty max-radius sentinel");
+        assert!(
+            v[7].is_infinite() && v[7] > 0.0,
+            "valid-empty max-radius sentinel"
+        );
         assert_eq!(
             v.len(),
             NEUROSHAPE_HEADER_LEN + 64 * 64,
