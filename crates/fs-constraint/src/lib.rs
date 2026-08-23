@@ -315,8 +315,6 @@ impl core::fmt::Display for ChanceEvalError {
                 "chance evaluation stopped after {} completed samples ({} hits): {refusal}",
                 receipt.completed_samples, receipt.hits
             ),
-                receipt.hits
-            ),
         }
     }
 }
@@ -1524,56 +1522,20 @@ pub fn evaluate(
                 });
             }
         }
-        ConstraintKind::Chance { level, estimator } => {
-            let ChanceEstimator::MonteCarlo { samples, delta } = *estimator;
-            let noise = noise.ok_or(ConError::BadParam {
-                what: "chance noise model (required)",
-                value: f64::NAN,
-            })?;
-            let mut hits = 0u32;
-            for s in 0..samples {
-                let draw = noise(u64::from(s));
-                if draw.len() != x.len() {
-                    return Err(ConError::BadParam {
-                        what: "chance noise draw dimension",
-                        value: draw.len() as f64,
-                    });
-                }
-                let shifted: Vec<f64> = x.iter().zip(&draw).map(|(a, b)| a + b).collect();
-                if scalar_at(problem, spec.node, &shifted)? <= 0.0 {
-                    hits += 1;
-                }
-            }
-            let empirical = f64::from(hits) / f64::from(samples);
-            // Hoeffding lower confidence bound at failure prob delta.
-            // `-ln(delta)` is algebraically `ln(1/delta)` but remains finite
-            // for every positive finite binary64 delta; forming `1/delta`
-            // first would overflow for valid subnormal policy values.
-            let half_width = (-delta.ln() / (2.0 * f64::from(samples))).sqrt();
-            let lower = empirical - half_width;
-            ev.statistical = StatisticalCertificate::HalfWidth {
-                half_width,
-                confidence: 1.0 - delta,
-            };
-            ev.status = if lower >= *level {
-                Status::Satisfied
-            } else if empirical >= *level {
-                // The raw rate clears but the BOUND does not: refuse —
-                // this is the validity machinery earning its keep.
-                Status::BoundNotCleared {
-                    empirical,
-                    lower_bound: lower,
-                }
-            } else {
-                Status::Violated
-            };
-            ev.violation = (*level - lower).max(0.0);
-            ev.certificate = NumericalCertificate::estimate(ev.violation, ev.violation);
-            ev.role = if matches!(ev.status, Status::Satisfied) {
-                ActiveRole::Inactive
-            } else {
-                ActiveRole::Violating
-            };
+        ConstraintKind::Chance {
+            level: _,
+            estimator: ChanceEstimator::MonteCarlo { samples, .. },
+        } => {
+            // Retired with the unbounded synchronous sampler (bead
+            // frankensim-oxyjg): a chance constraint's resource contract
+            // lives in an admitted [`ChanceWorkPlan`] under caller-owned
+            // cancellation/budget authority, which this entry point does
+            // not have. It refuses instead of silently bounding (or
+            // silently running) a workload that may be u32::MAX samples.
+            return Err(ConError::BadParam {
+                what: "chance constraints require evaluate_chance_with_budget with an admitted ChanceWorkPlan",
+                value: f64::from(samples),
+            });
         }
         ConstraintKind::Robust { half_widths } => {
             // Prove sup over the uncertainty box via interval eval.
