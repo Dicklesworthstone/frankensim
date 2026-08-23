@@ -248,7 +248,7 @@ fn d25_live_default_requires_green_and_budget_row_together() {
     .expect_err("live default without budget row refuses");
     match &err {
         SelectorError::NoAdmittedImage(d) => {
-            assert!(d.contains("live-default-without-budget-row"), "{d}")
+            assert!(d.contains("live-default-without-budget-row"), "{d}");
         }
         other => panic!("{other}"),
     }

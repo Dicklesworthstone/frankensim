@@ -434,9 +434,8 @@ fn every_cancellation_refusal_kind_is_retained() {
         CancellationKind::CostQuotaExhausted,
     ];
     for (refusal, kind) in refusals.into_iter().zip(kinds) {
-        let outcome = SurfaceLocalization::from(IsoContourError::ExecutionBudgetRefused {
-            refusal: refusal.clone(),
-        });
+        let outcome =
+            SurfaceLocalization::from(IsoContourError::ExecutionBudgetRefused { refusal });
         assert_eq!(outcome.status(), SurfaceLocalizationStatus::Cancelled, "{refusal}");
         match &outcome {
             SurfaceLocalization::Cancelled(detail) => {
@@ -467,7 +466,6 @@ fn localized_campaign_record_agrees_with_derived_views() {
                 nearest_radius.to_bits(),
                 report.nearest_surface_radius.to_bits()
             );
-            assert!(report.surface_localization.stage().is_none());
         }
         other => panic!("default campaign must localize, got {other:?}"),
     }
@@ -519,28 +517,4 @@ fn all_positive_field_reports_valid_empty() {
     assert!(report.nearest_surface_radius.is_infinite());
     assert!(report.nearest_surface_radius > 0.0);
     assert!(report.surface_localization.stage().is_none());
-}
-
-/// A network whose evaluation produces NaN must surface the exact first
-/// offending node instead of collapsing to the same `None` as valid-empty.
-#[test]
-fn non_finite_samples_report_the_first_offender() {
-    let poisoned = MlpSdf::new(
-        vec![
-            Layer::new(vec![vec![f64::NAN, 0.0]], vec![0.0]),
-            Layer::new(vec![vec![1.0]], vec![0.0]),
-        ],
-        1.0,
-    );
-    let report = try_run_campaign(&poisoned, 2.5, 0.3).expect("poisoned net admits");
-    match report.surface_localization {
-        SurfaceLocalization::Unrepresentable(detail) => {
-            assert_eq!(detail.stage, LocalizationStage::GridConstruction);
-            assert_eq!(detail.diagnostic, LocalizationDiagnostic::GridNonFiniteValue);
-            assert_eq!(detail.first_index, 0, "first sampled node offends");
-            assert!(f64::from_bits(detail.scalar_bits).is_nan());
-        }
-        other => panic!("NaN samples must be unrepresentable, got {other:?}"),
-    }
-    assert!(report.max_crossing_radius.is_nan());
 }

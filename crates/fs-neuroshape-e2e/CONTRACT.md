@@ -130,13 +130,16 @@ interval sign-margin safe-step / enclosure checks; an open frame yields typed
 `Unknown`; admission refuses a non-2-D net and non-finite/out-of-range
 geometry; G5 determinism includes the field identity and safe-step bits. The
 typed localization battery (G0/G3/G4) maps EVERY `Grid2Error` and
-`IsoContourError` variant — including plan overflow with its frozen resource
-ordinals and all seven fs-exec cancellation kinds — to its documented outcome,
-proves a localized campaign agrees bit-for-bit with its derived legacy views,
-and proves reachable live outcomes: an identically-zero field reports
-`Unrepresentable`/coincident-edge instead of a silent `None`, a strictly
-positive field is `ValidEmpty` (never a refusal), and NaN samples name their
-first offending node.
+`IsoContourError` variant — including non-finite samples, plan overflow with
+its frozen resource ordinals, and all seven fs-exec cancellation kinds — to
+its documented outcome, proves a localized campaign agrees bit-for-bit with
+its derived legacy views, and proves reachable live outcomes: an
+identically-zero field reports `Unrepresentable`/coincident-edge instead of a
+silent `None`, and a strictly positive field is `ValidEmpty` (never a
+refusal). A campaign-level NaN-sample case is deliberately absent:
+`fs_rep_neural::MlpSdf::new` already refuses non-finite weights at
+construction, so the `GridNonFiniteValue` state is exercised at the mapping
+level only.
 
 ## No-claim boundaries
 
