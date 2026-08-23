@@ -12,6 +12,9 @@ use fs_evidence::prediction_bundle::{
 };
 use fs_evidence::vv::{ApplicabilityPolicy, ArtifactId, ArtifactKind, ArtifactRef};
 
+/// One labeled field mutation used by the identity-sensitivity scenario.
+type Mutation = (&'static str, Box<dyn Fn(&mut Fixture)>);
+
 fn reference(kind: ArtifactKind, id: &str, salt: u8) -> ArtifactRef {
     ArtifactRef::new(
         kind,
@@ -231,7 +234,7 @@ fn boundary_counts_admit_exactly_the_cap() {
 #[test]
 fn every_semantic_field_moves_the_identity() {
     let base = nominal().identity().expect("identity");
-    let mutations: Vec<(&str, Box<dyn Fn(&mut Fixture)>)> = vec![
+    let mutations: Vec<Mutation> = vec![
         (
             "source_identity",
             Box::new(|f| f.source_identity[0].1 = "cafef00d".to_string()),
@@ -247,12 +250,14 @@ fn every_semantic_field_moves_the_identity() {
         (
             "calibration_split",
             Box::new(|f| {
-                f.calibration_split = reference(ArtifactKind::CalibrationSplit, "split-2", 23)
+                f.calibration_split = reference(ArtifactKind::CalibrationSplit, "split-2", 23);
             }),
         ),
         (
             "scenarios",
-            Box::new(|f| f.scenarios.pop().map(drop).unwrap_or(())),
+            Box::new(|f| {
+                f.scenarios.pop();
+            }),
         ),
         (
             "parameter_distributions",
@@ -268,7 +273,9 @@ fn every_semantic_field_moves_the_identity() {
         ),
         (
             "model_rungs",
-            Box::new(|f| f.model_rungs.allowed_rungs.pop().map(drop).unwrap_or(())),
+            Box::new(|f| {
+                f.model_rungs.allowed_rungs.pop();
+            }),
         ),
         (
             "applicability",
@@ -282,7 +289,7 @@ fn every_semantic_field_moves_the_identity() {
         (
             "blind_partition",
             Box::new(|f| {
-                f.blind_partition = reference(ArtifactKind::ExperimentArtifact, "holdout-2", 24)
+                f.blind_partition = reference(ArtifactKind::ExperimentArtifact, "holdout-2", 24);
             }),
         ),
         (

@@ -622,6 +622,7 @@ pub enum TilePoolRequestPhase {
 }
 
 impl TilePoolRequestPhase {
+    /// Stable lowercase name for events and ledger rows.
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
@@ -855,6 +856,7 @@ impl TilePoolInvocationPermit {
     /// one-shot authority. `InvocationBudget` is responsible for deriving the
     /// root from its invocation occurrence plus run ordinal and refusing a
     /// second mint for that ordinal.
+    #[cfg(test)]
     #[must_use]
     pub(crate) const fn from_permit_root(permit_root: [u8; 32]) -> Self {
         Self { permit_root }

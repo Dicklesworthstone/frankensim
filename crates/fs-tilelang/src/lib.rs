@@ -216,8 +216,8 @@ impl KernelMeta {
     }
 
     /// Fallibly render one bounded JSON metadata object
-    /// (roofline/autotuner food, ledger-ready).
-    #[must_use]
+    /// (roofline/autotuner food, ledger-ready). The error type carries
+    /// its own refusal JSON; the `Result` is already `#[must_use]`.
     pub fn try_descr(&self) -> Result<String, MetadataRenderError> {
         let escaped_name_len = self.validated_name_escaped_len()?;
         let capacity = METADATA_JSON_FIXED_CAPACITY
@@ -247,7 +247,6 @@ impl KernelMeta {
 
     /// Render the authoritative bounded outer log record with metadata as a
     /// nested JSON OBJECT, never as an interpolated quoted JSON string.
-    #[must_use]
     pub fn render_log_record(
         &self,
         case: &str,

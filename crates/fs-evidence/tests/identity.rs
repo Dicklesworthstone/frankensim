@@ -2,6 +2,8 @@
 //!
 //! A retained cross-ISA known-answer vector is still required for G5.
 
+#![allow(clippy::too_many_lines)] // long scenario functions are the point of identity fixtures
+#![allow(clippy::items_after_statements)] // probe structs live beside the scenario that drives them
 use std::collections::BTreeMap;
 
 use fs_blake3::identity::{
@@ -239,7 +241,7 @@ fn identified_model_bracket(bracket: ModelBracket) -> IdentifiedModelBracketV1 {
 
 fn manual_model_bracket_receipt(members: &[(&str, f64)]) -> ModelBracketReceiptV1 {
     let mut members = members.to_vec();
-    members.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+    members.sort_unstable_by_key(|(name, _)| *name);
     let rows: Vec<Vec<u8>> = members
         .iter()
         .map(|(name, qoi)| {
@@ -290,16 +292,13 @@ fn manual_model_evidence_receipt(model_evidence: &ModelEvidence) -> ModelEvidenc
         .canonical_set(
             Field::new(0, "model-card-names"),
             u64::try_from(model_evidence.cards.len()).expect("model-card count"),
-            model_evidence.cards.iter().map(|card| card.as_bytes()),
+            model_evidence.cards.iter().map(String::as_bytes),
         )
         .expect("model-card names")
         .canonical_set(
             Field::new(1, "assumptions"),
             u64::try_from(model_evidence.assumptions.len()).expect("assumption count"),
-            model_evidence
-                .assumptions
-                .iter()
-                .map(|assumption| assumption.as_bytes()),
+            model_evidence.assumptions.iter().map(String::as_bytes),
         )
         .expect("assumptions")
         .child(Field::new(2, "validity"), validity.id())
@@ -455,10 +454,7 @@ fn manual_lineage_receipt(
         .ordered_bytes(
             Field::new(5, "parents"),
             parent_count,
-            parent_rows
-                .iter()
-                .flat_map(|rows| rows.iter())
-                .map(|row| row.as_slice()),
+            parent_rows.iter().flatten().map(<[u8; 65]>::as_slice),
         )
         .expect("typed ordered parents")
         .finish()
@@ -595,17 +591,13 @@ fn manual_certified_receipt(
         .canonical_set(
             Field::new(6, "model-cards"),
             u64::try_from(evidence.model.cards.len()).expect("card count"),
-            evidence.model.cards.iter().map(|card| card.as_bytes()),
+            evidence.model.cards.iter().map(String::as_bytes),
         )
         .expect("model cards")
         .canonical_set(
             Field::new(7, "model-assumptions"),
             u64::try_from(evidence.model.assumptions.len()).expect("assumption count"),
-            evidence
-                .model
-                .assumptions
-                .iter()
-                .map(|assumption| assumption.as_bytes()),
+            evidence.model.assumptions.iter().map(String::as_bytes),
         )
         .expect("model assumptions")
         .child(Field::new(8, "model-validity"), validity.id())
@@ -620,7 +612,7 @@ fn manual_certified_receipt(
         .ordered_bytes(
             Field::new(11, "sensitivity"),
             u64::try_from(sensitivity_rows.len()).expect("sensitivity count"),
-            sensitivity_rows.iter().map(|row| row.as_slice()),
+            sensitivity_rows.iter().map(Vec::as_slice),
         )
         .expect("sensitivity")
         .flag(
@@ -773,7 +765,7 @@ fn manual_model_card_receipts(
         .canonical_set(
             Field::new(3, "assumptions"),
             u64::try_from(card.assumptions.len()).expect("assumption count"),
-            card.assumptions.iter().map(|value| value.as_bytes()),
+            card.assumptions.iter().map(String::as_bytes),
         )
         .expect("assumptions")
         .child(Field::new(4, "validity"), validity.id())
@@ -781,7 +773,7 @@ fn manual_model_card_receipts(
         .canonical_set(
             Field::new(5, "known-failures"),
             u64::try_from(card.known_failures.len()).expect("known-failure count"),
-            card.known_failures.iter().map(|value| value.as_bytes()),
+            card.known_failures.iter().map(String::as_bytes),
         )
         .expect("known failures")
         .flag(Field::new(6, "calibration-present"), calibration_present)
@@ -1905,7 +1897,7 @@ fn fidelity_pair_and_discrepancy_band_identities_enforce_resources_and_cancellat
         ))
     ));
     let oversized_params = (0..1_025)
-        .map(|index| (format!("p{index:04}"), index as f64))
+        .map(|index| (format!("p{index:04}"), f64::from(index)))
         .collect();
     assert!(matches!(
         identify_fidelity_pair_v1(
@@ -2962,7 +2954,7 @@ fn validity_domain_helper_matches_independent_canonical_rows() {
         .ordered_bytes(
             Field::new(0, "axes"),
             u64::try_from(rows.len()).expect("row count"),
-            rows.iter().map(|row| row.as_slice()),
+            rows.iter().map(std::vec::Vec::as_slice),
         )
         .expect("canonical rows")
         .finish()
@@ -4826,7 +4818,7 @@ fn sourced_certified_f64_identity_crosswalks_exact_sources_and_separates_fnv_col
     );
 
     let (child, producer, adjoint) = parent.into_parts();
-    assert_eq!(child.certified().value, 3.0);
+    assert_eq!(child.certified().value.to_bits(), 3.0_f64.to_bits());
     assert_eq!(producer.canonical_bytes(), b"producer-v1");
     assert_eq!(
         adjoint.expect("recovered adjoint source").canonical_bytes(),

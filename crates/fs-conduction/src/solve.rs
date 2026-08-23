@@ -659,6 +659,21 @@ impl<'m> ConductionSolver<'m> {
     }
 
 
+    /// The current resumable iterate (read-only view).
+    #[must_use]
+    pub const fn state(&self) -> &ConductionState {
+        &self.state
+    }
+
+    /// Seal the current iterate into the legacy-v1 envelope under the
+    /// caller's provenance stamp. The bytes round-trip through
+    /// [`Self::restore`] and reproduce the uninterrupted trajectory
+    /// bitwise; see [`ConductionState`].
+    #[must_use]
+    pub fn snapshot(&self, provenance: u64) -> Vec<u8> {
+        LegacySnapshotV1Adapter::<ConductionState>::seal(&self.state, provenance)
+    }
+
     /// Restore a sealed legacy-v1 state, replacing the current iterate.
     ///
     /// This is an unbounded compatibility parser: it validates the historical

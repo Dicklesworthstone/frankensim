@@ -1133,6 +1133,7 @@ impl CinematicConfigDocumentError {
             }
             Self::MalformedLine { line } => format!("config.line[{line}]"),
             Self::UnsupportedSchema => "config.schema".to_owned(),
+            Self::Budget(_) => "config.quality_profile".to_owned(),
             Self::InvalidAssetBudget => "config.assets".to_owned(),
             Self::Config(_)
             | Self::DocumentTooLarge { .. }

@@ -25,6 +25,8 @@ pub mod frame;
 pub mod gesture;
 pub mod ir;
 pub mod payload;
+#[cfg(feature = "rans-rung")]
+pub mod rans_card;
 pub mod scenario;
 pub mod sensor;
 pub mod signal;

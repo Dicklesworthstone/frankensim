@@ -302,7 +302,10 @@ fn legacy_projection_accounts_for_every_source_without_silent_zero() {
         &[EngineeringUncertaintyKind::ModelForm]
     );
     assert_ne!(projection.original_budget(), ContentHash([0; 32]));
-    assert_eq!(projection.reference_magnitude(), 1.0);
+    assert_eq!(
+        projection.reference_magnitude().to_bits(),
+        1.0_f64.to_bits()
+    );
 }
 
 #[test]

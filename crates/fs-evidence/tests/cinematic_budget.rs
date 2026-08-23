@@ -58,11 +58,11 @@ fn profile_identity_binds_every_budget_and_quality_field() {
     let baseline =
         CinematicQualityProfile::canonical(CinematicQualityTier::Final4k).expect("canonical final");
     let baseline_identity = baseline.identity();
-    let encoded = baseline
-        .canonical_bytes()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
+    let mut encoded = String::new();
+    for byte in baseline.canonical_bytes() {
+        use std::fmt::Write as _;
+        let _ = write!(encoded, "{byte:02x}");
+    }
     assert_eq!(
         encoded,
         "010003000f0000700800001800000000000000f000000000010000000400001000e8030000020210002000200040004000000000000000020000008051010000000000001a4f00000000000000000040000000000000800c000000",

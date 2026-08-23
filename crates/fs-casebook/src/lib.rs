@@ -62,7 +62,7 @@ fn hex_nibble(byte: u8, offset: usize) -> Result<u8, ReplayError> {
 }
 
 fn hex_decode(encoded: &str) -> Result<Vec<u8>, ReplayError> {
-    if encoded.len() % 2 != 0 {
+    if !encoded.len().is_multiple_of(2) {
         return Err(ReplayError::OddHexLength {
             length: encoded.len(),
         });
@@ -520,8 +520,8 @@ impl DisagreementRecord {
     }
 
     fn bind_owner(mut self, suite: &str, case: &str, owner: usize, discovery: usize) -> Self {
-        self.suite = suite.to_owned();
-        self.case = case.to_owned();
+        suite.clone_into(&mut self.suite);
+        case.clone_into(&mut self.case);
         self.owner_index = Some(owner);
         self.discovery_index = Some(discovery);
         self
