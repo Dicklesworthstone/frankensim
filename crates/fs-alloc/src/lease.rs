@@ -380,7 +380,8 @@ impl std::error::Error for LeaseIdentityPathError {}
 /// one output identity may be routed to different destinations. Treating the
 /// tuple as a single caller-formatted label would lose those authority
 /// boundaries and make duplicate detection ambiguous.
-#[allow(clippy::struct_field_names)] // the four *_identity fields ARE the point: distinct authority boundaries, per the doc comment above
+#[allow(clippy::struct_field_names)]
+// the four *_identity fields ARE the point: distinct authority boundaries, per the doc comment above
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PublishedTransferBinding {
     plan_identity: [u8; PUBLISHED_TRANSFER_BINDING_FIELD_BYTES],
@@ -2650,7 +2651,8 @@ impl OperationMemoryLease {
     ///
     /// Seal, reserve, and delegate are one mutex-serialized transition family:
     /// a race has exactly one winner, and the first seal sequence is immutable.
-    #[allow(clippy::too_many_lines)] // one mutex-serialized transition family with an immutable first-seal sequence; splitting would scatter the race invariants xdu4's proof lane reasons about
+    #[allow(clippy::too_many_lines)]
+    // one mutex-serialized transition family with an immutable first-seal sequence; splitting would scatter the race invariants xdu4's proof lane reasons about
     #[allow(clippy::result_large_err)]
     pub fn seal(&self) -> Result<SealedLeaseReceipt, LeaseSealRefusal> {
         let mut state = self.lock_state();

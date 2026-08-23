@@ -169,16 +169,16 @@ fn zero_sized_publication_remains_a_counted_authority() {
 
 #[test]
 fn guard_drop_destroys_value_and_records_implicit_close_agreeing_with_explicit() {
-    let root = delegated_root(50, 64);
-    let child_id = root_identity(50).child(subject(51), 1).unwrap();
-    let child = root.delegate_capacity(child_id, "run/out", 16).unwrap();
-
     struct Observed(Arc<AtomicBool>);
     impl Drop for Observed {
         fn drop(&mut self) {
             self.0.store(true, Ordering::SeqCst);
         }
     }
+    let root = delegated_root(50, 64);
+    let child_id = root_identity(50).child(subject(51), 1).unwrap();
+    let child = root.delegate_capacity(child_id, "run/out", 16).unwrap();
+
     let dropped_flag = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&dropped_flag);
     let explicit = child
@@ -216,16 +216,15 @@ fn guard_drop_destroys_value_and_records_implicit_close_agreeing_with_explicit()
 
 #[test]
 fn destructor_panic_during_close_never_records_success() {
-    let root = delegated_root(60, 64);
-    let child_id = root_identity(60).child(subject(61), 1).unwrap();
-    let child = root.delegate_capacity(child_id, "run/out", 8).unwrap();
-
     struct Exploding;
     impl Drop for Exploding {
         fn drop(&mut self) {
             panic!("destructor explosion");
         }
     }
+    let root = delegated_root(60, 64);
+    let child_id = root_identity(60).child(subject(61), 1).unwrap();
+    let child = root.delegate_capacity(child_id, "run/out", 8).unwrap();
 
     let published = child
         .allocate("out", Exploding)
