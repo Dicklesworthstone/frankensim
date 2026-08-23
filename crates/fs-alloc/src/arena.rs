@@ -428,7 +428,10 @@ impl PoolShared {
     }
 
     /// Get a chunk of at least `min_bytes` (free list first, then the OS),
-    /// enforcing the pool budget.
+    /// enforcing the pool budget. One coherent acquisition transition (free-list
+    /// probe, budget charge, OS fallback, retry-after-pressure); splitting would
+    /// scatter the retry invariants xdu4's fault-injection proof lane reasons about.
+    #[allow(clippy::too_many_lines)]
     fn acquire_chunk(
         &self,
         min_bytes: usize,

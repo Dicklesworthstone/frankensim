@@ -114,7 +114,7 @@ fn measure(buffers: &mut [Vec<u64>], pins: &[Vec<u32>], reps: usize) -> f64 {
 }
 
 #[test]
-#[ignore = "perf harness: run explicitly in release with --ignored"]
+#[allow(clippy::too_many_lines)] // perf A/B harness: topology setup, both variants, and the report read as one tabular procedure
 fn ccd_locality_ab() {
     // --- Topology: measured where possible, heuristic otherwise. ---
     let groups = measured_l3_groups();
