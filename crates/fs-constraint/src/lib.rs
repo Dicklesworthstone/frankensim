@@ -26,12 +26,20 @@
 
 mod diagnose;
 mod ival;
+mod restoration;
 
 pub use diagnose::{
     Diagnosis, DomainBox, ElasticReport, RepairAction, RepairKind, diagnose_infeasibility,
-    elastic_solve,
+    elastic_solve, elastic_solve_with_plan,
 };
 pub use ival::{Iv, IvalError};
+pub use restoration::{
+    RestorationError, RestorationMemoryAuthority, RestorationWorkLimits, RestorationWorkPlan,
+    RestorationWorkReceipt, RestorationWorkShape, RESTORATION_MAX_FEASIBILITY_SAMPLES,
+    RESTORATION_MAX_STARTS, RESTORATION_MAX_STEPS_PER_START,
+    RESTORATION_UNITS_CONSTRAINT_EVALUATION, RESTORATION_UNITS_SKIP_MASK_ENTRY,
+    RESTORATION_WORK_PLAN_SCHEMA_VERSION,
+};
 
 use fs_evidence::{NumericalCertificate, NumericalKind, StatisticalCertificate};
 use fs_exec::{AdmittedBudget, BudgetConsumption, BudgetRefusal, Cx};

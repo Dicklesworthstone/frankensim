@@ -186,7 +186,12 @@ not a failure), `BadParam`, `ProofKindMismatch`,
 manifold, point-dimension representation, point/domain component-count
 mismatch, and an axis-specific `InvalidRange` reason. The interval engine's
 `IvalError` names each refusal reason, including the aggregate cap name,
-observed count, and enforced limit.
+observed count, and enforced limit. The restoration entry points return
+`RestorationError`: `Invalid(ConError)` for pre-admission input faults
+and evaluator faults, `Refused { refusal, receipt }` when ADMITTED work
+is stopped by cancellation, deadline, poll quota, or cost quota — the
+retained `RestorationWorkReceipt` names the plan identity and exactly
+how far the run got.
 
 ## Determinism class
 
@@ -205,17 +210,25 @@ identity is not misreported as randomized input provenance.
 
 ## Cancellation behavior
 
-`elastic_solve` (and therefore `diagnose_infeasibility`) polls
-`cx.checkpoint()` before solver allocation/evaluation and between scalar
-graph evaluations at fixed strides through active-set construction,
-constraint totals, restart/step/dimension loops, final evidence,
-deletion filtering, and repair sampling. It returns the carried
-`Cancelled` teaching error and does not publish a partial success. A
-single synchronous fs-opt scalar evaluation is not yet internally
-cancellation-tiled. Full evaluator tiling, cost/poll/deadline admission,
-memory leases, and retained work-consumption receipts are explicitly
-tracked by P0 successor
-`frankensim-constraint-restoration-budget-receipts-x5sev`.
+`elastic_solve`, `elastic_solve_with_plan`, and `diagnose_infeasibility`
+build a checked `RestorationWorkPlan` (bead
+`frankensim-constraint-restoration-budget-receipts-x5sev`), admit it once
+against the caller's `Cx` budget through fs-exec's `AdmittedBudget`,
+and then route every phase — canonical skip-mask builds, constraint
+total passes, finite-difference probes, descent steps and starts,
+deletion-filter subset solves, verification solves, and Monte-Carlo
+repair sampling — through that one accountant. Checkpoints fire at the
+deterministic 64-entry stride inside every long loop and at each phase
+boundary; completed tiles charge contract unit weights. Cancellation,
+deadline, poll-quota, and cost-quota stops return a typed
+`RestorationError::Refused` carrying the latched `BudgetRefusal` plus a
+retained `RestorationWorkReceipt` (plan identity, final
+`BudgetConsumption`, charged work units, primary-solve starts); NO
+partial report is ever produced. Input faults refuse as
+`RestorationError::Invalid` before any budget authority is consumed.
+A single synchronous fs-opt scalar evaluation is not yet internally
+cancellation-tiled: the stride bounds how much work can run between two
+checkpoints, but one evaluation itself is atomic.
 
 ## Unsafe boundary
 
@@ -242,6 +255,16 @@ positive-claim downgrade, deterministic round trips, and pre-cancelled
 evaluation ordering. Any reimplementation must pass the suite
 unchanged.
 
+`tests/restoration_budget.rs` — the restoration resource-contract
+battery: G0 cap/zero/overflow/skip/tamper/schema refusals and
+admission-time refusals (zero/exact cost quota, zero polls, deadline
+without clock, expired deadline), G4 mid-run cancellation via a
+deterministic cancel-on-observation clock with bounded-extra-work
+proofs and mid-run deadline expiry, G3 skip-order equivalence sharing
+one plan identity, and G5 bit-stable replay of reports AND receipts,
+plus the lease-less `NoLeaseNoClaim` boundary and the diagnosis-wide
+shared-receipt contract.
+
 ## No-claim boundaries
 
 - The interval prover computes every endpoint on fs-ivl's
@@ -266,12 +289,18 @@ unchanged.
   subgradient); the production feasibility-restoration solver is a
   later ASCENT bead. Nonconvex fixtures can defeat it — verdicts are
   cross-checked against enumeration only at conformance scale.
-- Cancellation is now polled at bounded logical strides, but the
-  current `Cx::checkpoint` path alone does not interrupt the interior of
-  one scalar graph evaluation, enforce ambient deadline/poll/cost quotas,
-  charge allocations to a lease, or retain a resource receipt. Those
-  claims remain unavailable until the named P0 resource successor is
-  green.
+- Cancellation checkpoints bound how much work runs between two
+  observations, but the interior of one scalar graph evaluation is not
+  itself tiled: a single fs-opt evaluation completes atomically once
+  started.
+- The restoration resource contract is a WORST-CASE declaration:
+  `RestorationWorkPlan` bounds deletion filtering (`2N + 2` subset
+  solves) and repair estimation (`3N` estimates) structurally, so an
+  early-converging run legitimately charges less than its plan. Charged
+  work is authoritative; planned work is only the admitted ceiling.
+  Memory is NOT yet lease-admitted anywhere in this crate: contexts
+  without an operation-memory lease record `NoLeaseNoClaim`, and no
+  report may be read as memory-bounded.
 - Chance estimation is Monte-Carlo/Hoeffding v1; e-process anytime
   validity and richer estimators join with the UQ beads. Its current
   synchronous closure API has no `Cx`, work admission, cancellation, or

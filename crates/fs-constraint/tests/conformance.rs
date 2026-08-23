@@ -16,7 +16,8 @@ use asupersync::types::Budget;
 use fs_constraint::{
     ChanceEstimator, ChanceEvalError, ChanceWorkPlan, ConError, ConstraintKind, ConstraintSpec,
     Diagnosis, DomainBox, DomainError, DomainRangeError, ElasticReport, PenaltyLaw, ProofKind,
-    RepairAction, RepairKind, Status, Treatment, diagnose_infeasibility, elastic_solve, evaluate,
+    RepairAction, RepairKind, RestorationError, RestorationMemoryAuthority,
+    RestorationWorkReceipt, Status, Treatment, diagnose_infeasibility, elastic_solve, evaluate,
     evaluate_chance_with_budget, interval_eval, parse_specs, prove_interval, serialize_specs,
 };
 use fs_exec::{CancelGate, Cx, ExecMode, StreamKey};
@@ -30,6 +31,19 @@ const FSCON_003_INPUT_SEED: u64 = 0x1001_2026_0707_0003;
 const FSCON_003_STREAM_STRIDE: u64 = 0x9E37_79B9_7F4A_7C15;
 const FSCON_004_INPUT_SEED: u64 = 0x1001_2026_0707_0004;
 const FSCON_005_INPUT_SEED: u64 = 0x1001_2026_0707_0005;
+
+/// A receipt-shaped value for FORGED payloads only. Real receipts come
+/// from real admitted runs; these tests exercise JSON refusal surfaces.
+fn any_work_receipt() -> RestorationWorkReceipt {
+    RestorationWorkReceipt {
+        plan_identity: 0,
+        schema_version: 1,
+        consumption: None,
+        work_units_charged: 0,
+        starts_completed: 0,
+        memory: RestorationMemoryAuthority::NoLeaseNoClaim,
+    }
+}
 
 fn verdict(case: &str, pass: bool, detail: &str, seed: u64) {
     let mut emitter = fs_obs::Emitter::new("fs-constraint/conformance", case);
@@ -851,16 +865,20 @@ fn elastic_domain_admission_refuses_malformed_ranges_before_solving() {
             for active_specs in [&specs[..], &[]] {
                 assert!(matches!(
                     elastic_solve(&host.problem, active_specs, &domain, &[], cx),
-                    Err(ConError::InvalidDomain(DomainError::InvalidRange {
-                        axis,
-                        reason,
-                        ..
-                    })) if axis == expected_axis && reason == expected_reason
+                    Err(RestorationError::Invalid(ConError::InvalidDomain(
+                        DomainError::InvalidRange {
+                            axis,
+                            reason,
+                            ..
+                        },
+                    ))) if axis == expected_axis && reason == expected_reason
                 ));
             }
             assert!(matches!(
                 elastic_solve(&host.problem, &specs, &domain, &[0], cx),
-                Err(ConError::InvalidDomain(DomainError::InvalidRange { .. }))
+                Err(RestorationError::Invalid(ConError::InvalidDomain(
+                    DomainError::InvalidRange { .. },
+                )))
             ));
         }
 
@@ -870,7 +888,9 @@ fn elastic_domain_admission_refuses_malformed_ranges_before_solving() {
             };
             assert_eq!(
                 elastic_solve(&host.problem, &specs, &domain, &[], cx).unwrap_err(),
-                ConError::InvalidDomain(DomainError::DimensionMismatch { expected: 2, got })
+                RestorationError::Invalid(ConError::InvalidDomain(
+                    DomainError::DimensionMismatch { expected: 2, got }
+                ))
             );
         }
 
@@ -898,7 +918,9 @@ fn elastic_domain_admission_refuses_malformed_ranges_before_solving() {
                 cx,
             )
             .unwrap_err(),
-            ConError::InvalidDomain(DomainError::HostVariableCount { got: 2 })
+            RestorationError::Invalid(ConError::InvalidDomain(DomainError::HostVariableCount {
+                got: 2,
+            }))
         );
 
         let mut sphere_builder = ProblemBuilder::new();
@@ -922,9 +944,9 @@ fn elastic_domain_admission_refuses_malformed_ranges_before_solving() {
                 cx,
             )
             .unwrap_err(),
-            ConError::InvalidDomain(DomainError::HostVariableManifold {
+            RestorationError::Invalid(ConError::InvalidDomain(DomainError::HostVariableManifold {
                 got: Manifold::Sphere { ambient: 2 },
-            })
+            }))
         );
 
         let forged = [hard("forged", NodeId(u32::MAX))];
@@ -933,7 +955,9 @@ fn elastic_domain_admission_refuses_malformed_ranges_before_solving() {
         };
         assert!(matches!(
             elastic_solve(&host.problem, &forged, &invalid, &[], cx),
-            Err(ConError::InvalidDomain(DomainError::InvalidRange { .. }))
+            Err(RestorationError::Invalid(ConError::InvalidDomain(
+                DomainError::InvalidRange { .. },
+            )))
         ));
 
         let fixed = DomainBox {
@@ -1012,7 +1036,9 @@ fn json_surfaces_escape_untrusted_text_and_nonfinite_numbers() {
             total_violation: f64::NAN,
             violations: Vec::new(),
             evals: 0,
+            work: any_work_receipt(),
         },
+        work: any_work_receipt(),
     };
     let payload = diagnosis.to_json(std::slice::from_ref(&spec));
     assert!(payload.contains("\"valid\":false"));
@@ -1048,7 +1074,9 @@ fn json_surfaces_escape_untrusted_text_and_nonfinite_numbers() {
             total_violation: 1.0,
             violations: vec![1.0],
             evals: 1,
+            work: any_work_receipt(),
         },
+        work: any_work_receipt(),
     };
     let valid_payload = valid_hostile.to_json(std::slice::from_ref(&spec));
     assert!(valid_payload.contains("\\\""));
@@ -1658,18 +1686,31 @@ fn a_pre_cancelled_elastic_solve_refuses_before_expression_evaluation() {
             Budget::INFINITE,
             ExecMode::Deterministic,
         );
-        assert!(matches!(
-            elastic_solve(
-                &host.problem,
-                &forged,
-                &DomainBox {
-                    ranges: vec![(0.0, 1.0), (0.0, 1.0)],
-                },
-                &[],
-                &cx,
-            ),
-            Err(ConError::Eval(fs_opt::OptError::Cancelled))
-        ));
+        let outcome = elastic_solve(
+            &host.problem,
+            &forged,
+            &DomainBox {
+                ranges: vec![(0.0, 1.0), (0.0, 1.0)],
+            },
+            &[],
+            &cx,
+        )
+        .expect_err("a pre-cancelled run must refuse");
+        // The budget authority latches the cancellation as a typed
+        // refusal with a receipt proving NO work was admitted or
+        // charged — the forged `u32::MAX` node was never evaluated.
+        let RestorationError::Refused { refusal, receipt } = outcome else {
+            panic!("expected a typed Refused outcome, got {outcome:?}");
+        };
+        assert!(matches!(refusal, fs_exec::BudgetRefusal::Cancelled { .. }));
+        assert_eq!(receipt.work_units_charged, 0);
+        assert_eq!(receipt.starts_completed, 0);
+        assert!(
+            receipt
+                .consumption
+                .is_some_and(|consumption| consumption.cost_charged == 0),
+            "no partial work may be charged past a pre-cancel"
+        );
     });
 }
 
