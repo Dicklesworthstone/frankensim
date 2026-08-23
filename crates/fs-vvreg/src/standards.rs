@@ -1391,8 +1391,8 @@ fn validate_supersession_graph(drafts: &[StandardSourceDraft]) -> Result<(), Man
             cursor = drafts
                 .binary_search_by(|row| row.key.cmp(by))
                 .map_err(|_| ManifestError::UnknownSupersessionTarget {
-                    key: drafts[start].key.clone(),
-                    target: by.clone(),
+                    key: Box::new(drafts[start].key.clone()),
+                    target: Box::new(by.clone()),
                 })?;
         }
         if state[cursor] == 1 && matches!(&drafts[cursor].status, StandardStatus::Superseded { .. })
@@ -1411,8 +1411,8 @@ fn validate_supersession_graph(drafts: &[StandardSourceDraft]) -> Result<(), Man
             cursor = drafts
                 .binary_search_by(|row| row.key.cmp(by))
                 .map_err(|_| ManifestError::UnknownSupersessionTarget {
-                    key: drafts[start].key.clone(),
-                    target: by.clone(),
+                    key: Box::new(drafts[start].key.clone()),
+                    target: Box::new(by.clone()),
                 })?;
         }
     }
