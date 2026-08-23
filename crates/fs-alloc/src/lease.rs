@@ -478,6 +478,7 @@ impl PublishedTransferBinding {
 /// evidence even though admission enforces their checked total against one
 /// already-live staging charge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[allow(clippy::struct_field_names)] // payload/layout/overhead stay separate byte accounts in evidence, per the doc comment above
 pub struct PublishedTransferEnvelope {
     payload_bytes: u64,
     layout_bytes: u64,
@@ -2649,7 +2650,7 @@ impl OperationMemoryLease {
     ///
     /// Seal, reserve, and delegate are one mutex-serialized transition family:
     /// a race has exactly one winner, and the first seal sequence is immutable.
-    #[allow(clippy::result_large_err)]
+    #[allow(clippy::too_many_lines)] // one mutex-serialized transition family with an immutable first-seal sequence; splitting would scatter the race invariants xdu4's proof lane reasons about
     pub fn seal(&self) -> Result<SealedLeaseReceipt, LeaseSealRefusal> {
         let mut state = self.lock_state();
         if let Some(receipt) = state.terminal_receipt.as_ref() {
@@ -4900,6 +4901,9 @@ impl<T> fmt::Debug for TypedPrepareRejection<'_, T> {
     }
 }
 
+/// Prepared-publication refusal: the structured ledger refusal plus the
+/// prepared publication returned unchanged (record still prepared, value
+/// intact) for a corrected retry.
 pub struct TypedPrepareRejection<'owner, T> {
     allocation: LeasedAllocation<'owner, T>,
     refusal: PublishedTransferRefusal,
@@ -4928,6 +4932,8 @@ impl<T> fmt::Debug for TypedCommitRejection<'_, T> {
     }
 }
 
+/// Commit refusal: the structured ledger refusal plus the prepared
+/// publication returned unchanged for a corrected commit attempt.
 pub struct TypedCommitRejection<'owner, T> {
     prepared: TypedPreparedPublication<'owner, T>,
     refusal: PublishedTransferRefusal,
@@ -4941,7 +4947,6 @@ impl<'owner, T> TypedCommitRejection<'owner, T> {
     }
 
     /// Recover the unchanged prepared publication.
-    #[must_use]
     pub fn into_prepared(self) -> TypedPreparedPublication<'owner, T> {
         self.prepared
     }
@@ -4985,6 +4990,8 @@ impl<T> fmt::Debug for TypedRollback<'_, T> {
     }
 }
 
+/// Successful non-mutating rollback: the restaged allocation plus the
+/// verified rollback receipt.
 pub struct TypedRollback<'owner, T> {
     allocation: LeasedAllocation<'owner, T>,
     receipt: PublishedTransferRollbackReceipt,
@@ -5014,6 +5021,8 @@ impl<T> fmt::Debug for TypedCloseRejection<T> {
     }
 }
 
+/// Close refusal carrying the published guard whose value was already
+/// destroyed; the eventual drop retries the close implicitly.
 pub struct TypedCloseRejection<T> {
     published: PublishedAllocation<T>,
     refusal: PublishedTransferRefusal,
@@ -5028,7 +5037,6 @@ impl<T> TypedCloseRejection<T> {
 
     /// Recover the guard; its value is destroyed and its eventual drop
     /// retries the close implicitly.
-    #[must_use]
     pub fn into_published(self) -> PublishedAllocation<T> {
         self.published
     }
