@@ -20,9 +20,11 @@
 # Counts are recomputed from emitted membership arrays and never replace
 # them. Role classification is rule-based PROPOSAL with the matched rule
 # recorded per row; it confers no authority. Mutation modes (--plan,
-# --apply, --negative, --replay, --owner-report) intentionally do not exist
-# in this revision and refuse by absence; they land only after a reviewed
-# deferred-exempt manifest and an owner-evidence workflow exist.
+# --apply, --negative, --replay) intentionally do not exist yet;
+# --owner-report exists as READ-ONLY evidence assembly: it emits typed
+# staleness-evidence classes (ROSTER_ACTIVE, RECENT_PROOF, RECENTLY_UPDATED,
+# IDLE_NO_EVIDENCE) per stale in_progress claim. Evidence classes are NOT
+# dispositions; ABANDONED_CONFIRMED still requires owner response.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -45,6 +47,7 @@ command -v python3 >/dev/null 2>&1 || die "$EXIT_USAGE" "python3 is required"
 command -v br >/dev/null 2>&1 || die "$EXIT_USAGE" "br is required for ready/stale inputs"
 
 MODE="${1:-}"
+STALE_DAYS=7
 case "$MODE" in
   --list)
     shift
@@ -158,18 +161,71 @@ check("order invariance", sorted(raw), sorted(planhyg.raw_missing(shuffled)))
 check("zero missing boundary", set(), planhyg.raw_missing({"only": issue("only", est=10)}))
 check("one missing boundary", {"solo"}, planhyg.raw_missing({"solo": issue("solo")}))
 
+from datetime import datetime, timezone
+
+NOW = datetime(2026, 8, 23, 12, 0, tzinfo=timezone.utc)
+
+def claim(updated="2026-08-20T00:00:00Z", comments=None, assignee=None):
+    row = {"updated_at": updated, "comments": comments or []}
+    if assignee is not None:
+        row["assignee"] = assignee
+    return row
+
+klass, _ = planhyg.classify_claim(
+    claim(assignee="NobleLion"), NOW, 7,
+    {"NobleLion": "2026-08-23T11:30:00Z"})
+check("roster-active assignee classifies ROSTER_ACTIVE", "ROSTER_ACTIVE", klass)
+
+
+klass, _ = planhyg.classify_claim(
+    claim(comments=[{"author": "x", "created_at": "2026-08-20T00:00:00Z",
+                     "text": "battery green, pushed"}]), NOW, 7, {})
+check("recent proof comment classifies RECENT_PROOF", "RECENT_PROOF", klass)
+
+klass, _ = planhyg.classify_claim(claim(), NOW, 7, {})
+check("freshly touched no-comment classifies RECENTLY_UPDATED",
+      "RECENTLY_UPDATED", klass)
+
+klass, detail = planhyg.classify_claim(
+    claim(updated="2026-07-14T00:00:00Z",
+          comments=[{"author": "x", "created_at": "2026-07-15T00:00:00Z",
+                     "text": "looking at it"}]), NOW, 7, {})
+check("old idle claim classifies IDLE_NO_EVIDENCE", "IDLE_NO_EVIDENCE", klass)
+
+klass, _ = planhyg.classify_claim(
+    claim(comments=[{"author": "x", "created_at": "2026-08-20T00:00:00Z",
+                     "text": "battery green, pushed"}],
+          assignee="NobleLion"), NOW, 7,
+    {"NobleLion": "2026-08-23T11:30:00Z"})
+check("roster activity outranks proof comment", "ROSTER_ACTIVE", klass)
+
 print(f"self-test: {PASS} passed, {FAIL} failed")
 sys.exit(0 if FAIL == 0 else 1)
 SELFTEST
     ;;
-  --plan|--apply|--negative|--replay|--owner-report)
+  --owner-report)
+    shift
+    STALE_DAYS=7
+    if [ "${1:-}" = "--days" ]; then
+      [ $# -ge 2 ] || die "$EXIT_USAGE" "--days needs a number"
+      STALE_DAYS_OVERRIDE="$2"; shift 2
+    fi
+    OUT=""
+    if [ "${1:-}" = "--out" ]; then
+      [ $# -ge 2 ] || die "$EXIT_USAGE" "--out needs a path"
+      OUT="$2"; shift 2
+    fi
+    [ $# -le 0 ] || die "$EXIT_USAGE" "usage: --owner-report [--days N] [--out PATH]"
+    [ -z "${STALE_DAYS_OVERRIDE:-}" ] || STALE_DAYS="$STALE_DAYS_OVERRIDE"
+    MANIFEST="" ;;
+  --plan|--apply|--negative|--replay)
     die "$EXIT_UNIMPLEMENTED" \
       "$MODE lands only after a reviewed deferred-exempt manifest and owner-evidence workflow exist (bead frankensim-ug0yb slice gate); this revision is read-only" ;;
   *)
-    die "$EXIT_USAGE" "usage: beads_plan_hygiene.sh --list [--out PATH] [MANIFEST] | --check MANIFEST | --self-test" ;;
+    die "$EXIT_USAGE" "usage: beads_plan_hygiene.sh --list [--out PATH] [MANIFEST] | --check MANIFEST | --owner-report [--days N] [--out PATH] | --self-test" ;;
 esac
 
-exec python3 - "$MODE" "$BEADS_FILE" "$DEFAULT_MANIFEST" "$OUT" "$MANIFEST" <<'PYEOF'
+exec python3 - "$MODE" "$BEADS_FILE" "$DEFAULT_MANIFEST" "$OUT" "$MANIFEST" "$STALE_DAYS" <<'PYEOF'
 # ---CORE-BEGIN---
 import hashlib
 import json
@@ -310,6 +366,57 @@ def load_manifest(path):
     return data, rows
 
 
+PROOF_PATTERN = re.compile(
+    r"test|receipt|proof|pushed|landed|green", re.I)
+
+
+def classify_claim(rec, now, stale_days, roster):
+    """Pure staleness-evidence classifier for one in_progress claim.
+    Returns (evidence_class, detail). Classes in priority order:
+    ROSTER_ACTIVE > RECENT_PROOF > RECENTLY_UPDATED > IDLE_NO_EVIDENCE.
+    These are EVIDENCE classes, never dispositions."""
+    def age_days(iso_text):
+        if not isinstance(iso_text, str) or not iso_text:
+            return None
+        try:
+            then = datetime.fromisoformat(iso_text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if then.tzinfo is None:
+            then = then.replace(tzinfo=timezone.utc)
+        return (now - then).total_seconds() / 86400.0
+
+    assignee = rec.get("assignee")
+    roster_age = age_days(roster.get(assignee)) if assignee else None
+    if roster_age is not None and roster_age <= 2 / 24:
+        return "ROSTER_ACTIVE", {"basis": "assignee active on mail roster"}
+    comments = rec.get("comments") or []
+    last = max(
+        comments,
+        key=lambda c: c.get("created_at", "") if isinstance(c, dict) else "",
+        default=None,
+    )
+    last_age = age_days(last.get("created_at")) if isinstance(last, dict) else None
+    last_text = (last.get("text") or "") if isinstance(last, dict) else ""
+    proof = bool(last_text) and bool(PROOF_PATTERN.search(last_text))
+    if last_age is not None and last_age <= stale_days and proof:
+        return "RECENT_PROOF", {
+            "basis": f"last comment {last_age:.1f}d ago cites work",
+            "comment_author": (last or {}).get("author"),
+            "comment_excerpt": last_text[:160],
+        }
+    updated_age = age_days(rec.get("updated_at"))
+    if updated_age is not None and updated_age <= stale_days:
+        return "RECENTLY_UPDATED", {"basis": f"updated {updated_age:.1f}d ago"}
+    return "IDLE_NO_EVIDENCE", {
+        "basis": (
+            f"updated {updated_age:.1f}d ago, no proof comment"
+            if updated_age is not None
+            else "no parsable timestamps"
+        )
+    }
+
+
 def run_br(args):
     result = subprocess.run(["br", *args], capture_output=True, text=True, timeout=600)
     if result.returncode != 0:
@@ -325,6 +432,7 @@ def run_br(args):
 def main(argv):
     mode = (argv[0] or "").lstrip("-")
     beads_path, default_manifest, out_arg, manifest_arg = argv[1:5]
+    stale_days = int(argv[5]) if len(argv) > 5 and argv[5] else 7
 
     issues, edges = load_beads(beads_path)
     db_sha = hashlib.sha256(open(beads_path, "rb").read()).hexdigest()
@@ -465,6 +573,87 @@ def main(argv):
             f"manifest OK: {len(manifest_rows)} reviewed exempt rows bound to live DB "
             f"identity {db_sha[:16]}"
         )
+        return 0
+
+    if mode == "owner-report":
+        stale_rows = run_br([
+            "stale", "--days", str(stale_days),
+            "--status", "in_progress", "--json"])
+        roster = {}
+        roster_path = os.environ.get("FSIM_PLANHYG_MAIL_ROSTER", "")
+        if roster_path and os.path.exists(roster_path):
+            try:
+                with open(roster_path) as handle:
+                    roster_list = json.load(handle)
+                roster = {
+                    entry.get("name"): entry.get("last_active_ts")
+                    for entry in roster_list
+                    if isinstance(entry, dict)
+                }
+            except (OSError, json.JSONDecodeError):
+                roster = {}
+        now = datetime.now(timezone.utc)
+        rows = [{
+            "event": "owner-report-header",
+            "schema": SCHEMA,
+            "bead": "frankensim-ug0yb",
+            "formula_version": "ug0yb-owner-report-slice2",
+            "db_sha256": db_sha,
+            "frozen_basis_utc": now.isoformat(),
+            "stale_cutoff_days": stale_days,
+            "roster_bound": bool(roster),
+            "roster_liveness_note": (
+                "mail roster last_active_ts values are registration-time "
+                "snapshots on this server build; ROSTER_ACTIVE is therefore "
+                "conservative and may under-report live assignees"),
+        }]
+        counts = {}
+        for claim in sorted(stale_rows, key=lambda r: r.get("id", "")):
+            iid = claim.get("id")
+            rec = issues.get(iid, {})
+            klass, detail = classify_claim(rec, now, stale_days, roster)
+            counts[klass] = counts.get(klass, 0) + 1
+            rows.append({
+                "event": "owner_report_row",
+                "id": iid,
+                "title": (rec.get("title") or claim.get("title") or "")[:120],
+                "priority": rec.get("priority"),
+                "assignee": rec.get("assignee"),
+                "evidence_class": klass,
+                **detail,
+            })
+        derived_total = sum(counts.values())
+        if derived_total != len(stale_rows):
+            print(
+                f"count/member drift: classified {derived_total} vs "
+                f"stale rows {len(stale_rows)}",
+                file=sys.stderr,
+            )
+            sys.exit(33)
+        rows.append({"event": "owner-report-summary",
+                     "stale_claims": len(stale_rows), **counts})
+        rows.append({
+            "event": "no-claim",
+            "text": "evidence classes are not dispositions; "
+                    "ABANDONED_CONFIRMED requires owner response per the "
+                    "ug0yb contract; this report mutates nothing",
+        })
+        rendered = "".join(json.dumps(r, sort_keys=True) + "\n" for r in rows)
+        if out_arg:
+            target = os.path.realpath(out_arg)
+            if target == os.path.realpath(beads_path) or target.startswith(
+                    os.path.realpath(beads_path) + os.sep):
+                print(f"path-overlap refusal: {out_arg} overlaps tracker export",
+                      file=sys.stderr)
+                sys.exit(30)
+            parent_dir = os.path.dirname(out_arg)
+            if parent_dir:
+                os.makedirs(parent_dir, exist_ok=True)
+            with open(out_arg, "w") as handle:
+                handle.write(rendered)
+            print(f"owner report written: {out_arg}")
+        else:
+            sys.stdout.write(rendered)
         return 0
 
     print(f"unknown mode {mode}", file=sys.stderr)
