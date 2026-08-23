@@ -2451,11 +2451,14 @@ mod tests {
                     max_radius,
                     nearest_radius,
                 } => (
-                    crossings as f64,
+                    *crossings as f64,
                     nearest_radius.to_bits(),
                     max_radius.to_bits(),
                 ),
-                SurfaceLocalization::ValidEmpty => (0.0, f64::INFINITY.to_bits(), 0.0f64.to_bits()),
+                // `fon` folds every non-finite legacy view to NaN on the
+                // JSON-safe wire, so valid-empty's `+inf` nearest radius is
+                // serialized as NaN; slot `[26] = 2` carries the validity.
+                SurfaceLocalization::ValidEmpty => (0.0, f64::NAN.to_bits(), 0.0f64.to_bits()),
                 _ => (0.0, f64::NAN.to_bits(), f64::NAN.to_bits()),
             };
             assert_eq!(v[15], crossings_view, "case {case_index} derived count");
@@ -2469,7 +2472,9 @@ mod tests {
     }
 
     /// A live all-positive campaign serializes ValidEmpty without any
-    /// refusal detail, distinct from every error path.
+    /// refusal detail, distinct from every error path. On the wire its
+    /// `+inf` nearest view folds to NaN; only the typed status slot
+    /// distinguishes it from a refusal.
     #[test]
     fn neuroshape_live_valid_empty_is_not_a_refusal() {
         let net = neuro_net(12.0);
@@ -2571,8 +2576,8 @@ mod tests {
         assert_eq!(v[27], LOCALIZATION_STAGE_NONE, "valid empty has no stage");
         assert_eq!(v[15], 0.0, "derived crossing count for a valid empty grid");
         assert!(
-            v[6].is_infinite() && v[6] > 0.0,
-            "valid-empty nearest-surface sentinel is +inf"
+            v[6].is_nan(),
+            "valid-empty nearest view is the fon-folded +inf (NaN)"
         );
         assert_eq!(v[7], 0.0, "valid-empty max-radius sentinel is +0");
         assert_eq!(

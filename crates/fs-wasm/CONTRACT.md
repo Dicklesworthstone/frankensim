@@ -101,12 +101,16 @@ crates. Layer: **L6 HELM / interface surface**. The crate compiles as an
    `3` invalid input, `4` unrepresentable, `5` resource refused,
    `6` cancelled, `7` allocation refused, `8` internal fault; `0` stays the
    reserved no-claim code), `[27]` is the producing stage (`0` success/no
-   single stage, `1` grid construction, `2` isocontour extraction), and
-   `[28]` carries `NEUROSHAPE_LOCALIZATION_SCHEMA_VERSION = 1`, which freezes
-   those code tables and gates interpretation of `[26]`/`[27]`; `[29]` remains
-   a reserved zero. Legacy slots `[6]`, `[7]`, and `[15]` are derived,
-   non-authoritative views of the typed outcome: NaN sentinels alone never
-   carry status, and valid-empty keeps its `0` / `0` / `+inf` view. A consumer
+   single stage, `1` grid construction, `2` isocontour extraction). Legacy
+   slots `[6]`, `[7]`, and `[15]` are derived, non-authoritative views of the
+   typed outcome: every non-finite legacy slot is folded to `NaN` by the
+   JSON-safe `fon` encoder, so a valid-empty payload carries `[6] = NaN`
+   (the folded `+inf`) and `[7] = +0`, while the native report fields keep
+   `+inf`; the typed `[26]` status, never a NaN sentinel, distinguishes
+   valid-empty from every refusal. `[28]` carries
+   `NEUROSHAPE_LOCALIZATION_SCHEMA_VERSION = 1`, which freezes those code
+   tables and gates interpretation of `[26]`/`[27]`; `[29]` remains a
+   reserved zero. A consumer
    that gated on `[22] == 2` refuses this payload rather than silently
    ignoring the typed localization record; version-aware consumers must refuse
    an unrecognized `[22]` before interpreting any slot, an unrecognized `[25]`
