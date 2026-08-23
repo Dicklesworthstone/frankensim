@@ -179,7 +179,12 @@ for raw in sys.stdin:
     if m.get("reason") != "compiler-message":
         continue
     msg = m.get("message", {})
-    if msg.get("level") != "warning":
+    # Under -D warnings lint failures surface as level=error carrying a
+    # lint code; only bare rustc codes (E0xxx) are true compile failures.
+    if msg.get("level") not in ("warning", "error"):
+        continue
+    code_early = (msg.get("code") or {}).get("code") or ""
+    if code_early.startswith("E") and code_early[1:].isdigit():
         continue
     spans = [s for s in msg.get("spans", []) if s.get("is_primary")]
     if not spans:
@@ -403,8 +408,15 @@ do_run() {
             exit "${EXIT_OVERFLOW}" ;;
         0) : ;;
         101 | 102)
-            emit run-terminal "exit_class=${EXIT_COMPILE}" "cargo_status=${status}"
-            exit "${EXIT_COMPILE}" ;;
+            # Under -D warnings, lint failures also exit 101. Only a bare
+            # rustc E-code diagnostic is a true compile failure (class 12);
+            # pure lint debt falls through to the inventory classifier.
+            if grep -qE '"code":"E[0-9]{4}"' "${OUTPUT_DIR}/clippy_raw.jsonl" 2>/dev/null; then
+                emit run-terminal "exit_class=${EXIT_COMPILE}" "cargo_status=${status}"
+                exit "${EXIT_COMPILE}"
+            fi
+            emit run-note "cargo_status=${status}" "note=lint-debt-only failure"
+            ;;
         *)
             emit run-terminal "exit_class=${EXIT_INFRA}" "cargo_status=${status}"
             exit "${EXIT_INFRA}" ;;
