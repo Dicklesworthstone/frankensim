@@ -761,9 +761,11 @@ mod tests {
         let mut trailing = bytes.clone();
         trailing.push(0);
         assert_eq!(CanonicalQrPolicy::decode(&trailing), Err(PolicyError::MalformedEncoding));
-        // Bit-flipped tolerance revalidates through the checked constructor.
+        // Bit-flipped tolerance revalidates through the checked constructor:
+        // byte 15 carries the LE f64 sign/exponent high bits of the
+        // tolerance field, so this flip makes it negative.
         let mut flipped = bytes.clone();
-        flipped[8] ^= 0x80; // sign bit of the tolerance field
+        flipped[15] ^= 0x80;
         assert_eq!(
             CanonicalQrPolicy::decode(&flipped),
             Err(PolicyError::InvalidScaleRelativeFactor)
