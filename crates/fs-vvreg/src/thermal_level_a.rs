@@ -149,6 +149,9 @@ const fn context(name: &'static str, dims: Dims, lo: f64, hi: f64) -> ThermalLev
     ThermalLevelAContext { name, dims, lo, hi }
 }
 
+// Positional fixture constructor for 13 uniform Level-A case rows; the
+// field order mirrors the ThermalLevelACase literal it forwards to.
+#[allow(clippy::too_many_arguments)]
 const fn analytic(
     id: &'static str,
     title: &'static str,

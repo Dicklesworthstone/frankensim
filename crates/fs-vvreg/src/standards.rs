@@ -634,6 +634,25 @@ impl fmt::Display for ManifestError {
                 key.standard_id().as_str(),
                 key.edition()
             ),
+            Self::SelfSupersession { .. }
+            | Self::UnknownSupersessionTarget { .. }
+            | Self::SupersessionCycle { .. }
+            | Self::ZeroHash { .. }
+            | Self::InvalidMagic
+            | Self::UnknownSchema { .. }
+            | Self::UnexpectedEof { .. }
+            | Self::UnknownTag { .. }
+            | Self::InvalidUtf8 { .. }
+            | Self::TrailingBytes { .. }
+            | Self::NonCanonicalEncoding => self.fmt_wire_and_supersession(formatter),
+        }
+    }
+}
+
+impl ManifestError {
+    /// Render the supersession and wire-decoding refusal family.
+    fn fmt_wire_and_supersession(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
             Self::SelfSupersession { key } => write!(
                 formatter,
                 "standard edition {}:{} supersedes itself",
@@ -684,6 +703,7 @@ impl fmt::Display for ManifestError {
             }
             Self::NonCanonicalEncoding => formatter
                 .write_str("standard manifest bytes are semantically valid but non-canonical"),
+            _ => Ok(()),
         }
     }
 }

@@ -2010,6 +2010,11 @@ fn validate_dataset(dataset: &CorpusDataset) -> Result<(), CorpusError> {
         }
     }
 
+    Ok(())
+}
+
+/// Geometry class and acquisition-environment availability.
+fn validate_dataset_scene(dataset: &CorpusDataset) -> Result<(), CorpusError> {
     match &dataset.geometry {
         Availability::Available(geometry) => validate_geometry(geometry)?,
         Availability::Unavailable { reason } => validate_text(reason, DatasetField::Geometry)?,
@@ -2034,6 +2039,12 @@ fn validate_dataset(dataset: &CorpusDataset) -> Result<(), CorpusError> {
         }
     }
 
+    Ok(())
+}
+
+/// Ordinals, hash chaining, and final-artifact binding for a complete
+/// lineage; retained-input/output binding for an unreplayable one.
+fn validate_preprocessing_lineage(dataset: &CorpusDataset) -> Result<(), CorpusError> {
     match &dataset.preprocessing {
         PreprocessingLineage::Complete(steps) => {
             if steps.is_empty() {
@@ -2095,6 +2106,13 @@ fn validate_dataset(dataset: &CorpusDataset) -> Result<(), CorpusError> {
         }
     }
 
+    Ok(())
+}
+
+/// Context coordinates, licensing, provenance, and retention policy.
+fn validate_dataset_context_license_and_retention(
+    dataset: &CorpusDataset,
+) -> Result<(), CorpusError> {
     if dataset.context_of_use.is_empty() {
         return Err(invalid(
             DatasetField::ContextOfUse,
@@ -2145,6 +2163,11 @@ fn validate_dataset(dataset: &CorpusDataset) -> Result<(), CorpusError> {
         ));
     }
 
+    Ok(())
+}
+
+/// Metric slug uniqueness and per-envelope regime/coverage admission.
+fn validate_dataset_envelopes(dataset: &CorpusDataset) -> Result<(), CorpusError> {
     if dataset.acceptance_envelopes.is_empty() {
         return Err(invalid(
             DatasetField::AcceptanceEnvelopes,
@@ -2548,69 +2571,79 @@ impl CorpusDataset {
         out.extend_from_slice(&CORPUS_SCHEMA_VERSION.to_le_bytes());
         push_text(&mut out, &self.id);
         push_text(&mut out, &self.title);
+        self.encode_scene_sections(&mut out);
+        self.encode_lineage_governance_sections(&mut out);
+        out
+    }
+
+    /// Payload, sensor, geometry, and environment sections.
+    fn encode_scene_sections(&self, out: &mut Vec<u8>) {
         match &self.raw_payload {
             PayloadRetention::OriginalRaw(artifact) => {
                 out.push(1);
-                push_artifact(&mut out, artifact);
+                push_artifact(out, artifact);
             }
             PayloadRetention::DerivedOnly { retained, reason } => {
                 out.push(2);
-                push_artifact(&mut out, retained);
-                push_text(&mut out, reason);
+                push_artifact(out, retained);
+                push_text(out, reason);
             }
         }
 
-        push_u32(&mut out, self.sensors.len());
+        push_u32(out, self.sensors.len());
         for sensor in &self.sensors {
-            push_sensor_record(&mut out, sensor);
+            push_sensor_record(out, sensor);
         }
 
         match &self.geometry {
             Availability::Available(geometry) => {
                 out.push(1);
-                push_artifact(&mut out, &geometry.nominal);
+                push_artifact(out, &geometry.nominal);
                 match &geometry.as_built {
                     Some(artifact) => {
                         out.push(1);
-                        push_artifact(&mut out, artifact);
+                        push_artifact(out, artifact);
                     }
                     None => out.push(0),
                 }
-                push_text(&mut out, &geometry.frame);
+                push_text(out, &geometry.frame);
             }
             Availability::Unavailable { reason } => {
                 out.push(2);
-                push_text(&mut out, reason);
+                push_text(out, reason);
             }
         }
 
         match &self.environment {
             Availability::Available(conditions) => {
                 out.push(1);
-                push_u32(&mut out, conditions.len());
+                push_u32(out, conditions.len());
                 for condition in conditions {
-                    push_text(&mut out, &condition.name);
-                    push_qty(&mut out, condition.value);
-                    push_qty(&mut out, condition.uncertainty);
+                    push_text(out, &condition.name);
+                    push_qty(out, condition.value);
+                    push_qty(out, condition.uncertainty);
                 }
             }
             Availability::Unavailable { reason } => {
                 out.push(2);
-                push_text(&mut out, reason);
+                push_text(out, reason);
             }
         }
+    }
 
+    /// Preprocessing, license, partition, retention, and acceptance sections.
+    fn encode_lineage_governance_sections(&self, out: &mut Vec<u8>) {
         out.push(partition_tag(self.partition));
         match &self.preprocessing {
             PreprocessingLineage::Complete(steps) => {
                 out.push(1);
-                push_u32(&mut out, steps.len());
+                push_u32(out, steps.len());
                 for step in steps {
                     out.extend_from_slice(&step.ordinal.to_le_bytes());
-                    push_text(&mut out, &step.operation);
-                    push_text(&mut out, &step.version);
-                    push_hash(&mut out, step.input);
-                    push_hash(&mut out, step.output);
+                    push_text(out, &step.operation);
+                    push_text(out, &step.version);
+                    push_hash(out, step.input);
+                    push_hash(out, step.output);
                 }
             }
             PreprocessingLineage::Unreplayable {
@@ -2619,30 +2652,30 @@ impl CorpusDataset {
                 reason,
             } => {
                 out.push(2);
-                push_hash(&mut out, *retained_input);
-                push_hash(&mut out, *retained_output);
-                push_text(&mut out, reason);
+                push_hash(out, *retained_input);
+                push_hash(out, *retained_output);
+                push_text(out, reason);
             }
         }
-        push_hash(&mut out, self.final_artifact);
+        push_hash(out, self.final_artifact);
 
-        push_ranges(&mut out, &self.context_of_use);
+        push_ranges(out, &self.context_of_use);
         match &self.license {
             Availability::Available(license) => {
                 out.push(1);
-                push_text(&mut out, &license.identifier);
-                push_text(&mut out, &license.terms);
+                push_text(out, &license.identifier);
+                push_text(out, &license.terms);
                 out.push(redistribution_tag(license.redistribution));
             }
             Availability::Unavailable { reason } => {
                 out.push(2);
-                push_text(&mut out, reason);
+                push_text(out, reason);
             }
         }
-        push_text(&mut out, &self.provenance.measured_by);
-        push_text(&mut out, &self.provenance.organization);
-        push_availability_text(&mut out, &self.provenance.measured_on);
-        push_text(&mut out, &self.provenance.source_record);
+        push_text(out, &self.provenance.measured_by);
+        push_text(out, &self.provenance.organization);
+        push_availability_text(out, &self.provenance.measured_on);
+        push_text(out, &self.provenance.source_record);
         match self.retention.class {
             RetentionClass::Permanent => out.push(1),
             RetentionClass::Years(years) => {
@@ -2652,32 +2685,31 @@ impl CorpusDataset {
         }
         out.push(u8::from(self.retention.preserve_raw));
         out.push(u8::from(self.retention.preserve_calibration));
-        push_text(&mut out, &self.retention.policy_id);
+        push_text(out, &self.retention.policy_id);
 
-        push_u32(&mut out, self.acceptance_envelopes.len());
+        push_u32(out, self.acceptance_envelopes.len());
         for acceptance in &self.acceptance_envelopes {
-            push_text(&mut out, &acceptance.metric);
-            push_dims(&mut out, acceptance.dims);
+            push_text(out, &acceptance.metric);
+            push_dims(out, acceptance.dims);
             match &acceptance.envelope {
                 CorpusEnvelope::Tolerance { atol, rtol } => {
                     out.push(1);
-                    push_f64(&mut out, *atol);
-                    push_f64(&mut out, *rtol);
+                    push_f64(out, *atol);
+                    push_f64(out, *rtol);
                 }
                 CorpusEnvelope::Interval { lo, hi } => {
                     out.push(2);
-                    push_f64(&mut out, *lo);
-                    push_f64(&mut out, *hi);
+                    push_f64(out, *lo);
+                    push_f64(out, *hi);
                 }
                 CorpusEnvelope::Unpinned { basis } => {
                     out.push(3);
-                    push_text(&mut out, basis);
+                    push_text(out, basis);
                 }
             }
-            push_ranges(&mut out, &acceptance.regime);
+            push_ranges(out, &acceptance.regime);
         }
         out.push(evidence_tag(self.evidence_level));
-        out
     }
 
     /// Decode, validate, canonicalize, and byte-compare one dataset.

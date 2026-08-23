@@ -307,6 +307,18 @@ impl fmt::Display for PartitionRefusal {
                 "dataset `{dataset_id}` is already partitioned as `{}`",
                 partition.name()
             ),
+            Self::InvalidJustification
+            | Self::InvalidBlindIdentity { .. }
+            | Self::GenerationOverflow { .. }
+            | Self::TaintIntersection { .. } => self.fmt_blind_and_taint_tail(formatter),
+        }
+    }
+}
+
+impl PartitionRefusal {
+    /// Render the justification, blind-release, and taint refusal family.
+    fn fmt_blind_and_taint_tail(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
             Self::InvalidJustification => write!(
                 formatter,
                 "repartition/release justification must contain 1..={MAX_PARTITION_JUSTIFICATION_BYTES} UTF-8 bytes"
@@ -335,6 +347,7 @@ impl fmt::Display for PartitionRefusal {
                 dataset.to_hex(),
                 model_path.len()
             ),
+            _ => Ok(()),
         }
     }
 }
@@ -1877,6 +1890,10 @@ fn push_optional_hash(bytes: &mut Vec<u8>, value: Option<ContentHash>) {
     }
 }
 
+// The eight ordered fields ARE the canonical preimage; bundling them into
+// a struct would hide the domain-separation order this hash commits to.
+// Same ruling as repartition_identity below.
+#[allow(clippy::too_many_arguments)]
 fn access_identity(
     dataset_id: &str,
     dataset: ContentHash,
