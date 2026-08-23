@@ -47,6 +47,7 @@ pub mod piano_vertical;
 pub mod pickup;
 pub mod reed_bore;
 pub mod render;
+pub mod selector;
 pub mod speaker;
 pub mod stribeck_friction;
 pub mod thin_plate;

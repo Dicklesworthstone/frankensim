@@ -30,7 +30,10 @@
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::driving_point::characteristic_line;
 use crate::modal_acoustic_time::{ModalAcousticTimeError, ModalAcousticTimeModel};
-use crate::reed_bore::{blowing_envelope, reed_structural, solve_reed_wave};
+use crate::reed_bore::{
+    blowing_envelope, reed_structural, solve_reed_wave, solve_reed_wave_fast, FastSolveStats,
+    ReedSolverMode,
+};
 use crate::thin_plate::PlateBank;
 use fs_dcontact::Obstacle;
 use fs_duct::{Duct, Termination};
@@ -58,6 +61,12 @@ pub struct ReedBoreVoice {
     p_plus_prev: f64,
     f_jet_prev: f64,
     sample_index: u64,
+    /// Aperture-junction solver mode. `Strict` is the certification
+    /// default; `FastNewton` is an explicit opt-in declared fast mode
+    /// (bead frankensim-2s4i5).
+    solver_mode: ReedSolverMode,
+    /// Fast-mode fallback counters; idle while in Strict mode.
+    fast_stats: FastSolveStats,
 }
 
 impl ReedBoreVoice {
@@ -146,6 +155,8 @@ impl ReedBoreVoice {
             p_plus_prev,
             f_jet_prev: 0.0,
             sample_index: 0,
+            solver_mode: ReedSolverMode::Strict,
+            fast_stats: FastSolveStats::default(),
         })
     }
 
@@ -169,6 +180,21 @@ impl ReedBoreVoice {
     /// reed's own dynamics.
     pub const fn set_blowing_pressure(&mut self, pressure_pa: f64) {
         self.reed.blowing_pressure_pa = pressure_pa;
+    }
+
+    /// Opt in to the declared fast-mode aperture solver
+    /// ([`ReedSolverMode::FastNewton`], bead frankensim-2s4i5). The
+    /// strict bisection stays the certification default and the
+    /// constructor's value; this is an explicit, per-voice upgrade.
+    pub const fn set_solver_mode(&mut self, mode: ReedSolverMode) {
+        self.solver_mode = mode;
+    }
+
+    /// Fast-mode fallback counters. Zero `newton + fallback` means no
+    /// solver-work sample was seen (strict mode or closed-branch only).
+    #[must_use]
+    pub const fn fast_solver_stats(&self) -> FastSolveStats {
+        self.fast_stats
     }
 
     /// Advance exactly `out.len()` samples, writing observer pascals.
@@ -198,21 +224,36 @@ impl ReedBoreVoice {
                     self.dt,
                     u_body,
                     self.lay.as_ref(),
+                    self.solver_mode,
+                    &mut self.fast_stats,
                 )?;
                 self.reed_y = y;
                 self.reed_v = v;
                 pp
             } else {
-                solve_reed_wave(
-                    self.reed,
-                    self.rho,
-                    self.zc,
-                    0.0,
-                    p_minus,
-                    p_m,
-                    self.p_plus_prev,
-                    u_body,
-                )?
+                match self.solver_mode {
+                    ReedSolverMode::Strict => solve_reed_wave(
+                        self.reed,
+                        self.rho,
+                        self.zc,
+                        0.0,
+                        p_minus,
+                        p_m,
+                        self.p_plus_prev,
+                        u_body,
+                    )?,
+                    ReedSolverMode::FastNewton => solve_reed_wave_fast(
+                        self.reed,
+                        self.rho,
+                        self.zc,
+                        0.0,
+                        p_minus,
+                        p_m,
+                        self.p_plus_prev,
+                        u_body,
+                        &mut self.fast_stats,
+                    )?,
+                }
             };
             self.p_plus_prev = p_plus;
             let p_minus_now = self
