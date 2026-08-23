@@ -2651,6 +2651,7 @@ impl OperationMemoryLease {
     /// Seal, reserve, and delegate are one mutex-serialized transition family:
     /// a race has exactly one winner, and the first seal sequence is immutable.
     #[allow(clippy::too_many_lines)] // one mutex-serialized transition family with an immutable first-seal sequence; splitting would scatter the race invariants xdu4's proof lane reasons about
+    #[allow(clippy::result_large_err)]
     pub fn seal(&self) -> Result<SealedLeaseReceipt, LeaseSealRefusal> {
         let mut state = self.lock_state();
         if let Some(receipt) = state.terminal_receipt.as_ref() {
