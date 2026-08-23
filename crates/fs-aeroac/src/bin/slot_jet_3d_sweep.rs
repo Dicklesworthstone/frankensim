@@ -75,8 +75,11 @@ fn parse_args() -> Result<Args, String> {
             "--u-jet" => a.u_jet = v.parse().map_err(|_| k.clone())?,
             "--r3" => a.higher_order_rate = v.parse().map_err(|_| k.clone())?,
             "--r2" => {
-                a.second_order_rates =
-                    v.split(',').map(str::parse).collect::<Result<_, _>>().map_err(|_| k)?;
+                a.second_order_rates = v
+                    .split(',')
+                    .map(str::parse)
+                    .collect::<Result<_, _>>()
+                    .map_err(|_| k)?;
             }
             "--seed" => a.seed_amplitude = v.parse().map_err(|_| k.clone())?,
             "--fringe-width" => a.fringe_width = v.parse().map_err(|_| k.clone())?,
@@ -166,10 +169,7 @@ fn terminal_line(
         "{{\"schema\":\"fs-aeroac.slot-jet-3d.terminal/v1\",\"rungs\":{},\"classified\":{},\
 \"refusals\":{},\"broadband_rungs\":{},\"verdict\":\"{verdict}\",\
 \"no_claim\":\"no experimental or video-backed flue-noise claim; lattice measurements only\"}}",
-        total_rungs,
-        classified,
-        refusals,
-        broadband
+        total_rungs, classified, refusals, broadband
     )
 }
 
@@ -227,7 +227,15 @@ fn run_budget_mode(args: &Args) {
         }
     }
     if all_complete && refusals == 0 {
-        println!("{}", terminal_line(args.second_order_rates.len(), classified, refusals, broadband));
+        println!(
+            "{}",
+            terminal_line(
+                args.second_order_rates.len(),
+                classified,
+                refusals,
+                broadband
+            )
+        );
     }
 }
 

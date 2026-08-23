@@ -750,15 +750,21 @@ fn write_checkpoint(
     })?;
     let path = dir.join("state.bin");
     let tmp = dir.join("state.bin.tmp");
-    let file = std::fs::File::create(&tmp)
-        .map_err(|_| AeroacError::InvalidParameter { what: "cannot create checkpoint file" })?;
+    let file = std::fs::File::create(&tmp).map_err(|_| AeroacError::InvalidParameter {
+        what: "cannot create checkpoint file",
+    })?;
     let mut w = std::io::BufWriter::new(file);
-    let refuse = |_e: std::io::Error| AeroacError::InvalidParameter { what: "checkpoint write" };
+    let refuse = |_e: std::io::Error| AeroacError::InvalidParameter {
+        what: "checkpoint write",
+    };
     w.write_all(CHECKPOINT_MAGIC).map_err(refuse)?;
     w.write_all(&1u32.to_le_bytes()).map_err(refuse)?;
-    w.write_all(&config_fingerprint(cfg).to_le_bytes()).map_err(refuse)?;
-    w.write_all(&state.settle_done.to_le_bytes()).map_err(refuse)?;
-    w.write_all(&state.record_done.to_le_bytes()).map_err(refuse)?;
+    w.write_all(&config_fingerprint(cfg).to_le_bytes())
+        .map_err(refuse)?;
+    w.write_all(&state.settle_done.to_le_bytes())
+        .map_err(refuse)?;
+    w.write_all(&state.record_done.to_le_bytes())
+        .map_err(refuse)?;
     #[allow(clippy::cast_possible_truncation)]
     let record_len = state.force_series.len() as u64;
     w.write_all(&record_len.to_le_bytes()).map_err(refuse)?;
@@ -782,8 +788,8 @@ fn write_checkpoint(
         }
     }
     w.flush().map_err(refuse)?;
-    std::fs::rename(&tmp, &path).map_err(|_| {
-        AeroacError::InvalidParameter { what: "cannot finalize checkpoint (atomic rename)" }
+    std::fs::rename(&tmp, &path).map_err(|_| AeroacError::InvalidParameter {
+        what: "cannot finalize checkpoint (atomic rename)",
     })?;
     Ok(())
 }
@@ -843,7 +849,10 @@ pub fn run_slot_jet_3d_chunked(
 /// Jet Reynolds number for a validated central-moment config.
 #[must_use]
 pub fn reynolds_of(cfg: &SlotJet3dConfig) -> f64 {
-    let CollisionModel3::CentralMoment { second_order_rate, .. } = cfg.collision else {
+    let CollisionModel3::CentralMoment {
+        second_order_rate, ..
+    } = cfg.collision
+    else {
         return f64::NAN;
     };
     let nu = (1.0 / second_order_rate - 0.5) / 3.0;
@@ -885,8 +894,9 @@ fn load_checkpoint(
     cfg: &SlotJet3dConfig,
     ckpt_path: &std::path::Path,
 ) -> Result<(Rig3, ChunkState), AeroacError> {
-    let bytes = std::fs::read(ckpt_path)
-        .map_err(|_| AeroacError::InvalidParameter { what: "cannot read checkpoint" })?;
+    let bytes = std::fs::read(ckpt_path).map_err(|_| AeroacError::InvalidParameter {
+        what: "cannot read checkpoint",
+    })?;
     if bytes.len() < 44 || bytes[0..8] != *CHECKPOINT_MAGIC {
         return Err(AeroacError::InvalidParameter {
             what: "checkpoint magic/version mismatch",
@@ -913,8 +923,7 @@ fn load_checkpoint(
     let mut off = 44usize;
     for _ in 0..record_len {
         let fx = f64::from_le_bytes(bytes[off..off + 8].try_into().expect("fixed slice"));
-        let fy =
-            f64::from_le_bytes(bytes[off + 8..off + 16].try_into().expect("fixed slice"));
+        let fy = f64::from_le_bytes(bytes[off + 8..off + 16].try_into().expect("fixed slice"));
         force_series.push([fx, fy]);
         off += 16;
     }
@@ -986,7 +995,7 @@ fn step_chunk_loop(
                 Err(_) => {
                     return Err(AeroacError::NonFinite {
                         what: "3-D lattice destabilized during chunked record",
-                    })
+                    });
                 }
             };
             if !impulse[0].is_finite() || !impulse[1].is_finite() {

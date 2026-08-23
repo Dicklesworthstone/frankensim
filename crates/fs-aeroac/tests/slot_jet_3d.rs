@@ -300,7 +300,10 @@ fn chunked_resume_bitwise_matches_whole_run() {
         cfg.steps_settle
     ));
     let first = run_slot_jet_3d_chunked(&cfg, &dir, 137).expect("chunk 1");
-    assert!(matches!(first, fs_aeroac::slot_jet_3d::SweepProgress::Partial { .. }));
+    assert!(matches!(
+        first,
+        fs_aeroac::slot_jet_3d::SweepProgress::Partial { .. }
+    ));
     let second = run_slot_jet_3d_chunked(&cfg, &dir, 10_000).expect("chunk 2");
     match second {
         fs_aeroac::slot_jet_3d::SweepProgress::Complete(run) => {
@@ -325,8 +328,8 @@ fn checkpoint_refuses_foreign_configuration() {
     let _ = run_slot_jet_3d_chunked(&cfg, &dir, 50).expect("seed chunk");
     let mut foreign = smoke_config();
     foreign.slot_half *= 2.0;
-    let err = run_slot_jet_3d_chunked(&foreign, &dir, 50)
-        .expect_err("fingerprint mismatch must refuse");
+    let err =
+        run_slot_jet_3d_chunked(&foreign, &dir, 50).expect_err("fingerprint mismatch must refuse");
     assert!(
         format!("{err}").contains("different configuration"),
         "refusal must name the fingerprint guard: {err}"
