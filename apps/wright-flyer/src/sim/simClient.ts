@@ -23,7 +23,10 @@ const SIM_TICK_S = 1 / 120;
 
 export interface SimClientEvents {
   onReady(info: { runIntentId: string; tick0Digest: string; trimVMps: number }): void;
-  onRefusal(stage: "init" | "step", refusal: RefusalEnvelope): void;
+  /** `stage` includes "worker" for boot/load failures of the worker
+   * itself — without this surface, a dead worker silently degrades the
+   * app to the scripted attract loop and nobody can tell. */
+  onRefusal(stage: "init" | "step" | "worker", refusal: RefusalEnvelope): void;
   onTerminal(info: {
     phase: string;
     tick: number;
@@ -53,12 +56,35 @@ export class SimClient {
   private readonly syncSamples: ClockSyncSample[] = [];
   private clockOffsetMs = 0;
   private pingNonce = 0;
-
   constructor(events: SimClientEvents, workerFactory?: () => Worker) {
     this.worker =
       workerFactory !== undefined
         ? workerFactory()
         : new Worker(new URL("./simWorker.ts", import.meta.url), { type: "module" });
+    // Surface worker boot/load failures LOUDLY: a dead worker otherwise
+    // degrades the app to the scripted attract loop with no diagnostic
+    // (observed live as a silent fallback — fresh-eyes fix).
+    this.worker.addEventListener("error", (event) => {
+      const message =
+        event.message !== undefined && event.message !== ""
+          ? event.message
+          : "sim worker failed to load or threw during boot";
+      events.onRefusal("worker", {
+        code: "worker-boot-failed",
+        message,
+        ranked_repairs: [
+          "reload the page (a stale optimized-dependency reload can kill the first boot)",
+          "check the dev server console for the underlying module error",
+        ],
+      });
+    });
+    this.worker.addEventListener("messageerror", () => {
+      events.onRefusal("worker", {
+        code: "worker-message-deserialize-failed",
+        message: "a worker message could not be deserialized",
+        ranked_repairs: ["reload the page"],
+      });
+    });
     this.worker.addEventListener("message", (event: MessageEvent<WorkerToMain>) => {
       const msg = event.data;
       switch (msg.kind) {

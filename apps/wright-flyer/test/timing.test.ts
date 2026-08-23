@@ -113,7 +113,7 @@ test("metric separation: service, lateness, and backlog are independent series",
     clock += 2; // every service call "costs" 2 ms
     return clock;
   };
-  sched.pump(12, () => {}, nowFn); // one tick 12 ms late? due 0 and 10 → 2 ticks
+  sched.pump(12, () => true, nowFn); // one tick 12 ms late? due 0 and 10 → 2 ticks
   assert.equal(sched.metrics.latenessMs.length, sched.metrics.serviceMs.length);
   assert.ok(sched.metrics.latenessMs[0]! >= 12 - 0.001, "start lateness measured");
   assert.ok(sched.metrics.serviceMs[0]! > 0, "service time measured");

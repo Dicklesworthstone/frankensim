@@ -17,6 +17,7 @@ import {
   landingDust,
   lcg,
   orvillePose,
+  hash01,
   propwashPuff,
   railTies,
   scrubField,
@@ -29,6 +30,14 @@ import {
 } from "./dressing.ts";
 import { createBrotherFigure } from "./figure3d.ts";
 import { strideFreqHz } from "./figure.ts";
+import {
+  SKY_DOME_FRAG_GLSL,
+  SKY_DOME_VERT_GLSL,
+  groundHazeColor,
+  horizonColor,
+  sunDiscColor,
+  zenithColor,
+} from "./sky/atmosphere.ts";
 
 /* ------------------------------ the sun ---------------------------- */
 /* ONE shared sun: the sky-texture disc and every light/glint derive
@@ -41,18 +50,6 @@ export const SUN_DIRECTION: readonly [number, number, number] = [
 ];
 /** Warm low-winter-sun tint for lights and glints. */
 export const SUN_COLOR = 0xffe3bd;
-
-/** Where the sun disc paints on an equirect sky canvas of edge `s`
- * (three.js SphereGeometry UV convention, u from phi = atan2(z, -x),
- * canvas y = (theta/pi)·s with theta = acos(dir.y)). Deriving the
- * pixel FROM SUN_DIRECTION keeps texture and lighting locked. */
-export function sunCanvasPoint(s: number): [number, number] {
-  const [x, y, z] = SUN_DIRECTION;
-  const phi = Math.atan2(z, -x);
-  const u = (((phi / (2 * Math.PI)) % 1) + 1) % 1;
-  const theta = Math.acos(Math.max(-1, Math.min(1, y)));
-  return [u * s, (theta / Math.PI) * s];
-}
 
 /* ---------- procedural textures (canvas, deterministic) ---------- */
 
@@ -241,90 +238,63 @@ function plankTexture(): THREE.CanvasTexture {
     const plank = s / 8;
     for (let i = 0; i < 8; i += 1) {
       const shade = 108 + Math.floor(rand() * 40);
-      ctx.fillStyle = `rgb(${shade},${shade - 22},${shade - 46})`;
-      ctx.fillRect(0, i * plank + 1, s, plank - 2);
-      // Wood grain streaks.
-      for (let k = 0; k < 6; k += 1) {
-        ctx.strokeStyle = `rgba(60,44,26,${0.12 + rand() * 0.15})`;
-        ctx.lineWidth = 1;
-        const y = i * plank + rand() * plank;
-        ctx.beginPath();
-        ctx.moveTo(0, y);
-        ctx.lineTo(s, y + (rand() - 0.5) * 3);
-        ctx.stroke();
+      ctx.fillStyle = `rgb(${shade},${Math.round(shade * 0.82)},${Math.round(shade * 0.6)})`;
+      ctx.fillRect(0, i * plank, s, plank - 2);
+      // Grain streaks per plank.
+      for (let g = 0; g < 5; g += 1) {
+        ctx.fillStyle = `rgba(60,44,26,${0.08 + rand() * 0.14})`;
+        ctx.fillRect(rand() * s, i * plank + rand() * (plank - 4), 20 + rand() * 90, 1 + rand() * 2);
       }
-    }
-  });
-}
-/** Sky: December-dawn gradient — pale warm haze at the horizon,
- * cold blue zenith — with the TRUE sun disc (derived from
- * SUN_DIRECTION, so it sits exactly where the light comes from),
- * a horizon warm wash around the sun azimuth, and thin cirrus
- * streaks in the upper third. Deterministic: seeded LCG. */
-function skyTexture(): THREE.CanvasTexture {
-  return canvasTexture(1024, (ctx, s) => {
-    // Sphere v = 1 - y/s and the HORIZON is the equator at v = 0.5,
-    // i.e. canvas y = 0.5s — the pale sea haze belongs THERE, not at
-    // the bottom pole (which points underground).
-    const grad = ctx.createLinearGradient(0, s, 0, 0);
-    grad.addColorStop(0, "#c9cfd2"); // below the horizon (rarely seen)
-    grad.addColorStop(0.47, "#d9d5c6");
-    grad.addColorStop(0.5, "#e3dcc9"); // warm pale haze AT the horizon
-    grad.addColorStop(0.58, "#ccd6de");
-    grad.addColorStop(0.74, "#a9bfd6");
-    grad.addColorStop(0.9, "#7d9fc6");
-    grad.addColorStop(1, "#557fae"); // zenith
-    ctx.fillStyle = grad;
-    ctx.fillRect(0, 0, s, s);
-    const [sunX, sunY] = sunCanvasPoint(s);
-    // Broad warm wash along the horizon centered on the sun azimuth.
-    const wash = ctx.createRadialGradient(sunX, 0.5 * s, 4, sunX, 0.5 * s, 0.62 * s);
-    wash.addColorStop(0, "rgba(255,232,188,0.34)");
-    wash.addColorStop(0.5, "rgba(255,236,205,0.12)");
-    wash.addColorStop(1, "rgba(255,236,205,0)");
-    ctx.fillStyle = wash;
-    ctx.fillRect(0, 0, s, s);
-    // The disc + tight glow at the TRUE projected direction.
-    const sun = ctx.createRadialGradient(sunX, sunY, 6, sunX, sunY, 0.26 * s);
-    sun.addColorStop(0, "rgba(255,250,228,0.98)");
-    sun.addColorStop(0.1, "rgba(255,240,206,0.55)");
-    sun.addColorStop(0.35, "rgba(255,236,200,0.16)");
-    sun.addColorStop(1, "rgba(255,236,200,0)");
-    ctx.fillStyle = sun;
-    ctx.fillRect(0, 0, s, s);
-    // Thin cirrus streaks, upper third only (they never cross the sun).
-    const rand = lcg(1978);
-    for (let i = 0; i < 11; i += 1) {
-      const y = s * (0.08 + rand() * 0.3);
-      if (Math.abs(y - sunY) < 0.05 * s) {
-        continue;
-      }
-      const x0 = rand() * s;
-      const len = s * (0.18 + rand() * 0.3);
-      ctx.strokeStyle = `rgba(255,255,255,${0.05 + rand() * 0.09})`;
-      ctx.lineWidth = 1.5 + rand() * 3.5;
-      ctx.beginPath();
-      ctx.moveTo(x0, y);
-      ctx.bezierCurveTo(x0 + len * 0.3, y - 6 * rand(), x0 + len * 0.7, y + 6 * rand(), x0 + len, y);
-      ctx.stroke();
+      // Nail heads at the plank ends.
+      ctx.fillStyle = "rgba(40,36,30,0.7)";
+      ctx.fillRect(6 + rand() * 8, i * plank + plank / 2, 2, 2);
+      ctx.fillRect(s - 10 - rand() * 8, i * plank + plank / 2, 2, 2);
     }
   });
 }
 
-/** One soft cloud billboard. */
-function cloudTexture(seed: number): THREE.CanvasTexture {
+/** Cloud card textures (A4). `style` picks the deck:
+ * - "cumulus": puffs stacked ABOVE a flat base line (the fair-weather
+ *   December look — bright tops, cut bottoms), warm-lit from the SE.
+ * - "cirrus": long horizontal fiber streaks, very thin. */
+function cloudTexture(seed: number, style: "cumulus" | "cirrus"): THREE.CanvasTexture {
   const rand = lcg(seed);
   return canvasTexture(256, (ctx, s) => {
     ctx.clearRect(0, 0, s, s);
-    for (let i = 0; i < 14; i += 1) {
-      const x = s * (0.2 + rand() * 0.6);
-      const y = s * (0.35 + rand() * 0.3);
-      const r = s * (0.08 + rand() * 0.16);
-      const puff = ctx.createRadialGradient(x, y, r * 0.1, x, y, r);
-      puff.addColorStop(0, "rgba(255,255,255,0.55)");
-      puff.addColorStop(1, "rgba(255,255,255,0)");
+    if (style === "cirrus") {
+      for (let i = 0; i < 9; i += 1) {
+        const y = s * (0.3 + rand() * 0.4);
+        const x0 = rand() * s * 0.5;
+        const len = s * (0.3 + rand() * 0.55);
+        const g = ctx.createLinearGradient(x0, y, x0 + len, y);
+        g.addColorStop(0, "rgba(255,253,248,0)");
+        g.addColorStop(0.5, `rgba(255,253,248,${0.16 + rand() * 0.2})`);
+        g.addColorStop(1, "rgba(255,253,248,0)");
+        ctx.strokeStyle = g;
+        ctx.lineWidth = 2 + rand() * 5;
+        ctx.beginPath();
+        ctx.moveTo(x0, y);
+        ctx.bezierCurveTo(x0 + len * 0.3, y - 4, x0 + len * 0.7, y + 4, x0 + len, y);
+        ctx.stroke();
+      }
+      return;
+    }
+    // Cumulus: flat base at ~62% height, puffs only above it; a faint
+    // warm tint on the sun-facing (right) side, cool shadow beneath.
+    const base = s * 0.62;
+    ctx.fillStyle = "rgba(226,222,214,0.5)";
+    ctx.fillRect(s * 0.18, base - 4, s * 0.64, 5);
+    for (let i = 0; i < 13; i += 1) {
+      const x = s * (0.24 + rand() * 0.52);
+      const y = base - rand() * s * 0.3;
+      const r = s * (0.07 + rand() * 0.14);
+      const warm = x > s * 0.55;
+      const puff = ctx.createRadialGradient(x, y, r * 0.15, x, y, r);
+      puff.addColorStop(0, warm ? "rgba(255,250,238,0.7)" : "rgba(252,251,247,0.66)");
+      puff.addColorStop(0.7, "rgba(238,236,230,0.28)");
+      puff.addColorStop(1, "rgba(230,228,222,0)");
       ctx.fillStyle = puff;
-      ctx.fillRect(0, 0, s, s);
+      ctx.fillRect(x - r, y - r, r * 2, r * 2);
     }
   });
 }
@@ -364,44 +334,76 @@ function box(
  * on the dome's equator, and Huffman Prairie is ~250 m above the
  * KDH sea-level datum (absolute-elevation grids). */
 export function buildSky(): THREE.Mesh {
-  const geo = new THREE.SphereGeometry(2600, 32, 18);
-  const mat = new THREE.MeshBasicMaterial({
-    map: skyTexture(),
+  const geo = new THREE.SphereGeometry(2600, 48, 32);
+  // Atmospheric-shader dome (A2): every uniform comes from the tested
+  // pure math in sky/atmosphere.ts, and the sun direction IS the
+  // scene's SUN_DIRECTION — painted light and cast light cannot
+  // disagree. HDR disc feeds the bloom pass; ACES tonemaps once.
+  const mat = new THREE.ShaderMaterial({
+    vertexShader: SKY_DOME_VERT_GLSL,
+    fragmentShader: SKY_DOME_FRAG_GLSL,
+    uniforms: {
+      uSunDirection: { value: new THREE.Vector3(...SUN_DIRECTION) },
+      uZenith: { value: new THREE.Vector3(...zenithColor(SUN_DIRECTION)) },
+      uHorizon: { value: new THREE.Vector3(...horizonColor(SUN_DIRECTION)) },
+      uGroundHaze: { value: new THREE.Vector3(...groundHazeColor(SUN_DIRECTION)) },
+      uSunDisc: { value: new THREE.Vector3(...sunDiscColor(SUN_DIRECTION)) },
+      uDiscCos: { value: 0.999989 },
+      uGlowStrength: { value: 0.55 },
+    },
     side: THREE.BackSide,
-    fog: false,
     depthWrite: false,
+    fog: false,
   });
   const sky = new THREE.Mesh(geo, mat);
   sky.renderOrder = -10;
   return sky;
 }
 
-/** Drifting cloud billboards (updated by animateDressing). Heights
- * are relative to the site's base elevation — at Huffman's ~250 m
- * datum, absolute 190-350 m cloud bases would sit UNDERGROUND. */
 export function buildClouds(baseY: number): THREE.Group {
   const group = new THREE.Group();
   const rand = lcg(1908);
-  for (let i = 0; i < 9; i += 1) {
-    const mat = new THREE.MeshBasicMaterial({
-      map: cloudTexture(200 + i),
-      transparent: true,
-      depthWrite: false,
-      opacity: 0.85,
-      fog: false,
-    });
-    const w = 260 + rand() * 320;
-    const cloud = new THREE.Mesh(new THREE.PlaneGeometry(w, w * 0.42), mat);
-    mat.side = THREE.DoubleSide;
-    cloud.rotation.x = -Math.PI / 2 + 0.35; // near-horizontal, tipped at the camera
-    cloud.position.set(0, baseY + 190 + rand() * 160, -900 + rand() * 1800);
-    cloud.userData["baseX"] = -900 + rand() * 1800;
-    cloud.userData["driftMps"] = 1.5 + rand() * 2.2;
-    group.add(cloud);
+  // Three-layer deck (A4): wind shear means higher cards drift faster.
+  // Heights are relative to the site's base elevation — at Huffman's
+  // ~250 m datum, absolute cloud bases would sit UNDERGROUND.
+  const layers: {
+    n: number;
+    style: "cumulus" | "cirrus";
+    yMin: number;
+    ySpan: number;
+    wMin: number;
+    wSpan: number;
+    driftMin: number;
+    driftSpan: number;
+    opacity: number;
+  }[] = [
+    { n: 6, style: "cirrus", yMin: 330, ySpan: 110, wMin: 420, wSpan: 380, driftMin: 2.6, driftSpan: 1.4, opacity: 0.5 },
+    { n: 7, style: "cumulus", yMin: 210, ySpan: 90, wMin: 240, wSpan: 300, driftMin: 1.8, driftSpan: 1.0, opacity: 0.9 },
+    { n: 5, style: "cumulus", yMin: 140, ySpan: 50, wMin: 120, wSpan: 140, driftMin: 1.2, driftSpan: 0.6, opacity: 0.75 },
+  ];
+  let seed = 200;
+  for (const L of layers) {
+    for (let i = 0; i < L.n; i += 1) {
+      const mat = new THREE.MeshBasicMaterial({
+        map: cloudTexture(seed++, L.style),
+        transparent: true,
+        depthWrite: false,
+        opacity: L.opacity,
+        fog: false,
+      });
+      const w = L.wMin + rand() * L.wSpan;
+      const h = L.style === "cirrus" ? w * 0.22 : w * (L.n === 5 ? 0.5 : 0.42);
+      const cloud = new THREE.Mesh(new THREE.PlaneGeometry(w, h), mat);
+      mat.side = THREE.DoubleSide;
+      cloud.rotation.x = -Math.PI / 2 + 0.35; // near-horizontal, tipped at the camera
+      cloud.position.set(0, baseY + L.yMin + rand() * L.ySpan, -900 + rand() * 1800);
+      cloud.userData["baseX"] = -900 + rand() * 1800;
+      cloud.userData["driftMps"] = L.driftMin + rand() * L.driftSpan;
+      group.add(cloud);
+    }
   }
   return group;
 }
-
 /** Procedural water-normal map: two octaves of smooth value noise
  * converted to tangent-space normals (same derivation law as the sand
  * set). Seeded — replays render the same sea. */
@@ -528,7 +530,7 @@ export function buildOuterGround(
     roughness: 0.16,
     metalness: 0.06,
     normalMap: waterNrm,
-    normalScale: new THREE.Vector2(1.4, 1.4),
+    normalScale: new THREE.Vector2(1.6, 1.6),
     transparent: true,
     opacity: 0.96,
   });
@@ -540,15 +542,17 @@ export function buildOuterGround(
         "#include <begin_vertex>",
         [
           "#include <begin_vertex>",
-          // Gentle swell: two crossed sines lift the surface. The plane
+          // Gentle swell: three crossed sines lift the surface — two
+          // long east-west trains plus a short cross chop. The plane
           // is rotated flat, so LOCAL z is WORLD up.
           "float swellA = sin(transformed.x * 0.045 + uOceanTime * 1.05) * 0.30;",
           "float swellB = sin(transformed.x * 0.013 - transformed.y * 0.021 + uOceanTime * 0.62) * 0.42;",
-          "transformed.z += swellA + swellB;",
+          "float swellC = sin(transformed.y * 0.085 + uOceanTime * 1.7) * 0.10;",
+          "transformed.z += swellA + swellB + swellC;",
         ].join("\n"),
       );
   };
-  const ocean = new THREE.Mesh(new THREE.PlaneGeometry(2600, 5200, 96, 96), oceanMat);
+  const ocean = new THREE.Mesh(new THREE.PlaneGeometry(2600, 5200, 128, 128), oceanMat);
   ocean.rotation.x = -Math.PI / 2;
   ocean.position.set(tileExtentM / 2 + 1300, -0.15, 0);
   group.add(ocean);
@@ -632,20 +636,35 @@ function buildBuilding(widthM: number, depthM: number, heightM: number): THREE.G
   const wall = new THREE.MeshStandardMaterial({ map: planks, roughness: 0.95 });
   const body = box(widthM, heightM, depthM, wall, 0, heightM / 2, 0);
   group.add(body);
-  // Gable roof: two pitched slabs.
+  // Gable roof: two pitched slabs + dark tar paper & wood battens.
   const half = widthM / 2;
   const rise = heightM * 0.45;
-  const slabLen = Math.hypot(half, rise) + 0.15;
+  const slabLen = Math.hypot(half, rise) + 0.2;
   for (const side of [-1, 1]) {
     const slab = box(slabLen, 0.06, depthM + 0.4, WOOD_DARK);
     slab.position.set((side * half) / 2, heightM + rise / 2, 0);
     slab.rotation.z = -side * Math.atan2(rise, half);
     group.add(slab);
+    // Roof battens across the slope
+    for (let b = -depthM / 2; b <= depthM / 2; b += 1.4) {
+      const batten = box(slabLen * 0.98, 0.025, 0.04, WOOD_DARK);
+      batten.position.set((side * half) / 2, heightM + rise / 2 + 0.04, b);
+      batten.rotation.z = -side * Math.atan2(rise, half);
+      group.add(batten);
+    }
   }
-  // Dark doorway on the +x gable end.
+  // Dark doorway on the +x gable end with wood lintel framing.
   const door = box(0.04, heightM * 0.62, 1.15, WOOD_DARK, widthM / 2 + 0.01, heightM * 0.31, 0);
   door.material = new THREE.MeshStandardMaterial({ color: 0x17120b, roughness: 1 });
   group.add(door);
+  const frameTop = box(0.08, 0.08, 1.35, WOOD_DARK, widthM / 2 + 0.02, heightM * 0.63, 0);
+  group.add(frameTop);
+  group.traverse((o) => {
+    if ((o as THREE.Mesh).isMesh) {
+      o.castShadow = true;
+      o.receiveShadow = true;
+    }
+  });
   return group;
 }
 
@@ -658,7 +677,14 @@ export interface Campfire {
 function buildCampfire(): Campfire {
   const group = new THREE.Group();
   const rand = lcg(1917);
-  // Stone ring + charred logs.
+  // Stone ring + charred logs + glowing ash bed.
+  const ashBed = new THREE.Mesh(
+    new THREE.CircleGeometry(0.58, 16),
+    new THREE.MeshStandardMaterial({ color: 0x221a14, roughness: 1 }),
+  );
+  ashBed.rotation.x = -Math.PI / 2;
+  ashBed.position.y = 0.01;
+  group.add(ashBed);
   for (let i = 0; i < 9; i += 1) {
     const a = (i / 9) * Math.PI * 2;
     const stone = new THREE.Mesh(
@@ -666,12 +692,14 @@ function buildCampfire(): Campfire {
       new THREE.MeshStandardMaterial({ color: 0x8f8a80, roughness: 1 }),
     );
     stone.position.set(0.62 * Math.cos(a), 0.08, 0.62 * Math.sin(a));
+    stone.castShadow = true;
     group.add(stone);
   }
   for (let i = 0; i < 4; i += 1) {
     const log = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.07, 0.8, 6), WOOD_DARK);
     log.rotation.set(Math.PI / 2.3, (i / 4) * Math.PI, 0);
     log.position.set(0, 0.12, 0);
+    log.castShadow = true;
     group.add(log);
   }
   const flame = new THREE.Mesh(
@@ -682,6 +710,7 @@ function buildCampfire(): Campfire {
   group.add(flame);
   const light = new THREE.PointLight(0xff9440, 14, 22, 2);
   light.position.set(0, 0.9, 0);
+  light.castShadow = true;
   group.add(light);
   return { group, light, flame };
 }
@@ -698,15 +727,27 @@ function buildChair(): THREE.Group {
   ] as const) {
     g.add(box(0.04, 0.45, 0.04, WOOD, dx, 0.225, dz));
   }
+  g.traverse((o) => {
+    if ((o as THREE.Mesh).isMesh) {
+      o.castShadow = true;
+      o.receiveShadow = true;
+    }
+  });
   return g;
 }
 
 function buildBarrel(): THREE.Mesh {
-  return new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.26, 0.85, 12), WOOD);
+  const geo = new THREE.CylinderGeometry(0.3, 0.26, 0.85, 12);
+  geo.translate(0, 0.425, 0); // base-origin: the camp loop seats y = ground
+  const b = new THREE.Mesh(geo, WOOD);
+  b.castShadow = true;
+  b.receiveShadow = true;
+  return b;
 }
 
 function buildWorkbench(): THREE.Group {
   const g = new THREE.Group();
+  // Heavy timber top & legs
   g.add(box(1.8, 0.07, 0.7, WOOD, 0, 0.85, 0));
   for (const [dx, dz] of [
     [-0.8, -0.28],
@@ -716,12 +757,35 @@ function buildWorkbench(): THREE.Group {
   ] as const) {
     g.add(box(0.07, 0.85, 0.07, WOOD_DARK, dx, 0.42, dz));
   }
-  // Tools on top: a saw blade, a hammer, a can.
-  g.add(box(0.5, 0.015, 0.1, IRON, -0.4, 0.9, 0.05));
-  g.add(box(0.06, 0.06, 0.28, WOOD_DARK, 0.25, 0.92, -0.1));
+  // Bottom tool shelf
+  g.add(box(1.6, 0.03, 0.55, WOOD_DARK, 0, 0.25, 0));
+  // Tools: hand saw, wood plane, grease pot, hammer, brass oiler
+  // 1. Hand saw
+  g.add(box(0.55, 0.012, 0.12, IRON, -0.4, 0.89, 0.05));
+  g.add(box(0.08, 0.03, 0.14, WOOD_DARK, -0.66, 0.9, 0.05));
+  // 2. Wood block plane
+  g.add(box(0.24, 0.065, 0.08, WOOD_DARK, 0.15, 0.92, -0.1));
+  const blade = box(0.02, 0.07, 0.06, IRON, 0.15, 0.94, -0.1);
+  blade.rotation.z = -0.45;
+  g.add(blade);
+  // 3. Oil / grease can
   const can = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.07, 0.16, 10), IRON);
   can.position.set(0.6, 0.97, 0.15);
   g.add(can);
+  // 4. Spruce wood shavings curled on the bench
+  const SHAVING = new THREE.MeshStandardMaterial({ color: 0xd9c59a, roughness: 0.9 });
+  for (let i = 0; i < 4; i += 1) {
+    const curl = new THREE.Mesh(new THREE.TorusGeometry(0.025, 0.008, 4, 8, Math.PI * 1.5), SHAVING);
+    curl.rotation.set(Math.PI / 2, i * 0.8, 0);
+    curl.position.set(-0.05 + i * 0.06, 0.89, 0.08 + (i % 2) * 0.04);
+    g.add(curl);
+  }
+  g.traverse((o) => {
+    if ((o as THREE.Mesh).isMesh) {
+      o.castShadow = true;
+      o.receiveShadow = true;
+    }
+  });
   return g;
 }
 
@@ -729,6 +793,12 @@ function buildToolchest(): THREE.Group {
   const g = new THREE.Group();
   g.add(box(0.9, 0.4, 0.5, WOOD_DARK, 0, 0.2, 0));
   g.add(box(0.94, 0.05, 0.54, WOOD, 0, 0.44, 0));
+  g.traverse((o) => {
+    if ((o as THREE.Mesh).isMesh) {
+      o.castShadow = true;
+      o.receiveShadow = true;
+    }
+  });
   return g;
 }
 
@@ -971,6 +1041,11 @@ function buildGullMesh(): GullMesh {
   tail.scale.set(1, 1, 0.4);
   tail.position.set(-0.26, 0.005, 0);
   group.add(tail);
+  group.traverse((o) => {
+    if ((o as THREE.Mesh).isMesh) {
+      o.castShadow = true;
+    }
+  });
   return { group, leftWing, rightWing };
 }
 
@@ -994,9 +1069,10 @@ export function buildTakeoffDolly(): THREE.Group {
       group.add(hub);
       for (let s = 0; s < 4; s += 1) {
         const spoke = new THREE.Mesh(new THREE.CylinderGeometry(0.008, 0.008, 0.5, 4), IRON);
-        spoke.rotation.x = Math.PI / 2;
-        spoke.rotation.z = 0;
-        spoke.rotation.y = (s / 4) * Math.PI;
+        // Wheel disc is the x-y plane (axle along z): rotating about z
+        // fans the spokes radially; the old x+y Euler left all four
+        // superimposed along the axle.
+        spoke.rotation.z = (s / 4) * Math.PI;
         spoke.position.set(ax, 0.3, side);
         group.add(spoke);
       }
@@ -1167,6 +1243,62 @@ function buildVegetation(
   return group;
 }
 
+/** Ground detail scatter (A5): instanced shells + pebbles seeded by
+ * hash01 — the close-up cue that separates "textured plane" from
+ * "beach". One draw call per kind; static geometry, no animation.
+ * Deterministic: same seed -> same beach. */
+function buildScatter(
+  counts: { shells: number; pebbles: number },
+  groundY: (xRel: number, zRel: number) => number,
+): THREE.Group {
+  const group = new THREE.Group();
+  const shellMat = new THREE.MeshStandardMaterial({
+    color: 0xe8ddc8,
+    roughness: 0.55,
+    flatShading: true,
+  });
+  const pebbleMat = new THREE.MeshStandardMaterial({
+    color: 0xb3a284,
+    roughness: 0.9,
+    flatShading: true,
+  });
+  const shellGeo = new THREE.ConeGeometry(0.055, 0.09, 6);
+  const pebbleGeo = new THREE.IcosahedronGeometry(0.04, 0);
+  const shells = new THREE.InstancedMesh(shellGeo, shellMat, Math.max(1, counts.shells));
+  const pebbles = new THREE.InstancedMesh(pebbleGeo, pebbleMat, Math.max(1, counts.pebbles));
+  shells.receiveShadow = true;
+  pebbles.receiveShadow = true;
+  const m = new THREE.Matrix4();
+  const q = new THREE.Quaternion();
+  const eu = new THREE.Euler();
+  const pos = new THREE.Vector3();
+  const one = new THREE.Vector3();
+  let si = 0;
+  let pi = 0;
+  // Ring-rejection placement outside the launch flat (the corridor
+  // floor stays pristine for rail/figures), inside ~420 m.
+  for (let n = 0; n < counts.shells + counts.pebbles; n += 1) {
+    const a = hash01(n * 2 + 1) * Math.PI * 2;
+    const r = 62 + Math.pow(hash01(n * 2 + 2), 0.7) * 358;
+    const x = Math.cos(a) * r;
+    const z = Math.sin(a) * r;
+    pos.set(x, groundY(x, z) - 0.01, z);
+    q.setFromEuler(eu.set(hash01(n * 3 + 5) * 0.5 - 0.25, hash01(n * 3 + 6) * Math.PI * 2, hash01(n * 3 + 7) * 0.5 - 0.25));
+    const s = 0.6 + hash01(n * 5 + 9) * 0.9;
+    one.set(s, s, s);
+    m.compose(pos, q, one);
+    if (n % 2 === 0 && si < counts.shells) {
+      shells.setMatrixAt(si++, m);
+    } else if (pi < counts.pebbles) {
+      pebbles.setMatrixAt(pi++, m);
+    }
+  }
+  shells.count = si;
+  pebbles.count = pi;
+  group.add(shells, pebbles);
+  return group;
+}
+
 /** A downwind ribbon: `segs` spans × 2 columns of vertices whose
  * positions the animate loop rewrites from the pure math each frame. */
 function buildRibbon(segs: number, halfWidthM: number, color: number, opacity: number): {
@@ -1314,6 +1446,20 @@ export interface Dressing {
   /** QoS presentation budget (T0.6): 0 = full, 1 = secondary plumes
    * off, 2 = every particle system hidden. Presentation-only. */
   setParticleLevel(level: 0 | 1 | 2): void;
+  /** Orville's world position at scene time t under the same state the
+   * animate loop uses (pure recomputation of orvillePose + terrain) —
+   * the camera glances AT him without reaching into the rig. Eye-height
+   * offset included. */
+  orvillePosition(
+    t: number,
+    orville: {
+      onRail: boolean;
+      aircraftX: number;
+      releaseX: number | null;
+      releaseT: number | null;
+      landedX?: number | null;
+    },
+  ): [number, number, number];
 }
 
 /** Named contract for the camp flagpole rig. */
@@ -1362,10 +1508,10 @@ function buildFlagpole(): Flagpole {
         const p = pts[Math.min(s, pts.length - 1)]!;
         const o = s * 6;
         positions[o] = p.x;
-        positions[o + 1] = 5.9 + p.y - 0.28;
+        positions[o + 1] = 5.9 + p.y;
         positions[o + 2] = p.z - 0.28;
         positions[o + 3] = p.x;
-        positions[o + 4] = 5.9 + p.y + 0.28;
+        positions[o + 4] = 5.9 + p.y;
         positions[o + 5] = p.z + 0.28;
       }
       (geo.getAttribute("position") as THREE.BufferAttribute).needsUpdate = true;
@@ -1419,7 +1565,6 @@ export function buildDressing(
         break;
       case "barrel":
         obj = buildBarrel();
-        (obj as THREE.Mesh).position.y = 0.425;
         break;
       case "workbench":
         obj = buildWorkbench();
@@ -1477,6 +1622,8 @@ export function buildDressing(
   if (withLife) {
     veg = buildVegetation(scrubField({ tufts: 340, bushes: 56, pines: 12 }, 1903), groundY);
     group.add(veg);
+    // Beach detail (A5): shells + pebbles outside the launch flat.
+    group.add(buildScatter({ shells: 260, pebbles: 220 }, groundY));
     for (let i = 0; i < 9; i += 1) {
       const r = buildRibbon(STREAMER_SEGS, 0.055, 0xdccda6, 0.42);
       r.mesh.visible = false;
@@ -1535,14 +1682,48 @@ export function buildDressing(
   const daniels = buildDaniels();
   const DX = -9;
   const DZ = 13;
+  daniels.group.position.set(DX, 0, DZ);
+  // He photographs the machine departing +x: the builder aims the Korona
+  // west (-x), so flip him to face the flight path (fresh-eyes audit #8).
+  daniels.group.rotation.y = Math.PI;
   group.add(daniels.group);
   // Daniels' flash latch: fires once per run release, presentation-only.
   let flashAtT: number | null = null;
   let armedRelease: number | null = null;
-  let lastFlashFop = 0;
+  // QoS particle tier witness (set by setParticleLevel, read by animate):
+  let plumesHidden = false;
   return {
     group,
     animate(t, orville): void {
+      // The sea hangs off ONE wall-clock t (frame rate never changes
+      // the ocean): swell phase, shoreward normal scroll, and the
+      // breathing surf-foam line below.
+      OCEAN_TIME.value = t;
+      if (waterNrm !== undefined) {
+        // Wind (from the east) drives waves shoreward (-x): scroll the
+        // normal field against it; the slow cross term breaks the
+        // symmetry so the sparkle is not a conveyor belt.
+  // (He was silently parked at the origin before this — inside the
+  // rail corridor — because DX/DZ were declared but never applied.)
+  daniels.group.position.set(launch[0] + DX, launch[1] + groundY(DX, DZ), launch[2] + DZ);
+        const drift = Math.max(2, windMps);
+        waterNrm.offset.set(
+          (((-t * 0.016 * drift) % 1) + 1) % 1,
+          (((t * 0.005 * drift) % 1) + 1) % 1,
+        );
+      }
+      if (foamMesh !== undefined) {
+        const foamMat = foamMesh.material as THREE.MeshBasicMaterial;
+        // The surf line advances and retreats ~2.4 m with the swell
+        // beat and its opacity surges on the breaking phase.
+        const surfPhase = t * 0.62;
+        foamMesh.position.x = tileExtentM / 2 + 26 + Math.sin(surfPhase + 1.1) * 2.4;
+        foamMat.opacity = 0.36 + 0.32 * (0.5 + 0.5 * Math.sin(surfPhase));
+        const foamMap = foamMat.map;
+        if (foamMap !== null) {
+          foamMap.offset.y = (t * 0.045) % 1;
+        }
+      }
       // Clouds drift east — position is a pure function of t (frame
       // rate never changes the weather).
       for (const cloud of clouds.children) {
@@ -1579,6 +1760,8 @@ export function buildDressing(
         orvilleFig.group.rotation.y = Math.atan2(pose.z, orville.aircraftX - pose.x);
       }
       const chaseGap = orville.aircraftX - pose.x;
+      orvilleFig.setGlasses(pose.glassesUp);
+      orvilleFig.setGait(pose.gaitRad, pose.gaitRad > 0 ? (orville.landedX ? 4.6 : 3.8) : 0);
       orvilleFig.aimLeftArm(
         orville.onRail && chaseGap < 2.2
           ? [chaseGap, 1.45, 6.15 - pose.z] // wingtip: fore, wing-high, on his left
@@ -1607,19 +1790,13 @@ export function buildDressing(
         fb.mesh.leftWing.rotation.x = fp.flapRad;
         fb.mesh.rightWing.rotation.x = -fp.flapRad;
       }
-      // the xz-plane, so facing the heading direction needs phi = -h.
-      for (const rig of gulls) {
-        const p = gullPose(rig.path, t);
-        rig.group.position.set(launch[0] + p.x, launch[1] + p.y, launch[2] + p.z);
-        rig.group.rotation.y = -p.headingRad;
-        rig.leftWing.rotation.x = p.flapRad;
-        rig.rightWing.rotation.x = -p.flapRad;
-      }
       // --- wind-made-visible + fire + machine plumes (pure in t) ---
       SWAY_TIME.value = t;
       // Sand streamers: ribbons rewrite every frame from the pure law.
+      // QoS Critical hides them — fold the tier in HERE, or this
+      // per-frame visible write would resurrect what setParticleLevel hid.
       for (const [i, r] of streamers) {
-        const show = withLife && windMps > 3;
+        const show = withLife && windMps > 3 && !plumesHidden;
         r.mesh.visible = show;
         if (!show) {
           continue;
@@ -1729,22 +1906,35 @@ export function buildDressing(
       if (orville.releaseT !== null && armedRelease !== orville.releaseT) {
         armedRelease = orville.releaseT;
         flashAtT = t;
+        // Shutter sound seam: fire EXACTLY at the latch — an edge keyed
+        // on the fop window could be stepped over by one slow frame.
+        window.dispatchEvent(new CustomEvent("wf-flash"));
       }
       const fsince = flashAtT === null ? Number.POSITIVE_INFINITY : t - flashAtT;
       const fop = fsince >= 0 && fsince <= 0.26 ? Math.sin((fsince / 0.26) * Math.PI) : 0;
-      // Shutter sound seam: one rising-edge pulse per flash (main
-      // thread listens; audio stays out of the visual module).
-      if (fop > 0.5 && lastFlashFop <= 0.5) {
-        window.dispatchEvent(new CustomEvent("wf-flash"));
-      }
-      lastFlashFop = fop;
       (daniels.flash.material as THREE.SpriteMaterial).opacity = fop;
       daniels.lamp.intensity = 30 * fop;
+    },
+    orvillePosition(t, orville) {
+      const pose = orvillePose(
+        t,
+        orville.onRail,
+        orville.aircraftX,
+        orville.releaseX,
+        orville.releaseT,
+        orville.landedX ?? null,
+      );
+      return [
+        launch[0] + pose.x,
+        launch[1] + groundY(pose.x, pose.z) + 1.5,
+        launch[2] + pose.z,
+      ];
     },
     setParticleLevel(level): void {
       // Secondary plumes go first, everything airborne at Critical.
       const reduced = level >= 1;
       const none = level >= 2;
+      plumesHidden = none;
       exhaust.group.visible = !reduced && !none;
       dust.group.visible = !reduced && !none;
       embers.group.visible = !none;

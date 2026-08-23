@@ -6,7 +6,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { engineFreqHz, mixLevels, rpm01FromOmega } from "../src/audio.ts";
+import { engineFreqHz, mixLevels, rpm01FromOmega, windRushGain } from "../src/audio.ts";
 
 test("engine frequency follows the 23:8 chain at two fires per rev", () => {
   // Trim: engine 1025 rpm -> prop 356.5 rpm -> 37.33 rad/s.
@@ -35,4 +35,14 @@ test("mix is clamped, zero at rest, and rumble rides the rail only", () => {
   const rolling = mixLevels(0.6, 8, true, 10);
   assert.ok(rolling.rumble > 0 && rolling.rumble <= 0.3);
   assert.ok(rolling.engine > 0 && rolling.wind > 0);
+});
+
+test("wind rush obeys the square law and clamps", () => {
+  assert.equal(windRushGain(0), 0);
+  assert.equal(windRushGain(4), 0, "below the walking-headwind floor");
+  const a = windRushGain(17); // the December 17 headwind
+  const b = windRushGain(34);
+  assert.ok(a > 0 && a < 0.32, "in range at racing speed");
+  assert.ok(Math.abs(b - 4 * a) < 1e-9 || b === 0.32, "quadratic until clamped");
+  assert.equal(windRushGain(-5), 0, "negative refused to zero");
 });

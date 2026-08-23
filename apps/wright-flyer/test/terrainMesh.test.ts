@@ -111,8 +111,8 @@ test("LOD terrain keeps survey corners and packs vertices near launch", () => {
   const last = (nv * nv - 1) * 3;
   assert.equal(positions[last + 2], -1000); // north edge wz = -(1000-1000)
   // Nearest-vertex distance to the LAUNCH FLAT center must beat the
-  // uniform-grid spacing (2000/96 ≈ 20.8 m): warped inner ring ≤ 8 m.
-  const extent = 2000;
+  // uniform-grid spacing (2000/96 ≈ 20.8 m): the warped inner ring
+  // packs a vertex within 8 m of the launch point itself.
   let best = Infinity;
   for (let v = 0; v < nv * nv; v++) {
     const dx = positions[v * 3]! - 0;
@@ -120,7 +120,6 @@ test("LOD terrain keeps survey corners and packs vertices near launch", () => {
     best = Math.min(best, Math.hypot(dx, dz));
   }
   assert.ok(best < 8, `inner ring too coarse near launch: ${best.toFixed(2)} m`);
-  void extent;
 });
 
 /* ---------- presentation relief (PurpleCliff flat-dunes fix) -------- */

@@ -73,21 +73,22 @@ test("HUD renders the period triad and surfaces the rig flags", () => {
   assert.equal(clean.length, 4, "no flags when clean");
 });
 
-test("all five camera presets work against scripted state", async () => {
+test("all camera presets work against scripted state", async () => {
   const { cameraFor, PRESET_KEYS } = await import("../src/camera.ts");
   const launch: [number, number, number] = [0, 4.1, -625];
   const aircraft: [number, number, number] = [12, 5.3, -625];
   const seen = new Set<string>();
-  for (const preset of Object.values(PRESET_KEYS)) {
+  const presets = Object.values(PRESET_KEYS);
+  for (const preset of presets) {
     const shot = cameraFor(preset, 6.5, launch, aircraft);
     for (const v of [...shot.pos, ...shot.look]) assert.ok(Number.isFinite(v), preset);
     assert.ok(shot.pos[1] > 0, `${preset} camera above ground`);
     seen.add(shot.pos.map((v) => v.toFixed(2)).join(","));
-    if (preset !== "daniels" && preset !== "free") {
+    if (preset !== "daniels" && preset !== "free" && preset !== "binoculars") {
       assert.ok(Math.hypot(shot.pos[0] - aircraft[0], shot.pos[2] - aircraft[2]) < 25, preset);
     }
   }
-  assert.equal(seen.size, 5, "five DISTINCT viewpoints");
+  assert.equal(seen.size, presets.length, "all presets are DISTINCT viewpoints");
   const d1 = cameraFor("daniels", 1, launch, aircraft);
   const d2 = cameraFor("daniels", 9, launch, [50, 8, -600]);
   assert.deepEqual(d1.pos, d2.pos, "the tripod never moves");

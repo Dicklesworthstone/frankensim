@@ -36,12 +36,15 @@ export class TickScheduler {
   }
 
   /**
-   * Run due ticks at monotonic time `nowMs`. The backlog (due-but-unrun
-   * ticks) is measured BEFORE running; if it exceeds the bounded-catch-up
-   * limit the schedule re-anchors (pause semantics: simulation time simply
-   * does not advance for the gap — no burst, no wall-clock catch-up).
+   * Run due ticks at monotonic time `nowMs`. `runTick(tick)` returns
+   * whether the engine ACTUALLY stepped; when it returns false (e.g.
+   * Human mode waiting for the first control touch, or wasm still
+   * loading) the schedule slot is NOT consumed — simulation time waits
+   * for the engine instead of drifting ahead of it (H-2: scheduler
+   * ticks must equal engine ticks or latency ledgers and future
+   * input-trace replays measure the wrong domain).
    */
-  pump(nowMs: number, runTick: (tick: number) => void, nowFn: () => number): number {
+  pump(nowMs: number, runTick: (tick: number) => boolean, nowFn: () => number): number {
     let backlog = Math.floor((nowMs - this.nextDueMs) / this.tickMs) +
       (nowMs >= this.nextDueMs ? 1 : 0);
     if (backlog < 0) {
@@ -57,9 +60,14 @@ export class TickScheduler {
     let ran = 0;
     while (this.nextDueMs <= nowMs) {
       this.metrics.latenessMs.push(nowMs - this.nextDueMs);
-      this.tick += 1;
       const t0 = nowFn();
-      runTick(this.tick);
+      const stepped = runTick(this.tick + 1);
+      if (!stepped) {
+        // Sim time waits: leave nextDueMs (and this.tick) untouched so
+        // the same slot is retried on the next pump.
+        break;
+      }
+      this.tick += 1;
       this.metrics.serviceMs.push(nowFn() - t0);
       this.metrics.ticksRun += 1;
       this.nextDueMs += this.tickMs;

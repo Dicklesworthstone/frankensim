@@ -73,15 +73,13 @@ export interface DuneDetailOptions {
 }
 
 const DUNE_DEFAULTS: Required<DuneDetailOptions> = {
-  // 55 m keeps rail + camp + landing flat true (the shack corner sits
-  // at 42 m, the camp's far corner at 45 m); full amplitude by ~175 m
-  // so dunes fill the mid-ground.
-  flatRadiusM: 55,
-  featherM: 120,
-  // Full-amplitude crest height. The 1903 accounts describe a rolling
-  // dune sea around the launch flat (they chose the ONE level plain);
-  // single-digit amplitudes read as ripples from cockpit height.
-  amplitudeM: 9.5,
+  // 45 m keeps rail + camp + landing flat true (the shack corner sits
+  // at 42.1 m, the camp's far corner at 44.8 m); full amplitude by ~105 m
+  // so towering dunes roll right beside the flight corridor.
+  flatRadiusM: 45,
+  featherM: 60,
+  // Full-amplitude crest height (12.8 m gives breathtaking relief).
+  amplitudeM: 12.8,
 };
 
 /** Launch-relative dune displacement [m] for the render mesh. Ridged
@@ -113,12 +111,10 @@ export function duneDetail(
   ridge += (1 - Math.abs(2 * valueNoise2(nx * 2.3 + 7.3, nz * 2.3 + 3.1) - 1)) * 0.24;
   ridge += (1 - Math.abs(2 * valueNoise2(nx * 0.38 + 13.1, nz * 0.38 + 8.7) - 1)) * 0.26;
   const swell = valueNoise2(xRel * 0.006 + 11.7, zRel * 0.006 + 5.9) - 0.5;
-  // Flight-fan suppression: the machine crosses the flat 3–6 m up, so
-  // east of the rail crests are held LOW near the flight line and grow
-  // to full height off-axis — the pilot skims the swale while the
-  // horizon keeps its dune sea (0.22 floor ≈ 3.7 m max on the line).
-  const fan = xRel > 0 ? Math.min(1, 0.22 + Math.abs(zRel) / 130) : 1;
-  return mask * fan * (o.amplitudeM * ridge + o.amplitudeM * 0.75 * swell);
+  // Flight-fan: dunes rise quickly off the central path (wingspan ±6.4 m).
+  const fan = xRel > 0 ? Math.min(1, 0.45 + Math.abs(zRel) / 55) : 1;
+  const raw = mask * fan * (o.amplitudeM * ridge + o.amplitudeM * 0.75 * swell);
+  return Math.max(-13.8, Math.min(13.8, raw));
 }
 
 /** Big Kill Devil Hill: the ~90 ft living dune southwest of the camp,
@@ -152,8 +148,8 @@ export function bigHillDetail(xRel: number, zRel: number): number {
 
 const COLORS: Record<string, [number, number, number]> = {
   water: [0.23, 0.36, 0.45],
-  sand: [0.72, 0.66, 0.51],
-  dune: [0.78, 0.7, 0.52],
+  sand: [0.74, 0.68, 0.52],
+  dune: [0.82, 0.74, 0.55],
 };
 
 export function duneShade(
@@ -161,15 +157,21 @@ export function duneShade(
   x: number,
   z: number,
 ): number {
-  const e = 4;
+  const e = 3;
   const dx = detailAt(x + e, z) - detailAt(x - e, z);
   const dz = detailAt(x, z + e) - detailAt(x, z - e);
-  const slope = Math.hypot(dx, dz) / (2 * e); // ~tan of the local grade
+  const nx = -dx / (2 * e);
+  const nz = -dz / (2 * e);
+  const sunDot = nx * 0.75 - nz * 0.45;
   const self = detailAt(x, z);
-  const crest = Math.max(0, self) * 0.04; // brighten standing crests a touch
-  // Gentle tint only — FORM comes from the sun + shadow maps; a heavy
-  // vertex darkening turned the far field into a black silhouette.
-  return Math.max(0.86, Math.min(1.18, 1 - Math.min(slope * 0.35, 0.14) + crest));
+  const crest = Math.max(0, self) * 0.03;
+  // Wind ripples: oblique static banding (the December wind scours
+  // from the east, so crests run roughly NNE-SSW), phase-warped by the
+  // local relief so the stripes flow over the forms instead of
+  // slicing through them. Presentation-only tint, ±4%.
+  const ripple =
+    Math.sin((x * 0.82 + z * 0.57) * 1.9 + detailAt(x, z) * 0.9) * 0.04;
+  return Math.max(0.75, Math.min(1.3, 1.0 + sunDot * 0.4 + crest + ripple));
 }
 /** Two-ring LOD (T1.1): `warpAxis` maps the vertex-index fraction
  * u∈[0,1] along one axis to the FRACTIONAL tile position, clustering

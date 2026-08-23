@@ -17,14 +17,20 @@ import {
   WebGLRenderer,
 } from "three";
 
+import type { PresentationProfile } from "./qos.ts";
+
 export interface FlyerRenderer {
   /** Advance one presentation frame; `dtS` is wall-clock presentation time. */
   render(dtS: number): void;
+  /** One presentation frame WITHOUT the loop-level try/catch — the
+   * scene splits render/renderFrame so a thrown frame surfaces loudly
+   * and the rAF loop survives (presentation resilience). */
+  renderFrame(dtS: number): void;
   resize(width: number, height: number): void;
   dispose(): void;
   /** E5.6: apply an ATOMIC presentation profile (QoS governor output —
    * presentation only; the physics tier is immutable by construction). */
-  applyQuality?(profile: import("./qos.ts").PresentationProfile): void;
+  applyQuality?(profile: PresentationProfile): void;
 }
 
 /**
@@ -61,6 +67,9 @@ export function createPlaceholderRenderer(container: HTMLElement): FlyerRenderer
   let elapsedS = 0;
   return {
     render(dtS: number): void {
+      this.renderFrame(dtS);
+    },
+    renderFrame(dtS: number): void {
       elapsedS += dtS;
       // A slow dawn drift proves per-frame updates without faking physics.
       camera.position.x = 14 * Math.cos(elapsedS * 0.03);

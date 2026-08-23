@@ -112,9 +112,9 @@ test("arm aiming: axis points and refusals", () => {
   const fwd = armAimAngles(1, 0, 0);
   assert.ok(Math.abs(fwd.pitchRad - Math.PI / 2) < 1e-12);
   assert.ok(Math.abs(fwd.yawRad) < 1e-12);
-  // Straight out to the right: yaw pi/2.
+  // Straight out to the RIGHT (+z): yaw -pi/2 under the YZX composition.
   const right = armAimAngles(0, 0, 1);
-  assert.ok(Math.abs(right.yawRad - Math.PI / 2) < 1e-12);
+  assert.ok(Math.abs(right.yawRad + Math.PI / 2) < 1e-12);
   // Straight up: pitch pi.
   assert.ok(Math.abs(armAimAngles(0, 1, 0).pitchRad - Math.PI) < 1e-12);
   assert.throws(() => armAimAngles(0, 0, 0), RangeError);

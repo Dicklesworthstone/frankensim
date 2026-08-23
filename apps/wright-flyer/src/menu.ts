@@ -83,9 +83,9 @@ export const MODE_CARDS: readonly {
 export const KEY_LINES: readonly string[] = [
   "S / ↓  pull canard (nose UP)   W / ↑  push (nose DOWN)",
   "A / ←  warp left     D / →  warp right",
-  "Space  recenter      V  camera: behind ↔ pilot's eyes",
+  "Space  recenter    V  camera toggle    1-6  camera presets",
   "M  sound on/off      H  controls card   T  telemetry",
-  "R  replay with ghost P  photo mode",
+  "R  replay with ghost N  fresh relaunch  P  photo mode",
   "Drag the view = hip cradle   Gamepad left stick = warp/pull",
   "J  guided journey (watch → assist → authentic)",
 ];

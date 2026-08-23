@@ -168,6 +168,12 @@ function buildDial(view: DialView, size: number): { svg: SVGSVGElement; dom: Dia
     "font-weight": "bold",
   });
   svg.appendChild(reading);
+  // Convex glass reflection highlight
+  const glass = el("path", {
+    d: `M ${(c - c * 0.72).toFixed(2)} ${(c - c * 0.22).toFixed(2)} A ${(c * 0.75).toFixed(2)} ${(c * 0.75).toFixed(2)} 0 0 1 ${(c + c * 0.72).toFixed(2)} ${(c - c * 0.22).toFixed(2)} A ${(c * 0.75).toFixed(2)} ${(c * 0.48).toFixed(2)} 0 0 0 ${(c - c * 0.72).toFixed(2)} ${(c - c * 0.22).toFixed(2)} Z`,
+    fill: "rgba(255, 255, 255, 0.14)",
+  });
+  svg.appendChild(glass);
   return { svg, dom: { needle, reading, face, center: c } };
 }
 

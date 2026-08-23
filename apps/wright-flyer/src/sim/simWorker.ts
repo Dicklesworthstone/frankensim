@@ -69,9 +69,9 @@ async function loadEngine(): Promise<WasmEngine> {
   return pkg as unknown as WasmEngine;
 }
 
-function runTick(tick: number): void {
+function runTick(tick: number): boolean {
   if (engine === null || ended) {
-    return;
+    return false; // wasm still loading / run over: sim time waits
   }
   // E5.3a Human mode: the ControlHold supplies the zero-order-held
   // control every tick; before the FIRST admitted control the sim
@@ -82,7 +82,9 @@ function runTick(tick: number): void {
   if (mode === MODE_HUMAN) {
     const held = hold.valueAt(tick);
     if (held === null) {
-      return;
+      // H-2: report "did not step" so TickScheduler does not consume
+      // the schedule slot — scheduler ticks stay equal to engine ticks.
+      return false;
     }
     hasInput = true;
     lever = held.leverForceN;
@@ -91,12 +93,14 @@ function runTick(tick: number): void {
   const json = engine.flyer_engine_step(hasInput, lever, warp);
   const step = parseStepEnvelope(json);
   if (step.kind === "refusal") {
+    // Refusal consumes the tick as before (typed receipt posted); only
+    // the pre-first-touch / loading waits return false above.
     post({ kind: "refusal", stage: "step", refusal: step.refusal });
-    return;
+    return true;
   }
   if (step.kind === "malformed") {
     jlog("malformed-step", { detail: step.detail, tick });
-    return;
+    return true;
   }
   if (writer !== null) {
     writer.publish(step.tick, (payload) => fillPayload(step, payload));
@@ -120,6 +124,7 @@ function runTick(tick: number): void {
     });
     jlog("terminal", { phase: step.phase, tick: step.tick });
   }
+  return true;
 }
 
 function pump(): void {

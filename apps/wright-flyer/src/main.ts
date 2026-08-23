@@ -32,7 +32,8 @@ import {
 import { flightByIndex, flightSeed, missionOutcome } from "./missions/flights.ts";
 import { JOURNEY_STAGES, journeyNextUrl, journeyStage } from "./journey.ts";
 import { togglePhotoMode } from "./photoMode.ts";
-
+import { scoreTouchdown } from "./landingScore.ts";
+import { createInstrumentsPanel, type InstrumentSample } from "./instruments.ts";
 /** Landing menu overlay (game front door). The scripted demo keeps
  * running behind it as the attract mode; every button just navigates
  * to the URL params the app already honors. */
@@ -204,6 +205,11 @@ function main(): void {
     );
   }
   let simClient: SimClient | undefined;
+  // Startup-watchdog state (sim block): the frame loop turns a 6 s
+  // tickless window into a LOUD typed warning. Human mode is exempt —
+  // waiting for the pilot's first control is by design.
+  let simStartMs = performance.now();
+  let watchdogFired = false;
   let renderer = createFlyerSceneRenderer(app);
   const resize = (): void => renderer.resize(app.clientWidth, app.clientHeight);
 
@@ -247,10 +253,14 @@ function main(): void {
             params.get("site") !== "huffman" && Number.isInteger(flightNum)
               ? flightByIndex(flightNum)
               : null;
+          const touchdown = divergence === null ? scoreTouchdown(recording) : null;
           const lines =
             mission !== null && divergence === null
               ? [...base, ...missionOutcome(mission, kpis.downrangeM, kpis.airborneS).lines]
               : base;
+          if (touchdown !== null) {
+            lines.push(touchdown.line);
+          }
           resultsCardEl.textContent = lines.join("\n");
           resultsCardEl.style.display = "block";
           // Telegram slide-in (T3.5): restart the animation each run.
@@ -412,10 +422,18 @@ function main(): void {
       params.get("site") !== "huffman" && Number.isInteger(missionNum) && missionNum >= 1 && missionNum <= 4
         ? flightSeed(missionNum)
         : 1903n;
+    // HONESTY LAW (menu.ts/protocol.ts agreement): the bounded aid flies
+    // ONLY when the URL claims it — the menu emits ?assist=1 on its
+    // toggle, journey stage 2 passes it explicitly, and stage 3 plus
+    // every unparametered run get the authentic machine. A silent
+    // default-on here would launder a modern aid into the historical
+    // and fixed-controls replays too.
+    const assistOn = params.get("assist") === "1";
+    simStartMs = performance.now();
     simClient.start(
       params.get("site") === "huffman"
         ? huffmanScenario(missionSeed, mode, member)
-        : dec17Scenario(missionSeed, mode, member, params.get("assist") === "1"),
+        : dec17Scenario(missionSeed, mode, member, assistOn),
     );
     renderer.dispose();
     renderer = createFlyerSceneRenderer(app, simClient);
@@ -432,6 +450,7 @@ function main(): void {
       resultsCardEl.style.display = "none";
       simClient.dispose();
       simClient = makeClient(recording);
+      simStartMs = performance.now();
       simClient.start(recordedToScenario(recording.scenario));
       renderer.dispose();
       renderer = createFlyerSceneRenderer(app, simClient, recording);
@@ -443,6 +462,29 @@ function main(): void {
           frames: recording.ticks.length,
           expectedDigest: recording.finalDigest,
         }),
+      );
+    });
+    // N: fresh relaunch of the SAME scenario — no ghost, no replay
+    // verdict, a clean new run (B11 gameplay loop). Works mid-run too;
+    // the old client is simply replaced.
+    window.addEventListener("keydown", (e: KeyboardEvent) => {
+      if (e.code !== "KeyN" || simClient === undefined) {
+        return;
+      }
+      resultsCardEl.style.display = "none";
+      simClient.dispose();
+      simClient = makeClient();
+      simStartMs = performance.now();
+      simClient.start(
+        params.get("site") === "huffman"
+          ? huffmanScenario(missionSeed, mode, member)
+          : dec17Scenario(missionSeed, mode, member, assistOn),
+      );
+      renderer.dispose();
+      renderer = createFlyerSceneRenderer(app, simClient);
+      resize();
+      console.info(
+        JSON.stringify({ suite: "wright-flyer-app", stage: "fresh-relaunch" }),
       );
     });
   }
@@ -461,6 +503,17 @@ function main(): void {
         JSON.stringify({ suite: "wright-flyer-app", stage: "photo-mode", active: t.active }),
       );
     }
+  });
+  // B10: FIELD INSTRUMENTS panel — the dormant visualization/lesson
+  // modules behind one opt-in toggle row, fed by the latest snapshot.
+  // The feed slot is declared FIRST: the panel registers its callback
+  // synchronously during construction, so assigning it from the hook
+  // would otherwise hit the temporal dead zone and kill main().
+  let instrumentsFeed: ((s: InstrumentSample | null) => void) | null = null;
+  const instruments = createInstrumentsPanel(document.body, {
+    onFrame(cb) {
+      instrumentsFeed = cb;
+    },
   });
 
 
@@ -501,6 +554,27 @@ function main(): void {
     }
     pumpHuman(nowMs, dtS);
     renderer.render(dtS);
+    if (instrumentsFeed !== null && simClient !== undefined) {
+      const s = simClient.sample(nowMs);
+      if (s !== null) {
+        instrumentsFeed({
+          tick: s.tick,
+          xM: s.xM,
+          hM: s.hM,
+          uMps: s.uMps,
+          wMps: s.wMps,
+          qRadS: s.qRadS,
+          thetaRad: s.thetaRad,
+          dcRad: s.dcRad,
+          warpRad: s.warpRad,
+          omegaRadS: s.omegaPropRadS,
+          gustWMps: s.gustWMps,
+          phase: s.phase,
+        });
+      } else {
+        instrumentsFeed(null);
+      }
+    }
     // Latency ledger: publication (new sim tick visible) then present.
     const tick = simClient?.latestTick() ?? 0;
     if (tick > lastPublishedTick) {
@@ -508,6 +582,28 @@ function main(): void {
       ledger.published(tick, nowMs);
     }
     ledger.presented(performance.now());
+    // Startup watchdog (surfaced-failure law): tickless 6 s after a
+    // start in an auto-stepping mode means the worker never came up —
+    // say so on the honest banner instead of silently demoing.
+    if (
+      simClient !== undefined &&
+      mode !== MODE_HUMAN &&
+      !watchdogFired &&
+      tick === 0 &&
+      nowMs - simStartMs > 6000
+    ) {
+      watchdogFired = true;
+      capabilityText.textContent =
+        "SIM WORKER DID NOT START — showing the scripted attract demo. Reload to retry.";
+      capabilityText.className = "warn";
+      console.error(
+        JSON.stringify({
+          suite: "wright-flyer-app",
+          stage: "sim-worker-startup-timeout",
+          waitedMs: nowMs - simStartMs,
+        }),
+      );
+    }
     lastMs = nowMs;
     frames += 1;
     if (nowMs - windowStartMs >= 1000) {

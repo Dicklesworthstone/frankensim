@@ -175,7 +175,11 @@ export function armAimAngles(
   // pitch from straight-down (-y): 0 = hanging, pi/2 = horizontal.
   const horiz = Math.hypot(dx, dz);
   const pitchRad = Math.atan2(horiz, -dy);
-  const yawRad = Math.atan2(dz, dx);
+  // YZX application (figure3d aimLeftArm) composes R = RY(yaw)*RZ(pitch);
+  // solving R*(sin p, -cos p, ...) = (dx, dy, dz)/|d| yields
+  // yaw = atan2(-dz, dx) — the plain atan2(dz, dx) mirrors the arm
+  // across the sagittal plane (102 deg off for a left-side wingtip grip).
+  const yawRad = Math.atan2(-dz, dx);
   return { yawRad, pitchRad };
 }
 

@@ -36,6 +36,10 @@
         color: #e0b34d;
       }
       /* ---- game HUD: analog dial panel ---- */
+      #wf-cam-toolbar button:hover {
+        background: rgba(176, 141, 63, 0.3) !important;
+        color: #fff !important;
+      }
       #wf-dial-panel {
         position: fixed;
         left: 50%;
@@ -47,15 +51,15 @@
         padding: 12px 18px 10px;
         border-radius: 14px 14px 6px 6px;
         background:
-          linear-gradient(180deg, rgba(74, 50, 30, 0.92), rgba(46, 30, 17, 0.95));
-        border: 1px solid #6b4a26;
-        border-bottom-color: #241507;
-        box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 220, 160, 0.25);
+          linear-gradient(180deg, rgba(54, 38, 22, 0.94), rgba(30, 20, 10, 0.97));
+        border: 1px solid #8a6a38;
+        border-bottom-color: #1a1005;
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6), inset 0 1px 0 rgba(255, 224, 160, 0.3);
         z-index: 6;
       }
       .wf-dial svg {
         display: block;
-        filter: drop-shadow(0 2px 3px rgba(0, 0, 0, 0.45));
+        filter: drop-shadow(0 3px 6px rgba(0, 0, 0, 0.55));
       }
       #wf-lever-stack {
         display: flex;
@@ -313,6 +317,66 @@
       .wf-journey-next a {
         color: #eed9a4;
         pointer-events: auto;
+      }
+      /* ---- FIELD INSTRUMENTS panel (B10) ---- */
+      #wf-inst-panel,
+      .wf-inst-panel {
+        position: fixed;
+        left: 12px;
+        top: 12px;
+        z-index: 18;
+        font: 11px Georgia, serif;
+        color: #d9c294;
+      }
+      .wf-inst-head {
+        display: inline-block;
+        padding: 6px 12px;
+        border: 1px solid #8a6a38;
+        border-radius: 14px;
+        background: rgba(28, 20, 12, 0.88);
+        letter-spacing: 1.5px;
+        cursor: pointer;
+        user-select: none;
+      }
+      .wf-inst-row {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 3px 10px;
+      }
+      .wf-inst-check {
+        accent-color: #e8c76a;
+      }
+      .wf-inst-view {
+        position: fixed;
+        right: 12px;
+        top: 34px;
+        z-index: 17;
+        width: min(320px, 40vw);
+        max-height: 62vh;
+        overflow-y: auto;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .wf-inst-view-hidden {
+        display: none;
+      }
+      .wf-inst-tile {
+        font: 11px/1.5 "Courier New", monospace;
+        color: #f0e4c8;
+        background: linear-gradient(180deg, rgba(58, 40, 24, 0.94), rgba(36, 24, 13, 0.96));
+        border: 1px solid #8a6a38;
+        border-radius: 6px;
+        padding: 8px 10px;
+        white-space: pre-wrap;
+        box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+      }
+      .wf-inst-tile-label {
+        font: 700 10px Georgia, serif;
+        letter-spacing: 1.2px;
+        color: #eed9a4;
+        margin-bottom: 4px;
       }
       /* ---- photo mode (body class, presentation-only grade) ---- */
       body.wf-photo #wf-telemetry,

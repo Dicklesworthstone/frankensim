@@ -21,6 +21,14 @@ export function rpm01FromOmega(propOmegaRadS: number): number {
   return Math.min(1, Math.max(0, propOmegaRadS / trim));
 }
 
+/** PURE wind-rush law (B12): pressure drag on the ear scales with the
+ * SQUARE of airspeed above a walking headwind; clamped well below the
+ * engine so it textures rather than dominates. */
+export function windRushGain(airspeedMps: number): number {
+  const u = Math.max(0, airspeedMps - 4);
+  return Math.min(0.32, (u / 26) * (u / 26));
+}
+
 export interface MixLevels {
   /** Engine tone gain [0, 0.5]. */
   readonly engine: number;
@@ -49,16 +57,6 @@ export function mixLevels(
   };
 }
 
-interface AudioCtor {
-  // Structural typing keeps the class testable without a real context.
-  readonly currentTime: number;
-  readonly destination: AudioDestinationNode;
-  createOscillator(): OscillatorNode;
-  createGain(): GainNode;
-  createBiquadFilter(): BiquadFilterNode;
-  createBuffer(channels: number, frames: number, rate: number): AudioBuffer;
-  createBufferSource(): AudioBufferSourceNode;
-}
 
 /** The flight soundscape. All node churn is lazy; `update` only sets
  * AudioParams (no allocations on the frame path). */
@@ -74,6 +72,7 @@ export class FlightAudio {
   private windGain: GainNode | null = null;
   private rumbleGain: GainNode | null = null;
   private surfGain: GainNode | null = null;
+  private surfWanted = true;
   private master: GainNode | null = null;
   private muted = false;
   private lastCryS = 0;
@@ -95,18 +94,19 @@ export class FlightAudio {
       }
       return;
     }
-    const Ctor = window.AudioContext as unknown as new () => AudioContext | undefined;
-    const ctx = new Ctor();
-    if (ctx === undefined) {
-      return;
+    let ctx: AudioContext;
+    try {
+      ctx = new AudioContext();
+    } catch {
+      return; // no WebAudio: the game runs silent, never crashes
     }
     this.ctx = ctx;
     const master = ctx.createGain();
     master.gain.value = MASTER_LEVEL;
     master.connect(ctx.destination);
     this.master = master;
-    // Engine: saw at the firing frequency + sub square an octave down,
-    // through a warm lowpass.
+    // Engine: warm triangle at the firing frequency + sub an octave
+    // down, through a dark lowpass — a chug, not a buzzer.
     const eGain = ctx.createGain();
     eGain.gain.value = 0;
     const lp = ctx.createBiquadFilter();
@@ -163,18 +163,54 @@ export class FlightAudio {
     };
     this.windGain = mkNoise(650, "bandpass", 0);
     this.rumbleGain = mkNoise(110, "lowpass", 0);
-    if (this.withOcean) {
+    if (this.withOcean && this.surfWanted) {
       this.surfGain = mkNoise(280, "lowpass", 0.05);
     }
+    // Wire whistling: high bandpass for rigging whistling in the wind.
+    this.wireGain = mkNoise(1600, "bandpass", 0);
+
+    // Twin counter-rotating propeller blade passage nodes
+    const pGain = ctx.createGain();
+    pGain.gain.value = 0;
+    const pFilter = ctx.createBiquadFilter();
+    pFilter.type = "lowpass";
+    pFilter.frequency.value = 180;
+    pGain.connect(pFilter);
+    pFilter.connect(master);
+    
+    const propL = ctx.createOscillator();
+    propL.type = "sine";
+    propL.frequency.value = 12;
+    propL.connect(pGain);
+    propL.start();
+
+    const propR = ctx.createOscillator();
+    propR.type = "sine";
+    propR.frequency.value = 12.4;
+    propR.connect(pGain);
+    propR.start();
+
+    this.propBeatingGain = pGain;
+    this.propBeatingOscL = propL;
+    this.propBeatingOscR = propR;
   }
 
-  /** Per-frame mix update (cheap: AudioParams only). */
+  private wireGain: GainNode | null = null;
+  private propBeatingOscL: OscillatorNode | null = null;
+  private propBeatingOscR: OscillatorNode | null = null;
+  private propBeatingGain: GainNode | null = null;
+
+  /** Per-frame mix update (cheap: AudioParams only). Optional fields:
+   * gust01 drives structural creaks; surfFacing01 (camera dot toward
+   * the Atlantic, [0,1]) crossfades the surf bed by heading. */
   update(state: {
     propOmegaRadS: number;
     airspeedMps: number;
     onRail: boolean;
     groundSpeedMps: number;
     nowS: number;
+    gust01?: number;
+    surfFacing01?: number;
   }): void {
     if (this.ctx === null || this.engineGain === null || this.engineOsc === null) {
       return;
@@ -186,23 +222,100 @@ export class FlightAudio {
       state.groundSpeedMps,
     );
     const t = this.ctx.currentTime;
-    this.engineGain.gain.setTargetAtTime(this.muted ? 0 : mix.engine * 0.5, t, 0.08);
-    this.engineOsc.frequency.setTargetAtTime(engineFreqHz(state.propOmegaRadS), t, 0.06);
+    const engFreq = engineFreqHz(state.propOmegaRadS);
+    const propRps = state.propOmegaRadS / (2 * Math.PI);
+    const propBpf = Math.max(4, propRps * 2);
+
+    this.engineGain.gain.setTargetAtTime(this.muted ? 0 : mix.engine * 0.52, t, 0.08);
+    this.engineOsc.frequency.setTargetAtTime(engFreq, t, 0.06);
     if (this.engineSub !== null) {
-      this.engineSub.frequency.setTargetAtTime(engineFreqHz(state.propOmegaRadS) / 2, t, 0.06);
+      this.engineSub.frequency.setTargetAtTime(engFreq / 2, t, 0.06);
+    }
+    if (this.propBeatingGain !== null && this.propBeatingOscL !== null && this.propBeatingOscR !== null) {
+      this.propBeatingGain.gain.setTargetAtTime(this.muted ? 0 : mix.engine * 0.28, t, 0.08);
+      this.propBeatingOscL.frequency.setTargetAtTime(propBpf, t, 0.06);
+      this.propBeatingOscR.frequency.setTargetAtTime(propBpf + 0.45, t, 0.06);
     }
     if (this.windGain !== null) {
-      this.windGain.gain.setTargetAtTime(this.muted ? 0 : mix.wind * 0.7, t, 0.15);
+      // Wind bed + square-law rush layered under one clamp.
+      const rush = windRushGain(state.airspeedMps);
+      this.windGain.gain.setTargetAtTime(
+        this.muted ? 0 : Math.min(0.6, mix.wind * 0.75 + rush),
+        t,
+        0.15,
+      );
+    }
+    if (this.wireGain !== null) {
+      const wireLevel = Math.max(0, Math.min(0.25, ((state.airspeedMps - 8) / 20) * 0.25));
+      this.wireGain.gain.setTargetAtTime(this.muted ? 0 : wireLevel, t, 0.2);
     }
     if (this.rumbleGain !== null) {
-      this.rumbleGain.gain.setTargetAtTime(this.muted ? 0 : mix.rumble * 0.8, t, 0.1);
+      this.rumbleGain.gain.setTargetAtTime(this.muted ? 0 : mix.rumble * 0.85, t, 0.1);
     }
-    // Occasional gull cry: a two-note descending chirp, at most every
-    // ~9 s (presentation flavor — no determinism claim).
-    if (!this.muted && state.nowS - this.lastCryS > 28 && Math.random() < 0.002) {
+    if (this.surfGain !== null && this.ctx !== null) {
+      // Heading crossfade: the surf swells as the lens faces east.
+      const facing = Math.max(0, Math.min(1, state.surfFacing01 ?? 0.5));
+      this.surfGain.gain.setTargetAtTime(
+        this.surfWanted && !this.muted ? 0.02 + 0.06 * facing : 0,
+        t,
+        0.5,
+      );
+    }
+    // Structural creaks: the airframe talks when gusts load the rig.
+    if (!this.muted && (state.gust01 ?? 0) > 0.5 && Math.random() < (state.gust01 ?? 0) * 0.01) {
+      this.creak();
+    }
+    // Occasional realistic gull cries: randomized between short chirp,
+    // melodic double-cry, and long soaring screech.
+    if (!this.muted && state.nowS - this.lastCryS > 16 && Math.random() < 0.005) {
       this.lastCryS = state.nowS;
       this.gullCry();
     }
+  }
+
+  /** Wire release twang at takeoff launch start. */
+  twang(): void {
+    if (this.ctx === null || this.master === null || this.muted) {
+      return;
+    }
+    const ctx = this.ctx;
+    const osc = ctx.createOscillator();
+    const g = ctx.createGain();
+    osc.type = "sine";
+    const t = ctx.currentTime;
+    osc.frequency.setValueAtTime(440, t);
+    osc.frequency.exponentialRampToValueAtTime(110, t + 0.18);
+    g.gain.setValueAtTime(0.25, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.2);
+    osc.connect(g);
+    g.connect(this.master);
+    osc.start(t);
+    osc.stop(t + 0.22);
+  }
+
+  /** Landing skid sand crunch foley on touchdown. */
+  sandCrunch(): void {
+    if (this.ctx === null || this.master === null || this.muted) {
+      return;
+    }
+    const ctx = this.ctx;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.3, ctx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.6);
+    const f = ctx.createBiquadFilter();
+    f.type = "bandpass";
+    f.frequency.value = 850;
+    const buf = ctx.createBuffer(1, Math.floor(ctx.sampleRate * 0.6), ctx.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < d.length; i += 1) {
+      d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / d.length, 1.5);
+    }
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    src.connect(f);
+    f.connect(g);
+    g.connect(this.master);
+    src.start();
   }
 
   /** Daniels' plate: a sharp mechanical click (called on the flash). */
@@ -218,7 +331,7 @@ export class FlightAudio {
     f.type = "highpass";
     f.frequency.value = 1800;
     const src = ctx.createBufferSource();
-    const buf = ctx.createBuffer(1, ctx.sampleRate * 0.07, ctx.sampleRate);
+    const buf = ctx.createBuffer(1, Math.floor(ctx.sampleRate * 0.07), ctx.sampleRate);
     const d = buf.getChannelData(0);
     for (let i = 0; i < d.length; i += 1) {
       d[i] = (Math.random() * 2 - 1) * (1 - i / d.length);
@@ -228,6 +341,48 @@ export class FlightAudio {
     f.connect(g);
     g.connect(this.master);
     src.start();
+  }
+
+  /** Airframe creak (B12): a dry wooden knock — two detuned triangles
+   * through a woody bandpass — for gust-loaded structure. */
+  private creak(): void {
+    if (this.ctx === null || this.master === null || this.muted) {
+      return;
+    }
+    const ctx = this.ctx;
+    const t0 = ctx.currentTime;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.05 + Math.random() * 0.03, t0);
+    g.gain.exponentialRampToValueAtTime(0.001, t0 + 0.32);
+    const bp = ctx.createBiquadFilter();
+    bp.type = "bandpass";
+    bp.frequency.value = 170 + Math.random() * 90;
+    bp.Q.value = 2.2;
+    g.connect(bp);
+    bp.connect(this.master);
+    for (const det of [1, 1.047]) {
+      const o = ctx.createOscillator();
+      o.type = "triangle";
+      o.frequency.setValueAtTime(140 * det, t0);
+      o.frequency.exponentialRampToValueAtTime(95 * det, t0 + 0.28);
+      o.connect(g);
+      o.start(t0);
+      o.stop(t0 + 0.34);
+    }
+  }
+
+  /** Site surf gate: Huffman Prairie is landlocked Ohio pasture —
+   * the ocean bed plays at Kill Devil Hills only. Call once at scene
+   * build; safe before or after ensureStarted. */
+  setSurfEnabled(on: boolean): void {
+    this.surfWanted = on;
+    if (this.surfGain !== null && this.ctx !== null) {
+      this.surfGain.gain.setTargetAtTime(
+        on ? 0.05 : 0,
+        this.ctx.currentTime,
+        0.4,
+      );
+    }
   }
 
   toggleMute(): boolean {
@@ -244,19 +399,49 @@ export class FlightAudio {
     }
     const ctx = this.ctx;
     const g = ctx.createGain();
-    g.gain.value = 0.03;
-    g.connect(this.master);
+    // Spatialize (B12): random azimuth pan + distance attenuation so
+    // the flock reads as AROUND the listener, not inside the head.
+    const pan = ctx.createStereoPanner();
+    pan.pan.value = Math.random() * 1.6 - 0.8;
+    g.gain.value = 0.035 * (0.45 + Math.random() * 0.55);
+    g.connect(pan);
+    pan.connect(this.master);
     const osc = ctx.createOscillator();
     osc.type = "sine";
     const t0 = ctx.currentTime;
-    osc.frequency.setValueAtTime(1250, t0);
-    osc.frequency.exponentialRampToValueAtTime(820, t0 + 0.16);
-    osc.frequency.setValueAtTime(1150, t0 + 0.2);
-    osc.frequency.exponentialRampToValueAtTime(700, t0 + 0.38);
-    g.gain.setValueAtTime(0.03, t0);
-    g.gain.setValueAtTime(0, t0 + 0.42);
-    osc.connect(g);
-    osc.start(t0);
-    osc.stop(t0 + 0.45);
+    const kind = Math.floor(Math.random() * 3);
+    if (kind === 0) {
+      // Classic 2-note descending gull call
+      osc.frequency.setValueAtTime(1350, t0);
+      osc.frequency.exponentialRampToValueAtTime(840, t0 + 0.18);
+      osc.frequency.setValueAtTime(1200, t0 + 0.22);
+      osc.frequency.exponentialRampToValueAtTime(720, t0 + 0.44);
+      g.gain.setValueAtTime(g.gain.value, t0);
+      g.gain.setValueAtTime(0, t0 + 0.48);
+      osc.connect(g);
+      osc.start(t0);
+      osc.stop(t0 + 0.5);
+    } else if (kind === 1) {
+      // High rising-then-falling screech
+      osc.frequency.setValueAtTime(900, t0);
+      osc.frequency.exponentialRampToValueAtTime(1600, t0 + 0.12);
+      osc.frequency.exponentialRampToValueAtTime(750, t0 + 0.35);
+      g.gain.setValueAtTime(g.gain.value, t0);
+      g.gain.setValueAtTime(0, t0 + 0.38);
+      osc.connect(g);
+      osc.start(t0);
+      osc.stop(t0 + 0.4);
+    } else {
+      // Gentle warble
+      osc.frequency.setValueAtTime(1100, t0);
+      osc.frequency.exponentialRampToValueAtTime(950, t0 + 0.15);
+      osc.frequency.exponentialRampToValueAtTime(1050, t0 + 0.25);
+      osc.frequency.exponentialRampToValueAtTime(680, t0 + 0.5);
+      g.gain.setValueAtTime(g.gain.value, t0);
+      g.gain.setValueAtTime(0, t0 + 0.52);
+      osc.connect(g);
+      osc.start(t0);
+      osc.stop(t0 + 0.55);
+    }
   }
 }
