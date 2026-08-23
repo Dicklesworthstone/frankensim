@@ -241,8 +241,8 @@ fn g0_supersession_graph_requires_closed_acyclic_exact_keys() {
     assert_eq!(
         StandardManifest::try_new(vec![unknown], ManifestLimits::DEFAULT),
         Err(ManifestError::UnknownSupersessionTarget {
-            key: old_key.clone(),
-            target: unknown_key,
+            key: Box::new(old_key.clone()),
+            target: Box::new(unknown_key),
         })
     );
 
