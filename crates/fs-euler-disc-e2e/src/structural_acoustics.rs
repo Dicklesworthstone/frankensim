@@ -4143,6 +4143,11 @@ fn inertia_relieved_point_force(
         rigid_residual,
         1.0e-10,
     )?;
+    // Overwrite the bare geometric projection with the inertia-relieved
+    // generalized force: downstream residual-flexibility displacements and
+    // response identity consume the elastic forcing with rigid-body
+    // equilibrium removed. This field therefore intentionally differs from a
+    // fresh `project_point_force_on_modes` result by the relief residue.
     projection.modal_force_n_per_sqrt_kg = basis
         .enrichment_modes
         .iter()
@@ -7347,7 +7352,18 @@ mod tests {
                 .unwrap()
                 .identity
         );
-        let replay = project_point_force_on_modes(
+        // The stored projection is the inertia-relieved generalized force, so
+        // exact replay must go through the admitted relieved path, not the
+        // bare geometric projection: the two arithmetic paths differ by the
+        // rigid-relief residue and by summation order (and may diverge across
+        // ISAs because only one is written in terms of fused multiply-adds).
+        let (relieved_replay, _, _) =
+            inertia_relieved_point_force(&fine, point, [0.0, 0.0, 1.0], 1.0e-12).unwrap();
+        assert_eq!(
+            relieved_replay.modal_force_n_per_sqrt_kg,
+            unit.force_projection.modal_force_n_per_sqrt_kg
+        );
+        let geometric = project_point_force_on_modes(
             &fine.mesh,
             &fine.enrichment_modes,
             point,
@@ -7355,10 +7371,20 @@ mod tests {
             1.0e-12,
         )
         .unwrap();
-        assert_eq!(
-            replay.modal_force_n_per_sqrt_kg,
-            unit.force_projection.modal_force_n_per_sqrt_kg
-        );
+        for (geometric_force, relieved_force) in geometric
+            .modal_force_n_per_sqrt_kg
+            .iter()
+            .zip(&unit.force_projection.modal_force_n_per_sqrt_kg)
+        {
+            // Inertia relief may move an elastic generalized force only by
+            // the mass-orthogonality residue of this basis, already gated to
+            // 1.0e-8 during construction above; the bare geometric projection
+            // must therefore agree inside a band well below that gate.
+            let scale = geometric_force.abs().max(relieved_force.abs());
+            assert!(
+                (relieved_force - geometric_force).abs() <= 1.0e-9 * scale.max(f64::MIN_POSITIVE)
+            );
+        }
 
         let split = fine
             .enrichment_modes
