@@ -681,3 +681,324 @@ impl SlotJet3dRung {
         )
     }
 }
+
+/// Outcome of one chunked invocation.
+#[derive(Debug, Clone)]
+pub enum SweepProgress {
+    /// The full settle+record finished; the run is complete.
+    Complete(Box<SlotJet3dRun>),
+    /// The step budget expired first; resume with the same
+    /// checkpoint directory and configuration to continue.
+    Partial {
+        /// Total lattice steps completed across all chunks.
+        steps_done: u64,
+    },
+}
+
+/// Canonical configuration fingerprint (FNV-1a over the pinned
+/// fields) binding a checkpoint to exactly one geometry/law.
+#[must_use]
+pub fn config_fingerprint(cfg: &SlotJet3dConfig) -> u64 {
+    let CollisionModel3::CentralMoment {
+        second_order_rate,
+        higher_order_rate,
+    } = cfg.collision
+    else {
+        return 0;
+    };
+    let tag = format!(
+        "v1|{},{},{},{},{},{},{},{},{},{},{},{},{}",
+        cfg.nx,
+        cfg.ny,
+        cfg.nz,
+        cfg.slot_half,
+        cfg.u_jet,
+        second_order_rate,
+        higher_order_rate,
+        cfg.nozzle_thickness,
+        cfg.edge_distance,
+        cfg.plate_length,
+        cfg.fringe_width,
+        cfg.fringe_sigma,
+        cfg.seed_amplitude
+    );
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in tag.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+struct ChunkState {
+    settle_done: u64,
+    record_done: u64,
+    force_series: Vec<[f64; 2]>,
+}
+
+const CHECKPOINT_MAGIC: &[u8; 8] = b"FSJSCKPT";
+
+fn write_checkpoint(
+    dir: &std::path::Path,
+    cfg: &SlotJet3dConfig,
+    rig: &Rig3,
+    state: &ChunkState,
+) -> Result<(), AeroacError> {
+    use std::io::Write;
+    std::fs::create_dir_all(dir).map_err(|_| AeroacError::InvalidParameter {
+        what: "cannot create checkpoint directory",
+    })?;
+    let path = dir.join("state.bin");
+    let tmp = dir.join("state.bin.tmp");
+    let file = std::fs::File::create(&tmp)
+        .map_err(|_| AeroacError::InvalidParameter { what: "cannot create checkpoint file" })?;
+    let mut w = std::io::BufWriter::new(file);
+    let refuse = |_: ()| AeroacError::InvalidParameter { what: "checkpoint write" };
+    w.write_all(CHECKPOINT_MAGIC).map_err(refuse)?;
+    w.write_all(&1u32.to_le_bytes()).map_err(refuse)?;
+    w.write_all(&config_fingerprint(cfg).to_le_bytes()).map_err(refuse)?;
+    w.write_all(&state.settle_done.to_le_bytes()).map_err(refuse)?;
+    w.write_all(&state.record_done.to_le_bytes()).map_err(refuse)?;
+    #[allow(clippy::cast_possible_truncation)]
+    let record_len = state.force_series.len() as u64;
+    w.write_all(&record_len.to_le_bytes()).map_err(refuse)?;
+    for pair in &state.force_series {
+        w.write_all(&pair[0].to_le_bytes()).map_err(refuse)?;
+        w.write_all(&pair[1].to_le_bytes()).map_err(refuse)?;
+    }
+    // Fluid-cell populations in canonical x-fastest order; solid
+    // cells are skipped (reconstructed by the rig on load).
+    let [nx, ny, nz] = rig.grid.dimensions();
+    for z in 0..nz {
+        for y in 0..ny {
+            for x in 0..nx {
+                if rig.grid.is_solid(x, y, z) {
+                    continue;
+                }
+                for q in rig.grid.populations(x, y, z) {
+                    w.write_all(&q.to_le_bytes()).map_err(refuse)?;
+                }
+            }
+        }
+    }
+    w.flush().map_err(refuse)?;
+    std::fs::rename(&tmp, &path).map_err(|_| {
+        AeroacError::InvalidParameter { what: "cannot finalize checkpoint (atomic rename)" }
+    })?;
+    Ok(())
+}
+
+/// Run the sweep under an explicit per-invocation step budget,
+/// checkpointing atomically so repeated invocations chain into one
+/// bit-identical execution (the recorded checkpoint-between-rungs
+/// recipe under bounded worker job walls).
+///
+/// # Errors
+/// Config validation, checkpoint I/O refusals, fingerprint
+/// mismatch, and the usual destabilization refusals.
+pub fn run_slot_jet_3d_chunked(
+    cfg: &SlotJet3dConfig,
+    checkpoint_dir: &std::path::Path,
+    step_budget: usize,
+) -> Result<SweepProgress, AeroacError> {
+    validate_config(cfg)?;
+    if step_budget == 0 {
+        return Err(AeroacError::InvalidParameter {
+            what: "step budget must be positive",
+        });
+    }
+    let ckpt_path = checkpoint_dir.join("state.bin");
+    let (mut rig, mut state) = if ckpt_path.exists() {
+        load_checkpoint(cfg, &ckpt_path)?
+    } else {
+        (
+            Rig3::build(cfg),
+            ChunkState {
+                settle_done: 0,
+                record_done: 0,
+                force_series: Vec::new(),
+            },
+        )
+    };
+    step_chunk_loop(cfg, &mut rig, &mut state, step_budget)?;
+    let total_settle = u64::try_from(cfg.steps_settle).unwrap_or(u64::MAX);
+    let total_record = u64::try_from(cfg.steps_record).unwrap_or(u64::MAX);
+    if state.settle_done >= total_settle && state.record_done >= total_record {
+        let _ = std::fs::remove_file(&ckpt_path);
+        let (mach_max, flux_plate, flux_fringe) = rig.plane_diagnostics();
+        return Ok(SweepProgress::Complete(Box::new(finish_run(
+            cfg,
+            state.force_series,
+            mach_max,
+            flux_plate,
+            flux_fringe,
+        ))));
+    }
+    write_checkpoint(checkpoint_dir, cfg, &rig, &state)?;
+    Ok(SweepProgress::Partial {
+        steps_done: state.settle_done + state.record_done,
+    })
+}
+
+/// Jet Reynolds number for a validated central-moment config.
+#[must_use]
+pub fn reynolds_of(cfg: &SlotJet3dConfig) -> f64 {
+    let CollisionModel3::CentralMoment { second_order_rate, .. } = cfg.collision else {
+        return f64::NAN;
+    };
+    let nu = (1.0 / second_order_rate - 0.5) / 3.0;
+    #[allow(clippy::cast_precision_loss)]
+    cfg.u_jet * 2.0 * cfg.slot_half / nu
+}
+
+/// FFT Strouhal bin width for the record length (the quantization
+/// disclosure carried on every receipt).
+#[must_use]
+pub fn strouhal_bin_width_of(cfg: &SlotJet3dConfig) -> f64 {
+    #[allow(clippy::cast_precision_loss)]
+    (1.0 / cfg.steps_record as f64) * 2.0 * cfg.slot_half / cfg.u_jet
+}
+
+fn finish_run(
+    cfg: &SlotJet3dConfig,
+    force_series: Vec<[f64; 2]>,
+    mach_max: f64,
+    flux_plate: f64,
+    flux_fringe: f64,
+) -> SlotJet3dRun {
+    SlotJet3dRun {
+        force_series,
+        diagnostics: SlotJet3dDiagnostics {
+            mach_max_lattice: mach_max,
+            flux_plate_plane: flux_plate,
+            flux_fringe_plane: flux_fringe,
+            reynolds: reynolds_of(cfg),
+            record_len: cfg.steps_record,
+            strouhal_bin_width: strouhal_bin_width_of(cfg),
+        },
+        scope: SCOPE_STATEMENT,
+    }
+}
+
+fn load_checkpoint(
+    cfg: &SlotJet3dConfig,
+    ckpt_path: &std::path::Path,
+) -> Result<(Rig3, ChunkState), AeroacError> {
+    let bytes = std::fs::read(ckpt_path)
+        .map_err(|_| AeroacError::InvalidParameter { what: "cannot read checkpoint" })?;
+    if bytes.len() < 44 || bytes[0..8] != *CHECKPOINT_MAGIC {
+        return Err(AeroacError::InvalidParameter {
+            what: "checkpoint magic/version mismatch",
+        });
+    }
+    let stored_fp = u64::from_le_bytes(bytes[12..20].try_into().expect("fixed slice"));
+    if stored_fp != config_fingerprint(cfg) {
+        return Err(AeroacError::InvalidParameter {
+            what: "checkpoint belongs to a different configuration",
+        });
+    }
+    let settle_done = u64::from_le_bytes(bytes[20..28].try_into().expect("fixed slice"));
+    let record_done = u64::from_le_bytes(bytes[28..36].try_into().expect("fixed slice"));
+    let record_len = usize::try_from(u64::from_le_bytes(
+        bytes[36..44].try_into().expect("fixed slice"),
+    ))
+    .unwrap_or(usize::MAX);
+    if bytes.len() < 44 + 16 * record_len {
+        return Err(AeroacError::InvalidParameter {
+            what: "checkpoint truncated (force series)",
+        });
+    }
+    let mut force_series = Vec::with_capacity(record_len);
+    let mut off = 44usize;
+    for _ in 0..record_len {
+        let fx = f64::from_le_bytes(bytes[off..off + 8].try_into().expect("fixed slice"));
+        let fy =
+            f64::from_le_bytes(bytes[off + 8..off + 16].try_into().expect("fixed slice"));
+        force_series.push([fx, fy]);
+        off += 16;
+    }
+    let mut rig = Rig3::build(cfg);
+    for z in 0..cfg.nz {
+        for y in 0..cfg.ny {
+            for x in 0..cfg.nx {
+                if rig.grid.is_solid(x, y, z) {
+                    continue;
+                }
+                let mut pops = [0.0f64; Q3];
+                for q in &mut pops {
+                    if off + 8 > bytes.len() {
+                        return Err(AeroacError::InvalidParameter {
+                            what: "checkpoint truncated (lattice)",
+                        });
+                    }
+                    *q = f64::from_le_bytes(bytes[off..off + 8].try_into().expect("fixed slice"));
+                    off += 8;
+                }
+                if !pops.iter().all(|v| v.is_finite()) {
+                    return Err(AeroacError::NonFinite {
+                        what: "checkpoint carries non-finite populations",
+                    });
+                }
+                rig.grid.set_populations(x, y, z, &pops);
+            }
+        }
+    }
+    Ok((
+        rig,
+        ChunkState {
+            settle_done,
+            record_done,
+            force_series,
+        },
+    ))
+}
+
+fn step_chunk_loop(
+    cfg: &SlotJet3dConfig,
+    rig: &mut Rig3,
+    state: &mut ChunkState,
+    step_budget: usize,
+) -> Result<(), AeroacError> {
+    let total_settle = u64::try_from(cfg.steps_settle).unwrap_or(u64::MAX);
+    let total_record = u64::try_from(cfg.steps_record).unwrap_or(u64::MAX);
+    let mut budget = step_budget as u64;
+    while budget > 0 {
+        if state.settle_done < total_settle {
+            let stepped = std::panic::catch_unwind(core::panic::AssertUnwindSafe(|| {
+                rig.grid.step();
+                rig.fringe.apply(&mut rig.grid);
+            }));
+            if stepped.is_err() {
+                return Err(AeroacError::NonFinite {
+                    what: "3-D lattice destabilized during chunked settle",
+                });
+            }
+            state.settle_done += 1;
+        } else if state.record_done < total_record {
+            let stepped = std::panic::catch_unwind(core::panic::AssertUnwindSafe(|| {
+                rig.grid.step();
+                rig.fringe.apply(&mut rig.grid);
+                rig.plate_impulse()
+            }));
+            let impulse = match stepped {
+                Ok(impulse) => impulse,
+                Err(_) => {
+                    return Err(AeroacError::NonFinite {
+                        what: "3-D lattice destabilized during chunked record",
+                    })
+                }
+            };
+            if !impulse[0].is_finite() || !impulse[1].is_finite() {
+                return Err(AeroacError::NonFinite {
+                    what: "3-D lattice destabilized (non-finite plate force)",
+                });
+            }
+            state.force_series.push(impulse);
+            state.record_done += 1;
+        } else {
+            break;
+        }
+        budget -= 1;
+    }
+    Ok(())
+}
