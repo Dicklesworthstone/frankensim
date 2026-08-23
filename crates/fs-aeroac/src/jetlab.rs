@@ -435,23 +435,28 @@ pub struct ForcePeak {
     pub force_rms: f64,
 }
 
-/// Hann-windowed periodogram peak of the transverse (`[1]`) force
+/// Hann-windowed periodogram of the transverse (`[1]`) force
 /// component: mean removal, Hann window, power over the positive
-/// half-spectrum, peak search skipping the first `skip_bins` bins
-/// (fringe-transient / residual-DC leakage guard), prominence
-/// against the median admitted power.
+/// half-spectrum, plus peak search skipping the first `skip_bins`
+/// bins (fringe-transient / residual-DC leakage guard) with
+/// prominence against the median admitted power.
+///
+/// The shared measurement pipeline behind [`transverse_force_peak`];
+/// exposed so other rigs (the 3-D slot-jet lane) classify force
+/// records through the IDENTICAL window/FFT/peak math instead of a
+/// parallel convention.
 ///
 /// # Errors
 /// [`AeroacError::InvalidParameter`] unless the record length is a
 /// power of two >= 64 and `1 <= skip_bins < n/4`;
 /// [`AeroacError::NonFinite`]/[`AeroacError::InvalidParameter`] on
 /// bad `slot_half`/`u_jet`.
-pub fn transverse_force_peak(
+pub fn transverse_force_spectrum(
     force_series: &[[f64; 2]],
     slot_half: f64,
     u_jet: f64,
     skip_bins: usize,
-) -> Result<ForcePeak, AeroacError> {
+) -> Result<(Vec<f64>, ForcePeak), AeroacError> {
     let n = force_series.len();
     if !n.is_power_of_two() || n < 64 {
         return Err(AeroacError::InvalidParameter {
@@ -510,12 +515,30 @@ pub fn transverse_force_peak(
     let prominence = peak_pow / sorted[sorted.len() / 2].max(1e-300);
     #[allow(clippy::cast_precision_loss)]
     let strouhal = (peak_bin as f64 / n_f) * 2.0 * slot_half / u_jet;
-    Ok(ForcePeak {
+    let peak = ForcePeak {
         strouhal,
         bin: peak_bin,
         prominence,
         force_rms: rms,
-    })
+    };
+    Ok((power, peak))
+}
+
+/// Hann-windowed periodogram peak of the transverse (`[1]`) force
+/// component: mean removal, Hann window, power over the positive
+/// half-spectrum, peak search skipping the first `skip_bins` bins
+/// (fringe-transient / residual-DC leakage guard), prominence
+/// against the median admitted power.
+///
+/// # Errors
+/// [`transverse_force_spectrum`] refusals.
+pub fn transverse_force_peak(
+    force_series: &[[f64; 2]],
+    slot_half: f64,
+    u_jet: f64,
+    skip_bins: usize,
+) -> Result<ForcePeak, AeroacError> {
+    transverse_force_spectrum(force_series, slot_half, u_jet, skip_bins).map(|(_, peak)| peak)
 }
 
 /// Which leg of the ramp a rung was measured on.

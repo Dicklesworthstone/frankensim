@@ -31,6 +31,10 @@
 //!   l011o), the inverse-cascade refusal to catalog those spectra as
 //!   broadband flute noise, a spectral-flatness measurement, and a
 //!   D3Q19 operator smoke that does not mint a 3D broadband table.
+//! - [`slot_jet_3d`]: the 3-D slot-jet rig on the D3Q19
+//!   central-moment operator (bead frankensim-music-v8-root-3ez8g.10.1)
+//!   — the executed follow-up lane to the recorded 2-D tonal lock,
+//!   with its own discipline laws and honest both-outcomes framing.
 
 pub mod bessel;
 pub mod bickley;
@@ -38,6 +42,7 @@ pub mod curle2d;
 pub mod jetlab;
 pub mod noisetable;
 pub mod regime;
+pub mod slot_jet_3d;
 
 /// The honest-scope statement every exported artifact embeds (the
 /// bead's marketing-mutation guard asserts its presence): 2D line

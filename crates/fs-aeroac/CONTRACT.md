@@ -80,6 +80,24 @@ scope law, pinned as data and by test).
   raises `broadband_demonstrated` only from a real spectrum that
   clears the floor. The smoke alone does not mint a 3-D broadband
   table.
+- `slot_jet_3d` — bead frankensim-music-v8-root-3ez8g.10.1: the 3-D
+  slot-jet rig on the D3Q19 central-moment operator, the executed
+  follow-up lane to the recorded 2-D tonal lock. Periodic domain +
+  right-side per-y-row fringe (`Fringe3`, the Sponge2 port; its 3-D
+  reflection coefficient is MEASURED by the test battery with a
+  bounce-back-wall control), binary-slit nozzle wall (the executed
+  2-D lesson kept), two-cell splitter plate across the full span,
+  momentum-exchange plate force, `run_slot_jet_3d` /
+  `classify_rung` / `SlotJet3dRung::to_jsonl` receipts with the FFT
+  bin disclosure and the `FORCE_RMS_AMPLITUDE_FLOOR` amplitude law.
+  The Re actuator is the central-moment second-order rate at fixed
+  `u_jet`; independent rungs, not adiabatic continuation. Both
+  outcomes are honest wins: a broadband rung above the tonal
+  ceiling or a quantified tonal refusal. Driver:
+  `src/bin/slot_jet_3d_sweep.rs` +
+  `scripts/e2e/music/slot_jet_3d_sweep.sh`. No experimental,
+  video-backed, or absolute-level claim survives this lane; the
+  crate scope statement applies to every spectral quantity.
 
 ## Invariants
 
