@@ -256,7 +256,9 @@ pub struct V08b1Receipt {
     pub receipt_digest: String,
 }
 
+/// Wire schema id stamped on every retained v08b1 receipt.
 pub const RECEIPT_SCHEMA: &str = "org.frankensim.wf.v08b1-receipt.v1";
+/// Human-readable referee-model tier declaration for the retained receipt.
 pub const REFEREE_TIER: &str = "dense-uvlm1-prescribed-wake: single-chordwise-ring lattice, \
      thin-airfoil closure, rigid downstream convection, exact flat-ground images, \
      half-chord apparent-mass lift term";
@@ -427,6 +429,7 @@ struct WakeRing {
 /// `referee-case-invalid` (caps at cap AND cap+1: steps, dt, speed,
 /// rho, convection; ground must sit below both surfaces);
 /// `referee-system-singular`.
+#[allow(clippy::too_many_lines)] // one dense deterministic referee case; split obscures the physics
 pub fn run_case(g: &RefereeGeometry, case: &RefereeCase) -> Result<CaseSeries, Refusal> {
     let ok = case.v_mps.is_finite()
         && case.v_mps >= 5.0
@@ -538,7 +541,7 @@ pub fn run_case(g: &RefereeGeometry, case: &RefereeCase) -> Result<CaseSeries, R
     }
     let mut bytes = Vec::new();
     for series in [&wing_lift, &canard_lift, &hinge] {
-        for v in series.iter() {
+        for v in series {
             bytes.extend_from_slice(&v.to_bits().to_le_bytes());
         }
     }
