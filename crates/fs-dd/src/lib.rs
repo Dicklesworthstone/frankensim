@@ -104,6 +104,9 @@ impl Decomposition {
                 count += 1;
             }
         }
+        // Identical coefficients make the harmonic mean bitwise-equal to either
+        // input; an epsilon would silently corrupt exact uniform edges.
+        #[allow(clippy::float_cmp)]
         match count {
             0 => 1.0,
             1 => coefficients[0],
@@ -895,6 +898,7 @@ impl Bddc {
     /// [`CgError`] for caller-invalid dimension, RHS, or tolerance. Numerical
     /// recurrence failures are successful reports with
     /// [`CgTermination::Breakdown`] so the last finite residual is retained.
+    #[allow(clippy::too_many_lines)] // One CG driver keeps recurrence, breakdown attribution, and Lanczos bookkeeping in lockstep; splitting would let them drift apart.
     pub fn solve_cg(
         &self,
         b_gamma: &[f64],
@@ -1150,7 +1154,7 @@ impl Bddc {
                 alphas.clear();
                 betas.clear();
                 z = self.precondition(&r);
-                p = z.clone();
+                p.clone_from(&z);
                 rz = dot(&r, &z);
                 if !rz.is_finite() {
                     return Ok(cg_breakdown_report(
@@ -1468,6 +1472,9 @@ fn bisect_ritz(d: &[f64], e: &[f64], radius: f64, target: usize) -> Option<f64> 
     // endpoint check normally stops much earlier.
     for _ in 0..1_100 {
         let mid = f64::midpoint(lo, hi);
+        // Fixed-point termination of binary bisection IS bitwise identity;
+        // an epsilon would stop on representable-but-unconverged midpoints.
+        #[allow(clippy::float_cmp)]
         if mid == lo || mid == hi {
             break;
         }
@@ -1481,6 +1488,8 @@ fn bisect_ritz(d: &[f64], e: &[f64], radius: f64, target: usize) -> Option<f64> 
     estimate.is_finite().then_some(estimate)
 }
 
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+#[allow(clippy::float_cmp)] // Tests pin analytic kappa values (single-Ritz projections are exactly 1) bit-exactly.
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1608,4 +1617,3 @@ mod tests {
 }
 
 /// Crate version, re-exported for provenance stamping.
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
