@@ -604,6 +604,8 @@ fn metadata_feeds_the_roofline_table() {
 
 #[test]
 fn metadata_json_escapes_kernel_names() {
+    const HOSTILE: &str = "kernel\"\\\u{0008}\u{000c}\n\r\t\u{0000}\u{001f}";
+    const ESCAPED: &str = "kernel\\\"\\\\\\b\\f\\n\\r\\t\\u0000\\u001f";
     let plain = KernelMeta {
         name: "plain",
         flops_per_elem: 2,
@@ -616,9 +618,6 @@ fn metadata_json_escapes_kernel_names() {
         plain.descr(),
         "{\"kernel\":\"plain\",\"flops_per_elem\":2,\"bytes_per_elem\":24,\"intensity\":0.0833,\"halo\":0,\"reduction\":\"None\",\"determinism\":\"BitwiseAllTiers\"}"
     );
-
-    const HOSTILE: &str = "kernel\"\\\u{0008}\u{000c}\n\r\t\u{0000}\u{001f}";
-    const ESCAPED: &str = "kernel\\\"\\\\\\b\\f\\n\\r\\t\\u0000\\u001f";
     let hostile = KernelMeta {
         name: HOSTILE,
         ..plain

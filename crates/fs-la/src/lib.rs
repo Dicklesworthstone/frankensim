@@ -7,6 +7,7 @@
 
 pub mod batched;
 pub mod batched_f32;
+pub mod canonical_qr;
 pub mod eigen;
 pub mod eigen_complex;
 pub mod factor;
