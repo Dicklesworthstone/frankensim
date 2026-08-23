@@ -7,7 +7,9 @@
 
 use crate::{CancelGate, Cx};
 use fs_alloc::{LeaseCharge, OperationMemoryLease};
-use fs_blake3::{ContentHash, DomainHasher, hash_domain};
+use fs_blake3::{ContentHash, DomainHasher};
+#[cfg(test)]
+use fs_blake3::hash_domain;
 
 pub use asupersync::time::{TimeSource, VirtualClock, WallClock};
 pub use asupersync::types::Time;
@@ -4528,7 +4530,7 @@ fn verify_failure_propagation(
         }
     }
     match (&receipt.failure, receipt.failure_origin) {
-        (None, None) | (Some(_), None) => {}
+        (None | Some(_), None) => {}
         (None, Some(_)) => {
             return Err(invocation_semantic_error("failure-origin-without-failure"));
         }

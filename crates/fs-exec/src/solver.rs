@@ -8036,11 +8036,12 @@ mod tests {
                 CancelAfterPolls { remaining },
             ) {
                 Ok(_) => panic!("migration published before its measured final poll"),
-                Err(LegacySnapshotV1Error::Cancelled { phase, .. })
-                | Err(LegacySnapshotV1Error::Target(snapshot_v2::SnapshotV2Error::Cancelled {
-                    phase,
-                    ..
-                })) => {
+                Err(
+                    LegacySnapshotV1Error::Cancelled { phase, .. }
+                    | LegacySnapshotV1Error::Target(
+                        snapshot_v2::SnapshotV2Error::Cancelled { phase, .. },
+                    ),
+                ) => {
                     phases.insert(phase);
                 }
                 Err(other) => panic!("cancellation sweep produced non-cancellation: {other}"),

@@ -1912,12 +1912,18 @@ fn verify_completion_witness(
                 return Err(completion_invariant("cancelled-error"));
             }
         }
-        Some(RunError::TilePanicked {
-            kernel, completed, ..
-        })
-        | Some(RunError::TileFailed {
-            kernel, completed, ..
-        }) => {
+        Some(
+            RunError::TilePanicked {
+                kernel,
+                completed,
+                ..
+            }
+            | RunError::TileFailed {
+                kernel,
+                completed,
+                ..
+            },
+        ) => {
             if *kernel != witness.kernel
                 || *completed != witness.completed_tiles
                 || !witness.cancellation_requested_at_terminal
