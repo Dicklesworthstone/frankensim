@@ -1615,5 +1615,3 @@ mod tests {
         );
     }
 }
-
-/// Crate version, re-exported for provenance stamping.
