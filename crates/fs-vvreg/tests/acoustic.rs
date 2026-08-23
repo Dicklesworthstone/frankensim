@@ -82,6 +82,25 @@ fn every_case_is_structurally_complete() {
                     case.id
                 );
             }
+            AcousticAcceptance::AbsoluteTolerance { atol } => {
+                assert!(
+                    atol.is_finite() && atol > 0.0,
+                    "{}: atol must be finite and positive",
+                    case.id
+                );
+            }
+            AcousticAcceptance::ClassBand { lo_hz, hi_hz } => {
+                assert!(
+                    lo_hz.is_finite() && hi_hz.is_finite() && hi_hz > lo_hz,
+                    "{}: class band must be finite and ordered (lo < hi)",
+                    case.id
+                );
+                assert!(
+                    case.reference_value_si >= lo_hz && case.reference_value_si <= hi_hz,
+                    "{}: reference value must land inside its own class band",
+                    case.id
+                );
+            }
         }
         for context in case.context {
             assert!(
@@ -95,7 +114,7 @@ fn every_case_is_structurally_complete() {
         // decision and retention explicitly; analytic rows must say why no
         // transcription trust is needed.
         match case.level {
-            AcousticLevel::PublishedExperiment => {
+            AcousticLevel::PublishedExperiment | AcousticLevel::PublishedModelData => {
                 assert!(
                     case.license.contains("CC-BY")
                         || case.license.contains("two-source")

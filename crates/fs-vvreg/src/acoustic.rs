@@ -59,6 +59,10 @@ pub enum AcousticFamily {
     GuitarBody,
     /// Analytic bar/beam definitions.
     BarAnalytic,
+    /// Vocal-tract transfer-function references (published tube-chart models).
+    VowelTract,
+    /// Porous-absorber normal-incidence absorption references.
+    PorousAbsorber,
 }
 
 impl AcousticFamily {
@@ -70,6 +74,8 @@ impl AcousticFamily {
             Self::PlateReference => "plate-reference",
             Self::GuitarBody => "guitar-body",
             Self::BarAnalytic => "bar-analytic",
+            Self::VowelTract => "vowel-tract",
+            Self::PorousAbsorber => "porous-absorber",
         }
     }
 }
@@ -83,6 +89,9 @@ pub enum AcousticLevel {
     /// Published-experiment record (Level-C analog): derived/tabulated
     /// values with named licensing and retention decisions.
     PublishedExperiment,
+    /// Published model-derived data (tabulated from a cited computational
+    /// chart in the source, not a direct physical acquisition).
+    PublishedModelData,
 }
 
 impl AcousticLevel {
@@ -92,6 +101,7 @@ impl AcousticLevel {
         match self {
             Self::AnalyticDefinition => "analytic-definition",
             Self::PublishedExperiment => "published-experiment",
+            Self::PublishedModelData => "published-model-data",
         }
     }
 }
@@ -112,6 +122,19 @@ pub enum AcousticAcceptance {
         /// `|model - reference| / |reference|` ceiling.
         rtol: f64,
     },
+    /// Absolute tolerance on the metric's coherent-SI value.
+    AbsoluteTolerance {
+        /// `|model - reference|` ceiling.
+        atol: f64,
+    },
+    /// Pitch-class band check: the reference must land inside a named
+    /// class range (a CLASS check, never a per-subject match claim).
+    ClassBand {
+        /// Inclusive lower edge, Hz.
+        lo_hz: f64,
+        /// Inclusive upper edge, Hz.
+        hi_hz: f64,
+    },
 }
 
 impl AcousticAcceptance {
@@ -123,6 +146,8 @@ impl AcousticAcceptance {
                 format!("cents-outer={outer},cents-inner={inner}")
             }
             Self::Relative { rtol } => format!("rtol={rtol}"),
+            Self::AbsoluteTolerance { atol } => format!("atol={atol}"),
+            Self::ClassBand { lo_hz, hi_hz } => format!("class-band={lo_hz}-{hi_hz}Hz"),
         }
     }
 }
@@ -171,6 +196,8 @@ pub struct AcousticCase {
     pub retention: &'static str,
     /// Why this row carries no solver evidence by itself.
     pub no_claim_reason: &'static str,
+    /// Manifest status column spelling (projection of registration state).
+    pub status: &'static str,
 }
 
 /// One recorded absence or refusal — the population signal, named.
@@ -254,6 +281,7 @@ const fn ernoult(
         license: ERNOULT_LICENSE,
         retention: ERNOULT_RETENTION,
         no_claim_reason: REFERENCE_ONLY,
+        status: "reference-only",
     }
 }
 
@@ -285,6 +313,7 @@ const fn olson_hazell(
         license: OH_LICENSE,
         retention: OH_RETENTION,
         no_claim_reason: REFERENCE_ONLY,
+        status: "reference-only",
     }
 }
 
@@ -317,6 +346,7 @@ const fn carcagno(
         license: CARCAGNO_LICENSE,
         retention: CARCAGNO_RETENTION,
         no_claim_reason: REFERENCE_ONLY,
+        status: "reference-only",
     }
 }
 
@@ -356,6 +386,71 @@ const fn bar_ratio(
         license: BAR_LICENSE,
         retention: BAR_RETENTION,
         no_claim_reason: REFERENCE_ONLY,
+        status: "reference-only",
+    }
+}
+
+const ASSANEO_LICENSE: &str = "CC-BY (article license verbatim in the saved PDF)";
+const ASSANEO_RETENTION: &str = "full Table 2 transcribed in crates/fs-couple/src/tract.rs + \
+     PDF saved to session scratchpad; acoustically-inverted (not MRI) shapes, formant-valid \
+     register";
+const FOAM02_SOURCE: &str = "Caiazzo et al., FOAM 02 dataset, Zenodo record 18242697 + \
+     Acta Acustica 9 (50) 2025, doi:10.1051/aacus/2025033";
+const FOAM02_LICENSE: &str = "CC-BY-4.0; machine-readable alphas.csv (mean over 36 \
+     measurements: 4 angles x 3 specimens x 3 reps); no figure digitization";
+const FOAM02_RETENTION: &str = "mean spectrum retained at data/vv-corpus/acoustic/foam02-*-alpha.tsv; scalar \
+     checkpoints here";
+
+const fn assaneo(
+    id: &'static str,
+    title: &'static str,
+    peak_hz: f64,
+    lo_hz: f64,
+    hi_hz: f64,
+    formula: &'static str,
+    source_row: &'static str,
+) -> AcousticCase {
+    AcousticCase {
+        id,
+        title,
+        family: AcousticFamily::VowelTract,
+        level: AcousticLevel::PublishedModelData,
+        metric: "tmm-first-formant-class",
+        metric_dims: FREQUENCY_DIMS,
+        reference_value_si: peak_hz,
+        formula,
+        acceptance: AcousticAcceptance::ClassBand { lo_hz, hi_hz },
+        context: &[],
+        source: source_row,
+        license: ASSANEO_LICENSE,
+        retention: ASSANEO_RETENTION,
+        no_claim_reason: REFERENCE_ONLY,
+        status: "active",
+    }
+}
+
+const fn foam02(
+    id: &'static str,
+    title: &'static str,
+    mean_alpha: f64,
+    formula: &'static str,
+) -> AcousticCase {
+    AcousticCase {
+        id,
+        title,
+        family: AcousticFamily::PorousAbsorber,
+        level: AcousticLevel::PublishedExperiment,
+        metric: "normal-incidence-absorption",
+        metric_dims: Dims::NONE,
+        reference_value_si: mean_alpha,
+        formula,
+        acceptance: AcousticAcceptance::AbsoluteTolerance { atol: 0.05 },
+        context: &[],
+        source: FOAM02_SOURCE,
+        license: FOAM02_LICENSE,
+        retention: FOAM02_RETENTION,
+        no_claim_reason: REFERENCE_ONLY,
+        status: "reference-only",
     }
 }
 
@@ -406,6 +501,7 @@ const CASES: &[AcousticCase] = &[
         license: "US government publication; tabulated eigenvalue is a factual constant",
         retention: "one dimensionless eigenvalue",
         no_claim_reason: REFERENCE_ONLY,
+        status: "reference-only",
     },
     olson_hazell(
         "acoustic-olson-hazell-1977-mode1",
@@ -469,6 +565,52 @@ const CASES: &[AcousticCase] = &[
         "Free-free bar partial ratio f3/f1",
         5.403_917_632_383_322_5,
         "(10.995607838001671/4.730040744862704)^2",
+    ),
+    // Assaneo 2011 vowel-tract rows: registered by the vowel-gates bead
+    // (3ez8g.8.3); the TSV golden carried them before the catalog did, and
+    // bead frankensim-4pghb restored the projection invariant by registering
+    // them here.
+    assaneo(
+        "acoustic-assaneo-2011-tract-a",
+        "Assaneo 2011 ten-tube vocal tract, Spanish open-vowel /a/ chart",
+        827.0,
+        650.0,
+        900.0,
+        "TMM |Z_in| first peak of the published 10-tube /a/ chart; the class band is \
+         the Spanish open-vowel F1 range (Bradlow 1995-class values), a CLASS check not \
+         a per-subject match",
+        "Assaneo, Nichols, Trevisan, PLoS ONE 6(12):e28317 (2011), Table 2 row [a]",
+    ),
+    assaneo(
+        "acoustic-assaneo-2011-tract-u",
+        "Assaneo 2011 ten-tube vocal tract, Spanish close-back-vowel /u/ chart",
+        340.0,
+        250.0,
+        420.0,
+        "TMM |Z_in| first peak of the published 10-tube /u/ chart; the class band is \
+         the Spanish close-back-vowel F1 range, a CLASS check not a per-subject match",
+        "Assaneo, Nichols, Trevisan, PLoS ONE 6(12):e28317 (2011), Table 2 row [u]",
+    ),
+    foam02(
+        "acoustic-foam02-basotect-alpha500",
+        "FOAM 02 Basotect (melamine) 60 mm mean absorption at 500 Hz",
+        0.651_0,
+        "measured mean absorption at 500 Hz, Basotect (melamine) 60 mm, rigid backing, \
+         98 mm sample",
+    ),
+    foam02(
+        "acoustic-foam02-basotect-alpha1150",
+        "FOAM 02 Basotect (melamine) 60 mm mean absorption at 1150 Hz",
+        0.984_8,
+        "measured mean absorption at 1150 Hz, Basotect (melamine) 60 mm, rigid backing, \
+         98 mm sample",
+    ),
+    foam02(
+        "acoustic-foam02-pinta-alpha750",
+        "FOAM 02 Pinta Plano Polar (polyester fleece) 50 mm mean absorption at 750 Hz",
+        0.695_3,
+        "measured mean absorption at 750 Hz, Pinta Plano Polar (polyester fleece) 50 mm, \
+         rigid backing, 98 mm sample",
     ),
 ];
 
@@ -554,7 +696,7 @@ pub fn render_acoustic_manifest() -> String {
     for case in CASES {
         let _ = writeln!(
             out,
-            "1\t{}\t{}\t{}\t{}\t{:e}\t{}\t{}\t{}\t{}\t{}\treference-only",
+            "1\t{}\t{}\t{}\t{}\t{:e}\t{}\t{}\t{}\t{}\t{}\t{}",
             case.id,
             case.family.name(),
             case.level.name(),
@@ -565,6 +707,7 @@ pub fn render_acoustic_manifest() -> String {
             case.source,
             case.license,
             case.retention,
+            case.status,
         );
     }
     for absence in ABSENCES {

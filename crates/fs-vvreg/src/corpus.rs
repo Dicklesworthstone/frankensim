@@ -2010,6 +2010,11 @@ fn validate_dataset(dataset: &CorpusDataset) -> Result<(), CorpusError> {
         }
     }
 
+    validate_dataset_scene(dataset)?;
+    validate_preprocessing_lineage(dataset)?;
+    validate_dataset_context_license_and_retention(dataset)?;
+    validate_dataset_envelopes(dataset)?;
+
     Ok(())
 }
 
