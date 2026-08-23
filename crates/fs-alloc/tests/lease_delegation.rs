@@ -1136,6 +1136,7 @@ fn publication_binding_changes_child_and_root_ledger_roots() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // one conservation story: mismatch refusal, mutation refusal, and rehashed-conservation refusal share the seeded ledger setup
 fn root_and_child_receipts_reject_mismatch_mutation_and_rehashed_conservation_errors() {
     let root = OperationMemoryLease::bounded(16);
     let root_id = root_identity(38);
@@ -1514,6 +1515,7 @@ enum PublicationModelAction {
 }
 
 #[derive(Clone, Copy, Debug)]
+#[allow(clippy::struct_excessive_bools)] // the five bools are independent lifecycle phases of the seal state machine, not a flag bundle
 struct PublicationModel {
     child_live: bool,
     staging_live: bool,

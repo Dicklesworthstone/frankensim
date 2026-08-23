@@ -415,6 +415,7 @@ fn alloc_009_chunk_recycling_bounds_os_traffic() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // seeded poison/quarantine battery reads as one tabular procedure: corrupt, detect, quarantine, reclaim
 fn alloc_010_seeded_reclaim_poison_detects_and_quarantines_corruption() {
     const SEED: u64 = 0xA110_C010_2026_0715;
 
