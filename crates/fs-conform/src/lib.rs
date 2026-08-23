@@ -197,6 +197,19 @@ pub enum ExactStatus {
     Refused,
 }
 
+impl ExactStatus {
+    /// Stable wire code under [`CONFORM_ARITHMETIC_SCHEMA_VERSION`]
+    /// (`0` = refused/no-claim, `1` = holds, `2` = violated).
+    #[must_use]
+    pub const fn code(self) -> u32 {
+        match self {
+            Self::Refused => 0,
+            Self::Holds => 1,
+            Self::Violated => 2,
+        }
+    }
+}
+
 /// Typed arithmetic evidence for one exact certificate decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ComparisonEvidence {
@@ -1288,9 +1301,180 @@ fn tier_for_admitted_error(declared: f64, tolerance: f64) -> Tier {
     }
 }
 
+/// FNV-1a fold of one u64 word (matches the fs-la golden-hash mechanism).
+fn receipt_fold(acc: &mut u64, word: u64) {
+    for byte in word.to_le_bytes() {
+        *acc ^= u64::from(byte);
+        *acc = acc.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+}
+
+/// Deterministic G5 receipt over a canonical arithmetic transcript
+/// (bead frankensim-i8iva).
+///
+/// Feeds every `ExactStatus` code, evidence field, refusal site, and the RAW
+/// superaccumulator limb words for a fixed witness set covering the G0
+/// boundary classes (integer cancellation, subnormal underflow products,
+/// mixed ~600-exponent scales, f64::MAX extrema, exact equality at tol=0,
+/// one-ULP violation). Integer-only folding: the value is identical across
+/// debug/release and both reference ISAs. A changed value means certificate
+/// bit semantics moved — re-freeze only under docs/GOLDEN_POLICY.md with a
+/// plausible root cause.
+#[must_use]
+pub fn arithmetic_receipt_hash() -> u64 {
+    const TOL: f64 = 1e-9;
+    let mut acc: u64 = 0xcbf2_9ce4_8422_2325;
+
+    struct Scale {
+        source_dim: usize,
+        target_dim: usize,
+    }
+    impl Converter for Scale {
+        fn id(&self) -> &str {
+            "receipt-scale"
+        }
+        fn source_dim(&self) -> usize {
+            self.source_dim
+        }
+        fn target_dim(&self) -> usize {
+            self.target_dim
+        }
+        fn apply(&self, x: &[f64]) -> Vec<f64> {
+            x.iter()
+                .enumerate()
+                .map(|(i, &v)| v * f64::from(i as u32 + 2))
+                .collect()
+        }
+        fn adjoint(&self, y: &[f64]) -> Vec<f64> {
+            y.iter()
+                .enumerate()
+                .map(|(i, &v)| v * f64::from(i as u32 + 2))
+                .collect()
+        }
+        fn declared_error(&self) -> f64 {
+            0.0
+        }
+    }
+
+    // (source_dim, target_dim, x, y, tol) — distinct decision classes.
+    let witnesses: [(usize, usize, Vec<f64>, Vec<f64>, f64); 6] = [
+        // Exact cancellation to zero on both dot sides.
+        (2, 2, vec![9.0, -9.0], vec![5.0, 5.0], TOL),
+        // Underflowing products (2^-1078): f64 flushes to zero, bins do not.
+        (
+            2,
+            2,
+            vec![2f64.powi(-420), 2f64.powi(-420)],
+            vec![2f64.powi(-420), 2f64.powi(-420)],
+            TOL,
+        ),
+        // Mixed scales spanning ~600 binary exponents.
+        (
+            2,
+            2,
+            vec![2f64.powi(300), -2f64.powi(-300)],
+            vec![2f64.powi(300), 2f64.powi(300)],
+            TOL,
+        ),
+        // Opposite-sign extremum product.
+        (1, 1, vec![f64::MAX], vec![-1.0], TOL),
+        // One-ULP dishonest transpose: exactly Violated at tol = 0.
+        (1, 1, vec![1024.0], vec![1024.0], 0.0),
+        // Non-finite witness: typed refusal at site 0.
+        (1, 1, vec![1.0], vec![f64::NAN], TOL),
+    ];
+
+    for (index, (source_dim, target_dim, x, y, tol)) in witnesses.iter().enumerate() {
+        let converter = Scale {
+            source_dim: *source_dim,
+            target_dim: *target_dim,
+        };
+        let outcome = check_adjoint_with_evidence(&converter, &[(x.clone(), y.clone())], *tol);
+        receipt_fold(&mut acc, u64::from(outcome.status.code()));
+        receipt_fold(
+            &mut acc,
+            u64::from(outcome.evidence.schema_version)
+                | (u64::from(outcome.evidence.rung.code()) << 32),
+        );
+        receipt_fold(&mut acc, outcome.evidence.terms as u64);
+        receipt_fold(&mut acc, outcome.evidence.dimension as u64);
+        match outcome.evidence.first_refusal {
+            Some((site, reason)) => {
+                receipt_fold(&mut acc, 1);
+                receipt_fold(&mut acc, site as u64);
+                receipt_fold(&mut acc, reason_code(reason));
+            }
+            None => receipt_fold(&mut acc, 0),
+        }
+        let _ = index;
+    }
+
+    // Raw canonical accumulator limbs from a fixed mixed-scale dot:
+    // integer words, order-fixed, identical on every ISA.
+    let mut lhs = ExactSignedSum::ZERO;
+    let mut rhs = ExactSignedSum::ZERO;
+    let applied = vec![2.0, -6.0];
+    let adjoint = vec![1.0, 12.0];
+    for (&a, &b) in applied.iter().zip(&cy_fixture()) {
+        assert!(lhs.add_product(a, b));
+    }
+    for (&a, &b) in cx_fixture().iter().zip(&adjoint) {
+        assert!(rhs.add_product(a, b));
+    }
+    for i in 0..SUPERACC_LIMBS {
+        receipt_fold(&mut acc, lhs.positive.limbs[i]);
+        receipt_fold(&mut acc, lhs.negative.limbs[i]);
+        receipt_fold(&mut acc, rhs.positive.limbs[i]);
+        receipt_fold(&mut acc, rhs.negative.limbs[i]);
+    }
+    acc
+}
+
+fn cx_fixture() -> [f64; 2] {
+    [2f64.powi(300), -2f64.powi(-300)]
+}
+
+fn cy_fixture() -> [f64; 2] {
+    [2f64.powi(300), 2f64.powi(300)]
+}
+
+/// Golden sentinel for [`arithmetic_receipt_hash`] (bead frankensim-i8iva).
+///
+/// Reproduced identically on arm64-macOS and x86_64-Linux, in both debug and
+/// release profiles (four runs, rch remote evidence retained in the bead).
+pub const ARITHMETIC_RECEIPT_GOLDEN_HASH: u64 = 0x82a1_6112_5e2e_dee7;
+
+/// Stable integer code for [`ArithmeticRefusal`] (declaration order).
+#[must_use]
+const fn reason_code(reason: ArithmeticRefusal) -> u64 {
+    match reason {
+        ArithmeticRefusal::DimensionMismatch => 1,
+        ArithmeticRefusal::NonFiniteInput => 2,
+        ArithmeticRefusal::DimensionBudgetExceeded => 3,
+        ArithmeticRefusal::LatticeRefusal => 4,
+        ArithmeticRefusal::BinRangeExceeded => 5,
+    }
+}
+
 #[cfg(test)]
 mod arithmetic_tests {
     use super::*;
+
+    /// G5 sentinel over exact-arithmetic certificate bits (bead
+    /// frankensim-i8iva). Frozen after four-way reproduction: arm64-macOS and
+    /// x86_64-Linux (rch worker vmi1227854), each in debug AND release,
+    /// all agreeing on 0x82a1_6112_5e2e_dee7 at committed tree 8e1134e7+
+    /// (receipt fn added in this commit; integer-only folding, no float
+    /// control flow). Re-pin only per docs/GOLDEN_POLICY.md.
+    #[test]
+    fn arithmetic_receipt_is_bit_stable_across_isas_and_profiles() {
+        let receipt = arithmetic_receipt_hash();
+        assert_eq!(
+            receipt, ARITHMETIC_RECEIPT_GOLDEN_HASH,
+            "certificate bit semantics moved: {receipt:#018x} vs              {ARITHMETIC_RECEIPT_GOLDEN_HASH:#018x} — re-freeze only under \
+             docs/GOLDEN_POLICY.md with a plausible root cause"
+        );
+    }
 
     #[test]
     fn superacc_shift_and_long_carry_boundaries_are_exact() {
