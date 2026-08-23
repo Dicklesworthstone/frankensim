@@ -35,6 +35,7 @@ pub use ival::{Iv, IvalError};
 
 use fs_evidence::{NumericalCertificate, NumericalKind, StatisticalCertificate};
 use fs_opt::{Manifold, NodeId, Problem, ProblemSemanticId};
+use fs_exec::{AdmittedBudget, BudgetConsumption, BudgetRefusal, Cx};
 
 /// Crate version, re-exported for provenance stamping.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -152,6 +153,355 @@ pub enum ChanceEstimator {
         /// Bound failure probability (e.g. 0.05).
         delta: f64,
     },
+}
+
+/// Schema version of [`ChanceWorkPlan`] canonical bytes (bead
+/// frankensim-oxyjg). Bump on any field-semantics change; the identity
+/// hash binds this version.
+pub const CHANCE_WORK_PLAN_SCHEMA_VERSION: u32 = 1;
+
+/// Declared work units of one noise draw per dimension. The weight is a
+/// fixed contract constant, not a caller estimate, so two admitted plans
+/// for the same workload always declare identical cost.
+pub const CHANCE_WORK_UNITS_PER_DIM_NOISE_DRAW: u64 = 1;
+
+/// Declared work units of shifted-point storage per dimension.
+pub const CHANCE_WORK_UNITS_PER_DIM_SHIFTED_POINT: u64 = 1;
+
+/// Declared work units of one scalar expression-graph evaluation.
+pub const CHANCE_WORK_UNITS_GRAPH_EVALUATION: u64 = 1;
+
+/// Declared work units of one accumulator update (hit/miss bookkeeping).
+pub const CHANCE_WORK_UNITS_ACCUMULATOR: u64 = 1;
+
+/// The admitted resource contract of one chance-constraint evaluation.
+///
+/// Construction is total checked arithmetic over the fixed unit weights:
+/// a plan that cannot state its own cost without overflow refuses instead
+/// of silently truncating. The plan carries no authority by itself —
+/// [`evaluate_chance_with_budget`] admits it against the caller's `Cx`
+/// budget before the first sample runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChanceWorkPlan {
+    /// Must equal [`CHANCE_WORK_PLAN_SCHEMA_VERSION`].
+    pub schema_version: u32,
+    /// Sample count; must match the evaluated estimator exactly.
+    pub samples: u32,
+    /// Dimension every noise draw must return; must equal the admitted
+    /// host dimension exactly.
+    pub dimensions: u32,
+    /// Samples per cancellation/deadline checkpoint tile.
+    pub tile_samples: u32,
+    /// Checked work of ONE sample across all unit classes.
+    pub per_sample_work_units: u64,
+    /// Checked total work: `per_sample_work_units * samples`.
+    pub total_work_units: u64,
+}
+
+impl ChanceWorkPlan {
+    /// Build a checked plan. Zero samples, zero dimensions, and a tile
+    /// outside `1..=samples` are typed refusals; any arithmetic overflow
+    /// is a refusal, never a wrap.
+    ///
+    /// # Errors
+    /// [`ConError::BadParam`] with a teaching message for every boundary.
+    pub fn plan(samples: u32, dimensions: u32, tile_samples: u32) -> Result<Self, ConError> {
+        if samples == 0 {
+            return Err(ConError::BadParam {
+                what: "chance work plan needs a positive sample count",
+                value: 0.0,
+            });
+        }
+        if dimensions == 0 {
+            return Err(ConError::BadParam {
+                what: "chance work plan needs a positive dimension",
+                value: 0.0,
+            });
+        }
+        if tile_samples == 0 || tile_samples > samples {
+            return Err(ConError::BadParam {
+                what: "chance tile size must be in 1..=samples",
+                value: f64::from(tile_samples),
+            });
+        }
+        let per_dim = CHANCE_WORK_UNITS_PER_DIM_NOISE_DRAW
+            + CHANCE_WORK_UNITS_PER_DIM_SHIFTED_POINT;
+        let dims = u64::from(dimensions);
+        let per_sample = dims
+            .checked_mul(per_dim)
+            .and_then(|work| work.checked_add(CHANCE_WORK_UNITS_GRAPH_EVALUATION))
+            .and_then(|work| work.checked_add(CHANCE_WORK_UNITS_ACCUMULATOR))
+            .ok_or(ConError::BadParam {
+                what: "chance work plan overflows per-sample work",
+                value: f64::from(dimensions),
+            })?;
+        let total = per_sample.checked_mul(u64::from(samples)).ok_or(
+            ConError::BadParam {
+                what: "chance work plan overflows total work",
+                value: f64::from(samples),
+            },
+        )?;
+        Ok(Self {
+            schema_version: CHANCE_WORK_PLAN_SCHEMA_VERSION,
+            samples,
+            dimensions,
+            tile_samples,
+            per_sample_work_units: per_sample,
+            total_work_units: total,
+        })
+    }
+
+    /// Deterministic FNV-1a identity over the canonical little-endian
+    /// field order. Two plans for the same workload share an identity;
+    /// receipts bind it so retained evidence names the exact contract.
+    #[must_use]
+    pub fn identity(&self) -> u64 {
+        let mut hash: u64 = 0xcbf_29ce_484_223_25;
+        let mut mix = |bytes: &[u8], hash: &mut u64| {
+            for byte in bytes {
+                *hash ^= u64::from(*byte);
+                *hash = hash.wrapping_mul(0x000_00100_000_001b3);
+            }
+        };
+        mix(&self.schema_version.to_le_bytes(), &mut hash);
+        mix(&self.samples.to_le_bytes(), &mut hash);
+        mix(&self.dimensions.to_le_bytes(), &mut hash);
+        mix(&self.tile_samples.to_le_bytes(), &mut hash);
+        mix(&self.per_sample_work_units.to_le_bytes(), &mut hash);
+        mix(&self.total_work_units.to_le_bytes(), &mut hash);
+        hash
+    }
+}
+
+/// Retained work receipt of one chance evaluation: which plan ran, how
+/// much budget it consumed, and how much of the sampling completed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChanceWorkReceipt {
+    /// Identity of the executed [`ChanceWorkPlan`].
+    pub plan_identity: u64,
+    /// Final accountant state; `None` only when admission itself was
+    /// refused, so no budget contract ever existed to report.
+    pub consumption: Option<BudgetConsumption>,
+    /// Samples whose work was fully charged as complete.
+    pub completed_samples: u32,
+    /// Hits among the completed samples only.
+    pub hits: u32,
+}
+
+/// Typed outcome of a budgeted chance evaluation. `Invalid` carries the
+/// ordinary constraint-calculus refusals raised before any sampling;
+/// `Refused` means work WAS admitted and then stopped by the budget
+/// authority — the receipt proves how far it got, and NO evidence was
+/// produced (a partial sample set never mints satisfied/violated claims).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ChanceEvalError {
+    /// Typed refusal before sampling began.
+    Invalid(ConError),
+    /// Admitted work stopped by cancellation, deadline, poll, or cost
+    /// authority. The receipt retains the exact stop point.
+    Refused {
+        /// The latched accountant refusal.
+        refusal: BudgetRefusal,
+        /// Work completed and charged up to the refusal.
+        receipt: ChanceWorkReceipt,
+    },
+}
+
+impl core::fmt::Display for ChanceEvalError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Refused { refusal, receipt } => write!(
+                formatter,
+                "chance evaluation stopped after {} completed samples ({} hits): {refusal}",
+                receipt.completed_samples, receipt.hits
+            ),
+                receipt.hits
+            ),
+        }
+    }
+}
+
+impl core::error::Error for ChanceEvalError {}
+
+/// Evaluate a chance constraint under explicit resource authority.
+///
+/// Sampling proceeds in deterministic logical tiles (`plan.tile_samples`
+/// samples per tile, sample index = completed count at tile start), so
+/// worker count and wall-clock can never reorder draws: stream identity
+/// is the logical sample index, exactly like the retired synchronous
+/// loop. Cancellation, deadline, poll quota, and cost quota are enforced
+/// at every tile boundary through the caller's `Cx`; a refusal drains
+/// immediately with NO partial evidence and a receipt naming the exact
+/// completed prefix.
+///
+/// Statistical semantics are unchanged from the retired loop: Hoeffding
+/// fixed-horizon lower bound, bound-decides validity, exact-dimension
+/// finite draws or typed refusal.
+///
+/// # Errors
+/// [`ChanceEvalError::Invalid`] for host/policy/plan mismatches and
+/// evaluator faults; [`ChanceEvalError::Refused`] when admitted work is
+/// stopped by the budget authority (receipt retained).
+pub fn evaluate_chance_with_budget(
+    problem: &Problem,
+    spec: &ConstraintSpec,
+    x: &[f64],
+    noise: &dyn Fn(u64) -> Vec<f64>,
+    plan: ChanceWorkPlan,
+    cx: &Cx<'_>,
+) -> Result<(ConstraintEvidence, ChanceWorkReceipt), ChanceEvalError> {
+    if plan.schema_version != CHANCE_WORK_PLAN_SCHEMA_VERSION {
+        return Err(ChanceEvalError::Invalid(ConError::BadParam {
+            what: "unknown chance work plan schema version",
+            value: f64::from(plan.schema_version),
+        }));
+    }
+    let point_dim = validate_evaluate_host(problem, x).map_err(ChanceEvalError::Invalid)?;
+    if plan.dimensions != point_dim as u32 {
+        return Err(ChanceEvalError::Invalid(ConError::BadParam {
+            what: "chance work plan dimensions must equal the admitted host dimension",
+            value: f64::from(plan.dimensions),
+        }));
+    }
+    validate_spec_policy(spec, Some(point_dim)).map_err(ChanceEvalError::Invalid)?;
+    let ConstraintKind::Chance { level, estimator } = &spec.kind else {
+        return Err(ChanceEvalError::Invalid(ConError::BadParam {
+            what: "evaluate_chance_with_budget requires a chance constraint",
+            value: f64::NAN,
+        }));
+    };
+    let ChanceEstimator::MonteCarlo { samples, delta } = *estimator;
+    if plan.samples != samples {
+        return Err(ChanceEvalError::Invalid(ConError::BadParam {
+            what: "chance work plan samples must match the estimator",
+            value: f64::from(plan.samples),
+        }));
+    }
+    let mut budget = AdmittedBudget::admit_ambient(cx, plan.total_work_units).map_err(|refusal| {
+        ChanceEvalError::Refused {
+            refusal,
+            receipt: ChanceWorkReceipt {
+                plan_identity: plan.identity(),
+                consumption: None,
+                completed_samples: 0,
+                hits: 0,
+            },
+        }
+    })?;
+    let g = scalar_at(problem, spec.node, x).map_err(ChanceEvalError::Invalid)?;
+    let finite = g.is_finite();
+    let violation = if finite { g.max(0.0) } else { f64::INFINITY };
+    let base_status = if !finite || g > spec.active_tol {
+        Status::Violated
+    } else if g >= -spec.active_tol {
+        Status::Active
+    } else {
+        Status::Satisfied
+    };
+    let role = match base_status {
+        Status::Violated => ActiveRole::Violating,
+        Status::Active => ActiveRole::Active,
+        _ => ActiveRole::Inactive,
+    };
+    let mut ev = ConstraintEvidence {
+        name: spec.name.clone(),
+        kind: spec.kind.kind_name(),
+        status: base_status,
+        violation,
+        certificate: NumericalCertificate::exact(violation),
+        statistical: StatisticalCertificate::None,
+        role,
+        penalty: 0.0,
+        proof_subject: None,
+        proof_bound: None,
+    };
+    let mut completed = 0u32;
+    let mut hits = 0u32;
+    while completed < samples {
+        budget.checkpoint("fs-constraint:chance-tile-poll", cx).map_err(|refusal| {
+            ChanceEvalError::Refused {
+                refusal,
+                receipt: ChanceWorkReceipt {
+                    plan_identity: plan.identity(),
+                    consumption: Some(budget.consumption()),
+                    completed_samples: completed,
+                    hits,
+                },
+            }
+        })?;
+        let tile_n = plan.tile_samples.min(samples - completed);
+        let mut tile_hits = 0u32;
+        for j in 0..tile_n {
+            let draw = noise(u64::from(completed + j));
+            if draw.len() != x.len() {
+                return Err(ChanceEvalError::Invalid(ConError::BadParam {
+                    what: "chance noise draw dimension",
+                    value: draw.len() as f64,
+                }));
+            }
+            let shifted: Vec<f64> = x.iter().zip(&draw).map(|(a, b)| a + b).collect();
+            if scalar_at(problem, spec.node, &shifted).map_err(ChanceEvalError::Invalid)? <= 0.0
+            {
+                tile_hits += 1;
+            }
+        }
+        let tile_units = plan
+            .per_sample_work_units
+            .checked_mul(u64::from(tile_n))
+            .expect("tile work fits: plan construction checked the larger total");
+        budget
+            .charge_cost("fs-constraint:chance-tile-work", tile_units)
+            .map_err(|refusal| ChanceEvalError::Refused {
+                refusal,
+                receipt: ChanceWorkReceipt {
+                    plan_identity: plan.identity(),
+                    consumption: Some(budget.consumption()),
+                    completed_samples: completed,
+                    hits,
+                },
+            })?;
+        hits += tile_hits;
+        completed += tile_n;
+    }
+    let empirical = f64::from(hits) / f64::from(samples);
+    // Hoeffding lower confidence bound at failure prob delta.
+    // `-ln(delta)` is algebraically `ln(1/delta)` but remains finite
+    // for every positive finite binary64 delta; forming `1/delta`
+    // first would overflow for valid subnormal policy values.
+    let half_width = (-delta.ln() / (2.0 * f64::from(samples))).sqrt();
+    let lower = empirical - half_width;
+    ev.statistical = StatisticalCertificate::HalfWidth {
+        half_width,
+        confidence: 1.0 - delta,
+    };
+    ev.status = if lower >= *level {
+        Status::Satisfied
+    } else if empirical >= *level {
+        // The raw rate clears but the BOUND does not: refuse —
+        // this is the validity machinery earning its keep.
+        Status::BoundNotCleared {
+            empirical,
+            lower_bound: lower,
+        }
+    } else {
+        Status::Violated
+    };
+    ev.violation = (*level - lower).max(0.0);
+    ev.certificate = NumericalCertificate::estimate(ev.violation, ev.violation);
+    ev.role = if matches!(ev.status, Status::Satisfied) {
+        ActiveRole::Inactive
+    } else {
+        ActiveRole::Violating
+    };
+    Ok((
+        ev,
+        ChanceWorkReceipt {
+            plan_identity: plan.identity(),
+            consumption: Some(budget.consumption()),
+            completed_samples: completed,
+            hits,
+        },
+    ))
 }
 
 /// Which proof a certification constraint demands.
