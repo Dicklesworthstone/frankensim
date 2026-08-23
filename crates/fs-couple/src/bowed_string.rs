@@ -349,7 +349,6 @@ pub fn run_bowed(config: &BowedRunConfig) -> Result<BowedRunLog, BowedRunError> 
         log.body_velocity_m_s.reserve(config.steps);
         log.radiated_pressure_pa.reserve(config.steps);
     }
-
     // Start from rest; the bow spins the string up from silence so every
     // periodicity in the logs is EMERGENT, never an initial-condition echo.
     let mut forces = vec![0.0_f64; card.mode_count];
@@ -357,6 +356,9 @@ pub fn run_bowed(config: &BowedRunConfig) -> Result<BowedRunLog, BowedRunError> 
     let subsamples = config.subsamples.max(1);
     let sub_dt = dt / subsamples as f64;
     let capture_tol = config.island.capture_tol_m_s();
+    // Capture basin: both sides of a sign flip must be slower than this,
+    // or the crossing is a chatter spike rather than a capturable corner.
+    const CAPTURE_BASIN_M_S: f64 = 0.15;
     let mut stuck = false;
     let mut prev_v_rel = f64::NAN;
     let mut peak_energy_j = f64::MIN;
@@ -372,8 +374,11 @@ pub fn run_bowed(config: &BowedRunConfig) -> Result<BowedRunLog, BowedRunError> 
                 .map(|(s, phi)| phi * s.velocity_m_sqrt_kg_per_s)
                 .sum();
             v_rel = config.gesture.v_bow_m_s - v_str;
-            let flipped =
-                prev_v_rel.is_finite() && !stuck && prev_v_rel.signum() != v_rel.signum();
+            let flip_speed = prev_v_rel.abs().max(v_rel.abs());
+            let flipped = prev_v_rel.is_finite()
+                && !stuck
+                && prev_v_rel.signum() != v_rel.signum()
+                && flip_speed <= CAPTURE_BASIN_M_S;
             prev_v_rel = v_rel;
             let traction = match config.island {
                 FrictionIsland::Stribeck(law) => {

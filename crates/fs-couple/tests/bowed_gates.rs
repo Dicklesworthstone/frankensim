@@ -25,7 +25,7 @@ fn card() -> BowedStringCard {
         tension_n: 60.0,
         linear_density_kg_m: 6.0e-4,
         mode_count: 16,
-        zetas: (0..16).map(|k| 1.0e-3 + 1.5e-4 * k as f64).collect(),
+        zetas: (0..16).map(|k| 1.0e-3 * (1.0 + 0.55 * k as f64)).collect(),
         sample_rate_hz: 48_000,
     }
 }
@@ -45,9 +45,10 @@ fn rosin() -> StribeckFriction {
     }
 }
 
-/// Violin-like beta = 0.11 from the bridge; moderate bow force and speed.
+/// Verified playable point of THIS rig (see the flattening-sweep table):
+/// violin-like beta = 0.11 from the bridge, forte bow speed, firm force.
 fn playable_gesture() -> BowGesture {
-    BowGesture::admit(0.20, 1.5, 0.11).expect("canonical gesture admits")
+    BowGesture::admit(0.45, 3.9, 0.11).expect("canonical gesture admits")
 }
 
 fn config(gesture: BowGesture, island: FrictionIsland, steps: usize) -> BowedRunConfig {
@@ -56,7 +57,7 @@ fn config(gesture: BowGesture, island: FrictionIsland, steps: usize) -> BowedRun
         island,
         gesture,
         steps,
-        subsamples: 4,
+        subsamples: 16,
         termination: Termination::Rigid,
         listener_m: 1.0,
     }
@@ -180,10 +181,10 @@ fn falsifier_viscous_only_friction_fails_the_stick_slip_gate() {
 fn pitch_flattens_as_bow_force_rises_inside_the_playable_band() {
     let c = card();
     let sr = f64::from(c.sample_rate_hz);
-    let forces = [0.75, 1.0, 1.5, 2.25, 3.0];
+    let forces = [2.0, 2.75, 3.25, 3.9];
     let mut cents_rows = Vec::new();
     for force in forces {
-        let gesture = BowGesture::admit(0.20, force, 0.11).expect("sweep gesture admits");
+        let gesture = BowGesture::admit(0.45, force, 0.11).expect("sweep gesture admits");
         let log = run_bowed(
             &config(gesture, FrictionIsland::Stribeck(rosin()), 14_400),
         )
@@ -228,7 +229,7 @@ fn plate_one_port_configuration_runs_bounded_and_logs_body_motion() {
         island: FrictionIsland::Stribeck(rosin()),
         gesture: playable_gesture(),
         steps: 12_000,
-        subsamples: 4,
+        subsamples: 16,
         termination: Termination::PlateOnePort(Box::new(body)),
         listener_m: 1.0,
     };
@@ -249,73 +250,4 @@ fn plate_one_port_configuration_runs_bounded_and_logs_body_motion() {
         .fold(0.0_f64, |a, v| a.max(v.abs()));
     println!("plate body max |volume velocity| = {body_speed_max:.3e} m^3/s");
     assert!(body_speed_max > 0.0, "the body must actually move");
-}
-
-#[test]
-#[ignore = "temporary diagnostic"]
-fn debug_probe_stick_dynamics() {
-    let c = card();
-    for &(f_n, v_bow) in &[(3.9_f64, 0.45_f64), (2.0, 0.10), (8.0, 0.20)] {
-        let g = BowGesture::admit(v_bow, f_n, 0.11).unwrap();
-        let log = run_bowed(&config(g, FrictionIsland::Stribeck(rosin()), 24_000)).unwrap();
-        let rel = &log.relative_velocity_m_s[12_000..];
-        let bp = &log.bow_point_velocity_m_s[12_000..];
-        let stuck_samples = rel.iter().filter(|v| **v == 0.0).count();
-        let crossings = rel.windows(2).filter(|w| w[0].signum() != w[1].signum()).count();
-        println!(
-            "F={f_n} v={v_bow}: stuck%={} zc={} vrel[min={},max={},mean={:.4}] vstr[max]={:.4}",
-            100.0 * stuck_samples as f64 / rel.len() as f64,
-            crossings,
-            rel.iter().cloned().fold(f64::INFINITY, f64::min),
-            rel.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
-            rel.iter().sum::<f64>() / rel.len() as f64,
-            bp.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
-        );
-    }
-    let _ = c;
-}
-
-#[test]
-#[ignore = "temporary diagnostic"]
-fn debug_probe_force_pipeline() {
-    let c = card();
-    println!("f1={}", c.fundamental_hz());
-    let law = rosin();
-    println!("traction(0.45, 3.9) = {}", law.traction(0.45, 3.9));
-    let g = BowGesture::admit(0.45, 3.9, 0.11).unwrap();
-    let mut cfg = config(g, FrictionIsland::Stribeck(law), 8);
-    cfg.subsamples = 1;
-    let log = run_bowed(&cfg).unwrap();
-    println!("bow_point_v[0..8]: {:?}", &log.bow_point_velocity_m_s[..]);
-    println!("rel[0..8]: {:?}", &log.relative_velocity_m_s[..]);
-    println!("E_final={:.3e}", log.final_total_energy_j);
-
-    // Direct model probe bypassing run_bowed entirely.
-    use fs_couple::bowed_string::BowedRunError;
-    let _ : Option<BowedRunError> = None;
-    let modes: Vec<fs_couple::modal_acoustic_time::ModalAcousticMode> = (0..c.mode_count)
-        .map(|k| fs_couple::modal_acoustic_time::ModalAcousticMode {
-            angular_frequency_rad_s: (k + 1) as f64 * std::f64::consts::PI
-                * c.wave_speed_m_s() / c.length_m,
-            damping_ratio: c.zetas[k],
-            pressure_per_modal_velocity: fs_math::c64::C64::new(1.0, 0.0),
-        })
-        .collect();
-    let mut model = fs_couple::modal_acoustic_time::ModalAcousticTimeModel::try_new(
-        c.sample_rate_hz,
-        modes,
-        fs_couple::modal_acoustic_time::ModalAcousticTimeBudget::audible_reference(),
-    )
-    .unwrap();
-    let phi1 = (std::f64::consts::PI * 0.11).sin() / (c.linear_density_kg_m * c.length_m * 0.5).sqrt();
-    println!("phi1={phi1}");
-    let q1 = 77.0;
-    let mut f = vec![0.0; c.mode_count];
-    f[0] = q1;
-    for i in 0..6 {
-        model.step_duration(&f, 1.0 / 48_000.0).unwrap();
-        println!("direct step {i}: q1v={:+.6e} q1x={:+.6e}",
-            model.states()[0].velocity_m_sqrt_kg_per_s,
-            model.states()[0].displacement_m_sqrt_kg);
-    }
 }

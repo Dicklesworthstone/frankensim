@@ -110,11 +110,11 @@ fn main() -> std::process::ExitCode {
     // Coarse-but-honest grid; the artifact is the regime MAP.
     let stations = [0.08_f64, 0.11];
     let forces: Vec<f64> = if args.steps <= 7_200 {
-        (1..=13).map(|i| 0.3 + 0.3 * i as f64).collect()
+        (1..=12).map(|i| 0.6 * i as f64).collect()
     } else {
-        (1..=26).map(|i| 0.3 + 0.15 * i as f64).collect()
+        (1..=23).map(|i| 0.3 * i as f64).collect()
     };
-    let speeds: Vec<f64> = (1..=9).map(|i| 0.05 * i as f64).collect();
+    let speeds: Vec<f64> = (2..=12).map(|i| 0.05 * i as f64).collect();
 
     let mut rows_emitted = 0_u64;
     // (station index, speed in centi-m/s) -> playable forces in that column.
@@ -133,7 +133,7 @@ fn main() -> std::process::ExitCode {
                     island: FrictionIsland::Stribeck(rosin),
                     gesture,
                     steps: args.steps,
-                    subsamples: 4,
+                    subsamples: 16,
                     termination: Termination::Rigid,
                     listener_m: 1.0,
                 };
