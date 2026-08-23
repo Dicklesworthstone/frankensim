@@ -1,4 +1,3 @@
-#![cfg_attr(windows, feature(windows_by_handle))]
 
 //! FrankenSim repository policy checks (`cargo run -p xtask -- <command>`).
 //!
