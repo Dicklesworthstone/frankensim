@@ -323,7 +323,7 @@
     "X-Exact",
     "X-Struct"
    ],
-   "gate": "ungated",
+   "gate": "green",
    "live_default": "no",
    "determinism": "one-host",
    "evidence": [
@@ -334,11 +334,49 @@
     {
      "kind": "test",
      "ref": "crates/fs-couple/tests/acoustic_assembly.rs::bowed_rich_spectrum_has_even_partials"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/tests/bowed_gates.rs::stick_slip_and_helmholtz_corner_emerge_at_the_string_fundamental"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/tests/bowed_gates.rs::falsifier_viscous_only_friction_fails_the_stick_slip_gate"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/tests/bowed_gates.rs::pitch_flattens_as_bow_force_rises_inside_the_playable_band"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/tests/bowed_gates.rs::bowed_run_replays_bitwise_on_one_host"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/tests/bowed_gates.rs::gesture_admission_refuses_nonphysical_inputs"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/tests/bowed_gates.rs::plate_one_port_configuration_runs_bounded_and_logs_body_motion"
     }
    ],
    "budget_row": null,
    "corpus_refs": [],
-   "notes": "Modal string + Stribeck island (parts live). Determinism is CAPPED at one-host: fs-tribo declares no cross-ISA bit-stability (platform hypot) - bead 3ez8g.7.3 resolves or re-declares. Emergent Helmholtz-motion gates are bead 3ez8g.7.5; a forced Helmholtz oscillator is forbidden. .7.1 review: live-excitation + spectrum evidence attached; UNGATED until the stick-slip mechanism gates land (.7.5's lane) and the fs-tribo hypot determinism cap resolves (.7.3). .7.3 RESOLVED the fs-tribo determinism cap by det-routing (cross-ISA golden verified aarch64+x86-64); the row stays one-host until the COMPOSED bowed path's remaining operands are audited."
+   "notes": "GREEN per the .7.5 emergent-gate landing (2026-08-23): stick-slip limit cycle at the STRING fundamental, single-flyback Helmholtz corner, Schelleng-style playable band at beta=0.11 v_bow=0.45 m/s over F_n=[2.0,3.9] N, pitch flattening -14 to -72 cents across the band, viscous-only FALSIFIER refused by the same detector, bitwise one-host replay. Event-based Coulomb stiction at the bow point (a regularized ramp alone cannot capture a ~2e-5 kg contact); the kinetic drop width spans cm/s so the sliding operating point samples the negative-slope region. Rosin card is AUTHORED (no measured corpus) so the row carries Estimate authority. Determinism stays ONE-HOST until composed-path operands are audited post-.7.3. Measured boundary slopes are THIS RIG data compared only qualitatively to the literature shape; no Schelleng constant transcribed as truth. A listening receipt on a rendered open-string stroke is retained with the sweep artifacts; automated gates cover the mechanism, not listener judgment. Follow-up kept alive: optional 1-D bow-hair model [F] as a second bowed image (D21 keep-both)."
+  },
+  {
+   "filling": "bowed",
+   "image": "kc-friction-compose",
+   "qoi": "helmholtz-corner-per-period",
+   "owner_crates": ["fs-couple"],
+   "exactness": ["X-Struct"],
+   "gate": "ungated",
+   "live_default": "no",
+   "determinism": "one-host",
+   "evidence": [],
+   "budget_row": null,
+   "corpus_refs": [],
+   "notes": "Menu placeholder per D21/D22: Kirchhoff-Carrier tension nonlinearity COMPOSED with the Stribeck bow island (a second orthogonal bowed image). Parts live separately (the KC string channel is green on its own row; the friction island is live on modal-stribeck); the composition itself is NOT built, so this row enters UNGATED with no evidence and must never vanish. Joins the bake-off when the KC+island composition lands."
   },
   {
    "filling": "brass",
