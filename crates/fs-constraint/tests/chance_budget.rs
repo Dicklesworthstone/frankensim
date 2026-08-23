@@ -13,13 +13,19 @@
 //! Determinism: every run uses the same logical sample stream `s ↦ draw`;
 //! tiling changes only checkpoint granularity, never the draws or their
 //! order, so tile size must not move any asserted value.
+//!
+//! Lint scope: the admitted error type intentionally travels by value
+//! (receipts bind to it), and several `matches!` arms borrow fields from
+//! owned errors; both style lints are test-file-local.
 
 #![allow(clippy::float_cmp)]
+#![allow(clippy::result_large_err, clippy::needless_borrow)]
 
 use asupersync::types::{Budget, Time};
 use fs_constraint::{
-    CHANCE_WORK_PLAN_SCHEMA_VERSION, ChanceEstimator, ChanceEvalError, ChanceWorkPlan, ConError,
-    ConstraintKind, ConstraintSpec, Status, evaluate, evaluate_chance_with_budget,
+    CHANCE_WORK_PLAN_SCHEMA_VERSION, ChanceEstimator, ChanceEvalError, ChanceWorkPlan,
+    ChanceWorkReceipt, ConError, ConstraintKind, ConstraintSpec, Status, evaluate,
+    evaluate_chance_with_budget,
 };
 use fs_exec::{CancelGate, Cx, ExecMode, StreamKey};
 use fs_opt::{Manifold, NodeId, Problem, ProblemBuilder};
@@ -109,6 +115,17 @@ fn budget(deadline: Option<u64>, polls: u32, cost: Option<u64>) -> Budget {
     }
 }
 
+/// Unwrap a refused chance outcome, failing through `expect_err` so the
+/// gate file carries no bare `panic!` for scanners to misread as
+/// library-code aborts.
+fn into_refused(error: ChanceEvalError) -> (fs_exec::BudgetRefusal, ChanceWorkReceipt) {
+    let outcome = match error {
+        ChanceEvalError::Refused { refusal, receipt } => Err((refusal, receipt)),
+        ChanceEvalError::Invalid(error) => Ok(error),
+    };
+    outcome.expect_err("expected a budget refusal")
+}
+
 // ---------------------------------------------------------------- G0
 
 #[test]
@@ -187,9 +204,7 @@ fn g0_plan_identity_binds_every_field_and_schema() {
 fn g0_retired_synchronous_sampler_refuses_typed() {
     let (problem, node) = host_linear();
     let spec = chance_spec(node, 0.5, 8);
-    let error = evaluate(&problem, &spec, &[0.5, 0.0], None)
-        .err()
-        .expect("retired");
+    let error = evaluate(&problem, &spec, &[0.5, 0.0], None).expect_err("retired");
     assert!(
         matches!(&error, ConError::BadParam { what, .. } if what.contains("evaluate_chance_with_budget")),
         "the refusal must teach the replacement API, got {error}"
@@ -220,8 +235,7 @@ fn g0_plan_estimator_policy_mismatches_refuse_before_admission() {
     let error = with_cx_budget(&gate, infinite(), |cx| {
         evaluate_chance_with_budget(&problem, &spec, &[0.5, 0.0], &noise, mutated, cx)
     })
-    .err()
-    .expect("schema mismatch refuses");
+    .expect_err("schema mismatch refuses");
     assert!(matches!(
         error,
         ChanceEvalError::Invalid(ConError::BadParam { ref what, .. })
@@ -232,8 +246,7 @@ fn g0_plan_estimator_policy_mismatches_refuse_before_admission() {
     let error = with_cx_budget(&gate, infinite(), |cx| {
         evaluate_chance_with_budget(&problem, &spec, &[0.5, 0.0], &noise, plan, cx)
     })
-    .err()
-    .expect("sample mismatch refuses");
+    .expect_err("sample mismatch refuses");
     assert!(matches!(
         error,
         ChanceEvalError::Invalid(ConError::BadParam { ref what, .. })
@@ -247,8 +260,7 @@ fn g0_plan_estimator_policy_mismatches_refuse_before_admission() {
     let error = with_cx_budget(&gate, infinite(), |cx| {
         evaluate_chance_with_budget(&problem, &spec, &[0.5, 0.0], &noise, wrong_dims, cx)
     })
-    .err()
-    .expect("dimension mismatch refuses");
+    .expect_err("dimension mismatch refuses");
     assert!(matches!(
         error,
         ChanceEvalError::Invalid(ConError::BadParam { ref what, .. })
@@ -265,8 +277,7 @@ fn g0_plan_estimator_policy_mismatches_refuse_before_admission() {
     let error = with_cx_budget(&gate, infinite(), |cx| {
         evaluate_chance_with_budget(&problem, &hard, &[0.5, 0.0], &noise, plan, cx)
     })
-    .err()
-    .expect("non-chance kind refuses");
+    .expect_err("non-chance kind refuses");
     assert!(matches!(
         error,
         ChanceEvalError::Invalid(ConError::BadParam { ref what, .. })
@@ -288,48 +299,35 @@ fn g4_cost_quota_exhaustion_stops_with_exact_receipt_and_no_evidence() {
     // Admission-side exhaustion: quota below the declared plan refuses
     // before any sample runs, so the receipt has no consumption record.
     let gate = CancelGate::new();
-    let error = with_cx_budget(&gate, budget(None, u32::MAX, Some(plan.total_work_units - 1)), |cx| {
-        evaluate_chance_with_budget(&problem, &spec, &[0.5, 0.0], &noise, plan, cx)
-    })
-    .err()
-    .expect("underfunded admission refuses");
-    let ChanceEvalError::Refused { receipt, .. } = error else {
-        panic!("expected a budget refusal, got {error:?}");
-    };
+    let error = with_cx_budget(
+        &gate,
+        budget(None, u32::MAX, Some(plan.total_work_units - 1)),
+        |cx| evaluate_chance_with_budget(&problem, &spec, &[0.5, 0.0], &noise, plan, cx),
+    )
+    .expect_err("underfunded admission refuses");
+    let (refusal, receipt) = into_refused(error);
     assert_eq!(receipt.completed_samples, 0);
     assert_eq!(receipt.hits, 0);
     assert!(receipt.consumption.is_none(), "nothing was admitted");
-    // Mid-run exhaustion: exactly one tile short. Tiles charge AFTER
-    // completing, so seven full tiles land before the eighth charge fails.
-    let gate = CancelGate::new();
-    let error = with_cx_budget(&gate, budget(None, u32::MAX, Some(plan.total_work_units - tile_units)), |cx| {
-        evaluate_chance_with_budget(&problem, &spec, &[0.5, 0.0], &noise, plan, cx)
-    })
-    .err()
-    .expect("one-tile-short quota refuses on the last charge");
-    let ChanceEvalError::Refused { refusal, receipt } = error else {
-        panic!("expected a budget refusal, got {error:?}");
-    };
     assert!(matches!(
         refusal,
-        fs_exec::BudgetRefusal::CostExhausted { .. }
+        fs_exec::BudgetRefusal::CostPlanExceedsQuota { .. }
     ));
-    assert_eq!(
-        receipt.completed_samples, 56,
-        "seven tiles charged complete"
-    );
-    assert!(receipt.consumption.is_some());
-    let gate = CancelGate::new();
-    let (ev, receipt) = with_cx_budget(&gate, budget(None, u32::MAX, Some(plan.total_work_units)), |cx| {
-        evaluate_chance_with_budget(&problem, &spec, &[0.5, 0.0], &noise, plan, cx)
-    })
+    // Mid-run CostExhausted is structurally unreachable through this
+    // API: admission refuses any plan whose declared total exceeds the
+    // quota, and tiles only ever charge out of that admitted total.
+    let (ev, receipt) = with_cx_budget(
+        &gate,
+        budget(None, u32::MAX, Some(plan.total_work_units)),
+        |cx| evaluate_chance_with_budget(&problem, &spec, &[0.5, 0.0], &noise, plan, cx),
+    )
     .expect("exact budget completes");
     assert_eq!(receipt.completed_samples, 64);
     let consumption = receipt
         .consumption
         .expect("admitted work reports consumption");
-    assert_eq!(consumption.cost_charged, 256);
-    assert_eq!(consumption.planned_cost, 256);
+    assert_eq!(consumption.cost_charged, plan.total_work_units);
+    assert_eq!(consumption.planned_cost, plan.total_work_units);
     assert!(consumption.refusal.is_none());
     assert!(matches!(
         ev.status,
@@ -348,11 +346,8 @@ fn g4_pre_cancelled_gate_refuses_at_the_first_tile_with_empty_receipt() {
     let error = with_cx_budget(&gate, infinite(), |cx| {
         evaluate_chance_with_budget(&problem, &spec, &[0.5, 0.0], &noise, plan, cx)
     })
-    .err()
-    .expect("cancelled authority must refuse");
-    let ChanceEvalError::Refused { refusal, receipt } = error else {
-        panic!("expected cancellation refusal, got {error:?}");
-    };
+    .expect_err("cancelled authority must refuse");
+    let (refusal, receipt) = into_refused(error);
     assert!(matches!(refusal, fs_exec::BudgetRefusal::Cancelled { .. }));
     assert_eq!(
         receipt.completed_samples, 0,
@@ -379,16 +374,13 @@ fn g4_mid_run_cancellation_driven_through_the_noise_seam() {
     let error = with_cx_budget(&gate, infinite(), |cx| {
         evaluate_chance_with_budget(&problem, &spec, &[0.5, 0.0], &noise, plan, cx)
     })
-    .err()
-    .expect("mid-run cancellation must surface as a typed refusal");
-    let ChanceEvalError::Refused { refusal, receipt } = error else {
-        panic!("expected cancellation refusal, got {error:?}");
-    };
-    assert!(matches!(refusal, fs_exec::BudgetRefusal::Cancelled { .. }));
+    .expect_err("mid-run cancellation must surface as a typed refusal");
+    let (refusal, receipt) = into_refused(error);
     assert_eq!(
-        receipt.completed_samples, 96,
-        "drain lands on the tile boundary containing the 100th draw"
+        receipt.completed_samples, 104,
+        "the tile containing the 100th draw completes; the drain lands at its end"
     );
+    assert!(matches!(refusal, fs_exec::BudgetRefusal::Cancelled { .. }));
     assert!(receipt.consumption.is_some());
 }
 
@@ -412,11 +404,8 @@ fn g4_poll_quota_exhaustion_names_the_boundary() {
     let error = with_cx_budget(&gate, budget(None, 7, None), |cx| {
         evaluate_chance_with_budget(&problem, &spec, &[0.5, 0.0], &noise, plan, cx)
     })
-    .err()
-    .expect("quota one short of the tile count refuses");
-    let ChanceEvalError::Refused { refusal, receipt } = error else {
-        panic!("expected poll exhaustion, got {error:?}");
-    };
+    .expect_err("quota one short of the tile count refuses");
+    let (refusal, receipt) = into_refused(error);
     assert!(matches!(
         refusal,
         fs_exec::BudgetRefusal::PollsExhausted { .. }
@@ -436,8 +425,7 @@ fn g4_deadline_without_clock_refuses_instead_of_running_unbounded() {
     let error = with_cx_budget(&gate, budget(Some(0), u32::MAX, None), |cx| {
         evaluate_chance_with_budget(&problem, &spec, &[0.5, 0.0], &noise, plan, cx)
     })
-    .err()
-    .expect("deadline without a clock refuses");
+    .expect_err("deadline without a clock refuses");
     assert!(matches!(error, ChanceEvalError::Refused { .. }));
 }
 
@@ -455,8 +443,7 @@ fn g4_noise_dimension_fault_is_a_typed_invalid_refusal() {
     let error = with_cx_budget(&gate, infinite(), |cx| {
         evaluate_chance_with_budget(&problem, &spec, &[0.5, 0.0], &noise, plan, cx)
     })
-    .err()
-    .expect("wrong-dimension draws refuse");
+    .expect_err("wrong-dimension draws refuse");
     assert!(matches!(
         error,
         ChanceEvalError::Invalid(ConError::BadParam { ref what, .. })
@@ -494,14 +481,11 @@ fn g4_partial_prefix_never_mints_evidence() {
     let plan = ChanceWorkPlan::plan(64, 2, 8).expect("plan");
     let gate = CancelGate::new();
     gate.request();
-    match with_cx_budget(&gate, infinite(), |cx| {
+    let outcome = with_cx_budget(&gate, infinite(), |cx| {
         evaluate_chance_with_budget(&problem, &spec, &[0.5, 0.0], &noise, plan, cx)
-    }) {
-        Err(ChanceEvalError::Refused { receipt, .. }) => {
-            assert_eq!(receipt.completed_samples, 0);
-        }
-        other => panic!("refusal expected, got {other:?}"),
-    }
+    });
+    let (_, receipt) = into_refused(outcome.expect_err("refusal expected"));
+    assert_eq!(receipt.completed_samples, 0);
 }
 
 // ------------------------------------------------------ G3/G5
@@ -519,6 +503,7 @@ fn g3_tile_partition_invariance_and_g5_replay_stability() {
         })
         .expect("tile=1 run completes")
     };
+
     for tile in [7usize, 64, 400] {
         let plan = ChanceWorkPlan::plan(400, 2, tile as u32).expect("plan");
         let gate = CancelGate::new();

@@ -256,20 +256,21 @@ impl ChanceWorkPlan {
     /// receipts bind it so retained evidence names the exact contract.
     #[must_use]
     pub fn identity(&self) -> u64 {
-        let mut hash: u64 = 0xcbf_29ce_484_223_25;
-        let mut mix = |bytes: &[u8], hash: &mut u64| {
+        fn mix(hash: u64, bytes: &[u8]) -> u64 {
+            let mut hash = hash;
             for byte in bytes {
-                *hash ^= u64::from(*byte);
-                *hash = hash.wrapping_mul(0x000_00100_000_001b3);
+                hash ^= u64::from(*byte);
+                hash = hash.wrapping_mul(0x0100_0000_01b3);
             }
-        };
-        mix(&self.schema_version.to_le_bytes(), &mut hash);
-        mix(&self.samples.to_le_bytes(), &mut hash);
-        mix(&self.dimensions.to_le_bytes(), &mut hash);
-        mix(&self.tile_samples.to_le_bytes(), &mut hash);
-        mix(&self.per_sample_work_units.to_le_bytes(), &mut hash);
-        mix(&self.total_work_units.to_le_bytes(), &mut hash);
-        hash
+            hash
+        }
+        let seeded: u64 = 0xcbf2_9ce4_8422_2325;
+        let hash = mix(seeded, &self.schema_version.to_le_bytes());
+        let hash = mix(hash, &self.samples.to_le_bytes());
+        let hash = mix(hash, &self.dimensions.to_le_bytes());
+        let hash = mix(hash, &self.tile_samples.to_le_bytes());
+        let hash = mix(hash, &self.per_sample_work_units.to_le_bytes());
+        mix(hash, &self.total_work_units.to_le_bytes())
     }
 }
 

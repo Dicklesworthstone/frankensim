@@ -22,12 +22,27 @@ what the constraints MEAN.
 - `evaluate(problem, spec, x, noise) -> ConstraintEvidence`: status
   (`Satisfied`/`Active`/`Violated`/`NeedsProof`/`Proven`/
   `BoundNotCleared`), EXACT violation certificates for algebraic
-  graphs, active-set role, penalty per law. Chance kinds compute a
-  Hoeffding lower confidence bound and report satisfied ONLY when the
-  bound clears the level — `BoundNotCleared` exists precisely for the
-  case where the raw empirical rate clears but the bound does not
-  (the validity machinery is the feature). Certification kinds refuse
-  "satisfied" pointwise REGARDLESS of how good `g(x)` looks.
+  graphs, active-set role, penalty per law. Chance kinds REFUSE here
+  (typed BadParam naming the replacement): the retired synchronous
+  sampler could neither cancel nor bound a workload of up to
+  u32::MAX evaluations, and a silent cap would hide the resource
+  contract (bead frankensim-oxyjg).
+- `evaluate_chance_with_budget(problem, spec, x, noise, plan, cx) ->
+  Result<(ConstraintEvidence, ChanceWorkReceipt), ChanceEvalError>`:
+  the ONLY chance path. A versioned `ChanceWorkPlan` declares the
+  sample/dimension/tile shape with checked-arithmetic work totals over
+  fixed unit weights; admission against the caller's `Cx` budget
+  happens before the first sample. Sampling proceeds in deterministic
+  logical tiles (the sample index is the stream key; worker count can
+  never reorder draws), polling cancellation/deadline/poll quota at
+  every tile boundary and charging declared cost per completed tile.
+  Budget refusals drain immediately: NO partial evidence is produced,
+  and the retained `ChanceWorkReceipt` names the plan identity, final
+  `BudgetConsumption`, completed-sample prefix, and hits. Statistical
+  semantics are unchanged from the retired loop (same Hoeffding bound,
+  same exact-dimension finite-draw refusal).
+  Certification kinds refuse "satisfied" pointwise REGARDLESS of how
+  good `g(x)` looks in every entry point.
   The v1 host gate first requires exactly one `Rn` variable and an `x`
   whose length equals that declared point dimension. Zero/multiple-variable
   problems and Sphere, SO(3), or Stiefel hosts return typed `InvalidDomain`

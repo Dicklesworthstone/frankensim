@@ -1195,12 +1195,21 @@ fn malformed_policy_values_fail_closed_with_admitted_boundary_neighbors() {
             },
             active_tol: 0.0,
         };
+        let plan = ChanceWorkPlan::plan(1, 2, 1).expect("plan");
+        let any_noise = |_s: u64| vec![0.0, 0.0];
         assert!(matches!(
-            evaluate(&host.problem, &unrepresentable_delta, &x, None),
-            Err(ConError::BadParam {
+            with_cx(|cx| evaluate_chance_with_budget(
+                &host.problem,
+                &unrepresentable_delta,
+                &x,
+                &any_noise,
+                plan,
+                cx
+            )),
+            Err(ChanceEvalError::Invalid(ConError::BadParam {
                 what: "chance confidence representation",
                 ..
-            })
+            }))
         ));
     }
     let first_delta_above_tie = f64::from_bits(confidence_rounding_tie.to_bits() + 1);
@@ -1217,9 +1226,19 @@ fn malformed_policy_values_fail_closed_with_admitted_boundary_neighbors() {
         active_tol: 0.0,
     };
     let zero_noise = |_sample: u64| vec![0.0, 0.0];
-    let representable_delta_evidence =
-        evaluate(&host.problem, &representable_delta, &x, Some(&zero_noise))
-            .expect("a confidence-distinguishable delta is admitted");
+    let chance_plan = ChanceWorkPlan::plan(1, 2, 1).expect("plan");
+    let representable_delta_evidence = with_cx(|cx| {
+        evaluate_chance_with_budget(
+            &host.problem,
+            &representable_delta,
+            &x,
+            &zero_noise,
+            chance_plan,
+            cx,
+        )
+    })
+    .expect("a confidence-distinguishable delta is admitted")
+    .0;
     assert!(matches!(
         representable_delta_evidence.statistical,
         fs_evidence::StatisticalCertificate::HalfWidth { half_width, .. }
@@ -1235,18 +1254,21 @@ fn malformed_policy_values_fail_closed_with_admitted_boundary_neighbors() {
             .to_ledger_row()
             .contains("\"reason\":\"chance-statistical-certificate-kind-mismatch\"")
     );
-    let short_noise = |_sample: u64| vec![0.0];
-    let long_noise = |_sample: u64| vec![0.0, 0.0, 0.0];
-    for bad_noise in [
-        &short_noise as &dyn Fn(u64) -> Vec<f64>,
-        &long_noise as &dyn Fn(u64) -> Vec<f64>,
-    ] {
+    for bad_noise_len in [1usize, 3] {
+        let bad_noise = move |_s: u64| vec![0.0; bad_noise_len];
         assert!(matches!(
-            evaluate(&host.problem, &representable_delta, &x, Some(bad_noise)),
-            Err(ConError::BadParam {
+            with_cx(|cx| evaluate_chance_with_budget(
+                &host.problem,
+                &representable_delta,
+                &x,
+                &bad_noise,
+                chance_plan,
+                cx
+            )),
+            Err(ChanceEvalError::Invalid(ConError::BadParam {
                 what: "chance noise draw dimension",
                 ..
-            })
+            }))
         ));
     }
 }
@@ -1728,21 +1750,30 @@ fn a_chance_constraint_with_a_bad_delta_or_zero_samples_is_refused() {
         },
         active_tol: 1e-9,
     };
+    let plan = ChanceWorkPlan::plan(400, 2, 64).expect("plan");
     for (s, d, why) in [
         (400u32, 1.5f64, "delta >= 1"),
         (400, 0.0, "delta = 0"),
         (0, 0.05, "zero samples"),
     ] {
+        let outcome = with_cx(|cx| {
+            evaluate_chance_with_budget(&host.problem, &chance(s, d), &x, &noise, plan, cx)
+        });
         assert!(
             matches!(
-                evaluate(&host.problem, &chance(s, d), &x, Some(&noise)),
-                Err(ConError::BadParam { .. })
+                outcome,
+                Err(ChanceEvalError::Invalid(ConError::BadParam { .. }))
             ),
             "{why} must be refused as BadParam"
         );
     }
-    // A valid (delta, samples) still evaluates.
-    assert!(evaluate(&host.problem, &chance(400, 0.05), &x, Some(&noise)).is_ok());
+    // A valid (delta, samples) still evaluates under an admitted plan.
+    assert!(
+        with_cx(|cx| {
+            evaluate_chance_with_budget(&host.problem, &chance(400, 0.05), &x, &noise, plan, cx)
+        })
+        .is_ok()
+    );
     verdict(
         "fscon-chance-params",
         true,
