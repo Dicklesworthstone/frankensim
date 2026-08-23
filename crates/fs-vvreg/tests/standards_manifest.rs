@@ -103,8 +103,8 @@ fn g0_exact_edition_and_source_gates_fail_closed() {
         current.bind_rule(mismatch),
         Err(RuleBindingError::SourceHashMismatch {
             key: current_key.clone(),
-            expected: hash(0x11),
-            observed: hash(0x33),
+            expected: Box::new(hash(0x11)),
+            observed: Box::new(hash(0x33)),
         })
     );
 

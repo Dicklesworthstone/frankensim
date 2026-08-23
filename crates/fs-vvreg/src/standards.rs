@@ -890,8 +890,8 @@ impl StandardManifest {
         if expected_source_hash != request.observed_source_hash {
             return Err(RuleBindingError::SourceHashMismatch {
                 key: request.source,
-                expected: expected_source_hash,
-                observed: request.observed_source_hash,
+                expected: Box::new(expected_source_hash),
+                observed: Box::new(request.observed_source_hash),
             });
         }
         let historical = !matches!(record.status(), StandardStatus::Current);
@@ -1118,9 +1118,9 @@ pub enum RuleBindingError {
         /// Refused key.
         key: StandardEditionKey,
         /// Manifest pin.
-        expected: ContentHash,
+        expected: Box<ContentHash>,
         /// Observed source hash.
-        observed: ContentHash,
+        observed: Box<ContentHash>,
     },
     /// Historical edition was offered to a current-only rule.
     HistoricalEdition {

@@ -380,6 +380,7 @@ impl std::error::Error for LeaseIdentityPathError {}
 /// one output identity may be routed to different destinations. Treating the
 /// tuple as a single caller-formatted label would lose those authority
 /// boundaries and make duplicate detection ambiguous.
+#[allow(clippy::struct_field_names)] // the four *_identity fields ARE the point: distinct authority boundaries, per the doc comment above
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PublishedTransferBinding {
     plan_identity: [u8; PUBLISHED_TRANSFER_BINDING_FIELD_BYTES],
@@ -4891,7 +4892,7 @@ impl<T> Drop for PublishedAllocation<T> {
 }
 
 /// Preparation refusal carrying the allocation back unchanged.
-impl<'owner, T> fmt::Debug for TypedPrepareRejection<'owner, T> {
+impl<T> fmt::Debug for TypedPrepareRejection<'_, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TypedPrepareRejection")
             .field("refusal", &self.refusal)
@@ -4919,7 +4920,7 @@ impl<'owner, T> TypedPrepareRejection<'owner, T> {
 }
 
 /// Commit refusal carrying the prepared publication back unchanged.
-impl<'owner, T> fmt::Debug for TypedCommitRejection<'owner, T> {
+impl<T> fmt::Debug for TypedCommitRejection<'_, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TypedCommitRejection")
             .field("refusal", &self.refusal)
@@ -4960,7 +4961,7 @@ pub enum TypedRollbackRejection<'owner, T> {
     Released(T, PublishedTransferRollbackReceipt, DelegatedLeaseRefusal),
 }
 
-impl<'owner, T> fmt::Debug for TypedRollbackRejection<'owner, T> {
+impl<T> fmt::Debug for TypedRollbackRejection<'_, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Prepared(_, refusal) => f
@@ -4976,7 +4977,7 @@ impl<'owner, T> fmt::Debug for TypedRollbackRejection<'owner, T> {
 }
 
 /// Successful non-mutating rollback: staging plus untouched value.
-impl<'owner, T> fmt::Debug for TypedRollback<'owner, T> {
+impl<T> fmt::Debug for TypedRollback<'_, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TypedRollback")
             .field("receipt", &self.receipt)
