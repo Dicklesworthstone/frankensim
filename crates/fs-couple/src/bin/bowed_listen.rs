@@ -122,7 +122,8 @@ fn main() -> std::process::ExitCode {
         return std::process::ExitCode::from(2);
     }
     let full_scale_pa = peak / 0.3; // -10 dBFS peak
-    let (bytes, frames) =
+    let frames = log.radiated_pressure_pa.len();
+    let (bytes, clipped) =
         match encode_pcm16_wav(&log.radiated_pressure_pa, SAMPLE_RATE_HZ, full_scale_pa) {
             Ok(r) => r,
             Err(e) => {
@@ -147,12 +148,13 @@ fn main() -> std::process::ExitCode {
         concat!(
             r#"{{"schema":"{SCHEMA}","kind":"listening-receipt","#,
             r#""gesture":{{"v_bow_m_s":0.45,"normal_force_n":3.9,"station_fraction":0.11}},"#,
-            r#""termination":"plate-one-port","frames":{frames},"sample_rate_hz":48000,"#,
-            r#""peak_normalization_dbfs":-10.0,"wav_sha256":"{hash}","#,
+            r#""termination":"plate-one-port","frames":{frames},"clipped_samples":{clipped},"#,
+            r#""sample_rate_hz":48000,"peak_normalization_dbfs":-10.0,"wav_sha256":"{hash}","#,
             r#""no_claim":"automated gates cover the emergent mechanism; whether the stroke reads as bowed rather than plucked is listener judgment and is not claimed here"}}"#
         ),
         SCHEMA = SCHEMA,
         frames = frames,
+        clipped = clipped,
         hash = hash,
     );
     if writeln!(sink_file, "{row}").is_err() {
