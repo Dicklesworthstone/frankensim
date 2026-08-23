@@ -639,14 +639,20 @@ fn fnv(bytes: &[u8]) -> u64 {
     acc
 }
 
-/// Re-frozen 2026-08-06 for tracer bit-semantics v2: reflective GGX moved
-/// from NDF sampling to a matched isotropic visible-normal sampler. The BSDF
-/// integral is unchanged in expectation, but deterministic sample directions,
-/// PDFs, MIS weights, image bits, and variance deliberately changed. Fixture:
+/// Re-frozen 2026-08-22 for tracer bit-semantics v3 (bead frankensim-aivv6):
+/// image bits moved under v2 WITHOUT a surface bump through the composite of
+/// landed post-2026-08-06 shading-path changes (anisotropic-GGX kernels and
+/// BrushedConductor threading, reflected-manifold preparation reuse, BVH
+/// inclusive current-best-t pruning) while every one of those lanes' own
+/// declared fingerprints stayed green; the Cornell probe was the only observer
+/// of the drift, which is why check-goldens could not catch it. v2's label was
+/// therefore corrupted and is retired by this bump. Digest reproduced
+/// deterministically on x86_64-linux (RCH) at tree HEAD 1a7fa261. Fixture:
 /// 24×24, 8 spp, depth 4, MIS + iid Philox, seed 7; FNV-1a over the EXR bytes.
-/// This freeze also records the current chart-backend-bits=11 dependency.
+/// This freeze records chart-backend-bits=11 and bvh-determinism
+/// 0xcf18_55d9_4642_e0fd as unchanged dependencies.
 /// Re-freeze only per docs/GOLDEN_POLICY.md.
-const CORNELL_GOLDEN: u64 = 0xe89b_e51c_b59b_21cc;
+const CORNELL_GOLDEN: u64 = 0x9ce1_e693_4ae1_8543;
 
 /// ACCEPTANCE (2): the Cornell-class fixture matches the frozen
 /// reference image hash in deterministic mode.

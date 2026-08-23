@@ -124,7 +124,7 @@ mod transport;
 /// Philox/Sobol stream keying, the BSDF forms, the CMF/adaptation
 /// constants it inherits from `spectral`, and the EXR channel layout.
 /// Bump ONLY with a semantic justification per docs/GOLDEN_POLICY.md.
-pub const TRACER_BIT_SEMANTICS_VERSION: u32 = 2;
+pub const TRACER_BIT_SEMANTICS_VERSION: u32 = 3;
 
 /// Bit-affecting semantics of the optional motion-time path. This is versioned
 /// separately because the legacy static entry points do not draw a shutter

@@ -2013,8 +2013,7 @@ fn rb_004a_bvh_build_is_deterministic_under_concurrent_construction() {
     // row in the same commit.
     const BVH_DETERMINISM_FINGERPRINT_GOLDEN: u64 = 0xcf18_55d9_4642_e0fd;
     assert_eq!(
-        reference.0,
-        BVH_DETERMINISM_FINGERPRINT_GOLDEN,
+        reference.0, BVH_DETERMINISM_FINGERPRINT_GOLDEN,
         "BVH construction fingerprint moved: observed {:#018x} vs frozen \
          {BVH_DETERMINISM_FINGERPRINT_GOLDEN:#018x} — re-freeze only per \
          docs/GOLDEN_POLICY.md",
