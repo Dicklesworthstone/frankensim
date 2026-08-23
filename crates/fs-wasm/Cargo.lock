@@ -646,6 +646,7 @@ version = "0.0.1"
 dependencies = [
  "fs-evidence",
  "fs-exec",
+ "fs-ivl",
  "fs-obs",
  "fs-opt",
  "fs-qty",

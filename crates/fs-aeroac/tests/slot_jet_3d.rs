@@ -2,12 +2,10 @@
 //! config refusals, determinism, fringe no-op law, momentum-exchange
 //! sanity through a full smoke run, the shared-classifier wiring
 //! (tone vs noise vs roundoff), and the MEASURED 3-D fringe
-//! reflection coefficient with a bounce-back-wall control.
-
 use fs_aeroac::regime::TONAL_FLATNESS_CEILING;
 use fs_aeroac::slot_jet_3d::{
     FORCE_RMS_AMPLITUDE_FLOOR, Fringe3, SlotJet3dConfig, SlotJet3dDiagnostics, SlotJet3dRun,
-    classify_rung, run_slot_jet_3d,
+    classify_rung, run_slot_jet_3d, run_slot_jet_3d_chunked,
 };
 use fs_lbm::d3q19::{BoundaryGrid3, BoundarySpec3, CollisionModel3, FaceBoundary3};
 
@@ -284,5 +282,53 @@ fn fringe_reflection_measured_with_wall_control() {
     assert!(
         r_wall > 10.0 * r_fringe.max(1e-6),
         "wall control must reflect far more than the fringe: wall={r_wall:.4} fringe={r_fringe:.4}"
+    );
+}
+
+#[test]
+fn chunked_resume_bitwise_matches_whole_run() {
+    let mut cfg = smoke_config();
+    cfg.steps_settle = 200;
+    cfg.steps_record = 256;
+    let whole = run_slot_jet_3d(&cfg).expect("whole run");
+
+    // Unique per-process checkpoint dir; deliberately never deleted
+    // (repository law: no file deletion without explicit approval).
+    let dir = std::env::temp_dir().join(format!(
+        "sj-ckpt-equiv-{}-{}",
+        std::process::id(),
+        cfg.steps_settle
+    ));
+    let first = run_slot_jet_3d_chunked(&cfg, &dir, 137).expect("chunk 1");
+    assert!(matches!(first, fs_aeroac::slot_jet_3d::SweepProgress::Partial { .. }));
+    let second = run_slot_jet_3d_chunked(&cfg, &dir, 10_000).expect("chunk 2");
+    match second {
+        fs_aeroac::slot_jet_3d::SweepProgress::Complete(run) => {
+            assert_eq!(run.force_series.len(), whole.force_series.len());
+            for (fa, fb) in run.force_series.iter().zip(&whole.force_series) {
+                assert_eq!(fa[0].to_bits(), fb[0].to_bits());
+                assert_eq!(fa[1].to_bits(), fb[1].to_bits());
+            }
+            assert_eq!(
+                run.diagnostics.reynolds.to_bits(),
+                whole.diagnostics.reynolds.to_bits()
+            );
+        }
+        other => panic!("second chunk must complete, got {other:?}"),
+    }
+}
+
+#[test]
+fn checkpoint_refuses_foreign_configuration() {
+    let cfg = smoke_config();
+    let dir = std::env::temp_dir().join(format!("sj-ckpt-fp-{}", std::process::id()));
+    let _ = run_slot_jet_3d_chunked(&cfg, &dir, 50).expect("seed chunk");
+    let mut foreign = smoke_config();
+    foreign.slot_half *= 2.0;
+    let err = run_slot_jet_3d_chunked(&foreign, &dir, 50)
+        .expect_err("fingerprint mismatch must refuse");
+    assert!(
+        format!("{err}").contains("different configuration"),
+        "refusal must name the fingerprint guard: {err}"
     );
 }

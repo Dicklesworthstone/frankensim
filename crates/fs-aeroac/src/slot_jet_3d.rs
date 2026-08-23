@@ -753,7 +753,7 @@ fn write_checkpoint(
     let file = std::fs::File::create(&tmp)
         .map_err(|_| AeroacError::InvalidParameter { what: "cannot create checkpoint file" })?;
     let mut w = std::io::BufWriter::new(file);
-    let refuse = |_: ()| AeroacError::InvalidParameter { what: "checkpoint write" };
+    let refuse = |_e: std::io::Error| AeroacError::InvalidParameter { what: "checkpoint write" };
     w.write_all(CHECKPOINT_MAGIC).map_err(refuse)?;
     w.write_all(&1u32.to_le_bytes()).map_err(refuse)?;
     w.write_all(&config_fingerprint(cfg).to_le_bytes()).map_err(refuse)?;
@@ -847,7 +847,7 @@ pub fn reynolds_of(cfg: &SlotJet3dConfig) -> f64 {
         return f64::NAN;
     };
     let nu = (1.0 / second_order_rate - 0.5) / 3.0;
-    #[allow(clippy::cast_precision_loss)]
+    // No casts here; the allow below is unnecessary — plain float math.
     cfg.u_jet * 2.0 * cfg.slot_half / nu
 }
 
@@ -856,7 +856,8 @@ pub fn reynolds_of(cfg: &SlotJet3dConfig) -> f64 {
 #[must_use]
 pub fn strouhal_bin_width_of(cfg: &SlotJet3dConfig) -> f64 {
     #[allow(clippy::cast_precision_loss)]
-    (1.0 / cfg.steps_record as f64) * 2.0 * cfg.slot_half / cfg.u_jet
+    let inv = 1.0 / cfg.steps_record as f64;
+    inv * 2.0 * cfg.slot_half / cfg.u_jet
 }
 
 fn finish_run(
