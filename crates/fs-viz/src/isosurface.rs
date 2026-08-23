@@ -387,7 +387,7 @@ fn validate_grid3_layout(
     }
     let node_count = dimensions
         .into_iter()
-        .try_fold(1usize, |count, dimension| count.checked_mul(dimension))
+        .try_fold(1usize, usize::checked_mul)
         .ok_or(Grid3Error::NodeCountOverflow { dimensions })?;
     if node_count > node_limit {
         return Err(Grid3Error::NodeBudgetExceeded {

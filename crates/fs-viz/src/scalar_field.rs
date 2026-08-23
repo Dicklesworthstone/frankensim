@@ -477,7 +477,7 @@ fn validate_layout(
     }
     let sample_count = dimensions
         .into_iter()
-        .try_fold(1usize, |count, dimension| count.checked_mul(dimension))
+        .try_fold(1usize, usize::checked_mul)
         .ok_or(ScalarField3Error::SampleCountOverflow { dimensions })?;
     if sample_count > sample_limit {
         return Err(ScalarField3Error::SampleBudgetExceeded {
@@ -542,7 +542,7 @@ fn encoded_len(
 ) -> Result<usize, ScalarField3Error> {
     let semantic_bytes = semantic_lengths
         .into_iter()
-        .try_fold(0usize, |count, length| count.checked_add(length))
+        .try_fold(0usize, usize::checked_add)
         .ok_or(ScalarField3Error::EncodedSizeOverflow)?;
     let sample_bytes = sample_count
         .checked_mul(core::mem::size_of::<f64>())

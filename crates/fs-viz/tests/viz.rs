@@ -3,6 +3,9 @@
 //! streamlines conserve xy, Hessian classification recovers the known Morse
 //! type, and a circle-SDF isocontour lies on the circle.
 
+// Assertions pin bitwise-exact deterministic values (doubling, exact-level
+// nodes, decoded headers); a tolerance would weaken the G0/G3 pins.
+#![allow(clippy::float_cmp)]
 use fs_blake3::DomainHasher;
 use fs_exec::{Budget, BudgetRefusal, CancelGate, Cx, ExecMode, StreamKey};
 use fs_viz::{
@@ -50,7 +53,7 @@ fn with_contour_cx<R>(gate: &CancelGate, budget: Budget, f: impl FnOnce(&Cx<'_>)
             gate,
             arena,
             StreamKey {
-                seed: 0xF5_71_2,
+                seed: 0x000F_5712,
                 kernel_id: 5,
                 tile: 0,
                 iteration: 0,
@@ -963,13 +966,13 @@ fn g0_checkerboard_exact_node_ownership_is_static_and_budget_exact() {
             |_| {
                 let index = sample_index.get();
                 sample_index.set(index + 1);
-                let even = index % 2 == 0;
+                let even = index.is_multiple_of(2);
                 if even == exact_even { 0.0 } else { 1.0 }
             },
         )
         .expect("checkerboard dimensions and samples are admitted");
 
-        let is_exact = |i: usize, j: usize| ((j * nx + i) % 2 == 0) == exact_even;
+        let is_exact = |i: usize, j: usize| (j * nx + i).is_multiple_of(2) == exact_even;
         let mut expected = Vec::new();
         for j in 0..ny {
             for i in 0..nx {
@@ -986,7 +989,7 @@ fn g0_checkerboard_exact_node_ownership_is_static_and_budget_exact() {
             }
         }
 
-        let parity_tail = if exact_even { 1 } else { 0 };
+        let parity_tail = usize::from(exact_even);
         assert_eq!(expected.len(), (nx * ny + parity_tail) / 2);
         assert_eq!(
             grid.isocontour_crossings(0.0, expected.len())

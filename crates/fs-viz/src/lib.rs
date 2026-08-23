@@ -25,6 +25,13 @@
 //! extraction consume the lower-layer [`fs_exec::Cx`] contract and identify
 //! published artifacts with the workspace's [`fs_blake3`] owner.
 
+// The typed refusal enums (`StreamlineRunError`, `IsoContourRunError`,
+// `IsoContourError`) deliberately carry bounded structured diagnostics — edge
+// indices, endpoint/value bits, budgets, reports — because operators must
+// distinguish malformed evidence from valid-empty results (beads m2owi/o33vo).
+// Boxing them would erase that contract for a lint-size heuristic, so the
+// large-Err warning is waived crate-wide by design.
+#![allow(clippy::result_large_err)]
 mod isosurface;
 mod scalar_field;
 
@@ -308,9 +315,15 @@ pub enum StreamlineTermination {
     /// All requested steps completed.
     StepsComplete,
     /// The zero-based attempted step would have left the admitted domain.
-    DomainExit { attempted_step: usize },
+    DomainExit {
+        /// Zero-based index of the first step that would exit the domain.
+        attempted_step: usize,
+    },
     /// The zero-based attempted step rounded to the current point.
-    Stagnated { attempted_step: usize },
+    Stagnated {
+        /// Zero-based index of the step whose displacement rounded to zero.
+        attempted_step: usize,
+    },
 }
 
 impl StreamlineTermination {
@@ -1215,8 +1228,8 @@ fn streamline_identity_usize(
 }
 
 #[allow(clippy::too_many_lines)] // One transaction keeps callbacks, charging, and publication ordered.
-fn run_streamline_with<'clock, F, P, R>(
-    cx: Option<&Cx<'clock>>,
+fn run_streamline_with<F, P, R>(
+    cx: Option<&Cx<'_>>,
     field: &mut F,
     request: StreamlineRequest,
     budget: StreamlineBudget,
@@ -1271,16 +1284,13 @@ where
             report,
         ));
     }
-    let reserved_output_bytes = match points.capacity().checked_mul(size_of::<Vec2>()) {
-        Some(bytes) => bytes,
-        None => {
-            return Err(terminal_streamline_error(
-                StreamlineError::PlanOverflow {
-                    resource: StreamlineResource::OutputBytes,
-                },
-                report,
-            ));
-        }
+    let Some(reserved_output_bytes) = points.capacity().checked_mul(size_of::<Vec2>()) else {
+        return Err(terminal_streamline_error(
+            StreamlineError::PlanOverflow {
+                resource: StreamlineResource::OutputBytes,
+            },
+            report,
+        ));
     };
     report.reserved_output_bytes = reserved_output_bytes;
     if points.capacity() < plan.output_points {
@@ -1302,16 +1312,13 @@ where
         ));
     }
     let non_output_live = plan.live_bytes - plan.output_bytes;
-    let actual_live_bytes = match non_output_live.checked_add(reserved_output_bytes) {
-        Some(bytes) => bytes,
-        None => {
-            return Err(terminal_streamline_error(
-                StreamlineError::PlanOverflow {
-                    resource: StreamlineResource::LiveBytes,
-                },
-                report,
-            ));
-        }
+    let Some(actual_live_bytes) = non_output_live.checked_add(reserved_output_bytes) else {
+        return Err(terminal_streamline_error(
+            StreamlineError::PlanOverflow {
+                resource: StreamlineResource::LiveBytes,
+            },
+            report,
+        ));
     };
     report.peak_live_bytes = actual_live_bytes;
     if actual_live_bytes > budget.live_byte_limit {
@@ -1461,16 +1468,13 @@ where
             Ok(value) => value,
             Err(error) => return Err(terminal_streamline_error(error, report)),
         };
-    let termination = match report.termination {
-        Some(termination) => termination,
-        None => {
-            return Err(terminal_streamline_error(
-                StreamlineError::PlanOverflow {
-                    resource: StreamlineResource::IdentityBytes,
-                },
-                report,
-            ));
-        }
+    let Some(termination) = report.termination else {
+        return Err(terminal_streamline_error(
+            StreamlineError::PlanOverflow {
+                resource: StreamlineResource::IdentityBytes,
+            },
+            report,
+        ));
     };
     let termination_step = match streamline_identity_usize(
         termination.identity_step(request.steps),
@@ -1513,16 +1517,13 @@ where
     hasher.update(&[0]);
     hasher.update(&0u64.to_le_bytes());
     report.identity_bytes_hashed += STREAMLINE_IDENTITY_FIXED_PAYLOAD_BYTES;
-    let identity_header_work = match u64::try_from(report.identity_bytes_hashed) {
-        Ok(value) => value,
-        Err(_) => {
-            return Err(terminal_streamline_error(
-                StreamlineError::PlanOverflow {
-                    resource: StreamlineResource::WorkUnits,
-                },
-                report,
-            ));
-        }
+    let Ok(identity_header_work) = u64::try_from(report.identity_bytes_hashed) else {
+        return Err(terminal_streamline_error(
+            StreamlineError::PlanOverflow {
+                resource: StreamlineResource::WorkUnits,
+            },
+            report,
+        ));
     };
     report.work_units += identity_header_work;
     pending_work += identity_header_work;
@@ -1642,6 +1643,8 @@ pub fn classify_hessian_with_policy(
         };
     }
 
+    #[allow(clippy::float_cmp)]
+    // Exact policy is a deliberate bitwise symmetry test; an epsilon would reclassify degenerate saddles.
     let symmetric = match symmetry_policy {
         HessianSymmetryPolicy::Exact => hessian[0][1] == hessian[1][0],
     };
@@ -2693,9 +2696,9 @@ fn contour_charge(
 }
 
 #[allow(clippy::too_many_lines)] // One atomic transaction keeps charging and publication ordered.
-fn run_isocontour_with<'clock, P, R>(
+fn run_isocontour_with<P, R>(
     grid: &Grid2,
-    cx: Option<&Cx<'clock>>,
+    cx: Option<&Cx<'_>>,
     iso: f64,
     budget: IsoContourBudget,
     mut before_checkpoint: P,
@@ -2755,16 +2758,13 @@ where
             report,
         ));
     }
-    let reserved_output_bytes = match crossings.capacity().checked_mul(size_of::<Vec2>()) {
-        Some(bytes) => bytes,
-        None => {
-            return Err(terminal_contour_error(
-                IsoContourError::PlanOverflow {
-                    resource: IsoContourResource::OutputBytes,
-                },
-                report,
-            ));
-        }
+    let Some(reserved_output_bytes) = crossings.capacity().checked_mul(size_of::<Vec2>()) else {
+        return Err(terminal_contour_error(
+            IsoContourError::PlanOverflow {
+                resource: IsoContourResource::OutputBytes,
+            },
+            report,
+        ));
     };
     report.reserved_output_bytes = reserved_output_bytes;
     if crossings.capacity() < plan.max_crossings {
@@ -2786,16 +2786,13 @@ where
         ));
     }
     let non_output_live = plan.live_bytes - plan.output_bytes;
-    let actual_live_bytes = match non_output_live.checked_add(reserved_output_bytes) {
-        Some(bytes) => bytes,
-        None => {
-            return Err(terminal_contour_error(
-                IsoContourError::PlanOverflow {
-                    resource: IsoContourResource::LiveBytes,
-                },
-                report,
-            ));
-        }
+    let Some(actual_live_bytes) = non_output_live.checked_add(reserved_output_bytes) else {
+        return Err(terminal_contour_error(
+            IsoContourError::PlanOverflow {
+                resource: IsoContourResource::LiveBytes,
+            },
+            report,
+        ));
     };
     report.peak_live_bytes = actual_live_bytes;
     if actual_live_bytes > budget.live_byte_limit {
@@ -2973,38 +2970,29 @@ where
         return Err(terminal_contour_error(error, report));
     }
 
-    let nx = match u64::try_from(grid.nx) {
-        Ok(value) => value,
-        Err(_) => {
-            return Err(terminal_contour_error(
-                IsoContourError::PlanOverflow {
-                    resource: IsoContourResource::IdentityBytes,
-                },
-                report,
-            ));
-        }
+    let Ok(nx) = u64::try_from(grid.nx) else {
+        return Err(terminal_contour_error(
+            IsoContourError::PlanOverflow {
+                resource: IsoContourResource::IdentityBytes,
+            },
+            report,
+        ));
     };
-    let ny = match u64::try_from(grid.ny) {
-        Ok(value) => value,
-        Err(_) => {
-            return Err(terminal_contour_error(
-                IsoContourError::PlanOverflow {
-                    resource: IsoContourResource::IdentityBytes,
-                },
-                report,
-            ));
-        }
+    let Ok(ny) = u64::try_from(grid.ny) else {
+        return Err(terminal_contour_error(
+            IsoContourError::PlanOverflow {
+                resource: IsoContourResource::IdentityBytes,
+            },
+            report,
+        ));
     };
-    let crossing_count = match u64::try_from(crossings.len()) {
-        Ok(value) => value,
-        Err(_) => {
-            return Err(terminal_contour_error(
-                IsoContourError::PlanOverflow {
-                    resource: IsoContourResource::IdentityBytes,
-                },
-                report,
-            ));
-        }
+    let Ok(crossing_count) = u64::try_from(crossings.len()) else {
+        return Err(terminal_contour_error(
+            IsoContourError::PlanOverflow {
+                resource: IsoContourResource::IdentityBytes,
+            },
+            report,
+        ));
     };
     let mut hasher = DomainHasher::new(ISO_CONTOUR_ARTIFACT_IDENTITY_DOMAIN);
     report.identity_bytes_hashed = ISO_CONTOUR_ARTIFACT_IDENTITY_DOMAIN.len();
@@ -3017,16 +3005,13 @@ where
     hasher.update(&iso.to_bits().to_le_bytes());
     hasher.update(&crossing_count.to_le_bytes());
     report.identity_bytes_hashed += ISO_CONTOUR_IDENTITY_FIXED_PAYLOAD_BYTES;
-    let identity_header_work = match u64::try_from(report.identity_bytes_hashed) {
-        Ok(value) => value,
-        Err(_) => {
-            return Err(terminal_contour_error(
-                IsoContourError::PlanOverflow {
-                    resource: IsoContourResource::WorkUnits,
-                },
-                report,
-            ));
-        }
+    let Ok(identity_header_work) = u64::try_from(report.identity_bytes_hashed) else {
+        return Err(terminal_contour_error(
+            IsoContourError::PlanOverflow {
+                resource: IsoContourResource::WorkUnits,
+            },
+            report,
+        ));
     };
     report.work_units += identity_header_work;
     pending_work += identity_header_work;
@@ -3159,7 +3144,10 @@ fn edge_crossing(
     report: &mut IsoContourReport,
     pending_work: &mut u64,
 ) -> Result<Option<EdgeCrossing2>, IsoContourError> {
+    #[allow(clippy::float_cmp)]
+    // Exact-node ownership is defined bitwise against iso; a tolerance would corrupt exact/interpolated classification.
     let a_exact = va == iso;
+    #[allow(clippy::float_cmp)] // Same bitwise exact-node rule as a_exact above.
     let b_exact = vb == iso;
     if a_exact && b_exact {
         return Err(IsoContourError::CoincidentLevelEdge {
