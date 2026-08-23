@@ -1479,8 +1479,6 @@ dependencies = [
  "fs-solid",
  "fs-solver",
  "fs-sparse",
- "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -1750,6 +1748,7 @@ dependencies = [
 name = "fs-ledger"
 version = "0.0.1"
 dependencies = [
+ "fs-alloc",
  "fs-blake3",
  "fs-evidence",
  "fs-exec",
@@ -1822,10 +1821,6 @@ dependencies = [
 [[package]]
 name = "fs-mbd"
 version = "0.0.1"
-dependencies = [
- "serde",
- "serde_json",
-]
 
 [[package]]
 name = "fs-mesh"
@@ -1895,6 +1890,7 @@ dependencies = [
 name = "fs-neuroshape-e2e"
 version = "0.0.1"
 dependencies = [
+ "fs-exec",
  "fs-rep-neural",
  "fs-viz",
 ]

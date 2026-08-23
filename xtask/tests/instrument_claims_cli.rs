@@ -63,9 +63,7 @@ fn write(dir: &Path, rel: &str, content: &str) {
 }
 
 fn registry(rows: &str) -> String {
-    format!(
-        "{{\n  \"schema\": \"frankensim-instrument-claims-v1\",\n  \"rows\": [{rows}]\n}}\n"
-    )
+    format!("{{\n  \"schema\": \"frankensim-instrument-claims-v1\",\n  \"rows\": [{rows}]\n}}\n")
 }
 
 fn row(gate: &str, live_default: &str, evidence: &str, budget: &str, notes: &str) -> String {
@@ -86,10 +84,7 @@ fn live_repository_registry_is_clean() {
         stdout.contains("\"check\":\"instrument-claims\""),
         "missing check verdicts:\n{stdout}"
     );
-    assert!(
-        stdout.contains("rows="),
-        "missing summary note:\n{stdout}"
-    );
+    assert!(stdout.contains("rows="), "missing summary note:\n{stdout}");
     // The human-facing "policy OK" line goes to stderr; the machine verdict
     // is the JSON summary — agents parse verdicts, not prose.
     assert!(
@@ -100,10 +95,8 @@ fn live_repository_registry_is_clean() {
 
 #[test]
 fn scratch_lifecycle_through_the_real_binary() {
-    let scratch = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(
-        "instrument-claims-e2e-{}",
-        std::process::id()
-    ));
+    let scratch = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("instrument-claims-e2e-{}", std::process::id()));
     if scratch.exists() {
         std::fs::remove_dir_all(&scratch).expect("clean stale scratch");
     }
@@ -175,10 +168,7 @@ fn scratch_lifecycle_through_the_real_binary() {
     );
     let (ok, stdout) = run_check(&scratch);
     assert!(!ok, "live-default without budget must fail:\n{stdout}");
-    assert!(
-        stdout.contains("no budget_row"),
-        "wrong refusal:\n{stdout}"
-    );
+    assert!(stdout.contains("no budget_row"), "wrong refusal:\n{stdout}");
 
     // Step 5: with a budget row it passes; commit as the new predecessor.
     write(

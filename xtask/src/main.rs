@@ -19,6 +19,7 @@
 //! - `check-terminology` — enforce the repository's sole-branch vocabulary policy.
 //! - `check-goldens`  — golden hashes declare upstream couplings; drift re-freezes deliberately (bead y4pt).
 //! - `check-identities` — identity schemas classify fields and link mutation coverage (bead iu5l).
+//! - `check-state-charters` — workspace solver-state charter collision check (bead sj31i.52.5.2.1).
 //! - `check-manifest-fixture` — admit only declared new-domain Cargo edges and an acyclic same-layer order.
 //! - `check-constellation-assessment` — keep the measured seven-sibling trust cone current.
 //! - `check-constellation-drift` — classify each sibling against its pin; red only on wandered checkouts (bead es6pt).
@@ -69,6 +70,7 @@ mod portfolio_candidate;
 mod program_metrics;
 mod schemas;
 mod source_manifest;
+mod state_charters;
 mod spine_metrics;
 mod spine_ratchet;
 mod suite_receipt;
@@ -8570,6 +8572,17 @@ fn main() -> ExitCode {
         }
     };
     let mut policy_notes = Vec::new();
+    fn state_charter_violations(root: &Path) -> Vec<Violation> {
+        state_charters::run(root)
+            .unwrap_or_else(|error| vec![error])
+            .into_iter()
+            .map(|detail| Violation {
+                check: "state-charter-collisions",
+                crate_name: "xtask::state_charters".to_string(),
+                detail,
+            })
+            .collect()
+    }
     let (violations, checks): (Vec<Violation>, Vec<&str>) = match cmd.as_str() {
         "check-layers" => (check_layers(&manifests), vec!["layers"]),
         "check-deps" => (check_deps(&manifests), vec!["dependency-policy"]),
@@ -8583,6 +8596,10 @@ fn main() -> ExitCode {
         "check-casual-print" => (check_casual_print(&root), vec![CASUAL_PRINT_CHECK]),
         "check-terminology" => (check_terminology(&root), vec![TERMINOLOGY_CHECK]),
         "check-goldens" => (check_goldens(&root), vec!["golden-couplings"]),
+        "check-state-charters" => (
+            state_charter_violations(&root),
+            vec!["state-charter-collisions"],
+        ),
         "check-identities" => (
             identities::check_identities(&root),
             vec!["semantic-identities"],
@@ -8729,13 +8746,14 @@ fn main() -> ExitCode {
             let spine_metrics_report = spine_metrics::check(&root);
             v.extend(spine_metrics_report.0);
             policy_notes.extend(spine_metrics_report.1);
+            v.extend(check_citable_producers(&root));
+            v.extend(state_charter_violations(&root));
             let tropical_report = tropical_path::check(&root);
             v.extend(tropical_report.0);
             policy_notes.extend(tropical_report.1);
             let suite_report = suite_receipt::check(&root);
             v.extend(suite_report.0);
             policy_notes.extend(suite_report.1);
-            v.extend(check_citable_producers(&root));
             (
                 v,
                 vec![
@@ -8744,8 +8762,8 @@ fn main() -> ExitCode {
                     "contracts",
                     "unsafe-capsules",
                     "powi-determinism",
-                    "libm-determinism",
-                    "color-admission",
+                    "semantic-identities",
+                    "state-charter-collisions",
                     NO_PROMOTION_CHECK,
                     "obs-events",
                     CASUAL_PRINT_CHECK,
@@ -8784,7 +8802,7 @@ fn main() -> ExitCode {
                 "unknown command {other:?}; use check-layers|check-deps|check-contracts|\
                  check-unsafe|check-powi|check-obs-events|check-casual-print|check-terminology|\
                  check-goldens|check-docs|check-claims|check-closures|check-maturity|check-instrument-claims|check-critical-path|check-moonshots|check-claim-integrity|check-schemas|check-consolidation|check-program-metrics|\
-                 check-identities|check-manifest-fixture|check-constellation-assessment|check-constellation-drift|check-source-manifest|check-vv-scorecard|check-color-admission|check-no-promotion|check-citable-producers|\
+                 check-identities|check-state-charters|check-manifest-fixture|check-constellation-assessment|check-constellation-drift|check-source-manifest|check-vv-scorecard|check-color-admission|check-no-promotion|check-citable-producers|\
                  check-all|generate-identities|generate-constellation-assessment|generate-source-manifest|generate-vv-scorecard|generate-program-metrics|generate-spine-metrics|generate-tropical-path|generate-suite-receipt|record-program-metrics|compatibility-report|lock-constellation|\
                  check-constellation|check-spine-metrics|check-tropical-path|check-suite-receipt|depgraph-receipt|matdb-pack"
             );

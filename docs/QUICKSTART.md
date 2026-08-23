@@ -1,45 +1,91 @@
-# Quickstart: first honest solve
+# FrankenSim Quickstart
 
-This is the shortest path from a fresh checkout to the product's current
-end of the road — a four-stage ledgered solve that stops, by name, at the
-first stage that does not exist yet. Everything here is executed
-continuously by `scripts/ci/solve_stage_producers_e2e.sh`; the walkthrough
-version with output-reading guidance is `examples/cooling-enclosure/`.
+Bootstrap to a first validated project in about 15 minutes on a warm
+machine (measured: Apple M4 Pro, pinned nightly toolchain, siblings already
+materialized; the first cold build takes longer because it compiles the
+workspace). Every command below is executed continuously by
+`scripts/ci/examples_freshness_e2e.sh` and
+`scripts/ci/solve_stage_producers_e2e.sh`, so if a command here drifts from
+what the product actually does, a lane breaks.
+
+## 0. What you are validating
+
+FrankenSim is fail-closed by design. `validate` reports every structural
+finding about your project and never guesses. A green validate means the
+file is a well-formed project under the frozen schema — not that physics
+has been solved. Solve stages beyond the durable producer prefix are typed
+gaps that refuse by name; that refusal is the product working, and this
+quickstart ends by reading one deliberately.
+
+## 1. Materialize the sibling constellation
+
+The workspace path-depends on seven pinned sibling Franken repositories.
+From a fresh checkout:
 
 ```bash
-# 0. Toolchain + sibling constellation (see docs/BOOTSTRAP.md for modes).
 rustup toolchain install nightly
+rustup component add rustfmt clippy --toolchain nightly
 cargo run --manifest-path tools/bootstrap/Cargo.toml
+```
 
-# 1. Validate the tracked reference project (canonical hash, zero findings).
-cargo run -p fs-cli --bin frankensim -- --json validate \
-  data/reference-project/cooling-reference.fsim
+The bootstrap is standalone and zero-dependency so Cargo never has to
+resolve the missing path dependencies before it builds. See
+`docs/BOOTSTRAP.md` for offline and mirror modes.
 
-# 2. Import its geometry into a fresh FrankenSQLite ledger.
+## 2. Validate your first project
+
+```bash
+cargo run -p fs-cli --bin frankensim -- --json validate examples/heated-plate/heated-plate.fsim
+```
+
+Expected: exit 0 and JSON with
+
+- `"status":"ok"`,
+- `"finding_count":0`,
+- `"project_hash"` — the canonical hash of exactly these bytes,
+- `authority` and `no_claim` strings stating what this verdict is and is
+  not.
+
+Edit any value (try changing `:duty 1.0` to `2.0`) and re-run: the validator
+names the code (`project-duty-range`), what happened, and the fix. That
+triple — code, what, fix — is the shape of every FrankenSim refusal.
+
+## 3. Break it on purpose
+
+```bash
+cargo run -p fs-cli --bin frankensim -- --json validate examples/refusal-loop/broken.fsim
+```
+
+Expected: exit 4 (schema/semantic-refusal class) and a finding carrying
+code `project-duty-range`. `broken.fsim` is the tracked reference project
+with exactly one token changed; restoring `:duty 1.0` makes it
+byte-for-byte `data/reference-project/cooling-reference.fsim`. The
+freshness lane proves both directions continuously.
+
+## 4. Run the solve producer prefix
+
+```bash
+LEDGER="$(mktemp -d)/plate.db"
 cargo run -p fs-cli --bin frankensim -- --json import \
-  data/reference-project/cooling-reference.fsim \
-  data/reference-project/plate.stl \
-  /tmp/quickstart.db --unit m --max-hole-edges 0
-
-# 3. Solve: four stages execute with durable receipts, then the pipeline
-#    fails closed at conduction, naming the owning bead.
-cargo run -p fs-cli --bin frankensim -- --json solve \
-  data/reference-project/cooling-reference.fsim \
-  /tmp/quickstart.db \
+  data/reference-project/cooling-reference.fsim data/reference-project/plate.stl \
+  "${LEDGER}" --unit m --max-hole-edges 0
+cargo run -p fs-cli --bin frankensim -- solve \
+  data/reference-project/cooling-reference.fsim "${LEDGER}" \
   --materials data/reference-project/aa6061.fsmcdpk
 ```
 
-What "done" looks like today: stderr shows `import-verify`, `assign`,
-`material-resolve`, and `flow-network` completing (the last with an
-interval-certified operating point retained in the ledger); stdout reports
-`"status":"unavailable"`, `"stage":"conduction"`,
-`"dependency":"frankensim-s93ej"`. That is the product refusing to
-impersonate a finished simulator — the refusal is the feature. To see the
-validation-refusal loop on purpose, run step 1 against
-`examples/refusal-loop/broken.fsim`.
+The import admits the quarantined STL into the ledger; the solve executes
+the durable producer stages — import-verify, assign, material-resolve, and
+an interval-certified flow-network operating point — and then refuses at
+the conduction stage naming the bead that owns the gap. Report and package
+refuse the same way. Nothing is written that claims more than happened.
 
-Timing honesty: no time-to-first-result number is quoted here because the
-dominant cost is the first cold workspace build, which varies by an order
-of magnitude across machines and cache states. The three commands
-themselves are seconds once built; measure your own cold path if the
-metric matters to you.
+## 5. Where to go next
+
+| Path | What it teaches |
+|------|-----------------|
+| `examples/heated-plate/README.md` | Every mandatory schema section, minimally |
+| `examples/refusal-loop/README.md` | The refusal/fix loop as a workflow |
+| `examples/cooling-enclosure/README.md` | Reading receipts, budgets, and no-claims |
+| `crates/fs-project/src/spec.rs` | The validated schema, section by section |
+| Each crate's `CONTRACT.md` | Invariants, determinism class, and no-claim boundaries |

@@ -394,7 +394,7 @@
           "ref": "crates/fs-wasm/CONTRACT.md"
         }
       ],
-      "notes": "Builds again as of the safe-step propagation (bead f85xj.2.39): the browser payload now carries an interval-derived certified sign margin at schema v2 instead of a nominal |f|/L quotient. Still L1: two campaign tests (grammarforge, sensorforge) are red from an earlier code-first slice, so no test evidence is cited yet."
+      "notes": "Builds again as of the safe-step propagation (bead f85xj.2.39): the browser payload now carries an interval-derived certified sign margin at schema v3 instead of a nominal |f|/L quotient; v3 also crosses the typed surface-localization record through the ABI (bead frankensim-o33vo). Still L1: two campaign tests (grammarforge, sensorforge) are red from an earlier code-first slice, so no test evidence is cited yet."
     }
   ]
 }

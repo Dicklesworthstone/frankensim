@@ -1,0 +1,20 @@
+# strict-clippy historical inventory (TSV): bead<TAB>crate<TAB>path_prefix<TAB>lint_code<TAB>note
+# Provenance: each row names the vo8f2 child bead whose repair removed the
+# debt class from the named crate surface, with the landing commit. The
+# terminal gate classifies every row against a fresh workspace replay;
+# absent rows report proven_fixed, surviving rows report present/moved.
+frankensim-vo8f2.1	fs-sparse	crates/fs-sparse/src/direct.rs	clippy::bool_to_int_with_if	commit cb1f7ee5: u32::from over bool-if
+frankensim-vo8f2.1	fs-sparse	crates/fs-sparse/src/direct.rs	clippy::needless_range_loop	commit cb1f7ee5: row_ptr.windows(2) over range loop, mul_add order preserved
+frankensim-vo8f2.1	fs-sparse	crates/fs-sparse/tests/preconditioner_casebook.rs	clippy::cast_precision_loss	commit cb1f7ee5: f64::from over as-cast in casebook
+frankensim-vo8f2.1	fs-sparse	crates/fs-sparse/tests/preconditioner_casebook.rs	clippy::needless_pass_by_value	commit cb1f7ee5: receipt_pass takes &str
+frankensim-vo8f2.2	fs-rand	crates/fs-rand/src/cbc.rs	clippy::double_must_use	commit 71bbe9ee: must_use messages on CbcProblem methods
+frankensim-vo8f2.2	fs-rand	crates/fs-rand/src/cbc.rs	clippy::struct_field_names	commit 71bbe9ee: CbcExecutionSchedule fields drop _units postfix
+frankensim-vo8f2.2	fs-rand	crates/fs-rand/src/cbc_exec.rs	clippy::items_after_statements	commit 71bbe9ee: Verdict hoisted to module scope
+frankensim-vo8f2.2	fs-rand	crates/fs-rand/src/cbc_exec.rs	clippy::too_many_lines	commit 71bbe9ee: execute_tile dispatcher + tile methods + free fns
+frankensim-vo8f2.2	fs-rand	crates/fs-rand/src/cbc_cert.rs	clippy::large_types_passed_by_value	commit 71bbe9ee: validate_admission takes &CbcAdmission
+frankensim-vo8f2.2	fs-rand	crates/fs-rand/src/cbc_cert.rs	clippy::needless_lifetimes	commit 71bbe9ee: structural() lifetimes elided
+frankensim-vo8f2.2	fs-rand	crates/fs-rand/src/qmc.rs	clippy::double_must_use	commit 71bbe9ee: try_cbc must_use message
+frankensim-vo8f2.2	fs-rand	crates/fs-rand/src/qmc.rs	clippy::float_cmp	commit 71bbe9ee: Owen-reuse test asserts f64::to_bits equality
+frankensim-vo8f2.2	fs-rand	crates/fs-rand/tests/qmc_replay_casebook.rs	clippy::chunks_exact_to_as_chunks	commit 71bbe9ee: as_chunks::<DIM>().0 at both sites
+frankensim-vo8f2.3	fs-airflow	crates/fs-airflow/src/conjugate.rs	clippy::all	commit d32e41f5: staged conjugate driver, test-target lint debt cleared
+frankensim-vo8f2.4	fs-matdb	crates/fs-matdb/src/pcb.rs	clippy::too_many_lines	commit f6e9e0db: principal_and_structural extracted from homogenize
