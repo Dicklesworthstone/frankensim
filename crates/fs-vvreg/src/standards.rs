@@ -1195,9 +1195,7 @@ fn validate_identifier(
         return Err(ManifestError::EmptyField { field });
     };
     if !first.is_ascii_lowercase()
-        || !bytes
-            .last()
-            .is_some_and(u8::is_ascii_alphanumeric)
+        || !bytes.last().is_some_and(u8::is_ascii_alphanumeric)
         || !rest
             .iter()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
