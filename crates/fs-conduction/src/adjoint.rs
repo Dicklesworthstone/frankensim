@@ -70,41 +70,22 @@ pub struct DesignSolution {
 }
 
 impl<'m> ConductivityDesign<'m> {
-    /// Bind a design problem.
-    ///
-    /// # Errors
-    /// [`ConductionError::Conductivity`] when the material is
-    /// temperature dependent (this hook is the LINEAR case only);
-    /// [`ConductionError::NoFreeDofs`] / [`ConductionError::SingularPureNeumann`]
-    /// from the degree-of-freedom map.
-    pub fn new(
-        problem: ConductionProblem<'m>,
-        linear: LinearConfig,
-    ) -> Result<ConductivityDesign<'m>, ConductionError> {
-        Self::new_inner(problem, None, linear)
-    }
-
-    /// Bind a design problem whose base tensor varies by tet.
-    ///
+    /// Bind a design problem. A heterogeneous base tensor comes from
+    /// the problem's own [`ConductionProblem::element_materials`] root;
     /// `ρ_e` still multiplies that element's own linear `K_e`. Every
     /// assigned model must be temperature-independent.
     ///
     /// # Errors
-    /// The same refusals as [`ConductivityDesign::new`], plus assignment
-    /// validation and a `k(T)` model on any element.
-    pub fn new_with_element_materials(
+    /// [`ConductionError::Conductivity`] when the effective material is
+    /// temperature dependent (this hook is the LINEAR case only);
+    /// assignment validation refusals; [`ConductionError::NoFreeDofs`] /
+    /// [`ConductionError::SingularPureNeumann`] from the degree-of-freedom
+    /// map.
+    pub fn new(
         problem: ConductionProblem<'m>,
-        materials: &'m ElementMaterials,
         linear: LinearConfig,
     ) -> Result<ConductivityDesign<'m>, ConductionError> {
-        Self::new_inner(problem, Some(materials), linear)
-    }
-
-    fn new_inner(
-        problem: ConductionProblem<'m>,
-        materials: Option<&'m ElementMaterials>,
-        linear: LinearConfig,
-    ) -> Result<ConductivityDesign<'m>, ConductionError> {
+        let materials = problem.element_materials;
         if let Some(assigned) = materials {
             assigned.validate_for(problem.mesh)?;
         } else if problem.material.is_temperature_dependent() {

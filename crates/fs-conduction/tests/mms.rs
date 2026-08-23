@@ -189,12 +189,10 @@ fn run_isotropic_dirichlet(n: usize) -> (f64, f64) {
     let solution = with_cx(|cx| {
         solve(
             cx,
-            ConductionProblem {
-                mesh: &mesh,
-                boundary: &boundary,
-                material: &material,
-                source: &source,
-            },
+            ConductionProblem { element_materials: None, mesh: &mesh,
+            boundary: &boundary,
+            material: &material,
+            source: &source, },
             linear_config(),
         )
         .expect("solve")
@@ -343,12 +341,10 @@ fn run_anisotropic_dirichlet(n: usize) -> f64 {
     let solution = with_cx(|cx| {
         solve(
             cx,
-            ConductionProblem {
-                mesh: &mesh,
-                boundary: &boundary,
-                material: &material,
-                source: &source,
-            },
+            ConductionProblem { element_materials: None, mesh: &mesh,
+            boundary: &boundary,
+            material: &material,
+            source: &source, },
             linear_config(),
         )
         .expect("solve")
@@ -415,12 +411,10 @@ fn run_mixed_neumann(n: usize) -> f64 {
     let solution = with_cx(|cx| {
         solve(
             cx,
-            ConductionProblem {
-                mesh: &mesh,
-                boundary: &boundary,
-                material: &material,
-                source: &source,
-            },
+            ConductionProblem { element_materials: None, mesh: &mesh,
+            boundary: &boundary,
+            material: &material,
+            source: &source, },
             linear_config(),
         )
         .expect("solve")
@@ -484,12 +478,10 @@ fn run_robin(n: usize) -> f64 {
     let solution = with_cx(|cx| {
         solve(
             cx,
-            ConductionProblem {
-                mesh: &mesh,
-                boundary: &boundary,
-                material: &material,
-                source: &source,
-            },
+            ConductionProblem { element_materials: None, mesh: &mesh,
+            boundary: &boundary,
+            material: &material,
+            source: &source, },
             linear_config(),
         )
         .expect("solve")
@@ -578,12 +570,10 @@ fn run_nonlinear(n: usize) -> f64 {
     let solution = with_cx(|cx| {
         solve(
             cx,
-            ConductionProblem {
-                mesh: &mesh,
-                boundary: &boundary,
-                material: &material,
-                source: &source,
-            },
+            ConductionProblem { element_materials: None, mesh: &mesh,
+            boundary: &boundary,
+            material: &material,
+            source: &source, },
             config,
         )
         .expect("nonlinear solve")
@@ -715,12 +705,10 @@ fn run_anisotropic_temperature_dependent(n: usize) -> f64 {
     let solution = with_cx(|cx| {
         solve(
             cx,
-            ConductionProblem {
-                mesh: &mesh,
-                boundary: &boundary,
-                material: &material,
-                source: &source,
-            },
+            ConductionProblem { element_materials: None, mesh: &mesh,
+            boundary: &boundary,
+            material: &material,
+            source: &source, },
             SolveConfig {
                 nonlinearity: Nonlinearity::default(),
                 stop: StopRule {

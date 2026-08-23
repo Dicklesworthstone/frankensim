@@ -233,12 +233,10 @@ fn ingest_and_solve(text: &str, mesh: &ConductionMesh) -> (PowerAudit, Conductio
     let solution = with_cx(|cx| {
         solve(
             cx,
-            ConductionProblem {
-                mesh,
-                boundary: &boundary,
-                material: &material,
-                source: &source,
-            },
+            ConductionProblem { element_materials: None, mesh,
+            boundary: &boundary,
+            material: &material,
+            source: &source, },
             config(),
         )
         .expect("solve")

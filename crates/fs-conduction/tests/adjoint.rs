@@ -104,12 +104,10 @@ fn fixture(n: usize) -> Fixture {
 
 impl Fixture {
     fn problem(&self) -> ConductionProblem<'_> {
-        ConductionProblem {
-            mesh: &self.mesh,
-            boundary: &self.boundary,
-            material: &self.material,
-            source: &self.source,
-        }
+        ConductionProblem { element_materials: None, mesh: &self.mesh,
+        boundary: &self.boundary,
+        material: &self.material,
+        source: &self.source, }
     }
 }
 
@@ -189,12 +187,10 @@ fn p1_adjoint_error(n: usize) -> (f64, f64, f64) {
         let primal_system = assemble_operator(cx, &mesh, &boundary, &material, &primal_load, &zero)
             .expect("primal assembly");
         let design = ConductivityDesign::new(
-            ConductionProblem {
-                mesh: &mesh,
-                boundary: &boundary,
-                material: &material,
-                source: &primal_load,
-            },
+            ConductionProblem { element_materials: None, mesh: &mesh,
+            boundary: &boundary,
+            material: &material,
+            source: &primal_load, },
             ladder_linear_config(),
         )
         .expect("linear conduction design");

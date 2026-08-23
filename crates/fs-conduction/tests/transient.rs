@@ -160,12 +160,10 @@ fn marching_to_large_time_recovers_the_steady_solution() {
     let steady = with_cx(|cx| {
         solve(
             cx,
-            ConductionProblem {
-                mesh: &mesh,
-                boundary: &boundary,
-                material: &material(),
-                source: &source,
-            },
+            ConductionProblem { element_materials: None, mesh: &mesh,
+            boundary: &boundary,
+            material: &material(),
+            source: &source, },
             SolveConfig {
                 nonlinearity: Nonlinearity::FixedPoint {
                     relaxation: 1.0,

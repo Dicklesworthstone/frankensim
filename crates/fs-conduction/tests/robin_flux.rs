@@ -139,12 +139,10 @@ fn generating_slab(cells_x: usize) -> (ConductionMesh, ConductionSolution) {
     let solution = with_cx(|cx| {
         solve(
             cx,
-            ConductionProblem {
-                mesh: &mesh,
-                boundary: &boundary,
-                material: &material,
-                source: &source,
-            },
+            ConductionProblem { element_materials: None, mesh: &mesh,
+            boundary: &boundary,
+            material: &material,
+            source: &source, },
             config(),
         )
         .expect("generating slab solve")
@@ -303,12 +301,10 @@ fn only_robin_regions_emit_rows_and_they_follow_declaration_order() {
     let solution = with_cx(|cx| {
         solve(
             cx,
-            ConductionProblem {
-                mesh: &mesh,
-                boundary: &boundary,
-                material: &material,
-                source: &source,
-            },
+            ConductionProblem { element_materials: None, mesh: &mesh,
+            boundary: &boundary,
+            material: &material,
+            source: &source, },
             config(),
         )
         .expect("mixed-row solve")
@@ -364,12 +360,10 @@ fn a_robin_region_owning_no_face_emits_no_row() {
     let solution = with_cx(|cx| {
         solve(
             cx,
-            ConductionProblem {
-                mesh: &mesh,
-                boundary: &boundary,
-                material: &material,
-                source: &source,
-            },
+            ConductionProblem { element_materials: None, mesh: &mesh,
+            boundary: &boundary,
+            material: &material,
+            source: &source, },
             config(),
         )
         .expect("empty-region solve")

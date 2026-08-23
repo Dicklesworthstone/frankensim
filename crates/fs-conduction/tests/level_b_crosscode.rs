@@ -201,12 +201,10 @@ fn run_case(case: &ThermalLevelBCase) -> CaseRun {
     let solution = with_cx(|cx| {
         solve(
             cx,
-            ConductionProblem {
-                mesh: &mesh,
-                boundary: &boundary,
-                material: &material,
-                source: &source,
-            },
+            ConductionProblem { element_materials: None, mesh: &mesh,
+            boundary: &boundary,
+            material: &material,
+            source: &source, },
             config,
         )
     })

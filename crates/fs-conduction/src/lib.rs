@@ -107,8 +107,7 @@ pub use solve::{
     ConductionProblem, ConductionReport, ConductionSolution, ConductionSolver, ConductionState,
     EnergyBalance, InitialGuess, LineSearch, LinearConfig, LinearSolveEvidence, Nonlinearity,
     RobinFlux, SolveConfig, StopReason, StopRule, element_heat_flux, element_heat_flux_assigned,
-    solve, solve_with_element_materials, solve_with_element_materials_and_interfaces,
-    solve_with_interfaces,
+    solve, solve_with_interfaces,
 };
 // Types reachable through public fields of `LinearSolveEvidence` must be
 // nameable from this crate without a direct fs-solver dependency (bead qvmwp).

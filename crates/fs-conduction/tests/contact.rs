@@ -308,12 +308,10 @@ fn solve_contact_fixture(
     with_cx(|cx| {
         solve_with_interfaces(
             cx,
-            ConductionProblem {
-                mesh,
-                boundary,
-                material: &material,
-                source: &source,
-            },
+            ConductionProblem { element_materials: None, mesh,
+            boundary,
+            material: &material,
+            source: &source, },
             interfaces,
             config(),
         )
@@ -534,12 +532,10 @@ fn missing_interface_card_and_missing_binding_refuse_typed() {
     let error = with_cx(|cx| {
         solve(
             cx,
-            ConductionProblem {
-                mesh: &mesh,
-                boundary: &boundary,
-                material: &material,
-                source: &source,
-            },
+            ConductionProblem { element_materials: None, mesh: &mesh,
+            boundary: &boundary,
+            material: &material,
+            source: &source, },
             config(),
         )
         .expect_err("coincident traces without an interface binding must refuse")

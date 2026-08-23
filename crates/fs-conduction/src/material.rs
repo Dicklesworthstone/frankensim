@@ -782,6 +782,28 @@ impl ElementMaterials {
         Ok(Self { table, of_element })
     }
 
+    /// Deterministic FNV-1a identity of the assignment: element count,
+    /// then every element's stable [`MaterialId`] in order. Two
+    /// assignments with the same identity name the same constitutive
+    /// contract element-for-element; any reassignment or reordering
+    /// moves it.
+    #[must_use]
+    pub fn identity(&self) -> u64 {
+        fn mix(mut hash: u64, bytes: &[u8]) -> u64 {
+            for byte in bytes {
+                hash ^= u64::from(*byte);
+                hash = hash.wrapping_mul(0x0100_0000_01b3);
+            }
+            hash
+        }
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        hash = mix(hash, &u64::try_from(self.of_element.len()).unwrap_or(u64::MAX).to_le_bytes());
+        for id in &self.of_element {
+            hash = mix(hash, &id.0.to_le_bytes());
+        }
+        hash
+    }
+
     /// Map a labeled tet vector (region id per element) through a
     /// region→material table. This is the s93ej.1 → s93ej.2 handoff:
     /// mesh labels never become conductivity by themselves.

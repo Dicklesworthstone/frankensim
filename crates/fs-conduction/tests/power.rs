@@ -219,12 +219,10 @@ fn a_whole_domain_map_reproduces_the_equivalent_uniform_source_solve() {
         with_cx(|cx| {
             solve(
                 cx,
-                ConductionProblem {
-                    mesh: &mesh,
-                    boundary: &boundary,
-                    material: &material,
-                    source,
-                },
+                ConductionProblem { element_materials: None, mesh: &mesh,
+                boundary: &boundary,
+                material: &material,
+                source, },
                 config(),
             )
             .expect("solve")
@@ -705,12 +703,10 @@ fn a_full_face_map_reproduces_the_equivalent_uniform_neumann_solve() {
         with_cx(|cx| {
             solve(
                 cx,
-                ConductionProblem {
-                    mesh: &mesh,
-                    boundary: &boundary,
-                    material: &material,
-                    source: &zero_source,
-                },
+                ConductionProblem { element_materials: None, mesh: &mesh,
+                boundary: &boundary,
+                material: &material,
+                source: &zero_source, },
                 config(),
             )
             .expect("solve")

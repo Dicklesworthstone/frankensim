@@ -67,8 +67,16 @@ pub struct ConductionProblem<'m> {
     pub mesh: &'m ConductionMesh,
     /// The boundary partition.
     pub boundary: &'m ThermalBoundary,
-    /// The conductivity model.
+    /// The conductivity model. This is the UNIFORM fallback: it governs
+    /// every element exactly when [`Self::element_materials`] is `None`.
     pub material: &'m ConductivityModel,
+    /// The checked per-element constitutive assignment (the
+    /// heterogeneous root, bead frankensim-s93ej.2). After a successful
+    /// bind every tet samples the model named for its region;
+    /// `element_scale` remains a density multiplier, never a material
+    /// identity. Assignment validity against the mesh is enforced once
+    /// at solver construction.
+    pub element_materials: Option<&'m ElementMaterials>,
     /// The volumetric source, W/m³.
     pub source: &'m ScalarField,
 }
@@ -389,6 +397,11 @@ pub struct ConductionReport {
     pub material_provenance: ProvenanceClass,
     /// How many `fs-matdb` receipts travel with this solve.
     pub material_receipts: usize,
+    /// Deterministic FNV-1a identity of the per-element constitutive
+    /// assignment (assignment order + stable `MaterialId`s), `None` on
+    /// the uniform path. Two runs reporting the same identity executed
+    /// the same constitutive contract.
+    pub element_material_identity: Option<u64>,
     /// One evidence-bearing integrated heat rate per named interface.
     pub interface_fluxes: Vec<InterfaceFlux>,
     /// One integrated convective heat rate per named Robin region that
@@ -606,24 +619,6 @@ impl<'m> ConductionSolver<'m> {
         Self::new_inner(problem, Some(interfaces), config)
     }
 
-    /// Bind a checked per-element constitutive assignment.
-    ///
-    /// The uniform [`ConductionProblem::material`] remains the fallback
-    /// only when this is never called. After a successful bind, every
-    /// assembled element uses the named model; `element_scale` is still
-    /// a density multiplier, not a material identity.
-    ///
-    /// # Errors
-    /// Length mismatch or an unknown / empty assignment.
-    pub fn bind_element_materials(
-        &mut self,
-        materials: &'m ElementMaterials,
-    ) -> Result<(), ConductionError> {
-        materials.validate_for(self.problem.mesh)?;
-        self.element_materials = Some(materials);
-        Ok(())
-    }
-
     fn new_inner(
         problem: ConductionProblem<'m>,
         interfaces: Option<&'m ThermalInterfaces>,
@@ -633,6 +628,12 @@ impl<'m> ConductionSolver<'m> {
         problem
             .source
             .validate("volumetric source", problem.mesh.vertex_count())?;
+        // The heterogeneous root is admitted ONCE, here, fail-closed:
+        // a length mismatch or an unknown/empty assignment refuses
+        // before any assembly work instead of at the first tile.
+        if let Some(assigned) = problem.element_materials {
+            assigned.validate_for(problem.mesh)?;
+        }
         let dofs = DofMap::new(problem.boundary, problem.mesh.vertex_count())?;
         if dofs.fixed().is_empty() && !problem.boundary.has_robin() {
             return Err(ConductionError::SingularPureNeumann);
@@ -641,7 +642,7 @@ impl<'m> ConductionSolver<'m> {
         Ok(ConductionSolver {
             problem,
             interfaces,
-            element_materials: None,
+            element_materials: problem.element_materials,
             dofs,
             config,
             state: ConductionState {
@@ -657,29 +658,6 @@ impl<'m> ConductionSolver<'m> {
         })
     }
 
-    /// The degree-of-freedom map.
-    #[must_use]
-    pub const fn dofs(&self) -> &DofMap {
-        &self.dofs
-    }
-
-    /// The current state (a checkpoint by value).
-    #[must_use]
-    pub const fn state(&self) -> &ConductionState {
-        &self.state
-    }
-
-    /// The full nodal temperature of the current iterate.
-    #[must_use]
-    pub fn temperature(&self) -> Vec<f64> {
-        self.dofs.scatter(&self.state.free_temperature)
-    }
-
-    /// Seal the current state into `fs-exec`'s versioned envelope.
-    #[must_use]
-    pub fn snapshot(&self, provenance: u64) -> Vec<u8> {
-        LegacySnapshotV1Adapter::<ConductionState>::seal(&self.state, provenance)
-    }
 
     /// Restore a sealed legacy-v1 state, replacing the current iterate.
     ///
@@ -1048,6 +1026,9 @@ impl<'m> ConductionSolver<'m> {
                     || self.problem.material.receipts().len(),
                     |assigned| assigned.receipts().len(),
                 ),
+                element_material_identity: self
+                    .element_materials
+                    .map(ElementMaterials::identity),
                 interface_fluxes,
                 robin_fluxes,
                 free_dofs: self.dofs.n(),
@@ -1314,39 +1295,4 @@ pub fn solve_with_interfaces(
     config: SolveConfig,
 ) -> Result<ConductionSolution, ConductionError> {
     ConductionSolver::new_with_interfaces(problem, interfaces, config)?.run(cx)
-}
-
-/// Solve with a checked per-element constitutive assignment.
-///
-/// # Errors
-/// Assignment validation plus every refusal [`solve`] can produce.
-pub fn solve_with_element_materials(
-    cx: &Cx<'_>,
-    problem: ConductionProblem<'_>,
-    materials: &ElementMaterials,
-    config: SolveConfig,
-) -> Result<ConductionSolution, ConductionError> {
-    let mut solver = ConductionSolver::new(problem, config)?;
-    solver.bind_element_materials(materials)?;
-    solver.run(cx)
-}
-
-/// Solve with a checked constitutive assignment and matching-face contact.
-///
-/// Region materials cannot replace or erase an interface binding: coincident
-/// traces still require an explicit [`ThermalInterfaces`] card.
-///
-/// # Errors
-/// Assignment validation plus every refusal [`solve_with_interfaces`] can
-/// produce.
-pub fn solve_with_element_materials_and_interfaces(
-    cx: &Cx<'_>,
-    problem: ConductionProblem<'_>,
-    materials: &ElementMaterials,
-    interfaces: &ThermalInterfaces,
-    config: SolveConfig,
-) -> Result<ConductionSolution, ConductionError> {
-    let mut solver = ConductionSolver::new_with_interfaces(problem, interfaces, config)?;
-    solver.bind_element_materials(materials)?;
-    solver.run(cx)
 }
