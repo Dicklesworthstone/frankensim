@@ -6,6 +6,9 @@
 //! reported); CCD-aligned partitioning shows the expected locality metric;
 //! subdomain sweep ledgered.
 #![cfg(feature = "bddc")]
+// Kappa and condition pins assert analytic values bit-exactly; an epsilon
+// would let a wrong Lanczos projection pass as approximately right.
+#![allow(clippy::float_cmp)]
 
 use fs_dd::{Bddc, CgError, CgReport, CgTermination, Decomposition};
 
@@ -261,7 +264,7 @@ fn invalid_cell_coefficient_cannot_disappear_during_harmonic_mean() {
         m: 2,
         rho: vec![f64::NAN, 1.0, 1.0, 1.0],
     };
-    let _ = decomp.apply_global(&vec![0.0; 9]);
+    let _ = decomp.apply_global(&[0.0; 9]);
 }
 
 #[test]
