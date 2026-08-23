@@ -1245,10 +1245,11 @@ fn malformed_policy_values_fail_closed_with_admitted_boundary_neighbors() {
             if half_width.is_finite()
     ));
     let mut wrong_statistical_kind = representable_delta_evidence.clone();
-    wrong_statistical_kind.statistical = fs_evidence::StatisticalCertificate::EValue {
-        e: 1.0,
-        alpha: 0.05,
-    };
+    // EValue is now a LEGAL chance certificate (the frontier-eproc
+    // anytime-valid estimator mints it), so the mismatch probe uses a
+    // certificate kind that stays invalid for chance: no stochastic
+    // evidence at all.
+    wrong_statistical_kind.statistical = fs_evidence::StatisticalCertificate::None;
     assert!(
         wrong_statistical_kind
             .to_ledger_row()

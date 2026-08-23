@@ -153,6 +153,25 @@ pub enum ChanceEstimator {
         /// Bound failure probability (e.g. 0.05).
         delta: f64,
     },
+    /// Anytime-valid betting-style e-process over the same deterministic
+    /// stream: after each tile the running exponential supermartingale
+    /// `W_t = exp(lambda * sum(h_i - level) - t * lambda^2 / 8)` is
+    /// checked against the Ville threshold `1/alpha`; crossing it stops
+    /// the run with `Satisfied` under optional-stopping-valid Type-I
+    /// control. Running out of admitted samples without crossing reports
+    /// plain `Violated` (an estimate, never a proof of violation).
+    /// EXECUTION requires the `frontier-eproc` feature; the wire format
+    /// carries the estimator regardless so specs stay portable.
+    EProcessAnytime {
+        /// Maximum admitted samples (the stopping budget).
+        samples: u32,
+        /// Ville threshold failure probability (e.g. 0.05): satisfied
+        /// once `W_t >= 1/alpha`.
+        alpha: f64,
+        /// Betting parameter `lambda > 0` of the sub-Gaussian
+        /// exponential supermartingale.
+        lambda: f64,
+    },
 }
 
 /// Schema version of [`ChanceWorkPlan`] canonical bytes (bead
@@ -370,7 +389,25 @@ pub fn evaluate_chance_with_budget(
             value: f64::NAN,
         }));
     };
-    let ChanceEstimator::MonteCarlo { samples, delta } = *estimator;
+    #[cfg(not(feature = "frontier-eproc"))]
+    if matches!(estimator, ChanceEstimator::EProcessAnytime { .. }) {
+        return Err(ChanceEvalError::Invalid(ConError::BadParam {
+            what: "the anytime-valid chance estimator requires the frontier-eproc feature",
+            value: f64::NAN,
+        }));
+    }
+    // Per-estimator parameters plus the optional anytime-valid stopping
+    // rule: the betting slope `lambda` and the Ville log-threshold
+    // `-ln(alpha)` (crossed once the running log-e-value reaches it).
+    // For the e-process path `delta` carries the alpha role.
+    let (samples, delta, eproc) = match *estimator {
+        ChanceEstimator::MonteCarlo { samples, delta } => (samples, delta, None),
+        ChanceEstimator::EProcessAnytime {
+            samples,
+            alpha,
+            lambda,
+        } => (samples, alpha, Some((lambda, -alpha.ln()))),
+    };
     if plan.samples != samples {
         return Err(ChanceEvalError::Invalid(ConError::BadParam {
             what: "chance work plan samples must match the estimator",
@@ -418,6 +455,9 @@ pub fn evaluate_chance_with_budget(
     };
     let mut completed = 0u32;
     let mut hits = 0u32;
+    // Running log of the anytime-valid e-value (e-process path only).
+    let mut log_w = 0.0f64;
+    let mut crossed_at: Option<u32> = None;
     while completed < samples {
         budget
             .checkpoint("fs-constraint:chance-tile-poll", cx)
@@ -462,46 +502,88 @@ pub fn evaluate_chance_with_budget(
             })?;
         hits += tile_hits;
         completed += tile_n;
-    }
-    let empirical = f64::from(hits) / f64::from(samples);
-    // Hoeffding lower confidence bound at failure prob delta.
-    // `-ln(delta)` is algebraically `ln(1/delta)` but remains finite
-    // for every positive finite binary64 delta; forming `1/delta`
-    // first would overflow for valid subnormal policy values.
-    let half_width = (-delta.ln() / (2.0 * f64::from(samples))).sqrt();
-    let lower = empirical - half_width;
-    ev.statistical = StatisticalCertificate::HalfWidth {
-        half_width,
-        confidence: 1.0 - delta,
-    };
-    ev.status = if lower >= *level {
-        Status::Satisfied
-    } else if empirical >= *level {
-        // The raw rate clears but the BOUND does not: refuse —
-        // this is the validity machinery earning its keep.
-        Status::BoundNotCleared {
-            empirical,
-            lower_bound: lower,
+        if let Some((lambda, stop_ln)) = eproc {
+            // Ville's inequality makes any threshold crossing of this
+            // sub-Gaussian exponential supermartingale an
+            // optional-stopping-valid rejection at level alpha.
+            log_w += lambda * (f64::from(tile_hits) - *level * f64::from(tile_n))
+                - lambda * lambda * 0.125 * f64::from(tile_n);
+            if crossed_at.is_none() && log_w >= stop_ln {
+                crossed_at = Some(completed);
+                break;
+            }
         }
+    }
+    let receipt = ChanceWorkReceipt {
+        plan_identity: plan.identity(),
+        consumption: Some(budget.consumption()),
+        completed_samples: completed,
+        hits,
+    };
+    let Some((_lambda, _stop_ln)) = eproc else {
+        // Fixed-horizon Hoeffding path (unchanged semantics).
+        let empirical = f64::from(hits) / f64::from(samples);
+        // `-ln(delta)` is algebraically `ln(1/delta)` but remains finite
+        // for every positive finite binary64 delta; forming `1/delta`
+        // first would overflow for valid subnormal policy values.
+        let half_width = (-delta.ln() / (2.0 * f64::from(samples))).sqrt();
+        let lower = empirical - half_width;
+        ev.statistical = StatisticalCertificate::HalfWidth {
+            half_width,
+            confidence: 1.0 - delta,
+        };
+        ev.status = if lower >= *level {
+            Status::Satisfied
+        } else if empirical >= *level {
+            // The raw rate clears but the BOUND does not: refuse —
+            // this is the validity machinery earning its keep.
+            Status::BoundNotCleared {
+                empirical,
+                lower_bound: lower,
+            }
+        } else {
+            Status::Violated
+        };
+        ev.violation = (*level - lower).max(0.0);
+        ev.certificate = NumericalCertificate::estimate(ev.violation, ev.violation);
+        ev.role = if matches!(ev.status, Status::Satisfied) {
+            ActiveRole::Inactive
+        } else {
+            ActiveRole::Violating
+        };
+        return Ok((ev, receipt));
+    };
+    // Anytime-valid tail: a Ville-threshold crossing at ANY completed
+    // prefix is optional-stopping-valid evidence for satisfaction;
+    // exhausting the budget without crossing is NOT evidence of
+    // violation beyond an estimate, so no bound certificate is minted.
+    let alpha = delta;
+    let crossed = crossed_at.is_some();
+    let e_value = log_w.exp();
+    if !e_value.is_finite() || e_value <= 0.0 {
+        return Err(ChanceEvalError::Invalid(ConError::BadParam {
+            what: "chance e-process e-value left the positive finite range",
+            value: log_w,
+        }));
+    }
+    ev.statistical = StatisticalCertificate::EValue { e: e_value, alpha };
+    ev.status = if crossed {
+        Status::Satisfied
     } else {
         Status::Violated
     };
-    ev.violation = (*level - lower).max(0.0);
-    ev.certificate = NumericalCertificate::estimate(ev.violation, ev.violation);
-    ev.role = if matches!(ev.status, Status::Satisfied) {
+    ev.violation = if crossed { 0.0 } else { *level };
+    ev.certificate = if crossed {
+        NumericalCertificate::exact(0.0)
+    } else {
+        NumericalCertificate::estimate(ev.violation, ev.violation)
+    };
+    ev.role = if crossed {
         ActiveRole::Inactive
     } else {
         ActiveRole::Violating
     };
-    Ok((
-        ev,
-        ChanceWorkReceipt {
-            plan_identity: plan.identity(),
-            consumption: Some(budget.consumption()),
-            completed_samples: completed,
-            hits,
-        },
-    ))
+    Ok((ev, receipt))
 }
 
 /// Which proof a certification constraint demands.
@@ -960,7 +1042,10 @@ impl ConstraintEvidence {
             }
         }
         if self.kind == "chance"
-            && !matches!(self.statistical, StatisticalCertificate::HalfWidth { .. })
+            && !matches!(
+                self.statistical,
+                StatisticalCertificate::HalfWidth { .. } | StatisticalCertificate::EValue { .. }
+            )
         {
             return Some("chance-statistical-certificate-kind-mismatch");
         }
@@ -1235,34 +1320,70 @@ fn validate_spec_policy(spec: &ConstraintSpec, point_dim: Option<usize>) -> Resu
         ConstraintKind::Soft(PenaltyLaw::Quadratic { weight } | PenaltyLaw::Hinge { weight }) => {
             require_finite_nonnegative(*weight, "soft-constraint weight")?;
         }
-        ConstraintKind::Chance {
-            level,
-            estimator: ChanceEstimator::MonteCarlo { samples, delta },
-        } => {
+        ConstraintKind::Chance { level, estimator } => {
             if !(level.is_finite() && *level > 0.0 && *level < 1.0) {
                 return Err(ConError::BadParam {
                     what: "chance level",
                     value: *level,
                 });
             }
-            if !(delta.is_finite() && *delta > 0.0 && *delta < 1.0) {
-                return Err(ConError::BadParam {
-                    what: "chance failure probability (delta)",
-                    value: *delta,
-                });
-            }
-            let confidence = 1.0 - *delta;
-            if !(confidence > 0.0 && confidence < 1.0) {
-                return Err(ConError::BadParam {
-                    what: "chance confidence representation",
-                    value: confidence,
-                });
-            }
-            if *samples == 0 {
-                return Err(ConError::BadParam {
-                    what: "chance sample count",
-                    value: f64::from(*samples),
-                });
+            match estimator {
+                ChanceEstimator::MonteCarlo { samples, delta } => {
+                    if !(delta.is_finite() && *delta > 0.0 && *delta < 1.0) {
+                        return Err(ConError::BadParam {
+                            what: "chance failure probability (delta)",
+                            value: *delta,
+                        });
+                    }
+                    let confidence = 1.0 - *delta;
+                    if !(confidence > 0.0 && confidence < 1.0) {
+                        return Err(ConError::BadParam {
+                            what: "chance confidence representation",
+                            value: confidence,
+                        });
+                    }
+                    if *samples == 0 {
+                        return Err(ConError::BadParam {
+                            what: "chance sample count",
+                            value: f64::from(*samples),
+                        });
+                    }
+                }
+                ChanceEstimator::EProcessAnytime {
+                    samples,
+                    alpha,
+                    lambda,
+                } => {
+                    #[cfg(not(feature = "frontier-eproc"))]
+                    {
+                        let _ = (samples, alpha, lambda);
+                        return Err(ConError::BadParam {
+                            what: "the anytime-valid chance estimator requires the frontier-eproc feature",
+                            value: f64::NAN,
+                        });
+                    }
+                    #[cfg(feature = "frontier-eproc")]
+                    {
+                        if !(alpha.is_finite() && *alpha > 0.0 && *alpha < 1.0) {
+                            return Err(ConError::BadParam {
+                                what: "chance e-process threshold probability (alpha)",
+                                value: *alpha,
+                            });
+                        }
+                        if !(lambda.is_finite() && *lambda > 0.0 && *lambda <= 2.0) {
+                            return Err(ConError::BadParam {
+                                what: "chance e-process betting parameter (lambda)",
+                                value: *lambda,
+                            });
+                        }
+                        if *samples == 0 {
+                            return Err(ConError::BadParam {
+                                what: "chance sample count",
+                                value: f64::from(*samples),
+                            });
+                        }
+                    }
+                }
             }
         }
         ConstraintKind::Robust { half_widths } => {
@@ -1473,7 +1594,7 @@ pub fn evaluate(
     problem: &Problem,
     spec: &ConstraintSpec,
     x: &[f64],
-    noise: Option<&dyn Fn(u64) -> Vec<f64>>,
+    _noise: Option<&dyn Fn(u64) -> Vec<f64>>,
 ) -> Result<ConstraintEvidence, ConError> {
     // The v1 evaluator's uncertainty model is raw Euclidean addition. Admit
     // that exact host shape before graph evaluation or a chance-noise callback
@@ -1531,17 +1652,18 @@ pub fn evaluate(
         }
         ConstraintKind::Chance {
             level: _,
-            estimator: ChanceEstimator::MonteCarlo { samples, .. },
+            estimator: _,
         } => {
             // Retired with the unbounded synchronous sampler (bead
             // frankensim-oxyjg): a chance constraint's resource contract
             // lives in an admitted [`ChanceWorkPlan`] under caller-owned
             // cancellation/budget authority, which this entry point does
-            // not have. It refuses instead of silently bounding (or
-            // silently running) a workload that may be u32::MAX samples.
+            // not have. It refuses for EVERY estimator instead of
+            // silently bounding (or silently running) a workload that
+            // may reach u32::MAX samples.
             return Err(ConError::BadParam {
                 what: "chance constraints require evaluate_chance_with_budget with an admitted ChanceWorkPlan",
-                value: f64::from(*samples),
+                value: f64::NAN,
             });
         }
         ConstraintKind::Robust { half_widths } => {
@@ -1658,6 +1780,20 @@ pub fn serialize_specs(specs: &[ConstraintSpec]) -> String {
                 level,
                 estimator: ChanceEstimator::MonteCarlo { samples, delta },
             } => format!("chance {} mc {samples} {}", hex(*level), hex(*delta)),
+            ConstraintKind::Chance {
+                level,
+                estimator:
+                    ChanceEstimator::EProcessAnytime {
+                        samples,
+                        alpha,
+                        lambda,
+                    },
+            } => format!(
+                "chance {} eproc {samples} {} {}",
+                hex(*level),
+                hex(*alpha),
+                hex(*lambda)
+            ),
             ConstraintKind::Robust { half_widths } => {
                 let ws: Vec<String> = half_widths.iter().map(|w| hex(*w)).collect();
                 format!("robust {}", ws.join(","))
@@ -1748,27 +1884,60 @@ pub fn parse_specs(text: &str) -> Result<Vec<ConstraintSpec>, ConError> {
                         }
                     }
                     Some("chance") => {
-                        if toks.len() != 9 {
-                            return Err(perr(ln, "chance constraint has the wrong field count"));
-                        }
                         let level = toks
                             .get(5)
                             .and_then(|t| unhex(t))
                             .ok_or_else(|| perr(ln, "bad level"))?;
-                        if toks.get(6) != Some(&"mc") {
-                            return Err(perr(ln, "unknown estimator"));
-                        }
-                        let samples = toks
-                            .get(7)
-                            .and_then(|t| t.parse().ok())
-                            .ok_or_else(|| perr(ln, "bad samples"))?;
-                        let delta = toks
-                            .get(8)
-                            .and_then(|t| unhex(t))
-                            .ok_or_else(|| perr(ln, "bad delta"))?;
-                        ConstraintKind::Chance {
-                            level,
-                            estimator: ChanceEstimator::MonteCarlo { samples, delta },
+                        match toks.get(6).copied() {
+                            Some("mc") => {
+                                if toks.len() != 9 {
+                                    return Err(perr(
+                                        ln,
+                                        "chance constraint has the wrong field count",
+                                    ));
+                                }
+                                let samples = toks
+                                    .get(7)
+                                    .and_then(|t| t.parse().ok())
+                                    .ok_or_else(|| perr(ln, "bad samples"))?;
+                                let delta = toks
+                                    .get(8)
+                                    .and_then(|t| unhex(t))
+                                    .ok_or_else(|| perr(ln, "bad delta"))?;
+                                ConstraintKind::Chance {
+                                    level,
+                                    estimator: ChanceEstimator::MonteCarlo { samples, delta },
+                                }
+                            }
+                            Some("eproc") => {
+                                if toks.len() != 10 {
+                                    return Err(perr(
+                                        ln,
+                                        "chance eproc constraint has the wrong field count",
+                                    ));
+                                }
+                                let samples = toks
+                                    .get(7)
+                                    .and_then(|t| t.parse().ok())
+                                    .ok_or_else(|| perr(ln, "bad samples"))?;
+                                let alpha = toks
+                                    .get(8)
+                                    .and_then(|t| unhex(t))
+                                    .ok_or_else(|| perr(ln, "bad alpha"))?;
+                                let lambda = toks
+                                    .get(9)
+                                    .and_then(|t| unhex(t))
+                                    .ok_or_else(|| perr(ln, "bad lambda"))?;
+                                ConstraintKind::Chance {
+                                    level,
+                                    estimator: ChanceEstimator::EProcessAnytime {
+                                        samples,
+                                        alpha,
+                                        lambda,
+                                    },
+                                }
+                            }
+                            _ => return Err(perr(ln, "unknown estimator")),
                         }
                     }
                     Some("robust") => {

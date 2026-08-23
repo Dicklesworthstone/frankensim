@@ -10,6 +10,12 @@ description = "Constraint calculus: typed kinds with optimizer treatments, evide
 [package.metadata.frankensim]
 layer = "L4"
 
+[features]
+# [F]-gated per the Ambition-Tag rule: the anytime-valid chance
+# estimator (e-process stopping) stays out of default builds until its
+# statistical claims carry independent review evidence.
+frontier-eproc = []
+
 [dependencies]
 fs-evidence = { path = "../fs-evidence" }
 fs-exec = { path = "../fs-exec" }

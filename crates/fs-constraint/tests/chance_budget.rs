@@ -541,3 +541,204 @@ fn g3_tile_partition_invariance_and_g5_replay_stability() {
     assert_eq!(first, second, "replay diverged");
     assert_eq!(first.1.plan_identity, plan.identity());
 }
+
+/// Anytime-valid estimator gates ([F], `frontier-eproc` feature). The
+/// stopping resolution is the TILE, so crossing runs are asserted on
+/// status/receipt bounds rather than byte-equality across tilings;
+/// non-crossing runs consume the full budget and ARE byte-stable.
+#[cfg(feature = "frontier-eproc")]
+mod eproc_gates {
+    use super::*;
+
+    fn eproc_spec(node: NodeId, level: f64) -> ConstraintSpec {
+        ConstraintSpec {
+            name: "chance-eproc".to_string(),
+            node,
+            kind: ConstraintKind::Chance {
+                level,
+                estimator: ChanceEstimator::EProcessAnytime {
+                    samples: 512,
+                    alpha: 0.05,
+                    lambda: 1.0,
+                },
+            },
+            active_tol: 1e-9,
+        }
+    }
+
+    #[test]
+    fn eproc_crossing_stops_early_with_ville_satisfaction() {
+        let (problem, node) = host_linear();
+        // x0 - 1 <= 0 with x0=0.5 and draws u ~ 0.45: every shifted
+        // sample is a hit, so the supermartingale grows without bound.
+        let spec = eproc_spec(node, 0.3);
+        let noise = |_s: u64| vec![0.45, 0.0];
+        let plan = ChanceWorkPlan::plan(512, 2, 8).expect("plan");
+        let gate = CancelGate::new();
+        let (ev, receipt) = with_cx_budget(&gate, infinite(), |cx| {
+            evaluate_chance_with_budget(&problem, &spec, &[0.5, 0.0], &noise, plan, cx)
+        })
+        .expect("crossing run completes");
+        assert_eq!(ev.status, Status::Satisfied);
+        assert!(receipt.completed_samples < 512, "must stop early");
+        assert!(receipt.completed_samples >= 8, "at least one tile runs");
+        let evalue_ok = matches!(
+            ev.statistical,
+            fs_evidence::StatisticalCertificate::EValue { .. }
+        );
+        assert!(
+            evalue_ok,
+            "the certificate must carry the crossing evidence as an EValue"
+        );
+    }
+
+    #[test]
+    fn eproc_noncrossing_exhausts_budget_as_plain_violated() {
+        let (problem, node) = host_linear();
+        // Level 0.9 with guaranteed misses: x0 + 0.6 - 1 = +0.1 > 0.
+        let spec = eproc_spec(node, 0.9);
+        let noise = |_s: u64| vec![0.6, 0.0];
+        let plan = ChanceWorkPlan::plan(512, 2, 8).expect("plan");
+        let gate = CancelGate::new();
+        let (ev, receipt) = with_cx_budget(&gate, infinite(), |cx| {
+            evaluate_chance_with_budget(&problem, &spec, &[0.5, 0.0], &noise, plan, cx)
+        })
+        .expect("non-crossing run completes");
+        assert_eq!(ev.status, Status::Violated);
+        assert_eq!(receipt.completed_samples, 512);
+        assert_eq!(receipt.hits, 0);
+        assert!(matches!(
+            ev.statistical,
+            fs_evidence::StatisticalCertificate::EValue { .. }
+        ));
+        assert!(
+            ev.violation > 0.0 && ev.violation <= 1.0,
+            "a non-crossing budget exhaustion must NOT mint a bound, only an estimate"
+        );
+    }
+
+    #[test]
+    fn eproc_replay_bit_stable_and_partition_status_parity() {
+        let (problem, node) = host_linear();
+        let spec = eproc_spec(node, 0.9); // non-crossing: full budget both ways
+        let run = |tile: u32| {
+            let plan = ChanceWorkPlan::plan(512, 2, tile).expect("plan");
+            let gate = CancelGate::new();
+            let noise = |_s: u64| vec![0.5, 0.0];
+            with_cx_budget(&gate, infinite(), |cx| {
+                evaluate_chance_with_budget(&problem, &spec, &[0.5, 0.0], &noise, plan, cx)
+            })
+            .expect("run completes")
+        };
+        let a = run(4);
+        let b = run(64);
+        // Different tile sizes are DIFFERENT plans (the identity binds
+        // the tile shape) and their log-e-value accumulates in different
+        // groupings, so cross-tiling equality is status/counter parity
+        // plus a tight relative band on the e-value — never byte
+        // equality. Same-tiling replays below ARE byte-stable.
+        assert_eq!(a.0.status, b.0.status);
+        assert_eq!(a.1.completed_samples, b.1.completed_samples);
+        assert_eq!(a.1.hits, b.1.hits);
+        let (
+            fs_evidence::StatisticalCertificate::EValue { e: ea, .. },
+            fs_evidence::StatisticalCertificate::EValue { e: eb, .. },
+        ) = (&a.0.statistical, &b.0.statistical)
+        else {
+            unreachable!("e-process evidence carries EValue certificates");
+        };
+        assert!(
+            (ea - eb).abs() <= 1.0e-9 * ea.max(*eb),
+            "tile grouping may only move the e-value by roundoff: {ea} vs {eb}"
+        );
+        // Crossing parity across tilings (status-level only).
+        let cross_spec = eproc_spec(node, 0.3);
+        let statuses = [4u32, 64].map(|tile| {
+            let plan = ChanceWorkPlan::plan(512, 2, tile).expect("plan");
+            let gate = CancelGate::new();
+            let noise = |_s: u64| vec![0.45, 0.0];
+            with_cx_budget(&gate, infinite(), |cx| {
+                evaluate_chance_with_budget(&problem, &cross_spec, &[0.5, 0.0], &noise, plan, cx)
+            })
+            .expect("crossing run completes")
+            .0
+            .status
+        });
+        assert_eq!(statuses[0], statuses[1]);
+        assert_eq!(statuses[0], Status::Satisfied);
+    }
+
+    #[test]
+    fn g0_eproc_policy_boundaries_refuse() {
+        let (problem, node) = host_linear();
+        let noise = stream();
+        let mk = |alpha: f64, lambda: f64| ConstraintSpec {
+            name: "eproc".to_string(),
+            node,
+            kind: ConstraintKind::Chance {
+                level: 0.5,
+                estimator: ChanceEstimator::EProcessAnytime {
+                    samples: 16,
+                    alpha,
+                    lambda,
+                },
+            },
+            active_tol: 1e-9,
+        };
+        for (alpha, lambda, why) in [
+            (0.0, 1.0, "alpha = 0"),
+            (1.0, 1.0, "alpha >= 1"),
+            (0.05, 0.0, "lambda = 0"),
+            (0.05, 2.5, "lambda above the Bernoulli-bounded range"),
+        ] {
+            let plan = ChanceWorkPlan::plan(16, 2, 4).expect("plan");
+            let gate = CancelGate::new();
+            let outcome = with_cx_budget(&gate, infinite(), |cx| {
+                evaluate_chance_with_budget(
+                    &problem,
+                    &mk(alpha, lambda),
+                    &[0.5, 0.0],
+                    &noise,
+                    plan,
+                    cx,
+                )
+            });
+            assert!(
+                matches!(
+                    outcome,
+                    Err(ChanceEvalError::Invalid(ConError::BadParam { .. }))
+                ),
+                "{why} must be refused as BadParam"
+            );
+        }
+    }
+}
+
+#[cfg(not(feature = "frontier-eproc"))]
+#[test]
+fn eproc_execution_requires_the_frontier_feature() {
+    let (problem, node) = host_linear();
+    let spec = ConstraintSpec {
+        name: "eproc".to_string(),
+        node,
+        kind: ConstraintKind::Chance {
+            level: 0.5,
+            estimator: ChanceEstimator::EProcessAnytime {
+                samples: 16,
+                alpha: 0.05,
+                lambda: 1.0,
+            },
+        },
+        active_tol: 1e-9,
+    };
+    let plan = ChanceWorkPlan::plan(16, 2, 4).expect("plan");
+    let gate = CancelGate::new();
+    let outcome = with_cx_budget(&gate, infinite(), |cx| {
+        evaluate_chance_with_budget(&problem, &spec, &[0.5, 0.0], &stream(), plan, cx)
+    });
+    assert!(matches!(
+        outcome,
+        Err(ChanceEvalError::Invalid(ConError::BadParam { ref what, .. }))
+            if what.contains("frontier-eproc")
+    ));
+}
