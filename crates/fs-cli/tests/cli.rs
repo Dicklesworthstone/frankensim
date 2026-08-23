@@ -526,3 +526,63 @@ fn g0_the_tracked_reference_project_validates_through_the_real_cli_verb() {
     assert!(output.stdout.contains("\"finding_count\":0"));
     assert_eq!(output.stdout.lines().count(), 1, "one JSON result record");
 }
+
+#[test]
+fn g0_the_worked_example_fixtures_stay_fresh_through_the_real_cli_verb() {
+    // The worked examples (bead frankensim-extreal-program-f85xj.6.12) are
+    // executed, not prose. The minimal heated-plate fixture must keep
+    // validating clean; the refusal-loop fixture must keep refusing with
+    // exactly the documented code; and its one-token repair must remain
+    // byte-identical to the tracked reference project.
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+
+    let heated = root.join("examples/heated-plate/heated-plate.fsim");
+    let output = run(args(&["--json", "validate", &heated.to_string_lossy()]));
+    assert_eq!(output.exit_code, exit::SUCCESS, "stderr: {}", output.stderr);
+    assert!(output.stdout.contains("\"status\":\"ok\""));
+    assert!(output.stdout.contains("\"finding_count\":0"));
+    // Frozen canonical hashes: any fixture-byte drift fails right here
+    // instead of rotting quietly. Regenerate with the real verb and commit
+    // fixture + hash in the same commit.
+    assert!(
+        output.stdout.contains(
+            "\"project_hash\":\"7564f37eee52fbbef93f9013bb381f919e8f7022b2346319e57bf93f06328df1\""
+        ),
+        "heated-plate.fsim drifted from its frozen canonical hash"
+    );
+
+    let reference = root.join("data/reference-project/cooling-reference.fsim");
+    let ref_out = run(args(&["--json", "validate", &reference.to_string_lossy()]));
+    assert_eq!(ref_out.exit_code, exit::SUCCESS);
+    assert!(
+        ref_out.stdout.contains(
+            "\"project_hash\":\"d69d02bc923516de91eb586f48d9e85fef004942a742b3dd86ac117296324e1e\""
+        ),
+        "cooling-reference.fsim drifted from its frozen canonical hash"
+    );
+
+    let broken = root.join("examples/refusal-loop/broken.fsim");
+    let output = run(args(&["--json", "validate", &broken.to_string_lossy()]));
+    assert_eq!(output.exit_code, exit::REFUSED);
+    assert!(
+        output.stderr.contains("project-duty-range"),
+        "stderr: {}",
+        output.stderr
+    );
+    assert!(
+        output.stderr.contains("duty must lie in 0.0..=1.0"),
+        "stderr: {}",
+        output.stderr
+    );
+
+    let reference_bytes = std::fs::read(root.join("data/reference-project/cooling-reference.fsim"))
+        .expect("tracked reference project is readable");
+    let broken_text =
+        std::fs::read_to_string(&broken).expect("refusal-loop fixture is readable utf-8");
+    let repaired = broken_text.replacen(":duty 2.0", ":duty 1.0", 1);
+    assert_eq!(
+        repaired.as_bytes(),
+        reference_bytes.as_slice(),
+        "the one-token repair must reproduce the tracked reference bytes"
+    );
+}

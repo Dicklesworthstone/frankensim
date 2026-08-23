@@ -4,37 +4,35 @@
 # lane breaks (bead frankensim-extreal-program-f85xj.6.12).
 #
 # Examples that rot are worse than none. This harness executes each worked
-# example's documented commands against the REAL `frankensim` binary and
-# compares the observed results against frozen expectations:
+# example's documented commands against the REAL `frankensim` binary:
 #
-#   1. examples/heated-plate   — minimal schema walkthrough validates clean,
-#                                byte-for-byte the frozen canonical hash.
+#   1. examples/heated-plate   — minimal schema walkthrough validates clean.
 #   2. data/reference-project  — the cooling reference fixture validates
 #                                clean (the enclosure example's subject).
-#   3. examples/refusal-loop   — broken.fsim must keep refusing with exactly
-#                                code `project-duty-range`, and its one-token
-#                                repair must stay byte-equal to the tracked
-#                                reference project.
+#   3. examples/refusal-loop   — broken.fsim keeps refusing with exactly
+#                                code `project-duty-range`, and its one-
+#                                token repair stays byte-equal to the
+#                                tracked reference project.
 #
-# THE LOAD-BEARING RULE: an expectation that stops matching is a FAILURE,
-# never a silent pass. If you intentionally change a fixture, regenerate its
-# frozen hash with --update and review the diff; the commit that changes a
-# fixture and the commit that changes its frozen hash must be the same.
+# FROZEN BYTES: the canonical project hashes are frozen as literals in the
+# G0 battery (`crates/fs-cli/tests/cli.rs`,
+# g0_the_worked_example_fixtures_stay_fresh_through_the_real_cli_verb),
+# which runs wherever `cargo test` runs and fails on any fixture drift.
+# This lane is the human-runnable wrapper; it needs a NATIVE frankensim
+# binary. Under the RCH offload regime, set FRANKENSIM_BIN (or --binary)
+# explicitly, or rely on the G0 battery, which needs no local binary.
 #
 # Usage:
-#   scripts/ci/examples_freshness_e2e.sh [--binary PATH] [--update]
+#   scripts/ci/examples_freshness_e2e.sh [--binary PATH]
 #
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-EXPECTED="${REPO_ROOT}/scripts/ci/examples-freshness-expected.json"
 BINARY="${FRANKENSIM_BIN:-}"
-UPDATE=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --binary) BINARY="${2:-}"; shift 2 ;;
-    --update) UPDATE=1; shift ;;
     -h|--help) sed -n '3,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) printf 'FATAL: unknown argument: %s\n' "$1" >&2; exit 2 ;;
   esac
@@ -44,15 +42,17 @@ HEATED="${REPO_ROOT}/examples/heated-plate/heated-plate.fsim"
 REFERENCE="${REPO_ROOT}/data/reference-project/cooling-reference.fsim"
 BROKEN="${REPO_ROOT}/examples/refusal-loop/broken.fsim"
 
-for f in "${HEATED}" "${REFERENCE}" "${BROKEN}" "${EXPECTED}"; do
+for f in "${HEATED}" "${REFERENCE}" "${BROKEN}"; do
   [[ -f "${f}" ]] || { printf 'FATAL: missing %s\n' "${f}" >&2; exit 2; }
 done
 
 if [[ -z "${BINARY}" ]]; then
-  cargo build -q -p fs-cli --bin frankensim
-  BINARY="$(find "${CARGO_TARGET_DIR:-${REPO_ROOT}/target}" -name frankensim -type f -perm -u+x 2>/dev/null | head -1)"
+  printf 'FATAL: no frankensim binary. Set FRANKENSIM_BIN or pass --binary PATH.\n' >&2
+  printf 'The frozen-hash freshness assertions live in the fs-cli G0 battery,\n' >&2
+  printf 'which runs under plain `cargo test -p fs-cli --test cli` anywhere.\n' >&2
+  exit 2
 fi
-[[ -x "${BINARY}" ]] || { printf 'FATAL: frankensim binary not found: %s\n' "${BINARY}" >&2; exit 2; }
+[[ -x "${BINARY}" ]] || { printf 'FATAL: not executable: %s\n' "${BINARY}" >&2; exit 2; }
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/examples-freshness-XXXXXX")"
 trap 'rm -rf "${WORK}"' EXIT
@@ -81,44 +81,19 @@ check() {
   fi
 }
 
-frozen_hash() {
-  python3 - "$1" "$2" <<'PY'
-import json, sys
-path, field = sys.argv[1], sys.argv[2]
-data = json.load(open(path))
-print(data["fixtures"][field]["project_hash"])
-PY
-}
-
-observed_hash() {
-  python3 -c 'import json,sys; data=json.load(sys.stdin); print(data["project_hash"])'
-}
-
 validate_ok() {
   "${BINARY}" --json validate "$1" > "${WORK}/v.json" 2> "${WORK}/v.err"
 }
 
-# ---- 1. heated plate: minimal example validates clean at the frozen hash ---
+# ---- 1. heated plate: minimal example validates clean ----------------------
 check "heated-plate validates ok" validate_ok "${HEATED}"
 check "heated-plate reports zero findings" \
   grep -q '"finding_count":0' "${WORK}/v.json"
-OBS_HEATED="$(observed_hash < "${WORK}/v.json")"
-if [[ "${UPDATE}" != 1 ]]; then
-  FROZEN="$(frozen_hash "${EXPECTED}" "heated_plate")"
-  check "heated-plate canonical hash matches frozen expectation (observed=${OBS_HEATED} frozen=${FROZEN})" \
-    test "${OBS_HEATED}" = "${FROZEN}"
-fi
 
 # ---- 2. cooling reference: enclosure example's subject stays valid --------
 check "cooling-reference validates ok" validate_ok "${REFERENCE}"
 check "cooling-reference reports zero findings" \
   grep -q '"finding_count":0' "${WORK}/v.json"
-OBS_REFERENCE="$(observed_hash < "${WORK}/v.json")"
-if [[ "${UPDATE}" != 1 ]]; then
-  FROZEN="$(frozen_hash "${EXPECTED}" "cooling_reference")"
-  check "cooling-reference canonical hash matches frozen expectation (observed=${OBS_REFERENCE} frozen=${FROZEN})" \
-    test "${OBS_REFERENCE}" = "${FROZEN}"
-fi
 
 # ---- 3. refusal loop: broken fixture refuses with the documented code -----
 RC=0
@@ -131,21 +106,6 @@ check "refusal states the duty fix" grep -q 'duty must lie in 0.0..=1.0' "${WORK
 sed 's/:duty 2\.0/:duty 1.0/' "${BROKEN}" > "${WORK}/repaired.fsim"
 check "one-token repair reproduces the tracked reference bytes" \
   cmp -s "${WORK}/repaired.fsim" "${REFERENCE}"
-
-if [[ "${UPDATE}" == 1 ]]; then
-  python3 - "$EXPECTED" "${OBS_HEATED}" "${OBS_REFERENCE}" <<'PY'
-import json, sys
-path, heated, reference = sys.argv[1], sys.argv[2], sys.argv[3]
-data = {"fixtures": {
-    "heated_plate": {"project_hash": heated},
-    "cooling_reference": {"project_hash": reference}}}
-with open(path, "w") as f:
-    json.dump(data, f, indent=2, sort_keys=True)
-    f.write("\n")
-print(f"updated {path}")
-PY
-fi
-
 
 # ------------------------------------------------------------------- verdict
 log summary "checks=${CHECKS} failures=${FAILURES}"
