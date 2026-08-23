@@ -86,6 +86,7 @@ refuse the same way. Nothing is written that claims more than happened.
 |------|-----------------|
 | `examples/heated-plate/README.md` | Every mandatory schema section, minimally |
 | `examples/refusal-loop/README.md` | The refusal/fix loop as a workflow |
+| `examples/heatsink-fan/README.md` | The full cooling contract and the flow-network operating point |
 | `examples/cooling-enclosure/README.md` | Reading receipts, budgets, and no-claims |
 | `crates/fs-project/src/spec.rs` | The validated schema, section by section |
 | Each crate's `CONTRACT.md` | Invariants, determinism class, and no-claim boundaries |

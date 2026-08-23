@@ -586,3 +586,69 @@ fn g0_the_worked_example_fixtures_stay_fresh_through_the_real_cli_verb() {
         "the one-token repair must reproduce the tracked reference bytes"
     );
 }
+
+#[test]
+fn g0_the_heatsink_fan_example_reaches_the_flow_network_operating_point() {
+    // The heatsink+fan worked example (bead frankensim-extreal-program-
+    // f85xj.6.12) is the deepest walkthrough the product honestly supports:
+    // with a declared fan system, vent area, and airflow-leakage bypass it
+    // must clear import-verify, assign, material-resolve, AND the
+    // interval-certified flow-network operating point, then refuse at the
+    // conduction stage with the typed gap naming its owner bead.
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let fsim = root.join("examples/heatsink-fan/heatsink-fan.fsim");
+    let stl = root.join("examples/heatsink-fan/heatsink.stl");
+    let pack = root.join("data/reference-project/aa6061.fsmcdpk");
+
+    let validated = run(args(&[
+        "--json",
+        "validate",
+        fsim.to_string_lossy().as_ref(),
+    ]));
+    assert_eq!(
+        validated.exit_code,
+        exit::SUCCESS,
+        "stderr: {}",
+        validated.stderr
+    );
+    assert!(validated.stdout.contains("\"status\":\"ok\""));
+    assert!(validated.stdout.contains("\"finding_count\":0"));
+
+    let ledger = scratch("heatsink-ledger").join("heatsink.db");
+    let imported = run(args(&[
+        "--json",
+        "import",
+        fsim.to_string_lossy().as_ref(),
+        stl.to_string_lossy().as_ref(),
+        ledger.to_string_lossy().as_ref(),
+        "--unit",
+        "m",
+        "--max-hole-edges",
+        "0",
+    ]));
+    assert_eq!(
+        imported.exit_code,
+        exit::SUCCESS,
+        "stderr: {}",
+        imported.stderr
+    );
+
+    let solved = run(args(&[
+        "solve",
+        fsim.to_string_lossy().as_ref(),
+        ledger.to_string_lossy().as_ref(),
+        "--materials",
+        pack.to_string_lossy().as_ref(),
+    ]));
+    assert_ne!(
+        solved.exit_code,
+        exit::SUCCESS,
+        "solve must refuse at the conduction typed gap, stdout: {}",
+        solved.stdout
+    );
+    assert!(
+        solved.stderr.contains("cli-solve-stage-gap") && solved.stderr.contains("conduction"),
+        "expected the conduction typed-gap refusal, got: {}",
+        solved.stderr
+    );
+}
