@@ -6092,7 +6092,7 @@ fn composition_helper_matches_descriptor_bound_parent_construction() {
         .ordered_bytes(
             Field::new(6, "parents"),
             2,
-            parent_rows.iter().map(|row| row.as_slice()),
+            parent_rows.iter().map(<[u8; 65]>::as_slice),
         )
         .expect("descriptor-bound parents")
         .finish()
@@ -6130,7 +6130,7 @@ fn composition_helper_matches_descriptor_bound_parent_construction() {
         .ordered_bytes(
             Field::new(6, "parents"),
             2,
-            wrong_role_rows.iter().map(|row| row.as_slice()),
+            wrong_role_rows.iter().map(<[u8; 65]>::as_slice),
         )
         .expect("schema-shaped but semantically foreign parent rows")
         .finish()

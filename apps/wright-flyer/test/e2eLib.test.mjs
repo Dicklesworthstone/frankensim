@@ -8,6 +8,8 @@ import {
   RefusalCodes,
   redactRecord,
   extractReceipts,
+  extractQosStates,
+  countLatencySamples,
   compareRuns,
   digestLooksReal,
 } from "../e2e/lib.mjs";
@@ -83,6 +85,27 @@ test("extractReceipts refuses missing sim-ready with typed MISSING_STAGE + MISSI
   assert.equal(receipts.ok, false);
   assert.ok(receipts.errors.some((e) => e.code === RefusalCodes.MISSING_STAGE && e.stage === "sim-ready"));
   assert.ok(receipts.errors.some((e) => e.code === RefusalCodes.MISSING_DIGEST && e.field === "tick0Digest"));
+});
+
+test("extractQosStates returns ordered governor states only", () => {
+  const states = extractQosStates([
+    { stage: "capability-probe" },
+    { stage: "qos", state: "normal", enterConstrainedMs: 22 },
+    { stage: "qos", state: "constrained" },
+    { stage: "sim-terminal", digest: "x" },
+    { stage: "qos", state: "normal" },
+  ]);
+  assert.deepEqual(states, ["normal", "constrained", "normal"]);
+});
+
+test("countLatencySamples counts only samples with applied_tick", () => {
+  const n = countLatencySamples([
+    { suite: "wf-input-latency", seq: 1, applied_tick: 12 },
+    { suite: "wf-input-latency", seq: 2, applied_tick: null },
+    { suite: "other" },
+    { suite: "wf-input-latency", seq: 3, applied_tick: 15 },
+  ]);
+  assert.equal(n, 2);
 });
 
 test("extractReceipts refuses out-of-order stages", () => {

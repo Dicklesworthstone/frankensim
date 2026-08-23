@@ -39,7 +39,14 @@ export class BootRefusal extends Error {
  * and return when the run terminates (results card visible) or a typed
  * refusal fires. Never leaves a browser alive on failure.
  */
-export async function bootOnce({ baseUrl, query, timeoutMs = 60000, chromeBin }) {
+export async function bootOnce({
+  baseUrl,
+  query,
+  timeoutMs = 60000,
+  chromeBin,
+  holdKeys = [],
+  cpuThrottleRate = null,
+}) {
   const bin = chromeBin ?? resolveChromeBin();
   if (!bin) {
     throw new BootRefusal(
@@ -54,6 +61,11 @@ export async function bootOnce({ baseUrl, query, timeoutMs = 60000, chromeBin })
     args: ["--disable-dev-shm-usage", "--window-size=1280,800"],
     defaultViewport: { width: 1280, height: 800 },
   });
+  const cdp = await browser.target().createCDPSession();
+  if (cpuThrottleRate !== null) {
+    // Lands BEFORE navigation so the entire boot runs throttled.
+    await cdp.send("Emulation.setCPUThrottlingRate", { rate: cpuThrottleRate });
+  }
   try {
     const page = await browser.newPage();
     page.on("console", (msg) => {
@@ -64,6 +76,18 @@ export async function bootOnce({ baseUrl, query, timeoutMs = 60000, chromeBin })
     });
     const url = baseUrl.replace(/\/?$/, "/") + "?" + query;
     await page.goto(url, { waitUntil: "load", timeout: timeoutMs });
+    if (holdKeys.length > 0) {
+      // Synthetic DOM events through the app's REAL window listeners.
+      // Never released => command slews to its saturated plateau, the
+      // strongest wall-clock-reproducible script available (control
+      // admission is device-time-derived, so tick-exact scripts via DOM
+      // events are impossible BY DESIGN).
+      await page.evaluate((codes) => {
+        for (const code of codes) {
+          window.dispatchEvent(new KeyboardEvent("keydown", { code }));
+        }
+      }, holdKeys);
+    }
     // Terminal OR refusal, whichever comes first. The card is the app's own
     // end-of-run signal; the JSONL line is cross-checked by extractReceipts.
     await Promise.race([
