@@ -445,6 +445,7 @@ pub struct ConstraintEvidence {
 }
 
 impl ConstraintEvidence {
+    #[allow(clippy::too_many_lines)] // One integrity walk names the first defect across every evidence class; splitting would scatter the reason strings.
     fn invalid_reason(&self) -> Option<&'static str> {
         if !matches!(
             self.kind,
@@ -559,6 +560,8 @@ impl ConstraintEvidence {
         if self.certificate.lo > self.certificate.hi {
             return Some("reversed-numerical-certificate");
         }
+        #[allow(clippy::float_cmp)]
+        // Exact certificates are point-degenerate bitwise; a tolerance would mint false point claims.
         if self.certificate.kind == NumericalKind::Exact
             && self.certificate.lo != self.certificate.hi
         {
@@ -862,8 +865,7 @@ fn require_finite_nonnegative(value: f64, what: &'static str) -> Result<(), ConE
 fn validate_spec_policy(spec: &ConstraintSpec, point_dim: Option<usize>) -> Result<(), ConError> {
     require_finite_nonnegative(spec.active_tol, "active-set tolerance")?;
     match &spec.kind {
-        ConstraintKind::Soft(PenaltyLaw::Quadratic { weight })
-        | ConstraintKind::Soft(PenaltyLaw::Hinge { weight }) => {
+        ConstraintKind::Soft(PenaltyLaw::Quadratic { weight } | PenaltyLaw::Hinge { weight }) => {
             require_finite_nonnegative(*weight, "soft-constraint weight")?;
         }
         ConstraintKind::Chance {
@@ -1517,6 +1519,9 @@ pub fn parse_specs(text: &str) -> Result<Vec<ConstraintSpec>, ConError> {
             .zip(text.bytes())
             .take_while(|(expected, actual)| expected == actual)
             .count();
+        // Line attribution counts newlines directly; the bytecount crate is
+        // outside the Franken-only runtime dependency policy.
+        #[allow(clippy::naive_bytecount)]
         let line = text.as_bytes()[..mismatch.min(text.len())]
             .iter()
             .filter(|&&byte| byte == b'\n')

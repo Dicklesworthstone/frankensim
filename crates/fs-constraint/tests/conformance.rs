@@ -8,6 +8,9 @@
 //! their literal base seeds; fixed-input cases use zero, and the fixed Cx
 //! stream remains separate execution provenance. Assertions and expectations
 //! reached before a verdict remain ordinary Rust test diagnostics.
+// Interval proofs and certificate bounds are pinned bitwise; an epsilon
+// would let a wrong proof kind pass as approximate-but-adjacent.
+#![allow(clippy::float_cmp)]
 
 use asupersync::types::Budget;
 use fs_constraint::{
@@ -781,6 +784,7 @@ fn fscon_006_repairs_calibrated() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // Every malformed-range neighbor is refused in one table-driven admission story.
 fn elastic_domain_admission_refuses_malformed_ranges_before_solving() {
     with_cx(|cx| {
         let host = linear_host(&[(1.0, 0.0, 1.0)]);
@@ -927,6 +931,7 @@ fn elastic_domain_admission_refuses_malformed_ranges_before_solving() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // Hostile payloads, escapes, and non-finite surfaces are one serialization story.
 fn json_surfaces_escape_untrusted_text_and_nonfinite_numbers() {
     let hostile = "name\"\\\n\r\t\u{0008}\u{000c}\u{0001}";
     let host = linear_host(&[(1.0, 0.0, 1.0)]);
@@ -1051,6 +1056,7 @@ fn json_surfaces_escape_untrusted_text_and_nonfinite_numbers() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // Each malformed policy value pairs with its admitted boundary neighbors in one fail-closed story.
 fn malformed_policy_values_fail_closed_with_admitted_boundary_neighbors() {
     let host = linear_host(&[(1.0, 0.0, 1.0)]);
     let x = [0.0, 0.0];
@@ -1225,6 +1231,7 @@ fn malformed_policy_values_fail_closed_with_admitted_boundary_neighbors() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // Interval proofs, wrong kinds, and subject binding are one certification-refusal story.
 fn interval_proofs_refuse_bad_boxes_and_wrong_proof_kinds_and_bind_subjects() {
     let host = linear_host(&[(1.0, 0.0, 1.0), (0.0, 1.0, 1.0)]);
     let interval_spec = ConstraintSpec {
@@ -1393,6 +1400,7 @@ fn interval_proofs_refuse_bad_boxes_and_wrong_proof_kinds_and_bind_subjects() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // Wire injectivity, subnormal/tie rounding neighbors, and raw-policy admission are one encoding story.
 fn fscon_v2_wire_encoding_is_injective_and_raw_policies_are_admitted() {
     let host = linear_host(&[(1.0, 0.0, 1.0)]);
     let min_subnormal = f64::from_bits(1);

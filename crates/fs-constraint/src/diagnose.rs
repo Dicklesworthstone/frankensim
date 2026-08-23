@@ -151,6 +151,7 @@ fn validate_domain(problem: &Problem, domain: &DomainBox, cx: &Cx<'_>) -> Result
 /// # Errors
 /// [`ConError::InvalidDomain`] before allocation/evaluation, evaluation
 /// teaching errors carried through, or cancellation at a documented poll.
+#[allow(clippy::too_many_lines)] // One elastic solve keeps domain admission, teaching errors, and cancellation polling ordered; splitting would interleave them.
 pub fn elastic_solve(
     problem: &Problem,
     specs: &[ConstraintSpec],
@@ -351,6 +352,8 @@ impl Diagnosis {
         if !component_total.is_finite() {
             return Some("nonfinite-component-violation-total");
         }
+        #[allow(clippy::float_cmp)]
+        // The recomputed component sum must equal the stored total bitwise; that equality IS the determinism invariant.
         if component_total != self.elastic.total_violation {
             return Some("total-component-violation-mismatch");
         }

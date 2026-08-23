@@ -426,7 +426,7 @@ fn add_exact_product(
     };
     let Some(exponent) = left_exponent
         .checked_add(right_exponent)
-        .and_then(|value| value.checked_add(if doubled { 1 } else { 0 }))
+        .and_then(|value| value.checked_add(i32::from(doubled)))
     else {
         return false;
     };

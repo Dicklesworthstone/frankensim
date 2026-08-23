@@ -3,6 +3,9 @@
 //! (composition + identity), adjoint consistency (honest vs a lying transpose),
 //! and manufactured-solution tolerance honesty (honest vs an understated error
 //! model), plus tier assignment and the R6 same-severity rule.
+// Tolerance pins assert bitwise-exact manufactured-solution values; an
+// epsilon would let an understated error model pass.
+#![allow(clippy::float_cmp)]
 
 use fs_conform::{
     Composition, ConformanceSuite, Converter, ManufacturedCase, Tier, certify, check_adjoint,
@@ -175,6 +178,7 @@ fn full_suite<'a>() -> ConformanceSuite<'a> {
 struct EmptyOutput;
 
 impl Converter for EmptyOutput {
+    #[allow(clippy::unnecessary_literal_bound)] // Trait signature ties id to &self; the body is a 'static literal.
     fn id(&self) -> &str {
         "empty-output"
     }
@@ -200,6 +204,7 @@ struct ConstantOutput {
 }
 
 impl Converter for ConstantOutput {
+    #[allow(clippy::unnecessary_literal_bound)] // Trait signature ties id to &self; the body is a 'static literal.
     fn id(&self) -> &str {
         "constant-output"
     }
@@ -223,6 +228,7 @@ impl Converter for ConstantOutput {
 struct ZeroDim;
 
 impl Converter for ZeroDim {
+    #[allow(clippy::unnecessary_literal_bound)] // Trait signature ties id to &self; the body is a 'static literal.
     fn id(&self) -> &str {
         "zero-dimensional"
     }
@@ -336,6 +342,7 @@ fn non_finite_evidence_and_policy_cannot_certify() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // One underflow story builds the lying adjoint, the understated model, and both tier verdicts together.
 fn floating_point_underflow_cannot_erase_failed_evidence() {
     let tiny = f64::MIN_POSITIVE;
     let wrong_adjoint = Mtx::with_adjoint("underflow", vec![vec![tiny]], vec![vec![0.0]], 0.0);
