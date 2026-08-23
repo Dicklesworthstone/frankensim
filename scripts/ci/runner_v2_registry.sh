@@ -158,6 +158,24 @@ check("closed row unflagged", [], flags.get(FAM + ".d", []))
 shuffled = dict(reversed(list(issues.items())))
 check("order invariance", sorted(corpus), sorted(rv2reg.corpus_ids(shuffled)))
 
+# 7. Declared-count prose extraction: digits and number words, with
+#    unit-like numbers (4K, 48 kHz) unable to match.
+claims = rv2reg.declared_count_claims(
+    "thirteen roots and 5 work packages; renders at 48 kHz in 4K")
+check("declared count extraction exact",
+      [(13, "thirteen roots"), (5, "5 work packages")], claims)
+
+# 8. Mismatch detection: declared 3 vs live 2 flags; matching count silent.
+mm_issues = {
+    "e3": issue("e3", title="epic with three children"),
+    "e3.a": issue("e3.a"), "e3.b": issue("e3.b"),
+}
+contain = {("e3.a", "e3"): True, ("e3.b", "e3"): True}
+mismatches = rv2reg.declared_count_mismatches(mm_issues, contain)
+check("declared-vs-live mismatch detected",
+      [("e3", 3, 2)],
+      [(m["container"], m["claimed"], m["live"]) for m in mismatches])
+
 print(f"self-test: {PASS} passed, {FAIL} failed")
 sys.exit(0 if FAIL == 0 else 1)
 SELFTEST
@@ -174,6 +192,7 @@ exec python3 - "$MODE" "$BEADS_FILE" "$OUT" <<'PYEOF'
 import hashlib
 import json
 import os
+import re
 import sys
 from datetime import datetime, timezone
 
@@ -292,6 +311,61 @@ def owner_estimate_flags(records):
     return flags
 
 
+def declared_count_mismatches(issues, containment):
+    """Corpus containers whose prose declares a child/row count that
+    disagrees with the live direct dot-prefix child count. Heuristic
+    tier: findings are review proposals, never controlling."""
+    out = []
+    direct_children = {}
+    for (child, parent) in containment:
+        direct_children.setdefault(parent, set()).add(child)
+    for iid in sorted(issues):
+        rec = issues[iid]
+        text = f"{rec.get('title', '')}\n{rec.get('description', '')}"
+        live = len(direct_children.get(iid, ()))
+        for claimed, phrase in declared_count_claims(text):
+            if claimed != live:
+                out.append({
+                    "container": iid,
+                    "claimed": claimed,
+                    "live": live,
+                    "phrase": phrase.strip(),
+                })
+    return out
+
+
+COUNT_NOUNS = (
+    "children", "child", "sub-beads", "subbeads", "roots", "leaves",
+    "work packages", "relations", "cases", "producers",
+)
+NUMBER_WORDS = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+    "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11,
+    "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15,
+    "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19,
+    "twenty": 20,
+}
+
+
+def declared_count_claims(text):
+    """Heuristic extraction of declared child/row counts from container
+    prose. Returns [(claimed_count, matched_phrase)]. Deliberately
+    conservative: a count noun must follow the number, so unit-like
+    numbers (4K, 48 kHz) cannot match."""
+    claims = []
+    for match in re.finditer(
+            r"\b([A-Za-z]+|\d+)\s+((?:(?:active|open|closed|live)\s+)?"
+            r"(?:sub-)?beads?\b|child(?:ren)?\b|(?:work packages?)\b|"
+            r"roots?\b|leaves\b|"
+            r"relations?\b|cases?\b|producers?\b)", text):
+        token = match.group(1).lower()
+        if token.isdigit():
+            claims.append((int(token), match.group(0)))
+        elif token in NUMBER_WORDS:
+            claims.append((NUMBER_WORDS[token], match.group(0)))
+    return claims
+
+
 def main(argv):
     mode = (argv[0] or "").lstrip("-")
     beads_path, out_arg = argv[1], argv[2]
@@ -360,6 +434,14 @@ def main(argv):
         for parent in orphans:
             rows.append({"event": "conflict_row", "class": "MISSING_PARENT",
                          "child_prefix": parent})
+        count_mismatches = [
+            m for m in declared_count_mismatches(issues, containment)
+            if m["container"] in corpus
+        ]
+        for mismatch in count_mismatches:
+            rows.append({"event": "info_row",
+                         "class": "DECLARED_COUNT_MISMATCH",
+                         **mismatch})
         for iid, entries in sorted(flags.items()):
             for name, blocking in entries:
                 rows.append({"event": "conflict_row" if blocking else "info_row",
@@ -372,6 +454,7 @@ def main(argv):
             "tracker_wide_closed_container_open_child_count": len(contras_wide),
             "tracker_wide_stale_open_container_count": len(stale_wide),
             "missing_parent_count": len(orphans),
+            "declared_count_mismatch_count": len(count_mismatches),
             "owner_missing_count": sum(1 for e in flags.values() if any(n == "OWNER_MISSING" for n, _ in e)),
             "estimate_missing_count": sum(1 for e in flags.values() if any(n == "ESTIMATE_MISSING" for n, _ in e)),
         }
@@ -395,6 +478,8 @@ def main(argv):
                 1 for r in rows if r.get("class") == "MISSING_PARENT"),
             "owner_missing_count": sum(
                 1 for r in rows if r.get("class") == "OWNER_MISSING"),
+            "declared_count_mismatch_count": sum(
+                1 for r in rows if r.get("class") == "DECLARED_COUNT_MISMATCH"),
             "estimate_missing_count": sum(
                 1 for r in rows if r.get("class") == "ESTIMATE_MISSING"),
         }
