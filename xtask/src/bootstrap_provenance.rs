@@ -309,7 +309,7 @@ pub(crate) fn render_bootstrap_provenance(
 }
 
 pub(crate) fn write_bootstrap_provenance<Validate>(
-    path: &Path,
+    path: &std::path::Path,
     lock_hash: &str,
     dest: &str,
     rows: &[BootstrapProvenanceRow],

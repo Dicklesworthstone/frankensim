@@ -70,11 +70,9 @@ fn committed_value_travels_with_exact_authority_and_closes_before_seal() {
     assert!(!close_receipt.implicit_close);
     assert_eq!(root.active_delegations(), 1);
 
-    drop(
-        child
-            .close()
-            .expect("child returns after publication closed"),
-    );
+    let _ = child
+        .close()
+        .expect("child returns after publication closed");
     let sealed = root.seal().expect("conservation holds at seal");
     assert_eq!(sealed.published_transfer_count, 1);
     assert_eq!(sealed.child_published_bytes, 8);
@@ -175,15 +173,13 @@ fn guard_drop_destroys_value_and_records_implicit_close_agreeing_with_explicit()
     let child_id = root_identity(50).child(subject(51), 1).unwrap();
     let child = root.delegate_capacity(child_id, "run/out", 16).unwrap();
 
-    let dropped_flag = Arc::new(AtomicBool::new(false));
     struct Observed(Arc<AtomicBool>);
     impl Drop for Observed {
         fn drop(&mut self) {
             self.0.store(true, Ordering::SeqCst);
         }
     }
-
-    // Explicit close: value destroyed first, close recorded explicitly.
+    let dropped_flag = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&dropped_flag);
     let explicit = child
         .allocate("a", Observed(flag))
