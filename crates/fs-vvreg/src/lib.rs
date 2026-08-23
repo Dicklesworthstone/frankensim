@@ -566,6 +566,7 @@ impl EnvelopeGateError {
     /// registry definition and caller observation needed for replay.
     #[must_use]
     pub fn json_line(&self) -> String {
+        use fmt::Write as _;
         let (attempt, outcome, detail_key, detail) = match self {
             Self::ModeMismatch {
                 attempt,
@@ -588,7 +589,6 @@ impl EnvelopeGateError {
             Self::Registry(refusal) => {
                 let mut line =
                     String::from("{\"vvreg\":\"acceptance-envelope-refusal\",\"schema\":");
-                use fmt::Write as _;
                 let _ = write!(line, "{ENVELOPE_VERDICT_SCHEMA_VERSION}");
                 line.push_str(",\"outcome\":\"registry\",\"reason\":");
                 push_json_str(&mut line, &refusal.to_string());
@@ -598,7 +598,6 @@ impl EnvelopeGateError {
             Self::UnknownQoi { id, qoi } => {
                 let mut line =
                     String::from("{\"vvreg\":\"acceptance-envelope-refusal\",\"schema\":");
-                use fmt::Write as _;
                 let _ = write!(line, "{ENVELOPE_VERDICT_SCHEMA_VERSION}");
                 line.push_str(",\"outcome\":\"unknown-qoi\",\"entry\":");
                 push_json_str(&mut line, id);
@@ -1312,7 +1311,7 @@ fn is_registry_slug(id: &str) -> bool {
     first.is_ascii_lowercase()
         && bytes
             .last()
-            .is_some_and(|last| last.is_ascii_alphanumeric())
+            .is_some_and(u8::is_ascii_alphanumeric)
         && rest
             .iter()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
@@ -1797,16 +1796,15 @@ pub fn entry_digest(entry: &RegistryEntry) -> ContentHash {
         // (one canonical spelling: hex case cannot fork the identity); a
         // malformed one keeps its raw text under a DISTINCT tag so the
         // malformed state itself is mutation-sensitive.
-        DeckPin::External { digest_hex } => match ContentHash::from_hex(digest_hex) {
-            Some(digest) => {
+        DeckPin::External { digest_hex } => {
+            if let Some(digest) = ContentHash::from_hex(digest_hex) {
                 payload.push(2);
                 payload.extend_from_slice(digest.as_bytes());
-            }
-            None => {
+            } else {
                 payload.push(3);
                 frame(&mut payload, digest_hex.as_bytes());
             }
-        },
+        }
         DeckPin::Unpinned => payload.push(0),
     }
     match entry.oracle {
@@ -1922,18 +1920,17 @@ pub fn canonical_row(entry: &RegistryEntry) -> String {
             }
             None => row.push_str("{\"authored\":null}"),
         },
-        DeckPin::External { digest_hex } => match ContentHash::from_hex(digest_hex) {
-            Some(digest) => {
+        DeckPin::External { digest_hex } => {
+            if let Some(digest) = ContentHash::from_hex(digest_hex) {
                 row.push_str("{\"external\":");
                 push_json_str(&mut row, &digest.to_hex());
                 row.push('}');
-            }
-            None => {
+            } else {
                 row.push_str("{\"malformed\":");
                 push_json_str(&mut row, digest_hex);
                 row.push('}');
             }
-        },
+        }
         DeckPin::Unpinned => row.push_str("null"),
     }
     row.push_str(",\"oracle\":");

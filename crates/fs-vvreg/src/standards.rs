@@ -1197,7 +1197,7 @@ fn validate_identifier(
     if !first.is_ascii_lowercase()
         || !bytes
             .last()
-            .is_some_and(|byte| byte.is_ascii_alphanumeric())
+            .is_some_and(u8::is_ascii_alphanumeric)
         || !rest
             .iter()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
