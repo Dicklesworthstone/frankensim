@@ -195,28 +195,29 @@ fn coverage_bounds_propagate_as_one_shared_directional_source() {
     let influence = &result.coverage_influences()[0];
     assert_eq!(influence.source_id, "coverage/signal");
     assert_eq!(
-        influence.principal_at_lower_w_mk[0],
-        influence.principal_at_lower_w_mk[1]
+        influence.principal_at_lower_w_mk[0].to_bits(),
+        influence.principal_at_lower_w_mk[1].to_bits()
     );
     assert_eq!(
-        influence.principal_at_upper_w_mk[0],
-        influence.principal_at_upper_w_mk[1]
+        influence.principal_at_upper_w_mk[0].to_bits(),
+        influence.principal_at_upper_w_mk[1].to_bits()
     );
     assert!(
         influence.principal_at_lower_w_mk[0] < result.principal().nominal_w_mk[0]
             && result.principal().nominal_w_mk[0] < influence.principal_at_upper_w_mk[0]
     );
     assert_eq!(
-        influence.principal_at_lower_w_mk[0], influence.principal_at_lower_w_mk[2],
+        influence.principal_at_lower_w_mk[0].to_bits(),
+        influence.principal_at_lower_w_mk[2].to_bits(),
         "one physical layer has no series/parallel anisotropy"
     );
     assert_eq!(
-        result.principal().lower_w_mk,
-        influence.principal_at_lower_w_mk
+        result.principal().lower_w_mk.map(f64::to_bits),
+        influence.principal_at_lower_w_mk.map(f64::to_bits)
     );
     assert_eq!(
-        result.principal().upper_w_mk,
-        influence.principal_at_upper_w_mk
+        result.principal().upper_w_mk.map(f64::to_bits),
+        influence.principal_at_upper_w_mk.map(f64::to_bits)
     );
 }
 
@@ -324,10 +325,13 @@ fn zero_coverage_and_single_layer_degenerate_to_the_matrix() {
     .expect("stackup")
     .homogenize()
     .expect("homogenize");
-    assert_eq!(result.principal().nominal_w_mk, [0.25; 3]);
-    assert_eq!(result.tensor_w_mk()[0][0], 0.25);
-    assert_eq!(result.tensor_w_mk()[1][1], 0.25);
-    assert_eq!(result.tensor_w_mk()[2][2], 0.25);
+    assert_eq!(
+        result.principal().nominal_w_mk.map(f64::to_bits),
+        [0.25_f64; 3].map(f64::to_bits)
+    );
+    assert_eq!(result.tensor_w_mk()[0][0].to_bits(), 0.25_f64.to_bits());
+    assert_eq!(result.tensor_w_mk()[1][1].to_bits(), 0.25_f64.to_bits());
+    assert_eq!(result.tensor_w_mk()[2][2].to_bits(), 0.25_f64.to_bits());
 }
 
 #[test]
@@ -347,8 +351,8 @@ fn frame_rotation_preserves_symmetry_and_moves_principal_directions() {
     .homogenize()
     .expect("homogenize");
     assert_eq!(
-        rotated.principal().nominal_w_mk,
-        original.principal().nominal_w_mk
+        rotated.principal().nominal_w_mk.map(f64::to_bits),
+        original.principal().nominal_w_mk.map(f64::to_bits)
     );
     close(
         rotated.tensor_w_mk()[0][0],
@@ -368,8 +372,8 @@ fn frame_rotation_preserves_symmetry_and_moves_principal_directions() {
     for row in 0..3 {
         for column in 0..3 {
             assert_eq!(
-                rotated.tensor_w_mk()[row][column],
-                rotated.tensor_w_mk()[column][row]
+                rotated.tensor_w_mk()[row][column].to_bits(),
+                rotated.tensor_w_mk()[column][row].to_bits()
             );
         }
     }
@@ -435,8 +439,8 @@ fn stack_order_is_identity_bearing_even_when_the_series_value_is_equal() {
     .homogenize()
     .expect("reverse");
     assert_eq!(
-        forward.principal().nominal_w_mk,
-        reverse.principal().nominal_w_mk
+        forward.principal().nominal_w_mk.map(f64::to_bits),
+        reverse.principal().nominal_w_mk.map(f64::to_bits)
     );
     assert_ne!(
         forward.identity(),

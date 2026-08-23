@@ -156,114 +156,27 @@ impl ContactLawCard {
                 what: "missing frankensim.matdb-contact.v1 header".to_string(),
             });
         }
-        let mut material_a = None;
-        let mut material_b = None;
-        let mut geometry = None;
-        let mut law: Option<(f64, f64, f64)> = None;
-        let mut identification = None;
-        let mut force_v = None;
-        let mut vel_v = None;
-        let mut graze = None;
-        let mut citation = None;
+        let mut state = ContactLawRowState::default();
         for line in lines {
             if line.trim().is_empty() {
                 continue;
             }
             let cols: Vec<&str> = line.split('\t').collect();
-            match cols[0] {
-                "pair" => {
-                    // pair material_a <a> material_b <b> geometry <g>
-                    let mut i = 1;
-                    while i + 1 < cols.len() {
-                        match cols[i] {
-                            "material_a" => material_a = Some(cols[i + 1].to_string()),
-                            "material_b" => material_b = Some(cols[i + 1].to_string()),
-                            "geometry" => geometry = Some(cols[i + 1].to_string()),
-                            other => {
-                                return Err(ContactPackError::Schema {
-                                    what: format!("unknown pair field {other:?}"),
-                                });
-                            }
-                        }
-                        i += 2;
-                    }
-                }
-                "law" => {
-                    if cols.len() < 8 || cols[1] != "penalty-power" {
-                        return Err(ContactPackError::Schema {
-                            what: "law row must be penalty-power with k/alpha/chi".to_string(),
-                        });
-                    }
-                    if cols[2] != "k_n_per_m_alpha"
-                        || cols[4] != "alpha"
-                        || cols[6] != "chi_s_per_m"
-                    {
-                        return Err(ContactPackError::Schema {
-                            what: "law row field names drifted".to_string(),
-                        });
-                    }
-                    law = Some((
-                        parse_f64(cols[3], "K")?,
-                        parse_f64(cols[5], "alpha")?,
-                        parse_f64(cols[7], "chi")?,
-                    ));
-                }
-                "identification" => {
-                    if cols.len() < 3 {
-                        return Err(ContactPackError::Schema {
-                            what: "identification needs a method tag and detail".to_string(),
-                        });
-                    }
-                    identification = Some(format!("{}: {}", cols[1], cols[2]));
-                }
-                "validity" => {
-                    if cols.len() < 4 {
-                        return Err(ContactPackError::Schema {
-                            what: "validity row needs axis lo hi".to_string(),
-                        });
-                    }
-                    let lo = parse_f64(cols[2], "validity lo")?;
-                    let hi = parse_f64(cols[3], "validity hi")?;
-                    if !(lo.is_finite() && hi.is_finite() && hi > lo) {
-                        return Err(ContactPackError::Schema {
-                            what: format!("validity range not ordered: {lo} .. {hi}"),
-                        });
-                    }
-                    match cols[1] {
-                        "force_n" => force_v = Some((lo, hi)),
-                        "velocity_m_s" => vel_v = Some((lo, hi)),
-                        other => {
-                            return Err(ContactPackError::Schema {
-                                what: format!("unknown validity axis {other:?}"),
-                            });
-                        }
-                    }
-                }
-                "graze-advisory" => {
-                    if cols.len() < 2 || cols[1].trim().is_empty() {
-                        return Err(ContactPackError::Schema {
-                            what: "empty graze advisory".to_string(),
-                        });
-                    }
-                    graze = Some(cols[1].to_string());
-                }
-                "citation" => {
-                    if cols.len() < 2 || cols[1].trim().is_empty() {
-                        return Err(ContactPackError::Schema {
-                            what: "empty citation".to_string(),
-                        });
-                    }
-                    citation = Some(cols[1].to_string());
-                }
-                other => {
-                    return Err(ContactPackError::Schema {
-                        what: format!("unknown row kind {other:?}"),
-                    });
-                }
-            }
+            parse_contact_row(&mut state, &cols)?;
         }
         // PAIR-CONTEXT COMPLETENESS: a row without both materials AND
         // the geometry class refuses — that is the schema's thesis.
+        let ContactLawRowState {
+            material_a,
+            material_b,
+            geometry,
+            law,
+            identification,
+            force_v,
+            vel_v,
+            graze,
+            citation,
+        } = state;
         let material_a = material_a.ok_or_else(|| ContactPackError::Schema {
             what: "pair context incomplete: material_a missing".to_string(),
         })?;
@@ -366,6 +279,140 @@ impl ContactLawCard {
     }
 }
 
+/// Accumulated row state for [`ContactLawCard::parse`].
+#[derive(Default)]
+struct ContactLawRowState {
+    material_a: Option<String>,
+    material_b: Option<String>,
+    geometry: Option<String>,
+    law: Option<(f64, f64, f64)>,
+    identification: Option<String>,
+    force_v: Option<(f64, f64)>,
+    vel_v: Option<(f64, f64)>,
+    graze: Option<String>,
+    citation: Option<String>,
+}
+/// Apply one tab-separated `contact.tsv` row to the accumulated state.
+///
+/// # Errors
+/// [`ContactPackError::Schema`] for unknown row kinds, drifted field
+/// names, malformed numbers, or unordered validity ranges — byte-for-byte
+/// the same refusals the monolithic parser produced.
+fn parse_contact_row(
+    state: &mut ContactLawRowState,
+    cols: &[&str],
+) -> Result<(), ContactPackError> {
+    match cols[0] {
+        "pair" => parse_pair_row(state, cols),
+        "law" => parse_law_row(state, cols),
+        "identification" => {
+            if cols.len() < 3 {
+                return Err(ContactPackError::Schema {
+                    what: "identification needs a method tag and detail".to_string(),
+                });
+            }
+            state.identification = Some(format!("{}: {}", cols[1], cols[2]));
+            Ok(())
+        }
+        "validity" => parse_validity_row(state, cols),
+        "graze-advisory" | "citation" => parse_advisory_row(state, cols),
+        other => Err(ContactPackError::Schema {
+            what: format!("unknown row kind {other:?}"),
+        }),
+    }
+}
+
+/// `pair material_a <a> material_b <b> geometry <g>`
+fn parse_pair_row(state: &mut ContactLawRowState, cols: &[&str]) -> Result<(), ContactPackError> {
+    let mut i = 1;
+    while i + 1 < cols.len() {
+        match cols[i] {
+            "material_a" => state.material_a = Some(cols[i + 1].to_string()),
+            "material_b" => state.material_b = Some(cols[i + 1].to_string()),
+            "geometry" => state.geometry = Some(cols[i + 1].to_string()),
+            other => {
+                return Err(ContactPackError::Schema {
+                    what: format!("unknown pair field {other:?}"),
+                });
+            }
+        }
+        i += 2;
+    }
+    Ok(())
+}
+
+/// `law penalty-power k_n_per_m_alpha <k> alpha <a> chi_s_per_m <chi>`
+fn parse_law_row(state: &mut ContactLawRowState, cols: &[&str]) -> Result<(), ContactPackError> {
+    if cols.len() < 8 || cols[1] != "penalty-power" {
+        return Err(ContactPackError::Schema {
+            what: "law row must be penalty-power with k/alpha/chi".to_string(),
+        });
+    }
+    if cols[2] != "k_n_per_m_alpha" || cols[4] != "alpha" || cols[6] != "chi_s_per_m" {
+        return Err(ContactPackError::Schema {
+            what: "law row field names drifted".to_string(),
+        });
+    }
+    state.law = Some((
+        parse_f64(cols[3], "K")?,
+        parse_f64(cols[5], "alpha")?,
+        parse_f64(cols[7], "chi")?,
+    ));
+    Ok(())
+}
+
+/// `validity force_n|velocity_m_s <lo> <hi>`
+fn parse_validity_row(
+    state: &mut ContactLawRowState,
+    cols: &[&str],
+) -> Result<(), ContactPackError> {
+    if cols.len() < 4 {
+        return Err(ContactPackError::Schema {
+            what: "validity row needs axis lo hi".to_string(),
+        });
+    }
+    let lo = parse_f64(cols[2], "validity lo")?;
+    let hi = parse_f64(cols[3], "validity hi")?;
+    if !(lo.is_finite() && hi.is_finite() && hi > lo) {
+        return Err(ContactPackError::Schema {
+            what: format!("validity range not ordered: {lo} .. {hi}"),
+        });
+    }
+    match cols[1] {
+        "force_n" => state.force_v = Some((lo, hi)),
+        "velocity_m_s" => state.vel_v = Some((lo, hi)),
+        other => {
+            return Err(ContactPackError::Schema {
+                what: format!("unknown validity axis {other:?}"),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Single-cell advisory rows (`graze-advisory`, `citation`).
+fn parse_advisory_row(
+    state: &mut ContactLawRowState,
+    cols: &[&str],
+) -> Result<(), ContactPackError> {
+    if cols.len() < 2 || cols[1].trim().is_empty() {
+        return Err(ContactPackError::Schema {
+            what: if cols[0] == "graze-advisory" {
+                "empty graze advisory".to_string()
+            } else {
+                "empty citation".to_string()
+            },
+        });
+    }
+    let cell = Some(cols[1].to_string());
+    if cols[0] == "graze-advisory" {
+        state.graze = cell;
+    } else {
+        state.citation = cell;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod contact_pack_tests {
     use super::*;
@@ -405,8 +452,11 @@ mod contact_pack_tests {
             let mid_f = f64::midpoint(card.force_validity_n.0, card.force_validity_n.1);
             let mid_v = f64::midpoint(card.velocity_validity_m_s.0, card.velocity_validity_m_s.1);
             let receipt = card.lookup(mid_f, mid_v).expect("in-validity lookup");
-            assert!(receipt.k_n_per_m_alpha.to_bits() == card.k_n_per_m_alpha.to_bits());
-            assert!(receipt.alpha.to_bits() == card.alpha.to_bits());
+            assert_eq!(
+                receipt.k_n_per_m_alpha.to_bits(),
+                card.k_n_per_m_alpha.to_bits()
+            );
+            assert_eq!(receipt.alpha.to_bits(), card.alpha.to_bits());
             assert!(receipt.pair_label.contains("-on-"));
             loaded += 1;
             println!(
@@ -419,7 +469,7 @@ mod contact_pack_tests {
                 card.chi_s_per_m
             );
         }
-        assert!(loaded == 3);
+        assert_eq!(loaded, 3);
     }
 
     #[test]

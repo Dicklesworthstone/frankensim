@@ -2433,20 +2433,6 @@ mod tests {
                 LOCALIZATION_STAGE_ISOCONTOUR_EXTRACTION,
             ),
         ];
-
-        let expected_views = [
-            (42.0, false, true),
-            (0.0, false, true),
-            (0.0, true, false),
-            (0.0, true, false),
-            (0.0, true, false),
-            (0.0, true, false),
-            (0.0, true, false),
-            (0.0, true, false),
-            (0.0, true, false),
-            (0.0, true, false),
-        ];
-
         for (case_index, (localization, status, stage)) in cases.iter().enumerate() {
             let v = encoded_with_localization(localization.clone());
             assert_eq!(
@@ -2457,16 +2443,28 @@ mod tests {
             assert_eq!(v[26], *status, "case {case_index} status code");
             assert_eq!(v[27], *stage, "case {case_index} stage code");
             assert_eq!(v[28], f64::from(NEUROSHAPE_LOCALIZATION_SCHEMA_VERSION));
-            // Derived legacy views agree with the authoritative record.
-            let (crossings_view, nearest_nan, nearest_inf) = expected_views[case_index];
+            // Derived legacy views agree bit-for-bit with the authoritative
+            // record: `[15]` count, `[6]` nearest radius, `[7]` max radius.
+            let (crossings_view, nearest_view, max_view) = match localization {
+                SurfaceLocalization::Localized {
+                    crossings,
+                    max_radius,
+                    nearest_radius,
+                } => (
+                    crossings as f64,
+                    nearest_radius.to_bits(),
+                    max_radius.to_bits(),
+                ),
+                SurfaceLocalization::ValidEmpty => (0.0, f64::INFINITY.to_bits(), 0.0f64.to_bits()),
+                _ => (0.0, f64::NAN.to_bits(), f64::NAN.to_bits()),
+            };
             assert_eq!(v[15], crossings_view, "case {case_index} derived count");
-            if nearest_nan {
-                assert!(v[6].is_nan() && v[7].is_nan(), "case {case_index}");
-            }
-            if nearest_inf {
-                assert_eq!(v[6], 0.0, "case {case_index} nearest sentinel");
-                assert!(v[7].is_infinite() && v[7] > 0.0, "case {case_index}");
-            }
+            assert_eq!(
+                v[6].to_bits(),
+                nearest_view,
+                "case {case_index} nearest view"
+            );
+            assert_eq!(v[7].to_bits(), max_view, "case {case_index} max view");
         }
     }
 
@@ -2572,11 +2570,11 @@ mod tests {
         );
         assert_eq!(v[27], LOCALIZATION_STAGE_NONE, "valid empty has no stage");
         assert_eq!(v[15], 0.0, "derived crossing count for a valid empty grid");
-        assert_eq!(v[6], 0.0, "valid-empty nearest-surface sentinel");
         assert!(
-            v[7].is_infinite() && v[7] > 0.0,
-            "valid-empty max-radius sentinel"
+            v[6].is_infinite() && v[6] > 0.0,
+            "valid-empty nearest-surface sentinel is +inf"
         );
+        assert_eq!(v[7], 0.0, "valid-empty max-radius sentinel is +0");
         assert_eq!(
             v.len(),
             NEUROSHAPE_HEADER_LEN + 64 * 64,

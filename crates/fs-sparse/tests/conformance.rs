@@ -315,7 +315,7 @@ fn oversized_worker_requests_are_capped_to_useful_rows() {
     let empty_rows_compact = fs_sparse::CsrCompact::from_csr(&empty_rows);
     let mut empty_rows_y = [f64::NAN; 128];
     empty_rows_compact.spmv_sharded(&[1.0], &mut empty_rows_y, usize::MAX);
-    assert_eq!(empty_rows_y, [0.0; 128]);
+    assert_eq!(empty_rows_y.map(f64::to_bits), [0_u64; 128]);
     assert_eq!(
         empty_rows_compact.numa_localized(usize::MAX),
         empty_rows_compact
@@ -325,10 +325,10 @@ fn oversized_worker_requests_are_capped_to_useful_rows() {
     assert_eq!(empty_rows_sell.physical_slots(), 0);
     let mut empty_rows_sell_y = [f64::NAN; 128];
     empty_rows_sell.spmv_chunked(&[1.0], &mut empty_rows_sell_y);
-    assert_eq!(empty_rows_sell_y, [0.0; 128]);
+    assert_eq!(empty_rows_sell_y.map(f64::to_bits), [0_u64; 128]);
     empty_rows_sell_y.fill(f64::NAN);
     empty_rows_sell.spmv_chunked_sharded(&[1.0], &mut empty_rows_sell_y, usize::MAX);
-    assert_eq!(empty_rows_sell_y, [0.0; 128]);
+    assert_eq!(empty_rows_sell_y.map(f64::to_bits), [0_u64; 128]);
 
     let mut coo = Coo::new(1, 1);
     coo.push(0, 0, 2.0);

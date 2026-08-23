@@ -113,7 +113,10 @@ fn quadratic_series_and_parallel_composition_obey_g0_identities() {
     let b = LossNetwork::Element(loss("b", 100.0, 0.0));
     let series = LossNetwork::series(vec![a.clone(), b.clone()]).expect("series");
     let parallel = LossNetwork::parallel(vec![a, b]).expect("parallel");
-    assert_eq!(series.equivalent_resistance().value(), 200.0);
+    assert_eq!(
+        series.equivalent_resistance().value().to_bits(),
+        200.0_f64.to_bits()
+    );
     assert!((parallel.equivalent_resistance().value() - 25.0).abs() < 1.0e-12);
 }
 
@@ -612,7 +615,10 @@ fn orifice_resistance_matches_the_closed_form_derivation() {
         ((got - expected) / expected).abs() < 1.0e-14,
         "resistance {got} drifted from the closed form {expected}"
     );
-    assert_eq!(element.uncertainty_rel, ORIFICE_RESISTANCE_UNCERTAINTY_REL);
+    assert_eq!(
+        element.uncertainty_rel.to_bits(),
+        ORIFICE_RESISTANCE_UNCERTAINTY_REL.to_bits()
+    );
     assert_eq!(element.source.identifier, ORIFICE_CD_SOURCE_IDENTIFIER);
     assert_eq!(
         element.tolerance_basis,

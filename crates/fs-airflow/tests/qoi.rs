@@ -310,8 +310,14 @@ fn every_reference_qoi_emits_an_eight_term_budget_without_laundering_unknowns() 
     .expect("QoI extraction");
 
     assert_eq!(qois.junction_maximum.vertex, 6, "lowest-index tie wins");
-    assert_eq!(qois.junction_maximum.qoi.evidence.value.value(), 360.0);
-    assert_eq!(qois.thermal_margin.evidence.value.value(), 20.0);
+    assert_eq!(
+        qois.junction_maximum.qoi.evidence.value.value().to_bits(),
+        360.0_f64.to_bits()
+    );
+    assert_eq!(
+        qois.thermal_margin.evidence.value.value().to_bits(),
+        20.0_f64.to_bits()
+    );
     assert_eq!(
         qois.junction_maximum.qoi.evidence.numerical.kind,
         NumericalKind::NoClaim,
@@ -418,7 +424,11 @@ fn a_negative_thermal_margin_is_an_admissible_interval_never_an_absolute_tempera
     );
 
     let margin = qois.thermal_margin.evidence.value.value();
-    assert_eq!(margin, -10.0, "the fixture must actually violate its limit");
+    assert_eq!(
+        margin.to_bits(),
+        (-10.0_f64).to_bits(),
+        "the fixture must actually violate its limit"
+    );
     assert_eq!(
         qois.thermal_margin.kind,
         ThermalQoiKind::TemperatureDifference
@@ -470,11 +480,20 @@ fn an_absolute_temperature_below_zero_kelvin_refuses_instead_of_travelling_downs
     let above_zero = linear_in_z(&mesh, &solution, 300.0, 0.0);
     let admitted = extract_fixture_qois(&mesh, &above_zero, &operating);
     assert_eq!(
-        admitted.junction_maximum.qoi.evidence.value.value(),
-        300.0,
+        admitted
+            .junction_maximum
+            .qoi
+            .evidence
+            .value
+            .value()
+            .to_bits(),
+        300.0_f64.to_bits(),
         "the control must reach the same code path and pass it"
     );
-    assert_eq!(admitted.uniformity.spread.evidence.value.value(), 0.0);
+    assert_eq!(
+        admitted.uniformity.spread.evidence.value.value().to_bits(),
+        0
+    );
 }
 
 #[test]
@@ -591,8 +610,11 @@ fn actual_convection_card_alone_demotes_the_complete_qoi_set() {
         assert_eq!(violation.point, "low-reynolds");
         assert_eq!(violation.card, CorrelationId::DittusBoelter.name());
         assert_eq!(violation.axis, "Re");
-        assert_eq!(violation.observed, Some(1_000.0));
-        assert_eq!(violation.lo, 10_000.0);
+        assert_eq!(
+            violation.observed.map(f64::to_bits),
+            Some(1_000.0_f64.to_bits())
+        );
+        assert_eq!(violation.lo.to_bits(), 10_000.0_f64.to_bits());
         assert!(violation.distance > 0.0);
 
         let budget = audited
@@ -669,8 +691,11 @@ fn actual_loss_card_alone_demotes_the_complete_qoi_set() {
         assert_eq!(violation.point, "high-loss-reynolds");
         assert_eq!(violation.card, "airflow.loss.heatsink");
         assert_eq!(violation.axis, "loss_reynolds");
-        assert_eq!(violation.observed, Some(90_000.0));
-        assert_eq!(violation.hi, 80_000.0);
+        assert_eq!(
+            violation.observed.map(f64::to_bits),
+            Some(90_000.0_f64.to_bits())
+        );
+        assert_eq!(violation.hi.to_bits(), 80_000.0_f64.to_bits());
         assert!(violation.distance > 0.0);
         assert!(matches!(
             receipt.effective_color,

@@ -123,7 +123,7 @@ fn reconstructed_card_answers_a_binding_style_query_with_a_receipt() {
             SelectionPolicy::SingleClaimOnly,
         )
         .expect("in-domain conductivity query resolves");
-    assert_eq!(answer.evidence.value.value, 167.0);
+    assert_eq!(answer.evidence.value.value.to_bits(), 167.0_f64.to_bits());
     decoded
         .card()
         .claims()
