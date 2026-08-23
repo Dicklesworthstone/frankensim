@@ -198,6 +198,20 @@ klass, _ = planhyg.classify_claim(
           assignee="NobleLion"), NOW, 7,
     {"NobleLion": "2026-08-23T11:30:00Z"})
 check("roster activity outranks proof comment", "ROSTER_ACTIVE", klass)
+klass, _ = planhyg.classify_claim(
+    claim(), NOW, 7, {}, last_commit_days=2)
+check("recent bead-mentioning commit classifies COMMIT_ACTIVE",
+      "COMMIT_ACTIVE", klass)
+
+index = planhyg.commit_activity_index(
+    ["2026-08-22T10:00:00+00:00\tfeat: closes frankensim-b (frankensim-a)",
+     "2026-08-01T10:00:00+00:00\told frankensim-a work",
+     "no tab line"],
+    {"frankensim-a", "frankensim-b"}, NOW, 7)
+check("commit index keeps freshest in-cutoff mention per id",
+      {"frankensim-a": 1.08, "frankensim-b": 1.08},
+      {k: round(v, 2) for k, v in index.items()})
+
 
 print(f"self-test: {PASS} passed, {FAIL} failed")
 sys.exit(0 if FAIL == 0 else 1)
@@ -206,16 +220,20 @@ SELFTEST
   --owner-report)
     shift
     STALE_DAYS=7
+    COMMIT_EVIDENCE=""
     if [ "${1:-}" = "--days" ]; then
       [ $# -ge 2 ] || die "$EXIT_USAGE" "--days needs a number"
       STALE_DAYS_OVERRIDE="$2"; shift 2
+    fi
+    if [ "${1:-}" = "--commits" ]; then
+      COMMIT_EVIDENCE="1"; shift 1
     fi
     OUT=""
     if [ "${1:-}" = "--out" ]; then
       [ $# -ge 2 ] || die "$EXIT_USAGE" "--out needs a path"
       OUT="$2"; shift 2
     fi
-    [ $# -le 0 ] || die "$EXIT_USAGE" "usage: --owner-report [--days N] [--out PATH]"
+    [ $# -le 0 ] || die "$EXIT_USAGE" "usage: --owner-report [--days N] [--commits] [--out PATH]"
     [ -z "${STALE_DAYS_OVERRIDE:-}" ] || STALE_DAYS="$STALE_DAYS_OVERRIDE"
     MANIFEST="" ;;
   --plan|--apply|--negative|--replay)
@@ -225,7 +243,7 @@ SELFTEST
     die "$EXIT_USAGE" "usage: beads_plan_hygiene.sh --list [--out PATH] [MANIFEST] | --check MANIFEST | --owner-report [--days N] [--out PATH] | --self-test" ;;
 esac
 
-exec python3 - "$MODE" "$BEADS_FILE" "$DEFAULT_MANIFEST" "$OUT" "$MANIFEST" "$STALE_DAYS" <<'PYEOF'
+exec python3 - "$MODE" "$BEADS_FILE" "$DEFAULT_MANIFEST" "$OUT" "$MANIFEST" "$STALE_DAYS" "${COMMIT_EVIDENCE:-}" <<'PYEOF'
 # ---CORE-BEGIN---
 import hashlib
 import json
@@ -233,7 +251,7 @@ import os
 import re
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 ACTIVE = {"open", "in_progress", "blocked"}
 SCHEMA = "frankensim.beads-plan-hygiene-inventory.v1"
@@ -369,43 +387,69 @@ def load_manifest(path):
 PROOF_PATTERN = re.compile(
     r"test|receipt|proof|pushed|landed|green", re.I)
 
+BEAD_ID_PATTERN = re.compile(r"frankensim-[A-Za-z0-9]+(?:[.\-][A-Za-z0-9]+)*")
 
-def classify_claim(rec, now, stale_days, roster):
+
+def iso_age_days(iso_text, now):
+    if not isinstance(iso_text, str) or not iso_text:
+        return None
+    try:
+        then = datetime.fromisoformat(iso_text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if then.tzinfo is None:
+        then = then.replace(tzinfo=timezone.utc)
+    return (now - then).total_seconds() / 86400.0
+
+
+def commit_activity_index(commit_lines, ids, now, cutoff_days):
+    """Map bead id -> freshest mentioning-commit age (days), for ids in the
+    stale set only. Lines are 'ISO-DATE<TAB>SUBJECT' from git log."""
+    best = {}
+    for line in commit_lines:
+        if "\t" not in line:
+            continue
+        date_text, subject = line.split("\t", 1)
+        age = iso_age_days(date_text.strip(), now)
+        if age is None or age > cutoff_days:
+            continue
+        for iid in BEAD_ID_PATTERN.findall(subject):
+            if iid in ids and (iid not in best or age < best[iid]):
+                best[iid] = age
+    return best
+
+
+def classify_claim(rec, now, stale_days, roster, last_commit_days=None):
     """Pure staleness-evidence classifier for one in_progress claim.
     Returns (evidence_class, detail). Classes in priority order:
-    ROSTER_ACTIVE > RECENT_PROOF > RECENTLY_UPDATED > IDLE_NO_EVIDENCE.
-    These are EVIDENCE classes, never dispositions."""
-    def age_days(iso_text):
-        if not isinstance(iso_text, str) or not iso_text:
-            return None
-        try:
-            then = datetime.fromisoformat(iso_text.replace("Z", "+00:00"))
-        except ValueError:
-            return None
-        if then.tzinfo is None:
-            then = then.replace(tzinfo=timezone.utc)
-        return (now - then).total_seconds() / 86400.0
-
+    ROSTER_ACTIVE > COMMIT_ACTIVE > RECENT_PROOF > RECENTLY_UPDATED >
+    IDLE_NO_EVIDENCE. These are EVIDENCE classes, never dispositions."""
     assignee = rec.get("assignee")
-    roster_age = age_days(roster.get(assignee)) if assignee else None
+    roster_age = iso_age_days(roster.get(assignee), now) if assignee else None
     if roster_age is not None and roster_age <= 2 / 24:
         return "ROSTER_ACTIVE", {"basis": "assignee active on mail roster"}
+    if last_commit_days is not None and last_commit_days <= stale_days:
+        return "COMMIT_ACTIVE", {
+            "basis": f"a commit referencing this bead landed "
+                     f"{last_commit_days:.1f}d ago",
+        }
     comments = rec.get("comments") or []
     last = max(
         comments,
         key=lambda c: c.get("created_at", "") if isinstance(c, dict) else "",
         default=None,
     )
-    last_age = age_days(last.get("created_at")) if isinstance(last, dict) else None
+    last_age = iso_age_days(
+        last.get("created_at"), now) if isinstance(last, dict) else None
     last_text = (last.get("text") or "") if isinstance(last, dict) else ""
     proof = bool(last_text) and bool(PROOF_PATTERN.search(last_text))
     if last_age is not None and last_age <= stale_days and proof:
         return "RECENT_PROOF", {
             "basis": f"last comment {last_age:.1f}d ago cites work",
-            "comment_author": (last or {}).get("author"),
+            "comment_author": last.get("author"),
             "comment_excerpt": last_text[:160],
         }
-    updated_age = age_days(rec.get("updated_at"))
+    updated_age = iso_age_days(rec.get("updated_at"), now)
     if updated_age is not None and updated_age <= stale_days:
         return "RECENTLY_UPDATED", {"basis": f"updated {updated_age:.1f}d ago"}
     return "IDLE_NO_EVIDENCE", {
@@ -432,6 +476,7 @@ def run_br(args):
 def main(argv):
     mode = (argv[0] or "").lstrip("-")
     beads_path, default_manifest, out_arg, manifest_arg = argv[1:5]
+    commit_evidence = bool(argv[6]) if len(argv) > 6 else False
     stale_days = int(argv[5]) if len(argv) > 5 and argv[5] else 7
 
     issues, edges = load_beads(beads_path)
@@ -593,11 +638,29 @@ def main(argv):
             except (OSError, json.JSONDecodeError):
                 roster = {}
         now = datetime.now(timezone.utc)
+        commit_index = {}
+        if commit_evidence:
+            repo_root = os.path.dirname(os.path.dirname(
+                os.path.abspath(beads_path)))
+            since = (now - timedelta(days=stale_days)).strftime("%Y-%m-%d")
+            log_result = subprocess.run(
+                ["git", "-C", repo_root, "log",
+                 f"--since={since}", "--date=iso-strict",
+                 "--format=%ad%x09%s"],
+                capture_output=True, text=True, timeout=300)
+            if log_result.returncode != 0:
+                print(f"git log failed: {log_result.stderr[-200:]}",
+                      file=sys.stderr)
+                sys.exit(30)
+            stale_ids = {row.get("id") for row in stale_rows}
+            commit_index = commit_activity_index(
+                log_result.stdout.splitlines(), stale_ids, now, stale_days)
         rows = [{
             "event": "owner-report-header",
             "schema": SCHEMA,
             "bead": "frankensim-ug0yb",
-            "formula_version": "ug0yb-owner-report-slice2",
+            "formula_version": "ug0yb-owner-report-slice3",
+            "commits_bound": bool(commit_evidence),
             "db_sha256": db_sha,
             "frozen_basis_utc": now.isoformat(),
             "stale_cutoff_days": stale_days,
@@ -611,7 +674,9 @@ def main(argv):
         for claim in sorted(stale_rows, key=lambda r: r.get("id", "")):
             iid = claim.get("id")
             rec = issues.get(iid, {})
-            klass, detail = classify_claim(rec, now, stale_days, roster)
+            klass, detail = classify_claim(
+                rec, now, stale_days, roster,
+                last_commit_days=commit_index.get(iid))
             counts[klass] = counts.get(klass, 0) + 1
             rows.append({
                 "event": "owner_report_row",
@@ -661,6 +726,6 @@ def main(argv):
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:6]))
+    sys.exit(main(sys.argv[1:]))
 # ---CORE-END---
 PYEOF
