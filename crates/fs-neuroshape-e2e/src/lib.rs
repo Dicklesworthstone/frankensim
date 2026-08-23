@@ -40,7 +40,8 @@ use fs_rep_neural::{
     MlpSdf, NeuralFieldIdentity, SAFE_STEP_POLICY, SAFE_STEP_POLICY_VERSION, SafeStepDerivation,
     derive_safe_step,
 };
-use fs_viz::{CriticalKind, Grid2, Vec2, classify_hessian};
+use fs_exec::BudgetRefusal;
+use fs_viz::{CriticalKind, Grid2, Grid2Error, IsoContourError, Vec2, classify_hessian};
 use std::fmt;
 
 /// Version of the public component-evidence semantics carried by
@@ -51,6 +52,300 @@ use std::fmt;
 /// serializing these fields must carry this value so consumers can refuse
 /// layouts whose topology semantics they do not understand.
 pub const NEUROSHAPE_COMPONENT_EVIDENCE_SCHEMA_VERSION: u32 = 1;
+
+/// Stable schema version of [`NeuroShapeReport::surface_localization`] and of
+/// every wire code derived from it (bead frankensim-o33vo).
+///
+/// Version 1 pins [`SurfaceLocalizationStatus`] codes `1..=8`, the
+/// [`LocalizationStage`] codes `1..=2` (`0` meaning "no single stage"), and
+/// the [`LocalizationDiagnostic`] codes `1..=18`. Serializers must carry this
+/// value and consumers must refuse an unrecognized code instead of
+/// reinterpreting it.
+pub const NEUROSHAPE_LOCALIZATION_SCHEMA_VERSION: u32 = 1;
+
+/// Sentinel stored in [`StageDetail`] numeric slots that carry no meaning for
+/// the active [`LocalizationDiagnostic`].
+pub const LOCALIZATION_DETAIL_UNDEFINED: u64 = u64::MAX;
+/// `u32` companion of [`LOCALIZATION_DETAIL_UNDEFINED`].
+pub const LOCALIZATION_DETAIL_UNDEFINED_U32: u32 = u32::MAX;
+
+/// Exact fs-viz stage that produced a sampled zero-set localization outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalizationStage {
+    /// `fs_viz::Grid2::from_fn` admitted sampling.
+    GridConstruction,
+    /// `Grid2::isocontour_crossings` bounded extraction.
+    IsoContourExtraction,
+}
+
+impl LocalizationStage {
+    /// Stable wire code under [`NEUROSHAPE_LOCALIZATION_SCHEMA_VERSION`].
+    #[must_use]
+    pub const fn code(self) -> u32 {
+        match self {
+            Self::GridConstruction => 1,
+            Self::IsoContourExtraction => 2,
+        }
+    }
+}
+
+/// Stable coarse outcome class of sampled zero-set localization.
+///
+/// The discriminants ARE the wire codes under
+/// [`NEUROSHAPE_LOCALIZATION_SCHEMA_VERSION`]; `0` stays reserved as the
+/// no-claim convention shared with the other NeuroShape status slots.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum SurfaceLocalizationStatus {
+    /// A valid grid produced strict level crossings.
+    Localized = 1,
+    /// A valid grid contains no strict level crossing.
+    ValidEmpty = 2,
+    /// Malformed caller input was refused before any extraction work.
+    InvalidInput = 3,
+    /// Finite input produced values or geometry without a representable
+    /// point result (non-finite samples, coincident level edges, collapsed
+    /// coordinates, unrepresentable intersections).
+    Unrepresentable = 4,
+    /// A checked requirement exceeded its explicit caller envelope.
+    ResourceRefused = 5,
+    /// The ambient fs-exec cancellation/deadline/poll/cost contract refused.
+    Cancelled = 6,
+    /// Output or input storage could not be reserved.
+    AllocationRefused = 7,
+    /// Checked arithmetic inside the kernel failed; never expected from an
+    /// admitted plan, always reported rather than inferred.
+    InternalFault = 8,
+}
+
+impl SurfaceLocalizationStatus {
+    /// Stable wire code under [`NEUROSHAPE_LOCALIZATION_SCHEMA_VERSION`].
+    #[must_use]
+    pub const fn code(self) -> u32 {
+        self as u32
+    }
+}
+
+/// Stable diagnostic naming the exact underlying fs-viz refusal variant.
+///
+/// Discriminants are the wire codes; they are frozen by
+/// [`NEUROSHAPE_LOCALIZATION_SCHEMA_VERSION`] so downstream consumers can
+/// branch on them without display-string parsing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum LocalizationDiagnostic {
+    /// `Grid2Error::InvalidDimensions`.
+    GridInvalidDimensions = 1,
+    /// `Grid2Error::NodeCountOverflow`.
+    GridNodeCountOverflow = 2,
+    /// `Grid2Error::NodeBudgetExceeded`.
+    GridNodeBudgetExceeded = 3,
+    /// `Grid2Error::InvalidBounds`.
+    GridInvalidBounds = 4,
+    /// `Grid2Error::UnrepresentableCoordinates`.
+    GridUnrepresentableCoordinates = 5,
+    /// `Grid2Error::NonFiniteValue`.
+    GridNonFiniteValue = 6,
+    /// `Grid2Error::AllocationFailed`.
+    GridAllocationFailed = 7,
+    /// `IsoContourError::NonFiniteIso`.
+    IsoNonFiniteLevel = 8,
+    /// `IsoContourError::ZeroCrossingLimit`.
+    IsoZeroCrossingLimit = 9,
+    /// `IsoContourError::InvalidPollStride`.
+    IsoInvalidPollStride = 10,
+    /// `IsoContourError::PlanOverflow`.
+    IsoPlanOverflow = 11,
+    /// `IsoContourError::OperationBudgetExceeded`.
+    IsoOperationBudgetExceeded = 12,
+    /// `IsoContourError::ExecutionBudgetRefused`.
+    IsoExecutionBudgetRefused = 13,
+    /// `IsoContourError::CrossingBudgetExceeded`.
+    IsoCrossingBudgetExceeded = 14,
+    /// `IsoContourError::CoincidentLevelEdge`.
+    IsoCoincidentLevelEdge = 15,
+    /// `IsoContourError::UnrepresentableIntersection`.
+    IsoUnrepresentableIntersection = 16,
+    /// `IsoContourError::AllocationFailed`.
+    IsoAllocationFailed = 17,
+    /// `IsoContourError::NonFiniteGeometry`.
+    IsoNonFiniteGeometry = 18,
+}
+
+impl LocalizationDiagnostic {
+    /// Stable wire code under [`NEUROSHAPE_LOCALIZATION_SCHEMA_VERSION`].
+    #[must_use]
+    pub const fn code(self) -> u32 {
+        self as u32
+    }
+}
+
+/// Bounded exact context retained by a refusal outcome.
+///
+/// Slots that carry no meaning for the active [`LocalizationDiagnostic`]
+/// hold the [`LOCALIZATION_DETAIL_UNDEFINED`] sentinels. Edge endpoints are
+/// packed losslessly as `(i << 32) | j`; `required`/`limit` saturate at
+/// [`u64::MAX`] for `u128` requirements beyond that range. No field ever
+/// carries attacker-sized text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StageDetail {
+    /// Stage whose kernel produced the refusal.
+    pub stage: LocalizationStage,
+    /// Exact underlying refusal variant.
+    pub diagnostic: LocalizationDiagnostic,
+    /// Offending Cartesian axis or interpolation collapse axis.
+    pub axis: u32,
+    /// First offender node index, or packed first edge endpoint `[i, j]`.
+    pub first_index: u64,
+    /// Second offender node index, or packed second edge endpoint `[i, j]`.
+    pub second_index: u64,
+    /// Exact binary64 bits of the first offending scalar.
+    pub scalar_bits: u64,
+    /// Exact binary64 bits of the second offending scalar.
+    pub second_bits: u64,
+    /// Checked requirement, when the refusal compares one against a limit.
+    pub required: u64,
+    /// Caller-provided limit, when one exists.
+    pub limit: u64,
+    /// Diagnostic-specific auxiliary code (for example the
+    /// `fs_viz::IsoContourResource` ordinal `1..=13` for plan overflow).
+    pub aux: u32,
+}
+
+impl StageDetail {
+    /// A detail whose numeric slots are all undefined except `stage` and
+    /// `diagnostic`.
+    #[must_use]
+    pub const fn new(
+        stage: LocalizationStage,
+        diagnostic: LocalizationDiagnostic,
+    ) -> Self {
+        Self {
+            stage,
+            diagnostic,
+            axis: LOCALIZATION_DETAIL_UNDEFINED_U32,
+            first_index: LOCALIZATION_DETAIL_UNDEFINED,
+            second_index: LOCALIZATION_DETAIL_UNDEFINED,
+            scalar_bits: LOCALIZATION_DETAIL_UNDEFINED,
+            second_bits: LOCALIZATION_DETAIL_UNDEFINED,
+            required: LOCALIZATION_DETAIL_UNDEFINED,
+            limit: LOCALIZATION_DETAIL_UNDEFINED,
+            aux: LOCALIZATION_DETAIL_UNDEFINED_U32,
+        }
+    }
+}
+
+/// Stable kind of an ambient fs-exec budget/cancellation refusal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum CancellationKind {
+    /// `BudgetRefusal::Cancelled`: cancellation observed at a checkpoint.
+    CancelledAtCheckpoint = 1,
+    /// `BudgetRefusal::DeadlineExpiredAtAdmission`.
+    DeadlineExpiredAtAdmission = 2,
+    /// `BudgetRefusal::DeadlineWithoutClock`.
+    DeadlineWithoutClock = 3,
+    /// `BudgetRefusal::CostPlanExceedsQuota`.
+    CostPlanExceedsQuota = 4,
+    /// `BudgetRefusal::DeadlineExpired`: deadline passed mid-run.
+    DeadlineExpiredMidRun = 5,
+    /// `BudgetRefusal::PollsExhausted`.
+    PollsExhausted = 6,
+    /// `BudgetRefusal::CostExhausted`.
+    CostQuotaExhausted = 7,
+}
+
+/// Ambient execution-contract refusal retained with its exact stage and
+/// finalization phase. `phase` is a compile-time `'static` checkpoint name
+/// from fs-exec, never attacker-sized text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CancellationDetail {
+    /// Stage whose kernel observed the refusal.
+    pub stage: LocalizationStage,
+    /// Stable refusal kind.
+    pub kind: CancellationKind,
+    /// Stable checkpoint phase; empty when refused at admission time.
+    pub phase: &'static str,
+    /// Deadline nanoseconds for deadline kinds; otherwise undefined.
+    pub deadline_ns: u64,
+    /// Observed clock nanoseconds for mid-run/admission deadline refusals;
+    /// otherwise undefined.
+    pub observed_ns: u64,
+    /// Requested cost units for cost kinds, admitted poll quota for
+    /// exhausted polls; otherwise undefined.
+    pub quota_context_a: u64,
+    /// Remaining units before an exhausted cost charge; otherwise undefined.
+    pub quota_context_b: u64,
+    /// Admitted cost quota for cost kinds; otherwise undefined.
+    pub quota_context_c: u64,
+}
+
+/// Typed outcome of the report's sampled zero-set localization
+/// (`fs-viz` Grid2 construction plus isocontour extraction).
+///
+/// This is the authoritative localization record. The legacy
+/// `surface_crossings` / `max_crossing_radius` /
+/// `nearest_surface_radius` fields remain only as derived, non-authoritative
+/// compatibility views of it: `NaN` sentinels never carry status, and
+/// [`SurfaceLocalization::ValidEmpty`] is distinct from every refusal.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SurfaceLocalization {
+    /// A valid grid produced `crossings` strict level crossings with the
+    /// stated extreme radii.
+    Localized {
+        /// Number of strict crossings found.
+        crossings: usize,
+        /// Largest crossing radius.
+        max_radius: f64,
+        /// Smallest crossing radius.
+        nearest_radius: f64,
+    },
+    /// A valid grid contains no strict level crossing anywhere.
+    ValidEmpty,
+    /// Malformed caller input refused before any extraction work.
+    InvalidInput(StageDetail),
+    /// Finite input without a representable point result.
+    Unrepresentable(StageDetail),
+    /// A checked requirement exceeded its explicit caller envelope.
+    ResourceRefused(StageDetail),
+    /// Ambient cancellation/deadline/poll/cost refusal.
+    Cancelled(CancellationDetail),
+    /// Storage could not be reserved.
+    AllocationRefused(StageDetail),
+    /// Checked kernel arithmetic failed; always reported, never inferred.
+    InternalFault(StageDetail),
+}
+
+impl SurfaceLocalization {
+    /// Coarse stable status class.
+    #[must_use]
+    pub const fn status(&self) -> SurfaceLocalizationStatus {
+        match self {
+            Self::Localized { .. } => SurfaceLocalizationStatus::Localized,
+            Self::ValidEmpty => SurfaceLocalizationStatus::ValidEmpty,
+            Self::InvalidInput(_) => SurfaceLocalizationStatus::InvalidInput,
+            Self::Unrepresentable(_) => SurfaceLocalizationStatus::Unrepresentable,
+            Self::ResourceRefused(_) => SurfaceLocalizationStatus::ResourceRefused,
+            Self::Cancelled(_) => SurfaceLocalizationStatus::Cancelled,
+            Self::AllocationRefused(_) => SurfaceLocalizationStatus::AllocationRefused,
+            Self::InternalFault(_) => SurfaceLocalizationStatus::InternalFault,
+        }
+    }
+
+    /// Exact producing stage; `None` for success outcomes.
+    #[must_use]
+    pub const fn stage(&self) -> Option<LocalizationStage> {
+        match self {
+            Self::Localized { .. } | Self::ValidEmpty => None,
+            Self::InvalidInput(detail)
+            | Self::Unrepresentable(detail)
+            | Self::ResourceRefused(detail)
+            | Self::AllocationRefused(detail)
+            | Self::InternalFault(detail) => Some(detail.stage),
+            Self::Cancelled(detail) => Some(detail.stage),
+        }
+    }
+}
 
 /// Public campaign input named by a structured admission refusal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -259,6 +554,281 @@ impl ComponentCountEvidence {
     }
 }
 
+/// Stable ordinal for `fs_viz::IsoContourResource`, frozen under
+/// [`NEUROSHAPE_LOCALIZATION_SCHEMA_VERSION`] and used as the auxiliary code
+/// for [`LocalizationDiagnostic::IsoPlanOverflow`].
+#[must_use]
+pub const fn iso_contour_resource_code(resource: fs_viz::IsoContourResource) -> u32 {
+    use fs_viz::IsoContourResource as R;
+    match resource {
+        R::Cells => 1,
+        R::EdgeVisits => 2,
+        R::ExactOwnershipChecks => 3,
+        R::Interpolations => 4,
+        R::OutputCrossings => 5,
+        R::OutputBytes => 6,
+        R::ScratchBytes => 7,
+        R::DiagnosticRecords => 8,
+        R::DiagnosticBytes => 9,
+        R::LiveBytes => 10,
+        R::IdentityBytes => 11,
+        R::Polls => 12,
+        R::WorkUnits => 13,
+    }
+}
+
+/// Lossless packing of a grid edge endpoint `[i, j]` into one `u64`.
+const fn pack_edge(endpoint: [usize; 2]) -> u64 {
+    ((endpoint[0] as u64) << 32) | endpoint[1] as u64
+}
+/// Saturating narrowing used for `u128` requirements/limits.
+const fn saturate(value: u128) -> u64 {
+    if value > u64::MAX as u128 {
+        u64::MAX
+    } else {
+        value as u64
+    }
+}
+
+impl From<&BudgetRefusal> for CancellationDetail {
+    fn from(refusal: &BudgetRefusal) -> Self {
+        let undefined = LOCALIZATION_DETAIL_UNDEFINED;
+        match *refusal {
+            BudgetRefusal::Cancelled { phase } => Self {
+                stage: LocalizationStage::IsoContourExtraction,
+                kind: CancellationKind::CancelledAtCheckpoint,
+                phase,
+                deadline_ns: undefined,
+                observed_ns: undefined,
+                quota_context_a: undefined,
+                quota_context_b: undefined,
+                quota_context_c: undefined,
+            },
+            BudgetRefusal::DeadlineExpiredAtAdmission {
+                deadline_ns,
+                observed_ns,
+            } => Self {
+                stage: LocalizationStage::IsoContourExtraction,
+                kind: CancellationKind::DeadlineExpiredAtAdmission,
+                phase: "",
+                deadline_ns,
+                observed_ns,
+                quota_context_a: undefined,
+                quota_context_b: undefined,
+                quota_context_c: undefined,
+            },
+            BudgetRefusal::DeadlineWithoutClock { deadline_ns } => Self {
+                stage: LocalizationStage::IsoContourExtraction,
+                kind: CancellationKind::DeadlineWithoutClock,
+                phase: "",
+                deadline_ns,
+                observed_ns: undefined,
+                quota_context_a: undefined,
+                quota_context_b: undefined,
+                quota_context_c: undefined,
+            },
+            BudgetRefusal::CostPlanExceedsQuota { planned, quota } => Self {
+                stage: LocalizationStage::IsoContourExtraction,
+                kind: CancellationKind::CostPlanExceedsQuota,
+                phase: "",
+                deadline_ns: undefined,
+                observed_ns: undefined,
+                quota_context_a: planned,
+                quota_context_b: undefined,
+                quota_context_c: quota,
+            },
+            BudgetRefusal::DeadlineExpired {
+                phase,
+                deadline_ns,
+                observed_ns,
+            } => Self {
+                stage: LocalizationStage::IsoContourExtraction,
+                kind: CancellationKind::DeadlineExpiredMidRun,
+                phase,
+                deadline_ns,
+                observed_ns,
+                quota_context_a: undefined,
+                quota_context_b: undefined,
+                quota_context_c: undefined,
+            },
+            BudgetRefusal::PollsExhausted { phase, quota } => Self {
+                stage: LocalizationStage::IsoContourExtraction,
+                kind: CancellationKind::PollsExhausted,
+                phase,
+                deadline_ns: undefined,
+                observed_ns: undefined,
+                quota_context_a: u64::from(quota),
+                quota_context_b: undefined,
+                quota_context_c: u64::from(quota),
+            },
+            BudgetRefusal::CostExhausted {
+                phase,
+                requested,
+                remaining,
+                quota,
+            } => Self {
+                stage: LocalizationStage::IsoContourExtraction,
+                kind: CancellationKind::CostQuotaExhausted,
+                phase,
+                deadline_ns: undefined,
+                observed_ns: undefined,
+                quota_context_a: requested,
+                quota_context_b: remaining,
+                quota_context_c: quota,
+            },
+        }
+    }
+}
+
+impl From<Grid2Error> for SurfaceLocalization {
+    fn from(error: Grid2Error) -> Self {
+        let stage = LocalizationStage::GridConstruction;
+        match error {
+            Grid2Error::InvalidDimensions { dimensions } => {
+                let mut detail = StageDetail::new(stage, LocalizationDiagnostic::GridInvalidDimensions);
+                detail.first_index = dimensions[0] as u64;
+                detail.second_index = dimensions[1] as u64;
+                Self::InvalidInput(detail)
+            }
+            // A dimension product that overflows `usize` is an unadmittable
+            // caller-requested scale, not a kernel fault.
+            Grid2Error::NodeCountOverflow { dimensions } => {
+                let mut detail = StageDetail::new(stage, LocalizationDiagnostic::GridNodeCountOverflow);
+                detail.first_index = dimensions[0] as u64;
+                detail.second_index = dimensions[1] as u64;
+                Self::InvalidInput(detail)
+            }
+            Grid2Error::NodeBudgetExceeded { required, limit } => {
+                let mut detail = StageDetail::new(stage, LocalizationDiagnostic::GridNodeBudgetExceeded);
+                detail.required = required as u64;
+                detail.limit = limit as u64;
+                Self::ResourceRefused(detail)
+            }
+            Grid2Error::InvalidBounds { axis, lower, upper } => {
+                let mut detail = StageDetail::new(stage, LocalizationDiagnostic::GridInvalidBounds);
+                detail.axis = axis as u32;
+                detail.scalar_bits = lower.to_bits();
+                detail.second_bits = upper.to_bits();
+                Self::InvalidInput(detail)
+            }
+            Grid2Error::UnrepresentableCoordinates {
+                axis,
+                first_index,
+                first,
+                second_index,
+                second,
+            } => {
+                let mut detail =
+                    StageDetail::new(stage, LocalizationDiagnostic::GridUnrepresentableCoordinates);
+                detail.axis = axis as u32;
+                detail.first_index = first_index as u64;
+                detail.second_index = second_index as u64;
+                detail.scalar_bits = first.to_bits();
+                detail.second_bits = second.to_bits();
+                Self::Unrepresentable(detail)
+            }
+            Grid2Error::NonFiniteValue { index, value } => {
+                let mut detail = StageDetail::new(stage, LocalizationDiagnostic::GridNonFiniteValue);
+                detail.first_index = index as u64;
+                detail.scalar_bits = value.to_bits();
+                Self::Unrepresentable(detail)
+            }
+            Grid2Error::AllocationFailed { nodes } => {
+                let mut detail = StageDetail::new(stage, LocalizationDiagnostic::GridAllocationFailed);
+                detail.required = nodes as u64;
+                Self::AllocationRefused(detail)
+            }
+        }
+    }
+}
+
+impl From<IsoContourError> for SurfaceLocalization {
+    fn from(error: IsoContourError) -> Self {
+        let stage = LocalizationStage::IsoContourExtraction;
+        match error {
+            IsoContourError::NonFiniteIso { iso } => {
+                let mut detail = StageDetail::new(stage, LocalizationDiagnostic::IsoNonFiniteLevel);
+                detail.scalar_bits = iso.to_bits();
+                Self::InvalidInput(detail)
+            }
+            IsoContourError::ZeroCrossingLimit => {
+                let mut detail = StageDetail::new(stage, LocalizationDiagnostic::IsoZeroCrossingLimit);
+                detail.required = 1;
+                detail.limit = 0;
+                Self::InvalidInput(detail)
+            }
+            IsoContourError::InvalidPollStride { items_per_poll } => {
+                let mut detail = StageDetail::new(stage, LocalizationDiagnostic::IsoInvalidPollStride);
+                detail.required = items_per_poll as u64;
+                Self::InvalidInput(detail)
+            }
+            IsoContourError::PlanOverflow { resource } => {
+                let mut detail = StageDetail::new(stage, LocalizationDiagnostic::IsoPlanOverflow);
+                detail.aux = iso_contour_resource_code(resource);
+                Self::InternalFault(detail)
+            }
+            IsoContourError::OperationBudgetExceeded {
+                resource,
+                required,
+                limit,
+            } => {
+                let mut detail =
+                    StageDetail::new(stage, LocalizationDiagnostic::IsoOperationBudgetExceeded);
+                detail.aux = iso_contour_resource_code(resource);
+                detail.required = saturate(required);
+                detail.limit = saturate(limit);
+                Self::ResourceRefused(detail)
+            }
+            IsoContourError::ExecutionBudgetRefused { refusal } => {
+                let mut cancellation = CancellationDetail::from(&refusal);
+                cancellation.stage = stage;
+                Self::Cancelled(cancellation)
+            }
+            IsoContourError::CrossingBudgetExceeded { limit } => {
+                let mut detail =
+                    StageDetail::new(stage, LocalizationDiagnostic::IsoCrossingBudgetExceeded);
+                detail.limit = limit as u64;
+                Self::ResourceRefused(detail)
+            }
+            IsoContourError::CoincidentLevelEdge { first, second } => {
+                let mut detail = StageDetail::new(stage, LocalizationDiagnostic::IsoCoincidentLevelEdge);
+                detail.first_index = pack_edge(first);
+                detail.second_index = pack_edge(second);
+                Self::Unrepresentable(detail)
+            }
+            IsoContourError::UnrepresentableIntersection {
+                first,
+                second,
+                iso_bits,
+                interpolation_bits,
+                collapsed_axis,
+                ..
+            } => {
+                // The full endpoint/value bit dump stays in the fs-viz error at
+                // the source stage; this boundary retains offender identity,
+                // level bits, interpolation bits, and the collapse axis.
+                let mut detail =
+                    StageDetail::new(stage, LocalizationDiagnostic::IsoUnrepresentableIntersection);
+                detail.first_index = pack_edge(first);
+                detail.second_index = pack_edge(second);
+                detail.scalar_bits = iso_bits;
+                detail.second_bits = interpolation_bits;
+                detail.axis = collapsed_axis as u32;
+                Self::Unrepresentable(detail)
+            }
+            IsoContourError::AllocationFailed { required } => {
+                let mut detail = StageDetail::new(stage, LocalizationDiagnostic::IsoAllocationFailed);
+                detail.required = required as u64;
+                Self::AllocationRefused(detail)
+            }
+            IsoContourError::NonFiniteGeometry => Self::Unrepresentable(StageDetail::new(
+                stage,
+                LocalizationDiagnostic::IsoNonFiniteGeometry,
+            )),
+        }
+    }
+}
+
 /// The campaign report.
 #[derive(Debug, Clone)]
 pub struct NeuroShapeReport {
@@ -300,18 +870,20 @@ pub struct NeuroShapeReport {
     /// certified zero gradient it does not establish a critical point or local
     /// minimum.
     pub origin_hessian_positive_definite: bool,
-    /// Number of zero-set crossings found on the visualization grid.
-    /// Zero can also accompany rejected localization evidence; in that case
-    /// both reported crossing radii are `NaN` rather than the valid-empty
-    /// sentinels `0` and `+inf`.
+    /// Typed outcome of visualization zero-set localization. This is the
+    /// authoritative localization record carried by the report and every
+    /// native/WASM serialization of it.
+    pub surface_localization: SurfaceLocalization,
+    /// DERIVED non-authoritative view of [`NeuroShapeReport::surface_localization`]:
+    /// crossing count for [`SurfaceLocalizationStatus::Localized`], otherwise
+    /// `0`. Zero never distinguishes valid-empty from a refusal.
     pub surface_crossings: usize,
-    /// The largest radius at which a crossing was found (must be inside the
-    /// ring), `0` for a valid empty result, or `NaN` when localization was
-    /// rejected.
+    /// DERIVED view: largest crossing radius when localized, `0` for a valid
+    /// empty result, or `NaN` for every refusal.
     pub max_crossing_radius: f64,
-    /// The smallest radius at which a crossing was found — the NEAREST surface
-    /// point; the safe step radius must under-estimate it (no-tunnel soundness).
-    /// A valid empty result is `+inf`; rejected localization evidence is `NaN`.
+    /// DERIVED view: smallest crossing radius (nearest surface point) when
+    /// localized, `+inf` for a valid empty result, or `NaN` for every
+    /// refusal. The safe step radius must under-estimate it when finite.
     pub nearest_surface_radius: f64,
 }
 
@@ -415,35 +987,50 @@ pub fn try_run_campaign(
     let crit = classify_hessian([[fxx, fxy], [fxy, fyy]], 1e-6);
     let origin_hessian_positive_definite = crit.kind == CriticalKind::Minimum;
 
-    // Localize the zero set on a visualization grid.
+    // Localize the zero set on a visualization grid. The typed outcome below
+    // is authoritative; the legacy crossing/radius fields are derived views
+    // of it (bead frankensim-o33vo).
     const GRID_N: usize = 81;
     const CROSSING_LIMIT: usize = 2 * GRID_N * (GRID_N - 1);
-    let crossings = Grid2::from_fn(
+    let surface_localization = match Grid2::from_fn(
         GRID_N,
         GRID_N,
         [-ring_r - 0.5, -ring_r - 0.5],
         [ring_r + 0.5, ring_r + 0.5],
         GRID_N * GRID_N,
         |p| net.eval(&[p[0], p[1]]),
-    )
-    .ok()
-    .and_then(|grid| grid.isocontour_crossings(0.0, CROSSING_LIMIT).ok());
+    ) {
+        Ok(grid) => match grid.isocontour_crossings(0.0, CROSSING_LIMIT) {
+            Ok(crossings) if crossings.is_empty() => SurfaceLocalization::ValidEmpty,
+            Ok(crossings) => {
+                let mut max_radius = 0.0_f64;
+                let mut nearest_radius = f64::INFINITY;
+                for point in &crossings {
+                    let r = radius(*point);
+                    max_radius = max_radius.max(r);
+                    nearest_radius = nearest_radius.min(r);
+                }
+                SurfaceLocalization::Localized {
+                    crossings: crossings.len(),
+                    max_radius,
+                    nearest_radius,
+                }
+            }
+            Err(error) => SurfaceLocalization::from(error),
+        },
+        Err(error) => SurfaceLocalization::from(error),
+    };
     let (surface_crossings, max_crossing_radius, nearest_surface_radius) =
-        if let Some(crossings) = crossings {
-            (
-                crossings.len(),
-                crossings.iter().copied().map(radius).fold(0.0, f64::max),
-                crossings
-                    .iter()
-                    .copied()
-                    .map(radius)
-                    .fold(f64::INFINITY, f64::min),
-            )
-        } else {
-            // The interval topology certificate below is independent of this
-            // sampled visualization. NaN radii distinguish rejected contour
-            // evidence from a valid grid with no crossings (0 / +inf).
-            (0, f64::NAN, f64::NAN)
+        match &surface_localization {
+            SurfaceLocalization::Localized {
+                crossings,
+                max_radius,
+                nearest_radius,
+            } => (*crossings, *max_radius, *nearest_radius),
+            // Valid empty keeps its historical `0` / `+inf` sentinels; every
+            // refusal reports `NaN` radii so NaN never carries status alone.
+            SurfaceLocalization::ValidEmpty => (0, 0.0, f64::INFINITY),
+            _ => (0, f64::NAN, f64::NAN),
         };
 
     Ok(NeuroShapeReport {
@@ -464,6 +1051,7 @@ pub fn try_run_campaign(
         component_count_evidence,
         origin_hessian_positive_definite,
         surface_crossings,
+        surface_localization,
         max_crossing_radius,
         nearest_surface_radius,
     })

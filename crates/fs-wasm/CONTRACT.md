@@ -81,8 +81,8 @@ crates. Layer: **L6 HELM / interface surface**. The crate compiles as an
    without a zero-gradient certificate it is not a critical-point or minimum
    theorem. It and the sampled contour crossings cannot promote these fields to
    an exact count.
-10. NeuroShape wire version `NEUROSHAPE_SCHEMA_VERSION = 2` (header slot `[22]`,
-   header length 27) publishes a no-tunnel step whose authority is an INTERVAL
+10. NeuroShape wire version `NEUROSHAPE_SCHEMA_VERSION = 3` (header slot `[22]`,
+   header length 30) publishes a no-tunnel step whose authority is an INTERVAL
    sign margin. Slot `[5]` is `fs_rep_neural::derive_safe_step`'s
    downward-rounded `magnitude_lower_bound / L`, where the margin at `[23]` is
    the inward endpoint of the degenerate IBP enclosure at the origin — a
@@ -94,13 +94,27 @@ crates. Layer: **L6 HELM / interface surface**. The crate compiles as an
    true `|f(0)|/L` because the forward pass's own evaluation error was
    unaccounted for. Version `1` also carried
    `NEUROSHAPE_COMPONENT_EVIDENCE_SCHEMA_VERSION` in `[22]`; that value moved to
-   `[25]` and `[26]` is the remaining reserved zero, so a consumer that gated on
-   `[22] == 1` refuses this payload rather than re-reading `[5]` under the old
-   meaning. Version-aware consumers must refuse an unrecognized `[22]` before
-   interpreting any slot, and an unrecognized `[25]` before interpreting `[16]`,
-   `[17]`, `[20]`, or `[21]`. The export also runs the campaign through
-   `try_run_campaign`, so an inadmissible net or geometry serializes an empty
-   vector instead of trapping or publishing a partial header.
+   `[25]`. Version `3` keeps every version-2 slot at its position and extends
+   the header from 27 to 30 so the report's typed zero-set localization outcome
+   (`fs_neuroshape_e2e::SurfaceLocalization`, bead frankensim-o33vo) crosses
+   the ABI: `[26]` is its stable status code (`1` localized, `2` valid-empty,
+   `3` invalid input, `4` unrepresentable, `5` resource refused,
+   `6` cancelled, `7` allocation refused, `8` internal fault; `0` stays the
+   reserved no-claim code), `[27]` is the producing stage (`0` success/no
+   single stage, `1` grid construction, `2` isocontour extraction), and
+   `[28]` carries `NEUROSHAPE_LOCALIZATION_SCHEMA_VERSION = 1`, which freezes
+   those code tables and gates interpretation of `[26]`/`[27]`; `[29]` remains
+   a reserved zero. Legacy slots `[6]`, `[7]`, and `[15]` are derived,
+   non-authoritative views of the typed outcome: NaN sentinels alone never
+   carry status, and valid-empty keeps its `0` / `0` / `+inf` view. A consumer
+   that gated on `[22] == 2` refuses this payload rather than silently
+   ignoring the typed localization record; version-aware consumers must refuse
+   an unrecognized `[22]` before interpreting any slot, an unrecognized `[25]`
+   before interpreting `[16]`, `[17]`, `[20]`, or `[21]`, and an unrecognized
+   `[28]`, `[26]`, or `[27]` code before trusting any crossing view. The export
+   also runs the campaign through `try_run_campaign`, so an inadmissible net or
+   geometry serializes an empty vector instead of trapping or publishing a
+   partial header.
 11. FlutterCert slot `[8]` is the flag of `witness_decay_rate_color`, which names
    exactly one quantity: the LARGEST eigenvalue real part of `A(witness_mu)`.
    Its endpoints are `fs_flutter_e2e::spectral_abscissa_interval`'s

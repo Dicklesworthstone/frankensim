@@ -356,11 +356,7 @@ fn shutter_intervals_subdivide_or_refuse_at_events() {
     );
 
     let pose_continuous = resampler
-        .partition_exposure(
-            0.25,
-            0.75,
-            ExposureEventPolicy::AllowContactTransitions,
-        )
+        .partition_exposure(0.25, 0.75, ExposureEventPolicy::AllowContactTransitions)
         .unwrap();
     assert_eq!(pose_continuous.interior_events, partition.interior_events);
     assert_eq!(pose_continuous.segments.len(), 1);
@@ -610,11 +606,7 @@ fn declared_continuation_seams_partition_exposure_without_changing_pose() {
         .unwrap();
     assert_eq!(partition.segments.len(), 2);
     assert_eq!(
-        resampler.partition_exposure(
-            0.1,
-            0.9,
-            ExposureEventPolicy::AllowContactTransitions,
-        ),
+        resampler.partition_exposure(0.1, 0.9, ExposureEventPolicy::AllowContactTransitions,),
         Err(TimelineResamplingError::ExposureSpansEvent)
     );
 }

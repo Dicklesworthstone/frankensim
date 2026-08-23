@@ -277,7 +277,7 @@ fn determinism_and_golden() {
     // Prandtl acos + contact tanh moved the trim point by ulps;
     // the spectrum golden follows the trim it linearizes about.
     assert_eq!(
-        digest, "389e2a7c4f5a97e8c8507e011979571d10cb87d50c3f57d0b06cd38955d29321",
+        digest, "dc2e46444f67ce0cc3171ca6bafb161c9bf7bd53fbc36c07cf4b4ab3d2022c5c",
         "augmented-spectrum golden moved — determinism regression or an \
          intentional model change requiring the golden-bump protocol"
     );

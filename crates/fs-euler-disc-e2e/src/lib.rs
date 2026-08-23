@@ -51,9 +51,9 @@ pub mod render_trajectory_codec;
 pub mod rolling_contact;
 pub mod spatial_audio;
 pub mod specimen;
-pub mod terminal_sound;
 pub mod structural_acoustics;
 pub mod tangential_contact;
+pub mod terminal_sound;
 pub mod timeline_resampling;
 
 pub use audio_artifact::{

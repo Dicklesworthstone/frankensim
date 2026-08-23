@@ -17,12 +17,12 @@ fn jlog(case: &str, payload: &str) {
 fn raw_at(tick: u64) -> [f64; N_CUES] {
     let t = tick as f64 / 120.0;
     [
-        0.05 * (2.0 * t).sin(),
-        0.10 * (2.0 * t).cos(),
-        0.30 * (5.0 * t).sin(),
-        0.02 * (1.3 * t).sin(),
-        0.06 * (1.3 * t).cos(),
-        0.04 * (0.7 * t).sin(),
+        0.05 * fs_math::det::sin(2.0 * t),
+        0.10 * fs_math::det::cos(2.0 * t),
+        0.30 * fs_math::det::sin(5.0 * t),
+        0.02 * fs_math::det::sin(1.3 * t),
+        0.06 * fs_math::det::cos(1.3 * t),
+        0.04 * fs_math::det::sin(0.7 * t),
     ]
 }
 
@@ -225,7 +225,7 @@ fn golden_digest() {
     // repeatability and logs the value LOUDLY until 7.2.1 lands.
     if cfg!(debug_assertions) {
         assert_eq!(
-            digest, "f3b5b7434066a4a9b9add4d39cd5d3f4c1c989efb511111b7f69e5e4588c10f5",
+            digest, "07e2aab156b514056a02251f9ec7e1ea3389f96c0ecb1b92cf38a443f474f637",
             "perception golden moved — determinism regression or an \
              intentional model change requiring the golden-bump protocol"
         );

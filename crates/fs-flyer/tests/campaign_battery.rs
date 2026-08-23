@@ -76,7 +76,7 @@ fn campaign_emits_a_complete_consistent_selection_receipt() {
         "bit-identical twice"
     );
     assert_eq!(
-        r.receipt_digest, "f530ec52fd8eade0a3a65c6b707e0914916d43a75889ffa010fddabc09d02504",
+        r.receipt_digest, "a282b8b3e2d08cbb7d8acfa8671be21799da527313369c8beb9e1357db36ae09",
         "selection golden moved — determinism regression or an \
          intentional campaign change requiring the golden-bump protocol"
     );

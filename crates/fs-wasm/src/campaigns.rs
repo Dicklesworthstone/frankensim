@@ -39,7 +39,11 @@ use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_fab::min_feature_size;
 use fs_grammar_e2e::{SimplificationSummary, assess_simplification};
 use fs_lbm::{Lbm, plan_scaling, poiseuille_analytic};
-use fs_neuroshape_e2e::{ComponentCountEvidence, NEUROSHAPE_COMPONENT_EVIDENCE_SCHEMA_VERSION};
+use fs_neuroshape_e2e::{
+    ComponentCountEvidence, LocalizationStage, NeuroShapeReport, SurfaceLocalization,
+    SurfaceLocalizationStatus, NEUROSHAPE_COMPONENT_EVIDENCE_SCHEMA_VERSION,
+    NEUROSHAPE_LOCALIZATION_SCHEMA_VERSION,
+};
 use fs_rep_neural::{Layer, MlpSdf, SafeStepStatus};
 use fs_schedule_e2e::{ScheduleDisposition, Study};
 use fs_shapeprog::max_sdf_discrepancy;
@@ -1147,10 +1151,17 @@ const COMPONENT_EVIDENCE_CERTIFIED_LOWER_BOUND: f64 = 1.0;
 /// `[24]`, and moves the component-evidence semantics version to `[25]`, leaving
 /// `[26]` reserved. A version-1 consumer that gated on `[22] == 1` therefore
 /// refuses this payload instead of reading the new `[5]` under the old meaning.
-pub const NEUROSHAPE_SCHEMA_VERSION: u32 = 2;
+/// Version `3` keeps every version-2 field at its position and extends the
+/// header to 30 slots so the report's typed zero-set localization outcome
+/// (`fs_neuroshape_e2e::SurfaceLocalization`, bead frankensim-o33vo) crosses the
+/// ABI: stable status code at `[26]` (previously the reserved zero), producing
+/// stage code at `[27]`, and `NEUROSHAPE_LOCALIZATION_SCHEMA_VERSION` at `[28]`;
+/// `[29]` stays a reserved zero. Legacy slots `[6]`/`[7]`/`[15]` remain derived,
+/// non-authoritative views of that outcome.
+pub const NEUROSHAPE_SCHEMA_VERSION: u32 = 3;
 
 /// Length of the NeuroShape header preceding the SDF field.
-const NEUROSHAPE_HEADER_LEN: usize = 27;
+const NEUROSHAPE_HEADER_LEN: usize = 30;
 
 // Wire codes for `fs_rep_neural::SafeStepStatus` in slot `[24]`. `0` is the
 // no-claim code, matching `COMPONENT_EVIDENCE_UNKNOWN`'s convention.
@@ -1166,6 +1177,49 @@ fn safe_step_status_code(status: SafeStepStatus) -> f64 {
         SafeStepStatus::NoFiniteSignMargin => SAFE_STEP_NO_FINITE_SIGN_MARGIN,
         SafeStepStatus::InvalidEnclosure => SAFE_STEP_INVALID_ENCLOSURE,
         SafeStepStatus::InvalidLipschitz => SAFE_STEP_INVALID_LIPSCHITZ,
+    }
+}
+
+/// Wire codes for `fs_neuroshape_e2e::SurfaceLocalizationStatus` in slot
+/// `[26]`. `0` stays the reserved no-claim code, matching the other status
+/// slots; a conforming v3 producer never serializes it.
+const LOCALIZATION_STATUS_LOCALIZED: f64 = 1.0;
+const LOCALIZATION_STATUS_VALID_EMPTY: f64 = 2.0;
+const LOCALIZATION_STATUS_INVALID_INPUT: f64 = 3.0;
+const LOCALIZATION_STATUS_UNREPRESENTABLE: f64 = 4.0;
+const LOCALIZATION_STATUS_RESOURCE_REFUSED: f64 = 5.0;
+const LOCALIZATION_STATUS_CANCELLED: f64 = 6.0;
+const LOCALIZATION_STATUS_ALLOCATION_REFUSED: f64 = 7.0;
+const LOCALIZATION_STATUS_INTERNAL_FAULT: f64 = 8.0;
+
+/// Wire codes for `fs_neuroshape_e2e::LocalizationStage` in slot `[27]`.
+/// `0` means success (no single refusing stage).
+const LOCALIZATION_STAGE_NONE: f64 = 0.0;
+const LOCALIZATION_STAGE_GRID_CONSTRUCTION: f64 = 1.0;
+const LOCALIZATION_STAGE_ISOCONTOUR_EXTRACTION: f64 = 2.0;
+
+/// Wire code for a typed localization outcome status.
+fn localization_status_code(localization: &SurfaceLocalization) -> f64 {
+    match localization.status() {
+        SurfaceLocalizationStatus::Localized => LOCALIZATION_STATUS_LOCALIZED,
+        SurfaceLocalizationStatus::ValidEmpty => LOCALIZATION_STATUS_VALID_EMPTY,
+        SurfaceLocalizationStatus::InvalidInput => LOCALIZATION_STATUS_INVALID_INPUT,
+        SurfaceLocalizationStatus::Unrepresentable => LOCALIZATION_STATUS_UNREPRESENTABLE,
+        SurfaceLocalizationStatus::ResourceRefused => LOCALIZATION_STATUS_RESOURCE_REFUSED,
+        SurfaceLocalizationStatus::Cancelled => LOCALIZATION_STATUS_CANCELLED,
+        SurfaceLocalizationStatus::AllocationRefused => LOCALIZATION_STATUS_ALLOCATION_REFUSED,
+        SurfaceLocalizationStatus::InternalFault => LOCALIZATION_STATUS_INTERNAL_FAULT,
+    }
+}
+
+/// Wire code for the stage that produced a typed localization outcome.
+fn localization_stage_code(localization: &SurfaceLocalization) -> f64 {
+    match localization.stage() {
+        None => LOCALIZATION_STAGE_NONE,
+        Some(LocalizationStage::GridConstruction) => LOCALIZATION_STAGE_GRID_CONSTRUCTION,
+        Some(LocalizationStage::IsoContourExtraction) => {
+            LOCALIZATION_STAGE_ISOCONTOUR_EXTRACTION
+        }
     }
 }
 
@@ -1245,7 +1299,7 @@ fn neuro_net(lift: f64) -> MlpSdf {
 ///   enclosed-component lower bound).
 /// - `[21]` — `component_count_lower_bound` (0 or 1).
 /// - `[22]` — `payload_schema_version` ([`NEUROSHAPE_SCHEMA_VERSION`],
-///   currently `2`; consumers must refuse unsupported versions before
+///   currently `3`; consumers must refuse unsupported versions before
 ///   interpreting any other slot).
 /// - `[23]` — `safe_step_magnitude_lower_bound`: the CERTIFIED lower bound on
 ///   `|f(0)|` taken from the inward endpoint of the origin enclosure, `0` when
@@ -1256,7 +1310,18 @@ fn neuro_net(lift: f64) -> MlpSdf {
 /// - `[25]` — `component_evidence_schema_version`
 ///   (`NEUROSHAPE_COMPONENT_EVIDENCE_SCHEMA_VERSION`, currently `1`) — the
 ///   topology-semantics version gating `[16]`, `[17]`, `[20]`, and `[21]`.
-/// - `[26]` — reserved (0).
+/// - `[26]` — `surface_localization_status`: stable
+///   `fs_neuroshape_e2e::SurfaceLocalizationStatus` code (`1` localized,
+///   `2` valid-empty, `3` invalid input, `4` unrepresentable, `5` resource
+///   refused, `6` cancelled, `7` allocation refused, `8` internal fault).
+///   This is the authoritative localization record; `[6]`, `[7]`, and `[15]`
+///   are derived non-authoritative views of it.
+/// - `[27]` — `surface_localization_stage` (`0` success/no single stage,
+///   `1` grid construction, `2` isocontour extraction).
+/// - `[28]` — `localization_schema_version`
+///   (`NEUROSHAPE_LOCALIZATION_SCHEMA_VERSION`, currently `1`) — the version
+///   gating `[26]` and `[27]`.
+/// - `[29]` — reserved (0).
 /// - then `64·64` SDF field row-major (`j` outer / y, `i` inner / x) over the
 ///   render window.
 pub fn neuroshape(lift: f64, ring_r: f64, inner: f64) -> Vec<f64> {
@@ -1271,15 +1336,6 @@ pub fn neuroshape(lift: f64, ring_r: f64, inner: f64) -> Vec<f64> {
     let Ok(report) = fs_neuroshape_e2e::try_run_campaign(&net, ring_r, inner) else {
         return Vec::new();
     };
-    let (component_evidence_status, component_count_lower_bound, enclosed_component_verified) =
-        match &report.component_count_evidence {
-            ComponentCountEvidence::LowerBound(_) => (
-                COMPONENT_EVIDENCE_CERTIFIED_LOWER_BOUND,
-                report.component_count_evidence.lower_bound() as f64,
-                1.0,
-            ),
-            _ => (COMPONENT_EVIDENCE_UNKNOWN, 0.0, 0.0),
-        };
 
     let win_lo = -(ring_r + 0.5);
     let win_hi = ring_r + 0.5;
@@ -1293,6 +1349,31 @@ pub fn neuroshape(lift: f64, ring_r: f64, inner: f64) -> Vec<f64> {
     ) else {
         return Vec::new();
     };
+
+    neuroshape_payload(&report, &field, grid_n, win_lo, win_hi, ring_r, inner)
+}
+
+/// Encode one NeuroShape v3 wire payload from an already-admitted report and
+/// its visualization field. Separated from [`neuroshape`] so tests can drive
+/// the encoder with synthesized typed localization outcomes.
+fn neuroshape_payload(
+    report: &NeuroShapeReport,
+    field: &Grid2,
+    grid_n: usize,
+    win_lo: f64,
+    win_hi: f64,
+    ring_r: f64,
+    inner: f64,
+) -> Vec<f64> {
+    let (component_evidence_status, component_count_lower_bound, enclosed_component_verified) =
+        match &report.component_count_evidence {
+            ComponentCountEvidence::LowerBound(_) => (
+                COMPONENT_EVIDENCE_CERTIFIED_LOWER_BOUND,
+                report.component_count_evidence.lower_bound() as f64,
+                1.0,
+            ),
+            _ => (COMPONENT_EVIDENCE_UNKNOWN, 0.0, 0.0),
+        };
 
     let mut out = Vec::with_capacity(NEUROSHAPE_HEADER_LEN + grid_n * grid_n);
     out.push(grid_n as f64);
@@ -1333,6 +1414,9 @@ pub fn neuroshape(lift: f64, ring_r: f64, inner: f64) -> Vec<f64> {
         fon(report.safe_step.magnitude_lower_bound()),
         safe_step_status_code(report.safe_step.status()),
         f64::from(NEUROSHAPE_COMPONENT_EVIDENCE_SCHEMA_VERSION),
+        localization_status_code(&report.surface_localization),
+        localization_stage_code(&report.surface_localization),
+        f64::from(NEUROSHAPE_LOCALIZATION_SCHEMA_VERSION),
         0.0,
     ]);
     for j in 0..grid_n {
@@ -1881,7 +1965,7 @@ mod tests {
     /// reading any slot, exactly as a browser consumer must.
     fn require_supported_neuroshape_schema(encoded: &[f64]) -> Result<(), &'static str> {
         if encoded.len() < NEUROSHAPE_HEADER_LEN {
-            return Err("NeuroShape payload is shorter than its 27-value header");
+            return Err("NeuroShape payload is shorter than its 30-value header");
         }
         let version = encoded[22];
         if version.to_bits() != f64::from(NEUROSHAPE_SCHEMA_VERSION).to_bits() {
@@ -1891,6 +1975,22 @@ mod tests {
             != f64::from(NEUROSHAPE_COMPONENT_EVIDENCE_SCHEMA_VERSION).to_bits()
         {
             return Err("unsupported NeuroShape component-evidence schema");
+        }
+        if encoded[28].to_bits() != f64::from(NEUROSHAPE_LOCALIZATION_SCHEMA_VERSION).to_bits() {
+            return Err("unsupported NeuroShape localization schema");
+        }
+        let status = encoded[26];
+        if !(LOCALIZATION_STATUS_LOCALIZED..=LOCALIZATION_STATUS_INTERNAL_FAULT)
+            .contains(&status)
+            || status.fract() != 0.0
+        {
+            return Err("unknown NeuroShape surface-localization status code");
+        }
+        let stage = encoded[27];
+        if !(LOCALIZATION_STAGE_NONE..=LOCALIZATION_STAGE_ISOCONTOUR_EXTRACTION).contains(&stage)
+            || stage.fract() != 0.0
+        {
+            return Err("unknown NeuroShape surface-localization stage code");
         }
         Ok(())
     }
@@ -2104,8 +2204,19 @@ mod tests {
             f64::from(NEUROSHAPE_COMPONENT_EVIDENCE_SCHEMA_VERSION),
             "component-evidence schema version"
         );
-        assert_eq!(v[26], 0.0, "reserved header slot");
-        assert_eq!(v.len(), NEUROSHAPE_HEADER_LEN + 64 * 64, "total length");
+        assert_eq!(
+            v[26],
+            LOCALIZATION_STATUS_LOCALIZED,
+            "default campaign localizes the sampled zero set"
+        );
+        assert_eq!(v[27], LOCALIZATION_STAGE_NONE, "success has no refusing stage");
+        assert_eq!(
+            v[28],
+            f64::from(NEUROSHAPE_LOCALIZATION_SCHEMA_VERSION),
+            "localization schema version"
+        );
+        assert_eq!(v[29], 0.0, "reserved header slot");
+        assert!(v[15] > 0.0 && !v[6].is_nan(), "derived crossing views stay populated");
     }
 
     /// Regression for bead `frankensim-extreal-program-f85xj.2.39`.
@@ -2192,13 +2303,202 @@ mod tests {
         );
     }
 
+    /// Encode one payload whose report carries a synthesized typed
+    /// localization outcome, with the derived legacy views kept consistent
+    /// exactly as `try_run_campaign` would leave them.
+    fn encoded_with_localization(localization: SurfaceLocalization) -> Vec<f64> {
+        let net = neuro_net(6.5);
+        let mut report = fs_neuroshape_e2e::run_campaign(&net, 2.5, 0.3);
+        let (crossings, max_r, nearest_r) = match &localization {
+            SurfaceLocalization::Localized {
+                crossings,
+                max_radius,
+                nearest_radius,
+            } => (*crossings, *max_radius, *nearest_radius),
+            SurfaceLocalization::ValidEmpty => (0, 0.0, f64::INFINITY),
+            _ => (0, f64::NAN, f64::NAN),
+        };
+        report.surface_crossings = crossings;
+        report.max_crossing_radius = max_r;
+        report.nearest_surface_radius = nearest_r;
+        report.surface_localization = localization;
+        let ring_r = 2.5;
+        let inner = 0.3;
+        let win_lo = -(ring_r + 0.5);
+        let win_hi = ring_r + 0.5;
+        let field = Grid2::from_fn(
+            64,
+            64,
+            [win_lo, win_lo],
+            [win_hi, win_hi],
+            64 * 64,
+            |p| net.eval(&[p[0], p[1]]),
+        )
+        .expect("viz grid admits");
+        neuroshape_payload(&report, &field, 64, win_lo, win_hi, ring_r, inner)
+    }
+
+    /// G0/G3: every stable status code crosses the ABI, the stage code names
+    /// the exact refusing stage, and the derived legacy views agree — so a
+    /// JSON/JS consumer reading slots `[26]`/`[27]` sees the same outcome as
+    /// the native report.
+    #[test]
+    fn neuroshape_wire_carries_every_typed_localization_outcome() {
+        use fs_neuroshape_e2e::{
+            CancellationDetail, CancellationKind, LocalizationDiagnostic, StageDetail,
+        };
+
+        let cases: [(SurfaceLocalization, f64, f64); 10] = [
+            (
+                SurfaceLocalization::Localized {
+                    crossings: 42,
+                    max_radius: 2.25,
+                    nearest_radius: 1.125,
+                },
+                LOCALIZATION_STATUS_LOCALIZED,
+                LOCALIZATION_STAGE_NONE,
+            ),
+            (
+                SurfaceLocalization::ValidEmpty,
+                LOCALIZATION_STATUS_VALID_EMPTY,
+                LOCALIZATION_STAGE_NONE,
+            ),
+            (
+                SurfaceLocalization::InvalidInput(StageDetail::new(
+                    LocalizationStage::IsoContourExtraction,
+                    LocalizationDiagnostic::IsoNonFiniteLevel,
+                )),
+                LOCALIZATION_STATUS_INVALID_INPUT,
+                LOCALIZATION_STAGE_ISOCONTOUR_EXTRACTION,
+            ),
+            (
+                SurfaceLocalization::Unrepresentable(StageDetail::new(
+                    LocalizationStage::GridConstruction,
+                    LocalizationDiagnostic::GridUnrepresentableCoordinates,
+                )),
+                LOCALIZATION_STATUS_UNREPRESENTABLE,
+                LOCALIZATION_STAGE_GRID_CONSTRUCTION,
+            ),
+            (
+                SurfaceLocalization::ResourceRefused(StageDetail::new(
+                    LocalizationStage::IsoContourExtraction,
+                    LocalizationDiagnostic::IsoOperationBudgetExceeded,
+                )),
+                LOCALIZATION_STATUS_RESOURCE_REFUSED,
+                LOCALIZATION_STAGE_ISOCONTOUR_EXTRACTION,
+            ),
+            (
+                SurfaceLocalization::Cancelled(CancellationDetail {
+                    stage: LocalizationStage::IsoContourExtraction,
+                    kind: CancellationKind::CancelledAtCheckpoint,
+                    phase: "extract",
+                    deadline_ns: u64::MAX,
+                    observed_ns: u64::MAX,
+                    quota_context_a: u64::MAX,
+                    quota_context_b: u64::MAX,
+                    quota_context_c: u64::MAX,
+                }),
+                LOCALIZATION_STATUS_CANCELLED,
+                LOCALIZATION_STAGE_ISOCONTOUR_EXTRACTION,
+            ),
+            (
+                SurfaceLocalization::AllocationRefused(StageDetail::new(
+                    LocalizationStage::GridConstruction,
+                    LocalizationDiagnostic::GridAllocationFailed,
+                )),
+                LOCALIZATION_STATUS_ALLOCATION_REFUSED,
+                LOCALIZATION_STAGE_GRID_CONSTRUCTION,
+            ),
+            (
+                SurfaceLocalization::InternalFault(StageDetail::new(
+                    LocalizationStage::IsoContourExtraction,
+                    LocalizationDiagnostic::IsoPlanOverflow,
+                )),
+                LOCALIZATION_STATUS_INTERNAL_FAULT,
+                LOCALIZATION_STAGE_ISOCONTOUR_EXTRACTION,
+            ),
+            // A refusal may also name the grid stage even for contour-side
+            // diagnostics when synthesized directly; codes must stay stable.
+            (
+                SurfaceLocalization::InvalidInput(StageDetail::new(
+                    LocalizationStage::GridConstruction,
+                    LocalizationDiagnostic::GridInvalidBounds,
+                )),
+                LOCALIZATION_STATUS_INVALID_INPUT,
+                LOCALIZATION_STAGE_GRID_CONSTRUCTION,
+            ),
+            (
+                SurfaceLocalization::Unrepresentable(StageDetail::new(
+                    LocalizationStage::IsoContourExtraction,
+                    LocalizationDiagnostic::IsoCoincidentLevelEdge,
+                )),
+                LOCALIZATION_STATUS_UNREPRESENTABLE,
+                LOCALIZATION_STAGE_ISOCONTOUR_EXTRACTION,
+            ),
+        ];
+
+        let expected_views = [
+            (42.0, false, true),
+            (0.0, false, true),
+            (0.0, true, false),
+            (0.0, true, false),
+            (0.0, true, false),
+            (0.0, true, false),
+            (0.0, true, false),
+            (0.0, true, false),
+            (0.0, true, false),
+            (0.0, true, false),
+        ];
+
+        for (case_index, (localization, status, stage)) in cases.iter().enumerate() {
+            let v = encoded_with_localization(localization.clone());
+            assert_eq!(
+                require_supported_neuroshape_schema(&v),
+                Ok(()),
+                "case {case_index} must serialize a schema-valid payload"
+            );
+            assert_eq!(v[26], *status, "case {case_index} status code");
+            assert_eq!(v[27], *stage, "case {case_index} stage code");
+            assert_eq!(v[28], f64::from(NEUROSHAPE_LOCALIZATION_SCHEMA_VERSION));
+            // Derived legacy views agree with the authoritative record.
+            let (crossings_view, nearest_nan, nearest_inf) = expected_views[case_index];
+            assert_eq!(v[15], crossings_view, "case {case_index} derived count");
+            if nearest_nan {
+                assert!(v[6].is_nan() && v[7].is_nan(), "case {case_index}");
+            }
+            if nearest_inf {
+                assert_eq!(v[6], 0.0, "case {case_index} nearest sentinel");
+                assert!(v[7].is_infinite() && v[7] > 0.0, "case {case_index}");
+            }
+        }
+    }
+
+    /// A live all-positive campaign serializes ValidEmpty without any
+    /// refusal detail, distinct from every error path.
+    #[test]
+    fn neuroshape_live_valid_empty_is_not_a_refusal() {
+        let net = neuro_net(12.0);
+        let report = fs_neuroshape_e2e::run_campaign(&net, 2.5, 0.3);
+        assert_eq!(
+            report.surface_localization,
+            SurfaceLocalization::ValidEmpty,
+            "the lift-12 field is strictly positive on the window"
+        );
+        assert_eq!(report.surface_crossings, 0);
+        assert_eq!(report.max_crossing_radius.to_bits(), 0.0f64.to_bits());
+        assert!(report.nearest_surface_radius.is_infinite());
+    }
+
     #[test]
     fn neuroshape_schema_reader_refuses_legacy_future_nonfinite_and_truncated_headers() {
         let current = neuroshape(6.5, 2.5, 0.3);
 
         // `1.0` is the version-1 payload, whose `[5]` meant `|f_nominal|/L`: a
         // v1-shaped consumer must be forced to migrate, not silently re-read.
-        for unsupported in [0.0, 1.0, 3.0, 1.5, f64::NAN, f64::INFINITY] {
+        // `2.0` is the version-2 payload, whose `[26]` was a reserved zero: a
+        // v2-shaped consumer must be forced to migrate, not silently ignore
+        // the typed localization record.
+        for unsupported in [0.0, 1.0, 2.0, 4.0, 1.5, f64::NAN, f64::INFINITY] {
             let mut mutated = current.clone();
             mutated[22] = unsupported;
             assert!(
@@ -2216,7 +2516,34 @@ mod tests {
                 unsupported.to_bits()
             );
         }
-        for truncated_len in [0, 21, 22, 23, 24, 25, 26] {
+        for unsupported in [0.0, 2.0, 9.0, 1.5, f64::NAN] {
+            let mut mutated = current.clone();
+            mutated[28] = unsupported;
+            assert!(
+                require_supported_neuroshape_schema(&mutated).is_err(),
+                "accepted unsupported localization schema bits 0x{:016x}",
+                unsupported.to_bits()
+            );
+        }
+        for bad_status in [0.0, 9.0, -1.0, 1.5, f64::NAN] {
+            let mut mutated = current.clone();
+            mutated[26] = bad_status;
+            assert!(
+                require_supported_neuroshape_schema(&mutated).is_err(),
+                "accepted unknown localization status bits 0x{:016x}",
+                bad_status.to_bits()
+            );
+        }
+        for bad_stage in [3.0, -1.0, 0.5, f64::NAN] {
+            let mut mutated = current.clone();
+            mutated[27] = bad_stage;
+            assert!(
+                require_supported_neuroshape_schema(&mutated).is_err(),
+                "accepted unknown localization stage bits 0x{:016x}",
+                bad_stage.to_bits()
+            );
+        }
+        for truncated_len in [0, 21, 22, 23, 24, 25, 26, 27, 28, 29] {
             assert!(
                 require_supported_neuroshape_schema(&current[..truncated_len]).is_err(),
                 "accepted truncated header length {truncated_len}"
@@ -2242,7 +2569,15 @@ mod tests {
             f64::from(NEUROSHAPE_COMPONENT_EVIDENCE_SCHEMA_VERSION),
             "component-evidence schema version"
         );
-        assert_eq!(v[26], 0.0, "reserved header slot");
+        assert_eq!(
+            v[26],
+            LOCALIZATION_STATUS_VALID_EMPTY,
+            "the all-positive lift-12 field has no zero crossing anywhere"
+        );
+        assert_eq!(v[27], LOCALIZATION_STAGE_NONE, "valid empty has no stage");
+        assert_eq!(v[15], 0.0, "derived crossing count for a valid empty grid");
+        assert_eq!(v[6], 0.0, "valid-empty nearest-surface sentinel");
+        assert!(v[7].is_infinite() && v[7] > 0.0, "valid-empty max-radius sentinel");
         assert_eq!(
             v.len(),
             NEUROSHAPE_HEADER_LEN + 64 * 64,

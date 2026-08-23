@@ -642,6 +642,25 @@ impl BoundaryGrid3 {
         let (tile, lane) = self.addr(x, y, z);
         core::array::from_fn(|q| self.f[q][tile].0[lane])
     }
+    /// Overwrite one fluid cell's populations (fixture initialization;
+    /// the write-side counterpart of [`BoundaryGrid3::populations`]).
+    ///
+    /// # Panics
+    /// Panics for an out-of-range or solid cell, or any non-finite value.
+    pub fn set_populations(&mut self, x: usize, y: usize, z: usize, values: &[f64; Q3]) {
+        assert!(
+            !self.is_solid(x, y, z),
+            "solid cells have no fluid populations"
+        );
+        assert!(
+            values.iter().all(|v| v.is_finite()),
+            "set_populations refuses non-finite values"
+        );
+        let (tile, lane) = self.addr(x, y, z);
+        for (field, value) in self.f.iter_mut().zip(values) {
+            field[tile].0[lane] = *value;
+        }
+    }
 
     /// Total mass over fluid cells in canonical tile/lane order.
     #[must_use]

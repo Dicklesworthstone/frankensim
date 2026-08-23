@@ -21,6 +21,7 @@ fsqlite-ext-json = { path = "../../../frankensqlite/crates/fsqlite-ext-json" }
 
 [dev-dependencies]
 fsqlite-types = { path = "../../../frankensqlite/crates/fsqlite-types" }
+fs-alloc = { path = "../fs-alloc" }
 
 [lints]
 workspace = true

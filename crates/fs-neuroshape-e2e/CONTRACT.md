@@ -39,11 +39,27 @@ mint here.
 - `ComponentCountEvidence` — non-exhaustive typed state: `Unknown` has lower
   bound zero; `LowerBound(CertifiedEnclosedComponentExists)` has lower bound one.
   `exact_count()` is always `None` in this tranche.
-- `NEUROSHAPE_COMPONENT_EVIDENCE_SCHEMA_VERSION = 1` — the public semantic
-  version for component evidence. Version 1 means that an enclosed-component
-  witness supplies a global lower bound only and never an exact count. Any
-  serialized adapter must carry this value and version-aware consumers must
-  reject versions they do not implement.
+- `NEUROSHAPE_LOCALIZATION_SCHEMA_VERSION = 1` — freezes every wire code of
+  the typed zero-set localization vocabulary below
+  (`SurfaceLocalizationStatus` codes `1..=8`, `LocalizationStage` codes
+  `1..=2`, `LocalizationDiagnostic` codes `1..=18`). Version-aware consumers
+  must reject codes they do not implement; no display-string is ever parsed.
+- `NeuroShapeReport::surface_localization: SurfaceLocalization` — the
+  AUTHORITATIVE outcome of sampled zero-set localization:
+  `Localized { crossings, max_radius, nearest_radius }`, `ValidEmpty`, or a
+  refusal (`InvalidInput`, `Unrepresentable`, `ResourceRefused`,
+  `Cancelled`, `AllocationRefused`, `InternalFault`) carrying its exact
+  producing stage plus bounded structured detail (offender indices/packed
+  edge endpoints, exact scalar bits, required-vs-limit, cancellation kind,
+  stable checkpoint phase). Every `fs_viz::Grid2Error` and
+  `fs_viz::IsoContourError` variant maps to exactly one documented outcome;
+  nothing collapses to an undifferentiated failure.
+- `NeuroShapeReport::surface_crossings` / `max_crossing_radius` /
+  `nearest_surface_radius` — DERIVED, non-authoritative compatibility views
+  of `surface_localization`. Zero crossings never distinguishes valid-empty
+  from a refusal; `NaN` sentinels alone never carry status.
+- `iso_contour_resource_code(IsoContourResource) -> u32` — the stable
+  resource ordinal used as auxiliary detail for plan-overflow refusals.
 
 ## Invariants
 
@@ -76,12 +92,13 @@ mint here.
   critical point or minimum, much less uniqueness or a component count.
 - Deterministic (fixed net + grid; no RNG).
 
-## Error model
-
 Total on the demo net; `eval_interval`/`classify_hessian` are total.
 `try_run_campaign` returns a typed `CampaignError` for a wrong input dimension or
 a non-finite/out-of-range geometric parameter; `run_campaign` panics on the same
 inputs. Untrusted boundaries (the WASM export) must call the fallible form.
+Grid-construction and isocontour failures are NEVER erased: they surface inside
+the report as the typed `SurfaceLocalization` outcome described above, so a
+malformed grid and an empty contour are distinguishable at every boundary.
 
 ## Determinism class
 
@@ -89,7 +106,11 @@ Fully deterministic (G5).
 
 ## Cancellation behavior
 
-None (a synchronous batch).
+The campaign itself is a synchronous batch with no ambient execution context;
+its compat isocontour path therefore cannot observe a mid-run cancellation.
+The localization vocabulary still carries the full typed `Cancelled` state
+(stable kind + `'static` checkpoint phase) so producers that run the same
+extraction under a caller-owned `Cx` publish the identical record shape.
 
 ## Unsafe boundary
 
@@ -101,15 +122,21 @@ None.
 
 ## Conformance tests
 
-`tests/neuroshape.rs` (5): G0 pins component-evidence schema version 1, typed
-lower-bound state, and the private witness payload for the certified frame,
-including explicit refusal to return an exact count; Lipschitz / interval
-sign-margin safe-step / enclosure checks, including that the published step
-derivation is the one derived from the origin enclosure and that the report's
-field identity is the net's; an open frame yields typed `Unknown`; admission
-refuses a non-2-D net and non-finite/out-of-range geometry; G5 determinism
-includes the field identity, the safe-step status/radius/margin bits, and the
-typed topology evidence.
+`tests/neuroshape.rs` (12): G0 pins component-evidence schema version 1, typed
+lower-bound state, the localization schema version and every stable status /
+stage / diagnostic code, and the private witness payload for the certified
+frame, including explicit refusal to return an exact count; Lipschitz /
+interval sign-margin safe-step / enclosure checks; an open frame yields typed
+`Unknown`; admission refuses a non-2-D net and non-finite/out-of-range
+geometry; G5 determinism includes the field identity and safe-step bits. The
+typed localization battery (G0/G3/G4) maps EVERY `Grid2Error` and
+`IsoContourError` variant — including plan overflow with its frozen resource
+ordinals and all seven fs-exec cancellation kinds — to its documented outcome,
+proves a localized campaign agrees bit-for-bit with its derived legacy views,
+and proves reachable live outcomes: an identically-zero field reports
+`Unrepresentable`/coincident-edge instead of a silent `None`, a strictly
+positive field is `ValidEmpty` (never a refusal), and NaN samples name their
+first offending node.
 
 ## No-claim boundaries
 
@@ -117,7 +144,8 @@ typed topology evidence.
 interval-frame certificate proves that at least one enclosed negative component
 exists. It does NOT prove the full negative set is bounded, exclude exterior or
 additional interior components, establish a finite upper component-count bound,
-or certify any exact component count. The sampled contour is localization only;
+or certify any exact component count. The sampled contour is diagnostic
+localization only;
 the finite-difference Hessian is not a critical-point or global Morse/Conley
 certificate. There is no
 complete admitted domain cover, exterior sign certificate, unresolved-cell
@@ -128,3 +156,6 @@ has no source/field identity, units, budget, schema, or authenticated issuer and
 is therefore campaign-local candidate data, not a portable authority receipt.
 Those are required before an
 `ExactComponentCount` state may exist.
+The typed `SurfaceLocalization` record is diagnostic evidence about the sampled
+visualization only: its status codes classify what the grid/extraction kernels
+refused, and they carry no topology, distance, or certificate authority.

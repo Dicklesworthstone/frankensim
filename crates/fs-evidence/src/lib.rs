@@ -47,14 +47,14 @@ pub mod cinematic_config_codec;
 pub mod cinematic_sound;
 pub mod claim_class;
 pub mod color;
-pub mod witness;
 mod discrepancy;
 pub mod falsify;
 pub mod identity;
+pub mod prediction_bundle;
 pub mod uncertainty;
 pub mod useful_bound;
-pub mod prediction_bundle;
 pub mod vv;
+pub mod witness;
 
 pub use admitted::{
     AdmissionDecision, AdmissionReceipt, AdmissionRejection, AdmissionVerifier, AdmittedColor,

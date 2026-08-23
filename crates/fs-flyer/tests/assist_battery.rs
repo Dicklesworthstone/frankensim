@@ -198,8 +198,8 @@ fn caps_at_cap_and_cap_plus_one() {
 fn determinism_and_golden() {
     let mut payload = Vec::new();
     for i in 0..200 {
-        let q = 0.3 * (0.1 * f64::from(i)).sin();
-        let th = 0.1 * (0.07 * f64::from(i)).cos();
+        let q = 0.3 * fs_math::det::sin(0.1 * f64::from(i));
+        let th = 0.1 * fs_math::det::cos(0.07 * f64::from(i));
         let out = ASSIST_V1.apply(q, th, 0.5236).unwrap();
         let out2 = ASSIST_V1.apply(q, th, 0.5236).unwrap();
         assert_eq!(out, out2, "bitwise repeat");
@@ -209,7 +209,7 @@ fn determinism_and_golden() {
         fs_blake3::hash_domain("org.frankensim.fs-flyer.e46ciii-golden.v1", &payload).to_hex();
     jlog("golden", &format!("\"digest\":\"{digest}\""));
     assert_eq!(
-        digest, "6f7294edd8ee60625181bab74a3b9ffb775cf457a3cc59f098b63913b0346c71",
+        digest, "27ffdac75e9db02bf4bb810fd2df7abb65a3684f2925f2ebe3f3ccfad87b94ff",
         "assist golden moved — determinism regression or an intentional \
          model change requiring the golden-bump protocol"
     );

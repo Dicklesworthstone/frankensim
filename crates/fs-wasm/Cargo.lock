@@ -51,7 +51,7 @@ checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
 
 [[package]]
 name = "asupersync"
-version = "0.3.10"
+version = "0.4.9"
 dependencies = [
  "aes-gcm",
  "asupersync-macros",
@@ -102,7 +102,7 @@ dependencies = [
 
 [[package]]
 name = "asupersync-macros"
-version = "0.3.10"
+version = "0.4.9"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -505,7 +505,7 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "franken-decision"
-version = "0.3.10"
+version = "0.4.9"
 dependencies = [
  "franken-evidence",
  "franken-kernel",
@@ -514,7 +514,7 @@ dependencies = [
 
 [[package]]
 name = "franken-evidence"
-version = "0.3.10"
+version = "0.4.9"
 dependencies = [
  "serde",
  "serde_json",
@@ -522,7 +522,7 @@ dependencies = [
 
 [[package]]
 name = "franken-kernel"
-version = "0.3.10"
+version = "0.4.9"
 dependencies = [
  "serde",
 ]
@@ -593,12 +593,15 @@ dependencies = [
  "fs-evidence",
  "fs-exec",
  "fs-ivl",
+ "fs-obs",
+ "fs-qty",
 ]
 
 [[package]]
 name = "fs-bem"
 version = "0.0.1"
 dependencies = [
+ "fs-casebook",
  "fs-fmm",
  "fs-geom",
  "fs-la",
@@ -621,6 +624,10 @@ dependencies = [
  "fs-math",
  "fs-rand",
 ]
+
+[[package]]
+name = "fs-casebook"
+version = "0.0.1"
 
 [[package]]
 name = "fs-cheb"
@@ -648,8 +655,23 @@ dependencies = [
 name = "fs-couple"
 version = "0.0.1"
 dependencies = [
+ "fs-blake3",
+ "fs-dcontact",
+ "fs-duct",
+ "fs-exec",
+ "fs-fft",
  "fs-iface",
+ "fs-la",
+ "fs-material",
+ "fs-math",
+ "fs-modal",
+ "fs-nlmodal",
+ "fs-phs",
+ "fs-plate",
  "fs-qty",
+ "fs-scenario",
+ "fs-tribo",
+ "fs-vfit",
 ]
 
 [[package]]
@@ -664,6 +686,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-dcontact"
+version = "0.0.1"
+dependencies = [
+ "fs-matdb",
+ "fs-math",
+ "fs-phs",
+]
+
+[[package]]
 name = "fs-dfo"
 version = "0.0.1"
 dependencies = [
@@ -673,6 +704,16 @@ dependencies = [
  "fs-obs",
  "fs-rand",
  "fs-robust",
+]
+
+[[package]]
+name = "fs-duct"
+version = "0.0.1"
+dependencies = [
+ "fs-la",
+ "fs-material",
+ "fs-math",
+ "fs-phs",
 ]
 
 [[package]]
@@ -870,6 +911,7 @@ version = "0.0.1"
 dependencies = [
  "fs-ad",
  "fs-blake3",
+ "fs-casebook",
  "fs-evidence",
  "fs-matdb",
  "fs-math",
@@ -902,6 +944,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-modal"
+version = "0.0.1"
+dependencies = [
+ "fs-la",
+ "fs-math",
+ "fs-sparse",
+]
+
+[[package]]
 name = "fs-motion"
 version = "0.0.1"
 dependencies = [
@@ -918,8 +969,17 @@ dependencies = [
 name = "fs-neuroshape-e2e"
 version = "0.0.1"
 dependencies = [
+ "fs-exec",
  "fs-rep-neural",
  "fs-viz",
+]
+
+[[package]]
+name = "fs-nlmodal"
+version = "0.0.1"
+dependencies = [
+ "fs-math",
+ "fs-phs",
 ]
 
 [[package]]
@@ -963,6 +1023,24 @@ dependencies = [
  "fs-sos",
  "fs-surrogate",
  "fs-vpm",
+]
+
+[[package]]
+name = "fs-phs"
+version = "0.0.1"
+dependencies = [
+ "fs-la",
+ "fs-math",
+]
+
+[[package]]
+name = "fs-plate"
+version = "0.0.1"
+dependencies = [
+ "fs-material",
+ "fs-modal",
+ "fs-qty",
+ "fs-sparse",
 ]
 
 [[package]]
@@ -1138,9 +1216,12 @@ version = "0.0.1"
 name = "fs-solid"
 version = "0.0.1"
 dependencies = [
+ "fs-blake3",
  "fs-cutfem",
+ "fs-exec",
  "fs-la",
  "fs-material",
+ "fs-modal",
  "fs-scenario",
  "fs-solver",
  "fs-sparse",
@@ -1232,6 +1313,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-tribo"
+version = "0.0.1"
+dependencies = [
+ "fs-math",
+ "fs-rand",
+]
+
+[[package]]
 name = "fs-tropical"
 version = "0.0.1"
 
@@ -1286,6 +1375,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-vfit"
+version = "0.0.1"
+dependencies = [
+ "fs-la",
+ "fs-math",
+]
+
+[[package]]
 name = "fs-viz"
 version = "0.0.1"
 dependencies = [
@@ -1304,6 +1401,7 @@ dependencies = [
 name = "fs-vpm"
 version = "0.0.1"
 dependencies = [
+ "fs-blake3",
  "fs-exec",
 ]
 

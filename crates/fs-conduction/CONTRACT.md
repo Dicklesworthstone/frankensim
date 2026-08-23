@@ -130,7 +130,10 @@ reference temperature stays a declared property of the row, and the solve never
 guesses which ambient a coefficient was fitted against.
 
 Time signals, Chebyshev spatial profiles, and typed payloads are REFUSED at the
-lowering boundary — this crate is steady-only and consumes no time histories.
+lowering boundary — the scenario lowering path is steady-only. The staged
+`march_*`/duty-cycle drivers documented below DO step over declared capacity
+data, but each step re-assembles and marches the SAME steady operator; they are
+not a general transient frontend (see the no-claim section).
 
 ### The nonlinear driver: globalization and stop rule, both declared
 

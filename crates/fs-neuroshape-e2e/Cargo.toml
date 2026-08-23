@@ -13,6 +13,7 @@ layer = "L5"
 [dependencies]
 fs-rep-neural = { path = "../fs-rep-neural" }
 fs-viz = { path = "../fs-viz" }
+fs-exec = { path = "../fs-exec" }
 
 [dev-dependencies]
 
