@@ -2002,6 +2002,24 @@ fn rb_004a_bvh_build_is_deterministic_under_concurrent_construction() {
         reference_hit.t.to_bits(),
         reference_hit.steps,
     );
+    // Frozen 2026-08-22 closing the frankensim-8ll9 BVH bookkeeping decision.
+    // Matching digests were recorded on both reference ISA families at tree
+    // HEAD 62deacbb under default chart-backends features: x86_64-linux
+    // (RCH worker hz2) and aarch64-macos (M4 Pro) produced this fingerprint,
+    // hit_t_bits 0x40001f6448cfefda, and visits 26 identically across 1/2/4/8
+    // concurrent builders. A moved fingerprint is a golden event: re-freeze
+    // only with a semantic justification per docs/GOLDEN_POLICY.md, bumping
+    // the causative bit surface and the fs-render:bvh-determinism coupling
+    // row in the same commit.
+    const BVH_DETERMINISM_FINGERPRINT_GOLDEN: u64 = 0xcf18_55d9_4642_e0fd;
+    assert_eq!(
+        reference.0,
+        BVH_DETERMINISM_FINGERPRINT_GOLDEN,
+        "BVH construction fingerprint moved: observed {:#018x} vs frozen \
+         {BVH_DETERMINISM_FINGERPRINT_GOLDEN:#018x} — re-freeze only per \
+         docs/GOLDEN_POLICY.md",
+        reference.0
+    );
 
     for workers in [1usize, 2, 4, 8] {
         let outcomes = std::thread::scope(|scope| {
