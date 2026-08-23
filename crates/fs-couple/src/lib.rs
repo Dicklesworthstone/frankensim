@@ -35,6 +35,7 @@ pub mod acoustic_realize;
 pub mod air_path;
 pub mod bakeoff;
 pub mod bernoulli_aperture;
+pub mod bowed_string;
 pub mod brass_loop;
 pub mod broadband_radiation;
 pub mod cavity_phs;
