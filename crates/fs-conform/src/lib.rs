@@ -19,14 +19,28 @@
 //!    DECLARED error plus the suite's explicit numerical tolerance. A converter
 //!    that understates its error beyond that admitted tolerance FAILS.
 //!
-//! R6 mitigation: [`certify`] is applied to FIRST-PARTY converters with the
+//! R6 mitigation: certification is applied to FIRST-PARTY converters with the
 //! same severity as third-party ones. The certified tier is meant to be stamped
 //! on every ledger entry the converter touches. The SDK control flow is
 //! deterministic for a fixed callback transcript; robust evidence arithmetic
-//! uses the shared `fs-math` double-double rung. The current object-safe trait
-//! does not itself contain callback faults or prove that a third-party
-//! implementation is pure or deterministic; see the crate contract no-claim
-//! boundary.
+//! uses the shared `fs-math` double-double rung.
+//!
+//! TWO execution lanes exist, with different trust boundaries:
+//!
+//! * [`certify`] — the LEGACY trusted in-process path. It contains no faults
+//!   and proves nothing about later behavior of the same object; its tiers
+//!   carry the uncontained no-claim boundary in `CONTRACT.md` and are for
+//!   first-party use only.
+//! * [`certify_contained`] — the production lane (bead
+//!   frankensim-contain-fs-conform-callbacks-6bc6g). Every callback runs
+//!   under an admitted work envelope with panic containment and typed failure
+//!   classes; transcripts bind inputs, outputs, seeds, budgets, and an
+//!   immutable implementation identity; a permuted replay must reproduce the
+//!   transcript bitwise before any tier above `Rejected` is minted; and all
+//!   axiom arithmetic then runs against the frozen transcript table rather
+//!   than live user code. Containment limits remain honest: unwinding panics
+//!   are contained, but abort, OOM, native UB, and nontermination are NOT,
+//!   so a bounded-callback tier never claims hard isolation.
 
 use fs_math::{dd::Dd, eft::two_sum};
 
@@ -1184,26 +1198,30 @@ fn evaluate_functoriality(c: &dyn Converter, suite: &ConformanceSuite) -> (bool,
     (composition_ok && identity_ok, findings)
 }
 
-/// Certify a converter against its suite. It reaches a tier ABOVE `Rejected`
-/// only by passing every supplied axiom; the tier level reflects how tight an
-/// (honestly met within the suite tolerance) error model it declares. Adjoint
-/// and manufactured evidence must be non-empty; any supplied composition or
-/// identity witness must carry at least one probe.
+/// Certify a converter against its suite through the legacy trusted
+/// in-process path. It reaches a tier ABOVE `Rejected` only by passing every
+/// supplied axiom; the tier level reflects how tight an (honestly met within
+/// the suite tolerance) error model it declares. Adjoint and manufactured
+/// evidence must be non-empty; any supplied composition or identity witness
+/// must carry at least one probe.
+///
+/// TRUST BOUNDARY: this path executes arbitrary user code directly and
+/// contains nothing — no fault containment, no budget admission, and no
+/// replay evidence bind the observed transcript to later invocations. It is
+/// reserved for FIRST-PARTY converters under the operator's own trust
+/// decision, and any tier it mints carries the uncontained no-claim boundary
+/// documented in `CONTRACT.md`. Production third-party certification MUST go
+/// through [`certify_contained`], which executes every callback under an
+/// admitted envelope, binds a canonical transcript to an immutable
+/// implementation identity, and proves deterministic replay before awarding
+/// any tier.
 #[must_use]
 pub fn certify(c: &dyn Converter, suite: &ConformanceSuite) -> ConformanceReport {
-    let mut findings = Vec::new();
     let declared_error = c.declared_error();
     if !valid_tolerance(suite.tolerance) || !declared_error.is_finite() || declared_error < 0.0 {
-        findings.push(
+        let findings = vec![
             "admission: tolerance and declared error must be finite and non-negative".to_string(),
-        );
-        let arithmetic = ComparisonEvidence {
-            schema_version: CONFORM_ARITHMETIC_SCHEMA_VERSION,
-            rung: ArithmeticRung::ExactSuperaccumulator,
-            terms: 0,
-            dimension: c.source_dim(),
-            first_refusal: None,
-        };
+        ];
         return ConformanceReport {
             converter: c.id().to_string(),
             functoriality: false,
@@ -1211,11 +1229,30 @@ pub fn certify(c: &dyn Converter, suite: &ConformanceSuite) -> ConformanceReport
             tolerance_honest: false,
             measured_error: f64::INFINITY,
             tier: Tier::Rejected,
-            arithmetic,
+            arithmetic: ComparisonEvidence {
+                schema_version: CONFORM_ARITHMETIC_SCHEMA_VERSION,
+                rung: ArithmeticRung::ExactSuperaccumulator,
+                terms: 0,
+                dimension: c.source_dim(),
+                first_refusal: None,
+            },
             findings,
         };
     }
+    assemble_axiom_report(c, suite, declared_error, Vec::new())
+}
 
+/// Shared tail of both certification lanes: run the three axiom checks over
+/// the supplied converter view, assemble typed arithmetic evidence, findings,
+/// and the tier. `pre_findings` carries lane-specific admissions ahead of the
+/// axiom findings. No user code runs here for the contained lane — its
+/// converter view is a frozen transcript table.
+fn assemble_axiom_report(
+    c: &dyn Converter,
+    suite: &ConformanceSuite,
+    declared_error: f64,
+    mut findings: Vec<String>,
+) -> ConformanceReport {
     let (functoriality, functoriality_findings) = evaluate_functoriality(c, suite);
     findings.extend(functoriality_findings);
     let adjoint_outcome = if suite.adjoint_pairs.is_empty() {
@@ -1323,14 +1360,14 @@ fn receipt_fold(acc: &mut u64, word: u64) {
 #[must_use]
 pub fn arithmetic_receipt_hash() -> u64 {
     const TOL: f64 = 1e-9;
-    let mut acc: u64 = 0xcbf2_9ce4_8422_2325;
+    type Witness = (usize, usize, Vec<f64>, Vec<f64>, f64);
 
     struct Scale {
         source_dim: usize,
         target_dim: usize,
     }
     impl Converter for Scale {
-        fn id(&self) -> &str {
+        fn id(&self) -> &'static str {
             "receipt-scale"
         }
         fn source_dim(&self) -> usize {
@@ -1356,8 +1393,10 @@ pub fn arithmetic_receipt_hash() -> u64 {
         }
     }
 
+    let mut acc: u64 = 0xcbf2_9ce4_8422_2325;
+
     // (source_dim, target_dim, x, y, tol) — distinct decision classes.
-    let witnesses: [(usize, usize, Vec<f64>, Vec<f64>, f64); 6] = [
+    let witnesses: [Witness; 6] = [
         // Exact cancellation to zero on both dot sides.
         (2, 2, vec![9.0, -9.0], vec![5.0, 5.0], TOL),
         // Underflowing products (2^-1078): f64 flushes to zero, bins do not.
@@ -1413,8 +1452,8 @@ pub fn arithmetic_receipt_hash() -> u64 {
     // integer words, order-fixed, identical on every ISA.
     let mut lhs = ExactSignedSum::ZERO;
     let mut rhs = ExactSignedSum::ZERO;
-    let applied = vec![2.0, -6.0];
-    let adjoint = vec![1.0, 12.0];
+    let applied = [2.0, -6.0];
+    let adjoint = [1.0, 12.0];
     for (&a, &b) in applied.iter().zip(&cy_fixture()) {
         assert!(lhs.add_product(a, b));
     }
@@ -1456,6 +1495,1195 @@ const fn reason_code(reason: ArithmeticRefusal) -> u64 {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Contained execution boundary
+// (bead frankensim-contain-fs-conform-callbacks-6bc6g)
+//
+// The legacy [`Converter`] trait executes arbitrary caller code with no fault
+// containment, no resource admission, and no binding between the transcript a
+// certification run observed and whatever the same object does later. This
+// section adds the certifiable lane: every callback invocation runs under an
+// admitted work envelope with panic containment and typed failure classes,
+// produces a canonical transcript record, and must replay byte-identically
+// under witness permutation before any tier above `Rejected` can be minted.
+//
+// HONEST CONTAINMENT LIMITS: `catch_unwind` contains Rust panics only. It
+// CANNOT contain `abort`, allocation failure (OOM), native undefined
+// behavior, or nontermination. A bounded-callback tier therefore claims
+// fault-typed, budget-bounded, replay-verified TRANSCRIPT evidence — never
+// hard isolation. A real process/guest isolation boundary remains explicitly
+// out of scope and feature-gated future work.
+// ---------------------------------------------------------------------------
+
+/// Stable schema version of the contained-execution protocol.
+pub const CONTAINED_PROTOCOL_SCHEMA_VERSION: u32 = 1;
+
+/// Refusal reasons for sealing an [`ImplementationIdentity`]. Admission is
+/// fail-closed: an identity that cannot be validated never reaches execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdentityRefusal {
+    /// The converter id string was empty.
+    EmptyConverterId,
+    /// Declared error was not finite.
+    NonFiniteDeclaredError,
+    /// Declared error was negative.
+    NegativeDeclaredError,
+    /// Source dimension was zero.
+    ZeroSourceDimension,
+    /// Target dimension was zero.
+    ZeroTargetDimension,
+    /// `max_calls` was zero: at least one call must be admitted.
+    ZeroMaxCalls,
+    /// The output budget cannot hold one declared output vector.
+    InsufficientOutputBudget {
+        /// Largest output length one call can produce.
+        required: usize,
+    },
+    /// The work budget cannot fund even the smallest legal call.
+    WorkEnvelopeTooSmall {
+        /// Minimum work units one minimal call needs.
+        required: usize,
+    },
+}
+
+/// Declared per-pass execution envelope for one converter. Both certification
+/// passes (original and permuted replay) receive a fresh budget of this size;
+/// a pass that exceeds it fails closed with a typed fault.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorkEnvelope {
+    /// Maximum number of callback invocations admitted per pass.
+    pub max_calls: usize,
+    /// Maximum total f64 elements read plus written per pass.
+    pub max_work_units: usize,
+    /// Maximum length of any single output vector.
+    pub max_output_len: usize,
+}
+
+/// Deterministic seed policy. A converter that derives randomness MUST derive
+/// it from this fixed seed; ambient entropy would be caught by the replay
+/// audit as nondeterminism, but declaring the policy up front makes the
+/// identity self-describing and folds the seed into every receipt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SeedPolicy {
+    /// One fixed u64 seed for the whole certification run.
+    Fixed(u64),
+}
+
+/// Immutable, content-bound identity of one converter implementation. The
+/// digest folds every field with distinct tags via FNV-1a — the same
+/// deterministic-correlation class as the arithmetic receipts (NOT
+/// cryptographic; see the crate contract). Any change to id, dimensions,
+/// declared error, seed policy, or envelope changes the digest and therefore
+/// every transcript receipt derived from it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImplementationIdentity {
+    /// Stable converter id stamped on the tier.
+    pub converter_id: String,
+    /// Source chart dimension.
+    pub source_dim: usize,
+    /// Target chart dimension.
+    pub target_dim: usize,
+    /// Raw bit pattern of the declared error bound.
+    pub declared_error_bits: u64,
+    /// Declared deterministic seed policy.
+    pub seed_policy: SeedPolicy,
+    /// Declared per-pass work envelope.
+    pub envelope: WorkEnvelope,
+    /// FNV-1a digest over all fields above plus the protocol version.
+    pub digest: u64,
+}
+
+impl ImplementationIdentity {
+    /// Validate every field and seal the immutable identity. Fails closed on
+    /// any field that could make later admission or execution ill-defined.
+    pub fn seal(
+        converter_id: &str,
+        source_dim: usize,
+        target_dim: usize,
+        declared_error: f64,
+        seed_policy: SeedPolicy,
+        envelope: WorkEnvelope,
+    ) -> Result<ImplementationIdentity, IdentityRefusal> {
+        if converter_id.is_empty() {
+            return Err(IdentityRefusal::EmptyConverterId);
+        }
+        if !declared_error.is_finite() {
+            return Err(IdentityRefusal::NonFiniteDeclaredError);
+        }
+        if declared_error < 0.0 {
+            return Err(IdentityRefusal::NegativeDeclaredError);
+        }
+        if source_dim == 0 {
+            return Err(IdentityRefusal::ZeroSourceDimension);
+        }
+        if target_dim == 0 {
+            return Err(IdentityRefusal::ZeroTargetDimension);
+        }
+        if envelope.max_calls == 0 {
+            return Err(IdentityRefusal::ZeroMaxCalls);
+        }
+        let widest_output = source_dim.max(target_dim);
+        if envelope.max_output_len < widest_output {
+            return Err(IdentityRefusal::InsufficientOutputBudget {
+                required: widest_output,
+            });
+        }
+        let min_work = source_dim.saturating_add(target_dim);
+        if envelope.max_work_units < min_work {
+            return Err(IdentityRefusal::WorkEnvelopeTooSmall { required: min_work });
+        }
+        let mut acc = u64::from(CONTAINED_PROTOCOL_SCHEMA_VERSION)
+            .wrapping_mul(0x0000_0100_0000_01b3)
+            .wrapping_add(0x2d5c_1a4b);
+        receipt_fold(&mut acc, 0x6964_656e_7469_7479); // tag "identity"
+        fold_str(&mut acc, converter_id);
+        receipt_fold(&mut acc, source_dim as u64);
+        receipt_fold(&mut acc, target_dim as u64);
+        receipt_fold(&mut acc, declared_error.to_bits());
+        receipt_fold(
+            &mut acc,
+            match seed_policy {
+                SeedPolicy::Fixed(seed) => seed,
+            },
+        );
+        receipt_fold(&mut acc, envelope.max_calls as u64);
+        receipt_fold(&mut acc, envelope.max_work_units as u64);
+        receipt_fold(&mut acc, envelope.max_output_len as u64);
+        Ok(ImplementationIdentity {
+            converter_id: converter_id.to_string(),
+            source_dim,
+            target_dim,
+            declared_error_bits: declared_error.to_bits(),
+            seed_policy,
+            envelope,
+            digest: acc,
+        })
+    }
+
+    /// The declared error bound reconstructed from its sealed bits.
+    #[must_use]
+    pub fn declared_error(&self) -> f64 {
+        f64::from_bits(self.declared_error_bits)
+    }
+
+    /// Re-seal from fields and compare digests. Runtime use verifies an
+    /// incoming identity this way before accepting any tier, closing the
+    /// time-of-check versus time-of-use hole on hand-built identities.
+    #[must_use]
+    pub fn verify(&self) -> bool {
+        Self::seal(
+            &self.converter_id,
+            self.source_dim,
+            self.target_dim,
+            self.declared_error(),
+            self.seed_policy,
+            self.envelope,
+        )
+        .is_ok_and(|resealed| resealed.digest == self.digest)
+    }
+}
+
+fn fold_str(acc: &mut u64, value: &str) {
+    receipt_fold(acc, value.len() as u64);
+    for byte in value.as_bytes() {
+        receipt_fold(acc, u64::from(*byte));
+    }
+}
+
+/// Which role a converter plays in a certification run. The main converter is
+/// the candidate being certified; composition witnesses execute two further
+/// converters whose transcripts are bound into the same receipt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum TranscriptRole {
+    Main = 0,
+    After = 1,
+    Direct = 2,
+}
+
+/// Which protocol method produced one transcript record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum TranscriptKind {
+    Apply = 0,
+    Adjoint = 1,
+}
+
+/// One canonical transcript record: role, kind, input bits, output bits.
+/// Bit patterns (not float equality) are compared so `-0.0` and `+0.0`
+/// inputs/outputs can never silently alias.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TranscriptRecord {
+    role: TranscriptRole,
+    kind: TranscriptKind,
+    input_bits: Vec<u64>,
+    output_bits: Vec<u64>,
+}
+
+impl TranscriptRecord {
+    fn key(&self) -> (u8, u8, &[u64], &[u64]) {
+        (
+            self.role as u8,
+            self.kind as u8,
+            &self.input_bits[..],
+            &self.output_bits[..],
+        )
+    }
+}
+
+fn sort_records(records: &mut [TranscriptRecord]) {
+    records.sort_by(|left, right| left.key().cmp(&right.key()));
+}
+
+/// Typed failure of one bounded callback invocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallFault {
+    /// Input vector had the wrong dimension.
+    InputDimension {
+        /// Expected dimension.
+        expected: usize,
+        /// Observed dimension.
+        got: usize,
+    },
+    /// First non-finite input element site.
+    NonFiniteInput {
+        /// Element index.
+        index: usize,
+    },
+    /// Output vector had the wrong dimension.
+    OutputDimension {
+        /// Expected dimension.
+        expected: usize,
+        /// Observed dimension.
+        got: usize,
+    },
+    /// First non-finite output element site.
+    NonFiniteOutput {
+        /// Element index.
+        index: usize,
+    },
+    /// The call budget of this pass ran out.
+    CallBudgetExhausted,
+    /// The work budget of this pass ran out.
+    WorkBudgetExhausted,
+    /// An output vector exceeded the declared output budget.
+    OutputBudgetExceeded {
+        /// Declared maximum output length.
+        max: usize,
+    },
+    /// The callback panicked. The panic payload is deliberately dropped: its
+    /// contents are arbitrary host state, not deterministic diagnostics.
+    /// This contains unwinding only — never abort, OOM, UB, or loops.
+    Panicked,
+}
+
+/// Budget meter charged by bounded calls. Implementors of
+/// [`ContainedConverter`] drive it through [`CallBudget::begin_call`] and
+/// [`CallBudget::complete_call`]; the certification executor creates one per
+/// pass from the sealed envelope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CallBudget {
+    calls_left: usize,
+    work_left: usize,
+}
+
+impl CallBudget {
+    /// A fresh budget for one pass over the declared envelope.
+    #[must_use]
+    pub fn new(envelope: WorkEnvelope) -> CallBudget {
+        CallBudget {
+            calls_left: envelope.max_calls,
+            work_left: envelope.max_work_units,
+        }
+    }
+
+    /// Admit one call reading `input_len` input elements. Charges the call
+    /// count and the input read against the budget.
+    ///
+    /// # Errors
+    /// [`CallFault::CallBudgetExhausted`] when no calls remain,
+    /// [`CallFault::WorkBudgetExhausted`] when the input cannot be funded.
+    pub fn begin_call(&mut self, input_len: usize) -> Result<(), CallFault> {
+        if self.calls_left == 0 {
+            return Err(CallFault::CallBudgetExhausted);
+        }
+        if self.work_left < input_len {
+            return Err(CallFault::WorkBudgetExhausted);
+        }
+        self.calls_left -= 1;
+        self.work_left -= input_len;
+        Ok(())
+    }
+
+    /// Charge the observed output length after the callback returned.
+    pub fn complete_call(
+        &mut self,
+        envelope: WorkEnvelope,
+        output_len: usize,
+    ) -> Result<(), CallFault> {
+        if output_len > envelope.max_output_len {
+            return Err(CallFault::OutputBudgetExceeded {
+                max: envelope.max_output_len,
+            });
+        }
+        if self.work_left < output_len {
+            return Err(CallFault::WorkBudgetExhausted);
+        }
+        self.work_left -= output_len;
+        Ok(())
+    }
+}
+
+/// The certifiable converter protocol. Every method is fallible and
+/// budget-metered; outputs land in caller-provided storage instead of fresh
+/// allocations chosen by untrusted code.
+pub trait ContainedConverter {
+    /// The immutable implementation identity this object is bound to.
+    fn identity(&self) -> &ImplementationIdentity;
+    /// Bounded forward application (source → target).
+    ///
+    /// # Errors
+    /// Returns a typed [`CallFault`] for dimension/finiteness violations,
+    /// budget exhaustion, or a contained panic. `out` is cleared first and
+    /// left empty unless the call completed successfully.
+    fn apply_bounded(
+        &self,
+        x: &[f64],
+        out: &mut Vec<f64>,
+        budget: &mut CallBudget,
+    ) -> Result<(), CallFault>;
+    /// Bounded declared adjoint (target → source), same contract as
+    /// [`ContainedConverter::apply_bounded`].
+    ///
+    /// # Errors
+    /// Returns a typed [`CallFault`] under the same conditions.
+    fn adjoint_bounded(
+        &self,
+        y: &[f64],
+        out: &mut Vec<f64>,
+        budget: &mut CallBudget,
+    ) -> Result<(), CallFault>;
+}
+
+fn validate_input(input: &[f64], expected: usize) -> Result<(), CallFault> {
+    if input.len() != expected {
+        return Err(CallFault::InputDimension {
+            expected,
+            got: input.len(),
+        });
+    }
+    for (index, value) in input.iter().enumerate() {
+        if !value.is_finite() {
+            return Err(CallFault::NonFiniteInput { index });
+        }
+    }
+    Ok(())
+}
+
+fn validate_output(output: &[f64], expected: usize) -> Result<(), CallFault> {
+    if output.len() != expected {
+        return Err(CallFault::OutputDimension {
+            expected,
+            got: output.len(),
+        });
+    }
+    for (index, value) in output.iter().enumerate() {
+        if !value.is_finite() {
+            return Err(CallFault::NonFiniteOutput { index });
+        }
+    }
+    Ok(())
+}
+
+fn bits(values: &[f64]) -> Vec<u64> {
+    values.iter().map(|value| value.to_bits()).collect()
+}
+
+fn bits_eq(left: &[f64], right: &[u64]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right.iter())
+            .all(|(a, b)| a.to_bits() == *b)
+}
+
+/// Adapter binding a legacy [`Converter`] trait object into the contained
+/// protocol. Dimension and finiteness validation, budget charging, output
+/// storage, and panic containment happen HERE, not inside trusted code.
+pub struct BoundedCallback<'a> {
+    inner: &'a dyn Converter,
+    identity: ImplementationIdentity,
+}
+
+impl<'a> BoundedCallback<'a> {
+    /// Bind a legacy converter under a sealed identity. Fails closed when the
+    /// declaration cannot be validated.
+    ///
+    /// # Errors
+    /// Returns [`IdentityRefusal`] when any identity field is invalid.
+    pub fn bind(
+        inner: &'a dyn Converter,
+        seed_policy: SeedPolicy,
+        envelope: WorkEnvelope,
+    ) -> Result<BoundedCallback<'a>, IdentityRefusal> {
+        let identity = ImplementationIdentity::seal(
+            inner.id(),
+            inner.source_dim(),
+            inner.target_dim(),
+            inner.declared_error(),
+            seed_policy,
+            envelope,
+        )?;
+        Ok(BoundedCallback { inner, identity })
+    }
+
+    fn invoke(
+        &self,
+        kind: TranscriptKind,
+        input: &[f64],
+        out: &mut Vec<f64>,
+    ) -> Result<(), CallFault> {
+        let expected_in = match kind {
+            TranscriptKind::Apply => self.identity.source_dim,
+            TranscriptKind::Adjoint => self.identity.target_dim,
+        };
+        let expected_out = match kind {
+            TranscriptKind::Apply => self.identity.target_dim,
+            TranscriptKind::Adjoint => self.identity.source_dim,
+        };
+        validate_input(input, expected_in)?;
+        out.clear();
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match kind {
+            TranscriptKind::Apply => self.inner.apply(input),
+            TranscriptKind::Adjoint => self.inner.adjoint(input),
+        }));
+        match outcome {
+            Ok(produced) => {
+                *out = produced;
+            }
+            Err(payload) => {
+                drop(payload);
+                out.clear();
+                return Err(CallFault::Panicked);
+            }
+        }
+        validate_output(out, expected_out)
+    }
+}
+
+impl ContainedConverter for BoundedCallback<'_> {
+    fn identity(&self) -> &ImplementationIdentity {
+        &self.identity
+    }
+
+    fn apply_bounded(
+        &self,
+        x: &[f64],
+        out: &mut Vec<f64>,
+        _budget: &mut CallBudget,
+    ) -> Result<(), CallFault> {
+        self.invoke(TranscriptKind::Apply, x, out)
+    }
+
+    fn adjoint_bounded(
+        &self,
+        y: &[f64],
+        out: &mut Vec<f64>,
+        _budget: &mut CallBudget,
+    ) -> Result<(), CallFault> {
+        self.invoke(TranscriptKind::Adjoint, y, out)
+    }
+}
+
+/// Containment class declared by the caller for this certification run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContainmentClass {
+    /// First-party operator code running through the same bounded path.
+    /// Severity is uniform (R6), but the isolation claim stays "bounded
+    /// callbacks in-process", never "hard isolation".
+    FirstPartyBoundedCallbacks,
+    /// The production third-party lane.
+    ThirdPartyBoundedCallbacks,
+    /// Exploratory adapters. Never executes and never mints a tier.
+    ExploratoryUncontained,
+}
+
+/// Caller-supplied policy for one contained certification run.
+#[derive(Clone, Copy)]
+pub struct ContainmentPolicy<'a> {
+    /// Declared containment class for this run.
+    pub class: ContainmentClass,
+    /// Cooperative cancellation probe checked between witness steps. When it
+    /// returns true the run fails closed with
+    /// [`ExecutionFault::Cancelled`]; cancellation drains cleanly and never
+    /// leaves a partial tier behind.
+    pub cancelled: Option<&'a dyn Fn() -> bool>,
+}
+
+/// Typed failure of a whole contained execution pass.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExecutionFault {
+    /// The cancellation probe fired; the run drained without publishing.
+    Cancelled,
+    /// The suite supplied a composition witness but no contained binding.
+    MissingWitnessBinding,
+    /// A bounded call failed with the typed fault at this step index.
+    Call {
+        /// Index of the failing step within the pass plan.
+        step_index: usize,
+        /// The typed per-call fault.
+        fault: CallFault,
+    },
+    /// Original and permuted-replay transcripts diverged at this position of
+    /// the canonically sorted record sets — typed nondeterminism evidence.
+    NondeterministicReplay {
+        /// Position of the first differing sorted record.
+        first_divergent_record: usize,
+    },
+}
+
+/// Content-addressed evidence about HOW the transcripts were produced. Every
+/// field is deterministic; identical runs across threads, ISAs, and processes
+/// produce equal receipts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutionReceipt {
+    /// Protocol schema version.
+    pub protocol_schema_version: u32,
+    /// Declared containment class of the run.
+    pub class: ContainmentClass,
+    /// Digest of the certified implementation's sealed identity.
+    pub identity_digest: u64,
+    /// Sorted digests of composition-witness identities (after/direct).
+    pub auxiliary_identity_digests: Vec<u64>,
+    /// FNV-1a fold over the full sorted transcript set plus identity context.
+    pub transcript_receipt: u64,
+    /// Did the permuted replay reproduce every record bitwise?
+    pub replay_verified: bool,
+    /// Did both passes complete with no fault and no cancellation?
+    pub drained_cleanly: bool,
+    /// First typed failure, when the run did not drain cleanly.
+    pub first_fault: Option<ExecutionFault>,
+}
+
+/// Result of [`certify_contained`]: the ordinary axiom report plus the
+/// execution receipt that says whether the report may be believed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ContainedCertification {
+    /// The conformance verdict. Its tier is `Rejected` whenever the execution
+    /// receipt shows any fault, cancellation, or nondeterminism.
+    pub report: ConformanceReport,
+    /// The typed execution evidence bound to this run.
+    pub execution: ExecutionReceipt,
+}
+
+/// Why one planned step did not complete.
+enum StepAbort {
+    /// Cancellation probe fired before the step ran.
+    Cancelled,
+    /// The bounded call failed with this typed fault.
+    Call(CallFault),
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn step_fault(step_index: usize, abort: StepAbort) -> ExecutionFault {
+    match abort {
+        StepAbort::Cancelled => ExecutionFault::Cancelled,
+        StepAbort::Call(fault) => ExecutionFault::Call { step_index, fault },
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_one(
+    converter: &dyn ContainedConverter,
+    role: TranscriptRole,
+    kind: TranscriptKind,
+    input: &[f64],
+    records: &mut Vec<TranscriptRecord>,
+    scratch: &mut Vec<f64>,
+    budget: &mut CallBudget,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<f64>, StepAbort> {
+    if cancelled() {
+        return Err(StepAbort::Cancelled);
+    }
+    // Executor-side admission and metering: enforced HERE for every
+    // implementor of the trait, independent of adapter cooperation.
+    let identity = converter.identity();
+    let expected_in = match kind {
+        TranscriptKind::Apply => identity.source_dim,
+        TranscriptKind::Adjoint => identity.target_dim,
+    };
+    if let Err(fault) = validate_input(input, expected_in) {
+        return Err(StepAbort::Call(fault));
+    }
+    if let Err(fault) = budget.begin_call(input.len()) {
+        return Err(StepAbort::Call(fault));
+    }
+    let outcome = match kind {
+        TranscriptKind::Apply => converter.apply_bounded(input, scratch, budget),
+        TranscriptKind::Adjoint => converter.adjoint_bounded(input, scratch, budget),
+    };
+    outcome.map_err(StepAbort::Call)?;
+    let output = std::mem::take(scratch);
+    let expected_out = match kind {
+        TranscriptKind::Apply => identity.target_dim,
+        TranscriptKind::Adjoint => identity.source_dim,
+    };
+    if let Err(fault) = validate_output(&output, expected_out) {
+        *scratch = output;
+        return Err(StepAbort::Call(fault));
+    }
+    if let Err(fault) = budget.complete_call(identity.envelope, output.len()) {
+        *scratch = output;
+        return Err(StepAbort::Call(fault));
+    }
+    records.push(TranscriptRecord {
+        role,
+        kind,
+        input_bits: bits(input),
+        output_bits: bits(&output),
+    });
+    Ok(output)
+}
+
+fn witness_iter<'a, T>(items: &'a [T], reverse: bool) -> Box<dyn Iterator<Item = &'a T> + 'a> {
+    if reverse {
+        Box::new(items.iter().rev())
+    } else {
+        Box::new(items.iter())
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn execute_pass(
+    main: &dyn ContainedConverter,
+    after: Option<&dyn ContainedConverter>,
+    direct: Option<&dyn ContainedConverter>,
+    suite: &ConformanceSuite,
+    policy: ContainmentPolicy<'_>,
+    reverse_witnesses: bool,
+) -> Result<Vec<TranscriptRecord>, ExecutionFault> {
+    let noop = || false;
+    let cancelled: &dyn Fn() -> bool = policy.cancelled.unwrap_or(&noop);
+    let mut budget = CallBudget::new(main.identity().envelope);
+    let mut scratch: Vec<f64> = Vec::new();
+    let mut records: Vec<TranscriptRecord> = Vec::new();
+    let mut step_index: usize = 0;
+
+    // Adjoint pairs: Apply(x_i), then Adjoint(y_i).
+    for pair in witness_iter(&suite.adjoint_pairs, reverse_witnesses) {
+        run_one(
+            main,
+            TranscriptRole::Main,
+            TranscriptKind::Apply,
+            &pair.0,
+            &mut records,
+            &mut scratch,
+            &mut budget,
+            cancelled,
+        )
+        .map_err(|abort| step_fault(step_index, abort))?;
+        step_index += 1;
+        run_one(
+            main,
+            TranscriptRole::Main,
+            TranscriptKind::Adjoint,
+            &pair.1,
+            &mut records,
+            &mut scratch,
+            &mut budget,
+            cancelled,
+        )
+        .map_err(|abort| step_fault(step_index, abort))?;
+        step_index += 1;
+    }
+
+    // Manufactured tolerance-honesty cases.
+    for case in witness_iter(&suite.manufactured, reverse_witnesses) {
+        run_one(
+            main,
+            TranscriptRole::Main,
+            TranscriptKind::Apply,
+            &case.input,
+            &mut records,
+            &mut scratch,
+            &mut budget,
+            cancelled,
+        )
+        .map_err(|abort| step_fault(step_index, abort))?;
+        step_index += 1;
+    }
+
+    // Composition probes: Main(p) -> After(main_out) -> Direct(p). The chain
+    // is data-dependent by definition, so it is built during execution; both
+    // passes build the same structure because replay compares canonicalized
+    // record multisets, not raw orders.
+    let probes: &[Vec<f64>] = suite
+        .composition
+        .as_ref()
+        .map_or(&[], |composition| composition.probes.as_slice());
+    for probe in witness_iter(probes, reverse_witnesses) {
+        let mid = run_one(
+            main,
+            TranscriptRole::Main,
+            TranscriptKind::Apply,
+            probe,
+            &mut records,
+            &mut scratch,
+            &mut budget,
+            cancelled,
+        )
+        .map_err(|abort| step_fault(step_index, abort))?;
+        step_index += 1;
+        let Some(after_converter) = after else {
+            return Err(ExecutionFault::MissingWitnessBinding);
+        };
+        run_one(
+            after_converter,
+            TranscriptRole::After,
+            TranscriptKind::Apply,
+            &mid,
+            &mut records,
+            &mut scratch,
+            &mut budget,
+            cancelled,
+        )
+        .map_err(|abort| step_fault(step_index, abort))?;
+        step_index += 1;
+        let Some(direct_converter) = direct else {
+            return Err(ExecutionFault::MissingWitnessBinding);
+        };
+        run_one(
+            direct_converter,
+            TranscriptRole::Direct,
+            TranscriptKind::Apply,
+            probe,
+            &mut records,
+            &mut scratch,
+            &mut budget,
+            cancelled,
+        )
+        .map_err(|abort| step_fault(step_index, abort))?;
+        step_index += 1;
+    }
+
+    // Identity witness probes.
+    if let Some(identity_probes) = &suite.identity {
+        for probe in witness_iter(identity_probes, reverse_witnesses) {
+            run_one(
+                main,
+                TranscriptRole::Main,
+                TranscriptKind::Apply,
+                probe,
+                &mut records,
+                &mut scratch,
+                &mut budget,
+                cancelled,
+            )
+            .map_err(|abort| step_fault(step_index, abort))?;
+            step_index += 1;
+        }
+    }
+
+    if cancelled() {
+        return Err(ExecutionFault::Cancelled);
+    }
+    Ok(records)
+}
+
+/// Read-only view over one frozen transcript set. Implements [`Converter`]
+/// purely by table lookup so every downstream axiom check runs against the
+/// FROZEN transcript instead of live user code — zero callbacks execute
+/// during certification arithmetic.
+struct ReplayTable {
+    identity: ImplementationIdentity,
+    role: TranscriptRole,
+    records: Vec<TranscriptRecord>,
+}
+
+impl ReplayTable {
+    fn lookup(&self, kind: TranscriptKind, input: &[f64]) -> Vec<f64> {
+        for record in &self.records {
+            if record.role == self.role && record.kind == kind && bits_eq(input, &record.input_bits)
+            {
+                return record
+                    .output_bits
+                    .iter()
+                    .map(|word| f64::from_bits(*word))
+                    .collect();
+            }
+        }
+        Vec::new()
+    }
+}
+
+impl Converter for ReplayTable {
+    fn id(&self) -> &str {
+        &self.identity.converter_id
+    }
+
+    fn source_dim(&self) -> usize {
+        self.identity.source_dim
+    }
+
+    fn target_dim(&self) -> usize {
+        self.identity.target_dim
+    }
+
+    fn apply(&self, x: &[f64]) -> Vec<f64> {
+        self.lookup(TranscriptKind::Apply, x)
+    }
+
+    fn adjoint(&self, y: &[f64]) -> Vec<f64> {
+        self.lookup(TranscriptKind::Adjoint, y)
+    }
+
+    fn declared_error(&self) -> f64 {
+        self.identity.declared_error()
+    }
+}
+
+/// Contained bindings for both auxiliary converters of a composition
+/// witness, sealed under one seed/envelope policy.
+pub struct CompositionBindings<'a> {
+    /// The converter applied AFTER the candidate (target chart onward).
+    pub after: BoundedCallback<'a>,
+    /// The claimed direct converter (source chart to the composed target).
+    pub direct: BoundedCallback<'a>,
+}
+
+/// Bind a composition witness's auxiliary converters for the contained lane.
+///
+/// # Errors
+/// Returns [`IdentityRefusal`] when either auxiliary identity is invalid.
+pub fn bind_composition<'a>(
+    composition: &'a Composition<'a>,
+    seed_policy: SeedPolicy,
+    envelope: WorkEnvelope,
+) -> Result<CompositionBindings<'a>, IdentityRefusal> {
+    Ok(CompositionBindings {
+        after: BoundedCallback::bind(composition.after, seed_policy, envelope)?,
+        direct: BoundedCallback::bind(composition.direct, seed_policy, envelope)?,
+    })
+}
+
+fn fold_record(acc: &mut u64, record: &TranscriptRecord) {
+    receipt_fold(acc, u64::from(record.role as u8));
+    receipt_fold(acc, u64::from(record.kind as u8));
+    receipt_fold(acc, record.input_bits.len() as u64);
+    for word in &record.input_bits {
+        receipt_fold(acc, *word);
+    }
+    receipt_fold(acc, record.output_bits.len() as u64);
+    for word in &record.output_bits {
+        receipt_fold(acc, *word);
+    }
+}
+
+fn transcript_receipt(
+    class: ContainmentClass,
+    identity_digest: u64,
+    auxiliary: &[u64],
+    seed_policy: SeedPolicy,
+    sorted_records: &[TranscriptRecord],
+) -> u64 {
+    let mut acc = 0x243f_6a88_85a3_08d3;
+    receipt_fold(&mut acc, u64::from(CONTAINED_PROTOCOL_SCHEMA_VERSION));
+    receipt_fold(
+        &mut acc,
+        match class {
+            ContainmentClass::FirstPartyBoundedCallbacks => 1,
+            ContainmentClass::ThirdPartyBoundedCallbacks => 2,
+            ContainmentClass::ExploratoryUncontained => 3,
+        },
+    );
+    receipt_fold(&mut acc, identity_digest);
+    receipt_fold(&mut acc, auxiliary.len() as u64);
+    for digest in auxiliary {
+        receipt_fold(&mut acc, *digest);
+    }
+    receipt_fold(
+        &mut acc,
+        match seed_policy {
+            SeedPolicy::Fixed(seed) => seed,
+        },
+    );
+    receipt_fold(&mut acc, sorted_records.len() as u64);
+    for record in sorted_records {
+        fold_record(&mut acc, record);
+    }
+    acc
+}
+
+fn first_divergence(a: &[TranscriptRecord], b: &[TranscriptRecord]) -> Option<usize> {
+    if a.len() != b.len() {
+        return Some(a.len().min(b.len()));
+    }
+    for (index, (left, right)) in a.iter().zip(b.iter()).enumerate() {
+        if left.key() != right.key() {
+            return Some(index);
+        }
+    }
+    None
+}
+
+fn refused_report(identity: &ImplementationIdentity, finding: String) -> ConformanceReport {
+    ConformanceReport {
+        converter: identity.converter_id.clone(),
+        functoriality: false,
+        adjoint_consistent: false,
+        tolerance_honest: false,
+        measured_error: f64::INFINITY,
+        tier: Tier::Rejected,
+        arithmetic: ComparisonEvidence {
+            schema_version: CONFORM_ARITHMETIC_SCHEMA_VERSION,
+            rung: ArithmeticRung::ExactSuperaccumulator,
+            terms: 0,
+            dimension: identity.source_dim,
+            first_refusal: None,
+        },
+        findings: vec![finding],
+    }
+}
+
+fn describe_fault(fault: &ExecutionFault) -> String {
+    match fault {
+        ExecutionFault::Cancelled => {
+            "containment: cancelled before a clean drain; no tier published".to_string()
+        }
+        ExecutionFault::Call { step_index, fault } => {
+            format!("containment: bounded call at step {step_index} failed: {fault:?}")
+        }
+        ExecutionFault::NondeterministicReplay {
+            first_divergent_record,
+        } => format!(
+            "containment: permuted replay diverged at sorted record \
+             {first_divergent_record}; typed nondeterminism evidence"
+        ),
+        ExecutionFault::MissingWitnessBinding => {
+            "containment: composition witness lacks a contained binding".to_string()
+        }
+    }
+}
+
+fn fail_closed(
+    identity: &ImplementationIdentity,
+    class: ContainmentClass,
+    auxiliary_identity_digests: Vec<u64>,
+    fault: ExecutionFault,
+) -> ContainedCertification {
+    let finding = describe_fault(&fault);
+    let execution = ExecutionReceipt {
+        protocol_schema_version: CONTAINED_PROTOCOL_SCHEMA_VERSION,
+        class,
+        identity_digest: identity.digest,
+        auxiliary_identity_digests,
+        transcript_receipt: 0,
+        replay_verified: false,
+        drained_cleanly: false,
+        first_fault: Some(fault),
+    };
+    ContainedCertification {
+        report: refused_report(identity, finding),
+        execution,
+    }
+}
+
+/// Certify a converter through the CONTAINED lane: every callback runs under
+/// an admitted envelope with panic containment and typed failure classes,
+/// every invocation is transcribed, the permuted replay must reproduce the
+/// transcript bitwise, and the axiom checks then run against the frozen
+/// transcript table — never against live user code. A tier above `Rejected`
+/// is minted ONLY when execution drained cleanly and replay verified; any
+/// fault, cancellation, or nondeterminism fails closed with typed evidence
+/// and no partial positive tier.
+///
+/// The declared error bound is taken from the sealed IDENTITY, not from the
+/// live object, so a mutable implementation cannot change its declaration
+/// between certification and use.
+#[allow(clippy::too_many_lines)]
+#[must_use]
+pub fn certify_contained(
+    candidate: &dyn ContainedConverter,
+    witnesses: Option<&CompositionBindings<'_>>,
+    suite: &ConformanceSuite,
+    policy: ContainmentPolicy<'_>,
+) -> ContainedCertification {
+    let identity = candidate.identity();
+    let auxiliary_identity_digests: Vec<u64> = witnesses.map_or_else(Vec::new, |bindings| {
+        let mut digests = vec![
+            bindings.after.identity.digest,
+            bindings.direct.identity.digest,
+        ];
+        digests.sort_unstable();
+        digests
+    });
+
+    // Admission: exploratory adapters never execute and never mint tiers.
+    if policy.class == ContainmentClass::ExploratoryUncontained {
+        return ContainedCertification {
+            report: refused_report(
+                identity,
+                "admission: exploratory uncontained adapters cannot enter the certified lane"
+                    .to_string(),
+            ),
+            execution: refused_receipt(policy.class, identity, auxiliary_identity_digests),
+        };
+    }
+    // Admission: re-seal verification closes TOCTOU on hand-built identities.
+    if !identity.verify() {
+        return ContainedCertification {
+            report: refused_report(
+                identity,
+                "admission: implementation identity failed re-seal verification".to_string(),
+            ),
+            execution: refused_receipt(policy.class, identity, auxiliary_identity_digests),
+        };
+    }
+    // Admission: a composition witness in the suite needs contained bindings.
+    if suite.composition.is_some() && witnesses.is_none() {
+        return ContainedCertification {
+            report: refused_report(
+                identity,
+                "admission: composition witness present without contained bindings".to_string(),
+            ),
+            execution: refused_receipt(policy.class, identity, auxiliary_identity_digests),
+        };
+    }
+
+    let (after_conv, direct_conv): (
+        Option<&dyn ContainedConverter>,
+        Option<&dyn ContainedConverter>,
+    ) = match witnesses {
+        Some(bindings) => (Some(&bindings.after), Some(&bindings.direct)),
+        None => (None, None),
+    };
+
+    // Pass A: canonical witness order. Pass B: permuted witnesses, fresh
+    // budgets. Either pass aborting fails closed with typed evidence.
+    let sorted_a = match run_both_passes(candidate, after_conv, direct_conv, suite, policy) {
+        Ok(records) => records,
+        Err(fault) => {
+            return fail_closed(identity, policy.class, auxiliary_identity_digests, fault);
+        }
+    };
+
+    let receipt_value = transcript_receipt(
+        policy.class,
+        identity.digest,
+        &auxiliary_identity_digests,
+        identity.seed_policy,
+        &sorted_a,
+    );
+
+    // Frozen tables: certification arithmetic reads transcripts only.
+    let main_table = ReplayTable {
+        identity: identity.clone(),
+        role: TranscriptRole::Main,
+        records: sorted_a.clone(),
+    };
+    let after_table = ReplayTable {
+        identity: witnesses.map_or_else(
+            || identity.clone(),
+            |bindings| bindings.after.identity.clone(),
+        ),
+        role: TranscriptRole::After,
+        records: sorted_a.clone(),
+    };
+    let direct_table = ReplayTable {
+        identity: witnesses.map_or_else(
+            || identity.clone(),
+            |bindings| bindings.direct.identity.clone(),
+        ),
+        role: TranscriptRole::Direct,
+        records: sorted_a,
+    };
+    let assembled = ConformanceSuite {
+        adjoint_pairs: suite.adjoint_pairs.clone(),
+        manufactured: suite.manufactured.clone(),
+        composition: suite.composition.as_ref().map(|_| Composition {
+            after: &after_table,
+            direct: &direct_table,
+            probes: suite
+                .composition
+                .as_ref()
+                .map_or(Vec::new(), |composition| composition.probes.clone()),
+        }),
+        identity: suite.identity.clone(),
+        tolerance: suite.tolerance,
+    };
+    let report = assemble_axiom_report(
+        &main_table,
+        &assembled,
+        identity.declared_error(),
+        Vec::new(),
+    );
+    let execution = ExecutionReceipt {
+        protocol_schema_version: CONTAINED_PROTOCOL_SCHEMA_VERSION,
+        class: policy.class,
+        identity_digest: identity.digest,
+        auxiliary_identity_digests,
+        transcript_receipt: receipt_value,
+        replay_verified: true,
+        drained_cleanly: true,
+        first_fault: None,
+    };
+    ContainedCertification { report, execution }
+}
+
+fn refused_receipt(
+    class: ContainmentClass,
+    identity: &ImplementationIdentity,
+    auxiliary_identity_digests: Vec<u64>,
+) -> ExecutionReceipt {
+    ExecutionReceipt {
+        protocol_schema_version: CONTAINED_PROTOCOL_SCHEMA_VERSION,
+        class,
+        identity_digest: identity.digest,
+        auxiliary_identity_digests,
+        transcript_receipt: 0,
+        replay_verified: false,
+        drained_cleanly: false,
+        first_fault: None,
+    }
+}
+
+fn run_both_passes(
+    candidate: &dyn ContainedConverter,
+    after: Option<&dyn ContainedConverter>,
+    direct: Option<&dyn ContainedConverter>,
+    suite: &ConformanceSuite,
+    policy: ContainmentPolicy<'_>,
+) -> Result<Vec<TranscriptRecord>, ExecutionFault> {
+    let pass_a = execute_pass(candidate, after, direct, suite, policy, false)?;
+    let pass_b = execute_pass(candidate, after, direct, suite, policy, true)?;
+    let mut sorted_a = pass_a;
+    sort_records(&mut sorted_a);
+    let mut sorted_b = pass_b;
+    sort_records(&mut sorted_b);
+    if let Some(first_divergent_record) = first_divergence(&sorted_a, &sorted_b) {
+        return Err(ExecutionFault::NondeterministicReplay {
+            first_divergent_record,
+        });
+    }
+    Ok(sorted_a)
+}
+
+/// Convenience: bind a legacy trait object under a sealed identity and run
+/// the contained lane in one call. Suites carrying a composition witness
+/// additionally need [`bind_composition`] and the plain [`certify_contained`]
+/// entry point.
+///
+/// # Errors
+/// Returns [`IdentityRefusal`] when the candidate's identity is invalid.
+pub fn certify_contained_legacy(
+    candidate: &dyn Converter,
+    suite: &ConformanceSuite,
+    seed_policy: SeedPolicy,
+    envelope: WorkEnvelope,
+    policy: ContainmentPolicy<'_>,
+) -> Result<ContainedCertification, IdentityRefusal> {
+    let bound = BoundedCallback::bind(candidate, seed_policy, envelope)?;
+    Ok(certify_contained(&bound, None, suite, policy))
+}
 #[cfg(test)]
 mod arithmetic_tests {
     use super::*;

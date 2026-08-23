@@ -993,6 +993,7 @@ fn g3_generated_conversion_paths_agree_exactly() {
 /// the converter; the exact superaccumulator decides it honestly.
 struct TinyDiagonal;
 impl Converter for TinyDiagonal {
+    #[allow(clippy::unnecessary_literal_bound)] // Trait signature ties id to &self; the body is a 'static literal.
     fn id(&self) -> &str {
         "tiny-diagonal"
     }
@@ -1068,6 +1069,7 @@ fn exact_adjoint_dimension_budget_refuses_max_plus_one() {
     // allocates only the one refused witness pair.
     struct Oversized;
     impl Converter for Oversized {
+        #[allow(clippy::unnecessary_literal_bound)] // Trait signature ties id to &self; the body is a 'static literal.
         fn id(&self) -> &str {
             "oversized"
         }
@@ -1106,6 +1108,7 @@ fn zero_tolerance_decides_exact_equality_not_approximate() {
     // an approximate DD delta might round onto equality.
     struct OneUlpAdjoint;
     impl Converter for OneUlpAdjoint {
+        #[allow(clippy::unnecessary_literal_bound)] // Trait signature ties id to &self; the body is a 'static literal.
         fn id(&self) -> &str {
             "one-ulp-adjoint"
         }
@@ -1149,5 +1152,630 @@ fn g3_adjoint_verdict_is_independent_of_pair_order() {
     assert_eq!(
         check_adjoint_with_evidence(&TinyDiagonal, &reordered, 0.0).status,
         ExactStatus::Holds
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Contained execution lane (bead
+// frankensim-contain-fs-conform-callbacks-6bc6g).
+// ---------------------------------------------------------------------------
+
+use std::cell::Cell;
+
+use fs_conform::{
+    BoundedCallback, ContainedConverter, ContainmentClass, ContainmentPolicy, ExecutionFault,
+    ImplementationIdentity, SeedPolicy, WorkEnvelope, bind_composition, certify_contained,
+    certify_contained_legacy,
+};
+
+fn contained_envelope() -> WorkEnvelope {
+    WorkEnvelope {
+        max_calls: 64,
+        max_work_units: 4096,
+        max_output_len: 16,
+    }
+}
+
+fn third_party_policy() -> ContainmentPolicy<'static> {
+    ContainmentPolicy {
+        class: ContainmentClass::ThirdPartyBoundedCallbacks,
+        cancelled: None,
+    }
+}
+
+fn contained_pairs() -> Vec<(Vec<f64>, Vec<f64>)> {
+    vec![
+        (vec![3.0, -5.0], vec![7.0, 11.0]),
+        (vec![-13.0, 17.0], vec![19.0, -23.0]),
+    ]
+}
+
+/// Always panics on invocation; used to prove exploratory adapters are never
+/// executed at all.
+struct PanicAlways {
+    executed: Cell<bool>,
+}
+
+impl Converter for PanicAlways {
+    #[allow(clippy::unnecessary_literal_bound)] // Trait signature ties id to &self; the body is a 'static literal.
+    fn id(&self) -> &str {
+        "panic-always"
+    }
+    fn source_dim(&self) -> usize {
+        2
+    }
+    fn target_dim(&self) -> usize {
+        2
+    }
+    fn apply(&self, _x: &[f64]) -> Vec<f64> {
+        self.executed.set(true);
+        panic!("must never be reached in the certified lane");
+    }
+    fn adjoint(&self, _y: &[f64]) -> Vec<f64> {
+        self.executed.set(true);
+        panic!("must never be reached in the certified lane");
+    }
+    fn declared_error(&self) -> f64 {
+        0.0
+    }
+}
+
+/// Returns an output with the wrong length on every call.
+struct WrongLen;
+
+impl Converter for WrongLen {
+    #[allow(clippy::unnecessary_literal_bound)] // Trait signature ties id to &self; the body is a 'static literal.
+    fn id(&self) -> &str {
+        "wrong-len"
+    }
+    fn source_dim(&self) -> usize {
+        2
+    }
+    fn target_dim(&self) -> usize {
+        2
+    }
+    fn apply(&self, _x: &[f64]) -> Vec<f64> {
+        vec![0.0]
+    }
+    fn adjoint(&self, _y: &[f64]) -> Vec<f64> {
+        vec![0.0]
+    }
+    fn declared_error(&self) -> f64 {
+        0.0
+    }
+}
+
+/// Flips the sign of every apply output based on an interior call counter:
+/// pure-looking per call, nondeterministic across orders.
+struct StatefulFlip {
+    calls: Cell<u32>,
+}
+
+impl Converter for StatefulFlip {
+    #[allow(clippy::unnecessary_literal_bound)] // Trait signature ties id to &self; the body is a 'static literal.
+    fn id(&self) -> &str {
+        "stateful-flip"
+    }
+    fn source_dim(&self) -> usize {
+        2
+    }
+    fn target_dim(&self) -> usize {
+        2
+    }
+    fn apply(&self, x: &[f64]) -> Vec<f64> {
+        let n = self.calls.get();
+        self.calls.set(n + 1);
+        let sign = if n.is_multiple_of(2) { 1.0 } else { -1.0 };
+        vec![sign * x[0], sign * x[1]]
+    }
+    fn adjoint(&self, y: &[f64]) -> Vec<f64> {
+        vec![y[0], y[1]]
+    }
+    fn declared_error(&self) -> f64 {
+        0.0
+    }
+}
+
+/// Panics on the second apply invocation.
+struct PanicOnSecondCall {
+    applies: Cell<u32>,
+}
+
+impl Converter for PanicOnSecondCall {
+    #[allow(clippy::unnecessary_literal_bound)] // Trait signature ties id to &self; the body is a 'static literal.
+    fn id(&self) -> &str {
+        "panic-on-second"
+    }
+    fn source_dim(&self) -> usize {
+        2
+    }
+    fn target_dim(&self) -> usize {
+        2
+    }
+    fn apply(&self, x: &[f64]) -> Vec<f64> {
+        let n = self.applies.get();
+        self.applies.set(n + 1);
+        assert!(n != 1, "second call boom");
+        vec![2.0 * x[0], 2.0 * x[1]]
+    }
+    fn adjoint(&self, y: &[f64]) -> Vec<f64> {
+        vec![2.0 * y[0], 2.0 * y[1]]
+    }
+    fn declared_error(&self) -> f64 {
+        0.0
+    }
+}
+
+/// A hand-built `ContainedConverter` whose sealed identity digest was forged
+/// AFTER sealing: runtime use must reject it without executing any callback.
+struct ForgedIdentity {
+    inner: Mtx,
+    identity: ImplementationIdentity,
+}
+
+impl ContainedConverter for ForgedIdentity {
+    fn identity(&self) -> &ImplementationIdentity {
+        &self.identity
+    }
+    fn apply_bounded(
+        &self,
+        x: &[f64],
+        out: &mut Vec<f64>,
+        _budget: &mut fs_conform::CallBudget,
+    ) -> Result<(), fs_conform::CallFault> {
+        out.clear();
+        *out = self.inner.apply(x);
+        Ok(())
+    }
+    fn adjoint_bounded(
+        &self,
+        y: &[f64],
+        out: &mut Vec<f64>,
+        _budget: &mut fs_conform::CallBudget,
+    ) -> Result<(), fs_conform::CallFault> {
+        out.clear();
+        *out = self.inner.adjoint(y);
+        Ok(())
+    }
+}
+
+fn forged_identity() -> ForgedIdentity {
+    let mut identity = ImplementationIdentity::seal(
+        "forged",
+        2,
+        2,
+        0.0,
+        SeedPolicy::Fixed(1),
+        contained_envelope(),
+    )
+    .expect("valid identity");
+    identity.digest ^= 0xdead_beef_dead_beef;
+    ForgedIdentity {
+        inner: Mtx::honest("forged", vec![vec![2.0, 0.0], vec![0.0, 2.0]], 0.0),
+        identity,
+    }
+}
+
+#[test]
+fn contained_lane_certifies_a_pure_converter_and_freezes_receipts() {
+    // T = diag(2, 3) matches `manufactured()` exactly.
+    let mtx = Mtx::honest("contained-mtx", vec![vec![2.0, 0.0], vec![0.0, 3.0]], 0.0);
+    let mut suite = ConformanceSuite::new(0.0);
+    suite.adjoint_pairs = contained_pairs();
+    suite.manufactured = manufactured();
+    let first = certify_contained_legacy(
+        &mtx,
+        &suite,
+        SeedPolicy::Fixed(7),
+        contained_envelope(),
+        third_party_policy(),
+    )
+    .expect("valid identity");
+    assert!(
+        first.report.certified(),
+        "findings: {:?}",
+        first.report.findings
+    );
+    assert_eq!(first.report.tier, Tier::Gold);
+    let second = certify_contained_legacy(
+        &mtx,
+        &suite,
+        SeedPolicy::Fixed(7),
+        contained_envelope(),
+        third_party_policy(),
+    )
+    .expect("valid identity");
+    // G5: identical runs produce identical receipts and verdicts.
+    assert_eq!(first.execution, second.execution);
+    assert_eq!(first.report, second.report);
+    assert!(first.execution.transcript_receipt != 0);
+}
+
+#[test]
+fn identity_substitution_changes_digest_and_receipt() {
+    let base = vec![vec![2.0, 1.0], vec![0.0, 3.0]];
+    let loose = Mtx::honest("seeded-mtx", base.clone(), 1e-9);
+    let mut suite = ConformanceSuite::new(0.0);
+    suite.adjoint_pairs = contained_pairs();
+    suite.manufactured = manufactured();
+    let a = certify_contained_legacy(
+        &loose,
+        &suite,
+        SeedPolicy::Fixed(1),
+        contained_envelope(),
+        third_party_policy(),
+    )
+    .expect("valid identity");
+    let b = certify_contained_legacy(
+        &loose,
+        &suite,
+        SeedPolicy::Fixed(2),
+        contained_envelope(),
+        third_party_policy(),
+    )
+    .expect("valid identity");
+    assert_ne!(a.execution.identity_digest, b.execution.identity_digest);
+    assert_ne!(
+        a.execution.transcript_receipt,
+        b.execution.transcript_receipt
+    );
+}
+
+#[test]
+fn stateful_converter_is_caught_by_permuted_replay() {
+    let stateful = StatefulFlip {
+        calls: Cell::new(0),
+    };
+    let mut suite = ConformanceSuite::new(0.0);
+    suite.adjoint_pairs = contained_pairs();
+    suite.manufactured = manufactured();
+    let outcome = certify_contained_legacy(
+        &stateful,
+        &suite,
+        SeedPolicy::Fixed(7),
+        contained_envelope(),
+        third_party_policy(),
+    )
+    .expect("valid identity");
+    assert_eq!(outcome.report.tier, Tier::Rejected);
+    assert!(!outcome.report.certified());
+    assert!(!outcome.execution.replay_verified);
+    assert!(!outcome.execution.drained_cleanly);
+    assert!(matches!(
+        outcome.execution.first_fault,
+        Some(ExecutionFault::NondeterministicReplay { .. })
+    ));
+}
+
+#[test]
+fn panicking_converter_is_contained_and_retry_is_idempotent() {
+    let mut suite = ConformanceSuite::new(0.0);
+    suite.adjoint_pairs = contained_pairs();
+    suite.manufactured = manufactured();
+    let run = || {
+        let flaky = PanicOnSecondCall {
+            applies: Cell::new(0),
+        };
+        certify_contained_legacy(
+            &flaky,
+            &suite,
+            SeedPolicy::Fixed(7),
+            contained_envelope(),
+            third_party_policy(),
+        )
+        .expect("valid identity")
+    };
+    let first = run();
+    assert_eq!(first.report.tier, Tier::Rejected);
+    assert!(
+        matches!(
+            first.execution.first_fault,
+            Some(ExecutionFault::Call {
+                fault: fs_conform::CallFault::Panicked,
+                ..
+            })
+        ),
+        "unexpected fault: {:?}",
+        first.execution.first_fault
+    );
+    let second = run();
+    assert_eq!(first.report, second.report);
+    assert_eq!(first.execution.first_fault, second.execution.first_fault);
+}
+
+#[test]
+fn call_budget_exhaustion_is_typed_and_fails_closed() {
+    let mtx = Mtx::honest("budget-mtx", vec![vec![2.0, 1.0], vec![0.0, 3.0]], 0.0);
+    let mut suite = ConformanceSuite::new(0.0);
+    suite.adjoint_pairs = contained_pairs();
+    suite.adjoint_pairs.extend(contained_pairs());
+    suite.manufactured = manufactured();
+    let tiny = WorkEnvelope {
+        max_calls: 3,
+        max_work_units: 4096,
+        max_output_len: 16,
+    };
+    let outcome = certify_contained_legacy(
+        &mtx,
+        &suite,
+        SeedPolicy::Fixed(7),
+        tiny,
+        third_party_policy(),
+    )
+    .expect("valid identity");
+    assert_eq!(outcome.report.tier, Tier::Rejected);
+    assert!(matches!(
+        outcome.execution.first_fault,
+        Some(ExecutionFault::Call {
+            fault: fs_conform::CallFault::CallBudgetExhausted,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn malformed_output_dimension_is_a_typed_fault() {
+    let mut suite = ConformanceSuite::new(0.0);
+    suite.adjoint_pairs = contained_pairs();
+    suite.manufactured = manufactured();
+    let outcome = certify_contained_legacy(
+        &WrongLen,
+        &suite,
+        SeedPolicy::Fixed(7),
+        contained_envelope(),
+        third_party_policy(),
+    )
+    .expect("valid identity");
+    assert_eq!(outcome.report.tier, Tier::Rejected);
+    assert!(matches!(
+        outcome.execution.first_fault,
+        Some(ExecutionFault::Call {
+            fault: fs_conform::CallFault::OutputDimension {
+                expected: 2,
+                got: 1
+            },
+            ..
+        })
+    ));
+}
+
+#[test]
+fn undersized_envelopes_are_refused_at_seal_time() {
+    let mtx = Mtx::honest("tiny-mtx", vec![vec![2.0, 1.0], vec![0.0, 3.0]], 0.0);
+    let refusal = ImplementationIdentity::seal(
+        "tiny-mtx",
+        2,
+        2,
+        0.0,
+        SeedPolicy::Fixed(1),
+        WorkEnvelope {
+            max_calls: 1,
+            max_work_units: 3,
+            max_output_len: 2,
+        },
+    )
+    .expect_err("work envelope cannot fund one call");
+    assert_eq!(
+        refusal,
+        fs_conform::IdentityRefusal::WorkEnvelopeTooSmall { required: 4 }
+    );
+    let mut suite = ConformanceSuite::new(0.0);
+    suite.adjoint_pairs = contained_pairs();
+    suite.manufactured = manufactured();
+    assert!(
+        certify_contained_legacy(
+            &mtx,
+            &suite,
+            SeedPolicy::Fixed(1),
+            WorkEnvelope {
+                max_calls: 0,
+                max_work_units: 4096,
+                max_output_len: 16,
+            },
+            third_party_policy(),
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn cooperative_cancellation_drains_without_publishing() {
+    let mtx = Mtx::honest("cancelled-mtx", vec![vec![2.0, 1.0], vec![0.0, 3.0]], 0.0);
+    let mut suite = ConformanceSuite::new(0.0);
+    suite.adjoint_pairs = contained_pairs();
+    suite.manufactured = manufactured();
+    let fire = || true;
+    let policy = ContainmentPolicy {
+        class: ContainmentClass::ThirdPartyBoundedCallbacks,
+        cancelled: Some(&fire),
+    };
+    let outcome = certify_contained_legacy(
+        &mtx,
+        &suite,
+        SeedPolicy::Fixed(7),
+        contained_envelope(),
+        policy,
+    )
+    .expect("valid identity");
+    assert_eq!(outcome.report.tier, Tier::Rejected);
+    assert_eq!(
+        outcome.execution.first_fault,
+        Some(ExecutionFault::Cancelled)
+    );
+}
+
+#[test]
+fn exploratory_uncontained_adapters_never_execute() {
+    let hostile = PanicAlways {
+        executed: Cell::new(false),
+    };
+    let mut suite = ConformanceSuite::new(0.0);
+    suite.adjoint_pairs = contained_pairs();
+    suite.manufactured = manufactured();
+    let bound = BoundedCallback::bind(&hostile, SeedPolicy::Fixed(7), contained_envelope())
+        .expect("valid identity");
+    let outcome = certify_contained(&bound, None, &suite, {
+        ContainmentPolicy {
+            class: ContainmentClass::ExploratoryUncontained,
+            cancelled: None,
+        }
+    });
+    assert!(!hostile.executed.get(), "exploratory adapter must not run");
+    assert_eq!(outcome.report.tier, Tier::Rejected);
+    assert!(outcome.report.findings[0].contains("exploratory"));
+    assert!(!outcome.execution.drained_cleanly);
+    assert_eq!(outcome.execution.first_fault, None);
+}
+
+#[test]
+fn tampered_identity_fails_reseal_verification_without_execution() {
+    let mut suite = ConformanceSuite::new(0.0);
+    suite.adjoint_pairs = contained_pairs();
+    suite.manufactured = manufactured();
+    let forged = forged_identity();
+    let outcome = certify_contained(&forged, None, &suite, third_party_policy());
+    assert_eq!(outcome.report.tier, Tier::Rejected);
+    assert!(outcome.report.findings[0].contains("re-seal verification"));
+    assert!(!outcome.execution.drained_cleanly);
+}
+
+#[test]
+fn composition_witness_runs_through_contained_tables() {
+    let a = Mtx::honest("comp-candidate", vec![vec![2.0, 0.0], vec![0.0, 3.0]], 0.0);
+    let after = Mtx::honest("comp-after", vec![vec![2.0, 0.0], vec![0.0, 3.0]], 0.0);
+    // Direct = After · Candidate, exact in small integers.
+    let direct = Mtx::honest(
+        "comp-direct",
+        // After · Candidate = diag(2,3) · diag(2,3) = diag(4,9).
+        vec![vec![4.0, 0.0], vec![0.0, 9.0]],
+        0.0,
+    );
+    let probes = vec![vec![1.0, 2.0], vec![-3.0, 5.0]];
+    let mut suite = ConformanceSuite::new(0.0);
+    suite.adjoint_pairs = contained_pairs();
+    suite.manufactured = manufactured();
+    suite.composition = Some(Composition {
+        after: &after,
+        direct: &direct,
+        probes: probes.clone(),
+    });
+    let bindings = bind_composition(
+        suite.composition.as_ref().expect("composition"),
+        SeedPolicy::Fixed(9),
+        contained_envelope(),
+    )
+    .expect("aux identities valid");
+    let candidate = BoundedCallback::bind(&a, SeedPolicy::Fixed(9), contained_envelope())
+        .expect("candidate identity valid");
+    let good = certify_contained(&candidate, Some(&bindings), &suite, third_party_policy());
+    assert!(
+        good.report.certified(),
+        "findings: {:?}",
+        good.report.findings
+    );
+    assert!(good.report.functoriality);
+    assert!(good.execution.drained_cleanly);
+    assert_eq!(good.execution.auxiliary_identity_digests.len(), 2);
+
+    // A lying direct converter is caught by the SAME frozen-table machinery.
+    let liar = Mtx::honest("comp-liar", vec![vec![5.0, 5.0], vec![5.0, 5.0]], 0.0);
+    suite.composition = Some(Composition {
+        after: &after,
+        direct: &liar,
+        probes,
+    });
+    let bindings_bad = bind_composition(
+        suite.composition.as_ref().expect("composition"),
+        SeedPolicy::Fixed(9),
+        contained_envelope(),
+    )
+    .expect("aux identities valid");
+    let candidate_bad = BoundedCallback::bind(&a, SeedPolicy::Fixed(9), contained_envelope())
+        .expect("candidate identity valid");
+    let bad = certify_contained(
+        &candidate_bad,
+        Some(&bindings_bad),
+        &suite,
+        third_party_policy(),
+    );
+    assert_eq!(bad.report.tier, Tier::Rejected);
+    assert!(!bad.report.functoriality);
+    // The execution itself was clean: only the axiom failed.
+    assert!(bad.execution.drained_cleanly);
+    assert!(bad.execution.replay_verified);
+}
+
+#[test]
+fn missing_composition_bindings_are_refused_before_execution() {
+    let a = Mtx::honest("unbound-comp", vec![vec![1.0, 1.0], vec![0.0, 1.0]], 0.0);
+    let after = Mtx::honest("unbound-after", vec![vec![2.0, 0.0], vec![0.0, 3.0]], 0.0);
+    let direct = Mtx::honest("unbound-direct", vec![vec![2.0, 2.0], vec![0.0, 3.0]], 0.0);
+    let mut suite = ConformanceSuite::new(0.0);
+    suite.adjoint_pairs = contained_pairs();
+    suite.manufactured = manufactured();
+    suite.composition = Some(Composition {
+        after: &after,
+        direct: &direct,
+        probes: vec![vec![1.0, 1.0]],
+    });
+    let candidate = BoundedCallback::bind(&a, SeedPolicy::Fixed(9), contained_envelope())
+        .expect("candidate identity valid");
+    let outcome = certify_contained(&candidate, None, &suite, third_party_policy());
+    assert_eq!(outcome.report.tier, Tier::Rejected);
+    assert!(outcome.report.findings[0].contains("without contained bindings"));
+    assert!(!outcome.execution.drained_cleanly);
+}
+
+#[test]
+fn legacy_first_party_parity_through_identical_arithmetic() {
+    let mtx = Mtx::honest("parity-mtx", vec![vec![2.0, 0.0], vec![0.0, 3.0]], 1e-6);
+    let mut suite = ConformanceSuite::new(1e-9);
+    suite.adjoint_pairs = contained_pairs();
+    suite.manufactured = manufactured();
+    let legacy = certify(&mtx, &suite);
+    let contained = certify_contained_legacy(
+        &mtx,
+        &suite,
+        SeedPolicy::Fixed(7),
+        contained_envelope(),
+        ContainmentPolicy {
+            class: ContainmentClass::FirstPartyBoundedCallbacks,
+            cancelled: None,
+        },
+    )
+    .expect("valid identity");
+    assert_eq!(legacy.tier, contained.report.tier);
+    assert!(legacy.certified());
+    assert!(contained.report.certified());
+}
+
+#[test]
+fn containment_class_is_part_of_the_receipt_identity() {
+    let mtx = Mtx::honest("class-mtx", vec![vec![2.0, 1.0], vec![0.0, 3.0]], 0.0);
+    let mut suite = ConformanceSuite::new(0.0);
+    suite.adjoint_pairs = contained_pairs();
+    suite.manufactured = manufactured();
+    let third_party = certify_contained_legacy(
+        &mtx,
+        &suite,
+        SeedPolicy::Fixed(7),
+        contained_envelope(),
+        third_party_policy(),
+    )
+    .expect("valid identity");
+    let first_party = certify_contained_legacy(
+        &mtx,
+        &suite,
+        SeedPolicy::Fixed(7),
+        contained_envelope(),
+        ContainmentPolicy {
+            class: ContainmentClass::FirstPartyBoundedCallbacks,
+            cancelled: None,
+        },
+    )
+    .expect("valid identity");
+    assert_ne!(
+        third_party.execution.transcript_receipt,
+        first_party.execution.transcript_receipt
     );
 }

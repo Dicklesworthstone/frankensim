@@ -118,13 +118,26 @@ None.
 
 Two private arithmetic unit tests directly cover cross-word `u128` placement,
 a 69-limb carry chain, capacity-overflow refusal, signed DD tails, and
-maximum-finite exact squares. `tests/conform.rs` adds sixteen fixed Proposal 7
-regression tests, two generated G0 laws, and one generated G3 conversion-path
-relation (512 cases each, deterministic seeds and integrated shrinking). The
-fixed tests cover adjoint
+maximum-finite exact squares. `tests/conform.rs` adds thirty fixed Proposal 7
+and contained-lane regression tests, two generated G0 laws, and one generated
+G3 conversion-path relation (512 cases each, deterministic seeds and
+integrated shrinking). The fixed tests cover adjoint
 consistency, tolerance honesty, correct and incorrect functoriality witnesses,
 identity recognition and false-identity rejection, exact admitted-bound tiering
 that charges suite tolerance, and uniform first-party/third-party R6 severity.
+  The contained-lane tests additionally prove: pure-converter certification
+  with byte-identical receipt freeze across runs, identity/seed substitution
+  changing digests and receipts, interior-state converters caught by permuted
+  replay as typed nondeterminism, panicking callbacks contained with
+  idempotent retries, call-budget exhaustion and malformed output dimensions
+  as typed faults, undersized envelopes refused at seal time, cooperative
+  cancellation draining without publishing, exploratory adapters never
+  executing, tampered identities failing re-seal verification without
+  execution, composition witnesses running through frozen tables (including a
+  lying direct converter failing only the axiom while execution stays clean),
+  missing witness bindings refused before execution, legacy/contained tier
+  parity for identical evidence, and containment class being part of receipt
+  identity.
 They also reject empty or dimensionally malformed witnesses, non-finite
 policy/evidence, overflowing arithmetic, and robust scale-disparate arithmetic
 that would otherwise erase a nonzero failure, while accepting the same evidence
@@ -166,14 +179,30 @@ trait harness, not a production geometry-conversion adopter.
 - The suite is SUPPLIED here (probes, manufactured cases, composition witness);
   AUTO-GENERATING it from a chart pair's sheaf axioms is the generator's job (a
   downstream producer feeding this harness).
-- The current callback ABI does not isolate panics, allocation failure,
-  nontermination, interior mutation, nondeterminism, or time-of-check versus
-  time-of-use implementation changes. Certification is therefore evidence about
-  the observed callback transcript, not yet a fault-contained or replay-bound
-  capability for arbitrary third-party code. A successor must use an admitted,
-  fallible execution protocol; bind implementation identity, budgets, and the
-  canonical transcript into the receipt; and prove G4/G5 containment before
-  removing this no-claim boundary.
+- TWO certification lanes exist, and their trust boundaries differ:
+  the legacy `certify` path executes arbitrary caller code directly and
+  contains nothing; its tiers are evidence about one observed callback
+  transcript under an explicit first-party trust decision, and they MUST NOT
+  be minted for third-party production use. The contained lane
+  (`certify_contained`, bead
+  frankensim-contain-fs-conform-callbacks-6bc6g) runs every callback through
+  `BoundedCallback` under a sealed `ImplementationIdentity` and declared
+  `WorkEnvelope`: dimension/finiteness admission, per-call and per-pass work
+  budgets, panic containment via `catch_unwind`, typed failure classes
+  (`CallFault`/`ExecutionFault`), a canonical bit-exact transcript folded
+  into an order-independent receipt, mandatory permuted replay that must
+  reproduce every record bitwise, and axiom checks executed against frozen
+  transcript tables rather than live user code. Any fault, cancellation, or
+  replay divergence fails closed with no partial positive tier.
+  CONTAINMENT LIMITS THAT REMAIN: `catch_unwind` contains unwinding panics
+  only — `abort`, allocation failure (OOM), native undefined behavior, and
+  nontermination are NOT contained by bounded callbacks, so no tier in this
+  crate claims hard isolation of arbitrary native third-party code. A
+  supervised guest/process boundary remains future, feature-gated work.
+  Transcript and identity digests are FNV-1a deterministic-correlation
+  values, not cryptographic authenticity anchors. Cancellation is
+  cooperative between witness steps; wall-clock deadlines are deliberately
+  unenforced because timing cannot enter a deterministic receipt.
 - Stamping the certified tier onto every ledger entry the converter touches is
   fs-ledger's integration; this crate produces the tier.
 - Adjoint consistency is checked against the converter's OWN declared adjoint;
