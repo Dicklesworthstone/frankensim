@@ -167,7 +167,10 @@ fn main() -> std::process::ExitCode {
                 let note_field = if note.is_empty() {
                     String::new()
                 } else {
-                    format!(r#","note":"{}""#, note.replace('\\', "\\\\").replace('"', "'"))
+                    format!(
+                        r#","note":"{}""#,
+                        note.replace('\\', "\\\\").replace('"', "'")
+                    )
                 };
                 let row = format!(
                     concat!(

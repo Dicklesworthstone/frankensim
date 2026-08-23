@@ -174,10 +174,10 @@ fn canonicalize(mut witnesses: Vec<BindingWitness>) -> Result<Vec<BindingWitness
     let mut out: Vec<BindingWitness> = Vec::new();
     for witness in witnesses {
         if by_id.iter().any(|(id, _)| *id == witness.id) {
-            if witness.cause == BindingCause::CompositionDegraded {
-                if let Some(existing) = out.iter_mut().find(|w| w.id == witness.id) {
-                    existing.cause = BindingCause::CompositionDegraded;
-                }
+            if witness.cause == BindingCause::CompositionDegraded
+                && let Some(existing) = out.iter_mut().find(|w| w.id == witness.id)
+            {
+                existing.cause = BindingCause::CompositionDegraded;
             }
             continue;
         }

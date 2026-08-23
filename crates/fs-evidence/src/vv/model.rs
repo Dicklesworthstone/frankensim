@@ -493,9 +493,7 @@ impl ArtifactKind {
         }
     }
 
-    // Stable lowercase family slug used in diagnostics and canonical
-    // schemas. Plain comment: attached rustdoc on dependency fragments is
-    // refused by the identity gate.
+    /// Stable lowercase family slug used in diagnostics and canonical schemas.
     #[must_use]
     pub const fn slug(self) -> &'static str {
         match self {
@@ -5935,11 +5933,9 @@ impl VvCase {
         &self.assumptions
     }
 
-    // Clone every top-level artifact in canonical family and identity
-    // order. The returned collection is a structural view; its existence
-    // does not imply that cross-artifact admission has succeeded.
-    // Plain comment: attached rustdoc on dependency fragments is refused
-    // by the identity gate.
+    /// Clone every top-level artifact in canonical family and identity order.
+    /// The returned collection is a structural view; its existence does not
+    /// imply that cross-artifact admission has succeeded.
     #[must_use]
     pub fn artifacts(&self) -> Vec<VvArtifact> {
         let mut artifacts = Vec::with_capacity(
@@ -6154,52 +6150,52 @@ impl SchemaAdmissionReceipt {
     }
 
     #[must_use]
-    // Return the dimensionless canonical V&V wire-schema version admitted.
+    /// Returns the dimensionless canonical V&V wire-schema version admitted.
     pub const fn schema_version(&self) -> u32 {
         self.schema_version
     }
 
     #[must_use]
-    // Return the dimensionless structural-ruleset version applied at admission.
+    /// Returns the dimensionless structural-ruleset version applied at admission.
     pub const fn ruleset_version(&self) -> u32 {
         self.ruleset_version
     }
 
     #[must_use]
-    // Return the digest of the exact canonical case bytes.
+    /// Returns the digest of the exact canonical case bytes.
     pub const fn case_hash(&self) -> ContentHash {
         self.case_hash
     }
 
     #[must_use]
-    // Return the identity of the decision context bound by this receipt.
+    /// Returns the identity of the decision context bound by this receipt.
     pub const fn context_id(&self) -> &ArtifactId {
         &self.context_id
     }
 
     #[must_use]
-    // Return the complete set of QoI identities present at admission.
+    /// Returns the complete set of QoI identities present at admission.
     pub const fn qois(&self) -> &BTreeSet<QoiId> {
         &self.qois
     }
 
     #[must_use]
-    // Return exact content hashes for every artifact admitted with the case.
+    /// Returns exact content hashes for every artifact admitted with the case.
     pub const fn artifact_hashes(&self) -> &ArtifactHashMap {
         &self.artifact_hashes
     }
 
     #[must_use]
-    // Return the domain-separated digest binding all receipt fields.
+    /// Returns the domain-separated digest binding all receipt fields.
     pub const fn receipt_hash(&self) -> ContentHash {
         self.receipt_hash
     }
 
     #[must_use]
-    // Recompute and check this receipt's internal versioned content binding.
-    //
-    // A `true` result proves only internal self-consistency; use
-    // [`Self::verify_case`] to revalidate and bind a concrete case.
+    /// Recomputes and checks this receipt's internal versioned content binding.
+    ///
+    /// A `true` result proves only internal self-consistency; use
+    /// [`Self::verify_case`] to revalidate and bind a concrete case.
     pub fn has_valid_binding(&self) -> bool {
         self.schema_version == VV_SCHEMA_VERSION
             && self.ruleset_version == VV_RULESET_VERSION
@@ -6214,7 +6210,7 @@ impl SchemaAdmissionReceipt {
                 )
     }
 
-    // Re-run admission and verify that this receipt binds the exact case.
+    /// Re-runs admission and verifies that this receipt binds the exact case.
     pub fn verify_case(&self, case: &VvCase) -> Result<(), VvErrors> {
         case.validate()?;
         let case_hash = case.content_hash().map_err(|error| {

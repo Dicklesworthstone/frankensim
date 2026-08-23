@@ -475,6 +475,7 @@ pub struct CinematicBrief {
 
 impl CinematicBrief {
     /// Validate an editable brief against the frozen v1 delivery envelope.
+    #[allow(clippy::too_many_lines)] // one sequential frozen-envelope validation; splitting hides the ordered refusals
     pub fn try_new(input: CinematicBriefInput) -> Result<Self, CinematicBriefError> {
         let deliverable = CinematicDeliverableContract::euler_disc_v1();
         deliverable

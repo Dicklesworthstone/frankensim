@@ -122,14 +122,14 @@ fn main() -> std::process::ExitCode {
         return std::process::ExitCode::from(2);
     }
     let full_scale_pa = peak / 0.3; // -10 dBFS peak
-    let (bytes, frames) = match encode_pcm16_wav(&log.radiated_pressure_pa, SAMPLE_RATE_HZ, full_scale_pa)
-    {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("bowed_listen: encode refused: {e:?}");
-            return std::process::ExitCode::from(2);
-        }
-    };
+    let (bytes, frames) =
+        match encode_pcm16_wav(&log.radiated_pressure_pa, SAMPLE_RATE_HZ, full_scale_pa) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("bowed_listen: encode refused: {e:?}");
+                return std::process::ExitCode::from(2);
+            }
+        };
     if let Err(e) = std::fs::write(&wav_path, &bytes) {
         eprintln!("bowed_listen: write failed: {e}");
         return std::process::ExitCode::from(2);

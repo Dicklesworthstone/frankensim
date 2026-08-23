@@ -71,9 +71,7 @@ fn gesture_admission_refuses_nonphysical_inputs() {
     );
     assert_eq!(
         BowGesture::admit(f64::NAN, 1.0, 0.11),
-        Err(BowGestureError::NonFinite {
-            what: "v_bow_m_s"
-        })
+        Err(BowGestureError::NonFinite { what: "v_bow_m_s" })
     );
     assert_eq!(
         BowGesture::admit(0.2, f64::INFINITY, 0.11),
@@ -120,9 +118,11 @@ fn bowed_run_replays_bitwise_on_one_host() {
 fn stick_slip_and_helmholtz_corner_emerge_at_the_string_fundamental() {
     let c = card();
     // 500 ms total; the metrics window keeps the last 200 ms of steady motion.
-    let log = run_bowed(
-        &config(playable_gesture(), FrictionIsland::Stribeck(rosin()), 24_000),
-    )
+    let log = run_bowed(&config(
+        playable_gesture(),
+        FrictionIsland::Stribeck(rosin()),
+        24_000,
+    ))
     .expect("playable run stays inside state budgets");
     let m = gate_metrics(&log, &c);
     println!(
@@ -147,24 +147,18 @@ fn stick_slip_and_helmholtz_corner_emerge_at_the_string_fundamental() {
 #[test]
 fn falsifier_viscous_only_friction_fails_the_stick_slip_gate() {
     let c = card();
-    let log = run_bowed(
-        &config(
-            playable_gesture(),
-            FrictionIsland::ViscousOnly {
-                viscous_n_s_per_m: 8.0,
-            },
-            24_000,
-        ),
-    )
+    let log = run_bowed(&config(
+        playable_gesture(),
+        FrictionIsland::ViscousOnly {
+            viscous_n_s_per_m: 8.0,
+        },
+        24_000,
+    ))
     .expect("viscous falsifier run completes");
     let m = gate_metrics(&log, &c);
     println!(
         "falsifier metrics: f1={:.2} Hz peak={:.2} Hz ratio={:.2} slip={:.3} intervals/period={:.3}",
-        m.fundamental_hz,
-        m.peak_hz,
-        m.peak_to_semitone_ratio,
-        m.slip_frac,
-        m.intervals_per_period
+        m.fundamental_hz, m.peak_hz, m.peak_to_semitone_ratio, m.slip_frac, m.intervals_per_period
     );
     assert_ne!(
         classify(&m),
@@ -185,10 +179,8 @@ fn pitch_flattens_as_bow_force_rises_inside_the_playable_band() {
     let mut cents_rows = Vec::new();
     for force in forces {
         let gesture = BowGesture::admit(0.45, force, 0.11).expect("sweep gesture admits");
-        let log = run_bowed(
-            &config(gesture, FrictionIsland::Stribeck(rosin()), 14_400),
-        )
-        .expect("flattening sweep run stays bounded");
+        let log = run_bowed(&config(gesture, FrictionIsland::Stribeck(rosin()), 14_400))
+            .expect("flattening sweep run stays bounded");
         let win_start = log.bow_point_velocity_m_s.len() - 4_800;
         let cents = cents_deviation(
             &log.bow_point_velocity_m_s[win_start..],

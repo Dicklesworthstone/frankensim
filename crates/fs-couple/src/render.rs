@@ -31,8 +31,8 @@ use crate::acoustic_realize::AcousticRealizeError;
 use crate::driving_point::characteristic_line;
 use crate::modal_acoustic_time::{ModalAcousticTimeError, ModalAcousticTimeModel};
 use crate::reed_bore::{
-    blowing_envelope, reed_structural, solve_reed_wave, solve_reed_wave_fast, FastSolveStats,
-    ReedSolverMode,
+    FastSolveStats, ReedSolverMode, blowing_envelope, reed_structural, solve_reed_wave,
+    solve_reed_wave_fast,
 };
 use crate::thin_plate::PlateBank;
 use fs_dcontact::Obstacle;

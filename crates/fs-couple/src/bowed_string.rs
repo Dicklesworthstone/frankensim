@@ -393,12 +393,13 @@ pub fn run_bowed(config: &BowedRunConfig) -> Result<BowedRunLog, BowedRunError> 
                             .zip(model.states())
                             .zip(&shapes_at_bow)
                             .map(|((m, s), phi)| {
-                                phi
-                                    * (2.0 * m.damping_ratio * m.angular_frequency_rad_s
-                                        * s.velocity_m_sqrt_kg_per_s
-                                        + m.angular_frequency_rad_s
-                                            * m.angular_frequency_rad_s
-                                            * s.displacement_m_sqrt_kg)
+                                phi * (2.0
+                                    * m.damping_ratio
+                                    * m.angular_frequency_rad_s
+                                    * s.velocity_m_sqrt_kg_per_s
+                                    + m.angular_frequency_rad_s
+                                        * m.angular_frequency_rad_s
+                                        * s.displacement_m_sqrt_kg)
                             })
                             .sum::<f64>()
                             / w_point;

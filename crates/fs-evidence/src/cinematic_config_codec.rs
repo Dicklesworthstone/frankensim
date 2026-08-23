@@ -190,6 +190,7 @@ impl CinematicConfigDocument {
     /// Decode one complete document. Comments begin with `#`; all other
     /// nonblank lines are strict `key=value` records.
     #[allow(clippy::too_many_lines)]
+    #[allow(clippy::should_implement_trait)] // deliberate inherent parser; trait impl would churn every call site for no semantic gain
     pub fn from_str(source: &str) -> Result<Self, CinematicConfigDocumentError> {
         if source.len() > MAX_CINEMATIC_CONFIG_DOCUMENT_BYTES {
             return Err(CinematicConfigDocumentError::DocumentTooLarge {
@@ -1132,10 +1133,9 @@ impl CinematicConfigDocumentError {
             }
             Self::MalformedLine { line } => format!("config.line[{line}]"),
             Self::UnsupportedSchema => "config.schema".to_owned(),
-            Self::Budget(_) => "config.quality_profile".to_owned(),
-            Self::Config(_) => "config".to_owned(),
             Self::InvalidAssetBudget => "config.assets".to_owned(),
-            Self::DocumentTooLarge { .. }
+            Self::Config(_)
+            | Self::DocumentTooLarge { .. }
             | Self::InvalidUtf8
             | Self::TooManyLines
             | Self::InvalidLineEnding

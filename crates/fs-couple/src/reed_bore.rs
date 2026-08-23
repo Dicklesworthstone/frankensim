@@ -253,16 +253,12 @@ pub(crate) fn solve_reed_wave_fast(
     for _ in 0..NEWTON_MAX_ITERS {
         let Some(j) = reed_flow_jacobian(reed, rho, zc, r0, p_minus_hist, p_m, p) else {
             stats.fallback_samples += 1;
-            return solve_reed_wave_strict(
-                reed, rho, zc, r0, p_minus_hist, p_m, guess, u_body,
-            );
+            return solve_reed_wave_strict(reed, rho, zc, r0, p_minus_hist, p_m, guess, u_body);
         };
         let step = -f / j;
         if !step.is_finite() {
             stats.fallback_samples += 1;
-            return solve_reed_wave_strict(
-                reed, rho, zc, r0, p_minus_hist, p_m, guess, u_body,
-            );
+            return solve_reed_wave_strict(reed, rho, zc, r0, p_minus_hist, p_m, guess, u_body);
         }
         let p_new = p + step;
         let f_new = reed_flow_mismatch(reed, rho, zc, r0, p_minus_hist, p_m, p_new, u_body);
@@ -270,9 +266,7 @@ pub(crate) fn solve_reed_wave_fast(
         // that does not improve hands itself to the strict path.
         if !f_new.is_finite() || f_new.abs() >= f.abs() {
             stats.fallback_samples += 1;
-            return solve_reed_wave_strict(
-                reed, rho, zc, r0, p_minus_hist, p_m, guess, u_body,
-            );
+            return solve_reed_wave_strict(reed, rho, zc, r0, p_minus_hist, p_m, guess, u_body);
         }
         let converged = step.abs() <= NEWTON_STEP_TOL * (1.0 + p_new.abs());
         p = p_new;
@@ -307,9 +301,17 @@ pub(crate) fn step_massive_reed(
         ReedSolverMode::Strict => {
             solve_reed_wave(reed, rho, zc, 0.0, p_minus, p_m, 2.0 * p_minus, u_body)?
         }
-        ReedSolverMode::FastNewton => {
-            solve_reed_wave_fast(reed, rho, zc, 0.0, p_minus, p_m, 2.0 * p_minus, u_body, stats)?
-        }
+        ReedSolverMode::FastNewton => solve_reed_wave_fast(
+            reed,
+            rho,
+            zc,
+            0.0,
+            p_minus,
+            p_m,
+            2.0 * p_minus,
+            u_body,
+            stats,
+        )?,
     };
     let p_bore = p_plus + p_minus;
     let dp = p_m - p_bore;
@@ -496,7 +498,8 @@ mod fast_mode_tests {
         let p_equal = reed.blowing_pressure_pa - 100.0; // h := 100
         for p in [p_equal - 1.0e-9, p_equal, p_equal + 1.0e-9] {
             assert!(
-                reed_flow_jacobian(reed, rho, zc, 0.0, 100.0, reed.blowing_pressure_pa, p).is_none(),
+                reed_flow_jacobian(reed, rho, zc, 0.0, 100.0, reed.blowing_pressure_pa, p)
+                    .is_none(),
                 "kink neighborhood must refuse at p={p}"
             );
         }
@@ -520,18 +523,8 @@ mod fast_mode_tests {
             let guess = 0.25 * pm + 30.0 * f64::from(k % 5) + 7.0;
             let strict = solve_reed_wave_strict(reed, rho, zc, 0.0, h, pm, guess, 0.0)
                 .expect("strict solves");
-            let fast = solve_reed_wave_fast(
-                reed,
-                rho,
-                zc,
-                0.0,
-                h,
-                pm,
-                guess,
-                0.0,
-                &mut stats,
-            )
-            .expect("fast solves");
+            let fast = solve_reed_wave_fast(reed, rho, zc, 0.0, h, pm, guess, 0.0, &mut stats)
+                .expect("fast solves");
             max_dev = max_dev.max((fast - strict).abs());
             let dev = (fast - strict).abs();
             assert!(
@@ -539,9 +532,7 @@ mod fast_mode_tests {
                 "root deviation {dev} too large at k={k} (pm={pm}, h={h})"
             );
         }
-        println!(
-            "receipt: aperture-newton smooth battery max|p_fast-p_strict| = {max_dev:e} Pa"
-        );
+        println!("receipt: aperture-newton smooth battery max|p_fast-p_strict| = {max_dev:e} Pa");
         assert!(
             stats.fallback_rate() <= 0.25,
             "unexpected fallback rate on smooth battery: {stats:?}"
@@ -561,10 +552,8 @@ mod fast_mode_tests {
         let corner_guess = pm - h; // dp := pm − 2·guess − 0·… = 0 here
         let strict = solve_reed_wave_strict(reed, rho, zc, 0.0, h, pm, corner_guess, 0.0)
             .expect("strict solves");
-        let fast = solve_reed_wave_fast(
-            reed, rho, zc, 0.0, h, pm, corner_guess, 0.0, &mut stats,
-        )
-        .expect("cornered fast defers to strict");
+        let fast = solve_reed_wave_fast(reed, rho, zc, 0.0, h, pm, corner_guess, 0.0, &mut stats)
+            .expect("cornered fast defers to strict");
         assert_eq!(stats.fallback_samples, 1);
         assert_eq!(stats.newton_samples, 0);
         assert_eq!(fast, strict); // byte-identical handoff, never weakened

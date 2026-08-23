@@ -304,6 +304,12 @@ def main(argv):
         e for e in edges
         if e.get("issue_id") in corpus and e.get("depends_on_id") in corpus)
     contras, stale_open = status_contradictions(issues, containment)
+    # Scope honesty: only corpus members are controlling registry findings.
+    # Tracker-wide truths outside the corpus are retained under an explicit
+    # tracker_wide label rather than silently dropped or conflated.
+    in_corpus = lambda rows: sorted(r for r in rows if r in corpus)
+    contras_corpus, contras_wide = in_corpus(contras), sorted(set(contras) - set(in_corpus(contras)))
+    stale_corpus, stale_wide = in_corpus(stale_open), sorted(set(stale_open) - set(in_corpus(stale_open)))
     orphans = missing_parents(issues)
     records = {iid: issues[iid] for iid in sorted(corpus)}
     flags = owner_estimate_flags(records)
@@ -337,15 +343,20 @@ def main(argv):
                     1 for (child, parent) in containment
                     if parent == iid and issues.get(child, {}).get("status") in ACTIVE),
             })
-        for dependent, blocker in dup:
-            rows.append({"event": "conflict_row", "class": "HIERARCHY_DUPLICATION",
-                         "dependent": dependent, "blocker": blocker})
-        for parent in contras:
+        for parent in contras_corpus:
             rows.append({"event": "conflict_row", "class": "CLOSED_CONTAINER_OPEN_CHILD",
                          "container": parent})
-        for parent in stale_open:
+        for parent in contras_wide:
+            rows.append({"event": "tracker_wide_conflict_row",
+                         "class": "CLOSED_CONTAINER_OPEN_CHILD", "container": parent,
+                         "scope": "outside_runner_v2_corpus"})
+        for parent in stale_corpus:
             rows.append({"event": "info_row", "class": "OPEN_CONTAINER_ALL_CHILDREN_CLOSED",
                          "container": parent})
+        for parent in stale_wide:
+            rows.append({"event": "tracker_wide_info_row",
+                         "class": "OPEN_CONTAINER_ALL_CHILDREN_CLOSED",
+                         "container": parent, "scope": "outside_runner_v2_corpus"})
         for parent in orphans:
             rows.append({"event": "conflict_row", "class": "MISSING_PARENT",
                          "child_prefix": parent})
@@ -356,8 +367,10 @@ def main(argv):
         declared = {
             "corpus_count": len(corpus),
             "hierarchy_duplication_count": len(dup),
-            "closed_container_open_child_count": len(contras),
-            "stale_open_container_count": len(stale_open),
+            "closed_container_open_child_count": len(contras_corpus),
+            "stale_open_container_count": len(stale_corpus),
+            "tracker_wide_closed_container_open_child_count": len(contras_wide),
+            "tracker_wide_stale_open_container_count": len(stale_wide),
             "missing_parent_count": len(orphans),
             "owner_missing_count": sum(1 for e in flags.values() if any(n == "OWNER_MISSING" for n, _ in e)),
             "estimate_missing_count": sum(1 for e in flags.values() if any(n == "ESTIMATE_MISSING" for n, _ in e)),
@@ -367,10 +380,17 @@ def main(argv):
             "hierarchy_duplication_count": sum(
                 1 for r in rows if r.get("class") == "HIERARCHY_DUPLICATION"),
             "closed_container_open_child_count": sum(
-                1 for r in rows if r.get("class") == "CLOSED_CONTAINER_OPEN_CHILD"),
+                1 for r in rows if r.get("class") == "CLOSED_CONTAINER_OPEN_CHILD"
+                and r.get("scope") is None),
             "stale_open_container_count": sum(
-                1 for r in rows if r.get("class") == "OPEN_CONTAINER_ALL_CHILDREN_CLOSED"),
-            "missing_parent_count": sum(
+                1 for r in rows if r.get("class") == "OPEN_CONTAINER_ALL_CHILDREN_CLOSED"
+                and r.get("scope") is None),
+            "tracker_wide_closed_container_open_child_count": sum(
+                1 for r in rows if r.get("class") == "CLOSED_CONTAINER_OPEN_CHILD"
+                and r.get("scope") == "outside_runner_v2_corpus"),
+            "tracker_wide_stale_open_container_count": sum(
+                1 for r in rows if r.get("class") == "OPEN_CONTAINER_ALL_CHILDREN_CLOSED"
+                and r.get("scope") == "outside_runner_v2_corpus"),
                 1 for r in rows if r.get("class") == "MISSING_PARENT"),
             "owner_missing_count": sum(
                 1 for r in rows if r.get("class") == "OWNER_MISSING"),

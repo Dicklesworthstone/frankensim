@@ -280,9 +280,10 @@ impl PianoVertical {
         for (string, spec) in self.strings.iter().zip(&self.specs) {
             for (k, state) in string.states().iter().enumerate() {
                 let omega = core::f64::consts::TAU * spec.partial_hz(k + 1);
-                e += f64::midpoint(state.velocity_m_sqrt_kg_per_s * state.velocity_m_sqrt_kg_per_s, omega
-                            * omega
-                            * state.displacement_m_sqrt_kg * state.displacement_m_sqrt_kg);
+                e += f64::midpoint(
+                    state.velocity_m_sqrt_kg_per_s * state.velocity_m_sqrt_kg_per_s,
+                    omega * omega * state.displacement_m_sqrt_kg * state.displacement_m_sqrt_kg,
+                );
             }
         }
         for mode in &self.board {
@@ -304,7 +305,10 @@ impl PianoVertical {
                     .enumerate()
                     .map(|(k, s)| {
                         let omega = core::f64::consts::TAU * spec.partial_hz(k + 1);
-                        f64::midpoint(s.velocity_m_sqrt_kg_per_s * s.velocity_m_sqrt_kg_per_s, omega * omega * s.displacement_m_sqrt_kg * s.displacement_m_sqrt_kg)
+                        f64::midpoint(
+                            s.velocity_m_sqrt_kg_per_s * s.velocity_m_sqrt_kg_per_s,
+                            omega * omega * s.displacement_m_sqrt_kg * s.displacement_m_sqrt_kg,
+                        )
                     })
                     .sum()
             })
@@ -321,7 +325,10 @@ impl PianoVertical {
             .enumerate()
             .map(|(k, s)| {
                 let omega = core::f64::consts::TAU * spec.partial_hz(k + 1);
-                f64::midpoint(s.velocity_m_sqrt_kg_per_s * s.velocity_m_sqrt_kg_per_s, omega * omega * s.displacement_m_sqrt_kg * s.displacement_m_sqrt_kg)
+                f64::midpoint(
+                    s.velocity_m_sqrt_kg_per_s * s.velocity_m_sqrt_kg_per_s,
+                    omega * omega * s.displacement_m_sqrt_kg * s.displacement_m_sqrt_kg,
+                )
             })
             .collect()
     }
