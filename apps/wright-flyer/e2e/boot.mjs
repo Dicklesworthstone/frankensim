@@ -46,6 +46,7 @@ export async function bootOnce({
   chromeBin,
   holdKeys = [],
   cpuThrottleRate = null,
+  bench = false,
 }) {
   const bin = chromeBin ?? resolveChromeBin();
   if (!bin) {
@@ -90,6 +91,24 @@ export async function bootOnce({
         }
       }, holdKeys);
     }
+    if (bench) {
+      // E0.6b: wait for the wf-bench suite-complete event in the capture
+      // instead of the results card (?bench=1 builds no scene/card).
+      const deadline = Date.now() + timeoutMs;
+      for (;;) {
+        if (capture.lines().some((r) => r.suite === "wf-bench" && r.event === "suite-complete")) {
+          break;
+        }
+        if (Date.now() > deadline) {
+          const refusals = capture.lines().filter((r) => r.stage === "sim-refusal");
+          if (refusals.length > 0) {
+            throw new BootRefusal("SIM_REFUSAL", JSON.stringify(refusals));
+          }
+          throw new BootRefusal("RUN_TIMEOUT", `bench suite did not complete within ${timeoutMs}ms`);
+        }
+        await new Promise((r) => setTimeout(r, 500));
+      }
+    } else {
     // Terminal OR refusal, whichever comes first. The card is the app's own
     // end-of-run signal; the JSONL line is cross-checked by extractReceipts.
     await Promise.race([
@@ -115,6 +134,7 @@ export async function bootOnce({
       }
       throw error;
     });
+    }
     return { lines: capture.lines(), captureRefusals: capture.refusals() };
   } finally {
     await browser.close().catch(() => {});

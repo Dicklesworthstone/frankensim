@@ -168,6 +168,40 @@ function main(): void {
       degraded: described.degraded,
     }),
   );
+  // E0.6b bench gate (?bench=1): run the §7.2 microbench suite IN THIS
+  // BROWSER, emitting wf-bench JSONL rows on the console, then stop —
+  // the scene/sim/render stack is never built so measurements see an
+  // idle presentation plane. Repetition 0 is COLD (fresh boot); reps
+  // >= 1 are WARM. Variant context (isolation transport, contention)
+  // is stamped by the e2e/bench.mjs driver that owns the server and
+  // the CDP knobs; the page only measures. Parsed locally (not via
+  // `params`) so the gate stays independent of declaration order below.
+  const benchParams = new URLSearchParams(window.location.search);
+  if (benchParams.get("bench") === "1") {
+    const reps = Math.max(1, Math.min(5, Number(benchParams.get("repeat") ?? 3) || 3));
+    void import("./bench/kernels.ts").then(({ runBenchSuite }) => {
+      for (let rep = 0; rep < reps; rep += 1) {
+        const { rows, noData } = runBenchSuite();
+        for (const row of rows) {
+          console.info(
+            JSON.stringify({
+              suite: "wf-bench",
+              rep,
+              temperature: rep === 0 ? "cold" : "warm",
+              row,
+            }),
+          );
+        }
+        if (rep === 0) {
+          for (const nd of noData) {
+            console.info(JSON.stringify({ suite: "wf-bench", rep, no_data: nd }));
+          }
+        }
+      }
+      console.info(JSON.stringify({ suite: "wf-bench", event: "suite-complete", reps }));
+    });
+    return;
+  }
 
   // E5.2b: ?sim=1 drives the scene from the REAL wasm engine (E5.1)
   // via the sim worker; without the flag the E2.2 scripted demo runs.
