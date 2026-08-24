@@ -39,11 +39,14 @@ mint here.
 - `ComponentCountEvidence` — non-exhaustive typed state: `Unknown` has lower
   bound zero; `LowerBound(CertifiedEnclosedComponentExists)` has lower bound one.
   `exact_count()` is always `None` in this tranche.
-- `NEUROSHAPE_LOCALIZATION_SCHEMA_VERSION = 1` — freezes every wire code of
+- `NEUROSHAPE_LOCALIZATION_SCHEMA_VERSION = 2` — freezes every wire code of
   the typed zero-set localization vocabulary below
   (`SurfaceLocalizationStatus` codes `1..=8`, `LocalizationStage` codes
   `1..=2`, `LocalizationDiagnostic` codes `1..=18`). Version-aware consumers
   must reject codes they do not implement; no display-string is ever parsed.
+  Version 2 also packs each grid-edge coordinate into its own 64-bit lane of a
+  `u128`; version 1's 32-bit lanes collided for native indices above
+  `u32::MAX`.
 - `NeuroShapeReport::surface_localization: SurfaceLocalization` — the
   AUTHORITATIVE outcome of sampled zero-set localization:
   `Localized { crossings, max_radius, nearest_radius }`, `ValidEmpty`, or a

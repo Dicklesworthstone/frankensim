@@ -449,7 +449,7 @@ impl InvocationAdmitter {
         limits: InvocationLimits,
         required: InvocationResources,
     ) -> Result<InvocationAdmission, InvocationError> {
-        self.admit_inner(invocation_id, None, limits, required)
+        Self::admit_inner(invocation_id, None, limits, required)
     }
 
     /// Seal a complete preflight with an explicit checked-operation plan
@@ -465,11 +465,10 @@ impl InvocationAdmitter {
         limits: InvocationLimits,
         required: InvocationResources,
     ) -> Result<InvocationAdmission, InvocationError> {
-        self.admit_inner(invocation_id, Some(plan_binding), limits, required)
+        Self::admit_inner(invocation_id, Some(plan_binding), limits, required)
     }
 
     fn admit_inner(
-        self,
         invocation_id: ContentHash,
         plan_binding: Option<InvocationPlanBinding>,
         limits: InvocationLimits,
@@ -1645,7 +1644,7 @@ pub struct InvocationBudget<'clock> {
     clock: &'clock dyn TimeSource,
     cancel_gate: &'clock CancelGate,
     last_deadline_observation: Option<Time>,
-    _ambient_memory: Option<LeaseCharge>,
+    ambient_memory: Option<LeaseCharge>,
     backing_memory: OperationMemoryLease,
     children: Vec<ChildState>,
     next_ordinal: u64,
@@ -1716,7 +1715,7 @@ impl<'clock> InvocationBudget<'clock> {
             clock,
             cancel_gate,
             last_deadline_observation,
-            _ambient_memory: ambient_memory,
+            ambient_memory: ambient_memory,
             backing_memory: OperationMemoryLease::bounded(required.memory.0),
             children: Vec::new(),
             next_ordinal: 0,
@@ -1872,18 +1871,17 @@ impl<'clock> InvocationBudget<'clock> {
                 return Err(error);
             }
         };
-        let live_children = match parent {
-            Some(index) => match self.children[index].live_children.checked_add(1) {
-                Some(count) => count,
-                None => {
-                    let error = InvocationError::ArithmeticOverflow {
-                        resource: "live-children",
-                    };
-                    self.latch_failure(parent, error.clone());
-                    return Err(error);
-                }
-            },
-            None => 0,
+        let live_children = if let Some(index) = parent {
+            let Some(count) = self.children[index].live_children.checked_add(1) else {
+                let error = InvocationError::ArithmeticOverflow {
+                    resource: "live-children",
+                };
+                self.latch_failure(parent, error.clone());
+                return Err(error);
+            };
+            count
+        } else {
+            0
         };
         let parent_id = parent.map(|index| self.children[index].id);
         let id = child_id(
@@ -2360,7 +2358,7 @@ impl<'clock> InvocationBudget<'clock> {
         let returned = try_clone_invocation_receipt(&receipt, "invocation-receipt-return")?;
         // The ambient parent charge covered the root capacity until this exact
         // terminal cut. Release it once; replay uses the cached receipt.
-        self._ambient_memory.take();
+        self.ambient_memory.take();
         self.sealed_receipt = Some(receipt);
         Ok(returned)
     }
@@ -2969,8 +2967,9 @@ impl ChildFinalizer<'_, '_> {
             return Err(InvocationError::InactiveChild);
         }
         self.ensure_cleanup_open()?;
-        if self.owner.current_failure(Some(self.node)).is_none() {
-            if let Some(deadline) = self.owner.limits.deadline {
+        if self.owner.current_failure(Some(self.node)).is_none()
+            && let Some(deadline) = self.owner.limits.deadline
+        {
                 let now = self.owner.clock.now();
                 self.owner.last_deadline_observation = Some(now);
                 if now >= deadline {
@@ -3326,30 +3325,26 @@ impl Drop for InvocationMemoryReservation<'_, '_, '_> {
         let mut violation = false;
         {
             let state = &mut self.child.owner.children[node];
-            match (
+            if let (Some(current), Some(released)) = (
                 state.memory_current.checked_sub(self.bytes),
                 state.memory_released.checked_add(u128::from(self.bytes)),
             ) {
-                (Some(current), Some(released)) => {
-                    state.memory_current = current;
-                    state.memory_released = released;
-                }
-                _ => {
-                    state.memory_current = u64::MAX;
-                    state.memory_released = u128::MAX;
-                    violation = true;
-                }
+                state.memory_current = current;
+                state.memory_released = released;
+            } else {
+                state.memory_current = u64::MAX;
+                state.memory_released = u128::MAX;
+                violation = true;
             }
         }
         let mut ancestor = Some(node);
         while let Some(index) = ancestor {
             let state = &mut self.child.owner.children[index];
-            match state.subtree_memory_current.checked_sub(self.bytes) {
-                Some(current) => state.subtree_memory_current = current,
-                None => {
-                    state.subtree_memory_current = u64::MAX;
-                    violation = true;
-                }
+            if let Some(current) = state.subtree_memory_current.checked_sub(self.bytes) {
+                state.subtree_memory_current = current;
+            } else {
+                state.subtree_memory_current = u64::MAX;
+                violation = true;
             }
             ancestor = state.parent;
         }
@@ -4427,8 +4422,9 @@ fn verify_failure_propagation(
         if failure_requires_child_origin(failure) && receipt.failure_origin.is_none() {
             return Err(invocation_semantic_error("failure-origin-required"));
         }
-        if failure_requires_finalizable_origin(failure) {
-            if origin.is_some_and(|child| child.finalization.is_none()) {
+        if failure_requires_finalizable_origin(failure)
+            && origin.is_some_and(|child| child.finalization.is_none())
+        {
                 return Err(invocation_semantic_error(
                     "finalization-failure-origin-kind",
                 ));
@@ -4458,10 +4454,9 @@ fn verify_failure_propagation(
             available,
             ..
         } = failure
-        {
-            if resource_capacity_for_failure(receipt, origin, resource)
+            && resource_capacity_for_failure(receipt, origin, resource)
                 .is_some_and(|capacity| *available > capacity)
-            {
+        {
                 return Err(origin.map_or_else(
                     || invocation_semantic_error("failure-available-within-origin-grant"),
                     |child| child_semantic_error(child, "failure-available-within-origin-grant"),

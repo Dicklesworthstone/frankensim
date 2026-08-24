@@ -1317,7 +1317,7 @@ fn neuro_net(lift: f64) -> MlpSdf {
 /// - `[27]` — `surface_localization_stage` (`0` success/no single stage,
 ///   `1` grid construction, `2` isocontour extraction).
 /// - `[28]` — `localization_schema_version`
-///   (`NEUROSHAPE_LOCALIZATION_SCHEMA_VERSION`, currently `1`) — the version
+///   (`NEUROSHAPE_LOCALIZATION_SCHEMA_VERSION`, currently `2`) — the version
 ///   gating `[26]` and `[27]`.
 /// - `[29]` — reserved (0).
 /// - then `64·64` SDF field row-major (`j` outer / y, `i` inner / x) over the
@@ -2516,7 +2516,9 @@ mod tests {
                 unsupported.to_bits()
             );
         }
-        for unsupported in [0.0, 2.0, 9.0, 1.5, f64::NAN] {
+        // Localization schema 1 used colliding 32-bit endpoint lanes; schema
+        // 2 is current, and every legacy/future/non-integral value refuses.
+        for unsupported in [0.0, 1.0, 3.0, 9.0, 1.5, f64::NAN] {
             let mut mutated = current.clone();
             mutated[28] = unsupported;
             assert!(

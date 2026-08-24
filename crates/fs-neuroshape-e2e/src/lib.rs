@@ -57,18 +57,23 @@ pub const NEUROSHAPE_COMPONENT_EVIDENCE_SCHEMA_VERSION: u32 = 1;
 /// Stable schema version of [`NeuroShapeReport::surface_localization`] and of
 /// every wire code derived from it (bead frankensim-o33vo).
 ///
-/// Version 1 pins [`SurfaceLocalizationStatus`] codes `1..=8`, the
+/// Version 2 pins [`SurfaceLocalizationStatus`] codes `1..=8`, the
 /// [`LocalizationStage`] codes `1..=2` (`0` meaning "no single stage"), and
-/// the [`LocalizationDiagnostic`] codes `1..=18`. Serializers must carry this
-/// value and consumers must refuse an unrecognized code instead of
-/// reinterpreting it.
-pub const NEUROSHAPE_LOCALIZATION_SCHEMA_VERSION: u32 = 1;
+/// the [`LocalizationDiagnostic`] codes `1..=18`. It also stores each grid
+/// endpoint in a fixed 64-bit lane of a `u128`; version 1 used two 32-bit lanes
+/// and therefore collided for native indices above `u32::MAX`. Serializers
+/// must carry this value and consumers must refuse an unrecognized code instead
+/// of reinterpreting it.
+pub const NEUROSHAPE_LOCALIZATION_SCHEMA_VERSION: u32 = 2;
 
 /// Sentinel stored in [`StageDetail`] numeric slots that carry no meaning for
 /// the active [`LocalizationDiagnostic`].
 pub const LOCALIZATION_DETAIL_UNDEFINED: u64 = u64::MAX;
 /// `u32` companion of [`LOCALIZATION_DETAIL_UNDEFINED`].
 pub const LOCALIZATION_DETAIL_UNDEFINED_U32: u32 = u32::MAX;
+/// Sentinel for index slots that can retain a complete pair of 64-bit native
+/// grid coordinates.
+pub const LOCALIZATION_INDEX_UNDEFINED: u128 = u128::MAX;
 
 /// Exact fs-viz stage that produced a sampled zero-set localization outcome.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -184,8 +189,9 @@ impl LocalizationDiagnostic {
 /// Bounded exact context retained by a refusal outcome.
 ///
 /// Slots that carry no meaning for the active [`LocalizationDiagnostic`]
-/// hold the [`LOCALIZATION_DETAIL_UNDEFINED`] sentinels. Edge endpoints are
-/// packed losslessly as `(i << 32) | j`; `required`/`limit` saturate at
+/// hold the matching `LOCALIZATION_*_UNDEFINED` sentinels. Edge endpoints are
+/// packed losslessly as `(u128::from(i) << 64) | u128::from(j)`;
+/// `required`/`limit` saturate at
 /// [`u64::MAX`] for `u128` requirements beyond that range. No field ever
 /// carries attacker-sized text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -197,9 +203,9 @@ pub struct StageDetail {
     /// Offending Cartesian axis or interpolation collapse axis.
     pub axis: u32,
     /// First offender node index, or packed first edge endpoint `[i, j]`.
-    pub first_index: u64,
+    pub first_index: u128,
     /// Second offender node index, or packed second edge endpoint `[i, j]`.
-    pub second_index: u64,
+    pub second_index: u128,
     /// Exact binary64 bits of the first offending scalar.
     pub scalar_bits: u64,
     /// Exact binary64 bits of the second offending scalar.
@@ -222,8 +228,8 @@ impl StageDetail {
             stage,
             diagnostic,
             axis: LOCALIZATION_DETAIL_UNDEFINED_U32,
-            first_index: LOCALIZATION_DETAIL_UNDEFINED,
-            second_index: LOCALIZATION_DETAIL_UNDEFINED,
+            first_index: LOCALIZATION_INDEX_UNDEFINED,
+            second_index: LOCALIZATION_INDEX_UNDEFINED,
             scalar_bits: LOCALIZATION_DETAIL_UNDEFINED,
             second_bits: LOCALIZATION_DETAIL_UNDEFINED,
             required: LOCALIZATION_DETAIL_UNDEFINED,
@@ -575,9 +581,10 @@ pub const fn iso_contour_resource_code(resource: fs_viz::IsoContourResource) -> 
     }
 }
 
-/// Lossless packing of a grid edge endpoint `[i, j]` into one `u64`.
-const fn pack_edge(endpoint: [usize; 2]) -> u64 {
-    ((endpoint[0] as u64) << 32) | endpoint[1] as u64
+/// Lossless packing of a grid edge endpoint `[i, j]` into two fixed 64-bit
+/// lanes. Rust's supported native targets have `usize::BITS <= 64`.
+const fn pack_edge(endpoint: [usize; 2]) -> u128 {
+    ((endpoint[0] as u128) << 64) | endpoint[1] as u128
 }
 /// Saturating narrowing used for `u128` requirements/limits.
 const fn saturate(value: u128) -> u64 {
@@ -685,8 +692,8 @@ impl From<Grid2Error> for SurfaceLocalization {
             Grid2Error::InvalidDimensions { dimensions } => {
                 let mut detail =
                     StageDetail::new(stage, LocalizationDiagnostic::GridInvalidDimensions);
-                detail.first_index = dimensions[0] as u64;
-                detail.second_index = dimensions[1] as u64;
+                detail.first_index = dimensions[0] as u128;
+                detail.second_index = dimensions[1] as u128;
                 Self::InvalidInput(detail)
             }
             // A dimension product that overflows `usize` is an unadmittable
@@ -694,8 +701,8 @@ impl From<Grid2Error> for SurfaceLocalization {
             Grid2Error::NodeCountOverflow { dimensions } => {
                 let mut detail =
                     StageDetail::new(stage, LocalizationDiagnostic::GridNodeCountOverflow);
-                detail.first_index = dimensions[0] as u64;
-                detail.second_index = dimensions[1] as u64;
+                detail.first_index = dimensions[0] as u128;
+                detail.second_index = dimensions[1] as u128;
                 Self::InvalidInput(detail)
             }
             Grid2Error::NodeBudgetExceeded { required, limit } => {
@@ -724,8 +731,8 @@ impl From<Grid2Error> for SurfaceLocalization {
                     LocalizationDiagnostic::GridUnrepresentableCoordinates,
                 );
                 detail.axis = axis as u32;
-                detail.first_index = first_index as u64;
-                detail.second_index = second_index as u64;
+                detail.first_index = first_index as u128;
+                detail.second_index = second_index as u128;
                 detail.scalar_bits = first.to_bits();
                 detail.second_bits = second.to_bits();
                 Self::Unrepresentable(detail)
@@ -733,7 +740,7 @@ impl From<Grid2Error> for SurfaceLocalization {
             Grid2Error::NonFiniteValue { index, value } => {
                 let mut detail =
                     StageDetail::new(stage, LocalizationDiagnostic::GridNonFiniteValue);
-                detail.first_index = index as u64;
+                detail.first_index = index as u128;
                 detail.scalar_bits = value.to_bits();
                 Self::Unrepresentable(detail)
             }

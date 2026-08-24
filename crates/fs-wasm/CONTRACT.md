@@ -108,7 +108,7 @@ crates. Layer: **L6 HELM / interface surface**. The crate compiles as an
    (the folded `+inf`) and `[7] = +0`, while the native report fields keep
    `+inf`; the typed `[26]` status, never a NaN sentinel, distinguishes
    valid-empty from every refusal. `[28]` carries
-   `NEUROSHAPE_LOCALIZATION_SCHEMA_VERSION = 1`, which freezes those code
+   `NEUROSHAPE_LOCALIZATION_SCHEMA_VERSION = 2`, which freezes those code
    tables and gates interpretation of `[26]`/`[27]`; `[29]` remains a
    reserved zero. A consumer
    that gated on `[22] == 2` refuses this payload rather than silently

@@ -6,9 +6,8 @@ use fs_exec::BudgetRefusal;
 use fs_neuroshape_e2e::{
     CampaignError, CampaignParameter, CancellationKind, ComponentCountEvidence,
     LocalizationDiagnostic, LocalizationStage, NEUROSHAPE_COMPONENT_EVIDENCE_SCHEMA_VERSION,
-    NEUROSHAPE_LOCALIZATION_SCHEMA_VERSION, SurfaceLocalization,
-    SurfaceLocalizationStatus, blob_sdf_net, iso_contour_resource_code, run_campaign,
-    try_run_campaign,
+    NEUROSHAPE_LOCALIZATION_SCHEMA_VERSION, SurfaceLocalization, SurfaceLocalizationStatus,
+    blob_sdf_net, iso_contour_resource_code, run_campaign, try_run_campaign,
 };
 use fs_rep_neural::{Layer, MlpSdf, SAFE_STEP_POLICY_VERSION, SafeStepStatus};
 use fs_viz::{Grid2Error, IsoContourError, IsoContourResource};
@@ -207,7 +206,7 @@ fn campaign_admission_refuses_wrong_dimension_and_invalid_geometry() {
 
 #[test]
 fn localization_schema_version_pins_the_wire_codes() {
-    assert_eq!(NEUROSHAPE_LOCALIZATION_SCHEMA_VERSION, 1);
+    assert_eq!(NEUROSHAPE_LOCALIZATION_SCHEMA_VERSION, 2);
     assert_eq!(SurfaceLocalizationStatus::Localized.code(), 1);
     assert_eq!(SurfaceLocalizationStatus::ValidEmpty.code(), 2);
     assert_eq!(SurfaceLocalizationStatus::InvalidInput.code(), 3);
@@ -305,7 +304,7 @@ fn every_grid_error_maps_to_a_typed_localization_outcome() {
 /// typed outcome; plan overflow keeps a stable per-resource auxiliary code.
 #[test]
 fn every_contour_error_maps_to_a_typed_localization_outcome() {
-    // Resource codes are frozen by NEUROSHAPE_LOCALIZATION_SCHEMA_VERSION = 1.
+    // Resource codes are frozen by NEUROSHAPE_LOCALIZATION_SCHEMA_VERSION = 2.
     assert_eq!(iso_contour_resource_code(IsoContourResource::Cells), 1);
     assert_eq!(iso_contour_resource_code(IsoContourResource::WorkUnits), 13);
 
@@ -333,10 +332,26 @@ fn every_contour_error_maps_to_a_typed_localization_outcome() {
                 detail.diagnostic,
                 LocalizationDiagnostic::IsoCoincidentLevelEdge
             );
-            assert_eq!(detail.first_index, (2u64 << 32) | 3);
-            assert_eq!(detail.second_index, (2u64 << 32) | 4);
+            assert_eq!(detail.first_index, (2u128 << 64) | 3);
+            assert_eq!(detail.second_index, (2u128 << 64) | 4);
         }
         other => panic!("coincident edge must be unrepresentable, got {other:?}"),
+    }
+
+    // Schema v1 used 32-bit lanes in a u64, so these native-width endpoints
+    // collided after truncation on 64-bit hosts. Version 2 retains every bit
+    // of both coordinates in fixed 64-bit lanes.
+    let widest = IsoContourError::CoincidentLevelEdge {
+        first: [usize::MAX, 0],
+        second: [0, usize::MAX],
+    };
+    match SurfaceLocalization::from(widest) {
+        SurfaceLocalization::Unrepresentable(detail) => {
+            assert_eq!(detail.first_index, (usize::MAX as u128) << 64);
+            assert_eq!(detail.second_index, usize::MAX as u128);
+            assert_ne!(detail.first_index, detail.second_index);
+        }
+        other => panic!("wide endpoints must retain exact identity, got {other:?}"),
     }
 
     let budget = IsoContourError::OperationBudgetExceeded {
@@ -376,8 +391,8 @@ fn every_contour_error_maps_to_a_typed_localization_outcome() {
                 detail.diagnostic,
                 LocalizationDiagnostic::IsoUnrepresentableIntersection
             );
-            assert_eq!(detail.first_index, (1u64 << 32) | 1);
-            assert_eq!(detail.second_index, (1u64 << 32) | 2);
+            assert_eq!(detail.first_index, (1u128 << 64) | 1);
+            assert_eq!(detail.second_index, (1u128 << 64) | 2);
             assert_eq!(detail.scalar_bits, 3, "level bits retained");
             assert_eq!(detail.second_bits, 6, "interpolation bits retained");
             assert_eq!(detail.axis, 1, "collapse axis retained");
