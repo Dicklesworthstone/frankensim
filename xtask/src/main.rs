@@ -1,4 +1,3 @@
-
 //! FrankenSim repository policy checks (`cargo run -p xtask -- <command>`).
 //!
 //! Commands:
@@ -69,9 +68,9 @@ mod portfolio_candidate;
 mod program_metrics;
 mod schemas;
 mod source_manifest;
-mod state_charters;
 mod spine_metrics;
 mod spine_ratchet;
+mod state_charters;
 mod suite_receipt;
 mod tropical_path;
 mod vv_scorecard;

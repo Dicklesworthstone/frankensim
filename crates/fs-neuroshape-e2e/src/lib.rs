@@ -63,9 +63,10 @@ pub const NEUROSHAPE_COMPONENT_EVIDENCE_SCHEMA_VERSION: u32 = 1;
 /// endpoint in a fixed 64-bit lane of a `u128`; version 1 used two 32-bit lanes
 /// and therefore collided for native indices above `u32::MAX`. Version 3 adds
 /// the stable [`CancellationKind`] and [`LocalizationCancellationPhase`] code
-/// tables required by lossless native/WASM diagnostic parity. Serializers must
-/// carry this value and consumers must refuse an unrecognized code instead of
-/// reinterpreting it.
+/// tables and widens checked `required`/`limit` values from saturating `u64` to
+/// exact `u128`, as required for lossless native/WASM diagnostic parity.
+/// Serializers must carry this value and consumers must refuse an unrecognized
+/// code instead of reinterpreting it.
 pub const NEUROSHAPE_LOCALIZATION_SCHEMA_VERSION: u32 = 3;
 
 /// Sentinel stored in [`StageDetail`] numeric slots that carry no meaning for
@@ -192,9 +193,8 @@ impl LocalizationDiagnostic {
 ///
 /// Slots that carry no meaning for the active [`LocalizationDiagnostic`]
 /// hold the matching `LOCALIZATION_*_UNDEFINED` sentinels. Edge endpoints are
-/// packed losslessly as `(u128::from(i) << 64) | u128::from(j)`;
-/// `required`/`limit` saturate at
-/// [`u64::MAX`] for `u128` requirements beyond that range. No field ever
+/// packed losslessly as `(u128::from(i) << 64) | u128::from(j)`; checked
+/// `required`/`limit` values retain the complete source `u128`. No field ever
 /// carries attacker-sized text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StageDetail {
@@ -213,9 +213,9 @@ pub struct StageDetail {
     /// Exact binary64 bits of the second offending scalar.
     pub second_bits: u64,
     /// Checked requirement, when the refusal compares one against a limit.
-    pub required: u64,
+    pub required: u128,
     /// Caller-provided limit, when one exists.
-    pub limit: u64,
+    pub limit: u128,
     /// Diagnostic-specific auxiliary code (for example the
     /// `fs_viz::IsoContourResource` ordinal `1..=13` for plan overflow).
     pub aux: u32,
@@ -234,8 +234,8 @@ impl StageDetail {
             second_index: LOCALIZATION_INDEX_UNDEFINED,
             scalar_bits: LOCALIZATION_DETAIL_UNDEFINED,
             second_bits: LOCALIZATION_DETAIL_UNDEFINED,
-            required: LOCALIZATION_DETAIL_UNDEFINED,
-            limit: LOCALIZATION_DETAIL_UNDEFINED,
+            required: LOCALIZATION_INDEX_UNDEFINED,
+            limit: LOCALIZATION_INDEX_UNDEFINED,
             aux: LOCALIZATION_DETAIL_UNDEFINED_U32,
         }
     }
@@ -662,15 +662,6 @@ pub const fn iso_contour_resource_code(resource: fs_viz::IsoContourResource) -> 
 const fn pack_edge(endpoint: [usize; 2]) -> u128 {
     ((endpoint[0] as u128) << 64) | endpoint[1] as u128
 }
-/// Saturating narrowing used for `u128` requirements/limits.
-const fn saturate(value: u128) -> u64 {
-    if value > u64::MAX as u128 {
-        u64::MAX
-    } else {
-        value as u64
-    }
-}
-
 impl From<&BudgetRefusal> for CancellationDetail {
     fn from(refusal: &BudgetRefusal) -> Self {
         let undefined = LOCALIZATION_DETAIL_UNDEFINED;
@@ -784,8 +775,8 @@ impl From<Grid2Error> for SurfaceLocalization {
             Grid2Error::NodeBudgetExceeded { required, limit } => {
                 let mut detail =
                     StageDetail::new(stage, LocalizationDiagnostic::GridNodeBudgetExceeded);
-                detail.required = required as u64;
-                detail.limit = limit as u64;
+                detail.required = required as u128;
+                detail.limit = limit as u128;
                 Self::ResourceRefused(detail)
             }
             Grid2Error::InvalidBounds { axis, lower, upper } => {
@@ -823,7 +814,7 @@ impl From<Grid2Error> for SurfaceLocalization {
             Grid2Error::AllocationFailed { nodes } => {
                 let mut detail =
                     StageDetail::new(stage, LocalizationDiagnostic::GridAllocationFailed);
-                detail.required = nodes as u64;
+                detail.required = nodes as u128;
                 Self::AllocationRefused(detail)
             }
         }
@@ -849,7 +840,7 @@ impl From<IsoContourError> for SurfaceLocalization {
             IsoContourError::InvalidPollStride { items_per_poll } => {
                 let mut detail =
                     StageDetail::new(stage, LocalizationDiagnostic::IsoInvalidPollStride);
-                detail.required = items_per_poll as u64;
+                detail.required = items_per_poll as u128;
                 Self::InvalidInput(detail)
             }
             IsoContourError::PlanOverflow { resource } => {
@@ -865,8 +856,8 @@ impl From<IsoContourError> for SurfaceLocalization {
                 let mut detail =
                     StageDetail::new(stage, LocalizationDiagnostic::IsoOperationBudgetExceeded);
                 detail.aux = iso_contour_resource_code(resource);
-                detail.required = saturate(required);
-                detail.limit = saturate(limit);
+                detail.required = required;
+                detail.limit = limit;
                 Self::ResourceRefused(detail)
             }
             IsoContourError::ExecutionBudgetRefused { refusal } => {
@@ -877,7 +868,7 @@ impl From<IsoContourError> for SurfaceLocalization {
             IsoContourError::CrossingBudgetExceeded { limit } => {
                 let mut detail =
                     StageDetail::new(stage, LocalizationDiagnostic::IsoCrossingBudgetExceeded);
-                detail.limit = limit as u64;
+                detail.limit = limit as u128;
                 Self::ResourceRefused(detail)
             }
             IsoContourError::CoincidentLevelEdge { first, second } => {
@@ -912,7 +903,7 @@ impl From<IsoContourError> for SurfaceLocalization {
             IsoContourError::AllocationFailed { required } => {
                 let mut detail =
                     StageDetail::new(stage, LocalizationDiagnostic::IsoAllocationFailed);
-                detail.required = required as u64;
+                detail.required = required as u128;
                 Self::AllocationRefused(detail)
             }
             IsoContourError::NonFiniteGeometry => Self::Unrepresentable(StageDetail::new(

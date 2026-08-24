@@ -93,8 +93,7 @@ pub fn scan_source(path: &str, text: &str) -> Result<Vec<CharterDeclaration>, St
         // declaration keyword.
         let line_start = text[..token_start].rfind('\n').map_or(0, |pos| pos + 1);
         let same_line_prefix = text[line_start..token_start].trim_end();
-        if same_line_prefix.ends_with("struct") || same_line_prefix.ends_with("impl")
-        {
+        if same_line_prefix.ends_with("struct") || same_line_prefix.ends_with("impl") {
             cursor = after_token;
             continue;
         }
@@ -185,14 +184,10 @@ pub fn scan_source(path: &str, text: &str) -> Result<Vec<CharterDeclaration>, St
             CharterDeclaration {
                 path: path.to_string(),
                 line,
-                owner: string_field(literal, "owner")
-                    .expect("checked above"),
-                state_family: string_field(literal, "state_family")
-                    .expect("checked above"),
-                schema_grammar: string_field(literal, "schema_grammar")
-                    .expect("checked above"),
-                codec_grammar: string_field(literal, "codec_grammar")
-                    .expect("checked above"),
+                owner: string_field(literal, "owner").expect("checked above"),
+                state_family: string_field(literal, "state_family").expect("checked above"),
+                schema_grammar: string_field(literal, "schema_grammar").expect("checked above"),
+                codec_grammar: string_field(literal, "codec_grammar").expect("checked above"),
                 codec_version,
             }
         };
@@ -232,7 +227,10 @@ pub fn check_collisions(declarations: &[CharterDeclaration]) -> Vec<String> {
     let mut violations = Vec::new();
     let mut by_key: BTreeMap<(&str, &str), &CharterDeclaration> = BTreeMap::new();
     for declaration in declarations {
-        let key = (declaration.owner.as_str(), declaration.state_family.as_str());
+        let key = (
+            declaration.owner.as_str(),
+            declaration.state_family.as_str(),
+        );
         match by_key.get(&key) {
             Some(existing) => {
                 let same_grammar = existing.schema_grammar == declaration.schema_grammar
@@ -390,8 +388,8 @@ mod tests {
         let source = format!(
             "{FULL_LITERAL}\n let derived = StateIdentityCharterV2 {{ ..ALPHA_CHARTER }};\n"
         );
-        let declarations = scan_source("crates/x/src/lib.rs", &source)
-            .expect("both literals parse");
+        let declarations =
+            scan_source("crates/x/src/lib.rs", &source).expect("both literals parse");
         assert_eq!(declarations.len(), 2);
         assert_eq!(declarations[0].owner, "fs-exec::solver");
         assert_eq!(declarations[0].state_family, "jacobi-iteration");
@@ -412,22 +410,21 @@ mod tests {
     fn duplicate_pair_with_drifted_grammar_refuses_deterministically() {
         let drifted = FULL_LITERAL
             .replace("codec_version: 1,", "codec_version: 2,")
-            .replace(
-                "const ALPHA_CHARTER:",
-                "const BETA_CHARTER:",
-            )
+            .replace("const ALPHA_CHARTER:", "const BETA_CHARTER:")
             .replace(
                 "snapshot_v2::StateIdentityCharterV2 = snapshot_v2::StateIdentityCharterV2 {",
                 "snapshot_v2::StateIdentityCharterV2 = snapshot_v2::StateIdentityCharterV2 {",
             )
             .replacen("StateIdentityCharterV2 {", "StateIdentityCharterV2 {", 1);
-        let source =
-            format!("{FULL_LITERAL}\n{drifted}\n");
+        let source = format!("{FULL_LITERAL}\n{drifted}\n");
         let declarations = scan_source("crates/x/src/lib.rs", &source).expect("parses");
         assert_eq!(declarations.len(), 2);
         let violations = check_collisions(&declarations);
         assert_eq!(violations.len(), 1, "{violations:?}");
-        assert!(violations[0].contains("charter collision"), "{violations:?}");
+        assert!(
+            violations[0].contains("charter collision"),
+            "{violations:?}"
+        );
         assert!(violations[0].contains("jacobi-iteration"), "{violations:?}");
     }
 
@@ -440,10 +437,9 @@ mod tests {
 
     #[test]
     fn unresolvable_update_base_fails_closed() {
-        let source =
-            "let d = StateIdentityCharterV2 { ..NO_SUCH_BASE };".to_string();
-        let error = scan_source("crates/x/src/lib.rs", &source)
-            .expect_err("unresolvable base refuses");
+        let source = "let d = StateIdentityCharterV2 { ..NO_SUCH_BASE };".to_string();
+        let error =
+            scan_source("crates/x/src/lib.rs", &source).expect_err("unresolvable base refuses");
         assert!(error.contains("NO_SUCH_BASE"), "{error}");
     }
 
@@ -451,8 +447,7 @@ mod tests {
     fn incomplete_literal_names_the_missing_field() {
         let source = "const C: StateIdentityCharterV2 = StateIdentityCharterV2 { owner: \"a\" };"
             .to_string();
-        let error = scan_source("crates/x/src/lib.rs", &source)
-            .expect_err("missing fields refuse");
+        let error = scan_source("crates/x/src/lib.rs", &source).expect_err("missing fields refuse");
         assert!(error.contains("lacks"), "{error}");
     }
 
@@ -478,8 +473,7 @@ mod tests {
             "    codec_version: 1,\n",
             "};\n",
         );
-        let declarations =
-            scan_source("crates/x/src/lib.rs", source).expect("parses");
+        let declarations = scan_source("crates/x/src/lib.rs", source).expect("parses");
         assert_eq!(declarations.len(), 1, "{declarations:?}");
         assert_eq!(declarations[0].owner, "fs-exec::solver");
     }
@@ -488,8 +482,7 @@ mod tests {
     fn type_annotation_occurrence_is_not_a_constructor() {
         // The annotation `: StateIdentityCharterV2 =` must not produce a
         // phantom declaration or consume the real one.
-        let declarations =
-            scan_source("crates/x/src/lib.rs", FULL_LITERAL).expect("parses");
+        let declarations = scan_source("crates/x/src/lib.rs", FULL_LITERAL).expect("parses");
         assert_eq!(declarations.len(), 1);
         assert_eq!(declarations[0].line, 1);
     }
@@ -520,8 +513,7 @@ mod tests {
         );
         let stripped = strip_test_modules(source);
         assert!(!stripped.contains("IMPOSTOR_A"), "{stripped}");
-        let declarations =
-            scan_source("crates/x/src/lib.rs", &stripped).expect("parses");
+        let declarations = scan_source("crates/x/src/lib.rs", &stripped).expect("parses");
         assert_eq!(declarations.len(), 1);
         assert_eq!(declarations[0].owner, "c::real");
     }

@@ -845,9 +845,7 @@ fn rust_named_type_declaration_bytes(
         ";" => lexical.tokens[open].end,
         _ => {
             let Some(close) = lexical.pairs[open] else {
-                return Err(format!(
-                    "type {symbol:?} declaration braces are unbalanced"
-                ));
+                return Err(format!("type {symbol:?} declaration braces are unbalanced"));
             };
             lexical.tokens[close].end
         }
@@ -10689,7 +10687,7 @@ fn normalized_rust_schema_authority_with_index(
             None,
             index,
             &format!("external macro authority {symbol:?} invocation"),
-                &BTreeSet::new(),
+            &BTreeSet::new(),
         )?;
     }
     let local_macros = &index.source_macro_rules;
@@ -11650,11 +11648,11 @@ fn identity_schema_base_hash_with_index(
         &declared_type_authorities,
     )
     .map_err(|detail| {
-            format!(
-                "identity {}: owner-local function closure is invalid: {detail}",
-                decl.id
-            )
-        })?;
+        format!(
+            "identity {}: owner-local function closure is invalid: {detail}",
+            decl.id
+        )
+    })?;
     fingerprint_part(&mut payload, &owner_closure);
     for function in decl
         .schema_functions

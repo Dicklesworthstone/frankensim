@@ -1192,7 +1192,7 @@ fn safe_step_status_code(status: SafeStepStatus) -> f64 {
 
 /// Wire codes for `fs_neuroshape_e2e::SurfaceLocalizationStatus` in slot
 /// `[26]`. `0` stays the reserved no-claim code, matching the other status
-/// slots; a conforming v3 producer never serializes it.
+/// slots; a conforming v4 producer never serializes it.
 const LOCALIZATION_STATUS_LOCALIZED: f64 = 1.0;
 const LOCALIZATION_STATUS_VALID_EMPTY: f64 = 2.0;
 const LOCALIZATION_STATUS_INVALID_INPUT: f64 = 3.0;
@@ -1272,9 +1272,7 @@ fn encode_cancellation_detail(words: &mut [f64], detail: &CancellationDetail) {
 
 /// Fixed-width, lossless wire detail. `u32::MAX` in an unused lane is the
 /// native undefined sentinel split into its exact lane representation.
-fn localization_detail_words(
-    localization: &SurfaceLocalization,
-) -> [f64; LOCALIZATION_DETAIL_LEN] {
+fn localization_detail_words(localization: &SurfaceLocalization) -> [f64; LOCALIZATION_DETAIL_LEN] {
     let mut words = [f64::from(u32::MAX); LOCALIZATION_DETAIL_LEN];
     match localization {
         SurfaceLocalization::Localized { .. } | SurfaceLocalization::ValidEmpty => {
@@ -2047,10 +2045,7 @@ mod tests {
     };
 
     fn is_u32_lane(value: f64) -> bool {
-        value.is_finite()
-            && value >= 0.0
-            && value <= f64::from(u32::MAX)
-            && value.fract() == 0.0
+        value.is_finite() && value >= 0.0 && value <= f64::from(u32::MAX) && value.fract() == 0.0
     }
 
     /// A decoder-shaped reader: refuse an unrecognized payload version before
@@ -2512,7 +2507,7 @@ mod tests {
                 SurfaceLocalization::Cancelled(CancellationDetail {
                     stage: LocalizationStage::IsoContourExtraction,
                     kind: CancellationKind::CancelledAtCheckpoint,
-                    phase: "extract",
+                    phase: "fs-viz.isocontour.edge-chunk",
                     deadline_ns: u64::MAX,
                     observed_ns: u64::MAX,
                     quota_context_a: u64::MAX,
@@ -2778,8 +2773,8 @@ mod tests {
             require_supported_neuroshape_schema(&success_with_refusal).is_err(),
             "accepted refusal detail on a successful status"
         );
-        let cancelled = encoded_with_localization(SurfaceLocalization::Cancelled(
-            CancellationDetail {
+        let cancelled =
+            encoded_with_localization(SurfaceLocalization::Cancelled(CancellationDetail {
                 stage: LocalizationStage::IsoContourExtraction,
                 kind: CancellationKind::CancelledAtCheckpoint,
                 phase: "fs-viz.isocontour.publish",
@@ -2788,8 +2783,7 @@ mod tests {
                 quota_context_a: u64::MAX,
                 quota_context_b: u64::MAX,
                 quota_context_c: u64::MAX,
-            },
-        ));
+            }));
         for (slot, bad_code) in [(29, 8.0), (30, 11.0)] {
             let mut mutated = cancelled.clone();
             mutated[slot] = bad_code;
