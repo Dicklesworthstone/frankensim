@@ -1621,9 +1621,12 @@ export function buildDressing(
   const dust = makeSpritePool(14, dustTex, 1.1);
   if (withLife) {
     veg = buildVegetation(scrubField({ tufts: 340, bushes: 56, pines: 12 }, 1903), groundY);
+    veg.position.set(launch[0], launch[1], launch[2]);
     group.add(veg);
     // Beach detail (A5): shells + pebbles outside the launch flat.
-    group.add(buildScatter({ shells: 260, pebbles: 220 }, groundY));
+    const beachScatter = buildScatter({ shells: 260, pebbles: 220 }, groundY);
+    beachScatter.position.set(launch[0], launch[1], launch[2]);
+    group.add(beachScatter);
     for (let i = 0; i < 9; i += 1) {
       const r = buildRibbon(STREAMER_SEGS, 0.055, 0xdccda6, 0.42);
       r.mesh.visible = false;
