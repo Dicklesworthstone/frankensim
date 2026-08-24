@@ -4296,9 +4296,9 @@ impl TilePool {
     // removes witness counters, allocator snapshots, and hashing so the
     // additive evidence API does not tax existing hot-kernel callers.
     #[allow(clippy::too_many_lines)]
-#[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::type_complexity)]
     fn run_inner_core<const COMPLETION: bool, Caps, K: TileKernel>(
-#[allow(clippy::type_complexity)]
         &self,
         kernel: &K,
         gate: &CancelGate,
@@ -6965,6 +6965,7 @@ mod tests {
             Err(TilePoolCompletionWitnessError::RootMismatch)
         );
 
+        #[allow(clippy::type_complexity)]
         let mutations: &[(fn(&mut TilePoolCompletionWitness), &'static str)] = &[
             (
                 |witness| {

@@ -3085,7 +3085,10 @@ impl ChildFinalizer<'_, '_> {
         self.commit_child_local_publication(prepared, declared_bytes, destination, staged)
     }
 
-#[allow(clippy::too_many_lines)]
+    // `prepared` is intentionally taken by value: the commit consumes the
+    // staged-publication authority on success and drops it on refusal.
+    #[allow(clippy::needless_pass_by_value)]
+    #[allow(clippy::too_many_lines)]
     fn commit_publication_inner<T>(
         &mut self,
         prepared: PreparedPublication,
