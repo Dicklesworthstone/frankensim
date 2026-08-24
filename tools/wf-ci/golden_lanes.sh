@@ -13,7 +13,7 @@
 # Repro: tools/wf-ci/golden_lanes.sh
 set -u
 cd "$(dirname "$0")/../.."
-GOLDEN="975c44f0ffd8c0f7c40f9c39986e51b62bb9e67beab1e3183dce82efc3886018"
+GOLDEN="2c50f8a672617cd3e872dfbfb706d4ff26d5828b25d710c910d8e8d632c50714"
 NATIVE_GOLDEN="$GOLDEN"
 WASM_GOLDEN="$GOLDEN"
 PKG="${WF_PKG_DIR:-/tmp/wf-ci-pkg}"
