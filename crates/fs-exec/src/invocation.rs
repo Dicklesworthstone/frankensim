@@ -1903,7 +1903,7 @@ impl<'clock> InvocationBudget<'clock> {
             }
             None => self.remaining = remaining,
         }
-        self.next_ordinal = next_ordinal;
+        self.next_ordinal = next;
         let node = self.children.len();
         self.children.push(ChildState {
             id,
@@ -2569,7 +2569,7 @@ impl<'budget, 'clock> ChildBudget<'budget, 'clock> {
                 resource: "memory-bytes",
             }));
         };
-        let Some(next) = state.memory_requested.checked_add(u128::from(bytes.0)) else {
+        let Some(next_requested) = state.memory_requested.checked_add(u128::from(bytes.0)) else {
             return Err(self.latch(InvocationError::ArithmeticOverflow {
                 resource: "memory-requested",
             }));
@@ -2942,7 +2942,7 @@ impl ChildFinalizer<'_, '_> {
             };
             self.owner.latch_failure(Some(self.node), error.clone());
             return Err(error);
-        }
+        };
         let Some(consumed) = state.direct_consumed.work.get().checked_add(amount.get()) else {
             let error = InvocationError::ArithmeticOverflow {
                 resource: "finalization-work",
@@ -3151,7 +3151,7 @@ impl ChildFinalizer<'_, '_> {
             self.owner.children[self.node].finalization_publication =
                 FinalizationPublication::Aborted;
             return Err(PublicationCommitError { error, staged });
-        }
+        };
         let Some(retained) = state.output_retained.checked_add(declared_bytes.get()) else {
             let error = InvocationError::ArithmeticOverflow {
                 resource: "output-retained",
@@ -3177,7 +3177,7 @@ impl ChildFinalizer<'_, '_> {
             self.owner.children[self.node].finalization_publication =
                 FinalizationPublication::Aborted;
             return Err(PublicationCommitError { error, staged });
-        }
+        };
         // `mem::replace` is the only real destination mutation supported by
         // this protocol. It is infallible and runs after every refusal check,
         // so accounting cannot say Committed without the destination changing,
