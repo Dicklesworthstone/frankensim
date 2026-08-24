@@ -440,7 +440,7 @@ pub fn extract_bore(
                     tries += 1;
                 }
             }
-            (result.0, result.1, result.2, result.3.clone(), retreat)
+            (result.0, result.1, result.2, result.3, retreat)
         };
         if retreat_m > 0.0 {
             if index == 0 {
@@ -1261,10 +1261,7 @@ mod tests {
         }
 
         fn support(&self) -> Aabb {
-            Aabb::new(
-                Point3::new(-1.0, -1.0, -1.0),
-                Point3::new(1.0, 1.0, 1.0),
-            )
+            Aabb::new(Point3::new(-1.0, -1.0, -1.0), Point3::new(1.0, 1.0, 1.0))
         }
 
         fn trace_step_claim(&self) -> TraceStepClaim {

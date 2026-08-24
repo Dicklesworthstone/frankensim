@@ -16,9 +16,7 @@
 
 use asupersync::types::Budget;
 use fs_exec::{CancelGate, Cx, ExecMode, StreamKey};
-use fs_query::{
-    Feature, FeatureComplex, MAX_COMPLEX_FEATURES, QueryError, ccd_candidates,
-};
+use fs_query::{Feature, FeatureComplex, MAX_COMPLEX_FEATURES, QueryError, ccd_candidates};
 
 const EXECUTION_SEED: u64 = 0xFEA7;
 
@@ -300,6 +298,7 @@ fn gf_005_refusals_fail_closed() {
         ),
         "the feature ceiling must refuse before malformed triangle validation or edge allocation"
     );
+    drop(oversized_triangles);
 
     let (nan_inflation, negative_inflation, capped, cancelled_ok) = with_cx(|cx| {
         (

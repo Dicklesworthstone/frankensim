@@ -163,13 +163,14 @@ impl FeatureComplex {
                 return Err(QueryError::InvalidPointSample { at: *p });
             }
         }
-        let edge_records = triangles
-            .len()
-            .checked_mul(3)
-            .ok_or(QueryError::FeatureComplexTooLarge {
-                features: usize::MAX,
-                max: MAX_COMPLEX_FEATURES,
-            })?;
+        let edge_records =
+            triangles
+                .len()
+                .checked_mul(3)
+                .ok_or(QueryError::FeatureComplexTooLarge {
+                    features: usize::MAX,
+                    max: MAX_COMPLEX_FEATURES,
+                })?;
         let mut edges: Vec<(u32, u32)> = Vec::with_capacity(edge_records);
         for (triangle, tri) in triangles.iter().enumerate() {
             for (corner, &index) in tri.iter().enumerate() {
