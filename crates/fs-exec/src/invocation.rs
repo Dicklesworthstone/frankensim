@@ -2970,19 +2970,18 @@ impl ChildFinalizer<'_, '_> {
         if self.owner.current_failure(Some(self.node)).is_none()
             && let Some(deadline) = self.owner.limits.deadline
         {
-                let now = self.owner.clock.now();
-                self.owner.last_deadline_observation = Some(now);
-                if now >= deadline {
-                    self.owner.cancel_gate.request();
-                    self.owner.latch_failure(
-                        Some(self.node),
-                        InvocationError::DeadlineExpired {
-                            phase,
-                            deadline_ns: deadline.as_nanos(),
-                            observed_ns: now.as_nanos(),
-                        },
-                    );
-                }
+            let now = self.owner.clock.now();
+            self.owner.last_deadline_observation = Some(now);
+            if now >= deadline {
+                self.owner.cancel_gate.request();
+                self.owner.latch_failure(
+                    Some(self.node),
+                    InvocationError::DeadlineExpired {
+                        phase,
+                        deadline_ns: deadline.as_nanos(),
+                        observed_ns: now.as_nanos(),
+                    },
+                );
             }
         }
         let state = &self.owner.children[self.node];

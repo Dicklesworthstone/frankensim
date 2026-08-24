@@ -32,6 +32,14 @@ fn smoke_config() -> SlotJet3dConfig {
     }
 }
 
+fn checkpoint_dir(label: &str) -> std::path::PathBuf {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("test clock is after the Unix epoch")
+        .as_nanos();
+    std::env::temp_dir().join(format!("sj-ckpt-{label}-{}-{nonce}", std::process::id()))
+}
+
 #[test]
 fn config_refusals() {
     let mut cfg = smoke_config();
@@ -71,6 +79,27 @@ fn config_refusals() {
     assert!(
         run_slot_jet_3d(&cfg).is_err(),
         "oversized seed must be refused"
+    );
+
+    let mut cfg = smoke_config();
+    cfg.fringe_width = 0;
+    assert!(
+        run_slot_jet_3d(&cfg).is_err(),
+        "zero-width fringe must be refused without panicking"
+    );
+
+    let mut cfg = smoke_config();
+    cfg.fringe_sigma = 1.01;
+    assert!(
+        run_slot_jet_3d(&cfg).is_err(),
+        "out-of-range fringe strength must be refused without panicking"
+    );
+
+    let mut cfg = smoke_config();
+    cfg.nozzle_thickness = usize::MAX;
+    assert!(
+        run_slot_jet_3d(&cfg).is_err(),
+        "overflowing axial layout must be refused without panicking"
     );
 }
 
@@ -294,11 +323,7 @@ fn chunked_resume_bitwise_matches_whole_run() {
 
     // Unique per-process checkpoint dir; deliberately never deleted
     // (repository law: no file deletion without explicit approval).
-    let dir = std::env::temp_dir().join(format!(
-        "sj-ckpt-equiv-{}-{}",
-        std::process::id(),
-        cfg.steps_settle
-    ));
+    let dir = checkpoint_dir("equiv");
     let first = run_slot_jet_3d_chunked(&cfg, &dir, 137).expect("chunk 1");
     assert!(matches!(
         first,
@@ -319,12 +344,25 @@ fn chunked_resume_bitwise_matches_whole_run() {
         }
         other => panic!("second chunk must complete, got {other:?}"),
     }
+    assert!(
+        dir.join("state.bin").is_file(),
+        "completion must retain its replayable terminal checkpoint"
+    );
+    let replay = run_slot_jet_3d_chunked(&cfg, &dir, 1).expect("replay terminal checkpoint");
+    let fs_aeroac::slot_jet_3d::SweepProgress::Complete(replayed) = replay else {
+        panic!("terminal checkpoint must replay as complete");
+    };
+    assert_eq!(replayed.force_series.len(), whole.force_series.len());
+    for (actual, expected) in replayed.force_series.iter().zip(&whole.force_series) {
+        assert_eq!(actual[0].to_bits(), expected[0].to_bits());
+        assert_eq!(actual[1].to_bits(), expected[1].to_bits());
+    }
 }
 
 #[test]
 fn checkpoint_refuses_foreign_configuration() {
     let cfg = smoke_config();
-    let dir = std::env::temp_dir().join(format!("sj-ckpt-fp-{}", std::process::id()));
+    let dir = checkpoint_dir("fp");
     let _ = run_slot_jet_3d_chunked(&cfg, &dir, 50).expect("seed chunk");
     let mut foreign = smoke_config();
     foreign.slot_half *= 2.0;
@@ -334,12 +372,21 @@ fn checkpoint_refuses_foreign_configuration() {
         format!("{err}").contains("different configuration"),
         "refusal must name the fingerprint guard: {err}"
     );
+
+    let mut foreign_record_length = smoke_config();
+    foreign_record_length.steps_record *= 2;
+    let err = run_slot_jet_3d_chunked(&foreign_record_length, &dir, 50)
+        .expect_err("record-length changes must invalidate checkpoint identity");
+    assert!(
+        format!("{err}").contains("different configuration"),
+        "fingerprint must cover the recording horizon: {err}"
+    );
 }
 
 #[test]
 fn checkpoint_reader_refuses_malformed_state_before_resume() {
     let cfg = smoke_config();
-    let dir = std::env::temp_dir().join(format!("sj-ckpt-malformed-{}", std::process::id()));
+    let dir = checkpoint_dir("malformed");
     let _ = run_slot_jet_3d_chunked(&cfg, &dir, 50).expect("seed checkpoint");
     let path = dir.join("state.bin");
     let original = std::fs::read(&path).expect("read seeded checkpoint");
@@ -355,7 +402,7 @@ fn checkpoint_reader_refuses_malformed_state_before_resume() {
     };
 
     let mut unknown_version = original.clone();
-    unknown_version[8..12].copy_from_slice(&2u32.to_le_bytes());
+    unknown_version[8..12].copy_from_slice(&u32::MAX.to_le_bytes());
     refuse(&unknown_version, "magic/version mismatch");
 
     let mut impossible_progress = original.clone();

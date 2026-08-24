@@ -301,6 +301,8 @@ fn validate_config(cfg: &SlotJet3dConfig) -> Result<(), AeroacError> {
         || cfg.nozzle_thickness < 1
         || cfg.edge_distance < 8
         || cfg.plate_length < 2
+        || cfg.fringe_width == 0
+        || !(0.0..=1.0).contains(&cfg.fringe_sigma)
         || !(0.0..0.2).contains(&cfg.seed_amplitude)
         || cfg.steps_settle == 0
     {
@@ -308,7 +310,13 @@ fn validate_config(cfg: &SlotJet3dConfig) -> Result<(), AeroacError> {
             what: "jet geometry (domain, slot, speed, rates, layout) out of range",
         });
     }
-    if cfg.nozzle_thickness + cfg.edge_distance + cfg.plate_length + cfg.fringe_width + 8 > cfg.nx {
+    let occupied_x = cfg
+        .nozzle_thickness
+        .checked_add(cfg.edge_distance)
+        .and_then(|extent| extent.checked_add(cfg.plate_length))
+        .and_then(|extent| extent.checked_add(cfg.fringe_width))
+        .and_then(|extent| extent.checked_add(8));
+    if occupied_x.is_none_or(|extent| extent > cfg.nx) {
         return Err(AeroacError::InvalidParameter {
             what: "nozzle + plate + fringe do not fit in the domain",
         });
@@ -707,7 +715,7 @@ pub fn config_fingerprint(cfg: &SlotJet3dConfig) -> u64 {
         return 0;
     };
     let tag = format!(
-        "v1|{},{},{},{},{},{},{},{},{},{},{},{},{}",
+        "v2|{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
         cfg.nx,
         cfg.ny,
         cfg.nz,
@@ -720,7 +728,9 @@ pub fn config_fingerprint(cfg: &SlotJet3dConfig) -> u64 {
         cfg.plate_length,
         cfg.fringe_width,
         cfg.fringe_sigma,
-        cfg.seed_amplitude
+        cfg.seed_amplitude,
+        cfg.steps_settle,
+        cfg.steps_record
     );
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in tag.as_bytes() {
@@ -737,7 +747,7 @@ struct ChunkState {
 }
 
 const CHECKPOINT_MAGIC: &[u8; 8] = b"FSJSCKPT";
-const CHECKPOINT_VERSION: u32 = 1;
+const CHECKPOINT_VERSION: u32 = 2;
 const CHECKPOINT_HEADER_LEN: usize = 44;
 
 fn write_checkpoint(
@@ -833,7 +843,10 @@ pub fn run_slot_jet_3d_chunked(
     let total_settle = u64::try_from(cfg.steps_settle).unwrap_or(u64::MAX);
     let total_record = u64::try_from(cfg.steps_record).unwrap_or(u64::MAX);
     if state.settle_done >= total_settle && state.record_done >= total_record {
-        let _ = std::fs::remove_file(&ckpt_path);
+        // Persist the terminal state as well as partial progress. Besides
+        // preserving replay evidence, this makes a repeated invocation
+        // idempotently return the same completed run instead of restarting.
+        write_checkpoint(checkpoint_dir, cfg, &rig, &state)?;
         let (mach_max, flux_plate, flux_fringe) = rig.plane_diagnostics();
         return Ok(SweepProgress::Complete(Box::new(finish_run(
             cfg,

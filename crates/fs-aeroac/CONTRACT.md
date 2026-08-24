@@ -93,7 +93,9 @@ scope law, pinned as data and by test).
   Chunked checkpoints fail closed on unknown format versions, files beyond the
   configured size envelope, inconsistent settle/record/force counters, any
   truncated or trailing state bytes, non-finite force/population values, and
-  non-positive fluid density before resumed stepping can mutate the rig.
+  non-positive fluid density before resumed stepping can mutate the rig. Their
+  identity covers the full run configuration, including settle and record
+  horizons; terminal checkpoints are retained for idempotent replay.
   The Re actuator is the central-moment second-order rate at fixed
   `u_jet`; independent rungs, not adiabatic continuation. Both
   outcomes are honest wins: a broadband rung above the tonal
