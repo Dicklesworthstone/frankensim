@@ -393,6 +393,9 @@ pub fn ccd_candidates(
 /// The refusals from [`ccd_candidates`], plus
 /// [`QueryError::InvalidContactInflation`] if a finite motion radius cannot be
 /// inflated without overflow.
+// Bead frankensim-68v4f: 8th parameter is the inflation knob; folding it
+// into a config struct would churn every call site for no semantic gain.
+#[allow(clippy::too_many_arguments)]
 pub fn ccd_candidates_with_inflation(
     a: &FeatureComplex,
     b: &FeatureComplex,

@@ -328,6 +328,9 @@ impl From<QueryError> for BoreError {
 /// [`BoreError`] on refusal — branched lumens, degenerate chains, stations
 /// outside the region, unusable configuration, or any underlying
 /// [`QueryError`].
+// Bead frankensim-68v4f: staged bore extraction kept inline so the
+// refusal ordering stays auditable end to end.
+#[allow(clippy::too_many_lines)]
 pub fn extract_bore(
     chart: &dyn Chart,
     boundary: &Soup,
