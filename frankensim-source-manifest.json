@@ -2,7 +2,7 @@
   "schema": "frankensim-source-manifest-v1",
   "identity_domain": "org.frankensim.xtask.source-manifest.v1",
   "identity_version": 1,
-  "manifest_identity": "b388e2facf0e18e1fce04f5c0e067eb94731c7ebe3c56bbf32d3d76c67fefc32",
+  "manifest_identity": "4bc912222906d39359983febe819e8c3def2364b12b71d0fab5c6aaf3a162e6e",
   "bead_id": "frankensim-extreal-program-f85xj.13.2",
   "authority": "canonical structural inventory over exact Git-index non-tracker bytes; release observations are intentionally unbound here",
   "release_binding": {
@@ -15,7 +15,7 @@
     "repository": "https://github.com/Dicklesworthstone/frankensim",
     "workspace_version": "0.0.1",
     "source_root_domain": "org.frankensim.xtask.source-root.v1",
-    "source_root": "62bb317d9b1aed98254b0a3e38dbd088f2648b851a77e029f65e3627fd6554bc",
+    "source_root": "2b1df615caf9332460550138ccadaa6e7e7091b165bf25e78d43265f35c08b38",
     "tracked_file_count": 2927,
     "excluded_paths": [".beads/**", "frankensim-source-manifest.json", "frankensim-source-manifest.spdx.json"],
     "files": [
@@ -36,7 +36,7 @@
       {"path": "Cargo.lock", "git_mode": "100644", "bytes": 92683, "content_blake3": "d6f9c2cecce71e7565d04a0839c81c8b83ca5d92c52e81afdd2c05539b2a37fc"},
       {"path": "Cargo.toml", "git_mode": "100644", "bytes": 7892, "content_blake3": "e10683887838957c014fe9c79b58003e688682256e0b4cc20f3f27a80a75c39f"},
       {"path": "LICENSE", "git_mode": "100644", "bytes": 3939, "content_blake3": "1a54e7681c481b4eeeb3f5c324ff4229036e9480b6822ed3b3f310602ece6d7d"},
-      {"path": "README.md", "git_mode": "100644", "bytes": 127012, "content_blake3": "7229f5fda75dfd2e43f694ab7f23d36668d3fb0f76bc557e640989fcbd959a46"},
+      {"path": "README.md", "git_mode": "100644", "bytes": 127107, "content_blake3": "63b8694ea7c787503cfaf7e7c875c8005cefddf513455033325a4d41d6cf8d10"},
       {"path": "apps/wright-flyer/.gitignore", "git_mode": "100644", "bytes": 42, "content_blake3": "5b625293b50d6918c62faf04805608a2081469f3acf9521aff1b75e6a4bf068d"},
       {"path": "apps/wright-flyer/.vercelignore", "git_mode": "100644", "bytes": 40, "content_blake3": "5bf159c2100b908a0f5c9f59ce1eb63d69b7414cac6c4c6ca368ff6f2f367e6c"},
       {"path": "apps/wright-flyer/e2e/bench.mjs", "git_mode": "100644", "bytes": 7877, "content_blake3": "73d4c1ef80230f68eee45e005588ca28a8bcb34837f06991c1b3c48616dc69cf"},
