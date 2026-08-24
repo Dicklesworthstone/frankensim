@@ -122,14 +122,22 @@ pub fn scan_source(path: &str, text: &str) -> Result<Vec<CharterDeclaration>, St
             return Err(format!("{path}:{line}: unterminated charter literal"));
         };
         let literal = &text[open..=close];
-        let update_base = literal
-            .split(',')
-            .find_map(|field| field.trim().strip_prefix(".."))
-            .map(str::trim)
-            .filter(|base| !base.is_empty());
+        // A `{ ..Base }` update places the `..` after the opening
+        // brace (and possibly no commas at all), so strip the brace
+        // before scanning fields and take the base name as its leading
+        // identifier rather than trusting surrounding punctuation.
+        let body = literal.trim_start().strip_prefix('{').unwrap_or(literal);
+        let update_base = body.split(',').find_map(|field| {
+            let field = field.trim().strip_prefix("..")?;
+            let name: String = field
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            (!name.is_empty()).then_some(name)
+        });
 
         let declaration = if let Some(base) = update_base {
-            let Some(resolved) = base_bindings.get(base) else {
+            let Some(resolved) = base_bindings.get(base.as_str()) else {
                 return Err(format!(
                     "{path}:{line}: charter struct-update base {base:?} does not \
                      resolve to a same-file const/static charter binding"
