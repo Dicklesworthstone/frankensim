@@ -531,6 +531,12 @@
       "reason": "euler cinematic-campaign internal algorithm/codec/bridge identity; run evidence between the campaign's own producer and consumer, not a document a third party writes"
     },
     {
+      "constant": "EULER_SCIENTIFIC_OVERLAY_SCHEMA_VERSION",
+      "location": "crates/fs-euler-disc-e2e/src/scientific_overlay.rs",
+      "reason_class": "internal-wire",
+      "reason": "experimental scientific-overlay sidecar on the euler lane (h7xu5); no external producer invited yet - reclassify to frozen only when the euler schemas table adopts it"
+    },
+    {
       "constant": "SPATIAL_AUDIO_ALGORITHM_VERSION",
       "location": "crates/fs-euler-disc-e2e/src/spatial_audio.rs",
       "reason_class": "internal-wire",
@@ -861,6 +867,18 @@
       "reason": "payload encoding internal to the scenario crate"
     },
     {
+      "constant": "RANS_ADJUDICATION_SCHEMA_VERSION",
+      "location": "crates/fs-scenario/src/rans_adjudication.rs",
+      "reason_class": "internal-wire",
+      "reason": "low-Re RANS rung is behind the rans-rung gate (bead extreal-program-f85xj.5.8.1); internal wire until the lane freezes a public promise"
+    },
+    {
+      "constant": "RANS_VALIDATION_SCHEMA_VERSION",
+      "location": "crates/fs-scenario/src/rans_validation.rs",
+      "reason_class": "internal-wire",
+      "reason": "low-Re RANS validation sidecar behind the rans-rung gate; internal wire until the lane freezes a public promise"
+    },
+    {
       "constant": "SENSOR_EXTENSION_SCHEMA_VERSION",
       "location": "crates/fs-scenario/src/sensor.rs",
       "reason_class": "internal-wire",
@@ -877,12 +895,6 @@
       "location": "crates/fs-scenario/src/sensor.rs",
       "reason_class": "internal-wire",
       "reason": "sensor extension surface landed at bead f85xj.17.4 with no registered maturity claim"
-    },
-    {
-      "constant": "EULER_SCIENTIFIC_OVERLAY_SCHEMA_VERSION",
-      "location": "crates/fs-euler-disc-e2e/src/scientific_overlay.rs",
-      "reason_class": "internal-wire",
-      "reason": "experimental scientific-overlay sidecar on the euler lane (h7xu5); no external producer invited yet - reclassify to frozen only when the euler schemas table adopts it"
     }
   ]
 }
