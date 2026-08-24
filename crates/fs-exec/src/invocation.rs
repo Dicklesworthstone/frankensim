@@ -4424,10 +4424,7 @@ fn verify_failure_propagation(
         if failure_requires_finalizable_origin(failure)
             && origin.is_some_and(|child| child.finalization.is_none())
         {
-                return Err(invocation_semantic_error(
-                    "finalization-failure-origin-kind",
-                ));
-            }
+            return Err(invocation_semantic_error("finalization-failure-origin-kind"));
         }
         if let InvocationError::TransactionalOutputScopeViolation { ancestor, .. } = failure {
             let ancestor_index = topology

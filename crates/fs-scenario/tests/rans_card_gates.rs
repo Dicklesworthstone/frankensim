@@ -166,11 +166,50 @@ fn every_caller_controlled_flattened_list_has_injective_admission() {
     assert_ambiguous_list("exclusions", |draft| {
         draft.exclusions.push("claim-a;claim-b".to_string());
     });
-    assert_ambiguous_list("governing_terms", move |draft| {
+    assert_ambiguous_list("falsifiers", move |draft| {
         draft
-            .governing_terms
+            .falsifiers
             .push(LEGACY_AUTHORITY_EXCLUSION.to_string());
     });
+}
+
+#[test]
+fn incomplete_or_forged_authority_sections_cannot_freeze() {
+    for error in [
+        mutate(|draft| draft.system_family.clear()),
+        mutate(|draft| draft.max_iterations = 0),
+        mutate(|draft| {
+            let _ = draft.damping_formulas.remove("f_mu");
+        }),
+        mutate(|draft| {
+            let _ = draft.boundary_conditions.remove("outlet");
+        }),
+        mutate(|draft| {
+            let _ = draft.discretization_targets.remove("wall-resolution");
+        }),
+        mutate(|draft| draft.validation_case_families.clear()),
+    ] {
+        assert!(
+            matches!(error, Err(AdmissionError::InvalidRegime { .. })),
+            "incomplete authority section must refuse, got {error:?}"
+        );
+    }
+
+    assert_eq!(
+        mutate(|draft| draft.feature_gate = "default".to_string()).err(),
+        Some(AdmissionError::CapabilityUnavailable {
+            capability: "rans-rung",
+        }),
+        "a draft cannot relabel the owning feature gate"
+    );
+
+    assert_eq!(
+        mutate(|draft| draft.boussinesq.reference_temperature_k = f64::NAN).err(),
+        Some(AdmissionError::NonFinite {
+            field: "boussinesq",
+        }),
+        "disabled options still carry manifest data and must stay finite"
+    );
 }
 
 #[test]

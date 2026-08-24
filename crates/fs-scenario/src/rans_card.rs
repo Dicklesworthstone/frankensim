@@ -323,6 +323,53 @@ impl RansCardDraft {
     /// Every clause documented on [`AdmissionError`], plus the transition
     /// no-claim requirement and the manifest size cap.
     pub fn freeze(self) -> Result<RansModelCard, AdmissionError> {
+        if self.system_family.trim().is_empty() {
+            return Err(AdmissionError::InvalidRegime {
+                what: "system family must be non-empty".to_string(),
+            });
+        }
+        if self.feature_gate != "rans-rung" {
+            return Err(AdmissionError::CapabilityUnavailable {
+                capability: "rans-rung",
+            });
+        }
+        if self.max_iterations == 0 || self.max_iterations > 100_000 {
+            return Err(AdmissionError::InvalidRegime {
+                what: "max_iterations must lie in 1..=100000".to_string(),
+            });
+        }
+        for (section, required, entries) in [
+            (
+                "damping formulas",
+                &["f_mu", "f_2"][..],
+                &self.damping_formulas,
+            ),
+            (
+                "boundary conditions",
+                &["inlet", "walls", "thermal-wall", "outlet"][..],
+                &self.boundary_conditions,
+            ),
+            (
+                "discretization targets",
+                &["wall-resolution", "channel-modes"][..],
+                &self.discretization_targets,
+            ),
+        ] {
+            if required.iter().any(|key| {
+                entries
+                    .get(*key)
+                    .is_none_or(|value| value.trim().is_empty())
+            }) {
+                return Err(AdmissionError::InvalidRegime {
+                    what: format!("{section} are incomplete"),
+                });
+            }
+        }
+        if self.validation_case_families.is_empty() {
+            return Err(AdmissionError::InvalidRegime {
+                what: "validation case families must be non-empty".to_string(),
+            });
+        }
         // Terms: every required term present.
         for term in REQUIRED_TERMS {
             if !self.governing_terms.iter().any(|g| g == term) {
@@ -348,6 +395,29 @@ impl RansCardDraft {
         if !self.turbulent_prandtl.is_finite() || !(0.5..=1.2).contains(&self.turbulent_prandtl) {
             return Err(AdmissionError::CoefficientOutOfBounds {
                 name: "turbulent_prandtl",
+            });
+        }
+        if !self.boussinesq.reference_temperature_k.is_finite()
+            || self
+                .boussinesq
+                .beta_per_k
+                .is_some_and(|beta| !beta.is_finite())
+        {
+            return Err(AdmissionError::NonFinite {
+                field: "boussinesq",
+            });
+        }
+        if self
+            .porous_fin
+            .permeability_m2
+            .is_some_and(|permeability| !permeability.is_finite())
+            || self
+                .porous_fin
+                .forchheimer_c_f
+                .is_some_and(|coefficient| !coefficient.is_finite())
+        {
+            return Err(AdmissionError::NonFinite {
+                field: "porous_fin",
             });
         }
         // Boussinesq bounds when enabled.
