@@ -236,6 +236,21 @@ impl SchemaFunction {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct SchemaType {
+    path: Option<String>,
+    symbol: String,
+}
+
+impl SchemaType {
+    fn canonical(&self) -> String {
+        self.path.as_ref().map_or_else(
+            || self.symbol.clone(),
+            |path| format!("{path}#{}", self.symbol),
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct IdentityDecl {
     id: String,
@@ -248,6 +263,7 @@ struct IdentityDecl {
     encoder_helpers: Vec<String>,
     schema_functions: Vec<SchemaFunction>,
     schema_constants: Vec<SchemaConstant>,
+    schema_types: Vec<SchemaType>,
     schema_dependencies: Vec<String>,
     digest: String,
     encoding: String,
@@ -761,6 +777,39 @@ fn parse_schema_constants(value: &str) -> Result<Vec<SchemaConstant>, String> {
     Ok(constants)
 }
 
+fn parse_schema_types(value: &str) -> Result<Vec<SchemaType>, String> {
+    let mut types = Vec::new();
+    for item in list(value) {
+        let declared_type = if let Some((path, symbol)) = item.split_once('#') {
+            if path.contains('#') || symbol.contains('#') || !safe_relative(path) {
+                return Err(format!(
+                    "schema type {item:?} must be repo-relative path#TypeName or a bare Rust identifier"
+                ));
+            }
+            SchemaType {
+                path: Some(path.to_string()),
+                symbol: symbol.to_string(),
+            }
+        } else {
+            SchemaType {
+                path: None,
+                symbol: item.clone(),
+            }
+        };
+        if !canonical_symbol(&declared_type.symbol) {
+            return Err(format!(
+                "schema type {item:?} must name a bare Rust type identifier"
+            ));
+        }
+        types.push(declared_type);
+    }
+    types.sort();
+    if types.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err("schema_types contains duplicates".to_string());
+    }
+    Ok(types)
+}
+
 fn parse_schema_constant_reference(value: &str) -> Result<SchemaConstant, String> {
     let constants = parse_schema_constants(value)?;
     let [constant] = constants.as_slice() else {
@@ -938,6 +987,10 @@ fn parse_declaration(owner: &str, raw: BTreeMap<String, String>) -> Result<Ident
         parse_schema_functions(&take_required(&mut fields, "schema_functions")?)?;
     let schema_constants =
         parse_schema_constants(&take_required(&mut fields, "schema_constants")?)?;
+    let schema_types = match fields.remove("schema_types") {
+        Some(value) => parse_schema_types(&value)?,
+        None => Vec::new(),
+    };
     let schema_dependencies =
         parse_schema_dependencies(&take_required(&mut fields, "schema_dependencies")?, &id)?;
     let digest = take_required(&mut fields, "digest")?;
@@ -996,6 +1049,7 @@ fn parse_declaration(owner: &str, raw: BTreeMap<String, String>) -> Result<Ident
         encoder_helpers,
         schema_functions,
         schema_constants,
+        schema_types,
         schema_dependencies,
         digest,
         encoding,
