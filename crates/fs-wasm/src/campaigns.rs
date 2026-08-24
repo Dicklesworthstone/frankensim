@@ -1331,7 +1331,7 @@ fn neuro_net(lift: f64) -> MlpSdf {
 /// central box half-width (clamped `0.05..=1.0`, default 0.3).
 ///
 /// Output layout, schema version [`NEUROSHAPE_SCHEMA_VERSION`] (length
-/// `48 + 4096`; empty on an admission refusal):
+/// `52 + 4096`; empty on an admission refusal):
 /// - `[0]` — `grid_n` (64).
 /// - `[1]`,`[2]` — `win_lo`, `win_hi` (the render window `[win_lo, win_hi]²`,
 ///   `win_lo = -(ring_r+0.5)`).
