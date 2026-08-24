@@ -423,6 +423,7 @@ impl Chart for FeltThicknessChart {
 mod tests {
     use super::*;
     use fs_exec::{Budget, CancelGate, ExecMode, StreamKey};
+    use fs_geom::TraceStepClaim;
 
     fn cx_scope<T>(f: impl FnOnce(&Cx<'_>) -> T) -> T {
         let gate = CancelGate::new();
