@@ -19,17 +19,32 @@ const RESTART_GAP_EVOLUTION_RELATIVE_TOLERANCE: f64 = 1.0e-12;
 #[derive(Debug, Clone, PartialEq)]
 pub enum GasFilmError {
     /// A named scalar, vector entry, or count is not admitted.
-    InvalidInput { field: &'static str },
+    InvalidInput {
+        /// Name of invalid input field.
+        field: &'static str,
+    },
     /// A semantic identity is empty or contains non-canonical bytes.
-    InvalidIdentity { field: &'static str },
+    InvalidIdentity {
+        /// Name of invalid identity field.
+        field: &'static str,
+    },
     /// A requested model lies outside this deliberately narrow continuum scope.
-    Unavailable { reason: &'static str },
+    Unavailable {
+        /// Reason for unavailability.
+        reason: &'static str,
+    },
     /// The static mask would split or change the retained one-dimensional topology.
     TopologyChangeUnavailable,
     /// A checkpoint is not compatible with the next requested step.
-    CheckpointMismatch { field: &'static str },
+    CheckpointMismatch {
+        /// Mismatched field name.
+        field: &'static str,
+    },
     /// A derived quantity overflowed or became non-finite.
-    NonFiniteDerived { field: &'static str },
+    NonFiniteDerived {
+        /// Non-finite derived field name.
+        field: &'static str,
+    },
     /// The deterministic Picard/Jacobi budget ended before the residual gate.
     IterationBudgetExceeded {
         /// Number of completed iterations.
@@ -184,9 +199,15 @@ pub struct GasFilmUncertainty {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SlipPolicy {
     /// Named no-slip continuum policy.
-    NoSlipContinuum { source_id: String },
+    NoSlipContinuum {
+        /// Source identity of the policy.
+        source_id: String,
+    },
     /// Any rarefied/slip correction requires a separately admitted model.
-    RarefiedSlipRequested { source_id: String },
+    RarefiedSlipRequested {
+        /// Source identity of requested slip model.
+        source_id: String,
+    },
 }
 
 /// Explicit wall-roughness closure for the smooth-gap Reynolds model.
@@ -200,7 +221,10 @@ pub enum RoughnessPolicy {
         maximum_roughness_m: f64,
     },
     /// Roughness requires a model not provided by this foundation.
-    Unresolved { source_id: String },
+    Unresolved {
+        /// Source identity of unresolved roughness.
+        source_id: String,
+    },
 }
 
 /// Bounded nonlinear iteration and numerical acceptance controls.
@@ -387,13 +411,13 @@ fn derived(value: f64, field: &'static str) -> Result<f64, GasFilmError> {
 
 fn active_prefix(mask: &[bool]) -> Result<usize, GasFilmError> {
     let active = mask.iter().take_while(|excluded| !**excluded).count();
+    if mask[active..].iter().any(|excluded| !*excluded) {
+        return Err(GasFilmError::TopologyChangeUnavailable);
+    }
     if active < 2 {
         return Err(GasFilmError::Unavailable {
             reason: "fewer-than-two-active-gas-cells",
         });
-    }
-    if mask[active..].iter().any(|excluded| !*excluded) {
-        return Err(GasFilmError::TopologyChangeUnavailable);
     }
     Ok(active)
 }
@@ -1180,7 +1204,7 @@ pub fn solve_isothermal_gas_film_1d(
             )
         })?;
     let mut iterations = 0;
-    let mut max_residual = 0.0_f64;
+    let mut max_residual: f64;
     while iterations < input.budget.maximum_iterations {
         let flux = face_fluxes(&pressure, gap, input, spacing)?;
         let mut next = pressure.clone();
