@@ -3484,11 +3484,11 @@ pub mod snapshot_v2 {
     /// bounded exact payload extent, and the fact that at least one identity
     /// era marker differs. Historical tag, drain, payload, and semantic-root
     /// validation belongs to the explicitly selected historical migrator.
+    #[allow(clippy::result_large_err)]
     pub fn quarantine_historical_era<C: CancellationProbe>(
         bytes: &[u8],
         limits: SnapshotLimitsV2,
         mut cancellation: C,
-#[allow(clippy::result_large_err)]
     ) -> Result<HistoricalSnapshotV2<'_>, SnapshotEraMigrationErrorV2> {
         validate_limits(limits).map_err(SnapshotEraMigrationErrorV2::Source)?;
         if bytes.len() < 8 {
@@ -3585,13 +3585,13 @@ pub mod snapshot_v2 {
         })
     }
 
+    #[allow(clippy::result_large_err)]
     fn build_snapshot_era_migration_receipt<C: CancellationProbe>(
         source: HistoricalSnapshotV2<'_>,
         plan: SnapshotEraMigrationPlanV2,
         target: &SealedSnapshotV2,
         limits: CanonicalLimits,
         cancellation: &mut C,
-#[allow(clippy::result_large_err)]
     ) -> Result<SnapshotEraMigrationReceiptV2, SnapshotEraMigrationErrorV2> {
         let source_length = u64::try_from(source.bytes.len())
             .map_err(|_| SnapshotEraMigrationErrorV2::Source(SnapshotV2Error::LengthOverflow))?;
@@ -3673,6 +3673,7 @@ pub mod snapshot_v2 {
 
     /// Explicitly migrate one quarantined historical era, or fail closed when
     /// its exact historical canonical encoder is unavailable.
+    #[allow(clippy::result_large_err)]
     pub fn migrate_historical_era<'a, C: CancellationProbe>(
         source: HistoricalSnapshotV2<'a>,
         plan: SnapshotEraMigrationPlanV2,
@@ -3680,7 +3681,6 @@ pub mod snapshot_v2 {
         limits: SnapshotLimitsV2,
         encoder: HistoricalCanonicalEncoderV2<'_>,
         mut cancellation: C,
-#[allow(clippy::result_large_err)]
     ) -> Result<MigratedSnapshotEraV2<'a>, SnapshotEraMigrationErrorV2> {
         let current = current_identity_era();
         let HistoricalCanonicalEncoderV2::Available(migrator) = encoder else {
