@@ -922,8 +922,9 @@ fn load_checkpoint(
             what: "cannot read checkpoint metadata",
         })?
         .len();
-    let max_checkpoint_len = u64::try_from(max_checkpoint_len).map_err(|_| length_overflow())?;
-    if file_len > max_checkpoint_len {
+    let max_checkpoint_len_wire =
+        u64::try_from(max_checkpoint_len).map_err(|_| length_overflow())?;
+    if file_len > max_checkpoint_len_wire {
         return Err(AeroacError::InvalidParameter {
             what: "checkpoint exceeds configured size envelope",
         });
@@ -931,6 +932,11 @@ fn load_checkpoint(
     let bytes = std::fs::read(ckpt_path).map_err(|_| AeroacError::InvalidParameter {
         what: "cannot read checkpoint",
     })?;
+    if bytes.len() > max_checkpoint_len {
+        return Err(AeroacError::InvalidParameter {
+            what: "checkpoint exceeds configured size envelope",
+        });
+    }
     if bytes.len() < CHECKPOINT_HEADER_LEN
         || bytes[0..8] != *CHECKPOINT_MAGIC
         || u32::from_le_bytes(bytes[8..12].try_into().expect("fixed slice")) != CHECKPOINT_VERSION

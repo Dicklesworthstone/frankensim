@@ -359,7 +359,11 @@ fn checkpoint_reader_refuses_malformed_state_before_resume() {
     refuse(&unknown_version, "magic/version mismatch");
 
     let mut impossible_progress = original.clone();
-    impossible_progress[20..28].copy_from_slice(&(cfg.steps_settle as u64 + 1).to_le_bytes());
+    let settle_past_end = u64::try_from(cfg.steps_settle)
+        .expect("smoke settle count fits u64")
+        .checked_add(1)
+        .expect("smoke settle count can advance once");
+    impossible_progress[20..28].copy_from_slice(&settle_past_end.to_le_bytes());
     refuse(&impossible_progress, "progress is inconsistent");
 
     let mut impossible_force_count = original.clone();
@@ -382,7 +386,13 @@ fn checkpoint_reader_refuses_malformed_state_before_resume() {
         original[36..44].try_into().expect("fixed record length"),
     ))
     .expect("smoke record length fits usize");
-    let first_population = 44 + 16 * record_len;
+    let first_population = 44usize
+        .checked_add(
+            16usize
+                .checked_mul(record_len)
+                .expect("smoke force byte count fits usize"),
+        )
+        .expect("smoke population offset fits usize");
     let mut zero_density = original.clone();
     zero_density[first_population..first_population + 19 * 8].fill(0);
     refuse(&zero_density, "non-positive fluid density");
