@@ -419,6 +419,14 @@ pub struct CcdReport {
     pub max_defect: f64,
 }
 
+/// Outward-rounded lower bound on the separating gap between two closed
+/// intervals on one coordinate axis. Ordinary endpoint subtraction can round
+/// upward or overflow to positive infinity, neither of which is admissible in
+/// a published lower-bound certificate.
+fn axis_gap_lower(a_min: f64, a_max: f64, b_min: f64, b_max: f64) -> f64 {
+    (b_min - a_max).next_down().max((a_min - b_max).next_down())
+}
+
 /// Certified pairwise CCD by conservative window bisection.
 ///
 /// # Errors
@@ -474,9 +482,9 @@ pub fn certified_ccd(
         max_defect = max_defect.max(ea.defect).max(eb.defect);
         let (ba, bb) = (&ea.bounds, &eb.bounds);
         let axis_gaps = [
-            (bb.min.x - ba.max.x).max(ba.min.x - bb.max.x),
-            (bb.min.y - ba.max.y).max(ba.min.y - bb.max.y),
-            (bb.min.z - ba.max.z).max(ba.min.z - bb.max.z),
+            axis_gap_lower(ba.min.x, ba.max.x, bb.min.x, bb.max.x),
+            axis_gap_lower(ba.min.y, ba.max.y, bb.min.y, bb.max.y),
+            axis_gap_lower(ba.min.z, ba.max.z, bb.min.z, bb.max.z),
         ];
         let gap = axis_gaps[0].max(axis_gaps[1]).max(axis_gaps[2]);
         if gap > 0.0 {
@@ -927,5 +935,29 @@ mod sdf_radius_tests {
         let (center, radius) = enclosing_corner_ball(&corners).expect("finite corners");
         assert_eq!(center.x.to_bits(), 0.0f64.to_bits());
         assert!(radius.is_infinite() && radius.is_sign_positive());
+    }
+}
+
+#[cfg(test)]
+mod ccd_gap_tests {
+    use super::axis_gap_lower;
+
+    #[test]
+    fn axis_gap_rounds_down_when_nearest_subtraction_rounds_up() {
+        let three_quarter_ulp = 0.75 * f64::EPSILON;
+        let rounded_to_nearest = 1.0 - (-three_quarter_ulp);
+        assert_eq!(rounded_to_nearest.to_bits(), (1.0 + f64::EPSILON).to_bits());
+
+        let lower = axis_gap_lower(-three_quarter_ulp, -three_quarter_ulp, 1.0, 1.0);
+        assert_eq!(lower.to_bits(), 1.0_f64.to_bits());
+    }
+
+    #[test]
+    fn axis_gap_degrades_positive_overflow_and_does_not_clear_touching() {
+        let overflowed = axis_gap_lower(-f64::MAX, -f64::MAX, f64::MAX, f64::MAX);
+        assert_eq!(overflowed, f64::MAX);
+
+        let touching = axis_gap_lower(0.0, 0.0, 0.0, 0.0);
+        assert!(touching < 0.0);
     }
 }

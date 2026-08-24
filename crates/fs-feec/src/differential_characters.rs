@@ -2245,8 +2245,11 @@ pub enum CharacterError {
     },
     /// Representative and coefficient sectors disagree.
     RepresentativeCoefficientMismatch {
+        /// The declared representative kind.
         representative: RepresentativeKind,
+        /// The coefficient sector required by the representative.
         expected: CoefficientSector,
+        /// The coefficient sector actually supplied.
         actual: CoefficientSector,
     },
     /// Degree-zero character has no boundary `(k - 1)` trivialization.
@@ -2338,6 +2341,9 @@ pub enum CharacterError {
 }
 
 impl fmt::Display for CharacterError {
+    // One arm per refusal variant keeps message text next to its case;
+    // extraction would split the mapping reviewers rely on.
+    #[allow(clippy::too_many_lines)]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::EmptyIdentifier { object } => write!(f, "{object} must not be empty"),
