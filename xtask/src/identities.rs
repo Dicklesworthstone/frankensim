@@ -20049,9 +20049,10 @@ mod right { pub const DUPLICATE: u32 = 2; }
     #[test]
     fn declared_schema_types_exempt_imported_type_bindings() {
         let text = "use crate::token::SessionId;\nfn enc(x: SessionId) -> u8 { 3 }\n";
+        let fragment = &text["use crate::token::SessionId;\n".len()..];
         let index = RustSourceIndex::new(text);
         let undeclared = reject_imported_function_dependencies(
-            "fn enc(x: SessionId) -> u8 { 3 }",
+            fragment,
             "",
             None,
             &index,
@@ -20063,7 +20064,7 @@ mod right { pub const DUPLICATE: u32 = 2; }
         let mut declared = BTreeSet::new();
         declared.insert("SessionId".to_string());
         reject_imported_function_dependencies(
-            "fn enc(x: SessionId) -> u8 { 3 }",
+            fragment,
             "",
             None,
             &index,
