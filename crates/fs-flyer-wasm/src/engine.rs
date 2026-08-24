@@ -104,8 +104,10 @@ fn state_envelope(s: &SimStateOut, envelope_code: Option<&str>) -> String {
 /// friction; both are det::-routed now and native (aarch64 debug +
 /// release) and wasm (node debug + release) produce this digest
 /// bit-for-bit. Cross-lane identity is REQUIRED from here on.
+/// Golden bump 2026-08-24 (bead frankensim-4pa2k): snapshot v2
+/// appends simulated roll and heading to the chained payload.
 pub const SELFTEST_GOLDEN: &str =
-    "975c44f0ffd8c0f7c40f9c39986e51b62bb9e67beab1e3183dce82efc3886018";
+    "2c50f8a672617cd3e872dfbfb706d4ff26d5828b25d710c910d8e8d632c50714";
 
 /// Run the canonical 1-second scenario and compare against a golden
 /// (the startup self-test core; the shipped entry uses

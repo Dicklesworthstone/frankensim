@@ -143,11 +143,41 @@ pub enum AdmissionError {
         /// Actual byte count.
         actual: usize,
     },
+    /// A rendered statement contains the NUL byte used to delimit manifest
+    /// hash fields and could therefore alias a different statement sequence.
+    EmbeddedManifestDelimiter,
+    /// A list item is empty or contains the delimiter used by its flattened
+    /// manifest field, so distinct item sequences could render identically.
+    AmbiguousManifestList {
+        /// Draft field whose item encoding is ambiguous.
+        field: &'static str,
+    },
     /// A required capability is unavailable.
     CapabilityUnavailable {
         /// Capability name.
         capability: &'static str,
     },
+}
+
+fn manifest_list_is_unambiguous(
+    items: &[String],
+    delimiter: u8,
+    allow_one_trailing_delimiter: bool,
+) -> bool {
+    items.iter().all(|item| {
+        if item.is_empty() {
+            return false;
+        }
+        let delimiter_count = item
+            .as_bytes()
+            .iter()
+            .filter(|&&byte| byte == delimiter)
+            .count();
+        delimiter_count == 0
+            || (allow_one_trailing_delimiter
+                && delimiter_count == 1
+                && item.as_bytes().last() == Some(&delimiter))
+    })
 }
 
 /// Builder draft; every field public, admitted only at [`Self::freeze`].
@@ -361,6 +391,26 @@ impl RansCardDraft {
                 what: "a card without falsifiers cannot be frozen".to_string(),
             });
         }
+        // Version 1 preserves list-valued fields as delimiter-joined strings.
+        // Refuse elements that make that encoding non-injective. The canonical
+        // transition exclusion historically ends in `;`; one trailing delimiter
+        // is uniquely decodable when empty and internally-delimited items are
+        // refused, so it remains admissible without changing existing hashes.
+        for (field, items, delimiter, allow_one_trailing_delimiter) in [
+            ("governing_terms", &self.governing_terms, b',', false),
+            (
+                "validation_case_families",
+                &self.validation_case_families,
+                b',',
+                false,
+            ),
+            ("falsifiers", &self.falsifiers, b';', false),
+            ("exclusions", &self.exclusions, b';', true),
+        ] {
+            if !manifest_list_is_unambiguous(items, delimiter, allow_one_trailing_delimiter) {
+                return Err(AdmissionError::AmbiguousManifestList { field });
+            }
+        }
         // Capabilities: freezing declares the solver-side gates it needs.
         // Solver-side capabilities that do not exist yet (.5.8.2 lands
         // them): freezing may DECLARE such options only while disabled.
@@ -407,10 +457,16 @@ impl RansCardDraft {
             ],
         };
         // Size cap on the canonical manifest bytes.
-        let manifest_len = card
-            .statement_manifest()
+        let manifest = card.statement_manifest();
+        if manifest
             .iter()
-            .map(|(k, v)| k.len() + v.len())
+            .any(|(key, value)| key.contains('\0') || value.contains('\0'))
+        {
+            return Err(AdmissionError::EmbeddedManifestDelimiter);
+        }
+        let manifest_len = manifest
+            .iter()
+            .map(|(key, value)| key.len() + 1 + value.len() + 1)
             .sum::<usize>();
         if manifest_len > MAX_MANIFEST_BYTES {
             return Err(AdmissionError::ManifestTooLarge {

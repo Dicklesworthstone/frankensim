@@ -56,6 +56,9 @@ pub mod portfolio;
 /// gated on channel match, calibration, and a measured energy balance.
 pub mod rig;
 
+/// Level-E physical cooling campaign and operating matrix schema.
+pub mod campaign;
+
 /// Deterministic public V&V scorecard: per-QoI/regime outcome cells with
 /// loud NO-DATA semantics and byte-identical renders.
 pub mod scorecard;

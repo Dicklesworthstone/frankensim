@@ -239,6 +239,40 @@ fn plan_identity_is_order_free_and_tamper_detectable() {
 }
 
 #[test]
+fn active_count_above_total_is_a_typed_refusal() {
+    let mut plan = RestorationWorkPlan::plan(RestorationWorkShape {
+        dimensions: 1,
+        constraints_total: 1,
+        skipped_count: 0,
+        limits: RestorationWorkLimits::default(),
+    })
+    .expect("plan");
+    plan.active_constraints = 2;
+
+    let verification = std::panic::catch_unwind(|| plan.verify_consistency())
+        .expect("an untrusted plan must not unwind while being verified");
+    assert!(
+        matches!(verification, Err(ConError::BadParam { .. })),
+        "the invalid count relationship must be a typed refusal"
+    );
+
+    let (problem, nodes) = host_with(&[(1.0, 0, 0.5)], 1);
+    let specs = [hard("a", nodes[0])];
+    let domain = DomainBox {
+        ranges: vec![(0.0, 1.0)],
+    };
+    let gate = CancelGate::new();
+    with_cx_raw(&gate, infinite_budget(), None, |cx| {
+        let outcome = elastic_solve_with_plan(&problem, &specs, &domain, &[], plan, cx)
+            .expect_err("an impossible caller-supplied active count must refuse");
+        assert!(matches!(
+            outcome,
+            RestorationError::Invalid(ConError::BadParam { .. })
+        ));
+    });
+}
+
+#[test]
 fn stale_schema_plans_refuse_admission_site_checks() {
     let (problem, nodes) = host_with(&[(1.0, 0, 0.5)], 1);
     let specs = [hard("a", nodes[0])];

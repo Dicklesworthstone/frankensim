@@ -23,6 +23,9 @@
 
 pub mod affine;
 pub mod expansion;
+pub mod formal_binding;
+pub mod formal_manifest;
+pub mod formal_proofs;
 pub mod interval;
 pub mod newton;
 pub mod predicates;

@@ -32,6 +32,7 @@
 use fs_math::det;
 use fs_rand::StreamKey;
 
+pub mod fetch_mass_consistent;
 pub mod fit;
 pub mod mann;
 pub mod ou;

@@ -15,7 +15,7 @@
 //! Repro: cargo test -p fs-flyer --test lateral_battery
 
 use fs_flyer::lateral::{
-    FLYER_ROLL_INERTIA_KG_M2, LateralModel, LateralState, PHI_CAP_RAD, RudderLinkage,
+    FLYER_ROLL_INERTIA_KG_M2, LateralModel, LateralState, PHI_CAP_RAD, R_CAP_RAD_S, RudderLinkage,
 };
 
 fn jlog(case: &str, payload: &str) {
@@ -102,7 +102,8 @@ fn decomposition_sums_to_net_exactly() {
         let tick = row.expect("in-band run");
         let sum = tick.yaw.induced_drag_yaw_nm + tick.yaw.rudder_yaw_nm + tick.yaw.profile_yaw_nm;
         assert_eq!(
-            sum, tick.yaw.net(),
+            sum,
+            tick.yaw.net(),
             "the published order is the float sum order"
         );
     }
@@ -145,12 +146,29 @@ fn sustained_full_warp_refuses_at_the_roll_cap() {
 }
 
 #[test]
+fn yaw_rate_cap_refuses_without_mutating_state() {
+    let model = LateralModel::wright_v1(RudderLinkage::Linked {
+        gain_nm_per_rad: 1.0e9,
+    });
+    let mut state = LateralState {
+        r_rad_s: R_CAP_RAD_S - 0.001,
+        ..LateralState::default()
+    };
+    let before = state;
+    let refusal = model
+        .step(&mut state, 0.01, U_TRIM, RHO, DT)
+        .expect_err("a yaw-rate cap crossing must fail closed");
+    assert_eq!(refusal.code, "lateral-envelope-exceeded");
+    assert_eq!(
+        state, before,
+        "a refused step must not clamp or partially commit"
+    );
+}
+
+#[test]
 fn identical_runs_are_bit_identical() {
     let model = LateralModel::wright_v1(RudderLinkage::Decoupled);
-    let to_bits = |rows: &[Result<
-        fs_flyer::lateral::LateralTick,
-        fs_flyer::Refusal,
-    >]| -> Vec<u64> {
+    let to_bits = |rows: &[Result<fs_flyer::lateral::LateralTick, fs_flyer::Refusal>]| -> Vec<u64> {
         rows.iter()
             .map(|r| {
                 let t = r.as_ref().expect("in-band");

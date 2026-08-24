@@ -154,8 +154,8 @@ impl LateralModel {
     /// air density.
     ///
     /// # Errors
-    /// `lateral-envelope-exceeded` on non-finite inputs/state or a roll
-    /// cap crossing.
+    /// `lateral-envelope-exceeded` on non-finite inputs/state or a
+    /// roll/yaw cap crossing.
     pub fn step(
         &self,
         state: &mut LateralState,
@@ -200,7 +200,7 @@ impl LateralModel {
                 code: "lateral-envelope-exceeded",
                 message: format!(
                     "roll attitude {} rad outside the admitted ±{PHI_CAP_RAD} band",
-                    state.phi_rad
+                    phi_new
                 ),
                 ranked_repairs: vec![
                     "reduce the warp command".into(),
@@ -232,9 +232,16 @@ impl LateralModel {
             profile_yaw_nm: profile,
         };
         let r_dot = yaw.net() / REDUCED_YAW_INERTIA_KG_M2;
-        let mut r_new = state.r_rad_s + r_dot * dt_s;
+        let r_new = state.r_rad_s + r_dot * dt_s;
         if r_new.abs() > R_CAP_RAD_S {
-            r_new = r_new.signum() * R_CAP_RAD_S;
+            return Err(Refusal {
+                code: "lateral-envelope-exceeded",
+                message: format!("yaw rate {r_new} rad/s outside the admitted ±{R_CAP_RAD_S} band"),
+                ranked_repairs: vec![
+                    "reduce the warp/rudder command".into(),
+                    "close the run at the admitted boundary".into(),
+                ],
+            });
         }
         let psi_new = state.psi_rad + r_new * dt_s;
         if !psi_new.is_finite() || !r_new.is_finite() {

@@ -311,3 +311,117 @@ fn pt_006_refusals_fire_by_name() {
     ));
     println!("{{\"suite\":\"fs-plate\",\"case\":\"pt-006-refusals\",\"verdict\":\"pass\"}}");
 }
+
+#[test]
+fn pt_007_unstructured_admission_bitwise_reproduces_rectangle() {
+    let (a, b) = (0.5, 0.4);
+    let (nx, ny) = (10, 8);
+    let sec = steel();
+
+    let rect = PlateMesh::rectangle(a, b, nx, ny);
+    let mut b_rect = PlateMesh::rectangle_boundary(nx, ny);
+    b_rect.sort_unstable();
+    b_rect.dedup();
+
+    let equiv = PlateMesh::structured_equivalent(a, b, nx, ny).expect("structured equiv");
+    let b_equiv = equiv.boundary_nodes();
+
+    assert_eq!(b_rect, b_equiv, "boundary sets identical");
+
+    let model_rect = assemble(
+        &rect,
+        &sec,
+        &b_rect,
+        &[],
+        &AssemblyOptions {
+            pretension: 0.0,
+            support: EdgeSupport::SimplySupported,
+        },
+    )
+    .expect("assemble rect");
+
+    let model_equiv = assemble(
+        &equiv,
+        &sec,
+        &b_equiv,
+        &[],
+        &AssemblyOptions {
+            pretension: 0.0,
+            support: EdgeSupport::SimplySupported,
+        },
+    )
+    .expect("assemble equiv");
+
+    assert_eq!(model_rect.free, model_equiv.free);
+
+    let rep_rect = modes(
+        &model_rect,
+        (100.0, 50000.0),
+        &fs_modal::SliceOptions::default(),
+    )
+    .expect("modes rect");
+    let rep_equiv = modes(
+        &model_equiv,
+        (100.0, 50000.0),
+        &fs_modal::SliceOptions::default(),
+    )
+    .expect("modes equiv");
+
+    assert_eq!(rep_rect.modes.len(), rep_equiv.modes.len());
+    for (i, (m1, m2)) in rep_rect.modes.iter().zip(rep_equiv.modes.iter()).enumerate() {
+        assert_eq!(
+            m1.lambda.to_bits(),
+            m2.lambda.to_bits(),
+            "mode {i} eigenvalue bitwise identical"
+        );
+    }
+
+    println!(
+        "{{\"suite\":\"fs-plate\",\"case\":\"pt-007-unstructured-bitwise-replay\",\"modes_verified\":{},\
+         \"verdict\":\"pass\"}}",
+        rep_rect.modes.len()
+    );
+}
+
+#[test]
+fn pt_008_soundboard_plate_chart_modes() {
+    use fs_plate::{PlateChart, triangulate_soundboard};
+
+    let sec = steel();
+    let mesh = triangulate_soundboard(0.50, 0.38, 0.24, 0.28, 16, 12).expect("soundboard mesh");
+    let chart = PlateChart::from_mesh(mesh, sec).expect("chart");
+
+    assert!(chart.area() > 0.05 && chart.area() < 0.25);
+    assert!(!chart.boundary_nodes.is_empty());
+
+    let model = chart
+        .assemble(
+            &[],
+            &AssemblyOptions {
+                pretension: 0.0,
+                support: EdgeSupport::Clamped,
+            },
+        )
+        .expect("assemble chart");
+
+    let rep = modes(
+        &model,
+        (100.0, 20_000_000.0),
+        &fs_modal::SliceOptions::default(),
+    )
+    .expect("modes");
+
+    assert!(rep.modes.len() >= 3);
+    for m in &rep.modes {
+        assert!(m.lambda > 0.0);
+    }
+
+    println!(
+        "{{\"suite\":\"fs-plate\",\"case\":\"pt-008-soundboard-chart-modes\",\"area_m2\":{:.4},\
+         \"modes_found\":{},\"f1_hz\":{:.2},\"verdict\":\"pass\"}}",
+        chart.area(),
+        rep.modes.len(),
+        rep.modes[0].lambda.sqrt() / (2.0 * PI)
+    );
+}
+

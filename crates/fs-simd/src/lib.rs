@@ -26,6 +26,8 @@ pub mod sme2;
 #[cfg(all(target_arch = "x86_64", not(miri)))]
 pub mod x86;
 
+pub mod wasm;
+
 use fs_substrate::SimdTier;
 use std::sync::OnceLock;
 

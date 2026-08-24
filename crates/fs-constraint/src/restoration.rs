@@ -379,10 +379,19 @@ impl RestorationWorkPlan {
     /// # Errors
     /// [`ConError::BadParam`] naming the first mismatched field.
     pub fn verify_consistency(&self) -> Result<(), ConError> {
+        let skipped_count = self
+            .constraints_total
+            .checked_sub(self.active_constraints)
+            .ok_or_else(|| {
+                overflow(
+                    "restoration active_constraints cannot exceed constraints_total",
+                    u32f(self.active_constraints),
+                )
+            })?;
         let rebuilt = Self::plan(RestorationWorkShape {
             dimensions: self.dimensions,
             constraints_total: self.constraints_total,
-            skipped_count: self.constraints_total - self.active_constraints,
+            skipped_count,
             limits: self.limits,
         })?;
         if *self != rebuilt {

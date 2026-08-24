@@ -1084,6 +1084,87 @@ impl fs_ladder::Transfer for SegmentRefinementTransfer {
     }
 }
 
+/// Cross-fidelity transfer between 1D correlation segment wall states and
+/// resolved 2D/boundary-layer RANS temperature fields (bead `frankensim-wd35h`).
+///
+/// Prolongates a 1D vector of segment wall temperatures into a multi-node normal
+/// temperature profile $T_i(y_j)$ across the viscous sublayer to the core stream,
+/// and restricts a resolved near-wall RANS temperature field back to the segment wall
+/// temperatures.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CorrelationToRansFieldTransfer {
+    segment_count: usize,
+    normal_nodes: usize,
+    inlet_temperature_k: f64,
+}
+
+impl CorrelationToRansFieldTransfer {
+    /// Create a new cross-fidelity transfer between 1D correlation segments and RANS normal profiles.
+    ///
+    /// # Errors
+    /// [`AirflowError::InvalidConjugateInput`] if `segment_count == 0` or `normal_nodes < 2`.
+    pub fn new(
+        segment_count: usize,
+        normal_nodes: usize,
+        inlet_temperature_k: f64,
+    ) -> Result<Self, AirflowError> {
+        if segment_count == 0 {
+            return Err(AirflowError::InvalidConjugateInput {
+                field: "segment_count",
+                value_bits: 0,
+            });
+        }
+        if normal_nodes < 2 {
+            return Err(AirflowError::InvalidConjugateInput {
+                field: "normal_nodes",
+                value_bits: normal_nodes as u64,
+            });
+        }
+        Ok(Self {
+            segment_count,
+            normal_nodes,
+            inlet_temperature_k,
+        })
+    }
+
+    /// Number of normal nodes per stream-wise segment in the fine RANS representation.
+    #[must_use]
+    pub const fn normal_nodes(&self) -> usize {
+        self.normal_nodes
+    }
+}
+
+impl fs_ladder::Transfer for CorrelationToRansFieldTransfer {
+    fn prolongate(&self, coarse: &[f64]) -> Vec<f64> {
+        if coarse.len() != self.segment_count {
+            return vec![f64::NAN; self.segment_count * self.normal_nodes];
+        }
+        let mut fine = Vec::with_capacity(self.segment_count * self.normal_nodes);
+        for &t_wall in coarse {
+            fine.push(t_wall); // y=0 (wall node)
+            for node in 1..self.normal_nodes {
+                let frac = node as f64 / (self.normal_nodes - 1) as f64;
+                // Linear/exponential boundary layer profile to core stream
+                let t_field = t_wall + frac * (self.inlet_temperature_k - t_wall);
+                fine.push(t_field);
+            }
+        }
+        fine
+    }
+
+    fn restrict(&self, fine: &[f64]) -> Vec<f64> {
+        if fine.len() != self.segment_count * self.normal_nodes {
+            return vec![f64::NAN; self.segment_count];
+        }
+        let mut coarse = Vec::with_capacity(self.segment_count);
+        for segment_idx in 0..self.segment_count {
+            let wall_idx = segment_idx * self.normal_nodes;
+            coarse.push(fine[wall_idx]);
+        }
+        coarse
+    }
+}
+
 /// The fixed-point residual: `(max_j |dT_j|, area-weighted mean dT)`.
 ///
 /// The max drives the convergence test; the signed area-weighted mean is the

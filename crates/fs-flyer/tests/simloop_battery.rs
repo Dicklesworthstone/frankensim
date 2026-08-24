@@ -519,8 +519,11 @@ fn golden_digest() {
     // friction moved off platform tanh onto det::tanh (and the
     // Prandtl factors off platform acos), unifying the native
     // and wasm lanes; the lifecycle trajectory shifted by ulps.
+    // Golden bump 2026-08-24 (bead frankensim-4pa2k): snapshot v2
+    // appends the simulated roll and heading states to every chained
+    // payload; the v1 prefix and longitudinal trajectory are unchanged.
     assert_eq!(
-        digest, "56253f5d814fc0b4be428d0776c9d6d02f22853338237223abfda5ead94e8412",
+        digest, "f8b54d7d9dca60b0fba6c88d85bc6ddde03b2847ba5c9615fc19f8a16030f577",
         "lifecycle golden moved — determinism regression or an \
          intentional physics change requiring the golden-bump protocol"
     );

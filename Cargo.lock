@@ -1494,6 +1494,7 @@ dependencies = [
  "fs-bem",
  "fs-blake3",
  "fs-contact",
+ "fs-evidence",
  "fs-exec",
  "fs-ga",
  "fs-geom",
@@ -1502,6 +1503,7 @@ dependencies = [
  "fs-mbd",
  "fs-motion",
  "fs-rand",
+ "fs-robust",
  "fs-time",
  "fs-wakeref",
  "fs-wing",
@@ -1735,6 +1737,7 @@ dependencies = [
 name = "fs-lbm"
 version = "0.0.1"
 dependencies = [
+ "fs-blake3",
  "fs-evidence",
  "fs-exec",
  "fs-fft",

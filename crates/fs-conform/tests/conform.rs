@@ -1339,6 +1339,140 @@ impl ContainedConverter for ForgedIdentity {
     }
 }
 
+/// Direct implementations of the public contained protocol still execute
+/// behind the certification executor's fault boundary. The adapter is not the
+/// security boundary: callers may implement `ContainedConverter` themselves.
+#[derive(Clone, Copy)]
+enum DirectPanicKind {
+    Apply,
+    Adjoint,
+}
+
+struct DirectPanic {
+    identity: ImplementationIdentity,
+    kind: DirectPanicKind,
+}
+
+struct PanickingDropPayload;
+
+impl Drop for PanickingDropPayload {
+    fn drop(&mut self) {
+        panic!("panic payload destructor boom");
+    }
+}
+
+impl ContainedConverter for DirectPanic {
+    fn identity(&self) -> &ImplementationIdentity {
+        &self.identity
+    }
+
+    fn apply_bounded(
+        &self,
+        x: &[f64],
+        out: &mut Vec<f64>,
+        _budget: &mut fs_conform::CallBudget,
+    ) -> Result<(), fs_conform::CallFault> {
+        if matches!(self.kind, DirectPanicKind::Apply) {
+            std::panic::panic_any(PanickingDropPayload);
+        }
+        out.clear();
+        out.extend_from_slice(x);
+        Ok(())
+    }
+
+    fn adjoint_bounded(
+        &self,
+        y: &[f64],
+        out: &mut Vec<f64>,
+        _budget: &mut fs_conform::CallBudget,
+    ) -> Result<(), fs_conform::CallFault> {
+        if matches!(self.kind, DirectPanicKind::Adjoint) {
+            std::panic::panic_any(PanickingDropPayload);
+        }
+        out.clear();
+        out.extend_from_slice(y);
+        Ok(())
+    }
+}
+
+/// Attempts to replace the pass-wide meter from inside a direct callback.
+/// The callback-visible budget must not be the executor's authoritative copy.
+struct DirectBudgetReplenisher {
+    identity: ImplementationIdentity,
+}
+
+/// Returns a small identity at receipt admission and a larger identity when
+/// the executor later asks for a pass envelope.
+struct AlternatingIdentity {
+    admitted: ImplementationIdentity,
+    expanded: ImplementationIdentity,
+    return_expanded: Cell<bool>,
+}
+
+impl ContainedConverter for AlternatingIdentity {
+    fn identity(&self) -> &ImplementationIdentity {
+        let expanded = self.return_expanded.get();
+        self.return_expanded.set(!expanded);
+        if expanded {
+            &self.expanded
+        } else {
+            &self.admitted
+        }
+    }
+
+    fn apply_bounded(
+        &self,
+        x: &[f64],
+        out: &mut Vec<f64>,
+        _budget: &mut fs_conform::CallBudget,
+    ) -> Result<(), fs_conform::CallFault> {
+        out.clear();
+        out.extend_from_slice(x);
+        Ok(())
+    }
+
+    fn adjoint_bounded(
+        &self,
+        y: &[f64],
+        out: &mut Vec<f64>,
+        _budget: &mut fs_conform::CallBudget,
+    ) -> Result<(), fs_conform::CallFault> {
+        out.clear();
+        out.extend_from_slice(y);
+        Ok(())
+    }
+}
+
+impl ContainedConverter for DirectBudgetReplenisher {
+    fn identity(&self) -> &ImplementationIdentity {
+        &self.identity
+    }
+
+    fn apply_bounded(
+        &self,
+        x: &[f64],
+        out: &mut Vec<f64>,
+        budget: &mut fs_conform::CallBudget,
+    ) -> Result<(), fs_conform::CallFault> {
+        *budget = fs_conform::CallBudget::new(contained_envelope());
+        out.clear();
+        out.extend_from_slice(x);
+        Ok(())
+    }
+
+    fn adjoint_bounded(
+        &self,
+        y: &[f64],
+        out: &mut Vec<f64>,
+        budget: &mut fs_conform::CallBudget,
+    ) -> Result<(), fs_conform::CallFault> {
+        *budget = fs_conform::CallBudget::new(contained_envelope());
+        out.clear();
+        out.extend_from_slice(y);
+        Ok(())
+    }
+}
+
 fn forged_identity() -> ForgedIdentity {
     let mut identity = ImplementationIdentity::seal(
         "forged",
@@ -1481,6 +1615,120 @@ fn panicking_converter_is_contained_and_retry_is_idempotent() {
     let second = run();
     assert_eq!(first.report, second.report);
     assert_eq!(first.execution.first_fault, second.execution.first_fault);
+}
+
+#[test]
+fn direct_contained_converter_panic_is_typed_and_fails_closed() {
+    let mut suite = ConformanceSuite::new(0.0);
+    suite.adjoint_pairs = contained_pairs();
+    suite.manufactured = manufactured();
+
+    for (kind, expected_step) in [(DirectPanicKind::Apply, 0), (DirectPanicKind::Adjoint, 1)] {
+        let candidate = DirectPanic {
+            identity: ImplementationIdentity::seal(
+                "direct-panic",
+                2,
+                2,
+                0.0,
+                SeedPolicy::Fixed(7),
+                contained_envelope(),
+            )
+            .expect("valid identity"),
+            kind,
+        };
+        let outcome = certify_contained(&candidate, None, &suite, third_party_policy());
+
+        assert_eq!(outcome.report.tier, Tier::Rejected);
+        assert!(!outcome.report.certified());
+        assert!(!outcome.execution.replay_verified);
+        assert!(!outcome.execution.drained_cleanly);
+        assert!(matches!(
+            outcome.execution.first_fault,
+            Some(ExecutionFault::Call {
+                step_index,
+                fault: fs_conform::CallFault::Panicked,
+            }) if step_index == expected_step
+        ));
+    }
+}
+
+#[test]
+fn direct_callback_cannot_replenish_the_executor_budget() {
+    let tiny = WorkEnvelope {
+        max_calls: 1,
+        max_work_units: 4,
+        max_output_len: 2,
+    };
+    let candidate = DirectBudgetReplenisher {
+        identity: ImplementationIdentity::seal(
+            "direct-budget-replenisher",
+            2,
+            2,
+            0.0,
+            SeedPolicy::Fixed(7),
+            tiny,
+        )
+        .expect("one complete call fits the sealed envelope"),
+    };
+    let mut suite = ConformanceSuite::new(0.0);
+    suite.adjoint_pairs = contained_pairs();
+    suite.manufactured = manufactured();
+
+    let outcome = certify_contained(&candidate, None, &suite, third_party_policy());
+
+    assert_eq!(outcome.report.tier, Tier::Rejected);
+    assert!(matches!(
+        outcome.execution.first_fault,
+        Some(ExecutionFault::Call {
+            step_index: 1,
+            fault: fs_conform::CallFault::CallBudgetExhausted,
+        })
+    ));
+}
+
+#[test]
+fn callback_cannot_switch_identity_to_expand_the_executor_envelope() {
+    let tiny = WorkEnvelope {
+        max_calls: 1,
+        max_work_units: 4,
+        max_output_len: 2,
+    };
+    let candidate = AlternatingIdentity {
+        admitted: ImplementationIdentity::seal(
+            "alternating-identity",
+            2,
+            2,
+            0.0,
+            SeedPolicy::Fixed(7),
+            tiny,
+        )
+        .expect("one complete call fits the admitted envelope"),
+        expanded: ImplementationIdentity::seal(
+            "alternating-identity-expanded",
+            2,
+            2,
+            0.0,
+            SeedPolicy::Fixed(7),
+            contained_envelope(),
+        )
+        .expect("expanded identity is independently valid"),
+        return_expanded: Cell::new(false),
+    };
+    let mut suite = ConformanceSuite::new(0.0);
+    suite.adjoint_pairs = contained_pairs();
+    suite.manufactured = manufactured();
+
+    let outcome = certify_contained(&candidate, None, &suite, third_party_policy());
+
+    assert_eq!(outcome.report.tier, Tier::Rejected);
+    assert_eq!(outcome.report.converter, "alternating-identity");
+    assert!(matches!(
+        outcome.execution.first_fault,
+        Some(ExecutionFault::Call {
+            step_index: 1,
+            fault: fs_conform::CallFault::CallBudgetExhausted,
+        })
+    ));
 }
 
 #[test]

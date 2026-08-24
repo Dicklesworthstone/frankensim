@@ -32,6 +32,7 @@ pub mod bemscreen;
 pub mod campaign;
 pub mod canardmech;
 pub mod checkpoint;
+pub mod cinematic_export;
 pub mod contact;
 pub mod dragledger;
 pub mod effectowners;
@@ -54,10 +55,12 @@ pub mod refereeharness;
 pub mod registryaudit;
 pub mod replay;
 pub mod replayenv;
+pub mod robustopt;
 pub mod sections;
 pub mod simloop;
 pub mod spine;
 pub mod sweptevents;
+pub mod webgpu_experiment;
 
 /// Identity domain for design digests.
 pub const DESIGN_DIGEST_DOMAIN: &str = "org.frankensim.fs-flyer.design.v1";

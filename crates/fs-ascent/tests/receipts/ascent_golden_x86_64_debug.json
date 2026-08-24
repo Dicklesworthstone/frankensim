@@ -1,0 +1,20 @@
+{
+  "schema_version": "1.0",
+  "suite": "fs-ascent-golden-audit",
+  "bead_id": "frankensim-ascent-golden-requalify-o6bne",
+  "commit": "c6931538d16eac0262d5eccf368249b7ee02ef35",
+  "toolchain": "rustc 1.99.0-nightly (3659db0d3 2026-07-05)",
+  "target_arch": "x86_64",
+  "target_os": "linux",
+  "build_profile": "debug",
+  "trajectory_bit_semantics_version": 1,
+  "trajectory_golden_hash": "0xe185_4f98_a25e_3663",
+  "pareto_golden_hash": "0x301b_04df_db91_3965",
+  "tests_passed": [
+    "ascent_battery::ascent_golden_hash",
+    "pareto_battery::pareto_golden_hash"
+  ],
+  "execution_lane": "rch-worker-x86_64",
+  "verdict": "PASS",
+  "timestamp": "2026-08-24T06:39:01Z"
+}

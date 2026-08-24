@@ -21,8 +21,13 @@ Bead frankensim-fsim-plates-shells-kj3s0 (musical-acoustics program).
   D22 = 2.04378, D12 = 0.715322, D33 = 1.6875 exactly). ν stays a bare
   ratio (dimensionless); the elastic law keeps fs-material's raw-Pa
   contract.
-- `PlateMesh::{rectangle, rectangle_boundary}` — structured right-triangle
-  meshes; no external mesh formats in v1 (deliberate).
+- `PlateMesh::{rectangle, rectangle_boundary, from_unstructured, structured_equivalent, boundary_nodes, boundary_edges, total_area}` —
+  structured and unstructured right-triangle and general 2D triangular meshes;
+  `from_unstructured` validates quality, coordinate finiteness, connectivity, and positive
+  signed area (`2A > 1e-15`). `structured_equivalent` reproduces `rectangle` bit-identically.
+- `PlateChart` and `PlateRegion` — mid-surface soundboard and plate chart representations
+  binding geometry, thickness, material section, sub-regions, and boundary supports.
+- `triangulate_soundboard` — parametric guitar/instrument soundboard mesh generator.
 - `dkt_stiffness` — the 9×9 DKT bending stiffness. DOF convention per node:
   `(w, wx, wy)` with wx = ∂w/∂x, wy = ∂w/∂y (SLOPES; Batoz's published
   θ-tables are translated internally, producing βx = −w,x, βy = −w,y whose
@@ -41,7 +46,8 @@ Bead frankensim-fsim-plates-shells-kj3s0 (musical-acoustics program).
   in-window count is inertia-certified.
 - `PlateError` — typed refusals with stable `FS-PLATE-*` codes: bad
   section, degenerate element (with the offending element id and 2A), bad
-  stiffener, forwarded modal refusals.
+  boundary (with out-of-bounds node index and node count), bad stiffener,
+  forwarded modal refusals.
 
 ## Invariants
 1. Element certificates (tested on an irregular triangle): stiffness
@@ -100,7 +106,7 @@ None.
 
 ## Conformance tests
 
-`tests/plate_conformance.rs` (bead 3ez8g.13.2; the reimplementation
+`tests/plate_conformance.rs` (bead 3ez8g.13.2 and 3ez8g.3.9; the reimplementation
 contract through the public surface): pt-001 the SS isotropic plate
 lands on the exact Navier frequency with mesh convergence (0.12%
 fine); pt-002 the clamped square lands on Leissa 35.992 (0.28%);
@@ -111,8 +117,11 @@ the Olson-Hazell fundamental-region pin (709.6 vs 718.1 Hz theory,
 1.2%; the full five-mode gate lives inline; corpus row
 acoustic-olson-hazell-1977-mode3); pt-006 refusals by name — this
 battery FOUND that an out-of-range boundary node PANICKED inside
-assemble; it now refuses as `PlateError::BadBoundary`. Inline unit
-modules untouched.
+assemble; it now refuses as `PlateError::BadBoundary`; pt-007
+unstructured mesh admission (`PlateMesh::from_unstructured` /
+`structured_equivalent`) reproduces rectangle meshes, boundaries, and
+modal eigenvalues BIT-IDENTICALLY; pt-008 soundboard plate chart modes
+on a parametric guitar-top geometry. Inline unit modules untouched.
 In-crate: element patch tests (symmetry, rigid-body, constant-curvature
 exactness); SS Navier and clamped Leissa two-density convergence ladders
 with trend assertions; orthotropic Navier + E_L/E_R swap mutation;
@@ -122,7 +131,7 @@ support, where extra rigidity is invisible — measured and documented);
 stiffener term isolation against Rayleigh scale; the Olson–Hazell
 stiffened-panel literature case with a MAC mode-pairing table (two mesh
 densities, order-preserving pairing gate); named refusals (degenerate
-element, bad section, bad stiffener). All JSON-line evidence rows; all
+element, bad section, bad boundary, bad stiffener). All JSON-line evidence rows; all
 modal counts inertia-certified through fs-modal.
 
 ## No-claim boundaries
@@ -130,12 +139,13 @@ modal counts inertia-certified through fs-modal.
   needed or present, and in-plane load paths (shear walls, arch action) are
   out of scope. Coupled membrane-bending (curved/arched shells, flat-facet
   shell assembly) is a recorded follow-up (bead kj3s0 closed with this as
-  a trigger-deferred item), triggered by the first curved-geometry
+  a trigger-deferred item; tracked under 3ez8g.12.2), triggered by the first curved-geometry
   consumer.
 - MITC4 quads are NOT implemented (DKT triangles only); trigger-deferred
   at the kj3s0 close (lands with the first quad-mesh consumer or a DKT
-  validation gap). Structured rectangle meshes only in v1; no external
-  mesh import.
+  validation gap). Arbitrary 2D planar triangulations are admitted via
+  `PlateMesh::from_unstructured` (bead 3ez8g.3.9); 3D CAD surface/solid meshes
+  are flattened/extracted into planar mid-surfaces before plate admission.
 - The stiffener is a straight Hermite beam on existing plate nodes with
   uniform cross-section: no variable cross-section (vibraphone undercuts),
   no curved braces, no beam shear deformation (Euler-Bernoulli, not

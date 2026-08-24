@@ -27,6 +27,12 @@ pub mod ir;
 pub mod payload;
 #[cfg(feature = "rans-rung")]
 pub mod rans_card;
+#[cfg(feature = "rans-rung")]
+pub mod rans_solver;
+#[cfg(feature = "rans-rung")]
+pub mod rans_validation;
+#[cfg(feature = "rans-rung")]
+pub mod rans_adjudication;
 pub mod scenario;
 pub mod sensor;
 pub mod signal;

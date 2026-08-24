@@ -104,10 +104,26 @@ fn shoot(alpha: f64, c: C64, l: f64, steps: usize) -> (C64, C64) {
     (phi, psi)
 }
 
+fn complex_is_finite(value: C64) -> bool {
+    value.re.is_finite() && value.im.is_finite()
+}
+
 /// Boundary mismatch (normalized so the secant target is
 /// scale-invariant).
 fn mismatch(alpha: f64, c: C64, symmetry: JetSymmetry, l: f64, steps: usize) -> C64 {
     let (phi0, psi0) = shoot(alpha, c, l, steps);
+    if !complex_is_finite(phi0) || !complex_is_finite(psi0) {
+        return C64::new(f64::NAN, f64::NAN);
+    }
+    let scale = phi0
+        .re
+        .abs()
+        .max(phi0.im.abs())
+        .max(psi0.re.abs())
+        .max(psi0.im.abs())
+        .max(1e-300);
+    let phi0 = phi0.scale(1.0 / scale);
+    let psi0 = psi0.scale(1.0 / scale);
     let norm = det::sqrt(phi0.norm_sq() + psi0.norm_sq()).max(1e-300);
     match symmetry {
         JetSymmetry::Sinuous => psi0.scale(1.0 / norm),
@@ -153,6 +169,11 @@ pub fn bickley_rayleigh_mode(
     let mut c1 = c_guess + C64::new(1.0e-4, 1.0e-4);
     let mut f0 = mismatch(alpha, c0, symmetry, l, steps);
     let mut f1 = mismatch(alpha, c1, symmetry, l, steps);
+    if !complex_is_finite(f0) || !complex_is_finite(f1) {
+        return Err(AeroacError::NonFinite {
+            what: "rayleigh mismatch",
+        });
+    }
     let mut iterations = 0usize;
     for it in 0..80 {
         iterations = it + 1;
@@ -168,6 +189,11 @@ pub fn bickley_rayleigh_mode(
         f0 = f1;
         c1 = c2;
         f1 = mismatch(alpha, c1, symmetry, l, steps);
+        if !complex_is_finite(f1) {
+            return Err(AeroacError::NonFinite {
+                what: "rayleigh mismatch",
+            });
+        }
         if f1.abs() < 1.0e-12 {
             break;
         }
@@ -176,6 +202,12 @@ pub fn bickley_rayleigh_mode(
         }
     }
     let m = f1.abs();
+    let growth_rate = alpha * c1.im;
+    if !m.is_finite() || !growth_rate.is_finite() {
+        return Err(AeroacError::NonFinite {
+            what: "rayleigh mode",
+        });
+    }
     if m > 1.0e-9 {
         return Err(AeroacError::NotConverged {
             what: "rayleigh secant",
@@ -185,7 +217,7 @@ pub fn bickley_rayleigh_mode(
     Ok(RayleighMode {
         alpha,
         c: c1,
-        growth_rate: alpha * c1.im,
+        growth_rate,
         mismatch: m,
         iterations,
     })

@@ -58,11 +58,16 @@ pub mod certificate_regimes;
 pub mod claim_router;
 /// Cross-repository compatibility suite and release-train protocol.
 pub mod compatibility;
+pub mod core_ux_replication;
 pub mod crates;
 pub mod doctrine;
 pub mod evidence_contract;
 pub mod evidence_graph;
+pub mod horizon_explanation;
+pub mod horizon_goodhart;
+pub mod horizon_metrology;
 pub mod horizon_splitting;
+pub mod horizon_symmetry;
 pub mod lanes;
 pub mod moonshots;
 /// Program metrics dashboard: outcome metrics as one deterministic artifact.

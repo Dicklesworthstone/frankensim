@@ -350,6 +350,13 @@ fn bickley_refusals_are_typed() {
         ),
         Err(AeroacError::NonFinite { .. })
     ));
+    // Finite inputs can still overflow the RK4 state. A non-finite
+    // boundary mismatch must refuse rather than slipping through the
+    // `mismatch > tolerance` check (which is false for NaN).
+    assert!(matches!(
+        bickley_rayleigh_mode(f64::MAX, JetSymmetry::Sinuous, C64::new(0.6, 0.1), 14.0, 64),
+        Err(AeroacError::NonFinite { .. })
+    ));
     assert!(matches!(
         bickley_rayleigh_mode(1.0, JetSymmetry::Sinuous, C64::new(0.6, 0.1), 1.0, 2048),
         Err(AeroacError::InvalidParameter { .. })

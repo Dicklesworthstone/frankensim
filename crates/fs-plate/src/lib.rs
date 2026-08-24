@@ -37,6 +37,12 @@
 //! everything sequential; repeat runs bitwise (inherited and tested
 //! downstream through fs-modal).
 
+pub mod shell;
+pub use shell::{
+    assemble_shell, canonical_church_bell_profile, generate_bell_shell, generate_cylinder_shell,
+    modes_shell, ShellMesh, ShellModel, ShellSupport,
+};
+
 use fs_material::elastic::OrthotropicElastic;
 pub use fs_modal::{ModalError, ModePair, SliceOptions, SliceReport};
 pub use fs_qty::{Area as QtyArea, Density, Length, Pressure, SurfaceTension};
@@ -267,6 +273,79 @@ impl PlateMesh {
         PlateMesh { nodes, tris }
     }
 
+    /// Admit an arbitrary unstructured 2D triangular mesh with quality validation.
+    ///
+    /// # Errors
+    /// Returns [`PlateError::DegenerateElement`] if nodes or triangles are empty,
+    /// any coordinate is non-finite, any triangle index is out of bounds, or
+    /// any triangle has non-positive signed area or inverted winding (`2A <= 1e-15`).
+    pub fn from_unstructured(
+        nodes: Vec<(f64, f64)>,
+        tris: Vec<[usize; 3]>,
+    ) -> Result<PlateMesh, PlateError> {
+        if nodes.len() < 3 || tris.is_empty() {
+            return Err(PlateError::DegenerateElement {
+                element: 0,
+                twice_area: 0.0,
+            });
+        }
+        for &(x, y) in &nodes {
+            if !x.is_finite() || !y.is_finite() {
+                return Err(PlateError::DegenerateElement {
+                    element: 0,
+                    twice_area: 0.0,
+                });
+            }
+        }
+        let nn = nodes.len();
+        for (eidx, tri) in tris.iter().enumerate() {
+            if tri[0] >= nn || tri[1] >= nn || tri[2] >= nn {
+                return Err(PlateError::BadBoundary {
+                    node: tri[0].max(tri[1]).max(tri[2]),
+                    node_count: nn,
+                });
+            }
+            if tri[0] == tri[1] || tri[1] == tri[2] || tri[2] == tri[0] {
+                return Err(PlateError::DegenerateElement {
+                    element: eidx,
+                    twice_area: 0.0,
+                });
+            }
+            let (x0, y0) = nodes[tri[0]];
+            let (x1, y1) = nodes[tri[1]];
+            let (x2, y2) = nodes[tri[2]];
+            let twice_area = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0);
+            if !twice_area.is_finite() || twice_area <= 1e-15 {
+                return Err(PlateError::DegenerateElement {
+                    element: eidx,
+                    twice_area,
+                });
+            }
+        }
+        Ok(PlateMesh { nodes, tris })
+    }
+
+    /// Structured right-triangle mesh validated through unstructured admission.
+    /// Bit-identical to [`PlateMesh::rectangle`].
+    ///
+    /// # Errors
+    /// [`PlateError::DegenerateElement`] if dimensions or divisions are degenerate.
+    pub fn structured_equivalent(
+        a: f64,
+        b: f64,
+        nx: usize,
+        ny: usize,
+    ) -> Result<PlateMesh, PlateError> {
+        if a <= 0.0 || b <= 0.0 || nx == 0 || ny == 0 {
+            return Err(PlateError::DegenerateElement {
+                element: 0,
+                twice_area: 0.0,
+            });
+        }
+        let mesh = Self::rectangle(a, b, nx, ny);
+        Self::from_unstructured(mesh.nodes, mesh.tris)
+    }
+
     /// Node count.
     #[must_use]
     pub fn node_count(&self) -> usize {
@@ -287,6 +366,203 @@ impl PlateMesh {
         }
         out
     }
+
+    /// Extract all unique boundary node indices in ascending sorted order.
+    /// A node is on the boundary if it belongs to at least one edge that appears in
+    /// exactly one triangle.
+    #[must_use]
+    pub fn boundary_nodes(&self) -> Vec<usize> {
+        let mut edge_counts: std::collections::BTreeMap<(usize, usize), usize> =
+            std::collections::BTreeMap::new();
+        for tri in &self.tris {
+            for k in 0..3 {
+                let u = tri[k];
+                let v = tri[(k + 1) % 3];
+                let key = if u < v { (u, v) } else { (v, u) };
+                *edge_counts.entry(key).or_insert(0) += 1;
+            }
+        }
+        let mut b_nodes = std::collections::BTreeSet::new();
+        for ((u, v), count) in edge_counts {
+            if count == 1 {
+                b_nodes.insert(u);
+                b_nodes.insert(v);
+            }
+        }
+        b_nodes.into_iter().collect()
+    }
+
+    /// Extract all boundary edges as directed pairs `(u, v)` along triangle CCW winding.
+    #[must_use]
+    pub fn boundary_edges(&self) -> Vec<(usize, usize)> {
+        let mut directed_edges = std::collections::BTreeSet::new();
+        let mut undirected_counts: std::collections::BTreeMap<(usize, usize), usize> =
+            std::collections::BTreeMap::new();
+        for tri in &self.tris {
+            for k in 0..3 {
+                let u = tri[k];
+                let v = tri[(k + 1) % 3];
+                directed_edges.insert((u, v));
+                let key = if u < v { (u, v) } else { (v, u) };
+                *undirected_counts.entry(key).or_insert(0) += 1;
+            }
+        }
+        directed_edges
+            .into_iter()
+            .filter(|&(u, v)| {
+                let key = if u < v { (u, v) } else { (v, u) };
+                undirected_counts.get(&key).copied() == Some(1)
+            })
+            .collect()
+    }
+
+    /// Total surface area [m²] of all triangles in the mesh.
+    #[must_use]
+    pub fn total_area(&self) -> f64 {
+        self.tris
+            .iter()
+            .map(|tri| {
+                let (x0, y0) = self.nodes[tri[0]];
+                let (x1, y1) = self.nodes[tri[1]];
+                let (x2, y2) = self.nodes[tri[2]];
+                0.5 * ((x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0)).abs()
+            })
+            .sum()
+    }
+}
+
+/// Labeled sub-region of a plate chart (e.g. "soundboard", "bridge-patch", "bracing").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlateRegion {
+    /// Unique region identifier.
+    pub name: String,
+    /// Element indices belonging to this region.
+    pub triangle_indices: Vec<usize>,
+}
+
+/// Plate chart representation for instrument soundboards, backs, and ribs.
+/// Combines mid-surface mesh geometry, thickness field or scalar thickness,
+/// orthotropic or isotropic plate section, labeled sub-regions, and boundary support.
+#[derive(Debug, Clone)]
+pub struct PlateChart {
+    /// Mid-surface mesh geometry.
+    pub mesh: PlateMesh,
+    /// Material and thickness section.
+    pub section: PlateSection,
+    /// Labeled sub-regions (e.g., soundboard, bridge, braces, rim).
+    pub regions: Vec<PlateRegion>,
+    /// Boundary nodes identified for support.
+    pub boundary_nodes: Vec<usize>,
+}
+
+impl PlateChart {
+    /// Construct a new plate chart with automatic boundary node detection.
+    ///
+    /// # Errors
+    /// Returns [`PlateError`] if section or mesh is invalid.
+    pub fn from_mesh(mesh: PlateMesh, section: PlateSection) -> Result<PlateChart, PlateError> {
+        let boundary_nodes = mesh.boundary_nodes();
+        Ok(PlateChart {
+            mesh,
+            section,
+            regions: Vec::new(),
+            boundary_nodes,
+        })
+    }
+
+    /// Construct a plate chart with explicit boundary nodes and regions.
+    ///
+    /// # Errors
+    /// Returns [`PlateError::BadBoundary`] if any boundary node is out of range.
+    pub fn with_boundary_and_regions(
+        mesh: PlateMesh,
+        section: PlateSection,
+        boundary_nodes: Vec<usize>,
+        regions: Vec<PlateRegion>,
+    ) -> Result<PlateChart, PlateError> {
+        let nn = mesh.node_count();
+        for &b in &boundary_nodes {
+            if b >= nn {
+                return Err(PlateError::BadBoundary {
+                    node: b,
+                    node_count: nn,
+                });
+            }
+        }
+        Ok(PlateChart {
+            mesh,
+            section,
+            regions,
+            boundary_nodes,
+        })
+    }
+
+    /// Total mid-surface area [m²].
+    #[must_use]
+    pub fn area(&self) -> f64 {
+        self.mesh.total_area()
+    }
+
+    /// Assemble the reduced (K, M) pencil using this chart's geometry, section, and boundary.
+    ///
+    /// # Errors
+    /// Returns [`PlateError`] on assembly failure.
+    pub fn assemble(
+        &self,
+        stiffeners: &[Stiffener],
+        opts: &AssemblyOptions,
+    ) -> Result<PlateModel, PlateError> {
+        assemble(&self.mesh, &self.section, &self.boundary_nodes, stiffeners, opts)
+    }
+}
+
+/// Discretize a symmetric soundboard outline into an unstructured PlateMesh.
+///
+/// # Errors
+/// Returns [`PlateError::DegenerateElement`] if parameters are non-physical.
+pub fn triangulate_soundboard(
+    length: f64,
+    w_lower: f64,
+    w_waist: f64,
+    w_upper: f64,
+    nx: usize,
+    ny: usize,
+) -> Result<PlateMesh, PlateError> {
+    if length <= 0.0 || w_lower <= 0.0 || w_waist <= 0.0 || w_upper <= 0.0 || nx < 2 || ny < 2 {
+        return Err(PlateError::DegenerateElement {
+            element: 0,
+            twice_area: 0.0,
+        });
+    }
+    let mut nodes = Vec::with_capacity((nx + 1) * (ny + 1));
+    for j in 0..=ny {
+        let v = j as f64 / ny as f64; // 0 to 1 across width
+        let eta = 2.0 * v - 1.0;     // -1 to +1
+        for i in 0..=nx {
+            let s = i as f64 / nx as f64;
+            let x = s * length;
+            let half_w = if s <= 0.55 {
+                let t = s / 0.55;
+                let shape = 1.0 - (t - 0.45).powi(2) / 0.35;
+                0.5 * (w_waist + (w_lower - w_waist) * shape.max(0.0).sqrt())
+            } else {
+                let t = (s - 0.55) / 0.45;
+                let shape = 1.0 - (t - 0.55).powi(2) / 0.40;
+                0.5 * (w_waist + (w_upper - w_waist) * shape.max(0.0).sqrt())
+            };
+            let y = eta * half_w.max(0.005);
+            nodes.push((x, y));
+        }
+    }
+    let idx = |i: usize, j: usize| j * (nx + 1) + i;
+    let mut tris = Vec::with_capacity(2 * nx * ny);
+    for j in 0..ny {
+        for i in 0..nx {
+            tris.push([idx(i, j), idx(i + 1, j), idx(i + 1, j + 1)]);
+            tris.push([idx(i, j), idx(i + 1, j + 1), idx(i, j + 1)]);
+        }
+    }
+    PlateMesh::from_unstructured(nodes, tris)
 }
 
 // ---------------------------------------------------------------------------
@@ -1555,6 +1831,136 @@ mod tests {
     }
 
     #[test]
+    fn structured_equivalent_reproduces_rectangle_bitwise() {
+        let (a, b) = (0.6, 0.4);
+        let (nx, ny) = (12, 10);
+        let rect = PlateMesh::rectangle(a, b, nx, ny);
+        let equiv = PlateMesh::structured_equivalent(a, b, nx, ny).expect("structured equivalent");
+
+        assert_eq!(rect.nodes.len(), equiv.nodes.len());
+        assert_eq!(rect.tris.len(), equiv.tris.len());
+        for (i, (&n1, &n2)) in rect.nodes.iter().zip(equiv.nodes.iter()).enumerate() {
+            assert_eq!(
+                n1.0.to_bits(),
+                n2.0.to_bits(),
+                "node {i} x-coord bitwise identical"
+            );
+            assert_eq!(
+                n1.1.to_bits(),
+                n2.1.to_bits(),
+                "node {i} y-coord bitwise identical"
+            );
+        }
+        for (i, (&t1, &t2)) in rect.tris.iter().zip(equiv.tris.iter()).enumerate() {
+            assert_eq!(t1, t2, "triangle {i} connectivity bitwise identical");
+        }
+
+        // Boundary node extraction matches rectangle_boundary
+        let mut b_rect = PlateMesh::rectangle_boundary(nx, ny);
+        b_rect.sort_unstable();
+        b_rect.dedup();
+        let b_auto = equiv.boundary_nodes();
+        assert_eq!(b_rect, b_auto, "extracted boundary matches rectangle boundary");
+
+        let sec = steel_section();
+        let model_rect = assemble(
+            &rect,
+            &sec,
+            &b_rect,
+            &[],
+            &AssemblyOptions {
+                pretension: 0.0,
+                support: EdgeSupport::SimplySupported,
+            },
+        )
+        .expect("assemble rect");
+        let model_equiv = assemble(
+            &equiv,
+            &sec,
+            &b_auto,
+            &[],
+            &AssemblyOptions {
+                pretension: 0.0,
+                support: EdgeSupport::SimplySupported,
+            },
+        )
+        .expect("assemble equiv");
+
+        assert_eq!(model_rect.free, model_equiv.free);
+        let rep_rect = modes(&model_rect, (100.0, 10000.0), &SliceOptions::default()).expect("modes rect");
+        let rep_equiv = modes(&model_equiv, (100.0, 10000.0), &SliceOptions::default()).expect("modes equiv");
+
+        assert_eq!(rep_rect.modes.len(), rep_equiv.modes.len());
+        for (i, (m1, m2)) in rep_rect.modes.iter().zip(rep_equiv.modes.iter()).enumerate() {
+            assert_eq!(
+                m1.lambda.to_bits(),
+                m2.lambda.to_bits(),
+                "mode {i} eigenvalue bitwise identical between rectangle and unstructured admission"
+            );
+        }
+    }
+
+    #[test]
+    fn soundboard_chart_and_guitar_top_modes() {
+        let sec = steel_section();
+        let mesh = triangulate_soundboard(0.50, 0.38, 0.24, 0.28, 16, 12).expect("soundboard mesh");
+        let chart = PlateChart::from_mesh(mesh, sec).expect("soundboard chart");
+
+        assert!(chart.area() > 0.05 && chart.area() < 0.25, "soundboard area in realistic acoustic envelope");
+        assert!(!chart.boundary_nodes.is_empty(), "boundary nodes identified");
+
+        let model = chart
+            .assemble(
+                &[],
+                &AssemblyOptions {
+                    pretension: 0.0,
+                    support: EdgeSupport::Clamped,
+                },
+            )
+            .expect("assemble soundboard chart");
+
+        let rep = modes(&model, (100.0, 20_000_000.0), &SliceOptions::default()).expect("modes");
+        assert!(rep.modes.len() >= 3, "multiple modes found in window");
+        for mode in &rep.modes {
+            assert!(mode.lambda > 0.0, "eigenvalues positive for clamped plate");
+        }
+    }
+
+    #[test]
+    fn unstructured_admission_falsifiers_and_refusals() {
+        // Inverted triangle (CW winding)
+        let nodes = vec![(0.0, 0.0), (1.0, 0.0), (0.0, 1.0)];
+        let cw_tris = vec![[0, 2, 1]];
+        assert!(matches!(
+            PlateMesh::from_unstructured(nodes.clone(), cw_tris),
+            Err(PlateError::DegenerateElement { .. })
+        ));
+
+        // Collinear / degenerate triangle
+        let col_nodes = vec![(0.0, 0.0), (1.0, 0.0), (2.0, 0.0)];
+        let col_tris = vec![[0, 1, 2]];
+        assert!(matches!(
+            PlateMesh::from_unstructured(col_nodes, col_tris),
+            Err(PlateError::DegenerateElement { .. })
+        ));
+
+        // Non-finite node coordinate
+        let nan_nodes = vec![(f64::NAN, 0.0), (1.0, 0.0), (0.0, 1.0)];
+        let valid_tris = vec![[0, 1, 2]];
+        assert!(matches!(
+            PlateMesh::from_unstructured(nan_nodes, valid_tris.clone()),
+            Err(PlateError::DegenerateElement { .. })
+        ));
+
+        // Out-of-bounds node index
+        let oob_tris = vec![[0, 1, 99]];
+        assert!(matches!(
+            PlateMesh::from_unstructured(nodes, oob_tris),
+            Err(PlateError::BadBoundary { .. })
+        ));
+    }
+
+    #[test]
     fn named_refusals_fire() {
         // Degenerate element.
         let x = [0.0, 1.0, 2.0];
@@ -1596,3 +2002,4 @@ mod tests {
         assert!(err.to_string().contains("FS-PLATE-BAD-STIFFENER"));
     }
 }
+

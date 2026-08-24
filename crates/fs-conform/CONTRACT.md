@@ -185,10 +185,15 @@ trait harness, not a production geometry-conversion adopter.
   transcript under an explicit first-party trust decision, and they MUST NOT
   be minted for third-party production use. The contained lane
   (`certify_contained`, bead
-  frankensim-contain-fs-conform-callbacks-6bc6g) runs every callback through
-  `BoundedCallback` under a sealed `ImplementationIdentity` and declared
-  `WorkEnvelope`: dimension/finiteness admission, per-call and per-pass work
-  budgets, panic containment via `catch_unwind`, typed failure classes
+  frankensim-contain-fs-conform-callbacks-6bc6g) runs every public
+  `ContainedConverter` through the executor boundary under a sealed
+  `ImplementationIdentity` and declared `WorkEnvelope`; `BoundedCallback`
+  additionally adapts and guards legacy `Converter` callbacks. The executor
+  pins the first verified identity for the whole run, owns the authoritative
+  per-call and per-pass work meter, and gives callbacks only an isolated
+  snapshot, so later identity changes or budget mutations cannot expand the
+  pass authority. The boundary also provides dimension/finiteness admission,
+  panic containment via `catch_unwind`, typed failure classes
   (`CallFault`/`ExecutionFault`), a canonical bit-exact transcript folded
   into an order-independent receipt, mandatory permuted replay that must
   reproduce every record bitwise, and axiom checks executed against frozen

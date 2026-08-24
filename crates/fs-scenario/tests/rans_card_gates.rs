@@ -7,8 +7,8 @@
 //! from the canonical draft by exactly one deliberate defect.
 
 use fs_scenario::rans_card::{
-    AdmissionError, BoussinesqOption, LaunderSharmaCoefficients, PorousFinSink, REQUIRED_TERMS,
-    RansCardDraft, RansModelCard, WallTreatment,
+    AdmissionError, BoussinesqOption, LaunderSharmaCoefficients, MAX_MANIFEST_BYTES, PorousFinSink,
+    REQUIRED_TERMS, RansCardDraft, RansModelCard, WallTreatment,
 };
 
 fn canonical() -> RansCardDraft {
@@ -19,6 +19,13 @@ fn mutate<F: FnOnce(&mut RansCardDraft)>(f: F) -> Result<RansModelCard, Admissio
     let mut d = canonical();
     f(&mut d);
     d.freeze()
+}
+
+fn assert_ambiguous_list<F: FnOnce(&mut RansCardDraft)>(field: &'static str, f: F) {
+    let error = mutate(f)
+        .err()
+        .expect("ambiguous flattened-list input must be refused");
+    assert_eq!(error, AdmissionError::AmbiguousManifestList { field });
 }
 
 #[test]
@@ -36,6 +43,113 @@ fn canonical_draft_freezes_with_stable_binding() {
     );
     // The frozen card is opaque: no field of the struct is public, so the
     // only mutation path is a new draft + new freeze.
+}
+
+#[test]
+fn embedded_nul_cannot_alias_manifest_pair_boundaries() {
+    let mut smuggled = canonical();
+    smuggled.boundary_conditions.clear();
+    smuggled
+        .boundary_conditions
+        .insert("a".to_string(), "v\0bc/b\0w".to_string());
+
+    let mut split = canonical();
+    split.boundary_conditions.clear();
+    split
+        .boundary_conditions
+        .insert("a".to_string(), "v".to_string());
+    split
+        .boundary_conditions
+        .insert("b".to_string(), "w".to_string());
+    let split = split.freeze().expect("ordinary separate rows admit");
+
+    let smuggled = smuggled.freeze();
+    if let Ok(card) = &smuggled {
+        assert_ne!(
+            card.statement_manifest(),
+            split.statement_manifest(),
+            "the cards are semantically distinct"
+        );
+        assert_ne!(
+            card.manifest_hash(),
+            split.manifest_hash(),
+            "embedded delimiters must not alias separate manifest rows"
+        );
+    }
+    assert!(
+        matches!(smuggled, Err(AdmissionError::EmbeddedManifestDelimiter)),
+        "the frozen v1 delimiter format must refuse embedded NULs"
+    );
+}
+
+#[test]
+fn embedded_list_delimiters_cannot_alias_distinct_items() {
+    let mut smuggled = canonical();
+    smuggled.governing_terms.push("extra-a,extra-b".to_string());
+
+    let mut split = canonical();
+    split.governing_terms.push("extra-a".to_string());
+    split.governing_terms.push("extra-b".to_string());
+    let split = split.freeze().expect("ordinary separate list items admit");
+
+    let smuggled = smuggled.freeze();
+    if let Ok(card) = &smuggled {
+        assert_ne!(
+            card.manifest_hash(),
+            split.manifest_hash(),
+            "one item containing the list separator must not alias two items"
+        );
+    }
+    assert_eq!(
+        smuggled.err(),
+        Some(AdmissionError::AmbiguousManifestList {
+            field: "governing_terms",
+        }),
+        "the v1 flattened-list format must refuse ambiguous list items"
+    );
+}
+
+#[test]
+fn every_caller_controlled_flattened_list_has_injective_admission() {
+    assert_ambiguous_list("governing_terms", |draft| {
+        draft.governing_terms.push(String::new());
+    });
+    assert_ambiguous_list("validation_case_families", |draft| {
+        draft.validation_case_families = vec!["case-a,case-b".to_string()];
+    });
+    assert_ambiguous_list("falsifiers", |draft| {
+        draft.falsifiers = vec!["claim-a;claim-b".to_string()];
+    });
+    assert_ambiguous_list("exclusions", |draft| {
+        draft.exclusions.push("claim-a;claim-b".to_string());
+    });
+}
+
+#[test]
+fn manifest_size_cap_counts_hash_framing_bytes() {
+    const CANONICAL_FAMILY: &str = "electronics-cooling/e10-rans";
+    let canonical_card = RansCardDraft::launder_sharma_channel(CANONICAL_FAMILY)
+        .freeze()
+        .expect("canonical card admits");
+    let base_len = canonical_card
+        .statement_manifest()
+        .iter()
+        .map(|(key, value)| key.len() + 1 + value.len() + 1)
+        .sum::<usize>()
+        - CANONICAL_FAMILY.len();
+    assert!(base_len < MAX_MANIFEST_BYTES);
+
+    let oversized_family = "x".repeat(MAX_MANIFEST_BYTES - base_len + 1);
+    let error = RansCardDraft::launder_sharma_channel(oversized_family)
+        .freeze()
+        .err()
+        .expect("one byte beyond the framed manifest cap must be refused");
+    assert_eq!(
+        error,
+        AdmissionError::ManifestTooLarge {
+            actual: MAX_MANIFEST_BYTES + 1,
+        }
+    );
 }
 
 #[test]

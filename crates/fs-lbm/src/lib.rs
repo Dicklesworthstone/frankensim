@@ -22,6 +22,7 @@ pub mod perf;
 pub mod refine;
 pub mod rheology;
 pub mod sponge;
+pub mod terrain_wind;
 pub mod thermal;
 
 pub use core2::{Cell, Grid};

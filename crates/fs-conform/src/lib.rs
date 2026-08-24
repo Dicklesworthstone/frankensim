@@ -1775,10 +1775,10 @@ pub enum CallFault {
     Panicked,
 }
 
-/// Budget meter charged by bounded calls. Implementors of
-/// [`ContainedConverter`] drive it through [`CallBudget::begin_call`] and
-/// [`CallBudget::complete_call`]; the certification executor creates one per
-/// pass from the sealed envelope.
+/// Budget meter charged by bounded calls. The certification executor owns the
+/// authoritative meter for each pass. A [`ContainedConverter`] receives an
+/// isolated snapshot that it may use for stricter internal accounting; changes
+/// to that snapshot cannot replenish or erase executor-side charges.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CallBudget {
     calls_left: usize,
@@ -1832,9 +1832,9 @@ impl CallBudget {
     }
 }
 
-/// The certifiable converter protocol. Every method is fallible and
-/// budget-metered; outputs land in caller-provided storage instead of fresh
-/// allocations chosen by untrusted code.
+/// The certifiable converter protocol. Every method is fallible and executes
+/// under executor-owned budget metering; outputs land in caller-provided
+/// storage instead of fresh allocations chosen by untrusted code.
 pub trait ContainedConverter {
     /// The immutable implementation identity this object is bound to.
     fn identity(&self) -> &ImplementationIdentity;
@@ -1861,6 +1861,35 @@ pub trait ContainedConverter {
         out: &mut Vec<f64>,
         budget: &mut CallBudget,
     ) -> Result<(), CallFault>;
+}
+
+struct IdentityPinnedConverter<'a> {
+    inner: &'a dyn ContainedConverter,
+    identity: &'a ImplementationIdentity,
+}
+
+impl ContainedConverter for IdentityPinnedConverter<'_> {
+    fn identity(&self) -> &ImplementationIdentity {
+        self.identity
+    }
+
+    fn apply_bounded(
+        &self,
+        x: &[f64],
+        out: &mut Vec<f64>,
+        budget: &mut CallBudget,
+    ) -> Result<(), CallFault> {
+        self.inner.apply_bounded(x, out, budget)
+    }
+
+    fn adjoint_bounded(
+        &self,
+        y: &[f64],
+        out: &mut Vec<f64>,
+        budget: &mut CallBudget,
+    ) -> Result<(), CallFault> {
+        self.inner.adjoint_bounded(y, out, budget)
+    }
 }
 
 fn validate_input(input: &[f64], expected: usize) -> Result<(), CallFault> {
@@ -2117,9 +2146,36 @@ fn run_one(
     if let Err(fault) = budget.begin_call(input.len()) {
         return Err(StepAbort::Call(fault));
     }
-    let outcome = match kind {
-        TranscriptKind::Apply => converter.apply_bounded(input, scratch, budget),
-        TranscriptKind::Adjoint => converter.adjoint_bounded(input, scratch, budget),
+    // Give the public callback an accurate post-admission view of the budget,
+    // but never hand it the authoritative pass meter. A direct trait
+    // implementation may replace or mutate this snapshot; those changes are
+    // deliberately discarded so callback code cannot replenish calls/work or
+    // erase the executor's input charge.
+    let mut callback_budget = *budget;
+    // The executor is the containment boundary. `ContainedConverter` is a
+    // public trait, so callers are not required to enter through
+    // `BoundedCallback` (which also guards its legacy inner callback). Catch
+    // every direct implementation here and discard any partially written
+    // output before returning the typed fault.
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match kind {
+        TranscriptKind::Apply => converter.apply_bounded(input, scratch, &mut callback_budget),
+        TranscriptKind::Adjoint => converter.adjoint_bounded(input, scratch, &mut callback_budget),
+    }));
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(payload) => {
+            scratch.clear();
+            // Panic payloads are caller-controlled and may themselves have a
+            // panicking destructor. Keep that second unwind inside the same
+            // containment boundary; if it occurs, forget only the replacement
+            // payload so its destructor cannot recursively escape either.
+            if let Err(nested_payload) =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(payload)))
+            {
+                std::mem::forget(nested_payload);
+            }
+            return Err(StepAbort::Call(CallFault::Panicked));
+        }
     };
     outcome.map_err(StepAbort::Call)?;
     let output = std::mem::take(scratch);
@@ -2507,7 +2563,13 @@ pub fn certify_contained(
     suite: &ConformanceSuite,
     policy: ContainmentPolicy<'_>,
 ) -> ContainedCertification {
-    let identity = candidate.identity();
+    // Pin the first declaration before verification. `ContainedConverter` is
+    // public, so an implementation can otherwise alternate individually valid
+    // identities between admission, pass-budget creation, and calls. All
+    // executor authority must derive from the exact identity bound into the
+    // receipt.
+    let pinned_identity = candidate.identity().clone();
+    let identity = &pinned_identity;
     let auxiliary_identity_digests: Vec<u64> = witnesses.map_or_else(Vec::new, |bindings| {
         let mut digests = vec![
             bindings.after.identity.digest,
@@ -2556,10 +2618,15 @@ pub fn certify_contained(
         Some(bindings) => (Some(&bindings.after), Some(&bindings.direct)),
         None => (None, None),
     };
+    let pinned_candidate = IdentityPinnedConverter {
+        inner: candidate,
+        identity,
+    };
 
     // Pass A: canonical witness order. Pass B: permuted witnesses, fresh
     // budgets. Either pass aborting fails closed with typed evidence.
-    let sorted_a = match run_both_passes(candidate, after_conv, direct_conv, suite, policy) {
+    let sorted_a = match run_both_passes(&pinned_candidate, after_conv, direct_conv, suite, policy)
+    {
         Ok(records) => records,
         Err(fault) => {
             return fail_closed(identity, policy.class, auxiliary_identity_digests, fault);

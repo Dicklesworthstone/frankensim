@@ -18,8 +18,9 @@
 
 use fs_airflow::AirflowError;
 use fs_airflow::conjugate::{
-    AirPath, AirSegment, ConjugateConfig, Relaxation, SegmentRefinementTransfer, SolidRegionState,
-    seam_effort_dimensions, solve_conjugate, solve_conjugate_from,
+    AirPath, AirSegment, ConjugateConfig, CorrelationToRansFieldTransfer, Relaxation,
+    SegmentRefinementTransfer, SolidRegionState, seam_effort_dimensions, solve_conjugate,
+    solve_conjugate_from,
 };
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
@@ -1597,3 +1598,38 @@ fn a_resume_vector_of_the_wrong_length_refuses() {
         }
     );
 }
+
+#[test]
+fn correlation_to_rans_field_transfer_roundtrips_identically() {
+    let transfer = CorrelationToRansFieldTransfer::new(3, 8, 300.0).expect("valid transfer");
+    let coarse = vec![330.0, 345.0, 360.0];
+    let fine = transfer.prolongate(&coarse);
+    assert_eq!(fine.len(), 3 * 8);
+
+    // First node of each segment is the wall temperature
+    assert_eq!(fine[0], 330.0);
+    assert_eq!(fine[8], 345.0);
+    assert_eq!(fine[16], 360.0);
+
+    // Restriction recovers the coarse wall temperatures exactly
+    let back = transfer.restrict(&fine);
+    assert_eq!(back, coarse);
+}
+
+#[test]
+fn correlation_to_rans_field_transfer_constructs_resolved_boundary_layer() {
+    let transfer = CorrelationToRansFieldTransfer::new(1, 5, 300.0).expect("valid transfer");
+    let coarse = vec![350.0];
+    let fine = transfer.prolongate(&coarse);
+    assert_eq!(fine.len(), 5);
+    assert_eq!(fine[0], 350.0); // Wall
+    assert_eq!(fine[4], 300.0); // Core stream
+    assert!(fine[1] < fine[0] && fine[1] > fine[4]);
+}
+
+#[test]
+fn correlation_to_rans_field_transfer_refuses_invalid_inputs() {
+    assert!(CorrelationToRansFieldTransfer::new(0, 5, 300.0).is_err());
+    assert!(CorrelationToRansFieldTransfer::new(3, 1, 300.0).is_err());
+}
+

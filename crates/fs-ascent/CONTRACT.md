@@ -156,18 +156,17 @@ REPORTED outcome (reason + certificate), never a panic.
 
 ## Determinism class
 
-Bit-deterministic across runs on the same execution surface; golden FNV-64
-over L-BFGS, trust-region, and Riemannian trajectories:
-`0xe185_4f98_a25e_3663`. The re-freeze for `frankensim-nrhii` is registered
-against `TRAJECTORY_BIT_SEMANTICS_VERSION = 1` and reproduced in debug and
-release on an x86_64 RCH worker with the relevant source and lockfile blobs
-frozen at committed HEAD `724eddd8`. The previous `0xb28d_3cf4_99e8_9071` pin
-had historical Apple M4 Pro and Threadripper evidence, but that evidence does
-not transfer across the intentional Riemannian strong-Wolfe/transport and
-authoritative `fs-opt` manifold-runtime semantic migrations. A shared-tree
-overlay prevented clean-whole-tree promotion proof during the re-freeze;
-current clean-tree and arm64 reproduction remain pending, so the new constant
-alone makes no cross-ISA equality claim.
+Bit-deterministic across runs on the same execution surface and verified identical
+across architectures (x86_64 Linux and aarch64 macOS) in both debug and release
+profiles under `TRAJECTORY_BIT_SEMANTICS_VERSION = 1`:
+- Trajectory golden FNV-64 over L-BFGS, trust-region, and Riemannian trajectories: `0xe185_4f98_a25e_3663`.
+- Pareto front golden FNV-64: `0x301b_04df_db91_3965`.
+
+Requalification under bead `frankensim-ascent-golden-requalify-o6bne` provides retained
+receipts across 2 ISAs x 2 build profiles in `tests/receipts/` (`ascent_golden_x86_64_debug.json`,
+`ascent_golden_x86_64_release.json`, `ascent_golden_aarch64_debug.json`, and
+`ascent_golden_aarch64_release.json`), establishing cross-ISA bit-determinism across
+darwin/arm64 and x86_64 for these pinned sentinels.
 
 ## Cancellation behavior
 
