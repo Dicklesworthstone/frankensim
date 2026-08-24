@@ -119,27 +119,6 @@ export function createFlyerSceneRenderer(
   };
   // Particle budget from the QoS tier (0 = full, 2 = hidden).
   let particleLevel: 0 | 1 | 2 = 0;
-  // ONE sun: the light sits along the SAME direction the sky texture
-  // paints its disc from (dressing3d.SUN_DIRECTION), warm like a
-  // 10:35 a.m. December sun. Shadow ortho box covers the launch flat,
-  // rail corridor, and camp — not the whole 2 km tile.
-  const sun = new THREE.DirectionalLight(SUN_COLOR, 2.6);
-  sun.position.set(
-    SUN_DIRECTION[0] * 160,
-    SUN_DIRECTION[1] * 160,
-    SUN_DIRECTION[2] * 160,
-  );
-  sun.castShadow = true;
-  sun.shadow.mapSize.set(2048, 2048);
-  sun.shadow.camera.left = -80;
-  sun.shadow.camera.right = 110;
-  sun.shadow.camera.top = 70;
-  sun.shadow.camera.bottom = -60;
-  sun.shadow.camera.near = 40;
-  sun.shadow.camera.far = 340;
-  sun.shadow.bias = -0.00035;
-  sun.shadow.normalBias = 0.02;
-  scene.add(sun, new THREE.HemisphereLight(0xbcd0e8, 0x8a7d64, 0.85));
   // The REAL site tile (E1.3 3DEP grids): heightfield + splat.
   // E5.4: ?site=huffman loads the Huffman Prairie grid.
   const site = new URLSearchParams(window.location.search).get("site");
@@ -161,8 +140,33 @@ export function createFlyerSceneRenderer(
   tGeo.setIndex(new THREE.BufferAttribute(terrain.indices, 1));
   tGeo.computeVertexNormals();
   scene.add(new THREE.Mesh(tGeo, sandTileMaterial()));
-  const airframe = buildWrightFlyerAirframe();
   const launch = terrain.launch;
+
+  // ONE sun: the light sits along the SAME direction the sky texture
+  // paints its disc from (dressing3d.SUN_DIRECTION), warm like a
+  // 10:35 a.m. December sun. Shadow ortho box covers the launch flat,
+  // rail corridor, and camp — not the whole 2 km tile.
+  const sun = new THREE.DirectionalLight(SUN_COLOR, 2.6);
+  sun.position.set(
+    launch[0] + SUN_DIRECTION[0] * 160,
+    launch[1] + SUN_DIRECTION[1] * 160,
+    launch[2] + SUN_DIRECTION[2] * 160,
+  );
+  sun.target.position.set(launch[0] + 15, launch[1], launch[2]);
+  scene.add(sun.target);
+  sun.castShadow = true;
+  sun.shadow.mapSize.set(2048, 2048);
+  sun.shadow.camera.left = -80;
+  sun.shadow.camera.right = 110;
+  sun.shadow.camera.top = 70;
+  sun.shadow.camera.bottom = -60;
+  sun.shadow.camera.near = 40;
+  sun.shadow.camera.far = 340;
+  sun.shadow.bias = -0.00035;
+  sun.shadow.normalBias = 0.02;
+  scene.add(sun, new THREE.HemisphereLight(0xbcd0e8, 0x8a7d64, 0.85));
+
+  const airframe = buildWrightFlyerAirframe();
   airframe.group.position.set(launch[0], launch[1] + 1.2, launch[2]);
   scene.add(airframe.group);
   // A6: optional Smithsonian scan skin (?hero=1). The dossier-sourced

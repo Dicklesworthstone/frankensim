@@ -973,11 +973,11 @@ mod tests {
         MotionFrame::from_instance(time, shot_id, camera, &instance(transform)).unwrap()
     }
 
-    fn available(result: MotionVectorComputation) -> MotionVectorSample {
+    fn available(result: &MotionVectorComputation) -> MotionVectorSample {
         let MotionVectorComputation::Available(sample) = result else {
             panic!("expected available motion");
         };
-        sample
+        *sample
     }
 
     fn projected(endpoint: MotionEndpoint) -> (RasterProjection, [f64; 2], [f64; 2]) {
@@ -1021,7 +1021,10 @@ mod tests {
         let brute = mesh.intersect_surface_bruteforce(&ray).unwrap();
         assert_eq!(bvh.triangle_index, 0);
         assert_eq!(brute.triangle_index, 0);
-        assert_eq!(bvh.barycentric, brute.barycentric);
+        assert_eq!(
+            bvh.barycentric.map(f64::to_bits),
+            brute.barycentric.map(f64::to_bits)
+        );
         assert_close(bvh.barycentric.into_iter().sum(), 1.0);
         let indices = mesh.triangles[bvh.triangle_index as usize];
         let mut reconstructed = [0.0; 3];
@@ -1082,7 +1085,7 @@ mod tests {
                 transform_z(core::f64::consts::FRAC_PI_2, [0.0, 0.0, -5.0]),
             );
             let motion = available(
-                compute_motion_vectors(sample, &previous, &current, &next, raster).unwrap(),
+                &compute_motion_vectors(sample, &previous, &current, &next, raster).unwrap(),
             );
             let (_, previous_ndc, previous_pixels) = projected(motion.previous);
             let (_, next_ndc, next_pixels) = projected(motion.next);
@@ -1109,7 +1112,7 @@ mod tests {
             let current = frame(0.0, 9, camera_at(0.0, 0.0), current_transform);
             let camera_pan = frame(1.0, 9, camera_at(1.0, 0.0), current_transform);
             let panned = available(
-                compute_motion_vectors(sample, &previous, &current, &camera_pan, raster).unwrap(),
+                &compute_motion_vectors(sample, &previous, &current, &camera_pan, raster).unwrap(),
             );
             let (_, pan_ndc, _) = projected(panned.next);
             assert_close(pan_ndc[0], -0.2);
@@ -1121,7 +1124,7 @@ mod tests {
                 transform_z(0.0, [1.0, 0.0, -5.0]),
             );
             let common_motion = available(
-                compute_motion_vectors(sample, &previous, &current, &common, raster).unwrap(),
+                &compute_motion_vectors(sample, &previous, &current, &common, raster).unwrap(),
             );
             let (_, common_ndc, common_pixels) = projected(common_motion.next);
             assert_eq!(common_ndc.map(f64::to_bits), [0.0f64.to_bits(); 2]);
@@ -1187,7 +1190,7 @@ mod tests {
             let next = frame(1.0, 11, camera_at(0.0, 0.050), negative);
             assert_eq!(previous.frame_identity(), current.frame_identity());
             let motion = available(
-                compute_motion_vectors(sample, &previous, &current, &next, raster).unwrap(),
+                &compute_motion_vectors(sample, &previous, &current, &next, raster).unwrap(),
             );
             for endpoint in [motion.previous, motion.next] {
                 let (_, ndc, pixels) = projected(endpoint);
@@ -1212,7 +1215,7 @@ mod tests {
                 transform_z(0.0, [100.0, 0.0, -5.0]),
             );
             let motion = available(
-                compute_motion_vectors(sample, &previous, &current, &offscreen, raster).unwrap(),
+                &compute_motion_vectors(sample, &previous, &current, &offscreen, raster).unwrap(),
             );
             assert!(matches!(motion.previous, MotionEndpoint::CameraCut { .. }));
             let (target, _, _) = projected(motion.next);
@@ -1235,7 +1238,7 @@ mod tests {
                 transform_z(0.0, [0.0, 0.0, 1.0]),
             );
             let behind_motion = available(
-                compute_motion_vectors(sample, &current, &current, &behind, raster).unwrap(),
+                &compute_motion_vectors(sample, &current, &current, &behind, raster).unwrap(),
             );
             assert!(matches!(
                 behind_motion.next,
@@ -1300,7 +1303,7 @@ mod tests {
             let sample = hit_sample(cx, &instance(transform));
             let frame = frame(0.0, 5, camera_at(0.0, 0.0), transform);
             let motion = available(
-                compute_motion_vectors(
+                &compute_motion_vectors(
                     sample,
                     &frame,
                     &frame,

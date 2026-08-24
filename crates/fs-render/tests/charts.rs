@@ -70,6 +70,8 @@ fn exact_subtraction_bounds(lhs: f64, rhs: f64) -> (f64, f64) {
 fn bounded_certificate(lo: f64, hi: f64, nominal: f64) -> NumericalCertificate {
     let lo = lo.min(nominal);
     let hi = hi.max(nominal);
+    // det-ok: the exact-vs-enclosure selection is bit-exact by contract.
+    #[allow(clippy::float_cmp)]
     if lo == hi {
         NumericalCertificate::exact(lo)
     } else {
@@ -694,6 +696,8 @@ fn oracle_first_hit(chart: &dyn Chart, cx: &Cx<'_>, ray: &Ray, t_max: f64) -> Op
     None
 }
 
+// Bead frankensim-8ll9: headline scenario kept as one continuous narrative.
+#[allow(clippy::too_many_lines)]
 #[test]
 fn rb_001_zero_tunneling_headline() {
     with_cx(|cx| {
@@ -870,6 +874,8 @@ fn rb_001a_over_relaxation_cannot_accept_a_far_shell_boundary() {
     });
 }
 
+// Bead frankensim-8ll9: audit-state matrix kept inline for case-by-case review.
+#[allow(clippy::too_many_lines)]
 #[test]
 fn rb_001b_trace_audit_states_fail_closed() {
     with_cx(|cx| {
@@ -1271,7 +1277,7 @@ fn rb_001m_same_sign_residual_continues_to_transverse_first_root() {
             evaluations.len() >= 3,
             "current point, short witness, and safe continuation must all be evaluated"
         );
-        assert_eq!(evaluations[0], 0.0);
+        assert_eq!(evaluations[0].to_bits(), 0.0f64.to_bits());
         assert_eq!(
             evaluations[1].to_bits(),
             0x3ebf_ffff_ffff_fffc,
@@ -1369,6 +1375,9 @@ fn rb_001f_cancellation_requested_by_terminal_eval_wins() {
     });
 }
 
+// Bead frankensim-8ll9: scale-direction and touching-sphere cases kept in
+// one continuous scenario.
+#[allow(clippy::too_many_lines)]
 #[test]
 fn rb_001c_scale_direction_and_touching_spheres_are_conservative() {
     with_cx(|cx| {
@@ -1463,7 +1472,7 @@ fn rb_001c_scale_direction_and_touching_spheres_are_conservative() {
         let (limit_hit, limit_audit) =
             sphere_trace(&exact_limit, cx, &boundary_ray, 0.1, 1e-18, 1.0);
         let limit_hit = limit_hit.expect("an exact hit at caller t_max must not become a miss");
-        assert_eq!(limit_hit.t, 0.1);
+        assert_eq!(limit_hit.t.to_bits(), 0.1f64.to_bits());
         assert_eq!(limit_hit.point, boundary_ray.at(0.1));
         assert_eq!(limit_audit.termination, TraceTermination::Hit);
         assert!(limit_audit.certified);
@@ -1471,7 +1480,7 @@ fn rb_001c_scale_direction_and_touching_spheres_are_conservative() {
             sphere_trace(&exact_limit, cx, &boundary_ray, 0.1, 1e-18, 1.6);
         let relaxed_limit_hit =
             relaxed_limit_hit.expect("over-relaxation must retain the exact caller endpoint");
-        assert_eq!(relaxed_limit_hit.t, limit_hit.t);
+        assert_eq!(relaxed_limit_hit.t.to_bits(), limit_hit.t.to_bits());
         assert_eq!(relaxed_limit_hit.point, limit_hit.point);
         assert_eq!(relaxed_limit_audit.termination, TraceTermination::Hit);
         assert!(relaxed_limit_audit.certified);
@@ -1485,7 +1494,7 @@ fn rb_001c_scale_direction_and_touching_spheres_are_conservative() {
         .expect("production composition accepts a certified endpoint hit")
         .expect("the certified endpoint is present");
         assert_eq!(scene_limit_hit.0, 0);
-        assert_eq!(scene_limit_hit.1.t, limit_hit.t);
+        assert_eq!(scene_limit_hit.1.t.to_bits(), limit_hit.t.to_bits());
         assert_eq!(scene_limit_hit.1.point, limit_hit.point);
 
         let equality_ray = Ray {
@@ -1494,8 +1503,11 @@ fn rb_001c_scale_direction_and_touching_spheres_are_conservative() {
         };
         let equality_t_max = 0.3;
         let outward_working_x = (equality_t_max * equality_ray.dir.x).next_up();
-        assert_eq!(outward_working_x / equality_ray.dir.x, equality_t_max);
-        assert_ne!(outward_working_x, equality_ray.at(equality_t_max).x);
+        assert_eq!((outward_working_x / equality_ray.dir.x).to_bits(), equality_t_max.to_bits());
+        assert_ne!(
+            outward_working_x.to_bits(),
+            equality_ray.at(equality_t_max).x.to_bits()
+        );
         let equality_gap = ExactPlaneChart {
             boundary: outward_working_x,
             lipschitz: 1.0,
@@ -2011,7 +2023,6 @@ fn rb_004a_bvh_build_is_deterministic_under_concurrent_construction() {
     // only with a semantic justification per docs/GOLDEN_POLICY.md, bumping
     // the causative bit surface and the fs-render:bvh-determinism coupling
     // row in the same commit.
-    const BVH_DETERMINISM_FINGERPRINT_GOLDEN: u64 = 0xcf18_55d9_4642_e0fd;
     assert_eq!(
         reference.0, BVH_DETERMINISM_FINGERPRINT_GOLDEN,
         "BVH construction fingerprint moved: observed {:#018x} vs frozen \
@@ -2079,6 +2090,8 @@ fn rb_004b_bvh_grazing_pruning_matches_bruteforce() {
     }
 }
 
+// Bead frankensim-8ll9: three-representation consistency kept inline.
+#[allow(clippy::too_many_lines)]
 #[test]
 fn rb_004_mixed_scene_consistency_and_frame_invariance() {
     with_cx(|cx| {
@@ -2228,7 +2241,8 @@ fn rb_004_mixed_scene_consistency_and_frame_invariance() {
 #[test]
 fn rb_005_ray_rate_ledger() {
     with_cx(|cx| {
-        // MEASURED, honestly labeled throughput on primary rays. The plan's
+    const BVH_DETERMINISM_FINGERPRINT_GOLDEN: u64 = 0xcf18_55d9_4642_e0fd;
+            // MEASURED, honestly labeled throughput on primary rays. The plan's
         // Mray/s TARGETS are release-build perf-CI
         // gates (fz2.4) — this ledgers the measurement discipline, not
         // the target (AGENTS: no "fast" without a benchmark + machine).

@@ -143,14 +143,13 @@ impl SurfaceDetail {
         {
             return Err(SurfaceDetailError::UnboundedNormalPerturbation);
         }
-        if let Some(mark) = &mark {
-            if !mark.azimuth_rad.is_finite()
+        if let Some(mark) = &mark
+            && (!mark.azimuth_rad.is_finite()
                 || !mark.half_width_rad.is_finite()
                 || mark.half_width_rad <= 0.0
-                || mark.half_width_rad > core::f64::consts::FRAC_PI_4
-            {
-                return Err(SurfaceDetailError::InvalidMarkWidth);
-            }
+                || mark.half_width_rad > core::f64::consts::FRAC_PI_4)
+        {
+            return Err(SurfaceDetailError::InvalidMarkWidth);
         }
         Ok(Self {
             base_alpha,
@@ -172,7 +171,11 @@ impl SurfaceDetail {
     /// Whether this set is exactly the zero-detail limit.
     #[must_use]
     pub fn is_zero_detail(&self) -> bool {
-        self.anisotropy_ratio == 1.0 && self.normal_perturbation_rad == 0.0 && self.mark.is_none()
+        // det-ok: "exactly the zero-detail limit" is the documented contract;
+        // to_bits preserves it exactly.
+        self.anisotropy_ratio.to_bits() == 1.0f64.to_bits()
+            && self.normal_perturbation_rad.to_bits() == 0.0f64.to_bits()
+            && self.mark.is_none()
     }
 
     /// Versioned identity of the complete parameter set. Every semantic
@@ -464,6 +467,8 @@ mod tests {
         assert_eq!(detail().identity(), base_id);
     }
 
+    // Test fixture intentionally mirrors the real optional input shape.
+    #[allow(clippy::unnecessary_wraps)]
     fn base_mark() -> Option<RadialMark> {
         Some(RadialMark {
             azimuth_rad: 0.0,

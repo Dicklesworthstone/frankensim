@@ -932,7 +932,10 @@ impl PhysicalCamera {
         // Raster x grows with NDC x, while raster y grows opposite NDC y.
         // Preserve the exact half-open pixel domain in each orientation.
         let x_inside = (-1.0..1.0).contains(&ndc_xy[0]);
-        let y_inside = (-1.0..=1.0).contains(&ndc_xy[1]) && ndc_xy[1] != -1.0;
+        // det-ok: bit-exact exclusion of the closed endpoint; to_bits is
+        // truth-table identical here (-1.0 has no signed-zero ambiguity).
+        let y_inside =
+            (-1.0..=1.0).contains(&ndc_xy[1]) && ndc_xy[1].to_bits() != (-1.0f64).to_bits();
         if !x_inside || !y_inside {
             return Ok(None);
         }

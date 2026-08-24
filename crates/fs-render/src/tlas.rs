@@ -390,7 +390,7 @@ impl AnimatedTlas {
         let mut visited = 0usize;
         while let Some(index) = stack.pop() {
             visited += 1;
-            if visited % CANCEL_POLL_NODES == 0 {
+            if visited.is_multiple_of(CANCEL_POLL_NODES) {
                 cx.checkpoint()?;
             }
             counters.nodes_visited += 1;
@@ -414,8 +414,10 @@ impl AnimatedTlas {
                             let wins = match &best {
                                 None => true,
                                 Some(current) => {
+                                    // det-ok: deterministic tie-break needs
+                                    // bit-exact t equality.
                                     candidate.hit.t < current.hit.t
-                                        || (candidate.hit.t == current.hit.t
+                                        || (candidate.hit.t.to_bits() == current.hit.t.to_bits()
                                             && candidate.object_id < current.object_id)
                                 }
                             };
@@ -441,7 +443,7 @@ fn build_node(
     start: usize,
     end: usize,
 ) -> Result<u32, TlasError> {
-    if nodes.len() % CANCEL_POLL_NODES == 0 {
+    if nodes.len().is_multiple_of(CANCEL_POLL_NODES) {
         cx.checkpoint()?;
     }
     let mut aabb = swept[order[start] as usize];
@@ -626,8 +628,9 @@ pub fn brute_force_intersect(
             let wins = match &best {
                 None => true,
                 Some(current) => {
+                    // det-ok: deterministic tie-break needs bit-exact t equality.
                     candidate.hit.t < current.hit.t
-                        || (candidate.hit.t == current.hit.t
+                        || (candidate.hit.t.to_bits() == current.hit.t.to_bits()
                             && candidate.object_id < current.object_id)
                 }
             };
@@ -889,8 +892,61 @@ mod tests {
     }
 
     #[test]
+        // Bead frankensim-8ll9: mesh/chart derivation parity kept inline;
+        // extraction would separate oracle assertions from their fixtures.
+        #[allow(clippy::too_many_lines)]
     fn derived_bounds_match_manual_bounds_for_meshes_and_admit_charts() {
         with_cx(|_, cx| {
+            // A finite-support chart instance derives from Chart::support
+            // and never culls its own hits (oracle equality).
+        #[derive(Clone, Copy)]
+        struct SphereChart;
+        impl fs_geom::Chart for SphereChart {
+            fn eval(&self, x: Point3, _cx: &Cx<'_>) -> fs_geom::ChartSample {
+                let distance = (x.x * x.x + x.y * x.y + x.z * x.z).sqrt() - 0.5;
+                fs_geom::ChartSample {
+                    signed_distance: distance,
+                    gradient: None,
+                    lipschitz: Some(1.0),
+                    error: fs_evidence::NumericalCertificate::exact(distance),
+                }
+            }
+            fn support(&self) -> Aabb {
+                Aabb {
+                    min: Point3::new(-0.5, -0.5, -0.5),
+                    max: Point3::new(0.5, 0.5, 0.5),
+                }
+            }
+            fn trace_step_claim(&self) -> fs_geom::TraceStepClaim {
+                fs_geom::TraceStepClaim::ExactDistance
+            }
+            fn name(&self) -> &'static str {
+                "tlas-test-sphere"
+            }
+        }
+            // An unbounded chart support refuses typed.
+            #[derive(Clone, Copy)]
+            struct UnboundedChart;
+            impl fs_geom::Chart for UnboundedChart {
+                fn eval(&self, _x: Point3, _cx: &Cx<'_>) -> fs_geom::ChartSample {
+                    fs_geom::ChartSample {
+                        signed_distance: -1.0,
+                        gradient: None,
+                        lipschitz: None,
+                        error: fs_evidence::NumericalCertificate::exact(-1.0),
+                    }
+                }
+                fn support(&self) -> Aabb {
+                    Aabb {
+                        min: Point3::new(f64::NEG_INFINITY, -1.0, -1.0),
+                        max: Point3::new(f64::INFINITY, 1.0, 1.0),
+                    }
+                }
+                fn name(&self) -> &'static str {
+                    "tlas-test-unbounded"
+                }
+            }
+
             let exposure = shutter(0.0, 2.0);
             let instances = scene(&[0.0, 0.5, 0.0]);
             // Mesh derivation equals the manual local bounds: identical
@@ -899,33 +955,6 @@ mod tests {
             let derived = AnimatedTlas::build_derived(cx, &instances, exposure).unwrap();
             assert_eq!(derived.fingerprint(), manual.fingerprint());
 
-            // A finite-support chart instance derives from Chart::support
-            // and never culls its own hits (oracle equality).
-            #[derive(Clone, Copy)]
-            struct SphereChart;
-            impl fs_geom::Chart for SphereChart {
-                fn eval(&self, x: Point3, _cx: &Cx<'_>) -> fs_geom::ChartSample {
-                    let distance = (x.x * x.x + x.y * x.y + x.z * x.z).sqrt() - 0.5;
-                    fs_geom::ChartSample {
-                        signed_distance: distance,
-                        gradient: None,
-                        lipschitz: Some(1.0),
-                        error: fs_evidence::NumericalCertificate::exact(distance),
-                    }
-                }
-                fn support(&self) -> Aabb {
-                    Aabb {
-                        min: Point3::new(-0.5, -0.5, -0.5),
-                        max: Point3::new(0.5, 0.5, 0.5),
-                    }
-                }
-                fn trace_step_claim(&self) -> fs_geom::TraceStepClaim {
-                    fs_geom::TraceStepClaim::ExactDistance
-                }
-                fn name(&self) -> &'static str {
-                    "tlas-test-sphere"
-                }
-            }
             let identity = hash_domain("org.frankensim.test.tlas-chart", b"sphere");
             let trajectory = RigidTransformTrajectory::try_new(vec![
                 keyframe(0.0, [0.0, 0.0, 0.0], [0.0; 3]),
@@ -951,27 +980,6 @@ mod tests {
             assert!(fast.is_some(), "the derived chart bound admits its own hit");
 
             // An unbounded chart support refuses typed.
-            #[derive(Clone, Copy)]
-            struct UnboundedChart;
-            impl fs_geom::Chart for UnboundedChart {
-                fn eval(&self, _x: Point3, _cx: &Cx<'_>) -> fs_geom::ChartSample {
-                    fs_geom::ChartSample {
-                        signed_distance: -1.0,
-                        gradient: None,
-                        lipschitz: None,
-                        error: fs_evidence::NumericalCertificate::exact(-1.0),
-                    }
-                }
-                fn support(&self) -> Aabb {
-                    Aabb {
-                        min: Point3::new(f64::NEG_INFINITY, -1.0, -1.0),
-                        max: Point3::new(f64::INFINITY, 1.0, 1.0),
-                    }
-                }
-                fn name(&self) -> &'static str {
-                    "tlas-test-unbounded"
-                }
-            }
             assert!(matches!(
                 derived_local_bounds(&SharedGeometry::chart(UnboundedChart)),
                 Err(TlasError::NonFiniteSweptBounds { .. })

@@ -90,8 +90,8 @@ fn explicit_endpoints_and_counter_sampling_are_deterministic_and_bounded() {
     .unwrap();
     let open = TimedRay::at_normalized((), shutter, NormalizedShutterTime::try_new(0.0).unwrap());
     let close = TimedRay::at_normalized((), shutter, NormalizedShutterTime::try_new(1.0).unwrap());
-    assert_eq!(open.absolute_time_s(), 2.0);
-    assert_eq!(close.absolute_time_s(), 6.0);
+    assert_eq!(open.absolute_time_s().to_bits(), 2.0f64.to_bits());
+    assert_eq!(close.absolute_time_s().to_bits(), 6.0f64.to_bits());
     for sample in 0..128 {
         let first = TimedRay::from_sample((), shutter, 99, sample);
         let replay = TimedRay::from_sample((), shutter, 99, sample);
@@ -288,7 +288,11 @@ fn adding_shutter_time_does_not_perturb_existing_spatial_sample_dimensions() {
             halton(3, sample_identity),
         ];
         let timed = TimedRay::from_sample(spatial_dimensions, shutter, 91, sample_identity);
-        assert_eq!(timed.spatial(), &spatial_dimensions);
+        assert!(timed
+            .spatial()
+            .iter()
+            .zip(spatial_dimensions.iter())
+            .all(|(a, b)| a.to_bits() == b.to_bits()));
     }
 }
 

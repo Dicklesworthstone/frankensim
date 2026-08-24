@@ -982,11 +982,10 @@ fn validate_trace_sample(
     }
     let lipschitz = match sample.lipschitz {
         Some(bound) if bound.is_finite() && bound > 0.0 => bound,
-        Some(_) => return None,
         None if trace_claim == TraceStepClaim::NoClaim => 1.0,
-        None => return None,
+        _ => return None,
     };
-    if trace_claim != TraceStepClaim::NoClaim
+    if !matches!(trace_claim, TraceStepClaim::NoClaim)
         && (!trace_value.lo.is_finite()
             || !trace_value.hi.is_finite()
             || trace_value.lo > signed_distance
@@ -994,7 +993,10 @@ fn validate_trace_sample(
     {
         return None;
     }
-    let certified_bounds = if trace_claim != TraceStepClaim::NoClaim {
+    let certified_bounds = if matches!(
+        trace_claim,
+        TraceStepClaim::ExactDistance | TraceStepClaim::LipschitzImplicit
+    ) {
         if !matches!(
             trace_value.kind,
             NumericalKind::Exact | NumericalKind::Enclosure
@@ -1083,6 +1085,9 @@ fn validate_trace_sample(
 /// point's outward-rounded distance to both retained endpoints is at most
 /// `eps`.
 #[allow(clippy::too_many_arguments)]
+// Bead frankensim-8ll9: staged bracket certification kept inline so the
+// fail-closed ordering stays reviewable end to end.
+#[allow(clippy::too_many_lines)]
 fn certify_short_implicit_bracket(
     chart: &dyn Chart,
     cx: &Cx<'_>,
@@ -1097,6 +1102,8 @@ fn certify_short_implicit_bracket(
     caller_t_max: f64,
     eps: f64,
 ) -> ShortBracketOutcome {
+
+    const MAX_BISECTION_STEPS: usize = 8;
     if !current_sign.is_strict() || current_caller_t >= caller_t_max {
         return ShortBracketOutcome::NoWitness;
     }
@@ -1184,7 +1191,6 @@ fn certify_short_implicit_bracket(
     // back. This neither extends nor adopts the speculative witness. A fixed
     // cap keeps a pathological chart from turning residual classification into
     // unbounded work, and every uncertain/no-progress case still fails closed.
-    const MAX_BISECTION_STEPS: usize = 8;
     for _ in 0..MAX_BISECTION_STEPS {
         let midpoint_t = f64::midpoint(lo_t, hi_t);
         if !midpoint_t.is_finite() || midpoint_t <= lo_t || midpoint_t >= hi_t {
@@ -1670,6 +1676,9 @@ fn preflight_nurbs_ray_work(
     Ok(())
 }
 
+// Bead frankensim-8ll9: NURBS traversal stages kept inline so the
+// fail-closed work accounting stays auditable as one sequence.
+#[allow(clippy::too_many_lines)]
 fn ray_intersect_nurbs_impl(
     surface: &NurbsSurface<f64>,
     cx: Option<&Cx<'_>>,
@@ -2250,13 +2259,11 @@ impl TriMesh {
                         best = Some(hit);
                     }
                 }
-            } else {
-                if stack.try_push(node.b).is_err() || stack.try_push(node.a).is_err() {
-                    // The legacy API cannot report a failed spill reservation.
-                    // Returning no hit is the fail-closed outcome: a partial
-                    // traversal must never certify a potentially farther hit.
-                    return Ok(None);
-                }
+            } else if stack.try_push(node.b).is_err() || stack.try_push(node.a).is_err() {
+                // The legacy API cannot report a failed spill reservation.
+                // Returning no hit is the fail-closed outcome: a partial
+                // traversal must never certify a potentially farther hit.
+                return Ok(None);
             }
         }
         if let Some(cx) = cx {
@@ -2984,8 +2991,9 @@ mod tests {
         let current_point = ray.at(current_t / parameter_scale);
         let safe_radius = boundary_point.x - current_point.x;
         assert_eq!(
-            point_distance_upper(current_point, boundary_point),
-            safe_radius
+            point_distance_upper(current_point, boundary_point)
+                .to_bits(),
+            safe_radius.to_bits()
         );
 
         let safe_dt = conservative_safe_parameter(
@@ -3002,8 +3010,8 @@ mod tests {
             conservative_product_upper(0.1, parameter_scale),
         )
         .expect("the adjacent evaluated endpoint lies in the exact safe ball");
-        assert_eq!(endpoint, current_t.next_up());
-        assert_eq!(distance, safe_radius);
+        assert_eq!(endpoint.to_bits(), current_t.next_up().to_bits());
+        assert_eq!(distance.to_bits(), safe_radius.to_bits());
 
         let inexact_lhs = Point3::new(1.0, 0.0, 0.0);
         let inexact_rhs = Point3::new(-(f64::EPSILON * 0.25), 0.0, 0.0);

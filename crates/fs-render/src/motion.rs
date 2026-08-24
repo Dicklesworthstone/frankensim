@@ -88,6 +88,9 @@ impl ShutterInterval {
     /// a nominal frame time, which can change endpoint bits through a second
     /// round of floating-point arithmetic. It enforces the same stored-field
     /// invariants as [`Self::resolve`] and canonicalizes the one physical zero.
+    // Deliberate crate-private seam retained for canonical-part replay; the
+    // doc below records why reconstructing via resolve() is forbidden.
+    #[allow(dead_code)]
     pub(crate) fn try_from_canonical_parts(
         open_s: f64,
         close_s: f64,

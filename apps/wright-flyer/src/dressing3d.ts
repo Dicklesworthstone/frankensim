@@ -1682,7 +1682,7 @@ export function buildDressing(
   const daniels = buildDaniels();
   const DX = -9;
   const DZ = 13;
-  daniels.group.position.set(DX, 0, DZ);
+  daniels.group.position.set(launch[0] + DX, launch[1] + groundY(DX, DZ), launch[2] + DZ);
   // He photographs the machine departing +x: the builder aims the Korona
   // west (-x), so flip him to face the flight path (fresh-eyes audit #8).
   daniels.group.rotation.y = Math.PI;
@@ -1806,8 +1806,12 @@ export function buildDressing(
           const p = streamerPoint(i, s, STREAMER_SEGS, t, windMps);
           // Ride the terrain along the whole ribbon (the anchors run
           // past the launch flat, where dune relief is nonzero).
-          p.y += groundY(p.x, p.z);
-          pts.push(p);
+          const py = groundY(p.x, p.z);
+          pts.push({
+            x: launch[0] + p.x,
+            y: launch[1] + py + p.y,
+            z: launch[2] + p.z,
+          });
         }
         r.write(pts);
       }
