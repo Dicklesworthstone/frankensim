@@ -186,7 +186,7 @@ fn pipeline_and_oc_inputs_fail_closed() {
             ..valid
         },
         SimpParams {
-            e_min: 1.01,
+            e_min: 1.0,
             ..valid
         },
         SimpParams {
@@ -234,6 +234,28 @@ fn pipeline_and_oc_inputs_fail_closed() {
         .is_err()
     );
     assert_eq!(elasticity.moduli, original_moduli);
+    let mut nonfinite_force = force.clone();
+    nonfinite_force[0] = f64::NAN;
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            pipeline.compliance_and_gradient(&mut elasticity, &rho, &nonfinite_force)
+        }))
+        .is_err()
+    );
+    assert_eq!(elasticity.moduli, original_moduli);
+
+    let (other_complex, other_positions) = kuhn_cube(2);
+    let mismatched_pipeline = DesignPipeline {
+        filter: DensityFilter::new(&other_complex, &other_positions, 0.15),
+        params: valid,
+    };
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            mismatched_pipeline.compliance_and_gradient(&mut elasticity, &rho, &force)
+        }))
+        .is_err()
+    );
+    assert_eq!(elasticity.moduli, original_moduli);
 
     let mut extra_volume = cell_vol.clone();
     extra_volume.push(cell_vol[0]);
@@ -252,6 +274,23 @@ fn pipeline_and_oc_inputs_fail_closed() {
         }))
         .is_err(),
         "an extra cell volume must not be silently included in the denominator"
+    );
+    let overflow_volume = vec![f64::MAX; nc];
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            optimality_criteria(
+                &pipeline,
+                &mut elasticity,
+                &force,
+                &rho,
+                &overflow_volume,
+                0.4,
+                0.2,
+                0,
+            )
+        }))
+        .is_err(),
+        "finite cell volumes whose total overflows must refuse"
     );
     for (vol_frac, move_limit) in [
         (0.0, 0.2),

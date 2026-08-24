@@ -176,7 +176,7 @@ None. `unsafe_code = "deny"`.
 
 ## Conformance tests
 
-`tests/topopt_battery.rs` (8 cases): filter G0 laws (linearity ≤
+`tests/topopt_battery.rs`: filter G0 laws (linearity ≤
 1e−9, transpose adjointness ≤ 1e−9, constants preserved); projection
 G0 (exact endpoints, monotone on a 100-point sweep, slope vs FD ≤
 1e−8); FULL-CHAIN sensitivity vs FD at three continuation stages

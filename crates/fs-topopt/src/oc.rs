@@ -35,6 +35,7 @@ fn volume_fraction(pipeline: &DesignPipeline, rho: &[f64], cell_vol: &[f64]) -> 
         / total
 }
 
+/// Validate the common nominal/robust OC modeling boundary before iteration.
 pub(crate) fn assert_valid_oc_inputs(
     elasticity: &DensityElasticity,
     force: &[f64],
@@ -72,6 +73,10 @@ pub(crate) fn assert_valid_oc_inputs(
             .iter()
             .all(|volume| volume.is_finite() && *volume > 0.0),
         "cell volumes must be finite and positive"
+    );
+    assert!(
+        cell_vol.iter().sum::<f64>().is_finite(),
+        "total cell volume must be representable as a finite value"
     );
     assert!(
         vol_frac.is_finite() && vol_frac > 0.0 && vol_frac <= 1.0,

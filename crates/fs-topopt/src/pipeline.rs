@@ -32,10 +32,11 @@ impl Default for SimpParams {
 }
 
 impl SimpParams {
+    /// Refuse parameter sets that do not define the documented SIMP model.
     pub(crate) fn assert_valid(self) {
         assert!(
-            self.e_min.is_finite() && self.e_min > 0.0 && self.e_min <= 1.0,
-            "SIMP void-modulus floor must be finite and lie in (0, 1]"
+            self.e_min.is_finite() && self.e_min > 0.0 && self.e_min < 1.0,
+            "SIMP void-modulus floor must be finite and lie in (0, 1)"
         );
         assert!(
             self.penal.is_finite() && self.penal >= 1.0,
