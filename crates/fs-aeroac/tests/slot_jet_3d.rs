@@ -89,7 +89,7 @@ fn config_refusals() {
     );
 
     let mut cfg = smoke_config();
-    cfg.fringe_sigma = 1.01;
+    cfg.fringe_sigma = 0.0;
     assert!(
         run_slot_jet_3d(&cfg).is_err(),
         "out-of-range fringe strength must be refused without panicking"

@@ -4456,11 +4456,10 @@ fn verify_failure_propagation(
             && resource_capacity_for_failure(receipt, origin, resource)
                 .is_some_and(|capacity| *available > capacity)
         {
-                return Err(origin.map_or_else(
-                    || invocation_semantic_error("failure-available-within-origin-grant"),
-                    |child| child_semantic_error(child, "failure-available-within-origin-grant"),
-                ));
-            }
+            return Err(origin.map_or_else(
+                || invocation_semantic_error("failure-available-within-origin-grant"),
+                |child| child_semantic_error(child, "failure-available-within-origin-grant"),
+            ));
         }
     }
     match (&receipt.failure, receipt.failure_origin) {

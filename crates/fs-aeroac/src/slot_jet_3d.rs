@@ -302,7 +302,8 @@ fn validate_config(cfg: &SlotJet3dConfig) -> Result<(), AeroacError> {
         || cfg.edge_distance < 8
         || cfg.plate_length < 2
         || cfg.fringe_width == 0
-        || !(0.0..=1.0).contains(&cfg.fringe_sigma)
+        || cfg.fringe_sigma <= 0.0
+        || cfg.fringe_sigma > 1.0
         || !(0.0..0.2).contains(&cfg.seed_amplitude)
         || cfg.steps_settle == 0
     {
@@ -704,7 +705,7 @@ pub enum SweepProgress {
 }
 
 /// Canonical configuration fingerprint (FNV-1a over the pinned
-/// fields) binding a checkpoint to exactly one geometry/law.
+/// fields) binding a checkpoint to exactly one complete run setup.
 #[must_use]
 pub fn config_fingerprint(cfg: &SlotJet3dConfig) -> u64 {
     let CollisionModel3::CentralMoment {
