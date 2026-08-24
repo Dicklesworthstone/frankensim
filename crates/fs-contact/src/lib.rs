@@ -741,6 +741,24 @@ fn enclosing_corner_ball(corners: &[fs_geom::Point3]) -> Option<(fs_geom::Point3
     Some((center, radius))
 }
 
+/// Run both chart producers with cancellation handoffs before their output can
+/// participate in a pruning certificate.
+fn checked_sdf_trace_value(
+    obstacle: &dyn Chart,
+    point: fs_geom::Point3,
+    cx: &Cx<'_>,
+) -> Result<fs_evidence::NumericalCertificate, ContactError> {
+    let sample = obstacle.eval(point, cx);
+    if cx.checkpoint().is_err() {
+        return Err(ContactError::Cancelled);
+    }
+    let enclosure = obstacle.trace_value_enclosure(point, &sample, cx);
+    if cx.checkpoint().is_err() {
+        return Err(ContactError::Cancelled);
+    }
+    Ok(enclosure)
+}
+
 /// Refine possible-contact windows for a POLYTOPE body against a STATIC
 /// exact-distance obstacle chart (the SDF route of this bead's staging
 /// plan).
@@ -764,7 +782,7 @@ fn enclosing_corner_ball(corners: &[fs_geom::Point3]) -> Option<(fs_geom::Point3
 /// vertex-set refusals; motion refusals pass through typed;
 /// [`ContactError::Query`] wrapping non-finite swept corners or an unusable
 /// chart enclosure;
-/// [`ContactError::Cancelled`] per vertex and window.
+/// [`ContactError::Cancelled`] per vertex, window, and chart-producer handoff.
 #[allow(clippy::too_many_lines)] // One conservative bisection transaction, mirroring certified_ccd.
 pub fn refine_windows_against_sdf(
     vertices: &[fs_geom::Point3],
@@ -842,11 +860,7 @@ pub fn refine_windows_against_sdf(
             }));
         };
 
-        let sample = obstacle.eval(center, cx);
-        if cx.checkpoint().is_err() {
-            return Err(ContactError::Cancelled);
-        }
-        let enclosure = obstacle.trace_value_enclosure(center, &sample, cx);
+        let enclosure = checked_sdf_trace_value(obstacle, center, cx)?;
         let usable = matches!(
             enclosure.kind,
             fs_evidence::NumericalKind::Exact | fs_evidence::NumericalKind::Enclosure
@@ -878,9 +892,73 @@ pub fn refine_windows_against_sdf(
 }
 
 #[cfg(test)]
-mod sdf_radius_tests {
-    use super::enclosing_corner_ball;
-    use fs_geom::Point3;
+mod sdf_tests {
+    use super::{ContactError, checked_sdf_trace_value, enclosing_corner_ball};
+    use fs_evidence::NumericalCertificate;
+    use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
+    use fs_geom::{Aabb, Chart, ChartSample, Point3, TraceStepClaim, Vec3};
+
+    struct CancellingTraceChart<'a> {
+        gate: &'a CancelGate,
+    }
+
+    impl Chart for CancellingTraceChart<'_> {
+        fn eval(&self, _point: Point3, _cx: &Cx<'_>) -> ChartSample {
+            ChartSample {
+                signed_distance: 1.0,
+                gradient: Some(Vec3::new(1.0, 0.0, 0.0)),
+                lipschitz: Some(1.0),
+                error: NumericalCertificate::exact(1.0),
+            }
+        }
+
+        fn support(&self) -> Aabb {
+            Aabb::new(Point3::new(-1.0, -1.0, -1.0), Point3::new(1.0, 1.0, 1.0))
+        }
+
+        fn trace_step_claim(&self) -> TraceStepClaim {
+            TraceStepClaim::ExactDistance
+        }
+
+        fn trace_value_enclosure(
+            &self,
+            _point: Point3,
+            sample: &ChartSample,
+            _cx: &Cx<'_>,
+        ) -> NumericalCertificate {
+            self.gate.request();
+            sample.error
+        }
+
+        fn name(&self) -> &'static str {
+            "test/cancelling-sdf-trace"
+        }
+    }
+
+    #[test]
+    fn sdf_trace_value_observes_producer_cancellation_before_use() {
+        let gate = CancelGate::new_clock_free();
+        let chart = CancellingTraceChart { gate: &gate };
+        let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+        pool.scope(|arena| {
+            let cx = Cx::new(
+                &gate,
+                arena,
+                StreamKey {
+                    seed: 29,
+                    kernel_id: 31,
+                    tile: 0,
+                    iteration: 0,
+                },
+                Budget::INFINITE,
+                ExecMode::Deterministic,
+            );
+            assert!(matches!(
+                checked_sdf_trace_value(&chart, Point3::new(0.0, 0.0, 0.0), &cx),
+                Err(ContactError::Cancelled)
+            ));
+        });
+    }
 
     #[test]
     fn enclosing_corner_ball_survives_squared_distance_underflow() {
