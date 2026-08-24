@@ -320,7 +320,7 @@ fn ra2a_003_relative_boundary_window_has_the_correct_degree_shifts() {
         sequence
             .maps()
             .iter()
-            .map(|map| map.kind())
+            .map(TypedMap::kind)
             .collect::<Vec<_>>(),
         vec![
             MapKind::Connecting,
@@ -333,7 +333,7 @@ fn ra2a_003_relative_boundary_window_has_the_correct_degree_shifts() {
         sequence
             .maps()
             .iter()
-            .map(|map| map.degree_shift())
+            .map(TypedMap::degree_shift)
             .collect::<Vec<_>>(),
         vec![1, 0, 0, 1]
     );
@@ -341,7 +341,7 @@ fn ra2a_003_relative_boundary_window_has_the_correct_degree_shifts() {
         sequence
             .objects()
             .iter()
-            .map(|object| object.support())
+            .map(ObjectSpace::support)
             .collect::<Vec<_>>(),
         vec![
             ObjectSupport::RelativeSubcomplex,
@@ -740,6 +740,7 @@ fn ra2a_008_identity_replay_is_stable_and_semantic_mutations_move_it() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn ra2a_009_degree_coefficient_boundary_and_budget_mutations_refuse() {
     let pair = closed_pair("circle", 1, vec![1, 1], ComplexLane::Primal);
     let top_flat = RelativeDifferentialCharacter::new(

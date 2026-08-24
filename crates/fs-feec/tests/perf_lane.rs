@@ -915,6 +915,7 @@ fn measure_apply(m: usize, r: usize, reps: usize) -> (f64, f64) {
 
 #[test]
 #[ignore = "perf lane: run explicitly in release with --ignored"]
+#[allow(clippy::too_many_lines)]
 fn sum_factorized_attainment() {
     let axes = MachineAxes::probe();
     emit_observation(
