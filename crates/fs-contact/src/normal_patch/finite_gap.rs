@@ -396,7 +396,11 @@ fn chart_sign(
 ) -> Result<ChartSignObservation, FiniteGapChartSamplingError> {
     let point = plane_point.offset(inward.scale(parameter_m));
     let sample = request.chart.eval(point, cx);
+    cx.checkpoint()
+        .map_err(|_| FiniteGapChartSamplingError::Cancelled)?;
     let enclosure = request.chart.trace_value_enclosure(point, &sample, cx);
+    cx.checkpoint()
+        .map_err(|_| FiniteGapChartSamplingError::Cancelled)?;
     if valid_rigorous_enclosure(enclosure, sample.signed_distance) {
         let sign =
             if enclosure.kind == NumericalKind::Exact && enclosure.lo == 0.0 && enclosure.hi == 0.0
@@ -651,8 +655,8 @@ pub fn solve_finite_gap_half_space(
         || !(request.complementarity_tolerance_m.is_finite()
             && request.complementarity_tolerance_m > 0.0)
         || request.boundary_clearance_cells == 0
-        || 2 * request.boundary_clearance_cells >= request.grid.cells_x
-        || 2 * request.boundary_clearance_cells >= request.grid.cells_y
+        || request.boundary_clearance_cells >= request.grid.cells_x.div_ceil(2)
+        || request.boundary_clearance_cells >= request.grid.cells_y.div_ceil(2)
     {
         return Err(FiniteGapContactError::InvalidInput {
             field: "finite-gap request",
@@ -983,6 +987,18 @@ mod tests {
 
     struct NominalOnlySphere(SphereChart);
 
+    #[derive(Clone, Copy)]
+    enum CancelDuring {
+        Eval,
+        TraceEnclosure,
+    }
+
+    struct CancellingSphere<'a> {
+        sphere: SphereChart,
+        gate: &'a CancelGate,
+        during: CancelDuring,
+    }
+
     impl Chart for NominalOnlySphere {
         fn eval(&self, point: Point3, cx: &Cx<'_>) -> fs_geom::ChartSample {
             self.0.eval(point, cx)
@@ -994,6 +1010,36 @@ mod tests {
 
         fn name(&self) -> &'static str {
             "test/nominal-only-sphere"
+        }
+    }
+
+    impl Chart for CancellingSphere<'_> {
+        fn eval(&self, point: Point3, cx: &Cx<'_>) -> fs_geom::ChartSample {
+            let sample = self.sphere.eval(point, cx);
+            if matches!(self.during, CancelDuring::Eval) {
+                self.gate.request();
+            }
+            sample
+        }
+
+        fn support(&self) -> fs_geom::Aabb {
+            self.sphere.support()
+        }
+
+        fn trace_value_enclosure(
+            &self,
+            _point: Point3,
+            sample: &fs_geom::ChartSample,
+            _cx: &Cx<'_>,
+        ) -> NumericalCertificate {
+            if matches!(self.during, CancelDuring::TraceEnclosure) {
+                self.gate.request();
+            }
+            NumericalCertificate::exact(sample.signed_distance)
+        }
+
+        fn name(&self) -> &'static str {
+            "test/cancelling-sphere"
         }
     }
 
@@ -1132,6 +1178,61 @@ mod tests {
     }
 
     #[test]
+    fn chart_sampling_observes_producer_cancellation_before_use() {
+        for during in [CancelDuring::Eval, CancelDuring::TraceEnclosure] {
+            let gate = CancelGate::new_clock_free();
+            let chart = CancellingSphere {
+                sphere: SphereChart {
+                    center: Point3::new(0.0, 0.0, 0.020),
+                    radius: 0.020,
+                },
+                gate: &gate,
+                during,
+            };
+            let pool = ArenaPool::new(ArenaConfig::default());
+            pool.scope(|arena| {
+                let cx = Cx::new(
+                    &gate,
+                    arena,
+                    StreamKey {
+                        seed: 19,
+                        kernel_id: 23,
+                        tile: 0,
+                        iteration: 0,
+                    },
+                    Budget::INFINITE,
+                    ExecMode::Deterministic,
+                );
+                let request = FiniteGapChartSamplingRequest {
+                    chart: &chart,
+                    source_geometry_id: "test/cancelling-sphere/v1",
+                    grid: FiniteGapGrid {
+                        cells_x: 3,
+                        cells_y: 3,
+                        cell_width_m: 1.0e-3,
+                        cell_depth_m: 1.0e-3,
+                    },
+                    frame: FiniteGapContactFrame {
+                        surface_point_m: Point3::new(0.0, 0.0, 0.0),
+                        outward_normal: Vec3::new(0.0, 0.0, -1.0),
+                        tangent_x: Vec3::new(1.0, 0.0, 0.0),
+                        tangent_y: Vec3::new(0.0, 1.0, 0.0),
+                    },
+                    evidence_requirement: FiniteGapChartEvidenceRequirement::AllowEstimate,
+                    outside_probe_m: 1.0e-5,
+                    maximum_inward_search_m: 2.0e-3,
+                    root_tolerance_m: 1.0e-9,
+                    maximum_bisection_steps: 64,
+                };
+                assert_eq!(
+                    sample_finite_gap_from_chart(&request, &cx),
+                    Err(FiniteGapChartSamplingError::Cancelled),
+                );
+            });
+        }
+    }
+
+    #[test]
     fn g1_paraboloid_recovers_hertz_force_and_footprint() {
         let request = paraboloid_request(31, 2.5e-5);
         let receipt = with_cx(|cx| solve_finite_gap_half_space(&request, cx)).unwrap();
@@ -1162,6 +1263,18 @@ mod tests {
         assert!(matches!(
             error,
             FiniteGapContactError::ContactReachedDomainBoundary { .. }
+        ));
+    }
+
+    #[test]
+    fn oversized_boundary_clearance_refuses_without_arithmetic_overflow() {
+        let mut request = paraboloid_request(7, 5.0e-5);
+        request.boundary_clearance_cells = usize::MAX;
+        assert!(matches!(
+            with_cx(|cx| solve_finite_gap_half_space(&request, cx)),
+            Err(FiniteGapContactError::InvalidInput {
+                field: "finite-gap request"
+            })
         ));
     }
 }
