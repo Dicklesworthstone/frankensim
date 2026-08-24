@@ -150,8 +150,7 @@ impl FeatureComplex {
         // documented feature ceiling.
         let minimum_features = positions
             .len()
-            .checked_add(triangles.len())
-            .unwrap_or(usize::MAX);
+            .saturating_add(triangles.len());
         if minimum_features > MAX_COMPLEX_FEATURES {
             return Err(QueryError::FeatureComplexTooLarge {
                 features: minimum_features,

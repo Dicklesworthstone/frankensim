@@ -976,6 +976,7 @@ pub struct RelativeDifferentialCharacter {
 impl RelativeDifferentialCharacter {
     /// Construct a relative object and enforce degree, coefficient,
     /// primal/dual, and terminal-boundary compatibility.
+    #[allow(clippy::too_many_lines)]
     pub fn new(
         pair: RelativePairSchema,
         degree: CohomologicalDegree,
@@ -2185,14 +2186,20 @@ pub enum CharacterError {
     },
     /// Relative cell count exceeds the ambient count.
     RelativeCellCount {
+        /// Degree of the character involved.
         degree: u8,
+        /// Ambient cell count.
         ambient: u64,
+        /// Relative subcomplex cell count.
         relative: u64,
     },
     /// Primal/dual confusion.
     LaneMismatch {
+        /// The lane required by the operation.
         expected: ComplexLane,
+        /// The lane carried by the supplied object.
         actual: ComplexLane,
+        /// The named object involved.
         object: &'static str,
     },
     /// Named boundary exceeds the relative subcomplex dimension.
