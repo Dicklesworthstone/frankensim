@@ -835,6 +835,7 @@ fn legacy_payload_checksum_bounded<C: fs_blake3::identity::CancellationProbe>(
 /// # Errors
 /// Every cap, cancellation, structure, checksum, exact-root, or expected-field
 /// mismatch is refused before a typed legacy decoder can run.
+#[allow(clippy::too_many_lines)]
 pub fn inspect_expected_legacy_snapshot_v1<C>(
     bytes: &[u8],
     expected: LegacySnapshotExpectationV1,
@@ -3346,7 +3347,6 @@ pub mod snapshot_v2 {
         /// Consume the attachment while returning exact canonical bytes
         /// together with their mandatory identity evidence. There is no silent
         /// bare-byte escape.
-        #[must_use]
         pub fn into_parts(self) -> (Vec<u8>, SnapshotSealEvidenceV2) {
             (
                 self.bytes,
@@ -3461,13 +3461,11 @@ pub mod snapshot_v2 {
         }
 
         /// Canonical source/era/plan/target receipt.
-        #[must_use]
         pub const fn receipt(&self) -> &SnapshotEraMigrationReceiptV2 {
             &self.receipt
         }
 
         /// Explicitly discharge all attached migration evidence together.
-        #[must_use]
         pub fn into_parts(
             self,
         ) -> (
@@ -3490,6 +3488,7 @@ pub mod snapshot_v2 {
         bytes: &[u8],
         limits: SnapshotLimitsV2,
         mut cancellation: C,
+#[allow(clippy::result_large_err)]
     ) -> Result<HistoricalSnapshotV2<'_>, SnapshotEraMigrationErrorV2> {
         validate_limits(limits).map_err(SnapshotEraMigrationErrorV2::Source)?;
         if bytes.len() < 8 {
@@ -3592,6 +3591,7 @@ pub mod snapshot_v2 {
         target: &SealedSnapshotV2,
         limits: CanonicalLimits,
         cancellation: &mut C,
+#[allow(clippy::result_large_err)]
     ) -> Result<SnapshotEraMigrationReceiptV2, SnapshotEraMigrationErrorV2> {
         let source_length = u64::try_from(source.bytes.len())
             .map_err(|_| SnapshotEraMigrationErrorV2::Source(SnapshotV2Error::LengthOverflow))?;
@@ -3680,6 +3680,7 @@ pub mod snapshot_v2 {
         limits: SnapshotLimitsV2,
         encoder: HistoricalCanonicalEncoderV2<'_>,
         mut cancellation: C,
+#[allow(clippy::result_large_err)]
     ) -> Result<MigratedSnapshotEraV2<'a>, SnapshotEraMigrationErrorV2> {
         let current = current_identity_era();
         let HistoricalCanonicalEncoderV2::Available(migrator) = encoder else {
@@ -3986,7 +3987,6 @@ pub mod snapshot_v2 {
 
         /// Consume the attachment while returning the state together with its
         /// mandatory evidence object. There is no silent bare-state escape.
-        #[must_use]
         pub fn into_parts(self) -> (S, SnapshotOpenEvidenceV2) {
             (
                 self.state,
@@ -5903,13 +5903,11 @@ impl<'a> MigratedLegacySnapshotV1ToV2<'a> {
     }
 
     /// Typed canonical source-to-target migration receipt.
-    #[must_use]
     pub const fn receipt(&self) -> &LegacySnapshotMigrationReceiptV1 {
         &self.receipt
     }
 
     /// Explicitly discharge the attached source, target, and receipt together.
-    #[must_use]
     pub fn into_parts(
         self,
     ) -> (
@@ -6608,6 +6606,7 @@ mod tests {
     /// wf9.8.2 acceptance: the envelope refuses every corruption and
     /// misbinding class BEFORE the payload decoder runs.
     #[test]
+#[allow(clippy::too_many_lines)]
     fn envelope_refuses_every_misbinding_class() {
         // A twin state with the IDENTICAL payload layout but its own
         // type id: same-length bytes must not cross-decode.
@@ -7563,6 +7562,7 @@ mod tests {
     }
 
     #[test]
+#[allow(clippy::too_many_lines)]
     fn legacy_v1_expected_admission_refuses_every_header_axis_and_extent() {
         let (_, state) = jacobi();
         let provenance = 0x0102_0304_0506_0708;

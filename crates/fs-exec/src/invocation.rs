@@ -1762,6 +1762,7 @@ impl<'clock> InvocationBudget<'clock> {
         })
     }
 
+#[allow(clippy::too_many_lines)]
     fn open_child(
         &mut self,
         parent: Option<usize>,
@@ -3084,6 +3085,7 @@ impl ChildFinalizer<'_, '_> {
         self.commit_child_local_publication(prepared, declared_bytes, destination, staged)
     }
 
+#[allow(clippy::too_many_lines)]
     fn commit_publication_inner<T>(
         &mut self,
         prepared: PreparedPublication,
@@ -3701,6 +3703,7 @@ fn invocation_error_root(error: &InvocationError) -> ContentHash {
     hasher.finalize()
 }
 
+#[allow(clippy::too_many_lines)]
 fn child_receipt_root(receipt: &ChildReceipt) -> ContentHash {
     let mut hasher = DomainHasher::new(CHILD_RECEIPT_DOMAIN);
     hash_field(&mut hasher, "id", receipt.id.as_bytes());
@@ -4782,6 +4785,7 @@ fn verify_receipt_semantics(receipt: &InvocationReceipt) -> Result<(), ReceiptSe
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 fn invocation_receipt_root(receipt: &InvocationReceipt) -> ContentHash {
     let mut hasher = DomainHasher::new(INVOCATION_RECEIPT_DOMAIN);
     hash_field(&mut hasher, "version", &receipt.version.to_le_bytes());
@@ -5647,6 +5651,7 @@ mod tests {
     }
 
     #[test]
+#[allow(clippy::too_many_lines)]
     fn semantic_verifier_rejects_rehashed_deadline_and_first_fault_forgery() {
         let clock = VirtualClock::new();
         let (id, accuracy, capability) = identities();
@@ -5970,6 +5975,7 @@ mod tests {
     }
 
     #[test]
+#[allow(clippy::too_many_lines)]
     fn finalizer_mutants_cannot_cross_report_child_or_invocation_boundaries() {
         let clock = VirtualClock::new();
         let scientific = InvocationResources::new(

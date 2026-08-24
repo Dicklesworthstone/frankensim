@@ -769,6 +769,7 @@ impl CompletionScopeIdentity {
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[must_use]
+#[allow(clippy::struct_excessive_bools)]
 pub struct TilePoolCompletionWitness {
     version: u32,
     producer_version: &'static str,
@@ -857,7 +858,6 @@ impl TilePoolInvocationPermit {
     /// root from its invocation occurrence plus run ordinal and refusing a
     /// second mint for that ordinal.
     #[cfg(test)]
-    #[must_use]
     pub(crate) const fn from_permit_root(permit_root: [u8; 32]) -> Self {
         Self { permit_root }
     }
@@ -888,7 +888,6 @@ pub struct WitnessedRun<Out> {
 
 impl<Out> WitnessedRun<Out> {
     /// Borrow the terminal kernel outcome.
-    #[must_use]
     pub const fn outcome(&self) -> &Result<Out, RunError> {
         &self.outcome
     }
@@ -900,13 +899,11 @@ impl<Out> WitnessedRun<Out> {
     }
 
     /// Borrow the immutable semantic completion witness.
-    #[must_use]
     pub const fn witness(&self) -> &TilePoolCompletionWitness {
         &self.witness
     }
 
     /// Consume the bundle without weakening its prior verification.
-    #[must_use]
     pub fn into_parts(self) -> (Result<Out, RunError>, RunReport, TilePoolCompletionWitness) {
         (self.outcome, self.report, self.witness)
     }
@@ -1449,6 +1446,7 @@ impl TilePoolCompletionWitness {
     /// Timing samples, steal counts, stdout/stderr, and caller publication
     /// state are deliberately absent.
     #[must_use]
+#[allow(clippy::too_many_lines)]
     pub fn to_canonical_json(&self) -> String {
         use core::fmt::Write as _;
 
@@ -1665,6 +1663,7 @@ fn completion_first_failure(error: Option<&RunError>) -> (Option<&'static str>, 
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn verify_completion_witness(
     witness: &TilePoolCompletionWitness,
 ) -> Result<(), TilePoolCompletionWitnessError> {
@@ -2435,6 +2434,7 @@ fn completion_hash_alloc_error(hasher: &mut fs_blake3::DomainHasher, error: &fs_
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn completion_plan_root(
     pool_placement_identity_version: u32,
     pool_placement_identity: &str,
@@ -2494,6 +2494,7 @@ fn completion_call_replay_root(
     *hasher.finalize().as_bytes()
 }
 
+#[allow(clippy::too_many_lines)]
 fn completion_witness_root(witness: &TilePoolCompletionWitness) -> [u8; 32] {
     let mut hasher = fs_blake3::DomainHasher::new(TILEPOOL_COMPLETION_WITNESS_DOMAIN);
     completion_hash_u64(&mut hasher, "version", u64::from(witness.version));
@@ -2738,6 +2739,7 @@ fn completion_hash_lease_after(
     );
 }
 
+#[allow(clippy::struct_excessive_bools)]
 struct CompletionWitnessFields {
     pool_placement_identity: String,
     pool_seed: u64,
@@ -3551,6 +3553,7 @@ impl Drop for TileScopeCompletionGuard<'_> {
 /// the task context, and a failed checkpoint converts into a gate request
 /// so the pool's normal drain protocol — including its cancel-latency
 /// histogram — applies unchanged (P7: one drain semantics, two signals).
+#[allow(clippy::too_many_lines)]
 fn worker_loop<const COMPLETION: bool, Caps, K: TileKernel>(
     ctx: &WorkerCtx<'_, K>,
     w: usize,
@@ -4041,6 +4044,7 @@ impl TilePool {
     }
 
     /// Permit-consuming form of [`Self::run_scoped_witnessed`].
+#[allow(clippy::too_many_arguments)]
     pub fn run_scoped_witnessed_once<Caps, K: TileKernel>(
         &self,
         task_cx: &asupersync::Cx<Caps>,
@@ -4254,6 +4258,7 @@ impl TilePool {
         self.run_inner_witnessed_with_permit(kernel, gate, run, budget, lease, None, launch)
     }
 
+#[allow(clippy::too_many_arguments)]
     fn run_inner_witnessed_with_permit<Caps, K: TileKernel>(
         &self,
         kernel: &K,
@@ -4291,7 +4296,9 @@ impl TilePool {
     // removes witness counters, allocator snapshots, and hashing so the
     // additive evidence API does not tax existing hot-kernel callers.
     #[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
     fn run_inner_core<const COMPLETION: bool, Caps, K: TileKernel>(
+#[allow(clippy::type_complexity)]
         &self,
         kernel: &K,
         gate: &CancelGate,
@@ -6936,7 +6943,9 @@ mod tests {
     /// self-consistent rehash still cannot turn impossible join/quiescence
     /// states into executor-minted evidence.
     #[test]
+#[allow(clippy::too_many_lines)]
     fn completion_witness_verifier_rejects_mutated_lifecycle_states() {
+#[allow(clippy::type_complexity)]
         let p = pool(2);
         let (result, _, base) = witnessed_parts!(p.run_witnessed(&NoAllocation));
         assert_eq!(result, Ok(1));
