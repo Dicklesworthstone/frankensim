@@ -1715,7 +1715,7 @@ impl<'clock> InvocationBudget<'clock> {
             clock,
             cancel_gate,
             last_deadline_observation,
-            ambient_memory: ambient_memory,
+            ambient_memory,
             backing_memory: OperationMemoryLease::bounded(required.memory.0),
             children: Vec::new(),
             next_ordinal: 0,

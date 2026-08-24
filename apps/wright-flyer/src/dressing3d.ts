@@ -1703,9 +1703,6 @@ export function buildDressing(
         // Wind (from the east) drives waves shoreward (-x): scroll the
         // normal field against it; the slow cross term breaks the
         // symmetry so the sparkle is not a conveyor belt.
-  // (He was silently parked at the origin before this — inside the
-  // rail corridor — because DX/DZ were declared but never applied.)
-  daniels.group.position.set(launch[0] + DX, launch[1] + groundY(DX, DZ), launch[2] + DZ);
         const drift = Math.max(2, windMps);
         waterNrm.offset.set(
           (((-t * 0.016 * drift) % 1) + 1) % 1,

@@ -840,7 +840,7 @@ pub fn inspect_expected_legacy_snapshot_v1<C>(
     expected: LegacySnapshotExpectationV1,
     limits: LegacySnapshotLimitsV1,
     mut cancellation: C,
-) -> Result<LegacySnapshotV1<'a>, LegacySnapshotV1Error>
+) -> Result<LegacySnapshotV1<'_>, LegacySnapshotV1Error>
 where
     C: fs_blake3::identity::CancellationProbe,
 {
@@ -6158,7 +6158,7 @@ impl<S: LegacySolverStateV1> LegacySnapshotV1Adapter<S> {
         expected: LegacySnapshotExpectationV1,
         limits: LegacySnapshotLimitsV1,
         mut cancellation: C,
-    ) -> Result<OpenedLegacySnapshotV1<'a, S>, LegacySnapshotV1Error>
+    ) -> Result<OpenedLegacySnapshotV1<'_, S>, LegacySnapshotV1Error>
     where
         C: fs_blake3::identity::CancellationProbe,
     {
