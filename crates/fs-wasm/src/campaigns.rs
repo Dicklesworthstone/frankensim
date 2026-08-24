@@ -1333,7 +1333,7 @@ fn neuro_net(lift: f64) -> MlpSdf {
 /// central box half-width (clamped `0.05..=1.0`, default 0.3).
 ///
 /// Output layout, schema version [`NEUROSHAPE_SCHEMA_VERSION`] (length
-/// `30 + 4096`; empty on an admission refusal):
+/// `48 + 4096`; empty on an admission refusal):
 /// - `[0]` — `grid_n` (64).
 /// - `[1]`,`[2]` — `win_lo`, `win_hi` (the render window `[win_lo, win_hi]²`,
 ///   `win_lo = -(ring_r+0.5)`).
@@ -1367,7 +1367,7 @@ fn neuro_net(lift: f64) -> MlpSdf {
 ///   enclosed-component lower bound).
 /// - `[21]` — `component_count_lower_bound` (0 or 1).
 /// - `[22]` — `payload_schema_version` ([`NEUROSHAPE_SCHEMA_VERSION`],
-///   currently `3`; consumers must refuse unsupported versions before
+///   currently `4`; consumers must refuse unsupported versions before
 ///   interpreting any other slot).
 /// - `[23]` — `safe_step_magnitude_lower_bound`: the CERTIFIED lower bound on
 ///   `|f(0)|` taken from the inward endpoint of the origin enclosure, `0` when
@@ -1387,9 +1387,21 @@ fn neuro_net(lift: f64) -> MlpSdf {
 /// - `[27]` — `surface_localization_stage` (`0` success/no single stage,
 ///   `1` grid construction, `2` isocontour extraction).
 /// - `[28]` — `localization_schema_version`
-///   (`NEUROSHAPE_LOCALIZATION_SCHEMA_VERSION`, currently `2`) — the version
-///   gating `[26]` and `[27]`.
-/// - `[29]` — reserved (0).
+///   (`NEUROSHAPE_LOCALIZATION_SCHEMA_VERSION`, currently `3`) — the version
+///   gating `[26..=47]`.
+/// - `[29]` — exact diagnostic code (`LocalizationDiagnostic`) for ordinary
+///   refusals, cancellation-kind code for `Cancelled`, or `0` on success.
+/// - `[30]` — offending axis for ordinary refusals, stable cancellation phase
+///   code for `Cancelled`, or `0` on success.
+/// - `[31..=34]`, `[35..=38]` — high-to-low exact `u32` lanes of
+///   `first_index`/`second_index`; cancellation reuses them for the `u64`
+///   deadline/observed clock in the low two lanes.
+/// - `[39..=40]`, `[41..=42]` — exact `u32` lanes of `scalar_bits` and
+///   `second_bits`; cancellation reuses them for quota contexts A and B.
+/// - `[43..=44]`, `[45..=46]` — exact `u32` lanes of `required` and `limit`;
+///   cancellation reuses the first pair for quota context C.
+/// - `[47]` — diagnostic auxiliary code. Every unused lane is `u32::MAX`;
+///   integer context never passes through a lossy direct f64 cast.
 /// - then `64·64` SDF field row-major (`j` outer / y, `i` inner / x) over the
 ///   render window.
 pub fn neuroshape(lift: f64, ring_r: f64, inner: f64) -> Vec<f64> {
@@ -1421,7 +1433,7 @@ pub fn neuroshape(lift: f64, ring_r: f64, inner: f64) -> Vec<f64> {
     neuroshape_payload(&report, &field, grid_n, win_lo, win_hi, ring_r, inner)
 }
 
-/// Encode one NeuroShape v3 wire payload from an already-admitted report and
+/// Encode one NeuroShape v4 wire payload from an already-admitted report and
 /// its visualization field. Separated from [`neuroshape`] so tests can drive
 /// the encoder with synthesized typed localization outcomes.
 fn neuroshape_payload(
@@ -2704,10 +2716,9 @@ mod tests {
 
         // `1.0` is the version-1 payload, whose `[5]` meant `|f_nominal|/L`: a
         // v1-shaped consumer must be forced to migrate, not silently re-read.
-        // `2.0` is the version-2 payload, whose `[26]` was a reserved zero: a
-        // v2-shaped consumer must be forced to migrate, not silently ignore
-        // the typed localization record.
-        for unsupported in [0.0, 1.0, 2.0, 4.0, 1.5, f64::NAN, f64::INFINITY] {
+        // `2.0` predates typed localization; `3.0` has only coarse status/stage
+        // and therefore cannot be allowed to masquerade as the detailed v4 ABI.
+        for unsupported in [0.0, 1.0, 2.0, 3.0, 5.0, 1.5, f64::NAN, f64::INFINITY] {
             let mut mutated = current.clone();
             mutated[22] = unsupported;
             assert!(
@@ -2725,9 +2736,10 @@ mod tests {
                 unsupported.to_bits()
             );
         }
-        // Localization schema 1 used colliding 32-bit endpoint lanes; schema
-        // 2 is current, and every legacy/future/non-integral value refuses.
-        for unsupported in [0.0, 1.0, 3.0, 9.0, 1.5, f64::NAN] {
+        // Localization schema 1 used colliding 32-bit endpoint lanes; schema 2
+        // did not carry the native detail over WASM. Every legacy/future or
+        // non-integral value refuses under current schema 3.
+        for unsupported in [0.0, 1.0, 2.0, 4.0, 9.0, 1.5, f64::NAN] {
             let mut mutated = current.clone();
             mutated[28] = unsupported;
             assert!(
@@ -2754,7 +2766,39 @@ mod tests {
                 bad_stage.to_bits()
             );
         }
-        for truncated_len in [0, 21, 22, 23, 24, 25, 26, 27, 28, 29] {
+        let mut malformed_detail = current.clone();
+        malformed_detail[31] = f64::NAN;
+        assert!(
+            require_supported_neuroshape_schema(&malformed_detail).is_err(),
+            "accepted a non-finite integer lane"
+        );
+        let mut success_with_refusal = current.clone();
+        success_with_refusal[29] = 1.0;
+        assert!(
+            require_supported_neuroshape_schema(&success_with_refusal).is_err(),
+            "accepted refusal detail on a successful status"
+        );
+        let cancelled = encoded_with_localization(SurfaceLocalization::Cancelled(
+            CancellationDetail {
+                stage: LocalizationStage::IsoContourExtraction,
+                kind: CancellationKind::CancelledAtCheckpoint,
+                phase: "fs-viz.isocontour.publish",
+                deadline_ns: u64::MAX,
+                observed_ns: u64::MAX,
+                quota_context_a: u64::MAX,
+                quota_context_b: u64::MAX,
+                quota_context_c: u64::MAX,
+            },
+        ));
+        for (slot, bad_code) in [(29, 8.0), (30, 11.0)] {
+            let mut mutated = cancelled.clone();
+            mutated[slot] = bad_code;
+            assert!(
+                require_supported_neuroshape_schema(&mutated).is_err(),
+                "accepted bad cancellation detail code {bad_code} in slot {slot}"
+            );
+        }
+        for truncated_len in 0..NEUROSHAPE_HEADER_LEN {
             assert!(
                 require_supported_neuroshape_schema(&current[..truncated_len]).is_err(),
                 "accepted truncated header length {truncated_len}"
