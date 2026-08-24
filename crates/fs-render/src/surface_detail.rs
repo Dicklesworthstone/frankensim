@@ -151,6 +151,11 @@ impl SurfaceDetail {
         {
             return Err(SurfaceDetailError::InvalidMarkWidth);
         }
+        let normal_perturbation_rad = if normal_perturbation_rad.to_bits() == (-0.0f64).to_bits() {
+            0.0
+        } else {
+            normal_perturbation_rad
+        };
         Ok(Self {
             base_alpha,
             anisotropy_ratio,
@@ -380,6 +385,15 @@ mod tests {
     fn zero_detail_limit_is_exact() {
         let base = SurfaceDetail::none(0.08);
         assert!(base.is_zero_detail());
+        let negative_zero =
+            SurfaceDetail::try_new(0.08, 1.0, BrushingPattern::Circular, -0.0, None)
+                .expect("negative zero is the same physical perturbation");
+        assert!(negative_zero.is_zero_detail());
+        assert_eq!(
+            negative_zero.identity(),
+            base.identity(),
+            "signed zero cannot mint a distinct identity for identical shading"
+        );
         assert_eq!(base.alpha_pair(), (0.08, 0.08), "isotropic recovery");
         let frame = shading_frame(&base, Point3::new(0.5, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0))
             .expect("frame");
