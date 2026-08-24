@@ -47,7 +47,10 @@ fn string_field(literal: &str, field: &str) -> Option<String> {
     let marker = format!("{field}:");
     let field_offset = literal.find(&marker)?;
     let rest = literal[field_offset + marker.len()..].trim_start();
-    let rest = rest.strip_prefix('&')?.trim_start();
+    // A leading `&` (string-literal reference) is permitted but never
+    // required; `?` here would make it mandatory and reject every plain
+    // `owner: "..."` field as missing.
+    let rest = rest.strip_prefix('&').unwrap_or(rest).trim_start();
     let quoted = rest.strip_prefix('"')?;
     let end = quoted.find('"')?;
     Some(quoted[..end].to_string())
@@ -263,7 +266,68 @@ pub fn check_collisions(declarations: &[CharterDeclaration]) -> Vec<String> {
     violations
 }
 
-/// Walk the workspace `crates/` tree and run the full lane. Returns the
+/// Remove `#[cfg(test)] mod ... { ... }` blocks (brace-matched) from one
+/// source text. The workspace gate audits the production identity
+/// surface; test modules deliberately construct colliding and drifted
+/// charters (impostor owners, rotated codec versions) to exercise the
+/// collision registry, so scanning them reports fixture data as
+/// violations. Stripping is deterministic: occurrences are processed
+/// left to right, each removing its whole brace-matched module body.
+fn strip_test_modules(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut cursor = 0usize;
+    while let Some(attribute) = text[cursor..].find("#[cfg(test)]") {
+        let attribute_start = cursor + attribute;
+        let after_attribute = attribute_start + "#[cfg(test)]".len();
+        let rest = text[after_attribute..].trim_start();
+        // Only a following `mod` opens a removable block; other uses of
+        // the attribute (e.g. on individual test helpers) stay.
+        if !rest.starts_with("mod") {
+            out.push_str(&text[cursor..after_attribute]);
+            cursor = after_attribute;
+            continue;
+        }
+        out.push_str(&text[cursor..attribute_start]);
+        // rest starts after trimmed whitespace; convert its internal
+        // offsets with the same length-difference form scan_source uses.
+        let body_start = after_attribute + (text[after_attribute..].len() - rest.len());
+        let brace = body_start + rest.find('{').unwrap_or(0);
+        if brace >= text.len() || text.as_bytes()[brace] != b'{' {
+            cursor = after_attribute;
+            continue;
+        }
+        let mut depth = 0usize;
+        let mut close = None;
+        for (index, byte) in bytes[brace..].iter().enumerate() {
+            match byte {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = Some(brace + index);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        match close {
+            Some(close) => cursor = close + 1,
+            None => {
+                // Unterminated block: keep everything from here verbatim
+                // rather than guessing; scan_source still brace-checks it.
+                out.push_str(&text[attribute_start..]);
+                return out;
+            }
+        }
+    }
+    out.push_str(&text[cursor..]);
+    out
+}
+
+/// Walk the workspace `crates/` tree and run the full lane over the
+/// production identity surface (test modules stripped). Returns the
 /// sorted violation list (empty = green).
 pub fn run(root: &Path) -> Result<Vec<String>, String> {
     let mut declarations = Vec::new();
@@ -298,7 +362,8 @@ pub fn run(root: &Path) -> Result<Vec<String>, String> {
         let text = std::fs::read_to_string(&source)
             .map_err(|error| format!("cannot read {relative}: {error}"))?;
         if text.contains("StateIdentityCharterV2") {
-            declarations.extend(scan_source(&relative, &text)?);
+            let production = strip_test_modules(&text);
+            declarations.extend(scan_source(&relative, &production)?);
         }
     }
     let mut violations = check_collisions(&declarations);
@@ -330,10 +395,16 @@ mod tests {
         assert_eq!(declarations.len(), 2);
         assert_eq!(declarations[0].owner, "fs-exec::solver");
         assert_eq!(declarations[0].state_family, "jacobi-iteration");
-        assert_eq!(
-            declarations[1], declarations[0],
-            "an update with no overrides inherits every field"
-        );
+        // The update inherits every identity field but records its own
+        // site, so compare the identity fields rather than whole struct
+        // (path/line are per-occurrence by design).
+        let (base, derived) = (&declarations[0], &declarations[1]);
+        assert_eq!(derived.owner, base.owner);
+        assert_eq!(derived.state_family, base.state_family);
+        assert_eq!(derived.schema_grammar, base.schema_grammar);
+        assert_eq!(derived.codec_grammar, base.codec_grammar);
+        assert_eq!(derived.codec_version, base.codec_version);
+        assert_ne!(derived.line, base.line, "the update records its own site");
         assert!(check_collisions(&declarations).is_empty());
     }
 
@@ -421,5 +492,37 @@ mod tests {
             scan_source("crates/x/src/lib.rs", FULL_LITERAL).expect("parses");
         assert_eq!(declarations.len(), 1);
         assert_eq!(declarations[0].line, 1);
+    }
+
+    #[test]
+    fn test_modules_are_stripped_before_scanning() {
+        // Deliberately colliding fixture charters live inside
+        // `#[cfg(test)] mod` blocks; the workspace gate audits the
+        // production surface, so the stripper removes those blocks whole.
+        let source = concat!(
+            "const REAL: StateIdentityCharterV2 = StateIdentityCharterV2 {\n",
+            "    owner: \"c::real\",\n",
+            "    state_family: \"fam\",\n",
+            "    schema_grammar: \"g\",\n",
+            "    codec_grammar: \"k\",\n",
+            "    codec_version: 1,\n",
+            "};\n",
+            "#[cfg(test)]\n",
+            "mod fixtures {\n",
+            "    const IMPOSTOR_A: StateIdentityCharterV2 = StateIdentityCharterV2 {\n",
+            "        owner: \"t::impostor\",\n",
+            "        state_family: \"fam\",\n",
+            "        schema_grammar: \"drifted\",\n",
+            "        codec_grammar: \"k\",\n",
+            "        codec_version: 2,\n",
+            "    };\n",
+            "}\n",
+        );
+        let stripped = strip_test_modules(source);
+        assert!(!stripped.contains("IMPOSTOR_A"), "{stripped}");
+        let declarations =
+            scan_source("crates/x/src/lib.rs", &stripped).expect("parses");
+        assert_eq!(declarations.len(), 1);
+        assert_eq!(declarations[0].owner, "c::real");
     }
 }
