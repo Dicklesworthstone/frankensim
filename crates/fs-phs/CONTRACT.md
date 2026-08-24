@@ -291,6 +291,17 @@ matches the dissipation ledger within 2%.
   authored-typical (Koren 12AX7 fit constants, silicon-class diode),
   not a measured-tube ingest; no matdb migration yet (schema is
   migration-shaped by construction).
+- ACOUSTIC COMPONENTS ARE QUIESCENT-MEDIUM (decision record
+  `docs/DECISION_MUSIC_MEAN_FLOW.md`, music bead 3ez8g.10.5): the lumped
+  Helmholtz resonator, the `AcousticTap`s, and the `acoustic_chain`
+  inviscid ladders model a medium at rest. Validity boundary: peak
+  local acoustic Mach < 0.01 AND zero through-flow; forte-regime
+  impedance shifts, vortex-shedding end corrections near tone holes,
+  and jet-drive interaction regions are OUTSIDE every claim these
+  surfaces mint. Escalation (a named convected uniform-flow card, then
+  shear-flow/CAA territory) follows the ladder in that record and fires
+  only on registered-corpus measured deviation — never as a silent
+  rescale of an existing quiescent result.
 - Non-quadratic storage through `reduce_galerkin` is deferred with the
   same trigger; the refusal is typed.
 - A-priori trajectory/H-error bounds for reduction are a no-claim; the

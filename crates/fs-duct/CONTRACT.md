@@ -257,16 +257,22 @@ divergence-theorem closure/orientation pin on the lathe).
   `Y' = 2π a slant / (r − iωσ + i K/ω)` to the gas `Y'`
   (`slant = √(1+(dr/dx)²)`, `1` on a cylinder; same pin
   as the ODE cell shunt). `input_impedance` is rigid.
-  No roughness, no porous liners, no mean flow, no nonlinear
-  (high amplitude) propagation.
-- Lossy cones cascade spherical substations with `k, Zc` at each
+  No roughness, no porous liners, no mean flow (QUIESCENT medium,
+  `M̄ = 0`; through-flow absent by construction), no nonlinear
+  (high-amplitude) propagation. AMPLITUDE BOUNDARY: these claims hold
+  for peak local acoustic Mach < 0.01; beyond that they shrink or
+  escalate one rung per the falsifier in
+  `docs/DECISION_MUSIC_MEAN_FLOW.md` (rung A; the `k/(1-M²)` hack is
+  NEVER-listed there).
   slice's own mid-radius (lossless without a wall stays the
   exact one-shot `e^{±ikx}/x` 2-port; a wall follows the
   local radius and slant, so that path slices too). The multimodal
   expansion for strongly flaring horns now EXISTS (`modal` module;
   trigger executed: >= 8 cents of plane-wave peak error on a
   trumpet-like flare). Its own v1 boundaries: m = 0 modes only
-  (axisymmetric bores and sources), no tone holes, no mean flow;
+  (axisymmetric bores and sources), no tone holes, no mean flow (the
+  same quiescent/amplitude boundary as the plane path above; escalation
+  per `docs/DECISION_MUSIC_MEAN_FLOW.md`);
   higher modes terminate into their own characteristic impedance at
   the mouth (a matched-mouth approximation, disclosed — the plane
   mode can now play a TABULATED bell load via
