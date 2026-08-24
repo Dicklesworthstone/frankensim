@@ -525,6 +525,8 @@ impl SimLoop {
     /// # Errors
     /// `checkpoint-too-large` (cap AND cap+1 at 1 MiB);
     /// `checkpoint-tampered` (embedded digest mismatch);
+    /// `checkpoint-version-unsupported` (v1 cannot resume exactly
+    /// after lateral state entered the digest/state contract);
     /// `checkpoint-malformed`; init refusals pass through.
     pub fn restore_checkpoint(spec: ScenarioSpec, bytes: &[u8]) -> Result<SimLoop, Refusal> {
         const MAX: usize = 1 << 20;
@@ -560,11 +562,19 @@ impl SimLoop {
             .and_then(|v| <[u8; 4]>::try_from(v).ok())
             .map(u32::from_le_bytes)
             .ok_or_else(|| bad("missing version"))?;
-        if !matches!(
-            (version, matches_v1, matches_v2),
-            (1, true, _) | (2, _, true)
-        ) {
-            return Err(bad("version and integrity domain disagree"));
+        match (version, matches_v1, matches_v2) {
+            (2, _, true) => {}
+            (1, true, _) => {
+                return Err(Refusal {
+                    code: "checkpoint-version-unsupported",
+                    message: "CheckpointStateV1 lacks lateral state and cannot exact-resume v2"
+                        .into(),
+                    ranked_repairs: vec![
+                        "finish the run with the v1 engine or start a new v2 run".into(),
+                    ],
+                });
+            }
+            _ => return Err(bad("version and integrity domain disagree")),
         }
         let mut pos = 0usize;
         let take = |pos: &mut usize, n: usize| -> Result<&[u8], Refusal> {
@@ -577,8 +587,7 @@ impl SimLoop {
         let tick = u64::from_le_bytes(take(&mut pos, 8)?.try_into().expect("8"));
         let phase_code = take(&mut pos, 1)?[0];
         let mut f = [0.0f64; 14];
-        let state_words = if version == 1 { 10 } else { 14 };
-        for v in &mut f[..state_words] {
+        for v in &mut f {
             *v = f64::from_bits(u64::from_le_bytes(
                 take(&mut pos, 8)?.try_into().expect("8"),
             ));
@@ -632,15 +641,11 @@ impl SimLoop {
             delta_rad: f[8],
             rate_rad_s: f[9],
         };
-        sim.lateral_state = if version == 1 {
-            LateralState::default()
-        } else {
-            LateralState {
-                phi_rad: f[10],
-                p_rad_s: f[11],
-                psi_rad: f[12],
-                r_rad_s: f[13],
-            }
+        sim.lateral_state = LateralState {
+            phi_rad: f[10],
+            p_rad_s: f[11],
+            psi_rad: f[12],
+            r_rad_s: f[13],
         };
         sim.warm_slip = (warm_flag == 1).then_some([w0, w1]);
         sim.digest_acc = digest_acc;

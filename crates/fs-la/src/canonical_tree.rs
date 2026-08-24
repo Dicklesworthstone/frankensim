@@ -91,7 +91,7 @@ impl<'a> CancelScope<'a> {
         Self { verdict: Verdict::Closure(verdict) }
     }
 
-    fn cancelled(&mut self) -> bool {
+    pub fn cancelled(&mut self) -> bool {
         match &mut self.verdict {
             Verdict::Never => false,
             Verdict::Closure(f) => f(),

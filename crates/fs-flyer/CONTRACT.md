@@ -11,8 +11,8 @@ L4. The aircraft-level Wright Flyer model. E3.1 ships the `FlyerDesign`
 schema (Round-2 canard/mechanics/structure fields), control-topology enums,
 admission with typed refusals, the component mass/inertia build-up
 (cross-checked against the published single-lineage inertias), and the
-derived-quantity panel. Simulation state, solve orchestration, and the
-browser boundary arrive in later E3/E5 beads.
+derived-quantity panel. The later E5 lifecycle engine now also lives here;
+the browser boundary remains in `fs-flyer-wasm`.
 
 ## Public types and semantics
 
@@ -30,6 +30,10 @@ browser boundary arrive in later E3/E5 beads.
 - `digest()` — canonical content identity under
   `org.frankensim.fs-flyer.design.v1` (a PhysicalScenarioId ingredient).
 - `FlyerDesign::reference_1903()` — the dossier-valued reference config.
+- `simloop::SimLoop` / `SimStateOut` — 120 Hz lifecycle state including
+  longitudinal state plus Estimated reduced roll/yaw state. Snapshot v2 is a
+  14-float layout whose first 12 words are the unchanged v1 prefix and whose
+  appended words are roll attitude and heading.
 
 ## Invariants
 
@@ -92,5 +96,10 @@ sensitivity + pinned golden. JSONL receipts per case.
   V-02a territory (E4.6a) and need the full aero model.
 - The hinge-moment gradient is a SIGN/SHAPE device over the E1.5 prior; its
   quantitative level inherits the Estimated ceiling (A7a promotion path).
+- The lateral state uses `ReducedAeroelasticWarp` and
+  `ReducedLateralBuildUp`, with declared inertia and rudder-moment constants.
+  It supports bank/heading presentation and reduced control-response claims;
+  it is not a six-DOF structural-margin, post-stall, or calibrated-history
+  claim.
 - No aerodynamic force model lives here; sections are fs-airfoil, planform
   effects are fs-wing.

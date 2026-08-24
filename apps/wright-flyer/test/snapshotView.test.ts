@@ -91,8 +91,9 @@ test("decode: per-slot oracle for every field and phase code", () => {
     assert.equal(d.ended, word.startsWith("ended:"));
   }
   // Unknown code and short payload throw (fail-closed).
-  assert.throws(() => decodeSnapshot(1, payloadOf({ 11: 6 })), RangeError);
+  assert.throws(() => decodeSnapshot(1, payloadOf({ 11: 7 })), RangeError);
   assert.throws(() => decodeSnapshot(1, new Float64Array(PAYLOAD_F64S - 1)), RangeError);
+  assert.throws(() => decodeSnapshot(1, new Float64Array(PAYLOAD_F64S + 1)), RangeError);
   const legacy = decodeSnapshot(1, new Float64Array(PAYLOAD_F64S_V1));
   assert.equal(legacy.phiRad, 0, "v1 fallback is explicit zero-lateral");
   assert.equal(legacy.psiRad, 0);
@@ -201,6 +202,10 @@ test("phase banner: silent in flight, loud on every terminal", () => {
     /RAN OFF THE RAIL/,
   );
   assert.match(String(phaseBanner(snap({ phase: "ended:max-ticks" }))), /TIME LIMIT/);
+  assert.match(
+    String(phaseBanner(snap({ phase: "ended:damage-model-unavailable" }))),
+    /DAMAGE MODEL UNAVAILABLE/,
+  );
   const banner = phaseBanner(
     snap({ phase: "ended:envelope-exceeded" }),
     "PropAirframeCouplingDidNotConverge",

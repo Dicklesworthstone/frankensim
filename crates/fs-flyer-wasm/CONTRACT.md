@@ -83,7 +83,7 @@ and from node against the actual wasm binary
 | Entry | Contract |
 |---|---|
 | `flyer_engine_init(seed, rho, headwind, mode, member, rail_m, max_ticks)` | admission (caps at cap AND cap+1) → equilibrate → RunIntentId minted AFTER the tick-0 digest; returns run identity + trim; replaces any prior run (the E5.0 ring epoch bump is the consumer-side guard) |
-| `flyer_engine_step(has_input, lever_n, warp_rad)` | one 120 Hz step; mode words: 0=fixed, 1=historical(member), 2=human (input REQUIRED every tick — absent or non-finite input is a typed refusal, never a silent zero-hold) |
+| `flyer_engine_step(has_input, lever_n, warp_rad)` | one 120 Hz step; mode words: 0=fixed, 1=historical(member), 2=human (input REQUIRED every tick — absent or non-finite input is a typed refusal, never a silent zero-hold); the success envelope carries reduced lateral `p/phi/r/psi` as real engine state |
 | `flyer_engine_digest()` | chained per-tick blake3 digest (`org.frankensim.wf.sim-digest.v1`) — bit-identical lifecycles are checkable |
 
 Terminal events arrive IN-BAND as `phase` words (`ended:ground-contact`,
@@ -102,6 +102,9 @@ same envelope — the UI gets a receipted flight ending, never a trap.
   lanes run in CI, cross-platform identity is `Estimated`.
 - Nothing here allocates authority over the FlyerScenario/ModelId identity
   machinery (E0.9); the envelope carries no identity claims yet.
+- The lateral envelope fields inherit `fs-flyer`'s Estimated reduced-model
+  ceiling. Transporting them to the scene does not promote them to calibrated
+  historical or structural authority.
 
 ## Error model
 

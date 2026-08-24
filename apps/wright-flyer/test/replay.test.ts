@@ -70,6 +70,7 @@ test("recorder: monotone ticks enforced; empty seal refuses", () => {
   assert.throws(() => rec.append(5, payloadAt(5)), RangeError, "equal tick");
   assert.throws(() => rec.append(4, payloadAt(4)), RangeError, "backwards");
   assert.throws(() => rec.append(6, new Float64Array(PAYLOAD_F64S - 1)), RangeError, "short");
+  assert.throws(() => rec.append(6, new Float64Array(PAYLOAD_F64S + 1)), RangeError, "long");
   rec.append(6, payloadAt(6));
   assert.equal(rec.frameCount(), 2);
 });

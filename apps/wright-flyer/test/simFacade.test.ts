@@ -58,6 +58,7 @@ test("phase codes mirror the native payload codes exactly", () => {
     "ended:rail-end-without-lift": 3,
     "ended:max-ticks": 4,
     "ended:envelope-exceeded": 5,
+    "ended:damage-model-unavailable": 6,
   });
 });
 

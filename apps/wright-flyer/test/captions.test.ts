@@ -80,6 +80,7 @@ test("stream: every terminal phase gets a labeled caption", () => {
   const terminals: [SimSnapshot["phase"], RegExp][] = [
     ["ended:rail-end-without-lift", /Ran off the rail/],
     ["ended:envelope-exceeded", /certified aero envelope/],
+    ["ended:damage-model-unavailable", /swept-feature strike/],
     ["ended:max-ticks", /Tick budget/],
   ];
   for (const [phase, re] of terminals) {

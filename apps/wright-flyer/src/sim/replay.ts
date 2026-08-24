@@ -73,8 +73,8 @@ export class FlightRecorder {
   private readonly frames: number[] = [];
 
   append(tick: number, payload: Float64Array): void {
-    if (payload.length < PAYLOAD_F64S) {
-      throw new RangeError(`payload ${payload.length} < ${PAYLOAD_F64S}`);
+    if (payload.length !== PAYLOAD_F64S) {
+      throw new RangeError(`payload ${payload.length} != v2 ${PAYLOAD_F64S}`);
     }
     const last = this.ticks[this.ticks.length - 1];
     if (last !== undefined && tick <= last) {

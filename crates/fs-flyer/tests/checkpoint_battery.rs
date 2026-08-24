@@ -7,6 +7,7 @@
 //! AND cap+1.
 //! Repro: cargo test -p fs-flyer --test checkpoint_battery
 
+use fs_blake3::hash_domain;
 use fs_flyer::simloop::{Phase, PilotMode, SimLoop, dec17_scenario};
 
 fn jlog(case: &str, payload: &str) {
@@ -99,6 +100,22 @@ fn tamper_terminal_and_caps_refuse() {
     }
     let good = sim.save_checkpoint().unwrap();
     assert_eq!(u32::from_le_bytes(good[..4].try_into().unwrap()), 2);
+    // A structurally valid v1 checkpoint is authenticated under the
+    // old domain, then refused explicitly: it lacks lateral state and
+    // cannot exact-resume the v2 digest/physics contract.
+    let mut v1_body = good[..good.len() - 32].to_vec();
+    v1_body[..4].copy_from_slice(&1u32.to_le_bytes());
+    v1_body.drain(93..125); // four appended lateral f64 words
+    let v1_digest = hash_domain("org.frankensim.wf.checkpoint-state.v1", &v1_body);
+    let mut v1 = v1_body;
+    v1.extend_from_slice(v1_digest.as_bytes());
+    assert_eq!(
+        code_of(SimLoop::restore_checkpoint(
+            dec17_scenario(7, PilotMode::FixedControls),
+            &v1
+        )),
+        "checkpoint-version-unsupported"
+    );
     // Tamper twin: flip one payload byte — the embedded digest refuses.
     let mut bad = good.clone();
     bad[20] ^= 0x01;

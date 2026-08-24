@@ -57,7 +57,7 @@ const CODE_TO_PHASE: readonly PhaseWord[] = (() => {
  * fallback; a live v2 ring is hash-negotiated and never silently falls
  * back. Bad lengths and phase codes fail closed. */
 export function decodeSnapshot(tick: number, payload: Float64Array): SimSnapshot {
-  if (payload.length !== PAYLOAD_F64S_V1 && payload.length < PAYLOAD_F64S) {
+  if (payload.length !== PAYLOAD_F64S_V1 && payload.length !== PAYLOAD_F64S) {
     throw new RangeError(
       `payload ${payload.length} is neither v1 (${PAYLOAD_F64S_V1}) nor v2 (${PAYLOAD_F64S})`,
     );
@@ -76,8 +76,8 @@ export function decodeSnapshot(tick: number, payload: Float64Array): SimSnapshot
     wMps: payload[P_W_MPS]!,
     qRadS: payload[P_Q_RAD_S]!,
     thetaRad: payload[P_THETA_RAD]!,
-    phiRad: payload.length >= PAYLOAD_F64S ? payload[P_PHI_RAD]! : 0,
-    psiRad: payload.length >= PAYLOAD_F64S ? payload[P_PSI_RAD]! : 0,
+    phiRad: payload.length === PAYLOAD_F64S ? payload[P_PHI_RAD]! : 0,
+    psiRad: payload.length === PAYLOAD_F64S ? payload[P_PSI_RAD]! : 0,
     dcRad: payload[P_DC_RAD]!,
     warpRad: payload[P_WARP_RAD]!,
     omegaPropRadS: payload[P_OMEGA_RAD_S]!,
@@ -202,5 +202,7 @@ export function phaseBanner(snap: SimSnapshot, envelopeRefusalCode?: string): st
       return `FLIGHT LEFT THE CERTIFIED ENVELOPE${
         envelopeRefusalCode !== undefined ? ` (${envelopeRefusalCode})` : ""
       }`;
+    case "ended:damage-model-unavailable":
+      return "DAMAGE MODEL UNAVAILABLE — physical run ended";
   }
 }

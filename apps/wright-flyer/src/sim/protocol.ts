@@ -32,6 +32,7 @@ export const PHASE_CODES = {
   "ended:rail-end-without-lift": 3,
   "ended:max-ticks": 4,
   "ended:envelope-exceeded": 5,
+  "ended:damage-model-unavailable": 6,
 } as const;
 export type PhaseWord = keyof typeof PHASE_CODES;
 
