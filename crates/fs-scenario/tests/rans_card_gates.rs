@@ -7,8 +7,8 @@
 //! from the canonical draft by exactly one deliberate defect.
 
 use fs_scenario::rans_card::{
-    AdmissionError, BoussinesqOption, LaunderSharmaCoefficients, MAX_MANIFEST_BYTES, PorousFinSink,
-    REQUIRED_TERMS, RansCardDraft, RansModelCard, WallTreatment,
+    AdmissionError, BoussinesqOption, MAX_MANIFEST_BYTES, PorousFinSink, REQUIRED_TERMS,
+    RansCardDraft, RansModelCard, WallTreatment,
 };
 
 fn canonical() -> RansCardDraft {

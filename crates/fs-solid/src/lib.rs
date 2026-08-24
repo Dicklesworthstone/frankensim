@@ -42,6 +42,7 @@ pub mod mesh2;
 pub mod reduce;
 pub mod rod;
 pub mod shell;
+pub mod shell_time;
 pub mod stability;
 
 pub use beamcol::{ForceBasedElement, PushoverStep};
