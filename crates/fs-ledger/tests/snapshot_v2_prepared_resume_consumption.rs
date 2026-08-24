@@ -16,14 +16,14 @@
 //! storage.
 
 use fs_blake3::identity::CanonicalLimits;
-use fs_exec::{Budget, CancelGate, Cx, DrainTracker, ExecMode, RunId, StreamKey};
 use fs_exec::solver::snapshot_v2::{
-    self, prepare_resume, ExpectedResumeContextV2, PausedSnapshotBoundaryV2, SnapshotLimitsV2,
+    self, ExpectedResumeContextV2, PausedSnapshotBoundaryV2, SnapshotLimitsV2, prepare_resume,
 };
 use fs_exec::solver::{
-    drive_v2_prepared, PreparableSolverV2, ResumableSolverV2, SolverProgress, SolverStateV2,
-    StepVerdict,
+    PreparableSolverV2, ResumableSolverV2, SolverProgress, SolverStateV2, StepVerdict,
+    drive_v2_prepared,
 };
+use fs_exec::{Budget, CancelGate, Cx, DrainTracker, ExecMode, RunId, StreamKey};
 use fs_ledger::Ledger;
 
 // ---------------------------------------------------------------------------
@@ -52,9 +52,17 @@ const PROBE_STATE_TYPE_ID_V2: snapshot_v2::SnapshotStateTypeIdV2 =
         0x50, 0x3a,
     ]);
 const PROBE_STATE_SCHEMA_ID_V2: snapshot_v2::SnapshotStateSchemaIdV2 =
-    snapshot_v2::SnapshotStateSchemaIdV2::from_bytes([0x00; 32]);
+    snapshot_v2::SnapshotStateSchemaIdV2::from_bytes([
+        0x3e, 0xa5, 0x1f, 0xd6, 0xcf, 0xbf, 0x21, 0xf2, 0x75, 0x9d, 0xbf, 0x32, 0xae, 0x7f, 0x38,
+        0x73, 0x9e, 0x1a, 0xb4, 0x64, 0xbc, 0xcf, 0x4d, 0x52, 0xc0, 0x9f, 0x2b, 0x0d, 0x29, 0x24,
+        0x85, 0xd0,
+    ]);
 const PROBE_STATE_CODEC_ID_V2: snapshot_v2::SnapshotStateCodecIdV2 =
-    snapshot_v2::SnapshotStateCodecIdV2::from_bytes([0x00; 32]);
+    snapshot_v2::SnapshotStateCodecIdV2::from_bytes([
+        0x18, 0xa7, 0x36, 0xc2, 0xe4, 0xf0, 0x72, 0xe7, 0x7f, 0xc0, 0x52, 0x72, 0x68, 0x45, 0xff,
+        0xe7, 0x4f, 0x5d, 0xab, 0xb9, 0xa8, 0x52, 0x33, 0xbd, 0xc8, 0x9d, 0xa3, 0xb9, 0xf6, 0x59,
+        0x3a, 0x2d,
+    ]);
 const PROBE_CODEC_VERSION_V2: u32 = 1;
 
 /// This family consumes no stochastic work: its post-decode RNG cursor is a
@@ -106,11 +114,11 @@ struct ProbeSolver;
 
 impl ResumableSolverV2 for ProbeSolver {
     type State = ProbeState;
-    type Out = Vec<f64>;
+    type Out = (u64, Vec<f64>);
 
     fn step_v2(&self, state: &mut Self::State, _cx: &Cx<'_>) -> StepVerdict<Self::Out> {
         state.steps += 1;
-        StepVerdict::Done(state.residual.clone())
+        StepVerdict::Done((state.steps, state.residual.clone()))
     }
 }
 
@@ -119,10 +127,7 @@ impl PreparableSolverV2 for ProbeSolver {
         probe_context()
     }
 
-    fn decoded_state_manifest(
-        &self,
-        _state: &Self::State,
-    ) -> snapshot_v2::DecodedStateManifestV2 {
+    fn decoded_state_manifest(&self, _state: &Self::State) -> snapshot_v2::DecodedStateManifestV2 {
         snapshot_v2::DecodedStateManifestV2 {
             state_type: <ProbeState as SolverStateV2>::STATE_TYPE_ID_V2,
             state_schema: <ProbeState as SolverStateV2>::STATE_SCHEMA_ID_V2,
@@ -252,16 +257,14 @@ fn prepared_resume_round_trips_through_real_ledger_and_activates_only_prepared()
     let mut tampered = read_back.clone();
     let last = tampered.len() - 1;
     tampered[last] ^= 0x01;
-    let tamper_error =
-        ProbeState::unseal_v2_expected(&tampered, &expectation, limits, || false)
-            .expect_err("tampered stream must refuse");
+    let tamper_error = ProbeState::unseal_v2_expected(&tampered, &expectation, limits, || false)
+        .expect_err("tampered stream must refuse");
     let _ = tamper_error;
 
     // The exact ledger-retained stream opens and prepares against the
     // ACTUAL solver instance.
-    let opened =
-        ProbeState::unseal_v2_expected(&read_back, &expectation, limits, || false)
-            .expect("exact retained roots authorize decoding");
+    let opened = ProbeState::unseal_v2_expected(&read_back, &expectation, limits, || false)
+        .expect("exact retained roots authorize decoding");
     let prepared = prepare_resume(&ProbeSolver, opened, || false).expect("prepares");
 
     // Activation through the prepared-only drive path completes and matches
