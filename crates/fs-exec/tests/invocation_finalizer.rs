@@ -11,7 +11,7 @@ use fs_exec::{
 };
 
 const STREAM: StreamKey = StreamKey {
-    seed: 0xF1A1_1E20_2607_28,
+    seed: 0xF1_A11E_2026_0728,
     kernel_id: 0xF1A1,
     tile: 0,
     iteration: 0,

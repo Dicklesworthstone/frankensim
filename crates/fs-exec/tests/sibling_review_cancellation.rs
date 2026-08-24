@@ -24,7 +24,7 @@ use fs_exec::{CancelGate, Cx, ExecMode, StreamKey};
 
 fn key() -> StreamKey {
     StreamKey {
-        seed: 0xD13_5,
+        seed: 0xD135,
         kernel_id: 1,
         tile: 0,
         iteration: 0,
@@ -285,7 +285,7 @@ fn d6_one_request_is_observed_by_every_context_sharing_the_gate() {
             &gate,
             arena,
             StreamKey {
-                seed: 0xD13_5,
+                seed: 0xD135,
                 kernel_id: 2,
                 tile: 7,
                 iteration: 3,

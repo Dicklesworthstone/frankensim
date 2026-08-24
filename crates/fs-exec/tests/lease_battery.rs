@@ -124,7 +124,7 @@ fn exact_accounting_is_deterministic_and_returns_to_zero() {
     assert_eq!(a.used_bytes, 0, "every charge is released by run end");
     assert_eq!(a.refusals, 0);
     assert_eq!(
-        a.peak_bytes as u128, a.requested_bytes,
+        u128::from(a.peak_bytes), a.requested_bytes,
         "one root charge, no churn"
     );
 }
@@ -291,7 +291,7 @@ fn varying_worker_counts_hold_the_lease_invariants() {
         );
         let receipt = lease.receipt();
         assert_eq!(receipt.used_bytes, 0, "workers={workers}");
-        assert!(receipt.peak_bytes as u128 <= receipt.requested_bytes);
+        assert!(u128::from(receipt.peak_bytes) <= receipt.requested_bytes);
         assert!(pool.arena_pool().stats().quiescent());
     }
 }

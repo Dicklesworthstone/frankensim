@@ -548,7 +548,7 @@ fn lease_and_tile_arena_allocation_refusals_are_sealed_and_reusable() {
     );
     log_witness!("root-lease-refusal", 0, witness, reuse = true);
 
-    let mut config = PoolConfig::for_host(1, 0xA11_0C);
+    let mut config = PoolConfig::for_host(1, 0xA_110C);
     config.arena.limit_bytes = Some(0);
     config.arena.free_list_max_bytes = 0;
     let allocation_pool = TilePool::new(config);
