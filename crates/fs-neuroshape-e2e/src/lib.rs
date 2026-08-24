@@ -32,6 +32,7 @@
 //!   finite-difference Hessian. Without a certified zero gradient this is not a
 //!   critical-point or minimum theorem, and never a component-count proof.
 //!   `isocontour_crossings` separately localizes the sampled zero set.
+//!
 //! Same-build bit-deterministic replay; retained cross-ISA evidence is required
 //! before attaching a portable G5 receipt.
 
@@ -915,11 +916,16 @@ pub fn run_campaign(net: &MlpSdf, ring_r: f64, inner: f64) -> NeuroShapeReport {
 }
 
 /// Fallible NeuroShape campaign admission and execution.
+// Bead frankensim-30cz7: extraction deferred; the campaign's staged pipeline
+// is kept inline so the deterministic ordering stays obvious to reviewers.
+#[allow(clippy::too_many_lines)]
 pub fn try_run_campaign(
     net: &MlpSdf,
     ring_r: f64,
     inner: f64,
 ) -> Result<NeuroShapeReport, CampaignError> {
+    const GRID_N: usize = 81;
+    const CROSSING_LIMIT: usize = 2 * GRID_N * (GRID_N - 1);
     if net.input_dim() != 2 {
         return Err(CampaignError::InputDimension {
             expected: 2,
@@ -1000,8 +1006,6 @@ pub fn try_run_campaign(
     // Localize the zero set on a visualization grid. The typed outcome below
     // is authoritative; the legacy crossing/radius fields are derived views
     // of it (bead frankensim-o33vo).
-    const GRID_N: usize = 81;
-    const CROSSING_LIMIT: usize = 2 * GRID_N * (GRID_N - 1);
     let surface_localization = match Grid2::from_fn(
         GRID_N,
         GRID_N,

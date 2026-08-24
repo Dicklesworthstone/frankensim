@@ -106,8 +106,7 @@ impl SelfAffinePeriodicProfileSpectrum {
             return Err(SurfaceExcitationError::SurfaceSpectrumUnderresolved {
                 sample_count: MAX_TRACE_SAMPLES,
                 required_samples: maximum_cycle
-                    .checked_mul(MIN_SAMPLES_PER_SHORTEST_HARMONIC)
-                    .unwrap_or(usize::MAX),
+                    .saturating_mul(MIN_SAMPLES_PER_SHORTEST_HARMONIC),
             });
         }
         let harmonic_count = u64::from(maximum_cycles_per_track)
@@ -987,6 +986,10 @@ fn sample_validated_trace(
         }
         SurfaceTraceBoundary::Periodic => motion.path_coordinate_m.rem_euclid(track_length_m),
     };
+    // Exact endpoint match is the contract: clamp above guarantees a
+    // bit-identical `track_length_m` at the finite-trace end, and a
+    // to_bits rewrite would diverge from `==` for signed zeros.
+    #[allow(clippy::float_cmp)]
     let segment = match boundary {
         SurfaceTraceBoundary::Finite if center_m == track_length_m => {
             let final_segment = admitted.map_or(motion.trace.heights_m.len() - 2, |trace| {
@@ -1485,7 +1488,7 @@ mod tests {
         let slope = 2.5e-4;
         let intercept_m = 3.0e-6;
         let samples = (0..101)
-            .map(|index| intercept_m + slope * index as f64 * spacing_m)
+            .map(|index| intercept_m + slope * f64::from(index) * spacing_m)
             .collect();
         let affine = trace("affine", spacing_m, samples, SurfaceTraceBoundary::Finite);
         let flat = trace(
@@ -1604,40 +1607,37 @@ mod tests {
         assert!((before.combined_effective_height_m - 2.0e-6).abs() < 2.0e-19);
         assert!(before.combined_effective_height_rate_m_per_s.abs() < 2.0e-15);
         assert_eq!(
-            before.filtered_surface_heights_m,
-            after.filtered_surface_heights_m
+            before
+                .filtered_surface_heights_m
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            after
+                .filtered_surface_heights_m
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
         );
         assert_eq!(
-            before.filtered_surface_slopes,
-            after.filtered_surface_slopes
+            before
+                .filtered_surface_slopes
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            after
+                .filtered_surface_slopes
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
         );
     }
 
     #[test]
+    // Bead frankensim-30cz7: this G0 battery intentionally enumerates its
+    // refusal cases inline; extraction would obscure the case structure
+    // without changing any arithmetic.
+    #[allow(clippy::too_many_lines)]
     fn g0_admitted_surface_pair_matches_checked_bits_fallback_and_refusals() {
-        let heights_a = vec![
-            0.25e-6, -0.75e-6, 1.5e-6, -1.0e-6, 0.5e-6, 1.25e-6, -0.5e-6, 0.0,
-        ];
-        let heights_b = vec![
-            -0.5e-6, 0.125e-6, 0.75e-6, -0.25e-6, 1.0e-6, -0.875e-6, 0.375e-6, 0.625e-6,
-        ];
-        let surface_a = trace(
-            "admitted-a",
-            0.001,
-            heights_a.clone(),
-            SurfaceTraceBoundary::Periodic,
-        );
-        let surface_b = trace(
-            "admitted-b",
-            0.001,
-            heights_b.clone(),
-            SurfaceTraceBoundary::Periodic,
-        );
-        let admitted = AdmittedSurfaceTracePair::new(&surface_a, &surface_b)
-            .expect("immutable pair admits once");
-        let shared_a = surface_a.clone();
-        let shared_b = surface_b.clone();
-        let interface = interface();
         fn input<'a>(
             interface: &'a InterfaceSystemRef,
             a: &'a UniformSurfaceTrace,
@@ -1667,6 +1667,29 @@ mod tests {
                 maximum_linearized_height_fraction: 0.1,
             }
         }
+        let heights_a = vec![
+            0.25e-6, -0.75e-6, 1.5e-6, -1.0e-6, 0.5e-6, 1.25e-6, -0.5e-6, 0.0,
+        ];
+        let heights_b = vec![
+            -0.5e-6, 0.125e-6, 0.75e-6, -0.25e-6, 1.0e-6, -0.875e-6, 0.375e-6, 0.625e-6,
+        ];
+        let surface_a = trace(
+            "admitted-a",
+            0.001,
+            heights_a.clone(),
+            SurfaceTraceBoundary::Periodic,
+        );
+        let surface_b = trace(
+            "admitted-b",
+            0.001,
+            heights_b.clone(),
+            SurfaceTraceBoundary::Periodic,
+        );
+        let admitted = AdmittedSurfaceTracePair::new(&surface_a, &surface_b)
+            .expect("immutable pair admits once");
+        let shared_a = surface_a.clone();
+        let shared_b = surface_b.clone();
+        let interface = interface();
         let receipt_bits = |receipt: &HertzRoughnessExcitationReceipt| {
             [
                 receipt.projected_half_width_m.to_bits(),

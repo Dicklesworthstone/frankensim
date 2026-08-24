@@ -497,6 +497,7 @@ impl ArtifactKind {
     // schemas. Plain comment: attached rustdoc on dependency fragments is
     // refused by the identity gate.
     #[allow(missing_docs)]
+    #[must_use]
     pub const fn slug(self) -> &'static str {
         match self {
             Self::ContextOfUse => "context-of-use",
@@ -6196,6 +6197,7 @@ impl SchemaAdmissionReceipt {
     }
 
     #[allow(missing_docs)]
+    #[must_use]
     // Recomputes and checks this receipt's internal versioned content binding.
     //
     // A `true` result proves only internal self-consistency; use

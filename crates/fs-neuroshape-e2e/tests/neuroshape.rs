@@ -6,7 +6,7 @@ use fs_exec::BudgetRefusal;
 use fs_neuroshape_e2e::{
     CampaignError, CampaignParameter, CancellationKind, ComponentCountEvidence,
     LocalizationDiagnostic, LocalizationStage, NEUROSHAPE_COMPONENT_EVIDENCE_SCHEMA_VERSION,
-    NEUROSHAPE_LOCALIZATION_SCHEMA_VERSION, StageDetail, SurfaceLocalization,
+    NEUROSHAPE_LOCALIZATION_SCHEMA_VERSION, SurfaceLocalization,
     SurfaceLocalizationStatus, blob_sdf_net, iso_contour_resource_code, run_campaign,
     try_run_campaign,
 };

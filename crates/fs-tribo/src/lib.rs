@@ -28,13 +28,18 @@ const EPSILON: f64 = 64.0 * f64::EPSILON;
 pub enum ExactlyOnceKeyLedger<K> {
     /// Arbitrary keys with complete duplicate detection.
     RetainedSet {
+        /// Every accepted key, retained so duplicate submissions are always detectable.
         committed: BTreeSet<K>,
+        /// Admission ceiling on how many keys may be retained.
         maximum_committed: usize,
     },
     /// One exact next key plus a monotone accepted count.
     StrictSequence {
+        /// The only key this sequence currently admits.
         next: K,
+        /// Monotone count of strict-sequence keys accepted so far.
         committed_count: usize,
+        /// Caller-authored ceiling; reaching it refuses further admissions.
         maximum_committed: usize,
     },
 }
@@ -51,7 +56,10 @@ pub enum ExactlyOnceKeyError {
     /// No successor was supplied for an accepted strict-sequence key.
     MissingSuccessor,
     /// The caller-authored accepted-key ceiling was reached.
-    CapacityExceeded { maximum: usize },
+    CapacityExceeded {
+        /// The ceiling that was reached; no further keys are admitted.
+        maximum: usize,
+    },
 }
 
 impl<K: Ord + Clone> ExactlyOnceKeyLedger<K> {
@@ -333,26 +341,54 @@ impl TangentialSlip {
 #[derive(Debug, Clone, PartialEq)]
 pub enum TriboError {
     /// A required identity is empty.
-    MissingIdentity { field: &'static str },
+    MissingIdentity {
+        /// The identity field that was empty.
+        field: &'static str,
+    },
     /// Dry law received a lubrication or unknown-medium interface.
-    NotDryInterface { medium: InterfaceMedium },
+    NotDryInterface {
+        /// The offending interface medium carried by the request.
+        medium: InterfaceMedium,
+    },
     /// A finite scalar or a derived candidate was physically invalid or unrepresentable.
-    InvalidInput { field: &'static str },
+    InvalidInput {
+        /// The scalar or derived candidate that was refused.
+        field: &'static str,
+    },
     /// A vector contains a non-finite component.
-    NonFiniteVector { field: &'static str },
+    NonFiniteVector {
+        /// The vector field carrying a non-finite component.
+        field: &'static str,
+    },
     /// Submitted velocity leaks out of the declared tangent plane.
-    NormalSlipComponent { normal_component: f64 },
+    NormalSlipComponent {
+        /// The out-of-plane velocity component that leaked into the tangent admission.
+        normal_component: f64,
+    },
     /// A heat fraction does not sum to unity.
-    InvalidHeatPartition { sum: f64 },
+    InvalidHeatPartition {
+        /// The refused partition sum, which must equal one.
+        sum: f64,
+    },
     /// A forged or derived dissipation increment breaks an invariant.
-    InvalidDissipationStep { field: &'static str },
+    InvalidDissipationStep {
+        /// The broken-invariant field of the dissipation increment.
+        field: &'static str,
+    },
     /// A closed applicability interval is malformed.
-    InvalidApplicabilityRange { field: &'static str },
+    InvalidApplicabilityRange {
+        /// The malformed interval endpoint or field name.
+        field: &'static str,
+    },
     /// A query value lies outside the named card interval.
     OutsideApplicability {
+        /// The card field whose closed applicability interval was exceeded.
         field: &'static str,
+        /// The refused query value.
         value: f64,
+        /// Inclusive lower bound of the admitted interval.
         minimum: f64,
+        /// Inclusive upper bound of the admitted interval.
         maximum: f64,
     },
 }
@@ -396,18 +432,30 @@ impl std::error::Error for TriboError {}
 #[derive(Debug, Clone, PartialEq)]
 pub enum FrictionLaw {
     /// Coulomb static and kinetic coefficients.
-    Coulomb { static_mu: f64, kinetic_mu: f64 },
+    Coulomb {
+        /// Static friction coefficient at the stick limit.
+        static_mu: f64,
+        /// Kinetic sliding friction coefficient.
+        kinetic_mu: f64,
+    },
     /// `mu_zero + slope_per_speed * |v|`, lower-clamped at zero.
     VelocityDependent {
+        /// Friction coefficient extrapolated to zero sliding speed.
         static_mu: f64,
+        /// Speed-independent base coefficient.
         mu_zero: f64,
+        /// Linear growth of the coefficient per unit sliding speed.
         slope_per_speed: f64,
     },
     /// Exponential Stribeck decay plus a non-negative viscous coefficient.
     Stribeck {
+        /// Static friction coefficient at the stick limit.
         static_mu: f64,
+        /// Kinetic sliding friction coefficient.
         kinetic_mu: f64,
+        /// Decay speed scale of the Stribeck exponential [m/s].
         characteristic_speed: f64,
+        /// Additional viscous traction growth per unit sliding speed.
         viscous_per_speed: f64,
     },
 }
@@ -593,29 +641,37 @@ impl FrictionLaw {
 /// Contact solver branch represented by a friction response.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrictionRegime {
+    /// Contact patches stick; tangential traction stays below the static limit.
     Sticking,
+    /// Contact slides; kinetic traction applies with dissipation.
     Sliding,
 }
 
 /// One friction query result; all force values are newtons and power is watts.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FrictionResponse {
+    /// Resolved contact solver branch.
     pub regime: FrictionRegime,
+    /// Static traction ceiling in newtons for this query.
     pub static_limit: f64,
+    /// Kinetic coefficient when the branch is `Sliding`.
     pub kinetic_coefficient: Option<f64>,
     traction_n: [f64; 3],
     dissipated_power_w: f64,
     provenance: InputProvenance,
 }
 impl FrictionResponse {
+    /// Tangential traction vector in newtons, expressed in the interface frame.
     #[must_use]
     pub const fn traction_n(&self) -> [f64; 3] {
         self.traction_n
     }
+    /// Dissipated friction power in watts.
     #[must_use]
     pub const fn dissipated_power_w(&self) -> f64 {
         self.dissipated_power_w
     }
+    /// Provenance of the inputs that produced this response.
     #[must_use]
     pub fn provenance(&self) -> &InputProvenance {
         &self.provenance
@@ -865,18 +921,24 @@ impl FrictionQueryReceipt {
 /// Hertz sphere/plane geometry and modulus, in metres and pascals.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct HertzSpherePlane {
+    /// Equivalent sphere radius in metres; strictly positive.
     pub effective_radius: f64,
+    /// Reduced (effective) elastic modulus in pascals; strictly positive.
     pub reduced_modulus: f64,
 }
 /// Hertz sphere/plane response: newtons, metres, pascals respectively.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HertzSphereResponse {
+    /// Normal contact force in newtons.
     pub normal_force_n: f64,
+    /// Circular contact-patch radius in metres.
     pub contact_radius_m: f64,
+    /// Peak Hertzian pressure in pascals.
     pub peak_pressure_pa: f64,
     provenance: InputProvenance,
 }
 impl HertzSphereResponse {
+    /// Provenance of the interface and geometry inputs behind this response.
     #[must_use]
     pub fn provenance(&self) -> &InputProvenance {
         &self.provenance
@@ -937,17 +999,22 @@ impl HertzSpherePlane {
 /// Hertz cylinder/plane geometry and reduced modulus, in metres and pascals.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct HertzCylinderPlane {
+    /// Equivalent cylinder radius in metres; strictly positive.
     pub effective_radius: f64,
+    /// Reduced (effective) elastic modulus in pascals; strictly positive.
     pub reduced_modulus: f64,
 }
 /// Hertz cylinder/plane response: half-width in metres and pressure in pascals.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HertzCylinderResponse {
+    /// Half-contact width of the line patch in metres.
     pub half_width_m: f64,
+    /// Peak line-contact pressure in pascals.
     pub peak_pressure_pa: f64,
     provenance: InputProvenance,
 }
 impl HertzCylinderResponse {
+    /// Provenance of the interface and geometry inputs behind this response.
     #[must_use]
     pub fn provenance(&self) -> &InputProvenance {
         &self.provenance
@@ -1008,8 +1075,11 @@ pub trait ResistanceLaw {
 /// Inputs shared by the supplied scalar resistance laws.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ResistanceInput {
+    /// Normal contact force in newtons; non-negative.
     pub normal_force_n: f64,
+    /// Signed angular rate of the rolling contact in rad/s.
     pub angular_speed_rad_s: f64,
+    /// Signed contour (translational) speed in m/s.
     pub contour_speed_mps: f64,
 }
 impl ResistanceInput {
@@ -1022,16 +1092,20 @@ impl ResistanceInput {
 /// Response from one resistance mechanism.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResistanceResponse {
+    /// Opposing rolling moment in newton-metres.
     pub rolling_moment_n_m: f64,
+    /// Opposing contour force in newtons.
     pub contour_force_n: f64,
     dissipated_power_w: f64,
     provenance: InputProvenance,
 }
 impl ResistanceResponse {
+    /// Non-negative dissipated power in watts.
     #[must_use]
     pub const fn dissipated_power_w(&self) -> f64 {
         self.dissipated_power_w
     }
+    /// Provenance of the interface inputs behind this resistance response.
     #[must_use]
     pub fn provenance(&self) -> &InputProvenance {
         &self.provenance
@@ -1041,6 +1115,7 @@ impl ResistanceResponse {
 /// A caller-supplied rolling moment arm in metres; it carries no calibration claim.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ConstantRollingMoment {
+    /// Rolling moment arm in metres; non-negative.
     pub moment_arm_m: f64,
 }
 impl ResistanceLaw for ConstantRollingMoment {
@@ -1076,6 +1151,7 @@ impl ResistanceLaw for ConstantRollingMoment {
 /// A caller-supplied contour force in newtons; it carries no geometry/calibration claim.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ConstantContourForce {
+    /// Constant contour opposing force in newtons; non-negative.
     pub force_n: f64,
 }
 impl ResistanceLaw for ConstantContourForce {
@@ -1112,6 +1188,7 @@ pub struct HeatPartition {
     other: f64,
 }
 impl HeatPartition {
+    /// Builds a partition whose fractions are non-negative and sum to one.
     pub fn new(surface_a: f64, surface_b: f64, other: f64) -> Result<Self, TriboError> {
         let value = Self {
             surface_a,
@@ -1121,14 +1198,17 @@ impl HeatPartition {
         value.validate()?;
         Ok(value)
     }
+    /// Fraction of frictional heat routed to surface A.
     #[must_use]
     pub const fn surface_a(&self) -> f64 {
         self.surface_a
     }
+    /// Fraction of frictional heat routed to surface B.
     #[must_use]
     pub const fn surface_b(&self) -> f64 {
         self.surface_b
     }
+    /// Fraction routed elsewhere (environment or non-contact bodies).
     #[must_use]
     pub const fn other(&self) -> f64 {
         self.other
@@ -1396,6 +1476,9 @@ fn flash_rise_k(
 
 /// A closed, validated dissipative-work increment in joules.
 #[derive(Debug, Clone, Copy, PartialEq)]
+// Bead frankensim-30cz7: the `_j` (joule) suffix is deliberate unit vocabulary;
+// renaming would break caller-facing field semantics for a lint preference.
+#[allow(clippy::struct_field_names)]
 pub struct DissipationStep {
     total_work_j: f64,
     surface_a_heat_j: f64,
@@ -1422,18 +1505,22 @@ impl DissipationStep {
         value.validate()?;
         Ok(value)
     }
+    /// Total dissipative work of this increment [J].
     #[must_use]
     pub const fn total_work_j(&self) -> f64 {
         self.total_work_j
     }
+    /// Frictional heat assigned to surface A [J].
     #[must_use]
     pub const fn surface_a_heat_j(&self) -> f64 {
         self.surface_a_heat_j
     }
+    /// Frictional heat assigned to surface B [J].
     #[must_use]
     pub const fn surface_b_heat_j(&self) -> f64 {
         self.surface_b_heat_j
     }
+    /// Work routed to neither contact surface [J].
     #[must_use]
     pub const fn other_work_j(&self) -> f64 {
         self.other_work_j
@@ -1479,6 +1566,9 @@ impl DissipationStep {
 
 /// Caller-owned, checked cumulative work ledger.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
+// Bead frankensim-30cz7: the `_j` (joule) suffix is deliberate unit vocabulary;
+// renaming would break caller-facing field semantics for a lint preference.
+#[allow(clippy::struct_field_names)]
 pub struct WorkLedger {
     dissipated_work_j: f64,
     surface_a_heat_j: f64,
@@ -1486,6 +1576,7 @@ pub struct WorkLedger {
     other_work_j: f64,
 }
 impl WorkLedger {
+    /// Cumulative dissipated work [J].
     #[must_use]
     pub const fn dissipated_work_j(&self) -> f64 {
         self.dissipated_work_j
@@ -1549,6 +1640,7 @@ impl WorkLedger {
 /// Caller-supplied dimensionless Archard coefficient with no calibration claim.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ArchardLaw {
+    /// Dimensionless Archard coefficient; strictly non-negative.
     pub wear_coefficient: f64,
 }
 /// Caller-owned wear volume in cubic metres.
@@ -1557,10 +1649,12 @@ pub struct WearState {
     volume_m3: f64,
 }
 impl WearState {
+    /// Creates a non-negative starting wear volume in cubic metres.
     pub fn new(volume_m3: f64) -> Result<Self, TriboError> {
         nonnegative_finite(volume_m3, "wear_volume_m3")?;
         Ok(Self { volume_m3 })
     }
+    /// Current wear volume in cubic metres.
     #[must_use]
     pub const fn volume_m3(&self) -> f64 {
         self.volume_m3
@@ -1569,11 +1663,14 @@ impl WearState {
 /// Result of one Archard update, retaining caller provenance.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WearAdvance {
+    /// New wear volume added by this update, in cubic metres.
     pub increment_m3: f64,
+    /// Cumulative caller-owned wear volume in cubic metres after the update.
     pub total_volume_m3: f64,
     provenance: InputProvenance,
 }
 impl WearAdvance {
+    /// Provenance of the interface inputs behind this wear update.
     #[must_use]
     pub fn provenance(&self) -> &InputProvenance {
         &self.provenance
@@ -1884,8 +1981,10 @@ mod tests {
             .expect("kinetic");
         assert!((kinetic + 0.3).abs() < 0.02);
         assert_eq!(
-            law.regularized_traction_1d(0.0, 1.0, 0.05).expect("rest"),
-            0.0
+            law.regularized_traction_1d(0.0, 1.0, 0.05)
+                .expect("rest")
+                .to_bits(),
+            0.0f64.to_bits()
         );
     }
 
@@ -1934,14 +2033,17 @@ mod tests {
         };
         let step = DissipationStep::from_power(f64::MAX, 1.0, partition).unwrap();
         assert!(ledger.record(step).is_err());
-        assert_eq!(ledger.dissipated_work_j(), f64::MAX);
+        assert_eq!(
+            ledger.dissipated_work_j().to_bits(),
+            f64::MAX.to_bits()
+        );
         let mut wear = WearState::new(1.0).unwrap();
         let result = ArchardLaw {
             wear_coefficient: 2.0,
         }
         .advance(&declared_dry(), &mut wear, f64::MAX, 1.0, 1.0);
         assert!(result.is_err());
-        assert_eq!(wear.volume_m3(), 1.0);
+        assert_eq!(wear.volume_m3().to_bits(), 1.0f64.to_bits());
     }
 
     #[test]
@@ -1957,7 +2059,7 @@ mod tests {
             ledger.record(negative),
             Err(TriboError::InvalidDissipationStep { .. })
         ));
-        assert_eq!(ledger.dissipated_work_j(), 0.0);
+        assert_eq!(ledger.dissipated_work_j().to_bits(), 0.0f64.to_bits());
         let nonfinite = DissipationStep {
             total_work_j: 1.0,
             surface_a_heat_j: f64::INFINITY,
@@ -1968,7 +2070,7 @@ mod tests {
             ledger.record(nonfinite),
             Err(TriboError::InvalidDissipationStep { .. })
         ));
-        assert_eq!(ledger.dissipated_work_j(), 0.0);
+        assert_eq!(ledger.dissipated_work_j().to_bits(), 0.0f64.to_bits());
     }
 
     #[test]

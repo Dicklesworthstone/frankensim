@@ -357,6 +357,9 @@ fn g0_temperature_frequency_and_ownership_refuse() {
     ));
 }
 
+// Bead frankensim-30cz7: this G3 replay battery intentionally walks the full
+// checkpoint lineage inline; extraction would obscure the scenario sequence.
+#[allow(clippy::too_many_lines)]
 #[test]
 fn g3_checkpoint_replay_binds_source_cards_and_patch_lineage() {
     let law = coulomb(0.2);

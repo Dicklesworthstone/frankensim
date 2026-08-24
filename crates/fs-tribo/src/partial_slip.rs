@@ -40,6 +40,9 @@ pub enum NormalPatchAuthority {
 /// `integral(r^2 p dA) / normal_load`; its square root supplies the torsional
 /// lever radius in this lumped rung.  It is not a resolved pressure field.
 #[derive(Debug, Clone, PartialEq)]
+// Bead frankensim-30cz7: `_id` suffixes are deliberate identity vocabulary;
+// renaming would break caller-facing field semantics for a lint preference.
+#[allow(clippy::struct_field_names)]
 pub struct NormalPatchView {
     patch_id: String,
     normal_model_id: String,
@@ -409,6 +412,7 @@ impl PartialSlipLaw {
 
     /// Advances one interval without mutating the supplied state on refusal.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_lines)]
     pub fn advance(
         &self,
         patch: &NormalPatchView,
@@ -896,6 +900,9 @@ impl CoulombCapacity {
 }
 
 /// Generalized-coordinate ownership labels used to prevent work double counting.
+// Bead frankensim-30cz7: `_id` suffixes are deliberate identity vocabulary;
+// renaming would break caller-facing field semantics for a lint preference.
+#[allow(clippy::struct_field_names)]
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct GeneralizedWorkOwnership {
     patch_id: String,
@@ -1086,15 +1093,27 @@ pub struct PartialSlipStep {
 #[derive(Debug, Clone, PartialEq)]
 pub enum PartialSlipError {
     /// Required identity was blank.
-    MissingIdentity { field: &'static str },
+    MissingIdentity {
+        /// The identity field that was blank.
+        field: &'static str,
+    },
     /// Input was non-finite, non-positive where required, or outside this rung's domain.
-    InvalidInput { field: &'static str },
+    InvalidInput {
+        /// The refused input field name.
+        field: &'static str,
+    },
     /// A finite input produced a non-finite candidate.
-    InvalidDerived { field: &'static str },
+    InvalidDerived {
+        /// The derived-value field that was refused.
+        field: &'static str,
+    },
     /// Work keys named a different patch than the normal-patch view.
     WorkOwnershipMismatch,
     /// A checkpoint identity does not match current caller-owned identities.
-    CheckpointIdentityMismatch { field: &'static str },
+    CheckpointIdentityMismatch {
+        /// The checkpoint identity field that failed to bind.
+        field: &'static str,
+    },
 }
 
 impl fmt::Display for PartialSlipError {
@@ -1415,10 +1434,18 @@ mod tests {
     fn zero_rate_is_sticking_with_exact_zero_channels() {
         let response = step(frame(), &PartialSlipState::zero(), [0.0; 2], 0.0);
         assert_eq!(response.state, PartialSlipStateKind::Sticking);
+        // The producer legitimately emits signed zeros in these channels
+        // (e.g. a Coulomb force of `-capacity * signum(0.0)`); the original
+        // contract is value equality (where -0.0 == 0.0), not bit equality.
+        #[allow(clippy::float_cmp)]
         assert_eq!(response.tangent_force_n, [0.0; 2]);
+        #[allow(clippy::float_cmp)]
         assert_eq!(response.torsional_moment_nm, 0.0);
+        #[allow(clippy::float_cmp)]
         assert_eq!(response.dissipation.heat_j, 0.0);
+        #[allow(clippy::float_cmp)]
         assert_eq!(response.dissipation.rolling_deformation_loss_j, 0.0);
+        #[allow(clippy::float_cmp)]
         assert_eq!(response.generalized_work.work_into_interface_j, 0.0);
     }
 
@@ -1443,8 +1470,14 @@ mod tests {
             gross.tangent_force_n[0].abs(),
             gross.capacity.kinetic_force_n,
         );
-        assert_eq!(gross.slip_partition.microslip_fraction, 1.0);
-        assert_eq!(gross.dissipation.rolling_deformation_loss_j, 0.0);
+        assert_eq!(
+            gross.slip_partition.microslip_fraction.to_bits(),
+            1.0f64.to_bits()
+        );
+        assert_eq!(
+            gross.dissipation.rolling_deformation_loss_j.to_bits(),
+            0.0f64.to_bits()
+        );
     }
 
     /// G1 pure torsion uses the finite-patch pressure moment without inventing translation.
@@ -1452,6 +1485,7 @@ mod tests {
     fn pure_torsion_is_coulomb_limited_and_separate_from_rolling_loss() {
         let response = step(frame(), &PartialSlipState::zero(), [0.0; 2], 10.0);
         assert_eq!(response.state, PartialSlipStateKind::GrossSlide);
+        #[allow(clippy::float_cmp)]
         assert_eq!(response.tangent_force_n, [0.0; 2]);
         close(
             response.torsional_moment_nm.abs(),
@@ -1462,6 +1496,7 @@ mod tests {
             response.wrench.torque_nm,
             [0.0, 0.0, response.torsional_moment_nm],
         );
+        #[allow(clippy::float_cmp)]
         assert_eq!(response.dissipation.rolling_deformation_loss_j, 0.0);
     }
 
@@ -1479,8 +1514,11 @@ mod tests {
             -response.generalized_work.work_into_interface_j / 0.001,
         );
         assert_eq!(
-            response.dissipation.heat_j,
-            response.dissipation.tangential_and_torsional_microslip_j
+            response.dissipation.heat_j.to_bits(),
+            response
+                .dissipation
+                .tangential_and_torsional_microslip_j
+                .to_bits()
         );
     }
 
@@ -1619,6 +1657,9 @@ mod tests {
 
     /// G3: replay refuses every law/source/authority receipt mutation, not only display IDs.
     #[test]
+    // Bead frankensim-30cz7: this G3 refusal battery intentionally enumerates
+    // every mutation class inline; extraction would obscure the case table.
+    #[allow(clippy::too_many_lines)]
     fn checkpoint_rejects_coefficients_and_admitted_provenance_mutations() {
         let response = step(frame(), &PartialSlipState::zero(), [6.0, 0.0], 1.0);
         let state = response.next_state;

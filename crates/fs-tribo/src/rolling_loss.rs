@@ -23,11 +23,20 @@ pub const LEINE_STYLE_CONTOUR_LAW_ID: &str = "Leine-style Coulomb contour-force 
 #[derive(Debug, Clone, PartialEq)]
 pub enum RollingLossError {
     /// A required caller identity was blank.
-    MissingIdentity { field: &'static str },
+    MissingIdentity {
+        /// The identity field that was blank.
+        field: &'static str,
+    },
     /// A value was nonfinite or outside this module's physical input domain.
-    InvalidInput { field: &'static str },
+    InvalidInput {
+        /// The refused input field name.
+        field: &'static str,
+    },
     /// The declared interface is not dry.
-    NotDryInterface { medium: InterfaceMedium },
+    NotDryInterface {
+        /// The offending interface medium carried by the request.
+        medium: InterfaceMedium,
+    },
     /// Temperature or excitation frequency is outside a source card's range.
     OutsideApplicability {
         /// Named quantity that failed the card range.
@@ -40,11 +49,17 @@ pub enum RollingLossError {
         maximum: f64,
     },
     /// A rolling work key does not bind the patch or required loss channel.
-    WorkOwnershipMismatch { field: &'static str },
+    WorkOwnershipMismatch {
+        /// The ownership key field that failed to bind.
+        field: &'static str,
+    },
     /// A rolling work interval overlaps a partial-slip interval.
     WorkOwnershipOverlap,
     /// A checkpoint does not bind the supplied receipt, card, or law.
-    CheckpointMismatch { field: &'static str },
+    CheckpointMismatch {
+        /// The checkpoint field whose binding failed.
+        field: &'static str,
+    },
 }
 
 impl fmt::Display for RollingLossError {
@@ -565,6 +580,9 @@ impl RollingLossLaw {
 
     /// Evaluates one accepted loss interval. The returned state/checkpoint is a
     /// candidate that the caller commits only after its outer solver accepts it.
+    // Bead frankensim-30cz7: extraction deferred; the bit-exact battery
+    // contract forbids restructuring this interval arithmetic right now.
+    #[allow(clippy::too_many_lines)]
     pub fn advance(
         &self,
         patch: &RollingPatchReceipt,

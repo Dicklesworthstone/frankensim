@@ -734,7 +734,9 @@ fn scaled_spectral_upper_parts(weights: &[Vec<f64>]) -> (f64, f64) {
             if magnitude == 0.0 {
                 continue;
             }
-            let ratio = if magnitude == max_abs {
+            // det-ok: max_abs is bit-identical to one of the magnitudes;
+            // an epsilon rewrite would corrupt this directed-rounding branch.
+            let ratio = if magnitude.to_bits() == max_abs.to_bits() {
                 1.0
             } else {
                 next_up_nonnegative(magnitude / max_abs)
@@ -746,14 +748,14 @@ fn scaled_spectral_upper_parts(weights: &[Vec<f64>]) -> (f64, f64) {
         max_row_sum = max_row_sum.max(row_sum);
     }
 
-    let frobenius_bound = if frobenius_sum == 1.0 {
+    let frobenius_bound = if frobenius_sum.to_bits() == 1.0f64.to_bits() {
         1.0
     } else {
         next_up_nonnegative(frobenius_sum.sqrt())
     };
     let max_column_sum = column_sums.into_iter().fold(0.0_f64, f64::max);
     let induced_product = mul_up_nonnegative(max_column_sum, max_row_sum);
-    let induced_bound = if induced_product == 1.0 {
+    let induced_bound = if induced_product.to_bits() == 1.0f64.to_bits() {
         1.0
     } else {
         next_up_nonnegative(induced_product.sqrt())
@@ -771,7 +773,7 @@ fn finite_scaled_upper(max_abs: f64, unit_bound: f64) -> Option<f64> {
     if max_abs == 0.0 || unit_bound == 0.0 {
         return Some(0.0);
     }
-    if unit_bound == 1.0 {
+    if unit_bound.to_bits() == 1.0f64.to_bits() {
         // The induced certificate is exactly max_abs (for example, a single
         // nonzero or a scaled permutation matrix). Keeping this exact also
         // admits a 1×1 matrix containing f64::MAX.
@@ -795,10 +797,12 @@ fn mul_up_nonnegative(a: f64, b: f64) -> f64 {
     if a == 0.0 || b == 0.0 {
         return 0.0;
     }
-    if a == 1.0 {
+    // det-ok: exact multiplicative-identity tests; epsilon rewrites would
+    // break the upward-rounding contract these helpers implement.
+    if a.to_bits() == 1.0f64.to_bits() {
         return b;
     }
-    if b == 1.0 {
+    if b.to_bits() == 1.0f64.to_bits() {
         return a;
     }
     next_up_nonnegative(a * b)

@@ -67,7 +67,7 @@ fn certified_bound_covers_a_power_iteration_blind_direction() {
     let v1 = 1.1 / initial_norm;
     let blind_scale = 1e-8;
     let weights = vec![vec![v1 * blind_scale, -v0 * blind_scale]];
-    assert_eq!(spectral_norm(&weights), 0.0);
+    assert_eq!(spectral_norm(&weights).to_bits(), 0.0f64.to_bits());
 
     let exact = v0.hypot(v1) * blind_scale;
     let certified = spectral_norm_upper_bound(&weights);
@@ -104,16 +104,19 @@ fn certified_bound_preserves_sparse_axis_layer_scale() {
 #[test]
 fn certificate_handles_zero_rectangular_and_extreme_finite_matrices() {
     let zero = vec![vec![0.0; 3], vec![0.0; 3]];
-    assert_eq!(spectral_norm_upper_bound(&zero), 0.0);
+    assert_eq!(spectral_norm_upper_bound(&zero).to_bits(), 0.0f64.to_bits());
     assert_eq!(
         spectral_normalize(Layer::new(zero.clone(), vec![0.0; 2]), 1.0).weights,
         zero
     );
     let collapsed = spectral_normalize(Layer::new(vec![vec![1.0, -2.0]], vec![0.0]), 0.0);
-    assert_eq!(spectral_norm_upper_bound(&collapsed.weights), 0.0);
+    assert_eq!(spectral_norm_upper_bound(&collapsed.weights).to_bits(), 0.0f64.to_bits());
 
     // A single maximum-finite entry has an exactly representable finite norm.
-    assert_eq!(spectral_norm_upper_bound(&[vec![f64::MAX]]), f64::MAX);
+    assert_eq!(
+        spectral_norm_upper_bound(&[vec![f64::MAX]]).to_bits(),
+        f64::MAX.to_bits()
+    );
 
     // Two maximum-finite entries have a mathematical norm greater than
     // f64::MAX, so a direct finite certificate is impossible and must fail
@@ -169,7 +172,7 @@ fn interval_sign_margin_step_rounds_toward_the_conservative_side() {
     let nearest = 1.0_f64 / 10.0;
     let positive = derive_safe_step((1.0, 1.0), 10.0);
     assert_eq!(positive.status(), SafeStepStatus::SignSeparated);
-    assert_eq!(positive.magnitude_lower_bound(), 1.0);
+    assert_eq!(positive.magnitude_lower_bound().to_bits(), 1.0f64.to_bits());
     assert_eq!(positive.radius().to_bits() + 1, nearest.to_bits());
     assert_eq!(positive.policy_version(), SAFE_STEP_POLICY_VERSION);
     assert_eq!(SAFE_STEP_POLICY_VERSION, 1);
@@ -178,14 +181,14 @@ fn interval_sign_margin_step_rounds_toward_the_conservative_side() {
 
     let negative = derive_safe_step((-2.0, -1.0), 10.0);
     assert_eq!(negative.status(), SafeStepStatus::SignSeparated);
-    assert_eq!(negative.magnitude_lower_bound(), 1.0);
+    assert_eq!(negative.magnitude_lower_bound().to_bits(), 1.0f64.to_bits());
     assert_eq!(negative.radius().to_bits(), positive.radius().to_bits());
 
     // A rounded nominal value cannot create authority when the sound
     // enclosure still straddles zero.
     let unresolved = derive_safe_step((-f64::from_bits(1), f64::from_bits(1)), 1.0);
     assert_eq!(unresolved.status(), SafeStepStatus::NoFiniteSignMargin);
-    assert_eq!(unresolved.radius(), 0.0);
+    assert_eq!(unresolved.radius().to_bits(), 0.0f64.to_bits());
 
     // Invalid claimed bounds cannot create motion authority. A genuinely
     // nonzero constant field retains mathematically unbounded clearance, while
@@ -193,29 +196,49 @@ fn interval_sign_margin_step_rounds_toward_the_conservative_side() {
     for enclosure in [(f64::NAN, 1.0), (1.0, f64::NAN), (1.0, -1.0)] {
         let invalid = derive_safe_step(enclosure, 1.0);
         assert_eq!(invalid.status(), SafeStepStatus::InvalidEnclosure);
-        assert_eq!(invalid.radius(), 0.0);
+        assert_eq!(invalid.radius().to_bits(), 0.0f64.to_bits());
     }
     for invalid_lipschitz in [f64::NAN, f64::INFINITY, -1.0] {
         let invalid = derive_safe_step((1.0, 1.0), invalid_lipschitz);
         assert_eq!(invalid.status(), SafeStepStatus::InvalidLipschitz);
-        assert_eq!(invalid.radius(), 0.0);
+        assert_eq!(invalid.radius().to_bits(), 0.0f64.to_bits());
     }
-    assert_eq!(derive_safe_step((1.0, 1.0), 0.0).radius(), f64::INFINITY);
-    assert_eq!(derive_safe_step((-1.0, -1.0), -0.0).radius(), f64::INFINITY);
-    assert_eq!(derive_safe_step((0.0, 0.0), 0.0).radius(), 0.0);
-    assert_eq!(derive_safe_step((-0.0, 0.0), -0.0).radius(), 0.0);
+    assert_eq!(
+        derive_safe_step((1.0, 1.0), 0.0)
+            .radius()
+            .to_bits(),
+        f64::INFINITY.to_bits()
+    );
+    assert_eq!(
+        derive_safe_step((-1.0, -1.0), -0.0)
+            .radius()
+            .to_bits(),
+        f64::INFINITY.to_bits()
+    );
+    assert_eq!(
+        derive_safe_step((0.0, 0.0), 0.0)
+            .radius()
+            .to_bits(),
+        0.0f64.to_bits()
+    );
+    assert_eq!(
+        derive_safe_step((-0.0, 0.0), -0.0)
+            .radius()
+            .to_bits(),
+        0.0f64.to_bits()
+    );
 }
 
 #[test]
 fn interval_sign_margin_handles_extremes_scaling_and_one_sided_infinity() {
     let positive_tail = derive_safe_step((f64::MAX, f64::INFINITY), 1.0);
     assert_eq!(positive_tail.status(), SafeStepStatus::SignSeparated);
-    assert_eq!(positive_tail.magnitude_lower_bound(), f64::MAX);
+    assert_eq!(positive_tail.magnitude_lower_bound().to_bits(), f64::MAX.to_bits());
     assert_eq!(positive_tail.radius().to_bits() + 1, f64::MAX.to_bits());
 
     let negative_tail = derive_safe_step((f64::NEG_INFINITY, -f64::MAX), 1.0);
     assert_eq!(negative_tail.status(), SafeStepStatus::SignSeparated);
-    assert_eq!(negative_tail.magnitude_lower_bound(), f64::MAX);
+    assert_eq!(negative_tail.magnitude_lower_bound().to_bits(), f64::MAX.to_bits());
     assert_eq!(
         negative_tail.radius().to_bits(),
         positive_tail.radius().to_bits()
@@ -223,14 +246,14 @@ fn interval_sign_margin_handles_extremes_scaling_and_one_sided_infinity() {
 
     let whole = derive_safe_step((f64::NEG_INFINITY, f64::INFINITY), 1.0);
     assert_eq!(whole.status(), SafeStepStatus::NoFiniteSignMargin);
-    assert_eq!(whole.radius(), 0.0);
+    assert_eq!(whole.radius().to_bits(), 0.0f64.to_bits());
 
     let underflow = derive_safe_step((f64::from_bits(1), f64::from_bits(2)), f64::MAX);
     assert_eq!(underflow.status(), SafeStepStatus::SignSeparated);
-    assert_eq!(underflow.radius(), 0.0);
+    assert_eq!(underflow.radius().to_bits(), 0.0f64.to_bits());
 
     let overflow = derive_safe_step((f64::MAX, f64::MAX), f64::MIN_POSITIVE);
-    assert_eq!(overflow.radius(), f64::MAX);
+    assert_eq!(overflow.radius().to_bits(), f64::MAX.to_bits());
 
     let baseline = derive_safe_step((0.75, 1.25), 3.0);
     let scaled = derive_safe_step((1.5, 2.5), 6.0);
@@ -392,7 +415,7 @@ fn neural_affine_overflow_remains_a_sign_separating_enclosure() {
     let net = MlpSdf::new(vec![Layer::new(vec![vec![1.0]], vec![f64::MAX])], 1.0);
     let enclosure = net.eval_interval(&[f64::MAX], &[f64::MAX]);
     assert!(enclosure.0.is_finite() && enclosure.0 > 0.0);
-    assert_eq!(enclosure.1, f64::INFINITY);
+    assert_eq!(enclosure.1.to_bits(), f64::INFINITY.to_bits());
     let step = derive_safe_step(enclosure, net.lipschitz());
     assert_eq!(step.status(), SafeStepStatus::SignSeparated);
     assert!(step.radius() > 0.0);
