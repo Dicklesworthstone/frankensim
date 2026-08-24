@@ -9,7 +9,6 @@
 // matching transport and runs the shared §7.2 kernel suite in-page
 // (?bench=1&repeat=3): rep 0 is COLD, reps 1..2 are WARM.
 //
-// Gates (typed):
 //   BENCH_INCOMPLETE  a variant lacks its cold/warm rows or sane percentiles
 //   KERNEL_MISSING    an expected kernel row is absent for the transport
 //                     (seqlock only under SAB; pool-pack everywhere)
@@ -33,7 +32,7 @@ const outIdx = argv.indexOf("--out");
 const outPath =
   outIdx >= 0 && argv[outIdx + 1]
     ? argv[outIdx + 1]
-    : path.join("data", "wright-flyer", "perf-baseline-browser-chrome-dev-host.json");
+    : path.join(import.meta.dirname, "..", "..", "..", "data", "wright-flyer", "perf-baseline-browser-chrome-dev-host.json");
 
 function fail(code, payload, exitCode = 5) {
   console.error(JSON.stringify({ suite: "wf-bench-matrix", verdict: "FAIL", code, ...payload }));
@@ -115,8 +114,22 @@ async function runVariant(variant) {
         fail("BENCH_INCOMPLETE", { variant, kernel: name, colds, warms, warmExpected: REPEATS - 1 }, 4);
       }
       for (const r of per) {
-        if (!(r.p50_us > 0 && r.p50_us <= r.p95_us && r.p95_us <= r.p99_us && r.opsPerSec > 0)) {
+        // Non-isolated origins get COARSENED timers: sub-quantum kernels
+        // can floor percentiles to 0, and an all-zero rep leaves totals
+        // unresolvable (opsPerSec null). Those rows carry an explicit
+        // quantization_floor marker — never silent passes or fake
+        // precision. Ordering must hold either way.
+        if (
+          !(
+            (r.opsPerSec === null || r.opsPerSec > 0) &&
+            r.p50_us <= r.p95_us &&
+            r.p95_us <= r.p99_us
+          )
+        ) {
           fail("BENCH_INCOMPLETE", { variant, kernel: name, row: r, detail: "non-monotone percentiles" }, 4);
+        }
+        if (r.p50_us === 0 || r.p95_us === 0 || r.p99_us === 0 || r.opsPerSec === null) {
+          r.quantization_floor = true;
         }
       }
     }
@@ -190,3 +203,7 @@ console.log(
     content_hash: contentHash,
   }),
 );
+
+// Deterministic termination: a kept-alive handle after cleanup must not
+// hold the driver open past its verdict.
+process.exit(0);

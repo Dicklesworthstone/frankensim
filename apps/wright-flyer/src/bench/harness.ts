@@ -11,7 +11,10 @@ export interface BenchResult {
   readonly p50_us: number;
   readonly p95_us: number;
   readonly p99_us: number;
-  readonly opsPerSec: number;
+  /** Throughput over the timed window, or null when the host timer
+   * quantum resolved EVERY sample to zero elapsed time (coarsened
+   * non-isolated origins): totals are unresolvable, not zero-cost. */
+  readonly opsPerSec: number | null;
 }
 
 export function percentileOf(sorted: readonly number[], q: number): number {
@@ -52,6 +55,6 @@ export function bench(
     p50_us: Number(percentileOf(perOpUs, 0.5).toFixed(4)),
     p95_us: Number(percentileOf(perOpUs, 0.95).toFixed(4)),
     p99_us: Number(percentileOf(perOpUs, 0.99).toFixed(4)),
-    opsPerSec: Math.round((samples * batchSize * 1000) / totalMs),
+    opsPerSec: totalMs > 0 ? Math.round((samples * batchSize * 1000) / totalMs) : null,
   };
 }
