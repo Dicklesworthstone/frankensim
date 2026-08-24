@@ -19,6 +19,7 @@ import { writeFile } from "node:fs/promises";
 import { startVitePreview, startStaticDist, makeArtifactDir } from "./serve.mjs";
 import { bootOnce, resolveChromeBin, BootRefusal } from "./boot.mjs";
 import {
+  compareRuns,
   countLatencySamples,
   countActuatedSamples,
   digestLooksReal,
