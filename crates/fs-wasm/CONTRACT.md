@@ -114,7 +114,8 @@ crates. Layer: **L6 HELM / interface surface**. The crate compiles as an
    `[39..=42]` two `u64` contexts as exact `u32` lanes, `[43..=50]` two `u128`
    contexts, and `[51]` the auxiliary resource code. For ordinary refusals these
    are the native `StageDetail` indices/scalar bits/required/limit; for
-   cancellation they carry deadline, observed clock, and quota contexts. Unused
+   cancellation they carry deadline, observed clock, and quota contexts,
+   zero-extending each `u64` placed in a four-lane `u128` field. Other unused
    lanes are `u32::MAX`, never NaN;
    no integer is directly cast to f64. `[28]` carries
    `NEUROSHAPE_LOCALIZATION_SCHEMA_VERSION = 3`, which freezes all status,

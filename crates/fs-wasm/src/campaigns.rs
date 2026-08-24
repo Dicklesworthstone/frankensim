@@ -1393,11 +1393,11 @@ fn neuro_net(lift: f64) -> MlpSdf {
 ///   code for `Cancelled`, or `0` on success.
 /// - `[31..=34]`, `[35..=38]` — high-to-low exact `u32` lanes of
 ///   `first_index`/`second_index`; cancellation reuses them for the `u64`
-///   deadline/observed clock in the low two lanes.
+///   deadline/observed clock, zero-extended to `u128`.
 /// - `[39..=40]`, `[41..=42]` — exact `u32` lanes of `scalar_bits` and
 ///   `second_bits`; cancellation reuses them for quota contexts A and B.
 /// - `[43..=46]`, `[47..=50]` — exact `u32` lanes of `required` and `limit`;
-///   cancellation reuses the first range for quota context C.
+///   cancellation zero-extends quota context C into the first range.
 /// - `[51]` — diagnostic auxiliary code. Every unused lane is `u32::MAX`;
 ///   integer context never passes through a lossy direct f64 cast.
 /// - then `64·64` SDF field row-major (`j` outer / y, `i` inner / x) over the
@@ -2533,8 +2533,8 @@ mod tests {
                 LOCALIZATION_STATUS_INTERNAL_FAULT,
                 LOCALIZATION_STAGE_ISOCONTOUR_EXTRACTION,
             ),
-            // A refusal may also name the grid stage even for contour-side
-            // diagnostics when synthesized directly; codes must stay stable.
+            // A second grid-stage refusal pins the grid diagnostic family and
+            // stable code independently of the unrepresentable case above.
             (
                 SurfaceLocalization::InvalidInput(StageDetail::new(
                     LocalizationStage::GridConstruction,
@@ -2690,6 +2690,11 @@ mod tests {
             u128::from(cancellation.quota_context_c),
         );
         assert_eq!(&cancelled[43..47], &expected_u128);
+        assert_eq!(
+            &cancelled[47..52],
+            &[f64::from(u32::MAX); 5],
+            "unused cancellation limit and auxiliary lanes stay undefined"
+        );
     }
 
     /// A live all-positive campaign serializes ValidEmpty without any
