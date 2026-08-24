@@ -756,7 +756,27 @@ fn checked_sdf_trace_value(
     if cx.checkpoint().is_err() {
         return Err(ContactError::Cancelled);
     }
+    if !valid_sdf_trace_sample(sample.signed_distance, enclosure) {
+        return Err(ContactError::Query(QueryError::InvalidPointSample {
+            at: [point.x, point.y, point.z],
+        }));
+    }
     Ok(enclosure)
+}
+
+#[allow(clippy::float_cmp)] // Exact authority requires a matching singleton.
+fn valid_sdf_trace_sample(nominal: f64, certificate: fs_evidence::NumericalCertificate) -> bool {
+    nominal.is_finite()
+        && matches!(
+            certificate.kind,
+            fs_evidence::NumericalKind::Exact | fs_evidence::NumericalKind::Enclosure
+        )
+        && certificate.lo.is_finite()
+        && certificate.hi.is_finite()
+        && certificate.lo <= nominal
+        && nominal <= certificate.hi
+        && (certificate.kind != fs_evidence::NumericalKind::Exact
+            || (certificate.lo == certificate.hi && certificate.lo == nominal))
 }
 
 /// Refine possible-contact windows for a POLYTOPE body against a STATIC
@@ -861,17 +881,6 @@ pub fn refine_windows_against_sdf(
         };
 
         let enclosure = checked_sdf_trace_value(obstacle, center, cx)?;
-        let usable = matches!(
-            enclosure.kind,
-            fs_evidence::NumericalKind::Exact | fs_evidence::NumericalKind::Enclosure
-        ) && enclosure.lo.is_finite()
-            && enclosure.hi.is_finite()
-            && enclosure.lo <= enclosure.hi;
-        if !usable {
-            return Err(ContactError::Query(QueryError::InvalidPointSample {
-                at: [center.x, center.y, center.z],
-            }));
-        }
         let gap = (enclosure.lo.next_down() - radius).next_down();
         if gap > 0.0 {
             out.push(RefinedWindow::Pruned { window, gap });
@@ -897,18 +906,21 @@ mod sdf_tests {
     use fs_evidence::NumericalCertificate;
     use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
     use fs_geom::{Aabb, Chart, ChartSample, Point3, TraceStepClaim, Vec3};
+    use fs_query::QueryError;
 
-    struct CancellingTraceChart<'a> {
-        gate: &'a CancelGate,
+    struct TestTraceChart<'a> {
+        gate: Option<&'a CancelGate>,
+        nominal: f64,
+        certificate: NumericalCertificate,
     }
 
-    impl Chart for CancellingTraceChart<'_> {
+    impl Chart for TestTraceChart<'_> {
         fn eval(&self, _point: Point3, _cx: &Cx<'_>) -> ChartSample {
             ChartSample {
-                signed_distance: 1.0,
+                signed_distance: self.nominal,
                 gradient: Some(Vec3::new(1.0, 0.0, 0.0)),
                 lipschitz: Some(1.0),
-                error: NumericalCertificate::exact(1.0),
+                error: NumericalCertificate::exact(self.nominal),
             }
         }
 
@@ -923,22 +935,28 @@ mod sdf_tests {
         fn trace_value_enclosure(
             &self,
             _point: Point3,
-            sample: &ChartSample,
+            _sample: &ChartSample,
             _cx: &Cx<'_>,
         ) -> NumericalCertificate {
-            self.gate.request();
-            sample.error
+            if let Some(gate) = self.gate {
+                gate.request();
+            }
+            self.certificate
         }
 
         fn name(&self) -> &'static str {
-            "test/cancelling-sdf-trace"
+            "test/sdf-trace-producer"
         }
     }
 
     #[test]
     fn sdf_trace_value_observes_producer_cancellation_before_use() {
         let gate = CancelGate::new_clock_free();
-        let chart = CancellingTraceChart { gate: &gate };
+        let chart = TestTraceChart {
+            gate: Some(&gate),
+            nominal: 1.0,
+            certificate: NumericalCertificate::exact(1.0),
+        };
         let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
         pool.scope(|arena| {
             let cx = Cx::new(
@@ -956,6 +974,35 @@ mod sdf_tests {
             assert!(matches!(
                 checked_sdf_trace_value(&chart, Point3::new(0.0, 0.0, 0.0), &cx),
                 Err(ContactError::Cancelled)
+            ));
+        });
+    }
+
+    #[test]
+    fn sdf_trace_value_refuses_inconsistent_exact_evidence() {
+        let gate = CancelGate::new_clock_free();
+        let chart = TestTraceChart {
+            gate: None,
+            nominal: -1.0,
+            certificate: NumericalCertificate::exact(1.0),
+        };
+        let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+        pool.scope(|arena| {
+            let cx = Cx::new(
+                &gate,
+                arena,
+                StreamKey {
+                    seed: 37,
+                    kernel_id: 41,
+                    tile: 0,
+                    iteration: 0,
+                },
+                Budget::INFINITE,
+                ExecMode::Deterministic,
+            );
+            assert!(matches!(
+                checked_sdf_trace_value(&chart, Point3::new(0.0, 0.0, 0.0), &cx),
+                Err(ContactError::Query(QueryError::InvalidPointSample { .. }))
             ));
         });
     }
