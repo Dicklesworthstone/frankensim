@@ -46,7 +46,11 @@ const PROBE_CHARTER: snapshot_v2::StateIdentityCharterV2 = snapshot_v2::StateIde
 // guard below refuses any divergence between these constants and a fresh
 // derivation, so rotation of the charter text fails loudly here first.
 const PROBE_STATE_TYPE_ID_V2: snapshot_v2::SnapshotStateTypeIdV2 =
-    snapshot_v2::SnapshotStateTypeIdV2::from_bytes([0x00; 32]);
+    snapshot_v2::SnapshotStateTypeIdV2::from_bytes([
+        0x88, 0x6b, 0x03, 0x4c, 0xf5, 0x3c, 0x74, 0x4e, 0x91, 0x1e, 0x48, 0x78, 0x3c, 0x9f, 0x60,
+        0xd5, 0xc5, 0x03, 0x51, 0x13, 0x74, 0x80, 0x21, 0x4f, 0x0d, 0x97, 0x9f, 0xbc, 0xf0, 0xe3,
+        0x50, 0x3a,
+    ]);
 const PROBE_STATE_SCHEMA_ID_V2: snapshot_v2::SnapshotStateSchemaIdV2 =
     snapshot_v2::SnapshotStateSchemaIdV2::from_bytes([0x00; 32]);
 const PROBE_STATE_CODEC_ID_V2: snapshot_v2::SnapshotStateCodecIdV2 =
