@@ -123,19 +123,26 @@ fn projection_g0_laws() {
 #[test]
 fn filter_and_projection_inputs_fail_closed() {
     let (complex, positions) = kuhn_cube(1);
-    for radius in [-1.0, f64::NAN, f64::MAX] {
+    for radius in [-1.0, f64::NAN, f64::INFINITY, f64::MAX] {
         assert!(
             std::panic::catch_unwind(|| DensityFilter::new(&complex, &positions, radius)).is_err(),
             "invalid radius {radius:?} must refuse before assembly"
         );
     }
+    let empty = fs_rep_mesh::TetComplex::from_tets(0, Vec::new());
+    assert!(std::panic::catch_unwind(|| DensityFilter::new(&empty, &[], 0.15)).is_err());
+    assert!(
+        std::panic::catch_unwind(|| {
+            DensityFilter::new(&complex, &positions[..positions.len() - 1], 0.15)
+        })
+        .is_err()
+    );
 
     let filter = DensityFilter::new(&complex, &positions, 0.15);
+    assert_eq!(filter.radius().to_bits(), 0.15f64.to_bits());
     let cell_count = complex.tets.len();
     assert!(std::panic::catch_unwind(|| filter.apply(&[])).is_err());
-    assert!(
-        std::panic::catch_unwind(|| filter.apply(&vec![f64::NAN; cell_count])).is_err()
-    );
+    assert!(std::panic::catch_unwind(|| filter.apply(&vec![f64::NAN; cell_count])).is_err());
     assert!(std::panic::catch_unwind(|| filter.apply_transpose(&[])).is_err());
     assert!(
         std::panic::catch_unwind(|| filter.apply_transpose(&vec![f64::INFINITY; cell_count]))
@@ -143,7 +150,7 @@ fn filter_and_projection_inputs_fail_closed() {
     );
 
     let rho = 0.37;
-    for beta in [0.0, f64::MIN_POSITIVE] {
+    for beta in [0.0, f64::from_bits(1), f64::MIN_POSITIVE] {
         assert_eq!(heaviside(rho, beta, 0.5).to_bits(), rho.to_bits());
         assert_eq!(
             heaviside_derivative(rho, beta, 0.5).to_bits(),

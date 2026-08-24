@@ -31,7 +31,7 @@
 
 use fs_evidence::{NumericalCertificate, NumericalKind};
 use fs_exec::Cx;
-use fs_geom::{Aabb, Chart, ChartSample, Point3, TraceStepClaim};
+use fs_geom::{Aabb, Chart, ChartSample, Point3};
 
 /// One station of a felt thickness profile.
 #[derive(Debug, Clone, Copy, PartialEq)]

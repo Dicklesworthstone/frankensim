@@ -20015,17 +20015,19 @@ mod right { pub const DUPLICATE: u32 = 2; }
 
     #[test]
     fn schema_type_grammar_accepts_paths_and_bare_identifiers() {
-        let types = parse_schema_types(
-            "crates/shared/src/schema.rs#SessionId,LocalType",
-        )
-        .expect("path#TypeName and bare identifiers are canonical");
+        let types = parse_schema_types("crates/shared/src/schema.rs#SessionId,LocalType")
+            .expect("path#TypeName and bare identifiers are canonical");
         assert_eq!(types.len(), 2);
         assert_eq!(types[0].canonical(), "LocalType");
         assert_eq!(
             types[1].canonical(),
             "crates/shared/src/schema.rs#SessionId"
         );
-        assert!(parse_schema_types("none").expect("none is allowed").is_empty());
+        assert!(
+            parse_schema_types("none")
+                .expect("none is allowed")
+                .is_empty()
+        );
         assert!(parse_schema_types("../schema.rs#Type").is_err());
         assert!(parse_schema_types("Type,Type").is_err());
         assert!(parse_schema_types("schema.rs##Type").is_err());

@@ -17,7 +17,7 @@ pub struct DensityFilter {
     mass: Csr,
     helmholtz: Csr,
     /// Filter radius r (the length scale).
-    pub radius: f64,
+    radius: f64,
     /// Scatter matrix rows: for each cell, its 4 vertices with weight
     /// |V_c|/4 (volume-weighted vertex averaging).
     cells: Vec<[u32; 4]>,
@@ -42,6 +42,22 @@ impl DensityFilter {
         assert!(
             radius_squared.is_finite(),
             "density-filter squared radius must remain finite"
+        );
+        assert!(
+            !complex.tets.is_empty() && complex.vertex_count > 0,
+            "density filter requires a nonempty tetrahedral complex"
+        );
+        assert_eq!(
+            positions.len(),
+            complex.vertex_count,
+            "density filter requires one position per complex vertex"
+        );
+        assert!(
+            positions
+                .iter()
+                .flatten()
+                .all(|coordinate| coordinate.is_finite()),
+            "density filter requires finite vertex positions"
         );
         let geo = fs_feec::element_geometry(complex, positions);
         let mass = fs_feec::mass_matrix(complex, &geo, 0);
@@ -88,6 +104,12 @@ impl DensityFilter {
             vertex_vol,
             nv,
         }
+    }
+
+    /// Filter radius used to assemble the immutable Helmholtz operator.
+    #[must_use]
+    pub const fn radius(&self) -> f64 {
+        self.radius
     }
 
     /// Solve (M + r²K)·x = rhs on the FULL vertex space (natural BCs).
