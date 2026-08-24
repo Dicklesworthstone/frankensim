@@ -579,6 +579,13 @@ pub enum ScientificOverlayError {
         /// Configured ceiling.
         limit: usize,
     },
+    /// Timeline reconstruction named a source sample outside the artifact.
+    InvalidTimelineSampleIndex {
+        /// Invalid source index.
+        index: usize,
+        /// Number of retained source samples.
+        sample_count: usize,
+    },
     /// Timeline reconstruction refused.
     Timeline(TimelineResamplingError),
     /// Camera evaluation or projection refused.
@@ -624,7 +631,16 @@ pub fn build_scientific_overlay(
     let timeline =
         TimelineResampler::new(trajectory).sample(request.frame_time_s, request.event_side)?;
     let exact_input = match timeline.source {
-        TimelineSampleSource::ExactSample { index } => Some(trajectory.samples()[index].input()),
+        TimelineSampleSource::ExactSample { index } => Some(
+            trajectory
+                .samples()
+                .get(index)
+                .ok_or(ScientificOverlayError::InvalidTimelineSampleIndex {
+                    index,
+                    sample_count: trajectory.samples().len(),
+                })?
+                .input(),
+        ),
         TimelineSampleSource::Interpolated { .. } => None,
     };
 
@@ -632,7 +648,8 @@ pub fn build_scientific_overlay(
     let contact = ScientificContactDiagnostic {
         branch: timeline.contact_branch,
         point: current_contact
-            .map(|geometry| project_point(physical_camera, geometry.point_world_m, config)),
+            .map(|geometry| project_point(physical_camera, geometry.point_world_m, config))
+            .transpose()?,
         support_feature: current_contact.map(|geometry| geometry.support_feature),
     };
 
@@ -655,7 +672,7 @@ pub fn build_scientific_overlay(
                 physical_camera,
                 geometry.point_world_m,
                 config,
-            ));
+            )?);
         }
     }
 
@@ -671,7 +688,7 @@ pub fn build_scientific_overlay(
         centre,
         axis,
         config.axis_length_m,
-    );
+    )?;
     let mut vectors = Vec::new();
     if let Some(input) = exact_input {
         append_exact_vectors(
@@ -681,7 +698,7 @@ pub fn build_scientific_overlay(
             trajectory.metadata().channel_availability,
             input,
             centre,
-        );
+        )?;
     }
     let qois = exact_input.map(|input| input.qois);
     let energy = exact_input.map(|input| ScientificEnergyDiagnostic {
@@ -743,7 +760,7 @@ fn append_exact_vectors(
     availability: crate::render_trajectory::RenderChannelAvailability,
     input: &RenderTrajectorySampleInput,
     centre: MbdVec3,
-) {
+) -> Result<(), ScientificOverlayError> {
     if availability.normal_force_sampling != RenderNormalForceSampling::Unavailable {
         if let Some(contact) = input.contact_geometry {
             vectors.push(project_vector(
@@ -753,7 +770,7 @@ fn append_exact_vectors(
                 contact.point_world_m,
                 contact.normal_world.scale(input.interval_normal_force_n),
                 config.force_scale_m_per_n,
-            ));
+            )?);
         }
     }
     for (available, force_kind, torque_kind, wrench) in [
@@ -797,9 +814,10 @@ fn append_exact_vectors(
                 torque_kind,
                 centre,
                 wrench,
-            );
+            )?;
         }
     }
+    Ok(())
 }
 
 fn append_wrench(
@@ -810,7 +828,7 @@ fn append_wrench(
     torque_kind: ScientificVectorKind,
     origin: MbdVec3,
     wrench: ChannelWrench,
-) {
+) -> Result<(), ScientificOverlayError> {
     vectors.push(project_vector(
         camera,
         config,
@@ -818,7 +836,7 @@ fn append_wrench(
         origin,
         wrench.force_world_n,
         config.force_scale_m_per_n,
-    ));
+    )?);
     vectors.push(project_vector(
         camera,
         config,
@@ -826,7 +844,8 @@ fn append_wrench(
         origin,
         wrench.torque_world_nm,
         config.torque_scale_m_per_nm,
-    ));
+    )?);
+    Ok(())
 }
 
 fn project_vector(
@@ -836,60 +855,59 @@ fn project_vector(
     origin: MbdVec3,
     value: MbdVec3,
     scale: f64,
-) -> ScientificVectorDiagnostic {
+) -> Result<ScientificVectorDiagnostic, ScientificOverlayError> {
     let endpoint = origin.add(value.scale(scale));
-    ScientificVectorDiagnostic {
+    Ok(ScientificVectorDiagnostic {
         kind,
         origin_world_m: vec_array(origin),
         value_si: vec_array(value),
         display_scale_m_per_unit: scale,
-        start: project(camera, origin, config),
-        end: project(camera, endpoint, config),
-    }
+        start: project(camera, origin, config)?,
+        end: project(camera, endpoint, config)?,
+    })
 }
 
 fn project_point(
     camera: &PhysicalCamera,
     point: MbdVec3,
     config: ScientificOverlayConfig,
-) -> ScientificOverlayPoint {
-    ScientificOverlayPoint {
+) -> Result<ScientificOverlayPoint, ScientificOverlayError> {
+    Ok(ScientificOverlayPoint {
         world_m: vec_array(point),
-        projection: project(camera, point, config),
-    }
+        projection: project(camera, point, config)?,
+    })
 }
 
 fn project(
     camera: &PhysicalCamera,
     point: MbdVec3,
     config: ScientificOverlayConfig,
-) -> OverlayProjection {
-    match camera
-        .project_from_optical_center(
+) -> Result<OverlayProjection, ScientificOverlayError> {
+    Ok(
+        match camera.project_from_optical_center(
             Point3::new(point.x, point.y, point.z),
             f64::from(config.width) / f64::from(config.height),
-        )
-        .expect("admitted trajectory and camera must retain finite projection")
-    {
-        OpticalCenterProjection::BehindCamera { signed_depth_m } => {
-            OverlayProjection::BehindCamera { signed_depth_m }
-        }
-        OpticalCenterProjection::InFront { ndc_xy, depth_m } => {
-            let pixel_xy = [
-                (ndc_xy[0] + 1.0) * 0.5 * f64::from(config.width),
-                (1.0 - ndc_xy[1]) * 0.5 * f64::from(config.height),
-            ];
-            OverlayProjection::InFront {
-                ndc_xy,
-                pixel_xy,
-                depth_m,
-                in_frame: pixel_xy[0] >= 0.0
-                    && pixel_xy[0] < f64::from(config.width)
-                    && pixel_xy[1] >= 0.0
-                    && pixel_xy[1] < f64::from(config.height),
+        )? {
+            OpticalCenterProjection::BehindCamera { signed_depth_m } => {
+                OverlayProjection::BehindCamera { signed_depth_m }
             }
-        }
-    }
+            OpticalCenterProjection::InFront { ndc_xy, depth_m } => {
+                let pixel_xy = [
+                    (ndc_xy[0] + 1.0) * 0.5 * f64::from(config.width),
+                    (1.0 - ndc_xy[1]) * 0.5 * f64::from(config.height),
+                ];
+                OverlayProjection::InFront {
+                    ndc_xy,
+                    pixel_xy,
+                    depth_m,
+                    in_frame: pixel_xy[0] >= 0.0
+                        && pixel_xy[0] < f64::from(config.width)
+                        && pixel_xy[1] >= 0.0
+                        && pixel_xy[1] < f64::from(config.height),
+                }
+            }
+        },
+    )
 }
 
 fn event_diagnostic(event: TimelineEvent) -> ScientificEventDiagnostic {

@@ -497,8 +497,13 @@ fn diagnostic_artifact(
         sample_at(0.0, STEP_S, specimen, mass, true, false, cx),
         sample_at(STEP_S, END_TIME_S, specimen, mass, true, true, cx),
     ];
+    for input in &mut inputs {
+        input.signed_gap_m = input.signed_gap_m.min(0.0);
+    }
     inputs[0].contact_transitions.clear();
+    inputs[0].interval_contact_active = false;
     inputs[2].contact_transitions.clear();
+    inputs[1].contact_transitions[0].bracket_end_s = STEP_S;
     inputs[1].interval_normal_force_n = 6.0;
     inputs[1].channels = ChannelOwnership {
         gravity: ChannelWrench {
