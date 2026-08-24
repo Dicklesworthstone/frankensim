@@ -164,29 +164,52 @@ fn run_intent_id_is_minted_after_and_downstream_of_tick0() {
 }
 
 #[test]
-fn human_mode_requires_input_every_tick() {
-    let mut sim = SimLoop::init(dec17_scenario(7, PilotMode::Human)).unwrap();
-    // With input: steps.
-    assert!(
-        sim.step(Some(ControlInput {
-            lever_force_n: 10.0,
-            warp_cmd_rad: 0.0
-        }))
-        .is_ok()
-    );
-    // Without: the typed refusal (never a silent zero-hold).
-    assert_eq!(sim.step(None).unwrap_err().code, "control-input-missing");
-    // Non-finite input refuses too.
-    assert_eq!(
-        sim.step(Some(ControlInput {
+fn human_input_refusals_do_not_consume_physical_time() {
+    let spec = dec17_scenario(7, PilotMode::Human);
+    let mut retried = SimLoop::init(spec.clone()).unwrap();
+    let checkpoint_before = retried.save_checkpoint().unwrap();
+    let digest_before = retried.digest_hex();
+
+    // Missing and invalid input are distinct typed refusals. Neither may
+    // advance the tick-addressed atmosphere or any other checkpoint state.
+    assert_eq!(retried.step(None).unwrap_err().code, "control-input-missing");
+    assert_eq!(retried.save_checkpoint().unwrap(), checkpoint_before);
+    assert_eq!(retried.digest_hex(), digest_before);
+
+    for invalid in [
+        ControlInput {
             lever_force_n: f64::NAN,
-            warp_cmd_rad: 0.0
-        }))
-        .unwrap_err()
-        .code,
-        "control-input-missing"
+            warp_cmd_rad: 0.0,
+        },
+        ControlInput {
+            lever_force_n: 0.0,
+            warp_cmd_rad: f64::INFINITY,
+        },
+    ] {
+        assert_eq!(
+            retried.step(Some(invalid)).unwrap_err().code,
+            "control-input-invalid"
+        );
+        assert_eq!(retried.save_checkpoint().unwrap(), checkpoint_before);
+        assert_eq!(retried.digest_hex(), digest_before);
+    }
+
+    // A corrected retry is the same physical tick as a first-attempt valid
+    // control, not the next atmosphere sample after a hidden skipped tick.
+    let valid = ControlInput {
+        lever_force_n: 10.0,
+        warp_cmd_rad: 0.02,
+    };
+    let retried_out = retried.step(Some(valid)).unwrap();
+    let mut fresh = SimLoop::init(spec).unwrap();
+    let fresh_out = fresh.step(Some(valid)).unwrap();
+    assert_eq!(retried_out, fresh_out);
+    assert_eq!(retried.digest_hex(), fresh.digest_hex());
+    assert_eq!(retried.save_checkpoint().unwrap(), fresh.save_checkpoint().unwrap());
+    jlog(
+        "human-input",
+        "\"required_every_tick\":true,\"refusals_are_atomic\":true",
     );
-    jlog("human-input", "\"required_every_tick\":true");
 }
 
 #[test]

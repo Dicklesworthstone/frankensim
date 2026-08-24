@@ -674,6 +674,33 @@ impl SimLoop {
                 ranked_repairs: vec!["init a new run".into()],
             });
         }
+        // Human input belongs to the requested next tick. Validate it
+        // before advancing either the tick counter or the counter-addressed
+        // atmosphere path: an `Err` must not consume physical time and make
+        // a corrected retry diverge from the run that supplied valid input
+        // on the first attempt.
+        let human_input = match self.spec.pilot_mode {
+            PilotMode::Human => {
+                let Some(inp) = input else {
+                    return Err(Refusal {
+                        code: "control-input-missing",
+                        message: format!("Human mode requires input at tick {}", self.tick + 1),
+                        ranked_repairs: vec![
+                            "supply ControlInput every tick (ApplyNextEligibleTickAndFlag)".into(),
+                        ],
+                    });
+                };
+                if !inp.lever_force_n.is_finite() || !inp.warp_cmd_rad.is_finite() {
+                    return Err(Refusal {
+                        code: "control-input-invalid",
+                        message: "non-finite control input".into(),
+                        ranked_repairs: vec!["supply finite lever force and warp values".into()],
+                    });
+                }
+                Some(inp)
+            }
+            PilotMode::FixedControls | PilotMode::Historical(_) => None,
+        };
         let dt = 1.0 / PERCEPTION_HZ;
         self.tick += 1;
         self.ou.advance_to(self.tick as i64).map_err(map_atmo)?;
@@ -724,22 +751,9 @@ impl SimLoop {
                 (cmd.lever_force_n, cmd.warp_cmd_rad)
             }
             PilotMode::Human => {
-                let Some(inp) = input else {
-                    return Err(Refusal {
-                        code: "control-input-missing",
-                        message: format!("Human mode requires input at tick {}", self.tick),
-                        ranked_repairs: vec![
-                            "supply ControlInput every tick (ApplyNextEligibleTickAndFlag)".into(),
-                        ],
-                    });
+                let Some(inp) = human_input else {
+                    unreachable!("Human input was validated before lifecycle mutation")
                 };
-                if !inp.lever_force_n.is_finite() || !inp.warp_cmd_rad.is_finite() {
-                    return Err(Refusal {
-                        code: "control-input-missing",
-                        message: "non-finite control input".into(),
-                        ranked_repairs: vec!["finite lever force and warp".into()],
-                    });
-                }
                 (inp.lever_force_n.clamp(-220.0, 220.0), inp.warp_cmd_rad)
             }
         };
