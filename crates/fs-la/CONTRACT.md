@@ -166,6 +166,19 @@ Dense linear algebra: GEMM, batched small dense, factorizations, eigensolvers. L
   digests under one blake3 domain; codecs fail closed on unknown schema
   versions, truncation, and revalidation failures. The module defines no
   algorithm and no checker.
+  The producer half of that surface lands as `canonical_tree`
+  (bead 6ys.5.1.3): a fixed logical TSQR tree over public `factor::qr`
+  primitives whose schedule is the same pure function of
+  `(m, row_block, n)` as `tsqr_r`; bitwise-identical output on identical
+  schedules is a tested T1 fact. Stages poll a [`CancelScope`] between
+  leaf/combine boundaries with drain-to-completion semantics — a cancelled
+  run returns only a digest-sealed resumable checkpoint and never
+  publishes a partial factor. Checkpoints fail closed on body/seal
+  mismatch, foreign trees, and stale cursors. Producer outcomes carry
+  honest `NoClaim` authority until the independent checker receipt
+  (6ys.5.1.4) exists; the non-forgeability law forbids any other state.
+  Single-threaded v1 execution is unchanged; fs-exec tile-parallel
+  drivers remain recorded follow-up scope.
   `svd_jacobi` is one-sided cyclic Jacobi (thin
   U·Σ·Vᵀ, σ descending, deterministic order and tie-breaks).
 - `mixed::{solve_adaptive, ResidualTarget, Ladder, RefineReport}` —
