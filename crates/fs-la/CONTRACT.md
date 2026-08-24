@@ -153,9 +153,19 @@ Dense linear algebra: GEMM, batched small dense, factorizations, eigensolvers. L
   positive-diagonal uniqueness restricted to finite full-column-rank
   inputs; T3 an explicit NO-CLAIM on cross-schedule factor equality and on
   absolute-threshold rank classification for rank-deficient inputs.
-  Canonical gauge construction is 6ys.5.1.3 scope; typed scale-aware
-  rank/threshold policy and non-finite input admission refusal are
-  6ys.5.1.2 scope.
+  Canonical gauge construction is 6ys.5.1.3 scope. The typed policy and
+  result vocabulary for that work is delivered as `canonical_qr` (bead
+  6ys.5.1.2): `CanonicalQrPolicy`/`RankTolerance` carry scale-RELATIVE
+  thresholds only (absolute cutoffs are unrepresentable — private field,
+  no absolute constructor); `ClaimTier`/`OutcomeAuthority`/`NoClaimReason`
+  bind claims to the frozen tiers with T3 deliberately unnameable as a
+  claim; `CanonicalQrOutcome::checked` enforces shape/triangularity/flip-
+  law/finiteness and the non-forgeability law (certified tiers require a
+  checker receipt reference, so producers cannot mint authority);
+  `ReplayIdentity` binds input/policy/tree/mode/version/result/certificate
+  digests under one blake3 domain; codecs fail closed on unknown schema
+  versions, truncation, and revalidation failures. The module defines no
+  algorithm and no checker.
   `svd_jacobi` is one-sided cyclic Jacobi (thin
   U·Σ·Vᵀ, σ descending, deterministic order and tie-breaks).
 - `mixed::{solve_adaptive, ResidualTarget, Ladder, RefineReport}` —
