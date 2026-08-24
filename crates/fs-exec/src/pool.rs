@@ -1123,14 +1123,10 @@ impl TilePoolCompletionWitness {
     /// Typed-refusal tiles retained with exact provenance (zero or one).
     #[must_use]
     pub fn retained_refusal_tiles(&self) -> u64 {
-        if matches!(
+        u64::from(matches!(
             self.terminal_error.as_ref(),
             Some(RunError::TileFailed { .. })
-        ) {
-            1
-        } else {
-            0
-        }
+        ))
     }
 
     /// Failures with exact executor-retained provenance.
@@ -1768,10 +1764,9 @@ fn verify_completion_witness(
         witness.scope.parent_region_id,
         witness.scope.parent_task_id,
     ) {
-        ("std-thread-scope", None, None) => false,
-        ("asupersync-task-scope", Some(_), Some(_)) => false,
-        ("std-thread-parked-crew", None, None) => true,
-        ("asupersync-task-parked-crew", Some(_), Some(_)) => true,
+        ("std-thread-scope", None, None) | ("asupersync-task-scope", Some(_), Some(_)) => false,
+        ("std-thread-parked-crew", None, None)
+        | ("asupersync-task-parked-crew", Some(_), Some(_)) => true,
         _ => return Err(completion_invariant("scope-identity")),
     };
     if witness.admitted_tiles.checked_add(witness.unadmitted_tiles) != Some(witness.planned_tiles) {
@@ -4553,7 +4548,7 @@ impl TilePool {
                                 break;
                             }
                             let spawned = std::thread::Builder::new().spawn_scoped(s, move || {
-                                worker_loop::<COMPLETION, Caps, K>(ctx, w, None)
+                                worker_loop::<COMPLETION, Caps, K>(ctx, w, None);
                             });
                             if let Err(error) = spawned {
                                 spawn_failure = Some((w, error.to_string()));
@@ -4589,7 +4584,7 @@ impl TilePool {
                         for w in 0..workers {
                             let ctx = &ctx;
                             if let Err(error) = scope.spawn(move |cpu| {
-                                worker_loop::<COMPLETION, Caps, K>(ctx, w, Some(cpu))
+                                worker_loop::<COMPLETION, Caps, K>(ctx, w, Some(cpu));
                             }) {
                                 spawn_failure = Some((w, error.to_string()));
                                 gate.request();
@@ -4736,12 +4731,11 @@ impl TilePool {
             } else {
                 let mut missing = None;
                 for (index, slot) in slots.into_iter().enumerate() {
-                    match slot.into_inner().expect("slot") {
-                        Some(out) => outs.push(out),
-                        None => {
-                            missing = Some(index as u64);
-                            break;
-                        }
+                    if let Some(out) = slot.into_inner().expect("slot") {
+                        outs.push(out);
+                    } else {
+                        missing = Some(index as u64);
+                        break;
                     }
                 }
                 match missing {

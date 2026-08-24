@@ -835,8 +835,8 @@ fn legacy_payload_checksum_bounded<C: fs_blake3::identity::CancellationProbe>(
 /// # Errors
 /// Every cap, cancellation, structure, checksum, exact-root, or expected-field
 /// mismatch is refused before a typed legacy decoder can run.
-pub fn inspect_expected_legacy_snapshot_v1<'a, C>(
-    bytes: &'a [u8],
+pub fn inspect_expected_legacy_snapshot_v1<C>(
+    bytes: &[u8],
     expected: LegacySnapshotExpectationV1,
     limits: LegacySnapshotLimitsV1,
     mut cancellation: C,
@@ -6153,8 +6153,8 @@ impl<S: LegacySolverStateV1> LegacySnapshotV1Adapter<S> {
     /// # Errors
     /// Any adapter-identity, resource, cancellation, exact-root, envelope, or
     /// payload refusal prevents publication.
-    pub fn open_expected<'a, C>(
-        bytes: &'a [u8],
+    pub fn open_expected<C>(
+        bytes: &[u8],
         expected: LegacySnapshotExpectationV1,
         limits: LegacySnapshotLimitsV1,
         mut cancellation: C,
@@ -6344,6 +6344,7 @@ pub trait SolverStateV2: Sized {
     /// identity constants against the charter derivation, so copied or
     /// hand-edited constants refuse before any envelope work. `None`
     /// keeps the pre-charter no-claim for legacy implementations.
+    #[must_use]
     fn charter() -> Option<&'static snapshot_v2::StateIdentityCharterV2> {
         None
     }
@@ -6353,6 +6354,7 @@ pub trait SolverStateV2: Sized {
     /// identities still belong to this owner and family. Snapshots sealed
     /// under them stay recognizable for audit/replay routing, but only
     /// [`Self::charter`] is activation authority. Default empty.
+    #[must_use]
     fn charter_history() -> &'static [snapshot_v2::StateIdentityCharterV2] {
         &[]
     }
@@ -8365,6 +8367,7 @@ mod tests {
 
     #[test]
     fn v2_full_header_resume_and_authority_vectors_are_retained() {
+    const EXPECTED_HEADER_HEX: &str = "46534558534e5632020000004c0200007dda0e58a334b0cce2b380ce6631c316c1c047ad183e6ac021cbdff252260117a88ee1be8cbce945877508cfbd550dee41cdb8936c09db4f0fc21a15cb099516c344aaded501d5e1faa44d418b4647f5c8737b5670f9f74ed271e559498293a9010000001111111111111111111111111111111111111111111111111111111111111111070000000000000022222222222222222222222222222222222222222222222222222222222222223333333333333333333333333333333333333333333333333333333333333333010100000100000028b7b2adc0a1cc210441ded866dbed08da1bb2e2ca134d458884c19406fa108a870e28e7b557d3ffda247ea5aa30c39f94d3eff3ae6d727817381f18febf3ee9df00fe5010cbf8ffd8efa02bca34c272dce15801894a0309fe56a92474d11f0d3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f44444444444444444444444444444444444444444444444444444444444444445555555555555555555555555555555555555555555555555555555555555555666666666666666666666666666666666666666666666666666666666666666609000000000000001100000000000000020000000000000002000000000000007c4fd6af8bf0bfc369d4349977a34e31806461dd10ef5db63bfc9d1d22c1219e2000000000000000b1adb6585eb611b648efca4b640eda7ae68f89fae6b700cfde79999cc872e9521b8cf1e29945b16c996e86358d72bcd572533d4a5036be17a6b19724285ac0af";
         fn hex(bytes: &[u8]) -> String {
             use core::fmt::Write as _;
 
@@ -8391,7 +8394,6 @@ mod tests {
         let authority_preimage = sealed.authority_subject_receipt().canonical_preimage();
         let resume_hex = hex(resume_preimage.as_bytes());
         let authority_hex = hex(authority_preimage.as_bytes());
-        const EXPECTED_HEADER_HEX: &str = "46534558534e5632020000004c0200007dda0e58a334b0cce2b380ce6631c316c1c047ad183e6ac021cbdff252260117a88ee1be8cbce945877508cfbd550dee41cdb8936c09db4f0fc21a15cb099516c344aaded501d5e1faa44d418b4647f5c8737b5670f9f74ed271e559498293a9010000001111111111111111111111111111111111111111111111111111111111111111070000000000000022222222222222222222222222222222222222222222222222222222222222223333333333333333333333333333333333333333333333333333333333333333010100000100000028b7b2adc0a1cc210441ded866dbed08da1bb2e2ca134d458884c19406fa108a870e28e7b557d3ffda247ea5aa30c39f94d3eff3ae6d727817381f18febf3ee9df00fe5010cbf8ffd8efa02bca34c272dce15801894a0309fe56a92474d11f0d3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f44444444444444444444444444444444444444444444444444444444444444445555555555555555555555555555555555555555555555555555555555555555666666666666666666666666666666666666666666666666666666666666666609000000000000001100000000000000020000000000000002000000000000007c4fd6af8bf0bfc369d4349977a34e31806461dd10ef5db63bfc9d1d22c1219e2000000000000000b1adb6585eb611b648efca4b640eda7ae68f89fae6b700cfde79999cc872e9521b8cf1e29945b16c996e86358d72bcd572533d4a5036be17a6b19724285ac0af";
         assert_eq!(header_hex.len(), snapshot_v2::HEADER_LEN_V2 * 2);
         assert_eq!(EXPECTED_HEADER_HEX.len(), snapshot_v2::HEADER_LEN_V2 * 2);
         assert_eq!(header_hex, EXPECTED_HEADER_HEX);
@@ -8497,16 +8499,15 @@ mod tests {
             snapshot_v2::SnapshotEraMigrationSchemaIdV2::from_bytes([0x72; 32]),
             snapshot_v2::SnapshotEraMigrationContextIdV2::from_bytes([0x73; 32]),
         );
-        let refusal = match snapshot_v2::migrate_historical_era(
+        let Err(refusal) = snapshot_v2::migrate_historical_era(
             source,
             plan,
             &context,
             limits,
             snapshot_v2::HistoricalCanonicalEncoderV2::Unavailable,
             || false,
-        ) {
-            Ok(_) => panic!("missing historical encoder published a migration"),
-            Err(error) => error,
+        ) else {
+            panic!("missing historical encoder published a migration");
         };
         match refusal {
             snapshot_v2::SnapshotEraMigrationErrorV2::HistoricalCanonicalEncoderUnavailable {
@@ -8912,6 +8913,20 @@ mod tests {
     #[test]
     #[allow(clippy::too_many_lines)]
     fn v2_refuses_corruption_downgrade_and_hostile_lengths_before_decode() {
+    #[derive(Debug)]
+    struct CancelAfter {
+        successful_polls: usize,
+    }
+    impl fs_blake3::identity::CancellationProbe for CancelAfter {
+        fn is_cancelled(&mut self) -> bool {
+            if self.successful_polls == 0 {
+                true
+            } else {
+                self.successful_polls -= 1;
+                false
+            }
+        }
+    }
         const OFFSET_HEADER_LEN: usize = 12;
         const OFFSET_PROBLEM: usize = 156;
         const OFFSET_DETERMINISM: usize = 220;
@@ -9108,20 +9123,6 @@ mod tests {
             })
         ));
 
-        #[derive(Debug)]
-        struct CancelAfter {
-            successful_polls: usize,
-        }
-        impl fs_blake3::identity::CancellationProbe for CancelAfter {
-            fn is_cancelled(&mut self) -> bool {
-                if self.successful_polls == 0 {
-                    true
-                } else {
-                    self.successful_polls -= 1;
-                    false
-                }
-            }
-        }
         assert!(matches!(
             snapshot_v2::seal(
                 &[0x5a; 128],
