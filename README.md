@@ -10,7 +10,7 @@
 [![Rust](https://img.shields.io/badge/rust-nightly%202024-b7410e)](rust-toolchain.toml)
 [![Crates](https://img.shields.io/badge/workspace-162%20native%20fs--%2A%20crates-0969da)](#implemented-workspace)
 [![Contracts](https://img.shields.io/badge/contracts-166%20of%20166%20crates-8250df)](#contracts-and-verification)
-[![Tests](https://img.shields.io/badge/tests-788%20tracked%20integration%20test%20files-1f883d)](#contracts-and-verification)
+[![Tests](https://img.shields.io/badge/tests-804%20tracked%20integration%20test%20files-1f883d)](#contracts-and-verification)
 [![License](https://img.shields.io/badge/license-MIT%20%2B%20AI%20rider-yellow)](LICENSE)
 
 </div>
@@ -30,14 +30,14 @@ inventories declarations and is not, by itself, proof that every dependency
 edge is valid.
 
 <!-- BEGIN GENERATED FRANKENSIM DOC FACTS -->
-|Derived repository fact|Value|
-|---|---|
-|Native workspace `fs-*` crates|162|
-|Standalone `fs-*` workspaces|4 (`fs-flyer-wasm`, `fs-goddard-wasm`, `fs-tesla-wasm`, `fs-wasm`)|
-|Tracked `fs-*` crate directories|166|
-|Tracked `CONTRACT.md` files|166 of 166|
-|Tracked crate integration-test files|788|
-|`fs-*` layer inventory|`UTIL=15`, `L0=7`, `L1=14`, `L2=22`, `L3=40`, `L4=33`, `L5=4`, `L6=30`, `TOOL=1`|
+| Derived repository fact | Value |
+|-------------------------|-------|
+| Native workspace `fs-*` crates | 162 |
+| Standalone `fs-*` workspaces | 4 (`fs-flyer-wasm`, `fs-goddard-wasm`, `fs-tesla-wasm`, `fs-wasm`) |
+| Tracked `fs-*` crate directories | 166 |
+| Tracked `CONTRACT.md` files | 166 of 166 |
+| Tracked crate integration-test files | 804 |
+| `fs-*` layer inventory | `UTIL=15`, `L0=7`, `L1=14`, `L2=22`, `L3=40`, `L4=33`, `L5=4`, `L6=30`, `TOOL=1` |
 <!-- END GENERATED FRANKENSIM DOC FACTS -->
 
 An initial stable validation CLI now exists, but there is not yet an integrated end-user simulation application or crates.io release. Today, FrankenSim is usable as a source workspace and library substrate.
@@ -61,7 +61,7 @@ An initial stable validation CLI now exists, but there is not yet an integrated 
 | Evidence and ledger | L2 evidence-colour and evidence-packaging capabilities; `fs-vvreg` now has a fail-closed validation-corpus schema with 19 Level-A thermal definitions/targets, five thermal Level-B cross-code cases, and four retained Level-C published-experiment records (Martin–Moyce plus three further digitized curves), while the FrankenSQLite-backed design ledger remains registered at L1 with known suite failures open |
 | Euler-disc flagship contract and bounded campaign | `fs-euler-disc-e2e` freezes an exact Context of Use, nine claim kinds, a 15-role owner/schema-routing matrix, evidence minima, binding no-claims, permutation-invariant prerequisite assessment, and a literal-digest structural self-consistency checker. Its deterministic JSONL campaign now adds twelve profile-native reduced closed trajectories, 2/4/8/16/32 s censor-aware continuation, bounded interior contact-event scanning plus bracketed terminal events, five-rung timestep/ranking diagnostics, and a typed physical-calibration NO-DATA record. The ranking refinement compares matched 1 mm outer fillets and derives the ring's equal-mass density from resolved chart volume. Separately, Estimate-only finite-patch normal, partial-slip, rolling, exterior-air, thin-gap gas-film, and reduced-base adapters compose atomically for restartable smooth-contact prefixes. The campaign is still a reduced numerical model, not experimental or video validation, calibrated physics, or a spin-time prediction |
 | Policy tooling | `xtask` checks for layer direction, Franken-only runtime dependencies, contracts, unsafe capsules, and constellation lock verification |
-| Tests | 788 Rust files under crate `tests/` directories in the checked inventory, in addition to inline unit tests; this is an inventory count, not a claim that every test is green on the current tree |
+| Tests | 804 Rust files under crate `tests/` directories in the checked inventory, in addition to inline unit tests; this is an inventory count, not a claim that every test is green on the current tree |
 
 ### Bounded Euler-disc campaign
 
