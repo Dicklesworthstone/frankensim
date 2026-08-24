@@ -43,6 +43,9 @@ use fs_qty::{Dims, QUANTITY_SPEC_ENCODED_LEN, QuantitySpec};
 
 /// Retained binary/canonical semantics for the crate-private, single-case
 /// [`IdentifiabilityStudySpec`] prototype.
+// Bead frankensim-68v4f unblock: prototype constant retained for the
+// i94v.3.3.1 owner until its consumer lands; not yet referenced.
+#[allow(dead_code)]
 pub(crate) const LEGACY_IDENTIFIABILITY_SCHEMA_VERSION: u32 = 2;
 /// Maximum identifier or short-reason byte length.
 pub const MAX_IDENTIFIABILITY_ID_BYTES: usize = 256;
@@ -53,6 +56,8 @@ pub const MAX_IDENTIFIABILITY_ITEMS: usize = 4096;
 /// Maximum canonical study bytes accepted or emitted.
 pub const MAX_IDENTIFIABILITY_CANONICAL_BYTES: usize = 4 * 1024 * 1024;
 
+// Bead frankensim-68v4f unblock: retained for the i94v.3.3.1 owner.
+#[allow(dead_code)]
 const SPEC_DOMAIN: &str = "org.frankensim.fs-material.identifiability-spec.v2";
 const PHYSICAL_DOMAIN: &str = "org.frankensim.fs-material.identifiability-physical.v2";
 const CANONICAL_MAGIC: &[u8] = b"fs-material-identifiability-study\0";
