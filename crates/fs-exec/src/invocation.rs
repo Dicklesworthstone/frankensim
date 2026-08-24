@@ -1799,15 +1799,12 @@ impl<'clock> InvocationBudget<'clock> {
             return Err(error);
         }
         let ordinal = self.next_ordinal;
-        let next_ordinal = match ordinal.checked_add(1) {
-            Some(next) => next,
-            None => {
-                let error = InvocationError::ArithmeticOverflow {
-                    resource: "child-ordinal",
-                };
-                self.latch_failure(parent, error.clone());
-                return Err(error);
-            }
+        let Some(next) = ordinal.checked_add(1) else {
+            let error = InvocationError::ArithmeticOverflow {
+                resource: "child-ordinal",
+            };
+            self.latch_failure(parent, error.clone());
+            return Err(error);
         };
         let total_grant = match grant.checked_add(finalization.as_invocation_resources()) {
             Ok(total) => total,
@@ -2466,18 +2463,12 @@ impl<'budget, 'clock> ChildBudget<'budget, 'clock> {
     pub fn charge_work(&mut self, amount: WorkUnits) -> Result<(), InvocationError> {
         self.ensure_active()?;
         let state = &self.owner.children[self.node];
-        let remaining = match state.remaining.work.0.checked_sub(amount.0) {
-            Some(remaining) => remaining,
-            None => {
-                let available = state.remaining.work.0;
-                return Err(self.latch(exceeded("work", amount.0, available)));
-            }
+        let Some(remaining) = state.remaining.work.0.checked_sub(amount.0) else {
+            let available = state.remaining.work.0;
+            return Err(self.latch(exceeded("work", amount.0, available)));
         };
-        let direct = match state.direct_consumed.work.0.checked_add(amount.0) {
-            Some(direct) => direct,
-            None => {
-                return Err(self.latch(InvocationError::ArithmeticOverflow { resource: "work" }));
-            }
+        let Some(direct) = state.direct_consumed.work.0.checked_add(amount.0) else {
+            return Err(self.latch(InvocationError::ArithmeticOverflow { resource: "work" }));
         };
         let state = &mut self.owner.children[self.node];
         state.remaining.work.0 = remaining;
@@ -2492,22 +2483,16 @@ impl<'budget, 'clock> ChildBudget<'budget, 'clock> {
     pub fn charge_cost(&mut self, amount: CostUnits) -> Result<(), InvocationError> {
         self.ensure_active()?;
         let state = &self.owner.children[self.node];
-        let remaining = match state.remaining.cost.0.checked_sub(amount.0) {
-            Some(remaining) => remaining,
-            None => {
-                let available = state.remaining.cost.0;
-                return Err(self.latch(exceeded(
-                    "cost",
-                    u128::from(amount.0),
-                    u128::from(available),
-                )));
-            }
+        let Some(remaining) = state.remaining.cost.0.checked_sub(amount.0) else {
+            let available = state.remaining.cost.0;
+            return Err(self.latch(exceeded(
+                "cost",
+                u128::from(amount.0),
+                u128::from(available),
+            )));
         };
-        let direct = match state.direct_consumed.cost.0.checked_add(amount.0) {
-            Some(direct) => direct,
-            None => {
-                return Err(self.latch(InvocationError::ArithmeticOverflow { resource: "cost" }));
-            }
+        let Some(direct) = state.direct_consumed.cost.0.checked_add(amount.0) else {
+            return Err(self.latch(InvocationError::ArithmeticOverflow { resource: "cost" }));
         };
         let state = &mut self.owner.children[self.node];
         state.remaining.cost.0 = remaining;
@@ -2522,24 +2507,18 @@ impl<'budget, 'clock> ChildBudget<'budget, 'clock> {
     pub fn charge_evaluations(&mut self, amount: EvaluationUnits) -> Result<(), InvocationError> {
         self.ensure_active()?;
         let state = &self.owner.children[self.node];
-        let remaining = match state.remaining.evaluations.0.checked_sub(amount.0) {
-            Some(remaining) => remaining,
-            None => {
-                let available = state.remaining.evaluations.0;
-                return Err(self.latch(exceeded(
-                    "evaluations",
-                    u128::from(amount.0),
-                    u128::from(available),
-                )));
-            }
+        let Some(remaining) = state.remaining.evaluations.0.checked_sub(amount.0) else {
+            let available = state.remaining.evaluations.0;
+            return Err(self.latch(exceeded(
+                "evaluations",
+                u128::from(amount.0),
+                u128::from(available),
+            )));
         };
-        let direct = match state.direct_consumed.evaluations.0.checked_add(amount.0) {
-            Some(direct) => direct,
-            None => {
-                return Err(self.latch(InvocationError::ArithmeticOverflow {
-                    resource: "evaluations",
-                }));
-            }
+        let Some(direct) = state.direct_consumed.evaluations.0.checked_add(amount.0) else {
+            return Err(self.latch(InvocationError::ArithmeticOverflow {
+                resource: "evaluations",
+            }));
         };
         let state = &mut self.owner.children[self.node];
         state.remaining.evaluations.0 = remaining;
@@ -2585,21 +2564,15 @@ impl<'budget, 'clock> ChildBudget<'budget, 'clock> {
     ) -> Result<InvocationMemoryReservation<'child, 'budget, 'clock>, InvocationError> {
         self.ensure_active()?;
         let state = &self.owner.children[self.node];
-        let next = match state.memory_current.checked_add(bytes.0) {
-            Some(next) => next,
-            None => {
-                return Err(self.latch(InvocationError::ArithmeticOverflow {
-                    resource: "memory-bytes",
-                }));
-            }
+        let Some(next) = state.memory_current.checked_add(bytes.0) else {
+            return Err(self.latch(InvocationError::ArithmeticOverflow {
+                resource: "memory-bytes",
+            }));
         };
-        let next_requested = match state.memory_requested.checked_add(u128::from(bytes.0)) {
-            Some(next) => next,
-            None => {
-                return Err(self.latch(InvocationError::ArithmeticOverflow {
-                    resource: "memory-requested",
-                }));
-            }
+        let Some(next) = state.memory_requested.checked_add(u128::from(bytes.0)) else {
+            return Err(self.latch(InvocationError::ArithmeticOverflow {
+                resource: "memory-requested",
+            }));
         };
         if next > state.remaining.memory.0 {
             let available = state.remaining.memory.0;
@@ -2661,32 +2634,23 @@ impl<'budget, 'clock> ChildBudget<'budget, 'clock> {
         self.owner
             .observe_terminal(Some(self.node), "child-publication")?;
         let state = &self.owner.children[self.node];
-        let remaining = match state.remaining.output.0.checked_sub(bytes.0) {
-            Some(remaining) => remaining,
-            None => {
-                let available = state.remaining.output.0;
-                return Err(self.latch(exceeded(
-                    "output-bytes",
-                    u128::from(bytes.0),
-                    u128::from(available),
-                )));
-            }
+        let Some(remaining) = state.remaining.output.0.checked_sub(bytes.0) else {
+            let available = state.remaining.output.0;
+            return Err(self.latch(exceeded(
+                "output-bytes",
+                u128::from(bytes.0),
+                u128::from(available),
+            )));
         };
-        let retained = match state.output_retained.checked_add(bytes.0) {
-            Some(retained) => retained,
-            None => {
-                return Err(self.latch(InvocationError::ArithmeticOverflow {
-                    resource: "output-retained",
-                }));
-            }
+        let Some(retained) = state.output_retained.checked_add(bytes.0) else {
+            return Err(self.latch(InvocationError::ArithmeticOverflow {
+                resource: "output-retained",
+            }));
         };
-        let direct = match state.direct_consumed.output.0.checked_add(bytes.0) {
-            Some(direct) => direct,
-            None => {
-                return Err(self.latch(InvocationError::ArithmeticOverflow {
-                    resource: "output-bytes",
-                }));
-            }
+        let Some(direct) = state.direct_consumed.output.0.checked_add(bytes.0) else {
+            return Err(self.latch(InvocationError::ArithmeticOverflow {
+                resource: "output-bytes",
+            }));
         };
         let state = &mut self.owner.children[self.node];
         state.remaining.output.0 = remaining;
@@ -2966,32 +2930,25 @@ impl ChildFinalizer<'_, '_> {
         }
         self.ensure_cleanup_open()?;
         let state = &self.owner.children[self.node];
-        let remaining = match state
+        let Some(remaining) = state
             .finalization_remaining
             .work
             .get()
-            .checked_sub(amount.get())
-        {
-            Some(remaining) => remaining,
-            None => {
-                let error = InvocationError::ResourceExceeded {
-                    resource: "finalization-work",
-                    requested: amount.get(),
-                    available: state.finalization_remaining.work.get(),
-                };
-                self.owner.latch_failure(Some(self.node), error.clone());
-                return Err(error);
-            }
-        };
-        let consumed = match state.direct_consumed.work.get().checked_add(amount.get()) {
-            Some(consumed) => consumed,
-            None => {
-                let error = InvocationError::ArithmeticOverflow {
-                    resource: "finalization-work",
-                };
-                self.owner.latch_failure(Some(self.node), error.clone());
-                return Err(error);
-            }
+            .checked_sub(amount.get()) else {
+            let error = InvocationError::ResourceExceeded {
+                resource: "finalization-work",
+                requested: amount.get(),
+                available: state.finalization_remaining.work.get(),
+            };
+            self.owner.latch_failure(Some(self.node), error.clone());
+            return Err(error);
+        }
+        let Some(consumed) = state.direct_consumed.work.get().checked_add(amount.get()) else {
+            let error = InvocationError::ArithmeticOverflow {
+                resource: "finalization-work",
+            };
+            self.owner.latch_failure(Some(self.node), error.clone());
+            return Err(error);
         };
         let state = &mut self.owner.children[self.node];
         state.finalization_remaining.work = WorkUnits::new(remaining);
@@ -3030,27 +2987,21 @@ impl ChildFinalizer<'_, '_> {
             }
         }
         let state = &self.owner.children[self.node];
-        let remaining = match state.finalization_remaining.polls.get().checked_sub(1) {
-            Some(remaining) => remaining,
-            None => {
-                let error = InvocationError::ResourceExceeded {
-                    resource: "finalization-polls",
-                    requested: 1,
-                    available: 0,
-                };
-                self.owner.latch_failure(Some(self.node), error.clone());
-                return Err(error);
-            }
+        let Some(remaining) = state.finalization_remaining.polls.get().checked_sub(1) else {
+            let error = InvocationError::ResourceExceeded {
+                resource: "finalization-polls",
+                requested: 1,
+                available: 0,
+            };
+            self.owner.latch_failure(Some(self.node), error.clone());
+            return Err(error);
         };
-        let consumed = match state.direct_consumed.polls.get().checked_add(1) {
-            Some(consumed) => consumed,
-            None => {
-                let error = InvocationError::ArithmeticOverflow {
-                    resource: "finalization-polls",
-                };
-                self.owner.latch_failure(Some(self.node), error.clone());
-                return Err(error);
-            }
+        let Some(consumed) = state.direct_consumed.polls.get().checked_add(1) else {
+            let error = InvocationError::ArithmeticOverflow {
+                resource: "finalization-polls",
+            };
+            self.owner.latch_failure(Some(self.node), error.clone());
+            return Err(error);
         };
         {
             let state = &mut self.owner.children[self.node];
@@ -3184,60 +3135,49 @@ impl ChildFinalizer<'_, '_> {
             });
         }
         let state = &self.owner.children[self.node];
-        let remaining = match state
+        let Some(remaining) = state
             .remaining
             .output
             .get()
-            .checked_sub(declared_bytes.get())
-        {
-            Some(remaining) => remaining,
-            None => {
-                let error = InvocationError::ResourceExceeded {
-                    resource: "output-bytes",
-                    requested: u128::from(declared_bytes.get()),
-                    available: u128::from(state.remaining.output.get()),
-                };
-                self.owner.latch_failure(Some(self.node), error.clone());
-                self.owner.children[self.node].finalization_publication_scope =
-                    Some(InvocationPublicationScope::ChildLocal);
-                self.owner.children[self.node].finalization_publication =
-                    FinalizationPublication::Aborted;
-                return Err(PublicationCommitError { error, staged });
-            }
+            .checked_sub(declared_bytes.get()) else {
+            let error = InvocationError::ResourceExceeded {
+                resource: "output-bytes",
+                requested: u128::from(declared_bytes.get()),
+                available: u128::from(state.remaining.output.get()),
+            };
+            self.owner.latch_failure(Some(self.node), error.clone());
+            self.owner.children[self.node].finalization_publication_scope =
+                Some(InvocationPublicationScope::ChildLocal);
+            self.owner.children[self.node].finalization_publication =
+                FinalizationPublication::Aborted;
+            return Err(PublicationCommitError { error, staged });
+        }
+        let Some(retained) = state.output_retained.checked_add(declared_bytes.get()) else {
+            let error = InvocationError::ArithmeticOverflow {
+                resource: "output-retained",
+            };
+            self.owner.latch_failure(Some(self.node), error.clone());
+            self.owner.children[self.node].finalization_publication_scope =
+                Some(InvocationPublicationScope::ChildLocal);
+            self.owner.children[self.node].finalization_publication =
+                FinalizationPublication::Aborted;
+            return Err(PublicationCommitError { error, staged });
         };
-        let retained = match state.output_retained.checked_add(declared_bytes.get()) {
-            Some(retained) => retained,
-            None => {
-                let error = InvocationError::ArithmeticOverflow {
-                    resource: "output-retained",
-                };
-                self.owner.latch_failure(Some(self.node), error.clone());
-                self.owner.children[self.node].finalization_publication_scope =
-                    Some(InvocationPublicationScope::ChildLocal);
-                self.owner.children[self.node].finalization_publication =
-                    FinalizationPublication::Aborted;
-                return Err(PublicationCommitError { error, staged });
-            }
-        };
-        let consumed = match state
+        let Some(consumed) = state
             .direct_consumed
             .output
             .get()
-            .checked_add(declared_bytes.get())
-        {
-            Some(consumed) => consumed,
-            None => {
-                let error = InvocationError::ArithmeticOverflow {
-                    resource: "output-bytes",
-                };
-                self.owner.latch_failure(Some(self.node), error.clone());
-                self.owner.children[self.node].finalization_publication_scope =
-                    Some(InvocationPublicationScope::ChildLocal);
-                self.owner.children[self.node].finalization_publication =
-                    FinalizationPublication::Aborted;
-                return Err(PublicationCommitError { error, staged });
-            }
-        };
+            .checked_add(declared_bytes.get()) else {
+            let error = InvocationError::ArithmeticOverflow {
+                resource: "output-bytes",
+            };
+            self.owner.latch_failure(Some(self.node), error.clone());
+            self.owner.children[self.node].finalization_publication_scope =
+                Some(InvocationPublicationScope::ChildLocal);
+            self.owner.children[self.node].finalization_publication =
+                FinalizationPublication::Aborted;
+            return Err(PublicationCommitError { error, staged });
+        }
         // `mem::replace` is the only real destination mutation supported by
         // this protocol. It is infallible and runs after every refusal check,
         // so accounting cannot say Committed without the destination changing,
