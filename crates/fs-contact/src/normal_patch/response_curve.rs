@@ -319,13 +319,18 @@ impl FiniteGapResponseCurve {
         &self,
         approach_m: f64,
     ) -> Result<FiniteGapInterpolatedResponse, FiniteGapResponseCurveError> {
-        let first = self
-            .nodes
-            .first()
-            .ok_or(FiniteGapResponseCurveError::InvalidInput {
-                field: "empty response curve",
-            })?;
+        if self.nodes.len() < 2 {
+            return Err(FiniteGapResponseCurveError::InvalidInput {
+                field: "response curve nodes",
+            });
+        }
+        let first = &self.nodes[0];
         let last = self.nodes.last().expect("nonempty checked above");
+        if !first.approach_m.is_finite() || !last.approach_m.is_finite() {
+            return Err(FiniteGapResponseCurveError::InvalidInput {
+                field: "response curve domain",
+            });
+        }
         if !approach_m.is_finite() || approach_m < first.approach_m || approach_m > last.approach_m
         {
             return Err(FiniteGapResponseCurveError::ApproachOutsideTable {
@@ -341,8 +346,23 @@ impl FiniteGapResponseCurve {
         let left = &self.nodes[right_index - 1];
         let right = &self.nodes[right_index];
         let width = right.approach_m - left.approach_m;
+        if !(width.is_finite()
+            && width > 0.0
+            && valid_response_node_values(left)
+            && valid_response_node_values(right))
+            || right.normal_force_n < left.normal_force_n
+        {
+            return Err(FiniteGapResponseCurveError::InvalidInput {
+                field: "response curve segment",
+            });
+        }
         let fraction = (approach_m - left.approach_m) / width;
         let tangent = (right.normal_force_n - left.normal_force_n) / width;
+        if !(fraction.is_finite() && (0.0..=1.0).contains(&fraction) && tangent.is_finite()) {
+            return Err(FiniteGapResponseCurveError::InvalidInput {
+                field: "response curve interpolation",
+            });
+        }
         let force = tangent.mul_add(approach_m - left.approach_m, left.normal_force_n);
         let segment_approach_m = approach_m - left.approach_m;
         let energy = left.curve_reversible_energy_j
@@ -418,6 +438,7 @@ impl FiniteGapResponseFamily {
         if reference_grid.len() < 2
             || curves.iter().any(|curve| {
                 curve.response_authority != FiniteGapResponseCurveAuthority::Estimate
+                    || !valid_response_curve(curve)
                     || curve.nodes.len() != reference_grid.len()
                     || curve
                         .nodes
@@ -450,17 +471,21 @@ impl FiniteGapResponseFamily {
         coordinate: f64,
         approach_m: f64,
     ) -> Result<FiniteGapInterpolatedResponse, FiniteGapResponseCurveError> {
-        let first =
-            *self
-                .coordinate_nodes
-                .first()
-                .ok_or(FiniteGapResponseCurveError::InvalidInput {
-                    field: "empty response family",
-                })?;
+        if self.coordinate_nodes.len() < 2 || self.curves.len() != self.coordinate_nodes.len() {
+            return Err(FiniteGapResponseCurveError::InvalidInput {
+                field: "response family storage",
+            });
+        }
+        let first = self.coordinate_nodes[0];
         let last = *self
             .coordinate_nodes
             .last()
             .expect("nonempty family checked above");
+        if !first.is_finite() || !last.is_finite() {
+            return Err(FiniteGapResponseCurveError::InvalidInput {
+                field: "response family domain",
+            });
+        }
         if !coordinate.is_finite() || coordinate < first || coordinate > last {
             return Err(FiniteGapResponseCurveError::CoordinateOutsideFamily {
                 coordinate,
@@ -474,7 +499,13 @@ impl FiniteGapResponseFamily {
         let right_index = upper.clamp(1, self.coordinate_nodes.len() - 1);
         let left_coordinate = self.coordinate_nodes[right_index - 1];
         let right_coordinate = self.coordinate_nodes[right_index];
-        let fraction = (coordinate - left_coordinate) / (right_coordinate - left_coordinate);
+        let width = right_coordinate - left_coordinate;
+        if !(width.is_finite() && width > 0.0) {
+            return Err(FiniteGapResponseCurveError::InvalidInput {
+                field: "response family segment",
+            });
+        }
+        let fraction = (coordinate - left_coordinate) / width;
         let left = self.curves[right_index - 1].evaluate(approach_m)?;
         let right = self.curves[right_index].evaluate(approach_m)?;
         Ok(FiniteGapInterpolatedResponse {
@@ -574,6 +605,41 @@ fn lerp(left: f64, right: f64, fraction: f64) -> f64 {
 
 fn valid_coordinate_text(value: &str) -> bool {
     !value.trim().is_empty() && value.len() <= 128 && value.is_ascii()
+}
+
+fn valid_response_curve(curve: &FiniteGapResponseCurve) -> bool {
+    curve.nodes.len() >= 2
+        && curve.nodes.len() <= MAX_FINITE_GAP_RESPONSE_NODES
+        && curve.nodes[0].approach_m.to_bits() == 0.0_f64.to_bits()
+        && curve.nodes.iter().all(valid_response_node_values)
+        && curve.nodes.windows(2).all(|pair| {
+            pair[1].approach_m > pair[0].approach_m
+                && pair[1].normal_force_n >= pair[0].normal_force_n
+        })
+        && curve.maximum_absolute_energy_residual_j.is_finite()
+        && curve.maximum_absolute_energy_residual_j >= 0.0
+}
+
+fn valid_response_node_values(node: &FiniteGapResponseNode) -> bool {
+    node.approach_m.is_finite()
+        && node.approach_m >= 0.0
+        && node.normal_force_n.is_finite()
+        && node.normal_force_n >= 0.0
+        && node.peak_pressure_pa.is_finite()
+        && node.peak_pressure_pa >= 0.0
+        && node
+            .pressure_centroid_m
+            .iter()
+            .all(|value| value.is_finite())
+        && node
+            .equivalent_pressure_semiaxes_m
+            .iter()
+            .all(|value| value.is_finite() && *value >= 0.0)
+        && node.reference_reversible_energy_j.is_finite()
+        && node.reference_reversible_energy_j >= 0.0
+        && node.curve_reversible_energy_j.is_finite()
+        && node.curve_reversible_energy_j >= 0.0
+        && node.energy_residual_j.is_finite()
 }
 
 fn response_family_identity(
@@ -716,6 +782,18 @@ mod tests {
     }
 
     #[test]
+    fn evaluation_refuses_degenerate_public_curve_without_panicking() {
+        let mut curve = linear_test_curve(1.0, 1.0);
+        curve.nodes.truncate(1);
+        assert!(matches!(
+            curve.evaluate(0.0),
+            Err(FiniteGapResponseCurveError::InvalidInput {
+                field: "response curve nodes"
+            })
+        ));
+    }
+
+    #[test]
     fn g1_response_family_preserves_force_energy_derivative() {
         let family = FiniteGapResponseFamily::try_new(
             "inclination",
@@ -764,6 +842,39 @@ mod tests {
         assert!(matches!(
             family.evaluate(1.1, 0.5),
             Err(FiniteGapResponseCurveError::CoordinateOutsideFamily { .. })
+        ));
+
+        let mut repeated_grid = linear_test_curve(1.0, 1.0);
+        repeated_grid.nodes[1].approach_m = 0.0;
+        assert!(matches!(
+            FiniteGapResponseFamily::try_new(
+                "inclination",
+                "rad",
+                vec![0.0, 1.0],
+                vec![repeated_grid.clone(), repeated_grid],
+            ),
+            Err(FiniteGapResponseCurveError::InvalidInput {
+                field: "response family common approach grid"
+            })
+        ));
+    }
+
+    #[test]
+    fn evaluation_refuses_degenerate_public_family_without_panicking() {
+        let mut family = FiniteGapResponseFamily::try_new(
+            "inclination",
+            "rad",
+            vec![0.0, 1.0],
+            vec![linear_test_curve(1.0, 1.0), linear_test_curve(2.0, 1.0)],
+        )
+        .unwrap();
+        family.coordinate_nodes.truncate(1);
+        family.curves.truncate(1);
+        assert!(matches!(
+            family.evaluate(0.0, 0.5),
+            Err(FiniteGapResponseCurveError::InvalidInput {
+                field: "response family storage"
+            })
         ));
     }
 
