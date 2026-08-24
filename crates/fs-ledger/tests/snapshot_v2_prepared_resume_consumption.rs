@@ -18,10 +18,11 @@
 use fs_blake3::identity::CanonicalLimits;
 use fs_exec::{Budget, CancelGate, Cx, DrainTracker, ExecMode, RunId, StreamKey};
 use fs_exec::solver::snapshot_v2::{
-    self, ExpectedResumeContextV2, PausedSnapshotBoundaryV2, SnapshotLimitsV2,
+    self, prepare_resume, ExpectedResumeContextV2, PausedSnapshotBoundaryV2, SnapshotLimitsV2,
 };
 use fs_exec::solver::{
-    drive_v2_prepared, prepare_resume, PreparableSolverV2, ResumableSolverV2, SolverProgress,
+    drive_v2_prepared, PreparableSolverV2, ResumableSolverV2, SolverProgress, SolverStateV2,
+    StepVerdict,
 };
 use fs_ledger::Ledger;
 
