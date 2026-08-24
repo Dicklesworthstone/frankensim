@@ -119,6 +119,8 @@ impl CohomologicalDegree {
 }
 
 /// Explicit finite-schema construction limits.
+// Bead frankensim-68v4f: the `max_` prefix is deliberate limit vocabulary.
+#[allow(clippy::struct_field_names)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct AlgebraBudget {
     /// Maximum cells across the ambient and relative complexes.
@@ -547,7 +549,6 @@ impl RelativePairSchema {
     }
 
     /// Canonical, versioned bytes committed by [`Self::algebra_id`].
-    #[must_use]
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, CharacterError> {
         self.canonical_bytes_without_id()
     }
@@ -1174,7 +1175,6 @@ impl RelativeDifferentialCharacter {
     }
 
     /// Canonical, versioned schema bytes.
-    #[must_use]
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, CharacterError> {
         self.canonical_bytes_without_id()
     }
@@ -2134,25 +2134,54 @@ impl BilinearMapSchema {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CharacterError {
     /// Required identifier was empty.
-    EmptyIdentifier { object: &'static str },
+    EmptyIdentifier {
+        /// The named object or field involved.
+        object: &'static str,
+    },
     /// Semantic revisions start at one.
-    ZeroRevision { object: &'static str },
+    ZeroRevision {
+        /// The named object or field involved.
+        object: &'static str,
+    },
     /// One or more resource limits were zero.
     ZeroBudget,
     /// Cell-count vector does not cover exactly `0..=dimension`.
-    CellCountArity { dimension: u8, actual: usize },
+    CellCountArity {
+        /// Complex dimension involved.
+        dimension: u8,
+        /// The value actually found.
+        actual: usize,
+    },
     /// Cell-count sum overflowed.
     CellCountOverflow,
     /// Requested cells exceed the explicit budget.
-    CellBudgetExceeded { requested: u64, limit: u64 },
+    CellBudgetExceeded {
+        /// The requested amount.
+        requested: u64,
+        /// The refused ceiling.
+        limit: u64,
+    },
     /// Named boundary count exceeds the explicit budget.
     BoundaryBudgetExceeded,
     /// Canonical serialization exceeds the explicit budget.
-    CanonicalBudgetExceeded { requested: u64, limit: u64 },
+    CanonicalBudgetExceeded {
+        /// The requested amount.
+        requested: u64,
+        /// The refused ceiling.
+        limit: u64,
+    },
     /// Relative complex is higher-dimensional than its ambient complex.
-    RelativeDimension { ambient: u8, relative: u8 },
+    RelativeDimension {
+        /// Ambient complex dimension.
+        ambient: u8,
+        /// Relative subcomplex dimension.
+        relative: u8,
+    },
     /// The degree representation cannot encode `dim(X) + 1`.
-    CharacterDegreeRepresentationOverflow { dimension: u8 },
+    CharacterDegreeRepresentationOverflow {
+        /// Complex dimension involved.
+        dimension: u8,
+    },
     /// Relative cell count exceeds the ambient count.
     RelativeCellCount {
         degree: u8,
@@ -2166,19 +2195,46 @@ pub enum CharacterError {
         object: &'static str,
     },
     /// Named boundary exceeds the relative subcomplex dimension.
-    BoundaryDimension { boundary: u8, relative: u8 },
+    BoundaryDimension {
+        /// Boundary dimension involved.
+        boundary: u8,
+        /// Relative subcomplex dimension.
+        relative: u8,
+    },
     /// A terminal is not codimension one in the ambient complex.
-    TerminalCodimension { ambient: u8, terminal: u8 },
+    TerminalCodimension {
+        /// Ambient complex dimension.
+        ambient: u8,
+        /// Terminal codimension involved.
+        terminal: u8,
+    },
     /// Boundary identities must be unique.
-    DuplicateBoundary { id: String },
+    DuplicateBoundary {
+        /// The offending identifier.
+        id: String,
+    },
     /// Lattice rank is zero or too large.
-    InvalidLatticeRank { rank: usize },
+    InvalidLatticeRank {
+        /// Declared lattice rank.
+        rank: usize,
+    },
     /// Lattice scale is non-finite or non-positive.
-    InvalidLatticeScale { index: usize },
+    InvalidLatticeScale {
+        /// Index of the offending entry.
+        index: usize,
+    },
     /// `Z/n` requires `n >= 2`.
-    InvalidCyclicModulus { modulus: u64 },
+    InvalidCyclicModulus {
+        /// The cyclic modulus supplied.
+        modulus: u64,
+    },
     /// Object degree exceeds the representative-specific maximum.
-    DegreeOutOfRange { degree: u8, maximum: u8 },
+    DegreeOutOfRange {
+        /// Degree involved in the refusal.
+        degree: u8,
+        /// Maximum in-range value.
+        maximum: u8,
+    },
     /// Representative and coefficient sectors disagree.
     RepresentativeCoefficientMismatch {
         representative: RepresentativeKind,
@@ -2194,23 +2250,48 @@ pub enum CharacterError {
     /// Degree-zero character has no holonomy cycle.
     DegreeZeroHasNoHolonomyCycle,
     /// No in-range successor exists for this finite complex.
-    DegreeHasNoSuccessorInComplex { degree: u8, maximum: u8 },
+    DegreeHasNoSuccessorInComplex {
+        /// Degree involved in the refusal.
+        degree: u8,
+        /// Maximum in-range value.
+        maximum: u8,
+    },
     /// Terminal names an unknown boundary.
-    UnknownBoundary { id: String },
+    UnknownBoundary {
+        /// The offending identifier.
+        id: String,
+    },
     /// Trivialization names an interface rather than relative/terminal data.
-    BoundaryDoesNotAdmitTrivialization { id: String },
+    BoundaryDoesNotAdmitTrivialization {
+        /// The offending identifier.
+        id: String,
+    },
     /// Relative/terminal trivialization has the wrong degree.
-    BoundaryTrivializationDegreeMismatch { expected: u8, actual: u8 },
+    BoundaryTrivializationDegreeMismatch {
+        /// The lane/sector/degree required.
+        expected: u8,
+        /// The value actually found.
+        actual: u8,
+    },
     /// A terminal has no required trivialization.
-    MissingTerminalTrivialization { id: String },
+    MissingTerminalTrivialization {
+        /// The offending identifier.
+        id: String,
+    },
     /// Nonempty `A` has no whole-subcomplex mapping-cone trivialization.
     MissingRelativeSubcomplexTrivialization,
     /// Empty `A` was given a spurious mapping-cone trivialization.
     UnexpectedRelativeSubcomplexTrivialization,
     /// A boundary was trivialized more than once.
-    DuplicateBoundaryTrivialization { id: String },
+    DuplicateBoundaryTrivialization {
+        /// The offending identifier.
+        id: String,
+    },
     /// Coefficient systems disagree.
-    CoefficientMismatch { object: &'static str },
+    CoefficientMismatch {
+        /// The named object or field involved.
+        object: &'static str,
+    },
     /// Pair identities disagree.
     PairMismatch,
     /// Torsion coefficients have no nonzero real curvature lane.
@@ -2231,13 +2312,19 @@ pub enum CharacterError {
     /// Cup-product degree exceeds the differential-character degree ceiling.
     ProductDegreeOutOfRange,
     /// Declared coefficient product does not accept the supplied input.
-    CoefficientProductMismatch { input: &'static str },
+    CoefficientProductMismatch {
+        /// The refused product-input field.
+        input: &'static str,
+    },
     /// Differential-character holonomy requires `R/Lambda` coefficients.
     HolonomyRequiresRealModuloLattice,
     /// Exact-sequence object/map count is malformed.
     SequenceArity,
     /// A map does not connect the adjacent declared objects.
-    SequenceNotComposable { map: usize },
+    SequenceNotComposable {
+        /// Index of the non-composable map.
+        map: usize,
+    },
     /// Image/kernel indices are malformed.
     InvalidExactnessClaim,
 }
