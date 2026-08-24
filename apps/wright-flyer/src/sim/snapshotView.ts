@@ -1,5 +1,5 @@
 // E5.2b snapshot-view core (bead wf-root-guzez.6.3.2): PURE mapping
-// from the frozen 12-float engine payload to what the presentation
+// from the frozen engine payload to what the presentation
 // plane consumes — typed snapshot, render-rate interpolation (sim 120
 // Hz, render decoupled), pose/HUD inputs. No three.js, no DOM: every
 // branch is headless-tested. The scene applies; this decides.
@@ -11,6 +11,8 @@ import {
   P_H_M,
   P_OMEGA_RAD_S,
   P_PHASE,
+  P_PHI_RAD,
+  P_PSI_RAD,
   P_Q_RAD_S,
   P_THETA_RAD,
   P_U_MPS,
@@ -18,6 +20,7 @@ import {
   P_WARP_RAD,
   P_X_M,
   PAYLOAD_F64S,
+  PAYLOAD_F64S_V1,
   PHASE_CODES,
   type PhaseWord,
 } from "./protocol.ts";
@@ -32,6 +35,8 @@ export interface SimSnapshot {
   readonly wMps: number;
   readonly qRadS: number;
   readonly thetaRad: number;
+  readonly phiRad: number;
+  readonly psiRad: number;
   readonly dcRad: number;
   readonly warpRad: number;
   readonly omegaPropRadS: number;
@@ -48,10 +53,14 @@ const CODE_TO_PHASE: readonly PhaseWord[] = (() => {
   return byCode;
 })();
 
-/** Decode a payload (fail-closed: bad length or phase code throws). */
+/** Decode a payload. Stored v1 records receive an explicit zero-lateral
+ * fallback; a live v2 ring is hash-negotiated and never silently falls
+ * back. Bad lengths and phase codes fail closed. */
 export function decodeSnapshot(tick: number, payload: Float64Array): SimSnapshot {
-  if (payload.length < PAYLOAD_F64S) {
-    throw new RangeError(`payload ${payload.length} < ${PAYLOAD_F64S}`);
+  if (payload.length !== PAYLOAD_F64S_V1 && payload.length < PAYLOAD_F64S) {
+    throw new RangeError(
+      `payload ${payload.length} is neither v1 (${PAYLOAD_F64S_V1}) nor v2 (${PAYLOAD_F64S})`,
+    );
   }
   const phase = CODE_TO_PHASE[payload[P_PHASE]!];
   if (phase === undefined) {
@@ -67,6 +76,8 @@ export function decodeSnapshot(tick: number, payload: Float64Array): SimSnapshot
     wMps: payload[P_W_MPS]!,
     qRadS: payload[P_Q_RAD_S]!,
     thetaRad: payload[P_THETA_RAD]!,
+    phiRad: payload.length >= PAYLOAD_F64S ? payload[P_PHI_RAD]! : 0,
+    psiRad: payload.length >= PAYLOAD_F64S ? payload[P_PSI_RAD]! : 0,
     dcRad: payload[P_DC_RAD]!,
     warpRad: payload[P_WARP_RAD]!,
     omegaPropRadS: payload[P_OMEGA_RAD_S]!,
@@ -98,6 +109,8 @@ export function interpolateSnapshots(a: SimSnapshot, b: SimSnapshot, alpha: numb
     wMps: lerp(a.wMps, b.wMps),
     qRadS: lerp(a.qRadS, b.qRadS),
     thetaRad: lerp(a.thetaRad, b.thetaRad),
+    phiRad: lerp(a.phiRad, b.phiRad),
+    psiRad: lerp(a.psiRad, b.psiRad),
     dcRad: lerp(a.dcRad, b.dcRad),
     warpRad: lerp(a.warpRad, b.warpRad),
     omegaPropRadS: lerp(a.omegaPropRadS, b.omegaPropRadS),
@@ -143,15 +156,17 @@ export function controlStateFrom(snap: SimSnapshot, drive: SimDriveState): {
 }
 
 /** World transform for the airframe group: flight line = scene +x,
- * up = scene +y; pitch about the scene z axis (+theta = nose up with
- * forward +x, up +y). Lateral stays 0 at this tier (declared). */
+ * up = scene +y. Pitch, bank, and heading come from the simulation;
+ * this layer never infers attitude from the warp control. */
 export function worldTransformFrom(
   snap: SimSnapshot,
   launch: readonly [number, number, number],
-): { position: [number, number, number]; pitchRad: number } {
+): { position: [number, number, number]; pitchRad: number; rollRad: number; headingRad: number } {
   return {
     position: [launch[0] + snap.xM, launch[1] + snap.hM, launch[2]],
     pitchRad: snap.thetaRad,
+    rollRad: snap.phiRad,
+    headingRad: snap.psiRad,
   };
 }
 

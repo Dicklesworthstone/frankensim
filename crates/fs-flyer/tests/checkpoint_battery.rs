@@ -1,4 +1,4 @@
-//! E6.1-i battery (bead wf-root-guzez.7.1.1): CheckpointStateV1
+//! E6.1-i battery (bead wf-root-guzez.7.1.1): CheckpointStateV2
 //! bit-identity — checkpoint mid-run, restore into a FRESH SimLoop,
 //! march to terminal, and the chained digest EQUALS the uninterrupted
 //! run's (rail-phase and airborne-phase checkpoints; FixedControls AND
@@ -98,6 +98,7 @@ fn tamper_terminal_and_caps_refuse() {
         sim.step(None).unwrap();
     }
     let good = sim.save_checkpoint().unwrap();
+    assert_eq!(u32::from_le_bytes(good[..4].try_into().unwrap()), 2);
     // Tamper twin: flip one payload byte — the embedded digest refuses.
     let mut bad = good.clone();
     bad[20] ^= 0x01;

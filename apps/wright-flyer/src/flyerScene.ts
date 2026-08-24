@@ -471,11 +471,14 @@ export function createFlyerSceneRenderer(
             applyPose(ghostFrame, computePose(controlStateFrom(g, ghostDrive)));
             const gw = worldTransformFrom(g, launch);
             ghostFrame.group.position.set(gw.position[0], gw.position[1] + 1.2, gw.position[2]);
-            // Nose-frame mapping (visual-verification fix): the airframe's
-            // nose is LOCAL +z; flight runs WORLD +x. Ry(-pi/2) leftmost
-            // ('YXZ' order) maps nose->+x and wingspan->z AFTER the pitch.
+            // Nose-frame mapping: local +z -> world +x. Real sim
+            // roll/heading ride with pitch; no warp-derived fake bank.
             ghostFrame.group.rotation.order = "YXZ";
-            ghostFrame.group.rotation.set(0, -Math.PI / 2, gw.pitchRad);
+            ghostFrame.group.rotation.set(
+              gw.rollRad,
+              -Math.PI / 2 - gw.headingRad,
+              gw.pitchRad,
+            );
           }
         }
         drive = advanceProp(drive, snap, dtS);
@@ -483,11 +486,14 @@ export function createFlyerSceneRenderer(
         applyPose(airframe, pose);
         const world = worldTransformFrom(snap, launch);
         airframe.group.position.set(world.position[0], world.position[1] + 1.2, world.position[2]);
-        // Nose-frame mapping (visual-verification fix): the airframe's
-        // nose is LOCAL +z; flight runs WORLD +x. Ry(-pi/2) leftmost
-        // ('YXZ' order) maps nose->+x and wingspan->z AFTER the pitch.
+        // Nose-frame mapping: local +z -> world +x. Real sim
+        // roll/heading ride with pitch; no warp-derived fake bank.
         airframe.group.rotation.order = "YXZ";
-        airframe.group.rotation.set(0, -Math.PI / 2, world.pitchRad);
+        airframe.group.rotation.set(
+          world.rollRad,
+          -Math.PI / 2 - world.headingRad,
+          world.pitchRad,
+        );
         // Cockpit feel (T3.4): the pilot's lever mirrors live canard.
         // Pitch stick tilts fore/aft: rotate about the LATERAL x axis;
         // Rx(+) carries the stick top toward +z (fore), so pull (+dcRad,

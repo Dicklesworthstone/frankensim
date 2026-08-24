@@ -22,6 +22,8 @@ function snap(overrides: Partial<SimSnapshot>): SimSnapshot {
     wMps: 0,
     qRadS: 0,
     thetaRad: 0,
+    phiRad: 0,
+    psiRad: 0,
     dcRad: 0.14,
     warpRad: 0,
     omegaPropRadS: 48,

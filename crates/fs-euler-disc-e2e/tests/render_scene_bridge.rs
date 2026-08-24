@@ -503,7 +503,16 @@ fn diagnostic_artifact(
     inputs[0].contact_transitions.clear();
     inputs[0].interval_contact_active = false;
     inputs[2].contact_transitions.clear();
-    inputs[1].contact_transitions[0].bracket_end_s = STEP_S;
+    inputs[1].contact_transitions.insert(
+        0,
+        RenderContactTransition {
+            kind: ContactTransitionKind::Opening,
+            time_s: 0.25 * STEP_S,
+            bracket_start_s: 0.20 * STEP_S,
+            bracket_end_s: 0.30 * STEP_S,
+        },
+    );
+    inputs[1].contact_transitions[1].bracket_end_s = STEP_S;
     inputs[1].interval_normal_force_n = 6.0;
     inputs[1].channels = ChannelOwnership {
         gravity: ChannelWrench {
@@ -1985,7 +1994,7 @@ fn g0_g3_scientific_overlay_projects_sidecar_values_and_isolates_beauty() {
             RenderContactBranch::Closed
         );
         assert_eq!(overlay.sidecar().contact_orbit.len(), 2);
-        assert_eq!(overlay.sidecar().events.len(), 1);
+        assert_eq!(overlay.sidecar().events.len(), 2);
         assert_eq!(
             (overlay.sidecar().width, overlay.sidecar().height),
             (3840, 2160)

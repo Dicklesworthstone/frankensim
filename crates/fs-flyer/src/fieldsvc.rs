@@ -235,8 +235,9 @@ pub const V1_SPAN_M: f64 = 12.29;
 impl FieldSourceStateV1 {
     /// Build the v1 state from a leased E5.0 ring payload
     /// (fs-flyer-wasm binds this under the snapshot lease — E7.1-ii).
-    /// Payload layout: [x, h, u, w, q, theta, dc, warp, omega, gust,
-    /// assist, phase]. An AIRBORNE payload derives a lift-carrying
+    /// Payload v1 prefix: [x, h, u, w, q, theta, dc, warp, omega, gust,
+    /// assist, phase]; v2 appends [phi, psi]. This service needs only
+    /// the stable prefix. An AIRBORNE payload derives a lift-carrying
     /// bound system (Kutta–Joukowski at the published gross mass with
     /// elliptic-loading span efficiency); any other phase publishes
     /// atmosphere only, and the omission is named by the meta as

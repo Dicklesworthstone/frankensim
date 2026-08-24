@@ -9,7 +9,7 @@
 
 use fs_flyer::simloop::{
     ControlInput, MAX_HEADWIND_MPS, MAX_RAIL_M, MAX_TICKS, MIN_HEADWIND_MPS, Phase, PilotMode,
-    ScenarioSpec, SimLoop, TerminalEvent, dec17_scenario,
+    SNAPSHOT_LEN, SNAPSHOT_PHASE_INDEX, ScenarioSpec, SimLoop, TerminalEvent, dec17_scenario,
 };
 
 fn jlog(case: &str, payload: &str) {
@@ -187,6 +187,55 @@ fn human_mode_requires_input_every_tick() {
         "control-input-missing"
     );
     jlog("human-input", "\"required_every_tick\":true");
+}
+
+#[test]
+fn human_warp_drives_real_lateral_state_into_payload_v2() {
+    let mut spec = dec17_scenario(1903, PilotMode::Human);
+    spec.max_ticks = 1_200;
+    let mut sim = SimLoop::init(spec).unwrap();
+    let mut last = None;
+    for _ in 0..1_200 {
+        let out = sim
+            .step(Some(ControlInput {
+                lever_force_n: 0.0,
+                warp_cmd_rad: 0.08,
+            }))
+            .unwrap();
+        last = Some(out);
+        if out.phi_rad.abs() > 1.0e-5 && out.psi_rad.abs() > 1.0e-8 {
+            break;
+        }
+        if matches!(out.phase, Phase::Ended(_)) {
+            break;
+        }
+    }
+    let out = last.expect("at least one step");
+    assert!(out.phi_rad > 1.0e-5, "positive warp banks right: {out:?}");
+    assert!(out.p_rad_s > 0.0, "bank has a real roll rate: {out:?}");
+    assert!(
+        out.psi_rad.abs() > 1.0e-8,
+        "linked yaw changes heading: {out:?}"
+    );
+    assert!(
+        out.r_rad_s.abs() > 0.0,
+        "heading has a real yaw rate: {out:?}"
+    );
+    let payload = sim.snapshot_payload(&out);
+    assert_eq!(payload.len(), SNAPSHOT_LEN);
+    assert_eq!(
+        payload[SNAPSHOT_PHASE_INDEX], 1.0,
+        "airborne phase stays in the v1 slot"
+    );
+    assert_eq!(payload[12].to_bits(), out.phi_rad.to_bits());
+    assert_eq!(payload[13].to_bits(), out.psi_rad.to_bits());
+    jlog(
+        "payload-v2-lateral",
+        &format!(
+            "\"tick\":{},\"phi_rad\":{},\"psi_rad\":{}",
+            out.tick, out.phi_rad, out.psi_rad
+        ),
+    );
 }
 
 #[test]

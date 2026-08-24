@@ -10,6 +10,8 @@ import {
   P_H_M,
   P_OMEGA_RAD_S,
   P_PHASE,
+  P_PHI_RAD,
+  P_PSI_RAD,
   P_Q_RAD_S,
   P_THETA_RAD,
   P_U_MPS,
@@ -41,6 +43,10 @@ export interface EngineStepOk {
     readonly wMps: number;
     readonly qRadS: number;
     readonly thetaRad: number;
+    readonly pRadS: number;
+    readonly phiRad: number;
+    readonly rRadS: number;
+    readonly psiRad: number;
     readonly dcRad: number;
     readonly warpRad: number;
     readonly omegaPropRadS: number;
@@ -123,6 +129,10 @@ const STEP_NUMERIC_KEYS = [
   "w_mps",
   "q_rad_s",
   "theta_rad",
+  "p_rad_s",
+  "phi_rad",
+  "r_rad_s",
+  "psi_rad",
   "dc_rad",
   "warp_rad",
   "omega_prop_rad_s",
@@ -173,6 +183,10 @@ export function parseStepEnvelope(json: string): EngineStepOk | EngineRefusal | 
       wMps: ok.w_mps as number,
       qRadS: ok.q_rad_s as number,
       thetaRad: ok.theta_rad as number,
+      pRadS: ok.p_rad_s as number,
+      phiRad: ok.phi_rad as number,
+      rRadS: ok.r_rad_s as number,
+      psiRad: ok.psi_rad as number,
       dcRad: ok.dc_rad as number,
       warpRad: ok.warp_rad as number,
       omegaPropRadS: ok.omega_prop_rad_s as number,
@@ -183,7 +197,7 @@ export function parseStepEnvelope(json: string): EngineStepOk | EngineRefusal | 
 }
 
 /**
- * Assemble the frozen 12-float ring payload from a parsed step (the
+ * Assemble the frozen v2 ring payload from a parsed step (the
  * EXACT order the native engine digests — per-field, never a spread).
  */
 export function fillPayload(step: EngineStepOk, out: Float64Array): void {
@@ -202,6 +216,8 @@ export function fillPayload(step: EngineStepOk, out: Float64Array): void {
   out[P_GUST_W_MPS] = step.state.gustWMps;
   out[P_ASSIST] = step.state.assistActive ? 1 : 0;
   out[P_PHASE] = PHASE_CODES[step.phase];
+  out[P_PHI_RAD] = step.state.phiRad;
+  out[P_PSI_RAD] = step.state.psiRad;
 }
 
 /** Parse the digest envelope → 64-hex string or a typed failure. */

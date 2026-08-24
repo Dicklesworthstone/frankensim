@@ -5,7 +5,7 @@
 //! modified axis (scenario scalar, assist, model mode). HumanRefly:
 //! two different traces (the live re-fly vs the ghost). Either way the
 //! receipt records the COMMON-PREFIX tick — the first tick whose
-//! frozen 12-float snapshot payloads differ BITWISE — plus both
+//! frozen snapshot payloads differ BITWISE — plus both
 //! terminals (terminal-divergence cases included) and both final
 //! chained digests. A comparison that cannot fail is not a
 //! comparison: the battery drives identical twins (full-length
@@ -13,7 +13,9 @@
 //! terminal-divergence pair (different TerminalEvent kinds).
 
 use crate::Refusal;
-use crate::simloop::{ControlInput, Phase, PilotMode, SNAPSHOT_LEN, ScenarioSpec, SimLoop};
+use crate::simloop::{
+    ControlInput, Phase, PilotMode, SNAPSHOT_LEN, SNAPSHOT_PHASE_INDEX, ScenarioSpec, SimLoop,
+};
 use fs_blake3::hash_domain;
 
 /// Receipt schema id.
@@ -90,7 +92,7 @@ fn run_collect(
         let out = sim.step(input)?;
         payloads.push(sim.snapshot_payload(&out));
         if let Phase::Ended(_) = out.phase {
-            let code = payloads.last().expect("pushed")[SNAPSHOT_LEN - 1] as u8;
+            let code = payloads.last().expect("pushed")[SNAPSHOT_PHASE_INDEX] as u8;
             break (out.tick, code);
         }
     };

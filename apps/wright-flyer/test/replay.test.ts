@@ -14,6 +14,7 @@ import { test } from "node:test";
 import {
   FlightRecorder,
   RECORDING_SCHEMA,
+  RECORDING_SCHEMA_V1,
   ghostAt,
   parseRecording,
   recordedToScenario,
@@ -21,7 +22,12 @@ import {
   scenarioToRecorded,
   type FlightRecording,
 } from "../src/sim/replay.ts";
-import { MODE_FIXED, PAYLOAD_F64S, dec17Scenario } from "../src/sim/protocol.ts";
+import {
+  MODE_FIXED,
+  PAYLOAD_F64S,
+  PAYLOAD_F64S_V1,
+  dec17Scenario,
+} from "../src/sim/protocol.ts";
 import {
   fillPayload,
   parseDigestEnvelope,
@@ -38,6 +44,8 @@ function payloadAt(tick: number, phaseCode = 1): Float64Array {
   p[0] = tick * 0.1; // x
   p[1] = 2 + tick * 0.01; // h
   p[11] = phaseCode;
+  p[12] = tick * 0.001; // roll
+  p[13] = -tick * 0.002; // heading
   return p;
 }
 
@@ -100,6 +108,26 @@ test("ghost lookup: before-start null, exact hit, between-hold, hold-last", () =
   assert.equal(ghostAt(rec, 25)?.xM, 2, "payload of tick 20 (x = 20*0.1)");
   assert.equal(ghostAt(rec, 30)?.tick, 30);
   assert.equal(ghostAt(rec, 10_000)?.tick, 30, "hold-last past the end, never extrapolate");
+  assert.equal(ghostAt(rec, 20)?.phiRad, 0.02, "v2 lateral state is replayed");
+});
+
+test("legacy v1 recording decodes with explicit zero-lateral fallback", () => {
+  const current = sealedFixture();
+  const legacyFrames: number[] = [];
+  for (let frame = 0; frame < current.ticks.length; frame += 1) {
+    legacyFrames.push(
+      ...current.frames.slice(frame * PAYLOAD_F64S, frame * PAYLOAD_F64S + PAYLOAD_F64S_V1),
+    );
+  }
+  const legacy = {
+    ...current,
+    schema: RECORDING_SCHEMA_V1,
+    frames: legacyFrames,
+  } satisfies FlightRecording;
+  const parsed = parseRecording(JSON.stringify(legacy));
+  assert.ok(!("error" in parsed), JSON.stringify(parsed));
+  assert.equal(ghostAt(parsed as FlightRecording, 20)?.phiRad, 0);
+  assert.equal(ghostAt(parsed as FlightRecording, 20)?.psiRad, 0);
 });
 
 test("verdict discriminates", () => {

@@ -73,7 +73,7 @@ fn state_envelope(s: &SimStateOut, envelope_code: Option<&str>) -> String {
         format!(",\"envelope_refusal_code\":\"{}\"", json_escape(c))
     });
     format!(
-        "{{\"ok\":{{\"tick\":{},\"phase\":\"{}\",\"x_m\":{},\"h_m\":{},\"u_mps\":{},\"w_mps\":{},\"q_rad_s\":{},\"theta_rad\":{},\"dc_rad\":{},\"warp_rad\":{},\"omega_prop_rad_s\":{},\"gust_w_mps\":{},\"assist_active\":{},\"assist_dc_rad\":{}{}}}}}",
+        "{{\"ok\":{{\"tick\":{},\"phase\":\"{}\",\"x_m\":{},\"h_m\":{},\"u_mps\":{},\"w_mps\":{},\"q_rad_s\":{},\"theta_rad\":{},\"p_rad_s\":{},\"phi_rad\":{},\"r_rad_s\":{},\"psi_rad\":{},\"dc_rad\":{},\"warp_rad\":{},\"omega_prop_rad_s\":{},\"gust_w_mps\":{},\"assist_active\":{},\"assist_dc_rad\":{}{}}}}}",
         s.tick,
         phase_word(s.phase),
         s.x_m,
@@ -82,6 +82,10 @@ fn state_envelope(s: &SimStateOut, envelope_code: Option<&str>) -> String {
         s.w_mps,
         s.q_rad_s,
         s.theta_rad,
+        s.p_rad_s,
+        s.phi_rad,
+        s.r_rad_s,
+        s.psi_rad,
         s.dc_rad,
         s.warp_rad,
         s.omega_prop_rad_s,

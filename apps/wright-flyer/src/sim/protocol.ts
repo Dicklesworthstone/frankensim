@@ -2,11 +2,13 @@
 // seam between the main thread and the worker that drives the REAL
 // fs-flyer-wasm engine. Snapshot payloads ride the E0.7 seqlock ring
 // (SharedArrayBuffer) when available, else a postMessage fallback —
-// EITHER WAY the payload is the frozen 12-float layout the native
-// engine digests (fs_flyer::simloop::SNAPSHOT_LEN order, exactly).
+// EITHER WAY the payload is the frozen v2 layout the native engine
+// digests (fs_flyer::simloop::SNAPSHOT_LEN order, exactly).
 
-/** Frozen 12-float payload layout (mirror of simloop::snapshot_payload). */
-export const PAYLOAD_F64S = 12;
+/** Frozen v1 prefix length; retained for stored-recording fallback. */
+export const PAYLOAD_F64S_V1 = 12;
+/** Frozen v2 payload length (v1 prefix + roll + heading). */
+export const PAYLOAD_F64S = 14;
 export const P_X_M = 0;
 export const P_H_M = 1;
 export const P_U_MPS = 2;
@@ -19,6 +21,8 @@ export const P_OMEGA_RAD_S = 8;
 export const P_GUST_W_MPS = 9;
 export const P_ASSIST = 10;
 export const P_PHASE = 11;
+export const P_PHI_RAD = 12;
+export const P_PSI_RAD = 13;
 
 /** Phase words (engine envelope) ↔ payload codes (engine digest layout). */
 export const PHASE_CODES = {
@@ -38,7 +42,9 @@ export type PhaseWord = keyof typeof PHASE_CODES;
  */
 export const PAYLOAD_LAYOUT_V1 =
   "wf-snapshot-v1:x_m,h_m,u_mps,w_mps,q_rad_s,theta_rad,dc_rad,warp_rad,omega_prop_rad_s,gust_w_mps,assist,phase";
-export function payloadLayoutHash(descriptor: string = PAYLOAD_LAYOUT_V1): number {
+export const PAYLOAD_LAYOUT_V2 =
+  "wf-snapshot-v2:x_m,h_m,u_mps,w_mps,q_rad_s,theta_rad,dc_rad,warp_rad,omega_prop_rad_s,gust_w_mps,assist,phase,phi_rad,psi_rad";
+export function payloadLayoutHash(descriptor: string = PAYLOAD_LAYOUT_V2): number {
   // FNV-1a 32-bit — tiny, deterministic, dependency-free (identity tag,
   // not cryptographic; the engine's blake3 digest carries the truth).
   let h = 0x811c9dc5;

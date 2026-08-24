@@ -10,21 +10,23 @@
 //!           historical pilot / human input) → canard mechanism →
 //!           full nonlinear force build-up with the pitch-rate term →
 //!           FRD longitudinal kinematics + rotor torque balance + OU
-//!           gust coupling → ground contact ends the flight.
+//!           gust coupling + reduced lateral build-up → ground contact.
 //!
 //! Every tick chains into a running blake3 digest (bit-identical
 //! lifecycles are a checkable claim), and the snapshot payload for the
 //! E5.0 ring is a frozen layout. Tier notes carried honestly: the
 //! mechanism runs the m_aero = 0 stick tier (H-02c convention), the OU
 //! gust enters as an angle-of-attack increment (reduced coupling,
-//! declared), and lateral states are visual-only until the lateral
-//! force build-up lands (recorded, not silent).
+//! declared), and roll/yaw use the Estimated ReducedAeroelasticWarp +
+//! ReducedLateralBuildUp tier (not a structural-margin claim).
 
 use crate::Refusal;
+use crate::aerowarp::ReducedAeroelasticWarp;
 use crate::aircraft::{OpenLoopDesign, wright_openloop_v1};
 use crate::assist::AssistSpec;
 use crate::canardmech::{CANARD_MECH_V1, CanardMechanism, MechState};
 use crate::equilibrate::{EquilibrationSpec, PrelaunchBranch, Tick0State, equilibrate};
+use crate::lateral::{LateralModel, LateralState, RudderLinkage};
 use crate::longitudinal::IYY_KG_M2;
 use crate::perception::{PERCEPTION_HZ, PerceptionModelSpec, PerceptionState, perception_v1};
 use crate::pilot::{PilotState, PilotWrightModel, pack_cues};
@@ -82,9 +84,16 @@ pub struct CatapultSpec {
     pub pull_length_m: f64,
 }
 
-/// Snapshot payload length (frozen; matches ring::PAYLOAD_LAYOUT_V1
-/// spirit: pos2 + attitude + rates + controls + rotor + phase + gust).
-pub const SNAPSHOT_LEN: usize = 12;
+/// Snapshot payload length v2. The v1 12-float prefix is unchanged;
+/// roll and heading are appended so stored v1 records remain decodable.
+pub const SNAPSHOT_LEN: usize = 14;
+
+/// Phase remains at its v1 slot; do not infer it from `SNAPSHOT_LEN`.
+pub const SNAPSHOT_PHASE_INDEX: usize = 11;
+
+/// Declared reduced rudder moment gain for the 1903 linked-rudder
+/// presentation tier [N·m/rad]. It is Estimated, not calibrated.
+const WRIGHT_1903_RUDDER_GAIN_NM_PER_RAD: f64 = 66.0;
 
 /// Control mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -103,7 +112,7 @@ pub enum PilotMode {
 pub struct ControlInput {
     /// Lever force [N] (+ pull back = nose up).
     pub lever_force_n: f64,
-    /// Warp command [rad] (visual-only until the lateral build-up).
+    /// Warp command [rad].
     pub warp_cmd_rad: f64,
 }
 
@@ -211,9 +220,17 @@ pub struct SimStateOut {
     pub q_rad_s: f64,
     /// Pitch attitude [rad].
     pub theta_rad: f64,
+    /// Roll rate [rad/s] from the reduced lateral tier.
+    pub p_rad_s: f64,
+    /// Roll attitude [rad] (+ = right wing down).
+    pub phi_rad: f64,
+    /// Yaw rate [rad/s] from the reduced lateral tier.
+    pub r_rad_s: f64,
+    /// Heading [rad] (+ = nose right).
+    pub psi_rad: f64,
     /// Canard deflection [rad].
     pub dc_rad: f64,
-    /// Warp command [rad] (visual tier).
+    /// Warp command [rad].
     pub warp_rad: f64,
     /// Prop speed [rad/s].
     pub omega_prop_rad_s: f64,
@@ -234,6 +251,9 @@ pub struct SimLoop {
     perception: PerceptionModelSpec,
     perception_state: PerceptionState,
     pilot: Option<(PilotWrightModel, PilotState)>,
+    warp_model: ReducedAeroelasticWarp,
+    lateral_model: LateralModel,
+    lateral_state: LateralState,
     ou: StationaryOuPath,
     tick0: Tick0State,
     /// Minted AFTER the tick-0 digest (plan law).
@@ -345,6 +365,11 @@ impl SimLoop {
         let run_intent_id = hash_domain("org.frankensim.wf.run-intent.v1", &p).to_hex();
         let perception = perception_v1(spec.seed);
         let perception_state = perception.init()?;
+        let warp_model = ReducedAeroelasticWarp::wright_v1();
+        warp_model.admit()?;
+        let lateral_model = LateralModel::wright_v1(RudderLinkage::Linked {
+            gain_nm_per_rad: WRIGHT_1903_RUDDER_GAIN_NM_PER_RAD,
+        });
         let pilot = match spec.pilot_mode {
             PilotMode::Historical(member) => {
                 let m = PilotWrightModel::new(member, spec.seed)?;
@@ -365,6 +390,9 @@ impl SimLoop {
             perception,
             perception_state,
             pilot,
+            warp_model,
+            lateral_model,
+            lateral_state: LateralState::default(),
             ou,
             mech: tick0.mech,
             omega: tick0.trim.omega_prop_rad_s,
@@ -418,7 +446,7 @@ impl SimLoop {
         self.envelope_refusal.as_ref()
     }
 
-    /// Serialize the FULL dynamic state as CheckpointStateV1 bytes
+    /// Serialize the FULL dynamic state as CheckpointStateV2 bytes
     /// (bead guzez.7.1.1, E6.1-i): bit-exact capture with an embedded
     /// blake3 integrity digest. The OU path is counter-addressed and
     /// reconstructs from the tick alone (philox doctrine).
@@ -435,7 +463,7 @@ impl SimLoop {
             });
         }
         let mut b = Vec::new();
-        b.extend_from_slice(&1u32.to_le_bytes()); // version
+        b.extend_from_slice(&2u32.to_le_bytes()); // version
         b.extend_from_slice(&self.tick.to_le_bytes());
         b.push(match self.phase {
             Phase::OnRail => 0,
@@ -453,6 +481,10 @@ impl SimLoop {
             self.warp,
             self.mech.delta_rad,
             self.mech.rate_rad_s,
+            self.lateral_state.phi_rad,
+            self.lateral_state.p_rad_s,
+            self.lateral_state.psi_rad,
+            self.lateral_state.r_rad_s,
         ] {
             b.extend_from_slice(&v.to_bits().to_le_bytes());
         }
@@ -481,7 +513,7 @@ impl SimLoop {
             }
             None => b.push(0),
         }
-        let digest = hash_domain("org.frankensim.wf.checkpoint-state.v1", &b);
+        let digest = hash_domain("org.frankensim.wf.checkpoint-state.v2", &b);
         b.extend_from_slice(digest.as_bytes());
         Ok(b)
     }
@@ -500,7 +532,7 @@ impl SimLoop {
             return Err(Refusal {
                 code: "checkpoint-too-large",
                 message: format!("{} bytes > {MAX}", bytes.len()),
-                ranked_repairs: vec!["a v1 checkpoint is a few KiB".into()],
+                ranked_repairs: vec!["a checkpoint is a few KiB".into()],
             });
         }
         let bad = |m: &str| Refusal {
@@ -512,13 +544,27 @@ impl SimLoop {
             return Err(bad("shorter than the digest"));
         }
         let (body, tail) = bytes.split_at(bytes.len() - 32);
-        let expect = hash_domain("org.frankensim.wf.checkpoint-state.v1", body);
-        if expect.as_bytes() != tail {
+        let digest_v1 = hash_domain("org.frankensim.wf.checkpoint-state.v1", body);
+        let digest_v2 = hash_domain("org.frankensim.wf.checkpoint-state.v2", body);
+        let matches_v1 = digest_v1.as_bytes() == tail;
+        let matches_v2 = digest_v2.as_bytes() == tail;
+        if !matches_v1 && !matches_v2 {
             return Err(Refusal {
                 code: "checkpoint-tampered",
                 message: "embedded digest mismatch".into(),
                 ranked_repairs: vec!["the checkpoint bytes were altered; refuse".into()],
             });
+        }
+        let version = body
+            .get(..4)
+            .and_then(|v| <[u8; 4]>::try_from(v).ok())
+            .map(u32::from_le_bytes)
+            .ok_or_else(|| bad("missing version"))?;
+        if !matches!(
+            (version, matches_v1, matches_v2),
+            (1, true, _) | (2, _, true)
+        ) {
+            return Err(bad("version and integrity domain disagree"));
         }
         let mut pos = 0usize;
         let take = |pos: &mut usize, n: usize| -> Result<&[u8], Refusal> {
@@ -526,14 +572,13 @@ impl SimLoop {
             *pos += n;
             Ok(s)
         };
-        let version = u32::from_le_bytes(take(&mut pos, 4)?.try_into().expect("4"));
-        if version != 1 {
-            return Err(bad("unknown version"));
-        }
+        let parsed_version = u32::from_le_bytes(take(&mut pos, 4)?.try_into().expect("4"));
+        debug_assert_eq!(parsed_version, version);
         let tick = u64::from_le_bytes(take(&mut pos, 8)?.try_into().expect("8"));
         let phase_code = take(&mut pos, 1)?[0];
-        let mut f = [0.0f64; 10];
-        for v in &mut f {
+        let mut f = [0.0f64; 14];
+        let state_words = if version == 1 { 10 } else { 14 };
+        for v in &mut f[..state_words] {
             *v = f64::from_bits(u64::from_le_bytes(
                 take(&mut pos, 8)?.try_into().expect("8"),
             ));
@@ -587,6 +632,16 @@ impl SimLoop {
             delta_rad: f[8],
             rate_rad_s: f[9],
         };
+        sim.lateral_state = if version == 1 {
+            LateralState::default()
+        } else {
+            LateralState {
+                phi_rad: f[10],
+                p_rad_s: f[11],
+                psi_rad: f[12],
+                r_rad_s: f[13],
+            }
+        };
         sim.warm_slip = (warm_flag == 1).then_some([w0, w1]);
         sim.digest_acc = digest_acc;
         sim.perception_state = perception_state;
@@ -638,9 +693,9 @@ impl SimLoop {
                 self.theta - self.tick0.trim.alpha_rad,
                 self.q,
                 wdot_est,
-                0.0,
-                0.0,
-                0.0,
+                self.lateral_state.phi_rad,
+                self.lateral_state.p_rad_s,
+                self.lateral_state.r_rad_s,
             ),
         )?;
         let (force, warp_cmd) = match self.spec.pilot_mode {
@@ -786,7 +841,39 @@ impl SimLoop {
                     .max(0.0);
                 let inc_x = dt * ground_speed;
                 self.x_m += inc_x;
-                if self.h_m <= 0.0 {
+                // Project the achieved antisymmetric strip twists back
+                // onto the registered warp basis. Common trim washout
+                // is symmetric and therefore contributes no lateral
+                // command; the authority-bearing component drives the
+                // reduced roll/yaw state.
+                let lateral_result = self
+                    .warp_model
+                    .evaluate(
+                        self.warp,
+                        0.5 * self.spec.rho_kg_m3 * v_air * v_air,
+                        alpha_clamped,
+                    )
+                    .and_then(|loaded| {
+                        let (projection, norm) = loaded
+                            .strips
+                            .iter()
+                            .zip(&self.warp_model.basis)
+                            .fold((0.0, 0.0), |(projection, norm), (strip, basis)| {
+                                (projection + strip.loaded_rad * basis, norm + basis * basis)
+                            });
+                        self.lateral_model.step(
+                            &mut self.lateral_state,
+                            projection / norm,
+                            v_air,
+                            self.spec.rho_kg_m3,
+                            dt,
+                        )
+                    });
+                if let Err(refusal) = lateral_result {
+                    self.phase = Phase::Ended(TerminalEvent::EnvelopeExceeded);
+                    self.envelope_refusal = Some(refusal);
+                }
+                if self.h_m <= 0.0 && !matches!(self.phase, Phase::Ended(_)) {
                     self.h_m = 0.0;
                     self.phase = Phase::Ended(TerminalEvent::GroundContact);
                 }
@@ -816,6 +903,10 @@ impl SimLoop {
             w_mps: self.w,
             q_rad_s: self.q,
             theta_rad: self.theta,
+            p_rad_s: self.lateral_state.p_rad_s,
+            phi_rad: self.lateral_state.phi_rad,
+            r_rad_s: self.lateral_state.r_rad_s,
+            psi_rad: self.lateral_state.psi_rad,
             dc_rad: self.mech.delta_rad,
             warp_rad: self.warp,
             omega_prop_rad_s: self.omega,
@@ -825,7 +916,8 @@ impl SimLoop {
         }
     }
 
-    /// The frozen ring payload for a state (SNAPSHOT_LEN floats).
+    /// The frozen v2 ring payload for a state (`SNAPSHOT_LEN` floats).
+    /// Slots 0..12 are the exact v1 prefix; phi/psi are appended.
     #[must_use]
     pub fn snapshot_payload(&self, s: &SimStateOut) -> [f64; SNAPSHOT_LEN] {
         [
@@ -849,6 +941,8 @@ impl SimLoop {
                 Phase::Ended(TerminalEvent::EnvelopeExceeded) => 5.0,
                 Phase::Ended(TerminalEvent::DamageModelUnavailable) => 6.0,
             },
+            s.phi_rad,
+            s.psi_rad,
         ]
     }
 

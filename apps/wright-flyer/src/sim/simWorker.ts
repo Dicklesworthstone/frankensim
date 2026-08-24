@@ -1,6 +1,6 @@
 // Sim worker entry (bead wf-root-guzez.6.3.1, E5.2a): drives the REAL
 // fs-flyer-wasm engine at the 120 Hz bounded-catch-up schedule (E0.8)
-// and publishes the frozen 12-float snapshot into the E0.7 seqlock
+// and publishes the frozen v2 snapshot into the E0.7 seqlock
 // ring (SharedArrayBuffer) — postMessage fallback when SAB is
 // unavailable. THIN by design: every parse/assemble branch lives in
 // engineFacade.ts (headless-tested); this file is transport glue.

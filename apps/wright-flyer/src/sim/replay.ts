@@ -6,10 +6,11 @@
 // (The full scrubber/ABComparisonReceiptV1 machinery is E6.1; this is
 // the milestone ghost slice.)
 
-import { PAYLOAD_F64S, type ScenarioInit } from "./protocol.ts";
+import { PAYLOAD_F64S, PAYLOAD_F64S_V1, type ScenarioInit } from "./protocol.ts";
 import { decodeSnapshot, type SimSnapshot } from "./snapshotView.ts";
 
-export const RECORDING_SCHEMA = "org.frankensim.wf.flight-recording.v1";
+export const RECORDING_SCHEMA_V1 = "org.frankensim.wf.flight-recording.v1";
+export const RECORDING_SCHEMA = "org.frankensim.wf.flight-recording.v2";
 
 /** Scenario identity fields (bigints carried as decimal strings). */
 export interface RecordedScenario {
@@ -25,7 +26,7 @@ export interface RecordedScenario {
 }
 
 export interface FlightRecording {
-  readonly schema: typeof RECORDING_SCHEMA;
+  readonly schema: typeof RECORDING_SCHEMA | typeof RECORDING_SCHEMA_V1;
   readonly scenario: RecordedScenario;
   readonly runIntentId: string;
   readonly tick0Digest: string;
@@ -34,7 +35,7 @@ export interface FlightRecording {
   readonly finalDigest: string;
   /** Per-snapshot ticks (parallel to `frames`). */
   readonly ticks: readonly number[];
-  /** Flat payload transcript: frames[i] occupies [i*12, (i+1)*12). */
+  /** Flat payload transcript: v2 uses 14 words; legacy v1 uses 12. */
   readonly frames: readonly number[];
 }
 
@@ -143,8 +144,8 @@ export function parseRecording(json: string): FlightRecording | { readonly error
     return { error: "not an object" };
   }
   const r = value as Record<string, unknown>;
-  if (r.schema !== RECORDING_SCHEMA) {
-    return { error: `schema ${String(r.schema)} != ${RECORDING_SCHEMA}` };
+  if (r.schema !== RECORDING_SCHEMA && r.schema !== RECORDING_SCHEMA_V1) {
+    return { error: `unsupported schema ${String(r.schema)}` };
   }
   if (
     typeof r.runIntentId !== "string" ||
@@ -158,8 +159,9 @@ export function parseRecording(json: string): FlightRecording | { readonly error
   if (!Array.isArray(r.ticks) || !Array.isArray(r.frames)) {
     return { error: "transcript arrays missing" };
   }
-  if (r.frames.length !== r.ticks.length * PAYLOAD_F64S) {
-    return { error: `frames ${r.frames.length} != ticks ${r.ticks.length} * ${PAYLOAD_F64S}` };
+  const payloadWords = r.schema === RECORDING_SCHEMA_V1 ? PAYLOAD_F64S_V1 : PAYLOAD_F64S;
+  if (r.frames.length !== r.ticks.length * payloadWords) {
+    return { error: `frames ${r.frames.length} != ticks ${r.ticks.length} * ${payloadWords}` };
   }
   if (r.ticks.length === 0) {
     return { error: "empty transcript" };
@@ -198,9 +200,10 @@ export function ghostAt(recording: FlightRecording, liveTick: number): SimSnapsh
       hi = mid - 1;
     }
   }
-  const payload = new Float64Array(PAYLOAD_F64S);
-  for (let i = 0; i < PAYLOAD_F64S; i += 1) {
-    payload[i] = recording.frames[lo * PAYLOAD_F64S + i]!;
+  const payloadWords = recording.schema === RECORDING_SCHEMA_V1 ? PAYLOAD_F64S_V1 : PAYLOAD_F64S;
+  const payload = new Float64Array(payloadWords);
+  for (let i = 0; i < payloadWords; i += 1) {
+    payload[i] = recording.frames[lo * payloadWords + i]!;
   }
   return decodeSnapshot(ticks[lo]!, payload);
 }

@@ -113,6 +113,9 @@ fn human_mode_steps_with_input_and_historical_member_binds() {
     let s = human.step(true, 25.0, 0.01);
     assert!(s.starts_with("{\"ok\":{"), "{s}");
     assert!(s.contains("\"phase\":\"on-rail\""), "{s}");
+    for key in ["p_rad_s", "phi_rad", "r_rad_s", "psi_rad"] {
+        assert!(s.contains(key), "missing lateral field {key}: {s}");
+    }
     // Historical member is intent-bearing: run_intent_id differs.
     let mut h0 = EngineSlot::default();
     let mut h1 = EngineSlot::default();

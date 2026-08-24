@@ -25,6 +25,8 @@ import {
   P_H_M,
   P_OMEGA_RAD_S,
   P_PHASE,
+  P_PHI_RAD,
+  P_PSI_RAD,
   P_Q_RAD_S,
   P_THETA_RAD,
   P_U_MPS,
@@ -32,6 +34,8 @@ import {
   P_WARP_RAD,
   P_X_M,
   PAYLOAD_F64S,
+  PAYLOAD_LAYOUT_V1,
+  PAYLOAD_LAYOUT_V2,
   PHASE_CODES,
   payloadLayoutHash,
 } from "../src/sim/protocol.ts";
@@ -43,6 +47,7 @@ const jlog = (payload: Record<string, unknown>): void => {
 const STEP_OK =
   '{"ok":{"tick":42,"phase":"airborne","x_m":10.5,"h_m":3.25,"u_mps":13.5,"w_mps":0.5,' +
   '"q_rad_s":0.1,"theta_rad":0.08,"dc_rad":0.12,"warp_rad":0.01,"omega_prop_rad_s":50.5,' +
+  '"p_rad_s":0.03,"phi_rad":0.04,"r_rad_s":-0.02,"psi_rad":-0.05,' +
   '"gust_w_mps":0.02,"assist_active":false}}';
 
 test("phase codes mirror the native payload codes exactly", () => {
@@ -59,7 +64,8 @@ test("phase codes mirror the native payload codes exactly", () => {
 test("payload layout hash is pinned (layout identity, not crypto)", () => {
   const h = payloadLayoutHash();
   assert.equal(h, payloadLayoutHash(), "deterministic");
-  assert.notEqual(h, payloadLayoutHash("wf-snapshot-v2:something-else"), "descriptor-sensitive");
+  assert.equal(h, payloadLayoutHash(PAYLOAD_LAYOUT_V2));
+  assert.notEqual(h, payloadLayoutHash(PAYLOAD_LAYOUT_V1), "v2 refuses a stale v1 ring");
   jlog({ case: "layout-hash", value: h });
 });
 
@@ -86,6 +92,8 @@ test("step envelope parses per-field and fills the frozen payload order", () => 
   assert.equal(out[P_GUST_W_MPS], 0.02);
   assert.equal(out[P_ASSIST], 0);
   assert.equal(out[P_PHASE], 1);
+  assert.equal(out[P_PHI_RAD], 0.04);
+  assert.equal(out[P_PSI_RAD], -0.05);
 });
 
 test("terminal phases parse as ended with the envelope receipt carried", () => {

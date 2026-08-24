@@ -18,7 +18,7 @@ import {
   worldTransformFrom,
   type SimSnapshot,
 } from "../src/sim/snapshotView.ts";
-import { PAYLOAD_F64S, PHASE_CODES } from "../src/sim/protocol.ts";
+import { PAYLOAD_F64S, PAYLOAD_F64S_V1, PHASE_CODES } from "../src/sim/protocol.ts";
 
 function payloadOf(fields: Partial<Record<number, number>>): Float64Array {
   const p = new Float64Array(PAYLOAD_F64S);
@@ -39,6 +39,8 @@ function snap(overrides: Partial<SimSnapshot>): SimSnapshot {
     wMps: 1,
     qRadS: 0.2,
     thetaRad: 0.1,
+    phiRad: 0.04,
+    psiRad: -0.03,
     dcRad: 0.15,
     warpRad: 0.02,
     omegaPropRadS: 50,
@@ -62,6 +64,8 @@ test("decode: per-slot oracle for every field and phase code", () => {
     9: 0.07, // gust
     10: 1, // assist
     11: 1, // airborne
+    12: 0.09, // roll
+    13: -0.04, // heading
   });
   const s = decodeSnapshot(360, p);
   assert.equal(s.tick, 360);
@@ -78,6 +82,8 @@ test("decode: per-slot oracle for every field and phase code", () => {
   assert.equal(s.omegaPropRadS, 51.5);
   assert.equal(s.gustWMps, 0.07);
   assert.equal(s.assistActive, true);
+  assert.equal(s.phiRad, 0.09);
+  assert.equal(s.psiRad, -0.04);
   // Every phase code round-trips; ended:* map to ended=true.
   for (const [word, code] of Object.entries(PHASE_CODES)) {
     const d = decodeSnapshot(1, payloadOf({ 11: code }));
@@ -87,15 +93,36 @@ test("decode: per-slot oracle for every field and phase code", () => {
   // Unknown code and short payload throw (fail-closed).
   assert.throws(() => decodeSnapshot(1, payloadOf({ 11: 6 })), RangeError);
   assert.throws(() => decodeSnapshot(1, new Float64Array(PAYLOAD_F64S - 1)), RangeError);
+  const legacy = decodeSnapshot(1, new Float64Array(PAYLOAD_F64S_V1));
+  assert.equal(legacy.phiRad, 0, "v1 fallback is explicit zero-lateral");
+  assert.equal(legacy.psiRad, 0);
 });
 
 test("interpolation: exact midpoint on continuous fields, discrete held", () => {
-  const a = snap({ tick: 100, xM: 10, hM: 2, thetaRad: 0.1, assistActive: true });
-  const b = snap({ tick: 101, xM: 12, hM: 4, thetaRad: 0.3, assistActive: false });
+  const a = snap({
+    tick: 100,
+    xM: 10,
+    hM: 2,
+    thetaRad: 0.1,
+    phiRad: 0.2,
+    psiRad: -0.1,
+    assistActive: true,
+  });
+  const b = snap({
+    tick: 101,
+    xM: 12,
+    hM: 4,
+    thetaRad: 0.3,
+    phiRad: 0.4,
+    psiRad: 0.1,
+    assistActive: false,
+  });
   const mid = interpolateSnapshots(a, b, 0.5);
   assert.equal(mid.xM, 11);
   assert.equal(mid.hM, 3);
   assert.ok(Math.abs(mid.thetaRad - 0.2) < 1e-15);
+  assert.ok(Math.abs(mid.phiRad - 0.3) < 1e-15);
+  assert.ok(Math.abs(mid.psiRad) < 1e-15);
   assert.equal(mid.assistActive, true, "discrete holds the older value");
   assert.equal(mid.tick, 100, "tick holds until alpha=1");
   assert.equal(interpolateSnapshots(a, b, 1).xM, 12);
@@ -146,11 +173,13 @@ test("control-state mapping: exact rad->deg, slaved rudder, prop angle", () => {
   assert.equal(c.propAngleRad, 2.5);
 });
 
-test("world transform: launch offset + pitch; lateral declared zero", () => {
-  const s = snap({ xM: 25, hM: 6, thetaRad: 0.2 });
+test("world transform: launch offset + simulated pitch, roll, and heading", () => {
+  const s = snap({ xM: 25, hM: 6, thetaRad: 0.2, phiRad: -0.3, psiRad: 0.4 });
   const w = worldTransformFrom(s, [100, 5, -3]);
   assert.deepEqual(w.position, [125, 11, -3]);
   assert.equal(w.pitchRad, 0.2);
+  assert.equal(w.rollRad, -0.3);
+  assert.equal(w.headingRad, 0.4);
 });
 
 test("HUD inputs: airspeed hypot, elapsed from tick, engine rpm via 23:8", () => {
