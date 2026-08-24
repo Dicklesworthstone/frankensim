@@ -5584,6 +5584,7 @@ fn bind_local_macro_dependencies<'a>(
     authority: &str,
     local_macro_authorities: &mut BTreeMap<String, Vec<u8>>,
     local_macro_contexts: &mut BTreeSet<(String, String, Option<String>, usize)>,
+    declared_type_authorities: &BTreeSet<String>,
 ) -> Result<Vec<&'a str>, String> {
     let mut pending = roots
         .into_iter()
@@ -5839,6 +5840,7 @@ fn normalized_rust_function_closure_with_symbols_and_index(
                 &authority,
                 &mut local_macro_authorities,
                 &mut local_macro_contexts,
+                declared_type_authorities,
             )? {
                 let macro_authority = format!("{authority} local macro closure");
                 require_source_macro_constants(
@@ -5952,6 +5954,7 @@ fn normalized_rust_function_closure_with_symbols_and_index(
                 &authority,
                 &mut local_macro_authorities,
                 &mut local_macro_contexts,
+                declared_type_authorities,
             )? {
                 let macro_authority = format!("{authority} local macro closure");
                 require_source_macro_constants(
@@ -10627,7 +10630,12 @@ fn normalized_rust_schema_authority_with_index(
 ) -> Result<Vec<u8>, String> {
     let function_count = index.functions.get(symbol).map_or(0, Vec::len);
     if function_count != 0 || symbol.contains("::") {
-        return normalized_rust_function_closure_with_index(text, index, [symbol.to_string()]);
+        return normalized_rust_function_closure_with_index(
+            text,
+            index,
+            [symbol.to_string()],
+            &BTreeSet::new(),
+        );
     }
 
     let (fragment, inner_attributes) = exact_root_macro_rules_fragment_with_index(index, symbol)?;
@@ -10797,7 +10805,8 @@ fn normalized_rust_function_closure(
     text: &str,
     roots: impl IntoIterator<Item = String>,
 ) -> Result<Vec<u8>, String> {
-    normalized_rust_function_closure_with_symbols(text, roots).map(|(bytes, _)| bytes)
+    normalized_rust_function_closure_with_symbols(text, roots, &BTreeSet::new())
+        .map(|(bytes, _)| bytes)
 }
 
 #[allow(clippy::too_many_lines)] // Exact const spans need the same literal/comment discipline.
@@ -11273,9 +11282,6 @@ impl IdentityReferenceCache {
                 cache.constants.insert((path.clone(), symbol), result);
             }
             for symbol in requested.types {
-                let index = index
-                    .as_ref()
-                    .expect("schema type requests build a Rust index");
                 let result = rust_named_type_declaration_bytes(text, index, &symbol)
                     .map_err(|detail| format!("schema type {path}#{symbol} is invalid: {detail}"));
                 cache.types.insert((path.clone(), symbol), result);
