@@ -90,7 +90,7 @@ macro_rules! log_witness {
 }
 
 fn pool(workers: usize) -> TilePool {
-    TilePool::new(PoolConfig::for_host(workers, 0xC0_4D_50_1E_7E))
+    TilePool::new(PoolConfig::for_host(workers, 0xc0_4d50_1e7e))
 }
 
 struct UnitKernel {
@@ -158,7 +158,7 @@ impl TileKernel for FaultAtZero {
         if tile == 0 {
             ControlFlow::Break(cx.refuse(TileFailure::InjectedFault {
                 plan_version: 1,
-                plan_seed: 0xFA_17,
+                plan_seed: 0xfa17,
                 tiles: self.tiles,
                 touches_per_tile: 1,
                 touch: 1,
@@ -300,7 +300,7 @@ fn success_zero_one_many_and_deterministic_identity_are_fully_accounted() {
     assert_ne!(first.plan_root_bytes(), different_run.plan_root_bytes());
     assert_ne!(first.root_bytes(), different_run.root_bytes());
 
-    let different_seed_pool = TilePool::new(PoolConfig::for_host(4, 0xC0_4D_50_1E_7F));
+    let different_seed_pool = TilePool::new(PoolConfig::for_host(4, 0xc0_4d50_1e7f));
     let (_, _, different_seed) = witnessed_parts!(different_seed_pool.run_declared_witnessed(
         &kernel,
         &CancelGate::new(),
@@ -548,7 +548,7 @@ fn lease_and_tile_arena_allocation_refusals_are_sealed_and_reusable() {
     );
     log_witness!("root-lease-refusal", 0, witness, reuse = true);
 
-    let mut config = PoolConfig::for_host(1, 0xA_110C);
+    let mut config = PoolConfig::for_host(1, 0xa_110c);
     config.arena.limit_bytes = Some(0);
     config.arena.free_list_max_bytes = 0;
     let allocation_pool = TilePool::new(config);

@@ -17,26 +17,26 @@ use fs_substrate::affinity::CcdTopology;
 const SUITE: &str = "fs-exec/fault-storm";
 const TILES: u64 = 41;
 const TOUCHES_PER_TILE: u32 = 3;
-const SEEDED_POOL_EXECUTION_ROOT: u64 = 0xF404_F00D;
-const EARLY_POOL_EXECUTION_ROOT: u64 = 0xF404_DA1A;
-const EARLY_SEED: u64 = 0xF404_001a;
+const SEEDED_POOL_EXECUTION_ROOT: u64 = 0xf404_f00d;
+const EARLY_POOL_EXECUTION_ROOT: u64 = 0xf404_da1a;
+const EARLY_SEED: u64 = 0xf404_001a;
 const SEEDS: [u64; 16] = [
-    0xF404_0000,
-    0xF404_0001,
-    0xF404_0002,
-    0xF404_0003,
-    0xF404_0004,
-    0xF404_0005,
-    0xF404_0006,
-    0xF404_0007,
-    0xF404_0008,
-    0xF404_0009,
-    0xF404_000a,
-    0xF404_000b,
-    0xF404_000c,
-    0xF404_000d,
-    0xF404_000e,
-    0xF404_000f,
+    0xf404_0000,
+    0xf404_0001,
+    0xf404_0002,
+    0xf404_0003,
+    0xf404_0004,
+    0xf404_0005,
+    0xf404_0006,
+    0xf404_0007,
+    0xf404_0008,
+    0xf404_0009,
+    0xf404_000a,
+    0xf404_000b,
+    0xf404_000c,
+    0xf404_000d,
+    0xf404_000e,
+    0xf404_000f,
 ];
 
 fn verdict(emitter: &mut fs_obs::Emitter, case: &str, pass: bool, detail: &str, seed: u64) {
