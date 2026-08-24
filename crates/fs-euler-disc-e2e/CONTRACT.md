@@ -2102,6 +2102,61 @@ claims only; they do not establish concurrent scheduler-claim arbitration,
 render convergence, 4K capacity, or scientific authority beyond the source
 trajectory.
 
+## Scientific overlay and sidecar v1
+
+The opt-in `cinematic-render` feature exposes a separate transparent vector
+command layer through `scientific_overlay`. It consumes a borrowed canonical
+`EulerRenderTrajectoryArtifact`, its admitted `AnimatedCamera`, and an
+L6-supplied beauty-scene identity. It never mutates the trajectory, scene,
+film, beauty EXR, or raw physics artifact and never adds overlay state to their
+identities. The supplied beauty identity is retained as a provenance binding,
+not recomputed or minted from renderer internals.
+
+One frame retains the exact camera-shot owner, raster and safe-title rectangle,
+timeline reconstruction provenance, continuous base mode, one-sided contact
+branch, projected disc axis, exact closed-contact history through that time,
+and interval events with their original numerical brackets. At an exact source
+sample it additionally retains the original contact geometry/support feature,
+declared force and torque channels under their availability flags, the tagged
+normal-force scalar, Euler QoIs, energy/defect, and per-channel work. At an
+interpolated frame those interval-authority values are explicitly absent;
+continuous pose/base interpolation never fabricates force, energy, support, or
+QoI authority. An open contact has no current contact point even when the
+historical orbit remains available.
+
+Every vector carries its SI unit, world-space origin/value, declared display
+metres per physical unit, and independently auditable optical-centre
+projections of both endpoints. NDC and pixel conversion use the beauty
+raster's exact `+x` right / `+y` down convention. Points behind the optical
+centre retain a typed behind-camera result. Off-screen line segments are
+deterministically clipped to the declared safe area; current-contact markers
+are clamped and marked as clipped. Contact orbit, disc axis, force, torque,
+event bracket, and non-overlapping label commands use a fixed Okabe-Ito-derived
+color-safe palette and deterministic painter order. The command layer has a
+transparent background and is a compositor input, never a replacement beauty
+master.
+
+The typed sidecar and its compact canonical JSON contain the same values used
+to derive the commands. Fixed schema-v1 field order and numeric rendering are
+domain-hashed under
+`org.frankensim.fs-euler-disc-e2e.scientific-overlay-sidecar.v1`. The sidecar
+always labels itself `simulation-evidence`, `visualization_only`, and
+`transparent_background`, and carries an explicit no-claim against
+measurement, calibration, force reconstruction, uncertainty certification,
+or beauty-image authority. The contact orbit has a caller-declared point limit
+under a hard ceiling of 65,536; one point over refuses without a partial frame.
+Cancellation is checked before work, during orbit/command traversal, and before
+publication.
+
+Focused G0/G3 coverage checks independent world-to-screen parity, vector
+scaling and units, open/interpolated absence, behind-camera suppression,
+event brackets, deterministic replay and sidecar identity, non-overlapping 4K
+safe-area labels, the fixed palette, exact one-short orbit refusal,
+pre-requested cancellation, and unchanged trajectory/beauty identities. These
+tests establish deterministic visualization composition only; they do not
+establish physical fidelity, calibrated annotation scales, uncertainty
+coverage, text glyph rasterization, or a finished diagnostic edit.
+
 ## Deterministic cinematic job conductor v1
 
 The opt-in `cinematic-orchestration` feature owns the smallest film-specific

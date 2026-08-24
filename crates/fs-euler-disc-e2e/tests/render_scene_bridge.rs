@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_blake3::{ContentHash, hash_domain};
-use fs_euler_disc_e2e::coupled_runner::{ChannelOwnership, ContactTransitionKind};
+use fs_euler_disc_e2e::coupled_runner::{ChannelOwnership, ChannelWrench, ContactTransitionKind};
 use fs_euler_disc_e2e::profile_contact_geometry;
 use fs_euler_disc_e2e::render_scene_bridge::{
     EULER_STUDIO_ENVIRONMENT_HEIGHT, EULER_STUDIO_ENVIRONMENT_WIDTH, EulerCinematicScene,
@@ -15,21 +15,27 @@ use fs_euler_disc_e2e::render_scene_bridge::{
     EulerTessellationConfig, MAX_EULER_STUDIO_ENVIRONMENT_RADIANCE_SCALE,
     euler_scene_smoke_settings,
 };
+use fs_euler_disc_e2e::scientific_overlay::{
+    EULER_SCIENTIFIC_OVERLAY_IDENTITY_DOMAIN, OverlayColor, OverlayProjection,
+    ScientificOverlayConfig, ScientificOverlayError, ScientificOverlayPrimitive,
+    ScientificOverlayRequest, ScientificVectorKind, build_scientific_overlay,
+};
 use fs_euler_disc_e2e::specimen::{DiscProfileSpec, ResolvedDiscProfile};
 use fs_euler_disc_e2e::{
     DeclaredDiscontinuityKind, DeclaredTimelineDiscontinuity, DerivedEulerQois,
     EULER_RENDER_TRAJECTORY_SCHEMA_VERSION, EulerRenderTrajectoryArtifact, EventEvaluationSide,
     ExposureEventPolicy, RenderBaseFrame, RenderBaseModeState, RenderChannelAvailability,
     RenderContactBranch, RenderContactGeometry, RenderContactTransition, RenderMassProperties,
-    RenderSampleDisposition, RenderSupportFeature, RenderTrajectory, RenderTrajectoryAuthority,
-    RenderTrajectoryCodecBudget, RenderTrajectoryMetadata, RenderTrajectorySampleInput,
-    RenderUnitSystem, RenderWorldFrame,
+    RenderNormalForceSampling, RenderSampleDisposition, RenderSupportFeature, RenderTrajectory,
+    RenderTrajectoryAuthority, RenderTrajectoryCodecBudget, RenderTrajectoryMetadata,
+    RenderTrajectorySampleInput, RenderUnitSystem, RenderWorldFrame,
 };
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, RunId, StreamKey};
 use fs_geom::{Point3, Vec3 as GeomVec3};
 use fs_mbd::{MassProperties, Pose, RigidBodyState, UnitQuaternion, Vec3};
 use fs_render::camera::{
-    AnimatedCamera, Aperture, CameraKeyframe, CameraProjection, CameraShot, CutSide, PhysicalCamera,
+    AnimatedCamera, Aperture, CameraKeyframe, CameraProjection, CameraShot, CutSide,
+    OpticalCenterProjection, PhysicalCamera,
 };
 use fs_render::charts::TriMesh;
 use fs_render::conductor::{ConductorOptics, ConductorProvenance, ConductorSurface};
@@ -416,6 +422,23 @@ fn trajectory(
                 Vec3::new(velocity_mps * mass.mass(), 0.0, 0.0);
         }
     }
+    trajectory_from_inputs(
+        specimen,
+        chart_identity_override,
+        inputs,
+        RenderChannelAvailability::NONE_AVAILABLE,
+        if with_transition { END_TIME_S } else { STEP_S },
+    )
+}
+
+fn trajectory_from_inputs(
+    specimen: &ResolvedDiscProfile,
+    chart_identity_override: Option<ContentHash>,
+    inputs: Vec<RenderTrajectorySampleInput>,
+    channel_availability: RenderChannelAvailability,
+    timestep_s: f64,
+) -> RenderTrajectory {
+    let mass = render_mass(specimen);
     let identities = specimen.content_identities();
     let first = &inputs[0];
     let initial_orientation = UnitQuaternion::new(
@@ -450,10 +473,10 @@ fn trajectory(
                 orientation_base_to_world: UnitQuaternion::IDENTITY,
             },
             model_identity: identity("model"),
-            channel_availability: RenderChannelAvailability::NONE_AVAILABLE,
+            channel_availability,
             configuration_identity: identity("configuration"),
             configuration_fingerprint: 0x4555_4c45_525f_4532,
-            timestep_s: if with_transition { END_TIME_S } else { STEP_S },
+            timestep_s,
             producer_version: "scene-bridge-test-v1".into(),
             applicability: "deterministic visualization bridge fixture only".into(),
             no_claims: vec!["rendering does not validate the reduced mechanics".into()],
@@ -462,6 +485,62 @@ fn trajectory(
         inputs,
     )
     .expect("valid render trajectory fixture")
+}
+
+fn diagnostic_artifact(
+    specimen: &ResolvedDiscProfile,
+    cx: &Cx<'_>,
+) -> EulerRenderTrajectoryArtifact {
+    let mass = render_mass(specimen);
+    let mut inputs = vec![
+        sample_at(0.0, 0.0, specimen, mass, true, false, cx),
+        sample_at(0.0, STEP_S, specimen, mass, true, false, cx),
+        sample_at(STEP_S, END_TIME_S, specimen, mass, true, true, cx),
+    ];
+    inputs[0].contact_transitions.clear();
+    inputs[2].contact_transitions.clear();
+    inputs[1].interval_normal_force_n = 6.0;
+    inputs[1].channels = ChannelOwnership {
+        gravity: ChannelWrench {
+            force_world_n: Vec3::new(0.0, 0.0, -4.0),
+            torque_world_nm: Vec3::ZERO,
+            work_j: -0.02,
+        },
+        contact: ChannelWrench {
+            force_world_n: Vec3::new(0.0, 0.0, 6.0),
+            torque_world_nm: Vec3::new(0.01, 0.0, 0.0),
+            work_j: 0.03,
+        },
+        rolling: ChannelWrench {
+            force_world_n: Vec3::new(-0.25, 0.0, 0.0),
+            torque_world_nm: Vec3::new(0.0, -0.015, 0.0),
+            work_j: -0.005,
+        },
+        base: ChannelWrench {
+            force_world_n: Vec3::new(0.0, 0.0, -0.1),
+            torque_world_nm: Vec3::ZERO,
+            work_j: -0.001,
+        },
+        gas: ChannelWrench {
+            force_world_n: Vec3::new(-0.05, 0.02, 0.0),
+            torque_world_nm: Vec3::new(0.0, 0.0, -0.002),
+            work_j: -0.0005,
+        },
+    };
+    inputs[1].mechanical_energy_j = 0.91;
+    inputs[1].energy_defect_j = 2.5e-8;
+    let availability = RenderChannelAvailability {
+        normal_force_sampling: RenderNormalForceSampling::IntervalMean,
+        ..RenderChannelAvailability::ALL_AVAILABLE
+    };
+    EulerRenderTrajectoryArtifact::try_from_trajectory(
+        identity("scientific-overlay-campaign"),
+        trajectory_from_inputs(specimen, None, inputs, availability, STEP_S),
+        Vec::new(),
+        RenderTrajectoryCodecBudget::DEFAULT,
+        cx,
+    )
+    .expect("scientific overlay trajectory artifact")
 }
 
 fn artifact(
@@ -1855,5 +1934,297 @@ fn e2e_zero_width_frame_traces_real_pixels_and_round_trips_exr_deterministically
                 .expect("re-encode decoded EXR"),
             first_bytes
         );
+    });
+}
+
+#[test]
+fn g0_g3_scientific_overlay_projects_sidecar_values_and_isolates_beauty() {
+    with_cx(false, |cx| {
+        let specimen = specimen(cx);
+        let artifact = diagnostic_artifact(&specimen, cx);
+        let scene = EulerCinematicScene::try_build(&artifact, &specimen, config(), cx)
+            .expect("beauty scene");
+        let source_identity_before = artifact.receipt().artifact_identity();
+        let beauty_identity_before = scene.scene_identity();
+        let overlay_config = ScientificOverlayConfig::reference(3840, 2160);
+        let request = ScientificOverlayRequest {
+            frame_time_s: STEP_S,
+            cut_side: CutSide::After,
+            event_side: EventEvaluationSide::RightLimit,
+        };
+        let overlay = build_scientific_overlay(
+            cx,
+            &artifact,
+            scene.camera(),
+            beauty_identity_before,
+            request,
+            overlay_config,
+        )
+        .expect("scientific overlay");
+
+        assert_eq!(
+            artifact.receipt().artifact_identity(),
+            source_identity_before
+        );
+        assert_eq!(scene.scene_identity(), beauty_identity_before);
+        assert_eq!(
+            overlay.sidecar().beauty_scene_identity,
+            beauty_identity_before
+        );
+        assert_eq!(
+            overlay.sidecar().source_trajectory_identity,
+            source_identity_before
+        );
+        assert_eq!(
+            overlay.sidecar().contact.branch,
+            RenderContactBranch::Closed
+        );
+        assert_eq!(overlay.sidecar().contact_orbit.len(), 2);
+        assert_eq!(overlay.sidecar().events.len(), 1);
+        assert_eq!(
+            (overlay.sidecar().width, overlay.sidecar().height),
+            (3840, 2160)
+        );
+
+        let contact = overlay
+            .sidecar()
+            .contact
+            .point
+            .expect("exact closed contact point");
+        let evaluated = scene
+            .camera()
+            .evaluate(cx, STEP_S, CutSide::After)
+            .expect("frame camera");
+        let [x, y, z] = contact.world_m;
+        let OpticalCenterProjection::InFront { ndc_xy, depth_m } = evaluated
+            .project_from_optical_center(Point3::new(x, y, z), 3840.0 / 2160.0)
+            .expect("independent contact projection")
+        else {
+            panic!("fixture contact must be in front of the camera");
+        };
+        let expected_pixel = [
+            (ndc_xy[0] + 1.0) * 0.5 * 3840.0,
+            (1.0 - ndc_xy[1]) * 0.5 * 2160.0,
+        ];
+        let OverlayProjection::InFront {
+            pixel_xy,
+            depth_m: retained_depth,
+            ..
+        } = contact.projection
+        else {
+            panic!("contact projection parity");
+        };
+        assert_eq!(pixel_xy.map(f64::to_bits), expected_pixel.map(f64::to_bits));
+        assert_eq!(retained_depth.to_bits(), depth_m.to_bits());
+
+        let normal = overlay
+            .sidecar()
+            .vectors
+            .iter()
+            .find(|vector| vector.kind == ScientificVectorKind::NormalContactForce)
+            .expect("normal-force diagnostic");
+        assert_eq!(normal.value_si, [0.0, 0.0, 6.0]);
+        assert_eq!(
+            normal.display_scale_m_per_unit.to_bits(),
+            overlay_config.force_scale_m_per_n.to_bits()
+        );
+        let expected_end = Point3::new(
+            normal.origin_world_m[0] + normal.value_si[0] * normal.display_scale_m_per_unit,
+            normal.origin_world_m[1] + normal.value_si[1] * normal.display_scale_m_per_unit,
+            normal.origin_world_m[2] + normal.value_si[2] * normal.display_scale_m_per_unit,
+        );
+        let OpticalCenterProjection::InFront { ndc_xy, .. } = evaluated
+            .project_from_optical_center(expected_end, 3840.0 / 2160.0)
+            .expect("independent vector endpoint projection")
+        else {
+            panic!("normal vector endpoint must be in front");
+        };
+        let expected_end_pixel = [
+            (ndc_xy[0] + 1.0) * 0.5 * 3840.0,
+            (1.0 - ndc_xy[1]) * 0.5 * 2160.0,
+        ];
+        let OverlayProjection::InFront {
+            pixel_xy: retained_end,
+            ..
+        } = normal.end
+        else {
+            panic!("normal endpoint projection parity");
+        };
+        assert_eq!(
+            retained_end.map(f64::to_bits),
+            expected_end_pixel.map(f64::to_bits)
+        );
+
+        let labels = overlay
+            .primitives()
+            .iter()
+            .filter_map(|primitive| match primitive {
+                ScientificOverlayPrimitive::Label {
+                    bounds_px, text, ..
+                } => Some((*bounds_px, text)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(labels.iter().any(|(_, text)| text.contains("rad/s")));
+        assert!(labels.iter().any(|(_, text)| text.contains(" J")));
+        for (index, (bounds, _)) in labels.iter().enumerate() {
+            let safe = overlay.sidecar().safe_area;
+            assert!(
+                bounds[0] >= safe.left_px
+                    && bounds[1] >= safe.top_px
+                    && bounds[2] <= safe.right_px
+                    && bounds[3] <= safe.bottom_px
+            );
+            for (other, _) in labels.iter().skip(index + 1) {
+                let overlaps = bounds[0] < other[2]
+                    && other[0] < bounds[2]
+                    && bounds[1] < other[3]
+                    && other[1] < bounds[3];
+                assert!(!overlaps, "label rectangles must not overlap");
+            }
+        }
+        assert!(
+            overlay.primitives().iter().any(|primitive| matches!(
+                primitive,
+                ScientificOverlayPrimitive::EventBracket { .. }
+            ))
+        );
+
+        for color in [
+            OverlayColor::AXIS,
+            OverlayColor::CONTACT,
+            OverlayColor::FORCE,
+            OverlayColor::TORQUE,
+            OverlayColor::EVENT,
+        ] {
+            assert!(
+                color
+                    .rgb
+                    .iter()
+                    .all(|component| (0.0..=1.0).contains(component))
+            );
+            assert_eq!(color.alpha, 1.0);
+        }
+        assert_ne!(OverlayColor::AXIS.rgb, OverlayColor::CONTACT.rgb);
+        assert_ne!(OverlayColor::FORCE.rgb, OverlayColor::TORQUE.rgb);
+
+        let json = overlay.sidecar_json();
+        assert!(json.starts_with('{') && json.ends_with('}'));
+        assert!(json.contains("\"transparent_background\":true"));
+        assert!(json.contains("\"unit\":\"N\""));
+        assert!(json.contains("\"energy_defect_j\":0.000000025"));
+        assert_eq!(
+            overlay.sidecar_identity(),
+            hash_domain(EULER_SCIENTIFIC_OVERLAY_IDENTITY_DOMAIN, json.as_bytes())
+        );
+        let replay = build_scientific_overlay(
+            cx,
+            &artifact,
+            scene.camera(),
+            beauty_identity_before,
+            request,
+            overlay_config,
+        )
+        .expect("overlay replay");
+        assert_eq!(replay, overlay);
+    });
+}
+
+#[test]
+fn g3_scientific_overlay_handles_interpolation_clipping_budgets_and_cancellation() {
+    let (artifact, beauty_identity, normal_camera) = with_cx(false, |cx| {
+        let specimen = specimen(cx);
+        let artifact = artifact(&specimen, None, false, Vec::new(), cx);
+        (artifact, identity("independent-beauty-scene"), camera())
+    });
+    let config = ScientificOverlayConfig::reference(1920, 1080);
+    let request = ScientificOverlayRequest {
+        frame_time_s: 0.5 * STEP_S,
+        cut_side: CutSide::After,
+        event_side: EventEvaluationSide::RightLimit,
+    };
+    with_cx(false, |cx| {
+        let interpolated = build_scientific_overlay(
+            cx,
+            &artifact,
+            &normal_camera,
+            beauty_identity,
+            request,
+            config,
+        )
+        .expect("interpolated open-contact frame");
+        assert_eq!(
+            interpolated.sidecar().contact.branch,
+            RenderContactBranch::Open
+        );
+        assert!(interpolated.sidecar().contact.point.is_none());
+        assert!(interpolated.sidecar().vectors.is_empty());
+        assert!(interpolated.sidecar().qois.is_none());
+        assert!(interpolated.sidecar().energy.is_none());
+        assert!(interpolated.sidecar_json().contains("\"qois\":null"));
+
+        let eye = Point3::new(0.24, -0.30, 0.18);
+        let away = PhysicalCamera::try_look_at(
+            eye,
+            Point3::new(0.50, -0.60, 0.30),
+            GeomVec3::new(0.0, 0.0, 1.0),
+            CameraProjection::try_half_tangent(0.48).expect("projection"),
+            0.5,
+            Aperture::try_circular(0.0).expect("pinhole"),
+        )
+        .expect("away camera");
+        let away = AnimatedCamera::try_static(71, 0.0, END_TIME_S, away).expect("away camera shot");
+        let clipped =
+            build_scientific_overlay(cx, &artifact, &away, beauty_identity, request, config)
+                .expect("behind-camera diagnostics remain explainable");
+        assert!(matches!(
+            clipped.sidecar().disc_axis.start,
+            OverlayProjection::BehindCamera { .. }
+        ));
+        assert!(!clipped.primitives().iter().any(|primitive| matches!(
+            primitive,
+            ScientificOverlayPrimitive::Line {
+                role: "disc-axis",
+                ..
+            }
+        )));
+    });
+
+    with_cx(true, |cx| {
+        assert!(matches!(
+            build_scientific_overlay(
+                cx,
+                &artifact,
+                &normal_camera,
+                beauty_identity,
+                request,
+                config,
+            ),
+            Err(ScientificOverlayError::Cancelled)
+        ));
+    });
+
+    with_cx(false, |cx| {
+        let specimen = specimen(cx);
+        let dense_contact = diagnostic_artifact(&specimen, cx);
+        let mut one_short = config;
+        one_short.maximum_orbit_points = 2;
+        assert!(matches!(
+            build_scientific_overlay(
+                cx,
+                &dense_contact,
+                &normal_camera,
+                beauty_identity,
+                ScientificOverlayRequest {
+                    frame_time_s: END_TIME_S,
+                    ..request
+                },
+                one_short,
+            ),
+            Err(ScientificOverlayError::OrbitPointBudgetExceeded {
+                required: 3,
+                limit: 2
+            })
+        ));
     });
 }

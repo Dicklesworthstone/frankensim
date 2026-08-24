@@ -49,6 +49,8 @@ pub mod render_sharding;
 pub mod render_trajectory;
 pub mod render_trajectory_codec;
 pub mod rolling_contact;
+#[cfg(feature = "cinematic-render")]
+pub mod scientific_overlay;
 pub mod spatial_audio;
 pub mod specimen;
 pub mod structural_acoustics;
