@@ -4,7 +4,7 @@
   "policy_bead": "frankensim-extreal-program-f85xj.16.3",
   "issue_authority": ".beads/issues.jsonl",
   "critical_path_graph": "vertical-capability-graph.json",
-  "captured_at": "2026-07-22T21:56:15Z",
+  "captured_at": "2026-08-24",
   "moonshot_labels": [
     "ambition:M",
     "ambition-m",
@@ -35,8 +35,8 @@
   "inventory_snapshot": {
     "tagged_total": 514,
     "active": 5,
-    "open_backlog": 489,
-    "closed_terminal": 20,
+    "open_backlog": 487,
+    "closed_terminal": 22,
     "inactive_rule": "Only in_progress is active WIP. Open, blocked, and deferred moonshot Beads are unadmitted backlog; closed moonshot Beads are terminal history. Neither consumes a slot."
   },
   "active_lanes": [
@@ -149,24 +149,24 @@
   "admission_rehearsal": {
     "kind": "hypothetical-only",
     "candidate": {
-      "bead_id": "frankensim-epic-bedrock-6ys.5.1",
-      "lane": "canonical-rank-deficient-tsqr",
+      "bead_id": "frankensim-epic-ascent-7tv.24.18",
+      "lane": "pareto-sheaf-topology-continuation",
       "owner": "governance-rehearsal",
       "admission_kind": "replacement",
       "falsifier": {
-        "id": "rank-deficient-tree-invariance",
-        "observation": "A preregistered rank-deficient fixture yields a different canonical rank profile, R factor, or null-space gauge under two admitted deterministic TSQR tree regroupings, or the independent checker cannot certify the separation hypotheses.",
-        "decision_rule": "Do not admit global canonicality; retain deterministic TSQR plus a typed ambiguity or no-claim result and preserve the counterexample."
+        "id": "pareto-front-structure-forcing",
+        "observation": "A preregistered adversarial front (holes, intersections, disconnected strata, or continuation failure) yields an asserted global sheaf/topology structure that the independent checker refutes, or an activation path that promotes without the frozen statement, TCB, and kill criteria being satisfied.",
+        "decision_rule": "Do not admit any global Pareto-front structure; retain the ungated NSGA-III/WFG baseline plus a typed obstruction/counterexample or no-claim ratchet with retained evidence."
       },
       "budget": {
         "effort_minutes": 120,
-        "calendar_deadline": "2026-08-01"
+        "calendar_deadline": "2026-09-30"
       },
-      "critical_path_disjointness": "The open rank-deficient TSQR theorem Bead has no direct or transitive blocking path into the EXTREAL graph and receives no product-path capacity.",
+      "critical_path_disjointness": "The open Pareto-front ratchet Bead has no direct or transitive blocking path into any active lane; admitting it hypothetically would not reorder the product spine.",
       "quarterly_review": {
-        "next_review": "2026-08-01",
+        "next_review": "2026-09-30",
         "status": "rehearsal",
-        "required_evidence": "rank-deficient regrouping fixtures, independent gauge checks, and typed ambiguity cases"
+        "required_evidence": "adversarial-front fixtures, independent checker identity, cover/cocycle mutants, and typed no-claim cases"
       }
     },
     "displaces": {

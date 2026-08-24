@@ -877,6 +877,12 @@
       "location": "crates/fs-scenario/src/sensor.rs",
       "reason_class": "internal-wire",
       "reason": "sensor extension surface landed at bead f85xj.17.4 with no registered maturity claim"
+    },
+    {
+      "constant": "EULER_SCIENTIFIC_OVERLAY_SCHEMA_VERSION",
+      "location": "crates/fs-euler-disc-e2e/src/scientific_overlay.rs",
+      "reason_class": "internal-wire",
+      "reason": "experimental scientific-overlay sidecar on the euler lane (h7xu5); no external producer invited yet - reclassify to frozen only when the euler schemas table adopts it"
     }
   ]
 }
