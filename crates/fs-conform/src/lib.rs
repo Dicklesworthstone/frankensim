@@ -1518,10 +1518,13 @@ const fn reason_code(reason: ArithmeticRefusal) -> u64 {
 /// Stable schema version of the contained-execution protocol.
 pub const CONTAINED_PROTOCOL_SCHEMA_VERSION: u32 = 1;
 
-/// Refusal reasons for sealing an [`ImplementationIdentity`]. Admission is
-/// fail-closed: an identity that cannot be validated never reaches execution.
+/// Refusal reasons for sampling and sealing an [`ImplementationIdentity`].
+/// Admission is fail-closed: an identity that cannot be obtained and validated
+/// never reaches execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdentityRefusal {
+    /// A legacy converter panicked while its identity metadata was sampled.
+    MetadataPanicked,
     /// The converter id string was empty.
     EmptyConverterId,
     /// Declared error was not finite.
@@ -1934,6 +1937,18 @@ fn bits_eq(left: &[f64], right: &[u64]) -> bool {
             .all(|(a, b)| a.to_bits() == *b)
 }
 
+fn discard_panic_payload(payload: Box<dyn std::any::Any + Send>) {
+    // Panic payloads are caller-controlled and may themselves have a
+    // panicking destructor. Keep that second unwind inside the containment
+    // boundary; if it occurs, forget only the replacement payload so its
+    // destructor cannot recursively escape either.
+    if let Err(nested_payload) =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(payload)))
+    {
+        std::mem::forget(nested_payload);
+    }
+}
+
 /// Adapter binding a legacy [`Converter`] trait object into the contained
 /// protocol. Dimension and finiteness validation, budget charging, output
 /// storage, and panic containment happen HERE, not inside trusted code.
@@ -1947,17 +1962,33 @@ impl<'a> BoundedCallback<'a> {
     /// declaration cannot be validated.
     ///
     /// # Errors
-    /// Returns [`IdentityRefusal`] when any identity field is invalid.
+    /// Returns [`IdentityRefusal`] when metadata sampling panics or any
+    /// identity field is invalid.
     pub fn bind(
         inner: &'a dyn Converter,
         seed_policy: SeedPolicy,
         envelope: WorkEnvelope,
     ) -> Result<BoundedCallback<'a>, IdentityRefusal> {
+        let metadata = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            (
+                inner.id().to_string(),
+                inner.source_dim(),
+                inner.target_dim(),
+                inner.declared_error(),
+            )
+        }));
+        let (converter_id, source_dim, target_dim, declared_error) = match metadata {
+            Ok(metadata) => metadata,
+            Err(payload) => {
+                discard_panic_payload(payload);
+                return Err(IdentityRefusal::MetadataPanicked);
+            }
+        };
         let identity = ImplementationIdentity::seal(
-            inner.id(),
-            inner.source_dim(),
-            inner.target_dim(),
-            inner.declared_error(),
+            &converter_id,
+            source_dim,
+            target_dim,
+            declared_error,
             seed_policy,
             envelope,
         )?;
@@ -1989,7 +2020,7 @@ impl<'a> BoundedCallback<'a> {
                 *out = produced;
             }
             Err(payload) => {
-                drop(payload);
+                discard_panic_payload(payload);
                 out.clear();
                 return Err(CallFault::Panicked);
             }
@@ -2050,6 +2081,8 @@ pub struct ContainmentPolicy<'a> {
 /// Typed failure of a whole contained execution pass.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecutionFault {
+    /// The converter panicked while supplying its implementation identity.
+    IdentityPanicked,
     /// The cancellation probe fired; the run drained without publishing.
     Cancelled,
     /// The suite supplied a composition witness but no contained binding.
@@ -2165,15 +2198,7 @@ fn run_one(
         Ok(outcome) => outcome,
         Err(payload) => {
             scratch.clear();
-            // Panic payloads are caller-controlled and may themselves have a
-            // panicking destructor. Keep that second unwind inside the same
-            // containment boundary; if it occurs, forget only the replacement
-            // payload so its destructor cannot recursively escape either.
-            if let Err(nested_payload) =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(payload)))
-            {
-                std::mem::forget(nested_payload);
-            }
+            discard_panic_payload(payload);
             return Err(StepAbort::Call(CallFault::Panicked));
         }
     };
@@ -2502,6 +2527,9 @@ fn refused_report(identity: &ImplementationIdentity, finding: String) -> Conform
 
 fn describe_fault(fault: &ExecutionFault) -> String {
     match fault {
+        ExecutionFault::IdentityPanicked => {
+            "containment: implementation identity callback panicked; no tier published".to_string()
+        }
         ExecutionFault::Cancelled => {
             "containment: cancelled before a clean drain; no tier published".to_string()
         }
@@ -2517,6 +2545,41 @@ fn describe_fault(fault: &ExecutionFault) -> String {
         ExecutionFault::MissingWitnessBinding => {
             "containment: composition witness lacks a contained binding".to_string()
         }
+    }
+}
+
+fn fail_closed_without_identity(
+    class: ContainmentClass,
+    fault: ExecutionFault,
+) -> ContainedCertification {
+    let finding = describe_fault(&fault);
+    ContainedCertification {
+        report: ConformanceReport {
+            converter: "<identity unavailable>".to_string(),
+            functoriality: false,
+            adjoint_consistent: false,
+            tolerance_honest: false,
+            measured_error: f64::INFINITY,
+            tier: Tier::Rejected,
+            arithmetic: ComparisonEvidence {
+                schema_version: CONFORM_ARITHMETIC_SCHEMA_VERSION,
+                rung: ArithmeticRung::ExactSuperaccumulator,
+                terms: 0,
+                dimension: 0,
+                first_refusal: None,
+            },
+            findings: vec![finding],
+        },
+        execution: ExecutionReceipt {
+            protocol_schema_version: CONTAINED_PROTOCOL_SCHEMA_VERSION,
+            class,
+            identity_digest: 0,
+            auxiliary_identity_digests: Vec::new(),
+            transcript_receipt: 0,
+            replay_verified: false,
+            drained_cleanly: false,
+            first_fault: Some(fault),
+        },
     }
 }
 
@@ -2568,7 +2631,15 @@ pub fn certify_contained(
     // identities between admission, pass-budget creation, and calls. All
     // executor authority must derive from the exact identity bound into the
     // receipt.
-    let pinned_identity = candidate.identity().clone();
+    let pinned_identity = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        candidate.identity().clone()
+    })) {
+        Ok(identity) => identity,
+        Err(payload) => {
+            discard_panic_payload(payload);
+            return fail_closed_without_identity(policy.class, ExecutionFault::IdentityPanicked);
+        }
+    };
     let identity = &pinned_identity;
     let auxiliary_identity_digests: Vec<u64> = witnesses.map_or_else(Vec::new, |bindings| {
         let mut digests = vec![

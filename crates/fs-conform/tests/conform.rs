@@ -1361,6 +1361,114 @@ impl Drop for PanickingDropPayload {
     }
 }
 
+#[derive(Clone, Copy)]
+enum LegacyMetadataPanicKind {
+    Id,
+    SourceDimension,
+    TargetDimension,
+    DeclaredError,
+}
+
+struct LegacyMetadataPanic {
+    kind: LegacyMetadataPanicKind,
+}
+
+impl Converter for LegacyMetadataPanic {
+    fn id(&self) -> &str {
+        if matches!(self.kind, LegacyMetadataPanicKind::Id) {
+            std::panic::panic_any(PanickingDropPayload);
+        }
+        "legacy-metadata-panic"
+    }
+
+    fn source_dim(&self) -> usize {
+        if matches!(self.kind, LegacyMetadataPanicKind::SourceDimension) {
+            std::panic::panic_any(PanickingDropPayload);
+        }
+        2
+    }
+
+    fn target_dim(&self) -> usize {
+        if matches!(self.kind, LegacyMetadataPanicKind::TargetDimension) {
+            std::panic::panic_any(PanickingDropPayload);
+        }
+        2
+    }
+
+    fn apply(&self, x: &[f64]) -> Vec<f64> {
+        x.to_vec()
+    }
+
+    fn adjoint(&self, y: &[f64]) -> Vec<f64> {
+        y.to_vec()
+    }
+
+    fn declared_error(&self) -> f64 {
+        if matches!(self.kind, LegacyMetadataPanicKind::DeclaredError) {
+            std::panic::panic_any(PanickingDropPayload);
+        }
+        0.0
+    }
+}
+
+struct LegacyPayloadPanic;
+
+impl Converter for LegacyPayloadPanic {
+    fn id(&self) -> &str {
+        "legacy-payload-panic"
+    }
+
+    fn source_dim(&self) -> usize {
+        2
+    }
+
+    fn target_dim(&self) -> usize {
+        2
+    }
+
+    fn apply(&self, _x: &[f64]) -> Vec<f64> {
+        std::panic::panic_any(PanickingDropPayload);
+    }
+
+    fn adjoint(&self, y: &[f64]) -> Vec<f64> {
+        y.to_vec()
+    }
+
+    fn declared_error(&self) -> f64 {
+        0.0
+    }
+}
+
+struct IdentityPanic {
+    executed: Cell<bool>,
+}
+
+impl ContainedConverter for IdentityPanic {
+    fn identity(&self) -> &ImplementationIdentity {
+        std::panic::panic_any(PanickingDropPayload);
+    }
+
+    fn apply_bounded(
+        &self,
+        _x: &[f64],
+        _out: &mut Vec<f64>,
+        _budget: &mut fs_conform::CallBudget,
+    ) -> Result<(), fs_conform::CallFault> {
+        self.executed.set(true);
+        Ok(())
+    }
+
+    fn adjoint_bounded(
+        &self,
+        _y: &[f64],
+        _out: &mut Vec<f64>,
+        _budget: &mut fs_conform::CallBudget,
+    ) -> Result<(), fs_conform::CallFault> {
+        self.executed.set(true);
+        Ok(())
+    }
+}
+
 impl ContainedConverter for DirectPanic {
     fn identity(&self) -> &ImplementationIdentity {
         &self.identity
@@ -1650,6 +1758,58 @@ fn direct_contained_converter_panic_is_typed_and_fails_closed() {
             }) if step_index == expected_step
         ));
     }
+}
+
+#[test]
+fn legacy_adapter_contains_metadata_and_direct_payload_panics() {
+    for kind in [
+        LegacyMetadataPanicKind::Id,
+        LegacyMetadataPanicKind::SourceDimension,
+        LegacyMetadataPanicKind::TargetDimension,
+        LegacyMetadataPanicKind::DeclaredError,
+    ] {
+        let hostile = LegacyMetadataPanic { kind };
+        let refusal =
+            BoundedCallback::bind(&hostile, SeedPolicy::Fixed(7), contained_envelope()).err();
+        assert_eq!(refusal, Some(fs_conform::IdentityRefusal::MetadataPanicked));
+    }
+
+    let hostile = LegacyPayloadPanic;
+    let bound = BoundedCallback::bind(&hostile, SeedPolicy::Fixed(7), contained_envelope())
+        .expect("non-panicking metadata admits");
+    let mut output = vec![99.0];
+    let mut budget = fs_conform::CallBudget::new(contained_envelope());
+    let result = bound.apply_bounded(&[1.0, 2.0], &mut output, &mut budget);
+    assert_eq!(result, Err(fs_conform::CallFault::Panicked));
+    assert!(
+        output.is_empty(),
+        "a failed direct adapter call must drain output"
+    );
+}
+
+#[test]
+fn direct_identity_panic_is_typed_without_executing_the_converter() {
+    let hostile = IdentityPanic {
+        executed: Cell::new(false),
+    };
+    let outcome = certify_contained(
+        &hostile,
+        None,
+        &ConformanceSuite::new(0.0),
+        third_party_policy(),
+    );
+
+    assert!(
+        !hostile.executed.get(),
+        "identity refusal must precede execution"
+    );
+    assert_eq!(outcome.report.tier, Tier::Rejected);
+    assert_eq!(outcome.report.converter, "<identity unavailable>");
+    assert_eq!(outcome.execution.identity_digest, 0);
+    assert_eq!(
+        outcome.execution.first_fault,
+        Some(ExecutionFault::IdentityPanicked)
+    );
 }
 
 #[test]
