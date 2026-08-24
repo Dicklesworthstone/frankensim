@@ -97,6 +97,15 @@ impl<'a> CancelScope<'a> {
             Verdict::Closure(f) => f(),
         }
     }
+
+    /// A short-lived view sharing this scope's verdict — lets multi-stage
+    /// drivers hand a fresh owned scope to each stage without cloning.
+    pub fn reborrow(&mut self) -> CancelScope<'_> {
+        match &mut self.verdict {
+            Verdict::Never => CancelScope::never(),
+            Verdict::Closure(f) => CancelScope::from_closure(f),
+        }
+    }
 }
 
 
