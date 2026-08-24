@@ -5262,8 +5262,16 @@ fn enqueue_rust_fragment_dependencies<'a>(
     pending_functions: &mut BTreeSet<String>,
     constant_roots: &mut BTreeSet<(String, Option<String>, String)>,
     enum_authorities: &mut BTreeMap<String, &'a str>,
+    declared_type_authorities: &BTreeSet<String>,
 ) -> Result<(), String> {
-    reject_imported_function_dependencies(fragment, module, owner_scope, index, authority)?;
+    reject_imported_function_dependencies(
+        fragment,
+        module,
+        owner_scope,
+        index,
+        authority,
+        declared_type_authorities,
+    )?;
     let opaque_tokens = rust_authority_opaque_token_indexes(index, fragment)?;
     let semantic_fragment = rust_authority_semantic_fragment(index, fragment)?;
     let mut macro_nonvalue_tokens = rust_local_macro_type_argument_token_indexes(index, fragment)?;
@@ -5629,6 +5637,7 @@ fn bind_local_macro_dependencies<'a>(
             invocation_owner,
             index,
             &format!("{authority} local macro {macro_name:?}"),
+            declared_type_authorities,
         )?;
         let mut macro_authority = Vec::new();
         for (ordinal, attribute) in inner_attributes.iter().enumerate() {
@@ -5707,6 +5716,7 @@ fn normalized_rust_function_closure_with_symbols_and_index(
     index: &RustSourceIndex<'_>,
     function_roots: impl IntoIterator<Item = String>,
     source_constant_roots: impl IntoIterator<Item = (String, Option<String>, String)>,
+    declared_type_authorities: &BTreeSet<String>,
 ) -> Result<(Vec<u8>, BTreeSet<String>), String> {
     let mut pending = function_roots.into_iter().collect::<BTreeSet<_>>();
     let mut seen = BTreeSet::new();
@@ -5799,6 +5809,7 @@ fn normalized_rust_function_closure_with_symbols_and_index(
                 &mut pending,
                 &mut constant_roots,
                 &mut enum_authorities,
+                declared_type_authorities,
             )?;
             let invoked_local_candidates = rust_authority_invoked_macro_names(&semantic_fragment)?
                 .into_iter()
@@ -5850,6 +5861,7 @@ fn normalized_rust_function_closure_with_symbols_and_index(
                     &mut pending,
                     &mut constant_roots,
                     &mut enum_authorities,
+                    declared_type_authorities,
                 )?;
             }
         }
@@ -5910,6 +5922,7 @@ fn normalized_rust_function_closure_with_symbols_and_index(
                 &mut pending,
                 &mut constant_roots,
                 &mut enum_authorities,
+                declared_type_authorities,
             )?;
             let invoked_local_candidates = rust_authority_invoked_macro_names(&semantic_fragment)?
                 .into_iter()
@@ -5961,6 +5974,7 @@ fn normalized_rust_function_closure_with_symbols_and_index(
                     &mut pending,
                     &mut constant_roots,
                     &mut enum_authorities,
+                    declared_type_authorities,
                 )?;
             }
             constant_declarations.insert(locator, declaration);
@@ -6012,18 +6026,32 @@ fn normalized_rust_function_closure_with_symbols_and_index(
 fn normalized_rust_function_closure_with_symbols(
     text: &str,
     roots: impl IntoIterator<Item = String>,
+    declared_type_authorities: &BTreeSet<String>,
 ) -> Result<(Vec<u8>, BTreeSet<String>), String> {
     let index = RustSourceIndex::new(text);
-    normalized_rust_function_closure_with_symbols_and_index(text, &index, roots, std::iter::empty())
+    normalized_rust_function_closure_with_symbols_and_index(
+        text,
+        &index,
+        roots,
+        std::iter::empty(),
+        declared_type_authorities,
+    )
 }
 
 fn normalized_rust_function_closure_with_index(
     text: &str,
     index: &RustSourceIndex<'_>,
     roots: impl IntoIterator<Item = String>,
+    declared_type_authorities: &BTreeSet<String>,
 ) -> Result<Vec<u8>, String> {
-    normalized_rust_function_closure_with_symbols_and_index(text, index, roots, std::iter::empty())
-        .map(|(bytes, _)| bytes)
+    normalized_rust_function_closure_with_symbols_and_index(
+        text,
+        index,
+        roots,
+        std::iter::empty(),
+        declared_type_authorities,
+    )
+    .map(|(bytes, _)| bytes)
 }
 
 #[derive(Clone, Copy)]
@@ -10048,6 +10076,7 @@ fn reject_imported_function_dependencies(
     owner_scope: Option<&str>,
     index: &RustSourceIndex<'_>,
     authority: &str,
+    declared_type_authorities: &BTreeSet<String>,
 ) -> Result<(), String> {
     let tokens = rust_authority_tokens(fragment)?;
     let opaque_tokens = rust_authority_opaque_token_indexes(index, fragment)?;
@@ -10108,6 +10137,9 @@ fn reject_imported_function_dependencies(
             continue;
         }
         if generic_const_bindings.contains(token.text) {
+            continue;
+        }
+        if declared_type_authorities.contains(token.text) {
             continue;
         }
         if !canonical_symbol(token.text) || rust_language_identifier(token.text) {
@@ -10178,6 +10210,13 @@ fn reject_imported_function_dependencies(
     let macro_invocation_paths = rust_authority_macro_invocation_paths(&semantic_fragment)?;
     for path in rust_authority_function_paths(&semantic_fragment)? {
         if macro_invocation_paths.contains(&path) {
+            continue;
+        }
+        if path
+            .split("::")
+            .next()
+            .is_some_and(|root| declared_type_authorities.contains(root))
+        {
             continue;
         }
         let namespaces = rust_path_occurrence_namespaces(
@@ -10641,6 +10680,7 @@ fn normalized_rust_schema_authority_with_index(
         None,
         index,
         &format!("external macro authority {symbol:?}"),
+        &BTreeSet::new(),
     )?;
     for invocation in &invocations {
         reject_imported_function_dependencies(
@@ -10649,6 +10689,7 @@ fn normalized_rust_schema_authority_with_index(
             None,
             index,
             &format!("external macro authority {symbol:?} invocation"),
+                &BTreeSet::new(),
         )?;
     }
     let local_macros = &index.source_macro_rules;
@@ -10747,6 +10788,7 @@ fn normalized_rust_schema_authority_with_index(
             index,
             helper_roots,
             constant_roots,
+            &BTreeSet::new(),
         )?;
         append_schema_frame(&mut out, "macro-dependency-closure", &dependency_closure);
     }
@@ -11424,6 +11466,18 @@ fn identity_byte_schema_base_hash_with_references(
         fingerprint_part(&mut payload, &declaration);
     }
 
+    let mut type_declarations = Vec::new();
+    for declared_type in &decl.schema_types {
+        let path = declared_type.path.as_deref().unwrap_or(&decl.owner);
+        let reference = references.schema_type(path, &declared_type.symbol)?;
+        type_declarations.push((declared_type.canonical(), reference.to_vec()));
+    }
+    type_declarations.sort_by(|left, right| left.0.cmp(&right.0));
+    for (declared_type, declaration_bytes) in type_declarations {
+        fingerprint_part(&mut payload, b"schema-type");
+        fingerprint_part(&mut payload, declared_type.as_bytes());
+        fingerprint_part(&mut payload, &declaration_bytes);
+    }
     // Covered helpers are allowed to sit outside the declared encoder closure,
     // so retain their exact bodies in the byte ratchet until exemptions gain an
     // explicit implementation-only effect classification.
@@ -11584,8 +11638,18 @@ fn identity_schema_base_hash_with_index(
                 .map(|function| function.symbol.clone()),
         )
         .collect::<BTreeSet<_>>();
-    let owner_closure = normalized_rust_function_closure_with_index(text, index, owner_roots)
-        .map_err(|detail| {
+    let declared_type_authorities: BTreeSet<String> = decl
+        .schema_types
+        .iter()
+        .map(|declared_type| declared_type.symbol.clone())
+        .collect();
+    let owner_closure = normalized_rust_function_closure_with_index(
+        text,
+        index,
+        owner_roots,
+        &declared_type_authorities,
+    )
+    .map_err(|detail| {
             format!(
                 "identity {}: owner-local function closure is invalid: {detail}",
                 decl.id

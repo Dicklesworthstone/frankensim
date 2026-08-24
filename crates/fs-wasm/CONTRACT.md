@@ -81,8 +81,8 @@ crates. Layer: **L6 HELM / interface surface**. The crate compiles as an
    without a zero-gradient certificate it is not a critical-point or minimum
    theorem. It and the sampled contour crossings cannot promote these fields to
    an exact count.
-10. NeuroShape wire version `NEUROSHAPE_SCHEMA_VERSION = 3` (header slot `[22]`,
-   header length 30) publishes a no-tunnel step whose authority is an INTERVAL
+10. NeuroShape wire version `NEUROSHAPE_SCHEMA_VERSION = 4` (header slot `[22]`,
+   header length 48) publishes a no-tunnel step whose authority is an INTERVAL
    sign margin. Slot `[5]` is `fs_rep_neural::derive_safe_step`'s
    downward-rounded `magnitude_lower_bound / L`, where the margin at `[23]` is
    the inward endpoint of the degenerate IBP enclosure at the origin — a
@@ -107,11 +107,19 @@ crates. Layer: **L6 HELM / interface surface**. The crate compiles as an
    JSON-safe `fon` encoder, so a valid-empty payload carries `[6] = NaN`
    (the folded `+inf`) and `[7] = +0`, while the native report fields keep
    `+inf`; the typed `[26]` status, never a NaN sentinel, distinguishes
-   valid-empty from every refusal. `[28]` carries
-   `NEUROSHAPE_LOCALIZATION_SCHEMA_VERSION = 2`, which freezes those code
-   tables and gates interpretation of `[26]`/`[27]`; `[29]` remains a
-   reserved zero. A consumer
-   that gated on `[22] == 2` refuses this payload rather than silently
+   valid-empty from every refusal. Version `4` keeps `[0..=28]` fixed and
+   expands `[29..=47]` into the lossless detailed record. `[29]` is the exact
+   diagnostic or cancellation-kind code, `[30]` the axis or stable cancellation
+   phase, `[31..=38]` two `u128` contexts as exact high-to-low `u32` lanes,
+   `[39..=46]` four `u64` contexts as exact `u32` lanes, and `[47]` the auxiliary
+   resource code. For ordinary refusals these are the native `StageDetail`
+   indices/scalar bits/required/limit; for cancellation they carry deadline,
+   observed clock, and quota contexts. Unused lanes are `u32::MAX`, never NaN;
+   no integer is directly cast to f64. `[28]` carries
+   `NEUROSHAPE_LOCALIZATION_SCHEMA_VERSION = 3`, which freezes all status,
+   stage, diagnostic, cancellation-kind, and cancellation-phase tables and gates
+   interpretation of `[26..=47]`. A consumer that gated on `[22] == 2` or `3`
+   refuses this payload rather than silently
    ignoring the typed localization record; version-aware consumers must refuse
    an unrecognized `[22]` before interpreting any slot, an unrecognized `[25]`
    before interpreting `[16]`, `[17]`, `[20]`, or `[21]`, and an unrecognized
@@ -202,16 +210,17 @@ threshold serializes typed refusals and cannot promote the headline.
 NeuroShape tests assert that the default closed-frame certificate serializes a
 lower bound of one but an unknown exact count, while an unenclosed case retains
 the same wire shape and claims neither an exact zero nor a positive lower
-bound. Both cases pin payload schema version 3 in slot `[22]`, the
+bound. Both cases pin payload schema version 4 in slot `[22]`, the
 component-evidence version in `[25]`, the localization schema version in
-`[28]`, and zero in reserved slot `[29]`. The default case pins `Localized`
+`[28]`, and zero detail code in `[29]`. The default case pins `Localized`
 with no refusing stage in `[26]`/`[27]`; the unenclosed all-positive case pins
 `ValidEmpty`, and a synthesized-outcome battery covers every typed refusal and
-its producing stage. A decoder-shaped conformance fixture accepts only the
-exact version-3 bit pattern and refuses legacy versions 1 and 2, zero, future,
+its producing stage plus every exact wide integer/scalar/budget/cancellation
+context lane. A decoder-shaped conformance fixture accepts only the exact
+version-4 bit pattern and refuses legacy versions 1, 2, and 3, zero, future,
 fractional, non-finite, and truncated headers before reading any evidence. It
 also refuses unrecognized component-evidence or localization schema versions
-and unknown localization status/stage codes. A safe-step test
+and unknown localization status/stage/detail codes or malformed integer lanes. A safe-step test
 pins slots `[5]`/`[23]`/`[24]` bit-for-bit against the native campaign's
 `SafeStepDerivation` and requires the published step to be STRICTLY below the
 nominal `|origin_value|/L` that version 1 published, while still

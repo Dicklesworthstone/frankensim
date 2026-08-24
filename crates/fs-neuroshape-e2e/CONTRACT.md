@@ -39,14 +39,16 @@ mint here.
 - `ComponentCountEvidence` — non-exhaustive typed state: `Unknown` has lower
   bound zero; `LowerBound(CertifiedEnclosedComponentExists)` has lower bound one.
   `exact_count()` is always `None` in this tranche.
-- `NEUROSHAPE_LOCALIZATION_SCHEMA_VERSION = 2` — freezes every wire code of
+- `NEUROSHAPE_LOCALIZATION_SCHEMA_VERSION = 3` — freezes every wire code of
   the typed zero-set localization vocabulary below
   (`SurfaceLocalizationStatus` codes `1..=8`, `LocalizationStage` codes
-  `1..=2`, `LocalizationDiagnostic` codes `1..=18`). Version-aware consumers
-  must reject codes they do not implement; no display-string is ever parsed.
-  Version 2 also packs each grid-edge coordinate into its own 64-bit lane of a
-  `u128`; version 1's 32-bit lanes collided for native indices above
-  `u32::MAX`.
+  `1..=2`, `LocalizationDiagnostic` codes `1..=18`, `CancellationKind` codes
+  `1..=7`, and isocontour cancellation-phase codes `0..=10`). Version-aware
+  consumers must reject codes they do not implement; no display-string is ever
+  parsed. Version 2 packs each grid-edge coordinate into its own 64-bit lane of
+  a `u128`; version 1's 32-bit lanes collided for native indices above
+  `u32::MAX`. Version 3 adds the bounded cancellation code tables used by the
+  lossless WASM detail record.
 - `NeuroShapeReport::surface_localization: SurfaceLocalization` — the
   AUTHORITATIVE outcome of sampled zero-set localization:
   `Localized { crossings, max_radius, nearest_radius }`, `ValidEmpty`, or a
@@ -112,8 +114,10 @@ Fully deterministic (G5).
 The campaign itself is a synchronous batch with no ambient execution context;
 its compat isocontour path therefore cannot observe a mid-run cancellation.
 The localization vocabulary still carries the full typed `Cancelled` state
-(stable kind + `'static` checkpoint phase) so producers that run the same
-extraction under a caller-owned `Cx` publish the identical record shape.
+(stable kind + exact `'static` checkpoint phase + stable bounded phase code) so
+producers that run the same extraction under a caller-owned `Cx` publish the
+identical record shape. Unknown phase strings map only to the explicit
+`Unknown` code and never alias a known checkpoint.
 
 ## Unsafe boundary
 
@@ -127,7 +131,7 @@ None.
 
 `tests/neuroshape.rs` (12): G0 pins component-evidence schema version 1, typed
 lower-bound state, the localization schema version and every stable status /
-stage / diagnostic code, and the private witness payload for the certified
+stage / diagnostic / cancellation-kind / cancellation-phase code, and the private witness payload for the certified
 frame, including explicit refusal to return an exact count; Lipschitz /
 interval sign-margin safe-step / enclosure checks; an open frame yields typed
 `Unknown`; admission refuses a non-2-D net and non-finite/out-of-range
