@@ -94,6 +94,7 @@ pub const MMS_CLASS_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
     "encoder_helpers=class_identity_with_budget,f64_bytes,class_identity_from_parts_with_budget",
     "schema_constants=MMS_CLASS_IDENTITY_VERSION,MMS_CLASS_IDENTITY_DOMAIN,MAX_FEM1D_CLASS_CANONICAL_IDENTITY_BYTES,MAX_FEM1D_CLASS_NAME_BYTES,MAX_FEM1D_POLY_COEFFICIENTS,MAX_FEM1D_RAW_POLY_COEFFICIENTS,IDENTITY_STREAM_FRAME_BYTES,IDENTITY_FIELD_FRAME_BYTES",
     "schema_functions=identity_header_bytes,identity_field_bytes,identity_build_error,MmsClass::new,Poly::from_coefficients,Poly::is_exactly_zero_at_one,Poly::derive,Poly::neg,Poly::antiderive,canonicalize_zero,validate_identity,validate_retained_identity_parts,copy_identity_bytes,check_mms_identity_version,check_mms_class_identity_version,MmsClass::identity_receipt,MmsClass::admit_identity_receipt,crates/fs-obs/src/ident.rs#ReplayIdentity::root,crates/fs-obs/src/ident.rs#ReplayIdentity::canonical_bytes",
+    "schema_types=crates/fs-verify/src/fem1d.rs#MmsIdentityAdmissionError",
     "schema_dependencies=fs-obs:replay-identity-frame",
     "digest=fnv1a64",
     "encoding=typed-binary",

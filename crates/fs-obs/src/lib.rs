@@ -58,6 +58,7 @@ pub const EVENT_CONTENT_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
     "encoder_helpers=Event::content_identity_with_versions,Event::content_identity_with_schema,bind_outcome_identity,bind_u128_identity,bind_process_artifact_identity,Severity::name,EventKind::kind_name,ReceiptScope::name,ExecutionDisposition::name,PredicateOutcome::name,EpistemicGrade::name,DomainApplicability::name,OperationalSupport::name,EvidenceCompleteness::name,EvidenceIntegrity::name,PromotionEffect::name,SubmissionLane::name,SubmissionOutcome::name,AttachAction::name,CapabilityDecision::name,LifecycleTransitionKind::name,ArtifactAction::name",
     "schema_constants=EVENT_CONTENT_IDENTITY_VERSION,EVENT_CONTENT_IDENTITY_DOMAIN,SCHEMA_VERSION",
     "schema_functions=check_event_content_identity_version,Event::content_identity_receipt,Event::admit_content_identity,fnv1a64,crates/fs-obs/src/process.rs#ProcessStream::name,crates/fs-obs/src/process.rs#ProcessEventClass::name,crates/fs-obs/src/process.rs#LossReason::name",
+    "schema_types=crates/fs-obs/src/lib.rs#EventIdentityAdmissionError",
     "schema_dependencies=fs-obs:replay-identity-frame",
     "digest=fnv1a64",
     "encoding=typed-binary",

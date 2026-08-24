@@ -106,6 +106,7 @@ pub const PRODUCTION_AXES_RECEIPT_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
     "encoder_helpers=ProductionAxesReceiptInput::from_axes,production_axes_receipt_json,machine_axes_receipt_json,axes_receipt_with_domain",
     "schema_constants=PRODUCTION_AXES_RECEIPT_IDENTITY_VERSION,PRODUCTION_AXES_RECEIPT_DOMAIN",
     "schema_functions=production_axes_receipt_is_current,crates/fs-roofline/src/lib.rs#json_escape,crates/fs-roofline/src/lib.rs#parse_machine_axes_receipt,crates/fs-blake3/src/lib.rs#hash_domain",
+    "schema_types=crates/fs-roofline/src/axes.rs#MachineAxes",
     "schema_dependencies=none",
     "digest=fs-blake3",
     "encoding=canonical-transport-exact-bits",

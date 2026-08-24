@@ -107,6 +107,7 @@ pub const STREAM_CHECKPOINT_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
     "encoder_helpers=none",
     "schema_constants=STREAM_CHECKPOINT_VERSION,STREAM_CHECKPOINT_IDENTITY_DOMAIN,STREAM_CHECKPOINT_MAGIC,STREAM_CHECKPOINT_CANONICAL_LEN,STREAM_SEMANTICS_VERSION",
     "schema_functions=none",
+    "schema_types=crates/fs-rand/src/lib.rs#StreamReplayError",
     "schema_dependencies=fs-rand:stream-position",
     "digest=none-exact-canonical-transport",
     "encoding=canonical-transport-exact-bits",

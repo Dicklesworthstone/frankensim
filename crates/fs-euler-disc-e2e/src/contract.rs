@@ -80,6 +80,7 @@ pub const HYPOTHESIS_SOURCE_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
     "encoder=hypothesis_source_declaration_hash",
     "encoder_helpers=hypothesis_source_declaration_hash_with_schema",
     "schema_functions=HypothesisSource::try_new,HypothesisSource::from_canonical_parts,HypothesisSource::verify_identity,crates/fs-blake3/src/lib.rs#hash_domain",
+    "schema_types=crates/fs-blake3/src/lib.rs#ContentHash",
     "schema_constants=EULER_CONTRACT_SCHEMA_VERSION,HYPOTHESIS_SOURCE_DECLARATION_DOMAIN,MAX_EULER_TEXT_BYTES",
     "schema_dependencies=none",
     "digest=fs-blake3",

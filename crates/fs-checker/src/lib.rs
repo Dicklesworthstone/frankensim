@@ -81,6 +81,7 @@ pub const CHECKER_DECISION_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
     "encoder_helpers=checker_report_hash_with_protocol,checker_decision_atom,append_signature_identity,append_authenticated_signature_identity",
     "schema_constants=CHECKER_DECISION_IDENTITY_VERSION,CHECKER_PROTOCOL_VERSION,CHECKER_SUPPORTED_PACKAGE_FORMAT,crates/fs-package/src/lib.rs#CHECKER_DECISION_IDENTITY_DOMAIN,crates/fs-package/src/lib.rs#FORMAT_VERSION",
     "schema_functions=CheckReport::admit_retained_decision_hash,CheckReport::validate_decision_hash,crates/fs-checker/src/semantic.rs#SemanticReport::validate_context_hash,crates/fs-package/src/lib.rs#hash_checker_decision",
+    "schema_types=crates/fs-blake3/src/lib.rs#ContentHash",
     "schema_dependencies=fs-checker:semantic-report,fs-package:package-root,fs-package:signature-subject,fs-package:verification-receipt,fs-package:release-admission-context",
     "digest=blake3-derive-key",
     "encoding=typed-binary",

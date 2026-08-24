@@ -76,6 +76,7 @@ pub const COVERAGE_DECISION_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
     "encoder_helpers=coverage_report_hash_with_domain,CoverageDecisionRow::from_tuple",
     "schema_constants=COVERAGE_DECISION_IDENTITY_VERSION,COVERAGE_DECISION_IDENTITY_DOMAIN,crates/fs-package/src/lib.rs#FORMAT_VERSION,crates/fs-crosswalk/src/lib.rs#CROSSWALK_VERSION,crates/fs-crosswalk/src/lib.rs#SUPPORTED_PACKAGE_FORMAT",
     "schema_functions=admit_decision_hash,crates/fs-crosswalk/src/lib.rs#PackageConcept::label,crates/fs-crosswalk/src/lib.rs#Standard::label,crates/fs-blake3/src/lib.rs#ContentHash::to_hex,coverage_from_presence,crates/fs-crosswalk/src/lib.rs#crosswalk",
+    "schema_types=crates/fs-crosswalk/src/lib.rs#PackageConcept",
     "schema_dependencies=fs-package:verification-receipt",
     "digest=blake3-derive-key",
     "encoding=typed-binary",
