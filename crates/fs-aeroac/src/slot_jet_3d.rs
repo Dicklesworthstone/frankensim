@@ -737,6 +737,8 @@ struct ChunkState {
 }
 
 const CHECKPOINT_MAGIC: &[u8; 8] = b"FSJSCKPT";
+const CHECKPOINT_VERSION: u32 = 1;
+const CHECKPOINT_HEADER_LEN: usize = 44;
 
 fn write_checkpoint(
     dir: &std::path::Path,
@@ -758,7 +760,8 @@ fn write_checkpoint(
         what: "checkpoint write",
     };
     w.write_all(CHECKPOINT_MAGIC).map_err(refuse)?;
-    w.write_all(&1u32.to_le_bytes()).map_err(refuse)?;
+    w.write_all(&CHECKPOINT_VERSION.to_le_bytes())
+        .map_err(refuse)?;
     w.write_all(&config_fingerprint(cfg).to_le_bytes())
         .map_err(refuse)?;
     w.write_all(&state.settle_done.to_le_bytes())
@@ -894,10 +897,44 @@ fn load_checkpoint(
     cfg: &SlotJet3dConfig,
     ckpt_path: &std::path::Path,
 ) -> Result<(Rig3, ChunkState), AeroacError> {
+    let length_overflow = || AeroacError::InvalidParameter {
+        what: "checkpoint length overflow",
+    };
+    let total_cells = cfg
+        .nx
+        .checked_mul(cfg.ny)
+        .and_then(|cells| cells.checked_mul(cfg.nz))
+        .ok_or_else(length_overflow)?;
+    let max_force_bytes = cfg
+        .steps_record
+        .checked_mul(2 * core::mem::size_of::<f64>())
+        .ok_or_else(length_overflow)?;
+    let max_lattice_bytes = total_cells
+        .checked_mul(Q3)
+        .and_then(|values| values.checked_mul(core::mem::size_of::<f64>()))
+        .ok_or_else(length_overflow)?;
+    let max_checkpoint_len = CHECKPOINT_HEADER_LEN
+        .checked_add(max_force_bytes)
+        .and_then(|length| length.checked_add(max_lattice_bytes))
+        .ok_or_else(length_overflow)?;
+    let file_len = std::fs::metadata(ckpt_path)
+        .map_err(|_| AeroacError::InvalidParameter {
+            what: "cannot read checkpoint metadata",
+        })?
+        .len();
+    let max_checkpoint_len = u64::try_from(max_checkpoint_len).map_err(|_| length_overflow())?;
+    if file_len > max_checkpoint_len {
+        return Err(AeroacError::InvalidParameter {
+            what: "checkpoint exceeds configured size envelope",
+        });
+    }
     let bytes = std::fs::read(ckpt_path).map_err(|_| AeroacError::InvalidParameter {
         what: "cannot read checkpoint",
     })?;
-    if bytes.len() < 44 || bytes[0..8] != *CHECKPOINT_MAGIC {
+    if bytes.len() < CHECKPOINT_HEADER_LEN
+        || bytes[0..8] != *CHECKPOINT_MAGIC
+        || u32::from_le_bytes(bytes[8..12].try_into().expect("fixed slice")) != CHECKPOINT_VERSION
+    {
         return Err(AeroacError::InvalidParameter {
             what: "checkpoint magic/version mismatch",
         });
@@ -910,43 +947,98 @@ fn load_checkpoint(
     }
     let settle_done = u64::from_le_bytes(bytes[20..28].try_into().expect("fixed slice"));
     let record_done = u64::from_le_bytes(bytes[28..36].try_into().expect("fixed slice"));
-    let record_len = usize::try_from(u64::from_le_bytes(
-        bytes[36..44].try_into().expect("fixed slice"),
-    ))
-    .unwrap_or(usize::MAX);
-    if bytes.len() < 44 + 16 * record_len {
+    let record_len_wire = u64::from_le_bytes(bytes[36..44].try_into().expect("fixed slice"));
+    let total_settle = u64::try_from(cfg.steps_settle).map_err(|_| length_overflow())?;
+    let total_record = u64::try_from(cfg.steps_record).map_err(|_| length_overflow())?;
+    if settle_done > total_settle
+        || record_done > total_record
+        || (record_done != 0 && settle_done != total_settle)
+    {
+        return Err(AeroacError::InvalidParameter {
+            what: "checkpoint progress is inconsistent with configuration",
+        });
+    }
+    if record_len_wire != record_done {
+        return Err(AeroacError::InvalidParameter {
+            what: "checkpoint force count disagrees with recorded progress",
+        });
+    }
+    let record_len = usize::try_from(record_len_wire).map_err(|_| length_overflow())?;
+    let force_bytes = record_len
+        .checked_mul(2 * core::mem::size_of::<f64>())
+        .ok_or_else(length_overflow)?;
+    let force_end = CHECKPOINT_HEADER_LEN
+        .checked_add(force_bytes)
+        .ok_or_else(length_overflow)?;
+    if force_end > bytes.len() {
         return Err(AeroacError::InvalidParameter {
             what: "checkpoint truncated (force series)",
         });
     }
-    let mut force_series = Vec::with_capacity(record_len);
-    let mut off = 44usize;
+
+    let mut rig = Rig3::build(cfg);
+    let [nx, ny, nz] = rig.grid.dimensions();
+    let mut fluid_cells = 0usize;
+    for z in 0..nz {
+        for y in 0..ny {
+            for x in 0..nx {
+                if !rig.grid.is_solid(x, y, z) {
+                    fluid_cells = fluid_cells.checked_add(1).ok_or_else(length_overflow)?;
+                }
+            }
+        }
+    }
+    let lattice_bytes = fluid_cells
+        .checked_mul(Q3)
+        .and_then(|values| values.checked_mul(core::mem::size_of::<f64>()))
+        .ok_or_else(length_overflow)?;
+    let expected_len = force_end
+        .checked_add(lattice_bytes)
+        .ok_or_else(length_overflow)?;
+    if bytes.len() != expected_len {
+        return Err(AeroacError::InvalidParameter {
+            what: "checkpoint length does not match configured state",
+        });
+    }
+
+    let mut force_series = Vec::new();
+    force_series
+        .try_reserve_exact(record_len)
+        .map_err(|_| AeroacError::InvalidParameter {
+            what: "checkpoint force-series allocation refused",
+        })?;
+    let mut off = CHECKPOINT_HEADER_LEN;
     for _ in 0..record_len {
         let fx = f64::from_le_bytes(bytes[off..off + 8].try_into().expect("fixed slice"));
         let fy = f64::from_le_bytes(bytes[off + 8..off + 16].try_into().expect("fixed slice"));
+        if !fx.is_finite() || !fy.is_finite() {
+            return Err(AeroacError::NonFinite {
+                what: "checkpoint carries non-finite force history",
+            });
+        }
         force_series.push([fx, fy]);
         off += 16;
     }
-    let mut rig = Rig3::build(cfg);
-    for z in 0..cfg.nz {
-        for y in 0..cfg.ny {
-            for x in 0..cfg.nx {
+    for z in 0..nz {
+        for y in 0..ny {
+            for x in 0..nx {
                 if rig.grid.is_solid(x, y, z) {
                     continue;
                 }
                 let mut pops = [0.0f64; Q3];
                 for q in &mut pops {
-                    if off + 8 > bytes.len() {
-                        return Err(AeroacError::InvalidParameter {
-                            what: "checkpoint truncated (lattice)",
-                        });
-                    }
                     *q = f64::from_le_bytes(bytes[off..off + 8].try_into().expect("fixed slice"));
                     off += 8;
                 }
                 if !pops.iter().all(|v| v.is_finite()) {
                     return Err(AeroacError::NonFinite {
                         what: "checkpoint carries non-finite populations",
+                    });
+                }
+                let density = pops.iter().sum::<f64>();
+                if !density.is_finite() || density <= 0.0 {
+                    return Err(AeroacError::InvalidParameter {
+                        what: "checkpoint carries non-positive fluid density",
                     });
                 }
                 rig.grid.set_populations(x, y, z, &pops);

@@ -335,3 +335,55 @@ fn checkpoint_refuses_foreign_configuration() {
         "refusal must name the fingerprint guard: {err}"
     );
 }
+
+#[test]
+fn checkpoint_reader_refuses_malformed_state_before_resume() {
+    let cfg = smoke_config();
+    let dir = std::env::temp_dir().join(format!("sj-ckpt-malformed-{}", std::process::id()));
+    let _ = run_slot_jet_3d_chunked(&cfg, &dir, 50).expect("seed checkpoint");
+    let path = dir.join("state.bin");
+    let original = std::fs::read(&path).expect("read seeded checkpoint");
+
+    let refuse = |mutated: &[u8], expected: &str| {
+        std::fs::write(&path, mutated).expect("write malformed checkpoint fixture");
+        let error = run_slot_jet_3d_chunked(&cfg, &dir, 1)
+            .expect_err("malformed checkpoint must refuse before stepping");
+        assert!(
+            error.to_string().contains(expected),
+            "expected {expected:?} refusal, got {error}"
+        );
+    };
+
+    let mut unknown_version = original.clone();
+    unknown_version[8..12].copy_from_slice(&2u32.to_le_bytes());
+    refuse(&unknown_version, "magic/version mismatch");
+
+    let mut impossible_progress = original.clone();
+    impossible_progress[20..28].copy_from_slice(&(cfg.steps_settle as u64 + 1).to_le_bytes());
+    refuse(&impossible_progress, "progress is inconsistent");
+
+    let mut impossible_force_count = original.clone();
+    impossible_force_count[36..44].copy_from_slice(&u64::MAX.to_le_bytes());
+    refuse(&impossible_force_count, "force count disagrees");
+
+    let mut truncated = original.clone();
+    truncated.pop();
+    refuse(&truncated, "length does not match");
+
+    let mut trailing = original.clone();
+    trailing.push(0);
+    refuse(&trailing, "length does not match");
+
+    let mut non_finite_force = original.clone();
+    non_finite_force[44..52].copy_from_slice(&f64::NAN.to_le_bytes());
+    refuse(&non_finite_force, "non-finite force history");
+
+    let record_len = usize::try_from(u64::from_le_bytes(
+        original[36..44].try_into().expect("fixed record length"),
+    ))
+    .expect("smoke record length fits usize");
+    let first_population = 44 + 16 * record_len;
+    let mut zero_density = original.clone();
+    zero_density[first_population..first_population + 19 * 8].fill(0);
+    refuse(&zero_density, "non-positive fluid density");
+}

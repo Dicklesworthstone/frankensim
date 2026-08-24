@@ -90,6 +90,10 @@ scope law, pinned as data and by test).
   momentum-exchange plate force, `run_slot_jet_3d` /
   `classify_rung` / `SlotJet3dRung::to_jsonl` receipts with the FFT
   bin disclosure and the `FORCE_RMS_AMPLITUDE_FLOOR` amplitude law.
+  Chunked checkpoints fail closed on unknown format versions, files beyond the
+  configured size envelope, inconsistent settle/record/force counters, any
+  truncated or trailing state bytes, non-finite force/population values, and
+  non-positive fluid density before resumed stepping can mutate the rig.
   The Re actuator is the central-moment second-order rate at fixed
   `u_jet`; independent rungs, not adiabatic continuation. Both
   outcomes are honest wins: a broadband rung above the tonal
