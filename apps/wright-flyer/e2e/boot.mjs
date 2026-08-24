@@ -61,13 +61,15 @@ export async function bootOnce({
     args: ["--disable-dev-shm-usage", "--window-size=1280,800"],
     defaultViewport: { width: 1280, height: 800 },
   });
-  const cdp = await browser.target().createCDPSession();
-  if (cpuThrottleRate !== null) {
-    // Lands BEFORE navigation so the entire boot runs throttled.
-    await cdp.send("Emulation.setCPUThrottlingRate", { rate: cpuThrottleRate });
-  }
   try {
     const page = await browser.newPage();
+    if (cpuThrottleRate !== null) {
+      // Page-level session: Emulation.* does not exist on the browser
+      // target ("wasn't found" ProtocolError). Lands BEFORE navigation
+      // so the entire boot runs throttled.
+      const cdp = await page.createCDPSession();
+      await cdp.send("Emulation.setCPUThrottlingRate", { rate: cpuThrottleRate });
+    }
     page.on("console", (msg) => {
       capture.push(msg.text());
     });
@@ -101,10 +103,15 @@ export async function bootOnce({
       new Promise((_, reject) =>
         setTimeout(() => reject(new BootRefusal("RUN_TIMEOUT", `run did not terminate within ${timeoutMs}ms`)), timeoutMs),
       ),
-    ]).catch(async (error) => {
+    ]).catch((error) => {
       const refusals = capture.lines().filter((r) => r.stage === "sim-refusal");
       if (refusals.length > 0) {
         throw new BootRefusal("SIM_REFUSAL", JSON.stringify(refusals));
+      }
+      if (!(error instanceof BootRefusal)) {
+        // The waitForFunction arm rejects with a bare puppeteer
+        // TimeoutError at the same deadline; keep the refusal typed.
+        throw new BootRefusal("RUN_TIMEOUT", `run did not terminate within ${timeoutMs}ms`);
       }
       throw error;
     });

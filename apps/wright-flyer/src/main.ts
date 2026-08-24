@@ -329,7 +329,7 @@ function main(): void {
     }
     controlSeq += 1;
     const phys = toPhysical(cmd);
-    ledger.sent(controlSeq, deviceMs, performance.now());
+    ledger.sent(controlSeq, deviceMs, performance.now(), phys.leverForceN, phys.warpCmdRad);
     simClient.sendControl(phys.leverForceN, phys.warpCmdRad, controlSeq, deviceMs);
     lastSent = cmd;
     lastSentMs = performance.now();

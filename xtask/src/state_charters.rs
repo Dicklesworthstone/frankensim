@@ -82,6 +82,19 @@ pub fn scan_source(path: &str, text: &str) -> Result<Vec<CharterDeclaration>, St
         let token_start = cursor + offset;
         let after_token = token_start + "StateIdentityCharterV2".len();
         let rest_trim = text[after_token..].trim_start();
+        // Declarations (`pub struct X {`, `impl X {`) also place `{`
+        // directly after the type name; they are not constructor
+        // literals, and treating them as such misreads their member
+        // lists as charter fields (fs-exec defines the type beside its
+        // constructors). Skip when the same-line prefix ends in a
+        // declaration keyword.
+        let line_start = text[..token_start].rfind('\n').map_or(0, |pos| pos + 1);
+        let same_line_prefix = text[line_start..token_start].trim_end();
+        if same_line_prefix.ends_with("struct") || same_line_prefix.ends_with("impl")
+        {
+            cursor = after_token;
+            continue;
+        }
         // Constructor only: next non-space character opens the literal.
         if !rest_trim.starts_with('{') {
             cursor = after_token;
@@ -362,6 +375,34 @@ mod tests {
         let error = scan_source("crates/x/src/lib.rs", &source)
             .expect_err("missing fields refuse");
         assert!(error.contains("lacks"), "{error}");
+    }
+
+    #[test]
+    fn type_declarations_are_not_constructor_literals() {
+        // `pub struct StateIdentityCharterV2 {` and
+        // `impl StateIdentityCharterV2 {` place `{` after the type name
+        // exactly like constructors; both must be skipped so the
+        // definition beside its constructors in fs-exec/src/solver.rs
+        // does not read as a field-less charter literal.
+        let source = concat!(
+            "pub struct StateIdentityCharterV2 {\n",
+            "    pub owner: &'static str,\n",
+            "}\n",
+            "impl StateIdentityCharterV2 {\n",
+            "    pub fn owner(&self) -> &str { self.owner }\n",
+            "}\n",
+            "let real = StateIdentityCharterV2 {\n",
+            "    owner: \"fs-exec::solver\",\n",
+            "    state_family: \"jacobi-iteration\",\n",
+            "    schema_grammar: \"g\",\n",
+            "    codec_grammar: \"c\",\n",
+            "    codec_version: 1,\n",
+            "};\n",
+        );
+        let declarations =
+            scan_source("crates/x/src/lib.rs", source).expect("parses");
+        assert_eq!(declarations.len(), 1, "{declarations:?}");
+        assert_eq!(declarations[0].owner, "fs-exec::solver");
     }
 
     #[test]

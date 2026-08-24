@@ -1,7 +1,7 @@
 {
   "schema": "frankensim-consolidation-review-v1",
-  "policy_bead": "frankensim-extreal-program-f85xj.16.8",
   "protocol": "docs/CONSOLIDATION_REVIEW.md",
+  "policy_bead": "frankensim-extreal-program-f85xj.16.8",
   "reviews": [
     {
       "review_id": "CONS-2026-07-A",
@@ -257,7 +257,7 @@
         {
           "crate": "fs-vmanifest",
           "disposition": "KEEP",
-          "rationale": "18 test files, 24 source files, touched 2026-07-23 \u2014 one of the most active crates in the tree; the manifest family is a shared G1-freeze schema with many landed instances.",
+          "rationale": "18 test files, 24 source files, touched 2026-07-23 — one of the most active crates in the tree; the manifest family is a shared G1-freeze schema with many landed instances.",
           "evidence": {
             "test_files": 18,
             "src_files": 24,
@@ -639,6 +639,408 @@
         "This delta re-derives graph membership and refreshes mechanical file, commit-date, and direct-dependent counts; it does not rerun or re-adjudicate the carried-forward candidates' compile, test, scientific, or maturity evidence.",
         "Classifying fs-euler-disc-e2e as a workflow root means only that the repository protocol treats every fs-*-e2e crate as a closure root. It grants no L3, physical-validation, experimental, emergent-mechanics, or release authority.",
         "The sweep proves absence of a crate dependency edge from a supported-workflow root, not absence of use through scripts, binaries, documentation, or future downstream routes."
+      ]
+    },
+    {
+      "review_id": "CONS-2026-08-WF-MUSEUM-DELTA",
+      "date": "2026-08-24",
+      "reviewer": "ox-alpha",
+      "cadence_anchor": "release-train (e13.4)",
+      "method": "Post-EULER-DELTA accretion delta only. Eight crates landed after 2026-08-02 (the wright-flyer cluster fs-airfoil, fs-airscrew, fs-atmo, fs-wing, fs-flyer, fs-flyer-wasm and the museum seams fs-goddard-wasm, fs-tesla-wasm) are unreached from the workflow roots. For each candidate, dependency edges were re-verified by grep over every tracked Cargo.toml (runtime and dev), out-of-graph consumers were located in tracked app code and introducing commits, and per-crate source/test file counts were recounted on the current tree. Earlier dispositions are carried forward without re-adjudication. This delta is not a release-train review, does not re-derive closure totals, and makes no compile or test-green claim.",
+      "validation": {
+        "known_exercised_control": "fs-sparse (17 dependent crates) is reached and not flagged",
+        "zero_dependent_spot_checks": "fs-goddard-wasm and fs-tesla-wasm confirmed by independent grep to have zero dependent crates anywhere in the workspace"
+      },
+      "candidates": [
+        {
+          "crate": "fs-aeroac",
+          "disposition": "KEEP",
+          "rationale": "KEEP: musical-acoustics program facility (beads 9ok02/l011o, epic tx6k8 closed 2026-08-13). Curle aeroacoustic sources + the CentralMoment jet-labium rig with executed tonal-regime refusal evidence. Named consumer pending: the owner-doctrine instrument-synthesis workflow (jazz-studio PHS extraction) and the recorded SlotJet3dFollowUp 3D continuation. New investment days old, not decay. Disposition added 2026-08-13 by the musical-acoustics program closer (NobleLion) when the usage sweep flagged the post-review landings.",
+          "evidence": {
+            "test_files": 6,
+            "src_files": 7,
+            "last_commit": "2026-08-13",
+            "dependent_crates": 0
+          }
+        },
+        {
+          "crate": "fs-airflow",
+          "disposition": "KEEP",
+          "rationale": "Named consumer pending in-flight: the E06 cooling product workflow (f85xj.6.5/.6.11) remains the declared consumer. Continued source investment through 2026-07-28 is evidence of an active lane, not workflow integration or maturity.",
+          "evidence": {
+            "test_files": 5,
+            "src_files": 3,
+            "last_commit": "2026-07-28",
+            "dependent_crates": 0
+          }
+        },
+        {
+          "crate": "fs-bisect",
+          "disposition": "KEEP",
+          "rationale": "Bisect-style proof and debugging infrastructure; developer-facing tooling rather than a supported-workflow participant.",
+          "evidence": {
+            "test_files": 2,
+            "src_files": 2,
+            "last_commit": "2026-07-13",
+            "dependent_crates": 0
+          }
+        },
+        {
+          "crate": "fs-conform",
+          "disposition": "KEEP",
+          "rationale": "Restriction-map plugin conformance; verification-layer primitive named in README.",
+          "evidence": {
+            "test_files": 1,
+            "src_files": 1,
+            "last_commit": "2026-07-18",
+            "dependent_crates": 0
+          }
+        },
+        {
+          "crate": "fs-contact",
+          "disposition": "KEEP",
+          "rationale": "Thermal-contact lane companion to fs-conduction; same pending E06 consumer path.",
+          "evidence": {
+            "test_files": 1,
+            "src_files": 1,
+            "last_commit": "2026-07-18",
+            "dependent_crates": 0
+          }
+        },
+        {
+          "crate": "fs-contract",
+          "disposition": "KEEP",
+          "rationale": "Assume-guarantee component contracts; verification-layer primitive.",
+          "evidence": {
+            "test_files": 2,
+            "src_files": 2,
+            "last_commit": "2026-07-14",
+            "dependent_crates": 0
+          }
+        },
+        {
+          "crate": "fs-dd",
+          "disposition": "KEEP",
+          "rationale": "Domain-decomposition lane with continued corrective source work through 2026-07-26; active research infrastructure, not an integrated-workflow claim.",
+          "evidence": {
+            "test_files": 1,
+            "src_files": 1,
+            "last_commit": "2026-07-26",
+            "dependent_crates": 0
+          }
+        },
+        {
+          "crate": "fs-detaudit",
+          "disposition": "KEEP",
+          "rationale": "Determinism-audit tooling; G5 lane support, developer-facing by design.",
+          "evidence": {
+            "test_files": 2,
+            "src_files": 2,
+            "last_commit": "2026-07-17",
+            "dependent_crates": 0
+          }
+        },
+        {
+          "crate": "fs-dimine",
+          "disposition": "FREEZE",
+          "rationale": "Carried forward from CONS-2026-07-A: the implementation has no workflow consumer or dependent crate, its source work was last touched 2026-07-07, and 9/9 conformance tests were verified green at that review. The 2026-07-24 path commit made the FROZEN state visible in its contract; this delta does not claim a fresh green run.",
+          "evidence": {
+            "test_files": 1,
+            "src_files": 1,
+            "last_commit": "2026-07-24",
+            "dependent_crates": 0
+          }
+        },
+        {
+          "crate": "fs-evidence-runner",
+          "disposition": "KEEP",
+          "rationale": "Narrow TOOL-layer trust boundary for the active Runner V2 schema program: it centralizes bounded terminal-state, refusal, canonical-identity, and pure local-evaluator contracts so downstream runners do not redeclare authority-bearing vocabulary. It currently has no supported-workflow consumer, process execution, retained runtime proof, or maturity claim; KEEP preserves the governance boundary while those downstream leaves remain explicit future obligations.",
+          "evidence": {
+            "test_files": 0,
+            "src_files": 24,
+            "last_commit": "2026-07-30",
+            "dependent_crates": 0
+          }
+        },
+        {
+          "crate": "fs-flux",
+          "disposition": "KEEP",
+          "rationale": "FLUX-layer scaffolding with five source files; its only dependent is the currently unreached fs-wasm workspace.",
+          "evidence": {
+            "test_files": 2,
+            "src_files": 5,
+            "last_commit": "2026-07-16",
+            "dependent_crates": 1
+          }
+        },
+        {
+          "crate": "fs-gen",
+          "disposition": "KEEP",
+          "rationale": "Generator scaffolding with no dependent crate; retain as the smallest explicit generator seam and re-review on the next release train.",
+          "evidence": {
+            "test_files": 1,
+            "src_files": 1,
+            "last_commit": "2026-07-10",
+            "dependent_crates": 0
+          }
+        },
+        {
+          "crate": "fs-geocon",
+          "disposition": "KEEP",
+          "rationale": "Geometric-constraint layer named in the README query and certificate family.",
+          "evidence": {
+            "test_files": 1,
+            "src_files": 3,
+            "last_commit": "2026-07-17",
+            "dependent_crates": 0
+          }
+        },
+        {
+          "crate": "fs-iga",
+          "disposition": "KEEP",
+          "rationale": "Spline and shell FLUX element family in the plan atlas; prior soundness-audit subject.",
+          "evidence": {
+            "test_files": 1,
+            "src_files": 1,
+            "last_commit": "2026-07-11",
+            "dependent_crates": 0
+          }
+        },
+        {
+          "crate": "fs-matdb-store",
+          "disposition": "KEEP",
+          "rationale": "KEEP: storage seam for the 35 provenance-pinned instrument material packs (bead zwzey, closed). Named consumer pending: the same instrument-synthesis workflow consuming loss-factor packs; fs-matdb packs it stores are already consumed by the fs-cli material-resolve stage lane. New investment, not decay. Disposition added 2026-08-13 by the musical-acoustics program closer (NobleLion) when the usage sweep flagged the post-review landings.",
+          "evidence": {
+            "test_files": 1,
+            "src_files": 1,
+            "last_commit": "2026-08-09",
+            "dependent_crates": 0
+          }
+        },
+        {
+          "crate": "fs-modalid",
+          "disposition": "KEEP",
+          "rationale": "KEEP: experimental modal identification (Loewner + RFP with stabilization/MAC gates, bead 1qxdh, closed with tests). Named consumer pending: instrument model calibration against measured mobilities in the owner-doctrine synthesis workflow. New investment, not decay. Disposition added 2026-08-13 by the musical-acoustics program closer (NobleLion) when the usage sweep flagged the post-review landings.",
+          "evidence": {
+            "test_files": 1,
+            "src_files": 1,
+            "last_commit": "2026-08-09",
+            "dependent_crates": 0
+          }
+        },
+        {
+          "crate": "fs-probe",
+          "disposition": "KEEP",
+          "rationale": "Probe surface named in the README HELM and utility family.",
+          "evidence": {
+            "test_files": 2,
+            "src_files": 1,
+            "last_commit": "2026-07-17",
+            "dependent_crates": 0
+          }
+        },
+        {
+          "crate": "fs-psycho",
+          "disposition": "KEEP",
+          "rationale": "KEEP: standards-anchored psychoacoustic metrics (bead 4y0v8, closed; BBN cross-covariance class mandatory per its close). Named consumer pending: perceptual acceptance gates for rendered instrument audio in the synthesis workflow (the euler cinematic audio lane is an in-tree candidate consumer today). New investment, not decay. Disposition added 2026-08-13 by the musical-acoustics program closer (NobleLion) when the usage sweep flagged the post-review landings.",
+          "evidence": {
+            "test_files": 2,
+            "src_files": 8,
+            "last_commit": "2026-08-10",
+            "dependent_crates": 0
+          }
+        },
+        {
+          "crate": "fs-rep-voxel",
+          "disposition": "KEEP",
+          "rationale": "Named MORPH representation in the plan atlas and README; zero dependent crates today.",
+          "evidence": {
+            "test_files": 1,
+            "src_files": 6,
+            "last_commit": "2026-07-18",
+            "dependent_crates": 0
+          }
+        },
+        {
+          "crate": "fs-thermochem",
+          "disposition": "KEEP",
+          "rationale": "NASA-9 thermochemistry lane with no integration-test files yet; retain as pre-first-release research work and re-review on the next train, without implying a green or workflow claim.",
+          "evidence": {
+            "test_files": 0,
+            "src_files": 5,
+            "last_commit": "2026-07-17",
+            "dependent_crates": 0
+          }
+        },
+        {
+          "crate": "fs-topo",
+          "disposition": "KEEP",
+          "rationale": "Hosts registered L2 capability geometry.topology-certificates. Exact predicates for self-intersection and manifoldness are load-bearing for geometry claims, so absence of a supported-workflow consumer is an L3 promotion blocker rather than a retirement signal.",
+          "evidence": {
+            "test_files": 3,
+            "src_files": 4,
+            "last_commit": "2026-07-22",
+            "dependent_crates": 1
+          }
+        },
+        {
+          "crate": "fs-topols",
+          "disposition": "KEEP",
+          "rationale": "Level-set topology lane and the sole current dependent of fs-topo; it is not itself reached by a supported workflow.",
+          "evidence": {
+            "test_files": 1,
+            "src_files": 7,
+            "last_commit": "2026-07-17",
+            "dependent_crates": 0
+          }
+        },
+        {
+          "crate": "fs-vmanifest",
+          "disposition": "KEEP",
+          "rationale": "Eighteen integration-test files and 24 source files; the manifest family is a shared G1-freeze schema with many landed instances, but no current supported-workflow root reaches it.",
+          "evidence": {
+            "test_files": 18,
+            "src_files": 24,
+            "last_commit": "2026-07-23",
+            "dependent_crates": 0
+          }
+        },
+        {
+          "crate": "fs-wasm",
+          "disposition": "REPAIR-OR-QUARANTINE",
+          "rationale": "Cannot be FROZEN: FREEZE requires a green gate and this standalone nested workspace has none in the retained review boundary. It remains registered L1 wasm.browser-flagships. REPAIR-OR-QUARANTINE avoids implying either a green parked state or current workflow integration.",
+          "evidence": {
+            "test_files": 0,
+            "src_files": 8,
+            "last_commit": "2026-07-22",
+            "dependent_crates": 0
+          }
+        },
+        {
+          "crate": "fs-xform",
+          "disposition": "KEEP",
+          "rationale": "Core MORPH parameterization named in the plan crate atlas; its sole dependent is the currently unreached fs-wasm workspace. Retention preserves the design-parameterization seam without implying workflow integration.",
+          "evidence": {
+            "test_files": 3,
+            "src_files": 7,
+            "last_commit": "2026-07-17",
+            "dependent_crates": 1
+          }
+        },
+        {
+          "crate": "fs-airfoil",
+          "disposition": "KEEP",
+          "rationale": "Consumed by fs-airscrew, fs-wing, and fs-flyer runtime edges (verified in their Cargo.toml manifests); airfoil-section primitives of the actively-landing wright-flyer program.",
+          "evidence": {
+            "test_files": 4,
+            "src_files": 6,
+            "last_commit": "2026-08-19",
+            "dependent_crates": 3
+          }
+        },
+        {
+          "crate": "fs-airscrew",
+          "disposition": "KEEP",
+          "rationale": "Consumed by fs-flyer and fs-flyer-wasm; propeller/airscrew model behind the wright-flyer wasm boundary.",
+          "evidence": {
+            "test_files": 1,
+            "src_files": 1,
+            "last_commit": "2026-08-21",
+            "dependent_crates": 2
+          }
+        },
+        {
+          "crate": "fs-atmo",
+          "disposition": "KEEP",
+          "rationale": "Consumed by fs-flyer; atmosphere model of the wright-flyer program.",
+          "evidence": {
+            "test_files": 4,
+            "src_files": 4,
+            "last_commit": "2026-08-20",
+            "dependent_crates": 1
+          }
+        },
+        {
+          "crate": "fs-wing",
+          "disposition": "KEEP",
+          "rationale": "Consumed by fs-flyer; wing geometry of the wright-flyer program.",
+          "evidence": {
+            "test_files": 8,
+            "src_files": 8,
+            "last_commit": "2026-08-21",
+            "dependent_crates": 1
+          }
+        },
+        {
+          "crate": "fs-flyer",
+          "disposition": "KEEP",
+          "rationale": "Consumed by fs-flyer-wasm as its native simulation plane; the largest surface of the active program (44 src / 42 test files) owned by the frankensim-wf-root-guzez.* bead series with landings through 2026-08-22.",
+          "evidence": {
+            "test_files": 42,
+            "src_files": 44,
+            "last_commit": "2026-08-22",
+            "dependent_crates": 1
+          }
+        },
+        {
+          "crate": "fs-flyer-wasm",
+          "disposition": "KEEP",
+          "rationale": "Named out-of-graph consumer: the tracked apps/wright-flyer browser app compiles this crate into dist/assets/fs_flyer_wasm_bg-*.wasm and exercises it through apps/wright-flyer/e2e/*.mjs; standalone workspace by contract so browser builds decouple from native WIP.",
+          "evidence": {
+            "test_files": 4,
+            "src_files": 5,
+            "last_commit": "2026-08-21",
+            "dependent_crates": 0
+          }
+        },
+        {
+          "crate": "fs-goddard-wasm",
+          "disposition": "KEEP",
+          "rationale": "Named trust rationale: deliberate L6 museum-page seam over the fs_mbd::goddard kernel (introduced in commit 8f00c08c, Franken-only dependency purity restored in 11f36c8f). Its consumer is an out-of-repo browser page by design - exactly the outside-the-crate-graph case docs/CONSOLIDATION_REVIEW.md says the sweep cannot see. test_files=0 is recorded honestly; no green claim is made here.",
+          "evidence": {
+            "test_files": 0,
+            "src_files": 1,
+            "last_commit": "2026-08-22",
+            "dependent_crates": 0
+          }
+        },
+        {
+          "crate": "fs-tesla-wasm",
+          "disposition": "KEEP",
+          "rationale": "Same museum-seam pattern over fs_flux::lc::step_tesla_coil (introduced in commit 3587171e); consumer is an out-of-repo browser page by design. test_files=0 is recorded honestly; no green claim is made here.",
+          "evidence": {
+            "test_files": 0,
+            "src_files": 1,
+            "last_commit": "2026-08-22",
+            "dependent_crates": 0
+          }
+        }
+      ],
+      "roots": [
+        "fs-adaptbo-e2e",
+        "fs-cli",
+        "fs-diffreal-e2e",
+        "fs-epi-e2e",
+        "fs-euler-disc-e2e",
+        "fs-flagship-e2e",
+        "fs-flowcert-e2e",
+        "fs-flutter-e2e",
+        "fs-flywheel-e2e",
+        "fs-frame",
+        "fs-grammar-e2e",
+        "fs-marquee",
+        "fs-metamat-e2e",
+        "fs-neuroshape-e2e",
+        "fs-oed-e2e",
+        "fs-ornith",
+        "fs-robustopt-e2e",
+        "fs-schedule-e2e",
+        "fs-selfknow-e2e",
+        "fs-thrust-e2e",
+        "fs-topopt",
+        "fs-truss-e2e",
+        "fs-vessel",
+        "fs-vskeleton"
       ]
     }
   ]

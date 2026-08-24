@@ -10,6 +10,7 @@ import {
   extractReceipts,
   extractQosStates,
   countLatencySamples,
+  countActuatedSamples,
   compareRuns,
   digestLooksReal,
 } from "../e2e/lib.mjs";
@@ -106,6 +107,16 @@ test("countLatencySamples counts only samples with applied_tick", () => {
     { suite: "wf-input-latency", seq: 3, applied_tick: 15 },
   ]);
   assert.equal(n, 2);
+});
+
+test("countActuatedSamples counts applied NON-neutral commands only", () => {
+  const n = countActuatedSamples([
+    { suite: "wf-input-latency", seq: 1, applied_tick: 12, lever_n: -220, warp_rad: 0 },
+    { suite: "wf-input-latency", seq: 2, applied_tick: 13, lever_n: 0, warp_rad: 0 },
+    { suite: "wf-input-latency", seq: 3, applied_tick: null, lever_n: -220, warp_rad: 0 },
+    { suite: "wf-input-latency", seq: 4, applied_tick: 15, lever_n: 0, warp_rad: 8.5 },
+  ]);
+  assert.equal(n, 2, "neutral heartbeat and unapplied sample excluded");
 });
 
 test("extractReceipts refuses out-of-order stages", () => {

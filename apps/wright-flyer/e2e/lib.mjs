@@ -179,6 +179,21 @@ export function countLatencySamples(lines) {
 }
 
 /**
+ * ACTUATED samples: admitted (applied_tick) controls whose quantized
+ * command was NON-neutral. The pump heartbeats neutral commands every
+ * 100 ms even with no keys held, so applied_tick alone cannot tell
+ * "pilot input" from "idle pump"; a nonzero lever/warp can.
+ */
+export function countActuatedSamples(lines) {
+  return lines.filter(
+    (r) =>
+      r?.suite === "wf-input-latency" &&
+      typeof r.applied_tick === "number" &&
+      (r.lever_n !== 0 || r.warp_rad !== 0),
+  ).length;
+}
+
+/**
  * Compare two boots' receipts. Verdict IDENTICAL requires equal tick0 and
  * final engine digests; anything else is DIVERGENT with a typed field list.
  * The comparator never sees KPIs — digests only.

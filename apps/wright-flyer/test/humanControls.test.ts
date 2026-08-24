@@ -68,12 +68,13 @@ test("ControlHold: waits before first input, ZOH after, receipts exact", () => {
   assert.equal(hold.valueAt(10), null, "never applies before its tick");
   assert.equal(hold.valueAt(11)?.leverForceN, 40);
   assert.equal(hold.valueAt(200)?.leverForceN, 40, "zero-order hold");
-  // On-time input: requested 202 > next eligible 201 → late by 0.
+  // Early input: requested 202 targets one tick past next eligible 201;
+  // the law applies it AT 201 and flags lateness as signed -1.
   const r2 = hold.admit(2, { leverForceN: -60, warpCmdRad: 0 }, 202, 200);
-  assert.equal(r2.appliedTick, 202);
-  assert.equal(r2.lateByTicks, 0);
-  assert.equal(hold.valueAt(201)?.leverForceN, 40, "old value until applied tick");
-  assert.equal(hold.valueAt(202)?.leverForceN, -60, "supersedes at its tick");
+  assert.equal(r2.appliedTick, 201);
+  assert.equal(r2.lateByTicks, -1);
+  assert.equal(hold.valueAt(201)?.leverForceN, -60, "supersedes at next eligible");
+  assert.equal(hold.valueAt(202)?.leverForceN, -60, "zero-order hold continues");
   // Non-finite refuses.
   assert.throws(
     () => hold.admit(3, { leverForceN: Number.NaN, warpCmdRad: 0 }, 300, 299),
@@ -82,10 +83,22 @@ test("ControlHold: waits before first input, ZOH after, receipts exact", () => {
   assert.equal(hold.receiptLog().length, 2);
 });
 
+test("ControlHold: first touch on a PAUSED engine applies at next eligible", () => {
+  const hold = new ControlHold();
+  // Wall-clock targeting can place `requested` thousands of ticks past
+  // the paused engine's position (ticks advance only by stepping).
+  // Applying at the future target deadlocked every human run forever;
+  // the declared ApplyNextEligibleTickAndFlag law applies at tick+1.
+  const r = hold.admit(1, { leverForceN: 220, warpCmdRad: 0 }, 3000, 0);
+  assert.equal(r.appliedTick, 1, "never a future wall-clock target");
+  assert.equal(r.lateByTicks, 1 - 3000, "signed flag records how far early");
+  assert.equal(hold.valueAt(1)?.leverForceN, 220, "first touch starts the run");
+});
+
 test("latency ledger: full lifecycle emits one line with every stage", () => {
   const lines: string[] = [];
   const ledger = new LatencyLedger((l) => lines.push(l));
-  ledger.sent(7, 1000, 1002);
+  ledger.sent(7, 1000, 1002, -220, 0);
   ledger.acked(7, 480, 1, 1010);
   ledger.published(479, 1015); // earlier tick: must NOT complete seq 7
   assert.equal(lines.length, 0);
@@ -112,6 +125,8 @@ test("latency ledger: unmeasured stages stay null, never fake zeros", () => {
     sequence: 1,
     deviceMs: 100,
     sentMs: 101,
+    leverN: 0,
+    warpRad: 0,
     ackMs: null,
     appliedTick: null,
     lateByTicks: null,
@@ -129,7 +144,7 @@ test("latency ledger: bounded — overflow drops the OLDEST, loudly", () => {
   const lines: string[] = [];
   const ledger = new LatencyLedger((l) => lines.push(l), 4);
   for (let seq = 1; seq <= 5; seq += 1) {
-    ledger.sent(seq, seq * 10, seq * 10 + 1);
+    ledger.sent(seq, seq * 10, seq * 10 + 1, 0, 0);
   }
   assert.equal(ledger.inflightCount(), 4, "cap held");
   const dropped = lines.map((l) => JSON.parse(l) as Record<string, unknown>);

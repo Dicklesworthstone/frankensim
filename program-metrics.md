@@ -5,7 +5,7 @@ metrics: 27
 measured: 14
 no_data: 13
 trend_basis: NO-DATA (no generation recorded yet; every trend cell reads `no prior generation`)
-source_identity: 06b595d346d16ffe17be48bd16c409c0dd5f4cd6153457a16ebdb569ebecdcea
+source_identity: 236a5b7b614bb1a21b6020fda1171cb6997bc4760917ce45a182e0aba1be7fb2
 
 This dashboard measures OUTCOMES. A `NO-DATA` row means no measurement machinery exists yet, so no number is invented; a measured `0` means the population is enumerable and the answer is genuinely none. The two are never conflated, and a measured zero is deliberately left visible rather than hidden behind `NO-DATA`.
 
@@ -24,7 +24,7 @@ This dashboard measures OUTCOMES. A `NO-DATA` row means no measurement machinery
 | Human-locked supplier import annotations that disagree with current observations | 0 | no prior generation | lower-is-better | fs_io::supplier_corpus + data/cad-import-corpus/{corpus-v1.tsv,scorecard-summary-v1.json} |
 | Human-reviewed supplier CAD files refused by the standing import policy | NO-DATA (needs f85xj.11.6) | no prior generation | neutral | - |
 | Human-reviewed supplier CAD files admitted after repair | NO-DATA (needs f85xj.11.6) | no prior generation | neutral | - |
-| Datasets reproduced by an independent team or implementation lineage | 0 of 28 (0.00%) | no prior generation | higher-is-better | fs_vvreg::corpus seeded validation registry |
+| Datasets reproduced by an independent team or implementation lineage | 0 of 34 (0.00%) | no prior generation | higher-is-better | fs_vvreg::corpus seeded validation registry |
 | Correctness of certify-or-escalate decisions by learned components | NO-DATA (needs f85xj.14.2) | no prior generation | higher-is-better | - |
 | Time to explain a surprising result through ledger lineage | NO-DATA | no prior generation | lower-is-better | - |
 | Setup time, diagnosis time, and decision quality from real user sessions | NO-DATA (needs f85xj.7.6) | no prior generation | higher-is-better | - |
@@ -34,10 +34,10 @@ This dashboard measures OUTCOMES. A `NO-DATA` row means no measurement machinery
 | metric | value | trend | direction | sources |
 | --- | --- | --- | --- | --- |
 | Registered adversarial challenges actually executed | 0 of 8 (0.00%) | no prior generation | higher-is-better | fs_vvreg::adversarial registry; vv-scorecard.json (fs_vvreg::scorecard) |
-| Validation datasets on the blind-predictive axis | 0 of 28 (0.00%) | no prior generation | higher-is-better | fs_vvreg::corpus seeded validation registry |
-| Validation datasets supplying an external evidence axis | 9 of 28 (32.14%) | no prior generation | higher-is-better | fs_vvreg::corpus seeded validation registry |
-| Claim cells carrying at least one external reference | 13 of 25 (52.00%) | no prior generation | higher-is-better | vv-scorecard.json (fs_vvreg::scorecard) |
-| Claim cells with no external reference at all | 12 | no prior generation | lower-is-better | vv-scorecard.json (fs_vvreg::scorecard) |
+| Validation datasets on the blind-predictive axis | 0 of 34 (0.00%) | no prior generation | higher-is-better | fs_vvreg::corpus seeded validation registry |
+| Validation datasets supplying an external evidence axis | 11 of 34 (32.35%) | no prior generation | higher-is-better | fs_vvreg::corpus seeded validation registry |
+| Claim cells carrying at least one external reference | 15 of 31 (48.38%) | no prior generation | higher-is-better | vv-scorecard.json (fs_vvreg::scorecard) |
+| Claim cells with no external reference at all | 16 | no prior generation | lower-is-better | vv-scorecard.json (fs_vvreg::scorecard) |
 
 ## Governance metrics
 
@@ -105,4 +105,4 @@ These are legitimate signals that are NOT outcome metrics. They move without the
 - crate count — inventory, not capability; the capability maturity registry is the outcome measure
 - integration-test file count — inventory, not proof; check-docs already pins it and a test file is not an outcome
 
-identity: fb955425cf981f7415593c3da48d6f12249d7efeef03a8aff9e4b5148206d921
+identity: d2c9cb9b4750cca885b01ec1b36e4f512cd84269ae27a8440c2bd213b0c970f7

@@ -52,7 +52,10 @@ export class ControlHold {
     lateByTicks: number;
   }[] = [];
 
-  /** Admit a control for `nextEligibleTick = currentTick + 1`. */
+  /** Admit a control for application at the NEXT ELIGIBLE tick
+   * (`currentTick + 1`). `requestedTick` is retained only as the
+   * wall-clock target for the lateness receipt — never as the
+   * application tick. */
   admit(
     sequence: number,
     value: PhysicalControl,
@@ -63,7 +66,13 @@ export class ControlHold {
       throw new RangeError("non-finite control never enters the hold");
     }
     const nextEligible = currentTick + 1;
-    const appliedTick = Math.max(requestedTick, nextEligible);
+    // ApplyNextEligibleTickAndFlag — the declared law of this class.
+    // Applying at the future wall-clock target instead DEADLOCKS the
+    // paused engine: ticks advance only by stepping (H-2), so a first
+    // touch requested even one tick past `nextEligible` could never come
+    // due and every run would wait for its first step forever. Found
+    // live by the E6.4c e2e row (bead frankensim-nty3a).
+    const appliedTick = nextEligible;
     const lateByTicks = appliedTick - requestedTick;
     this.pendingValue = value;
     this.pendingFromTick = appliedTick;
@@ -94,6 +103,11 @@ export interface LatencyRecord {
   readonly sequence: number;
   /** Device event timestamp. */
   readonly deviceMs: number;
+  /** Quantized physical command carried by this sample. The pump
+   * heartbeats NEUTRAL commands by design, so these fields separate
+   * real pilot actuation from the idle stream (e2e efficacy gate). */
+  readonly leverN: number;
+  readonly warpRad: number;
   /** postMessage to the worker. */
   readonly sentMs: number;
   /** Ack received (worker admitted the control). */
@@ -121,6 +135,8 @@ export function latencyLine(r: LatencyRecord): string {
     device_to_present_ms: seg(r.deviceMs, r.presentedMs),
     applied_tick: r.appliedTick,
     late_by_ticks: r.lateByTicks,
+    lever_n: r.leverN,
+    warp_rad: r.warpRad,
   });
 }
 
@@ -136,7 +152,7 @@ export class LatencyLedger {
     this.cap = cap;
   }
 
-  sent(sequence: number, deviceMs: number, sentMs: number): void {
+  sent(sequence: number, deviceMs: number, sentMs: number, leverN: number, warpRad: number): void {
     if (this.inflight.size >= this.cap) {
       // Bounded (logging contract): drop the OLDEST, loudly.
       const oldest = this.inflight.keys().next().value;
@@ -149,6 +165,8 @@ export class LatencyLedger {
       sequence,
       deviceMs,
       sentMs,
+      leverN,
+      warpRad,
       ackMs: null,
       appliedTick: null,
       lateByTicks: null,

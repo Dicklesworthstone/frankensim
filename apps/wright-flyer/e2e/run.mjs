@@ -7,19 +7,20 @@
 //   node e2e/run.mjs --row=qos      # CPU-throttled QoS escalation row
 //   node e2e/run.mjs --all          # every row
 //   node e2e/run.mjs --falsifier    # default vs ?flight=2 MUST diverge
+//   node e2e/run.mjs --negative     # each row gate MUST refuse its negative control
 //
 // Receipts are ENGINE digests only for the isolation rows (sim-ready
 // tick0Digest, sim-terminal digest). Human-row efficacy is proven by
 // input-latency samples carrying applied_tick; cross-boot digest identity
 // is NOT asserted there because control admission is device-time-derived.
-// Exit: 0 pass · 3 RUN_DIVERGENT · 4 FALSIFIER_FAILED · 5 setup refusal.
+// Exit: 0 pass · 3 RUN_DIVERGENT · 4 FALSIFIER/NEGATIVE failed · 5 setup refusal.
 import path from "node:path";
 import { writeFile } from "node:fs/promises";
 import { startVitePreview, startStaticDist, makeArtifactDir } from "./serve.mjs";
 import { bootOnce, resolveChromeBin, BootRefusal } from "./boot.mjs";
 import {
-  compareRuns,
   countLatencySamples,
+  countActuatedSamples,
   digestLooksReal,
   extractQosStates,
   extractReceipts,
@@ -29,8 +30,15 @@ import {
 const argv = process.argv.slice(2);
 const falsifierMode = argv.includes("--falsifier");
 const rowArg = argv.find((a) => a.startsWith("--row="))?.slice(6) ?? "both";
-if (!["sab", "fallback", "human", "qos", "both", "all"].includes(rowArg)) {
-  console.error(JSON.stringify({ suite: "wf-e2e", verdict: "REFUSED", code: "BAD_ROW", row: rowArg }));
+const negFlag = argv.find((a) => a.startsWith("--negative"));
+// Bare --negative runs BOTH gate negatives; --negative=human|qos narrows it.
+const negativeGates =
+  negFlag === undefined ? null : (negFlag.split("=")[1] ?? "both") === "both" ? ["human", "qos"] : [negFlag.split("=")[1]];
+if (
+  !["sab", "fallback", "human", "qos", "both", "all"].includes(rowArg) ||
+  (negFlag !== undefined && ![undefined, "human", "qos", "both"].includes(negFlag.split("=")[1]))
+) {
+  console.error(JSON.stringify({ suite: "wf-e2e", verdict: "REFUSED", code: "BAD_ROW", row: rowArg, negative: negFlag ?? null }));
   process.exit(5);
 }
 
@@ -96,13 +104,14 @@ async function runRow(kind, artifactDir) {
       fail("TRANSPORT_MISDECLARED", { row: kind, expected: "crossOriginIsolated=false (headers leaked?)" });
     }
     if (kind === "human") {
-      // Input-path efficacy: our synthetic keydowns must reach the worker
-      // and be ADMITTED at engine ticks (applied_tick in latency samples).
-      const samples = Math.min(countLatencySamples(a.lines), countLatencySamples(b.lines));
+      // Input-path EFFICACY: injected keydowns must drive a NON-neutral
+      // command into an engine tick. The pump heartbeats neutrals even
+      // with no keys held, so admitted-but-neutral samples prove nothing.
+      const samples = Math.min(countActuatedSamples(a.lines), countActuatedSamples(b.lines));
       if (samples < 1) {
         fail("INPUT_PATH_SILENT", {
           row: kind,
-          detail: "no wf-input-latency sample with applied_tick — injected controls never admitted",
+          detail: "no non-neutral control admitted at an engine tick — injected keys never actuated",
         });
       }
       return {
@@ -152,27 +161,64 @@ async function runRow(kind, artifactDir) {
   }
 }
 
+/**
+ * Per-gate falsifier negatives (bead frankensim-nty3a): every row gate must
+ * REFUSE its negative control, or the gate cannot fire and is decoration.
+ *   human: NO injected keys -> zero admitted-control latency samples must
+ *          hold (INPUT_PATH_SILENT condition). Any sample means the input
+ *          path admitted controls nobody sent.
+ *   qos:   NO CDP throttling -> "constrained" must stay absent
+ *          (QOS_NOT_OBSERVED condition). Escalation on an unthrottled boot
+ *          means the gate cannot tell throttle from environment.
+ */
+async function runNegativeGate(gate, artifactDir) {
+  const serve = await startVitePreview();
+  try {
+    const query = gate === "human" ? "sim=1&mode=human" : "sim=1";
+    const bootOpts = gate === "human" ? { timeoutMs: 90000 } : { timeoutMs: 180000 };
+    const a = await bootOnce({ baseUrl: serve.baseUrl, query, ...bootOpts });
+    await writeFile(
+      path.join(artifactDir, `negative-${gate}.jsonl`),
+      a.lines.map((l) => JSON.stringify(l)).join("\n") + "\n",
+    );
+    if (gate === "human") {
+      const samples = countActuatedSamples(a.lines);
+      if (samples !== 0) {
+        fail("NEGATIVE_FAILED", { gate, detail: `${samples} actuated samples without injected keys` }, 4);
+      }
+      return { gate, verdict: "NEGATIVE-OK", refuses: "INPUT_PATH_SILENT" };
+    }
+    const states = extractQosStates(a.lines);
+    if (states.includes("constrained")) {
+      fail("NEGATIVE_FAILED", { gate, statesSeen: states, detail: "constrained observed with no CDP throttling" }, 4);
+    }
+    return { gate, verdict: "NEGATIVE-OK", refuses: "QOS_NOT_OBSERVED", qosStates: states };
+  } finally {
+    serve.stop();
+  }
+}
+
 const artifactDir = makeArtifactDir();
 try {
-  await writeFile(path.join(artifactDir, "mode.json"), JSON.stringify({ falsifierMode, rowArg }) + "\n");
+  await writeFile(path.join(artifactDir, "mode.json"), JSON.stringify({ falsifierMode, rowArg, negativeGates }) + "\n");
 } catch {}
 
 try {
-  const rows = falsifierMode
+  const rows = negativeGates ?? (falsifierMode
     ? ["sab"]
     : rowArg === "both"
       ? ["sab", "fallback"]
       : rowArg === "all"
         ? ["sab", "fallback", "human", "qos"]
-        : [rowArg];
+        : [rowArg]);
   const summaries = [];
   for (const row of rows) {
-    summaries.push(await runRow(row, artifactDir));
+    summaries.push(negativeGates === null ? await runRow(row, artifactDir) : await runNegativeGate(row, artifactDir));
   }
   console.log(
     JSON.stringify({
       suite: "wf-e2e",
-      verdict: falsifierMode ? "FALSIFIER-OK" : "PASS",
+      verdict: negativeGates !== null ? "NEGATIVE-OK" : falsifierMode ? "FALSIFIER-OK" : "PASS",
       rows: summaries,
       artifacts: artifactDir,
     }),
