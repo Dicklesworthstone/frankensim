@@ -234,6 +234,8 @@ impl TileKernel for ArenaAllocationRefusal {
     }
 }
 
+// Bead frankensim-68v4f: zero/one/many sweep kept inline.
+    #[allow(clippy::too_many_lines)]
 #[test]
 fn success_zero_one_many_and_deterministic_identity_are_fully_accounted() {
     for (sequence, workers, tiles) in [(0, 1, 0), (1, 4, 1), (2, 4, 257)] {
@@ -350,6 +352,8 @@ fn success_zero_one_many_and_deterministic_identity_are_fully_accounted() {
 
 #[test]
 fn prelaunch_and_mid_run_cancellation_seal_then_the_pool_reuses() {
+    const WORKERS: usize = 4;
+    const TILES: u64 = 16_384;
     let p = pool(4);
 
     let pre_cancelled = CancelGate::new_clock_free();
@@ -379,8 +383,6 @@ fn prelaunch_and_mid_run_cancellation_seal_then_the_pool_reuses() {
     assert_eq!(witness.cancelled_tiles(), 64);
     let pre_cancelled_witness = witness;
 
-    const WORKERS: usize = 4;
-    const TILES: u64 = 16_384;
     let gate = CancelGate::new_clock_free();
     let kernel = CancelAfterFirstWave {
         gate: &gate,

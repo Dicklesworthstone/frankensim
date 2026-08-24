@@ -596,6 +596,8 @@ fn exec_010_race_winner_is_deterministic_and_losers_fully_drain() {
     );
 }
 
+// Bead frankensim-68v4f: full checkpoint/resume/fork narrative kept inline.
+#[allow(clippy::too_many_lines)]
 #[test]
 fn exec_011_solver_checkpoint_resume_fork_is_bit_exact() {
     use fs_exec::solver::{

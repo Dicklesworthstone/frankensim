@@ -1099,7 +1099,7 @@ fn abandoned_nested_authority_is_recovered_inside_out_before_parent_seals() {
         let nested_id = nested.id();
         // Deliberate forget: models a child authority abandoned mid-flight
         // so recovery via recover_child_finalizer can be exercised.
-        #[allow(clippy::mem_forget)]
+        #[allow(forget_non_drop)]
         std::mem::forget(nested);
         let parent_id = parent.id();
         let mut parent_finalizer = parent.begin_finalization();
@@ -1311,6 +1311,8 @@ fn root_finish_reports_deepest_abandoned_child_without_consuming_recovery_author
             .unwrap();
         leaf_finalizer.abort_publication().unwrap();
         let leaf_report = leaf_finalizer.finish().unwrap();
+        // Guard drop only extends lifetimes; no Drop impl involved.
+        #[allow(drop_non_drop)]
         drop(leaf_finalizer);
 
         let parent = root.next_unfinished_child().unwrap();
