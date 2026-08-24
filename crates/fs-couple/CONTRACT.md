@@ -250,6 +250,26 @@ bead zolja, is the lift), and the Zwikker–Kosten Bessel path's former
 `r_v ≈ 160` continued-fraction ceiling was an iteration-budget bug fixed
 in `fs-phs` (budget now scales with `|z|`).
 
+### Aperture-junction solver modes (bead frankensim-2s4i5)
+
+The reed aperture junction has two solver modes on
+`ReedBoreVoice::set_solver_mode`. `Strict` (default) is the
+certification path: deterministic bisection with its 21-point
+grid-argmin fallback. `FastNewton` is a DECLARED FAST MODE (the
+fs-rand ziggurat precedent): island Newton on the analytic Jacobian
+of the shared Bernoulli-plus-wave-junction residual, with a
+monotone-descent guard that hands every cornered sample — sqrt kink,
+non-finite state, vanishing slope, non-monotone step, iteration cap —
+untouched to the strict path and counts it in `FastSolveStats`.
+It is NOT bitwise-equal to the strict path and must never become the
+default until it earns the same proof. Receipts (bead 2s4i5,
+`tests/reed_newton_fusion.rs`): bounded-deviation band of 1e-3 Pa over
+a full nominal render (observed deviation is uPa-scale by
+step-sized convergence), fallback-hit-rate bounded structurally at
+0.5 with the actual rate printed, and before/after budget rows stamped
+with build profile — debug rows are diagnostics forever, per the
+budget-lane doctrine.
+
 ### `music_render` (binary)
 
 The music lane's render CLI (bead ib15w): `music_render <reed|string>
