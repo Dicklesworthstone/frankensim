@@ -35,6 +35,54 @@ fn volume_fraction(pipeline: &DesignPipeline, rho: &[f64], cell_vol: &[f64]) -> 
         / total
 }
 
+pub(crate) fn assert_valid_oc_inputs(
+    elasticity: &DensityElasticity,
+    force: &[f64],
+    rho0: &[f64],
+    cell_vol: &[f64],
+    vol_frac: f64,
+    move_limit: f64,
+) {
+    assert_eq!(
+        rho0.len(),
+        elasticity.cells(),
+        "initial design must contain one density per elasticity cell"
+    );
+    assert_eq!(
+        cell_vol.len(),
+        rho0.len(),
+        "OC requires one cell volume per design density"
+    );
+    assert_eq!(
+        force.len(),
+        elasticity.n(),
+        "force must contain one value per elasticity dof"
+    );
+    assert!(
+        rho0.iter()
+            .all(|value| value.is_finite() && (0.0..=1.0).contains(value)),
+        "initial design densities must be finite and lie in [0, 1]"
+    );
+    assert!(
+        force.iter().all(|value| value.is_finite()),
+        "force must contain only finite values"
+    );
+    assert!(
+        cell_vol
+            .iter()
+            .all(|volume| volume.is_finite() && *volume > 0.0),
+        "cell volumes must be finite and positive"
+    );
+    assert!(
+        vol_frac.is_finite() && vol_frac > 0.0 && vol_frac <= 1.0,
+        "target volume fraction must be finite and lie in (0, 1]"
+    );
+    assert!(
+        move_limit.is_finite() && move_limit > 0.0 && move_limit <= 1.0,
+        "OC move limit must be finite and lie in (0, 1]"
+    );
+}
+
 /// Run OC iterations at FIXED continuation parameters (drivers wrap
 /// this with β/p schedules). Volume constraint is on the projected
 /// design; the multiplier is found by deterministic bisection.
@@ -49,6 +97,7 @@ pub fn optimality_criteria(
     move_limit: f64,
     iters: usize,
 ) -> OcReport {
+    assert_valid_oc_inputs(elasticity, force, rho0, cell_vol, vol_frac, move_limit);
     let nc = rho0.len();
     let mut rho = rho0.to_vec();
     let mut compliance_trace = Vec::with_capacity(iters);

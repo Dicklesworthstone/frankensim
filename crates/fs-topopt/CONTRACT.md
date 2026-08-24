@@ -120,8 +120,14 @@ or non-representable radii, empty complexes, malformed/non-finite geometry, and
 invalid cell/vertex measures; its assembled radius is immutable. Filter
 application refuses wrong-length or non-finite vectors. Projection helpers refuse non-finite
 densities, negative/non-finite sharpness, and thresholds outside `[0, 1]`, while
-the well-defined zero-sharpness limit is the identity map. Optimization outcomes
-are reported traces (compliance, volume, final change), never silent.
+the well-defined zero-sharpness limit is the identity map. The design pipelines
+also refuse nonphysical SIMP parameters, raw densities outside `[0, 1]`, malformed
+physics sensitivities or loads, mismatched elasticity/design shapes, and invalid
+robust threshold offsets before mutating the elasticity operator. Nominal and
+robust OC refuse mismatched vector shapes, non-finite state, nonpositive cell
+volumes, and volume targets or move limits outside `(0, 1]`; no `zip` truncation
+can silently change an optimization problem. Optimization outcomes are reported
+traces (compliance, volume, final change), never silent.
 The public DWR band-planning helper is fail-closed: it validates its
 level and every entry in the supplied indicator map, then plans recursive
 halo refinement on a

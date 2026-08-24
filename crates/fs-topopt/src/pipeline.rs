@@ -31,6 +31,27 @@ impl Default for SimpParams {
     }
 }
 
+impl SimpParams {
+    pub(crate) fn assert_valid(self) {
+        assert!(
+            self.e_min.is_finite() && self.e_min > 0.0 && self.e_min <= 1.0,
+            "SIMP void-modulus floor must be finite and lie in (0, 1]"
+        );
+        assert!(
+            self.penal.is_finite() && self.penal >= 1.0,
+            "SIMP penalization exponent must be finite and at least one"
+        );
+        assert!(
+            self.beta.is_finite() && self.beta >= 0.0,
+            "Heaviside sharpness beta must be finite and nonnegative"
+        );
+        assert!(
+            self.eta.is_finite() && (0.0..=1.0).contains(&self.eta),
+            "Heaviside threshold eta must be finite and lie in [0, 1]"
+        );
+    }
+}
+
 /// The chained design-to-physics pipeline.
 pub struct DesignPipeline {
     /// The filter stage.
@@ -44,6 +65,12 @@ impl DesignPipeline {
     #[must_use]
     pub fn forward(&self, rho: &[f64]) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
         let p = &self.params;
+        p.assert_valid();
+        assert!(
+            rho.iter()
+                .all(|value| value.is_finite() && (0.0..=1.0).contains(value)),
+            "raw design densities must be finite and lie in [0, 1]"
+        );
         let rho_tilde = self.filter.apply(rho);
         let rho_bar: Vec<f64> = rho_tilde
             .iter()
@@ -65,6 +92,16 @@ impl DesignPipeline {
     #[must_use]
     pub fn pullback(&self, rho_tilde: &[f64], dc_de: &[f64]) -> Vec<f64> {
         let p = &self.params;
+        p.assert_valid();
+        assert_eq!(
+            rho_tilde.len(),
+            dc_de.len(),
+            "SIMP pullback requires one physics sensitivity per filtered density"
+        );
+        assert!(
+            dc_de.iter().all(|value| value.is_finite()),
+            "SIMP pullback sensitivities must be finite"
+        );
         let chained: Vec<f64> = rho_tilde
             .iter()
             .zip(dc_de)
@@ -89,6 +126,20 @@ impl DesignPipeline {
         rho: &[f64],
         force: &[f64],
     ) -> (f64, Vec<f64>, Vec<f64>) {
+        assert_eq!(
+            elasticity.cells(),
+            rho.len(),
+            "elasticity and design must have the same cell count"
+        );
+        assert_eq!(
+            force.len(),
+            elasticity.n(),
+            "force must contain one finite value per elasticity dof"
+        );
+        assert!(
+            force.iter().all(|value| value.is_finite()),
+            "force must contain only finite values"
+        );
         let (rho_tilde, _rho_bar, moduli) = self.forward(rho);
         elasticity.moduli = moduli;
         let u = solve(elasticity, force);

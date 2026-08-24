@@ -13,6 +13,7 @@
 
 use crate::elasticity::DensityElasticity;
 use crate::filter::{DensityFilter, heaviside, heaviside_derivative};
+use crate::oc::assert_valid_oc_inputs;
 use crate::pipeline::SimpParams;
 
 /// The three-field design state at one evaluation.
@@ -44,6 +45,20 @@ impl RobustPipeline {
     #[must_use]
     pub fn three_fields(&self, rho: &[f64]) -> ThreeField {
         let p = &self.params;
+        p.assert_valid();
+        assert!(
+            self.eta_offset.is_finite() && self.eta_offset >= 0.0,
+            "robust threshold offset must be finite and nonnegative"
+        );
+        assert!(
+            p.eta - self.eta_offset >= 0.0 && p.eta + self.eta_offset <= 1.0,
+            "robust eroded and dilated thresholds must lie in [0, 1]"
+        );
+        assert!(
+            rho.iter()
+                .all(|value| value.is_finite() && (0.0..=1.0).contains(value)),
+            "raw design densities must be finite and lie in [0, 1]"
+        );
         let rho_tilde = self.filter.apply(rho);
         let project = |eta: f64| -> Vec<f64> {
             rho_tilde
@@ -62,6 +77,7 @@ impl RobustPipeline {
     /// SIMP moduli from a projected field.
     fn moduli(&self, rho_bar: &[f64]) -> Vec<f64> {
         let p = &self.params;
+        p.assert_valid();
         rho_bar
             .iter()
             .map(|&r| {
@@ -80,6 +96,20 @@ impl RobustPipeline {
         rho: &[f64],
         force: &[f64],
     ) -> (f64, Vec<f64>) {
+        assert_eq!(
+            elasticity.cells(),
+            rho.len(),
+            "elasticity and design must have the same cell count"
+        );
+        assert_eq!(
+            force.len(),
+            elasticity.n(),
+            "force must contain one finite value per elasticity dof"
+        );
+        assert!(
+            force.iter().all(|value| value.is_finite()),
+            "force must contain only finite values"
+        );
         let p = &self.params;
         let eta_e = p.eta + self.eta_offset;
         let tf = self.three_fields(rho);
@@ -142,6 +172,7 @@ pub fn robust_optimality_criteria(
     move_limit: f64,
     iters: usize,
 ) -> RobustReport {
+    assert_valid_oc_inputs(elasticity, force, rho0, cell_vol, vol_frac, move_limit);
     let nc = rho0.len();
     let mut rho = rho0.to_vec();
     let mut trace = Vec::with_capacity(iters);

@@ -164,6 +164,149 @@ fn filter_and_projection_inputs_fail_closed() {
 }
 
 #[test]
+fn pipeline_and_oc_inputs_fail_closed() {
+    use fs_topopt::{RobustPipeline, robust_optimality_criteria};
+
+    let (complex, positions, force, cell_vol) = cantilever(1);
+    let nc = complex.tets.len();
+    let rho = vec![0.4; nc];
+    let valid = SimpParams::default();
+    let mut pipeline = DesignPipeline {
+        filter: DensityFilter::new(&complex, &positions, 0.15),
+        params: valid,
+    };
+
+    for params in [
+        SimpParams {
+            e_min: 0.0,
+            ..valid
+        },
+        SimpParams {
+            e_min: f64::NAN,
+            ..valid
+        },
+        SimpParams {
+            e_min: 1.01,
+            ..valid
+        },
+        SimpParams {
+            penal: 0.5,
+            ..valid
+        },
+        SimpParams {
+            penal: f64::INFINITY,
+            ..valid
+        },
+    ] {
+        pipeline.params = params;
+        assert!(
+            std::panic::catch_unwind(|| pipeline.forward(&rho)).is_err(),
+            "invalid SIMP parameters must refuse before filtering"
+        );
+    }
+    pipeline.params = valid;
+
+    for invalid_density in [-f64::EPSILON, 1.0 + f64::EPSILON, f64::NAN] {
+        let mut malformed = rho.clone();
+        malformed[0] = invalid_density;
+        assert!(std::panic::catch_unwind(|| pipeline.forward(&malformed)).is_err());
+    }
+
+    let (rho_tilde, _, _) = pipeline.forward(&rho);
+    assert!(
+        std::panic::catch_unwind(|| pipeline.pullback(&rho_tilde, &vec![0.0; nc + 1])).is_err(),
+        "an extra physics sensitivity must not be silently truncated"
+    );
+    assert!(
+        std::panic::catch_unwind(|| pipeline.pullback(&rho_tilde, &vec![f64::NAN; nc])).is_err()
+    );
+
+    let mut elasticity = DensityElasticity::new(&complex, &positions, 1.0, 0.3, &|p: [f64; 3]| {
+        p[0].to_bits() == 0.0f64.to_bits()
+    });
+    let original_moduli = elasticity.moduli.clone();
+    let mut malformed_force = force.clone();
+    malformed_force.push(0.0);
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            pipeline.compliance_and_gradient(&mut elasticity, &rho, &malformed_force)
+        }))
+        .is_err()
+    );
+    assert_eq!(elasticity.moduli, original_moduli);
+
+    let mut extra_volume = cell_vol.clone();
+    extra_volume.push(cell_vol[0]);
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            optimality_criteria(
+                &pipeline,
+                &mut elasticity,
+                &force,
+                &rho,
+                &extra_volume,
+                0.4,
+                0.2,
+                0,
+            )
+        }))
+        .is_err(),
+        "an extra cell volume must not be silently included in the denominator"
+    );
+    for (vol_frac, move_limit) in [
+        (0.0, 0.2),
+        (f64::NAN, 0.2),
+        (1.0 + f64::EPSILON, 0.2),
+        (0.4, 0.0),
+        (0.4, f64::INFINITY),
+        (0.4, 1.0 + f64::EPSILON),
+    ] {
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                optimality_criteria(
+                    &pipeline,
+                    &mut elasticity,
+                    &force,
+                    &rho,
+                    &cell_vol,
+                    vol_frac,
+                    move_limit,
+                    0,
+                )
+            }))
+            .is_err()
+        );
+    }
+
+    let mut robust = RobustPipeline {
+        filter: DensityFilter::new(&complex, &positions, 0.15),
+        params: valid,
+        eta_offset: 0.1,
+    };
+    for eta_offset in [-0.1, f64::NAN, 0.51] {
+        robust.eta_offset = eta_offset;
+        assert!(std::panic::catch_unwind(|| robust.three_fields(&rho)).is_err());
+    }
+    robust.eta_offset = 0.1;
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            robust_optimality_criteria(
+                &robust,
+                &mut elasticity,
+                &force,
+                &rho,
+                &extra_volume,
+                0.4,
+                0.2,
+                0,
+            )
+        }))
+        .is_err()
+    );
+    assert_eq!(elasticity.moduli, original_moduli);
+}
+
+#[test]
 fn full_chain_sensitivity_at_continuation_stages() {
     // The acceptance gate: dc/dρ through SIMP ∘ projection ∘ filter ∘
     // solve, FD-verified at MULTIPLE continuation stages (early,
