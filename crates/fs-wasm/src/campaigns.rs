@@ -1167,17 +1167,11 @@ pub const NEUROSHAPE_SCHEMA_VERSION: u32 = 4;
 /// Length of the NeuroShape header preceding the SDF field.
 const NEUROSHAPE_HEADER_LEN: usize = 48;
 
-// Detailed localization slots. Status `[26]` selects the interpretation:
-// ordinary refusals use StageDetail; Cancelled uses CancellationDetail.
-const LOCALIZATION_DETAIL_CODE_SLOT: usize = 29;
-const LOCALIZATION_AXIS_OR_PHASE_SLOT: usize = 30;
-const LOCALIZATION_CONTEXT_0_SLOT: usize = 31; // u128: first index / deadline
-const LOCALIZATION_CONTEXT_1_SLOT: usize = 35; // u128: second index / observed
-const LOCALIZATION_CONTEXT_2_SLOT: usize = 39; // u64: scalar bits / quota A
-const LOCALIZATION_CONTEXT_3_SLOT: usize = 41; // u64: second bits / quota B
-const LOCALIZATION_CONTEXT_4_SLOT: usize = 43; // u64: required / quota C
-const LOCALIZATION_CONTEXT_5_SLOT: usize = 45; // u64: limit / undefined
-const LOCALIZATION_AUX_SLOT: usize = 47;
+// Detailed localization slots `[29..48)`. Status `[26]` selects the
+// interpretation: ordinary refusals use StageDetail; Cancelled uses
+// CancellationDetail.
+const LOCALIZATION_DETAIL_START: usize = 29;
+const LOCALIZATION_DETAIL_LEN: usize = 19;
 
 // Wire codes for `fs_rep_neural::SafeStepStatus` in slot `[24]`. `0` is the
 // no-claim code, matching `COMPONENT_EVIDENCE_UNKNOWN`'s convention.
@@ -1240,16 +1234,18 @@ fn localization_stage_code(localization: &SurfaceLocalization) -> f64 {
 /// Write a `u64` as two exact high-to-low `u32` lanes. Every lane is exactly
 /// representable in binary64 and survives the JSON numeric boundary.
 fn write_u64_lanes(target: &mut [f64], offset: usize, value: u64) {
-    target[offset] = f64::from((value >> 32) as u32);
-    target[offset + 1] = f64::from(value as u32);
+    let [a, b, c, d, e, f, g, h] = value.to_be_bytes();
+    target[offset] = f64::from(u32::from_be_bytes([a, b, c, d]));
+    target[offset + 1] = f64::from(u32::from_be_bytes([e, f, g, h]));
 }
 
 /// Write a `u128` as four exact high-to-low `u32` lanes.
 fn write_u128_lanes(target: &mut [f64], offset: usize, value: u128) {
-    target[offset] = f64::from((value >> 96) as u32);
-    target[offset + 1] = f64::from((value >> 64) as u32);
-    target[offset + 2] = f64::from((value >> 32) as u32);
-    target[offset + 3] = f64::from(value as u32);
+    let [a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p] = value.to_be_bytes();
+    target[offset] = f64::from(u32::from_be_bytes([a, b, c, d]));
+    target[offset + 1] = f64::from(u32::from_be_bytes([e, f, g, h]));
+    target[offset + 2] = f64::from(u32::from_be_bytes([i, j, k, l]));
+    target[offset + 3] = f64::from(u32::from_be_bytes([m, n, o, p]));
 }
 
 fn encode_stage_detail(words: &mut [f64], detail: &StageDetail) {
@@ -1276,8 +1272,10 @@ fn encode_cancellation_detail(words: &mut [f64], detail: &CancellationDetail) {
 
 /// Fixed-width, lossless wire detail. `u32::MAX` in an unused lane is the
 /// native undefined sentinel split into its exact lane representation.
-fn localization_detail_words(localization: &SurfaceLocalization) -> [f64; 19] {
-    let mut words = [f64::from(u32::MAX); 19];
+fn localization_detail_words(
+    localization: &SurfaceLocalization,
+) -> [f64; LOCALIZATION_DETAIL_LEN] {
+    let mut words = [f64::from(u32::MAX); LOCALIZATION_DETAIL_LEN];
     match localization {
         SurfaceLocalization::Localized { .. } | SurfaceLocalization::ValidEmpty => {
             words[0] = 0.0;
@@ -1487,8 +1485,10 @@ fn neuroshape_payload(
         localization_status_code(&report.surface_localization),
         localization_stage_code(&report.surface_localization),
         f64::from(NEUROSHAPE_LOCALIZATION_SCHEMA_VERSION),
-        0.0,
     ]);
+    debug_assert_eq!(out.len(), LOCALIZATION_DETAIL_START);
+    out.extend_from_slice(&localization_detail_words(&report.surface_localization));
+    debug_assert_eq!(out.len(), NEUROSHAPE_HEADER_LEN);
     for j in 0..grid_n {
         for i in 0..grid_n {
             out.push(fon(field.at(i, j)));
@@ -2030,12 +2030,22 @@ pub fn flowcert(steps: usize, tol: f64) -> Vec<f64> {
 mod tests {
     use super::*;
     use fs_grammar_e2e::SimplificationCheckStatus;
+    use fs_neuroshape_e2e::{
+        CancellationKind, LocalizationCancellationPhase, LocalizationDiagnostic,
+    };
+
+    fn is_u32_lane(value: f64) -> bool {
+        value.is_finite()
+            && value >= 0.0
+            && value <= f64::from(u32::MAX)
+            && value.fract() == 0.0
+    }
 
     /// A decoder-shaped reader: refuse an unrecognized payload version before
     /// reading any slot, exactly as a browser consumer must.
     fn require_supported_neuroshape_schema(encoded: &[f64]) -> Result<(), &'static str> {
         if encoded.len() < NEUROSHAPE_HEADER_LEN {
-            return Err("NeuroShape payload is shorter than its 30-value header");
+            return Err("NeuroShape payload is shorter than its 48-value header");
         }
         let version = encoded[22];
         if version.to_bits() != f64::from(NEUROSHAPE_SCHEMA_VERSION).to_bits() {
@@ -2060,6 +2070,35 @@ mod tests {
             || stage.fract() != 0.0
         {
             return Err("unknown NeuroShape surface-localization stage code");
+        }
+        if encoded[LOCALIZATION_DETAIL_START..NEUROSHAPE_HEADER_LEN]
+            .iter()
+            .any(|value| !is_u32_lane(*value))
+        {
+            return Err("NeuroShape localization detail contains a malformed u32 lane");
+        }
+        let detail_code = encoded[LOCALIZATION_DETAIL_START];
+        let axis_or_phase = encoded[LOCALIZATION_DETAIL_START + 1];
+        if status == LOCALIZATION_STATUS_LOCALIZED || status == LOCALIZATION_STATUS_VALID_EMPTY {
+            if stage != LOCALIZATION_STAGE_NONE || detail_code != 0.0 || axis_or_phase != 0.0 {
+                return Err("successful NeuroShape localization carries refusal detail");
+            }
+        } else if status == LOCALIZATION_STATUS_CANCELLED {
+            if stage != LOCALIZATION_STAGE_ISOCONTOUR_EXTRACTION
+                || !(f64::from(CancellationKind::CancelledAtCheckpoint.code())
+                    ..=f64::from(CancellationKind::CostQuotaExhausted.code()))
+                    .contains(&detail_code)
+                || !(0.0..=f64::from(LocalizationCancellationPhase::Unknown.code()))
+                    .contains(&axis_or_phase)
+            {
+                return Err("NeuroShape cancellation detail has an unknown code");
+            }
+        } else if stage == LOCALIZATION_STAGE_NONE
+            || !(f64::from(LocalizationDiagnostic::GridInvalidDimensions.code())
+                ..=f64::from(LocalizationDiagnostic::IsoNonFiniteGeometry.code()))
+                .contains(&detail_code)
+        {
+            return Err("NeuroShape stage detail has an unknown code");
         }
         Ok(())
     }
@@ -2286,7 +2325,8 @@ mod tests {
             f64::from(NEUROSHAPE_LOCALIZATION_SCHEMA_VERSION),
             "localization schema version"
         );
-        assert_eq!(v[29], 0.0, "reserved header slot");
+        assert_eq!(v[29], 0.0, "successful localization has no detail code");
+        assert_eq!(v[30], 0.0, "successful localization has no axis/phase code");
         assert!(
             v[15] > 0.0 && !v[6].is_nan(),
             "derived crossing views stay populated"
@@ -2515,6 +2555,36 @@ mod tests {
             assert_eq!(v[26], *status, "case {case_index} status code");
             assert_eq!(v[27], *stage, "case {case_index} stage code");
             assert_eq!(v[28], f64::from(NEUROSHAPE_LOCALIZATION_SCHEMA_VERSION));
+            match localization {
+                SurfaceLocalization::Localized { .. } | SurfaceLocalization::ValidEmpty => {
+                    assert_eq!(v[29], 0.0, "case {case_index} has no refusal code");
+                    assert_eq!(v[30], 0.0, "case {case_index} has no axis/phase");
+                }
+                SurfaceLocalization::InvalidInput(detail)
+                | SurfaceLocalization::Unrepresentable(detail)
+                | SurfaceLocalization::ResourceRefused(detail)
+                | SurfaceLocalization::AllocationRefused(detail)
+                | SurfaceLocalization::InternalFault(detail) => {
+                    assert_eq!(
+                        v[29],
+                        f64::from(detail.diagnostic.code()),
+                        "case {case_index} diagnostic code"
+                    );
+                    assert_eq!(v[30], f64::from(detail.axis), "case {case_index} axis");
+                }
+                SurfaceLocalization::Cancelled(detail) => {
+                    assert_eq!(
+                        v[29],
+                        f64::from(detail.kind.code()),
+                        "case {case_index} cancellation kind"
+                    );
+                    assert_eq!(
+                        v[30],
+                        f64::from(detail.phase_code().code()),
+                        "case {case_index} cancellation phase"
+                    );
+                }
+            }
             // Derived legacy views agree bit-for-bit with the authoritative
             // record: `[15]` count, `[6]` nearest radius, `[7]` max radius.
             let (crossings_view, nearest_view, max_view) = match localization {
@@ -2540,6 +2610,73 @@ mod tests {
                 "case {case_index} nearest view"
             );
             assert_eq!(v[7].to_bits(), max_view, "case {case_index} max view");
+        }
+
+        // Wide indices and every fixed-width context field survive the f64 ABI
+        // as exact u32 lanes; direct numeric casts would collide above 2^53.
+        let mut detail = StageDetail::new(
+            LocalizationStage::IsoContourExtraction,
+            LocalizationDiagnostic::IsoUnrepresentableIntersection,
+        );
+        detail.axis = 1;
+        detail.first_index = 0x0123_4567_89ab_cdef_fedc_ba98_7654_3210;
+        detail.second_index = 0xffff_ffff_0000_0001_8000_0000_0000_0002;
+        detail.scalar_bits = 0x7ff8_0000_0000_1234;
+        detail.second_bits = 0x3ff0_0000_0000_0001;
+        detail.required = u64::MAX - 1;
+        detail.limit = 0x0123_4567_89ab_cdef;
+        detail.aux = 13;
+        let detailed = encoded_with_localization(SurfaceLocalization::Unrepresentable(detail));
+        assert_eq!(require_supported_neuroshape_schema(&detailed), Ok(()));
+        assert_eq!(detailed[29], f64::from(detail.diagnostic.code()));
+        assert_eq!(detailed[30], 1.0);
+        let mut expected_u128 = [0.0; 4];
+        write_u128_lanes(&mut expected_u128, 0, detail.first_index);
+        assert_eq!(&detailed[31..35], &expected_u128);
+        write_u128_lanes(&mut expected_u128, 0, detail.second_index);
+        assert_eq!(&detailed[35..39], &expected_u128);
+        let mut expected_u64 = [0.0; 2];
+        write_u64_lanes(&mut expected_u64, 0, detail.scalar_bits);
+        assert_eq!(&detailed[39..41], &expected_u64);
+        write_u64_lanes(&mut expected_u64, 0, detail.second_bits);
+        assert_eq!(&detailed[41..43], &expected_u64);
+        write_u64_lanes(&mut expected_u64, 0, detail.required);
+        assert_eq!(&detailed[43..45], &expected_u64);
+        write_u64_lanes(&mut expected_u64, 0, detail.limit);
+        assert_eq!(&detailed[45..47], &expected_u64);
+        assert_eq!(detailed[47], 13.0);
+
+        let cancellation = CancellationDetail {
+            stage: LocalizationStage::IsoContourExtraction,
+            kind: CancellationKind::CostQuotaExhausted,
+            phase: "fs-viz.isocontour.identity-finalize",
+            deadline_ns: 11,
+            observed_ns: 12,
+            quota_context_a: 13,
+            quota_context_b: 14,
+            quota_context_c: u64::MAX,
+        };
+        let cancelled = encoded_with_localization(SurfaceLocalization::Cancelled(cancellation));
+        assert_eq!(require_supported_neuroshape_schema(&cancelled), Ok(()));
+        assert_eq!(cancelled[29], f64::from(cancellation.kind.code()));
+        assert_eq!(
+            cancelled[30],
+            f64::from(LocalizationCancellationPhase::IdentityFinalize.code())
+        );
+        for (range, value) in [
+            (31..35, u128::from(cancellation.deadline_ns)),
+            (35..39, u128::from(cancellation.observed_ns)),
+        ] {
+            write_u128_lanes(&mut expected_u128, 0, value);
+            assert_eq!(&cancelled[range], &expected_u128);
+        }
+        for (range, value) in [
+            (39..41, cancellation.quota_context_a),
+            (41..43, cancellation.quota_context_b),
+            (43..45, cancellation.quota_context_c),
+        ] {
+            write_u64_lanes(&mut expected_u64, 0, value);
+            assert_eq!(&cancelled[range], &expected_u64);
         }
     }
 
