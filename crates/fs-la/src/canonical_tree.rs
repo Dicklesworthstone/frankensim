@@ -607,7 +607,7 @@ mod tests {
             seen += 1;
             seen > 2
         };
-        let mut scope = CancelScope::from_closure(&mut gate);
+        let scope = CancelScope::from_closure(&mut gate);
         match driver.run(&a, scope, None).expect("runs") {
             TreeRun::Cancelled(cp, halt) => {
                 assert_eq!(cp.cursor_stage(), 2);
@@ -646,7 +646,7 @@ mod tests {
             seen += 1;
             seen > 3
         };
-        let mut scope = CancelScope::from_closure(&mut gate);
+        let scope = CancelScope::from_closure(&mut gate);
         let cancelled = driver.run(&a, scope, None).expect("runs");
         let (cp, _) = match cancelled {
             TreeRun::Cancelled(cp, halt) => {
@@ -672,7 +672,7 @@ mod tests {
             seen += 1;
             seen > 1
         };
-        let mut scope = CancelScope::from_closure(&mut gate);
+        let scope = CancelScope::from_closure(&mut gate);
         let cancelled = driver.run(&a, scope, None).expect("runs");
         let cp = match cancelled {
             TreeRun::Cancelled(cp, _) => cp,

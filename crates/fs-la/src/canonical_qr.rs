@@ -79,6 +79,10 @@ pub enum PolicyError {
     UncertifiedClaim,
     /// Identity versions are stale or cross-domain relative to this build.
     StaleIdentity { field: &'static str },
+    /// A cancellation scope fired at a stage boundary; the operation
+    /// drained and published nothing. Added by 6ys.5.1.5 for the tree-gauge
+    /// investigation surface.
+    CancellationPending,
 }
 
 impl fmt::Display for PolicyError {
@@ -104,6 +108,9 @@ impl fmt::Display for PolicyError {
                 "certified tier requires an independent checker receipt reference"
             ),
             Self::StaleIdentity { field } => write!(f, "stale/cross-domain identity: {field}"),
+            Self::CancellationPending => {
+                write!(f, "cancellation scope fired; drained without publication")
+            }
         }
     }
 }

@@ -62,6 +62,7 @@ pub mod crates;
 pub mod doctrine;
 pub mod evidence_contract;
 pub mod evidence_graph;
+pub mod horizon_splitting;
 pub mod lanes;
 pub mod moonshots;
 /// Program metrics dashboard: outcome metrics as one deterministic artifact.

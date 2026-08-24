@@ -10,6 +10,7 @@ pub mod batched_f32;
 pub mod canonical_qr;
 pub mod canonical_check;
 pub mod canonical_tree;
+pub mod canonical_tree_gauge;
 pub mod eigen;
 pub mod eigen_complex;
 pub mod factor;
