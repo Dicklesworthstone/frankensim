@@ -238,20 +238,19 @@ pub fn build_finite_gap_response_curve(
 ) -> Result<FiniteGapResponseCurve, FiniteGapResponseCurveError> {
     validate_request(request)?;
     let mut nodes: Vec<FiniteGapResponseNode> = Vec::with_capacity(request.approach_nodes_m.len());
+    let mut contact_request = FiniteGapContactRequest {
+        grid: request.grid,
+        undeformed_gap_m: request.undeformed_gap_m.clone(),
+        approach_m: 0.0,
+        reduced_modulus_pa: request.reduced_modulus_pa,
+        maximum_active_set_iterations: request.maximum_active_set_iterations,
+        complementarity_tolerance_m: request.complementarity_tolerance_m,
+        boundary_clearance_cells: request.boundary_clearance_cells,
+    };
     for (node, &approach_m) in request.approach_nodes_m.iter().enumerate() {
-        let contact = solve_finite_gap_half_space(
-            &FiniteGapContactRequest {
-                grid: request.grid,
-                undeformed_gap_m: request.undeformed_gap_m.clone(),
-                approach_m,
-                reduced_modulus_pa: request.reduced_modulus_pa,
-                maximum_active_set_iterations: request.maximum_active_set_iterations,
-                complementarity_tolerance_m: request.complementarity_tolerance_m,
-                boundary_clearance_cells: request.boundary_clearance_cells,
-            },
-            cx,
-        )
-        .map_err(|source| FiniteGapResponseCurveError::Contact { node, source })?;
+        contact_request.approach_m = approach_m;
+        let contact = solve_finite_gap_half_space(&contact_request, cx)
+            .map_err(|source| FiniteGapResponseCurveError::Contact { node, source })?;
         if let Some(previous) = nodes.last() {
             // Do not hide even a rounding-scale negative stiffness by calling
             // it tolerance. The retained nodes themselves define the runtime
