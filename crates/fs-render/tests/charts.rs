@@ -2000,6 +2000,7 @@ fn sphere_mesh(subdiv: usize) -> TriMesh {
 
 #[test]
 fn rb_004a_bvh_build_is_deterministic_under_concurrent_construction() {
+    const BVH_DETERMINISM_FINGERPRINT_GOLDEN: u64 = 0xcf18_55d9_4642_e0fd;
     let source = sphere_mesh(3);
     let vertices = source.vertices.clone();
     let triangles = source.triangles.clone();
@@ -2241,7 +2242,6 @@ fn rb_004_mixed_scene_consistency_and_frame_invariance() {
 #[test]
 fn rb_005_ray_rate_ledger() {
     with_cx(|cx| {
-    const BVH_DETERMINISM_FINGERPRINT_GOLDEN: u64 = 0xcf18_55d9_4642_e0fd;
             // MEASURED, honestly labeled throughput on primary rays. The plan's
         // Mray/s TARGETS are release-build perf-CI
         // gates (fz2.4) — this ledgers the measurement discipline, not

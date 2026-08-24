@@ -11,6 +11,8 @@ use fs_scenario::rans_card::{
     RansCardDraft, RansModelCard, WallTreatment,
 };
 
+const LEGACY_AUTHORITY_EXCLUSION: &str = "NO unvalidated turbulence-model authority; discrepancy vs correlations is fidelity-graph edge data, never an upgrade.";
+
 fn canonical() -> RansCardDraft {
     RansCardDraft::launder_sharma_channel("electronics-cooling/e10-rans")
 }
@@ -110,6 +112,47 @@ fn embedded_list_delimiters_cannot_alias_distinct_items() {
 }
 
 #[test]
+fn legacy_internal_exclusion_delimiter_cannot_alias_two_items() {
+    let canonical_card = canonical().freeze().expect("canonical card admits");
+    let canonical_exclusions = canonical_card
+        .statement_manifest()
+        .into_iter()
+        .find(|(key, _)| key == "exclusions")
+        .map(|(_, value)| value)
+        .expect("canonical exclusions are bound into the manifest");
+
+    let mut split = canonical();
+    let legacy_index = split
+        .exclusions
+        .iter()
+        .position(|item| item == LEGACY_AUTHORITY_EXCLUSION)
+        .expect("canonical draft carries the legacy authority exclusion");
+    let (left, right) = LEGACY_AUTHORITY_EXCLUSION
+        .split_once(';')
+        .expect("legacy authority exclusion contains its historical delimiter");
+    let removed: Vec<_> = split
+        .exclusions
+        .splice(
+            legacy_index..=legacy_index,
+            [left.to_string(), right.to_string()],
+        )
+        .collect();
+    assert_eq!(removed, vec![LEGACY_AUTHORITY_EXCLUSION.to_string()]);
+    assert_eq!(
+        split.exclusions.join(";"),
+        canonical_exclusions,
+        "the legacy flat encoding demonstrates the collision precondition"
+    );
+    assert_eq!(
+        split.freeze().err(),
+        Some(AdmissionError::AmbiguousManifestList {
+            field: "exclusions",
+        }),
+        "the alternate two-item spelling must not mint the canonical binding"
+    );
+}
+
+#[test]
 fn every_caller_controlled_flattened_list_has_injective_admission() {
     assert_ambiguous_list("governing_terms", |draft| {
         draft.governing_terms.push(String::new());
@@ -122,6 +165,11 @@ fn every_caller_controlled_flattened_list_has_injective_admission() {
     });
     assert_ambiguous_list("exclusions", |draft| {
         draft.exclusions.push("claim-a;claim-b".to_string());
+    });
+    assert_ambiguous_list("governing_terms", move |draft| {
+        draft
+            .governing_terms
+            .push(LEGACY_AUTHORITY_EXCLUSION.to_string());
     });
 }
 

@@ -146,8 +146,8 @@ pub enum AdmissionError {
     /// A rendered statement contains the NUL byte used to delimit manifest
     /// hash fields and could therefore alias a different statement sequence.
     EmbeddedManifestDelimiter,
-    /// A list item is empty or contains the delimiter used by its flattened
-    /// manifest field, so distinct item sequences could render identically.
+    /// A list would not be injectively represented by its flattened manifest
+    /// field, so distinct item sequences could render identically.
     AmbiguousManifestList {
         /// Draft field whose item encoding is ambiguous.
         field: &'static str,
@@ -163,14 +163,13 @@ fn manifest_list_is_unambiguous(
     items: &[String],
     delimiter: u8,
     allow_one_trailing_delimiter: bool,
+    legacy_delimited_item: Option<&str>,
 ) -> bool {
-    const CANONICAL_EXCLUSION_2: &str =
-        "NO unvalidated turbulence-model authority; discrepancy vs correlations is fidelity-graph edge data, never an upgrade.";
-    items.iter().all(|item| {
+    let items_are_valid = items.iter().all(|item| {
         if item.is_empty() {
             return false;
         }
-        if item == CANONICAL_EXCLUSION_2 {
+        if legacy_delimited_item == Some(item.as_str()) {
             return true;
         }
         let delimiter_count = item
@@ -182,7 +181,24 @@ fn manifest_list_is_unambiguous(
             || (allow_one_trailing_delimiter
                 && delimiter_count == 1
                 && item.as_bytes().last() == Some(&delimiter))
-    })
+    });
+    if !items_are_valid {
+        return false;
+    }
+
+    let Some(legacy_item) = legacy_delimited_item else {
+        return true;
+    };
+    let delimiter = char::from(delimiter);
+    let Some((left, right)) = legacy_item.split_once(delimiter) else {
+        return false;
+    };
+    if right.contains(delimiter) {
+        return false;
+    }
+    !items
+        .windows(2)
+        .any(|pair| pair[0] == left && pair[1] == right)
 }
 
 /// Builder draft; every field public, admitted only at [`Self::freeze`].
@@ -398,21 +414,35 @@ impl RansCardDraft {
         }
         // Version 1 preserves list-valued fields as delimiter-joined strings.
         // Refuse elements that make that encoding non-injective. The canonical
-        // transition exclusion historically ends in `;`; one trailing delimiter
-        // is uniquely decodable when empty and internally-delimited items are
-        // refused, so it remains admissible without changing existing hashes.
-        for (field, items, delimiter, allow_one_trailing_delimiter) in [
-            ("governing_terms", &self.governing_terms, b',', false),
+        // transition exclusion historically ends in `;`; with empty items
+        // forbidden, one trailing delimiter is uniquely decodable. One other
+        // canonical exclusion contains an internal `;`; keep that exact legacy
+        // item atomic and reject its equivalent two-item split.
+        const LEGACY_AUTHORITY_EXCLUSION: &str = "NO unvalidated turbulence-model authority; discrepancy vs correlations is fidelity-graph edge data, never an upgrade.";
+        for (field, items, delimiter, allow_one_trailing_delimiter, legacy_item) in [
+            ("governing_terms", &self.governing_terms, b',', false, None),
             (
                 "validation_case_families",
                 &self.validation_case_families,
                 b',',
                 false,
+                None,
             ),
-            ("falsifiers", &self.falsifiers, b';', false),
-            ("exclusions", &self.exclusions, b';', true),
+            ("falsifiers", &self.falsifiers, b';', false, None),
+            (
+                "exclusions",
+                &self.exclusions,
+                b';',
+                true,
+                Some(LEGACY_AUTHORITY_EXCLUSION),
+            ),
         ] {
-            if !manifest_list_is_unambiguous(items, delimiter, allow_one_trailing_delimiter) {
+            if !manifest_list_is_unambiguous(
+                items,
+                delimiter,
+                allow_one_trailing_delimiter,
+                legacy_item,
+            ) {
                 return Err(AdmissionError::AmbiguousManifestList { field });
             }
         }
