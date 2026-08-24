@@ -404,7 +404,7 @@ pub fn extract_bore(
     let mut extra_end_slab_m = 0.0f64;
     for (index, (s_len, center, tangent, pole_r)) in sampled.iter().enumerate() {
         crate::query_checkpoint(cx)?;
-        let inside = chart.eval(*center, cx).signed_distance < 0.0;
+        let inside = checked_bore_signed_distance(chart, *center, cx)? < 0.0;
         if !inside {
             return Err(BoreError::CenterOutsideLumen {
                 station: index,
@@ -429,7 +429,7 @@ pub fn extract_bore(
                     let step = 0.4 * *pole_r;
                     retreat += step;
                     center_now = center_now.offset(tangent.scale(inward * step));
-                    if chart.eval(center_now, cx).signed_distance >= 0.0 {
+                    if checked_bore_signed_distance(chart, center_now, cx)? >= 0.0 {
                         return Err(BoreError::CenterOutsideLumen {
                             station: index,
                             arc_length_m: *s_len,
@@ -594,6 +594,17 @@ fn validate_config(config: &BoreConfig) -> Result<(), BoreError> {
         });
     }
     Ok(())
+}
+
+/// Evaluate one bore sample through the crate-wide finite-value and
+/// producer-cancellation guard.  Bore geometry remains Estimate-authority,
+/// but malformed producer output and cancellation are never usable inputs.
+fn checked_bore_signed_distance(
+    chart: &dyn Chart,
+    point: Point3,
+    cx: &Cx<'_>,
+) -> Result<f64, QueryError> {
+    Ok(crate::checked_point_sample(chart, point, cx)?.signed_distance)
 }
 
 /// FNV-1a over the soup's position bits and triangle indices.
@@ -1008,7 +1019,7 @@ fn extend_to_boundary(
             continue;
         }
         let dir = dir.scale(1.0 / len);
-        if chart.eval(tip, cx).signed_distance >= 0.0 {
+        if checked_bore_signed_distance(chart, tip, cx)? >= 0.0 {
             continue; // tip already at/outside the boundary; nothing to add
         }
         // Expand to an outside bracket.
@@ -1017,7 +1028,7 @@ fn extend_to_boundary(
         let mut found = false;
         while hi <= cap {
             crate::query_checkpoint(cx)?;
-            if chart.eval(tip.offset(dir.scale(hi)), cx).signed_distance >= 0.0 {
+            if checked_bore_signed_distance(chart, tip.offset(dir.scale(hi)), cx)? >= 0.0 {
                 found = true;
                 break;
             }
@@ -1030,7 +1041,7 @@ fn extend_to_boundary(
         while hi - lo > config.root_tolerance_m {
             crate::query_checkpoint(cx)?;
             let mid = 0.5 * (lo + hi);
-            if chart.eval(tip.offset(dir.scale(mid)), cx).signed_distance < 0.0 {
+            if checked_bore_signed_distance(chart, tip.offset(dir.scale(mid)), cx)? < 0.0 {
                 lo = mid;
             } else {
                 hi = mid;
@@ -1154,7 +1165,7 @@ fn plane_section(
         let mut found = false;
         while hi <= cap {
             crate::query_checkpoint(cx)?;
-            if chart.eval(center.offset(dir.scale(hi)), cx).signed_distance >= 0.0 {
+            if checked_bore_signed_distance(chart, center.offset(dir.scale(hi)), cx)? >= 0.0 {
                 found = true;
                 break;
             }
@@ -1173,11 +1184,7 @@ fn plane_section(
         let mut lo = 0.0f64;
         while hi - lo > config.root_tolerance_m {
             let mid = 0.5 * (lo + hi);
-            if chart
-                .eval(center.offset(dir.scale(mid)), cx)
-                .signed_distance
-                < 0.0
-            {
+            if checked_bore_signed_distance(chart, center.offset(dir.scale(mid)), cx)? < 0.0 {
                 lo = mid;
             } else {
                 hi = mid;
@@ -1194,11 +1201,7 @@ fn plane_section(
             // an oblique chord exits in the domain interior.
             while hi - lo > config.root_tolerance_m / 64.0 {
                 let mid = 0.5 * (lo + hi);
-                if chart
-                    .eval(center.offset(dir.scale(mid)), cx)
-                    .signed_distance
-                    < 0.0
-                {
+                if checked_bore_signed_distance(chart, center.offset(dir.scale(mid)), cx)? < 0.0 {
                     lo = mid;
                 } else {
                     hi = mid;
@@ -1240,9 +1243,66 @@ fn axial_volume(stations: &[BoreStation], closed: bool) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fs_geom::fixtures::SphereChart;
+
+    struct CancellingBoreChart<'a> {
+        gate: &'a fs_exec::CancelGate,
+    }
+
+    impl Chart for CancellingBoreChart<'_> {
+        fn eval(&self, point: Point3, cx: &Cx<'_>) -> fs_geom::ChartSample {
+            let sample = SphereChart {
+                center: Point3::new(0.0, 0.0, 0.0),
+                radius: 1.0,
+            }
+            .eval(point, cx);
+            self.gate.request();
+            sample
+        }
+
+        fn support(&self) -> Aabb {
+            Aabb::new(
+                Point3::new(-1.0, -1.0, -1.0),
+                Point3::new(1.0, 1.0, 1.0),
+            )
+        }
+
+        fn trace_step_claim(&self) -> TraceStepClaim {
+            TraceStepClaim::ExactDistance
+        }
+
+        fn name(&self) -> &'static str {
+            "test/cancelling-bore"
+        }
+    }
 
     fn p(x: f64, y: f64, z: f64) -> (Point3, f64) {
         (Point3::new(x, y, z), 0.5)
+    }
+
+    #[test]
+    fn bore_sample_observes_producer_cancellation_before_use() {
+        let gate = fs_exec::CancelGate::new_clock_free();
+        let chart = CancellingBoreChart { gate: &gate };
+        let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+        pool.scope(|arena| {
+            let cx = Cx::new(
+                &gate,
+                arena,
+                fs_exec::StreamKey {
+                    seed: 0,
+                    kernel_id: 899,
+                    tile: 0,
+                    iteration: 0,
+                },
+                fs_exec::Budget::INFINITE,
+                fs_exec::ExecMode::Deterministic,
+            );
+            assert_eq!(
+                checked_bore_signed_distance(&chart, Point3::new(0.0, 0.0, 0.0), &cx),
+                Err(QueryError::Cancelled),
+            );
+        });
     }
 
     #[test]

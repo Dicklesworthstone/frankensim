@@ -143,12 +143,34 @@ impl FeatureComplex {
         positions: &[[f64; 3]],
         triangles: &[[u32; 3]],
     ) -> Result<FeatureComplex, QueryError> {
+        // Vertices and faces alone are a lower bound on the final feature
+        // count.  Refuse that bound before validating elements or reserving
+        // the three-edge-per-triangle scratch buffer; otherwise an oversized
+        // malformed input can consume work and memory before reaching the
+        // documented feature ceiling.
+        let minimum_features = positions
+            .len()
+            .checked_add(triangles.len())
+            .unwrap_or(usize::MAX);
+        if minimum_features > MAX_COMPLEX_FEATURES {
+            return Err(QueryError::FeatureComplexTooLarge {
+                features: minimum_features,
+                max: MAX_COMPLEX_FEATURES,
+            });
+        }
         for p in positions {
             if !(p[0].is_finite() && p[1].is_finite() && p[2].is_finite()) {
                 return Err(QueryError::InvalidPointSample { at: *p });
             }
         }
-        let mut edges: Vec<(u32, u32)> = Vec::with_capacity(triangles.len() * 3);
+        let edge_records = triangles
+            .len()
+            .checked_mul(3)
+            .ok_or(QueryError::FeatureComplexTooLarge {
+                features: usize::MAX,
+                max: MAX_COMPLEX_FEATURES,
+            })?;
+        let mut edges: Vec<(u32, u32)> = Vec::with_capacity(edge_records);
         for (triangle, tri) in triangles.iter().enumerate() {
             for (corner, &index) in tri.iter().enumerate() {
                 if index as usize >= positions.len() {
