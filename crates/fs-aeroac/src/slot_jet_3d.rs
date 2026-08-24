@@ -911,6 +911,8 @@ fn load_checkpoint(
     cfg: &SlotJet3dConfig,
     ckpt_path: &std::path::Path,
 ) -> Result<(Rig3, ChunkState), AeroacError> {
+    use std::io::Read as _;
+
     let length_overflow = || AeroacError::InvalidParameter {
         what: "checkpoint length overflow",
     };
@@ -931,7 +933,11 @@ fn load_checkpoint(
         .checked_add(max_force_bytes)
         .and_then(|length| length.checked_add(max_lattice_bytes))
         .ok_or_else(length_overflow)?;
-    let file_len = std::fs::metadata(ckpt_path)
+    let file = std::fs::File::open(ckpt_path).map_err(|_| AeroacError::InvalidParameter {
+        what: "cannot open checkpoint",
+    })?;
+    let file_len = file
+        .metadata()
         .map_err(|_| AeroacError::InvalidParameter {
             what: "cannot read checkpoint metadata",
         })?
@@ -943,9 +949,18 @@ fn load_checkpoint(
             what: "checkpoint exceeds configured size envelope",
         });
     }
-    let bytes = std::fs::read(ckpt_path).map_err(|_| AeroacError::InvalidParameter {
-        what: "cannot read checkpoint",
-    })?;
+    let initial_capacity = usize::try_from(file_len).map_err(|_| length_overflow())?;
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(initial_capacity)
+        .map_err(|_| AeroacError::InvalidParameter {
+            what: "checkpoint buffer allocation refused",
+        })?;
+    file.take(max_checkpoint_len_wire.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|_| AeroacError::InvalidParameter {
+            what: "cannot read checkpoint",
+        })?;
     if bytes.len() > max_checkpoint_len {
         return Err(AeroacError::InvalidParameter {
             what: "checkpoint exceeds configured size envelope",
