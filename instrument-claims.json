@@ -15,7 +15,7 @@
    ],
    "gate": "green",
    "live_default": "no",
-   "determinism": "one-host",
+   "determinism": "cross-isa",
    "evidence": [
     {
      "kind": "test",
@@ -117,7 +117,7 @@
    ],
    "gate": "green",
    "live_default": "no",
-   "determinism": "one-host",
+   "determinism": "cross-isa",
    "evidence": [
     {
      "kind": "test",
@@ -164,7 +164,7 @@
    ],
    "gate": "green",
    "live_default": "no",
-   "determinism": "one-host",
+   "determinism": "cross-isa",
    "evidence": [
     {
      "kind": "bakeoff",
@@ -203,7 +203,7 @@
    ],
    "gate": "green",
    "live_default": "no",
-   "determinism": "one-host",
+   "determinism": "cross-isa",
    "evidence": [
     {
      "kind": "bakeoff",
@@ -1058,7 +1058,7 @@
    ],
    "gate": "green",
    "live_default": "no",
-   "determinism": "one-host",
+   "determinism": "cross-isa",
    "evidence": [
     {
      "kind": "test",

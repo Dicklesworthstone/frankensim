@@ -68,6 +68,7 @@ fn modal_bank_ledger() -> u64 {
     let mut acc = FNV_OFFSET;
     for _ in 0..2_400 {
         let record = step(&bank, &x, &u, dt).expect("step");
+        for value in &record.x {
             acc = fold(acc, *value);
         }
         acc = fold(acc, record.delta_h);
@@ -89,13 +90,20 @@ fn phs_step_ledger_digest_is_cross_isa_golden() {
 
     let (duffing_digest, steps) = duffing_ledger();
     let bank_digest = modal_bank_ledger();
-    let acc = fold_u64(fold_u64(duffing_digest, bank_digest), u64::try_from(steps).expect("n"));
+    let acc = fold_u64(
+        fold_u64(duffing_digest, bank_digest),
+        u64::try_from(steps).expect("n"),
+    );
 
     println!(
         "{{\"suite\":\"fs-phs\",\"case\":\"cross-isa-step-ledger\",\"arch\":\"{}\",\
          \"profile\":\"{}\",\"digest\":\"{acc:#018x}\",\"verdict\":\"golden-check\"}}",
         std::env::consts::ARCH,
-        if cfg!(debug_assertions) { "debug" } else { "release" },
+        if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        },
     );
     assert_eq!(
         acc, GOLDEN_HASH,

@@ -100,7 +100,22 @@ const DETERMINISM_DEFAULT_CEILING: &str = "one-host";
 /// cap until bead 3ez8g.7.3 routes or re-declares it. Listing it explicitly
 /// (even while equal to the default) makes the cap survive any future
 /// default raise.
-const DETERMINISM_CEILINGS: [(&str, &str); 1] = [("fs-tribo", "one-host")];
+const DETERMINISM_CEILINGS: [(&str, &str); 6] = [
+    ("fs-tribo", "one-host"),
+    // Cross-ISA audit bead 3ez8g.13.4 (2026-08-23): matching digests on
+    // aarch64-apple and x86_64-linux in BOTH build modes from the committed
+    // tests/cross_isa_golden.rs per crate —
+    // fs-phs 0x798c84cbeb3c39b9 (step ledger: duffing + 3-mode modal bank),
+    // fs-vfit 0xd00d69e2b740e56b (vector fit -> bilinear -> filter steps),
+    // fs-modal 0x11dced94c7f67115 (certified spectral slice windows),
+    // fs-couple 0x432320b3c2bf06d9 (exact-ZOH modal render trajectory),
+    // fs-duct 0xd6e9724c5414cf8d (TMM impedance sweep + peak finder).
+    ("fs-duct", "cross-isa"),
+    ("fs-vfit", "cross-isa"),
+    ("fs-phs", "cross-isa"),
+    ("fs-modal", "cross-isa"),
+    ("fs-couple", "cross-isa"),
+];
 
 /// Ladder position; `None` for the orthogonal declarations.
 fn determinism_strength(class: &str) -> Option<u8> {

@@ -111,7 +111,11 @@ fn tmm_sweep_digest_is_cross_isa_golden() {
         "{{\"suite\":\"fs-duct\",\"case\":\"cross-isa-tmm\",\"arch\":\"{}\",\"profile\":\"{}\",\
          \"digest\":\"{acc:#018x}\",\"verdict\":\"golden-check\"}}",
         std::env::consts::ARCH,
-        if cfg!(debug_assertions) { "debug" } else { "release" },
+        if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        },
     );
     assert_eq!(
         acc, GOLDEN_HASH,

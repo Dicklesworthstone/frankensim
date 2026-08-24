@@ -92,7 +92,10 @@ fn fit_and_filter_step_digest_is_cross_isa_golden() {
     }
     acc = fold(acc, outcome.report.weighted_rms);
     acc = fold(acc, outcome.report.max_abs_error);
-    acc = fold_u64(acc, u64::try_from(outcome.report.iterations_run).expect("iters"));
+    acc = fold_u64(
+        acc,
+        u64::try_from(outcome.report.iterations_run).expect("iters"),
+    );
 
     // Stage 2: Tustin discretize with prewarp at the top resonance.
     let t_s = 1.0 / 48_000.0;
@@ -110,7 +113,11 @@ fn fit_and_filter_step_digest_is_cross_isa_golden() {
         "{{\"suite\":\"fs-vfit\",\"case\":\"cross-isa-fit-filter\",\"arch\":\"{}\",\
          \"profile\":\"{}\",\"digest\":\"{acc:#018x}\",\"verdict\":\"golden-check\"}}",
         std::env::consts::ARCH,
-        if cfg!(debug_assertions) { "debug" } else { "release" },
+        if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        },
     );
     assert_eq!(
         acc, GOLDEN_HASH,

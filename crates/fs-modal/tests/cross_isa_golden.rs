@@ -77,7 +77,11 @@ const W2_EXPECTED: usize = 8;
 
 fn window_digest(k: &Csr, m: &Csr, lo: f64, hi: f64, expected: usize) -> u64 {
     let rep = slice_window(k, m, (lo, hi), &SliceOptions::default()).expect("slice");
-    assert_eq!(rep.modes.len(), expected, "inertia count must equal the frozen count");
+    assert_eq!(
+        rep.modes.len(),
+        expected,
+        "inertia count must equal the frozen count"
+    );
     let mut acc = fold_u64(FNV_OFFSET, u64::try_from(expected).expect("count"));
     for mode in &rep.modes {
         acc = fold(acc, mode.interval.0);
@@ -96,15 +100,31 @@ fn modal_slice_digest_is_cross_isa_golden() {
     let s = 49;
     let k = laplacian_2d(s);
     let m = identity(s * s);
-    let d1 = window_digest(&k, &m, f64::from_bits(W1_LO_BITS), f64::from_bits(W1_HI_BITS), W1_EXPECTED);
-    let d2 = window_digest(&k, &m, f64::from_bits(W2_LO_BITS), f64::from_bits(W2_HI_BITS), W2_EXPECTED);
+    let d1 = window_digest(
+        &k,
+        &m,
+        f64::from_bits(W1_LO_BITS),
+        f64::from_bits(W1_HI_BITS),
+        W1_EXPECTED,
+    );
+    let d2 = window_digest(
+        &k,
+        &m,
+        f64::from_bits(W2_LO_BITS),
+        f64::from_bits(W2_HI_BITS),
+        W2_EXPECTED,
+    );
     let acc = fold_u64(d1, d2);
 
     println!(
         "{{\"suite\":\"fs-modal\",\"case\":\"cross-isa-slice\",\"arch\":\"{}\",\
          \"profile\":\"{}\",\"digest\":\"{acc:#018x}\",\"verdict\":\"golden-check\"}}",
         std::env::consts::ARCH,
-        if cfg!(debug_assertions) { "debug" } else { "release" },
+        if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        },
     );
     assert_eq!(
         acc, GOLDEN_HASH,

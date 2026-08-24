@@ -40,9 +40,8 @@ const GOLDEN_HASH: u64 = 0x4323_20b3_c2bf_06d9;
 #[test]
 fn exact_zoh_render_trajectory_is_cross_isa_golden() {
     let wave_speed = (TENSION_N / LIN_DENSITY_KG_M).sqrt();
-    let omegas: [f64; MODES] = core::array::from_fn(|k| {
-        (k + 1) as f64 * core::f64::consts::PI * wave_speed / LENGTH_M
-    });
+    let omegas: [f64; MODES] =
+        core::array::from_fn(|k| (k + 1) as f64 * core::f64::consts::PI * wave_speed / LENGTH_M);
     let modes = omegas
         .iter()
         .zip(ZETAS)
@@ -82,7 +81,11 @@ fn exact_zoh_render_trajectory_is_cross_isa_golden() {
         "{{\"suite\":\"fs-couple\",\"case\":\"cross-isa-zoh-render\",\"arch\":\"{}\",\
          \"profile\":\"{}\",\"digest\":\"{acc:#018x}\",\"verdict\":\"golden-check\"}}",
         std::env::consts::ARCH,
-        if cfg!(debug_assertions) { "debug" } else { "release" },
+        if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        },
     );
     assert_eq!(
         acc, GOLDEN_HASH,

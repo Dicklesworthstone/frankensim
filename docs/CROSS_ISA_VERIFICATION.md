@@ -155,3 +155,43 @@ at the *gate*, not the instances. The pre-commit cross-check (`ebro`) closed the
 compile-class gap. Runtime-class gaps (page-size, storage, perf) still need a
 Threadripper lane — if that recurs, propose wiring it into the nightly/DSR flow
 rather than re-catching it by hand.
+
+---
+
+## 7. Music-stack kernel goldens (bead `3ez8g.13.4`, 2026-08-23)
+
+Five deterministic music kernels now carry committed cross-ISA goldens as
+`tests/cross_isa_golden.rs` in their owning crate (same pattern as the
+`fs-la` rand-NLA sentinel): an FNV-1a fold over exact f64 bit patterns of a
+pinned fixture, asserted against a `const GOLDEN_HASH`. Verified
+bit-identical aarch64-apple ⇄ x86_64-linux in BOTH build modes:
+
+| crate | pinned pipeline | digest |
+|---|---|---|
+| fs-phs | Gonzalez step ledger: Duffing + 3-mode modal bank | `0x798c84cbeb3c39b9` |
+| fs-vfit | vector_fit → Tustin bilinear → DF-II filter steps | `0xd00d69e2b740e56b` |
+| fs-modal | certified spectral slice over frozen windows | `0x11dced94c7f67115` |
+| fs-couple | exact-ZOH modal render trajectory (3-mode pluck) | `0x432320b3c2bf06d9` |
+| fs-duct | TMM impedance sweep + peak finder, two fingerings | `0xd6e9724c5414cf8d` |
+
+Re-run after any det-relevant change (both legs, both modes):
+
+```bash
+# arm64 leg (local; RCH_CARGO_WRAPPER_BYPASS=1 is the shim's own
+# local-exec escape — used ONLY for these bounded native runs):
+RCH_CARGO_WRAPPER_BYPASS=1 cargo test [-p CRATE ...] --test cross_isa_golden [--release]
+
+# x86-64 leg (fleet via the cargo shim; no bypass):
+cargo test [-p CRATE ...] --test cross_isa_golden [--release]
+```
+
+A digest change is a golden event under `docs/GOLDEN_POLICY.md`: bisect
+stage-wise, name the hazard, route it through `fs_math::det` in the SAME
+commit that re-pins. Known remaining one-host caps inside otherwise-golden
+crates (NOT covered by the fixtures above, do not promote their rows):
+`fs-phs/src/device.rs` valve island (`powf`/`sinh`/`cosh`/`ln`),
+`fs-duct/src/modal.rs` mm-TDD magnitudes (`.ln()`), `fs-couple/src/air_path.rs`
+(`.sin()`), and the standing fs-tribo `hypot` cap. Registry coupling: the
+per-crate determinism ceilings live in `xtask/src/instrument_claims.rs`
+(`DETERMINISM_CEILINGS`) and row promotions in `instrument-claims.json`; a
+ceiling raise and its golden must land in one commit.
