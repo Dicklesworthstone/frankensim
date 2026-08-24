@@ -9,6 +9,7 @@
 //!   turns a contact verdict into a clear one, and the bracket only
 //!   moves down.
 //! - gd-004 G0: thickness/distance refusals fail closed typed.
+//!
 //! Aggregate outcomes use canonical fs-obs events; the convex-composition
 //! case carries its execution seed and deterministic cases use zero.
 

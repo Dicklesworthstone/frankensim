@@ -11,6 +11,7 @@
 //! - gg-003 G0/G4: capability refusal at construction, malformed
 //!   evidence refusal per sample, non-finite points, cancellation.
 //! - gg-004 G0: honestly absent gradients yield no normal claim.
+//!
 //! Aggregate outcomes use canonical fs-obs events and carry the shared
 //! deterministic execution seed.
 

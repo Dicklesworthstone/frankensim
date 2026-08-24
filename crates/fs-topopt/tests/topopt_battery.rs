@@ -121,6 +121,42 @@ fn projection_g0_laws() {
 }
 
 #[test]
+fn filter_and_projection_inputs_fail_closed() {
+    let (complex, positions) = kuhn_cube(1);
+    for radius in [-1.0, f64::NAN, f64::MAX] {
+        assert!(
+            std::panic::catch_unwind(|| DensityFilter::new(&complex, &positions, radius)).is_err(),
+            "invalid radius {radius:?} must refuse before assembly"
+        );
+    }
+
+    let filter = DensityFilter::new(&complex, &positions, 0.15);
+    let cell_count = complex.tets.len();
+    assert!(std::panic::catch_unwind(|| filter.apply(&[])).is_err());
+    assert!(
+        std::panic::catch_unwind(|| filter.apply(&vec![f64::NAN; cell_count])).is_err()
+    );
+    assert!(std::panic::catch_unwind(|| filter.apply_transpose(&[])).is_err());
+    assert!(
+        std::panic::catch_unwind(|| filter.apply_transpose(&vec![f64::INFINITY; cell_count]))
+            .is_err()
+    );
+
+    let rho = 0.37;
+    for beta in [0.0, f64::MIN_POSITIVE] {
+        assert_eq!(heaviside(rho, beta, 0.5).to_bits(), rho.to_bits());
+        assert_eq!(
+            heaviside_derivative(rho, beta, 0.5).to_bits(),
+            1.0f64.to_bits()
+        );
+    }
+    assert!(std::panic::catch_unwind(|| heaviside(f64::NAN, 1.0, 0.5)).is_err());
+    assert!(std::panic::catch_unwind(|| heaviside(0.5, -1.0, 0.5)).is_err());
+    assert!(std::panic::catch_unwind(|| heaviside(0.5, 1.0, -0.1)).is_err());
+    assert!(std::panic::catch_unwind(|| heaviside_derivative(0.5, 1.0, 1.1)).is_err());
+}
+
+#[test]
 fn full_chain_sensitivity_at_continuation_stages() {
     // The acceptance gate: dc/dρ through SIMP ∘ projection ∘ filter ∘
     // solve, FD-verified at MULTIPLE continuation stages (early,

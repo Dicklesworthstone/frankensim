@@ -10,6 +10,7 @@
 //! - gc-004 G5: identical inputs replay bit-identical enclosures.
 //! - gc-005 G0/G4: constructor refusals, zero budget, and cancellation
 //!   all fail closed with the named typed error.
+//!
 //! Aggregate outcomes use canonical fs-obs events and carry the shared
 //! deterministic execution seed.
 

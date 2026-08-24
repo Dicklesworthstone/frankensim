@@ -428,11 +428,8 @@ fn gb_006_cancellation_fails_closed() {
             ExecMode::Deterministic,
         );
         let tube = cylinder_tube(0.5, 1.5);
-        let (soup, _) = match dual_contour(&tube, DcOptions::sharp(0.1), &cx) {
-            Ok(pair) => pair,
-            // The contouring itself may already observe the cancellation;
-            // that is the same fail-closed outcome.
-            Err(_) => return Err(BoreError::Query(QueryError::Cancelled)),
+        let Ok((soup, _)) = dual_contour(&tube, DcOptions::sharp(0.1), &cx) else {
+            return Err(BoreError::Query(QueryError::Cancelled));
         };
         extract_bore(&tube, &soup, &BoreConfig::default(), "test/cancel/v1", &cx)
     });
@@ -447,21 +444,23 @@ fn gb_006_cancellation_fails_closed() {
 /// Author a watertight OBJ cylinder (rings + caps); `capped: false` drops
 /// the top cap to make the non-watertight arm.
 fn obj_cylinder(radius: f64, length: f64, segments: usize, rings: usize, capped: bool) -> String {
+    use std::fmt::Write as _;
     let mut obj = String::new();
     for ring in 0..=rings {
         let z = length * ring as f64 / rings as f64;
         for k in 0..segments {
             let th = std::f64::consts::TAU * k as f64 / segments as f64;
-            obj.push_str(&format!(
-                "v {:.9} {:.9} {:.9}\n",
+            let _ = writeln!(
+                obj,
+                "v {:.9} {:.9} {:.9}",
                 radius * th.cos(),
                 radius * th.sin(),
                 z
-            ));
+            );
         }
     }
     // Cap centers (bottom, top).
-    obj.push_str(&format!("v 0 0 0\nv 0 0 {length:.9}\n"));
+    let _ = writeln!(obj, "v 0 0 0\nv 0 0 {length:.9}");
     let idx = |ring: usize, k: usize| ring * segments + (k % segments) + 1;
     for ring in 0..rings {
         for k in 0..segments {
@@ -469,25 +468,27 @@ fn obj_cylinder(radius: f64, length: f64, segments: usize, rings: usize, capped:
             let b = idx(ring, k + 1);
             let c = idx(ring + 1, k + 1);
             let d = idx(ring + 1, k);
-            obj.push_str(&format!("f {a} {b} {c}\nf {a} {c} {d}\n"));
+            let _ = writeln!(obj, "f {a} {b} {c}\nf {a} {c} {d}");
         }
     }
     let bottom_center = (rings + 1) * segments + 1;
     let top_center = bottom_center + 1;
     for k in 0..segments {
-        obj.push_str(&format!(
-            "f {} {} {}\n",
+        let _ = writeln!(
+            obj,
+            "f {} {} {}",
             bottom_center,
             idx(0, k + 1),
             idx(0, k)
-        ));
+        );
         if capped {
-            obj.push_str(&format!(
-                "f {} {} {}\n",
+            let _ = writeln!(
+                obj,
+                "f {} {} {}",
                 top_center,
                 idx(rings, k),
                 idx(rings, k + 1)
-            ));
+            );
         }
     }
     obj

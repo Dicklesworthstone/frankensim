@@ -11,6 +11,7 @@
 //!   through typed errors or no-claim samples.
 //! - gh-004 G0: the deformed chart cannot launder a distance claim
 //!   into exact-distance consumers.
+//!
 //! Aggregate outcomes use canonical fs-obs events; evaluated cases carry
 //! the shared execution seed and the constructor-only case uses zero.
 

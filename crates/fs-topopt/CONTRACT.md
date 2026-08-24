@@ -115,7 +115,11 @@ cubical homology), so the optimization stack lives here.
 ## Error model
 
 Structured panics on solver failures and invalid materials
-(modeling errors). Optimization outcomes are reported traces
+(modeling errors). Filter construction likewise refuses negative, non-finite,
+or non-representable radii and invalid cell/vertex measures; filter application
+refuses wrong-length or non-finite vectors. Projection helpers refuse non-finite
+densities, negative/non-finite sharpness, and thresholds outside `[0, 1]`, while
+the well-defined zero-sharpness limit is the identity map. Optimization outcomes are reported traces
 (compliance, volume, final change), never silent.
 The public DWR band-planning helper is fail-closed: it validates its
 level and every entry in the supplied indicator map, then plans recursive
