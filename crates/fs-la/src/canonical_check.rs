@@ -162,27 +162,33 @@ mod independent {
             }
             let alpha = if w[k * n + k] >= 0.0 { -norm } else { norm };
             let v0 = w[k * n + k] - alpha;
-            // v = x - alpha*e1 stored implicitly: scale factor tau = 1/(v0*?)…
-            // Use the direct form: apply H = I - 2 vvᵀ/(vᵀv) with v[0]=v0,
-            // v[i]=w[i][k] for i>k.
-            let mut vv = 0.0f64;
-            vv += v0 * v0;
-            for i in (k + 1)..m {
-                vv += w[i * n + k] * w[i * n + k];
+            // Snapshot v BEFORE applying H: v[0]=x0-alpha, v[i]=x_i. The
+            // original version read components from column k inside the
+            // apply loop — after the j==k pass mutated that column, later
+            // columns consumed a corrupted reflector (caught by this
+            // module's own Gram-identity test against the producer).
+            let len = m - k;
+            let mut v = vec![0.0f64; len];
+            v[0] = v0;
+            for idx in 1..len {
+                v[idx] = w[(k + idx) * n + k];
             }
+            let vv: f64 = v.iter().map(|x| x * x).sum();
             if vv == 0.0 {
                 continue;
             }
-            // Apply to remaining columns j >= k.
+            // Apply H to every column j >= k using the snapshot.
             for j in k..n {
-                let mut dot = v0 * w[k * n + j];
-                for i in (k + 1)..m {
-                    dot += w[i * n + k] * w[i * n + j];
+                let mut dot = 0.0f64;
+                for idx in 0..len {
+                    dot += v[idx] * w[(k + idx) * n + j];
                 }
                 let f = 2.0 * dot / vv;
-                w[k * n + j] -= f * v0;
-                for i in (k + 1)..m {
-                    w[i * n + j] -= f * w[i * n + k];
+                if f == 0.0 {
+                    continue;
+                }
+                for idx in 0..len {
+                    w[(k + idx) * n + j] -= f * v[idx];
                 }
             }
             r[k * n + k] = alpha;
@@ -390,6 +396,104 @@ pub fn check_outcome(
     }
 }
 
+/// Explicit, fully-rechecked promotion of a validated no-claim outcome to
+/// the T2 certified tier. This is the ONLY sanctioned upgrade path: it
+/// re-runs every [`check_outcome`] obligation (which must return
+/// `NoClaimValidated`), additionally demands the independent factor
+/// agreement at full column rank, mints a `Certified` receipt, and returns
+/// the rebuilt outcome whose replay identity carries that receipt digest.
+/// Ambiguous or deficient inputs refuse; the checker cannot turn ambiguity
+/// into canonicality.
+pub fn promote_full_rank_t2(
+    a: &[f64],
+    m: usize,
+    n: usize,
+    row_block: usize,
+    policy: &CanonicalQrPolicy,
+    outcome: &CanonicalQrOutcome,
+) -> Result<(CanonicalQrOutcome, CheckerReceipt), PolicyError> {
+    let receipt = check_outcome(a, m, n, row_block, policy, outcome)?;
+    let records = receipt.records.clone();
+    if receipt.verdict != Verdict::NoClaimValidated {
+        // Demotions and already-certified receipts are returned untouched:
+        // promotion is only defined from an honest no-claim.
+        return Ok((outcome.clone(), receipt));
+    }
+    if outcome.rank_profile().rank() != n || n == 0 {
+        return Ok((
+            outcome.clone(),
+            CheckerReceipt::mint(
+                Verdict::Demoted(Refusal::RankProfileDisagrees {
+                    producer: outcome.rank_profile().rank(),
+                    checker: n,
+                }),
+                records,
+            ),
+        ));
+    }
+    let checker_r = independent::full_qr_r(a, m, n);
+    let agree = independent::rel_err(&checker_r, outcome.r_factor());
+    let budget = (policy.error_budget().factor() * 1e3).max(1e-9) * 10.0;
+    let t2_budget = budget.min(1e-6);
+    if !(agree.is_finite() && agree <= t2_budget) {
+        return Ok((
+            outcome.clone(),
+            CheckerReceipt::mint(
+                Verdict::Demoted(Refusal::FactorAgreementExceeded {
+                    expected_bound: t2_budget,
+                    observed: agree,
+                }),
+                records,
+            ),
+        ));
+    }
+    let mut final_records = records;
+    final_records.push(CheckRecord::FullRankFactorAgreement {
+        observed_rel_err: agree,
+        budget: t2_budget,
+    });
+    let promoted_receipt =
+        CheckerReceipt::mint(Verdict::Certified(ClaimTier::FullRankTreeAgreement), final_records);
+    let base_identity = super::canonical_qr::ReplayIdentity {
+        input_digest: outcome.replay().input_digest,
+        tree_digest: outcome.replay().tree_digest,
+        result_digest: outcome.replay().result_digest,
+        certificate_ref: Some(promoted_receipt.digest),
+        arithmetic_mode: outcome.replay().arithmetic_mode,
+    };
+    let profile = crate::canonical_qr::CertifiedRankProfile::checked(
+        outcome.rank_profile().pivots().to_vec(),
+    )?;
+    // Two-phase settle: the authority tag participates in the canonical
+    // encoding, so certification CHANGES the recomputed result digest. Build
+    // once to derive it, rebuild with the settled value so the binding
+    // check sustains re-examination.
+    let draft = CanonicalQrOutcome::checked(
+        outcome.r_factor().to_vec(),
+        n,
+        profile.clone(),
+        OutcomeAuthority::Certified(ClaimTier::FullRankTreeAgreement),
+        base_identity,
+    )?;
+    let settled = super::canonical_qr::ReplayIdentity {
+        result_digest: draft.result_digest(),
+        ..super::canonical_qr::ReplayIdentity {
+            input_digest: outcome.replay().input_digest,
+            tree_digest: outcome.replay().tree_digest,
+            result_digest: outcome.replay().result_digest,
+            certificate_ref: Some(promoted_receipt.digest),
+            arithmetic_mode: outcome.replay().arithmetic_mode,
+        }
+    };
+    let promoted = CanonicalQrOutcome::checked(
+        outcome.r_factor().to_vec(),
+        n,
+        profile,
+        OutcomeAuthority::Certified(ClaimTier::FullRankTreeAgreement),
+        settled,
+    )?;
+    Ok((promoted, promoted_receipt))
+}
 /// The checker's own classification (same relative law, own code path).
 fn classify_independent(r: &[f64], n: usize, tolerance: &crate::canonical_qr::RankTolerance) -> Vec<PivotClass> {
     let mut scale = 0.0f64;
@@ -456,7 +560,7 @@ mod tests {
 
     #[test]
     fn independent_path_agrees_with_producer_on_shared_fixtures() {
-        let (a, _) = dep_matrix(48);
+        let a = dep_matrix(48);
         let r_ind = independent::full_qr_r(&a, 48, 3);
         let r_prod = crate::factor::tsqr_r(&a, 48, 3, 12);
         // Different algorithms may differ inside gauge freedom, but both are
@@ -485,36 +589,34 @@ mod tests {
         let receipt = check_outcome(&a_dep, 48, 3, 12, &pol, &outcome).expect("checkable");
         assert_eq!(receipt.verdict, Verdict::NoClaimValidated);
 
-        // Full-rank fixture: certify T2 once the receipt lands in identity.
+        // Full-rank fixture: the checker VALIDATES honesty, then promotion
+        // is a separate, fully-rechecked act (the only sanctioned upgrade).
         let a_full = full_matrix(120, 31);
         let driver_f = FixedTreeDriver::admit(&a_full, 120, 4, 40).expect("valid");
         let run_f = driver_f.run(&a_full, CancelScope::never(), None).expect("runs");
         let outcome_f = outcome_from_run(&run_f, &a_full, &pol, hash_bytes(b"in")).expect("outcome");
         assert_eq!(outcome_f.rank_profile().rank(), 4);
         let receipt_f = check_outcome(&a_full, 120, 4, 40, &pol, &outcome_f).expect("checkable");
-        assert_eq!(receipt_f.verdict, Verdict::Certified(ClaimTier::FullRankTreeAgreement));
+        assert_eq!(receipt_f.verdict, Verdict::NoClaimValidated);
 
-        // The receipt flips authority ONLY through the certified pairing.
-        let certified_identity = ReplayIdentity {
-            input_digest: outcome_f.replay().input_digest,
-            tree_digest: outcome_f.replay().tree_digest,
-            result_digest: outcome_f.replay().result_digest,
-            certificate_ref: Some(receipt_f.digest),
-            arithmetic_mode: ArithmeticMode::Binary64RoundToNearest,
-        };
-        let promoted = CanonicalQrOutcome::checked(
-            outcome_f.r_factor().to_vec(),
-            outcome_f.n(),
-            CertifiedRankProfile::checked(outcome_f.rank_profile().pivots().to_vec())
-                .expect("consistent"),
-            OutcomeAuthority::Certified(ClaimTier::FullRankTreeAgreement),
-            certified_identity,
-        )
-        .expect("certified pairing admits with receipt");
+        let (promoted, promoted_receipt) =
+            promote_full_rank_t2(&a_full, 120, 4, 40, &pol, &outcome_f).expect("promotable");
+        assert_eq!(
+            promoted_receipt.verdict,
+            Verdict::Certified(ClaimTier::FullRankTreeAgreement)
+        );
         assert_eq!(
             promoted.authority(),
             OutcomeAuthority::Certified(ClaimTier::FullRankTreeAgreement)
         );
+        // The promoted outcome's identity binds THIS receipt digest.
+        assert_eq!(
+            promoted.replay().certificate_ref,
+            Some(promoted_receipt.digest)
+        );
+        // Re-checking the PROMOTED outcome must sustain certification.
+        let recheck = check_outcome(&a_full, 120, 4, 40, &pol, &promoted).expect("checkable");
+        assert_eq!(recheck.verdict, Verdict::Certified(ClaimTier::FullRankTreeAgreement));
     }
 
     #[test]
