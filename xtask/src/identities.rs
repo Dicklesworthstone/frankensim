@@ -20008,6 +20008,66 @@ mod right { pub const DUPLICATE: u32 = 2; }
     }
 
     #[test]
+    fn schema_type_grammar_accepts_paths_and_bare_identifiers() {
+        let types = parse_schema_types(
+            "crates/shared/src/schema.rs#SessionId,LocalType",
+        )
+        .expect("path#TypeName and bare identifiers are canonical");
+        assert_eq!(types.len(), 2);
+        assert_eq!(types[0].canonical(), "LocalType");
+        assert_eq!(
+            types[1].canonical(),
+            "crates/shared/src/schema.rs#SessionId"
+        );
+        assert!(parse_schema_types("none").expect("none is allowed").is_empty());
+        assert!(parse_schema_types("../schema.rs#Type").is_err());
+        assert!(parse_schema_types("Type,Type").is_err());
+        assert!(parse_schema_types("schema.rs##Type").is_err());
+    }
+
+    #[test]
+    fn named_type_declaration_bytes_extract_and_refuse_ambiguity() {
+        let text = "struct Unique { x: u8 }\n\nstruct Dup {}\nstruct Dup {}\n";
+        let index = RustSourceIndex::new(text);
+        let bytes = rust_named_type_declaration_bytes(text, &index, "Unique")
+            .expect("a unique direct type declaration extracts");
+        assert!(!bytes.is_empty());
+        let ambiguous = rust_named_type_declaration_bytes(text, &index, "Dup")
+            .expect_err("duplicate declarations are refused");
+        assert!(ambiguous.contains("exactly one"), "{ambiguous}");
+        let missing = rust_named_type_declaration_bytes(text, &index, "Missing")
+            .expect_err("unknown types are refused");
+        assert!(missing.contains("no direct"), "{missing}");
+    }
+
+    #[test]
+    fn declared_schema_types_exempt_imported_type_bindings() {
+        let text = "use crate::token::SessionId;\nfn enc(x: SessionId) -> u8 { 3 }\n";
+        let index = RustSourceIndex::new(text);
+        let undeclared = reject_imported_function_dependencies(
+            "fn enc(x: SessionId) -> u8 { 3 }",
+            "",
+            None,
+            &index,
+            "test authority",
+            &BTreeSet::new(),
+        )
+        .expect_err("an undeclared imported type binding must refuse");
+        assert!(undeclared.contains("imported"), "{undeclared}");
+        let mut declared = BTreeSet::new();
+        declared.insert("SessionId".to_string());
+        reject_imported_function_dependencies(
+            "fn enc(x: SessionId) -> u8 { 3 }",
+            "",
+            None,
+            &index,
+            "test authority",
+            &declared,
+        )
+        .expect("a declared cross-file type authority is exempt");
+    }
+
+    #[test]
     fn cross_file_schema_macro_body_movement_changes_implementation_fingerprint_only() {
         let root = fixture_root("cross-file-macro-movement");
         let helper_path = root.join("crates/shared/src/schema.rs");

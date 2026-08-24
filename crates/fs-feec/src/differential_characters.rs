@@ -952,6 +952,7 @@ impl RelativeTrivialization {
         &self.representative_id
     }
 
+    #[allow(clippy::too_many_lines)]
     fn encode(&self, encoder: &mut CanonicalEncoder) {
         encoder.u8(self.degree.get());
         encoder.lane(self.lane);
@@ -2619,8 +2620,7 @@ impl CanonicalEncoder {
     fn push(&mut self, value: &[u8]) {
         let requested = self
             .logical_len
-            .checked_add(usize_to_u64(value.len()))
-            .unwrap_or(u64::MAX);
+            .saturating_add(usize_to_u64(value.len()));
         self.logical_len = requested;
         if self.overflow.is_some() {
             self.overflow = Some(requested);
