@@ -5,9 +5,10 @@
 use fs_exec::BudgetRefusal;
 use fs_neuroshape_e2e::{
     CampaignError, CampaignParameter, CancellationKind, ComponentCountEvidence,
-    LocalizationDiagnostic, LocalizationStage, NEUROSHAPE_COMPONENT_EVIDENCE_SCHEMA_VERSION,
-    NEUROSHAPE_LOCALIZATION_SCHEMA_VERSION, SurfaceLocalization, SurfaceLocalizationStatus,
-    blob_sdf_net, iso_contour_resource_code, run_campaign, try_run_campaign,
+    LocalizationCancellationPhase, LocalizationDiagnostic, LocalizationStage,
+    NEUROSHAPE_COMPONENT_EVIDENCE_SCHEMA_VERSION, NEUROSHAPE_LOCALIZATION_SCHEMA_VERSION,
+    SurfaceLocalization, SurfaceLocalizationStatus, blob_sdf_net, iso_contour_resource_code,
+    run_campaign, try_run_campaign,
 };
 use fs_rep_neural::{Layer, MlpSdf, SAFE_STEP_POLICY_VERSION, SafeStepStatus};
 use fs_viz::{Grid2Error, IsoContourError, IsoContourResource};
@@ -206,7 +207,7 @@ fn campaign_admission_refuses_wrong_dimension_and_invalid_geometry() {
 
 #[test]
 fn localization_schema_version_pins_the_wire_codes() {
-    assert_eq!(NEUROSHAPE_LOCALIZATION_SCHEMA_VERSION, 2);
+    assert_eq!(NEUROSHAPE_LOCALIZATION_SCHEMA_VERSION, 3);
     assert_eq!(SurfaceLocalizationStatus::Localized.code(), 1);
     assert_eq!(SurfaceLocalizationStatus::ValidEmpty.code(), 2);
     assert_eq!(SurfaceLocalizationStatus::InvalidInput.code(), 3);
@@ -217,6 +218,12 @@ fn localization_schema_version_pins_the_wire_codes() {
     assert_eq!(SurfaceLocalizationStatus::InternalFault.code(), 8);
     assert_eq!(LocalizationStage::GridConstruction.code(), 1);
     assert_eq!(LocalizationStage::IsoContourExtraction.code(), 2);
+    assert_eq!(CancellationKind::CancelledAtCheckpoint.code(), 1);
+    assert_eq!(CancellationKind::CostQuotaExhausted.code(), 7);
+    assert_eq!(LocalizationCancellationPhase::None.code(), 0);
+    assert_eq!(LocalizationCancellationPhase::Admission.code(), 1);
+    assert_eq!(LocalizationCancellationPhase::Publish.code(), 9);
+    assert_eq!(LocalizationCancellationPhase::Unknown.code(), 10);
 }
 
 /// Every `Grid2Error` variant must cross the boundary as the documented
@@ -304,7 +311,7 @@ fn every_grid_error_maps_to_a_typed_localization_outcome() {
 /// typed outcome; plan overflow keeps a stable per-resource auxiliary code.
 #[test]
 fn every_contour_error_maps_to_a_typed_localization_outcome() {
-    // Resource codes are frozen by NEUROSHAPE_LOCALIZATION_SCHEMA_VERSION = 2.
+    // Resource codes are frozen by NEUROSHAPE_LOCALIZATION_SCHEMA_VERSION = 3.
     assert_eq!(iso_contour_resource_code(IsoContourResource::Cells), 1);
     assert_eq!(iso_contour_resource_code(IsoContourResource::WorkUnits), 13);
 
@@ -414,7 +421,9 @@ fn every_contour_error_maps_to_a_typed_localization_outcome() {
 #[test]
 fn every_cancellation_refusal_kind_is_retained() {
     let refusals = [
-        BudgetRefusal::Cancelled { phase: "extract" },
+        BudgetRefusal::Cancelled {
+            phase: "fs-viz.isocontour.edge-chunk",
+        },
         BudgetRefusal::DeadlineExpiredAtAdmission {
             deadline_ns: 10,
             observed_ns: 11,
@@ -425,16 +434,16 @@ fn every_cancellation_refusal_kind_is_retained() {
             quota: 14,
         },
         BudgetRefusal::DeadlineExpired {
-            phase: "sample",
+            phase: "fs-viz.isocontour.edge-finalize",
             deadline_ns: 15,
             observed_ns: 16,
         },
         BudgetRefusal::PollsExhausted {
-            phase: "seal",
+            phase: "fs-viz.isocontour.identity",
             quota: 17,
         },
         BudgetRefusal::CostExhausted {
-            phase: "identity",
+            phase: "fs-viz.isocontour.identity-finalize",
             requested: 18,
             remaining: 19,
             quota: 20,
@@ -449,7 +458,16 @@ fn every_cancellation_refusal_kind_is_retained() {
         CancellationKind::PollsExhausted,
         CancellationKind::CostQuotaExhausted,
     ];
-    for (refusal, kind) in refusals.into_iter().zip(kinds) {
+    let phases = [
+        LocalizationCancellationPhase::EdgeChunk,
+        LocalizationCancellationPhase::None,
+        LocalizationCancellationPhase::None,
+        LocalizationCancellationPhase::None,
+        LocalizationCancellationPhase::EdgeFinalize,
+        LocalizationCancellationPhase::Identity,
+        LocalizationCancellationPhase::IdentityFinalize,
+    ];
+    for ((refusal, kind), phase) in refusals.into_iter().zip(kinds).zip(phases) {
         let outcome =
             SurfaceLocalization::from(IsoContourError::ExecutionBudgetRefused { refusal });
         assert_eq!(
@@ -461,6 +479,7 @@ fn every_cancellation_refusal_kind_is_retained() {
             SurfaceLocalization::Cancelled(detail) => {
                 assert_eq!(detail.kind, kind, "{refusal}");
                 assert_eq!(detail.stage, LocalizationStage::IsoContourExtraction);
+                assert_eq!(detail.phase_code(), phase, "{refusal}");
             }
             other => panic!("budget refusals are cancellations here, got {other:?}"),
         }

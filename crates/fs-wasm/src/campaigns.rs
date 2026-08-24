@@ -40,9 +40,9 @@ use fs_fab::min_feature_size;
 use fs_grammar_e2e::{SimplificationSummary, assess_simplification};
 use fs_lbm::{Lbm, plan_scaling, poiseuille_analytic};
 use fs_neuroshape_e2e::{
-    ComponentCountEvidence, LocalizationStage, NEUROSHAPE_COMPONENT_EVIDENCE_SCHEMA_VERSION,
-    NEUROSHAPE_LOCALIZATION_SCHEMA_VERSION, NeuroShapeReport, SurfaceLocalization,
-    SurfaceLocalizationStatus,
+    CancellationDetail, ComponentCountEvidence, LocalizationStage,
+    NEUROSHAPE_COMPONENT_EVIDENCE_SCHEMA_VERSION, NEUROSHAPE_LOCALIZATION_SCHEMA_VERSION,
+    NeuroShapeReport, StageDetail, SurfaceLocalization, SurfaceLocalizationStatus,
 };
 use fs_rep_neural::{Layer, MlpSdf, SafeStepStatus};
 use fs_schedule_e2e::{ScheduleDisposition, Study};
@@ -1156,12 +1156,28 @@ const COMPONENT_EVIDENCE_CERTIFIED_LOWER_BOUND: f64 = 1.0;
 /// (`fs_neuroshape_e2e::SurfaceLocalization`, bead frankensim-o33vo) crosses the
 /// ABI: stable status code at `[26]` (previously the reserved zero), producing
 /// stage code at `[27]`, and `NEUROSHAPE_LOCALIZATION_SCHEMA_VERSION` at `[28]`;
-/// `[29]` stays a reserved zero. Legacy slots `[6]`/`[7]`/`[15]` remain derived,
-/// non-authoritative views of that outcome.
-pub const NEUROSHAPE_SCHEMA_VERSION: u32 = 3;
+/// `[29]` stays a reserved zero. Version `4` preserves `[0..=28]`, expands the
+/// header to 48 slots, and replaces reserved `[29]` with the detailed refusal
+/// record: diagnostic/cancellation and phase/axis codes plus fixed `u32` lanes
+/// for every `u128`/`u64` context value. This avoids the lossy integer-to-f64
+/// cast that would collapse native indices above `2^53`. Legacy slots
+/// `[6]`/`[7]`/`[15]` remain derived, non-authoritative views of the outcome.
+pub const NEUROSHAPE_SCHEMA_VERSION: u32 = 4;
 
 /// Length of the NeuroShape header preceding the SDF field.
-const NEUROSHAPE_HEADER_LEN: usize = 30;
+const NEUROSHAPE_HEADER_LEN: usize = 48;
+
+// Detailed localization slots. Status `[26]` selects the interpretation:
+// ordinary refusals use StageDetail; Cancelled uses CancellationDetail.
+const LOCALIZATION_DETAIL_CODE_SLOT: usize = 29;
+const LOCALIZATION_AXIS_OR_PHASE_SLOT: usize = 30;
+const LOCALIZATION_CONTEXT_0_SLOT: usize = 31; // u128: first index / deadline
+const LOCALIZATION_CONTEXT_1_SLOT: usize = 35; // u128: second index / observed
+const LOCALIZATION_CONTEXT_2_SLOT: usize = 39; // u64: scalar bits / quota A
+const LOCALIZATION_CONTEXT_3_SLOT: usize = 41; // u64: second bits / quota B
+const LOCALIZATION_CONTEXT_4_SLOT: usize = 43; // u64: required / quota C
+const LOCALIZATION_CONTEXT_5_SLOT: usize = 45; // u64: limit / undefined
+const LOCALIZATION_AUX_SLOT: usize = 47;
 
 // Wire codes for `fs_rep_neural::SafeStepStatus` in slot `[24]`. `0` is the
 // no-claim code, matching `COMPONENT_EVIDENCE_UNKNOWN`'s convention.
@@ -1219,6 +1235,62 @@ fn localization_stage_code(localization: &SurfaceLocalization) -> f64 {
         Some(LocalizationStage::GridConstruction) => LOCALIZATION_STAGE_GRID_CONSTRUCTION,
         Some(LocalizationStage::IsoContourExtraction) => LOCALIZATION_STAGE_ISOCONTOUR_EXTRACTION,
     }
+}
+
+/// Write a `u64` as two exact high-to-low `u32` lanes. Every lane is exactly
+/// representable in binary64 and survives the JSON numeric boundary.
+fn write_u64_lanes(target: &mut [f64], offset: usize, value: u64) {
+    target[offset] = f64::from((value >> 32) as u32);
+    target[offset + 1] = f64::from(value as u32);
+}
+
+/// Write a `u128` as four exact high-to-low `u32` lanes.
+fn write_u128_lanes(target: &mut [f64], offset: usize, value: u128) {
+    target[offset] = f64::from((value >> 96) as u32);
+    target[offset + 1] = f64::from((value >> 64) as u32);
+    target[offset + 2] = f64::from((value >> 32) as u32);
+    target[offset + 3] = f64::from(value as u32);
+}
+
+fn encode_stage_detail(words: &mut [f64], detail: &StageDetail) {
+    words[0] = f64::from(detail.diagnostic.code());
+    words[1] = f64::from(detail.axis);
+    write_u128_lanes(words, 2, detail.first_index);
+    write_u128_lanes(words, 6, detail.second_index);
+    write_u64_lanes(words, 10, detail.scalar_bits);
+    write_u64_lanes(words, 12, detail.second_bits);
+    write_u64_lanes(words, 14, detail.required);
+    write_u64_lanes(words, 16, detail.limit);
+    words[18] = f64::from(detail.aux);
+}
+
+fn encode_cancellation_detail(words: &mut [f64], detail: &CancellationDetail) {
+    words[0] = f64::from(detail.kind.code());
+    words[1] = f64::from(detail.phase_code().code());
+    write_u128_lanes(words, 2, u128::from(detail.deadline_ns));
+    write_u128_lanes(words, 6, u128::from(detail.observed_ns));
+    write_u64_lanes(words, 10, detail.quota_context_a);
+    write_u64_lanes(words, 12, detail.quota_context_b);
+    write_u64_lanes(words, 14, detail.quota_context_c);
+}
+
+/// Fixed-width, lossless wire detail. `u32::MAX` in an unused lane is the
+/// native undefined sentinel split into its exact lane representation.
+fn localization_detail_words(localization: &SurfaceLocalization) -> [f64; 19] {
+    let mut words = [f64::from(u32::MAX); 19];
+    match localization {
+        SurfaceLocalization::Localized { .. } | SurfaceLocalization::ValidEmpty => {
+            words[0] = 0.0;
+            words[1] = 0.0;
+        }
+        SurfaceLocalization::InvalidInput(detail)
+        | SurfaceLocalization::Unrepresentable(detail)
+        | SurfaceLocalization::ResourceRefused(detail)
+        | SurfaceLocalization::AllocationRefused(detail)
+        | SurfaceLocalization::InternalFault(detail) => encode_stage_detail(&mut words, detail),
+        SurfaceLocalization::Cancelled(detail) => encode_cancellation_detail(&mut words, detail),
+    }
+    words
 }
 
 /// Build the tunable blob SDF network. `MlpSdf::new` spectral-normalizes every

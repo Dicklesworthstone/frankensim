@@ -810,6 +810,52 @@ fn parse_schema_types(value: &str) -> Result<Vec<SchemaType>, String> {
     Ok(types)
 }
 
+fn rust_named_type_declaration_bytes(
+    text: &str,
+    index: &RustSourceIndex<'_>,
+    symbol: &str,
+) -> Result<Vec<u8>, String> {
+    let lexical = index.lexical.as_ref().map_err(|detail| detail.clone())?;
+    let Some(starts) = index.direct_type_declarations.get(symbol) else {
+        return Err(format!(
+            "type {symbol:?} has no direct struct/enum/union/trait declaration"
+        ));
+    };
+    let [start] = starts.as_slice() else {
+        return Err(format!(
+            "type {symbol:?} must resolve to exactly one direct declaration; found {}",
+            starts.len()
+        ));
+    };
+    let Some(keyword_index) = lexical.token_indexes_by_start.get(start).copied() else {
+        return Err(format!(
+            "type {symbol:?} declaration start does not resolve to a token"
+        ));
+    };
+    let keyword_depth = lexical.outer_depth[keyword_index];
+    let Some(open) = (keyword_index + 1..lexical.tokens.len()).find(|candidate| {
+        lexical.outer_depth[*candidate] == keyword_depth
+            && matches!(lexical.tokens[*candidate].text, "{" | ";")
+    }) else {
+        return Err(format!(
+            "type {symbol:?} declaration has no top-level body delimiter"
+        ));
+    };
+    let end = match lexical.tokens[open].text {
+        ";" => lexical.tokens[open].end,
+        _ => {
+            let Some(close) = lexical.pairs[open] else {
+                return Err(format!(
+                    "type {symbol:?} declaration braces are unbalanced"
+                ));
+            };
+            lexical.tokens[close].end
+        }
+    };
+    let item_start = lexical.tokens[lexical.item_leaders[keyword_index]].start;
+    Ok(normalized_rust_fragment(&text[item_start..end]))
+}
+
 fn parse_schema_constant_reference(value: &str) -> Result<SchemaConstant, String> {
     let constants = parse_schema_constants(value)?;
     let [constant] = constants.as_slice() else {
@@ -11003,12 +11049,14 @@ struct IdentityReferenceRequests {
     tests: BTreeSet<String>,
     functions: BTreeSet<String>,
     constants: BTreeSet<String>,
+    types: BTreeSet<String>,
 }
 
 #[derive(Default)]
 struct IdentityReferenceCache {
     tests: BTreeMap<(String, String), Result<Vec<u8>, String>>,
     functions: BTreeMap<(String, String), Result<Vec<u8>, String>>,
+    types: BTreeMap<(String, String), Result<Vec<u8>, String>>,
     constants: BTreeMap<(String, String), Result<IdentityConstantReference, String>>,
 }
 
@@ -11053,6 +11101,18 @@ impl IdentityReferenceCache {
                     .or_default()
                     .functions
                     .insert(function.symbol.clone());
+            }
+            for declared_type in &declaration.schema_types {
+                requests
+                    .entry(
+                        declared_type
+                            .path
+                            .clone()
+                            .unwrap_or_else(|| declaration.owner.clone()),
+                    )
+                    .or_default()
+                    .types
+                    .insert(declared_type.symbol.clone());
             }
             for constant in &declaration.schema_constants {
                 requests
@@ -11115,7 +11175,8 @@ impl IdentityReferenceCache {
             };
             let index = (!requested.tests.is_empty()
                 || !requested.functions.is_empty()
-                || !requested.constants.is_empty())
+                || !requested.constants.is_empty()
+                || !requested.types.is_empty())
             .then(|| RustSourceIndex::new(text));
             for symbol in requested.tests {
                 let result = identity_test_bytes_with_index(
@@ -11171,6 +11232,14 @@ impl IdentityReferenceCache {
                 };
                 cache.constants.insert((path.clone(), symbol), result);
             }
+            for symbol in requested.types {
+                let index = index
+                    .as_ref()
+                    .expect("schema type requests build a Rust index");
+                let result = rust_named_type_declaration_bytes(text, index, &symbol)
+                    .map_err(|detail| format!("schema type {path}#{symbol} is invalid: {detail}"));
+                cache.types.insert((path.clone(), symbol), result);
+            }
         }
         cache
     }
@@ -11181,6 +11250,10 @@ impl IdentityReferenceCache {
 
     fn function(&self, path: &str, symbol: &str) -> Result<&[u8], String> {
         cached_reference(&self.functions, path, symbol, "schema function")
+    }
+
+    fn schema_type(&self, path: &str, symbol: &str) -> Result<&[u8], String> {
+        cached_reference(&self.types, path, symbol, "schema type")
     }
 
     fn constant(&self, path: &str, symbol: &str) -> Result<&IdentityConstantReference, String> {
@@ -11534,6 +11607,12 @@ fn identity_schema_base_hash_with_index(
         let reference = references.constant(path, &constant.symbol)?;
         fingerprint_part(&mut payload, reference.locator.as_bytes());
         fingerprint_part(&mut payload, &reference.declaration);
+    }
+    for declared_type in &decl.schema_types {
+        fingerprint_part(&mut payload, declared_type.canonical().as_bytes());
+        let path = declared_type.path.as_deref().unwrap_or(&decl.owner);
+        let reference = references.schema_type(path, &declared_type.symbol)?;
+        fingerprint_part(&mut payload, reference);
     }
     for exemption in exemptions
         .iter()
@@ -16545,6 +16624,13 @@ fn render_registry(
                 .iter()
                 .map(SchemaConstant::canonical),
         );
+        if !declaration.schema_types.is_empty() {
+            out.push_str(",\"schema_types\":");
+            render_string_array(
+                &mut out,
+                declaration.schema_types.iter().map(SchemaType::canonical),
+            );
+        }
         out.push_str(",\"schema_dependencies\":");
         render_string_array(&mut out, declaration.schema_dependencies.clone());
         out.push_str(",\"source_fields\":");

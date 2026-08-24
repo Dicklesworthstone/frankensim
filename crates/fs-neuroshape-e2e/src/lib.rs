@@ -57,14 +57,16 @@ pub const NEUROSHAPE_COMPONENT_EVIDENCE_SCHEMA_VERSION: u32 = 1;
 /// Stable schema version of [`NeuroShapeReport::surface_localization`] and of
 /// every wire code derived from it (bead frankensim-o33vo).
 ///
-/// Version 2 pins [`SurfaceLocalizationStatus`] codes `1..=8`, the
+/// Version 3 pins [`SurfaceLocalizationStatus`] codes `1..=8`, the
 /// [`LocalizationStage`] codes `1..=2` (`0` meaning "no single stage"), and
-/// the [`LocalizationDiagnostic`] codes `1..=18`. It also stores each grid
+/// the [`LocalizationDiagnostic`] codes `1..=18`. Version 2 stores each grid
 /// endpoint in a fixed 64-bit lane of a `u128`; version 1 used two 32-bit lanes
-/// and therefore collided for native indices above `u32::MAX`. Serializers
-/// must carry this value and consumers must refuse an unrecognized code instead
-/// of reinterpreting it.
-pub const NEUROSHAPE_LOCALIZATION_SCHEMA_VERSION: u32 = 2;
+/// and therefore collided for native indices above `u32::MAX`. Version 3 adds
+/// the stable [`CancellationKind`] and [`LocalizationCancellationPhase`] code
+/// tables required by lossless native/WASM diagnostic parity. Serializers must
+/// carry this value and consumers must refuse an unrecognized code instead of
+/// reinterpreting it.
+pub const NEUROSHAPE_LOCALIZATION_SCHEMA_VERSION: u32 = 3;
 
 /// Sentinel stored in [`StageDetail`] numeric slots that carry no meaning for
 /// the active [`LocalizationDiagnostic`].
@@ -259,6 +261,71 @@ pub enum CancellationKind {
     CostQuotaExhausted = 7,
 }
 
+impl CancellationKind {
+    /// Stable wire code under [`NEUROSHAPE_LOCALIZATION_SCHEMA_VERSION`].
+    #[must_use]
+    pub const fn code(self) -> u32 {
+        self as u32
+    }
+}
+
+/// Stable checkpoint phase for cancellation details emitted by the fs-viz
+/// isocontour transaction. `Unknown` retains a bounded refusal when a producer
+/// supplies a phase outside this schema; it never aliases a known phase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum LocalizationCancellationPhase {
+    /// Admission-time refusal has no checkpoint phase.
+    None = 0,
+    /// Initial ambient-budget checkpoint.
+    Admission = 1,
+    /// Bounded edge traversal checkpoint or charge.
+    EdgeChunk = 2,
+    /// Charge before returning an edge-localization refusal.
+    EdgeRefusal = 3,
+    /// Charge before returning an output-cap refusal.
+    OutputRefusal = 4,
+    /// Final edge-traversal charge.
+    EdgeFinalize = 5,
+    /// Identity-header checkpoint.
+    Identity = 6,
+    /// Bounded identity-point chunk.
+    IdentityChunk = 7,
+    /// Final identity charge.
+    IdentityFinalize = 8,
+    /// Publication checkpoint after the identity is complete.
+    Publish = 9,
+    /// Producer phase not recognized by this schema.
+    Unknown = 10,
+}
+
+impl LocalizationCancellationPhase {
+    /// Stable wire code under [`NEUROSHAPE_LOCALIZATION_SCHEMA_VERSION`].
+    #[must_use]
+    pub const fn code(self) -> u32 {
+        self as u32
+    }
+
+    /// Classify an fs-exec phase without parsing a display string. The native
+    /// detail retains the exact static phase; this code is the bounded ABI view.
+    #[must_use]
+    pub fn from_phase(phase: &str) -> Self {
+        match phase {
+            "" => Self::None,
+            "fs-viz.isocontour.admission" => Self::Admission,
+            "fs-viz.isocontour.edge-chunk" => Self::EdgeChunk,
+            "fs-viz.isocontour.edge-refusal" => Self::EdgeRefusal,
+            "fs-viz.isocontour.output-refusal" => Self::OutputRefusal,
+            "fs-viz.isocontour.edge-finalize" => Self::EdgeFinalize,
+            "fs-viz.isocontour.identity" => Self::Identity,
+            "fs-viz.isocontour.identity-chunk" => Self::IdentityChunk,
+            "fs-viz.isocontour.identity-finalize" => Self::IdentityFinalize,
+            "fs-viz.isocontour.publish" => Self::Publish,
+            _ => Self::Unknown,
+        }
+    }
+}
+
 /// Ambient execution-contract refusal retained with its exact stage and
 /// finalization phase. `phase` is a compile-time `'static` checkpoint name
 /// from fs-exec, never attacker-sized text.
@@ -282,6 +349,15 @@ pub struct CancellationDetail {
     pub quota_context_b: u64,
     /// Admitted cost quota for cost kinds; otherwise undefined.
     pub quota_context_c: u64,
+}
+
+impl CancellationDetail {
+    /// Stable bounded phase code for the WASM/JSON ABI. The exact native
+    /// `&'static str` remains available for local diagnostics.
+    #[must_use]
+    pub fn phase_code(&self) -> LocalizationCancellationPhase {
+        LocalizationCancellationPhase::from_phase(self.phase)
+    }
 }
 
 /// Typed outcome of the report's sampled zero-set localization
