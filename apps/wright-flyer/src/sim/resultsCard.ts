@@ -17,10 +17,9 @@ import {
   P_U_MPS,
   P_W_MPS,
   P_X_M,
-  PAYLOAD_F64S,
   PHASE_CODES,
 } from "./protocol.ts";
-import type { FlightRecording } from "./replay.ts";
+import { recordingPayloadWords, type FlightRecording } from "./replay.ts";
 
 export interface FlightKpis {
   /** Snapshot count the KPIs were computed over (transparency). */
@@ -63,7 +62,8 @@ const PHASE_BY_CODE: readonly string[] = (() => {
 /** Compute the KPIs from the sealed transcript (pure, deterministic). */
 export function computeKpis(rec: FlightRecording): FlightKpis {
   const n = rec.ticks.length;
-  const at = (i: number, slot: number): number => rec.frames[i * PAYLOAD_F64S + slot]!;
+  const payloadWords = recordingPayloadWords(rec);
+  const at = (i: number, slot: number): number => rec.frames[i * payloadWords + slot]!;
   let pathLength = 0;
   let liftoff: { tick: number; xM: number } | null = null;
   let airborneFrames = 0;

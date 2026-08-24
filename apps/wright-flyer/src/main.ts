@@ -5,7 +5,7 @@
 import { describeCapabilities, probeCapabilities } from "./capability";
 import { createFlyerSceneRenderer } from "./flyerScene.ts";
 import { SimClient } from "./sim/simClient.ts";
-import { MODE_FIXED, MODE_HISTORICAL, dec17Scenario, huffmanScenario } from "./sim/protocol.ts";
+import { MODE_FIXED, MODE_HISTORICAL } from "./sim/protocol.ts";
 import { recordedToScenario, replayVerdict, type FlightRecording } from "./sim/replay.ts";
 import { cardLines, computeKpis, kpiRecomputeDivergence } from "./sim/resultsCard.ts";
 import { QosGovernor } from "./qos.ts";
@@ -27,13 +27,15 @@ import {
   MODE_CARDS,
   assistAvailable,
   menuQuery,
+  scenarioFromQuery,
   type MenuSelection,
 } from "./menu.ts";
-import { flightByIndex, flightSeed, missionOutcome } from "./missions/flights.ts";
+import { flightByIndex, missionOutcome } from "./missions/flights.ts";
 import { JOURNEY_STAGES, journeyNextUrl, journeyStage } from "./journey.ts";
-import { togglePhotoMode } from "./photoMode.ts";
+import { exportInstantPhoto, togglePhotoMode } from "./photoMode.ts";
 import { scoreTouchdown } from "./landingScore.ts";
 import { createInstrumentsPanel, type InstrumentSample } from "./instruments.ts";
+import { CHALLENGE_PRESETS, challengeQuery } from "./challenges.ts";
 /** Landing menu overlay (game front door). The scripted demo keeps
  * running behind it as the attract mode; every button just navigates
  * to the URL params the app already honors. */
@@ -50,6 +52,7 @@ function buildMenu(container: HTMLElement): void {
   modeRow.className = "wf-menu-row";
   const modeButtons = new Map<string, HTMLButtonElement>();
   const flightChips = new Map<number, HTMLButtonElement>();
+  const challengeButtons = new Map<string, HTMLButtonElement>();
   const refresh = (): void => {
     for (const [mode, btn] of modeButtons) {
       btn.classList.toggle("selected", mode === sel.mode);
@@ -61,6 +64,12 @@ function buildMenu(container: HTMLElement): void {
       const usable = sel.site === "kdh";
       chip.classList.toggle("selected", usable && sel.flight === id);
       chip.disabled = !usable;
+    }
+    const selectedQuery = menuQuery(sel);
+    for (const preset of CHALLENGE_PRESETS) {
+      challengeButtons
+        .get(preset.id)
+        ?.classList.toggle("selected", selectedQuery === challengeQuery(preset));
     }
     siteBtn.textContent =
       sel.site === "kdh" ? "SITE: KILL DEVIL HILLS 1903" : "SITE: HUFFMAN PRAIRIE 1904-05 (catapult)";
@@ -120,6 +129,21 @@ function buildMenu(container: HTMLElement): void {
     flightRow.appendChild(chip);
   }
   card.appendChild(flightRow);
+  const challengeRow = document.createElement("div");
+  challengeRow.className = "wf-menu-row";
+  for (const preset of CHALLENGE_PRESETS) {
+    const button = document.createElement("button");
+    button.className = "wf-opt-btn";
+    button.textContent = preset.title;
+    button.title = preset.description;
+    button.addEventListener("click", () => {
+      sel = { ...preset.selection };
+      refresh();
+    });
+    challengeButtons.set(preset.id, button);
+    challengeRow.appendChild(button);
+  }
+  card.appendChild(challengeRow);
   const go = document.createElement("button");
   go.id = "wf-go-btn";
   go.addEventListener("click", () => {
@@ -210,6 +234,8 @@ function main(): void {
   const modeWord = params.get("mode");
   const mode =
     modeWord === "historical" ? MODE_HISTORICAL : modeWord === "human" ? MODE_HUMAN : MODE_FIXED;
+  const scenario = scenarioFromQuery(params);
+  let photoIdentity = "attract-mode";
   // E5.3a: latency decomposition ledger (device→sent→ack→published→
   // present), JSONL per completed control sample.
   const ledger = new LatencyLedger((line) => console.info(line));
@@ -250,6 +276,7 @@ function main(): void {
   const makeClient = (expected?: FlightRecording): SimClient => {
     const client: SimClient = new SimClient({
       onReady(info): void {
+        photoIdentity = info.runIntentId;
         client.bindAnchor(info.tick0Digest);
         // Clock-sync burst (min-RTT sample wins inside the client).
         for (let i = 0; i < 5; i += 1) {
@@ -442,33 +469,10 @@ function main(): void {
 
   if (params.get("sim") === "1") {
     simClient = makeClient();
-    // Historical mode flies the NONLINEAR-calibrated member 3 (the
-    // E5.3b-i registration; members 0-2 are linear-plant tuned and
-    // PIO out of the full lifecycle — kept for the H-campaigns).
-    // E5.4: ?site=huffman selects the 1904-05 catapult scenario (the
-    // near-calm run currently ends with a receipted envelope exit —
-    // guzez.5.7.1 — surfaced on the HUD, never silently).
-    const member = mode === MODE_HISTORICAL ? 3 : 0;
-    // Mission preset (?flight=N): each Dec-17 flight flies its own
-    // deterministic wind ensemble; anything else keeps the 1903 base.
-    const missionNum = Number(params.get("flight"));
-    const missionSeed =
-      params.get("site") !== "huffman" && Number.isInteger(missionNum) && missionNum >= 1 && missionNum <= 4
-        ? flightSeed(missionNum)
-        : 1903n;
-    // HONESTY LAW (menu.ts/protocol.ts agreement): the bounded aid flies
-    // ONLY when the URL claims it — the menu emits ?assist=1 on its
-    // toggle, journey stage 2 passes it explicitly, and stage 3 plus
-    // every unparametered run get the authentic machine. A silent
-    // default-on here would launder a modern aid into the historical
-    // and fixed-controls replays too.
-    const assistOn = params.get("assist") === "1";
+    // The landing menu, challenge rail, and direct URLs share this exact
+    // parsed ScenarioInit. There is no challenge-only tuning path.
     simStartMs = performance.now();
-    simClient.start(
-      params.get("site") === "huffman"
-        ? huffmanScenario(missionSeed, mode, member)
-        : dec17Scenario(missionSeed, mode, member, assistOn),
-    );
+    simClient.start(scenario);
     renderer.dispose();
     renderer = createFlyerSceneRenderer(app, simClient);
     // R after a terminal: rebuild the scene with the finished run as a
@@ -509,11 +513,7 @@ function main(): void {
       simClient.dispose();
       simClient = makeClient();
       simStartMs = performance.now();
-      simClient.start(
-        params.get("site") === "huffman"
-          ? huffmanScenario(missionSeed, mode, member)
-          : dec17Scenario(missionSeed, mode, member, assistOn),
-      );
+      simClient.start(scenario);
       renderer.dispose();
       renderer = createFlyerSceneRenderer(app, simClient);
       resize();
@@ -529,13 +529,31 @@ function main(): void {
   }
   window.addEventListener("resize", resize);
   resize();
-  // P toggles photo mode anywhere (HUD hide + plate grade, CSS-only).
+  // P toggles the HUD-free plate preview; I exports the baked PNG.
   window.addEventListener("keydown", (e: KeyboardEvent) => {
     if (e.code === "KeyP" && !e.repeat) {
       const t = togglePhotoMode(document);
       console.info(
         JSON.stringify({ suite: "wright-flyer-app", stage: "photo-mode", active: t.active }),
       );
+    }
+    if (e.code === "KeyI" && !e.repeat) {
+      const canvas = app.querySelector("canvas");
+      void exportInstantPhoto(document, canvas, photoIdentity).then((result) => {
+        if (result.ok) {
+          console.info(
+            JSON.stringify({ suite: "wright-flyer-app", stage: "photo-export", ...result }),
+          );
+        } else {
+          console.warn(
+            JSON.stringify({
+              suite: "wright-flyer-app",
+              stage: "photo-export-refused",
+              ...result.refusal,
+            }),
+          );
+        }
+      });
     }
   });
   // B10: FIELD INSTRUMENTS panel — the dormant visualization/lesson

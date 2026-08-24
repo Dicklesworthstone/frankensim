@@ -391,6 +391,18 @@
       body.wf-photo #app canvas {
         filter: sepia(0.55) contrast(1.06) brightness(1.02) saturate(0.85);
       }
+      body.wf-photo::before {
+        content: "";
+        position: fixed;
+        inset: 0;
+        background-image:
+          repeating-radial-gradient(circle at 17% 31%, rgba(255, 255, 255, 0.12) 0 0.6px, transparent 0.8px 3px),
+          repeating-radial-gradient(circle at 73% 61%, rgba(20, 12, 4, 0.10) 0 0.5px, transparent 0.7px 4px);
+        mix-blend-mode: soft-light;
+        opacity: 0.28;
+        pointer-events: none;
+        z-index: 29;
+      }
       body.wf-photo::after {
         content: "";
         position: fixed;

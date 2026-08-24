@@ -39,6 +39,14 @@ export interface FlightRecording {
   readonly frames: readonly number[];
 }
 
+/** Payload stride carried by a recording schema. Stored v1 flights
+ * retain their 12-word frames; v2 appends roll and heading. */
+export function recordingPayloadWords(
+  recording: Pick<FlightRecording, "schema">,
+): typeof PAYLOAD_F64S | typeof PAYLOAD_F64S_V1 {
+  return recording.schema === RECORDING_SCHEMA_V1 ? PAYLOAD_F64S_V1 : PAYLOAD_F64S;
+}
+
 export function scenarioToRecorded(s: ScenarioInit): RecordedScenario {
   return {
     seed: s.seed.toString(),
@@ -200,7 +208,7 @@ export function ghostAt(recording: FlightRecording, liveTick: number): SimSnapsh
       hi = mid - 1;
     }
   }
-  const payloadWords = recording.schema === RECORDING_SCHEMA_V1 ? PAYLOAD_F64S_V1 : PAYLOAD_F64S;
+  const payloadWords = recordingPayloadWords(recording);
   const payload = new Float64Array(payloadWords);
   for (let i = 0; i < payloadWords; i += 1) {
     payload[i] = recording.frames[lo * payloadWords + i]!;

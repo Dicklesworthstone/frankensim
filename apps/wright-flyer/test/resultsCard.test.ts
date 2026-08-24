@@ -16,8 +16,17 @@ import {
   kpiRecomputeDivergence,
   type FlightKpis,
 } from "../src/sim/resultsCard.ts";
-import { FlightRecorder, type FlightRecording } from "../src/sim/replay.ts";
-import { MODE_FIXED, PAYLOAD_F64S, dec17Scenario } from "../src/sim/protocol.ts";
+import {
+  FlightRecorder,
+  RECORDING_SCHEMA_V1,
+  type FlightRecording,
+} from "../src/sim/replay.ts";
+import {
+  MODE_FIXED,
+  PAYLOAD_F64S,
+  PAYLOAD_F64S_V1,
+  dec17Scenario,
+} from "../src/sim/protocol.ts";
 import {
   fillPayload,
   parseDigestEnvelope,
@@ -52,6 +61,15 @@ function fixture(): FlightRecording {
   });
 }
 
+function asLegacyV1(current: FlightRecording): FlightRecording {
+  const frames: number[] = [];
+  for (let frameIndex = 0; frameIndex < current.ticks.length; frameIndex += 1) {
+    const start = frameIndex * PAYLOAD_F64S;
+    frames.push(...current.frames.slice(start, start + PAYLOAD_F64S_V1));
+  }
+  return { ...current, schema: RECORDING_SCHEMA_V1, frames };
+}
+
 test("per-KPI oracles on the hand-built transcript", () => {
   const k = computeKpis(fixture());
   assert.equal(k.frames, 5);
@@ -74,6 +92,11 @@ test("per-KPI oracles on the hand-built transcript", () => {
   assert.ok(Math.abs(k.canardTravelRad - 0.4) < 1e-12);
   // Min airspeed while airborne: hypot(3,4)=5 (frame 4).
   assert.equal(k.minAirspeedMps, 5);
+});
+
+test("legacy v1 recordings use their 12-word stride for every KPI", () => {
+  const current = fixture();
+  assert.deepEqual(computeKpis(asLegacyV1(current)), computeKpis(current));
 });
 
 test("KPI-vs-recompute hostile twin fires and names the field", () => {

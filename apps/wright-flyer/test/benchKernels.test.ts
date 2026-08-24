@@ -36,7 +36,7 @@ test("every row carries sane monotone percentiles", () => {
   }
 });
 
-test("standing NO-DATA rows are always present; seqlock NO-DATA only without SAB", () => {
+test("standing NO-DATA rows are always present; seqlock/GPU NO-DATA typed in headless context", () => {
   const { noData } = runBenchSuite();
   const names = new Set(noData.map((n) => n.name));
   for (const standing of standingNoData()) {
@@ -47,6 +47,9 @@ test("standing NO-DATA rows are always present; seqlock NO-DATA only without SAB
     assert.ok(names.has("seqlock-publish-256f64"), "fallback origin must type its seqlock gap");
   } else {
     assert.ok(!names.has("seqlock-publish-256f64"), "measured kernel must not double-report as NO-DATA");
+  }
+  if (typeof WebGL2RenderingContext === "undefined") {
+    assert.ok(names.has("float32-gpu-upload"), "headless context must type its GPU upload gap");
   }
 });
 

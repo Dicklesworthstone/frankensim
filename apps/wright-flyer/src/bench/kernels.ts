@@ -35,10 +35,9 @@ export const KERNEL_NAMES = [
   "f32-downconvert-98k",
 ] as const;
 
-/** Standing NO-DATA rows emitted in EVERY context (never silent). */
+/** Standing NO-DATA rows emitted in unmeasured contexts (never silent). */
 export function standingNoData(): NoDataRow[] {
   return [
-    { name: "float32-gpu-upload", reason: "requires a real GPU context (E0.6c)" },
     { name: "wasm-aero-kernels", reason: "real kernels land with E4.2/E4.5/E4.7 (E0.6c)" },
     { name: "simd-kernel-split", reason: "scalar/SIMD split arrives with the wasm kernels (E0.6c)" },
   ];
@@ -184,6 +183,40 @@ export function runBenchSuite(): SuiteOutput {
         dst.set(src as unknown as ArrayLike<number>);
       }, 60),
     );
+  }
+
+  // 7. Float32 GPU upload timing (WebGL2 buffer upload or typed fallback).
+  if (typeof WebGL2RenderingContext !== "undefined" && typeof document !== "undefined") {
+    try {
+      const canvas = document.createElement("canvas");
+      const gl = canvas.getContext("webgl2");
+      if (gl) {
+        const buffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+        const data = new Float32Array(32 * 32 * 32 * 3);
+        gl.bufferData(gl.ARRAY_BUFFER, data.byteLength, gl.DYNAMIC_DRAW);
+        rows.push(
+          bench("float32-gpu-upload", data.length, () => {
+            gl.bufferSubData(gl.ARRAY_BUFFER, 0, data);
+          }, 60),
+        );
+      } else {
+        noData.push({
+          name: "float32-gpu-upload",
+          reason: "WebGL2 context unavailable in this environment",
+        });
+      }
+    } catch {
+      noData.push({
+        name: "float32-gpu-upload",
+        reason: "WebGL2 initialization threw an exception",
+      });
+    }
+  } else {
+    noData.push({
+      name: "float32-gpu-upload",
+      reason: "requires a browser GPU/DOM context (WebGL2/WebGPU)",
+    });
   }
 
   noData.push(...standingNoData());

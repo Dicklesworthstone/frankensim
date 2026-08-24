@@ -4,14 +4,23 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { PAYLOAD_F64S, P_W_MPS } from "../src/sim/protocol.ts";
-import type { FlightRecording } from "../src/sim/replay.ts";
+import { PAYLOAD_F64S, PAYLOAD_F64S_V1, P_W_MPS } from "../src/sim/protocol.ts";
+import {
+  RECORDING_SCHEMA,
+  RECORDING_SCHEMA_V1,
+  type FlightRecording,
+} from "../src/sim/replay.ts";
 import { scoreTouchdown, touchdownVerticalSpeed } from "../src/landingScore.ts";
 
-function recWith(terminalPhase: string, lastWMps: number): FlightRecording {
+function recWith(
+  terminalPhase: string,
+  lastWMps: number,
+  schema: typeof RECORDING_SCHEMA | typeof RECORDING_SCHEMA_V1 = RECORDING_SCHEMA,
+): FlightRecording {
+  const payloadWords = schema === RECORDING_SCHEMA_V1 ? PAYLOAD_F64S_V1 : PAYLOAD_F64S;
   const frames: number[] = [];
   const push = (w: number): void => {
-    for (let i = 0; i < PAYLOAD_F64S; i += 1) {
+    for (let i = 0; i < payloadWords; i += 1) {
       frames.push(i === P_W_MPS ? w : 0);
     }
   };
@@ -19,7 +28,7 @@ function recWith(terminalPhase: string, lastWMps: number): FlightRecording {
   push(-1.0);
   push(lastWMps);
   return {
-    schema: "org.frankensim.wf.flight-recording.v1",
+    schema,
     scenario: {},
     runIntentId: "test",
     tick0Digest: "0".repeat(64),
@@ -32,6 +41,11 @@ function recWith(terminalPhase: string, lastWMps: number): FlightRecording {
 
 test("touchdown vertical speed reads the final frame's w slot", () => {
   const r = recWith("ended:ground-contact", -1.8);
+  assert.ok(Math.abs(touchdownVerticalSpeed(r)! + 1.8) < 1e-12);
+});
+
+test("legacy v1 touchdown uses the 12-word frame stride", () => {
+  const r = recWith("ended:ground-contact", -1.8, RECORDING_SCHEMA_V1);
   assert.ok(Math.abs(touchdownVerticalSpeed(r)! + 1.8) < 1e-12);
 });
 

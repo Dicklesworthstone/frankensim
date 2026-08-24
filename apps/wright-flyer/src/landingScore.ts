@@ -7,18 +7,19 @@
 // claims a historical comparison or a scoreboard.
 // Repro: node --test test/landingScore.test.ts
 
-import { PAYLOAD_F64S, P_W_MPS } from "./sim/protocol.ts";
-import type { FlightRecording } from "./sim/replay.ts";
+import { P_W_MPS } from "./sim/protocol.ts";
+import { recordingPayloadWords, type FlightRecording } from "./sim/replay.ts";
 
 /** Vertical speed [m/s, negative = descending] at the FINAL recorded
  * frame (ground contact is terminal: ended:ground-contact). Null when
  * the transcript is malformed or empty — never an invented number. */
 export function touchdownVerticalSpeed(rec: FlightRecording): number | null {
-  const n = rec.frames.length / PAYLOAD_F64S;
+  const payloadWords = recordingPayloadWords(rec);
+  const n = rec.frames.length / payloadWords;
   if (!Number.isInteger(n) || n < 1) {
     return null;
   }
-  const w = rec.frames[(n - 1) * PAYLOAD_F64S + P_W_MPS];
+  const w = rec.frames[(n - 1) * payloadWords + P_W_MPS];
   return typeof w === "number" && Number.isFinite(w) ? w : null;
 }
 

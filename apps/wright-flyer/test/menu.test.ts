@@ -108,14 +108,17 @@ test("flight param emits only for valid missions at Kill Devil Hills", () => {
   jlog("flight-gating", `"cases":5`);
 });
 
-test("journey stages chain watch -> assist -> authentic with honest copy", () => {
-  assert.equal(JOURNEY_STAGES.length, 3);
+test("journey stages chain watch -> assist -> authentic -> porpoises with honest copy", () => {
+  assert.equal(JOURNEY_STAGES.length, 4);
   assert.equal(journeyStage(null), null);
   assert.equal(journeyStage("0"), null);
-  assert.equal(journeyStage("4"), null);
+  assert.equal(journeyStage("5"), null);
   assert.equal(journeyStage("abc"), null);
   const s2 = journeyStage("2")!;
   assert.match(s2.url, /mode=human&assist=1&journey=2/);
+  const s4 = journeyStage("4")!;
+  assert.equal(s4.url, "?sim=1&mode=human&journey=4&inst=porpoises");
+  assert.match(s4.caption, /not released engine eigenmode authority/);
   // Copy law: stage 1 names itself a hypothesis; no stage promises an outcome.
   assert.match(journeyStage("1")!.caption, /hypothesis/);
   for (const s of JOURNEY_STAGES) {
@@ -126,6 +129,7 @@ test("journey stages chain watch -> assist -> authentic with honest copy", () =>
       }
     }
   }
-  assert.equal(journeyNextUrl(3), null, "stage 3 ends the journey");
+  assert.equal(journeyNextUrl(3), s4.url, "authentic controls open the flagship lesson");
+  assert.equal(journeyNextUrl(4), null, "stage 4 ends the journey");
   jlog("journey-chain", `"stages":${JOURNEY_STAGES.length}`);
 });

@@ -8,6 +8,60 @@
 // headless (test/audio.test.ts). AudioContext starts only after a user
 // gesture (browser policy); M toggles mute.
 
+/** Labeled sound design disclaimer constant (E9.1). */
+export const AUDIO_DISCLAIMER_LABEL =
+  "Synthesized sound design (WebAudio/BPF/4-cyl model), not an acoustic simulation claim";
+
+/** Propeller blade passage frequency [Hz]: BPF = blade_count · RPM / 60 = blade_count · (omega / 2π).
+ * For the 1903 Flyer with twin 2-blade props, bladeCount = 2.
+ */
+export function propBpfHz(propOmegaRadS: number, bladeCount = 2): number {
+  if (propOmegaRadS <= 0 || bladeCount <= 0) {
+    return 0;
+  }
+  const rps = propOmegaRadS / (2 * Math.PI);
+  return rps * bladeCount;
+}
+
+/** Twin-propeller partially-coherent BPF frequencies [Hz].
+ * The Flyer had two counter-rotating 2-blade propellers driven by crossed/uncrossed
+ * chains at a 23:8 engine-to-prop reduction. Slight blade pitch/inflow discrepancies
+ * and chain elasticity produce a slight beat frequency (~0.3-0.5 Hz) between the two
+ * props, creating characteristic twin-rotor beating.
+ */
+export function twinPropBpfHz(
+  propOmegaRadS: number,
+  bladeCount = 2,
+  inflowAsymmetry01 = 0.038,
+): { readonly bpfLeftHz: number; readonly bpfRightHz: number; readonly beatHz: number } {
+  const nominal = propBpfHz(propOmegaRadS, bladeCount);
+  if (nominal <= 0) {
+    return { bpfLeftHz: 0, bpfRightHz: 0, beatHz: 0 };
+  }
+  const delta = nominal * Math.min(0.1, Math.max(0, inflowAsymmetry01));
+  const left = Math.max(0, nominal - delta * 0.5);
+  const right = Math.max(0, nominal + delta * 0.5);
+  return {
+    bpfLeftHz: left,
+    bpfRightHz: right,
+    beatHz: right - left,
+  };
+}
+
+/** Airframe turbulence / wire noise gain [0, 0.35].
+ * Scales with dynamic pressure (v^2) above walking speed, plus extra separation
+ * turbulence when angle of attack indicates high-lift / near-stall flow.
+ */
+export function airframeNoiseGain(airspeedMps: number, alphaDeg = 0): number {
+  if (airspeedMps <= 0) {
+    return 0;
+  }
+  const u = Math.max(0, airspeedMps - 3.5);
+  const base = Math.min(0.25, (u / 24) * (u / 24) * 0.25);
+  const separationBoost = Math.max(0, Math.min(0.1, (Math.abs(alphaDeg) - 10) * 0.02));
+  return Math.min(0.35, base + separationBoost);
+}
+
 /** Engine firing frequency [Hz] from prop omega: engine = prop·23/8,
  * and a 4-stroke inline-4 fires twice per revolution. */
 export function engineFreqHz(propOmegaRadS: number): number {
@@ -211,6 +265,7 @@ export class FlightAudio {
     nowS: number;
     gust01?: number;
     surfFacing01?: number;
+    alphaDeg?: number;
   }): void {
     if (this.ctx === null || this.engineGain === null || this.engineOsc === null) {
       return;
@@ -223,8 +278,7 @@ export class FlightAudio {
     );
     const t = this.ctx.currentTime;
     const engFreq = engineFreqHz(state.propOmegaRadS);
-    const propRps = state.propOmegaRadS / (2 * Math.PI);
-    const propBpf = Math.max(4, propRps * 2);
+    const twinBpf = twinPropBpfHz(state.propOmegaRadS, 2);
 
     this.engineGain.gain.setTargetAtTime(this.muted ? 0 : mix.engine * 0.52, t, 0.08);
     this.engineOsc.frequency.setTargetAtTime(engFreq, t, 0.06);
@@ -233,8 +287,8 @@ export class FlightAudio {
     }
     if (this.propBeatingGain !== null && this.propBeatingOscL !== null && this.propBeatingOscR !== null) {
       this.propBeatingGain.gain.setTargetAtTime(this.muted ? 0 : mix.engine * 0.28, t, 0.08);
-      this.propBeatingOscL.frequency.setTargetAtTime(propBpf, t, 0.06);
-      this.propBeatingOscR.frequency.setTargetAtTime(propBpf + 0.45, t, 0.06);
+      this.propBeatingOscL.frequency.setTargetAtTime(Math.max(4, twinBpf.bpfLeftHz), t, 0.06);
+      this.propBeatingOscR.frequency.setTargetAtTime(Math.max(4, twinBpf.bpfRightHz), t, 0.06);
     }
     if (this.windGain !== null) {
       // Wind bed + square-law rush layered under one clamp.
@@ -246,7 +300,7 @@ export class FlightAudio {
       );
     }
     if (this.wireGain !== null) {
-      const wireLevel = Math.max(0, Math.min(0.25, ((state.airspeedMps - 8) / 20) * 0.25));
+      const wireLevel = airframeNoiseGain(state.airspeedMps, state.alphaDeg);
       this.wireGain.gain.setTargetAtTime(this.muted ? 0 : wireLevel, t, 0.2);
     }
     if (this.rumbleGain !== null) {

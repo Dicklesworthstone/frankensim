@@ -3,7 +3,15 @@
 // no third configuration path, it just types the params for the player.
 // Repro: node --test test/menu.test.ts
 
-import { flightByIndex } from "./missions/flights.ts";
+import { flightByIndex, flightSeed } from "./missions/flights.ts";
+import {
+  MODE_FIXED,
+  MODE_HISTORICAL,
+  MODE_HUMAN,
+  dec17Scenario,
+  huffmanScenario,
+  type ScenarioInit,
+} from "./sim/protocol.ts";
 
 export interface MenuSelection {
   readonly mode: "human" | "historical" | "fixed";
@@ -48,6 +56,34 @@ export function menuQuery(sel: MenuSelection): string {
   return `?${parts.join("&")}`;
 }
 
+export interface QueryParamsLike {
+  get(name: string): string | null;
+}
+
+/**
+ * The one query-to-engine-scenario route used by both free selection
+ * and challenge presets. Unsupported combinations fail closed to the
+ * existing baseline: assist and Dec-17 missions cannot leak to Huffman,
+ * and assist cannot leak outside human mode.
+ */
+export function scenarioFromQuery(params: QueryParamsLike): ScenarioInit {
+  const modeWord = params.get("mode");
+  const mode =
+    modeWord === "historical" ? MODE_HISTORICAL : modeWord === "human" ? MODE_HUMAN : MODE_FIXED;
+  const huffman = params.get("site") === "huffman";
+  const mission = Number(params.get("flight"));
+  const seed =
+    !huffman && Number.isInteger(mission) && flightByIndex(mission) !== null
+      ? flightSeed(mission)
+      : 1903n;
+  const member = mode === MODE_HISTORICAL ? 3 : 0;
+  if (huffman) {
+    return huffmanScenario(seed, mode, member);
+  }
+  const assist = mode === MODE_HUMAN && params.get("assist") === "1";
+  return dec17Scenario(seed, mode, member, assist);
+}
+
 /** Mission selector chips (labels from missions/flights.ts data). */
 export const FLIGHT_CHIPS: readonly { readonly id: number; readonly label: string }[] = [
   { id: 1, label: "F1 · Orville" },
@@ -85,7 +121,7 @@ export const KEY_LINES: readonly string[] = [
   "A / ←  warp left     D / →  warp right",
   "Space  recenter    V  camera toggle    1-6  camera presets",
   "M  sound on/off      H  controls card   T  telemetry",
-  "R  replay with ghost N  fresh relaunch  P  photo mode",
+  "R  replay with ghost N  fresh relaunch  P  photo mode  I  export PNG",
   "Drag the view = hip cradle   Gamepad left stick = warp/pull",
-  "J  guided journey (watch → assist → authentic)",
+  "J  guided journey (watch → assist → authentic → why it porpoises)",
 ];
