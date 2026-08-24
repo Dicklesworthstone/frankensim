@@ -372,7 +372,11 @@ fn every_contour_error_maps_to_a_typed_localization_outcome() {
                 detail.diagnostic,
                 LocalizationDiagnostic::IsoOperationBudgetExceeded
             );
-            assert_eq!(detail.required, u64::MAX, "u128 requirements saturate");
+            assert_eq!(
+                detail.required,
+                u128::from(u64::MAX) + 7,
+                "u128 requirements remain exact"
+            );
             assert_eq!(detail.limit, 1024);
         }
         other => panic!("operation budgets are resource refusals, got {other:?}"),

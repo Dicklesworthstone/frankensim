@@ -82,7 +82,7 @@ crates. Layer: **L6 HELM / interface surface**. The crate compiles as an
    theorem. It and the sampled contour crossings cannot promote these fields to
    an exact count.
 10. NeuroShape wire version `NEUROSHAPE_SCHEMA_VERSION = 4` (header slot `[22]`,
-   header length 48) publishes a no-tunnel step whose authority is an INTERVAL
+   header length 52) publishes a no-tunnel step whose authority is an INTERVAL
    sign margin. Slot `[5]` is `fs_rep_neural::derive_safe_step`'s
    downward-rounded `magnitude_lower_bound / L`, where the margin at `[23]` is
    the inward endpoint of the degenerate IBP enclosure at the origin — a
@@ -108,17 +108,18 @@ crates. Layer: **L6 HELM / interface surface**. The crate compiles as an
    (the folded `+inf`) and `[7] = +0`, while the native report fields keep
    `+inf`; the typed `[26]` status, never a NaN sentinel, distinguishes
    valid-empty from every refusal. Version `4` keeps `[0..=28]` fixed and
-   expands `[29..=47]` into the lossless detailed record. `[29]` is the exact
+   expands `[29..=51]` into the lossless detailed record. `[29]` is the exact
    diagnostic or cancellation-kind code, `[30]` the axis or stable cancellation
    phase, `[31..=38]` two `u128` contexts as exact high-to-low `u32` lanes,
-   `[39..=46]` four `u64` contexts as exact `u32` lanes, and `[47]` the auxiliary
-   resource code. For ordinary refusals these are the native `StageDetail`
-   indices/scalar bits/required/limit; for cancellation they carry deadline,
-   observed clock, and quota contexts. Unused lanes are `u32::MAX`, never NaN;
+   `[39..=42]` two `u64` contexts as exact `u32` lanes, `[43..=50]` two `u128`
+   contexts, and `[51]` the auxiliary resource code. For ordinary refusals these
+   are the native `StageDetail` indices/scalar bits/required/limit; for
+   cancellation they carry deadline, observed clock, and quota contexts. Unused
+   lanes are `u32::MAX`, never NaN;
    no integer is directly cast to f64. `[28]` carries
    `NEUROSHAPE_LOCALIZATION_SCHEMA_VERSION = 3`, which freezes all status,
    stage, diagnostic, cancellation-kind, and cancellation-phase tables and gates
-   interpretation of `[26..=47]`. A consumer that gated on `[22] == 2` or `3`
+   interpretation of `[26..=51]`. A consumer that gated on `[22] == 2` or `3`
    refuses this payload rather than silently
    ignoring the typed localization record; version-aware consumers must refuse
    an unrecognized `[22]` before interpreting any slot, an unrecognized `[25]`

@@ -48,7 +48,8 @@ mint here.
   parsed. Version 2 packs each grid-edge coordinate into its own 64-bit lane of
   a `u128`; version 1's 32-bit lanes collided for native indices above
   `u32::MAX`. Version 3 adds the bounded cancellation code tables used by the
-  lossless WASM detail record.
+  lossless WASM detail record and widens checked `required`/`limit` fields to
+  exact `u128` values rather than saturating them at `u64::MAX`.
 - `NeuroShapeReport::surface_localization: SurfaceLocalization` — the
   AUTHORITATIVE outcome of sampled zero-set localization:
   `Localized { crossings, max_radius, nearest_radius }`, `ValidEmpty`, or a

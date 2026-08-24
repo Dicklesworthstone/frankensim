@@ -1157,7 +1157,7 @@ const COMPONENT_EVIDENCE_CERTIFIED_LOWER_BOUND: f64 = 1.0;
 /// ABI: stable status code at `[26]` (previously the reserved zero), producing
 /// stage code at `[27]`, and `NEUROSHAPE_LOCALIZATION_SCHEMA_VERSION` at `[28]`;
 /// `[29]` stays a reserved zero. Version `4` preserves `[0..=28]`, expands the
-/// header to 48 slots, and replaces reserved `[29]` with the detailed refusal
+/// header to 52 slots, and replaces reserved `[29]` with the detailed refusal
 /// record: diagnostic/cancellation and phase/axis codes plus fixed `u32` lanes
 /// for every `u128`/`u64` context value. This avoids the lossy integer-to-f64
 /// cast that would collapse native indices above `2^53`. Legacy slots
@@ -1165,13 +1165,13 @@ const COMPONENT_EVIDENCE_CERTIFIED_LOWER_BOUND: f64 = 1.0;
 pub const NEUROSHAPE_SCHEMA_VERSION: u32 = 4;
 
 /// Length of the NeuroShape header preceding the SDF field.
-const NEUROSHAPE_HEADER_LEN: usize = 48;
+const NEUROSHAPE_HEADER_LEN: usize = 52;
 
-// Detailed localization slots `[29..48)`. Status `[26]` selects the
+// Detailed localization slots `[29..52)`. Status `[26]` selects the
 // interpretation: ordinary refusals use StageDetail; Cancelled uses
 // CancellationDetail.
 const LOCALIZATION_DETAIL_START: usize = 29;
-const LOCALIZATION_DETAIL_LEN: usize = 19;
+const LOCALIZATION_DETAIL_LEN: usize = 23;
 
 // Wire codes for `fs_rep_neural::SafeStepStatus` in slot `[24]`. `0` is the
 // no-claim code, matching `COMPONENT_EVIDENCE_UNKNOWN`'s convention.
@@ -1255,9 +1255,9 @@ fn encode_stage_detail(words: &mut [f64], detail: &StageDetail) {
     write_u128_lanes(words, 6, detail.second_index);
     write_u64_lanes(words, 10, detail.scalar_bits);
     write_u64_lanes(words, 12, detail.second_bits);
-    write_u64_lanes(words, 14, detail.required);
-    write_u64_lanes(words, 16, detail.limit);
-    words[18] = f64::from(detail.aux);
+    write_u128_lanes(words, 14, detail.required);
+    write_u128_lanes(words, 18, detail.limit);
+    words[22] = f64::from(detail.aux);
 }
 
 fn encode_cancellation_detail(words: &mut [f64], detail: &CancellationDetail) {
@@ -1267,7 +1267,7 @@ fn encode_cancellation_detail(words: &mut [f64], detail: &CancellationDetail) {
     write_u128_lanes(words, 6, u128::from(detail.observed_ns));
     write_u64_lanes(words, 10, detail.quota_context_a);
     write_u64_lanes(words, 12, detail.quota_context_b);
-    write_u64_lanes(words, 14, detail.quota_context_c);
+    write_u128_lanes(words, 14, u128::from(detail.quota_context_c));
 }
 
 /// Fixed-width, lossless wire detail. `u32::MAX` in an unused lane is the
@@ -1386,7 +1386,7 @@ fn neuro_net(lift: f64) -> MlpSdf {
 ///   `1` grid construction, `2` isocontour extraction).
 /// - `[28]` — `localization_schema_version`
 ///   (`NEUROSHAPE_LOCALIZATION_SCHEMA_VERSION`, currently `3`) — the version
-///   gating `[26..=47]`.
+///   gating `[26..=51]`.
 /// - `[29]` — exact diagnostic code (`LocalizationDiagnostic`) for ordinary
 ///   refusals, cancellation-kind code for `Cancelled`, or `0` on success.
 /// - `[30]` — offending axis for ordinary refusals, stable cancellation phase
@@ -1396,9 +1396,9 @@ fn neuro_net(lift: f64) -> MlpSdf {
 ///   deadline/observed clock in the low two lanes.
 /// - `[39..=40]`, `[41..=42]` — exact `u32` lanes of `scalar_bits` and
 ///   `second_bits`; cancellation reuses them for quota contexts A and B.
-/// - `[43..=44]`, `[45..=46]` — exact `u32` lanes of `required` and `limit`;
-///   cancellation reuses the first pair for quota context C.
-/// - `[47]` — diagnostic auxiliary code. Every unused lane is `u32::MAX`;
+/// - `[43..=46]`, `[47..=50]` — exact `u32` lanes of `required` and `limit`;
+///   cancellation reuses the first range for quota context C.
+/// - `[51]` — diagnostic auxiliary code. Every unused lane is `u32::MAX`;
 ///   integer context never passes through a lossy direct f64 cast.
 /// - then `64·64` SDF field row-major (`j` outer / y, `i` inner / x) over the
 ///   render window.
@@ -2052,7 +2052,7 @@ mod tests {
     /// reading any slot, exactly as a browser consumer must.
     fn require_supported_neuroshape_schema(encoded: &[f64]) -> Result<(), &'static str> {
         if encoded.len() < NEUROSHAPE_HEADER_LEN {
-            return Err("NeuroShape payload is shorter than its 48-value header");
+            return Err("NeuroShape payload is shorter than its 52-value header");
         }
         let version = encoded[22];
         if version.to_bits() != f64::from(NEUROSHAPE_SCHEMA_VERSION).to_bits() {
@@ -2630,8 +2630,8 @@ mod tests {
         detail.second_index = 0xffff_ffff_0000_0001_8000_0000_0000_0002;
         detail.scalar_bits = 0x7ff8_0000_0000_1234;
         detail.second_bits = 0x3ff0_0000_0000_0001;
-        detail.required = u64::MAX - 1;
-        detail.limit = 0x0123_4567_89ab_cdef;
+        detail.required = 0x1111_2222_3333_4444_ffff_ffff_ffff_fffe;
+        detail.limit = 0xaaaa_bbbb_cccc_dddd_0123_4567_89ab_cdef;
         detail.aux = 13;
         let detailed = encoded_with_localization(SurfaceLocalization::Unrepresentable(detail));
         assert_eq!(require_supported_neuroshape_schema(&detailed), Ok(()));
@@ -2647,11 +2647,11 @@ mod tests {
         assert_eq!(&detailed[39..41], &expected_u64);
         write_u64_lanes(&mut expected_u64, 0, detail.second_bits);
         assert_eq!(&detailed[41..43], &expected_u64);
-        write_u64_lanes(&mut expected_u64, 0, detail.required);
-        assert_eq!(&detailed[43..45], &expected_u64);
-        write_u64_lanes(&mut expected_u64, 0, detail.limit);
-        assert_eq!(&detailed[45..47], &expected_u64);
-        assert_eq!(detailed[47], 13.0);
+        write_u128_lanes(&mut expected_u128, 0, detail.required);
+        assert_eq!(&detailed[43..47], &expected_u128);
+        write_u128_lanes(&mut expected_u128, 0, detail.limit);
+        assert_eq!(&detailed[47..51], &expected_u128);
+        assert_eq!(detailed[51], 13.0);
 
         let cancellation = CancellationDetail {
             stage: LocalizationStage::IsoContourExtraction,
@@ -2680,11 +2680,16 @@ mod tests {
         for (range, value) in [
             (39..41, cancellation.quota_context_a),
             (41..43, cancellation.quota_context_b),
-            (43..45, cancellation.quota_context_c),
         ] {
             write_u64_lanes(&mut expected_u64, 0, value);
             assert_eq!(&cancelled[range], &expected_u64);
         }
+        write_u128_lanes(
+            &mut expected_u128,
+            0,
+            u128::from(cancellation.quota_context_c),
+        );
+        assert_eq!(&cancelled[43..47], &expected_u128);
     }
 
     /// A live all-positive campaign serializes ValidEmpty without any

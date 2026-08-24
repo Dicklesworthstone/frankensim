@@ -74,9 +74,10 @@ pub const NEUROSHAPE_LOCALIZATION_SCHEMA_VERSION: u32 = 3;
 pub const LOCALIZATION_DETAIL_UNDEFINED: u64 = u64::MAX;
 /// `u32` companion of [`LOCALIZATION_DETAIL_UNDEFINED`].
 pub const LOCALIZATION_DETAIL_UNDEFINED_U32: u32 = u32::MAX;
-/// Sentinel for index slots that can retain a complete pair of 64-bit native
-/// grid coordinates.
-pub const LOCALIZATION_INDEX_UNDEFINED: u128 = u128::MAX;
+/// Sentinel for wide index and checked budget slots. Index slots can retain a
+/// complete pair of 64-bit native grid coordinates; budget slots can retain a
+/// complete source `u128`.
+pub const LOCALIZATION_DETAIL_UNDEFINED_U128: u128 = u128::MAX;
 
 /// Exact fs-viz stage that produced a sampled zero-set localization outcome.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -230,12 +231,12 @@ impl StageDetail {
             stage,
             diagnostic,
             axis: LOCALIZATION_DETAIL_UNDEFINED_U32,
-            first_index: LOCALIZATION_INDEX_UNDEFINED,
-            second_index: LOCALIZATION_INDEX_UNDEFINED,
+            first_index: LOCALIZATION_DETAIL_UNDEFINED_U128,
+            second_index: LOCALIZATION_DETAIL_UNDEFINED_U128,
             scalar_bits: LOCALIZATION_DETAIL_UNDEFINED,
             second_bits: LOCALIZATION_DETAIL_UNDEFINED,
-            required: LOCALIZATION_INDEX_UNDEFINED,
-            limit: LOCALIZATION_INDEX_UNDEFINED,
+            required: LOCALIZATION_DETAIL_UNDEFINED_U128,
+            limit: LOCALIZATION_DETAIL_UNDEFINED_U128,
             aux: LOCALIZATION_DETAIL_UNDEFINED_U32,
         }
     }
