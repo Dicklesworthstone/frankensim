@@ -202,12 +202,16 @@ threshold serializes typed refusals and cannot promote the headline.
 NeuroShape tests assert that the default closed-frame certificate serializes a
 lower bound of one but an unknown exact count, while an unenclosed case retains
 the same wire shape and claims neither an exact zero nor a positive lower
-bound. Both cases pin payload schema version 2 in slot `[22]`, the
-component-evidence version in `[25]`, and zero in the remaining reserved slot
-`[26]`. A decoder-shaped conformance fixture accepts only the exact version-2
-bit pattern and refuses the legacy version-1 value, zero, future version 3,
-fractional, non-finite, and truncated headers before reading any evidence, and
-refuses an unrecognized component-evidence version in `[25]`. A safe-step test
+bound. Both cases pin payload schema version 3 in slot `[22]`, the
+component-evidence version in `[25]`, the localization schema version in
+`[28]`, and zero in reserved slot `[29]`. The default case pins `Localized`
+with no refusing stage in `[26]`/`[27]`; the unenclosed all-positive case pins
+`ValidEmpty`, and a synthesized-outcome battery covers every typed refusal and
+its producing stage. A decoder-shaped conformance fixture accepts only the
+exact version-3 bit pattern and refuses legacy versions 1 and 2, zero, future,
+fractional, non-finite, and truncated headers before reading any evidence. It
+also refuses unrecognized component-evidence or localization schema versions
+and unknown localization status/stage codes. A safe-step test
 pins slots `[5]`/`[23]`/`[24]` bit-for-bit against the native campaign's
 `SafeStepDerivation` and requires the published step to be STRICTLY below the
 nominal `|origin_value|/L` that version 1 published, while still
