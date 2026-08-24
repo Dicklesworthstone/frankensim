@@ -665,6 +665,7 @@ impl SimLoop {
     /// # Errors
     /// `run-ended` (stepping past the terminal event);
     /// `control-input-missing` (Human mode without input);
+    /// `control-input-invalid` (Human mode with a non-finite input);
     /// physics refusals pass through.
     pub fn step(&mut self, input: Option<ControlInput>) -> Result<SimStateOut, Refusal> {
         if let Phase::Ended(_) = self.phase {
@@ -697,9 +698,15 @@ impl SimLoop {
                         ranked_repairs: vec!["supply finite lever force and warp values".into()],
                     });
                 }
-                Some(inp)
+                inp
             }
-            PilotMode::FixedControls | PilotMode::Historical(_) => None,
+            // This value is unreachable in these modes because their match
+            // arms below do not read `human_input`; using a finite inert value
+            // keeps that invariant panic-free.
+            PilotMode::FixedControls | PilotMode::Historical(_) => ControlInput {
+                lever_force_n: 0.0,
+                warp_cmd_rad: 0.0,
+            },
         };
         let dt = 1.0 / PERCEPTION_HZ;
         self.tick += 1;
@@ -750,12 +757,10 @@ impl SimLoop {
                 )?;
                 (cmd.lever_force_n, cmd.warp_cmd_rad)
             }
-            PilotMode::Human => {
-                let Some(inp) = human_input else {
-                    unreachable!("Human input was validated before lifecycle mutation")
-                };
-                (inp.lever_force_n.clamp(-220.0, 220.0), inp.warp_cmd_rad)
-            }
+            PilotMode::Human => (
+                human_input.lever_force_n.clamp(-220.0, 220.0),
+                human_input.warp_cmd_rad,
+            ),
         };
         self.warp = warp_cmd.clamp(-0.148, 0.148);
         // Mechanism (m_aero = 0 stick tier, H-02c convention, declared).

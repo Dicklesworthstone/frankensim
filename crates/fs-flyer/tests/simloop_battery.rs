@@ -172,7 +172,10 @@ fn human_input_refusals_do_not_consume_physical_time() {
 
     // Missing and invalid input are distinct typed refusals. Neither may
     // advance the tick-addressed atmosphere or any other checkpoint state.
-    assert_eq!(retried.step(None).unwrap_err().code, "control-input-missing");
+    assert_eq!(
+        retried.step(None).unwrap_err().code,
+        "control-input-missing"
+    );
     assert_eq!(retried.save_checkpoint().unwrap(), checkpoint_before);
     assert_eq!(retried.digest_hex(), digest_before);
 
@@ -205,7 +208,10 @@ fn human_input_refusals_do_not_consume_physical_time() {
     let fresh_out = fresh.step(Some(valid)).unwrap();
     assert_eq!(retried_out, fresh_out);
     assert_eq!(retried.digest_hex(), fresh.digest_hex());
-    assert_eq!(retried.save_checkpoint().unwrap(), fresh.save_checkpoint().unwrap());
+    assert_eq!(
+        retried.save_checkpoint().unwrap(),
+        fresh.save_checkpoint().unwrap()
+    );
     jlog(
         "human-input",
         "\"required_every_tick\":true,\"refusals_are_atomic\":true",
