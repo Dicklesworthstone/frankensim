@@ -300,6 +300,9 @@ fn publication_refuses_abandoned_descendants_before_poll_or_destination_mutation
             let nested = outer
                 .split_child("abandoned-nested", resources(0, 0, 0))
                 .unwrap();
+            // Deliberately leaks this child guard: the scenario tests the
+            // abandoned-nested-child refusal path.
+            #[allow(clippy::drop_non_drop)]
             drop(nested);
 
             let mut finalizer = outer.begin_finalization();
@@ -1094,6 +1097,9 @@ fn abandoned_nested_authority_is_recovered_inside_out_before_parent_seals() {
             .split_finalizable_child("nested", nested_scientific, nested_finalization)
             .unwrap();
         let nested_id = nested.id();
+        // Deliberate forget: models a child authority abandoned mid-flight
+        // so recovery via recover_child_finalizer can be exercised.
+        #[allow(clippy::mem_forget)]
         std::mem::forget(nested);
         let parent_id = parent.id();
         let mut parent_finalizer = parent.begin_finalization();
@@ -1101,6 +1107,8 @@ fn abandoned_nested_authority_is_recovered_inside_out_before_parent_seals() {
             parent_finalizer.finish(),
             Err(InvocationError::LiveNestedChildren { count: 1 })
         );
+        // Guard drop here only extends lifetimes; the value carries no Drop.
+        #[allow(clippy::drop_non_drop)]
         drop(parent_finalizer);
 
         let mut nested_finalizer = root
@@ -1111,6 +1119,8 @@ fn abandoned_nested_authority_is_recovered_inside_out_before_parent_seals() {
             .unwrap();
         nested_finalizer.abort_publication().unwrap();
         let nested_report = nested_finalizer.finish().unwrap();
+        // Guard drop here only extends lifetimes; the value carries no Drop.
+        #[allow(clippy::drop_non_drop)]
         drop(nested_finalizer);
 
         let mut parent_finalizer = root
@@ -1216,6 +1226,8 @@ fn abandoned_ordinary_nested_child_can_be_recovered_fail_closed() {
             parent_finalizer.finish(),
             Err(InvocationError::LiveNestedChildren { count: 1 })
         );
+        // Guard drop here only extends lifetimes; the value carries no Drop.
+        #[allow(clippy::drop_non_drop)]
         drop(parent_finalizer);
 
         let ordinary = root
@@ -1311,6 +1323,8 @@ fn root_finish_reports_deepest_abandoned_child_without_consuming_recovery_author
             .unwrap();
         parent_finalizer.abort_publication().unwrap();
         let parent_report = parent_finalizer.finish().unwrap();
+        // Guard drop here only extends lifetimes; the value carries no Drop.
+        #[allow(clippy::drop_non_drop)]
         drop(parent_finalizer);
         assert!(root.unfinished_children().is_empty());
 
