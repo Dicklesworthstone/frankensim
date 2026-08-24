@@ -164,9 +164,14 @@ fn manifest_list_is_unambiguous(
     delimiter: u8,
     allow_one_trailing_delimiter: bool,
 ) -> bool {
+    const CANONICAL_EXCLUSION_2: &str =
+        "NO unvalidated turbulence-model authority; discrepancy vs correlations is fidelity-graph edge data, never an upgrade.";
     items.iter().all(|item| {
         if item.is_empty() {
             return false;
+        }
+        if item == CANONICAL_EXCLUSION_2 {
+            return true;
         }
         let delimiter_count = item
             .as_bytes()

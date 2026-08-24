@@ -865,6 +865,14 @@ Linux workers: unset, so `$TMPDIR`=/data/tmp is used, which is already correct).
 Prefer reusing one of the two names above. If you truly need a distinct target dir
 for an isolated task, still base it on `$RCH_TARGET_BASE` and delete it when done.
 
+**Disk preflight (machine law, bead frankensim-z4igc):** before any heavy
+build/test lane on this Mac, run `sbh check --need 20G` (adjust `--need` for
+the lane's expected footprint). A nonzero exit means the Data volume is under
+pressure: STOP and reclaim first. A full disk silently corrupts shared SQLite
+writers (`br`, cass, agent mail) mid-commit. The `sbh` daemon already scans
+and auto-cleans `/tmp`; this preflight is the agent-side gate for everything
+else.
+
 Do not rely on local fallback for heavy builds in a shared-agent environment
 unless the user explicitly authorizes it.
 

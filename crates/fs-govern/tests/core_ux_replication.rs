@@ -189,3 +189,87 @@ fn max_ux_expert_replication_sealing_succeeds_and_is_deterministic() {
         }
     );
 }
+
+#[test]
+fn sealing_refuses_malformed_claim_revision_and_precision() {
+    let mut spec = sample_spec();
+    spec.product_claim_revision = "   ".into();
+    let err = CoreUxReplicationSealV1::seal(spec.clone(), 1_700_000_000).expect_err("must refuse blank claim");
+    assert!(matches!(err, CoreUxReplicationError::MalformedInput { field: "product_claim_revision", .. }));
+
+    spec.product_claim_revision = "valid-rev.1".into();
+    spec.precision_target = -0.01;
+    let err = CoreUxReplicationSealV1::seal(spec.clone(), 1_700_000_000).expect_err("must refuse negative precision");
+    assert!(matches!(err, CoreUxReplicationError::InvalidPrecisionTarget { .. }));
+
+    spec.precision_target = f64::NAN;
+    let err = CoreUxReplicationSealV1::seal(spec, 1_700_000_000).expect_err("must refuse NaN precision");
+    assert!(matches!(err, CoreUxReplicationError::InvalidPrecisionTarget { .. }));
+}
+
+#[test]
+fn max_sealing_refuses_empty_domain_tcb_strata() {
+    let h1_hash = hash_domain("test.h1", b"h1-max-protocol-v1");
+    let h2_hash = hash_domain("test.h2", b"h2-max-privacy-v1");
+    let task_hash = hash_domain("test.tasks", b"task-max-hazard-catalog-v1");
+    let data_hash = hash_domain("test.data", b"disjoint-max-data-root");
+    let artifact_hash = hash_domain("test.artifacts", b"disjoint-max-artifact-root");
+
+    let spec = fs_govern::core_ux_replication::MaxReplicationProtocolSpec {
+        h1_protocol_root: h1_hash,
+        h2_privacy_contract_root: h2_hash,
+        product_claim_revision: "rev-2026-07-30.max.1".into(),
+        domain_tcb_strata: vec![],
+        task_hazard_catalog_root: task_hash,
+        expert_cohorts: vec!["domain-expert".into()],
+        expert_role_criteria: vec!["tenured-faculty".into()],
+        recruitment_source: "expert-panel-v1".into(),
+        conflict_check_roster: vec!["conflict-check-passed".into()],
+        facilitator_roster: vec!["lead-expert-facilitator".into()],
+        accommodations: vec!["braille-display".into()],
+        power_target: 0.85,
+        precision_target: 0.02,
+        uncertainty_policy: "exact-finite-sample".into(),
+        multiplicity_policy: "familywise-error-rate".into(),
+        missingness_policy: "complete-case-analysis".into(),
+        stopping_rule: "preregistered-interim-bounds".into(),
+        allowed_deviations: vec![],
+        non_widening_restrictions: vec!["no-theorem-widening".into()],
+        analysis_principal_ids: vec!["expert-analyst-1".into()],
+        checker_principal_ids: vec!["expert-checker-1".into()],
+        disjoint_data_root: data_hash,
+        disjoint_artifact_root: artifact_hash,
+        disclosure_roster: vec!["max-adjudication-committee".into()],
+        privacy_retention_policy: "zero-raw-expert-retention".into(),
+        no_outcome_access_attestation: true,
+    };
+
+    let err = fs_govern::core_ux_replication::MaxUxReplicationSealV1::seal(spec, 1_700_000_100)
+        .expect_err("must refuse empty strata");
+    assert!(matches!(err, CoreUxReplicationError::MalformedInput { field: "domain_tcb_strata", .. }));
+}
+
+#[test]
+fn seal_digest_is_sensitive_to_every_core_root_mutation() {
+    let base_spec = sample_spec();
+    let base_seal = CoreUxReplicationSealV1::seal(base_spec.clone(), 1_700_000_000).unwrap();
+
+    let mut mutated_spec1 = base_spec.clone();
+    mutated_spec1.product_claim_revision = "rev-2026-07-30.2".into();
+    let seal1 = CoreUxReplicationSealV1::seal(mutated_spec1, 1_700_000_000).unwrap();
+    assert_ne!(base_seal.seal_digest, seal1.seal_digest);
+
+    let mut mutated_spec2 = base_spec.clone();
+    mutated_spec2.power_target = 0.90;
+    let seal2 = CoreUxReplicationSealV1::seal(mutated_spec2, 1_700_000_000).unwrap();
+    assert_ne!(base_seal.seal_digest, seal2.seal_digest);
+
+    let mut mutated_spec3 = base_spec.clone();
+    mutated_spec3.precision_target = 0.01;
+    let seal3 = CoreUxReplicationSealV1::seal(mutated_spec3, 1_700_000_000).unwrap();
+    assert_ne!(base_seal.seal_digest, seal3.seal_digest);
+
+    let seal4 = CoreUxReplicationSealV1::seal(base_spec, 1_700_000_001).unwrap();
+    assert_ne!(base_seal.seal_digest, seal4.seal_digest);
+}
+
