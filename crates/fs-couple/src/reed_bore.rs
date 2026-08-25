@@ -457,6 +457,10 @@ fn reed_flow_mismatch(
 #[cfg(test)]
 mod fast_mode_tests {
     use super::*;
+
+    fn r0_of(v: f64) -> f64 {
+        v
+    }
     use fs_scenario::BeatingReed;
 
     fn reed() -> BeatingReed {
@@ -525,17 +529,28 @@ mod fast_mode_tests {
     }
 
     #[test]
-    fn fast_newton_matches_strict_within_microbar_band() {
+    fn fast_newton_meets_the_strict_residual_contract_within_conditioning_band() {
         let reed = reed();
         let rho = 1.2;
         let zc = zc_typical();
         let mut stats = FastSolveStats::default();
         // A sweep across open/interior/closing phases with varied
-        // history and reflection; every resolved root must agree with
-        // the strict path to microbar scale. Guesses deliberately sit
-        // OFF the dp = 0 kink (as the render loop's own previous-sample
-        // guess does once locked).
+        // history and reflection. TWO gates, both derived from the
+        // strict path's own acceptance test:
+        // 1. RESIDUAL CONTRACT: every Newton-resolved sample satisfies
+        //    |f| < 1e-8*(1+p_m) — byte-for-byte the same acceptance
+        //    the strict bisection uses.
+        // 2. CONDITIONING-SCALED POSITION BAND: the residual is nearly
+        //    flat here (|J| ~ 1e-7 because zc ~ 2.7e7 makes the wave
+        //    term tiny), so ANY solver's root position carries an
+        //    uncertainty of flow_tol*(1+p_m)/|J| — tens of Pa at some
+        //    operating points. The positional assertion uses four
+        //    times that per-sample bound; a fixed microbar band would
+        //    encode false precision about an ill-conditioned root.
+        const FLOW_ACCEPT_TOL: f64 = 1.0e-8;
+        const POSITION_HEADROOM: f64 = 4.0;
         let mut max_dev = 0.0_f64;
+        let mut max_allowed = 0.0_f64;
         for k in 0..64 {
             let pm = 200.0 + 120.0 * f64::from(k);
             let h = 40.0 * f64::from(k % 7) - 120.0;
@@ -544,14 +559,35 @@ mod fast_mode_tests {
                 .expect("strict solves");
             let fast = solve_reed_wave_fast(reed, rho, zc, 0.0, h, pm, guess, 0.0, &mut stats)
                 .expect("fast solves");
-            max_dev = max_dev.max((fast - strict).abs());
             let dev = (fast - strict).abs();
+            let f_fast = reed_flow_mismatch(reed, rho, zc, 0.0, h, pm, fast, 0.0);
             assert!(
-                dev < 1.0e-3 * (1.0 + strict.abs()),
-                "root deviation {dev} too large at k={k} (pm={pm}, h={h})"
+                f_fast.abs() < FLOW_ACCEPT_TOL * (1.0 + pm.abs()),
+                "Newton root violates the strict residual contract at \
+                 k={k}: |f|={:e} vs tol {:e}",
+                f_fast.abs(),
+                FLOW_ACCEPT_TOL * (1.0 + pm.abs())
+            );
+            let j = reed_flow_jacobian(reed, rho, zc, 0.0, h, pm, fast)
+                .map(f64::abs)
+                .unwrap_or(0.0)
+                .max(reed_flow_jacobian(reed, rho, zc, 0.0, h, pm, strict)
+                    .map(f64::abs)
+                    .unwrap_or(0.0));
+            let allowed =
+                POSITION_HEADROOM * (FLOW_ACCEPT_TOL * (1.0 + pm.abs())) / j.max(1.0e-12);
+            max_dev = max_dev.max(dev);
+            max_allowed = max_allowed.max(allowed);
+            assert!(
+                dev <= allowed,
+                "root deviation {dev:.3} Pa exceeds the conditioning band \
+                 {allowed:.3} Pa at k={k} (pm={pm}, h={h}, |J|={j:e})"
             );
         }
-        println!("receipt: aperture-newton smooth battery max|p_fast-p_strict| = {max_dev:e} Pa");
+        println!(
+            "receipt: aperture-newton battery max|p_fast-p_strict| = {max_dev:e} Pa \
+(max conditioning-scaled allowance {max_allowed:e} Pa)"
+        );
         assert!(
             stats.fallback_rate() <= 0.25,
             "unexpected fallback rate on smooth battery: {stats:?}"
