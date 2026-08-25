@@ -221,12 +221,20 @@ macro_rules! algebra {
             }
 
             /// Largest absolute component (∞-norm) — the test metric.
+            ///
+            /// Returns `NaN` if any coefficient is `NaN`, positive infinity
+            /// if any coefficient is infinite (and none is `NaN`), and the
+            /// maximum absolute component otherwise.
             #[must_use]
             pub fn max_abs(&self) -> f64 {
                 let mut m = 0.0f64;
                 for &v in &self.0 {
-                    if v.abs() > m {
-                        m = v.abs();
+                    let a = v.abs();
+                    if a.is_nan() {
+                        return f64::NAN;
+                    }
+                    if a > m {
+                        m = a;
                     }
                 }
                 m
@@ -288,6 +296,61 @@ mod tests {
         let lhs = a.gp(&b).reverse();
         let rhs = b.reverse().gp(&a.reverse());
         assert!(lhs.sub(&rhs).max_abs() < 1e-12);
+    }
+
+    #[test]
+    fn max_abs_finite_and_special_values() {
+        // Pga zero
+        assert_eq!(Pga::zero().max_abs(), 0.0);
+
+        // Pga finite max
+        let mut p = Pga::zero();
+        p.0[3] = -7.5;
+        p.0[5] = 4.2;
+        assert_eq!(p.max_abs(), 7.5);
+
+        // Pga NaN propagation at various positions
+        for idx in [0, 7, 15] {
+            let mut p_nan = p;
+            p_nan.0[idx] = f64::NAN;
+            assert!(p_nan.max_abs().is_nan(), "Pga NaN at index {idx} must propagate");
+        }
+
+        // Pga Infinity propagation
+        let mut p_inf = p;
+        p_inf.0[2] = f64::NEG_INFINITY;
+        assert_eq!(p_inf.max_abs(), f64::INFINITY);
+        p_inf.0[10] = f64::INFINITY;
+        assert_eq!(p_inf.max_abs(), f64::INFINITY);
+
+        // Pga NaN takes precedence over Infinity
+        p_inf.0[0] = f64::NAN;
+        assert!(p_inf.max_abs().is_nan(), "NaN must take precedence over Infinity");
+
+        // Cga zero
+        assert_eq!(Cga::zero().max_abs(), 0.0);
+
+        // Cga finite max
+        let mut c = Cga::zero();
+        c.0[1] = -12.3;
+        c.0[31] = 9.8;
+        assert_eq!(c.max_abs(), 12.3);
+
+        // Cga NaN propagation at various positions
+        for idx in [0, 15, 31] {
+            let mut c_nan = c;
+            c_nan.0[idx] = f64::NAN;
+            assert!(c_nan.max_abs().is_nan(), "Cga NaN at index {idx} must propagate");
+        }
+
+        // Cga Infinity propagation
+        let mut c_inf = c;
+        c_inf.0[14] = f64::NEG_INFINITY;
+        assert_eq!(c_inf.max_abs(), f64::INFINITY);
+
+        // Cga NaN takes precedence over Infinity
+        c_inf.0[20] = f64::NAN;
+        assert!(c_inf.max_abs().is_nan(), "Cga NaN must take precedence over Infinity");
     }
 
     trait SinLike {

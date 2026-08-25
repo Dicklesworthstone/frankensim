@@ -18,6 +18,7 @@
 #   scripts/ci/solve_stage_producers_e2e.sh
 #       [--profile pr|full|recovery]
 #       [--through import-verify|assign|material-resolve|flow-network|conduction|qoi]
+#       [--case multi-region-volumetricization]
 #       [--artifact-dir PATH]
 #       [--binary PATH]
 #
@@ -36,6 +37,7 @@ MATERIAL_PACK="${FIXTURE_DIR}/aa6061.fsmcdpk"
 
 PROFILE="pr"
 THROUGH="flow-network"
+CASE=""
 ARTIFACT_DIR=""
 BINARY="${FRANKENSIM_BIN:-}"
 
@@ -67,6 +69,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --profile)      PROFILE="${2:-}"; shift 2 ;;
     --through)      THROUGH="${2:-}"; shift 2 ;;
+    --case)         CASE="${2:-}"; shift 2 ;;
     --artifact-dir) ARTIFACT_DIR="${2:-}"; shift 2 ;;
     --binary)       BINARY="${2:-}"; shift 2 ;;
     -h|--help)      usage ;;
@@ -75,7 +78,50 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "${PROFILE}" in pr|full|recovery) ;; *) die "unknown profile: ${PROFILE}" ;; esac
+[[ -z "${CASE}" ]] || [[ "${CASE}" == "multi-region-volumetricization" ]] \
+  || die "unknown case: ${CASE} (try --help)"
 [[ -n "${GAP_OWNER[${THROUGH}]+set}" ]] || die "unknown stage: ${THROUGH}"
+
+run_case_multi_region_volumetricization() {
+  # bead frankensim-s93ej.1 tail item (a), script-level form. HONESTY
+  # BOUNDARY: this exercises the production mesher journey at LIBRARY
+  # level through the tracked integration test; the fs-cli conduction
+  # STAGE remains a typed gap owned by frankensim-s93ej and is NOT
+  # claimed green by this case.
+  local fixture_fsml="${FIXTURE_DIR}/multi-region-interface.fsim"
+  local fixture_cold="${FIXTURE_DIR}/multi-region-cold-body.stl"
+  local fixture_hot="${FIXTURE_DIR}/multi-region-hot-body.stl"
+  for f in "${fixture_fsml}" "${fixture_cold}" "${fixture_hot}"; do
+    [[ -f "${f}" ]] || die "missing tracked fixture: ${f}"
+  done
+  export MRI_RETENTION_DIR="${ARTIFACT_DIR}/retention"
+  mkdir -p "${MRI_RETENTION_DIR}"
+  local invoked="cargo test -p fs-cli --test multi_region_pipeline"
+  log phase "case multi-region-volumetricization: ${invoked}"
+  if cargo test -p fs-cli --test multi_region_pipeline -- --nocapture >>"${LOG}" 2>&1; then
+    log check "PASS production mesher journey green (parse/import/resolve/volumetricize/audit/consumer-open)"
+  else
+    FAILURES=$((FAILURES + 1))
+    log check "FAIL production mesher journey refused or failed (see test output above)"
+  fi
+  local retained="${MRI_RETENTION_DIR}/labeled_complex.jsonl"
+  check "retained labeled complex exists" test -s "${retained}"
+  check "retention carries both region labels" \
+    grep -q '"region":1' "${retained}" && grep -q '"region":2' "${retained}"
+  check "retention carries 16 welded vertices" \
+    [[ "$(grep -c '"kind":"position"' "${retained}")" == "16" ]]
+  check "no exterior/cavity rows leaked into retention" \
+    ! grep -q '"region":0' "${retained}"
+  log summary "case multi-region-volumetricization complete; conduction STAGE gap remains owned by frankensim-s93ej"
+  printf 'OK: case multi-region-volumetricization finished with %d check failure(s); artifacts in %s\n'     "${FAILURES}" "${ARTIFACT_DIR}" >&2
+  [[ "${FAILURES}" == "0" ]]
+}
+
+if [[ -n "${CASE}" ]]; then
+  THROUGH="conduction"
+  run_case_multi_region_volumetricization
+  exit $?
+fi
 
 if [[ -z "${ARTIFACT_DIR}" ]]; then
   ARTIFACT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/solve-e2e-XXXXXX")"

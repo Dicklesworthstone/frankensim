@@ -41,8 +41,7 @@ fn as_cga(coefficients: &GaCoeffs<32>) -> Cga {
 }
 
 fn pga_residual_within(residual: &Pga, tolerance: f64) -> bool {
-    // max_abs deliberately ignores unordered NaN comparisons, so finiteness
-    // is a separate, load-bearing part of every generated numeric law.
+    // max_abs propagates NaN, and finiteness checks ensure all components are finite.
     residual.0.iter().all(|value| value.is_finite()) && residual.max_abs() < tolerance
 }
 

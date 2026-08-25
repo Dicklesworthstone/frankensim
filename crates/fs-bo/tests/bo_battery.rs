@@ -13,6 +13,7 @@ use fs_bo::{
     q_expected_improvement,
 };
 use fs_rand::StreamKey;
+use std::cell::Cell;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 fn log(case: &str, verdict: &str, detail: &str) {
@@ -185,6 +186,117 @@ fn kernel_dimension_mismatches_fail_fast() {
         "GP prediction must reject probe dimension mismatches"
     );
     log("kernel-dimensions", "pass", "mismatches fail fast");
+}
+
+#[test]
+fn acquisition_inputs_fail_before_numerical_work() {
+    assert!(catch_unwind(|| normal_bank(0, 1, 7)).is_err());
+    assert!(catch_unwind(|| normal_bank(1, 0, 7)).is_err());
+    assert!(catch_unwind(|| normal_bank(1, fs_rand::qmc::MAX_SOBOL_DIM + 1, 7)).is_err());
+
+    let gp = Gp::fit(
+        &[vec![0.25, 0.75]],
+        &[1.0],
+        Kernel {
+            family: Matern::FiveHalves,
+            signal: 1.0,
+            lengthscales: vec![0.5, 0.5],
+        },
+        1e-6,
+    );
+    assert!(
+        catch_unwind(AssertUnwindSafe(|| {
+            q_expected_improvement(&gp, &[], 1.0, &[0.0])
+        }))
+        .is_err()
+    );
+    assert!(
+        catch_unwind(AssertUnwindSafe(|| {
+            q_expected_improvement(&gp, &[vec![0.2, 0.3]], 1.0, &[])
+        }))
+        .is_err()
+    );
+    assert!(
+        catch_unwind(AssertUnwindSafe(|| {
+            q_expected_improvement(
+                &gp,
+                &[vec![0.2, 0.3], vec![0.4, 0.5]],
+                1.0,
+                &[0.0, 0.0, 99.0],
+            )
+        }))
+        .is_err(),
+        "a partial trailing normal-bank row must not be silently ignored"
+    );
+    log(
+        "acquisition-input-contracts",
+        "pass",
+        "empty, unsupported, and ragged normal banks fail before posterior work",
+    );
+}
+
+#[test]
+fn classic_bo_inputs_fail_before_objective_callbacks() {
+    let valid = BoConfig {
+        bounds: (0.0, 1.0),
+        family: Matern::FiveHalves,
+        log_box: (-2.0, 1.0),
+        hyper_starts: 1,
+        acq_starts: 1,
+        acq_evals: 1,
+        q: 1,
+        mc_samples: 1,
+        seed: 7,
+    };
+    let objective_calls = Cell::new(0_usize);
+    let mut objective = |_: &[f64]| {
+        objective_calls.set(objective_calls.get() + 1);
+        0.0
+    };
+    let mut invalid_q = valid.clone();
+    invalid_q.q = 0;
+    assert!(
+        catch_unwind(AssertUnwindSafe(|| {
+            minimize(&mut objective, 2, 1, 0, &invalid_q)
+        }))
+        .is_err()
+    );
+    assert_eq!(
+        objective_calls.get(),
+        0,
+        "invalid q must fail before callbacks"
+    );
+
+    let mut invalid_starts = valid.clone();
+    invalid_starts.acq_starts = 0;
+    assert!(
+        catch_unwind(AssertUnwindSafe(|| {
+            minimize(&mut objective, 2, 1, 1, &invalid_starts)
+        }))
+        .is_err()
+    );
+    assert_eq!(
+        objective_calls.get(),
+        0,
+        "invalid optimizer counts must fail before callbacks"
+    );
+
+    assert!(
+        catch_unwind(AssertUnwindSafe(|| {
+            minimize(&mut objective, 2, 0, 0, &valid)
+        }))
+        .is_err()
+    );
+    assert_eq!(
+        objective_calls.get(),
+        0,
+        "an empty initial design must fail before callbacks"
+    );
+    log(
+        "bo-input-contracts",
+        "pass",
+        "invalid classic BO counts fail before objective callbacks",
+    );
 }
 
 #[test]

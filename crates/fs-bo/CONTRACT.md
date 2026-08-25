@@ -88,7 +88,13 @@ acquisition surfaces.
 Structured panics on dimension mismatches, invalid fidelity indices,
 invalid TuRBO configuration knobs, and direct `fit` of non-SPD
 systems; the hyperparameter search path uses `try_fit` (rejection,
-not crash). `phi_inv` asserts p ∈ (0,1).
+not crash). `phi_inv` asserts p ∈ (0,1). Classic `bo::minimize`
+rejects unsupported/zero dimensions, an empty initial design, invalid finite
+boxes, zero batch/optimizer counts, and an empty q-EI sample budget before
+objective callbacks. `normal_bank` rejects empty or unsupported shapes before
+allocation; `q_expected_improvement` rejects empty, ragged, or non-finite banks
+before posterior evaluation rather than returning NaN or silently ignoring a
+partial row. Objective callbacks used by classic BO must return finite values.
 
 ## Determinism class
 

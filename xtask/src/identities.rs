@@ -10089,6 +10089,12 @@ fn reject_imported_function_dependencies(
     let semantic_type_token_indexes = rust_authority_type_token_indexes(&semantic_tokens)?;
     let lexical_bindings = rust_authority_lexical_bindings(fragment)?;
     let generated_item_macros = rust_visible_generated_item_macros(index, module);
+    if !declared_type_authorities.is_empty() {
+        eprintln!(
+            "PROBE-WALL-ENTRY authority={authority} set={:?} module={module}",
+            declared_type_authorities
+        );
+    }
     if tokens
         .iter()
         .enumerate()
@@ -10203,6 +10209,11 @@ fn reject_imported_function_dependencies(
                 && (binding.kind == RustImportBindingKind::Exact
                     || !rust_candidate_outranks_wildcard(index, &candidate, namespace))
             {
+                eprintln!(
+                    "PROBE-WALL-REFUSE authority={authority} token={} in_declared_set={}",
+                    token.text,
+                    declared_type_authorities.contains(token.text)
+                );
                 return Err(format!(
                     "{authority} references imported identifier {:?} through binding {:?}; imported helper authority and imported type/trait/operator authority must be declared explicitly",
                     token.text, binding.name

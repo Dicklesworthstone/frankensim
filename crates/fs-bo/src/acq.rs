@@ -103,17 +103,33 @@ pub fn expected_improvement(gp: &Gp, x: &[f64], f_best: f64, xi: f64) -> f64 {
 /// Deterministic q-point normal sample bank: `samples × q` z-values
 /// from scrambled Sobol through Φ⁻¹ (fixed per seed — the
 /// reparameterization's common random numbers).
+///
+/// # Panics
+/// Panics before allocation when `samples` is zero or cannot be indexed by
+/// the 32-bit Sobol sequence, when `q` is outside the embedded Sobol table,
+/// or when the requested row-major length overflows `usize`.
 #[must_use]
 pub fn normal_bank(samples: usize, q: usize, seed: u64) -> Vec<f64> {
+    assert!(samples > 0, "normal bank needs at least one sample");
+    let sample_count = u32::try_from(samples)
+        .expect("normal bank sample count must fit the 32-bit Sobol index space");
+    assert!(
+        (1..=fs_rand::qmc::MAX_SOBOL_DIM).contains(&q),
+        "normal bank width {q} outside 1..={} (embedded Sobol table)",
+        fs_rand::qmc::MAX_SOBOL_DIM
+    );
+    let bank_len = samples
+        .checked_mul(q)
+        .expect("normal bank row-major length overflow");
     let sobol = fs_rand::qmc::Sobol::scrambled(q, seed);
-    let mut bank = vec![0.0f64; samples * q];
+    let mut bank = vec![0.0f64; bank_len];
     let mut pt = vec![0.0f64; q];
-    for s in 0..samples {
-        // Skip the first point (all-zeros before scrambling can sit
-        // at the box corner); 1-based indexing keeps u in (0,1).
-        sobol.point(u32::try_from(s + 1).expect("bank fits u32"), &mut pt);
+    for (row, point_index) in (1..=sample_count).enumerate() {
+        // Skip the unscrambled all-zero corner. Owen scrambling can still
+        // produce an endpoint; the clamp below enforces phi_inv's open domain.
+        sobol.point(point_index, &mut pt);
         for (j, &u) in pt.iter().enumerate() {
-            bank[s * q + j] = phi_inv(u.clamp(1e-12, 1.0 - 1e-12));
+            bank[row * q + j] = phi_inv(u.clamp(1e-12, 1.0 - 1e-12));
         }
     }
     bank
@@ -122,9 +138,27 @@ pub fn normal_bank(samples: usize, q: usize, seed: u64) -> Vec<f64> {
 /// Batched q-EI for MINIMIZATION via the reparameterization
 /// f = μ + L·z over the fixed bank: mean of
 /// max(0, f* − minᵢ fᵢ(z)). Deterministic given the bank.
+///
+/// # Panics
+/// Panics before posterior evaluation when the batch is empty, `f_best` is
+/// non-finite, or the bank is empty, non-finite, or not exactly rectangular
+/// with one column per candidate.
 #[must_use]
 pub fn q_expected_improvement(gp: &Gp, xs: &[Vec<f64>], f_best: f64, bank: &[f64]) -> f64 {
     let q = xs.len();
+    assert!(q > 0, "q-EI needs at least one candidate");
+    assert!(f_best.is_finite(), "q-EI incumbent must be finite");
+    assert!(!bank.is_empty(), "q-EI normal bank must not be empty");
+    assert_eq!(
+        bank.len() % q,
+        0,
+        "q-EI normal bank length {} must be divisible by batch width {q}",
+        bank.len()
+    );
+    assert!(
+        bank.iter().all(|value| value.is_finite()),
+        "q-EI normal bank values must be finite"
+    );
     let (mu, lflat) = gp.predict_joint(xs);
     let samples = bank.len() / q;
     let mut acc = 0.0f64;

@@ -49,8 +49,76 @@ fn clamp_box(x: &mut [f64], lo: f64, hi: f64) {
     }
 }
 
+fn assert_valid_minimize_inputs(dim: usize, n_init: usize, iters: usize, config: &BoConfig) {
+    assert!(
+        (1..=fs_rand::qmc::MAX_SOBOL_DIM).contains(&dim),
+        "classic BO dimension {dim} outside 1..={} (use TuRBO above the embedded Sobol ceiling)",
+        fs_rand::qmc::MAX_SOBOL_DIM
+    );
+    assert!(n_init > 0, "classic BO needs at least one initial point");
+    assert!(
+        u32::try_from(n_init).is_ok(),
+        "classic BO initial-point count must fit the 32-bit Sobol index space"
+    );
+    let (lo, hi) = config.bounds;
+    assert!(
+        lo.is_finite() && hi.is_finite() && lo < hi,
+        "classic BO bounds must be finite and strictly increasing"
+    );
+    assert!(config.q > 0, "classic BO batch size q must be positive");
+    assert!(
+        config.q <= fs_rand::qmc::MAX_SOBOL_DIM,
+        "classic BO batch size q={} exceeds the embedded Sobol ceiling {}",
+        config.q,
+        fs_rand::qmc::MAX_SOBOL_DIM
+    );
+    if config.q > 1 {
+        assert!(
+            config.mc_samples > 0,
+            "batched q-EI needs at least one normal sample"
+        );
+        assert!(
+            u32::try_from(config.mc_samples).is_ok(),
+            "q-EI normal-sample count must fit the 32-bit Sobol index space"
+        );
+    }
+    if iters > 0 {
+        let (log_lo, log_hi) = config.log_box;
+        assert!(
+            log_lo.is_finite() && log_hi.is_finite() && log_lo < log_hi,
+            "classic BO hyperparameter log-box must be finite and strictly increasing"
+        );
+        assert!(
+            config.hyper_starts > 0,
+            "classic BO needs at least one hyperparameter start"
+        );
+        assert!(
+            u32::try_from(config.hyper_starts).is_ok(),
+            "classic BO hyperparameter-start count must fit the 32-bit Sobol index space"
+        );
+        assert!(
+            config.acq_starts > 0,
+            "classic BO needs at least one acquisition start"
+        );
+        assert!(
+            u32::try_from(config.acq_starts).is_ok(),
+            "classic BO acquisition-start count must fit the 32-bit Sobol index space"
+        );
+        assert!(
+            config.acq_evals > 0,
+            "classic BO needs a positive acquisition evaluation budget"
+        );
+    }
+}
+
 /// Run BO for MINIMIZATION from `n_init` Sobol seeds, `iters` batches
 /// of `q` acquisitions each.
+///
+/// # Panics
+/// Panics before the first objective callback when the dimension, initial
+/// design, bounds, batch size, or any used optimizer/sample count is outside
+/// the documented classic-BO domain. Panics at the offending callback when
+/// the objective returns a non-finite value.
 pub fn minimize(
     f: &mut dyn FnMut(&[f64]) -> f64,
     dim: usize,
@@ -58,6 +126,7 @@ pub fn minimize(
     iters: usize,
     config: &BoConfig,
 ) -> BoReport {
+    assert_valid_minimize_inputs(dim, n_init, iters, config);
     let (lo, hi) = config.bounds;
     let sobol = fs_rand::qmc::Sobol::scrambled(dim, config.seed);
     let mut xs: Vec<Vec<f64>> = Vec::new();
@@ -66,7 +135,12 @@ pub fn minimize(
     for s in 0..n_init {
         sobol.point(u32::try_from(s + 1).expect("few inits"), &mut pt);
         let x: Vec<f64> = pt.iter().map(|u| (hi - lo).mul_add(*u, lo)).collect();
-        ys.push(f(&x));
+        let value = f(&x);
+        assert!(
+            value.is_finite(),
+            "classic BO objective returned a non-finite value at initial point {s}"
+        );
+        ys.push(value);
         xs.push(x);
     }
     let mut best_trace: Vec<f64> = vec![ys.iter().copied().fold(f64::INFINITY, f64::min)];
@@ -90,7 +164,7 @@ pub fn minimize(
             config.seed ^ (it as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15),
         );
         let f_best = ys_std.iter().copied().fold(f64::INFINITY, f64::min);
-        let batch: Vec<Vec<f64>> = if config.q <= 1 {
+        let batch: Vec<Vec<f64>> = if config.q == 1 {
             vec![argmax_acq(
                 &|x: &[f64]| expected_improvement(&gp, x, f_best, 0.0),
                 dim,
@@ -131,7 +205,13 @@ pub fn minimize(
             chosen
         };
         for x in batch {
-            ys.push(f(&x));
+            let value = f(&x);
+            assert!(
+                value.is_finite(),
+                "classic BO objective returned a non-finite value at adaptive point {}",
+                xs.len()
+            );
+            ys.push(value);
             xs.push(x);
         }
         best_trace.push(ys.iter().copied().fold(f64::INFINITY, f64::min));
