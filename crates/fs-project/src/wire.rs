@@ -21,12 +21,13 @@ use fs_scenario::Violation;
 
 use crate::FSIM_VERSION;
 use crate::spec::{
-    AirflowLeakage, Budgets, ConsequenceClass, Cooling, DecisionGate, DefaultReceipt, EntityDecl,
-    Envelope, Fan, FanCurveDecl, FanCurvePoint, FanToleranceBasis, GeometryArtifact,
-    GeometryAssignment, InterfaceCardBinding, InterfaceState, MaterialBinding, Metadata,
-    OutputRequest, PerfectContactBinding, PowerDissipation, ProjectSpec, RequirementDirection,
-    RequirementSeverity, RequirementSource, RequirementSourceKind, SafetyFactorPolicy, Seeds,
-    SolverSettings, ThermalLimit, UnitsDoctrine, Vent, Versions,
+    AirflowLeakage, Budgets, ConductionRegion, ConductionSetup, ConsequenceClass, Cooling,
+    DecisionGate, DefaultReceipt, EntityDecl, Envelope, Fan, FanCurveDecl, FanCurvePoint,
+    FanToleranceBasis, GeometryArtifact, GeometryAssignment, InterfaceCardBinding,
+    InterfaceState, MaterialBinding, Metadata, OutputRequest, PerfectContactBinding,
+    PowerDissipation, ProjectSpec, RequirementDirection, RequirementSeverity, RequirementSource,
+    RequirementSourceKind, SafetyFactorPolicy, Seeds, SolverSettings, ThermalBoundary,
+    ThermalBoundaryCondition, ThermalLimit, UnitsDoctrine, Vent, Versions,
 };
 
 /// Domain for canonical `.fsim` byte hashing.
@@ -197,6 +198,15 @@ fn qty(value: QtyAny) -> Result<Node, ProjectError> {
         detail: error.to_string(),
         hint: "quantities must be finite and canonically spellable".to_string(),
     })
+}
+
+fn qty_vec3(value: [QtyAny; 3]) -> Result<Node, ProjectError> {
+    Ok(list(vec![
+        sym("vec3"),
+        qty(value[0])?,
+        qty(value[1])?,
+        qty(value[2])?,
+    ]))
 }
 
 /// Lower a project to the envelope AST. Absent sections are simply not
@@ -568,6 +578,62 @@ fn lower_fan_system_decl(decl: &crate::fansystem::FanSystemDecl) -> Result<Node,
     ]))
 }
 
+fn lower_conduction(setup: &ConductionSetup) -> Result<Node, ProjectError> {
+    let mut regions = vec![sym("regions")];
+    for region in &setup.regions {
+        regions.push(list(vec![
+            sym("region"),
+            kw("name"),
+            text(&region.region),
+            kw("seed"),
+            qty_vec3(region.seed)?,
+        ]));
+    }
+
+    let mut boundaries = vec![sym("boundaries")];
+    for boundary in &setup.boundaries {
+        let row = match &boundary.condition {
+            ThermalBoundaryCondition::FixedTemperature { temperature } => list(vec![
+                sym("fixed-temperature"),
+                kw("target"),
+                text(&boundary.target),
+                kw("temperature"),
+                qty(*temperature)?,
+            ]),
+            ThermalBoundaryCondition::HeatFlux { outward_flux } => list(vec![
+                sym("heat-flux"),
+                kw("target"),
+                text(&boundary.target),
+                kw("outward-flux"),
+                qty(*outward_flux)?,
+            ]),
+            ThermalBoundaryCondition::Convection {
+                coefficient,
+                reference_temperature,
+            } => list(vec![
+                sym("convection"),
+                kw("target"),
+                text(&boundary.target),
+                kw("coefficient"),
+                qty(*coefficient)?,
+                kw("reference-temperature"),
+                qty(*reference_temperature)?,
+            ]),
+        };
+        boundaries.push(row);
+    }
+
+    Ok(list(vec![
+        sym("conduction"),
+        kw("adiabatic-remainder"),
+        boolean(setup.adiabatic_remainder),
+        kw("regions"),
+        list(regions),
+        kw("boundaries"),
+        list(boundaries),
+    ]))
+}
+
 fn lower_cooling(cooling: &Cooling, sections: &mut Vec<Node>) -> Result<(), ProjectError> {
     let mut fans = vec![sym("fans")];
     for fan in &cooling.fans {
@@ -611,6 +677,9 @@ fn lower_cooling(cooling: &Cooling, sections: &mut Vec<Node>) -> Result<(), Proj
     }
     if let Some(fan_system) = &cooling.fan_system {
         cooling_sections.push(lower_fan_system_decl(fan_system)?);
+    }
+    if let Some(conduction) = &cooling.conduction {
+        cooling_sections.push(lower_conduction(conduction)?);
     }
     sections.push(list(cooling_sections));
     Ok(())
@@ -1103,6 +1172,47 @@ fn expect_vec3(node: Option<&Node>, context: &str, out: &mut Vec<Violation>) -> 
         expect_float(items.get(1), &format!("{context}[0]"), out),
         expect_float(items.get(2), &format!("{context}[1]"), out),
         expect_float(items.get(3), &format!("{context}[2]"), out),
+    ]
+}
+
+fn expect_qty_vec3(
+    node: Option<&Node>,
+    context: &str,
+    out: &mut Vec<Violation>,
+) -> [QtyAny; 3] {
+    let Some(Node {
+        kind: NodeKind::List(items),
+        ..
+    }) = node
+    else {
+        out.push(Violation {
+            code: "project-malformed-clause",
+            what: format!("`{context}` expected `(vec3 <x-qty> <y-qty> <z-qty>)`"),
+            fix: format!("spell `{context}` as three explicit length quantities"),
+        });
+        return [QtyAny::dimensionless(f64::NAN); 3];
+    };
+    if !matches!(
+        items.first(),
+        Some(Node {
+            kind: NodeKind::Symbol(head),
+            ..
+        }) if head == "vec3"
+    ) || items.len() != 4
+    {
+        out.push(Violation {
+            code: "project-malformed-clause",
+            what: format!(
+                "`{context}` expected exactly `(vec3 <x-qty> <y-qty> <z-qty>)`"
+            ),
+            fix: format!("spell `{context}` as three explicit length quantities"),
+        });
+        return [QtyAny::dimensionless(f64::NAN); 3];
+    }
+    [
+        expect_qty(items.get(1), &format!("{context}[0]"), out),
+        expect_qty(items.get(2), &format!("{context}[1]"), out),
+        expect_qty(items.get(3), &format!("{context}[2]"), out),
     ]
 }
 
@@ -2069,6 +2179,7 @@ fn read_cooling(
     let mut leakage = None;
     let mut airflow_leakage = None;
     let mut fan_system = None;
+    let mut conduction = None;
     for node in body {
         match section_name(node) {
             Some(("fans", inner)) => {
@@ -2133,12 +2244,16 @@ fn read_cooling(
             Some(("fan-system", inner)) => {
                 fan_system = read_fan_system(inner, out, defaults);
             }
+            Some(("conduction", inner)) => {
+                conduction = read_conduction(inner, out);
+            }
             _ => {
                 out.push(Violation {
                     code: "project-unknown-field",
                     what: "`cooling` carries an unknown subsection".to_string(),
                     fix: "cooling contains exactly `(fans ...)`, `(vents ...)`, \
-                          `(leakage ...)`, and optionally `(airflow-leakage ...)`"
+                          `(leakage ...)`, `(airflow-leakage ...)`, `(fan-system ...)`, \
+                          and optionally `(conduction ...)`"
                         .to_string(),
                 });
             }
@@ -2158,6 +2273,148 @@ fn read_cooling(
         leakage,
         airflow_leakage,
         fan_system,
+        conduction,
+    })
+}
+
+fn read_conduction(
+    body: &[Node],
+    out: &mut Vec<Violation>,
+) -> Option<ConductionSetup> {
+    let pairs = read_pairs(
+        body,
+        "conduction",
+        &["adiabatic-remainder", "regions", "boundaries"],
+        out,
+    );
+    let adiabatic_remainder = expect_boolean(
+        field(&pairs, "adiabatic-remainder"),
+        "conduction.adiabatic-remainder",
+        out,
+    );
+
+    let mut regions = Vec::new();
+    if let Some(Node {
+        kind: NodeKind::List(regions_list),
+        ..
+    }) = field(&pairs, "regions")
+    {
+        for region_node in regions_list.iter().skip(1) {
+            let Some(("region", region_body)) = section_name(region_node) else {
+                out.push(Violation {
+                    code: "project-malformed-clause",
+                    what: "`conduction.regions` rows must be `(region ...)`".to_string(),
+                    fix: "declare `(region :name ... :seed ...)`".to_string(),
+                });
+                continue;
+            };
+            let region_pairs = read_pairs(region_body, "region", &["name", "seed"], out);
+            let name = expect_str(field(&region_pairs, "name"), "conduction.region.name", out);
+            let seed = expect_qty_vec3(field(&region_pairs, "seed"), "conduction.region.seed", out);
+            regions.push(ConductionRegion {
+                region: name,
+                seed,
+            });
+        }
+    }
+
+    let mut boundaries = Vec::new();
+    if let Some(Node {
+        kind: NodeKind::List(boundaries_list),
+        ..
+    }) = field(&pairs, "boundaries")
+    {
+        for boundary_node in boundaries_list.iter().skip(1) {
+            match section_name(boundary_node) {
+                Some(("fixed-temperature", b_body)) => {
+                    let b_pairs = read_pairs(
+                        b_body,
+                        "fixed-temperature",
+                        &["target", "temperature"],
+                        out,
+                    );
+                    let target = expect_str(
+                        field(&b_pairs, "target"),
+                        "conduction.boundary.target",
+                        out,
+                    );
+                    let temperature = expect_qty(
+                        field(&b_pairs, "temperature"),
+                        "conduction.boundary.temperature",
+                        out,
+                    );
+                    boundaries.push(ThermalBoundary {
+                        target,
+                        condition: ThermalBoundaryCondition::FixedTemperature { temperature },
+                    });
+                }
+                Some(("heat-flux", b_body)) => {
+                    let b_pairs = read_pairs(
+                        b_body,
+                        "heat-flux",
+                        &["target", "outward-flux"],
+                        out,
+                    );
+                    let target = expect_str(
+                        field(&b_pairs, "target"),
+                        "conduction.boundary.target",
+                        out,
+                    );
+                    let outward_flux = expect_qty(
+                        field(&b_pairs, "outward-flux"),
+                        "conduction.boundary.outward-flux",
+                        out,
+                    );
+                    boundaries.push(ThermalBoundary {
+                        target,
+                        condition: ThermalBoundaryCondition::HeatFlux { outward_flux },
+                    });
+                }
+                Some(("convection", b_body)) => {
+                    let b_pairs = read_pairs(
+                        b_body,
+                        "convection",
+                        &["target", "coefficient", "reference-temperature"],
+                        out,
+                    );
+                    let target = expect_str(
+                        field(&b_pairs, "target"),
+                        "conduction.boundary.target",
+                        out,
+                    );
+                    let coefficient = expect_qty(
+                        field(&b_pairs, "coefficient"),
+                        "conduction.boundary.coefficient",
+                        out,
+                    );
+                    let reference_temperature = expect_qty(
+                        field(&b_pairs, "reference-temperature"),
+                        "conduction.boundary.reference-temperature",
+                        out,
+                    );
+                    boundaries.push(ThermalBoundary {
+                        target,
+                        condition: ThermalBoundaryCondition::Convection {
+                            coefficient,
+                            reference_temperature,
+                        },
+                    });
+                }
+                _ => {
+                    out.push(Violation {
+                        code: "project-malformed-clause",
+                        what: "`conduction.boundaries` rows must be `(fixed-temperature ...)`, `(heat-flux ...)`, or `(convection ...)`".to_string(),
+                        fix: "declare one of the supported thermal boundary condition types".to_string(),
+                    });
+                }
+            }
+        }
+    }
+
+    Some(ConductionSetup {
+        regions,
+        boundaries,
+        adiabatic_remainder,
     })
 }
 

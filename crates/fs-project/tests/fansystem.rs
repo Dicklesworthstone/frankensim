@@ -455,6 +455,7 @@ mod wire_surface {
                 leakage: watts(2.5),
                 airflow_leakage: None,
                 fan_system: Some(super::single_system()),
+                conduction: None,
             }),
             envelope: Some(Envelope {
                 ambient_lo: kelvin(273.15),

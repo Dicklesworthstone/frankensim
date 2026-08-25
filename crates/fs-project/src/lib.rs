@@ -23,10 +23,11 @@ pub mod wire;
 /// The current `.fsim` schema version. Readers admit exactly this version;
 /// older envelopes must pass through [`migration::migrate_envelope`].
 ///
-/// Version 2 adds the optional `(fan-system ...)` cooling subsection (bead
-/// frn2i.1); version-1 documents are valid version-2 documents unchanged,
-/// and the migration is the receipted envelope rewrite.
-pub const FSIM_VERSION: u32 = 2;
+/// Version 3 adds the optional `(conduction ...)` cooling subsection (bead
+/// frankensim-s93ej.3). Version-2 documents are valid version-3 documents
+/// unchanged, and the migration is a receipted envelope rewrite. Version 2
+/// similarly added the optional `(fan-system ...)` subsection (bead frn2i.1).
+pub const FSIM_VERSION: u32 = 3;
 
 pub use assignment::{
     ConductionInterfaceLimits, ConductionInterfaceResolution, ConductionSourceFace,
@@ -52,12 +53,13 @@ pub use migration::{
     parse_sexpr_migrating,
 };
 pub use spec::{
-    AirflowLeakage, Budgets, ConsequenceClass, Cooling, DecisionGate, DefaultReceipt, EntityDecl,
-    Envelope, Fan, FanCurveDecl, FanCurvePoint, FanToleranceBasis, GeometryArtifact,
-    GeometryAssignment, InterfaceCardBinding, InterfaceState, MaterialBinding, Metadata,
-    OutputRequest, PerfectContactBinding, PowerDissipation, ProjectSpec, RequirementDirection,
-    RequirementSeverity, RequirementSource, RequirementSourceKind, RequirementSourceReview,
-    SafetyFactorPolicy, Seeds, SolverSettings, ThermalLimit, UnitsDoctrine, Vent, Versions,
+    AirflowLeakage, Budgets, ConductionRegion, ConductionSetup, ConsequenceClass, Cooling,
+    DecisionGate, DefaultReceipt, EntityDecl, Envelope, Fan, FanCurveDecl, FanCurvePoint,
+    FanToleranceBasis, GeometryArtifact, GeometryAssignment, InterfaceCardBinding,
+    InterfaceState, MaterialBinding, Metadata, OutputRequest, PerfectContactBinding,
+    PowerDissipation, ProjectSpec, RequirementDirection, RequirementSeverity, RequirementSource,
+    RequirementSourceKind, RequirementSourceReview, SafetyFactorPolicy, Seeds, SolverSettings,
+    ThermalBoundary, ThermalBoundaryCondition, ThermalLimit, UnitsDoctrine, Vent, Versions,
     requirement_source_reviews,
 };
 pub use wire::{

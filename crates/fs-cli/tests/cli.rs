@@ -123,6 +123,7 @@ fn valid_project() -> ProjectSpec {
             leakage: watts(0.0),
             airflow_leakage: None,
             fan_system: None,
+            conduction: None,
         }),
         envelope: Some(Envelope {
             ambient_lo: kelvin(293.15),

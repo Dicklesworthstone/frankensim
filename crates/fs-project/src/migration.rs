@@ -4,11 +4,11 @@
 //! bytes under the current version and binds both byte strings into a
 //! [`ProjectMigrationReceipt`]. There is no implicit migration path.
 //!
-//! Version 1 is the first real schema version, so the only registered rule is
-//! the synthetic proof rule from version 0: a version-0 envelope differing
-//! from version 1 solely in its declared version. It exists to prove the
-//! receipt machinery end to end (bead f85xj.6.1's acceptance criterion), and
-//! it says so in its name.
+//! Version 1 is the first real schema version. The registry retains the
+//! synthetic proof rule from version 0 plus the released v1→v2 fan-system and
+//! v2→v3 conduction accretions. Both released migrations preserve the payload
+//! and rewrite only the envelope and internal schema declarations because the
+//! added subsections are optional; no physical input is invented.
 
 use fs_blake3::ContentHash;
 
@@ -29,6 +29,11 @@ pub enum MigrationRule {
     /// default for documents that do carry the new section: version-1
     /// readers refuse them as unknown subsections.
     CoolingFanSystemV2,
+    /// Version 2 to 3: the cooling section gains the optional
+    /// `(conduction ...)` subsection (bead frankensim-s93ej.3). Existing
+    /// version-2 documents carry no implicit conduction inputs and remain
+    /// semantically unchanged after the receipted envelope rewrite.
+    CoolingConductionV3,
 }
 
 impl MigrationRule {
@@ -38,6 +43,7 @@ impl MigrationRule {
         match self {
             MigrationRule::SyntheticV0EnvelopeRewrite => "synthetic-v0-envelope-rewrite",
             MigrationRule::CoolingFanSystemV2 => "cooling-fan-system-v2",
+            MigrationRule::CoolingConductionV3 => "cooling-conduction-v3",
         }
     }
 
@@ -47,6 +53,7 @@ impl MigrationRule {
         match self {
             MigrationRule::SyntheticV0EnvelopeRewrite => 0,
             MigrationRule::CoolingFanSystemV2 => 1,
+            MigrationRule::CoolingConductionV3 => 2,
         }
     }
 }
@@ -148,6 +155,7 @@ pub fn migrate_envelope(
     let rule = match declared_version {
         0 => MigrationRule::SyntheticV0EnvelopeRewrite,
         1 => MigrationRule::CoolingFanSystemV2,
+        2 => MigrationRule::CoolingConductionV3,
         v if v == FSIM_VERSION => {
             return Err(ProjectError {
                 code: "fsim-migration-not-needed",
@@ -179,7 +187,7 @@ pub fn migrate_envelope(
     let envelope_rewritten = format!("{new_prefix}{rest}");
     let migrated = match rule {
         MigrationRule::SyntheticV0EnvelopeRewrite => envelope_rewritten,
-        MigrationRule::CoolingFanSystemV2 => {
+        MigrationRule::CoolingFanSystemV2 | MigrationRule::CoolingConductionV3 => {
             // The document's internal `versions.schema` field must move with
             // the envelope: the validator admits only the current schema.
             // The rewrite is exactly these two byte strings, never a
