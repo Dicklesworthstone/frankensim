@@ -3492,11 +3492,8 @@ fn lower_thermal_interfaces(
         return Ok(None);
     }
     let library = cards.library();
-    let bindings = resolve_bindings(
-        spec,
-        &library,
-        &BindingRequirements::thermal_steady_v1(),
-    );
+    let requirements = BindingRequirements::thermal_steady_v1();
+    let bindings = resolve_bindings(spec, &library, &requirements);
     if !bindings.admissible() {
         let first = &bindings.violations[0];
         return Err(conduction_error(
@@ -3536,7 +3533,7 @@ fn lower_thermal_interfaces(
             .properties
             .iter()
             .find(|property| {
-                property.property == fs_project::THERMAL_CONTACT_RESISTANCE_PROPERTY
+                property.property == fs_conduction::AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY
             })
             .ok_or_else(|| {
                 conduction_error(
@@ -3563,7 +3560,7 @@ fn lower_thermal_interfaces(
             )
         })?;
         let point = QueryPoint::new()
-            .with(fs_conduction::TEMPERATURE_AXIS, binding.range_lo)
+            .with(requirements.temperature_axis.clone(), binding.range_lo)
             .map_err(|error| {
                 conduction_error(
                     "cli-solve-conduction-interface-card",
@@ -3644,19 +3641,6 @@ fn conduction_receipt(
                 "declare region seeds and thermal boundary laws under cooling.conduction",
             )
         })?;
-    if spec
-        .assembly
-        .as_deref()
-        .unwrap_or(&[])
-        .iter()
-        .any(|decl| matches!(decl, EntityDecl::Interface { .. }))
-    {
-        return Err(conduction_error(
-            "cli-solve-conduction-interface-gap",
-            "the project declares material interfaces, but contact-law lowering is not integrated into this conduction slice",
-            "complete frankensim-s93ej thermal-contact integration; never substitute perfect contact silently",
-        ));
-    }
     let geometry = spec.geometry.as_deref().unwrap_or(&[]);
     if geometry.len() != context.verified_imports.len()
         || geometry.len() != context.import_sources.len()
@@ -3784,22 +3768,81 @@ fn conduction_receipt(
             .map(|region| region.0)
             .collect();
         let (table, region_to_material, fallback) = material_models(spec, cards, &region_ids)?;
-        let (mesh, element_materials) = fs_conduction::ElementMaterials::bind_labeled_volume(
+        let element_materials = fs_conduction::ElementMaterials::from_region_ids(
             table,
-            TetComplex::from_tets(labeled.positions().len(), labeled.tets().to_vec()),
-            labeled.positions().to_vec(),
             &labels,
             &region_to_material,
         )
         .map_err(|error| {
             conduction_error(
                 "cli-solve-conduction-operator",
-                format!("heterogeneous conduction operator binding refused: {error}"),
-                "repair region labels, material bindings, or the audited tet complex",
+                format!("heterogeneous material assignment refused: {error}"),
+                "repair region labels or material bindings",
+            )
+        })?;
+        let mesh = fs_conduction::ConductionMesh::new_region_owned(
+            TetComplex::from_tets(labeled.positions().len(), labeled.tets().to_vec()),
+            labeled.positions().to_vec(),
+            &labels,
+        )
+        .map_err(|error| {
+            conduction_error(
+                "cli-solve-conduction-operator",
+                format!("region-owned conduction mesh binding refused: {error}"),
+                "repair the audited tet complex or its region labels",
+            )
+        })?;
+        element_materials.validate_for(&mesh).map_err(|error| {
+            conduction_error(
+                "cli-solve-conduction-operator",
+                format!("heterogeneous material assignment does not fit the mesh: {error}"),
+                "report the inconsistent region-owned mesh lowering",
             )
         })?;
         let source = conduction_source(spec, &mesh, &labels, &region_ids, &audited)?;
-        let boundary = conduction_boundary(setup, &mesh, &audited, &surfaces, &regions)?;
+        let interface_resolution = resolve_conduction_interface_pairs(
+            spec,
+            &library,
+            assignment_limits(limits),
+            ConductionInterfaceLimits {
+                max_source_faces: ConductionInterfaceLimits::DEFAULT
+                    .max_source_faces
+                    .min(limits.max_selected_faces),
+            },
+            &mesh,
+            &cx,
+        );
+        if work.is_requested() {
+            return Err(cancelled());
+        }
+        if !interface_resolution.admissible() {
+            let first = &interface_resolution.violations[0];
+            return Err(conduction_error(
+                first.code,
+                format!(
+                    "conduction interface lowering found {} violation(s); first: {}",
+                    interface_resolution.violations.len(),
+                    first.what
+                ),
+                first.fix.clone(),
+            ));
+        }
+        let interface_faces = interface_resolution
+            .pairs
+            .iter()
+            .flat_map(|pair| [pair.from_boundary_slot, pair.to_boundary_slot])
+            .map(|slot| coordinate_face_key(mesh.positions(), mesh.boundary()[slot].vertices))
+            .collect::<BTreeSet<_>>();
+        let boundary = conduction_boundary(
+            setup,
+            &mesh,
+            &audited,
+            &surfaces,
+            &regions,
+            &interface_faces,
+        )?;
+        let interfaces =
+            lower_thermal_interfaces(spec, cards, &mesh, &boundary, &interface_resolution)?;
         let mut config = fs_conduction::SolveConfig::default();
         if let Some(solver) = &spec.solver {
             config.stop.residual_rtol = solver.tolerance_rel;
@@ -3809,17 +3852,17 @@ fn conduction_receipt(
                 (envelope.ambient_lo.value + envelope.ambient_hi.value) / 2.0,
             );
         }
-        let solution = fs_conduction::solve(
-            &cx,
-            fs_conduction::ConductionProblem {
-                mesh: &mesh,
-                boundary: &boundary,
-                material: &fallback,
-                element_materials: Some(&element_materials),
-                source: &source,
-            },
-            config,
-        )
+        let problem = fs_conduction::ConductionProblem {
+            mesh: &mesh,
+            boundary: &boundary,
+            material: &fallback,
+            element_materials: Some(&element_materials),
+            source: &source,
+        };
+        let solution = match interfaces.as_ref() {
+            Some(interfaces) => fs_conduction::solve_with_interfaces(&cx, problem, interfaces, config),
+            None => fs_conduction::solve(&cx, problem, config),
+        }
         .map_err(|error| match error {
             fs_conduction::ConductionError::Cancelled { .. } => cancelled(),
             other => conduction_error(
@@ -3828,9 +3871,18 @@ fn conduction_receipt(
                 "inspect the declared boundary anchor, material span, and solver tolerance",
             ),
         })?;
-        Ok((audited, mesh, solution))
+        let interface_evidence = (!interface_resolution.pairs.is_empty())
+            .then(|| interface_evidence_bytes(run, &interface_resolution))
+            .transpose()?;
+        Ok((
+            audited,
+            mesh,
+            solution,
+            interface_resolution.pairs.len(),
+            interface_evidence,
+        ))
     })?;
-    let (audited, mesh, solution) = result;
+    let (audited, mesh, solution, interface_pair_count, interface_evidence) = result;
     work.checkpoint(SolveEvidencePhase::AssignmentDerivation, None, 1)
         .map_err(|_| cancelled())?;
 
@@ -3877,6 +3929,30 @@ fn conduction_receipt(
         .reduce(f64::max)
         .expect("conduction solution is nonempty");
     let report = &solution.report;
+    let interface_evidence_artifact = interface_evidence.as_deref().map(hash_bytes);
+    let interface_evidence_json = interface_evidence_artifact
+        .map(|artifact| json_string(&artifact.to_hex()))
+        .unwrap_or_else(|| "null".to_string());
+    let interface_fluxes = report
+        .interface_fluxes
+        .iter()
+        .map(|flux| {
+            Ok(format!(
+                "{{\"interface\":{},\"area_m2\":{},\"conductance_w_per_k\":{},\
+                 \"mean_jump_k\":{},\"heat_rate_a_to_b_w\":{},\"card\":{}}}",
+                json_string(&flux.interface),
+                finite("interface.area_m2", flux.area_m2)?,
+                finite(
+                    "interface.conductance_w_per_k",
+                    flux.conductance_w_per_k
+                )?,
+                finite("interface.mean_jump_k", flux.mean_jump_k)?,
+                finite("interface.heat_rate_a_to_b_w", flux.heat_rate_a_to_b_w)?,
+                json_string(&flux.card_identity.to_hex()),
+            ))
+        })
+        .collect::<Result<Vec<_>, SolveRefusal>>()?
+        .join(",");
     let method = match audited.witness().method {
         fs_mesh::VolumeMethod::ExactDyadic => "exact-dyadic",
         fs_mesh::VolumeMethod::MeasuredF64 => "measured-f64",
@@ -3887,6 +3963,7 @@ fn conduction_receipt(
          \"regions\":{},\"length_unit\":\"m\",\"volume_audit\":{}}},\
          \"material_assignment\":\"{:016x}\",\"solution_artifact\":{},\
          \"temperature\":{{\"unit\":\"K\",\"min\":{},\"max\":{}}},\
+         \"interfaces\":{{\"pair_count\":{},\"evidence_artifact\":{},\"fluxes\":[{}]}},\
          \"solver\":{{\"iterations\":{},\"stop_reason\":{},\"final_residual\":{},\
          \"residual_threshold\":{},\"free_dofs\":{}}},\
          \"energy\":{{\"source_w\":{},\"neumann_out_w\":{},\"robin_out_w\":{},\
@@ -3905,6 +3982,9 @@ fn conduction_receipt(
         json_string(&solution_artifact.to_hex()),
         finite("temperature.min", min_temperature)?,
         finite("temperature.max", max_temperature)?,
+        interface_pair_count,
+        interface_evidence_json,
+        interface_fluxes,
         report.iterations,
         json_string(report.stop_reason.tag()),
         finite("final_residual", report.final_residual)?,
@@ -3922,6 +4002,9 @@ fn conduction_receipt(
     let charge = solution_bytes
         .len()
         .checked_add(receipt.len())
+        .and_then(|bytes| {
+            bytes.checked_add(interface_evidence.as_ref().map_or(0, Vec::len))
+        })
         .and_then(|bytes| u64::try_from(bytes).ok())
         .ok_or_else(|| {
             invocation_work_refusal(
@@ -3936,13 +4019,21 @@ fn conduction_receipt(
         .map_err(|error| invocation_work_refusal(Some(run), Some(stage), error))?;
     work.checkpoint(SolveEvidencePhase::AssignmentDerivation, None, u64::MAX)
         .map_err(|_| cancelled())?;
+    let mut artifacts = vec![RetainedSideArtifact {
+        kind: CONDUCTION_SOLUTION_KIND,
+        artifact: solution_artifact,
+        bytes: solution_bytes,
+    }];
+    if let (Some(artifact), Some(bytes)) = (interface_evidence_artifact, interface_evidence) {
+        artifacts.push(RetainedSideArtifact {
+            kind: CONDUCTION_INTERFACE_EVIDENCE_KIND,
+            artifact,
+            bytes,
+        });
+    }
     Ok((
         receipt,
-        vec![RetainedSideArtifact {
-            kind: CONDUCTION_SOLUTION_KIND,
-            artifact: solution_artifact,
-            bytes: solution_bytes,
-        }],
+        artifacts,
     ))
 }
 
