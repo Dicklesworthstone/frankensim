@@ -183,9 +183,10 @@ fn multi_region_artifacts_survive_retention_and_recheck() {
         let payload = lines.join("\n");
         let root = hash_domain(RETENTION_DOMAIN, payload.as_bytes());
         let root_hex: String = root.0.iter().map(|b| format!("{b:02x}")).collect();
-        let dir = std::env::temp_dir().join("mri-retention");
+        let dir =
+            std::env::temp_dir().join(format!("frankensim-mri-retention-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("artifact dir");
-        let artifact = dir.join("labeled_complex.jsonl");
+        let artifact = dir.join(format!("labeled_complex-{root_hex}.jsonl"));
         std::fs::write(&artifact, &payload).expect("retain");
 
         // -- independent recheck from disk bytes alone -------------------
