@@ -20049,6 +20049,28 @@ mod right { pub const DUPLICATE: u32 = 2; }
     }
 
     #[test]
+    fn probe_cross_file_declared_fn_call_admission() {
+        let root = fixture_root("probe-cross-file-fn-call");
+        let helper_path = root.join("crates/shared/src/schema.rs");
+        std::fs::create_dir_all(helper_path.parent().expect("helper parent"))
+            .expect("helper directory");
+        std::fs::write(
+            &helper_path,
+            "pub fn shared_stamp(x: u64) -> u64 { x.wrapping_add(7) }\n",
+        )
+        .expect("helper authority");
+        let owner = identity_source_with_schema_functions(
+            "mini:xcall",
+            "crates/shared/src/schema.rs#shared_stamp",
+        )
+        .replace(
+            "fn encode_mini() {}",
+            "fn encode_mini(v: u64) -> u64 { shared_stamp(v) }",
+        );
+        let _declaration = fixture_declaration(&root, "crates/mini/src/lib.rs", &owner);
+    }
+
+    #[test]
     fn declared_schema_types_exempt_imported_type_bindings() {
         let text = "use crate::token::SessionId;\nfn enc(x: SessionId) -> u8 { 3 }\n";
         let fragment = &text["use crate::token::SessionId;\n".len()..];
