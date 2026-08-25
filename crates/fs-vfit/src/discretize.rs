@@ -743,23 +743,31 @@ impl DelayedFilter {
     ///
     /// A passive 1-D scatterer cannot return more than it is sent.
     /// Call this after [`Self::pin_magnitude_at`] so a speaking-frequency
-    /// gain pin cannot create an active band elsewhere.
+    /// gain pin cannot create an active band elsewhere. An empty/non-finite
+    /// grid or an already-passive response leaves runtime state unchanged.
     pub fn enforce_scattering_passivity(&mut self, omegas: &[f64]) {
+        if omegas.is_empty() || omegas.iter().any(|omega| !omega.is_finite()) {
+            return;
+        }
         if !self.fir.is_empty() {
             let peak = omegas
                 .iter()
                 .map(|&w| fir_dtft(&self.fir, w, self.filter.t_s).abs())
                 .fold(0.0_f64, f64::max);
-            if peak > 1.0 {
-                let gain = 1.0 / peak;
-                for s in &mut self.fir {
-                    *s *= gain;
-                }
+            if !(peak > 1.0 && peak.is_finite()) {
+                return;
+            }
+            let gain = 1.0 / peak;
+            for sample in &mut self.fir {
+                *sample *= gain;
             }
             self.last = 0.0;
             return;
         }
-        self.filter.enforce_abs_bound(omegas, 1.0);
+        let peak = self.filter.enforce_abs_bound(omegas, 1.0);
+        if !(peak > 1.0 && peak.is_finite()) {
+            return;
+        }
         self.state = self.filter.zero_state();
         self.last = 0.0;
     }
@@ -1704,6 +1712,62 @@ mod runtime_tests {
             })
         ));
         assert_same_state(&dispersed_iir, &dispersed_iir_before);
+    }
+
+    #[test]
+    fn g0_passivity_noop_preserves_line_state_and_active_projection_scales() {
+        let mut passive_fir =
+            DelayedFilter::from_impulse_response(1.0 / 48_000.0, vec![0.5, 0.0, 0.0, 0.0]).unwrap();
+        assert_eq!(passive_fir.push(1.0).unwrap(), 0.5);
+        let passive_fir_before = passive_fir.clone();
+        passive_fir.enforce_scattering_passivity(&[0.0]);
+        assert_eq!(passive_fir.fir, passive_fir_before.fir);
+        assert_eq!(
+            passive_fir.incoming().to_bits(),
+            passive_fir_before.incoming().to_bits()
+        );
+        assert_eq!(passive_fir.history(), passive_fir_before.history());
+        passive_fir.enforce_scattering_passivity(&[]);
+        passive_fir.enforce_scattering_passivity(&[f64::NAN]);
+        assert_eq!(passive_fir.fir, passive_fir_before.fir);
+        assert_eq!(
+            passive_fir.incoming().to_bits(),
+            passive_fir_before.incoming().to_bits()
+        );
+
+        let passive_filter = DigitalFilter {
+            sections: Vec::new(),
+            direct: 0.5,
+            t_s: 1.0 / 48_000.0,
+            prewarp: 0.0,
+        };
+        let mut passive_iir = DelayedFilter::new(2.0, passive_filter).unwrap();
+        assert_eq!(passive_iir.push(1.0).unwrap(), 0.0);
+        assert_eq!(passive_iir.push(0.0).unwrap(), 0.0);
+        assert_eq!(passive_iir.push(0.0).unwrap(), 0.5);
+        let passive_iir_before = passive_iir.clone();
+        passive_iir.enforce_scattering_passivity(&[0.0]);
+        assert_eq!(passive_iir.filter, passive_iir_before.filter);
+        assert_eq!(passive_iir.state, passive_iir_before.state);
+        assert_eq!(
+            passive_iir.incoming().to_bits(),
+            passive_iir_before.incoming().to_bits()
+        );
+
+        let mut active_fir =
+            DelayedFilter::from_impulse_response(1.0 / 48_000.0, vec![2.0, 0.0, 0.0, 0.0]).unwrap();
+        active_fir.enforce_scattering_passivity(&[0.0]);
+        assert_eq!(active_fir.fir, [1.0, 0.0, 0.0, 0.0]);
+
+        let active_filter = DigitalFilter {
+            sections: Vec::new(),
+            direct: 2.0,
+            t_s: 1.0 / 48_000.0,
+            prewarp: 0.0,
+        };
+        let mut active_iir = DelayedFilter::new(2.0, active_filter).unwrap();
+        active_iir.enforce_scattering_passivity(&[0.0]);
+        assert_eq!(active_iir.filter.direct, 1.0);
     }
 
     #[test]
