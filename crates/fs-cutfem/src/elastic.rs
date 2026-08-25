@@ -209,9 +209,6 @@ pub fn supported_traction_segment<'a>(
     }
 }
 
-/// Vector Q1 CutFEM problem on `Omega = {phi < 0}`.
-///
-/// The constitutive parameters come from [`IsotropicElastic`], so the
 /// Scaling convention used to evaluate Nitsche and ghost penalty parameters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CutStabilizationScaling {

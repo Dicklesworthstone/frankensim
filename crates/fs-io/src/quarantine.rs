@@ -536,6 +536,24 @@ pub struct Quarantined<T> {
     pub defects: Vec<ImportDefect>,
 }
 
+impl<T> Quarantined<T> {
+    /// Wrap a raw parsed value into quarantine with its receipt and defect census.
+    #[must_use]
+    pub fn new(raw: T, source_receipt: ImportReceipt, defects: Vec<ImportDefect>) -> Self {
+        Self {
+            raw,
+            source_receipt,
+            defects,
+        }
+    }
+
+    /// Unwrap the raw value.
+    #[must_use]
+    pub fn into_inner(self) -> T {
+        self.raw
+    }
+}
+
 /// A structured promotion refusal: what blocked, and what to do.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PromotionRefusal {

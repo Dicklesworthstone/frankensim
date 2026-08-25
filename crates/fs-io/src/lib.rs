@@ -12,8 +12,11 @@
 //! from the receipts this crate emits (L2 must not call L6).
 
 pub mod association;
+pub mod cae_matrix;
 pub mod catalog;
 pub mod export;
+pub mod gmsh;
+pub mod inp_bdf;
 pub mod obj;
 pub mod ply;
 pub mod power_table;
@@ -25,12 +28,16 @@ pub mod step_faceted_export;
 pub mod step_import;
 pub mod stl;
 pub mod supplier_corpus;
+pub mod tabular_export;
 
 pub use association::{
     AddedRegion, AssociationDecision, AssociationDrift, AssociationPolicy, AssociationReceipt,
     AssociationRefusal, AssociationReport, AssociationVerdict, MESH_ASSOCIATION_POLL_STRIDE,
     MESH_ASSOCIATION_SEMANTICS_VERSION, MigrationAction, RegionChange, RigidTransform3,
     SurfaceFingerprint, TopologySignature, associate_mesh_assignments,
+};
+pub use cae_matrix::{
+    CAE_CAPABILITY_MATRIX, CaeCapabilityEntry, CaeDirection, CaeEvidenceClass, CaeQuarantineStatus,
 };
 pub use catalog::{
     CATALOG_CANCELLATION_POLL_STRIDE, CATALOG_CSV_PARSER_VERSION, CATALOG_JSON_PARSER_VERSION,
@@ -41,6 +48,18 @@ pub use catalog::{
     ColumnSpec, Schema, SchemaDefinitionRefusal,
 };
 pub use export::{export_3mf, export_glb, export_vtk};
+pub use gmsh::{
+    GmshElement, GmshElementType, GmshLimits, GmshMesh, GmshNode, GmshReceipt, parse_gmsh,
+    parse_gmsh_with_limits, write_gmsh_msh2,
+};
+pub use inp_bdf::{
+    FeBoundaryCondition, FeElement, FeMaterial, FeModel, FeNode, InpBdfReceipt, parse_abaqus_inp,
+    parse_nastran_bdf,
+};
+pub use tabular_export::{
+    TabularColumn, TabularData, TabularDataset, TabularReceipt, export_arrow_ipc_stream,
+    export_tabular_csv,
+};
 pub use quarantine::{
     CensusRefusal, IMPORT_CENSUS_SEMANTICS_VERSION, ImportCensusPolicy, ImportCensusReport,
     ImportDefect, ImportGeometryBudgetInput, ImportPromotionError, ImportPromotionPolicy,
