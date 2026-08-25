@@ -1793,7 +1793,9 @@ impl<'a> SolveEngine<'a> {
 
     /// Resolve every declared material and interface binding against the
     /// admitted card packs.
-    fn stage_material_resolve(&mut self) -> Result<(String, Vec<RetainedUsage>), SolveRefusal> {
+    fn stage_material_resolve(
+        &mut self,
+    ) -> Result<(String, Vec<RetainedSideArtifact>), SolveRefusal> {
         material_resolve_receipt(self.spec, self.cards, self.run, self.work, false)
     }
 
@@ -1804,7 +1806,7 @@ impl<'a> SolveEngine<'a> {
     fn stage_conduction(
         &mut self,
         context: &StageContext,
-    ) -> Result<(String, Vec<RetainedUsage>), SolveRefusal> {
+    ) -> Result<(String, Vec<RetainedSideArtifact>), SolveRefusal> {
         conduction_receipt(
             self.ledger,
             self.spec,
@@ -1823,7 +1825,7 @@ impl<'a> SolveEngine<'a> {
         state_before: &SolveDriverState,
         stage: SolveStage,
         receipt_json: &str,
-        usages: &[RetainedUsage],
+        usages: &[RetainedSideArtifact],
         context: &StageContext,
         predecessor_state: Option<ContentHash>,
     ) -> Result<(i64, ContentHash, ContentHash), LedgerError> {
@@ -2242,13 +2244,12 @@ fn import_verify_receipt(
 
 /// One replayable claim-usage receipt retained as its own ledger artifact.
 ///
-/// `id` is the `fs-matdb` receipt identity (what `ClaimSet::verify_receipt`
-/// replays against); `artifact` is the ledger content address of the exact
-/// retained bytes. They are different hashes over different preimages and the
-/// stage receipt records both, so neither can stand in for the other.
+/// The stage receipt carries semantic identities such as the `fs-matdb`
+/// receipt hash; `artifact` is independently the ledger content address of
+/// the exact retained bytes. `kind` keeps heterogeneous stage side outputs
+/// explicit rather than treating a temperature field as a usage receipt.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct RetainedUsage {
-    id: String,
+struct RetainedSideArtifact {
     kind: &'static str,
     artifact: ContentHash,
     bytes: Vec<u8>,
@@ -2361,7 +2362,7 @@ fn material_resolve_receipt(
     run: SolveRunId,
     work: EvidenceWork<'_>,
     resume: bool,
-) -> Result<(String, Vec<RetainedUsage>), SolveRefusal> {
+) -> Result<(String, Vec<RetainedSideArtifact>), SolveRefusal> {
     let stage = SolveStage::MaterialResolve;
     let cancelled = || {
         if resume {
@@ -2424,7 +2425,7 @@ fn material_resolve_receipt(
         ));
     }
 
-    let mut usages: Vec<RetainedUsage> = Vec::new();
+    let mut usages: Vec<RetainedSideArtifact> = Vec::new();
     let mut bindings = String::new();
     for (index, binding) in resolution.bindings.iter().enumerate() {
         if index > 0 {
@@ -2457,8 +2458,7 @@ fn material_resolve_receipt(
             for retained in [&property.receipt_lo, &property.receipt_hi] {
                 let artifact = hash_bytes(&retained.bytes);
                 if !usages.iter().any(|usage| usage.artifact == artifact) {
-                    usages.push(RetainedUsage {
-                        id: retained.receipt_hash.clone(),
+                    usages.push(RetainedSideArtifact {
                         kind: MATERIAL_USAGE_KIND,
                         artifact,
                         bytes: retained.bytes.clone(),
@@ -2827,9 +2827,14 @@ struct AssignmentSurface {
     enclosed_volume: Option<f64>,
 }
 
-fn conduction_import_refusal(run: SolveRunId, error: ImportSummaryError) -> SolveRefusal {
+fn conduction_import_refusal(
+    run: SolveRunId,
+    resume: bool,
+    error: ImportSummaryError,
+) -> SolveRefusal {
     let stage = SolveStage::Conduction;
     match error {
+        ImportSummaryError::Cancelled if resume => cancelled_resume_refusal(run),
         ImportSummaryError::Cancelled => cancelled_fresh_refusal(run, Some(stage)),
         ImportSummaryError::WorkEnvelope(error) => {
             invocation_work_refusal(Some(run), Some(stage), error)
@@ -3364,7 +3369,7 @@ fn conduction_receipt(
     run: SolveRunId,
     work: EvidenceWork<'_>,
     resume: bool,
-) -> Result<(String, Vec<RetainedUsage>), SolveRefusal> {
+) -> Result<(String, Vec<RetainedSideArtifact>), SolveRefusal> {
     let stage = SolveStage::Conduction;
     let cancelled = || {
         if resume {
@@ -3447,7 +3452,7 @@ fn conduction_receipt(
                 index,
                 SolveEvidencePhase::PromotedMeshRead,
             )
-            .map_err(|error| conduction_import_refusal(run, error))?;
+            .map_err(|error| conduction_import_refusal(run, resume, error))?;
             let soup = fs_io::ply::read_ply(&bytes).map_err(|error| {
                 conduction_error(
                     "cli-solve-conduction-import",
@@ -3465,6 +3470,9 @@ fn conduction_receipt(
         }
         let resolution =
             resolve_geometry_assignments(spec, &library, assignment_limits(limits), &cx);
+        if work.is_requested() {
+            return Err(cancelled());
+        }
         if !resolution.admissible() {
             let first = &resolution.violations[0];
             return Err(conduction_error(
@@ -3508,12 +3516,13 @@ fn conduction_receipt(
             policy,
             &cx,
         )
-        .map_err(|error| {
-            conduction_error(
+        .map_err(|error| match error {
+            fs_mesh::VolumetricError::Mesh(fs_mesh::MeshError::Cancelled) => cancelled(),
+            other => conduction_error(
                 "cli-solve-conduction-volumetricize",
-                format!("constrained volumetricization refused: {error}"),
+                format!("constrained volumetricization refused: {other}"),
                 "repair region surfaces/seeds or increase the declared memory budget",
-            )
+            ),
         })?;
         let labeled = audited.labeled();
         let labels: Vec<u32> = labeled
@@ -3558,12 +3567,13 @@ fn conduction_receipt(
             },
             config,
         )
-        .map_err(|error| {
-            conduction_error(
+        .map_err(|error| match error {
+            fs_conduction::ConductionError::Cancelled { .. } => cancelled(),
+            other => conduction_error(
                 "cli-solve-conduction-solve",
-                format!("steady heterogeneous conduction solve refused: {error}"),
+                format!("steady heterogeneous conduction solve refused: {other}"),
                 "inspect the declared boundary anchor, material span, and solver tolerance",
-            )
+            ),
         })?;
         Ok((audited, mesh, solution))
     })?;
@@ -3675,8 +3685,7 @@ fn conduction_receipt(
         .map_err(|_| cancelled())?;
     Ok((
         receipt,
-        vec![RetainedUsage {
-            id: solution_artifact.to_hex(),
+        vec![RetainedSideArtifact {
             kind: CONDUCTION_SOLUTION_KIND,
             artifact: solution_artifact,
             bytes: solution_bytes,

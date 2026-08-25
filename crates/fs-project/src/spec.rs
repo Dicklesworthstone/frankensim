@@ -2111,6 +2111,19 @@ impl ProjectSpec {
                         "thermal boundary".to_string(),
                         &boundary.target,
                     );
+                    if let Some(id) = ids.get(&boundary.target)
+                        && !matches!(id.kind(), EntityKind::Region | EntityKind::Interface)
+                    {
+                        out.push(violation(
+                            "project-conduction-boundary-target-kind",
+                            format!(
+                                "thermal boundary target `{}` is a {}, not a region or interface",
+                                boundary.target,
+                                id.kind().label()
+                            ),
+                            "attach each thermal law to the target of one region or interface geometry assignment",
+                        ));
+                    }
                     if !boundary_targets.insert(boundary.target.as_str()) {
                         out.push(violation(
                             "project-conduction-boundary-duplicate",
