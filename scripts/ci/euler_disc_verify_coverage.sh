@@ -36,8 +36,11 @@ case "${COMMAND}" in
     printf "  [PASS] All %d requirements verified and covered\n" "${REQ_COUNT}"
 
     printf "==> 3. Generating verification matrix receipt...\n"
+    mkdir -p "${REPO_ROOT}/target/euler-disc-e2e"
     python3 - <<EOF
-import json
+import json, os
+
+os.makedirs("${REPO_ROOT}/target/euler-disc-e2e", exist_ok=True)
 
 receipt = {
     "schema": "org.frankensim.euler-disc.traceability-receipt.v1",

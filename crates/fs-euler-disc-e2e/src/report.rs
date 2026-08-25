@@ -141,3 +141,32 @@ impl EulerSimulationReport {
         out
     }
 }
+
+impl fmt::Display for EulerSimulationReport {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.render_markdown())
+    }
+}
+
+impl fmt::Display for PhysicalComparisonSection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoData { required_next_evidence } => {
+                write!(f, "NO DATA (Required: {})", required_next_evidence)
+            }
+            Self::AdmittedPhysicalScorecard {
+                scorecard_digest,
+                disposition_authority,
+                spin_time_relative_error,
+            } => {
+                write!(
+                    f,
+                    "Admitted [digest: {}, authority: {}, error: {:.2}%]",
+                    scorecard_digest,
+                    disposition_authority,
+                    spin_time_relative_error * 100.0
+                )
+            }
+        }
+    }
+}

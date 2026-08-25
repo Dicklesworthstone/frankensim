@@ -55,3 +55,22 @@ fn test_simulation_report_with_admitted_physical_scorecard() {
     assert!(md.contains("Scorecard Digest"));
     assert!(md.contains("3.50%"));
 }
+
+#[test]
+fn test_display_trait_formatting() {
+    let report = EulerSimulationReport::new_simulation_only(
+        "campaign_test_display",
+        "specimen_45mm_chrome",
+        10.0,
+        15.0,
+        0.5,
+        1.250,
+        0.005,
+    );
+
+    let display_str = format!("{}", report);
+    assert_eq!(display_str, report.render_markdown());
+
+    let no_data = PhysicalComparisonSection::no_data();
+    assert!(format!("{}", no_data).starts_with("NO DATA"));
+}
