@@ -34,6 +34,7 @@ pub const ARTIFACT_CONTENT_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
     "encoder=content_hash",
     "encoder_helpers=content_hash_with_domain",
     "schema_functions=artifact_content_identity_version_is_supported,MiniLedger::open,MiniLedger::put_artifact,MiniLedger::verify_artifact_integrity,crates/fs-blake3/src/lib.rs#ContentHash::to_hex,crates/fs-blake3/src/lib.rs#hash_domain",
+    "schema_types=std#PhantomData",
     "schema_constants=ARTIFACT_CONTENT_IDENTITY_VERSION,ARTIFACT_CONTENT_IDENTITY_DOMAIN,LEDGER_FORMAT_VERSION",
     "schema_dependencies=none",
     "digest=fs-blake3",

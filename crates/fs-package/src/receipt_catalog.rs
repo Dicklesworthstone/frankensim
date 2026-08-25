@@ -1199,6 +1199,7 @@ pub const RECEIPT_SCHEMA_DESCRIPTOR_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
     "encoder_helpers=descriptor_hash_with_schema,ReceiptSchemaDescriptor::identity_preimage,ReceiptTransportProfile::tag,ReceiptTransportProfile::encoded_limit,Encoder::new,Encoder::u8,Encoder::u32,Encoder::u64,Encoder::count,Encoder::string,Encoder::hash,Encoder::finish",
     "schema_constants=RECEIPT_SCHEMA_DESCRIPTOR_IDENTITY_VERSION,RECEIPT_SCHEMA_DESCRIPTOR_IDENTITY_DOMAIN,FIELD_FAMILY,FIELD_WIRE_SCHEMA_VERSION,FIELD_OWNER_IDENTITY_VERSION,FIELD_OWNER_IDENTITY_DOMAIN,FIELD_TRANSPORT,FIELD_OWNER_SCHEMA_FINGERPRINT,TRANSPORT_DIGEST_ONLY,TRANSPORT_CANONICAL_BYTES,MAX_RECEIPT_FAMILY_ID_BYTES,MAX_RECEIPT_IDENTITY_DOMAIN_BYTES,MAX_RECEIPT_TRANSPORT_BYTES",
     "schema_functions=ReceiptSchemaDescriptor::try_new,ReceiptSchemaDescriptor::validate,ReceiptSchemaDescriptor::admit_retained_content_hash,validate_descriptor_fields,validate_machine_identity,is_placeholder_component,invalid_field,resource_limit,admit_retained_hash,crates/fs-blake3/src/lib.rs#hash_domain",
+    "schema_types=std#u64",
     "schema_dependencies=none",
     "digest=blake3-256-domain-separated",
     "encoding=typed-binary",
