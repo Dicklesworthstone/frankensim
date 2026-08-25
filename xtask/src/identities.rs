@@ -1035,6 +1035,9 @@ fn parse_declaration(owner: &str, raw: BTreeMap<String, String>) -> Result<Ident
         Some(value) => parse_schema_types(&value)?,
         None => Vec::new(),
     };
+    if !schema_types.is_empty() {
+        eprintln!("PROBE-PARSE id={id} types={}", schema_types.len());
+    }
     let schema_dependencies =
         parse_schema_dependencies(&take_required(&mut fields, "schema_dependencies")?, &id)?;
     let digest = take_required(&mut fields, "digest")?;
@@ -11647,6 +11650,13 @@ fn identity_schema_base_hash_with_index(
         .iter()
         .map(|declared_type| declared_type.symbol.clone())
         .collect();
+    if !declared_type_authorities.is_empty() {
+        eprintln!(
+            "PROBE-AUTH id={} authorities={}",
+            decl.id,
+            declared_type_authorities.len()
+        );
+    }
     let owner_closure = normalized_rust_function_closure_with_index(
         text,
         index,
