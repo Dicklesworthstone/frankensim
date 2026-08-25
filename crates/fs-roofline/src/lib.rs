@@ -15,8 +15,15 @@ pub mod axes;
 pub mod baseline;
 pub mod checkpoint;
 pub mod kernels;
+pub mod pipeline_attribution;
 pub mod production;
 pub mod stats;
+
+pub use pipeline_attribution::{
+    FalsifierVerdict, KernelAttribution, PIPELINE_ATTRIBUTION_AUTHORITY,
+    PIPELINE_ATTRIBUTION_NO_CLAIM, PIPELINE_ATTRIBUTION_SCHEMA, PhaseAttribution,
+    PipelineAttributionReceipt,
+};
 
 #[cfg(test)]
 pub use authority::StaticKeyRegistry;
