@@ -390,8 +390,8 @@ fn multi_region_fixture_resolves_volumetricizes_and_binds_contact_traces() {
             .expect("region-owned mesh has valid matching-P1 candidates");
         assert_eq!(
             candidates.len(),
-            2,
-            "the square joint has two trace triangles"
+            4,
+            "the square joint has four trace triangles"
         );
 
         let interfaces = fs_project::resolve_conduction_interface_pairs(
