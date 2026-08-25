@@ -232,7 +232,10 @@ fn g0_region_owned_lowering_splits_only_cross_region_traces() {
     let normal_dot = a.outward_normal[0] * b.outward_normal[0]
         + a.outward_normal[1] * b.outward_normal[1]
         + a.outward_normal[2] * b.outward_normal[2];
-    assert!(normal_dot < -0.999_999, "contact normals must oppose: {normal_dot}");
+    assert!(
+        normal_dot < -0.999_999,
+        "contact normals must oppose: {normal_dot}"
+    );
 
     let same_region = ConductionMesh::new_region_owned(complex, positions, &[10, 10])
         .expect("same-region neighbors stay conforming");

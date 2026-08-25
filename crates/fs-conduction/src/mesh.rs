@@ -10,9 +10,10 @@
 //! extraction and the degeneracy pre-check that turns fs-feec's
 //! (correct, but panicking) degeneracy assertion into a typed refusal.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use fs_feec::{ElementGeometry, element_geometry};
 use fs_rep_mesh::TetComplex;
-use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ConductionError;
 
@@ -178,8 +179,9 @@ impl ConductionMesh {
     /// Prepare a labeled conformal complex with one P1 trace per region.
     ///
     /// Every used source vertex is cloned once for each incident region and
-    /// each tetrahedron is remapped to the clone owned by its region. Tets,
-    /// coordinates, element order, and region order are otherwise unchanged.
+    /// each tetrahedron is remapped to the clone owned by its region. Every
+    /// tet retains the same ordered geometric vertex coordinates, and element
+    /// and region order are unchanged.
     /// A face shared by two differently labeled tets therefore becomes two
     /// exactly coincident boundary faces with independent temperature DOFs,
     /// which is the representation required by [`crate::ThermalInterfaces`].
