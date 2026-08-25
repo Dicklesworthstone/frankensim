@@ -3799,7 +3799,7 @@ fn conduction_receipt(
             ConductionInterfaceLimits {
                 max_source_faces: ConductionInterfaceLimits::DEFAULT
                     .max_source_faces
-                    .min(limits.max_selected_faces as u64),
+                    .min(u64::try_from(limits.max_selected_faces).unwrap_or(u64::MAX)),
             },
             &mesh,
             &cx,

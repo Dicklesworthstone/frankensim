@@ -557,7 +557,10 @@ fn multi_region_contact_project() -> ProjectSpec {
                 },
             },
         ],
-        adiabatic_remainder: false,
+        // The contact operator, not an exterior boundary row, owns the two
+        // duplicated joint traces. They must therefore remain in the explicit
+        // adiabatic remainder until ThermalInterfaces binds them.
+        adiabatic_remainder: true,
     });
     spec
 }

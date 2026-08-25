@@ -160,11 +160,12 @@ Run identity is content-derived before any side effect:
 `hash_domain("org.frankensim.fs-cli.solve-run.v1", project canonical hash ||
 constellation || workspace || root seed || driver version)`. Budgets travel
 inside the project hash, so raising a budget starts a new run whose completed
-artifacts still deduplicate by content. Driver semantics version 5 binds the
+artifacts still deduplicate by content. Driver semantics version 6 binds the
 current executable prefix: version 3 added retained card packs and material
-resolution, version 4 added flow-network execution, and version 5 conditionally
-adds conduction when the project carries its explicit conduction setup. Older
-run ids do not collide with or silently resume under version 5. Every solve
+resolution, version 4 added flow-network execution, version 5 conditionally
+added conduction when the project carries its explicit conduction setup, and
+version 6 added exact matching-P1 finite-contact lowering. Older run ids do not
+collide with or silently resume under version 6. Every solve
 operation carries the 32-byte run identity as its ledger `session` value; the
 run's own operations are its index. Resume and import discovery walk globally descending
 `visible_op_ids_page_controlled` pages under a first-page high-water mark,
@@ -205,8 +206,10 @@ interval-certified operating point. `conduction` executes only when
 partition of physical boundary laws. It replays the retained promoted meshes
 and assignments, constructs and audits a labeled tetrahedral volume, binds
 region labels to material-card conductivity, distributes declared regional
-power, solves the heterogeneous steady problem, and retains both the canonical
-stage receipt and a `solve-conduction-solution` temperature-field artifact.
+power, resolves declared matching-P1 contact faces against their interface
+cards, solves the heterogeneous steady problem, and retains the canonical
+stage receipt, a `solve-conduction-solution` temperature-field artifact, and
+interface-resolution evidence when contact is present.
 Projects without that optional declaration retain the `frankensim-s93ej`
 typed gap; `qoi` remains the `frankensim-s2l9v` typed gap. Gap refusals use
 `cli-solve-stage-gap` (exit 5), name their producer bead, and are retained as
@@ -552,7 +555,11 @@ project comparison, resume checkpoint/project/receipt re-attestation, and the
 final pre-publication boundary with exact zero publication beyond any already
 durable prefix. It also proves a cancelled resume retry reproduces the same stage-receipt
 identities as an uninterrupted run. G5 covers identical stage-receipt
-identities across independent fresh ledgers. The typed G4 matrices enumerate
+identities as an uninterrupted run. G1 additionally lowers the committed
+two-region imported fixture through its declared finite-resistance contact,
+checks nonzero interface heat transfer and energy closure, and replays the same
+receipts on resume. G5 covers identical stage-receipt identities across
+independent fresh ledgers. The typed G4 matrices enumerate
 61 fresh and 79 resume checkpoints, including entry/intermediate/completion
 points around visible-ID pages, controlled candidate fields and text
 conversion, operation sidecars, artifact descriptors, edge seals/pages/set
@@ -603,10 +610,11 @@ publication.
   currently complete because `qoi` remains a typed gap. Projects without an
   explicit conduction setup also stop at the conduction gap. The conduction
   path proves only the declared finite-mesh, static Dirichlet/Neumann/Robin
-  solve plus its reported algebraic residual and energy balance. It does not
-  authenticate source geometry or material claims, establish mesh convergence,
-  lower contact resistance, or perform conjugate airflow exchange; projects
-  declaring interfaces therefore refuse rather than silently assuming perfect
+  solve, exact matching-P1 finite contact, and the reported algebraic residual
+  and energy balance. It does not authenticate source geometry or material
+  claims, establish mesh convergence, lower nonmatching or
+  temperature-dependent contact, or perform conjugate airflow exchange.
+  Unsupported interface models refuse rather than silently assuming perfect
   contact.
 - `material-resolve` proves that every declared region and interface resolves
   to an admitted card whose selected claim answers the required property at
