@@ -6,7 +6,6 @@
 
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_mesh::{volumetricize, RegionId, RegionKind, RegionSpec, UnverifiedPlc, VolumetricPolicy};
-use fs_project::ImportedMeshLibrary;
 
 const DATA: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/reference-project");
 
