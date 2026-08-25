@@ -504,7 +504,10 @@ bore-authority\tplane-TMM AllRegime IdealOpen"
             let (lo, hi) = (f_lip.min(peak) - 3.0, f_lip.max(peak) + 3.0);
             assert!(
                 (lo..hi).contains(&f_lock),
-                "lip-dominated lock {f_lock:.1} outside the pull interval                  [{lo:.1}, {hi:.1}] (lip {f_lip:.0}, peak {peak:.1})"
+                "lip-dominated lock {f_lock:.1} outside the pull interval [{lo:.1}, {hi:.1}] (lip {f_lip:.0}, peak {peak:.1})"
+            );
+        }
+    }
     // Breadth gates rewritten to the MEASURED regime: under Q=10 the
     // lock-in band is a single 5 Hz cell (see diag_hb002 fine scan),
     // so captured/slots-visited breadth assertions would encode
@@ -682,9 +685,7 @@ fn diag_hb002_lock_scan() {
     let mass = 2.0e-3;
     // Fine scan concentrated near the two reachable slots (peaks near
     // 180 / 302 Hz): lock-in zones proved narrow in the coarse scan.
-    let tensions: Vec<f64> = (50..=60)
-        .map(|s| 5.0 * f64::from(s))
-        .collect();
+    let tensions: Vec<f64> = (50..=60).map(|s| 5.0 * f64::from(s)).collect();
     for &f_lip in &tensions {
         let k = mass * (TAU * f_lip) * (TAU * f_lip);
         let problem = LipHb {
@@ -757,19 +758,17 @@ fn diag_hb003_harmonic_convergence_table() {
                 tolerance: 1.0e-9,
                 deflate_equilibrium: false,
             };
-            match [0.6f64, 0.35]
-                .iter()
-                .find_map(|&g| {
-                    solve_hb(
-                        &make,
-                        HbAnchor::Autonomous {
-                            omega_guess: omega_res,
-                        },
-                        g,
-                        &budget,
-                    )
-                    .ok()
-                }) {
+            match [0.6f64, 0.35].iter().find_map(|&g| {
+                solve_hb(
+                    &make,
+                    HbAnchor::Autonomous {
+                        omega_guess: omega_res,
+                    },
+                    g,
+                    &budget,
+                )
+                .ok()
+            }) {
                 Some(o) => println!(
                     "pm={pm} N={n}: f={:.2} a1={:.4}",
                     o.omega / TAU,
