@@ -124,6 +124,7 @@ pub const PROGRAM_RISK_REPORT_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
     "encoder=program_risk_report_authority_identity",
     "encoder_helpers=none",
     "schema_functions=Governor::write_program_risk_session_end_report,Governor::recover_program_risk_report,crates/fs-blake3/src/lib.rs#hash_domain",
+    "schema_types=crates/fs-session/src/governor.rs#SessionOpenReceipt,crates/fs-session/src/lib.rs#SessionError,crates/fs-session/src/token.rs#SessionId",
     "schema_constants=PROGRAM_RISK_REPORT_IDENTITY_VERSION,PROGRAM_RISK_REPORT_ID_DOMAIN,PROGRAM_RISK_REPORT_SLOT_TAG,PROGRAM_RISK_REPORT_CODEC_VERSION,PROGRAM_RISK_REPORT_ROW_ORDER_VERSION,PROGRAM_RISK_REPORT_STATUS_TAG_VERSION,PROGRAM_RISK_REPORT_LOGICAL_ROWS",
     "schema_dependencies=fs-session:durable-governor-id,fs-session:session-open-receipt",
     "digest=fs-blake3",

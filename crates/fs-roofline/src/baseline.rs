@@ -87,6 +87,7 @@ pub const BASELINE_RECORD_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
     "encoder_helpers=BaselineAxes::canonical_json,BaselineAxes::canonical_json_unchecked,push_json_string,push_json_string_body",
     "schema_constants=BASELINE_SCHEMA_VERSION,BASELINE_HASH_DOMAIN,BASELINE_LOW_BAND,BASELINE_HIGH_BAND,MAX_BASELINE_AGE_DAYS,MIN_PROMOTION_RUNS,MAX_BASELINE_STORE_BYTES,MAX_BASELINE_LINE_BYTES,MAX_BASELINE_STRING_BYTES,crates/fs-roofline/src/axes.rs#MAX_AXIS_REPROBE_DRIFT",
     "schema_functions=parse_baseline_line,validate_baseline,validate_identity,validate_text,LineParser::take,LineParser::string,LineParser::hex_u64,LineParser::content_hash,LineParser::decimal_u64,crates/fs-blake3/src/lib.rs#hash_domain,crates/fs-blake3/src/lib.rs#ContentHash::to_hex",
+    "schema_types=crates/fs-roofline/src/authority.rs#KeyVerdict,crates/fs-roofline/src/authority.rs#PromotionAuthorityDecision,crates/fs-roofline/src/axes.rs#MachineAxes",
     "schema_dependencies=none",
     "digest=fs-blake3",
     "encoding=canonical-transport-exact-bits",

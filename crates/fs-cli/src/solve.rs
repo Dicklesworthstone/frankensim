@@ -34,8 +34,8 @@
 #![allow(clippy::result_large_err)]
 
 use std::cell::Cell;
-use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::collections::hash_map::DefaultHasher;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt::Write as _;
 use std::hash::BuildHasherDefault;
 use std::ops::ControlFlow;
@@ -56,11 +56,11 @@ use fs_ledger::{
     OpVariableField, PrehashedOpContent, VisibleOpCursor, VisibleOpPage,
 };
 use fs_matdb::SelectionPolicy;
+use fs_project::spec::{ConductionSetup, ThermalBoundaryCondition};
 use fs_project::{
     BindingRequirements, DecodedProject, EntityDecl, GeometryArtifact, ImportedMeshLibrary,
     ProjectSpec, geometry_source_identity, resolve_bindings, resolve_geometry_assignments,
 };
-use fs_project::spec::{ConductionSetup, ThermalBoundaryCondition};
 use fs_rep_mesh::{Soup, TetComplex};
 use fs_session::{CapabilityToken, Charge, Enforcement, Governor, SessionError, SessionId};
 
@@ -1892,9 +1892,7 @@ impl<'a> SolveEngine<'a> {
                 }
             }
             for usage in usages {
-                let retained = self
-                    .ledger
-                    .put_artifact(usage.kind, &usage.bytes, None)?;
+                let retained = self.ledger.put_artifact(usage.kind, &usage.bytes, None)?;
                 if retained.hash != usage.artifact {
                     return Err(LedgerError::Invalid {
                         field: "solve_stage_side_artifact".to_string(),
@@ -2876,9 +2874,17 @@ fn assignment_limits(limits: ImportIrLimits) -> fs_io::AssignmentLimits {
 
 fn coordinate_key(point: [f64; 3]) -> [u64; 3] {
     fn component(value: f64) -> u64 {
-        if value == 0.0 { 0.0f64.to_bits() } else { value.to_bits() }
+        if value == 0.0 {
+            0.0f64.to_bits()
+        } else {
+            value.to_bits()
+        }
     }
-    [component(point[0]), component(point[1]), component(point[2])]
+    [
+        component(point[0]),
+        component(point[1]),
+        component(point[2]),
+    ]
 }
 
 fn sorted_face(mut face: [u32; 3]) -> [u32; 3] {
@@ -2975,7 +2981,10 @@ fn build_conduction_surfaces(
             "assign every project geometry artifact before solving",
         ));
     }
-    if positions.is_empty() || surfaces.is_empty() || spec.assignments.as_deref().unwrap_or(&[]).is_empty() {
+    if positions.is_empty()
+        || surfaces.is_empty()
+        || spec.assignments.as_deref().unwrap_or(&[]).is_empty()
+    {
         return Err(conduction_error(
             "cli-solve-conduction-assignment",
             "the declared conduction domain resolved to no vertices or selected surfaces",
@@ -3108,7 +3117,10 @@ fn material_models(
         let card = library.material(&binding.card).ok_or_else(|| {
             conduction_error(
                 "cli-solve-conduction-material",
-                format!("material card {} for region `{name}` is absent", binding.card),
+                format!(
+                    "material card {} for region `{name}` is absent",
+                    binding.card
+                ),
                 "supply the exact normalized material pack used by material-resolve",
             )
         })?;
@@ -3152,7 +3164,10 @@ fn conduction_source(
     region_ids: &BTreeMap<String, u32>,
     audited: &fs_mesh::AuditedLabeledTetComplex,
 ) -> Result<fs_conduction::ScalarField, SolveRefusal> {
-    let cooling = spec.cooling.as_ref().expect("conduction setup implies cooling");
+    let cooling = spec
+        .cooling
+        .as_ref()
+        .expect("conduction setup implies cooling");
     if cooling.leakage.value != 0.0 {
         return Err(conduction_error(
             "cli-solve-conduction-leakage",
@@ -3177,7 +3192,10 @@ fn conduction_source(
         let id = *region_ids.get(&row.region).ok_or_else(|| {
             conduction_error(
                 "cli-solve-conduction-power",
-                format!("power row targets unknown conduction region `{}`", row.region),
+                format!(
+                    "power row targets unknown conduction region `{}`",
+                    row.region
+                ),
                 "attach power only to a declared seeded region",
             )
         })?;
@@ -3247,7 +3265,10 @@ fn conduction_boundary(
         let surface = surfaces.get(&row.target).ok_or_else(|| {
             conduction_error(
                 "cli-solve-conduction-boundary",
-                format!("thermal boundary target `{}` has no resolved assignment", row.target),
+                format!(
+                    "thermal boundary target `{}` has no resolved assignment",
+                    row.target
+                ),
                 "reference the exact target of one geometry assignment",
             )
         })?;
@@ -3295,10 +3316,7 @@ fn conduction_boundary(
             ThermalBoundaryCondition::Convection {
                 coefficient,
                 reference_temperature,
-            } => fs_conduction::ThermalBc::robin(
-                coefficient.value,
-                reference_temperature.value,
-            ),
+            } => fs_conduction::ThermalBc::robin(coefficient.value, reference_temperature.value),
         }
         .map_err(|error| {
             conduction_error(
@@ -3453,7 +3471,8 @@ fn conduction_receipt(
                 first.code,
                 format!(
                     "conduction assignment replay found {} violation(s); first: {}",
-                    resolution.violations.len(), first.what
+                    resolution.violations.len(),
+                    first.what
                 ),
                 first.fix.clone(),
             ));
@@ -3497,7 +3516,11 @@ fn conduction_receipt(
             )
         })?;
         let labeled = audited.labeled();
-        let labels: Vec<u32> = labeled.region_of_tet().iter().map(|region| region.0).collect();
+        let labels: Vec<u32> = labeled
+            .region_of_tet()
+            .iter()
+            .map(|region| region.0)
+            .collect();
         let (table, region_to_material, fallback) = material_models(spec, cards, &region_ids)?;
         let (mesh, element_materials) = fs_conduction::ElementMaterials::bind_labeled_volume(
             table,
@@ -3613,7 +3636,9 @@ fn conduction_receipt(
         mesh.boundary().len(),
         audited.witness().per_region_auditor.len(),
         json_string(method),
-        report.element_material_identity.expect("heterogeneous assignment"),
+        report
+            .element_material_identity
+            .expect("heterogeneous assignment"),
         json_string(&solution_artifact.to_hex()),
         finite("temperature.min", min_temperature)?,
         finite("temperature.max", max_temperature)?,
@@ -3639,7 +3664,9 @@ fn conduction_receipt(
             invocation_work_refusal(
                 Some(run),
                 Some(stage),
-                InvocationWorkExceeded::CumulativeBytes { attempted: u64::MAX },
+                InvocationWorkExceeded::CumulativeBytes {
+                    attempted: u64::MAX,
+                },
             )
         })?;
     work.charge(charge)
@@ -5387,9 +5414,7 @@ fn validate_resume_candidate(
             }
             SolveStage::Conduction => {
                 let cards = recovered_cards.as_ref().ok_or_else(|| {
-                    resume_identity(
-                        "the retained conduction stage has no recovered card-pack set",
-                    )
+                    resume_identity("the retained conduction stage has no recovered card-pack set")
                 })?;
                 let receipt_stage_index = Some(index);
                 work.checkpoint(
@@ -5398,15 +5423,8 @@ fn validate_resume_candidate(
                     0,
                 )
                 .map_err(|_| cancelled_resume_refusal(run))?;
-                let rebuilt = conduction_receipt(
-                    ledger,
-                    &project.spec,
-                    cards,
-                    &context,
-                    run,
-                    work,
-                    true,
-                );
+                let rebuilt =
+                    conduction_receipt(ledger, &project.spec, cards, &context, run, work, true);
                 work.checkpoint(
                     SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
                     receipt_stage_index,

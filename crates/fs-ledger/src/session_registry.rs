@@ -172,6 +172,7 @@ pub const SOLVER_CHECKPOINT_RECEIPT_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
     "encoder_helpers=solver_checkpoint_receipt_hash_with_schema",
     "schema_constants=SOLVER_CHECKPOINT_RECEIPT_IDENTITY_VERSION,SOLVER_CHECKPOINT_RECEIPT_IDENTITY_DOMAIN,SOLVER_CHECKPOINT_RECEIPT_TRANSPORT_BYTES,SOLVER_STATE_ARTIFACT_KIND,MAX_SOLVER_CHECKPOINT_ARTIFACT_BYTES,crates/fs-exec/src/cx.rs#DRAIN_FINALIZE_REPORT_IDENTITY_VERSION,crates/fs-exec/src/cx.rs#DRAIN_FINALIZE_REPORT_IDENTITY_DOMAIN",
     "schema_functions=Ledger::validate_solver_checkpoint_artifact,Ledger::solver_checkpoint_receipt_at_instance,Ledger::insert_solver_checkpoint_receipt,Ledger::attest_solver_checkpoint,Ledger::solver_checkpoint_receipt,Ledger::verify_solver_checkpoint_receipt,SolverCheckpointReceipt::to_bytes,SolverCheckpointReceipt::from_bytes,crates/fs-exec/src/cx.rs#DrainTracker::finalize",
+    "schema_types=crates/fs-ledger/src/lib.rs#PreparedStatement",
     "schema_dependencies=fs-ledger:artifact-content,fs-ledger:physical-instance",
     "digest=blake3-256-domain-separated",
     "encoding=typed-binary",

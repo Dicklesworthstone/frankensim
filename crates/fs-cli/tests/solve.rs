@@ -19,6 +19,9 @@ use fs_ledger::{
     CONTROLLED_ARTIFACT_TILE_LEN, CONTROLLED_OP_FIELD_TILE_LEN, EdgeRole, ExtensionTable,
     FiveExplicits, Ledger, MAX_OP_FIELD_BYTES, OpOutcome, STORAGE_CHUNK_LEN, hash_bytes,
 };
+use fs_project::spec::{
+    ConductionRegion, ConductionSetup, ThermalBoundary, ThermalBoundaryCondition,
+};
 use fs_project::{
     AirflowLeakage, Budgets, ConsequenceClass, Cooling, DecisionGate, DecodedProject, EntityDecl,
     Envelope, Fan, FanCurveDecl, FanCurvePoint, FanToleranceBasis, GeometryArtifact,
@@ -26,9 +29,6 @@ use fs_project::{
     PowerDissipation, ProjectSpec, RequirementDirection, RequirementSeverity, RequirementSource,
     RequirementSourceKind, SafetyFactorPolicy, Seeds, SolverSettings, ThermalLimit, UnitsDoctrine,
     Vent, Versions, print_sexpr,
-};
-use fs_project::spec::{
-    ConductionRegion, ConductionSetup, ThermalBoundary, ThermalBoundaryCondition,
 };
 use fs_qty::QtyAny;
 
@@ -388,14 +388,8 @@ fn conduction_fixture_project(seed_root: u64, bytes: &[u8]) -> ProjectSpec {
         boundaries: vec![ThermalBoundary {
             target: "air".to_string(),
             condition: ThermalBoundaryCondition::Convection {
-                coefficient: QtyAny::new(
-                    10.0,
-                    fs_project::spec::dims::HEAT_TRANSFER_COEFFICIENT,
-                ),
-                reference_temperature: QtyAny::new(
-                    293.15,
-                    fs_project::spec::dims::TEMPERATURE,
-                ),
+                coefficient: QtyAny::new(10.0, fs_project::spec::dims::HEAT_TRANSFER_COEFFICIENT),
+                reference_temperature: QtyAny::new(293.15, fs_project::spec::dims::TEMPERATURE),
             },
         }],
         adiabatic_remainder: false,
@@ -2847,7 +2841,8 @@ fn dump_reference_project_fixture() {
             std::fs::create_dir_all(&path).expect("fixture directory");
             path
         });
-    let source = print_sexpr(&fixture_project(7, &tetra_stl())).expect("fixture renders");
+    let source =
+        print_sexpr(&conduction_fixture_project(7, &tetra_stl())).expect("fixture renders");
     std::fs::write(dir.join("cooling-reference.fsim"), &source).expect("project writes");
     std::fs::write(dir.join("aa6061.fsmcdpk"), fixture_pack_bytes()).expect("pack writes");
     std::fs::write(dir.join("plate.stl"), tetra_stl()).expect("geometry writes");
@@ -2869,7 +2864,8 @@ fn g0_the_tracked_reference_project_is_exactly_what_its_generator_produces() {
     let dir = reference_project_dir();
     let tracked = std::fs::read_to_string(dir.join("cooling-reference.fsim"))
         .expect("the tracked reference project exists");
-    let generated = print_sexpr(&fixture_project(7, &tetra_stl())).expect("fixture renders");
+    let generated =
+        print_sexpr(&conduction_fixture_project(7, &tetra_stl())).expect("fixture renders");
     assert_eq!(
         tracked, generated,
         "tracked .fsim drifted from its generator; re-run the ignored \
@@ -2933,6 +2929,21 @@ fn receipt_str_field(receipt: &str, name: &str) -> String {
     let rest = &receipt[start..];
     let end = rest.find('"').expect("field is terminated");
     rest[..end].to_string()
+}
+
+fn receipt_number_field(receipt: &str, name: &str) -> f64 {
+    let key = format!("\"{name}\":");
+    let start = receipt
+        .find(&key)
+        .unwrap_or_else(|| panic!("receipt field `{name}` present"))
+        + key.len();
+    let rest = &receipt[start..];
+    let end = rest
+        .find(|character: char| character == ',' || character == '}')
+        .unwrap_or_else(|| panic!("receipt number `{name}` is terminated"));
+    rest[..end]
+        .parse()
+        .unwrap_or_else(|_| panic!("receipt field `{name}` is numeric"))
 }
 
 /// The flow-network stage (bead frankensim-frn2i.2) executes on the reference
@@ -3022,6 +3033,58 @@ fn g0_flow_network_stage_retains_an_interval_certified_operating_point_receipt()
         leakage_fraction > 0.0 && leakage_fraction < 1.0,
         "a declared leakage branch carries a nonzero, non-total share: {leakage_fraction}"
     );
+}
+
+/// G1 manufactured single-tet path: retained import evidence is replayed into
+/// a labeled volume, the card-backed conductivity operator receives 5 W, and
+/// the declared full-surface Robin law removes that heat. The next refusal is
+/// QoI, proving conduction itself is no longer a skeleton or typed gap when
+/// its physical inputs are declared.
+#[test]
+fn g1_conduction_stage_executes_and_retains_field_and_balance_evidence() {
+    let bytes = tetra_stl();
+    let spec = conduction_fixture_project(7, &bytes);
+    let decoded = decode(&spec);
+    let ledger = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&ledger, &spec, bytes);
+
+    let (refusal, progress) = run_to_gap(&ledger, &decoded);
+    assert_eq!(refusal.code, "cli-solve-stage-gap");
+    assert_eq!(refusal.stage, Some("qoi"), "conduction completed");
+    assert_eq!(refusal.dependency, Some("frankensim-s2l9v"));
+    assert!(
+        progress.iter().any(|line| line.contains("conduction")),
+        "the executing conduction stage reports progress"
+    );
+
+    let run = refusal.run.expect("run");
+    let receipts = stage_receipt_hashes(&ledger, &run);
+    assert_eq!(receipts.len(), 5, "conduction retained the fifth receipt");
+    let receipt =
+        String::from_utf8(artifact_bytes(&ledger, &receipts[4])).expect("receipt is utf-8");
+    assert_balanced_json(&receipt);
+    assert!(receipt.contains("frankensim.cli.solve-conduction-receipt.v1"));
+    assert!(receipt.contains("\"elements\":1"));
+    assert_eq!(receipt_number_field(&receipt, "source_w"), 5.0);
+    assert!(
+        receipt_number_field(&receipt, "relative_closure") < 1e-6,
+        "the independent energy balance closes at the declared tolerance: {receipt}"
+    );
+    let min = receipt_number_field(&receipt, "min");
+    let max = receipt_number_field(&receipt, "max");
+    assert!(min.is_finite() && max.is_finite() && min <= max);
+    assert!(
+        max > 293.15,
+        "positive power under convection raises the solid above its declared reference"
+    );
+
+    let solution_hash = receipt_str_field(&receipt, "solution_artifact");
+    let solution = fs_ledger::ContentHash::from_hex(&solution_hash).expect("solution hash");
+    let solution_bytes = artifact_bytes(&ledger, &solution);
+    let solution_text = String::from_utf8(solution_bytes).expect("solution is utf-8");
+    assert_balanced_json(&solution_text);
+    assert!(solution_text.contains("frankensim.cli.solve-conduction-solution.v1"));
+    assert!(solution_text.contains("\"temperature_unit\":\"K\""));
 }
 
 /// Declarations the flow-network stage requires but validation deliberately

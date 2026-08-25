@@ -139,6 +139,7 @@ pub const STATE_CHECKPOINT_RECEIPT_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
     "encoder_helpers=checkpoint_receipt_hash_with_schema",
     "schema_constants=STATE_CHECKPOINT_RECEIPT_IDENTITY_VERSION,STATE_CHECKPOINT_RECEIPT_IDENTITY_DOMAIN,STATE_CHECKPOINT_RECEIPT_FIXED_TRANSPORT_BYTES,MAX_STATE_CHECKPOINT_LAW_ID_BYTES,RUNTIME_STATE_ARTIFACT_KIND,MAX_RUNTIME_STATE_CHECKPOINT_BYTES,crates/fs-ledger/src/schema.rs#V12",
     "schema_functions=StateCheckpointReceipt::to_bytes,StateCheckpointReceipt::from_bytes,validate_receipt_identity,validate_law_id,receipt_from_semantics,Ledger::stored_state_checkpoint,Ledger::insert_state_checkpoint,Ledger::record_state_checkpoint,Ledger::load_state_checkpoint,Ledger::verify_state_checkpoint_receipt,Ledger::ensure_known_state_semantics,Ledger::load_runtime_state_artifact,crates/fs-blake3/src/lib.rs#hash_domain",
+    "schema_types=crates/fs-blake3/src/lib.rs#ContentHash,crates/fs-ledger/src/lib.rs#Ledger,crates/fs-ledger/src/lib.rs#LedgerError",
     "schema_dependencies=fs-ledger:artifact-content,fs-matdb:canonical-parameter-block",
     "digest=blake3-256-domain-separated",
     "encoding=typed-binary",

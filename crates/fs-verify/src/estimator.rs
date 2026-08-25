@@ -70,6 +70,7 @@ pub const VERIFIER_RECEIPT_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
     "encoder_helpers=VerifierReceipt::canonical_bytes_inner,receipt_push,receipt_push_string,receipt_push_hash,receipt_phase_tag,receipt_checkpoint_tag",
     "schema_constants=VERIFIER_RECEIPT_SCHEMA_VERSION,VERIFIER_RECEIPT_HASH_DOMAIN,VERIFIER_RECEIPT_MAGIC,MAX_VERIFIER_RECEIPT_CANONICAL_BYTES,MAX_VERIFIER_RECEIPT_STRING_BYTES,MAX_VERIFIER_RECEIPT_HYPOTHESES",
     "schema_functions=VerifierReceipt::from_successful_report,VerifierProducerSourceIdentity::current,current_verifier_feature_set,source_set_root,framed_parts_root,f64_sequence_root,crates/fs-blake3/src/lib.rs#hash_domain",
+    "schema_types=crates/fs-verify/src/fem1d.rs#Fem1dError,crates/fs-verify/src/fem1d.rs#MmsProblem",
     "schema_dependencies=fs-verify:fem1d-mms-problem",
     "digest=blake3-derive-key",
     "encoding=typed-binary",
