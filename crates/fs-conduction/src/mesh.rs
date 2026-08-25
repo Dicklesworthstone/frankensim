@@ -81,6 +81,25 @@ fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
 /// operator and is refused rather than inverted.
 const DEGENERACY_FLOOR: f64 = 1e-12;
 
+fn validate_vertex_indices(
+    complex: &TetComplex,
+    position_count: usize,
+) -> Result<(), ConductionError> {
+    for (element, tet) in complex.tets.iter().enumerate() {
+        for &vertex in tet {
+            if vertex as usize >= position_count {
+                return Err(ConductionError::Mesh {
+                    what: format!(
+                        "tet {element} references vertex {vertex}, outside the {position_count} supplied positions"
+                    ),
+                    fix: "rebuild the complex with in-range vertex indices".to_string(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 impl ConductionMesh {
     /// Prepare a complex for assembly.
     ///
@@ -109,6 +128,7 @@ impl ConductionMesh {
                 fix: "supply a complex with at least one element".to_string(),
             });
         }
+        validate_vertex_indices(&complex, positions.len())?;
         for (v, p) in positions.iter().enumerate() {
             for (k, &c) in p.iter().enumerate() {
                 if !c.is_finite() {
@@ -195,19 +215,11 @@ impl ConductionMesh {
                 fix: "supply exactly one position per complex vertex".to_string(),
             });
         }
+        validate_vertex_indices(&complex, positions.len())?;
 
         let mut keys = BTreeSet::new();
         for (tet, &region) in complex.tets.iter().zip(region_of_element) {
             for &vertex in tet {
-                if vertex as usize >= positions.len() {
-                    return Err(ConductionError::Mesh {
-                        what: format!(
-                            "tet references vertex {vertex}, outside the {} supplied positions",
-                            positions.len()
-                        ),
-                        fix: "rebuild the complex with in-range vertex indices".to_string(),
-                    });
-                }
                 keys.insert((vertex, region));
             }
         }

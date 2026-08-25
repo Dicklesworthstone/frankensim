@@ -226,8 +226,13 @@ fn g0_region_owned_lowering_splits_only_cross_region_traces() {
     let a = &split.boundary()[pair.side_a];
     let b = &split.boundary()[pair.side_b];
     assert_ne!(a.vertices, b.vertices, "the two traces own distinct DOFs");
-    assert_eq!(a.element, 0);
-    assert_eq!(b.element, 1);
+    let mut owners = [a.element, b.element];
+    owners.sort_unstable();
+    assert_eq!(owners, [0, 1], "each region owns one side of the trace");
+    let normal_dot = a.outward_normal[0] * b.outward_normal[0]
+        + a.outward_normal[1] * b.outward_normal[1]
+        + a.outward_normal[2] * b.outward_normal[2];
+    assert!(normal_dot < -0.999_999, "contact normals must oppose: {normal_dot}");
 
     let same_region = ConductionMesh::new_region_owned(complex, positions, &[10, 10])
         .expect("same-region neighbors stay conforming");
@@ -261,6 +266,25 @@ fn g0_region_owned_lowering_refuses_label_length_mismatch() {
             found: 0,
         }
     ));
+}
+
+#[test]
+fn g0_conduction_mesh_refuses_out_of_range_vertex_without_panicking() {
+    let positions = vec![
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0],
+    ];
+    let error = ConductionMesh::new(TetComplex::from_tets(4, vec![[0, 1, 2, 4]]), positions)
+        .expect_err("an out-of-range vertex must be a typed refusal");
+    match error {
+        ConductionError::Mesh { what, fix } => {
+            assert!(what.contains("tet 0 references vertex 4"), "{what}");
+            assert!(fix.contains("in-range vertex indices"), "{fix}");
+        }
+        other => panic!("unexpected refusal: {other}"),
+    }
 }
 
 fn coincident_base_tet_mesh(apex_heights: &[f64]) -> ConductionMesh {
