@@ -116,7 +116,15 @@ fn re_sweep_campaign() {
     // our way out of, so a too-thin box must be ruled out explicitly.
     let mut cfg_hi = base_config(*LADDER.last().expect("non-empty ladder"));
     cfg_hi.nz *= 2;
-    let run_hi = run_slot_jet_3d(&cfg_hi).expect("octave rung executes");
+    let ckpt_hi = std::env::temp_dir().join("sj3d-sweep-octave");
+    let run_hi = loop {
+        match run_slot_jet_3d_chunked(&cfg_hi, &ckpt_hi, 1_024).expect("chunk executes") {
+            SweepProgress::Complete(run) => break *run,
+            SweepProgress::Partial { steps_done } => {
+                println!("  octave: {steps_done} steps done");
+            }
+        }
+    };
     let cls_hi = classify_rung(&run_hi, &cfg_hi).expect("octave classification");
     jsonl.push_str(&cls_hi.to_jsonl());
     jsonl.push('\n');
