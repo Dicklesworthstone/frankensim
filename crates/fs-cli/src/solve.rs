@@ -3396,6 +3396,223 @@ fn conduction_boundary(
     })
 }
 
+fn interface_resolution_root(
+    resolution: &fs_project::ConductionInterfaceResolution,
+) -> Result<ContentHash, SolveRefusal> {
+    const ROW_DOMAIN: &str = "org.frankensim.fs-cli.conduction-interface-row.v1";
+    const SET_DOMAIN: &str = "org.frankensim.fs-cli.conduction-interface-set.v1";
+    let capacity = resolution.pairs.len().checked_mul(32).ok_or_else(|| {
+        conduction_error(
+            "cli-solve-conduction-interface-budget",
+            "the interface-pair identity buffer length overflowed",
+            "reduce the interface mesh or split the solve domain",
+        )
+    })?;
+    let mut roots = Vec::new();
+    roots.try_reserve_exact(capacity).map_err(|_| {
+        conduction_error(
+            "cli-solve-conduction-interface-budget",
+            format!("could not reserve {capacity} bytes for interface-pair identities"),
+            "reduce the interface mesh or raise the declared memory budget",
+        )
+    })?;
+    for pair in &resolution.pairs {
+        let selected = pair
+            .interface_sources
+            .iter()
+            .map(|source| {
+                format!(
+                    "{}:{}:{}",
+                    source.artifact, source.source_identity, source.face
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let row = format!(
+            "{}|{}|{}|{}|{}|{}:{}:{}|{}:{}:{}|{}",
+            pair.interface,
+            pair.from_region,
+            pair.to_region,
+            pair.from_boundary_slot,
+            pair.to_boundary_slot,
+            pair.from_source.artifact,
+            pair.from_source.source_identity,
+            pair.from_source.face,
+            pair.to_source.artifact,
+            pair.to_source.source_identity,
+            pair.to_source.face,
+            selected,
+        );
+        roots.extend_from_slice(hash_domain(ROW_DOMAIN, row.as_bytes()).as_bytes());
+    }
+    Ok(hash_domain(SET_DOMAIN, &roots))
+}
+
+fn interface_evidence_bytes(
+    run: SolveRunId,
+    resolution: &fs_project::ConductionInterfaceResolution,
+) -> Result<Vec<u8>, SolveRefusal> {
+    let mut counts = BTreeMap::<&str, usize>::new();
+    for pair in &resolution.pairs {
+        *counts.entry(&pair.interface).or_default() += 1;
+    }
+    let interfaces = counts
+        .into_iter()
+        .map(|(name, pairs)| {
+            format!(
+                "{{\"name\":{},\"pair_count\":{pairs}}}",
+                json_string(name)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    Ok(format!(
+        "{{\"schema\":{},\"run\":{},\"pair_count\":{},\"source_faces_indexed\":{},\
+         \"resolution_root\":{},\"interfaces\":[{}],\"authority\":{},\"no_claim\":{}}}",
+        json_string(CONDUCTION_INTERFACE_EVIDENCE_SCHEMA),
+        json_string(&run.to_hex()),
+        resolution.pairs.len(),
+        resolution.source_faces_indexed,
+        json_string(&interface_resolution_root(resolution)?.to_hex()),
+        interfaces,
+        json_string("exact-imported-face-to-region-owned-matching-p1-lowering"),
+        json_string(fs_project::ConductionInterfaceResolution::no_claim()),
+    )
+    .into_bytes())
+}
+
+fn lower_thermal_interfaces(
+    spec: &ProjectSpec,
+    cards: &CardPackSet,
+    mesh: &fs_conduction::ConductionMesh,
+    boundary: &fs_conduction::ThermalBoundary,
+    resolution: &fs_project::ConductionInterfaceResolution,
+) -> Result<Option<fs_conduction::ThermalInterfaces>, SolveRefusal> {
+    if resolution.pairs.is_empty() {
+        return Ok(None);
+    }
+    let library = cards.library();
+    let bindings = resolve_bindings(
+        spec,
+        &library,
+        &BindingRequirements::thermal_steady_v1(),
+    );
+    if !bindings.admissible() {
+        let first = &bindings.violations[0];
+        return Err(conduction_error(
+            first.code,
+            format!(
+                "conduction interface material replay found {} violation(s); first: {}",
+                bindings.violations.len(),
+                first.what
+            ),
+            first.fix.clone(),
+        ));
+    }
+
+    let mut pairs_by_interface = BTreeMap::<&str, Vec<fs_conduction::InterfaceFacePair>>::new();
+    for pair in &resolution.pairs {
+        pairs_by_interface
+            .entry(&pair.interface)
+            .or_default()
+            .push(pair.face_pair());
+    }
+    let mut surfaces = Vec::with_capacity(pairs_by_interface.len());
+    for (name, pairs) in pairs_by_interface {
+        let binding = bindings
+            .bindings
+            .iter()
+            .find(|binding| {
+                matches!(&binding.target, BindingTarget::Interface(target) if target == name)
+            })
+            .ok_or_else(|| {
+                conduction_error(
+                    "cli-solve-conduction-interface-card",
+                    format!("declared interface `{name}` has no resolved card binding"),
+                    "bind every declared interface to one admitted finite-resistance card",
+                )
+            })?;
+        let property = binding
+            .properties
+            .iter()
+            .find(|property| {
+                property.property == fs_project::THERMAL_CONTACT_RESISTANCE_PROPERTY
+            })
+            .ok_or_else(|| {
+                conduction_error(
+                    "cli-solve-conduction-interface-card",
+                    format!("interface `{name}` resolved no thermal-contact resistance"),
+                    "supply the property required by the thermal steady binding contract",
+                )
+            })?;
+        if property.value_lo.to_bits() != property.value_hi.to_bits() {
+            return Err(conduction_error(
+                "cli-solve-conduction-interface-temperature-variation",
+                format!(
+                    "interface `{name}` resistance varies from {} to {} m^2 K/W over [{}, {}] K",
+                    property.value_lo, property.value_hi, binding.range_lo, binding.range_hi
+                ),
+                "use a constant-within-validity contact claim until temperature-dependent contact is coupled into the nonlinear solve",
+            ));
+        }
+        let card = library.interface(&binding.card).ok_or_else(|| {
+            conduction_error(
+                "cli-solve-conduction-interface-card",
+                format!("interface card {} for `{name}` is absent", binding.card),
+                "supply the exact normalized interface pack used by material-resolve",
+            )
+        })?;
+        let point = QueryPoint::new()
+            .with(fs_conduction::TEMPERATURE_AXIS, binding.range_lo)
+            .map_err(|error| {
+                conduction_error(
+                    "cli-solve-conduction-interface-card",
+                    format!("interface `{name}` query point refused: {error}"),
+                    "repair the admitted temperature range",
+                )
+            })?;
+        let resistance = match binding.pinned_claim.as_deref() {
+            Some(pin) => fs_conduction::InterfaceResistance::from_card_pinned(
+                name,
+                card,
+                &point,
+                parse_claim_id(pin, &format!("interface binding `{name}`"))?,
+            ),
+            None => fs_conduction::InterfaceResistance::from_card(
+                name,
+                card,
+                &point,
+                SelectionPolicy::SingleClaimOnly,
+            ),
+        }
+        .map_err(|error| {
+            conduction_error(
+                "cli-solve-conduction-interface-card",
+                format!("interface resistance for `{name}` refused: {error}"),
+                "repair the selected contact claim or its validity range",
+            )
+        })?;
+        surfaces.push(
+            fs_conduction::InterfaceSurface::new(name, pairs, resistance).map_err(|error| {
+                conduction_error(
+                    "cli-solve-conduction-interface-surface",
+                    format!("interface surface `{name}` refused: {error}"),
+                    "repair the exact interface pair lowering",
+                )
+            })?,
+        );
+    }
+    fs_conduction::ThermalInterfaces::new(mesh, boundary, surfaces)
+        .map(Some)
+        .map_err(|error| {
+            conduction_error(
+                "cli-solve-conduction-interface-bind",
+                format!("contact operator binding refused: {error}"),
+                "ensure every exact coincident trace has one card and no external boundary law",
+            )
+        })
+}
+
 #[allow(clippy::too_many_lines)]
 fn conduction_receipt(
     ledger: &Ledger,
