@@ -299,6 +299,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::float_cmp)]
     fn max_abs_finite_and_special_values() {
         // Pga zero
         assert_eq!(Pga::zero().max_abs(), 0.0);
@@ -313,7 +314,10 @@ mod tests {
         for idx in [0, 7, 15] {
             let mut p_nan = p;
             p_nan.0[idx] = f64::NAN;
-            assert!(p_nan.max_abs().is_nan(), "Pga NaN at index {idx} must propagate");
+            assert!(
+                p_nan.max_abs().is_nan(),
+                "Pga NaN at index {idx} must propagate"
+            );
         }
 
         // Pga Infinity propagation
@@ -325,7 +329,10 @@ mod tests {
 
         // Pga NaN takes precedence over Infinity
         p_inf.0[0] = f64::NAN;
-        assert!(p_inf.max_abs().is_nan(), "NaN must take precedence over Infinity");
+        assert!(
+            p_inf.max_abs().is_nan(),
+            "NaN must take precedence over Infinity"
+        );
 
         // Cga zero
         assert_eq!(Cga::zero().max_abs(), 0.0);
@@ -340,7 +347,10 @@ mod tests {
         for idx in [0, 15, 31] {
             let mut c_nan = c;
             c_nan.0[idx] = f64::NAN;
-            assert!(c_nan.max_abs().is_nan(), "Cga NaN at index {idx} must propagate");
+            assert!(
+                c_nan.max_abs().is_nan(),
+                "Cga NaN at index {idx} must propagate"
+            );
         }
 
         // Cga Infinity propagation
@@ -350,7 +360,10 @@ mod tests {
 
         // Cga NaN takes precedence over Infinity
         c_inf.0[20] = f64::NAN;
-        assert!(c_inf.max_abs().is_nan(), "Cga NaN must take precedence over Infinity");
+        assert!(
+            c_inf.max_abs().is_nan(),
+            "Cga NaN must take precedence over Infinity"
+        );
     }
 
     trait SinLike {
