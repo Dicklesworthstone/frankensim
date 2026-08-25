@@ -265,7 +265,7 @@ It is NOT bitwise-equal to the strict path and must never become the
 default until it earns the same proof. Receipts (bead 2s4i5): the
 junction-level deviation battery lives inline (`fast_mode_tests`):
 a 64-point open/interior/closing stimulus sweep with every resolved
-root inside a microbar-scaled band of the strict root and the
+root within a per-sample conditioning-scaled band of the strict root
 fallback rate bounded at 0.25; the integration lane
 (`tests/reed_newton_fusion.rs`) owns the fallback-hit-rate receipt on
 a full nominal render and before/after budget rows stamped with build
@@ -283,21 +283,32 @@ compositions render through the block API and encode through the ONE
 pascals→PCM owner, `pcm_wav::encode_pcm16_wav` — the recorded seam
 decision (beads ib15w + h7xu5.7.8): the cinematic stereo/receipt-hashed
 encoder stays cinematic, no third RIFF writer exists in the music lane.
-Laws, all e2e-tested through the real binary: same arguments →
-bit-identical WAV + provenance sidecar; existing output/sidecar paths
-REFUSE (evidence is never overwritten); full-scale is a MAPPING, never
-normalization — the same physics renders identical `peak_pa` at any
-full-scale, PCM peaks scale inversely, and an undersized full-scale
-CLIPS with the count reported (the reed fixture peaks ≈10.7 kPa —
-mouthpiece pressures are kPa-scale, so full-scale choices must be too);
-sample rate pinned at 48 kHz (ecosystem coherence with fs-psycho). The
-provenance sidecar (`frankensim-music-render-provenance-v1`) carries
-fixture, rates, clip count, peak/rms pascals, and the domain-hashed
-blake3 of the WAV bytes — no wall-clock, no commit stamp (git history
-of committed artifacts carries those). No-claims: fixtures are pinned
-compositions, not a project/assembly loader (that is fs-cli product
-territory); mono only; no mastering, room, or loudness processing of
-any kind.
+grid-argmin fallback. `FastNewton` is a DECLARED FAST MODE (the
+fs-rand ziggurat precedent): DAMPED island Newton on the analytic
+Jacobian of the shared Bernoulli-plus-wave-junction residual — each
+step is halved up to four times until the residual magnitude strictly
+decreases, and a sample that never improves, hits a sqrt kink or
+non-finite state, exhausts its iteration budget, or shows a vanishing
+slope is handed untouched to the strict path and counted in
+`FastSolveStats`. Convergence requires an UNDOUBLED full step inside
+`NEWTON_STEP_TOL`, so a still-descending line search never reads as
+a converged root. It is NOT bitwise-equal to the strict path and must
+never become the default until it earns the same proof. Receipts (bead
+2s4i5): the junction-level battery lives inline (`fast_mode_tests`) —
+a 64-point open/interior/closing stimulus sweep gating two things per
+sample: every Newton root satisfies the strict path's own residual
+contract (`|f| < 1e-8*(1+p_m)`), and positional deviation from the
+strict root stays within four times the per-sample conditioning bound
+(`flow_tol*(1+p_m)/|J|`; the residual is nearly flat here because
+zc ~ 2.7e7 makes the wave term tiny). The integration lane
+(`tests/reed_newton_fusion.rs`) owns the fallback-hit-rate receipt on
+a full nominal render (bounded structurally at 0.5; measured 12-22%
+warm-seeded) and before/after budget rows stamped with build profile —
+debug rows are diagnostics forever, per the budget-lane doctrine.
+Recorded finding: end-to-end rendered waveforms are NOT comparable
+between modes beyond onset — the self-oscillating loop amplifies
+per-sample root differences into phase-divergent (O(kPa)) waveforms,
+so waveform equality is never a claim either mode makes.
 
 ### `bakeoff`
 
