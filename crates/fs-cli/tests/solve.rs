@@ -24,13 +24,15 @@ use fs_project::spec::{
 };
 use fs_project::{
     AirflowLeakage, Budgets, ConsequenceClass, Cooling, DecisionGate, DecodedProject, EntityDecl,
-    Envelope, FanCurveDecl, FanCurvePoint, FanToleranceBasis, GeometryArtifact,
-    GeometryAssignment, HalfSpaceSide, MaterialBinding, MeshSelector, Metadata, OutputRequest,
-    PowerDissipation, ProjectSpec, RequirementDirection, RequirementSeverity, RequirementSource,
-    RequirementSourceKind, SafetyFactorPolicy, Seeds, SolverSettings, ThermalLimit, UnitsDoctrine,
-    Vent, Versions, print_sexpr,
+    Envelope, FanCurveDecl, FanCurvePoint, FanToleranceBasis, GeometryArtifact, GeometryAssignment,
+    HalfSpaceSide, InterfaceCardBinding, InterfaceState, MaterialBinding, MeshSelector, Metadata,
+    OutputRequest, PowerDissipation, ProjectSpec, RequirementDirection, RequirementSeverity,
+    RequirementSource, RequirementSourceKind, SafetyFactorPolicy, Seeds, SolverSettings,
+    ThermalLimit, UnitsDoctrine, Vent, Versions, print_sexpr,
 };
 use fs_qty::QtyAny;
+
+const REFERENCE_DATA: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/reference-project");
 
 fn with_cx<R>(gate: &CancelGate, f: impl FnOnce(&Cx<'_>) -> R) -> R {
     let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
@@ -190,6 +192,95 @@ fn fixture_cards() -> CardPackSet {
         fixture_pack_bytes(),
     )])
     .expect("the fixture pack admits")
+}
+
+fn interface_pack_bytes() -> Vec<u8> {
+    use fs_evidence::ValidityDomain;
+    use fs_matdb::{
+        ClaimSet, InterpolationPolicy, MaterialStateId, NormalizedInterfacePack, NormalizedPack,
+        PropertyClaim, PropertyKey, PropertyValue, Provenance, SurfaceSpec, SystemContext,
+        UncertaintyModel,
+    };
+    let provenance = Provenance {
+        source: "solve fixture contact table".to_string(),
+        license: "CC-BY-4.0; redistribution permitted with attribution".to_string(),
+        artifact: Some(fs_blake3::hash_domain(
+            CARD_FIXTURE_DOMAIN,
+            b"fixture-contact-table",
+        )),
+    };
+    let mut claims = ClaimSet::new();
+    claims
+        .insert_claim(PropertyClaim {
+            key: PropertyKey::new(
+                fs_conduction::AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY,
+                fs_conduction::AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS,
+            ),
+            value: PropertyValue::Scalar {
+                value: 0.1,
+                dims: fs_conduction::AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS,
+            },
+            validity: ValidityDomain::unconstrained().with("T", 200.0, 450.0),
+            uncertainty: UncertaintyModel::HalfWidth {
+                half_width: 0.005,
+                confidence: 0.95,
+            },
+            interpolation: InterpolationPolicy::ConstantWithinValidity,
+            observations: Vec::new(),
+            provenance: provenance.clone(),
+        })
+        .expect("contact claim inserts");
+    let pack = NormalizedPack::new(
+        "solve-fixture-interface-pack",
+        "frankensim-interface-pack-compiler-v1",
+        fs_blake3::hash_domain(CARD_FIXTURE_DOMAIN, b"contact-source-envelope"),
+        "CC-BY-4.0: redistribution permitted with attribution",
+        claims,
+        Vec::new(),
+        Vec::new(),
+    )
+    .expect("contact claim pack admits");
+    let state = |chemistry: &str| MaterialStateId {
+        chemistry: chemistry.to_string(),
+        phase: "solid".to_string(),
+        process: "fixture".to_string(),
+        revision: 0,
+    };
+    NormalizedInterfacePack::new(
+        SurfaceSpec {
+            material: state("cold-body"),
+            texture_frame: "normal-plus-x".to_string(),
+        },
+        SurfaceSpec {
+            material: state("hot-body"),
+            texture_frame: "normal-minus-x".to_string(),
+        },
+        SystemContext {
+            medium: "dry-contact".to_string(),
+            third_body: None,
+            environment: "fixture-air".to_string(),
+            history: "unaged".to_string(),
+        },
+        pack,
+    )
+    .expect("interface pack admits")
+    .to_bytes()
+}
+
+fn contact_cards() -> CardPackSet {
+    CardPackSet::admit(vec![
+        raw_pack(
+            CardPackKind::Material,
+            "fixtures/aa6061.fsmcdpk",
+            fixture_pack_bytes(),
+        ),
+        raw_pack(
+            CardPackKind::Interface,
+            "fixtures/cold-hot.fsintpk",
+            interface_pack_bytes(),
+        ),
+    ])
+    .expect("contact card set admits")
 }
 
 /// The card hash the fixture project's material binding must name, and the
@@ -395,6 +486,97 @@ fn conduction_fixture_project(seed_root: u64, bytes: &[u8]) -> ProjectSpec {
         adiabatic_remainder: false,
     });
     spec
+}
+
+fn multi_region_contact_project() -> ProjectSpec {
+    let source = std::fs::read_to_string(format!("{REFERENCE_DATA}/multi-region-interface.fsim"))
+        .expect("committed multi-region project");
+    let mut spec = fs_project::parse_sexpr(&source)
+        .expect("multi-region project parses")
+        .spec;
+    let (material_card, material_state) = fixture_card_identity();
+    spec.materials = Some(
+        ["cold", "hot"]
+            .into_iter()
+            .map(|region| MaterialBinding {
+                region: region.to_string(),
+                card: material_card.clone(),
+                claim: None,
+                state: material_state.clone(),
+                temp_lo: QtyAny::new(233.15, fs_project::spec::dims::TEMPERATURE),
+                temp_hi: QtyAny::new(398.15, fs_project::spec::dims::TEMPERATURE),
+                source: "solve-contact-fixture".to_string(),
+            })
+            .collect(),
+    );
+    let cards = contact_cards();
+    spec.interface_cards = Some(vec![InterfaceCardBinding {
+        interface: "cold-hot-joint".to_string(),
+        card: cards.interfaces()[0].card().to_hex(),
+        claim: None,
+        source: "solve-contact-fixture".to_string(),
+        state: InterfaceState::DryContact {
+            pressure: QtyAny::new(1.0e6, fs_project::spec::dims::PRESSURE),
+            pressure_half_width: QtyAny::new(1.0e5, fs_project::spec::dims::PRESSURE),
+            finish: "fixture-machined".to_string(),
+        },
+    }]);
+    spec.power = Some(vec![PowerDissipation {
+        region: "hot".to_string(),
+        watts: QtyAny::new(5.0, fs_project::spec::dims::POWER),
+        duty: 1.0,
+    }]);
+    spec.cooling.as_mut().expect("fixture cooling").conduction = Some(ConductionSetup {
+        regions: vec![
+            ConductionRegion {
+                region: "cold".to_string(),
+                seed: [0.5, 0.5, 0.5]
+                    .map(|value| QtyAny::new(value, fs_project::spec::dims::LENGTH)),
+            },
+            ConductionRegion {
+                region: "hot".to_string(),
+                seed: [1.5, 0.5, 0.5]
+                    .map(|value| QtyAny::new(value, fs_project::spec::dims::LENGTH)),
+            },
+        ],
+        boundaries: vec![
+            ThermalBoundary {
+                target: "cold".to_string(),
+                condition: ThermalBoundaryCondition::FixedTemperature {
+                    temperature: QtyAny::new(293.15, fs_project::spec::dims::TEMPERATURE),
+                },
+            },
+            ThermalBoundary {
+                target: "hot".to_string(),
+                condition: ThermalBoundaryCondition::Convection {
+                    coefficient: QtyAny::new(
+                        10.0,
+                        fs_project::spec::dims::HEAT_TRANSFER_COEFFICIENT,
+                    ),
+                    reference_temperature: QtyAny::new(293.15, fs_project::spec::dims::TEMPERATURE),
+                },
+            },
+        ],
+        adiabatic_remainder: false,
+    });
+    spec
+}
+
+fn import_multi_region_contact(ledger: &Ledger, spec: &ProjectSpec) {
+    let mut raw = RawGeometryLibrary::new();
+    for artifact in spec.geometry.as_deref().expect("geometry") {
+        let path = format!(
+            "{REFERENCE_DATA}/multi-region-{role}.stl",
+            role = artifact.role
+        );
+        let bytes = std::fs::read(&path).expect("committed multi-region mesh");
+        assert!(!raw.insert_mesh(artifact, path, bytes, "m", 0, Vec::new(),));
+    }
+    let gate = CancelGate::new_clock_free();
+    with_cx(&gate, |cx| {
+        import_project_geometry(spec, &raw, ledger, GeometryImportLimits::DEFAULT, cx)
+            .expect("multi-region fixture imports");
+    });
 }
 
 fn decode(spec: &ProjectSpec) -> DecodedProject {
@@ -3100,6 +3282,71 @@ fn g1_conduction_stage_executes_and_retains_field_and_balance_evidence() {
         receipts,
         "resume preserves the exact five-stage prefix"
     );
+}
+
+/// G1 product contact path: two retained solids are volumetricized together,
+/// split back into region-owned matching-P1 traces, mapped to the declared
+/// scenario interface and finite-resistance card, and solved without treating
+/// the joint as either perfect contact or an adiabatic gap.
+#[test]
+fn g1_conduction_stage_executes_declared_card_backed_contact() {
+    let spec = multi_region_contact_project();
+    let decoded = decode(&spec);
+    let ledger = Ledger::open(":memory:").expect("ledger");
+    import_multi_region_contact(&ledger, &spec);
+    let cards = contact_cards();
+    let gate = CancelGate::new_clock_free();
+    let mut clock = benign_clock();
+    let mut progress = Vec::new();
+    let refusal = run_solve(&ledger, &gate, &mut clock, &decoded, &cards, &mut progress)
+        .expect_err("contact solve completes and stops at the QoI gap");
+    assert_eq!(refusal.code, "cli-solve-stage-gap");
+    assert_eq!(refusal.stage, Some("qoi"));
+
+    let run = refusal.run.expect("run");
+    let receipts = stage_receipt_hashes(&ledger, &run);
+    assert_eq!(
+        receipts.len(),
+        5,
+        "contact conduction retained the fifth receipt"
+    );
+    let receipt =
+        String::from_utf8(artifact_bytes(&ledger, &receipts[4])).expect("receipt is utf-8");
+    assert_balanced_json(&receipt);
+    assert!(receipt.contains("frankensim.cli.solve-conduction-receipt.v2"));
+    assert!(receipt.contains("\"interfaces\":{\"pair_count\":2"));
+    assert!(receipt.contains("\"interface\":\"cold-hot-joint\""));
+    assert!(
+        receipt_number_field(&receipt, "heat_rate_a_to_b_w").abs() > 1e-12,
+        "finite resistance carries a nonzero solved heat rate: {receipt}"
+    );
+    assert!(
+        receipt_number_field(&receipt, "relative_closure") < 1e-6,
+        "the contact solve closes its global energy balance: {receipt}"
+    );
+
+    let evidence_hash = receipt_str_field(&receipt, "evidence_artifact");
+    let evidence = String::from_utf8(artifact_bytes(&ledger, &evidence_hash))
+        .expect("interface evidence is utf-8");
+    assert_balanced_json(&evidence);
+    assert!(evidence.contains("frankensim.cli.solve-conduction-interface-evidence.v1"));
+    assert!(evidence.contains("\"pair_count\":2"));
+    assert!(evidence.contains("\"name\":\"cold-hot-joint\""));
+    assert!(receipt_number_field(&evidence, "source_faces_indexed") > 0.0);
+
+    let mut resume_clock = benign_clock();
+    let mut resume_progress = Vec::new();
+    let resumed = resume_solve(
+        &ledger,
+        &gate,
+        &mut resume_clock,
+        &run,
+        &mut resume_progress,
+    )
+    .expect_err("resume replays contact and stops at QoI");
+    assert_eq!(resumed.code, "cli-solve-stage-gap");
+    assert_eq!(resumed.stage, Some("qoi"));
+    assert_eq!(stage_receipt_hashes(&ledger, &run), receipts);
 }
 
 /// Declarations the flow-network stage requires but validation deliberately
