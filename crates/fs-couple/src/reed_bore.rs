@@ -160,6 +160,9 @@ const FLOW_DEAD_ZONE_PA: f64 = 1.0e-12;
 const NEWTON_CORNER_PA: f64 = 1.0e-6;
 /// Newton cap before handing the sample to the strict path.
 const NEWTON_MAX_ITERS: usize = 12;
+/// Line-search halvings allowed before the sample is declared
+/// cornered (4 halvings cover a 16x overshoot).
+const NEWTON_BACKTRACK_MAX: u32 = 4;
 /// Step-size convergence: stop when a full Newton step moves `p_plus`
 /// by less than this relative amount. Converging on the shared
 /// residual acceptance (`1e-8·(1+|p_m|)` in flow units) instead would
@@ -247,34 +250,44 @@ pub(crate) fn solve_reed_wave_fast(
     let mut p = guess;
     let mut f = reed_flow_mismatch(reed, rho, zc, r0, p_minus_hist, p_m, p, u_body);
     if !f.is_finite() {
-        #[cfg(test)]
-        eprintln!("DBG fallback: non-finite f at guess={guess} pm={p_m} h={p_minus_hist} f={f}");
         stats.fallback_samples += 1;
         return solve_reed_wave_strict(reed, rho, zc, r0, p_minus_hist, p_m, guess, u_body);
     }
     for _ in 0..NEWTON_MAX_ITERS {
         let Some(j) = reed_flow_jacobian(reed, rho, zc, r0, p_minus_hist, p_m, p) else {
-            #[cfg(test)]
-            eprintln!("DBG fallback: no jacobian at p={p} dp={} ", p_m - ((1.0+r0)*p + p_minus_hist));
             stats.fallback_samples += 1;
             return solve_reed_wave_strict(reed, rho, zc, r0, p_minus_hist, p_m, guess, u_body);
         };
-        let step = -f / j;
-        if !step.is_finite() {
+        // Damped Newton: the raw step may overshoot the root from a
+        // cold seed (measured: |f_new| can exceed |f| by <20% with the
+        // true root lying BETWEEN the iterates). Halve the step until
+        // the residual magnitude strictly decreases; a cornered sample
+        // that never improves hands itself to the strict path.
+        let full_step = -f / j;
+        if !full_step.is_finite() {
             stats.fallback_samples += 1;
             return solve_reed_wave_strict(reed, rho, zc, r0, p_minus_hist, p_m, guess, u_body);
         }
-        let p_new = p + step;
-        let f_new = reed_flow_mismatch(reed, rho, zc, r0, p_minus_hist, p_m, p_new, u_body);
-        // Monotone-descent guard: no line search, no drift — a sample
-        // that does not improve hands itself to the strict path.
+        let mut applied = full_step;
+        let mut p_new = p + applied;
+        let mut f_new = reed_flow_mismatch(reed, rho, zc, r0, p_minus_hist, p_m, p_new, u_body);
+        let mut halvings = 0_u32;
+        while (!f_new.is_finite() || f_new.abs() >= f.abs())
+            && halvings < NEWTON_BACKTRACK_MAX
+        {
+            applied *= 0.5;
+            p_new = p + applied;
+            f_new = reed_flow_mismatch(reed, rho, zc, r0, p_minus_hist, p_m, p_new, u_body);
+            halvings += 1;
+        }
         if !f_new.is_finite() || f_new.abs() >= f.abs() {
-            #[cfg(test)]
-            eprintln!("DBG fallback: monotone guard iter f={f} f_new={f_new} step={step} p={p}");
             stats.fallback_samples += 1;
             return solve_reed_wave_strict(reed, rho, zc, r0, p_minus_hist, p_m, guess, u_body);
         }
-        let converged = step.abs() <= NEWTON_STEP_TOL * (1.0 + p_new.abs());
+        // Converged on an UNDOUBLED full step; a backtracked step means
+        // "still descending", never "done".
+        let converged =
+            halvings == 0 && full_step.abs() <= NEWTON_STEP_TOL * (1.0 + p_new.abs());
         p = p_new;
         f = f_new;
         if converged {
@@ -524,7 +537,6 @@ mod fast_mode_tests {
         // guess does once locked).
         let mut max_dev = 0.0_f64;
         for k in 0..64 {
-            if k >= 3 { break; }
             let pm = 200.0 + 120.0 * f64::from(k);
             let h = 40.0 * f64::from(k % 7) - 120.0;
             let guess = 0.25 * pm + 30.0 * f64::from(k % 5) + 7.0;
