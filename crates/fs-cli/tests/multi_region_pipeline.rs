@@ -10,7 +10,7 @@
 
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_io::read_stl;
-use fs_mesh::volumetric::{RegionId, RegionKind, RegionSpec, UnverifiedPlc, VolumetricPolicy};
+use fs_mesh::{RegionId, RegionKind, RegionSpec, UnverifiedPlc, VolumetricPolicy, volumetricize};
 use fs_project::ImportedMeshLibrary;
 
 const DATA: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/reference-project");
@@ -130,20 +130,11 @@ fn multi_region_fixture_resolves_volumetricizes_and_opens() {
             },
         ];
 
-        // -- mesher chain: admit -> recover -> carve_and_label -> audit --
-        let plc = UnverifiedPlc::new(vertices.clone(), regions.clone());
+        // -- production mesher: the crate's own audited entry point ------
+        let plc = UnverifiedPlc::new(vertices, regions);
         let policy = VolumetricPolicy::fixture_default("m");
-        let recovered = plc
-            .admit(policy, cx)
-            .expect("PLC admits under fixture policy");
-        let carved = recovered
-            .recover(cx)
-            .expect("constraint recovery")
-            .carve_and_label(cx)
-            .expect("exterior carving and region labeling");
-        let audited = carved
-            .audit(&regions, 0.0, 0.0, cx)
-            .expect("independent audit");
+        let audited = fs_mesh::volumetricize(plc, policy, cx)
+            .expect("production mesher volumetricizes and audits");
 
         // -- independent volume recomputation from retained bytes --------
         let labeled = audited.labeled();
