@@ -24,6 +24,10 @@ pub mod dims {
     pub const TEMPERATURE: Dims = Dims([0, 0, 0, 1, 0, 0]);
     /// Watt.
     pub const POWER: Dims = Dims([2, 1, -3, 0, 0, 0]);
+    /// Watt per square metre.
+    pub const HEAT_FLUX: Dims = Dims([0, 1, -3, 0, 0, 0]);
+    /// Watt per square metre-kelvin.
+    pub const HEAT_TRANSFER_COEFFICIENT: Dims = Dims([0, 1, -3, -1, 0, 0]);
     /// Pascal.
     pub const PRESSURE: Dims = Dims([-1, 1, -2, 0, 0, 0]);
     /// Torque.
@@ -530,6 +534,64 @@ pub struct AirflowLeakage {
     pub area: QtyAny,
 }
 
+/// One explicitly seeded volumetric region in the conduction domain.
+///
+/// The seed must lie strictly inside the closed surface selected by the
+/// region's [`GeometryAssignment`]. It is declared rather than guessed: a
+/// surface centroid is not generally interior for non-convex geometry.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConductionRegion {
+    /// Declared region entity and geometry-assignment target.
+    pub region: String,
+    /// Strictly interior point, in coherent SI length quantities.
+    pub seed: [QtyAny; 3],
+}
+
+/// Physical law applied to one selected exterior boundary.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ThermalBoundaryCondition {
+    /// Prescribed absolute temperature.
+    FixedTemperature {
+        /// Boundary temperature (K).
+        temperature: QtyAny,
+    },
+    /// Prescribed outward heat flux.
+    HeatFlux {
+        /// Outward flux (W/m^2); a negative value injects heat.
+        outward_flux: QtyAny,
+    },
+    /// Linear convection to a declared reference temperature.
+    Convection {
+        /// Heat-transfer coefficient (W/(m^2 K)).
+        coefficient: QtyAny,
+        /// Reference-fluid absolute temperature (K).
+        reference_temperature: QtyAny,
+    },
+}
+
+/// One thermal boundary, keyed by an existing geometry-assignment target.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ThermalBoundary {
+    /// Region or interface whose exact finite-face selector defines the
+    /// boundary. Assignment targets are unique in an admissible project.
+    pub target: String,
+    /// Declared boundary law.
+    pub condition: ThermalBoundaryCondition,
+}
+
+/// Explicit inputs required to lower project geometry into a conduction
+/// problem without inventing an interior point or a thermal boundary.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConductionSetup {
+    /// One seed for every declared volumetric region.
+    pub regions: Vec<ConductionRegion>,
+    /// Boundary laws over selected exterior faces.
+    pub boundaries: Vec<ThermalBoundary>,
+    /// Whether exterior faces not selected above are deliberately adiabatic.
+    /// When false, the execution stage must refuse any uncovered face.
+    pub adiabatic_remainder: bool,
+}
+
 /// The cooling section: declared-empty lists are facts, not omissions.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Cooling {
@@ -546,6 +608,10 @@ pub struct Cooling {
     /// Optional versioned fan-system declaration (bead frn2i.1, schema
     /// v2). Absence declares that no fan-system evidence is carried.
     pub fan_system: Option<crate::fansystem::FanSystemDecl>,
+    /// Optional explicit conduction-domain declaration. Absence remains
+    /// loadable for older projects but makes the conduction solve stage a
+    /// typed gap; no seed or boundary condition is inferred.
+    pub conduction: Option<ConductionSetup>,
 }
 
 /// The operating envelope.
@@ -1401,6 +1467,139 @@ impl ProjectSpec {
                     dims::AREA,
                 );
             }
+            if let Some(conduction) = &cooling.conduction {
+                if conduction.regions.is_empty() {
+                    out.push(violation(
+                        "project-conduction-regions-empty",
+                        "cooling.conduction declares no volumetric regions",
+                        "declare one strictly interior seed for every assembly region",
+                    ));
+                }
+                for region in &conduction.regions {
+                    for (axis, coordinate) in region.seed.iter().enumerate() {
+                        check_dims(
+                            out,
+                            "project-conduction-seed-dims",
+                            &format!("conduction seed `{}` axis {axis}", region.region),
+                            *coordinate,
+                            dims::LENGTH,
+                        );
+                        if !coordinate.value.is_finite() {
+                            out.push(violation(
+                                "project-conduction-seed-finite",
+                                format!(
+                                    "conduction seed `{}` axis {axis} is {}",
+                                    region.region, coordinate.value
+                                ),
+                                "declare a finite strictly interior coordinate",
+                            ));
+                        }
+                    }
+                }
+                if conduction.boundaries.is_empty() {
+                    out.push(violation(
+                        "project-conduction-boundaries-empty",
+                        "cooling.conduction declares no thermal boundary laws",
+                        "declare at least one fixed-temperature or convection boundary",
+                    ));
+                }
+                let mut has_anchor = false;
+                for boundary in &conduction.boundaries {
+                    match &boundary.condition {
+                        ThermalBoundaryCondition::FixedTemperature { temperature } => {
+                            has_anchor = true;
+                            check_dims(
+                                out,
+                                "project-conduction-boundary-dims",
+                                &format!("fixed temperature on `{}`", boundary.target),
+                                *temperature,
+                                dims::TEMPERATURE,
+                            );
+                            if !(temperature.value.is_finite() && temperature.value > 0.0) {
+                                out.push(violation(
+                                    "project-conduction-temperature-range",
+                                    format!(
+                                        "fixed temperature on `{}` is {} K",
+                                        boundary.target, temperature.value
+                                    ),
+                                    "declare a finite absolute temperature greater than zero",
+                                ));
+                            }
+                        }
+                        ThermalBoundaryCondition::HeatFlux { outward_flux } => {
+                            check_dims(
+                                out,
+                                "project-conduction-boundary-dims",
+                                &format!("outward heat flux on `{}`", boundary.target),
+                                *outward_flux,
+                                dims::HEAT_FLUX,
+                            );
+                            if !outward_flux.value.is_finite() {
+                                out.push(violation(
+                                    "project-conduction-flux-finite",
+                                    format!(
+                                        "outward heat flux on `{}` is {}",
+                                        boundary.target, outward_flux.value
+                                    ),
+                                    "declare a finite outward heat flux",
+                                ));
+                            }
+                        }
+                        ThermalBoundaryCondition::Convection {
+                            coefficient,
+                            reference_temperature,
+                        } => {
+                            has_anchor = true;
+                            check_dims(
+                                out,
+                                "project-conduction-boundary-dims",
+                                &format!("convection coefficient on `{}`", boundary.target),
+                                *coefficient,
+                                dims::HEAT_TRANSFER_COEFFICIENT,
+                            );
+                            check_dims(
+                                out,
+                                "project-conduction-boundary-dims",
+                                &format!(
+                                    "convection reference temperature on `{}`",
+                                    boundary.target
+                                ),
+                                *reference_temperature,
+                                dims::TEMPERATURE,
+                            );
+                            if !(coefficient.value.is_finite() && coefficient.value > 0.0) {
+                                out.push(violation(
+                                    "project-conduction-coefficient-range",
+                                    format!(
+                                        "convection coefficient on `{}` is {}",
+                                        boundary.target, coefficient.value
+                                    ),
+                                    "declare a finite heat-transfer coefficient greater than zero",
+                                ));
+                            }
+                            if !(reference_temperature.value.is_finite()
+                                && reference_temperature.value > 0.0)
+                            {
+                                out.push(violation(
+                                    "project-conduction-temperature-range",
+                                    format!(
+                                        "convection reference temperature on `{}` is {} K",
+                                        boundary.target, reference_temperature.value
+                                    ),
+                                    "declare a finite absolute temperature greater than zero",
+                                ));
+                            }
+                        }
+                    }
+                }
+                if !has_anchor {
+                    out.push(violation(
+                        "project-conduction-boundary-unanchored",
+                        "cooling.conduction carries only heat-flux boundaries",
+                        "declare at least one fixed-temperature or convection boundary so the steady operator is nonsingular",
+                    ));
+                }
+            }
         }
         self.check_range_quantities(out);
     }
@@ -1859,6 +2058,70 @@ impl ProjectSpec {
                     format!("vent (area {})", vent.area.value),
                     &vent.region,
                 );
+            }
+            if let Some(conduction) = &cooling.conduction {
+                let declared_regions: BTreeSet<&str> = ids
+                    .iter()
+                    .filter_map(|(name, id)| {
+                        (id.kind() == EntityKind::Region).then_some(name.as_str())
+                    })
+                    .collect();
+                let mut seeded_regions = BTreeSet::new();
+                for region in &conduction.regions {
+                    check_ref(
+                        ids,
+                        out,
+                        "conduction region seed".to_string(),
+                        &region.region,
+                    );
+                    if let Some(id) = ids.get(&region.region)
+                        && id.kind() != EntityKind::Region
+                    {
+                        out.push(violation(
+                            "project-conduction-seed-target-kind",
+                            format!(
+                                "conduction seed target `{}` is a {}, not a region",
+                                region.region,
+                                id.kind().label()
+                            ),
+                            "attach each conduction seed to a declared assembly region",
+                        ));
+                    }
+                    if !seeded_regions.insert(region.region.as_str()) {
+                        out.push(violation(
+                            "project-conduction-seed-duplicate",
+                            format!("region `{}` has more than one conduction seed", region.region),
+                            "declare exactly one strictly interior seed for each region",
+                        ));
+                    }
+                }
+                for missing in declared_regions.difference(&seeded_regions) {
+                    out.push(violation(
+                        "project-conduction-seed-missing",
+                        format!("region `{missing}` has no conduction seed"),
+                        "declare one strictly interior seed for every assembly region",
+                    ));
+                }
+
+                let mut boundary_targets = BTreeSet::new();
+                for boundary in &conduction.boundaries {
+                    check_ref(
+                        ids,
+                        out,
+                        "thermal boundary".to_string(),
+                        &boundary.target,
+                    );
+                    if !boundary_targets.insert(boundary.target.as_str()) {
+                        out.push(violation(
+                            "project-conduction-boundary-duplicate",
+                            format!(
+                                "assignment target `{}` has more than one thermal boundary law",
+                                boundary.target
+                            ),
+                            "declare exactly one boundary law for each selected face set",
+                        ));
+                    }
+                }
             }
         }
         if let Some(requirements) = &self.requirements {
