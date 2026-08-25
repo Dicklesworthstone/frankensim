@@ -85,7 +85,7 @@ diameter.
 
 | type | meaning |
 | --- | --- |
-| `ConductionMesh` | a tet complex with element geometry and its EXTRACTED boundary (faces incident to exactly one tet), each with area, outward normal, centroid |
+| `ConductionMesh` | a tet complex with element geometry and its EXTRACTED boundary (faces incident to exactly one tet), each with area, outward normal, centroid; `new_region_owned` deterministically clones each used source vertex per incident region so an audited conformal labeled volume can expose independent, exactly coincident P1 traces without changing its tets or coordinates |
 | `ScalarField` | uniform or per-vertex nodal data; the single carrier for every boundary value and source. There is no closure-valued field — a closure cannot be snapshotted or content-addressed |
 | `ThermalBc` | `Dirichlet{temperature}`, `Neumann{outward_flux}`, `Robin{htc, t_ref}` |
 | `ThermalBoundaryBuilder` / `ThermalBoundary` | a boundary PARTITION: regions may not overlap, leftovers refuse unless an adiabatic remainder is declared out loud |

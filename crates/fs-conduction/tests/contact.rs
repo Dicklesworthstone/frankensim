@@ -188,6 +188,81 @@ fn two_tet_contact_mesh() -> ConductionMesh {
     .expect("two-tet matching-contact mesh")
 }
 
+#[test]
+fn g0_region_owned_lowering_splits_only_cross_region_traces() {
+    let positions = vec![
+        [0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0],
+        [-1.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+    ];
+    let complex = TetComplex::from_tets(5, vec![[0, 1, 2, 3], [0, 2, 1, 4]]);
+
+    let conformal = ConductionMesh::new(complex.clone(), positions.clone()).expect("conformal");
+    assert!(
+        ThermalInterfaces::coincident_face_pairs(&conformal)
+            .expect("conformal candidate scan")
+            .is_empty(),
+        "a welded shared face cannot carry a temperature jump"
+    );
+
+    let split = ConductionMesh::new_region_owned(complex.clone(), positions.clone(), &[10, 20])
+        .expect("two region-owned traces");
+    assert_eq!(split.element_count(), conformal.element_count());
+    assert_eq!(
+        split.vertex_count(),
+        8,
+        "the three interface vertices split"
+    );
+    assert_eq!(
+        split.total_volume().to_bits(),
+        conformal.total_volume().to_bits(),
+        "trace ownership changes topology, not geometry"
+    );
+    let pairs = ThermalInterfaces::coincident_face_pairs(&split).expect("split candidate scan");
+    assert_eq!(pairs.len(), 1, "the shared face becomes one contact pair");
+    let pair = pairs[0];
+    let a = &split.boundary()[pair.side_a];
+    let b = &split.boundary()[pair.side_b];
+    assert_ne!(a.vertices, b.vertices, "the two traces own distinct DOFs");
+    assert_eq!(a.element, 0);
+    assert_eq!(b.element, 1);
+
+    let same_region = ConductionMesh::new_region_owned(complex, positions, &[10, 10])
+        .expect("same-region neighbors stay conforming");
+    assert_eq!(same_region.vertex_count(), 5);
+    assert!(
+        ThermalInterfaces::coincident_face_pairs(&same_region)
+            .expect("same-region candidate scan")
+            .is_empty()
+    );
+}
+
+#[test]
+fn g0_region_owned_lowering_refuses_label_length_mismatch() {
+    let positions = vec![
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0],
+    ];
+    let error = ConductionMesh::new_region_owned(
+        TetComplex::from_tets(4, vec![[0, 1, 2, 3]]),
+        positions,
+        &[],
+    )
+    .expect_err("one region id is required per tet");
+    assert!(matches!(
+        error,
+        ConductionError::FieldLength {
+            field: "region-of-element vector",
+            expected: 1,
+            found: 0,
+        }
+    ));
+}
+
 fn coincident_base_tet_mesh(apex_heights: &[f64]) -> ConductionMesh {
     assert!(
         apex_heights.len() >= 2,
@@ -308,10 +383,13 @@ fn solve_contact_fixture(
     with_cx(|cx| {
         solve_with_interfaces(
             cx,
-            ConductionProblem { element_materials: None, mesh,
-            boundary,
-            material: &material,
-            source: &source, },
+            ConductionProblem {
+                element_materials: None,
+                mesh,
+                boundary,
+                material: &material,
+                source: &source,
+            },
             interfaces,
             config(),
         )
@@ -532,10 +610,13 @@ fn missing_interface_card_and_missing_binding_refuse_typed() {
     let error = with_cx(|cx| {
         solve(
             cx,
-            ConductionProblem { element_materials: None, mesh: &mesh,
-            boundary: &boundary,
-            material: &material,
-            source: &source, },
+            ConductionProblem {
+                element_materials: None,
+                mesh: &mesh,
+                boundary: &boundary,
+                material: &material,
+                source: &source,
+            },
             config(),
         )
         .expect_err("coincident traces without an interface binding must refuse")

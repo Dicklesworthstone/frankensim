@@ -12,6 +12,7 @@
 
 use fs_feec::{ElementGeometry, element_geometry};
 use fs_rep_mesh::TetComplex;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ConductionError;
 
@@ -152,6 +153,94 @@ impl ConductionMesh {
             boundary,
             total_volume: total,
         })
+    }
+
+    /// Prepare a labeled conformal complex with one P1 trace per region.
+    ///
+    /// Every used source vertex is cloned once for each incident region and
+    /// each tetrahedron is remapped to the clone owned by its region. Tets,
+    /// coordinates, element order, and region order are otherwise unchanged.
+    /// A face shared by two differently labeled tets therefore becomes two
+    /// exactly coincident boundary faces with independent temperature DOFs,
+    /// which is the representation required by [`crate::ThermalInterfaces`].
+    /// Same-region neighbors remain conforming and share their DOFs.
+    ///
+    /// New vertex ids follow sorted `(source vertex, region id)` order, so the
+    /// result is independent of hash iteration and tet-local vertex order.
+    /// Unused source vertices are intentionally omitted because they own no
+    /// region trace.
+    ///
+    /// # Errors
+    /// [`ConductionError::FieldLength`] when `region_of_element` does not have
+    /// exactly one entry per tet; otherwise every refusal of [`Self::new`].
+    pub fn new_region_owned(
+        complex: TetComplex,
+        positions: Vec<[f64; 3]>,
+        region_of_element: &[u32],
+    ) -> Result<ConductionMesh, ConductionError> {
+        if region_of_element.len() != complex.tets.len() {
+            return Err(ConductionError::FieldLength {
+                field: "region-of-element vector",
+                expected: complex.tets.len(),
+                found: region_of_element.len(),
+            });
+        }
+        if positions.len() != complex.vertex_count {
+            return Err(ConductionError::Mesh {
+                what: format!(
+                    "{} positions for {} vertices",
+                    positions.len(),
+                    complex.vertex_count
+                ),
+                fix: "supply exactly one position per complex vertex".to_string(),
+            });
+        }
+
+        let mut keys = BTreeSet::new();
+        for (tet, &region) in complex.tets.iter().zip(region_of_element) {
+            for &vertex in tet {
+                if vertex as usize >= positions.len() {
+                    return Err(ConductionError::Mesh {
+                        what: format!(
+                            "tet references vertex {vertex}, outside the {} supplied positions",
+                            positions.len()
+                        ),
+                        fix: "rebuild the complex with in-range vertex indices".to_string(),
+                    });
+                }
+                keys.insert((vertex, region));
+            }
+        }
+
+        let mut remap = BTreeMap::new();
+        let mut owned_positions = Vec::with_capacity(keys.len());
+        for key @ (source, _) in keys {
+            let owned =
+                u32::try_from(owned_positions.len()).map_err(|_| ConductionError::Mesh {
+                    what: "region-owned trace needs more than u32::MAX vertices".to_string(),
+                    fix: "partition the labeled volume before constructing contact traces"
+                        .to_string(),
+                })?;
+            owned_positions.push(positions[source as usize]);
+            remap.insert(key, owned);
+        }
+
+        let owned_tets = complex
+            .tets
+            .iter()
+            .zip(region_of_element)
+            .map(|(tet, &region)| {
+                tet.map(|source| {
+                    *remap
+                        .get(&(source, region))
+                        .expect("every tet vertex/region key was indexed")
+                })
+            })
+            .collect();
+        Self::new(
+            TetComplex::from_tets(owned_positions.len(), owned_tets),
+            owned_positions,
+        )
     }
 
     /// The underlying complex.
