@@ -271,7 +271,13 @@ GitHub Actions is not the source of truth for this project. Use DSR for automati
 
 ## Command Reference
 
-FrankenSim ships an initial strict validation CLI. Its solve verb executes a durable four-stage producer prefix — import-verify, assign, material-resolve, and an interval-certified flow-network operating point — then fails closed at the first unavailable stage (conduction, bead frankensim-s93ej). Report and package remain explicit unavailable stages rather than presenting an incomplete simulator as a working product.
+FrankenSim ships an initial strict validation CLI. Its solve verb executes a
+durable producer prefix through an interval-certified flow-network operating
+point and, when the project declares `cooling.conduction`, a heterogeneous
+steady conduction stage with exact matching-P1 finite contact. Projects without
+that declaration retain the typed conduction gap; every run currently stops at
+the unavailable QoI stage. Report and package remain explicit unavailable
+stages rather than presenting an incomplete simulator as a working product.
 
 | Command | Purpose |
 |---------|---------|
@@ -444,7 +450,11 @@ The workspace has grown beyond the first substrate and geometry layer. These cra
 
 ## Examples
 
-These examples remain library-level examples. The stable CLI surface covers project validation, quarantined geometry import, and the four-stage solve producer prefix (through the flow-network operating point); the conduction and QoI solve stages, report, and package are explicit unavailable stages.
+These examples remain library-level examples. The stable CLI surface covers
+project validation, quarantined geometry import, the solve producer prefix, and
+the optional declared heterogeneous-conduction stage with exact matching-P1
+finite contact. The QoI solve stage, report, and package remain explicitly
+unavailable.
 
 ### Deterministic Sparse Assembly
 
@@ -1469,7 +1479,7 @@ FrankenSim has substantial working code, but it is still early infrastructure.
 | Capability | Current state |
 |------------|---------------|
 | Stable public API | Not promised yet; contracts exist, but APIs may still change |
-| End-user CLI/application | Project validation, geometry import, and the solve producer prefix through flow-network are implemented; the solve pipeline fails closed at conduction, and report and package refuse as unavailable until their product stages are integrated |
+| End-user CLI/application | Project validation, geometry import, and the solve producer prefix through flow-network are implemented. A project with an explicit conduction setup proceeds through heterogeneous steady conduction and exact matching-P1 finite contact; a project without it fails at the typed conduction gap. QoI, report, and package remain unavailable |
 | crates.io distribution | Not published |
 | GitHub Actions | Not authoritative for this repo; use DSR |
 | Full multiphysics solver suite | Not complete in the current workspace |
