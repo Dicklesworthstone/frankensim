@@ -160,12 +160,14 @@ Run identity is content-derived before any side effect:
 `hash_domain("org.frankensim.fs-cli.solve-run.v1", project canonical hash ||
 constellation || workspace || root seed || driver version)`. Budgets travel
 inside the project hash, so raising a budget starts a new run whose completed
-artifacts still deduplicate by content. Driver semantics version 6 binds the
+artifacts still deduplicate by content. Driver semantics version 7 binds the
 current executable prefix: version 3 added retained card packs and material
 resolution, version 4 added flow-network execution, version 5 conditionally
 added conduction when the project carries its explicit conduction setup, and
-version 6 added exact matching-P1 finite-contact lowering. Older run ids do not
-collide with or silently resume under version 6. Every solve
+version 6 added exact matching-P1 finite-contact lowering. Version 7
+length-frames every variable-width interface-resolution identity field so
+distinct declared names cannot collide by shifting delimiters. Older run ids do
+not collide with or silently resume under version 7. Every solve
 operation carries the 32-byte run identity as its ledger `session` value; the
 run's own operations are its index. Resume and import discovery walk globally descending
 `visible_op_ids_page_controlled` pages under a first-page high-water mark,

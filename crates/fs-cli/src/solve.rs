@@ -42,7 +42,7 @@ use std::ops::ControlFlow;
 use std::rc::Rc;
 
 use fs_blake3::identity::ContentId;
-use fs_blake3::{hash_bytes, hash_domain};
+use fs_blake3::{DomainHasher, hash_bytes, hash_domain};
 use fs_exec::CancelGate;
 use fs_exec::solver::{
     LegacySnapshotExpectationV1, LegacySnapshotLimitsV1, LegacySnapshotV1Adapter,
@@ -81,7 +81,9 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// executing the real volumetricizer and heterogeneous conduction solver.
 /// Bumped to 6 when declared matching-P1 interfaces began executing through
 /// region-owned traces and the card-backed contact operator.
-pub const SOLVE_DRIVER_VERSION: u32 = 6;
+/// Bumped to 7 when interface-resolution evidence identities switched from
+/// ambiguous delimiter joining to length-framed fields.
+pub const SOLVE_DRIVER_VERSION: u32 = 7;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";
@@ -118,7 +120,7 @@ const FLOW_NETWORK_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-flow-network-rec
 const CONDUCTION_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-conduction-receipt.v2";
 const CONDUCTION_SOLUTION_SCHEMA: &str = "frankensim.cli.solve-conduction-solution.v1";
 const CONDUCTION_INTERFACE_EVIDENCE_SCHEMA: &str =
-    "frankensim.cli.solve-conduction-interface-evidence.v1";
+    "frankensim.cli.solve-conduction-interface-evidence.v2";
 /// Specific gas constant of dry air, J/(kg·K); used only for the declared
 /// envelope-derived density estimate (see FLOW_NETWORK_NO_CLAIM).
 const AIR_SPECIFIC_GAS_CONSTANT: f64 = 287.05;
@@ -3398,54 +3400,39 @@ fn conduction_boundary(
 
 fn interface_resolution_root(
     resolution: &fs_project::ConductionInterfaceResolution,
-) -> Result<ContentHash, SolveRefusal> {
-    const ROW_DOMAIN: &str = "org.frankensim.fs-cli.conduction-interface-row.v1";
-    const SET_DOMAIN: &str = "org.frankensim.fs-cli.conduction-interface-set.v1";
-    let capacity = resolution.pairs.len().checked_mul(32).ok_or_else(|| {
-        conduction_error(
-            "cli-solve-conduction-interface-budget",
-            "the interface-pair identity buffer length overflowed",
-            "reduce the interface mesh or split the solve domain",
-        )
-    })?;
-    let mut roots = Vec::new();
-    roots.try_reserve_exact(capacity).map_err(|_| {
-        conduction_error(
-            "cli-solve-conduction-interface-budget",
-            format!("could not reserve {capacity} bytes for interface-pair identities"),
-            "reduce the interface mesh or raise the declared memory budget",
-        )
-    })?;
-    for pair in &resolution.pairs {
-        let selected = pair
-            .interface_sources
-            .iter()
-            .map(|source| {
-                format!(
-                    "{}:{}:{}",
-                    source.artifact, source.source_identity, source.face
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(",");
-        let row = format!(
-            "{}|{}|{}|{}|{}|{}:{}:{}|{}:{}:{}|{}",
-            pair.interface,
-            pair.from_region,
-            pair.to_region,
-            pair.from_boundary_slot,
-            pair.to_boundary_slot,
-            pair.from_source.artifact,
-            pair.from_source.source_identity,
-            pair.from_source.face,
-            pair.to_source.artifact,
-            pair.to_source.source_identity,
-            pair.to_source.face,
-            selected,
-        );
-        roots.extend_from_slice(hash_domain(ROW_DOMAIN, row.as_bytes()).as_bytes());
+) -> ContentHash {
+    const ROW_DOMAIN: &str = "org.frankensim.fs-cli.conduction-interface-row.v2";
+    const SET_DOMAIN: &str = "org.frankensim.fs-cli.conduction-interface-set.v2";
+
+    fn absorb_text(hasher: &mut DomainHasher, text: &str) {
+        hasher.update(&(text.len() as u128).to_le_bytes());
+        hasher.update(text.as_bytes());
     }
-    Ok(hash_domain(SET_DOMAIN, &roots))
+
+    fn absorb_source(hasher: &mut DomainHasher, source: &fs_project::ConductionSourceFace) {
+        absorb_text(hasher, &source.artifact);
+        absorb_text(hasher, &source.source_identity);
+        hasher.update(&source.face.to_le_bytes());
+    }
+
+    let mut set = DomainHasher::new(SET_DOMAIN);
+    set.update(&(resolution.pairs.len() as u128).to_le_bytes());
+    for pair in &resolution.pairs {
+        let mut row = DomainHasher::new(ROW_DOMAIN);
+        absorb_text(&mut row, &pair.interface);
+        absorb_text(&mut row, &pair.from_region);
+        absorb_text(&mut row, &pair.to_region);
+        row.update(&(pair.from_boundary_slot as u128).to_le_bytes());
+        row.update(&(pair.to_boundary_slot as u128).to_le_bytes());
+        absorb_source(&mut row, &pair.from_source);
+        absorb_source(&mut row, &pair.to_source);
+        row.update(&(pair.interface_sources.len() as u128).to_le_bytes());
+        for source in &pair.interface_sources {
+            absorb_source(&mut row, source);
+        }
+        set.update(row.finalize().as_bytes());
+    }
+    set.finalize()
 }
 
 fn interface_evidence_bytes(
@@ -3468,7 +3455,7 @@ fn interface_evidence_bytes(
         json_string(&run.to_hex()),
         resolution.pairs.len(),
         resolution.source_faces_indexed,
-        json_string(&interface_resolution_root(resolution)?.to_hex()),
+        json_string(&interface_resolution_root(resolution).to_hex()),
         interfaces,
         json_string("exact-imported-face-to-region-owned-matching-p1-lowering"),
         json_string(fs_project::ConductionInterfaceResolution::no_claim()),
@@ -9551,13 +9538,63 @@ mod tests {
         InvocationWorkExceeded, InvocationWorkLedger, JsonCursor, MAX_CANONICAL_F64_BYTES,
         MAX_CANONICAL_PLY_VERTEX_LINE_BYTES, MAX_SOLVE_EVIDENCE_LABEL_BYTES,
         MAX_SOLVE_INVOCATION_WORK_BYTES, SolveCancellationPlan, SolveEvidencePhase,
-        evidence_bytes_equal, evidence_utf8_string, materialize_evidence_artifact,
-        parse_canonical_ply_face_line, parse_canonical_ply_vertex_line, preflight_canonical_ply,
-        require_solve_evidence_label, validate_named_group_face_ranges, verify_evidence_artifact,
+        evidence_bytes_equal, evidence_utf8_string, interface_resolution_root,
+        materialize_evidence_artifact, parse_canonical_ply_face_line,
+        parse_canonical_ply_vertex_line, preflight_canonical_ply, require_solve_evidence_label,
+        validate_named_group_face_ranges, verify_evidence_artifact,
     };
     use fs_exec::CancelGate;
     use fs_io::NamedFaceGroup;
     use fs_ledger::{Ledger, hash_bytes};
+    use fs_project::{
+        ConductionInterfaceResolution, ConductionSourceFace, ResolvedConductionInterfacePair,
+    };
+
+    #[test]
+    fn interface_resolution_identity_length_frames_user_controlled_names() {
+        let source = ConductionSourceFace {
+            artifact: "mesh".to_string(),
+            source_identity: "geometry:0123".to_string(),
+            face: 7,
+        };
+        let resolution = |interface: &str, from_region: &str| ConductionInterfaceResolution {
+            violations: Vec::new(),
+            pairs: vec![ResolvedConductionInterfacePair {
+                interface: interface.to_string(),
+                from_region: from_region.to_string(),
+                to_region: "sink".to_string(),
+                from_boundary_slot: 1,
+                to_boundary_slot: 2,
+                from_source: source.clone(),
+                to_source: source.clone(),
+                interface_sources: vec![source.clone()],
+            }],
+            source_faces_indexed: 1,
+        };
+        let shifted_left = resolution("joint|hot", "cold");
+        let shifted_right = resolution("joint", "hot|cold");
+
+        assert_eq!(
+            format!(
+                "{}|{}|{}",
+                shifted_left.pairs[0].interface,
+                shifted_left.pairs[0].from_region,
+                shifted_left.pairs[0].to_region
+            ),
+            format!(
+                "{}|{}|{}",
+                shifted_right.pairs[0].interface,
+                shifted_right.pairs[0].from_region,
+                shifted_right.pairs[0].to_region
+            ),
+            "the former delimiter-joined prefix collides for these distinct declarations"
+        );
+        assert_ne!(
+            interface_resolution_root(&shifted_left),
+            interface_resolution_root(&shifted_right),
+            "length framing must keep the two semantic rows distinct"
+        );
+    }
 
     #[test]
     fn invocation_work_ledger_admits_exact_cap_and_refuses_plus_one_without_advancing() {

@@ -899,7 +899,7 @@ fn solve_publication_counts(ledger: &Ledger) -> SolvePublicationCounts {
 #[test]
 fn g0_run_identity_is_deterministic_and_input_sensitive() {
     assert_eq!(
-        SOLVE_DRIVER_VERSION, 6,
+        SOLVE_DRIVER_VERSION, 7,
         "authority-semantic changes must deliberately advance this identity-bearing version"
     );
 
@@ -3332,7 +3332,7 @@ fn g0_conduction_stage_executes_declared_card_backed_contact() {
     let evidence = String::from_utf8(artifact_bytes(&ledger, &evidence_hash))
         .expect("interface evidence is utf-8");
     assert_balanced_json(&evidence);
-    assert!(evidence.contains("frankensim.cli.solve-conduction-interface-evidence.v1"));
+    assert!(evidence.contains("frankensim.cli.solve-conduction-interface-evidence.v2"));
     assert!(evidence.contains("\"pair_count\":2"));
     assert!(evidence.contains("\"name\":\"cold-hot-joint\""));
     assert!(receipt_number_field(&evidence, "source_faces_indexed") > 0.0);
