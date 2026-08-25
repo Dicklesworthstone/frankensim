@@ -19,11 +19,121 @@ use crate::{ContactInflation, ConvexOverlapWitness, ConvexSupportMap, GapSample,
 use fs_exec::Cx;
 use fs_geom::{Chart, Point3, Vec3};
 use fs_rep_frep::axisymmetric::{
-    AxisymmetricChart, AxisymmetricConstructionCertificate, MeridianSegment,
+    AxisymmetricChart, AxisymmetricConstructionCertificate, MeridianPoint, MeridianSegment,
 };
 
 /// Binary64 relative slack for support computation.
 const AXISYMMETRIC_SUPPORT_SLACK_FACTOR: f64 = 256.0 * f64::EPSILON;
+
+/// Normalize without squaring the original components. Scaling first keeps
+/// finite nonzero directions usable at both ends of the binary64 range.
+fn normalized_direction(direction: Vec3) -> Option<Vec3> {
+    if !direction.x.is_finite() || !direction.y.is_finite() || !direction.z.is_finite() {
+        return None;
+    }
+    let scale = direction
+        .x
+        .abs()
+        .max(direction.y.abs())
+        .max(direction.z.abs());
+    if scale == 0.0 {
+        return None;
+    }
+    let scaled = Vec3::new(
+        direction.x / scale,
+        direction.y / scale,
+        direction.z / scale,
+    );
+    let norm = scaled.x.hypot(scaled.y).hypot(scaled.z);
+    if !norm.is_finite() || norm == 0.0 {
+        return None;
+    }
+    Some(Vec3::new(scaled.x / norm, scaled.y / norm, scaled.z / norm))
+}
+
+fn normalized_meridian_tangent(dr: f64, dz: f64) -> Option<(f64, f64)> {
+    let scale = dr.abs().max(dz.abs());
+    if !scale.is_finite() || scale == 0.0 {
+        return None;
+    }
+    let scaled_dr = dr / scale;
+    let scaled_dz = dz / scale;
+    let norm = scaled_dr.hypot(scaled_dz);
+    if !norm.is_finite() || norm == 0.0 {
+        return None;
+    }
+    Some((scaled_dr / norm, scaled_dz / norm))
+}
+
+fn segment_tangent(segment: MeridianSegment, at_end: bool) -> Option<(f64, f64)> {
+    match segment {
+        MeridianSegment::Line { start, end } => {
+            normalized_meridian_tangent(end.radius - start.radius, end.axial - start.axial)
+        }
+        MeridianSegment::Arc {
+            start,
+            end,
+            center,
+            clockwise,
+        } => {
+            if clockwise {
+                return None;
+            }
+            let point = if at_end { end } else { start };
+            normalized_meridian_tangent(-(point.axial - center.axial), point.radius - center.radius)
+        }
+    }
+}
+
+/// A simple CCW profile with only CCW arcs is convex exactly when every join
+/// makes a nonnegative turn. The chart constructor already proves closure and
+/// rejects self-intersections; this check supplies the missing local-convexity
+/// obligation required by `ConvexSupportMap`.
+fn profile_is_convex(segments: &[MeridianSegment]) -> bool {
+    let turn_tolerance = AXISYMMETRIC_SUPPORT_SLACK_FACTOR;
+    segments.iter().enumerate().all(|(index, segment)| {
+        let next = segments[(index + 1) % segments.len()];
+        let Some((in_r, in_z)) = segment_tangent(*segment, true) else {
+            return false;
+        };
+        let Some((out_r, out_z)) = segment_tangent(next, false) else {
+            return false;
+        };
+        in_r * out_z - in_z * out_r >= -turn_tolerance
+    })
+}
+
+fn ccw_arc_contains_angle(start: f64, end: f64, candidate: f64) -> bool {
+    let sweep = (end - start).rem_euclid(core::f64::consts::TAU);
+    let travel = (candidate - start).rem_euclid(core::f64::consts::TAU);
+    travel <= sweep + AXISYMMETRIC_SUPPORT_SLACK_FACTOR
+}
+
+fn arc_projection_maximum(
+    query_r: f64,
+    query_z: f64,
+    start: MeridianPoint,
+    end: MeridianPoint,
+    center: MeridianPoint,
+) -> Option<f64> {
+    let start_angle = (start.axial - center.axial).atan2(start.radius - center.radius);
+    let end_angle = (end.axial - center.axial).atan2(end.radius - center.radius);
+    let vr = query_r - center.radius;
+    let vz = query_z - center.axial;
+    if !vr.is_finite() || !vz.is_finite() {
+        return None;
+    }
+
+    let mut maximum = (vr * start_angle.cos() + vz * start_angle.sin())
+        .max(vr * end_angle.cos() + vz * end_angle.sin());
+    if vr != 0.0 || vz != 0.0 {
+        let candidate = vz.atan2(vr);
+        if ccw_arc_contains_angle(start_angle, end_angle, candidate) {
+            maximum = maximum.max(vr.hypot(vz));
+        }
+    }
+    maximum.is_finite().then_some(maximum)
+}
 
 /// Convex support map adapter over a validated convex axisymmetric chart.
 #[derive(Debug, Clone)]
@@ -76,7 +186,12 @@ impl AxisymmetricSupportMap {
             });
         }
 
-        // Validate convexity of the meridian profile
+        if !profile_is_convex(segments) {
+            return Err(QueryError::ConvexInvalidShape {
+                reason: "axisymmetric meridian profile is not convex",
+            });
+        }
+
         let mut z_min = f64::INFINITY;
         let mut z_max = f64::NEG_INFINITY;
         let mut max_r = 0.0f64;
@@ -101,24 +216,45 @@ impl AxisymmetricSupportMap {
                         });
                     }
                     let r_arc = (start.radius - center.radius).hypot(start.axial - center.axial);
-                    z_min = z_min.min(start.axial).min(end.axial).min(center.axial - r_arc);
-                    z_max = z_max.max(start.axial).max(end.axial).max(center.axial + r_arc);
-                    max_r = max_r.max(start.radius).max(end.radius).max(center.radius + r_arc);
+                    z_min = z_min
+                        .min(start.axial)
+                        .min(end.axial)
+                        .min(center.axial - r_arc);
+                    z_max = z_max
+                        .max(start.axial)
+                        .max(end.axial)
+                        .max(center.axial + r_arc);
+                    max_r = max_r
+                        .max(start.radius)
+                        .max(end.radius)
+                        .max(center.radius + r_arc);
                 }
             }
         }
 
-        if !z_min.is_finite() || !z_max.is_finite() || !max_r.is_finite() || z_max <= z_min || max_r <= 0.0 {
+        if !z_min.is_finite()
+            || !z_max.is_finite()
+            || !max_r.is_finite()
+            || z_max <= z_min
+            || max_r <= 0.0
+        {
             return Err(QueryError::ConvexInvalidShape {
                 reason: "axisymmetric chart has invalid bounding extents",
             });
         }
 
-        let scale = max_r.max(z_max - z_min);
+        let axial_span = z_max - z_min;
+        let scale = max_r.max(z_min.abs()).max(z_max.abs()).max(axial_span);
         let base_slack = (scale * AXISYMMETRIC_SUPPORT_SLACK_FACTOR).next_up();
         let total_slack = base_slack + inflation.radius();
+        let inflated_extent = scale + inflation.radius();
+        if !base_slack.is_finite() || !total_slack.is_finite() || !inflated_extent.is_finite() {
+            return Err(QueryError::ConvexInvalidShape {
+                reason: "axisymmetric chart exceeds finite support arithmetic",
+            });
+        }
 
-        let interior = Point3::new(0.0, 0.0, (z_min + z_max) * 0.5);
+        let interior = Point3::new(0.0, 0.0, f64::midpoint(z_min, z_max));
 
         Ok(Self {
             chart,
@@ -159,20 +295,12 @@ impl AxisymmetricSupportMap {
 
 impl ConvexSupportMap for AxisymmetricSupportMap {
     fn support_point(&self, direction: Vec3) -> Point3 {
-        let finite = direction.x.is_finite() && direction.y.is_finite() && direction.z.is_finite();
-        if !finite {
+        let Some(unit) = normalized_direction(direction) else {
             return Point3::new(0.0, 0.0, self.z_max);
-        }
-
-        let norm_sq = direction.x * direction.x + direction.y * direction.y + direction.z * direction.z;
-        if norm_sq == 0.0 {
-            return Point3::new(0.0, 0.0, self.z_max);
-        }
-
-        let inv_norm = 1.0 / norm_sq.sqrt();
-        let unit_x = direction.x * inv_norm;
-        let unit_y = direction.y * inv_norm;
-        let unit_z = direction.z * inv_norm;
+        };
+        let unit_x = unit.x;
+        let unit_y = unit.y;
+        let unit_z = unit.z;
 
         let radial_dir = unit_x.hypot(unit_y);
 
@@ -223,17 +351,13 @@ impl ConvexSupportMap for AxisymmetricSupportMap {
                     let cand_z = center.axial + arc_r * unit_z;
                     if cand_r >= 0.0 {
                         // Check if (cand_r, cand_z) lies in the arc's angular interval
-                        let angle_start = (start.axial - center.axial).atan2(start.radius - center.radius);
-                        let angle_end = (end.axial - center.axial).atan2(end.radius - center.radius);
+                        let angle_start =
+                            (start.axial - center.axial).atan2(start.radius - center.radius);
+                        let angle_end =
+                            (end.axial - center.axial).atan2(end.radius - center.radius);
                         let angle_cand = (cand_z - center.axial).atan2(cand_r - center.radius);
 
-                        let in_span = if angle_end >= angle_start {
-                            angle_cand >= angle_start && angle_cand <= angle_end
-                        } else {
-                            angle_cand >= angle_start || angle_cand <= angle_end
-                        };
-
-                        if in_span {
+                        if ccw_arc_contains_angle(angle_start, angle_end, angle_cand) {
                             let v_arc = radial_dir * cand_r + unit_z * cand_z;
                             if v_arc > best_val {
                                 best_val = v_arc;
@@ -246,7 +370,7 @@ impl ConvexSupportMap for AxisymmetricSupportMap {
             }
         }
 
-        let (px, py) = if radial_dir > 1e-15 {
+        let (px, py) = if radial_dir > 0.0 {
             let cos_theta = unit_x / radial_dir;
             let sin_theta = unit_y / radial_dir;
             (best_r * cos_theta, best_r * sin_theta)
@@ -279,46 +403,51 @@ impl ConvexSupportMap for AxisymmetricSupportMap {
         let cr = center.x.hypot(center.y);
         let cz = center.z;
 
-        // Check if inside axial bounds
-        if cz <= self.z_min || cz >= self.z_max || cr >= self.max_radius {
-            return None;
-        }
-
-        // Compute conservative inradius to boundary features
-        let mut min_dist = f64::INFINITY;
+        // A convex profile is the intersection of its oriented supporting
+        // half-spaces. The minimum inward margin therefore proves an entire
+        // ball, whereas a bounding-cylinder check proves only a coarse box.
+        let mut min_margin = f64::INFINITY;
         for seg in self.chart.segments() {
             match *seg {
                 MeridianSegment::Line { start, end } => {
-                    if start.radius < 1e-12 && end.radius < 1e-12 {
+                    // The r=0 closure is an artifact of the meridian half-plane,
+                    // not a boundary of the revolved three-dimensional solid.
+                    if start.radius == 0.0 && end.radius == 0.0 {
                         continue;
                     }
                     let dr = end.radius - start.radius;
                     let dz = end.axial - start.axial;
-                    let len_sq = dr * dr + dz * dz;
-                    if len_sq > 0.0 {
-                        let t = (((cr - start.radius) * dr + (cz - start.axial) * dz) / len_sq).clamp(0.0, 1.0);
-                        let proj_r = start.radius + t * dr;
-                        let proj_z = start.axial + t * dz;
-                        let d = (cr - proj_r).hypot(cz - proj_z);
-                        min_dist = min_dist.min(d);
+                    let (tangent_r, tangent_z) = normalized_meridian_tangent(dr, dz)?;
+                    let margin = -tangent_z * (cr - start.radius) + tangent_r * (cz - start.axial);
+                    if !margin.is_finite() {
+                        return None;
                     }
+                    min_margin = min_margin.min(margin.next_down());
                 }
                 MeridianSegment::Arc {
                     start,
-                    end: _,
+                    end,
                     center: c,
-                    clockwise: _,
+                    clockwise,
                 } => {
+                    if clockwise {
+                        return None;
+                    }
                     let arc_r = (start.radius - c.radius).hypot(start.axial - c.axial);
-                    let d_center = (cr - c.radius).hypot(cz - c.axial);
-                    let d = (d_center - arc_r).abs();
-                    min_dist = min_dist.min(d);
+                    let projection = arc_projection_maximum(cr, cz, start, end, c)?;
+                    let margin = (arc_r - projection).next_down();
+                    if !margin.is_finite() {
+                        return None;
+                    }
+                    min_margin = min_margin.min(margin);
                 }
             }
         }
 
-        let inradius = min_dist - self.inflation.radius();
-        if inradius > 0.0 {
+        // `slack` includes both the support arithmetic guard and retained
+        // contact inflation, so the proof cannot launder either uncertainty.
+        let inradius = (min_margin - self.slack).next_down();
+        if inradius > 0.0 && inradius.is_finite() {
             Some(inradius)
         } else {
             None
@@ -408,7 +537,8 @@ pub fn axisymmetric_normal(
                 let len_sq = dr * dr + dz * dz;
                 if len_sq > 0.0 {
                     let len = len_sq.sqrt();
-                    let t = (((r - start.radius) * dr + (z - start.axial) * dz) / len_sq).clamp(0.0, 1.0);
+                    let t = (((r - start.radius) * dr + (z - start.axial) * dz) / len_sq)
+                        .clamp(0.0, 1.0);
                     let proj_r = start.radius + t * dr;
                     let proj_z = start.axial + t * dz;
                     let dist_sq = (r - proj_r).powi(2) + (z - proj_z).powi(2);
@@ -581,10 +711,7 @@ pub fn axisymmetric_reach(chart: &AxisymmetricChart) -> Result<AxisymmetricReach
                 }
             }
             MeridianSegment::Arc {
-                start,
-                end,
-                center,
-                ..
+                start, end, center, ..
             } => {
                 let arc_r = (start.radius - center.radius).hypot(start.axial - center.axial);
                 if arc_r > 0.0 {
@@ -623,10 +750,7 @@ impl<'a> AxisymmetricGapOracle<'a> {
     ///
     /// # Errors
     /// [`QueryError::InvalidContactInflation`] if inflation composition fails.
-    pub fn new(
-        chart_a: &'a AxisymmetricChart,
-        chart_b: &'a dyn Chart,
-    ) -> Result<Self, QueryError> {
+    pub fn new(chart_a: &'a AxisymmetricChart, chart_b: &'a dyn Chart) -> Result<Self, QueryError> {
         Self::new_with_inflation(
             chart_a,
             chart_b,

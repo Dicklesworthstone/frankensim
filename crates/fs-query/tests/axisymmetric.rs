@@ -23,8 +23,15 @@ use fs_query::{
     axisymmetric_normal, axisymmetric_reach, convex_separation,
 };
 use fs_rep_frep::axisymmetric::{
-    AxisymmetricChart, SquatDiscEdgeTreatment,
+    AxisymmetricChart, MeridianPoint, MeridianSegment, SquatDiscEdgeTreatment,
 };
+
+fn meridian_line(start: (f64, f64), end: (f64, f64)) -> MeridianSegment {
+    MeridianSegment::Line {
+        start: MeridianPoint::new(start.0, start.1),
+        end: MeridianPoint::new(end.0, end.1),
+    }
+}
 
 fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
     let gate = CancelGate::new();
@@ -61,8 +68,9 @@ fn conversion_receipt(radius: f64) -> Certified<f64> {
 fn ax_001_convex_support_sharp_disc_exact_extrema() {
     let outer_radius = 1.0;
     let thickness = 0.4;
-    let disc = AxisymmetricChart::squat_disc(outer_radius, thickness, SquatDiscEdgeTreatment::Sharp)
-        .expect("sharp disc");
+    let disc =
+        AxisymmetricChart::squat_disc(outer_radius, thickness, SquatDiscEdgeTreatment::Sharp)
+            .expect("sharp disc");
 
     let map = AxisymmetricSupportMap::try_new(disc).expect("support map");
     assert_eq!(map.max_radius(), 1.0);
@@ -82,6 +90,21 @@ fn ax_001_convex_support_sharp_disc_exact_extrema() {
     let s_x = map.support_point(Vec3::new(1.0, 0.0, 0.0));
     assert!((s_x.x - 1.0).abs() < 1e-12);
     assert!(s_x.y.abs() < 1e-12);
+
+    // G3: support selection is homogeneous even when a naive squared norm
+    // would overflow or underflow.
+    assert_eq!(map.support_point(Vec3::new(f64::MAX, 0.0, 0.0)), s_x);
+    assert_eq!(
+        map.support_point(Vec3::new(f64::from_bits(1), 0.0, 0.0)),
+        s_x
+    );
+
+    // Any nonzero radial component selects the rim of the top face. Treating
+    // a tiny component as axial would return a point one metre from the true
+    // supporting set while declaring only rounding-scale support slack.
+    let almost_axial = map.support_point(Vec3::new(f64::from_bits(1), 0.0, 1.0));
+    assert_eq!(almost_axial.x, 1.0);
+    assert_eq!(almost_axial.z, 0.2);
 
     // Support in diagonal (+x, +z)
     let s_diag = map.support_point(Vec3::new(1.0, 0.0, 1.0));
@@ -135,14 +158,31 @@ fn ax_003_refuses_nonconvex_annulus_and_concave_profiles() {
 
     let result = AxisymmetricSupportMap::try_new(annulus);
     assert!(matches!(result, Err(QueryError::ConvexInvalidShape { .. })));
+
+    // This is a valid simple CCW chart, but its inward notch is a reflex
+    // line-line join. A support map for the chart itself must refuse instead
+    // of silently representing its convex hull.
+    let concave = AxisymmetricChart::try_new(vec![
+        meridian_line((0.0, -1.0), (1.0, -1.0)),
+        meridian_line((1.0, -1.0), (0.5, 0.0)),
+        meridian_line((0.5, 0.0), (1.0, 1.0)),
+        meridian_line((1.0, 1.0), (0.0, 1.0)),
+        meridian_line((0.0, 1.0), (0.0, -1.0)),
+    ])
+    .expect("valid concave chart");
+    assert!(matches!(
+        AxisymmetricSupportMap::try_new(concave),
+        Err(QueryError::ConvexInvalidShape { .. })
+    ));
 }
 
 #[test]
 fn ax_004_contact_inflation_monotonically_widens_support() {
     let outer_radius = 1.0;
     let thickness = 0.4;
-    let disc = AxisymmetricChart::squat_disc(outer_radius, thickness, SquatDiscEdgeTreatment::Sharp)
-        .expect("sharp disc");
+    let disc =
+        AxisymmetricChart::squat_disc(outer_radius, thickness, SquatDiscEdgeTreatment::Sharp)
+            .expect("sharp disc");
 
     let base_map = AxisymmetricSupportMap::try_new(disc.clone()).expect("base support map");
     let cert_1 = conversion_receipt(0.05);
@@ -152,8 +192,8 @@ fn ax_004_contact_inflation_monotonically_widens_support() {
 
     let map_1 = AxisymmetricSupportMap::try_new_with_inflation(disc.clone(), inflation_1)
         .expect("inflated map 1");
-    let map_2 = AxisymmetricSupportMap::try_new_with_inflation(disc, inflation_2)
-        .expect("inflated map 2");
+    let map_2 =
+        AxisymmetricSupportMap::try_new_with_inflation(disc, inflation_2).expect("inflated map 2");
 
     assert!(map_1.support_slack() > base_map.support_slack());
     assert!(map_2.support_slack() > map_1.support_slack());
@@ -171,8 +211,9 @@ fn ax_004_contact_inflation_monotonically_widens_support() {
 fn ax_005_contained_ball_inradius_evaluation() {
     let outer_radius = 1.0;
     let thickness = 0.4;
-    let disc = AxisymmetricChart::squat_disc(outer_radius, thickness, SquatDiscEdgeTreatment::Sharp)
-        .expect("sharp disc");
+    let disc =
+        AxisymmetricChart::squat_disc(outer_radius, thickness, SquatDiscEdgeTreatment::Sharp)
+            .expect("sharp disc");
 
     let map = AxisymmetricSupportMap::try_new(disc).expect("support map");
 
@@ -183,7 +224,48 @@ fn ax_005_contained_ball_inradius_evaluation() {
     assert!((inrad.unwrap() - 0.2).abs() < 1e-10);
 
     // Outside point (0, 0, 0.5) -> None
-    assert!(map.contained_ball_radius(Point3::new(0.0, 0.0, 0.5)).is_none());
+    assert!(
+        map.contained_ball_radius(Point3::new(0.0, 0.0, 0.5))
+            .is_none()
+    );
+
+    let rounded_disc = AxisymmetricChart::squat_disc(
+        outer_radius,
+        thickness,
+        SquatDiscEdgeTreatment::CircularFillet { radius: 0.1 },
+    )
+    .expect("filleted disc");
+    let rounded_map = AxisymmetricSupportMap::try_new(rounded_disc).expect("filleted support map");
+    assert!(
+        rounded_map
+            .contained_ball_radius(Point3::new(0.0, 0.0, 0.0))
+            .is_some()
+    );
+    assert!(
+        rounded_map
+            .contained_ball_radius(Point3::new(0.99, 0.0, 0.19))
+            .is_none()
+    );
+
+    // A cone exposes why bounding-cylinder membership is insufficient: this
+    // probe is within r/z extents but lies well outside the sloped face.
+    let cone = AxisymmetricChart::try_new(vec![
+        meridian_line((0.0, -1.0), (1.0, -1.0)),
+        meridian_line((1.0, -1.0), (0.0, 1.0)),
+        meridian_line((0.0, 1.0), (0.0, -1.0)),
+    ])
+    .expect("valid convex cone");
+    let cone_map = AxisymmetricSupportMap::try_new(cone).expect("cone support map");
+    assert!(
+        cone_map
+            .contained_ball_radius(Point3::new(0.9, 0.0, 0.9))
+            .is_none()
+    );
+    assert!(
+        cone_map
+            .contained_ball_radius(Point3::new(0.1, 0.0, 0.0))
+            .is_some()
+    );
 }
 
 #[test]
@@ -214,7 +296,8 @@ fn ax_006_surface_normal_and_curvature_adapters() {
         assert_eq!(n_axis.classification, NormalClassification::Axis);
 
         // Curvature on flat top: meridional = 0, azimuthal = 0 (since n_r = 0)
-        let curv_top = axisymmetric_curvature(&disc, Point3::new(0.5, 0.0, 0.2), cx).expect("curvature");
+        let curv_top =
+            axisymmetric_curvature(&disc, Point3::new(0.5, 0.0, 0.2), cx).expect("curvature");
         assert_eq!(curv_top.meridional_curvature, 0.0);
         assert!(curv_top.azimuthal_curvature.abs() < 1e-12);
         assert!(curv_top.mean_curvature.abs() < 1e-12);
@@ -222,7 +305,8 @@ fn ax_006_surface_normal_and_curvature_adapters() {
 
         // Curvature on cylindrical wall (r = 1.0, z = 0.0):
         // meridional = 0, azimuthal = 1.0 / 1.0 = 1.0
-        let curv_wall = axisymmetric_curvature(&disc, Point3::new(1.0, 0.0, 0.0), cx).expect("curvature");
+        let curv_wall =
+            axisymmetric_curvature(&disc, Point3::new(1.0, 0.0, 0.0), cx).expect("curvature");
         assert_eq!(curv_wall.meridional_curvature, 0.0);
         assert!((curv_wall.azimuthal_curvature - 1.0).abs() < 1e-10);
         assert!((curv_wall.mean_curvature - 0.5).abs() < 1e-10);
@@ -252,8 +336,9 @@ fn ax_008_pointwise_gap_oracle_with_inflation() {
     with_cx(|cx| {
         let outer_radius = 1.0;
         let thickness = 0.4;
-        let disc = AxisymmetricChart::squat_disc(outer_radius, thickness, SquatDiscEdgeTreatment::Sharp)
-            .expect("sharp disc");
+        let disc =
+            AxisymmetricChart::squat_disc(outer_radius, thickness, SquatDiscEdgeTreatment::Sharp)
+                .expect("sharp disc");
 
         let sphere = SphereChart {
             center: Point3::new(3.0, 0.0, 0.0),
@@ -262,7 +347,9 @@ fn ax_008_pointwise_gap_oracle_with_inflation() {
         let oracle = AxisymmetricGapOracle::new(&disc, &sphere).expect("gap oracle");
 
         // Probe midpoint between shapes: (2.0, 0.0, 0.0)
-        let sample = oracle.gap_at(Point3::new(2.0, 0.0, 0.0), cx).expect("gap sample");
+        let sample = oracle
+            .gap_at(Point3::new(2.0, 0.0, 0.0), cx)
+            .expect("gap sample");
         assert!(sample.separation_upper.is_some());
         assert!(sample.sum_lo > 0.0);
         assert!(sample.overlap_inradius.is_none());
@@ -274,8 +361,9 @@ fn ax_009_convex_separation_against_sphere() {
     with_cx(|cx| {
         let outer_radius = 1.0;
         let thickness = 0.4;
-        let disc = AxisymmetricChart::squat_disc(outer_radius, thickness, SquatDiscEdgeTreatment::Sharp)
-            .expect("sharp disc");
+        let disc =
+            AxisymmetricChart::squat_disc(outer_radius, thickness, SquatDiscEdgeTreatment::Sharp)
+                .expect("sharp disc");
 
         let map = AxisymmetricSupportMap::try_new(disc).expect("support map");
         let sphere = ConvexSphere::new(Point3::new(3.0, 0.0, 0.0), 0.5).expect("sphere");
