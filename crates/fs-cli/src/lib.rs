@@ -339,29 +339,21 @@ fn parse_args(
                 cards: parse_solve_card_args(rest).map_err(|diagnostic| (mode, diagnostic))?,
             }
         }
-        [verb, run_id] if verb == "report" && is_operand(run_id) => {
-            Command::Report {
-                run_id: run_id.clone(),
-                ledger: None,
-            }
-        }
-        [verb, run_id, ledger]
-            if verb == "report" && is_operand(run_id) && is_operand(ledger) =>
-        {
+        [verb, run_id] if verb == "report" && is_operand(run_id) => Command::Report {
+            run_id: run_id.clone(),
+            ledger: None,
+        },
+        [verb, run_id, ledger] if verb == "report" && is_operand(run_id) && is_operand(ledger) => {
             Command::Report {
                 run_id: run_id.clone(),
                 ledger: Some(PathBuf::from(ledger)),
             }
         }
-        [verb, run_id] if verb == "package" && is_operand(run_id) => {
-            Command::Package {
-                run_id: run_id.clone(),
-                ledger: None,
-            }
-        }
-        [verb, run_id, ledger]
-            if verb == "package" && is_operand(run_id) && is_operand(ledger) =>
-        {
+        [verb, run_id] if verb == "package" && is_operand(run_id) => Command::Package {
+            run_id: run_id.clone(),
+            ledger: None,
+        },
+        [verb, run_id, ledger] if verb == "package" && is_operand(run_id) && is_operand(ledger) => {
             Command::Package {
                 run_id: run_id.clone(),
                 ledger: Some(PathBuf::from(ledger)),
@@ -376,9 +368,7 @@ fn parse_args(
                 cards: parse_solve_card_args(rest).map_err(|diagnostic| (mode, diagnostic))?,
             }
         }
-        [verb, left, right]
-            if verb == "compare" && is_operand(left) && is_operand(right) =>
-        {
+        [verb, left, right] if verb == "compare" && is_operand(left) && is_operand(right) => {
             Command::Compare {
                 left: left.clone(),
                 right: right.clone(),
@@ -386,10 +376,7 @@ fn parse_args(
             }
         }
         [verb, left, right, ledger]
-            if verb == "compare"
-                && is_operand(left)
-                && is_operand(right)
-                && is_operand(ledger) =>
+            if verb == "compare" && is_operand(left) && is_operand(right) && is_operand(ledger) =>
         {
             Command::Compare {
                 left: left.clone(),

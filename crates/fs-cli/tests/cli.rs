@@ -680,7 +680,12 @@ fn g0_empty_ledger_cannot_mint_a_self_consistent_package() {
         ledger.to_string_lossy().as_ref(),
         "--json",
     ]));
-    assert_eq!(output.exit_code, exit::UNAVAILABLE, "stderr: {}", output.stderr);
+    assert_eq!(
+        output.exit_code,
+        exit::UNAVAILABLE,
+        "stderr: {}",
+        output.stderr
+    );
     assert!(output.stdout.contains("\"status\":\"unavailable\""));
     assert!(output.stderr.contains("cli-stage-unavailable"));
     assert!(!output.stdout.contains("\"merkle_root\""));
@@ -714,7 +719,12 @@ fn g0_empty_ledger_cannot_mint_a_verified_engineering_report() {
         ledger.to_string_lossy().as_ref(),
         "--json",
     ]));
-    assert_eq!(output.exit_code, exit::UNAVAILABLE, "stderr: {}", output.stderr);
+    assert_eq!(
+        output.exit_code,
+        exit::UNAVAILABLE,
+        "stderr: {}",
+        output.stderr
+    );
     assert!(output.stdout.contains("\"status\":\"unavailable\""));
     assert!(output.stderr.contains("cli-stage-unavailable"));
     assert!(!output.stdout.contains("\"content_hash\""));
@@ -724,8 +734,14 @@ fn g0_empty_ledger_cannot_mint_a_verified_engineering_report() {
     let html_path = dir.join(format!("{run_id}.html"));
     let json_path = dir.join(format!("{run_id}.report.json"));
 
-    assert!(!html_path.exists(), "unavailable report must not write HTML");
-    assert!(!json_path.exists(), "unavailable report must not write a JSON twin");
+    assert!(
+        !html_path.exists(),
+        "unavailable report must not write HTML"
+    );
+    assert!(
+        !json_path.exists(),
+        "unavailable report must not write a JSON twin"
+    );
 }
 
 #[test]
@@ -775,7 +791,9 @@ fn g0_run_command_preserves_the_first_unavailable_stage() {
     ]));
 
     assert_eq!(output.exit_code, exit::UNAVAILABLE); // solver stops at conduction stage gap
-    assert!(output.stderr.contains("cli-solve-stage-gap") || output.stdout.contains("stage=conduction"));
+    assert!(
+        output.stderr.contains("cli-solve-stage-gap") || output.stdout.contains("stage=conduction")
+    );
     assert!(!output.stdout.contains("\"status\":\"completed\""));
     assert!(!output.stdout.contains("\"report\""));
     assert!(!output.stdout.contains("\"package\""));
