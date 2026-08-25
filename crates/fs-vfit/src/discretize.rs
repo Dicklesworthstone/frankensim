@@ -688,25 +688,43 @@ impl DelayedFilter {
     /// Scale the residual so `|H(ω)|` equals `target_abs`.
     ///
     /// A self-oscillating loop needs the speaking-frequency loop gain,
-    /// not only an impulse-correct fit.
+    /// not only an impulse-correct fit. An invalid or unrepresentable pin
+    /// request leaves coefficients and runtime state unchanged.
     pub fn pin_magnitude_at(&mut self, omega: f64, target_abs: f64) {
+        if !(omega.is_finite() && target_abs >= 0.0 && target_abs.is_finite()) {
+            return;
+        }
         if !self.fir.is_empty() {
             let h = fir_dtft(&self.fir, omega, self.filter.t_s).abs();
-            if h > 1.0e-12 && target_abs >= 0.0 && target_abs.is_finite() {
-                let gain = target_abs / h;
-                for s in &mut self.fir {
-                    *s *= gain;
-                }
+            if !(h > 1.0e-12 && h.is_finite()) {
+                return;
+            }
+            let gain = target_abs / h;
+            if !gain.is_finite() || self.fir.iter().any(|sample| !(*sample * gain).is_finite()) {
+                return;
+            }
+            for sample in &mut self.fir {
+                *sample *= gain;
             }
             self.last = 0.0;
             return;
         }
         let h = self.filter.eval(omega).abs();
-        #[allow(clippy::nonminimal_bool)] // NaN-aware: the "simpler" form drops the NaN refusal
-        if !(h > 1.0e-12) || !(target_abs >= 0.0 && target_abs.is_finite()) {
+        if !(h > 1.0e-12 && h.is_finite()) {
             return;
         }
         let gain = target_abs / h;
+        if !gain.is_finite()
+            || !(self.filter.direct * gain).is_finite()
+            || self.filter.sections.iter().any(|section| {
+                section
+                    .b
+                    .iter()
+                    .any(|coefficient| !(*coefficient * gain).is_finite())
+            })
+        {
+            return;
+        }
         self.filter.direct *= gain;
         for section in &mut self.filter.sections {
             section.b[0] *= gain;
@@ -1513,8 +1531,31 @@ mod runtime_tests {
         let assert_same_state = |got: &DelayedFilter, want: &DelayedFilter| {
             assert_eq!(got.buf, want.buf, "delay history changed after refusal");
             assert_eq!(got.write, want.write, "write cursor changed after refusal");
+            assert_eq!(
+                got.delay_int, want.delay_int,
+                "integer delay changed after refusal"
+            );
+            assert_eq!(
+                got.frac.to_bits(),
+                want.frac.to_bits(),
+                "fractional delay changed after refusal"
+            );
+            assert_eq!(
+                got.filter, want.filter,
+                "filter coefficients changed after refusal"
+            );
             assert_eq!(got.state, want.state, "IIR memory changed after refusal");
-            assert_eq!(got.last, want.last, "last output changed after refusal");
+            assert_eq!(got.fir, want.fir, "FIR coefficients changed after refusal");
+            assert_eq!(
+                got.last.to_bits(),
+                want.last.to_bits(),
+                "last output changed after refusal"
+            );
+            assert_eq!(
+                got.disp_a.to_bits(),
+                want.disp_a.to_bits(),
+                "dispersion coefficient changed after refusal"
+            );
             assert_eq!(
                 got.disp_x1, want.disp_x1,
                 "dispersion input memory changed after refusal"
@@ -1558,6 +1599,44 @@ mod runtime_tests {
             })
         ));
         assert_same_state(&fir_line, &fir_before);
+
+        let mut pin_line =
+            DelayedFilter::from_impulse_response(1.0 / 48_000.0, vec![2.0e-12, 0.0, 0.0, 0.0])
+                .unwrap();
+        assert_eq!(pin_line.push(1.0).unwrap(), 2.0e-12);
+        let pin_before = pin_line.clone();
+        pin_line.pin_magnitude_at(0.0, f64::MAX);
+        assert_same_state(&pin_line, &pin_before);
+
+        let pin_filter = DigitalFilter {
+            sections: vec![Biquad {
+                b: [-5.0e149, 0.0, 0.0],
+                a: [0.0, 0.0],
+            }],
+            direct: 1.0e150,
+            t_s: 1.0 / 48_000.0,
+            prewarp: 0.0,
+        };
+        let mut iir_pin_line = DelayedFilter::new(2.0, pin_filter).unwrap();
+        let iir_pin_before = iir_pin_line.clone();
+        iir_pin_line.pin_magnitude_at(0.0, f64::MAX);
+        assert_same_state(&iir_pin_line, &iir_pin_before);
+
+        let mut valid_fir_pin =
+            DelayedFilter::from_impulse_response(1.0 / 48_000.0, vec![0.5, 0.0, 0.0, 0.0])
+                .unwrap();
+        valid_fir_pin.pin_magnitude_at(0.0, 1.0);
+        assert_eq!(valid_fir_pin.fir, [1.0, 0.0, 0.0, 0.0]);
+
+        let valid_pin_filter = DigitalFilter {
+            sections: Vec::new(),
+            direct: 0.5,
+            t_s: 1.0 / 48_000.0,
+            prewarp: 0.0,
+        };
+        let mut valid_iir_pin = DelayedFilter::new(2.0, valid_pin_filter).unwrap();
+        valid_iir_pin.pin_magnitude_at(0.0, 1.0);
+        assert_eq!(valid_iir_pin.filter.direct, 1.0);
 
         let mut dispersed_fir =
             DelayedFilter::from_impulse_response(1.0 / 48_000.0, vec![1.0, 0.0, 0.0, 0.0])
