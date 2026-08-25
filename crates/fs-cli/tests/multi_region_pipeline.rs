@@ -9,8 +9,7 @@
 //! labeled complex.
 
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
-use fs_io::read_stl;
-use fs_mesh::{RegionId, RegionKind, RegionSpec, UnverifiedPlc, VolumetricPolicy, volumetricize};
+use fs_mesh::{RegionId, RegionKind, RegionSpec, UnverifiedPlc, VolumetricPolicy};
 use fs_project::ImportedMeshLibrary;
 
 const DATA: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/reference-project");
@@ -75,10 +74,7 @@ fn multi_region_fixture_resolves_volumetricizes_and_opens() {
             .unwrap_or_else(|e| panic!("committed mesh missing: {mesh_path}: {e}"));
         let soup: fs_rep_mesh::Soup = fs_io::stl::read_stl(&bytes).expect("stl admits");
         assert_eq!(soup.triangles.len(), 12, "unit cube fixture topology");
-        raw.push((
-            soup.positions.clone(),
-            soup.triangles.clone(),
-        ));
+        raw.push((soup.positions.clone(), soup.triangles.clone()));
     }
     for (artifact, (positions, triangles)) in artifacts.iter().zip(raw.iter()) {
         let soup = fs_rep_mesh::Soup {
@@ -123,9 +119,16 @@ fn multi_region_fixture_resolves_volumetricizes_and_opens() {
                 id: RegionId(2),
                 kind: RegionKind::Solid,
                 seed: [1.5, 0.5, 0.5],
-                triangles: hot.1
+                triangles: hot
+                    .1
                     .iter()
-                    .map(|t| [t[0] + vertex_offset, t[1] + vertex_offset, t[2] + vertex_offset])
+                    .map(|t| {
+                        [
+                            t[0] + vertex_offset,
+                            t[1] + vertex_offset,
+                            t[2] + vertex_offset,
+                        ]
+                    })
                     .collect(),
             },
         ];
@@ -157,10 +160,9 @@ fn multi_region_fixture_resolves_volumetricizes_and_opens() {
         );
 
         // -- the real conduction consumer opens the audited complex ------
-        let complex =
-            fs_rep_mesh::TetComplex::from_tets(positions.len(), labeled.tets().to_vec());
+        let complex = fs_rep_mesh::TetComplex::from_tets(positions.len(), labeled.tets().to_vec());
         assert_eq!(complex.vertex_count, positions.len());
-        let mesh = fs_conduction::ConductionMesh::new(complex, positions.clone())
+        let mesh = fs_conduction::ConductionMesh::new(complex, positions.to_vec())
             .expect("conduction consumer opens the audited labeled complex");
         let _ = mesh;
     });
