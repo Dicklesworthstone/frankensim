@@ -68,7 +68,7 @@ const DIAGNOSTIC_SCHEMA: &str = "frankensim.cli.diagnostic.v1";
 const VALIDATION_AUTHORITY: &str = "structural-project-admission";
 const VALIDATION_NO_CLAIM: &str =
     "does not prove artifact existence, capability availability, solvability, or physical validity";
-const USAGE: &str = "frankensim [--json] validate <project.fsim|project.json> | import <project> <source> <ledger.db> --unit <unit> (--max-hole-edges <n> | --step-root <id> --target-h <spacing>) | solve <project> <ledger.db> [--materials <pack>]... [--interfaces <pack>]... | solve --resume <run-id> <ledger.db> | report <run-id> [<ledger.db>] | package <run-id> [<ledger.db>] | run <project> <ledger.db> [--materials <pack>]... [--interfaces <pack>]... | cinematic <mode> <config.fscine> <trajectory-source> [cinematic options] (verify/mux require --trajectory <artifact>; other cinematic modes also allow --run-reduced)";
+const USAGE: &str = "frankensim [--json] validate <project.fsim|project.json> | import <project> <source> <ledger.db> --unit <unit> (--max-hole-edges <n> | --step-root <id> --target-h <spacing>) | solve <project> <ledger.db> [--materials <pack>]... [--interfaces <pack>]... | solve --resume <run-id> <ledger.db> | report <run-id> [<ledger.db>] | package <run-id> [<ledger.db>] | run <project> <ledger.db> [--materials <pack>]... [--interfaces <pack>]... | compare <left-run> <right-run> [<ledger.db>] | cinematic <mode> <config.fscine> <trajectory-source> [cinematic options] (verify/mux require --trajectory <artifact>; other cinematic modes also allow --run-reduced)";
 
 /// Captured command output. Final result records are on stdout; diagnostics
 /// are on stderr.

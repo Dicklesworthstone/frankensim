@@ -3,37 +3,41 @@
 use fs_cli::{exit, run};
 
 #[test]
-fn test_cli_compare_text_output() {
+fn compare_text_refuses_instead_of_emitting_fixture_evidence() {
     let output = run(["compare".to_string(), "run_base".to_string(), "run_opt".to_string()]);
-    assert_eq!(output.exit_code, exit::SUCCESS);
-    assert!(output.stdout.contains("FrankenSim Semantic Run Comparison"));
-    assert!(output.stdout.contains("junction_maximum"));
-    assert!(output.stdout.contains("thermal_margin"));
+    assert_eq!(output.exit_code, exit::UNAVAILABLE);
+    assert!(output.stdout.contains("status=unavailable"));
+    assert!(output.stderr.contains("cli-stage-unavailable"));
+    assert!(!output.stdout.contains("junction_maximum"));
+    assert!(!output.stdout.contains("thermal_margin"));
 }
 
 #[test]
-fn test_cli_compare_json_output() {
+fn identical_runs_do_not_produce_a_fabricated_change() {
     let output = run([
         "--json".to_string(),
         "compare".to_string(),
-        "run_01".to_string(),
-        "run_02".to_string(),
+        "same_run".to_string(),
+        "same_run".to_string(),
     ]);
-    assert_eq!(output.exit_code, exit::SUCCESS);
-    assert!(output.stdout.contains("\"schema\": \"frankensim.cli.compare-result.v1\""));
-    assert!(output.stdout.contains("\"status\": \"changed\""));
-    assert!(output.stdout.contains("\"name\": \"junction_maximum\""));
+    assert_eq!(output.exit_code, exit::UNAVAILABLE);
+    assert!(output.stdout.contains("\"status\":\"unavailable\""));
+    assert!(output.stderr.contains("\"code\":\"cli-stage-unavailable\""));
+    assert!(!output.stdout.contains("\"status\":\"changed\""));
+    assert!(!output.stdout.contains("junction_maximum"));
 }
 
 #[test]
-fn test_cli_compare_with_ledger_path() {
+fn nonexistent_ledger_cannot_be_ignored_to_mint_comparison_authority() {
     let output = run([
         "--json".to_string(),
         "compare".to_string(),
-        "run_01".to_string(),
-        "run_02".to_string(),
-        "/tmp/test_ledger.db".to_string(),
+        "same_run".to_string(),
+        "same_run".to_string(),
+        "/definitely/missing/frankensim-ledger.db".to_string(),
     ]);
-    assert_eq!(output.exit_code, exit::SUCCESS);
-    assert!(output.stdout.contains("\"command\": \"compare\""));
+    assert_eq!(output.exit_code, exit::UNAVAILABLE);
+    assert!(output.stdout.contains("\"command\":\"compare\""));
+    assert!(!output.stdout.contains("evidence-aware-semantic-run-diff"));
+    assert!(!output.stdout.contains("verified"));
 }

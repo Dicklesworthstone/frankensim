@@ -39,6 +39,7 @@ frankensim [--json] solve <project.fsim|project.json> <ledger.db>
 frankensim [--json] solve --resume <run-id> <ledger.db>
 frankensim [--json] report <run-id>
 frankensim [--json] package <run-id>
+frankensim [--json] compare <left-run> <right-run> [<ledger.db>]
 ```
 
 `--json` may appear once at any position. Unknown flags, duplicate/missing
@@ -53,12 +54,11 @@ and semantic checks. A successful result reports the canonical project hash,
 schema version, zero findings, and the exact authority class
 `structural-project-admission`.
 
-`report` and `package` are present in the parser but currently return the
-stable `cli-stage-unavailable` refusal naming the producer Bead that must land
-before the verb can execute:
+`compare` is present in the parser but currently returns the stable
+`cli-stage-unavailable` refusal naming the producer Bead that must land before
+the verb can execute:
 
-- report: `frankensim-extreal-program-f85xj.6.9`;
-- package: `frankensim-extreal-program-f85xj.6.10`.
+- compare: `frankensim-extreal-program-f85xj.6.14.1`.
 
 This is a deliberate fail-closed integration seam. Reusing the photovoltaic
 skeleton or emitting placeholder artifacts would turn a CLI-shaped mock into
@@ -363,7 +363,7 @@ the diagnostic identity the binding layer already defines.
 - Every refusal has a non-empty code, message, and suggested fix.
 - User-controlled strings are escaped before JSON emission; every JSON record
   is one line.
-- No unavailable stage (`report`, `package`) writes a run, report, package,
+- No unavailable `compare` invocation writes a run, report, package,
   checkpoint, or ledger artifact. A solve run writes only through its staged
   operations, and a stage the driver cannot execute refuses with retained
   evidence instead of substituting a skeleton stage.

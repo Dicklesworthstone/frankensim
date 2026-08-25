@@ -102,12 +102,26 @@ class TestFrankenSimClientIntegration(unittest.TestCase):
             self.assertEqual(solve_res.exit_code, ExitCode.UNAVAILABLE)
             self.assertTrue(any("conduction" in d.message or "conduction" in d.fix for d in solve_res.diagnostics))
 
-            # 3. Compare runs
-            comp = self.client.compare("baseline_run", "candidate_run", ledger_path=ledger, strict=True)
-            self.assertEqual(comp.status, "changed")
-            self.assertEqual(comp.exit_code, ExitCode.SUCCESS)
-            self.assertGreaterEqual(comp.qoi_count, 2)
-            self.assertTrue(any(q.name == "junction_maximum" for q in comp.qoi_diffs))
+            # 3. Compare remains fail-closed until it can load retained run data.
+            with self.assertRaises(UnavailableError):
+                self.client.compare(
+                    "baseline_run",
+                    "candidate_run",
+                    ledger_path=ledger,
+                    strict=True,
+                )
+
+            comp = self.client.compare(
+                "baseline_run",
+                "candidate_run",
+                ledger_path=ledger,
+                strict=False,
+            )
+            self.assertEqual(comp.status, "unavailable")
+            self.assertEqual(comp.exit_code, ExitCode.UNAVAILABLE)
+            self.assertEqual(comp.authority, "none")
+            self.assertEqual(comp.qoi_count, 0)
+            self.assertEqual(comp.qoi_diffs, [])
 
 
 if __name__ == "__main__":

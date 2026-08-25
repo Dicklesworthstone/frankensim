@@ -25,10 +25,8 @@ fi
 
 case "${COMMAND}" in
   --list)
-    printf "cooling_compare::text_diff\n"
-    printf "cooling_compare::json_diff\n"
-    printf "cooling_compare::qoi_semantics\n"
-    printf "cooling_compare::evidence_regime\n"
+    printf "cooling_compare::fail_closed_without_retained_loader\n"
+    printf "cooling_compare::no_fabricated_qoi_authority\n"
     exit 0
     ;;
   --check)
@@ -41,31 +39,34 @@ case "${COMMAND}" in
     fi
     ;;
   --run)
-    printf "==> 1. Testing text compare output\n"
-    "${BINARY}" compare baseline_run candidate_run > "${ARTIFACT_DIR}/compare.txt"
-    grep -q "FrankenSim Semantic Run Comparison" "${ARTIFACT_DIR}/compare.txt"
-    grep -q "junction_maximum" "${ARTIFACT_DIR}/compare.txt"
-    grep -q "thermal_margin" "${ARTIFACT_DIR}/compare.txt"
+    printf "==> 1. Verifying compare fails closed without a retained-run loader\n"
+    set +e
+    "${BINARY}" --json compare identical_run identical_run /definitely/missing/ledger.db \
+      > "${ARTIFACT_DIR}/compare.json" 2> "${ARTIFACT_DIR}/compare.stderr.jsonl"
+    compare_exit=$?
+    set -e
+    test "${compare_exit}" -eq 5
+    grep -q '"status":"unavailable"' "${ARTIFACT_DIR}/compare.json"
+    grep -q '"code":"cli-stage-unavailable"' "${ARTIFACT_DIR}/compare.stderr.jsonl"
+    if grep -Eq 'junction_maximum|thermal_margin|evidence-aware-semantic-run-diff|"status":"changed"' \
+      "${ARTIFACT_DIR}/compare.json"; then
+      printf "FATAL: compare emitted fabricated semantic evidence\n" >&2
+      exit 1
+    fi
 
-    printf "==> 2. Testing JSON structured compare output\n"
-    "${BINARY}" --json compare baseline_run candidate_run > "${ARTIFACT_DIR}/compare.json"
-    grep -q '"schema": "frankensim.cli.compare-result.v1"' "${ARTIFACT_DIR}/compare.json"
-    grep -q '"status": "changed"' "${ARTIFACT_DIR}/compare.json"
-    grep -q '"name": "junction_maximum"' "${ARTIFACT_DIR}/compare.json"
-    grep -q '"name": "thermal_margin"' "${ARTIFACT_DIR}/compare.json"
-    grep -q '"authority": "evidence-aware-semantic-run-diff"' "${ARTIFACT_DIR}/compare.json"
-
-    printf "==> 3. Testing Python SDK compare integration\n"
+    printf "==> 2. Verifying Python SDK preserves the unavailable boundary\n"
     PYTHONPATH="${REPO_ROOT}/python" python3 -c '
-from frankensim import FrankenSimClient
+from frankensim import FrankenSimClient, UnavailableError
 client = FrankenSimClient()
-res = client.compare("baseline_run", "candidate_run")
-assert res.status == "changed"
-assert len(res.qoi_diffs) >= 2
-print(f"Verified {len(res.qoi_diffs)} QoI diffs via Python SDK")
+try:
+    client.compare("identical_run", "identical_run")
+except UnavailableError:
+    pass
+else:
+    raise AssertionError("compare must refuse until retained-run loading exists")
 '
 
-    printf "All cooling_compare acceptance checks passed!\n"
+    printf "Cooling compare fail-closed checks passed; semantic comparison remains unavailable.\n"
     exit 0
     ;;
   *)

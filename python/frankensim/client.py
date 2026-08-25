@@ -451,7 +451,7 @@ class FrankenSimClient:
             summary=data.get("summary", ""),
             qoi_count=int(data.get("qoi_count", len(qoi_diffs))),
             qoi_diffs=qoi_diffs,
-            authority=data.get("authority", "evidence-aware-semantic-run-diff"),
+            authority=data.get("authority", "none"),
             no_claim=data.get("no_claim", ""),
             exit_code=exit_code,
             diagnostics=diagnostics,
