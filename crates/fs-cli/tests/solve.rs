@@ -3287,12 +3287,12 @@ fn g1_conduction_stage_executes_and_retains_field_and_balance_evidence() {
     );
 }
 
-/// G1 product contact path: two retained solids are volumetricized together,
+/// G0 product contact path: two retained solids are volumetricized together,
 /// split back into region-owned matching-P1 traces, mapped to the declared
 /// scenario interface and finite-resistance card, and solved without treating
 /// the joint as either perfect contact or an adiabatic gap.
 #[test]
-fn g1_conduction_stage_executes_declared_card_backed_contact() {
+fn g0_conduction_stage_executes_declared_card_backed_contact() {
     let spec = multi_region_contact_project();
     let decoded = decode(&spec);
     let ledger = Ledger::open(":memory:").expect("ledger");

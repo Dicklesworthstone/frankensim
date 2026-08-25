@@ -555,7 +555,7 @@ project comparison, resume checkpoint/project/receipt re-attestation, and the
 final pre-publication boundary with exact zero publication beyond any already
 durable prefix. It also proves a cancelled resume retry reproduces the same stage-receipt
 identities as an uninterrupted run. G5 covers identical stage-receipt
-identities as an uninterrupted run. G1 additionally lowers the committed
+identities as an uninterrupted run. G0 additionally lowers the committed
 two-region imported fixture through its declared finite-resistance contact,
 checks nonzero interface heat transfer and energy closure, and replays the same
 receipts on resume. G5 covers identical stage-receipt identities across
