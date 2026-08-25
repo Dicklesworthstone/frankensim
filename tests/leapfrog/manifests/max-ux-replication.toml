@@ -1,0 +1,45 @@
+# Manifest for independent MAX expert UX replication (bead frankensim-leapfrog-2026-program-i94v.7.5.7.2.5)
+schema_version = "org.frankensim.leapfrog.max-ux-replication-manifest.v1"
+campaign_id = "max-ux-repl-2026-m1"
+protocol_seal_schema = "org.frankensim.leapfrog.max-ux-replication-seal.v1"
+claim_revision = "ClaimRevision-2026.07-MAX-v1"
+
+[information_barrier]
+seal_required_before_handoff = true
+no_outcome_access_attested = true
+disjoint_principals_required = true
+disjoint_artifact_root = "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+disjoint_data_root = "fedcba0987654321fedcba0987654321fedcba0987654321fedcba0987654321"
+
+[cohorts]
+required = [
+    "domain-expert",
+    "theorem-researcher",
+    "validation-safety-audit",
+    "site-operator",
+    "assistive-technology"
+]
+
+[cases]
+immutable_cases = [
+    "max-ux-repl.seal-handoff",
+    "max-ux-repl.domain-expert",
+    "max-ux-repl.theorem-researcher",
+    "max-ux-repl.validation-safety-audit",
+    "max-ux-repl.site-operator",
+    "max-ux-repl.assistive-technology",
+    "max-ux-repl.seeded-hazards",
+    "max-ux-repl.missingness-withdrawal",
+    "max-ux-repl.privacy-refusal",
+    "max-ux-repl.independent-analysis",
+    "max-ux-repl.tamper-stale-overlap",
+    "max-ux-repl.cancel-infrastructure-fault",
+    "max-ux-repl.artifact-replay"
+]
+
+[tolerances]
+power_target = 0.85
+precision_target = 0.04
+max_missingness_rate = 0.08
+multiplicity_method = "benjamini-hochberg"
+uncertainty_method = "bootstrap"

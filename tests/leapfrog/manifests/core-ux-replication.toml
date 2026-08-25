@@ -1,0 +1,43 @@
+# Manifest for independent CORE UX replication (bead frankensim-leapfrog-2026-program-i94v.7.5.5.2.5)
+schema_version = "org.frankensim.leapfrog.core-ux-replication-manifest.v1"
+campaign_id = "core-ux-repl-2026-c1"
+protocol_seal_schema = "org.frankensim.leapfrog.core-ux-replication-seal.v1"
+claim_revision = "ClaimRevision-2026.07-CORE-v1"
+
+[information_barrier]
+seal_required_before_handoff = true
+no_outcome_access_attested = true
+disjoint_principals_required = true
+disjoint_artifact_root = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+disjoint_data_root = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+
+[cohorts]
+required = [
+    "first-time-user",
+    "domain-engineer",
+    "validation-safety-audit",
+    "assistive-technology"
+]
+
+[cases]
+immutable_cases = [
+    "core-ux-repl.seal-handoff",
+    "core-ux-repl.first-time-user",
+    "core-ux-repl.domain-engineer",
+    "core-ux-repl.validation-safety-audit",
+    "core-ux-repl.assistive-technology",
+    "core-ux-repl.seeded-hazards",
+    "core-ux-repl.missingness-withdrawal",
+    "core-ux-repl.privacy-refusal",
+    "core-ux-repl.independent-analysis",
+    "core-ux-repl.tamper-stale-overlap",
+    "core-ux-repl.cancel-infrastructure-fault",
+    "core-ux-repl.artifact-replay"
+]
+
+[tolerances]
+power_target = 0.80
+precision_target = 0.05
+max_missingness_rate = 0.10
+multiplicity_method = "benjamini-hochberg"
+uncertainty_method = "wilson-score"

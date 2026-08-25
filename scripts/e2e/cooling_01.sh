@@ -57,6 +57,7 @@ case "${COMMAND}" in
       log_json "run_start" "failed" "no executable frankensim binary found"
       exit 1
     fi
+    BINARY="$(cd "$(dirname "${BINARY}")" && pwd)/$(basename "${BINARY}")"
     log_json "run_start" "started" "executing Cooling product-prefix and refusal suite"
 
     PROJECT="${REPO_ROOT}/examples/heatsink-fan/heatsink-fan.fsim"
@@ -88,7 +89,7 @@ case "${COMMAND}" in
 
     log_json "step_report" "running" "verifying report refuses the incomplete retained run"
     RC_REPORT=0
-    "${BINARY}" --json report "cooling_demo_run" "${LEDGER_VERBS}" \
+    (cd "${RUN_DIR}" && "${BINARY}" --json report "cooling_demo_run" "${LEDGER_VERBS}") \
       > "${ARTIFACT_DIR}/report.json" 2> "${ARTIFACT_DIR}/report.err" || RC_REPORT=$?
     test "${RC_REPORT}" -eq 5
     grep -q '"status":"unavailable"' "${ARTIFACT_DIR}/report.json"
@@ -98,11 +99,13 @@ case "${COMMAND}" in
       log_json "step_report" "failed" "report emitted fabricated scientific evidence"
       exit 1
     fi
+    test ! -e "${RUN_DIR}/cooling_demo_run.html"
+    test ! -e "${RUN_DIR}/cooling_demo_run.report.json"
     log_json "step_report" "passed" "report remained unavailable without minting authority"
 
     log_json "step_package" "running" "verifying package refuses the incomplete retained run"
     RC_PACKAGE=0
-    "${BINARY}" --json package "cooling_demo_run" "${LEDGER_VERBS}" \
+    (cd "${RUN_DIR}" && "${BINARY}" --json package "cooling_demo_run" "${LEDGER_VERBS}") \
       > "${ARTIFACT_DIR}/package.json" 2> "${ARTIFACT_DIR}/package.err" || RC_PACKAGE=$?
     test "${RC_PACKAGE}" -eq 5
     grep -q '"status":"unavailable"' "${ARTIFACT_DIR}/package.json"
@@ -112,6 +115,7 @@ case "${COMMAND}" in
       log_json "step_package" "failed" "package emitted fabricated scientific evidence"
       exit 1
     fi
+    test ! -e "${RUN_DIR}/cooling_demo_run.fspkg"
     log_json "step_package" "passed" "package remained unavailable without minting authority"
 
     # 2. Parity: One-Command `run`

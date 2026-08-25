@@ -50,10 +50,12 @@ case "${COMMAND}" in
       log_json "run_start" "failed" "frankensim binary is unavailable"
       exit 1
     fi
+    BINARY="$(cd "$(dirname "${BINARY}")" && pwd)/$(basename "${BINARY}")"
     mkdir -p "${ARTIFACT_DIR}"
+    ARTIFACT_DIR="$(cd "${ARTIFACT_DIR}" && pwd)"
     log_json "run_start" "started" "verifying report refuses without retained-run loading"
     set +e
-    "${BINARY}" --json report unbound_run /definitely/missing/ledger.db \
+    (cd "${ARTIFACT_DIR}" && "${BINARY}" --json report unbound_run /definitely/missing/ledger.db) \
       > "${ARTIFACT_DIR}/report.json" 2> "${ARTIFACT_DIR}/report.stderr.jsonl"
     report_exit=$?
     set -e
@@ -65,6 +67,8 @@ case "${COMMAND}" in
       log_json "run_terminal" "failed" "report emitted fabricated scientific evidence"
       exit 1
     fi
+    test ! -e "${ARTIFACT_DIR}/unbound_run.html"
+    test ! -e "${ARTIFACT_DIR}/unbound_run.report.json"
     log_json "run_terminal" "pass" "report remained unavailable and emitted no scientific claim"
     exit 0
     ;;
