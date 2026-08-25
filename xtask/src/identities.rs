@@ -777,6 +777,40 @@ fn parse_schema_constants(value: &str) -> Result<Vec<SchemaConstant>, String> {
     Ok(constants)
 }
 
+/// Fixed std/core/alloc prelude type-authority table for `schema_types`
+/// pseudo-paths ("std#Vec", "core#str", ...). Deliberately minimal and
+/// bead-gated: only names with demonstrated registration need are admitted,
+/// keeping the extern-prelude trust surface explicit rather than blanket.
+const STDLIB_PRELUDE_TYPES: &[&str] = &[
+    "Arc",
+    "BTreeSet",
+    "Box",
+    "Cow",
+    "HashMap",
+    "HashSet",
+    "PhantomData",
+    "Rc",
+    "String",
+    "Vec",
+    "bool",
+    "char",
+    "f32",
+    "f64",
+    "i8",
+    "i16",
+    "i32",
+    "i64",
+    "i128",
+    "isize",
+    "u8",
+    "u16",
+    "u32",
+    "u64",
+    "u128",
+    "usize",
+    "str",
+];
+
 fn parse_schema_types(value: &str) -> Result<Vec<SchemaType>, String> {
     let mut types = Vec::new();
     for item in list(value) {
@@ -11291,6 +11325,15 @@ impl IdentityReferenceCache {
                     )),
                 };
                 cache.constants.insert((path.clone(), symbol), result);
+            }
+            if matches!(path.as_str(), "std" | "core" | "alloc") {
+                for symbol in requested.types {
+                    // Parser already gated membership; the marker bytes bind
+                    // the admission to this checker's fixed table version.
+                    let bytes = format!("std-prelude-type:{symbol}").into_bytes();
+                    cache.types.insert((path.clone(), symbol), Ok(bytes));
+                }
+                continue;
             }
             for symbol in requested.types {
                 let result = rust_named_type_declaration_bytes(text, index, &symbol)
