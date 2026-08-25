@@ -1475,8 +1475,9 @@ impl<'a> SolveEngine<'a> {
                 );
                 return Err(self.record_refusal(&state, stage, refusal));
             }
-            // Stages that retain no side evidence yield an empty usage list;
-            // only `material-resolve` retains replayable claim-usage receipts.
+            // Stages that retain no side evidence yield an empty list;
+            // material resolution retains replayable usage receipts and
+            // conduction retains its temperature field.
             let body = match stage {
                 SolveStage::ImportVerify => self
                     .stage_import_verify(&mut context)
@@ -4873,7 +4874,11 @@ fn is_supported_stage_discovery_row(row: &OpRow, run: SolveRunId) -> bool {
     let Ok(stage) = parse_stage_discovery_ir(&row.ir, run) else {
         return false;
     };
-    stage.gap_dependency().is_none()
+    // Conduction is conditional on the retained project's explicit setup.
+    // Discovery cannot inspect that project yet, so admit the candidate here
+    // and let `validate_resume_candidate` re-attest the project and enforce
+    // `stage_has_declared_producer`. QoI remains unconditionally unavailable.
+    (stage.gap_dependency().is_none() || stage == SolveStage::Conduction)
         && row.t_start == i64::from(stage.ordinal()) * 2
         && row.t_end == Some(i64::from(stage.ordinal()) * 2 + 1)
 }

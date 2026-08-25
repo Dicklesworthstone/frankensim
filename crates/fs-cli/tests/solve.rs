@@ -3085,6 +3085,20 @@ fn g1_conduction_stage_executes_and_retains_field_and_balance_evidence() {
     assert_balanced_json(&solution_text);
     assert!(solution_text.contains("frankensim.cli.solve-conduction-solution.v1"));
     assert!(solution_text.contains("\"temperature_unit\":\"K\""));
+
+    let gate = CancelGate::new_clock_free();
+    let mut clock = benign_clock();
+    let mut resume_progress = Vec::new();
+    let resumed = resume_solve(&ledger, &gate, &mut clock, &run, &mut resume_progress)
+        .expect_err("resume re-attests conduction and stops at the QoI gap");
+    assert_eq!(resumed.code, "cli-solve-stage-gap");
+    assert_eq!(resumed.stage, Some("qoi"));
+    assert_eq!(resumed.dependency, Some("frankensim-s2l9v"));
+    assert_eq!(
+        stage_receipt_hashes(&ledger, &run),
+        receipts,
+        "resume preserves the exact five-stage prefix"
+    );
 }
 
 /// Declarations the flow-network stage requires but validation deliberately

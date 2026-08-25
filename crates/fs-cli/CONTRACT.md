@@ -148,7 +148,7 @@ refusals retain all evidence available at the refusal stage and finish one
 terminal error operation. Project-admission, resource-envelope, and
 pre-cancellation failures occur before ledger side effects.
 
-### Solve orchestration (slices 1-2)
+### Solve orchestration
 
 The library surface exposes `run_solve`, `resume_solve`, `SolveRunId`,
 `SolveStage`, `SolveDriverState`, `SolveOutcome`, and `SolveRefusal`. The
@@ -158,11 +158,13 @@ Run identity is content-derived before any side effect:
 `hash_domain("org.frankensim.fs-cli.solve-run.v1", project canonical hash ||
 constellation || workspace || root seed || driver version)`. Budgets travel
 inside the project hash, so raising a budget starts a new run whose completed
-artifacts still deduplicate by content. Driver semantics version 2 binds the
-strict lineage/evidence rules in this contract; version-1 run ids do not
-collide with or silently resume under version 2. Every solve operation carries the
-32-byte run identity as its ledger `session` value; the run's own operations
-are its index. Resume and import discovery walk globally descending
+artifacts still deduplicate by content. Driver semantics version 5 binds the
+current executable prefix: version 3 added retained card packs and material
+resolution, version 4 added flow-network execution, and version 5 conditionally
+adds conduction when the project carries its explicit conduction setup. Older
+run ids do not collide with or silently resume under version 5. Every solve
+operation carries the 32-byte run identity as its ledger `session` value; the
+run's own operations are its index. Resume and import discovery walk globally descending
 `visible_op_ids_page_controlled` pages under a first-page high-water mark,
 then reconstruct each bounded candidate through
 `read_op_fields_controlled`. Retained field hashes are compared with the
@@ -195,10 +197,18 @@ complete card library from the admitted packs, resolves every declared
 material and interface binding through `fs_project::resolve_bindings` under
 `BindingRequirements::thermal_steady_v1()`, and retains each selected claim's
 replayable usage receipt as a `solve-material-usage-receipt` artifact.
-`flow-network` (frankensim-frn2i), `conduction` (frankensim-s93ej), and `qoi`
-(frankensim-s2l9v) refuse with `cli-solve-stage-gap` (exit 5) naming their
-producer bead, and the refusal is itself retained as a terminal error
-operation.
+`flow-network` lowers the declared fan system and enclosure network to its
+interval-certified operating point. `conduction` executes only when
+`cooling.conduction` explicitly supplies one interior seed per region and a
+partition of physical boundary laws. It replays the retained promoted meshes
+and assignments, constructs and audits a labeled tetrahedral volume, binds
+region labels to material-card conductivity, distributes declared regional
+power, solves the heterogeneous steady problem, and retains both the canonical
+stage receipt and a `solve-conduction-solution` temperature-field artifact.
+Projects without that optional declaration retain the `frankensim-s93ej`
+typed gap; `qoi` remains the `frankensim-s2l9v` typed gap. Gap refusals use
+`cli-solve-stage-gap` (exit 5), name their producer bead, and are retained as
+terminal error operations.
 
 Card packs reach the run through the repeatable `--materials <pack>` and
 `--interfaces <pack>` flags. Admission decodes each pack through its own
@@ -587,10 +597,15 @@ publication.
 - The presence of report/package in help and parsing is not an implementation
   claim. Until their named authorities land, execution fails before side
   effects.
-- The solve verb executes only its leading prefix. A run cannot currently
-  complete: `flow-network`, `conduction`, and `qoi` are typed gaps owned by
-  their named beads, and no end-to-end solve, physics answer, QoI, or
-  product-determinism claim is made.
+- The solve verb executes only its available leading prefix. A run cannot
+  currently complete because `qoi` remains a typed gap. Projects without an
+  explicit conduction setup also stop at the conduction gap. The conduction
+  path proves only the declared finite-mesh, static Dirichlet/Neumann/Robin
+  solve plus its reported algebraic residual and energy balance. It does not
+  authenticate source geometry or material claims, establish mesh convergence,
+  lower contact resistance, or perform conjugate airflow exchange; projects
+  declaring interfaces therefore refuse rather than silently assuming perfect
+  contact.
 - `material-resolve` proves that every declared region and interface resolves
   to an admitted card whose selected claim answers the required property at
   both endpoints of the declared temperature range, and it retains that
