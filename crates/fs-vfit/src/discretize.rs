@@ -700,7 +700,10 @@ impl DelayedFilter {
                 return;
             }
             let gain = target_abs / h;
-            if !gain.is_finite() || self.fir.iter().any(|sample| !(*sample * gain).is_finite()) {
+            if !gain.is_finite()
+                || (target_abs > 0.0 && gain == 0.0)
+                || self.fir.iter().any(|sample| !(*sample * gain).is_finite())
+            {
                 return;
             }
             for sample in &mut self.fir {
@@ -715,6 +718,7 @@ impl DelayedFilter {
         }
         let gain = target_abs / h;
         if !gain.is_finite()
+            || (target_abs > 0.0 && gain == 0.0)
             || !(self.filter.direct * gain).is_finite()
             || self.filter.sections.iter().any(|section| {
                 section
@@ -1622,9 +1626,27 @@ mod runtime_tests {
         iir_pin_line.pin_magnitude_at(0.0, f64::MAX);
         assert_same_state(&iir_pin_line, &iir_pin_before);
 
-        let mut valid_fir_pin =
-            DelayedFilter::from_impulse_response(1.0 / 48_000.0, vec![0.5, 0.0, 0.0, 0.0])
+        let smallest_positive = f64::from_bits(1);
+        let mut fir_underflow_pin =
+            DelayedFilter::from_impulse_response(1.0 / 48_000.0, vec![f64::MAX, 0.0, 0.0, 0.0])
                 .unwrap();
+        let fir_underflow_before = fir_underflow_pin.clone();
+        fir_underflow_pin.pin_magnitude_at(0.0, smallest_positive);
+        assert_same_state(&fir_underflow_pin, &fir_underflow_before);
+
+        let underflow_filter = DigitalFilter {
+            sections: Vec::new(),
+            direct: f64::MAX,
+            t_s: 1.0 / 48_000.0,
+            prewarp: 0.0,
+        };
+        let mut iir_underflow_pin = DelayedFilter::new(2.0, underflow_filter).unwrap();
+        let iir_underflow_before = iir_underflow_pin.clone();
+        iir_underflow_pin.pin_magnitude_at(0.0, smallest_positive);
+        assert_same_state(&iir_underflow_pin, &iir_underflow_before);
+
+        let mut valid_fir_pin =
+            DelayedFilter::from_impulse_response(1.0 / 48_000.0, vec![0.5, 0.0, 0.0, 0.0]).unwrap();
         valid_fir_pin.pin_magnitude_at(0.0, 1.0);
         assert_eq!(valid_fir_pin.fir, [1.0, 0.0, 0.0, 0.0]);
 
