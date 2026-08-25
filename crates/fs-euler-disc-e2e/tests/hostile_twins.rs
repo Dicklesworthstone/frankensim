@@ -1,42 +1,45 @@
 //! Hostile-twin, mutation, leakage, alias, and false-certificate test suite
 //! (bead `frankensim-euler-disc-emergent-flagship-t6314.8.4`).
 
+#![allow(missing_docs)]
+
 use fs_euler_disc_e2e::specimen::DiscProfileSpec;
+use fs_exec::Cx;
 use fs_rep_frep::SquatDiscEdgeTreatment;
 
 #[test]
 fn test_hostile_twin_nominal_asbuilt_substitution() {
-    // Attempting to resolve a degenerate profile with negative thickness must fail
+    let cx = Cx::new();
     let spec = DiscProfileSpec::SolidCylinder {
         outer_radius_m: 0.0375,
         thickness_m: -0.0125,
         edge_treatment: SquatDiscEdgeTreatment::Sharp,
     };
-    assert!(spec.resolve(7850.0).is_err(), "Negative thickness must fail resolution");
+    assert!(spec.resolve(7850.0, &cx).is_err(), "Negative thickness must fail resolution");
 }
 
 #[test]
 fn test_hostile_twin_fillet_chamfer_confusion() {
-    // A fillet larger than half the thickness is physically invalid and must be rejected
+    let cx = Cx::new();
     let spec = DiscProfileSpec::SolidCylinder {
         outer_radius_m: 0.0375,
         thickness_m: 0.010,
         edge_treatment: SquatDiscEdgeTreatment::CircularFillet {
-            fillet_radius_m: 0.020, // Exceeds thickness
+            radius: 0.020, // Exceeds thickness
         },
     };
-    assert!(spec.resolve(7850.0).is_err(), "Oversized fillet must fail resolution");
+    assert!(spec.resolve(7850.0, &cx).is_err(), "Oversized fillet must fail resolution");
 }
 
 #[test]
 fn test_hostile_twin_stripped_geometry_bound() {
-    // Non-positive outer radius must fail resolution
+    let cx = Cx::new();
     let spec = DiscProfileSpec::SolidCylinder {
         outer_radius_m: 0.0,
         thickness_m: 0.0125,
         edge_treatment: SquatDiscEdgeTreatment::Sharp,
     };
-    assert!(spec.resolve(7850.0).is_err(), "Zero outer radius must fail resolution");
+    assert!(spec.resolve(7850.0, &cx).is_err(), "Zero outer radius must fail resolution");
 }
 
 #[test]
