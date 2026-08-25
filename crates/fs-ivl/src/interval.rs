@@ -641,7 +641,7 @@ mod tests {
                 f64::MAX.to_bits(),
                 "finite positive overflow lost its finite lower bound: {positive:?}"
             );
-            assert_eq!(positive.hi(), f64::INFINITY);
+            assert_eq!(positive.hi().to_bits(), f64::INFINITY.to_bits());
         }
 
         for negative in [
@@ -650,7 +650,7 @@ mod tests {
             neg_max * two,
             neg_max / min_positive,
         ] {
-            assert_eq!(negative.lo(), f64::NEG_INFINITY);
+            assert_eq!(negative.lo().to_bits(), f64::NEG_INFINITY.to_bits());
             assert_eq!(
                 negative.hi().to_bits(),
                 (-f64::MAX).to_bits(),
@@ -693,10 +693,10 @@ mod tests {
         let shifted_positive = positive_tail + one;
         assert!(shifted_positive.contains(f64::MAX));
         assert!(shifted_positive.lo() >= fs_math::next_down(f64::MAX));
-        assert_eq!(shifted_positive.hi(), f64::INFINITY);
+        assert_eq!(shifted_positive.hi().to_bits(), f64::INFINITY.to_bits());
 
         let shifted_negative = negative_tail - one;
-        assert_eq!(shifted_negative.lo(), f64::NEG_INFINITY);
+        assert_eq!(shifted_negative.lo().to_bits(), f64::NEG_INFINITY.to_bits());
         assert!(shifted_negative.contains(-f64::MAX));
         assert!(shifted_negative.hi() <= fs_math::next_up(-f64::MAX));
 

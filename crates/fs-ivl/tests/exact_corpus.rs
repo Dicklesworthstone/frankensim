@@ -64,7 +64,7 @@ fn exact_dyadic(num: i128, k: i32) -> f64 {
         remaining -= step;
     }
     if num == 0 {
-        assert!(value == 0.0);
+        assert_eq!(value.to_bits(), 0u64, "+0.0 is the exact reconstruction");
         return value;
     }
     // Reconstruct: value = m·2^e exactly from the bit pattern.
@@ -512,7 +512,8 @@ fn built_corpus() -> String {
             .map(i128::to_string)
             .collect::<Vec<_>>()
             .join("|");
-        body.push_str(&format!("row|r{n:03}|{primitive}|{joined}\n"));
+        use std::fmt::Write as _;
+        let _ = write!(body, "row|r{n:03}|{primitive}|{joined}\n");
     };
 
     // (a) Exact dyadic point chains — reducible spellings included

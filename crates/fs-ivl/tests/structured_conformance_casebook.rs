@@ -207,7 +207,11 @@ fn measure_core() -> CoreMeasurement {
     let division = source / divisor;
     let mut context = AffineCtx::new();
     let affine = context.from_interval(source);
+    // Intentional x-x: the affine form must cancel exactly while plain
+    // interval arithmetic widens; eq_op is therefore suppressed here.
+    #[allow(clippy::eq_op)]
     let affine_difference = (&affine - &affine).to_interval();
+    #[allow(clippy::eq_op)]
     let plain_difference = source - source;
     CoreMeasurement {
         division: interval_bits(division),

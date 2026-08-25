@@ -31,7 +31,7 @@ impl ManifestFingerprint {
 fn fnv1a_hash(bytes: &[u8]) -> ManifestFingerprint {
     let mut h: u64 = 0xcbf29ce484222325;
     for &b in bytes {
-        h ^= b as u64;
+        h ^= u64::from(b);
         h = h.wrapping_mul(0x100000001b3);
     }
     ManifestFingerprint(h)
@@ -205,7 +205,7 @@ pub const FROZEN_FORMAL_MANIFEST: FormalProofManifest<'static> = FormalProofMani
     no_claims: &FROZEN_RESIDUAL_NO_CLAIMS,
 };
 
-impl<'a> FormalProofManifest<'a> {
+impl FormalProofManifest<'_> {
     /// Compute the immutable content hash of this formal manifest.
     #[must_use]
     pub fn content_hash(&self) -> ManifestFingerprint {

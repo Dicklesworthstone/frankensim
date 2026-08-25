@@ -378,8 +378,8 @@ mod tests {
             "the fixture must actually overflow"
         );
         let collapsed = product.to_interval();
-        assert_eq!(collapsed.lo(), f64::NEG_INFINITY);
-        assert_eq!(collapsed.hi(), f64::INFINITY);
+        assert_eq!(collapsed.lo().to_bits(), f64::NEG_INFINITY.to_bits());
+        assert_eq!(collapsed.hi().to_bits(), f64::INFINITY.to_bits());
         // WHOLE is a valid (maximally pessimistic) enclosure: containment
         // of any probe holds trivially and no panic path remains.
         assert!(collapsed.contains(0.0));

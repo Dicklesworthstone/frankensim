@@ -95,7 +95,7 @@ pub struct ProofArtifactReceipt<'a> {
     pub records: &'a [TheoremVerificationRecord],
 }
 
-impl<'a> ProofArtifactReceipt<'a> {
+impl ProofArtifactReceipt<'_> {
     /// Canonical receipt constructor for the frozen proof set.
     #[must_use]
     pub const fn frozen_receipt() -> ProofArtifactReceipt<'static> {
@@ -155,7 +155,7 @@ impl<'a> ProofArtifactReceipt<'a> {
 
         let mut h: u64 = 0xcbf29ce484222325;
         for &b in &buf {
-            h ^= b as u64;
+            h ^= u64::from(b);
             h = h.wrapping_mul(0x100000001b3);
         }
         ManifestFingerprint(h)

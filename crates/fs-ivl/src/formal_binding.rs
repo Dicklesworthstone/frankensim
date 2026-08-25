@@ -229,7 +229,7 @@ pub fn binding_manifest_fingerprint() -> ManifestFingerprint {
     }
     let mut h: u64 = 0xcbf29ce484222325;
     for &byte in &buf {
-        h ^= byte as u64;
+        h ^= u64::from(byte);
         h = h.wrapping_mul(0x100000001b3);
     }
     ManifestFingerprint(h)

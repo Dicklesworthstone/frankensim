@@ -600,7 +600,9 @@ fn g3_unnudged_and_inward_mutant_ops_are_killed() {
             Interval::point(lo_in.min(hi_in))
         }
     };
-    let mutants: [(&str, OpKind, &dyn Fn(Interval, Interval) -> Interval); 3] = [
+    /// Local alias keeps the clippy type-complexity gate readable.
+    type MutantOp<'a> = &'a dyn Fn(Interval, Interval) -> Interval;
+    let mutants: [(&str, OpKind, MutantOp<'_>); 3] = [
         ("nearest-add", OpKind::Add, &nearest_add),
         ("nearest-mul", OpKind::Mul, &nearest_mul),
         ("inward-sub", OpKind::Sub, &inward_sub),
