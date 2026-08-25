@@ -5,12 +5,14 @@
 //! real wire grammar, both meshes admit through the real STL reader, every
 //! declared assignment resolves through the real project assignment surface,
 //! the production PLC mesher volumetricizes and independently audits the
-//! shared-interface pair, and the real conduction consumer opens the audited
-//! labeled complex.
+//! shared-interface pair. The real conduction consumer then derives
+//! region-owned P1 traces from that same audited labeled complex and the real
+//! project adapter resolves every coincident trace back to the declared,
+//! oriented interface and retained source faces.
 
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
-use fs_mesh::{RegionId, RegionKind, RegionSpec, UnverifiedPlc, VolumetricPolicy};
 use fs_geom::Point3;
+use fs_mesh::{RegionId, RegionKind, RegionSpec, UnverifiedPlc, VolumetricPolicy};
 use fs_project::ImportedMeshLibrary;
 
 const DATA: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/reference-project");
@@ -76,7 +78,6 @@ fn weld(parts: &[Vec<[f64; 3]>]) -> (Vec<[f64; 3]>, Vec<Vec<u32>>) {
     (verts, remaps)
 }
 
-
 /// Retention + independent recheck: the audited labeled complex is
 /// serialized to canonical JSONL with a domain-separated content root,
 /// dropped to disk, reloaded from those bytes alone, and re-verified by
@@ -112,7 +113,11 @@ fn multi_region_artifacts_survive_retention_and_recheck() {
             let soup = fs_rep_mesh::Soup {
                 positions: positions
                     .iter()
-                    .map(|p| Point3 { x: p[0], y: p[1], z: p[2] })
+                    .map(|p| Point3 {
+                        x: p[0],
+                        y: p[1],
+                        z: p[2],
+                    })
                     .collect(),
                 triangles: triangles.clone(),
             };
@@ -127,18 +132,17 @@ fn multi_region_artifacts_survive_retention_and_recheck() {
         assert!(resolution.admissible());
 
         let (vertices, remaps) = weld(&[raw[0].0.clone(), raw[1].0.clone()]);
-        let remap_tris =
-            |tris: &[[u32; 3]], remap: &[u32]| -> Vec<[u32; 3]> {
-                tris.iter()
-                    .map(|t| {
-                        [
-                            remap[t[0] as usize],
-                            remap[t[1] as usize],
-                            remap[t[2] as usize],
-                        ]
-                    })
-                    .collect()
-            };
+        let remap_tris = |tris: &[[u32; 3]], remap: &[u32]| -> Vec<[u32; 3]> {
+            tris.iter()
+                .map(|t| {
+                    [
+                        remap[t[0] as usize],
+                        remap[t[1] as usize],
+                        remap[t[2] as usize],
+                    ]
+                })
+                .collect()
+        };
         let regions = vec![
             RegionSpec {
                 id: RegionId(1),
@@ -154,17 +158,16 @@ fn multi_region_artifacts_survive_retention_and_recheck() {
             },
         ];
         let plc = UnverifiedPlc::new(vertices, regions);
-        let audited = fs_mesh::volumetricize(
-            plc,
-            VolumetricPolicy::fixture_default("m"),
-            cx,
-        )
-        .expect("production mesher");
+        let audited = fs_mesh::volumetricize(plc, VolumetricPolicy::fixture_default("m"), cx)
+            .expect("production mesher");
         let labeled = audited.labeled();
 
         // -- retain: canonical JSONL + content root ----------------------
         let mut lines = Vec::new();
-        lines.push(format!("{{\"kind\":\"header\",\"length_unit\":\"{}\"}}", "m"));
+        lines.push(format!(
+            "{{\"kind\":\"header\",\"length_unit\":\"{}\"}}",
+            "m"
+        ));
         for (tet, region) in labeled.tets().iter().zip(labeled.region_of_tet()) {
             lines.push(format!(
                 "{{\"kind\":\"tet\",\"v\":[{},{},{},{}],\"region\":{}}}",
@@ -194,15 +197,6 @@ fn multi_region_artifacts_survive_retention_and_recheck() {
         );
         let mut reload_positions = Vec::<[f64; 3]>::new();
         let mut reload_tets = Vec::<([u32; 4], u32)>::new();
-        for line in reloaded.lines() {
-            if line.contains("\"kind\":\"tet\"") {
-                let nums: Vec<u32> = line
-                    .match_indices(|c: char| c.is_ascii_digit())
-                    .map(|_| 0)
-                    .collect();
-                let _ = nums;
-            }
-        }
         // Deterministic parse: split on known key markers rather than a
         // full JSON parser (this test has no serde dependency).
         for line in reloaded.lines() {
@@ -241,8 +235,7 @@ fn multi_region_artifacts_survive_retention_and_recheck() {
         // -- recompute volumes purely from the reloaded artifact ---------
         let mut per_region = std::collections::BTreeMap::new();
         for (tet, region) in &reload_tets {
-            *per_region.entry(*region).or_insert(0.0) +=
-                tet_volume(&reload_positions, tet).abs();
+            *per_region.entry(*region).or_insert(0.0) += tet_volume(&reload_positions, tet).abs();
         }
         assert_eq!(per_region.len(), 2);
         for id in [1u32, 2] {
@@ -256,7 +249,7 @@ fn multi_region_artifacts_survive_retention_and_recheck() {
 }
 
 #[test]
-fn multi_region_fixture_resolves_volumetricizes_and_opens() {
+fn multi_region_fixture_resolves_volumetricizes_and_binds_contact_traces() {
     // -- project parses through the real wire grammar --------------------
     let project_path = format!("{DATA}/multi-region-interface.fsim");
     let src = std::fs::read_to_string(&project_path).expect("committed fixture present");
@@ -311,18 +304,17 @@ fn multi_region_fixture_resolves_volumetricizes_and_opens() {
 
         // -- production PLC: exact-welded table, two solid region specs --
         let (vertices, remaps) = weld(&[raw[0].0.clone(), raw[1].0.clone()]);
-        let remap_tris =
-            |tris: &[[u32; 3]], remap: &[u32]| -> Vec<[u32; 3]> {
-                tris.iter()
-                    .map(|t| {
-                        [
-                            remap[t[0] as usize],
-                            remap[t[1] as usize],
-                            remap[t[2] as usize],
-                        ]
-                    })
-                    .collect()
-            };
+        let remap_tris = |tris: &[[u32; 3]], remap: &[u32]| -> Vec<[u32; 3]> {
+            tris.iter()
+                .map(|t| {
+                    [
+                        remap[t[0] as usize],
+                        remap[t[1] as usize],
+                        remap[t[2] as usize],
+                    ]
+                })
+                .collect()
+        };
         let regions = vec![
             RegionSpec {
                 id: RegionId(1),
@@ -378,11 +370,47 @@ fn multi_region_fixture_resolves_volumetricizes_and_opens() {
             "every retained tet carries exactly one region label"
         );
 
-        // -- the real conduction consumer opens the audited complex ------
+        // -- real contact topology + declared interface lowering ----------
         let complex = fs_rep_mesh::TetComplex::from_tets(positions.len(), labeled.tets().to_vec());
         assert_eq!(complex.vertex_count, positions.len());
-        let mesh = fs_conduction::ConductionMesh::new(complex, positions.to_vec())
-            .expect("conduction consumer opens the audited labeled complex");
-        let _ = mesh;
+        let labels = labeled
+            .region_of_tet()
+            .iter()
+            .map(|region| region.0)
+            .collect::<Vec<_>>();
+        let mesh =
+            fs_conduction::ConductionMesh::new_region_owned(complex, positions.to_vec(), &labels)
+                .expect("conduction consumer derives region-owned traces from the audited volume");
+        let candidates = fs_conduction::ThermalInterfaces::coincident_face_pairs(&mesh)
+            .expect("region-owned mesh has valid matching-P1 candidates");
+        assert_eq!(
+            candidates.len(),
+            2,
+            "the square joint has two trace triangles"
+        );
+
+        let interfaces = fs_project::resolve_conduction_interface_pairs(
+            &decoded.spec,
+            &library,
+            fs_io::AssignmentLimits::default(),
+            fs_project::ConductionInterfaceLimits::DEFAULT,
+            &mesh,
+            cx,
+        );
+        assert!(
+            interfaces.admissible(),
+            "interface-lowering violations: {:?}",
+            interfaces.violations
+        );
+        assert_eq!(interfaces.pairs.len(), candidates.len());
+        for pair in interfaces.pairs {
+            assert_eq!(pair.interface, "cold-hot-joint");
+            assert_eq!(pair.from_region, "cold");
+            assert_eq!(pair.to_region, "hot");
+            assert!(
+                !pair.interface_sources.is_empty(),
+                "the declared interface selector must retain its source face"
+            );
+        }
     });
 }
