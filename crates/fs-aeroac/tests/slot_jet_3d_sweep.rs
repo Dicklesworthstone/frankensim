@@ -70,7 +70,12 @@ fn re_sweep_campaign() {
         let started = std::time::Instant::now();
         // Chunked execution with an atomic checkpoint: repeated
         // invocations (or post-crash reruns) resume bit-identically.
-        let ckpt = std::env::temp_dir().join(format!("sj3d-sweep-{rate:.2}"));
+        // Checkpoints live INSIDE the synced tree (gitignored) so
+        // repeated RCH invocations resume on any worker; temp_dir is
+        // worker-local and loses state across routing changes.
+        let ckpt = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target-sweep-ckpt")
+            .join(format!("{rate:.2}"));
         let run = loop {
             match run_slot_jet_3d_chunked(&cfg, &ckpt, 1_024).expect("chunk executes") {
                 SweepProgress::Complete(run) => break *run,
@@ -116,7 +121,8 @@ fn re_sweep_campaign() {
     // our way out of, so a too-thin box must be ruled out explicitly.
     let mut cfg_hi = base_config(*LADDER.last().expect("non-empty ladder"));
     cfg_hi.nz *= 2;
-    let ckpt_hi = std::env::temp_dir().join("sj3d-sweep-octave");
+    let ckpt_hi = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target-sweep-ckpt/octave");
     let run_hi = loop {
         match run_slot_jet_3d_chunked(&cfg_hi, &ckpt_hi, 1_024).expect("chunk executes") {
             SweepProgress::Complete(run) => break *run,
