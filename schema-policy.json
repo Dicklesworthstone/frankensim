@@ -21,7 +21,7 @@
       "version_kind": "integer-const",
       "version_constant": "FSIM_VERSION",
       "version_location": "crates/fs-project/src/lib.rs",
-      "current_version": "2",
+      "current_version": "3",
       "lockstep": [],
       "surface": [
         "the canonical .fsim envelope and its canonical-hash construction",
@@ -29,7 +29,8 @@
         "declared region and interface material bindings",
         "the optional per-binding claim pin (`:claim <hex>`, both spellings) admitted at bead f85xj.6.4; a pin never bypasses validity and refuses as PinnedClaimOutOfDomain or PinnedClaimUnknown",
         "structural finding identifiers reported by `frankensim validate`",
-        "the optional cooling `(fan-system ...)` subsection admitted at bead frn2i.1 (schema v2): versioned bank declarations with explicit count/arrangement/speed-ratio/domain, monotone curve, stall boundary, tolerance basis, source identity, and an explicit multi-bank topology"
+        "the optional cooling `(fan-system ...)` subsection admitted at bead frn2i.1 (schema v2): versioned bank declarations with explicit count/arrangement/speed-ratio/domain, monotone curve, stall boundary, tolerance basis, source identity, and an explicit multi-bank topology",
+        "the optional cooling `(conduction ...)` subsection admitted at bead frankensim-s93ej.3 (schema v3): explicit volumetric-region seeds, fixed-temperature/heat-flux/convection boundary laws, and deliberate adiabatic-remainder intent"
       ],
       "minor_bump": "may add optional fields with receipted defaults and may add new structural findings; must keep every prior document loadable and its canonical hash stable",
       "major_bump": "may remove or retype fields, or change canonical-hash construction; requires a migration path and a new deprecation horizon",
@@ -40,8 +41,12 @@
           "location": "crates/fs-project/tests/project.rs"
         },
         {
-          "test": "v1_envelopes_migrate_to_v2_with_a_receipted_rewrite",
+          "test": "v1_envelopes_migrate_to_v3_with_a_receipted_rewrite",
           "location": "crates/fs-project/tests/fansystem.rs"
+        },
+        {
+          "test": "v2_envelopes_migrate_to_v3_without_inventing_conduction_inputs",
+          "location": "crates/fs-project/tests/project.rs"
         }
       ],
       "deprecation_horizon": "a removed field stays accepted for one major version after the release that deprecates it"

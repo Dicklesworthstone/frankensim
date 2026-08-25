@@ -13,14 +13,15 @@ use fs_evidence::uncertainty::{
 };
 use fs_package::{EvidencePackage, Provenance, VerifiedPackage};
 use fs_project::{
-    AirflowLeakage, Budgets, ConsequenceClass, Cooling, DecisionGate, EntityDecl, Envelope,
-    FSIM_VERSION, Fan, FanCurveDecl, FanCurvePoint, FanToleranceBasis, GeometryArtifact,
-    GeometryAssignment, HalfSpaceSide, InterfaceCardBinding, InterfaceState, MaterialBinding,
-    MeshSelector, Metadata, OutputRequest, PerfectContactBinding, PowerDissipation, ProjectSpec,
-    RequirementDirection, RequirementSeverity, RequirementSource, RequirementSourceKind,
-    SafetyFactorPolicy, Seeds, SolverSettings, ThermalLimit, UnitsDoctrine, Vent, Versions,
-    canonical_hash, migrate_envelope, parse_json, parse_sexpr, parse_sexpr_lenient, print_json,
-    print_sexpr, project_decision_authorities, project_decision_authority,
+    AirflowLeakage, Budgets, ConductionRegion, ConductionSetup, ConsequenceClass, Cooling,
+    DecisionGate, EntityDecl, Envelope, FSIM_VERSION, Fan, FanCurveDecl, FanCurvePoint,
+    FanToleranceBasis, GeometryArtifact, GeometryAssignment, HalfSpaceSide,
+    InterfaceCardBinding, InterfaceState, MaterialBinding, MeshSelector, Metadata, OutputRequest,
+    PerfectContactBinding, PowerDissipation, ProjectSpec, RequirementDirection,
+    RequirementSeverity, RequirementSource, RequirementSourceKind, SafetyFactorPolicy, Seeds,
+    SolverSettings, ThermalBoundary, ThermalBoundaryCondition, ThermalLimit, UnitsDoctrine, Vent,
+    Versions, canonical_hash, migrate_envelope, parse_json, parse_sexpr, parse_sexpr_lenient,
+    print_json, print_sexpr, project_decision_authorities, project_decision_authority,
     requirement_source_reviews,
 };
 use fs_qty::QtyAny;
@@ -247,6 +248,54 @@ fn reference_project() -> ProjectSpec {
             leakage: watts(2.5),
             airflow_leakage: None,
             fan_system: None,
+            conduction: Some(ConductionSetup {
+                regions: vec![
+                    ConductionRegion {
+                        region: "cpu".to_string(),
+                        seed: [
+                            QtyAny::new(0.01, fs_project::spec::dims::LENGTH),
+                            QtyAny::new(0.02, fs_project::spec::dims::LENGTH),
+                            QtyAny::new(0.03, fs_project::spec::dims::LENGTH),
+                        ],
+                    },
+                    ConductionRegion {
+                        region: "sink-base".to_string(),
+                        seed: [
+                            QtyAny::new(0.04, fs_project::spec::dims::LENGTH),
+                            QtyAny::new(0.05, fs_project::spec::dims::LENGTH),
+                            QtyAny::new(0.06, fs_project::spec::dims::LENGTH),
+                        ],
+                    },
+                ],
+                boundaries: vec![
+                    ThermalBoundary {
+                        target: "sink-base".to_string(),
+                        condition: ThermalBoundaryCondition::FixedTemperature {
+                            temperature: kelvin(293.15),
+                        },
+                    },
+                    ThermalBoundary {
+                        target: "cpu".to_string(),
+                        condition: ThermalBoundaryCondition::HeatFlux {
+                            outward_flux: QtyAny::new(
+                                125.0,
+                                fs_project::spec::dims::HEAT_FLUX,
+                            ),
+                        },
+                    },
+                    ThermalBoundary {
+                        target: "cpu-sink-tim".to_string(),
+                        condition: ThermalBoundaryCondition::Convection {
+                            coefficient: QtyAny::new(
+                                18.0,
+                                fs_project::spec::dims::HEAT_TRANSFER_COEFFICIENT,
+                            ),
+                            reference_temperature: kelvin(298.15),
+                        },
+                    },
+                ],
+                adiabatic_remainder: false,
+            }),
         }),
         envelope: Some(Envelope {
             ambient_lo: kelvin(273.15),
@@ -696,7 +745,11 @@ fn noncanonical_whitespace_is_refused_strictly_and_receipted_leniently() {
 #[test]
 fn the_version_bump_machinery_is_proven_with_the_synthetic_migration() {
     let rendered = print_sexpr(&reference_project()).expect("renders");
-    let v0 = rendered.replacen("(fsim-project :version 2", "(fsim-project :version 0", 1);
+    let v0 = rendered.replacen(
+        &format!("(fsim-project :version {FSIM_VERSION}"),
+        "(fsim-project :version 0",
+        1,
+    );
 
     // The reader refuses the old envelope outright.
     let refusal = parse_sexpr(&v0).expect_err("v0 must not parse directly");
@@ -731,6 +784,54 @@ fn the_version_bump_machinery_is_proven_with_the_synthetic_migration() {
             .code,
         "fsim-migration-unknown-version"
     );
+}
+
+#[test]
+fn v2_envelopes_migrate_to_v3_without_inventing_conduction_inputs() {
+    let mut historical = reference_project();
+    historical
+        .cooling
+        .as_mut()
+        .expect("reference cooling")
+        .conduction = None;
+    let current = print_sexpr(&historical).expect("current no-conduction project renders");
+    let v2 = current
+        .replacen(
+            &format!("(fsim-project :version {FSIM_VERSION}"),
+            "(fsim-project :version 2",
+            1,
+        )
+        .replacen(
+            &format!("(versions :schema {FSIM_VERSION}"),
+            "(versions :schema 2",
+            1,
+        );
+
+    let refusal = parse_sexpr(&v2).expect_err("v2 does not parse directly as v3");
+    assert_eq!(refusal.code, "fsim-unsupported-version");
+
+    let migrated = migrate_envelope(&v2, 2).expect("registered v2 rule migrates");
+    assert_eq!(migrated.decoded.canonical, current);
+    assert_eq!(migrated.decoded.spec, historical);
+    assert!(
+        migrated
+            .decoded
+            .spec
+            .cooling
+            .as_ref()
+            .expect("cooling survives")
+            .conduction
+            .is_none(),
+        "migration must not fabricate a seed or boundary condition"
+    );
+    assert!(
+        migrated
+            .receipt
+            .verifies(v2.as_bytes(), migrated.decoded.canonical.as_bytes())
+    );
+    assert_eq!(migrated.receipt.source_version, 2);
+    assert_eq!(migrated.receipt.target_version, FSIM_VERSION);
+    assert_eq!(migrated.receipt.rule.label(), "cooling-conduction-v3");
 }
 
 #[test]

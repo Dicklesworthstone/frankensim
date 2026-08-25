@@ -70,7 +70,13 @@ bindings; it runs no solves and admits no scenarios itself.
   and a stall boundary — and the section may carry an optional
   `AirflowLeakage` open area, distinct from the thermal watts sink; absence
   of either is a declaration the flow-network stage must refuse, never
-  repair), `Envelope`, sourced `ThermalLimit` requirements
+  repair). Cooling may also carry an optional `ConductionSetup`: one explicit
+  interior length-quantity seed per volumetric region, typed fixed-temperature,
+  outward-heat-flux, or convection boundary laws keyed by assignment target,
+  and an explicit adiabatic-remainder decision. Its absence remains loadable
+  but is a typed execution gap; this layer never invents a seed or boundary
+  condition. The remaining sections are `Envelope`, sourced `ThermalLimit`
+  requirements
   with explicit QoI, direction, effective limit, guard margin, severity,
   versioned base authority, and an already-applied `SafetyFactorPolicy` with
   its own versioned source, `SolverSettings`, and `OutputRequest`s. Sections
@@ -398,8 +404,9 @@ refuse atomically.
   `receipt.selected` against the project's pin, exactly as matdb's CONTRACT
   states.
 - The optional `claim` pin was added to version 1 before the schema freeze
-  (.16.5). The schema has since FROZEN at version 2 (`schema-policy.json`
-  row `project.fsim`, current_version 2, v1 migrates with a receipt);
+  (.16.5). The schema has since FROZEN and is now at version 3
+  (`schema-policy.json` row `project.fsim`, current_version 3; v1 and v2
+  migrate with receipts);
   absence of the field remains the canonical spelling of "no pin", and
   pre-pin v1 documents were byte-identical under the extended grammar
   before their receipted migration.

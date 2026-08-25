@@ -510,25 +510,35 @@ mod wire_surface {
     }
 
     #[test]
-    fn v1_envelopes_migrate_to_v2_with_a_receipted_rewrite() {
+    fn v1_envelopes_migrate_to_v3_with_a_receipted_rewrite() {
         let mut v1_spec = spec_with_fan_system();
         v1_spec.cooling.as_mut().expect("cooling").fan_system = None;
-        let v1_rendered = print_sexpr(&v1_spec).expect("v1 renders");
-        let v1 = v1_rendered.replacen("(fsim-project :version 2", "(fsim-project :version 1", 1);
-        assert_ne!(v1, v1_rendered, "the version rewrite must bite");
+        let current = print_sexpr(&v1_spec).expect("current schema renders");
+        let v1 = current
+            .replacen(
+                &format!("(fsim-project :version {}", fs_project::FSIM_VERSION),
+                "(fsim-project :version 1",
+                1,
+            )
+            .replacen(
+                &format!("(versions :schema {}", fs_project::FSIM_VERSION),
+                "(versions :schema 1",
+                1,
+            );
+        assert_ne!(v1, current, "the version rewrite must bite");
 
-        let refusal = parse_sexpr(&v1).expect_err("v1 must not parse at v2 directly");
+        let refusal = parse_sexpr(&v1).expect_err("v1 must not parse at v3 directly");
         assert_eq!(refusal.code, "fsim-unsupported-version");
 
         let migrated = migrate_envelope(&v1, 1).expect("registered v1 rule migrates");
-        assert_eq!(migrated.decoded.canonical, v1_rendered);
+        assert_eq!(migrated.decoded.canonical, current);
         assert!(
             migrated
                 .receipt
                 .verifies(v1.as_bytes(), migrated.decoded.canonical.as_bytes())
         );
         assert_eq!(migrated.receipt.source_version, 1);
-        assert_eq!(migrated.receipt.target_version, 2);
+        assert_eq!(migrated.receipt.target_version, fs_project::FSIM_VERSION);
         assert_eq!(migrated.receipt.rule.label(), "cooling-fan-system-v2");
     }
 
