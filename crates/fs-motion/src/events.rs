@@ -240,6 +240,28 @@ enum LeafClass {
     Split,
 }
 
+fn validate_guard_alignment(
+    tube: &CertifiedMotorTube,
+    family: &GuardFamily,
+) -> Result<(), MotionError> {
+    if family.segments.len() != tube.segments().len() {
+        return Err(MotionError::InvalidConfiguration {
+            what: "guard family must align with the tube's segments",
+        });
+    }
+    if tube
+        .segments()
+        .iter()
+        .zip(&family.segments)
+        .any(|(segment, model)| segment.domain() != model.g.domain())
+    {
+        return Err(MotionError::InvalidConfiguration {
+            what: "each guard model domain must equal its tube segment domain",
+        });
+    }
+    Ok(())
+}
+
 fn classify_leaf(model: &GuardModel, window: Interval, min_width: f64) -> LeafClass {
     let guard_band = model.g.eval_interval(window);
     if !contains_zero(guard_band) {
@@ -358,11 +380,7 @@ pub fn scan_events(
             what: "subdivision and event budgets must be positive",
         });
     }
-    if family.segments.len() != tube.segments().len() {
-        return Err(MotionError::InvalidConfiguration {
-            what: "guard family must align with the tube's segments",
-        });
-    }
+    validate_guard_alignment(tube, family)?;
     let domain = tube.domain();
     if !domain.encloses(span) {
         return Err(MotionError::OutOfDomain {
@@ -382,11 +400,27 @@ pub fn scan_events(
     };
     let mut verdict = ScanVerdict::Complete;
 
-    'segments: for (segment, model) in tube.segments().iter().zip(&family.segments) {
+    let mut zeno_budget_hit = false;
+    'segments: for (segment_index, (segment, model)) in tube
+        .segments()
+        .iter()
+        .zip(&family.segments)
+        .enumerate()
+    {
         let d = segment.domain();
         let lo = span.lo().max(d.lo());
         let hi = span.hi().min(d.hi());
         if lo >= hi {
+            continue;
+        }
+        if zeno_budget_hit {
+            let window = Interval::new(lo, hi);
+            possible.push(PossibleEvent {
+                window,
+                guard_band: model.g.eval_interval(window),
+                derivative_band: model.gdot.eval_interval(window),
+                reason: PossibleReason::BudgetExhausted,
+            });
             continue;
         }
         // LIFO stack, right pushed first so the left half is examined
@@ -419,10 +453,24 @@ pub fn scan_events(
                     receipt.widest_leaf_guard_band = receipt.widest_leaf_guard_band.max(width);
                 }
                 LeafClass::Certified(event) => {
+                    receipt.widest_leaf_guard_band = receipt
+                        .widest_leaf_guard_band
+                        .max(event.guard_band.width());
                     certified.push(refine_certified(model, event, config, &mut receipt));
-                    if certified.len() > config.max_certified_events {
+                    let future_segment_intersects_span = tube.segments()
+                        [segment_index + 1..]
+                        .iter()
+                        .any(|future| {
+                            let future_domain = future.domain();
+                            span.lo().max(future_domain.lo())
+                                < span.hi().min(future_domain.hi())
+                        });
+                    if certified.len() >= config.max_certified_events
+                        && (!stack.is_empty() || future_segment_intersects_span)
+                    {
                         // Zeno guard: stop and surface the untouched
-                        // remainder as one possible window per entry.
+                        // current-segment remainder plus every later
+                        // segment as possible windows.
                         verdict = ScanVerdict::ZenoBudgetExceeded;
                         for (w, _) in stack.drain(..) {
                             possible.push(PossibleEvent {
@@ -432,10 +480,16 @@ pub fn scan_events(
                                 reason: PossibleReason::BudgetExhausted,
                             });
                         }
+                        zeno_budget_hit = true;
                         continue 'segments;
                     }
                 }
-                LeafClass::Possible(event) => possible.push(event),
+                LeafClass::Possible(event) => {
+                    receipt.widest_leaf_guard_band = receipt
+                        .widest_leaf_guard_band
+                        .max(event.guard_band.width());
+                    possible.push(event);
+                }
                 LeafClass::Split => {
                     let mid = window.midpoint();
                     if !(mid > window.lo() && mid < window.hi()) {
@@ -563,6 +617,7 @@ pub fn estimated_scan(
             what: "estimated scan needs at least two samples per segment",
         });
     }
+    validate_guard_alignment(tube, family)?;
     let mut events = Vec::new();
     for (segment, model) in tube.segments().iter().zip(&family.segments) {
         let d = segment.domain();
@@ -633,6 +688,26 @@ fn permutations(n: usize) -> Vec<Vec<usize>> {
     out
 }
 
+fn order_respects_certified_precedence(
+    order: &[usize],
+    members: &[(usize, CertifiedEvent)],
+) -> bool {
+    let mut position = vec![0usize; order.len()];
+    for (ordinal, &member) in order.iter().enumerate() {
+        position[member] = ordinal;
+    }
+    for earlier in 0..members.len() {
+        for later in 0..members.len() {
+            if members[earlier].1.window.hi() < members[later].1.window.lo()
+                && position[earlier] >= position[later]
+            {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 /// Group certified events from multiple guard scans by window overlap
 /// and enumerate admissible orders. Events whose windows are disjoint
 /// are totally ordered by time; overlapping windows form set-valued
@@ -674,6 +749,9 @@ pub fn enumerate_simultaneous(scans: &[EventScan]) -> Vec<SimultaneousGroup> {
                 vec![vec![0]]
             } else {
                 permutations(group.members.len())
+                    .into_iter()
+                    .filter(|order| order_respects_certified_precedence(order, &group.members))
+                    .collect()
             });
         }
     }
