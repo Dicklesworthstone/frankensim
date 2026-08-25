@@ -15,6 +15,7 @@
 //! (≥85% STREAM, per-CCD sharding, prefetch, fs-tilelang SIMD bodies) is the
 //! recorded follow-up bead, gated on fs-tilelang + the autotuner.
 
+/// Feature-gated accelerator kernel pilot and run evidence.
 pub mod accelerator_pilot;
 pub mod bsr;
 pub mod direct;
