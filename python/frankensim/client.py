@@ -140,17 +140,22 @@ class FrankenSimClient:
 
         # Parse final result record from stdout JSON
         result_data: Dict[str, Any] = {}
-        for line in reversed(stdout_raw.splitlines()):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                data = json.loads(line)
-                if isinstance(data, dict) and "schema" in data:
-                    result_data = data
-                    break
-            except json.JSONDecodeError:
-                pass
+        try:
+            full_data = json.loads(stdout_raw.strip())
+            if isinstance(full_data, dict):
+                result_data = full_data
+        except (json.JSONDecodeError, ValueError):
+            for line in reversed(stdout_raw.splitlines()):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                    if isinstance(data, dict) and "schema" in data:
+                        result_data = data
+                        break
+                except json.JSONDecodeError:
+                    pass
 
         return proc.returncode, result_data, diagnostics, stdout_raw, stderr_raw
 
