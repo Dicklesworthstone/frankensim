@@ -1588,10 +1588,13 @@ pub fn run_frame(seed: u32) -> Vec<f64> {
     let ens_cvar = frame_ensemble(seed, 12, 4.0, dt);
     let cvar_catalog = [0.5f64, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0];
     let beta = 0.9f64;
-    let cvar_curve: Vec<(f64, f64)> = cvar_catalog
-        .iter()
-        .map(|&s| (s, fs_frame::ensemble_cvar(&ens_cvar, base, s, beta)))
-        .collect();
+    let mut cvar_curve: Vec<(f64, f64)> = Vec::with_capacity(cvar_catalog.len());
+    for &s in &cvar_catalog {
+        match fs_frame::try_ensemble_cvar(&ens_cvar, base, s, beta) {
+            Ok(c) if c.is_finite() => cvar_curve.push((s, c)),
+            _ => return frame_nan_body(seed),
+        }
+    }
     // feasible limit: the CVaR at scale 1.0 (guarantees cvar_at(4.0) ≤ limit).
     let cvar_at_1 = cvar_curve
         .iter()
@@ -1603,13 +1606,7 @@ pub fn run_frame(seed: u32) -> Vec<f64> {
         .map_or(f64::NAN, |&(_, c)| c);
     let limit = cvar_at_1 * 1.0001;
     let design = if limit.is_finite() && cvar_at_4.is_finite() && cvar_at_4 <= limit {
-        Some(fs_frame::cvar_mass_min(
-            &ens_cvar,
-            base,
-            beta,
-            limit,
-            &cvar_catalog,
-        ))
+        fs_frame::try_cvar_mass_min(&ens_cvar, base, beta, limit, &cvar_catalog).ok()
     } else {
         None
     };
@@ -1953,5 +1950,46 @@ mod tests {
         assert_eq!(all_pass, 1.0, "sizing all_pass");
         assert!(p_hat > 0.0 && p_hat < 1.0, "fragility p_hat {p_hat}");
         assert!(members_used < 48.0, "members_used {members_used}");
+
+        let off_cvar = v[7] as usize;
+        let scale_star = v[off_cvar];
+        let scale_snapped = v[off_cvar + 1];
+        let cvar_star = v[off_cvar + 2];
+        let cvar_snapped = v[off_cvar + 3];
+        let limit = v[off_cvar + 4];
+        let mass = v[off_cvar + 5];
+        let beta = v[off_cvar + 7];
+        let cvar_curve_len = v[off_cvar + 8] as usize;
+        let cvar_cat_len = v[off_cvar + 9] as usize;
+        assert!(
+            scale_star.is_finite() && scale_star > 0.0,
+            "scale_star {scale_star}"
+        );
+        assert!(
+            scale_snapped.is_finite() && scale_snapped >= scale_star,
+            "scale_snapped {scale_snapped}"
+        );
+        assert!(
+            cvar_star.is_finite() && cvar_star > 0.0,
+            "cvar_star {cvar_star}"
+        );
+        assert!(
+            cvar_snapped.is_finite() && cvar_snapped <= limit,
+            "cvar_snapped {cvar_snapped} <= limit {limit}"
+        );
+        assert!(mass.is_finite() && mass > 0.0, "mass {mass}");
+        assert_eq!(beta, 0.9, "beta");
+        assert_eq!(cvar_curve_len, 7, "cvar_curve_len");
+        assert_eq!(cvar_cat_len, 7, "cvar_cat_len");
+    }
+
+    #[test]
+    fn frame_nan_body_on_malformed_ensemble() {
+        let nan_body = frame_nan_body(42);
+        assert_eq!(nan_body[0], 2.0, "MAGIC");
+        assert_eq!(nan_body[1], 2.0, "wire version");
+        assert_eq!(nan_body[2], 42.0, "seed");
+        // Remaining payload should be NaNs
+        assert!(nan_body[12..].iter().all(|x| x.is_nan()));
     }
 }

@@ -25,7 +25,10 @@ pub mod fragility;
 pub mod history;
 pub mod layout;
 
-pub use cvar::{CvarDesign, cvar_mass_min, ensemble_cvar};
+pub use cvar::{
+    CvarDesign, FrameCvarError, cvar_mass_min, ensemble_cvar, try_cvar_mass_min, try_ensemble_cvar,
+    try_losses,
+};
 pub use fragility::{FragilityReport, e_stopped_fragility};
 pub use history::{
     GroundMotion, HistoryError, HistoryLimits, HistoryResponse, StoryFrame, StoryParams, peak_drift,

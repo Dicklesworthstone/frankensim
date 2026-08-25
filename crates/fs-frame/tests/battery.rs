@@ -9,7 +9,10 @@ use fs_frame::cvar::{RobustError, cvar, empirical_cvar};
 use fs_frame::history::{
     GroundMotion, HistoryError, HistoryLimits, StoryFrame, StoryParams, peak_drift,
 };
-use fs_frame::{LayoutError, cvar_mass_min, e_stopped_fragility, ensemble_cvar, layout_and_size};
+use fs_frame::{
+    FrameCvarError, LayoutError, cvar_mass_min, e_stopped_fragility, ensemble_cvar,
+    layout_and_size, try_cvar_mass_min, try_ensemble_cvar, try_losses,
+};
 use fs_qty::{Dims, QtyAny};
 use fs_scenario::ensemble::{SpectrumModel, StochasticEnsemble};
 use fs_truss::ground::TrussConstructionError;
@@ -483,10 +486,24 @@ fn frame_006_replay_and_drills() {
         ),
     );
     // Infeasible CVaR study: limit unreachable even at the max scale.
-    let infeasible = std::panic::catch_unwind(|| {
-        let ens = kt_ensemble(12, 0.05, 31337);
-        cvar_mass_min(&ens, params, 0.9, 1e-9, &[0.5, 1.0])
-    });
+    let ens = kt_ensemble(12, 0.05, 31337);
+    let try_infeasible = try_cvar_mass_min(&ens, params, 0.9, 1e-9, &[0.5, 1.0]);
+    verdict(
+        "frame-006-try-infeasible-drill",
+        matches!(try_infeasible, Err(FrameCvarError::InfeasibleLimit { .. })),
+        "infeasible CVaR limit returns typed FrameCvarError::InfeasibleLimit",
+    );
+    let try_empty_catalog = try_cvar_mass_min(&ens, params, 0.9, 10.0, &[]);
+    verdict(
+        "frame-006-try-empty-catalog-drill",
+        matches!(
+            try_empty_catalog,
+            Err(FrameCvarError::NoFeasibleCatalogScale { .. })
+        ),
+        "empty catalog returns typed FrameCvarError::NoFeasibleCatalogScale",
+    );
+    let infeasible =
+        std::panic::catch_unwind(|| cvar_mass_min(&ens, params, 0.9, 1e-9, &[0.5, 1.0]));
     verdict(
         "frame-006-infeasible-drill",
         infeasible.is_err(),

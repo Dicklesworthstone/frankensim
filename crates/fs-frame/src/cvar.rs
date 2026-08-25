@@ -11,9 +11,10 @@
 use crate::assert_ground_motion_ensemble;
 use crate::history::{StoryFrame, StoryParams, peak_drift};
 pub use fs_robust::{EmpiricalCvarReport, RobustError, cvar, empirical_cvar};
-use fs_scenario::ensemble::StochasticEnsemble;
+use fs_scenario::ensemble::{SpectrumModel, StochasticEnsemble};
 
 /// The CVaR design record.
+#[derive(Debug, Clone, PartialEq)]
 pub struct CvarDesign {
     /// Minimal feasible section scale (continuous).
     pub scale_star: f64,
@@ -30,27 +31,183 @@ pub struct CvarDesign {
     pub iters: u32,
 }
 
+/// Errors that can arise during fallible frame CVaR evaluation and mass minimization.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FrameCvarError {
+    /// The ensemble was empty or did not declare a Kanai-Tajimi spectrum model.
+    EnsembleMalformed(&'static str),
+    /// Realization of an ensemble member failed.
+    RealizationFailed { member: u32 },
+    /// Non-finite drift loss encountered.
+    NonFiniteLoss { member: u32, value: f64 },
+    /// Canonical CVaR calculation refused.
+    Robust(RobustError),
+    /// Even the maximum scale in the bisection range violates the CVaR limit.
+    InfeasibleLimit {
+        hi_scale: f64,
+        cvar_observed: f64,
+        limit: f64,
+    },
+    /// The catalog has no section scale greater than or equal to the continuous optimum.
+    NoFeasibleCatalogScale { scale_star: f64 },
+}
+
+impl core::fmt::Display for FrameCvarError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::EnsembleMalformed(msg) => write!(f, "malformed ensemble: {msg}"),
+            Self::RealizationFailed { member } => write!(f, "failed to realize member {member}"),
+            Self::NonFiniteLoss { member, value } => {
+                write!(f, "non-finite drift loss {value} at member {member}")
+            }
+            Self::Robust(err) => write!(f, "canonical CVaR error: {err:?}"),
+            Self::InfeasibleLimit {
+                hi_scale,
+                cvar_observed,
+                limit,
+            } => write!(
+                f,
+                "even scale {hi_scale} violates CVaR limit {limit} (observed {cvar_observed})"
+            ),
+            Self::NoFeasibleCatalogScale { scale_star } => {
+                write!(f, "catalog has no section above scale {scale_star}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for FrameCvarError {}
+
+impl From<RobustError> for FrameCvarError {
+    fn from(err: RobustError) -> Self {
+        Self::Robust(err)
+    }
+}
+
+/// Validate ground motion ensemble fallibly.
+pub(crate) fn try_assert_ground_motion_ensemble(
+    ensemble: &StochasticEnsemble,
+) -> Result<(), FrameCvarError> {
+    if ensemble.members == 0 {
+        return Err(FrameCvarError::EnsembleMalformed(
+            "frame studies require at least one ground-motion ensemble member",
+        ));
+    }
+    if !matches!(ensemble.model, SpectrumModel::KanaiTajimi { .. }) {
+        return Err(FrameCvarError::EnsembleMalformed(
+            "frame studies require a Kanai-Tajimi ground-acceleration ensemble; \
+             wind spectra and material-parameter bands are not structural motions",
+        ));
+    }
+    Ok(())
+}
+
+/// Peak-drift losses over the whole ensemble at section scale `s` (fallible).
+pub fn try_losses(
+    ensemble: &StochasticEnsemble,
+    base: StoryParams,
+    s: f64,
+) -> Result<Vec<f64>, FrameCvarError> {
+    try_assert_ground_motion_ensemble(ensemble)?;
+    let dt = ensemble.dt.value;
+    let mut out = Vec::with_capacity(ensemble.members as usize);
+    for member in 0..ensemble.members {
+        let real = ensemble
+            .realize(member)
+            .map_err(|_| FrameCvarError::RealizationFailed { member })?;
+        let params = StoryParams { scale: s, ..base };
+        let mut frame = StoryFrame::new(params);
+        let drifts = frame.run(&real.values, dt);
+        let drift = peak_drift(&drifts, base.h);
+        if !drift.is_finite() {
+            return Err(FrameCvarError::NonFiniteLoss {
+                member,
+                value: drift,
+            });
+        }
+        out.push(drift);
+    }
+    Ok(out)
+}
+
+/// Fallible calculation of CVaR of the peak-drift loss over the ensemble at section scale `s`.
+pub fn try_ensemble_cvar(
+    ensemble: &StochasticEnsemble,
+    base: StoryParams,
+    s: f64,
+    beta: f64,
+) -> Result<f64, FrameCvarError> {
+    let loss_vec = try_losses(ensemble, base, s)?;
+    let rep = empirical_cvar(&loss_vec, beta)?;
+    Ok(rep.cvar())
+}
+
+/// Minimize mass (∝ scale) subject to CVaR_β(peak drift) ≤ `limit` by
+/// bisection on the scale, then snap UP to `catalog` and re-check (fallible).
+pub fn try_cvar_mass_min(
+    ensemble: &StochasticEnsemble,
+    base: StoryParams,
+    beta: f64,
+    limit: f64,
+    catalog: &[f64],
+) -> Result<CvarDesign, FrameCvarError> {
+    let (mut lo, mut hi) = (0.25f64, 4.0f64);
+    let cvar_hi = try_ensemble_cvar(ensemble, base, hi, beta)?;
+    if cvar_hi > limit {
+        return Err(FrameCvarError::InfeasibleLimit {
+            hi_scale: hi,
+            cvar_observed: cvar_hi,
+            limit,
+        });
+    }
+    let mut iters = 0u32;
+    let cvar_lo = try_ensemble_cvar(ensemble, base, lo, beta)?;
+    if cvar_lo <= limit {
+        hi = lo;
+    }
+    while hi - lo > 0.02 {
+        let mid = f64::midpoint(lo, hi);
+        let cvar_mid = try_ensemble_cvar(ensemble, base, mid, beta)?;
+        if cvar_mid <= limit {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+        iters += 1;
+    }
+    let scale_star = hi;
+    let cvar_star = try_ensemble_cvar(ensemble, base, scale_star, beta)?;
+    let scale_snapped = catalog
+        .iter()
+        .copied()
+        .filter(|&c| c >= scale_star)
+        .fold(f64::INFINITY, f64::min);
+    if !scale_snapped.is_finite() {
+        return Err(FrameCvarError::NoFeasibleCatalogScale { scale_star });
+    }
+    let cvar_snapped = try_ensemble_cvar(ensemble, base, scale_snapped, beta)?;
+    Ok(CvarDesign {
+        scale_star,
+        scale_snapped,
+        cvar_snapped,
+        cvar_star,
+        mass: scale_snapped * 2.0,
+        iters,
+    })
+}
+
 /// CVaR of the peak-drift loss over the ensemble at section scale
 /// `s` — the battery's monotonicity probe and limit-bracketing tool.
 #[must_use]
 pub fn ensemble_cvar(ensemble: &StochasticEnsemble, base: StoryParams, s: f64, beta: f64) -> f64 {
-    cvar(&losses(ensemble, base, s), beta)
+    try_ensemble_cvar(ensemble, base, s, beta)
         .expect("frame-generated losses and beta must satisfy the canonical CVaR contract")
 }
 
 /// Peak-drift losses over the whole ensemble at section scale `s`.
 fn losses(ensemble: &StochasticEnsemble, base: StoryParams, s: f64) -> Vec<f64> {
-    assert_ground_motion_ensemble(ensemble);
-    let dt = ensemble.dt.value;
-    let mut out = Vec::with_capacity(ensemble.members as usize);
-    for member in 0..ensemble.members {
-        let real = ensemble.realize(member).expect("ensemble realizes");
-        let params = StoryParams { scale: s, ..base };
-        let mut frame = StoryFrame::new(params);
-        let drifts = frame.run(&real.values, dt);
-        out.push(peak_drift(&drifts, base.h));
-    }
-    out
+    try_losses(ensemble, base, s)
+        .expect("frame-generated losses must satisfy the ground-motion ensemble contract")
 }
 
 /// Minimize mass (∝ scale) subject to CVaR_β(peak drift) ≤ `limit` by
@@ -67,49 +224,6 @@ pub fn cvar_mass_min(
     limit: f64,
     catalog: &[f64],
 ) -> CvarDesign {
-    let cvar_at = |s: f64| {
-        cvar(&losses(ensemble, base, s), beta)
-            .expect("frame-generated losses and beta must satisfy the canonical CVaR contract")
-    };
-    let (mut lo, mut hi) = (0.25f64, 4.0f64);
-    assert!(
-        cvar_at(hi) <= limit,
-        "even scale {hi} violates the CVaR limit — infeasible study"
-    );
-    let mut iters = 0u32;
-    // If the smallest scale is already feasible, take it.
-    if cvar_at(lo) <= limit {
-        hi = lo;
-    }
-    while hi - lo > 0.02 {
-        let mid = f64::midpoint(lo, hi);
-        if cvar_at(mid) <= limit {
-            hi = mid;
-        } else {
-            lo = mid;
-        }
-        iters += 1;
-    }
-    let scale_star = hi;
-    let cvar_star = cvar_at(scale_star);
-    // Snap UP to the catalog (feasibility preserved by monotonicity —
-    // and re-checked anyway).
-    let scale_snapped = catalog
-        .iter()
-        .copied()
-        .filter(|&c| c >= scale_star)
-        .fold(f64::INFINITY, f64::min);
-    assert!(
-        scale_snapped.is_finite(),
-        "catalog has no section above the optimum — infeasible snap"
-    );
-    let cvar_snapped = cvar_at(scale_snapped);
-    CvarDesign {
-        scale_star,
-        scale_snapped,
-        cvar_snapped,
-        cvar_star,
-        mass: scale_snapped * 2.0,
-        iters,
-    }
+    try_cvar_mass_min(ensemble, base, beta, limit, catalog)
+        .expect("cvar_mass_min must find a feasible design under the declared limit and catalog")
 }
