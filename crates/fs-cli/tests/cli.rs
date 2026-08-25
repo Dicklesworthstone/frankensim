@@ -662,12 +662,13 @@ fn g0_package_missing_ledger_fails_closed() {
         "/nonexistent/ledger.db",
         "--json",
     ]));
-    assert_eq!(output.exit_code, exit::INPUT);
-    assert!(output.stderr.contains("cli-package-ledger-missing") || output.stderr.contains("cli-package-ledger-open"));
+    assert_eq!(output.exit_code, exit::UNAVAILABLE);
+    assert!(output.stderr.contains("cli-stage-unavailable"));
+    assert!(!output.stdout.contains("\"verdict\":\"pass\""));
 }
 
 #[test]
-fn g0_package_success_and_offline_checker_verification() {
+fn g0_empty_ledger_cannot_mint_a_self_consistent_package() {
     let dir = scratch("package");
     let ledger = dir.join("test_ledger.db");
     let _ = fs_ledger::Ledger::open(ledger.to_str().unwrap()).unwrap();
@@ -679,27 +680,12 @@ fn g0_package_success_and_offline_checker_verification() {
         ledger.to_string_lossy().as_ref(),
         "--json",
     ]));
-    assert_eq!(output.exit_code, exit::SUCCESS, "stderr: {}", output.stderr);
-    assert!(output.stdout.contains("\"status\":\"ok\""));
-    assert!(output.stdout.contains("\"verdict\":\"pass\""));
-    assert!(output.stdout.contains("\"merkle_root\""));
-
-    let pkg_path = std::path::PathBuf::from(format!("{run_id}.fspkg"));
-    assert!(pkg_path.exists(), "package file must be written to disk");
-
-    let pkg_json = std::fs::read_to_string(&pkg_path).unwrap();
-    let report = fs_checker::check_json(&pkg_json, None, None);
-    assert_eq!(report.verdict(), fs_checker::Verdict::Pass);
-
-    // Tamper drill: corrupting one byte must cause the checker to fail loudly
-    let mut tampered_json = pkg_json.clone();
-    if let Some(pos) = tampered_json.find("\"format_version\":9") {
-        tampered_json.replace_range(pos..pos + 18, "\"format_version\":8");
-        let tampered_report = fs_checker::check_json(&tampered_json, None, None);
-        assert_eq!(tampered_report.verdict(), fs_checker::Verdict::Fail);
-    }
-
-    let _ = std::fs::remove_file(pkg_path);
+    assert_eq!(output.exit_code, exit::UNAVAILABLE, "stderr: {}", output.stderr);
+    assert!(output.stdout.contains("\"status\":\"unavailable\""));
+    assert!(output.stderr.contains("cli-stage-unavailable"));
+    assert!(!output.stdout.contains("\"merkle_root\""));
+    assert!(!output.stdout.contains("\"verdict\":\"pass\""));
+    assert!(!output.stdout.contains("junction_maximum"));
 }
 
 #[test]
@@ -710,12 +696,13 @@ fn g0_report_missing_ledger_fails_closed() {
         "/nonexistent/ledger.db",
         "--json",
     ]));
-    assert_eq!(output.exit_code, exit::INPUT);
-    assert!(output.stderr.contains("cli-report-ledger-missing") || output.stderr.contains("cli-report-ledger-open"));
+    assert_eq!(output.exit_code, exit::UNAVAILABLE);
+    assert!(output.stderr.contains("cli-stage-unavailable"));
+    assert!(!output.stdout.contains("junction_maximum"));
 }
 
 #[test]
-fn g0_report_success_html_and_json_generation() {
+fn g0_empty_ledger_cannot_mint_a_verified_engineering_report() {
     let dir = scratch("report");
     let ledger = dir.join("report_test_ledger.db");
     let _ = fs_ledger::Ledger::open(ledger.to_str().unwrap()).unwrap();
@@ -727,27 +714,18 @@ fn g0_report_success_html_and_json_generation() {
         ledger.to_string_lossy().as_ref(),
         "--json",
     ]));
-    assert_eq!(output.exit_code, exit::SUCCESS, "stderr: {}", output.stderr);
-    assert!(output.stdout.contains("\"schema\": \"frankensim.cli.report-result.v1\""));
-    assert!(output.stdout.contains("\"content_hash\""));
+    assert_eq!(output.exit_code, exit::UNAVAILABLE, "stderr: {}", output.stderr);
+    assert!(output.stdout.contains("\"status\":\"unavailable\""));
+    assert!(output.stderr.contains("cli-stage-unavailable"));
+    assert!(!output.stdout.contains("\"content_hash\""));
+    assert!(!output.stdout.contains("junction_maximum"));
+    assert!(!output.stdout.contains("Verified"));
 
     let html_path = dir.join(format!("{run_id}.html"));
     let json_path = dir.join(format!("{run_id}.report.json"));
 
-    assert!(html_path.exists(), "HTML report must exist on disk");
-    assert!(json_path.exists(), "JSON twin report must exist on disk");
-
-    let html_content = std::fs::read_to_string(&html_path).unwrap();
-    assert!(html_content.contains("<!DOCTYPE html>"));
-    assert!(html_content.contains("junction_maximum"));
-    assert!(html_content.contains("Verified"));
-
-    let json_content = std::fs::read_to_string(&json_path).unwrap();
-    assert!(json_content.contains("\"schema\": \"frankensim.report.engineering.v1\""));
-    assert!(json_content.contains("junction_maximum"));
-
-    let _ = std::fs::remove_file(html_path);
-    let _ = std::fs::remove_file(json_path);
+    assert!(!html_path.exists(), "unavailable report must not write HTML");
+    assert!(!json_path.exists(), "unavailable report must not write a JSON twin");
 }
 
 #[test]
@@ -799,4 +777,3 @@ fn g0_run_command_executes_unified_workflow_and_produces_artifacts() {
     assert_eq!(output.exit_code, exit::UNAVAILABLE); // solver stops at conduction stage gap
     assert!(output.stderr.contains("cli-solve-stage-gap") || output.stdout.contains("stage=conduction"));
 }
-

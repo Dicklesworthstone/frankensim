@@ -199,12 +199,18 @@ pub fn run(args: impl IntoIterator<Item = String>) -> CommandOutput {
             cards,
         } => solve_path(&project, &ledger, &cards, mode),
         Command::Resume { run_id, ledger } => resume_path(&run_id, &ledger, mode),
-        Command::Report { run_id, ledger } => {
-            report::report_path(&run_id, ledger.as_deref(), mode)
-        }
-        Command::Package { run_id, ledger } => {
-            package::package_path(&run_id, ledger.as_deref(), mode)
-        }
+        Command::Report { run_id, ledger: _ } => unavailable(
+            mode,
+            "report",
+            &run_id,
+            "frankensim-extreal-program-f85xj.6.9",
+        ),
+        Command::Package { run_id, ledger: _ } => unavailable(
+            mode,
+            "package",
+            &run_id,
+            "frankensim-extreal-program-f85xj.6.10",
+        ),
         Command::Run {
             project,
             ledger,

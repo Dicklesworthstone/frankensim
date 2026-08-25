@@ -1,7 +1,7 @@
 //! CPU differential, equivalence-envelope, determinism, and fault test suite for accelerator pilot
 //! (bead `frankensim-extreal-program-f85xj.15.3.3`).
 
-use fs_sparse::{Coo, Csr, run_accelerator_spmv_pilot};
+use fs_sparse::{Coo, run_accelerator_spmv_pilot};
 
 #[test]
 fn test_differential_empty_matrix() {

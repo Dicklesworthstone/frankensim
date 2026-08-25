@@ -11,6 +11,17 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 COMMAND="${1:---run}"
 ARTIFACT_DIR="${ARTIFACT_DIR:-${REPO_ROOT}/target/cooling-report}"
+BINARY="${FRANKENSIM_BIN:-}"
+
+if [ -z "${BINARY}" ]; then
+  if [ -x "/Volumes/USB_NVME/cargo-target/debug/frankensim" ]; then
+    BINARY="/Volumes/USB_NVME/cargo-target/debug/frankensim"
+  elif [ -x "${REPO_ROOT}/target/debug/frankensim" ]; then
+    BINARY="${REPO_ROOT}/target/debug/frankensim"
+  elif command -v frankensim >/dev/null 2>&1; then
+    BINARY="$(command -v frankensim)"
+  fi
+fi
 
 log_json() {
   local event="$1"
@@ -22,42 +33,35 @@ log_json() {
 
 case "${COMMAND}" in
   --list)
-    printf "cooling_report::html_rendering\n"
-    printf "cooling_report::json_twin_parity\n"
-    printf "cooling_report::traceability_audit\n"
-    printf "cooling_report::escaping_and_injection\n"
-    printf "cooling_report::determinism_audit\n"
+    printf "cooling_report::fail_closed_without_retained_loader\n"
+    printf "cooling_report::no_fabricated_verified_qois\n"
     exit 0
     ;;
   --check|--self-test)
-    log_json "self_test" "ok" "preflight checks passed"
-    exit 0
+    if [ -n "${BINARY}" ] && [ -x "${BINARY}" ]; then
+      log_json "self_test" "ok" "frankensim binary is available"
+      exit 0
+    fi
+    log_json "self_test" "failed" "frankensim binary is unavailable"
+    exit 1
     ;;
   --run|--negative|--replay)
     mkdir -p "${ARTIFACT_DIR}"
-    log_json "run_start" "started" "executing HTML engineering report and JSON twin e2e suite"
-
-    export PATH="${PATH}:/Users/jemanuel/.local/bin"
-
-    # 1. Run unit & conformance suite in fs-report
-    log_json "test_dispatch" "running" "dispatching fs-report tests via rch"
-    if rch exec -- env CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_frankensim_test" cargo test -p fs-report --test engineering_report; then
-      log_json "report_tests" "passed" "all fs-report rendering and determinism tests succeeded"
-    else
-      log_json "report_tests" "failed" "fs-report tests failed"
+    log_json "run_start" "started" "verifying report refuses without retained-run loading"
+    set +e
+    "${BINARY}" --json report unbound_run /definitely/missing/ledger.db \
+      > "${ARTIFACT_DIR}/report.json" 2> "${ARTIFACT_DIR}/report.stderr.jsonl"
+    report_exit=$?
+    set -e
+    test "${report_exit}" -eq 5
+    grep -q '"status":"unavailable"' "${ARTIFACT_DIR}/report.json"
+    grep -q '"code":"cli-stage-unavailable"' "${ARTIFACT_DIR}/report.stderr.jsonl"
+    if grep -Eq 'junction_maximum|thermal_margin|Verified|content_hash' \
+      "${ARTIFACT_DIR}/report.json"; then
+      log_json "run_terminal" "failed" "report emitted fabricated scientific evidence"
       exit 1
     fi
-
-    # 2. Run CLI integration tests
-    log_json "cli_dispatch" "running" "dispatching fs-cli report tests via rch"
-    if rch exec -- env CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_frankensim_test" cargo test -p fs-cli --test cli; then
-      log_json "cli_tests" "passed" "all fs-cli report tests succeeded"
-    else
-      log_json "cli_tests" "failed" "fs-cli tests failed"
-      exit 1
-    fi
-
-    log_json "run_terminal" "pass" "cooling engineering report generated with verified traceability and JSON twin parity"
+    log_json "run_terminal" "pass" "report remained unavailable and emitted no scientific claim"
     exit 0
     ;;
   *)

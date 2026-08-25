@@ -54,10 +54,12 @@ and semantic checks. A successful result reports the canonical project hash,
 schema version, zero findings, and the exact authority class
 `structural-project-admission`.
 
-`compare` is present in the parser but currently returns the stable
-`cli-stage-unavailable` refusal naming the producer Bead that must land before
-the verb can execute:
+`report`, `package`, and `compare` are present in the parser but currently
+return the stable `cli-stage-unavailable` refusal naming the producer Bead that
+must land before each verb can execute:
 
+- report: `frankensim-extreal-program-f85xj.6.9`;
+- package: `frankensim-extreal-program-f85xj.6.10`;
 - compare: `frankensim-extreal-program-f85xj.6.14.1`.
 
 This is a deliberate fail-closed integration seam. Reusing the photovoltaic
@@ -363,7 +365,7 @@ the diagnostic identity the binding layer already defines.
 - Every refusal has a non-empty code, message, and suggested fix.
 - User-controlled strings are escaped before JSON emission; every JSON record
   is one line.
-- No unavailable `compare` invocation writes a run, report, package,
+- No unavailable `report`, `package`, or `compare` invocation writes a run, report, package,
   checkpoint, or ledger artifact. A solve run writes only through its staged
   operations, and a stage the driver cannot execute refuses with retained
   evidence instead of substituting a skeleton stage.

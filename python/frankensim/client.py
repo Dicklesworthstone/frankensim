@@ -324,8 +324,8 @@ class FrankenSimClient:
 
         exit_code, data, diagnostics, _, stderr_raw = self._execute(args, timeout_s=timeout_s)
 
-        html_file = data.get("html_report", f"{run_id}.html")
-        json_file = data.get("json_twin", f"{run_id}.report.json")
+        html_file = data.get("html_report", "")
+        json_file = data.get("json_twin", "")
 
         result = EngineeringReport(
             run_id=run_id,
@@ -359,7 +359,7 @@ class FrankenSimClient:
         result = PackageAuditResult(
             status=data.get("status", "unknown"),
             command="package",
-            package_path=data.get("package_path", f"{run_id}.fspkg"),
+            package_path=data.get("package_path", ""),
             content_hash=data.get("content_hash", ""),
             receipt_count=int(data.get("receipt_count", 0)),
             audit_verdict=data.get("audit_verdict", "unspecified"),
