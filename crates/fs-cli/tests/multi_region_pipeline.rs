@@ -10,6 +10,7 @@
 
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_mesh::{RegionId, RegionKind, RegionSpec, UnverifiedPlc, VolumetricPolicy};
+use fs_geom::Point3;
 use fs_project::ImportedMeshLibrary;
 
 const DATA: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/reference-project");
@@ -73,6 +74,180 @@ fn weld(parts: &[Vec<[f64; 3]>]) -> (Vec<[f64; 3]>, Vec<Vec<u32>>) {
         remaps.push(remap);
     }
     (verts, remaps)
+}
+
+
+/// Retention + independent recheck: the audited labeled complex is
+/// serialized to canonical JSONL with a domain-separated content root,
+/// dropped to disk, reloaded from those bytes alone, and re-verified by
+/// recomputation - the retained artifact must stand on its own without
+/// the producing process in the room.
+#[test]
+fn multi_region_artifacts_survive_retention_and_recheck() {
+    use fs_blake3::hash_domain;
+
+    const RETENTION_DOMAIN: &str = "org.frankensim.fs-cli.tests.multi-region-retention.v1";
+    let project_path = format!("{DATA}/multi-region-interface.fsim");
+    let src = std::fs::read_to_string(&project_path).expect("fixture present");
+    let decoded = fs_project::parse_sexpr(&src).expect("parse");
+    let artifacts = decoded.spec.geometry.clone().expect("geometry rows");
+
+    let mut raw = Vec::new();
+    for artifact in &artifacts {
+        let mesh_path = format!("{DATA}/multi-region-{role}.stl", role = artifact.role);
+        let soup: fs_rep_mesh::Soup =
+            fs_io::stl::read_stl(&std::fs::read(&mesh_path).expect("mesh bytes")).expect("stl");
+        raw.push((
+            soup.positions
+                .iter()
+                .map(|p| [p.x, p.y, p.z])
+                .collect::<Vec<[f64; 3]>>(),
+            soup.triangles.clone(),
+        ));
+    }
+
+    with_cx(|cx| {
+        let mut library = ImportedMeshLibrary::new();
+        for (artifact, (positions, triangles)) in artifacts.iter().zip(raw.iter()) {
+            let soup = fs_rep_mesh::Soup {
+                positions: positions
+                    .iter()
+                    .map(|p| Point3 { x: p[0], y: p[1], z: p[2] })
+                    .collect(),
+                triangles: triangles.clone(),
+            };
+            library.insert(artifact, soup, "m", Vec::new());
+        }
+        let resolution = fs_project::resolve_geometry_assignments(
+            &decoded.spec,
+            &library,
+            fs_io::AssignmentLimits::default(),
+            cx,
+        );
+        assert!(resolution.admissible());
+
+        let (vertices, remaps) = weld(&[raw[0].0.clone(), raw[1].0.clone()]);
+        let remap_tris =
+            |tris: &[[u32; 3]], remap: &[u32]| -> Vec<[u32; 3]> {
+                tris.iter()
+                    .map(|t| {
+                        [
+                            remap[t[0] as usize],
+                            remap[t[1] as usize],
+                            remap[t[2] as usize],
+                        ]
+                    })
+                    .collect()
+            };
+        let regions = vec![
+            RegionSpec {
+                id: RegionId(1),
+                kind: RegionKind::Solid,
+                seed: [0.5, 0.5, 0.5],
+                triangles: remap_tris(&raw[0].1, &remaps[0]),
+            },
+            RegionSpec {
+                id: RegionId(2),
+                kind: RegionKind::Solid,
+                seed: [1.5, 0.5, 0.5],
+                triangles: remap_tris(&raw[1].1, &remaps[1]),
+            },
+        ];
+        let plc = UnverifiedPlc::new(vertices, regions);
+        let audited = fs_mesh::volumetricize(
+            plc,
+            VolumetricPolicy::fixture_default("m"),
+            cx,
+        )
+        .expect("production mesher");
+        let labeled = audited.labeled();
+
+        // -- retain: canonical JSONL + content root ----------------------
+        let mut lines = Vec::new();
+        lines.push(format!("{{\"kind\":\"header\",\"length_unit\":\"{}\"}}", "m"));
+        for (tet, region) in labeled.tets().iter().zip(labeled.region_of_tet()) {
+            lines.push(format!(
+                "{{\"kind\":\"tet\",\"v\":[{},{},{},{}],\"region\":{}}}",
+                tet[0], tet[1], tet[2], tet[3], region.0
+            ));
+        }
+        for p in labeled.positions() {
+            lines.push(format!(
+                "{{\"kind\":\"position\",\"p\":[{:?},{:?},{:?}]}}",
+                p[0], p[1], p[2]
+            ));
+        }
+        let payload = lines.join("\n");
+        let root = hash_domain(RETENTION_DOMAIN, payload.as_bytes());
+        let root_hex: String = root.0.iter().map(|b| format!("{b:02x}")).collect();
+        let dir = std::env::temp_dir().join("mri-retention");
+        std::fs::create_dir_all(&dir).expect("artifact dir");
+        let artifact = dir.join("labeled_complex.jsonl");
+        std::fs::write(&artifact, &payload).expect("retain");
+
+        // -- independent recheck from disk bytes alone -------------------
+        let reloaded = std::fs::read_to_string(&artifact).expect("retained artifact reads");
+        assert_eq!(
+            hash_domain(RETENTION_DOMAIN, reloaded.as_bytes()).0,
+            root.0,
+            "content root survives the round trip"
+        );
+        let mut reload_positions = Vec::<[f64; 3]>::new();
+        let mut reload_tets = Vec::<([u32; 4], u32)>::new();
+        for line in reloaded.lines() {
+            if line.contains("\"kind\":\"tet\"") {
+                let nums: Vec<u32> = line
+                    .match_indices(|c: char| c.is_ascii_digit())
+                    .map(|_| 0)
+                    .collect();
+                let _ = nums;
+            }
+        }
+        // Deterministic parse: split on known key markers rather than a
+        // full JSON parser (this test has no serde dependency).
+        for line in reloaded.lines() {
+            let grab = |key: &str| -> Vec<u32> {
+                let k = format!("\"{key}\":[");
+                let i = line.find(&k).expect("key present") + k.len();
+                let end = line[i..].find(']').expect("array close") + i;
+                line[i..end]
+                    .split(',')
+                    .filter_map(|t| t.trim().parse::<u32>().ok())
+                    .collect()
+            };
+            if line.contains("\"kind\":\"tet\"") {
+                let v = grab("v");
+                let r = grab("region");
+                reload_tets.push(([v[0], v[1], v[2], v[3]], r[0]));
+            } else if line.contains("\"kind\":\"position\"") {
+                let kf = "\"p\":[";
+                let i = line.find(kf).expect("p key") + kf.len();
+                let end = line[i..].find(']').expect("close") + i;
+                let xyz: Vec<f64> = line[i..end]
+                    .split(',')
+                    .filter_map(|t| t.trim().parse::<f64>().ok())
+                    .collect();
+                reload_positions.push([xyz[0], xyz[1], xyz[2]]);
+            }
+        }
+        assert_eq!(reload_positions.len(), labeled.positions().len());
+        assert_eq!(reload_tets.len(), labeled.tets().len());
+
+        // -- recompute volumes purely from the reloaded artifact ---------
+        let mut per_region = std::collections::BTreeMap::new();
+        for (tet, region) in &reload_tets {
+            *per_region.entry(*region).or_insert(0.0) +=
+                tet_volume(&reload_positions, tet).abs();
+        }
+        assert_eq!(per_region.len(), 2);
+        for id in [1u32, 2] {
+            assert!(
+                (per_region[&id] - 1.0).abs() < 1e-9,
+                "reloaded region {id} volume {} != 1.0",
+                per_region[&id]
+            );
+        }
+    });
 }
 
 #[test]

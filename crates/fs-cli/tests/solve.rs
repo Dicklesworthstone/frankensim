@@ -24,7 +24,7 @@ use fs_project::spec::{
 };
 use fs_project::{
     AirflowLeakage, Budgets, ConsequenceClass, Cooling, DecisionGate, DecodedProject, EntityDecl,
-    Envelope, Fan, FanCurveDecl, FanCurvePoint, FanToleranceBasis, GeometryArtifact,
+    Envelope, FanCurveDecl, FanCurvePoint, FanToleranceBasis, GeometryArtifact,
     GeometryAssignment, HalfSpaceSide, MaterialBinding, MeshSelector, Metadata, OutputRequest,
     PowerDissipation, ProjectSpec, RequirementDirection, RequirementSeverity, RequirementSource,
     RequirementSourceKind, SafetyFactorPolicy, Seeds, SolverSettings, ThermalLimit, UnitsDoctrine,
@@ -714,7 +714,7 @@ fn solve_publication_counts(ledger: &Ledger) -> SolvePublicationCounts {
 #[test]
 fn g0_run_identity_is_deterministic_and_input_sensitive() {
     assert_eq!(
-        SOLVE_DRIVER_VERSION, 4,
+        SOLVE_DRIVER_VERSION, 5,
         "authority-semantic changes must deliberately advance this identity-bearing version"
     );
 
@@ -3079,8 +3079,8 @@ fn g1_conduction_stage_executes_and_retains_field_and_balance_evidence() {
     );
 
     let solution_hash = receipt_str_field(&receipt, "solution_artifact");
-    let solution = fs_ledger::ContentHash::from_hex(&solution_hash).expect("solution hash");
-    let solution_bytes = artifact_bytes(&ledger, &solution);
+    let _solution = fs_ledger::ContentHash::from_hex(&solution_hash).expect("solution hash");
+    let solution_bytes = artifact_bytes(&ledger, &solution_hash);
     let solution_text = String::from_utf8(solution_bytes).expect("solution is utf-8");
     assert_balanced_json(&solution_text);
     assert!(solution_text.contains("frankensim.cli.solve-conduction-solution.v1"));

@@ -539,7 +539,19 @@ mod wire_surface {
         );
         assert_eq!(migrated.receipt.source_version, 1);
         assert_eq!(migrated.receipt.target_version, fs_project::FSIM_VERSION);
-        assert_eq!(migrated.receipt.rule.label(), "cooling-fan-system-v2");
+        assert_eq!(
+            migrated.receipt.rule.label(),
+            "cooling-fan-system-v2-then-conduction-v3"
+        );
+        let cooling = migrated.decoded.spec.cooling.expect("cooling survives");
+        assert!(
+            cooling.fan_system.is_none(),
+            "v1 migration must not fabricate a fan-system declaration"
+        );
+        assert!(
+            cooling.conduction.is_none(),
+            "v1 migration must not fabricate conduction inputs"
+        );
     }
 
     #[test]
