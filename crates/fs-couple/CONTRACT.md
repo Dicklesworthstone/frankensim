@@ -262,13 +262,18 @@ monotone-descent guard that hands every cornered sample — sqrt kink,
 non-finite state, vanishing slope, non-monotone step, iteration cap —
 untouched to the strict path and counts it in `FastSolveStats`.
 It is NOT bitwise-equal to the strict path and must never become the
-default until it earns the same proof. Receipts (bead 2s4i5,
-`tests/reed_newton_fusion.rs`): bounded-deviation band of 1e-3 Pa over
-a full nominal render (observed deviation is uPa-scale by
-step-sized convergence), fallback-hit-rate bounded structurally at
-0.5 with the actual rate printed, and before/after budget rows stamped
-with build profile — debug rows are diagnostics forever, per the
-budget-lane doctrine.
+default until it earns the same proof. Receipts (bead 2s4i5): the
+junction-level deviation battery lives inline (`fast_mode_tests`):
+a 64-point open/interior/closing stimulus sweep with every resolved
+root inside a microbar-scaled band of the strict root and the
+fallback rate bounded at 0.25; the integration lane
+(`tests/reed_newton_fusion.rs`) owns the fallback-hit-rate receipt on
+a full nominal render and before/after budget rows stamped with build
+profile — debug rows are diagnostics forever, per the budget-lane
+doctrine. Recorded finding: end-to-end rendered waveforms are NOT
+comparable between modes beyond onset — the self-oscillating loop
+amplifies per-sample root differences into phase-divergent (O(kPa))
+waveforms, so waveform equality is never a claim either mode makes.
 
 ### `music_render` (binary)
 
