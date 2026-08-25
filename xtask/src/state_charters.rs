@@ -43,17 +43,27 @@ pub struct CharterDeclaration {
 }
 
 /// Extract a string-typed field value from one literal's text.
+///
+/// The key must OPEN a field: the byte before it, ignoring whitespace,
+/// is the opening brace or the comma of the previous field. Searching
+/// for bare `"owner:"` would otherwise match inside an earlier value
+/// such as a schema grammar string that happens to contain that text.
 fn string_field(literal: &str, field: &str) -> Option<String> {
     let marker = format!("{field}:");
-    let field_offset = literal.find(&marker)?;
-    let rest = literal[field_offset + marker.len()..].trim_start();
-    // A leading `&` (string-literal reference) is permitted but never
-    // required; `?` here would make it mandatory and reject every plain
-    // `owner: "..."` field as missing.
-    let rest = rest.strip_prefix('&').unwrap_or(rest).trim_start();
-    let quoted = rest.strip_prefix('"')?;
-    let end = quoted.find('"')?;
-    Some(quoted[..end].to_string())
+    let mut search_from = 0usize;
+    while let Some(offset) = literal[search_from..].find(&marker) {
+        let field_offset = search_from + offset;
+        let before = literal[..field_offset].trim_end();
+        if before.ends_with('{') || before.ends_with(',') {
+            let rest = literal[field_offset + marker.len()..].trim_start();
+            let rest = rest.strip_prefix('&').unwrap_or(rest).trim_start();
+            let quoted = rest.strip_prefix('"')?;
+            let end = quoted.find('"')?;
+            return Some(quoted[..end].to_string());
+        }
+        search_from = field_offset + marker.len();
+    }
+    None
 }
 
 /// Extract a u32-typed field value from one literal's text.
@@ -195,11 +205,6 @@ pub fn scan_source(path: &str, text: &str) -> Result<Vec<CharterDeclaration>, St
         // Capture `const NAME` / `static NAME` bindings (the binding
         // keyword precedes the name, which precedes the type and `=`).
         let prefix = text[..token_start].trim_end();
-        if prefix.ends_with('}') || prefix.ends_with(';') || prefix.is_empty() {
-            // Not a binding position? Still probe: bindings read
-            // `const NAME: <type> = <value>`, so search backwards for
-            // the nearest `const `/`static ` keyword.
-        }
         if let Some(keyword_position) = prefix.rfind("const ").or_else(|| prefix.rfind("static ")) {
             let between = &prefix[keyword_position..];
             // Only a DIRECT binding (keyword then name then colon)
@@ -310,15 +315,22 @@ fn strip_test_modules(text: &str) -> String {
                 _ => {}
             }
         }
-        match close {
-            Some(close) => cursor = close + 1,
-            None => {
-                // Unterminated block: keep everything from here verbatim
-                // rather than guessing; scan_source still brace-checks it.
-                out.push_str(&text[attribute_start..]);
-                return out;
-            }
+        let Some(close) = close else {
+            // Unterminated block: keep everything from here verbatim
+            // rather than guessing; scan_source still brace-checks it.
+            out.push_str(&text[attribute_start..]);
+            return out;
+        };
+        // Preserve the removed block's newlines so scan_source reports
+        // line numbers against the ORIGINAL file, not the stripped one.
+        let newlines = bytes[attribute_start..=close]
+            .iter()
+            .filter(|b| **b == b'\n')
+            .count();
+        for _ in 0..newlines {
+            out.push('\n');
         }
+        cursor = close + 1;
     }
     out.push_str(&text[cursor..]);
     out
@@ -479,6 +491,25 @@ mod tests {
     }
 
     #[test]
+    fn field_keys_anchored_to_field_positions() {
+        // A grammar string that happens to contain `owner:` must not
+        // hijack the owner lookup: keys only count when they OPEN a
+        // field (preceded by the brace or the previous comma).
+        let source = concat!(
+            "const G: StateIdentityCharterV2 = StateIdentityCharterV2 {\n",
+            "    owner: \"fs-exec::solver\",\n",
+            "    state_family: \"fam\",\n",
+            "    schema_grammar: \"owner: u64; x: f64 le[]\",\n",
+            "    codec_grammar: \"k\",\n",
+            "    codec_version: 1,\n",
+            "};\n",
+        );
+        let declarations = scan_source("crates/x/src/lib.rs", source).expect("parses");
+        assert_eq!(declarations.len(), 1);
+        assert_eq!(declarations[0].owner, "fs-exec::solver");
+    }
+
+    #[test]
     fn type_annotation_occurrence_is_not_a_constructor() {
         // The annotation `: StateIdentityCharterV2 =` must not produce a
         // phantom declaration or consume the real one.
@@ -516,5 +547,21 @@ mod tests {
         let declarations = scan_source("crates/x/src/lib.rs", &stripped).expect("parses");
         assert_eq!(declarations.len(), 1);
         assert_eq!(declarations[0].owner, "c::real");
+
+        // A production charter AFTER the stripped block must report its
+        // ORIGINAL line number: the stripper preserves removed newlines
+        // so diagnostics stay truthful.
+        let with_late = format!(
+            "{stripped}const LATE: StateIdentityCharterV2 = StateIdentityCharterV2 {{\n             owner: \"c::late\", state_family: \"fam\", schema_grammar: \"g\", codec_grammar: \"k\", codec_version: 1 }};\n"
+        );
+        let both = scan_source("crates/x/src/lib.rs", &with_late).expect("parses");
+        assert_eq!(both.len(), 2);
+        let expected_line = with_late
+            .lines()
+            .position(|l| l.starts_with("const LATE"))
+            .expect("LATE opens its own line")
+            + 1;
+        let late = both.iter().find(|d| d.owner == "c::late").expect("late");
+        assert_eq!(late.line, expected_line);
     }
 }
