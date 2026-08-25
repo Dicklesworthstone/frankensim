@@ -24,8 +24,8 @@
 //! wrong answer, so it is not available.
 
 use fs_matdb::{
-    ClaimSet, PCB_HOMOGENIZATION_SCHEMA_VERSION, PcbHomogenizedConductivity, PropertyUsageReceipt,
-    QueryPoint, SelectionPolicy,
+    ClaimId, ClaimSet, PCB_HOMOGENIZATION_SCHEMA_VERSION, PcbHomogenizedConductivity,
+    PropertyUsageReceipt, QueryPoint, SelectionPolicy,
 };
 use fs_qty::Dims;
 
@@ -199,6 +199,34 @@ impl ConductivityTable {
         grid: &[f64],
         policy: SelectionPolicy,
     ) -> Result<ConductivityTable, ConductionError> {
+        Self::from_claims_selected(claims, property, grid, ClaimSelection::Policy(policy))
+    }
+
+    /// Sample one explicitly pinned `fs-matdb` claim over a declared
+    /// temperature grid, retaining the pinned-query receipt at every knot.
+    ///
+    /// This is the conductivity counterpart of the project schema's explicit
+    /// `:claim` field. A pin never widens validity: an unknown or out-of-domain
+    /// claim still refuses through [`ConductionError::MaterialQuery`].
+    ///
+    /// # Errors
+    /// The same refusals as [`Self::from_claims`], plus the upstream pinned
+    /// claim refusals.
+    pub fn from_claims_pinned(
+        claims: &ClaimSet,
+        property: &str,
+        grid: &[f64],
+        pinned: ClaimId,
+    ) -> Result<ConductivityTable, ConductionError> {
+        Self::from_claims_selected(claims, property, grid, ClaimSelection::Pinned(pinned))
+    }
+
+    fn from_claims_selected(
+        claims: &ClaimSet,
+        property: &str,
+        grid: &[f64],
+        selection: ClaimSelection,
+    ) -> Result<ConductivityTable, ConductionError> {
         if grid.len() < 2 {
             return Err(ConductionError::Conductivity {
                 what: format!(
@@ -224,7 +252,13 @@ impl ConductivityTable {
                     upstream: e.to_string(),
                 }
             })?;
-            let answer = claims.query(property, &point, policy).map_err(|e| {
+            let answer = match selection {
+                ClaimSelection::Policy(policy) => claims.query(property, &point, policy),
+                ClaimSelection::Pinned(pinned) => {
+                    claims.query_pinned(property, &point, pinned)
+                }
+            }
+            .map_err(|e| {
                 ConductionError::MaterialQuery {
                     property: property.to_string(),
                     temperature: t,
@@ -351,6 +385,12 @@ impl ConductivityTable {
         let (x1, y1) = self.knots[s + 1];
         Ok((y1 - y0) / (x1 - x0))
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ClaimSelection {
+    Policy(SelectionPolicy),
+    Pinned(ClaimId),
 }
 
 #[derive(Debug, Clone, PartialEq)]

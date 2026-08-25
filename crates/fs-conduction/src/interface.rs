@@ -17,7 +17,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use fs_blake3::ContentHash;
 use fs_exec::Cx;
 use fs_matdb::{
-    InterfaceSystemCard, PropertyUsageReceipt, QueryPoint, SelectionPolicy, UncertaintyModel,
+    ClaimId, InterfaceSystemCard, PropertyUsageReceipt, QueryPoint, SelectionPolicy,
+    UncertaintyModel,
 };
 use fs_sparse::Coo;
 
@@ -77,6 +78,42 @@ impl InterfaceResistance {
         point: &QueryPoint,
         policy: SelectionPolicy,
     ) -> Result<Self, ConductionError> {
+        Self::from_card_selected(
+            interface_name,
+            card,
+            point,
+            InterfaceClaimSelection::Policy(policy),
+        )
+    }
+
+    /// Resolve one exact claim pinned by the caller's project bytes.
+    ///
+    /// A pin disambiguates competing claims; it does not bypass property,
+    /// dimensional, validity, finiteness, or positivity checks.
+    ///
+    /// # Errors
+    /// The same refusals as [`Self::from_card`], plus the upstream pinned
+    /// claim refusals.
+    pub fn from_card_pinned(
+        interface_name: &str,
+        card: &InterfaceSystemCard,
+        point: &QueryPoint,
+        pinned: ClaimId,
+    ) -> Result<Self, ConductionError> {
+        Self::from_card_selected(
+            interface_name,
+            card,
+            point,
+            InterfaceClaimSelection::Pinned(pinned),
+        )
+    }
+
+    fn from_card_selected(
+        interface_name: &str,
+        card: &InterfaceSystemCard,
+        point: &QueryPoint,
+        selection: InterfaceClaimSelection,
+    ) -> Result<Self, ConductionError> {
         if interface_name.trim().is_empty() {
             return Err(interface_error(
                 "<unnamed>",
@@ -84,9 +121,18 @@ impl InterfaceResistance {
                 "name the scenario interface so diagnostics and receipts can identify it",
             ));
         }
-        let answer = card
-            .claims()
-            .query(AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY, point, policy)
+        let answer = match selection {
+            InterfaceClaimSelection::Policy(policy) => card.claims().query(
+                AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY,
+                point,
+                policy,
+            ),
+            InterfaceClaimSelection::Pinned(pinned) => card.claims().query_pinned(
+                AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY,
+                point,
+                pinned,
+            ),
+        }
             .map_err(|error| {
                 interface_error(
                     interface_name,
@@ -248,6 +294,12 @@ impl InterfaceResistance {
             },
         )
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum InterfaceClaimSelection {
+    Policy(SelectionPolicy),
+    Pinned(ClaimId),
 }
 
 /// Uncertainty on one total-resistance term in K/W.

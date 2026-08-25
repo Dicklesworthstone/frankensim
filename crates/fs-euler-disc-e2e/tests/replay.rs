@@ -4,7 +4,7 @@
 #![allow(missing_docs)]
 
 use fs_alloc::{ArenaConfig, ArenaPool};
-use fs_blake3::Hasher;
+use fs_blake3::hash_bytes;
 use fs_euler_disc_e2e::specimen::DiscProfileSpec;
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_rep_frep::SquatDiscEdgeTreatment;
@@ -53,9 +53,7 @@ fn verify_artifact_bundle(
         };
     }
 
-    let mut hasher = Hasher::new();
-    hasher.update(artifact_payload);
-    let computed_digest = hasher.finalize().to_hex().to_string();
+    let computed_digest = hash_bytes(artifact_payload).to_hex().to_string();
 
     if computed_digest == expected_digest {
         ReplayVerificationResult::Verified
@@ -71,9 +69,7 @@ fn verify_artifact_bundle(
 fn test_artifact_only_replay_from_bundle_manifest() {
     let manifest = br#"{"schema":"frankensim.euler-disc.bundle.v1","version":1}"#;
     let artifact = b"canonical-euler-disc-simulation-state-v1";
-    let mut hasher = Hasher::new();
-    hasher.update(artifact);
-    let digest = hasher.finalize().to_hex().to_string();
+    let digest = hash_bytes(artifact).to_hex().to_string();
 
     let result = verify_artifact_bundle(manifest, artifact, &digest);
     assert_eq!(result, ReplayVerificationResult::Verified);
@@ -84,9 +80,7 @@ fn test_replay_refuses_tampered_digest() {
     let manifest = br#"{"schema":"frankensim.euler-disc.bundle.v1","version":1}"#;
     let artifact = b"canonical-euler-disc-simulation-state-v1";
     let corrupted_artifact = b"canonical-euler-disc-simulation-state-v2";
-    let mut hasher = Hasher::new();
-    hasher.update(artifact);
-    let digest = hasher.finalize().to_hex().to_string();
+    let digest = hash_bytes(artifact).to_hex().to_string();
 
     let result = verify_artifact_bundle(manifest, corrupted_artifact, &digest);
     assert!(
@@ -120,7 +114,7 @@ fn test_independent_score_reconstruction() {
             edge_treatment: SquatDiscEdgeTreatment::Sharp,
         };
         let resolved = spec.resolve(7850.0, cx).expect("specimen must resolve cleanly");
-        let mass = resolved.mass_properties().mass_kg();
+        let mass = resolved.mass_properties.mass;
         assert!(mass > 0.40 && mass < 0.46, "Reconstructed mass must fall within expected physical band");
     });
 }
