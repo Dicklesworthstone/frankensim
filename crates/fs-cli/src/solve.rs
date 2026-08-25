@@ -2823,6 +2823,840 @@ fn flow_network_receipt(
     Ok(receipt)
 }
 
+#[derive(Debug)]
+struct AssignmentSurface {
+    triangles: Vec<[u32; 3]>,
+    enclosed_volume: Option<f64>,
+}
+
+fn conduction_import_refusal(run: SolveRunId, error: ImportSummaryError) -> SolveRefusal {
+    let stage = SolveStage::Conduction;
+    match error {
+        ImportSummaryError::Cancelled => cancelled_fresh_refusal(run, Some(stage)),
+        ImportSummaryError::WorkEnvelope(error) => {
+            invocation_work_refusal(Some(run), Some(stage), error)
+        }
+        ImportSummaryError::Ledger(error) => SolveRefusal::staged(
+            "cli-solve-conduction-ledger",
+            stage,
+            format!("reading retained promoted geometry failed: {error}"),
+            "repair or recreate the exact import evidence before solving",
+        ),
+        ImportSummaryError::Invalid(what) | ImportSummaryError::Unsupported(what) => {
+            SolveRefusal::staged(
+                "cli-solve-conduction-import",
+                stage,
+                what,
+                "re-run geometry import under the documented solve evidence envelope",
+            )
+        }
+    }
+}
+
+fn conduction_error(
+    code: &'static str,
+    what: impl Into<String>,
+    fix: impl Into<String>,
+) -> SolveRefusal {
+    SolveRefusal::staged(code, SolveStage::Conduction, what, fix)
+}
+
+fn assignment_limits(limits: ImportIrLimits) -> fs_io::AssignmentLimits {
+    fs_io::AssignmentLimits {
+        max_mesh_vertices: limits.max_mesh_vertices,
+        max_mesh_faces: limits.max_mesh_faces,
+        max_requests: limits.max_requests,
+        max_named_groups: limits.max_named_groups,
+        max_group_faces: limits.max_group_faces,
+        max_selected_faces: limits.max_selected_faces,
+        max_predicate_tests: limits.max_predicate_tests,
+        max_label_bytes: limits.max_label_bytes,
+    }
+}
+
+fn coordinate_key(point: [f64; 3]) -> [u64; 3] {
+    fn component(value: f64) -> u64 {
+        if value == 0.0 { 0.0f64.to_bits() } else { value.to_bits() }
+    }
+    [component(point[0]), component(point[1]), component(point[2])]
+}
+
+fn sorted_face(mut face: [u32; 3]) -> [u32; 3] {
+    face.sort_unstable();
+    face
+}
+
+fn build_conduction_surfaces(
+    spec: &ProjectSpec,
+    soups: &mut BTreeMap<String, Soup>,
+    resolution: fs_project::GeometryResolution,
+) -> Result<(Vec<[f64; 3]>, BTreeMap<String, AssignmentSurface>), SolveRefusal> {
+    let mut vertex_by_bits = BTreeMap::<[u64; 3], u32>::new();
+    let mut positions = Vec::<[f64; 3]>::new();
+    let mut surfaces = BTreeMap::<String, AssignmentSurface>::new();
+
+    for resolved in resolution.artifacts {
+        let soup = soups.remove(&resolved.artifact_role).ok_or_else(|| {
+            conduction_error(
+                "cli-solve-conduction-import",
+                format!(
+                    "assignment resolution returned unknown artifact role `{}`",
+                    resolved.artifact_role
+                ),
+                "re-import the exact project geometry",
+            )
+        })?;
+        let mut local_to_global = Vec::with_capacity(soup.positions.len());
+        for point in &soup.positions {
+            let key = coordinate_key([point.x, point.y, point.z]);
+            let index = if let Some(index) = vertex_by_bits.get(&key) {
+                *index
+            } else {
+                let index = u32::try_from(positions.len()).map_err(|_| {
+                    conduction_error(
+                        "cli-solve-conduction-mesh-budget",
+                        "the merged conduction PLC exceeds the u32 vertex index space",
+                        "split the model into bounded solve domains",
+                    )
+                })?;
+                positions.push([point.x, point.y, point.z]);
+                vertex_by_bits.insert(key, index);
+                index
+            };
+            local_to_global.push(index);
+        }
+        for (entity, assignment) in resolved.entities.iter().zip(&resolved.report.assignments) {
+            let mut triangles = Vec::with_capacity(assignment.faces.len());
+            for &face in &assignment.faces {
+                let local = *soup.triangles.get(face as usize).ok_or_else(|| {
+                    conduction_error(
+                        "cli-solve-conduction-assignment",
+                        format!(
+                            "assignment `{}` names missing face {face} on `{}`",
+                            entity.declared_target, resolved.artifact_role
+                        ),
+                        "re-run geometry assignment against the retained promoted mesh",
+                    )
+                })?;
+                triangles.push([
+                    local_to_global[local[0] as usize],
+                    local_to_global[local[1] as usize],
+                    local_to_global[local[2] as usize],
+                ]);
+            }
+            if surfaces
+                .insert(
+                    entity.declared_target.clone(),
+                    AssignmentSurface {
+                        triangles,
+                        enclosed_volume: assignment.stats.enclosed_volume,
+                    },
+                )
+                .is_some()
+            {
+                return Err(conduction_error(
+                    "cli-solve-conduction-assignment",
+                    format!(
+                        "assignment target `{}` resolved more than once",
+                        entity.declared_target
+                    ),
+                    "declare exactly one geometry assignment for each region or interface",
+                ));
+            }
+        }
+    }
+    if !soups.is_empty() {
+        return Err(conduction_error(
+            "cli-solve-conduction-assignment",
+            format!(
+                "{} promoted geometry artifact(s) were not present in assignment resolution",
+                soups.len()
+            ),
+            "assign every project geometry artifact before solving",
+        ));
+    }
+    if positions.is_empty() || surfaces.is_empty() || spec.assignments.as_deref().unwrap_or(&[]).is_empty() {
+        return Err(conduction_error(
+            "cli-solve-conduction-assignment",
+            "the declared conduction domain resolved to no vertices or selected surfaces",
+            "declare and import a nonempty closed region surface",
+        ));
+    }
+    Ok((positions, surfaces))
+}
+
+fn region_specs(
+    spec: &ProjectSpec,
+    setup: &ConductionSetup,
+    surfaces: &BTreeMap<String, AssignmentSurface>,
+) -> Result<(Vec<fs_mesh::RegionSpec>, BTreeMap<String, u32>), SolveRefusal> {
+    let seeds: BTreeMap<&str, [f64; 3]> = setup
+        .regions
+        .iter()
+        .map(|row| {
+            (
+                row.region.as_str(),
+                [row.seed[0].value, row.seed[1].value, row.seed[2].value],
+            )
+        })
+        .collect();
+    let mut regions = Vec::new();
+    let mut ids = BTreeMap::new();
+    for declaration in spec.assembly.as_deref().unwrap_or(&[]) {
+        let EntityDecl::Region { name, .. } = declaration else {
+            continue;
+        };
+        let id = u32::try_from(regions.len() + 1).map_err(|_| {
+            conduction_error(
+                "cli-solve-conduction-mesh-budget",
+                "the project declares more regions than the u32 label space",
+                "split the solve domain",
+            )
+        })?;
+        let seed = *seeds.get(name.as_str()).ok_or_else(|| {
+            conduction_error(
+                "cli-solve-conduction-seed",
+                format!("region `{name}` has no declared strictly interior seed"),
+                "add the region to cooling.conduction.regions",
+            )
+        })?;
+        let surface = surfaces.get(name).ok_or_else(|| {
+            conduction_error(
+                "cli-solve-conduction-region-surface",
+                format!("region `{name}` has no resolved geometry-assignment surface"),
+                "bind the region to one closed, consistently oriented surface selector",
+            )
+        })?;
+        let volume = surface.enclosed_volume.ok_or_else(|| {
+            conduction_error(
+                "cli-solve-conduction-region-open",
+                format!("assignment for region `{name}` is not a closed oriented surface"),
+                "repair the promoted mesh or select a closed surface component",
+            )
+        })?;
+        if !(volume.is_finite() && volume != 0.0) {
+            return Err(conduction_error(
+                "cli-solve-conduction-region-volume",
+                format!("assignment for region `{name}` has invalid signed volume {volume}"),
+                "repair the closed surface so it encloses a finite nonzero volume",
+            ));
+        }
+        let triangles = if volume > 0.0 {
+            surface.triangles.clone()
+        } else {
+            surface
+                .triangles
+                .iter()
+                .map(|triangle| [triangle[0], triangle[2], triangle[1]])
+                .collect()
+        };
+        ids.insert(name.clone(), id);
+        regions.push(fs_mesh::RegionSpec {
+            id: fs_mesh::RegionId(id),
+            kind: fs_mesh::RegionKind::Solid,
+            seed,
+            triangles,
+        });
+    }
+    if regions.is_empty() {
+        return Err(conduction_error(
+            "cli-solve-conduction-regions-empty",
+            "the project assembly declares no volumetric regions",
+            "declare at least one region with a closed geometry assignment",
+        ));
+    }
+    Ok((regions, ids))
+}
+
+fn material_models(
+    spec: &ProjectSpec,
+    cards: &CardPackSet,
+    region_ids: &BTreeMap<String, u32>,
+) -> Result<
+    (
+        fs_conduction::MaterialTable,
+        BTreeMap<u32, fs_conduction::MaterialId>,
+        fs_conduction::ConductivityModel,
+    ),
+    SolveRefusal,
+> {
+    let library = cards.library();
+    let bindings = spec.materials.as_deref().unwrap_or(&[]);
+    let mut entries = Vec::with_capacity(region_ids.len());
+    let mut by_region = BTreeMap::new();
+    let mut fallback = None;
+    for (name, &region_id) in region_ids {
+        let binding = bindings
+            .iter()
+            .find(|binding| binding.region == *name)
+            .ok_or_else(|| {
+                conduction_error(
+                    "cli-solve-conduction-material",
+                    format!("region `{name}` has no material binding"),
+                    "bind every conduction region to one admitted material card",
+                )
+            })?;
+        if binding.claim.is_some() {
+            return Err(conduction_error(
+                "cli-solve-conduction-pinned-claim",
+                format!(
+                    "region `{name}` pins a material claim, but the conduction table adapter cannot yet preserve pinned-query receipts"
+                ),
+                "use an unambiguous single-claim card until pinned conductivity sampling is wired",
+            ));
+        }
+        let card = library.material(&binding.card).ok_or_else(|| {
+            conduction_error(
+                "cli-solve-conduction-material",
+                format!("material card {} for region `{name}` is absent", binding.card),
+                "supply the exact normalized material pack used by material-resolve",
+            )
+        })?;
+        let table = fs_conduction::ConductivityTable::from_claims(
+            card.claims(),
+            fs_project::THERMAL_CONDUCTIVITY_PROPERTY,
+            &[binding.temp_lo.value, binding.temp_hi.value],
+            SelectionPolicy::SingleClaimOnly,
+        )
+        .map_err(|error| {
+            conduction_error(
+                "cli-solve-conduction-material",
+                format!("conductivity sampling for region `{name}` refused: {error}"),
+                "repair the card validity/claims or the project's admitted temperature range",
+            )
+        })?;
+        let model = fs_conduction::ConductivityModel::isotropic(table);
+        let material_id = fs_conduction::MaterialId(region_id);
+        fallback.get_or_insert_with(|| model.clone());
+        entries.push((material_id, model));
+        by_region.insert(region_id, material_id);
+    }
+    let table = fs_conduction::MaterialTable::new(entries).map_err(|error| {
+        conduction_error(
+            "cli-solve-conduction-material",
+            format!("heterogeneous material table refused: {error}"),
+            "bind each retained region to one valid conductivity model",
+        )
+    })?;
+    Ok((
+        table,
+        by_region,
+        fallback.expect("a nonempty region map produced one model"),
+    ))
+}
+
+fn conduction_source(
+    spec: &ProjectSpec,
+    mesh: &fs_conduction::ConductionMesh,
+    labels: &[u32],
+    region_ids: &BTreeMap<String, u32>,
+    audited: &fs_mesh::AuditedLabeledTetComplex,
+) -> Result<fs_conduction::ScalarField, SolveRefusal> {
+    let cooling = spec.cooling.as_ref().expect("conduction setup implies cooling");
+    if cooling.leakage.value != 0.0 {
+        return Err(conduction_error(
+            "cli-solve-conduction-leakage",
+            format!(
+                "cooling leakage declares {} W without a target region or boundary law",
+                cooling.leakage.value
+            ),
+            "set leakage to zero or model the loss explicitly as regional power or boundary flux",
+        ));
+    }
+    let volumes: BTreeMap<u32, f64> = audited
+        .witness()
+        .per_region_auditor
+        .iter()
+        .map(|(region, volume)| (region.0, *volume))
+        .collect();
+    let mut watts = BTreeMap::<u32, f64>::new();
+    for &id in region_ids.values() {
+        watts.insert(id, 0.0);
+    }
+    for row in spec.power.as_deref().unwrap_or(&[]) {
+        let id = *region_ids.get(&row.region).ok_or_else(|| {
+            conduction_error(
+                "cli-solve-conduction-power",
+                format!("power row targets unknown conduction region `{}`", row.region),
+                "attach power only to a declared seeded region",
+            )
+        })?;
+        let delivered = row.watts.value * row.duty;
+        if !(delivered.is_finite() && delivered >= 0.0) {
+            return Err(conduction_error(
+                "cli-solve-conduction-power",
+                format!("power for `{}` evaluates to {delivered} W", row.region),
+                "declare finite non-negative watts and duty in 0..=1",
+            ));
+        }
+        *watts.get_mut(&id).expect("region map initialized") += delivered;
+    }
+    let mut density = BTreeMap::new();
+    for (&id, &power) in &watts {
+        let volume = *volumes.get(&id).ok_or_else(|| {
+            conduction_error(
+                "cli-solve-conduction-power",
+                format!("audited volume carries no row for region {id}"),
+                "report the inconsistent volumetricization result",
+            )
+        })?;
+        if !(volume.is_finite() && volume > 0.0) {
+            return Err(conduction_error(
+                "cli-solve-conduction-power",
+                format!("audited volume for region {id} is {volume} m^3"),
+                "repair the volume mesh before distributing power",
+            ));
+        }
+        density.insert(id, power / volume);
+    }
+    fs_conduction::PowerMap::regional_volumetric_source(mesh, labels, &density).map_err(|error| {
+        conduction_error(
+            "cli-solve-conduction-power",
+            format!("regional power projection refused: {error}"),
+            "map every retained tet label to one finite regional power density",
+        )
+    })
+}
+
+fn conduction_boundary(
+    setup: &ConductionSetup,
+    mesh: &fs_conduction::ConductionMesh,
+    audited: &fs_mesh::AuditedLabeledTetComplex,
+    surfaces: &BTreeMap<String, AssignmentSurface>,
+    regions: &[fs_mesh::RegionSpec],
+) -> Result<fs_conduction::ThermalBoundary, SolveRefusal> {
+    let mut unique_facets = BTreeSet::new();
+    for region in regions {
+        for &triangle in &region.triangles {
+            unique_facets.insert(sorted_face(triangle));
+        }
+    }
+    let parent_by_facet: BTreeMap<[u32; 3], u32> = unique_facets
+        .into_iter()
+        .enumerate()
+        .map(|(index, face)| (face, u32::try_from(index).expect("facet count fits u32")))
+        .collect();
+    let parent_by_boundary: BTreeMap<[u32; 3], u32> = audited
+        .labeled()
+        .source_faces()
+        .iter()
+        .map(|(face, parent)| (sorted_face(*face), *parent))
+        .collect();
+    let mut builder = fs_conduction::ThermalBoundaryBuilder::new(mesh);
+    for row in &setup.boundaries {
+        let surface = surfaces.get(&row.target).ok_or_else(|| {
+            conduction_error(
+                "cli-solve-conduction-boundary",
+                format!("thermal boundary target `{}` has no resolved assignment", row.target),
+                "reference the exact target of one geometry assignment",
+            )
+        })?;
+        let mut parents = BTreeSet::new();
+        for &triangle in &surface.triangles {
+            let face = sorted_face(triangle);
+            let parent = parent_by_facet.get(&face).ok_or_else(|| {
+                conduction_error(
+                    "cli-solve-conduction-boundary",
+                    format!(
+                        "thermal boundary `{}` selects a face outside every volumetric region surface",
+                        row.target
+                    ),
+                    "select only exterior faces of a declared conduction region",
+                )
+            })?;
+            parents.insert(*parent);
+        }
+        let matched = mesh
+            .boundary()
+            .iter()
+            .filter(|face| {
+                parent_by_boundary
+                    .get(&face.vertices)
+                    .is_some_and(|parent| parents.contains(parent))
+            })
+            .count();
+        if matched == 0 {
+            return Err(conduction_error(
+                "cli-solve-conduction-boundary-empty",
+                format!(
+                    "thermal boundary `{}` selects no exterior face after volumetricization",
+                    row.target
+                ),
+                "select a nonempty exterior face set; internal interfaces need contact lowering",
+            ));
+        }
+        let condition = match &row.condition {
+            ThermalBoundaryCondition::FixedTemperature { temperature } => {
+                fs_conduction::ThermalBc::dirichlet(temperature.value)
+            }
+            ThermalBoundaryCondition::HeatFlux { outward_flux } => {
+                fs_conduction::ThermalBc::neumann(outward_flux.value)
+            }
+            ThermalBoundaryCondition::Convection {
+                coefficient,
+                reference_temperature,
+            } => fs_conduction::ThermalBc::robin(
+                coefficient.value,
+                reference_temperature.value,
+            ),
+        }
+        .map_err(|error| {
+            conduction_error(
+                "cli-solve-conduction-boundary",
+                format!("thermal boundary `{}` refused: {error}", row.target),
+                "repair the declared boundary quantity",
+            )
+        })?;
+        builder = builder
+            .region(
+                &row.target,
+                |face| {
+                    parent_by_boundary
+                        .get(&face.vertices)
+                        .is_some_and(|parent| parents.contains(parent))
+                },
+                condition,
+            )
+            .map_err(|error| {
+                conduction_error(
+                    "cli-solve-conduction-boundary",
+                    format!("thermal boundary partition refused: {error}"),
+                    "make declared thermal face sets non-overlapping and physically admissible",
+                )
+            })?;
+    }
+    if setup.adiabatic_remainder {
+        builder = builder.adiabatic_remainder();
+    }
+    builder.finish().map_err(|error| {
+        conduction_error(
+            "cli-solve-conduction-boundary",
+            format!("thermal boundary partition is incomplete: {error}"),
+            "cover every exterior face or explicitly declare an adiabatic remainder",
+        )
+    })
+}
+
+#[allow(clippy::too_many_lines)]
+fn conduction_receipt(
+    ledger: &Ledger,
+    spec: &ProjectSpec,
+    cards: &CardPackSet,
+    context: &StageContext,
+    run: SolveRunId,
+    work: EvidenceWork<'_>,
+    resume: bool,
+) -> Result<(String, Vec<RetainedUsage>), SolveRefusal> {
+    let stage = SolveStage::Conduction;
+    let cancelled = || {
+        if resume {
+            cancelled_resume_refusal(run)
+        } else {
+            cancelled_fresh_refusal(run, Some(stage))
+        }
+    };
+    work.checkpoint(SolveEvidencePhase::AssignmentDerivation, None, 0)
+        .map_err(|_| cancelled())?;
+    let setup = spec
+        .cooling
+        .as_ref()
+        .and_then(|cooling| cooling.conduction.as_ref())
+        .ok_or_else(|| {
+            conduction_error(
+                "cli-solve-conduction-no-setup",
+                "the project declares no explicit conduction setup",
+                "declare region seeds and thermal boundary laws under cooling.conduction",
+            )
+        })?;
+    if spec
+        .assembly
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .any(|decl| matches!(decl, EntityDecl::Interface { .. }))
+    {
+        return Err(conduction_error(
+            "cli-solve-conduction-interface-gap",
+            "the project declares material interfaces, but contact-law lowering is not integrated into this conduction slice",
+            "complete frankensim-s93ej thermal-contact integration; never substitute perfect contact silently",
+        ));
+    }
+    let geometry = spec.geometry.as_deref().unwrap_or(&[]);
+    if geometry.len() != context.verified_imports.len()
+        || geometry.len() != context.import_sources.len()
+    {
+        return Err(conduction_error(
+            "cli-solve-conduction-import",
+            "verified import entries, importer metadata, and project geometry differ in cardinality",
+            "restart from a freshly attested import operation",
+        ));
+    }
+    let limits = context.import_limits.ok_or_else(|| {
+        conduction_error(
+            "cli-solve-conduction-import",
+            "the verified import context carries no assignment resource envelope",
+            "restart from a freshly attested import operation",
+        )
+    })?;
+
+    let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+    let result = pool.scope(|arena| {
+        let cx = fs_exec::Cx::new(
+            work.gate,
+            arena,
+            fs_exec::StreamKey {
+                seed: spec.seeds.as_ref().map_or(0, |seeds| seeds.root),
+                kernel_id: 0x66_73_63_6f_6e_64_75_63,
+                tile: 0,
+                iteration: 0,
+            },
+            fs_exec::Budget::INFINITE,
+            fs_exec::ExecMode::Deterministic,
+        );
+        let mut library = ImportedMeshLibrary::new();
+        let mut soups = BTreeMap::new();
+        for (index, ((artifact, entry), source)) in geometry
+            .iter()
+            .zip(&context.verified_imports)
+            .zip(&context.import_sources)
+            .enumerate()
+        {
+            let bytes = read_parsed_import_artifact(
+                ledger,
+                work,
+                entry.promoted_mesh,
+                "promoted mesh",
+                index,
+                SolveEvidencePhase::PromotedMeshRead,
+            )
+            .map_err(|error| conduction_import_refusal(run, error))?;
+            let soup = fs_io::ply::read_ply(&bytes).map_err(|error| {
+                conduction_error(
+                    "cli-solve-conduction-import",
+                    format!("promoted PLY for `{}` refused: {error}", artifact.role),
+                    "re-run import so the retained artifact is canonical fs-io PLY",
+                )
+            })?;
+            library.insert(
+                artifact,
+                soup.clone(),
+                source.length_unit.clone(),
+                source.named_groups.clone(),
+            );
+            soups.insert(artifact.role.clone(), soup);
+        }
+        let resolution =
+            resolve_geometry_assignments(spec, &library, assignment_limits(limits), &cx);
+        if !resolution.admissible() {
+            let first = &resolution.violations[0];
+            return Err(conduction_error(
+                first.code,
+                format!(
+                    "conduction assignment replay found {} violation(s); first: {}",
+                    resolution.violations.len(), first.what
+                ),
+                first.fix.clone(),
+            ));
+        }
+        let (positions, surfaces) = build_conduction_surfaces(spec, &mut soups, resolution)?;
+        let (regions, region_ids) = region_specs(spec, setup, &surfaces)?;
+        if context
+            .import_sources
+            .iter()
+            .any(|source| source.length_unit != "m")
+        {
+            return Err(conduction_error(
+                "cli-solve-conduction-length-unit",
+                "the conduction stage currently admits promoted coordinates only in metres",
+                "re-import with `--unit m`; no implicit geometry scaling is performed",
+            ));
+        }
+        let memory_bytes = spec
+            .budgets
+            .as_ref()
+            .map_or(0, |budgets| budgets.memory_bytes);
+        let max_tets = usize::try_from(memory_bytes / 256)
+            .unwrap_or(usize::MAX)
+            .clamp(1, 4_000_000);
+        let policy = fs_mesh::VolumetricPolicy {
+            length_unit: "m".to_string(),
+            recovery: fs_mesh::RecoveryOptions::default(),
+            max_vertices: positions.len(),
+            max_tets,
+        };
+        let audited = fs_mesh::volumetricize(
+            fs_mesh::UnverifiedPlc::new(positions, regions.clone()),
+            policy,
+            &cx,
+        )
+        .map_err(|error| {
+            conduction_error(
+                "cli-solve-conduction-volumetricize",
+                format!("constrained volumetricization refused: {error}"),
+                "repair region surfaces/seeds or increase the declared memory budget",
+            )
+        })?;
+        let labeled = audited.labeled();
+        let labels: Vec<u32> = labeled.region_of_tet().iter().map(|region| region.0).collect();
+        let (table, region_to_material, fallback) = material_models(spec, cards, &region_ids)?;
+        let (mesh, element_materials) = fs_conduction::ElementMaterials::bind_labeled_volume(
+            table,
+            TetComplex::from_tets(labeled.positions().len(), labeled.tets().to_vec()),
+            labeled.positions().to_vec(),
+            &labels,
+            &region_to_material,
+        )
+        .map_err(|error| {
+            conduction_error(
+                "cli-solve-conduction-operator",
+                format!("heterogeneous conduction operator binding refused: {error}"),
+                "repair region labels, material bindings, or the audited tet complex",
+            )
+        })?;
+        let source = conduction_source(spec, &mesh, &labels, &region_ids, &audited)?;
+        let boundary = conduction_boundary(setup, &mesh, &audited, &surfaces, &regions)?;
+        let mut config = fs_conduction::SolveConfig::default();
+        if let Some(solver) = &spec.solver {
+            config.stop.residual_rtol = solver.tolerance_rel;
+        }
+        if let Some(envelope) = &spec.envelope {
+            config.initial = fs_conduction::InitialGuess::Uniform(
+                (envelope.ambient_lo.value + envelope.ambient_hi.value) / 2.0,
+            );
+        }
+        let solution = fs_conduction::solve(
+            &cx,
+            fs_conduction::ConductionProblem {
+                mesh: &mesh,
+                boundary: &boundary,
+                material: &fallback,
+                element_materials: Some(&element_materials),
+                source: &source,
+            },
+            config,
+        )
+        .map_err(|error| {
+            conduction_error(
+                "cli-solve-conduction-solve",
+                format!("steady heterogeneous conduction solve refused: {error}"),
+                "inspect the declared boundary anchor, material span, and solver tolerance",
+            )
+        })?;
+        Ok((audited, mesh, solution))
+    })?;
+    let (audited, mesh, solution) = result;
+    work.checkpoint(SolveEvidencePhase::AssignmentDerivation, None, 1)
+        .map_err(|_| cancelled())?;
+
+    let mut temperatures = String::new();
+    for (index, &temperature) in solution.temperature.iter().enumerate() {
+        if index > 0 {
+            temperatures.push(',');
+        }
+        temperatures.push_str(&canonical_f64(temperature).ok_or_else(|| {
+            conduction_error(
+                "cli-solve-conduction-nonfinite",
+                format!("solution vertex {index} has non-finite temperature {temperature}"),
+                "report the solver defect; non-finite fields are never published",
+            )
+        })?);
+    }
+    let solution_bytes = format!(
+        "{{\"schema\":{},\"run\":{},\"temperature_unit\":\"K\",\"temperature\":[{}]}}",
+        json_string(CONDUCTION_SOLUTION_SCHEMA),
+        json_string(&run.to_hex()),
+        temperatures
+    )
+    .into_bytes();
+    let solution_artifact = hash_bytes(&solution_bytes);
+    let finite = |name: &str, value: f64| {
+        canonical_f64(value).ok_or_else(|| {
+            conduction_error(
+                "cli-solve-conduction-nonfinite",
+                format!("conduction report field `{name}` is non-finite ({value})"),
+                "report the solver defect; non-finite evidence is never published",
+            )
+        })
+    };
+    let min_temperature = solution
+        .temperature
+        .iter()
+        .copied()
+        .reduce(f64::min)
+        .expect("conduction solution is nonempty");
+    let max_temperature = solution
+        .temperature
+        .iter()
+        .copied()
+        .reduce(f64::max)
+        .expect("conduction solution is nonempty");
+    let report = &solution.report;
+    let method = match audited.witness().method {
+        fs_mesh::VolumeMethod::ExactDyadic => "exact-dyadic",
+        fs_mesh::VolumeMethod::MeasuredF64 => "measured-f64",
+    };
+    let receipt = format!(
+        "{{\"schema\":{},\"run\":{},\"stage\":\"conduction\",\
+         \"mesh\":{{\"vertices\":{},\"elements\":{},\"boundary_faces\":{},\
+         \"regions\":{},\"length_unit\":\"m\",\"volume_audit\":{}}},\
+         \"material_assignment\":\"{:016x}\",\"solution_artifact\":{},\
+         \"temperature\":{{\"unit\":\"K\",\"min\":{},\"max\":{}}},\
+         \"solver\":{{\"iterations\":{},\"stop_reason\":{},\"final_residual\":{},\
+         \"residual_threshold\":{},\"free_dofs\":{}}},\
+         \"energy\":{{\"source_w\":{},\"neumann_out_w\":{},\"robin_out_w\":{},\
+         \"dirichlet_in_w\":{},\"closure_w\":{},\"relative_closure\":{}}},\
+         \"authority\":{},\"no_claim\":{}}}",
+        json_string(CONDUCTION_RECEIPT_SCHEMA),
+        json_string(&run.to_hex()),
+        mesh.vertex_count(),
+        mesh.element_count(),
+        mesh.boundary().len(),
+        audited.witness().per_region_auditor.len(),
+        json_string(method),
+        report.element_material_identity.expect("heterogeneous assignment"),
+        json_string(&solution_artifact.to_hex()),
+        finite("temperature.min", min_temperature)?,
+        finite("temperature.max", max_temperature)?,
+        report.iterations,
+        json_string(report.stop_reason.tag()),
+        finite("final_residual", report.final_residual)?,
+        finite("residual_threshold", report.residual_threshold)?,
+        report.free_dofs,
+        finite("energy.source_w", report.energy.source_w)?,
+        finite("energy.neumann_out_w", report.energy.neumann_out_w)?,
+        finite("energy.robin_out_w", report.energy.robin_out_w)?,
+        finite("energy.dirichlet_in_w", report.energy.dirichlet_in_w)?,
+        finite("energy.closure_w", report.energy.closure_w)?,
+        finite("energy.relative_closure", report.energy.relative_closure())?,
+        json_string(CONDUCTION_AUTHORITY),
+        json_string(CONDUCTION_NO_CLAIM),
+    );
+    let charge = solution_bytes
+        .len()
+        .checked_add(receipt.len())
+        .and_then(|bytes| u64::try_from(bytes).ok())
+        .ok_or_else(|| {
+            invocation_work_refusal(
+                Some(run),
+                Some(stage),
+                InvocationWorkExceeded::CumulativeBytes { attempted: u64::MAX },
+            )
+        })?;
+    work.charge(charge)
+        .map_err(|error| invocation_work_refusal(Some(run), Some(stage), error))?;
+    work.checkpoint(SolveEvidencePhase::AssignmentDerivation, None, u64::MAX)
+        .map_err(|_| cancelled())?;
+    Ok((
+        receipt,
+        vec![RetainedUsage {
+            id: solution_artifact.to_hex(),
+            kind: CONDUCTION_SOLUTION_KIND,
+            artifact: solution_artifact,
+            bytes: solution_bytes,
+        }],
+    ))
+}
+
 fn assignment_receipt(
     spec: &ProjectSpec,
     context: &StageContext,
@@ -4551,7 +5385,89 @@ fn validate_resume_candidate(
                 })?;
                 expected_edges.push((EdgeRole::In, predecessor));
             }
-            _ => unreachable!("completed unavailable stages were refused above"),
+            SolveStage::Conduction => {
+                let cards = recovered_cards.as_ref().ok_or_else(|| {
+                    resume_identity(
+                        "the retained conduction stage has no recovered card-pack set",
+                    )
+                })?;
+                let receipt_stage_index = Some(index);
+                work.checkpoint(
+                    SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
+                    receipt_stage_index,
+                    0,
+                )
+                .map_err(|_| cancelled_resume_refusal(run))?;
+                let rebuilt = conduction_receipt(
+                    ledger,
+                    &project.spec,
+                    cards,
+                    &context,
+                    run,
+                    work,
+                    true,
+                );
+                work.checkpoint(
+                    SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
+                    receipt_stage_index,
+                    1,
+                )
+                .map_err(|_| cancelled_resume_refusal(run))?;
+                let (expected_receipt, outputs) = match rebuilt {
+                    Ok(rebuilt) => rebuilt,
+                    Err(error)
+                        if matches!(
+                            error.code,
+                            "cli-solve-cancelled" | "cli-solve-work-envelope"
+                        ) =>
+                    {
+                        return Err(error);
+                    }
+                    Err(error) => {
+                        return Err(resume_identity(format!(
+                            "the retained conduction problem no longer reproduces: {}",
+                            error.what
+                        )));
+                    }
+                };
+                let receipt_matches = evidence_bytes_equal(
+                    receipt_text.as_bytes(),
+                    expected_receipt.as_bytes(),
+                    work,
+                    SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
+                    receipt_stage_index,
+                )
+                .map_err(|error| match error {
+                    EvidenceCompareError::Cancelled => cancelled_resume_refusal(run),
+                    EvidenceCompareError::WorkEnvelope(error) => {
+                        invocation_work_refusal(Some(run), Some(stage), error)
+                    }
+                })?;
+                if !receipt_matches {
+                    return Err(resume_identity(
+                        "the retained conduction receipt is not the canonical driver receipt",
+                    ));
+                }
+                for output in outputs {
+                    require_artifact_kind_resume(
+                        ledger,
+                        run,
+                        output.artifact,
+                        output.kind,
+                        "conduction side artifact",
+                        work,
+                        index,
+                    )?;
+                    expected_edges.push((EdgeRole::Out, output.artifact));
+                }
+                let predecessor = predecessor_state.ok_or_else(|| {
+                    resume_identity(
+                        "the retained conduction stage has no verified flow-network predecessor",
+                    )
+                })?;
+                expected_edges.push((EdgeRole::In, predecessor));
+            }
+            SolveStage::Qoi => unreachable!("completed unavailable stages were refused above"),
         }
         require_exact_edges(
             run,

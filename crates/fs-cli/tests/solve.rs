@@ -27,6 +27,9 @@ use fs_project::{
     RequirementSourceKind, SafetyFactorPolicy, Seeds, SolverSettings, ThermalLimit, UnitsDoctrine,
     Vent, Versions, print_sexpr,
 };
+use fs_project::spec::{
+    ConductionRegion, ConductionSetup, ThermalBoundary, ThermalBoundaryCondition,
+};
 use fs_qty::QtyAny;
 
 fn with_cx<R>(gate: &CancelGate, f: impl FnOnce(&Cx<'_>) -> R) -> R {
@@ -322,6 +325,7 @@ fn project_for_receipt(seed_root: u64, source_hash: u64, parser_version: &str) -
                 }],
                 topology: fs_project::fansystem::FanSystemTopology::Single,
             }),
+            conduction: None,
         }),
         envelope: Some(Envelope {
             ambient_lo: kelvin(293.15),
@@ -368,6 +372,35 @@ fn fixture_project(seed_root: u64, bytes: &[u8]) -> ProjectSpec {
         .expect("fixture parses")
         .source_receipt;
     project_for_receipt(seed_root, receipt.source_hash, receipt.parser_version)
+}
+
+fn conduction_fixture_project(seed_root: u64, bytes: &[u8]) -> ProjectSpec {
+    let mut spec = fixture_project(seed_root, bytes);
+    spec.cooling.as_mut().expect("fixture cooling").conduction = Some(ConductionSetup {
+        regions: vec![ConductionRegion {
+            region: "air".to_string(),
+            seed: [
+                QtyAny::new(0.1, fs_project::spec::dims::LENGTH),
+                QtyAny::new(0.1, fs_project::spec::dims::LENGTH),
+                QtyAny::new(0.1, fs_project::spec::dims::LENGTH),
+            ],
+        }],
+        boundaries: vec![ThermalBoundary {
+            target: "air".to_string(),
+            condition: ThermalBoundaryCondition::Convection {
+                coefficient: QtyAny::new(
+                    10.0,
+                    fs_project::spec::dims::HEAT_TRANSFER_COEFFICIENT,
+                ),
+                reference_temperature: QtyAny::new(
+                    293.15,
+                    fs_project::spec::dims::TEMPERATURE,
+                ),
+            },
+        }],
+        adiabatic_remainder: false,
+    });
+    spec
 }
 
 fn decode(spec: &ProjectSpec) -> DecodedProject {
