@@ -16,9 +16,10 @@
 //! execute against retained import evidence, `material-resolve` executes
 //! against caller-supplied normalized card packs (bead frankensim-hp7tb),
 //! and `flow-network` executes the declared Cooling lowering to an
-//! interval-certified operating point (bead frankensim-frn2i.2);
-//! `conduction` (frankensim-s93ej) and `qoi` (frankensim-s2l9v) remain
-//! typed gaps.
+//! interval-certified operating point (bead frankensim-frn2i.2). `conduction`
+//! executes when the project declares an explicit conduction setup; older
+//! projects without that optional setup retain the typed frankensim-s93ej gap.
+//! `qoi` (frankensim-s2l9v) remains a typed gap.
 //!
 //! Card packs are invocation inputs, so their canonical set root is bound
 //! into the run identity: a different pack set is a different run, never the
@@ -33,7 +34,7 @@
 #![allow(clippy::result_large_err)]
 
 use std::cell::Cell;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::collections::hash_map::DefaultHasher;
 use std::fmt::Write as _;
 use std::hash::BuildHasherDefault;
@@ -54,10 +55,13 @@ use fs_ledger::{
     LedgerError, MAIN_BRANCH, MAX_VISIBLE_OP_PAGE_ROWS, OpArtifactEdge, OpOutcome, OpRow,
     OpVariableField, PrehashedOpContent, VisibleOpCursor, VisibleOpPage,
 };
+use fs_matdb::SelectionPolicy;
 use fs_project::{
-    BindingRequirements, DecodedProject, GeometryArtifact, ProjectSpec, geometry_source_identity,
-    resolve_bindings,
+    BindingRequirements, DecodedProject, EntityDecl, GeometryArtifact, ImportedMeshLibrary,
+    ProjectSpec, geometry_source_identity, resolve_bindings, resolve_geometry_assignments,
 };
+use fs_project::spec::{ConductionSetup, ThermalBoundaryCondition};
+use fs_rep_mesh::{Soup, TetComplex};
 use fs_session::{CapabilityToken, Charge, Enforcement, Governor, SessionError, SessionId};
 
 use crate::cards::{CardPackKind, CardPackSet, CardPackSetBuilder, RawCardPack};
@@ -72,7 +76,9 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// admitted card-pack-set root. A v2 checkpoint therefore cannot be mistaken
 /// for a v3 run. Bumped to 4 when `flow-network` stopped being a typed gap
 /// (frankensim-frn2i.2): v3 checkpoints cannot resume into a v4 stage set.
-pub const SOLVE_DRIVER_VERSION: u32 = 4;
+/// Bumped to 5 when projects carrying an explicit conduction setup began
+/// executing the real volumetricizer and heterogeneous conduction solver.
+pub const SOLVE_DRIVER_VERSION: u32 = 5;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";
@@ -87,6 +93,7 @@ const STAGE_STATE_KIND: &str = "solve-stage-state";
 const STAGE_RECEIPT_KIND: &str = "solve-stage-receipt";
 const RUN_RECEIPT_KIND: &str = "solve-run-receipt";
 const MATERIAL_USAGE_KIND: &str = "solve-material-usage-receipt";
+const CONDUCTION_SOLUTION_KIND: &str = "solve-conduction-solution";
 const IMPORT_SUMMARY_KIND: &str = "geometry-import-run-receipt";
 const IMPORT_RAW_KIND: &str = "geometry-source";
 const IMPORT_PROMOTION_KIND: &str = "geometry-import-receipt";
@@ -104,6 +111,8 @@ const IMPORT_VERIFY_NO_CLAIM: &str =
     "does not prove the imported geometry is watertight, meshable, or physically meaningful";
 const MATERIAL_RESOLVE_AUTHORITY: &str = "declared-binding-resolution-against-admitted-card-packs";
 const FLOW_NETWORK_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-flow-network-receipt.v1";
+const CONDUCTION_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-conduction-receipt.v1";
+const CONDUCTION_SOLUTION_SCHEMA: &str = "frankensim.cli.solve-conduction-solution.v1";
 /// Specific gas constant of dry air, J/(kg·K); used only for the declared
 /// envelope-derived density estimate (see FLOW_NETWORK_NO_CLAIM).
 const AIR_SPECIFIC_GAS_CONSTANT: f64 = 287.05;
@@ -554,7 +563,8 @@ pub enum SolveStage {
     /// Solve the enclosure flow network from the declared Cooling section
     /// (executes; bead frankensim-frn2i.2).
     FlowNetwork,
-    /// Conduction/conjugate coupling solve (gap: frankensim-s93ej).
+    /// Conduction solve over an explicitly declared domain; conjugate
+    /// exchange remains successor scope under frankensim-s93ej.
     Conduction,
     /// QoI extraction against requirements (gap: frankensim-s2l9v).
     Qoi,
@@ -623,6 +633,15 @@ impl SolveStage {
     fn from_ordinal(ordinal: u32) -> Option<SolveStage> {
         SolveStage::ALL.get(ordinal as usize).copied()
     }
+}
+
+fn stage_has_declared_producer(stage: SolveStage, spec: &ProjectSpec) -> bool {
+    stage == SolveStage::Conduction
+        && spec
+            .cooling
+            .as_ref()
+            .and_then(|cooling| cooling.conduction.as_ref())
+            .is_some()
 }
 
 /// Content-derived run identity: the hash of the exact inputs that determine
@@ -947,6 +966,10 @@ struct StageContext {
     import_summary: Option<ContentHash>,
     /// Verified imports: (role, source identity, promoted mesh, report).
     verified_imports: Vec<VerifiedImport>,
+    /// Importer-declared units and named groups, in project geometry order.
+    import_sources: Vec<ImportIrSource>,
+    /// Assignment resource envelope retained by the import operation.
+    import_limits: Option<ImportIrLimits>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -964,6 +987,8 @@ struct ImportSummary {
     op_id: i64,
     artifact: ContentHash,
     entries: Vec<VerifiedImport>,
+    sources: Vec<ImportIrSource>,
+    limits: ImportIrLimits,
 }
 
 #[derive(Clone, Copy)]
@@ -1404,7 +1429,9 @@ impl<'a> SolveEngine<'a> {
             if self.work.is_requested() {
                 return Err(self.cancelled_refusal(&state));
             }
-            if let Some(dependency) = stage.gap_dependency() {
+            if let Some(dependency) = stage.gap_dependency()
+                && !stage_has_declared_producer(stage, self.spec)
+            {
                 let refusal = SolveRefusal {
                     code: "cli-solve-stage-gap",
                     stage: Some(stage.name()),
@@ -1455,7 +1482,8 @@ impl<'a> SolveEngine<'a> {
                 SolveStage::FlowNetwork => self
                     .stage_flow_network()
                     .map(|receipt| (receipt, Vec::new())),
-                _ => unreachable!("gap stages returned above"),
+                SolveStage::Conduction => self.stage_conduction(&context),
+                SolveStage::Qoi => unreachable!("gap stages returned above"),
             };
             let (receipt_json, usages) = match body {
                 Ok(produced) => produced,
@@ -1725,6 +1753,8 @@ impl<'a> SolveEngine<'a> {
             op_id: import_op,
             artifact: import_summary,
             entries,
+            sources,
+            limits,
         } = summary;
         // Summary parsing has already checked every entry, in order, against
         // the same project geometry role and controlled source identity.
@@ -1733,6 +1763,8 @@ impl<'a> SolveEngine<'a> {
         context.import_op = Some(import_op);
         context.import_summary = Some(import_summary);
         context.verified_imports = entries;
+        context.import_sources = sources;
+        context.import_limits = Some(limits);
         import_verify_receipt(
             self.run,
             self.project_hash,
@@ -1761,6 +1793,21 @@ impl<'a> SolveEngine<'a> {
 
     fn stage_flow_network(&mut self) -> Result<String, SolveRefusal> {
         flow_network_receipt(self.spec, self.run, self.work, false)
+    }
+
+    fn stage_conduction(
+        &mut self,
+        context: &StageContext,
+    ) -> Result<(String, Vec<RetainedUsage>), SolveRefusal> {
+        conduction_receipt(
+            self.ledger,
+            self.spec,
+            self.cards,
+            context,
+            self.run,
+            self.work,
+            false,
+        )
     }
 
     /// Persist one completed stage as a ledgered op: stage receipt, sealed
@@ -1837,12 +1884,23 @@ impl<'a> SolveEngine<'a> {
                 for pack in self.cards.iter() {
                     self.ledger.link(op, &pack.artifact(), EdgeRole::In)?;
                 }
-                for usage in usages {
-                    let retained =
-                        self.ledger
-                            .put_artifact(MATERIAL_USAGE_KIND, &usage.bytes, None)?;
-                    self.ledger.link(op, &retained.hash, EdgeRole::Out)?;
+            }
+            for usage in usages {
+                let retained = self
+                    .ledger
+                    .put_artifact(usage.kind, &usage.bytes, None)?;
+                if retained.hash != usage.artifact {
+                    return Err(LedgerError::Invalid {
+                        field: "solve_stage_side_artifact".to_string(),
+                        problem: format!(
+                            "stage `{}` precomputed artifact {} but ledger retained {}",
+                            stage.name(),
+                            usage.artifact.to_hex(),
+                            retained.hash.to_hex()
+                        ),
+                    });
                 }
+                self.ledger.link(op, &retained.hash, EdgeRole::Out)?;
             }
             if stage == SolveStage::ImportVerify {
                 let import_summary =
@@ -2187,6 +2245,7 @@ fn import_verify_receipt(
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RetainedUsage {
     id: String,
+    kind: &'static str,
     artifact: ContentHash,
     bytes: Vec<u8>,
 }
@@ -2396,6 +2455,7 @@ fn material_resolve_receipt(
                 if !usages.iter().any(|usage| usage.artifact == artifact) {
                     usages.push(RetainedUsage {
                         id: retained.receipt_hash.clone(),
+                        kind: MATERIAL_USAGE_KIND,
                         artifact,
                         bytes: retained.bytes.clone(),
                     });
@@ -4043,7 +4103,7 @@ fn validate_resume_candidate(
     let mut predecessor_checkpoint: Option<SolveDriverState> = None;
     for (index, completed) in state.completed.iter().enumerate() {
         let stage = SolveStage::ALL[index];
-        if stage.gap_dependency().is_some() {
+        if stage.gap_dependency().is_some() && !stage_has_declared_producer(stage, &project.spec) {
             return Err(resume_identity(format!(
                 "driver version {SOLVE_DRIVER_VERSION} cannot have completed unavailable stage `{}`",
                 stage.name()
@@ -4296,6 +4356,8 @@ fn validate_resume_candidate(
                 expected_edges.push((EdgeRole::In, summary_hash));
                 context.import_op = Some(summary.op_id);
                 context.import_summary = Some(summary.artifact);
+                context.import_sources = summary.sources;
+                context.import_limits = Some(summary.limits);
                 context.verified_imports = summary.entries;
             }
             SolveStage::Assign => {
@@ -5646,6 +5708,8 @@ fn validate_import_evidence(
         op_id: op,
         artifact: summary_artifact,
         entries,
+        sources: attestation.sources.clone(),
+        limits: attestation.limits,
     })
 }
 
