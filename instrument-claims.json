@@ -368,8 +368,12 @@
    "filling": "bowed",
    "image": "kc-friction-compose",
    "qoi": "helmholtz-corner-per-period",
-   "owner_crates": ["fs-couple"],
-   "exactness": ["X-Struct"],
+   "owner_crates": [
+    "fs-couple"
+   ],
+   "exactness": [
+    "X-Struct"
+   ],
    "gate": "ungated",
    "live_default": "no",
    "determinism": "one-host",
@@ -1549,6 +1553,60 @@
     "vvreg:acoustic-foam02-pinta-alpha750"
    ],
    "notes": "The LININGS claim (bead 3ez8g.5.4; NOT the hammer): JCA(L) equivalent fluid in fs_material::porous with licensing-first cards \u2014 Nguyen 2024 measured melamine characterization (CC-BY; k0->sigma, uncertainties in provenance) + FOAM 02 Basotect/Pinta identified rows (CC-BY; thick-sample fits only, thin-sample bound-pinned fits REFUSED as cards). ORACLE: committed FOAM 02 measured mean spectra (machine-readable CC-BY data, 36 measurements each; no figure digitization): worst |model-measured| 0.041/0.029, means 0.018/0.006 inside authored 0.06/0.03 bands. Degeneracies analytic (thin->0, compliance limit 7e-5, air-like->free medium). Composed demo: simulated ISO-10534-2 two-mic rig = direct alpha to 2e-16; melamine-lined tube T60 0.13 s vs rigid never. D23 seam: fs-duct wall path + fs-phs wall pins consume surface_impedance_rigid via thin adapters (displacement note in CONTRACT). SCOPE: normal incidence, rigid frame, no Biot frame waves, no room acoustics; Pinta is polyester-fleece felt-CLASS (wool piano felt = recorded vein)."
+  },
+  {
+   "filling": "wind-reed",
+   "image": "hb-lock-oracle",
+   "qoi": "speaking-threshold-pa",
+   "owner_crates": [
+    "fs-couple"
+   ],
+   "exactness": [
+    "X-Consist"
+   ],
+   "gate": "green",
+   "live_default": "no",
+   "determinism": "one-host",
+   "evidence": [
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/tests/hb_gates.rs::hb_001_reed_threshold_fd_predicts_td_confirms"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/tests/hb_gates.rs::hb_003_truncation_falsifier_produces_the_disagreement_receipt"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/tests/hb_gates.rs::hb_004_below_threshold_refuses_by_name"
+    }
+   ],
+   "budget_row": null,
+   "corpus_refs": [],
+   "notes": "Bead 3ez8g.11.2 gate 1: HB continuation threshold vs the quasi-static analytic regime marker and the TD realize_reed_bore onset on the same cards. Truncation falsifier (N=1) visibly biases the threshold and is caught by the disagreement receipt; N9/N11 convergence verified, N13+ truncation boundary DISCLOSED (diag_hb003). Quasi-static valve law: no oscillation-regime claim beyond this comparison."
+  },
+  {
+   "filling": "brass",
+   "image": "hb-lock-oracle",
+   "qoi": "slot-map-lock-hz",
+   "owner_crates": [
+    "fs-couple"
+   ],
+   "exactness": [
+    "X-Consist"
+   ],
+   "gate": "green",
+   "live_default": "no",
+   "determinism": "one-host",
+   "evidence": [
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/tests/hb_gates.rs::hb_002_brass_slot_map_locks_on_impedance_peaks"
+    }
+   ],
+   "budget_row": null,
+   "corpus_refs": [],
+   "notes": "Bead 3ez8g.11.2 gate 2: lock frequency vs lip tension on the lip island + plane-wave bore Z(n*omega) (plane TMM authority; regenerate against the MM matrix when T-Brass lands it). MEASURED FINDING: under Q=10 the lock-in band is a single 5 Hz cell at f_lip=270 locking onto the ~302 Hz bore peak - narrow lock-in recorded, not swept away."
   }
  ]
 }
