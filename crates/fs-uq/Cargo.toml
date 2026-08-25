@@ -11,10 +11,12 @@ description = "Uncertainty quantification: Karhunen-Loeve random fields with cap
 layer = "L4"
 
 [dependencies]
+fs-blake3 = { path = "../fs-blake3" }
 fs-bo = { path = "../fs-bo" }
+fs-eproc = { path = "../fs-eproc" }
+fs-evidence = { path = "../fs-evidence" }
 fs-la = { path = "../fs-la" }
 fs-math = { path = "../fs-math" }
-fs-eproc = { path = "../fs-eproc" }
 fs-rand = { path = "../fs-rand" }
 fs-robust = { path = "../fs-robust" }
 

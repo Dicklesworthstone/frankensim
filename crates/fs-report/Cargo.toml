@@ -11,12 +11,15 @@ description = "Automatic lab notebooks + semantic design diffs (fs-report): ever
 layer = "L6"
 
 [dependencies]
+fs-blake3 = { path = "../fs-blake3" }
 fs-evidence = { path = "../fs-evidence" }
+fs-ladder = { path = "../fs-ladder" }
 fs-obs = { path = "../fs-obs" }
 fs-package = { path = "../fs-package" }
 fs-project = { path = "../fs-project" }
 fs-regime = { path = "../fs-regime" }
 fs-session = { path = "../fs-session" }
+fs-uq = { path = "../fs-uq" }
 
 [dev-dependencies]
 fs-blake3 = { path = "../fs-blake3" }

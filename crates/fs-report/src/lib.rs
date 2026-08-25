@@ -47,6 +47,12 @@ use fs_project::ProjectDecisionAuthority;
 use fs_regime::{OutputClaimReceipt, ProductOutputAudit};
 use fs_session::DecisionAssessment;
 
+pub mod engineering_report;
+
+pub use engineering_report::{
+    EngineeringReport, MaterialReportItem, NoClaimItem, QoiReportItem, ReportProvenance,
+};
+
 /// Estimator identity used by package declarations that retain demotion receipts.
 pub const REGIME_DEMOTION_PACKAGE_ESTIMATOR: &str = "fs-regime/output-demotion-package-receipt-v1";
 

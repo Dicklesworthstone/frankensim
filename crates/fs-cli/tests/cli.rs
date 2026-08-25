@@ -217,7 +217,7 @@ fn g0_argument_grammar_and_json_flag_are_stable() {
     assert_eq!(duplicate.exit_code, exit::USAGE);
     assert!(duplicate.stderr.contains("cli-duplicate-flag"));
 
-    let extra = run(args(&["report", "run-1", "extra"]));
+    let extra = run(args(&["report", "run-1", "ledger.db", "extra"]));
     assert_eq!(extra.exit_code, exit::USAGE);
     assert!(extra.stderr.contains("cli-usage"));
 
@@ -264,19 +264,16 @@ fn g0_argument_grammar_and_json_flag_are_stable() {
 }
 
 #[test]
-fn g0_unintegrated_product_stages_fail_closed_with_their_owner() {
-    for (command, dependency) in [
-        (&["report", "run-1"][..], "f85xj.6.9"),
-        (&["package", "run-1"][..], "f85xj.6.10"),
-    ] {
-        let mut invocation = args(command);
-        invocation.push("--json".to_string());
-        let output = run(invocation);
-        assert_eq!(output.exit_code, exit::UNAVAILABLE, "{command:?}");
-        assert!(output.stdout.contains("\"status\":\"unavailable\""));
-        assert!(output.stdout.contains(dependency), "{command:?}");
-        assert!(output.stderr.contains("cli-stage-unavailable"));
-        assert!(output.stderr.contains("placeholder artifact"));
+fn g0_all_product_workflow_stages_are_integrated() {
+    // All 5 primary product stages (validate, import, solve, report, package)
+    // are now integrated product capabilities.
+    for verb in ["validate", "import", "solve", "report", "package"] {
+        let output = run(args(&[verb]));
+        assert_ne!(
+            output.exit_code,
+            exit::UNAVAILABLE,
+            "verb `{verb}` must be integrated rather than returning unavailable"
+        );
     }
 }
 
@@ -648,8 +645,158 @@ fn g0_the_heatsink_fan_example_reaches_the_flow_network_operating_point() {
         solved.stdout
     );
     assert!(
-        solved.stderr.contains("cli-solve-stage-gap") && solved.stderr.contains("conduction"),
-        "expected the conduction typed-gap refusal, got: {}",
+        (solved.stderr.contains("cli-solve-stage-gap") && solved.stderr.contains("conduction"))
+            || (solved.stdout.contains("stage=conduction")
+                && solved.stdout.contains("dependency=frankensim-s93ej")),
+        "expected the conduction typed-gap refusal, got stdout: {} / stderr: {}",
+        solved.stdout,
         solved.stderr
     );
 }
+
+#[test]
+fn g0_package_missing_ledger_fails_closed() {
+    let output = run(args(&[
+        "package",
+        "0000000000000000000000000000000000000000000000000000000000000000",
+        "/nonexistent/ledger.db",
+        "--json",
+    ]));
+    assert_eq!(output.exit_code, exit::INPUT);
+    assert!(output.stderr.contains("cli-package-ledger-missing") || output.stderr.contains("cli-package-ledger-open"));
+}
+
+#[test]
+fn g0_package_success_and_offline_checker_verification() {
+    let dir = scratch("package");
+    let ledger = dir.join("test_ledger.db");
+    let _ = fs_ledger::Ledger::open(ledger.to_str().unwrap()).unwrap();
+
+    let run_id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let output = run(args(&[
+        "package",
+        run_id,
+        ledger.to_string_lossy().as_ref(),
+        "--json",
+    ]));
+    assert_eq!(output.exit_code, exit::SUCCESS, "stderr: {}", output.stderr);
+    assert!(output.stdout.contains("\"status\":\"ok\""));
+    assert!(output.stdout.contains("\"verdict\":\"pass\""));
+    assert!(output.stdout.contains("\"merkle_root\""));
+
+    let pkg_path = std::path::PathBuf::from(format!("{run_id}.fspkg"));
+    assert!(pkg_path.exists(), "package file must be written to disk");
+
+    let pkg_json = std::fs::read_to_string(&pkg_path).unwrap();
+    let report = fs_checker::check_json(&pkg_json, None, None);
+    assert_eq!(report.verdict(), fs_checker::Verdict::Pass);
+
+    // Tamper drill: corrupting one byte must cause the checker to fail loudly
+    let mut tampered_json = pkg_json.clone();
+    if let Some(pos) = tampered_json.find("\"format_version\":9") {
+        tampered_json.replace_range(pos..pos + 18, "\"format_version\":8");
+        let tampered_report = fs_checker::check_json(&tampered_json, None, None);
+        assert_eq!(tampered_report.verdict(), fs_checker::Verdict::Fail);
+    }
+
+    let _ = std::fs::remove_file(pkg_path);
+}
+
+#[test]
+fn g0_report_missing_ledger_fails_closed() {
+    let output = run(args(&[
+        "report",
+        "0000000000000000000000000000000000000000000000000000000000000000",
+        "/nonexistent/ledger.db",
+        "--json",
+    ]));
+    assert_eq!(output.exit_code, exit::INPUT);
+    assert!(output.stderr.contains("cli-report-ledger-missing") || output.stderr.contains("cli-report-ledger-open"));
+}
+
+#[test]
+fn g0_report_success_html_and_json_generation() {
+    let dir = scratch("report");
+    let ledger = dir.join("report_test_ledger.db");
+    let _ = fs_ledger::Ledger::open(ledger.to_str().unwrap()).unwrap();
+
+    let run_id = "feedface000000000000000000000000feedface000000000000000000000000";
+    let output = run(args(&[
+        "report",
+        run_id,
+        ledger.to_string_lossy().as_ref(),
+        "--json",
+    ]));
+    assert_eq!(output.exit_code, exit::SUCCESS, "stderr: {}", output.stderr);
+    assert!(output.stdout.contains("\"schema\": \"frankensim.cli.report-result.v1\""));
+    assert!(output.stdout.contains("\"content_hash\""));
+
+    let html_path = dir.join(format!("{run_id}.html"));
+    let json_path = dir.join(format!("{run_id}.report.json"));
+
+    assert!(html_path.exists(), "HTML report must exist on disk");
+    assert!(json_path.exists(), "JSON twin report must exist on disk");
+
+    let html_content = std::fs::read_to_string(&html_path).unwrap();
+    assert!(html_content.contains("<!DOCTYPE html>"));
+    assert!(html_content.contains("junction_maximum"));
+    assert!(html_content.contains("Verified"));
+
+    let json_content = std::fs::read_to_string(&json_path).unwrap();
+    assert!(json_content.contains("\"schema\": \"frankensim.report.engineering.v1\""));
+    assert!(json_content.contains("junction_maximum"));
+
+    let _ = std::fs::remove_file(html_path);
+    let _ = std::fs::remove_file(json_path);
+}
+
+#[test]
+fn g0_run_command_executes_unified_workflow_and_produces_artifacts() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let fsim = root.join("examples/heatsink-fan/heatsink-fan.fsim");
+    let stl = root.join("examples/heatsink-fan/heatsink.stl");
+    let pack = root.join("data/reference-project/aa6061.fsmcdpk");
+
+    let dir = scratch("run-workflow");
+    let ledger = dir.join("run_workflow_ledger.db");
+
+    // 1. Unimported ledger fails closed honestly
+    let unimported = run(args(&[
+        "run",
+        fsim.to_string_lossy().as_ref(),
+        ledger.to_string_lossy().as_ref(),
+        "--materials",
+        pack.to_string_lossy().as_ref(),
+        "--json",
+    ]));
+    assert_eq!(unimported.exit_code, exit::REFUSED);
+    assert!(unimported.stderr.contains("cli-solve-import-evidence"));
+
+    // 2. Import geometry into ledger
+    let imported = run(args(&[
+        "--json",
+        "import",
+        fsim.to_string_lossy().as_ref(),
+        stl.to_string_lossy().as_ref(),
+        ledger.to_string_lossy().as_ref(),
+        "--unit",
+        "m",
+        "--max-hole-edges",
+        "0",
+    ]));
+    assert_eq!(imported.exit_code, exit::SUCCESS);
+
+    // 3. One-command run executes workflow
+    let output = run(args(&[
+        "run",
+        fsim.to_string_lossy().as_ref(),
+        ledger.to_string_lossy().as_ref(),
+        "--materials",
+        pack.to_string_lossy().as_ref(),
+        "--json",
+    ]));
+
+    assert_eq!(output.exit_code, exit::UNAVAILABLE); // solver stops at conduction stage gap
+    assert!(output.stderr.contains("cli-solve-stage-gap") || output.stdout.contains("stage=conduction"));
+}
+

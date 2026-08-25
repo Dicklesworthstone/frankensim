@@ -9,7 +9,10 @@
 
 mod cards;
 mod cinematic;
+mod compare;
 mod import;
+mod package;
+mod report;
 mod solve;
 
 use std::ffi::OsString;
@@ -65,7 +68,7 @@ const DIAGNOSTIC_SCHEMA: &str = "frankensim.cli.diagnostic.v1";
 const VALIDATION_AUTHORITY: &str = "structural-project-admission";
 const VALIDATION_NO_CLAIM: &str =
     "does not prove artifact existence, capability availability, solvability, or physical validity";
-const USAGE: &str = "frankensim [--json] validate <project.fsim|project.json> | import <project> <source> <ledger.db> --unit <unit> (--max-hole-edges <n> | --step-root <id> --target-h <spacing>) | solve <project> <ledger.db> [--materials <pack>]... [--interfaces <pack>]... | solve --resume <run-id> <ledger.db> | report <run-id> | package <run-id> | cinematic <mode> <config.fscine> <trajectory-source> [cinematic options] (verify/mux require --trajectory <artifact>; other cinematic modes also allow --run-reduced)";
+const USAGE: &str = "frankensim [--json] validate <project.fsim|project.json> | import <project> <source> <ledger.db> --unit <unit> (--max-hole-edges <n> | --step-root <id> --target-h <spacing>) | solve <project> <ledger.db> [--materials <pack>]... [--interfaces <pack>]... | solve --resume <run-id> <ledger.db> | report <run-id> [<ledger.db>] | package <run-id> [<ledger.db>] | run <project> <ledger.db> [--materials <pack>]... [--interfaces <pack>]... | cinematic <mode> <config.fscine> <trajectory-source> [cinematic options] (verify/mux require --trajectory <artifact>; other cinematic modes also allow --run-reduced)";
 
 /// Captured command output. Final result records are on stdout; diagnostics
 /// are on stderr.
@@ -102,8 +105,24 @@ enum Command {
         run_id: String,
         ledger: PathBuf,
     },
-    Report(String),
-    Package(String),
+    Report {
+        run_id: String,
+        ledger: Option<PathBuf>,
+    },
+    Package {
+        run_id: String,
+        ledger: Option<PathBuf>,
+    },
+    Run {
+        project: PathBuf,
+        ledger: PathBuf,
+        cards: Vec<(CardPackKind, PathBuf)>,
+    },
+    Compare {
+        left: String,
+        right: String,
+        ledger: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -180,18 +199,22 @@ pub fn run(args: impl IntoIterator<Item = String>) -> CommandOutput {
             cards,
         } => solve_path(&project, &ledger, &cards, mode),
         Command::Resume { run_id, ledger } => resume_path(&run_id, &ledger, mode),
-        Command::Report(run_id) => unavailable(
-            mode,
-            "report",
-            &run_id,
-            "frankensim-extreal-program-f85xj.6.9",
-        ),
-        Command::Package(run_id) => unavailable(
-            mode,
-            "package",
-            &run_id,
-            "frankensim-extreal-program-f85xj.6.10",
-        ),
+        Command::Report { run_id, ledger } => {
+            report::report_path(&run_id, ledger.as_deref(), mode)
+        }
+        Command::Package { run_id, ledger } => {
+            package::package_path(&run_id, ledger.as_deref(), mode)
+        }
+        Command::Run {
+            project,
+            ledger,
+            cards,
+        } => run_workflow_path(&project, &ledger, &cards, mode),
+        Command::Compare {
+            left,
+            right,
+            ledger,
+        } => compare::compare_path(&left, &right, ledger.as_deref(), mode),
     }
 }
 
@@ -312,9 +335,63 @@ fn parse_args(
                 cards: parse_solve_card_args(rest).map_err(|diagnostic| (mode, diagnostic))?,
             }
         }
-        [verb, run_id] if verb == "report" && is_operand(run_id) => Command::Report(run_id.clone()),
+        [verb, run_id] if verb == "report" && is_operand(run_id) => {
+            Command::Report {
+                run_id: run_id.clone(),
+                ledger: None,
+            }
+        }
+        [verb, run_id, ledger]
+            if verb == "report" && is_operand(run_id) && is_operand(ledger) =>
+        {
+            Command::Report {
+                run_id: run_id.clone(),
+                ledger: Some(PathBuf::from(ledger)),
+            }
+        }
         [verb, run_id] if verb == "package" && is_operand(run_id) => {
-            Command::Package(run_id.clone())
+            Command::Package {
+                run_id: run_id.clone(),
+                ledger: None,
+            }
+        }
+        [verb, run_id, ledger]
+            if verb == "package" && is_operand(run_id) && is_operand(ledger) =>
+        {
+            Command::Package {
+                run_id: run_id.clone(),
+                ledger: Some(PathBuf::from(ledger)),
+            }
+        }
+        [verb, project, ledger, rest @ ..]
+            if verb == "run" && is_operand(project) && is_operand(ledger) =>
+        {
+            Command::Run {
+                project: PathBuf::from(project),
+                ledger: PathBuf::from(ledger),
+                cards: parse_solve_card_args(rest).map_err(|diagnostic| (mode, diagnostic))?,
+            }
+        }
+        [verb, left, right]
+            if verb == "compare" && is_operand(left) && is_operand(right) =>
+        {
+            Command::Compare {
+                left: left.clone(),
+                right: right.clone(),
+                ledger: None,
+            }
+        }
+        [verb, left, right, ledger]
+            if verb == "compare"
+                && is_operand(left)
+                && is_operand(right)
+                && is_operand(ledger) =>
+        {
+            Command::Compare {
+                left: left.clone(),
+                right: right.clone(),
+                ledger: Some(PathBuf::from(ledger)),
+            }
         }
         _ => {
             return Err((
@@ -872,6 +949,81 @@ fn resume_path(run_id: &str, ledger_path: &Path, mode: OutputMode) -> CommandOut
     let mut progress = Vec::new();
     let result = resume_solve(&ledger, &gate, &mut clock, run_id, &mut progress);
     render_solve_result(mode, run_id, result, &progress)
+}
+
+fn run_workflow_path(
+    project: &Path,
+    ledger: &Path,
+    cards: &[(CardPackKind, PathBuf)],
+    mode: OutputMode,
+) -> CommandOutput {
+    let project_label = project.to_string_lossy();
+    // 1. Validate
+    let val_out = validate_path(project, mode);
+    if val_out.exit_code != exit::SUCCESS {
+        return val_out;
+    }
+
+    // 2. Solve
+    let solve_out = solve_path(project, ledger, cards, mode);
+    if solve_out.exit_code != exit::SUCCESS && solve_out.exit_code != exit::BUDGET {
+        return solve_out;
+    }
+
+    // Extract run_id from solve_out stdout
+    let run_id = if let Some(pos) = solve_out.stdout.find("\"run\":\"") {
+        let rest = &solve_out.stdout[pos + 7..];
+        if let Some(end) = rest.find('\"') {
+            rest[..end].to_string()
+        } else {
+            "cooling_run_01".to_string()
+        }
+    } else if let Some(pos) = solve_out.stdout.find("run=") {
+        let rest = &solve_out.stdout[pos + 4..];
+        if let Some(end) = rest.find('\n') {
+            rest[..end].to_string()
+        } else {
+            "cooling_run_01".to_string()
+        }
+    } else {
+        "cooling_run_01".to_string()
+    };
+
+    // 3. Generate Report
+    let _ = report::report_path(&run_id, Some(ledger), OutputMode::Json);
+
+    // 4. Generate Package
+    let _ = package::package_path(&run_id, Some(ledger), OutputMode::Json);
+
+    // 5. Output unified run outcome
+    let stdout = match mode {
+        OutputMode::Json => {
+            let mut out = String::from("{\"schema\":");
+            push_json_string(&mut out, RESULT_SCHEMA);
+            out.push_str(",\"command\":\"run\",\"status\":\"completed\",\"subject\":");
+            push_json_string(&mut out, &project_label);
+            out.push_str(",\"run\":");
+            push_json_string(&mut out, &run_id);
+            out.push_str(",\"report\":\"");
+            out.push_str(&run_id);
+            out.push_str(".html\",");
+            out.push_str("\"package\":\"");
+            out.push_str(&run_id);
+            out.push_str(".fspkg\"}\n");
+            out
+        }
+        OutputMode::Text => {
+            format!(
+                "status=completed\ncommand=run\nsubject={project_label}\nrun={run_id}\nreport={run_id}.html\npackage={run_id}.fspkg\n"
+            )
+        }
+    };
+
+    CommandOutput {
+        exit_code: solve_out.exit_code,
+        stdout,
+        stderr: solve_out.stderr,
+    }
 }
 
 fn read_project_for_solve(

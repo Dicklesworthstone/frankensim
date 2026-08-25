@@ -17,8 +17,13 @@ pub mod chance;
 pub mod kl;
 pub mod mlmc;
 pub mod pce;
+pub mod product_plan;
 pub mod seismic;
 
+pub use product_plan::{
+    CorrelationModel, ParameterUncertainty, PropagationMethod, UqPlan, UqPropagator, UqResult,
+    UqStatus, UncertaintyKind,
+};
 pub use fs_robust::{EmpiricalCvarReport, RobustError, cvar, empirical_cvar};
 
 pub use adaptive::{AdaptiveReport, adaptive_mlmc};

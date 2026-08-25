@@ -1071,20 +1071,26 @@ dependencies = [
  "fs-airflow",
  "fs-alloc",
  "fs-blake3",
+ "fs-checker",
  "fs-conduction",
+ "fs-crosswalk",
  "fs-euler-disc-e2e",
  "fs-evidence",
  "fs-exec",
  "fs-geom",
  "fs-io",
+ "fs-ladder",
  "fs-ledger",
  "fs-matdb",
  "fs-mbd",
  "fs-mesh",
+ "fs-package",
  "fs-project",
  "fs-qty",
  "fs-rep-mesh",
+ "fs-report",
  "fs-session",
+ "fs-uq",
 ]
 
 [[package]]
@@ -1723,6 +1729,8 @@ name = "fs-ladder"
 version = "0.0.1"
 dependencies = [
  "fs-blake3",
+ "fs-evidence",
+ "fs-math",
 ]
 
 [[package]]
@@ -2260,12 +2268,14 @@ version = "0.0.1"
 dependencies = [
  "fs-blake3",
  "fs-evidence",
+ "fs-ladder",
  "fs-obs",
  "fs-package",
  "fs-project",
  "fs-qty",
  "fs-regime",
  "fs-session",
+ "fs-uq",
  "fs-voi",
 ]
 
@@ -2640,8 +2650,10 @@ dependencies = [
 name = "fs-uq"
 version = "0.0.1"
 dependencies = [
+ "fs-blake3",
  "fs-bo",
  "fs-eproc",
+ "fs-evidence",
  "fs-la",
  "fs-math",
  "fs-rand",

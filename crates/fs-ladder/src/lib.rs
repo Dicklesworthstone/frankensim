@@ -38,8 +38,12 @@ use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 
+pub mod convergence;
 mod graph;
 
+pub use convergence::{
+    ConvergenceEvaluator, ConvergencePlan, ConvergenceResult, ConvergenceStatus, MeshRung,
+};
 pub use graph::{
     Adequacy, ClosedInterval, ConsideredEdge, ContextClause, ContextPredicateSet, CostModelRef,
     CostRelationRef, DiscrepancyModelRef, DiscrepancyReference, EdgeEvidenceResolver, EdgeId,
