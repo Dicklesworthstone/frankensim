@@ -8,15 +8,15 @@ use std::path::Path;
 fn test_euler_disc_verification_matrix_is_valid_and_complete() {
     let manifest_path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/e2e/campaigns/euler_disc/verification_matrix.toml");
-    
+
     assert!(
         manifest_path.exists(),
         "Traceability matrix must exist at {}",
         manifest_path.display()
     );
 
-    let content = fs::read_to_string(&manifest_path)
-        .expect("Failed to read verification_matrix.toml");
+    let content =
+        fs::read_to_string(&manifest_path).expect("Failed to read verification_matrix.toml");
 
     assert!(
         content.contains("org.frankensim.euler-disc.verification-matrix.v1"),
