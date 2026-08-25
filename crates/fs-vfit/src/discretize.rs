@@ -169,7 +169,6 @@ impl DigitalFilter {
             });
         }
         let mut output = self.direct * input;
-        let mut next = vec![[0.0; 2]; self.sections.len()];
         for (i, section) in self.sections.iter().enumerate() {
             let [w1, w2] = state.w[i];
             let w0 = input - section.a[0] * w1 - section.a[1] * w2;
@@ -187,10 +186,9 @@ impl DigitalFilter {
                 });
             }
             output += y;
-            next[i] = [w0, w1];
+            state.w[i] = [w0, w1];
         }
         require_finite_scalar("output", output)?;
-        state.w = next;
         Ok(output)
     }
 }
