@@ -1,4 +1,4 @@
-//! Generic certified axisymmetric support, normal, curvature, reach, and gap adapters
+//! Axisymmetric support, normal, curvature, reach-estimate, and gap adapters
 //! (bead frankensim-b8bxd.2).
 //!
 //! This module provides L2 query adapters over validated axisymmetric charts
@@ -7,19 +7,22 @@
 //! - [`AxisymmetricSupportMap`]: implements [`ConvexSupportMap`] for convex
 //!   axisymmetric charts via global analytic maximization over all meridian
 //!   features, with certified support slack and contact inflation;
-//! - [`axisymmetric_normal`]: evaluates surface normals with explicit classification
-//!   (Smooth, Axis, JoinSetValued);
-//! - [`axisymmetric_curvature`]: evaluates meridional and azimuthal principal
-//!   curvatures, mean/Gaussian curvatures, and local reach bounds;
-//! - [`axisymmetric_reach`]: certified global reach lower bounds;
+//! - [`axisymmetric_normal`]: evaluates unique Smooth/Axis surface normals and
+//!   refuses ambiguous feature boundaries;
+//! - [`axisymmetric_curvature`]: evaluates Estimate-authority meridional and
+//!   azimuthal principal-curvature magnitudes on one smooth feature;
+//! - [`axisymmetric_reach`]: exposes a local-feature-scale reach heuristic with
+//!   an explicit Estimate-only no-certificate boundary;
 //! - [`AxisymmetricGapOracle`]: pointwise gap oracle pairing an axisymmetric chart
 //!   with another chart under explicit pointwise-only no-claim boundaries.
 
 use crate::{ContactInflation, ConvexOverlapWitness, ConvexSupportMap, GapSample, QueryError};
+use fs_evidence::NumericalKind;
 use fs_exec::Cx;
 use fs_geom::{Chart, Point3, Vec3};
 use fs_rep_frep::axisymmetric::{
-    AxisymmetricChart, AxisymmetricConstructionCertificate, MeridianPoint, MeridianSegment,
+    AxisymmetricChart, AxisymmetricConstructionCertificate, AxisymmetricCurvatureError,
+    MeridianPoint, MeridianSegment,
 };
 
 /// Binary64 relative slack for support computation.
@@ -107,6 +110,117 @@ fn ccw_arc_contains_angle(start: f64, end: f64, candidate: f64) -> bool {
     let sweep = (end - start).rem_euclid(core::f64::consts::TAU);
     let travel = (candidate - start).rem_euclid(core::f64::consts::TAU);
     travel <= sweep + AXISYMMETRIC_SUPPORT_SLACK_FACTOR
+}
+
+fn oriented_arc_contains_angle(start: f64, end: f64, candidate: f64, clockwise: bool) -> bool {
+    if clockwise {
+        ccw_arc_contains_angle(end, start, candidate)
+    } else {
+        ccw_arc_contains_angle(start, end, candidate)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct NearestMeridianFeature {
+    closest: MeridianPoint,
+    distance: f64,
+    normal_r: f64,
+    normal_z: f64,
+    at_boundary: bool,
+    feature_scale: f64,
+}
+
+fn local_point_tolerance(query: MeridianPoint, closest: MeridianPoint, feature_scale: f64) -> f64 {
+    AXISYMMETRIC_SUPPORT_SLACK_FACTOR
+        * feature_scale
+            .max(query.radius.abs())
+            .max(closest.radius.abs())
+            .max(f64::MIN_POSITIVE)
+}
+
+fn nearest_meridian_feature(
+    segment: MeridianSegment,
+    query: MeridianPoint,
+) -> Option<NearestMeridianFeature> {
+    match segment {
+        MeridianSegment::Line { start, end } => {
+            // The collapsed r=0 profile edge closes the meridian loop but does
+            // not generate a surface under revolution.
+            if start.radius == 0.0 && end.radius == 0.0 {
+                return None;
+            }
+            let dr = end.radius - start.radius;
+            let dz = end.axial - start.axial;
+            let length = dr.hypot(dz);
+            let (tangent_r, tangent_z) = normalized_meridian_tangent(dr, dz)?;
+            if !length.is_finite() || length == 0.0 {
+                return None;
+            }
+            let along =
+                (query.radius - start.radius) * tangent_r + (query.axial - start.axial) * tangent_z;
+            let fraction = (along / length).clamp(0.0, 1.0);
+            let closest =
+                MeridianPoint::new(start.radius + fraction * dr, start.axial + fraction * dz);
+            let distance = (query.radius - closest.radius).hypot(query.axial - closest.axial);
+            let tolerance = local_point_tolerance(query, closest, length);
+            let at_boundary = (closest.radius - start.radius).hypot(closest.axial - start.axial)
+                <= tolerance
+                || (closest.radius - end.radius).hypot(closest.axial - end.axial) <= tolerance;
+            Some(NearestMeridianFeature {
+                closest,
+                distance,
+                normal_r: tangent_z,
+                normal_z: -tangent_r,
+                at_boundary,
+                feature_scale: length,
+            })
+        }
+        MeridianSegment::Arc {
+            start,
+            end,
+            center,
+            clockwise,
+        } => {
+            let radius = (start.radius - center.radius).hypot(start.axial - center.axial);
+            if !radius.is_finite() || radius == 0.0 {
+                return None;
+            }
+            let vr = query.radius - center.radius;
+            let vz = query.axial - center.axial;
+            let center_distance = vr.hypot(vz);
+            let candidate_angle = vz.atan2(vr);
+            let start_angle = (start.axial - center.axial).atan2(start.radius - center.radius);
+            let end_angle = (end.axial - center.axial).atan2(end.radius - center.radius);
+            let closest = if center_distance > 0.0
+                && oriented_arc_contains_angle(start_angle, end_angle, candidate_angle, clockwise)
+            {
+                MeridianPoint::new(
+                    center.radius + radius * candidate_angle.cos(),
+                    center.axial + radius * candidate_angle.sin(),
+                )
+            } else if (query.radius - start.radius).hypot(query.axial - start.axial)
+                <= (query.radius - end.radius).hypot(query.axial - end.axial)
+            {
+                start
+            } else {
+                end
+            };
+            let distance = (query.radius - closest.radius).hypot(query.axial - closest.axial);
+            let tolerance = local_point_tolerance(query, closest, radius);
+            let at_boundary = (closest.radius - start.radius).hypot(closest.axial - start.axial)
+                <= tolerance
+                || (closest.radius - end.radius).hypot(closest.axial - end.axial) <= tolerance;
+            let orientation = if clockwise { -1.0 } else { 1.0 };
+            Some(NearestMeridianFeature {
+                closest,
+                distance,
+                normal_r: orientation * (closest.radius - center.radius) / radius,
+                normal_z: orientation * (closest.axial - center.axial) / radius,
+                at_boundary,
+                feature_scale: radius,
+            })
+        }
+    }
 }
 
 fn arc_projection_maximum(
@@ -466,8 +580,6 @@ pub enum NormalClassification {
     Smooth,
     /// On the axis of revolution (r = 0).
     Axis,
-    /// At a C0 join or corner between features.
-    JoinSetValued,
 }
 
 /// Normal vector result from [`axisymmetric_normal`].
@@ -485,12 +597,18 @@ pub struct AxisymmetricNormal {
 
 /// Evaluate surface normal on an axisymmetric chart.
 ///
+/// Feature boundaries with no unique retained normal refuse instead of
+/// publishing one arbitrarily selected incident-feature normal.
+///
 /// # Errors
-/// [`QueryError::InvalidPointSample`] if the point is non-finite.
+/// [`QueryError::InvalidPointSample`] if the point is non-finite;
+/// [`QueryError::NotOnBoundary`] if it is not on the retained surface;
+/// [`QueryError::InvalidPointArithmetic`] at an ambiguous feature boundary;
+/// [`QueryError::Cancelled`] when cancellation is observed.
 pub fn axisymmetric_normal(
     chart: &AxisymmetricChart,
     point: Point3,
-    _cx: &Cx<'_>,
+    cx: &Cx<'_>,
 ) -> Result<AxisymmetricNormal, QueryError> {
     if !point.x.is_finite() || !point.y.is_finite() || !point.z.is_finite() {
         return Err(QueryError::InvalidPointSample {
@@ -498,194 +616,199 @@ pub fn axisymmetric_normal(
         });
     }
 
-    let r = point.x.hypot(point.y);
-    let z = point.z;
-
-    if r < 1e-12 {
-        // Axis point: normal is along z axis
-        let normal = if z >= 0.0 {
-            Vec3::new(0.0, 0.0, 1.0)
-        } else {
-            Vec3::new(0.0, 0.0, -1.0)
-        };
-        return Ok(AxisymmetricNormal {
-            normal,
-            point,
-            classification: NormalClassification::Axis,
-            feature_index: 0,
-        });
+    if cx.checkpoint().is_err() {
+        return Err(QueryError::Cancelled);
     }
 
-    let cos_theta = point.x / r;
-    let sin_theta = point.y / r;
+    let r = point.x.hypot(point.y);
+    let query = MeridianPoint::new(r, point.z);
+    let mut best: Option<(usize, NearestMeridianFeature)> = None;
+    let mut tied_feature = false;
+    let mut ambiguous_tied_normal = false;
 
-    // Find closest meridian segment
-    let mut min_dist_sq = f64::INFINITY;
-    let mut best_feature = 0;
-    let mut best_normal_rz = (1.0, 0.0);
-    let mut is_join = false;
-
-    let segments = chart.segments();
-    for (idx, seg) in segments.iter().enumerate() {
-        match *seg {
-            MeridianSegment::Line { start, end } => {
-                if start.radius < 1e-12 && end.radius < 1e-12 {
-                    continue;
-                }
-                let dr = end.radius - start.radius;
-                let dz = end.axial - start.axial;
-                let len_sq = dr * dr + dz * dz;
-                if len_sq > 0.0 {
-                    let len = len_sq.sqrt();
-                    let t = (((r - start.radius) * dr + (z - start.axial) * dz) / len_sq)
-                        .clamp(0.0, 1.0);
-                    let proj_r = start.radius + t * dr;
-                    let proj_z = start.axial + t * dz;
-                    let dist_sq = (r - proj_r).powi(2) + (z - proj_z).powi(2);
-                    if dist_sq < min_dist_sq {
-                        min_dist_sq = dist_sq;
-                        best_feature = idx;
-                        // Outward normal in (r, z) for CCW segment is (dz / len, -dr / len)
-                        best_normal_rz = (dz / len, -dr / len);
-                        is_join = t <= 1e-6 || t >= 1.0 - 1e-6;
+    for (index, segment) in chart.segments().iter().copied().enumerate() {
+        if index % 16 == 0 && cx.checkpoint().is_err() {
+            return Err(QueryError::Cancelled);
+        }
+        let Some(candidate) = nearest_meridian_feature(segment, query) else {
+            continue;
+        };
+        if !candidate.distance.is_finite() {
+            return Err(QueryError::InvalidPointArithmetic {
+                reason: "axisymmetric surface residual became non-finite",
+            });
+        }
+        match best {
+            None => best = Some((index, candidate)),
+            Some((_, incumbent)) => {
+                let tie_tolerance = AXISYMMETRIC_SUPPORT_SLACK_FACTOR
+                    * incumbent
+                        .feature_scale
+                        .max(candidate.feature_scale)
+                        .max(incumbent.distance)
+                        .max(candidate.distance)
+                        .max(f64::MIN_POSITIVE);
+                if candidate.distance + tie_tolerance < incumbent.distance {
+                    best = Some((index, candidate));
+                    tied_feature = false;
+                    ambiguous_tied_normal = false;
+                } else if (candidate.distance - incumbent.distance).abs() <= tie_tolerance {
+                    tied_feature = true;
+                    let normal_delta = (candidate.normal_r - incumbent.normal_r)
+                        .hypot(candidate.normal_z - incumbent.normal_z);
+                    if normal_delta > AXISYMMETRIC_SUPPORT_SLACK_FACTOR {
+                        ambiguous_tied_normal = true;
                     }
-                }
-            }
-            MeridianSegment::Arc {
-                start,
-                end: _,
-                center,
-                clockwise: _,
-            } => {
-                let arc_r = (start.radius - center.radius).hypot(start.axial - center.axial);
-                let d_center = (r - center.radius).hypot(z - center.axial);
-                let dist_sq = (d_center - arc_r).powi(2);
-                if dist_sq < min_dist_sq {
-                    min_dist_sq = dist_sq;
-                    best_feature = idx;
-                    if d_center > 1e-15 {
-                        best_normal_rz = (
-                            (r - center.radius) / d_center,
-                            (z - center.axial) / d_center,
-                        );
-                    }
-                    is_join = false;
                 }
             }
         }
     }
 
-    let (nr, nz) = best_normal_rz;
-    let normal = Vec3::new(nr * cos_theta, nr * sin_theta, nz);
-    let classification = if is_join {
-        NormalClassification::JoinSetValued
-    } else {
-        NormalClassification::Smooth
+    let Some((feature_index, nearest)) = best else {
+        return Err(QueryError::InvalidPointArithmetic {
+            reason: "axisymmetric chart has no surfaced feature",
+        });
+    };
+    let tolerance = local_point_tolerance(query, nearest.closest, nearest.feature_scale);
+    if nearest.distance > tolerance {
+        return Err(QueryError::NotOnBoundary {
+            sd: nearest.distance,
+        });
+    }
+
+    if r <= tolerance {
+        if ambiguous_tied_normal
+            || nearest.normal_r.abs() > AXISYMMETRIC_SUPPORT_SLACK_FACTOR
+            || nearest.normal_z.abs() <= AXISYMMETRIC_SUPPORT_SLACK_FACTOR
+        {
+            return Err(QueryError::InvalidPointArithmetic {
+                reason: "axisymmetric axis point has no unique retained normal",
+            });
+        }
+        return Ok(AxisymmetricNormal {
+            normal: Vec3::new(0.0, 0.0, nearest.normal_z.signum()),
+            point,
+            classification: NormalClassification::Axis,
+            feature_index,
+        });
+    }
+
+    if ambiguous_tied_normal || (nearest.at_boundary && !tied_feature) {
+        return Err(QueryError::InvalidPointArithmetic {
+            reason: "axisymmetric feature boundary has no unique retained normal",
+        });
+    }
+
+    let cos_theta = point.x / r;
+    let sin_theta = point.y / r;
+    let normal = normalized_direction(Vec3::new(
+        nearest.normal_r * cos_theta,
+        nearest.normal_r * sin_theta,
+        nearest.normal_z,
+    ));
+    let Some(normal) = normal else {
+        return Err(QueryError::InvalidPointArithmetic {
+            reason: "axisymmetric normal became non-finite",
+        });
     };
 
     Ok(AxisymmetricNormal {
         normal,
         point,
-        classification,
-        feature_index: best_feature,
+        classification: NormalClassification::Smooth,
+        feature_index,
     })
 }
 
 /// Principal curvature result from [`axisymmetric_curvature`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AxisymmetricCurvature {
-    /// Meridional principal curvature (along the meridian profile).
+    /// Meridional principal-curvature magnitude [m^-1].
     pub meridional_curvature: f64,
-    /// Azimuthal principal curvature (along the circle of revolution).
+    /// Azimuthal principal-curvature magnitude [m^-1].
     pub azimuthal_curvature: f64,
-    /// Mean curvature `H = (kappa_m + kappa_theta) / 2`.
+    /// Mean of the two magnitude estimates [m^-1], not oriented mean curvature.
     pub mean_curvature: f64,
-    /// Gaussian curvature `K = kappa_m * kappa_theta`.
+    /// Product of the two magnitude estimates [m^-2], not oriented Gaussian curvature.
     pub gaussian_curvature: f64,
-    /// Certified local reach lower bound.
-    pub reach_bound: f64,
+    /// Conservative absolute binary64 rounding/conditioning estimate [m^-1].
+    pub uncertainty_m_inverse: f64,
+    /// Numerical authority, always [`NumericalKind::Estimate`].
+    pub authority: NumericalKind,
     /// Active feature index.
     pub feature_index: usize,
 }
 
-/// Evaluate principal curvatures and local reach bound on an axisymmetric chart.
+/// Evaluate principal-curvature magnitudes on one smooth axisymmetric feature.
+///
+/// This adapter deliberately inherits the underlying chart's Estimate-only
+/// authority. It does not turn local binary64 curvature into a reach
+/// certificate.
 ///
 /// # Errors
-/// [`QueryError::InvalidPointSample`] if the point is non-finite or at the axis.
+/// The boundary, ambiguity, and cancellation refusals from
+/// [`axisymmetric_normal`], plus [`QueryError::InvalidPointArithmetic`] when
+/// the selected feature has no stable local curvature estimate.
 pub fn axisymmetric_curvature(
     chart: &AxisymmetricChart,
     point: Point3,
     cx: &Cx<'_>,
 ) -> Result<AxisymmetricCurvature, QueryError> {
     let norm = axisymmetric_normal(chart, point, cx)?;
-    let r = point.x.hypot(point.y);
-
-    if r < 1e-12 {
-        return Err(QueryError::InvalidPointSample {
-            at: [point.x, point.y, point.z],
+    if norm.classification != NormalClassification::Smooth {
+        return Err(QueryError::InvalidPointArithmetic {
+            reason: "axisymmetric curvature is unavailable at the revolution axis",
         });
     }
-
-    let segments = chart.segments();
-    let seg = segments.get(norm.feature_index).copied().ok_or_else(|| {
-        QueryError::InvalidPointArithmetic {
-            reason: "feature index out of bounds",
-        }
-    })?;
-
-    let (kappa_m, reach_m) = match seg {
-        MeridianSegment::Line { .. } => (0.0, f64::INFINITY),
-        MeridianSegment::Arc {
-            start,
-            center,
-            clockwise,
-            ..
-        } => {
-            let radius = (start.radius - center.radius).hypot(start.axial - center.axial);
-            if radius <= 0.0 {
-                (0.0, f64::INFINITY)
-            } else {
-                let sign = if clockwise { -1.0 } else { 1.0 };
-                (sign / radius, radius)
+    let estimate = chart
+        .principal_curvatures_at_feature_point(norm.feature_index, point, cx)
+        .map_err(|error| match error {
+            AxisymmetricCurvatureError::Cancelled => QueryError::Cancelled,
+            AxisymmetricCurvatureError::NonFinitePoint { point } => {
+                QueryError::InvalidPointSample {
+                    at: [point.x, point.y, point.z],
+                }
             }
-        }
-    };
-
-    // Azimuthal curvature kappa_theta = n_r / r (Meusnier theorem)
-    let n_r = norm.normal.x.hypot(norm.normal.y);
-    let kappa_theta = n_r / r;
-    let reach_theta = if kappa_theta.abs() > 1e-12 {
-        1.0 / kappa_theta.abs()
-    } else {
-        f64::INFINITY
-    };
-
+            AxisymmetricCurvatureError::PointNotOnSelectedFeature { residual_m, .. } => {
+                QueryError::NotOnBoundary { sd: residual_m }
+            }
+            _ => QueryError::InvalidPointArithmetic {
+                reason: "axisymmetric curvature is unavailable at this feature point",
+            },
+        })?;
+    let kappa_m = estimate.meridional_m_inverse;
+    let kappa_theta = estimate.azimuthal_m_inverse;
     let mean_curvature = (kappa_m + kappa_theta) * 0.5;
     let gaussian_curvature = kappa_m * kappa_theta;
-    let reach_bound = reach_m.min(reach_theta).min(r);
 
     Ok(AxisymmetricCurvature {
         meridional_curvature: kappa_m,
         azimuthal_curvature: kappa_theta,
         mean_curvature,
         gaussian_curvature,
-        reach_bound,
+        uncertainty_m_inverse: estimate.uncertainty_m_inverse,
+        authority: NumericalKind::Estimate,
         feature_index: norm.feature_index,
     })
 }
 
-/// Reach lower bound result from [`axisymmetric_reach`].
+/// Estimate-only reach-related feature scales from [`axisymmetric_reach`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AxisymmetricReach {
-    /// Certified global reach lower bound over the entire revolved shape.
-    pub global_reach_lower_bound: f64,
-    /// Minimum meridional radius of curvature across filleted features.
-    pub min_meridional_radius_of_curvature: f64,
-    /// Minimum azimuthal radius of curvature.
-    pub min_azimuthal_radius_of_curvature: f64,
+    /// Heuristic global reach scale [m]; not a lower bound or certificate.
+    pub global_reach_estimate: f64,
+    /// Smallest retained circular-arc radius [m].
+    pub min_meridional_radius_estimate: f64,
+    /// Smallest positive sampled meridian radius [m].
+    pub min_sampled_positive_radius: f64,
+    /// Numerical authority, always [`NumericalKind::Estimate`].
+    pub authority: NumericalKind,
 }
 
-/// Compute certified reach bounds over an axisymmetric chart.
+/// Estimate a reach-related local feature scale over an axisymmetric chart.
+///
+/// This endpoint/arc-radius diagnostic does not analyze the medial axis or
+/// nonlocal self-approach, so it must never be consumed as a reach lower bound.
 ///
 /// # Errors
 /// [`QueryError::ConvexInvalidShape`] if the chart is empty or degenerate.
@@ -730,9 +853,10 @@ pub fn axisymmetric_reach(chart: &AxisymmetricChart) -> Result<AxisymmetricReach
     let global_reach = min_arc_r.min(min_r_nonzero);
 
     Ok(AxisymmetricReach {
-        global_reach_lower_bound: global_reach,
-        min_meridional_radius_of_curvature: min_arc_r,
-        min_azimuthal_radius_of_curvature: min_r_nonzero,
+        global_reach_estimate: global_reach,
+        min_meridional_radius_estimate: min_arc_r,
+        min_sampled_positive_radius: min_r_nonzero,
+        authority: NumericalKind::Estimate,
     })
 }
 

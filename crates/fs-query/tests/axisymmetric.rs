@@ -5,15 +5,15 @@
 //!   deterministic zero-direction handling, certified support slack, contained ball inradius;
 //! - Refusal on non-convex profiles (annular bore / central hole, concave arcs);
 //! - Contact inflation: monotone outward expansion of support slack and brackets;
-//! - [`axisymmetric_normal`]: classification of Smooth, Axis, and JoinSetValued;
+//! - [`axisymmetric_normal`]: unique Smooth/Axis normals and fail-closed boundary admission;
 //! - [`axisymmetric_curvature`]: meridional and azimuthal curvatures (Meusnier theorem),
-//!   mean/Gaussian curvatures, local reach bounds;
-//! - [`axisymmetric_reach`]: certified global reach lower bounds;
+//!   mean/Gaussian magnitude diagnostics, and explicit Estimate authority;
+//! - [`axisymmetric_reach`]: explicit Estimate-only reach-related feature scales;
 //! - [`AxisymmetricGapOracle`]: pointwise gap, separation upper bounds, overlap witnesses;
 //! - Convex separation between [`AxisymmetricSupportMap`] and [`ConvexSphere`] / [`ConvexBox`].
 
 use asupersync::types::Budget;
-use fs_evidence::{Certified, Evidence, ProvenanceHash};
+use fs_evidence::{Certified, Evidence, NumericalKind, ProvenanceHash};
 use fs_exec::{CancelGate, Cx, ExecMode, StreamKey};
 use fs_geom::fixtures::SphereChart;
 use fs_geom::{Point3, Vec3};
@@ -33,12 +33,11 @@ fn meridian_line(start: (f64, f64), end: (f64, f64)) -> MeridianSegment {
     }
 }
 
-fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
-    let gate = CancelGate::new();
+fn with_gate_cx<R>(gate: &CancelGate, f: impl FnOnce(&Cx<'_>) -> R) -> R {
     let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
     pool.scope(|arena| {
         let cx = Cx::new(
-            &gate,
+            gate,
             arena,
             StreamKey {
                 seed: 0xB8B_2001,
@@ -51,6 +50,10 @@ fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
         );
         f(&cx)
     })
+}
+
+fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
+    with_gate_cx(&CancelGate::new(), f)
 }
 
 fn conversion_receipt(radius: f64) -> Certified<f64> {
@@ -302,6 +305,8 @@ fn ax_006_surface_normal_and_curvature_adapters() {
         assert!(curv_top.azimuthal_curvature.abs() < 1e-12);
         assert!(curv_top.mean_curvature.abs() < 1e-12);
         assert_eq!(curv_top.gaussian_curvature, 0.0);
+        assert_eq!(curv_top.authority, NumericalKind::Estimate);
+        assert!(curv_top.uncertainty_m_inverse.is_finite());
 
         // Curvature on cylindrical wall (r = 1.0, z = 0.0):
         // meridional = 0, azimuthal = 1.0 / 1.0 = 1.0
@@ -311,11 +316,12 @@ fn ax_006_surface_normal_and_curvature_adapters() {
         assert!((curv_wall.azimuthal_curvature - 1.0).abs() < 1e-10);
         assert!((curv_wall.mean_curvature - 0.5).abs() < 1e-10);
         assert_eq!(curv_wall.gaussian_curvature, 0.0);
+        assert_eq!(curv_wall.authority, NumericalKind::Estimate);
     });
 }
 
 #[test]
-fn ax_007_global_reach_lower_bound() {
+fn ax_007_reach_scale_is_explicitly_estimate_only() {
     let outer_radius = 1.0;
     let thickness = 0.4;
     let fillet = 0.1;
@@ -327,8 +333,79 @@ fn ax_007_global_reach_lower_bound() {
     .expect("filleted disc");
 
     let reach = axisymmetric_reach(&disc).expect("reach");
-    assert!((reach.min_meridional_radius_of_curvature - 0.1).abs() < 1e-10);
-    assert!(reach.global_reach_lower_bound > 0.0);
+    assert!((reach.min_meridional_radius_estimate - 0.1).abs() < 1e-10);
+    assert!(reach.global_reach_estimate > 0.0);
+    assert_eq!(reach.authority, NumericalKind::Estimate);
+}
+
+#[test]
+fn ax_007a_differential_queries_refuse_points_without_unique_surface_geometry() {
+    with_cx(|cx| {
+        let disc = AxisymmetricChart::squat_disc(
+            1.0,
+            0.4,
+            SquatDiscEdgeTreatment::CircularFillet { radius: 0.1 },
+        )
+        .expect("filleted disc");
+
+        // Interior points on or near the revolution axis are not surface
+        // points. The old r<1e-12 shortcut fabricated a +/-z normal here.
+        assert!(matches!(
+            axisymmetric_normal(&disc, Point3::new(0.0, 0.0, 0.0), cx),
+            Err(QueryError::NotOnBoundary { .. })
+        ));
+        assert!(matches!(
+            axisymmetric_normal(&disc, Point3::new(f64::from_bits(1), 0.0, 0.0), cx),
+            Err(QueryError::NotOnBoundary { .. })
+        ));
+
+        // This point lies on the upper fillet's full supporting circle but
+        // outside the retained quarter-arc. Bounded-arc projection must not
+        // turn that circle point into a surface point.
+        assert!(matches!(
+            axisymmetric_normal(&disc, Point3::new(0.9, 0.0, 0.0), cx),
+            Err(QueryError::NotOnBoundary { .. })
+        ));
+
+        // The cap/fillet endpoint has agreeing incident normals, so the normal
+        // is unique. Curvature still refuses because the local second
+        // derivative changes across the feature boundary.
+        let tangent_join = Point3::new(0.9, 0.0, 0.2);
+        let tangent_normal =
+            axisymmetric_normal(&disc, tangent_join, cx).expect("unique tangent normal");
+        assert!((tangent_normal.normal.z - 1.0).abs() < 1e-12);
+        assert!(matches!(
+            axisymmetric_curvature(&disc, tangent_join, cx),
+            Err(QueryError::InvalidPointArithmetic { .. })
+        ));
+
+        // A sharp disc rim has distinct incident normals and must refuse.
+        let sharp = AxisymmetricChart::squat_disc(1.0, 0.4, SquatDiscEdgeTreatment::Sharp)
+            .expect("sharp disc");
+        let sharp_join = Point3::new(1.0, 0.0, 0.2);
+        assert!(matches!(
+            axisymmetric_normal(&sharp, sharp_join, cx),
+            Err(QueryError::InvalidPointArithmetic { .. })
+        ));
+        assert!(matches!(
+            axisymmetric_curvature(&sharp, sharp_join, cx),
+            Err(QueryError::InvalidPointArithmetic { .. })
+        ));
+    });
+}
+
+#[test]
+fn ax_007b_surface_normal_observes_preexisting_cancellation() {
+    let gate = CancelGate::new();
+    gate.request();
+    with_gate_cx(&gate, |cx| {
+        let disc = AxisymmetricChart::squat_disc(1.0, 0.4, SquatDiscEdgeTreatment::Sharp)
+            .expect("sharp disc");
+        assert_eq!(
+            axisymmetric_normal(&disc, Point3::new(0.5, 0.0, 0.2), cx),
+            Err(QueryError::Cancelled)
+        );
+    });
 }
 
 #[test]

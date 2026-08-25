@@ -16,7 +16,9 @@
 //! budget wall time accordingly and let the checkpoint machinery
 //! (chunked runner) absorb worker job walls if routed through RCH.
 
-use fs_aeroac::slot_jet_3d::{SlotJet3dConfig, classify_rung, run_slot_jet_3d};
+use fs_aeroac::slot_jet_3d::{
+    SlotJet3dConfig, SweepProgress, classify_rung, run_slot_jet_3d_chunked,
+};
 use fs_lbm::d3q19::CollisionModel3;
 
 /// Fixed geometry for the whole ladder (the clean actuator is the
@@ -66,7 +68,17 @@ fn re_sweep_campaign() {
     for rate in LADDER {
         let cfg = base_config(rate);
         let started = std::time::Instant::now();
-        let run = run_slot_jet_3d(&cfg).expect("rung executes");
+        // Chunked execution with an atomic checkpoint: repeated
+        // invocations (or post-crash reruns) resume bit-identically.
+        let ckpt = std::env::temp_dir().join(format!("sj3d-sweep-{rate:.2}"));
+        let run = loop {
+            match run_slot_jet_3d_chunked(&cfg, &ckpt, 1_024).expect("chunk executes") {
+                SweepProgress::Complete(run) => break *run,
+                SweepProgress::Partial { steps_done } => {
+                    println!("  rate {rate:.2}: {steps_done} steps done");
+                }
+            }
+        };
         let rung = classify_rung(&run, &cfg).expect("classification succeeds");
         jsonl.push_str(&rung.to_jsonl());
         jsonl.push('\n');
