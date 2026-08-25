@@ -257,8 +257,8 @@ fn ev_004_dense_scan_falsifier_all_estimated_events_inside_windows() {
                 e.bracket
             );
         }
-        // The certified count can never exceed what the dense scan
-        // implies plus unresolved windows.
+        // Fixture-level cross-check only: this dense baseline happens to resolve
+        // at least the certified crossings. It is not certificate evidence.
         assert!(scan.count.confirmed <= estimated.len() + scan.count.possible_windows);
     });
 }
@@ -577,8 +577,14 @@ fn ev_012_chain_overlap_preserves_disjoint_pair_precedence() {
         "only the three linear extensions are valid"
     );
     for order in orders {
-        let first = order.iter().position(|&member| member == 0).unwrap();
-        let third = order.iter().position(|&member| member == 2).unwrap();
+        let first = order
+            .iter()
+            .position(|&member| member == 0)
+            .expect("each permutation contains the first member");
+        let third = order
+            .iter()
+            .position(|&member| member == 2)
+            .expect("each permutation contains the third member");
         assert!(first < third, "disjoint [0, 2] must precede [2.5, 4]");
     }
 }

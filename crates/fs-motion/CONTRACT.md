@@ -236,10 +236,10 @@ segment windows remain explicit possible events.
 as the independent falsifier. `enumerate_simultaneous` groups
 overlap-connected certified windows across guards and enumerates only orders
 that preserve the proven precedence of every disjoint pair (set-valued; groups
-above `MAX_ENUMERATED_GROUP` stay explicitly unordered). Piecewise double-cover continuity is chained at
-construction: the first segment uses the anchor rule and every later
-segment matches the previous segment's representative at the shared
-junction, so rotations through π cannot tear the cover.
+above `MAX_ENUMERATED_GROUP` stay explicitly unordered). Piecewise double-cover
+continuity is chained at construction: the first segment uses the anchor rule
+and every later segment matches the previous segment's representative at the
+shared junction, so rotations through π cannot tear the cover.
 
 ## Conformance tests
 

@@ -198,7 +198,7 @@ pub struct EventScan {
     pub certified: Vec<CertifiedEvent>,
     /// Possible-event windows in ascending window order.
     pub possible: Vec<PossibleEvent>,
-    /// The set-valued count.
+    /// Certified root accounting and unresolved-window count.
     pub count: RootCountCertificate,
     /// Work receipt.
     pub receipt: ScanReceipt,
@@ -413,6 +413,7 @@ pub fn scan_events(
             continue;
         }
         if zeno_budget_hit {
+            cx.checkpoint().map_err(|_| MotionError::Cancelled)?;
             let window = Interval::new(lo, hi);
             possible.push(PossibleEvent {
                 window,
@@ -455,28 +456,29 @@ pub fn scan_events(
                     receipt.widest_leaf_guard_band =
                         receipt.widest_leaf_guard_band.max(event.guard_band.width());
                     certified.push(refine_certified(model, event, config, &mut receipt));
-                    let future_segment_intersects_span =
-                        tube.segments()[segment_index + 1..].iter().any(|future| {
-                            let future_domain = future.domain();
-                            span.lo().max(future_domain.lo()) < span.hi().min(future_domain.hi())
-                        });
-                    if certified.len() >= config.max_certified_events
-                        && (!stack.is_empty() || future_segment_intersects_span)
-                    {
-                        // Zeno guard: stop and surface the untouched
-                        // current-segment remainder plus every later
-                        // segment as possible windows.
-                        verdict = ScanVerdict::ZenoBudgetExceeded;
-                        for (w, _) in stack.drain(..) {
-                            possible.push(PossibleEvent {
-                                window: w,
-                                guard_band: model.g.eval_interval(w),
-                                derivative_band: model.gdot.eval_interval(w),
-                                reason: PossibleReason::BudgetExhausted,
+                    if certified.len() >= config.max_certified_events {
+                        let future_segment_intersects_span =
+                            tube.segments()[segment_index + 1..].iter().any(|future| {
+                                let future_domain = future.domain();
+                                span.lo().max(future_domain.lo())
+                                    < span.hi().min(future_domain.hi())
                             });
+                        if !stack.is_empty() || future_segment_intersects_span {
+                            // Zeno guard: stop and surface the untouched
+                            // current-segment remainder plus every later
+                            // segment as possible windows.
+                            verdict = ScanVerdict::ZenoBudgetExceeded;
+                            for (w, _) in stack.drain(..) {
+                                possible.push(PossibleEvent {
+                                    window: w,
+                                    guard_band: model.g.eval_interval(w),
+                                    derivative_band: model.gdot.eval_interval(w),
+                                    reason: PossibleReason::BudgetExhausted,
+                                });
+                            }
+                            zeno_budget_hit = true;
+                            continue 'segments;
                         }
-                        zeno_budget_hit = true;
-                        continue 'segments;
                     }
                 }
                 LeafClass::Possible(event) => {
