@@ -67,6 +67,7 @@ fn multi_region_fixture_resolves_volumetricizes_and_opens() {
     // library: the PLC below needs positions/triangles independent of
     // library ownership, and Soups are not promised Clone.
     let mut library = ImportedMeshLibrary::new();
+    let mut soups = Vec::new();
     let mut raw = Vec::new();
     for artifact in &artifacts {
         let mesh_path = format!("{DATA}/multi-region-{role}.stl", role = artifact.role);
@@ -75,22 +76,15 @@ fn multi_region_fixture_resolves_volumetricizes_and_opens() {
         let soup: fs_rep_mesh::Soup = fs_io::stl::read_stl(&bytes).expect("stl admits");
         assert_eq!(soup.triangles.len(), 12, "unit cube fixture topology");
         raw.push((
-            soup
-                .positions
+            soup.positions
                 .iter()
                 .map(|p| [p.x, p.y, p.z])
                 .collect::<Vec<[f64; 3]>>(),
             soup.triangles.clone(),
         ));
+        soups.push(soup);
     }
-    for (artifact, (positions, triangles)) in artifacts.iter().zip(raw.iter()) {
-        let soup = fs_rep_mesh::Soup {
-            positions: positions
-                .iter()
-                .map(|p| fs_geom::Point3 { x: p[0], y: p[1], z: p[2] })
-                .collect(),
-            triangles: triangles.clone(),
-        };
+    for (artifact, soup) in artifacts.iter().zip(soups) {
         library.insert(artifact, soup, "m", Vec::new());
     }
 

@@ -32,7 +32,6 @@ fs-rep-mesh = { path = "../fs-rep-mesh" }
 fs-session = { path = "../fs-session" }
 
 [dev-dependencies]
-fs-geom = { path = "../fs-geom" }
 fs-mbd = { path = "../fs-mbd" }
 
 [lints]
