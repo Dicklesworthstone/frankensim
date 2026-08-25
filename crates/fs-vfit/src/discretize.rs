@@ -852,6 +852,43 @@ impl core::fmt::Display for DiscretizeError {
 
 impl std::error::Error for DiscretizeError {}
 
+fn validated_bilinear_parameters(
+    t_s: f64,
+    omega_pw: f64,
+) -> Result<(f64, f64, f64), DiscretizeError> {
+    if !(t_s > 0.0 && t_s.is_finite()) {
+        return Err(DiscretizeError::BadSampleInterval);
+    }
+    if !(omega_pw >= 0.0 && omega_pw.is_finite()) {
+        return Err(DiscretizeError::BadPrewarpFrequency { omega: omega_pw });
+    }
+
+    // Canonicalize IEEE -0.0 so the stored provenance for the unwarped map is
+    // bit-stable. For a positive subnormal prewarp, the angle multiplication
+    // can underflow to zero; use the analytic K -> 2/T limit in that case.
+    let omega_pw = if omega_pw == 0.0 { 0.0 } else { omega_pw };
+    let nyquist = core::f64::consts::PI / t_s;
+    if omega_pw >= nyquist {
+        return Err(DiscretizeError::BeyondNyquist {
+            omega: omega_pw,
+            nyquist,
+        });
+    }
+    let angle = omega_pw * t_s / 2.0;
+    let k = if angle == 0.0 {
+        2.0 / t_s
+    } else {
+        omega_pw / det::tan(angle)
+    };
+    if !(k > 0.0 && k.is_finite()) {
+        return Err(DiscretizeError::NonFiniteRuntimeValue {
+            field: "bilinear_constant",
+            index: None,
+        });
+    }
+    Ok((k, nyquist, omega_pw))
+}
+
 /// Bilinear-transform the model at sample interval `t_s` with prewarp
 /// at `omega_pw` (pass 0 for the unwarped `K = 2/T` map).
 ///
@@ -865,24 +902,7 @@ pub fn bilinear(
     t_s: f64,
     omega_pw: f64,
 ) -> Result<DigitalFilter, DiscretizeError> {
-    if !(t_s > 0.0 && t_s.is_finite()) {
-        return Err(DiscretizeError::BadSampleInterval);
-    }
-    if !(omega_pw >= 0.0 && omega_pw.is_finite()) {
-        return Err(DiscretizeError::BadPrewarpFrequency { omega: omega_pw });
-    }
-    let nyquist = core::f64::consts::PI / t_s;
-    if omega_pw >= nyquist {
-        return Err(DiscretizeError::BeyondNyquist {
-            omega: omega_pw,
-            nyquist,
-        });
-    }
-    let k = if omega_pw > 0.0 {
-        omega_pw / det::tan(omega_pw * t_s / 2.0)
-    } else {
-        2.0 / t_s
-    };
+    let (k, _nyquist, omega_pw) = validated_bilinear_parameters(t_s, omega_pw)?;
     let mut sections = Vec::new();
     for t in &model.terms {
         match *t {
@@ -989,24 +1009,7 @@ pub fn bilinear_state_space(
     t_s: f64,
     omega_pw: f64,
 ) -> Result<DiscreteStateSpace, DiscretizeError> {
-    if !(t_s > 0.0 && t_s.is_finite()) {
-        return Err(DiscretizeError::BadSampleInterval);
-    }
-    if !(omega_pw >= 0.0 && omega_pw.is_finite()) {
-        return Err(DiscretizeError::BadPrewarpFrequency { omega: omega_pw });
-    }
-    let nyquist = core::f64::consts::PI / t_s;
-    if omega_pw >= nyquist {
-        return Err(DiscretizeError::BeyondNyquist {
-            omega: omega_pw,
-            nyquist,
-        });
-    }
-    let k = if omega_pw > 0.0 {
-        omega_pw / det::tan(omega_pw * t_s / 2.0)
-    } else {
-        2.0 / t_s
-    };
+    let (k, nyquist, _omega_pw) = validated_bilinear_parameters(t_s, omega_pw)?;
     let ss = model.state_space();
     let n = ss.n;
     // M = K I - A, factored once.
@@ -1300,6 +1303,45 @@ mod runtime_tests {
                 Err(DiscretizeError::BadPrewarpFrequency { .. })
             ));
         }
+
+        let canonical = bilinear(&model, 1.0 / 48_000.0, -0.0).unwrap();
+        assert_eq!(canonical.prewarp.to_bits(), 0.0f64.to_bits());
+
+        let subnormal_prewarp = f64::from_bits(1);
+        let sections = bilinear(&model, 1.0 / 48_000.0, subnormal_prewarp).unwrap();
+        assert!(sections.sections.iter().all(|section| {
+            section
+                .a
+                .iter()
+                .chain(&section.b)
+                .all(|value| value.is_finite())
+        }));
+        let state_space = bilinear_state_space(&model, 1.0 / 48_000.0, subnormal_prewarp).unwrap();
+        assert!(
+            state_space
+                .a
+                .iter()
+                .chain(&state_space.b)
+                .chain(&state_space.c)
+                .chain([&state_space.d, &state_space.e_leftover, &state_space.t_s])
+                .all(|value| value.is_finite())
+        );
+
+        let subnormal_interval = f64::from_bits(1);
+        assert!(matches!(
+            bilinear(&model, subnormal_interval, 0.0),
+            Err(DiscretizeError::NonFiniteRuntimeValue {
+                field: "bilinear_constant",
+                index: None
+            })
+        ));
+        assert!(matches!(
+            bilinear_state_space(&model, subnormal_interval, 0.0),
+            Err(DiscretizeError::NonFiniteRuntimeValue {
+                field: "bilinear_constant",
+                index: None
+            })
+        ));
     }
 
     #[test]
