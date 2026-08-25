@@ -160,6 +160,16 @@ impl DigitalFilter {
     /// [`DiscretizeError::NonFiniteRuntimeValue`] or a state/section
     /// length mismatch.
     pub fn step(&self, state: &mut DigitalFilterState, input: f64) -> Result<f64, DiscretizeError> {
+        let output = self.validate_step(state, input)?;
+        self.commit_step(state, input);
+        Ok(output)
+    }
+
+    fn validate_step(
+        &self,
+        state: &DigitalFilterState,
+        input: f64,
+    ) -> Result<f64, DiscretizeError> {
         require_finite_scalar("input", input)?;
         if state.w.len() != self.sections.len() {
             return Err(DiscretizeError::InvalidRuntimeDimensions {
@@ -188,9 +198,13 @@ impl DigitalFilter {
             output += y;
         }
         require_finite_scalar("output", output)?;
-        // The validation pass above deliberately leaves state untouched. Once
-        // every section and the complete sum are finite, recompute only the
-        // new memories and commit them in place. This preserves the public
+        Ok(output)
+    }
+
+    fn commit_step(&self, state: &mut DigitalFilterState, input: f64) {
+        // `validate_step` deliberately leaves state untouched. Once every
+        // section and the complete sum are finite, recompute only the new
+        // memories and commit them in place. This preserves the public
         // no-partial-commit invariant without returning to a per-sample
         // allocation.
         for (section, memory) in self.sections.iter().zip(&mut state.w) {
@@ -198,7 +212,6 @@ impl DigitalFilter {
             let w0 = input - section.a[0] * w1 - section.a[1] * w2;
             *memory = [w0, w1];
         }
-        Ok(output)
     }
 }
 
@@ -454,7 +467,23 @@ impl DelayedFilter {
         (1.0 - a * a) / (1.0 + 2.0 * a * omega_norm.cos() + a * a)
     }
 
-    fn apply_dispersion(&mut self, input: f64) -> f64 {
+    fn validate_dispersion(&self, input: f64) -> Result<f64, DiscretizeError> {
+        let a = self.disp_a;
+        let mut x = input;
+        for k in 0..self.disp_x1.len() {
+            let y = a * (x - self.disp_y1[k]) + self.disp_x1[k];
+            if !y.is_finite() {
+                return Err(DiscretizeError::NonFiniteRuntimeValue {
+                    field: "dispersion_output",
+                    index: Some(k),
+                });
+            }
+            x = y;
+        }
+        Ok(x)
+    }
+
+    fn commit_dispersion(&mut self, input: f64) -> f64 {
         let a = self.disp_a;
         let mut x = input;
         for k in 0..self.disp_x1.len() {
@@ -573,7 +602,8 @@ impl DelayedFilter {
     /// A refusal leaves the delay, filter, and dispersion memories unchanged.
     ///
     /// # Errors
-    /// A non-finite outgoing sample or FIR/IIR filter result.
+    /// A non-finite outgoing sample, FIR/IIR filter result, or dispersion
+    /// result.
     pub fn push(&mut self, outgoing: f64) -> Result<f64, DiscretizeError> {
         require_finite_scalar("outgoing", outgoing)?;
         let n = self.buf.len();
@@ -609,19 +639,22 @@ impl DelayedFilter {
                     index: None,
                 });
             }
+            self.validate_dispersion(acc)?;
             self.buf[self.write] = outgoing;
             self.write = (self.write + 1) % n;
-            let dispersed = self.apply_dispersion(acc);
+            let dispersed = self.commit_dispersion(acc);
             self.last = dispersed;
             return Ok(dispersed);
         }
         let i1 = (self.write + n - self.delay_int) % n;
         let i0 = (i1 + n - 1) % n;
         let delayed = (1.0 - self.frac) * self.buf[i1] + self.frac * self.buf[i0];
-        let filtered = self.filter.step(&mut self.state, delayed)?;
+        let filtered = self.filter.validate_step(&self.state, delayed)?;
+        self.validate_dispersion(filtered)?;
+        self.filter.commit_step(&mut self.state, delayed);
         self.buf[self.write] = outgoing;
         self.write = (self.write + 1) % n;
-        self.last = self.apply_dispersion(filtered);
+        self.last = self.commit_dispersion(filtered);
         Ok(self.last)
     }
 
@@ -1356,6 +1389,55 @@ mod runtime_tests {
             })
         ));
         assert_same_state(&fir_line, &fir_before);
+
+        let mut dispersed_fir =
+            DelayedFilter::from_impulse_response(1.0 / 48_000.0, vec![1.0, 0.0, 0.0, 0.0])
+                .unwrap()
+                .with_dispersion(0.5, 1)
+                .unwrap();
+        dispersed_fir.disp_x1[0] = f64::MAX;
+        dispersed_fir.disp_y1[0] = -f64::MAX;
+        let dispersed_fir_before = dispersed_fir.clone();
+
+        assert!(matches!(
+            dispersed_fir.push(f64::MAX),
+            Err(DiscretizeError::NonFiniteRuntimeValue {
+                field: "dispersion_output",
+                index: Some(0)
+            })
+        ));
+        assert_same_state(&dispersed_fir, &dispersed_fir_before);
+
+        let section = Biquad {
+            b: [1.0, 0.0, 0.0],
+            a: [0.0, 0.0],
+        };
+        let filter = DigitalFilter {
+            sections: vec![section],
+            direct: 0.0,
+            t_s: 1.0 / 48_000.0,
+            prewarp: 0.0,
+        };
+        let mut dispersed_iir = DelayedFilter::new(2.0, filter)
+            .unwrap()
+            .with_dispersion(0.5, 1)
+            .unwrap();
+        let delayed_slot = (dispersed_iir.write + dispersed_iir.buf.len()
+            - dispersed_iir.delay_int)
+            % dispersed_iir.buf.len();
+        dispersed_iir.buf[delayed_slot] = 1.0;
+        dispersed_iir.disp_x1[0] = f64::MAX;
+        dispersed_iir.disp_y1[0] = -f64::MAX;
+        let dispersed_iir_before = dispersed_iir.clone();
+
+        assert!(matches!(
+            dispersed_iir.push(0.0),
+            Err(DiscretizeError::NonFiniteRuntimeValue {
+                field: "dispersion_output",
+                index: Some(0)
+            })
+        ));
+        assert_same_state(&dispersed_iir, &dispersed_iir_before);
     }
 
     #[test]
