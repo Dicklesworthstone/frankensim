@@ -158,6 +158,58 @@ fn assert_unit_cubes(volumes: &std::collections::BTreeMap<u32, f64>) {
 }
 
 #[test]
+fn duplicate_face_refuses_as_non_manifold() {
+    // Duplicate/reversed-faces family: an exactly duplicated triangle
+    // makes the surface non-manifold at its edges.
+    let mut raw = load_committed();
+    let dup = raw[0].triangles[3];
+    raw[0].triangles.push(dup);
+    with_cx(|cx| {
+        let (vertices, remaps) = weld(&[raw[0].positions.clone(), raw[1].positions.clone()]);
+        let regions = region_specs(&raw, &remaps, &[[0.5, 0.5, 0.5], [1.5, 0.5, 0.5]]);
+        let plc = UnverifiedPlc::new(vertices, regions);
+        let outcome =
+            fs_mesh::volumetricize(plc, VolumetricPolicy::fixture_default("m"), cx);
+        assert!(
+            outcome.is_err(),
+            "a duplicated face must refuse, never pass silently"
+        );
+    });
+}
+
+#[test]
+fn overlapping_solids_refuse_as_ambiguous_ownership() {
+    // Gaps/overlaps family: translating the hot solid +0.5 in x makes it
+    // interpenetrate the cold solid; region ownership of the overlap is
+    // ambiguous, which the Scope section refuses.
+    let mut raw = load_committed();
+    for p in &mut raw[1].positions {
+        p[0] -= 0.5;
+    }
+    with_cx(|cx| {
+        let (vertices, remaps) = weld(&[raw[0].positions.clone(), raw[1].positions.clone()]);
+        // Seeds stay at the ORIGINAL interiors: cold (0.5,...) still lies
+        // inside both solids' overlap; hot's seed (1.25,...) is hot-only.
+        // Ambiguity must be refused regardless of seed choice.
+        let regions = region_specs(&raw, &remaps, &[[0.75, 0.5, 0.5], [1.25, 0.5, 0.5]]);
+        let plc = UnverifiedPlc::new(vertices, regions);
+        let outcome =
+            fs_mesh::volumetricize(plc, VolumetricPolicy::fixture_default("m"), cx);
+        match outcome {
+            Ok(_) => panic!("overlapping solids must not volumetricize silently"),
+            Err(e) => {
+                let rendered = format!("{e:?}");
+                assert!(
+                    !rendered.contains("MissingUnit"),
+                    "unexpected unrelated refusal: {rendered}"
+                );
+            }
+        }
+    });
+}
+
+
+#[test]
 fn triangle_permutation_is_volume_invariant() {
     let mut raw = load_committed();
     for mesh in &mut raw {
