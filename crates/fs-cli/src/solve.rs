@@ -123,6 +123,12 @@ const FLOW_NETWORK_NO_CLAIM: &str = "the stage proves the declared fan system lo
     declared orifice/leakage models; it does not authenticate manufacturer curve data, system \
     effects, compressibility, installation effects, or any experimental validation, and the \
     envelope-derived air density is a declared ideal-gas estimate, not a measurement";
+const CONDUCTION_AUTHORITY: &str = "retained-promoted-mesh-plus-declared-region-seeds-plus-\
+    audited-labeled-volume-plus-matdb-backed-heterogeneous-steady-conduction";
+const CONDUCTION_NO_CLAIM: &str = "the stage solves the declared finite mesh with static \
+    Dirichlet, Neumann, and Robin laws and audits algebraic residual and energy closure; it does \
+    not authenticate source geometry or material claims, establish mesh convergence, lower \
+    contact resistance, or perform conjugate airflow exchange";
 const MATERIAL_RESOLVE_NO_CLAIM: &str = "the stage proves that every declared region and \
     interface resolves to an admitted card whose selected claim covers the declared temperature \
     range, and retains that claim's replayable usage receipt; it does not authenticate the pack \

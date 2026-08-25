@@ -1071,6 +1071,7 @@ dependencies = [
  "fs-airflow",
  "fs-alloc",
  "fs-blake3",
+ "fs-conduction",
  "fs-euler-disc-e2e",
  "fs-evidence",
  "fs-exec",
@@ -1078,8 +1079,10 @@ dependencies = [
  "fs-ledger",
  "fs-matdb",
  "fs-mbd",
+ "fs-mesh",
  "fs-project",
  "fs-qty",
+ "fs-rep-mesh",
  "fs-session",
 ]
 
