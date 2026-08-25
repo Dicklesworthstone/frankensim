@@ -729,7 +729,7 @@ fn g0_empty_ledger_cannot_mint_a_verified_engineering_report() {
 }
 
 #[test]
-fn g0_run_command_executes_unified_workflow_and_produces_artifacts() {
+fn g0_run_command_preserves_the_first_unavailable_stage() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let fsim = root.join("examples/heatsink-fan/heatsink-fan.fsim");
     let stl = root.join("examples/heatsink-fan/heatsink.stl");
@@ -776,4 +776,7 @@ fn g0_run_command_executes_unified_workflow_and_produces_artifacts() {
 
     assert_eq!(output.exit_code, exit::UNAVAILABLE); // solver stops at conduction stage gap
     assert!(output.stderr.contains("cli-solve-stage-gap") || output.stdout.contains("stage=conduction"));
+    assert!(!output.stdout.contains("\"status\":\"completed\""));
+    assert!(!output.stdout.contains("\"report\""));
+    assert!(!output.stdout.contains("\"package\""));
 }

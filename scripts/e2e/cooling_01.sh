@@ -15,9 +15,9 @@ mkdir -p "${ARTIFACT_DIR}"
 
 BINARY="${FRANKENSIM_BIN:-}"
 if [ -z "${BINARY}" ]; then
-  if [ -f "/Volumes/USB_NVME/cargo-target/debug/frankensim" ]; then
+  if [ -x "/Volumes/USB_NVME/cargo-target/debug/frankensim" ]; then
     BINARY="/Volumes/USB_NVME/cargo-target/debug/frankensim"
-  elif [ -f "${REPO_ROOT}/target/debug/frankensim" ]; then
+  elif [ -x "${REPO_ROOT}/target/debug/frankensim" ]; then
     BINARY="${REPO_ROOT}/target/debug/frankensim"
   elif command -v frankensim >/dev/null 2>&1; then
     BINARY="$(command -v frankensim)"
@@ -34,8 +34,9 @@ log_json() {
 
 case "${COMMAND}" in
   --list)
-    printf "cooling_01::golden_path_pipeline\n"
-    printf "cooling_01::verbs_vs_run_parity\n"
+    printf "cooling_01::durable_product_prefix\n"
+    printf "cooling_01::report_and_package_fail_closed\n"
+    printf "cooling_01::verbs_vs_run_refusal_parity\n"
     printf "cooling_01::idempotent_replay\n"
     printf "cooling_01::refusal_drills_broken_duty\n"
     printf "cooling_01::refusal_drills_missing_inputs\n"
@@ -52,7 +53,11 @@ case "${COMMAND}" in
     fi
     ;;
   --run|--negative|--replay)
-    log_json "run_start" "started" "executing cooling 0.1 acceptance suite"
+    if [ -z "${BINARY}" ] || [ ! -x "${BINARY}" ]; then
+      log_json "run_start" "failed" "no executable frankensim binary found"
+      exit 1
+    fi
+    log_json "run_start" "started" "executing Cooling product-prefix and refusal suite"
 
     PROJECT="${REPO_ROOT}/examples/heatsink-fan/heatsink-fan.fsim"
     STL="${REPO_ROOT}/examples/heatsink-fan/heatsink.stl"
@@ -81,15 +86,33 @@ case "${COMMAND}" in
     grep -q 'conduction' "${ARTIFACT_DIR}/solve.err"
     log_json "step_solve" "passed" "solve executed durable prefix and halted honestly at conduction gap"
 
-    log_json "step_report" "running" "generating HTML report and JSON twin"
-    "${BINARY}" --json report "cooling_demo_run" "${LEDGER_VERBS}" > "${ARTIFACT_DIR}/report.json"
-    grep -q 'frankensim.cli.report-result.v1' "${ARTIFACT_DIR}/report.json"
-    log_json "step_report" "passed" "engineering report generated"
+    log_json "step_report" "running" "verifying report refuses the incomplete retained run"
+    RC_REPORT=0
+    "${BINARY}" --json report "cooling_demo_run" "${LEDGER_VERBS}" \
+      > "${ARTIFACT_DIR}/report.json" 2> "${ARTIFACT_DIR}/report.err" || RC_REPORT=$?
+    test "${RC_REPORT}" -eq 5
+    grep -q '"status":"unavailable"' "${ARTIFACT_DIR}/report.json"
+    grep -q 'cli-stage-unavailable' "${ARTIFACT_DIR}/report.err"
+    if grep -Eq 'report-result|junction_maximum|thermal_margin|Verified|content_hash' \
+      "${ARTIFACT_DIR}/report.json"; then
+      log_json "step_report" "failed" "report emitted fabricated scientific evidence"
+      exit 1
+    fi
+    log_json "step_report" "passed" "report remained unavailable without minting authority"
 
-    log_json "step_package" "running" "generating evidence package"
-    "${BINARY}" --json package "cooling_demo_run" "${LEDGER_VERBS}" > "${ARTIFACT_DIR}/package.json"
-    grep -q 'frankensim.cli.package-result.v1' "${ARTIFACT_DIR}/package.json"
-    log_json "step_package" "passed" "evidence package generated"
+    log_json "step_package" "running" "verifying package refuses the incomplete retained run"
+    RC_PACKAGE=0
+    "${BINARY}" --json package "cooling_demo_run" "${LEDGER_VERBS}" \
+      > "${ARTIFACT_DIR}/package.json" 2> "${ARTIFACT_DIR}/package.err" || RC_PACKAGE=$?
+    test "${RC_PACKAGE}" -eq 5
+    grep -q '"status":"unavailable"' "${ARTIFACT_DIR}/package.json"
+    grep -q 'cli-stage-unavailable' "${ARTIFACT_DIR}/package.err"
+    if grep -Eq 'package-result|merkle_root|"verdict":"pass"|junction_maximum|thermal_margin' \
+      "${ARTIFACT_DIR}/package.json"; then
+      log_json "step_package" "failed" "package emitted fabricated scientific evidence"
+      exit 1
+    fi
+    log_json "step_package" "passed" "package remained unavailable without minting authority"
 
     # 2. Parity: One-Command `run`
     log_json "step_run_workflow" "running" "executing one-command run workflow"
@@ -114,7 +137,7 @@ case "${COMMAND}" in
     test "${RC_MISSING}" -eq 3
     log_json "drill_missing_file" "passed" "missing file exited with input error class (3)"
 
-    log_json "run_terminal" "pass" "cooling 0.1 acceptance suite completed successfully"
+    log_json "run_terminal" "pass" "durable prefix and typed refusals passed; report/package remain unavailable"
     exit 0
     ;;
   *)

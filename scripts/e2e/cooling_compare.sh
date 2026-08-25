@@ -39,6 +39,10 @@ case "${COMMAND}" in
     fi
     ;;
   --run)
+    if [ -z "${BINARY}" ] || [ ! -x "${BINARY}" ]; then
+      printf "ERROR: frankensim binary not found\n" >&2
+      exit 1
+    fi
     printf "==> 1. Verifying compare fails closed without a retained-run loader\n"
     set +e
     "${BINARY}" --json compare identical_run identical_run /definitely/missing/ledger.db \

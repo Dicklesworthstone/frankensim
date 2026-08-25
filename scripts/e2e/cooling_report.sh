@@ -46,6 +46,10 @@ case "${COMMAND}" in
     exit 1
     ;;
   --run|--negative|--replay)
+    if [ -z "${BINARY}" ] || [ ! -x "${BINARY}" ]; then
+      log_json "run_start" "failed" "frankensim binary is unavailable"
+      exit 1
+    fi
     mkdir -p "${ARTIFACT_DIR}"
     log_json "run_start" "started" "verifying report refuses without retained-run loading"
     set +e

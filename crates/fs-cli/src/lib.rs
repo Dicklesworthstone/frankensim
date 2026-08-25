@@ -11,8 +11,6 @@ mod cards;
 mod cinematic;
 mod compare;
 mod import;
-mod package;
-mod report;
 mod solve;
 
 use std::ffi::OsString;
@@ -972,64 +970,20 @@ fn run_workflow_path(
 
     // 2. Solve
     let solve_out = solve_path(project, ledger, cards, mode);
-    if solve_out.exit_code != exit::SUCCESS && solve_out.exit_code != exit::BUDGET {
+    if solve_out.exit_code != exit::SUCCESS {
         return solve_out;
     }
 
-    // Extract run_id from solve_out stdout
-    let run_id = if let Some(pos) = solve_out.stdout.find("\"run\":\"") {
-        let rest = &solve_out.stdout[pos + 7..];
-        if let Some(end) = rest.find('\"') {
-            rest[..end].to_string()
-        } else {
-            "cooling_run_01".to_string()
-        }
-    } else if let Some(pos) = solve_out.stdout.find("run=") {
-        let rest = &solve_out.stdout[pos + 4..];
-        if let Some(end) = rest.find('\n') {
-            rest[..end].to_string()
-        } else {
-            "cooling_run_01".to_string()
-        }
-    } else {
-        "cooling_run_01".to_string()
-    };
-
-    // 3. Generate Report
-    let _ = report::report_path(&run_id, Some(ledger), OutputMode::Json);
-
-    // 4. Generate Package
-    let _ = package::package_path(&run_id, Some(ledger), OutputMode::Json);
-
-    // 5. Output unified run outcome
-    let stdout = match mode {
-        OutputMode::Json => {
-            let mut out = String::from("{\"schema\":");
-            push_json_string(&mut out, RESULT_SCHEMA);
-            out.push_str(",\"command\":\"run\",\"status\":\"completed\",\"subject\":");
-            push_json_string(&mut out, &project_label);
-            out.push_str(",\"run\":");
-            push_json_string(&mut out, &run_id);
-            out.push_str(",\"report\":\"");
-            out.push_str(&run_id);
-            out.push_str(".html\",");
-            out.push_str("\"package\":\"");
-            out.push_str(&run_id);
-            out.push_str(".fspkg\"}\n");
-            out
-        }
-        OutputMode::Text => {
-            format!(
-                "status=completed\ncommand=run\nsubject={project_label}\nrun={run_id}\nreport={run_id}.html\npackage={run_id}.fspkg\n"
-            )
-        }
-    };
-
-    CommandOutput {
-        exit_code: solve_out.exit_code,
-        stdout,
-        stderr: solve_out.stderr,
-    }
+    // A successful solve still cannot become a completed product workflow until
+    // the report stage loads the retained run and traces every displayed value.
+    // Do not bypass the public fail-closed dispatcher by calling the staged
+    // report/package helpers directly.
+    unavailable(
+        mode,
+        "run",
+        &project_label,
+        "frankensim-extreal-program-f85xj.6.9",
+    )
 }
 
 fn read_project_for_solve(
