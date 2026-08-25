@@ -186,9 +186,18 @@ impl DigitalFilter {
                 });
             }
             output += y;
-            state.w[i] = [w0, w1];
         }
         require_finite_scalar("output", output)?;
+        // The validation pass above deliberately leaves state untouched. Once
+        // every section and the complete sum are finite, recompute only the
+        // new memories and commit them in place. This preserves the public
+        // no-partial-commit invariant without returning to a per-sample
+        // allocation.
+        for (section, memory) in self.sections.iter().zip(&mut state.w) {
+            let [w1, w2] = *memory;
+            let w0 = input - section.a[0] * w1 - section.a[1] * w2;
+            *memory = [w0, w1];
+        }
         Ok(output)
     }
 }
@@ -523,10 +532,6 @@ impl DelayedFilter {
         Self::new(delay_samples, filter).map_err(RealizeError::Discretize)
     }
 
-    /// Inject an outgoing sample and return the incoming wave.
-    ///
-    /// # Errors
-    /// Non-finite input or filter overflow.
     /// The FIR-mode outgoing-wave history, oldest first (empty in IIR
     /// mode). This is the PHYSICAL in-flight wave state a fingering
     /// change must carry (D17 lift seam for characteristic lines).
@@ -565,26 +570,32 @@ impl DelayedFilter {
 
     /// Push one outgoing sample into the line and return the delayed,
     /// filtered incoming sample.
+    /// A refusal leaves the delay, filter, and dispersion memories unchanged.
     ///
     /// # Errors
-    /// Non-finite input.
+    /// A non-finite outgoing sample or FIR/IIR filter result.
     pub fn push(&mut self, outgoing: f64) -> Result<f64, DiscretizeError> {
         require_finite_scalar("outgoing", outgoing)?;
         let n = self.buf.len();
-        self.buf[self.write] = outgoing;
         if !self.fir.is_empty() {
             // Fused inner loop (music bead 3ez8g.15, strict mode): tap k
-            // reads `buf[(write + n - k) % n]`, i.e. buf[..=write]
-            // REVERSED then buf[write+1..] REVERSED. Splitting into two
-            // contiguous runs removes the per-tap modulo while keeping
-            // the accumulation order IDENTICAL — bit-for-bit with the
-            // modulo loop by construction (proven by the equivalence
+            // reads the candidate outgoing sample first, then
+            // buf[..write] REVERSED and buf[write+1..] REVERSED. Splitting
+            // into two contiguous runs removes the per-tap modulo while
+            // keeping the accumulation order IDENTICAL — bit-for-bit with
+            // the modulo loop by construction (proven by the equivalence
             // test against a retained reference implementation).
             let mut acc = 0.0;
             let split = (self.write + 1).min(self.fir.len());
             let (head_taps, tail_taps) = self.fir.split_at(split);
-            for (&h, &b) in head_taps.iter().zip(self.buf[..=self.write].iter().rev()) {
-                acc += h * b;
+            if let Some((&first_tap, remaining_taps)) = head_taps.split_first() {
+                acc += first_tap * outgoing;
+                for (&h, &b) in remaining_taps
+                    .iter()
+                    .zip(self.buf[..self.write].iter().rev())
+                {
+                    acc += h * b;
+                }
             }
             for (&h, &b) in tail_taps
                 .iter()
@@ -598,6 +609,7 @@ impl DelayedFilter {
                     index: None,
                 });
             }
+            self.buf[self.write] = outgoing;
             self.write = (self.write + 1) % n;
             let dispersed = self.apply_dispersion(acc);
             self.last = dispersed;
@@ -606,8 +618,9 @@ impl DelayedFilter {
         let i1 = (self.write + n - self.delay_int) % n;
         let i0 = (i1 + n - 1) % n;
         let delayed = (1.0 - self.frac) * self.buf[i1] + self.frac * self.buf[i0];
-        self.write = (self.write + 1) % n;
         let filtered = self.filter.step(&mut self.state, delayed)?;
+        self.buf[self.write] = outgoing;
+        self.write = (self.write + 1) % n;
         self.last = self.apply_dispersion(filtered);
         Ok(self.last)
     }
@@ -1225,6 +1238,124 @@ mod runtime_tests {
         for (got, want) in y.iter().zip(expect) {
             assert!((got - want).abs() < 1.0e-15);
         }
+    }
+
+    #[test]
+    fn digital_filter_refusal_does_not_commit_earlier_section_state() {
+        let valid = Biquad {
+            b: [1.0, 0.0, 0.0],
+            a: [0.0, 0.0],
+        };
+        let overflowing = Biquad {
+            b: [f64::MAX, f64::MAX, 0.0],
+            a: [0.0, 0.0],
+        };
+        let filter = DigitalFilter {
+            sections: vec![valid, overflowing],
+            direct: 0.0,
+            t_s: 1.0 / 48_000.0,
+            prewarp: 0.0,
+        };
+        let mut state = DigitalFilterState {
+            w: vec![[0.25, -0.5], [1.0, 0.0]],
+        };
+        let before = state.clone();
+
+        assert!(matches!(
+            filter.step(&mut state, 1.0),
+            Err(DiscretizeError::NonFiniteRuntimeValue {
+                field: "biquad_y",
+                index: Some(1)
+            })
+        ));
+        assert_eq!(
+            state, before,
+            "a later section refusal must not commit earlier section memories"
+        );
+
+        let summing_filter = DigitalFilter {
+            sections: vec![
+                Biquad {
+                    b: [f64::MAX, 0.0, 0.0],
+                    a: [0.0, 0.0],
+                },
+                Biquad {
+                    b: [f64::MAX, 0.0, 0.0],
+                    a: [0.0, 0.0],
+                },
+            ],
+            direct: 0.0,
+            t_s: 1.0 / 48_000.0,
+            prewarp: 0.0,
+        };
+        let mut summing_state = DigitalFilterState {
+            w: vec![[0.25, -0.5], [1.0, 0.0]],
+        };
+        let summing_before = summing_state.clone();
+
+        assert!(matches!(
+            summing_filter.step(&mut summing_state, 1.0),
+            Err(DiscretizeError::NonFiniteRuntimeValue {
+                field: "output",
+                index: None
+            })
+        ));
+        assert_eq!(
+            summing_state, summing_before,
+            "a non-finite aggregate output must not commit section memories"
+        );
+    }
+
+    #[test]
+    fn delayed_filter_refusal_does_not_commit_line_state() {
+        let assert_same_state = |got: &DelayedFilter, want: &DelayedFilter| {
+            assert_eq!(got.buf, want.buf, "delay history changed after refusal");
+            assert_eq!(got.write, want.write, "write cursor changed after refusal");
+            assert_eq!(got.state, want.state, "IIR memory changed after refusal");
+            assert_eq!(got.last, want.last, "last output changed after refusal");
+            assert_eq!(
+                got.disp_x1, want.disp_x1,
+                "dispersion input memory changed after refusal"
+            );
+            assert_eq!(
+                got.disp_y1, want.disp_y1,
+                "dispersion output memory changed after refusal"
+            );
+        };
+
+        let filter = DigitalFilter {
+            sections: Vec::new(),
+            direct: f64::MAX,
+            t_s: 1.0 / 48_000.0,
+            prewarp: 0.0,
+        };
+        let mut iir_line = DelayedFilter::new(2.0, filter).unwrap();
+        assert_eq!(iir_line.push(2.0).unwrap(), 0.0);
+        assert_eq!(iir_line.push(0.0).unwrap(), 0.0);
+        let iir_before = iir_line.clone();
+
+        assert!(matches!(
+            iir_line.push(9.0),
+            Err(DiscretizeError::NonFiniteRuntimeValue {
+                field: "output",
+                index: None
+            })
+        ));
+        assert_same_state(&iir_line, &iir_before);
+
+        let mut fir_line =
+            DelayedFilter::from_impulse_response(1.0 / 48_000.0, vec![f64::MAX, 0.0, 0.0, 0.0])
+                .unwrap();
+        let fir_before = fir_line.clone();
+
+        assert!(matches!(
+            fir_line.push(2.0),
+            Err(DiscretizeError::NonFiniteRuntimeValue {
+                field: "fir_output",
+                index: None
+            })
+        ));
+        assert_same_state(&fir_line, &fir_before);
     }
 
     #[test]
