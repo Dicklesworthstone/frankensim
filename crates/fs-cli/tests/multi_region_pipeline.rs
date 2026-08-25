@@ -217,8 +217,13 @@ fn multi_region_artifacts_survive_retention_and_recheck() {
             };
             if line.contains("\"kind\":\"tet\"") {
                 let v = grab("v");
-                let r = grab("region");
-                reload_tets.push(([v[0], v[1], v[2], v[3]], r[0]));
+                let rk = "\"region\":";
+                let ri = line.find(rk).expect("region key") + rk.len();
+                let rend = line[ri..]
+                    .find(|c: char| !c.is_ascii_digit())
+                    .unwrap_or(line.len() - ri);
+                let r: u32 = line[ri..ri + rend].parse().expect("region id");
+                reload_tets.push(([v[0], v[1], v[2], v[3]], r));
             } else if line.contains("\"kind\":\"position\"") {
                 let kf = "\"p\":[";
                 let i = line.find(kf).expect("p key") + kf.len();
