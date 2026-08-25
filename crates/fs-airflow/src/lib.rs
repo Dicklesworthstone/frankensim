@@ -9,6 +9,8 @@
 pub mod composite;
 pub mod conjugate;
 pub mod qoi;
+pub mod registered_qoi;
+pub mod requirement_composition;
 
 use core::fmt;
 use fs_convection::CorrelationInputs;

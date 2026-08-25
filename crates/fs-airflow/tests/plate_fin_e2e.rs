@@ -543,6 +543,7 @@ fn solve_plate_fin(
                 boundary: &boundary,
                 material: &material,
                 source: &source,
+                element_materials: None,
             },
             &interfaces,
             solve_config(),

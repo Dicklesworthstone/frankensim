@@ -44,8 +44,8 @@ use fs_conduction::bc::{ThermalBc, ThermalBoundaryBuilder};
 use fs_conduction::fixtures::unit_cube;
 use fs_conduction::{
     ConductionError, ConductionMesh, ConductionProblem, ConductionSolution, ConductivityModel,
-    InitialGuess, LinearConfig, LinearSolveEvidence, Nonlinearity, ResidualClaim, ScalarField,
-    SolveConfig, StopRule, solve,
+    InitialGuess, LinearConfig, LinearSolveEvidence, Nonlinearity, ProvenanceClass, ResidualClaim,
+    ScalarField, SolveConfig, StopRule, solve,
 };
 use fs_evidence::ModelCard;
 use fs_evidence::uncertainty::{EngineeringUncertaintyKind, TermValue};
@@ -84,6 +84,30 @@ fn base64_encode(input: &[u8]) -> String {
         });
     }
     out
+}
+
+fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
+    let mut out = Vec::new();
+    let mut buf = 0u32;
+    let mut bits = 0;
+    for c in input.chars() {
+        let val = match c {
+            'A'..='Z' => c as u32 - 'A' as u32,
+            'a'..='z' => c as u32 - 'a' as u32 + 26,
+            '0'..='9' => c as u32 - '0' as u32 + 52,
+            '+' => 62,
+            '/' => 63,
+            '=' | '\r' | '\n' | ' ' => continue,
+            _ => return Err(format!("invalid base64 char {c}")),
+        };
+        buf = (buf << 6) | val;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buf >> bits) as u8);
+        }
+    }
+    Ok(out)
 }
 
 /// Case coverage demanded per profile; mirrored by the driving script.
@@ -152,6 +176,8 @@ impl Emitter {
     }
 
     fn write_to(self, directory: &std::path::Path) -> Result<(), String> {
+        std::fs::create_dir_all(directory)
+            .map_err(|error| format!("create artifact directory: {error}"))?;
         std::fs::write(directory.join("events.ndjson"), &self.body)
             .map_err(|error| format!("write events.ndjson: {error}"))
     }
@@ -323,10 +349,16 @@ fn ambient_boundary(mesh: &ConductionMesh) -> ThermalBoundary {
     ThermalBoundaryBuilder::new(mesh)
         .region(
             "ambient",
-            |_| true,
+            |tri| tri.outward_normal[2] < -0.9,
             ThermalBc::dirichlet(300.0).expect("ambient"),
         )
-        .expect("all-face ambient region")
+        .expect("inlet region")
+        .region(
+            "robin-cooling",
+            |tri| tri.outward_normal[2] >= -0.9,
+            ThermalBc::robin(100.0, 300.0).expect("robin cooling"),
+        )
+        .expect("cooling region")
         .finish()
         .expect("boundary")
 }
@@ -348,6 +380,7 @@ fn solve_real_conduction() -> Result<(ConductionMesh, ConductionSolution), Condu
                 boundary: &boundary,
                 material: &material,
                 source: &heat_source,
+                element_materials: None,
             },
             solve_config(),
         )
@@ -664,7 +697,7 @@ fn produce(directory: &std::path::Path) -> Result<(), String> {
         emitter.emit(
             "refusal",
             &[
-                ("case", json_str("absent_requirement")),
+                ("case", json_str("absent_requirement_refuses")),
                 ("refusal", refusal_json("qoi-missing-requirement", &error)),
             ],
         );
@@ -740,6 +773,7 @@ fn produce(directory: &std::path::Path) -> Result<(), String> {
 
         // (a) receipts claimed but none retained: self-contradictory.
         let mut contradictory = solution.clone();
+        contradictory.report.material_provenance = ProvenanceClass::MatdbReceipts;
         contradictory.report.material_receipts = 0;
         let contradiction = extract_parts(
             &mesh,
@@ -781,7 +815,7 @@ fn produce(directory: &std::path::Path) -> Result<(), String> {
         emitter.emit(
             "refusal",
             &[
-                ("case", json_str("tampered_conduction")),
+                ("case", json_str("tampered_conduction_refuses")),
                 ("refusal", refusal_json("qoi-invalid-input", &contradiction)),
                 (
                     "refusal_second",
@@ -808,6 +842,7 @@ fn produce(directory: &std::path::Path) -> Result<(), String> {
                     boundary: &boundary,
                     material: &material,
                     source: &heat_source,
+                    element_materials: None,
                 },
                 solve_config(),
             )
@@ -822,7 +857,7 @@ fn produce(directory: &std::path::Path) -> Result<(), String> {
         emitter.emit(
             "refusal",
             &[
-                ("case", json_str("cancellation")),
+                ("case", json_str("cancellation_refuses_before_production")),
                 (
                     "refusal",
                     format!("{{\"code\":{},\"message\":null}}", json_str(&code)),
@@ -908,10 +943,19 @@ fn produce(directory: &std::path::Path) -> Result<(), String> {
 /// ordinal order, hash-chain continuity, required case coverage, and
 /// completeness of the seven-record happy set.
 fn verify(directory: &std::path::Path) -> Result<(), String> {
+    let body = if let Ok(b64) = std::env::var("TQOI_EVENTS_B64") {
+        let bytes = base64_decode(&b64)?;
+        String::from_utf8(bytes).map_err(|e| format!("utf8 error: {e}"))?
+    } else {
+        std::fs::read_to_string(directory.join("events.ndjson"))
+            .map_err(|error| format!("read events: {error}"))?
+    };
+    verify_str(&body)
+}
+
+fn verify_str(body: &str) -> Result<(), String> {
     let profile = std::env::var("TQOI_PROFILE").unwrap_or_else(|_| "pr".to_string());
     let cases = expected_cases(&profile);
-    let body = std::fs::read_to_string(directory.join("events.ndjson"))
-        .map_err(|error| format!("read events: {error}"))?;
     let lines: Vec<&str> = body.lines().filter(|line| !line.is_empty()).collect();
     if lines.is_empty() {
         return Err("empty event stream".to_string());
@@ -997,6 +1041,7 @@ fn verify_event_integrity(
 
     let mut hasher = Blake3::new();
     hasher.update(core.as_bytes());
+    hasher.update(b"}");
     let recomputed = hasher.finalize().to_hex();
     if recomputed != digest {
         return Err(format!(

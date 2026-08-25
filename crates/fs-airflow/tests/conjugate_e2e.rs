@@ -317,6 +317,7 @@ fn solid_exchange(
             boundary: &boundary,
             material: &material,
             source: &source,
+            element_materials: None,
         },
         solve_config(),
     )

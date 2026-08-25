@@ -131,6 +131,7 @@ fn mesh_and_solution() -> (ConductionMesh, ConductionSolution) {
             robin_fluxes: Vec::new(),
             free_dofs: 8,
             elements: mesh.element_count(),
+            element_material_identity: None,
         },
     };
     (mesh, solution)

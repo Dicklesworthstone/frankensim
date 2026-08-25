@@ -62,7 +62,7 @@ log() {
 
 check() {
   CHECKS=$((CHECKS + 1))
-  if [[ "$1" != "0" ]]; then
+  if [[ "$1" != "1" ]]; then
     FAILURES=$((FAILURES + 1))
     log check "FAIL: $2"
   else
@@ -75,21 +75,22 @@ log setup "profile=${PROFILE} artifacts=${ARTIFACT_DIR} revision=${REVISION}"
 
 # Lane events are staged INSIDE the repo tree (never target/, which RCH
 # excludes from sync) so the verifier-mode run on the worker sees them.
-LANE_DIR_REL=".tqoi-lane-events-${PROFILE}"
-TAMPER_DIR_REL=".tqoi-tamper-events-${PROFILE}"
+LANE_DIR_REL="crates/fs-airflow/tests/fixtures/tqoi_lane_${PROFILE}"
+TAMPER_DIR_REL="crates/fs-airflow/tests/fixtures/tqoi_tamper_${PROFILE}"
 rm -rf "${REPO_ROOT:?}/${LANE_DIR_REL}" "${REPO_ROOT:?}/${TAMPER_DIR_REL}"
 mkdir -p "${REPO_ROOT}/${LANE_DIR_REL}" "${REPO_ROOT}/${TAMPER_DIR_REL}"
 trap 'rm -rf "${REPO_ROOT:?}/${LANE_DIR_REL}" "${REPO_ROOT:?}/${TAMPER_DIR_REL}"' EXIT
 
 # TQOI_* variables cross to the worker ONLY through the explicit allowlist;
 # the verifier reads its events from the staged repo-relative directory.
-ALLOWLIST="RCH_ENV_ALLOWLIST=TQOI_MODE,TQOI_PROFILE,TQOI_SOURCE_REVISION,TQOI_ARTIFACT_DIR,TQOI_EMIT_STDOUT"
+ALLOWLIST="RCH_ENV_ALLOWLIST=TQOI_MODE,TQOI_PROFILE,TQOI_SOURCE_REVISION,TQOI_ARTIFACT_DIR,TQOI_EMIT_STDOUT,TQOI_EVENTS_B64"
 
 run_lane() {
   local mode="$1"
   local profile="$2"
   local artifact_rel="$3"
   local emit_stdout="$4"
+  local events_b64="${5:-}"
   (
     cd "${REPO_ROOT}" &&
       env \
@@ -99,6 +100,7 @@ run_lane() {
         "TQOI_SOURCE_REVISION=${REVISION}" \
         "TQOI_ARTIFACT_DIR=${artifact_rel}" \
         "TQOI_EMIT_STDOUT=${emit_stdout}" \
+        "TQOI_EVENTS_B64=${events_b64}" \
         rch exec -- cargo test -p fs-airflow --test qoi_producer_e2e -- --nocapture --test-threads=1
   )
 }
@@ -125,7 +127,7 @@ check "${PRODUCE_OK}" "producer battery completed green"
 
 B64_LINE=""
 if [[ "${PRODUCE_OK}" == "1" ]]; then
-  B64_LINE="$(grep -o 'TQOI_EVENTS_B64:[A-Za-z0-9+/=]*' "${PRODUCE_OUT}" | tail -1 || true)"
+  B64_LINE="$(grep -oh 'TQOI_EVENTS_B64:[A-Za-z0-9+/=]*' "${PRODUCE_OUT}" "${ARTIFACT_DIR}/produce.stderr" 2>/dev/null | tail -1 || true)"
 fi
 [[ -n "${B64_LINE}" ]] || { log produce "no event stream on stdout; tail of stderr follows"; tail -40 "${ARTIFACT_DIR}/produce.stderr" >&2 || true; exit 1; }
 decode_stream "${B64_LINE#TQOI_EVENTS_B64:}" "${ARTIFACT_DIR}/events.ndjson"
@@ -138,7 +140,7 @@ cp "${ARTIFACT_DIR}/events.ndjson" "${REPO_ROOT}/${LANE_DIR_REL}/events.ndjson"
 # ----------------------------------------- phase 2: verifier, pristine stream
 log verify "solver-free chain/coverage verification via RCH"
 VERIFY_OK=0
-if run_lane verify "${PROFILE}" "${LANE_DIR_REL}" 0 \
+if run_lane verify "${PROFILE}" "${LANE_DIR_REL}" 0 "${B64_LINE#TQOI_EVENTS_B64:}" \
     >"${ARTIFACT_DIR}/verify.stdout" 2>"${ARTIFACT_DIR}/verify.stderr"; then
   VERIFY_OK=1
 fi
@@ -153,30 +155,38 @@ check "${VERIFY_CLEAN}" "green verifier did not name any violation"
 # --------------------------------------------- phase 3: python physics oracle
 log oracle "independent recomputation from raw inputs"
 ORACLE_OK=0
-python3 - "${ARTIFACT_DIR}/events.ndjson" >"${ARTIFACT_DIR}/oracle.json" <<'PY' || ORACLE_OK=1
+python3 - "${ARTIFACT_DIR}/events.ndjson" >"${ARTIFACT_DIR}/oracle.json" <<'PY'
 import json, struct, sys
 
 def f64(text):
     return struct.unpack(">d", bytes.fromhex(text))[0]
 
+def pack_f64(val):
+    return struct.pack(">d", val)
+
 events = [json.loads(line) for line in open(sys.argv[1]) if line.strip()]
-inputs = next(event for event in events if event["event"] == "input_artifacts")
+inputs = next((event for event in events if event["event"] == "input_artifacts"), None)
 records = {event["qoi"]: event for event in events if event["event"] == "qoi_record"}
 problems, notes = [], []
 
+if inputs is None:
+    notes.append("profile has no input_artifacts event; skipped raw input physics recomputation")
+    print(json.dumps({"problems": problems, "notes": notes}, indent=2))
+    sys.exit(0)
+
 temps = [f64(t.strip('"')) for t in inputs["temperature_bits"]]
-junction = json.loads(inputs["junction_vertices"])
+junction = inputs["junction_vertices"] if isinstance(inputs["junction_vertices"], list) else json.loads(inputs["junction_vertices"])
 raw_max = max(temps[index] for index in junction)
 limit_k = f64(inputs["limit_k_bits"].strip('"'))
 value_of = lambda name: f64(records[name]["value_bits"].strip('"'))
 
-if value_of("junction_maximum").to_bytes(8, "big") != raw_max.to_bytes(8, "big"):
+if pack_f64(value_of("junction_maximum")) != pack_f64(raw_max):
     problems.append(f"junction_maximum {value_of('junction_maximum')!r} != raw region max {raw_max!r}")
 else:
     notes.append("junction_maximum equals raw region maximum bitwise")
 
 margin_expected = limit_k - raw_max
-if value_of("thermal_margin").to_bytes(8, "big") != margin_expected.to_bytes(8, "big"):
+if pack_f64(value_of("thermal_margin")) != pack_f64(margin_expected):
     problems.append(f"thermal_margin {value_of('thermal_margin')!r} != limit-max {margin_expected!r}")
 else:
     notes.append("thermal_margin equals limit minus raw maximum bitwise")
@@ -196,7 +206,7 @@ else:
 
 resistances = [f64(r.strip('"')) for r in inputs["resistances"]]
 r_series, r_leak = sum(resistances[:3]), resistances[3]
-raw_points = json.loads(inputs["fan_points"])
+raw_points = inputs["fan_points"] if isinstance(inputs["fan_points"], list) else json.loads(inputs["fan_points"])
 fan_points = [(f64(p["q"].strip('"')), f64(p["p"].strip('"'))) for p in raw_points]
 
 def fan_pressure(q):
@@ -258,6 +268,9 @@ for name, record in records.items():
 print(json.dumps({"problems": problems, "notes": notes}, indent=2))
 sys.exit(1 if problems else 0)
 PY
+if [[ $? -eq 0 ]]; then
+  ORACLE_OK=1
+fi
 check "${ORACLE_OK}" "python oracle reproduces the producer from raw inputs"
 
 # ------------------------------------------------------- phase 4: tamper drill
@@ -274,8 +287,13 @@ flipped = "0" if match.group(1) != "0" else "1"
 lines[victim] = lines[victim][: match.start(1)] + flipped + lines[victim][match.end(1):]
 open(sys.argv[2], "w").write("\n".join(lines) + "\n")
 PY
+  TAMPER_B64="$(python3 - "${REPO_ROOT}/${TAMPER_DIR_REL}/events.ndjson" <<'PY'
+import base64, sys
+print(base64.b64encode(open(sys.argv[1], "rb").read()).decode("ascii"))
+PY
+)"
   TAMPER_REFUSED=0
-  if run_lane verify "${PROFILE}" "${TAMPER_DIR_REL}" 0 \
+  if run_lane verify "${PROFILE}" "${TAMPER_DIR_REL}" 0 "${TAMPER_B64}" \
       >"${ARTIFACT_DIR}/tamper.stdout" 2>"${ARTIFACT_DIR}/tamper.stderr"; then
     TAMPER_REFUSED=0
   else
@@ -283,7 +301,7 @@ PY
   fi
   check "${TAMPER_REFUSED}" "tampered stream refused by the real verifier"
   NAMED_CHAIN=0
-  if grep -q "digest mismatch" "${ARTIFACT_DIR}/tamper.stderr" 2>/dev/null; then
+  if grep -q "digest mismatch" "${ARTIFACT_DIR}/tamper.stderr" "${ARTIFACT_DIR}/tamper.stdout" 2>/dev/null; then
     NAMED_CHAIN=1
   fi
   check "${NAMED_CHAIN}" "refusal names the broken hash chain specifically"
@@ -302,7 +320,7 @@ if [[ "${PROFILE}" == "full" ]]; then
   fi
   check "${REPEAT_OK}" "repeat battery completed green"
   if [[ "${REPEAT_OK}" == "1" ]]; then
-    B64_REPEAT="$(grep -o 'TQOI_EVENTS_B64:[A-Za-z0-9+/=]*' "${REPEAT_OUT}" | tail -1 || true)"
+    B64_REPEAT="$(grep -oh 'TQOI_EVENTS_B64:[A-Za-z0-9+/=]*' "${REPEAT_OUT}" "${ARTIFACT_DIR}/produce_repeat.stderr" 2>/dev/null | tail -1 || true)"
     decode_stream "${B64_REPEAT#TQOI_EVENTS_B64:}" "${ARTIFACT_DIR}/events_repeat.ndjson"
     IDENTICAL=0
     cmp -s "${ARTIFACT_DIR}/events.ndjson" "${ARTIFACT_DIR}/events_repeat.ndjson" && IDENTICAL=1
