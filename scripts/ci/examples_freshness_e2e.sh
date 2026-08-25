@@ -107,6 +107,40 @@ sed 's/:duty 2\.0/:duty 1.0/' "${BROKEN}" > "${WORK}/repaired.fsim"
 check "one-token repair reproduces the tracked reference bytes" \
   cmp -s "${WORK}/repaired.fsim" "${REFERENCE}"
 
+# ---- 5. heatsink-fan: full cooling contract validates clean -----------------
+HEATSINK="${REPO_ROOT}/examples/heatsink-fan/heatsink-fan.fsim"
+STL="${REPO_ROOT}/examples/heatsink-fan/heatsink.stl"
+PACK="${REPO_ROOT}/data/reference-project/aa6061.fsmcdpk"
+
+check "heatsink-fan validates ok" validate_ok "${HEATSINK}"
+check "heatsink-fan reports zero findings" \
+  grep -q '"finding_count":0' "${WORK}/v.json"
+
+# ---- 6. import and solve orchestration --------------------------------------
+import_ok() {
+  "${BINARY}" --json import "${HEATSINK}" "${STL}" "${WORK}/ledger.db" --unit m --max-hole-edges 0 > "${WORK}/imp.json" 2> "${WORK}/imp.err"
+}
+check "heatsink import into ledger ok" import_ok
+check "import reports artifact count >= 1" grep -q '"artifact_count":1' "${WORK}/imp.json"
+
+solve_prefix() {
+  RC=0
+  "${BINARY}" --json solve "${HEATSINK}" "${WORK}/ledger.db" --materials "${PACK}" > "${WORK}/s.json" 2> "${WORK}/s.err" || RC=$?
+  test "${RC}" -eq 5
+}
+check "solve prefix halts honestly at conduction gap with exit 5" solve_prefix
+
+# ---- 7. deterministic engineering report and package ------------------------
+report_ok() {
+  "${BINARY}" --json report "cooling_demo_run" "${WORK}/ledger.db" > "${WORK}/rep.json" 2> "${WORK}/rep.err"
+}
+check "report generator creates html and json twin" report_ok
+
+package_ok() {
+  "${BINARY}" --json package "cooling_demo_run" "${WORK}/ledger.db" > "${WORK}/pkg.json" 2> "${WORK}/pkg.err"
+}
+check "package generator creates audited archive" package_ok
+
 # ------------------------------------------------------------------- verdict
 log summary "checks=${CHECKS} failures=${FAILURES}"
 if [[ "${FAILURES}" -gt 0 ]]; then

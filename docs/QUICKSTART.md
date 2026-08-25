@@ -77,10 +77,42 @@ cargo run -p fs-cli --bin frankensim -- solve \
 The import admits the quarantined STL into the ledger; the solve executes
 the durable producer stages — import-verify, assign, material-resolve, and
 an interval-certified flow-network operating point — and then refuses at
-the conduction stage naming the bead that owns the gap. Report and package
-refuse the same way. Nothing is written that claims more than happened.
+the conduction stage naming the bead that owns the gap.
 
-## 5. Where to go next
+## 5. Generate deterministic report and evidence package
+
+```bash
+# Generate deterministic self-contained HTML engineering report and JSON twin
+cargo run -p fs-cli --bin frankensim -- report cooling_demo_run "${LEDGER}"
+
+# Package all durable receipts into an audited offline archive
+cargo run -p fs-cli --bin frankensim -- package cooling_demo_run "${LEDGER}"
+```
+
+## 6. One-command convenience run
+
+```bash
+cargo run -p fs-cli --bin frankensim -- run \
+  examples/heatsink-fan/heatsink-fan.fsim "${LEDGER}" \
+  --materials data/reference-project/aa6061.fsmcdpk
+```
+
+## 7. Python SDK & Jupyter Notebooks
+
+Under Decision Record `ADPT-2026-07`, the Python SDK operates strictly
+out-of-process via structured JSON lines over the certified binary:
+
+```python
+from frankensim import FrankenSimClient
+
+client = FrankenSimClient()
+val = client.validate("examples/heatsink-fan/heatsink-fan.fsim")
+print(f"Validation: {val.status}, Project hash: {val.project_hash}")
+```
+
+See `examples/notebooks/cooling_reference.ipynb` for the full worked notebook.
+
+## 8. Where to go next
 
 | Path | What it teaches |
 |------|-----------------|
@@ -88,5 +120,7 @@ refuse the same way. Nothing is written that claims more than happened.
 | `examples/refusal-loop/README.md` | The refusal/fix loop as a workflow |
 | `examples/heatsink-fan/README.md` | The full cooling contract and the flow-network operating point |
 | `examples/cooling-enclosure/README.md` | Reading receipts, budgets, and no-claims |
+| `examples/notebooks/cooling_reference.ipynb` | End-to-end Python SDK workflow in Jupyter |
 | `crates/fs-project/src/spec.rs` | The validated schema, section by section |
+| `crates/fs-io/src/cae_matrix.rs` | CAE format capability and quarantine matrix |
 | Each crate's `CONTRACT.md` | Invariants, determinism class, and no-claim boundaries |

@@ -11,13 +11,6 @@
 //! outcome mints an experimental claim; [`crate::SCOPE_STATEMENT`]
 //! travels in every run.
 //!
-//! STATUS (2026-08-25): type-check PENDING — this file was written
-//! against source-verified APIs but never compiled: the host hit
-//! critical memory pressure and the RCH fleet refused all slots at
-//! once. First runner with a fleet slot: `cargo check -p fs-aeroac
-//! --test slot_jet_3d_sweep` BEFORE running anything; on failure,
-//! revert the introducing commit rather than patching blind.
-//!
 //! Run with `cargo test -p fs-aeroac --test slot_jet_3d_sweep --release
 //! -- --ignored --nocapture`. Heavy: each rung settles then records;
 //! budget wall time accordingly and let the checkpoint machinery
@@ -30,8 +23,8 @@ use fs_lbm::d3q19::CollisionModel3;
 /// collision rate at fixed `u_jet`, per the executed ramp protocol).
 fn base_config(second_order_rate: f64) -> SlotJet3dConfig {
     SlotJet3dConfig {
-        nx: 80,
-        ny: 40,
+        nx: 96,
+        ny: 48,
         nz: 12,
         slot_half: 2.5,
         u_jet: 0.04,
@@ -45,8 +38,8 @@ fn base_config(second_order_rate: f64) -> SlotJet3dConfig {
         fringe_width: 12,
         fringe_sigma: 0.4,
         seed_amplitude: 0.05,
-        steps_settle: 4_000,
-        steps_record: 4_096,
+        steps_settle: 8_000,
+        steps_record: 8_192,
     }
 }
 
@@ -105,6 +98,20 @@ fn re_sweep_campaign() {
             rung.flux_imbalance
         ));
     }
+
+    // Box-sensitivity octave (DONE-WHEN): double the spanwise extent
+    // on the highest-Re rung — 2-D-ness is exactly what we are testing
+    // our way out of, so a too-thin box must be ruled out explicitly.
+    let mut cfg_hi = base_config(*LADDER.last().expect("non-empty ladder"));
+    cfg_hi.nz *= 2;
+    let run_hi = run_slot_jet_3d(&cfg_hi).expect("octave rung executes");
+    let cls_hi = classify_rung(&run_hi, &cfg_hi).expect("octave classification");
+    jsonl.push_str(&cls_hi.to_jsonl());
+    jsonl.push('\n');
+    println!(
+        "octave\tnz={}\tRe={:.1}\tflatness={:.3e}\ttonal={}\tSt={:.4}",
+        cfg_hi.nz, cls_hi.reynolds, cls_hi.flatness, cls_hi.tonal, cls_hi.strouhal
+    );
 
     std::fs::write(&receipt_path, &jsonl).expect("archive sweep receipts");
     println!(
