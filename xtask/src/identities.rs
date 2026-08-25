@@ -1035,9 +1035,6 @@ fn parse_declaration(owner: &str, raw: BTreeMap<String, String>) -> Result<Ident
         Some(value) => parse_schema_types(&value)?,
         None => Vec::new(),
     };
-    if !schema_types.is_empty() {
-        eprintln!("PROBE-PARSE id={id} types={}", schema_types.len());
-    }
     let schema_dependencies =
         parse_schema_dependencies(&take_required(&mut fields, "schema_dependencies")?, &id)?;
     let digest = take_required(&mut fields, "digest")?;
@@ -10089,12 +10086,6 @@ fn reject_imported_function_dependencies(
     let semantic_type_token_indexes = rust_authority_type_token_indexes(&semantic_tokens)?;
     let lexical_bindings = rust_authority_lexical_bindings(fragment)?;
     let generated_item_macros = rust_visible_generated_item_macros(index, module);
-    if !declared_type_authorities.is_empty() {
-        eprintln!(
-            "PROBE-WALL-ENTRY authority={authority} set={:?} module={module}",
-            declared_type_authorities
-        );
-    }
     if tokens
         .iter()
         .enumerate()
@@ -10209,11 +10200,6 @@ fn reject_imported_function_dependencies(
                 && (binding.kind == RustImportBindingKind::Exact
                     || !rust_candidate_outranks_wildcard(index, &candidate, namespace))
             {
-                eprintln!(
-                    "PROBE-WALL-REFUSE authority={authority} token={} in_declared_set={}",
-                    token.text,
-                    declared_type_authorities.contains(token.text)
-                );
                 return Err(format!(
                     "{authority} references imported identifier {:?} through binding {:?}; imported helper authority and imported type/trait/operator authority must be declared explicitly",
                     token.text, binding.name
@@ -11661,13 +11647,6 @@ fn identity_schema_base_hash_with_index(
         .iter()
         .map(|declared_type| declared_type.symbol.clone())
         .collect();
-    if !declared_type_authorities.is_empty() {
-        eprintln!(
-            "PROBE-AUTH id={} authorities={}",
-            decl.id,
-            declared_type_authorities.len()
-        );
-    }
     let owner_closure = normalized_rust_function_closure_with_index(
         text,
         index,
