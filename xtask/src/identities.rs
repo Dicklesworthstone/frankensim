@@ -20088,6 +20088,18 @@ mod right { pub const DUPLICATE: u32 = 2; }
     }
 
     #[test]
+    fn schema_type_grammar_gates_stdlib_prelude_paths() {
+        let types =
+            parse_schema_types("std#Vec,std#Arc,core#PhantomData").expect("prelude paths parse");
+        assert_eq!(types.len(), 3);
+        assert_eq!(types[0].canonical(), "std#Arc");
+        assert!(
+            parse_schema_types("std#NotARealPreludeType").is_err(),
+            "non-table std symbols must refuse"
+        );
+        assert!(parse_schema_types("alloc#Vec").is_ok());
+    }
+    #[test]
     fn named_type_declaration_bytes_extract_and_refuse_ambiguity() {
         let text = "struct Unique { x: u8 }\n\nstruct Dup {}\nstruct Dup {}\n";
         let index = RustSourceIndex::new(text);
