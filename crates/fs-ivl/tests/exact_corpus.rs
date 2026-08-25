@@ -30,6 +30,7 @@
 //! feeds. This corpus proves its stated rows only.
 
 use fs_casebook::fnv1a64;
+use std::fmt::Write as _;
 use fs_ivl::predicates::{Sign, incircle, orient2d, orient3d};
 use fs_ivl::{Interval, TaylorModel1, expansion, newton};
 
@@ -512,8 +513,7 @@ fn built_corpus() -> String {
             .map(i128::to_string)
             .collect::<Vec<_>>()
             .join("|");
-        use std::fmt::Write as _;
-        let _ = write!(body, "row|r{n:03}|{primitive}|{joined}\n");
+        writeln!(body, "row|r{n:03}|{primitive}|{joined}").expect("write corpus row");
     };
 
     // (a) Exact dyadic point chains — reducible spellings included

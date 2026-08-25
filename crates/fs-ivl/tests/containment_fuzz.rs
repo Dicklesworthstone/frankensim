@@ -38,6 +38,9 @@
 //! a fuzz battery is measured evidence with a declared budget.
 
 use fs_ivl::Interval;
+
+/// Local alias keeps the clippy type-complexity gate readable.
+type MutantOp<'a> = &'a dyn Fn(Interval, Interval) -> Interval;
 use fs_math::dd::Dd;
 use fs_propcheck::Stream;
 
@@ -600,8 +603,6 @@ fn g3_unnudged_and_inward_mutant_ops_are_killed() {
             Interval::point(lo_in.min(hi_in))
         }
     };
-    /// Local alias keeps the clippy type-complexity gate readable.
-    type MutantOp<'a> = &'a dyn Fn(Interval, Interval) -> Interval;
     let mutants: [(&str, OpKind, MutantOp<'_>); 3] = [
         ("nearest-add", OpKind::Add, &nearest_add),
         ("nearest-mul", OpKind::Mul, &nearest_mul),

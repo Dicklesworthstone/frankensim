@@ -1241,7 +1241,7 @@ mod runtime_tests {
     }
 
     #[test]
-    fn digital_filter_refusal_does_not_commit_earlier_section_state() {
+    fn g0_digital_filter_refusal_does_not_commit_earlier_section_state() {
         let valid = Biquad {
             b: [1.0, 0.0, 0.0],
             a: [0.0, 0.0],
@@ -1307,7 +1307,7 @@ mod runtime_tests {
     }
 
     #[test]
-    fn delayed_filter_refusal_does_not_commit_line_state() {
+    fn g0_delayed_filter_refusal_does_not_commit_line_state() {
         let assert_same_state = |got: &DelayedFilter, want: &DelayedFilter| {
             assert_eq!(got.buf, want.buf, "delay history changed after refusal");
             assert_eq!(got.write, want.write, "write cursor changed after refusal");
