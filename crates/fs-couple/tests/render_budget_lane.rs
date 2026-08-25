@@ -263,11 +263,17 @@ fn mint_fusion_pair(reps: usize) -> (BudgetRow, BudgetRow, f64) {
         headroom_at_48k: strict_rate / f64::from(RATE),
     };
     let fused = BudgetRow {
+        fixture: base.fixture,
         image: "wind-reed/char-line+fast-newton-junction",
+        states: base.states,
+        block_len: base.block_len,
+        sample_rate_hz: base.sample_rate_hz,
+        build_profile: base.build_profile,
+        machine_fingerprint: base.machine_fingerprint,
+        reps: base.reps,
         median_samples_per_sec: fast_rate,
         dispersion: fast_disp,
         headroom_at_48k: fast_rate / f64::from(RATE),
-        ..base.clone()
     };
     let ratio = fast_rate / strict_rate.max(f64::MIN_POSITIVE);
     (base, fused, ratio)
@@ -298,7 +304,7 @@ fn fusion_before_after_rows_encode_and_stay_sane() {
     // genuine speedup shows up in the release mint).
     let (strict_row, fast_row, ratio) = mint_fusion_pair(5);
     for row in [&strict_row, &fast_row] {
-        assert!(row.median_samples_per_sec.is_finite() && *row.median_samples_per_sec > 0.0);
+        assert!(row.median_samples_per_sec.is_finite() && row.median_samples_per_sec > 0.0);
         assert!(row.dispersion.is_finite());
         let bytes = row.canonical();
         assert!(bytes.contains("image\twind-reed/char-line"));
