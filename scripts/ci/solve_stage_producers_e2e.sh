@@ -117,12 +117,6 @@ run_case_multi_region_volumetricization() {
   [[ "${FAILURES}" == "0" ]]
 }
 
-if [[ -n "${CASE}" ]]; then
-  THROUGH="conduction"
-  run_case_multi_region_volumetricization
-  exit $?
-fi
-
 if [[ -z "${ARTIFACT_DIR}" ]]; then
   ARTIFACT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/solve-e2e-XXXXXX")"
 fi
@@ -160,6 +154,12 @@ check() {
 
 contains() { grep -qF -- "$2" "$1"; }
 not_contains() { ! grep -qF -- "$2" "$1"; }
+
+if [[ -n "${CASE}" ]]; then
+  THROUGH="conduction"
+  run_case_multi_region_volumetricization
+  exit $?
+fi
 
 # ------------------------------------------------------------------ setup
 for f in "${PROJECT}" "${GEOMETRY}" "${MATERIAL_PACK}"; do
