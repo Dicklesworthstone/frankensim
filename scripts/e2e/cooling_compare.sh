@@ -55,7 +55,7 @@ case "${COMMAND}" in
     fi
 
     printf "==> 2. Verifying Python SDK preserves the unavailable boundary\n"
-    PYTHONPATH="${REPO_ROOT}/python" python3 -c '
+    FRANKENSIM_BIN="${BINARY}" PYTHONPATH="${REPO_ROOT}/python" python3 -c '
 from frankensim import FrankenSimClient, UnavailableError
 client = FrankenSimClient()
 try:

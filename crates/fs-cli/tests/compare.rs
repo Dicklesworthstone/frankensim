@@ -4,7 +4,11 @@ use fs_cli::{exit, run};
 
 #[test]
 fn compare_text_refuses_instead_of_emitting_fixture_evidence() {
-    let output = run(["compare".to_string(), "run_base".to_string(), "run_opt".to_string()]);
+    let output = run([
+        "compare".to_string(),
+        "run_base".to_string(),
+        "run_opt".to_string(),
+    ]);
     assert_eq!(output.exit_code, exit::UNAVAILABLE);
     assert!(output.stdout.contains("status=unavailable"));
     assert!(output.stderr.contains("cli-stage-unavailable"));
