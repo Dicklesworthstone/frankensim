@@ -393,8 +393,8 @@ impl DelayedFilter {
     /// and strictly inside the allocated buffer).
     ///
     /// # Errors
-    /// A delay that does not fit, or a non-positive sample interval
-    /// on the filter.
+    /// A delay that does not fit, or a non-finite/non-positive sample
+    /// interval on the filter.
     pub fn new(delay_samples: f64, filter: DigitalFilter) -> Result<Self, DiscretizeError> {
         if !(delay_samples >= 2.0 && delay_samples.is_finite()) {
             return Err(DiscretizeError::InvalidRuntimeDimensions {
@@ -403,12 +403,17 @@ impl DelayedFilter {
                 actual: delay_samples.max(0.0) as usize,
             });
         }
-        if !(filter.t_s > 0.0) {
+        if !(filter.t_s > 0.0 && filter.t_s.is_finite()) {
             return Err(DiscretizeError::BadSampleInterval);
         }
         let delay_int = delay_samples.floor() as usize;
         let frac = delay_samples - delay_int as f64;
-        let n = delay_int + 4;
+        const BUFFER_PADDING: usize = 4;
+        let max_delay = (isize::MAX as usize / core::mem::size_of::<f64>()) - BUFFER_PADDING;
+        if delay_int > max_delay {
+            return Err(DiscretizeError::RuntimeDimensionOverflow { n: delay_int });
+        }
+        let n = delay_int + BUFFER_PADDING;
         Ok(Self {
             buf: vec![0.0; n],
             write: 0,
@@ -500,8 +505,8 @@ impl DelayedFilter {
     /// map of a sampled `R(ω)`, not a rational fit.
     ///
     /// # Errors
-    /// Non-finite samples, a non-positive sample interval, or an IR
-    /// shorter than 4 samples.
+    /// Non-finite samples, a non-finite/non-positive sample interval, or an
+    /// IR shorter than 4 samples.
     pub fn from_impulse_response(t_s: f64, ir: Vec<f64>) -> Result<Self, DiscretizeError> {
         if !(t_s > 0.0 && t_s.is_finite()) {
             return Err(DiscretizeError::BadSampleInterval);
@@ -579,7 +584,8 @@ impl DelayedFilter {
     /// in-flight waves persist, the new taps govern future reflections.
     ///
     /// # Errors
-    /// As [`DelayedFilter::from_impulse_response`].
+    /// As [`DelayedFilter::from_impulse_response`], plus a non-finite history
+    /// sample.
     pub fn from_impulse_response_with_history(
         t_s: f64,
         ir: Vec<f64>,
@@ -588,9 +594,19 @@ impl DelayedFilter {
         let mut line = Self::from_impulse_response(t_s, ir)?;
         let n = line.buf.len();
         let take = history.len().min(n);
+        let history_start = history.len() - take;
+        if let Some(offset) = history[history_start..]
+            .iter()
+            .position(|value| !value.is_finite())
+        {
+            return Err(DiscretizeError::NonFiniteRuntimeValue {
+                field: "history",
+                index: Some(history_start + offset),
+            });
+        }
         // Copy the NEWEST `take` samples so the most recent waves land
         // just behind the write cursor.
-        for (k, &v) in history[history.len() - take..].iter().enumerate() {
+        for (k, &v) in history[history_start..].iter().enumerate() {
             let slot = (line.write + (n - take) + k) % n;
             line.buf[slot] = v;
         }
@@ -753,7 +769,7 @@ pub enum DiscretizeError {
         /// Nyquist [rad/s].
         nyquist: f64,
     },
-    /// Non-positive sample interval.
+    /// Non-finite or non-positive sample interval.
     BadSampleInterval,
     /// A public state-space field does not match the declared state
     /// dimension.
@@ -765,9 +781,10 @@ pub enum DiscretizeError {
         /// Supplied number of scalar entries.
         actual: usize,
     },
-    /// Squaring the declared state dimension overflowed `usize`.
+    /// A declared runtime dimension cannot be represented by its required
+    /// storage layout.
     RuntimeDimensionOverflow {
-        /// Declared state dimension.
+        /// Offending runtime dimension.
         n: usize,
     },
     /// A runtime input, coefficient, state coordinate, or computed result is
@@ -795,7 +812,9 @@ impl core::fmt::Display for DiscretizeError {
                     "frequency {omega} rad/s at/beyond nyquist {nyquist} rad/s"
                 )
             }
-            DiscretizeError::BadSampleInterval => write!(f, "sample interval must be positive"),
+            DiscretizeError::BadSampleInterval => {
+                write!(f, "sample interval must be positive and finite")
+            }
             DiscretizeError::InvalidRuntimeDimensions {
                 field,
                 expected,
@@ -805,7 +824,10 @@ impl core::fmt::Display for DiscretizeError {
                 "runtime state-space field {field} has length {actual}, expected {expected}"
             ),
             DiscretizeError::RuntimeDimensionOverflow { n } => {
-                write!(f, "runtime state dimension {n} cannot be squared")
+                write!(
+                    f,
+                    "runtime dimension {n} cannot be represented by required storage"
+                )
             }
             DiscretizeError::NonFiniteRuntimeValue { field, index } => match index {
                 Some(index) => write!(f, "runtime value {field}[{index}] must be finite"),
@@ -1337,6 +1359,51 @@ mod runtime_tests {
             summing_state, summing_before,
             "a non-finite aggregate output must not commit section memories"
         );
+    }
+
+    #[test]
+    fn g0_delayed_filter_constructors_refuse_invalid_state_sources() {
+        let filter = DigitalFilter {
+            sections: Vec::new(),
+            direct: 1.0,
+            t_s: f64::INFINITY,
+            prewarp: 0.0,
+        };
+        assert!(matches!(
+            DelayedFilter::new(2.0, filter),
+            Err(DiscretizeError::BadSampleInterval)
+        ));
+
+        let filter = DigitalFilter {
+            sections: Vec::new(),
+            direct: 1.0,
+            t_s: 1.0 / 48_000.0,
+            prewarp: 0.0,
+        };
+        assert!(matches!(
+            DelayedFilter::new(f64::MAX, filter),
+            Err(DiscretizeError::RuntimeDimensionOverflow { .. })
+        ));
+
+        assert!(matches!(
+            DelayedFilter::from_impulse_response_with_history(
+                1.0 / 48_000.0,
+                vec![1.0, 0.0, 0.0, 0.0],
+                &[0.0, f64::NAN],
+            ),
+            Err(DiscretizeError::NonFiniteRuntimeValue {
+                field: "history",
+                index: Some(1)
+            })
+        ));
+
+        let truncated = DelayedFilter::from_impulse_response_with_history(
+            1.0 / 48_000.0,
+            vec![1.0, 0.0, 0.0, 0.0],
+            &[f64::NAN, 1.0, 2.0, 3.0, 4.0],
+        )
+        .unwrap();
+        assert_eq!(truncated.history(), [1.0, 2.0, 3.0, 4.0]);
     }
 
     #[test]
