@@ -502,6 +502,20 @@ fn frame_006_replay_and_drills() {
         ),
         "empty catalog returns typed FrameCvarError::NoFeasibleCatalogScale",
     );
+    let losses_res = try_losses(&ens, params, 1.0);
+    verdict(
+        "frame-006-try-losses",
+        losses_res
+            .as_ref()
+            .is_ok_and(|l| l.len() == 12 && l.iter().all(|x| x.is_finite())),
+        "try_losses produces 12 finite drift samples",
+    );
+    let cvar_res = try_ensemble_cvar(&ens, params, 1.0, 0.9);
+    verdict(
+        "frame-006-try-ensemble-cvar",
+        cvar_res.is_ok_and(|c| c.is_finite() && c > 0.0),
+        "try_ensemble_cvar produces a positive finite CVaR value",
+    );
     let infeasible =
         std::panic::catch_unwind(|| cvar_mass_min(&ens, params, 0.9, 1e-9, &[0.5, 1.0]));
     verdict(

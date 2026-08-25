@@ -8,7 +8,6 @@
 //! The chosen scale then snaps UP to the section catalog and the
 //! snapped design is INDEPENDENTLY re-checked.
 
-use crate::assert_ground_motion_ensemble;
 use crate::history::{StoryFrame, StoryParams, peak_drift};
 pub use fs_robust::{EmpiricalCvarReport, RobustError, cvar, empirical_cvar};
 use fs_scenario::ensemble::{SpectrumModel, StochasticEnsemble};
@@ -37,19 +36,33 @@ pub enum FrameCvarError {
     /// The ensemble was empty or did not declare a Kanai-Tajimi spectrum model.
     EnsembleMalformed(&'static str),
     /// Realization of an ensemble member failed.
-    RealizationFailed { member: u32 },
+    RealizationFailed {
+        /// Member index that failed realization.
+        member: u32,
+    },
     /// Non-finite drift loss encountered.
-    NonFiniteLoss { member: u32, value: f64 },
+    NonFiniteLoss {
+        /// Member index where non-finite loss was observed.
+        member: u32,
+        /// Non-finite loss value observed.
+        value: f64,
+    },
     /// Canonical CVaR calculation refused.
     Robust(RobustError),
     /// Even the maximum scale in the bisection range violates the CVaR limit.
     InfeasibleLimit {
+        /// Maximum scale in the bisection range.
         hi_scale: f64,
+        /// Observed CVaR at the maximum scale.
         cvar_observed: f64,
+        /// Declared CVaR limit.
         limit: f64,
     },
     /// The catalog has no section scale greater than or equal to the continuous optimum.
-    NoFeasibleCatalogScale { scale_star: f64 },
+    NoFeasibleCatalogScale {
+        /// Continuous optimal scale.
+        scale_star: f64,
+    },
 }
 
 impl core::fmt::Display for FrameCvarError {
@@ -202,12 +215,6 @@ pub fn try_cvar_mass_min(
 pub fn ensemble_cvar(ensemble: &StochasticEnsemble, base: StoryParams, s: f64, beta: f64) -> f64 {
     try_ensemble_cvar(ensemble, base, s, beta)
         .expect("frame-generated losses and beta must satisfy the canonical CVaR contract")
-}
-
-/// Peak-drift losses over the whole ensemble at section scale `s`.
-fn losses(ensemble: &StochasticEnsemble, base: StoryParams, s: f64) -> Vec<f64> {
-    try_losses(ensemble, base, s)
-        .expect("frame-generated losses must satisfy the ground-motion ensemble contract")
 }
 
 /// Minimize mass (∝ scale) subject to CVaR_β(peak drift) ≤ `limit` by
