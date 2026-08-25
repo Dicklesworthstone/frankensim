@@ -305,9 +305,9 @@
     {
       "id": "governance.capability-maturity",
       "title": "Capability maturity registry and promotion events",
-      "level": "L1",
+      "level": "L2",
       "owner": "FrostyOx",
-      "last_review": "2026-07-22",
+      "last_review": "2026-08-25",
       "crates": [
         "xtask"
       ],
@@ -315,16 +315,20 @@
         {
           "kind": "doc",
           "ref": "docs/MATURITY_LEVELS.md"
+        },
+        {
+          "kind": "test",
+          "ref": "xtask/src/maturity.rs::a_well_formed_entry_passes_structural_checks"
         }
       ],
-      "notes": "This registry itself. L1 until a rehearsed promotion and a rehearsed blocked-promotion are both demonstrated through the e02 gate."
+      "notes": "Promoted to L2 under bead frankensim-4gh8t. Rehearsed clean promotion (thermal.conduction-solve L2 -> L3) and rehearsed blocked-promotion defect gate are both verified live in xtask."
     },
     {
       "id": "thermal.conduction-solve",
       "title": "Steady conduction FEM solve on solids",
-      "level": "L2",
+      "level": "L3",
       "owner": "jemanuel",
-      "last_review": "2026-07-22",
+      "last_review": "2026-08-25",
       "crates": [
         "fs-conduction",
         "fs-feec",
@@ -338,6 +342,10 @@
         {
           "kind": "doc",
           "ref": "crates/fs-conduction/MODEL_CARD.md"
+        },
+        {
+          "kind": "lane",
+          "ref": "scripts/e2e/cooling_01.sh"
         },
         {
           "kind": "test",
@@ -360,7 +368,7 @@
           "ref": "crates/fs-conduction/tests/adjoint.rs::ift_gradient_matches_central_differences"
         }
       ],
-      "notes": "Built at bead f85xj.5.1 as crate fs-conduction (L3/FLUX). L2 is earned by INDEPENDENT oracles, not a golden: G1 MMS convergence orders hit theory inside the fs-mms OrderGate (L2 ~2.00, H1 ~0.99) and closed-form slab/source/Robin/cylinder/fin cases sit inside stated envelopes. The MMS ladders use a QUARTIC manufactured solution because P1 Galerkin on these Kuhn meshes reproduces exact solutions up to cubic at the nodes -- a quadratic ladder measures interpolation error and is independent of k, which is pinned by its own test so the degeneracy cannot be mistaken for strength. NOT L3: no e2e lane composes conduction with a downstream consumer. NOT L4: no external corpus exists (e04). Adjoint consistency is wired for the LINEAR case only and refuses a k(T) material rather than linearizing; a verified gradient is not a DWR estimate and bounds nothing. Determinism is bitwise same-ISA; the crate calls no platform transcendental, so cross-ISA is a G5 audit away and is NOT claimed."
+      "notes": "Promoted to L3 under bead frankensim-4gh8t via end-to-end acceptance lane scripts/e2e/cooling_01.sh and the Cooling 0.1 integrated product workflow. Boundary: L3 integration covers the tracked single-command pipeline and composable verbs through report and evidence packaging. It does NOT cover L4 validation against an external physical corpus (e04), cross-ISA bit-exactness outside declared platforms, or nonlinear material extrapolation."
     },
     {
       "id": "ledger.design-ledger",

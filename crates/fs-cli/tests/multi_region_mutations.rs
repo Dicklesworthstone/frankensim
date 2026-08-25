@@ -5,7 +5,7 @@
 //! analytic volumes, corrupt geometry refuses with typed errors.
 
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
-use fs_mesh::volumetric::{RegionId, RegionKind, RegionSpec, UnverifiedPlc, VolumetricPolicy};
+use fs_mesh::{volumetricize, RegionId, RegionKind, RegionSpec, UnverifiedPlc, VolumetricPolicy};
 use fs_project::ImportedMeshLibrary;
 
 const DATA: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/reference-project");
@@ -119,7 +119,7 @@ fn volumes_for(raw: &[RawMesh], seeds: &[[f64; 3]]) -> std::collections::BTreeMa
         let regions = region_specs(raw, &remaps, seeds);
         let plc = UnverifiedPlc::new(vertices, regions);
         let audited =
-            fs_mesh::volumetricize(plc, VolumetricPolicy::fixture_default("m"), cx)
+            volumetricize(plc, VolumetricPolicy::fixture_default("m"), cx)
                 .expect("production mesher handles the mutated fixture");
         let labeled = audited.labeled();
         let positions = labeled.positions();
@@ -253,7 +253,7 @@ fn single_reversed_triangle_refuses_as_not_closed() {
         let regions = region_specs(&raw, &remaps, &[[0.5, 0.5, 0.5], [1.5, 0.5, 0.5]]);
         let plc = UnverifiedPlc::new(vertices, regions);
         let outcome =
-            fs_mesh::volumetricize(plc, VolumetricPolicy::fixture_default("m"), cx);
+            volumetricize(plc, VolumetricPolicy::fixture_default("m"), cx);
         match outcome {
             Ok(_) => panic!("reversed face must not volumetricize"),
             Err(e) => {
@@ -278,7 +278,7 @@ fn deleted_triangle_refuses_as_open_surface() {
         let regions = region_specs(&raw, &remaps, &[[0.5, 0.5, 0.5], [1.5, 0.5, 0.5]]);
         let plc = UnverifiedPlc::new(vertices, regions);
         let outcome =
-            fs_mesh::volumetricize(plc, VolumetricPolicy::fixture_default("m"), cx);
+            volumetricize(plc, VolumetricPolicy::fixture_default("m"), cx);
         assert!(
             outcome.is_err(),
             "an open solid must refuse, never fill silently"
