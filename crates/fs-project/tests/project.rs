@@ -15,14 +15,13 @@ use fs_package::{EvidencePackage, Provenance, VerifiedPackage};
 use fs_project::{
     AirflowLeakage, Budgets, ConductionRegion, ConductionSetup, ConsequenceClass, Cooling,
     DecisionGate, EntityDecl, Envelope, FSIM_VERSION, Fan, FanCurveDecl, FanCurvePoint,
-    FanToleranceBasis, GeometryArtifact, GeometryAssignment, HalfSpaceSide,
-    InterfaceCardBinding, InterfaceState, MaterialBinding, MeshSelector, Metadata, OutputRequest,
-    PerfectContactBinding, PowerDissipation, ProjectSpec, RequirementDirection,
-    RequirementSeverity, RequirementSource, RequirementSourceKind, SafetyFactorPolicy, Seeds,
-    SolverSettings, ThermalBoundary, ThermalBoundaryCondition, ThermalLimit, UnitsDoctrine, Vent,
-    Versions, canonical_hash, migrate_envelope, parse_json, parse_sexpr, parse_sexpr_lenient,
-    print_json, print_sexpr, project_decision_authorities, project_decision_authority,
-    requirement_source_reviews,
+    FanToleranceBasis, GeometryArtifact, GeometryAssignment, HalfSpaceSide, InterfaceCardBinding,
+    InterfaceState, MaterialBinding, MeshSelector, Metadata, OutputRequest, PerfectContactBinding,
+    PowerDissipation, ProjectSpec, RequirementDirection, RequirementSeverity, RequirementSource,
+    RequirementSourceKind, SafetyFactorPolicy, Seeds, SolverSettings, ThermalBoundary,
+    ThermalBoundaryCondition, ThermalLimit, UnitsDoctrine, Vent, Versions, canonical_hash,
+    migrate_envelope, parse_json, parse_sexpr, parse_sexpr_lenient, print_json, print_sexpr,
+    project_decision_authorities, project_decision_authority, requirement_source_reviews,
 };
 use fs_qty::QtyAny;
 use fs_scenario::EntityDeclaration;
@@ -277,10 +276,7 @@ fn reference_project() -> ProjectSpec {
                     ThermalBoundary {
                         target: "cpu".to_string(),
                         condition: ThermalBoundaryCondition::HeatFlux {
-                            outward_flux: QtyAny::new(
-                                125.0,
-                                fs_project::spec::dims::HEAT_FLUX,
-                            ),
+                            outward_flux: QtyAny::new(125.0, fs_project::spec::dims::HEAT_FLUX),
                         },
                     },
                     ThermalBoundary {

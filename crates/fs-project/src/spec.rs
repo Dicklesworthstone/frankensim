@@ -2090,7 +2090,10 @@ impl ProjectSpec {
                     if !seeded_regions.insert(region.region.as_str()) {
                         out.push(violation(
                             "project-conduction-seed-duplicate",
-                            format!("region `{}` has more than one conduction seed", region.region),
+                            format!(
+                                "region `{}` has more than one conduction seed",
+                                region.region
+                            ),
                             "declare exactly one strictly interior seed for each region",
                         ));
                     }
@@ -2105,12 +2108,7 @@ impl ProjectSpec {
 
                 let mut boundary_targets = BTreeSet::new();
                 for boundary in &conduction.boundaries {
-                    check_ref(
-                        ids,
-                        out,
-                        "thermal boundary".to_string(),
-                        &boundary.target,
-                    );
+                    check_ref(ids, out, "thermal boundary".to_string(), &boundary.target);
                     if let Some(id) = ids.get(&boundary.target)
                         && !matches!(id.kind(), EntityKind::Region | EntityKind::Interface)
                     {

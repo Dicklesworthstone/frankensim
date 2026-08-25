@@ -547,7 +547,7 @@ fn g0_the_worked_example_fixtures_stay_fresh_through_the_real_cli_verb() {
     // fixture + hash in the same commit.
     assert!(
         output.stdout.contains(
-            "\"project_hash\":\"7564f37eee52fbbef93f9013bb381f919e8f7022b2346319e57bf93f06328df1\""
+            "\"project_hash\":\"5171668d33c8c3b02d68b779425ef2efb69333506f0ebca0b177c7e415e8f31f\""
         ),
         "heated-plate.fsim drifted from its frozen canonical hash"
     );
@@ -557,7 +557,7 @@ fn g0_the_worked_example_fixtures_stay_fresh_through_the_real_cli_verb() {
     assert_eq!(ref_out.exit_code, exit::SUCCESS);
     assert!(
         ref_out.stdout.contains(
-            "\"project_hash\":\"d69d02bc923516de91eb586f48d9e85fef004942a742b3dd86ac117296324e1e\""
+            "\"project_hash\":\"8dff1c52c0494b960cb438919e1b1da04781cebabded874f80b563a0ff3a9069\""
         ),
         "cooling-reference.fsim drifted from its frozen canonical hash"
     );

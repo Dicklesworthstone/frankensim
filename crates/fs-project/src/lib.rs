@@ -55,11 +55,11 @@ pub use migration::{
 pub use spec::{
     AirflowLeakage, Budgets, ConductionRegion, ConductionSetup, ConsequenceClass, Cooling,
     DecisionGate, DefaultReceipt, EntityDecl, Envelope, Fan, FanCurveDecl, FanCurvePoint,
-    FanToleranceBasis, GeometryArtifact, GeometryAssignment, InterfaceCardBinding,
-    InterfaceState, MaterialBinding, Metadata, OutputRequest, PerfectContactBinding,
-    PowerDissipation, ProjectSpec, RequirementDirection, RequirementSeverity, RequirementSource,
-    RequirementSourceKind, RequirementSourceReview, SafetyFactorPolicy, Seeds, SolverSettings,
-    ThermalBoundary, ThermalBoundaryCondition, ThermalLimit, UnitsDoctrine, Vent, Versions,
+    FanToleranceBasis, GeometryArtifact, GeometryAssignment, InterfaceCardBinding, InterfaceState,
+    MaterialBinding, Metadata, OutputRequest, PerfectContactBinding, PowerDissipation, ProjectSpec,
+    RequirementDirection, RequirementSeverity, RequirementSource, RequirementSourceKind,
+    RequirementSourceReview, SafetyFactorPolicy, Seeds, SolverSettings, ThermalBoundary,
+    ThermalBoundaryCondition, ThermalLimit, UnitsDoctrine, Vent, Versions,
     requirement_source_reviews,
 };
 pub use wire::{

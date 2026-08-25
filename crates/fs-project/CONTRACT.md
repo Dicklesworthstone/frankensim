@@ -127,7 +127,7 @@ bindings; it runs no solves and admits no scenarios itself.
   byte-equal derivation inputs, never physical sameness. Display names are
   outside identity, exactly as in fs-scenario.
 - Wire: `lower`/`recognize` map `ProjectSpec` to and from the `fs_ir::Node`
-  envelope `(fsim-project :version 1 ...)`. `print_sexpr`/`parse_sexpr` and
+  envelope `(fsim-project :version 3 ...)`. `print_sexpr`/`parse_sexpr` and
   `print_json`/`parse_json` are the two spellings; `parse_sexpr_lenient`
   accepts noncanonical bytes and omitted defaultable fields, issuing a
   `CanonicalizationReceipt` (both hashes, `verifies()`) and `DefaultReceipt`s.
@@ -431,7 +431,7 @@ refuse atomically.
   the complete geometry row exactly, but cannot strengthen the importer's
   underlying FNV collision guarantee or authenticate the supplied mesh.
 - The schema freeze (e16, bead .16.5) HAS happened: `project.fsim` is a
-  frozen record in `schema-policy.json` at version 1, enforced by
+  frozen record in `schema-policy.json` at version 3, enforced by
   `xtask check-schemas` (version constant read from source, migration
   obligation `auto-migration-receipt`, proven by the synthetic-migration
   test). Accretion follows the policy row: optional fields with receipted
