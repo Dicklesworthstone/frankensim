@@ -106,8 +106,10 @@ run_case_multi_region_volumetricization() {
   fi
   local retained="${MRI_RETENTION_DIR}/labeled_complex.jsonl"
   check "retained labeled complex exists" test -s "${retained}"
-  check "retention carries both region labels" \
-    grep -q '"region":1' "${retained}" && grep -q '"region":2' "${retained}"
+  # Two separate checks: chaining with && here would let a missing
+  # region-2 label escape the failure tally.
+  check "retention carries region 1 labels" grep -q '"region":1' "${retained}"
+  check "retention carries region 2 labels" grep -q '"region":2' "${retained}"
   check "retention carries welded vertices" \
     test "$(grep -c '"kind":"position"' "${retained}")" -ge 12
   check "no exterior/cavity rows leaked into retention" \
