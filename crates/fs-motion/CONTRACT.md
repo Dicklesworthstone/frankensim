@@ -333,11 +333,12 @@ order enumeration retains precedence between disjoint members (ev-012).
   segment junctions or bisection cut points may surface as
   possible-event windows instead of certified crossings. Even-order
   touch points (grazing) are always `PossibleEvent`, never counted.
-  Root-count completeness is relative to the scan span and the
-  possible windows: the true count lies in
-  `[confirmed, confirmed + possible]`. No interval-Newton tightening
-  is performed in v1; the mode-ledger and true-flow (ValidatedStep)
-  rungs live in fs-time bead ow2o, not here.
+  Root-count completeness is relative to the scan span. With no possible
+  windows, `confirmed` is the exact root count; otherwise it is only a
+  certified lower bound, and the unresolved windows carry no finite
+  root-multiplicity upper bound in v1. No interval-Newton tightening is
+  performed in v1; the mode-ledger and true-flow (ValidatedStep) rungs live in
+  fs-time bead ow2o, not here.
 - Analytic constructors enclose their **constructed component path**;
   the deviation of that path from the ideal real-number screw or
   Wankel motion is bounded by the reported versor defect, not

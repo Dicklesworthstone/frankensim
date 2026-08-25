@@ -137,7 +137,9 @@ fn i12_claims() -> Vec<ClaimSpec> {
                         certified derivative bands over prescribed analytic segments), \
                         event scanning classifies every subinterval as root-free, \
                         certified-unique-crossing, or an explicit possible-event window, \
-                        and the true root count lies in [confirmed, confirmed+possible]",
+                        yielding the exact root count when no possible windows remain, \
+                        or a certified lower bound plus explicit unresolved windows \
+                        with no finite multiplicity bound otherwise",
             hypotheses: &[
                 "guards belong to the declared Taylor-pair class (guard and true- \
                  derivative bands describing one real function)",
@@ -519,8 +521,9 @@ fn i12_obligations() -> Vec<ObligationRow> {
             ],
             unit_cases: UNIT_CASES,
             g0: "generators: Taylor-pair guard families over prescribed segments; laws: \
-                 every leaf classified, count interval validity, certified windows \
-                 contain analytic roots, refinement never weakens a certificate; \
+                 every leaf classified, complete-count or lower-bound/unresolved-window \
+                 validity, certified windows contain analytic roots, refinement never \
+                 weakens a certificate; \
                  shrinker: segment bisection; replay seeds per explicits",
             decks: &[
                 "i12-gear-backlash-family",
