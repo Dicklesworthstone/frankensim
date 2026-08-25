@@ -42,7 +42,7 @@ pub struct GapSample {
     /// Carries no certificate; `None` when either gradient is honestly
     /// absent or the difference is degenerate/non-finite.
     pub normal: Option<[f64; 3]>,
-    overlap_witness: Option<ConvexOverlapWitness>,
+    pub(crate) overlap_witness: Option<ConvexOverlapWitness>,
 }
 
 impl GapSample {

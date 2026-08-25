@@ -42,6 +42,7 @@ use fs_geom::{
 use fs_mesh::delaunay;
 use fs_rep_mesh::Soup;
 
+mod axisymmetric;
 mod bore;
 mod codim;
 mod convex;
@@ -54,6 +55,11 @@ mod inflation;
 mod moments;
 mod penetration;
 
+pub use axisymmetric::{
+    AxisymmetricCurvature, AxisymmetricGapOracle, AxisymmetricNormal, AxisymmetricReach,
+    AxisymmetricSupportMap, NormalClassification, axisymmetric_curvature, axisymmetric_normal,
+    axisymmetric_reach,
+};
 pub use bore::{BoreConfig, BoreError, BoreExtraction, BoreStation, VolumeClosure, extract_bore};
 pub use codim::{
     CodimGap, CodimThickness, CodimVerdict, codim_gap, codim_gap_from_separation,

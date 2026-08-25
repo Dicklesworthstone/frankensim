@@ -54,7 +54,7 @@ pub mod sheaf_merge;
 #[cfg(feature = "sheaf-repair")]
 pub mod sheaf_repair;
 
-pub use convert::{Convert, ConvertDiag, ErrBudget, SampledSdf};
+pub use convert::{Convert, ConvertDiag, ErrBudget, SagittaEnclosure, SampledSdf};
 pub use ident::{EntityId, IdTransform, IdentityMap};
 pub use region::{
     AgreementConfig, AgreementReport, AgreementScope, AgreementStatus, AgreementUnknown,

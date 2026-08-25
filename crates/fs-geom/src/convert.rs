@@ -22,6 +22,49 @@ pub struct ErrBudget {
     pub abs_sd_error: f64,
 }
 
+/// Analytic sagitta calculation and bounding helper for revolved patches.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SagittaEnclosure {
+    /// Sagitta chord error in azimuthal revolution: `R * (1 - cos(pi / N_theta))`.
+    pub azimuthal_sagitta: f64,
+    /// Sagitta chord error along profile circular arcs: `r_arc * (1 - cos(Delta_alpha / (2 * N_arc)))`.
+    pub meridian_sagitta: f64,
+    /// Total analytic Hausdorff bound: `sqrt(s_theta^2 + s_meridian^2)`.
+    pub total_hausdorff_bound: f64,
+}
+
+impl SagittaEnclosure {
+    /// Calculate exact analytic sagitta for an axisymmetric revolution patch.
+    #[must_use]
+    pub fn compute(
+        max_radius: f64,
+        azimuthal_sectors: u32,
+        max_arc_radius: f64,
+        max_arc_sweep: f64,
+        arc_subdivisions: u32,
+    ) -> Self {
+        let s_theta = if azimuthal_sectors > 0 && max_radius > 0.0 {
+            max_radius * (1.0 - (core::f64::consts::PI / azimuthal_sectors as f64).cos())
+        } else {
+            0.0
+        };
+
+        let s_meridian = if arc_subdivisions > 0 && max_arc_radius > 0.0 && max_arc_sweep > 0.0 {
+            max_arc_radius * (1.0 - (max_arc_sweep / (2.0 * arc_subdivisions as f64)).cos())
+        } else {
+            0.0
+        };
+
+        let total = s_theta.hypot(s_meridian);
+
+        Self {
+            azimuthal_sagitta: s_theta,
+            meridian_sagitta: s_meridian,
+            total_hausdorff_bound: total,
+        }
+    }
+}
+
 /// Structured conversion refusal (Decalogue P10: a refusal that teaches).
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConvertDiag {

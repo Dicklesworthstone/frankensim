@@ -25,6 +25,14 @@
 pub mod api;
 #[cfg(feature = "tolerance-invalidation")]
 pub mod invalidate;
+pub mod checker;
+pub mod semantic_determinism;
+
+pub use checker::{CheckerDisposition, IndependentChecker};
+pub use semantic_determinism::{
+    ComputationKey, DeterminismClass, DeterminismDisposition, ExecutionPolicy,
+    OperationFamily, OutputObservation, SemanticKeyError, ToleranceRole,
+};
 
 use fs_ledger::{ContentHash, hash_bytes};
 use std::collections::BTreeMap;
@@ -304,7 +312,9 @@ fn push_string(buf: &mut Vec<u8>, value: &str) {
     push_bytes(buf, value.as_bytes());
 }
 
-fn artifact_content_hash(bytes: &[u8]) -> ContentHash {
+/// Compute canonical artifact-content hash with versioned domain prefix.
+#[must_use]
+pub fn artifact_content_hash(bytes: &[u8]) -> ContentHash {
     artifact_content_hash_with_domain(
         ARTIFACT_CONTENT_IDENTITY_DOMAIN,
         ARTIFACT_CONTENT_IDENTITY_VERSION,
@@ -835,6 +845,7 @@ impl std::error::Error for StoreError {}
 #[derive(Debug, Default)]
 pub struct Store {
     nodes: BTreeMap<[u8; 32], StoredNode>,
+    semantic_nodes: BTreeMap<[u8; 32], semantic_determinism::StoredSemanticComputation>,
     seq: u64,
     revision: u64,
     rows: Vec<String>,
@@ -1035,6 +1046,97 @@ impl Store {
     #[must_use]
     pub fn get(&self, node: &ContentHash) -> Option<&StoredNode> {
         self.nodes.get(&key(node))
+    }
+
+    /// Store a semantic computation.
+    ///
+    /// For deterministic operations, re-putting with identical key and identical
+    /// artifact dedupes; different artifact bytes trips the determinism contract.
+    ///
+    /// # Errors
+    /// [`StoreError::DeterminismViolation`] — stop the line.
+    pub fn put_computation(
+        &mut self,
+        key: ComputationKey,
+        observation: OutputObservation,
+        artifact_bytes: &[u8],
+    ) -> Result<PutOutcome, StoreError> {
+        let key_hash = key.content_hash();
+        let artifact_hash = artifact_content_hash(artifact_bytes);
+
+        if key.policy_determinism_class.is_deterministic() {
+            if let Some(existing) = self.semantic_nodes.get(&crate::key(&key_hash)) {
+                if existing.observation.artifact_hash == artifact_hash {
+                    return Ok(PutOutcome::Deduped(key_hash));
+                }
+                return Err(StoreError::DeterminismViolation {
+                    node: key_hash,
+                    expected: existing.observation.artifact_hash.to_hex(),
+                    got: artifact_hash.to_hex(),
+                });
+            }
+        }
+
+        let mut observation = observation;
+        observation.artifact_hash = artifact_hash;
+
+        self.semantic_nodes.insert(
+            crate::key(&key_hash),
+            semantic_determinism::StoredSemanticComputation {
+                key,
+                observation,
+                pins: Vec::new(),
+                seq: self.seq,
+            },
+        );
+        self.seq += 1;
+        self.bump_revision();
+        Ok(PutOutcome::Inserted(key_hash))
+    }
+
+    /// Retrieve a stored semantic computation by key hash.
+    #[must_use]
+    pub fn get_computation(
+        &self,
+        key_hash: &ContentHash,
+    ) -> Option<&semantic_determinism::StoredSemanticComputation> {
+        self.semantic_nodes.get(&crate::key(key_hash))
+    }
+
+    /// Migrate all currently stored legacy nodes to semantic computation entries.
+    ///
+    /// This is an idempotent transaction that populates `semantic_nodes` for every
+    /// stored legacy node without deleting or mutating the legacy record.
+    pub fn migrate_all_legacy_nodes(&mut self) -> usize {
+        let mut count = 0;
+        let mut migrations = Vec::with_capacity(self.nodes.len());
+        for node in self.nodes.values() {
+            let (comp_key, obs) = semantic_determinism::migrate_legacy_node_record(
+                &node.record,
+                node.artifact_hash,
+            );
+            migrations.push((comp_key, obs, node.pins.clone(), node.seq));
+        }
+
+        for (key, observation, pins, seq) in migrations {
+            let key_hash = key.content_hash();
+            if !self.semantic_nodes.contains_key(&crate::key(&key_hash)) {
+                self.semantic_nodes.insert(
+                    crate::key(&key_hash),
+                    semantic_determinism::StoredSemanticComputation {
+                        key,
+                        observation,
+                        pins,
+                        seq,
+                    },
+                );
+                count += 1;
+            }
+        }
+        if count > 0 {
+            self.bump_revision();
+        }
+        count
     }
 
     /// Skip soundness: is the cached artifact for this identity (op,

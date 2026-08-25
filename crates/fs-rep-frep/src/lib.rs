@@ -34,8 +34,9 @@
 //! proven by `is_exact` retain the exact-distance theorem and publish that
 //! enclosure directly as their abstract-distance certificate.
 
-mod axisymmetric;
+pub mod axisymmetric;
 mod axisymmetric_mass;
+pub mod axisymmetric_tessellation;
 mod ival;
 
 pub use axisymmetric::{
@@ -48,6 +49,11 @@ pub use axisymmetric::{
 pub use axisymmetric_mass::{
     AxisymmetricMassError, AxisymmetricMassProperties, AxisymmetricMassRoundoffDiagnostics,
     AxisymmetricPrincipalInertia, AxisymmetricSurfaceArea, AxisymmetricSurfaceAreaError,
+};
+pub use axisymmetric_tessellation::{
+    AxisymmetricCollisionMesh, AxisymmetricMesh, AxisymmetricRenderMesh,
+    AxisymmetricTessellationConfig, AxisymmetricTessellationError, AxisymmetricTessellationReceipt,
+    TessellationPurpose, tessellate_axisymmetric,
 };
 
 use fs_evidence::NumericalCertificate;
