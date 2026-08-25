@@ -55,11 +55,12 @@ use fs_ledger::{
     LedgerError, MAIN_BRANCH, MAX_VISIBLE_OP_PAGE_ROWS, OpArtifactEdge, OpOutcome, OpRow,
     OpVariableField, PrehashedOpContent, VisibleOpCursor, VisibleOpPage,
 };
-use fs_matdb::SelectionPolicy;
+use fs_matdb::{ClaimId, QueryPoint, SelectionPolicy};
 use fs_project::spec::{ConductionSetup, ThermalBoundaryCondition};
 use fs_project::{
-    BindingRequirements, DecodedProject, EntityDecl, GeometryArtifact, ImportedMeshLibrary,
-    ProjectSpec, geometry_source_identity, resolve_bindings, resolve_geometry_assignments,
+    BindingRequirements, BindingTarget, ConductionInterfaceLimits, DecodedProject, EntityDecl,
+    GeometryArtifact, ImportedMeshLibrary, ProjectSpec, geometry_source_identity,
+    resolve_bindings, resolve_conduction_interface_pairs, resolve_geometry_assignments,
 };
 use fs_rep_mesh::{Soup, TetComplex};
 use fs_session::{CapabilityToken, Charge, Enforcement, Governor, SessionError, SessionId};
@@ -78,7 +79,9 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// (frankensim-frn2i.2): v3 checkpoints cannot resume into a v4 stage set.
 /// Bumped to 5 when projects carrying an explicit conduction setup began
 /// executing the real volumetricizer and heterogeneous conduction solver.
-pub const SOLVE_DRIVER_VERSION: u32 = 5;
+/// Bumped to 6 when declared matching-P1 interfaces began executing through
+/// region-owned traces and the card-backed contact operator.
+pub const SOLVE_DRIVER_VERSION: u32 = 6;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";
@@ -94,6 +97,7 @@ const STAGE_RECEIPT_KIND: &str = "solve-stage-receipt";
 const RUN_RECEIPT_KIND: &str = "solve-run-receipt";
 const MATERIAL_USAGE_KIND: &str = "solve-material-usage-receipt";
 const CONDUCTION_SOLUTION_KIND: &str = "solve-conduction-solution";
+const CONDUCTION_INTERFACE_EVIDENCE_KIND: &str = "solve-conduction-interface-evidence";
 const IMPORT_SUMMARY_KIND: &str = "geometry-import-run-receipt";
 const IMPORT_RAW_KIND: &str = "geometry-source";
 const IMPORT_PROMOTION_KIND: &str = "geometry-import-receipt";
@@ -111,8 +115,10 @@ const IMPORT_VERIFY_NO_CLAIM: &str =
     "does not prove the imported geometry is watertight, meshable, or physically meaningful";
 const MATERIAL_RESOLVE_AUTHORITY: &str = "declared-binding-resolution-against-admitted-card-packs";
 const FLOW_NETWORK_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-flow-network-receipt.v1";
-const CONDUCTION_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-conduction-receipt.v1";
+const CONDUCTION_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-conduction-receipt.v2";
 const CONDUCTION_SOLUTION_SCHEMA: &str = "frankensim.cli.solve-conduction-solution.v1";
+const CONDUCTION_INTERFACE_EVIDENCE_SCHEMA: &str =
+    "frankensim.cli.solve-conduction-interface-evidence.v1";
 /// Specific gas constant of dry air, J/(kg·K); used only for the declared
 /// envelope-derived density estimate (see FLOW_NETWORK_NO_CLAIM).
 const AIR_SPECIFIC_GAS_CONSTANT: f64 = 287.05;
@@ -124,11 +130,12 @@ const FLOW_NETWORK_NO_CLAIM: &str = "the stage proves the declared fan system lo
     effects, compressibility, installation effects, or any experimental validation, and the \
     envelope-derived air density is a declared ideal-gas estimate, not a measurement";
 const CONDUCTION_AUTHORITY: &str = "retained-promoted-mesh-plus-declared-region-seeds-plus-\
-    audited-labeled-volume-plus-matdb-backed-heterogeneous-steady-conduction";
+    audited-labeled-volume-plus-matdb-backed-heterogeneous-steady-conduction-and-explicit-matching-p1-contact";
 const CONDUCTION_NO_CLAIM: &str = "the stage solves the declared finite mesh with static \
-    Dirichlet, Neumann, and Robin laws and audits algebraic residual and energy closure; it does \
-    not authenticate source geometry or material claims, establish mesh convergence, lower \
-    contact resistance, or perform conjugate airflow exchange";
+    Dirichlet, Neumann, and Robin laws, exact matching-P1 finite contact resistance, and audits \
+    algebraic residual and energy closure; it does not authenticate source geometry or material \
+    claims, establish mesh convergence, support nonmatching or temperature-varying contact, or \
+    perform conjugate airflow exchange";
 const MATERIAL_RESOLVE_NO_CLAIM: &str = "the stage proves that every declared region and \
     interface resolves to an admitted card whose selected claim covers the declared temperature \
     range, and retains that claim's replayable usage receipt; it does not authenticate the pack \
@@ -2898,6 +2905,14 @@ fn sorted_face(mut face: [u32; 3]) -> [u32; 3] {
     face
 }
 
+type CoordinateFaceKey = [[u64; 3]; 3];
+
+fn coordinate_face_key(positions: &[[f64; 3]], face: [u32; 3]) -> CoordinateFaceKey {
+    let mut key = face.map(|vertex| coordinate_key(positions[vertex as usize]));
+    key.sort_unstable();
+    key
+}
+
 fn build_conduction_surfaces(
     spec: &ProjectSpec,
     soups: &mut BTreeMap<String, Soup>,
@@ -3111,15 +3126,6 @@ fn material_models(
                     "bind every conduction region to one admitted material card",
                 )
             })?;
-        if binding.claim.is_some() {
-            return Err(conduction_error(
-                "cli-solve-conduction-pinned-claim",
-                format!(
-                    "region `{name}` pins a material claim, but the conduction table adapter cannot yet preserve pinned-query receipts"
-                ),
-                "use an unambiguous single-claim card until pinned conductivity sampling is wired",
-            ));
-        }
         let card = library.material(&binding.card).ok_or_else(|| {
             conduction_error(
                 "cli-solve-conduction-material",
@@ -3130,12 +3136,21 @@ fn material_models(
                 "supply the exact normalized material pack used by material-resolve",
             )
         })?;
-        let table = fs_conduction::ConductivityTable::from_claims(
-            card.claims(),
-            fs_project::THERMAL_CONDUCTIVITY_PROPERTY,
-            &[binding.temp_lo.value, binding.temp_hi.value],
-            SelectionPolicy::SingleClaimOnly,
-        )
+        let grid = [binding.temp_lo.value, binding.temp_hi.value];
+        let table = match binding.claim.as_deref() {
+            Some(pin) => fs_conduction::ConductivityTable::from_claims_pinned(
+                card.claims(),
+                fs_project::THERMAL_CONDUCTIVITY_PROPERTY,
+                &grid,
+                parse_claim_id(pin, &format!("material binding for region `{name}`"))?,
+            ),
+            None => fs_conduction::ConductivityTable::from_claims(
+                card.claims(),
+                fs_project::THERMAL_CONDUCTIVITY_PROPERTY,
+                &grid,
+                SelectionPolicy::SingleClaimOnly,
+            ),
+        }
         .map_err(|error| {
             conduction_error(
                 "cli-solve-conduction-material",
@@ -3161,6 +3176,16 @@ fn material_models(
         by_region,
         fallback.expect("a nonempty region map produced one model"),
     ))
+}
+
+fn parse_claim_id(pin: &str, target: &str) -> Result<ClaimId, SolveRefusal> {
+    ContentHash::from_hex(pin).map(ClaimId).ok_or_else(|| {
+        conduction_error(
+            "cli-solve-conduction-pinned-claim",
+            format!("{target} pins malformed claim `{pin}`"),
+            "pin the exact 64-hex claim content hash admitted by material-resolve",
+        )
+    })
 }
 
 fn conduction_source(
@@ -3248,6 +3273,7 @@ fn conduction_boundary(
     audited: &fs_mesh::AuditedLabeledTetComplex,
     surfaces: &BTreeMap<String, AssignmentSurface>,
     regions: &[fs_mesh::RegionSpec],
+    interface_faces: &BTreeSet<CoordinateFaceKey>,
 ) -> Result<fs_conduction::ThermalBoundary, SolveRefusal> {
     let mut unique_facets = BTreeSet::new();
     for region in regions {
@@ -3260,11 +3286,16 @@ fn conduction_boundary(
         .enumerate()
         .map(|(index, face)| (face, u32::try_from(index).expect("facet count fits u32")))
         .collect();
-    let parent_by_boundary: BTreeMap<[u32; 3], u32> = audited
+    let parent_by_boundary: BTreeMap<CoordinateFaceKey, u32> = audited
         .labeled()
         .source_faces()
         .iter()
-        .map(|(face, parent)| (sorted_face(*face), *parent))
+        .map(|(face, parent)| {
+            (
+                coordinate_face_key(audited.labeled().positions(), *face),
+                *parent,
+            )
+        })
         .collect();
     let mut builder = fs_conduction::ThermalBoundaryBuilder::new(mesh);
     for row in &setup.boundaries {
@@ -3297,9 +3328,11 @@ fn conduction_boundary(
             .boundary()
             .iter()
             .filter(|face| {
-                parent_by_boundary
-                    .get(&face.vertices)
-                    .is_some_and(|parent| parents.contains(parent))
+                let key = coordinate_face_key(mesh.positions(), face.vertices);
+                !interface_faces.contains(&key)
+                    && parent_by_boundary
+                        .get(&key)
+                        .is_some_and(|parent| parents.contains(parent))
             })
             .count();
         if matched == 0 {
@@ -3335,9 +3368,11 @@ fn conduction_boundary(
             .region(
                 &row.target,
                 |face| {
-                    parent_by_boundary
-                        .get(&face.vertices)
-                        .is_some_and(|parent| parents.contains(parent))
+                    let key = coordinate_face_key(mesh.positions(), face.vertices);
+                    !interface_faces.contains(&key)
+                        && parent_by_boundary
+                            .get(&key)
+                            .is_some_and(|parent| parents.contains(parent))
                 },
                 condition,
             )
