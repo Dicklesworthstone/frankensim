@@ -20049,7 +20049,7 @@ mod right { pub const DUPLICATE: u32 = 2; }
     }
 
     #[test]
-    fn probe_cross_file_declared_fn_call_admission() {
+    fn cross_file_declared_fn_call_admits_encoder_body() {
         let root = fixture_root("probe-cross-file-fn-call");
         let helper_path = root.join("crates/shared/src/schema.rs");
         std::fs::create_dir_all(helper_path.parent().expect("helper parent"))
