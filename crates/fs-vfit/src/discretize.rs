@@ -442,7 +442,8 @@ impl DelayedFilter {
     ///
     /// # Errors
     /// A non-finite or unit-circle-touching coefficient (`|a| >= 1`
-    /// is unstable), or zero sections.
+    /// is unstable), zero sections, or a section count that cannot be
+    /// represented by the allpass state vectors.
     pub fn with_dispersion(mut self, a: f64, sections: usize) -> Result<Self, DiscretizeError> {
         if !(a.is_finite() && a.abs() < 1.0) {
             return Err(DiscretizeError::NonFiniteRuntimeValue {
@@ -456,6 +457,10 @@ impl DelayedFilter {
                 expected: 1,
                 actual: 0,
             });
+        }
+        let max_sections = isize::MAX as usize / core::mem::size_of::<f64>();
+        if sections > max_sections {
+            return Err(DiscretizeError::RuntimeDimensionOverflow { n: sections });
         }
         self.disp_a = a;
         self.disp_x1 = vec![0.0; sections];
@@ -1473,6 +1478,13 @@ mod runtime_tests {
         assert!(matches!(
             DelayedFilter::new(f64::MAX, filter),
             Err(DiscretizeError::RuntimeDimensionOverflow { .. })
+        ));
+
+        let line =
+            DelayedFilter::from_impulse_response(1.0 / 48_000.0, vec![1.0, 0.0, 0.0, 0.0]).unwrap();
+        assert!(matches!(
+            line.with_dispersion(0.5, usize::MAX),
+            Err(DiscretizeError::RuntimeDimensionOverflow { n }) if n == usize::MAX
         ));
 
         assert!(matches!(
