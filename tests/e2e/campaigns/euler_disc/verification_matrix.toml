@@ -1,0 +1,123 @@
+# Verification traceability matrix for the Euler disc flagship (bead frankensim-euler-disc-emergent-flagship-t6314.8.13)
+schema_version = "org.frankensim.euler-disc.verification-matrix.v1"
+campaign_id = "euler_disc_campaign_v1"
+
+[[mapping]]
+requirement_id = "REQ-ED-001"
+title = "Exact profile and mass properties resolution"
+contract = "crates/fs-euler-disc-e2e/src/specimen.rs"
+unit_tests = ["crates/fs-euler-disc-e2e/tests/specimen.rs"]
+e2e_case = "ed.core.geometry_and_mass"
+gauntlet_tier = "G0"
+proof_tier = "exact-analytical-reduction"
+status = "Covered"
+
+[[mapping]]
+requirement_id = "REQ-ED-002"
+title = "Conservative rigid-body dynamics and energy conservation"
+contract = "crates/fs-euler-disc-e2e/src/mechanics.rs"
+unit_tests = ["crates/fs-euler-disc-e2e/tests/mechanics.rs"]
+e2e_case = "ed.core.conservative_mechanics"
+gauntlet_tier = "G1"
+proof_tier = "numerical-order-verification"
+status = "Covered"
+
+[[mapping]]
+requirement_id = "REQ-ED-003"
+title = "Unilateral contact, restitution, and rolling dissipation"
+contract = "crates/fs-euler-disc-e2e/src/contact_dynamics.rs"
+unit_tests = ["crates/fs-euler-disc-e2e/tests/contact_dynamics_e2e.rs"]
+e2e_case = "ed.core.contact_and_loss"
+gauntlet_tier = "G1"
+proof_tier = "dissipative-work-bounds"
+status = "Covered"
+
+[[mapping]]
+requirement_id = "REQ-ED-004"
+title = "Modal flexible base compliance response"
+contract = "crates/fs-euler-disc-e2e/src/modal_base_response.rs"
+unit_tests = ["crates/fs-euler-disc-e2e/tests/modal_base_response.rs"]
+e2e_case = "ed.core.flexible_base_reduced"
+gauntlet_tier = "G1"
+proof_tier = "modal-decomposition"
+status = "Covered"
+
+[[mapping]]
+requirement_id = "REQ-ED-005"
+title = "External air drag torque and boundary-layer damping"
+contract = "crates/fs-euler-disc-e2e/src/external_air.rs"
+unit_tests = ["crates/fs-euler-disc-e2e/tests/external_air.rs"]
+e2e_case = "ed.core.reduced_external_air"
+gauntlet_tier = "G1"
+proof_tier = "boundary-layer-scaling"
+status = "Covered"
+
+[[mapping]]
+requirement_id = "REQ-ED-006"
+title = "Narrow-gap compressible gas film lubrication"
+contract = "crates/fs-euler-disc-e2e/src/air.rs"
+unit_tests = ["crates/fs-euler-disc-e2e/tests/air_film.rs"]
+e2e_case = "ed.core.compressible_gas_film"
+gauntlet_tier = "G1"
+proof_tier = "reynolds-squeeze-film"
+status = "Covered"
+
+[[mapping]]
+requirement_id = "REQ-ED-007"
+title = "Coupled multi-physics campaign simulation"
+contract = "crates/fs-euler-disc-e2e/src/coupled_runner.rs"
+unit_tests = ["crates/fs-euler-disc-e2e/tests/coupled_runner.rs"]
+e2e_case = "ed.core.coupled_reduced"
+gauntlet_tier = "G2"
+proof_tier = "coupled-campaign-simulation"
+status = "Covered"
+
+[[mapping]]
+requirement_id = "REQ-ED-008"
+title = "Prediction bundle digest sealing"
+contract = "crates/fs-euler-disc-e2e/src/protocol.rs"
+unit_tests = ["crates/fs-euler-disc-e2e/tests/protocol.rs"]
+e2e_case = "ed.core.prediction_seal"
+gauntlet_tier = "G0"
+proof_tier = "blake3-digest-sealing"
+status = "Covered"
+
+[[mapping]]
+requirement_id = "REQ-ED-009"
+title = "Blind unlock scoring arithmetic on synthetic benchmark fixtures"
+contract = "crates/fs-euler-disc-e2e/src/contract.rs"
+unit_tests = ["crates/fs-euler-disc-e2e/tests/contract.rs"]
+e2e_case = "ed.core.synthetic_unlock_scoring"
+gauntlet_tier = "G0"
+proof_tier = "synthetic-scoring-arithmetic"
+status = "Covered"
+
+[[mapping]]
+requirement_id = "REQ-ED-010"
+title = "Hostile twin, mutation, leakage, and false-certificate detection"
+contract = "crates/fs-euler-disc-e2e/tests/hostile_twins.rs"
+unit_tests = ["crates/fs-euler-disc-e2e/tests/hostile_twins.rs"]
+e2e_case = "ed.core.hostile_twin_guard"
+gauntlet_tier = "G0"
+proof_tier = "fail-closed-adversarial-refusal"
+status = "Covered"
+
+[[mapping]]
+requirement_id = "REQ-ED-011"
+title = "Artifact-only deterministic replay"
+contract = "crates/fs-euler-disc-e2e/tests/replay.rs"
+unit_tests = ["crates/fs-euler-disc-e2e/tests/replay.rs"]
+e2e_case = "ed.core.artifact_replay"
+gauntlet_tier = "G5"
+proof_tier = "content-addressed-replay"
+status = "Covered"
+
+[[mapping]]
+requirement_id = "REQ-ED-012"
+title = "No-promotion and strict epistemic boundary audit"
+contract = "crates/fs-euler-disc-e2e/src/report.rs"
+unit_tests = ["crates/fs-euler-disc-e2e/tests/report.rs"]
+e2e_case = "ed.core.no_promotion_audit"
+gauntlet_tier = "G0"
+proof_tier = "typed-no-data-disclosure"
+status = "Covered"
