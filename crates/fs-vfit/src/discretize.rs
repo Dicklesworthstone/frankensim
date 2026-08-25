@@ -771,6 +771,11 @@ pub enum DiscretizeError {
     },
     /// Non-finite or non-positive sample interval.
     BadSampleInterval,
+    /// A prewarp frequency is negative or non-finite.
+    BadPrewarpFrequency {
+        /// Offending prewarp frequency [rad/s].
+        omega: f64,
+    },
     /// A public state-space field does not match the declared state
     /// dimension.
     InvalidRuntimeDimensions {
@@ -815,6 +820,10 @@ impl core::fmt::Display for DiscretizeError {
             DiscretizeError::BadSampleInterval => {
                 write!(f, "sample interval must be positive and finite")
             }
+            DiscretizeError::BadPrewarpFrequency { omega } => write!(
+                f,
+                "prewarp frequency {omega} rad/s must be finite and non-negative"
+            ),
             DiscretizeError::InvalidRuntimeDimensions {
                 field,
                 expected,
@@ -847,16 +856,20 @@ impl std::error::Error for DiscretizeError {}
 /// at `omega_pw` (pass 0 for the unwarped `K = 2/T` map).
 ///
 /// # Errors
-/// [`DiscretizeError`] when the prewarp frequency is at/beyond Nyquist
-/// or `t_s <= 0`. Stable continuous poles are not sampled sinusoids:
+/// [`DiscretizeError`] when the sample interval is not positive and finite,
+/// or the prewarp frequency is negative, non-finite, or at/beyond Nyquist.
+/// Stable continuous poles are not sampled sinusoids:
 /// Tustin maps the complete open left half-plane inside the unit circle.
 pub fn bilinear(
     model: &RationalModel,
     t_s: f64,
     omega_pw: f64,
 ) -> Result<DigitalFilter, DiscretizeError> {
-    if t_s <= 0.0 || t_s.is_nan() {
+    if !(t_s > 0.0 && t_s.is_finite()) {
         return Err(DiscretizeError::BadSampleInterval);
+    }
+    if !(omega_pw >= 0.0 && omega_pw.is_finite()) {
+        return Err(DiscretizeError::BadPrewarpFrequency { omega: omega_pw });
     }
     let nyquist = core::f64::consts::PI / t_s;
     if omega_pw >= nyquist {
@@ -976,8 +989,11 @@ pub fn bilinear_state_space(
     t_s: f64,
     omega_pw: f64,
 ) -> Result<DiscreteStateSpace, DiscretizeError> {
-    if t_s <= 0.0 || t_s.is_nan() {
+    if !(t_s > 0.0 && t_s.is_finite()) {
         return Err(DiscretizeError::BadSampleInterval);
+    }
+    if !(omega_pw >= 0.0 && omega_pw.is_finite()) {
+        return Err(DiscretizeError::BadPrewarpFrequency { omega: omega_pw });
     }
     let nyquist = core::f64::consts::PI / t_s;
     if omega_pw >= nyquist {
@@ -1252,6 +1268,38 @@ mod runtime_tests {
             Err(DiscretizeError::NonFiniteRuntimeValue { field: "input", .. })
         ));
         assert_eq!(runtime.state(), [0.0]);
+    }
+
+    #[test]
+    fn g0_bilinear_constructors_refuse_invalid_sampling_parameters() {
+        let model = RationalModel {
+            terms: vec![PoleTerm::Real {
+                pole: -1.0,
+                residue: 1.0,
+            }],
+            d: 0.0,
+            e: 0.0,
+        };
+
+        assert!(matches!(
+            bilinear(&model, f64::INFINITY, 0.0),
+            Err(DiscretizeError::BadSampleInterval)
+        ));
+        assert!(matches!(
+            bilinear_state_space(&model, f64::INFINITY, 0.0),
+            Err(DiscretizeError::BadSampleInterval)
+        ));
+
+        for omega in [f64::NAN, f64::NEG_INFINITY, f64::INFINITY, -1.0] {
+            assert!(matches!(
+                bilinear(&model, 1.0 / 48_000.0, omega),
+                Err(DiscretizeError::BadPrewarpFrequency { .. })
+            ));
+            assert!(matches!(
+                bilinear_state_space(&model, 1.0 / 48_000.0, omega),
+                Err(DiscretizeError::BadPrewarpFrequency { .. })
+            ));
+        }
     }
 
     #[test]
