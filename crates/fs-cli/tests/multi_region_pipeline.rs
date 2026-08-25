@@ -74,11 +74,21 @@ fn multi_region_fixture_resolves_volumetricizes_and_opens() {
             .unwrap_or_else(|e| panic!("committed mesh missing: {mesh_path}: {e}"));
         let soup: fs_rep_mesh::Soup = fs_io::stl::read_stl(&bytes).expect("stl admits");
         assert_eq!(soup.triangles.len(), 12, "unit cube fixture topology");
-        raw.push((soup.positions.clone(), soup.triangles.clone()));
+        raw.push((
+            soup
+                .positions
+                .iter()
+                .map(|p| [p.x, p.y, p.z])
+                .collect::<Vec<[f64; 3]>>(),
+            soup.triangles.clone(),
+        ));
     }
     for (artifact, (positions, triangles)) in artifacts.iter().zip(raw.iter()) {
         let soup = fs_rep_mesh::Soup {
-            positions: positions.clone(),
+            positions: positions
+                .iter()
+                .map(|p| fs_geom::Point3 { x: p[0], y: p[1], z: p[2] })
+                .collect(),
             triangles: triangles.clone(),
         };
         library.insert(artifact, soup, "m", Vec::new());
