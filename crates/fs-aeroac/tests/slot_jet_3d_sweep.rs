@@ -121,8 +121,8 @@ fn re_sweep_campaign() {
     // our way out of, so a too-thin box must be ruled out explicitly.
     let mut cfg_hi = base_config(*LADDER.last().expect("non-empty ladder"));
     cfg_hi.nz *= 2;
-    let ckpt_hi = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target-sweep-ckpt/octave");
+    let ckpt_hi =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target-sweep-ckpt/octave");
     let run_hi = loop {
         match run_slot_jet_3d_chunked(&cfg_hi, &ckpt_hi, 1_024).expect("chunk executes") {
             SweepProgress::Complete(run) => break *run,
