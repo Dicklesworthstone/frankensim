@@ -153,18 +153,20 @@ pub struct PossibleEvent {
 pub enum ScanVerdict {
     /// Every subinterval classified; the confirmed count is THE count.
     Complete,
-    /// All work finished but possible-event windows remain; the true
-    /// count lies in `[confirmed, confirmed + possible]`.
+    /// All work finished but possible-event windows remain. `confirmed`
+    /// is a certified lower bound; without additional evidence, an
+    /// unresolved window has no finite certified root-count upper bound.
     IncompleteUnknownWindows,
     /// The subdivision budget ran out; unclassified remainders were
     /// converted to possible-event windows.
     SubdivisionBudgetExhausted,
-    /// More certified events than the Zeno budget allows; the scan
-    /// stopped early and the tail of the span is one possible window.
+    /// The certified-event budget was reached while unclassified work
+    /// remained; the untouched tail is surfaced as possible windows.
     ZenoBudgetExceeded,
 }
 
-/// Set-valued root accounting.
+/// Root accounting with a certified count when complete, or a certified
+/// lower bound plus explicit unresolved windows otherwise.
 #[derive(Debug, Clone, Copy)]
 pub struct RootCountCertificate {
     /// Certified crossings (each window holds exactly one root).
@@ -401,11 +403,8 @@ pub fn scan_events(
     let mut verdict = ScanVerdict::Complete;
 
     let mut zeno_budget_hit = false;
-    'segments: for (segment_index, (segment, model)) in tube
-        .segments()
-        .iter()
-        .zip(&family.segments)
-        .enumerate()
+    'segments: for (segment_index, (segment, model)) in
+        tube.segments().iter().zip(&family.segments).enumerate()
     {
         let d = segment.domain();
         let lo = span.lo().max(d.lo());
@@ -453,17 +452,13 @@ pub fn scan_events(
                     receipt.widest_leaf_guard_band = receipt.widest_leaf_guard_band.max(width);
                 }
                 LeafClass::Certified(event) => {
-                    receipt.widest_leaf_guard_band = receipt
-                        .widest_leaf_guard_band
-                        .max(event.guard_band.width());
+                    receipt.widest_leaf_guard_band =
+                        receipt.widest_leaf_guard_band.max(event.guard_band.width());
                     certified.push(refine_certified(model, event, config, &mut receipt));
-                    let future_segment_intersects_span = tube.segments()
-                        [segment_index + 1..]
-                        .iter()
-                        .any(|future| {
+                    let future_segment_intersects_span =
+                        tube.segments()[segment_index + 1..].iter().any(|future| {
                             let future_domain = future.domain();
-                            span.lo().max(future_domain.lo())
-                                < span.hi().min(future_domain.hi())
+                            span.lo().max(future_domain.lo()) < span.hi().min(future_domain.hi())
                         });
                     if certified.len() >= config.max_certified_events
                         && (!stack.is_empty() || future_segment_intersects_span)
@@ -485,21 +480,23 @@ pub fn scan_events(
                     }
                 }
                 LeafClass::Possible(event) => {
-                    receipt.widest_leaf_guard_band = receipt
-                        .widest_leaf_guard_band
-                        .max(event.guard_band.width());
+                    receipt.widest_leaf_guard_band =
+                        receipt.widest_leaf_guard_band.max(event.guard_band.width());
                     possible.push(event);
                 }
                 LeafClass::Split => {
                     let mid = window.midpoint();
                     if !(mid > window.lo() && mid < window.hi()) {
                         // Cannot bisect further in f64: resolution floor.
-                        possible.push(PossibleEvent {
+                        let event = PossibleEvent {
                             window,
                             guard_band: model.g.eval_interval(window),
                             derivative_band: model.gdot.eval_interval(window),
                             reason: PossibleReason::ResolutionFloor,
-                        });
+                        };
+                        receipt.widest_leaf_guard_band =
+                            receipt.widest_leaf_guard_band.max(event.guard_band.width());
+                        possible.push(event);
                         continue;
                     }
                     stack.push((Interval::new(mid, window.hi()), depth + 1));

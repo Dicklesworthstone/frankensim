@@ -5,11 +5,13 @@
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_ga::Motor;
 use fs_geom::Point3;
-use fs_ivl::Interval;
+use fs_ivl::{Interval, TaylorModel1};
 use fs_math::det;
+use fs_motion::MotionError;
 use fs_motion::analytic::{ScrewParams, screw_tube_with_derivative};
 use fs_motion::events::{
-    CrossingDirection, EventScanConfig, PossibleReason, ScanVerdict, enumerate_simultaneous,
+    CertifiedEvent, CrossingDirection, EventScan, EventScanConfig, GuardFamily, GuardModel,
+    PossibleReason, RootCountCertificate, ScanReceipt, ScanVerdict, enumerate_simultaneous,
     estimated_scan, plane_crossing_guard, scan_events,
 };
 
@@ -42,6 +44,28 @@ fn rotor_fixture() -> ScrewParams {
         omega: 1.0,
         axial_velocity: 0.0,
         base_pose: Motor::identity(),
+    }
+}
+
+fn one_certified_event(window: Interval) -> EventScan {
+    EventScan {
+        certified: vec![CertifiedEvent {
+            window,
+            direction: CrossingDirection::Rising,
+            guard_band: Interval::new(-1.0, 1.0),
+        }],
+        possible: Vec::new(),
+        count: RootCountCertificate {
+            confirmed: 1,
+            possible_windows: 0,
+            verdict: ScanVerdict::Complete,
+        },
+        receipt: ScanReceipt {
+            intervals_examined: 1,
+            max_depth: 0,
+            excluded_leaves: 0,
+            widest_leaf_guard_band: 2.0,
+        },
     }
 }
 
@@ -422,4 +446,139 @@ fn ev_008_certified_windows_localize_the_analytic_roots_tightly() {
             assert!(residual < 1e-12);
         }
     });
+}
+
+#[test]
+fn ev_009_guard_domains_must_match_tube_segments() {
+    with_cx(|cx| {
+        let (tube, _) = screw_tube_with_derivative(&rotor_fixture(), Interval::new(0.0, 1.0), 4, 1)
+            .expect("tube builds");
+        let wrong_domain = Interval::new(2.0, 3.0);
+        let family = GuardFamily::new(vec![
+            GuardModel::new(
+                TaylorModel1::variable(wrong_domain, 1).expect("guard model"),
+                TaylorModel1::constant(1.0, wrong_domain, 1).expect("derivative model"),
+            )
+            .expect("guard pair"),
+        ])
+        .expect("guard family");
+
+        let certified_error = scan_events(
+            &tube,
+            &family,
+            Interval::new(0.0, 1.0),
+            &EventScanConfig::default(),
+            cx,
+        )
+        .expect_err("misaligned certified scan must refuse");
+        assert!(matches!(
+            certified_error,
+            MotionError::InvalidConfiguration {
+                what: "each guard model domain must equal its tube segment domain"
+            }
+        ));
+
+        let estimated_error = estimated_scan(&tube, &family, Interval::new(0.0, 1.0), 8, cx)
+            .expect_err("misaligned estimated scan must refuse");
+        assert!(matches!(
+            estimated_error,
+            MotionError::InvalidConfiguration {
+                what: "each guard model domain must equal its tube segment domain"
+            }
+        ));
+    });
+}
+
+#[test]
+fn ev_010_receipt_includes_certified_leaf_guard_width() {
+    with_cx(|cx| {
+        let domain = Interval::new(0.0, 1.0);
+        let (tube, _) =
+            screw_tube_with_derivative(&rotor_fixture(), domain, 4, 1).expect("tube builds");
+        let t = TaylorModel1::variable(domain, 1).expect("time model");
+        let root = TaylorModel1::constant(0.5, domain, 1).expect("root model");
+        let guard = t.try_sub(&root).expect("linear guard");
+        let derivative = TaylorModel1::constant(1.0, domain, 1).expect("derivative");
+        let family = GuardFamily::new(vec![
+            GuardModel::new(guard, derivative).expect("guard pair"),
+        ])
+        .expect("guard family");
+
+        let scan = scan_events(&tube, &family, domain, &EventScanConfig::default(), cx)
+            .expect("scan completes");
+        assert_eq!(scan.count.verdict, ScanVerdict::Complete);
+        assert_eq!(scan.count.confirmed, 1);
+        assert_eq!(scan.receipt.excluded_leaves, 0);
+        assert!(
+            scan.receipt.widest_leaf_guard_band >= 1.0,
+            "the certified parent leaf spans guard values from -0.5 to 0.5"
+        );
+    });
+}
+
+#[test]
+fn ev_011_zeno_budget_never_confirms_more_than_the_limit() {
+    with_cx(|cx| {
+        let params = rotor_fixture();
+        let span = Interval::new(0.0, 6.2);
+        let (tube, rate) = screw_tube_with_derivative(&params, span, 10, 8).expect("tube builds");
+        let family = plane_crossing_guard(
+            &tube,
+            &rate,
+            Point3::new(1.0, 0.0, 0.0),
+            [1.0, 0.0, 0.0],
+            0.5,
+        )
+        .expect("guard builds");
+        let scan = scan_events(
+            &tube,
+            &family,
+            span,
+            &EventScanConfig {
+                max_certified_events: 1,
+                ..EventScanConfig::default()
+            },
+            cx,
+        )
+        .expect("scan returns a typed budget verdict");
+
+        assert_eq!(scan.count.verdict, ScanVerdict::ZenoBudgetExceeded);
+        assert_eq!(scan.count.confirmed, 1, "the configured cap is strict");
+        assert!(
+            !scan.possible.is_empty(),
+            "the untouched tail stays visible"
+        );
+        let later_root = 5.0 * std::f64::consts::FRAC_PI_3;
+        assert!(
+            scan.possible
+                .iter()
+                .any(|event| event.window.lo() <= later_root && later_root <= event.window.hi()),
+            "the unscanned second analytic crossing must remain inside a possible window"
+        );
+    });
+}
+
+#[test]
+fn ev_012_chain_overlap_preserves_disjoint_pair_precedence() {
+    let scans = [
+        one_certified_event(Interval::new(0.0, 2.0)),
+        one_certified_event(Interval::new(1.0, 3.0)),
+        one_certified_event(Interval::new(2.5, 4.0)),
+    ];
+    let groups = enumerate_simultaneous(&scans);
+    assert_eq!(groups.len(), 1, "overlap connectivity forms one group");
+    let orders = groups[0]
+        .admissible_orders
+        .as_ref()
+        .expect("three-member groups enumerate");
+    assert_eq!(
+        orders.len(),
+        3,
+        "only the three linear extensions are valid"
+    );
+    for order in orders {
+        let first = order.iter().position(|&member| member == 0).unwrap();
+        let third = order.iter().position(|&member| member == 2).unwrap();
+        assert!(first < third, "disjoint [0, 2] must precede [2.5, 4]");
+    }
 }

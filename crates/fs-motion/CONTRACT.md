@@ -225,12 +225,18 @@ with equal rigorous endpoint signs), a certified unique crossing
 without weakening the certificate), or an explicit `PossibleEvent`
 (grazing, resolution floor, or budget) — nothing is dropped, and the
 `RootCountCertificate` verdict is set-valued whenever anything stayed
-possible. Zeno and subdivision budgets surface as typed verdicts.
+possible. `confirmed` is then a certified lower bound, while
+`possible_windows` counts unresolved regions rather than bounding their root
+multiplicity. Each guard-model domain must exactly match its corresponding
+tube-segment domain; both scan lanes refuse a mismatch before interval
+evaluation. Zeno and subdivision budgets surface as typed verdicts, and the
+Zeno cap never admits an extra certified event: untouched current and future
+segment windows remain explicit possible events.
 `estimated_scan` is the classical dense lane: LABELED Estimated, used
 as the independent falsifier. `enumerate_simultaneous` groups
-overlapping certified windows across guards and enumerates admissible
-orders (set-valued; groups above `MAX_ENUMERATED_GROUP` stay
-explicitly unordered). Piecewise double-cover continuity is chained at
+overlap-connected certified windows across guards and enumerates only orders
+that preserve the proven precedence of every disjoint pair (set-valued; groups
+above `MAX_ENUMERATED_GROUP` stay explicitly unordered). Piecewise double-cover continuity is chained at
 construction: the first segment uses the anchor rule and every later
 segment matches the previous segment's representative at the shared
 junction, so rotations through π cannot tear the cover.
@@ -311,7 +317,10 @@ groups enumerate both admissible orders while disjoint crossings stay
 separate (ev-005); subdivision-budget exhaustion drains into visible
 possible windows with a typed verdict (ev-006); bitwise-deterministic
 replay (ev-007); certified windows refine to sub-1e-3 localization
-around analytic roots (ev-008).
+around analytic roots (ev-008); guard/tube domain mismatch refuses in both scan
+lanes (ev-009); receipt width includes certified leaves (ev-010); the Zeno cap
+is strict and preserves the untouched tail as possible (ev-011); chain-overlap
+order enumeration retains precedence between disjoint members (ev-012).
 
 ## No-claim boundaries
 
