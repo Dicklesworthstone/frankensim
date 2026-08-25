@@ -1395,12 +1395,11 @@ mod runtime_tests {
                 .unwrap()
                 .with_dispersion(0.5, 1)
                 .unwrap();
-        dispersed_fir.disp_x1[0] = f64::MAX;
-        dispersed_fir.disp_y1[0] = -f64::MAX;
+        assert!(dispersed_fir.push(f64::MAX).unwrap().is_finite());
         let dispersed_fir_before = dispersed_fir.clone();
 
         assert!(matches!(
-            dispersed_fir.push(f64::MAX),
+            dispersed_fir.push(-f64::MAX),
             Err(DiscretizeError::NonFiniteRuntimeValue {
                 field: "dispersion_output",
                 index: Some(0)
@@ -1422,12 +1421,9 @@ mod runtime_tests {
             .unwrap()
             .with_dispersion(0.5, 1)
             .unwrap();
-        let delayed_slot = (dispersed_iir.write + dispersed_iir.buf.len()
-            - dispersed_iir.delay_int)
-            % dispersed_iir.buf.len();
-        dispersed_iir.buf[delayed_slot] = 1.0;
-        dispersed_iir.disp_x1[0] = f64::MAX;
-        dispersed_iir.disp_y1[0] = -f64::MAX;
+        assert_eq!(dispersed_iir.push(f64::MAX).unwrap(), 0.0);
+        assert_eq!(dispersed_iir.push(-f64::MAX).unwrap(), 0.0);
+        assert!(dispersed_iir.push(0.0).unwrap().is_finite());
         let dispersed_iir_before = dispersed_iir.clone();
 
         assert!(matches!(
