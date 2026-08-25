@@ -781,9 +781,20 @@ fn parse_schema_types(value: &str) -> Result<Vec<SchemaType>, String> {
     let mut types = Vec::new();
     for item in list(value) {
         let declared_type = if let Some((path, symbol)) = item.split_once('#') {
-            if path.contains('#') || symbol.contains('#') || !safe_relative(path) {
+            if path.contains('#') || symbol.contains('#') {
                 return Err(format!(
-                    "schema type {item:?} must be repo-relative path#TypeName or a bare Rust identifier"
+                    "schema type {item:?} must be repo-relative path#TypeName, a std/core/alloc prelude path#TypeName, or a bare Rust identifier"
+                ));
+            }
+            if matches!(path, "std" | "core" | "alloc") {
+                if !STDLIB_PRELUDE_TYPES.contains(&symbol) {
+                    return Err(format!(
+                        "schema type {item:?} names {symbol:?}, which is not in the fixed std/core/alloc prelude authority table"
+                    ));
+                }
+            } else if !safe_relative(path) {
+                return Err(format!(
+                    "schema type {item:?} must be a repo-relative path#TypeName or a bare Rust identifier"
                 ));
             }
             SchemaType {
