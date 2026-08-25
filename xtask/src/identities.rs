@@ -818,7 +818,7 @@ fn rust_named_type_declaration_bytes(
     let lexical = index.lexical.as_ref().map_err(|detail| detail.clone())?;
     let Some(starts) = index.direct_type_declarations.get(symbol) else {
         return Err(format!(
-            "type {symbol:?} has no direct struct/enum/union/trait declaration"
+            "type {symbol:?} has no top-level struct/enum/union/trait/type declaration"
         ));
     };
     let [start] = starts.as_slice() else {
@@ -20045,7 +20045,7 @@ mod right { pub const DUPLICATE: u32 = 2; }
         assert!(ambiguous.contains("exactly one"), "{ambiguous}");
         let missing = rust_named_type_declaration_bytes(text, &index, "Missing")
             .expect_err("unknown types are refused");
-        assert!(missing.contains("no direct"), "{missing}");
+        assert!(missing.contains("no top-level"), "{missing}");
     }
 
     #[test]
