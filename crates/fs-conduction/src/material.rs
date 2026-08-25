@@ -254,16 +254,12 @@ impl ConductivityTable {
             })?;
             let answer = match selection {
                 ClaimSelection::Policy(policy) => claims.query(property, &point, policy),
-                ClaimSelection::Pinned(pinned) => {
-                    claims.query_pinned(property, &point, pinned)
-                }
+                ClaimSelection::Pinned(pinned) => claims.query_pinned(property, &point, pinned),
             }
-            .map_err(|e| {
-                ConductionError::MaterialQuery {
-                    property: property.to_string(),
-                    temperature: t,
-                    upstream: e.to_string(),
-                }
+            .map_err(|e| ConductionError::MaterialQuery {
+                property: property.to_string(),
+                temperature: t,
+                upstream: e.to_string(),
             })?;
             let sample = &answer.evidence.value;
             if sample.dims != CONDUCTIVITY_DIMS {
@@ -837,7 +833,12 @@ impl ElementMaterials {
             hash
         }
         let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-        hash = mix(hash, &u64::try_from(self.of_element.len()).unwrap_or(u64::MAX).to_le_bytes());
+        hash = mix(
+            hash,
+            &u64::try_from(self.of_element.len())
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
+        );
         for id in &self.of_element {
             hash = mix(hash, &id.0.to_le_bytes());
         }

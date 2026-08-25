@@ -714,7 +714,7 @@ fn solve_publication_counts(ledger: &Ledger) -> SolvePublicationCounts {
 #[test]
 fn g0_run_identity_is_deterministic_and_input_sensitive() {
     assert_eq!(
-        SOLVE_DRIVER_VERSION, 5,
+        SOLVE_DRIVER_VERSION, 6,
         "authority-semantic changes must deliberately advance this identity-bearing version"
     );
 
@@ -3063,7 +3063,8 @@ fn g1_conduction_stage_executes_and_retains_field_and_balance_evidence() {
     let receipt =
         String::from_utf8(artifact_bytes(&ledger, &receipts[4])).expect("receipt is utf-8");
     assert_balanced_json(&receipt);
-    assert!(receipt.contains("frankensim.cli.solve-conduction-receipt.v1"));
+    assert!(receipt.contains("frankensim.cli.solve-conduction-receipt.v2"));
+    assert!(receipt.contains("\"interfaces\":{\"pair_count\":0"));
     assert!(receipt.contains("\"elements\":1"));
     assert_eq!(receipt_number_field(&receipt, "source_w"), 5.0);
     assert!(

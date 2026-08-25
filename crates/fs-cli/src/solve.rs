@@ -59,8 +59,8 @@ use fs_matdb::{ClaimId, QueryPoint, SelectionPolicy};
 use fs_project::spec::{ConductionSetup, ThermalBoundaryCondition};
 use fs_project::{
     BindingRequirements, BindingTarget, ConductionInterfaceLimits, DecodedProject, EntityDecl,
-    GeometryArtifact, ImportedMeshLibrary, ProjectSpec, geometry_source_identity,
-    resolve_bindings, resolve_conduction_interface_pairs, resolve_geometry_assignments,
+    GeometryArtifact, ImportedMeshLibrary, ProjectSpec, geometry_source_identity, resolve_bindings,
+    resolve_conduction_interface_pairs, resolve_geometry_assignments,
 };
 use fs_rep_mesh::{Soup, TetComplex};
 use fs_session::{CapabilityToken, Charge, Enforcement, Governor, SessionError, SessionId};
@@ -3458,12 +3458,7 @@ fn interface_evidence_bytes(
     }
     let interfaces = counts
         .into_iter()
-        .map(|(name, pairs)| {
-            format!(
-                "{{\"name\":{},\"pair_count\":{pairs}}}",
-                json_string(name)
-            )
-        })
+        .map(|(name, pairs)| format!("{{\"name\":{},\"pair_count\":{pairs}}}", json_string(name)))
         .collect::<Vec<_>>()
         .join(",");
     Ok(format!(
@@ -3768,18 +3763,15 @@ fn conduction_receipt(
             .map(|region| region.0)
             .collect();
         let (table, region_to_material, fallback) = material_models(spec, cards, &region_ids)?;
-        let element_materials = fs_conduction::ElementMaterials::from_region_ids(
-            table,
-            &labels,
-            &region_to_material,
-        )
-        .map_err(|error| {
-            conduction_error(
-                "cli-solve-conduction-operator",
-                format!("heterogeneous material assignment refused: {error}"),
-                "repair region labels or material bindings",
-            )
-        })?;
+        let element_materials =
+            fs_conduction::ElementMaterials::from_region_ids(table, &labels, &region_to_material)
+                .map_err(|error| {
+                conduction_error(
+                    "cli-solve-conduction-operator",
+                    format!("heterogeneous material assignment refused: {error}"),
+                    "repair region labels or material bindings",
+                )
+            })?;
         let mesh = fs_conduction::ConductionMesh::new_region_owned(
             TetComplex::from_tets(labeled.positions().len(), labeled.tets().to_vec()),
             labeled.positions().to_vec(),
@@ -3807,7 +3799,7 @@ fn conduction_receipt(
             ConductionInterfaceLimits {
                 max_source_faces: ConductionInterfaceLimits::DEFAULT
                     .max_source_faces
-                    .min(limits.max_selected_faces),
+                    .min(limits.max_selected_faces as u64),
             },
             &mesh,
             &cx,
@@ -3860,7 +3852,9 @@ fn conduction_receipt(
             source: &source,
         };
         let solution = match interfaces.as_ref() {
-            Some(interfaces) => fs_conduction::solve_with_interfaces(&cx, problem, interfaces, config),
+            Some(interfaces) => {
+                fs_conduction::solve_with_interfaces(&cx, problem, interfaces, config)
+            }
             None => fs_conduction::solve(&cx, problem, config),
         }
         .map_err(|error| match error {
@@ -3942,10 +3936,7 @@ fn conduction_receipt(
                  \"mean_jump_k\":{},\"heat_rate_a_to_b_w\":{},\"card\":{}}}",
                 json_string(&flux.interface),
                 finite("interface.area_m2", flux.area_m2)?,
-                finite(
-                    "interface.conductance_w_per_k",
-                    flux.conductance_w_per_k
-                )?,
+                finite("interface.conductance_w_per_k", flux.conductance_w_per_k)?,
                 finite("interface.mean_jump_k", flux.mean_jump_k)?,
                 finite("interface.heat_rate_a_to_b_w", flux.heat_rate_a_to_b_w)?,
                 json_string(&flux.card_identity.to_hex()),
@@ -4002,9 +3993,7 @@ fn conduction_receipt(
     let charge = solution_bytes
         .len()
         .checked_add(receipt.len())
-        .and_then(|bytes| {
-            bytes.checked_add(interface_evidence.as_ref().map_or(0, Vec::len))
-        })
+        .and_then(|bytes| bytes.checked_add(interface_evidence.as_ref().map_or(0, Vec::len)))
         .and_then(|bytes| u64::try_from(bytes).ok())
         .ok_or_else(|| {
             invocation_work_refusal(
@@ -4031,10 +4020,7 @@ fn conduction_receipt(
             bytes,
         });
     }
-    Ok((
-        receipt,
-        artifacts,
-    ))
+    Ok((receipt, artifacts))
 }
 
 fn assignment_receipt(
