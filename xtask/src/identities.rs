@@ -11262,6 +11262,19 @@ impl IdentityReferenceCache {
                                 .constants
                                 .insert((path.clone(), symbol), Err(detail.clone()));
                         }
+                        for symbol in requested.types {
+                            if matches!(path.as_str(), "std" | "core" | "alloc") {
+                                let bytes =
+                                    format!("std-prelude-type:{symbol}").into_bytes();
+                                cache
+                                    .types
+                                    .insert((path.clone(), symbol), Ok(bytes));
+                            } else {
+                                cache
+                                    .types
+                                    .insert((path.clone(), symbol), Err(detail.clone()));
+                            }
+                        }
                         continue;
                     }
                 };
