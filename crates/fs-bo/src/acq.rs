@@ -91,9 +91,30 @@ pub fn phi_inv(p: f64) -> f64 {
 
 /// Closed-form Expected Improvement for MINIMIZATION at exploration
 /// margin ξ: EI(x) = (f* − μ − ξ)Φ(z) + σφ(z), z = (f* − μ − ξ)/σ.
+///
+/// # Panics
+/// Panics before posterior evaluation when the candidate, incumbent, or
+/// exploration margin is non-finite, or when the fitted GP produces a
+/// non-finite posterior.
 #[must_use]
 pub fn expected_improvement(gp: &Gp, x: &[f64], f_best: f64, xi: f64) -> f64 {
+    assert!(
+        x.iter().all(|value| value.is_finite()),
+        "expected-improvement candidate values must be finite"
+    );
+    assert!(
+        f_best.is_finite(),
+        "expected-improvement incumbent must be finite"
+    );
+    assert!(
+        xi.is_finite(),
+        "expected-improvement exploration margin must be finite"
+    );
     let (mu, var) = gp.predict(x);
+    assert!(
+        mu.is_finite() && var.is_finite(),
+        "expected-improvement GP posterior must be finite"
+    );
     let sigma = fs_math::det::sqrt(var.max(1e-18));
     let delta = f_best - mu - xi;
     let z = delta / sigma;
@@ -141,13 +162,20 @@ pub fn normal_bank(samples: usize, q: usize, seed: u64) -> Vec<f64> {
 ///
 /// # Panics
 /// Panics before posterior evaluation when the batch is empty, `f_best` is
-/// non-finite, or the bank is empty, non-finite, or not exactly rectangular
-/// with one column per candidate.
+/// non-finite, candidate coordinates are non-finite, or the bank is empty,
+/// non-finite, or not exactly rectangular with one column per candidate.
+/// Panics after posterior evaluation if the fitted GP returns non-finite state.
 #[must_use]
 pub fn q_expected_improvement(gp: &Gp, xs: &[Vec<f64>], f_best: f64, bank: &[f64]) -> f64 {
     let q = xs.len();
     assert!(q > 0, "q-EI needs at least one candidate");
     assert!(f_best.is_finite(), "q-EI incumbent must be finite");
+    assert!(
+        xs.iter()
+            .flat_map(|candidate| candidate.iter())
+            .all(|value| value.is_finite()),
+        "q-EI candidate values must be finite"
+    );
     assert!(!bank.is_empty(), "q-EI normal bank must not be empty");
     assert_eq!(
         bank.len() % q,
@@ -160,6 +188,10 @@ pub fn q_expected_improvement(gp: &Gp, xs: &[Vec<f64>], f_best: f64, bank: &[f64
         "q-EI normal bank values must be finite"
     );
     let (mu, lflat) = gp.predict_joint(xs);
+    assert!(
+        mu.iter().chain(&lflat).all(|value| value.is_finite()),
+        "q-EI GP posterior must be finite"
+    );
     let samples = bank.len() / q;
     let mut acc = 0.0f64;
     for s in 0..samples {

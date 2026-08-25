@@ -94,7 +94,9 @@ boxes, zero batch/optimizer counts, and an empty q-EI sample budget before
 objective callbacks. `normal_bank` rejects empty or unsupported shapes before
 allocation; `q_expected_improvement` rejects empty, ragged, or non-finite banks
 before posterior evaluation rather than returning NaN or silently ignoring a
-partial row. Objective callbacks used by classic BO must return finite values.
+partial row. Both EI paths reject non-finite candidates, incumbents, and
+posterior state; closed-form EI also requires a finite exploration margin.
+Objective callbacks used by classic BO must return finite values.
 
 ## Determinism class
 

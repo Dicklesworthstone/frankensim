@@ -206,9 +206,51 @@ fn acquisition_inputs_fail_before_numerical_work() {
     );
     assert!(
         catch_unwind(AssertUnwindSafe(|| {
+            expected_improvement(&gp, &[f64::NAN, 0.3], 1.0, 0.0)
+        }))
+        .is_err(),
+        "EI must reject non-finite candidate coordinates"
+    );
+    assert!(
+        catch_unwind(AssertUnwindSafe(|| {
+            expected_improvement(&gp, &[0.2, 0.3], f64::NAN, 0.0)
+        }))
+        .is_err(),
+        "EI must reject a non-finite incumbent"
+    );
+    assert!(
+        catch_unwind(AssertUnwindSafe(|| {
+            expected_improvement(&gp, &[0.2, 0.3], 1.0, f64::INFINITY)
+        }))
+        .is_err(),
+        "EI must reject a non-finite exploration margin"
+    );
+    assert!(
+        catch_unwind(AssertUnwindSafe(|| {
             q_expected_improvement(&gp, &[], 1.0, &[0.0])
         }))
         .is_err()
+    );
+    assert!(
+        catch_unwind(AssertUnwindSafe(|| {
+            q_expected_improvement(&gp, &[vec![0.2, f64::NAN]], 1.0, &[0.0])
+        }))
+        .is_err(),
+        "q-EI must reject non-finite candidate coordinates"
+    );
+    assert!(
+        catch_unwind(AssertUnwindSafe(|| {
+            q_expected_improvement(&gp, &[vec![0.2, 0.3]], f64::NAN, &[0.0])
+        }))
+        .is_err(),
+        "q-EI must reject a non-finite incumbent"
+    );
+    assert!(
+        catch_unwind(AssertUnwindSafe(|| {
+            q_expected_improvement(&gp, &[vec![0.2, 0.3]], 1.0, &[f64::INFINITY])
+        }))
+        .is_err(),
+        "q-EI must reject non-finite normal-bank values"
     );
     assert!(
         catch_unwind(AssertUnwindSafe(|| {
@@ -231,7 +273,7 @@ fn acquisition_inputs_fail_before_numerical_work() {
     log(
         "acquisition-input-contracts",
         "pass",
-        "empty, unsupported, and ragged normal banks fail before posterior work",
+        "non-finite acquisition inputs and empty, unsupported, or ragged banks fail fast",
     );
 }
 
@@ -281,6 +323,20 @@ fn classic_bo_inputs_fail_before_objective_callbacks() {
         "invalid optimizer counts must fail before callbacks"
     );
 
+    let mut invalid_bounds = valid.clone();
+    invalid_bounds.bounds = (f64::NAN, 1.0);
+    assert!(
+        catch_unwind(AssertUnwindSafe(|| {
+            minimize(&mut objective, 2, 1, 0, &invalid_bounds)
+        }))
+        .is_err()
+    );
+    assert_eq!(
+        objective_calls.get(),
+        0,
+        "invalid bounds must fail before callbacks"
+    );
+
     assert!(
         catch_unwind(AssertUnwindSafe(|| {
             minimize(&mut objective, 2, 0, 0, &valid)
@@ -291,6 +347,23 @@ fn classic_bo_inputs_fail_before_objective_callbacks() {
         objective_calls.get(),
         0,
         "an empty initial design must fail before callbacks"
+    );
+
+    let nonfinite_calls = Cell::new(0_usize);
+    let mut nonfinite_objective = |_: &[f64]| {
+        nonfinite_calls.set(nonfinite_calls.get() + 1);
+        f64::NAN
+    };
+    assert!(
+        catch_unwind(AssertUnwindSafe(|| {
+            minimize(&mut nonfinite_objective, 2, 1, 0, &valid)
+        }))
+        .is_err()
+    );
+    assert_eq!(
+        nonfinite_calls.get(),
+        1,
+        "classic BO must reject the first non-finite objective value"
     );
     log(
         "bo-input-contracts",
