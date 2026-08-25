@@ -20092,7 +20092,9 @@ mod right { pub const DUPLICATE: u32 = 2; }
         let types =
             parse_schema_types("std#Vec,std#Arc,core#PhantomData").expect("prelude paths parse");
         assert_eq!(types.len(), 3);
-        assert_eq!(types[0].canonical(), "std#Arc");
+        assert_eq!(types[0].canonical(), "core#PhantomData");
+        assert_eq!(types[1].canonical(), "std#Arc");
+        assert_eq!(types[2].canonical(), "std#Vec");
         assert!(
             parse_schema_types("std#NotARealPreludeType").is_err(),
             "non-table std symbols must refuse"

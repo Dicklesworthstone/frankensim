@@ -3,43 +3,67 @@
 
 #![allow(missing_docs)]
 
+use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_euler_disc_e2e::specimen::DiscProfileSpec;
-use fs_exec::Cx;
+use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_rep_frep::SquatDiscEdgeTreatment;
+
+fn with_cx<R>(operation: impl FnOnce(&Cx<'_>) -> R) -> R {
+    let gate = CancelGate::new();
+    let pool = ArenaPool::new(ArenaConfig::default());
+    pool.scope(|arena| {
+        let cx = Cx::new(
+            &gate,
+            arena,
+            StreamKey {
+                seed: 0x4555_4c45_525f_5052,
+                kernel_id: 1,
+                tile: 0,
+                iteration: 0,
+            },
+            Budget::INFINITE,
+            ExecMode::Deterministic,
+        );
+        operation(&cx)
+    })
+}
 
 #[test]
 fn test_hostile_twin_nominal_asbuilt_substitution() {
-    let cx = Cx::new();
-    let spec = DiscProfileSpec::SolidCylinder {
-        outer_radius_m: 0.0375,
-        thickness_m: -0.0125,
-        edge_treatment: SquatDiscEdgeTreatment::Sharp,
-    };
-    assert!(spec.resolve(7850.0, &cx).is_err(), "Negative thickness must fail resolution");
+    with_cx(|cx| {
+        let spec = DiscProfileSpec::SolidCylinder {
+            outer_radius_m: 0.0375,
+            thickness_m: -0.0125,
+            edge_treatment: SquatDiscEdgeTreatment::Sharp,
+        };
+        assert!(spec.resolve(7850.0, cx).is_err(), "Negative thickness must fail resolution");
+    });
 }
 
 #[test]
 fn test_hostile_twin_fillet_chamfer_confusion() {
-    let cx = Cx::new();
-    let spec = DiscProfileSpec::SolidCylinder {
-        outer_radius_m: 0.0375,
-        thickness_m: 0.010,
-        edge_treatment: SquatDiscEdgeTreatment::CircularFillet {
-            radius: 0.020, // Exceeds thickness
-        },
-    };
-    assert!(spec.resolve(7850.0, &cx).is_err(), "Oversized fillet must fail resolution");
+    with_cx(|cx| {
+        let spec = DiscProfileSpec::SolidCylinder {
+            outer_radius_m: 0.0375,
+            thickness_m: 0.010,
+            edge_treatment: SquatDiscEdgeTreatment::CircularFillet {
+                radius: 0.020, // Exceeds thickness
+            },
+        };
+        assert!(spec.resolve(7850.0, cx).is_err(), "Oversized fillet must fail resolution");
+    });
 }
 
 #[test]
 fn test_hostile_twin_stripped_geometry_bound() {
-    let cx = Cx::new();
-    let spec = DiscProfileSpec::SolidCylinder {
-        outer_radius_m: 0.0,
-        thickness_m: 0.0125,
-        edge_treatment: SquatDiscEdgeTreatment::Sharp,
-    };
-    assert!(spec.resolve(7850.0, &cx).is_err(), "Zero outer radius must fail resolution");
+    with_cx(|cx| {
+        let spec = DiscProfileSpec::SolidCylinder {
+            outer_radius_m: 0.0,
+            thickness_m: 0.0125,
+            edge_treatment: SquatDiscEdgeTreatment::Sharp,
+        };
+        assert!(spec.resolve(7850.0, cx).is_err(), "Zero outer radius must fail resolution");
+    });
 }
 
 #[test]
