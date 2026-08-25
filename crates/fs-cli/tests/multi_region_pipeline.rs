@@ -258,7 +258,7 @@ fn multi_region_artifacts_survive_retention_and_recheck() {
 }
 
 #[test]
-fn multi_region_fixture_resolves_volumetricizes_and_binds_contact_traces() {
+fn multi_region_fixture_resolves_volumetricizes_and_opens_for_conduction() {
     // -- project parses through the real wire grammar --------------------
     let project_path = format!("{DATA}/multi-region-interface.fsim");
     let src = std::fs::read_to_string(&project_path).expect("committed fixture present");
@@ -384,6 +384,11 @@ fn multi_region_fixture_resolves_volumetricizes_and_binds_contact_traces() {
         assert_eq!(complex.vertex_count, positions.len());
         let mesh = fs_conduction::ConductionMesh::new(complex, positions.to_vec())
             .expect("conduction consumer opens the audited labeled complex");
-        let _ = mesh;
+        // NOTE: contact-trace BINDING (resolve_conduction_interface_pairs
+        // lowering the declared cold-hot-joint to coincident boundary
+        // pairs) is intentionally NOT exercised here - that lowering
+        // requires duplicated matching-P1 traces the current fixture
+        // does not carry. Track it with the fs-project interface lane.
+        let _ = (&mesh, &library);
     });
 }
