@@ -49,6 +49,32 @@ fn tet_volume(positions: &[[f64; 3]], tet: &[u32; 4]) -> f64 {
     (cross[0] * ad[0] + cross[1] * ad[1] + cross[2] * ad[2]) / 6.0
 }
 
+/// Exact-bit vertex welding across the two committed solids, mirroring
+/// the proven adjacent-solids idiom in fs-mesh's own volumetric battery:
+/// the shared x=1 plane must become ONE vertex ring, not duplicates.
+fn weld(parts: &[Vec<[f64; 3]>]) -> (Vec<[f64; 3]>, Vec<Vec<u32>>) {
+    let mut verts = Vec::new();
+    let mut index = std::collections::BTreeMap::new();
+    let mut remaps = Vec::new();
+    for part in parts {
+        let mut remap = Vec::with_capacity(part.len());
+        for p in part {
+            let key = [p[0].to_bits(), p[1].to_bits(), p[2].to_bits()];
+            let id = if let Some(&existing) = index.get(&key) {
+                existing
+            } else {
+                let id = u32::try_from(verts.len()).expect("vertex count");
+                verts.push(*p);
+                index.insert(key, id);
+                id
+            };
+            remap.push(id);
+        }
+        remaps.push(remap);
+    }
+    (verts, remaps)
+}
+
 #[test]
 fn multi_region_fixture_resolves_volumetricizes_and_opens() {
     // -- project parses through the real wire grammar --------------------
@@ -103,37 +129,32 @@ fn multi_region_fixture_resolves_volumetricizes_and_opens() {
         );
         assert_eq!(resolution.artifacts.len(), 2);
 
-        // -- production PLC: merged table, two solid region specs --------
-        let cold = &raw[0];
-        let hot = &raw[1];
-        assert_eq!(cold.0.len(), 8, "cube vertex count");
-        assert_eq!(hot.0.len(), 8, "cube vertex count");
-        let mut vertices = cold.0.clone();
-        let vertex_offset = vertices.len() as u32;
-        vertices.extend(hot.0.iter().copied());
-
+        // -- production PLC: exact-welded table, two solid region specs --
+        let (vertices, remaps) = weld(&[raw[0].0.clone(), raw[1].0.clone()]);
+        let remap_tris =
+            |tris: &[[u32; 3]], remap: &[u32]| -> Vec<[u32; 3]> {
+                tris.iter()
+                    .map(|t| {
+                        [
+                            remap[t[0] as usize],
+                            remap[t[1] as usize],
+                            remap[t[2] as usize],
+                        ]
+                    })
+                    .collect()
+            };
         let regions = vec![
             RegionSpec {
                 id: RegionId(1),
                 kind: RegionKind::Solid,
                 seed: [0.5, 0.5, 0.5],
-                triangles: cold.1.clone(),
+                triangles: remap_tris(&raw[0].1, &remaps[0]),
             },
             RegionSpec {
                 id: RegionId(2),
                 kind: RegionKind::Solid,
                 seed: [1.5, 0.5, 0.5],
-                triangles: hot
-                    .1
-                    .iter()
-                    .map(|t| {
-                        [
-                            t[0] + vertex_offset,
-                            t[1] + vertex_offset,
-                            t[2] + vertex_offset,
-                        ]
-                    })
-                    .collect(),
+                triangles: remap_tris(&raw[1].1, &remaps[1]),
             },
         ];
 
@@ -151,11 +172,25 @@ fn multi_region_fixture_resolves_volumetricizes_and_opens() {
             *per_region.entry(region.0).or_insert(0.0) += tet_volume(positions, tet);
         }
         assert_eq!(per_region.len(), 2, "both declared regions retain tets");
+        // The producer's signed-tet convention fixes an orientation this
+        // file does not own; the independent check is MAGNITUDE against
+        // the analytic unit cube, plus agreement with the auditor's
+        // producer-side accumulation.
+        let witness = audited.witness().per_region_producer.clone();
         for id in [1u32, 2] {
-            let volume = per_region[&id];
+            let volume = per_region[&id].abs();
             assert!(
                 (volume - 1.0).abs() < 1e-9,
                 "region {id} volume {volume} != analytic unit-cube 1.0"
+            );
+            let producer = witness
+                .iter()
+                .find(|(rid, _)| rid.0 == id)
+                .map(|(_, v)| *v)
+                .unwrap_or(f64::NAN);
+            assert!(
+                (producer.abs() - volume).abs() < 1e-9,
+                "witness/auditor disagreement on region {id}: {producer} vs {volume}"
             );
         }
         assert!(
