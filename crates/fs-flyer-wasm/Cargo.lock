@@ -610,10 +610,12 @@ dependencies = [
  "fs-atmo",
  "fs-bem",
  "fs-blake3",
+ "fs-evidence",
  "fs-geom",
  "fs-math",
  "fs-mbd",
  "fs-rand",
+ "fs-robust",
  "fs-time",
  "fs-wakeref",
  "fs-wing",
@@ -727,6 +729,13 @@ dependencies = [
  "fs-geom",
  "fs-obs",
  "fs-substrate",
+]
+
+[[package]]
+name = "fs-robust"
+version = "0.0.1"
+dependencies = [
+ "fs-evidence",
 ]
 
 [[package]]
