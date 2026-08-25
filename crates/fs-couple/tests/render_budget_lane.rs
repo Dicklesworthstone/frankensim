@@ -25,6 +25,7 @@
 //! reviewer sees the noise, and rows minted on a noisy host are honestly
 //! wide rather than quietly lucky.
 
+use fs_couple::reed_bore::ReedSolverMode;
 use fs_couple::render::{ReedBoreVoice, RenderContext, RenderVoice};
 use fs_couple::thin_plate::PlateBank;
 use fs_duct::{Duct, Segment, Termination};
@@ -88,7 +89,7 @@ fn build_profile() -> &'static str {
     }
 }
 
-fn reed_fixture() -> RenderContext {
+fn reed_fixture(mode: ReedSolverMode) -> RenderContext {
     let air = GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101_325.0).expect("air");
     let duct = Duct {
         segments: vec![Segment::Cylinder {
@@ -105,7 +106,7 @@ fn reed_fixture() -> RenderContext {
         mass_kg: 0.0,
         stiffness_n_m: 0.0,
     };
-    let voice = ReedBoreVoice::new(
+    let mut voice = ReedBoreVoice::new(
         &duct,
         &air,
         reed,
@@ -117,6 +118,7 @@ fn reed_fixture() -> RenderContext {
         None,
     )
     .expect("voice admits");
+    voice.set_solver_mode(mode);
     RenderContext::new(vec![RenderVoice::ReedBore(voice)], BLOCK)
 }
 
@@ -150,7 +152,7 @@ fn measure(context: &mut RenderContext, reps: usize, blocks_per_rep: usize) -> (
 }
 
 fn mint_row(reps: usize) -> BudgetRow {
-    let mut context = reed_fixture();
+    let mut context = reed_fixture(ReedSolverMode::Strict);
     let (samples_per_sec, dispersion) = measure(&mut context, reps, 32);
     BudgetRow {
         fixture: "massless-reed 2.2mm radiation-damped pipe, empty plate bank",
@@ -229,5 +231,104 @@ fn mint_registry_budget_row() {
         "fixture renders below real time on this machine ({}x); a live-default \
          claim would be false here",
         row.headroom_at_48k
+    );
+}
+
+// --- Fusion #1 before/after rows (bead frankensim-kigr6) ----------------
+//
+// The aperture-solve fusion (2s4i5) already flipped its pricing; this
+// lane's job for kigr6 is the BEFORE row pair for the FIR convolution
+// fusion candidate: the SAME massless-reed fixture rendered through
+// both aperture solver modes so the char-image budget delta from the
+// junction solve is isolated from everything else. Strict is the
+// certification default; FastNewton rows are the declared-fast-mode
+// comparator.
+
+fn mint_fusion_pair(reps: usize) -> (BudgetRow, BudgetRow, f64) {
+    let mut strict_ctx = reed_fixture(ReedSolverMode::Strict);
+    let (strict_rate, strict_disp) = measure(&mut strict_ctx, reps, 32);
+    let mut fast_ctx = reed_fixture(ReedSolverMode::FastNewton);
+    let (fast_rate, fast_disp) = measure(&mut fast_ctx, reps, 32);
+    let base = BudgetRow {
+        fixture: "massless-reed 2.2mm radiation-damped pipe, empty plate bank",
+        image: "wind-reed/char-line",
+        states: 1,
+        block_len: BLOCK,
+        sample_rate_hz: RATE,
+        build_profile: build_profile(),
+        machine_fingerprint: CapabilityProbe::run().fingerprint(),
+        reps,
+        median_samples_per_sec: strict_rate,
+        dispersion: strict_disp,
+        headroom_at_48k: strict_rate / f64::from(RATE),
+    };
+    let fused = BudgetRow {
+        image: "wind-reed/char-line+fast-newton-junction",
+        median_samples_per_sec: fast_rate,
+        dispersion: fast_disp,
+        headroom_at_48k: fast_rate / f64::from(RATE),
+        ..base.clone()
+    };
+    let ratio = fast_rate / strict_rate.max(f64::MIN_POSITIVE);
+    (base, fused, ratio)
+}
+
+fn fusion_row_canonical(label: &str, row: &BudgetRow, ratio: Option<f64>) -> String {
+    let mut s = format!(
+        "frankensim-fusion-budget-row-v2\nlane\t{klabel}\n{rcanonical}",
+        klabel = label,
+        rcanonical = {
+            let _ = label;
+            row.canonical()
+        }
+    )
+    .replace("frankensim-budget-row-v1", "");
+    if let Some(r) = ratio {
+        s.push_str(&format!("ratio-vs-strict\t{r:e}\n"));
+    }
+    s
+}
+
+#[test]
+fn fusion_before_after_rows_encode_and_stay_sane() {
+    // Machinery gate at small reps (mirrors budget_lane_measures...):
+    // both modes must encode finite rows and the FAST mode must not be
+    // catastrophically slower than STRICT on the same host (10x sanity
+    // band; a real regression shows up as a budget-row finding, and a
+    // genuine speedup shows up in the release mint).
+    let (strict_row, fast_row, ratio) = mint_fusion_pair(5);
+    for row in [&strict_row, &fast_row] {
+        assert!(row.median_samples_per_sec.is_finite() && *row.median_samples_per_sec > 0.0);
+        assert!(row.dispersion.is_finite());
+        let bytes = row.canonical();
+        assert!(bytes.contains("image\twind-reed/char-line"));
+    }
+    println!(
+        "{}",
+        fusion_row_canonical("strict-before", &strict_row, None)
+    );
+    println!(
+        "{}",
+        fusion_row_canonical("fast-newton-after", &fast_row, Some(ratio))
+    );
+    assert!(
+        (0.1..=10.0).contains(&ratio),
+        "fast-newton junction rate is {ratio}x strict on the same host; \\
+         outside the 10x sanity band either the lane or the solver is broken"
+    );
+}
+
+#[test]
+#[ignore = "heavy minting run: 32 reps in release via the recorded heavy-run recipe"]
+fn mint_fusion_registry_rows() {
+    let (strict_row, fast_row, ratio) = mint_fusion_pair(32);
+    assert!(strict_row.build_profile == "release");
+    println!(
+        "{}",
+        fusion_row_canonical("strict-before", &strict_row, None)
+    );
+    println!(
+        "{}",
+        fusion_row_canonical("fast-newton-after", &fast_row, Some(ratio))
     );
 }
