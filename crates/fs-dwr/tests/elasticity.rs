@@ -1,7 +1,13 @@
 //! `frankensim-m4rb` vector-compliance DWR acceptance fixtures.
 
-use fs_cutfem::{Circle, CutElasticity, CutFemError, CutSdf, HalfPlane, Quadtree};
-use fs_dwr::{ElasticityDwrEstimate, estimate_elasticity_compliance};
+use fs_cutfem::{
+    BoundaryTraction, Circle, CutElasticity, CutFemError, CutSdf, CutStabilizationScaling,
+    DesignBoxEdge, EdgeBand, HalfPlane, Quadtree,
+};
+use fs_dwr::{
+    ElasticityDwrEstimate, estimate_elasticity_compliance,
+    estimate_elasticity_compliance_with_boundary_traction,
+};
 use fs_ivl::Interval;
 use fs_material::IsotropicElastic;
 use std::collections::BTreeMap;
@@ -26,6 +32,7 @@ fn problem<'a>(
         material,
         nitsche_beta: 100.0,
         ghost_gamma,
+        stabilization_scaling: CutStabilizationScaling::MuScaled,
         quad_depth: 3,
         clamp,
         boundary_traction: traction,
@@ -557,5 +564,103 @@ fn assert_top_decile_near_hole(
     println!(
         "{{\"suite\":\"fs-dwr/elasticity\",\"case\":\"plate-with-hole-localization\",\"indicator_terms\":\"bulk+nitsche+ghost\",\"top_decile_cells\":{},\"k_cells\":{k},\"top_mass_fraction\":{mass_fraction:.8}}}",
         top.len()
+    );
+}
+
+#[test]
+fn edge_band_traction_disjoint_cut_and_refusal_semantics() {
+    let material = material();
+    let clamp_left = |x: f64, _y: f64| x == 0.0;
+    let body_zero = |_: f64, _: f64| [0.0, 0.0];
+    let zero = |_: f64, _: f64| [0.0, 0.0];
+    let traction_fn = |_x: f64, y: f64| [0.05 * (PI * y).sin().powi(2), 0.0];
+
+    let grid = Quadtree::uniform(3);
+
+    // Case 1: Cut intersects bottom edge (y = 0), but traction is on right edge (x = 1).
+    // Disjoint cut edge must succeed under EdgeBand.
+    let bottom_notch = HalfPlane {
+        normal: [0.0, -1.0],
+        offset: -0.1,
+    };
+    let right_band = EdgeBand::new(DesignBoxEdge::Right, 0.25, 0.75).expect("valid edge band");
+    let prob = problem(
+        &grid,
+        &bottom_notch,
+        &material,
+        Some(&clamp_left),
+        None,
+        true,
+        0.5,
+    );
+    let estimate = estimate_elasticity_compliance_with_boundary_traction(
+        &prob,
+        &body_zero,
+        &zero,
+        BoundaryTraction::EdgeBand {
+            support: right_band,
+            value: &traction_fn,
+        },
+    )
+    .expect("disjoint cut with edge band must succeed");
+    assert_reconstruction(&estimate);
+    assert!(estimate.terms.outer_traction.abs() > 0.0);
+    assert!(estimate.terms.bulk.abs() > 0.0);
+
+    // Case 2: Cut intersects the loaded band directly (x = 1, y in [0.25, 0.75]).
+    // Cut through loaded band must fail-closed with InvalidElasticityInput.
+    let sqrt2 = 2.0f64.sqrt();
+    let right_notch = HalfPlane {
+        normal: [1.0 / sqrt2, 1.0 / sqrt2],
+        offset: 1.5 / sqrt2,
+    };
+    let prob_cut = problem(
+        &grid,
+        &right_notch,
+        &material,
+        Some(&clamp_left),
+        None,
+        true,
+        0.5,
+    );
+    let result_cut = estimate_elasticity_compliance_with_boundary_traction(
+        &prob_cut,
+        &body_zero,
+        &zero,
+        BoundaryTraction::EdgeBand {
+            support: right_band,
+            value: &traction_fn,
+        },
+    );
+    assert!(
+        matches!(result_cut, Err(CutFemError::InvalidElasticityInput { .. })),
+        "cut through loaded edge band must refuse"
+    );
+
+    // Case 3: Competing boundary traction sources (both problem field and explicit arg) refuse.
+    let prob_competing = problem(
+        &grid,
+        &AlwaysInside,
+        &material,
+        Some(&clamp_left),
+        Some(&traction_fn),
+        true,
+        0.5,
+    );
+    let result_competing = estimate_elasticity_compliance_with_boundary_traction(
+        &prob_competing,
+        &body_zero,
+        &zero,
+        BoundaryTraction::EdgeBand {
+            support: right_band,
+            value: &traction_fn,
+        },
+    );
+    assert!(
+        matches!(
+            result_competing,
+            Err(CutFemError::InvalidElasticityInput { .. })
+        ),
+        "competing boundary traction sources must refuse"
     );
 }

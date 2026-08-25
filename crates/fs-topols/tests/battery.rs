@@ -352,16 +352,15 @@ fn try_cantilever_solution(
             what: format!("cantilever material card was refused: {error}"),
         }
     })?;
-    let (lambda, mu) = material.lame();
-    let legacy_stiffness_scale = (lambda + 2.0 * mu) / mu;
     let clamp = |x: f64, _y: f64| x < 1e-9;
     let traction = move |_: f64, _: f64| [0.0, -load];
     let solver = CutElasticity {
         grid,
         sdf: phi,
         material: &material,
-        nitsche_beta: 20.0 * legacy_stiffness_scale,
-        ghost_gamma: 0.5 * legacy_stiffness_scale,
+        nitsche_beta: 20.0,
+        ghost_gamma: 0.5,
+        stabilization_scaling: fs_cutfem::CutStabilizationScaling::LongitudinalModulus,
         quad_depth: 2,
         clamp: Some(&clamp),
         boundary_traction: None,

@@ -52,8 +52,9 @@ pub use agg::AggPolicy;
 pub use cond::{CondReport, condition_estimate};
 pub use elastic::MAX_PLANE_STRAIN_STIFFNESS_RATIO;
 pub use elastic::{
-    BoundaryTraction, CutElasticity, CutElasticityOperator, CutElasticitySolution, DesignBoxEdge,
-    EdgeBand,
+    BoundaryTraction, CutElasticity, CutElasticityOperator, CutElasticitySolution,
+    CutStabilizationScaling, DesignBoxEdge, EdgeBand, SupportedTractionSegment,
+    supported_traction_segment,
 };
 #[cfg(feature = "adjoint-vjp")]
 pub use elastic::{

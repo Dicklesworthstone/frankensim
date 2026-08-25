@@ -139,22 +139,30 @@ pub enum BoundaryTraction<'a> {
         value: &'a dyn Fn(f64, f64) -> [f64; 2],
     },
 }
-
+/// A subsegment of a design-box boundary edge that carries supported traction.
 #[derive(Clone, Copy)]
-struct SupportedTractionSegment<'a> {
-    value: &'a dyn Fn(f64, f64) -> [f64; 2],
-    local_start: f64,
-    local_end: f64,
-    start: [f64; 2],
-    end: [f64; 2],
+pub struct SupportedTractionSegment<'a> {
+    /// Traction value callback evaluated only on this supported subsegment.
+    pub value: &'a dyn Fn(f64, f64) -> [f64; 2],
+    /// Normalized local parameter start on the element edge in `[0, 1]`.
+    pub local_start: f64,
+    /// Normalized local parameter end on the element edge in `[0, 1]`.
+    pub local_end: f64,
+    /// Cartesian start coordinates.
+    pub start: [f64; 2],
+    /// Cartesian end coordinates.
+    pub end: [f64; 2],
 }
 
-fn supported_traction_segment(
-    boundary_traction: BoundaryTraction<'_>,
+/// Compute the supported subsegment (if any) of an element edge `point_a` to `point_b`
+/// on `edge` under `boundary_traction`.
+#[must_use]
+pub fn supported_traction_segment<'a>(
+    boundary_traction: BoundaryTraction<'a>,
     edge: DesignBoxEdge,
     point_a: [f64; 2],
     point_b: [f64; 2],
-) -> Option<SupportedTractionSegment<'_>> {
+) -> Option<SupportedTractionSegment<'a>> {
     match boundary_traction {
         BoundaryTraction::Uncertified(value) => Some(SupportedTractionSegment {
             value,
@@ -204,6 +212,29 @@ fn supported_traction_segment(
 /// Vector Q1 CutFEM problem on `Omega = {phi < 0}`.
 ///
 /// The constitutive parameters come from [`IsotropicElastic`], so the
+/// Scaling convention used to evaluate Nitsche and ghost penalty parameters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CutStabilizationScaling {
+    /// Dimensionless coefficients scaled by the shear modulus $\mu$ (canonical default).
+    ///
+    /// - Nitsche penalty: `nitsche_beta * mu / h`
+    /// - Ghost scale: `ghost_gamma * mu * h * weight`
+    #[default]
+    MuScaled,
+    /// Physical coefficients scaled by the longitudinal / P-wave modulus $M = \lambda + 2\mu$.
+    ///
+    /// - Nitsche penalty: `nitsche_beta * (lambda + 2*mu) / h`
+    /// - Ghost scale: `ghost_gamma * (lambda + 2*mu) * h * weight`
+    ///
+    /// Evaluated without forming intermediate dimensionless $(M / \mu)$ ratios, ensuring
+    /// finite physical products assemble without overflow for scale-separated inputs.
+    LongitudinalModulus,
+}
+
+/// A certified vector small-strain CutFEM linear elasticity problem on
+/// Ω = {φ < 0}.
+///
+/// Material parameters are supplied by a verified [`IsotropicElastic`]; the
 /// material's admissibility checks and model-card identity are shared
 /// with the rest of FLUX rather than duplicated here.
 #[derive(Clone, Copy)]
@@ -215,11 +246,13 @@ pub struct CutElasticity<'a> {
     /// Isotropic small-strain material (plane-strain restriction). The v1
     /// certified regime requires `(lambda + 2*mu) / mu <= 4`.
     pub material: &'a IsotropicElastic,
-    /// Dimensionless symmetric-Nitsche constant. The applied penalty is
-    /// `nitsche_beta * mu / h`, never divided by cut fraction.
+    /// Symmetric-Nitsche constant. The applied penalty is
+    /// `nitsche_beta * modulus / h`, never divided by cut fraction.
     pub nitsche_beta: f64,
     /// First-derivative ghost-penalty constant. Zero disables it.
     pub ghost_gamma: f64,
+    /// Stabilization scaling convention for Nitsche and ghost penalties.
+    pub stabilization_scaling: CutStabilizationScaling,
     /// Certified cut-quadrature subdivision depth.
     pub quad_depth: u32,
     /// Optional zero-displacement clamp on active design-box boundary nodes.
@@ -244,6 +277,7 @@ impl core::fmt::Debug for CutElasticity<'_> {
             .field("material", self.material)
             .field("nitsche_beta", &self.nitsche_beta)
             .field("ghost_gamma", &self.ghost_gamma)
+            .field("stabilization_scaling", &self.stabilization_scaling)
             .field("quad_depth", &self.quad_depth)
             .field("has_clamp", &self.clamp.is_some())
             .field("has_boundary_traction", &self.boundary_traction.is_some())
@@ -727,6 +761,35 @@ impl CutElasticity<'_> {
         Ok((lambda, mu))
     }
 
+    /// Return the effective physical modulus used to scale stabilization terms.
+    ///
+    /// Under [`CutStabilizationScaling::MuScaled`] this is the second Lamé parameter $\mu$.
+    /// Under [`CutStabilizationScaling::LongitudinalModulus`] this is $\lambda + 2\mu$.
+    ///
+    /// # Errors
+    /// Returns `CutFemError::InvalidElasticityInput` if the effective modulus is non-finite or non-positive.
+    pub fn effective_stabilization_modulus(
+        &self,
+        lambda: f64,
+        mu: f64,
+    ) -> Result<f64, CutFemError> {
+        let modulus = match self.stabilization_scaling {
+            CutStabilizationScaling::MuScaled => mu,
+            CutStabilizationScaling::LongitudinalModulus => {
+                let m = lambda + 2.0 * mu;
+                if !(m.is_finite() && m > 0.0) {
+                    return Err(CutFemError::InvalidElasticityInput {
+                        what: format!(
+                            "longitudinal modulus (lambda + 2*mu) = {m} is not finite and positive"
+                        ),
+                    });
+                }
+                m
+            }
+        };
+        Ok(modulus)
+    }
+
     fn validate_solver(&self) -> Result<(), CutFemError> {
         if !(self.solver_tol > 0.0 && self.solver_tol.is_finite()) {
             return Err(CutFemError::InvalidElasticityInput {
@@ -772,18 +835,15 @@ impl CutElasticity<'_> {
         )
     }
 
-    /// Assemble with an explicit boundary-traction support descriptor.
+    /// Assemble `K u = b` with a checked boundary-traction descriptor.
     ///
-    /// [`BoundaryTraction::Uncertified`] preserves the full-edge fail-closed
-    /// callback semantics of [`Self::boundary_traction`]. A checked
-    /// [`BoundaryTraction::EdgeBand`] instead defines the applied traction as
-    /// zero outside its named support, so only the exact supported subsegment
-    /// is classified and integrated.
+    /// This accepts either [`BoundaryTraction::Uncertified`] or a checked
+    /// [`BoundaryTraction::EdgeBand`]. Like [`Self::solve_with_boundary_traction`],
+    /// this requires [`Self::boundary_traction`] to be `None`.
     ///
     /// # Errors
-    /// In addition to the ordinary assembly refusals, this method requires
-    /// [`Self::boundary_traction`] to be `None`; two competing sources are
-    /// never merged implicitly.
+    /// Returns a structured refusal for invalid parameters, empty domains,
+    /// non-finite callbacks, or SDF cuts across loaded boundary support.
     pub fn assemble_with_boundary_traction(
         &self,
         f: &dyn Fn(f64, f64) -> [f64; 2],
@@ -797,11 +857,12 @@ impl CutElasticity<'_> {
     #[allow(clippy::too_many_lines)]
     fn assemble_impl(
         &self,
-        f: &dyn Fn(f64, f64) -> [f64; 2],
+        body: &dyn Fn(f64, f64) -> [f64; 2],
         g: &dyn Fn(f64, f64) -> [f64; 2],
         boundary_traction: Option<BoundaryTraction<'_>>,
     ) -> Result<CutElasticityOperator, CutFemError> {
         let (lambda, mu) = self.validate_assembly()?;
+        let modulus = self.effective_stabilization_modulus(lambda, mu)?;
         let mut active = Vec::new();
         let mut cut = BTreeSet::new();
         let mut rules = BTreeMap::new();
@@ -857,26 +918,29 @@ impl CutElasticity<'_> {
 
         let mut coo = Coo::new(ndof, ndof);
         let mut rhs = vec![0.0; ndof];
+
         for &cell in &active {
             let (lo, hi) = self.grid.rect(cell);
-            let corners = self.grid.corner_nodes(cell);
             let h = self.grid.cell_h(cell);
+            let corners = self.grid.corner_nodes(cell);
             let mut local_k = [[0.0; 8]; 8];
             let mut local_f = [0.0; 8];
-            let full_rule;
-            let bulk: &[([f64; 2], f64)] = if cut.contains(&cell) {
-                &rules[&cell].bulk
+
+            let bulk_rule;
+            let bulk: &[([f64; 2], f64)] = if let Some(rule) = rules.get(&cell) {
+                &rule.bulk
             } else {
-                full_rule = {
+                bulk_rule = {
                     let mut points = Vec::with_capacity(9);
                     tensor_gauss(lo, hi, &mut points);
                     points
                 };
-                &full_rule
+                &bulk_rule
             };
+
             for &(point, weight) in bulk {
                 let (shape, gradients) = q1(lo, hi, point);
-                let body = f(point[0], point[1]);
+                let body = body(point[0], point[1]);
                 if body.iter().any(|value| !value.is_finite()) {
                     return Err(CutFemError::InvalidElasticityInput {
                         what: format!("body force is non-finite at {point:?}"),
@@ -897,7 +961,7 @@ impl CutElasticity<'_> {
                 }
             }
             if cut.contains(&cell) && !self.traction_free_interface {
-                let penalty = self.nitsche_beta * mu / h;
+                let penalty = self.nitsche_beta * modulus / h;
                 if !penalty.is_finite() {
                     return Err(CutFemError::InvalidElasticityInput {
                         what: format!("derived Nitsche penalty is non-finite on cell {cell:?}"),
@@ -980,7 +1044,7 @@ impl CutElasticity<'_> {
                         if ghost_faces.insert(face) {
                             self.assemble_ghost_face(
                                 patch,
-                                mu,
+                                modulus,
                                 &node_ids,
                                 node_expansions.as_ref(),
                                 &clamped,
@@ -1138,7 +1202,7 @@ impl CutElasticity<'_> {
     fn assemble_ghost_face(
         &self,
         patch: SharedFacePatch,
-        mu: f64,
+        modulus: f64,
         node_ids: &TerminalIds,
         expansions: Option<&NodeExpansions>,
         clamped: &[bool],
@@ -1173,7 +1237,7 @@ impl CutElasticity<'_> {
                     dot2(gradients_b[a], normal);
             }
         }
-        let scale = self.ghost_gamma * mu * h * weight;
+        let scale = self.ghost_gamma * modulus * h * weight;
         if !scale.is_finite() {
             return Err(CutFemError::InvalidElasticityInput {
                 what: format!("derived ghost penalty is non-finite on patch {patch:?}"),
@@ -1831,6 +1895,7 @@ mod tests {
             material: &material,
             nitsche_beta: 100.0,
             ghost_gamma: 0.5,
+            stabilization_scaling: CutStabilizationScaling::MuScaled,
             quad_depth: 4,
             clamp: None,
             boundary_traction: None,

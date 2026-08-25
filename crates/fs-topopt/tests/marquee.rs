@@ -93,6 +93,7 @@ fn vector_dwr_problem<'a>(
         material,
         nitsche_beta: 100.0,
         ghost_gamma: 0.5,
+        stabilization_scaling: fs_cutfem::CutStabilizationScaling::MuScaled,
         quad_depth: 3,
         clamp: None,
         boundary_traction: None,

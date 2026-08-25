@@ -280,10 +280,6 @@ pub fn optimize_compliance(
 ) -> Result<OptimizeReport, CutFemError> {
     let support = cantilever_support(fixture)?;
     let (material, lambda, mu) = validated_plane_strain_material(settings)?;
-    // Preserve the former fs-solid facade's coefficient convention exactly:
-    // it expressed both constants against lambda + 2*mu, while fs-cutfem's
-    // canonical operator expresses them against mu.
-    let legacy_stiffness_scale = (lambda + 2.0 * mu) / mu;
     let n = 1usize << settings.level;
     assert_eq!(phi.n(), n, "SDF lattice must match the CutFEM grid");
     let grid = Quadtree::uniform(settings.level);
@@ -301,8 +297,9 @@ pub fn optimize_compliance(
             grid: &grid,
             sdf: phi,
             material: &material,
-            nitsche_beta: 20.0 * legacy_stiffness_scale,
-            ghost_gamma: 0.5 * legacy_stiffness_scale,
+            nitsche_beta: 20.0,
+            ghost_gamma: 0.5,
+            stabilization_scaling: fs_cutfem::CutStabilizationScaling::LongitudinalModulus,
             quad_depth: 2,
             clamp: Some(&clamp),
             boundary_traction: None,

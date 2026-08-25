@@ -59,9 +59,10 @@ pub use adapt::{AdaptStep, adapt_loop};
 pub use aniso::synthesize_metric;
 pub use elasticity::{
     ElasticityDwrEstimate, ElasticityGhostMethod, ElasticityResidualTerms,
-    estimate_elasticity_compliance,
+    estimate_elasticity_compliance, estimate_elasticity_compliance_with_boundary_traction,
 };
 pub use estimate::{DwrEstimate, GoalContext, estimate, goal_value};
+pub use fs_cutfem::{BoundaryTraction, CutStabilizationScaling, DesignBoxEdge, EdgeBand};
 pub use hvsp::{Decision, h_vs_p};
 pub use mark::dorfler;
 pub use tiles::{ThresholdOutcome, haar_threshold};

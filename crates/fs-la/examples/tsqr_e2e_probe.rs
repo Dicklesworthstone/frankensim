@@ -9,12 +9,12 @@
 
 use fs_la::canonical_check::{check_outcome, promote_full_rank_t2};
 use fs_la::canonical_qr::{
-    CertifiedRankProfile, CanonicalQrOutcome, CanonicalQrPolicy, ClaimTier, DeterminismClass,
-    ErrorBudget, NoClaimReason, OutcomeAuthority, PolicyError, RankTolerance, ReplayIdentity,
+    ArithmeticMode, CanonicalQrOutcome, CanonicalQrPolicy, CertifiedRankProfile, ClaimTier,
+    DeterminismClass, ErrorBudget, OutcomeAuthority, PolicyError, RankTolerance, ReplayIdentity,
     TiePolicy,
 };
 use fs_la::canonical_tree::{CancelScope, FixedTreeDriver};
-use fs_blake3::{hash_bytes, ContentHash};
+use fs_blake3::hash_bytes;
 
 fn policy() -> CanonicalQrPolicy {
     CanonicalQrPolicy::new(
@@ -203,7 +203,7 @@ fn emit_certificate(a: &[f64], m: usize, n: usize, block: usize) {
 /// Verify a retained certificate artifact: structure + digest coherence.
 fn verify_certificate_line(line: &str) {
     let obj: Json = parse_flat_json(line);
-    if obj.get("domain").map(String::as_str) != Some("frankensim.fs-la.canonical-qr-replay.v1") {
+    if obj.get("domain").as_deref() != Some("frankensim.fs-la.canonical-qr-replay.v1") {
         fail("artifact domain mismatch");
     }
     let rd = obj.get("result_digest").unwrap_or_else(|| fail("missing result_digest"));

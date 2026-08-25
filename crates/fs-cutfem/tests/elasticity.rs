@@ -10,7 +10,8 @@
 
 use fs_cutfem::{
     BoundaryTraction, Circle, CutElasticity, CutElasticityOperator, CutElasticitySolution,
-    CutFemError, CutSdf, DesignBoxEdge, EdgeBand, HalfPlane, NodeKey, Quadtree, condition_estimate,
+    CutFemError, CutSdf, CutStabilizationScaling, DesignBoxEdge, EdgeBand, HalfPlane, NodeKey,
+    Quadtree, condition_estimate,
 };
 use fs_ivl::Interval;
 use fs_material::IsotropicElastic;
@@ -57,6 +58,7 @@ fn problem<'a>(
         material,
         nitsche_beta: 20.0,
         ghost_gamma,
+        stabilization_scaling: CutStabilizationScaling::MuScaled,
         quad_depth: 3,
         clamp: None,
         boundary_traction: None,
@@ -1960,3 +1962,54 @@ fn elasticity_inputs_fail_closed() {
         Err(CutFemError::InvalidElasticityInput { .. })
     ));
 }
+
+#[test]
+fn stabilization_scaling_parity_and_extreme_scale_refusals() {
+    let grid = Quadtree::uniform(2);
+    let sdf = Circle {
+        center: [0.5, 0.5],
+        radius: 0.3,
+    };
+    let mat = material();
+    let (lambda, mu) = mat.lame();
+    let ratio = (lambda + 2.0 * mu) / mu;
+
+    let zero_body = |_: f64, _: f64| [0.0, 0.0];
+    let dirichlet = |x: f64, y: f64| [0.1 * x, -0.2 * y];
+
+    // Parity: MuScaled with beta * ratio matches LongitudinalModulus with beta
+    let beta = 25.0;
+    let gamma = 0.5;
+    let mu_problem = CutElasticity {
+        nitsche_beta: beta * ratio,
+        ghost_gamma: gamma * ratio,
+        stabilization_scaling: CutStabilizationScaling::MuScaled,
+        ..problem(&grid, &sdf, &mat, 0.0)
+    };
+    let long_problem = CutElasticity {
+        nitsche_beta: beta,
+        ghost_gamma: gamma,
+        stabilization_scaling: CutStabilizationScaling::LongitudinalModulus,
+        ..problem(&grid, &sdf, &mat, 0.0)
+    };
+
+    let mu_op = mu_problem
+        .assemble(&zero_body, &dirichlet)
+        .expect("mu-scaled assembly");
+    let long_op = long_problem
+        .assemble(&zero_body, &dirichlet)
+        .expect("longitudinal-modulus assembly");
+    assert_operator_evidence_bits_eq(&mu_op, &long_op);
+
+    // Non-finite penalty or scale must refuse structurally
+    let nonfinite_beta = CutElasticity {
+        nitsche_beta: f64::INFINITY,
+        stabilization_scaling: CutStabilizationScaling::LongitudinalModulus,
+        ..problem(&grid, &sdf, &mat, 0.5)
+    };
+    assert!(matches!(
+        nonfinite_beta.assemble(&zero_body, &dirichlet),
+        Err(CutFemError::InvalidElasticityInput { .. })
+    ));
+}
+

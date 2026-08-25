@@ -15,7 +15,8 @@
 
 use fs_cutfem::quad::tensor_gauss;
 use fs_cutfem::{
-    CellKey, CutElasticity, CutElasticitySolution, CutFemError, Quadtree, SharedFacePatch,
+    BoundaryTraction, CellKey, CutElasticity, CutElasticitySolution, CutFemError, DesignBoxEdge,
+    Quadtree, SharedFacePatch, supported_traction_segment,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -90,7 +91,7 @@ pub struct ElasticityDwrEstimate {
 }
 
 /// Estimate compliance error using self-adjoint coarse and enriched primal
-/// solves.
+/// solves with uncertified callback traction or no traction.
 ///
 /// `J=b^T u` is physical dead-load compliance when essential data are
 /// homogeneous. With nonzero embedded data `g`, it is explicitly the
@@ -101,11 +102,42 @@ pub struct ElasticityDwrEstimate {
 /// Propagates vector CutFEM build/solve refusals. Field evaluation fails closed
 /// when a requested active cell or corner value is unavailable, and every
 /// callback-derived or accumulated quantity must remain finite.
-#[allow(clippy::too_many_lines)]
 pub fn estimate_elasticity_compliance(
     problem: &CutElasticity<'_>,
     body: &dyn Fn(f64, f64) -> [f64; 2],
     embedded_data: &dyn Fn(f64, f64) -> [f64; 2],
+) -> Result<ElasticityDwrEstimate, CutFemError> {
+    estimate_elasticity_compliance_impl(problem, body, embedded_data, None)
+}
+
+/// Estimate compliance error using self-adjoint coarse and enriched primal
+/// solves with typed boundary traction data.
+///
+/// Requires [`CutElasticity::boundary_traction`] to be `None`.
+///
+/// # Errors
+///
+/// Propagates vector CutFEM build/solve refusals or invalid traction inputs.
+pub fn estimate_elasticity_compliance_with_boundary_traction(
+    problem: &CutElasticity<'_>,
+    body: &dyn Fn(f64, f64) -> [f64; 2],
+    embedded_data: &dyn Fn(f64, f64) -> [f64; 2],
+    boundary_traction: BoundaryTraction<'_>,
+) -> Result<ElasticityDwrEstimate, CutFemError> {
+    if problem.boundary_traction.is_some() {
+        return Err(CutFemError::InvalidElasticityInput {
+            what: "estimate_elasticity_compliance_with_boundary_traction requires CutElasticity::boundary_traction to be None"
+                .to_string(),
+        });
+    }
+    estimate_elasticity_compliance_impl(problem, body, embedded_data, Some(boundary_traction))
+}
+
+fn estimate_elasticity_compliance_impl(
+    problem: &CutElasticity<'_>,
+    body: &dyn Fn(f64, f64) -> [f64; 2],
+    embedded_data: &dyn Fn(f64, f64) -> [f64; 2],
+    boundary_traction: Option<BoundaryTraction<'_>>,
 ) -> Result<ElasticityDwrEstimate, CutFemError> {
     if problem.grid.max_level() >= 16 {
         return Err(invalid(
@@ -113,7 +145,10 @@ pub fn estimate_elasticity_compliance(
                 .to_string(),
         ));
     }
-    let coarse = problem.solve(body, embedded_data)?;
+    let coarse = match boundary_traction {
+        Some(bt) => problem.solve_with_boundary_traction(body, embedded_data, bt)?,
+        None => problem.solve(body, embedded_data)?,
+    };
     let fine_grid = problem.grid.refined_once();
     let fine_problem = CutElasticity {
         grid: &fine_grid,
@@ -121,15 +156,26 @@ pub fn estimate_elasticity_compliance(
         material: problem.material,
         nitsche_beta: problem.nitsche_beta,
         ghost_gamma: problem.ghost_gamma,
+        stabilization_scaling: problem.stabilization_scaling,
         quad_depth: problem.quad_depth,
         clamp: problem.clamp,
-        boundary_traction: problem.boundary_traction,
+        boundary_traction: if boundary_traction.is_some() {
+            None
+        } else {
+            problem.boundary_traction
+        },
         traction_free_interface: problem.traction_free_interface,
         solver_tol: problem.solver_tol,
         solver_max_iters: problem.solver_max_iters,
     };
-    let fine = fine_problem.solve(body, embedded_data)?;
+    let fine = match boundary_traction {
+        Some(bt) => fine_problem.solve_with_boundary_traction(body, embedded_data, bt)?,
+        None => fine_problem.solve(body, embedded_data)?,
+    };
+    let effective_traction =
+        boundary_traction.or_else(|| problem.boundary_traction.map(BoundaryTraction::Uncertified));
     let (lambda, mu) = problem.material.lame();
+    let modulus = problem.effective_stabilization_modulus(lambda, mu)?;
 
     let coarse_active: BTreeSet<CellKey> = coarse.active_cells().iter().copied().collect();
     let fine_active: BTreeSet<CellKey> = fine.active_cells().iter().copied().collect();
@@ -185,7 +231,7 @@ pub fn estimate_elasticity_compliance(
             && let Some(rule) = fine.cut_rules().get(&fine_cell)
         {
             let coarse_h = problem.grid.cell_h(parent);
-            let penalty = problem.nitsche_beta * mu / coarse_h;
+            let penalty = problem.nitsche_beta * modulus / coarse_h;
             require_finite(penalty, "elasticity DWR Nitsche penalty")?;
             let mut cell_nitsche = 0.0;
             for &(point, weight, normal) in &rule.iface {
@@ -215,8 +261,15 @@ pub fn estimate_elasticity_compliance(
             add_indicator(&mut indicators, parent, cell_nitsche)?;
         }
 
-        let cell_traction =
-            outer_traction_residual(problem, &coarse, &fine, &fine_grid, fine_cell, parent)?;
+        let cell_traction = outer_traction_residual(
+            problem,
+            &coarse,
+            &fine,
+            &fine_grid,
+            fine_cell,
+            parent,
+            effective_traction,
+        )?;
         terms.outer_traction += cell_traction;
         add_cell_term(&mut cell_terms, parent, |cell| {
             cell.outer_traction += cell_traction;
@@ -248,7 +301,7 @@ pub fn estimate_elasticity_compliance(
                         "cannot reconstruct coarse elasticity ghost patch ({cell_a:?}, {cell_b:?}): {error}"
                     ))
                 })?;
-            let face_value = coarse_ghost_consistent_energy(problem, &coarse, patch, mu)?;
+            let face_value = coarse_ghost_consistent_energy(problem, &coarse, patch, modulus)?;
             if face_indicators
                 .insert((cell_a, cell_b), face_value)
                 .is_some()
@@ -333,59 +386,72 @@ fn outer_traction_residual(
     fine_grid: &Quadtree,
     fine_cell: CellKey,
     parent: CellKey,
+    boundary_traction: Option<BoundaryTraction<'_>>,
 ) -> Result<f64, CutFemError> {
-    let Some(load) = problem.boundary_traction else {
+    let Some(boundary_traction) = boundary_traction else {
         return Ok(0.0);
     };
     let (level, i, j) = fine_cell;
     let nmax = 1u32 << level;
     let corners = fine_grid.corner_nodes(fine_cell);
     let edges = [
-        (j == 0, [0usize, 1usize]),
-        (i + 1 == nmax, [1, 2]),
-        (j + 1 == nmax, [2, 3]),
-        (i == 0, [3, 0]),
+        (j == 0, DesignBoxEdge::Bottom, [0usize, 1usize]),
+        (i + 1 == nmax, DesignBoxEdge::Right, [1, 2]),
+        (j + 1 == nmax, DesignBoxEdge::Top, [2, 3]),
+        (i == 0, DesignBoxEdge::Left, [3, 0]),
     ];
     let mut eta = 0.0;
-    for (on_boundary, corner_indices) in edges {
+    for (on_boundary, edge, corner_indices) in edges {
         if !on_boundary {
             continue;
         }
         let point_a = fine_grid.node_pos(corners[corner_indices[0]]);
         let point_b = fine_grid.node_pos(corners[corner_indices[1]]);
-        let edge_lo = [point_a[0].min(point_b[0]), point_a[1].min(point_b[1])];
-        let edge_hi = [point_a[0].max(point_b[0]), point_a[1].max(point_b[1])];
-        let enclosure = problem.sdf.enclose(edge_lo, edge_hi);
+        let dx = point_b[0] - point_a[0];
+        let dy = point_b[1] - point_a[1];
+        let Some(segment) = supported_traction_segment(boundary_traction, edge, point_a, point_b)
+        else {
+            continue;
+        };
+        let segment_lo = [
+            segment.start[0].min(segment.end[0]),
+            segment.start[1].min(segment.end[1]),
+        ];
+        let segment_hi = [
+            segment.start[0].max(segment.end[0]),
+            segment.start[1].max(segment.end[1]),
+        ];
+        let enclosure = problem.sdf.enclose(segment_lo, segment_hi);
         if !(enclosure.lo().is_finite() && enclosure.hi().is_finite()) {
             return Err(invalid(format!(
-                "non-finite SDF enclosure on DWR loaded edge {point_a:?}--{point_b:?}"
+                "non-finite SDF enclosure on DWR supported {edge:?} segment {:?}--{:?}",
+                segment.start, segment.end
             )));
         }
         if enclosure.lo() <= 0.0 && enclosure.hi() >= 0.0 {
             return Err(invalid(format!(
-                "DWR loaded edge {point_a:?}--{point_b:?} is cut by the SDF; certified edge clipping is unavailable"
+                "DWR supported {edge:?} boundary traction segment {:?}--{:?} is cut by the SDF; certified edge clipping is unavailable",
+                segment.start, segment.end
             )));
         }
         if enclosure.lo() > 0.0 {
             continue;
         }
-        let delta = [point_b[0] - point_a[0], point_b[1] - point_a[1]];
-        let length = delta[0].hypot(delta[1]);
-        let gauss = 0.5 / 3.0f64.sqrt();
-        for coordinate in [0.5 - gauss, 0.5 + gauss] {
-            let point = [
-                point_a[0] + coordinate * delta[0],
-                point_a[1] + coordinate * delta[1],
-            ];
+        let length = dx.hypot(dy);
+        let midpoint = f64::midpoint(segment.local_start, segment.local_end);
+        let half_span = 0.5 * (segment.local_end - segment.local_start);
+        let gauss = half_span / 3.0f64.sqrt();
+        for coordinate in [midpoint - gauss, midpoint + gauss] {
+            let point = [point_a[0] + coordinate * dx, point_a[1] + coordinate * dy];
             let (fine_value, _) = fine.value_gradient(fine_grid, fine_cell, point)?;
             let (coarse_value, _) = coarse.value_gradient(problem.grid, parent, point)?;
             let weight_value = sub2(fine_value, coarse_value);
-            let traction_value = load(point[0], point[1]);
+            let traction_value = (segment.value)(point[0], point[1]);
             require_vector_finite(
                 traction_value,
                 "outer traction in elasticity DWR boundary term",
             )?;
-            let value = 0.5 * length * dot2(traction_value, weight_value);
+            let value = half_span * length * dot2(traction_value, weight_value);
             require_finite(value, "elasticity DWR outer-traction contribution")?;
             eta += value;
         }
@@ -398,7 +464,7 @@ fn coarse_ghost_consistent_energy(
     problem: &CutElasticity<'_>,
     coarse: &CutElasticitySolution,
     patch: SharedFacePatch,
-    mu: f64,
+    modulus: f64,
 ) -> Result<f64, CutFemError> {
     let (cell_a, cell_b) = patch.oriented_cells();
     let axis = patch.axis().index();
@@ -413,7 +479,7 @@ fn coarse_ghost_consistent_energy(
     let gauss = 0.5 / 3.0f64.sqrt();
     let half_length = 0.5 * (tangent_hi - tangent_lo);
     let h = patch.h_f();
-    let scale = problem.ghost_gamma * mu * h * half_length;
+    let scale = problem.ghost_gamma * modulus * h * half_length;
     require_finite(scale, "elasticity DWR coarse ghost scale")?;
     let mut quadrature_sum = 0.0;
     for local in [0.5 - gauss, 0.5 + gauss] {

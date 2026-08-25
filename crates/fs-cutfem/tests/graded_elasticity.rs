@@ -50,6 +50,7 @@ fn problem<'a>(
         material,
         nitsche_beta: 20.0,
         ghost_gamma: 0.5,
+        stabilization_scaling: fs_cutfem::CutStabilizationScaling::MuScaled,
         quad_depth: 3,
         clamp,
         boundary_traction: traction,

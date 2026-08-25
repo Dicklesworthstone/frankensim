@@ -156,14 +156,13 @@ pub fn fullres_compliance(holes: &HoleArray, level: u32) -> Result<f64, CutFemEr
             what: format!("fixed full-resolution lattice material was refused: {error}"),
         }
     })?;
-    let (lambda, mu) = material.lame();
-    let legacy_stiffness_scale = (lambda + 2.0 * mu) / mu;
     let solver = CutElasticity {
         grid: &grid,
         sdf: holes,
         material: &material,
-        nitsche_beta: 20.0 * legacy_stiffness_scale,
-        ghost_gamma: 0.5 * legacy_stiffness_scale,
+        nitsche_beta: 20.0,
+        ghost_gamma: 0.5,
+        stabilization_scaling: fs_cutfem::CutStabilizationScaling::LongitudinalModulus,
         quad_depth: 2,
         clamp: Some(&clamp),
         boundary_traction: Some(&traction),

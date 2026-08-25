@@ -69,8 +69,11 @@ same certified cuts; its constitutive parameters come from
   insertion order, clamp mask, and topology bits. `IsotropicElastic` supplies
   the plane-strain Lamé parameters. Symmetric Nitsche imposes displacement
   data on the SDF interface with the cut-independent penalty
-  `nitsche_beta * mu / h`; the componentwise ghost penalty scales as
-  `ghost_gamma * mu * h` and controls degenerating cut fractions. The
+  `nitsche_beta * modulus / h`; the componentwise ghost penalty scales as
+  `ghost_gamma * modulus * h` and controls degenerating cut fractions. The
+  effective modulus is configured via `CutStabilizationScaling`:
+  `MuScaled` (canonical default, modulus = $\mu$) or `LongitudinalModulus`
+  (physical modulus = $\lambda + 2\mu$, evaluated directly without dimensionless intermediate ratios). The
   certified v1 material regime requires
   `(lambda + 2*mu) / mu <= 4`; larger ratios refuse rather than
   extrapolating the compressible-regime coercivity evidence toward

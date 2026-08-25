@@ -47,7 +47,9 @@ pub mod stability;
 
 pub use beamcol::{ForceBasedElement, PushoverStep};
 pub use continuation::{ArcSettings, PathEvent, PathResidual, PathState, advance, switch_branch};
-pub use cutfront::{BoundaryTraction, CutElasticity, CutSolution, DesignBoxEdge, EdgeBand};
+pub use cutfront::{
+    BoundaryTraction, CutElasticity, CutSolution, CutStabilizationScaling, DesignBoxEdge, EdgeBand,
+};
 pub use fiber::{Fiber, FiberLaw, Section, SectionState, update_sections_batched};
 pub use hyper2d::{HyperProblem, NewtonReport, NewtonSettings};
 pub use linear::{Formulation, LinearProblem, PlaneKind};

@@ -40,15 +40,13 @@ pub struct CutElasticity<'a> {
     pub poisson: f64,
     /// Historical Nitsche constant β, applied as β(λ+2μ)/h.
     ///
-    /// The facade converts this to fs-cutfem's μ-scaled convention. When
-    /// Nitsche interface data is active, the dimensionless translated
-    /// coefficient must remain finite.
+    /// The facade configures canonical `fs-cutfem` with [`CutStabilizationScaling::LongitudinalModulus`],
+    /// applying the physical product directly without intermediate dimensionless ratio evaluation.
     pub nitsche_beta: f64,
     /// Historical ghost constant γ, applied as γ(λ+2μ)h per face.
     ///
-    /// The facade converts this to fs-cutfem's μ-scaled convention. When
-    /// ghost stabilization is active, the dimensionless translated
-    /// coefficient must remain finite.
+    /// The facade configures canonical `fs-cutfem` with [`CutStabilizationScaling::LongitudinalModulus`],
+    /// applying the physical product directly without intermediate dimensionless ratio evaluation.
     pub ghost_gamma: f64,
     /// Certified cut-quadrature subdivision depth.
     pub quad_depth: u32,
@@ -62,6 +60,8 @@ pub struct CutElasticity<'a> {
     /// displacement data.
     pub traction_free_interface: bool,
 }
+
+pub use fs_cutfem::CutStabilizationScaling;
 
 /// Canonical CutFEM solution returned through the legacy fs-solid name.
 ///
@@ -79,14 +79,13 @@ impl CutElasticity<'_> {
     }
 
     fn canonical<'a>(&'a self, material: &'a IsotropicElastic) -> CanonicalCutElasticity<'a> {
-        let (lambda, mu) = material.lame();
-        let legacy_stiffness_scale = (lambda + 2.0 * mu) / mu;
         CanonicalCutElasticity {
             grid: self.grid,
             sdf: self.sdf,
             material,
-            nitsche_beta: self.nitsche_beta * legacy_stiffness_scale,
-            ghost_gamma: self.ghost_gamma * legacy_stiffness_scale,
+            nitsche_beta: self.nitsche_beta,
+            ghost_gamma: self.ghost_gamma,
+            stabilization_scaling: fs_cutfem::CutStabilizationScaling::LongitudinalModulus,
             quad_depth: self.quad_depth,
             clamp: self.clamp,
             boundary_traction: self.boundary_traction,

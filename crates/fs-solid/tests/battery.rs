@@ -275,14 +275,13 @@ fn cutfront_delegates_bitwise_to_canonical_cutfem() {
     };
 
     let material = IsotropicElastic::new(E_MOD, NU, 1.0).expect("valid parity material");
-    let (lambda, mu) = material.lame();
-    let legacy_stiffness_scale = (lambda + 2.0 * mu) / mu;
     let canonical = CanonicalCutElasticity {
         grid: &grid,
         sdf: &sdf,
         material: &material,
-        nitsche_beta: 20.0 * legacy_stiffness_scale,
-        ghost_gamma: 0.5 * legacy_stiffness_scale,
+        nitsche_beta: 20.0,
+        ghost_gamma: 0.5,
+        stabilization_scaling: fs_cutfem::CutStabilizationScaling::LongitudinalModulus,
         quad_depth: 3,
         clamp: None,
         boundary_traction: None,
@@ -371,14 +370,13 @@ fn cutfront_typed_edge_band_delegates_bitwise_to_canonical_cutfem() {
     };
 
     let material = IsotropicElastic::new(E_MOD, NU, 1.0).expect("valid parity material");
-    let (lambda, mu) = material.lame();
-    let legacy_stiffness_scale = (lambda + 2.0 * mu) / mu;
     let canonical = CanonicalCutElasticity {
         grid: &grid,
         sdf: &sdf,
         material: &material,
-        nitsche_beta: 20.0 * legacy_stiffness_scale,
-        ghost_gamma: 0.5 * legacy_stiffness_scale,
+        nitsche_beta: 20.0,
+        ghost_gamma: 0.5,
+        stabilization_scaling: fs_cutfem::CutStabilizationScaling::LongitudinalModulus,
         quad_depth: 2,
         clamp: Some(&clamp),
         boundary_traction: None,
@@ -1042,3 +1040,33 @@ fn sol_mapped_quads_refuses_orientation_reversing_maps() {
         [r * th.cos(), r * th.sin()]
     });
 }
+
+#[test]
+fn cutfront_extreme_scale_stabilization_delegation() {
+    let grid = Quadtree::uniform(2);
+    let sdf = Circle {
+        center: [0.5, 0.5],
+        radius: 0.3,
+    };
+    let displacement = |x: f64, y: f64| [0.1 * x, -0.2 * y];
+    let body = |_: f64, _: f64| [0.0, 0.0];
+
+    let facade = CutElasticity {
+        grid: &grid,
+        sdf: &sdf,
+        youngs: 1e20,
+        poisson: 0.3,
+        nitsche_beta: 25.0,
+        ghost_gamma: 0.5,
+        quad_depth: 2,
+        clamp: None,
+        boundary_traction: None,
+        traction_free_interface: false,
+    };
+
+    let solution = facade
+        .solve(&body, &displacement)
+        .expect("extreme-scale stabilization facade solve succeeds without intermediate overflow");
+    assert!(solution.compliance().is_finite() && solution.compliance() > 0.0);
+}
+
