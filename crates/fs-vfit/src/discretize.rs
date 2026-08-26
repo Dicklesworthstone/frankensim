@@ -127,12 +127,23 @@ impl DigitalFilter {
     }
 
     /// Peak `|H(ω)|` on a caller grid.
+    ///
+    /// Returns a non-finite value instead of silently omitting a non-finite
+    /// frequency or response sample from the grid maximum.
     #[must_use]
     pub fn peak_abs(&self, omegas: &[f64]) -> f64 {
-        omegas
-            .iter()
-            .map(|&omega| self.eval(omega).abs())
-            .fold(0.0_f64, f64::max)
+        let mut peak = 0.0_f64;
+        for &omega in omegas {
+            if !omega.is_finite() {
+                return f64::NAN;
+            }
+            let magnitude = self.eval(omega).abs();
+            if !magnitude.is_finite() {
+                return magnitude;
+            }
+            peak = peak.max(magnitude);
+        }
+        peak
     }
 
     /// Uniformly scale so `max |H|` on `omegas` does not exceed `bound`.
@@ -141,10 +152,11 @@ impl DigitalFilter {
     /// is not impedance-form residue repair; use
     /// [`realize_tabulated_impedance`] for `Re Z ≥ 0`.
     ///
-    /// Returns the peak magnitude before scaling.
+    /// Returns the peak magnitude before scaling. A negative or non-finite
+    /// bound leaves the filter unchanged.
     pub fn enforce_abs_bound(&mut self, omegas: &[f64], bound: f64) -> f64 {
         let peak = self.peak_abs(omegas);
-        if peak > bound && bound > 0.0 && peak.is_finite() {
+        if peak > bound && bound >= 0.0 && bound.is_finite() && peak.is_finite() {
             self.scale(bound / peak);
         }
         peak
@@ -266,8 +278,21 @@ pub fn modulate_delay(
             });
         }
         let phase = sign * w * tau_s;
+        if !phase.is_finite() {
+            return Err(DiscretizeError::NonFiniteRuntimeValue {
+                field: "delay_phase",
+                index: Some(i),
+            });
+        }
         let rot = C64::new(det::cos(phase), det::sin(phase));
-        out.push(hi * rot);
+        let sample = hi * rot;
+        if !sample.re.is_finite() || !sample.im.is_finite() {
+            return Err(DiscretizeError::NonFiniteRuntimeValue {
+                field: "modulated_response",
+                index: Some(i),
+            });
+        }
+        out.push(sample);
     }
     Ok(out)
 }
@@ -1797,6 +1822,31 @@ mod runtime_tests {
     }
 
     #[test]
+    fn g0_modulate_delay_refuses_finite_intermediate_overflow() {
+        assert!(matches!(
+            modulate_delay(&[f64::MAX], &[C64::ONE], f64::MAX, 1.0),
+            Err(DiscretizeError::NonFiniteRuntimeValue {
+                field: "delay_phase",
+                index: Some(0)
+            })
+        ));
+
+        let overflowing_sample = C64::new(f64::MAX, f64::MAX);
+        assert!(matches!(
+            modulate_delay(
+                &[core::f64::consts::FRAC_PI_4],
+                &[overflowing_sample],
+                1.0,
+                1.0,
+            ),
+            Err(DiscretizeError::NonFiniteRuntimeValue {
+                field: "modulated_response",
+                index: Some(0)
+            })
+        ));
+    }
+
+    #[test]
     fn delayed_filter_is_a_pure_delay_when_the_filter_is_one() {
         let filter = DigitalFilter {
             sections: Vec::new(),
@@ -1859,6 +1909,15 @@ mod runtime_tests {
         assert!((peak - 1.4).abs() < 1.0e-12);
         assert!(filter.peak_abs(&omegas) <= 1.0 + 1.0e-12);
         assert!((filter.direct - 1.0).abs() < 1.0e-12);
+
+        let before = filter.clone();
+        assert!(filter.enforce_abs_bound(&[0.0, f64::NAN], 0.5).is_nan());
+        assert_eq!(filter, before);
+
+        let peak = filter.enforce_abs_bound(&omegas, 0.0);
+        assert!((peak - 1.0).abs() < 1.0e-12);
+        assert_eq!(filter.direct, 0.0);
+        assert_eq!(filter.peak_abs(&omegas), 0.0);
     }
 }
 
