@@ -9,8 +9,7 @@
 
 use crate::quarantine::{ImportReceipt, Quarantined};
 use crate::{IoError, MAX_ELEMENTS};
-use core::fmt::Write as _;
-use fs_blake3::{ContentHash, hash_domain};
+use fs_blake3::{ContentHash, DomainHasher};
 use std::collections::BTreeMap;
 
 /// Extracted FE node.
@@ -113,6 +112,107 @@ impl FeModel {
             unsupported_cards: BTreeMap::new(),
         }
     }
+}
+
+fn hash_len(hasher: &mut DomainHasher, len: usize) {
+    let wire_len = u64::try_from(len).expect("collection length must fit the u64 receipt format");
+    hasher.update(&wire_len.to_le_bytes());
+}
+
+fn hash_str(hasher: &mut DomainHasher, value: &str) {
+    hash_len(hasher, value.len());
+    hasher.update(value.as_bytes());
+}
+
+fn hash_optional_f64(hasher: &mut DomainHasher, value: Option<f64>) {
+    match value {
+        Some(value) => {
+            hasher.update(&[1]);
+            hasher.update(&value.to_bits().to_le_bytes());
+        }
+        None => hasher.update(&[0]),
+    }
+}
+
+fn hash_fe_model(domain: &str, model: &FeModel) -> ContentHash {
+    let mut hasher = DomainHasher::new(domain);
+    hash_str(&mut hasher, &model.dialect);
+
+    hash_len(&mut hasher, model.nodes.len());
+    for node in &model.nodes {
+        hasher.update(&node.id.to_le_bytes());
+        for coordinate in node.coords {
+            hasher.update(&coordinate.to_bits().to_le_bytes());
+        }
+    }
+
+    hash_len(&mut hasher, model.elements.len());
+    for element in &model.elements {
+        hasher.update(&element.id.to_le_bytes());
+        hash_str(&mut hasher, &element.element_type);
+        hash_len(&mut hasher, element.node_ids.len());
+        for node_id in &element.node_ids {
+            hasher.update(&node_id.to_le_bytes());
+        }
+    }
+
+    for sets in [&model.node_sets, &model.element_sets] {
+        hash_len(&mut hasher, sets.len());
+        for (name, ids) in sets {
+            hash_str(&mut hasher, name);
+            hash_len(&mut hasher, ids.len());
+            for id in ids {
+                hasher.update(&id.to_le_bytes());
+            }
+        }
+    }
+
+    hash_len(&mut hasher, model.materials.len());
+    for material in &model.materials {
+        hash_str(&mut hasher, &material.name);
+        hash_optional_f64(&mut hasher, material.thermal_conductivity);
+        hash_optional_f64(&mut hasher, material.specific_heat);
+        hash_optional_f64(&mut hasher, material.density);
+    }
+
+    hash_len(&mut hasher, model.boundary_conditions.len());
+    for condition in &model.boundary_conditions {
+        match condition {
+            FeBoundaryCondition::PrescribedTemperature {
+                set_name,
+                temperature_k,
+            } => {
+                hasher.update(&[0]);
+                hash_str(&mut hasher, set_name);
+                hasher.update(&temperature_k.to_bits().to_le_bytes());
+            }
+            FeBoundaryCondition::ConvectiveFilm {
+                set_name,
+                h_coeff,
+                ambient_k,
+            } => {
+                hasher.update(&[1]);
+                hash_str(&mut hasher, set_name);
+                hasher.update(&h_coeff.to_bits().to_le_bytes());
+                hasher.update(&ambient_k.to_bits().to_le_bytes());
+            }
+            FeBoundaryCondition::HeatFlux { set_name, flux_w } => {
+                hasher.update(&[2]);
+                hash_str(&mut hasher, set_name);
+                hasher.update(&flux_w.to_bits().to_le_bytes());
+            }
+        }
+    }
+
+    for cards in [&model.supported_cards, &model.unsupported_cards] {
+        hash_len(&mut hasher, cards.len());
+        for (name, count) in cards {
+            hash_str(&mut hasher, name);
+            hash_len(&mut hasher, *count);
+        }
+    }
+
+    hasher.finalize()
 }
 
 /// Verifiable cryptographic receipt for an admitted INP or BDF model.
@@ -381,17 +481,7 @@ pub fn parse_abaqus_inp(input: &str) -> Result<(Quarantined<FeModel>, InpBdfRece
     let supported_total: usize = model.supported_cards.values().sum();
     let unsupported_total: usize = model.unsupported_cards.values().sum();
 
-    let mut hash_text = String::with_capacity(4096);
-    let _ = write!(
-        hash_text,
-        "inp_model;nodes={};elements={};materials={};supp={};unsupp={}",
-        model.nodes.len(),
-        model.elements.len(),
-        model.materials.len(),
-        supported_total,
-        unsupported_total
-    );
-    let content_hash = hash_domain("org.frankensim.inp.receipt.v1", hash_text.as_bytes());
+    let content_hash = hash_fe_model("org.frankensim.inp.receipt.v2", &model);
 
     let receipt = InpBdfReceipt {
         dialect: model.dialect.clone(),
@@ -405,7 +495,7 @@ pub fn parse_abaqus_inp(input: &str) -> Result<(Quarantined<FeModel>, InpBdfRece
 
     let source_receipt = ImportReceipt {
         format: "abaqus-inp",
-        source_hash: u64::from_le_bytes(content_hash.as_bytes()[..8].try_into().unwrap_or([0; 8])),
+        source_hash: fs_obs::fnv1a64(input.as_bytes()),
         parser_version: crate::VERSION,
         parsed: (model.nodes.len(), model.elements.len()),
     };
@@ -519,17 +609,7 @@ pub fn parse_nastran_bdf(input: &str) -> Result<(Quarantined<FeModel>, InpBdfRec
     let supported_total: usize = model.supported_cards.values().sum();
     let unsupported_total: usize = model.unsupported_cards.values().sum();
 
-    let mut hash_text = String::with_capacity(4096);
-    let _ = write!(
-        hash_text,
-        "bdf_model;nodes={};elements={};materials={};supp={};unsupp={}",
-        model.nodes.len(),
-        model.elements.len(),
-        model.materials.len(),
-        supported_total,
-        unsupported_total
-    );
-    let content_hash = hash_domain("org.frankensim.bdf.receipt.v1", hash_text.as_bytes());
+    let content_hash = hash_fe_model("org.frankensim.bdf.receipt.v2", &model);
 
     let receipt = InpBdfReceipt {
         dialect: model.dialect.clone(),
@@ -543,7 +623,7 @@ pub fn parse_nastran_bdf(input: &str) -> Result<(Quarantined<FeModel>, InpBdfRec
 
     let source_receipt = ImportReceipt {
         format: "nastran-bdf",
-        source_hash: u64::from_le_bytes(content_hash.as_bytes()[..8].try_into().unwrap_or([0; 8])),
+        source_hash: fs_obs::fnv1a64(input.as_bytes()),
         parser_version: crate::VERSION,
         parsed: (model.nodes.len(), model.elements.len()),
     };

@@ -9,7 +9,7 @@
 use crate::quarantine::Quarantined;
 use crate::{IoError, MAX_ELEMENTS};
 use core::fmt::Write as _;
-use fs_blake3::{ContentHash, hash_domain};
+use fs_blake3::{ContentHash, DomainHasher};
 use std::collections::BTreeMap;
 
 /// Supported Gmsh Element Types.
@@ -118,6 +118,52 @@ impl GmshMesh {
             elements: Vec::new(),
         }
     }
+}
+
+fn hash_len(hasher: &mut DomainHasher, len: usize) {
+    let wire_len = u64::try_from(len).expect("collection length must fit the u64 receipt format");
+    hasher.update(&wire_len.to_le_bytes());
+}
+
+fn hash_str(hasher: &mut DomainHasher, value: &str) {
+    hash_len(hasher, value.len());
+    hasher.update(value.as_bytes());
+}
+
+fn hash_gmsh_mesh(mesh: &GmshMesh) -> ContentHash {
+    let mut hasher = DomainHasher::new("org.frankensim.gmsh.receipt.v2");
+    hash_str(&mut hasher, &mesh.version);
+
+    hash_len(&mut hasher, mesh.physical_names.len());
+    for ((dimension, tag), name) in &mesh.physical_names {
+        hasher.update(&dimension.to_le_bytes());
+        hasher.update(&tag.to_le_bytes());
+        hash_str(&mut hasher, name);
+    }
+
+    hash_len(&mut hasher, mesh.nodes.len());
+    for node in &mesh.nodes {
+        hasher.update(&node.id.to_le_bytes());
+        for coordinate in node.coords {
+            hasher.update(&coordinate.to_bits().to_le_bytes());
+        }
+    }
+
+    hash_len(&mut hasher, mesh.elements.len());
+    for element in &mesh.elements {
+        hasher.update(&element.id.to_le_bytes());
+        hasher.update(&element.element_type.type_id().to_le_bytes());
+        hash_len(&mut hasher, element.tags.len());
+        for tag in &element.tags {
+            hasher.update(&tag.to_le_bytes());
+        }
+        hash_len(&mut hasher, element.node_ids.len());
+        for node_id in &element.node_ids {
+            hasher.update(&node_id.to_le_bytes());
+        }
+    }
+
+    hasher.finalize()
 }
 
 /// Resource and admission limits for Gmsh parsing.
@@ -398,18 +444,7 @@ pub fn parse_gmsh_with_limits(
         *census.entry(el.element_type as u8).or_insert(0) += 1;
     }
 
-    let mut hash_text = String::with_capacity(4096);
-    let _ = write!(
-        hash_text,
-        "gmsh_msh;version={};nodes={};elements={}",
-        mesh.version,
-        mesh.nodes.len(),
-        mesh.elements.len()
-    );
-    for (type_id, count) in &census {
-        let _ = write!(hash_text, ";type_{type_id}={count}");
-    }
-    let content_hash = hash_domain("org.frankensim.gmsh.receipt.v1", hash_text.as_bytes());
+    let content_hash = hash_gmsh_mesh(&mesh);
 
     let receipt = GmshReceipt {
         format_version: mesh.version.clone(),
@@ -422,7 +457,7 @@ pub fn parse_gmsh_with_limits(
 
     let source_receipt = crate::quarantine::ImportReceipt {
         format: "gmsh-msh",
-        source_hash: u64::from_le_bytes(content_hash.as_bytes()[..8].try_into().unwrap_or([0; 8])),
+        source_hash: fs_obs::fnv1a64(input.as_bytes()),
         parser_version: crate::VERSION,
         parsed: (mesh.nodes.len(), mesh.elements.len()),
     };

@@ -130,6 +130,76 @@ FORCE,1,1,0,100.0,0.0,0.0,1.0
     assert_eq!(model.boundary_conditions.len(), 1);
 }
 
+/// G0 regression for bead frankensim-egdbd: receipt identity must bind the
+/// admitted values, not merely aggregate node/element/card counts.
+#[test]
+fn cae_receipts_distinguish_equal_count_models() {
+    let abaqus_a = "*NODE\n1,0,0,0\n*MATERIAL,NAME=M\n*CONDUCTIVITY\n10\n";
+    let abaqus_b = "*NODE\n1,0,0,0\n*MATERIAL,NAME=M\n*CONDUCTIVITY\n20\n";
+    let (abaqus_a_model, abaqus_a_receipt) = parse_abaqus_inp(abaqus_a).expect("Abaqus A");
+    let (abaqus_b_model, abaqus_b_receipt) = parse_abaqus_inp(abaqus_b).expect("Abaqus B");
+    assert_ne!(abaqus_a_receipt.content_hash, abaqus_b_receipt.content_hash);
+    assert_ne!(
+        abaqus_a_model.source_receipt.source_hash,
+        abaqus_b_model.source_receipt.source_hash
+    );
+    assert_eq!(
+        abaqus_a_model.source_receipt.source_hash,
+        fs_obs::fnv1a64(abaqus_a.as_bytes())
+    );
+
+    let bdf_a = "GRID,1,,0,0,0\nGRID,2,,1,0,0\nCTETRA,1,1,1,1,1,1\n";
+    let bdf_b = "GRID,1,,0,0,0\nGRID,2,,1,0,0\nCTETRA,1,1,1,1,1,2\n";
+    let (bdf_a_model, bdf_a_receipt) = parse_nastran_bdf(bdf_a).expect("BDF A");
+    let (bdf_b_model, bdf_b_receipt) = parse_nastran_bdf(bdf_b).expect("BDF B");
+    assert_ne!(bdf_a_receipt.content_hash, bdf_b_receipt.content_hash);
+    assert_ne!(
+        bdf_a_model.source_receipt.source_hash,
+        bdf_b_model.source_receipt.source_hash
+    );
+    assert_eq!(
+        bdf_a_model.source_receipt.source_hash,
+        fs_obs::fnv1a64(bdf_a.as_bytes())
+    );
+
+    let mut gmsh_a = GmshMesh::new("2.2");
+    gmsh_a.nodes.push(GmshNode {
+        id: 1,
+        coords: [0.0, 0.0, 0.0],
+    });
+    gmsh_a.elements.push(GmshElement {
+        id: 1,
+        element_type: GmshElementType::Point,
+        tags: Vec::new(),
+        node_ids: vec![1],
+    });
+    let mut gmsh_b = gmsh_a.clone();
+    gmsh_b.nodes[0].coords[0] = 1.0;
+    let gmsh_a_text = write_gmsh_msh2(&gmsh_a);
+    let gmsh_b_text = write_gmsh_msh2(&gmsh_b);
+    let (gmsh_a_model, gmsh_a_receipt) = parse_gmsh(&gmsh_a_text).expect("Gmsh A");
+    let (gmsh_b_model, gmsh_b_receipt) = parse_gmsh(&gmsh_b_text).expect("Gmsh B");
+    assert_ne!(gmsh_a_receipt.content_hash, gmsh_b_receipt.content_hash);
+    assert_ne!(
+        gmsh_a_model.source_receipt.source_hash,
+        gmsh_b_model.source_receipt.source_hash
+    );
+    assert_eq!(
+        gmsh_a_model.source_receipt.source_hash,
+        fs_obs::fnv1a64(gmsh_a_text.as_bytes())
+    );
+
+    let (gmsh_a_again, gmsh_a_receipt_again) = parse_gmsh(&gmsh_a_text).expect("Gmsh A replay");
+    assert_eq!(
+        gmsh_a_receipt.content_hash,
+        gmsh_a_receipt_again.content_hash
+    );
+    assert_eq!(
+        gmsh_a_model.source_receipt.source_hash,
+        gmsh_a_again.source_receipt.source_hash
+    );
+}
+
 #[test]
 fn test_tabular_csv_and_arrow_ipc_export() {
     let temp_col = TabularColumn::new_f64("temperature", "K", vec![300.0, 320.5, 345.2, 380.1]);
