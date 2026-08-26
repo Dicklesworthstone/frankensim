@@ -1355,8 +1355,10 @@ dependencies = [
 name = "fs-uq"
 version = "0.0.1"
 dependencies = [
+ "fs-blake3",
  "fs-bo",
  "fs-eproc",
+ "fs-evidence",
  "fs-la",
  "fs-math",
  "fs-rand",
