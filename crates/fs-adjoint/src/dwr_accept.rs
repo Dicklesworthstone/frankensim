@@ -3145,12 +3145,17 @@ mod execution_tests {
             let baseline = root(&fields, CURRENT_VERIFIER_POLICY_IDENTITY);
             assert_eq!(
                 baseline.to_hex(),
-                // Intentionally still the last runtime-proven v6-era pin.
-                // The code-first v7 typed-functional wave changes the shared
-                // evidence version this header hashes; central Phase 2 must
-                // derive and attribute the v7 replacement from the production
-                // encoder. Do not fabricate that root during a no-build slice.
-                "f4e634fa3e69ffe5f8246cffce580e59a371839698d7f5cea72fad02d4f85ae1",
+                // Centrally derived and attributed replacement for the last
+                // runtime-proven v6-era pin (f4e634fa…), per the rotation
+                // directive recorded on the v6 pin. The shared evidence
+                // version change from the v7 typed-functional wave
+                // (frankensim-sj31i.1) plus the DWR schema-declaration
+                // expansion adding Cx/Color schema_types (fb6ed220,
+                // 2026-08-25) both feed this header preimage. Value derived
+                // by executing this test at HEAD via strict remote RCH
+                // (worker build, 2026-08-26), not fabricated; the per-field
+                // mutation battery below still enforces the binding property.
+                "9d6631c431887348004b3ca0d5fe5e93c58b1aa84049090995006110b7444760",
                 "fixed bracket work-policy preimage changed"
             );
             for index in (4..=9).chain(14..=19) {
