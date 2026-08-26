@@ -24,9 +24,9 @@ use fs_blake3::identity::{
     CanonicalLimits, CanonicalSchema, ContentId, ExternalAnchorRef, Field, FieldSpec,
     IdentityReceipt, KeyPolicyId, NeverCancel, ObservedIdentity, OwnerPromotionAdmitter,
     OwnerPromotionCapabilities, OwnerPromotionVerifier, Presented, PromotionAdmissionRequest,
-    PromotionCapabilityDescriptor, PromotionCapabilityVerdict, PromotionDecisionRequest,
-    PromotionDecisionScope, PromotionTrustRoot, PromotionWitness, SemanticId, StrongIdentity,
-    Verified, VerifierId, WireType,
+    PromotionCapabilityDescriptor, PromotionCapabilityVerdict, PromotionDecisionDisposition,
+    PromotionDecisionRequest, PromotionDecisionScope, PromotionTrustRoot, PromotionWitness,
+    SemanticId, StrongIdentity, Verified, VerifierId, WireType,
 };
 use fs_evidence::{Color, IntervalOp, compose};
 use fs_ir::planner::{
@@ -617,34 +617,92 @@ impl PromotedVerifierReceipt<'_> {
     }
 
     fn producer_attestation_root(&self) -> fs_checker::ContentHash {
-        let audit = self.promotion.audit();
-        let mut bytes = Vec::new();
-        push_text(
-            &mut bytes,
-            "fs-flywheel-e2e/admitted-producer-attestation/v1",
-        );
-        push_bytes(&mut bytes, self.promotion.subject().id().as_bytes());
-        push_bytes(
-            &mut bytes,
-            self.promotion.subject().canonical_preimage().as_bytes(),
-        );
-        bytes.extend_from_slice(&self.promotion.subject().canonical_bytes().to_le_bytes());
-        push_bytes(&mut bytes, self.promotion.anchor().content_id().as_bytes());
-        push_text(&mut bytes, audit.verifier_domain);
-        push_bytes(
-            &mut bytes,
-            audit.verifier_observation.content_id().as_bytes(),
-        );
-        bytes.extend_from_slice(&audit.verifier_observation.length().to_le_bytes());
-        push_text(&mut bytes, audit.key_policy_domain);
-        push_bytes(
-            &mut bytes,
-            audit.key_policy_observation.content_id().as_bytes(),
-        );
-        bytes.extend_from_slice(&audit.key_policy_observation.length().to_le_bytes());
-        push_text(&mut bytes, audit.context);
-        fs_ledger::hash_bytes(&bytes)
+        admitted_producer_attestation_root(&self.promotion)
     }
+}
+
+/// Published producer-attestation identity (frankensim-n79fn): domain
+/// rotated to v2 and bound to the COMPLETE owner-executed promotion decision
+/// receipt. Beyond the v1 axes (subject receipt, external anchor, verifier/
+/// policy domains and byte observations, context) it now binds the root's
+/// exact-configuration charter, the full replay/correlation scope, both
+/// owner-capability descriptors, both owner stage statements, the committed
+/// disposition, and every transcript identity (request/verification/
+/// admission/decision). A rogue self-configured root or a reconfigured
+/// capability set therefore cannot publish an attestation indistinguishable
+/// from one minted under the pinned flywheel acceptance authority; historical
+/// v1 roots are quarantined as untrusted replay evidence by the domain
+/// rotation itself.
+fn admitted_producer_attestation_root(
+    promotion: &ProducerPromotionWitness,
+) -> fs_checker::ContentHash {
+    let audit = promotion.audit();
+    let scope = promotion.scope();
+    let mut bytes = Vec::new();
+    push_text(
+        &mut bytes,
+        "fs-flywheel-e2e/admitted-producer-attestation/v2",
+    );
+    push_bytes(&mut bytes, promotion.subject().id().as_bytes());
+    push_bytes(
+        &mut bytes,
+        promotion.subject().canonical_preimage().as_bytes(),
+    );
+    bytes.extend_from_slice(&promotion.subject().canonical_bytes().to_le_bytes());
+    push_bytes(&mut bytes, promotion.anchor().content_id().as_bytes());
+    push_text(&mut bytes, audit.verifier_domain);
+    push_bytes(
+        &mut bytes,
+        audit.verifier_observation.content_id().as_bytes(),
+    );
+    bytes.extend_from_slice(&audit.verifier_observation.length().to_le_bytes());
+    push_text(&mut bytes, audit.key_policy_domain);
+    push_bytes(
+        &mut bytes,
+        audit.key_policy_observation.content_id().as_bytes(),
+    );
+    bytes.extend_from_slice(&audit.key_policy_observation.length().to_le_bytes());
+    push_text(&mut bytes, audit.context);
+    // Root provenance: exact-configuration charter of the executing owner
+    // root (the sj31i.52.9-class axis; configuration-relative by design).
+    push_bytes(&mut bytes, promotion.root_charter().as_bytes());
+    // Full decision scope.
+    push_bytes(&mut bytes, scope.attempt().as_bytes());
+    push_bytes(&mut bytes, scope.decision_context().as_bytes());
+    bytes.extend_from_slice(&scope.epoch().to_le_bytes());
+    bytes.extend_from_slice(&scope.sequence().to_le_bytes());
+    // Both physically-owned capability descriptors.
+    for descriptor in [
+        promotion.verifier_capability(),
+        promotion.admission_capability(),
+    ] {
+        push_bytes(
+            &mut bytes,
+            descriptor.implementation().content_id().as_bytes(),
+        );
+        bytes.extend_from_slice(&descriptor.implementation().length().to_le_bytes());
+        push_bytes(
+            &mut bytes,
+            descriptor.configuration().content_id().as_bytes(),
+        );
+        bytes.extend_from_slice(&descriptor.configuration().length().to_le_bytes());
+        bytes.extend_from_slice(&descriptor.protocol_version().to_le_bytes());
+    }
+    // Owner stage statements.
+    push_bytes(&mut bytes, promotion.verification_statement().as_bytes());
+    push_bytes(&mut bytes, promotion.admission_statement().as_bytes());
+    // Committed disposition: only Approved decisions are ever published, so
+    // a single discriminant byte keeps the preimage total without granting
+    // non-publishing outcomes an identity here.
+    match promotion.disposition() {
+        PromotionDecisionDisposition::Approved => bytes.push(1),
+    }
+    // Complete transcript identities of the committed decision.
+    push_bytes(&mut bytes, promotion.request_id().as_bytes());
+    push_bytes(&mut bytes, promotion.verification_decision().as_bytes());
+    push_bytes(&mut bytes, promotion.admission_decision().as_bytes());
+    push_bytes(&mut bytes, promotion.decision_id().as_bytes());
+    fs_ledger::hash_bytes(&bytes)
 }
 
 impl AuthenticReceiptResolver {
@@ -2260,6 +2318,175 @@ impl WholePathReplayManifest {
     fn verifies(&self, expected: fs_checker::ContentHash) -> bool {
         self.root() == expected
     }
+}
+
+/// Permit-everything producer-attestation authority for the rogue-pair
+/// hostile fixture (frankensim-n79fn): approves any presented pair over the
+/// anchor and identity set it was constructed with. The adversary owns the
+/// WHOLE pair — root configuration, presented identities, and admission —
+/// which is exactly why only the root-provenance axes can separate its
+/// published attestation from one minted under pinned acceptance authority.
+struct PermitAllProducerAuthority {
+    anchor: ContentId,
+    verifier: IdentityReceipt<VerifierId<ProducerAttestationVerifierSchemaV1>>,
+    key_policy: IdentityReceipt<KeyPolicyId<ProducerAttestationPolicySchemaV1>>,
+}
+
+impl ProducerAttestationAuthority for PermitAllProducerAuthority {
+    fn verify_and_admit(
+        &self,
+        expected_subject: IdentityReceipt<ProducerAttestationSubject>,
+    ) -> Result<AdmittedProducerAuthority, &'static str> {
+        AuthorityRef::present(
+            expected_subject,
+            ExternalAnchorRef::presented(self.anchor),
+            self.verifier.id(),
+            self.key_policy.id(),
+        )
+        .verify(&PermitAllProducerAuthority {
+            anchor: self.anchor,
+            verifier: self.verifier,
+            key_policy: self.key_policy,
+        })?
+        .admit(&PermitAllProducerAuthority {
+            anchor: self.anchor,
+            verifier: self.verifier,
+            key_policy: self.key_policy,
+        })
+    }
+}
+
+impl
+    AuthorityVerifier<
+        ProducerAttestationSubject,
+        ProducerAttestationVerifierSchemaV1,
+        ProducerAttestationPolicySchemaV1,
+    > for PermitAllProducerAuthority
+{
+    type Error = &'static str;
+    fn verify(
+        &self,
+        _presented: &AuthorityRef<
+            ProducerAttestationSubject,
+            ProducerAttestationVerifierSchemaV1,
+            ProducerAttestationPolicySchemaV1,
+            Presented,
+        >,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+}
+
+impl
+    AuthorityAdmitter<
+        ProducerAttestationSubject,
+        ProducerAttestationVerifierSchemaV1,
+        ProducerAttestationPolicySchemaV1,
+    > for PermitAllProducerAuthority
+{
+    type Error = &'static str;
+    fn admit(
+        &self,
+        _verified: &AuthorityRef<
+            ProducerAttestationSubject,
+            ProducerAttestationVerifierSchemaV1,
+            ProducerAttestationPolicySchemaV1,
+            Verified,
+        >,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+}
+
+#[test]
+fn n79fn_attestation_root_discriminates_root_provenance_and_is_deterministic()
+-> Result<(), PlanError> {
+    // frankensim-n79fn G0/G5 matrix: the published attestation root must
+    // move when ANY promotion-authority axis moves, and must be
+    // deterministic for the same decision. The charter axis subsumes the
+    // capability-descriptor axis by construction: descriptors feed the
+    // charter fingerprint, so two roots can never share a charter while
+    // differing in descriptors.
+    let family = steep_family()?;
+    let resolver = AuthenticReceiptResolver::capture(&family, 1.0, 6e-3, 400.0, &RUNGS)?;
+    let attestation_scope = ProducerAttestationScope {
+        purpose: "fs-flywheel-e2e/n79fn-attestation-root/v1",
+        evidence_root: resolver.receipt.artifact_root().content_hash(),
+    };
+    let producer_authority = producer_attestation_fixture(&resolver, attestation_scope);
+    let resolved = expect_verified_promotion(
+        resolve_for_promotion(
+            Some(&resolver),
+            attestation_scope,
+            Some(fixture_producer_attestation_capability(&producer_authority)),
+            Some(configured_producer_promotion()),
+        ),
+        "n79fn baseline pinned-authority promotion",
+    );
+    let baseline = resolved.producer_attestation_root();
+    assert_eq!(
+        baseline,
+        admitted_producer_attestation_root(&resolved.promotion),
+        "G5: the attestation root is a deterministic function of the committed witness"
+    );
+
+    let rogue_verifier =
+        producer_attestation_verifier_identity("fs-flywheel-e2e/rogue-verifier/v1", 1);
+    let rogue_policy = producer_attestation_policy_identity("fs-flywheel-e2e/rogue-policy/v1", 1);
+    let permit_all = PermitAllProducerAuthority {
+        anchor: ContentId::of_bytes(&producer_authority.anchor_bytes),
+        verifier: rogue_verifier,
+        key_policy: rogue_policy,
+    };
+    let expected_subject = resolver
+        .producer_attestation_subject(attestation_scope, resolver.producer_executable)
+        .expect("bounded rogue-pair subject");
+    let mut rogue_root = PromotionTrustRoot::<
+        ProducerAttestationVerifierSchemaV1,
+        ProducerAttestationPolicySchemaV1,
+    >::configure_owner_executed(
+        ObservedIdentity::from_receipt(rogue_verifier),
+        ObservedIdentity::from_receipt(rogue_policy),
+        PRODUCER_ATTESTATION_CONTEXT,
+        PRODUCER_PROMOTION_DECISION_EPOCH,
+        FixtureOwnerVerifier,
+        FixtureOwnerAdmitter,
+    )
+    .expect("rogue self-configured owner root configures");
+    let rogue_promotion = rogue_root
+        .decide_for_promotion(
+            &permit_all
+                .verify_and_admit(expected_subject)
+                .expect("permit-all admission admits the exact subject"),
+            ObservedIdentity::from_receipt(rogue_verifier).bytes(),
+            ObservedIdentity::from_receipt(rogue_policy).bytes(),
+            producer_promotion_decision_scope(),
+        )
+        .expect("the rogue root approves its own paired witness");
+    let rogue = admitted_producer_attestation_root(&rogue_promotion);
+    assert_ne!(
+        baseline, rogue,
+        "a self-configured root's witness must publish a DIFFERENT attestation \
+         identity than one minted under the pinned acceptance authority"
+    );
+    // The refusal is exactly provenance discrimination: within the rogue
+    // pair itself, the axes agree and the root differs.
+    assert_eq!(
+        rogue_promotion.subject(),
+        resolved.promotion.subject(),
+        "rogue pair shares the exact subject receipt"
+    );
+    assert_eq!(
+        rogue_promotion.context(),
+        resolved.promotion.context(),
+        "rogue pair shares the pinned context"
+    );
+    assert_ne!(
+        rogue_promotion.root_charter(),
+        resolved.promotion.root_charter(),
+        "only the root charter separates the pair"
+    );
+    Ok(())
 }
 
 #[test]

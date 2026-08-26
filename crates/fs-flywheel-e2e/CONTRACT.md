@@ -132,10 +132,18 @@ ac_004), current-process executable schema/byte count/raw-content hash,
 producer crate/version/features, source and dependency cones, workspace
 manifest and lock, and toolchain. The fixture sidecar first crosses concrete
 exact verifier and policy capabilities; `resolve_for_promotion` constructs
-neither authority. It consumes an injected domain-owned `PromotionTrustRoot`
-plus independently retained verifier and key-policy byte observations, then
-that root alone can mint the opaque `PromotionWitness` required by the
-claim-bearing type. Missing or truncated sidecars, missing promotion roots,
+neither authority. It consumes an injected owner-executed `PromotionTrustRoot`
+(V3 protocol; configuration-only roots always refuse) plus independently
+retained verifier and key-policy byte observations, then that root alone can
+mint the opaque `PromotionWitness` required by the claim-bearing type. The
+published producer-attestation identity (`admitted-producer-attestation/v2`)
+binds the COMPLETE committed decision receipt: subject receipt, external
+anchor, verifier/policy domains and observations, context, the root's
+exact-configuration charter, decision scope, both owner-capability
+descriptors, stage statements, disposition, and all transcript identities, so
+a self-configured or reconfigured root cannot publish an indistinguishable
+attestation (frankensim-n79fn); v1 identities are quarantined untrusted
+replay evidence by the domain rotation. Missing or truncated sidecars, missing promotion roots,
 changed retained identity observations, executable drift, foreign receipt
 scopes, verifier/policy substitution, fixed/fake hashes,
 producer relabeling, changed interval endpoints, and cross-problem, cross-QoI,
