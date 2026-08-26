@@ -43,7 +43,7 @@
 //!     -- env MODE=pinned OUT_DIR=<stamp-<label>> scripts/ci/oracle_determinism_leg.sh
 //! Gauntlet tier: G5 determinism audit.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::PolicyNote;
 
@@ -219,9 +219,15 @@ fn same_arch_compare(report: &mut Report, mode: &str, left: &LegPayload, right: 
         }
         let mut mismatches = Vec::new();
         let digests = [
-            ("boundary_digest", (&lcase.boundary_digest, &rcase.boundary_digest)),
+            (
+                "boundary_digest",
+                (&lcase.boundary_digest, &rcase.boundary_digest),
+            ),
             ("areas_digest", (&lcase.areas_digest, &rcase.areas_digest)),
-            ("radius_digest", (&lcase.radius_digest, &rcase.radius_digest)),
+            (
+                "radius_digest",
+                (&lcase.radius_digest, &rcase.radius_digest),
+            ),
             ("arc_digest", (&lcase.arc_digest, &rcase.arc_digest)),
             ("poles_digest", (&lcase.poles_digest, &rcase.poles_digest)),
         ];
@@ -231,7 +237,10 @@ fn same_arch_compare(report: &mut Report, mode: &str, left: &LegPayload, right: 
             }
         }
         if lcase.stations != rcase.stations {
-            mismatches.push(format!("stations: {} vs {}", lcase.stations, rcase.stations));
+            mismatches.push(format!(
+                "stations: {} vs {}",
+                lcase.stations, rcase.stations
+            ));
         }
         if lcase.pole_count != rcase.pole_count {
             mismatches.push(format!(
@@ -337,7 +346,13 @@ fn compare_pair(report: &mut Report, mode: &str, left: &LegPayload, right: &LegP
 /// bless anything when evidence is missing.
 pub(crate) fn check(root: &Path) -> Report {
     let mut report = Report::new();
-    let base = root.join("target/oracle-determinism");
+    // Frozen-tree builds are full dep-graph compiles; park every byte on
+    // RCH_TARGET_BASE (external NVMe class storage) exactly like the rch
+    // lanes do, never on the internal boot volume under disk pressure.
+    let base = match std::env::var("RCH_TARGET_BASE") {
+        Ok(dir) if !dir.trim().is_empty() => PathBuf::from(dir).join("frankensim-oracle-det"),
+        _ => root.join("target/oracle-determinism"),
+    };
     if std::fs::create_dir_all(&base).is_err() {
         report.violation(format!("cannot create scratch base {}", base.display()));
         return report;
@@ -364,8 +379,9 @@ pub(crate) fn check(root: &Path) -> Report {
                 Err(error) => report.violation(error),
             },
             Ok(status) => report.violation(format!(
-                "local {mode} leg exited {status}; receipts retained under {}; rerun \
-                 MODE={mode} OUT_DIR={} scripts/ci/oracle_determinism_leg.sh directly",
+                "local {mode} leg exited {status}; receipts retained in the leg \
+                 directory; rerun MODE={mode} OUT_DIR={} scripts/ci/oracle_determinism_leg.sh \
+                 directly",
                 dir.display()
             )),
             Err(error) => report.violation(format!("local {mode} leg spawn failed: {error}")),
@@ -415,8 +431,7 @@ pub(crate) fn check(root: &Path) -> Report {
     }
 
     for group in ["pinned", "live"] {
-        let group_legs: Vec<&LegPayload> =
-            legs.iter().filter(|leg| leg.mode == group).collect();
+        let group_legs: Vec<&LegPayload> = legs.iter().filter(|leg| leg.mode == group).collect();
         for window in group_legs.windows(2) {
             compare_pair(&mut report, group, window[0], window[1]);
         }
@@ -474,7 +489,12 @@ mod tests {
     #[test]
     fn same_arch_bit_divergence_is_charged_with_both_sides_named() {
         let mut report = Report::new();
-        let a = leg("mac-pinned-a", "pinned", "arm64", vec![probe_case("gb-003", true, "dead")]);
+        let a = leg(
+            "mac-pinned-a",
+            "pinned",
+            "arm64",
+            vec![probe_case("gb-003", true, "dead")],
+        );
         let b = leg(
             "ovh-pinned-b",
             "pinned",
@@ -504,19 +524,43 @@ mod tests {
     #[test]
     fn cross_arch_verdict_flip_is_charged_but_texture_is_not() {
         let mut report = Report::new();
-        let a = leg("arm-a", "live", "arm64", vec![probe_case("gb-004", true, "1111")]);
-        let b = leg("x86-b", "live", "x86_64", vec![probe_case("gb-004", false, "2222")]);
+        let a = leg(
+            "arm-a",
+            "live",
+            "arm64",
+            vec![probe_case("gb-004", true, "1111")],
+        );
+        let b = leg(
+            "x86-b",
+            "live",
+            "x86_64",
+            vec![probe_case("gb-004", false, "2222")],
+        );
         cross_arch_compare(&mut report, "live", &a, &b);
         assert_eq!(report.violations.len(), 1);
-        assert!(report.violations[0].detail.contains("structural divergence"));
+        assert!(
+            report.violations[0]
+                .detail
+                .contains("structural divergence")
+        );
         assert!(report.notes.is_empty());
     }
 
     #[test]
     fn missing_case_on_either_side_is_charged() {
         let mut report = Report::new();
-        let a = leg("l1", "pinned", "arm64", vec![probe_case("gb-003", true, "aa")]);
-        let b = leg("l2", "pinned", "arm64", vec![probe_case("gb-004", true, "aa")]);
+        let a = leg(
+            "l1",
+            "pinned",
+            "arm64",
+            vec![probe_case("gb-003", true, "aa")],
+        );
+        let b = leg(
+            "l2",
+            "pinned",
+            "arm64",
+            vec![probe_case("gb-004", true, "aa")],
+        );
         same_arch_compare(&mut report, "pinned", &a, &b);
         assert_eq!(report.violations.len(), 2);
         for item in &report.violations {
