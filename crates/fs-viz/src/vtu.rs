@@ -332,6 +332,15 @@ pub enum VtuError {
         /// VTK type ID byte.
         type_id: u8,
     },
+    /// Text destined for XML contains a character forbidden by XML 1.0.
+    InvalidXmlCharacter {
+        /// XML field carrying the invalid text.
+        context: &'static str,
+        /// UTF-8 byte offset of the invalid character.
+        index: usize,
+        /// Unicode scalar value of the invalid character.
+        codepoint: u32,
+    },
     /// XML syntax or formatting parse error.
     ParseError {
         /// Error details.
@@ -452,6 +461,16 @@ impl std::fmt::Display for VtuError {
                 write!(
                     f,
                     "cell {cell} has VTK type ID {type_id}, which this XDMF writer cannot represent losslessly"
+                )
+            }
+            Self::InvalidXmlCharacter {
+                context,
+                index,
+                codepoint,
+            } => {
+                write!(
+                    f,
+                    "{context} contains XML-forbidden code point U+{codepoint:04X} at byte {index}"
                 )
             }
             Self::ParseError { detail } => {
@@ -603,6 +622,10 @@ impl UnstructuredGrid {
         // Validate data arrays
         let mut seen_names = std::collections::HashSet::new();
         for arr in &self.arrays {
+            validate_xml_chars("data array name", &arr.name)?;
+            if let Some(unit) = &arr.unit {
+                validate_xml_chars("data array unit", unit)?;
+            }
             if !seen_names.insert(&arr.name) {
                 return Err(VtuError::DuplicateArrayName {
                     name: arr.name.clone(),
@@ -768,15 +791,19 @@ impl VtuWriter {
 
     fn write_data_array(out: &mut String, arr: &DataArray) {
         let type_name = arr.values.type_name();
-        let unit_attr = arr
-            .unit
-            .as_ref()
-            .map_or(String::new(), |u| format!(" Unit=\"{u}\""));
+        let _ = write!(out, "        <DataArray type=\"{type_name}\" Name=\"");
+        push_xml_attribute_escaped(out, &arr.name);
         let _ = write!(
             out,
-            "        <DataArray type=\"{}\" Name=\"{}\" NumberOfComponents=\"{}\" format=\"ascii\"{}>\n          ",
-            type_name, arr.name, arr.components, unit_attr
+            "\" NumberOfComponents=\"{}\" format=\"ascii\"",
+            arr.components
         );
+        if let Some(unit) = &arr.unit {
+            out.push_str(" Unit=\"");
+            push_xml_attribute_escaped(out, unit);
+            out.push('"');
+        }
+        out.push_str(">\n          ");
         match &arr.values {
             DataValues::Float64(vals) => {
                 for (i, &v) in vals.iter().enumerate() {
@@ -1053,12 +1080,12 @@ fn parse_arrays_in_section(
         let content = cursor[tag_header_end + 1..content_end].trim();
 
         // Extract attributes
-        let name = extract_attr(tag_header, "Name").unwrap_or_else(|| "unnamed".to_string());
-        let type_name = extract_attr(tag_header, "type").unwrap_or_else(|| "Float64".to_string());
-        let components = extract_attr(tag_header, "NumberOfComponents")
+        let name = extract_attr(tag_header, "Name")?.unwrap_or_else(|| "unnamed".to_string());
+        let type_name = extract_attr(tag_header, "type")?.unwrap_or_else(|| "Float64".to_string());
+        let components = extract_attr(tag_header, "NumberOfComponents")?
             .and_then(|s| s.parse::<usize>().ok())
             .unwrap_or(1);
-        let unit = extract_attr(tag_header, "Unit");
+        let unit = extract_attr(tag_header, "Unit")?;
 
         let values = match type_name.as_str() {
             "Float64" => {
@@ -1136,9 +1163,113 @@ fn parse_arrays_in_section(
     Ok(())
 }
 
-fn extract_attr(header: &str, attr: &str) -> Option<String> {
+fn extract_attr(header: &str, attr: &str) -> Result<Option<String>, VtuError> {
     let pattern = format!("{attr}=\"");
-    let start = header.find(&pattern)? + pattern.len();
-    let end = header[start..].find('"')? + start;
-    Some(header[start..end].to_string())
+    let Some(start) = header.find(&pattern).map(|start| start + pattern.len()) else {
+        return Ok(None);
+    };
+    let Some(end) = header[start..].find('"').map(|end| start + end) else {
+        return Err(VtuError::ParseError {
+            detail: format!("unterminated `{attr}` attribute"),
+        });
+    };
+    decode_xml_entities(&header[start..end]).map(Some)
+}
+
+const fn is_valid_xml_char(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{9}' | '\u{A}' | '\u{D}' | '\u{20}'..='\u{D7FF}' | '\u{E000}'..='\u{FFFD}' | '\u{10000}'..='\u{10FFFF}'
+    )
+}
+
+pub(super) fn validate_xml_chars(context: &'static str, value: &str) -> Result<(), VtuError> {
+    for (index, ch) in value.char_indices() {
+        if !is_valid_xml_char(ch) {
+            return Err(VtuError::InvalidXmlCharacter {
+                context,
+                index,
+                codepoint: ch as u32,
+            });
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn push_xml_attribute_escaped(out: &mut String, value: &str) {
+    for ch in value.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            '\t' => out.push_str("&#x9;"),
+            '\n' => out.push_str("&#xA;"),
+            '\r' => out.push_str("&#xD;"),
+            _ => out.push(ch),
+        }
+    }
+}
+
+pub(super) fn push_xml_text_escaped(out: &mut String, value: &str) {
+    for ch in value.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            _ => out.push(ch),
+        }
+    }
+}
+
+fn decode_xml_entities(value: &str) -> Result<String, VtuError> {
+    validate_xml_chars("XML attribute", value)?;
+    let mut decoded = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(amp) = rest.find('&') {
+        decoded.push_str(&rest[..amp]);
+        let entity_start = amp + 1;
+        let Some(entity_len) = rest[entity_start..].find(';') else {
+            return Err(VtuError::ParseError {
+                detail: "unterminated XML entity in attribute".to_string(),
+            });
+        };
+        let entity_end = entity_start + entity_len;
+        let entity = &rest[entity_start..entity_end];
+        let ch = match entity {
+            "amp" => '&',
+            "lt" => '<',
+            "gt" => '>',
+            "quot" => '"',
+            "apos" => '\'',
+            _ if entity.starts_with("#x") => u32::from_str_radix(&entity[2..], 16)
+                .ok()
+                .and_then(char::from_u32)
+                .ok_or_else(|| VtuError::ParseError {
+                    detail: format!("invalid hexadecimal XML entity `&{entity};`"),
+                })?,
+            _ if entity.starts_with('#') => entity[1..]
+                .parse::<u32>()
+                .ok()
+                .and_then(char::from_u32)
+                .ok_or_else(|| VtuError::ParseError {
+                    detail: format!("invalid decimal XML entity `&{entity};`"),
+                })?,
+            _ => {
+                return Err(VtuError::ParseError {
+                    detail: format!("unknown XML entity `&{entity};`"),
+                });
+            }
+        };
+        if !is_valid_xml_char(ch) {
+            return Err(VtuError::ParseError {
+                detail: format!("XML entity `&{entity};` decodes to a forbidden character"),
+            });
+        }
+        decoded.push(ch);
+        rest = &rest[entity_end + 1..];
+    }
+    decoded.push_str(rest);
+    Ok(decoded)
 }

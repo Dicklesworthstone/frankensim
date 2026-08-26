@@ -226,6 +226,39 @@ fn test_vtu_checker_preserves_every_writer_data_type() {
 }
 
 #[test]
+fn test_vtu_xml_attributes_are_escaped_and_round_trip() {
+    let mut grid = UnstructuredGrid::new();
+    let p0 = grid.add_point(0.0, 0.0, 0.0);
+    grid.add_cell(CellType::Vertex, &[p0]);
+    grid.add_array(
+        DataArray::new_point_scalar("temperature <&\"'>", vec![300.0]).with_unit("K <&\"'>"),
+    );
+
+    let xml = VtuWriter::write_ascii(&grid).expect("write escaped VTU");
+    assert!(xml.contains("Name=\"temperature &lt;&amp;&quot;&apos;&gt;\""));
+    assert!(xml.contains("Unit=\"K &lt;&amp;&quot;&apos;&gt;\""));
+    let parsed = VtuChecker::parse_ascii(&xml).expect("parse escaped VTU");
+    assert_eq!(parsed.arrays, grid.arrays);
+}
+
+#[test]
+fn test_vtu_rejects_xml_forbidden_characters() {
+    let mut grid = UnstructuredGrid::new();
+    let p0 = grid.add_point(0.0, 0.0, 0.0);
+    grid.add_cell(CellType::Vertex, &[p0]);
+    grid.add_array(DataArray::new_point_scalar("bad\0name", vec![1.0]));
+
+    assert_eq!(
+        VtuWriter::write_ascii(&grid),
+        Err(VtuError::InvalidXmlCharacter {
+            context: "data array name",
+            index: 3,
+            codepoint: 0,
+        })
+    );
+}
+
+#[test]
 fn test_xdmf_export_and_binary_companion() {
     let mut grid = UnstructuredGrid::new();
     let p0 = grid.add_point(0.0, 0.0, 0.0);
@@ -291,6 +324,20 @@ fn test_xdmf_field_metadata_matches_binary_value_types() {
             "wrong XDMF type metadata for {name}: {attribute}"
         );
     }
+}
+
+#[test]
+fn test_xdmf_escapes_attribute_names_and_binary_file_text() {
+    let mut grid = UnstructuredGrid::new();
+    let p0 = grid.add_point(0.0, 0.0, 0.0);
+    grid.add_cell(CellType::Vertex, &[p0]);
+    grid.add_array(DataArray::new_point_scalar("field <&\"'>", vec![1.0]));
+
+    let (xmf, _) =
+        XdmfWriter::write_xdmf_with_binary(&grid, "mesh<&>.bin").expect("write escaped XDMF");
+    assert!(xmf.contains("Name=\"field &lt;&amp;&quot;&apos;&gt;\""));
+    assert!(xmf.contains("mesh&lt;&amp;&gt;.bin"));
+    assert!(!xmf.contains("mesh<&>.bin"));
 }
 
 #[test]

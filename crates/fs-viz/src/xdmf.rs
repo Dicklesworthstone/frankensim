@@ -5,7 +5,10 @@
 //! Generates clean, standard XDMF XML files with raw binary heavy-data containers
 //! (strictly pure Rust, zero C / HDF5 dependency) for large-scale solution fields.
 
-use super::vtu::{CellType, DataAssociation, DataValues, UnstructuredGrid, VtuError};
+use super::vtu::{
+    CellType, DataAssociation, DataValues, UnstructuredGrid, VtuError, push_xml_attribute_escaped,
+    push_xml_text_escaped, validate_xml_chars,
+};
 use std::fmt::Write as _;
 
 struct TopologyData {
@@ -132,6 +135,7 @@ impl XdmfWriter {
         binary_file_name: &str,
     ) -> Result<(String, Vec<u8>), VtuError> {
         grid.validate()?;
+        validate_xml_chars("XDMF binary file name", binary_file_name)?;
 
         let mut bin = Vec::with_capacity(16 * 1024);
         let mut xmf = String::with_capacity(4096);
@@ -167,7 +171,9 @@ impl XdmfWriter {
             topology.dimensions
         )
         .ok();
-        writeln!(xmf, "          {binary_file_name}").ok();
+        xmf.push_str("          ");
+        push_xml_text_escaped(&mut xmf, binary_file_name);
+        xmf.push('\n');
         xmf.push_str("        </DataItem>\n");
         xmf.push_str("      </Topology>\n");
 
@@ -186,7 +192,9 @@ impl XdmfWriter {
             "        <DataItem NumberType=\"Float\" Precision=\"8\" Dimensions=\"{num_points} 3\" Format=\"Binary\" Endian=\"Little\" Seek=\"{geom_offset}\">"
         )
         .ok();
-        writeln!(xmf, "          {binary_file_name}").ok();
+        xmf.push_str("          ");
+        push_xml_text_escaped(&mut xmf, binary_file_name);
+        xmf.push('\n');
         xmf.push_str("        </DataItem>\n");
         xmf.push_str("      </Geometry>\n");
 
@@ -253,18 +261,17 @@ impl XdmfWriter {
                 }
             };
 
-            writeln!(
-                xmf,
-                "      <Attribute Name=\"{}\" AttributeType=\"{}\" Center=\"{center}\">",
-                arr.name, attr_type
-            )
-            .ok();
+            xmf.push_str("      <Attribute Name=\"");
+            push_xml_attribute_escaped(&mut xmf, &arr.name);
+            writeln!(xmf, "\" AttributeType=\"{attr_type}\" Center=\"{center}\">").ok();
             writeln!(
                 xmf,
                 "        <DataItem NumberType=\"{number_type}\" Precision=\"{precision}\" Dimensions=\"{dim_str}\" Format=\"Binary\" Endian=\"Little\" Seek=\"{arr_offset}\">"
             )
             .ok();
-            writeln!(xmf, "          {binary_file_name}").ok();
+            xmf.push_str("          ");
+            push_xml_text_escaped(&mut xmf, binary_file_name);
+            xmf.push('\n');
             xmf.push_str("        </DataItem>\n");
             xmf.push_str("      </Attribute>\n");
         }

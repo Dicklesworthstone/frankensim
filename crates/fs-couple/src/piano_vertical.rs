@@ -336,7 +336,7 @@ impl PianoVertical {
     /// Render one sample; returns the board bridge velocity (the
     /// radiating observer's proxy).
     #[allow(clippy::too_many_lines)] // the composed per-sample loop
-    pub fn step(&mut self) -> f64 {
+    pub fn step(&mut self) -> Result<f64, String> {
         let dt = 1.0 / f64::from(RATE);
         // 1. Hammer island against the struck strings' displacement at
         //    the strike station.
@@ -425,13 +425,15 @@ impl PianoVertical {
                     g
                 })
                 .collect();
-            let frame = string.step(&generalized).expect("string step");
+            let frame = string
+                .step(&generalized)
+                .map_err(|error| format!("piano string {i} step refused: {error}"))?;
             if struck {
                 ke_before += frame.input_work_j;
             }
         }
         self.strike_work_j += ke_before.max(0.0) * f64::from(u8::from(strike_force > 0.0));
-        v_bridge
+        Ok(v_bridge)
     }
 }
 
@@ -464,7 +466,7 @@ mod piano_vertical_tests {
         }
     }
 
-    fn render(pv: &mut PianoVertical, v0: f64, samples: usize) -> Vec<f64> {
+    fn render(pv: &mut PianoVertical, v0: f64, samples: usize) -> Result<Vec<f64>, String> {
         pv.strike(v0);
         (0..samples).map(|_| pv.step()).collect()
     }
@@ -476,7 +478,7 @@ mod piano_vertical_tests {
         // and the matched linear spring cannot reproduce it.
         let tilt = |law: HammerLaw, v0: f64| -> f64 {
             let mut pv = PianoVertical::new(base_spec(), 1.2, law, pedals(), 0.02).expect("pv");
-            let _ = render(&mut pv, v0, 2400);
+            let _ = render(&mut pv, v0, 2400).expect("pv render");
             let e = pv.middle_string_modal_energies();
             (e[4] + e[5] + e[6]) / (e[0] + e[1]).max(f64::MIN_POSITIVE)
         };
