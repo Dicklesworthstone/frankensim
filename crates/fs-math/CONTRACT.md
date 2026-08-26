@@ -106,7 +106,12 @@ floating-point POLICY: FMA contraction, subnormals, NaN, ULP budgets
   (+, −, ×, ÷) plus `abs/sqrt/lt`. Documented error bounds: add/sub/mul
   ≤ 2⁻¹⁰⁴ relative, div/sqrt ≤ 2⁻¹⁰³, finite non-over/underflowing
   operands. Normalization invariant `hi = fl(hi+lo)` property-tested.
-  Quad-double is recorded follow-up scope (not needed by current oracles).
+- `qd::Qd` — quad-double (~212-bit significand) via four non-overlapping
+  binary64 components `c0 + c1 + c2 + c3` with `|c_{i+1}| ≤ ½ ulp(c_i)`
+  (bead 6ys.23.1.1). Checked construction via `from_parts_checked` returns typed
+  `QdError`, `from_parts` and `renormalize` enforce canonical non-overlapping
+  representation, and byte conversions round-trip deterministically.
+  Precision is a value representation, never certification authority.
 
 ## Invariants
 - No platform libm on any strict path (sqrt excepted: IEEE-exact).
