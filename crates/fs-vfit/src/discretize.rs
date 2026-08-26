@@ -753,16 +753,21 @@ impl DelayedFilter {
     /// A passive 1-D scatterer cannot return more than it is sent.
     /// Call this after [`Self::pin_magnitude_at`] so a speaking-frequency
     /// gain pin cannot create an active band elsewhere. An empty/non-finite
-    /// grid or an already-passive response leaves runtime state unchanged.
+    /// grid, a non-finite evaluated response, or an already-passive response
+    /// leaves runtime state unchanged.
     pub fn enforce_scattering_passivity(&mut self, omegas: &[f64]) {
         if omegas.is_empty() || omegas.iter().any(|omega| !omega.is_finite()) {
             return;
         }
         if !self.fir.is_empty() {
-            let peak = omegas
-                .iter()
-                .map(|&w| fir_dtft(&self.fir, w, self.filter.t_s).abs())
-                .fold(0.0_f64, f64::max);
+            let mut peak = 0.0_f64;
+            for &omega in omegas {
+                let magnitude = fir_dtft(&self.fir, omega, self.filter.t_s).abs();
+                if !magnitude.is_finite() {
+                    return;
+                }
+                peak = peak.max(magnitude);
+            }
             if !(peak > 1.0 && peak.is_finite()) {
                 return;
             }
@@ -1979,6 +1984,21 @@ mod runtime_tests {
         assert_eq!(
             passive_fir.incoming().to_bits(),
             passive_fir_before.incoming().to_bits()
+        );
+
+        let mut overflowing_grid_fir =
+            DelayedFilter::from_impulse_response(1.0, vec![2.0, 0.0, 1.0, 0.0]).unwrap();
+        assert_eq!(overflowing_grid_fir.push(1.0).unwrap(), 2.0);
+        let overflowing_grid_before = overflowing_grid_fir.clone();
+        overflowing_grid_fir.enforce_scattering_passivity(&[0.0, f64::MAX]);
+        assert_eq!(overflowing_grid_fir.fir, overflowing_grid_before.fir);
+        assert_eq!(
+            overflowing_grid_fir.incoming().to_bits(),
+            overflowing_grid_before.incoming().to_bits()
+        );
+        assert_eq!(
+            overflowing_grid_fir.history(),
+            overflowing_grid_before.history()
         );
 
         let passive_filter = DigitalFilter {
