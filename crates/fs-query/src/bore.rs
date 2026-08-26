@@ -736,11 +736,34 @@ fn farthest(
             }
         }
     }
+    // Pick the farthest node; on a near-tie (a real possibility in
+    // symmetric thickets, where last-ULP input drift flips the winner)
+    // fall back to the lexicographically smallest coordinate bits so the
+    // diameter anchor is a function of the pole SET, not scan order or
+    // rounding residue (bead frankensim-b2can).
     let mut far = start;
     for (j, &d) in dist.iter().enumerate() {
         if d > dist[far] {
             far = j;
         }
+    }
+    let max_d = dist[far];
+    if max_d.is_finite() {
+        // Near-tie band: last-ULP input drift must not flip the anchor
+        // between geometrically equivalent diameter extremes (bead
+        // frankensim-b2can); resolve by smallest coordinate bits.
+        let tie = max_d.abs().max(1.0) * f64::EPSILON * 8.0;
+        let key = |j: usize| -> (u64, u64, u64) {
+            let p = poles[j].0;
+            (p.x.to_bits(), p.y.to_bits(), p.z.to_bits())
+        };
+        let mut best = far;
+        for (j, &d) in dist.iter().enumerate() {
+            if d >= max_d - tie && key(j) < key(best) {
+                best = j;
+            }
+        }
+        far = best;
     }
     parent[start] = None;
     (far, parent)
@@ -838,10 +861,15 @@ fn bin_centroids(
     let spine_pts: Vec<(Point3, f64)> = spine.iter().map(|&i| poles[i]).collect();
     let mut skeleton = smooth_chain(&spine_pts, 3, closed);
     // Near a flat tube end the medial set is a disc-shaped SHEET reaching
-    // about one local radius in from the cap; the MST diameter path curls
-    // through it and scrambles the tail ordering. Trim one end radius of
-    // skeleton arc from each OPEN end — the end-extension step rebuilds
-    // the physical ends from the clean interior tangents.
+    // about one local radius in from the cap; the MST diameter path can
+    // curl through it when a face-adjacent sheet pole survives the
+    // spinal filter (its local-maximality neighborhood can lack a
+    // strictly larger pole). Keying the trim to the CONTAMINATED
+    // terminal's own shrunken radius self-defeats, so take the trim
+    // depth from a WINDOW of interior-skeleton radii instead: a
+    // single-dip remnant lifts the window maximum back to the local
+    // lumen scale, while a legitimate sustained narrow section keeps
+    // every radius inside its own window low and preserves its trim.
     if !closed {
         let arc_at = |sk: &[(Point3, f64)]| -> Vec<f64> {
             let mut c = vec![0.0f64; sk.len()];
@@ -852,8 +880,17 @@ fn bin_centroids(
         };
         let c = arc_at(&skeleton);
         let total_raw = c[skeleton.len() - 1];
-        let r_start = skeleton[0].1;
-        let r_end = skeleton[skeleton.len() - 1].1;
+        const TRIM_WINDOW: usize = 4;
+        let head_n = TRIM_WINDOW.min(skeleton.len());
+        let tail_start = skeleton.len().saturating_sub(TRIM_WINDOW);
+        let r_start = skeleton[..head_n]
+            .iter()
+            .map(|node| node.1)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let r_end = skeleton[tail_start..]
+            .iter()
+            .map(|node| node.1)
+            .fold(f64::NEG_INFINITY, f64::max);
         if total_raw > 3.0 * (r_start + r_end) {
             let keep: Vec<(Point3, f64)> = skeleton
                 .iter()
@@ -1386,5 +1423,81 @@ mod tests {
             (jitter_out - jitter_in).abs() < 1.0e-12 || jitter_out < jitter_in,
             "smoothing must not amplify jitter"
         );
+    }
+
+    /// Regression (bead frankensim-b2can): a face-adjacent medial SHEET
+    /// remnant — a single shrunken terminal pole beyond an otherwise
+    /// healthy interior — must be trimmed by the WINDOW-max depth, not
+    /// its own (self-defeating) radius.
+    #[test]
+    fn trim_depth_uses_interior_window_not_contaminated_terminal() {
+        let mut chain: Vec<(Point3, f64)> = (0..12).map(|i| p(i as f64 * 0.3, 0.0, 0.0)).collect();
+        // Sheet remnant: terminal pole at half the lumen radius, sitting
+        // slightly OFF-axis the way a face-adjacent disc pole does.
+        chain[0] = (Point3::new(-0.05, 0.08, 0.0), 0.25);
+        let spine: Vec<usize> = (0..chain.len()).collect();
+        let gate = fs_exec::CancelGate::new_clock_free();
+        let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+        pool.scope(|arena| {
+            let cx = Cx::new(
+                &gate,
+                arena,
+                fs_exec::StreamKey {
+                    seed: 0,
+                    kernel_id: 943,
+                    tile: 0,
+                    iteration: 0,
+                },
+                fs_exec::Budget::INFINITE,
+                fs_exec::ExecMode::Deterministic,
+            );
+            let binned = bin_centroids(&chain, &spine, 6, false, &cx).expect("bin");
+            let first = binned[0].0.x;
+            assert!(
+                first >= 0.4,
+                "window trim must remove the sheet-remnant reach; first centroid {first}"
+            );
+            // A healthy line keeps its full extent under the same rule.
+            let healthy: Vec<(Point3, f64)> =
+                (0..12).map(|i| p(i as f64 * 0.3, 0.0, 0.0)).collect();
+            let binned2 =
+                bin_centroids(&healthy, &(0..12).collect::<Vec<_>>(), 6, false, &cx).expect("bin");
+            // Post-trim rebasing puts the first centroid near the kept
+            // span edge plus projection stacking; >=0.35 proves the
+            // window did not eat the interior. The DISCRIMINATOR for the
+            // sheet remnant is the >=0.4 case above.
+            assert!(
+                binned2[0].0.x >= 0.35,
+                "window trim must not eat healthy interior length; {}",
+                binned2[0].0.x
+            );
+        });
+    }
+
+    /// Determinism insurance (bead frankensim-b2can): two exactly tied
+    /// farthest candidates must resolve to the canonical coordinate-bits
+    /// minimum, independent of adjacency construction order.
+    #[test]
+    fn farthest_resolves_exact_ties_canonically() {
+        // Root at origin; two arms of two 0.5 edges each (exact 1.0
+        // distance both ways); arm B has lexicographically larger bits.
+        let poles = vec![
+            p(0.0, 0.0, 0.0),
+            p(0.5, 0.0, 0.0),
+            p(1.0, 0.0, 0.0),
+            p(-0.5, 0.0, 0.0),
+            p(-1.0, 0.0, 0.0),
+        ];
+        // Edge lists in BOTH construction orders.
+        for order in [
+            vec![(0usize, 1usize), (1, 2), (0, 3), (3, 4)],
+            vec![(3usize, 4usize), (0, 3), (1, 2), (0, 1)],
+        ] {
+            let adj = adjacency(poles.len(), &order);
+            let (far, _) = farthest(&adj, &poles, 0);
+            // +1.0 bits (0x3FF0…) < -1.0 bits (0xBFF0…): the POSITIVE
+            // arm's terminal is the canonical minimum-bits anchor.
+            assert_eq!(far, 2, "canonical minimum coordinate bits must win");
+        }
     }
 }
