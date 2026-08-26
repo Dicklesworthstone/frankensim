@@ -83,15 +83,15 @@ fn every_documented_surface_refusal_code_executes() {
         false,
     );
     assert!(e4.contains("\"code\":\"scenario-invalid\""), "{e4}");
-    // control-input-missing: Human mode without input, then with a
-    // non-finite lever force.
+    // control-input-missing: Human mode without input;
+    // control-input-invalid: non-finite lever force.
     let mut human = EngineSlot::default();
     let env = init_short(&mut human, 7, MODE_HUMAN, 0);
     assert!(env.starts_with("{\"ok\":{"), "{env}");
     let e5 = human.step(false, 0.0, 0.0);
     assert!(e5.contains("\"code\":\"control-input-missing\""), "{e5}");
     let e6 = human.step(true, f64::NAN, 0.0);
-    assert!(e6.contains("\"code\":\"control-input-missing\""), "{e6}");
+    assert!(e6.contains("\"code\":\"control-input-invalid\""), "{e6}");
     // run-ended is executed in the lifecycle test above; execute it
     // here too so THIS test alone covers the documented list.
     let mut ended = EngineSlot::default();
