@@ -365,7 +365,7 @@ pub(crate) fn check(root: &Path) -> Report {
             },
             Ok(status) => report.violation(format!(
                 "local {mode} leg exited {status}; receipts retained under {}; rerun \
-                 MODE={mode} OUT_DIR={dir} scripts/ci/oracle_determinism_leg.sh directly",
+                 MODE={mode} OUT_DIR={} scripts/ci/oracle_determinism_leg.sh directly",
                 dir.display()
             )),
             Err(error) => report.violation(format!("local {mode} leg spawn failed: {error}")),
@@ -418,7 +418,7 @@ pub(crate) fn check(root: &Path) -> Report {
         let group_legs: Vec<&LegPayload> =
             legs.iter().filter(|leg| leg.mode == group).collect();
         for window in group_legs.windows(2) {
-            compare_pair(report, group, window[0], window[1]);
+            compare_pair(&mut report, group, window[0], window[1]);
         }
     }
     for leg in &legs {

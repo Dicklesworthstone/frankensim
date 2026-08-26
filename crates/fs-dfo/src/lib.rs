@@ -41,6 +41,7 @@ pub use dro::{DroReport, wasserstein_worst_case};
 pub use moo::{
     HvArchive, Individual, MoeadParams, NsgaParams, crowding_distance, das_dennis, dominates,
     hypervolume, knee_point, mc_hypervolume, moead, non_dominated_sort, nsga2, nsga3,
+    nsga3_tournament,
 };
 pub use neldermead::nelder_mead;
 pub use ot::{OtReport, cost_sq_1d, monotone_cost_1d, sinkhorn};

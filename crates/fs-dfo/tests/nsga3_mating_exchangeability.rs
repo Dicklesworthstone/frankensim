@@ -10,13 +10,13 @@
 //!
 //! BOUNDARY: `nsga3` initializes its population from its own keyed stream and
 //! takes no external initial population, so duplicate-rich END-TO-END runs are
-//! not injectable here; the duplicate case is exercised at the law level
-//! (identical ranks/slots) plus bitwise fixed-seed replay of the real runner.
+//! not injectable here; the duplicate case is exercised at the law level.
+//!
 //! AUTHORITY: same-fixture evidence only. No WFG-family quality gain, no
 //! cross-ISA bitwise claim, and no release authority is made here; those
 //! belong to the registered campaign (7tv.17) and release lane (7tv.19).
 
-use fs_dfo::{Individual, Nsga3Params, das_dennis, nsga3, nsga3_tournament};
+use fs_dfo::{Individual, NsgaParams, das_dennis, nsga3, nsga3_tournament};
 use std::f64::consts::PI;
 
 fn f(x: f64) -> String {
