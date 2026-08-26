@@ -147,6 +147,16 @@ distributions (plan §6.7; P2's seed pillar). Layer: L1.
   and target-capacity refusals precede work/memory budget refusals and allocate
   nothing. Executor construction independently rederives that authority;
   changing any bound field requires a schema bump.
+- CBC executor storage is a fallible authority: every construction and
+  growth reservation is checked (`try_reserve_exact` paths) and refused as
+  the allocation-free, `Copy` `CbcExecError::Storage(CbcStorageRefusal)`
+  carrying class, phase, cursor, requested/admitted/observed counts, and
+  ranked static remediations — never an allocation panic. Product
+  multiplication computes through an executor-owned admitted scratch buffer,
+  so arithmetic transitions perform no allocation and cannot move or replace
+  a product allocation; on any refusal the source bytes are untouched.
+  Requested logical capacity remains the admitted bound; observed
+  allocator capacity is evidence only.
 
 ## Error model
 Invalid distribution parameters panic as programmer errors (`next_below(0)`,

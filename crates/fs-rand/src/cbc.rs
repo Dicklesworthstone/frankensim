@@ -463,9 +463,11 @@ impl CbcProblem {
             .checked_mul(product_capacity_limbs)
             .and_then(|limbs| limbs.checked_mul(LIMB_BYTES))
             .ok_or_else(|| overflow("resident product payload"))?;
-        // `ExactNat::mul_assign_factor_with_capacity` temporarily owns the
-        // moved old allocation while populating a new allocation requested at
-        // the same admitted capacity.
+        // Product multiplication computes through the executor's admitted
+        // multiply-scratch buffer, which occupies one product payload of
+        // transient overlap inside the update phase. The charge below keeps
+        // that reservation honest; the arithmetic itself no longer moves or
+        // replaces any product allocation.
         let product_overlap_bytes = product_capacity_limbs
             .checked_mul(LIMB_BYTES)
             .ok_or_else(|| overflow("product-update overlap"))?;
@@ -1378,10 +1380,7 @@ mod authority_tests {
         ));
 
         let mut changed_schedule = receipt();
-        changed_schedule
-            .estimate
-            .execution_schedule
-            .candidate_visit += 1;
+        changed_schedule.estimate.execution_schedule.candidate_visit += 1;
         assert!(matches!(
             CbcExecutor::new(changed_schedule),
             Err(CbcExecError::AdmissionAuthorityMismatch)
@@ -1421,10 +1420,7 @@ mod authority_tests {
         );
 
         let mut changed_schedule = certified_receipt();
-        changed_schedule
-            .estimate
-            .execution_schedule
-            .candidate_visit += 1;
+        changed_schedule.estimate.execution_schedule.candidate_visit += 1;
         assert_eq!(
             verify_consistency_admitted(changed_schedule, &certificate),
             Err(CbcCertError::AdmissionMismatch)

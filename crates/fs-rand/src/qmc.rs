@@ -320,6 +320,68 @@ impl ExactNat {
         }
     }
 
+    /// Add `src * factor` exactly, where `src` is an admitted scratch copy
+    /// of a multiplicand. Identical arithmetic to [`Self::add_mul_factor`],
+    /// expressed over a borrowed limb slice so callers can own the
+    /// multiplicand storage without a second `ExactNat` owner.
+    ///
+    /// # Panics
+    /// Only when a required limb count overflows `usize`, which the
+    /// admission bounds exclude.
+    pub(crate) fn add_mul_slice_factor(&mut self, src: &[u32], factor: u128) {
+        if factor == 0 || src.is_empty() {
+            return;
+        }
+
+        let mut factor_limbs = [0_u32; 4];
+        let mut remaining = factor;
+        let mut factor_len = 0_usize;
+        while remaining != 0 {
+            factor_limbs[factor_len] = u32::try_from(remaining & u128::from(u32::MAX))
+                .expect("a masked base-2^32 limb fits u32");
+            remaining >>= Self::LIMB_BITS;
+            factor_len += 1;
+        }
+
+        let needed = src
+            .len()
+            .checked_add(factor_len)
+            .and_then(|length| length.checked_add(1))
+            .expect("exact CBC accumulator limb capacity overflow");
+        if self.limbs.len() < needed {
+            self.limbs.resize(needed, 0);
+        }
+
+        for (source_index, &source_limb) in src.iter().enumerate() {
+            let mut carry = 0_u64;
+            for (factor_index, &factor_limb) in factor_limbs[..factor_len].iter().enumerate() {
+                let destination = source_index + factor_index;
+                let wide = u64::from(source_limb)
+                    .checked_mul(u64::from(factor_limb))
+                    .and_then(|value| value.checked_add(u64::from(self.limbs[destination])))
+                    .and_then(|value| value.checked_add(carry))
+                    .expect("base-2^32 multiply-add fits u64");
+                self.limbs[destination] = u32::try_from(wide & u64::from(u32::MAX))
+                    .expect("a masked base-2^32 limb fits u32");
+                carry = wide >> Self::LIMB_BITS;
+            }
+
+            let mut destination = source_index + factor_len;
+            while carry != 0 {
+                if destination == self.limbs.len() {
+                    self.limbs.push(0);
+                }
+                let wide = u64::from(self.limbs[destination])
+                    .checked_add(carry)
+                    .expect("base-2^32 carry propagation fits u64");
+                self.limbs[destination] = u32::try_from(wide & u64::from(u32::MAX))
+                    .expect("a masked base-2^32 limb fits u32");
+                carry = wide >> Self::LIMB_BITS;
+                destination += 1;
+            }
+        }
+    }
+
     /// Add under an admission-owned requested-capacity ceiling.
     ///
     /// Returns the required limb count before touching the accumulator when
@@ -356,16 +418,36 @@ impl ExactNat {
         self.normalize();
     }
 
-    /// Multiply while requesting exactly the admission-owned replacement
-    /// capacity and retaining the moved old allocation until completion.
-    pub(crate) fn mul_assign_factor_with_capacity(
+    /// Multiply by `factor` in place using a caller-owned admitted scratch
+    /// buffer instead of moving the old allocation aside and building a
+    /// fresh replacement.
+    ///
+    /// Preflight proves `required <= capacity_limbs` and that `scratch`
+    /// already reserves at least the source length, so after the check the
+    /// transition performs no allocation at all: it cannot fail mid-mutation,
+    /// cannot reallocate away the admitted reservation, and never leaves the
+    /// two-buffer peak overlap the moved-allocation form produced. On any
+    /// refusal the source limbs are untouched.
+    ///
+    /// Returns the required limb count when the shared storage schema is too
+    /// small, or the scratch reservation was not supplied.
+    pub(crate) fn mul_assign_factor_scratch(
         &mut self,
         factor: u128,
         capacity_limbs: usize,
+        scratch: &mut Vec<u32>,
     ) -> Result<(), usize> {
         if factor == 0 || self.limbs.is_empty() {
+            // Zero has no limbs; retain the admitted allocation.
             self.limbs.clear();
             return Ok(());
+        }
+        debug_assert!(
+            scratch.capacity() >= self.limbs.len(),
+            "admitted scratch must reserve at least the product length"
+        );
+        if scratch.capacity() < self.limbs.len() {
+            return Err(self.limbs.len());
         }
         let required = self
             .limbs
@@ -373,17 +455,60 @@ impl ExactNat {
             .checked_add(factor_limb_count(factor))
             .and_then(|length| length.checked_add(1))
             .expect("exact CBC required limb count overflow");
-        if required > capacity_limbs {
+        if required > capacity_limbs.max(self.limbs.capacity()) {
             return Err(required);
         }
-        let multiplicand = Self {
-            limbs: core::mem::take(&mut self.limbs),
-        };
-        self.limbs = Vec::with_capacity(capacity_limbs);
-        self.add_mul_factor(&multiplicand, factor);
+
+        scratch.clear();
+        // The admitted scratch reserved at least this length at construction,
+        // so the copy cannot reallocate.
+        scratch.extend_from_slice(&self.limbs);
+        self.limbs.clear();
+        self.add_mul_slice_factor(scratch, factor);
         self.normalize();
         debug_assert!(self.limbs.len() <= capacity_limbs);
         Ok(())
+    }
+
+    /// Fallibly request at least the admitted limb capacity before
+    /// execution. Construction paths must use this so resource admission
+    /// can never become an allocation panic.
+    ///
+    /// Rust allocators may round the observable `Vec::capacity()` upward; the
+    /// admission contract bounds requested logical payload and operation
+    /// length, not allocator-usable bytes.
+    pub(crate) fn try_reserve_exact_limbs(
+        &mut self,
+        capacity_limbs: usize,
+    ) -> Result<(), std::collections::TryReserveError> {
+        let additional = capacity_limbs.saturating_sub(self.limbs.len());
+        self.limbs.try_reserve_exact(additional)
+    }
+
+    /// A zero value holding the admitted limb capacity, allocated fallibly.
+    pub(crate) fn try_zero_with_capacity(
+        capacity_limbs: usize,
+    ) -> Result<Self, std::collections::TryReserveError> {
+        let mut value = Self { limbs: Vec::new() };
+        value.try_reserve_exact_limbs(capacity_limbs)?;
+        Ok(value)
+    }
+
+    /// Fallibly clone exactly the retained limbs (certificate emission).
+    pub(crate) fn try_clone_limbs(&self) -> Result<Vec<u32>, std::collections::TryReserveError> {
+        let mut limbs = Vec::new();
+        limbs.try_reserve_exact(self.limbs.len())?;
+        limbs.extend_from_slice(&self.limbs);
+        Ok(limbs)
+    }
+
+    /// A value of one holding the admitted limb capacity, allocated fallibly.
+    pub(crate) fn try_one_with_capacity(
+        capacity_limbs: usize,
+    ) -> Result<Self, std::collections::TryReserveError> {
+        let mut value = Self::try_zero_with_capacity(capacity_limbs)?;
+        value.limbs.push(1);
+        Ok(value)
     }
 
     /// Request at least the admitted limb capacity before execution.

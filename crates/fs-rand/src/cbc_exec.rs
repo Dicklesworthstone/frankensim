@@ -158,11 +158,78 @@ pub enum CbcExecError {
     },
     /// `run` was called after completion.
     AlreadyComplete,
+    /// A fallible-storage admission refused an allocation or a capacity
+    /// reservation before any mutation. Carries the full diagnostic surface
+    /// required by the fallible-storage authority: storage class, phase,
+    /// cursor, requested/admitted/observed counts, and ranked remediations.
+    Storage(CbcStorageRefusal),
     /// `enable_certificates` was called after work had already been debited
     /// (certificates must cover every scanned component or none).
     CertificatesAfterStart,
     /// Certificate production was requested from a construction-only receipt.
     CertificatesNotAdmitted,
+}
+
+/// Which admitted storage class refused a fallible allocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CbcStorageClass {
+    /// The point-indexed product owner array itself.
+    ProductOwnerArray,
+    /// One product's limb payload (`cursor` is the point index).
+    ProductLimbs,
+    /// The chosen-prefix register (`z`).
+    ZPrefix,
+    /// The retained-certificate record array.
+    CertificateRecords,
+    /// One certificate's prefix word payload.
+    CertificatePrefixScratch,
+    /// One certificate's winning/runner-up score limbs.
+    CertificateScoreScratch,
+    /// One certificate's tie-class words.
+    CertificateTieScratch,
+    /// A candidate scan's running-score accumulator.
+    ScoreAccumulator,
+    /// The shared product-multiply scratch buffer.
+    MultiplyScratch,
+}
+
+/// Where in the resumable control flow a storage refusal occurred.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CbcPhaseKind {
+    /// Executor construction from an admitted receipt.
+    Construction,
+    /// First-component product initialization.
+    Init,
+    /// Candidate scanning.
+    Scan,
+    /// Chosen-product update folding.
+    Update,
+    /// Certified prefix-record emission.
+    CertificateEmission,
+}
+
+/// Ranked remediations for a storage refusal (best first). Static text
+/// keeps the error `Copy` so refusal paths never allocate.
+pub const RANKED_STORAGE_REMEDIATIONS: [&str; 2] = [
+    "re-admit with a larger memory budget covering this class",
+    "resume with a smaller problem inside the same receipt authority",
+];
+
+/// A typed, allocation-free storage refusal diagnostic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CbcStorageRefusal {
+    /// Which admitted storage class refused.
+    pub class: CbcStorageClass,
+    /// Control-flow phase at refusal.
+    pub phase: CbcPhaseKind,
+    /// Point index, candidate, or record slot the refusal occurred at.
+    pub cursor: usize,
+    /// Elements requested by the refused reservation.
+    pub requested: usize,
+    /// Elements admitted for this class by the sealed receipt.
+    pub admitted: usize,
+    /// Allocator-reported capacity evidence observed at refusal.
+    pub observed: usize,
 }
 
 /// Runtime observation separating the admission's requested product payload
@@ -303,6 +370,10 @@ pub struct CbcExecutor {
     admissible_candidates_per_prefix: usize,
     products: Vec<ExactNat>,
     z: Vec<u32>,
+    /// Admitted multiply-scratch copy of one product's limbs. Lives inside
+    /// the already-charged update-phase overlap envelope; reserving it at
+    /// construction keeps every arithmetic transition allocation-free.
+    scratch: Vec<u32>,
     phase: Phase,
     work_spent: u128,
     certifying: bool,
@@ -336,10 +407,81 @@ impl CbcExecutor {
                 .expect("admission target bounds proved the unit-group size fits usize");
         let certificate_capacity = problem.dimension().saturating_sub(1);
         let certificates_admitted = matches!(admission.mode(), CbcExecutionMode::Certified);
-        let mut products = vec![ExactNat::one(); point_count];
-        for product in &mut products {
-            product.reserve_exact_limbs(product_capacity);
+
+        // Fallible-storage authority: every construction allocation is a
+        // checked reservation refused with a typed diagnostic before any
+        // executor state is published.
+        let refuse = |class, cursor, requested, admitted, observed| {
+            CbcExecError::Storage(CbcStorageRefusal {
+                class,
+                phase: CbcPhaseKind::Construction,
+                cursor,
+                requested,
+                admitted,
+                observed,
+            })
+        };
+
+        let mut products = Vec::new();
+        products.try_reserve_exact(point_count).map_err(|_| {
+            refuse(
+                CbcStorageClass::ProductOwnerArray,
+                0,
+                point_count,
+                point_count,
+                products.capacity(),
+            )
+        })?;
+        for point_index in 0..point_count {
+            let product = ExactNat::try_one_with_capacity(product_capacity).map_err(|_| {
+                refuse(
+                    CbcStorageClass::ProductLimbs,
+                    point_index,
+                    product_capacity,
+                    product_capacity,
+                    0,
+                )
+            })?;
+            products.push(product);
         }
+
+        let mut z = Vec::new();
+        z.try_reserve_exact(problem.dimension()).map_err(|_| {
+            refuse(
+                CbcStorageClass::ZPrefix,
+                0,
+                problem.dimension(),
+                problem.dimension(),
+                z.capacity(),
+            )
+        })?;
+
+        let mut scratch = Vec::new();
+        scratch.try_reserve_exact(product_capacity).map_err(|_| {
+            refuse(
+                CbcStorageClass::MultiplyScratch,
+                0,
+                product_capacity,
+                product_capacity,
+                scratch.capacity(),
+            )
+        })?;
+
+        let mut certificates = Vec::new();
+        if certificates_admitted {
+            certificates
+                .try_reserve_exact(certificate_capacity)
+                .map_err(|_| {
+                    refuse(
+                        CbcStorageClass::CertificateRecords,
+                        0,
+                        certificate_capacity,
+                        certificate_capacity,
+                        certificates.capacity(),
+                    )
+                })?;
+        }
+
         Ok(Self {
             problem,
             admitted_work_units: estimate.work_units(),
@@ -348,16 +490,13 @@ impl CbcExecutor {
             product_capacity_limbs: product_capacity,
             admissible_candidates_per_prefix,
             products,
-            z: Vec::with_capacity(problem.dimension()),
+            z,
+            scratch,
             phase: Phase::Init { next_point: 0 },
             work_spent: 0,
             certifying: false,
             certificates_admitted,
-            certificates: if certificates_admitted {
-                Vec::with_capacity(certificate_capacity)
-            } else {
-                Vec::new()
-            },
+            certificates,
         })
     }
 
@@ -577,24 +716,35 @@ impl CbcExecutor {
                         .schedule
                         .certificate_prefix_units(prefix_len)
                         .expect("admission proved certificate charges fit u128");
+                    // Build the full record from borrowed state first: a
+                    // storage refusal here leaves every scan field intact,
+                    // so the retry re-emits once and never double-charges
+                    // the certificate units or loses the tie class.
+                    let runner_borrowed = match &*runner_up {
+                        Some((score, who)) => Some((score, *who)),
+                        None => None,
+                    };
+                    let certificate = build_prefix_certificate(
+                        &self.z,
+                        &winning_score,
+                        chosen,
+                        runner_borrowed,
+                        tie_class,
+                        prefix_len,
+                        charges.n,
+                    )?;
                     debit(
                         &mut self.work_spent,
                         charges.admitted_work_units,
                         remaining,
                         certificate_units,
                     )?;
-                    let runner_up_limbs = runner_up
-                        .take()
-                        .map(|(score, who)| (score.limbs().to_vec(), who));
-                    let certificate = build_prefix_certificate(
-                        &self.z,
-                        &winning_score,
-                        chosen,
-                        runner_up_limbs,
-                        core::mem::take(tie_class),
-                        prefix_len,
-                        charges.n,
+                    debug_assert!(
+                        self.certificates.len() < self.certificates.capacity(),
+                        "the record array was reserved for one certificate per scanned component"
                     );
+                    let _ = runner_up.take();
+                    tie_class.clear();
                     self.certificates.push(certificate);
                 }
                 self.phase = Phase::Update {
@@ -642,8 +792,22 @@ impl CbcExecutor {
         point_block: u32,
         remaining: &mut u128,
     ) -> Result<CbcBoundary, CbcExecError> {
-        let n = self.problem.point_count();
-        let dimension = self.problem.dimension();
+        let Self {
+            products,
+            scratch,
+            z,
+            phase,
+            work_spent,
+            admitted_work_units,
+            schedule,
+            product_capacity_limbs,
+            admissible_candidates_per_prefix,
+            certifying,
+            problem,
+            ..
+        } = self;
+        let n = problem.point_count();
+        let dimension = problem.dimension();
         // Initialization charges one unit per point plus the update
         // visits themselves (the estimate's `+ points + dimension`
         // tail distributes here and at each z push).
@@ -652,31 +816,36 @@ impl CbcExecutor {
             let point_index =
                 usize::try_from(point).expect("admission proved point indices fit usize");
             let residue = lattice_residue(point_index, 1, n);
-            self.products[point_index]
-                .mul_assign_factor_with_capacity(
+            products[point_index]
+                .mul_assign_factor_scratch(
                     exact_kernel_numerator(n, residue),
-                    self.product_capacity_limbs,
+                    *product_capacity_limbs,
+                    scratch,
                 )
                 .map_err(|required_limbs| CbcExecError::StorageScheduleOverrun {
                     required_limbs,
-                    admitted_limbs: self.product_capacity_limbs,
+                    admitted_limbs: *product_capacity_limbs,
                 })?;
             debit(
-                &mut self.work_spent,
-                self.admitted_work_units,
+                work_spent,
+                *admitted_work_units,
                 remaining,
-                self.schedule.initialization_visit_units(),
+                schedule.initialization_visit_units(),
             )?;
         }
         if end == n {
-            self.z.push(1);
+            debug_assert!(
+                z.len() < z.capacity(),
+                "the prefix register was reserved for the admitted dimension"
+            );
+            z.push(1);
             debit(
-                &mut self.work_spent,
-                self.admitted_work_units,
+                work_spent,
+                *admitted_work_units,
                 remaining,
-                self.schedule.prefix_control_units(),
+                schedule.prefix_control_units(),
             )?;
-            self.phase = if dimension == 1 {
+            *phase = if dimension == 1 {
                 Phase::Done
             } else {
                 Phase::Scan {
@@ -684,16 +853,16 @@ impl CbcExecutor {
                     accum: None,
                     best: None,
                     runner_up: None,
-                    tie_class: if self.certifying {
-                        Vec::with_capacity(self.admissible_candidates_per_prefix)
-                    } else {
-                        Vec::new()
-                    },
+                    tie_class: try_reserve_tie_class(
+                        *certifying,
+                        *admissible_candidates_per_prefix,
+                        1,
+                    )?,
                 }
             };
             Ok(CbcBoundary::Prefix)
         } else {
-            self.phase = Phase::Init { next_point: end };
+            *phase = Phase::Init { next_point: end };
             Ok(CbcBoundary::PointBlock)
         }
     }
@@ -707,38 +876,57 @@ impl CbcExecutor {
         point_block: u32,
         remaining: &mut u128,
     ) -> Result<CbcBoundary, CbcExecError> {
-        let n = self.problem.point_count();
-        let dimension = self.problem.dimension();
+        let Self {
+            products,
+            scratch,
+            z,
+            phase,
+            work_spent,
+            admitted_work_units,
+            schedule,
+            product_capacity_limbs,
+            admissible_candidates_per_prefix,
+            certifying,
+            problem,
+            ..
+        } = self;
+        let n = problem.point_count();
+        let dimension = problem.dimension();
         let end = next_point.saturating_add(point_block).min(n);
         for point in next_point..end {
             let point_index =
                 usize::try_from(point).expect("admission proved point indices fit usize");
             let residue = lattice_residue(point_index, chosen, n);
-            self.products[point_index]
-                .mul_assign_factor_with_capacity(
+            products[point_index]
+                .mul_assign_factor_scratch(
                     exact_kernel_numerator(n, residue),
-                    self.product_capacity_limbs,
+                    *product_capacity_limbs,
+                    scratch,
                 )
                 .map_err(|required_limbs| CbcExecError::StorageScheduleOverrun {
                     required_limbs,
-                    admitted_limbs: self.product_capacity_limbs,
+                    admitted_limbs: *product_capacity_limbs,
                 })?;
             debit(
-                &mut self.work_spent,
-                self.admitted_work_units,
+                work_spent,
+                *admitted_work_units,
                 remaining,
-                self.schedule.product_update_visit_units(),
+                schedule.product_update_visit_units(),
             )?;
         }
         if end == n {
-            self.z.push(chosen);
+            debug_assert!(
+                z.len() < z.capacity(),
+                "the prefix register was reserved for the admitted dimension"
+            );
+            z.push(chosen);
             debit(
-                &mut self.work_spent,
-                self.admitted_work_units,
+                work_spent,
+                *admitted_work_units,
                 remaining,
-                self.schedule.prefix_control_units(),
+                schedule.prefix_control_units(),
             )?;
-            self.phase = if self.z.len() == dimension {
+            *phase = if z.len() == dimension {
                 Phase::Done
             } else {
                 Phase::Scan {
@@ -746,22 +934,47 @@ impl CbcExecutor {
                     accum: None,
                     best: None,
                     runner_up: None,
-                    tie_class: if self.certifying {
-                        Vec::with_capacity(self.admissible_candidates_per_prefix)
-                    } else {
-                        Vec::new()
-                    },
+                    tie_class: try_reserve_tie_class(
+                        *certifying,
+                        *admissible_candidates_per_prefix,
+                        1,
+                    )?,
                 }
             };
             Ok(CbcBoundary::Prefix)
         } else {
-            self.phase = Phase::Update {
+            *phase = Phase::Update {
                 chosen,
                 next_point: end,
             };
             Ok(CbcBoundary::PointBlock)
         }
     }
+}
+
+/// Fallibly reserve the admitted tie-class scan scratch. A free function so
+/// phase-destructured executor fields stay disjoint from the reservation.
+fn try_reserve_tie_class(
+    certifying: bool,
+    admissible_candidates_per_prefix: usize,
+    candidate: u32,
+) -> Result<Vec<u32>, CbcExecError> {
+    let mut tie = Vec::new();
+    if certifying {
+        tie.try_reserve_exact(admissible_candidates_per_prefix)
+            .map_err(|_| {
+                CbcExecError::Storage(CbcStorageRefusal {
+                    class: CbcStorageClass::CertificateTieScratch,
+                    phase: CbcPhaseKind::Scan,
+                    cursor: usize::try_from(candidate)
+                        .expect("admission proved candidates fit usize"),
+                    requested: admissible_candidates_per_prefix,
+                    admitted: admissible_candidates_per_prefix,
+                    observed: tie.capacity(),
+                })
+            })?;
+    }
+    Ok(tie)
 }
 
 /// Debit schedule units against the admitted bound and the run allowance
@@ -873,22 +1086,38 @@ fn advance_scan_candidate(
             return Ok(AdvanceScan::Boundary(CbcBoundary::CandidateBlock));
         }
         *candidates_in_tile += 1;
+        let coprime = gcd(*candidate, charges.n) == 1;
+        // Fallible reservation precedes the control debit: a storage
+        // refusal leaves no mutation behind, so the retry re-executes this
+        // candidate identically and never double-charges the schedule.
+        let mut score =
+            ExactNat::try_zero_with_capacity(charges.score_capacity_limbs).map_err(|_| {
+                CbcExecError::Storage(CbcStorageRefusal {
+                    class: CbcStorageClass::ScoreAccumulator,
+                    phase: CbcPhaseKind::Scan,
+                    cursor: usize::try_from(*candidate)
+                        .expect("admission proved candidates fit usize"),
+                    requested: charges.score_capacity_limbs,
+                    admitted: charges.score_capacity_limbs,
+                    observed: 0,
+                })
+            })?;
+        if coprime {
+            *accum = Some(ScanAccum {
+                score,
+                next_point: 0,
+            });
+        }
         debit(
             work_spent,
             charges.admitted_work_units,
             remaining,
             charges.candidate_control_units,
         )?;
-        if gcd(*candidate, charges.n) != 1 {
+        if !coprime {
             *candidate += 1;
             return Ok(AdvanceScan::Accumulating);
         }
-        let mut score = ExactNat::zero();
-        score.reserve_exact_limbs(charges.score_capacity_limbs);
-        *accum = Some(ScanAccum {
-            score,
-            next_point: 0,
-        });
     }
     let n = charges.n;
     let running = accum.as_mut().expect("accumulator was just installed");
@@ -979,31 +1208,70 @@ fn apply_scan_verdict(
 }
 
 /// Assemble the certified prefix record for a completed scan. Pure
-/// construction: the caller has already debited the certificate charge.
+/// construction over borrowed scan state: every payload is fallibly cloned
+/// into freshly reserved storage, so a refusal leaves the caller's fields
+/// untouched and no partial record is ever minted. The caller debits the
+/// certificate charge only after this succeeds, then publishes the record.
 fn build_prefix_certificate(
     z: &[u32],
     winning_score: &ExactNat,
     chosen: u32,
-    runner_up: Option<(Vec<u32>, u32)>,
-    tie_class: Vec<u32>,
+    runner_up: Option<(&ExactNat, u32)>,
+    tie_class: &[u32],
     prefix_len: usize,
     n: u32,
-) -> CbcPrefixCertificate {
-    let mut prefix = Vec::with_capacity(prefix_len);
+) -> Result<CbcPrefixCertificate, CbcExecError> {
+    let refuse = |class: CbcStorageClass, requested: usize| {
+        CbcExecError::Storage(CbcStorageRefusal {
+            class,
+            phase: CbcPhaseKind::CertificateEmission,
+            cursor: prefix_len,
+            requested,
+            admitted: requested,
+            observed: 0,
+        })
+    };
+    let mut prefix = Vec::new();
+    prefix
+        .try_reserve_exact(prefix_len)
+        .map_err(|_| refuse(CbcStorageClass::CertificatePrefixScratch, prefix_len))?;
     prefix.extend_from_slice(z);
     prefix.push(chosen);
+    let winning_score_limbs = winning_score.try_clone_limbs().map_err(|_| {
+        refuse(
+            CbcStorageClass::CertificateScoreScratch,
+            winning_score.limbs().len(),
+        )
+    })?;
+    let runner_up_limbs = match runner_up {
+        Some((score, who)) => {
+            let limbs = score.try_clone_limbs().map_err(|_| {
+                refuse(
+                    CbcStorageClass::CertificateScoreScratch,
+                    score.limbs().len(),
+                )
+            })?;
+            Some((limbs, who))
+        }
+        None => None,
+    };
+    let mut retained_tie_class = Vec::new();
+    retained_tie_class
+        .try_reserve_exact(tie_class.len())
+        .map_err(|_| refuse(CbcStorageClass::CertificateTieScratch, tie_class.len()))?;
+    retained_tie_class.extend_from_slice(tie_class);
     let denominator_exponent =
         u32::try_from(prefix.len()).expect("admitted dimensions fit u32 exponents");
-    CbcPrefixCertificate {
+    Ok(CbcPrefixCertificate {
         point_count: n,
         prefix,
-        winning_score_limbs: winning_score.limbs().to_vec(),
-        tie_class,
-        runner_up,
+        winning_score_limbs,
+        tie_class: retained_tie_class,
+        runner_up: runner_up_limbs,
         denominator_exponent,
         tie_rule: TIE_RULE_LOWEST_CANDIDATE,
         admissible_rule: ADMISSIBLE_RULE_UNITS,
-    }
+    })
 }
 
 #[cfg(test)]
