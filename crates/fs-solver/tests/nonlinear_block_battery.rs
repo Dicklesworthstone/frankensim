@@ -120,11 +120,20 @@ fn block_2x2_3x3_and_real_equivalent_match_dense_actions() {
     let operator = BlockOperator2::new(blocks).expect("valid 2x2 partition");
     let x = [1.0, 2.0, -1.0];
     let mut y = [0.0; 3];
+    fn arr_bits_eq(a: &[f64], b: &[f64]) -> bool {
+        a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits())
+    }
     LinearOp::apply(&operator, &x, &mut y);
-    assert_eq!(y, [0.0, 0.0, -5.0]);
+    assert!(
+        arr_bits_eq(&y, &[0.0, 0.0, -5.0]),
+        "bitwise mismatch: y={y:?}"
+    );
     let mut yt = [0.0; 3];
     LinearOp::apply_transpose(&operator, &x, &mut yt);
-    assert_eq!(yt, [-6.0, 9.0, 7.0]);
+    assert!(
+        arr_bits_eq(&yt, &[-6.0, 9.0, 7.0]),
+        "bitwise mismatch: yt={yt:?}"
+    );
 
     let one = DenseSquare::new(1, &[1.0]);
     let two = DenseSquare::new(1, &[2.0]);
@@ -152,20 +161,32 @@ fn block_2x2_3x3_and_real_equivalent_match_dense_actions() {
     let operator3 = BlockOperator3::new(blocks3).expect("valid 3x3 partition");
     let mut y3 = [0.0; 3];
     LinearOp::apply(&operator3, &[1.0, -1.0, 2.0], &mut y3);
-    assert_eq!(y3, [5.0, 11.0, 17.0]);
+    assert!(
+        arr_bits_eq(&y3, &[5.0, 11.0, 17.0]),
+        "bitwise mismatch: y3={y3:?}"
+    );
     let mut y3_transpose = [0.0; 3];
     LinearOp::apply_transpose(&operator3, &[1.0, -1.0, 2.0], &mut y3_transpose);
-    assert_eq!(y3_transpose, [11.0, 13.0, 15.0]);
+    assert!(
+        arr_bits_eq(&y3_transpose, &[11.0, 13.0, 15.0]),
+        "bitwise mismatch: y3_transpose={y3_transpose:?}"
+    );
 
     let real = DenseSquare::new(2, &[2.0, 0.0, 0.0, 3.0]);
     let imaginary = DenseSquare::new(2, &[0.0, 1.0, 2.0, 0.0]);
     let complex = RealEquivalentComplexOp::new(&real, &imaginary).expect("same dimension");
     let mut yc = [0.0; 4];
     LinearOp::apply(&complex, &[1.0, 2.0, -1.0, 4.0], &mut yc);
-    assert_eq!(yc, [-2.0, 8.0, 0.0, 14.0]);
+    assert!(
+        arr_bits_eq(&yc, &[-2.0, 8.0, 0.0, 14.0]),
+        "bitwise mismatch: yc={yc:?}"
+    );
     let mut yc_transpose = [0.0; 4];
     LinearOp::apply_transpose(&complex, &[1.0, 2.0, -1.0, 4.0], &mut yc_transpose);
-    assert_eq!(yc_transpose, [10.0, 5.0, -6.0, 11.0]);
+    assert!(
+        arr_bits_eq(&yc_transpose, &[10.0, 5.0, -6.0, 11.0]),
+        "bitwise mismatch: yc_transpose={yc_transpose:?}"
+    );
     verdict(
         "block-actions",
         "2x2/3x3 rectangular composition, transpose, and real-equivalent complex action match dense references",
@@ -233,7 +254,7 @@ struct FindingVerifier {
 }
 
 impl LinearSystemVerifier for FindingVerifier {
-    fn verifier_id(&self) -> &str {
+    fn verifier_id(&self) -> &'static str {
         "test/exact-dense-structure-verifier/v1"
     }
 
@@ -589,7 +610,12 @@ fn newton_krylov_globalizes_logs_and_resumes_bitwise() {
         rejection_report.history[0].decision,
         GlobalizationDecision::LineSearchRejected
     );
-    assert_eq!(rejection_report.history[0].step_length, 0.25);
+    assert_eq!(
+        rejection_report.history[0].step_length.to_bits(),
+        0.25_f64.to_bits(),
+        "step_length bits differ: {:?}",
+        rejection_report.history[0].step_length
+    );
     assert!(matches!(
         NewtonKrylovState::new(&HugeResidual, vec![0.0, 0.0], NewtonKrylovConfig::default()),
         Err(NewtonError::NonFiniteResidualNorm { iteration: 0 })

@@ -2,7 +2,7 @@
 
 use fs_evidence::ColorRank;
 use fs_flyer::robustopt::{
-    run_robust_optimization, FlightOptimizationCandidate, RobustOptConfig, StructuralModelMode,
+    FlightOptimizationCandidate, RobustOptConfig, StructuralModelMode, run_robust_optimization,
 };
 
 #[test]
@@ -60,7 +60,8 @@ fn hostile_twin_prescribed_kinematic_refuses() {
         crn_distance_samples_m: vec![100.0, 95.0],
     };
 
-    let err = run_robust_optimization(&config, &[cand]).expect_err("must refuse under prescribed kinematic");
+    let err = run_robust_optimization(&config, &[cand])
+        .expect_err("must refuse under prescribed kinematic");
     assert_eq!(err.code, "robust-opt-disabled-under-prescribed-kinematic");
 }
 
@@ -101,6 +102,7 @@ fn hostile_twin_applicability_violation_refuses() {
         crn_distance_samples_m: vec![100.0, 95.0],
     };
 
-    let err = run_robust_optimization(&config, &[cand]).expect_err("must refuse applicability violation");
+    let err =
+        run_robust_optimization(&config, &[cand]).expect_err("must refuse applicability violation");
     assert_eq!(err.code, "robust-opt-applicability-exceeded");
 }

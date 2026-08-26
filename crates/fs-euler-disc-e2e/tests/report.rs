@@ -46,7 +46,8 @@ fn test_simulation_report_with_admitted_physical_scorecard() {
     );
 
     report.physical_section = PhysicalComparisonSection::AdmittedPhysicalScorecard {
-        scorecard_digest: "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef".to_string(),
+        scorecard_digest: "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+            .to_string(),
         disposition_authority: "independent-disposition-auth-v1".to_string(),
         spin_time_relative_error: 0.035,
     };

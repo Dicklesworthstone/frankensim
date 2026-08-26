@@ -8,8 +8,8 @@
 
 use fs_ivl::formal_manifest::FROZEN_FORMAL_MANIFEST;
 use fs_ivl::formal_proofs::{
-    ProofArtifactReceipt, TheoremStatus, ToolchainLock, FROZEN_TOOLCHAIN_LOCK,
-    FROZEN_VERIFICATION_RECORDS,
+    FROZEN_TOOLCHAIN_LOCK, FROZEN_VERIFICATION_RECORDS, ProofArtifactReceipt, TheoremStatus,
+    ToolchainLock,
 };
 
 #[test]

@@ -2,8 +2,8 @@
 
 use fs_blake3::hash_domain;
 use fs_govern::core_ux_replication::{
-    CoreUxReplicationError, CoreUxReplicationSealV1, ReplicationProtocolSpec,
-    CORE_UX_REPLICATION_SEAL_SCHEMA_V1,
+    CORE_UX_REPLICATION_SEAL_SCHEMA_V1, CoreUxReplicationError, CoreUxReplicationSealV1,
+    ReplicationProtocolSpec,
 };
 
 fn sample_spec() -> ReplicationProtocolSpec {
@@ -86,7 +86,8 @@ fn sealing_refuses_without_attestation() {
     let mut spec = sample_spec();
     spec.no_outcome_access_attestation = false;
 
-    let err = CoreUxReplicationSealV1::seal(spec, 1_700_000_000).expect_err("must refuse without attestation");
+    let err = CoreUxReplicationSealV1::seal(spec, 1_700_000_000)
+        .expect_err("must refuse without attestation");
     assert_eq!(err, CoreUxReplicationError::MissingAttestation);
 }
 
@@ -95,7 +96,8 @@ fn sealing_refuses_empty_cohorts() {
     let mut spec = sample_spec();
     spec.cohorts.clear();
 
-    let err = CoreUxReplicationSealV1::seal(spec, 1_700_000_000).expect_err("must refuse empty cohorts");
+    let err =
+        CoreUxReplicationSealV1::seal(spec, 1_700_000_000).expect_err("must refuse empty cohorts");
     assert!(matches!(err, CoreUxReplicationError::InvalidCohorts { .. }));
 }
 
@@ -120,7 +122,8 @@ fn sealing_refuses_duplicate_principals() {
     let mut spec = sample_spec();
     spec.analysis_principal_ids = vec!["analyst-a".into(), "analyst-a".into()];
 
-    let err = CoreUxReplicationSealV1::seal(spec, 1_700_000_000).expect_err("must refuse duplicate principal");
+    let err = CoreUxReplicationSealV1::seal(spec, 1_700_000_000)
+        .expect_err("must refuse duplicate principal");
     assert_eq!(
         err,
         CoreUxReplicationError::DuplicatePrincipal {
@@ -144,7 +147,10 @@ fn max_ux_expert_replication_sealing_succeeds_and_is_deterministic() {
         domain_tcb_strata: vec!["numerical-kernel".into(), "evidence-graph".into()],
         task_hazard_catalog_root: task_hash,
         expert_cohorts: vec!["domain-expert".into(), "theorem-researcher".into()],
-        expert_role_criteria: vec!["tenured-faculty".into(), "lead-verification-engineer".into()],
+        expert_role_criteria: vec![
+            "tenured-faculty".into(),
+            "lead-verification-engineer".into(),
+        ],
         recruitment_source: "expert-panel-v1".into(),
         conflict_check_roster: vec!["conflict-check-passed".into()],
         facilitator_roster: vec!["lead-expert-facilitator".into()],
@@ -194,17 +200,32 @@ fn max_ux_expert_replication_sealing_succeeds_and_is_deterministic() {
 fn sealing_refuses_malformed_claim_revision_and_precision() {
     let mut spec = sample_spec();
     spec.product_claim_revision = "   ".into();
-    let err = CoreUxReplicationSealV1::seal(spec.clone(), 1_700_000_000).expect_err("must refuse blank claim");
-    assert!(matches!(err, CoreUxReplicationError::MalformedInput { field: "product_claim_revision", .. }));
+    let err = CoreUxReplicationSealV1::seal(spec.clone(), 1_700_000_000)
+        .expect_err("must refuse blank claim");
+    assert!(matches!(
+        err,
+        CoreUxReplicationError::MalformedInput {
+            field: "product_claim_revision",
+            ..
+        }
+    ));
 
     spec.product_claim_revision = "valid-rev.1".into();
     spec.precision_target = -0.01;
-    let err = CoreUxReplicationSealV1::seal(spec.clone(), 1_700_000_000).expect_err("must refuse negative precision");
-    assert!(matches!(err, CoreUxReplicationError::InvalidPrecisionTarget { .. }));
+    let err = CoreUxReplicationSealV1::seal(spec.clone(), 1_700_000_000)
+        .expect_err("must refuse negative precision");
+    assert!(matches!(
+        err,
+        CoreUxReplicationError::InvalidPrecisionTarget { .. }
+    ));
 
     spec.precision_target = f64::NAN;
-    let err = CoreUxReplicationSealV1::seal(spec, 1_700_000_000).expect_err("must refuse NaN precision");
-    assert!(matches!(err, CoreUxReplicationError::InvalidPrecisionTarget { .. }));
+    let err =
+        CoreUxReplicationSealV1::seal(spec, 1_700_000_000).expect_err("must refuse NaN precision");
+    assert!(matches!(
+        err,
+        CoreUxReplicationError::InvalidPrecisionTarget { .. }
+    ));
 }
 
 #[test]
@@ -246,7 +267,13 @@ fn max_sealing_refuses_empty_domain_tcb_strata() {
 
     let err = fs_govern::core_ux_replication::MaxUxReplicationSealV1::seal(spec, 1_700_000_100)
         .expect_err("must refuse empty strata");
-    assert!(matches!(err, CoreUxReplicationError::MalformedInput { field: "domain_tcb_strata", .. }));
+    assert!(matches!(
+        err,
+        CoreUxReplicationError::MalformedInput {
+            field: "domain_tcb_strata",
+            ..
+        }
+    ));
 }
 
 #[test]
@@ -272,4 +299,3 @@ fn seal_digest_is_sensitive_to_every_core_root_mutation() {
     let seal4 = CoreUxReplicationSealV1::seal(base_spec, 1_700_000_001).unwrap();
     assert_ne!(base_seal.seal_digest, seal4.seal_digest);
 }
-

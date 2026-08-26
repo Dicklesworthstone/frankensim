@@ -2033,10 +2033,7 @@ mod tests {
         };
         let step = DissipationStep::from_power(f64::MAX, 1.0, partition).unwrap();
         assert!(ledger.record(step).is_err());
-        assert_eq!(
-            ledger.dissipated_work_j().to_bits(),
-            f64::MAX.to_bits()
-        );
+        assert_eq!(ledger.dissipated_work_j().to_bits(), f64::MAX.to_bits());
         let mut wear = WearState::new(1.0).unwrap();
         let result = ArchardLaw {
             wear_coefficient: 2.0,

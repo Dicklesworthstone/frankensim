@@ -138,7 +138,6 @@ pub(super) fn encode_terminal(receipt: &RecordedSnapshotFreezeReceipt) -> Vec<u8
     out
 }
 
-
 /// Inputs for one publication attempt; assembled under the governor lock so
 /// the claim cannot drift from the armed gate.
 pub(super) struct FreezePublishInputs<'a> {
@@ -192,11 +191,12 @@ pub(super) fn publish_freeze_terminal(
 
     // Idempotent replay: an identical stored row means this exact publication
     // already committed; anything else under the same authority refuses.
-    let existing = ledger
-        .session_terminal(&authority)
-        .map_err(|error| SessionError::Persistence {
-            what: format!("snapshot-freeze terminal lookup failed: {error}"),
-        })?;
+    let existing =
+        ledger
+            .session_terminal(&authority)
+            .map_err(|error| SessionError::Persistence {
+                what: format!("snapshot-freeze terminal lookup failed: {error}"),
+            })?;
     if let Some(existing) = existing {
         if existing.receipt != terminal_bytes {
             return Err(SessionError::IndeterminateMutation {
@@ -265,11 +265,6 @@ fn freeze_authority_preimage(freeze: &fs_exec::freeze::SnapshotFreezeReceipt) ->
     preimage.extend_from_slice(freeze.sealed_content_id());
     preimage.extend_from_slice(freeze.payload_commitment());
     preimage.extend_from_slice(&freeze.drained_run().to_le_bytes());
-    preimage.extend_from_slice(
-        &freeze
-            .binding()
-            .solver_instance_generation
-            .to_le_bytes(),
-    );
+    preimage.extend_from_slice(&freeze.binding().solver_instance_generation.to_le_bytes());
     preimage
 }

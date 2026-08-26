@@ -32,9 +32,9 @@
 // Boxing them would erase that contract for a lint-size heuristic, so the
 // large-Err warning is waived crate-wide by design.
 #![allow(clippy::result_large_err)]
+pub mod field_registry;
 mod isosurface;
 mod scalar_field;
-pub mod field_registry;
 pub mod vtu;
 pub mod xdmf;
 

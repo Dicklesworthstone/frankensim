@@ -1,6 +1,12 @@
 //! Fixed, typed invocation plan for the as-built scientific transaction.
 
-use super::*;
+use super::{
+    AS_BUILT_ASSIMILATION_BOUNDS, AS_BUILT_ASSIMILATION_PARAMETER, AS_BUILT_CALIBRATION_CANDIDATE,
+    AS_BUILT_DESIGN_POINTS, AS_BUILT_DESIGN_TOLERANCE, AS_BUILT_EVIDENCE_IDENTITY,
+    AS_BUILT_MEASUREMENT_NOISE, AS_BUILT_PRIOR_MEAN, AS_BUILT_STAGE, ContentHash, DiffRealError,
+    DiffRealExecutionIdentity, as_built_observations, encode_execution_identity, hash_domain,
+    push_identity_f64, push_identity_str,
+};
 
 pub(super) const AS_BUILT_INVOCATION_POLICY: &str = "fs-diffreal-e2e/as-built-invocation-budget/v1";
 
@@ -214,13 +220,13 @@ impl AsBuiltInvocationPlan {
             && children[0].direct_consumed() == setup.consumed
             && children[0].direct_memory_peak_bytes() == setup.memory
             && children[0].memory_peak_bytes() == transaction_memory_peak
-            && children[0].memory_requested_bytes() == setup.memory as u128
-            && children[0].memory_released_bytes() == setup.memory as u128
+            && children[0].memory_requested_bytes() == u128::from(setup.memory)
+            && children[0].memory_released_bytes() == u128::from(setup.memory)
             && children[0].output_retained_bytes() == 0
             && receipt.remaining() == expected_remaining
             && receipt.memory_peak_bytes() == transaction_memory_peak
-            && receipt.memory_requested_bytes() == requested_memory as u128
-            && receipt.memory_released_bytes() == requested_memory as u128
+            && receipt.memory_requested_bytes() == u128::from(requested_memory)
+            && receipt.memory_released_bytes() == u128::from(requested_memory)
             && receipt.output_retained_bytes() == retained_output
     }
 }
@@ -250,8 +256,8 @@ fn leaf_evidence_matches(child: &fs_exec::ChildReceipt, expected: ExpectedLeafEv
         && child.direct_consumed() == expected.consumed
         && child.direct_memory_peak_bytes() == expected.memory
         && child.memory_peak_bytes() == expected.memory
-        && child.memory_requested_bytes() == expected.memory as u128
-        && child.memory_released_bytes() == expected.memory as u128
+        && child.memory_requested_bytes() == u128::from(expected.memory)
+        && child.memory_released_bytes() == u128::from(expected.memory)
         && child.output_retained_bytes() == expected.consumed.output().get()
 }
 

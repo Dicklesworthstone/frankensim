@@ -644,10 +644,13 @@ fn gray_diffuse_outer_fixed_point_couples_two_conduction_slabs() {
     let solution = with_cx(|cx| {
         solve_with_gray_diffuse_enclosure(
             cx,
-            ConductionProblem { element_materials: None, mesh: &mesh,
-            boundary: &boundary,
-            material: &material,
-            source: &source, },
+            ConductionProblem {
+                element_materials: None,
+                mesh: &mesh,
+                boundary: &boundary,
+                material: &material,
+                source: &source,
+            },
             None,
             &enclosure,
             config(),
@@ -745,10 +748,13 @@ fn gray_diffuse_outer_fixed_point_refuses_an_exhausted_budget() {
     let refusal = with_cx(|cx| {
         solve_with_gray_diffuse_enclosure(
             cx,
-            ConductionProblem { element_materials: None, mesh: &mesh,
-            boundary: &boundary,
-            material: &material,
-            source: &source, },
+            ConductionProblem {
+                element_materials: None,
+                mesh: &mesh,
+                boundary: &boundary,
+                material: &material,
+                source: &source,
+            },
             None,
             &enclosure,
             config(),
@@ -781,10 +787,13 @@ fn radiation_overlay_refuses_a_preexisting_robin_row() {
     let refusal = with_cx(|cx| {
         solve_with_gray_diffuse_enclosure(
             cx,
-            ConductionProblem { element_materials: None, mesh: &mesh,
-            boundary: &boundary,
-            material: &material,
-            source: &source, },
+            ConductionProblem {
+                element_materials: None,
+                mesh: &mesh,
+                boundary: &boundary,
+                material: &material,
+                source: &source,
+            },
             None,
             &enclosure,
             config(),

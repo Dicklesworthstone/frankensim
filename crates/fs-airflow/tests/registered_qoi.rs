@@ -12,8 +12,8 @@
 //! - Bit-identical deterministic replay.
 
 use fs_airflow::qoi::{
-    FanPowerSpec, JunctionRegion, SafetyFactorAuthority, SurfaceRegion,
-    ThermalQoiDeclarations, ThermalRequirement,
+    FanPowerSpec, JunctionRegion, SafetyFactorAuthority, SurfaceRegion, ThermalQoiDeclarations,
+    ThermalRequirement,
 };
 use fs_airflow::registered_qoi::{
     OutputKind, OutputQuery, QoiExecutionLimits, QoiSemanticId, RegisteredQoiError,
@@ -204,15 +204,27 @@ fn rq_001_extracts_all_canonical_qoi_families() {
         assert_eq!(receipt.rows.len(), 7);
 
         // Verify values
-        let jm = receipt.rows.iter().find(|r| r.semantic_id == QoiSemanticId::JunctionMaximum).unwrap();
-        assert_eq!(jm.value, 360.0);
+        let jm = receipt
+            .rows
+            .iter()
+            .find(|r| r.semantic_id == QoiSemanticId::JunctionMaximum)
+            .unwrap();
+        assert_eq!(jm.value.to_bits(), 360.0f64.to_bits());
         assert_eq!(jm.units, "kelvin");
         assert_eq!(jm.tie_witness_vertex, Some(6)); // tie-break picks lowest index between 6 and 7
 
-        let margin = receipt.rows.iter().find(|r| r.semantic_id == QoiSemanticId::ThermalMargin).unwrap();
-        assert_eq!(margin.value, 20.0); // 380.0 - 360.0
+        let margin = receipt
+            .rows
+            .iter()
+            .find(|r| r.semantic_id == QoiSemanticId::ThermalMargin)
+            .unwrap();
+        assert_eq!(margin.value.to_bits(), 20.0f64.to_bits()); // 380.0 - 360.0
 
-        let pd = receipt.rows.iter().find(|r| r.semantic_id == QoiSemanticId::PressureDrop).unwrap();
+        let pd = receipt
+            .rows
+            .iter()
+            .find(|r| r.semantic_id == QoiSemanticId::PressureDrop)
+            .unwrap();
         assert!(pd.value > 0.0);
         assert_eq!(pd.units, "pascal");
     });
@@ -250,7 +262,10 @@ fn rq_002_query_aliases_map_deterministically() {
 
         assert_eq!(receipt.rows.len(), 4);
         assert_eq!(receipt.rows[0].semantic_id, QoiSemanticId::JunctionMaximum);
-        assert_eq!(receipt.rows[1].semantic_id, QoiSemanticId::SurfaceMeanTemperature);
+        assert_eq!(
+            receipt.rows[1].semantic_id,
+            QoiSemanticId::SurfaceMeanTemperature
+        );
         assert_eq!(receipt.rows[2].semantic_id, QoiSemanticId::PressureDrop);
         assert_eq!(receipt.rows[3].semantic_id, QoiSemanticId::ThermalMargin);
     });
@@ -338,7 +353,10 @@ fn rq_004_duplicate_queries_and_unsupported_names_refuse() {
             QoiExecutionLimits::default(),
             cx,
         );
-        assert!(matches!(res_dup, Err(RegisteredQoiError::DuplicateQuery { .. })));
+        assert!(matches!(
+            res_dup,
+            Err(RegisteredQoiError::DuplicateQuery { .. })
+        ));
 
         // Unsupported name
         let unk_queries = vec![OutputQuery::scalar("unsupported_acoustic_noise")];
@@ -372,11 +390,19 @@ fn rq_005_work_and_memory_limit_guards_enforce_preflight() {
 
         let queries = vec![OutputQuery::scalar("junction_temp")];
 
-        let mut tight_limits = QoiExecutionLimits::default();
-        tight_limits.max_elements = 1; // mesh has 6 elements
+        let tight_limits = QoiExecutionLimits {
+            max_elements: 1, // mesh has 6 elements
+            max_vertices: 5_000_000,
+            max_queries: 1_000,
+            max_memory_bytes: 512 * 1024 * 1024,
+        };
 
-        let res = extract_registered_qois(&queries, &mesh, &solution, &op, &decls, tight_limits, cx);
-        assert!(matches!(res, Err(RegisteredQoiError::WorkLimitExceeded { .. })));
+        let res =
+            extract_registered_qois(&queries, &mesh, &solution, &op, &decls, tight_limits, cx);
+        assert!(matches!(
+            res,
+            Err(RegisteredQoiError::WorkLimitExceeded { .. })
+        ));
     });
 }
 

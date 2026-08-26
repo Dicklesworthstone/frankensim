@@ -14,7 +14,9 @@ fn data_dir() -> PathBuf {
 }
 
 fn registry() -> serde_free::Registry {
-    serde_free::parse(&fs::read_to_string(data_dir().join("evidence-registry-freeze-v1.json")).unwrap())
+    serde_free::parse(
+        &fs::read_to_string(data_dir().join("evidence-registry-freeze-v1.json")).unwrap(),
+    )
 }
 
 /// Minimal dependency-free JSON field extraction for the two structures
@@ -51,7 +53,11 @@ mod serde_free {
                 .unwrap_or_default()
                 .to_string()
         };
-        Registry { files, status: field("status"), decision: field("decision") }
+        Registry {
+            files,
+            status: field("status"),
+            decision: field("decision"),
+        }
     }
 }
 
@@ -59,7 +65,11 @@ mod serde_free {
 fn every_frozen_artifact_hash_matches_disk() {
     let reg = registry();
     assert_eq!(reg.status, "FROZEN");
-    assert_eq!(reg.files.len(), 8, "the freeze covers exactly the eight evidence artifacts");
+    assert_eq!(
+        reg.files.len(),
+        8,
+        "the freeze covers exactly the eight evidence artifacts"
+    );
     let mut receipts = Vec::new();
     let mut mismatches = Vec::new();
     for (name, pinned) in &reg.files {

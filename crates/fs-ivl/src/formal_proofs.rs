@@ -4,9 +4,7 @@
 //! Binds the Coq / Flocq machine-checked formal proof sources to verification
 //! receipts, validating theorem status, assumption inventories, and toolchain locks.
 
-use crate::formal_manifest::{
-    FormalProofManifest, ManifestFingerprint, FROZEN_FORMAL_MANIFEST,
-};
+use crate::formal_manifest::{FROZEN_FORMAL_MANIFEST, FormalProofManifest, ManifestFingerprint};
 
 /// Proof verification status for a single formal theorem.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

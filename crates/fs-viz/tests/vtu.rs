@@ -40,7 +40,13 @@ fn test_vtu_basic_tetra_ascii_roundtrip() {
         .iter()
         .find(|(name, _)| name == "Temperature")
         .expect("temperature in report");
-    assert_eq!(temp_extrema.1, [300.0, 350.0]);
+    let arr_eq_bits = |a: &[f64], b: &[f64]| {
+        a.len() == b.len()
+            && a.iter()
+                .zip(b.iter())
+                .all(|(x, y)| x.to_bits() == y.to_bits())
+    };
+    assert!(arr_eq_bits(&temp_extrema.1, &[300.0, 350.0]));
 
     // Independent readback
     let parsed_grid = VtuChecker::parse_ascii(&xml).expect("parse grid");
@@ -57,7 +63,10 @@ fn test_vtu_determinism_same_input() {
     let p2 = grid1.add_point(0.0, 1.0, 0.0);
     let p3 = grid1.add_point(0.0, 0.0, 1.0);
     grid1.add_tetra(p0, p1, p2, p3);
-    grid1.add_array(DataArray::new_point_scalar("Temperature", vec![300.0, 310.0, 320.0, 350.0]));
+    grid1.add_array(DataArray::new_point_scalar(
+        "Temperature",
+        vec![300.0, 310.0, 320.0, 350.0],
+    ));
 
     let mut grid2 = UnstructuredGrid::new();
     let q0 = grid2.add_point(0.0, 0.0, 0.0);
@@ -65,7 +74,10 @@ fn test_vtu_determinism_same_input() {
     let q2 = grid2.add_point(0.0, 1.0, 0.0);
     let q3 = grid2.add_point(0.0, 0.0, 1.0);
     grid2.add_tetra(q0, q1, q2, q3);
-    grid2.add_array(DataArray::new_point_scalar("Temperature", vec![300.0, 310.0, 320.0, 350.0]));
+    grid2.add_array(DataArray::new_point_scalar(
+        "Temperature",
+        vec![300.0, 310.0, 320.0, 350.0],
+    ));
 
     let xml1 = VtuWriter::write_ascii(&grid1).unwrap();
     let xml2 = VtuWriter::write_ascii(&grid2).unwrap();
@@ -115,7 +127,10 @@ fn test_vtu_validation_failures() {
     let p0 = nan_field_grid.add_point(0.0, 0.0, 0.0);
     let p1 = nan_field_grid.add_point(1.0, 0.0, 0.0);
     nan_field_grid.add_cell(CellType::Line, &[p0, p1]);
-    nan_field_grid.add_array(DataArray::new_point_scalar("Temperature", vec![300.0, f64::INFINITY]));
+    nan_field_grid.add_array(DataArray::new_point_scalar(
+        "Temperature",
+        vec![300.0, f64::INFINITY],
+    ));
     assert!(matches!(
         nan_field_grid.validate(),
         Err(VtuError::NonFiniteFieldValue { .. })
@@ -130,7 +145,10 @@ fn test_xdmf_export_and_binary_companion() {
     let p2 = grid.add_point(0.0, 1.0, 0.0);
     let p3 = grid.add_point(0.0, 0.0, 1.0);
     grid.add_tetra(p0, p1, p2, p3);
-    grid.add_array(DataArray::new_point_scalar("Temperature", vec![300.0, 310.0, 320.0, 350.0]));
+    grid.add_array(DataArray::new_point_scalar(
+        "Temperature",
+        vec![300.0, 310.0, 320.0, 350.0],
+    ));
 
     let (xmf, bin) = XdmfWriter::write_xdmf_with_binary(&grid, "mesh.bin").expect("write XDMF");
     assert!(xmf.contains("<Xdmf Version=\"3.0\">"));

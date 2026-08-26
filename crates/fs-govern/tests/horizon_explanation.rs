@@ -3,9 +3,8 @@
 //! explanation objects.
 
 use fs_govern::horizon_explanation::{
-    evaluate_trigger_b, mint_trigger_b_receipt, ExplanationCase, ExplanationDisposition,
-    OperatorMode, TriggerBReceipt, TriggerBRefusal, TriggerBVerdict,
-    MAX_RECONCILIATION_FAILURE_RATE,
+    ExplanationCase, ExplanationDisposition, MAX_RECONCILIATION_FAILURE_RATE, OperatorMode,
+    TriggerBReceipt, TriggerBRefusal, TriggerBVerdict, evaluate_trigger_b, mint_trigger_b_receipt,
 };
 
 fn passing_case(id: &str) -> ExplanationCase {

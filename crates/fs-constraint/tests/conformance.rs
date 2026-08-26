@@ -16,8 +16,8 @@ use asupersync::types::Budget;
 use fs_constraint::{
     ChanceEstimator, ChanceEvalError, ChanceWorkPlan, ConError, ConstraintKind, ConstraintSpec,
     Diagnosis, DomainBox, DomainError, DomainRangeError, ElasticReport, PenaltyLaw, ProofKind,
-    RepairAction, RepairKind, RestorationError, RestorationMemoryAuthority,
-    RestorationWorkReceipt, Status, Treatment, diagnose_infeasibility, elastic_solve, evaluate,
+    RepairAction, RepairKind, RestorationError, RestorationMemoryAuthority, RestorationWorkReceipt,
+    Status, Treatment, diagnose_infeasibility, elastic_solve, evaluate,
     evaluate_chance_with_budget, interval_eval, parse_specs, prove_interval, serialize_specs,
 };
 use fs_exec::{CancelGate, Cx, ExecMode, StreamKey};
@@ -399,8 +399,7 @@ fn evaluate_admits_the_single_rn_host_before_graph_or_noise_work() {
         let problem = problem_with(&[manifold]);
         let error =
             with_cx(|cx| evaluate_chance_with_budget(&problem, &spec, &point, &noise, plan, cx))
-                .err()
-                .expect("non-Euclidean host must refuse");
+                .expect_err("non-Euclidean host must refuse");
         assert_eq!(
             error,
             ChanceEvalError::Invalid(ConError::InvalidDomain(DomainError::HostVariableManifold {
@@ -413,8 +412,7 @@ fn evaluate_admits_the_single_rn_host_before_graph_or_noise_work() {
     let multi = problem_with(&[Manifold::Rn { dim: 1 }, Manifold::Rn { dim: 1 }]);
     let error =
         with_cx(|cx| evaluate_chance_with_budget(&multi, &spec, &[0.0, 0.0], &noise, plan, cx))
-            .err()
-            .expect("multi-variable host must refuse");
+            .expect_err("multi-variable host must refuse");
     assert_eq!(
         error,
         ChanceEvalError::Invalid(ConError::InvalidDomain(DomainError::HostVariableCount {
@@ -425,8 +423,7 @@ fn evaluate_admits_the_single_rn_host_before_graph_or_noise_work() {
 
     let rn = problem_with(&[Manifold::Rn { dim: 2 }]);
     let error = with_cx(|cx| evaluate_chance_with_budget(&rn, &spec, &[0.0], &noise, plan, cx))
-        .err()
-        .expect("short Rn point must refuse");
+        .expect_err("short Rn point must refuse");
     assert_eq!(
         error,
         ChanceEvalError::Invalid(ConError::InvalidDomain(DomainError::DimensionMismatch {

@@ -37,14 +37,15 @@ fn rans_solver_converges_channel_flow() {
     let mut state = RansFieldState::new_initial(&grid, 1.0, 300.0);
 
     let report = solver
-        .solve(
-            &grid, &mut state, -10.0, 1000.0, None, None, 50, 1e-4,
-        )
+        .solve(&grid, &mut state, -10.0, 1000.0, None, None, 50, 1e-4)
         .expect("solves without divergence");
 
     assert!(report.iterations > 0);
     assert!(report.final_momentum_residual < 1.0);
-    assert!(state.temp_k[0] > 300.0, "wall temperature should rise due to heat flux");
+    assert!(
+        state.temp_k[0] > 300.0,
+        "wall temperature should rise due to heat flux"
+    );
 }
 
 #[test]
@@ -54,9 +55,7 @@ fn porous_medium_decelerates_flow() {
     let grid = RansChannelGrid::new_stretched(16, 0.01, 1.1);
 
     let mut state_clear = RansFieldState::new_initial(&grid, 1.0, 300.0);
-    let _ = solver.solve(
-        &grid, &mut state_clear, -10.0, 0.0, None, None, 30, 1e-4,
-    );
+    let _ = solver.solve(&grid, &mut state_clear, -10.0, 0.0, None, None, 30, 1e-4);
 
     let mut state_porous = RansFieldState::new_initial(&grid, 1.0, 300.0);
     let porous = PorousFinSink {
@@ -65,7 +64,14 @@ fn porous_medium_decelerates_flow() {
         forchheimer_c_f: Some(0.5),
     };
     let _ = solver.solve(
-        &grid, &mut state_porous, -10.0, 0.0, Some(porous), None, 30, 1e-4,
+        &grid,
+        &mut state_porous,
+        -10.0,
+        0.0,
+        Some(porous),
+        None,
+        30,
+        1e-4,
     );
 
     // Centerline velocity in porous medium should be lower due to Darcy-Forchheimer drag
@@ -89,7 +95,14 @@ fn boussinesq_buoyancy_modifies_momentum() {
 
     let report = solver
         .solve(
-            &grid, &mut state, -10.0, 2000.0, None, Some(buoyancy), 100, 1e-3,
+            &grid,
+            &mut state,
+            -10.0,
+            2000.0,
+            None,
+            Some(buoyancy),
+            100,
+            1e-3,
         )
         .expect("buoyancy solve succeeds");
 

@@ -134,13 +134,16 @@ pub const FIELD_REGISTRY: &[FieldDescriptor] = &[
 /// Look up a field descriptor by its canonical name (case-insensitive).
 #[must_use]
 pub fn find_field_by_name(name: &str) -> Option<&'static FieldDescriptor> {
-    FIELD_REGISTRY
-        .iter()
-        .find(|f| f.canonical_name.eq_ignore_ascii_case(name) || f.semantic_id.eq_ignore_ascii_case(name))
+    FIELD_REGISTRY.iter().find(|f| {
+        f.canonical_name.eq_ignore_ascii_case(name) || f.semantic_id.eq_ignore_ascii_case(name)
+    })
 }
 
 /// Validate whether an output request matches the field registry.
-pub fn validate_output_request(name: &str, format: ExportFormat) -> Result<&'static FieldDescriptor, String> {
+pub fn validate_output_request(
+    name: &str,
+    format: ExportFormat,
+) -> Result<&'static FieldDescriptor, String> {
     let desc = find_field_by_name(name)
         .ok_or_else(|| format!("unknown output field `{name}`; see FIELD_REGISTRY"))?;
     if !desc.allowed_formats.contains(&format) {

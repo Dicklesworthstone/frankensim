@@ -39,7 +39,6 @@ pub mod production_coupling;
 #[cfg(feature = "scientific-contract")]
 pub mod protocol;
 pub mod reduced_decay;
-pub mod report;
 #[cfg(feature = "render-checkpoint-ledger")]
 pub mod render_checkpoint;
 pub mod render_motion_bridge;
@@ -49,6 +48,7 @@ pub mod render_scene_bridge;
 pub mod render_sharding;
 pub mod render_trajectory;
 pub mod render_trajectory_codec;
+pub mod report;
 pub mod rolling_contact;
 #[cfg(feature = "cinematic-render")]
 pub mod scientific_overlay;

@@ -9,11 +9,11 @@
 
 use fs_blake3::hash_bytes;
 use fs_la::canonical_qr::{PolicyError, RankTolerance};
-use fs_la::canonical_tree_gauge::{
-    adjudicate_family, tree_gauge_obstruction, ActivationCriteria, ArbitraryTreeGauge,
-    EscalationLadder, GaugeBlocker,
-};
 use fs_la::canonical_tree::CancelScope;
+use fs_la::canonical_tree_gauge::{
+    ActivationCriteria, ArbitraryTreeGauge, EscalationLadder, GaugeBlocker, adjudicate_family,
+    tree_gauge_obstruction,
+};
 
 fn dep(m: usize) -> Vec<f64> {
     let n = 3usize;
@@ -32,7 +32,9 @@ fn full(m: usize) -> Vec<f64> {
     let mut s = 9001u64 | 1;
     let mut a = vec![0.0; m * n];
     for v in a.iter_mut() {
-        s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        s = s
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         *v = ((s >> 11) as f64) / ((1u64 << 53) as f64);
     }
     for i in 0..n {
@@ -106,11 +108,11 @@ fn counterexample_kills_activation_regardless_of_other_criteria() {
         falsifier_corpus_digest: Some(hash_bytes(b"corpus")),
         confirmed_counterexample: Some(hash_bytes(b"counterexample")),
     };
-        assert!(matches!(
-            criteria.satisfied(),
-            Err(GaugeBlocker::KilledByCounterexample(d)) if d == hash_bytes(b"counterexample")
-        ));
-    }
+    assert!(matches!(
+        criteria.satisfied(),
+        Err(GaugeBlocker::KilledByCounterexample(d)) if d == hash_bytes(b"counterexample")
+    ));
+}
 
 // ---------------------------------------------------------------------------
 // Feature gate freeze: current() is disabled; revision 0 has no enable path.
@@ -127,7 +129,10 @@ fn feature_gate_cannot_enable_at_revision_zero() {
         falsifier_corpus_digest: Some(hash_bytes(b"f")),
         confirmed_counterexample: None,
     };
-    assert!(satisfied.satisfied().is_ok(), "criteria can be satisfiable...");
+    assert!(
+        satisfied.satisfied().is_ok(),
+        "criteria can be satisfiable..."
+    );
     assert!(!g.is_enabled(), "...but the shipped gate stays frozen");
 }
 

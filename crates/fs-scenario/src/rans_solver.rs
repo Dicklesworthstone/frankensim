@@ -151,9 +151,9 @@ impl RansSolver {
             card,
             coeffs: LaunderSharmaCoefficients::launder_sharma_1974(),
             nu_laminar: 1.5e-5, // Air at room temp m²/s
-            rho: 1.2,          // kg/m³
-            cp: 1005.0,        // J/(kg*K)
-            k_thermal: 0.026,  // W/(m*K)
+            rho: 1.2,           // kg/m³
+            cp: 1005.0,         // J/(kg*K)
+            k_thermal: 0.026,   // W/(m*K)
             pr_turbulent: 0.85,
         }
     }
@@ -186,7 +186,8 @@ impl RansSolver {
                 let y = grid.y_nodes[i];
                 let re_y = (state.k[i].sqrt() * y) / (self.nu_laminar + 1e-12);
                 let f_mu = (-3.4 / (1.0 + re_y / 50.0).powi(2)).exp();
-                state.nu_t[i] = self.coeffs.c_mu * f_mu * (state.k[i] * state.k[i]) / (state.eps[i] + 1e-12);
+                state.nu_t[i] =
+                    self.coeffs.c_mu * f_mu * (state.k[i] * state.k[i]) / (state.eps[i] + 1e-12);
             }
 
             // 2. Momentum equation with optional porous sink & buoyancy
@@ -197,7 +198,8 @@ impl RansSolver {
                 let dy_avg = 0.5 * (dy_m + dy_p);
 
                 let nu_eff = self.nu_laminar + state.nu_t[i];
-                let d2u_dy2 = (state.u[i + 1] - 2.0 * state.u[i] + state.u[i - 1]) / (dy_avg * dy_avg);
+                let d2u_dy2 =
+                    (state.u[i + 1] - 2.0 * state.u[i] + state.u[i - 1]) / (dy_avg * dy_avg);
 
                 let mut source = -dp_dx / self.rho;
 
@@ -245,8 +247,10 @@ impl RansSolver {
                 let dy_p = grid.y_nodes[i + 1] - grid.y_nodes[i];
                 let dy_avg = 0.5 * (dy_m + dy_p);
 
-                let alpha_eff = (self.k_thermal / (self.rho * self.cp)) + (state.nu_t[i] / self.pr_turbulent);
-                let d2t_dy2 = (state.temp_k[i + 1] - 2.0 * state.temp_k[i] + state.temp_k[i - 1]) / (dy_avg * dy_avg);
+                let alpha_eff =
+                    (self.k_thermal / (self.rho * self.cp)) + (state.nu_t[i] / self.pr_turbulent);
+                let d2t_dy2 = (state.temp_k[i + 1] - 2.0 * state.temp_k[i] + state.temp_k[i - 1])
+                    / (dy_avg * dy_avg);
                 let t_new = state.temp_k[i] + 0.01 * alpha_eff * d2t_dy2;
                 max_t_delta = max_t_delta.max((t_new - state.temp_k[i]).abs());
                 state.temp_k[i] = t_new;

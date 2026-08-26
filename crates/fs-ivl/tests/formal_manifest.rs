@@ -8,8 +8,8 @@
 //! - Mutation and refusal tests on corrupted manifests
 
 use fs_ivl::formal_manifest::{
-    FormalProofManifest, FROZEN_FORMAL_MANIFEST, FROZEN_MINIMUM_THEOREMS, FROZEN_PROOF_TCB,
-    FROZEN_RESIDUAL_NO_CLAIMS, FROZEN_STRETCH_THEOREMS,
+    FROZEN_FORMAL_MANIFEST, FROZEN_MINIMUM_THEOREMS, FROZEN_PROOF_TCB, FROZEN_RESIDUAL_NO_CLAIMS,
+    FROZEN_STRETCH_THEOREMS, FormalProofManifest,
 };
 
 #[test]
@@ -39,7 +39,10 @@ fn manifest_content_hash_is_deterministic_and_non_empty() {
 
 #[test]
 fn tcb_specification_is_complete_and_names_ieee_model() {
-    assert!(FROZEN_PROOF_TCB.proof_vehicle.contains("Flocq") || FROZEN_PROOF_TCB.proof_vehicle.contains("Coq"));
+    assert!(
+        FROZEN_PROOF_TCB.proof_vehicle.contains("Flocq")
+            || FROZEN_PROOF_TCB.proof_vehicle.contains("Coq")
+    );
     assert!(FROZEN_PROOF_TCB.ieee_model_ref.contains("IEEE 754"));
     assert!(!FROZEN_PROOF_TCB.trusted_axioms.is_empty());
     assert!(!FROZEN_PROOF_TCB.extraction_boundary.is_empty());

@@ -20,11 +20,11 @@ pub mod pce;
 pub mod product_plan;
 pub mod seismic;
 
-pub use product_plan::{
-    CorrelationModel, ParameterUncertainty, PropagationMethod, UqPlan, UqPropagator, UqResult,
-    UqStatus, UncertaintyKind,
-};
 pub use fs_robust::{EmpiricalCvarReport, RobustError, cvar, empirical_cvar};
+pub use product_plan::{
+    CorrelationModel, ParameterUncertainty, PropagationMethod, UncertaintyKind, UqPlan,
+    UqPropagator, UqResult, UqStatus,
+};
 
 pub use adaptive::{AdaptiveReport, adaptive_mlmc};
 pub use anytime::{AnytimeEstimate, estimate_probability_anytime};

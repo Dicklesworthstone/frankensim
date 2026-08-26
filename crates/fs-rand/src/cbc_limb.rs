@@ -79,13 +79,7 @@ impl LimbCursor {
     /// `grow_to` semantics.
     #[must_use]
     #[allow(clippy::too_many_arguments)]
-    pub fn begin_add_multiply(
-        src_len: usize,
-        factor_len: usize,
-        dst_len: usize,
-        fill_to: usize,
-        grow_to: usize,
-    ) -> Self {
+    pub fn begin_add_multiply(dst_len: usize, fill_to: usize, grow_to: usize) -> Self {
         let kind = if dst_len < fill_to {
             ExactOpKind::ZeroFill
         } else {
@@ -295,8 +289,7 @@ mod limb_kernel_tests {
         let needed = src.len() + flen + 1;
         let mut dst: Vec<u32> = Vec::new();
         dst.reserve_exact(needed);
-        let mut cursor =
-            LimbCursor::begin_add_multiply(src.len(), flen, dst.len(), needed, usize::MAX);
+        let mut cursor = LimbCursor::begin_add_multiply(dst.len(), needed, usize::MAX);
         loop {
             match step_add_multiply(&mut dst, src, &words, flen, &mut cursor, split) {
                 (StepOutcome::Advanced { .. }, _) => {}
@@ -315,7 +308,7 @@ mod limb_kernel_tests {
             (&[7_u32, 0, u32::MAX][..], u128::from(u32::MAX)),
             (&[1_u32][..], 1_u128),
             (&[0_u32, 5][..], 0_u128),
-            (&[u32::MAX; 4][..], u64::MAX as u128),
+            (&[u32::MAX; 4][..], u128::from(u64::MAX)),
         ] {
             let expected_full = run_sliced(src_words, factor, usize::MAX);
             for split in [1_usize, 2, 3, 7] {
@@ -340,7 +333,7 @@ mod limb_kernel_tests {
         let mut acc: Vec<u32> = vec![u32::MAX - 1, u32::MAX, 5];
         let cap = acc.len();
         let (words, flen) = factor_limbs_u32(1);
-        let mut cursor = LimbCursor::begin_add_multiply(1, flen, acc.len(), 1 + flen + 1, cap);
+        let mut cursor = LimbCursor::begin_add_multiply(acc.len(), 1 + flen + 1, cap);
         loop {
             match step_add_multiply(&mut acc, &[2], &words, flen, &mut cursor, 1) {
                 (StepOutcome::Complete { .. }, _) => break,

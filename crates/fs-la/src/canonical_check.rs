@@ -24,12 +24,11 @@
 //! the evidence supports, ambiguity never becomes canonicality, and a
 //! missing obligation is a refusal — never a favorable default.
 
-use crate::canonical_qr::{
-    CanonicalQrOutcome, CanonicalQrPolicy, ClaimTier, OutcomeAuthority, PivotClass,
-    PolicyError,
-};
 use crate::canonical_qr::CANONICAL_QR_IDENTITY_DOMAIN;
-use fs_blake3::{hash_bytes, ContentHash, DomainHasher};
+use crate::canonical_qr::{
+    CanonicalQrOutcome, CanonicalQrPolicy, ClaimTier, OutcomeAuthority, PivotClass, PolicyError,
+};
+use fs_blake3::{ContentHash, DomainHasher, hash_bytes};
 
 /// Stable checker implementation identity (part of every receipt).
 pub const CHECKER_IMPLEMENTATION_TAG: &str = "fs-la.canonical-check.v1";
@@ -38,13 +37,28 @@ pub const CHECKER_IMPLEMENTATION_TAG: &str = "fs-la.canonical-check.v1";
 #[derive(Debug, Clone, PartialEq)]
 pub enum CheckRecord {
     /// RᵀR == AᵀA within the policy budget (relative Frobenius error).
-    Reconstruction { observed_rel_err: f64, budget: f64 },
+    Reconstruction {
+        /// Checker-measured relative reconstruction error (unitless).
+        observed_rel_err: f64,
+        /// Inclusive upper bound applied to `observed_rel_err` (unitless).
+        budget: f64,
+    },
     /// Upper triangularity + flip law (no strictly-negative diagonals).
     FactorShape,
     /// Independent recomputation agrees on the rank profile classification.
-    RankProfile { producer_rank: usize, checker_rank: usize },
+    RankProfile {
+        /// Rank headline carried by the outcome under judgment.
+        producer_rank: usize,
+        /// Rank recounted from the checker's own independent factor.
+        checker_rank: usize,
+    },
     /// Full-column-rank tier T2: independent factor agrees within tolerance.
-    FullRankFactorAgreement { observed_rel_err: f64, budget: f64 },
+    FullRankFactorAgreement {
+        /// Relative elementwise deviation between checker and producer factors.
+        observed_rel_err: f64,
+        /// Inclusive T2 agreement bound applied to `observed_rel_err`.
+        budget: f64,
+    },
     /// Identity binding: result digest recomputed over the canonical
     /// encoding matches the outcome's settled digest.
     ResultDigestBinding,
@@ -56,16 +70,68 @@ pub enum CheckRecord {
 /// carries the checker's own derived value where meaningful.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Refusal {
-    ShapeMismatch { expected_len: usize, got_len: usize },
-    NotUpperTriangular { row: usize, col: usize },
-    StrictlyNegativeDiagonal { index: usize },
-    NonFiniteEntry { index: usize },
-    ReconstructionExceeded { expected_bound: f64, observed: f64 },
-    RankProfileDisagrees { producer: usize, checker: usize },
-    PivotClassMismatch { position: usize },
-    FactorAgreementExceeded { expected_bound: f64, observed: f64 },
-    DigestMismatch { stage: &'static str },
-    StaleVersion { field: &'static str },
+    /// Input length disagrees with the m*n entries demanded by shape.
+    ShapeMismatch {
+        /// Expected element count m*n (`usize::MAX` when that overflows).
+        expected_len: usize,
+        /// Observed element count.
+        got_len: usize,
+    },
+    /// R holds a nonzero entry strictly below the diagonal.
+    NotUpperTriangular {
+        /// Row index of the offending entry in the n x n factor.
+        row: usize,
+        /// Column index of the offending entry in the n x n factor.
+        col: usize,
+    },
+    /// A diagonal pivot of R is strictly negative (flip law violated).
+    StrictlyNegativeDiagonal {
+        /// Diagonal index of the offending pivot.
+        index: usize,
+    },
+    /// The factor contains a non-finite value under judgment.
+    NonFiniteEntry {
+        /// Row-major linear index of the non-finite element.
+        index: usize,
+    },
+    /// Independent reconstruction error exceeded its budget.
+    ReconstructionExceeded {
+        /// The budget bound that was applied (unitless).
+        expected_bound: f64,
+        /// The observed relative error (unitless).
+        observed: f64,
+    },
+    /// Checker-recounted rank differs from the producer's headline rank.
+    RankProfileDisagrees {
+        /// Rank claimed by the outcome's profile.
+        producer: usize,
+        /// Rank independently recounted by the checker.
+        checker: usize,
+    },
+    /// An independent pivot classification disagrees at this position.
+    PivotClassMismatch {
+        /// Diagonal index of the disagreeing pivot.
+        position: usize,
+    },
+    /// Independent full-rank factor agreement exceeded its T2 budget.
+    FactorAgreementExceeded {
+        /// The T2 bound that was applied (unitless).
+        expected_bound: f64,
+        /// The observed relative deviation between factors (unitless).
+        observed: f64,
+    },
+    /// A settled digest does not match its recomputation over the canonical
+    /// encoding.
+    DigestMismatch {
+        /// Canonical name of the binding stage that failed (e.g. "result").
+        stage: &'static str,
+    },
+    /// A version field is not current for this build.
+    StaleVersion {
+        /// Canonical name of the stale version field.
+        field: &'static str,
+    },
+    /// The recomputed raw-input digest fails identity binding.
     InputDigestMismatch,
 }
 
@@ -75,8 +141,11 @@ pub enum Refusal {
 /// certificate_ref`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct CheckerReceipt {
+    /// Final tier outcome of the check pass.
     pub verdict: Verdict,
+    /// Per-obligation records retained as seal evidence, in check order.
     pub records: Vec<CheckRecord>,
+    /// Domain-separated hash binding checker tag, verdict, and records.
     pub digest: ContentHash,
 }
 
@@ -110,7 +179,11 @@ impl CheckerReceipt {
     #[must_use]
     pub fn mint(verdict: Verdict, records: Vec<CheckRecord>) -> Self {
         let digest = Self::seal(&verdict, &records);
-        Self { verdict, records, digest }
+        Self {
+            verdict,
+            records,
+            digest,
+        }
     }
 }
 
@@ -134,7 +207,9 @@ fn verdict_tag(v: &Verdict) -> [u8; 33] {
 }
 
 fn record_tag(r: &CheckRecord) -> [u8; 32] {
-    hash_bytes(format!("{r:?}").as_bytes()).as_bytes().to_owned()
+    hash_bytes(format!("{r:?}").as_bytes())
+        .as_bytes()
+        .to_owned()
 }
 
 // ---------------------------------------------------------------------------
@@ -272,7 +347,10 @@ pub fn check_outcome(
     let mut records = Vec::new();
     let Some(entries) = m.checked_mul(n) else {
         return Ok(CheckerReceipt::mint(
-            Verdict::Demoted(Refusal::ShapeMismatch { expected_len: usize::MAX, got_len: a.len() }),
+            Verdict::Demoted(Refusal::ShapeMismatch {
+                expected_len: usize::MAX,
+                got_len: a.len(),
+            }),
             records,
         ));
     };
@@ -323,16 +401,24 @@ pub fn check_outcome(
     let rec_err = independent::rel_err(&rt_r, &ata);
     if !(rec_err.is_finite() && rec_err <= budget) {
         return Ok(CheckerReceipt::mint(
-            Verdict::Demoted(Refusal::ReconstructionExceeded { expected_bound: budget, observed: rec_err }),
+            Verdict::Demoted(Refusal::ReconstructionExceeded {
+                expected_bound: budget,
+                observed: rec_err,
+            }),
             records,
         ));
     }
-    records.push(CheckRecord::Reconstruction { observed_rel_err: rec_err, budget });
+    records.push(CheckRecord::Reconstruction {
+        observed_rel_err: rec_err,
+        budget,
+    });
 
     // Obligation: version coherence.
     if policy.theorem_version() != crate::canonical_qr::CANONICAL_QR_THEOREM_VERSION {
         return Ok(CheckerReceipt::mint(
-            Verdict::Demoted(Refusal::StaleVersion { field: "theorem_version" }),
+            Verdict::Demoted(Refusal::StaleVersion {
+                field: "theorem_version",
+            }),
             records,
         ));
     }
@@ -342,15 +428,24 @@ pub fn check_outcome(
     // same RELATIVE tolerance law, then compare headline ranks.
     let checker_r = independent::full_qr_r(a, m, n);
     let checker_pivots = classify_independent(&checker_r, n, &policy.rank_tolerance());
-    let checker_rank = checker_pivots.iter().filter(|p| **p == PivotClass::Nonzero).count();
+    let checker_rank = checker_pivots
+        .iter()
+        .filter(|p| **p == PivotClass::Nonzero)
+        .count();
     let producer_rank = outcome.rank_profile().rank();
     if producer_rank > n || checker_rank != producer_rank {
         return Ok(CheckerReceipt::mint(
-            Verdict::Demoted(Refusal::RankProfileDisagrees { producer: producer_rank, checker: checker_rank }),
+            Verdict::Demoted(Refusal::RankProfileDisagrees {
+                producer: producer_rank,
+                checker: checker_rank,
+            }),
             records,
         ));
     }
-    records.push(CheckRecord::RankProfile { producer_rank, checker_rank });
+    records.push(CheckRecord::RankProfile {
+        producer_rank,
+        checker_rank,
+    });
 
     // Obligation: result-digest binding. The settled replay digest must
     // equal the recomputation over the outcome's own canonical encoding.
@@ -381,7 +476,10 @@ pub fn check_outcome(
                         records,
                     ));
                 }
-                records.push(CheckRecord::FullRankFactorAgreement { observed_rel_err: agree, budget: t2_budget });
+                records.push(CheckRecord::FullRankFactorAgreement {
+                    observed_rel_err: agree,
+                    budget: t2_budget,
+                });
             }
             Ok(CheckerReceipt::mint(Verdict::Certified(tier), records))
         }
@@ -452,8 +550,10 @@ pub fn promote_full_rank_t2(
         observed_rel_err: agree,
         budget: t2_budget,
     });
-    let promoted_receipt =
-        CheckerReceipt::mint(Verdict::Certified(ClaimTier::FullRankTreeAgreement), final_records);
+    let promoted_receipt = CheckerReceipt::mint(
+        Verdict::Certified(ClaimTier::FullRankTreeAgreement),
+        final_records,
+    );
     let base_identity = super::canonical_qr::ReplayIdentity {
         input_digest: outcome.replay().input_digest,
         tree_digest: outcome.replay().tree_digest,
@@ -495,7 +595,11 @@ pub fn promote_full_rank_t2(
     Ok((promoted, promoted_receipt))
 }
 /// The checker's own classification (same relative law, own code path).
-fn classify_independent(r: &[f64], n: usize, tolerance: &crate::canonical_qr::RankTolerance) -> Vec<PivotClass> {
+fn classify_independent(
+    r: &[f64],
+    n: usize,
+    tolerance: &crate::canonical_qr::RankTolerance,
+) -> Vec<PivotClass> {
     let mut scale = 0.0f64;
     for i in 0..n {
         scale = scale.max(r[i * n + i].abs());
@@ -517,7 +621,7 @@ fn classify_independent(r: &[f64], n: usize, tolerance: &crate::canonical_qr::Ra
 mod tests {
     use super::*;
     use crate::canonical_qr::{
-        ArithmeticMode, CertifiedRankProfile, CanonicalQrPolicy, DeterminismClass, ErrorBudget,
+        ArithmeticMode, CanonicalQrPolicy, CertifiedRankProfile, DeterminismClass, ErrorBudget,
         NoClaimReason, OutcomeAuthority, PivotClass, RankTolerance, ReplayIdentity, TiePolicy,
     };
 
@@ -549,7 +653,9 @@ mod tests {
         let mut s = seed | 1;
         let mut a = vec![0.0; m * n];
         for v in a.iter_mut() {
-            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             *v = ((s >> 11) as f64) / ((1u64 << 53) as f64);
         }
         for i in 0..n {
@@ -573,18 +679,23 @@ mod tests {
             &independent::gram_rt_r(&r_prod, 3),
             &independent::gram_ata(&a, 48, 3),
         );
-        assert!(e1 < 1e-11 && e2 < 1e-11, "independent ({e1:e}) or producer ({e2:e}) invalid");
+        assert!(
+            e1 < 1e-11 && e2 < 1e-11,
+            "independent ({e1:e}) or producer ({e2:e}) invalid"
+        );
     }
 
     #[test]
     fn checker_validates_honest_no_claim_and_certifies_full_rank_t2() {
-        use crate::canonical_tree::{outcome_from_run, CancelScope, FixedTreeDriver};
+        use crate::canonical_tree::{CancelScope, FixedTreeDriver, outcome_from_run};
         let pol = policy();
 
         // Deficient fixture: honest no-claim validates.
         let a_dep = dep_matrix(48);
         let driver = FixedTreeDriver::admit(&a_dep, 48, 3, 12).expect("valid");
-        let run = driver.run(&a_dep, CancelScope::never(), None).expect("runs");
+        let run = driver
+            .run(&a_dep, CancelScope::never(), None)
+            .expect("runs");
         let outcome = outcome_from_run(&run, &a_dep, &pol, hash_bytes(b"in")).expect("outcome");
         let receipt = check_outcome(&a_dep, 48, 3, 12, &pol, &outcome).expect("checkable");
         assert_eq!(receipt.verdict, Verdict::NoClaimValidated);
@@ -593,8 +704,11 @@ mod tests {
         // is a separate, fully-rechecked act (the only sanctioned upgrade).
         let a_full = full_matrix(120, 31);
         let driver_f = FixedTreeDriver::admit(&a_full, 120, 4, 40).expect("valid");
-        let run_f = driver_f.run(&a_full, CancelScope::never(), None).expect("runs");
-        let outcome_f = outcome_from_run(&run_f, &a_full, &pol, hash_bytes(b"in")).expect("outcome");
+        let run_f = driver_f
+            .run(&a_full, CancelScope::never(), None)
+            .expect("runs");
+        let outcome_f =
+            outcome_from_run(&run_f, &a_full, &pol, hash_bytes(b"in")).expect("outcome");
         assert_eq!(outcome_f.rank_profile().rank(), 4);
         let receipt_f = check_outcome(&a_full, 120, 4, 40, &pol, &outcome_f).expect("checkable");
         assert_eq!(receipt_f.verdict, Verdict::NoClaimValidated);
@@ -616,12 +730,15 @@ mod tests {
         );
         // Re-checking the PROMOTED outcome must sustain certification.
         let recheck = check_outcome(&a_full, 120, 4, 40, &pol, &promoted).expect("checkable");
-        assert_eq!(recheck.verdict, Verdict::Certified(ClaimTier::FullRankTreeAgreement));
+        assert_eq!(
+            recheck.verdict,
+            Verdict::Certified(ClaimTier::FullRankTreeAgreement)
+        );
     }
 
     #[test]
     fn tampered_fields_demote_never_promote() {
-        use crate::canonical_tree::{outcome_from_run, CancelScope, FixedTreeDriver};
+        use crate::canonical_tree::{CancelScope, FixedTreeDriver, outcome_from_run};
         let pol = policy();
         let a = full_matrix(80, 77);
         let driver = FixedTreeDriver::admit(&a, 80, 4, 20).expect("valid");
@@ -632,7 +749,9 @@ mod tests {
         bad_factor[0] = f64::from_bits(bad_factor[0].to_bits() + 1); // one-ulp perturbation
         let tampered = rebuild(&good, bad_factor, good.authority());
         assert!(matches!(
-            check_outcome(&a, 80, 4, 20, &pol, &tampered).expect("checkable").verdict,
+            check_outcome(&a, 80, 4, 20, &pol, &tampered)
+                .expect("checkable")
+                .verdict,
             Verdict::Demoted(_)
         ));
 
@@ -654,7 +773,9 @@ mod tests {
         // diagonals, so instead demote via digest mismatch (rebuilt outcome
         // digest differs from replay's settled value).
         assert!(matches!(
-            check_outcome(&a, 80, 4, 20, &pol, &inflated).expect("checkable").verdict,
+            check_outcome(&a, 80, 4, 20, &pol, &inflated)
+                .expect("checkable")
+                .verdict,
             Verdict::Demoted(Refusal::DigestMismatch { .. })
         ));
 
@@ -665,7 +786,9 @@ mod tests {
         // at the boundary: nothing stale ever reaches checking.
         assert!(matches!(
             crate::canonical_qr::CanonicalQrPolicy::decode(&stale_bytes),
-            Err(PolicyError::StaleIdentity { field: "theorem_version" }) | Err(PolicyError::UnknownSchemaVersion(_))
+            Err(PolicyError::StaleIdentity {
+                field: "theorem_version"
+            }) | Err(PolicyError::UnknownSchemaVersion(_))
         ));
     }
 
@@ -680,10 +803,7 @@ mod tests {
         CanonicalQrOutcome::checked(r, base.n(), profile, authority, identity).expect("rebuilt")
     }
 
-    fn clone_identity(
-        base: &CanonicalQrOutcome,
-        cert: Option<ContentHash>,
-    ) -> ReplayIdentity {
+    fn clone_identity(base: &CanonicalQrOutcome, cert: Option<ContentHash>) -> ReplayIdentity {
         ReplayIdentity {
             input_digest: base.replay().input_digest,
             tree_digest: base.replay().tree_digest,
@@ -695,7 +815,9 @@ mod tests {
 
     #[test]
     fn ambiguity_stays_ambiguity_under_the_checker() {
-        use crate::canonical_tree::{classify_pivots, outcome_from_run, CancelScope, FixedTreeDriver};
+        use crate::canonical_tree::{
+            CancelScope, FixedTreeDriver, classify_pivots, outcome_from_run,
+        };
         let pol = policy();
         // Near-dependent columns land some pivot inside the ambiguity band;
         // whatever the band yields, the checker must not upgrade it.
@@ -711,8 +833,7 @@ mod tests {
         let driver = FixedTreeDriver::admit(&near, m, 2, 12).expect("valid");
         let run = driver.run(&near, CancelScope::never(), None).expect("runs");
         let outcome = outcome_from_run(&run, &near, &pol, hash_bytes(b"in")).expect("outcome");
-        let receipt =
-            check_outcome(&near, m, 2, 12, &pol, &outcome).expect("checkable");
+        let receipt = check_outcome(&near, m, 2, 12, &pol, &outcome).expect("checkable");
         // Whatever the band decided, the checker neither upgraded nor hid it.
         match receipt.verdict {
             Verdict::NoClaimValidated => {}

@@ -183,14 +183,6 @@ impl FrictionIsland {
         }
     }
 
-    fn kinetic_traction(self, v_rel_m_s: f64, normal_force_n: f64) -> f64 {
-        match self {
-            Self::Stribeck(law) => law.traction(v_rel_m_s, normal_force_n),
-            Self::ViscousOnly {
-                viscous_n_s_per_m: cst,
-            } => cst * v_rel_m_s,
-        }
-    }
 }
 
 /// Bridge termination configuration of a run.

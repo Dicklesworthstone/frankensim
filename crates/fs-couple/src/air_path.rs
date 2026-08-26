@@ -27,7 +27,9 @@ pub fn absorb_pressure_history(
         return;
     }
     let n = pressure_pa.len();
-    let n_fft = n.next_power_of_two().clamp(8, 8192);
+    // The transform covers the complete history. Capping below `n` would
+    // truncate the input and make the writeback index beyond the FFT buffer.
+    let n_fft = n.next_power_of_two().max(8);
     let fft = Fft::new(n_fft);
     let mut buf: Vec<FftC64> = (0..n_fft)
         .map(|i| {
@@ -82,5 +84,18 @@ mod tests {
             ef < en * 0.98,
             "200 m must absorb more 2 kHz energy than 1 m"
         );
+    }
+
+    #[test]
+    fn g0_history_beyond_legacy_fft_cap_is_transformed_in_full() {
+        let gas = GasState::try_new(&GasSpec::dry_air_ussa1976(), 288.15, 101_325.0).expect("air");
+        let mut pressure = vec![0.0; 8_193];
+        pressure[8_192] = 1.0;
+
+        absorb_pressure_history(&mut pressure, 1.0 / 48_000.0, 200.0, &gas, 0.50);
+
+        assert_eq!(pressure.len(), 8_193);
+        assert!(pressure.iter().all(|sample| sample.is_finite()));
+        assert!(pressure[8_192].abs() < 1.0);
     }
 }

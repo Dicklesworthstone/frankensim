@@ -169,7 +169,7 @@ fn certify_or_escalate_rejects_unbounded_and_malformed_numeric_policy() {
     // decision boundary is essential when a caller supplies an infinite
     // tolerance. The old comparison-only policy incorrectly used the surrogate.
     let unbounded = conformal_band(&[0.1; 8], 0.1);
-    assert_eq!(unbounded.half_width, f64::INFINITY);
+    assert_eq!(unbounded.half_width.to_bits(), f64::INFINITY.to_bits());
     assert!(matches!(
         certify_or_escalate(&unbounded, true, f64::INFINITY),
         Decision::Escalate { .. }

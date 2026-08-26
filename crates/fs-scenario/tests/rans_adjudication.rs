@@ -24,8 +24,18 @@ fn adjudication_succeeds_for_canonical_card_and_ledger() {
     assert_eq!(receipt.verdict, "ADMITTED_WITH_CONTEXTUAL_BOUNDS");
     assert_eq!(receipt.node.node_id, "e10-low-re-rans");
     assert_eq!(receipt.node.authority_class, "Estimate"); // Cost != Authority!
-    assert!(receipt.edge.admitted_contexts.contains(&"heatsink_fin_array"));
-    assert!(receipt.edge.refused_contexts.contains(&"massive_unsteady_separation"));
+    assert!(
+        receipt
+            .edge
+            .admitted_contexts
+            .contains(&"heatsink_fin_array")
+    );
+    assert!(
+        receipt
+            .edge
+            .refused_contexts
+            .contains(&"massive_unsteady_separation")
+    );
 }
 
 #[test]

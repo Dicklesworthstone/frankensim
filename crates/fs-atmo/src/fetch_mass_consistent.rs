@@ -10,7 +10,7 @@
 //!
 //! Claim class is explicitly `Estimated` / `Approximate` with ModelId `FetchAdjustedMassConsistent`.
 
-use crate::{refuse, Refusal, KAPPA, MAX_Z0_M, MIN_Z0_M};
+use crate::{KAPPA, MAX_Z0_M, MIN_Z0_M, Refusal, refuse};
 use fs_math::det;
 
 /// Model identifier for the fetch-adjusted mass-consistent atmosphere mode.
@@ -59,7 +59,9 @@ impl FetchRoughnessProfile {
         if z0_end < MIN_Z0_M || z0_end > MAX_Z0_M {
             return Err(refuse(
                 "z0-outside-domain",
-                format!("projected z0 at max fetch ({z0_end:.4e}) outside [{MIN_Z0_M}, {MAX_Z0_M}]"),
+                format!(
+                    "projected z0 at max fetch ({z0_end:.4e}) outside [{MIN_Z0_M}, {MAX_Z0_M}]"
+                ),
                 "reduce dz0_dx or max_fetch_m",
             ));
         }

@@ -2012,4 +2012,3 @@ fn stabilization_scaling_parity_and_extreme_scale_refusals() {
         Err(CutFemError::InvalidElasticityInput { .. })
     ));
 }
-

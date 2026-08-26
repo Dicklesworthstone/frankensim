@@ -9,8 +9,8 @@
 //! - Axisymmetric bell profile mesh generator and harmonic partial ratio analysis
 //! - Oracle ladder generators (cylinder, hemisphere, church bell)
 
-use crate::{dkt_stiffness, PlateError, PlateSection};
-use fs_modal::{slice_window, SliceOptions, SliceReport};
+use crate::{PlateError, PlateSection, dkt_stiffness};
+use fs_modal::{SliceOptions, SliceReport, slice_window};
 use fs_sparse::{Coo, Csr};
 
 /// Drilling DOF regularization coefficient (disclosed in CONTRACT.md).
@@ -176,7 +176,8 @@ pub fn assemble_shell(
             ex[2] * v02[0] - ex[0] * v02[2],
             ex[0] * v02[1] - ex[1] * v02[0],
         ];
-        let n_len = (n_cross[0] * n_cross[0] + n_cross[1] * n_cross[1] + n_cross[2] * n_cross[2]).sqrt();
+        let n_len =
+            (n_cross[0] * n_cross[0] + n_cross[1] * n_cross[1] + n_cross[2] * n_cross[2]).sqrt();
         if n_len < 1e-12 {
             return Err(PlateError::DegenerateElement {
                 element: elem_idx,
@@ -225,8 +226,22 @@ pub fn assemble_shell(
         let c3 = lx1 - lx0; // x1 - x0
 
         let bm = [
-            [b1 / twice_area, 0.0, b2 / twice_area, 0.0, b3 / twice_area, 0.0],
-            [0.0, c1 / twice_area, 0.0, c2 / twice_area, 0.0, c3 / twice_area],
+            [
+                b1 / twice_area,
+                0.0,
+                b2 / twice_area,
+                0.0,
+                b3 / twice_area,
+                0.0,
+            ],
+            [
+                0.0,
+                c1 / twice_area,
+                0.0,
+                c2 / twice_area,
+                0.0,
+                c3 / twice_area,
+            ],
             [
                 c1 / twice_area,
                 b1 / twice_area,
@@ -277,9 +292,7 @@ pub fn assemble_shell(
         // For each node, T_node = diag(R, R) (6x6)
         // Transform k_local (18x18) to k_global: K_glob = T^T * K_loc * T
         let r_mat = [
-            ex[0], ex[1], ex[2],
-            ey[0], ey[1], ey[2],
-            ez[0], ez[1], ez[2],
+            ex[0], ex[1], ex[2], ey[0], ey[1], ey[2], ez[0], ez[1], ez[2],
         ];
 
         let mut k_global = [0.0f64; 18 * 18];
@@ -297,7 +310,8 @@ pub fn assemble_shell(
                                 let mut val = 0.0;
                                 for p in 0..3 {
                                     for q in 0..3 {
-                                        let k_loc_val = k_local[(r_offset_i + p) * 18 + (r_offset_j + q)];
+                                        let k_loc_val =
+                                            k_local[(r_offset_i + p) * 18 + (r_offset_j + q)];
                                         val += r_mat[p * 3 + a] * k_loc_val * r_mat[q * 3 + b];
                                     }
                                 }
@@ -311,9 +325,24 @@ pub fn assemble_shell(
 
         // (e) Accumulate into global Coo
         let global_dof_indices = [
-            6 * tri[0], 6 * tri[0] + 1, 6 * tri[0] + 2, 6 * tri[0] + 3, 6 * tri[0] + 4, 6 * tri[0] + 5,
-            6 * tri[1], 6 * tri[1] + 1, 6 * tri[1] + 2, 6 * tri[1] + 3, 6 * tri[1] + 4, 6 * tri[1] + 5,
-            6 * tri[2], 6 * tri[2] + 1, 6 * tri[2] + 2, 6 * tri[2] + 3, 6 * tri[2] + 4, 6 * tri[2] + 5,
+            6 * tri[0],
+            6 * tri[0] + 1,
+            6 * tri[0] + 2,
+            6 * tri[0] + 3,
+            6 * tri[0] + 4,
+            6 * tri[0] + 5,
+            6 * tri[1],
+            6 * tri[1] + 1,
+            6 * tri[1] + 2,
+            6 * tri[1] + 3,
+            6 * tri[1] + 4,
+            6 * tri[1] + 5,
+            6 * tri[2],
+            6 * tri[2] + 1,
+            6 * tri[2] + 2,
+            6 * tri[2] + 3,
+            6 * tri[2] + 4,
+            6 * tri[2] + 5,
         ];
 
         for i in 0..18 {
@@ -449,5 +478,7 @@ pub fn canonical_church_bell_profile(scale_m: f64) -> Vec<(f64, f64)> {
         (0.65, 0.08), // Soundring
         (0.75, 0.00), // Lip / mouth
     ];
-    raw.iter().map(|&(r, z)| (r * scale_m, z * scale_m)).collect()
+    raw.iter()
+        .map(|&(r, z)| (r * scale_m, z * scale_m))
+        .collect()
 }

@@ -49,6 +49,11 @@ pub enum FrameCvarError {
     },
     /// Canonical CVaR calculation refused.
     Robust(RobustError),
+    /// The declared peak-drift CVaR limit was non-finite or negative.
+    InvalidLimit {
+        /// Offending limit.
+        limit: f64,
+    },
     /// Even the maximum scale in the bisection range violates the CVaR limit.
     InfeasibleLimit {
         /// Maximum scale in the bisection range.
@@ -74,6 +79,12 @@ impl core::fmt::Display for FrameCvarError {
                 write!(f, "non-finite drift loss {value} at member {member}")
             }
             Self::Robust(err) => write!(f, "canonical CVaR error: {err:?}"),
+            Self::InvalidLimit { limit } => {
+                write!(
+                    f,
+                    "CVaR drift limit must be finite and nonnegative, got {limit}"
+                )
+            }
             Self::InfeasibleLimit {
                 hi_scale,
                 cvar_observed,
@@ -164,6 +175,9 @@ pub fn try_cvar_mass_min(
     limit: f64,
     catalog: &[f64],
 ) -> Result<CvarDesign, FrameCvarError> {
+    if !limit.is_finite() || limit < 0.0 {
+        return Err(FrameCvarError::InvalidLimit { limit });
+    }
     let (mut lo, mut hi) = (0.25f64, 4.0f64);
     let cvar_hi = try_ensemble_cvar(ensemble, base, hi, beta)?;
     if cvar_hi > limit {

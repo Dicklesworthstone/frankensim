@@ -56,10 +56,6 @@ pub use inp_bdf::{
     FeBoundaryCondition, FeElement, FeMaterial, FeModel, FeNode, InpBdfReceipt, parse_abaqus_inp,
     parse_nastran_bdf,
 };
-pub use tabular_export::{
-    TabularColumn, TabularData, TabularDataset, TabularReceipt, export_arrow_ipc_stream,
-    export_tabular_csv,
-};
 pub use quarantine::{
     CensusRefusal, IMPORT_CENSUS_SEMANTICS_VERSION, ImportCensusPolicy, ImportCensusReport,
     ImportDefect, ImportGeometryBudgetInput, ImportPromotionError, ImportPromotionPolicy,
@@ -102,6 +98,10 @@ pub use supplier_corpus::{
     SUPPLIER_CORPUS_MANIFEST_IDENTITY_DOMAIN, SUPPLIER_CORPUS_SEMANTICS_VERSION,
     SUPPLIER_CORPUS_SUMMARY_SEMANTICS_VERSION, SupplierCadFormat, SupplierCorpusCase,
     SupplierCorpusPolicy, parse_supplier_corpus_manifest, run_supplier_corpus,
+};
+pub use tabular_export::{
+    TabularColumn, TabularData, TabularDataset, TabularReceipt, export_arrow_ipc_stream,
+    export_tabular_csv,
 };
 
 use core::fmt;

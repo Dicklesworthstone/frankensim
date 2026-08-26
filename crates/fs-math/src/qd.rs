@@ -562,11 +562,7 @@ impl Qd {
     /// Absolute value (exact).
     #[must_use]
     pub fn abs(self) -> Qd {
-        if self.is_sign_negative() {
-            -self
-        } else {
-            self
-        }
+        if self.is_sign_negative() { -self } else { self }
     }
 
     /// Signum: returns +1.0 for positive, -1.0 for negative, 0.0 for zero, NaN for NaN.
@@ -586,11 +582,7 @@ impl Qd {
     /// Total comparison conforming to IEEE 754-2008 totalOrder semantics.
     #[must_use]
     pub fn total_cmp(&self, other: &Qd) -> core::cmp::Ordering {
-        for (&a, &b) in self
-            .components()
-            .iter()
-            .zip(other.components().iter())
-        {
+        for (&a, &b) in self.components().iter().zip(other.components().iter()) {
             let ord = a.total_cmp(&b);
             if ord != core::cmp::Ordering::Equal {
                 return ord;
@@ -1068,7 +1060,8 @@ impl core::ops::Mul for Qd {
         let (s3, e17) = two_sum(s3, e5);
         let (s3, e18) = two_sum(s3, e6);
 
-        let tail = q6 + q7 + q8 + q9 + e7 + e8 + e9 + e10 + e11 + e12 + e13 + e14 + e15 + e16 + e17 + e18;
+        let tail =
+            q6 + q7 + q8 + q9 + e7 + e8 + e9 + e10 + e11 + e12 + e13 + e14 + e15 + e16 + e17 + e18;
 
         let (t0, t1) = two_sum(p0, s1);
         let (t1, t2) = two_sum(t1, s2);
@@ -1237,7 +1230,11 @@ mod tests {
             assert!(q1.is_canonical());
 
             let q2 = Qd::from_parts(q1.c0, q1.c1, q1.c2, q1.c3);
-            assert_eq!(q1.components(), q2.components(), "renormalization must be idempotent");
+            assert_eq!(
+                q1.components(),
+                q2.components(),
+                "renormalization must be idempotent"
+            );
         }
     }
 
@@ -1252,7 +1249,8 @@ mod tests {
         assert!(matches!(err2, QdError::UnorderedMagnitudes { .. }));
 
         // Non-zero after zero
-        let err3 = Qd::from_parts_checked(0.0, 1.0, 0.0, 0.0).expect_err("zero followed by non-zero");
+        let err3 =
+            Qd::from_parts_checked(0.0, 1.0, 0.0, 0.0).expect_err("zero followed by non-zero");
         assert!(matches!(err3, QdError::InvalidZeroRepresentation));
     }
 
@@ -1280,6 +1278,9 @@ mod tests {
         let sqrt2 = Qd::from_f64(2.0).sqrt();
         let two = sqrt2 * sqrt2;
         let diff2 = (two - Qd::TWO).abs();
-        assert!(diff2.c0 <= 1e-60, "sqrt(2)^2 must equal 2.0 to quad precision");
+        assert!(
+            diff2.c0 <= 1e-60,
+            "sqrt(2)^2 must equal 2.0 to quad precision"
+        );
     }
 }

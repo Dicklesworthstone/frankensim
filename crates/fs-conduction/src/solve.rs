@@ -658,7 +658,6 @@ impl<'m> ConductionSolver<'m> {
         })
     }
 
-
     /// The current resumable iterate (read-only view).
     #[must_use]
     pub const fn state(&self) -> &ConductionState {
@@ -1041,9 +1040,7 @@ impl<'m> ConductionSolver<'m> {
                     || self.problem.material.receipts().len(),
                     |assigned| assigned.receipts().len(),
                 ),
-                element_material_identity: self
-                    .element_materials
-                    .map(ElementMaterials::identity),
+                element_material_identity: self.element_materials.map(ElementMaterials::identity),
                 interface_fluxes,
                 robin_fluxes,
                 free_dofs: self.dofs.n(),

@@ -64,16 +64,16 @@ fn rand_mat(rows: usize, cols: usize, seed: u64) -> Vec<f64> {
     let mut s = seed | 1;
     let mut out = vec![0.0; rows * cols];
     for v in out.iter_mut() {
-        s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        s = s
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         *v = ((s >> 11) as f64) / ((1u64 << 53) as f64);
     }
     out
 }
 
 fn transpose(a: &[f64], m: usize, n: usize) -> Vec<f64> {
-    (0..n * m)
-        .map(|i| a[(i % m) * n + i / m])
-        .collect()
+    (0..n * m).map(|i| a[(i % m) * n + i / m]).collect()
 }
 
 /// Naive triple-loop product; every fixture keeps sizes tiny.
@@ -137,15 +137,15 @@ fn gram_identity_across_ranks_and_schedules() {
         dep[i * n_dep + 3] = x * x;
     }
 
-    for (label, a, n) in [
-        ("full", &full, n_full),
-        ("dependent", &dep, n_dep),
-    ] {
+    for (label, a, n) in [("full", &full, n_full), ("dependent", &dep, n_dep)] {
         let ata = matmul(&transpose(a, m, n), a, n, m, n);
         for block in [6usize, 12, m] {
             let r = tsqr_r(a, m, n, block);
             assert_eq!(r.len(), n * n, "{label}: R shape");
-            assert!(is_upper_triangular(&r, n), "{label}: upper triangular @block={block}");
+            assert!(
+                is_upper_triangular(&r, n),
+                "{label}: upper triangular @block={block}"
+            );
             assert!(
                 diag_signs_within_convention(&r, n),
                 "{label}: strict-negative flip convention violated"
@@ -254,16 +254,23 @@ fn tier_t3_cross_schedule_each_valid_bits_unclaimed() {
     let schedules = [6usize, 12, 24, m];
     let rs: Vec<Vec<f64>> = schedules.iter().map(|&b| tsqr_r(&dep, m, 3, b)).collect();
     for (k, r) in rs.iter().enumerate() {
-        assert!(is_upper_triangular(r, 3), "validity: triangular @{}", schedules[k]);
+        assert!(
+            is_upper_triangular(r, 3),
+            "validity: triangular @{}",
+            schedules[k]
+        );
         let rt = transpose(r, 3, 3);
         let rtr = matmul(&rt, r, 3, 3, 3);
         let err = max_rel_err(&rtr, &ata);
-        assert!(err < 1e-11, "T0 validity failed for schedule {}: {err:e}", schedules[k]);
+        assert!(
+            err < 1e-11,
+            "T0 validity failed for schedule {}: {err:e}",
+            schedules[k]
+        );
     }
     for i in 0..rs.len() {
         for j in (i + 1)..rs.len() {
-            divergence = divergence
-                .max(max_rel_err(&rs[i], &rs[j]));
+            divergence = divergence.max(max_rel_err(&rs[i], &rs[j]));
         }
     }
     // Observed divergence is DATA, not an assertion: it quantifies the gauge
@@ -361,7 +368,9 @@ fn threshold_boundary_is_scale_dependent_no_claim() {
         assert!(err < 1e-9, "scale {s:e}: Gram identity failed: {err:e}");
         let abs_pivot = r[1 * 2 + 1].abs();
         let rel_pivot = abs_pivot / (s * s); // normalized by ||col||^2 scale
-        report.push(format!("{{\"scale\":{s:e},\"abs_pivot\":{abs_pivot:e},\"rel_pivot\":{rel_pivot:e}}}"));
+        report.push(format!(
+            "{{\"scale\":{s:e},\"abs_pivot\":{abs_pivot:e},\"rel_pivot\":{rel_pivot:e}}}"
+        ));
     }
     println!(
         "{{\"suite\":\"fs-la\",\"case\":\"tsqr_rank_deficient\",\"verdict\":\"pass\",\"detail\":\"scale sweep (no rank claim): [{}]\"}}",
@@ -408,7 +417,10 @@ fn falsifier_value_change_moves_output_bits() {
     b[5 * 2] += 1.0; // material change to one entry
     let perturbed = tsqr_r(&b, m, 2, 8);
     assert!(
-        !base.iter().zip(&perturbed).all(|(x, y)| x.to_bits() == y.to_bits()),
+        !base
+            .iter()
+            .zip(&perturbed)
+            .all(|(x, y)| x.to_bits() == y.to_bits()),
         "falsifier: output bits unchanged despite material input change"
     );
 

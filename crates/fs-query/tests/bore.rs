@@ -474,13 +474,7 @@ fn obj_cylinder(radius: f64, length: f64, segments: usize, rings: usize, capped:
     let bottom_center = (rings + 1) * segments + 1;
     let top_center = bottom_center + 1;
     for k in 0..segments {
-        let _ = writeln!(
-            obj,
-            "f {} {} {}",
-            bottom_center,
-            idx(0, k + 1),
-            idx(0, k)
-        );
+        let _ = writeln!(obj, "f {} {} {}", bottom_center, idx(0, k + 1), idx(0, k));
         if capped {
             let _ = writeln!(
                 obj,

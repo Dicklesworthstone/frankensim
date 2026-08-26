@@ -1233,7 +1233,9 @@ impl DiffRealExecutionIdentity {
             stream_key: cx.stream_key(),
             budget: cx.budget(),
             mode: cx.mode(),
-            operation_memory_limit_bytes: cx.lease().and_then(|lease| lease.limit_bytes()),
+            operation_memory_limit_bytes: cx
+                .lease()
+                .and_then(fs_alloc::OperationMemoryLease::limit_bytes),
         }
     }
 
@@ -1671,7 +1673,7 @@ fn push_sensitivity(output: &mut Vec<u8>, label: &str, sensitivity: &SealedSensi
     );
 }
 
-fn finish_stage_result(stage: &str, canonical: Vec<u8>) -> ContentHash {
+fn finish_stage_result(stage: &str, canonical: &[u8]) -> ContentHash {
     let mut framed = Vec::new();
     push_identity_u64(
         &mut framed,
@@ -1679,7 +1681,7 @@ fn finish_stage_result(stage: &str, canonical: Vec<u8>) -> ContentHash {
         u64::from(STAGE_RECEIPT_POLICY_VERSION),
     );
     push_identity_str(&mut framed, "stage", stage);
-    push_identity_field(&mut framed, "result-payload", &canonical);
+    push_identity_field(&mut framed, "result-payload", canonical);
     hash_domain(STAGE_RESULT_IDENTITY_DOMAIN, &framed)
 }
 
@@ -1700,7 +1702,7 @@ fn diagnostic_result_identity(stage: &StageLog) -> ContentHash {
     for (index, event) in stage.events.iter().enumerate() {
         encode_stage_event(&mut canonical, &format!("event.{index}"), event);
     }
-    finish_stage_result(stage.stage, canonical)
+    finish_stage_result(stage.stage, &canonical)
 }
 
 fn differentiation_result_identity(
@@ -1732,7 +1734,7 @@ fn differentiation_result_identity(
             encode_differentiation_error(&mut canonical, "missing-probe.typed-error", error);
         }
     }
-    finish_stage_result(DIFFERENTIATION_STAGE, canonical)
+    finish_stage_result(DIFFERENTIATION_STAGE, &canonical)
 }
 
 fn as_built_result_identity(
@@ -1814,7 +1816,7 @@ fn as_built_result_identity(
         "posterior.misfit-after",
         posterior.misfit_after(),
     );
-    finish_stage_result(AS_BUILT_STAGE, canonical)
+    finish_stage_result(AS_BUILT_STAGE, &canonical)
 }
 
 fn tolerance_result_identity(
@@ -1900,7 +1902,7 @@ fn tolerance_result_identity(
         "robustness.confirmed",
         &[u8::from(verdict.confirmed)],
     );
-    finish_stage_result(TOLERANCE_STAGE, canonical)
+    finish_stage_result(TOLERANCE_STAGE, &canonical)
 }
 
 #[derive(Debug, Clone)]

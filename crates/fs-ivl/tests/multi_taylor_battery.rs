@@ -60,7 +60,11 @@ fn test_multi_index_graded_properties() {
             let mut sorted = indices.clone();
             sorted.sort();
             sorted.dedup();
-            assert_eq!(sorted.len(), indices.len(), "all multi-indices must be unique");
+            assert_eq!(
+                sorted.len(),
+                indices.len(),
+                "all multi-indices must be unique"
+            );
         }
     }
 }
@@ -83,7 +87,8 @@ fn test_variable_info_and_fixed_axes() {
     assert_eq!(fixed_var.radius(), 0.0);
 
     // Non-finite domain refusal
-    let err_inf = VariableInfo::new("inf", Interval::WHOLE).expect_err("infinite domain must refuse");
+    let err_inf =
+        VariableInfo::new("inf", Interval::WHOLE).expect_err("infinite domain must refuse");
     assert_eq!(err_inf, TaylorModelError::NonFiniteDomain);
 }
 
@@ -199,11 +204,18 @@ fn test_multivariate_division_and_refusal() {
     let denom = one.add(&x.scale(0.2).unwrap()).unwrap();
 
     let recip = denom.reciprocal().expect("reciprocal of positive denom");
-    assert!(recip.range().unwrap().encloses(Interval::new(1.0 / 1.1, 1.0 / 0.9)));
+    assert!(
+        recip
+            .range()
+            .unwrap()
+            .encloses(Interval::new(1.0 / 1.1, 1.0 / 0.9))
+    );
 
     // Denominator containing zero must refuse
     let bad_denom = TaylorModel::variable(0, vars.clone(), 2).unwrap(); // x over [-0.5, 0.5] contains 0
-    let err_div = one.div(&bad_denom).expect_err("div by zero-straddling denom must refuse");
+    let err_div = one
+        .div(&bad_denom)
+        .expect_err("div by zero-straddling denom must refuse");
     assert_eq!(err_div, TaylorModelError::DenominatorContainsZero);
 }
 
@@ -222,8 +234,13 @@ fn test_truncation_order_reduction() {
     assert_eq!(x_trunc.term_count(), 2);
 
     // Truncation to higher order refuses
-    let err_hi = x_trunc.truncate(5).expect_err("higher order truncate must refuse");
-    assert!(matches!(err_hi, TaylorModelError::TruncationOrderTooLarge { .. }));
+    let err_hi = x_trunc
+        .truncate(5)
+        .expect_err("higher order truncate must refuse");
+    assert!(matches!(
+        err_hi,
+        TaylorModelError::TruncationOrderTooLarge { .. }
+    ));
 
     // Range containment: truncated model must still enclose x^3 over [0, 2] ([0, 8])
     let full_range = x_trunc.range().unwrap();
@@ -376,7 +393,10 @@ fn test_differentiation_and_gradient() {
 
     // Out of bounds axis refuses
     let err_axis = f.diff(5).expect_err("out of bounds axis must refuse");
-    assert!(matches!(err_axis, TaylorModelError::AxisIndexOutOfBounds { .. }));
+    assert!(matches!(
+        err_axis,
+        TaylorModelError::AxisIndexOutOfBounds { .. }
+    ));
 }
 
 #[test]

@@ -16,6 +16,11 @@ fn jlog(case: &str, payload: &str) {
     println!("{{\"suite\":\"fs-vpm-coarsen3d\",\"case\":\"{case}\",{payload}}}");
 }
 
+/// Bitwise f64 equality; both sides are bit-identical by construction.
+fn bits_equal(a: f64, b: f64) -> bool {
+    a.to_bits() == b.to_bits()
+}
+
 fn line(n: usize) -> Vec<[f64; 3]> {
     (0..=n)
         .map(|i| [0.0, i as f64 - n as f64 / 2.0, 0.0])
@@ -32,7 +37,7 @@ fn built_wake(rows: usize) -> FilamentWake {
     for t in 0..rows as u64 {
         let g: Vec<f64> = (0..8)
             .map(|s| {
-                let y = (s as f64 - 3.5) / 4.0;
+                let y = (f64::from(s) - 3.5) / 4.0;
                 (1.0 - y * y).max(0.0) * (1.0 + 0.15 * (t as f64 * 0.37).sin())
             })
             .collect();
@@ -62,9 +67,8 @@ fn per_station_impulse_exact_and_kelvin_survives() {
     // Kelvin closure still holds per cell on the COARSENED lattice.
     for r in 0..wake.rows.len().saturating_sub(1) {
         for s in 0..8 {
-            assert_eq!(
-                wake.cell_net_circulation(r, s).unwrap(),
-                0.0,
+            assert!(
+                bits_equal(wake.cell_net_circulation(r, s).unwrap(), 0.0),
                 "closure at ({r},{s}) after coarsening"
             );
         }
@@ -75,7 +79,7 @@ fn per_station_impulse_exact_and_kelvin_survives() {
         if i < 8 {
             assert!(row.core2_m2 > 0.0, "merged row {i} retains spread");
         } else {
-            assert_eq!(row.core2_m2, 0.0, "fresh row {i} unspread");
+            assert!(bits_equal(row.core2_m2, 0.0), "fresh row {i} unspread");
         }
     }
     // The mixed-norm metric is REPORTED and honest (nonzero).
@@ -125,7 +129,7 @@ fn pulsed_wake(rows: usize) -> FilamentWake {
         let pulse = if t % 2 == 0 { 2.0 } else { 0.2 };
         let g: Vec<f64> = (0..8)
             .map(|s| {
-                let y = (s as f64 - 3.5) / 4.0;
+                let y = (f64::from(s) - 3.5) / 4.0;
                 (1.0 - y * y).max(0.0) * pulse
             })
             .collect();

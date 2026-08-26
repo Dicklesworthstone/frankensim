@@ -14,8 +14,8 @@
 //!   3. If indistinguishable, budget returns to general falsification and
 //!      activation is deferred.
 
-use fs_blake3::hash_bytes;
 pub use crate::horizon_explanation::OperatorMode;
+use fs_blake3::hash_bytes;
 
 /// Required escalation step kind for Proposal D.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -103,7 +103,10 @@ pub enum TriggerDRefusal {
     /// Missing endpoint study in agent-operator mode.
     MissingStudy,
     /// Inadmissible sample counts (e.g. zero or catches > samples).
-    InadmissibleStudyData { endpoint_catches: usize, endpoint_samples: usize },
+    InadmissibleStudyData {
+        endpoint_catches: usize,
+        endpoint_samples: usize,
+    },
     /// Non-finite or negative p-value.
     InvalidPValue { p: f64 },
     /// Escalation steps missing or incomplete.
@@ -228,7 +231,9 @@ pub fn mint_trigger_d_receipt(
             verdict: TriggerDVerdict::IndistinguishableDefer,
             operator_mode: mode,
             receipt_hash: hash,
-            reason: "no preregistered endpoint-targeting study evaluated in agent-operator mode yet".into(),
+            reason:
+                "no preregistered endpoint-targeting study evaluated in agent-operator mode yet"
+                    .into(),
         };
     };
 
@@ -245,7 +250,8 @@ pub fn mint_trigger_d_receipt(
             }
         }
         Ok(TriggerDVerdict::IndistinguishableDefer) => {
-            let hash = hash_bytes(b"org.frankensim.horizon-trigger-d.defer-indistinguishable.v1").to_hex();
+            let hash =
+                hash_bytes(b"org.frankensim.horizon-trigger-d.defer-indistinguishable.v1").to_hex();
             TriggerDReceipt {
                 proposal: "D",
                 disposition: GoodhartDisposition::Defer,
@@ -256,7 +262,8 @@ pub fn mint_trigger_d_receipt(
             }
         }
         Ok(TriggerDVerdict::ProvisionalDefer) => {
-            let hash = hash_bytes(b"org.frankensim.horizon-trigger-d.defer-provisional.v1").to_hex();
+            let hash =
+                hash_bytes(b"org.frankensim.horizon-trigger-d.defer-provisional.v1").to_hex();
             TriggerDReceipt {
                 proposal: "D",
                 disposition: GoodhartDisposition::Defer,
@@ -274,7 +281,8 @@ pub fn mint_trigger_d_receipt(
                 verdict: TriggerDVerdict::Rule4Defer,
                 operator_mode: mode,
                 receipt_hash: hash,
-                reason: "Rule 4: human-driven operator mode defers Goodhart guard activation".into(),
+                reason: "Rule 4: human-driven operator mode defers Goodhart guard activation"
+                    .into(),
             }
         }
         Err(refusal) => {
@@ -285,7 +293,9 @@ pub fn mint_trigger_d_receipt(
                 verdict: TriggerDVerdict::IndistinguishableDefer,
                 operator_mode: mode,
                 receipt_hash: hash,
-                reason: format!("inadmissible Goodhart premises ({refusal:?}); deferring activation"),
+                reason: format!(
+                    "inadmissible Goodhart premises ({refusal:?}); deferring activation"
+                ),
             }
         }
     }

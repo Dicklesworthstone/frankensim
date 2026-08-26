@@ -148,8 +148,7 @@ fn fusion_receipts_deviation_fallback_and_budget() {
     let strict_median = median_of(strict_times);
     let fast_median = median_of(fast_times);
     println!(
-        "frankensim-fusion-budget-row-v1\nmode\tstrict\nprofile\t{}\nsamples\t{}\nmedian-sec\t{:e}\n",
-        build_profile, SAMPLES, strict_median
+        "frankensim-fusion-budget-row-v1\nmode\tstrict\nprofile\t{build_profile}\nsamples\t{SAMPLES}\nmedian-sec\t{strict_median:e}\n",
     );
     println!(
         "frankensim-fusion-budget-row-v1\nmode\tfast-newton\nprofile\t{}\nsamples\t{}\nmedian-sec\t{:e}\nratio-vs-strict\t{:e}\n",

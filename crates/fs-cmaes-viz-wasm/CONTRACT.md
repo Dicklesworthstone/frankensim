@@ -19,6 +19,13 @@ floor-and-rebuild repair, so every snapshot's `eigvals` describe a genuine
 positive-definite covariance. (v0.1.0's simplified mirrored-weight heuristic
 could drive C indefinite and reported the raw spectrum.)
 
+v0.2.1: the cumulative-path `h_sigma` normalizer uses the canonical
+`sqrt(1 - (1 - c_s)^(2g))` recurrence. The previous linear generation
+multiplier left the square-root domain after a few generations and silently
+disabled rank-one covariance-path updates for the remainder of a run. The
+public `sx`, `sz`, and `sf` population streams are now reordered together so
+rank, elite flag, decision vector, sample vector, and fitness stay aligned.
+
 No-claims: teaching/viz surface. NOT fs-dfo's production `cmaes` (no BIPOP
 restarts, no identity ledgers, no adversarial-refusal hardening). For
 production optimization use `fs_dfo::cmaes`.
@@ -28,7 +35,7 @@ production optimization use `fs_dfo::cmaes`.
 | Export | Signature | Returns |
 |---|---|---|
 | `cmaes_viz_run` | 18 scalars (dim, x0_0..x0_5, sigma0, lambda, active, seed, generations, landscape, noise, bounds_enabled, bound_min, bound_max, f_target) -> String | JSON envelope |
-| `cmaes_viz_kernel_version` | () -> String | `"fs-cmaes-viz-wasm 0.2.0"` |
+| `cmaes_viz_kernel_version` | () -> String | `"fs-cmaes-viz-wasm 0.2.1"` |
 
 ## Envelope contract (frozen v1)
 
@@ -73,5 +80,5 @@ eigendecompositions — a faithful marginal, never a fake 3D ellipsoid.
 
 `cargo check --locked --target wasm32-unknown-unknown` then
 `wasm-pack build --target web --release`; nested `Cargo.lock` must not be
-mutated by the pack step. Native tests: `cargo test` (10 exact-value and
+mutated by the pack step. Native tests: `cargo test` (13 exact-value and
 invariant tests).

@@ -9,6 +9,10 @@ use fs_assimilate::factor::{
 use fs_assimilate::{AssimError, Belief, Observation, point_sensor};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 
+fn bits_eq(a: f64, b: f64) -> bool {
+    a.to_bits() == b.to_bits()
+}
+
 const TEST_STREAM: StreamKey = StreamKey {
     seed: 0x00FA_C708,
     kernel_id: 0xFA07,
@@ -138,8 +142,9 @@ fn g0_two_component_bierman_matches_direct_dense() {
             [1.0 - 7.5 / 6.5, 2.0 - 9.0 / 6.5],
         ];
         let dense = result.belief().to_dense_covariance();
+        let expected_rows: Vec<Vec<f64>> = expected.iter().map(|row| row.to_vec()).collect();
         assert!(
-            max_cov_diff(&dense, &expected.map(|row| row.to_vec()).to_vec()) <= 1e-12,
+            max_cov_diff(&dense, &expected_rows) <= 1e-12,
             "factor posterior must match the direct dense rank-one downdate: {dense:?}"
         );
         assert_eq!(result.receipt().state(), ContractionState::Certified);
@@ -242,8 +247,8 @@ fn g0_rank_singular_prior_stays_exact_zero_in_singular_direction() {
         let obs = Observation::new(vec![1.0, 1.0], 6.0, 1.0, "singular-prior").expect("obs");
         let result = assimilate_scalar(&prior, &obs, cx).expect("update");
         assert_eq!(result.belief().diag(1), Some(0.0));
-        assert_eq!(result.belief().mean()[1], 5.0);
-        assert!((result.belief().variance(1).expect("v")).abs() == 0.0);
+        assert!(bits_eq(result.belief().mean()[1], 5.0));
+        assert_eq!(result.belief().variance(1).expect("v").abs(), 0.0);
         // The verdict may certify or be unresolved on a singular prior, but
         // it must never affirmatively refute a contraction that holds.
         assert_ne!(result.receipt().state(), ContractionState::Refuted);

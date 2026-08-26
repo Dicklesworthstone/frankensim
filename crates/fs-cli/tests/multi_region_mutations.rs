@@ -5,7 +5,7 @@
 //! analytic volumes, corrupt geometry refuses with typed errors.
 
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
-use fs_mesh::{volumetricize, RegionId, RegionKind, RegionSpec, UnverifiedPlc, VolumetricPolicy};
+use fs_mesh::{RegionId, RegionKind, RegionSpec, UnverifiedPlc, VolumetricPolicy, volumetricize};
 
 const DATA: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/reference-project");
 
@@ -62,11 +62,7 @@ fn weld(parts: &[Vec<[f64; 3]>]) -> (Vec<[f64; 3]>, Vec<Vec<u32>>) {
     (verts, remaps)
 }
 
-fn region_specs(
-    raw: &[RawMesh],
-    remaps: &[Vec<u32>],
-    seeds: &[[f64; 3]],
-) -> Vec<RegionSpec> {
+fn region_specs(raw: &[RawMesh], remaps: &[Vec<u32>], seeds: &[[f64; 3]]) -> Vec<RegionSpec> {
     raw.iter()
         .enumerate()
         .map(|(i, mesh)| RegionSpec {
@@ -117,15 +113,13 @@ fn volumes_for(raw: &[RawMesh], seeds: &[[f64; 3]]) -> std::collections::BTreeMa
         let (vertices, remaps) = weld(&[raw[0].positions.clone(), raw[1].positions.clone()]);
         let regions = region_specs(raw, &remaps, seeds);
         let plc = UnverifiedPlc::new(vertices, regions);
-        let audited =
-            volumetricize(plc, VolumetricPolicy::fixture_default("m"), cx)
-                .expect("production mesher handles the mutated fixture");
+        let audited = volumetricize(plc, VolumetricPolicy::fixture_default("m"), cx)
+            .expect("production mesher handles the mutated fixture");
         let labeled = audited.labeled();
         let positions = labeled.positions();
         let mut per_region = std::collections::BTreeMap::new();
         for (tet, region) in labeled.tets().iter().zip(labeled.region_of_tet()) {
-            *per_region.entry(region.0).or_insert(0.0) +=
-                signed_tet_volume(positions, tet).abs();
+            *per_region.entry(region.0).or_insert(0.0) += signed_tet_volume(positions, tet).abs();
         }
         per_region
     })
@@ -167,8 +161,7 @@ fn duplicate_face_refuses_as_non_manifold() {
         let (vertices, remaps) = weld(&[raw[0].positions.clone(), raw[1].positions.clone()]);
         let regions = region_specs(&raw, &remaps, &[[0.5, 0.5, 0.5], [1.5, 0.5, 0.5]]);
         let plc = UnverifiedPlc::new(vertices, regions);
-        let outcome =
-            fs_mesh::volumetricize(plc, VolumetricPolicy::fixture_default("m"), cx);
+        let outcome = fs_mesh::volumetricize(plc, VolumetricPolicy::fixture_default("m"), cx);
         assert!(
             outcome.is_err(),
             "a duplicated face must refuse, never pass silently"
@@ -192,8 +185,7 @@ fn overlapping_solids_refuse_as_ambiguous_ownership() {
         // Ambiguity must be refused regardless of seed choice.
         let regions = region_specs(&raw, &remaps, &[[0.75, 0.5, 0.5], [1.25, 0.5, 0.5]]);
         let plc = UnverifiedPlc::new(vertices, regions);
-        let outcome =
-            fs_mesh::volumetricize(plc, VolumetricPolicy::fixture_default("m"), cx);
+        let outcome = fs_mesh::volumetricize(plc, VolumetricPolicy::fixture_default("m"), cx);
         match outcome {
             Ok(_) => panic!("overlapping solids must not volumetricize silently"),
             Err(e) => {
@@ -206,7 +198,6 @@ fn overlapping_solids_refuse_as_ambiguous_ownership() {
         }
     });
 }
-
 
 #[test]
 fn triangle_permutation_is_volume_invariant() {
@@ -303,8 +294,7 @@ fn single_reversed_triangle_refuses_as_not_closed() {
         let (vertices, remaps) = weld(&[raw[0].positions.clone(), raw[1].positions.clone()]);
         let regions = region_specs(&raw, &remaps, &[[0.5, 0.5, 0.5], [1.5, 0.5, 0.5]]);
         let plc = UnverifiedPlc::new(vertices, regions);
-        let outcome =
-            volumetricize(plc, VolumetricPolicy::fixture_default("m"), cx);
+        let outcome = volumetricize(plc, VolumetricPolicy::fixture_default("m"), cx);
         match outcome {
             Ok(_) => panic!("reversed face must not volumetricize"),
             Err(e) => {
@@ -328,8 +318,7 @@ fn deleted_triangle_refuses_as_open_surface() {
         let (vertices, remaps) = weld(&[raw[0].positions.clone(), raw[1].positions.clone()]);
         let regions = region_specs(&raw, &remaps, &[[0.5, 0.5, 0.5], [1.5, 0.5, 0.5]]);
         let plc = UnverifiedPlc::new(vertices, regions);
-        let outcome =
-            volumetricize(plc, VolumetricPolicy::fixture_default("m"), cx);
+        let outcome = volumetricize(plc, VolumetricPolicy::fixture_default("m"), cx);
         assert!(
             outcome.is_err(),
             "an open solid must refuse, never fill silently"

@@ -11264,11 +11264,8 @@ impl IdentityReferenceCache {
                         }
                         for symbol in requested.types {
                             if matches!(path.as_str(), "std" | "core" | "alloc") {
-                                let bytes =
-                                    format!("std-prelude-type:{symbol}").into_bytes();
-                                cache
-                                    .types
-                                    .insert((path.clone(), symbol), Ok(bytes));
+                                let bytes = format!("std-prelude-type:{symbol}").into_bytes();
+                                cache.types.insert((path.clone(), symbol), Ok(bytes));
                             } else {
                                 cache
                                     .types

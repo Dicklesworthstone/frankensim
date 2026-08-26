@@ -2631,9 +2631,7 @@ impl CanonicalEncoder {
     }
 
     fn push(&mut self, value: &[u8]) {
-        let requested = self
-            .logical_len
-            .saturating_add(usize_to_u64(value.len()));
+        let requested = self.logical_len.saturating_add(usize_to_u64(value.len()));
         self.logical_len = requested;
         if self.overflow.is_some() {
             self.overflow = Some(requested);

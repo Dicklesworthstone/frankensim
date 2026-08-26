@@ -102,7 +102,10 @@ impl EulerSimulationReport {
         out.push_str(&format!("- **Campaign ID**: `{}`\n", self.campaign_id));
         out.push_str(&format!("- **Specimen ID**: `{}`\n", self.specimen_id));
         out.push_str(&format!("- **Model Ladder**: {}\n", self.model_ladder));
-        out.push_str(&format!("- **Simulated Duration**: {:.3} s\n", self.duration_s));
+        out.push_str(&format!(
+            "- **Simulated Duration**: {:.3} s\n",
+            self.duration_s
+        ));
         out.push_str(&format!(
             "- **Inclination Range**: {:.2}° -> {:.2}°\n",
             self.initial_inclination_deg, self.terminal_inclination_deg
@@ -119,7 +122,10 @@ impl EulerSimulationReport {
             } => {
                 out.push_str("> [!NOTE]\n");
                 out.push_str("> **NO DATA**: No physical comparison dataset bound.\n");
-                out.push_str(&format!("> Required next evidence: {}\n\n", required_next_evidence));
+                out.push_str(&format!(
+                    "> Required next evidence: {}\n\n",
+                    required_next_evidence
+                ));
             }
             PhysicalComparisonSection::AdmittedPhysicalScorecard {
                 scorecard_digest,
@@ -151,7 +157,9 @@ impl fmt::Display for EulerSimulationReport {
 impl fmt::Display for PhysicalComparisonSection {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NoData { required_next_evidence } => {
+            Self::NoData {
+                required_next_evidence,
+            } => {
                 write!(f, "NO DATA (Required: {})", required_next_evidence)
             }
             Self::AdmittedPhysicalScorecard {

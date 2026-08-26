@@ -292,13 +292,8 @@ impl ExactNat {
         // The kernel is the single arithmetic sequence in the crate: the
         // monolithic path simply runs it with an unlimited cell budget, so
         // microstepped execution is byte-identical by construction.
-        let mut cursor = crate::cbc_limb::LimbCursor::begin_add_multiply(
-            src.len(),
-            factor_len,
-            self.limbs.len(),
-            needed,
-            usize::MAX,
-        );
+        let mut cursor =
+            crate::cbc_limb::LimbCursor::begin_add_multiply(self.limbs.len(), needed, usize::MAX);
         loop {
             match crate::cbc_limb::step_add_multiply(
                 &mut self.limbs,
@@ -325,33 +320,6 @@ impl ExactNat {
         self.normalize();
     }
 
-    /// Add under an admission-owned requested-capacity ceiling.
-    ///
-    /// Returns the required limb count before touching the accumulator when
-    /// the shared storage schema is too small.
-    pub(crate) fn add_mul_factor_with_capacity(
-        &mut self,
-        multiplicand: &Self,
-        factor: u128,
-        capacity_limbs: usize,
-    ) -> Result<(), usize> {
-        if factor == 0 || multiplicand.limbs.is_empty() {
-            return Ok(());
-        }
-        let required = multiplicand
-            .limbs
-            .len()
-            .checked_add(factor_limb_count(factor))
-            .and_then(|length| length.checked_add(1))
-            .map(|product_length| product_length.max(self.limbs.len()))
-            .expect("exact CBC required limb count overflow");
-        if required > capacity_limbs {
-            return Err(required);
-        }
-        self.add_mul_factor(multiplicand, factor);
-        debug_assert!(self.limbs.len() <= capacity_limbs);
-        Ok(())
-    }
     /// buffer instead of moving the old allocation aside and building a
     /// fresh replacement.
     ///
@@ -442,16 +410,6 @@ impl ExactNat {
         let mut value = Self::try_zero_with_capacity(capacity_limbs)?;
         value.limbs.push(1);
         Ok(value)
-    }
-
-    /// Request at least the admitted limb capacity before execution.
-    ///
-    /// Rust allocators may round the observable `Vec::capacity()` upward; the
-    /// admission contract bounds requested logical payload and operation
-    /// length, not allocator-usable bytes.
-    pub(crate) fn reserve_exact_limbs(&mut self, capacity_limbs: usize) {
-        let additional = capacity_limbs.saturating_sub(self.limbs.len());
-        self.limbs.reserve_exact(additional);
     }
 
     /// The normalized little-endian limbs (certificate serialization and

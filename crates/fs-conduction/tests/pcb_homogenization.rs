@@ -153,10 +153,13 @@ fn solve_board(material: &ConductivityModel) -> fs_conduction::ConductionSolutio
     with_cx(|cx| {
         solve(
             cx,
-            ConductionProblem { element_materials: None, mesh: &mesh,
-            boundary: &boundary,
-            material,
-            source: &source, },
+            ConductionProblem {
+                element_materials: None,
+                mesh: &mesh,
+                boundary: &boundary,
+                material,
+                source: &source,
+            },
             solve_config(),
         )
         .expect("board solve")

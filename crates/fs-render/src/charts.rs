@@ -1102,7 +1102,6 @@ fn certify_short_implicit_bracket(
     caller_t_max: f64,
     eps: f64,
 ) -> ShortBracketOutcome {
-
     const MAX_BISECTION_STEPS: usize = 8;
     if !current_sign.is_strict() || current_caller_t >= caller_t_max {
         return ShortBracketOutcome::NoWitness;
@@ -2991,8 +2990,7 @@ mod tests {
         let current_point = ray.at(current_t / parameter_scale);
         let safe_radius = boundary_point.x - current_point.x;
         assert_eq!(
-            point_distance_upper(current_point, boundary_point)
-                .to_bits(),
+            point_distance_upper(current_point, boundary_point).to_bits(),
             safe_radius.to_bits()
         );
 

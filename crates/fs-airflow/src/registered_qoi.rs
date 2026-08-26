@@ -73,8 +73,10 @@ impl QoiSemanticId {
     #[must_use]
     pub const fn units(self) -> &'static str {
         match self {
-            Self::JunctionMaximum | Self::SurfaceMeanTemperature => "kelvin",
-            Self::SurfaceTemperatureSpread | Self::SurfaceTemperatureStdDev => "kelvin",
+            Self::JunctionMaximum
+            | Self::SurfaceMeanTemperature
+            | Self::SurfaceTemperatureSpread
+            | Self::SurfaceTemperatureStdDev => "kelvin",
             Self::PressureDrop => "pascal",
             Self::FanPower => "watt",
             Self::ThermalMargin => "kelvin",
@@ -90,12 +92,14 @@ impl QoiSemanticId {
             }
             Self::SurfaceTemperatureSpread
             | Self::SurfaceTemperatureStdDev
-            | Self::ThermalMargin => ThermalQoiKind::TemperatureDifference,
-            Self::PressureDrop | Self::FanPower => ThermalQoiKind::TemperatureDifference,
+            | Self::ThermalMargin
+            | Self::PressureDrop
+            | Self::FanPower => ThermalQoiKind::TemperatureDifference,
         }
     }
 
     /// Parse from user-facing query name (accepting canonical or common aliases).
+    #[must_use]
     pub fn parse(name: &str) -> Option<Self> {
         let normalized = name.trim().to_lowercase();
         match normalized.as_str() {
@@ -126,9 +130,7 @@ impl QoiSemanticId {
                 Some(Self::PressureDrop)
             }
 
-            "airflow.fan_power" | "fan_power" | "fan_input_power" | "p_fan" => {
-                Some(Self::FanPower)
-            }
+            "airflow.fan_power" | "fan_power" | "fan_input_power" | "p_fan" => Some(Self::FanPower),
 
             "thermal.thermal_margin" | "thermal_margin" | "margin" | "junction_margin" => {
                 Some(Self::ThermalMargin)
@@ -160,6 +162,7 @@ pub enum OutputKind {
 
 impl OutputKind {
     /// Parse from wire string.
+    #[must_use]
     pub fn parse(s: &str) -> Self {
         match s.trim().to_lowercase().as_str() {
             "scalar" | "qoi" => Self::Scalar,
@@ -607,10 +610,7 @@ pub fn extract_registered_qois(
 
         // Finiteness validation
         if !value.is_finite() {
-            return Err(RegisteredQoiError::NonFiniteScalar {
-                semantic_id,
-                value,
-            });
+            return Err(RegisteredQoiError::NonFiniteScalar { semantic_id, value });
         }
 
         // Absolute zero validation

@@ -59,9 +59,9 @@ fn budget_exhausted_root_driver_logs_width_trajectory_and_refuses() {
     assert!(!report.complete);
     assert_eq!(report.width_trajectory.len(), report.boxes_examined);
     assert_eq!(
-            report.width_trajectory[0].to_bits(),
-            domain.width().to_bits()
-        );
+        report.width_trajectory[0].to_bits(),
+        domain.width().to_bits()
+    );
     assert!(
         report
             .width_trajectory

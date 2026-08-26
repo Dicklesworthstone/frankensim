@@ -791,9 +791,11 @@ pub fn accelerator_doctrine_markdown() -> Result<String, AcceleratorDoctrineErro
 }
 
 /// Schema for accelerator pilot decision receipts.
-pub const ACCELERATOR_PILOT_DECISION_SCHEMA: &str = "frankensim.govern.accelerator-pilot-decision.v1";
+pub const ACCELERATOR_PILOT_DECISION_SCHEMA: &str =
+    "frankensim.govern.accelerator-pilot-decision.v1";
 /// Authority string for accelerator pilot decision receipts.
-pub const ACCELERATOR_PILOT_DECISION_AUTHORITY: &str = "governance-accelerator-pilot-admission-decision";
+pub const ACCELERATOR_PILOT_DECISION_AUTHORITY: &str =
+    "governance-accelerator-pilot-admission-decision";
 /// No-claim boundary for accelerator pilot decision receipts.
 pub const ACCELERATOR_PILOT_DECISION_NO_CLAIM: &str = "a governance decision does not prove \
     scientific correctness or future production fitness; admission authorizes a feature-gated pilot experiment only";
@@ -845,17 +847,38 @@ impl AcceleratorPilotDecisionReceipt {
     pub fn to_json(&self) -> String {
         let mut out = String::with_capacity(1024);
         out.push_str("{\n");
-        out.push_str(&format!("  \"schema\": \"{ACCELERATOR_PILOT_DECISION_SCHEMA}\",\n"));
+        out.push_str(&format!(
+            "  \"schema\": \"{ACCELERATOR_PILOT_DECISION_SCHEMA}\",\n"
+        ));
         out.push_str(&format!("  \"decision_id\": \"{}\",\n", self.decision_id));
-        out.push_str(&format!("  \"profile_digest\": \"{}\",\n", self.profile_digest));
-        out.push_str(&format!("  \"selected_candidate_id\": \"{}\",\n", self.selected_candidate_id));
-        out.push_str(&format!("  \"kernel_family\": \"{}\",\n", self.kernel_family));
+        out.push_str(&format!(
+            "  \"profile_digest\": \"{}\",\n",
+            self.profile_digest
+        ));
+        out.push_str(&format!(
+            "  \"selected_candidate_id\": \"{}\",\n",
+            self.selected_candidate_id
+        ));
+        out.push_str(&format!(
+            "  \"kernel_family\": \"{}\",\n",
+            self.kernel_family
+        ));
         out.push_str(&format!("  \"decision\": \"{}\",\n", self.decision.code()));
-        out.push_str(&format!("  \"dependency_ruling\": \"{}\",\n", self.dependency_ruling));
-        out.push_str(&format!("  \"displacement_slot\": \"{}\",\n", self.displacement_slot));
+        out.push_str(&format!(
+            "  \"dependency_ruling\": \"{}\",\n",
+            self.dependency_ruling
+        ));
+        out.push_str(&format!(
+            "  \"displacement_slot\": \"{}\",\n",
+            self.displacement_slot
+        ));
         out.push_str(&format!("  \"summary\": \"{}\",\n", self.summary));
-        out.push_str(&format!("  \"authority\": \"{ACCELERATOR_PILOT_DECISION_AUTHORITY}\",\n"));
-        out.push_str(&format!("  \"no_claim\": \"{ACCELERATOR_PILOT_DECISION_NO_CLAIM}\"\n"));
+        out.push_str(&format!(
+            "  \"authority\": \"{ACCELERATOR_PILOT_DECISION_AUTHORITY}\",\n"
+        ));
+        out.push_str(&format!(
+            "  \"no_claim\": \"{ACCELERATOR_PILOT_DECISION_NO_CLAIM}\"\n"
+        ));
         out.push_str("}\n");
         out
     }

@@ -782,10 +782,13 @@ mod tests {
         assert_eq!((combine_product(&[]) + 0.0).to_bits(), 0.0f64.to_bits()); // +0 normalizes -0
         assert_eq!((combine_average(&[]) + 0.0).to_bits(), 0.0f64.to_bits());
         assert!(e_benjamini_hochberg(&[], 0.1).is_empty());
-        assert_eq!(combine_average(&[f64::NEG_INFINITY]), f64::NEG_INFINITY);
         assert_eq!(
-            combine_average(&[f64::NEG_INFINITY, f64::INFINITY]),
-            f64::INFINITY
+            combine_average(&[f64::NEG_INFINITY]).to_bits(),
+            f64::NEG_INFINITY.to_bits()
+        );
+        assert_eq!(
+            combine_average(&[f64::NEG_INFINITY, f64::INFINITY]).to_bits(),
+            f64::INFINITY.to_bits()
         );
     }
 

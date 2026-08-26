@@ -32,6 +32,7 @@ use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::Cx;
 use fs_material::state_point::IsotropicElasticStatePoint;
 use fs_modal::{SliceOptions, slice_window};
+use std::fmt::Write as _;
 
 use crate::linear3::{
     TetAssemblyBudget, TetElasticMaterial, TetLinearElasticProblem, TetMaterialField,
@@ -476,12 +477,9 @@ impl ValveCard {
     pub fn to_canonical_bytes(&self) -> Vec<u8> {
         let mut s = String::new();
         s.push_str("frankensim-valve-card-v1\n");
-        s.push_str(&format!("source_id\t{}\n", self.source_id));
-        s.push_str(&format!(
-            "material_identity\t{}\n",
-            self.material_identity.to_hex()
-        ));
-        s.push_str(&format!("mesh_digest\t{}\n", self.mesh_digest.to_hex()));
+        let _ = writeln!(s, "source_id\t{}", self.source_id);
+        let _ = writeln!(s, "material_identity\t{}", self.material_identity.to_hex());
+        let _ = writeln!(s, "mesh_digest\t{}", self.mesh_digest.to_hex());
         for (key, v) in [
             ("rest_gap_m", self.rest_gap_m),
             ("width_m", self.width_m),
@@ -493,20 +491,21 @@ impl ValveCard {
             ("loss_factor", self.loss_factor),
             ("total_mass_kg", self.total_mass_kg),
         ] {
-            s.push_str(&format!("{key}\t{v:e}\n"));
+            let _ = writeln!(s, "{key}\t{v:e}");
         }
-        s.push_str(&format!("modes\t{}\n", self.modes.len()));
+        let _ = writeln!(s, "modes\t{}", self.modes.len());
         for m in &self.modes {
-            s.push_str(&format!(
-                "mode\t{:e}\t{:e}\t{:e}\t{:e}\t{:e}\n",
+            let _ = writeln!(
+                s,
+                "mode\t{:e}\t{:e}\t{:e}\t{:e}\t{:e}",
                 m.frequency_hz,
                 m.mass_kg,
                 m.stiffness_n_m,
                 m.damping_n_s_m,
                 m.participation_sqrt_kg
-            ));
+            );
         }
-        s.push_str(&format!("identity\t{}\n", self.identity.to_hex()));
+        let _ = writeln!(s, "identity\t{}", self.identity.to_hex());
         s.into_bytes()
     }
 
@@ -516,17 +515,6 @@ impl ValveCard {
     /// # Errors
     /// [`ReduceError::Card`] naming the violated rule.
     pub fn from_canonical_bytes(bytes: &[u8]) -> Result<ValveCard, ReduceError> {
-        let text = core::str::from_utf8(bytes).map_err(|_| ReduceError::Card {
-            what: "card bytes are not UTF-8",
-        })?;
-        let lines: Vec<&str> = text.lines().collect();
-        let mut cursor = 0usize;
-        if lines.first().copied() != Some("frankensim-valve-card-v1") {
-            return Err(ReduceError::Card {
-                what: "schema line mismatch",
-            });
-        }
-        cursor += 1;
         fn take<'a>(
             lines: &[&'a str],
             cursor: &mut usize,
@@ -553,6 +541,17 @@ impl ValveCard {
                     what: "bad numeric field",
                 })
         }
+        let text = core::str::from_utf8(bytes).map_err(|_| ReduceError::Card {
+            what: "card bytes are not UTF-8",
+        })?;
+        let lines: Vec<&str> = text.lines().collect();
+        let mut cursor = 0usize;
+        if lines.first().copied() != Some("frankensim-valve-card-v1") {
+            return Err(ReduceError::Card {
+                what: "schema line mismatch",
+            });
+        }
+        cursor += 1;
         let source_id = take(&lines, &mut cursor, "source_id")?.to_string();
         let material_identity =
             ContentHash::from_hex(take(&lines, &mut cursor, "material_identity")?).ok_or(

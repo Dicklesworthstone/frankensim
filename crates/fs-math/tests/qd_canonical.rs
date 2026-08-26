@@ -136,10 +136,12 @@ fn test_checked_construction_unordered_refusal() {
 #[test]
 fn test_checked_construction_zero_ordering_refusal() {
     // Zero followed by non-zero
-    let err = Qd::from_parts_checked(0.0, 1e-20, 0.0, 0.0).expect_err("must refuse non-zero after 0");
+    let err =
+        Qd::from_parts_checked(0.0, 1e-20, 0.0, 0.0).expect_err("must refuse non-zero after 0");
     assert_eq!(err, QdError::InvalidZeroRepresentation);
 
-    let err2 = Qd::from_parts_checked(1.0, 0.0, 1e-35, 0.0).expect_err("must refuse non-zero after 0");
+    let err2 =
+        Qd::from_parts_checked(1.0, 0.0, 1e-35, 0.0).expect_err("must refuse non-zero after 0");
     assert_eq!(err2, QdError::InvalidZeroRepresentation);
 }
 
@@ -280,7 +282,10 @@ fn test_corrupt_bytes_refusal() {
     bad_bytes[8..16].copy_from_slice(&(1.0_f64).to_le_bytes());
 
     let res = Qd::from_bytes_le(&bad_bytes);
-    assert!(res.is_err(), "overlapping components from bytes must be rejected");
+    assert!(
+        res.is_err(),
+        "overlapping components from bytes must be rejected"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -299,7 +304,10 @@ fn test_sqrt_machin_precision() {
     let sqrt3 = Qd::from_f64(3.0).sqrt();
     let sq3 = sqrt3 * sqrt3;
     let diff3 = (sq3 - Qd::from_f64(3.0)).abs();
-    assert!(diff3.c0 < 1e-62, "sqrt(3)^2 error must be < 1e-62: {diff3:?}");
+    assert!(
+        diff3.c0 < 1e-62,
+        "sqrt(3)^2 error must be < 1e-62: {diff3:?}"
+    );
 }
 
 #[test]
@@ -391,12 +399,20 @@ fn test_commutativity_and_distributivity_laws() {
         // Commutativity: a + b == b + a
         let sum_ab = a + b;
         let sum_ba = b + a;
-        assert_eq!(sum_ab.components(), sum_ba.components(), "a+b must equal b+a");
+        assert_eq!(
+            sum_ab.components(),
+            sum_ba.components(),
+            "a+b must equal b+a"
+        );
 
         // Commutativity: a * b == b * a
         let mul_ab = a * b;
         let mul_ba = b * a;
-        assert_eq!(mul_ab.components(), mul_ba.components(), "a*b must equal b*a");
+        assert_eq!(
+            mul_ab.components(),
+            mul_ba.components(),
+            "a*b must equal b*a"
+        );
 
         // Distributivity residual: a * (b + c) ≈ a*b + a*c
         let lhs = a * (b + c);
@@ -428,7 +444,12 @@ fn test_checked_arithmetic_outcomes_and_refusals() {
 
     // Division by zero refusal
     let err_zero = a.checked_div(Qd::ZERO).expect_err("div 0 must refuse");
-    assert_eq!(err_zero, QdOpError::InvalidInput { reason: "division by zero" });
+    assert_eq!(
+        err_zero,
+        QdOpError::InvalidInput {
+            reason: "division by zero"
+        }
+    );
 }
 
 #[test]
@@ -453,7 +474,9 @@ fn test_checked_sqrt_and_escalation_primitives() {
     assert_eq!(sqrt_zero, QdOpOutcome::CorrectlyRounded(Qd::ZERO));
 
     // Negative sqrt refusal
-    let err_neg = Qd::NEG_ONE.checked_sqrt().expect_err("sqrt negative must refuse");
+    let err_neg = Qd::NEG_ONE
+        .checked_sqrt()
+        .expect_err("sqrt negative must refuse");
     assert!(matches!(err_neg, QdOpError::InvalidInput { .. }));
 
     // Exact square

@@ -5,12 +5,12 @@
 //! battery: this file owns empty/min/max boundaries, cross-version
 //! migration refusal, byte-stable encodings, and stable diagnostic text.
 
+use fs_blake3::{ContentHash, hash_bytes};
 use fs_la::canonical_qr::{
-    ArithmeticMode, CertifiedRankProfile, CanonicalQrOutcome, CanonicalQrPolicy, ClaimTier,
-    DeterminismClass, ErrorBudget, NoClaimReason, OutcomeAuthority, PivotClass, PolicyError,
-    RankTolerance, ReplayIdentity, CANONICAL_QR_SCHEMA_VERSION,
+    ArithmeticMode, CANONICAL_QR_SCHEMA_VERSION, CanonicalQrOutcome, CanonicalQrPolicy,
+    CertifiedRankProfile, ClaimTier, DeterminismClass, ErrorBudget, NoClaimReason,
+    OutcomeAuthority, PivotClass, PolicyError, RankTolerance, ReplayIdentity,
 };
-use fs_blake3::{hash_bytes, ContentHash};
 
 fn base_policy() -> CanonicalQrPolicy {
     CanonicalQrPolicy::new(
@@ -57,10 +57,16 @@ fn zero_dimension_outcome_is_admissible() {
 // ---------------------------------------------------------------------------
 #[test]
 fn budget_window_edges() {
-    assert_eq!(ErrorBudget::relative(0.0), Err(PolicyError::BudgetOutOfRange));
+    assert_eq!(
+        ErrorBudget::relative(0.0),
+        Err(PolicyError::BudgetOutOfRange)
+    );
     assert!(ErrorBudget::relative(f64::MIN_POSITIVE).is_ok());
     assert!(ErrorBudget::relative(1.0).is_ok());
-    assert_eq!(ErrorBudget::relative(1.0 + f64::EPSILON), Err(PolicyError::BudgetOutOfRange));
+    assert_eq!(
+        ErrorBudget::relative(1.0 + f64::EPSILON),
+        Err(PolicyError::BudgetOutOfRange)
+    );
     assert_eq!(
         ErrorBudget::relative(-1.0),
         Err(PolicyError::BudgetOutOfRange)
@@ -139,7 +145,9 @@ fn stale_identities_refuse() {
     stale.arithmetic_mode = ArithmeticMode::Binary64DirectedOutward;
     assert_eq!(
         stale.validate(&policy),
-        Err(PolicyError::StaleIdentity { field: "arithmetic_mode" })
+        Err(PolicyError::StaleIdentity {
+            field: "arithmetic_mode"
+        })
     );
     // Current-mode identity validates.
     identity(None).validate(&policy).expect("coherent");

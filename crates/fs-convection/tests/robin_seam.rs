@@ -123,6 +123,7 @@ fn three_flow_rate_heatsink_slab_keeps_correlation_evidence_at_the_robin_seam() 
             solve(
                 cx,
                 ConductionProblem {
+                    element_materials: None,
                     mesh: &mesh,
                     boundary: &boundary,
                     material: &material,

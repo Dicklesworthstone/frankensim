@@ -25,7 +25,7 @@ const DT: f64 = 1.0 / 120.0;
 /// Lifting line at z = 1 m over the plane z = 0; wake convects
 /// downstream and slightly UP so every node stays strictly above.
 fn line_at(z: f64) -> Vec<[f64; 3]> {
-    (0..=8).map(|i| [0.0, i as f64 - 4.0, z]).collect()
+    (0..=8).map(|i| [0.0, f64::from(i) - 4.0, z]).collect()
 }
 
 fn flying_wake(rows: usize) -> FilamentWake {
@@ -37,7 +37,7 @@ fn flying_wake(rows: usize) -> FilamentWake {
     let mut wake = FilamentWake::new(cert, line_at(1.0)).unwrap();
     let g: Vec<f64> = (0..8)
         .map(|s| {
-            let y = (s as f64 - 3.5) / 4.0;
+            let y = (f64::from(s) - 3.5) / 4.0;
             5.0 * (1.0 - y * y).max(0.0)
         })
         .collect();
@@ -62,7 +62,7 @@ fn v06a_on_plane_normal_velocity_cancels() {
     let mut worst = 0.0f64;
     for i in 0..5 {
         for j in 0..3 {
-            let p = [-6.0 + 3.0 * i as f64, -3.0 + 3.0 * j as f64, 0.0];
+            let p = [-6.0 + 3.0 * f64::from(i), -3.0 + 3.0 * f64::from(j), 0.0];
             let v = grounded_hybrid_velocity(&near, &far, &images, p);
             let rel = v[2].abs() / mag(v).max(1e-300);
             assert!(rel < 1e-9, "normal residual at ({},{}) = {rel}", p[0], p[1]);
@@ -257,9 +257,9 @@ fn ground_effect_direction_and_determinism_golden() {
         let mut b = Vec::new();
         for i in 0..4 {
             let p = [
-                0.5 * i as f64 - 1.0,
-                0.7 * i as f64 - 1.0,
-                0.6 + 0.2 * i as f64,
+                0.5 * f64::from(i) - 1.0,
+                0.7 * f64::from(i) - 1.0,
+                0.6 + 0.2 * f64::from(i),
             ];
             let v = grounded_hybrid_velocity(&near, &far, &images, p);
             for c in v {

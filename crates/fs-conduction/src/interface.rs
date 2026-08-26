@@ -1140,7 +1140,7 @@ impl ThermalInterfaces {
         for surface in &self.surfaces {
             for face in &surface.faces {
                 let conductance_density = 1.0 / face.resistance.value_m2_k_per_w;
-                if face_index % crate::assemble::ASSEMBLY_TILE == 0 {
+                if face_index.is_multiple_of(crate::assemble::ASSEMBLY_TILE) {
                     cx.checkpoint().map_err(|_| ConductionError::Cancelled {
                         stage: "assemble-interfaces",
                         at: face_index,

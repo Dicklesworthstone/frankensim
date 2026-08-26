@@ -245,6 +245,7 @@ fn ob_003_continuation_traverses_the_duffing_folds() {
         initial_step: 0.02,
         min_step: 1.0e-5,
         hb: HbBudget {
+            deflate_equilibrium: false,
             harmonics: 7,
             max_newton: 25,
             tolerance: 1.0e-9,
@@ -397,6 +398,7 @@ fn ob_005_refusals_fire_by_name() {
         HbAnchor::Autonomous { omega_guess: 0.94 },
         2.0,
         &HbBudget {
+            deflate_equilibrium: false,
             harmonics: 17,
             max_newton: 2,
             tolerance: 1.0e-14,

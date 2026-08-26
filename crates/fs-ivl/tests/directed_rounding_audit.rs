@@ -276,10 +276,7 @@ fn g3_ordering_involution_reflection_and_pow2_scaling_laws() {
         // Involution (value equality: +0/-0 collapse is correct behavior).
         if up.is_finite() {
             let down = fs_math::next_down(up);
-            assert!(
-                same(down, x) || down == x,
-                "involution at {x:e}"
-            );
+            assert!(same(down, x) || down == x, "involution at {x:e}");
         }
         // Sign reflection: next_up(-x) == -next_down(x), signed zeros included.
         assert!(
@@ -472,7 +469,11 @@ fn g3_nudge_mutants_are_killed_by_the_model_battery() {
     // caught by the same harness that passes the real pair. The ledger rows
     // are the retained evidence for .3.7's end-to-end tripwire campaign.
     /// Local alias keeps the clippy type-complexity gate readable.
-    type F64Mutant = (&'static str, Box<dyn Fn(f64) -> f64>, Box<dyn Fn(f64) -> f64>);
+    type F64Mutant = (
+        &'static str,
+        Box<dyn Fn(f64) -> f64>,
+        Box<dyn Fn(f64) -> f64>,
+    );
     let mutants: Vec<F64Mutant> = vec![
         (
             "reversed-directions",

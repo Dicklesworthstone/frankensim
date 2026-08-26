@@ -3,9 +3,9 @@
 //! partnership and reality-chart registration uncertainty gate.
 
 use fs_govern::horizon_metrology::{
-    evaluate_trigger_11, mint_trigger_11_receipt, MetrologyAgreement, MetrologyDisposition,
-    Proposal11Premises, RegistrationUncertainty, ScannedPartSpecimen, Trigger11Receipt,
-    Trigger11Refusal, Trigger11Verdict, MAX_UNCERTAINTY_RATIO,
+    MAX_UNCERTAINTY_RATIO, MetrologyAgreement, MetrologyDisposition, Proposal11Premises,
+    RegistrationUncertainty, ScannedPartSpecimen, Trigger11Receipt, Trigger11Refusal,
+    Trigger11Verdict, evaluate_trigger_11, mint_trigger_11_receipt,
 };
 
 fn valid_agreement() -> MetrologyAgreement {
@@ -45,7 +45,10 @@ fn gate_activates_when_agreement_is_genuine_and_uncertainty_is_below_tolerance()
         registration: valid_registration(10e-6), // 10 microns < 50 microns
         point_sensor_fallback_active: true,
     };
-    assert_eq!(evaluate_trigger_11(&premises), Ok(Trigger11Verdict::Activate));
+    assert_eq!(
+        evaluate_trigger_11(&premises),
+        Ok(Trigger11Verdict::Activate)
+    );
 
     let receipt = mint_trigger_11_receipt(Some(&premises));
     assert_eq!(receipt.disposition, MetrologyDisposition::Activate);
@@ -58,11 +61,14 @@ fn gate_activates_when_agreement_is_genuine_and_uncertainty_is_below_tolerance()
 fn gate_defers_when_uncertainty_exceeds_tolerance() {
     let premises = Proposal11Premises {
         agreement: Some(valid_agreement()),
-        specimen: valid_specimen(), // 50 microns
+        specimen: valid_specimen(),              // 50 microns
         registration: valid_registration(60e-6), // 60 microns > 50 microns
         point_sensor_fallback_active: true,
     };
-    assert_eq!(evaluate_trigger_11(&premises), Ok(Trigger11Verdict::FallbackPointSensors));
+    assert_eq!(
+        evaluate_trigger_11(&premises),
+        Ok(Trigger11Verdict::FallbackPointSensors)
+    );
 
     let receipt = mint_trigger_11_receipt(Some(&premises));
     assert_eq!(receipt.disposition, MetrologyDisposition::Defer);

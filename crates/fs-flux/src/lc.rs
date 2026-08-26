@@ -27,10 +27,11 @@ pub struct TeslaCoilResult {
 }
 
 /// Compute one-step discharge properties for a Tesla coil.
+#[must_use]
 pub fn step_tesla_coil(params: &TeslaCoilParams) -> TeslaCoilResult {
-    let primary_l = 0.012; // mH
-    let secondary_l = 85.0; // mH
-    let transformation_ratio = (secondary_l / primary_l as f64).sqrt();
+    let primary_l: f64 = 0.012; // mH
+    let secondary_l: f64 = 85.0; // mH
+    let transformation_ratio = (secondary_l / primary_l).sqrt();
     let k = 0.18;
     let secondary_potential_mv =
         ((params.input_kv * transformation_ratio * k * params.q_factor.sqrt()) / 1000.0)

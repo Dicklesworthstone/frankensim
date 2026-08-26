@@ -40,7 +40,7 @@ fn step_wake(rows: usize) -> FilamentWake {
     let mut wake = FilamentWake::new(cert, line(8)).unwrap();
     let g: Vec<f64> = (0..8)
         .map(|s| {
-            let y = (s as f64 - 3.5) / 4.0;
+            let y = (f64::from(s) - 3.5) / 4.0;
             5.0 * (1.0 - y * y).max(0.0)
         })
         .collect();
@@ -66,7 +66,7 @@ fn multipole_converges_to_exact_with_distance() {
     let base = 3.0 * cell.effective_radius_m();
     let mut errs = Vec::new();
     for k in 0..2 {
-        let d = base * (1 << k) as f64;
+        let d = base * f64::from(1 << k);
         let p = [
             cell.centroid[0] + d * dir[0],
             cell.centroid[1] + d * dir[1],
@@ -217,7 +217,7 @@ fn audited_prune_lawful_and_certificate_falsifier() {
         !receipt.pruned.is_empty(),
         "the scenario must actually prune"
     );
-    assert!(receipt.kept + receipt.pruned.len() == far_full.cells.len());
+    assert_eq!(receipt.kept + receipt.pruned.len(), far_full.cells.len());
     // Every audit row carries its evidence, and every exact spot-check
     // sits below tol AND below its own bound (per-item oracles).
     for r in &receipt.pruned {
@@ -294,7 +294,7 @@ fn v10_receipt_vs_wakeref_dense_reference() {
     let mut wake = FilamentWake::new(cert, line(8)).unwrap();
     let g: Vec<f64> = (0..8)
         .map(|s| {
-            let y = (s as f64 - 3.5) / 4.0;
+            let y = (f64::from(s) - 3.5) / 4.0;
             5.0 * (1.0 - y * y).max(0.0)
         })
         .collect();

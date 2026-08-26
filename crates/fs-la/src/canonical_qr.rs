@@ -89,19 +89,28 @@ impl fmt::Display for PolicyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidScaleRelativeFactor => {
-                write!(f, "tolerance/budget must be a positive finite scale-relative factor")
+                write!(
+                    f,
+                    "tolerance/budget must be a positive finite scale-relative factor"
+                )
             }
             Self::BudgetOutOfRange => write!(f, "budget outside its admissible window"),
             Self::UnknownSchemaVersion(v) => write!(f, "unknown canonical-qr schema version {v}"),
             Self::MalformedEncoding => write!(f, "malformed canonical-qr encoding"),
             Self::ShapeMismatch { expected, got } => {
-                write!(f, "R shape mismatch: expected {expected} entries, got {got}")
+                write!(
+                    f,
+                    "R shape mismatch: expected {expected} entries, got {got}"
+                )
             }
             Self::NotUpperTriangular { row, col } => {
                 write!(f, "R[{row}][{col}] below diagonal must be exactly zero")
             }
             Self::StrictlyNegativeDiagonal { index } => {
-                write!(f, "R diagonal [{index}] strictly negative; flip law violated")
+                write!(
+                    f,
+                    "R diagonal [{index}] strictly negative; flip law violated"
+                )
             }
             Self::UncertifiedClaim => write!(
                 f,
@@ -135,18 +144,24 @@ impl RankTolerance {
     /// Checked construction from a scale-relative factor (multiples of the
     /// column-norm reference, not of unity).
     pub fn relative(scale_relative: f64) -> Result<Self, PolicyError> {
-        if !(scale_relative.is_finite() && scale_relative > EPS64 && scale_relative <= Self::WINDOW_UPPER)
+        if !(scale_relative.is_finite()
+            && scale_relative > EPS64
+            && scale_relative <= Self::WINDOW_UPPER)
         {
             return Err(PolicyError::InvalidScaleRelativeFactor);
         }
-        Ok(Self { relative: scale_relative })
+        Ok(Self {
+            relative: scale_relative,
+        })
     }
 
     /// Documented default: √ε₆₄, the classical square-root-of-roundoff rank
     /// heuristic expressed RELATIVELY.
     #[must_use]
     pub fn default_f64() -> Self {
-        Self { relative: EPS64.sqrt() }
+        Self {
+            relative: EPS64.sqrt(),
+        }
     }
 
     /// The stored scale-relative factor (inspection only; there is no way to
@@ -166,13 +181,14 @@ pub struct ErrorBudget {
 impl ErrorBudget {
     /// Admissible window: (0, 1].
     pub fn relative(residual_relative: f64) -> Result<Self, PolicyError> {
-        if !(residual_relative.is_finite() && residual_relative > 0.0 && residual_relative <= 1.0)
-        {
+        if !(residual_relative.is_finite() && residual_relative > 0.0 && residual_relative <= 1.0) {
             return Err(PolicyError::BudgetOutOfRange);
         }
         Ok(Self { residual_relative })
     }
 
+    /// The stored relative residual factor (inspection counterpart of
+    /// [`ErrorBudget::relative`]).
     #[must_use]
     pub fn factor(&self) -> f64 {
         self.residual_relative
@@ -264,7 +280,9 @@ impl OutcomeAuthority {
     pub fn from_tag(bytes: [u8; 2]) -> Option<Self> {
         match bytes {
             [0, t] => ClaimTier::from_tag(t).map(Self::Certified),
-            [1, 0] => Some(Self::NoClaim(NoClaimReason::RankDeficientCrossScheduleEquality)),
+            [1, 0] => Some(Self::NoClaim(
+                NoClaimReason::RankDeficientCrossScheduleEquality,
+            )),
             [1, 1] => Some(Self::NoClaim(NoClaimReason::AmbiguousRankBoundary)),
             [1, 2] => Some(Self::NoClaim(NoClaimReason::NonFiniteInput)),
             [1, 3] => Some(Self::NoClaim(NoClaimReason::UnsupportedArithmeticMode)),
@@ -362,36 +380,46 @@ impl CanonicalQrPolicy {
         })
     }
 
+    /// The scale-relative rank threshold this policy carries.
     #[must_use]
     pub fn rank_tolerance(&self) -> RankTolerance {
         self.rank_tolerance
     }
 
+    /// The relative residual/error budget this policy carries.
     #[must_use]
     pub fn error_budget(&self) -> ErrorBudget {
         self.error_budget
     }
 
+    /// The determinism class this policy pins (same-ISA bit-stable today).
     #[must_use]
     pub fn determinism(&self) -> DeterminismClass {
         self.determinism
     }
 
+    /// The arithmetic mode this policy requests (admitted iff
+    /// [`ArithmeticMode::admitted`]).
     #[must_use]
     pub fn arithmetic_mode(&self) -> ArithmeticMode {
         self.mode
     }
 
+    /// The deterministic tie-break convention of this policy.
     #[must_use]
     pub fn tie_policy(&self) -> TiePolicy {
         self.ties
     }
 
+    /// The frozen theorem-tier version pinned at construction
+    /// ([`CANONICAL_QR_THEOREM_VERSION`]).
     #[must_use]
     pub fn theorem_version(&self) -> u32 {
         self.theorem_version
     }
 
+    /// The wire/codec encoding version pinned at construction
+    /// ([`CANONICAL_QR_SCHEMA_VERSION`]).
     #[must_use]
     pub fn schema_version(&self) -> u32 {
         self.schema_version
@@ -426,11 +454,14 @@ impl CanonicalQrPolicy {
         }
         let theorem = u32::from_le_bytes(bytes[4..8].try_into().expect("framed"));
         if theorem != CANONICAL_QR_THEOREM_VERSION {
-            return Err(PolicyError::StaleIdentity { field: "theorem_version" });
+            return Err(PolicyError::StaleIdentity {
+                field: "theorem_version",
+            });
         }
         let tol = f64::from_le_bytes(bytes[8..16].try_into().expect("framed"));
         let budget = f64::from_le_bytes(bytes[16..24].try_into().expect("framed"));
-        let determinism = DeterminismClass::from_tag_u8(bytes[24]).ok_or(PolicyError::MalformedEncoding)?;
+        let determinism =
+            DeterminismClass::from_tag_u8(bytes[24]).ok_or(PolicyError::MalformedEncoding)?;
         let mode = ArithmeticMode::from_tag(bytes[25]).ok_or(PolicyError::MalformedEncoding)?;
         let ties = TiePolicy::from_tag_u8(bytes[26]).ok_or(PolicyError::MalformedEncoding)?;
         Ok(Self {
@@ -533,11 +564,14 @@ impl CertifiedRankProfile {
         Ok(Self { rank, pivots })
     }
 
+    /// Number of [`PivotClass::Nonzero`] entries, enforced equal by
+    /// [`CertifiedRankProfile::checked`].
     #[must_use]
     pub fn rank(&self) -> usize {
         self.rank
     }
 
+    /// Per-diagonal-position classes, index `i` describing pivot `i`.
     #[must_use]
     pub fn pivots(&self) -> &[PivotClass] {
         &self.pivots
@@ -557,7 +591,9 @@ impl CertifiedRankProfile {
 
     fn decode_from(bytes: &[u8], cursor: &mut usize) -> Result<Self, PolicyError> {
         let end = *cursor + 8;
-        let len_bytes = bytes.get(*cursor..end).ok_or(PolicyError::MalformedEncoding)?;
+        let len_bytes = bytes
+            .get(*cursor..end)
+            .ok_or(PolicyError::MalformedEncoding)?;
         let len = u64::from_le_bytes(len_bytes.try_into().expect("framed")) as usize;
         // Refuse giant infallible allocations: length must fit the payload.
         if bytes.len() < end + len {
@@ -594,13 +630,19 @@ impl ReplayIdentity {
     /// Fail-closed coherence check against this build's versions.
     pub fn validate(&self, policy: &CanonicalQrPolicy) -> Result<(), PolicyError> {
         if policy.theorem_version() != CANONICAL_QR_THEOREM_VERSION {
-            return Err(PolicyError::StaleIdentity { field: "theorem_version" });
+            return Err(PolicyError::StaleIdentity {
+                field: "theorem_version",
+            });
         }
         if policy.schema_version() != CANONICAL_QR_SCHEMA_VERSION {
-            return Err(PolicyError::StaleIdentity { field: "schema_version" });
+            return Err(PolicyError::StaleIdentity {
+                field: "schema_version",
+            });
         }
         if policy.arithmetic_mode() != self.arithmetic_mode {
-            return Err(PolicyError::StaleIdentity { field: "arithmetic_mode" });
+            return Err(PolicyError::StaleIdentity {
+                field: "arithmetic_mode",
+            });
         }
         Ok(())
     }
@@ -650,13 +692,22 @@ impl CanonicalQrOutcome {
         replay: ReplayIdentity,
     ) -> Result<Self, PolicyError> {
         let Some(expected) = n.checked_mul(n) else {
-            return Err(PolicyError::ShapeMismatch { expected: usize::MAX, got: r_factor.len() });
+            return Err(PolicyError::ShapeMismatch {
+                expected: usize::MAX,
+                got: r_factor.len(),
+            });
         };
         if r_factor.len() != expected {
-            return Err(PolicyError::ShapeMismatch { expected, got: r_factor.len() });
+            return Err(PolicyError::ShapeMismatch {
+                expected,
+                got: r_factor.len(),
+            });
         }
         if rank_profile.pivots().len() != n {
-            return Err(PolicyError::ShapeMismatch { expected: n, got: rank_profile.pivots().len() });
+            return Err(PolicyError::ShapeMismatch {
+                expected: n,
+                got: rank_profile.pivots().len(),
+            });
         }
         for i in 0..n {
             if r_factor[i * n + i] < 0.0 {
@@ -676,13 +727,20 @@ impl CanonicalQrOutcome {
             return Err(PolicyError::InvalidScaleRelativeFactor);
         }
         // Non-forgeability: certified tiers demand an independent receipt.
-        if matches!(authority, OutcomeAuthority::Certified(_)) && replay.certificate_ref.is_none()
-        {
+        if matches!(authority, OutcomeAuthority::Certified(_)) && replay.certificate_ref.is_none() {
             return Err(PolicyError::UncertifiedClaim);
         }
-        Ok(Self { n, r_factor, rank_profile, authority, replay })
+        Ok(Self {
+            n,
+            r_factor,
+            rank_profile,
+            authority,
+            replay,
+        })
     }
 
+    /// Order of the factored square system; `r_factor` holds exactly n²
+    /// row-major entries.
     #[must_use]
     pub fn n(&self) -> usize {
         self.n
@@ -694,16 +752,21 @@ impl CanonicalQrOutcome {
         &self.r_factor
     }
 
+    /// The certified per-pivot classification behind this result.
     #[must_use]
     pub fn rank_profile(&self) -> &CertifiedRankProfile {
         &self.rank_profile
     }
 
+    /// The honest authority statement: a certified tier (receipt-bound) or
+    /// a typed no-claim reason.
     #[must_use]
     pub fn authority(&self) -> OutcomeAuthority {
         self.authority
     }
 
+    /// Identity binding this result to its input, tree, mode, versions,
+    /// and (when present) checker receipt.
     #[must_use]
     pub fn replay(&self) -> &ReplayIdentity {
         &self.replay
@@ -713,7 +776,9 @@ impl CanonicalQrOutcome {
     /// row-major order, profile, authority tags, identity fields.
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(16 + self.r_factor.len() * 8 + self.rank_profile.pivots().len() + 96);
+        let mut out = Vec::with_capacity(
+            16 + self.r_factor.len() * 8 + self.rank_profile.pivots().len() + 96,
+        );
         out.extend_from_slice(&(self.n as u64).to_le_bytes());
         for v in &self.r_factor {
             out.extend_from_slice(&v.to_le_bytes());
@@ -742,11 +807,26 @@ mod tests {
 
     #[test]
     fn rank_tolerance_rejects_absolute_and_degenerate_values() {
-        assert_eq!(RankTolerance::relative(f64::NAN), Err(PolicyError::InvalidScaleRelativeFactor));
-        assert_eq!(RankTolerance::relative(f64::INFINITY), Err(PolicyError::InvalidScaleRelativeFactor));
-        assert_eq!(RankTolerance::relative(0.0), Err(PolicyError::InvalidScaleRelativeFactor));
-        assert_eq!(RankTolerance::relative(-1e-9), Err(PolicyError::InvalidScaleRelativeFactor));
-        assert_eq!(RankTolerance::relative(EPS64), Err(PolicyError::InvalidScaleRelativeFactor));
+        assert_eq!(
+            RankTolerance::relative(f64::NAN),
+            Err(PolicyError::InvalidScaleRelativeFactor)
+        );
+        assert_eq!(
+            RankTolerance::relative(f64::INFINITY),
+            Err(PolicyError::InvalidScaleRelativeFactor)
+        );
+        assert_eq!(
+            RankTolerance::relative(0.0),
+            Err(PolicyError::InvalidScaleRelativeFactor)
+        );
+        assert_eq!(
+            RankTolerance::relative(-1e-9),
+            Err(PolicyError::InvalidScaleRelativeFactor)
+        );
+        assert_eq!(
+            RankTolerance::relative(EPS64),
+            Err(PolicyError::InvalidScaleRelativeFactor)
+        );
         assert!(RankTolerance::relative(RankTolerance::WINDOW_UPPER).is_ok());
         assert!(RankTolerance::relative(10.0).is_ok());
     }
@@ -764,10 +844,16 @@ mod tests {
         let bytes = policy.encode();
         assert_eq!(CanonicalQrPolicy::decode(&bytes), Ok(policy.clone()));
         // Truncation and trailing bytes refuse.
-        assert_eq!(CanonicalQrPolicy::decode(&bytes[..bytes.len() - 1]), Err(PolicyError::MalformedEncoding));
+        assert_eq!(
+            CanonicalQrPolicy::decode(&bytes[..bytes.len() - 1]),
+            Err(PolicyError::MalformedEncoding)
+        );
         let mut trailing = bytes.clone();
         trailing.push(0);
-        assert_eq!(CanonicalQrPolicy::decode(&trailing), Err(PolicyError::MalformedEncoding));
+        assert_eq!(
+            CanonicalQrPolicy::decode(&trailing),
+            Err(PolicyError::MalformedEncoding)
+        );
         // Bit-flipped tolerance revalidates through the checked constructor:
         // byte 15 carries the LE f64 sign/exponent high bits of the
         // tolerance field, so this flip makes it negative.
@@ -853,25 +939,49 @@ mod tests {
 
         // Wrong length refuses.
         assert!(matches!(
-            CanonicalQrOutcome::checked(vec![1.0], n, profile.clone(), OutcomeAuthority::NoClaim(NoClaimReason::RankDeficientCrossScheduleEquality), identity.clone()),
+            CanonicalQrOutcome::checked(
+                vec![1.0],
+                n,
+                profile.clone(),
+                OutcomeAuthority::NoClaim(NoClaimReason::RankDeficientCrossScheduleEquality),
+                identity.clone()
+            ),
             Err(PolicyError::ShapeMismatch { .. })
         ));
         // Lower-triangular dirt refuses.
         let dirty = vec![1.0, 0.5, 1e-30, 0.0];
         assert_eq!(
-            CanonicalQrOutcome::checked(dirty, n, profile.clone(), OutcomeAuthority::NoClaim(NoClaimReason::RankDeficientCrossScheduleEquality), identity.clone()),
+            CanonicalQrOutcome::checked(
+                dirty,
+                n,
+                profile.clone(),
+                OutcomeAuthority::NoClaim(NoClaimReason::RankDeficientCrossScheduleEquality),
+                identity.clone()
+            ),
             Err(PolicyError::NotUpperTriangular { row: 1, col: 0 })
         );
         // Strictly-negative diagonal refuses.
         let neg = vec![-1.0, 0.5, 0.0, -2.0];
         assert_eq!(
-            CanonicalQrOutcome::checked(neg, n, profile.clone(), OutcomeAuthority::NoClaim(NoClaimReason::RankDeficientCrossScheduleEquality), identity.clone()),
+            CanonicalQrOutcome::checked(
+                neg,
+                n,
+                profile.clone(),
+                OutcomeAuthority::NoClaim(NoClaimReason::RankDeficientCrossScheduleEquality),
+                identity.clone()
+            ),
             Err(PolicyError::StrictlyNegativeDiagonal { index: 0 })
         );
         // Non-finite entries refuse.
         let nan = vec![1.0, f64::NAN, 0.0, 0.0];
         assert!(matches!(
-            CanonicalQrOutcome::checked(nan, n, profile.clone(), OutcomeAuthority::NoClaim(NoClaimReason::NonFiniteInput), identity.clone()),
+            CanonicalQrOutcome::checked(
+                nan,
+                n,
+                profile.clone(),
+                OutcomeAuthority::NoClaim(NoClaimReason::NonFiniteInput),
+                identity.clone()
+            ),
             Err(PolicyError::InvalidScaleRelativeFactor)
         ));
         // Valid no-claim outcome admits.
@@ -950,6 +1060,9 @@ mod tests {
         // Certificate removal moves the identity (absent ≠ present).
         assert_ne!(mk(None, "tree").composite_digest(), d0);
         // Tree change moves the identity.
-        assert_ne!(mk(Some(fs_blake3::hash_bytes(b"c")), "other").composite_digest(), d0);
+        assert_ne!(
+            mk(Some(fs_blake3::hash_bytes(b"c")), "other").composite_digest(),
+            d0
+        );
     }
 }

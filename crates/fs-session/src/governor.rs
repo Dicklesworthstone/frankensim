@@ -12,12 +12,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-pub(crate) mod recovery;
 pub(crate) mod freeze_receipt;
+pub(crate) mod recovery;
 
 pub use freeze_receipt::{
-    RecordedSnapshotFreezeReceipt, SnapshotFreezePublicationDisposition,
-    SnapshotFreezeReceiptWrite,
+    RecordedSnapshotFreezeReceipt, SnapshotFreezePublicationDisposition, SnapshotFreezeReceiptWrite,
 };
 /// Hard-bound ratio: past 6/5 of a grant the session pauses. Float and exact
 /// integer resource paths derive from this one policy definition.
@@ -6606,13 +6605,12 @@ impl Governor {
         {
             return Err(SessionError::ResumeAcknowledgementMismatch { id: session });
         }
-        let entry = g
-            .snapshot_freeze_gates
-            .entry(session)
-            .or_insert(freeze_receipt::SnapshotFreezeGateState::AwaitReceipt {
+        let entry = g.snapshot_freeze_gates.entry(session).or_insert(
+            freeze_receipt::SnapshotFreezeGateState::AwaitReceipt {
                 request_ordinal: completed.completion_ordinal,
                 acknowledgement_hash: acknowledgement.content_hash,
-            });
+            },
+        );
         match entry {
             freeze_receipt::SnapshotFreezeGateState::AwaitReceipt {
                 request_ordinal,
@@ -6691,12 +6689,8 @@ impl Governor {
                 });
             }
         }
-        freeze_receipt::validate_binding(
-            self.id,
-            session,
-            freeze,
-        )
-        .map_err(|(_field, error)| error)?;
+        freeze_receipt::validate_binding(self.id, session, freeze)
+            .map_err(|(_field, error)| error)?;
         let ledger_scope = g
             .tokens
             .get(&session)

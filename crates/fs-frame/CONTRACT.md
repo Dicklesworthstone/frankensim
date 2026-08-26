@@ -67,6 +67,7 @@ their own battery: fs-truss (layout LP + sizing), fs-solid/fs-material
 - `cvar::cvar_mass_min` → `CvarDesign`: Rockafellar–Uryasev empirical
   CVaR from `fs-robust`, bisection on the section scale (monotone at smoke
   scale), catalog UP-snap with an independent CVaR re-check.
+  Non-finite or negative drift limits refuse before ensemble realization.
   `ensemble_cvar` exposes the monotonicity probe. These smoke-tier
   orchestrators generate their own finite, non-empty loss sets and treat a
   canonical risk-algebra refusal as an internal programmer-contract defect.
@@ -118,8 +119,10 @@ not publish a partial layout. Direct empirical-CVaR calls return
 `RobustError`; smoke-tier orchestration contracts still panic with teaching
 messages when internally generated losses violate that contract, an ensemble
 spec is malformed, or a CVaR study is infeasible (the drill gates the
-diagnostic). Statistical outputs carry their own uncertainty: the CS radius and
-stopping state ARE the answer's quality statement.
+diagnostic). The fallible mass-minimization surface returns
+`FrameCvarError::InvalidLimit` before simulation for a non-finite or negative
+drift constraint. Statistical outputs carry their own uncertainty: the CS
+radius and stopping state ARE the answer's quality statement.
 
 `StoryFrame::run_checked` returns `HistoryError` for an empty or non-finite
 record, invalid SI time step or story parameter, sample-budget excess, invalid

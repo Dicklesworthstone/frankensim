@@ -558,6 +558,18 @@ fn frame_006_replay_and_drills() {
         matches!(bad_loss, Err(RobustError::BadSample { value }) if value.is_nan()),
         "non-finite CVaR losses return a structured refusal before tail aggregation",
     );
+    let invalid_limits_refused = [f64::NAN, f64::INFINITY, -0.1].into_iter().all(|limit| {
+        matches!(
+            try_cvar_mass_min(&ens, params, 0.9, limit, &[1.0]),
+            Err(FrameCvarError::InvalidLimit { limit: observed })
+                if observed.to_bits() == limit.to_bits()
+        )
+    });
+    verdict(
+        "frame-006-invalid-cvar-limit-drill",
+        invalid_limits_refused,
+        "non-finite and negative CVaR limits refuse before ensemble realization",
+    );
 }
 
 /// G0/G3: physically different fs-scenario realization payloads must not be

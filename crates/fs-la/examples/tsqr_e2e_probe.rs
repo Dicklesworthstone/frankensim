@@ -7,6 +7,7 @@
 //! HOLDS. A regression turns any twin into a nonzero exit — the runner's
 //! EXIT_NEG_MISSED path becomes reachable, which is the falsifier law.
 
+use fs_blake3::hash_bytes;
 use fs_la::canonical_check::{check_outcome, promote_full_rank_t2};
 use fs_la::canonical_qr::{
     ArithmeticMode, CanonicalQrOutcome, CanonicalQrPolicy, CertifiedRankProfile, ClaimTier,
@@ -14,7 +15,6 @@ use fs_la::canonical_qr::{
     TiePolicy,
 };
 use fs_la::canonical_tree::{CancelScope, FixedTreeDriver};
-use fs_blake3::hash_bytes;
 
 fn policy() -> CanonicalQrPolicy {
     CanonicalQrPolicy::new(
@@ -44,7 +44,9 @@ fn full(m: usize, seed: u64) -> Vec<f64> {
     let mut s = seed | 1;
     let mut a = vec![0.0; m * n];
     for v in a.iter_mut() {
-        s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        s = s
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         *v = ((s >> 11) as f64) / ((1u64 << 53) as f64);
     }
     for i in 0..n {
@@ -56,9 +58,10 @@ fn full(m: usize, seed: u64) -> Vec<f64> {
 fn produce_outcome(a: &[f64], m: usize, n: usize, block: usize) -> CanonicalQrOutcome {
     let pol = policy();
     let driver = FixedTreeDriver::admit(a, m, n, block).expect("admits");
-    let run = driver.run(a, CancelScope::never(), None).expect("completes");
-    fs_la::canonical_tree::outcome_from_run(&run, a, &pol, hash_bytes(b"input"))
-        .expect("outcome")
+    let run = driver
+        .run(a, CancelScope::never(), None)
+        .expect("completes");
+    fs_la::canonical_tree::outcome_from_run(&run, a, &pol, hash_bytes(b"input")).expect("outcome")
 }
 
 fn fail(msg: &str) -> ! {
@@ -95,13 +98,23 @@ fn twin_raw_factor_equality() {
     let o12 = produce_outcome(&a, 48, 3, 12);
     let receipt = check_outcome(&a, 48, 3, 12, &pol, &o12).expect("checkable");
     assert!(
-        matches!(receipt.verdict, fs_la::canonical_check::Verdict::NoClaimValidated),
+        matches!(
+            receipt.verdict,
+            fs_la::canonical_check::Verdict::NoClaimValidated
+        ),
         "honest no-claim must validate"
     );
     // Divergence recorded as data; magnitude unconstrained by contract.
-    let max_bit_diff = r12.iter().zip(&r24).filter(|(x, y)| x.to_bits() != y.to_bits()).count();
+    let max_bit_diff = r12
+        .iter()
+        .zip(&r24)
+        .filter(|(x, y)| x.to_bits() != y.to_bits())
+        .count();
     let _ = max_bit_diff; // data, not a claim either direction
-    ok("raw-factor-equality", "both schedules valid; no equality claim enforced (T3)");
+    ok(
+        "raw-factor-equality",
+        "both schedules valid; no equality claim enforced (T3)",
+    );
 }
 
 /// Twin tampered-certificate: corrupting one factor bit must DEMOTE via the
@@ -131,7 +144,10 @@ fn twin_tampered_certificate() {
     let receipt = check_outcome(&a, 80, 4, 20, &policy(), &tampered).expect("checkable");
     match receipt.verdict {
         fs_la::canonical_check::Verdict::Demoted(_) => {
-            ok("tampered-certificate", "checker demoted the corrupted factor");
+            ok(
+                "tampered-certificate",
+                "checker demoted the corrupted factor",
+            );
         }
         _ => fail("tampered factor was not demoted"),
     }
@@ -141,19 +157,27 @@ fn twin_tampered_certificate() {
 /// tier must refuse; the moonshot arbitrary-tree gate stays structurally off.
 fn twin_unsupported_tree_claim() {
     let g = ArbitraryTreeGaugeProbe::current();
-    assert!(!g.is_enabled(), "moonshot gate must stay frozen at revision 0");
+    assert!(
+        !g.is_enabled(),
+        "moonshot gate must stay frozen at revision 0"
+    );
     let a = dep(48);
     let deficient_outcome = produce_outcome(&a, 48, 3, 12);
     let (_, receipt) =
         promote_full_rank_t2(&a, 48, 3, 12, &policy(), &deficient_outcome).expect("checkable");
     assert!(
-        !matches!(receipt.verdict, fs_la::canonical_check::Verdict::Certified(_)),
+        !matches!(
+            receipt.verdict,
+            fs_la::canonical_check::Verdict::Certified(_)
+        ),
         "deficient input must never certify"
     );
     struct ArbitraryTreeGaugeProbe;
     impl ArbitraryTreeGaugeProbe {
         fn current() -> GateProbe {
-            GateProbe { enabled: fs_la::canonical_tree_gauge::ArbitraryTreeGauge::current().is_enabled() }
+            GateProbe {
+                enabled: fs_la::canonical_tree_gauge::ArbitraryTreeGauge::current().is_enabled(),
+            }
         }
     }
     struct GateProbe {
@@ -164,7 +188,10 @@ fn twin_unsupported_tree_claim() {
             self.enabled
         }
     }
-    ok("unsupported-tree-claim", "gate frozen; deficient promotion refuses");
+    ok(
+        "unsupported-tree-claim",
+        "gate frozen; deficient promotion refuses",
+    );
 }
 
 /// Twin scale-blind-tolerance: absolute/degenerate tolerances are
@@ -178,8 +205,14 @@ fn twin_scale_blind_tolerance() {
         RankTolerance::relative(-1e-9),
         Err(PolicyError::InvalidScaleRelativeFactor)
     );
-    assert_eq!(RankTolerance::relative(0.0), Err(PolicyError::InvalidScaleRelativeFactor));
-    ok("scale-blind-tolerance", "absolute/degenerate tolerances refuse at construction");
+    assert_eq!(
+        RankTolerance::relative(0.0),
+        Err(PolicyError::InvalidScaleRelativeFactor)
+    );
+    ok(
+        "scale-blind-tolerance",
+        "absolute/degenerate tolerances refuse at construction",
+    );
 }
 
 // --- replay ----------------------------------------------------------------
@@ -206,8 +239,12 @@ fn verify_certificate_line(line: &str) {
     if obj.get("domain").as_deref() != Some("frankensim.fs-la.canonical-qr-replay.v1") {
         fail("artifact domain mismatch");
     }
-    let rd = obj.get("result_digest").unwrap_or_else(|| fail("missing result_digest"));
-    let cd = obj.get("receipt_digest").unwrap_or_else(|| fail("missing receipt_digest"));
+    let rd = obj
+        .get("result_digest")
+        .unwrap_or_else(|| fail("missing result_digest"));
+    let cd = obj
+        .get("receipt_digest")
+        .unwrap_or_else(|| fail("missing receipt_digest"));
     if rd.len() != 64 || cd.len() != 64 {
         fail("digest fields must be 64-hex");
     }
@@ -221,7 +258,11 @@ fn verify_certificate_line(line: &str) {
 struct Json(Vec<(String, String)>);
 impl Json {
     fn get(&self, k: &str) -> Option<String> {
-        self.0.iter().find(|(key, _)| key == k).cloned().map(|(_, v)| v)
+        self.0
+            .iter()
+            .find(|(key, _)| key == k)
+            .cloned()
+            .map(|(_, v)| v)
     }
 }
 fn parse_flat_json(line: &str) -> Json {
@@ -246,7 +287,9 @@ fn hex(bytes: &[u8]) -> String {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let Some(cmd) = args.first() else { std::process::exit(40) };
+    let Some(cmd) = args.first() else {
+        std::process::exit(40)
+    };
     match cmd.as_str() {
         "twin-raw-factor-equality" => twin_raw_factor_equality(),
         "twin-tampered-certificate" => twin_tampered_certificate(),
@@ -261,10 +304,16 @@ fn main() {
             emit_certificate(&a, 48, 3, 12);
         }
         "verify-certificate" => {
-            let Some(path) = args.get(1) else { std::process::exit(40) };
-            let content = std::fs::read_to_string(path).unwrap_or_else(|_| fail("unreadable artifact"));
+            let Some(path) = args.get(1) else {
+                std::process::exit(40)
+            };
+            let content =
+                std::fs::read_to_string(path).unwrap_or_else(|_| fail("unreadable artifact"));
             let mut verified = 0usize;
-            for line in content.lines().filter(|l| l.contains("\"artifact\":\"tsqr-certificate-v1\"")) {
+            for line in content
+                .lines()
+                .filter(|l| l.contains("\"artifact\":\"tsqr-certificate-v1\""))
+            {
                 verify_certificate_line(line);
                 verified += 1;
             }

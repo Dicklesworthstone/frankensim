@@ -5,7 +5,7 @@
 //! - Enforces seal-before-disclosure invariance (no primary outcome access before sealing).
 //! - Produces content-bound `CoreUxReplicationSealV1` and `MaxUxReplicationSealV1` with Blake3 signing.
 
-use fs_blake3::{hash_domain, ContentHash};
+use fs_blake3::{ContentHash, hash_domain};
 
 /// Schema identifier for the v1 CORE UX replication seal.
 pub const CORE_UX_REPLICATION_SEAL_SCHEMA_V1: &str =
@@ -35,7 +35,10 @@ pub enum CoreUxReplicationError {
     /// Tampered seal digest or payload modification detected.
     TamperedSeal { field: &'static str },
     /// Non-finite or malformed string parameter.
-    MalformedInput { field: &'static str, message: String },
+    MalformedInput {
+        field: &'static str,
+        message: String,
+    },
 }
 
 /// Specifications for the independent CORE replication cohort and study parameters.

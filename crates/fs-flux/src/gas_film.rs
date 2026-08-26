@@ -488,7 +488,7 @@ impl GasFilmInput {
         }
         match &self.slip_policy {
             SlipPolicy::NoSlipContinuum { source_id } => {
-                canonical_identity(source_id, "slip_source_id")?
+                canonical_identity(source_id, "slip_source_id")?;
             }
             SlipPolicy::RarefiedSlipRequested { .. } => {
                 return Err(GasFilmError::Unavailable {
@@ -664,12 +664,11 @@ impl GasFilmInput {
                 maximum_roughness_m,
                 ..
             } = &self.roughness_policy
+                && *maximum_roughness_m >= gap
             {
-                if *maximum_roughness_m >= gap {
-                    return Err(GasFilmError::Unavailable {
-                        reason: "roughness-not-small-relative-to-gap",
-                    });
-                }
+                return Err(GasFilmError::Unavailable {
+                    reason: "roughness-not-small-relative-to-gap",
+                });
             }
             let knudsen = derived(self.applicability.mean_free_path_m / gap, "knudsen_number")?;
             max_knudsen = max_knudsen.max(knudsen);
@@ -857,7 +856,7 @@ fn invariant_configuration_fingerprint(input: &GasFilmInput) -> String {
     match &input.slip_policy {
         SlipPolicy::NoSlipContinuum { source_id } => text(&mut output, "slip", source_id),
         SlipPolicy::RarefiedSlipRequested { source_id } => {
-            text(&mut output, "rarefied_slip", source_id)
+            text(&mut output, "rarefied_slip", source_id);
         }
     }
     match &input.roughness_policy {
@@ -869,7 +868,7 @@ fn invariant_configuration_fingerprint(input: &GasFilmInput) -> String {
             number(&mut output, "roughness_max", *maximum_roughness_m);
         }
         RoughnessPolicy::Unresolved { source_id } => {
-            text(&mut output, "roughness_unresolved", source_id)
+            text(&mut output, "roughness_unresolved", source_id);
         }
     }
     number(
@@ -1015,7 +1014,7 @@ fn accepted_request_fingerprint(input: &GasFilmInput) -> String {
     match &input.slip_policy {
         SlipPolicy::NoSlipContinuum { source_id } => text(&mut output, "slip", source_id),
         SlipPolicy::RarefiedSlipRequested { source_id } => {
-            text(&mut output, "rarefied_slip", source_id)
+            text(&mut output, "rarefied_slip", source_id);
         }
     }
     match &input.roughness_policy {
@@ -1027,7 +1026,7 @@ fn accepted_request_fingerprint(input: &GasFilmInput) -> String {
             number(&mut output, "roughness_max", *maximum_roughness_m);
         }
         RoughnessPolicy::Unresolved { source_id } => {
-            text(&mut output, "roughness_unresolved", source_id)
+            text(&mut output, "roughness_unresolved", source_id);
         }
     }
     number(
@@ -1214,11 +1213,10 @@ pub fn solve_isothermal_gas_film_1d(
                 cell_index,
                 absolute_pressure_pa,
             } = input.boundary
+                && cell == cell_index
             {
-                if cell == cell_index {
-                    next[cell] = absolute_pressure_pa;
-                    continue;
-                }
+                next[cell] = absolute_pressure_pa;
+                continue;
             }
             let storage_coefficient =
                 derived(gap[cell] / (rt * input.timestep_s), "storage_coefficient")?;
@@ -1449,6 +1447,7 @@ pub fn solve_isothermal_gas_film_1d(
 }
 
 /// Canonical model identity for callers constructing a [`GasFilmIdentity`].
+#[must_use]
 pub const fn isothermal_compressible_reynolds_model_id() -> &'static str {
     MODEL_ID
 }

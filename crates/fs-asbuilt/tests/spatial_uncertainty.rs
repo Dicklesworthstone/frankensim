@@ -67,7 +67,7 @@ fn with_cx<R>(cancelled: bool, f: impl FnOnce(&Cx<'_>) -> R) -> R {
             &gate,
             arena,
             StreamKey {
-                seed: 0x5A71_A1,
+                seed: 0x005A_71A1,
                 kernel_id: 94,
                 tile: 0,
                 iteration: 0,

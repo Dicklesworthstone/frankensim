@@ -3,7 +3,7 @@
 use fs_atmo::{Atmosphere, DEC17_AIR, FlatSiteLogLaw, TurbulenceField};
 use fs_flyer::fieldsvc::{BoundSystem, FieldSourceStateV1, GridSpec};
 use fs_flyer::webgpu_experiment::{
-    run_webgpu_field_experiment, FieldBackendId, WebGpuExperimentConfig,
+    FieldBackendId, WebGpuExperimentConfig, run_webgpu_field_experiment,
 };
 
 fn test_state() -> FieldSourceStateV1 {
@@ -66,7 +66,8 @@ fn webgpu_experiment_device_loss_fallback_drill() {
         ..Default::default()
     };
 
-    let receipt = run_webgpu_field_experiment(&config, &state).expect("experiment with fallback runs");
+    let receipt =
+        run_webgpu_field_experiment(&config, &state).expect("experiment with fallback runs");
     assert!(receipt.device_loss_fallback_verified);
 }
 
@@ -79,5 +80,8 @@ fn webgpu_experiment_refuses_promotion_if_readback_enabled() {
     };
 
     let receipt = run_webgpu_field_experiment(&config, &state).expect("experiment runs");
-    assert!(!receipt.promoted, "must not promote when readback is enabled on render path");
+    assert!(
+        !receipt.promoted,
+        "must not promote when readback is enabled on render path"
+    );
 }

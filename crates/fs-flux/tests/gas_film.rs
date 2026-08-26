@@ -253,7 +253,8 @@ fn g3_reversing_relative_wall_motion_preserves_pressure_and_reverses_shear() {
     reversed.wall_motion.upper_tangential_velocity_m_per_s = -2.0;
     let positive = solve_isothermal_gas_film_1d(&forward, None).expect("forward admitted");
     let negative = solve_isothermal_gas_film_1d(&reversed, None).expect("reversed admitted");
-    let mirrored_negative_pressure: Vec<f64> = active_pressure(&negative).into_iter().rev().collect();
+    let mirrored_negative_pressure: Vec<f64> =
+        active_pressure(&negative).into_iter().rev().collect();
     assert_eq!(active_pressure(&positive), mirrored_negative_pressure);
     assert_eq!(
         positive.receipt.upper_wall_shear_pa[0].expect("active"),

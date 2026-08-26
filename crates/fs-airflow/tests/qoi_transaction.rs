@@ -10,8 +10,8 @@
 //! - G5: Bit-identical replay across independent transaction runs.
 
 use fs_airflow::qoi::{
-    FanPowerSpec, JunctionRegion, SafetyFactorAuthority, SurfaceRegion,
-    ThermalQoiDeclarations, ThermalRequirement,
+    FanPowerSpec, JunctionRegion, SafetyFactorAuthority, SurfaceRegion, ThermalQoiDeclarations,
+    ThermalRequirement,
 };
 use fs_airflow::registered_qoi::{
     OutputQuery, QoiExecutionLimits, QoiSemanticId, extract_registered_qois,
@@ -62,10 +62,7 @@ pub enum QoiTransactionState {
         terminal_receipt_hash: ContentHash,
     },
     /// Terminal refusal after clean drain.
-    Refused {
-        reason: &'static str,
-        drained: bool,
-    },
+    Refused { reason: &'static str, drained: bool },
 }
 
 /// Durable checkpoint envelope for QoI stage transaction.
@@ -77,6 +74,7 @@ pub struct QoiTransactionCheckpoint {
 }
 
 impl QoiTransactionCheckpoint {
+    #[must_use]
     pub fn new(state: QoiTransactionState) -> Self {
         let mut buf = Vec::new();
         buf.extend_from_slice(TRANSACTION_DOMAIN.as_bytes());
@@ -86,7 +84,11 @@ impl QoiTransactionCheckpoint {
                 buf.push(1);
                 buf.extend_from_slice(plan_hash.as_bytes());
             }
-            QoiTransactionState::Extracted { plan_hash, extraction_provenance, .. } => {
+            QoiTransactionState::Extracted {
+                plan_hash,
+                extraction_provenance,
+                ..
+            } => {
                 buf.push(2);
                 buf.extend_from_slice(plan_hash.as_bytes());
                 buf.extend_from_slice(&extraction_provenance.to_le_bytes());
@@ -96,7 +98,10 @@ impl QoiTransactionCheckpoint {
                 buf.extend_from_slice(plan_hash.as_bytes());
                 buf.extend_from_slice(receipt.receipt_hash.as_bytes());
             }
-            QoiTransactionState::Published { plan_hash, terminal_receipt_hash } => {
+            QoiTransactionState::Published {
+                plan_hash,
+                terminal_receipt_hash,
+            } => {
                 buf.push(4);
                 buf.extend_from_slice(plan_hash.as_bytes());
                 buf.extend_from_slice(terminal_receipt_hash.as_bytes());

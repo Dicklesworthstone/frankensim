@@ -32,6 +32,7 @@ use fs_duct::{Duct, Segment, Termination};
 use fs_material::gas::{GasSpec, GasState};
 use fs_scenario::BeatingReed;
 use fs_substrate::CapabilityProbe;
+use std::fmt::Write as _;
 
 const RATE: u32 = 48_000;
 const BLOCK: usize = 512;
@@ -290,7 +291,7 @@ fn fusion_row_canonical(label: &str, row: &BudgetRow, ratio: Option<f64>) -> Str
     )
     .replace("frankensim-budget-row-v1", "");
     if let Some(r) = ratio {
-        s.push_str(&format!("ratio-vs-strict\t{r:e}\n"));
+        let _ = writeln!(s, "ratio-vs-strict\t{r:e}");
     }
     s
 }
@@ -328,7 +329,7 @@ fn fusion_before_after_rows_encode_and_stay_sane() {
 #[ignore = "heavy minting run: 32 reps in release via the recorded heavy-run recipe"]
 fn mint_fusion_registry_rows() {
     let (strict_row, fast_row, ratio) = mint_fusion_pair(32);
-    assert!(strict_row.build_profile == "release");
+    assert_eq!(strict_row.build_profile, "release");
     println!(
         "{}",
         fusion_row_canonical("strict-before", &strict_row, None)

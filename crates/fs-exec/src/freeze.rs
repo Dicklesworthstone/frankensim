@@ -303,13 +303,13 @@ impl SnapshotFreezeRegistry {
     }
 
     fn poison(&self, reason: FreezePoisonReason) {
-        if let Ok(mut slot) = self.slot.lock() {
-            if !matches!(
+        if let Ok(mut slot) = self.slot.lock()
+            && !matches!(
                 slot.phase,
                 FreezePhase::Committed | FreezePhase::Poisoned { .. }
-            ) {
-                slot.phase = FreezePhase::Poisoned { reason };
-            }
+            )
+        {
+            slot.phase = FreezePhase::Poisoned { reason };
         }
     }
 
@@ -348,10 +348,10 @@ impl SnapshotFreezeRegistry {
     }
 
     fn finish_committed(&self) {
-        if let Ok(mut slot) = self.slot.lock() {
-            if slot.phase == FreezePhase::Burning {
-                slot.phase = FreezePhase::Committed;
-            }
+        if let Ok(mut slot) = self.slot.lock()
+            && slot.phase == FreezePhase::Burning
+        {
+            slot.phase = FreezePhase::Committed;
         }
     }
 

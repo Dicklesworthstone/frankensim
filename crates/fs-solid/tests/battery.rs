@@ -1069,4 +1069,3 @@ fn cutfront_extreme_scale_stabilization_delegation() {
         .expect("extreme-scale stabilization facade solve succeeds without intermediate overflow");
     assert!(solution.compliance().is_finite() && solution.compliance() > 0.0);
 }
-

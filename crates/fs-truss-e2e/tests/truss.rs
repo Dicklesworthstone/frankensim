@@ -101,7 +101,7 @@ fn the_converged_truss_has_a_bounded_unique_load_path() {
             assert_ne!(path_certificate.replay_golden(), 0);
         }
         (LoadPathCertificateStatus::Unavailable(_), Color::Estimated { dispersion, .. }) => {
-            assert!(dispersion.is_infinite())
+            assert!(dispersion.is_infinite());
         }
         other => panic!("load-path color/status mismatch: {other:?}"),
     }

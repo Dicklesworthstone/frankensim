@@ -381,7 +381,7 @@ impl ShellPlate {
             || !material.density_kg_m3.is_finite()
             || material.density_kg_m3 <= 0.0
             || !material.poisson_ratio.is_finite()
-            || !(-1.0 < material.poisson_ratio && material.poisson_ratio < 0.5)
+            || !((-1.0..0.5).contains(&material.poisson_ratio))
         {
             return Err(ShellError::InvalidInput {
                 what: "material requires E > 0, density > 0, and -1 < nu < 0.5".into(),
@@ -899,7 +899,7 @@ fn diagnostics(
         .into_iter()
         .filter(|value| *value > tolerance)
         .collect();
-    positive.sort_by(|left, right| left.total_cmp(right));
+    positive.sort_by(f64::total_cmp);
     OperatorDiagnostics::Computed {
         raw_mass_min_eigenvalue: mass_eigenvalues.into_iter().fold(f64::INFINITY, f64::min),
         raw_stiffness_nullity: stiffness.values.len() / stiffness.dimension - positive.len(),

@@ -8,7 +8,7 @@
 
 use crate::rans_card::RansModelCard;
 use crate::rans_validation::RansValidationLedger;
-use fs_blake3::{hash_bytes, ContentHash};
+use fs_blake3::{ContentHash, hash_bytes};
 
 /// Schema version for RANS adjudication receipt.
 pub const RANS_ADJUDICATION_SCHEMA_VERSION: u32 = 1;

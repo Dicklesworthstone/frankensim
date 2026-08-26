@@ -469,8 +469,8 @@ fn a_zero_noise_probe_leaves_only_the_registration_term() {
         let field = DeviationField::extract(&[sample], &registration, &probe, coverage(), cx)
             .expect("field extracts");
         let point = field.points()[0];
-        assert_eq!(point.scan_sigma(), 0.0);
-        assert_eq!(point.ambiguity_sigma(), 0.0);
+        assert_eq!(point.scan_sigma().to_bits(), 0.0_f64.to_bits());
+        assert_eq!(point.ambiguity_sigma().to_bits(), 0.0_f64.to_bits());
         assert!(point.registration_sigma() > 0.0);
         assert!(
             (point.half_width() - coverage().factor() * point.registration_sigma()).abs() < 1e-18
@@ -986,7 +986,7 @@ fn declared_form_removal_cancels_a_tilt() {
 fn a_parabolic_form_is_removed_only_at_the_declared_order() {
     let heights: Vec<f64> = (0..64)
         .map(|i| {
-            let x = i as f64 / 63.0;
+            let x = f64::from(i) / 63.0;
             0.5 * x * x + if i % 2 == 0 { 0.1 } else { -0.1 }
         })
         .collect();

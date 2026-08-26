@@ -9,7 +9,10 @@ fn fetch_mass_consistent_divergence_cancels_to_machine_precision() {
     let profile = FetchRoughnessProfile::new(0.01, 0.0005, 500.0).expect("valid profile");
     let law = FetchAdjustedMassConsistent::new(profile, 0.0, 10.0, 15.0).expect("valid law");
 
-    assert_eq!(MODEL_ID_FETCH_MASS_CONSISTENT, "FetchAdjustedMassConsistent");
+    assert_eq!(
+        MODEL_ID_FETCH_MASS_CONSISTENT,
+        "FetchAdjustedMassConsistent"
+    );
 
     // Sample across grid of (x, h) points
     for ix in 0..20 {
@@ -33,7 +36,10 @@ fn fetch_mass_consistent_wall_impermeability() {
     for ix in 0..10 {
         let x = ix as f64 * 30.0;
         let v_ground = law.sample_velocity(x, 0.0);
-        assert_eq!(v_ground[2], 0.0, "vertical velocity at ground must be exactly zero");
+        assert_eq!(
+            v_ground[2], 0.0,
+            "vertical velocity at ground must be exactly zero"
+        );
     }
 }
 

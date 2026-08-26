@@ -89,7 +89,10 @@ pub enum Trigger11Refusal {
     /// Registration uncertainty is non-positive or non-finite.
     NonPositiveUncertainty { val: f64 },
     /// Specimen and registration coordinate frames do not match.
-    FrameMismatch { specimen: String, registration: String },
+    FrameMismatch {
+        specimen: String,
+        registration: String,
+    },
     /// Raw data root is empty or invalid.
     EmptyDataRoot,
 }
@@ -130,7 +133,9 @@ pub struct Trigger11Receipt {
 ///
 /// # Errors
 /// Returns [`Trigger11Refusal`] if any input parameter or invariant is violated.
-pub fn evaluate_trigger_11(premises: &Proposal11Premises) -> Result<Trigger11Verdict, Trigger11Refusal> {
+pub fn evaluate_trigger_11(
+    premises: &Proposal11Premises,
+) -> Result<Trigger11Verdict, Trigger11Refusal> {
     let Some(agreement) = &premises.agreement else {
         return Err(Trigger11Refusal::MissingAgreement);
     };
@@ -143,11 +148,19 @@ pub fn evaluate_trigger_11(premises: &Proposal11Premises) -> Result<Trigger11Ver
     if !premises.registration.is_calibrated || !premises.registration.calibration_valid {
         return Err(Trigger11Refusal::CalibrationInvalid);
     }
-    if !premises.specimen.geometric_tolerance_m.is_finite() || premises.specimen.geometric_tolerance_m <= 0.0 {
-        return Err(Trigger11Refusal::NonPositiveTolerance { val: premises.specimen.geometric_tolerance_m });
+    if !premises.specimen.geometric_tolerance_m.is_finite()
+        || premises.specimen.geometric_tolerance_m <= 0.0
+    {
+        return Err(Trigger11Refusal::NonPositiveTolerance {
+            val: premises.specimen.geometric_tolerance_m,
+        });
     }
-    if !premises.registration.uncertainty_95_m.is_finite() || premises.registration.uncertainty_95_m <= 0.0 {
-        return Err(Trigger11Refusal::NonPositiveUncertainty { val: premises.registration.uncertainty_95_m });
+    if !premises.registration.uncertainty_95_m.is_finite()
+        || premises.registration.uncertainty_95_m <= 0.0
+    {
+        return Err(Trigger11Refusal::NonPositiveUncertainty {
+            val: premises.registration.uncertainty_95_m,
+        });
     }
     if premises.specimen.coordinate_frame != premises.registration.coordinate_frame {
         return Err(Trigger11Refusal::FrameMismatch {
@@ -166,9 +179,7 @@ pub fn evaluate_trigger_11(premises: &Proposal11Premises) -> Result<Trigger11Ver
 
 /// Mint an immutable decision receipt for Proposal 11.
 #[must_use]
-pub fn mint_trigger_11_receipt(
-    premises_opt: Option<&Proposal11Premises>,
-) -> Trigger11Receipt {
+pub fn mint_trigger_11_receipt(premises_opt: Option<&Proposal11Premises>) -> Trigger11Receipt {
     let Some(premises) = premises_opt else {
         let hash = hash_bytes(b"org.frankensim.horizon-trigger-11.nodata.v1").to_hex();
         return Trigger11Receipt {
@@ -184,7 +195,8 @@ pub fn mint_trigger_11_receipt(
 
     match evaluate_trigger_11(premises) {
         Ok(Trigger11Verdict::Activate) => {
-            let ratio = premises.registration.uncertainty_95_m / premises.specimen.geometric_tolerance_m;
+            let ratio =
+                premises.registration.uncertainty_95_m / premises.specimen.geometric_tolerance_m;
             let mut payload = Vec::new();
             payload.extend_from_slice(b"org.frankensim.horizon-trigger-11.activate.v1");
             payload.extend_from_slice(ratio.to_le_bytes().as_slice());
@@ -199,11 +211,17 @@ pub fn mint_trigger_11_receipt(
                 uncertainty_ratio: ratio,
                 point_sensor_fallback_retained: false,
                 receipt_hash: hash,
-                reason: format!("registration uncertainty ({:.2e} m) is strictly below geometric tolerance ({:.2e} m; ratio {:.3}) under authorized agreement", premises.registration.uncertainty_95_m, premises.specimen.geometric_tolerance_m, ratio),
+                reason: format!(
+                    "registration uncertainty ({:.2e} m) is strictly below geometric tolerance ({:.2e} m; ratio {:.3}) under authorized agreement",
+                    premises.registration.uncertainty_95_m,
+                    premises.specimen.geometric_tolerance_m,
+                    ratio
+                ),
             }
         }
         Ok(Trigger11Verdict::FallbackPointSensors) => {
-            let ratio = premises.registration.uncertainty_95_m / premises.specimen.geometric_tolerance_m;
+            let ratio =
+                premises.registration.uncertainty_95_m / premises.specimen.geometric_tolerance_m;
             let hash = hash_bytes(b"org.frankensim.horizon-trigger-11.defer.v1").to_hex();
             Trigger11Receipt {
                 proposal: "11",
@@ -212,7 +230,12 @@ pub fn mint_trigger_11_receipt(
                 uncertainty_ratio: ratio,
                 point_sensor_fallback_retained: true,
                 receipt_hash: hash,
-                reason: format!("registration uncertainty ({:.2e} m) exceeds or equals tolerance ({:.2e} m; ratio {:.3}); retaining point-sensor fallback", premises.registration.uncertainty_95_m, premises.specimen.geometric_tolerance_m, ratio),
+                reason: format!(
+                    "registration uncertainty ({:.2e} m) exceeds or equals tolerance ({:.2e} m; ratio {:.3}); retaining point-sensor fallback",
+                    premises.registration.uncertainty_95_m,
+                    premises.specimen.geometric_tolerance_m,
+                    ratio
+                ),
             }
         }
         Err(refusal) => {
@@ -224,7 +247,9 @@ pub fn mint_trigger_11_receipt(
                 uncertainty_ratio: f64::NAN,
                 point_sensor_fallback_retained: true,
                 receipt_hash: hash,
-                reason: format!("inadmissible premises ({refusal:?}); retaining point-sensor fallback"),
+                reason: format!(
+                    "inadmissible premises ({refusal:?}); retaining point-sensor fallback"
+                ),
             }
         }
     }

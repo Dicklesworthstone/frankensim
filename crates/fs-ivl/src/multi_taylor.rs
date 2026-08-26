@@ -811,7 +811,10 @@ impl TaylorModel {
             // Outward enlargement for nonzero remainder
             let rad = self.variables[axis].radius();
             if rad > 0.0 {
-                Interval::new(-self.remainder.hi().abs() / rad, self.remainder.hi().abs() / rad)
+                Interval::new(
+                    -self.remainder.hi().abs() / rad,
+                    self.remainder.hi().abs() / rad,
+                )
             } else {
                 self.remainder
             }
@@ -851,7 +854,12 @@ impl TaylorModel {
     }
 
     /// Integrate the model along coordinate `axis` over `[a, b] ⊆ D_{axis}`.
-    pub fn integrate_axis(&self, axis: usize, a: f64, b: f64) -> Result<Interval, TaylorModelError> {
+    pub fn integrate_axis(
+        &self,
+        axis: usize,
+        a: f64,
+        b: f64,
+    ) -> Result<Interval, TaylorModelError> {
         if axis >= self.dim {
             return Err(TaylorModelError::AxisIndexOutOfBounds {
                 axis,

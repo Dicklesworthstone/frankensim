@@ -6,11 +6,11 @@
 //! unstructured meshes. Parsed meshes enter through the [`Quarantined`] boundary
 //! with explicit element censuses, tags, and cryptographic receipts.
 
-use core::fmt::Write as _;
-use std::collections::BTreeMap;
-use fs_blake3::{ContentHash, hash_domain};
 use crate::quarantine::Quarantined;
 use crate::{IoError, MAX_ELEMENTS};
+use core::fmt::Write as _;
+use fs_blake3::{ContentHash, hash_domain};
+use std::collections::BTreeMap;
 
 /// Supported Gmsh Element Types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -171,7 +171,11 @@ pub fn parse_gmsh_with_limits(
 ) -> Result<(Quarantined<GmshMesh>, GmshReceipt), IoError> {
     if input.len() > limits.max_bytes {
         return Err(IoError::ResourceBound {
-            what: format!("input size {} exceeds limit {}", input.len(), limits.max_bytes),
+            what: format!(
+                "input size {} exceeds limit {}",
+                input.len(),
+                limits.max_bytes
+            ),
         });
     }
 
@@ -228,10 +232,11 @@ pub fn parse_gmsh_with_limits(
                 // number-of-nodes
                 // node-number x y z
                 if let Some((_, count_line)) = lines.next() {
-                    let count: usize = count_line.trim().parse().map_err(|_| IoError::Malformed {
-                        at: line_idx,
-                        what: "invalid node count in $Nodes".to_string(),
-                    })?;
+                    let count: usize =
+                        count_line.trim().parse().map_err(|_| IoError::Malformed {
+                            at: line_idx,
+                            what: "invalid node count in $Nodes".to_string(),
+                        })?;
                     if count > limits.max_nodes {
                         return Err(IoError::ResourceBound {
                             what: format!("node count {count} exceeds limit {}", limits.max_nodes),
@@ -284,7 +289,10 @@ pub fn parse_gmsh_with_limits(
                         let num_nodes: usize = parts[1].parse().unwrap_or(0);
                         if num_nodes > limits.max_nodes {
                             return Err(IoError::ResourceBound {
-                                what: format!("node count {num_nodes} exceeds limit {}", limits.max_nodes),
+                                what: format!(
+                                    "node count {num_nodes} exceeds limit {}",
+                                    limits.max_nodes
+                                ),
                             });
                         }
                     }
@@ -301,13 +309,17 @@ pub fn parse_gmsh_with_limits(
                 // number-of-elements
                 // elm-number elm-type number-of-tags < tag > ... node-number-list
                 if let Some((_, count_line)) = lines.next() {
-                    let count: usize = count_line.trim().parse().map_err(|_| IoError::Malformed {
-                        at: line_idx,
-                        what: "invalid element count in $Elements".to_string(),
-                    })?;
+                    let count: usize =
+                        count_line.trim().parse().map_err(|_| IoError::Malformed {
+                            at: line_idx,
+                            what: "invalid element count in $Elements".to_string(),
+                        })?;
                     if count > limits.max_elements {
                         return Err(IoError::ResourceBound {
-                            what: format!("element count {count} exceeds limit {}", limits.max_elements),
+                            what: format!(
+                                "element count {count} exceeds limit {}",
+                                limits.max_elements
+                            ),
                         });
                     }
                     mesh.elements.reserve(count);
@@ -324,23 +336,27 @@ pub fn parse_gmsh_with_limits(
                                 at: e_idx,
                                 what: "invalid element id".to_string(),
                             })?;
-                            let type_id: u32 = parts[1].parse().map_err(|_| IoError::Malformed {
-                                at: e_idx,
-                                what: "invalid element type id".to_string(),
-                            })?;
-                            let element_type = GmshElementType::from_id(type_id).ok_or_else(|| {
-                                IoError::Unsupported {
-                                    what: format!("unsupported Gmsh element type {type_id}"),
-                                }
-                            })?;
-                            let num_tags: usize = parts[2].parse().map_err(|_| IoError::Malformed {
-                                at: e_idx,
-                                what: "invalid element tag count".to_string(),
-                            })?;
+                            let type_id: u32 =
+                                parts[1].parse().map_err(|_| IoError::Malformed {
+                                    at: e_idx,
+                                    what: "invalid element type id".to_string(),
+                                })?;
+                            let element_type =
+                                GmshElementType::from_id(type_id).ok_or_else(|| {
+                                    IoError::Unsupported {
+                                        what: format!("unsupported Gmsh element type {type_id}"),
+                                    }
+                                })?;
+                            let num_tags: usize =
+                                parts[2].parse().map_err(|_| IoError::Malformed {
+                                    at: e_idx,
+                                    what: "invalid element tag count".to_string(),
+                                })?;
                             if parts.len() < 3 + num_tags + element_type.node_count() {
                                 return Err(IoError::Malformed {
                                     at: e_idx,
-                                    what: "element record has insufficient node references".to_string(),
+                                    what: "element record has insufficient node references"
+                                        .to_string(),
                                 });
                             }
                             let mut tags = Vec::with_capacity(num_tags);
@@ -350,9 +366,11 @@ pub fn parse_gmsh_with_limits(
                             }
                             let mut node_ids = Vec::with_capacity(element_type.node_count());
                             for n in 0..element_type.node_count() {
-                                let n_id: u64 = parts[3 + num_tags + n].parse().map_err(|_| IoError::Malformed {
-                                    at: e_idx,
-                                    what: "invalid node id in element connectivity".to_string(),
+                                let n_id: u64 = parts[3 + num_tags + n].parse().map_err(|_| {
+                                    IoError::Malformed {
+                                        at: e_idx,
+                                        what: "invalid node id in element connectivity".to_string(),
+                                    }
                                 })?;
                                 node_ids.push(n_id);
                             }
@@ -428,13 +446,23 @@ pub fn write_gmsh_msh2(mesh: &GmshMesh) -> String {
 
     let _ = writeln!(out, "$Nodes\n{}", mesh.nodes.len());
     for n in &mesh.nodes {
-        let _ = writeln!(out, "{} {:.12e} {:.12e} {:.12e}", n.id, n.coords[0], n.coords[1], n.coords[2]);
+        let _ = writeln!(
+            out,
+            "{} {:.12e} {:.12e} {:.12e}",
+            n.id, n.coords[0], n.coords[1], n.coords[2]
+        );
     }
     out.push_str("$EndNodes\n");
 
     let _ = writeln!(out, "$Elements\n{}", mesh.elements.len());
     for el in &mesh.elements {
-        let _ = write!(out, "{} {} {}", el.id, el.element_type.type_id(), el.tags.len());
+        let _ = write!(
+            out,
+            "{} {} {}",
+            el.id,
+            el.element_type.type_id(),
+            el.tags.len()
+        );
         for tag in &el.tags {
             let _ = write!(out, " {tag}");
         }

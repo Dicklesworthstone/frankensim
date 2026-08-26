@@ -10,7 +10,7 @@
 //!
 //! Records honest discrepancy attributions without cherry-picking.
 
-use fs_blake3::{hash_bytes, ContentHash};
+use fs_blake3::{ContentHash, hash_bytes};
 
 /// Schema version of the validation ledger.
 pub const RANS_VALIDATION_SCHEMA_VERSION: u32 = 1;

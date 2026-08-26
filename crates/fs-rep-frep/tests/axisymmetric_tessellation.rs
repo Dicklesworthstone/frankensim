@@ -45,8 +45,9 @@ fn axt_001_sharp_disc_tessellation_satisfies_budget() {
     with_cx(|cx| {
         let outer_radius = 1.0;
         let thickness = 0.4;
-        let disc = AxisymmetricChart::squat_disc(outer_radius, thickness, SquatDiscEdgeTreatment::Sharp)
-            .expect("sharp disc");
+        let disc =
+            AxisymmetricChart::squat_disc(outer_radius, thickness, SquatDiscEdgeTreatment::Sharp)
+                .expect("sharp disc");
 
         let budget = 0.05;
         let config = AxisymmetricTessellationConfig::new(budget, TessellationPurpose::Rendering)
@@ -108,7 +109,9 @@ fn axt_002_filleted_disc_refines_arc_features_by_budget() {
         assert!(fine_mesh.positions.len() > coarse_mesh.positions.len());
         assert!(fine_mesh.receipt.total_hausdorff_bound <= fine_budget);
         assert!(coarse_mesh.receipt.total_hausdorff_bound <= coarse_budget);
-        assert!(fine_mesh.receipt.total_hausdorff_bound < coarse_mesh.receipt.total_hausdorff_bound);
+        assert!(
+            fine_mesh.receipt.total_hausdorff_bound < coarse_mesh.receipt.total_hausdorff_bound
+        );
 
         // Topology is preserved
         assert!(coarse_mesh.receipt.is_watertight);
@@ -123,8 +126,9 @@ fn axt_003_distinct_typed_rendering_and_collision_wrappers() {
     with_cx(|cx| {
         let outer_radius = 0.8;
         let thickness = 0.3;
-        let disc = AxisymmetricChart::squat_disc(outer_radius, thickness, SquatDiscEdgeTreatment::Sharp)
-            .expect("sharp disc");
+        let disc =
+            AxisymmetricChart::squat_disc(outer_radius, thickness, SquatDiscEdgeTreatment::Sharp)
+                .expect("sharp disc");
 
         let config_render =
             AxisymmetricTessellationConfig::new(0.02, TessellationPurpose::Rendering)
@@ -204,8 +208,7 @@ fn axt_006_deterministic_bit_identical_replay() {
     )
     .expect("filleted disc");
 
-    let config =
-        AxisymmetricTessellationConfig::new(0.01, TessellationPurpose::Rendering).unwrap();
+    let config = AxisymmetricTessellationConfig::new(0.01, TessellationPurpose::Rendering).unwrap();
 
     let mesh1 = with_cx(|cx| tessellate_axisymmetric(&disc, config, cx).unwrap());
     let mesh2 = with_cx(|cx| tessellate_axisymmetric(&disc, config, cx).unwrap());

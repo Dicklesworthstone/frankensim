@@ -72,7 +72,11 @@ pub enum TriggerBRefusal {
     /// Narrative emitted despite honesty gate refusal (storytelling violation).
     NarrativeOverRefusal { case_id: String },
     /// Unreconciled residual passed the honesty gate (smear violation).
-    UnreconciledPassedGate { case_id: String, residual: f64, tol: f64 },
+    UnreconciledPassedGate {
+        case_id: String,
+        residual: f64,
+        tol: f64,
+    },
 }
 
 /// Activation verdict for Proposal B.
@@ -137,7 +141,9 @@ pub fn evaluate_trigger_b(
         }
         for &ch in &case.attributed_channels {
             if !ch.is_finite() {
-                return Err(TriggerBRefusal::NonFiniteQuantity { case_id: case.case_id.clone() });
+                return Err(TriggerBRefusal::NonFiniteQuantity {
+                    case_id: case.case_id.clone(),
+                });
             }
         }
 
@@ -184,7 +190,8 @@ pub fn mint_trigger_b_receipt(
             operator_mode: mode,
             failure_rate: 0.0,
             receipt_hash: hash,
-            reason: "Rule 4: human-driven operator mode defers explanation-object activation".into(),
+            reason: "Rule 4: human-driven operator mode defers explanation-object activation"
+                .into(),
         };
     }
 
@@ -216,7 +223,12 @@ pub fn mint_trigger_b_receipt(
                 operator_mode: mode,
                 failure_rate: rate,
                 receipt_hash: hash,
-                reason: format!("agent-operator mode active with reconciliation failure rate ({:.1}%, {}/{}) <= 10% and honesty gate respected", rate * 100.0, failures, battery.len()),
+                reason: format!(
+                    "agent-operator mode active with reconciliation failure rate ({:.1}%, {}/{}) <= 10% and honesty gate respected",
+                    rate * 100.0,
+                    failures,
+                    battery.len()
+                ),
             }
         }
         Ok(TriggerBVerdict::Defer) => {
@@ -230,7 +242,12 @@ pub fn mint_trigger_b_receipt(
                 operator_mode: mode,
                 failure_rate: rate,
                 receipt_hash: hash,
-                reason: format!("reconciliation failure rate ({:.1}%, {}/{}) exceeds 10% ceiling; deferring activation", rate * 100.0, failures, battery.len()),
+                reason: format!(
+                    "reconciliation failure rate ({:.1}%, {}/{}) exceeds 10% ceiling; deferring activation",
+                    rate * 100.0,
+                    failures,
+                    battery.len()
+                ),
             }
         }
         Ok(TriggerBVerdict::Rule4Defer) => {
@@ -242,7 +259,8 @@ pub fn mint_trigger_b_receipt(
                 operator_mode: mode,
                 failure_rate: 0.0,
                 receipt_hash: hash,
-                reason: "Rule 4: human-driven operator mode defers explanation-object activation".into(),
+                reason: "Rule 4: human-driven operator mode defers explanation-object activation"
+                    .into(),
             }
         }
         Err(refusal) => {
@@ -254,7 +272,9 @@ pub fn mint_trigger_b_receipt(
                 operator_mode: mode,
                 failure_rate: f64::NAN,
                 receipt_hash: hash,
-                reason: format!("inadmissible explanation battery ({refusal:?}); deferring activation"),
+                reason: format!(
+                    "inadmissible explanation battery ({refusal:?}); deferring activation"
+                ),
             }
         }
     }

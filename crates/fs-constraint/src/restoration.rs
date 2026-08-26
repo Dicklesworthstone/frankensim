@@ -235,7 +235,10 @@ impl RestorationWorkPlan {
         let evals_per_step = fd_evals_per_step
             .checked_add(evals_per_total_pass)
             .ok_or_else(|| {
-                overflow("restoration plan overflows per-step work", u32f(shape.dimensions))
+                overflow(
+                    "restoration plan overflows per-step work",
+                    u32f(shape.dimensions),
+                )
             })?;
         // Per start: initial pass + every capped step.
         let descent_evals_per_start = evals_per_step
@@ -255,8 +258,9 @@ impl RestorationWorkPlan {
         })?;
         // Base phase outside the starts loop: canonical skip-mask build
         // (every declared entry) + best-seed pass + final violation pass.
-        let mask_units =
-            ct.checked_mul(RESTORATION_UNITS_SKIP_MASK_ENTRY).ok_or_else(|| {
+        let mask_units = ct
+            .checked_mul(RESTORATION_UNITS_SKIP_MASK_ENTRY)
+            .ok_or_else(|| {
                 overflow(
                     "restoration plan overflows skip-mask work",
                     u32f(shape.constraints_total),
@@ -313,22 +317,22 @@ impl RestorationWorkPlan {
                     u32f(shape.constraints_total),
                 )
             })?;
-        let filter_runs = ct.checked_mul(2).and_then(|runs| runs.checked_add(2)).ok_or_else(
-            || {
+        let filter_runs = ct
+            .checked_mul(2)
+            .and_then(|runs| runs.checked_add(2))
+            .ok_or_else(|| {
                 overflow(
                     "restoration plan overflows filter-run count",
                     u32f(shape.constraints_total),
                 )
-            },
-        )?;
-        let filter_allowance_units = filter_runs.checked_mul(subset_run_upper).ok_or_else(
-            || {
+            })?;
+        let filter_allowance_units =
+            filter_runs.checked_mul(subset_run_upper).ok_or_else(|| {
                 overflow(
                     "restoration plan overflows filter allowance",
                     u32f(shape.constraints_total),
                 )
-            },
-        )?;
+            })?;
         let estimates = ct.checked_mul(3).ok_or_else(|| {
             overflow(
                 "restoration plan overflows repair-estimate count",
@@ -343,14 +347,12 @@ impl RestorationWorkPlan {
                     u32f(limits.feasibility_samples),
                 )
             })?;
-        let repair_allowance_units = estimates
-            .checked_mul(estimate_upper)
-            .ok_or_else(|| {
-                overflow(
-                    "restoration plan overflows repair allowance",
-                    u32f(shape.constraints_total),
-                )
-            })?;
+        let repair_allowance_units = estimates.checked_mul(estimate_upper).ok_or_else(|| {
+            overflow(
+                "restoration plan overflows repair allowance",
+                u32f(shape.constraints_total),
+            )
+        })?;
 
         let total_work_units = base_phase_units
             .checked_add(starts_work)

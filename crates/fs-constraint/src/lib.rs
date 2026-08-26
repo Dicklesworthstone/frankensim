@@ -34,11 +34,10 @@ pub use diagnose::{
 };
 pub use ival::{Iv, IvalError};
 pub use restoration::{
-    RestorationError, RestorationMemoryAuthority, RestorationWorkLimits, RestorationWorkPlan,
-    RestorationWorkReceipt, RestorationWorkShape, RESTORATION_MAX_FEASIBILITY_SAMPLES,
-    RESTORATION_MAX_STARTS, RESTORATION_MAX_STEPS_PER_START,
+    RESTORATION_MAX_FEASIBILITY_SAMPLES, RESTORATION_MAX_STARTS, RESTORATION_MAX_STEPS_PER_START,
     RESTORATION_UNITS_CONSTRAINT_EVALUATION, RESTORATION_UNITS_SKIP_MASK_ENTRY,
-    RESTORATION_WORK_PLAN_SCHEMA_VERSION,
+    RESTORATION_WORK_PLAN_SCHEMA_VERSION, RestorationError, RestorationMemoryAuthority,
+    RestorationWorkLimits, RestorationWorkPlan, RestorationWorkReceipt, RestorationWorkShape,
 };
 
 use fs_evidence::{NumericalCertificate, NumericalKind, StatisticalCertificate};

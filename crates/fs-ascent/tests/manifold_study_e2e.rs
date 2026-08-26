@@ -13,8 +13,7 @@
 #![deny(unsafe_code)]
 
 use fs_ascent::{
-    Packing, RiemannianLbfgs, StopReason, StopRule, Study, StudyError,
-    StudyRunProgress,
+    Packing, RiemannianLbfgs, StopReason, StopRule, Study, StudyError, StudyRunProgress,
 };
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_opt::{Manifold, Problem, ProblemBuilder, Sense};
@@ -213,16 +212,18 @@ fn test_e2e_so3_point_parameter_separation() {
     let mut opt = RiemannianLbfgs::new(so3, &q0, 4, &mut objective);
 
     assert_eq!(opt.x.len(), 4, "Quaternion point dimension is 4");
-    assert_eq!(opt.g.len(), 3, "SO(3) Lie parameter gradient dimension is 3");
+    assert_eq!(
+        opt.g.len(),
+        3,
+        "SO(3) Lie parameter gradient dimension is 3"
+    );
 
     let report = opt.run(&mut objective, &StopRule::GradNorm(1e-6), 100);
 
     assert!(report.iters > 0);
-    let norm = (opt.x[0] * opt.x[0]
-        + opt.x[1] * opt.x[1]
-        + opt.x[2] * opt.x[2]
-        + opt.x[3] * opt.x[3])
-        .sqrt();
+    let norm =
+        (opt.x[0] * opt.x[0] + opt.x[1] * opt.x[1] + opt.x[2] * opt.x[2] + opt.x[3] * opt.x[3])
+            .sqrt();
     assert!(
         (norm - 1.0).abs() < 1e-12,
         "SO(3) quaternion norm must be preserved"
@@ -310,9 +311,7 @@ fn test_e2e_mixed_manifold_study_runner() {
         "PASS",
         &format!(
             "\"evaluations\":{},\"steps\":{},\"f_final\":{:.8}",
-            report.evals,
-            study.steps,
-            report.f
+            report.evals, study.steps, report.f
         ),
     );
 }
@@ -457,7 +456,10 @@ fn test_e2e_study_world_fork_and_steering() {
         "study_world_fork",
         "fork",
         "PASS",
-        &format!("\"child_steps\":{},\"parent_steps\":{}", child_study.steps, parent_study.steps),
+        &format!(
+            "\"child_steps\":{},\"parent_steps\":{}",
+            child_study.steps, parent_study.steps
+        ),
     );
 }
 

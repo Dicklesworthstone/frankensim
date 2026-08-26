@@ -8,8 +8,8 @@
 //! - Deliberate divergence detection: injected mutants fail and produce witnesses
 
 use fs_ivl::formal_binding::{
-    binding_manifest_fingerprint, verify_boundary_class, verify_interval_add_enclosure,
-    verify_interval_mul_enclosure, FROZEN_MODEL_BINDINGS,
+    FROZEN_MODEL_BINDINGS, binding_manifest_fingerprint, verify_boundary_class,
+    verify_interval_add_enclosure, verify_interval_mul_enclosure,
 };
 use fs_ivl::interval::Interval;
 
@@ -58,18 +58,8 @@ fn f64_boundary_classes_match_formal_model_exactly() {
 #[test]
 fn interval_add_enclosure_verified_on_test_pairs() {
     let pairs = [
-        (
-            Interval::new(1.0, 2.0),
-            Interval::new(3.0, 4.0),
-            1.5,
-            3.5,
-        ),
-        (
-            Interval::new(-1.0, 1.0),
-            Interval::new(-2.0, 2.0),
-            0.0,
-            0.0,
-        ),
+        (Interval::new(1.0, 2.0), Interval::new(3.0, 4.0), 1.5, 3.5),
+        (Interval::new(-1.0, 1.0), Interval::new(-2.0, 2.0), 0.0, 0.0),
         (
             Interval::new(f64::MIN_POSITIVE, 1.0),
             Interval::new(f64::MIN_POSITIVE, 2.0),
@@ -83,18 +73,8 @@ fn interval_add_enclosure_verified_on_test_pairs() {
 #[test]
 fn interval_mul_enclosure_verified_on_test_pairs() {
     let pairs = [
-        (
-            Interval::new(1.0, 2.0),
-            Interval::new(3.0, 4.0),
-            1.5,
-            3.5,
-        ),
-        (
-            Interval::new(-2.0, 3.0),
-            Interval::new(1.0, 5.0),
-            -1.0,
-            2.0,
-        ),
+        (Interval::new(1.0, 2.0), Interval::new(3.0, 4.0), 1.5, 3.5),
+        (Interval::new(-2.0, 3.0), Interval::new(1.0, 5.0), -1.0, 2.0),
         (
             Interval::new(0.0, 1.0),
             Interval::new(0.0, 100.0),

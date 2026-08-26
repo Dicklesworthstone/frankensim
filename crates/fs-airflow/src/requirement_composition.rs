@@ -25,8 +25,7 @@ use fs_exec::Cx;
 
 use crate::registered_qoi::{CandidateQoiRow, QoiSemanticId};
 
-const REQUIREMENT_COMPOSITION_DOMAIN: &str =
-    "org.frankensim.fs-airflow.requirement-composition.v1";
+const REQUIREMENT_COMPOSITION_DOMAIN: &str = "org.frankensim.fs-airflow.requirement-composition.v1";
 
 /// Exhaustive compliance outcome taxonomy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -299,9 +298,7 @@ pub fn compose_thermal_limits(
         }
 
         if !seen_ids.insert(req.id.clone()) {
-            return Err(RequirementCompositionError::DuplicateRequirement {
-                id: req.id.clone(),
-            });
+            return Err(RequirementCompositionError::DuplicateRequirement { id: req.id.clone() });
         }
 
         // Match with candidate row

@@ -85,7 +85,12 @@ pub struct ParameterUncertainty {
 impl ParameterUncertainty {
     /// Create a new parameter with aleatory Gaussian distribution.
     #[must_use]
-    pub fn gaussian(name: impl Into<String>, mean: f64, std_dev: f64, unit: impl Into<String>) -> Self {
+    pub fn gaussian(
+        name: impl Into<String>,
+        mean: f64,
+        std_dev: f64,
+        unit: impl Into<String>,
+    ) -> Self {
         Self {
             name: name.into(),
             kind: UncertaintyKind::AleatoryGaussian { mean, std_dev },
@@ -191,7 +196,11 @@ pub struct UqPlan {
 impl UqPlan {
     /// Create a new UQ plan for a target QoI.
     #[must_use]
-    pub fn new(target_qoi: impl Into<String>, method: PropagationMethod, max_samples: usize) -> Self {
+    pub fn new(
+        target_qoi: impl Into<String>,
+        method: PropagationMethod,
+        max_samples: usize,
+    ) -> Self {
         Self {
             target_qoi: target_qoi.into(),
             compliance_threshold: None,
@@ -346,7 +355,9 @@ impl UqPropagator {
                             dispersion: 0.0,
                         },
                         status: UqStatus::Refused,
-                        rejection_reason: Some(format!("correlation matrix diagonal at {i} != 1.0")),
+                        rejection_reason: Some(format!(
+                            "correlation matrix diagonal at {i} != 1.0"
+                        )),
                     };
                 }
                 for j in 0..dim {
@@ -427,7 +438,11 @@ impl UqPropagator {
                         let u = stream.next_f64();
                         lo + (hi - lo) * u
                     }
-                    UncertaintyKind::StatisticalConfidence { estimate, half_width, .. } => {
+                    UncertaintyKind::StatisticalConfidence {
+                        estimate,
+                        half_width,
+                        ..
+                    } => {
                         let u = stream.next_f64();
                         estimate - half_width + 2.0 * half_width * u
                     }
@@ -465,7 +480,10 @@ impl UqPropagator {
         let max_val = sorted[n_samples - 1];
 
         // Probability of compliance
-        let all_have_prob = plan.parameters.iter().all(|p| p.kind.has_probability_measure());
+        let all_have_prob = plan
+            .parameters
+            .iter()
+            .all(|p| p.kind.has_probability_measure());
         let probability_of_compliance = if all_have_prob {
             plan.compliance_threshold.map(|thresh| {
                 let compliant_count = qoi_values.iter().filter(|&&v| v <= thresh).count();
@@ -478,10 +496,7 @@ impl UqPropagator {
         let sampling_error = std_dev / (n_samples as f64).sqrt();
 
         let evidence_color = if all_have_prob && n_samples >= 100 {
-            Color::Verified {
-                lo: p05,
-                hi: p95,
-            }
+            Color::Verified { lo: p05, hi: p95 }
         } else {
             Color::Estimated {
                 estimator: "monte-carlo-sampling".to_string(),

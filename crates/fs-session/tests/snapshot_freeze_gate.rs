@@ -111,7 +111,8 @@ fn commit_freeze(
         marker: u64,
     }
     impl fs_exec::solver::SolverStateV2 for FixtureState {
-        const STATE_TYPE_ID_V2: sv2::SnapshotStateTypeIdV2 = sv2::SnapshotStateTypeIdV2::from_bytes([0xE1; 32]);
+        const STATE_TYPE_ID_V2: sv2::SnapshotStateTypeIdV2 =
+            sv2::SnapshotStateTypeIdV2::from_bytes([0xE1; 32]);
         const STATE_SCHEMA_ID_V2: sv2::SnapshotStateSchemaIdV2 =
             sv2::SnapshotStateSchemaIdV2::from_bytes([0xE2; 32]);
         const STATE_CODEC_ID_V2: sv2::SnapshotStateCodecIdV2 =

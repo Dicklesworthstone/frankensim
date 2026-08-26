@@ -437,7 +437,10 @@ impl fmt::Display for SemanticKeyError {
                 write!(f, "invalid achieved error {value}: {reason}")
             }
             Self::InvalidTiming { value } => {
-                write!(f, "invalid wall timing {value}: must be finite and non-negative")
+                write!(
+                    f,
+                    "invalid wall timing {value}: must be finite and non-negative"
+                )
             }
         }
     }
@@ -492,7 +495,10 @@ pub fn migrate_legacy_node_record(
     }
 
     let (tolerance_role, required_tolerance) = if record.required_tolerance > 0.0 {
-        (ToleranceRole::StoppingCriterion, Some(record.required_tolerance))
+        (
+            ToleranceRole::StoppingCriterion,
+            Some(record.required_tolerance),
+        )
     } else {
         (ToleranceRole::None, None)
     };
@@ -506,13 +512,9 @@ pub fn migrate_legacy_node_record(
         max_iterations: None,
     };
 
-    let comp_key = ComputationKey::try_new(
-        &record.op_id,
-        record.input_hashes.clone(),
-        params,
-        &policy,
-    )
-    .expect("valid legacy record migration");
+    let comp_key =
+        ComputationKey::try_new(&record.op_id, record.input_hashes.clone(), params, &policy)
+            .expect("valid legacy record migration");
 
     let obs = OutputObservation {
         artifact_hash,
@@ -523,4 +525,3 @@ pub fn migrate_legacy_node_record(
 
     (comp_key, obs)
 }
-

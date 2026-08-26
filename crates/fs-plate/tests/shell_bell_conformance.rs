@@ -1,11 +1,11 @@
 //! Shell and bell modal conformance test suite (bead `frankensim-music-v8-root-3ez8g.12.2`).
 
 use fs_modal::SliceOptions;
-use fs_plate::shell::{
-    assemble_shell, canonical_church_bell_profile, generate_bell_shell, generate_cylinder_shell,
-    modes_shell, ShellSupport,
-};
 use fs_plate::PlateSection;
+use fs_plate::shell::{
+    ShellSupport, assemble_shell, canonical_church_bell_profile, generate_bell_shell,
+    generate_cylinder_shell, modes_shell,
+};
 
 fn bronze_bell_section() -> PlateSection {
     // Bell bronze (80% Cu, 20% Sn): E ≈ 105 GPa, nu = 0.34, rho = 8750 kg/m³, h = 15 mm
@@ -31,7 +31,10 @@ fn flat_facet_cylinder_shell_assembles_and_solves_modes() {
     // Modal solve for lowest modes
     let opts = SliceOptions::default();
     let report = modes_shell(&model, (10.0, 1e8), &opts).expect("modal solve succeeds");
-    assert!(report.modes.len() >= 4, "should find at least 4 cylinder modes");
+    assert!(
+        report.modes.len() >= 4,
+        "should find at least 4 cylinder modes"
+    );
 }
 
 #[test]
@@ -50,16 +53,23 @@ fn church_bell_revolve_and_partial_structure() {
     let opts = SliceOptions::default();
     let report = modes_shell(&model, (100.0, 5e8), &opts).expect("bell modal solve succeeds");
 
-    assert!(report.modes.len() >= 5, "should resolve bell partial structure");
+    assert!(
+        report.modes.len() >= 5,
+        "should resolve bell partial structure"
+    );
     let f0 = report.modes[0].lambda.sqrt() / (2.0 * std::f64::consts::PI);
-    assert!(f0 > 50.0 && f0 < 5000.0, "fundamental frequency within audible band: {f0} Hz");
+    assert!(
+        f0 > 50.0 && f0 < 5000.0,
+        "fundamental frequency within audible band: {f0} Hz"
+    );
 }
 
 #[test]
 fn shell_rigid_body_modes_on_free_mesh() {
     let mesh = generate_cylinder_shell(0.1, 0.2, 8, 4);
     let sec = bronze_bell_section();
-    let model = assemble_shell(&mesh, &sec, &[], ShellSupport::Free).expect("free assembly succeeds");
+    let model =
+        assemble_shell(&mesh, &sec, &[], ShellSupport::Free).expect("free assembly succeeds");
 
     assert_eq!(model.free, 6 * mesh.node_count());
 }

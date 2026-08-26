@@ -342,7 +342,9 @@ fn chunked_resume_bitwise_matches_whole_run() {
                 whole.diagnostics.reynolds.to_bits()
             );
         }
-        other => panic!("second chunk must complete, got {other:?}"),
+        other @ fs_aeroac::slot_jet_3d::SweepProgress::Partial { .. } => {
+            panic!("second chunk must complete, got {other:?}")
+        }
     }
     assert!(
         dir.join("state.bin").is_file(),

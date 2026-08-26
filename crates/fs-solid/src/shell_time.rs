@@ -9,7 +9,7 @@
 //! - Exact checkpoint / resume equivalence: resuming from a checkpoint produces bit-identical trajectories.
 //! - Bounded step budgets and cancellation checking.
 
-use fs_blake3::{hash_domain, ContentHash};
+use fs_blake3::{ContentHash, hash_domain};
 use std::fmt;
 
 /// Schema identifier for shell transient time integration receipts.
@@ -205,13 +205,13 @@ impl ShellTimeCheckpoint {
 /// Helper for dense matrix-vector product $y = A x$.
 fn mat_vec(n: usize, a: &[f64], x: &[f64]) -> Vec<f64> {
     let mut y = vec![0.0; n];
-    for i in 0..n {
+    for (i, y_elem) in y.iter_mut().enumerate() {
         let mut sum = 0.0;
         let row_offset = i * n;
         for j in 0..n {
             sum += a[row_offset + j] * x[j];
         }
-        y[i] = sum;
+        *y_elem = sum;
     }
     y
 }
@@ -316,8 +316,9 @@ pub fn step_newmark(
 
     // Effective force: R_eff = f_{n+1} + M * (a0*u_n + a2*v_n + a3*a_n) + C * (a1*u_n + a4*v_n + a5*a_n)
     let mut m_term = vec![0.0; n];
-    for i in 0..n {
-        m_term[i] = a0 * current.displacement[i] + a2 * current.velocity[i] + a3 * current.acceleration[i];
+    for (i, term) in m_term.iter_mut().enumerate() {
+        *term =
+            a0 * current.displacement[i] + a2 * current.velocity[i] + a3 * current.acceleration[i];
     }
     let m_force = mat_vec(n, mass, &m_term);
 
@@ -328,8 +329,10 @@ pub fn step_newmark(
 
     if let Some(c) = damping {
         let mut c_term = vec![0.0; n];
-        for i in 0..n {
-            c_term[i] = a1 * current.displacement[i] + a4 * current.velocity[i] + a5 * current.acceleration[i];
+        for (i, term) in c_term.iter_mut().enumerate() {
+            *term = a1 * current.displacement[i]
+                + a4 * current.velocity[i]
+                + a5 * current.acceleration[i];
         }
         let c_force = mat_vec(n, c, &c_term);
         for i in 0..n {
@@ -344,14 +347,19 @@ pub fn step_newmark(
     let mut a_next = vec![0.0; n];
     let mut v_next = vec![0.0; n];
     for i in 0..n {
-        a_next[i] = a0 * (u_next[i] - current.displacement[i]) - a2 * current.velocity[i] - a3 * current.acceleration[i];
-        v_next[i] = current.velocity[i] + dt * ((1.0 - gamma) * current.acceleration[i] + gamma * a_next[i]);
+        a_next[i] = a0 * (u_next[i] - current.displacement[i])
+            - a2 * current.velocity[i]
+            - a3 * current.acceleration[i];
+        v_next[i] = current.velocity[i]
+            + dt * ((1.0 - gamma) * current.acceleration[i] + gamma * a_next[i]);
     }
 
     // Check finite
     for &val in &u_next {
         if !val.is_finite() {
-            return Err(ShellTimeError::NonFiniteValue { field: "displacement" });
+            return Err(ShellTimeError::NonFiniteValue {
+                field: "displacement",
+            });
         }
     }
 

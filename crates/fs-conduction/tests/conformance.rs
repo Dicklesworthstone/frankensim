@@ -133,10 +133,13 @@ fn enclosure_block(n: usize) -> Fixture {
 
 impl Fixture {
     fn problem(&self) -> ConductionProblem<'_> {
-        ConductionProblem { element_materials: None, mesh: &self.mesh,
-        boundary: &self.boundary,
-        material: &self.material,
-        source: &self.source, }
+        ConductionProblem {
+            element_materials: None,
+            mesh: &self.mesh,
+            boundary: &self.boundary,
+            material: &self.material,
+            source: &self.source,
+        }
     }
 }
 
@@ -277,10 +280,13 @@ fn polynomial_reproduction_at_the_nodes() {
     let solution = with_cx(|cx| {
         solve(
             cx,
-            ConductionProblem { element_materials: None, mesh: &mesh,
-            boundary: &boundary,
-            material: &material,
-            source: &source, },
+            ConductionProblem {
+                element_materials: None,
+                mesh: &mesh,
+                boundary: &boundary,
+                material: &material,
+                source: &source,
+            },
             linear_config(),
         )
         .expect("solve")
@@ -308,10 +314,13 @@ fn polynomial_reproduction_at_the_nodes() {
     let solution3 = with_cx(|cx| {
         solve(
             cx,
-            ConductionProblem { element_materials: None, mesh: &mesh,
-            boundary: &boundary3,
-            material: &material,
-            source: &source3, },
+            ConductionProblem {
+                element_materials: None,
+                mesh: &mesh,
+                boundary: &boundary3,
+                material: &material,
+                source: &source3,
+            },
             linear_config(),
         )
         .expect("solve")
@@ -339,10 +348,13 @@ fn polynomial_reproduction_at_the_nodes() {
     let solution4 = with_cx(|cx| {
         solve(
             cx,
-            ConductionProblem { element_materials: None, mesh: &mesh,
-            boundary: &boundary4,
-            material: &material,
-            source: &source4, },
+            ConductionProblem {
+                element_materials: None,
+                mesh: &mesh,
+                boundary: &boundary4,
+                material: &material,
+                source: &source4,
+            },
             linear_config(),
         )
         .expect("solve")
@@ -516,10 +528,13 @@ fn recovered_flux_matches_the_analytic_gradient() {
     let solution = with_cx(|cx| {
         solve(
             cx,
-            ConductionProblem { element_materials: None, mesh: &mesh,
-            boundary: &boundary,
-            material: &material,
-            source: &source, },
+            ConductionProblem {
+                element_materials: None,
+                mesh: &mesh,
+                boundary: &boundary,
+                material: &material,
+                source: &source,
+            },
             linear_config(),
         )
         .expect("solve")
@@ -588,10 +603,13 @@ fn cancellation_mid_iteration_drains_with_a_structured_refusal() {
         .expect("region")
         .finish()
         .expect("boundary");
-    let problem = ConductionProblem { element_materials: None, mesh: &mesh,
-    boundary: &boundary,
-    material: &material,
-    source: &source, };
+    let problem = ConductionProblem {
+        element_materials: None,
+        mesh: &mesh,
+        boundary: &boundary,
+        material: &material,
+        source: &source,
+    };
     let config = SolveConfig {
         nonlinearity: Nonlinearity::default(),
         stop: StopRule {
@@ -667,10 +685,13 @@ fn snapshot_resume_reproduces_the_uninterrupted_trajectory() {
         .expect("region")
         .finish()
         .expect("boundary");
-    let problem = ConductionProblem { element_materials: None, mesh: &mesh,
-    boundary: &boundary,
-    material: &material,
-    source: &source, };
+    let problem = ConductionProblem {
+        element_materials: None,
+        mesh: &mesh,
+        boundary: &boundary,
+        material: &material,
+        source: &source,
+    };
     let config = SolveConfig {
         nonlinearity: Nonlinearity::default(),
         stop: StopRule {
@@ -855,10 +876,13 @@ fn matdb_receipts_travel_with_the_solve() {
     let solution = with_cx(|cx| {
         solve(
             cx,
-            ConductionProblem { element_materials: None, mesh: &mesh,
-            boundary: &boundary,
-            material: &material,
-            source: &source, },
+            ConductionProblem {
+                element_materials: None,
+                mesh: &mesh,
+                boundary: &boundary,
+                material: &material,
+                source: &source,
+            },
             config,
         )
         .expect("solve")
@@ -1115,10 +1139,13 @@ fn pure_neumann_problem_refuses_instead_of_returning_a_plausible_field() {
     let err = with_cx(|cx| {
         solve(
             cx,
-            ConductionProblem { element_materials: None, mesh: &mesh,
-            boundary: &boundary,
-            material: &material,
-            source: &source, },
+            ConductionProblem {
+                element_materials: None,
+                mesh: &mesh,
+                boundary: &boundary,
+                material: &material,
+                source: &source,
+            },
             linear_config(),
         )
         .expect_err("a pure-Neumann steady problem is singular")
@@ -1162,10 +1189,13 @@ fn adjoint_hook_refuses_a_temperature_dependent_material() {
         .finish()
         .expect("boundary");
     let err = ConductivityDesign::new(
-        ConductionProblem { element_materials: None, mesh: &mesh,
-        boundary: &boundary,
-        material: &material,
-        source: &source, },
+        ConductionProblem {
+            element_materials: None,
+            mesh: &mesh,
+            boundary: &boundary,
+            material: &material,
+            source: &source,
+        },
         LinearConfig::default(),
     )
     .err()

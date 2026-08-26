@@ -115,9 +115,7 @@ fn cbx_003_cancellation_drains_and_never_half_commits() {
             .run(&mut poll, tile, u128::MAX)
             .expect("cancellation is a status, not an error");
         match status {
-            CbcRunStatus::NeedAllowance(_, _) => panic!(
-                "u128::MAX allowance can never shortfall"
-            ),
+            CbcRunStatus::NeedAllowance(_, _) => panic!("u128::MAX allowance can never shortfall"),
             CbcRunStatus::Cancelled(_) => {
                 // The committed prefix is a byte-exact prefix of the final
                 // vector: no half-committed component exists.
@@ -181,7 +179,12 @@ fn cbx_004_allowance_pause_resume_equals_one_shot() {
         // headroom so the final call lands exactly on the sealed bound.
         slice = slice.min(one_shot_spent - executor.work_spent());
         if std::env::var_os("CBC_DEBIT_TRACE").is_some() {
-            println!("IT {} spent={} slice={}", runs, executor.work_spent(), slice);
+            println!(
+                "IT {} spent={} slice={}",
+                runs,
+                executor.work_spent(),
+                slice
+            );
         }
         assert!(slice > 0, "headroom exhausted before completion");
         match executor

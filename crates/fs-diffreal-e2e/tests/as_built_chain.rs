@@ -882,6 +882,7 @@ fn solve_rung(fixture: &BondFixture<'_>, scale: f64) -> BondRung {
         let solution = solve_with_interfaces(
             cx,
             ConductionProblem {
+                element_materials: None,
                 mesh: fixture.mesh,
                 boundary: fixture.boundary,
                 material: fixture.material,

@@ -36,7 +36,10 @@ fn test_hostile_twin_nominal_asbuilt_substitution() {
             thickness_m: -0.0125,
             edge_treatment: SquatDiscEdgeTreatment::Sharp,
         };
-        assert!(spec.resolve(7850.0, cx).is_err(), "Negative thickness must fail resolution");
+        assert!(
+            spec.resolve(7850.0, cx).is_err(),
+            "Negative thickness must fail resolution"
+        );
     });
 }
 
@@ -50,7 +53,10 @@ fn test_hostile_twin_fillet_chamfer_confusion() {
                 radius: 0.020, // Exceeds thickness
             },
         };
-        assert!(spec.resolve(7850.0, cx).is_err(), "Oversized fillet must fail resolution");
+        assert!(
+            spec.resolve(7850.0, cx).is_err(),
+            "Oversized fillet must fail resolution"
+        );
     });
 }
 
@@ -62,7 +68,10 @@ fn test_hostile_twin_stripped_geometry_bound() {
             thickness_m: 0.0125,
             edge_treatment: SquatDiscEdgeTreatment::Sharp,
         };
-        assert!(spec.resolve(7850.0, cx).is_err(), "Zero outer radius must fail resolution");
+        assert!(
+            spec.resolve(7850.0, cx).is_err(),
+            "Zero outer radius must fail resolution"
+        );
     });
 }
 

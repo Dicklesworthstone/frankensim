@@ -148,9 +148,7 @@ impl FeatureComplex {
         // the three-edge-per-triangle scratch buffer; otherwise an oversized
         // malformed input can consume work and memory before reaching the
         // documented feature ceiling.
-        let minimum_features = positions
-            .len()
-            .saturating_add(triangles.len());
+        let minimum_features = positions.len().saturating_add(triangles.len());
         if minimum_features > MAX_COMPLEX_FEATURES {
             return Err(QueryError::FeatureComplexTooLarge {
                 features: minimum_features,

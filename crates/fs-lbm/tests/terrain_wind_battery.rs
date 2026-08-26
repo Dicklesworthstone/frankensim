@@ -1,6 +1,6 @@
 //! V-04c wind-over-terrain battery (bead `frankensim-wf-root-guzez.11.7`, E10.3).
 
-use fs_lbm::terrain_wind::{run_v04c_terrain_wind, TerrainWindConfig, V04C_RECEIPT_SCHEMA_V1};
+use fs_lbm::terrain_wind::{TerrainWindConfig, V04C_RECEIPT_SCHEMA_V1, run_v04c_terrain_wind};
 
 #[test]
 fn v04c_terrain_wind_runs_and_evaluates_discrepancy_bands() {

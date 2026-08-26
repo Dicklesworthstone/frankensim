@@ -43,6 +43,7 @@ use fs_material::gas::{GasSpec, GasState};
 use fs_math::c64::C64;
 use fs_orbit::{HbAnchor, HbBudget, OrbitError, OrbitProblem, solve_hb};
 use fs_scenario::BeatingReed;
+use std::fmt::Write as _;
 
 const TAU: f64 = core::f64::consts::TAU;
 const RATE: u32 = 48_000;
@@ -133,30 +134,6 @@ fn first_resonance(duct: &Duct, gas: &GasState) -> f64 {
     .expect("sweep");
     let peaks = impedance_peaks(&sweep);
     sweep[peaks[0]].omega
-}
-
-/// Does HB find a speaking (non-trivial) orbit at this blowing
-/// pressure? TrivialCollapse / stalls mean "does not speak".
-fn hb_speaks(problem: &ReedHb, omega_guess: f64, harmonics: usize) -> bool {
-    let budget = HbBudget {
-        harmonics,
-        max_newton: 60,
-        tolerance: 1.0e-9,
-        deflate_equilibrium: false,
-    };
-    // Large seeds reach the orbit basin (measured: the equilibrium
-    // basin swallows small seeds); deterministic guess ladder.
-    [0.6f64, 0.35].iter().any(|&guess| {
-        matches!(
-            solve_hb(
-                problem,
-                HbAnchor::Autonomous { omega_guess },
-                guess,
-                &budget
-            ),
-            Ok(_)
-        )
-    })
 }
 
 /// The HB speaking threshold in blowing pressure [Pa], measured by a
@@ -723,13 +700,16 @@ fn diag_hb002_lock_scan() {
                 fs_orbit::seed_from_first_harmonics(&[x1, v1, p1], budget.harmonics, &anchor);
             match fs_orbit::solve_hb_seeded(&problem, anchor, seed, &budget) {
                 Ok(o) => {
-                    line.push_str(&format!(
+                    let _ = write!(
+                        line,
                         " g{guess:.0e}=LOCK f={:.1} a={:.2e};",
                         o.omega / TAU,
                         o.first_harmonic_amplitude(0)
-                    ));
+                    );
                 }
-                Err(e) => line.push_str(&format!(" g{guess:.0e}=refused({e});")),
+                Err(e) => {
+                    let _ = write!(line, " g{guess:.0e}=refused({e});");
+                }
             }
         }
         println!("{line}");

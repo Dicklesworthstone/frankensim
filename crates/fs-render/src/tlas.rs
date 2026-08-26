@@ -892,38 +892,38 @@ mod tests {
     }
 
     #[test]
-        // Bead frankensim-8ll9: mesh/chart derivation parity kept inline;
-        // extraction would separate oracle assertions from their fixtures.
-        #[allow(clippy::too_many_lines)]
+    // Bead frankensim-8ll9: mesh/chart derivation parity kept inline;
+    // extraction would separate oracle assertions from their fixtures.
+    #[allow(clippy::too_many_lines)]
     fn derived_bounds_match_manual_bounds_for_meshes_and_admit_charts() {
         with_cx(|_, cx| {
             // A finite-support chart instance derives from Chart::support
             // and never culls its own hits (oracle equality).
-        #[derive(Clone, Copy)]
-        struct SphereChart;
-        impl fs_geom::Chart for SphereChart {
-            fn eval(&self, x: Point3, _cx: &Cx<'_>) -> fs_geom::ChartSample {
-                let distance = (x.x * x.x + x.y * x.y + x.z * x.z).sqrt() - 0.5;
-                fs_geom::ChartSample {
-                    signed_distance: distance,
-                    gradient: None,
-                    lipschitz: Some(1.0),
-                    error: fs_evidence::NumericalCertificate::exact(distance),
+            #[derive(Clone, Copy)]
+            struct SphereChart;
+            impl fs_geom::Chart for SphereChart {
+                fn eval(&self, x: Point3, _cx: &Cx<'_>) -> fs_geom::ChartSample {
+                    let distance = (x.x * x.x + x.y * x.y + x.z * x.z).sqrt() - 0.5;
+                    fs_geom::ChartSample {
+                        signed_distance: distance,
+                        gradient: None,
+                        lipschitz: Some(1.0),
+                        error: fs_evidence::NumericalCertificate::exact(distance),
+                    }
+                }
+                fn support(&self) -> Aabb {
+                    Aabb {
+                        min: Point3::new(-0.5, -0.5, -0.5),
+                        max: Point3::new(0.5, 0.5, 0.5),
+                    }
+                }
+                fn trace_step_claim(&self) -> fs_geom::TraceStepClaim {
+                    fs_geom::TraceStepClaim::ExactDistance
+                }
+                fn name(&self) -> &'static str {
+                    "tlas-test-sphere"
                 }
             }
-            fn support(&self) -> Aabb {
-                Aabb {
-                    min: Point3::new(-0.5, -0.5, -0.5),
-                    max: Point3::new(0.5, 0.5, 0.5),
-                }
-            }
-            fn trace_step_claim(&self) -> fs_geom::TraceStepClaim {
-                fs_geom::TraceStepClaim::ExactDistance
-            }
-            fn name(&self) -> &'static str {
-                "tlas-test-sphere"
-            }
-        }
             // An unbounded chart support refuses typed.
             #[derive(Clone, Copy)]
             struct UnboundedChart;

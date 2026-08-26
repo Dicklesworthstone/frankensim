@@ -53,7 +53,7 @@ fn exec_reduction_subject() -> Subject {
             let pool = TilePool::new(PoolConfig::new(
                 workers,
                 CcdTopology::APPLE_M_CLASS,
-                0xD3_7A_0D17,
+                0xD37A_0D17,
             ));
             let out = pool
                 .run(&FloatKernel { tiles: 257 })

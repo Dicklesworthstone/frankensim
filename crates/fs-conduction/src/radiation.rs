@@ -514,7 +514,7 @@ impl ViewFactorMatrix {
         for (i, row) in factors.iter().enumerate() {
             let mut sum = 0.0;
             for (j, &factor) in row.iter().enumerate() {
-                if !(factor.is_finite() && factor >= 0.0 && factor <= 1.0) {
+                if !(factor.is_finite() && (0.0..=1.0).contains(&factor)) {
                     return Err(radiation_error(
                         format!("view-factor-{i}-{j}"),
                         format!("factor {factor} must lie in [0, 1]"),
@@ -1137,10 +1137,13 @@ pub fn solve_with_gray_diffuse_enclosure(
         let dofs = DofMap::new(&overlaid, problem.mesh.vertex_count())?;
         let mut next_config = conduction_config.clone();
         next_config.initial = InitialGuess::Free(dofs.gather(&conduction.temperature));
-        let next_problem = ConductionProblem { element_materials: None, mesh: problem.mesh,
-        boundary: &overlaid,
-        material: problem.material,
-        source: problem.source, };
+        let next_problem = ConductionProblem {
+            element_materials: None,
+            mesh: problem.mesh,
+            boundary: &overlaid,
+            material: problem.material,
+            source: problem.source,
+        };
         let next = run_conduction(cx, next_problem, interfaces, next_config)?;
         let actual_temperatures =
             enclosure.surface_temperatures(problem.mesh, &next.temperature)?;

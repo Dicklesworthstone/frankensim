@@ -110,10 +110,19 @@ impl fmt::Display for CheckerDisposition {
                 )
             }
             Self::LegacyUnresolved { node_hash, reason } => {
-                write!(f, "LegacyUnresolved(node={}, reason={})", node_hash.to_hex(), reason)
+                write!(
+                    f,
+                    "LegacyUnresolved(node={}, reason={})",
+                    node_hash.to_hex(),
+                    reason
+                )
             }
             Self::ExplicitlyNondeterministic { computation_hash } => {
-                write!(f, "ExplicitlyNondeterministic(key={})", computation_hash.to_hex())
+                write!(
+                    f,
+                    "ExplicitlyNondeterministic(key={})",
+                    computation_hash.to_hex()
+                )
             }
             Self::InvalidEvidence { reason } => {
                 write!(f, "InvalidEvidence({reason})")

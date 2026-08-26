@@ -881,7 +881,7 @@ mod volume_rounding_tests {
         assert_eq!(grid.dims, [1, 2, 1]);
         let (center, radius) = cell_center_and_radius(&grid, [0, 0, 0])
             .expect("unrepresentable ideal midpoint gets an enclosing stored center");
-        assert!(center.x == x_min || center.x == x_max);
+        assert!(center.x.to_bits() == x_min.to_bits() || center.x.to_bits() == x_max.to_bits());
         assert!(center.y.is_finite() && center.z.is_finite() && radius.is_finite());
 
         let nearest_measure = grid.cell_volume_estimate;

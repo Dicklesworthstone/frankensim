@@ -60,14 +60,19 @@ impl ArbitraryTreeGauge {
     /// The only obtainable state: gated OFF at the current revision.
     #[must_use]
     pub fn current() -> Self {
-        Self { revision: TREE_GAUGE_GATE_REVISION }
+        Self {
+            revision: TREE_GAUGE_GATE_REVISION,
+        }
     }
 
+    /// Structurally false at every revision: revision 0 admits no theorem
+    /// identity, so no enabled gate state can exist.
     #[must_use]
     pub fn is_enabled(&self) -> bool {
         false // structural: revision 0 admits no theorem identity to enable
     }
 
+    /// The gate revision this state was minted under.
     #[must_use]
     pub fn revision(&self) -> u32 {
         self.revision
@@ -111,9 +116,14 @@ impl ActivationCriteria {
 /// Typed blockers on the moonshot path. Exhaustive; each names its repair.
 #[derive(Debug, Clone, PartialEq)]
 pub enum GaugeBlocker {
+    /// No proven arbitrary-tree canonicality theorem exists yet.
     MissingExactTheorem,
+    /// No independent checker receipt covers that theorem.
     MissingIndependentChecker,
+    /// The preregistered falsifier corpus is not retained and green.
     MissingFalsifierCorpus,
+    /// A confirmed counterexample permanently vetoes activation; carries
+    /// its digest.
     KilledByCounterexample(ContentHash),
 }
 
@@ -146,6 +156,8 @@ pub enum EscalationLadder {
     AlternativePolicy,
 }
 
+/// Measured gauge freedom between two admissible schedules over one input,
+/// together with the digest sealing the evidence behind the number.
 pub struct TreeObstruction {
     /// Row block of schedule A.
     pub row_block_a: usize,
@@ -160,7 +172,15 @@ pub struct TreeObstruction {
 }
 
 impl TreeObstruction {
-    fn seal(a: &[f64], m: usize, n: usize, ra: &[f64], rb: &[f64], ba: usize, bb: usize) -> ContentHash {
+    fn seal(
+        a: &[f64],
+        m: usize,
+        n: usize,
+        ra: &[f64],
+        rb: &[f64],
+        ba: usize,
+        bb: usize,
+    ) -> ContentHash {
         let mut h = DomainHasher::new(TREE_GAUGE_IDENTITY_DOMAIN);
         h.update(b"obstruction:");
         h.update(&(m as u64).to_le_bytes());
@@ -211,8 +231,12 @@ pub fn tree_gauge_obstruction(
     let run_b = db.run(a, cancel_b, None)?;
     let (ra, rb) = match (&run_a, &run_b) {
         (TreeRun::Completed(_), TreeRun::Completed(_)) => (
-            FixedTreeDriver::final_r(&run_a).expect("completed").to_vec(),
-            FixedTreeDriver::final_r(&run_b).expect("completed").to_vec(),
+            FixedTreeDriver::final_r(&run_a)
+                .expect("completed")
+                .to_vec(),
+            FixedTreeDriver::final_r(&run_b)
+                .expect("completed")
+                .to_vec(),
         ),
         _ => return Err(PolicyError::CancellationPending),
     };
@@ -244,11 +268,17 @@ pub fn tree_gauge_obstruction(
 /// artifact the closure cites.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FamilyAdjudication {
+    /// Caller-supplied label echoed into the record unchanged.
     pub family_tag: &'static str,
+    /// Pairwise obstruction runs completed (all pairs, or nothing — any
+    /// refusal propagates instead of yielding a partial record).
     pub pair_count: usize,
+    /// Largest max-normal relative divergence across those pairs.
     pub max_observed_divergence: f64,
     /// True iff every pair showed T2-level agreement (full-rank family).
     pub glues_as_full_rank: bool,
+    /// Empty when every pair glued within tolerance; otherwise all ladder
+    /// options in recommendation-priority order.
     pub escalations: Vec<EscalationLadder>,
 }
 
@@ -328,7 +358,9 @@ mod tests {
         let mut s = 4242u64 | 1;
         let mut a = vec![0.0; m * n];
         for v in a.iter_mut() {
-            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             *v = ((s >> 11) as f64) / ((1u64 << 53) as f64);
         }
         for i in 0..n {
@@ -384,9 +416,8 @@ mod tests {
         // Full-rank family: T2 agreement MUST hold — this direction is a
         // theorem, not an observation.
         let a_full = full(48);
-        let adj_full =
-            adjudicate_family("full-rank", &a_full, 48, 3, &[12, 24, 48], &mut never)
-                .expect("adjudicates");
+        let adj_full = adjudicate_family("full-rank", &a_full, 48, 3, &[12, 24, 48], &mut never)
+            .expect("adjudicates");
         assert!(adj_full.glues_as_full_rank);
         assert!(adj_full.max_observed_divergence < 1e-9);
         assert!(adj_full.escalations.is_empty());
@@ -398,7 +429,10 @@ mod tests {
         let a = dep(48);
         let o1 = tree_gauge_obstruction(&a, 48, 3, 12, 24, &mut never).expect("runs");
         let o2 = tree_gauge_obstruction(&a, 48, 3, 12, 24, &mut never).expect("runs");
-        assert_eq!(o1.evidence_digest, o2.evidence_digest, "same-ISA replay must be stable");
+        assert_eq!(
+            o1.evidence_digest, o2.evidence_digest,
+            "same-ISA replay must be stable"
+        );
         // Swapping the schedule pair changes the bound evidence.
         let o3 = tree_gauge_obstruction(&a, 48, 3, 24, 48, &mut never).expect("runs");
         assert_ne!(o1.evidence_digest, o3.evidence_digest);

@@ -1503,7 +1503,10 @@ fn rb_001c_scale_direction_and_touching_spheres_are_conservative() {
         };
         let equality_t_max = 0.3;
         let outward_working_x = (equality_t_max * equality_ray.dir.x).next_up();
-        assert_eq!((outward_working_x / equality_ray.dir.x).to_bits(), equality_t_max.to_bits());
+        assert_eq!(
+            (outward_working_x / equality_ray.dir.x).to_bits(),
+            equality_t_max.to_bits()
+        );
         assert_ne!(
             outward_working_x.to_bits(),
             equality_ray.at(equality_t_max).x.to_bits()
@@ -2242,7 +2245,7 @@ fn rb_004_mixed_scene_consistency_and_frame_invariance() {
 #[test]
 fn rb_005_ray_rate_ledger() {
     with_cx(|cx| {
-            // MEASURED, honestly labeled throughput on primary rays. The plan's
+        // MEASURED, honestly labeled throughput on primary rays. The plan's
         // Mray/s TARGETS are release-build perf-CI
         // gates (fz2.4) — this ledgers the measurement discipline, not
         // the target (AGENTS: no "fast" without a benchmark + machine).

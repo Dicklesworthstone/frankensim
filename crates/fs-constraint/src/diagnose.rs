@@ -40,9 +40,9 @@
 //! the embedded [`ElasticReport`]'s solver-scoped `evals`.
 
 use crate::restoration::{
-    RestorationError, RestorationMemoryAuthority, RestorationWorkLimits, RestorationWorkPlan,
-    RestorationWorkReceipt, RestorationWorkShape, RESTORATION_UNITS_CONSTRAINT_EVALUATION,
-    RESTORATION_UNITS_SKIP_MASK_ENTRY,
+    RESTORATION_UNITS_CONSTRAINT_EVALUATION, RESTORATION_UNITS_SKIP_MASK_ENTRY, RestorationError,
+    RestorationMemoryAuthority, RestorationWorkLimits, RestorationWorkPlan, RestorationWorkReceipt,
+    RestorationWorkShape,
 };
 use crate::{ConError, ConstraintSpec, DomainError, DomainRangeError, push_json_string, scalar_at};
 use fs_exec::{AdmittedBudget, BudgetConsumption, BudgetRefusal, Cx};
@@ -361,7 +361,11 @@ fn run_descent_start(
             let minus = run_total_pass(problem, specs, active_indices, &xm, evals, budget, cx)?;
             *gk = (plus - minus) / (xp[k] - xm[k]).max(1e-300);
         }
-        let norm = gradient.iter().map(|value| value * value).sum::<f64>().sqrt();
+        let norm = gradient
+            .iter()
+            .map(|value| value * value)
+            .sum::<f64>()
+            .sqrt();
         if norm < 1e-14 {
             break;
         }
@@ -413,8 +417,15 @@ fn run_elastic(
         .iter()
         .map(|&(lo, hi)| f64::midpoint(lo, hi))
         .collect();
-    let mut best_v =
-        run_total_pass(problem, specs, &active_indices, &best_x, &mut evals, budget, cx)?;
+    let mut best_v = run_total_pass(
+        problem,
+        specs,
+        &active_indices,
+        &best_x,
+        &mut evals,
+        budget,
+        cx,
+    )?;
     for start in 0..limits.starts {
         cp(budget, cx, PHASE_START)?;
         let seed = if start == 0 {
@@ -602,8 +613,8 @@ pub fn elastic_solve_with_plan(
         }));
     }
     plan.verify_consistency().map_err(invalid)?;
-    let dimension_matches = u32::try_from(dimension)
-        .map_or(false, |admitted| admitted == plan.dimensions);
+    let dimension_matches =
+        u32::try_from(dimension).map_or(false, |admitted| admitted == plan.dimensions);
     if !dimension_matches {
         return Err(invalid(ConError::BadParam {
             what: "restoration work plan dimensions must equal the admitted host dimension",
@@ -623,8 +634,7 @@ pub fn elastic_solve_with_plan(
 
 /// Schema-current marker used by [`elastic_solve_with_plan`]; a plain
 /// alias keeps the comparison site honest about what it checks.
-const RESTORATION_WORK_PLAN_SCHEMA_VERSION_ID: u32 =
-    crate::RESTORATION_WORK_PLAN_SCHEMA_VERSION;
+const RESTORATION_WORK_PLAN_SCHEMA_VERSION_ID: u32 = crate::RESTORATION_WORK_PLAN_SCHEMA_VERSION;
 
 /// Shared admission + execution tail for the two public elastic entry
 /// points. `mask` and `plan` arrive pre-validated.
@@ -966,11 +976,10 @@ pub fn diagnose_infeasibility(
             });
         }
     };
-    let stopped =
-        |budget: &AdmittedBudget<'_>, refusal: BudgetRefusal| RestorationError::Refused {
-            refusal,
-            receipt: receipt(&plan, budget, memory, 0),
-        };
+    let stopped = |budget: &AdmittedBudget<'_>, refusal: BudgetRefusal| RestorationError::Refused {
+        refusal,
+        receipt: receipt(&plan, budget, memory, 0),
+    };
 
     let mut tally = RunTally::default();
     let base = match run_elastic(
@@ -1081,11 +1090,10 @@ pub fn diagnose_infeasibility(
     // soft; estimate feasibility by Monte-Carlo volume; rank.
     let mut repairs = Vec::new();
     for &i in &core {
-        cp(&mut budget, cx, PHASE_REPAIR_CANDIDATE)
-            .map_err(|stop| match stop {
-                Stop::Refused(refusal) => stopped(&budget, refusal),
-                Stop::Fault(error) => invalid(error),
-            })?;
+        cp(&mut budget, cx, PHASE_REPAIR_CANDIDATE).map_err(|stop| match stop {
+            Stop::Refused(refusal) => stopped(&budget, refusal),
+            Stop::Fault(error) => invalid(error),
+        })?;
         let scale = base.violations[i].max(FEAS_TOL);
         for factor in [1.1, 1.5] {
             let slack = scale * factor;

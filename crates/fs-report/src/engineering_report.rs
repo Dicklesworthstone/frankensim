@@ -201,12 +201,37 @@ impl EngineeringReport {
         // Five Explicits & Provenance
         html.push_str("<h2>1. Provenance &amp; The Five Explicits</h2>\n<table>\n");
         html.push_str("<tr><th>Dimension</th><th>Explicit Declaration</th></tr>\n");
-        let _ = write!(html, "<tr><td>Code Version</td><td><code>{}</code></td></tr>\n", self.provenance.code_version);
-        let _ = write!(html, "<tr><td>Constellation Lock</td><td><code>{}</code></td></tr>\n", self.provenance.constellation_lock);
-        let _ = write!(html, "<tr><td>Machine Fingerprint</td><td><code>{}</code></td></tr>\n", self.provenance.machine_fingerprint);
-        let _ = write!(html, "<tr><td>Units System</td><td>{}</td></tr>\n", self.provenance.units_system);
-        let _ = write!(html, "<tr><td>Deterministic Seed</td><td><code>0x{:04x}</code></td></tr>\n", self.provenance.rng_seed);
-        let _ = write!(html, "<tr><td>Budgets</td><td>Wall: {}s | Memory: {} MB</td></tr>\n", self.provenance.wall_budget_s, self.provenance.mem_budget_bytes / (1024 * 1024));
+        let _ = write!(
+            html,
+            "<tr><td>Code Version</td><td><code>{}</code></td></tr>\n",
+            self.provenance.code_version
+        );
+        let _ = write!(
+            html,
+            "<tr><td>Constellation Lock</td><td><code>{}</code></td></tr>\n",
+            self.provenance.constellation_lock
+        );
+        let _ = write!(
+            html,
+            "<tr><td>Machine Fingerprint</td><td><code>{}</code></td></tr>\n",
+            self.provenance.machine_fingerprint
+        );
+        let _ = write!(
+            html,
+            "<tr><td>Units System</td><td>{}</td></tr>\n",
+            self.provenance.units_system
+        );
+        let _ = write!(
+            html,
+            "<tr><td>Deterministic Seed</td><td><code>0x{:04x}</code></td></tr>\n",
+            self.provenance.rng_seed
+        );
+        let _ = write!(
+            html,
+            "<tr><td>Budgets</td><td>Wall: {}s | Memory: {} MB</td></tr>\n",
+            self.provenance.wall_budget_s,
+            self.provenance.mem_budget_bytes / (1024 * 1024)
+        );
         html.push_str("</table>\n");
 
         // 2. Quantities of Interest & Error Budget
@@ -243,7 +268,8 @@ impl EngineeringReport {
                 escape_html(&conv.qoi_name),
                 conv.status.label(),
                 conv.theoretical_order,
-                conv.observed_order.map_or("N/A".to_string(), |v| format!("{v:.3}"))
+                conv.observed_order
+                    .map_or("N/A".to_string(), |v| format!("{v:.3}"))
             );
             html.push_str("<table>\n<tr><th>Rung</th><th>Mesh ID</th><th>h (spacing)</th><th>DOF</th><th>QoI Value</th><th>Solver Status</th></tr>\n");
             for r in &conv.admitted_rungs {
@@ -266,7 +292,8 @@ impl EngineeringReport {
                     html,
                     "<p><strong>Richardson Extrapolated Continuum Value:</strong> {:.4} | <strong>Grid Convergence Index (GCI):</strong> {}</p>\n",
                     extrap,
-                    conv.discretization_error_gci.map_or("N/A".to_string(), |g| format!("{:.3}%", g * 100.0))
+                    conv.discretization_error_gci
+                        .map_or("N/A".to_string(), |g| format!("{:.3}%", g * 100.0))
                 );
             }
         }
@@ -277,9 +304,7 @@ impl EngineeringReport {
             let _ = write!(
                 html,
                 "<p><strong>Propagation Method:</strong> {:?} | <strong>Samples Evaluated:</strong> {} | <strong>Sampling Error:</strong> ±{:.4}</p>\n",
-                uq.method_used,
-                uq.samples_evaluated,
-                uq.sampling_error
+                uq.method_used, uq.samples_evaluated, uq.sampling_error
             );
             if let (Some(m), Some(s)) = (uq.mean, uq.std_dev) {
                 let _ = write!(
@@ -317,7 +342,9 @@ impl EngineeringReport {
         }
 
         // 6. Known Gaps & No-Claims Section
-        html.push_str("<h2>6. Known Gaps &amp; No-Claims Boundaries</h2>\n<div class=\"alert-box\">\n");
+        html.push_str(
+            "<h2>6. Known Gaps &amp; No-Claims Boundaries</h2>\n<div class=\"alert-box\">\n",
+        );
         html.push_str("<p><em>FrankenSim makes explicit no-claim boundaries where physical validation or continuum authority is absent:</em></p>\n<ul>\n");
         for nc in &self.no_claims {
             let _ = write!(
@@ -350,19 +377,50 @@ impl EngineeringReport {
     pub fn render_json(&self) -> String {
         let mut json = String::with_capacity(16 * 1024);
         json.push_str("{\n");
-        let _ = write!(json, "  \"schema\": \"frankensim.report.engineering.v1\",\n");
+        let _ = write!(
+            json,
+            "  \"schema\": \"frankensim.report.engineering.v1\",\n"
+        );
         let _ = write!(json, "  \"run_id\": \"{}\",\n", self.run_id);
-        let _ = write!(json, "  \"project_name\": \"{}\",\n", escape_json(&self.project_name));
+        let _ = write!(
+            json,
+            "  \"project_name\": \"{}\",\n",
+            escape_json(&self.project_name)
+        );
 
         // Provenance
         json.push_str("  \"provenance\": {\n");
-        let _ = write!(json, "    \"code_version\": \"{}\",\n", self.provenance.code_version);
-        let _ = write!(json, "    \"constellation_lock\": \"{}\",\n", self.provenance.constellation_lock);
-        let _ = write!(json, "    \"machine_fingerprint\": \"{}\",\n", self.provenance.machine_fingerprint);
-        let _ = write!(json, "    \"units_system\": \"{}\",\n", self.provenance.units_system);
+        let _ = write!(
+            json,
+            "    \"code_version\": \"{}\",\n",
+            self.provenance.code_version
+        );
+        let _ = write!(
+            json,
+            "    \"constellation_lock\": \"{}\",\n",
+            self.provenance.constellation_lock
+        );
+        let _ = write!(
+            json,
+            "    \"machine_fingerprint\": \"{}\",\n",
+            self.provenance.machine_fingerprint
+        );
+        let _ = write!(
+            json,
+            "    \"units_system\": \"{}\",\n",
+            self.provenance.units_system
+        );
         let _ = write!(json, "    \"rng_seed\": {},\n", self.provenance.rng_seed);
-        let _ = write!(json, "    \"wall_budget_s\": {},\n", self.provenance.wall_budget_s);
-        let _ = write!(json, "    \"mem_budget_bytes\": {}\n", self.provenance.mem_budget_bytes);
+        let _ = write!(
+            json,
+            "    \"wall_budget_s\": {},\n",
+            self.provenance.wall_budget_s
+        );
+        let _ = write!(
+            json,
+            "    \"mem_budget_bytes\": {}\n",
+            self.provenance.mem_budget_bytes
+        );
         json.push_str("  },\n");
 
         // QoIs
@@ -394,11 +452,23 @@ impl EngineeringReport {
         // Convergence
         if let Some(conv) = &self.convergence {
             json.push_str("  \"convergence\": {\n");
-            let _ = write!(json, "    \"qoi_name\": \"{}\",\n", escape_json(&conv.qoi_name));
+            let _ = write!(
+                json,
+                "    \"qoi_name\": \"{}\",\n",
+                escape_json(&conv.qoi_name)
+            );
             let _ = write!(json, "    \"status\": \"{}\",\n", conv.status.label());
-            let _ = write!(json, "    \"theoretical_order\": {:.4},\n", conv.theoretical_order);
+            let _ = write!(
+                json,
+                "    \"theoretical_order\": {:.4},\n",
+                conv.theoretical_order
+            );
             let _ = write!(json, "    \"observed_order\": {:?},\n", conv.observed_order);
-            let _ = write!(json, "    \"richardson_extrapolated\": {:?},\n", conv.richardson_extrapolated_qoi);
+            let _ = write!(
+                json,
+                "    \"richardson_extrapolated\": {:?},\n",
+                conv.richardson_extrapolated_qoi
+            );
             let _ = write!(json, "    \"gci\": {:?}\n", conv.discretization_error_gci);
             json.push_str("  },\n");
         }
@@ -406,12 +476,20 @@ impl EngineeringReport {
         // Uncertainty
         if let Some(uq) = &self.uncertainty {
             json.push_str("  \"uncertainty\": {\n");
-            let _ = write!(json, "    \"qoi_name\": \"{}\",\n", escape_json(&uq.qoi_name));
+            let _ = write!(
+                json,
+                "    \"qoi_name\": \"{}\",\n",
+                escape_json(&uq.qoi_name)
+            );
             let _ = write!(json, "    \"method\": \"{:?}\",\n", uq.method_used);
             let _ = write!(json, "    \"samples\": {},\n", uq.samples_evaluated);
             let _ = write!(json, "    \"mean\": {:?},\n", uq.mean);
             let _ = write!(json, "    \"std_dev\": {:?},\n", uq.std_dev);
-            let _ = write!(json, "    \"p_compliance\": {:?}\n", uq.probability_of_compliance);
+            let _ = write!(
+                json,
+                "    \"p_compliance\": {:?}\n",
+                uq.probability_of_compliance
+            );
             json.push_str("  },\n");
         }
 

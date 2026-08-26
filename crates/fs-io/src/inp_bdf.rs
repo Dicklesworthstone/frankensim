@@ -7,11 +7,11 @@
 //! input files. Emits an explicit census of supported and unsupported cards and
 //! never claims external execution semantics.
 
-use core::fmt::Write as _;
-use std::collections::BTreeMap;
-use fs_blake3::{ContentHash, hash_domain};
 use crate::quarantine::{ImportReceipt, Quarantined};
 use crate::{IoError, MAX_ELEMENTS};
+use core::fmt::Write as _;
+use fs_blake3::{ContentHash, hash_domain};
+use std::collections::BTreeMap;
 
 /// Extracted FE node.
 #[derive(Debug, Clone, PartialEq)]
@@ -154,10 +154,16 @@ pub fn parse_abaqus_inp(input: &str) -> Result<(Quarantined<FeModel>, InpBdfRece
             let upper = line.to_ascii_uppercase();
             if upper.starts_with("*NODE") {
                 current_section = "NODE";
-                *model.supported_cards.entry("*NODE".to_string()).or_insert(0) += 1;
+                *model
+                    .supported_cards
+                    .entry("*NODE".to_string())
+                    .or_insert(0) += 1;
             } else if upper.starts_with("*ELEMENT") {
                 current_section = "ELEMENT";
-                *model.supported_cards.entry("*ELEMENT".to_string()).or_insert(0) += 1;
+                *model
+                    .supported_cards
+                    .entry("*ELEMENT".to_string())
+                    .or_insert(0) += 1;
                 // Parse TYPE=
                 current_element_type = "C3D4".to_string();
                 for part in upper.split(',') {
@@ -168,7 +174,10 @@ pub fn parse_abaqus_inp(input: &str) -> Result<(Quarantined<FeModel>, InpBdfRece
                 }
             } else if upper.starts_with("*NSET") {
                 current_section = "NSET";
-                *model.supported_cards.entry("*NSET".to_string()).or_insert(0) += 1;
+                *model
+                    .supported_cards
+                    .entry("*NSET".to_string())
+                    .or_insert(0) += 1;
                 current_set_name = "NSET".to_string();
                 for part in line.split(',') {
                     let p = part.trim();
@@ -179,7 +188,10 @@ pub fn parse_abaqus_inp(input: &str) -> Result<(Quarantined<FeModel>, InpBdfRece
                 model.node_sets.entry(current_set_name.clone()).or_default();
             } else if upper.starts_with("*ELSET") {
                 current_section = "ELSET";
-                *model.supported_cards.entry("*ELSET".to_string()).or_insert(0) += 1;
+                *model
+                    .supported_cards
+                    .entry("*ELSET".to_string())
+                    .or_insert(0) += 1;
                 current_set_name = "ELSET".to_string();
                 for part in line.split(',') {
                     let p = part.trim();
@@ -187,13 +199,19 @@ pub fn parse_abaqus_inp(input: &str) -> Result<(Quarantined<FeModel>, InpBdfRece
                         current_set_name = p["ELSET=".len()..].trim().to_string();
                     }
                 }
-                model.element_sets.entry(current_set_name.clone()).or_default();
+                model
+                    .element_sets
+                    .entry(current_set_name.clone())
+                    .or_default();
             } else if upper.starts_with("*MATERIAL") {
                 if let Some(mat) = current_material.take() {
                     model.materials.push(mat);
                 }
                 current_section = "MATERIAL";
-                *model.supported_cards.entry("*MATERIAL".to_string()).or_insert(0) += 1;
+                *model
+                    .supported_cards
+                    .entry("*MATERIAL".to_string())
+                    .or_insert(0) += 1;
                 let mut name = "MAT".to_string();
                 for part in line.split(',') {
                     let p = part.trim();
@@ -209,19 +227,34 @@ pub fn parse_abaqus_inp(input: &str) -> Result<(Quarantined<FeModel>, InpBdfRece
                 });
             } else if upper.starts_with("*CONDUCTIVITY") {
                 current_section = "CONDUCTIVITY";
-                *model.supported_cards.entry("*CONDUCTIVITY".to_string()).or_insert(0) += 1;
+                *model
+                    .supported_cards
+                    .entry("*CONDUCTIVITY".to_string())
+                    .or_insert(0) += 1;
             } else if upper.starts_with("*SPECIFIC HEAT") {
                 current_section = "SPECIFIC_HEAT";
-                *model.supported_cards.entry("*SPECIFIC HEAT".to_string()).or_insert(0) += 1;
+                *model
+                    .supported_cards
+                    .entry("*SPECIFIC HEAT".to_string())
+                    .or_insert(0) += 1;
             } else if upper.starts_with("*DENSITY") {
                 current_section = "DENSITY";
-                *model.supported_cards.entry("*DENSITY".to_string()).or_insert(0) += 1;
+                *model
+                    .supported_cards
+                    .entry("*DENSITY".to_string())
+                    .or_insert(0) += 1;
             } else if upper.starts_with("*BOUNDARY") {
                 current_section = "BOUNDARY";
-                *model.supported_cards.entry("*BOUNDARY".to_string()).or_insert(0) += 1;
+                *model
+                    .supported_cards
+                    .entry("*BOUNDARY".to_string())
+                    .or_insert(0) += 1;
             } else if upper.starts_with("*DFLUX") || upper.starts_with("*FILM") {
                 current_section = "FLUX";
-                *model.supported_cards.entry(upper.split(',').next().unwrap_or("*FLUX").to_string()).or_insert(0) += 1;
+                *model
+                    .supported_cards
+                    .entry(upper.split(',').next().unwrap_or("*FLUX").to_string())
+                    .or_insert(0) += 1;
             } else {
                 current_section = "UNSUPPORTED";
                 let card_name = upper.split(',').next().unwrap_or(&upper).to_string();
@@ -243,7 +276,10 @@ pub fn parse_abaqus_inp(input: &str) -> Result<(Quarantined<FeModel>, InpBdfRece
                     let y: f64 = parts[2].parse().unwrap_or(0.0);
                     let z: f64 = parts[3].parse().unwrap_or(0.0);
                     if model.nodes.len() < MAX_ELEMENTS {
-                        model.nodes.push(FeNode { id, coords: [x, y, z] });
+                        model.nodes.push(FeNode {
+                            id,
+                            coords: [x, y, z],
+                        });
                     }
                 }
             }
@@ -254,7 +290,8 @@ pub fn parse_abaqus_inp(input: &str) -> Result<(Quarantined<FeModel>, InpBdfRece
                         at: line_idx,
                         what: "invalid element id in *ELEMENT".to_string(),
                     })?;
-                    let node_ids: Vec<u64> = parts[1..].iter().filter_map(|p| p.parse().ok()).collect();
+                    let node_ids: Vec<u64> =
+                        parts[1..].iter().filter_map(|p| p.parse().ok()).collect();
                     if model.elements.len() < MAX_ELEMENTS {
                         model.elements.push(FeElement {
                             id,
@@ -273,7 +310,10 @@ pub fn parse_abaqus_inp(input: &str) -> Result<(Quarantined<FeModel>, InpBdfRece
                 }
             }
             "ELSET" => {
-                let set = model.element_sets.entry(current_set_name.clone()).or_default();
+                let set = model
+                    .element_sets
+                    .entry(current_set_name.clone())
+                    .or_default();
                 for part in line.split(',').map(str::trim) {
                     if let Ok(id) = part.parse::<u64>() {
                         set.push(id);
@@ -282,19 +322,37 @@ pub fn parse_abaqus_inp(input: &str) -> Result<(Quarantined<FeModel>, InpBdfRece
             }
             "CONDUCTIVITY" => {
                 if let Some(mat) = current_material.as_mut() {
-                    let val: f64 = line.split(',').next().unwrap_or("").trim().parse().unwrap_or(0.0);
+                    let val: f64 = line
+                        .split(',')
+                        .next()
+                        .unwrap_or("")
+                        .trim()
+                        .parse()
+                        .unwrap_or(0.0);
                     mat.thermal_conductivity = Some(val);
                 }
             }
             "SPECIFIC_HEAT" => {
                 if let Some(mat) = current_material.as_mut() {
-                    let val: f64 = line.split(',').next().unwrap_or("").trim().parse().unwrap_or(0.0);
+                    let val: f64 = line
+                        .split(',')
+                        .next()
+                        .unwrap_or("")
+                        .trim()
+                        .parse()
+                        .unwrap_or(0.0);
                     mat.specific_heat = Some(val);
                 }
             }
             "DENSITY" => {
                 if let Some(mat) = current_material.as_mut() {
-                    let val: f64 = line.split(',').next().unwrap_or("").trim().parse().unwrap_or(0.0);
+                    let val: f64 = line
+                        .split(',')
+                        .next()
+                        .unwrap_or("")
+                        .trim()
+                        .parse()
+                        .unwrap_or(0.0);
                     mat.density = Some(val);
                 }
             }
@@ -303,10 +361,12 @@ pub fn parse_abaqus_inp(input: &str) -> Result<(Quarantined<FeModel>, InpBdfRece
                 if parts.len() >= 4 {
                     let set_name = parts[0].to_string();
                     let temp: f64 = parts[3].parse().unwrap_or(300.0);
-                    model.boundary_conditions.push(FeBoundaryCondition::PrescribedTemperature {
-                        set_name,
-                        temperature_k: temp,
-                    });
+                    model
+                        .boundary_conditions
+                        .push(FeBoundaryCondition::PrescribedTemperature {
+                            set_name,
+                            temperature_k: temp,
+                        });
                 }
             }
             _ => {}
@@ -397,7 +457,10 @@ pub fn parse_nastran_bdf(input: &str) -> Result<(Quarantined<FeModel>, InpBdfRec
                     let y: f64 = tokens[4].parse().unwrap_or(0.0);
                     let z: f64 = tokens[5].parse().unwrap_or(0.0);
                     if model.nodes.len() < MAX_ELEMENTS {
-                        model.nodes.push(FeNode { id, coords: [x, y, z] });
+                        model.nodes.push(FeNode {
+                            id,
+                            coords: [x, y, z],
+                        });
                     }
                 }
             }
@@ -408,7 +471,8 @@ pub fn parse_nastran_bdf(input: &str) -> Result<(Quarantined<FeModel>, InpBdfRec
                         at: line_idx,
                         what: format!("invalid {card} element id"),
                     })?;
-                    let node_ids: Vec<u64> = tokens[3..].iter().filter_map(|t| t.parse().ok()).collect();
+                    let node_ids: Vec<u64> =
+                        tokens[3..].iter().filter_map(|t| t.parse().ok()).collect();
                     if model.elements.len() < MAX_ELEMENTS {
                         model.elements.push(FeElement {
                             id,
@@ -438,10 +502,12 @@ pub fn parse_nastran_bdf(input: &str) -> Result<(Quarantined<FeModel>, InpBdfRec
                 if tokens.len() >= 3 {
                     let set_name = tokens[1].to_string();
                     let temp: f64 = tokens[2].parse().unwrap_or(300.0);
-                    model.boundary_conditions.push(FeBoundaryCondition::PrescribedTemperature {
-                        set_name,
-                        temperature_k: temp,
-                    });
+                    model
+                        .boundary_conditions
+                        .push(FeBoundaryCondition::PrescribedTemperature {
+                            set_name,
+                            temperature_k: temp,
+                        });
                 }
             }
             _ => {

@@ -118,17 +118,18 @@ fn one_material_assignment_matches_the_uniform_path() {
         .adiabatic_remainder()
         .finish()
         .expect("boundary");
-    let problem = ConductionProblem { element_materials: None, mesh: &mesh,
-    boundary: &boundary,
-    material: &material,
-    source: &source, };
+    let problem = ConductionProblem {
+        element_materials: None,
+        mesh: &mesh,
+        boundary: &boundary,
+        material: &material,
+        source: &source,
+    };
     let uniform = with_cx(|cx| solve(cx, problem, config()).expect("uniform"));
     let table = MaterialTable::new([(MaterialId(1), material.clone())]).expect("table");
     let assigned =
         ElementMaterials::new(table, vec![MaterialId(1); mesh.element_count()]).expect("assign");
-    let hetero = with_cx(|cx| {
-        solve(cx, rooted(problem, &assigned), config()).expect("hetero")
-    });
+    let hetero = with_cx(|cx| solve(cx, rooted(problem, &assigned), config()).expect("hetero"));
     let worst = uniform
         .temperature
         .iter()
@@ -183,13 +184,14 @@ fn two_layer_slab_hits_the_series_interface_temperature() {
         })
         .collect();
     let assigned = ElementMaterials::new(table, ids).expect("assign");
-    let problem = ConductionProblem { element_materials: None, mesh: &mesh,
-    boundary: &boundary,
-    material: &fallback,
-    source: &source, };
-    let solution = with_cx(|cx| {
-        solve(cx, rooted(problem, &assigned), config()).expect("solve")
-    });
+    let problem = ConductionProblem {
+        element_materials: None,
+        mesh: &mesh,
+        boundary: &boundary,
+        material: &fallback,
+        source: &source,
+    };
+    let solution = with_cx(|cx| solve(cx, rooted(problem, &assigned), config()).expect("solve"));
     // Equal thicknesses, k1=1, k2=2, T(0)=1, T(2)=0. Heat flows +x:
     // q = 1 / (1/1 + 1/2) = 2/3, so T(1) = 1 − q/k1 = 1/3.
     let mut worst = 0.0f64;
@@ -281,13 +283,14 @@ fn assignment_length_mismatch_refuses_at_bind() {
         .adiabatic_remainder()
         .finish()
         .expect("boundary");
-    let problem = ConductionProblem { element_materials: None, mesh: &mesh,
-    boundary: &boundary,
-    material: &material,
-    source: &source, };
-    let err = with_cx(|cx| {
-        solve(cx, rooted(problem, &assigned), config()).expect_err("len")
-    });
+    let problem = ConductionProblem {
+        element_materials: None,
+        mesh: &mesh,
+        boundary: &boundary,
+        material: &material,
+        source: &source,
+    };
+    let err = with_cx(|cx| solve(cx, rooted(problem, &assigned), config()).expect_err("len"));
     assert!(
         matches!(err, ConductionError::FieldLength { .. }),
         "length mismatch as {err:?}"
@@ -326,13 +329,14 @@ fn temperature_dependent_layer_refuses_outside_its_span() {
     map.insert(1, MaterialId(1));
     map.insert(2, MaterialId(2));
     let assigned = ElementMaterials::from_region_ids(table, &regions, &map).expect("assign");
-    let problem = ConductionProblem { element_materials: None, mesh: &mesh,
-    boundary: &boundary,
-    material: &fallback,
-    source: &source, };
-    let err = with_cx(|cx| {
-        solve(cx, rooted(problem, &assigned), config()).expect_err("span")
-    });
+    let problem = ConductionProblem {
+        element_materials: None,
+        mesh: &mesh,
+        boundary: &boundary,
+        material: &fallback,
+        source: &source,
+    };
+    let err = with_cx(|cx| solve(cx, rooted(problem, &assigned), config()).expect_err("span"));
     assert!(
         matches!(err, ConductionError::OutsideTemperatureSpan { .. }),
         "out-of-span as {err:?}"
@@ -374,13 +378,14 @@ fn anisotropic_layers_keep_the_x_series_interface() {
     map.insert(1, MaterialId(1));
     map.insert(2, MaterialId(2));
     let assigned = ElementMaterials::from_region_ids(table, &regions, &map).expect("assign");
-    let problem = ConductionProblem { element_materials: None, mesh: &mesh,
-    boundary: &boundary,
-    material: &fallback,
-    source: &source, };
-    let solution = with_cx(|cx| {
-        solve(cx, rooted(problem, &assigned), config()).expect("solve")
-    });
+    let problem = ConductionProblem {
+        element_materials: None,
+        mesh: &mesh,
+        boundary: &boundary,
+        material: &fallback,
+        source: &source,
+    };
+    let solution = with_cx(|cx| solve(cx, rooted(problem, &assigned), config()).expect("solve"));
     let mut worst = 0.0f64;
     for (v, &p) in mesh.positions().iter().enumerate() {
         if (p[0] - 1.0).abs() < 1e-9 {
@@ -500,13 +505,14 @@ fn labeled_adjacent_volumes_solve_as_two_materials() {
         .adiabatic_remainder()
         .finish()
         .expect("boundary");
-    let problem = ConductionProblem { element_materials: None, mesh: &mesh,
-    boundary: &boundary,
-    material: &fallback,
-    source: &source, };
-    let solution = with_cx(|cx| {
-        solve(cx, rooted(problem, &assigned), config()).expect("solve")
-    });
+    let problem = ConductionProblem {
+        element_materials: None,
+        mesh: &mesh,
+        boundary: &boundary,
+        material: &fallback,
+        source: &source,
+    };
+    let solution = with_cx(|cx| solve(cx, rooted(problem, &assigned), config()).expect("solve"));
     let mut worst = 0.0f64;
     let mut counted = 0usize;
     for (v, &p) in mesh.positions().iter().enumerate() {
@@ -595,13 +601,14 @@ fn rotated_labeled_adjacent_volumes_solve_as_two_materials() {
         .adiabatic_remainder()
         .finish()
         .expect("boundary");
-    let problem = ConductionProblem { element_materials: None, mesh: &mesh,
-    boundary: &boundary,
-    material: &fallback,
-    source: &source, };
-    let solution = with_cx(|cx| {
-        solve(cx, rooted(problem, &assigned), config()).expect("solve")
-    });
+    let problem = ConductionProblem {
+        element_materials: None,
+        mesh: &mesh,
+        boundary: &boundary,
+        material: &fallback,
+        source: &source,
+    };
+    let solution = with_cx(|cx| solve(cx, rooted(problem, &assigned), config()).expect("solve"));
     let mut sum = 0.0f64;
     let mut counted = 0usize;
     for (v, &p) in mesh.positions().iter().enumerate() {
@@ -653,15 +660,21 @@ fn assigned_linear_adjoint_refuses_k_of_t_and_matches_finite_differences() {
     map.insert(2, MaterialId(2));
     let assigned_bad =
         ElementMaterials::from_region_ids(table_bad, &regions, &map).expect("assign-bad");
-    let problem = ConductionProblem { element_materials: None, mesh: &mesh,
-    boundary: &boundary,
-    material: &fallback,
-    source: &source, };
-    let refused = ConductivityDesign::new(rooted(problem, &assigned_bad), LinearConfig {
-        tolerance: 1e-14,
-        max_iterations: 20_000,
-        restart: 40,
-    });
+    let problem = ConductionProblem {
+        element_materials: None,
+        mesh: &mesh,
+        boundary: &boundary,
+        material: &fallback,
+        source: &source,
+    };
+    let refused = ConductivityDesign::new(
+        rooted(problem, &assigned_bad),
+        LinearConfig {
+            tolerance: 1e-14,
+            max_iterations: 20_000,
+            restart: 40,
+        },
+    );
     match refused {
         Err(ConductionError::Conductivity { .. }) => {}
         Err(other) => panic!("expected Conductivity refusal for k(T), got {other}"),
@@ -670,11 +683,14 @@ fn assigned_linear_adjoint_refuses_k_of_t_and_matches_finite_differences() {
 
     let table = MaterialTable::new([(MaterialId(1), left), (MaterialId(2), right)]).expect("table");
     let assigned = ElementMaterials::from_region_ids(table, &regions, &map).expect("assign");
-    let design = ConductivityDesign::new(rooted(problem, &assigned), LinearConfig {
-        tolerance: 1e-14,
-        max_iterations: 20_000,
-        restart: 40,
-    })
+    let design = ConductivityDesign::new(
+        rooted(problem, &assigned),
+        LinearConfig {
+            tolerance: 1e-14,
+            max_iterations: 20_000,
+            restart: 40,
+        },
+    )
     .expect("design");
     let np = design.parameter_count();
     let nf = design.dofs().n();
@@ -781,13 +797,14 @@ fn three_layer_slab_hits_the_series_interface_temperatures() {
     ])
     .expect("table");
     let assigned = ElementMaterials::new(table, three_layer_ids(&mesh)).expect("assign");
-    let problem = ConductionProblem { element_materials: None, mesh: &mesh,
-    boundary: &boundary,
-    material: &fallback,
-    source: &source, };
-    let solution = with_cx(|cx| {
-        solve(cx, rooted(problem, &assigned), config()).expect("solve")
-    });
+    let problem = ConductionProblem {
+        element_materials: None,
+        mesh: &mesh,
+        boundary: &boundary,
+        material: &fallback,
+        source: &source,
+    };
+    let solution = with_cx(|cx| solve(cx, rooted(problem, &assigned), config()).expect("solve"));
     // Equal thicknesses, k = 1, 2, 4, T(0)=1, T(3)=0.
     // R = 1 + 1/2 + 1/4 = 7/4, q = 4/7, T(1)=3/7, T(2)=1/7.
     let mut worst_1 = 0.0f64;
@@ -863,13 +880,15 @@ fn assigned_temperature_dependent_newton_solves_inside_span() {
     map.insert(1, MaterialId(1));
     map.insert(2, MaterialId(2));
     let assigned = ElementMaterials::from_region_ids(table, &regions, &map).expect("assign");
-    let problem = ConductionProblem { element_materials: None, mesh: &mesh,
-    boundary: &boundary,
-    material: &fallback,
-    source: &source, };
-    let solution = with_cx(|cx| {
-        solve(cx, rooted(problem, &assigned), newton_config()).expect("newton")
-    });
+    let problem = ConductionProblem {
+        element_materials: None,
+        mesh: &mesh,
+        boundary: &boundary,
+        material: &fallback,
+        source: &source,
+    };
+    let solution =
+        with_cx(|cx| solve(cx, rooted(problem, &assigned), newton_config()).expect("newton"));
     assert!(
         solution.report.energy.closure_w.abs() < 1e-8,
         "assigned k(T) energy did not close: {:?}",
@@ -1010,13 +1029,14 @@ fn assigned_materials_do_not_erase_an_undeclared_interface() {
         .adiabatic_remainder()
         .finish()
         .expect("boundary");
-    let problem = ConductionProblem { element_materials: None, mesh: &mesh,
-    boundary: &boundary,
-    material: &fallback,
-    source: &source, };
-    let err = with_cx(|cx| {
-        solve(cx, rooted(problem, &assigned), config()).expect_err("interface")
-    });
+    let problem = ConductionProblem {
+        element_materials: None,
+        mesh: &mesh,
+        boundary: &boundary,
+        material: &fallback,
+        source: &source,
+    };
+    let err = with_cx(|cx| solve(cx, rooted(problem, &assigned), config()).expect_err("interface"));
     assert!(
         matches!(err, ConductionError::Interface { .. }),
         "undeclared coincident faces must refuse even with a material map: {err}"
@@ -1183,16 +1203,27 @@ fn assigned_one_material_contact_matches_the_uniform_contact_path() {
     let table = MaterialTable::new([(MaterialId(1), k.clone())]).expect("table");
     let assigned =
         ElementMaterials::new(table, vec![MaterialId(1); mesh.element_count()]).expect("assign");
-    let assigned_problem = ConductionProblem { element_materials: None, mesh: &mesh,
-    boundary: &boundary,
-    material: &fallback,
-    source: &source, };
-    let uniform_problem = ConductionProblem { element_materials: None, mesh: &mesh,
-    boundary: &boundary,
-    material: &k,
-    source: &source, };
+    let assigned_problem = ConductionProblem {
+        element_materials: None,
+        mesh: &mesh,
+        boundary: &boundary,
+        material: &fallback,
+        source: &source,
+    };
+    let uniform_problem = ConductionProblem {
+        element_materials: None,
+        mesh: &mesh,
+        boundary: &boundary,
+        material: &k,
+        source: &source,
+    };
     let assigned_sol = with_cx(|cx| {
-        solve_with_interfaces(cx, rooted(assigned_problem, &assigned), &interfaces, config())
+        solve_with_interfaces(
+            cx,
+            rooted(assigned_problem, &assigned),
+            &interfaces,
+            config(),
+        )
         .expect("assigned")
     });
     let uniform_sol = with_cx(|cx| {
@@ -1241,13 +1272,15 @@ fn assigned_two_material_contact_hits_the_series_jump() {
     let interfaces = bind_bondline(&mesh, &boundary);
     let table = MaterialTable::new([(MaterialId(1), left), (MaterialId(2), right)]).expect("table");
     let assigned = ElementMaterials::new(table, slab_ids(&mesh)).expect("assign");
-    let problem = ConductionProblem { element_materials: None, mesh: &mesh,
-    boundary: &boundary,
-    material: &fallback,
-    source: &source, };
+    let problem = ConductionProblem {
+        element_materials: None,
+        mesh: &mesh,
+        boundary: &boundary,
+        material: &fallback,
+        source: &source,
+    };
     let solution = with_cx(|cx| {
-        solve_with_interfaces(cx, rooted(problem, &assigned), &interfaces, config())
-            .expect("solve")
+        solve_with_interfaces(cx, rooted(problem, &assigned), &interfaces, config()).expect("solve")
     });
     // R = 1/10 + 0.1 + 1/20 = 0.25 K/W, Q = 30/0.25 = 120 W.
     // Left: T = 330 − 12 x. Right: T = 312 − 6 x.
@@ -1351,13 +1384,14 @@ fn assigned_matdb_receipts_travel_with_the_solve() {
     .expect("assign");
     assert_eq!(assigned.receipts().len(), 5);
     assert_eq!(assigned.provenance(), ProvenanceClass::MatdbReceipts);
-    let problem = ConductionProblem { element_materials: None, mesh: &mesh,
-    boundary: &boundary,
-    material: &fallback,
-    source: &source, };
-    let solution = with_cx(|cx| {
-        solve(cx, rooted(problem, &assigned), config()).expect("solve")
-    });
+    let problem = ConductionProblem {
+        element_materials: None,
+        mesh: &mesh,
+        boundary: &boundary,
+        material: &fallback,
+        source: &source,
+    };
+    let solution = with_cx(|cx| solve(cx, rooted(problem, &assigned), config()).expect("solve"));
     assert_eq!(solution.report.material_receipts, 5);
     assert_eq!(
         solution.report.material_provenance,
@@ -1423,13 +1457,14 @@ fn unused_table_entries_and_mixed_provenance_stay_honest() {
     assert_eq!(assigned.receipts().len(), 2);
     assert_eq!(assigned.provenance(), ProvenanceClass::MatdbReceipts);
     let fallback = ConductivityModel::isotropic_declared(1.0).expect("fallback");
-    let problem = ConductionProblem { element_materials: None, mesh: &mesh,
-    boundary: &boundary,
-    material: &fallback,
-    source: &source, };
-    let solution = with_cx(|cx| {
-        solve(cx, rooted(problem, &assigned), config()).expect("solve")
-    });
+    let problem = ConductionProblem {
+        element_materials: None,
+        mesh: &mesh,
+        boundary: &boundary,
+        material: &fallback,
+        source: &source,
+    };
+    let solution = with_cx(|cx| solve(cx, rooted(problem, &assigned), config()).expect("solve"));
     assert_eq!(solution.report.material_receipts, 2);
     assert_eq!(
         solution.report.material_provenance,
@@ -1482,13 +1517,14 @@ fn rotated_orthotropic_layers_keep_the_x_series_interface() {
         &BTreeMap::from([(1, MaterialId(1)), (2, MaterialId(2))]),
     )
     .expect("assign");
-    let problem = ConductionProblem { element_materials: None, mesh: &mesh,
-    boundary: &boundary,
-    material: &fallback,
-    source: &source, };
-    let solution = with_cx(|cx| {
-        solve(cx, rooted(problem, &assigned), config()).expect("solve")
-    });
+    let problem = ConductionProblem {
+        element_materials: None,
+        mesh: &mesh,
+        boundary: &boundary,
+        material: &fallback,
+        source: &source,
+    };
+    let solution = with_cx(|cx| solve(cx, rooted(problem, &assigned), config()).expect("solve"));
     let mut worst = 0.0f64;
     for (v, &p) in mesh.positions().iter().enumerate() {
         if (p[0] - 1.0).abs() < 1e-9 {
@@ -1576,13 +1612,15 @@ fn raising_the_right_layer_conductivity_raises_flux_and_drops_interface_t() {
             .adiabatic_remainder()
             .finish()
             .expect("boundary");
-        let problem = ConductionProblem { element_materials: None, mesh: &mesh,
-        boundary: &boundary,
-        material: &fallback,
-        source: &source, };
-        let solution = with_cx(|cx| {
-            solve(cx, rooted(problem, &assigned), config()).expect("solve")
-        });
+        let problem = ConductionProblem {
+            element_materials: None,
+            mesh: &mesh,
+            boundary: &boundary,
+            material: &fallback,
+            source: &source,
+        };
+        let solution =
+            with_cx(|cx| solve(cx, rooted(problem, &assigned), config()).expect("solve"));
         let q = mean_qx(&mesh, &assigned, &solution.temperature);
         let t = mean_interface_t(&mesh, &solution.temperature, 1.0);
         assert!(
@@ -1634,10 +1672,13 @@ fn two_ids_with_the_same_k_match_one_material() {
             .collect(),
     )
     .expect("two");
-    let problem = ConductionProblem { element_materials: None, mesh: &mesh,
-    boundary: &boundary,
-    material: &fallback,
-    source: &source, };
+    let problem = ConductionProblem {
+        element_materials: None,
+        mesh: &mesh,
+        boundary: &boundary,
+        material: &fallback,
+        source: &source,
+    };
     let a = with_cx(|cx| solve(cx, rooted(problem, &one), config()).expect("one"));
     let b = with_cx(|cx| solve(cx, rooted(problem, &two), config()).expect("two"));
     let worst = a
@@ -1690,14 +1731,15 @@ fn swapped_region_map_is_the_same_physics() {
         &BTreeMap::from([(1, MaterialId(2)), (2, MaterialId(1))]),
     )
     .expect("swp");
-    let problem = ConductionProblem { element_materials: None, mesh: &mesh,
-    boundary: &boundary,
-    material: &fallback,
-    source: &source, };
-    let a =
-        with_cx(|cx| solve(cx, rooted(problem, &forward), config()).expect("fwd"));
-    let b =
-        with_cx(|cx| solve(cx, rooted(problem, &swapped), config()).expect("swp"));
+    let problem = ConductionProblem {
+        element_materials: None,
+        mesh: &mesh,
+        boundary: &boundary,
+        material: &fallback,
+        source: &source,
+    };
+    let a = with_cx(|cx| solve(cx, rooted(problem, &forward), config()).expect("fwd"));
+    let b = with_cx(|cx| solve(cx, rooted(problem, &swapped), config()).expect("swp"));
     let worst = a
         .temperature
         .iter()
@@ -1735,13 +1777,15 @@ fn two_layer_interface_tightens_under_refinement() {
             .adiabatic_remainder()
             .finish()
             .expect("boundary");
-        let problem = ConductionProblem { element_materials: None, mesh: &mesh,
-        boundary: &boundary,
-        material: &fallback,
-        source: &source, };
-        let solution = with_cx(|cx| {
-            solve(cx, rooted(problem, &assigned), config()).expect("solve")
-        });
+        let problem = ConductionProblem {
+            element_materials: None,
+            mesh: &mesh,
+            boundary: &boundary,
+            material: &fallback,
+            source: &source,
+        };
+        let solution =
+            with_cx(|cx| solve(cx, rooted(problem, &assigned), config()).expect("solve"));
         let err = (mean_interface_t(&mesh, &solution.temperature, 1.0) - 1.0 / 3.0).abs();
         assert!(
             err <= last_err + 1e-12,
@@ -1815,13 +1859,14 @@ fn regional_source_on_one_layer_delivers_volume_times_density() {
         .adiabatic_remainder()
         .finish()
         .expect("boundary");
-    let problem = ConductionProblem { element_materials: None, mesh: &mesh,
-    boundary: &boundary,
-    material: &k,
-    source: &source, };
-    let solution = with_cx(|cx| {
-        solve(cx, rooted(problem, &assigned), config()).expect("solve")
-    });
+    let problem = ConductionProblem {
+        element_materials: None,
+        mesh: &mesh,
+        boundary: &boundary,
+        material: &k,
+        source: &source,
+    };
+    let solution = with_cx(|cx| solve(cx, rooted(problem, &assigned), config()).expect("solve"));
     assert!(
         (solution.report.energy.source_w - want).abs() < 1e-8 * want.abs().max(1.0),
         "delivered source {} W vs expected {want} W",
@@ -1877,13 +1922,14 @@ fn extreme_contrast_two_layer_still_hits_the_series_limit() {
         .adiabatic_remainder()
         .finish()
         .expect("boundary");
-    let problem = ConductionProblem { element_materials: None, mesh: &mesh,
-    boundary: &boundary,
-    material: &fallback,
-    source: &source, };
-    let solution = with_cx(|cx| {
-        solve(cx, rooted(problem, &assigned), config()).expect("solve")
-    });
+    let problem = ConductionProblem {
+        element_materials: None,
+        mesh: &mesh,
+        boundary: &boundary,
+        material: &fallback,
+        source: &source,
+    };
+    let solution = with_cx(|cx| solve(cx, rooted(problem, &assigned), config()).expect("solve"));
     // k2 → ∞ ⇒ almost all drop is in the left layer: T(1) → 0.
     let t = mean_interface_t(&mesh, &solution.temperature, 1.0);
     assert!(

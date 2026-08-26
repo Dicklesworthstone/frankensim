@@ -3,10 +3,8 @@
 //! Bead: `frankensim-extreal-program-f85xj.6.9`
 
 use fs_evidence::Color;
-use fs_ladder::{ConvergencePlan, ConvergenceEvaluator, MeshRung};
-use fs_report::{
-    EngineeringReport, MaterialReportItem, NoClaimItem, QoiReportItem,
-};
+use fs_ladder::{ConvergenceEvaluator, ConvergencePlan, MeshRung};
+use fs_report::{EngineeringReport, MaterialReportItem, NoClaimItem, QoiReportItem};
 use fs_uq::{ParameterUncertainty, PropagationMethod, UqPlan, UqPropagator};
 
 #[test]
@@ -19,7 +17,10 @@ fn test_engineering_report_html_rendering() {
         description: "Maximum junction temperature across silicon dies".to_string(),
         nominal_value: 342.15,
         unit: "K".to_string(),
-        color: Color::Verified { lo: 341.0, hi: 343.3 },
+        color: Color::Verified {
+            lo: 341.0,
+            hi: 343.3,
+        },
         discretization_error: 0.25,
         parameter_uncertainty: 0.85,
         surrogate_error: 0.0,
@@ -29,15 +30,47 @@ fn test_engineering_report_html_rendering() {
 
     // Convergence
     let conv_plan = ConvergencePlan::new("junction_maximum", 2.0)
-        .with_rung(MeshRung::new(0, "mesh_coarse", 0.04, "m", 1000, "junction_maximum", 350.0, "K"))
-        .with_rung(MeshRung::new(1, "mesh_medium", 0.02, "m", 8000, "junction_maximum", 342.5, "K"))
-        .with_rung(MeshRung::new(2, "mesh_fine", 0.01, "m", 64000, "junction_maximum", 340.625, "K"));
+        .with_rung(MeshRung::new(
+            0,
+            "mesh_coarse",
+            0.04,
+            "m",
+            1000,
+            "junction_maximum",
+            350.0,
+            "K",
+        ))
+        .with_rung(MeshRung::new(
+            1,
+            "mesh_medium",
+            0.02,
+            "m",
+            8000,
+            "junction_maximum",
+            342.5,
+            "K",
+        ))
+        .with_rung(MeshRung::new(
+            2,
+            "mesh_fine",
+            0.01,
+            "m",
+            64000,
+            "junction_maximum",
+            340.625,
+            "K",
+        ));
     let conv_res = ConvergenceEvaluator::evaluate(&conv_plan);
     report = report.with_convergence(conv_res);
 
     // Uncertainty
     let uq_plan = UqPlan::new("junction_maximum", PropagationMethod::MonteCarlo, 200)
-        .with_parameter(ParameterUncertainty::gaussian("ambient_temp", 300.0, 5.0, "K"))
+        .with_parameter(ParameterUncertainty::gaussian(
+            "ambient_temp",
+            300.0,
+            5.0,
+            "K",
+        ))
         .with_compliance_threshold(355.0);
     let uq_res = UqPropagator::run(&uq_plan, |p| p[0] + 42.15);
     report = report.with_uncertainty(uq_res);
@@ -56,7 +89,9 @@ fn test_engineering_report_html_rendering() {
     report.no_claims.push(NoClaimItem {
         component: "radiation_coupling".to_string(),
         status: "Unmodeled".to_string(),
-        statement: "Surface-to-surface radiative heat transfer is neglected (<1% contribution at <400K).".to_string(),
+        statement:
+            "Surface-to-surface radiative heat transfer is neglected (<1% contribution at <400K)."
+                .to_string(),
     });
 
     report.replay_command = "frankensim solve --project cooling --seed 0x0517".to_string();
@@ -85,7 +120,10 @@ fn test_engineering_report_determinism() {
         description: "Test QoI".to_string(),
         nominal_value: 100.0,
         unit: "W".to_string(),
-        color: Color::Verified { lo: 99.0, hi: 101.0 },
+        color: Color::Verified {
+            lo: 99.0,
+            hi: 101.0,
+        },
         discretization_error: 0.1,
         parameter_uncertainty: 0.2,
         surrogate_error: 0.0,
@@ -95,8 +133,16 @@ fn test_engineering_report_determinism() {
 
     let r2 = r1.clone();
 
-    assert_eq!(r1.render_html(), r2.render_html(), "HTML renders bit-identically");
-    assert_eq!(r1.render_json(), r2.render_json(), "JSON renders bit-identically");
+    assert_eq!(
+        r1.render_html(),
+        r2.render_html(),
+        "HTML renders bit-identically"
+    );
+    assert_eq!(
+        r1.render_json(),
+        r2.render_json(),
+        "JSON renders bit-identically"
+    );
     assert_eq!(r1.content_hash(), r2.content_hash(), "Content hashes match");
 }
 
@@ -110,7 +156,10 @@ fn test_engineering_report_escaping() {
     });
 
     let html = r.render_html();
-    assert!(!html.contains("<script>alert('xss')</script>"), "script tag must be escaped");
+    assert!(
+        !html.contains("<script>alert('xss')</script>"),
+        "script tag must be escaped"
+    );
     assert!(html.contains("&lt;script&gt;alert(&#39;xss&#39;)&lt;/script&gt;"));
     assert!(html.contains("&lt;b&gt;bold&lt;/b&gt;"));
     assert!(html.contains("&amp;"));

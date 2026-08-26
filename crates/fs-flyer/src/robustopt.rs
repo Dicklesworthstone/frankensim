@@ -7,7 +7,7 @@
 //! - Correction-model holdouts validation
 //! - Epistemic coloring and CVaR ranking via `fs-robust`
 
-use crate::{refuse, Refusal};
+use crate::{Refusal, refuse};
 use fs_evidence::{Color, ColorRank};
 use fs_robust::{ColoredObjective, cvar};
 
@@ -132,14 +132,20 @@ pub fn run_robust_optimization(
         if c.pilot_kp < config.min_kp || c.pilot_kp > config.max_kp {
             return Err(refuse(
                 "robust-opt-applicability-exceeded",
-                format!("candidate {} pilot_kp {:.3} outside [{}, {}]", c.name, c.pilot_kp, config.min_kp, config.max_kp),
+                format!(
+                    "candidate {} pilot_kp {:.3} outside [{}, {}]",
+                    c.name, c.pilot_kp, config.min_kp, config.max_kp
+                ),
                 "keep pilot gains within applicable control domain",
             ));
         }
         if c.pilot_kq < config.min_kq || c.pilot_kq > config.max_kq {
             return Err(refuse(
                 "robust-opt-applicability-exceeded",
-                format!("candidate {} pilot_kq {:.3} outside [{}, {}]", c.name, c.pilot_kq, config.min_kq, config.max_kq),
+                format!(
+                    "candidate {} pilot_kq {:.3} outside [{}, {}]",
+                    c.name, c.pilot_kq, config.min_kq, config.max_kq
+                ),
                 "keep pilot gains within applicable control domain",
             ));
         }
@@ -214,11 +220,17 @@ pub fn run_robust_optimization(
 
     let digest_input = format!(
         "wf-robustopt-v1:{}:{}:{}:{}",
-        nominal_winner, robust_winner, robustness_reorders, candidates.len()
+        nominal_winner,
+        robust_winner,
+        robustness_reorders,
+        candidates.len()
     );
-    let receipt_digest = fs_blake3::hash_domain("org.frankensim.wf.robustopt.receipt.v1", digest_input.as_bytes())
-        .to_hex()
-        .to_string();
+    let receipt_digest = fs_blake3::hash_domain(
+        "org.frankensim.wf.robustopt.receipt.v1",
+        digest_input.as_bytes(),
+    )
+    .to_hex()
+    .to_string();
 
     Ok(RobustOptReceipt {
         nominal_winner,

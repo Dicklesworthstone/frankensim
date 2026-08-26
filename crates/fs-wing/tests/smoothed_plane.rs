@@ -1,7 +1,7 @@
 //! SmoothedTangentPlane test suite (bead `frankensim-wf-root-guzez.5.11`, E4.4b, V-06c).
 
 use fs_wing::smoothed_plane::{
-    SmoothedTangentPlane, SmoothedTangentPlaneConfig, DEFAULT_MAX_SLOPE_RAD,
+    DEFAULT_MAX_SLOPE_RAD, SmoothedTangentPlane, SmoothedTangentPlaneConfig,
 };
 
 #[test]
@@ -10,7 +10,9 @@ fn smoothed_plane_slope_gate_admits_at_cap_and_refuses_at_cap_plus_epsilon() {
 
     // Flat horizontal terrain admits
     let normal_flat = [0.0, 0.0, -1.0];
-    let receipt = plane.update(1.0, normal_flat, 500.0, 0.05).expect("flat admits");
+    let receipt = plane
+        .update(1.0, normal_flat, 500.0, 0.05)
+        .expect("flat admits");
     assert_eq!(receipt.claim_class, "EstimateOnly");
     assert!(receipt.slope_rad < 1e-6);
 
@@ -23,7 +25,9 @@ fn smoothed_plane_slope_gate_admits_at_cap_and_refuses_at_cap_plus_epsilon() {
     // Slope beyond cap refuses with typed code
     let beyond_cap = DEFAULT_MAX_SLOPE_RAD + 0.02;
     let normal_beyond = [beyond_cap.sin(), 0.0, -beyond_cap.cos()];
-    let err = plane.update(1.0, normal_beyond, 500.0, 0.05).expect_err("slope beyond cap must refuse");
+    let err = plane
+        .update(1.0, normal_beyond, 500.0, 0.05)
+        .expect_err("slope beyond cap must refuse");
     assert_eq!(err.code, "smoothed-plane-slope-exceeded");
 }
 
@@ -39,14 +43,20 @@ fn smoothed_plane_hysteresis_and_filter_smoothing() {
     // Micro-perturbation within hysteresis deadband does not move the plane
     let normal = [0.0, 0.0, -1.0];
     let r1 = plane.update(0.05, normal, 100.0, 0.01).expect("update");
-    assert_eq!(r1.plane_z_m, 0.0, "within deadband height should not change");
+    assert_eq!(
+        r1.plane_z_m, 0.0,
+        "within deadband height should not change"
+    );
     assert_eq!(r1.artificial_boundary_power_w, 0.0);
 
     // Significant step changes plane smoothly
     let mut last_z = 0.0;
     for _ in 0..50 {
         let r = plane.update(2.0, normal, 100.0, 0.01).expect("step update");
-        assert!(r.plane_z_m >= last_z, "plane height increases monotonically toward target");
+        assert!(
+            r.plane_z_m >= last_z,
+            "plane height increases monotonically toward target"
+        );
         assert!(r.artificial_boundary_power_w > 0.0 || r.plane_z_m > 1.9);
         last_z = r.plane_z_m;
     }
@@ -68,7 +78,9 @@ fn smoothed_plane_state_checkpoint_and_replay() {
     // Rewind and replay from checkpoint
     let mut replayed_plane = SmoothedTangentPlane::new(SmoothedTangentPlaneConfig::default(), 0.0);
     replayed_plane.restore_state(checkpoint);
-    let r_replayed = replayed_plane.update(2.5, normal, 200.0, 0.01).expect("replayed update");
+    let r_replayed = replayed_plane
+        .update(2.5, normal, 200.0, 0.01)
+        .expect("replayed update");
 
     assert_eq!(
         r_cont.plane_z_m.to_bits(),

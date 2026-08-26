@@ -30,9 +30,9 @@
 //! feeds. This corpus proves its stated rows only.
 
 use fs_casebook::fnv1a64;
-use std::fmt::Write as _;
 use fs_ivl::predicates::{Sign, incircle, orient2d, orient3d};
 use fs_ivl::{Interval, TaylorModel1, expansion, newton};
+use std::fmt::Write as _;
 
 const CORPUS_REL: &str = "tests/fixtures/exact_corpus.txt";
 const MAX_LINES: usize = 4096;

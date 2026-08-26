@@ -700,7 +700,7 @@ impl CbcExecutor {
         else {
             return None;
         };
-        let candidate = u32::try_from(*candidate).ok();
+        let candidate = Some(*candidate);
         let pending = accum
             .as_ref()
             .and_then(|running| running.micro)
@@ -835,7 +835,8 @@ impl CbcExecutor {
         tile: CbcTileShape,
         allowance: u128,
     ) -> Result<CbcRunStatus, CbcExecError> {
-        self.run_with_receipt(poll, tile, allowance).map(|(status, _)| status)
+        self.run_with_receipt(poll, tile, allowance)
+            .map(|(status, _)| status)
     }
 
     /// [`Self::run`] plus the per-run progress receipt binding schedule
@@ -850,6 +851,10 @@ impl CbcExecutor {
         tile: CbcTileShape,
         allowance: u128,
     ) -> Result<(CbcRunStatus, CbcRunReceipt), CbcExecError> {
+        enum Terminal {
+            Status(CbcRunStatus),
+            Fatal(CbcExecError),
+        }
         if let Phase::Poisoned { reason } = &self.phase {
             return Err(CbcExecError::Poisoned { reason });
         }
@@ -866,10 +871,6 @@ impl CbcExecutor {
         let mut polls = 1_u32;
         let mut max_poll_spacing: u64 = 0;
         let mut remaining = allowance;
-        enum Terminal {
-            Status(CbcRunStatus, CbcBoundary),
-            Fatal(CbcExecError),
-        }
         // Entry protocol: pre-cancelled runs observe cancellation even at
         // zero allowance; otherwise zero allowance exhausts at Entry
         // without executing anything.
@@ -912,17 +913,15 @@ impl CbcExecutor {
         // executed and everything stays resumable. Translated from the
         // internal AllowanceShort error at its exact boundary.
 
-        let mut last_boundary = CbcBoundary::Entry;
         let mut transitions_at_last_poll = 0_u64;
         let terminal = loop {
             // Contain callback/worker faults (a panicking poll closure or
             // an unexpected unwind inside tile execution): the executor
             // poisons terminally rather than publishing half-committed
             // results.
-            let outcome =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    self.execute_tile(tile, &mut remaining)
-                }));
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                self.execute_tile(tile, &mut remaining)
+            }));
             match outcome {
                 Err(contained) => {
                     let reason = panic_reason(&contained);
@@ -931,39 +930,34 @@ impl CbcExecutor {
                 }
                 Ok(Err(err)) => {
                     if let CbcExecError::AllowanceShort { minimum, boundary } = err {
-                        break Terminal::Status(
-                            CbcRunStatus::NeedAllowance(boundary, minimum),
-                            boundary,
-                        );
+                        break Terminal::Status(CbcRunStatus::NeedAllowance(boundary, minimum));
                     }
                     break Terminal::Fatal(err);
                 }
                 Ok(Ok(boundary)) => {
                     if matches!(self.phase, Phase::Done | Phase::Poisoned { .. }) {
-                        break Terminal::Status(CbcRunStatus::Completed, boundary);
+                        break Terminal::Status(CbcRunStatus::Completed);
                     }
                     // Simultaneous boundary events: cancellation precedes
                     // exhaustion.
                     let cancelled = matches!(poll.poll(), CbcControl::Cancel);
                     polls += 1;
-                    max_poll_spacing = max_poll_spacing
-                        .max(self.run_transitions.saturating_sub(transitions_at_last_poll));
+                    max_poll_spacing = max_poll_spacing.max(
+                        self.run_transitions
+                            .saturating_sub(transitions_at_last_poll),
+                    );
                     transitions_at_last_poll = self.run_transitions;
-                    last_boundary = boundary;
                     if cancelled {
-                        break Terminal::Status(CbcRunStatus::Cancelled(boundary), boundary);
+                        break Terminal::Status(CbcRunStatus::Cancelled(boundary));
                     }
                     if remaining == 0 {
-                        break Terminal::Status(
-                            CbcRunStatus::AllowanceExhausted(boundary),
-                            boundary,
-                        );
+                        break Terminal::Status(CbcRunStatus::AllowanceExhausted(boundary));
                     }
                 }
             }
         };
-        let (status, last_boundary) = match terminal {
-            Terminal::Status(status, boundary) => (status, boundary),
+        let status = match terminal {
+            Terminal::Status(status) => status,
             Terminal::Fatal(err) => return Err(err),
         };
 
@@ -1055,10 +1049,7 @@ impl CbcExecutor {
                     // storage refusal here leaves every scan field intact,
                     // so the retry re-emits once and never double-charges
                     // the certificate units or loses the tie class.
-                    let runner_borrowed = match &*runner_up {
-                        Some((score, who)) => Some((score, *who)),
-                        None => None,
-                    };
+                    let runner_borrowed = (*runner_up).as_ref().map(|(score, who)| (score, *who));
                     let certificate = build_prefix_certificate(
                         &self.z,
                         &winning_score,
@@ -1068,11 +1059,7 @@ impl CbcExecutor {
                         prefix_len,
                         charges.n,
                     )?;
-                    gate_allowance(
-                        remaining,
-                        certificate_units,
-                        CbcBoundary::CandidateBlock,
-                    )?;
+                    gate_allowance(remaining, certificate_units, CbcBoundary::CandidateBlock)?;
                     debit(
                         &mut self.work_spent,
                         charges.admitted_work_units,
@@ -1131,7 +1118,7 @@ impl CbcExecutor {
     /// seal the prefix and enter the first scan on completion.
     fn run_init_tile(
         &mut self,
-        mut next_point: u32,
+        next_point: u32,
         point_block: u32,
         remaining: &mut u128,
     ) -> Result<CbcBoundary, CbcExecError> {
@@ -1165,14 +1152,7 @@ impl CbcExecutor {
             let point_index =
                 usize::try_from(point).expect("admission proved point indices fit usize");
             let residue = lattice_residue(point_index, 1, n);
-            let src_limbs = products[point_index].limbs();
             let factor_words = exact_kernel_numerator(n, residue);
-            let (_, factor_len) = crate::cbc_limb::factor_limbs_u32(factor_words);
-            let required = src_limbs
-                .len()
-                .checked_add(factor_len)
-                .and_then(|length| length.checked_add(1))
-                .expect("exact CBC required limb count overflow");
             let boundary = if point + 1 == end && end == n {
                 CbcBoundary::Prefix
             } else {
@@ -1195,14 +1175,17 @@ impl CbcExecutor {
             )?;
             point_cursor += 1;
         }
-        next_point = end;
         *phase = Phase::Init { next_point: end };
         if end == n {
             debug_assert!(
                 z.len() < z.capacity(),
                 "the prefix register was reserved for the admitted dimension"
             );
-            gate_allowance(remaining, schedule.prefix_control_units(), CbcBoundary::Prefix)?;
+            gate_allowance(
+                remaining,
+                schedule.prefix_control_units(),
+                CbcBoundary::Prefix,
+            )?;
             debit(
                 work_spent,
                 *admitted_work_units,
@@ -1240,7 +1223,7 @@ impl CbcExecutor {
     fn run_update_tile(
         &mut self,
         chosen: u32,
-        mut next_point: u32,
+        next_point: u32,
         point_block: u32,
         remaining: &mut u128,
     ) -> Result<CbcBoundary, CbcExecError> {
@@ -1266,18 +1249,14 @@ impl CbcExecutor {
         while point_cursor < end {
             let point = point_cursor;
             // Persist BEFORE gating/mutating (no replay on shortfall).
-            *phase = Phase::Update { chosen, next_point: point };
+            *phase = Phase::Update {
+                chosen,
+                next_point: point,
+            };
             let point_index =
                 usize::try_from(point).expect("admission proved point indices fit usize");
             let residue = lattice_residue(point_index, chosen, n);
-            let src_limbs = products[point_index].limbs();
             let factor_words = exact_kernel_numerator(n, residue);
-            let (_, factor_len) = crate::cbc_limb::factor_limbs_u32(factor_words);
-            let required = src_limbs
-                .len()
-                .checked_add(factor_len)
-                .and_then(|length| length.checked_add(1))
-                .expect("exact CBC required limb count overflow");
             let boundary = if point + 1 == end && end == n {
                 CbcBoundary::Prefix
             } else {
@@ -1300,14 +1279,20 @@ impl CbcExecutor {
             )?;
             point_cursor += 1;
         }
-        next_point = end;
-        *phase = Phase::Update { chosen, next_point: end };
+        *phase = Phase::Update {
+            chosen,
+            next_point: end,
+        };
         if end == n {
             debug_assert!(
                 z.len() < z.capacity(),
                 "the prefix register was reserved for the admitted dimension"
             );
-            gate_allowance(remaining, schedule.prefix_control_units(), CbcBoundary::Prefix)?;
+            gate_allowance(
+                remaining,
+                schedule.prefix_control_units(),
+                CbcBoundary::Prefix,
+            )?;
             debit(
                 work_spent,
                 *admitted_work_units,
@@ -1381,7 +1366,10 @@ fn gate_allowance(
     boundary: CbcBoundary,
 ) -> Result<(), CbcExecError> {
     if *remaining < units {
-        return Err(CbcExecError::AllowanceShort { minimum: units, boundary });
+        return Err(CbcExecError::AllowanceShort {
+            minimum: units,
+            boundary,
+        });
     }
     Ok(())
 }
@@ -1410,10 +1398,12 @@ impl CbcExecutor {
         }
         let phase_discriminant: u64 = match &self.phase {
             Phase::Init { .. } => 1,
-            Phase::Scan { candidate, accum, .. } => {
-                2 + u64::from(*candidate) * 4 + u64::from(accum.is_some())
+            Phase::Scan {
+                candidate, accum, ..
+            } => 2 + u64::from(*candidate) * 4 + u64::from(accum.is_some()),
+            Phase::Update { chosen, next_point } => {
+                3 + u64::from(*chosen) * 8 + u64::from(*next_point)
             }
-            Phase::Update { chosen, next_point } => 3 + u64::from(*chosen) * 8 + u64::from(*next_point),
             Phase::Done => 4,
             Phase::Poisoned { .. } => 5,
         };
@@ -1472,7 +1462,10 @@ fn debit(
         });
     }
     *remaining = remaining.checked_sub(units).ok_or({
-        CbcExecError::AllowanceShort { minimum: units, boundary }
+        CbcExecError::AllowanceShort {
+            minimum: units,
+            boundary,
+        }
     })?;
     *work_spent = new_spent;
     *transitions = transitions.saturating_add(1);
@@ -1581,7 +1574,7 @@ fn advance_scan_candidate(
         // Fallible reservation precedes the control debit: a storage
         // refusal leaves no mutation behind, so the retry re-executes this
         // candidate identically and never double-charges the schedule.
-        let mut score =
+        let score =
             ExactNat::try_zero_with_capacity(charges.score_capacity_limbs).map_err(|_| {
                 CbcExecError::Storage(CbcStorageRefusal {
                     class: CbcStorageClass::ScoreAccumulator,
@@ -1638,7 +1631,7 @@ fn advance_scan_candidate(
         if running.micro.is_none() {
             let src = products[point_index].limbs();
             let factor = exact_kernel_numerator(n, residue_of(point_index, *candidate, n));
-            let (factor_words, factor_len) = crate::cbc_limb::factor_limbs_u32(factor);
+            let (_, factor_len) = crate::cbc_limb::factor_limbs_u32(factor);
             let required = src
                 .len()
                 .checked_add(factor_len)
@@ -1664,8 +1657,6 @@ fn advance_scan_candidate(
                 transitions,
             )?;
             running.micro = Some(crate::cbc_limb::LimbCursor::begin_add_multiply(
-                src.len(),
-                factor_len,
                 running.score.limbs().len(),
                 required,
                 running.score.capacity_limbs(),
@@ -1928,8 +1919,8 @@ mod debit_schedule_tests {
         // admitted in-flight phase isolates the exact production debit site;
         // no schedule accessor participates in the expected constants.
         let mut construction = executor(8, 3, CbcExecutionMode::Construction);
-        let mut score = ExactNat::zero();
-        score.reserve_exact_limbs(construction.score_capacity_limbs);
+        let score = ExactNat::try_zero_with_capacity(construction.score_capacity_limbs)
+            .expect("construction fixture admits its own score capacity");
         construction.phase = scan_phase(
             1,
             Some(ScanAccum {

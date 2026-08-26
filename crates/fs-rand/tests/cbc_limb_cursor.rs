@@ -159,9 +159,9 @@ fn clc_003_cancellation_at_microstep_boundaries_never_half_commits() {
                 );
             }
             CbcRunStatus::AllowanceExhausted(_) => {}
-            CbcRunStatus::NeedAllowance(_, minimum) => panic!(
-                "one-cell budget cannot shortfall: minimum {minimum} exceeds remaining"
-            ),
+            CbcRunStatus::NeedAllowance(_, minimum) => {
+                panic!("one-cell budget cannot shortfall: minimum {minimum} exceeds remaining")
+            }
         }
         guard += 1;
         assert!(guard < 10_000, "adversarial stepping failed to converge");
@@ -233,7 +233,7 @@ fn clc_005_tampered_or_stale_cursors_are_refused_without_mutation() {
     // Version skew: a cursor from a foreign encoding generation refuses.
     let stale = LimbCursor {
         version: fs_rand::cbc_limb::LIMB_CURSOR_VERSION + 1,
-        ..LimbCursor::begin_add_multiply(1, flen, dst.len(), 1 + flen + 1, usize::MAX)
+        ..LimbCursor::begin_add_multiply(dst.len(), 1 + flen + 1, usize::MAX)
     };
     let mut probe = stale;
     assert_eq!(
@@ -244,7 +244,7 @@ fn clc_005_tampered_or_stale_cursors_are_refused_without_mutation() {
     // Out-of-bounds source position refuses rather than clamping.
     let beyond = LimbCursor {
         src_pos: 9,
-        ..LimbCursor::begin_add_multiply(1, flen, dst.len(), 1 + flen + 1, usize::MAX)
+        ..LimbCursor::begin_add_multiply(dst.len(), 1 + flen + 1, usize::MAX)
     };
     let mut probe = beyond;
     assert_eq!(

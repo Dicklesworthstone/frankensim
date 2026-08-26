@@ -229,7 +229,9 @@ fn chordwise_clock_freezes_and_refuses() {
     assert!((ds - 2.0 * 14.0 * (1.0 / 120.0) / 1.981).abs() < 1e-15);
     // U_conv = 0: the clock FREEZES (a vertical gust advances nothing).
     assert_eq!(
-        reduced_time_increment(0.0, 1.981, 1.0 / 120.0).unwrap().to_bits(),
+        reduced_time_increment(0.0, 1.981, 1.0 / 120.0)
+            .unwrap()
+            .to_bits(),
         0.0f64.to_bits()
     );
     let mut state = IndicialState::impulsive_start(&WAGNER_JONES);

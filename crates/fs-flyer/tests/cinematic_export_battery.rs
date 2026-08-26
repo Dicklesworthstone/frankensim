@@ -1,7 +1,7 @@
 //! Cinematic export battery (bead `frankensim-wf-root-guzez.11.8`, E10.4).
 
 use fs_flyer::cinematic_export::{
-    export_hero_clip, CinematicClipManifest, QUARANTINED_MUX_ADAPTER,
+    CinematicClipManifest, QUARANTINED_MUX_ADAPTER, export_hero_clip,
 };
 use fs_flyer::replay::{AppliedEvent, InputTrace};
 
@@ -41,14 +41,9 @@ fn hero_clip_export_binds_run_id_and_manifest() {
 
 #[test]
 fn hostile_twin_tampered_run_id_refuses() {
-    let manifest = CinematicClipManifest::new(
-        "authoritative-run-001",
-        "trace-120",
-        60,
-        60,
-        [1920, 1080],
-    )
-    .expect("valid manifest");
+    let manifest =
+        CinematicClipManifest::new("authoritative-run-001", "trace-120", 60, 60, [1920, 1080])
+            .expect("valid manifest");
 
     let err = manifest
         .verify_origin("tampered-run-999")
@@ -58,14 +53,9 @@ fn hostile_twin_tampered_run_id_refuses() {
 
 #[test]
 fn hostile_twin_tampered_digest_refuses() {
-    let mut manifest = CinematicClipManifest::new(
-        "authoritative-run-001",
-        "trace-120",
-        60,
-        60,
-        [1920, 1080],
-    )
-    .expect("valid manifest");
+    let mut manifest =
+        CinematicClipManifest::new("authoritative-run-001", "trace-120", 60, 60, [1920, 1080])
+            .expect("valid manifest");
 
     // Tamper frame count without recomputing digest
     manifest.frame_count = 120;

@@ -52,12 +52,13 @@ fn main() -> std::process::ExitCode {
             return std::process::ExitCode::from(2);
         }
     };
-    for dir in [wav_path.parent(), receipt_path.parent()] {
-        if let Some(d) = dir {
-            if let Err(e) = std::fs::create_dir_all(d) {
-                eprintln!("bowed_listen: cannot create {}: {e}", d.display());
-                return std::process::ExitCode::from(2);
-            }
+    for d in [wav_path.parent(), receipt_path.parent()]
+        .into_iter()
+        .flatten()
+    {
+        if let Err(e) = std::fs::create_dir_all(d) {
+            eprintln!("bowed_listen: cannot create {}: {e}", d.display());
+            return std::process::ExitCode::from(2);
         }
     }
 
@@ -66,7 +67,9 @@ fn main() -> std::process::ExitCode {
         tension_n: 60.0,
         linear_density_kg_m: 6.0e-4,
         mode_count: 16,
-        zetas: (0..16).map(|k| 1.0e-3 * (1.0 + 0.55 * k as f64)).collect(),
+        zetas: (0..16)
+            .map(|k| 1.0e-3 * (1.0 + 0.55 * f64::from(k)))
+            .collect(),
         sample_rate_hz: SAMPLE_RATE_HZ,
     };
     let rosin = StribeckFriction {

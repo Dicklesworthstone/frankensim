@@ -105,8 +105,7 @@ impl SelfAffinePeriodicProfileSpectrum {
         if maximum_cycle > maximum_resolvable_cycle {
             return Err(SurfaceExcitationError::SurfaceSpectrumUnderresolved {
                 sample_count: MAX_TRACE_SAMPLES,
-                required_samples: maximum_cycle
-                    .saturating_mul(MIN_SAMPLES_PER_SHORTEST_HARMONIC),
+                required_samples: maximum_cycle.saturating_mul(MIN_SAMPLES_PER_SHORTEST_HARMONIC),
             });
         }
         let harmonic_count = u64::from(maximum_cycles_per_track)

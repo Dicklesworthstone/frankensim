@@ -70,7 +70,8 @@ fn gauntlet_002_verified_policy_match_on_repeat() {
     let mut checker = IndependentChecker::new();
     let code = sample_code();
     let policy = ExecutionPolicy::exact_deterministic(code, 42);
-    let key = ComputationKey::try_new("exact_op", vec![sample_input(1)], BTreeMap::new(), &policy).unwrap();
+    let key = ComputationKey::try_new("exact_op", vec![sample_input(1)], BTreeMap::new(), &policy)
+        .unwrap();
 
     let artifact = b"exact-artifact-data";
     let art_hash = fs_recompute::artifact_content_hash(artifact);
@@ -102,7 +103,8 @@ fn gauntlet_003_divergence_refuted_with_exact_witness() {
     let mut checker = IndependentChecker::new();
     let code = sample_code();
     let policy = ExecutionPolicy::exact_deterministic(code, 42);
-    let key = ComputationKey::try_new("exact_op", vec![sample_input(1)], BTreeMap::new(), &policy).unwrap();
+    let key = ComputationKey::try_new("exact_op", vec![sample_input(1)], BTreeMap::new(), &policy)
+        .unwrap();
 
     let artifact1 = b"exact-artifact-data-1";
     let art_hash1 = fs_recompute::artifact_content_hash(artifact1);
@@ -132,7 +134,8 @@ fn gauntlet_004_invalid_evidence_on_tampered_declared_hash() {
     let mut checker = IndependentChecker::new();
     let code = sample_code();
     let policy = ExecutionPolicy::exact_deterministic(code, 42);
-    let key = ComputationKey::try_new("exact_op", vec![sample_input(1)], BTreeMap::new(), &policy).unwrap();
+    let key = ComputationKey::try_new("exact_op", vec![sample_input(1)], BTreeMap::new(), &policy)
+        .unwrap();
 
     let artifact = b"actual-bytes";
     let fake_art_hash = hash_bytes(b"tampered-fake-hash");
@@ -158,7 +161,9 @@ fn gauntlet_005_nondeterministic_mode_never_claims_divergence() {
     let key = ComputationKey::try_new("heuristic", vec![], BTreeMap::new(), &policy).unwrap();
 
     let art1 = b"fast-bytes-1";
-    let obs1 = OutputObservation::try_new(fs_recompute::artifact_content_hash(art1), None, None, None).unwrap();
+    let obs1 =
+        OutputObservation::try_new(fs_recompute::artifact_content_hash(art1), None, None, None)
+            .unwrap();
     let res1 = checker.check_observation(&key, &obs1, art1);
     assert_eq!(
         res1,
@@ -168,7 +173,9 @@ fn gauntlet_005_nondeterministic_mode_never_claims_divergence() {
     );
 
     let art2 = b"fast-bytes-2";
-    let obs2 = OutputObservation::try_new(fs_recompute::artifact_content_hash(art2), None, None, None).unwrap();
+    let obs2 =
+        OutputObservation::try_new(fs_recompute::artifact_content_hash(art2), None, None, None)
+            .unwrap();
     let res2 = checker.check_observation(&key, &obs2, art2);
     assert_eq!(
         res2,

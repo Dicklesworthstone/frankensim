@@ -1,6 +1,6 @@
 [package]
 name = "fs-cmaes-viz-wasm"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 publish = false
 description = "Browser (WASM) surface for CMA-ES optimization internals visualization — per-generation mean/sigma/covariance-eigendecomposition/population stream, typed refusals at the JS boundary, deterministic seeded runs."

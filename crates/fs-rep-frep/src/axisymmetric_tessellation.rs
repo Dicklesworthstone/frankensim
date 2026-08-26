@@ -196,13 +196,13 @@ pub fn tessellate_axisymmetric(
                 max_radius = max_radius.max(start.radius).max(end.radius);
             }
             MeridianSegment::Arc {
-                start,
-                end,
-                center,
-                ..
+                start, end, center, ..
             } => {
                 let arc_r = (start.radius - center.radius).hypot(start.axial - center.axial);
-                max_radius = max_radius.max(start.radius).max(end.radius).max(center.radius + arc_r);
+                max_radius = max_radius
+                    .max(start.radius)
+                    .max(end.radius)
+                    .max(center.radius + arc_r);
             }
         }
     }
@@ -322,8 +322,7 @@ pub fn tessellate_axisymmetric(
 
                 let actual_arc_sagitta = arc_r * (1.0 - (sweep / (2.0 * n_arc as f64)).cos());
                 max_meridian_sagitta = max_meridian_sagitta.max(actual_arc_sagitta);
-                max_normal_angular_error =
-                    max_normal_angular_error.max(sweep / n_arc as f64);
+                max_normal_angular_error = max_normal_angular_error.max(sweep / n_arc as f64);
 
                 let d_angle = if clockwise {
                     -sweep / n_arc as f64

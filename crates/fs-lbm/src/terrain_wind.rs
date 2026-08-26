@@ -112,7 +112,8 @@ pub fn run_v04c_terrain_wind(config: &TerrainWindConfig) -> Result<V04cDiscrepan
             * (z / config.roughness_z0_m).max(1.0).ln();
 
         // LBM boundary layer solution with terrain speedup near top and deceleration near ground
-        let u_lbm = u_target * (1.0 + 0.05 * (-((iz as f64 - (nz as f64) / 2.0).powi(2)) / 8.0).exp());
+        let u_lbm =
+            u_target * (1.0 + 0.05 * (-((iz as f64 - (nz as f64) / 2.0).powi(2)) / 8.0).exp());
 
         let err = (u_lbm - u_target).abs();
         sum_sq_err += err * err;

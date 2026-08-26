@@ -193,10 +193,13 @@ fn slab_dirichlet_dirichlet() {
     let solution = with_cx(|cx| {
         solve(
             cx,
-            ConductionProblem { element_materials: None, mesh: &mesh,
-            boundary: &boundary,
-            material: &material,
-            source: &source, },
+            ConductionProblem {
+                element_materials: None,
+                mesh: &mesh,
+                boundary: &boundary,
+                material: &material,
+                source: &source,
+            },
             config(),
         )
         .expect("solve")
@@ -281,10 +284,13 @@ fn slab_with_uniform_source() {
     let solution = with_cx(|cx| {
         solve(
             cx,
-            ConductionProblem { element_materials: None, mesh: &mesh,
-            boundary: &boundary,
-            material: &material,
-            source: &source, },
+            ConductionProblem {
+                element_materials: None,
+                mesh: &mesh,
+                boundary: &boundary,
+                material: &material,
+                source: &source,
+            },
             config(),
         )
         .expect("solve")
@@ -382,10 +388,13 @@ fn slab_dirichlet_robin() {
     let solution = with_cx(|cx| {
         solve(
             cx,
-            ConductionProblem { element_materials: None, mesh: &mesh,
-            boundary: &boundary,
-            material: &material,
-            source: &source, },
+            ConductionProblem {
+                element_materials: None,
+                mesh: &mesh,
+                boundary: &boundary,
+                material: &material,
+                source: &source,
+            },
             config(),
         )
         .expect("solve")
@@ -460,10 +469,13 @@ fn rectangular_affine_temperature_patch() {
     let solution = with_cx(|cx| {
         solve(
             cx,
-            ConductionProblem { element_materials: None, mesh: &mesh,
-            boundary: &boundary,
-            material: &material,
-            source: &source, },
+            ConductionProblem {
+                element_materials: None,
+                mesh: &mesh,
+                boundary: &boundary,
+                material: &material,
+                source: &source,
+            },
             config(),
         )
         .expect("solve")
@@ -567,10 +579,13 @@ fn run_cylinder(refine: usize) -> (f64, f64, f64) {
     let solution = with_cx(|cx| {
         solve(
             cx,
-            ConductionProblem { element_materials: None, mesh: &mesh,
-            boundary: &boundary,
-            material: &material,
-            source: &source, },
+            ConductionProblem {
+                element_materials: None,
+                mesh: &mesh,
+                boundary: &boundary,
+                material: &material,
+                source: &source,
+            },
             config(),
         )
         .expect("solve")
@@ -707,10 +722,13 @@ fn run_sphere(refine: usize) -> (f64, f64, f64) {
     let solution = with_cx(|cx| {
         solve(
             cx,
-            ConductionProblem { element_materials: None, mesh: &mesh,
-            boundary: &boundary,
-            material: &material,
-            source: &source, },
+            ConductionProblem {
+                element_materials: None,
+                mesh: &mesh,
+                boundary: &boundary,
+                material: &material,
+                source: &source,
+            },
             config(),
         )
         .expect("solve")
@@ -824,10 +842,13 @@ fn straight_fin_against_the_one_dimensional_model() {
     let solution = with_cx(|cx| {
         solve(
             cx,
-            ConductionProblem { element_materials: None, mesh: &mesh,
-            boundary: &boundary,
-            material: &material,
-            source: &source, },
+            ConductionProblem {
+                element_materials: None,
+                mesh: &mesh,
+                boundary: &boundary,
+                material: &material,
+                source: &source,
+            },
             fin_config,
         )
         .expect("solve")

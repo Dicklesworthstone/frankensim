@@ -1632,4 +1632,3 @@ fn correlation_to_rans_field_transfer_refuses_invalid_inputs() {
     assert!(CorrelationToRansFieldTransfer::new(0, 5, 300.0).is_err());
     assert!(CorrelationToRansFieldTransfer::new(3, 1, 300.0).is_err());
 }
-

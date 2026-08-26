@@ -310,31 +310,71 @@ impl std::fmt::Display for VtuError {
         match self {
             Self::EmptyGrid => write!(f, "unstructured grid has zero points"),
             Self::NonFinitePointCoordinate { index, component } => {
-                write!(f, "point {index} component {component} is non-finite (NaN or Inf)")
+                write!(
+                    f,
+                    "point {index} component {component} is non-finite (NaN or Inf)"
+                )
             }
             Self::NonFiniteFieldValue { array, index } => {
-                write!(f, "array `{array}` at index {index} contains non-finite float")
+                write!(
+                    f,
+                    "array `{array}` at index {index} contains non-finite float"
+                )
             }
-            Self::InvalidCellIndex { cell, point_index, max_points } => {
-                write!(f, "cell {cell} references point index {point_index} >= {max_points}")
+            Self::InvalidCellIndex {
+                cell,
+                point_index,
+                max_points,
+            } => {
+                write!(
+                    f,
+                    "cell {cell} references point index {point_index} >= {max_points}"
+                )
             }
             Self::InvalidCellType { cell, type_id } => {
                 write!(f, "cell {cell} has unknown VTK cell type ID {type_id}")
             }
-            Self::CellPointCountMismatch { cell, expected, found } => {
+            Self::CellPointCountMismatch {
+                cell,
+                expected,
+                found,
+            } => {
                 write!(f, "cell {cell} expects {expected} points, found {found}")
             }
-            Self::OffsetsMismatch { expected_cells, found_offsets } => {
-                write!(f, "expected {expected_cells} offsets, found {found_offsets}")
+            Self::OffsetsMismatch {
+                expected_cells,
+                found_offsets,
+            } => {
+                write!(
+                    f,
+                    "expected {expected_cells} offsets, found {found_offsets}"
+                )
             }
-            Self::TypesMismatch { expected_cells, found_types } => {
-                write!(f, "expected {expected_cells} cell types, found {found_types}")
+            Self::TypesMismatch {
+                expected_cells,
+                found_types,
+            } => {
+                write!(
+                    f,
+                    "expected {expected_cells} cell types, found {found_types}"
+                )
             }
-            Self::OffsetsNotMonotonic { cell, prev, current } => {
+            Self::OffsetsNotMonotonic {
+                cell,
+                prev,
+                current,
+            } => {
                 write!(f, "offset for cell {cell} ({current}) <= previous ({prev})")
             }
-            Self::ArrayLengthMismatch { array, expected, found } => {
-                write!(f, "array `{array}` length mismatch: expected {expected}, found {found}")
+            Self::ArrayLengthMismatch {
+                array,
+                expected,
+                found,
+            } => {
+                write!(
+                    f,
+                    "array `{array}` length mismatch: expected {expected}, found {found}"
+                )
             }
             Self::DuplicateArrayName { name } => {
                 write!(f, "duplicate data array name `{name}`")
@@ -370,7 +410,8 @@ impl UnstructuredGrid {
         for &idx in indices {
             self.cells_connectivity.push(idx as i64);
         }
-        self.cells_offsets.push(self.cells_connectivity.len() as i64);
+        self.cells_offsets
+            .push(self.cells_connectivity.len() as i64);
         self.cells_types.push(cell_type.type_id());
     }
 
@@ -411,7 +452,10 @@ impl UnstructuredGrid {
         for (i, p) in self.points.iter().enumerate() {
             for (c, &val) in p.iter().enumerate() {
                 if !val.is_finite() {
-                    return Err(VtuError::NonFinitePointCoordinate { index: i, component: c });
+                    return Err(VtuError::NonFinitePointCoordinate {
+                        index: i,
+                        component: c,
+                    });
                 }
             }
         }
@@ -426,7 +470,9 @@ impl UnstructuredGrid {
 
         // Validate offsets monotonicity and cell connectivity
         let mut prev_offset = 0i64;
-        for (c_idx, (&offset, &type_id)) in self.cells_offsets.iter().zip(&self.cells_types).enumerate() {
+        for (c_idx, (&offset, &type_id)) in
+            self.cells_offsets.iter().zip(&self.cells_types).enumerate()
+        {
             if offset <= prev_offset {
                 return Err(VtuError::OffsetsNotMonotonic {
                     cell: c_idx,
@@ -439,14 +485,14 @@ impl UnstructuredGrid {
                 type_id,
             })?;
             let pts_count = (offset - prev_offset) as usize;
-            if let Some(expected) = cell_type.fixed_point_count() {
-                if pts_count != expected {
-                    return Err(VtuError::CellPointCountMismatch {
-                        cell: c_idx,
-                        expected,
-                        found: pts_count,
-                    });
-                }
+            if let Some(expected) = cell_type.fixed_point_count()
+                && pts_count != expected
+            {
+                return Err(VtuError::CellPointCountMismatch {
+                    cell: c_idx,
+                    expected,
+                    found: pts_count,
+                });
             }
             for p_idx in (prev_offset as usize)..(offset as usize) {
                 let p = self.cells_connectivity[p_idx];
@@ -465,10 +511,14 @@ impl UnstructuredGrid {
         let mut seen_names = std::collections::HashSet::new();
         for arr in &self.arrays {
             if !seen_names.insert(&arr.name) {
-                return Err(VtuError::DuplicateArrayName { name: arr.name.clone() });
+                return Err(VtuError::DuplicateArrayName {
+                    name: arr.name.clone(),
+                });
             }
             if arr.components == 0 {
-                return Err(VtuError::ZeroComponents { array: arr.name.clone() });
+                return Err(VtuError::ZeroComponents {
+                    array: arr.name.clone(),
+                });
             }
             let expected_items = match arr.association {
                 DataAssociation::PointData => self.points.len() * arr.components,
@@ -523,9 +573,9 @@ impl VtuWriter {
         out.push_str("<?xml version=\"1.0\"?>\n");
         out.push_str("<VTKFile type=\"UnstructuredGrid\" version=\"1.0\" byte_order=\"LittleEndian\" header_type=\"UInt64\">\n");
         out.push_str("  <UnstructuredGrid>\n");
-        let _ = write!(
+        let _ = writeln!(
             out,
-            "    <Piece NumberOfPoints=\"{}\" NumberOfCells=\"{}\">\n",
+            "    <Piece NumberOfPoints=\"{}\" NumberOfCells=\"{}\">",
             grid.points.len(),
             grid.num_cells()
         );
@@ -545,7 +595,9 @@ impl VtuWriter {
         // 2. Cells
         out.push_str("      <Cells>\n");
         // Connectivity
-        out.push_str("        <DataArray type=\"Int64\" Name=\"connectivity\" format=\"ascii\">\n          ");
+        out.push_str(
+            "        <DataArray type=\"Int64\" Name=\"connectivity\" format=\"ascii\">\n          ",
+        );
         for (i, &c) in grid.cells_connectivity.iter().enumerate() {
             if i > 0 {
                 out.push(' ');
@@ -555,7 +607,9 @@ impl VtuWriter {
         out.push_str("\n        </DataArray>\n");
 
         // Offsets
-        out.push_str("        <DataArray type=\"Int64\" Name=\"offsets\" format=\"ascii\">\n          ");
+        out.push_str(
+            "        <DataArray type=\"Int64\" Name=\"offsets\" format=\"ascii\">\n          ",
+        );
         for (i, &off) in grid.cells_offsets.iter().enumerate() {
             if i > 0 {
                 out.push(' ');
@@ -565,7 +619,9 @@ impl VtuWriter {
         out.push_str("\n        </DataArray>\n");
 
         // Types
-        out.push_str("        <DataArray type=\"UInt8\" Name=\"types\" format=\"ascii\">\n          ");
+        out.push_str(
+            "        <DataArray type=\"UInt8\" Name=\"types\" format=\"ascii\">\n          ",
+        );
         for (i, &t) in grid.cells_types.iter().enumerate() {
             if i > 0 {
                 out.push(' ');
@@ -627,7 +683,7 @@ impl VtuWriter {
                     if i > 0 {
                         out.push(' ');
                     }
-                    let _ = write!(out, "{:.17e}", v);
+                    let _ = write!(out, "{v:.17e}");
                 }
             }
             DataValues::Float32(vals) => {
@@ -635,7 +691,7 @@ impl VtuWriter {
                     if i > 0 {
                         out.push(' ');
                     }
-                    let _ = write!(out, "{:.9e}", v);
+                    let _ = write!(out, "{v:.9e}");
                 }
             }
             DataValues::Int32(vals) => {
@@ -728,14 +784,14 @@ impl VtuChecker {
                 }
                 DataValues::Float32(vals) => {
                     for &v in vals {
-                        v_min = v_min.min(v as f64);
-                        v_max = v_max.max(v as f64);
+                        v_min = v_min.min(f64::from(v));
+                        v_max = v_max.max(f64::from(v));
                     }
                 }
                 DataValues::Int32(vals) => {
                     for &v in vals {
-                        v_min = v_min.min(v as f64);
-                        v_max = v_max.max(v as f64);
+                        v_min = v_min.min(f64::from(v));
+                        v_max = v_max.max(f64::from(v));
                     }
                 }
                 DataValues::Int64(vals) => {
@@ -746,8 +802,8 @@ impl VtuChecker {
                 }
                 DataValues::UInt8(vals) => {
                     for &v in vals {
-                        v_min = v_min.min(v as f64);
-                        v_max = v_max.max(v as f64);
+                        v_min = v_min.min(f64::from(v));
+                        v_max = v_max.max(f64::from(v));
                     }
                 }
             }
@@ -771,24 +827,27 @@ impl VtuChecker {
         let mut grid = UnstructuredGrid::new();
 
         // 1. Extract Points
-        if let Some(points_content) = extract_tag_content(xml, "<Points>", "</Points>") {
-            if let Some(data) = extract_data_array_content(&points_content) {
-                let coords: Vec<f64> = data
-                    .split_whitespace()
-                    .map(|s| {
-                        s.parse::<f64>().map_err(|e| VtuError::ParseError {
-                            detail: format!("invalid point float `{s}`: {e}"),
-                        })
+        if let Some(points_content) = extract_tag_content(xml, "<Points>", "</Points>")
+            && let Some(data) = extract_data_array_content(&points_content)
+        {
+            let coords: Vec<f64> = data
+                .split_whitespace()
+                .map(|s| {
+                    s.parse::<f64>().map_err(|e| VtuError::ParseError {
+                        detail: format!("invalid point float `{s}`: {e}"),
                     })
-                    .collect::<Result<_, _>>()?;
-                if coords.len() % 3 != 0 {
-                    return Err(VtuError::ParseError {
-                        detail: format!("points coordinate count {} is not multiple of 3", coords.len()),
-                    });
-                }
-                for chunk in coords.chunks_exact(3) {
-                    grid.points.push([chunk[0], chunk[1], chunk[2]]);
-                }
+                })
+                .collect::<Result<_, _>>()?;
+            if !coords.len().is_multiple_of(3) {
+                return Err(VtuError::ParseError {
+                    detail: format!(
+                        "points coordinate count {} is not multiple of 3",
+                        coords.len()
+                    ),
+                });
+            }
+            for chunk in coords.as_chunks::<3>().0 {
+                grid.points.push([chunk[0], chunk[1], chunk[2]]);
             }
         }
 
@@ -895,8 +954,7 @@ fn parse_arrays_in_section(
 
         // Extract attributes
         let name = extract_attr(tag_header, "Name").unwrap_or_else(|| "unnamed".to_string());
-        let type_name =
-            extract_attr(tag_header, "type").unwrap_or_else(|| "Float64".to_string());
+        let type_name = extract_attr(tag_header, "type").unwrap_or_else(|| "Float64".to_string());
         let components = extract_attr(tag_header, "NumberOfComponents")
             .and_then(|s| s.parse::<usize>().ok())
             .unwrap_or(1);

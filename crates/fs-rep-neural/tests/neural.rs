@@ -110,7 +110,10 @@ fn certificate_handles_zero_rectangular_and_extreme_finite_matrices() {
         zero
     );
     let collapsed = spectral_normalize(Layer::new(vec![vec![1.0, -2.0]], vec![0.0]), 0.0);
-    assert_eq!(spectral_norm_upper_bound(&collapsed.weights).to_bits(), 0.0f64.to_bits());
+    assert_eq!(
+        spectral_norm_upper_bound(&collapsed.weights).to_bits(),
+        0.0f64.to_bits()
+    );
 
     // A single maximum-finite entry has an exactly representable finite norm.
     assert_eq!(
@@ -204,27 +207,19 @@ fn interval_sign_margin_step_rounds_toward_the_conservative_side() {
         assert_eq!(invalid.radius().to_bits(), 0.0f64.to_bits());
     }
     assert_eq!(
-        derive_safe_step((1.0, 1.0), 0.0)
-            .radius()
-            .to_bits(),
+        derive_safe_step((1.0, 1.0), 0.0).radius().to_bits(),
         f64::INFINITY.to_bits()
     );
     assert_eq!(
-        derive_safe_step((-1.0, -1.0), -0.0)
-            .radius()
-            .to_bits(),
+        derive_safe_step((-1.0, -1.0), -0.0).radius().to_bits(),
         f64::INFINITY.to_bits()
     );
     assert_eq!(
-        derive_safe_step((0.0, 0.0), 0.0)
-            .radius()
-            .to_bits(),
+        derive_safe_step((0.0, 0.0), 0.0).radius().to_bits(),
         0.0f64.to_bits()
     );
     assert_eq!(
-        derive_safe_step((-0.0, 0.0), -0.0)
-            .radius()
-            .to_bits(),
+        derive_safe_step((-0.0, 0.0), -0.0).radius().to_bits(),
         0.0f64.to_bits()
     );
 }
@@ -233,12 +228,18 @@ fn interval_sign_margin_step_rounds_toward_the_conservative_side() {
 fn interval_sign_margin_handles_extremes_scaling_and_one_sided_infinity() {
     let positive_tail = derive_safe_step((f64::MAX, f64::INFINITY), 1.0);
     assert_eq!(positive_tail.status(), SafeStepStatus::SignSeparated);
-    assert_eq!(positive_tail.magnitude_lower_bound().to_bits(), f64::MAX.to_bits());
+    assert_eq!(
+        positive_tail.magnitude_lower_bound().to_bits(),
+        f64::MAX.to_bits()
+    );
     assert_eq!(positive_tail.radius().to_bits() + 1, f64::MAX.to_bits());
 
     let negative_tail = derive_safe_step((f64::NEG_INFINITY, -f64::MAX), 1.0);
     assert_eq!(negative_tail.status(), SafeStepStatus::SignSeparated);
-    assert_eq!(negative_tail.magnitude_lower_bound().to_bits(), f64::MAX.to_bits());
+    assert_eq!(
+        negative_tail.magnitude_lower_bound().to_bits(),
+        f64::MAX.to_bits()
+    );
     assert_eq!(
         negative_tail.radius().to_bits(),
         positive_tail.radius().to_bits()

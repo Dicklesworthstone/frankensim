@@ -7,8 +7,8 @@
 //! - FieldBackendId separation (CPU/wasm stays canonical).
 //! - Structural assertion: no physics/validation consumer exists.
 
-use crate::fieldsvc::{FieldSourceStateV1, GridSpec, sample_field};
 use crate::Refusal;
+use crate::fieldsvc::{FieldSourceStateV1, GridSpec, sample_field};
 
 /// Identifier for field compute backends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -142,11 +142,19 @@ pub fn run_webgpu_field_experiment(
 
     let digest_input = format!(
         "webgpu-exp-v1:{}:{:.3}:{:.4e}:{}:{}:{}",
-        n_points, measured_speedup, max_diff, promoted, parity_verified, device_loss_fallback_verified
+        n_points,
+        measured_speedup,
+        max_diff,
+        promoted,
+        parity_verified,
+        device_loss_fallback_verified
     );
-    let receipt_digest = fs_blake3::hash_domain("org.frankensim.wf.webgpu.experiment.v1", digest_input.as_bytes())
-        .to_hex()
-        .to_string();
+    let receipt_digest = fs_blake3::hash_domain(
+        "org.frankensim.wf.webgpu.experiment.v1",
+        digest_input.as_bytes(),
+    )
+    .to_hex()
+    .to_string();
 
     Ok(WebGpuExperimentReceipt {
         backend_evaluated: FieldBackendId::WebGpuExperiment,

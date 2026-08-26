@@ -10,8 +10,8 @@
 //! - Deterministic canonical ordering and bit-identical replay.
 
 use fs_airflow::qoi::{
-    FanPowerSpec, JunctionRegion, SafetyFactorAuthority, SurfaceRegion,
-    ThermalQoiDeclarations, ThermalRequirement,
+    FanPowerSpec, JunctionRegion, SafetyFactorAuthority, SurfaceRegion, ThermalQoiDeclarations,
+    ThermalRequirement,
 };
 use fs_airflow::registered_qoi::{
     OutputQuery, QoiExecutionLimits, QoiSemanticId, extract_registered_qois,
@@ -210,13 +210,8 @@ fn rc_001_satisfied_and_violated_composition() {
         )
         .unwrap();
 
-        let receipt = compose_thermal_limits(
-            &qoi_receipt.rows,
-            &[req_sat, req_viol],
-            false,
-            cx,
-        )
-        .unwrap();
+        let receipt =
+            compose_thermal_limits(&qoi_receipt.rows, &[req_sat, req_viol], false, cx).unwrap();
 
         assert_eq!(receipt.evaluations.len(), 2);
         assert_eq!(receipt.satisfied_count, 1);
@@ -346,7 +341,10 @@ fn rc_003_duplicate_requirements_and_missing_qoi_refuse() {
         .unwrap();
 
         let res_dup = compose_thermal_limits(&qoi_receipt.rows, &[req1, req2], false, cx);
-        assert!(matches!(res_dup, Err(RequirementCompositionError::DuplicateRequirement { .. })));
+        assert!(matches!(
+            res_dup,
+            Err(RequirementCompositionError::DuplicateRequirement { .. })
+        ));
 
         // 2. Missing QoI candidate row (PressureDrop requested but not in qoi_receipt)
         let req_missing = ThermalLimitSpec::try_new(
@@ -361,7 +359,10 @@ fn rc_003_duplicate_requirements_and_missing_qoi_refuse() {
         .unwrap();
 
         let res_missing = compose_thermal_limits(&qoi_receipt.rows, &[req_missing], false, cx);
-        assert!(matches!(res_missing, Err(RequirementCompositionError::MissingQoiRow { .. })));
+        assert!(matches!(
+            res_missing,
+            Err(RequirementCompositionError::MissingQoiRow { .. })
+        ));
     });
 }
 
@@ -474,12 +475,10 @@ fn rc_005_deterministic_replay_produces_identical_receipt_hashes() {
         .unwrap(),
     ];
 
-    let receipt1 = with_cx(|cx| {
-        compose_thermal_limits(&qoi_receipt.rows, &requirements, false, cx).unwrap()
-    });
-    let receipt2 = with_cx(|cx| {
-        compose_thermal_limits(&qoi_receipt.rows, &requirements, false, cx).unwrap()
-    });
+    let receipt1 =
+        with_cx(|cx| compose_thermal_limits(&qoi_receipt.rows, &requirements, false, cx).unwrap());
+    let receipt2 =
+        with_cx(|cx| compose_thermal_limits(&qoi_receipt.rows, &requirements, false, cx).unwrap());
 
     assert_eq!(receipt1.receipt_hash, receipt2.receipt_hash);
     assert_eq!(receipt1.evaluations.len(), receipt2.evaluations.len());

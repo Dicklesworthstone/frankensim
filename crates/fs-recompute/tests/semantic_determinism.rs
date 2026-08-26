@@ -15,8 +15,8 @@ use std::collections::BTreeMap;
 
 use fs_ledger::{ContentHash, hash_bytes};
 use fs_recompute::semantic_determinism::{
-    ComputationKey, DeterminismClass, DeterminismDisposition, ExecutionPolicy,
-    OperationFamily, OutputObservation, SemanticKeyError, ToleranceRole,
+    ComputationKey, DeterminismClass, DeterminismDisposition, ExecutionPolicy, OperationFamily,
+    OutputObservation, SemanticKeyError, ToleranceRole,
 };
 
 fn sample_code_hash() -> ContentHash {
@@ -167,7 +167,10 @@ fn sem_003_refusals_on_invalid_and_non_finite_inputs() {
         code,
         None,
     );
-    assert!(matches!(err_nan, Err(SemanticKeyError::InvalidTolerance { .. })));
+    assert!(matches!(
+        err_nan,
+        Err(SemanticKeyError::InvalidTolerance { .. })
+    ));
 
     let err_inf = ExecutionPolicy::try_new(
         DeterminismClass::ToleranceDependentDeterministic,
@@ -177,7 +180,10 @@ fn sem_003_refusals_on_invalid_and_non_finite_inputs() {
         code,
         None,
     );
-    assert!(matches!(err_inf, Err(SemanticKeyError::InvalidTolerance { .. })));
+    assert!(matches!(
+        err_inf,
+        Err(SemanticKeyError::InvalidTolerance { .. })
+    ));
 
     // Negative / zero tolerance
     let err_zero = ExecutionPolicy::try_new(
@@ -188,7 +194,10 @@ fn sem_003_refusals_on_invalid_and_non_finite_inputs() {
         code,
         None,
     );
-    assert!(matches!(err_zero, Err(SemanticKeyError::InvalidTolerance { .. })));
+    assert!(matches!(
+        err_zero,
+        Err(SemanticKeyError::InvalidTolerance { .. })
+    ));
 
     // Missing tolerance when required
     let err_missing = ExecutionPolicy::try_new(
@@ -199,7 +208,10 @@ fn sem_003_refusals_on_invalid_and_non_finite_inputs() {
         code,
         None,
     );
-    assert!(matches!(err_missing, Err(SemanticKeyError::MissingTolerance { .. })));
+    assert!(matches!(
+        err_missing,
+        Err(SemanticKeyError::MissingTolerance { .. })
+    ));
 }
 
 #[test]
@@ -213,11 +225,17 @@ fn sem_004_output_observation_validation() {
 
     // Non-finite error
     let err_nan = OutputObservation::try_new(art, Some(f64::NAN), None, None);
-    assert!(matches!(err_nan, Err(SemanticKeyError::InvalidAchievedError { .. })));
+    assert!(matches!(
+        err_nan,
+        Err(SemanticKeyError::InvalidAchievedError { .. })
+    ));
 
     // Negative timing
     let err_time = OutputObservation::try_new(art, Some(1e-5), Some(-0.1), None);
-    assert!(matches!(err_time, Err(SemanticKeyError::InvalidTiming { .. })));
+    assert!(matches!(
+        err_time,
+        Err(SemanticKeyError::InvalidTiming { .. })
+    ));
 }
 
 #[test]
@@ -261,20 +279,29 @@ fn sem_006_determinism_class_properties() {
     assert!(DeterminismClass::ToleranceDependentDeterministic.is_deterministic());
     assert!(!DeterminismClass::Nondeterministic.is_deterministic());
 
-    assert_eq!(DeterminismClass::ExactDeterministic.as_str(), "exact-deterministic");
+    assert_eq!(
+        DeterminismClass::ExactDeterministic.as_str(),
+        "exact-deterministic"
+    );
     assert_eq!(
         DeterminismClass::ToleranceDependentDeterministic.as_str(),
         "tolerance-dependent-deterministic"
     );
-    assert_eq!(DeterminismClass::Nondeterministic.as_str(), "nondeterministic");
+    assert_eq!(
+        DeterminismClass::Nondeterministic.as_str(),
+        "nondeterministic"
+    );
 }
 
 #[test]
 fn sem_007_algebraic_laws() {
     let policy = ExecutionPolicy::exact_deterministic(sample_code_hash(), 123);
-    let key1 = ComputationKey::try_new("op", vec![sample_input_hash(1)], BTreeMap::new(), &policy).unwrap();
-    let key2 = ComputationKey::try_new("op", vec![sample_input_hash(1)], BTreeMap::new(), &policy).unwrap();
-    let key3 = ComputationKey::try_new("op", vec![sample_input_hash(1)], BTreeMap::new(), &policy).unwrap();
+    let key1 = ComputationKey::try_new("op", vec![sample_input_hash(1)], BTreeMap::new(), &policy)
+        .unwrap();
+    let key2 = ComputationKey::try_new("op", vec![sample_input_hash(1)], BTreeMap::new(), &policy)
+        .unwrap();
+    let key3 = ComputationKey::try_new("op", vec![sample_input_hash(1)], BTreeMap::new(), &policy)
+        .unwrap();
 
     // Reflexivity
     assert_eq!(key1, key1);
@@ -306,24 +333,51 @@ fn sem_008_determinism_disposition_states() {
 fn sem_009_store_put_computation_tripwire() {
     let mut store = fs_recompute::Store::new();
     let policy = ExecutionPolicy::exact_deterministic(sample_code_hash(), 42);
-    let key = ComputationKey::try_new("op", vec![sample_input_hash(1)], BTreeMap::new(), &policy).unwrap();
+    let key = ComputationKey::try_new("op", vec![sample_input_hash(1)], BTreeMap::new(), &policy)
+        .unwrap();
 
     let art1 = b"artifact-bytes-v1";
     let art2 = b"artifact-bytes-v2";
 
-    let obs1 = OutputObservation::try_new(fs_recompute::artifact_content_hash(art1), Some(1e-6), None, None).unwrap();
+    let obs1 = OutputObservation::try_new(
+        fs_recompute::artifact_content_hash(art1),
+        Some(1e-6),
+        None,
+        None,
+    )
+    .unwrap();
     let res1 = store.put_computation(key.clone(), obs1, art1).unwrap();
     assert_eq!(res1, fs_recompute::PutOutcome::Inserted(key.content_hash()));
 
     // Re-put identical artifact -> Deduped
-    let obs1_again = OutputObservation::try_new(fs_recompute::artifact_content_hash(art1), Some(1e-6), None, None).unwrap();
-    let res_dedup = store.put_computation(key.clone(), obs1_again, art1).unwrap();
-    assert_eq!(res_dedup, fs_recompute::PutOutcome::Deduped(key.content_hash()));
+    let obs1_again = OutputObservation::try_new(
+        fs_recompute::artifact_content_hash(art1),
+        Some(1e-6),
+        None,
+        None,
+    )
+    .unwrap();
+    let res_dedup = store
+        .put_computation(key.clone(), obs1_again, art1)
+        .unwrap();
+    assert_eq!(
+        res_dedup,
+        fs_recompute::PutOutcome::Deduped(key.content_hash())
+    );
 
     // Re-put DIFFERENT artifact with same key -> DeterminismViolation
-    let obs2 = OutputObservation::try_new(fs_recompute::artifact_content_hash(art2), Some(1e-6), None, None).unwrap();
+    let obs2 = OutputObservation::try_new(
+        fs_recompute::artifact_content_hash(art2),
+        Some(1e-6),
+        None,
+        None,
+    )
+    .unwrap();
     let res_viol = store.put_computation(key, obs2, art2);
-    assert!(matches!(res_viol, Err(fs_recompute::StoreError::DeterminismViolation { .. })));
+    assert!(matches!(
+        res_viol,
+        Err(fs_recompute::StoreError::DeterminismViolation { .. })
+    ));
 }
 
 #[test]
@@ -372,12 +426,15 @@ fn sem_011_nondeterministic_mode_relaxation() {
     let art1 = b"fast-result-1";
     let art2 = b"fast-result-2";
 
-    let obs1 = OutputObservation::try_new(fs_recompute::artifact_content_hash(art1), None, None, None).unwrap();
+    let obs1 =
+        OutputObservation::try_new(fs_recompute::artifact_content_hash(art1), None, None, None)
+            .unwrap();
     store.put_computation(key.clone(), obs1, art1).unwrap();
 
     // Nondeterministic mode allows differing artifacts without tripping determinism violation
-    let obs2 = OutputObservation::try_new(fs_recompute::artifact_content_hash(art2), None, None, None).unwrap();
+    let obs2 =
+        OutputObservation::try_new(fs_recompute::artifact_content_hash(art2), None, None, None)
+            .unwrap();
     let res2 = store.put_computation(key, obs2, art2);
     assert!(res2.is_ok());
 }
-

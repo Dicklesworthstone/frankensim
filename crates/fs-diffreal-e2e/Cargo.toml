@@ -17,11 +17,11 @@ fs-evidence = { path = "../fs-evidence" }
 fs-asbuilt = { path = "../fs-asbuilt" }
 fs-assimilate = { path = "../fs-assimilate" }
 fs-blake3 = { path = "../fs-blake3" }
+fs-alloc = { path = "../fs-alloc" }
 fs-exec = { path = "../fs-exec" }
 fs-toleralloc = { path = "../fs-toleralloc" }
 
 [dev-dependencies]
-fs-alloc = { path = "../fs-alloc" }
 # Test-only: the as-built product chain (bead f85xj.12.2) needs the scenario
 # placement binding and the report projection at its two ends. They are
 # dev-dependencies because this crate's LIBRARY composes neither.

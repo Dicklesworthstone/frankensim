@@ -14,7 +14,7 @@ use std::mem::size_of;
 
 const TEST_STREAM: StreamKey = StreamKey {
     seed: 0x5650_4D5F_4741_554E,
-    kernel_id: 0x5650_4D,
+    kernel_id: 0x0056_504D,
     tile: 0,
     iteration: 0,
 };

@@ -20,6 +20,7 @@ use fs_aeroac::slot_jet_3d::{
     SlotJet3dConfig, SweepProgress, classify_rung, run_slot_jet_3d_chunked,
 };
 use fs_lbm::d3q19::CollisionModel3;
+use std::fmt::Write as _;
 
 /// Fixed geometry for the whole ladder (the clean actuator is the
 /// collision rate at fixed `u_jet`, per the executed ramp protocol).
@@ -119,8 +120,9 @@ fn re_sweep_campaign() {
             run.diagnostics.mach_max_lattice,
             started.elapsed().as_secs_f64()
         );
-        regime_map.push_str(&format!(
-            "{:.3}\t{:.1}\t{:.3e}\t{}\t{:.4}\t{}\t{:.2e}\t{:.3e}\t{}\t{:.4}\t{:.3}\n",
+        let _ = writeln!(
+            regime_map,
+            "{:.3}\t{:.1}\t{:.3e}\t{}\t{:.4}\t{}\t{:.2e}\t{:.3e}\t{}\t{:.4}\t{:.3}",
             rate,
             rung.reynolds,
             rung.flatness,
@@ -132,7 +134,7 @@ fn re_sweep_campaign() {
             rung.amplitude_qualified,
             run.diagnostics.mach_max_lattice,
             rung.flux_imbalance
-        ));
+        );
     }
 
     // Box-sensitivity octave (DONE-WHEN): double the spanwise extent
@@ -140,7 +142,7 @@ fn re_sweep_campaign() {
     // our way out of, so a too-thin box must be ruled out explicitly.
     // Skipped in single-rung distributed mode unless that rung IS the
     // highest-Re one (its owner also owns the octave).
-    if only.map(|o| o + 1 != LADDER.len()).unwrap_or(false) {
+    if only.is_some_and(|o| o + 1 != LADDER.len()) {
         println!("octave skipped in single-rung mode");
         return;
     }

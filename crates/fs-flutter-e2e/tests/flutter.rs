@@ -214,8 +214,16 @@ fn the_decay_rate_enclosure_is_sound_across_the_branch_and_fails_open_to_no_clai
     }
     for mu in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
         let iv = spectral_abscissa_interval(mu);
-        assert_eq!(iv.lo(), f64::NEG_INFINITY, "μ={mu} must mint no bound");
-        assert_eq!(iv.hi(), f64::INFINITY, "μ={mu} must mint no bound");
+        assert_eq!(
+            iv.lo().to_bits(),
+            f64::NEG_INFINITY.to_bits(),
+            "μ={mu} must mint no bound"
+        );
+        assert_eq!(
+            iv.hi().to_bits(),
+            f64::INFINITY.to_bits(),
+            "μ={mu} must mint no bound"
+        );
     }
 }
 

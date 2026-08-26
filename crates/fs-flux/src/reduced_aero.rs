@@ -667,8 +667,8 @@ impl ReducedAeroModel {
             }
         }
         let supplied: BTreeSet<_> = components.families().into_iter().collect();
-        for family in declared.symmetric_difference(&supplied) {
-            return Err(ReducedAeroError::ContributionDeclarationMismatch { family: *family });
+        if let Some(&family) = declared.symmetric_difference(&supplied).next() {
+            return Err(ReducedAeroError::ContributionDeclarationMismatch { family });
         }
         if supplied.is_empty() {
             return Err(ReducedAeroError::InvalidInput {
@@ -760,32 +760,32 @@ impl ReducedAeroModel {
         let mut edge_torque = Vec3::ZERO;
         let mut orientation_torque = Vec3::ZERO;
 
-        if let Some(term) = self.components.form_drag {
-            if speed > 0.0 && density > 0.0 {
-                let direction = finite_vec3(
-                    relative_velocity.scaled(1.0 / speed),
-                    "relative_velocity_direction",
-                )?;
-                let face_projection = finite_derived(
-                    checked_dot(normal, direction, "face_projection")?.abs(),
-                    "face_projection",
-                )?;
-                let rim_projection = finite_derived(
-                    (1.0 - face_projection * face_projection).max(0.0).sqrt(),
-                    "rim_projection",
-                )?;
-                let projected_area = finite_derived(
-                    face_area * face_projection + edge_on_rim_silhouette * rim_projection,
-                    "projected_area_m2",
-                )?;
-                let force_scale = finite_derived(
-                    -0.5 * density * term.coefficient * roughness_factor * projected_area * speed,
-                    "form_force_scale",
-                )?;
-                form_force =
-                    finite_vec3(relative_velocity.scaled(force_scale), "form_force_world_n")?;
-                force = finite_vec3(force.plus(form_force), "force_world_n")?;
-            }
+        if let Some(term) = self.components.form_drag
+            && speed > 0.0
+            && density > 0.0
+        {
+            let direction = finite_vec3(
+                relative_velocity.scaled(1.0 / speed),
+                "relative_velocity_direction",
+            )?;
+            let face_projection = finite_derived(
+                checked_dot(normal, direction, "face_projection")?.abs(),
+                "face_projection",
+            )?;
+            let rim_projection = finite_derived(
+                (1.0 - face_projection * face_projection).max(0.0).sqrt(),
+                "rim_projection",
+            )?;
+            let projected_area = finite_derived(
+                face_area * face_projection + edge_on_rim_silhouette * rim_projection,
+                "projected_area_m2",
+            )?;
+            let force_scale = finite_derived(
+                -0.5 * density * term.coefficient * roughness_factor * projected_area * speed,
+                "form_force_scale",
+            )?;
+            form_force = finite_vec3(relative_velocity.scaled(force_scale), "form_force_world_n")?;
+            force = finite_vec3(force.plus(form_force), "force_world_n")?;
         }
 
         let spin = finite_vec3(
@@ -1100,7 +1100,7 @@ impl CandidateWrench {
 }
 
 fn within_roundoff(left: f64, right: f64) -> bool {
-    if left == right {
+    if left.to_bits() == right.to_bits() {
         return true;
     }
     let scale = left.abs().max(right.abs()).max(f64::MIN_POSITIVE);

@@ -368,7 +368,12 @@ fn pt_007_unstructured_admission_bitwise_reproduces_rectangle() {
     .expect("modes equiv");
 
     assert_eq!(rep_rect.modes.len(), rep_equiv.modes.len());
-    for (i, (m1, m2)) in rep_rect.modes.iter().zip(rep_equiv.modes.iter()).enumerate() {
+    for (i, (m1, m2)) in rep_rect
+        .modes
+        .iter()
+        .zip(rep_equiv.modes.iter())
+        .enumerate()
+    {
         assert_eq!(
             m1.lambda.to_bits(),
             m2.lambda.to_bits(),
@@ -424,4 +429,3 @@ fn pt_008_soundboard_plate_chart_modes() {
         rep.modes[0].lambda.sqrt() / (2.0 * PI)
     );
 }
-

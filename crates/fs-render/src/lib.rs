@@ -39,9 +39,9 @@ pub mod motion_bounds;
 #[cfg(feature = "chart-backends")]
 pub mod motion_vectors;
 #[cfg(feature = "chart-backends")]
-pub mod temporal_accumulation;
-#[cfg(feature = "chart-backends")]
 pub mod surface_detail;
+#[cfg(feature = "chart-backends")]
+pub mod temporal_accumulation;
 #[cfg(feature = "chart-backends")]
 pub mod tlas;
 

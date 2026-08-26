@@ -6,7 +6,7 @@
 //! - Hostile identity-tamper twin verification.
 
 use crate::replay::InputTrace;
-use crate::{refuse, Refusal};
+use crate::{Refusal, refuse};
 
 /// Quarantined mux adapter identifier for external ffmpeg/ProRes packaging.
 pub const QUARANTINED_MUX_ADAPTER: &str = "fs-quarantined-mux-adapter.v1";
@@ -161,19 +161,16 @@ pub fn export_hero_clip(
     trace.admit()?;
 
     let trace_id = format!("trace-{}", trace.end_tick_exclusive);
-    let manifest = CinematicClipManifest::new(
-        run_id,
-        trace_id,
-        frame_count,
-        60,
-        [1920, 1080],
-    )?;
+    let manifest = CinematicClipManifest::new(run_id, trace_id, frame_count, 60, [1920, 1080])?;
 
     // Verify manifest binds the run_id exactly
     manifest.verify_origin(run_id)?;
 
     let clip_id = format!("wf-hero-clip-{}-{}", run_id, frame_count);
-    let mux_receipt_input = format!("{}:{}:{}", clip_id, manifest.manifest_digest, QUARANTINED_MUX_ADAPTER);
+    let mux_receipt_input = format!(
+        "{}:{}:{}",
+        clip_id, manifest.manifest_digest, QUARANTINED_MUX_ADAPTER
+    );
     let mux_receipt_id = fs_blake3::hash_domain(
         "org.frankensim.wf.cinematic.mux.v1",
         mux_receipt_input.as_bytes(),

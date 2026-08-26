@@ -23,9 +23,9 @@
 use asupersync::time::TimeSource;
 use asupersync::types::{Budget, Time};
 use fs_constraint::{
-    ConError, ConstraintKind, ConstraintSpec, DomainBox, RestorationError, RestorationWorkLimits,
-    RestorationWorkPlan, RestorationWorkShape, RESTORATION_MAX_FEASIBILITY_SAMPLES,
+    ConError, ConstraintKind, ConstraintSpec, DomainBox, RESTORATION_MAX_FEASIBILITY_SAMPLES,
     RESTORATION_MAX_STARTS, RESTORATION_MAX_STEPS_PER_START, RESTORATION_WORK_PLAN_SCHEMA_VERSION,
+    RestorationError, RestorationWorkLimits, RestorationWorkPlan, RestorationWorkShape,
     diagnose_infeasibility, elastic_solve, elastic_solve_with_plan,
 };
 use fs_exec::{CancelGate, Cx, ExecMode, StreamKey};
@@ -40,9 +40,7 @@ const EXECUTION_SEED: u64 = 0xC07A;
 /// hinge constraints (`g <= 0` semantics).
 fn host_with(nodes_spec: &[(f64, u32, f64)], dim: u32) -> (Problem, Vec<NodeId>) {
     let mut b = ProblemBuilder::new();
-    let v = b
-        .var("x", Manifold::Rn { dim }, Dims::NONE)
-        .expect("var");
+    let v = b.var("x", Manifold::Rn { dim }, Dims::NONE).expect("var");
     let vr = b.var_ref(v).expect("ref");
     let mut nodes = Vec::new();
     for &(coeff, component, rhs) in nodes_spec {
@@ -228,7 +226,11 @@ fn plan_identity_is_order_free_and_tamper_detectable() {
     };
     let a = make();
     let b = make();
-    assert_eq!(a.identity(), b.identity(), "identical shapes share identity");
+    assert_eq!(
+        a.identity(),
+        b.identity(),
+        "identical shapes share identity"
+    );
 
     let mut tampered = a;
     tampered.total_work_units += 1;
@@ -276,7 +278,9 @@ fn active_count_above_total_is_a_typed_refusal() {
 fn stale_schema_plans_refuse_admission_site_checks() {
     let (problem, nodes) = host_with(&[(1.0, 0, 0.5)], 1);
     let specs = [hard("a", nodes[0])];
-    let domain = DomainBox { ranges: vec![(0.0, 1.0)] };
+    let domain = DomainBox {
+        ranges: vec![(0.0, 1.0)],
+    };
     let mut plan = RestorationWorkPlan::plan(RestorationWorkShape {
         dimensions: 1,
         constraints_total: 1,
@@ -303,7 +307,9 @@ fn stale_schema_plans_refuse_admission_site_checks() {
 fn zero_cost_quota_refuses_admission_with_no_consumption() {
     let (problem, nodes) = host_with(&[(1.0, 0, 2.0)], 1);
     let specs = [hard("a", nodes[0])];
-    let domain = DomainBox { ranges: vec![(0.0, 1.0)] };
+    let domain = DomainBox {
+        ranges: vec![(0.0, 1.0)],
+    };
     let budget = Budget {
         cost_quota: Some(0),
         ..infinite_budget()
@@ -331,7 +337,9 @@ fn zero_cost_quota_refuses_admission_with_no_consumption() {
 fn zero_poll_quota_stops_at_the_first_checkpoint_with_nothing_charged() {
     let (problem, nodes) = host_with(&[(1.0, 0, 2.0)], 1);
     let specs = [hard("a", nodes[0])];
-    let domain = DomainBox { ranges: vec![(0.0, 1.0)] };
+    let domain = DomainBox {
+        ranges: vec![(0.0, 1.0)],
+    };
     let budget = Budget {
         poll_quota: 0,
         ..infinite_budget()
@@ -343,8 +351,13 @@ fn zero_poll_quota_stops_at_the_first_checkpoint_with_nothing_charged() {
         let RestorationError::Refused { refusal, receipt } = outcome else {
             panic!("expected PollsExhausted, got {outcome:?}");
         };
-        assert!(matches!(refusal, fs_exec::BudgetRefusal::PollsExhausted { .. }));
-        let consumption = receipt.consumption.expect("admitted runs retain consumption");
+        assert!(matches!(
+            refusal,
+            fs_exec::BudgetRefusal::PollsExhausted { .. }
+        ));
+        let consumption = receipt
+            .consumption
+            .expect("admitted runs retain consumption");
         assert_eq!(consumption.cost_charged, 0);
         assert_eq!(consumption.refusal, Some(refusal));
     });
@@ -354,7 +367,9 @@ fn zero_poll_quota_stops_at_the_first_checkpoint_with_nothing_charged() {
 fn deadlines_fail_closed_without_a_clock_and_expire_at_admission_when_passed() {
     let (problem, nodes) = host_with(&[(1.0, 0, 2.0)], 1);
     let specs = [hard("a", nodes[0])];
-    let domain = DomainBox { ranges: vec![(0.0, 1.0)] };
+    let domain = DomainBox {
+        ranges: vec![(0.0, 1.0)],
+    };
 
     let unenforceable = Budget {
         deadline: Some(Time::from_nanos(10)),
@@ -397,7 +412,9 @@ fn deadlines_fail_closed_without_a_clock_and_expire_at_admission_when_passed() {
 fn mid_run_cancellation_stops_with_receipt_and_bounded_extra_work() {
     let (problem, nodes) = host_with(&[(1.0, 0, 2.0)], 1);
     let specs = [hard("a", nodes[0])];
-    let domain = DomainBox { ranges: vec![(0.0, 1.0)] };
+    let domain = DomainBox {
+        ranges: vec![(0.0, 1.0)],
+    };
 
     let plan = RestorationWorkPlan::plan(RestorationWorkShape {
         dimensions: 1,
@@ -432,8 +449,14 @@ fn mid_run_cancellation_stops_with_receipt_and_bounded_extra_work() {
             receipt.starts_completed < plan.limits.starts,
             "the stop must land inside the descent schedule"
         );
-        let consumption = receipt.consumption.expect("admitted stops keep consumption");
-        assert_eq!(consumption.refusal, Some(refusal), "latched reason is stable");
+        let consumption = receipt
+            .consumption
+            .expect("admitted stops keep consumption");
+        assert_eq!(
+            consumption.refusal,
+            Some(refusal),
+            "latched reason is stable"
+        );
         // Bounded-extra-work proof: charged units stay well under the
         // declared worst case because the drain aborts at the next tile.
         assert!(
@@ -447,7 +470,9 @@ fn mid_run_cancellation_stops_with_receipt_and_bounded_extra_work() {
 fn mid_run_deadline_expiry_stops_with_the_crossing_observation() {
     let (problem, nodes) = host_with(&[(1.0, 0, 2.0)], 1);
     let specs = [hard("a", nodes[0])];
-    let domain = DomainBox { ranges: vec![(0.0, 1.0)] };
+    let domain = DomainBox {
+        ranges: vec![(0.0, 1.0)],
+    };
     let budget = Budget {
         deadline: Some(Time::from_nanos(60)),
         ..infinite_budget()
@@ -537,7 +562,9 @@ fn equivalent_skip_orderings_share_one_plan_identity_and_result() {
 fn leaseless_contexts_record_the_no_lease_no_claim_boundary() {
     let (problem, nodes) = host_with(&[(1.0, 0, 0.25)], 1);
     let specs = [hard("a", nodes[0])];
-    let domain = DomainBox { ranges: vec![(0.0, 1.0)] };
+    let domain = DomainBox {
+        ranges: vec![(0.0, 1.0)],
+    };
     let gate = CancelGate::new();
     with_cx_raw(&gate, infinite_budget(), None, |cx| {
         let report = elastic_solve(&problem, &specs, &domain, &[], cx).expect("solve");
@@ -547,8 +574,11 @@ fn leaseless_contexts_record_the_no_lease_no_claim_boundary() {
             "hand-built contexts carry no lease; the receipt must say so"
         );
         let consumption = report.work.consumption.expect("successful runs keep it");
-        assert!(consumption.refusal.is_none(), "success implies no latched refusal");
-        assert!(report.work.starts_completed == RESTORATION_MAX_STARTS);
+        assert!(
+            consumption.refusal.is_none(),
+            "success implies no latched refusal"
+        );
+        assert_eq!(report.work.starts_completed, RESTORATION_MAX_STARTS);
     });
 }
 
@@ -557,11 +587,12 @@ fn diagnosis_binds_one_shared_receipt_across_every_phase() {
     // Pairwise infeasible: g_a <= 0 needs x >= 0.75, g_b <= 0 needs x <= 0.25.
     let (problem, nodes) = host_with(&[(-1.0, 0, -0.75), (1.0, 0, 0.25)], 1);
     let specs = [hard("upper", nodes[0]), hard("lower", nodes[1])];
-    let domain = DomainBox { ranges: vec![(0.0, 1.0)] };
+    let domain = DomainBox {
+        ranges: vec![(0.0, 1.0)],
+    };
     let gate = CancelGate::new();
     with_cx_raw(&gate, infinite_budget(), None, |cx| {
-        let diagnosis =
-            diagnose_infeasibility(&problem, &specs, &domain, cx).expect("diagnosis");
+        let diagnosis = diagnose_infeasibility(&problem, &specs, &domain, cx).expect("diagnosis");
         assert!(!diagnosis.feasible);
         assert_eq!(diagnosis.core.len(), 2, "both members are necessary here");
         assert!(!diagnosis.repairs.is_empty());

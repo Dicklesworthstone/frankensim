@@ -10,7 +10,8 @@ use fs_blake3::ContentHash;
 /// Schema for pipeline attribution receipts.
 pub const PIPELINE_ATTRIBUTION_SCHEMA: &str = "frankensim.roofline.pipeline-attribution.v1";
 /// Authority string for pipeline attribution receipts.
-pub const PIPELINE_ATTRIBUTION_AUTHORITY: &str = "measured-pipeline-attribution-and-accelerator-falsifier";
+pub const PIPELINE_ATTRIBUTION_AUTHORITY: &str =
+    "measured-pipeline-attribution-and-accelerator-falsifier";
 /// No-claim boundary for pipeline attribution receipts.
 pub const PIPELINE_ATTRIBUTION_NO_CLAIM: &str = "pipeline profiling attributes wall time and \
     energy across stages; it does not authorize device execution or assert speedup without \
@@ -109,8 +110,10 @@ impl PipelineAttributionReceipt {
             None
         };
 
-        let top_three_wall_share_bps: u16 = top_three_kernels.iter().map(|k| k.wall_share_bps).sum();
-        let selected_kernel_wall_share_bps = top_three_kernels.first().map_or(0, |k| k.wall_share_bps);
+        let top_three_wall_share_bps: u16 =
+            top_three_kernels.iter().map(|k| k.wall_share_bps).sum();
+        let selected_kernel_wall_share_bps =
+            top_three_kernels.first().map_or(0, |k| k.wall_share_bps);
 
         let top_three_meets_gate = top_three_wall_share_bps >= 5_000;
         let selected_kernel_meets_gate = selected_kernel_wall_share_bps >= 1_500;
@@ -169,9 +172,21 @@ impl PipelineAttributionReceipt {
         let mut out = String::with_capacity(4096);
         let _ = write!(out, "{{\n");
         let _ = write!(out, "  \"schema\": \"{PIPELINE_ATTRIBUTION_SCHEMA}\",\n");
-        let _ = write!(out, "  \"workflow_id\": \"{}\",\n", escape_json(&self.workflow_id));
-        let _ = write!(out, "  \"machine_fingerprint\": \"{}\",\n", escape_json(&self.machine_fingerprint));
-        let _ = write!(out, "  \"isa_family\": \"{}\",\n", escape_json(&self.isa_family));
+        let _ = write!(
+            out,
+            "  \"workflow_id\": \"{}\",\n",
+            escape_json(&self.workflow_id)
+        );
+        let _ = write!(
+            out,
+            "  \"machine_fingerprint\": \"{}\",\n",
+            escape_json(&self.machine_fingerprint)
+        );
+        let _ = write!(
+            out,
+            "  \"isa_family\": \"{}\",\n",
+            escape_json(&self.isa_family)
+        );
         let _ = write!(out, "  \"total_wall_s\": {:.6},\n", self.total_wall_s);
         if let Some(energy) = self.total_energy_j {
             let _ = write!(out, "  \"total_energy_j\": {:.6},\n", energy);
@@ -193,7 +208,11 @@ impl PipelineAttributionReceipt {
                 let _ = write!(out, "      \"energy_j\": null,\n");
             }
             let _ = write!(out, "      \"memory_bytes\": {},\n", p.memory_bytes);
-            let _ = write!(out, "      \"is_accelerator_addressable\": {}\n", p.is_accelerator_addressable);
+            let _ = write!(
+                out,
+                "      \"is_accelerator_addressable\": {}\n",
+                p.is_accelerator_addressable
+            );
             let _ = write!(out, "    }}");
         }
         let _ = write!(out, "\n  ],\n");
@@ -203,24 +222,59 @@ impl PipelineAttributionReceipt {
                 out.push_str(",\n");
             }
             let _ = write!(out, "    {{\n");
-            let _ = write!(out, "      \"kernel_name\": \"{}\",\n", escape_json(&k.kernel_name));
+            let _ = write!(
+                out,
+                "      \"kernel_name\": \"{}\",\n",
+                escape_json(&k.kernel_name)
+            );
             let _ = write!(out, "      \"wall_s\": {:.6},\n", k.wall_s);
             let _ = write!(out, "      \"wall_share_bps\": {},\n", k.wall_share_bps);
-            let _ = write!(out, "      \"arithmetic_intensity\": {:.3},\n", k.arithmetic_intensity);
-            let _ = write!(out, "      \"roofline_regime\": \"{}\",\n", k.roofline_regime);
+            let _ = write!(
+                out,
+                "      \"arithmetic_intensity\": {:.3},\n",
+                k.arithmetic_intensity
+            );
+            let _ = write!(
+                out,
+                "      \"roofline_regime\": \"{}\",\n",
+                k.roofline_regime
+            );
             let _ = write!(out, "      \"suitability\": \"{}\"\n", k.suitability);
             let _ = write!(out, "    }}");
         }
         let _ = write!(out, "\n  ],\n");
         let _ = write!(out, "  \"falsifier\": {{\n");
-        let _ = write!(out, "    \"top_three_wall_share_bps\": {},\n", self.falsifier.top_three_wall_share_bps);
-        let _ = write!(out, "    \"top_three_meets_gate\": {},\n", self.falsifier.top_three_meets_gate);
-        let _ = write!(out, "    \"selected_kernel_wall_share_bps\": {},\n", self.falsifier.selected_kernel_wall_share_bps);
-        let _ = write!(out, "    \"selected_kernel_meets_gate\": {},\n", self.falsifier.selected_kernel_meets_gate);
+        let _ = write!(
+            out,
+            "    \"top_three_wall_share_bps\": {},\n",
+            self.falsifier.top_three_wall_share_bps
+        );
+        let _ = write!(
+            out,
+            "    \"top_three_meets_gate\": {},\n",
+            self.falsifier.top_three_meets_gate
+        );
+        let _ = write!(
+            out,
+            "    \"selected_kernel_wall_share_bps\": {},\n",
+            self.falsifier.selected_kernel_wall_share_bps
+        );
+        let _ = write!(
+            out,
+            "    \"selected_kernel_meets_gate\": {},\n",
+            self.falsifier.selected_kernel_meets_gate
+        );
         let _ = write!(out, "    \"decision\": \"{}\",\n", self.falsifier.decision);
-        let _ = write!(out, "    \"reason\": \"{}\"\n", escape_json(&self.falsifier.reason));
+        let _ = write!(
+            out,
+            "    \"reason\": \"{}\"\n",
+            escape_json(&self.falsifier.reason)
+        );
         let _ = write!(out, "  }},\n");
-        let _ = write!(out, "  \"authority\": \"{PIPELINE_ATTRIBUTION_AUTHORITY}\",\n");
+        let _ = write!(
+            out,
+            "  \"authority\": \"{PIPELINE_ATTRIBUTION_AUTHORITY}\",\n"
+        );
         let _ = write!(out, "  \"no_claim\": \"{PIPELINE_ATTRIBUTION_NO_CLAIM}\"\n");
         let _ = write!(out, "}}\n");
         out

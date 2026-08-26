@@ -30,9 +30,17 @@ impl XdmfWriter {
 
         // 1. Topology
         let num_cells = grid.num_cells();
-        let topology_type = if grid.cells_types.iter().all(|&t| t == CellType::Tetra.type_id()) {
+        let topology_type = if grid
+            .cells_types
+            .iter()
+            .all(|&t| t == CellType::Tetra.type_id())
+        {
             "Tetrahedron"
-        } else if grid.cells_types.iter().all(|&t| t == CellType::Triangle.type_id()) {
+        } else if grid
+            .cells_types
+            .iter()
+            .all(|&t| t == CellType::Triangle.type_id())
+        {
             "Triangle"
         } else {
             "Mixed"
@@ -44,17 +52,17 @@ impl XdmfWriter {
         }
         let conn_len = grid.cells_connectivity.len();
 
-        let _ = write!(
+        writeln!(
             xmf,
-            "      <Topology TopologyType=\"{}\" NumberOfElements=\"{}\">\n",
-            topology_type, num_cells
-        );
-        let _ = write!(
+            "      <Topology TopologyType=\"{topology_type}\" NumberOfElements=\"{num_cells}\">"
+        )
+        .ok();
+        writeln!(
             xmf,
-            "        <DataItem DataType=\"UInt\" Precision=\"8\" Dimensions=\"{}\" Format=\"Binary\" Seek=\"{}\">\n",
-            conn_len, conn_offset
-        );
-        let _ = write!(xmf, "          {binary_file_name}\n");
+            "        <DataItem DataType=\"UInt\" Precision=\"8\" Dimensions=\"{conn_len}\" Format=\"Binary\" Seek=\"{conn_offset}\">"
+        )
+        .ok();
+        writeln!(xmf, "          {binary_file_name}").ok();
         xmf.push_str("        </DataItem>\n");
         xmf.push_str("      </Topology>\n");
 
@@ -68,12 +76,12 @@ impl XdmfWriter {
         }
 
         xmf.push_str("      <Geometry GeometryType=\"XYZ\">\n");
-        let _ = write!(
+        writeln!(
             xmf,
-            "        <DataItem DataType=\"Float\" Precision=\"8\" Dimensions=\"{} 3\" Format=\"Binary\" Seek=\"{}\">\n",
-            num_points, geom_offset
-        );
-        let _ = write!(xmf, "          {binary_file_name}\n");
+            "        <DataItem DataType=\"Float\" Precision=\"8\" Dimensions=\"{num_points} 3\" Format=\"Binary\" Seek=\"{geom_offset}\">"
+        )
+        .ok();
+        writeln!(xmf, "          {binary_file_name}").ok();
         xmf.push_str("        </DataItem>\n");
         xmf.push_str("      </Geometry>\n");
 
@@ -135,17 +143,18 @@ impl XdmfWriter {
                 }
             }
 
-            let _ = write!(
+            writeln!(
                 xmf,
-                "      <Attribute Name=\"{}\" AttributeType=\"{}\" Center=\"{}\">\n",
-                arr.name, attr_type, center
-            );
-            let _ = write!(
+                "      <Attribute Name=\"{}\" AttributeType=\"{}\" Center=\"{center}\">",
+                arr.name, attr_type
+            )
+            .ok();
+            writeln!(
                 xmf,
-                "        <DataItem DataType=\"Float\" Precision=\"8\" Dimensions=\"{}\" Format=\"Binary\" Seek=\"{}\">\n",
-                dim_str, arr_offset
-            );
-            let _ = write!(xmf, "          {binary_file_name}\n");
+                "        <DataItem DataType=\"Float\" Precision=\"8\" Dimensions=\"{dim_str}\" Format=\"Binary\" Seek=\"{arr_offset}\">"
+            )
+            .ok();
+            writeln!(xmf, "          {binary_file_name}").ok();
             xmf.push_str("        </DataItem>\n");
             xmf.push_str("      </Attribute>\n");
         }

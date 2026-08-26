@@ -1,8 +1,8 @@
 //! Conformance tests for CAE ecosystem interchange tiers (bead frankensim-extreal-program-f85xj.11.5).
 
 use fs_io::{
-    CAE_CAPABILITY_MATRIX, CaeDirection, CaeQuarantineStatus, GmshElementType, GmshMesh, GmshNode,
-    GmshElement, TabularColumn, TabularDataset, export_arrow_ipc_stream, export_tabular_csv,
+    CAE_CAPABILITY_MATRIX, CaeDirection, CaeQuarantineStatus, GmshElement, GmshElementType,
+    GmshMesh, GmshNode, TabularColumn, TabularDataset, export_arrow_ipc_stream, export_tabular_csv,
     parse_abaqus_inp, parse_gmsh, parse_nastran_bdf, write_gmsh_msh2,
 };
 
@@ -10,12 +10,25 @@ use fs_io::{
 fn test_gmsh_roundtrip_msh2() {
     let mut mesh = GmshMesh::new("2.2");
     mesh.physical_names.insert((2, 100), "inlet".to_string());
-    mesh.physical_names.insert((3, 200), "solid_domain".to_string());
+    mesh.physical_names
+        .insert((3, 200), "solid_domain".to_string());
 
-    mesh.nodes.push(GmshNode { id: 1, coords: [0.0, 0.0, 0.0] });
-    mesh.nodes.push(GmshNode { id: 2, coords: [1.0, 0.0, 0.0] });
-    mesh.nodes.push(GmshNode { id: 3, coords: [0.0, 1.0, 0.0] });
-    mesh.nodes.push(GmshNode { id: 4, coords: [0.0, 0.0, 1.0] });
+    mesh.nodes.push(GmshNode {
+        id: 1,
+        coords: [0.0, 0.0, 0.0],
+    });
+    mesh.nodes.push(GmshNode {
+        id: 2,
+        coords: [1.0, 0.0, 0.0],
+    });
+    mesh.nodes.push(GmshNode {
+        id: 3,
+        coords: [0.0, 1.0, 0.0],
+    });
+    mesh.nodes.push(GmshNode {
+        id: 4,
+        coords: [0.0, 0.0, 1.0],
+    });
 
     mesh.elements.push(GmshElement {
         id: 1,
@@ -43,7 +56,10 @@ fn test_gmsh_roundtrip_msh2() {
     let parsed_mesh = quarantined.into_inner();
     assert_eq!(parsed_mesh.nodes.len(), 4);
     assert_eq!(parsed_mesh.elements.len(), 2);
-    assert_eq!(parsed_mesh.elements[1].element_type, GmshElementType::Tetrahedron);
+    assert_eq!(
+        parsed_mesh.elements[1].element_type,
+        GmshElementType::Tetrahedron
+    );
 }
 
 #[test]
@@ -117,7 +133,8 @@ FORCE,1,1,0,100.0,0.0,0.0,1.0
 #[test]
 fn test_tabular_csv_and_arrow_ipc_export() {
     let temp_col = TabularColumn::new_f64("temperature", "K", vec![300.0, 320.5, 345.2, 380.1]);
-    let flux_col = TabularColumn::new_f64("heat_flux_z", "W/m^2", vec![1000.0, 1500.0, 2200.0, 3100.0]);
+    let flux_col =
+        TabularColumn::new_f64("heat_flux_z", "W/m^2", vec![1000.0, 1500.0, 2200.0, 3100.0]);
     let node_col = TabularColumn::new_i64("node_id", "id", vec![1, 2, 3, 4]);
 
     let dataset = TabularDataset::new("thermal_results", vec![node_col, temp_col, flux_col])
@@ -145,12 +162,18 @@ fn test_cae_capability_matrix_completeness() {
         .iter()
         .find(|e| e.format_id == "Gmsh-MSH")
         .expect("gmsh in matrix");
-    assert_eq!(gmsh_entry.quarantine_status, CaeQuarantineStatus::NativeCertified);
+    assert_eq!(
+        gmsh_entry.quarantine_status,
+        CaeQuarantineStatus::NativeCertified
+    );
     assert_eq!(gmsh_entry.direction, CaeDirection::Bidirectional);
 
     let exo_entry = CAE_CAPABILITY_MATRIX
         .iter()
         .find(|e| e.format_id == "Exodus-II")
         .expect("exodus in matrix");
-    assert_eq!(exo_entry.quarantine_status, CaeQuarantineStatus::QuarantinedAdapter);
+    assert_eq!(
+        exo_entry.quarantine_status,
+        CaeQuarantineStatus::QuarantinedAdapter
+    );
 }

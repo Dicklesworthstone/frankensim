@@ -107,10 +107,16 @@ impl core::fmt::Display for TaylorModelError {
                 )
             }
             Self::AxisIndexOutOfBounds { axis, dim } => {
-                write!(f, "Taylor axis index {axis} is out of bounds for dimension {dim}")
+                write!(
+                    f,
+                    "Taylor axis index {axis} is out of bounds for dimension {dim}"
+                )
             }
             Self::DerivativeCapabilityUnavailable => {
-                write!(f, "Taylor model derivative remainder capability is unavailable")
+                write!(
+                    f,
+                    "Taylor model derivative remainder capability is unavailable"
+                )
             }
         }
     }

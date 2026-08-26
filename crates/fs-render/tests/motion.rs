@@ -288,11 +288,13 @@ fn adding_shutter_time_does_not_perturb_existing_spatial_sample_dimensions() {
             halton(3, sample_identity),
         ];
         let timed = TimedRay::from_sample(spatial_dimensions, shutter, 91, sample_identity);
-        assert!(timed
-            .spatial()
-            .iter()
-            .zip(spatial_dimensions.iter())
-            .all(|(a, b)| a.to_bits() == b.to_bits()));
+        assert!(
+            timed
+                .spatial()
+                .iter()
+                .zip(spatial_dimensions.iter())
+                .all(|(a, b)| a.to_bits() == b.to_bits())
+        );
     }
 }
 

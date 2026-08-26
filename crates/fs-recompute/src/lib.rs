@@ -23,15 +23,15 @@
 
 #[cfg(feature = "tolerance-invalidation")]
 pub mod api;
+pub mod checker;
 #[cfg(feature = "tolerance-invalidation")]
 pub mod invalidate;
-pub mod checker;
 pub mod semantic_determinism;
 
 pub use checker::{CheckerDisposition, IndependentChecker};
 pub use semantic_determinism::{
-    ComputationKey, DeterminismClass, DeterminismDisposition, ExecutionPolicy,
-    OperationFamily, OutputObservation, SemanticKeyError, ToleranceRole,
+    ComputationKey, DeterminismClass, DeterminismDisposition, ExecutionPolicy, OperationFamily,
+    OutputObservation, SemanticKeyError, ToleranceRole,
 };
 
 use fs_ledger::{ContentHash, hash_bytes};
@@ -1111,10 +1111,8 @@ impl Store {
         let mut count = 0;
         let mut migrations = Vec::with_capacity(self.nodes.len());
         for node in self.nodes.values() {
-            let (comp_key, obs) = semantic_determinism::migrate_legacy_node_record(
-                &node.record,
-                node.artifact_hash,
-            );
+            let (comp_key, obs) =
+                semantic_determinism::migrate_legacy_node_record(&node.record, node.artifact_hash);
             migrations.push((comp_key, obs, node.pins.clone(), node.seq));
         }
 

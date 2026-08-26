@@ -166,10 +166,10 @@ fn terminal_line(
         "all-rungs-refused"
     };
     format!(
-        "{{\"schema\":\"fs-aeroac.slot-jet-3d.terminal/v1\",\"rungs\":{},\"classified\":{},\
-\"refusals\":{},\"broadband_rungs\":{},\"verdict\":\"{verdict}\",\
-\"no_claim\":\"no experimental or video-backed flue-noise claim; lattice measurements only\"}}",
-        total_rungs, classified, refusals, broadband
+        "{{\"schema\":\"fs-aeroac.slot-jet-3d.terminal/v1\",\"rungs\":{total_rungs},\
+\"classified\":{classified},\"refusals\":{refusals},\"broadband_rungs\":{broadband},\
+\"verdict\":\"{verdict}\",\
+\"no_claim\":\"no experimental or video-backed flue-noise claim; lattice measurements only\"}}"
     )
 }
 

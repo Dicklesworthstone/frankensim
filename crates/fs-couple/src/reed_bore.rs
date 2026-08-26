@@ -272,9 +272,7 @@ pub(crate) fn solve_reed_wave_fast(
         let mut p_new = p + applied;
         let mut f_new = reed_flow_mismatch(reed, rho, zc, r0, p_minus_hist, p_m, p_new, u_body);
         let mut halvings = 0_u32;
-        while (!f_new.is_finite() || f_new.abs() >= f.abs())
-            && halvings < NEWTON_BACKTRACK_MAX
-        {
+        while (!f_new.is_finite() || f_new.abs() >= f.abs()) && halvings < NEWTON_BACKTRACK_MAX {
             applied *= 0.5;
             p_new = p + applied;
             f_new = reed_flow_mismatch(reed, rho, zc, r0, p_minus_hist, p_m, p_new, u_body);
@@ -286,8 +284,7 @@ pub(crate) fn solve_reed_wave_fast(
         }
         // Converged on an UNDOUBLED full step; a backtracked step means
         // "still descending", never "done".
-        let converged =
-            halvings == 0 && full_step.abs() <= NEWTON_STEP_TOL * (1.0 + p_new.abs());
+        let converged = halvings == 0 && full_step.abs() <= NEWTON_STEP_TOL * (1.0 + p_new.abs());
         p = p_new;
         f = f_new;
         if converged {
@@ -458,9 +455,6 @@ fn reed_flow_mismatch(
 mod fast_mode_tests {
     use super::*;
 
-    fn r0_of(v: f64) -> f64 {
-        v
-    }
     use fs_scenario::BeatingReed;
 
     fn reed() -> BeatingReed {
@@ -530,6 +524,8 @@ mod fast_mode_tests {
 
     #[test]
     fn fast_newton_meets_the_strict_residual_contract_within_conditioning_band() {
+        const FLOW_ACCEPT_TOL: f64 = 1.0e-8;
+        const POSITION_HEADROOM: f64 = 4.0;
         let reed = reed();
         let rho = 1.2;
         let zc = zc_typical();
@@ -547,8 +543,6 @@ mod fast_mode_tests {
         //    operating points. The positional assertion uses four
         //    times that per-sample bound; a fixed microbar band would
         //    encode false precision about an ill-conditioned root.
-        const FLOW_ACCEPT_TOL: f64 = 1.0e-8;
-        const POSITION_HEADROOM: f64 = 4.0;
         let mut max_dev = 0.0_f64;
         let mut max_allowed = 0.0_f64;
         for k in 0..64 {
@@ -569,13 +563,9 @@ mod fast_mode_tests {
                 FLOW_ACCEPT_TOL * (1.0 + pm.abs())
             );
             let j = reed_flow_jacobian(reed, rho, zc, 0.0, h, pm, fast)
-                .map(f64::abs)
-                .unwrap_or(0.0)
-                .max(reed_flow_jacobian(reed, rho, zc, 0.0, h, pm, strict)
-                    .map(f64::abs)
-                    .unwrap_or(0.0));
-            let allowed =
-                POSITION_HEADROOM * (FLOW_ACCEPT_TOL * (1.0 + pm.abs())) / j.max(1.0e-12);
+                .map_or(0.0, f64::abs)
+                .max(reed_flow_jacobian(reed, rho, zc, 0.0, h, pm, strict).map_or(0.0, f64::abs));
+            let allowed = POSITION_HEADROOM * (FLOW_ACCEPT_TOL * (1.0 + pm.abs())) / j.max(1.0e-12);
             max_dev = max_dev.max(dev);
             max_allowed = max_allowed.max(allowed);
             assert!(
@@ -619,6 +609,6 @@ mod fast_mode_tests {
             .expect("cornered fast defers to strict");
         assert_eq!(stats.fallback_samples, 1);
         assert_eq!(stats.newton_samples, 0);
-        assert_eq!(fast, strict); // byte-identical handoff, never weakened
+        assert_eq!(fast.to_bits(), strict.to_bits()); // byte-identical handoff, never weakened
     }
 }

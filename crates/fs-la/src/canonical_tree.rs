@@ -47,11 +47,11 @@
 //! with the precise reason. This is the non-forgeability law doing its job,
 //! not a limitation of the arithmetic.
 use crate::canonical_qr::{
-    CertifiedRankProfile, CanonicalQrOutcome, CanonicalQrPolicy, NoClaimReason, OutcomeAuthority,
-    PivotClass, PolicyError, RankTolerance, ReplayIdentity, CANONICAL_QR_IDENTITY_DOMAIN,
+    CANONICAL_QR_IDENTITY_DOMAIN, CanonicalQrOutcome, CanonicalQrPolicy, CertifiedRankProfile,
+    NoClaimReason, OutcomeAuthority, PivotClass, PolicyError, RankTolerance, ReplayIdentity,
 };
 use crate::factor::qr;
-use fs_blake3::{hash_bytes, ContentHash, DomainHasher};
+use fs_blake3::{ContentHash, DomainHasher, hash_bytes};
 
 /// Checkpoint wire version (bump on any encoding change).
 pub const TREE_CHECKPOINT_VERSION: u32 = 1;
@@ -82,15 +82,22 @@ enum Verdict<'a> {
 impl<'a> CancelScope<'a> {
     /// A scope that never cancels (production default for short runs).
     pub fn never() -> Self {
-        Self { verdict: Verdict::Never }
+        Self {
+            verdict: Verdict::Never,
+        }
     }
 
     /// A scope backed by any mutable closure observing external
     /// cancellation state.
     pub fn from_closure(verdict: &'a mut dyn FnMut() -> bool) -> Self {
-        Self { verdict: Verdict::Closure(verdict) }
+        Self {
+            verdict: Verdict::Closure(verdict),
+        }
     }
 
+    /// Pure observation of the backing verdict (`false` for
+    /// [`CancelScope::never`]); takes `&mut self` only because the closure
+    /// is `FnMut`.
     pub fn cancelled(&mut self) -> bool {
         match &mut self.verdict {
             Verdict::Never => false,
@@ -108,7 +115,6 @@ impl<'a> CancelScope<'a> {
     }
 }
 
-
 /// Sealed mid-tree state: every completed node's R plus the resume cursor.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TreeCheckpoint {
@@ -116,10 +122,13 @@ pub struct TreeCheckpoint {
     /// sealed identity so a checkpoint can never be replayed onto a
     /// different tree.
     leaf_rows: Vec<usize>,
+    /// Column dimension shared by every sealed block R.
     n: usize,
     /// Completed R factors, level-major: level 0 = leaves that finished,
     /// higher levels = combine outputs. `cursor` indexes the next stage.
     levels: Vec<Vec<Vec<f64>>>,
+    /// Index of the next stage to issue: `[0, leaves)` are leaf QRs, then
+    /// combines in breadth order.
     cursor_stage: usize,
 }
 
@@ -175,27 +184,36 @@ impl TreeCheckpoint {
             return Err(PolicyError::UnknownSchemaVersion(ver));
         }
         let n = u64::from_le_bytes(take(bytes, &mut cur, 8)?.try_into().expect("framed")) as usize;
-        let cursor_stage = u64::from_le_bytes(take(bytes, &mut cur, 8)?.try_into().expect("framed")) as usize;
-        let leaf_count = u64::from_le_bytes(take(bytes, &mut cur, 8)?.try_into().expect("framed")) as usize;
+        let cursor_stage =
+            u64::from_le_bytes(take(bytes, &mut cur, 8)?.try_into().expect("framed")) as usize;
+        let leaf_count =
+            u64::from_le_bytes(take(bytes, &mut cur, 8)?.try_into().expect("framed")) as usize;
         // Refuse giant infallible allocations up front.
         if leaf_count > bytes.len() {
             return Err(PolicyError::MalformedEncoding);
         }
         let mut leaf_rows = Vec::with_capacity(leaf_count);
         for _ in 0..leaf_count {
-            leaf_rows.push(u64::from_le_bytes(take(bytes, &mut cur, 8)?.try_into().expect("framed")) as usize);
+            leaf_rows.push(
+                u64::from_le_bytes(take(bytes, &mut cur, 8)?.try_into().expect("framed")) as usize,
+            );
         }
         let mut levels = Vec::new();
         while cur < bytes.len() {
-            let count = u64::from_le_bytes(take(bytes, &mut cur, 8)?.try_into().expect("framed")) as usize;
+            let count =
+                u64::from_le_bytes(take(bytes, &mut cur, 8)?.try_into().expect("framed")) as usize;
             if count > bytes.len() {
                 return Err(PolicyError::MalformedEncoding);
             }
             let mut level = Vec::with_capacity(count);
             for _ in 0..count {
-                let blen =
-                    u64::from_le_bytes(take(bytes, &mut cur, 8)?.try_into().expect("framed")) as usize;
-                let raw = take(bytes, &mut cur, blen.checked_mul(8).ok_or(PolicyError::MalformedEncoding)?)?;
+                let blen = u64::from_le_bytes(take(bytes, &mut cur, 8)?.try_into().expect("framed"))
+                    as usize;
+                let raw = take(
+                    bytes,
+                    &mut cur,
+                    blen.checked_mul(8).ok_or(PolicyError::MalformedEncoding)?,
+                )?;
                 let block: Vec<f64> = raw
                     .chunks_exact(8)
                     .map(|c| f64::from_le_bytes(c.try_into().expect("chunk")))
@@ -204,23 +222,33 @@ impl TreeCheckpoint {
             }
             levels.push(level);
         }
-        let cp = Self { leaf_rows, n, levels, cursor_stage };
+        let cp = Self {
+            leaf_rows,
+            n,
+            levels,
+            cursor_stage,
+        };
         if &cp.seal() != expected_seal {
-            return Err(PolicyError::StaleIdentity { field: "checkpoint_digest" });
+            return Err(PolicyError::StaleIdentity {
+                field: "checkpoint_digest",
+            });
         }
         Ok(cp)
     }
 
+    /// The resume cursor: how many stages were finished when sealed.
     #[must_use]
     pub fn cursor_stage(&self) -> usize {
         self.cursor_stage
     }
 
+    /// The sealed leaf partition (part of the replay identity).
     #[must_use]
     pub fn leaf_rows(&self) -> &[usize] {
         &self.leaf_rows
     }
 
+    /// Completed node R factors, level-major: level 0 = finished leaves.
     #[must_use]
     pub fn levels(&self) -> &[Vec<Vec<f64>>] {
         &self.levels
@@ -232,11 +260,17 @@ impl TreeCheckpoint {
 /// checkpoint (no partial factor publication).
 #[derive(Debug, Clone, PartialEq)]
 pub enum TreeRun {
+    /// Ran every stage; the checkpoint's cursor sits at the total stage
+    /// count and holds the full factor stack.
     Completed(TreeCheckpoint),
+    /// Stopped at a stage boundary with all in-flight work drained and
+    /// sealed; names the boundary that halted it.
     Cancelled(TreeCheckpoint, HaltStage),
 }
 
 impl TreeRun {
+    /// The sealed checkpoint carried by either variant (resume payload in
+    /// both cases).
     #[must_use]
     pub fn checkpoint(&self) -> &TreeCheckpoint {
         match self {
@@ -261,23 +295,43 @@ impl FixedTreeDriver {
     /// nonempty storage refused for zero-entry shapes.
     pub fn admit(a: &[f64], m: usize, n: usize, row_block: usize) -> Result<Self, PolicyError> {
         if m < n {
-            return Err(PolicyError::ShapeMismatch { expected: m, got: n });
+            return Err(PolicyError::ShapeMismatch {
+                expected: m,
+                got: n,
+            });
         }
         let Some(entries) = m.checked_mul(n) else {
-            return Err(PolicyError::ShapeMismatch { expected: usize::MAX, got: a.len() });
+            return Err(PolicyError::ShapeMismatch {
+                expected: usize::MAX,
+                got: a.len(),
+            });
         };
         if a.len() != entries {
-            return Err(PolicyError::ShapeMismatch { expected: entries, got: a.len() });
+            return Err(PolicyError::ShapeMismatch {
+                expected: entries,
+                got: a.len(),
+            });
         }
         if entries == 0 && !a.is_empty() {
-            return Err(PolicyError::ShapeMismatch { expected: 0, got: a.len() });
+            return Err(PolicyError::ShapeMismatch {
+                expected: 0,
+                got: a.len(),
+            });
         }
         if n > 0 && row_block < n {
-            return Err(PolicyError::ShapeMismatch { expected: n, got: row_block });
+            return Err(PolicyError::ShapeMismatch {
+                expected: n,
+                got: row_block,
+            });
         }
         if n == 0 {
             // Empty schedule: single degenerate leaf, no combines.
-            return Ok(Self { m, n, row_block, leaf_rows: Vec::new() });
+            return Ok(Self {
+                m,
+                n,
+                row_block,
+                leaf_rows: Vec::new(),
+            });
         }
         // Leaf partition identical to factor::tsqr_r (absorb short tail).
         let mut bounds: Vec<usize> = (0..m).step_by(row_block).collect();
@@ -289,7 +343,12 @@ impl FixedTreeDriver {
         for w in bounds.windows(2) {
             leaf_rows.push(w[1] - w[0]);
         }
-        Ok(Self { m, n, row_block, leaf_rows })
+        Ok(Self {
+            m,
+            n,
+            row_block,
+            leaf_rows,
+        })
     }
 
     /// The leaf partition (pure function of the admission tuple).
@@ -322,7 +381,12 @@ impl FixedTreeDriver {
         // Re-admit against the live slice (cheap; keeps the driver total).
         let _ = Self::admit(a, self.m, self.n, self.row_block)?;
         if self.leaf_rows.is_empty() {
-            let cp = TreeCheckpoint { leaf_rows: Vec::new(), n: 0, levels: Vec::new(), cursor_stage: 0 };
+            let cp = TreeCheckpoint {
+                leaf_rows: Vec::new(),
+                n: 0,
+                levels: Vec::new(),
+                cursor_stage: 0,
+            };
             return Ok(TreeRun::Completed(cp));
         }
         let n = self.n;
@@ -333,10 +397,14 @@ impl FixedTreeDriver {
             Some((cp, seal)) => {
                 let fresh = cp.seal();
                 if &fresh != seal {
-                    return Err(PolicyError::StaleIdentity { field: "checkpoint_digest" });
+                    return Err(PolicyError::StaleIdentity {
+                        field: "checkpoint_digest",
+                    });
                 }
                 if cp.leaf_rows != self.leaf_rows || cp.n != n {
-                    return Err(PolicyError::StaleIdentity { field: "tree_identity" });
+                    return Err(PolicyError::StaleIdentity {
+                        field: "tree_identity",
+                    });
                 }
                 if cp.cursor_stage > self.total_stages() {
                     return Err(PolicyError::StaleIdentity { field: "cursor" });
@@ -355,8 +423,12 @@ impl FixedTreeDriver {
                 } else {
                     HaltStage::Combine(stage - leaf_total)
                 };
-                let cp =
-                    TreeCheckpoint { leaf_rows: self.leaf_rows.clone(), n, levels, cursor_stage: stage };
+                let cp = TreeCheckpoint {
+                    leaf_rows: self.leaf_rows.clone(),
+                    n,
+                    levels,
+                    cursor_stage: stage,
+                };
                 return Ok(TreeRun::Cancelled(cp, halt));
             }
             if stage < leaf_total {
@@ -411,7 +483,12 @@ impl FixedTreeDriver {
             }
             stage += 1;
         }
-        let cp = TreeCheckpoint { leaf_rows: self.leaf_rows.clone(), n, levels, cursor_stage: stage };
+        let cp = TreeCheckpoint {
+            leaf_rows: self.leaf_rows.clone(),
+            n,
+            levels,
+            cursor_stage: stage,
+        };
         Ok(TreeRun::Completed(cp))
     }
 
@@ -459,6 +536,12 @@ fn apply_flip_law(r: &mut [f64], n: usize) {
 /// verdict).
 const AMBIGUITY_GUARD: f64 = 16.0;
 
+/// Per-diagonal classification of an upper-triangular R under the policy:
+/// reference scale is the largest absolute diagonal floored by
+/// `f64::MIN_POSITIVE`; a pivot above `tolerance.factor()` times that scale
+/// is [`PivotClass::Nonzero`], at or below one-`AMBIGUITY_GUARD`th of the
+/// threshold is [`PivotClass::Zero`], and anything between refuses to
+/// guess ([`PivotClass::Ambiguous`]).
 #[must_use]
 pub fn classify_pivots(r: &[f64], n: usize, tolerance: &RankTolerance) -> Vec<PivotClass> {
     let mut scale = 0.0f64;
@@ -529,7 +612,10 @@ pub fn outcome_from_run(
         OutcomeAuthority::NoClaim(reason),
         provisional.clone(),
     )?;
-    let settled = ReplayIdentity { result_digest: draft.result_digest(), ..provisional };
+    let settled = ReplayIdentity {
+        result_digest: draft.result_digest(),
+        ..provisional
+    };
     CanonicalQrOutcome::checked(
         r.to_vec(),
         n,
@@ -600,7 +686,9 @@ mod tests {
         let reference = crate::factor::tsqr_r(&a, 48, n, 12);
         // Same tree, same primitives: bitwise agreement is the T1 fact.
         assert!(
-            r1.iter().zip(&reference).all(|(x, y)| x.to_bits() == y.to_bits()),
+            r1.iter()
+                .zip(&reference)
+                .all(|(x, y)| x.to_bits() == y.to_bits()),
             "driver diverged from reference TSQR on identical schedule"
         );
     }
@@ -665,9 +753,13 @@ mod tests {
             TreeRun::Completed(_) => panic!("expected cancellation"),
         };
         let seal = cp.seal();
-        let resumed = driver.run(&a, CancelScope::never(), Some((cp, seal))).expect("resumes");
+        let resumed = driver
+            .run(&a, CancelScope::never(), Some((cp, seal)))
+            .expect("resumes");
         let direct = driver.run(&a, CancelScope::never(), None).expect("direct");
-        let rr = FixedTreeDriver::final_r(&resumed).expect("completed").to_vec();
+        let rr = FixedTreeDriver::final_r(&resumed)
+            .expect("completed")
+            .to_vec();
         let rd = FixedTreeDriver::final_r(&direct).expect("completed");
         assert!(rr.iter().zip(rd).all(|(x, y)| x.to_bits() == y.to_bits()));
     }
@@ -697,10 +789,16 @@ mod tests {
         let forged = hash_bytes(b"forged");
         assert!(matches!(
             driver.run(&a, CancelScope::never(), Some((cp.clone(), forged))),
-            Err(PolicyError::StaleIdentity { field: "checkpoint_digest" })
+            Err(PolicyError::StaleIdentity {
+                field: "checkpoint_digest"
+            })
         ));
         // The unmutated checkpoint still resumes cleanly.
-        assert!(driver.run(&a, CancelScope::never(), Some((cp, seal))).is_ok());
+        assert!(
+            driver
+                .run(&a, CancelScope::never(), Some((cp, seal)))
+                .is_ok()
+        );
     }
 
     #[test]
@@ -710,7 +808,10 @@ mod tests {
         let driver = FixedTreeDriver::admit(&a, 48, n, 12).expect("valid");
         let run = driver.run(&a, CancelScope::never(), None).expect("runs");
         let outcome = outcome_from_run(&run, &a, &pol, hash_bytes(b"input")).expect("outcome");
-        assert_eq!(outcome.authority(), OutcomeAuthority::NoClaim(NoClaimReason::RankDeficientCrossScheduleEquality));
+        assert_eq!(
+            outcome.authority(),
+            OutcomeAuthority::NoClaim(NoClaimReason::RankDeficientCrossScheduleEquality)
+        );
         assert_eq!(CANONICAL_QR_THEOREM_VERSION, 1);
         assert_eq!(CANONICAL_QR_SCHEMA_VERSION, 1);
     }

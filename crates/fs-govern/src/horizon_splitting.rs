@@ -44,7 +44,10 @@ pub struct ErrorTerm {
 impl ErrorTerm {
     #[must_use]
     pub fn new(name: &str, share: f64) -> Self {
-        Self { name: name.to_string(), share }
+        Self {
+            name: name.to_string(),
+            share,
+        }
     }
 }
 
@@ -115,7 +118,10 @@ pub fn splitting_verdict(w: &WorkloadBudget) -> Result<SplittingVerdict, BudgetR
     let mut sum = 0.0;
     for t in &w.terms {
         if !(0.0..=1.0).contains(&t.share) {
-            return Err(BudgetRefusal::ShareOutOfRange { term: t.name.clone(), share: t.share });
+            return Err(BudgetRefusal::ShareOutOfRange {
+                term: t.name.clone(),
+                share: t.share,
+            });
         }
         sum += t.share;
     }
@@ -124,7 +130,9 @@ pub fn splitting_verdict(w: &WorkloadBudget) -> Result<SplittingVerdict, BudgetR
     }
     for required in REQUIRED_TERMS {
         if !w.terms.iter().any(|t| t.name == required) {
-            return Err(BudgetRefusal::MissingRequiredTerm { term: required.to_string() });
+            return Err(BudgetRefusal::MissingRequiredTerm {
+                term: required.to_string(),
+            });
         }
     }
     if !w.coupling_stable {
@@ -158,10 +166,14 @@ pub enum PopulationDisposition {
     /// be evaluated. This is today's honest state.
     NoData { reason: String },
     /// Every paying workload passed the gate.
-    Activate { verdicts: Vec<(String, SplittingVerdict)> },
+    Activate {
+        verdicts: Vec<(String, SplittingVerdict)>,
+    },
     /// Bound and measured, but at least one paying workload stayed below
     /// the gate (or refused — refusals are surfaced, never swallowed).
-    InstrumentOnly { verdicts: Vec<(String, SplittingVerdict)> },
+    InstrumentOnly {
+        verdicts: Vec<(String, SplittingVerdict)>,
+    },
 }
 
 /// Aggregate a retained population. Weakest link: ANY refusing budget or

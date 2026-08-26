@@ -39,8 +39,8 @@
 
 pub mod shell;
 pub use shell::{
-    assemble_shell, canonical_church_bell_profile, generate_bell_shell, generate_cylinder_shell,
-    modes_shell, ShellMesh, ShellModel, ShellSupport,
+    ShellMesh, ShellModel, ShellSupport, assemble_shell, canonical_church_bell_profile,
+    generate_bell_shell, generate_cylinder_shell, modes_shell,
 };
 
 use fs_material::elastic::OrthotropicElastic;
@@ -512,7 +512,13 @@ impl PlateChart {
         stiffeners: &[Stiffener],
         opts: &AssemblyOptions,
     ) -> Result<PlateModel, PlateError> {
-        assemble(&self.mesh, &self.section, &self.boundary_nodes, stiffeners, opts)
+        assemble(
+            &self.mesh,
+            &self.section,
+            &self.boundary_nodes,
+            stiffeners,
+            opts,
+        )
     }
 }
 
@@ -537,7 +543,7 @@ pub fn triangulate_soundboard(
     let mut nodes = Vec::with_capacity((nx + 1) * (ny + 1));
     for j in 0..=ny {
         let v = j as f64 / ny as f64; // 0 to 1 across width
-        let eta = 2.0 * v - 1.0;     // -1 to +1
+        let eta = 2.0 * v - 1.0; // -1 to +1
         for i in 0..=nx {
             let s = i as f64 / nx as f64;
             let x = s * length;
@@ -1860,7 +1866,10 @@ mod tests {
         b_rect.sort_unstable();
         b_rect.dedup();
         let b_auto = equiv.boundary_nodes();
-        assert_eq!(b_rect, b_auto, "extracted boundary matches rectangle boundary");
+        assert_eq!(
+            b_rect, b_auto,
+            "extracted boundary matches rectangle boundary"
+        );
 
         let sec = steel_section();
         let model_rect = assemble(
@@ -1887,11 +1896,18 @@ mod tests {
         .expect("assemble equiv");
 
         assert_eq!(model_rect.free, model_equiv.free);
-        let rep_rect = modes(&model_rect, (100.0, 10000.0), &SliceOptions::default()).expect("modes rect");
-        let rep_equiv = modes(&model_equiv, (100.0, 10000.0), &SliceOptions::default()).expect("modes equiv");
+        let rep_rect =
+            modes(&model_rect, (100.0, 10000.0), &SliceOptions::default()).expect("modes rect");
+        let rep_equiv =
+            modes(&model_equiv, (100.0, 10000.0), &SliceOptions::default()).expect("modes equiv");
 
         assert_eq!(rep_rect.modes.len(), rep_equiv.modes.len());
-        for (i, (m1, m2)) in rep_rect.modes.iter().zip(rep_equiv.modes.iter()).enumerate() {
+        for (i, (m1, m2)) in rep_rect
+            .modes
+            .iter()
+            .zip(rep_equiv.modes.iter())
+            .enumerate()
+        {
             assert_eq!(
                 m1.lambda.to_bits(),
                 m2.lambda.to_bits(),
@@ -1906,8 +1922,14 @@ mod tests {
         let mesh = triangulate_soundboard(0.50, 0.38, 0.24, 0.28, 16, 12).expect("soundboard mesh");
         let chart = PlateChart::from_mesh(mesh, sec).expect("soundboard chart");
 
-        assert!(chart.area() > 0.05 && chart.area() < 0.25, "soundboard area in realistic acoustic envelope");
-        assert!(!chart.boundary_nodes.is_empty(), "boundary nodes identified");
+        assert!(
+            chart.area() > 0.05 && chart.area() < 0.25,
+            "soundboard area in realistic acoustic envelope"
+        );
+        assert!(
+            !chart.boundary_nodes.is_empty(),
+            "boundary nodes identified"
+        );
 
         let model = chart
             .assemble(
@@ -2002,4 +2024,3 @@ mod tests {
         assert!(err.to_string().contains("FS-PLATE-BAD-STIFFENER"));
     }
 }
-

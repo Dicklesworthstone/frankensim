@@ -53,9 +53,9 @@ pub use governor::{
     MAX_RETAINED_BYTES_PER_SCOPE, MAX_RETAINED_EVIDENCE_BYTES, MAX_SESSIONS_PER_GOVERNOR,
     MAX_SESSIONS_PER_SCOPE, MeterReceipt, MeterReportId, MeterSnapshot, PauseAcknowledgement,
     PauseRequestId, PressureActionId, PressureReceipt, RecordedSnapshotFreezeReceipt,
-    ResumeActivationId, ResumeActivationReceipt, RetainedEvidence, ScopeFlushPermit,
-    SessionOpenId, SessionOpenReceipt, SnapshotFreezePublicationDisposition,
-    SnapshotFreezeReceiptWrite, StepPhase, SubmissionReceipt, SubmissionRequestId, SubmitOutcome,
+    ResumeActivationId, ResumeActivationReceipt, RetainedEvidence, ScopeFlushPermit, SessionOpenId,
+    SessionOpenReceipt, SnapshotFreezePublicationDisposition, SnapshotFreezeReceiptWrite,
+    StepPhase, SubmissionReceipt, SubmissionRequestId, SubmitOutcome,
 };
 pub use grant::{
     CoreLease, CoreLeaseBook, GrantCapabilityVerifier, IssuerIdentity, IssuerPolicy,
@@ -735,10 +735,9 @@ impl fmt::Display for SessionError {
                 f,
                 "session {id} pause was declared snapshot-freeze-bound; record the predecessor-bound freeze receipt before activating resume"
             ),
-            SessionError::SnapshotFreezeBindingMismatch { id, reason } => write!(
-                f,
-                "session {id} snapshot-freeze binding mismatch: {reason}"
-            ),
+            SessionError::SnapshotFreezeBindingMismatch { id, reason } => {
+                write!(f, "session {id} snapshot-freeze binding mismatch: {reason}")
+            }
             SessionError::PauseAlreadyPending {
                 id,
                 requested_ordinal,

@@ -14,6 +14,11 @@ fn jlog(case: &str, payload: &str) {
     println!("{{\"suite\":\"fs-vpm-filament3d\",\"case\":\"{case}\",{payload}}}");
 }
 
+/// Bitwise f64 equality; both sides are bit-identical by construction.
+fn bits_equal(a: f64, b: f64) -> bool {
+    a.to_bits() == b.to_bits()
+}
+
 fn line(n: usize) -> Vec<[f64; 3]> {
     (0..=n)
         .map(|i| [0.0, i as f64 - n as f64 / 2.0, 0.0])
@@ -36,7 +41,7 @@ fn kelvin_closure_holds_per_cell_every_step() {
     for t in 0..40u64 {
         let g: Vec<f64> = (0..8)
             .map(|s| {
-                let y = (s as f64 - 3.5) / 4.0;
+                let y = (f64::from(s) - 3.5) / 4.0;
                 (1.0 - y * y).max(0.0) * (1.0 + 0.1 * (t as f64 * 0.3).sin())
             })
             .collect();
@@ -45,7 +50,10 @@ fn kelvin_closure_holds_per_cell_every_step() {
         for r in 0..wake.rows.len().saturating_sub(1) {
             for s in 0..8 {
                 let net = wake.cell_net_circulation(r, s).unwrap();
-                assert_eq!(net, 0.0, "Kelvin closure at cell ({r},{s}) tick {t}");
+                assert!(
+                    bits_equal(net, 0.0),
+                    "Kelvin closure at cell ({r},{s}) tick {t}"
+                );
             }
         }
     }
@@ -66,7 +74,7 @@ fn connectivity_and_symmetry_oracles() {
     for _ in 0..16 {
         let g: Vec<f64> = (0..8)
             .map(|s| {
-                let y = (s as f64 - 3.5) / 4.0;
+                let y = (f64::from(s) - 3.5) / 4.0;
                 (1.0 - y * y).max(0.0)
             })
             .collect();
@@ -193,6 +201,6 @@ fn additivity_pin_2d_lane_untouched() {
         VortexParticle::new([0.0, 0.0], 1.5),
         VortexParticle::new([1.0, 0.0], -0.5),
     ];
-    assert_eq!(total_circulation(&ps), 1.0);
+    assert!(bits_equal(total_circulation(&ps), 1.0));
     jlog("additivity", "\"lane_2d\":\"intact\"");
 }

@@ -32,7 +32,7 @@ fn card() -> BowedStringCard {
         tension_n: 60.0,
         linear_density_kg_m: 6.0e-4,
         mode_count: 16,
-        zetas: (0..16).map(|k| 1.0e-3 + 1.5e-4 * k as f64).collect(),
+        zetas: (0..16).map(|k| 1.0e-3 + 1.5e-4 * f64::from(k)).collect(),
         sample_rate_hz: 48_000,
     }
 }
@@ -85,11 +85,11 @@ fn main() -> std::process::ExitCode {
             return std::process::ExitCode::from(2);
         }
     };
-    if let Some(parent) = args.out.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            eprintln!("bowed_sweep: cannot create output dir: {e}");
-            return std::process::ExitCode::from(2);
-        }
+    if let Some(parent) = args.out.parent()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        eprintln!("bowed_sweep: cannot create output dir: {e}");
+        return std::process::ExitCode::from(2);
     }
     let sink_file = match std::fs::File::create(&args.out) {
         Ok(f) => f,
@@ -110,11 +110,11 @@ fn main() -> std::process::ExitCode {
     // Coarse-but-honest grid; the artifact is the regime MAP.
     let stations = [0.08_f64, 0.11];
     let forces: Vec<f64> = if args.steps <= 7_200 {
-        (1..=12).map(|i| 0.6 * i as f64).collect()
+        (1..=12).map(|i| 0.6 * f64::from(i)).collect()
     } else {
-        (1..=23).map(|i| 0.3 * i as f64).collect()
+        (1..=23).map(|i| 0.3 * f64::from(i)).collect()
     };
-    let speeds: Vec<f64> = (2..=12).map(|i| 0.05 * i as f64).collect();
+    let speeds: Vec<f64> = (2..=12).map(|i| 0.05 * f64::from(i)).collect();
 
     let mut rows_emitted = 0_u64;
     // (station index, speed in centi-m/s) -> playable forces in that column.
@@ -124,9 +124,8 @@ fn main() -> std::process::ExitCode {
     for (station_index, &station) in stations.iter().enumerate() {
         for &v_bow in &speeds {
             for &force in &forces {
-                let gesture = match BowGesture::admit(v_bow, force, station) {
-                    Ok(g) => g,
-                    Err(_) => continue,
+                let Ok(gesture) = BowGesture::admit(v_bow, force, station) else {
+                    continue;
                 };
                 let cfg = BowedRunConfig {
                     card: card.clone(),

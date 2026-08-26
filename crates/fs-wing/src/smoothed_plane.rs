@@ -6,7 +6,7 @@
 //!
 //! NEVER inherits 'exact' (claim class is always EstimateOnly / Approximate).
 
-use crate::{refuse, Refusal};
+use crate::{Refusal, refuse};
 
 /// Default maximum allowable terrain slope [rad] (~8.5 degrees).
 pub const DEFAULT_MAX_SLOPE_RAD: f64 = 0.15;
@@ -156,7 +156,9 @@ impl SmoothedTangentPlane {
         let target_nz = raw_terrain_normal[2] * inv_n;
 
         // Calculate slope relative to horizontal plane
-        let slope_rad = (target_nx * target_nx + target_ny * target_ny).sqrt().atan2(target_nz.abs());
+        let slope_rad = (target_nx * target_nx + target_ny * target_ny)
+            .sqrt()
+            .atan2(target_nz.abs());
         if slope_rad > self.config.max_slope_rad {
             return Err(refuse(
                 "smoothed-plane-slope-exceeded",

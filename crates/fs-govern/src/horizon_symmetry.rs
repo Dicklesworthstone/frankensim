@@ -99,7 +99,9 @@ pub fn evaluate_trigger_13b(
     }
     for w in population {
         if w.group_order == 0 {
-            return Err(Trigger13bRefusal::ZeroGroupOrder { workload_id: w.workload_id.clone() });
+            return Err(Trigger13bRefusal::ZeroGroupOrder {
+                workload_id: w.workload_id.clone(),
+            });
         }
         if !w.asymmetry_residual.is_finite() || w.asymmetry_residual < 0.0 {
             return Err(Trigger13bRefusal::InvalidResidual {
@@ -134,7 +136,8 @@ pub fn mint_trigger_13b_receipt(
             total_count: 0,
             prevalence: 0.0,
             receipt_hash: hash,
-            reason: "no representative real-workload symmetry census exists in the program yet".into(),
+            reason: "no representative real-workload symmetry census exists in the program yet"
+                .into(),
         };
     };
 
@@ -155,7 +158,12 @@ pub fn mint_trigger_13b_receipt(
                 total_count: total,
                 prevalence,
                 receipt_hash: hash,
-                reason: format!("symmetry prevalence ({:.1}%, {}/{}) satisfies the 15% activation threshold with full-solve falsifiers", prevalence * 100.0, qualifying, total),
+                reason: format!(
+                    "symmetry prevalence ({:.1}%, {}/{}) satisfies the 15% activation threshold with full-solve falsifiers",
+                    prevalence * 100.0,
+                    qualifying,
+                    total
+                ),
             }
         }
         Ok(Trigger13bVerdict::DetectionOnly) => {
@@ -171,7 +179,12 @@ pub fn mint_trigger_13b_receipt(
                 total_count: total,
                 prevalence,
                 receipt_hash: hash,
-                reason: format!("symmetry prevalence ({:.1}%, {}/{}) sits below the 15% activation threshold; preserving low-cost detection and deferring solver promotion", prevalence * 100.0, qualifying, total),
+                reason: format!(
+                    "symmetry prevalence ({:.1}%, {}/{}) sits below the 15% activation threshold; preserving low-cost detection and deferring solver promotion",
+                    prevalence * 100.0,
+                    qualifying,
+                    total
+                ),
             }
         }
         Err(refusal) => {
@@ -184,7 +197,9 @@ pub fn mint_trigger_13b_receipt(
                 total_count: population.len(),
                 prevalence: 0.0,
                 receipt_hash: hash,
-                reason: format!("inadmissible symmetry population ({refusal:?}); preserving detection only"),
+                reason: format!(
+                    "inadmissible symmetry population ({refusal:?}); preserving detection only"
+                ),
             }
         }
     }

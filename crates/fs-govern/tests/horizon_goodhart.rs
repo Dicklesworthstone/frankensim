@@ -3,9 +3,9 @@
 //! Proposal D Goodhart guard.
 
 use fs_govern::horizon_goodhart::{
-    evaluate_trigger_d, mint_trigger_d_receipt, EndpointStudy, EscalationStep,
-    GoodhartDisposition, OperatorMode, ProposalDPremises, StepStatus, TriggerDReceipt,
-    TriggerDRefusal, TriggerDVerdict,
+    EndpointStudy, EscalationStep, GoodhartDisposition, OperatorMode, ProposalDPremises,
+    StepStatus, TriggerDReceipt, TriggerDRefusal, TriggerDVerdict, evaluate_trigger_d,
+    mint_trigger_d_receipt,
 };
 
 fn all_available_steps() -> [(EscalationStep, StepStatus); 4] {
@@ -23,8 +23,8 @@ fn distinguishable_study() -> EndpointStudy {
         endpoint_sample_count: 100,
         endpoint_catches: 25, // 25% catch rate
         random_sample_count: 100,
-        random_catches: 5,   // 5% catch rate
-        p_value: 0.001,      // p < 0.05
+        random_catches: 5, // 5% catch rate
+        p_value: 0.001,    // p < 0.05
     }
 }
 
@@ -34,8 +34,8 @@ fn indistinguishable_study() -> EndpointStudy {
         endpoint_sample_count: 100,
         endpoint_catches: 5,
         random_sample_count: 100,
-        random_catches: 5,  // Same catch rate
-        p_value: 0.50,      // Not statistically distinguishable
+        random_catches: 5, // Same catch rate
+        p_value: 0.50,     // Not statistically distinguishable
     }
 }
 

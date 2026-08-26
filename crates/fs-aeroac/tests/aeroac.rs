@@ -227,7 +227,7 @@ fn tonal_dipole_is_observer_side_and_nulls_off_axis() {
     let off = tonal_dipole_observer(1.2, 20.0, 0.006, 432.0, 0.4, 343.0, [0.0, 2.0], [0.0, 0.0])
         .expect("off");
     assert!(on.pressure.abs() > 0.0);
-    assert_eq!(off.pressure.abs(), 0.0);
+    assert_eq!(off.pressure.abs().to_bits(), 0.0f64.to_bits());
     assert_eq!(on.scope, SCOPE_STATEMENT);
 }
 

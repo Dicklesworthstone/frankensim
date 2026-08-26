@@ -361,8 +361,11 @@ fn vol_007_transfer_function_laws() {
         transfer.sample(1.0).expect("finite")
     );
     let midpoint = transfer.sample(0.0).expect("finite");
-    assert_eq!(midpoint.extinction, 0.75);
-    assert_eq!(midpoint.source_rgb, [0.5, 0.5, 0.5]);
+    assert_eq!(midpoint.extinction.to_bits(), 0.75_f64.to_bits());
+    assert_eq!(
+        midpoint.source_rgb.map(f64::to_bits),
+        [0.5_f64.to_bits(); 3]
+    );
 
     assert_eq!(
         TransferFunction::new(Vec::new()),

@@ -39,7 +39,7 @@ pub const LANDSCAPE_RASTRIGIN: u32 = 3;
 pub const LANDSCAPE_ELLI: u32 = 4;
 
 /// Kernel id baked into envelopes so the page can prove which build is live.
-pub const KERNEL_VERSION: &str = "fs-cmaes-viz-wasm 0.2.0";
+pub const KERNEL_VERSION: &str = "fs-cmaes-viz-wasm 0.2.1";
 
 /// One visualization run request. Field ranges are refused, never clamped.
 #[derive(Debug, Clone)]
@@ -243,6 +243,16 @@ fn mat_vec(m: &[f64], v: &[f64], n: usize) -> Vec<f64> {
         .collect()
 }
 
+/// Advance the cumulative-path decay and return
+/// `sqrt(1 - (1 - c_s)^(2 * generation))`.
+///
+/// Keeping the power as recurrence state avoids platform `pow` drift while
+/// preserving the canonical CMA-ES generation exponent.
+fn next_hsig_normalizer(decay_power: &mut f64, one_minus_cs_sq: f64) -> f64 {
+    *decay_power *= one_minus_cs_sq;
+    fs_math::det::sqrt(1.0 - *decay_power)
+}
+
 /// Rebuild C from its decomposition: V·Λ·Vᵀ (NOT C^{1/2} — transform_matrix
 /// applies √λ; here the update rule needs the covariance itself back).
 fn rebuild_c(eigvals: &[f64], eigvecs: &[f64], n: usize) -> Vec<f64> {
@@ -380,6 +390,8 @@ pub fn cmaes_run(p: &VizParams) -> Result<VizRun, Refusal> {
     .max(0.0);
     let damps = 1.0 + 2.0 * ((mueff - 1.0) / (nf + 1.0)).sqrt().max(0.0) + cs;
     let chin = nf.sqrt() * (1.0 - 1.0 / (4.0 * nf) + 1.0 / (21.0 * nf * nf));
+    let one_minus_cs_sq = (1.0 - cs) * (1.0 - cs);
+    let mut hsig_decay_power = 1.0;
 
     // Canonical active (negative) covariance weights: the worst-ranked
     // offspring enter the rank-mu sum with negative weights scaled by
@@ -499,7 +511,7 @@ pub fn cmaes_run(p: &VizParams) -> Result<VizRun, Refusal> {
             p_sigma[k] = (1.0 - cs) * p_sigma[k] + ps_coeff * z_mean[k];
         }
         let norm_ps: f64 = p_sigma.iter().map(|v| v * v).sum::<f64>().sqrt();
-        let hsig_denom = (1.0 - (1.0 - cs) * (1.0 - cs) * (g as f64 + 1.0)).sqrt();
+        let hsig_denom = next_hsig_normalizer(&mut hsig_decay_power, one_minus_cs_sq);
         let hsig = if hsig_denom > 0.0 && norm_ps / hsig_denom / chin < 1.4 + 2.0 / (nf + 1.0) {
             1.0
         } else {
@@ -582,10 +594,16 @@ pub fn cmaes_run(p: &VizParams) -> Result<VizRun, Refusal> {
         sigma *= fs_math::det::exp((cs / damps) * (norm_ps / chin - 1.0));
         sigma = sigma.min(10.0).max(1e-10);
 
-        // z in rank order (mirrors sx ordering).
-        let mut sz = vec![0.0f64; lambda * n];
+        // Keep every population stream in the same rank order. Optimization
+        // above retains sampling-order storage because `order` indexes it;
+        // the public snapshot must not expose those mismatched indices.
+        let mut ranked_sx = vec![0.0f64; lambda * n];
+        let mut ranked_sz = vec![0.0f64; lambda * n];
+        let mut ranked_sf = vec![0.0f64; lambda];
         for (rank, &idx) in order.iter().enumerate() {
-            sz[rank * n..(rank + 1) * n].copy_from_slice(&sz_raw[idx * n..(idx + 1) * n]);
+            ranked_sx[rank * n..(rank + 1) * n].copy_from_slice(&sx[idx * n..(idx + 1) * n]);
+            ranked_sz[rank * n..(rank + 1) * n].copy_from_slice(&sz_raw[idx * n..(idx + 1) * n]);
+            ranked_sf[rank] = sf[idx];
         }
 
         generations.push(GenSnapshot {
@@ -600,9 +618,9 @@ pub fn cmaes_run(p: &VizParams) -> Result<VizRun, Refusal> {
             proj_mean: [0.0; 3],
             proj_eigvals: [0.0; 3],
             proj_eigvecs: [0.0; 9],
-            sx,
-            sz,
-            sf,
+            sx: ranked_sx,
+            sz: ranked_sz,
+            sf: ranked_sf,
             se,
             p_sigma: p_sigma.clone(),
             p_c: p_c.clone(),
@@ -1113,6 +1131,70 @@ mod tests {
                 snap.g,
                 snap.cond
             );
+        }
+    }
+
+    #[test]
+    fn g0_hsig_normalizer_uses_exponential_generation_decay() {
+        let cs = 0.3;
+        let one_minus_cs_sq = (1.0 - cs) * (1.0 - cs);
+        let mut decay_power = 1.0;
+
+        for generation in 1..=200 {
+            let observed = next_hsig_normalizer(&mut decay_power, one_minus_cs_sq);
+            let exponent = 2 * i32::try_from(generation).expect("bounded generation");
+            let expected = fs_math::det::sqrt(1.0 - fs_math::det::powi(1.0 - cs, exponent));
+            assert!(
+                observed.is_finite(),
+                "generation {generation} produced {observed}"
+            );
+            assert!(
+                (observed - expected).abs() <= 8.0 * f64::EPSILON,
+                "generation {generation}: observed {observed}, expected {expected}"
+            );
+        }
+
+        // The former linear multiplier is already outside sqrt's domain here.
+        assert!(1.0 - one_minus_cs_sq * 3.0 < 0.0);
+    }
+
+    #[test]
+    fn g0_population_snapshot_streams_are_rank_aligned() {
+        let p = VizParams {
+            generations: 3,
+            ..base_params()
+        };
+        let run = cmaes_run(&p).expect("run");
+
+        for snap in &run.generations {
+            for pair in snap.sf.windows(2) {
+                assert!(
+                    pair[0].total_cmp(&pair[1]).is_le(),
+                    "generation {} fitness stream is not ranked: {:?}",
+                    snap.g,
+                    snap.sf
+                );
+            }
+            for rank in 0..p.lambda {
+                let x = &snap.sx[rank * p.dim..(rank + 1) * p.dim];
+                assert_eq!(
+                    evaluate(p.landscape, x).to_bits(),
+                    snap.sf[rank].to_bits(),
+                    "generation {}, rank {} has mismatched x/f streams",
+                    snap.g,
+                    rank
+                );
+            }
+        }
+
+        // At generation one C = I, so the ranked x and z streams must retain
+        // their pairwise sampling relation after the public reorder.
+        let first = &run.generations[0];
+        for rank in 0..p.lambda {
+            for k in 0..p.dim {
+                let expected = p.x0[k] + p.sigma0 * first.sz[rank * p.dim + k];
+                assert_eq!(first.sx[rank * p.dim + k].to_bits(), expected.to_bits());
+            }
         }
     }
 

@@ -3,9 +3,8 @@
 //! prevalence and isotypic solver gate.
 
 use fs_govern::horizon_symmetry::{
-    evaluate_trigger_13b, mint_trigger_13b_receipt, SymmetryDisposition,
-    Trigger13bReceipt, Trigger13bRefusal, Trigger13bVerdict, WorkloadSymmetryAssessment,
-    SYMMETRY_PREVALENCE_MIN,
+    SYMMETRY_PREVALENCE_MIN, SymmetryDisposition, Trigger13bReceipt, Trigger13bRefusal,
+    Trigger13bVerdict, WorkloadSymmetryAssessment, evaluate_trigger_13b, mint_trigger_13b_receipt,
 };
 
 fn symmetric_workload(id: &str) -> WorkloadSymmetryAssessment {

@@ -113,8 +113,13 @@ fn test_independent_score_reconstruction() {
             thickness_m: 0.0125,
             edge_treatment: SquatDiscEdgeTreatment::Sharp,
         };
-        let resolved = spec.resolve(7850.0, cx).expect("specimen must resolve cleanly");
+        let resolved = spec
+            .resolve(7850.0, cx)
+            .expect("specimen must resolve cleanly");
         let mass = resolved.mass_properties.mass;
-        assert!(mass > 0.40 && mass < 0.46, "Reconstructed mass must fall within expected physical band");
+        assert!(
+            mass > 0.40 && mass < 0.46,
+            "Reconstructed mass must fall within expected physical band"
+        );
     });
 }

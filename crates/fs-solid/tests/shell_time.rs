@@ -1,8 +1,8 @@
 //! Shell transient integration, passive dissipation, and checkpoint battery (bead `frankensim-b8bxd.9.2`).
 
 use fs_solid::shell_time::{
-    step_newmark, DynamicState, ShellTimeCheckpoint, ShellTimeConfig, ShellTimeError,
-    SHELL_TIME_INTEGRATOR_SCHEMA_V1,
+    DynamicState, SHELL_TIME_INTEGRATOR_SCHEMA_V1, ShellTimeCheckpoint, ShellTimeConfig,
+    ShellTimeError, step_newmark,
 };
 
 fn sample_system() -> (usize, Vec<f64>, Vec<f64>, Vec<f64>) {
@@ -43,8 +43,11 @@ fn shell_time_undamped_free_oscillation_conserves_energy() {
     };
 
     let f_zero = vec![0.0; n];
-    let initial_energy = 0.5 * (state.displacement[0] * (stiffness[0] * state.displacement[0] + stiffness[1] * state.displacement[1])
-        + state.displacement[1] * (stiffness[2] * state.displacement[0] + stiffness[3] * state.displacement[1]));
+    let initial_energy = 0.5
+        * (state.displacement[0]
+            * (stiffness[0] * state.displacement[0] + stiffness[1] * state.displacement[1])
+            + state.displacement[1]
+                * (stiffness[2] * state.displacement[0] + stiffness[3] * state.displacement[1]));
     state.strain_energy_j = initial_energy;
     state.total_energy_j = initial_energy;
 
@@ -90,7 +93,8 @@ fn shell_time_passive_damping_dissipates_energy_monotonically() {
             * (state.displacement[0]
                 * (stiffness[0] * state.displacement[0] + stiffness[1] * state.displacement[1])
                 + state.displacement[1]
-                    * (stiffness[2] * state.displacement[0] + stiffness[3] * state.displacement[1]));
+                    * (stiffness[2] * state.displacement[0]
+                        + stiffness[3] * state.displacement[1]));
     state.total_energy_j = initial_energy;
 
     let f_zero = vec![0.0; n];
@@ -98,8 +102,16 @@ fn shell_time_passive_damping_dissipates_energy_monotonically() {
     let mut prev_energy = f64::INFINITY;
 
     for _ in 0..num_steps {
-        state = step_newmark(n, &mass, Some(&damping), &stiffness, &state, &f_zero, &config)
-            .expect("damped step succeeds");
+        state = step_newmark(
+            n,
+            &mass,
+            Some(&damping),
+            &stiffness,
+            &state,
+            &f_zero,
+            &config,
+        )
+        .expect("damped step succeeds");
         if prev_energy.is_finite() {
             assert!(
                 state.total_energy_j <= prev_energy + 1.0e-12,
@@ -146,17 +158,31 @@ fn shell_time_checkpoint_and_resume_are_exact() {
     // Run 50 steps continuously
     let mut state_continuous = initial.clone();
     for _ in 0..50 {
-        state_continuous =
-            step_newmark(n, &mass, Some(&damping), &stiffness, &state_continuous, &f_zero, &config)
-                .expect("continuous step succeeds");
+        state_continuous = step_newmark(
+            n,
+            &mass,
+            Some(&damping),
+            &stiffness,
+            &state_continuous,
+            &f_zero,
+            &config,
+        )
+        .expect("continuous step succeeds");
     }
 
     // Run 25 steps, take checkpoint, resume and run 25 steps
     let mut state_resumed = initial;
     for _ in 0..25 {
-        state_resumed =
-            step_newmark(n, &mass, Some(&damping), &stiffness, &state_resumed, &f_zero, &config)
-                .expect("first half step succeeds");
+        state_resumed = step_newmark(
+            n,
+            &mass,
+            Some(&damping),
+            &stiffness,
+            &state_resumed,
+            &f_zero,
+            &config,
+        )
+        .expect("first half step succeeds");
     }
 
     let checkpoint = ShellTimeCheckpoint::new(&state_resumed);
@@ -164,9 +190,16 @@ fn shell_time_checkpoint_and_resume_are_exact() {
     checkpoint.verify().expect("checkpoint verification passes");
 
     for _ in 0..25 {
-        state_resumed =
-            step_newmark(n, &mass, Some(&damping), &stiffness, &state_resumed, &f_zero, &config)
-                .expect("second half step succeeds");
+        state_resumed = step_newmark(
+            n,
+            &mass,
+            Some(&damping),
+            &stiffness,
+            &state_resumed,
+            &f_zero,
+            &config,
+        )
+        .expect("second half step succeeds");
     }
 
     assert_eq!(state_continuous.step, state_resumed.step);
@@ -194,7 +227,9 @@ fn shell_time_refuses_corrupt_checkpoint() {
 
     // Tamper with displacement
     checkpoint.u[0] = 0.999;
-    let err = checkpoint.verify().expect_err("tampered checkpoint must fail verification");
+    let err = checkpoint
+        .verify()
+        .expect_err("tampered checkpoint must fail verification");
     assert!(matches!(err, ShellTimeError::CorruptCheckpoint { .. }));
 }
 
