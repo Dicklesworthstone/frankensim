@@ -182,9 +182,9 @@ pub fn leased_sample_json(s: &LeasedFieldSample) -> Result<String, Refusal> {
 #[must_use]
 pub fn field_selftest_json() -> String {
     let inner = || -> Result<String, Refusal> {
-        let mut ring = SnapshotRing::new(3, 12, 0x1903, 0xd17)?;
+        let mut ring = SnapshotRing::new(3, SNAPSHOT_LEN, 0x1903, 0xd17)?;
         let payload = [
-            50.0, 3.0, 12.0, 0.8, 0.01, 0.05, 0.02, 0.0, 35.0, 0.0, 0.0, 1.0,
+            50.0, 3.0, 12.0, 0.8, 0.01, 0.05, 0.02, 0.0, 35.0, 0.0, 0.0, 1.0, 0.0, 0.0,
         ];
         ring.publish(100, &payload)?;
         let grid = GridSpec {
