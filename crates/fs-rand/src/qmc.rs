@@ -266,58 +266,7 @@ impl ExactNat {
     /// arithmetic. The score accumulator deliberately retains spare zero
     /// limbs between additions and normalizes once before comparison.
     pub(crate) fn add_mul_factor(&mut self, multiplicand: &Self, factor: u128) {
-        if factor == 0 || multiplicand.limbs.is_empty() {
-            return;
-        }
-
-        let mut factor_limbs = [0_u32; 4];
-        let mut remaining = factor;
-        let mut factor_len = 0_usize;
-        while remaining != 0 {
-            factor_limbs[factor_len] = u32::try_from(remaining & u128::from(u32::MAX))
-                .expect("a masked base-2^32 limb fits u32");
-            remaining >>= Self::LIMB_BITS;
-            factor_len += 1;
-        }
-
-        let needed = multiplicand
-            .limbs
-            .len()
-            .checked_add(factor_len)
-            .and_then(|length| length.checked_add(1))
-            .expect("exact CBC accumulator limb capacity overflow");
-        if self.limbs.len() < needed {
-            self.limbs.resize(needed, 0);
-        }
-
-        for (source_index, &source_limb) in multiplicand.limbs.iter().enumerate() {
-            let mut carry = 0_u64;
-            for (factor_index, &factor_limb) in factor_limbs[..factor_len].iter().enumerate() {
-                let destination = source_index + factor_index;
-                let wide = u64::from(source_limb)
-                    .checked_mul(u64::from(factor_limb))
-                    .and_then(|value| value.checked_add(u64::from(self.limbs[destination])))
-                    .and_then(|value| value.checked_add(carry))
-                    .expect("base-2^32 multiply-add fits u64");
-                self.limbs[destination] = u32::try_from(wide & u64::from(u32::MAX))
-                    .expect("a masked base-2^32 limb fits u32");
-                carry = wide >> Self::LIMB_BITS;
-            }
-
-            let mut destination = source_index + factor_len;
-            while carry != 0 {
-                if destination == self.limbs.len() {
-                    self.limbs.push(0);
-                }
-                let wide = u64::from(self.limbs[destination])
-                    .checked_add(carry)
-                    .expect("base-2^32 carry propagation fits u64");
-                self.limbs[destination] = u32::try_from(wide & u64::from(u32::MAX))
-                    .expect("a masked base-2^32 limb fits u32");
-                carry = wide >> Self::LIMB_BITS;
-                destination += 1;
-            }
-        }
+        self.add_mul_slice_factor(&multiplicand.limbs, factor);
     }
 
     /// Add `src * factor` exactly, where `src` is an admitted scratch copy
@@ -333,53 +282,47 @@ impl ExactNat {
             return;
         }
 
-        let mut factor_limbs = [0_u32; 4];
-        let mut remaining = factor;
-        let mut factor_len = 0_usize;
-        while remaining != 0 {
-            factor_limbs[factor_len] = u32::try_from(remaining & u128::from(u32::MAX))
-                .expect("a masked base-2^32 limb fits u32");
-            remaining >>= Self::LIMB_BITS;
-            factor_len += 1;
-        }
-
+        let (factor_limbs, factor_len) = crate::cbc_limb::factor_limbs_u32(factor);
         let needed = src
             .len()
             .checked_add(factor_len)
             .and_then(|length| length.checked_add(1))
             .expect("exact CBC accumulator limb capacity overflow");
-        if self.limbs.len() < needed {
-            self.limbs.resize(needed, 0);
-        }
 
-        for (source_index, &source_limb) in src.iter().enumerate() {
-            let mut carry = 0_u64;
-            for (factor_index, &factor_limb) in factor_limbs[..factor_len].iter().enumerate() {
-                let destination = source_index + factor_index;
-                let wide = u64::from(source_limb)
-                    .checked_mul(u64::from(factor_limb))
-                    .and_then(|value| value.checked_add(u64::from(self.limbs[destination])))
-                    .and_then(|value| value.checked_add(carry))
-                    .expect("base-2^32 multiply-add fits u64");
-                self.limbs[destination] = u32::try_from(wide & u64::from(u32::MAX))
-                    .expect("a masked base-2^32 limb fits u32");
-                carry = wide >> Self::LIMB_BITS;
-            }
-
-            let mut destination = source_index + factor_len;
-            while carry != 0 {
-                if destination == self.limbs.len() {
-                    self.limbs.push(0);
+        // The kernel is the single arithmetic sequence in the crate: the
+        // monolithic path simply runs it with an unlimited cell budget, so
+        // microstepped execution is byte-identical by construction.
+        let mut cursor = crate::cbc_limb::LimbCursor::begin_add_multiply(
+            src.len(),
+            factor_len,
+            self.limbs.len(),
+            needed,
+            usize::MAX,
+        );
+        loop {
+            match crate::cbc_limb::step_add_multiply(
+                &mut self.limbs,
+                src,
+                &factor_limbs,
+                factor_len,
+                &mut cursor,
+                usize::MAX,
+            ) {
+                crate::cbc_limb::StepOutcome::Advanced => {}
+                crate::cbc_limb::StepOutcome::Complete => break,
+                crate::cbc_limb::StepOutcome::Refused => {
+                    unreachable!("preflight proved every cursor bound");
                 }
-                let wide = u64::from(self.limbs[destination])
-                    .checked_add(carry)
-                    .expect("base-2^32 carry propagation fits u64");
-                self.limbs[destination] = u32::try_from(wide & u64::from(u32::MAX))
-                    .expect("a masked base-2^32 limb fits u32");
-                carry = wide >> Self::LIMB_BITS;
-                destination += 1;
             }
         }
+    }
+    /// Multiply by `factor` exactly, then normalize.
+    pub(crate) fn mul_assign_factor(&mut self, factor: u128) {
+        let multiplicand = Self {
+            limbs: core::mem::take(&mut self.limbs),
+        };
+        self.add_mul_slice_factor(&multiplicand.limbs, factor);
+        self.normalize();
     }
 
     /// Add under an admission-owned requested-capacity ceiling.
@@ -409,16 +352,6 @@ impl ExactNat {
         debug_assert!(self.limbs.len() <= capacity_limbs);
         Ok(())
     }
-
-    pub(crate) fn mul_assign_factor(&mut self, factor: u128) {
-        let multiplicand = Self {
-            limbs: core::mem::take(&mut self.limbs),
-        };
-        self.add_mul_factor(&multiplicand, factor);
-        self.normalize();
-    }
-
-    /// Multiply by `factor` in place using a caller-owned admitted scratch
     /// buffer instead of moving the old allocation aside and building a
     /// fresh replacement.
     ///
@@ -525,6 +458,12 @@ impl ExactNat {
     /// independent checking; callers must normalize first).
     pub(crate) fn limbs(&self) -> &[u32] {
         &self.limbs
+    }
+
+    /// Mutable limb access for the CBC microprogram driver. Callers must
+    /// keep `len() <= capacity` and never reorder limbs.
+    pub(crate) fn limbs_mut(&mut self) -> &mut Vec<u32> {
+        &mut self.limbs
     }
 
     pub(crate) fn capacity_limbs(&self) -> usize {

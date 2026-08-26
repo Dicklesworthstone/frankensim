@@ -19,6 +19,7 @@
 pub mod cbc;
 pub mod cbc_cert;
 pub mod cbc_exec;
+pub mod cbc_limb;
 pub mod dist;
 pub mod philox;
 pub mod qmc;

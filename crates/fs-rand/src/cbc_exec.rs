@@ -30,11 +30,17 @@
 
 use crate::cbc::{CbcAdmission, CbcExecutionMode, CbcExecutionSchedule, CbcProblem};
 use crate::cbc_cert::{ADMISSIBLE_RULE_UNITS, CbcPrefixCertificate, TIE_RULE_LOWEST_CANDIDATE};
+use crate::cbc_limb::LimbCursor;
 use crate::qmc::{ExactNat, Lattice, exact_kernel_numerator, gcd, lattice_residue};
 
 /// Version of the executor semantics (tile classes, boundary names, debit
-/// schedule binding, and cancellation protocol).
-pub const CBC_EXECUTOR_SCHEMA_VERSION: u32 = 2;
+/// schedule binding, and cancellation protocol). v3 adds the limb-block
+/// microstep dimension with persistent limb cursors (bead .20.6).
+pub const CBC_EXECUTOR_SCHEMA_VERSION: u32 = 3;
+
+/// Default mutation cells per tile for the two-argument constructor.
+/// Callers partitioning below this use [`CbcTileShape::with_limbs`].
+pub const DEFAULT_LIMB_BLOCK: u32 = 64;
 
 /// Cancellation verdict returned by a poll.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,24 +70,17 @@ impl<F: FnMut() -> CbcControl> CbcPoll for F {
 pub struct CbcTileShape {
     candidate_block: u32,
     point_block: u32,
+    limb_block: u32,
 }
 
 impl CbcTileShape {
-    /// Validate a tile shape (both blocks must be at least one).
+    /// Validate a tile shape (both outer blocks must be at least one);
+    /// the limb-microstep block defaults to [`DEFAULT_LIMB_BLOCK`].
     ///
     /// # Errors
     /// [`CbcExecError::InvalidTileShape`] when either block is zero.
     pub const fn new(candidate_block: u32, point_block: u32) -> Result<Self, CbcExecError> {
-        if candidate_block == 0 || point_block == 0 {
-            return Err(CbcExecError::InvalidTileShape {
-                candidate_block,
-                point_block,
-            });
-        }
-        Ok(Self {
-            candidate_block,
-            point_block,
-        })
+        Self::with_limbs(candidate_block, point_block, DEFAULT_LIMB_BLOCK)
     }
 
     /// Candidates per tile.
@@ -94,6 +93,40 @@ impl CbcTileShape {
     #[must_use]
     pub const fn point_block(self) -> u32 {
         self.point_block
+    }
+
+    /// Validate a tile shape including the limb-microstep block. All three
+    /// blocks must be at least one; each bounds the work between
+    /// consecutive poll/allowance observations at its own granularity.
+    ///
+    /// # Errors
+    /// [`CbcExecError::InvalidTileShape`] when an outer block is zero or
+    /// [`CbcExecError::InvalidLimbBlock`] when `limb_block` is zero.
+    pub const fn with_limbs(
+        candidate_block: u32,
+        point_block: u32,
+        limb_block: u32,
+    ) -> Result<Self, CbcExecError> {
+        if candidate_block == 0 || point_block == 0 {
+            return Err(CbcExecError::InvalidTileShape {
+                candidate_block,
+                point_block,
+            });
+        }
+        if limb_block == 0 {
+            return Err(CbcExecError::InvalidLimbBlock { limb_block });
+        }
+        Ok(Self {
+            candidate_block,
+            point_block,
+            limb_block,
+        })
+    }
+
+    /// Mutation cells per tile (the microstep budget).
+    #[must_use]
+    pub const fn limb_block(self) -> u32 {
+        self.limb_block
     }
 }
 
@@ -108,6 +141,9 @@ pub enum CbcBoundary {
     CandidateBlock,
     /// Between prefixes (a whole generator component was just committed).
     Prefix,
+    /// Between mutation cells inside one exact operation's microprogram:
+    /// the persisted limb cursor resumes exactly where it paused.
+    LimbBlock,
 }
 
 /// Why a `run` call returned without completing the construction.
@@ -138,6 +174,11 @@ pub enum CbcExecError {
         candidate_block: u32,
         /// Requested points per tile.
         point_block: u32,
+    },
+    /// A limb-microstep block was zero.
+    InvalidLimbBlock {
+        /// Requested mutation cells per tile.
+        limb_block: u32,
     },
     /// The executor's conservative debits exceeded the admitted work bound —
     /// a schedule-conformance invariant breach, never a normal outcome.
@@ -230,6 +271,33 @@ pub struct CbcStorageRefusal {
     pub admitted: usize,
     /// Allocator-reported capacity evidence observed at refusal.
     pub observed: usize,
+}
+
+/// One pending microprogram's logical position. Copy-only: exposing
+/// progress never leaks a mutable internal buffer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CbcMicroCursor {
+    /// Human-readable operation class (charge-class identity).
+    pub op: &'static str,
+    /// Source limb row.
+    pub src_pos: usize,
+    /// Factor limb column.
+    pub factor_pos: usize,
+    /// Destination limb cell.
+    pub dst_pos: usize,
+    /// Live carry register.
+    pub carry: u64,
+}
+
+/// Scan-phase microprogram progress receipt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CbcMicroProgress {
+    /// The candidate currently being scored, when one is open.
+    pub candidate: Option<u32>,
+    /// Candidates charged against the current tile's block budget.
+    pub scan_tile_candidates: u32,
+    /// The partially advanced exact operation, when one is open.
+    pub pending: Option<CbcMicroCursor>,
 }
 
 /// Runtime observation separating the admission's requested product payload
@@ -337,6 +405,14 @@ impl CbcStorageObservation {
 struct ScanAccum {
     score: ExactNat,
     next_point: u32,
+    /// Persisted limb cursor for a partially advanced exact operation.
+    /// `None` between operations; `Some` only while a point visit is
+    /// mid-microprogram (its visit units were already prepaid).
+    micro: Option<LimbCursor>,
+    /// The lattice point whose operation `micro` belongs to. Valid
+    /// whenever `micro` is `Some`; resuming without this would replay a
+    /// cursor against the wrong point (bead .20.6 root cause).
+    micro_point: u32,
 }
 
 /// The resumable phase cursor. `z` only ever grows by whole components.
@@ -347,6 +423,10 @@ enum Phase {
     /// Scanning candidates for the next component.
     Scan {
         candidate: u32,
+        /// Candidates charged against the current tile's block budget.
+        /// Persistent across run() calls so resumed work consumes the
+        /// same observation envelope as fresh work.
+        tile_candidates: u32,
         accum: Option<ScanAccum>,
         best: Option<(ExactNat, u32)>,
         runner_up: Option<(ExactNat, u32)>,
@@ -546,6 +626,42 @@ impl CbcExecutor {
         self.work_spent
     }
 
+    /// Logical microprogram progress: the persisted cursor of any partially
+    /// advanced exact operation plus the scan tile's candidate counter.
+    /// Exposes positions only — never references to internal buffers.
+    #[must_use]
+    pub fn micro_progress(&self) -> Option<CbcMicroProgress> {
+        let Phase::Scan {
+            candidate,
+            tile_candidates,
+            accum,
+            ..
+        } = &self.phase
+        else {
+            return None;
+        };
+        let candidate = u32::try_from(*candidate).ok();
+        let pending = accum
+            .as_ref()
+            .and_then(|running| running.micro)
+            .map(|cursor| CbcMicroCursor {
+                op: match cursor.kind {
+                    crate::cbc_limb::ExactOpKind::ZeroFill => "zero-fill",
+                    crate::cbc_limb::ExactOpKind::AddMultiplyCell => "multiply-add",
+                    crate::cbc_limb::ExactOpKind::AddMultiplyDrain => "carry-drain",
+                },
+                src_pos: cursor.src_pos,
+                factor_pos: cursor.factor_pos,
+                dst_pos: cursor.dst_pos,
+                carry: cursor.carry,
+            });
+        Some(CbcMicroProgress {
+            candidate,
+            scan_tile_candidates: *tile_candidates,
+            pending,
+        })
+    }
+
     /// Observe logical product lengths and allocator-reported capacities.
     /// Only the logical length is constrained by the admission ceiling.
     #[must_use]
@@ -692,6 +808,7 @@ impl CbcExecutor {
         }
         let Phase::Scan {
             candidate,
+            tile_candidates,
             accum,
             best,
             runner_up,
@@ -700,7 +817,6 @@ impl CbcExecutor {
         else {
             unreachable!("every executor phase was handled above");
         };
-        let mut candidates_in_tile = 0_u32;
         loop {
             if *candidate == charges.n {
                 let (winning_score, chosen) = best
@@ -756,7 +872,7 @@ impl CbcExecutor {
             match advance_scan_candidate(
                 candidate,
                 accum,
-                &mut candidates_in_tile,
+                tile_candidates,
                 &self.products,
                 &charges,
                 &mut self.work_spent,
@@ -850,6 +966,7 @@ impl CbcExecutor {
             } else {
                 Phase::Scan {
                     candidate: 1,
+                    tile_candidates: 0,
                     accum: None,
                     best: None,
                     runner_up: None,
@@ -931,6 +1048,7 @@ impl CbcExecutor {
             } else {
                 Phase::Scan {
                     candidate: 1,
+                    tile_candidates: 0,
                     accum: None,
                     best: None,
                     runner_up: None,
@@ -1015,6 +1133,7 @@ struct TileCharges {
     candidate_control_units: u128,
     point_block: u32,
     candidate_block: u32,
+    limb_block: u32,
 }
 
 impl TileCharges {
@@ -1038,6 +1157,7 @@ impl TileCharges {
                 .expect("admission proved candidate charges fit u128"),
             point_block: tile.point_block,
             candidate_block: tile.candidate_block,
+            limb_block: tile.limb_block,
         }
     }
 }
@@ -1083,6 +1203,8 @@ fn advance_scan_candidate(
 ) -> Result<AdvanceScan, CbcExecError> {
     if accum.is_none() {
         if *candidates_in_tile == charges.candidate_block {
+            // Tile envelope consumed; the next tile starts a fresh budget.
+            *candidates_in_tile = 0;
             return Ok(AdvanceScan::Boundary(CbcBoundary::CandidateBlock));
         }
         *candidates_in_tile += 1;
@@ -1106,6 +1228,8 @@ fn advance_scan_candidate(
             *accum = Some(ScanAccum {
                 score,
                 next_point: 0,
+                micro: None,
+                micro_point: 0,
             });
         }
         debit(
@@ -1125,32 +1249,99 @@ fn advance_scan_candidate(
         .next_point
         .saturating_add(charges.point_block)
         .min(n);
-    for point in running.next_point..end {
+    // Resume a paused microprogram at ITS point, not at the block start:
+    // the persisted cursor is meaningless against any other operand.
+    let mut point = if running.micro.is_some() {
+        running.micro_point
+    } else {
+        running.next_point
+    };
+    while point < end {
         let point_index = usize::try_from(point).expect("admission proved point indices fit usize");
-        let residue = lattice_residue(point_index, *candidate, n);
-        running
-            .score
-            .add_mul_factor_with_capacity(
-                &products[point_index],
-                exact_kernel_numerator(n, residue),
-                charges.score_capacity_limbs,
-            )
-            .map_err(|required_limbs| CbcExecError::StorageScheduleOverrun {
-                required_limbs,
-                admitted_limbs: charges.score_capacity_limbs,
-            })?;
-        debit(
-            work_spent,
-            charges.admitted_work_units,
-            remaining,
-            charges.visit_units,
-        )?;
+
+        // Begin (and prepay) the visit when no microprogram is in flight;
+        // resume a persisted cursor without re-debiting.
+        if running.micro.is_none() {
+            let src = products[point_index].limbs();
+            let factor = exact_kernel_numerator(n, residue_of(point_index, *candidate, n));
+            let (factor_words, factor_len) = crate::cbc_limb::factor_limbs_u32(factor);
+            let required = src
+                .len()
+                .checked_add(factor_len)
+                .and_then(|length| length.checked_add(1))
+                .expect("exact CBC required limb count overflow");
+            if required
+                > charges
+                    .score_capacity_limbs
+                    .max(running.score.limbs().len())
+            {
+                return Err(CbcExecError::StorageScheduleOverrun {
+                    required_limbs: required,
+                    admitted_limbs: charges.score_capacity_limbs,
+                });
+            }
+            debit(
+                work_spent,
+                charges.admitted_work_units,
+                remaining,
+                charges.visit_units,
+            )?;
+            running.micro = Some(crate::cbc_limb::LimbCursor::begin_add_multiply(
+                src.len(),
+                factor_len,
+                running.score.limbs().len(),
+                required,
+                running.score.capacity_limbs(),
+            ));
+            running.micro_point = point;
+        }
+
+        // Drive up to limb_block mutation cells of the persisted microprogram.
+        let src = products[point_index].limbs();
+        let factor = exact_kernel_numerator(n, residue_of(point_index, *candidate, n));
+        let (factor_words, factor_len) = crate::cbc_limb::factor_limbs_u32(factor);
+        let mut cursor = running.micro.expect("cursor installed above");
+        let outcome = crate::cbc_limb::step_add_multiply(
+            running.score.limbs_mut(),
+            src,
+            &factor_words,
+            factor_len,
+            &mut cursor,
+            usize::try_from(charges.limb_block).expect("admission proved blocks fit usize"),
+        );
+        match outcome {
+            crate::cbc_limb::StepOutcome::Refused => {
+                // Carry propagation hit the admitted capacity ceiling:
+                // fail closed with the score-class overrun identity.
+                return Err(CbcExecError::StorageScheduleOverrun {
+                    required_limbs: cursor.limit + 1,
+                    admitted_limbs: charges.score_capacity_limbs,
+                });
+            }
+            crate::cbc_limb::StepOutcome::Advanced => {
+                // Budget exhausted mid-operation: persist cursor AND its
+                // owning point, then observe a poll.
+                running.micro = Some(cursor);
+                running.micro_point = point;
+                return Ok(AdvanceScan::Boundary(CbcBoundary::LimbBlock));
+            }
+            crate::cbc_limb::StepOutcome::Complete => {
+                running.micro = None;
+                point += 1;
+            }
+        }
     }
     running.next_point = end;
     if end < n {
         return Ok(AdvanceScan::Boundary(CbcBoundary::PointBlock));
     }
     Ok(AdvanceScan::CandidateFinished)
+}
+
+/// Residue helper mirroring the historical call form so the micro driver
+/// stays readable; pure function of the same sealed inputs.
+fn residue_of(point_index: usize, candidate: u32, n: u32) -> u32 {
+    lattice_residue(point_index, candidate, n)
 }
 
 /// Compare a finished candidate score against the committed best and
@@ -1320,6 +1511,7 @@ mod debit_schedule_tests {
     ) -> Phase {
         Phase::Scan {
             candidate,
+            tile_candidates: 0,
             accum,
             best,
             runner_up: None,
@@ -1364,6 +1556,8 @@ mod debit_schedule_tests {
             Some(ScanAccum {
                 score,
                 next_point: 0,
+                micro: None,
+                micro_point: 0,
             }),
             None,
             Vec::new(),

@@ -304,5 +304,5 @@ fn cbx_007_structural_refusals_are_typed() {
         "running a completed executor must refuse"
     );
 
-    assert_eq!(CBC_EXECUTOR_SCHEMA_VERSION, 2);
+    assert_eq!(CBC_EXECUTOR_SCHEMA_VERSION, 3);
 }

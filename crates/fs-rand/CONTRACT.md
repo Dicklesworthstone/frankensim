@@ -157,6 +157,14 @@ distributions (plan §6.7; P2's seed pillar). Layer: L1.
   a product allocation; on any refusal the source bytes are untouched.
   Requested logical capacity remains the admitted bound; observed
   allocator capacity is evidence only.
+- CBC exact arithmetic is a resumable microprogram (`cbc_limb`): every
+  mutation cell carries a versioned [`LimbCursor`] persisting source,
+  factor, destination, and carry state, so tile shapes admit a limb block
+  and poll spacing is bounded by admitted cells rather than operand width.
+  Cell sequences are partition-invariant: any candidate/point/limb
+  slicing yields identical arithmetic bytes, work totals, and
+  certificates. A paused cursor refuses tampered or out-of-bounds state
+  without mutating its destination.
 
 ## Error model
 Invalid distribution parameters panic as programmer errors (`next_below(0)`,
