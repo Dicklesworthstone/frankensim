@@ -21,6 +21,7 @@
 //! - `check-manifest-fixture` — admit only declared new-domain Cargo edges and an acyclic same-layer order.
 //! - `check-constellation-assessment` — keep the measured seven-sibling trust cone current.
 //! - `check-constellation-drift` — classify each sibling against its pin; red only on wandered checkouts (bead es6pt).
+//! - `check-oracle-determinism` — bit-level cross-environment bore-oracle matrix; flips and same-ISA texture drift are red (bead uf7cw).
 //! - `check-source-manifest` — keep the structural trust-cone source inventory and SPDX rendering current.
 //! - `check-critical-path` — bind maturity capabilities and integration seams to the live Beads graph.
 //! - `check-moonshots` — enforce the `[M]` WIP cap, displacement rule, and path disjointness.
@@ -64,6 +65,7 @@ mod manifest_fixture;
 mod matdb_pack;
 mod maturity;
 mod moonshot_policy;
+mod oracle_determinism;
 mod portfolio_candidate;
 mod program_metrics;
 mod schemas;
@@ -8625,6 +8627,11 @@ fn main() -> ExitCode {
             policy_notes = report.notes;
             (report.violations, vec![constellation_drift::CHECK])
         }
+        "check-oracle-determinism" => {
+            let report = oracle_determinism::check(&root);
+            policy_notes = report.notes;
+            (report.violations, vec![oracle_determinism::CHECK])
+        }
         "check-claim-integrity" => {
             let report = claim_integrity_gate::check_claim_integrity_gate(&root);
             policy_notes = report.decisions;
@@ -8800,7 +8807,7 @@ fn main() -> ExitCode {
                 "unknown command {other:?}; use check-layers|check-deps|check-contracts|\
                  check-unsafe|check-powi|check-obs-events|check-casual-print|check-terminology|\
                  check-goldens|check-docs|check-claims|check-closures|check-maturity|check-instrument-claims|check-critical-path|check-moonshots|check-claim-integrity|check-schemas|check-consolidation|check-program-metrics|\
-                 check-identities|check-state-charters|check-manifest-fixture|check-constellation-assessment|check-constellation-drift|check-source-manifest|check-vv-scorecard|check-color-admission|check-no-promotion|check-citable-producers|\
+                 check-identities|check-state-charters|check-manifest-fixture|check-constellation-assessment|check-constellation-drift|check-oracle-determinism|check-source-manifest|check-vv-scorecard|check-color-admission|check-no-promotion|check-citable-producers|\
                  check-all|generate-identities|generate-constellation-assessment|generate-source-manifest|generate-vv-scorecard|generate-program-metrics|generate-spine-metrics|generate-tropical-path|generate-suite-receipt|record-program-metrics|compatibility-report|lock-constellation|\
                  check-constellation|check-spine-metrics|check-tropical-path|check-suite-receipt|depgraph-receipt|matdb-pack"
             );
