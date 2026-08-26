@@ -235,7 +235,7 @@ impl TileKernel for ArenaAllocationRefusal {
 }
 
 // Bead frankensim-68v4f: zero/one/many sweep kept inline.
-    #[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines)]
 #[test]
 fn success_zero_one_many_and_deterministic_identity_are_fully_accounted() {
     for (sequence, workers, tiles) in [(0, 1, 0), (1, 4, 1), (2, 4, 257)] {

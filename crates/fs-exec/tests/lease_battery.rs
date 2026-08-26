@@ -124,7 +124,8 @@ fn exact_accounting_is_deterministic_and_returns_to_zero() {
     assert_eq!(a.used_bytes, 0, "every charge is released by run end");
     assert_eq!(a.refusals, 0);
     assert_eq!(
-        u128::from(a.peak_bytes), a.requested_bytes,
+        u128::from(a.peak_bytes),
+        a.requested_bytes,
         "one root charge, no churn"
     );
 }

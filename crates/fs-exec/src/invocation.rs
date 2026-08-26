@@ -7,9 +7,9 @@
 
 use crate::{CancelGate, Cx};
 use fs_alloc::{LeaseCharge, OperationMemoryLease};
-use fs_blake3::{ContentHash, DomainHasher};
 #[cfg(test)]
 use fs_blake3::hash_domain;
+use fs_blake3::{ContentHash, DomainHasher};
 
 pub use asupersync::time::{TimeSource, VirtualClock, WallClock};
 pub use asupersync::types::Time;
@@ -1762,7 +1762,7 @@ impl<'clock> InvocationBudget<'clock> {
         })
     }
 
-#[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines)]
     fn open_child(
         &mut self,
         parent: Option<usize>,
@@ -2933,7 +2933,8 @@ impl ChildFinalizer<'_, '_> {
             .finalization_remaining
             .work
             .get()
-            .checked_sub(amount.get()) else {
+            .checked_sub(amount.get())
+        else {
             let error = InvocationError::ResourceExceeded {
                 resource: "finalization-work",
                 requested: amount.get(),
@@ -3142,7 +3143,8 @@ impl ChildFinalizer<'_, '_> {
             .remaining
             .output
             .get()
-            .checked_sub(declared_bytes.get()) else {
+            .checked_sub(declared_bytes.get())
+        else {
             let error = InvocationError::ResourceExceeded {
                 resource: "output-bytes",
                 requested: u128::from(declared_bytes.get()),
@@ -3170,7 +3172,8 @@ impl ChildFinalizer<'_, '_> {
             .direct_consumed
             .output
             .get()
-            .checked_add(declared_bytes.get()) else {
+            .checked_add(declared_bytes.get())
+        else {
             let error = InvocationError::ArithmeticOverflow {
                 resource: "output-bytes",
             };
@@ -4430,7 +4433,9 @@ fn verify_failure_propagation(
         if failure_requires_finalizable_origin(failure)
             && origin.is_some_and(|child| child.finalization.is_none())
         {
-            return Err(invocation_semantic_error("finalization-failure-origin-kind"));
+            return Err(invocation_semantic_error(
+                "finalization-failure-origin-kind",
+            ));
         }
         if let InvocationError::TransactionalOutputScopeViolation { ancestor, .. } = failure {
             let ancestor_index = topology
@@ -5654,7 +5659,7 @@ mod tests {
     }
 
     #[test]
-#[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines)]
     fn semantic_verifier_rejects_rehashed_deadline_and_first_fault_forgery() {
         let clock = VirtualClock::new();
         let (id, accuracy, capability) = identities();
@@ -5978,7 +5983,7 @@ mod tests {
     }
 
     #[test]
-#[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines)]
     fn finalizer_mutants_cannot_cross_report_child_or_invocation_boundaries() {
         let clock = VirtualClock::new();
         let scientific = InvocationResources::new(

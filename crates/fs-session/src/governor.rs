@@ -13,7 +13,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 pub(crate) mod recovery;
+pub(crate) mod freeze_receipt;
 
+pub use freeze_receipt::{
+    RecordedSnapshotFreezeReceipt, SnapshotFreezePublicationDisposition,
+    SnapshotFreezeReceiptWrite,
+};
 /// Hard-bound ratio: past 6/5 of a grant the session pauses. Float and exact
 /// integer resource paths derive from this one policy definition.
 const HARD_FACTOR_NUMERATOR: u32 = 6;
@@ -4017,6 +4022,10 @@ struct Inner {
     completed_pause: BTreeMap<u64, CompletedPause>,
     pause_acknowledgements: BTreeMap<PauseRequestId, PauseAcknowledgementReplay>,
     resume_activations: BTreeMap<ResumeActivationId, ResumeActivationReceipt>,
+    /// Snapshot-freeze gates armed per session (bead sj31i.52.5.4.1):
+    /// a session whose completed pause was declared snapshot-freeze-bound
+    /// may not activate resume until its predecessor-bound receipt exists.
+    snapshot_freeze_gates: BTreeMap<u64, freeze_receipt::SnapshotFreezeGateState>,
     meters: BTreeMap<u64, SessionMeters>,
     meter_reports: BTreeMap<MeterReportId, MeterReceipt>,
     meter_report_ids: BTreeMap<u64, BTreeSet<MeterReportId>>,
@@ -6528,6 +6537,14 @@ impl Governor {
         match g.gate_phases.get(&session).copied() {
             Some(GatePhase::ReadyToResume) => {
                 self.ensure_durable_recovery_complete(&g)?;
+                if let Some(freeze_gate) = g.snapshot_freeze_gates.get(&session) {
+                    if !matches!(
+                        freeze_gate,
+                        freeze_receipt::SnapshotFreezeGateState::Satisfied { .. }
+                    ) {
+                        return Err(SessionError::SnapshotFreezeReceiptRequired { id: session });
+                    }
+                }
                 if current_gate.is_requested() {
                     return Err(SessionError::ResumeGateAlreadyRequested {
                         id: session,
@@ -6557,6 +6574,185 @@ impl Governor {
             },
             None => Err(SessionError::UngatedSession { id: session }),
         }
+    }
+
+    /// Arm the snapshot-freeze requirement for THIS completed pause (bead
+    /// sj31i.52.5.4.1). After arming, [`Self::activate_resume`] refuses with
+    /// [`SessionError::SnapshotFreezeReceiptRequired`] until a
+    /// predecessor-bound receipt recorded via
+    /// [`Self::record_snapshot_freeze_receipt`] covers exactly this request.
+    ///
+    /// # Errors
+    /// Foreign/stale acknowledgements and conflicting re-arms fail closed.
+    pub fn require_snapshot_freeze(
+        &self,
+        acknowledgement: &PauseAcknowledgement,
+    ) -> Result<(), SessionError> {
+        let request_id = acknowledgement.request_id;
+        if request_id.governor_id != self.id {
+            return Err(SessionError::ResumeAcknowledgementMismatch {
+                id: request_id.session.0,
+            });
+        }
+        let session = request_id.session.0;
+        let mut g = self.inner.lock().expect("governor lock");
+        let completed = g
+            .completed_pause
+            .get(&session)
+            .copied()
+            .ok_or(SessionError::ResumeAcknowledgementMismatch { id: session })?;
+        if completed.request_id != request_id
+            || completed.acknowledgement_hash != acknowledgement.content_hash
+        {
+            return Err(SessionError::ResumeAcknowledgementMismatch { id: session });
+        }
+        let entry = g
+            .snapshot_freeze_gates
+            .entry(session)
+            .or_insert(freeze_receipt::SnapshotFreezeGateState::AwaitReceipt {
+                request_ordinal: completed.completion_ordinal,
+                acknowledgement_hash: acknowledgement.content_hash,
+            });
+        match entry {
+            freeze_receipt::SnapshotFreezeGateState::AwaitReceipt {
+                request_ordinal,
+                acknowledgement_hash,
+            } => {
+                if *request_ordinal != completed.completion_ordinal
+                    || *acknowledgement_hash != acknowledgement.content_hash
+                {
+                    return Err(SessionError::SnapshotFreezeBindingMismatch {
+                        id: session,
+                        reason: "gate is armed for a different completed pause",
+                    });
+                }
+                Ok(())
+            }
+            freeze_receipt::SnapshotFreezeGateState::Satisfied { .. } => Ok(()),
+        }
+    }
+
+    /// Validate an fs-exec committed freeze receipt against THIS governor's
+    /// completed pause, then publish it as the predecessor-bound terminal
+    /// row that unblocks [`Self::activate_resume`]. Idempotent: republishing
+    /// the identical receipt replays without side effects.
+    ///
+    /// # Errors
+    /// Unknown sessions, foreign acknowledgements, unarmed or mismatched
+    /// gates, binding mismatches, and every ledger refusal fail closed.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_snapshot_freeze_receipt(
+        &self,
+        ledger: &fs_ledger::Ledger,
+        logical_time: i64,
+        acknowledgement: &PauseAcknowledgement,
+        freeze: &fs_exec::freeze::SnapshotFreezeReceipt,
+    ) -> Result<freeze_receipt::SnapshotFreezeReceiptWrite, SessionError> {
+        let request_id = acknowledgement.request_id;
+        if request_id.governor_id != self.id {
+            return Err(SessionError::ResumeAcknowledgementMismatch {
+                id: request_id.session.0,
+            });
+        }
+        let session = request_id.session.0;
+        let mut g = self.inner.lock().expect("governor lock");
+        if !g.tokens.contains_key(&session) {
+            return Err(SessionError::UnknownSession { id: session });
+        }
+        let completed = g
+            .completed_pause
+            .get(&session)
+            .copied()
+            .ok_or(SessionError::ResumeAcknowledgementMismatch { id: session })?;
+        if completed.request_id != request_id
+            || completed.acknowledgement_hash != acknowledgement.content_hash
+        {
+            return Err(SessionError::ResumeAcknowledgementMismatch { id: session });
+        }
+        match g.snapshot_freeze_gates.get(&session) {
+            Some(freeze_receipt::SnapshotFreezeGateState::Satisfied { .. }) => {}
+            Some(freeze_receipt::SnapshotFreezeGateState::AwaitReceipt {
+                request_ordinal,
+                acknowledgement_hash,
+            }) => {
+                if *request_ordinal != completed.completion_ordinal
+                    || *acknowledgement_hash != acknowledgement.content_hash
+                {
+                    return Err(SessionError::SnapshotFreezeBindingMismatch {
+                        id: session,
+                        reason: "gate is armed for a different completed pause",
+                    });
+                }
+            }
+            None => {
+                return Err(SessionError::SnapshotFreezeBindingMismatch {
+                    id: session,
+                    reason: "no snapshot-freeze gate was armed for this pause",
+                });
+            }
+        }
+        freeze_receipt::validate_binding(
+            self.id,
+            session,
+            freeze,
+        )
+        .map_err(|(_field, error)| error)?;
+        let ledger_scope = g
+            .tokens
+            .get(&session)
+            .expect("known session checked above")
+            .ledger_scope
+            .clone();
+        let current_generation = g
+            .gate_generations
+            .get(&session)
+            .copied()
+            .ok_or(SessionError::UngatedSession { id: session })?;
+        let session_open_hash = Self::current_open_identity(&g, request_id.session)?;
+        drop(g);
+        let write = freeze_receipt::publish_freeze_terminal(
+            freeze_receipt::FreezePublishInputs {
+                governor_hash: self.identity(),
+                session_open_hash,
+                session,
+                ledger_scope: &ledger_scope,
+                generation: current_generation,
+                logical_time,
+                request_ordinal: completed.completion_ordinal,
+                acknowledgement_hash: acknowledgement.content_hash,
+                freeze,
+            },
+            ledger,
+        )?;
+        let mut g = self.inner.lock().expect("governor lock");
+        // The gate may not have silently moved while the lock was released;
+        // refuse to satisfy a newer arm with this older publication.
+        let gate_now = g.snapshot_freeze_gates.get(&session);
+        let still_bound = match gate_now {
+            Some(freeze_receipt::SnapshotFreezeGateState::AwaitReceipt {
+                request_ordinal,
+                acknowledgement_hash,
+            }) => {
+                *request_ordinal == completed.completion_ordinal
+                    && *acknowledgement_hash == acknowledgement.content_hash
+            }
+            Some(freeze_receipt::SnapshotFreezeGateState::Satisfied { .. }) => true,
+            None => false,
+        };
+        if !still_bound {
+            return Err(SessionError::SnapshotFreezeBindingMismatch {
+                id: session,
+                reason: "snapshot-freeze gate moved while the receipt published",
+            });
+        }
+        if let Some(state @ freeze_receipt::SnapshotFreezeGateState::AwaitReceipt { .. }) =
+            g.snapshot_freeze_gates.get_mut(&session)
+        {
+            *state = freeze_receipt::SnapshotFreezeGateState::Satisfied {
+                receipt: write.recorded.clone(),
+            };
+        }
+        Ok(write)
     }
 
     /// Whether a pause request is outstanding (requested, not yet

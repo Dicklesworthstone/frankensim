@@ -60,9 +60,9 @@ pub use cx::{
 };
 pub use fault::{FaultPlanError, TILE_FAULT_PLAN_VERSION, TileFaultPlan};
 pub use freeze::{
-    CommittedFreeze, FreezeBoundaryLabels, FreezeDisposition, FreezeNonce, FreezeOwnerBinding,
-    FreezeResumeInputs, FREEZE_COMMITMENT_IDENTITY_DOMAIN, FREEZE_NONCE_IDENTITY_DOMAIN,
-    FREEZE_RECEIPT_IDENTITY_DOMAIN, FREEZE_REGISTRY_IDENTITY_DOMAIN, SnapshotFreezeError,
+    CommittedFreeze, FREEZE_COMMITMENT_IDENTITY_DOMAIN, FREEZE_NONCE_IDENTITY_DOMAIN,
+    FREEZE_RECEIPT_IDENTITY_DOMAIN, FREEZE_REGISTRY_IDENTITY_DOMAIN, FreezeBoundaryLabels,
+    FreezeDisposition, FreezeNonce, FreezeOwnerBinding, FreezeResumeInputs, SnapshotFreezeError,
     SnapshotFreezePermit, SnapshotFreezeReceipt, SnapshotFreezeRegistry, SnapshotSealError,
 };
 pub use invocation::{

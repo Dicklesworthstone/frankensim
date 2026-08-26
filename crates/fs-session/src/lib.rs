@@ -52,9 +52,10 @@ pub use governor::{
     MAX_PRESSURE_ACTIONS_PER_SESSION, MAX_RETAINED_BYTES_PER_GOVERNOR,
     MAX_RETAINED_BYTES_PER_SCOPE, MAX_RETAINED_EVIDENCE_BYTES, MAX_SESSIONS_PER_GOVERNOR,
     MAX_SESSIONS_PER_SCOPE, MeterReceipt, MeterReportId, MeterSnapshot, PauseAcknowledgement,
-    PauseRequestId, PressureActionId, PressureReceipt, ResumeActivationId, ResumeActivationReceipt,
-    RetainedEvidence, ScopeFlushPermit, SessionOpenId, SessionOpenReceipt, StepPhase,
-    SubmissionReceipt, SubmissionRequestId, SubmitOutcome,
+    PauseRequestId, PressureActionId, PressureReceipt, RecordedSnapshotFreezeReceipt,
+    ResumeActivationId, ResumeActivationReceipt, RetainedEvidence, ScopeFlushPermit,
+    SessionOpenId, SessionOpenReceipt, SnapshotFreezePublicationDisposition,
+    SnapshotFreezeReceiptWrite, StepPhase, SubmissionReceipt, SubmissionRequestId, SubmitOutcome,
 };
 pub use grant::{
     CoreLease, CoreLeaseBook, GrantCapabilityVerifier, IssuerIdentity, IssuerPolicy,
@@ -449,6 +450,20 @@ pub enum SessionError {
         /// Exact number of admitted submissions still executing.
         pending_submissions: usize,
     },
+    /// Resume activation was refused because the pause was declared
+    /// snapshot-freeze-bound and no predecessor-bound receipt is recorded.
+    SnapshotFreezeReceiptRequired {
+        /// The session id.
+        id: u64,
+    },
+    /// A snapshot-freeze receipt or gate does not bind to this governor's
+    /// completed pause.
+    SnapshotFreezeBindingMismatch {
+        /// The session id.
+        id: u64,
+        /// Stable refusal reason.
+        reason: &'static str,
+    },
     /// New work was offered after the current cancellation gate entered its
     /// draining state but before a replacement generation was activated.
     SessionGateDraining {
@@ -715,6 +730,14 @@ impl fmt::Display for SessionError {
             SessionError::ResumeGateAlreadyRequested { id, generation } => write!(
                 f,
                 "session {id} resume gate generation {generation} was requested before activation; refusing to start work on a cancelled generation"
+            ),
+            SessionError::SnapshotFreezeReceiptRequired { id } => write!(
+                f,
+                "session {id} pause was declared snapshot-freeze-bound; record the predecessor-bound freeze receipt before activating resume"
+            ),
+            SessionError::SnapshotFreezeBindingMismatch { id, reason } => write!(
+                f,
+                "session {id} snapshot-freeze binding mismatch: {reason}"
             ),
             SessionError::PauseAlreadyPending {
                 id,

@@ -55,11 +55,13 @@
 //!
 //! Forged construction and duplication are compile errors:
 //!
-//! ```compile_fail,E0277
+//! ```compile_fail,E0599
 //! use fs_exec::freeze::SnapshotFreezePermit;
 //!
-//! fn duplicate<S>(permit: &SnapshotFreezePermit<'_, S>) -> SnapshotFreezePermit<'_, S> {
-//!     permit.clone() // ERROR: `Clone` is deliberately not implemented.
+//! fn duplicate<'a, S>(
+//!     permit: &'a SnapshotFreezePermit<'a, S>,
+//! ) -> SnapshotFreezePermit<'a, S> {
+//!     (*permit).clone() // ERROR: the permit type is deliberately not `Clone`.
 //! }
 //! ```
 //!
@@ -68,7 +70,11 @@
 //!
 //! // Private fields refuse struct literals outside the minting path.
 //! let forged: SnapshotFreezePermit<'_, u8> = SnapshotFreezePermit {
+//!     registry: unimplemented!(),
 //!     core: unimplemented!(),
+//!     payload: unimplemented!(),
+//!     state: unimplemented!(),
+//!     limits_used: unimplemented!(),
 //! };
 //! ```
 
@@ -92,8 +98,7 @@ pub const FREEZE_NONCE_IDENTITY_DOMAIN: &str = "org.frankensim.fs-exec.solver-fr
 pub const FREEZE_COMMITMENT_IDENTITY_DOMAIN: &str =
     "org.frankensim.fs-exec.solver-freeze-commitment.v2";
 /// Identity domain of committed freeze receipts.
-pub const FREEZE_RECEIPT_IDENTITY_DOMAIN: &str =
-    "org.frankensim.fs-exec.solver-freeze-receipt.v2";
+pub const FREEZE_RECEIPT_IDENTITY_DOMAIN: &str = "org.frankensim.fs-exec.solver-freeze-receipt.v2";
 
 /// Owner/session/solver-instance binding declared by the session owner.
 ///
@@ -299,7 +304,10 @@ impl SnapshotFreezeRegistry {
 
     fn poison(&self, reason: FreezePoisonReason) {
         if let Ok(mut slot) = self.slot.lock() {
-            if !matches!(slot.phase, FreezePhase::Committed | FreezePhase::Poisoned { .. }) {
+            if !matches!(
+                slot.phase,
+                FreezePhase::Committed | FreezePhase::Poisoned { .. }
+            ) {
                 slot.phase = FreezePhase::Poisoned { reason };
             }
         }
@@ -357,7 +365,6 @@ impl SnapshotFreezeRegistry {
         }
     }
 }
-
 
 /// Open transaction after [`SnapshotFreezeRegistry::begin_freeze`].
 ///
@@ -424,17 +431,14 @@ impl<'reg> SnapshotFreezeRequest<'reg> {
         };
         // Encode exactly once; the payload lives inside the permit from now
         // on, so sealing can never observe a mutated state.
-        let payload = match snapshot_v2::encode_state_payload::<S>(
-            limits,
-            encode_cancellation,
-            &state,
-        ) {
-            Ok(payload) => payload,
-            Err(error) => {
-                self.registry.poison(FreezePoisonReason::CaptureRefused);
-                return Err(SnapshotFreezeError::Encode(error));
-            }
-        };
+        let payload =
+            match snapshot_v2::encode_state_payload::<S>(limits, encode_cancellation, &state) {
+                Ok(payload) => payload,
+                Err(error) => {
+                    self.registry.poison(FreezePoisonReason::CaptureRefused);
+                    return Err(SnapshotFreezeError::Encode(error));
+                }
+            };
         self.registry.record_capture(&core);
         Ok(SnapshotFreezePermit {
             registry: self.registry,
@@ -449,7 +453,8 @@ impl<'reg> SnapshotFreezeRequest<'reg> {
 impl Drop for SnapshotFreezeRequest<'_> {
     fn drop(&mut self) {
         if self.live {
-            self.registry.poison(FreezePoisonReason::DroppedBeforeCapture);
+            self.registry
+                .poison(FreezePoisonReason::DroppedBeforeCapture);
         }
     }
 }
@@ -552,10 +557,12 @@ impl<S: SolverStateV2> SnapshotFreezePermit<'_, S> {
     where
         C: fs_blake3::identity::CancellationProbe,
     {
-        self.registry.burn_for_seal(&self.core)?;
-        // From here every exit path terminates the slot explicitly; suppress
-        // Drop so it cannot double-poison after ownership moved out.
+        // Consuming the permit is unconditional: every permit handed to
+        // `seal` is spent, whether the burn admits it or refuses it as
+        // forged or duplicate. Only permits never handed to `seal` reach the
+        // abandonment poison in `Drop`.
         let mut this = std::mem::ManuallyDrop::new(self);
+        this.registry.burn_for_seal(&this.core)?;
         let core = this.core;
         let payload = core::mem::take(&mut this.payload);
         let state = this.state.take();
@@ -803,7 +810,10 @@ impl fmt::Display for SnapshotFreezeError {
         match self {
             Self::ZeroInstanceNonce => write!(formatter, "freeze instance nonce must be nonzero"),
             Self::TransactionAlreadyBegan => {
-                write!(formatter, "freeze registry already ran its single transaction")
+                write!(
+                    formatter,
+                    "freeze registry already ran its single transaction"
+                )
             }
             Self::PoisonedTerminal(reason) => {
                 write!(formatter, "freeze terminal poisoned: {reason}")
@@ -841,7 +851,10 @@ impl fmt::Display for SnapshotSealError {
         match self {
             Self::Envelope(error) => write!(formatter, "envelope seal refused: {error}"),
             Self::RegistryMismatch => {
-                write!(formatter, "permit does not match the registry's frozen record")
+                write!(
+                    formatter,
+                    "permit does not match the registry's frozen record"
+                )
             }
             Self::WrongPhase { expected } => {
                 write!(formatter, "slot phase was not `{expected}` at burn time")
@@ -1025,9 +1038,9 @@ mod tests {
             problem: snapshot_v2::SnapshotProblemIdV2::from_bytes(id32(0xB2)),
             rng_counter: snapshot_v2::SnapshotRngCounterIdV2::from_bytes(id32(0xB3)),
             determinism: snapshot_v2::SnapshotDeterminismV2::Deterministic,
-            execution_fingerprint: snapshot_v2::SnapshotExecutionFingerprintIdV2::from_bytes(
-                id32(0xB4),
-            ),
+            execution_fingerprint: snapshot_v2::SnapshotExecutionFingerprintIdV2::from_bytes(id32(
+                0xB4,
+            )),
             budget_state: snapshot_v2::SnapshotBudgetStateIdV2::from_bytes(id32(0xB5)),
             provenance: snapshot_v2::SnapshotProvenanceIdV2::from_bytes(id32(0xB6)),
         }
@@ -1256,18 +1269,20 @@ mod tests {
         let barrier = Arc::new(Barrier::new(8));
         let handles: Vec<_> = (0..8)
             .map(|_| {
+                let registry = Arc::clone(&registry);
+                let barrier = Arc::clone(&barrier);
                 std::thread::spawn(move || {
                     barrier.wait();
-                    let admitted = registry.begin_freeze().is_ok();
                     // Dropping a winning request here poisons the terminal;
                     // admission counting stays exact either way.
+                    let admitted = registry.begin_freeze().is_ok();
                     admitted
                 })
             })
             .collect();
         let mut winners = 0;
         for handle in handles {
-            if handle.join().unwrap().is_ok() {
+            if handle.join().unwrap() {
                 winners += 1;
             }
         }

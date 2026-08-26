@@ -1447,7 +1447,7 @@ impl TilePoolCompletionWitness {
     /// Timing samples, steal counts, stdout/stderr, and caller publication
     /// state are deliberately absent.
     #[must_use]
-#[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines)]
     pub fn to_canonical_json(&self) -> String {
         use core::fmt::Write as _;
 
@@ -1909,14 +1909,10 @@ fn verify_completion_witness(
         }
         Some(
             RunError::TilePanicked {
-                kernel,
-                completed,
-                ..
+                kernel, completed, ..
             }
             | RunError::TileFailed {
-                kernel,
-                completed,
-                ..
+                kernel, completed, ..
             },
         ) => {
             if *kernel != witness.kernel
@@ -4045,7 +4041,7 @@ impl TilePool {
     }
 
     /// Permit-consuming form of [`Self::run_scoped_witnessed`].
-#[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     pub fn run_scoped_witnessed_once<Caps, K: TileKernel>(
         &self,
         task_cx: &asupersync::Cx<Caps>,
@@ -4259,7 +4255,7 @@ impl TilePool {
         self.run_inner_witnessed_with_permit(kernel, gate, run, budget, lease, None, launch)
     }
 
-#[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     fn run_inner_witnessed_with_permit<Caps, K: TileKernel>(
         &self,
         kernel: &K,
@@ -6944,9 +6940,9 @@ mod tests {
     /// self-consistent rehash still cannot turn impossible join/quiescence
     /// states into executor-minted evidence.
     #[test]
-#[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines)]
     fn completion_witness_verifier_rejects_mutated_lifecycle_states() {
-#[allow(clippy::type_complexity)]
+        #[allow(clippy::type_complexity)]
         let p = pool(2);
         let (result, _, base) = witnessed_parts!(p.run_witnessed(&NoAllocation));
         assert_eq!(result, Ok(1));

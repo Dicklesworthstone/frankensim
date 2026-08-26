@@ -4678,7 +4678,6 @@ pub mod snapshot_v2 {
         })
     }
 
-
     /// Crate-internal single-pass payload encoder for the freeze transaction
     /// path (bead sj31i.52.5.4.1). Same charter/limits/cancellation contract
     /// as [`super::SolverStateV2::seal_v2`]'s encode prefix; sealing the
@@ -5259,7 +5258,8 @@ pub mod snapshot_v2 {
     #[derive(Debug, Default)]
     pub struct CharterRegistryV2 {
         entries: std::collections::BTreeMap<(&'static str, &'static str), StateIdentityCharterV2>,
-        retained: std::collections::BTreeMap<(&'static str, &'static str), Vec<StateIdentityCharterV2>>,
+        retained:
+            std::collections::BTreeMap<(&'static str, &'static str), Vec<StateIdentityCharterV2>>,
     }
 
     /// Typed collision refusal from [`CharterRegistryV2::register`].
@@ -6622,7 +6622,7 @@ mod tests {
     /// wf9.8.2 acceptance: the envelope refuses every corruption and
     /// misbinding class BEFORE the payload decoder runs.
     #[test]
-#[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines)]
     fn envelope_refuses_every_misbinding_class() {
         // A twin state with the IDENTICAL payload layout but its own
         // type id: same-length bytes must not cross-decode.
@@ -6790,21 +6790,21 @@ mod tests {
         // between these constants and the charter derivation.
         const STATE_TYPE_ID_V2: snapshot_v2::SnapshotStateTypeIdV2 =
             snapshot_v2::SnapshotStateTypeIdV2::from_bytes([
-                0x7d, 0xda, 0x0e, 0x58, 0xa3, 0x34, 0xb0, 0xcc, 0xe2, 0xb3, 0x80, 0xce, 0x66,
-                0x31, 0xc3, 0x16, 0xc1, 0xc0, 0x47, 0xad, 0x18, 0x3e, 0x6a, 0xc0, 0x21, 0xcb,
-                0xdf, 0xf2, 0x52, 0x26, 0x01, 0x17,
+                0x7d, 0xda, 0x0e, 0x58, 0xa3, 0x34, 0xb0, 0xcc, 0xe2, 0xb3, 0x80, 0xce, 0x66, 0x31,
+                0xc3, 0x16, 0xc1, 0xc0, 0x47, 0xad, 0x18, 0x3e, 0x6a, 0xc0, 0x21, 0xcb, 0xdf, 0xf2,
+                0x52, 0x26, 0x01, 0x17,
             ]);
         const STATE_SCHEMA_ID_V2: snapshot_v2::SnapshotStateSchemaIdV2 =
             snapshot_v2::SnapshotStateSchemaIdV2::from_bytes([
-                0xa8, 0x8e, 0xe1, 0xbe, 0x8c, 0xbc, 0xe9, 0x45, 0x87, 0x75, 0x08, 0xcf, 0xbd,
-                0x55, 0x0d, 0xee, 0x41, 0xcd, 0xb8, 0x93, 0x6c, 0x09, 0xdb, 0x4f, 0x0f, 0xc2,
-                0x1a, 0x15, 0xcb, 0x09, 0x95, 0x16,
+                0xa8, 0x8e, 0xe1, 0xbe, 0x8c, 0xbc, 0xe9, 0x45, 0x87, 0x75, 0x08, 0xcf, 0xbd, 0x55,
+                0x0d, 0xee, 0x41, 0xcd, 0xb8, 0x93, 0x6c, 0x09, 0xdb, 0x4f, 0x0f, 0xc2, 0x1a, 0x15,
+                0xcb, 0x09, 0x95, 0x16,
             ]);
         const STATE_CODEC_ID_V2: snapshot_v2::SnapshotStateCodecIdV2 =
             snapshot_v2::SnapshotStateCodecIdV2::from_bytes([
-                0xc3, 0x44, 0xaa, 0xde, 0xd5, 0x01, 0xd5, 0xe1, 0xfa, 0xa4, 0x4d, 0x41, 0x8b,
-                0x46, 0x47, 0xf5, 0xc8, 0x73, 0x7b, 0x56, 0x70, 0xf9, 0xf7, 0x4e, 0xd2, 0x71,
-                0xe5, 0x59, 0x49, 0x82, 0x93, 0xa9,
+                0xc3, 0x44, 0xaa, 0xde, 0xd5, 0x01, 0xd5, 0xe1, 0xfa, 0xa4, 0x4d, 0x41, 0x8b, 0x46,
+                0x47, 0xf5, 0xc8, 0x73, 0x7b, 0x56, 0x70, 0xf9, 0xf7, 0x4e, 0xd2, 0x71, 0xe5, 0x59,
+                0x49, 0x82, 0x93, 0xa9,
             ]);
         const STATE_CODEC_VERSION_V2: u32 = 1;
 
@@ -7578,7 +7578,7 @@ mod tests {
     }
 
     #[test]
-#[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines)]
     fn legacy_v1_expected_admission_refuses_every_header_axis_and_extent() {
         let (_, state) = jacobi();
         let provenance = 0x0102_0304_0506_0708;
@@ -8056,9 +8056,10 @@ mod tests {
                 Ok(_) => panic!("migration published before its measured final poll"),
                 Err(
                     LegacySnapshotV1Error::Cancelled { phase, .. }
-                    | LegacySnapshotV1Error::Target(
-                        snapshot_v2::SnapshotV2Error::Cancelled { phase, .. },
-                    ),
+                    | LegacySnapshotV1Error::Target(snapshot_v2::SnapshotV2Error::Cancelled {
+                        phase,
+                        ..
+                    }),
                 ) => {
                     phases.insert(phase);
                 }
@@ -8383,7 +8384,7 @@ mod tests {
 
     #[test]
     fn v2_full_header_resume_and_authority_vectors_are_retained() {
-    const EXPECTED_HEADER_HEX: &str = "46534558534e5632020000004c0200007dda0e58a334b0cce2b380ce6631c316c1c047ad183e6ac021cbdff252260117a88ee1be8cbce945877508cfbd550dee41cdb8936c09db4f0fc21a15cb099516c344aaded501d5e1faa44d418b4647f5c8737b5670f9f74ed271e559498293a9010000001111111111111111111111111111111111111111111111111111111111111111070000000000000022222222222222222222222222222222222222222222222222222222222222223333333333333333333333333333333333333333333333333333333333333333010100000100000028b7b2adc0a1cc210441ded866dbed08da1bb2e2ca134d458884c19406fa108a870e28e7b557d3ffda247ea5aa30c39f94d3eff3ae6d727817381f18febf3ee9df00fe5010cbf8ffd8efa02bca34c272dce15801894a0309fe56a92474d11f0d3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f44444444444444444444444444444444444444444444444444444444444444445555555555555555555555555555555555555555555555555555555555555555666666666666666666666666666666666666666666666666666666666666666609000000000000001100000000000000020000000000000002000000000000007c4fd6af8bf0bfc369d4349977a34e31806461dd10ef5db63bfc9d1d22c1219e2000000000000000b1adb6585eb611b648efca4b640eda7ae68f89fae6b700cfde79999cc872e9521b8cf1e29945b16c996e86358d72bcd572533d4a5036be17a6b19724285ac0af";
+        const EXPECTED_HEADER_HEX: &str = "46534558534e5632020000004c0200007dda0e58a334b0cce2b380ce6631c316c1c047ad183e6ac021cbdff252260117a88ee1be8cbce945877508cfbd550dee41cdb8936c09db4f0fc21a15cb099516c344aaded501d5e1faa44d418b4647f5c8737b5670f9f74ed271e559498293a9010000001111111111111111111111111111111111111111111111111111111111111111070000000000000022222222222222222222222222222222222222222222222222222222222222223333333333333333333333333333333333333333333333333333333333333333010100000100000028b7b2adc0a1cc210441ded866dbed08da1bb2e2ca134d458884c19406fa108a870e28e7b557d3ffda247ea5aa30c39f94d3eff3ae6d727817381f18febf3ee9df00fe5010cbf8ffd8efa02bca34c272dce15801894a0309fe56a92474d11f0d3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f44444444444444444444444444444444444444444444444444444444444444445555555555555555555555555555555555555555555555555555555555555555666666666666666666666666666666666666666666666666666666666666666609000000000000001100000000000000020000000000000002000000000000007c4fd6af8bf0bfc369d4349977a34e31806461dd10ef5db63bfc9d1d22c1219e2000000000000000b1adb6585eb611b648efca4b640eda7ae68f89fae6b700cfde79999cc872e9521b8cf1e29945b16c996e86358d72bcd572533d4a5036be17a6b19724285ac0af";
         fn hex(bytes: &[u8]) -> String {
             use core::fmt::Write as _;
 
@@ -8929,20 +8930,20 @@ mod tests {
     #[test]
     #[allow(clippy::too_many_lines)]
     fn v2_refuses_corruption_downgrade_and_hostile_lengths_before_decode() {
-    #[derive(Debug)]
-    struct CancelAfter {
-        successful_polls: usize,
-    }
-    impl fs_blake3::identity::CancellationProbe for CancelAfter {
-        fn is_cancelled(&mut self) -> bool {
-            if self.successful_polls == 0 {
-                true
-            } else {
-                self.successful_polls -= 1;
-                false
+        #[derive(Debug)]
+        struct CancelAfter {
+            successful_polls: usize,
+        }
+        impl fs_blake3::identity::CancellationProbe for CancelAfter {
+            fn is_cancelled(&mut self) -> bool {
+                if self.successful_polls == 0 {
+                    true
+                } else {
+                    self.successful_polls -= 1;
+                    false
+                }
             }
         }
-    }
         const OFFSET_HEADER_LEN: usize = 12;
         const OFFSET_PROBLEM: usize = 156;
         const OFFSET_DETERMINISM: usize = 220;
@@ -9534,7 +9535,8 @@ mod tests {
             manifest: matching_manifest(&wrong_version),
             context: wrong_version,
         };
-        let error = snapshot_v2::prepare_resume(&solver, opened, || false).expect_err("must refuse");
+        let error =
+            snapshot_v2::prepare_resume(&solver, opened, || false).expect_err("must refuse");
         assert_eq!(
             error,
             snapshot_v2::PrepareResumeErrorV2::SolverContextMismatch {
@@ -9559,7 +9561,8 @@ mod tests {
             manifest: matching_manifest(&wrong_problem),
             context: wrong_problem,
         };
-        let error = snapshot_v2::prepare_resume(&solver, opened, || false).expect_err("must refuse");
+        let error =
+            snapshot_v2::prepare_resume(&solver, opened, || false).expect_err("must refuse");
         assert_eq!(
             error,
             snapshot_v2::PrepareResumeErrorV2::SolverContextMismatch {
@@ -9580,7 +9583,8 @@ mod tests {
             ),
             context: context.clone(),
         };
-        let error = snapshot_v2::prepare_resume(&solver, opened, || false).expect_err("must refuse");
+        let error =
+            snapshot_v2::prepare_resume(&solver, opened, || false).expect_err("must refuse");
         assert_eq!(
             error,
             snapshot_v2::PrepareResumeErrorV2::DecodedManifestMismatch {
@@ -9597,7 +9601,8 @@ mod tests {
             ),
             context: context.clone(),
         };
-        let error = snapshot_v2::prepare_resume(&solver, opened, || false).expect_err("must refuse");
+        let error =
+            snapshot_v2::prepare_resume(&solver, opened, || false).expect_err("must refuse");
         assert_eq!(
             error,
             snapshot_v2::PrepareResumeErrorV2::DecodedManifestMismatch {
@@ -10070,7 +10075,9 @@ mod tests {
     #[test]
     fn registry_retirement_quarantines_without_regaining_authority() {
         let mut registry = snapshot_v2::CharterRegistryV2::new();
-        registry.register(JACOBI_CHARTER).expect("live registration");
+        registry
+            .register(JACOBI_CHARTER)
+            .expect("live registration");
         registry
             .retire(JACOBI_PREV_ERA_CHARTER)
             .expect("superseded revision retires");
