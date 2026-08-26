@@ -8,10 +8,19 @@ wasm32; native builds stay dependency-clean.
 
 Replace the site's O(N²·R²) direct-convolution TypeScript Lenia (capped at
 96²) with the SAME model computed through a radix-2 FFT — O(N² log N) exact
-toroidal convolution — so a 256² display field with a proportionally larger
-ring kernel steps faster than the 96² fallback, phones included. Also hosts
-the half-resolution snapshot-seeded fitness rollouts the site's CMA-ES search
-evaluates.
+toroidal convolution — so a 256² or 512² display field with a proportionally
+larger ring kernel steps faster than the 96² fallback, phones included. Also
+hosts the reduced-resolution snapshot-seeded fitness rollouts the site's
+CMA-ES search evaluates.
+
+v0.2.0 performance structure (identical math, verified by the same tests):
+precomputed twiddle/bit-reversal tables per size, cache-blocked in-place
+transposes over row-padded planes (power-of-two row strides alias cache sets
+badly enough under wasm to triple the 512² step cost), a transpose-sparing
+convolution path that multiplies in the transposed spectral layout (valid
+because the distance-only kernel's spectrum is transpose-symmetric), and a
+growth LUT cached across steps while (μ, σ) are unchanged. Measured in wasm
+(bun/JSC, M-series): ~1.8 ms per 256² step, ~8.6 ms per 512² step.
 
 No-claims: teaching/viz surface, not a general spectral PDE solver. The TS
 fallback remains the behavioral reference at 96²; this kernel is the same
@@ -41,7 +50,7 @@ mathematics at higher resolution, verified FFT-vs-direct to < 1e-10.
 | `lenia_rgba_ptr` / `lenia_rgba_len` | () -> u32 | RGBA buffer location in wasm memory; allocated once per init, never reallocated — the page rewraps per frame in case memory grows |
 | `lenia_snapshot_eval` | () | — (freeze the display field, box-averaged, as the eval seed) |
 | `lenia_eval` | (mu, sigma, dt, steps: u32) -> String | `{"ok":{"score"}}` from the frozen seed |
-| `lenia_version` | () -> String | `"fs-lenia-wasm 0.1.0"` |
+| `lenia_version` | () -> String | `"fs-lenia-wasm 0.2.0"` |
 
 ## Refusal codes
 

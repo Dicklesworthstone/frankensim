@@ -3,11 +3,13 @@
 //!
 //! The site's TypeScript fallback steps Lenia with a direct O(N²·R²) spatial
 //! convolution, which caps the field at 96². This kernel computes the SAME
-//! toroidal convolution through a radix-2 FFT — O(N² log N) — so a 256²
-//! display field with a proportionally larger ring kernel steps faster than
-//! the 96² fallback, on phones included. The growth mapping runs through a
-//! per-step lookup table, and the bioluminescent colormap is written straight
-//! into an in-memory RGBA buffer the page blits with zero per-pixel JS work.
+//! toroidal convolution through a planned radix-2 FFT — O(N² log N), with
+//! precomputed twiddle/bit-reversal tables, blocked transposes, and a
+//! transpose-sparing convolution path — so a 256² or 512² display field with
+//! a proportionally larger ring kernel steps faster than the 96² fallback,
+//! on phones included. The growth mapping runs through a lookup table cached
+//! across steps, and the bioluminescent colormap is written straight into an
+//! in-memory RGBA buffer the page blits with zero per-pixel JS work.
 //!
 //! Model (identical to the site's TS fallback, up to floating-point error):
 //!
@@ -31,7 +33,7 @@
 use core::cell::RefCell;
 
 /// Kernel id baked into envelopes so the page can prove which build is live.
-pub const KERNEL_VERSION: &str = "fs-lenia-wasm 0.1.0";
+pub const KERNEL_VERSION: &str = "fs-lenia-wasm 0.2.0";
 
 const LUT_SIZE: usize = 2048;
 
@@ -64,7 +66,8 @@ fn escape_json_string(s: &str) -> String {
 }
 
 impl Refusal {
-    fn json(&self) -> String {
+    /// Render the refusal as the JSON envelope the JS boundary returns.
+    pub fn json(&self) -> String {
         let repairs: Vec<String> = self
             .ranked_repairs
             .iter()
@@ -92,88 +95,163 @@ fn require_finite(name: &'static str, v: f64) -> Result<(), Refusal> {
 }
 
 // ---------------------------------------------------------------------------
-// Radix-2 FFT (iterative, in place) and 2D helpers
+// Radix-2 FFT with a precomputed plan (bit-reversal + per-stage twiddle
+// tables), blocked square transposes, and a transpose-sparing 2D pass.
 // ---------------------------------------------------------------------------
 
-fn fft(re: &mut [f64], im: &mut [f64], invert: bool) {
-    let n = re.len();
-    debug_assert!(n.is_power_of_two() && im.len() == n);
+/// Precomputed tables for one transform length. Twiddles are stored with the
+/// FORWARD sign convention (w_k = exp(-i·2πk/len)); the inverse conjugates on
+/// the fly. Tables replace the per-butterfly rotation recurrence, which is
+/// both faster and free of the recurrence's accumulated roundoff.
+pub struct FftPlan {
+    n: usize,
+    bitrev: Vec<u32>,
+    // Stages len = 2, 4, ..., n concatenated; stage `len` contributes len/2
+    // factors, so the tables hold exactly n - 1 entries.
+    tw_re: Vec<f64>,
+    tw_im: Vec<f64>,
+}
 
-    // Bit-reversal permutation.
-    let mut j = 0usize;
-    for i in 1..n {
-        let mut bit = n >> 1;
-        while j & bit != 0 {
-            j ^= bit;
-            bit >>= 1;
-        }
-        j |= bit;
-        if i < j {
-            re.swap(i, j);
-            im.swap(i, j);
-        }
-    }
-
-    let mut len = 2usize;
-    while len <= n {
-        let angle = if invert {
-            core::f64::consts::TAU / len as f64
-        } else {
-            -core::f64::consts::TAU / len as f64
-        };
-        let (step_re, step_im) = (angle.cos(), angle.sin());
-        let half = len / 2;
-        let mut block = 0usize;
-        while block < n {
-            let mut w_re = 1.0f64;
-            let mut w_im = 0.0f64;
-            for k in 0..half {
-                let a = block + k;
-                let b = a + half;
-                let u_re = re[a];
-                let u_im = im[a];
-                let v_re = re[b] * w_re - im[b] * w_im;
-                let v_im = re[b] * w_im + im[b] * w_re;
-                re[a] = u_re + v_re;
-                im[a] = u_im + v_im;
-                re[b] = u_re - v_re;
-                im[b] = u_im - v_im;
-                let next_re = w_re * step_re - w_im * step_im;
-                w_im = w_re * step_im + w_im * step_re;
-                w_re = next_re;
+impl FftPlan {
+    pub fn new(n: usize) -> Self {
+        debug_assert!(n.is_power_of_two() && n >= 2);
+        let mut bitrev = vec![0u32; n];
+        let mut j = 0usize;
+        for i in 1..n {
+            let mut bit = n >> 1;
+            while j & bit != 0 {
+                j ^= bit;
+                bit >>= 1;
             }
-            block += len;
+            j |= bit;
+            bitrev[i] = j as u32;
         }
-        len <<= 1;
+        let mut tw_re = Vec::with_capacity(n - 1);
+        let mut tw_im = Vec::with_capacity(n - 1);
+        let mut len = 2usize;
+        while len <= n {
+            let half = len / 2;
+            for k in 0..half {
+                let angle = -core::f64::consts::TAU * k as f64 / len as f64;
+                tw_re.push(angle.cos());
+                tw_im.push(angle.sin());
+            }
+            len <<= 1;
+        }
+        Self { n, bitrev, tw_re, tw_im }
     }
 
-    if invert {
-        let inv = 1.0 / n as f64;
-        for v in re.iter_mut() {
-            *v *= inv;
+    pub fn fft(&self, re: &mut [f64], im: &mut [f64], invert: bool) {
+        let n = self.n;
+        debug_assert!(re.len() == n && im.len() == n);
+
+        for i in 1..n {
+            let j = self.bitrev[i] as usize;
+            if i < j {
+                re.swap(i, j);
+                im.swap(i, j);
+            }
         }
-        for v in im.iter_mut() {
-            *v *= inv;
+
+        let mut tw_base = 0usize;
+        let mut len = 2usize;
+        while len <= n {
+            let half = len / 2;
+            let mut block = 0usize;
+            while block < n {
+                for k in 0..half {
+                    let w_re = self.tw_re[tw_base + k];
+                    let w_im = if invert { -self.tw_im[tw_base + k] } else { self.tw_im[tw_base + k] };
+                    let a = block + k;
+                    let b = a + half;
+                    let u_re = re[a];
+                    let u_im = im[a];
+                    let v_re = re[b] * w_re - im[b] * w_im;
+                    let v_im = re[b] * w_im + im[b] * w_re;
+                    re[a] = u_re + v_re;
+                    im[a] = u_im + v_im;
+                    re[b] = u_re - v_re;
+                    im[b] = u_im - v_im;
+                }
+                block += len;
+            }
+            tw_base += half;
+            len <<= 1;
+        }
+
+        if invert {
+            let inv = 1.0 / n as f64;
+            for v in re.iter_mut() {
+                *v *= inv;
+            }
+            for v in im.iter_mut() {
+                *v *= inv;
+            }
         }
     }
 }
 
-fn fft2d(re: &mut [f64], im: &mut [f64], n: usize, invert: bool, tr: &mut [f64], ti: &mut [f64]) {
+/// Row padding for the FFT working planes, in f64 slots (one cache line).
+/// Power-of-two row strides are a cache-set aliasing disaster during the
+/// transpose (at 512² every column access lands in the same set group and
+/// the pass runs at memory-conflict speed, ~3× the whole convolution cost
+/// under wasm). Padding each row by a line breaks the aliasing; rows stay
+/// contiguous for the FFT, only the row-to-row stride changes.
+const ROW_PAD: usize = 8;
+
+/// In-place square transpose of the n×n prefix of a stride-row matrix,
+/// cache-blocked (each plane is multiple MB at 512²).
+fn transpose_square(m: &mut [f64], n: usize, stride: usize) {
+    const B: usize = 32;
+    let mut ii = 0usize;
+    while ii < n {
+        let i_end = (ii + B).min(n);
+        // Diagonal block: swap only the upper triangle within the block.
+        for i in ii..i_end {
+            for j in (i + 1)..i_end {
+                m.swap(i * stride + j, j * stride + i);
+            }
+        }
+        // Off-diagonal block pairs.
+        let mut jj = i_end;
+        while jj < n {
+            let j_end = (jj + B).min(n);
+            for i in ii..i_end {
+                for j in jj..j_end {
+                    m.swap(i * stride + j, j * stride + i);
+                }
+            }
+            jj += B;
+        }
+        ii += B;
+    }
+}
+
+/// Half of a 2D transform: FFT every row, transpose, FFT every row again —
+/// leaving the TRANSPOSED 2D spectrum. Composing half(fwd) → pointwise
+/// multiply → half(inv) computes an exact circular convolution while
+/// skipping two full transposes per convolution, PROVIDED the kernel
+/// spectrum is transpose-symmetric. The ring kernel depends only on
+/// distance, so k(x, y) = k(y, x) and its spectrum inherits the symmetry.
+fn fft2d_half(re: &mut [f64], im: &mut [f64], n: usize, stride: usize, invert: bool, plan: &FftPlan) {
     for row in 0..n {
-        let start = row * n;
-        fft(&mut re[start..start + n], &mut im[start..start + n], invert);
+        let start = row * stride;
+        plan.fft(&mut re[start..start + n], &mut im[start..start + n], invert);
     }
-    for col in 0..n {
-        for row in 0..n {
-            tr[row] = re[row * n + col];
-            ti[row] = im[row * n + col];
-        }
-        fft(&mut tr[..n], &mut ti[..n], invert);
-        for row in 0..n {
-            re[row * n + col] = tr[row];
-            im[row * n + col] = ti[row];
-        }
+    transpose_square(re, n, stride);
+    transpose_square(im, n, stride);
+    for row in 0..n {
+        let start = row * stride;
+        plan.fft(&mut re[start..start + n], &mut im[start..start + n], invert);
     }
+}
+
+/// Full 2D FFT (spatial orientation preserved). Used for the one-time kernel
+/// spectrum build; the per-step path uses `fft2d_half`.
+fn fft2d(re: &mut [f64], im: &mut [f64], n: usize, stride: usize, invert: bool, plan: &FftPlan) {
+    fft2d_half(re, im, n, stride, invert, plan);
+    transpose_square(re, n, stride);
+    transpose_square(im, n, stride);
 }
 
 // ---------------------------------------------------------------------------
@@ -182,28 +260,35 @@ fn fft2d(re: &mut [f64], im: &mut [f64], n: usize, invert: bool, tr: &mut [f64],
 
 pub struct LeniaCore {
     pub n: usize,
+    /// Row-to-row stride of the FFT working planes (n + ROW_PAD). The field
+    /// itself stays dense; only the spectral scratch is padded.
+    pub stride: usize,
     /// Ring kernel radius in cells (fractional radii are honored exactly).
     pub radius: f64,
     pub field: Vec<f64>,
-    // FFT scratch (re/im of the working spectrum, column temporaries).
+    // FFT scratch (re/im of the working spectrum), stride-padded rows.
     re: Vec<f64>,
     im: Vec<f64>,
-    tr: Vec<f64>,
-    ti: Vec<f64>,
-    // Forward FFT of the normalized kernel (fixed for the core's lifetime).
+    plan: FftPlan,
+    // Forward FFT of the normalized kernel (fixed for the core's lifetime),
+    // same padded layout as the scratch planes.
+    // Transpose-symmetric because the kernel is a pure function of distance,
+    // which is what lets convolve() use the transpose-sparing half passes.
     kr: Vec<f64>,
     ki: Vec<f64>,
-    // Growth lookup table, rebuilt per step call (mu/sigma are live sliders).
+    // Growth lookup table; rebuilt only when (mu, sigma) actually change
+    // (they are live sliders, constant across almost every step).
     lut: Vec<f64>,
+    lut_key: Option<(u64, u64)>,
 }
 
 impl LeniaCore {
     pub fn new(n: usize, radius: f64, ring_r0: f64, ring_sigma: f64) -> Self {
-        let cells = n * n;
-        let mut kr = vec![0.0f64; cells];
-        let mut ki = vec![0.0f64; cells];
-        let mut tr = vec![0.0f64; n];
-        let mut ti = vec![0.0f64; n];
+        let stride = n + ROW_PAD;
+        let padded = n * stride;
+        let plan = FftPlan::new(n);
+        let mut kr = vec![0.0f64; padded];
+        let mut ki = vec![0.0f64; padded];
 
         // Build the ring kernel centered at the origin with toroidal wrap,
         // matching the site's TS fallback: w = exp(-((r/R - r0)/sigma_k)^2/2)
@@ -217,7 +302,7 @@ impl LeniaCore {
                 if dist <= radius {
                     let d = (dist / radius - ring_r0) / ring_sigma;
                     let w = (-0.5 * d * d).exp();
-                    kr[y * n + x] = w;
+                    kr[y * stride + x] = w;
                     total += w;
                 }
             }
@@ -226,19 +311,20 @@ impl LeniaCore {
         for w in kr.iter_mut() {
             *w *= inv_total;
         }
-        fft2d(&mut kr, &mut ki, n, false, &mut tr, &mut ti);
+        fft2d(&mut kr, &mut ki, n, stride, false, &plan);
 
         Self {
             n,
+            stride,
             radius,
-            field: vec![0.0; cells],
-            re: vec![0.0; cells],
-            im: vec![0.0; cells],
-            tr,
-            ti,
+            field: vec![0.0; n * n],
+            re: vec![0.0; padded],
+            im: vec![0.0; padded],
+            plan,
             kr,
             ki,
             lut: vec![0.0; LUT_SIZE + 1],
+            lut_key: None,
         }
     }
 
@@ -277,30 +363,44 @@ impl LeniaCore {
     }
 
     fn rebuild_lut(&mut self, mu: f64, sigma: f64) {
+        let key = (mu.to_bits(), sigma.to_bits());
+        if self.lut_key == Some(key) {
+            return;
+        }
         let inv_sigma = 1.0 / sigma.max(1e-4);
         for (i, slot) in self.lut.iter_mut().enumerate() {
             let u = i as f64 / LUT_SIZE as f64;
             let d = (u - mu) * inv_sigma;
             *slot = 2.0 * (-0.5 * d * d).exp() - 1.0;
         }
+        self.lut_key = Some(key);
     }
 
     /// Convolve the current field with the ring kernel into `self.re`
     /// (the neighborhood potential u = K * a, exact toroidal convolution).
+    /// The pointwise multiply runs in the TRANSPOSED spectral layout the
+    /// half passes leave behind, which is valid because the kernel spectrum
+    /// equals its own transpose (distance-only kernel).
     pub fn convolve(&mut self) {
-        let cells = self.n * self.n;
-        self.re[..cells].copy_from_slice(&self.field);
-        self.im.fill(0.0);
-        fft2d(&mut self.re, &mut self.im, self.n, false, &mut self.tr, &mut self.ti);
-        for i in 0..cells {
-            let ar = self.re[i];
-            let ai = self.im[i];
-            let br = self.kr[i];
-            let bi = self.ki[i];
-            self.re[i] = ar * br - ai * bi;
-            self.im[i] = ar * bi + ai * br;
+        let n = self.n;
+        let stride = self.stride;
+        for row in 0..n {
+            self.re[row * stride..row * stride + n].copy_from_slice(&self.field[row * n..row * n + n]);
         }
-        fft2d(&mut self.re, &mut self.im, self.n, true, &mut self.tr, &mut self.ti);
+        self.im.fill(0.0);
+        fft2d_half(&mut self.re, &mut self.im, n, stride, false, &self.plan);
+        for row in 0..n {
+            let base = row * stride;
+            for i in base..base + n {
+                let ar = self.re[i];
+                let ai = self.im[i];
+                let br = self.kr[i];
+                let bi = self.ki[i];
+                self.re[i] = ar * br - ai * bi;
+                self.im[i] = ar * bi + ai * br;
+            }
+        }
+        fft2d_half(&mut self.re, &mut self.im, n, stride, true, &self.plan);
     }
 
     /// One Lenia step. Returns (interface fraction, mean mass) of the
@@ -309,23 +409,29 @@ impl LeniaCore {
         self.rebuild_lut(mu, sigma);
         self.convolve();
 
-        let cells = self.n * self.n;
+        let n = self.n;
+        let stride = self.stride;
+        let cells = n * n;
         let scale = LUT_SIZE as f64;
         let mut active = 0usize;
         let mut mass = 0.0f64;
-        for i in 0..cells {
-            // Kernel is unit-normalized and the field lives in [0, 1], so u
-            // only leaves [0, 1] by FFT roundoff; clamp before the LUT.
-            let u = self.re[i].clamp(0.0, 1.0);
-            let t = u * scale;
-            let idx = t as usize; // 0..=LUT_SIZE, last slot duplicated below
-            let frac = t - idx as f64;
-            let g = self.lut[idx] + (self.lut[(idx + 1).min(LUT_SIZE)] - self.lut[idx]) * frac;
-            let updated = (self.field[i] + dt * g).clamp(0.0, 1.0);
-            self.field[i] = updated;
-            mass += updated;
-            if updated > 0.08 && updated < 0.92 {
-                active += 1;
+        for y in 0..n {
+            let pot_base = y * stride;
+            let row_base = y * n;
+            for x in 0..n {
+                // Kernel is unit-normalized and the field lives in [0, 1], so
+                // u only leaves [0, 1] by FFT roundoff; clamp before the LUT.
+                let u = self.re[pot_base + x].clamp(0.0, 1.0);
+                let t = u * scale;
+                let idx = t as usize; // 0..=LUT_SIZE, last slot duplicated below
+                let frac = t - idx as f64;
+                let g = self.lut[idx] + (self.lut[(idx + 1).min(LUT_SIZE)] - self.lut[idx]) * frac;
+                let updated = (self.field[row_base + x] + dt * g).clamp(0.0, 1.0);
+                self.field[row_base + x] = updated;
+                mass += updated;
+                if updated > 0.08 && updated < 0.92 {
+                    active += 1;
+                }
             }
         }
         (active as f64 / cells as f64, mass / cells as f64)
@@ -618,14 +724,62 @@ mod tests {
     #[test]
     fn fft_round_trips() {
         let n = 64;
+        let plan = FftPlan::new(n);
         let mut re = test_field(8, 7)[..n].to_vec();
         let original = re.clone();
         let mut im = vec![0.0; n];
-        fft(&mut re, &mut im, false);
-        fft(&mut re, &mut im, true);
+        plan.fft(&mut re, &mut im, false);
+        plan.fft(&mut re, &mut im, true);
         for i in 0..n {
             assert!((re[i] - original[i]).abs() < 1e-12, "re[{i}] drifted");
             assert!(im[i].abs() < 1e-12, "im[{i}] nonzero");
+        }
+    }
+
+    #[test]
+    fn planned_fft_matches_direct_dft() {
+        // Verify the table-driven FFT against the O(n²) textbook DFT, so the
+        // fast path is checked against the definition rather than itself.
+        let n = 32usize;
+        let plan = FftPlan::new(n);
+        let src_re = test_field(8, 11)[..n].to_vec();
+        let src_im = test_field(8, 13)[..n].to_vec();
+
+        let mut dft_re = vec![0.0f64; n];
+        let mut dft_im = vec![0.0f64; n];
+        for (k, (dr, di)) in dft_re.iter_mut().zip(dft_im.iter_mut()).enumerate() {
+            for j in 0..n {
+                let angle = -core::f64::consts::TAU * (k * j) as f64 / n as f64;
+                let (c, s) = (angle.cos(), angle.sin());
+                *dr += src_re[j] * c - src_im[j] * s;
+                *di += src_re[j] * s + src_im[j] * c;
+            }
+        }
+
+        let mut re = src_re.clone();
+        let mut im = src_im.clone();
+        plan.fft(&mut re, &mut im, false);
+        for i in 0..n {
+            assert!((re[i] - dft_re[i]).abs() < 1e-10, "re[{i}] vs DFT");
+            assert!((im[i] - dft_im[i]).abs() < 1e-10, "im[{i}] vs DFT");
+        }
+    }
+
+    #[test]
+    fn blocked_transpose_is_a_transpose() {
+        // Non-multiple-of-block size exercises the ragged tail blocks; the
+        // strided case exercises the padded-row layout the cores use.
+        for pad in [0usize, ROW_PAD] {
+            let n = 48usize;
+            let stride = n + pad;
+            let mut m: Vec<f64> = (0..n * stride).map(|i| i as f64).collect();
+            let original = m.clone();
+            transpose_square(&mut m, n, stride);
+            for i in 0..n {
+                for j in 0..n {
+                    assert_eq!(m[i * stride + j], original[j * stride + i], "({i},{j}) pad {pad}");
+                }
+            }
         }
     }
 
@@ -670,8 +824,10 @@ mod tests {
 
         core.convolve();
         let mut max_diff = 0.0f64;
-        for i in 0..n * n {
-            max_diff = max_diff.max((core.re[i] - direct[i]).abs());
+        for y in 0..n {
+            for x in 0..n {
+                max_diff = max_diff.max((core.re[y * core.stride + x] - direct[y * n + x]).abs());
+            }
         }
         assert!(max_diff < 1e-10, "FFT vs direct convolution diff {max_diff}");
     }
@@ -761,25 +917,28 @@ mod perf_probe {
     #[test]
     #[ignore = "perf probe, run explicitly"]
     fn probe_step_cost() {
-        let mut sim = LeniaSim::new(256, 128, 0.052);
-        sim.display.seed_ring(90.0, 120.0, 27.0, 0.55, 5.9, 0.9);
-        sim.display.seed_ring(166.0, 140.0, 27.0, 0.55, 5.9, 0.9);
-        let t0 = std::time::Instant::now();
-        for _ in 0..120 {
-            sim.display.step(0.152, 0.038, 0.22);
+        for size in [256usize, 512] {
+            let s = size as f64 / 96.0;
+            let mut sim = LeniaSim::new(size, 128, 0.052);
+            sim.display.seed_ring(33.6 * s, 43.2 * s, 10.0 * s, 0.55, 2.2 * s, 0.9);
+            sim.display.seed_ring(62.4 * s, 52.8 * s, 10.0 * s, 0.55, 2.2 * s, 0.9);
+            let t0 = std::time::Instant::now();
+            for _ in 0..120 {
+                sim.display.step(0.152, 0.038, 0.22);
+            }
+            let per_display = t0.elapsed().as_secs_f64() / 120.0;
+            sim.snapshot_eval_seed();
+            let t1 = std::time::Instant::now();
+            for _ in 0..12 {
+                sim.eval_score(0.152, 0.038, 0.22, 18);
+            }
+            let per_generation = t1.elapsed().as_secs_f64();
+            let t2 = std::time::Instant::now();
+            sim.render();
+            let render = t2.elapsed().as_secs_f64();
+            println!("display step {size}²: {:.3} ms", per_display * 1e3);
+            println!("CMA-ES generation (12 cands × 18 steps @128²): {:.1} ms", per_generation * 1e3);
+            println!("render {size}²: {:.3} ms", render * 1e3);
         }
-        let per_display = t0.elapsed().as_secs_f64() / 120.0;
-        sim.snapshot_eval_seed();
-        let t1 = std::time::Instant::now();
-        for _ in 0..12 {
-            sim.eval_score(0.152, 0.038, 0.22, 18);
-        }
-        let per_generation = t1.elapsed().as_secs_f64() / 12.0 * 12.0;
-        let t2 = std::time::Instant::now();
-        sim.render();
-        let render = t2.elapsed().as_secs_f64();
-        println!("display step 256²: {:.3} ms", per_display * 1e3);
-        println!("CMA-ES generation (12 cands × 18 steps @128²): {:.1} ms", per_generation * 1e3);
-        println!("render 256²: {:.3} ms", render * 1e3);
     }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "fs-lenia-wasm"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 publish = false
 description = "Browser (WASM) surface for the CMA-ES explainer site's continuous Lenia field — FFT-accelerated toroidal convolution, growth-function LUT, in-memory RGBA colormap, and a snapshot-seeded fitness evaluator for the site's CMA-ES search."
