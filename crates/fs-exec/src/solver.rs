@@ -4616,7 +4616,7 @@ pub mod snapshot_v2 {
     ///
     /// No value is published on resource, cancellation, or allocation refusal.
     /// The returned identities prove only exact content/semantic consistency.
-    pub(super) fn seal_encoded_payload<C: CancellationProbe>(
+    pub(crate) fn seal_encoded_payload<C: CancellationProbe>(
         mut bytes: Vec<u8>,
         expected_context: &ExpectedResumeContextV2,
         limits: SnapshotLimitsV2,
