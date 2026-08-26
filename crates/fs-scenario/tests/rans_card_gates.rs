@@ -49,20 +49,22 @@ fn canonical_draft_freezes_with_stable_binding() {
 
 #[test]
 fn embedded_nul_cannot_alias_manifest_pair_boundaries() {
+    // Required-section keys must stay present and non-empty or freeze
+    // refuses for regime reasons before the delimiter gate can speak.
+    // Overwriting `inlet` keeps all four required rows while planting a
+    // value whose NULs decode as two separate manifest pairs.
     let mut smuggled = canonical();
-    smuggled.boundary_conditions.clear();
     smuggled
         .boundary_conditions
-        .insert("a".to_string(), "v\0bc/b\0w".to_string());
+        .insert("inlet".to_string(), "v\0bc/extra\0w".to_string());
 
     let mut split = canonical();
-    split.boundary_conditions.clear();
     split
         .boundary_conditions
-        .insert("a".to_string(), "v".to_string());
+        .insert("inlet".to_string(), "v".to_string());
     split
         .boundary_conditions
-        .insert("b".to_string(), "w".to_string());
+        .insert("extra".to_string(), "w".to_string());
     let split = split.freeze().expect("ordinary separate rows admit");
 
     let smuggled = smuggled.freeze();

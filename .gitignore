@@ -49,6 +49,11 @@ flamegraph.folded
 # which the two patterns above miss.
 .beads/*.lock.stale-*
 .beads/.*.lock.stale-*
+.beads/beads.db.bad_*
+.beads/beads.db.rebuild_*
+.beads/beads.db.pre_idx_fix_*
+.beads/pre_idx_fix_*
+.beads/recovery_*/
 .beads/beads.db
 .beads/beads.db-*
 .beads/last-touched

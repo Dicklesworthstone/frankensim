@@ -1,3 +1,0 @@
-repo_path=.
-timestamp=20260708T054056Z
-issue_id=frankensim-epic-lumen-qfx.4
