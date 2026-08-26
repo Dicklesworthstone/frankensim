@@ -1652,7 +1652,9 @@ fn ac_003_production_receipt_and_claim_subject_substitutions_fail_closed() -> Re
     );
     let mut changed_verifier_observation = configured_producer_promotion();
     changed_verifier_observation.verifier_observation = fs_blake3::identity::ByteObservation::new(
-        changed_verifier_observation.verifier_observation.content_id(),
+        changed_verifier_observation
+            .verifier_observation
+            .content_id(),
         changed_verifier_observation.verifier_observation.length() + 1,
     );
     assert_producer_attestation_gated(
@@ -1688,7 +1690,7 @@ fn ac_003_production_receipt_and_claim_subject_substitutions_fail_closed() -> Re
             Some(&stale_hash),
             attestation_scope,
             Some(producer_capability),
-            Some(configured_promotion),
+            Some(configured_producer_promotion()),
         ),
         "producer-process-executable-drift",
         "foreign executable content hash",
@@ -1708,7 +1710,7 @@ fn ac_003_production_receipt_and_claim_subject_substitutions_fail_closed() -> Re
             Some(fixture_producer_attestation_capability(
                 &foreign_executable_authority,
             )),
-            Some(configured_promotion),
+            Some(configured_producer_promotion()),
         ),
         "producer-attestation-capability-refusal",
         "valid sidecar transplanted from a foreign executable",
@@ -1724,7 +1726,7 @@ fn ac_003_production_receipt_and_claim_subject_substitutions_fail_closed() -> Re
             Some(&resolver),
             attestation_scope,
             Some(fixture_producer_attestation_capability(&truncated_sidecar)),
-            Some(configured_promotion),
+            Some(configured_producer_promotion()),
         ),
         "producer-attestation-capability-refusal",
         "truncated detached attestation sidecar",
@@ -1739,7 +1741,7 @@ fn ac_003_production_receipt_and_claim_subject_substitutions_fail_closed() -> Re
             Some(&resolver),
             foreign_scope,
             Some(producer_capability),
-            Some(configured_promotion),
+            Some(configured_producer_promotion()),
         ),
         "producer-attestation-capability-refusal",
         "attestation transplanted to another receipt scope",
@@ -1758,7 +1760,7 @@ fn ac_003_production_receipt_and_claim_subject_substitutions_fail_closed() -> Re
             Some(&resolver),
             attestation_scope,
             Some(fixture_producer_attestation_capability(&foreign_verifier)),
-            Some(configured_promotion),
+            Some(configured_producer_promotion()),
         ),
         "producer-attestation-trust-root-refusal",
         "foreign verifier identity",
@@ -1776,7 +1778,7 @@ fn ac_003_production_receipt_and_claim_subject_substitutions_fail_closed() -> Re
             Some(&resolver),
             attestation_scope,
             Some(fixture_producer_attestation_capability(&foreign_policy)),
-            Some(configured_promotion),
+            Some(configured_producer_promotion()),
         ),
         "producer-attestation-trust-root-refusal",
         "foreign producer-promotion key policy",
