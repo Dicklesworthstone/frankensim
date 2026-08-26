@@ -1,10 +1,11 @@
-use core::fmt::Write as _;
 use crate::Csr;
+use core::fmt::Write as _;
 
 /// Schema for accelerator run receipts.
 pub const ACCELERATOR_RUN_SCHEMA: &str = "frankensim.sparse.accelerator-run-receipt.v1";
 /// Authority string for accelerator run receipts.
-pub const ACCELERATOR_RUN_AUTHORITY: &str = "feature-gated-accelerator-kernel-and-cpu-differential-evidence";
+pub const ACCELERATOR_RUN_AUTHORITY: &str =
+    "feature-gated-accelerator-kernel-and-cpu-differential-evidence";
 /// No-claim boundary for accelerator run receipts.
 pub const ACCELERATOR_RUN_NO_CLAIM: &str = "accelerator run evidence binds device measurements \
     and CPU-differential checks on the admitted kernel; it does not authorize production product path use";
@@ -107,41 +108,101 @@ impl AcceleratorRunReceipt {
     #[must_use]
     pub fn to_json(&self) -> String {
         let mut out = String::with_capacity(2048);
-        let _ = write!(out, "{{\n");
-        let _ = write!(out, "  \"schema\": \"{ACCELERATOR_RUN_SCHEMA}\",\n");
-        let _ = write!(out, "  \"run_id\": \"{}\",\n", escape_json(&self.run_id));
-        let _ = write!(out, "  \"candidate_id\": \"{}\",\n", escape_json(&self.candidate_id));
-        let _ = write!(out, "  \"device\": {{\n");
-        let _ = write!(out, "    \"vendor\": \"{}\",\n", escape_json(&self.device.vendor));
-        let _ = write!(out, "    \"architecture\": \"{}\",\n", escape_json(&self.device.architecture));
-        let _ = write!(out, "    \"model\": \"{}\",\n", escape_json(&self.device.model));
-        let _ = write!(out, "    \"device_id\": \"{}\",\n", escape_json(&self.device.device_id));
-        let _ = write!(out, "    \"memory_bytes\": {}\n", self.device.memory_bytes);
-        let _ = write!(out, "  }},\n");
-        let _ = write!(out, "  \"compiler\": {{\n");
-        let _ = write!(out, "    \"compiler\": \"{}\",\n", escape_json(&self.compiler.compiler));
-        let _ = write!(out, "    \"target\": \"{}\",\n", escape_json(&self.compiler.target));
-        let _ = write!(out, "    \"flags\": \"{}\",\n", escape_json(&self.compiler.flags));
-        let _ = write!(out, "    \"build_id\": \"{}\"\n", escape_json(&self.compiler.build_id));
-        let _ = write!(out, "  }},\n");
-        let _ = write!(out, "  \"kernel_source_hash\": \"{}\",\n", escape_json(&self.kernel_source_hash));
-        let _ = write!(out, "  \"matrix_shape\": [{}, {}, {}],\n", self.matrix_shape.0, self.matrix_shape.1, self.matrix_shape.2);
-        let _ = write!(out, "  \"reduction_policy\": \"{}\",\n", self.reduction_policy.code());
-        let _ = write!(out, "  \"timings\": {{\n");
-        let _ = write!(out, "    \"device_wall_s\": {:.8},\n", self.device_wall_s);
-        let _ = write!(out, "    \"cpu_wall_s\": {:.8},\n", self.cpu_wall_s);
-        let _ = write!(out, "    \"transfer_wall_s\": {:.8}\n", self.transfer_wall_s);
-        let _ = write!(out, "  }},\n");
-        let _ = write!(out, "  \"envelope\": {{\n");
-        let _ = write!(out, "    \"max_abs_diff\": {:.2e},\n", self.envelope.max_abs_diff);
-        let _ = write!(out, "    \"max_rel_diff\": {:.2e},\n", self.envelope.max_rel_diff);
-        let _ = write!(out, "    \"tolerance\": {:.2e},\n", self.envelope.tolerance);
-        let _ = write!(out, "    \"passed\": {}\n", self.envelope.passed);
-        let _ = write!(out, "  }},\n");
-        let _ = write!(out, "  \"cancellation_drain_verified\": {},\n", self.cancellation_drain_verified);
-        let _ = write!(out, "  \"authority\": \"{ACCELERATOR_RUN_AUTHORITY}\",\n");
-        let _ = write!(out, "  \"no_claim\": \"{ACCELERATOR_RUN_NO_CLAIM}\"\n");
-        let _ = write!(out, "}}\n");
+        let _ = writeln!(out, "{{");
+        let _ = writeln!(out, "  \"schema\": \"{ACCELERATOR_RUN_SCHEMA}\",");
+        let _ = writeln!(out, "  \"run_id\": \"{}\",", escape_json(&self.run_id));
+        let _ = writeln!(
+            out,
+            "  \"candidate_id\": \"{}\",",
+            escape_json(&self.candidate_id)
+        );
+        let _ = writeln!(out, "  \"device\": {{");
+        let _ = writeln!(
+            out,
+            "    \"vendor\": \"{}\",",
+            escape_json(&self.device.vendor)
+        );
+        let _ = writeln!(
+            out,
+            "    \"architecture\": \"{}\",",
+            escape_json(&self.device.architecture)
+        );
+        let _ = writeln!(
+            out,
+            "    \"model\": \"{}\",",
+            escape_json(&self.device.model)
+        );
+        let _ = writeln!(
+            out,
+            "    \"device_id\": \"{}\",",
+            escape_json(&self.device.device_id)
+        );
+        let _ = writeln!(out, "    \"memory_bytes\": {}", self.device.memory_bytes);
+        let _ = writeln!(out, "  }},");
+        let _ = writeln!(out, "  \"compiler\": {{");
+        let _ = writeln!(
+            out,
+            "    \"compiler\": \"{}\",",
+            escape_json(&self.compiler.compiler)
+        );
+        let _ = writeln!(
+            out,
+            "    \"target\": \"{}\",",
+            escape_json(&self.compiler.target)
+        );
+        let _ = writeln!(
+            out,
+            "    \"flags\": \"{}\",",
+            escape_json(&self.compiler.flags)
+        );
+        let _ = writeln!(
+            out,
+            "    \"build_id\": \"{}\"",
+            escape_json(&self.compiler.build_id)
+        );
+        let _ = writeln!(out, "  }},");
+        let _ = writeln!(
+            out,
+            "  \"kernel_source_hash\": \"{}\",",
+            escape_json(&self.kernel_source_hash)
+        );
+        let _ = writeln!(
+            out,
+            "  \"matrix_shape\": [{}, {}, {}],",
+            self.matrix_shape.0, self.matrix_shape.1, self.matrix_shape.2
+        );
+        let _ = writeln!(
+            out,
+            "  \"reduction_policy\": \"{}\",",
+            self.reduction_policy.code()
+        );
+        let _ = writeln!(out, "  \"timings\": {{");
+        let _ = writeln!(out, "    \"device_wall_s\": {:.8},", self.device_wall_s);
+        let _ = writeln!(out, "    \"cpu_wall_s\": {:.8},", self.cpu_wall_s);
+        let _ = writeln!(out, "    \"transfer_wall_s\": {:.8}", self.transfer_wall_s);
+        let _ = writeln!(out, "  }},");
+        let _ = writeln!(out, "  \"envelope\": {{");
+        let _ = writeln!(
+            out,
+            "    \"max_abs_diff\": {:.2e},",
+            self.envelope.max_abs_diff
+        );
+        let _ = writeln!(
+            out,
+            "    \"max_rel_diff\": {:.2e},",
+            self.envelope.max_rel_diff
+        );
+        let _ = writeln!(out, "    \"tolerance\": {:.2e},", self.envelope.tolerance);
+        let _ = writeln!(out, "    \"passed\": {}", self.envelope.passed);
+        let _ = writeln!(out, "  }},");
+        let _ = writeln!(
+            out,
+            "  \"cancellation_drain_verified\": {},",
+            self.cancellation_drain_verified
+        );
+        let _ = writeln!(out, "  \"authority\": \"{ACCELERATOR_RUN_AUTHORITY}\",");
+        let _ = writeln!(out, "  \"no_claim\": \"{ACCELERATOR_RUN_NO_CLAIM}\"");
+        let _ = writeln!(out, "}}");
         out
     }
 }
@@ -162,8 +223,12 @@ impl AcceleratorNotExecutedReceipt {
         let mut out = String::with_capacity(512);
         out.push_str("{\n");
         out.push_str("  \"schema\": \"frankensim.sparse.accelerator-not-executed.v1\",\n");
-        out.push_str(&format!("  \"refusal_decision_id\": \"{}\",\n", escape_json(&self.refusal_decision_id)));
-        out.push_str(&format!("  \"reason\": \"{}\",\n", escape_json(&self.reason)));
+        let _ = writeln!(
+            out,
+            "  \"refusal_decision_id\": \"{}\",",
+            escape_json(&self.refusal_decision_id)
+        );
+        let _ = writeln!(out, "  \"reason\": \"{}\",", escape_json(&self.reason));
         out.push_str("  \"authority\": \"path-b-canonical-accelerator-refusal\",\n");
         out.push_str("  \"no_claim\": \"no accelerator kernel was compiled or executed; permanent CPU reference is active\"\n");
         out.push_str("}\n");
@@ -204,7 +269,8 @@ pub fn run_accelerator_spmv_pilot(
     let tolerance = 1e-12;
     let passed = max_rel <= tolerance && max_abs <= tolerance;
 
-    let kernel_source_hash = "8f3b20c918a7d6e5f4123456789abcdef0123456789abcdef0123456789abcde".to_string();
+    let kernel_source_hash =
+        "8f3b20c918a7d6e5f4123456789abcdef0123456789abcdef0123456789abcde".to_string();
 
     let receipt = AcceleratorRunReceipt {
         run_id: run_id.to_string(),
@@ -263,10 +329,10 @@ mod tests {
         let (y, receipt) = run_accelerator_spmv_pilot(&csr, &x, "test_pilot_spmv_01");
 
         assert_eq!(y.len(), 4);
-        assert_eq!(y[0], 6.0);
-        assert_eq!(y[1], 16.0);
-        assert_eq!(y[2], 18.0);
-        assert_eq!(y[3], 15.0);
+        assert_eq!(y[0].to_bits(), 6.0_f64.to_bits());
+        assert_eq!(y[1].to_bits(), 16.0_f64.to_bits());
+        assert_eq!(y[2].to_bits(), 18.0_f64.to_bits());
+        assert_eq!(y[3].to_bits(), 15.0_f64.to_bits());
 
         assert!(receipt.envelope.passed);
         assert!(receipt.cancellation_drain_verified);
