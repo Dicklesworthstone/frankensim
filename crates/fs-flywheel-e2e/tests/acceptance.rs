@@ -1917,20 +1917,37 @@ fn admission_decision_root(
     cx: &admission::AdmissionContext<'_>,
 ) -> fs_checker::ContentHash {
     let mut bytes = Vec::new();
-    push_text(&mut bytes, "fs-flywheel-e2e/admission-decision/v1");
+    push_text(&mut bytes, "fs-flywheel-e2e/admission-decision/v2");
     push_hash(&mut bytes, admission_ir_root(report));
     push_text(&mut bytes, &report.study);
     bytes.push(u8::from(report.admitted));
     push_text(&mut bytes, &report.diagnosis());
-    let capability = cx
+    let sealed = cx
         .capability
         .as_ref()
         .expect("acceptance admission has an explicit session capability");
+    // aeq7 slice B: the decision root binds the evidence CLASS and the
+    // claimed grant identity, so a caller-declared token can never
+    // replay inside a whole-path manifest as issuer-granted authority.
+    match sealed.evidence_class() {
+        admission::CapabilityEvidenceClass::CallerDeclared => bytes.push(1),
+        admission::CapabilityEvidenceClass::GrantBacked => bytes.push(2),
+    }
+    let capability = sealed.capability();
     bytes.extend_from_slice(&capability.cores.to_le_bytes());
     bytes.extend_from_slice(&capability.mem_bytes.to_le_bytes());
     bytes.extend_from_slice(&capability.wall_s.to_bits().to_le_bytes());
     for op in &capability.ops {
         push_text(&mut bytes, op);
+    }
+    if let Some(receipt) = sealed.receipt() {
+        bytes.push(1);
+        push_text(&mut bytes, &receipt.issuer_id);
+        push_text(&mut bytes, &receipt.policy_fingerprint);
+        bytes.extend_from_slice(&receipt.session.to_le_bytes());
+        push_text(&mut bytes, &receipt.grant_digest);
+    } else {
+        bytes.push(0);
     }
     fs_ledger::hash_bytes(&bytes)
 }
