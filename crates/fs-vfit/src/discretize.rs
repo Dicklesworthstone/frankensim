@@ -323,6 +323,8 @@ pub fn realize_tabulated(
 /// `repair_passivity` is the impedance-form primitive (`Re Z ≥ 0`).
 /// A raw fit that is already passive is returned unchanged. Repair
 /// exhaustion keeps the raw stable fit — it does not invent residues.
+/// The repair band spans the complete sampled frequency range regardless
+/// of input sample order.
 ///
 /// Conjugate `e^{-iωt}` acoustics data before calling.
 ///
@@ -338,8 +340,9 @@ pub fn realize_tabulated_impedance(
 ) -> Result<DigitalFilter, RealizeError> {
     let fit = crate::vf::vector_fit(omega, z, opts).map_err(RealizeError::Fit)?;
     let mut model = fit.model;
-    if let (Some(&lo), Some(&hi)) = (omega.first(), omega.last())
-        && hi > lo
+    let lo = omega.iter().copied().fold(f64::INFINITY, f64::min);
+    let hi = omega.iter().copied().fold(0.0_f64, f64::max);
+    if hi > lo
         && model.is_stable()
         && let Ok((repaired, _)) = crate::passivity::repair_passivity(&model, (lo, hi))
     {
@@ -1875,6 +1878,14 @@ mod runtime_tests {
         let mut state = filter.zero_state();
         let y0 = filter.step(&mut state, 1.0).unwrap();
         assert!((y0 - 0.7).abs() < 0.08);
+
+        // Tustin maps stable continuous poles throughout the open left
+        // half-plane. A low digital Nyquist therefore must not erase the
+        // fitted order before bilinearization, even when the fitted residue
+        // happens to be small for this constant-response fixture.
+        let low_rate_filter = realize_tabulated(&omega, &h, 1.0, &opts, 0.0).expect("low-rate fit");
+        assert_eq!(low_rate_filter.sections.len(), 1);
+        assert!(low_rate_filter.is_stable());
     }
 
     #[test]
