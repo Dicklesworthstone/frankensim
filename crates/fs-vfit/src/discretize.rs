@@ -314,9 +314,7 @@ pub fn realize_tabulated(
     prewarp: f64,
 ) -> Result<DigitalFilter, RealizeError> {
     let fit = crate::vf::vector_fit(omega, h, opts).map_err(RealizeError::Fit)?;
-    let nyquist = core::f64::consts::PI / t_s;
-    let model = band_limit_to_nyquist(fit.model, nyquist);
-    bilinear(&model, t_s, prewarp).map_err(RealizeError::Discretize)
+    bilinear(&fit.model, t_s, prewarp).map_err(RealizeError::Discretize)
 }
 
 /// Fit tabulated **impedance** `Z(iω)`, convex-repair passivity, then
@@ -339,8 +337,7 @@ pub fn realize_tabulated_impedance(
     prewarp: f64,
 ) -> Result<DigitalFilter, RealizeError> {
     let fit = crate::vf::vector_fit(omega, z, opts).map_err(RealizeError::Fit)?;
-    let nyquist = core::f64::consts::PI / t_s;
-    let mut model = band_limit_to_nyquist(fit.model, nyquist);
+    let mut model = fit.model;
     if let (Some(&lo), Some(&hi)) = (omega.first(), omega.last())
         && hi > lo
         && model.is_stable()
@@ -349,22 +346,6 @@ pub fn realize_tabulated_impedance(
         model = repaired;
     }
     bilinear(&model, t_s, prewarp).map_err(RealizeError::Discretize)
-}
-
-/// Drop poles that bilinear cannot represent at this sample rate.
-/// Aliasing them would change the transfer function silently.
-fn band_limit_to_nyquist(
-    mut model: crate::model::RationalModel,
-    nyquist: f64,
-) -> crate::model::RationalModel {
-    model.terms.retain(|term| {
-        let omega = match *term {
-            crate::model::PoleTerm::Real { pole, .. } => pole.abs(),
-            crate::model::PoleTerm::Pair { pole, .. } => pole.abs(),
-        };
-        omega < nyquist
-    });
-    model
 }
 
 /// Typed failure from tabulated-response realization.
