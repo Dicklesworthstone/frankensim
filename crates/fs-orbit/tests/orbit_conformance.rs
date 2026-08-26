@@ -475,14 +475,10 @@ fn ob_admission_refuses_degenerate_budgets() {
         harmonics: 0,
         max_newton: 8,
         tolerance: 1e-10,
+        deflate_equilibrium: false,
     };
     assert!(matches!(
-        fs_orbit::solve_hb(
-            &duffing,
-            HbAnchor::Forced { omega: 1.0 },
-            0.1,
-            &budget
-        ),
+        fs_orbit::solve_hb(&duffing, HbAnchor::Forced { omega: 1.0 }, 0.1, &budget),
         Err(fs_orbit::OrbitError::BadParameter { .. })
     ));
     // Continuation path shares the same admission.

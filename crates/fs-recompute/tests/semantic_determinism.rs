@@ -485,14 +485,16 @@ fn sem_012_option_discriminant_diverges_in_key() {
         key_zero.content_hash(),
         "None and Some(0) max_iterations must not share an identity"
     );
-    // The independent checker framing must agree with the key framing.
+    // The independent checker framing must agree with the key framing; the
+    // independent entry point takes params as a SLICE, unlike try_new's map.
+    let no_params: Vec<(String, String)> = Vec::new();
     let independent_none = fs_recompute::checker::IndependentChecker::compute_key_hash_independent(
         "cap-discriminant",
         &[sample_input_hash(1)],
-        &BTreeMap::new(),
+        &no_params,
         policy_none.determinism_class,
         policy_none.tolerance_role,
-        policy_none.effective_tolerance_bits,
+        key_none.effective_tolerance_bits,
         policy_none.rng_seed,
         &code,
         None,
@@ -500,10 +502,10 @@ fn sem_012_option_discriminant_diverges_in_key() {
     let independent_zero = fs_recompute::checker::IndependentChecker::compute_key_hash_independent(
         "cap-discriminant",
         &[sample_input_hash(1)],
-        &BTreeMap::new(),
+        &no_params,
         policy_zero.determinism_class,
         policy_zero.tolerance_role,
-        policy_zero.effective_tolerance_bits,
+        key_zero.effective_tolerance_bits,
         policy_zero.rng_seed,
         &code,
         Some(0),
