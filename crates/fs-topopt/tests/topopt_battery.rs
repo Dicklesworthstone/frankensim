@@ -157,6 +157,25 @@ fn filter_and_projection_inputs_fail_closed() {
             1.0f64.to_bits()
         );
     }
+
+    // CAP+1: just above the guarded ε cap the quotient path must stay
+    // FINITE at every admissible η — the documented "zero rounded
+    // denominator" refusal class can no longer occur, while values are
+    // rounding-noisy (catastrophic cancellation is why the cap exists),
+    // so only finiteness is pinned here.
+    let beta_next = f64::EPSILON * 2.0;
+    for eta in [0.0, 0.5, 1.0] {
+        let projected = heaviside(rho, beta_next, eta);
+        assert!(
+            projected.is_finite(),
+            "heaviside one past the beta cap must not produce a zero-rounded denominator (eta={eta})"
+        );
+        let slope = heaviside_derivative(rho, beta_next, eta);
+        assert!(
+            slope.is_finite(),
+            "heaviside derivative one past the beta cap must stay finite (eta={eta})"
+        );
+    }
     assert!(std::panic::catch_unwind(|| heaviside(f64::NAN, 1.0, 0.5)).is_err());
     assert!(std::panic::catch_unwind(|| heaviside(0.5, -1.0, 0.5)).is_err());
     assert!(std::panic::catch_unwind(|| heaviside(0.5, 1.0, -0.1)).is_err());
