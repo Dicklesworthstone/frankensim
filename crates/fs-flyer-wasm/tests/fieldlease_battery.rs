@@ -17,19 +17,21 @@ use fs_flyer_wasm::fieldlease::{
 };
 use fs_flyer_wasm::ring::SnapshotRing;
 
+use fs_flyer::simloop::SNAPSHOT_LEN;
+
 fn jlog(case: &str, payload: &str) {
     println!("{{\"suite\":\"fs-flyer-wasm-fieldlease\",\"case\":\"{case}\",{payload}}}");
 }
 
-const AIRBORNE: [f64; 12] = [
-    50.0, 3.0, 12.0, 0.8, 0.01, 0.05, 0.02, 0.0, 35.0, 0.0, 0.0, 1.0,
+const AIRBORNE: [f64; SNAPSHOT_LEN] = [
+    50.0, 3.0, 12.0, 0.8, 0.01, 0.05, 0.02, 0.0, 35.0, 0.0, 0.0, 1.0, 0.0, 0.0,
 ];
-const ON_RAIL: [f64; 12] = [
-    10.0, 0.1, 5.0, 0.0, 0.0, 0.02, 0.01, 0.0, 30.0, 0.0, 0.0, 0.0,
+const ON_RAIL: [f64; SNAPSHOT_LEN] = [
+    10.0, 0.1, 5.0, 0.0, 0.0, 0.02, 0.01, 0.0, 30.0, 0.0, 0.0, 0.0, 0.0, 0.0,
 ];
 
-fn ring_with(tick: u64, payload: &[f64; 12]) -> SnapshotRing {
-    let mut r = SnapshotRing::new(3, 12, 0x1903, 0xd17).unwrap();
+fn ring_with(tick: u64, payload: &[f64; SNAPSHOT_LEN]) -> SnapshotRing {
+    let mut r = SnapshotRing::new(3, SNAPSHOT_LEN as u32, 0x1903, 0xd17).unwrap();
     r.publish(tick, payload).unwrap();
     r
 }
@@ -180,7 +182,7 @@ fn json_export_bounds_and_selftest() {
 
 #[test]
 fn empty_ring_refusal_propagates() {
-    let mut ring = SnapshotRing::new(3, 12, 0x1903, 0xd17).unwrap();
+    let mut ring = SnapshotRing::new(3, SNAPSHOT_LEN as u32, 0x1903, 0xd17).unwrap();
     let err =
         sample_field_leased(&mut ring, 10, 1903, 8.0, 1.294, &grid(), C_MEAN_ATMO).unwrap_err();
     // Whatever the ring's typed code is, it must PROPAGATE — the
