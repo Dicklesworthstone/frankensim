@@ -22,8 +22,11 @@
 use fs_blake3::identity::{
     Admitted, AuthorityAdmitter, AuthorityRef, AuthorityVerifier, CanonicalEncoder,
     CanonicalLimits, CanonicalSchema, ContentId, ExternalAnchorRef, Field, FieldSpec,
-    IdentityReceipt, KeyPolicyId, NeverCancel, ObservedIdentity, Presented, PromotionTrustRoot,
-    PromotionWitness, SemanticId, StrongIdentity, Verified, VerifierId, WireType,
+    IdentityReceipt, KeyPolicyId, NeverCancel, ObservedIdentity, OwnerPromotionAdmitter,
+    OwnerPromotionCapabilities, OwnerPromotionVerifier, Presented, PromotionAdmissionRequest,
+    PromotionCapabilityDescriptor, PromotionCapabilityVerdict, PromotionDecisionRequest,
+    PromotionDecisionScope, PromotionTrustRoot, PromotionWitness, SemanticId, StrongIdentity,
+    Verified, VerifierId, WireType,
 };
 use fs_evidence::{Color, IntervalOp, compose};
 use fs_ir::planner::{
@@ -50,6 +53,21 @@ const PRODUCER_ATTESTATION_CONTEXT: &str = "fs-flywheel-e2e/producer-promotion/v
 const MAX_PRODUCER_EXECUTABLE_BYTES: u64 = 1 << 30;
 const EXECUTABLE_HASH_CHUNK_BYTES: usize = 64 * 1024;
 const MAX_PRODUCER_ATTESTATION_SIDECAR_BYTES: usize = 4 * 1024;
+/// V3 owner-executed promotion policy epoch for the pinned fixture root.
+const PRODUCER_PROMOTION_DECISION_EPOCH: u64 = 1;
+
+/// Fixed replay/correlation scope for every fixture promotion decision.
+/// Each decision runs on a freshly configured root, so the constant
+/// attempt/sequence identities stay deterministic without replaying state.
+fn producer_promotion_decision_scope() -> PromotionDecisionScope {
+    PromotionDecisionScope::fresh(
+        ContentId::of_bytes(b"fs-flywheel-e2e/producer-promotion-attempt/v1"),
+        ContentId::of_bytes(b"fs-flywheel-e2e/producer-promotion-decision/v1"),
+        PRODUCER_PROMOTION_DECISION_EPOCH,
+        1,
+    )
+}
+
 const PRODUCER_IDENTITY_LIMITS: CanonicalLimits =
     CanonicalLimits::new(64 * 1024, 16 * 1024, 32, 64, 1024);
 
@@ -222,8 +240,87 @@ type AdmittedProducerAuthority = AuthorityRef<
     ProducerAttestationPolicySchemaV1,
     Admitted,
 >;
-type ProducerPromotionRoot =
-    PromotionTrustRoot<ProducerAttestationVerifierSchemaV1, ProducerAttestationPolicySchemaV1>;
+/// V3 owner-executed promotion requires the root to physically own both
+/// decision capabilities. The acceptance fixture binds them to the pinned
+/// producer-promotion context and decision scope; the subject-specific
+/// authority stays with the detached sidecar admission and the post-witness
+/// subject binding in `resolve_for_promotion`.
+#[derive(Debug, Clone, Copy)]
+struct FixtureOwnerVerifier;
+
+fn fixture_owner_verifier_descriptor() -> PromotionCapabilityDescriptor {
+    PromotionCapabilityDescriptor::new(
+        fs_blake3::identity::ByteObservation::new(
+            ContentId::of_bytes(b"fs-flywheel-e2e owner promotion verifier v1"),
+            38,
+        ),
+        fs_blake3::identity::ByteObservation::new(
+            ContentId::of_bytes(b"fs-flywheel-e2e owner promotion verifier config v1"),
+            45,
+        ),
+        1,
+    )
+}
+
+impl OwnerPromotionVerifier for FixtureOwnerVerifier {
+    fn descriptor(&self) -> PromotionCapabilityDescriptor {
+        fixture_owner_verifier_descriptor()
+    }
+
+    fn verify(&self, request: &PromotionDecisionRequest) -> PromotionCapabilityVerdict {
+        if request.root_context() != PRODUCER_ATTESTATION_CONTEXT
+            || request.scope() != producer_promotion_decision_scope()
+        {
+            PromotionCapabilityVerdict::Refuse {
+                reason: ContentId::of_bytes(b"fixture verifier context/scope mismatch"),
+            }
+        } else {
+            PromotionCapabilityVerdict::Approve {
+                statement: ContentId::of_bytes(b"fixture verifier approved pinned context"),
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FixtureOwnerAdmitter;
+
+impl OwnerPromotionAdmitter for FixtureOwnerAdmitter {
+    fn descriptor(&self) -> PromotionCapabilityDescriptor {
+        PromotionCapabilityDescriptor::new(
+            fs_blake3::identity::ByteObservation::new(
+                ContentId::of_bytes(b"fs-flywheel-e2e owner promotion admitter v1"),
+                39,
+            ),
+            fs_blake3::identity::ByteObservation::new(
+                ContentId::of_bytes(b"fs-flywheel-e2e owner promotion admitter config v1"),
+                46,
+            ),
+            1,
+        )
+    }
+
+    fn admit(&self, request: &PromotionAdmissionRequest) -> PromotionCapabilityVerdict {
+        if request.verification_capability() != fixture_owner_verifier_descriptor()
+            || request.verification_statement()
+                != ContentId::of_bytes(b"fixture verifier approved pinned context")
+        {
+            PromotionCapabilityVerdict::Refuse {
+                reason: ContentId::of_bytes(b"fixture admitter verification evidence mismatch"),
+            }
+        } else {
+            PromotionCapabilityVerdict::Approve {
+                statement: ContentId::of_bytes(request.verification_decision().as_bytes()),
+            }
+        }
+    }
+}
+
+type ProducerPromotionRoot = PromotionTrustRoot<
+    ProducerAttestationVerifierSchemaV1,
+    ProducerAttestationPolicySchemaV1,
+    OwnerPromotionCapabilities<FixtureOwnerVerifier, FixtureOwnerAdmitter>,
+>;
 type ProducerPromotionWitness = PromotionWitness<
     ProducerAttestationSubject,
     ProducerAttestationVerifierSchemaV1,
@@ -283,7 +380,9 @@ fn trusted_producer_attestation_policy()
     producer_attestation_policy_identity("fs-flywheel-e2e/executable-and-receipt-required/v1", 1)
 }
 
-#[derive(Clone, Copy)]
+/// One owner-executed producer-promotion root per decision. The V3 root is
+/// intentionally non-copyable (it burns a decision sequence per witness), so
+/// callers construct a fresh configuration for each promotion attempt.
 struct ConfiguredProducerPromotion {
     trust_root: ProducerPromotionRoot,
     verifier_observation: fs_blake3::identity::ByteObservation,
@@ -294,12 +393,15 @@ fn configured_producer_promotion() -> ConfiguredProducerPromotion {
     let verifier = trusted_producer_attestation_verifier();
     let policy = trusted_producer_attestation_policy();
     ConfiguredProducerPromotion {
-        trust_root: ProducerPromotionRoot::configure(
+        trust_root: ProducerPromotionRoot::configure_owner_executed(
             ObservedIdentity::from_receipt(verifier),
             ObservedIdentity::from_receipt(policy),
             PRODUCER_ATTESTATION_CONTEXT,
+            PRODUCER_PROMOTION_DECISION_EPOCH,
+            FixtureOwnerVerifier,
+            FixtureOwnerAdmitter,
         )
-        .expect("non-empty pinned producer-promotion context"),
+        .expect("pinned owner-executed producer-promotion root configures"),
         verifier_observation: ObservedIdentity::from_receipt(verifier).bytes(),
         policy_observation: ObservedIdentity::from_receipt(policy).bytes(),
     }
@@ -791,7 +893,7 @@ fn resolve_for_promotion<'a>(
             "NO-CLAIM: producer-attestation capability is unavailable",
         );
     };
-    let Some(configured_promotion) = configured_promotion else {
+    let Some(mut configured_promotion) = configured_promotion else {
         return producer_attestation_gated(
             "missing-producer-promotion-trust-root",
             "NO-CLAIM: independently configured producer-promotion trust root is unavailable",
@@ -821,14 +923,12 @@ fn resolve_for_promotion<'a>(
                     "NO-CLAIM: detached producer-attestation capability was refused",
                 );
             };
-            let Ok(promotion) = configured_promotion.trust_root.admit_for_promotion(
+            let Ok(promotion) = configured_promotion.trust_root.decide_for_promotion(
                 &policy_relative,
                 configured_promotion.verifier_observation,
                 configured_promotion.policy_observation,
+                producer_promotion_decision_scope(),
             ) else {
-                return producer_attestation_gated(
-                    "producer-attestation-trust-root-refusal",
-                    "NO-CLAIM: producer attestation did not match the pinned promotion trust root",
                 );
             };
             if promotion.subject() != expected_subject
