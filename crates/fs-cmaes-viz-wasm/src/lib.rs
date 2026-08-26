@@ -39,7 +39,7 @@ pub const LANDSCAPE_RASTRIGIN: u32 = 3;
 pub const LANDSCAPE_ELLI: u32 = 4;
 
 /// Kernel id baked into envelopes so the page can prove which build is live.
-pub const KERNEL_VERSION: &str = "fs-cmaes-viz-wasm 0.1.0";
+pub const KERNEL_VERSION: &str = "fs-cmaes-viz-wasm 0.2.0";
 
 /// One visualization run request. Field ranges are refused, never clamped.
 #[derive(Debug, Clone)]
@@ -356,19 +356,19 @@ pub fn cmaes_run(p: &VizParams) -> Result<VizRun, Refusal> {
     let mut p_c = vec![0.0f64; n];
 
     // Strategy constants (Hansen 2016; identical formulas to the TS fallback).
+    // One log-weight vector over ALL lambda ranks; its positive half (the top
+    // mu) is normalized into the recombination weights, and its negative half
+    // becomes the active covariance weights below. For even lambda,
+    // ln((lambda+1)/2) equals ln(mu + 0.5), so the positive weights match the
+    // historical kernel exactly.
     let lambda = p.lambda;
-    let mu = (lambda / 2).max(1);
-    let mut weights = vec![0.0f64; mu];
-    {
-        let mut raw = vec![0.0f64; mu];
-        for (i, w) in raw.iter_mut().enumerate() {
-            *w = fs_math::det::ln(mu as f64 + 0.5) - fs_math::det::ln((i + 1) as f64);
-        }
-        let sum: f64 = raw.iter().sum();
-        for (i, w) in weights.iter_mut().enumerate() {
-            *w = raw[i] / sum;
-        }
+    let mut raw_all = vec![0.0f64; lambda];
+    for (i, w) in raw_all.iter_mut().enumerate() {
+        *w = fs_math::det::ln((lambda as f64 + 1.0) / 2.0) - fs_math::det::ln((i + 1) as f64);
     }
+    let mu = raw_all.iter().filter(|w| **w > 0.0).count().max(1);
+    let positive_sum: f64 = raw_all[..mu].iter().sum();
+    let weights: Vec<f64> = raw_all[..mu].iter().map(|w| w / positive_sum).collect();
     let mueff = 1.0 / weights.iter().map(|w| w * w).sum::<f64>();
     let nf = n as f64;
     let cc = (4.0 + mueff / nf) / (nf + 4.0 + 2.0 * mueff / nf);
@@ -380,6 +380,35 @@ pub fn cmaes_run(p: &VizParams) -> Result<VizRun, Refusal> {
     .max(0.0);
     let damps = 1.0 + 2.0 * ((mueff - 1.0) / (nf + 1.0)).sqrt().max(0.0) + cs;
     let chin = nf.sqrt() * (1.0 - 1.0 / (4.0 * nf) + 1.0 / (21.0 * nf * nf));
+
+    // Canonical active (negative) covariance weights: the worst-ranked
+    // offspring enter the rank-mu sum with negative weights scaled by
+    // Hansen's alpha bounds, and are additionally Mahalanobis-rescaled per
+    // candidate at update time — mirroring the site's rewritten TS engines.
+    let neg_abs_sum: f64 = raw_all[mu..].iter().map(|w| w.abs()).sum();
+    let neg_sq_sum: f64 = raw_all[mu..].iter().map(|w| w * w).sum();
+    let mueff_minus = if neg_sq_sum > 0.0 { neg_abs_sum * neg_abs_sum / neg_sq_sum } else { 0.0 };
+    let mut negative_scale = 0.0;
+    if neg_abs_sum > 0.0 && cmu > 0.0 {
+        let alpha_mu = 1.0 + c1 / cmu;
+        let alpha_mueff = 1.0 + 2.0 * mueff_minus / (mueff + 2.0);
+        let alpha_pd = (1.0 - c1 - cmu) / (nf * cmu);
+        negative_scale = alpha_mu.min(alpha_mueff).min(alpha_pd).max(0.0);
+    }
+    let cov_weights: Vec<f64> = raw_all
+        .iter()
+        .enumerate()
+        .map(|(i, &w)| {
+            if i < mu {
+                w / positive_sum
+            } else if neg_abs_sum > 0.0 {
+                w * negative_scale / neg_abs_sum
+            } else {
+                0.0
+            }
+        })
+        .collect();
+    let cov_weight_sum: f64 = cov_weights.iter().sum();
 
     let mut best_f = f64::INFINITY;
     let mut best_x = mean.clone();
@@ -400,7 +429,11 @@ pub fn cmaes_run(p: &VizParams) -> Result<VizRun, Refusal> {
         }
         let sqrt_c = transform_matrix(&eigvals, &eigvecs, n, false);
         let inv_sqrt_c = transform_matrix(&eigvals, &eigvecs, n, true);
-        let cond = eigvals[n - 1] / eigvals[0].max(1e-18);
+        // The spectral repair below keeps eigvals[0] >= 1e-12 * eigvals[n-1],
+        // so this ratio is well-defined and bounded by 1e12. (An absolute
+        // denominator clamp here would report cond < 1 once a fully converged
+        // run's whole spectrum drifts below the clamp.)
+        let cond = eigvals[n - 1] / eigvals[0].max(f64::MIN_POSITIVE);
 
         // 1. Sample λ offspring: x = m + σ·C^{1/2}·z.
         let mut sx = vec![0.0f64; lambda * n];
@@ -477,38 +510,73 @@ pub fn cmaes_run(p: &VizParams) -> Result<VizRun, Refusal> {
             p_c[k] = (1.0 - cc) * p_c[k] + hsig * pc_coeff * mean_shift[k];
         }
 
-        // 5. Covariance adaptation: rank-1 + rank-μ (+ active negative rank-μ,
-        // mirroring the TS fallback's mirrored-weight heuristic).
-        let old_coeff = 1.0 - c1 - cmu + (1.0 - hsig) * c1 * cc * (2.0 - cc);
+        // 5. Covariance adaptation: rank-1 + rank-μ over all ranks with the
+        // canonical negative (active) weights, each worst-ranked candidate's
+        // weight Mahalanobis-rescaled by n/‖C^{-1/2}y‖² — mirroring the
+        // site's rewritten TS engines (Hansen 2016 active CMA).
+        let mut adjusted = cov_weights.clone();
+        if p.active {
+            for rank in mu..lambda {
+                if adjusted[rank] >= 0.0 {
+                    continue;
+                }
+                let idx = order[rank];
+                let y: Vec<f64> = (0..n).map(|k| (sx[idx * n + k] - old_mean[k]) / sigma).collect();
+                let whitened = mat_vec(&inv_sqrt_c, &y, n);
+                let mahalanobis_sq: f64 = whitened.iter().map(|v| v * v).sum();
+                adjusted[rank] = if mahalanobis_sq > 0.0 {
+                    adjusted[rank] * nf / mahalanobis_sq
+                } else {
+                    0.0
+                };
+            }
+        } else {
+            for weight in adjusted.iter_mut().skip(mu) {
+                *weight = 0.0;
+            }
+        }
+        let weight_sum = if p.active { cov_weight_sum } else { 1.0 };
+        let old_coeff = 1.0 + c1 * (1.0 - hsig) * cc * (2.0 - cc) - c1 - cmu * weight_sum;
         let mut new_c = vec![0.0f64; n * n];
         for i in 0..n {
             for k in 0..n {
                 let rank1 = p_c[i] * p_c[k];
                 let mut rankmu = 0.0;
-                let mut active = 0.0;
-                for (rank, &idx) in order.iter().enumerate().take(mu) {
+                for (rank, &idx) in order.iter().enumerate() {
+                    let wgt = adjusted[rank];
+                    if wgt == 0.0 {
+                        continue;
+                    }
                     let yi = (sx[idx * n + i] - old_mean[i]) / sigma;
                     let yk = (sx[idx * n + k] - old_mean[k]) / sigma;
-                    rankmu += weights[rank] * yi * yk;
+                    rankmu += wgt * yi * yk;
                 }
-                if p.active {
-                    let c_active = cmu * 0.4;
-                    for rank in (lambda - mu)..lambda {
-                        let idx = order[rank];
-                        let yi = (sx[idx * n + i] - old_mean[i]) / sigma;
-                        let yk = (sx[idx * n + k] - old_mean[k]) / sigma;
-                        let neg_w = weights[lambda - 1 - rank];
-                        active -= c_active * neg_w * yi * yk;
-                    }
-                }
-                new_c[i * n + k] =
-                    old_coeff * c[i * n + k] + c1 * rank1 + cmu * rankmu + active;
+                new_c[i * n + k] = old_coeff * c[i * n + k] + c1 * rank1 + cmu * rankmu;
             }
         }
-        for i in 0..n {
-            new_c[i * n + i] += 1e-10;
-        }
         c = new_c;
+
+        // PD repair (mirrors the TS engines' floored reconstruction): the
+        // negative update can overshoot on unlucky rankings, so floor the
+        // spectrum relative to its own scale and rebuild. Sampling, the
+        // snapshot eigvals, and cond then always describe a genuine
+        // positive-definite covariance.
+        let (repair_ev, repair_evec) = jacobi_eigh(&c, n);
+        if repair_ev.iter().any(|v| !v.is_finite()) {
+            return Err(Refusal {
+                code: "eigen-decomposition-failed",
+                message: format!(
+                    "covariance repair produced non-finite eigenvalues at generation {g}"
+                ),
+                ranked_repairs: vec!["disable the active update", "reduce sigma0"],
+            });
+        }
+        let spectrum_scale = repair_ev
+            .iter()
+            .fold(f64::MIN_POSITIVE, |acc, v| acc.max(v.abs()));
+        let spectrum_floor = 1e-12 * spectrum_scale;
+        let repaired: Vec<f64> = repair_ev.iter().map(|v| v.max(spectrum_floor)).collect();
+        c = rebuild_c(&repaired, &repair_evec, n);
 
         // 6. Step-size adaptation with numerical safety clamp (TS parity).
         sigma *= fs_math::det::exp((cs / damps) * (norm_ps / chin - 1.0));
@@ -1013,6 +1081,39 @@ mod tests {
         assert!(snap.proj_eigvals.iter().all(|v| *v >= -1e-12));
         assert!(trace >= -1e-12);
         assert_eq!(snap.proj_eigvecs.len(), 9);
+    }
+
+    #[test]
+    fn active_update_spectrum_stays_positive_definite() {
+        // Regression: v0.1.0's simplified active update drove C indefinite on
+        // this exact UI-reachable configuration (n=2, λ=8, σ₀=0.6, Rastrigin,
+        // active on), reporting negative eigvals and cond ≈ 1e18 in 119/120
+        // generations. The canonical update + spectral repair must keep every
+        // snapshot's spectrum strictly positive with a sane condition number.
+        let p = VizParams {
+            dim: 2,
+            x0: [1.5, -1.0, 0.0, 0.0, 0.0, 0.0],
+            sigma0: 0.6,
+            lambda: 8,
+            landscape: LANDSCAPE_RASTRIGIN,
+            generations: 120,
+            ..base_params()
+        };
+        let run = cmaes_run(&p).expect("run");
+        for snap in &run.generations {
+            assert!(
+                snap.eigvals.iter().all(|v| *v > 0.0),
+                "gen {} has non-positive eigenvalue: {:?}",
+                snap.g,
+                snap.eigvals
+            );
+            assert!(
+                snap.cond >= 1.0 && snap.cond < 1e14,
+                "gen {} has implausible cond {}",
+                snap.g,
+                snap.cond
+            );
+        }
     }
 
     #[test]

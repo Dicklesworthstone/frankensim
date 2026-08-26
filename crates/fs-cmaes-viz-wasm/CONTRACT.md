@@ -12,6 +12,13 @@ math) so a browser can visualize covariance ellipsoids, evolution paths, and
 population flow per generation — including an honest PCA marginal for
 dim > 3.
 
+v0.2.0: the active update is the canonical Hansen 2016 form — negative
+log-weights on the worst-ranked offspring, scaled by the alpha bounds and
+Mahalanobis-rescaled per candidate (n/‖C^{-1/2}y‖²) — followed by a spectral
+floor-and-rebuild repair, so every snapshot's `eigvals` describe a genuine
+positive-definite covariance. (v0.1.0's simplified mirrored-weight heuristic
+could drive C indefinite and reported the raw spectrum.)
+
 No-claims: teaching/viz surface. NOT fs-dfo's production `cmaes` (no BIPOP
 restarts, no identity ledgers, no adversarial-refusal hardening). For
 production optimization use `fs_dfo::cmaes`.
@@ -21,7 +28,7 @@ production optimization use `fs_dfo::cmaes`.
 | Export | Signature | Returns |
 |---|---|---|
 | `cmaes_viz_run` | 18 scalars (dim, x0_0..x0_5, sigma0, lambda, active, seed, generations, landscape, noise, bounds_enabled, bound_min, bound_max, f_target) -> String | JSON envelope |
-| `cmaes_viz_kernel_version` | () -> String | `"fs-cmaes-viz-wasm 0.1.0"` |
+| `cmaes_viz_kernel_version` | () -> String | `"fs-cmaes-viz-wasm 0.2.0"` |
 
 ## Envelope contract (frozen v1)
 
