@@ -31,7 +31,7 @@ const ON_RAIL: [f64; SNAPSHOT_LEN] = [
 ];
 
 fn ring_with(tick: u64, payload: &[f64; SNAPSHOT_LEN]) -> SnapshotRing {
-    let mut r = SnapshotRing::new(3, SNAPSHOT_LEN as u32, 0x1903, 0xd17).unwrap();
+    let mut r = SnapshotRing::new(3, SNAPSHOT_LEN, 0x1903, 0xd17).unwrap();
     r.publish(tick, payload).unwrap();
     r
 }
@@ -182,7 +182,7 @@ fn json_export_bounds_and_selftest() {
 
 #[test]
 fn empty_ring_refusal_propagates() {
-    let mut ring = SnapshotRing::new(3, SNAPSHOT_LEN as u32, 0x1903, 0xd17).unwrap();
+    let mut ring = SnapshotRing::new(3, SNAPSHOT_LEN, 0x1903, 0xd17).unwrap();
     let err =
         sample_field_leased(&mut ring, 10, 1903, 8.0, 1.294, &grid(), C_MEAN_ATMO).unwrap_err();
     // Whatever the ring's typed code is, it must PROPAGATE — the
