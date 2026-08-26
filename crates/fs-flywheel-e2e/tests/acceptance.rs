@@ -885,6 +885,21 @@ fn assert_producer_attestation_gated(
     }
 }
 
+/// Positive-path counterpart to [`assert_producer_attestation_gated`]:
+/// on refusal, name the exact gate that fired instead of failing
+/// opaquely, so drift shows up as its typed boundary.
+fn expect_verified_promotion<'a>(
+    promotion: ReceiptPromotion<'a>,
+    scenario: &str,
+) -> PromotedVerifierReceipt<'a> {
+    match promotion {
+        ReceiptPromotion::Verified(promoted) => promoted,
+        ReceiptPromotion::Gated { color, no_claim } => {
+            panic!("{scenario}: expected Verified promotion, got Gated ({color:?}): {no_claim}")
+        }
+    }
+}
+
 fn physical_qoi_no_claim(detail: &str, dispersion: f64) -> Claim {
     Claim::estimated(
         PHYSICAL_QOI_ID,
@@ -1270,14 +1285,15 @@ fn ac_003_package_recheck_solver_free_and_voi_hint() -> Result<(), PlanError> {
         evidence_root: resolver.receipt.artifact_root().content_hash(),
     };
     let producer_authority = producer_attestation_fixture(&resolver, attestation_scope);
-    let ReceiptPromotion::Verified(resolved) = resolve_for_promotion(
-        Some(&resolver),
-        attestation_scope,
-        Some(fixture_producer_attestation_capability(&producer_authority)),
-        Some(configured_producer_promotion()),
-    ) else {
-        panic!("the authentic final receipt and producer attestation must resolve");
-    };
+    let resolved = expect_verified_promotion(
+        resolve_for_promotion(
+            Some(&resolver),
+            attestation_scope,
+            Some(fixture_producer_attestation_capability(&producer_authority)),
+            Some(configured_producer_promotion()),
+        ),
+        "the authentic final receipt and producer attestation",
+    );
     let admitted_receipt = resolved.receipt();
     assert_eq!(
         admitted_receipt.bound_lo().to_bits(),
@@ -1503,14 +1519,15 @@ fn ac_003_production_receipt_and_claim_subject_substitutions_fail_closed() -> Re
     let producer_authority = producer_attestation_fixture(&resolver, attestation_scope);
     let producer_capability = fixture_producer_attestation_capability(&producer_authority);
     let configured_promotion = configured_producer_promotion();
-    let ReceiptPromotion::Verified(resolved) = resolve_for_promotion(
-        Some(&resolver),
-        attestation_scope,
-        Some(producer_capability),
-        Some(configured_promotion),
-    ) else {
-        panic!("baseline production receipt must promote");
-    };
+    let resolved = expect_verified_promotion(
+        resolve_for_promotion(
+            Some(&resolver),
+            attestation_scope,
+            Some(producer_capability),
+            Some(configured_promotion),
+        ),
+        "baseline production receipt",
+    );
     assert_producer_attestation_gated(
         resolve_for_promotion(
             Some(&resolver),
@@ -2229,14 +2246,15 @@ fn ac_004_g5_whole_path_replay() -> Result<(), PlanError> {
             evidence_root: verifier_receipts_root,
         };
         let producer_authority = producer_attestation_fixture(&resolver, attestation_scope);
-        let ReceiptPromotion::Verified(resolved) = resolve_for_promotion(
-            Some(&resolver),
-            attestation_scope,
-            Some(fixture_producer_attestation_capability(&producer_authority)),
-            Some(configured_producer_promotion()),
-        ) else {
-            panic!("the final replay receipt sequence and producer attestation must resolve");
-        };
+        let resolved = expect_verified_promotion(
+            resolve_for_promotion(
+                Some(&resolver),
+                attestation_scope,
+                Some(fixture_producer_attestation_capability(&producer_authority)),
+                Some(configured_producer_promotion()),
+            ),
+            "the final replay receipt sequence and producer attestation",
+        );
         let provenance = Provenance::new("acceptance-e2e", "Cargo.lock");
         let pkg = signed_fixture(
             EvidencePackage::new(provenance.clone())
@@ -2512,14 +2530,15 @@ fn ac_005_laundering_invariant_across_the_path() -> Result<(), PlanError> {
         evidence_root: resolver.receipt.artifact_root().content_hash(),
     };
     let producer_authority = producer_attestation_fixture(&resolver, attestation_scope);
-    let ReceiptPromotion::Verified(resolved) = resolve_for_promotion(
-        Some(&resolver),
-        attestation_scope,
-        Some(fixture_producer_attestation_capability(&producer_authority)),
-        Some(configured_producer_promotion()),
-    ) else {
-        panic!("the authentic and producer-attested hard component must resolve");
-    };
+    let resolved = expect_verified_promotion(
+        resolve_for_promotion(
+            Some(&resolver),
+            attestation_scope,
+            Some(fixture_producer_attestation_capability(&producer_authority)),
+            Some(configured_producer_promotion()),
+        ),
+        "the authentic and producer-attested hard component",
+    );
     let provenance = Provenance::new("acceptance-e2e", "Cargo.lock");
     let hard_claim = resolved.claim();
     let pkg = signed_fixture(
