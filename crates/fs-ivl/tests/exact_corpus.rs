@@ -744,3 +744,51 @@ fn g3_mutated_rows_fail_the_battery() {
     let err = run_row(&orient).expect_err("classification flip caught");
     assert!(err.contains("expected"), "{err}");
 }
+
+/// A certified Newton box must survive a later contradictory absence step.
+/// Both certificates are rigorous, so their conjunction indicts the
+/// caller's enclosures (a broken oracle), and the search must keep the
+/// already-proven root box on the report instead of silently dropping it.
+#[test]
+fn contradictory_absence_never_erases_certified_root() {
+    use fs_ivl::newton;
+    use std::cell::Cell;
+    let f_legs = Cell::new(0u32);
+    // f(x) = x - 0.5 with a decaying enclosure half-width: every Newton
+    // step is strict from the second leg on, so `certified` latches true
+    // while widths keep shrinking (no stall). At leg 20 the enclosure goes
+    // contract-breaking, forcing N(X) ∩ X = ∅ AFTER certification — the
+    // exact contradiction path under test.
+    let poison_leg = 20u32;
+    let f = |arg: Interval| -> Interval {
+        let leg = f_legs.get() + 1;
+        f_legs.set(leg);
+        if leg >= poison_leg {
+            return Interval::new(1.0e300, 1.0e300);
+        }
+        let c = arg.midpoint();
+        let e = 0.05f64.powi((leg - 1) as i32);
+        Interval::new(c - 0.5 - e, c - 0.5 + e)
+    };
+    let fp = |_x: Interval| -> Interval { Interval::new(1.0 - 1e-12, 1.0 + 1e-12) };
+
+    let report = newton::newton_roots_bounded(
+        &f,
+        &fp,
+        Interval::new(0.0, 1.0),
+        fs_ivl::RootSearchConfig {
+            min_width: 1e-9,
+            max_boxes: 16,
+        },
+    )
+    .expect("well-formed search");
+
+    // Pre-fix behavior swallowed the certified box here; post-fix it is
+    // retained and still certifies the root near 0.5.
+    let certified = report
+        .roots
+        .iter()
+        .filter(|root| matches!(root, fs_ivl::RootBox::Certified(_)))
+        .count();
+    assert_eq!(certified, 1, "certified root box must be retained");
+}

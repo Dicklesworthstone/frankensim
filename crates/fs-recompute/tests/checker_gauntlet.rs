@@ -184,3 +184,42 @@ fn gauntlet_005_nondeterministic_mode_never_claims_divergence() {
         }
     );
 }
+
+/// Regression (fresh-eyes review, 2026-08-26): the checker is the
+/// independent-validation boundary; an observation carrying NaN evidence —
+/// constructible via struct literal bypassing OutputObservation::try_new —
+/// must receive InvalidEvidence and must never enter history.
+#[test]
+fn gauntlet_nan_observation_is_invalid_evidence() {
+    use fs_recompute::NodeRecord;
+    let code = sample_code();
+    let policy = ExecutionPolicy::try_new(
+        DeterminismClass::ToleranceDependentDeterministic,
+        ToleranceRole::StoppingCriterion,
+        Some(1e-5),
+        11,
+        code,
+        None,
+    )
+    .unwrap();
+    let key = ComputationKey::try_new(
+        "nan-evidence",
+        vec![sample_input(9)],
+        BTreeMap::new(),
+        &policy,
+    )
+    .unwrap();
+    let artifact = b"nan-gauntlet-artifact";
+    let corrupt = OutputObservation {
+        artifact_hash: fs_recompute::artifact_content_hash(artifact),
+        achieved_error: Some(f64::NAN),
+        wall_time_s: None,
+        peak_memory_bytes: None,
+    };
+    let mut checker = IndependentChecker::new();
+    let verdict = checker.check_observation(&key, &corrupt, artifact);
+    assert!(
+        matches!(verdict, CheckerDisposition::InvalidEvidence { .. }),
+        "NaN achieved_error must refuse as InvalidEvidence, got {verdict:?}"
+    );
+}

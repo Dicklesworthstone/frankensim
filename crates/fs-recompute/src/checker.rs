@@ -183,7 +183,15 @@ impl IndependentChecker {
         push_u64(&mut buf, effective_tolerance_bits);
         push_u64(&mut buf, rng_seed);
         push_bytes(&mut buf, code_version_hash.as_bytes());
-        push_u64(&mut buf, max_iterations.unwrap_or(0));
+        // Mirrors ComputationKey::content_hash: the Option discriminant is
+        // explicit so `None` and `Some(0)` never share an identity.
+        match max_iterations {
+            None => push_u64(&mut buf, 0),
+            Some(iterations) => {
+                push_u64(&mut buf, 1);
+                push_u64(&mut buf, iterations);
+            }
+        }
 
         hash_bytes(&buf)
     }
@@ -195,6 +203,25 @@ impl IndependentChecker {
         observation: &OutputObservation,
         artifact_bytes: &[u8],
     ) -> CheckerDisposition {
+        // The checker is the independent-validation boundary: an observation
+        // constructed by struct literal (bypassing OutputObservation::try_new)
+        // carrying non-finite or negative evidence is CORRUPT, not comparable,
+        // and must never enter history as a reference.
+        if let Some(v) = observation.achieved_error {
+            if !v.is_finite() || v < 0.0 {
+                return CheckerDisposition::InvalidEvidence {
+                    reason: format!("achieved_error must be finite and non-negative; got {v}"),
+                };
+            }
+        }
+        if let Some(t) = observation.wall_time_s {
+            if !t.is_finite() || t < 0.0 {
+                return CheckerDisposition::InvalidEvidence {
+                    reason: format!("wall_time_s must be finite and non-negative; got {t}"),
+                };
+            }
+        }
+
         // 1. Validate key hash integrity
         let key_hash = key.content_hash();
 

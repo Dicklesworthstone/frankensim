@@ -397,11 +397,13 @@ fn sem_010_legacy_migration_idempotent() {
     assert_eq!(store.len(), 1);
 
     // Initial migration
-    let migrated = store.migrate_all_legacy_nodes();
+    let migrated = store
+        .migrate_all_legacy_nodes()
+        .expect("valid legacy record");
     assert_eq!(migrated, 1);
 
     // Idempotent retry -> 0 new migrations
-    let retry = store.migrate_all_legacy_nodes();
+    let retry = store.migrate_all_legacy_nodes().expect("idempotent retry");
     assert_eq!(retry, 0);
 
     // Legacy node still retrievable
@@ -437,4 +439,130 @@ fn sem_011_nondeterministic_mode_relaxation() {
             .unwrap();
     let res2 = store.put_computation(key, obs2, art2);
     assert!(res2.is_ok());
+}
+
+/// Regression (fresh-eyes review, 2026-08-26): a policy with NO iteration cap
+/// and one capped at exactly 0 iterations are DIFFERENT policies; their
+/// canonical keys must diverge. The v1 encoder folded Option's discriminant
+/// away (None == Some(0)).
+#[test]
+fn sem_012_option_discriminant_diverges_in_key() {
+    let code = sample_code_hash();
+    let policy_none = ExecutionPolicy::try_new(
+        DeterminismClass::ExactDeterministic,
+        ToleranceRole::None,
+        None,
+        7,
+        code,
+        None,
+    )
+    .unwrap();
+    let policy_zero = ExecutionPolicy::try_new(
+        DeterminismClass::ExactDeterministic,
+        ToleranceRole::None,
+        None,
+        7,
+        code,
+        Some(0),
+    )
+    .unwrap();
+    let key_none = ComputationKey::try_new(
+        "cap-discriminant",
+        vec![sample_input_hash(1)],
+        BTreeMap::new(),
+        &policy_none,
+    )
+    .unwrap();
+    let key_zero = ComputationKey::try_new(
+        "cap-discriminant",
+        vec![sample_input_hash(1)],
+        BTreeMap::new(),
+        &policy_zero,
+    )
+    .unwrap();
+    assert_ne!(
+        key_none.content_hash(),
+        key_zero.content_hash(),
+        "None and Some(0) max_iterations must not share an identity"
+    );
+    // The independent checker framing must agree with the key framing.
+    let independent_none = fs_recompute::checker::IndependentChecker::compute_key_hash_independent(
+        "cap-discriminant",
+        &[sample_input_hash(1)],
+        &BTreeMap::new(),
+        policy_none.determinism_class,
+        policy_none.tolerance_role,
+        policy_none.effective_tolerance_bits,
+        policy_none.rng_seed,
+        &code,
+        None,
+    );
+    let independent_zero = fs_recompute::checker::IndependentChecker::compute_key_hash_independent(
+        "cap-discriminant",
+        &[sample_input_hash(1)],
+        &BTreeMap::new(),
+        policy_zero.determinism_class,
+        policy_zero.tolerance_role,
+        policy_zero.effective_tolerance_bits,
+        policy_zero.rng_seed,
+        &code,
+        Some(0),
+    );
+    assert_ne!(independent_none, independent_zero);
+}
+
+/// Regression: migration must REFUSE a record that cannot form a semantic
+/// identity (blank op id) with a typed error naming the node — never panic.
+#[test]
+fn sem_013_migration_refuses_blank_op_id_as_typed_error() {
+    use fs_recompute::{NodeRecord, Store};
+
+    let mut store = Store::new();
+    let rec = NodeRecord {
+        op_id: String::from("   "),
+        input_hashes: vec![sample_input_hash(2)],
+        params: Vec::new(),
+        code_version_hash: sample_code_hash(),
+        rng_seed: 3,
+        achieved_error: 1e-6,
+        required_tolerance: 1e-5,
+    };
+    store.put(rec, b"artifact").unwrap();
+    let err = store
+        .migrate_all_legacy_nodes()
+        .expect_err("blank op_id must refuse");
+    assert!(
+        matches!(err, fs_recompute::StoreError::SemanticMigration { .. }),
+        "expected SemanticMigration, got {err:?}"
+    );
+}
+
+/// Regression: evicting a legacy node must retire its semantic twin — the
+/// semantic mirror previously grew monotonically forever.
+#[test]
+fn sem_014_eviction_retires_semantic_mirror() {
+    use fs_recompute::{NodeRecord, Store};
+
+    let mut store = Store::new();
+    let rec = NodeRecord {
+        op_id: String::from("mirror-tie-out"),
+        input_hashes: vec![sample_input_hash(4)],
+        params: Vec::new(),
+        code_version_hash: sample_code_hash(),
+        rng_seed: 9,
+        achieved_error: 1e-7,
+        required_tolerance: 1e-6,
+    };
+    store.put(rec, b"twin-artifact").unwrap();
+    let migrated = store.migrate_all_legacy_nodes().unwrap();
+    assert_eq!(migrated, 1);
+    assert_eq!(store.semantic_len(), 1);
+
+    store.evict_unpinned(0);
+    assert_eq!(store.len(), 0);
+    assert_eq!(
+        store.semantic_len(),
+        0,
+        "semantic twin must not outlive its evicted source"
+    );
 }

@@ -224,6 +224,14 @@ where
         for _ in 0..64 {
             match newton_step(f, fp, cur) {
                 None => {
+                    if certified {
+                        // A previously certified box must never be silently
+                        // erased by a later contradictory absence step: both
+                        // are rigorous certificates, so their conjunction
+                        // signals a caller-side enclosure bug. Keep the
+                        // proven root box on the report.
+                        break;
+                    }
                     // Empty intersection: certificate of ABSENCE.
                     absent = true;
                     break;

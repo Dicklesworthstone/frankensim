@@ -778,6 +778,20 @@ pub enum StoreError {
         /// State fingerprint at commit time.
         current_state: ContentHash,
     },
+    /// An [`OutputObservation`] reached the store with non-finite or
+    /// negative evidence despite bypassing the typed constructor.
+    InvalidObservation {
+        /// Human-readable refusal naming the offending field and value.
+        reason: String,
+    },
+    /// Legacy migration refused a record that cannot form a semantic
+    /// identity (blank op id, non-finite budget, or corrupt observation).
+    SemanticMigration {
+        /// The legacy node hash whose migration was refused.
+        node: ContentHash,
+        /// The underlying typed refusal.
+        reason: String,
+    },
 }
 
 impl core::fmt::Display for StoreError {
@@ -833,7 +847,15 @@ impl core::fmt::Display for StoreError {
                 f,
                 "stale recompute plan: certified store revision {planned_revision} state {}, current revision {current_revision} state {}; re-plan before committing",
                 planned_state.to_hex(),
-                current_state.to_hex()
+                current_state.to_hex(),
+            ),
+            StoreError::InvalidObservation { reason } => {
+                write!(f, "invalid output observation: {reason}")
+            }
+            StoreError::SemanticMigration { node, reason } => write!(
+                f,
+                "legacy node {} cannot migrate to a semantic computation: {reason}",
+                node.to_hex()
             ),
         }
     }
@@ -1061,9 +1083,26 @@ impl Store {
         observation: OutputObservation,
         artifact_bytes: &[u8],
     ) -> Result<PutOutcome, StoreError> {
+        // The store is an identity boundary too: struct-literal observations
+        // bypassing OutputObservation::try_new must not poison memoization
+        // with non-finite or negative evidence.
+        if let Some(v) = observation.achieved_error {
+            if !v.is_finite() || v < 0.0 {
+                return Err(StoreError::InvalidObservation {
+                    reason: format!("achieved_error must be finite and non-negative; got {v}"),
+                });
+            }
+        }
+        if let Some(t) = observation.wall_time_s {
+            if !t.is_finite() || t < 0.0 {
+                return Err(StoreError::InvalidObservation {
+                    reason: format!("wall_time_s must be finite and non-negative; got {t}"),
+                });
+            }
+        }
+
         let key_hash = key.content_hash();
         let artifact_hash = artifact_content_hash(artifact_bytes);
-
         if key.policy_determinism_class.is_deterministic() {
             if let Some(existing) = self.semantic_nodes.get(&crate::key(&key_hash)) {
                 if existing.observation.artifact_hash == artifact_hash {
@@ -1103,16 +1142,31 @@ impl Store {
         self.semantic_nodes.get(&crate::key(key_hash))
     }
 
+    /// Number of semantic computation entries currently retained.
+    #[must_use]
+    pub fn semantic_len(&self) -> usize {
+        self.semantic_nodes.len()
+    }
+
     /// Migrate all currently stored legacy nodes to semantic computation entries.
+    /// This is an idempotent transaction that populates `semantic_nodes` for
+    /// every stored legacy node without deleting or mutating the legacy record.
     ///
-    /// This is an idempotent transaction that populates `semantic_nodes` for every
-    /// stored legacy node without deleting or mutating the legacy record.
-    pub fn migrate_all_legacy_nodes(&mut self) -> usize {
+    /// # Errors
+    /// [`StoreError::SemanticMigration`] — any record that cannot form a
+    /// semantic identity (blank op id, non-finite budget, corrupt observation)
+    /// refuses the whole transaction naming the offending node.
+    pub fn migrate_all_legacy_nodes(&mut self) -> Result<usize, StoreError> {
         let mut count = 0;
         let mut migrations = Vec::with_capacity(self.nodes.len());
         for node in self.nodes.values() {
+            let node_hash = node.record.content_hash();
             let (comp_key, obs) =
-                semantic_determinism::migrate_legacy_node_record(&node.record, node.artifact_hash);
+                semantic_determinism::migrate_legacy_node_record(&node.record, node.artifact_hash)
+                    .map_err(|error| StoreError::SemanticMigration {
+                        node: node_hash,
+                        reason: error.to_string(),
+                    })?;
             migrations.push((comp_key, obs, node.pins.clone(), node.seq));
         }
 
@@ -1134,7 +1188,7 @@ impl Store {
         if count > 0 {
             self.bump_revision();
         }
-        count
+        Ok(count)
     }
 
     /// Skip soundness: is the cached artifact for this identity (op,
@@ -1212,11 +1266,19 @@ impl Store {
         unpinned.sort_by_key(|&(_, seq)| seq);
         let excess = unpinned.len().saturating_sub(keep);
         let mut evicted = 0;
-        for &(k, _) in unpinned.iter().take(excess) {
+        let mut evicted_seqs: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
+        for &(k, seq) in unpinned.iter().take(excess) {
             self.nodes.remove(&k);
+            // `seq` is a single global insertion counter, so it uniquely
+            // identifies the semantic twin migrated from this node; tie the
+            // mirror's lifetime to the source or unbounded semantic growth
+            // accumulates stale evidence forever.
+            evicted_seqs.insert(seq);
             evicted += 1;
         }
-        if evicted > 0 {
+        if !evicted_seqs.is_empty() {
+            self.semantic_nodes
+                .retain(|_, v| !evicted_seqs.contains(&v.seq));
             self.bump_revision();
         }
         evicted
@@ -1299,7 +1361,12 @@ impl Store {
     /// Remove a node by raw key (the eviction path).
     #[allow(dead_code)] // wired by the eviction path as it lands; keeping the seam
     pub(crate) fn remove_by_key(&mut self, k: [u8; 32]) {
-        if self.nodes.remove(&k).is_some() {
+        if let Some(removed) = self.nodes.remove(&k) {
+            // Drop the semantic twin whose migration sourced from this
+            // legacy record; identity discipline must not outlive its
+            // evicted evidence.
+            let seq = removed.seq;
+            self.semantic_nodes.retain(|_, v| v.seq != seq);
             self.bump_revision();
         }
     }

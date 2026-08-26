@@ -279,6 +279,22 @@ pub enum VtuError {
         /// Current offset value.
         current: i64,
     },
+    /// A cell offset points beyond the available connectivity entries.
+    ConnectivityOffsetOutOfBounds {
+        /// Cell whose cumulative offset is invalid.
+        cell: usize,
+        /// Cumulative connectivity offset declared by the cell.
+        offset: i64,
+        /// Number of available connectivity entries.
+        connectivity_len: usize,
+    },
+    /// The final cell offset does not consume the complete connectivity array.
+    ConnectivityLengthMismatch {
+        /// Number of connectivity entries referenced by all cells.
+        referenced: usize,
+        /// Number of connectivity entries actually present.
+        available: usize,
+    },
     /// Array length does not match expected point or cell count.
     ArrayLengthMismatch {
         /// Array name.
@@ -297,6 +313,15 @@ pub enum VtuError {
     ZeroComponents {
         /// Array name.
         array: String,
+    },
+    /// The entity count times the component count cannot be represented.
+    ArrayItemCountOverflow {
+        /// Array name.
+        array: String,
+        /// Number of points or cells carrying the array.
+        entities: usize,
+        /// Components declared per entity.
+        components: usize,
     },
     /// XML syntax or formatting parse error.
     ParseError {
@@ -366,6 +391,25 @@ impl std::fmt::Display for VtuError {
             } => {
                 write!(f, "offset for cell {cell} ({current}) <= previous ({prev})")
             }
+            Self::ConnectivityOffsetOutOfBounds {
+                cell,
+                offset,
+                connectivity_len,
+            } => {
+                write!(
+                    f,
+                    "cell {cell} offset {offset} exceeds connectivity length {connectivity_len}"
+                )
+            }
+            Self::ConnectivityLengthMismatch {
+                referenced,
+                available,
+            } => {
+                write!(
+                    f,
+                    "cell offsets reference {referenced} connectivity entries, but {available} are present"
+                )
+            }
             Self::ArrayLengthMismatch {
                 array,
                 expected,
@@ -381,6 +425,16 @@ impl std::fmt::Display for VtuError {
             }
             Self::ZeroComponents { array } => {
                 write!(f, "array `{array}` has zero components")
+            }
+            Self::ArrayItemCountOverflow {
+                array,
+                entities,
+                components,
+            } => {
+                write!(
+                    f,
+                    "array `{array}` item count overflows: {entities} entities times {components} components"
+                )
             }
             Self::ParseError { detail } => {
                 write!(f, "VTU parse error: {detail}")
@@ -470,6 +524,7 @@ impl UnstructuredGrid {
 
         // Validate offsets monotonicity and cell connectivity
         let mut prev_offset = 0i64;
+        let mut prev_offset_usize = 0usize;
         for (c_idx, (&offset, &type_id)) in
             self.cells_offsets.iter().zip(&self.cells_types).enumerate()
         {
@@ -480,11 +535,25 @@ impl UnstructuredGrid {
                     current: offset,
                 });
             }
+            let offset_usize = usize::try_from(offset).map_err(|_| {
+                VtuError::ConnectivityOffsetOutOfBounds {
+                    cell: c_idx,
+                    offset,
+                    connectivity_len: self.cells_connectivity.len(),
+                }
+            })?;
+            if offset_usize > self.cells_connectivity.len() {
+                return Err(VtuError::ConnectivityOffsetOutOfBounds {
+                    cell: c_idx,
+                    offset,
+                    connectivity_len: self.cells_connectivity.len(),
+                });
+            }
             let cell_type = CellType::from_type_id(type_id).ok_or(VtuError::InvalidCellType {
                 cell: c_idx,
                 type_id,
             })?;
-            let pts_count = (offset - prev_offset) as usize;
+            let pts_count = offset_usize - prev_offset_usize;
             if let Some(expected) = cell_type.fixed_point_count()
                 && pts_count != expected
             {
@@ -494,7 +563,7 @@ impl UnstructuredGrid {
                     found: pts_count,
                 });
             }
-            for p_idx in (prev_offset as usize)..(offset as usize) {
+            for p_idx in prev_offset_usize..offset_usize {
                 let p = self.cells_connectivity[p_idx];
                 if p < 0 || (p as usize) >= self.points.len() {
                     return Err(VtuError::InvalidCellIndex {
@@ -505,6 +574,13 @@ impl UnstructuredGrid {
                 }
             }
             prev_offset = offset;
+            prev_offset_usize = offset_usize;
+        }
+        if prev_offset_usize != self.cells_connectivity.len() {
+            return Err(VtuError::ConnectivityLengthMismatch {
+                referenced: prev_offset_usize,
+                available: self.cells_connectivity.len(),
+            });
         }
 
         // Validate data arrays
@@ -520,10 +596,17 @@ impl UnstructuredGrid {
                     array: arr.name.clone(),
                 });
             }
-            let expected_items = match arr.association {
-                DataAssociation::PointData => self.points.len() * arr.components,
-                DataAssociation::CellData => num_cells * arr.components,
+            let entities = match arr.association {
+                DataAssociation::PointData => self.points.len(),
+                DataAssociation::CellData => num_cells,
             };
+            let expected_items = entities.checked_mul(arr.components).ok_or_else(|| {
+                VtuError::ArrayItemCountOverflow {
+                    array: arr.name.clone(),
+                    entities,
+                    components: arr.components,
+                }
+            })?;
             if arr.values.len() != expected_items {
                 return Err(VtuError::ArrayLengthMismatch {
                     array: arr.name.clone(),
@@ -972,6 +1055,17 @@ fn parse_arrays_in_section(
                     .collect::<Result<_, _>>()?;
                 DataValues::Float64(vals)
             }
+            "Float32" => {
+                let vals: Vec<f32> = content
+                    .split_whitespace()
+                    .map(|s| {
+                        s.parse::<f32>().map_err(|e| VtuError::ParseError {
+                            detail: format!("invalid float in array `{name}`: {e}"),
+                        })
+                    })
+                    .collect::<Result<_, _>>()?;
+                DataValues::Float32(vals)
+            }
             "Int32" => {
                 let vals: Vec<i32> = content
                     .split_whitespace()
@@ -983,16 +1077,32 @@ fn parse_arrays_in_section(
                     .collect::<Result<Vec<i32>, VtuError>>()?;
                 DataValues::Int32(vals)
             }
-            _ => {
-                let vals: Vec<f64> = content
+            "Int64" => {
+                let vals: Vec<i64> = content
                     .split_whitespace()
                     .map(|s| {
-                        s.parse::<f64>().map_err(|e| VtuError::ParseError {
-                            detail: format!("invalid float in array `{name}`: {e}"),
+                        s.parse::<i64>().map_err(|e| VtuError::ParseError {
+                            detail: format!("invalid int in array `{name}`: {e}"),
                         })
                     })
                     .collect::<Result<_, _>>()?;
-                DataValues::Float64(vals)
+                DataValues::Int64(vals)
+            }
+            "UInt8" => {
+                let vals: Vec<u8> = content
+                    .split_whitespace()
+                    .map(|s| {
+                        s.parse::<u8>().map_err(|e| VtuError::ParseError {
+                            detail: format!("invalid unsigned byte in array `{name}`: {e}"),
+                        })
+                    })
+                    .collect::<Result<_, _>>()?;
+                DataValues::UInt8(vals)
+            }
+            _ => {
+                return Err(VtuError::ParseError {
+                    detail: format!("unsupported DataArray type `{type_name}` for array `{name}`"),
+                });
             }
         };
 

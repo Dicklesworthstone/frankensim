@@ -38,7 +38,7 @@ pub const COMPUTATION_KEY_DOMAIN: &str = "org.frankensim.fs-recompute.computatio
 pub const OUTPUT_OBSERVATION_DOMAIN: &str = "org.frankensim.fs-recompute.output-observation.v1";
 
 /// Semantic version of the computation key encoding.
-pub const COMPUTATION_KEY_VERSION: u32 = 1;
+pub const COMPUTATION_KEY_VERSION: u32 = 2;
 
 /// Determinism guarantee class for an operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -336,7 +336,16 @@ impl ComputationKey {
         push_u64(&mut bytes, self.effective_tolerance_bits);
         push_u64(&mut bytes, self.rng_seed);
         push_bytes(&mut bytes, self.code_version_hash.as_bytes());
-        push_u64(&mut bytes, self.max_iterations.unwrap_or(0));
+        // The Option discriminant is explicit in the canonical encoding:
+        // `None` (no cap) and `Some(0)` (a zero-iteration budget) are
+        // DIFFERENT policies and must never collide on one key.
+        match self.max_iterations {
+            None => push_u64(&mut bytes, 0),
+            Some(iterations) => {
+                push_u64(&mut bytes, 1);
+                push_u64(&mut bytes, iterations);
+            }
+        }
 
         hash_bytes(&bytes)
     }
@@ -479,11 +488,16 @@ pub struct StoredSemanticComputation {
 ///
 /// Conservatively assumes [`ToleranceRole::StoppingCriterion`] when `required_tolerance > 0`,
 /// preventing false-positive determinism trip-wire trips across legitimate discretization levels.
-#[must_use]
+/// # Errors
+/// Propagates the typed [`SemanticKeyError`] refusals of
+/// [`ComputationKey::try_new`], [`ExecutionPolicy::try_new`], and
+/// [`OutputObservation::try_new`] — a legacy record with a blank op id, a
+/// non-finite tolerance, or a non-finite/negative achieved error is REFUSED,
+/// never silently laundered into an identity.
 pub fn migrate_legacy_node_record(
     record: &crate::NodeRecord,
     artifact_hash: ContentHash,
-) -> (ComputationKey, OutputObservation) {
+) -> Result<(ComputationKey, OutputObservation), SemanticKeyError> {
     let mut params = BTreeMap::new();
     for (k, v) in &record.params {
         let val_str = match v {
@@ -503,25 +517,19 @@ pub fn migrate_legacy_node_record(
         (ToleranceRole::None, None)
     };
 
-    let policy = ExecutionPolicy {
-        determinism_class: DeterminismClass::ToleranceDependentDeterministic,
+    let policy = ExecutionPolicy::try_new(
+        DeterminismClass::ToleranceDependentDeterministic,
         tolerance_role,
         required_tolerance,
-        rng_seed: record.rng_seed,
-        code_version_hash: record.code_version_hash,
-        max_iterations: None,
-    };
+        record.rng_seed,
+        record.code_version_hash,
+        None,
+    )?;
 
     let comp_key =
-        ComputationKey::try_new(&record.op_id, record.input_hashes.clone(), params, &policy)
-            .expect("valid legacy record migration");
+        ComputationKey::try_new(&record.op_id, record.input_hashes.clone(), params, &policy)?;
 
-    let obs = OutputObservation {
-        artifact_hash,
-        achieved_error: Some(record.achieved_error),
-        wall_time_s: None,
-        peak_memory_bytes: None,
-    };
+    let obs = OutputObservation::try_new(artifact_hash, Some(record.achieved_error), None, None)?;
 
-    (comp_key, obs)
+    Ok((comp_key, obs))
 }
