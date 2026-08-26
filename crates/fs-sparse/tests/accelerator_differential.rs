@@ -21,13 +21,15 @@ fn test_differential_diagonal_matrix() {
         coo.push(i, i, (i + 1) as f64 * 1.5);
     }
     let csr = coo.assemble();
-    let x: Vec<f64> = (0..100).map(|i| i as f64).collect();
+    let x: Vec<f64> = (0..100_i32).map(f64::from).collect();
     let (y, receipt) = run_accelerator_spmv_pilot(&csr, &x, "test_diag");
 
     assert_eq!(y.len(), 100);
-    for i in 0..100 {
-        let expected = (i + 1) as f64 * 1.5 * (i as f64);
-        assert!((y[i] - expected).abs() < 1e-12);
+    let expected: Vec<f64> = (0..100_i32)
+        .map(|i| f64::from(i + 1) * 1.5 * f64::from(i))
+        .collect();
+    for (actual, expected_value) in y.iter().zip(&expected) {
+        assert!((actual - expected_value).abs() < 1e-12);
     }
     assert!(receipt.envelope.passed);
     assert_eq!(receipt.matrix_shape, (100, 100, 100));
@@ -73,8 +75,8 @@ fn test_differential_extreme_dynamic_range() {
     let x = vec![1.0, 1e20, 2.0];
     let (y, receipt) = run_accelerator_spmv_pilot(&csr, &x, "test_extreme");
 
-    assert_eq!(y[0], 1e20 + 1.0);
-    assert_eq!(y[1], -1e35);
+    assert_eq!(y[0].to_bits(), (1e20_f64 + 1.0).to_bits());
+    assert_eq!(y[1].to_bits(), (-1e35_f64).to_bits());
     assert!((y[2] - 8.4).abs() < 1e-12);
     assert!(receipt.envelope.passed);
 }
