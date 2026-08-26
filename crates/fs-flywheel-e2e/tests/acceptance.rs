@@ -929,6 +929,9 @@ fn resolve_for_promotion<'a>(
                 configured_promotion.policy_observation,
                 producer_promotion_decision_scope(),
             ) else {
+                return producer_attestation_gated(
+                    "producer-attestation-trust-root-refusal",
+                    "NO-CLAIM: producer attestation did not match the pinned promotion trust root",
                 );
             };
             if promotion.subject() != expected_subject
@@ -1618,13 +1621,12 @@ fn ac_003_production_receipt_and_claim_subject_substitutions_fail_closed() -> Re
     };
     let producer_authority = producer_attestation_fixture(&resolver, attestation_scope);
     let producer_capability = fixture_producer_attestation_capability(&producer_authority);
-    let configured_promotion = configured_producer_promotion();
     let resolved = expect_verified_promotion(
         resolve_for_promotion(
             Some(&resolver),
             attestation_scope,
             Some(producer_capability),
-            Some(configured_promotion),
+            Some(configured_producer_promotion()),
         ),
         "baseline production receipt",
     );
@@ -1633,7 +1635,7 @@ fn ac_003_production_receipt_and_claim_subject_substitutions_fail_closed() -> Re
             Some(&resolver),
             attestation_scope,
             None,
-            Some(configured_promotion),
+            Some(configured_producer_promotion()),
         ),
         "missing-producer-attestation-capability",
         "missing detached attestation authority",
@@ -1648,10 +1650,10 @@ fn ac_003_production_receipt_and_claim_subject_substitutions_fail_closed() -> Re
         "missing-producer-promotion-trust-root",
         "an attestation authority cannot synthesize its own promotion trust root",
     );
-    let mut changed_verifier_observation = configured_promotion;
+    let mut changed_verifier_observation = configured_producer_promotion();
     changed_verifier_observation.verifier_observation = fs_blake3::identity::ByteObservation::new(
-        configured_promotion.verifier_observation.content_id(),
-        configured_promotion.verifier_observation.length() + 1,
+        changed_verifier_observation.verifier_observation.content_id(),
+        changed_verifier_observation.verifier_observation.length() + 1,
     );
     assert_producer_attestation_gated(
         resolve_for_promotion(
@@ -1663,10 +1665,10 @@ fn ac_003_production_receipt_and_claim_subject_substitutions_fail_closed() -> Re
         "producer-attestation-trust-root-refusal",
         "changed retained verifier bytes",
     );
-    let mut changed_policy_observation = configured_promotion;
+    let mut changed_policy_observation = configured_producer_promotion();
     changed_policy_observation.policy_observation = fs_blake3::identity::ByteObservation::new(
-        configured_promotion.policy_observation.content_id(),
-        configured_promotion.policy_observation.length() + 1,
+        changed_policy_observation.policy_observation.content_id(),
+        changed_policy_observation.policy_observation.length() + 1,
     );
     assert_producer_attestation_gated(
         resolve_for_promotion(
