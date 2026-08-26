@@ -4594,12 +4594,15 @@ fn runtime_source_const_declarations_with_index<'a>(
     symbol: &str,
     index: &RustSourceIndex<'a>,
 ) -> Vec<&'a str> {
-    if !canonical_symbol(symbol)
-        || index
-            .use_aliases
-            .keys()
-            .any(|name| rust_qualified_name_tail(name) == symbol)
-    {
+    // Bare-symbol requests resolve the unique ROOT-level declaration. An
+    // alias bound inside a NESTED module (`mod tests { use super::X; }`)
+    // keys as "<module>::X" and cannot shadow the root spelling, so it does
+    // not poison resolution. Only a file-root UNQUALIFIED import binding
+    // the exact same name (alias key without any "::" component) does, and
+    // even then the refusal stays fail-closed: text inspection alone cannot
+    // disprove that the imported binding wins the root scope.
+    let root_scope_shadow = index.use_aliases.keys().any(|name| *name == symbol);
+    if !canonical_symbol(symbol) || root_scope_shadow {
         return Vec::new();
     }
 
@@ -25143,42 +25146,45 @@ fn admit_candidate_receipt(cache: &mut Cache, value: Value) {
     }
 
     #[test]
-    fn family_f_real_file_probe() {
-        let text = include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../crates/fs-ir/src/planner.rs"
-        ));
-        let index = RustSourceIndex::new(text);
-        for symbol in [
-            "PLANNER_CACHE_KEY_VERSION",
-            "PLANNER_CACHE_KEY_DOMAIN",
-            "PLANNER_CACHE_KEY_PREFIX_STEM",
-        ] {
-            let declarations =
-                runtime_source_const_declarations_with_index(text, symbol, &index);
-            println!(
-                "PROBE {symbol}: found={} bytes={:?}",
-                declarations.len(),
-                declarations
-                    .first()
-                    .map(|fragment| fragment.as_bytes().len())
-            );
-            let alias_tail_matches: Vec<&String> = index
-                .use_aliases
-                .keys()
-                .filter(|name| rust_qualified_name_tail(name) == symbol)
-                .collect();
-            println!("PROBE {symbol}: alias_tail_matches={alias_tail_matches:?}");
-        }
+    fn nested_module_reimport_does_not_shadow_root_const_authority() {
+        // The planner/gemm-tune gate failures: a tests module re-imports
+        // the crate's own root consts with `use super::...`, and the old
+        // tail-match poison refused every such bare-symbol lookup.
+        let reimporting_source = concat!(
+            "pub const SWEEP_SEED: [usize; 2] = [16, 32];\n",
+            "mod probe_tests {\n",
+            "    use super::SWEEP_SEED;\n",
+            "}\n",
+        );
+        let index = RustSourceIndex::new(reimporting_source);
         assert_eq!(
             runtime_source_const_declarations_with_index(
-                text,
-                "PLANNER_CACHE_KEY_DOMAIN",
-                &index
+                &reimporting_source,
+                "SWEEP_SEED",
+                &index,
             )
             .len(),
             1,
-            "PLANNER_CACHE_KEY_DOMAIN must resolve to one const in the real planner source"
+            "a nested-module `use super::` re-import must not shadow the root const"
+        );
+
+        // A file-root unqualified import binding the exact same name stays
+        // refused: text inspection cannot prove which root-scope binding
+        // wins, so resolution remains fail-closed there.
+        let shadowing_source = concat!(
+            "use foreign::SWEEP_DUP;\n",
+            "const SWEEP_DUP: u8 = 3;\n",
+        );
+        let index = RustSourceIndex::new(shadowing_source);
+        assert_eq!(
+            runtime_source_const_declarations_with_index(
+                &shadowing_source,
+                "SWEEP_DUP",
+                &index,
+            )
+            .len(),
+            0,
+            "a root-scope import sharing the symbol must keep refusing"
         );
     }
 }
