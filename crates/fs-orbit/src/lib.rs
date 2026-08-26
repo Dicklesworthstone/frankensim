@@ -365,6 +365,20 @@ pub fn solve_hb<P: OrbitProblem>(
     budget: &HbBudget,
 ) -> Result<HbOrbit, OrbitError> {
     let d = problem.dim();
+    // Admission BEFORE any packed writes: `re_index(1,0)` for `n_harm = 0`
+    // aliases past the coefficient block, and a zero state dimension makes
+    // every seed slot out of bounds — both must refuse as typed parameters,
+    // never panic (fresh-eyes review 2026-08-26).
+    if budget.harmonics == 0 {
+        return Err(OrbitError::BadParameter {
+            what: "harmonic count must be positive",
+        });
+    }
+    if d == 0 {
+        return Err(OrbitError::BadParameter {
+            what: "state dimension must be positive",
+        });
+    }
     let pack = Packing {
         d,
         n_harm: budget.harmonics,
@@ -428,6 +442,11 @@ pub fn solve_hb_seeded<P: OrbitProblem>(
     if d == 0 {
         return Err(OrbitError::BadParameter {
             what: "state dimension must be positive",
+        });
+    }
+    if budget.harmonics == 0 {
+        return Err(OrbitError::BadParameter {
+            what: "harmonic count must be positive",
         });
     }
     let pack = Packing {
@@ -717,6 +736,15 @@ pub fn solve_shooting<P: OrbitProblem>(
     if !(period_guess > 0.0 && period_guess.is_finite()) {
         return Err(OrbitError::BadParameter {
             what: "period guess must be positive and finite",
+        });
+    }
+    // A zero-step period map is the IDENTITY: the residual would be exactly
+    // zero and monodromy differences all trivially unit — indistinguishable
+    // from a converged orbit. Refuse instead of fabricating one (fresh-eyes
+    // review 2026-08-26).
+    if budget.steps_per_period == 0 {
+        return Err(OrbitError::BadParameter {
+            what: "steps per period must be positive",
         });
     }
     let auto = problem.autonomous();

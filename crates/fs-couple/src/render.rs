@@ -102,6 +102,11 @@ impl ReedBoreVoice {
                 what: "reed parameters must be physical and finite",
             });
         }
+        if !listener_m.is_finite() || listener_m <= 0.0 {
+            return Err(AcousticRealizeError::InvalidDescription {
+                what: "listener distance must be positive and finite",
+            });
+        }
         let inlet_r = physics
             .segments
             .first()
@@ -562,7 +567,10 @@ pub fn render_under_gate(
     block_len: usize,
     blocks: usize,
 ) -> Result<GatedRenderOutcome, RenderError> {
-    if block_len == 0 || out.len() < block_len * blocks {
+    let required_samples = block_len.checked_mul(blocks).ok_or(RenderError::Control {
+        what: "block_len * blocks overflows usize",
+    })?;
+    if block_len == 0 || out.len() < required_samples {
         return Err(RenderError::Control {
             what: "output slice must hold block_len * blocks samples",
         });

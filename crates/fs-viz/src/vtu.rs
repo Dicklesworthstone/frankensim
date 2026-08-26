@@ -323,6 +323,15 @@ pub enum VtuError {
         /// Components declared per entity.
         components: usize,
     },
+    /// XDMF export requires at least one cell topology element.
+    EmptyXdmfTopology,
+    /// The VTK cell has no lossless XDMF topology representation in this writer.
+    UnsupportedXdmfCellType {
+        /// Cell index.
+        cell: usize,
+        /// VTK type ID byte.
+        type_id: u8,
+    },
     /// XML syntax or formatting parse error.
     ParseError {
         /// Error details.
@@ -436,6 +445,15 @@ impl std::fmt::Display for VtuError {
                     "array `{array}` item count overflows: {entities} entities times {components} components"
                 )
             }
+            Self::EmptyXdmfTopology => {
+                write!(f, "XDMF export requires at least one cell")
+            }
+            Self::UnsupportedXdmfCellType { cell, type_id } => {
+                write!(
+                    f,
+                    "cell {cell} has VTK type ID {type_id}, which this XDMF writer cannot represent losslessly"
+                )
+            }
             Self::ParseError { detail } => {
                 write!(f, "VTU parse error: {detail}")
             }
@@ -535,13 +553,12 @@ impl UnstructuredGrid {
                     current: offset,
                 });
             }
-            let offset_usize = usize::try_from(offset).map_err(|_| {
-                VtuError::ConnectivityOffsetOutOfBounds {
+            let offset_usize =
+                usize::try_from(offset).map_err(|_| VtuError::ConnectivityOffsetOutOfBounds {
                     cell: c_idx,
                     offset,
                     connectivity_len: self.cells_connectivity.len(),
-                }
-            })?;
+                })?;
             if offset_usize > self.cells_connectivity.len() {
                 return Err(VtuError::ConnectivityOffsetOutOfBounds {
                     cell: c_idx,

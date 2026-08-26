@@ -456,3 +456,54 @@ fn ob_006_bitwise_determinism() {
     assert_eq!(a.residual_trace.len(), b.residual_trace.len());
     println!("{{\"suite\":\"fs-orbit\",\"case\":\"ob-006-determinism\",\"verdict\":\"pass\"}}");
 }
+
+/// Regression (fresh-eyes review, 2026-08-26): degenerate budgets must refuse
+/// as typed parameters BEFORE any packed indexing — harmonics=0 aliased
+/// `re_index(1,0)` out of bounds and steps_per_period=0 fabricated a
+/// converged orbit from the identity period map.
+#[test]
+fn ob_admission_refuses_degenerate_budgets() {
+    let duffing = Duffing {
+        zeta: 0.05,
+        eps: 0.5,
+        force: 1.0,
+        omega: 1.0,
+    };
+
+    // Harmonic balance: zero harmonics.
+    let budget = HbBudget {
+        harmonics: 0,
+        max_newton: 8,
+        tolerance: 1e-10,
+    };
+    assert!(matches!(
+        fs_orbit::solve_hb(
+            &duffing,
+            HbAnchor::Forced { omega: 1.0 },
+            0.1,
+            &budget
+        ),
+        Err(fs_orbit::OrbitError::BadParameter { .. })
+    ));
+    // Continuation path shares the same admission.
+    assert!(matches!(
+        fs_orbit::solve_hb_seeded(
+            &duffing,
+            HbAnchor::Forced { omega: 1.0 },
+            vec![0.0; duffing.dim()],
+            &budget
+        ),
+        Err(fs_orbit::OrbitError::BadParameter { .. })
+    ));
+
+    // Shooting: a zero-step map is the identity and must not publish an orbit.
+    let shoot = ShootBudget {
+        steps_per_period: 0,
+        max_newton: 4,
+        tolerance: 1e-9,
+    };
+    assert!(matches!(
+        fs_orbit::solve_shooting(&duffing, &[0.2, 0.0], 6.28, &shoot),
+        Err(fs_orbit::OrbitError::BadParameter { .. })
+    ));
+}

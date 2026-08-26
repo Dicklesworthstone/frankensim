@@ -3,8 +3,9 @@
 //! Bead: `frankensim-extreal-program-f85xj.6.8`
 
 use fs_viz::{
-    CellType, DataArray, ExportFormat, FIELD_REGISTRY, UnstructuredGrid, VtuChecker, VtuError,
-    VtuWriter, XdmfWriter, find_field_by_name, validate_output_request,
+    CellType, DataArray, DataAssociation, DataValues, ExportFormat, FIELD_REGISTRY,
+    UnstructuredGrid, VtuChecker, VtuError, VtuWriter, XdmfWriter, find_field_by_name,
+    validate_output_request,
 };
 
 #[test]
@@ -138,6 +139,93 @@ fn test_vtu_validation_failures() {
 }
 
 #[test]
+fn test_vtu_validation_rejects_connectivity_length_mismatches_without_panicking() {
+    let mut out_of_bounds = UnstructuredGrid::new();
+    out_of_bounds.add_point(0.0, 0.0, 0.0);
+    out_of_bounds.cells_connectivity = vec![0];
+    out_of_bounds.cells_offsets = vec![2];
+    out_of_bounds.cells_types = vec![CellType::Line.type_id()];
+    assert_eq!(
+        out_of_bounds.validate(),
+        Err(VtuError::ConnectivityOffsetOutOfBounds {
+            cell: 0,
+            offset: 2,
+            connectivity_len: 1,
+        })
+    );
+
+    let mut trailing = UnstructuredGrid::new();
+    trailing.add_point(0.0, 0.0, 0.0);
+    trailing.cells_connectivity = vec![0, 0];
+    trailing.cells_offsets = vec![1];
+    trailing.cells_types = vec![CellType::Vertex.type_id()];
+    assert_eq!(
+        trailing.validate(),
+        Err(VtuError::ConnectivityLengthMismatch {
+            referenced: 1,
+            available: 2,
+        })
+    );
+}
+
+#[test]
+fn test_vtu_validation_rejects_array_item_count_overflow() {
+    let mut grid = UnstructuredGrid::new();
+    grid.add_point(0.0, 0.0, 0.0);
+    grid.add_point(1.0, 0.0, 0.0);
+    grid.add_array(DataArray {
+        name: "overflow".to_string(),
+        association: DataAssociation::PointData,
+        components: usize::MAX,
+        unit: None,
+        values: DataValues::Float64(Vec::new()),
+    });
+    assert_eq!(
+        grid.validate(),
+        Err(VtuError::ArrayItemCountOverflow {
+            array: "overflow".to_string(),
+            entities: 2,
+            components: usize::MAX,
+        })
+    );
+}
+
+#[test]
+fn test_vtu_checker_preserves_every_writer_data_type() {
+    let mut grid = UnstructuredGrid::new();
+    let p0 = grid.add_point(0.0, 0.0, 0.0);
+    let p1 = grid.add_point(1.0, 0.0, 0.0);
+    let p2 = grid.add_point(0.0, 1.0, 0.0);
+    let p3 = grid.add_point(0.0, 0.0, 1.0);
+    grid.add_tetra(p0, p1, p2, p3);
+    grid.add_array(DataArray {
+        name: "f32".to_string(),
+        association: DataAssociation::PointData,
+        components: 1,
+        unit: None,
+        values: DataValues::Float32(vec![1.25, 2.5, 3.75, 5.0]),
+    });
+    grid.add_array(DataArray {
+        name: "i64".to_string(),
+        association: DataAssociation::PointData,
+        components: 1,
+        unit: None,
+        values: DataValues::Int64(vec![i64::MIN, -1, 0, i64::MAX]),
+    });
+    grid.add_array(DataArray {
+        name: "u8".to_string(),
+        association: DataAssociation::PointData,
+        components: 1,
+        unit: None,
+        values: DataValues::UInt8(vec![0, 1, 254, 255]),
+    });
+
+    let xml = VtuWriter::write_ascii(&grid).expect("write VTU");
+    let parsed = VtuChecker::parse_ascii(&xml).expect("parse every emitted VTU data type");
+    assert_eq!(parsed.arrays, grid.arrays);
+}
+
+#[test]
 fn test_xdmf_export_and_binary_companion() {
     let mut grid = UnstructuredGrid::new();
     let p0 = grid.add_point(0.0, 0.0, 0.0);
@@ -154,8 +242,94 @@ fn test_xdmf_export_and_binary_companion() {
     assert!(xmf.contains("<Xdmf Version=\"3.0\">"));
     assert!(xmf.contains("<Topology TopologyType=\"Tetrahedron\""));
     assert!(xmf.contains("mesh.bin"));
+    assert!(xmf.contains("NumberType=\"Float\" Precision=\"8\""));
+    assert!(xmf.contains("Endian=\"Little\""));
     assert!(!bin.is_empty());
     assert_eq!(bin.len(), (4 * 8) + (4 * 3 * 8) + (4 * 8)); // 4 conn + 4*3 coords + 4 temp
+}
+
+#[test]
+fn test_xdmf_field_metadata_matches_binary_value_types() {
+    let mut grid = UnstructuredGrid::new();
+    let p0 = grid.add_point(0.0, 0.0, 0.0);
+    let p1 = grid.add_point(1.0, 0.0, 0.0);
+    let p2 = grid.add_point(0.0, 1.0, 0.0);
+    let p3 = grid.add_point(0.0, 0.0, 1.0);
+    grid.add_tetra(p0, p1, p2, p3);
+    for (name, values) in [
+        ("f32", DataValues::Float32(vec![1.0, 2.0, 3.0, 4.0])),
+        ("i32", DataValues::Int32(vec![1, 2, 3, 4])),
+        ("i64", DataValues::Int64(vec![1, 2, 3, 4])),
+        ("u8", DataValues::UInt8(vec![1, 2, 3, 4])),
+    ] {
+        grid.add_array(DataArray {
+            name: name.to_string(),
+            association: DataAssociation::PointData,
+            components: 1,
+            unit: None,
+            values,
+        });
+    }
+
+    let (xmf, _) = XdmfWriter::write_xdmf_with_binary(&grid, "typed.bin").expect("write XDMF");
+    for (name, number_type, precision) in [
+        ("f32", "Float", 4),
+        ("i32", "Int", 4),
+        ("i64", "Int", 8),
+        ("u8", "UInt", 1),
+    ] {
+        let attribute_start = xmf
+            .find(&format!("<Attribute Name=\"{name}\""))
+            .expect("attribute exists");
+        let attribute = &xmf[attribute_start..];
+        let attribute_end = attribute.find("</Attribute>").expect("attribute closes");
+        let attribute = &attribute[..attribute_end];
+        assert!(
+            attribute.contains(&format!(
+                "NumberType=\"{number_type}\" Precision=\"{precision}\""
+            )),
+            "wrong XDMF type metadata for {name}: {attribute}"
+        );
+    }
+}
+
+#[test]
+fn test_xdmf_mixed_topology_includes_cell_codes() {
+    let mut grid = UnstructuredGrid::new();
+    let p0 = grid.add_point(0.0, 0.0, 0.0);
+    let p1 = grid.add_point(1.0, 0.0, 0.0);
+    let p2 = grid.add_point(0.0, 1.0, 0.0);
+    let p3 = grid.add_point(0.0, 0.0, 1.0);
+    grid.add_tetra(p0, p1, p2, p3);
+    grid.add_triangle(p0, p1, p2);
+
+    let (xmf, bin) =
+        XdmfWriter::write_xdmf_with_binary(&grid, "mixed.bin").expect("write mixed XDMF topology");
+    assert!(xmf.contains("TopologyType=\"Mixed\" NumberOfElements=\"2\""));
+    assert!(xmf.contains("Dimensions=\"9\""));
+
+    let topology: Vec<u64> = bin[..9 * 8]
+        .chunks_exact(8)
+        .map(|bytes| u64::from_le_bytes(bytes.try_into().expect("eight bytes")))
+        .collect();
+    assert_eq!(topology, vec![6, 0, 1, 2, 3, 4, 0, 1, 2]);
+}
+
+#[test]
+fn test_xdmf_refuses_cell_types_without_lossless_mapping() {
+    let mut grid = UnstructuredGrid::new();
+    let p0 = grid.add_point(0.0, 0.0, 0.0);
+    let p1 = grid.add_point(1.0, 0.0, 0.0);
+    let p2 = grid.add_point(0.0, 1.0, 0.0);
+    grid.add_cell(CellType::TriangleStrip, &[p0, p1, p2]);
+
+    assert_eq!(
+        XdmfWriter::write_xdmf_with_binary(&grid, "strip.bin"),
+        Err(VtuError::UnsupportedXdmfCellType {
+            cell: 0,
+            type_id: CellType::TriangleStrip.type_id(),
+        })
+    );
 }
 
 #[test]
