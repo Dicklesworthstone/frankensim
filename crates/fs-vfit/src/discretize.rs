@@ -1884,7 +1884,16 @@ mod runtime_tests {
         // fitted order before bilinearization, even when the fitted residue
         // happens to be small for this constant-response fixture.
         let low_rate_filter = realize_tabulated(&omega, &h, 1.0, &opts, 0.0).expect("low-rate fit");
-        assert_eq!(low_rate_filter.sections.len(), 1);
+        // `bilinear` emits an exact zero quadratic denominator coefficient
+        // for a real first-order pole; this is a structural tag, not a
+        // numeric approximation.
+        #[allow(clippy::float_cmp)]
+        let represented_order: usize = low_rate_filter
+            .sections
+            .iter()
+            .map(|section| if section.a[1] == 0.0 { 1 } else { 2 })
+            .sum();
+        assert_eq!(represented_order, opts.order);
         assert!(low_rate_filter.is_stable());
     }
 
