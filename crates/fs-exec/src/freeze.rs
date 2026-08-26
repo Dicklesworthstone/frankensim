@@ -79,7 +79,7 @@ use crate::solver::snapshot_v2::{
     ExpectedResumeContextV2, PausedSnapshotBoundaryV2, SealedSnapshotV2, SnapshotAlgorithmIdV2,
     SnapshotBudgetStateIdV2, SnapshotDeterminismV2, SnapshotExecutionFingerprintIdV2,
     SnapshotLimitsV2, SnapshotPauseRequestIdV2, SnapshotProblemIdV2, SnapshotProvenanceIdV2,
-    SnapshotRngCounterIdV2, SnapshotV2Error, verify_state_charter,
+    SnapshotRngCounterIdV2, SnapshotV2Error,
 };
 use crate::solver::{SolverStateV2, snapshot_v2};
 
@@ -213,6 +213,7 @@ struct RegistrySlot {
     phase: FreezePhase,
     nonce: Option<FreezeNonce>,
     binding: Option<FreezeOwnerBinding>,
+    labels: Option<FreezeBoundaryLabels>,
 }
 
 /// Owner-held authority that mints and burns snapshot freeze permits.
@@ -221,11 +222,19 @@ struct RegistrySlot {
 /// authorize freezes for exactly one (owner, session, solver-instance
 /// generation); nobody else can obtain a permit because every minting path
 /// starts here and each registry performs exactly one transaction.
-#[derive(Debug)]
 pub struct SnapshotFreezeRegistry {
     id: [u8; 32],
     binding: FreezeOwnerBinding,
     slot: std::sync::Mutex<RegistrySlot>,
+}
+
+impl fmt::Debug for SnapshotFreezeRegistry {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SnapshotFreezeRegistry")
+            .field("binding", &self.binding)
+            .finish_non_exhaustive()
+    }
 }
 
 impl SnapshotFreezeRegistry {
@@ -242,6 +251,7 @@ impl SnapshotFreezeRegistry {
                 phase: FreezePhase::Armed,
                 nonce: None,
                 binding: None,
+                labels: None,
             }),
         })
     }
@@ -268,7 +278,10 @@ impl SnapshotFreezeRegistry {
     /// [`SnapshotFreezeError::TransactionAlreadyBegan`] unless freshly armed;
     /// [`SnapshotFreezeError::PoisonedTerminal`] after poisoning.
     pub fn begin_freeze(&self) -> Result<SnapshotFreezeRequest<'_>, SnapshotFreezeError> {
-        let mut slot = lock_slot(&self.slot)?;
+        let mut slot = self
+            .slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         match slot.phase {
             FreezePhase::Armed => {
                 slot.phase = FreezePhase::Admitted;
@@ -292,6 +305,9 @@ impl SnapshotFreezeRegistry {
         }
     }
 
+    /// Burn-before-call: only the exact frozen record accepts it; forged or
+    /// foreign permits are refused WITHOUT burning so the legitimate holder
+    /// can still seal.
     fn burn_for_seal(&self, core: &PermitCore) -> Result<(), SnapshotSealError> {
         let mut slot = self
             .slot
@@ -307,15 +323,16 @@ impl SnapshotFreezeRegistry {
             }
             _ => return Err(SnapshotSealError::WrongPhase { expected: "frozen" }),
         }
-        let recorded_ok = match (slot.nonce, slot.binding) {
-            (Some(nonce), Some(binding)) => {
-                nonce == core.nonce && binding == core.binding && self.id == core.registry_id
+        let recorded_ok = match (slot.nonce, slot.binding, slot.labels) {
+            (Some(nonce), Some(binding), Some(labels)) => {
+                nonce == core.nonce
+                    && binding == core.binding
+                    && labels == core.labels
+                    && self.id == core.registry_id
             }
             _ => false,
         };
         if !recorded_ok {
-            // A forged or foreign permit: refused WITHOUT burning, so the
-            // legitimate holder of the real permit can still seal.
             return Err(SnapshotSealError::RegistryMismatch);
         }
         slot.phase = FreezePhase::Burning;
@@ -336,17 +353,11 @@ impl SnapshotFreezeRegistry {
             slot.phase = FreezePhase::Frozen;
             slot.nonce = Some(core.nonce);
             slot.binding = Some(core.binding);
+            slot.labels = Some(core.labels);
         }
     }
 }
 
-fn lock_slot(
-    slot: &std::sync::Mutex<RegistrySlot>,
-) -> Result<std::sync::MutexGuard<'_, RegistrySlot>, SnapshotFreezeError> {
-    slot.lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .map(Ok)
-}
 
 /// Open transaction after [`SnapshotFreezeRegistry::begin_freeze`].
 ///
@@ -359,7 +370,7 @@ pub struct SnapshotFreezeRequest<'reg> {
     live: bool,
 }
 
-impl SnapshotFreezeRequest<'_> {
+impl<'reg> SnapshotFreezeRequest<'reg> {
     /// Capture `state`, drain the exact run, and encode the canonical payload
     /// exactly once.
     ///
@@ -380,7 +391,7 @@ impl SnapshotFreezeRequest<'_> {
         inputs: FreezeResumeInputs,
         limits: SnapshotLimitsV2,
         encode_cancellation: &mut dyn fs_blake3::identity::CancellationProbe,
-    ) -> Result<SnapshotFreezePermit<'_, S>, SnapshotFreezeError>
+    ) -> Result<SnapshotFreezePermit<'reg, S>, SnapshotFreezeError>
     where
         S: SolverStateV2,
     {
@@ -413,7 +424,11 @@ impl SnapshotFreezeRequest<'_> {
         };
         // Encode exactly once; the payload lives inside the permit from now
         // on, so sealing can never observe a mutated state.
-        let payload = match encode_payload_once::<S>(encode_cancellation, limits, &state) {
+        let payload = match snapshot_v2::encode_state_payload::<S>(
+            limits,
+            encode_cancellation,
+            &state,
+        ) {
             Ok(payload) => payload,
             Err(error) => {
                 self.registry.poison(FreezePoisonReason::CaptureRefused);
@@ -439,14 +454,6 @@ impl Drop for SnapshotFreezeRequest<'_> {
     }
 }
 
-fn lock_slot(
-    slot: &std::sync::Mutex<RegistrySlot>,
-) -> Result<std::sync::MutexGuard<'_, RegistrySlot>, SnapshotFreezeError> {
-    slot.lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .map(Ok)
-}
-
 /// Private shared permit data. Fully `Copy` so sealing can consume it without
 /// partial-move gymnastics.
 #[derive(Clone, Copy)]
@@ -458,6 +465,17 @@ struct PermitCore {
     inputs: FreezeResumeInputs,
     report: DrainFinalizeReport,
     commitment: [u8; 32],
+}
+
+impl fmt::Debug for PermitCore {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PermitCore")
+            .field("binding", &self.binding)
+            .field("nonce", &self.nonce)
+            .field("drained_run", &self.report.run().0)
+            .finish_non_exhaustive()
+    }
 }
 
 fn derive_nonce(registry_id: &[u8; 32], labels: &FreezeBoundaryLabels) -> FreezeNonce {
@@ -474,7 +492,6 @@ fn derive_nonce(registry_id: &[u8; 32], labels: &FreezeBoundaryLabels) -> Freeze
 /// allowed; cloning, copying, serializing, or rebuilding it is not. Sealing
 /// burns the nonce in the minting registry before any work and poisons the
 /// registry on panic, cancellation, or refusal.
-#[derive(Debug)]
 #[must_use = "an unsealed frozen state poisons its registry when dropped"]
 pub struct SnapshotFreezePermit<'reg, S> {
     registry: &'reg SnapshotFreezeRegistry,
@@ -482,6 +499,16 @@ pub struct SnapshotFreezePermit<'reg, S> {
     payload: Vec<u8>,
     state: Option<S>,
     limits_used: SnapshotLimitsV2,
+}
+
+impl<S> fmt::Debug for SnapshotFreezePermit<'_, S> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SnapshotFreezePermit")
+            .field("core", &self.core)
+            .field("payload_bytes", &self.payload.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl<S> SnapshotFreezePermit<'_, S> {
@@ -521,24 +548,19 @@ impl<S: SolverStateV2> SnapshotFreezePermit<'_, S> {
     /// [`SnapshotSealError::AlreadySpent`],
     /// [`SnapshotSealError::PoisonedTerminal`] for stale/replayed/duplicate
     /// burns.
-    pub fn seal<C>(mut self, mut seal_cancellation: C) -> Result<CommittedFreeze<S>, SnapshotSealError>
+    pub fn seal<C>(self, seal_cancellation: C) -> Result<CommittedFreeze<S>, SnapshotSealError>
     where
         C: fs_blake3::identity::CancellationProbe,
     {
         self.registry.burn_for_seal(&self.core)?;
         // From here every exit path terminates the slot explicitly; suppress
         // Drop so it cannot double-poison after ownership moved out.
-        let this = std::mem::ManuallyDrop::new(self);
+        let mut this = std::mem::ManuallyDrop::new(self);
         let core = this.core;
         let payload = core::mem::take(&mut this.payload);
         let state = this.state.take();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            seal_registered_payload::<S, C>(
-                &core,
-                &payload,
-                this.limits_used,
-                &mut seal_cancellation,
-            )
+            seal_registered_payload::<S, C>(&core, &payload, this.limits_used, seal_cancellation)
         }));
         match result {
             Ok(Ok(sealed)) => {
@@ -570,6 +592,22 @@ impl<S: SolverStateV2> SnapshotFreezePermit<'_, S> {
         Self {
             registry: self.registry,
             core: self.core,
+            payload: self.payload.clone(),
+            state: None,
+            limits_used: self.limits_used,
+        }
+    }
+
+    /// Test-only relabeling used to prove label substitution fails closed.
+    #[cfg(test)]
+    #[doc(hidden)]
+    pub fn test_with_labels(&self, labels: FreezeBoundaryLabels) -> Self {
+        let mut core = self.core;
+        core.labels = labels;
+        core.nonce = derive_nonce(&core.registry_id, &labels);
+        Self {
+            registry: self.registry,
+            core,
             payload: self.payload.clone(),
             state: None,
             limits_used: self.limits_used,
@@ -727,8 +765,20 @@ impl SnapshotFreezeReceipt {
     }
 }
 
+#[cfg(test)]
+fn test_limits() -> SnapshotLimitsV2 {
+    snapshot_v2::SnapshotLimitsV2::new(
+        1 << 20,
+        64,
+        fs_blake3::identity::CanonicalLimits::new(16_384, 4_096, 32, 32, 64),
+        4_096,
+        1 << 20,
+        64,
+    )
+}
+
 /// Refusal while driving the transaction up to permit minting.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SnapshotFreezeError {
     /// The caller supplied the all-zero instance nonce.
     ZeroInstanceNonce,
@@ -767,7 +817,7 @@ impl fmt::Display for SnapshotFreezeError {
 impl core::error::Error for SnapshotFreezeError {}
 
 /// Refusal or misuse detected while sealing a permit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SnapshotSealError {
     /// Structural or resource refusal from the v2 envelope machinery.
     Envelope(SnapshotV2Error),
@@ -807,31 +857,19 @@ impl fmt::Display for SnapshotSealError {
 
 impl core::error::Error for SnapshotSealError {}
 
-struct EncodeProbe<'a>(&'a mut dyn fs_blake3::identity::CancellationProbe);
+struct ProbeRef<'a>(&'a mut dyn fs_blake3::identity::CancellationProbe);
 
-impl fs_blake3::identity::CancellationProbe for EncodeProbe<'_> {
-    fn is_cancelled(&self) -> bool {
+impl fs_blake3::identity::CancellationProbe for ProbeRef<'_> {
+    fn is_cancelled(&mut self) -> bool {
         self.0.is_cancelled()
     }
-}
-
-fn encode_payload_once<S: SolverStateV2>(
-    cancellation: &mut dyn fs_blake3::identity::CancellationProbe,
-    limits: SnapshotLimitsV2,
-    state: &S,
-) -> Result<Vec<u8>, SnapshotV2Error> {
-    verify_state_charter::<S>()?;
-    let mut probe = EncodeProbe(cancellation);
-    let mut encoder = snapshot_v2::SnapshotEncoderV2::new(limits, &mut probe)?;
-    state.encode_v2(&mut encoder)?;
-    encoder.finish()
 }
 
 fn seal_registered_payload<S: SolverStateV2, C: fs_blake3::identity::CancellationProbe>(
     core: &PermitCore,
     payload: &[u8],
     limits: SnapshotLimitsV2,
-    cancellation: &mut C,
+    cancellation: C,
 ) -> Result<SealedSnapshotV2, SnapshotV2Error> {
     let boundary = PausedSnapshotBoundaryV2::from_drain_report(
         core.report,
@@ -851,7 +889,9 @@ fn seal_registered_payload<S: SolverStateV2, C: fs_blake3::identity::Cancellatio
     );
     let mut bytes = Vec::with_capacity(payload.len());
     bytes.extend_from_slice(payload);
-    snapshot_v2::seal_encoded_payload(bytes, &expected, limits, cancellation)
+    let mut cancellation = cancellation;
+    let probe = ProbeRef(&mut cancellation);
+    snapshot_v2::seal_encoded_payload(bytes, &expected, limits, probe)
 }
 
 fn build_receipt(core: &PermitCore, sealed: &SealedSnapshotV2) -> SnapshotFreezeReceipt {
@@ -870,8 +910,12 @@ fn build_receipt(core: &PermitCore, sealed: &SealedSnapshotV2) -> SnapshotFreeze
         identity: [0_u8; 32],
     };
     let identity_input = receipt_preimage(&receipt);
-    let identity = *fs_blake3::hash_domain(FREEZE_RECEIPT_IDENTITY_DOMAIN, &identity_input).as_bytes();
-    SnapshotFreezeReceipt { identity, ..receipt }
+    let identity =
+        *fs_blake3::hash_domain(FREEZE_RECEIPT_IDENTITY_DOMAIN, &identity_input).as_bytes();
+    SnapshotFreezeReceipt {
+        identity,
+        ..receipt
+    }
 }
 
 fn receipt_preimage(receipt: &SnapshotFreezeReceipt) -> Vec<u8> {
@@ -895,4 +939,344 @@ fn receipt_preimage(receipt: &SnapshotFreezeReceipt) -> Vec<u8> {
         FreezeDisposition::BytesCommitted => 2_u8,
     });
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cx::{CancelGate, ExecMode};
+    use crate::solver::snapshot_v2::{
+        SnapshotStateCodecIdV2, SnapshotStateSchemaIdV2, SnapshotStateTypeIdV2,
+    };
+    use std::sync::Arc;
+    use std::sync::Barrier;
+
+    const fn id32(tag: u8) -> [u8; 32] {
+        [tag; 32]
+    }
+
+    struct TestState {
+        marker: u64,
+    }
+
+    impl SolverStateV2 for TestState {
+        const STATE_TYPE_ID_V2: SnapshotStateTypeIdV2 =
+            SnapshotStateTypeIdV2::from_bytes(id32(0xA1));
+        const STATE_SCHEMA_ID_V2: SnapshotStateSchemaIdV2 =
+            SnapshotStateSchemaIdV2::from_bytes(id32(0xA2));
+        const STATE_CODEC_ID_V2: SnapshotStateCodecIdV2 =
+            SnapshotStateCodecIdV2::from_bytes(id32(0xA3));
+        const STATE_CODEC_VERSION_V2: u32 = 1;
+
+        fn encode_v2(
+            &self,
+            encoder: &mut snapshot_v2::SnapshotEncoderV2<'_>,
+        ) -> Result<(), SnapshotV2Error> {
+            encoder.put_u64(self.marker)
+        }
+
+        fn decode_v2(
+            decoder: &mut snapshot_v2::SnapshotDecoderV2<'_, '_>,
+        ) -> Result<Self, SnapshotV2Error> {
+            Ok(Self {
+                marker: decoder.get_u64()?,
+            })
+        }
+    }
+
+    /// Test probe: optional cancellation, optional seeded panic on first poll.
+    #[derive(Clone)]
+    struct TestProbe {
+        cancelled: bool,
+        panic_on_poll: bool,
+    }
+
+    impl TestProbe {
+        fn ok() -> Self {
+            Self {
+                cancelled: false,
+                panic_on_poll: false,
+            }
+        }
+    }
+
+    impl fs_blake3::identity::CancellationProbe for TestProbe {
+        fn is_cancelled(&mut self) -> bool {
+            if self.panic_on_poll {
+                panic!("seeded seal unwind");
+            }
+            self.cancelled
+        }
+    }
+
+    fn owner_binding(nonce_tag: u8) -> FreezeOwnerBinding {
+        FreezeOwnerBinding {
+            owner: id32(0x10),
+            session: 7,
+            solver_instance_generation: 3,
+            instance_nonce: id32(nonce_tag),
+        }
+    }
+
+    fn resume_inputs() -> FreezeResumeInputs {
+        FreezeResumeInputs {
+            algorithm: snapshot_v2::SnapshotAlgorithmIdV2::from_bytes(id32(0xB1)),
+            algorithm_version: 11,
+            problem: snapshot_v2::SnapshotProblemIdV2::from_bytes(id32(0xB2)),
+            rng_counter: snapshot_v2::SnapshotRngCounterIdV2::from_bytes(id32(0xB3)),
+            determinism: snapshot_v2::SnapshotDeterminismV2::Deterministic,
+            execution_fingerprint: snapshot_v2::SnapshotExecutionFingerprintIdV2::from_bytes(
+                id32(0xB4),
+            ),
+            budget_state: snapshot_v2::SnapshotBudgetStateIdV2::from_bytes(id32(0xB5)),
+            provenance: snapshot_v2::SnapshotProvenanceIdV2::from_bytes(id32(0xB6)),
+        }
+    }
+
+    fn boundary_labels(tag: u8) -> FreezeBoundaryLabels {
+        FreezeBoundaryLabels {
+            pause_request: snapshot_v2::SnapshotPauseRequestIdV2::from_bytes(id32(tag)),
+            gate_generation: 42,
+        }
+    }
+
+    fn test_limits() -> SnapshotLimitsV2 {
+        super::test_limits()
+    }
+
+    /// Gate requested + one worker registered and drained.
+    fn drained_tracker<'a>(gate: &'a CancelGate) -> DrainTracker<'a> {
+        gate.request();
+        let tracker = DrainTracker::new(RunId(77), gate);
+        drop(tracker.register_worker().expect("register worker"));
+        tracker
+    }
+
+    fn mint_permit<'a>(
+        registry: &'a SnapshotFreezeRegistry,
+        gate: &'a CancelGate,
+    ) -> Result<SnapshotFreezePermit<'a, TestState>, SnapshotFreezeError> {
+        let request = registry.begin_freeze()?;
+        let tracker = drained_tracker(gate);
+        request.freeze(
+            TestState { marker: 0x5EED },
+            &tracker,
+            boundary_labels(0xC1),
+            resume_inputs(),
+            test_limits(),
+            &mut TestProbe::ok(),
+        )
+    }
+
+    #[test]
+    fn zero_instance_nonce_is_refused() {
+        let mut binding = owner_binding(0x01);
+        binding.instance_nonce = [0_u8; 32];
+        assert_eq!(
+            SnapshotFreezeRegistry::new(binding).unwrap_err(),
+            SnapshotFreezeError::ZeroInstanceNonce
+        );
+    }
+
+    #[test]
+    fn committed_receipt_binds_every_identity() {
+        let registry = SnapshotFreezeRegistry::new(owner_binding(0x01)).unwrap();
+        let gate = CancelGate::new();
+        let permit = mint_permit(&registry, &gate).expect("freeze");
+        assert_eq!(permit.disposition(), FreezeDisposition::BytesPrepared);
+        assert_eq!(permit.drained_run(), RunId(77));
+
+        let committed = permit.seal(TestProbe::ok()).expect("seal");
+        let receipt = committed.receipt();
+        assert_eq!(receipt.disposition(), FreezeDisposition::BytesCommitted);
+        assert_eq!(receipt.registry_id(), registry.id());
+        assert_eq!(*receipt.binding(), owner_binding(0x01));
+        assert_eq!(receipt.labels(), &boundary_labels(0xC1));
+        assert_eq!(receipt.drained_run(), 77);
+        assert_eq!(receipt.worker_counts(), (1, 1));
+        assert_ne!(receipt.identity(), &[0_u8; 32]);
+        assert_ne!(receipt.sealed_content_id(), &[0_u8; 32]);
+        // Deterministic recompute: same inputs produce the same receipt id.
+        let identity_input = receipt_preimage(receipt);
+        assert_eq!(
+            *fs_blake3::hash_domain(FREEZE_RECEIPT_IDENTITY_DOMAIN, &identity_input).as_bytes(),
+            *receipt.identity()
+        );
+    }
+
+    #[test]
+    fn second_begin_is_refused_after_commit() {
+        let registry = SnapshotFreezeRegistry::new(owner_binding(0x02)).unwrap();
+        let gate = CancelGate::new();
+        let permit = mint_permit(&registry, &gate).unwrap();
+        let _committed = permit.seal(TestProbe::ok()).unwrap();
+        assert_eq!(
+            registry.begin_freeze().unwrap_err(),
+            SnapshotFreezeError::TransactionAlreadyBegan
+        );
+    }
+
+    #[test]
+    fn unconsumed_request_drop_poisons_terminal() {
+        let registry = SnapshotFreezeRegistry::new(owner_binding(0x03)).unwrap();
+        let first = registry.begin_freeze().unwrap();
+        assert_eq!(
+            registry.begin_freeze().unwrap_err(),
+            SnapshotFreezeError::TransactionAlreadyBegan
+        );
+        drop(first);
+        assert!(matches!(
+            registry.begin_freeze().unwrap_err(),
+            SnapshotFreezeError::PoisonedTerminal(_)
+        ));
+    }
+
+    #[test]
+    fn drain_refusal_poisons_terminal() {
+        let registry = SnapshotFreezeRegistry::new(owner_binding(0x04)).unwrap();
+        let gate = CancelGate::new();
+        // Gate NOT requested: finalize must refuse and poison.
+        let tracker = DrainTracker::new(RunId(5), &gate);
+        drop(tracker.register_worker().unwrap());
+        let request = registry.begin_freeze().unwrap();
+        let error = request
+            .freeze(
+                TestState { marker: 1 },
+                &tracker,
+                boundary_labels(0xC2),
+                resume_inputs(),
+                test_limits(),
+                &mut TestProbe::ok(),
+            )
+            .unwrap_err();
+        assert!(matches!(error, SnapshotFreezeError::Drain(_)));
+        assert!(matches!(
+            registry.begin_freeze().unwrap_err(),
+            SnapshotFreezeError::PoisonedTerminal(_)
+        ));
+    }
+
+    #[test]
+    fn cancelled_encode_poisons_terminal() {
+        let registry = SnapshotFreezeRegistry::new(owner_binding(0x05)).unwrap();
+        let gate = CancelGate::new();
+        let request = registry.begin_freeze().unwrap();
+        let tracker = drained_tracker(&gate);
+        let error = request
+            .freeze(
+                TestState { marker: 2 },
+                &tracker,
+                boundary_labels(0xC3),
+                resume_inputs(),
+                test_limits(),
+                &mut TestProbe {
+                    cancelled: true,
+                    panic_on_poll: false,
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(error, SnapshotFreezeError::Encode(_)));
+        assert!(matches!(
+            registry.begin_freeze().unwrap_err(),
+            SnapshotFreezeError::PoisonedTerminal(_)
+        ));
+    }
+
+    #[test]
+    fn seal_panic_poisons_terminal_and_propagates() {
+        let registry = SnapshotFreezeRegistry::new(owner_binding(0x06)).unwrap();
+        let gate = CancelGate::new();
+        let permit = mint_permit(&registry, &gate).unwrap();
+        let duplicate = permit.test_duplicate_for_refusal_probes();
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _ = permit.seal(TestProbe {
+                cancelled: false,
+                panic_on_poll: true,
+            });
+        }));
+        assert!(unwound.is_err(), "panic must propagate after poisoning");
+        // Duplicate sealing afterwards hits the poisoned terminal.
+        assert!(matches!(
+            duplicate.seal(TestProbe::ok()).unwrap_err(),
+            SnapshotSealError::PoisonedTerminal(_)
+        ));
+    }
+
+    #[test]
+    fn tampered_labels_fail_closed_without_burning() {
+        let registry = SnapshotFreezeRegistry::new(owner_binding(0x07)).unwrap();
+        let gate = CancelGate::new();
+        let permit = mint_permit(&registry, &gate).unwrap();
+        let tampered = permit.test_with_labels(boundary_labels(0xFF));
+        assert!(matches!(
+            tampered.seal(TestProbe::ok()).unwrap_err(),
+            SnapshotSealError::RegistryMismatch
+        ));
+        // The legitimate permit still seals: nothing was burned.
+        let committed = permit.seal(TestProbe::ok()).expect("legitimate seal");
+        assert_eq!(
+            committed.receipt().disposition(),
+            FreezeDisposition::BytesCommitted
+        );
+    }
+
+    #[test]
+    fn replay_after_commit_refuses_as_already_spent() {
+        let registry = SnapshotFreezeRegistry::new(owner_binding(0x08)).unwrap();
+        let gate = CancelGate::new();
+        let permit = mint_permit(&registry, &gate).unwrap();
+        let replay = permit.test_duplicate_for_refusal_probes();
+        let _committed = permit.seal(TestProbe::ok()).unwrap();
+        assert_eq!(
+            replay.seal(TestProbe::ok()).unwrap_err(),
+            SnapshotSealError::AlreadySpent
+        );
+    }
+
+    fn duplicate_seals_after_commit_refuse_as_spent() {
+        let registry = SnapshotFreezeRegistry::new(owner_binding(0x09)).unwrap();
+        let gate = CancelGate::new();
+        let permit = mint_permit(&registry, &gate).unwrap();
+        let first_duplicate = permit.test_duplicate_for_refusal_probes();
+        let second_duplicate = permit.test_duplicate_for_refusal_probes();
+        let _committed = permit.seal(TestProbe::ok()).unwrap();
+        assert_eq!(
+            first_duplicate.seal(TestProbe::ok()).unwrap_err(),
+            SnapshotSealError::AlreadySpent
+        );
+        assert_eq!(
+            second_duplicate.seal(TestProbe::ok()).unwrap_err(),
+            SnapshotSealError::AlreadySpent
+        );
+    }
+
+    #[test]
+    fn concurrent_begins_admit_exactly_one_transaction() {
+        let registry = Arc::new(SnapshotFreezeRegistry::new(owner_binding(0x0A)).unwrap());
+        let barrier = Arc::new(Barrier::new(8));
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    let admitted = registry.begin_freeze().is_ok();
+                    // Dropping a winning request here poisons the terminal;
+                    // admission counting stays exact either way.
+                    admitted
+                })
+            })
+            .collect();
+        let mut winners = 0;
+        for handle in handles {
+            if handle.join().unwrap().is_ok() {
+                winners += 1;
+            }
+        }
+        assert_eq!(winners, 1);
+    }
+
+    #[test]
+    fn exec_mode_remains_importable_for_callers() {
+        // Guard against accidental removal of re-exports used by sessions.
+        let _mode = ExecMode::Deterministic;
+    }
 }

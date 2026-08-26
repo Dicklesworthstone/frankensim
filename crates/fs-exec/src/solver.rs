@@ -4678,6 +4678,22 @@ pub mod snapshot_v2 {
         })
     }
 
+
+    /// Crate-internal single-pass payload encoder for the freeze transaction
+    /// path (bead sj31i.52.5.4.1). Same charter/limits/cancellation contract
+    /// as [`super::SolverStateV2::seal_v2`]'s encode prefix; sealing the
+    /// returned bytes remains [`seal_encoded_payload`].
+    pub(crate) fn encode_state_payload<S: super::SolverStateV2>(
+        limits: SnapshotLimitsV2,
+        cancellation: &mut dyn CancellationProbe,
+        state: &S,
+    ) -> Result<Vec<u8>, SnapshotV2Error> {
+        verify_state_charter::<S>()?;
+        let mut encoder = SnapshotEncoderV2::new(limits, cancellation)?;
+        state.encode_v2(&mut encoder)?;
+        encoder.finish()
+    }
+
     #[cfg(test)]
     pub(super) fn seal<C: CancellationProbe>(
         payload: &[u8],
