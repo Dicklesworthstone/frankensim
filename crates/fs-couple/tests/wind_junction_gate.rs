@@ -250,11 +250,14 @@ fn wind_gate_summary_enumerates_every_registry_row() {
 /// Oversized FFT extents must clamp INSIDE the documented [256, 8192]
 /// band BEFORE power-of-two rounding (bead frankensim-u6pph): the
 /// pre-fix code rounded first and panicked on `usize::MAX`. The
-/// capped-oversized requests must be bit-identical to authoring the
-/// cap directly, and in-band values must still round UP to their own
-/// power of two — the budget is neither broadened nor lowered.
+/// capped-oversized requests must select the same FFT extent as
+/// authoring the cap directly, and in-band values must still round UP
+/// to their own power of two — the budget is neither broadened nor
+/// lowered. `DelayedFilter::history()` exposes the outgoing-wave ring
+/// buffer, so its length is the public witness for the selected FIR
+/// extent; it is not an accessor for the FIR coefficients.
 #[test]
-fn fft_extents_clamp_before_rounding_and_stay_bit_exact() {
+fn fft_extents_clamp_before_rounding_and_preserve_sizes() {
     use fs_couple::driving_point::{characteristic_line_dense, impedance_line};
 
     let duct = Duct {
@@ -288,11 +291,8 @@ fn fft_extents_clamp_before_rounding_and_stay_bit_exact() {
         Some(usize::MAX),
     )
     .expect("usize::MAX override must clamp instead of panicking");
-    assert_eq!(
-        max_requested.history(),
-        capped.history(),
-        "override far above the cap must realize the SAME FIR as the cap"
-    );
+    assert_eq!(capped.history().len(), 8192);
+    assert_eq!(max_requested.history().len(), 8192);
     let just_over = characteristic_line_dense(
         &duct,
         &gas,
@@ -304,7 +304,7 @@ fn fft_extents_clamp_before_rounding_and_stay_bit_exact() {
         Some(9000),
     )
     .expect("9000 realizes");
-    assert_eq!(just_over.history(), capped.history());
+    assert_eq!(just_over.history().len(), 8192);
     let in_band = characteristic_line_dense(
         &duct,
         &gas,
@@ -327,19 +327,20 @@ fn fft_extents_clamp_before_rounding_and_stay_bit_exact() {
         Some(4096),
     )
     .expect("4096 realizes");
-    assert_eq!(
-        in_band.history(),
-        rounded_up.history(),
-        "in-band non-power-of-two still rounds UP to its own PoT"
-    );
+    assert_eq!(in_band.history().len(), 4096);
+    assert_eq!(rounded_up.history().len(), 4096);
 
     let capped_z = impedance_line(&duct, &gas, Termination::UnflangedOpen, RATE, 8192, None)
         .expect("impedance cap");
-    let max_z = impedance_line(&duct, &gas, Termination::UnflangedOpen, RATE, usize::MAX, None)
-        .expect("usize::MAX request must clamp instead of panicking");
-    assert_eq!(
-        max_z.history(),
-        capped_z.history(),
-        "oversized history extent must realize the SAME impedance FIR"
-    );
+    let max_z = impedance_line(
+        &duct,
+        &gas,
+        Termination::UnflangedOpen,
+        RATE,
+        usize::MAX,
+        None,
+    )
+    .expect("usize::MAX request must clamp instead of panicking");
+    assert_eq!(capped_z.history().len(), 8192);
+    assert_eq!(max_z.history().len(), 8192);
 }
