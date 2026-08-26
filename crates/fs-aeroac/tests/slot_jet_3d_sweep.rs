@@ -77,11 +77,13 @@ fn re_sweep_campaign() {
     );
 
     let only = only_rung();
+    let mut filtered_rate = Option::<f64>::None;
     for (rung_idx, rate) in LADDER.iter().enumerate() {
         if let Some(o) = only {
             if rung_idx != o {
                 continue;
             }
+            filtered_rate = Some(*rate);
         }
         let cfg = base_config(*rate);
         let started = std::time::Instant::now();
@@ -162,9 +164,9 @@ fn re_sweep_campaign() {
         cfg_hi.nz, cls_hi.reynolds, cls_hi.flatness, cls_hi.tonal, cls_hi.strouhal
     );
 
-    if only.is_some() {
+    if let Some(rate) = filtered_rate {
         let rung_path =
-            receipt_path.with_file_name(format!("slot-jet-3d-re-sweep-rung{:.2}.jsonl", rate));
+            receipt_path.with_file_name(format!("slot-jet-3d-re-sweep-rung{rate:.2}.jsonl"));
         std::fs::write(&rung_path, &jsonl).expect("archive per-rung receipts");
         println!("archived: {}", rung_path.display());
     } else {
