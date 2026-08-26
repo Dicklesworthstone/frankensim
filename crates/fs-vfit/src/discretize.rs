@@ -850,6 +850,12 @@ pub enum DiscretizeError {
         /// Coefficient requiring a separate differentiator section.
         e_leftover: f64,
     },
+    /// The discrete frequency-response solve is singular at the requested
+    /// frequency.
+    SingularStateSpaceResponse {
+        /// Elimination step whose pivot vanished.
+        pivot: usize,
+    },
 }
 
 impl core::fmt::Display for DiscretizeError {
@@ -889,6 +895,10 @@ impl core::fmt::Display for DiscretizeError {
             DiscretizeError::UnrealizedImproperTerm { e_leftover } => write!(
                 f,
                 "runtime state-space step cannot realize e_leftover={e_leftover}; use the separate differentiator section"
+            ),
+            DiscretizeError::SingularStateSpaceResponse { pivot } => write!(
+                f,
+                "discrete state-space frequency-response solve is singular at pivot {pivot}"
             ),
         }
     }
@@ -1172,7 +1182,7 @@ impl DiscreteStateSpace {
         })
     }
 
-    fn validate_runtime_realization(&self) -> Result<(), DiscretizeError> {
+    fn validate_realization(&self) -> Result<(), DiscretizeError> {
         let matrix_len = self
             .n
             .checked_mul(self.n)
@@ -1189,6 +1199,11 @@ impl DiscreteStateSpace {
         if self.t_s <= 0.0 {
             return Err(DiscretizeError::BadSampleInterval);
         }
+        Ok(())
+    }
+
+    fn validate_runtime_realization(&self) -> Result<(), DiscretizeError> {
+        self.validate_realization()?;
         if self.e_leftover != 0.0 {
             return Err(DiscretizeError::UnrealizedImproperTerm {
                 e_leftover: self.e_leftover,
@@ -1202,10 +1217,15 @@ impl DiscreteStateSpace {
     /// section).
     ///
     /// # Errors
-    /// Singular `(z I - Ad)` (resonance exactly on the unit circle).
-    pub fn eval(&self, omega: f64) -> Result<C64, fs_la::eigen_complex::EigFailure> {
+    /// A malformed/non-finite public realization, a non-finite frequency or
+    /// phase, a singular `(z I - Ad)`, or a non-finite solve result.
+    pub fn eval(&self, omega: f64) -> Result<C64, DiscretizeError> {
+        self.validate_realization()?;
+        require_finite_scalar("omega", omega)?;
+        let phase = omega * self.t_s;
+        require_finite_scalar("frequency_phase", phase)?;
         let n = self.n;
-        let z = C64::new(det::cos(omega * self.t_s), det::sin(omega * self.t_s));
+        let z = C64::new(det::cos(phase), det::sin(phase));
         let mut m = vec![C64::ZERO; n * n];
         for i in 0..n {
             for j in 0..n {
@@ -1213,12 +1233,31 @@ impl DiscreteStateSpace {
             }
             m[i * n + i] = m[i * n + i] + z;
         }
-        let lu = fs_la::eigen_complex::lu_complex(&m, n)?;
+        let lu = fs_la::eigen_complex::lu_complex(&m, n).map_err(|failure| {
+            DiscretizeError::SingularStateSpaceResponse {
+                pivot: failure.window_hi,
+            }
+        })?;
         let mut x: Vec<C64> = self.b.iter().map(|&v| C64::from_re(v)).collect();
         lu.solve(&mut x);
+        if let Some(index) = x
+            .iter()
+            .position(|value| !(value.re.is_finite() && value.im.is_finite()))
+        {
+            return Err(DiscretizeError::NonFiniteRuntimeValue {
+                field: "state_space_response_solve",
+                index: Some(index),
+            });
+        }
         let mut acc = C64::from_re(self.d);
         for (ci, xi) in self.c.iter().zip(&x) {
             acc = acc + xi.scale(*ci);
+        }
+        if !(acc.re.is_finite() && acc.im.is_finite()) {
+            return Err(DiscretizeError::NonFiniteRuntimeValue {
+                field: "state_space_response",
+                index: None,
+            });
         }
         Ok(acc)
     }
@@ -1372,6 +1411,71 @@ mod runtime_tests {
             Err(DiscretizeError::NonFiniteRuntimeValue { field: "input", .. })
         ));
         assert_eq!(runtime.state(), [0.0]);
+    }
+
+    #[test]
+    fn g0_frequency_evaluation_refuses_malformed_and_nonfinite_inputs() {
+        let mut malformed = first_order();
+        malformed.a.clear();
+        assert!(matches!(
+            malformed.eval(0.0),
+            Err(DiscretizeError::InvalidRuntimeDimensions { field: "a", .. })
+        ));
+
+        let mut nonfinite = first_order();
+        nonfinite.d = f64::NAN;
+        assert!(matches!(
+            nonfinite.eval(0.0),
+            Err(DiscretizeError::NonFiniteRuntimeValue { field: "d", .. })
+        ));
+
+        let system = first_order();
+        assert!(matches!(
+            system.eval(f64::INFINITY),
+            Err(DiscretizeError::NonFiniteRuntimeValue { field: "omega", .. })
+        ));
+        let mut overflowing_phase = first_order();
+        overflowing_phase.t_s = 2.0;
+        assert!(matches!(
+            overflowing_phase.eval(f64::MAX),
+            Err(DiscretizeError::NonFiniteRuntimeValue {
+                field: "frequency_phase",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn g0_frequency_evaluation_refuses_singular_and_nonfinite_solves() {
+        let mut singular = first_order();
+        singular.a[0] = 1.0;
+        assert!(matches!(
+            singular.eval(0.0),
+            Err(DiscretizeError::SingularStateSpaceResponse { pivot: 0 })
+        ));
+
+        let mut overflowing_solve = first_order();
+        overflowing_solve.b[0] = f64::MAX;
+        assert!(matches!(
+            overflowing_solve.eval(0.0),
+            Err(DiscretizeError::NonFiniteRuntimeValue {
+                field: "state_space_response_solve",
+                index: Some(0)
+            })
+        ));
+
+        let mut overflowing_sum = first_order();
+        overflowing_sum.a[0] = 0.0;
+        overflowing_sum.b[0] = 1.0;
+        overflowing_sum.c[0] = f64::MAX;
+        overflowing_sum.d = f64::MAX;
+        assert!(matches!(
+            overflowing_sum.eval(0.0),
+            Err(DiscretizeError::NonFiniteRuntimeValue {
+                field: "state_space_response",
+                index: None
+            })
+        ));
     }
 
     #[test]
