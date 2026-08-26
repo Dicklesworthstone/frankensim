@@ -338,10 +338,10 @@ fn dispatch_equivalence_outcome() -> CaseOutcome {
             for ((computed_row, reference_row), initial_row) in computed
                 .iter_mut()
                 .zip(&mut reference)
-                .zip(initial.chunks_exact(4))
+                .zip(initial.as_chunks::<4>().0)
             {
-                computed_row.copy_from_slice(initial_row);
-                reference_row.copy_from_slice(initial_row);
+                *computed_row = *initial_row;
+                *reference_row = *initial_row;
             }
             (table.mk8x4_f64)(&a, &b, depth, &mut computed);
             scalar::mk8x4_f64(&a, &b, depth, &mut reference);

@@ -159,6 +159,7 @@ pub fn fmacc(a: &[f64], b: &[f64], acc: &mut [f64]) {
 }
 
 /// dot product
+#[must_use]
 pub fn dot(x: &[f64], y: &[f64]) -> f64 {
     assert_eq!(x.len(), y.len(), "dot length mismatch");
     let (xc, xt) = x.as_chunks::<LANES>();
@@ -188,6 +189,7 @@ pub fn dot(x: &[f64], y: &[f64]) -> f64 {
 }
 
 /// Sum elements
+#[must_use]
 pub fn sum(x: &[f64]) -> f64 {
     let (xc, xt) = x.as_chunks::<LANES>();
     let mut total = 0.0f64;
