@@ -55,6 +55,26 @@ pub enum TaylorModelError {
     },
     /// Binary arithmetic requires exactly matching centers and domains.
     IncompatibleModels,
+    /// The domain box is empty or degenerate.
+    EmptyDomain,
+    /// Denominator interval range contains zero in division.
+    DenominatorContainsZero,
+    /// Truncation target order is greater than the model's current order.
+    TruncationOrderTooLarge {
+        /// Requested order.
+        requested: usize,
+        /// Current order.
+        current: usize,
+    },
+    /// The specified variable axis index is out of bounds.
+    AxisIndexOutOfBounds {
+        /// Requested axis.
+        axis: usize,
+        /// Dimensionality of the model.
+        dim: usize,
+    },
+    /// Derivative remainder capability is unavailable or was dropped.
+    DerivativeCapabilityUnavailable,
 }
 
 impl core::fmt::Display for TaylorModelError {
@@ -76,6 +96,22 @@ impl core::fmt::Display for TaylorModelError {
                 write!(f, "could not reserve {coefficients} Taylor coefficients")
             }
             Self::IncompatibleModels => write!(f, "Taylor models have incompatible domains"),
+            Self::EmptyDomain => write!(f, "Taylor domain is empty"),
+            Self::DenominatorContainsZero => {
+                write!(f, "Taylor denominator enclosure contains zero in division")
+            }
+            Self::TruncationOrderTooLarge { requested, current } => {
+                write!(
+                    f,
+                    "cannot truncate Taylor model of order {current} to higher order {requested}"
+                )
+            }
+            Self::AxisIndexOutOfBounds { axis, dim } => {
+                write!(f, "Taylor axis index {axis} is out of bounds for dimension {dim}")
+            }
+            Self::DerivativeCapabilityUnavailable => {
+                write!(f, "Taylor model derivative remainder capability is unavailable")
+            }
         }
     }
 }
@@ -209,6 +245,30 @@ impl TaylorModel1 {
     #[must_use]
     pub fn order(&self) -> usize {
         self.poly.len() - 1
+    }
+
+    /// Expansion center.
+    #[must_use]
+    pub fn center(&self) -> f64 {
+        self.c
+    }
+
+    /// Polynomial coefficients in powers of `x - c`.
+    #[must_use]
+    pub fn poly(&self) -> &[f64] {
+        &self.poly
+    }
+
+    /// Set a polynomial coefficient.
+    pub fn set_poly_coeff(&mut self, idx: usize, val: f64) {
+        if idx < self.poly.len() {
+            self.poly[idx] = val;
+        }
+    }
+
+    /// Set remainder interval.
+    pub fn set_remainder(&mut self, rem: Interval) {
+        self.rem = rem;
     }
 
     /// The domain.

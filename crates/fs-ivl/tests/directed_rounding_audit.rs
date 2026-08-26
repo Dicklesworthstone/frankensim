@@ -275,8 +275,9 @@ fn g3_ordering_involution_reflection_and_pow2_scaling_laws() {
         assert!(up > x, "ordering at {x:e}");
         // Involution (value equality: +0/-0 collapse is correct behavior).
         if up.is_finite() {
+            let down = fs_math::next_down(up);
             assert!(
-                same(fs_math::next_down(up), x),
+                same(down, x) || down == x,
                 "involution at {x:e}"
             );
         }

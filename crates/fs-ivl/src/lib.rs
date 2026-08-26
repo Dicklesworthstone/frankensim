@@ -27,12 +27,17 @@ pub mod formal_binding;
 pub mod formal_manifest;
 pub mod formal_proofs;
 pub mod interval;
+pub mod multi_taylor;
 pub mod newton;
 pub mod predicates;
 pub mod taylor;
 
 pub use affine::{Affine, AffineCtx};
 pub use interval::Interval;
+pub use multi_taylor::{
+    MAX_MODEL_MEMORY_BYTES, MAX_MULTIVARIATE_DIM, MAX_MULTIVARIATE_ORDER, MAX_MULTIVARIATE_TERMS,
+    TaylorModel, VariableInfo, binomial, generate_multi_indices, term_count,
+};
 pub use newton::{
     DEFAULT_MAX_ROOT_BOXES, RootBox, RootSearchConfig, RootSearchError, RootSearchReport,
     krawczyk_step, lipschitz_bound, newton_roots, newton_roots_bounded,

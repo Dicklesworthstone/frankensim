@@ -118,10 +118,22 @@ impl Interval {
         self.hi
     }
 
-    /// Width (hi − lo, rounded up — a certified width never understates).
+    /// Width (hi − lo, rounded up – a certified width never understates).
     #[must_use]
     pub fn width(self) -> f64 {
         up_k(self.hi - self.lo, 1)
+    }
+
+    /// Half-width / radius (0.5 * width, rounded up).
+    #[must_use]
+    pub fn rad(self) -> f64 {
+        up_k(0.5 * (self.hi - self.lo), 1)
+    }
+
+    /// Half-width / radius (0.5 * width, rounded up).
+    #[must_use]
+    pub fn radius(self) -> f64 {
+        self.rad()
     }
 
     /// Midpoint (a representative point, NOT certified to be central).
