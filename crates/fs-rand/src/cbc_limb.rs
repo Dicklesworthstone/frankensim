@@ -107,11 +107,18 @@ impl LimbCursor {
 /// Outcome of advancing a microprogram.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StepOutcome {
-    /// At least one cell mutated state and more may remain.
-    Advanced,
+    /// Cells mutated state and more may remain (carries the count).
+    Advanced {
+        /// Mutation cells consumed during this call.
+        cells: usize,
+    },
     /// The operation reached its commit boundary; bytes are final and
-    /// further steps refuse as no-ops.
-    Complete,
+    /// further steps refuse as no-ops (carries trailing cells consumed on
+    /// the committing call).
+    Complete {
+        /// Mutation cells consumed during this call.
+        cells: usize,
+    },
     /// The cursor violated operand bounds or the growth ceiling. Nothing
     /// was mutated.
     Refused,
@@ -139,19 +146,19 @@ pub fn step_add_multiply(
     factor_len: usize,
     cursor: &mut LimbCursor,
     budget: usize,
-) -> StepOutcome {
+) -> (StepOutcome, usize) {
     if cursor.version != LIMB_CURSOR_VERSION
         || cursor.src_pos > src.len()
         || cursor.factor_pos > factor_len
         || cursor.dst_pos > cursor.limit
         || cursor.fill_to > cursor.limit
     {
-        return StepOutcome::Refused;
+        return (StepOutcome::Refused, 0);
     }
     if src.is_empty() || factor_len == 0 {
         // Multiplying by zero limbs changes nothing (historical early-out);
         // the accumulator keeps its retained spare zero limbs.
-        return StepOutcome::Complete;
+        return (StepOutcome::Complete { cells: 0 }, 0);
     }
     let mut used = 0_usize;
     while used < budget {
@@ -181,7 +188,7 @@ pub fn step_add_multiply(
                 let destination = cursor.src_pos + cursor.factor_pos;
                 if destination >= dst.len() {
                     if destination >= cursor.limit {
-                        return StepOutcome::Refused;
+                        return (StepOutcome::Refused, used);
                     }
                     dst.push(0);
                 }
@@ -197,7 +204,7 @@ pub fn step_add_multiply(
             ExactOpKind::AddMultiplyDrain => {
                 if cursor.src_pos >= src.len() {
                     // Parked terminal state: fully committed.
-                    return StepOutcome::Complete;
+                    return (StepOutcome::Complete { cells: used }, used);
                 }
                 if cursor.carry == 0 {
                     // Row finished without residual carry: next row.
@@ -205,7 +212,7 @@ pub fn step_add_multiply(
                     cursor.factor_pos = 0;
                     cursor.carry = 0;
                     if cursor.src_pos >= src.len() {
-                        return StepOutcome::Complete;
+                        return (StepOutcome::Complete { cells: used }, used);
                     }
                     cursor.kind = ExactOpKind::AddMultiplyCell;
                     continue;
@@ -215,7 +222,7 @@ pub fn step_add_multiply(
                     if d >= cursor.limit {
                         // Carry wants space past the growth bound:
                         // fail closed rather than allocate.
-                        return StepOutcome::Refused;
+                        return (StepOutcome::Refused, used);
                     }
                     dst.push(0);
                 }
@@ -227,7 +234,7 @@ pub fn step_add_multiply(
             }
         }
     }
-    StepOutcome::Advanced
+    (StepOutcome::Advanced { cells: used }, used)
 }
 
 /// Whether an add-multiply cursor has parked at its commit boundary.
@@ -292,9 +299,9 @@ mod limb_kernel_tests {
             LimbCursor::begin_add_multiply(src.len(), flen, dst.len(), needed, usize::MAX);
         loop {
             match step_add_multiply(&mut dst, src, &words, flen, &mut cursor, split) {
-                StepOutcome::Advanced => {}
-                StepOutcome::Complete => break,
-                StepOutcome::Refused => panic!("unbounded driver refused in-bounds work"),
+                (StepOutcome::Advanced { .. }, _) => {}
+                (StepOutcome::Complete { .. }, _) => break,
+                (StepOutcome::Refused, _) => panic!("unbounded driver refused in-bounds work"),
             }
         }
         dst.truncate(needed);
@@ -336,9 +343,9 @@ mod limb_kernel_tests {
         let mut cursor = LimbCursor::begin_add_multiply(1, flen, acc.len(), 1 + flen + 1, cap);
         loop {
             match step_add_multiply(&mut acc, &[2], &words, flen, &mut cursor, 1) {
-                StepOutcome::Complete => break,
-                StepOutcome::Advanced => {}
-                StepOutcome::Refused => panic!("growth bound refused reachable ripple"),
+                (StepOutcome::Complete { .. }, _) => break,
+                (StepOutcome::Advanced { .. }, _) => {}
+                (StepOutcome::Refused, _) => panic!("growth bound refused reachable ripple"),
             }
         }
         assert_eq!(acc, vec![0, 0, 6]);

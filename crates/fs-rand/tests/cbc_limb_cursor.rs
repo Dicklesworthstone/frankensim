@@ -159,6 +159,9 @@ fn clc_003_cancellation_at_microstep_boundaries_never_half_commits() {
                 );
             }
             CbcRunStatus::AllowanceExhausted(_) => {}
+            CbcRunStatus::NeedAllowance(_, minimum) => panic!(
+                "one-cell budget cannot shortfall: minimum {minimum} exceeds remaining"
+            ),
         }
         guard += 1;
         assert!(guard < 10_000, "adversarial stepping failed to converge");
@@ -235,7 +238,7 @@ fn clc_005_tampered_or_stale_cursors_are_refused_without_mutation() {
     let mut probe = stale;
     assert_eq!(
         step_add_multiply(&mut dst, &[1], &words, flen, &mut probe, 8),
-        StepOutcome::Refused
+        (StepOutcome::Refused, 0)
     );
 
     // Out-of-bounds source position refuses rather than clamping.
@@ -246,7 +249,7 @@ fn clc_005_tampered_or_stale_cursors_are_refused_without_mutation() {
     let mut probe = beyond;
     assert_eq!(
         step_add_multiply(&mut dst, &[1], &words, flen, &mut probe, 8),
-        StepOutcome::Refused
+        (StepOutcome::Refused, 0)
     );
     assert_eq!(dst, vec![7], "refusals never mutate the destination");
 }

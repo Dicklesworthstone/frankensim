@@ -128,6 +128,9 @@ fn crt_002_certificates_are_invariant_under_tiling_and_pause_resume() {
             .expect("sliced certified runs stay within the schedule")
         {
             CbcRunStatus::Completed => break,
+            CbcRunStatus::NeedAllowance(_, _) => panic!(
+                "50k-unit slices exceed any atomic step here"
+            ),
             CbcRunStatus::AllowanceExhausted(_) => {}
             CbcRunStatus::Cancelled(_) => panic!("nothing requested cancellation"),
         }

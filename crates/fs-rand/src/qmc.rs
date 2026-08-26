@@ -308,9 +308,9 @@ impl ExactNat {
                 &mut cursor,
                 usize::MAX,
             ) {
-                crate::cbc_limb::StepOutcome::Advanced => {}
-                crate::cbc_limb::StepOutcome::Complete => break,
-                crate::cbc_limb::StepOutcome::Refused => {
+                (crate::cbc_limb::StepOutcome::Advanced { .. }, _) => {}
+                (crate::cbc_limb::StepOutcome::Complete { .. }, _) => break,
+                (crate::cbc_limb::StepOutcome::Refused, _) => {
                     unreachable!("preflight proved every cursor bound");
                 }
             }

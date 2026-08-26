@@ -115,6 +115,9 @@ fn cbx_003_cancellation_drains_and_never_half_commits() {
             .run(&mut poll, tile, u128::MAX)
             .expect("cancellation is a status, not an error");
         match status {
+            CbcRunStatus::NeedAllowance(_, _) => panic!(
+                "u128::MAX allowance can never shortfall"
+            ),
             CbcRunStatus::Cancelled(_) => {
                 // The committed prefix is a byte-exact prefix of the final
                 // vector: no half-committed component exists.
@@ -170,14 +173,27 @@ fn cbx_004_allowance_pause_resume_equals_one_shot() {
     let tile = CbcTileShape::new(5, 32).expect("static tile shape");
     let mut keep_going = || CbcControl::Continue;
     let mut runs = 0_u32;
+    let mut slice = one_shot_spent / 97 + 1;
     loop {
         runs += 1;
         assert!(runs < 1_000_000, "allowance loop failed to converge");
+        // Real drivers size the allowance to the remaining schedule
+        // headroom so the final call lands exactly on the sealed bound.
+        slice = slice.min(one_shot_spent - executor.work_spent());
+        if std::env::var_os("CBC_DEBIT_TRACE").is_some() {
+            println!("IT {} spent={} slice={}", runs, executor.work_spent(), slice);
+        }
+        assert!(slice > 0, "headroom exhausted before completion");
         match executor
-            .run(&mut keep_going, tile, one_shot_spent / 97 + 1)
+            .run(&mut keep_going, tile, slice)
             .expect("sliced runs must not breach the schedule")
         {
             CbcRunStatus::Completed => break,
+            CbcRunStatus::NeedAllowance(_, minimum) => {
+                // Strict protocol: raise the slice to cover the carried
+                // minimum and resume. Nothing executed on the shortfall.
+                slice += minimum;
+            }
             CbcRunStatus::AllowanceExhausted(boundary) => {
                 assert!(
                     matches!(
@@ -305,4 +321,22 @@ fn cbx_007_structural_refusals_are_typed() {
     );
 
     assert_eq!(CBC_EXECUTOR_SCHEMA_VERSION, 3);
+}
+
+#[test]
+fn tmp_oneshot_127_public() {
+    use fs_rand::cbc::{CbcBudget, CbcExecutionMode, CbcProblem};
+    let problem = CbcProblem::new(127, 3).expect("fixture");
+    let admission = problem
+        .admit_for(CbcExecutionMode::Construction, CbcBudget::UNBOUNDED)
+        .expect("admits");
+    let admitted = admission.estimate().work_units();
+    let mut executor = fs_rand::cbc_exec::CbcExecutor::new(admission).expect("executor");
+    let mut keep_going = || fs_rand::cbc_exec::CbcControl::Continue;
+    let shape = fs_rand::cbc_exec::CbcTileShape::new(4, 2).expect("tile");
+    let status = executor.run(&mut keep_going, shape, u128::MAX);
+    println!(
+        "status={status:?} spent={} admitted={admitted}",
+        executor.work_spent()
+    );
 }

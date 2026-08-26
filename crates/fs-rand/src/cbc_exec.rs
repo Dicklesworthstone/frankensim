@@ -42,6 +42,10 @@ pub const CBC_EXECUTOR_SCHEMA_VERSION: u32 = 3;
 /// Callers partitioning below this use [`CbcTileShape::with_limbs`].
 pub const DEFAULT_LIMB_BLOCK: u32 = 64;
 
+/// Version of the strict transactional run protocol and precedence table
+/// (bead .20.7).
+pub const RUN_PROTOCOL_VERSION: u32 = 1;
+
 /// Cancellation verdict returned by a poll.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CbcControl {
@@ -157,6 +161,10 @@ pub enum CbcRunStatus {
     /// The run-scoped work allowance was exhausted at the named boundary.
     /// Resumable.
     AllowanceExhausted(CbcBoundary),
+    /// The next indivisible admitted step costs more than the remaining
+    /// allowance. Nothing was executed; resume with at least the carried
+    /// minimum (in schedule units) to make progress. Resumable.
+    NeedAllowance(CbcBoundary, u128),
 }
 
 /// Executor refusals. Admission-authority and storage-ceiling refusals happen
@@ -174,6 +182,14 @@ pub enum CbcExecError {
         candidate_block: u32,
         /// Requested points per tile.
         point_block: u32,
+    },
+    /// The next indivisible atomic step costs more than the remaining
+    /// run allowance. Nothing executed; the minimum is exact.
+    AllowanceShort {
+        /// Schedule units required by the next step.
+        minimum: u128,
+        /// Boundary class at which the step would execute.
+        boundary: CbcBoundary,
     },
     /// A limb-microstep block was zero.
     InvalidLimbBlock {
@@ -209,6 +225,12 @@ pub enum CbcExecError {
     CertificatesAfterStart,
     /// Certificate production was requested from a construction-only receipt.
     CertificatesNotAdmitted,
+    /// The executor entered an irreversible poison state after a contained
+    /// fault. No further execution or publication is possible.
+    Poisoned {
+        /// Why the executor was poisoned.
+        reason: &'static str,
+    },
 }
 
 /// Which admitted storage class refused a fallible allocation.
@@ -298,6 +320,37 @@ pub struct CbcMicroProgress {
     pub scan_tile_candidates: u32,
     /// The partially advanced exact operation, when one is open.
     pub pending: Option<CbcMicroCursor>,
+}
+
+/// Per-run progress receipt (bead .20.7): a Copy snapshot binding the run
+/// protocol, schedule identity, strict allowance accounting, committed
+/// transition counts, poll statistics, final boundary, finalization, and
+/// deterministic same-target state roots before/after the run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CbcRunReceipt {
+    /// Run-protocol version ([`RUN_PROTOCOL_VERSION`]).
+    pub protocol_version: u32,
+    /// Executor schema sealed into the admission.
+    pub executor_schema_version: u32,
+    /// Allowance requested for this run.
+    pub allowance_requested: u128,
+    /// Schedule units committed during this run (`used <= requested`).
+    pub allowance_used: u128,
+    /// Allowance left unspent at the terminal boundary.
+    pub allowance_remaining: u128,
+    /// Committed schedule transitions (debits) during this run.
+    pub committed_transitions: u64,
+    /// Boundary at which the run stopped (`None` when completed).
+    pub last_boundary: Option<CbcBoundary>,
+    /// Poll observations including the entry poll.
+    pub polls: u32,
+    /// Whether the run reached a terminal status with a final receipt
+    /// (always true on `Ok`).
+    pub finalized: bool,
+    /// Deterministic state root before the run's first transition.
+    pub state_root_before: u64,
+    /// Deterministic state root after the terminal boundary.
+    pub state_root_after: u64,
 }
 
 /// Runtime observation separating the admission's requested product payload
@@ -436,6 +489,10 @@ enum Phase {
     Update { chosen: u32, next_point: u32 },
     /// All components chosen.
     Done,
+    /// Irreversible terminal state after a fault (contained panic). A
+    /// poisoned executor can never resume or publish results
+    /// ([`CbcExecutor::into_lattice`] returns `None` forever).
+    Poisoned { reason: &'static str },
 }
 
 /// Tiled exact-CBC executor. See the module docs for the determinism,
@@ -456,6 +513,8 @@ pub struct CbcExecutor {
     scratch: Vec<u32>,
     phase: Phase,
     work_spent: u128,
+    /// Committed schedule transitions during the current run (receipt).
+    run_transitions: u64,
     certifying: bool,
     certificates_admitted: bool,
     certificates: Vec<CbcPrefixCertificate>,
@@ -574,6 +633,7 @@ impl CbcExecutor {
             scratch,
             phase: Phase::Init { next_point: 0 },
             work_spent: 0,
+            run_transitions: 0,
             certifying: false,
             certificates_admitted,
             certificates,
@@ -736,7 +796,8 @@ impl CbcExecutor {
         matches!(self.phase, Phase::Done)
     }
 
-    /// Consume the executor; `Some` exactly when complete.
+    /// Consume the executor; `Some` exactly when complete. A poisoned
+    /// executor can never publish results.
     #[must_use]
     pub fn into_lattice(self) -> Option<Lattice> {
         if matches!(self.phase, Phase::Done) {
@@ -749,39 +810,182 @@ impl CbcExecutor {
         }
     }
 
-    /// Execute tiles until completion, cancellation, or allowance
-    /// exhaustion. `allowance` is a run-scoped slice of the admitted work
-    /// budget in the same units; zero performs no work.
+    /// Execute tiles until completion, cancellation, allowance shortfall
+    /// ([`CbcRunStatus::NeedAllowance`]), or exhaustion under the strict
+    /// transactional protocol (bead .20.7):
+    ///
+    /// 1. completion and poison are terminal;
+    /// 2. the entry poll makes a pre-requested cancellation observable even
+    ///    at zero allowance (cancellation precedes exhaustion at every
+    ///    shared boundary);
+    /// 3. every atomic step is gated and prepaid before mutation; a step
+    ///    whose units exceed the remaining allowance yields
+    ///    [`CbcRunStatus::NeedAllowance`] with its exact minimum and no
+    ///    execution;
+    /// 4. work accounting is strict: the counter never stores an over-limit
+    ///    value and the allowance never saturates.
     ///
     /// # Errors
-    /// [`CbcExecError::AlreadyComplete`] when called after completion, or
-    /// [`CbcExecError::ScheduleOverrun`] if debits ever exceed the admitted
-    /// bound (an invariant breach, never a normal outcome).
+    /// [`CbcExecError::AlreadyComplete`], [`CbcExecError::Poisoned`] after
+    /// a contained fault, [`CbcExecError::ScheduleOverrun`] on invariant
+    /// breach (state left replayable), or storage refusals.
     pub fn run(
         &mut self,
         poll: &mut dyn CbcPoll,
         tile: CbcTileShape,
         allowance: u128,
     ) -> Result<CbcRunStatus, CbcExecError> {
+        self.run_with_receipt(poll, tile, allowance).map(|(status, _)| status)
+    }
+
+    /// [`Self::run`] plus the per-run progress receipt binding schedule
+    /// identity, allowance accounting, committed-transition counts, poll
+    /// statistics, boundary, finalization, and before/after state roots.
+    ///
+    /// # Errors
+    /// As [`Self::run`].
+    pub fn run_with_receipt(
+        &mut self,
+        poll: &mut dyn CbcPoll,
+        tile: CbcTileShape,
+        allowance: u128,
+    ) -> Result<(CbcRunStatus, CbcRunReceipt), CbcExecError> {
+        if let Phase::Poisoned { reason } = &self.phase {
+            return Err(CbcExecError::Poisoned { reason });
+        }
         if matches!(self.phase, Phase::Done) {
             return Err(CbcExecError::AlreadyComplete);
         }
+        let root_before = self.state_root();
+        let used_before = self.work_spent;
+        self.run_transitions = 0;
+
+        // Entry poll: pre-cancelled runs observe cancellation even with a
+        // zero allowance; otherwise zero allowance exhausts at Entry.
+        let cancelled_at_entry = matches!(poll.poll(), CbcControl::Cancel);
+        let mut polls = 1_u32;
+        let mut max_poll_spacing: u64 = 0;
         let mut remaining = allowance;
+        enum Terminal {
+            Status(CbcRunStatus, CbcBoundary),
+            Fatal(CbcExecError),
+        }
+        // Entry protocol: pre-cancelled runs observe cancellation even at
+        // zero allowance; otherwise zero allowance exhausts at Entry
+        // without executing anything.
+        if cancelled_at_entry {
+            let receipt = CbcRunReceipt {
+                protocol_version: RUN_PROTOCOL_VERSION,
+                executor_schema_version: CBC_EXECUTOR_SCHEMA_VERSION,
+                allowance_requested: allowance,
+                allowance_used: 0,
+                allowance_remaining: 0,
+                committed_transitions: 0,
+                last_boundary: Some(CbcBoundary::Entry),
+                polls,
+                finalized: true,
+                state_root_before: root_before,
+                state_root_after: self.state_root(),
+            };
+            return Ok((CbcRunStatus::Cancelled(CbcBoundary::Entry), receipt));
+        }
         if remaining == 0 {
-            return Ok(CbcRunStatus::AllowanceExhausted(CbcBoundary::Entry));
+            let receipt = CbcRunReceipt {
+                protocol_version: RUN_PROTOCOL_VERSION,
+                executor_schema_version: CBC_EXECUTOR_SCHEMA_VERSION,
+                allowance_requested: allowance,
+                allowance_used: 0,
+                allowance_remaining: 0,
+                committed_transitions: 0,
+                last_boundary: Some(CbcBoundary::Entry),
+                polls,
+                finalized: true,
+                state_root_before: root_before,
+                state_root_after: self.state_root(),
+            };
+            return Ok((
+                CbcRunStatus::AllowanceExhausted(CbcBoundary::Entry),
+                receipt,
+            ));
         }
-        loop {
-            let boundary = self.execute_tile(tile, &mut remaining)?;
-            if matches!(self.phase, Phase::Done) {
-                return Ok(CbcRunStatus::Completed);
+        // Strict-allowance shortfalls are statuses, not errors: nothing
+        // executed and everything stays resumable. Translated from the
+        // internal AllowanceShort error at its exact boundary.
+
+        let mut last_boundary = CbcBoundary::Entry;
+        let mut transitions_at_last_poll = 0_u64;
+        let terminal = loop {
+            // Contain callback/worker faults (a panicking poll closure or
+            // an unexpected unwind inside tile execution): the executor
+            // poisons terminally rather than publishing half-committed
+            // results.
+            let outcome =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    self.execute_tile(tile, &mut remaining)
+                }));
+            match outcome {
+                Err(contained) => {
+                    let reason = panic_reason(&contained);
+                    self.phase = Phase::Poisoned { reason };
+                    break Terminal::Fatal(CbcExecError::Poisoned { reason });
+                }
+                Ok(Err(err)) => {
+                    if let CbcExecError::AllowanceShort { minimum, boundary } = err {
+                        break Terminal::Status(
+                            CbcRunStatus::NeedAllowance(boundary, minimum),
+                            boundary,
+                        );
+                    }
+                    break Terminal::Fatal(err);
+                }
+                Ok(Ok(boundary)) => {
+                    if matches!(self.phase, Phase::Done | Phase::Poisoned { .. }) {
+                        break Terminal::Status(CbcRunStatus::Completed, boundary);
+                    }
+                    // Simultaneous boundary events: cancellation precedes
+                    // exhaustion.
+                    let cancelled = matches!(poll.poll(), CbcControl::Cancel);
+                    polls += 1;
+                    max_poll_spacing = max_poll_spacing
+                        .max(self.run_transitions.saturating_sub(transitions_at_last_poll));
+                    transitions_at_last_poll = self.run_transitions;
+                    last_boundary = boundary;
+                    if cancelled {
+                        break Terminal::Status(CbcRunStatus::Cancelled(boundary), boundary);
+                    }
+                    if remaining == 0 {
+                        break Terminal::Status(
+                            CbcRunStatus::AllowanceExhausted(boundary),
+                            boundary,
+                        );
+                    }
+                }
             }
-            if remaining == 0 {
-                return Ok(CbcRunStatus::AllowanceExhausted(boundary));
-            }
-            if matches!(poll.poll(), CbcControl::Cancel) {
-                return Ok(CbcRunStatus::Cancelled(boundary));
-            }
-        }
+        };
+        let (status, last_boundary) = match terminal {
+            Terminal::Status(status, boundary) => (status, boundary),
+            Terminal::Fatal(err) => return Err(err),
+        };
+
+        let receipt = CbcRunReceipt {
+            protocol_version: RUN_PROTOCOL_VERSION,
+            executor_schema_version: CBC_EXECUTOR_SCHEMA_VERSION,
+            allowance_requested: allowance,
+            allowance_used: self.work_spent - used_before,
+            allowance_remaining: remaining,
+            committed_transitions: self.run_transitions,
+            last_boundary: match &status {
+                CbcRunStatus::Completed => None,
+                CbcRunStatus::Cancelled(b)
+                | CbcRunStatus::AllowanceExhausted(b)
+                | CbcRunStatus::NeedAllowance(b, _) => Some(*b),
+            },
+            polls,
+            finalized: true,
+            state_root_before: root_before,
+            state_root_after: self.state_root(),
+        };
+        Ok((status, receipt))
     }
 
     /// Execute exactly one tile (or less at a phase edge) and return the
@@ -793,14 +997,27 @@ impl CbcExecutor {
         tile: CbcTileShape,
         remaining: &mut u128,
     ) -> Result<CbcBoundary, CbcExecError> {
+        if let Phase::Poisoned { reason } = &self.phase {
+            return Err(CbcExecError::Poisoned { reason });
+        }
         let charges = TileCharges::sealed(self, tile);
-        // Dispatch by phase with each borrow released before the mutable method call.
-        if let Phase::Init { next_point } = &self.phase {
-            let cursor = *next_point;
+        // Dispatch by phase with each borrow released before the mutable
+        // method call: cursors are copied out and persisted through the
+        // phase assignment inside each tile function.
+        let init_cursor = if let Phase::Init { next_point } = &self.phase {
+            Some(*next_point)
+        } else {
+            None
+        };
+        if let Some(cursor) = init_cursor {
             return self.run_init_tile(cursor, charges.point_block, remaining);
         }
-        if let Phase::Update { chosen, next_point } = &self.phase {
-            let (fold, cursor) = (*chosen, *next_point);
+        let update_cursor = if let Phase::Update { chosen, next_point } = &self.phase {
+            Some((*chosen, *next_point))
+        } else {
+            None
+        };
+        if let Some((fold, cursor)) = update_cursor {
             return self.run_update_tile(fold, cursor, charges.point_block, remaining);
         }
         if matches!(self.phase, Phase::Done) {
@@ -813,10 +1030,12 @@ impl CbcExecutor {
             best,
             runner_up,
             tie_class,
+            ..
         } = &mut self.phase
         else {
             unreachable!("every executor phase was handled above");
         };
+        let transitions_handle = &mut self.run_transitions;
         loop {
             if *candidate == charges.n {
                 let (winning_score, chosen) = best
@@ -849,11 +1068,18 @@ impl CbcExecutor {
                         prefix_len,
                         charges.n,
                     )?;
+                    gate_allowance(
+                        remaining,
+                        certificate_units,
+                        CbcBoundary::CandidateBlock,
+                    )?;
                     debit(
                         &mut self.work_spent,
                         charges.admitted_work_units,
                         remaining,
                         certificate_units,
+                        CbcBoundary::CandidateBlock,
+                        &mut self.run_transitions,
                     )?;
                     debug_assert!(
                         self.certificates.len() < self.certificates.capacity(),
@@ -876,6 +1102,7 @@ impl CbcExecutor {
                 &self.products,
                 &charges,
                 &mut self.work_spent,
+                transitions_handle,
                 remaining,
             )? {
                 AdvanceScan::Boundary(boundary) => return Ok(boundary),
@@ -904,7 +1131,7 @@ impl CbcExecutor {
     /// seal the prefix and enter the first scan on completion.
     fn run_init_tile(
         &mut self,
-        next_point: u32,
+        mut next_point: u32,
         point_block: u32,
         remaining: &mut u128,
     ) -> Result<CbcBoundary, CbcExecError> {
@@ -920,24 +1147,40 @@ impl CbcExecutor {
             admissible_candidates_per_prefix,
             certifying,
             problem,
+            run_transitions,
             ..
         } = self;
         let n = problem.point_count();
         let dimension = problem.dimension();
+        let mut point_cursor = next_point;
         // Initialization charges one unit per point plus the update
         // visits themselves (the estimate's `+ points + dimension`
         // tail distributes here and at each z push).
-        let end = next_point.saturating_add(point_block).min(n);
-        for point in next_point..end {
+        let end = point_cursor.saturating_add(point_block).min(n);
+        while point_cursor < end {
+            let point = point_cursor;
+            // Persist the cursor BEFORE gating/mutating: a shortfall or
+            // pause resumes at THIS point, never replaying committed ones.
+            *phase = Phase::Init { next_point: point };
             let point_index =
                 usize::try_from(point).expect("admission proved point indices fit usize");
             let residue = lattice_residue(point_index, 1, n);
+            let src_limbs = products[point_index].limbs();
+            let factor_words = exact_kernel_numerator(n, residue);
+            let (_, factor_len) = crate::cbc_limb::factor_limbs_u32(factor_words);
+            let required = src_limbs
+                .len()
+                .checked_add(factor_len)
+                .and_then(|length| length.checked_add(1))
+                .expect("exact CBC required limb count overflow");
+            let boundary = if point + 1 == end && end == n {
+                CbcBoundary::Prefix
+            } else {
+                CbcBoundary::PointBlock
+            };
+            gate_allowance(remaining, schedule.initialization_visit_units(), boundary)?;
             products[point_index]
-                .mul_assign_factor_scratch(
-                    exact_kernel_numerator(n, residue),
-                    *product_capacity_limbs,
-                    scratch,
-                )
+                .mul_assign_factor_scratch(factor_words, *product_capacity_limbs, scratch)
                 .map_err(|required_limbs| CbcExecError::StorageScheduleOverrun {
                     required_limbs,
                     admitted_limbs: *product_capacity_limbs,
@@ -947,20 +1190,28 @@ impl CbcExecutor {
                 *admitted_work_units,
                 remaining,
                 schedule.initialization_visit_units(),
+                boundary,
+                run_transitions,
             )?;
+            point_cursor += 1;
         }
+        next_point = end;
+        *phase = Phase::Init { next_point: end };
         if end == n {
             debug_assert!(
                 z.len() < z.capacity(),
                 "the prefix register was reserved for the admitted dimension"
             );
-            z.push(1);
+            gate_allowance(remaining, schedule.prefix_control_units(), CbcBoundary::Prefix)?;
             debit(
                 work_spent,
                 *admitted_work_units,
                 remaining,
                 schedule.prefix_control_units(),
+                CbcBoundary::Prefix,
+                run_transitions,
             )?;
+            z.push(1);
             *phase = if dimension == 1 {
                 Phase::Done
             } else {
@@ -989,7 +1240,7 @@ impl CbcExecutor {
     fn run_update_tile(
         &mut self,
         chosen: u32,
-        next_point: u32,
+        mut next_point: u32,
         point_block: u32,
         remaining: &mut u128,
     ) -> Result<CbcBoundary, CbcExecError> {
@@ -1005,21 +1256,36 @@ impl CbcExecutor {
             admissible_candidates_per_prefix,
             certifying,
             problem,
+            run_transitions,
             ..
         } = self;
         let n = problem.point_count();
         let dimension = problem.dimension();
-        let end = next_point.saturating_add(point_block).min(n);
-        for point in next_point..end {
+        let mut point_cursor = next_point;
+        let end = point_cursor.saturating_add(point_block).min(n);
+        while point_cursor < end {
+            let point = point_cursor;
+            // Persist BEFORE gating/mutating (no replay on shortfall).
+            *phase = Phase::Update { chosen, next_point: point };
             let point_index =
                 usize::try_from(point).expect("admission proved point indices fit usize");
             let residue = lattice_residue(point_index, chosen, n);
+            let src_limbs = products[point_index].limbs();
+            let factor_words = exact_kernel_numerator(n, residue);
+            let (_, factor_len) = crate::cbc_limb::factor_limbs_u32(factor_words);
+            let required = src_limbs
+                .len()
+                .checked_add(factor_len)
+                .and_then(|length| length.checked_add(1))
+                .expect("exact CBC required limb count overflow");
+            let boundary = if point + 1 == end && end == n {
+                CbcBoundary::Prefix
+            } else {
+                CbcBoundary::PointBlock
+            };
+            gate_allowance(remaining, schedule.product_update_visit_units(), boundary)?;
             products[point_index]
-                .mul_assign_factor_scratch(
-                    exact_kernel_numerator(n, residue),
-                    *product_capacity_limbs,
-                    scratch,
-                )
+                .mul_assign_factor_scratch(factor_words, *product_capacity_limbs, scratch)
                 .map_err(|required_limbs| CbcExecError::StorageScheduleOverrun {
                     required_limbs,
                     admitted_limbs: *product_capacity_limbs,
@@ -1029,20 +1295,28 @@ impl CbcExecutor {
                 *admitted_work_units,
                 remaining,
                 schedule.product_update_visit_units(),
+                boundary,
+                run_transitions,
             )?;
+            point_cursor += 1;
         }
+        next_point = end;
+        *phase = Phase::Update { chosen, next_point: end };
         if end == n {
             debug_assert!(
                 z.len() < z.capacity(),
                 "the prefix register was reserved for the admitted dimension"
             );
-            z.push(chosen);
+            gate_allowance(remaining, schedule.prefix_control_units(), CbcBoundary::Prefix)?;
             debit(
                 work_spent,
                 *admitted_work_units,
                 remaining,
                 schedule.prefix_control_units(),
+                CbcBoundary::Prefix,
+                run_transitions,
             )?;
+            z.push(chosen);
             *phase = if z.len() == dimension {
                 Phase::Done
             } else {
@@ -1098,25 +1372,113 @@ fn try_reserve_tie_class(
 /// Debit schedule units against the admitted bound and the run allowance
 /// (saturating: a started tile always completes). A free function so phase
 /// bindings and the accounting fields can be borrowed disjointly.
+/// Gate an atomic step on the run allowance BEFORE any mutation: a step
+/// whose units exceed the remaining allowance raises a typed shortfall
+/// carrying its exact minimum and the boundary at which it would occur.
+fn gate_allowance(
+    remaining: &u128,
+    units: u128,
+    boundary: CbcBoundary,
+) -> Result<(), CbcExecError> {
+    if *remaining < units {
+        return Err(CbcExecError::AllowanceShort { minimum: units, boundary });
+    }
+    Ok(())
+}
+
+/// Deterministic FNV-1a state root over the executor's replayable public
+/// state: committed prefix bytes, work counter, phase discriminant, and
+/// retained certificate identities. Same-target stable; never a claim of
+/// arithmetic correctness by itself.
+impl CbcExecutor {
+    /// Compute the canonical state root for progress receipts.
+    #[must_use]
+    pub fn state_root(&self) -> u64 {
+        let mut hash: u64 = 0xcbf29ce484222325;
+        let mut mix = |byte: u8| {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        };
+        for limb in &self.z {
+            mix(*limb as u8);
+            mix((limb >> 8) as u8);
+            mix((limb >> 16) as u8);
+            mix((limb >> 24) as u8);
+        }
+        for byte in self.work_spent.to_le_bytes() {
+            mix(byte);
+        }
+        let phase_discriminant: u64 = match &self.phase {
+            Phase::Init { .. } => 1,
+            Phase::Scan { candidate, accum, .. } => {
+                2 + u64::from(*candidate) * 4 + u64::from(accum.is_some())
+            }
+            Phase::Update { chosen, next_point } => 3 + u64::from(*chosen) * 8 + u64::from(*next_point),
+            Phase::Done => 4,
+            Phase::Poisoned { .. } => 5,
+        };
+        for byte in phase_discriminant.to_le_bytes() {
+            mix(byte);
+        }
+        mix(self.certificates.len() as u8);
+        for certificate in &self.certificates {
+            for word in &certificate.prefix {
+                mix(*word as u8);
+            }
+        }
+        hash
+    }
+}
+
+/// Extract a stable reason string from a contained panic payload.
+fn panic_reason(payload: &(dyn std::any::Any + Send)) -> &'static str {
+    if let Some(text) = payload.downcast_ref::<&'static str>() {
+        return text;
+    }
+    if let Some(string) = payload.downcast_ref::<String>() {
+        // Boxed messages cannot be kept as 'static; use a fixed class so
+        // the poison reason stays 'static without leaking memory.
+        let _ = string;
+        return "panic with dynamic message";
+    }
+    "panic with opaque payload"
+}
+
+/// Commit one scheduled transition strictly: checked against both the
+/// admitted schedule bound and the run allowance, with the work counter
+/// advanced only when every check passes (never stores an over-limit
+/// value) and the allowance never saturating below zero. Also advances
+/// the per-run committed-transition counter feeding progress receipts.
+#[allow(clippy::too_many_arguments)]
 fn debit(
     work_spent: &mut u128,
     admitted: u128,
     remaining: &mut u128,
     units: u128,
+    boundary: CbcBoundary,
+    transitions: &mut u64,
 ) -> Result<(), CbcExecError> {
-    *work_spent = work_spent
+    gate_allowance(remaining, units, boundary)?;
+    let new_spent = work_spent
         .checked_add(units)
         .ok_or(CbcExecError::ScheduleOverrun {
             spent: u128::MAX,
             admitted,
         })?;
-    if *work_spent > admitted {
+    if new_spent > admitted {
         return Err(CbcExecError::ScheduleOverrun {
-            spent: *work_spent,
+            spent: new_spent,
             admitted,
         });
     }
-    *remaining = remaining.saturating_sub(units);
+    *remaining = remaining.checked_sub(units).ok_or({
+        CbcExecError::AllowanceShort { minimum: units, boundary }
+    })?;
+    *work_spent = new_spent;
+    *transitions = transitions.saturating_add(1);
+    if std::env::var_os("CBC_DEBIT_TRACE").is_some() {
+        eprintln!("DEBIT {units} {boundary:?}");
+    }
     Ok(())
 }
 
@@ -1192,6 +1554,7 @@ enum AdvanceScan {
 /// exact score capacity), then accumulate one point block of its running
 /// score with a per-visit debit. Returns the finished flag when the whole
 /// candidate score is complete.
+#[allow(clippy::too_many_arguments)]
 fn advance_scan_candidate(
     candidate: &mut u32,
     accum: &mut Option<ScanAccum>,
@@ -1199,6 +1562,7 @@ fn advance_scan_candidate(
     products: &[ExactNat],
     charges: &TileCharges,
     work_spent: &mut u128,
+    transitions: &mut u64,
     remaining: &mut u128,
 ) -> Result<AdvanceScan, CbcExecError> {
     if accum.is_none() {
@@ -1208,6 +1572,11 @@ fn advance_scan_candidate(
             return Ok(AdvanceScan::Boundary(CbcBoundary::CandidateBlock));
         }
         *candidates_in_tile += 1;
+        gate_allowance(
+            remaining,
+            charges.candidate_control_units,
+            CbcBoundary::CandidateBlock,
+        )?;
         let coprime = gcd(*candidate, charges.n) == 1;
         // Fallible reservation precedes the control debit: a storage
         // refusal leaves no mutation behind, so the retry re-executes this
@@ -1237,6 +1606,8 @@ fn advance_scan_candidate(
             charges.admitted_work_units,
             remaining,
             charges.candidate_control_units,
+            CbcBoundary::CandidateBlock,
+            transitions,
         )?;
         if !coprime {
             *candidate += 1;
@@ -1257,6 +1628,9 @@ fn advance_scan_candidate(
         running.next_point
     };
     while point < end {
+        // Persist BEFORE gating/mutating so a shortfall or pause resumes
+        // at this exact point (no committed work is ever replayed).
+        running.next_point = point;
         let point_index = usize::try_from(point).expect("admission proved point indices fit usize");
 
         // Begin (and prepay) the visit when no microprogram is in flight;
@@ -1280,11 +1654,14 @@ fn advance_scan_candidate(
                     admitted_limbs: charges.score_capacity_limbs,
                 });
             }
+            gate_allowance(remaining, charges.visit_units, CbcBoundary::PointBlock)?;
             debit(
                 work_spent,
                 charges.admitted_work_units,
                 remaining,
                 charges.visit_units,
+                CbcBoundary::PointBlock,
+                transitions,
             )?;
             running.micro = Some(crate::cbc_limb::LimbCursor::begin_add_multiply(
                 src.len(),
@@ -1310,7 +1687,7 @@ fn advance_scan_candidate(
             usize::try_from(charges.limb_block).expect("admission proved blocks fit usize"),
         );
         match outcome {
-            crate::cbc_limb::StepOutcome::Refused => {
+            (crate::cbc_limb::StepOutcome::Refused, _) => {
                 // Carry propagation hit the admitted capacity ceiling:
                 // fail closed with the score-class overrun identity.
                 return Err(CbcExecError::StorageScheduleOverrun {
@@ -1318,16 +1695,18 @@ fn advance_scan_candidate(
                     admitted_limbs: charges.score_capacity_limbs,
                 });
             }
-            crate::cbc_limb::StepOutcome::Advanced => {
+            (crate::cbc_limb::StepOutcome::Advanced { cells }, _) => {
                 // Budget exhausted mid-operation: persist cursor AND its
                 // owning point, then observe a poll.
                 running.micro = Some(cursor);
                 running.micro_point = point;
+                *transitions = transitions.saturating_add(cells as u64);
                 return Ok(AdvanceScan::Boundary(CbcBoundary::LimbBlock));
             }
-            crate::cbc_limb::StepOutcome::Complete => {
+            (crate::cbc_limb::StepOutcome::Complete { cells }, _) => {
                 running.micro = None;
                 point += 1;
+                *transitions = transitions.saturating_add(cells.max(1) as u64);
             }
         }
     }
