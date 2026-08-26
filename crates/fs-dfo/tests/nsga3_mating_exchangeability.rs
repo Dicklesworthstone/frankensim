@@ -40,7 +40,7 @@ fn tournament_law_table_is_rank_then_first_draw() {
     assert_eq!(nsga3_tournament(1, 7, 0, 40), 40);
     assert_eq!(nsga3_tournament(0, 40, 1, 7), 40);
     assert_eq!(nsga3_tournament(2, 9, 5, 31), 9);
-    assert_eq!(nsga3_tournament(5, 31, 2, 9), 31);
+    assert_eq!(nsga3_tournament(5, 31, 2, 9), 9);
     // Equal rank keeps the FIRST ordered draw whichever slot holds the
     // numerically larger live position.
     for first in [0usize, 3usize, 11usize] {
