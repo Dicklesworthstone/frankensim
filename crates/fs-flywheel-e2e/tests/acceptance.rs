@@ -393,7 +393,10 @@ fn configured_producer_promotion() -> ConfiguredProducerPromotion {
     let verifier = trusted_producer_attestation_verifier();
     let policy = trusted_producer_attestation_policy();
     ConfiguredProducerPromotion {
-        trust_root: ProducerPromotionRoot::configure_owner_executed(
+        trust_root: PromotionTrustRoot::<
+            ProducerAttestationVerifierSchemaV1,
+            ProducerAttestationPolicySchemaV1,
+        >::configure_owner_executed(
             ObservedIdentity::from_receipt(verifier),
             ObservedIdentity::from_receipt(policy),
             PRODUCER_ATTESTATION_CONTEXT,

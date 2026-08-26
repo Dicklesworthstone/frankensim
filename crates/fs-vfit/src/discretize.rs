@@ -933,12 +933,36 @@ fn validated_bilinear_parameters(
     Ok((k, nyquist, omega_pw))
 }
 
+fn validate_rational_model(model: &RationalModel) -> Result<(), DiscretizeError> {
+    require_finite_scalar("model_direct", model.d)?;
+    require_finite_scalar("model_improper", model.e)?;
+    for (index, term) in model.terms.iter().enumerate() {
+        let finite = match term {
+            PoleTerm::Real { pole, residue } => pole.is_finite() && residue.is_finite(),
+            PoleTerm::Pair { pole, residue } => {
+                pole.re.is_finite()
+                    && pole.im.is_finite()
+                    && residue.re.is_finite()
+                    && residue.im.is_finite()
+            }
+        };
+        if !finite {
+            return Err(DiscretizeError::NonFiniteRuntimeValue {
+                field: "model_term",
+                index: Some(index),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Bilinear-transform the model at sample interval `t_s` with prewarp
 /// at `omega_pw` (pass 0 for the unwarped `K = 2/T` map).
 ///
 /// # Errors
 /// [`DiscretizeError`] when the sample interval is not positive and finite,
-/// or the prewarp frequency is negative, non-finite, or at/beyond Nyquist.
+/// the prewarp frequency is negative, non-finite, or at/beyond Nyquist, or
+/// the input/derived filter coefficients are non-finite.
 /// Stable continuous poles are not sampled sinusoids:
 /// Tustin maps the complete open left half-plane inside the unit circle.
 pub fn bilinear(
@@ -947,6 +971,7 @@ pub fn bilinear(
     omega_pw: f64,
 ) -> Result<DigitalFilter, DiscretizeError> {
     let (k, _nyquist, omega_pw) = validated_bilinear_parameters(t_s, omega_pw)?;
+    validate_rational_model(model)?;
     let mut sections = Vec::new();
     for t in &model.terms {
         match *t {
@@ -994,6 +1019,19 @@ pub fn bilinear(
             b: [model.e * k, -model.e * k, 0.0],
             a: [1.0, 0.0],
         });
+    }
+    for (index, section) in sections.iter().enumerate() {
+        if section
+            .a
+            .iter()
+            .chain(&section.b)
+            .any(|coefficient| !coefficient.is_finite())
+        {
+            return Err(DiscretizeError::NonFiniteRuntimeValue {
+                field: "digital_section",
+                index: Some(index),
+            });
+        }
     }
     Ok(DigitalFilter {
         sections,
@@ -1054,8 +1092,14 @@ pub fn bilinear_state_space(
     omega_pw: f64,
 ) -> Result<DiscreteStateSpace, DiscretizeError> {
     let (k, nyquist, _omega_pw) = validated_bilinear_parameters(t_s, omega_pw)?;
+    validate_rational_model(model)?;
     let ss = model.state_space();
     let n = ss.n;
+    require_finite("continuous_a", &ss.a)?;
+    require_finite("continuous_b", &ss.b)?;
+    require_finite("continuous_c", &ss.c)?;
+    require_finite_scalar("continuous_d", ss.d)?;
+    require_finite_scalar("continuous_e", ss.e)?;
     // M = K I - A, factored once.
     let mut m = vec![0.0f64; n * n];
     for i in 0..n {
@@ -1064,6 +1108,7 @@ pub fn bilinear_state_space(
         }
         m[i * n + i] += k;
     }
+    require_finite("bilinear_matrix", &m)?;
     let fact = fs_la::factor::lu(&m, n)
         .map_err(|_| DiscretizeError::BeyondNyquist { omega: k, nyquist })?;
     // X = M^{-1} (K I + A) column by column; Y = M^{-1} B.
@@ -1072,22 +1117,34 @@ pub fn bilinear_state_space(
         let mut rhs: Vec<f64> = (0..n).map(|row| ss.a[row * n + col]).collect();
         rhs[col] += k;
         fact.solve(&mut rhs);
+        require_finite("discrete_a_column", &rhs)?;
         for row in 0..n {
             ad[row * n + col] = rhs[row];
         }
     }
     let mut y = ss.b.clone();
     fact.solve(&mut y);
-    let g = det::sqrt(2.0 * k);
+    require_finite("discrete_input_solve", &y)?;
+    let g = if n == 0 {
+        0.0
+    } else {
+        let g = det::sqrt(2.0 * k);
+        require_finite_scalar("bilinear_state_scale", g)?;
+        g
+    };
     let bd: Vec<f64> = y.iter().map(|&v| g * v).collect();
+    require_finite("discrete_b", &bd)?;
     // Cd = g * C M^{-1}  (solve M^T z = C^T).
     let mut z = ss.c.clone();
     fact.solve_transpose(&mut z);
+    require_finite("discrete_output_solve", &z)?;
     let cd: Vec<f64> = z.iter().map(|&v| g * v).collect();
+    require_finite("discrete_c", &cd)?;
     let mut dd = ss.d;
     for (ci, yi) in ss.c.iter().zip(&y) {
         dd += ci * yi;
     }
+    require_finite_scalar("discrete_d", dd)?;
     Ok(DiscreteStateSpace {
         n,
         a: ad,
@@ -1384,6 +1441,82 @@ mod runtime_tests {
             Err(DiscretizeError::NonFiniteRuntimeValue {
                 field: "bilinear_constant",
                 index: None
+            })
+        ));
+
+        let direct_only = RationalModel {
+            terms: Vec::new(),
+            d: 0.5,
+            e: 0.0,
+        };
+        let tiny_direct_interval = 2.0 / (0.75 * f64::MAX);
+        let direct_k = 2.0 / tiny_direct_interval;
+        assert!(direct_k.is_finite());
+        assert!((2.0 * direct_k).is_infinite());
+        let direct_state_space =
+            bilinear_state_space(&direct_only, tiny_direct_interval, 0.0).unwrap();
+        assert_eq!(direct_state_space.n, 0);
+        assert_eq!(direct_state_space.d, 0.5);
+
+        let malformed_models = [
+            RationalModel {
+                terms: Vec::new(),
+                d: f64::NAN,
+                e: 0.0,
+            },
+            RationalModel {
+                terms: Vec::new(),
+                d: 0.0,
+                e: f64::INFINITY,
+            },
+            RationalModel {
+                terms: vec![PoleTerm::Real {
+                    pole: f64::NAN,
+                    residue: 1.0,
+                }],
+                d: 0.0,
+                e: 0.0,
+            },
+            RationalModel {
+                terms: vec![PoleTerm::Pair {
+                    pole: C64::new(-1.0, 1.0),
+                    residue: C64::new(1.0, f64::NEG_INFINITY),
+                }],
+                d: 0.0,
+                e: 0.0,
+            },
+        ];
+        for malformed in &malformed_models {
+            assert!(matches!(
+                bilinear(malformed, 1.0 / 48_000.0, 0.0),
+                Err(DiscretizeError::NonFiniteRuntimeValue { .. })
+            ));
+            assert!(matches!(
+                bilinear_state_space(malformed, 1.0 / 48_000.0, 0.0),
+                Err(DiscretizeError::NonFiniteRuntimeValue { .. })
+            ));
+        }
+
+        let finite_overflow = RationalModel {
+            terms: vec![PoleTerm::Pair {
+                pole: C64::new(-1.0, 1.0),
+                residue: C64::new(f64::MAX, 0.0),
+            }],
+            d: 0.0,
+            e: 0.0,
+        };
+        assert!(matches!(
+            bilinear(&finite_overflow, 1.0, 0.0),
+            Err(DiscretizeError::NonFiniteRuntimeValue {
+                field: "digital_section",
+                index: Some(0)
+            })
+        ));
+        assert!(matches!(
+            bilinear_state_space(&finite_overflow, 1.0, 0.0),
+            Err(DiscretizeError::NonFiniteRuntimeValue {
+                field: "continuous_c",
+                index: Some(0)
             })
         ));
     }
