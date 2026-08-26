@@ -25141,4 +25141,44 @@ fn admit_candidate_receipt(cache: &mut Cache, value: Value) {
             "missing coupling diagnostics must be directly actionable: {violations:?}"
         );
     }
+
+    #[test]
+    fn family_f_real_file_probe() {
+        let text = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../crates/fs-ir/src/planner.rs"
+        ));
+        let index = RustSourceIndex::new(text);
+        for symbol in [
+            "PLANNER_CACHE_KEY_VERSION",
+            "PLANNER_CACHE_KEY_DOMAIN",
+            "PLANNER_CACHE_KEY_PREFIX_STEM",
+        ] {
+            let declarations =
+                runtime_source_const_declarations_with_index(text, symbol, &index);
+            println!(
+                "PROBE {symbol}: found={} bytes={:?}",
+                declarations.len(),
+                declarations
+                    .first()
+                    .map(|fragment| fragment.as_bytes().len())
+            );
+            let alias_tail_matches: Vec<&String> = index
+                .use_aliases
+                .keys()
+                .filter(|name| rust_qualified_name_tail(name) == symbol)
+                .collect();
+            println!("PROBE {symbol}: alias_tail_matches={alias_tail_matches:?}");
+        }
+        assert_eq!(
+            runtime_source_const_declarations_with_index(
+                text,
+                "PLANNER_CACHE_KEY_DOMAIN",
+                &index
+            )
+            .len(),
+            1,
+            "PLANNER_CACHE_KEY_DOMAIN must resolve to one const in the real planner source"
+        );
+    }
 }
