@@ -900,12 +900,38 @@ pub fn nsga3(
         .collect()
 }
 
-fn nsga3_mating_winner(fronts: &[usize], first_draw: usize, second_draw: usize) -> usize {
-    if fronts[first_draw] <= fronts[second_draw] {
+/// The NSGA-III binary mating law: lower nondomination rank wins, and an
+/// equal-rank tie keeps the FIRST ordered draw without consulting live
+/// population indices ([`NSGA3_MATING_POLICY`]'s `equal-rank-policy`).
+///
+/// Public and pure so [`nsga3`] and the mating-exchangeability fixture
+/// exercise THE production rule rather than a parallel re-implementation
+/// (epic-ascent-7tv.24.12): any edit that reintroduces index bias or an
+/// extra tie draw must pass through here and flip the fixture's recorded
+/// law/mutant tables.
+#[must_use]
+pub fn nsga3_tournament(
+    first_rank: usize,
+    first_draw: usize,
+    second_rank: usize,
+    second_draw: usize,
+) -> usize {
+    if first_rank <= second_rank {
         first_draw
     } else {
         second_draw
     }
+}
+
+/// In-crate adapter preserving the historic internal call shape and
+/// out-of-bounds strictness of the original private selector.
+fn nsga3_mating_winner(fronts: &[usize], first_draw: usize, second_draw: usize) -> usize {
+    nsga3_tournament(
+        fronts[first_draw],
+        first_draw,
+        fronts[second_draw],
+        second_draw,
+    )
 }
 
 /// NSGA-III environmental selection to `target` members.
