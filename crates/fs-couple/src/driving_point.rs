@@ -105,13 +105,19 @@ pub fn characteristic_line_dense(
             what: "round-trip delay does not fit the realized history",
         });
     }
+    // Clamp INSIDE the documented budget BEFORE rounding: rounding
+    // first overflows/saturates on oversized requests (usize::MAX-style
+    // inputs panic before the cap ever applies — bead frankensim-u6pph).
+    // For every representable value, clamping first selects the same
+    // point on the power-of-two ladder, so no admissible request
+    // changes meaning and no input escapes the budget.
     let n_fft = n_fft_override.map_or_else(
         || {
             ((4.0 * geo_delay).ceil() as usize)
-                .next_power_of_two()
                 .clamp(256, 4096)
+                .next_power_of_two()
         },
-        |v| v.next_power_of_two().clamp(256, 8192),
+        |v| v.clamp(256, 8192).next_power_of_two(),
     );
     let fft = Fft::new(n_fft);
     let mut buf = vec![FftC64::new(0.0, 0.0); n_fft];
@@ -169,7 +175,7 @@ pub fn impedance_line(
         });
     }
     let dt = 1.0 / f64::from(sample_rate_hz);
-    let n_fft = n.next_power_of_two().clamp(256, 8192);
+    let n_fft = n.clamp(256, 8192).next_power_of_two();
     let fft = Fft::new(n_fft);
     let mut buf = vec![FftC64::new(0.0, 0.0); n_fft];
     for k in 1..=n_fft / 2 {

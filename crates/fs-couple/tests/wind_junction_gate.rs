@@ -246,3 +246,100 @@ fn wind_gate_summary_enumerates_every_registry_row() {
         images.len()
     );
 }
+
+/// Oversized FFT extents must clamp INSIDE the documented [256, 8192]
+/// band BEFORE power-of-two rounding (bead frankensim-u6pph): the
+/// pre-fix code rounded first and panicked on `usize::MAX`. The
+/// capped-oversized requests must be bit-identical to authoring the
+/// cap directly, and in-band values must still round UP to their own
+/// power of two — the budget is neither broadened nor lowered.
+#[test]
+fn fft_extents_clamp_before_rounding_and_stay_bit_exact() {
+    use fs_couple::driving_point::{characteristic_line_dense, impedance_line};
+
+    let duct = Duct {
+        segments: vec![Segment::Cylinder {
+            radius: 0.002,
+            length: 0.170,
+        }],
+    };
+    let gas = air20();
+    let zc = gas.characteristic_impedance / (core::f64::consts::PI * 0.002 * 0.002);
+
+    let capped = characteristic_line_dense(
+        &duct,
+        &gas,
+        Termination::UnflangedOpen,
+        RATE,
+        4096,
+        zc,
+        None,
+        Some(8192),
+    )
+    .expect("capped line realizes");
+    let max_requested = characteristic_line_dense(
+        &duct,
+        &gas,
+        Termination::UnflangedOpen,
+        RATE,
+        4096,
+        zc,
+        None,
+        Some(usize::MAX),
+    )
+    .expect("usize::MAX override must clamp instead of panicking");
+    assert_eq!(
+        max_requested.history(),
+        capped.history(),
+        "override far above the cap must realize the SAME FIR as the cap"
+    );
+    let just_over = characteristic_line_dense(
+        &duct,
+        &gas,
+        Termination::UnflangedOpen,
+        RATE,
+        4096,
+        zc,
+        None,
+        Some(9000),
+    )
+    .expect("9000 realizes");
+    assert_eq!(just_over.history(), capped.history());
+    let in_band = characteristic_line_dense(
+        &duct,
+        &gas,
+        Termination::UnflangedOpen,
+        RATE,
+        4096,
+        zc,
+        None,
+        Some(3000),
+    )
+    .expect("3000 realizes");
+    let rounded_up = characteristic_line_dense(
+        &duct,
+        &gas,
+        Termination::UnflangedOpen,
+        RATE,
+        4096,
+        zc,
+        None,
+        Some(4096),
+    )
+    .expect("4096 realizes");
+    assert_eq!(
+        in_band.history(),
+        rounded_up.history(),
+        "in-band non-power-of-two still rounds UP to its own PoT"
+    );
+
+    let capped_z = impedance_line(&duct, &gas, Termination::UnflangedOpen, RATE, 8192, None)
+        .expect("impedance cap");
+    let max_z = impedance_line(&duct, &gas, Termination::UnflangedOpen, RATE, usize::MAX, None)
+        .expect("usize::MAX request must clamp instead of panicking");
+    assert_eq!(
+        max_z.history(),
+        capped_z.history(),
+        "oversized history extent must realize the SAME impedance FIR"
+    );
+}
