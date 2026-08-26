@@ -58,7 +58,10 @@ Nothing is silently clamped; no traps cross the boundary.
 ## Determinism
 
 Pure functions of scalar inputs: no wall-clock, no entropy. Same inputs ⇒
-byte-identical envelope, native and wasm.
+byte-identical envelope, native and wasm. Display fields carry the site's
+rounding; `costScore` (the CMA-ES objective) is quantized to 1e-6 on both
+sides of the boundary so sub-ULP libm differences between Rust and V8 cannot
+flip rankings on near-ties.
 
 ## CI gates
 

@@ -38,17 +38,33 @@ pub struct Refusal {
     pub ranked_repairs: Vec<&'static str>,
 }
 
+fn escape_json_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 impl Refusal {
     fn json(&self) -> String {
         let repairs: Vec<String> = self
             .ranked_repairs
             .iter()
-            .map(|r| format!("\"{}\"", r))
+            .map(|r| format!("\"{}\"", escape_json_string(r)))
             .collect();
         format!(
             "{{\"refusal\":{{\"code\":\"{}\",\"message\":\"{}\",\"ranked_repairs\":[{}]}}}}",
             self.code,
-            self.message.replace('"', "'"),
+            escape_json_string(&self.message),
             repairs.join(",")
         )
     }
@@ -66,8 +82,10 @@ fn require_finite(name: &'static str, v: f64) -> Result<(), Refusal> {
     }
 }
 
-/// JS `Math.round` for the non-negative values this kernel rounds (half-up
-/// and half-away-from-zero agree for v >= 0).
+/// JS `Math.round` equivalent for the inputs the site emits: every rounded
+/// quantity is non-negative over the site's parameter ranges, where half-up
+/// (JS) and half-away-from-zero (Rust) agree. Inputs outside those ranges
+/// could produce negative values whose exact-.5 rounding differs by 1.
 fn js_round(v: f64) -> f64 {
     v.round()
 }
@@ -207,7 +225,10 @@ pub fn wing_eval_core(
     let rib_mass_kg = rib_count * 2.8 * structural_factor;
     let wing_mass_kg = js_round(spar_mass_kg + skin_mass_kg + rib_mass_kg);
 
-    let cost_score = -lift_to_drag_ratio + (wing_mass_kg / 800.0) * 2.5;
+    // Quantized to 1e-6: cost_score is the CMA-ES objective, and sub-ULP
+    // libm differences vs the site's TS fallback could otherwise flip
+    // rankings on near-ties and let the two engines diverge.
+    let cost_score = js_round((-lift_to_drag_ratio + (wing_mass_kg / 800.0) * 2.5) * 1e6) / 1e6;
 
     let out = WingOut {
         lift_coeff_cl: js_round(lift_coeff_cl * 1000.0) / 1000.0,
@@ -440,9 +461,14 @@ pub fn bridge_eval_core(
 
     let stress_violation = (max_von_mises_stress_mpa - yield_mpa).max(0.0);
     let deflection_violation = (max_deflection_mm - span_m * 2.5).max(0.0);
-    let cost_score = total_mass_tons * cost_factor
-        + stress_violation * stress_violation * 8.0
-        + deflection_violation * deflection_violation * 4.0;
+    // Quantized to 1e-6 for exact agreement with the site's TS fallback
+    // (see the wing evaluator's cost_score note).
+    let cost_score = js_round(
+        (total_mass_tons * cost_factor
+            + stress_violation * stress_violation * 8.0
+            + deflection_violation * deflection_violation * 4.0)
+            * 1e6,
+    ) / 1e6;
 
     let out = BridgeOut {
         total_mass_tons,
