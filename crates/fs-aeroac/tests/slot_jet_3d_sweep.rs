@@ -49,6 +49,17 @@ fn base_config(second_order_rate: f64) -> SlotJet3dConfig {
 /// edge. Higher rate = lower nu = higher jet Re.
 const LADDER: [f64; 6] = [1.60, 1.75, 1.85, 1.92, 1.96, 1.98];
 
+/// Optional single-rung filter for distributed execution:
+/// `SWEEP_ONLY_RUNG=<index into LADDER>` runs just that rung and
+/// archives to a per-rung receipt file, so independent machines can
+/// take different rungs concurrently. Unset = the full serial ladder
+/// (the default for one dedicated host).
+fn only_rung() -> Option<usize> {
+    std::env::var("SWEEP_ONLY_RUNG")
+        .ok()
+        .and_then(|v| v.parse().ok())
+}
+
 #[test]
 #[ignore = "heavy: full 3-D Re sweep campaign (bead 3ez8g.10.1)"]
 fn re_sweep_campaign() {
@@ -65,8 +76,14 @@ fn re_sweep_campaign() {
         "runr\tRe\trate\tflatness\ttonal\tStrouhal\tpeak_bin\tprominence\tforce_rms\tamplitude_qualified\tmach_max\tflux_imbalance\n",
     );
 
-    for rate in LADDER {
-        let cfg = base_config(rate);
+    let only = only_rung();
+    for (rung_idx, rate) in LADDER.iter().enumerate() {
+        if let Some(o) = only {
+            if rung_idx != o {
+                continue;
+            }
+        }
+        let cfg = base_config(*rate);
         let started = std::time::Instant::now();
         // Chunked execution with an atomic checkpoint: repeated
         // invocations (or post-crash reruns) resume bit-identically.
@@ -119,6 +136,12 @@ fn re_sweep_campaign() {
     // Box-sensitivity octave (DONE-WHEN): double the spanwise extent
     // on the highest-Re rung — 2-D-ness is exactly what we are testing
     // our way out of, so a too-thin box must be ruled out explicitly.
+    // Skipped in single-rung distributed mode unless that rung IS the
+    // highest-Re one (its owner also owns the octave).
+    if only.map(|o| o + 1 != LADDER.len()).unwrap_or(false) {
+        println!("octave skipped in single-rung mode");
+        return;
+    }
     let mut cfg_hi = base_config(*LADDER.last().expect("non-empty ladder"));
     cfg_hi.nz *= 2;
     let ckpt_hi =
@@ -139,7 +162,14 @@ fn re_sweep_campaign() {
         cfg_hi.nz, cls_hi.reynolds, cls_hi.flatness, cls_hi.tonal, cls_hi.strouhal
     );
 
-    std::fs::write(&receipt_path, &jsonl).expect("archive sweep receipts");
+    if only.is_some() {
+        let rung_path =
+            receipt_path.with_file_name(format!("slot-jet-3d-re-sweep-rung{:.2}.jsonl", rate));
+        std::fs::write(&rung_path, &jsonl).expect("archive per-rung receipts");
+        println!("archived: {}", rung_path.display());
+    } else {
+        std::fs::write(&receipt_path, &jsonl).expect("archive sweep receipts");
+    }
     println!(
         "\nREGIME MAP (rate/Re/flatness/tonal/St/bin/prominence/rms/qualified/mach/imbalance):\n{regime_map}"
     );
