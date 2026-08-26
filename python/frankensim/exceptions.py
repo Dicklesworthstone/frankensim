@@ -61,3 +61,15 @@ class CancellationError(FrankenSimError):
     """Execution was cancelled via cancellation gate or SIGINT (exit 130)."""
     def __init__(self, message: str, diagnostics: Optional[List[Diagnostic]] = None):
         super().__init__(message, exit_code=ExitCode.CANCELLED, diagnostics=diagnostics)
+
+
+class FrankenSimTimeoutError(FrankenSimError):
+    """The CLIENT-imposed wall-clock timeout killed the engine (SIGKILL).
+
+    Distinct from :class:`BudgetExceededError`, which is the ENGINE's honest
+    exit-6 budget stop with a durable prefix. A killed child produced no
+    durable prefix, so resuming from receipts would be a lie.
+    """
+
+    def __init__(self, message: str, diagnostics: Optional[List[Diagnostic]] = None):
+        super().__init__(message, exit_code=ExitCode.CANCELLED, diagnostics=diagnostics)

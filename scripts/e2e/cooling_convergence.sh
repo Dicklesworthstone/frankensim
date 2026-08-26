@@ -31,6 +31,14 @@ case "${COMMAND}" in
     exit 0
     ;;
   --check|--self-test)
+    if ! command -v rch >/dev/null 2>&1; then
+      log_json "self_test" "failed" "preflight failed: rch not on PATH"
+      exit 1
+    fi
+    if ! command -v cargo >/dev/null 2>&1; then
+      log_json "self_test" "failed" "preflight failed: cargo not on PATH"
+      exit 1
+    fi
     log_json "self_test" "ok" "preflight checks passed"
     exit 0
     ;;

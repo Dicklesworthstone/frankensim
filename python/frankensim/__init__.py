@@ -8,6 +8,7 @@ physics simulation, and optimization.
 from .client import FrankenSimClient
 from .exceptions import (
     FrankenSimError,
+    FrankenSimTimeoutError,
     UsageError,
     InputError,
     RefusalError,

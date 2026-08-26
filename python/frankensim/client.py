@@ -21,6 +21,7 @@ from .exceptions import (
     RefusalError,
     UnavailableError,
     BudgetExceededError,
+    FrankenSimTimeoutError,
     CancellationError,
 )
 from .models import (
@@ -113,8 +114,11 @@ class FrankenSimClient:
                 check=False,
             )
         except subprocess.TimeoutExpired as exc:
-            raise BudgetExceededError(
-                f"Execution exceeded timeout budget of {timeout}s: {' '.join(cmd)}"
+            # A client-side wall-clock kill is NOT the engine's honest exit-6
+            # budget stop (no durable prefix exists); conflating them would
+            # make callers resume from receipts that were never written.
+            raise FrankenSimTimeoutError(
+                f"Client timeout killed execution after {timeout}s: {' '.join(cmd)}"
             ) from exc
         except FileNotFoundError as exc:
             raise InputError(
@@ -244,10 +248,22 @@ class FrankenSimClient:
             unit,
         ]
 
-        if max_hole_edges is not None:
-            args.extend(["--max-hole-edges", str(max_hole_edges)])
-        elif step_root is not None and target_h is not None:
+        step_given = step_root is not None
+        target_given = target_h is not None
+        if step_given != target_given:
+            raise UsageError(
+                "import_mesh: step_root and target_h must be provided together"
+            )
+        if step_given and max_hole_edges is not None:
+            raise UsageError(
+                "import_mesh: max_hole_edges is a mesh-only option and cannot "
+                "be combined with the STEP import path (step_root/target_h)"
+            )
+
+        if step_given:
             args.extend(["--step-root", str(step_root), "--target-h", str(target_h)])
+        elif max_hole_edges is not None:
+            args.extend(["--max-hole-edges", str(max_hole_edges)])
         else:
             args.extend(["--max-hole-edges", "0"])
 
@@ -391,14 +407,15 @@ class FrankenSimClient:
                 args.extend(["--interfaces", str(iface)])
 
         exit_code, data, diagnostics, _, stderr_raw = self._execute(args, timeout_s=timeout_s)
-
         result = RunOutcome(
             status=data.get("status", "unknown"),
             command="run",
             subject=data.get("subject", str(project_path)),
             run_id=data.get("run", ""),
-            report_file=data.get("report", f"{data.get('run', 'cooling_run_01')}.html"),
-            package_file=data.get("package", f"{data.get('run', 'cooling_run_01')}.fspkg"),
+            # Empty means the engine minted no artifact (e.g. an unavailable
+            # stage under strict=False): never fabricate success-shaped paths.
+            report_file=data.get("report", ""),
+            package_file=data.get("package", ""),
             exit_code=exit_code,
             diagnostics=diagnostics,
         )

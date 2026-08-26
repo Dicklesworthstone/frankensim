@@ -34,6 +34,14 @@ case "${COMMAND}" in
     exit 0
     ;;
   --check|--self-test)
+    if ! command -v rch >/dev/null 2>&1; then
+      log_json "self_test" "failed" "preflight failed: rch not on PATH"
+      exit 1
+    fi
+    if ! command -v cargo >/dev/null 2>&1; then
+      log_json "self_test" "failed" "preflight failed: cargo not on PATH"
+      exit 1
+    fi
     log_json "self_test" "ok" "preflight checks passed"
     exit 0
     ;;
@@ -53,14 +61,20 @@ case "${COMMAND}" in
     fi
 
     # 2. Check ParaView availability if installed
+    PARAVIEW_RAN="no"
     if command -v pvpython >/dev/null 2>&1; then
       PV_VER="$(pvpython --version 2>&1 || true)"
+      PARAVIEW_RAN="yes"
       log_json "paraview_lane" "available" "${PV_VER}"
     else
       log_json "paraview_lane" "not_run" "pvpython not present on host; structural and independent reader checks verified"
     fi
 
-    log_json "run_terminal" "pass" "cooling field export verified bit-exact and ParaView-compatible"
+    if [ "${PARAVIEW_RAN}" = "yes" ]; then
+      log_json "run_terminal" "pass" "cooling field export verified bit-exact and ParaView-compatible"
+    else
+      log_json "run_terminal" "pass" "cooling field export verified bit-exact; ParaView lane NOT executed on this host"
+    fi
     exit 0
     ;;
   *)
