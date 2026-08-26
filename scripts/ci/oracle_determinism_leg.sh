@@ -99,9 +99,23 @@ cat >"$OUT_DIR/leg_receipt.json" <<RECEIPT
  "frankensim_head":"$FS_HEAD","goldens_pass":$GOLDENS_PASS,
  "siblings":{$SIBLING_RECEIPTS}}
 RECEIPT
+if [ "${FS_DET_STDOUT:-0}" = "1" ]; then
+    echo "=====FS_DET_BEGIN leg_receipt.json====="
+    cat "$OUT_DIR/leg_receipt.json"
+    echo "=====FS_DET_END====="
+    echo "=====FS_DET_BEGIN probe.jsonl====="
+    cat "$OUT_DIR/probe.jsonl"
+    echo "=====FS_DET_END====="
+fi
 
+"$GOLDENS_PASS" || {
+    echo "leg failed: goldens red inside frozen tree; receipts emitted above" >&2
+    exit 1
+}
+echo "leg complete: $OUT_DIR"
 "$GOLDENS_PASS" || {
     echo "leg failed: goldens red inside frozen tree; receipts retained" >&2
     exit 1
 }
 echo "leg complete: $OUT_DIR"
+
