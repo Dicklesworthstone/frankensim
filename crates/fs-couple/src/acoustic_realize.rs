@@ -2245,7 +2245,36 @@ fn ode_bore_chain(
     .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))
 }
 
+/// Fail-closed admission for tone holes: every realization lane must agree
+/// on whether a hole exists, so malformed entries refuse the WHOLE duct
+/// instead of being dropped by one image and kept by the other. This also
+/// closes the mis-indexed-hole escape hatch: `after_segment` beyond the
+/// last segment previously matched no realization loop at all.
+fn validate_tone_holes(duct: &ViscothermalDuct) -> Result<(), &'static str> {
+    if duct.tone_holes.len() > duct.segments.len().saturating_mul(64) {
+        return Err("unreasonable tone-hole count for the duct");
+    }
+    for hole in &duct.tone_holes {
+        if hole.after_segment >= duct.segments.len() {
+            return Err("tone hole references a segment index past the duct end");
+        }
+        if !(hole.radius_m.is_finite() && hole.radius_m > 0.0) {
+            return Err("tone-hole radius must be finite and positive");
+        }
+        if !(hole.chimney_m.is_finite() && hole.chimney_m >= 0.0) {
+            return Err("tone-hole chimney length must be finite and nonnegative");
+        }
+        if !hole.open_fraction.is_finite() {
+            return Err("tone-hole open fraction must be finite");
+        }
+    }
+    Ok(())
+}
+
 fn bore_spec(duct: &ViscothermalDuct) -> Option<(Vec<AcousticSection>, Vec<AcousticTap>)> {
+    if validate_tone_holes(duct).is_err() {
+        return None;
+    }
     if duct.segments.is_empty()
         || duct
             .segments
@@ -2610,6 +2639,7 @@ fn realize_blown_with_body(
 }
 
 fn physics_duct(duct: &ViscothermalDuct) -> Result<Duct, AcousticRealizeError> {
+    validate_tone_holes(duct).map_err(|what| AcousticRealizeError::InvalidDescription { what })?;
     if duct.segments.is_empty() {
         return Err(AcousticRealizeError::InvalidDescription {
             what: "duct has no segments",
@@ -2688,5 +2718,74 @@ fn refuse_open_nyquist(
 fn add_in_place(acc: &mut [f64], addend: &[f64]) {
     for (a, b) in acc.iter_mut().zip(addend) {
         *a += *b;
+    }
+}
+
+#[cfg(test)]
+mod tone_hole_admission_tests {
+    use super::*;
+    use fs_scenario::{CylinderSegment, ToneHole};
+
+    fn base_duct(hole: Option<ToneHole>) -> ViscothermalDuct {
+        ViscothermalDuct {
+            segments: vec![CylinderSegment::cylinder(0.01, 0.3)],
+            tone_holes: hole.into_iter().collect(),
+            termination: WaveguideEnd::Closed,
+            wall: None,
+        }
+    }
+
+    fn malformed_variants() -> Vec<ToneHole> {
+        vec![
+            ToneHole {
+                after_segment: 0,
+                radius_m: f64::NAN,
+                chimney_m: 0.0,
+                open_fraction: 1.0,
+            },
+            ToneHole {
+                after_segment: 5,
+                radius_m: 0.004,
+                chimney_m: 0.0,
+                open_fraction: 1.0,
+            },
+            ToneHole {
+                after_segment: 0,
+                radius_m: -0.004,
+                chimney_m: 0.0,
+                open_fraction: 1.0,
+            },
+            ToneHole {
+                after_segment: 0,
+                radius_m: 0.004,
+                chimney_m: 0.0,
+                open_fraction: f64::NAN,
+            },
+        ]
+    }
+
+    #[test]
+    fn bore_spec_refuses_every_malformed_tone_hole_shape() {
+        for hole in malformed_variants() {
+            assert!(
+                bore_spec(&base_duct(Some(hole))).is_none(),
+                "bore_spec must refuse duct with malformed hole {hole:?}"
+            );
+        }
+        assert!(bore_spec(&base_duct(None)).is_some(), "control must pass");
+    }
+
+    #[test]
+    fn physics_duct_refuses_with_typed_error() {
+        for hole in malformed_variants() {
+            let error = physics_duct(&base_duct(Some(hole)))
+                .expect_err("physics_duct must refuse malformed holes");
+            let what = match &error {
+                AcousticRealizeError::InvalidDescription { what } => *what,
+                other => panic!("unexpected refusal shape: {other:?}"),
+            };
+            assert!(what.contains("tone"), "{what}");
+        }
+        assert!(physics_duct(&base_duct(None)).is_ok(), "control must pass");
     }
 }

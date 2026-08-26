@@ -73,9 +73,11 @@ pub fn encode_pcm16_wav(
     write_u32_le(&mut out, sample_rate_hz);
     write_u32_le(
         &mut out,
-        sample_rate_hz.checked_mul(2).ok_or(WavError::InvalidInput {
-            what: "WAV byte rate overflows u32",
-        })?,
+        sample_rate_hz
+            .checked_mul(2)
+            .ok_or(WavError::InvalidInput {
+                what: "WAV byte rate overflows u32",
+            })?,
     );
     write_u16_le(&mut out, 2);
     write_u16_le(&mut out, 16);

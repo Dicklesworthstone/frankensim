@@ -511,7 +511,7 @@ mod piano_vertical_tests {
         let obs = 0.3f64;
         let mut signal = Vec::with_capacity(40_000);
         for _ in 0..40_000usize {
-            let _ = pv.step();
+            pv.step().expect("pv step");
             let disp: f64 = pv.strings[1]
                 .states()
                 .iter()
@@ -606,7 +606,7 @@ mod piano_vertical_tests {
             let mut env = Vec::new();
             let mut acc = 0.0f64;
             for k in 0..72_000usize {
-                let v = pv.step();
+                let v = pv.step().expect("pv step");
                 acc += v * v;
                 if k % 240 == 239 {
                     env.push((acc / 240.0).sqrt());
@@ -689,7 +689,7 @@ mod piano_vertical_tests {
                 0.02,
             )
             .expect("pv");
-            let _ = render(&mut pv, 2.0, sample);
+            let _ = render(&mut pv, 2.0, sample).expect("pv render");
             pv.string_energies().iter().take(3).sum()
         };
         let sustained = energy_at(true, false, 24_000);
@@ -725,7 +725,7 @@ mod piano_vertical_tests {
             let mut signal = Vec::new();
             let mut energies = Vec::new();
             for k in 0..24_000usize {
-                signal.push(pv.step());
+                signal.push(pv.step().expect("pv step"));
                 if k % 240 == 0 {
                     energies.push(pv.system_energy());
                 }
