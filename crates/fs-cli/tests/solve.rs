@@ -198,8 +198,8 @@ fn interface_pack_bytes() -> Vec<u8> {
     use fs_evidence::ValidityDomain;
     use fs_matdb::{
         ClaimSet, InterpolationPolicy, MaterialStateId, NormalizedInterfacePack, NormalizedPack,
-        PropertyClaim, PropertyKey, PropertyValue, Provenance, SurfaceSpec, SystemContext,
-        UncertaintyModel,
+        ObservationDataset, PropertyClaim, PropertyKey, PropertyValue, Provenance, SurfaceSpec,
+        SystemContext, UncertaintyModel,
     };
     let provenance = Provenance {
         source: "solve fixture contact table".to_string(),
@@ -210,6 +210,15 @@ fn interface_pack_bytes() -> Vec<u8> {
         )),
     };
     let mut claims = ClaimSet::new();
+    let observation = claims
+        .register_observation(ObservationDataset {
+            specimen: "solve fixture contact coupon".to_string(),
+            method: "solve fixture contact campaign".to_string(),
+            artifact: fs_blake3::hash_domain(CARD_FIXTURE_DOMAIN, b"raw-contact-observation"),
+            caveats: "fixture value; not a seed-dataset authority".to_string(),
+            provenance: provenance.clone(),
+        })
+        .expect("licensed contact observation inserts");
     claims
         .insert_claim(PropertyClaim {
             key: PropertyKey::new(
@@ -226,7 +235,7 @@ fn interface_pack_bytes() -> Vec<u8> {
                 confidence: 0.95,
             },
             interpolation: InterpolationPolicy::ConstantWithinValidity,
-            observations: Vec::new(),
+            observations: vec![observation],
             provenance: provenance.clone(),
         })
         .expect("contact claim inserts");
