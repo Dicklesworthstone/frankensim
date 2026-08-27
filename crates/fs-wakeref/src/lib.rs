@@ -143,8 +143,12 @@ impl Fixture {
             Fixture::Chirp => {
                 let t = k as f64 * dt_s;
                 let total = n as f64 * dt_s;
-                let f = 0.5 + 3.5 * (t / total);
-                0.05 * det::sin(core::f64::consts::TAU * f * t)
+                // Linear sweep requires the INTEGRATED phase
+                // phi(t) = 2π∫f dt' = 2π(0.5·t + 1.75·t²/total) so the
+                // INSTANTANEOUS frequency dphi/dt / 2π sweeps 0.5 → 4 Hz as
+                // declared. (TAU·f(t)·t sweeps 0.5 → 7.5 Hz — wrong stimulus.)
+                let phase = 0.5 * t + 1.75 * t * t / total;
+                0.05 * det::sin(core::f64::consts::TAU * phase)
             }
             Fixture::Reversal => {
                 if k < n / 2 {
@@ -509,11 +513,13 @@ pub fn run_case(g: &RefereeGeometry, case: &RefereeCase) -> Result<CaseSeries, R
                     [st.te_left[0] + dx, st.te_left[1], st.te_left[2]],
                 ],
                 gamma: gamma[i],
-                station: i,
             });
         }
-        // Declared memory cap: drop the OLDEST rows beyond the budget.
-        let cap = MAX_WAKE_ROWS * n / 8;
+        // Declared memory cap (MAX_WAKE_ROWS per station): drop the OLDEST
+        // rows beyond the budget. Enforcing the DECLARED constant keeps the
+        // receipt's wake_rows_cap truthful; the former `/8` shared-budget
+        // division silently retained an eighth of the documented history.
+        let cap = MAX_WAKE_ROWS * n;
         if wake.len() > cap {
             let drop = wake.len() - cap;
             wake.drain(0..drop);
