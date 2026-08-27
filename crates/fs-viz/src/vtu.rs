@@ -620,13 +620,18 @@ impl UnstructuredGrid {
         }
 
         // Validate data arrays
-        let mut seen_names = std::collections::HashSet::new();
+        let mut point_names = std::collections::HashSet::new();
+        let mut cell_names = std::collections::HashSet::new();
         for arr in &self.arrays {
             validate_xml_chars("data array name", &arr.name)?;
             if let Some(unit) = &arr.unit {
                 validate_xml_chars("data array unit", unit)?;
             }
-            if !seen_names.insert(&arr.name) {
+            let names = match arr.association {
+                DataAssociation::PointData => &mut point_names,
+                DataAssociation::CellData => &mut cell_names,
+            };
+            if !names.insert(&arr.name) {
                 return Err(VtuError::DuplicateArrayName {
                     name: arr.name.clone(),
                 });
@@ -957,10 +962,20 @@ impl VtuChecker {
         let declared_cells = parse_required_usize_attr(piece_header, "NumberOfCells")?;
 
         // 1. Extract Points
-        if let Some(points_content) = extract_tag_content(xml, "<Points>", "</Points>")
-            && let Some(data) = extract_data_array_content(&points_content)
-        {
-            let coords: Vec<f64> = data
+        if let Some(points_content) = extract_tag_content(xml, "<Points>", "</Points>") {
+            let points_array =
+                find_first_data_array(&points_content, "Points")?.ok_or_else(|| {
+                    VtuError::ParseError {
+                        detail: "Points contains no DataArray".to_string(),
+                    }
+                })?;
+            require_data_array_attr(&points_array, "type", "Float64", "Points")?;
+            require_data_array_attr(&points_array, "Name", "Points", "Points")?;
+            require_data_array_attr(&points_array, "NumberOfComponents", "3", "Points")?;
+            require_data_array_attr(&points_array, "format", "ascii", "Points")?;
+
+            let coords: Vec<f64> = points_array
+                .content
                 .split_whitespace()
                 .map(|s| {
                     s.parse::<f64>().map_err(|e| VtuError::ParseError {
@@ -984,8 +999,11 @@ impl VtuChecker {
         // 2. Extract Cells
         if let Some(cells_content) = extract_tag_content(xml, "<Cells>", "</Cells>") {
             // Connectivity
-            if let Some(conn_tag) = find_data_array_by_name(&cells_content, "connectivity")? {
-                let indices: Vec<i64> = conn_tag
+            if let Some(conn_array) = find_data_array_by_name(&cells_content, "connectivity")? {
+                require_data_array_attr(&conn_array, "type", "Int64", "Cells connectivity")?;
+                require_data_array_attr(&conn_array, "format", "ascii", "Cells connectivity")?;
+                let indices: Vec<i64> = conn_array
+                    .content
                     .split_whitespace()
                     .map(|s| {
                         s.parse::<i64>().map_err(|e| VtuError::ParseError {
@@ -997,8 +1015,11 @@ impl VtuChecker {
             }
 
             // Offsets
-            if let Some(offsets_tag) = find_data_array_by_name(&cells_content, "offsets")? {
-                let offsets: Vec<i64> = offsets_tag
+            if let Some(offsets_array) = find_data_array_by_name(&cells_content, "offsets")? {
+                require_data_array_attr(&offsets_array, "type", "Int64", "Cells offsets")?;
+                require_data_array_attr(&offsets_array, "format", "ascii", "Cells offsets")?;
+                let offsets: Vec<i64> = offsets_array
+                    .content
                     .split_whitespace()
                     .map(|s| {
                         s.parse::<i64>().map_err(|e| VtuError::ParseError {
@@ -1010,8 +1031,11 @@ impl VtuChecker {
             }
 
             // Types
-            if let Some(types_tag) = find_data_array_by_name(&cells_content, "types")? {
-                let types: Vec<u8> = types_tag
+            if let Some(types_array) = find_data_array_by_name(&cells_content, "types")? {
+                require_data_array_attr(&types_array, "type", "UInt8", "Cells types")?;
+                require_data_array_attr(&types_array, "format", "ascii", "Cells types")?;
+                let types: Vec<u8> = types_array
+                    .content
                     .split_whitespace()
                     .map(|s| {
                         s.parse::<u8>().map_err(|e| VtuError::ParseError {
@@ -1060,37 +1084,94 @@ fn extract_tag_content(source: &str, open_tag: &str, close_tag: &str) -> Option<
     Some(source[start..start + end].to_string())
 }
 
-fn extract_data_array_content(source: &str) -> Option<String> {
-    let open_end = source.find("<DataArray")?;
-    let content_start = source[open_end..].find('>')? + open_end + 1;
-    let content_end = source[content_start..].find("</DataArray>")? + content_start;
-    Some(source[content_start..content_end].trim().to_string())
+struct XmlDataArray<'a> {
+    header: &'a str,
+    content: &'a str,
+    next: usize,
 }
 
-fn find_data_array_by_name(section: &str, name: &str) -> Result<Option<String>, VtuError> {
-    let mut search_from = 0usize;
-    while let Some(relative_start) = section[search_from..].find("<DataArray") {
-        let array_start = search_from + relative_start;
-        let header_end = section[array_start..]
-            .find('>')
-            .map(|end| array_start + end)
-            .ok_or_else(|| VtuError::ParseError {
-                detail: "unterminated DataArray tag in Cells".to_string(),
-            })?;
-        let header = &section[array_start..header_end];
-        if extract_attr(header, "Name")?.as_deref() == Some(name) {
-            let content_start = header_end + 1;
-            let content_end = section[content_start..]
-                .find("</DataArray>")
-                .map(|end| content_start + end)
-                .ok_or_else(|| VtuError::ParseError {
-                    detail: format!("missing </DataArray> for Cells array `{name}`"),
-                })?;
-            return Ok(Some(section[content_start..content_end].trim().to_string()));
+fn parse_data_array_at<'a>(
+    section: &'a str,
+    array_start: usize,
+    context: &str,
+) -> Result<XmlDataArray<'a>, VtuError> {
+    let header_end = section[array_start..]
+        .find('>')
+        .map(|end| array_start + end)
+        .ok_or_else(|| VtuError::ParseError {
+            detail: format!("unterminated DataArray tag in {context}"),
+        })?;
+    let content_start = header_end + 1;
+    let content_end = section[content_start..]
+        .find("</DataArray>")
+        .map(|end| content_start + end)
+        .ok_or_else(|| VtuError::ParseError {
+            detail: format!("missing </DataArray> in {context}"),
+        })?;
+    Ok(XmlDataArray {
+        header: &section[array_start..header_end],
+        content: section[content_start..content_end].trim(),
+        next: content_end + "</DataArray>".len(),
+    })
+}
+
+fn find_data_array_start(section: &str, mut search_from: usize) -> Option<usize> {
+    const ELEMENT: &str = "<DataArray";
+    while let Some(relative_start) = section[search_from..].find(ELEMENT) {
+        let start = search_from + relative_start;
+        let name_end = start + ELEMENT.len();
+        let has_element_boundary = section[name_end..]
+            .chars()
+            .next()
+            .is_some_and(|ch| ch == '>' || ch == '/' || ch.is_ascii_whitespace());
+        if has_element_boundary {
+            return Some(start);
         }
-        search_from = header_end + 1;
+        search_from = name_end;
+    }
+    None
+}
+
+fn find_first_data_array<'a>(
+    section: &'a str,
+    context: &str,
+) -> Result<Option<XmlDataArray<'a>>, VtuError> {
+    let Some(array_start) = find_data_array_start(section, 0) else {
+        return Ok(None);
+    };
+    parse_data_array_at(section, array_start, context).map(Some)
+}
+
+fn find_data_array_by_name<'a>(
+    section: &'a str,
+    name: &str,
+) -> Result<Option<XmlDataArray<'a>>, VtuError> {
+    let mut search_from = 0usize;
+    while let Some(array_start) = find_data_array_start(section, search_from) {
+        let array = parse_data_array_at(section, array_start, "Cells")?;
+        if extract_attr(array.header, "Name")?.as_deref() == Some(name) {
+            return Ok(Some(array));
+        }
+        search_from = array.next;
     }
     Ok(None)
+}
+
+fn require_data_array_attr(
+    array: &XmlDataArray<'_>,
+    attr: &str,
+    expected: &str,
+    context: &str,
+) -> Result<(), VtuError> {
+    let actual = extract_attr(array.header, attr)?.ok_or_else(|| VtuError::ParseError {
+        detail: format!("{context} DataArray is missing required `{attr}` attribute"),
+    })?;
+    if actual != expected {
+        return Err(VtuError::ParseError {
+            detail: format!("{context} DataArray `{attr}` must be `{expected}`, found `{actual}`"),
+        });
+    }
+    Ok(())
 }
 
 fn parse_arrays_in_section(
@@ -1099,27 +1180,19 @@ fn parse_arrays_in_section(
     grid: &mut UnstructuredGrid,
 ) -> Result<(), VtuError> {
     let mut cursor = section;
-    while let Some(start_pos) = cursor.find("<DataArray") {
-        let tag_header_end = cursor[start_pos..]
-            .find('>')
-            .ok_or_else(|| VtuError::ParseError {
-                detail: "unterminated DataArray tag".to_string(),
-            })?
-            + start_pos;
-        let tag_header = &cursor[start_pos..tag_header_end];
-
-        let content_end = cursor[tag_header_end..]
-            .find("</DataArray>")
-            .ok_or_else(|| VtuError::ParseError {
-                detail: "missing </DataArray> closing tag".to_string(),
-            })?
-            + tag_header_end;
-        let content = cursor[tag_header_end + 1..content_end].trim();
+    while let Some(start_pos) = find_data_array_start(cursor, 0) {
+        let array = parse_data_array_at(cursor, start_pos, "field data")?;
 
         // Extract attributes
-        let name = extract_attr(tag_header, "Name")?.unwrap_or_else(|| "unnamed".to_string());
-        let type_name = extract_attr(tag_header, "type")?.unwrap_or_else(|| "Float64".to_string());
-        let components = match extract_attr(tag_header, "NumberOfComponents")? {
+        let name = extract_attr(array.header, "Name")?.ok_or_else(|| VtuError::ParseError {
+            detail: "field DataArray is missing required `Name` attribute".to_string(),
+        })?;
+        let type_name =
+            extract_attr(array.header, "type")?.ok_or_else(|| VtuError::ParseError {
+                detail: format!("array `{name}` is missing required `type` attribute"),
+            })?;
+        require_data_array_attr(&array, "format", "ascii", &format!("array `{name}`"))?;
+        let components = match extract_attr(array.header, "NumberOfComponents")? {
             Some(value) => value
                 .parse::<usize>()
                 .map_err(|error| VtuError::ParseError {
@@ -1129,7 +1202,8 @@ fn parse_arrays_in_section(
                 })?,
             None => 1,
         };
-        let unit = extract_attr(tag_header, "Unit")?;
+        let unit = extract_attr(array.header, "Unit")?;
+        let content = array.content;
 
         let values = match type_name.as_str() {
             "Float64" => {
@@ -1202,7 +1276,7 @@ fn parse_arrays_in_section(
             values,
         });
 
-        cursor = &cursor[content_end + "</DataArray>".len()..];
+        cursor = &cursor[array.next..];
     }
     Ok(())
 }

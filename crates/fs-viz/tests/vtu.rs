@@ -299,6 +299,89 @@ fn test_vtu_checker_rejects_invalid_component_metadata() {
 }
 
 #[test]
+fn test_vtu_checker_rejects_false_core_array_metadata() {
+    let mut grid = UnstructuredGrid::new();
+    let p0 = grid.add_point(0.0, 0.0, 0.0);
+    grid.add_cell(CellType::Vertex, &[p0]);
+    let xml = VtuWriter::write_ascii(&grid).expect("write VTU");
+
+    for (tampered, expected_detail) in [
+        (
+            xml.replacen(
+                "type=\"Float64\" Name=\"Points\"",
+                "type=\"Float32\" Name=\"Points\"",
+                1,
+            ),
+            "Points DataArray `type` must be `Float64`",
+        ),
+        (
+            xml.replacen(
+                "Name=\"Points\" NumberOfComponents=\"3\"",
+                "Name=\"Points\" NumberOfComponents=\"2\"",
+                1,
+            ),
+            "Points DataArray `NumberOfComponents` must be `3`",
+        ),
+        (
+            xml.replacen(
+                "type=\"Int64\" Name=\"connectivity\" format=\"ascii\"",
+                "type=\"Int32\" Name=\"connectivity\" format=\"ascii\"",
+                1,
+            ),
+            "Cells connectivity DataArray `type` must be `Int64`",
+        ),
+        (
+            xml.replacen(
+                "type=\"UInt8\" Name=\"types\" format=\"ascii\"",
+                "type=\"UInt8\" Name=\"types\" format=\"binary\"",
+                1,
+            ),
+            "Cells types DataArray `format` must be `ascii`",
+        ),
+    ] {
+        assert_ne!(tampered, xml, "test fixture must mutate writer output");
+        assert!(matches!(
+            VtuChecker::check(&tampered),
+            Err(VtuError::ParseError { detail }) if detail.contains(expected_detail)
+        ));
+    }
+}
+
+#[test]
+fn test_vtu_checker_rejects_non_ascii_field_encoding() {
+    let mut grid = UnstructuredGrid::new();
+    let p0 = grid.add_point(0.0, 0.0, 0.0);
+    grid.add_cell(CellType::Vertex, &[p0]);
+    grid.add_array(DataArray::new_point_scalar("scalar", vec![1.0]));
+    let xml = VtuWriter::write_ascii(&grid).expect("write VTU");
+    let tampered = xml.replacen(
+        "Name=\"scalar\" NumberOfComponents=\"1\" format=\"ascii\"",
+        "Name=\"scalar\" NumberOfComponents=\"1\" format=\"binary\"",
+        1,
+    );
+    assert_ne!(tampered, xml, "test fixture must mutate writer output");
+
+    assert!(matches!(
+        VtuChecker::check(&tampered),
+        Err(VtuError::ParseError { detail })
+            if detail.contains("array `scalar` DataArray `format` must be `ascii`")
+    ));
+}
+
+#[test]
+fn test_vtu_duplicate_names_are_scoped_to_their_association() {
+    let mut grid = UnstructuredGrid::new();
+    let p0 = grid.add_point(0.0, 0.0, 0.0);
+    grid.add_cell(CellType::Vertex, &[p0]);
+    grid.add_array(DataArray::new_point_scalar("id", vec![1.0]));
+    grid.add_array(DataArray::new_cell_scalar("id", vec![2.0]));
+
+    let xml = VtuWriter::write_ascii(&grid).expect("same name is valid across associations");
+    let parsed = VtuChecker::parse_ascii(&xml).expect("round-trip association-scoped names");
+    assert_eq!(parsed.arrays, grid.arrays);
+}
+
+#[test]
 fn test_vtu_rejects_xml_forbidden_characters() {
     let mut grid = UnstructuredGrid::new();
     let p0 = grid.add_point(0.0, 0.0, 0.0);
