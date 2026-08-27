@@ -814,8 +814,7 @@ fn strip_string_literals(line: &str) -> String {
                 let closer: Vec<u8> = std::iter::once(b'"')
                     .chain(std::iter::repeat_n(b'#', hashes))
                     .collect();
-                if let Some(rel) = line[j + 1..]
-                    .as_bytes()
+                if let Some(rel) = line.as_bytes()[j + 1..]
                     .windows(closer.len())
                     .position(|window| window == closer.as_slice())
                 {
@@ -851,7 +850,7 @@ fn strip_string_literals(line: &str) -> String {
 
 fn contains_unsafe_token(text: &str) -> bool {
     for raw in text.lines() {
-        let line = strip_string_literals(&strip_line_comments(raw));
+        let line = strip_string_literals(strip_line_comments(raw));
         for (i, _) in line.match_indices("unsafe") {
             let before_ok = i == 0
                 || !line.as_bytes()[i - 1].is_ascii_alphanumeric()
@@ -3693,7 +3692,7 @@ fn casual_function_owner_map(
     let mut owners = vec![None; token_count];
     let mut stack: Vec<usize> = Vec::new();
     let mut next = 0usize;
-    for token in 0..token_count {
+    for (token, slot) in owners.iter_mut().enumerate() {
         while stack
             .last()
             .is_some_and(|index| functions[*index].close <= token)
@@ -3704,7 +3703,7 @@ fn casual_function_owner_map(
             stack.push(order[next]);
             next += 1;
         }
-        owners[token] = stack.last().copied();
+        *slot = stack.last().copied();
     }
     owners
 }
@@ -4194,17 +4193,17 @@ fn casual_module_edges(
         let attached = casual_attached_attributes(&tokens, &pairs, header_start);
         let mut direct_path = None;
         for hash in attached {
-            if let Some(literal) = casual_module_path_attribute(path, &tokens, &pairs, hash)? {
-                if direct_path.replace(literal).is_some() {
-                    return Err(format!(
-                        "multiple #[path] attributes on module {name} in {path}"
-                    ));
-                }
+            if let Some(literal) = casual_module_path_attribute(path, &tokens, &pairs, hash)?
+                && direct_path.replace(literal).is_some()
+            {
+                return Err(format!(
+                    "multiple #[path] attributes on module {name} in {path}"
+                ));
             }
         }
         let child_identity_bytes = current_dir
             .len()
-            .checked_add(if current_dir.is_empty() { 0 } else { 1 })
+            .checked_add(usize::from(!current_dir.is_empty()))
             .and_then(|length| length.checked_add(name.len()))
             .ok_or_else(|| format!("module identity length overflowed in {path}"))?;
         if child_identity_bytes > CASUAL_MAX_PORTABLE_PATH_BYTES {
@@ -4552,12 +4551,7 @@ fn casual_toml_basic_string(token: &str) -> Result<String, String> {
     let mut characters = token[1..token.len() - 1].chars();
     let mut output = String::new();
     while let Some(character) = characters.next() {
-        let decoded = if character != '\\' {
-            if (character <= '\u{001f}' && character != '\t') || character == '\u{007f}' {
-                return Err("unescaped control character in TOML basic string".to_string());
-            }
-            character
-        } else {
+        let decoded = if character == '\\' {
             let escaped = characters
                 .next()
                 .ok_or_else(|| "truncated TOML basic-string escape".to_string())?;
@@ -4593,6 +4587,11 @@ fn casual_toml_basic_string(token: &str) -> Result<String, String> {
                     ));
                 }
             }
+        } else {
+            if (character <= '\u{001f}' && character != '\t') || character == '\u{007f}' {
+                return Err("unescaped control character in TOML basic string".to_string());
+            }
+            character
         };
         output.push(decoded);
         if output.len() > CASUAL_MAX_PORTABLE_PATH_BYTES {
@@ -4701,7 +4700,7 @@ fn casual_manifest_statements(manifest: &str) -> Result<Vec<CasualManifestStatem
 
         if let Some(active) = quote {
             current.push(byte);
-            if byte == b'\n' && delimiters.iter().any(|delimiter| *delimiter == b'{') {
+            if byte == b'\n' && delimiters.contains(&b'{') {
                 return Err(format!(
                     "inline TOML table crosses line {line}; Cargo's admitted inline-table grammar is single-line"
                 ));
@@ -4780,7 +4779,7 @@ fn casual_manifest_statements(manifest: &str) -> Result<Vec<CasualManifestStatem
         }
 
         if byte == b'\n' {
-            if delimiters.iter().any(|delimiter| *delimiter == b'{') {
+            if delimiters.contains(&b'{') {
                 return Err(format!(
                     "inline TOML table crosses line {line}; Cargo's admitted inline-table grammar is single-line"
                 ));
@@ -4899,7 +4898,7 @@ fn casual_manifest_key_path(input: &str) -> Result<Vec<String>, String> {
     loop {
         while bytes
             .get(cursor)
-            .is_some_and(|byte| byte.is_ascii_whitespace())
+            .is_some_and(u8::is_ascii_whitespace)
         {
             cursor += 1;
         }
@@ -4953,7 +4952,7 @@ fn casual_manifest_key_path(input: &str) -> Result<Vec<String>, String> {
             ));
         }
         key_path_bytes = key_path_bytes
-            .checked_add(if keys.is_empty() { 0 } else { 1 })
+            .checked_add(usize::from(!keys.is_empty()))
             .and_then(|bytes| bytes.checked_add(key.len()))
             .ok_or_else(|| "TOML key-path byte count overflowed".to_string())?;
         if key_path_bytes > CASUAL_MAX_PORTABLE_PATH_BYTES {
@@ -4965,7 +4964,7 @@ fn casual_manifest_key_path(input: &str) -> Result<Vec<String>, String> {
 
         while bytes
             .get(cursor)
-            .is_some_and(|byte| byte.is_ascii_whitespace())
+            .is_some_and(u8::is_ascii_whitespace)
         {
             cursor += 1;
         }
@@ -4999,10 +4998,9 @@ fn casual_manifest_comment_free(input: &str) -> Result<&str, String> {
             Some(b'"') if escaped => escaped = false,
             Some(b'"') if byte == b'\\' => escaped = true,
             Some(delimiter) if byte == delimiter => quote = None,
-            Some(_) => {}
             None if matches!(byte, b'\'' | b'"') => quote = Some(byte),
             None if byte == b'#' => return Ok(&input[..index]),
-            None => {}
+            Some(_) | None => {}
         }
     }
     if quote.is_some() {
@@ -5047,14 +5045,13 @@ fn casual_manifest_assignment(line: &str) -> Result<Option<(Vec<String>, &str)>,
             Some(b'"') if escaped => escaped = false,
             Some(b'"') if byte == b'\\' => escaped = true,
             Some(delimiter) if byte == delimiter => quote = None,
-            Some(_) => {}
             None if matches!(byte, b'\'' | b'"') => quote = Some(byte),
             None if byte == b'#' => return Ok(None),
             None if byte == b'=' => {
                 let keys = casual_manifest_key_path(line[..index].trim())?;
                 return Ok(Some((keys, &line[index + 1..])));
             }
-            None => {}
+            Some(_) | None => {}
         }
     }
     if quote.is_some() {
@@ -5134,7 +5131,7 @@ fn casual_manifest_library_root_from_statements(
                 ));
             }
             lib_path = Some(casual_manifest_string(value).map_err(|error| {
-                format!("cannot parse {package_root}/Cargo.toml:{line_number} lib.path: {error}",)
+                format!("cannot parse {package_root}/Cargo.toml:{line_number} lib.path: {error}")
             })?);
         }
     }
@@ -5315,7 +5312,7 @@ struct CasualWorkspaceContext {
     excluded: BTreeSet<String>,
 }
 
-fn casual_workspace_path_identity(path: String, kind: &str) -> Result<String, String> {
+fn casual_workspace_path_identity(path: &str, kind: &str) -> Result<String, String> {
     if path.is_empty() {
         return Err(format!("workspace {kind} path must not be empty"));
     }
@@ -5327,7 +5324,7 @@ fn casual_workspace_path_identity(path: String, kind: &str) -> Result<String, St
             "workspace {kind} path {path:?} uses a glob; exact scanner membership requires explicit normalized paths"
         ));
     }
-    let normalized = casual_normalized_inclusion("Cargo.toml", &path)
+    let normalized = casual_normalized_inclusion("Cargo.toml", path)
         .map_err(|error| format!("invalid workspace {kind} path {path:?}: {error}"))?;
     if normalized != path.trim_end_matches('/') {
         return Err(format!(
@@ -5378,7 +5375,7 @@ fn casual_manifest_workspace_context(manifest: &str) -> Result<CasualWorkspaceCo
                     for path in casual_manifest_string_array(&value).map_err(|error| {
                         format!("workspace Cargo.toml:{line} has invalid {kind} array: {error}")
                     })? {
-                        let path = casual_workspace_path_identity(path, kind)?;
+                        let path = casual_workspace_path_identity(&path, kind)?;
                         if !target.insert(path.clone()) {
                             return Err(format!(
                                 "workspace Cargo.toml:{line} declares duplicate {kind} path {path}"
@@ -5666,7 +5663,7 @@ fn casual_workspace_library_contexts(
                 manifest_path.display()
             )
         })?;
-        let package_root = casual_inventory_relative(root, &package)?;
+        let package_root = casual_inventory_relative(root, package)?;
         if !seen_packages.insert(package_root.clone()) {
             return Err(format!(
                 "Cargo package {package_root} was discovered through more than one manifest identity"
@@ -6303,10 +6300,8 @@ fn casual_include_macro_authority_with_limits(
                 ));
             }
             resolved[index] = true;
-            if leaf.alias != "_" {
-                if authority.aliases.insert(leaf.alias.clone()) {
-                    ready.push(leaf.alias.clone());
-                }
+            if leaf.alias != "_" && authority.aliases.insert(leaf.alias.clone()) {
+                ready.push(leaf.alias.clone());
             }
         } else if leaf.alias == "include"
             || leaf.source.last().is_some_and(|name| name == "include")

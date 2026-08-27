@@ -37,6 +37,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::fmt::Write as _;
 
 use crate::depgraph::{JsonParser, JsonValue};
 use crate::{PolicyNote, Violation, fnv1a64};
@@ -228,10 +229,10 @@ fn closed_bead_ids(root: &Path) -> Result<std::collections::BTreeSet<String>, St
         else {
             continue;
         };
-        if let (Some(id), Some(status)) = (json_string(&map, "id"), json_string(&map, "status")) {
-            if status == "closed" {
-                closed.insert(id);
-            }
+        if let (Some(id), Some(status)) = (json_string(&map, "id"), json_string(&map, "status"))
+            && status == "closed"
+        {
+            closed.insert(id);
         }
     }
     Ok(closed)

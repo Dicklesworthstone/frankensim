@@ -25171,18 +25171,11 @@ fn admit_candidate_receipt(cache: &mut Cache, value: Value) {
         // A file-root unqualified import binding the exact same name stays
         // refused: text inspection cannot prove which root-scope binding
         // wins, so resolution remains fail-closed there.
-        let shadowing_source = concat!(
-            "use foreign::SWEEP_DUP;\n",
-            "const SWEEP_DUP: u8 = 3;\n",
-        );
+        let shadowing_source = concat!("use foreign::SWEEP_DUP;\n", "const SWEEP_DUP: u8 = 3;\n",);
         let index = RustSourceIndex::new(shadowing_source);
         assert_eq!(
-            runtime_source_const_declarations_with_index(
-                &shadowing_source,
-                "SWEEP_DUP",
-                &index,
-            )
-            .len(),
+            runtime_source_const_declarations_with_index(&shadowing_source, "SWEEP_DUP", &index,)
+                .len(),
             0,
             "a root-scope import sharing the symbol must keep refusing"
         );
