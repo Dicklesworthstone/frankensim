@@ -402,12 +402,13 @@ fn compute_normalization(pop: &[NsgaIndividual], m: usize) -> Normalization {
             at.swap(col, piv);
             for r in col + 1..m {
                 let factor = at[r][col] / at[col][col];
-                for (cc, row_cc) in at[r]
-                    .iter_mut()
-                    .enumerate()
-                    .skip(col)
-                {
-                    *row_cc -= factor * at[col][cc];
+                // Indexed form required: row `r` is mutated while
+                // pivot row `col` is read; iterator adapters would
+                // double-borrow (`clippy::needless_range_loop` wants a
+                // transform that cannot hold both loans).
+                #[allow(clippy::needless_range_loop)]
+                for cc in col..m {
+                    at[r][cc] -= factor * at[col][cc];
                 }
             }
         }
