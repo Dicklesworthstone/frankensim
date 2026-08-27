@@ -57,12 +57,11 @@ fn live_issue_ids(beads: &str) -> BTreeSet<String> {
         }
         // Malformed rows are moonshot_policy's territory; this gate only
         // needs the id set of rows that DO parse.
-        if let Ok(parsed) = JsonParser::with_string_limit(line, MAX_BYTES).finish() {
-            if let JsonValue::Object(map) = parsed {
-                if let Some(JsonValue::String(id)) = map.get("id") {
-                    ids.insert(id.clone());
-                }
-            }
+        if let Ok(parsed) = JsonParser::with_string_limit(line, MAX_BYTES).finish()
+            && let JsonValue::Object(map) = parsed
+            && let Some(JsonValue::String(id)) = map.get("id")
+        {
+            ids.insert(id.clone());
         }
     }
     ids

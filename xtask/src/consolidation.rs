@@ -457,17 +457,21 @@ mod tests {
             .map(|(name, deps)| {
                 (
                     name.to_string(),
-                    deps.iter().map(|d| d.to_string()).collect(),
+                    deps.iter().map(ToString::to_string).collect(),
                 )
             })
             .collect()
     }
 
     fn protocol() -> String {
-        REQUIRED_PROTOCOL
-            .iter()
-            .map(|term| format!("{term}\n"))
-            .collect()
+        {
+            let mut built = String::new();
+            for term in REQUIRED_PROTOCOL {
+                built.push_str(term);
+                built.push('\n');
+            }
+            built
+        }
     }
 
     fn record(candidates: &str) -> String {

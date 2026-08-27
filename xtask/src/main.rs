@@ -4896,10 +4896,7 @@ fn casual_manifest_key_path(input: &str) -> Result<Vec<String>, String> {
     let mut keys = Vec::new();
     let mut key_path_bytes = 0usize;
     loop {
-        while bytes
-            .get(cursor)
-            .is_some_and(u8::is_ascii_whitespace)
-        {
+        while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
             cursor += 1;
         }
         let Some(first) = bytes.get(cursor).copied() else {
@@ -4962,10 +4959,7 @@ fn casual_manifest_key_path(input: &str) -> Result<Vec<String>, String> {
         }
         keys.push(key);
 
-        while bytes
-            .get(cursor)
-            .is_some_and(u8::is_ascii_whitespace)
-        {
+        while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
             cursor += 1;
         }
         match bytes.get(cursor) {

@@ -71,7 +71,7 @@ fn uint_field(literal: &str, field: &str) -> Option<u32> {
     let marker = format!("{field}:");
     let field_offset = literal.find(&marker)?;
     let rest = literal[field_offset + marker.len()..].trim_start();
-    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
     if digits.is_empty() {
         None
     } else {
@@ -213,10 +213,10 @@ pub fn scan_source(path: &str, text: &str) -> Result<Vec<CharterDeclaration>, St
                 let name_part = between[..colon].trim();
                 let mut name_tokens = name_part.split_whitespace();
                 let _kind = name_tokens.next();
-                if let Some(name) = name_tokens.next() {
-                    if name.chars().all(|c| c.is_alphanumeric() || c == '_') {
-                        base_bindings.insert(name.to_string(), declaration.clone());
-                    }
+                if let Some(name) = name_tokens.next()
+                    && name.chars().all(|c| c.is_alphanumeric() || c == '_')
+                {
+                    base_bindings.insert(name.to_string(), declaration.clone());
                 }
             }
         }
@@ -349,7 +349,7 @@ pub fn run(root: &Path) -> Result<Vec<String>, String> {
             .map_err(|error| format!("cannot read {}: {error}", dir.display()))?;
         for entry in entries.flatten() {
             let path = entry.path();
-            if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            if entry.file_type().is_ok_and(|t| t.is_dir()) {
                 if matches!(
                     entry.file_name().to_str(),
                     Some("target" | "node_modules" | ".git" | ".beads")

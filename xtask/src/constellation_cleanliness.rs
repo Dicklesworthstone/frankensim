@@ -2943,7 +2943,7 @@ mod tests {
             }
             index.extend_from_slice(path);
             index.push(0);
-            while (index.len() - entry_start) % 8 != 0 {
+            while !(index.len() - entry_start).is_multiple_of(8) {
                 index.push(0);
             }
         }

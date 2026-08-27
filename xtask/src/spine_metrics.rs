@@ -189,9 +189,8 @@ pub(crate) struct E2eReceipt {
 }
 
 fn load_e2e_receipt(root: &Path) -> Result<Option<E2eReceipt>, String> {
-    let text = match std::fs::read_to_string(root.join(E2E_RECEIPT_PATH)) {
-        Ok(text) => text,
-        Err(_) => return Ok(None),
+    let Ok(text) = std::fs::read_to_string(root.join(E2E_RECEIPT_PATH)) else {
+        return Ok(None);
     };
     let parsed = JsonParser::with_string_limit(&text, MAX_TRACKER_STRING_BYTES)
         .finish()
@@ -208,9 +207,8 @@ fn load_e2e_receipt(root: &Path) -> Result<Option<E2eReceipt>, String> {
         }
         _ => return Err(format!("{E2E_RECEIPT_PATH} has no schema string")),
     }
-    let summary = match map.get("summary") {
-        Some(JsonValue::Object(summary)) => summary,
-        _ => return Err(format!("{E2E_RECEIPT_PATH} has no summary object")),
+    let Some(JsonValue::Object(summary)) = map.get("summary") else {
+        return Err(format!("{E2E_RECEIPT_PATH} has no summary object"));
     };
     let number = |key: &str| match summary.get(key) {
         Some(JsonValue::Number(raw)) => raw
@@ -280,9 +278,8 @@ fn parse_snapshot(text: &str) -> Result<Snapshot, String> {
         }
         _ => return Err(format!("{SNAPSHOT_PATH} has no schema string")),
     }
-    let beads = match map.get("beads") {
-        Some(JsonValue::Object(beads)) => beads,
-        _ => return Err(format!("{SNAPSHOT_PATH} has no `beads` object")),
+    let Some(JsonValue::Object(beads)) = map.get("beads") else {
+        return Err(format!("{SNAPSHOT_PATH} has no `beads` object"));
     };
     let issues_fnv = match beads.get("issues_fnv1a64") {
         Some(JsonValue::String(hex)) => u64::from_str_radix(hex, 16)

@@ -642,7 +642,7 @@ fn read_git_blob(
             indexed.path
         )
     })?;
-    if delimiter != [b'\n'] {
+    if delimiter != *b"\n" {
         return Err(format!(
             "git cat-file returned a malformed blob delimiter for {}",
             indexed.path

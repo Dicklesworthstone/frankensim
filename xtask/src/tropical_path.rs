@@ -28,6 +28,7 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::fmt::Write as _;
 
 use crate::depgraph::{JsonParser, JsonValue};
 use crate::{PolicyNote, Violation, fnv1a64};
@@ -332,24 +333,28 @@ fn render_f64(value: f64) -> String {
 fn render(projection: &Projection) -> String {
     let mut out = String::new();
     out.push_str("{\n");
-    out.push_str(&format!("  \"schema\": \"{SCHEMA}\",\n"));
+    writeln!(out, "  \"schema\": \"{SCHEMA}\"").ok();
     out.push_str("  \"bead\": \"frankensim-kx95s\",\n");
-    out.push_str(&format!(
+    writeln!(
+        out,
         "  \"source\": {{\n    \"issues_fnv1a64\": \"{:016x}\",\n    \"open\": {},\n    \
          \"edges_blocks\": {},\n    \"edges_parent_child\": {},\n    \"defaulted_weights\": {},\n    \
-         \"default_estimate_minutes\": {}\n  }},\n",
+         \"default_estimate_minutes\": {}\n  }},",
         projection.issues_fnv,
         projection.open,
         projection.edges_blocks,
         projection.edges_parent_child,
         projection.defaulted_weights,
         DEFAULT_ESTIMATE_MINUTES
-    ));
-    out.push_str(&format!(
-        "  \"makespan_hours\": {},\n  \"path_is_unique\": {},\n",
+    )
+    .ok();
+    writeln!(
+        out,
+        "  \"makespan_hours\": {},\n  \"path_is_unique\": {},",
         render_f64(projection.makespan_hours),
         projection.path_is_unique
-    ));
+    )
+    .ok();
     out.push_str("  \"critical_path\": [\n");
     for (index, (id, latency)) in projection.critical_path.iter().enumerate() {
         let comma = if index + 1 == projection.critical_path.len() {
@@ -357,28 +362,32 @@ fn render(projection: &Projection) -> String {
         } else {
             ","
         };
-        out.push_str(&format!(
-            "    {{\"id\": \"{id}\", \"latency_hours\": {}}}{comma}\n",
+        writeln!(
+            out,
+            "    {{\"id\": \"{id}\", \"latency_hours\": {}}}{comma}",
             render_f64(*latency)
-        ));
+        )
+        .ok();
     }
     out.push_str("  ],\n");
     out.push_str("  \"spine_positions\": {\n");
     let spine_len = projection.spine_positions.len();
     for (index, (id, slack)) in projection.spine_positions.iter().enumerate() {
         let comma = if index + 1 == spine_len { "" } else { "," };
-        out.push_str(&format!(
-            "    \"{id}\": {{\"slack_hours\": {}, \"on_critical_path\": {}}}{comma}\n",
+        writeln!(
+            out,
+            "    \"{id}\": {{\"slack_hours\": {}, \"on_critical_path\": {}}}{comma}",
             render_f64(*slack),
             *slack == 0.0
-        ));
+        )
+        .ok();
     }
     out.push_str("  },\n");
     out.push_str("  \"slack_hours\": {\n");
     let slack_len = projection.slack_hours.len();
     for (index, (id, slack)) in projection.slack_hours.iter().enumerate() {
         let comma = if index + 1 == slack_len { "" } else { "," };
-        out.push_str(&format!("    \"{id}\": {}{comma}\n", render_f64(*slack)));
+        writeln!(out, "    \"{id}\": {}{comma}", render_f64(*slack)).ok();
     }
     out.push_str("  },\n");
     if projection.bv_available {
@@ -389,10 +398,12 @@ fn render(projection: &Projection) -> String {
         for (index, (id, score, slack)) in projection.bv_top.iter().enumerate() {
             let comma = if index + 1 == top_len { "" } else { "," };
             let slack = slack.map_or_else(|| "null".to_string(), render_f64);
-            out.push_str(&format!(
-                "      {{\"id\": \"{id}\", \"bv_score\": {}, \"slack_hours\": {slack}}}{comma}\n",
+            writeln!(
+                out,
+                "      {{\"id\": \"{id}\", \"bv_score\": {}, \"slack_hours\": {slack}}}{comma}",
                 render_f64(*score)
-            ));
+            )
+            .ok();
         }
         out.push_str("    ]\n  },\n");
     } else {
@@ -459,9 +470,8 @@ fn parse_artifact(text: &str) -> Result<TropicalArtifact, String> {
         }
         _ => return Err(format!("{ARTIFACT_PATH} has no schema string")),
     }
-    let source = match map.get("source") {
-        Some(JsonValue::Object(source)) => source,
-        _ => return Err(format!("{ARTIFACT_PATH} has no `source` object")),
+    let Some(JsonValue::Object(source)) = map.get("source") else {
+        return Err(format!("{ARTIFACT_PATH} has no `source` object"));
     };
     let issues_fnv = match source.get("issues_fnv1a64") {
         Some(JsonValue::String(hex)) => u64::from_str_radix(hex, 16)
@@ -729,15 +739,15 @@ mod tests {
         ]
         .join("\n");
         let projection = project(&text).expect("projection");
-        assert_eq!(projection.makespan_hours, 13.0);
+        assert_eq!(projection.makespan_hours.to_bits(), 13.0f64.to_bits());
         let path: Vec<&str> = projection
             .critical_path
             .iter()
             .map(|(id, _)| id.as_str())
             .collect();
         assert_eq!(path, vec!["a", "b", "c"]);
-        assert_eq!(projection.slack_hours["d"], 5.0);
-        assert_eq!(projection.slack_hours["b"], 0.0);
+        assert_eq!(projection.slack_hours["d"].to_bits(), 5.0f64.to_bits());
+        assert_eq!(projection.slack_hours["b"].to_bits(), 0.0f64.to_bits());
         assert_eq!(projection.defaulted_weights, 0);
     }
 
@@ -752,7 +762,7 @@ mod tests {
         assert_eq!(projection.defaulted_weights, 1);
         // 480-minute default + 60 minutes = 9 hours of makespan; a silent
         // zero would have reported 1.
-        assert_eq!(projection.makespan_hours, 9.0);
+        assert_eq!(projection.makespan_hours.to_bits(), 9.0f64.to_bits());
     }
 
     #[test]
@@ -765,7 +775,7 @@ mod tests {
         .join("\n");
         let projection = project(&text).expect("projection");
         assert_eq!(projection.open, 2);
-        assert_eq!(projection.makespan_hours, 1.0);
+        assert_eq!(projection.makespan_hours.to_bits(), 1.0f64.to_bits());
         assert!(!projection.slack_hours.contains_key("b"));
     }
 
@@ -790,7 +800,7 @@ mod tests {
         .join("\n");
         let projection = project(&text).expect("projection");
         assert_eq!(projection.edges_parent_child, 1);
-        assert_eq!(projection.makespan_hours, 5.0);
+        assert_eq!(projection.makespan_hours.to_bits(), 5.0f64.to_bits());
         let path: Vec<&str> = projection
             .critical_path
             .iter()
@@ -810,9 +820,9 @@ mod tests {
         let rendered = render(&projection);
         let parsed = parse_artifact(&rendered).expect("round trip");
         assert_eq!(parsed.open, 2);
-        assert_eq!(parsed.makespan_hours, 6.0);
+        assert_eq!(parsed.makespan_hours.to_bits(), 6.0f64.to_bits());
         assert_eq!(parsed.critical_path.len(), 2);
-        assert_eq!(parsed.slack_hours["a"], 0.0);
+        assert_eq!(parsed.slack_hours["a"].to_bits(), 0.0f64.to_bits());
     }
 
     #[test]

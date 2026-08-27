@@ -4576,7 +4576,7 @@ fn compile_joint(
                 None,
             ));
             decisions.push(Decision::admit(
-                format!("normalization:{}:covariance:{row}:{column}", subject),
+                format!("normalization:{subject}:covariance:{row}:{column}"),
                 "covariance_normalized",
                 "packed covariance entry scaled by both canonically permuted member transforms",
                 Some(literal_hash),
@@ -5046,8 +5046,8 @@ mod tests {
             .collect();
         assert_eq!(temperature_value_receipts.len(), 2);
         for receipt in temperature_value_receipts {
-            assert_eq!(receipt.scale(), 1.0);
-            assert_eq!(receipt.offset(), 273.15);
+            assert_eq!(receipt.scale().to_bits(), 1.0f64.to_bits());
+            assert_eq!(receipt.offset().to_bits(), 273.15f64.to_bits());
             assert_eq!(receipt.source_frame(), Some("specimen"));
             assert_eq!(receipt.target_frame(), Some("lab"));
         }
@@ -5066,8 +5066,8 @@ mod tests {
         assert_eq!(temperature_validity_receipts.len(), 2);
         for receipt in temperature_validity_receipts {
             assert_eq!(receipt.source_basis(), "degC");
-            assert_eq!(receipt.scale(), 1.0);
-            assert_eq!(receipt.offset(), 273.15);
+            assert_eq!(receipt.scale().to_bits(), 1.0f64.to_bits());
+            assert_eq!(receipt.offset().to_bits(), 273.15f64.to_bits());
             assert_eq!(receipt.source_frame(), None);
             assert_eq!(receipt.target_frame(), None);
         }
@@ -5082,7 +5082,10 @@ mod tests {
                 )
             })
             .expect("modulus uncertainty receipt");
-        assert_eq!(modulus_uncertainty_receipt.offset(), 0.0);
+        assert_eq!(
+            modulus_uncertainty_receipt.offset().to_bits(),
+            0.0f64.to_bits()
+        );
         assert_eq!(modulus_uncertainty_receipt.source_frame(), Some("specimen"));
         assert_eq!(modulus_uncertainty_receipt.target_frame(), Some("lab"));
         assert!(decoded.normalizations().iter().all(|receipt| {
@@ -5096,7 +5099,10 @@ mod tests {
 
         let joint = &decoded.joint_statistics()[0];
         assert_eq!(joint.members().len(), 2);
-        assert_eq!(joint.correlation().expect("source correlation")[1], 0.0);
+        assert_eq!(
+            joint.correlation().expect("source correlation")[1].to_bits(),
+            0.0f64.to_bits()
+        );
         for (row, member) in joint.members().iter().copied().enumerate() {
             let claim = decoded
                 .claims()

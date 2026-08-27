@@ -35,9 +35,9 @@
 //! (HEAD moved since the run) as a visible note, never a wedge.
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::fmt::Write as _;
 
 use crate::depgraph::{JsonParser, JsonValue};
 use crate::{PolicyNote, Violation, fnv1a64};
@@ -273,14 +273,12 @@ fn package_name(package_id: &str) -> String {
         // `registry+url#name@version`: the name is the fragment, but only
         // when the fragment actually carries a name@ (a bare version, as in
         // `path+file:///dir/name#version`, is not a name).
-        if let Some(fragment) = fragment {
-            if fragment.contains('@') {
-                if let Some(name) = fragment.split('@').next() {
-                    if !name.is_empty() {
-                        return name.to_string();
-                    }
-                }
-            }
+        if let Some(fragment) = fragment
+            && fragment.contains('@')
+            && let Some(name) = fragment.split('@').next()
+            && !name.is_empty()
+        {
+            return name.to_string();
         }
         // `path+file:///dir/name#version`: the name is the last path segment.
         let name = source.rsplit('/').next().unwrap_or(source);
@@ -508,7 +506,7 @@ fn run_test_executable(executable: &Path, cwd: &Path, outcome: &mut TargetOutcom
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn();
-    let mut child = match child {
+    let child = match child {
         Ok(child) => child,
         Err(error) => {
             outcome.target_error = Some(format!("cannot spawn {}: {error}", executable.display()));
@@ -639,9 +637,10 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 }
 
 fn host_fingerprint() -> String {
-    let uname = run_command("uname", &["-srm"], Path::new("/"))
-        .map(|(_, out, _)| out.trim().to_string())
-        .unwrap_or_else(|_| "unknown-uname".to_string());
+    let uname = run_command("uname", &["-srm"], Path::new("/")).map_or_else(
+        |_| "unknown-uname".to_string(),
+        |(_, out, _)| out.trim().to_string(),
+    );
     let cpus = run_command("nproc", &[], Path::new("/"))
         .ok()
         .and_then(|(ok, out, _)| ok.then(|| out.trim().to_string()))
@@ -663,9 +662,10 @@ fn toolchain_string(root: &Path) -> String {
                 .map(str::to_string)
         })
         .unwrap_or_else(|| "channel unpinned?".to_string());
-    let rustc = run_command("rustc", &["--version"], root)
-        .map(|(_, out, _)| out.trim().to_string())
-        .unwrap_or_else(|_| "rustc unknown".to_string());
+    let rustc = run_command("rustc", &["--version"], root).map_or_else(
+        |_| "rustc unknown".to_string(),
+        |(_, out, _)| out.trim().to_string(),
+    );
     format!("{}; {rustc}", channel.trim())
 }
 
@@ -674,9 +674,7 @@ fn head_sha(root: &Path) -> String {
 }
 
 fn head_dirty(root: &Path) -> bool {
-    crate::git_out(root, &["status", "--porcelain"])
-        .map(|status| !status.is_empty())
-        .unwrap_or(true)
+    crate::git_out(root, &["status", "--porcelain"]).map_or(true, |status| !status.is_empty())
 }
 
 fn constellation_lock_hash(root: &Path) -> String {
@@ -732,13 +730,14 @@ fn render(model: &RunModel) -> String {
     let (passed, failed, ignored) = model.totals();
     let mut out = String::new();
     out.push_str("{\n");
-    out.push_str(&format!("  \"schema\": \"{SCHEMA}\",\n"));
+    writeln!(out, "  \"schema\": \"{SCHEMA}\"").ok();
     out.push_str("  \"bead\": \"frankensim-fluz9\",\n");
     out.push_str("  \"run\": {\n");
-    out.push_str(&format!(
+    writeln!(
+        out,
         "    \"command\": \"{}\",\n    \"executed_at\": \"{}\",\n    \"host_fingerprint\": \"{}\",\n    \
          \"toolchain\": \"{}\",\n    \"head_sha\": \"{}\",\n    \"head_dirty\": {},\n    \
-         \"constellation_lock_fnv1a64\": \"{}\",\n    \"target\": \"{}\"\n  }},\n",
+         \"constellation_lock_fnv1a64\": \"{}\",\n    \"target\": \"{}\"\n  }},",
         escape(&model.command),
         model.executed_at,
         escape(&model.host),
@@ -747,11 +746,14 @@ fn render(model: &RunModel) -> String {
         model.head_dirty,
         model.lock_hash,
         model.target_triple
-    ));
-    out.push_str(&format!("  \"status\": \"{}\",\n", model.status()));
-    out.push_str(&format!(
-        "  \"totals\": {{\"passed\": {passed}, \"failed\": {failed}, \"ignored\": {ignored}}},\n"
-    ));
+    )
+    .ok();
+    writeln!(out, "  \"status\": \"{}\",", model.status()).ok();
+    writeln!(
+        out,
+        "  \"totals\": {{\"passed\": {passed}, \"failed\": {failed}, \"ignored\": {ignored}}},"
+    )
+    .ok();
     out.push_str("  \"crates\": {\n");
     let crate_count = model.crates.len();
     for (index, (krate, outcome)) in model.crates.iter().enumerate() {
@@ -763,7 +765,7 @@ fn render(model: &RunModel) -> String {
         if outcome.target_error.is_some() {
             line.push_str(", \"target_error\": true");
         }
-        line.push_str(&format!("}}{comma}\n"));
+        writeln!(line, "}}{comma}").ok();
         out.push_str(&line);
     }
     out.push_str("  },\n");
@@ -772,7 +774,7 @@ fn render(model: &RunModel) -> String {
         if index > 0 {
             out.push_str(", ");
         }
-        out.push_str(&format!("\"{}\"", escape(failure)));
+        write!(out, "\"{}\"", escape(failure)).ok();
     }
     out.push_str("],\n");
     out.push_str("  \"known_red\": [\n");
@@ -782,14 +784,16 @@ fn render(model: &RunModel) -> String {
         } else {
             ","
         };
-        out.push_str(&format!(
+        writeln!(
+            out,
             "    {{\"test\": \"{}\", \"crate\": \"{}\", \"owner_bead\": \"{}\", \"disposition\": \
-             \"{}\", \"observed_failed\": {observed}}}{comma}\n",
+             \"{}\", \"observed_failed\": {observed}}}{comma}",
             escape(&entry.test),
             escape(&entry.krate),
             escape(&entry.owner_bead),
             entry.disposition
-        ));
+        )
+        .ok();
     }
     out.push_str("  ],\n");
     out.push_str("  \"unexpected_red\": [\n");
@@ -799,11 +803,13 @@ fn render(model: &RunModel) -> String {
         } else {
             ","
         };
-        out.push_str(&format!(
-            "    {{\"crate\": \"{}\", \"test\": \"{}\"}}{comma}\n",
+        writeln!(
+            out,
+            "    {{\"crate\": \"{}\", \"test\": \"{}\"}}{comma}",
             escape(krate),
             escape(test)
-        ));
+        )
+        .ok();
     }
     out.push_str("  ],\n");
     out.push_str("  \"excluded\": [");
@@ -811,7 +817,7 @@ fn render(model: &RunModel) -> String {
         if index > 0 {
             out.push_str(", ");
         }
-        out.push_str(&format!("\"{}\"", escape(excluded)));
+        write!(out, "\"{}\"", escape(excluded)).ok();
     }
     out.push_str("],\n");
     out.push_str(
@@ -865,15 +871,13 @@ fn parse_receipt(text: &str) -> Result<SuiteReceipt, String> {
     ) {
         return Err(format!("{RECEIPT_PATH} has unknown status `{status}`"));
     }
-    let run = match json_obj_field(map, "run") {
-        Some(JsonValue::Object(run)) => run,
-        _ => return Err(format!("{RECEIPT_PATH} has no run object")),
+    let Some(JsonValue::Object(run)) = json_obj_field(map, "run") else {
+        return Err(format!("{RECEIPT_PATH} has no run object"));
     };
     let head_sha = json_string(run, "head_sha")
         .ok_or_else(|| format!("{RECEIPT_PATH} run has no head_sha"))?;
-    let totals = match json_obj_field(map, "totals") {
-        Some(JsonValue::Object(totals)) => totals,
-        _ => return Err(format!("{RECEIPT_PATH} has no totals object")),
+    let Some(JsonValue::Object(totals)) = json_obj_field(map, "totals") else {
+        return Err(format!("{RECEIPT_PATH} has no totals object"));
     };
     let passed = json_count(totals, "passed")?;
     let failed = json_count(totals, "failed")?;

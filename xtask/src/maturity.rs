@@ -27,6 +27,7 @@
 use crate::depgraph::{JsonParser, JsonValue};
 use crate::{PolicyNote, Violation};
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 use std::path::Path;
 
 pub const REGISTRY_FILE: &str = "capability-maturity.json";
@@ -359,19 +360,21 @@ fn render_readme_matrix(entries: &[Entry]) -> String {
             .map(|name| format!("`{}`", markdown_cell(name)))
             .collect::<Vec<_>>()
             .join(", ");
-        output.push_str(&format!(
-            "| `{}` — {} | {} | {crates} | {} |\n",
+        writeln!(
+            output,
+            "| `{}` — {} | {} | {crates} | {} |",
             markdown_cell(&entry.id),
             markdown_cell(&entry.title),
             entry.level,
             markdown_cell(&entry.notes),
-        ));
+        )
+        .ok();
     }
     output.push_str(README_MATRIX_END);
     output
 }
 
-fn readme_matrix_block<'a>(source: &'a str) -> Result<&'a str, String> {
+fn readme_matrix_block(source: &str) -> Result<&str, String> {
     let starts: Vec<usize> = source
         .match_indices(README_MATRIX_BEGIN)
         .map(|(index, _)| index)

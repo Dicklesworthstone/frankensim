@@ -936,10 +936,12 @@ mod tests {
             .map(|(path, body)| (path.to_string(), body.to_string()))
             .collect();
         map.entry(DOCTRINE_FILE.to_string()).or_insert_with(|| {
-            REQUIRED_DOCTRINE
-                .iter()
-                .map(|term| format!("{term}\n"))
-                .collect()
+            let mut built = String::new();
+            for term in REQUIRED_DOCTRINE {
+                built.push_str(term);
+                built.push('\n');
+            }
+            built
         });
         map
     }
@@ -1158,7 +1160,7 @@ mod tests {
     #[test]
     fn const_parsing_handles_the_shapes_this_repo_actually_uses() {
         assert_eq!(
-            parse_const_decl("pub const FSIM_VERSION: u32 = 1;").map(|(n, k, v)| (n, k, v)),
+            parse_const_decl("pub const FSIM_VERSION: u32 = 1;"),
             Some(("FSIM_VERSION", ConstKind::Integer, "1".to_string()))
         );
         assert_eq!(
@@ -1188,13 +1190,14 @@ mod tests {
         };
         write("crates/fs-demo/src/lib.rs", DEMO_SRC);
         write("crates/fs-demo/tests/demo.rs", DEMO_TEST);
-        write(
-            DOCTRINE_FILE,
-            &REQUIRED_DOCTRINE
-                .iter()
-                .map(|term| format!("{term}\n"))
-                .collect::<String>(),
-        );
+        write(DOCTRINE_FILE, &{
+            let mut built = String::new();
+            for term in REQUIRED_DOCTRINE {
+                built.push_str(term);
+                built.push('\n');
+            }
+            built
+        });
         write(POLICY_FILE, &policy(DEMO_FROZEN, ""));
 
         let clean = check_schema_policy(&base);

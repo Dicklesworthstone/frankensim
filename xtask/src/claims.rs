@@ -27,6 +27,7 @@
 use crate::depgraph::{JsonParser, JsonValue};
 use crate::{PolicyNote, Violation};
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 const DOC_FACTS_BEGIN: &str = "<!-- BEGIN GENERATED FRANKENSIM DOC FACTS -->";
@@ -1474,12 +1475,12 @@ members = [
             definition.push_str("\n\nbody\n\n");
         }
         for label in CLAIM_INTEGRITY_SEVERITY_LABELS {
-            definition.push_str(&format!("- `{label}`\n"));
+            writeln!(definition, "- `{label}`").ok();
         }
         let mut conventions = format!("{CLAIM_INTEGRITY_CONVENTIONS_SECTION}\n\n");
-        conventions.push_str(&format!("label `{CLAIM_INTEGRITY_LABEL}`\n"));
+        writeln!(conventions, "label `{CLAIM_INTEGRITY_LABEL}`").ok();
         for label in CLAIM_INTEGRITY_SEVERITY_LABELS {
-            conventions.push_str(&format!("- `{label}`\n"));
+            writeln!(conventions, "- `{label}`").ok();
         }
         let write = |rel: &str, text: &str| {
             let path = base.join(rel);

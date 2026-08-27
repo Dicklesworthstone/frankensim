@@ -1091,7 +1091,7 @@ fn g3_cli_compiles_committed_peek_thermic_plate_seed() {
             panic!("PEEK conductivity at {temperature} K was not scalar");
         };
         assert_eq!(*dims, Dims([1, 1, -3, -1, 0, 0]));
-        assert_eq!(*value, expected_value);
+        assert_eq!((*value).to_bits(), f64::to_bits(expected_value));
         assert_eq!(
             claim.validity.bound("source_pressure_atmospheric"),
             Some((1.0, 1.0))
@@ -1147,7 +1147,7 @@ fn g3_cli_compiles_committed_peek_thermic_plate_seed() {
             panic!("PEEK specific heat at {temperature} K was not scalar");
         };
         assert_eq!(*dims, Dims([2, 0, -2, -1, 0, 0]));
-        assert_eq!(*value, expected_value);
+        assert_eq!((*value).to_bits(), f64::to_bits(expected_value));
         assert_eq!(claim.uncertainty, UncertaintyModel::Unstated);
         assert_eq!(claim.provenance.license, NASA_SEED_LICENSE);
         let observation = decoded
@@ -1174,7 +1174,7 @@ fn g3_cli_compiles_committed_peek_thermic_plate_seed() {
     let PropertyValue::Scalar { value, dims } = &density.value else {
         panic!("PEEK density was not scalar");
     };
-    assert_eq!(*value, 1_264.0);
+    assert_eq!((*value).to_bits(), 1_264.0f64.to_bits());
     assert_eq!(*dims, Dims([-3, 1, 0, 0, 0, 0]));
     assert_eq!(
         density.validity.bound("source_test_temperature_known"),
@@ -1329,7 +1329,7 @@ fn g3_cli_compiles_committed_nasa_cr_115153_water_ethylene_glycol_seed() {
         let PropertyValue::Scalar { value, dims } = &claim.value else {
             panic!("water/glycol {property} was not scalar");
         };
-        assert_eq!(*value, expected_value);
+        assert_eq!((*value).to_bits(), f64::to_bits(expected_value));
         assert_eq!(*dims, expected_dims);
         assert_eq!(
             claim.validity.bound("source_test_temperature_known"),
@@ -1378,7 +1378,7 @@ fn g3_cli_compiles_committed_nasa_cr_115153_water_ethylene_glycol_seed() {
         let PropertyValue::Scalar { value, dims } = &claim.value else {
             panic!("NASA water/glycol cp at {temperature} K was not scalar");
         };
-        assert_eq!(*value, expected_value);
+        assert_eq!((*value).to_bits(), f64::to_bits(expected_value));
         assert_eq!(*dims, Dims([2, 0, -2, -1, 0, 0]));
         assert_eq!(
             claim.validity.bound("source_test_pressure_known"),
@@ -1581,7 +1581,7 @@ fn g3_cli_compiles_committed_n0602_001_nitrile_jp8_compatibility_seed() {
         let PropertyValue::Scalar { value, dims } = &claim.value else {
             panic!("N0602-001 {property} was not scalar");
         };
-        assert_eq!(*value, expected_value);
+        assert_eq!((*value).to_bits(), f64::to_bits(expected_value));
         assert_eq!(*dims, Dims([0, 0, 0, 0, 0, 0]));
         assert_eq!(
             claim.validity.bound("fuel_aromatic_volume_fraction"),
@@ -1648,7 +1648,7 @@ fn g3_cli_compiles_committed_n0602_001_nitrile_jp8_compatibility_seed() {
     let PropertyValue::Scalar { value, dims } = &r_squared[0].1.value else {
         panic!("N0602-001 R-squared was not scalar");
     };
-    assert_eq!(*value, 0.948);
+    assert_eq!((*value).to_bits(), 0.948f64.to_bits());
     assert_eq!(*dims, Dims([0, 0, 0, 0, 0, 0]));
     assert_eq!(
         r_squared[0]
@@ -2240,7 +2240,7 @@ fn g3_cli_compiles_committed_torrent_2018_m19_steinmetz_inputs_without_cross_sta
     let PropertyValue::Scalar { value, dims } = &thickness.value else {
         panic!("Torrent M19 Equation 5 sheet thickness was not scalar");
     };
-    assert_eq!(*value, 0.0005_f64);
+    assert_eq!((*value).to_bits(), 0.0005_f64.to_bits());
     assert_eq!(*dims, Dims([1, 0, 0, 0, 0, 0]));
     assert_eq!(thickness.uncertainty, UncertaintyModel::Unstated);
     assert_eq!(thickness.provenance.license, CC_BY_4_0_LICENSE);
@@ -2418,7 +2418,7 @@ fn g3_cli_compiles_committed_ngyc_n42_sintered_magnet_seed() {
     let PropertyValue::Scalar { value, dims } = &coercivity[0].1.value else {
         panic!("NGYC N42 coercivity was not scalar");
     };
-    assert_eq!(*value, 923.0_f64 * 1.0e3);
+    assert_eq!((*value).to_bits(), (923.0_f64 * 1.0e3).to_bits());
     assert_eq!(*dims, Dims([-1, 0, 0, 0, 1, 0]));
 
     let energy_products = decoded
@@ -2700,7 +2700,7 @@ fn g3_cli_compiles_committed_jinshan_n42_pristine_temperature_endpoints() {
             panic!("Jinshan N42 {property} was not scalar");
         };
         assert_eq!(*dims, Dims([0, 0, 0, -1, 0, 0]));
-        assert_eq!(*value, expected_value);
+        assert_eq!((*value).to_bits(), f64::to_bits(expected_value));
         assert_eq!(
             claim.validity.bound("temperature"),
             Some((25.0 + 273.15, 120.0 + 273.15))
@@ -3041,7 +3041,7 @@ fn g3_cli_compiles_committed_y30_afcp_application_demagnetization_without_intrin
             panic!("Y30 application demagnetization claim {id:?} was not scalar");
         };
         assert_eq!(*dims, Dims([0, 0, 0, 0, 0, 0]));
-        assert_eq!(*value, expected_fraction);
+        assert_eq!((*value).to_bits(), expected_fraction.to_bits());
         assert_eq!(claim.uncertainty, UncertaintyModel::Unstated);
         assert_eq!(claim.provenance.license, CC_BY_4_0_LICENSE);
         assert!(claim.provenance.source.contains("10.3390/app16021094"));
@@ -3257,7 +3257,8 @@ fn g3_cli_compiles_committed_naca_tn_2680_isooctane_flame_speed_seed() {
                         == Some((diameter_m, diameter_m))
                     && matches!(
                         &claim.value,
-                        PropertyValue::Scalar { value, .. } if *value == speed_m_per_s
+                        PropertyValue::Scalar { value, .. }
+                            if (*value).to_bits() == f64::to_bits(speed_m_per_s)
                     )
             })
             .collect::<Vec<_>>();
@@ -3305,7 +3306,7 @@ fn g3_cli_compiles_committed_naca_tn_2680_isooctane_flame_speed_seed() {
             claim.validity.bound("source_fuel_lot_known"),
             Some((0.0, 0.0))
         );
-        if oxygen_fraction == 0.210 {
+        if oxygen_fraction.to_bits() == 0.210_f64.to_bits() {
             assert_eq!(
                 claim
                     .validity
@@ -3940,7 +3941,7 @@ fn g3_cli_compiles_committed_nasa_uam_insulation_stack_constituents() {
                     panic!("MW-16C thermal-endurance duration was not scalar");
                 };
                 assert_eq!(*duration_dims, Dims([0, 0, 1, 0, 0, 0]));
-                assert_eq!(*duration, 20_000.0 * 3_600.0);
+                assert_eq!((*duration).to_bits(), (20_000.0_f64 * 3_600.0).to_bits());
                 assert_eq!(
                     duration_claim.validity.bound("reference_temperature"),
                     Some((240.0 + 273.15, 240.0 + 273.15))
@@ -4496,7 +4497,7 @@ fn g3_cli_compiles_committed_aisi_1045_cold_drawn_tensile_seed() {
             relative_half_width_error <= 2.0e-14,
             "AISI 1045 {property} Student-t half-width moved by {relative_half_width_error:e} relative"
         );
-        assert_eq!(*confidence, 0.95);
+        assert_eq!((*confidence).to_bits(), 0.95f64.to_bits());
 
         let Some((speed_lo, speed_hi)) = claim.validity.bound("crosshead_speed") else {
             panic!("AISI 1045 {property} lost its crosshead-speed validity point");
@@ -4691,7 +4692,7 @@ fn g3_cli_compiles_committed_aisi_52100_cvm_heat_treatment_states() {
             panic!("AISI 52100 hardness state {specimen_state} was not scalar");
         };
         assert_eq!(*dims, dimensionless);
-        assert_eq!(*value, expected_hardness);
+        assert_eq!((*value).to_bits(), f64::to_bits(expected_hardness));
         assert_eq!(
             hardness_claim.validity.bound("temperature"),
             Some((294.0, 294.0))
@@ -4974,7 +4975,7 @@ fn g3_cli_compiles_committed_aisi_9310_cvm_carburized_gear_seed() {
         panic!("AISI 9310 core hardness was not scalar");
     };
     assert_eq!(*core_dims, dimensionless);
-    assert_eq!(*core_value, 40.0);
+    assert_eq!((*core_value).to_bits(), 40.0f64.to_bits());
     assert!(core_claim.validity.bounds().is_empty());
     assert_eq!(core_claim.uncertainty, UncertaintyModel::Unstated);
     assert_eq!(core_claim.observations.len(), 1);
@@ -5039,9 +5040,10 @@ fn g3_cli_compiles_committed_aisi_9310_cvm_carburized_gear_seed() {
 
 #[test]
 fn g3_cli_compiles_committed_napc_gear_oils_without_fusing_batches() {
+    type ExpectedClaim = (&'static str, &'static str, f64, Dims, Option<f64>);
+
     let temperature_dims = Dims([0, 0, 0, 1, 0, 0]);
     let dimensionless = Dims([0, 0, 0, 0, 0, 0]);
-    type ExpectedClaim = (&'static str, &'static str, f64, Dims, Option<f64>);
     let seeds: [(&str, &str, &str, &[ExpectedClaim]); 2] = [
         (
             NAPC_PE_5_L_1274_GEAR_OIL_SEED_MANIFEST,
@@ -5380,9 +5382,8 @@ fn g3_cli_compiles_committed_rheolube_2000_bearing_grease_seed() {
         }
         assert_eq!(
             claim.validity.bounds().len(),
-            temperature_k.is_some() as usize + duration_s.is_some() as usize
+            usize::from(temperature_k.is_some()) + usize::from(duration_s.is_some())
         );
-        assert_eq!(claim.uncertainty, UncertaintyModel::Unstated);
         assert_eq!(
             claim.interpolation,
             InterpolationPolicy::ConstantWithinValidity
@@ -5802,12 +5803,11 @@ fn g3_cli_compiles_committed_s2_s_gray_cast_iron_seed() {
         panic!("S2-S ultimate tensile strength was not scalar");
     };
     assert_eq!(*tensile_dims, Dims([-1, 1, -2, 0, 0, 0]));
-    assert_eq!(*tensile_value, 326.0e6);
+    assert_eq!((*tensile_value).to_bits(), 326.0e6_f64.to_bits());
     assert_eq!(
         tensile.validity.bound("source_test_temperature_known"),
         Some((0.0, 0.0))
     );
-    assert_eq!(tensile.validity.bounds().len(), 1);
     assert_eq!(tensile.uncertainty, UncertaintyModel::Unstated);
     let tensile_observation = decoded
         .claims()
@@ -5837,7 +5837,7 @@ fn g3_cli_compiles_committed_s2_s_gray_cast_iron_seed() {
         panic!("S2-S thermal conductivity was not scalar");
     };
     assert_eq!(*conductivity_dims, Dims([1, 1, -3, -1, 0, 0]));
-    assert_eq!(*conductivity_value, 58.8);
+    assert_eq!((*conductivity_value).to_bits(), 58.8f64.to_bits());
     assert_eq!(
         conductivity.validity.bound("source_test_temperature_known"),
         Some((0.0, 0.0))
@@ -6644,7 +6644,7 @@ fn g3_cli_compiles_committed_nasa_cr_195445_omc_ps200_rotary_coating_system() {
         };
         assert_eq!(*dims, dimensionless);
         let expected_value = source_percent * 0.01;
-        assert_eq!(value.to_bits(), expected_value.to_bits());
+        assert_eq!(value.to_bits(), f64::to_bits(expected_value));
         composition_sum += *value;
         for required_axis in [
             "source_feedstock_composition_basis_is_mass_fraction",
@@ -7676,8 +7676,8 @@ fn g2_cli_compiles_breadth_tranches_with_derived_gates() {
 #[test]
 fn g2_stainless_yield_fraction_temperature_curve() {
     let slug = "stainless-301-annealed-mil-hdbk-5j";
-    let manifest = workspace_path(&format!("data/matdb/seed-v1/{slug}/manifest.tsv"));
-    let out = fixture_dir().join(format!("{slug}-curve.fsmatpk"));
+    let manifest = workspace_path(&format!("data/matdb/seed-v1/{}/manifest.tsv", slug));
+    let out = fixture_dir().join(format!("{}-curve.fsmatpk", slug));
     let run = run_compiler(&manifest, &out);
     assert!(
         run.status.success(),

@@ -2453,11 +2453,14 @@ struct Evaluated {
 
 const fn minimum_terminal_events(state: AdmissionState) -> usize {
     match state {
-        AdmissionState::Diagnostic(_) | AdmissionState::Admitted(AdmittedPhase::Active { .. }) => 2,
-        AdmissionState::Admitted(AdmittedPhase::CompletionPending { .. })
-        | AdmissionState::Admitted(AdmittedPhase::PublicationPending { .. })
-        | AdmissionState::Admitted(AdmittedPhase::PublicationReady { .. })
-        | AdmissionState::Admitted(AdmittedPhase::PublicationCommitting { .. }) => 2,
+        AdmissionState::Diagnostic(_)
+        | AdmissionState::Admitted(AdmittedPhase::Active { .. })
+        | AdmissionState::Admitted(
+            AdmittedPhase::CompletionPending { .. }
+            | AdmittedPhase::PublicationPending { .. }
+            | AdmittedPhase::PublicationReady { .. }
+            | AdmittedPhase::PublicationCommitting { .. },
+        ) => 2,
         AdmissionState::Unanchored(TerminalPhase::Pending)
         | AdmissionState::Refused {
             phase: TerminalPhase::Pending,
@@ -2873,9 +2876,10 @@ impl AdmissionRule {
             Self::NetworkForbiddenForCommand => {
                 &[Remedy::UseOfflineCache, Remedy::UseDiagnosticMode]
             }
-            Self::FetchAuthorityWithoutBudget | Self::BudgetExceeded | Self::BudgetOverflow => {
-                &[Remedy::ReduceWork, Remedy::IncreaseExplicitBudget]
-            }
+            Self::FetchAuthorityWithoutBudget
+            | Self::BudgetExceeded
+            | Self::BudgetOverflow
+            | Self::BudgetInfeasible => &[Remedy::ReduceWork, Remedy::IncreaseExplicitBudget],
             Self::DeadlineExceeded => &[Remedy::IncreaseExplicitDeadline, Remedy::ReduceWork],
             Self::ClockRegression => &[Remedy::RestartPreflight, Remedy::InspectDiagnostic],
             Self::PollIntervalExceeded => &[Remedy::ReduceWork, Remedy::CompleteDrain],
@@ -2891,14 +2895,14 @@ impl AdmissionRule {
             }
             Self::PublicationAuthorityDenied
             | Self::PublicationWithoutOutputBudget
-            | Self::PublicationCapabilityMismatch => {
+            | Self::PublicationCapabilityMismatch
+            | Self::PublicationRequiredForCommand => {
                 &[Remedy::BindPublicationCapability, Remedy::UseDiagnosticMode]
             }
-            Self::PublicationForbiddenForCommand => {
+            Self::PublicationForbiddenForCommand
+            | Self::PolicyDenied
+            | Self::ReadOnlyCompletionForbidden => {
                 &[Remedy::UseDiagnosticMode, Remedy::InspectDiagnostic]
-            }
-            Self::PublicationRequiredForCommand => {
-                &[Remedy::BindPublicationCapability, Remedy::UseDiagnosticMode]
             }
             Self::RetryCxNotFresh | Self::CxIdentityAliasing => {
                 &[Remedy::BindFreshChildCx, Remedy::StartNewRequest]
@@ -2910,10 +2914,6 @@ impl AdmissionRule {
             Self::SourceRejected => &[Remedy::RestartPreflight, Remedy::InspectDiagnostic],
             Self::CapabilityRejected | Self::ExecutableRejected => {
                 &[Remedy::BindRequiredCapability, Remedy::InspectDiagnostic]
-            }
-            Self::BudgetInfeasible => &[Remedy::ReduceWork, Remedy::IncreaseExplicitBudget],
-            Self::PolicyDenied | Self::ReadOnlyCompletionForbidden => {
-                &[Remedy::UseDiagnosticMode, Remedy::InspectDiagnostic]
             }
             Self::PublicationSuccessEvidenceMismatch => {
                 &[Remedy::MarkIndeterminate, Remedy::InspectDiagnostic]

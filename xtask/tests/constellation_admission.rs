@@ -7,9 +7,9 @@ mod admission;
 use admission::{
     AdmissionBudgets, AdmissionContext, AdmissionContextSpec, AdmissionMachine, AdmissionRule,
     AdmissionState, AdmissionTransition, AdmittedPhase, AnchorObservation, AuthorityId,
-    BudgetCharge, CancellationCause, CancellationPhase, CommandClass, ComputeBudget, CxBinding,
-    DeadlineBudget, DiagnosticPhase, DrainObligations, ExecutableCapability, ExecutableSlot,
-    FetchAuthority, IndeterminateReason, IoBudget, MAX_ADMISSION_BYTES, MAX_ADMISSION_EVENTS,
+    BudgetCharge, CancellationCause, CommandClass, ComputeBudget, CxBinding, DeadlineBudget,
+    DiagnosticPhase, DrainObligations, ExecutableCapability, ExecutableSlot, FetchAuthority,
+    IndeterminateReason, IoBudget, MAX_ADMISSION_BYTES, MAX_ADMISSION_EVENTS,
     MAX_EXECUTABLE_CAPABILITIES, MAX_PATH_CAPABILITIES, NetworkBudget, PathCapability, PathSlot,
     PublicationAuthority, PublicationFailureReason, PublicationSuccessEvidence, RefusalReason,
     StateKind, TerminalPhase, TransitionKind, TrustAnchorState, transition_kind_may_apply,
@@ -1171,7 +1171,7 @@ fn g4_post_work_read_only_drift_is_indeterminate_and_never_successful() {
         machine
             .events()
             .last()
-            .and_then(|event| event.terminal_rule()),
+            .and_then(admission::AdmissionEvent::terminal_rule),
         Some(AdmissionRule::PostEffectStabilityChanged)
     );
     machine

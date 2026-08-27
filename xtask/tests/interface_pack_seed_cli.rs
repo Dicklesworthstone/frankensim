@@ -148,7 +148,10 @@ fn g3_cli_compiles_committed_nasa_52100_dry_air_interface() {
     assert_eq!(pack.card().environment(), "air-at-760-mmHg");
     assert_eq!(pack.card().history(), "fresh-specimens-one-hour-run");
     assert_eq!(pack.claims_pack().claims().claim_count(), 1);
-    assert_eq!(scalar(&pack, "kinetic-friction-coefficient"), 0.45);
+    assert_eq!(
+        scalar(&pack, "kinetic-friction-coefficient").to_bits(),
+        0.45f64.to_bits()
+    );
 
     let claim = pack.card().claims_for("kinetic-friction-coefficient")[0].1;
     for (axis, value) in [
@@ -206,14 +209,17 @@ fn g3_cli_compiles_committed_nasa_52100_gxl320a_vacuum_interface() {
         "four-hour-test-with-hourly-wear-measurements"
     );
     assert_eq!(pack.claims_pack().claims().claim_count(), 3);
-    assert_eq!(scalar(&pack, "kinetic-friction-coefficient"), 0.11);
     assert_eq!(
-        scalar(&pack, "kinetic-friction-coefficient-observed-minimum"),
-        0.09
+        scalar(&pack, "kinetic-friction-coefficient").to_bits(),
+        0.11f64.to_bits()
     );
     assert_eq!(
-        scalar(&pack, "kinetic-friction-coefficient-observed-maximum"),
-        0.23
+        scalar(&pack, "kinetic-friction-coefficient-observed-minimum").to_bits(),
+        0.09f64.to_bits()
+    );
+    assert_eq!(
+        scalar(&pack, "kinetic-friction-coefficient-observed-maximum").to_bits(),
+        0.23f64.to_bits()
     );
 
     for property in [
@@ -270,8 +276,8 @@ fn g3_cli_compiles_committed_nasa_4340_high_lead_bronze_journal_interface() {
     );
     assert_eq!(pack.claims_pack().claims().claim_count(), 1);
     assert_eq!(
-        scalar(&pack, "maximum-demonstrated-unit-bearing-load"),
-        1_516_846.604_497_039_5
+        scalar(&pack, "maximum-demonstrated-unit-bearing-load").to_bits(),
+        1_516_846.604_497_039_5f64.to_bits()
     );
 
     let claim = pack
@@ -378,7 +384,10 @@ fn g3_cli_compiles_committed_carbon_ptfe_chrome_rod_interface() {
             0.1,
         ),
     ] {
-        assert_eq!(scalar(&pack, property), expected_force);
+        assert_eq!(
+            scalar(&pack, property).to_bits(),
+            f64::to_bits(expected_force)
+        );
         let claim = pack.card().claims_for(property)[0].1;
         for (axis, value) in [
             ("experimental_temperature", 293.15),
@@ -554,8 +563,10 @@ fn g3_cli_compiles_committed_ptfe_cf10_steel_bore_iso_vg32_interface() {
     let mut same_condition_values = observed
         .iter()
         .filter_map(|(_, pressure, temperature, speed, _, thickness)| {
-            (*pressure == 10_000_000.0 && *temperature == 333.0 && *speed == 0.2)
-                .then_some(*thickness)
+            (pressure.to_bits() == 10_000_000.0f64.to_bits()
+                && temperature.to_bits() == 333.0f64.to_bits()
+                && speed.to_bits() == 0.2f64.to_bits())
+            .then_some(*thickness)
         })
         .collect::<Vec<_>>();
     same_condition_values.sort_by(f64::total_cmp);
@@ -613,7 +624,7 @@ fn g3_cli_compiles_committed_mahle_ptfe_nickel_sic_coated_bore_patent_interface(
     for (property, expected_value, expected_dims, scope, semantic_axis) in [
         (
             "patent_claim_liner_silicon_carbide_mass_fraction_approximate_lower_bound",
-            2.0 * 0.01,
+            2.0 * 0.01_f64,
             dimensionless,
             "claims",
             "source_value_is_approximate",
@@ -699,7 +710,7 @@ fn g3_cli_compiles_committed_mahle_ptfe_nickel_sic_coated_bore_patent_interface(
         let PropertyValue::Scalar { value, dims } = &claim.value else {
             panic!("MAHLE patent claim {property} was not scalar");
         };
-        assert_eq!(*value, expected_value);
+        assert_eq!((*value).to_bits(), expected_value.to_bits());
         assert_eq!(*dims, expected_dims);
         assert_eq!(claim.uncertainty, UncertaintyModel::Unstated);
         assert!(claim.provenance.source.contains("WO 2019/072721 A1"));
@@ -800,7 +811,7 @@ fn g3_cli_compiles_committed_a2017_seiken_llc_air_wetting_interfaces() {
             "yilmaz-2026-a2017-seiken-llc-ra005-air-wetting-interface",
             "pre-boiling-a2017-ra005um",
             0.000_000_05,
-            1.094_321_441_000_444_7,
+            1.094_321_441_000_444_7_f64,
         ),
         (
             A2017_LLC_RA3_MANIFEST,
@@ -840,7 +851,10 @@ fn g3_cli_compiles_committed_a2017_seiken_llc_air_wetting_interfaces() {
             "pre-boiling-IPA-cleaned-five-static-angle-measurements"
         );
         assert_eq!(pack.claims_pack().claims().claim_count(), 1);
-        assert_eq!(scalar(&pack, "static-contact-angle"), angle);
+        assert_eq!(
+            scalar(&pack, "static-contact-angle").to_bits(),
+            angle.to_bits()
+        );
 
         let claim = pack.card().claims_for("static-contact-angle")[0].1;
         for (axis, value) in [

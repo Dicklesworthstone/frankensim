@@ -67,7 +67,7 @@ fn content_hash(hex: &str) -> Option<ContentHash> {
         return None;
     }
     let mut bytes = [0_u8; 32];
-    for (index, chunk) in hex.as_bytes().chunks_exact(2).enumerate() {
+    for (index, chunk) in hex.as_bytes().as_chunks::<2>().0.iter().enumerate() {
         let pair = std::str::from_utf8(chunk).ok()?;
         bytes[index] = u8::from_str_radix(pair, 16).ok()?;
     }

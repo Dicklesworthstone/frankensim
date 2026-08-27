@@ -21,6 +21,8 @@
 //! all three agree, so a source shape it no longer understands fails loudly
 //! instead of silently reporting a smaller pipeline.
 
+use std::fmt::Write as _;
+
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -262,33 +264,29 @@ pub(crate) fn render(stages: &[Stage]) -> String {
     let first_gap = stages.iter().find(|stage| stage.gap_owner.is_some());
     let mut out = String::new();
     out.push_str("{\n");
-    out.push_str(&format!("  \"schema\": \"{SCHEMA}\",\n"));
+    writeln!(out, "  \"schema\": \"{SCHEMA}\"").ok();
     out.push_str("  \"bead\": \"frankensim-o5et9\",\n");
-    out.push_str(&format!(
-        "  \"high_water_stages_executing\": {},\n",
-        prefix.len()
-    ));
-    out.push_str(&format!("  \"stages_total\": {},\n", stages.len()));
+    writeln!(out, "  \"high_water_stages_executing\": {},", prefix.len()).ok();
+    writeln!(out, "  \"stages_total\": {},", stages.len()).ok();
     out.push_str("  \"executing_prefix\": [");
     for (index, stage) in prefix.iter().enumerate() {
         if index > 0 {
             out.push_str(", ");
         }
-        out.push_str(&format!("\"{}\"", stage.name));
+        write!(out, "\"{}\"", stage.name).ok();
     }
     out.push_str("],\n");
-    match first_gap {
-        Some(stage) => {
-            out.push_str(&format!("  \"first_gap\": \"{}\",\n", stage.name));
-            out.push_str(&format!(
-                "  \"first_gap_owner\": \"{}\",\n",
-                stage.gap_owner.as_deref().unwrap_or("")
-            ));
-        }
-        None => {
-            out.push_str("  \"first_gap\": null,\n");
-            out.push_str("  \"first_gap_owner\": null,\n");
-        }
+    if let Some(stage) = first_gap {
+        writeln!(out, "  \"first_gap\": \"{}\",", stage.name).ok();
+        writeln!(
+            out,
+            "  \"first_gap_owner\": \"{}\",",
+            stage.gap_owner.as_deref().unwrap_or("")
+        )
+        .ok();
+    } else {
+        out.push_str("  \"first_gap\": null,\n");
+        out.push_str("  \"first_gap_owner\": null,\n");
     }
     out.push_str(
         "  \"no_claim\": \"counts the executing stage PREFIX declared in fs-cli source; it does \
