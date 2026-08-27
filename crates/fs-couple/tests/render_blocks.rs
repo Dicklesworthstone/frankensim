@@ -234,7 +234,7 @@ fn controls_apply_between_blocks_and_are_logged() {
             voice: 7,
             pressure_pa: 100.0
         }]),
-        Err(RenderError::Control { .. })
+        Err(RenderError::UnknownVoice { index: 7 })
     ));
     assert!(matches!(
         context.apply_controls(&[ControlDelta::SetBlowingPressure {
@@ -251,7 +251,7 @@ fn oversized_and_empty_blocks_refuse_before_state_moves() {
     let mut too_big = vec![0.0; 256];
     assert!(matches!(
         context.block(&mut too_big),
-        Err(RenderError::Control { .. })
+        Err(RenderError::Sizing { .. })
     ));
     let mut empty: Vec<f64> = vec![];
     assert!(matches!(

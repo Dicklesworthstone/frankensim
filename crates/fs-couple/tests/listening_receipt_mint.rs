@@ -358,7 +358,7 @@ fn mint_piano_ladder_artifact() {
         pv.strike(v0);
         // 1.4 s per note at 24 kHz; dampers give a natural release.
         for _ in 0..33_600usize {
-            signal.push(pv.step());
+            signal.push(pv.step().expect("piano vertical renders at this cadence"));
         }
         signal.extend(std::iter::repeat_n(0.0, 2_400));
     }

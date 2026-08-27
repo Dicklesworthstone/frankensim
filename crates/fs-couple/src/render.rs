@@ -125,7 +125,7 @@ impl ReedBoreVoice {
             zc,
             wall,
         )
-        .map_err(crate::reed_bore::map_drive)?;
+        .map_err(crate::acoustic_realize::map_drive)?;
         let lay = if reed.mass_kg > 0.0 {
             let k_lay = 1.0e7 * reed.width_m;
             let (_k, r_damp) = reed_structural(reed);
@@ -388,6 +388,11 @@ pub enum RenderError {
         /// What was wrong.
         what: &'static str,
     },
+    /// A control named a voice slot beyond the admitted voices.
+    UnknownVoice {
+        /// The zero-based slot the control named.
+        index: usize,
+    },
     /// A caller-supplied size exceeds a documented pre-sized budget (block
     /// length versus construction-time scratch, or a block-count product).
     /// This is an admission failure of the request shape, not a control
@@ -406,6 +411,9 @@ impl core::fmt::Display for RenderError {
             Self::Voice(e) => write!(f, "voice refusal: {e:?}"),
             Self::Modal(e) => write!(f, "modal voice refusal: {e:?}"),
             Self::Control { what } => write!(f, "control refusal: {what}"),
+            Self::UnknownVoice { index } => {
+                write!(f, "control names unknown voice slot {index}")
+            }
             Self::Sizing { what } => write!(f, "sizing refusal: {what}"),
             Self::EmptyBlock => write!(f, "block output slice is empty"),
         }
@@ -481,9 +489,7 @@ impl RenderContext {
                             });
                         }
                         None => {
-                            return Err(RenderError::Control {
-                                what: "control names a voice index that does not exist",
-                            });
+                            return Err(RenderError::UnknownVoice { index: *voice });
                         }
                     }
                 }
@@ -576,11 +582,11 @@ pub fn render_under_gate(
     block_len: usize,
     blocks: usize,
 ) -> Result<GatedRenderOutcome, RenderError> {
-    let required_samples = block_len.checked_mul(blocks).ok_or(RenderError::Control {
+    let required_samples = block_len.checked_mul(blocks).ok_or(RenderError::Sizing {
         what: "block_len * blocks overflows usize",
     })?;
     if block_len == 0 || out.len() < required_samples {
-        return Err(RenderError::Control {
+        return Err(RenderError::Sizing {
             what: "output slice must hold block_len * blocks samples",
         });
     }

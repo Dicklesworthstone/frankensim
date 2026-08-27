@@ -501,7 +501,7 @@ pub fn run_log_hash(log: &BowedRunLog) -> fs_blake3::ContentHash {
         &log.body_velocity_m_s,
         &log.radiated_pressure_pa,
     ] {
-        for value in series.iter() {
+        for value in series {
             bytes.extend_from_slice(&value.to_bits().to_le_bytes());
         }
     }

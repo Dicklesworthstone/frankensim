@@ -880,7 +880,7 @@ pub fn assembly_wav(
     .map_err(AcousticRealizeError::Wav)
 }
 
-fn map_drive(err: crate::driving_point::DrivingPointError) -> AcousticRealizeError {
+pub(crate) fn map_drive(err: crate::driving_point::DrivingPointError) -> AcousticRealizeError {
     match err {
         crate::driving_point::DrivingPointError::Invalid { what } => {
             AcousticRealizeError::Reed { what }
@@ -889,9 +889,9 @@ fn map_drive(err: crate::driving_point::DrivingPointError) -> AcousticRealizeErr
         crate::driving_point::DrivingPointError::Realize(_) => AcousticRealizeError::Reed {
             what: "characteristic realization refused",
         },
-        crate::driving_point::DrivingPointError::Discrete(_) => AcousticRealizeError::Reed {
-            what: "characteristic line left the finite set",
-        },
+        crate::driving_point::DrivingPointError::Discrete(e) => AcousticRealizeError::Nonlinear(
+            format!("characteristic-line discretization refused: {e}"),
+        ),
     }
 }
 

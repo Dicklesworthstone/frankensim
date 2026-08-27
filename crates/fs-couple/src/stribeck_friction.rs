@@ -98,7 +98,7 @@ mod tests {
         assert!(law.traction(f64::NAN, 1.0).is_err());
         assert!(law.traction(f64::INFINITY, 1.0).is_err());
         assert!(law.traction(0.01, f64::NAN).is_err());
-        assert_eq!(law.traction(0.01, 0.0).unwrap(), 0.0);
+        assert_eq!(law.traction(0.01, 0.0).unwrap().to_bits(), 0.0f64.to_bits());
         assert!(StribeckFriction::try_new(0.3, 0.8, 0.05).is_err());
         assert!(StribeckFriction::try_new(f64::NAN, 0.3, 0.05).is_err());
         assert!(StribeckFriction::try_new(0.8, 0.3, 0.0).is_err());

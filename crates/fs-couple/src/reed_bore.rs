@@ -63,21 +63,6 @@ pub fn realize_reed_bore(
     Ok(p_bore_hist)
 }
 
-pub(crate) fn map_drive(err: crate::driving_point::DrivingPointError) -> AcousticRealizeError {
-    match err {
-        crate::driving_point::DrivingPointError::Invalid { what } => {
-            AcousticRealizeError::Reed { what }
-        }
-        crate::driving_point::DrivingPointError::Duct(d) => AcousticRealizeError::Duct(d),
-        crate::driving_point::DrivingPointError::Realize(_) => AcousticRealizeError::Reed {
-            what: "characteristic realization refused",
-        },
-        crate::driving_point::DrivingPointError::Discrete(e) => AcousticRealizeError::Nonlinear(
-            format!("characteristic-line discretization refused: {e:?}"),
-        ),
-    }
-}
-
 pub(crate) fn blowing_envelope(reed: BeatingReed, t: f64) -> f64 {
     if reed.attack_s <= 0.0 {
         return reed.blowing_pressure_pa;
