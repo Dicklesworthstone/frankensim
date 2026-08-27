@@ -584,9 +584,7 @@ mod tests {
 }\n";
         let error = parse_snapshot(swapped).expect_err("blocked > open must refuse");
         assert!(error.contains("inconsistent"), "{error}");
-        let bad_sum = swapped
-            .replace("\"blocked\": 3", "\"blocked\": 1")
-            .replace("\"actionable\": 0", "\"actionable\": 0");
+        let bad_sum = swapped.replace("\"blocked\": 3", "\"blocked\": 1");
         let error = parse_snapshot(&bad_sum).expect_err("sum mismatch must refuse");
         assert!(error.contains("inconsistent"), "{error}");
         let green = "{

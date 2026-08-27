@@ -422,12 +422,7 @@ mod tests {
     fn duplicate_pair_with_drifted_grammar_refuses_deterministically() {
         let drifted = FULL_LITERAL
             .replace("codec_version: 1,", "codec_version: 2,")
-            .replace("const ALPHA_CHARTER:", "const BETA_CHARTER:")
-            .replace(
-                "snapshot_v2::StateIdentityCharterV2 = snapshot_v2::StateIdentityCharterV2 {",
-                "snapshot_v2::StateIdentityCharterV2 = snapshot_v2::StateIdentityCharterV2 {",
-            )
-            .replacen("StateIdentityCharterV2 {", "StateIdentityCharterV2 {", 1);
+            .replace("const ALPHA_CHARTER:", "const BETA_CHARTER:");
         let source = format!("{FULL_LITERAL}\n{drifted}\n");
         let declarations = scan_source("crates/x/src/lib.rs", &source).expect("parses");
         assert_eq!(declarations.len(), 2);
