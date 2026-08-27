@@ -609,14 +609,17 @@ fn graph_composes_executes_and_audits() {
     external.insert(("bulk/steel".to_string(), "grad_T".to_string()), 5.0);
     let result = graph.execute(version, &state, &external).expect("executes");
     assert_eq!(
-        result.outputs[&("bulk/steel".to_string(), "heat_flux".to_string())],
-        -200.0
+        result.outputs[&("bulk/steel".to_string(), "heat_flux".to_string())].to_bits(),
+        (-200.0f64).to_bits()
     );
     assert_eq!(
-        result.outputs[&("meter/flux".to_string(), "out".to_string())],
-        -100.0
+        result.outputs[&("meter/flux".to_string(), "out".to_string())].to_bits(),
+        (-100.0f64).to_bits()
     );
-    assert_eq!(result.total_dissipation, 40.0 * 25.0);
+    assert_eq!(
+        result.total_dissipation.to_bits(),
+        (40.0f64 * 25.0).to_bits()
+    );
     // The meter's state slot recorded its input; round trip proves it.
     let decoded = schema
         .decode(version, &result.next_state)
@@ -751,10 +754,11 @@ fn graph_refuses_structural_pathologies() {
     let (version, state) = schema.encode(&[&[0.0]]).expect("state");
     let mut external = std::collections::BTreeMap::new();
     external.insert(("bulk/perpetuum".to_string(), "in".to_string()), 1.0);
-    assert!(matches!(
-        lying.execute(version, &state, &external),
-        Err(GraphError::NegativeDissipation { rate, .. }) if rate == -1.0
-    ));
+    let rate = match lying.execute(version, &state, &external) {
+        Err(GraphError::NegativeDissipation { rate, .. }) => rate,
+        other => panic!("expected NegativeDissipation, got {other:?}"),
+    };
+    assert_eq!(rate.to_bits(), (-1.0f64).to_bits());
     println!(
         "{{\"suite\":\"fs-material\",\"case\":\"graph-refusals\",\"verdict\":\"pass\",\
          \"detail\":\"duplicate ids, dims-mismatched/unknown/doubly-driven edges, cycles, and \

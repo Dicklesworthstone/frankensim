@@ -7519,7 +7519,6 @@ mod tests {
             );
         }
 
-
         for (guard, field) in [
             (
                 CANONICAL_SCHEMA_FIELD_DESCRIPTOR_MAX_BYTES_V1,
@@ -9124,11 +9123,8 @@ mod tests {
                 CanonicalFrameVersionV1::V1,
             )
             .expect("domain"),
-            CanonicalSchemaMagicV1::new(
-                b"TEST_DUPLICATE_FIELD\x01",
-                CanonicalFrameVersionV1::V1,
-            )
-            .expect("magic"),
+            CanonicalSchemaMagicV1::new(b"TEST_DUPLICATE_FIELD\x01", CanonicalFrameVersionV1::V1)
+                .expect("magic"),
             vec![controller.clone(), controller.clone()],
             None,
         )
@@ -9154,11 +9150,8 @@ mod tests {
                 CanonicalFrameVersionV1::V1,
             )
             .expect("domain"),
-            CanonicalSchemaMagicV1::new(
-                b"TEST_FIELD_ORDER\x01",
-                CanonicalFrameVersionV1::V1,
-            )
-            .expect("magic"),
+            CanonicalSchemaMagicV1::new(b"TEST_FIELD_ORDER\x01", CanonicalFrameVersionV1::V1)
+                .expect("magic"),
             vec![controller.clone(), second_out_of_order],
             None,
         )

@@ -1385,6 +1385,9 @@ pub(super) fn push_xml_text_escaped(out: &mut String, value: &str) {
             '&' => out.push_str("&amp;"),
             '<' => out.push_str("&lt;"),
             '>' => out.push_str("&gt;"),
+            '\t' => out.push_str("&#x9;"),
+            '\n' => out.push_str("&#xA;"),
+            '\r' => out.push_str("&#xD;"),
             _ => out.push(ch),
         }
     }

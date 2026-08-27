@@ -1854,7 +1854,10 @@ mod tests {
             MaterialPropertySelection::SingleClaimOnly,
         )
         .expect("temperature-dependent expansion resolves inside its evidence domain");
-        assert_eq!(resolved.linear_coefficient_per_k().to_bits(), 17.0e-6_f64.to_bits());
+        assert_eq!(
+            resolved.linear_coefficient_per_k().to_bits(),
+            17.0e-6_f64.to_bits()
+        );
         assert_eq!(resolved.resolved().card_identity(), lead.content_hash());
         assert!(matches!(
             resolve_isotropic_thermal_expansion_state_point(
@@ -1924,8 +1927,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(resolved.samples().len(), 9);
-        assert_eq!(resolved.samples()[0].wavelength_nm.to_bits(), 380.0_f64.to_bits());
-        assert_eq!(resolved.samples()[8].wavelength_nm.to_bits(), 780.0_f64.to_bits());
+        assert_eq!(
+            resolved.samples()[0].wavelength_nm.to_bits(),
+            380.0_f64.to_bits()
+        );
+        assert_eq!(
+            resolved.samples()[8].wavelength_nm.to_bits(),
+            780.0_f64.to_bits()
+        );
         assert_eq!(resolved.samples()[0].eta.to_bits(), 1.45_f64.to_bits());
         assert_eq!(resolved.samples()[0].k.to_bits(), 2.25_f64.to_bits());
         assert_eq!(resolved.resolved().card_identity(), card.content_hash());
@@ -1957,10 +1966,15 @@ mod tests {
         assert!((cauchy[1] - 4.1e-15).abs() <= 1.0e-30);
         assert_eq!(cauchy[2].to_bits(), 0.0_f64.to_bits());
         assert_eq!(
-            resolved.reference_transmittance_linear_rgb().map(f64::to_bits),
+            resolved
+                .reference_transmittance_linear_rgb()
+                .map(f64::to_bits),
             [0.98_f64, 0.98_f64, 0.94_f64].map(f64::to_bits)
         );
-        assert_eq!(resolved.reference_distance_m().to_bits(), 0.01_f64.to_bits());
+        assert_eq!(
+            resolved.reference_distance_m().to_bits(),
+            0.01_f64.to_bits()
+        );
         assert_eq!(resolved.resolved().card_identity(), card.content_hash());
 
         assert!(matches!(
@@ -2036,9 +2050,18 @@ mod tests {
         .unwrap();
         assert_eq!(orthotropic.resolved().properties().len(), 10);
         assert_eq!(orthotropic.density_kg_m3().to_bits(), 780.0_f64.to_bits());
-        assert_eq!(orthotropic.law().e.map(f64::to_bits), [11.0e9_f64, 2.75e9_f64, 1.35e9_f64].map(f64::to_bits));
-        assert_eq!(orthotropic.law().nu.map(f64::to_bits), [0.25_f64, 0.10_f64, 0.20_f64].map(f64::to_bits));
-        assert_eq!(orthotropic.law().g.map(f64::to_bits), [1.1e9_f64, 0.75e9_f64, 0.55e9_f64].map(f64::to_bits));
+        assert_eq!(
+            orthotropic.law().e.map(f64::to_bits),
+            [11.0e9_f64, 2.75e9_f64, 1.35e9_f64].map(f64::to_bits)
+        );
+        assert_eq!(
+            orthotropic.law().nu.map(f64::to_bits),
+            [0.25_f64, 0.10_f64, 0.20_f64].map(f64::to_bits)
+        );
+        assert_eq!(
+            orthotropic.law().g.map(f64::to_bits),
+            [1.1e9_f64, 0.75e9_f64, 0.55e9_f64].map(f64::to_bits)
+        );
 
         assert!(matches!(
             resolve_orthotropic_elastic_state_point(

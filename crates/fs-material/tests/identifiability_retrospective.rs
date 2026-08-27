@@ -2419,13 +2419,12 @@ fn repeated_row_likelihood_must_match_the_global_joint_model() {
         ordinary_data("a"),
     )
     .with_declared_duplicate_row_sharing();
-    let error = match try_problem_fixture_with_global_likelihood(
+    let Err(error) = try_problem_fixture_with_global_likelihood(
         vec![case],
         DataReusePolicy::Disjoint,
         "different-global-likelihood",
-    ) {
-        Ok(_) => panic!("a local repeated-row factor cannot differ from the global joint model"),
-        Err(error) => error,
+    ) else {
+        panic!("a local repeated-row factor cannot differ from the global joint model")
     };
     assert!(matches!(&error, IdentifiabilityError::Covariance { .. }));
     log(
@@ -2836,9 +2835,9 @@ fn cross_case_sharing_likelihood_must_match_the_global_joint_model() {
             .expect("cross-case sharing group"),
         ],
     };
-    let error = match try_problem_fixture_with_global_likelihood(cases, reuse, "joint-likelihood") {
-        Ok(_) => panic!("a cross-case sharing factor cannot differ from the global joint model"),
-        Err(error) => error,
+    let Err(error) = try_problem_fixture_with_global_likelihood(cases, reuse, "joint-likelihood")
+    else {
+        panic!("a cross-case sharing factor cannot differ from the global joint model")
     };
     assert!(matches!(&error, IdentifiabilityError::Covariance { .. }));
     log(

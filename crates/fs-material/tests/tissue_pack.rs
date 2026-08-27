@@ -129,8 +129,8 @@ fn g2_tissue_packs_pass_physicality_and_register_gates() {
     // Postmortem time is load-bearing: the 1-day porcine range must
     // differ from the 4-hour range (recorded separately).
     assert!(
-        porcine.scalars["young_modulus_dynamic_day_printed_range_high"]
-            != porcine.scalars["young_modulus_dynamic_printed_range_high"]
+        porcine.scalars["young_modulus_dynamic_day_printed_range_high"].to_bits()
+            != porcine.scalars["young_modulus_dynamic_printed_range_high"].to_bits()
     );
 
     // Loss tangents in the soft-tissue class, tiger above lion (the

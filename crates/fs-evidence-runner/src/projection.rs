@@ -17900,8 +17900,9 @@ mod tests {
                         hash_domain("projection-test-phase-one-partitions-axis.v1", b"mutant");
                 }
                 3 => {
-                    fixture.per_cell_budgets = frozen_downstream_close_contribution_budgets_v1(2, 1)
-                        .expect("mutated per-cell budget");
+                    fixture.per_cell_budgets =
+                        frozen_downstream_close_contribution_budgets_v1(2, 1)
+                            .expect("mutated per-cell budget");
                 }
                 4 => {
                     fixture.shard_budgets = frozen_downstream_close_contribution_budgets_v1(5, 2)
@@ -17930,10 +17931,9 @@ mod tests {
                     .expect("mutated build identity");
                 }
                 9 => {
-                    fixture.toolchain_root = super::parse_phase_one_toolchain_identity(hash_domain(
-                        "projection-test-phase-one-toolchain-axis.v1",
-                        b"mutant",
-                    ))
+                    fixture.toolchain_root = super::parse_phase_one_toolchain_identity(
+                        hash_domain("projection-test-phase-one-toolchain-axis.v1", b"mutant"),
+                    )
                     .expect("mutated toolchain identity");
                 }
                 10 => {
@@ -17945,24 +17945,26 @@ mod tests {
                         hash_domain("projection-test-phase-one-feature-axis.v1", b"mutant");
                 }
                 12 => {
-                    fixture.observer_contract = BaseCoverageCloseDeferredObservationContractV1::new(
-                        RUNNER_V2_PHASE_ONE_CONTRACT_ROUTE_ID_V1,
-                        RUNNER_V2_PHASE_ONE_CONTRACT_EXECUTION_OWNER_V1,
-                        RUNNER_V2_PHASE_ONE_CONTRACT_EXECUTION_OWNER_V1,
-                        RUNNER_V2_PHASE_ONE_CONTRACT_EXECUTION_OWNER_V1,
-                        RUNNER_V2_PHASE_ONE_CONTRACT_EXECUTION_OWNER_V1,
-                        RUNNER_V2_PHASE_ONE_CONTRACT_EXECUTION_OWNER_V1,
-                        BaseCoverageCloseCapabilityProfileV1::ReleaseControl,
-                        StableTokenV2::new(RUNNER_V2_PHASE_ONE_CONTRACT_DRIVER_V1).expect("driver"),
-                        RUNNER_V2_PHASE_ONE_CONTRACT_POSIX_ROUTE_V1,
-                        RUNNER_V2_PHASE_ONE_CONTRACT_WINDOWS_ROUTE_V1,
-                        RUNNER_V2_PHASE_ONE_CONTRACT_CASE_MANIFEST_PATH_V1,
-                        projection.case_manifest_contract_root(),
-                        DeferredReasonV1::ImmutableContributionAwaitsDesignatedReleaseOwner,
-                        StableTokenV2::new("mutated-phase1-observer-no-claim")
-                            .expect("mutated observer no-claim"),
-                    )
-                    .expect("structurally valid mutated observer");
+                    fixture.observer_contract =
+                        BaseCoverageCloseDeferredObservationContractV1::new(
+                            RUNNER_V2_PHASE_ONE_CONTRACT_ROUTE_ID_V1,
+                            RUNNER_V2_PHASE_ONE_CONTRACT_EXECUTION_OWNER_V1,
+                            RUNNER_V2_PHASE_ONE_CONTRACT_EXECUTION_OWNER_V1,
+                            RUNNER_V2_PHASE_ONE_CONTRACT_EXECUTION_OWNER_V1,
+                            RUNNER_V2_PHASE_ONE_CONTRACT_EXECUTION_OWNER_V1,
+                            RUNNER_V2_PHASE_ONE_CONTRACT_EXECUTION_OWNER_V1,
+                            BaseCoverageCloseCapabilityProfileV1::ReleaseControl,
+                            StableTokenV2::new(RUNNER_V2_PHASE_ONE_CONTRACT_DRIVER_V1)
+                                .expect("driver"),
+                            RUNNER_V2_PHASE_ONE_CONTRACT_POSIX_ROUTE_V1,
+                            RUNNER_V2_PHASE_ONE_CONTRACT_WINDOWS_ROUTE_V1,
+                            RUNNER_V2_PHASE_ONE_CONTRACT_CASE_MANIFEST_PATH_V1,
+                            projection.case_manifest_contract_root(),
+                            DeferredReasonV1::ImmutableContributionAwaitsDesignatedReleaseOwner,
+                            StableTokenV2::new("mutated-phase1-observer-no-claim")
+                                .expect("mutated observer no-claim"),
+                        )
+                        .expect("structurally valid mutated observer");
                 }
                 13 => {
                     fixture.no_claim = StableTokenV2::new("mutated-phase1-contribution-no-claim")

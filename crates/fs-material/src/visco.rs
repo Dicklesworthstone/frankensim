@@ -164,7 +164,12 @@ impl RayleighDamping {
         omega2: f64,
         zeta2: f64,
     ) -> Result<RayleighDamping, ViscoError> {
-        if !(omega1 > 0.0 && omega2 > 0.0 && omega1.to_bits() != omega2.to_bits() && zeta1 >= 0.0 && zeta2 >= 0.0) {
+        if !(omega1 > 0.0
+            && omega2 > 0.0
+            && omega1.to_bits() != omega2.to_bits()
+            && zeta1 >= 0.0
+            && zeta2 >= 0.0)
+        {
             return Err(ViscoError::Parameters {
                 what: "two-point Rayleigh fit needs distinct positive frequencies",
             });
@@ -204,13 +209,7 @@ impl FractionalZener {
     /// [`ViscoError::Parameters`].
     pub fn new(e0: f64, e_inf: f64, alpha: f64, tau: f64) -> Result<FractionalZener, ViscoError> {
         let finite = e0.is_finite() && e_inf.is_finite() && alpha.is_finite() && tau.is_finite();
-        if !finite
-            || e0 <= 0.0
-            || e_inf <= e0
-            || alpha <= 0.0
-            || alpha > 1.0
-            || tau <= 0.0
-        {
+        if !finite || e0 <= 0.0 || e_inf <= e0 || alpha <= 0.0 || alpha > 1.0 || tau <= 0.0 {
             return Err(ViscoError::Parameters {
                 what: "fractional Zener needs 0 < E0 < Einf, 0 < alpha <= 1, tau > 0",
             });
@@ -1453,8 +1452,9 @@ mod tests {
         let truth = FractionalZener::new(9.0e9, 1.5e10, 0.35, 2.0e-4).expect("truth");
         let mut samples = Vec::new();
         for k in 0..24 {
-            let w =
-                det::exp(det::ln(1.0e1) + (f64::from(k) / 23.0) * (det::ln(1.0e7) - det::ln(1.0e1)));
+            let w = det::exp(
+                det::ln(1.0e1) + (f64::from(k) / 23.0) * (det::ln(1.0e7) - det::ln(1.0e1)),
+            );
             let (ep, epp) = truth.modulus(w);
             samples.push((w, ep, epp));
         }

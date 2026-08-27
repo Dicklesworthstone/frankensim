@@ -473,11 +473,11 @@ fn test_xdmf_escapes_attribute_names_and_binary_file_text() {
     grid.add_cell(CellType::Vertex, &[p0]);
     grid.add_array(DataArray::new_point_scalar("field <&\"'>", vec![1.0]));
 
-    let (xmf, _) =
-        XdmfWriter::write_xdmf_with_binary(&grid, "mesh<&>.bin").expect("write escaped XDMF");
+    let (xmf, _) = XdmfWriter::write_xdmf_with_binary(&grid, "mesh<&>\tline\nreturn\r.bin")
+        .expect("write escaped XDMF");
     assert!(xmf.contains("Name=\"field &lt;&amp;&quot;&apos;&gt;\""));
-    assert!(xmf.contains("mesh&lt;&amp;&gt;.bin"));
-    assert!(!xmf.contains("mesh<&>.bin"));
+    assert!(xmf.contains("mesh&lt;&amp;&gt;&#x9;line&#xA;return&#xD;.bin"));
+    assert!(!xmf.contains("mesh<&>\tline\nreturn\r.bin"));
 }
 
 #[test]

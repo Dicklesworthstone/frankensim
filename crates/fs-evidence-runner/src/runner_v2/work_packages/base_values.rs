@@ -5778,9 +5778,8 @@ fn validate_retained_domain_obligations_diagnostic_v1(
                 "restore-exact-retained-domain-obligation-catalog",
             )
         })?;
-        let expected_id = format!(
-            "runner-v2.base-values.retained-{expected_ordinal:03}-{suffix}.v1"
-        );
+        let expected_id =
+            format!("runner-v2.base-values.retained-{expected_ordinal:03}-{suffix}.v1");
         if row.ordinal != expected_ordinal {
             return Err(stage_a_inventory_mismatch_v1(
                 ConstructionErrorKindV2::Incompatible,

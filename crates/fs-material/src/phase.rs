@@ -458,8 +458,14 @@ mod tests {
         let half_melted = curve.advance_specific_energy(solid, 22_500.0).unwrap();
         assert_eq!(half_melted.phase(), SolidLiquidPhase::SolidLiquid);
         assert_eq!(half_melted.temperature_k().to_bits(), 600.0_f64.to_bits());
-        assert_eq!(half_melted.solid_mass_fraction().to_bits(), 0.5_f64.to_bits());
-        assert_eq!(half_melted.liquid_mass_fraction().to_bits(), 0.5_f64.to_bits());
+        assert_eq!(
+            half_melted.solid_mass_fraction().to_bits(),
+            0.5_f64.to_bits()
+        );
+        assert_eq!(
+            half_melted.liquid_mass_fraction().to_bits(),
+            0.5_f64.to_bits()
+        );
         assert!(!half_melted.is_fully_solid());
 
         let liquid = curve

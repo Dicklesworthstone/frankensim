@@ -12857,9 +12857,8 @@ mod tests {
             BaseCoverageCloseDecisionV1::Accept => BaseCoverageCloseDecisionV1::Refuse,
             BaseCoverageCloseDecisionV1::Refuse => BaseCoverageCloseDecisionV1::Accept,
             BaseCoverageCloseDecisionV1::Fail => BaseCoverageCloseDecisionV1::Accept,
-            BaseCoverageCloseDecisionV1::Unsupported | BaseCoverageCloseDecisionV1::Inapplicable => {
-                BaseCoverageCloseDecisionV1::Refuse
-            }
+            BaseCoverageCloseDecisionV1::Unsupported
+            | BaseCoverageCloseDecisionV1::Inapplicable => BaseCoverageCloseDecisionV1::Refuse,
         }
     }
 

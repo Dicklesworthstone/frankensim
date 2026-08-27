@@ -4155,9 +4155,8 @@ mod tests {
             Err(SeedErrorV2::InvocationMaterialForbiddenForFixedManifest)
         );
 
-        let registry =
-            CaseSeedDerivationDomainRegistryV1::try_new(std::slice::from_ref(&domain))
-                .expect("exact source registry");
+        let registry = CaseSeedDerivationDomainRegistryV1::try_new(std::slice::from_ref(&domain))
+            .expect("exact source registry");
         let derived_binding = registry
             .bind_invocation_derived(case.clone(), 1)
             .expect("registered invocation-derived binding");

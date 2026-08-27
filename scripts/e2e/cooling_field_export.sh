@@ -45,9 +45,9 @@ case "${COMMAND}" in
     log_json "self_test" "ok" "preflight checks passed"
     exit 0
     ;;
-  --run|--negative|--replay)
+  --run)
     mkdir -p "${ARTIFACT_DIR}"
-    log_json "run_start" "started" "executing VTU/XDMF field export e2e suite"
+    log_json "run_start" "started" "executing focused VTU/XDMF writer tests"
 
     export PATH="${PATH}:/Users/jemanuel/.local/bin"
 
@@ -60,22 +60,24 @@ case "${COMMAND}" in
       exit 1
     fi
 
-    # 2. Check ParaView availability if installed
-    PARAVIEW_RAN="no"
+    # Presence is useful preflight information, but it is not an artifact-open
+    # result and therefore cannot satisfy the ParaView acceptance lane.
     if command -v pvpython >/dev/null 2>&1; then
-      PV_VER="$(pvpython --version 2>&1 || true)"
-      PARAVIEW_RAN="yes"
-      log_json "paraview_lane" "available" "${PV_VER}"
+      log_json "paraview_lane" "not_run" "pvpython is available, but no retained cooling artifact was opened"
     else
-      log_json "paraview_lane" "not_run" "pvpython not present on host; structural and independent reader checks verified"
+      log_json "paraview_lane" "not_run" "pvpython not present on host"
     fi
 
-    if [ "${PARAVIEW_RAN}" = "yes" ]; then
-      log_json "run_terminal" "pass" "cooling field export verified bit-exact and ParaView-compatible"
-    else
-      log_json "run_terminal" "pass" "cooling field export verified bit-exact; ParaView lane NOT executed on this host"
-    fi
-    exit 0
+    log_json "run_terminal" "refused" "focused writer tests passed, but the real cooling solve, requested-field export, independent artifact readback, ledger QoI comparison, and replay are not wired in this script"
+    exit 1
+    ;;
+  --negative)
+    log_json "run_terminal" "refused" "negative mode has no cancellation, short-write, corruption, or ledger-failure drill wired"
+    exit 1
+    ;;
+  --replay)
+    log_json "run_terminal" "refused" "replay mode has no retained cooling artifact production or byte-comparison path wired"
+    exit 1
     ;;
   *)
     printf "FATAL: unknown command %s\n" "${COMMAND}" >&2
