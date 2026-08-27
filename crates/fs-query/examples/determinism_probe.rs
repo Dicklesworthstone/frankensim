@@ -176,8 +176,12 @@ fn run_bent_tube() -> Result<ProbeOutcome, String> {
             .torus(Point3::new(0.0, 0.0, 0.0), major, minor)
             .expect("torus");
         // Keep the quadrant x >= 0, y >= 0: a 90-degree bend (as gb_003).
-        let hx = builder.half_space(Vec3::new(-1.0, 0.0, 0.0), 0.0).expect("hx");
-        let hy = builder.half_space(Vec3::new(0.0, -1.0, 0.0), 0.0).expect("hy");
+        let hx = builder
+            .half_space(Vec3::new(-1.0, 0.0, 0.0), 0.0)
+            .expect("hx");
+        let hy = builder
+            .half_space(Vec3::new(0.0, -1.0, 0.0), 0.0)
+            .expect("hy");
         let quad = builder
             .boolean(BoolOp::Intersect, BoolStyle::Hard, hx, hy)
             .expect("quad");
@@ -204,8 +208,7 @@ fn run_cone_frustum() -> Result<ProbeOutcome, String> {
         let r1 = 0.3_f64;
         let length = 1.6_f64;
         let p = |radius: f64, axial: f64| MeridianPoint { radius, axial };
-        let line =
-            |a: MeridianPoint, b: MeridianPoint| MeridianSegment::Line { start: a, end: b };
+        let line = |a: MeridianPoint, b: MeridianPoint| MeridianSegment::Line { start: a, end: b };
         let chart = AxisymmetricChart::try_new(vec![
             line(p(0.0, 0.0), p(r0, 0.0)),
             line(p(r0, 0.0), p(r1, length)),

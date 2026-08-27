@@ -9025,19 +9025,19 @@ mod tests {
             cell.expected_decision().stable_name(),
         )))
         .expect("safe expected decision");
-        let observed = result
-            .observed_decision()
-            .map(|decision| {
+        let observed = result.observed_decision().map_or_else(
+            || {
+                BaseLeafCloseLoggedValueV1::redacted(
+                    ConstructionObservedDataClassV2::CallerControlledText,
+                )
+            },
+            |decision| {
                 BaseLeafCloseLoggedValueV1::typed(TypedValueV2::Token(token(
                     decision.stable_name(),
                 )))
                 .expect("safe observed decision")
-            })
-            .unwrap_or_else(|| {
-                BaseLeafCloseLoggedValueV1::redacted(
-                    ConstructionObservedDataClassV2::CallerControlledText,
-                )
-            });
+            },
+        );
         let repair = BaseLeafCloseLoggedRepairV1::new(
             1,
             RepairActionKindV2::InspectRetainedArtifact,
@@ -13073,6 +13073,21 @@ mod tests {
 
     #[test]
     fn budget_exceeded_terminal_binds_every_field_and_overflow_document_replays() {
+        fn write_overflow(
+            event: &BaseLeafCloseDetailEventV1,
+            maximum_bytes: u64,
+        ) -> BaseLeafCloseBoundedLogV1 {
+            let manifest = BaseLeafCloseDetailManifestV1::from_events(std::slice::from_ref(event))
+                .expect("overflow replay manifest");
+            let mut writer = bounded_test_writer(&manifest, maximum_bytes);
+            assert!(matches!(
+                writer
+                    .push(event.clone())
+                    .expect("overflow replay seals terminal"),
+                BaseLeafCloseLogWriteDispositionV1::LogBudgetExceeded { .. }
+            ));
+            writer.finish().expect("overflow replay document")
+        }
         let baseline = budget_terminal_fixture(
             BaseLeafCloseDetailEventClassV1::Stage,
             1,
@@ -13287,22 +13302,6 @@ mod tests {
             .kind(),
             ConstructionErrorKindV2::Incompatible
         );
-
-        fn write_overflow(
-            event: &BaseLeafCloseDetailEventV1,
-            maximum_bytes: u64,
-        ) -> BaseLeafCloseBoundedLogV1 {
-            let manifest = BaseLeafCloseDetailManifestV1::from_events(std::slice::from_ref(event))
-                .expect("overflow replay manifest");
-            let mut writer = bounded_test_writer(&manifest, maximum_bytes);
-            assert!(matches!(
-                writer
-                    .push(event.clone())
-                    .expect("overflow replay seals terminal"),
-                BaseLeafCloseLogWriteDispositionV1::LogBudgetExceeded { .. }
-            ));
-            writer.finish().expect("overflow replay document")
-        }
 
         let event = bounded_test_stage(9);
         let manifest = BaseLeafCloseDetailManifestV1::from_events(std::slice::from_ref(&event))

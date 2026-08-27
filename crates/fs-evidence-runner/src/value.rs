@@ -3216,6 +3216,8 @@ mod tests {
 
     #[test]
     fn ieee_wrappers_preserve_special_encodings_and_nan_payloads() {
+        use core::cmp::Ordering;
+
         for bits in [
             0_u32,
             1_u32 << 31,
@@ -3243,7 +3245,6 @@ mod tests {
         ] {
             assert_eq!(F64BitsV2::from_bits(bits).bits(), bits);
         }
-        use core::cmp::Ordering;
 
         let negative_zero_f32 = F32BitsV2::from_bits((-0.0_f32).to_bits());
         let positive_zero_f32 = F32BitsV2::from_bits(0.0_f32.to_bits());
@@ -4056,7 +4057,7 @@ mod tests {
             Ok(source.clone())
         );
         assert_eq!(
-            source.reconstruct_exact(&[first.clone()], source.root()),
+            source.reconstruct_exact(std::slice::from_ref(&first), source.root()),
             Err(SeedErrorV2::DerivationDomainRegistryLengthMismatch {
                 observed: 1,
                 expected: 2,
@@ -4154,10 +4155,9 @@ mod tests {
             Err(SeedErrorV2::InvocationMaterialForbiddenForFixedManifest)
         );
 
-        let domain =
-            semantic_seed_domain(1, "coverage.semantic-seed", "generator-v7", "minimizer-v3");
-        let registry = CaseSeedDerivationDomainRegistryV1::try_new(&[domain.clone()])
-            .expect("exact source registry");
+        let registry =
+            CaseSeedDerivationDomainRegistryV1::try_new(std::slice::from_ref(&domain))
+                .expect("exact source registry");
         let derived_binding = registry
             .bind_invocation_derived(case.clone(), 1)
             .expect("registered invocation-derived binding");
@@ -4364,8 +4364,9 @@ mod tests {
         let second_domain =
             semantic_seed_domain(2, "coverage.case-two", "generator-v1", "minimizer-v1");
 
-        let first_registry = CaseSeedDerivationDomainRegistryV1::try_new(&[first_domain.clone()])
-            .expect("single-domain registry");
+        let first_registry =
+            CaseSeedDerivationDomainRegistryV1::try_new(std::slice::from_ref(&first_domain))
+                .expect("single-domain registry");
         let expanded_registry =
             CaseSeedDerivationDomainRegistryV1::try_new(&[first_domain, second_domain])
                 .expect("expanded registry");

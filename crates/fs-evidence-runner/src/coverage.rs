@@ -12857,8 +12857,9 @@ mod tests {
             BaseCoverageCloseDecisionV1::Accept => BaseCoverageCloseDecisionV1::Refuse,
             BaseCoverageCloseDecisionV1::Refuse => BaseCoverageCloseDecisionV1::Accept,
             BaseCoverageCloseDecisionV1::Fail => BaseCoverageCloseDecisionV1::Accept,
-            BaseCoverageCloseDecisionV1::Unsupported => BaseCoverageCloseDecisionV1::Refuse,
-            BaseCoverageCloseDecisionV1::Inapplicable => BaseCoverageCloseDecisionV1::Refuse,
+            BaseCoverageCloseDecisionV1::Unsupported | BaseCoverageCloseDecisionV1::Inapplicable => {
+                BaseCoverageCloseDecisionV1::Refuse
+            }
         }
     }
 
@@ -14172,7 +14173,7 @@ mod tests {
             .map(|index| {
                 numeric(
                     format!("n{index:02}"),
-                    NumericValueV2::U128(u128::from(index)),
+                    NumericValueV2::U128(index),
                     BaseCoverageCloseNumericUnitV1::logical(LogicalUnitV2::Count)
                         .expect("logical unit"),
                 )
@@ -15660,7 +15661,7 @@ mod tests {
         assert_eq!(
             contracts
                 .iter()
-                .map(|contract| contract.root())
+                .map(super::BaseCoverageCloseCapabilityContractV1::root)
                 .collect::<BTreeSet<_>>()
                 .len(),
             BaseCoverageCloseCapabilityProfileV1::ALL.len()
@@ -15733,7 +15734,7 @@ mod tests {
             super::validate_close_capability_id_set(
                 "coverage.close.capability.boundary_fixture",
                 &capability_registry,
-                &vec![BaseCoverageCloseCapabilityIdV1::new(1).expect("id"); 6],
+                &[BaseCoverageCloseCapabilityIdV1::new(1).expect("id"); 6],
             )
             .unwrap_err()
             .kind(),

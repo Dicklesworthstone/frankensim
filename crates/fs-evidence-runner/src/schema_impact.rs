@@ -6701,6 +6701,40 @@ mod tests {
 
     #[test]
     fn schema_impact_closed_catalogs_wrappers_frames_and_rows_are_exact() {
+        fn assert_shared_canonical_guard_seam(guard: usize, field: &'static str) {
+            let exact_invocations = std::cell::Cell::new(0_u8);
+            let exact = CanonicalFrameV1::preflighted(b"M", guard, |sink| {
+                exact_invocations.set(exact_invocations.get() + 1);
+                for _ in 1..guard {
+                    sink.push_u8(field, 0)?;
+                }
+                Ok(())
+            })
+            .expect("the shared seam accepts an exactly guard-length frame");
+            assert_eq!(exact.as_bytes().len(), guard);
+            assert_eq!(
+                exact_invocations.get(),
+                2,
+                "an admitted frame performs one count pass and one encode pass"
+            );
+
+            let one_over_invocations = std::cell::Cell::new(0_u8);
+            let one_over = CanonicalFrameV1::preflighted(b"M", guard, |sink| {
+                one_over_invocations.set(one_over_invocations.get() + 1);
+                for _ in 0..guard {
+                    sink.push_u8(field, 0)?;
+                }
+                Ok(())
+            })
+            .expect_err("guard plus one must refuse during count-only preflight");
+            assert_eq!(one_over.kind(), ConstructionErrorKindV2::TooLarge);
+            assert_eq!(one_over.field(), field);
+            assert_eq!(
+                one_over_invocations.get(),
+                1,
+                "guard-plus-one refusal happens before output materialization"
+            );
+        }
         let u16_catalogs: &[(&[(u16, &str)], Vec<(u16, &str)>)] = &[
             (
                 &[(1, "v1"), (2, "v2")],
@@ -6935,7 +6969,7 @@ mod tests {
             ConstructionErrorKindV2::Incompatible
         );
         assert_eq!(
-            CanonicalSchemaMagicV1::new(b"BAD_MAGIC\x02".to_vec(), CanonicalFrameVersionV1::V1)
+            CanonicalSchemaMagicV1::new(b"BAD_MAGIC\x02", CanonicalFrameVersionV1::V1)
                 .expect_err("magic/version mismatch")
                 .kind(),
             ConstructionErrorKindV2::Incompatible
@@ -7485,40 +7519,6 @@ mod tests {
             );
         }
 
-        fn assert_shared_canonical_guard_seam(guard: usize, field: &'static str) {
-            let exact_invocations = std::cell::Cell::new(0_u8);
-            let exact = CanonicalFrameV1::preflighted(b"M", guard, |sink| {
-                exact_invocations.set(exact_invocations.get() + 1);
-                for _ in 1..guard {
-                    sink.push_u8(field, 0)?;
-                }
-                Ok(())
-            })
-            .expect("the shared seam accepts an exactly guard-length frame");
-            assert_eq!(exact.as_bytes().len(), guard);
-            assert_eq!(
-                exact_invocations.get(),
-                2,
-                "an admitted frame performs one count pass and one encode pass"
-            );
-
-            let one_over_invocations = std::cell::Cell::new(0_u8);
-            let one_over = CanonicalFrameV1::preflighted(b"M", guard, |sink| {
-                one_over_invocations.set(one_over_invocations.get() + 1);
-                for _ in 0..guard {
-                    sink.push_u8(field, 0)?;
-                }
-                Ok(())
-            })
-            .expect_err("guard plus one must refuse during count-only preflight");
-            assert_eq!(one_over.kind(), ConstructionErrorKindV2::TooLarge);
-            assert_eq!(one_over.field(), field);
-            assert_eq!(
-                one_over_invocations.get(),
-                1,
-                "guard-plus-one refusal happens before output materialization"
-            );
-        }
 
         for (guard, field) in [
             (
@@ -8577,7 +8577,7 @@ mod tests {
             Vec::new(),
             None,
         );
-        let frame_variants = vec![
+        let frame_variants = [
             baseline_frame.clone(),
             frame(
                 "MovementFrameRenamed",
@@ -9105,7 +9105,7 @@ mod tests {
             )
             .expect("domain"),
             CanonicalSchemaMagicV1::new(
-                b"TEST_MISSING_RECIPROCAL\x01".to_vec(),
+                b"TEST_MISSING_RECIPROCAL\x01",
                 CanonicalFrameVersionV1::V1,
             )
             .expect("magic"),
@@ -9125,7 +9125,7 @@ mod tests {
             )
             .expect("domain"),
             CanonicalSchemaMagicV1::new(
-                b"TEST_DUPLICATE_FIELD\x01".to_vec(),
+                b"TEST_DUPLICATE_FIELD\x01",
                 CanonicalFrameVersionV1::V1,
             )
             .expect("magic"),
@@ -9155,7 +9155,7 @@ mod tests {
             )
             .expect("domain"),
             CanonicalSchemaMagicV1::new(
-                b"TEST_FIELD_ORDER\x01".to_vec(),
+                b"TEST_FIELD_ORDER\x01",
                 CanonicalFrameVersionV1::V1,
             )
             .expect("magic"),
@@ -9187,7 +9187,7 @@ mod tests {
                 CanonicalFrameVersionV1::V1,
             )
             .expect("domain"),
-            CanonicalSchemaMagicV1::new(b"TEST_WIDE\x01".to_vec(), CanonicalFrameVersionV1::V1)
+            CanonicalSchemaMagicV1::new(b"TEST_WIDE\x01", CanonicalFrameVersionV1::V1)
                 .expect("magic"),
             vec![wide_field; CANONICAL_SCHEMA_FIELDS_MAX_V1 + 1],
             None,
@@ -10321,6 +10321,38 @@ mod tests {
 
     #[test]
     fn schema_impact_manifest_reconstructs_the_source_frozen_meta_schema_without_authority() {
+        const TEST_LOG_CASES: [SourceFrozenSchemaImpactLogCaseV1; 6] = [
+            SourceFrozenSchemaImpactLogCaseV1 {
+                entry_local_ordinal: 1,
+                case_id: "ac60.meta.accepted",
+                expected_decision: SchemaImpactDecisionV1::Accepted,
+            },
+            SourceFrozenSchemaImpactLogCaseV1 {
+                entry_local_ordinal: 2,
+                case_id: "ac60.meta.validation-refused",
+                expected_decision: SchemaImpactDecisionV1::ValidationRefused,
+            },
+            SourceFrozenSchemaImpactLogCaseV1 {
+                entry_local_ordinal: 3,
+                case_id: "ac60.meta.failure-observed",
+                expected_decision: SchemaImpactDecisionV1::FailureObserved,
+            },
+            SourceFrozenSchemaImpactLogCaseV1 {
+                entry_local_ordinal: 4,
+                case_id: "ac60.meta.mutation-refused",
+                expected_decision: SchemaImpactDecisionV1::MutationRefused,
+            },
+            SourceFrozenSchemaImpactLogCaseV1 {
+                entry_local_ordinal: 5,
+                case_id: "ac60.meta.unsupported",
+                expected_decision: SchemaImpactDecisionV1::Unsupported,
+            },
+            SourceFrozenSchemaImpactLogCaseV1 {
+                entry_local_ordinal: 2,
+                case_id: "ac60.meta.inapplicable",
+                expected_decision: SchemaImpactDecisionV1::Inapplicable,
+            },
+        ];
         let production =
             runner_v2_base_schema_impact_manifest_v1().expect("production AC60 meta-schema");
         assert_eq!(
@@ -10556,7 +10588,7 @@ mod tests {
             ),
             snapshot,
         );
-        let rows = vec![legacy_parent, nested, migrated, alpha, beta];
+        let rows = [legacy_parent, nested, migrated, alpha, beta];
         let relations = rows
             .iter()
             .cloned()
@@ -10641,38 +10673,6 @@ mod tests {
         let safe_refusal = CanonicalSchemaIdV1::new("REJECTED_RAW_SCHEMA_VALUE")
             .expect_err("redacted refusal fixture");
         assert_eq!(safe_refusal.kind(), ConstructionErrorKindV2::Incompatible);
-        const TEST_LOG_CASES: [SourceFrozenSchemaImpactLogCaseV1; 6] = [
-            SourceFrozenSchemaImpactLogCaseV1 {
-                entry_local_ordinal: 1,
-                case_id: "ac60.meta.accepted",
-                expected_decision: SchemaImpactDecisionV1::Accepted,
-            },
-            SourceFrozenSchemaImpactLogCaseV1 {
-                entry_local_ordinal: 2,
-                case_id: "ac60.meta.validation-refused",
-                expected_decision: SchemaImpactDecisionV1::ValidationRefused,
-            },
-            SourceFrozenSchemaImpactLogCaseV1 {
-                entry_local_ordinal: 3,
-                case_id: "ac60.meta.failure-observed",
-                expected_decision: SchemaImpactDecisionV1::FailureObserved,
-            },
-            SourceFrozenSchemaImpactLogCaseV1 {
-                entry_local_ordinal: 4,
-                case_id: "ac60.meta.mutation-refused",
-                expected_decision: SchemaImpactDecisionV1::MutationRefused,
-            },
-            SourceFrozenSchemaImpactLogCaseV1 {
-                entry_local_ordinal: 5,
-                case_id: "ac60.meta.unsupported",
-                expected_decision: SchemaImpactDecisionV1::Unsupported,
-            },
-            SourceFrozenSchemaImpactLogCaseV1 {
-                entry_local_ordinal: 2,
-                case_id: "ac60.meta.inapplicable",
-                expected_decision: SchemaImpactDecisionV1::Inapplicable,
-            },
-        ];
         let typed_case_manifest =
             source_frozen_schema_impact_log_case_manifest_v1(&first, &TEST_LOG_CASES)
                 .expect("schema-owned source-frozen log translator");

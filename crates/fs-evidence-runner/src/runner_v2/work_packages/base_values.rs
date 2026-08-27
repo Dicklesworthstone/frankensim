@@ -5779,8 +5779,7 @@ fn validate_retained_domain_obligations_diagnostic_v1(
             )
         })?;
         let expected_id = format!(
-            "runner-v2.base-values.retained-{:03}-{}.v1",
-            expected_ordinal, suffix
+            "runner-v2.base-values.retained-{expected_ordinal:03}-{suffix}.v1"
         );
         if row.ordinal != expected_ordinal {
             return Err(stage_a_inventory_mismatch_v1(
@@ -6168,7 +6167,7 @@ fn validate_common_requirements_diagnostic_v1(
                 rows,
                 index,
                 "api-generation",
-                format!("{:?}", RUNNER_SPEC_V2_API_GENERATION),
+                format!("{RUNNER_SPEC_V2_API_GENERATION:?}"),
                 format!("{:?}", row.api_generation),
             ));
         }
@@ -6177,7 +6176,7 @@ fn validate_common_requirements_diagnostic_v1(
                 rows,
                 index,
                 "wire-version",
-                format!("{:?}", RUNNER_V2_WIRE_VERSION),
+                format!("{RUNNER_V2_WIRE_VERSION:?}"),
                 format!("{:?}", row.wire_version),
             ));
         }
@@ -6186,7 +6185,7 @@ fn validate_common_requirements_diagnostic_v1(
                 rows,
                 index,
                 "predecessor-policy",
-                format!("{:?}", RUNNER_V2_PREDECESSOR_POLICY),
+                format!("{RUNNER_V2_PREDECESSOR_POLICY:?}"),
                 format!("{:?}", row.predecessor_policy),
             ));
         }
@@ -7400,12 +7399,12 @@ fn build_capability_none_v1() -> Result<
 
 fn build_local_budget_set_v1() -> Result<BaseCoverageCloseBudgetSetV1, ConstructionErrorV2> {
     let row = |axis, hard, soft, unit| {
-        Ok(BaseCoverageCloseTypedBudgetV1::new(
+        BaseCoverageCloseTypedBudgetV1::new(
             axis,
             hard,
             soft,
             BaseCoverageCloseLogicalUnitReferenceV1::fixed(unit)?,
-        )?)
+        )
     };
     BaseCoverageCloseBudgetSetV1::new(
         BaseCoverageCloseBudgetProfileV1::LocalSourceValidation,
@@ -11830,10 +11829,10 @@ mod tests {
                             RunnerV2RawReasonV1::FixedRepresentationChanged => fixed_changed += 1,
                             RunnerV2RawReasonV1::BelowStructuralMinimum => below_minimum += 1,
                             RunnerV2RawReasonV1::JointFeasibilityViolation => {
-                                joint_feasibility += 1
+                                joint_feasibility += 1;
                             }
                             RunnerV2RawReasonV1::CheckedRepresentationalOverflow => {
-                                checked_overflow += 1
+                                checked_overflow += 1;
                             }
                             other => panic!(
                                 "unexpected limit refusal reason {other:?} for {}",

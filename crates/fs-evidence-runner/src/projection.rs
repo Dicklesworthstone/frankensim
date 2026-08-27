@@ -17893,56 +17893,56 @@ mod tests {
                 0 => fixture.source_owner = "frankensim-test-mutated-source-owner".to_owned(),
                 1 => {
                     fixture.payload_root =
-                        hash_domain("projection-test-phase-one-payload-axis.v1", b"mutant")
+                        hash_domain("projection-test-phase-one-payload-axis.v1", b"mutant");
                 }
                 2 => {
                     fixture.expected_partitions_root =
-                        hash_domain("projection-test-phase-one-partitions-axis.v1", b"mutant")
+                        hash_domain("projection-test-phase-one-partitions-axis.v1", b"mutant");
                 }
                 3 => {
                     fixture.per_cell_budgets = frozen_downstream_close_contribution_budgets_v1(2, 1)
-                        .expect("mutated per-cell budget")
+                        .expect("mutated per-cell budget");
                 }
                 4 => {
                     fixture.shard_budgets = frozen_downstream_close_contribution_budgets_v1(5, 2)
-                        .expect("mutated shard budget")
+                        .expect("mutated shard budget");
                 }
                 5 => {
                     fixture.schema_root =
-                        hash_domain("projection-test-phase-one-schema-axis.v1", b"mutant")
+                        hash_domain("projection-test-phase-one-schema-axis.v1", b"mutant");
                 }
                 6 => {
                     fixture.log_schema_root =
-                        hash_domain("projection-test-phase-one-log-axis.v1", b"mutant")
+                        hash_domain("projection-test-phase-one-log-axis.v1", b"mutant");
                 }
                 7 => {
                     fixture.source_root = super::parse_phase_one_source_identity(hash_domain(
                         "projection-test-phase-one-source-axis.v1",
                         b"mutant",
                     ))
-                    .expect("mutated source identity")
+                    .expect("mutated source identity");
                 }
                 8 => {
                     fixture.build_root = super::parse_phase_one_build_identity(hash_domain(
                         "projection-test-phase-one-build-axis.v1",
                         b"mutant",
                     ))
-                    .expect("mutated build identity")
+                    .expect("mutated build identity");
                 }
                 9 => {
                     fixture.toolchain_root = super::parse_phase_one_toolchain_identity(hash_domain(
                         "projection-test-phase-one-toolchain-axis.v1",
                         b"mutant",
                     ))
-                    .expect("mutated toolchain identity")
+                    .expect("mutated toolchain identity");
                 }
                 10 => {
                     fixture.target_root =
-                        hash_domain("projection-test-phase-one-target-axis.v1", b"mutant")
+                        hash_domain("projection-test-phase-one-target-axis.v1", b"mutant");
                 }
                 11 => {
                     fixture.feature_set_root =
-                        hash_domain("projection-test-phase-one-feature-axis.v1", b"mutant")
+                        hash_domain("projection-test-phase-one-feature-axis.v1", b"mutant");
                 }
                 12 => {
                     fixture.observer_contract = BaseCoverageCloseDeferredObservationContractV1::new(
@@ -17962,11 +17962,11 @@ mod tests {
                         StableTokenV2::new("mutated-phase1-observer-no-claim")
                             .expect("mutated observer no-claim"),
                     )
-                    .expect("structurally valid mutated observer")
+                    .expect("structurally valid mutated observer");
                 }
                 13 => {
                     fixture.no_claim = StableTokenV2::new("mutated-phase1-contribution-no-claim")
-                        .expect("mutated contribution no-claim")
+                        .expect("mutated contribution no-claim");
                 }
                 _ => unreachable!("closed mutation axis"),
             }

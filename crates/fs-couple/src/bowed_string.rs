@@ -182,7 +182,6 @@ impl FrictionIsland {
             Self::ViscousOnly { .. } => 0.0,
         }
     }
-
 }
 
 /// Bridge termination configuration of a run.
