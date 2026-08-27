@@ -18,6 +18,7 @@
 pub mod auglag;
 pub mod interior;
 pub mod lbfgs;
+pub mod nsga;
 pub mod pareto;
 pub mod riemann;
 pub mod runner;
@@ -25,11 +26,15 @@ pub mod sqp;
 pub mod stop;
 pub mod trust;
 pub mod wolfe;
+pub use nsga::{
+    NonFiniteKind, NsgaConfig, NsgaError, NsgaIndividual, NsgaReport, NsgaStop, build_references,
+    das_dennis_cardinality, fast_nondominated_sort, nsga3_run, partition_tuples,
+};
+pub use pareto::{ParetoPoint, epsilon_constraint_sweep, nondominated_front, weighted_sum_sweep};
 
 pub use auglag::{AugLagReport, KktResidual, augmented_lagrangian};
 pub use interior::{InteriorReport, interior_point};
 pub use lbfgs::{LbfgsReport, LbfgsState};
-pub use pareto::{ParetoPoint, epsilon_constraint_sweep, nondominated_front, weighted_sum_sweep};
 pub use riemann::{RiemannianLbfgs, RiemannianReport, retract, tangent_project};
 pub use runner::{
     Packing, STUDY_CANCELLATION_BOUNDARY_VERSION, Study, StudyError, StudyForkReceipt,

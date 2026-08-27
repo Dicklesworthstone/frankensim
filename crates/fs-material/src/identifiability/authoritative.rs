@@ -29,21 +29,29 @@ use fs_evidence::vv::{ExperimentOrigin, MAX_VV_MATRIX_DIMENSION, ObservationLoca
 /// preimages use the four stage-specific versions below, so changing one stage
 /// never silently rewrites the other three identities.
 pub const IDENTIFIABILITY_AUTHORITY_SCHEMA_VERSION: u32 = 3;
+/// Preimage version baked into [`ProblemId`] identity hashing.
 pub const IDENTIFIABILITY_PROBLEM_IDENTITY_VERSION: u32 = 3;
+/// Preimage version baked into [`SourceAdmissionId`] identity hashing.
 pub const IDENTIFIABILITY_SOURCE_ADMISSION_IDENTITY_VERSION: u32 = 3;
+/// Preimage version baked into [`ExecutionId`] identity hashing.
 pub const IDENTIFIABILITY_EXECUTION_IDENTITY_VERSION: u32 = 3;
+/// Preimage version baked into [`AssessmentId`] identity hashing.
 pub const IDENTIFIABILITY_ASSESSMENT_IDENTITY_VERSION: u32 = 3;
 
 const PROBLEM_MAGIC: &[u8] = b"fs-material-identifiability-problem\0";
 const SOURCE_ADMISSION_MAGIC: &[u8] = b"fs-material-identifiability-source-admission\0";
 const EXECUTION_MAGIC: &[u8] = b"fs-material-identifiability-execution\0";
 const ASSESSMENT_MAGIC: &[u8] = b"fs-material-identifiability-assessment\0";
+/// Domain-separated fs-blake3 domain of [`ProblemId`] digests.
 pub const IDENTIFIABILITY_PROBLEM_IDENTITY_DOMAIN: &str =
     "org.frankensim.fs-material.identifiability-problem.v3";
+/// Domain-separated fs-blake3 domain of [`SourceAdmissionId`] digests.
 pub const IDENTIFIABILITY_SOURCE_ADMISSION_IDENTITY_DOMAIN: &str =
     "org.frankensim.fs-material.identifiability-source-admission.v3";
+/// Domain-separated fs-blake3 domain of [`ExecutionId`] digests.
 pub const IDENTIFIABILITY_EXECUTION_IDENTITY_DOMAIN: &str =
     "org.frankensim.fs-material.identifiability-execution.v3";
+/// Domain-separated fs-blake3 domain of [`AssessmentId`] digests.
 pub const IDENTIFIABILITY_ASSESSMENT_IDENTITY_DOMAIN: &str =
     "org.frankensim.fs-material.identifiability-assessment.v3";
 
@@ -61,30 +69,42 @@ pub const CASE_PHYSICS_SOURCE_CONTRACT_VERSION: u32 = 1;
 /// equal byte strings from aliasing different physical roles.
 pub const FRAME_TRANSFORM_SOURCE_DOMAIN: &str =
     "org.frankensim.fs-material.case-frame-transform.v1";
+/// Digest domain of the canonical case specimen-geometry component artifact.
 pub const SPECIMEN_GEOMETRY_SOURCE_DOMAIN: &str =
     "org.frankensim.fs-material.case-specimen-geometry.v1";
+/// Digest domain of the canonical case specimen-process component artifact.
 pub const SPECIMEN_PROCESS_SOURCE_DOMAIN: &str =
     "org.frankensim.fs-material.case-specimen-process.v1";
+/// Digest domain of the canonical case specimen-preparation component artifact.
 pub const SPECIMEN_PREPARATION_SOURCE_DOMAIN: &str =
     "org.frankensim.fs-material.case-specimen-preparation.v1";
+/// Digest domain of the canonical case load-path component artifact.
 pub const LOAD_PATH_SOURCE_DOMAIN: &str = "org.frankensim.fs-material.case-load-path.v1";
+/// Digest domain of the canonical case environment-path component artifact.
 pub const ENVIRONMENT_PATH_SOURCE_DOMAIN: &str =
     "org.frankensim.fs-material.case-environment-path.v1";
+/// Digest domain of the canonical case time-grid component artifact.
 pub const TIME_GRID_SOURCE_DOMAIN: &str = "org.frankensim.fs-material.case-time-grid.v1";
+/// Digest domain of the canonical case initial-state component artifact.
 pub const INITIAL_STATE_SOURCE_DOMAIN: &str = "org.frankensim.fs-material.case-initial-state.v1";
 /// Exact source contract for an external claim that one canonical witness
 /// belongs to the full conjunction of opaque admissible-domain constraints.
 pub const ADMISSIBLE_DOMAIN_MEMBERSHIP_SOURCE_VERSION: u32 = 2;
+/// Digest domain accepted for admissible-domain-membership witness claims.
 pub const ADMISSIBLE_DOMAIN_MEMBERSHIP_SOURCE_DOMAIN: &str =
     "org.frankensim.fs-material.admissible-domain-membership.v2";
 /// Exact typed receipt binding one producer artifact to the complete
 /// domain/version/kind/key/hash identity of a forward-model source.
 pub const FORWARD_MODEL_PRODUCTION_BINDING_VERSION: u32 = 1;
+/// Identity domain paired with [`FORWARD_MODEL_PRODUCTION_BINDING_VERSION`].
 pub const FORWARD_MODEL_PRODUCTION_BINDING_DOMAIN: &str =
     "org.frankensim.fs-material.forward-model-production-binding.v1";
 const ADMISSIBLE_DOMAIN_WITNESS_BINDING_DOMAIN: &str =
     "org.frankensim.fs-material.admissible-domain-witness-binding.v2";
+/// Source contract version enforced for receipts under
+/// [`BLIND_RELEASE_TRUST_RECEIPT_DOMAIN`].
 pub const BLIND_RELEASE_TRUST_RECEIPT_VERSION: u32 = 1;
+/// Exact digest domain of typed blind-release trust receipts.
 pub const BLIND_RELEASE_TRUST_RECEIPT_DOMAIN: &str =
     "org.frankensim.fs-evidence.blind-release-trust-receipt.v1";
 
@@ -159,7 +179,9 @@ authority_token!(GaugeReductionId, "gauge reduction");
 /// globally unique across a campaign.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ObservationKey {
+    /// Owning study-case token.
     case: CaseId,
+    /// Case-local observation channel identifier.
     channel: ObservationChannelId,
 }
 
@@ -186,62 +208,119 @@ impl ObservationKey {
 /// Semantic class of an immutable source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SourceKind {
+    /// Context-of-use artifact describing the experimental setting.
     ContextOfUse,
+    /// fs-matdb material card artifact.
     MaterialCard,
+    /// fs-matdb constitutive-model card artifact.
     ConstitutiveModelCard,
+    /// Constitutive graph artifact.
     ConstitutiveGraph,
+    /// V&V experiment artifact.
     ExperimentArtifact,
+    /// V&V calibration split artifact.
     CalibrationSplit,
+    /// Forward-model implementation source.
     ForwardModel,
+    /// Specimen geometry input artifact.
     Geometry,
+    /// Specimen process input artifact.
     Process,
+    /// Protocol document artifact.
     Protocol,
+    /// Observation-operator definition artifact.
     ObservationOperator,
+    /// Metrology record artifact.
     Metrology,
+    /// Parser implementation source.
     Parser,
+    /// Preprocessing step definition artifact.
     Preprocessing,
+    /// Likelihood definition artifact.
     Likelihood,
+    /// Prior definition artifact.
     Prior,
+    /// Joint-constraint declaration artifact.
     Constraint,
+    /// Gauge-action specification artifact.
     GaugeAction,
+    /// Gauge-section specification artifact.
     GaugeSection,
+    /// Discrepancy-family specification artifact.
     Discrepancy,
+    /// Explicit assumption artifact.
     Assumption,
+    /// Analyzer implementation source.
     Analyzer,
+    /// Derivative-provider implementation source.
     DerivativeProvider,
+    /// Build-environment provenance record.
     Build,
+    /// Trust receipt binding external evidence authority.
     EvidenceReceipt,
+    /// Externally defined manifold artifact.
     ExternalManifold,
+    /// Algebraic extension declaration artifact.
     AlgebraicExtension,
+    /// Stratification specification artifact.
     Stratification,
+    /// Derived functional definition artifact.
     DerivedFunctional,
+    /// Admissible-domain membership certificate artifact.
     AdmissibleDomainCertificate,
+    /// Dimensionless error-metric definition artifact.
     DimensionlessErrorMetric,
+    /// Nondimensionalization specification artifact.
     Nondimensionalization,
+    /// Quantifier realization definition artifact.
     QuantifierRealization,
+    /// Reference measure definition artifact.
     ReferenceMeasure,
+    /// Probability measure definition artifact.
     ProbabilityMeasure,
+    /// Quantifier-domain definition artifact.
     QuantifierDomain,
+    /// Gauge composition declaration artifact.
     GaugeComposition,
+    /// Gauge orbit-type profile artifact.
     GaugeOrbitTypeProfile,
+    /// Gauge hypothesis statement artifact.
     GaugeHypothesis,
+    /// Gauge group presentation artifact.
     GaugeGroupPresentation,
+    /// Gauge orbit presentation artifact.
     GaugeOrbitPresentation,
+    /// Influence composition declaration artifact.
     InfluenceComposition,
+    /// Gauge quotient profile artifact.
     GaugeQuotientProfile,
+    /// Fiber cardinality profile artifact.
     FiberCardinalityProfile,
+    /// Fiber dimension profile artifact.
     FiberDimensionProfile,
+    /// Functional model-space declaration artifact.
     FunctionalModelSpace,
+    /// Gauge quotient map artifact.
     GaugeQuotientMap,
+    /// Gauge-invariant map artifact.
     GaugeInvariantMap,
+    /// Gauge groupoid presentation artifact.
     GaugeGroupoidPresentation,
+    /// Gauge reduction law artifact.
     GaugeReductionLaw,
+    /// Gauge subgroup certificate artifact.
     GaugeSubgroupCertificate,
+    /// Residual gauge action remaining after reduction.
     GaugeResidualAction,
+    /// Measure transport across gauge choices.
     GaugeMeasureTransport,
+    /// Measure transport declaration artifact.
     MeasureTransport,
+    /// Parameterized likelihood family artifact.
     ParameterizedLikelihood,
+    /// Unit definition artifact.
     UnitDefinition,
+    /// Producer-to-forward-model production-binding receipt.
     ForwardModelProductionBinding,
 }
 
@@ -250,10 +329,15 @@ pub enum SourceKind {
 /// correctness claim; authority is supplied only during source admission.
 #[derive(Clone, PartialEq, Eq)]
 pub struct SourceRef {
+    /// Canonical source-key token identifying the reference within its stage.
     key: SourceKey,
+    /// Semantic [`SourceKind`] class selecting the digest domain contract.
     kind: SourceKind,
+    /// Domain-separated digest that admitted bytes must reproduce exactly.
     expected_hash: ContentHash,
+    /// Exact fs-blake3 domain string used to compute `expected_hash`.
     content_hash_domain: String,
+    /// Source contract version of the referenced artifact family.
     contract_version: u32,
 }
 
@@ -384,26 +468,31 @@ impl SourceRef {
     }
 
     #[must_use]
+    /// Canonical source key.
     pub const fn key(&self) -> &SourceKey {
         &self.key
     }
 
     #[must_use]
+    /// Semantic class of the referenced source.
     pub const fn kind(&self) -> SourceKind {
         self.kind
     }
 
     #[must_use]
+    /// Expected domain-separated digest of the source content.
     pub const fn expected_hash(&self) -> ContentHash {
         self.expected_hash
     }
 
     #[must_use]
+    /// Exact digest-domain string used for `expected_hash`.
     pub fn content_hash_domain(&self) -> &str {
         &self.content_hash_domain
     }
 
     #[must_use]
+    /// Source contract version of the referenced artifact family.
     pub const fn contract_version(&self) -> u32 {
         self.contract_version
     }
@@ -431,9 +520,13 @@ pub fn forward_model_production_binding_preimage(
 /// and policy semantics.
 #[derive(Clone, PartialEq, Eq)]
 pub enum TrustAuthentication {
+    /// Explicit no-authentication boundary retained for legacy records.
     Unauthenticated,
+    /// Issuer-and-policy-authenticated envelope.
     IssuerPolicy {
+        /// Artifact identifier of the issuing authority.
         issuer: ArtifactId,
+        /// Exact Assumption-kind policy source governing acceptance.
         trust_policy: SourceRef,
     },
 }
@@ -452,9 +545,13 @@ impl fmt::Debug for TrustAuthentication {
 /// for different subjects are intentionally distinct.
 #[derive(Clone, PartialEq, Eq)]
 pub struct TrustReceiptRef {
+    /// Receipt reference carrying EvidenceReceipt semantics.
     receipt: SourceRef,
+    /// Source whose resolution this receipt concerns.
     subject: SourceRef,
+    /// Split artifact bound to typed blind-release subjects.
     subject_artifact: Option<ArtifactId>,
+    /// Declared authentication envelope.
     authentication: TrustAuthentication,
 }
 
@@ -480,6 +577,9 @@ impl fmt::Debug for TrustReceiptRef {
 }
 
 impl TrustReceiptRef {
+    /// Construct a validated trust-receipt binding, enforcing EvidenceReceipt
+    /// receipt kind, the typed blind-release namespace invariants, and an
+    /// Assumption-kind trust policy for issuer-bound envelopes.
     pub fn try_new(
         receipt: SourceRef,
         subject: SourceRef,
@@ -539,6 +639,8 @@ impl TrustReceiptRef {
         })
     }
 
+    /// Construct an unauthenticated blind-release receipt binding a
+    /// `CalibrationSplit` split artifact to its subject source.
     pub fn blind_release(
         subject: &SourceRef,
         split: ArtifactId,
@@ -559,21 +661,25 @@ impl TrustReceiptRef {
     }
 
     #[must_use]
+    /// Bound receipt reference.
     pub const fn receipt(&self) -> &SourceRef {
         &self.receipt
     }
 
     #[must_use]
+    /// Bound subject reference.
     pub const fn subject(&self) -> &SourceRef {
         &self.subject
     }
 
     #[must_use]
+    /// Split artifact present exactly for typed blind-release receipts.
     pub const fn subject_artifact(&self) -> Option<&ArtifactId> {
         self.subject_artifact.as_ref()
     }
 
     #[must_use]
+    /// Declared authentication envelope.
     pub const fn authentication(&self) -> &TrustAuthentication {
         &self.authentication
     }
@@ -585,9 +691,18 @@ impl TrustReceiptRef {
 /// unauthenticated receipt does not assert issuer or policy authentication.
 #[derive(Clone, PartialEq, Eq)]
 pub enum AuthorityDisposition {
+    /// Admitted bytes reproduced the declared domain-separated digest.
     ContentVerified,
-    ExternalTrustReceipt { trust_receipt: TrustReceiptRef },
-    Unverified { reason: String },
+    /// Acceptance delegated to a typed external trust receipt.
+    ExternalTrustReceipt {
+        /// Typed receipt binding the delegated producer authority.
+        trust_receipt: TrustReceiptRef,
+    },
+    /// Byte identity never established; admission rejects this disposition.
+    Unverified {
+        /// Bounded diagnostic reason no verification occurred.
+        reason: String,
+    },
 }
 
 impl fmt::Debug for AuthorityDisposition {
@@ -610,8 +725,14 @@ impl fmt::Debug for AuthorityDisposition {
 /// must not infer that those bytes obey a canonical source schema.
 #[derive(Clone, PartialEq, Eq)]
 pub enum SourceVerification {
+    /// Admission consumed a fully typed artifact schema.
     TypedArtifact,
-    HashPreimage { byte_len: u64 },
+    /// Retained preimage bytes reproduce the expected digest.
+    HashPreimage {
+        /// Length in bytes of the verified preimage.
+        byte_len: u64,
+    },
+    /// No byte-level verification evidence was retained.
     Unverified,
 }
 
@@ -628,12 +749,19 @@ impl fmt::Debug for SourceVerification {
 /// Resolution supplied for one opaque source key.
 #[derive(Clone, PartialEq, Eq)]
 pub struct SourceResolution {
+    /// Opaque source key being resolved.
     key: SourceKey,
+    /// Semantic class carried from the unresolved reference.
     kind: SourceKind,
+    /// Digest recorded during admission verification.
     resolved_hash: ContentHash,
+    /// Digest domain under which `resolved_hash` was computed.
     content_hash_domain: String,
+    /// Source contract version carried from the reference.
     contract_version: u32,
+    /// Authority disposition deciding whether admission may proceed.
     authority: AuthorityDisposition,
+    /// Byte-identity evidence class retained for audit.
     verification: SourceVerification,
 }
 
@@ -719,31 +847,37 @@ impl SourceResolution {
     }
 
     #[must_use]
+    /// Resolved opaque source key.
     pub const fn key(&self) -> &SourceKey {
         &self.key
     }
 
     #[must_use]
+    /// Semantic class of the resolved source.
     pub const fn kind(&self) -> SourceKind {
         self.kind
     }
 
     #[must_use]
+    /// Digest recorded during admission verification.
     pub const fn resolved_hash(&self) -> ContentHash {
         self.resolved_hash
     }
 
     #[must_use]
+    /// Digest-domain string backing `resolved_hash`.
     pub fn content_hash_domain(&self) -> &str {
         &self.content_hash_domain
     }
 
     #[must_use]
+    /// Source contract version carried from the reference.
     pub const fn contract_version(&self) -> u32 {
         self.contract_version
     }
 
     #[must_use]
+    /// Authority disposition of this resolution.
     pub const fn authority(&self) -> &AuthorityDisposition {
         &self.authority
     }
@@ -760,6 +894,7 @@ impl SourceResolution {
 /// taking last-writer-wins authority.
 #[derive(Clone, PartialEq, Eq, Default)]
 pub struct SourceResolutionSet {
+    /// Exact resolutions keyed by opaque source key.
     entries: BTreeMap<SourceKey, SourceResolution>,
 }
 
@@ -823,6 +958,7 @@ impl SourceResolutionSet {
     }
 
     #[must_use]
+    /// Exact resolutions keyed by opaque source key.
     pub const fn entries(&self) -> &BTreeMap<SourceKey, SourceResolution> {
         &self.entries
     }
@@ -831,20 +967,27 @@ impl SourceResolutionSet {
 /// Decision-facing role of a physical parameter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParameterPurpose {
+    /// Target quantity the analysis exists to identify.
     Estimand,
+    /// Quantity that must be eliminated to reach the estimand.
     Nuisance,
+    /// Hyperparameter over distribution structure rather than physics.
     Hyperparameter,
+    /// Tuning control fixed by calibration policy outside inference.
     CalibrationControl,
 }
 
 /// Exact value and provenance for a parameter conditioned outside inference.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConditionedValue {
+    /// Conditioned value in SI base units after canonical normalization.
     value_si: f64,
+    /// Source key documenting where the conditioning value came from.
     source: SourceKey,
 }
 
 impl ConditionedValue {
+    /// Construct a conditioned value from a finite SI number plus provenance.
     pub fn try_new(value_si: f64, source: SourceKey) -> Result<Self, IdentifiabilityError> {
         if !value_si.is_finite() {
             return Err(IdentifiabilityError::InvalidNumeric {
@@ -859,11 +1002,13 @@ impl ConditionedValue {
     }
 
     #[must_use]
+    /// Canonicalized value in SI base units.
     pub const fn value_si(&self) -> f64 {
         self.value_si
     }
 
     #[must_use]
+    /// Provenance source key.
     pub const fn source(&self) -> &SourceKey {
         &self.source
     }
@@ -872,12 +1017,19 @@ impl ConditionedValue {
 /// Inferential treatment is orthogonal to decision purpose.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ParameterTreatment {
+    /// Value is inferred freely during estimation.
     Estimated,
+    /// Value is concentrated out by profiling the likelihood.
     Profiled,
+    /// Value is integrated out against its prior measure.
     Marginalized,
+    /// Value is fixed externally via a provenance-bound [`ConditionedValue`].
     Conditioned(ConditionedValue),
+    /// Value is computed deterministically from declared parents.
     Derived {
+        /// Source key locating the derived-parameter definition.
         definition: SourceKey,
+        /// Nonempty parent roles feeding the derivation.
         parents: BTreeSet<ParameterRoleId>,
     },
 }
@@ -885,18 +1037,36 @@ pub enum ParameterTreatment {
 /// Prior semantics distinguish absence from not-applicable.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PriorPolicy {
+    /// Explicit probability distribution.
     Distribution(ParameterPrior),
-    Absent { reason: String },
-    NotApplicable { reason: String },
+    /// No prior exists, with a bounded reason string.
+    Absent {
+        /// Bounded reason no prior exists.
+        reason: String,
+    },
+    /// A prior cannot apply to this parameter class, with a bounded reason.
+    NotApplicable {
+        /// Bounded reason a prior cannot apply to this class.
+        reason: String,
+    },
 }
 
 /// Whether schema-level influence connectivity is declared.  This is not an
 /// identifiability result and contains no evidence receipt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InfluenceCoverage {
+    /// Schema-level influence connectivity is declared downstream.
     Declared,
-    IntentionallyAbsent { reason: String },
-    NotApplicable { reason: String },
+    /// Influences are intentionally omitted, with a bounded reason.
+    IntentionallyAbsent {
+        /// Bounded reason influences are deliberately omitted.
+        reason: String,
+    },
+    /// Influences do not apply to this parameter class.
+    NotApplicable {
+        /// Bounded reason influence does not apply here.
+        reason: String,
+    },
 }
 
 /// Semantic owner with an immutable payload binding.  A bare category label is
@@ -904,22 +1074,35 @@ pub enum InfluenceCoverage {
 /// protocol controls.
 #[derive(Clone, PartialEq, Eq)]
 pub enum ParameterOwnerBinding {
+    /// Parameter owned by the constitutive model itself.
     ConstitutiveModel,
+    /// Parameter owned by an initial-state path.
     InitialState {
+        /// Source key of the owning initial-state artifact.
         state_path: SourceKey,
     },
+    /// Parameter owned by a specific instrument acquisition channel.
     Instrument {
+        /// Artifact identifier of the measuring instrument.
         instrument: ArtifactId,
+        /// Artifact identifier of the acquisition channel.
         acquisition_channel: ArtifactId,
+        /// Source key of the metrology record characterizing the channel.
         metrology: SourceKey,
     },
+    /// Parameter owned by a discrepancy family.
     Discrepancy {
+        /// Source key of the discrepancy-family specification.
         family: SourceKey,
     },
+    /// Parameter owned by a protocol-controlled input.
     ControlledInput {
+        /// Source key of the controlling protocol.
         protocol: SourceKey,
     },
+    /// Parameter owned by a population hierarchy.
     Population {
+        /// Source key of the population-hierarchy specification.
         hierarchy: SourceKey,
     },
 }
@@ -940,24 +1123,40 @@ impl fmt::Debug for ParameterOwnerBinding {
 /// Population/realization scope, including explicit multi-case scope.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParameterScopeBinding {
+    /// One value shared across the entire campaign.
     Global,
+    /// One value per enumerated set of cases.
     Cases(BTreeSet<CaseId>),
+    /// Value bound to a material-lot artifact.
     MaterialLot {
+        /// Material-lot artifact identifier.
         lot: ArtifactId,
+        /// Cases covered by this lot-level value.
         cases: BTreeSet<CaseId>,
     },
+    /// Value bound to one specimen within one case.
     Specimen {
+        /// Case containing the specimen.
         case: CaseId,
+        /// Specimen artifact identifier.
         specimen: ArtifactId,
     },
+    /// Value bound to a spatial-field support source.
     Field {
+        /// Source key defining the field support.
         support: SourceKey,
+        /// Cases covered by this field support.
         cases: BTreeSet<CaseId>,
     },
+    /// Value living at a level of a population hierarchy.
     Hierarchical {
+        /// Population artifact the hierarchy belongs to.
         population: ArtifactId,
+        /// Hierarchy depth of this binding.
         level: u32,
+        /// Source key of the hierarchy specification.
         hierarchy: SourceKey,
+        /// Cases covered by this hierarchical binding.
         cases: BTreeSet<CaseId>,
     },
 }
@@ -965,14 +1164,23 @@ pub enum ParameterScopeBinding {
 /// Coordinate-free physical parameter declaration.
 #[derive(Clone, PartialEq)]
 pub struct StudyParameter {
+    /// Role identifier naming the parameter within its campaign.
     role: ParameterRoleId,
+    /// Typed quantity, name, unit, and canonical spelling of the parameter.
     quantity: QuantitySpec,
+    /// Finite admissible bounds for the parameter value.
     domain: ParameterDomain,
+    /// Decision-facing role of the parameter.
     purpose: ParameterPurpose,
+    /// Inferential treatment applied to the parameter.
     treatment: ParameterTreatment,
+    /// Immutable owner payload binding semantics to models or instruments.
     owner: ParameterOwnerBinding,
+    /// Population/realization scope including multi-case coverage.
     scope: ParameterScopeBinding,
+    /// Prior policy distinguishing absence from not-applicable.
     prior: PriorPolicy,
+    /// Whether influence connectivity is declared downstream.
     influence_coverage: InfluenceCoverage,
 }
 
@@ -1021,6 +1229,9 @@ impl fmt::Debug for StudyParameter {
 
 impl StudyParameter {
     #[allow(clippy::too_many_arguments)]
+    /// Validate and construct a study parameter, enforcing finite domain
+    /// bounds, treatment-specific prior policies, and free-parameter
+    /// influence-coverage rules.
     pub fn try_new(
         role: ParameterRoleId,
         quantity: QuantitySpec,
@@ -1146,46 +1357,55 @@ impl StudyParameter {
     }
 
     #[must_use]
+    /// Campaign-wide role identifier.
     pub const fn role(&self) -> &ParameterRoleId {
         &self.role
     }
 
     #[must_use]
+    /// Typed quantity specification.
     pub const fn quantity(&self) -> QuantitySpec {
         self.quantity
     }
 
     #[must_use]
+    /// Finite admissible-value bounds.
     pub const fn domain(&self) -> ParameterDomain {
         self.domain
     }
 
     #[must_use]
+    /// Inferential treatment.
     pub const fn treatment(&self) -> &ParameterTreatment {
         &self.treatment
     }
 
     #[must_use]
+    /// Decision-facing purpose.
     pub const fn purpose(&self) -> ParameterPurpose {
         self.purpose
     }
 
     #[must_use]
+    /// Immutable owner payload binding.
     pub const fn owner(&self) -> &ParameterOwnerBinding {
         &self.owner
     }
 
     #[must_use]
+    /// Population/realization scope.
     pub const fn scope(&self) -> &ParameterScopeBinding {
         &self.scope
     }
 
     #[must_use]
+    /// Prior policy.
     pub const fn prior(&self) -> &PriorPolicy {
         &self.prior
     }
 
     #[must_use]
+    /// Influence-connectivity declaration state.
     pub const fn influence_coverage(&self) -> &InfluenceCoverage {
         &self.influence_coverage
     }
@@ -1194,12 +1414,16 @@ impl StudyParameter {
 /// A typed scalar coefficient used by a joint affine constraint.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AffineConstraintTerm {
+    /// Constrained parameter role in the affine combination.
     parameter: ParameterRoleId,
+    /// Numeric scale factor of this affine term.
     coefficient: f64,
+    /// Quantity type carried by the term contribution.
     coefficient_quantity: QuantitySpec,
 }
 
 impl AffineConstraintTerm {
+    /// Construct a term, refusing non-finite coefficients.
     pub fn try_new(
         parameter: ParameterRoleId,
         coefficient: f64,
@@ -1219,16 +1443,19 @@ impl AffineConstraintTerm {
     }
 
     #[must_use]
+    /// Constrained parameter role.
     pub const fn parameter(&self) -> &ParameterRoleId {
         &self.parameter
     }
 
     #[must_use]
+    /// Canonicalized numeric scale factor.
     pub const fn coefficient(&self) -> f64 {
         self.coefficient
     }
 
     #[must_use]
+    /// Quantity carried into the constraint sum.
     pub const fn coefficient_quantity(&self) -> QuantitySpec {
         self.coefficient_quantity
     }
@@ -1236,19 +1463,25 @@ impl AffineConstraintTerm {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConstraintRelation {
+    /// Weighted sum must equal the right-hand side.
     Equal,
+    /// Weighted sum must be less than or equal to the right-hand side.
     LessOrEqual,
+    /// Weighted sum must be greater than or equal to the right-hand side.
     GreaterOrEqual,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConstraintCodimension {
+    /// Whole-number codimension checked numerically.
     Finite {
+        /// Number of independent constraint equations.
         codimension: u64,
     },
     /// Functional/continuum codimension whose exact analytic category and
     /// closed-range/transversality semantics are external to this crate.
     InfiniteDimensional {
+        /// Source key naming the exact continuum codimension semantics.
         profile: SourceKey,
     },
 }
@@ -1256,40 +1489,62 @@ pub enum ConstraintCodimension {
 /// Cross-parameter admissible-domain constraint.
 #[derive(Debug, Clone, PartialEq)]
 pub enum JointConstraintKind {
+    /// Weighted affine combination over parameter roles.
     Affine {
+        /// Affine terms summed with their quantities.
         terms: Vec<AffineConstraintTerm>,
+        /// Comparison applied to the weighted sum.
         relation: ConstraintRelation,
+        /// Right-hand side value in SI units, canonically normalized.
         rhs_si: f64,
+        /// Quantity type of the constraint residual.
         residual_quantity: QuantitySpec,
     },
+    /// Members sharing a constrained total value.
     Simplex {
+        /// Roles participating in the simplex.
         members: BTreeSet<ParameterRoleId>,
+        /// Required total value in SI units.
         total_si: f64,
+        /// Quantity type shared by all members.
         quantity: QuantitySpec,
     },
+    /// Ordering relation imposed across member roles.
     Ordered {
+        /// Ordered member roles; adjacency defines the relation chain.
         members: Vec<ParameterRoleId>,
+        /// When true, ordering must be strict rather than weak.
         strict: bool,
     },
+    /// Members confined to an externally specified manifold.
     ExternalManifold {
+        /// Roles confined to the manifold.
         members: BTreeSet<ParameterRoleId>,
+        /// Source key of the external manifold definition.
         definition: SourceKey,
+        /// Codimension classification of the manifold.
         codimension: ConstraintCodimension,
     },
+    /// Members sharing a declared joint stochastic law.
     StochasticCoupling {
+        /// Coupled roles sharing the joint law.
         members: BTreeSet<ParameterRoleId>,
+        /// Source key of the joint-distribution specification.
         distribution: SourceKey,
     },
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct JointConstraint {
+    /// Unique constraint token within the problem document.
     id: ConstraintId,
+    /// Cross-parameter constraint body.
     kind: JointConstraintKind,
 }
 
 impl JointConstraint {
     #[must_use]
+    /// Construct a constraint, canonically normalizing numeric fields.
     pub fn new(id: ConstraintId, mut kind: JointConstraintKind) -> Self {
         match &mut kind {
             JointConstraintKind::Affine { rhs_si, .. } => {
@@ -1306,11 +1561,13 @@ impl JointConstraint {
     }
 
     #[must_use]
+    /// Constraint token.
     pub const fn id(&self) -> &ConstraintId {
         &self.id
     }
 
     #[must_use]
+    /// Constraint body.
     pub const fn kind(&self) -> &JointConstraintKind {
         &self.kind
     }
@@ -1328,7 +1585,9 @@ impl JointConstraint {
 /// responsibility.
 #[derive(Clone, PartialEq, Eq)]
 pub struct OpaqueDomainMembershipClaim {
+    /// Source key claiming membership of the bound witness.
     source: SourceKey,
+    /// Digest of the full conjunction preimage once admission binds it.
     witness_binding: Option<ContentHash>,
 }
 
@@ -1343,6 +1602,7 @@ impl fmt::Debug for OpaqueDomainMembershipClaim {
 
 impl OpaqueDomainMembershipClaim {
     #[must_use]
+    /// Create an unbound membership claim for the named source.
     pub const fn new(source: SourceKey) -> Self {
         Self {
             source,
@@ -1358,11 +1618,13 @@ impl OpaqueDomainMembershipClaim {
     }
 
     #[must_use]
+    /// Claimed source key.
     pub const fn source(&self) -> &SourceKey {
         &self.source
     }
 
     #[must_use]
+    /// Bound conjunction digest when present.
     pub const fn witness_binding(&self) -> Option<ContentHash> {
         self.witness_binding
     }
@@ -1370,7 +1632,9 @@ impl OpaqueDomainMembershipClaim {
 
 #[derive(Clone, PartialEq)]
 pub struct AdmissibleDomainWitness {
+    /// One exact finite witness point per parameter role.
     values: BTreeMap<ParameterRoleId, f64>,
+    /// Membership claim covering every externally evaluated constraint.
     opaque_membership_claim: Option<OpaqueDomainMembershipClaim>,
 }
 
@@ -1395,6 +1659,8 @@ impl fmt::Debug for AdmissibleDomainWitness {
 }
 
 impl AdmissibleDomainWitness {
+    /// Validate and construct a witness, requiring bounded nonempty finite
+    /// values with no duplicate roles and a nonzero claim binding.
     pub fn try_new(
         values: Vec<(ParameterRoleId, f64)>,
         opaque_membership_claim: Option<OpaqueDomainMembershipClaim>,
@@ -1439,11 +1705,13 @@ impl AdmissibleDomainWitness {
     }
 
     #[must_use]
+    /// Witness points keyed by role.
     pub const fn values(&self) -> &BTreeMap<ParameterRoleId, f64> {
         &self.values
     }
 
     #[must_use]
+    /// Attached membership claim when present.
     pub const fn opaque_membership_claim(&self) -> Option<&OpaqueDomainMembershipClaim> {
         self.opaque_membership_claim.as_ref()
     }
@@ -1471,25 +1739,42 @@ impl AdmissibleDomainWitness {
 /// Why a case participates in the campaign.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CasePurpose {
+    /// Case used to fit calibration parameters.
     Calibration,
+    /// Case chosen primarily to break model symmetries.
     SymmetryBreaking,
+    /// Case reserved for validation and excluded from fitting.
     ValidationOnly,
+    /// Blind case never inspected before predictions are locked.
     BlindFalsification,
+    /// Prospective case whose data will arrive later.
     ProspectiveDesign,
-    Complementary { reason: String },
+    /// Case contributing complementary protocol or specimen coverage.
+    Complementary {
+        /// Bounded reason the case adds complementary coverage.
+        reason: String,
+    },
 }
 
 /// Whether observations already exist.  Retrospective lineage is re-derived
 /// from concrete V&V artifacts at admission; it is never trusted from bytes.
 #[derive(Clone, PartialEq, Eq)]
 pub enum CaseDataDeclaration {
+    /// Observations do not yet exist.
     Prospective,
+    /// Observations exist and are bound to concrete V&V artifacts.
     Retrospective {
+        /// Source key of the experiment artifact supplying rows.
         experiment: SourceKey,
+        /// Source key of the calibration-split declaration.
         split: SourceKey,
+        /// Source key of the parser that produced the raw rows.
         parser: SourceKey,
+        /// Source key of the preprocessing pipeline applied to the rows.
         preprocessing: SourceKey,
+        /// Parser contract version used for this lineage.
         parser_version: u32,
+        /// Artifact identifier binding the split grouping of the rows.
         split_grouping: ArtifactId,
     },
 }
@@ -1509,7 +1794,9 @@ impl fmt::Debug for CaseDataDeclaration {
 /// Raw-row declaration for one channel.
 #[derive(Clone, PartialEq, Eq)]
 pub enum ObservationRows {
+    /// No retrospective rows exist yet for this channel.
     Prospective,
+    /// Exact set of consumed raw-row identifiers.
     Retrospective(BTreeSet<ObservationId>),
 }
 
@@ -1531,22 +1818,35 @@ impl fmt::Debug for ObservationRows {
 /// or unknown marginals are never silently assigned a standard deviation.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MarginalNoiseSpec {
+    /// Gaussian marginal with positive finite standard deviation.
     Gaussian {
+        /// Positive finite noise scale.
         standard_deviation: f64,
     },
+    /// Student-t marginal; finite variance requires the shape above two.
     StudentT {
+        /// Positive finite location-scale parameter.
         scale: f64,
+        /// Tail-shape parameter; finite variance needs a value above two.
         degrees_of_freedom: f64,
     },
+    /// Empirical marginal supplied from an admitted source.
     Empirical {
+        /// Source key of the empirical distribution.
         distribution: SourceKey,
+        /// Positive finite sample standard deviation.
         standard_deviation: f64,
+        /// Source key modeling finite-variance behavior for heavy samples.
         finite_variance_model: SourceKey,
     },
+    /// Two-sided bounded marginal centered on zero.
     Bounded {
+        /// Nonnegative half-width of the value interval.
         half_width: f64,
     },
+    /// Noise magnitude cannot be characterized, with a bounded reason.
     Unknown {
+        /// Bounded diagnostic reason noise is unknown.
         reason: String,
     },
 }
@@ -1571,34 +1871,67 @@ impl MarginalNoiseSpec {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MissingnessAssumption {
-    Complete { assumption: SourceKey },
-    Modeled { mechanism: SourceKey },
-    Unknown { reason: String },
+    /// Data are complete under an admitted assumption source.
+    Complete {
+        /// Source key of the completeness assumption.
+        assumption: SourceKey,
+    },
+    /// Missingness follows an explicitly modeled mechanism source.
+    Modeled {
+        /// Source key of the missingness-mechanism model.
+        mechanism: SourceKey,
+    },
+    /// Missingness behavior unknown, with a bounded reason.
+    Unknown {
+        /// Bounded reason missingness behavior is unknown.
+        reason: String,
+    },
 }
 
 /// Evidence-free physical observation schema.
 #[derive(Clone, PartialEq)]
 pub struct StudyObservation {
+    /// Case-local observation channel identifier.
     id: ObservationChannelId,
+    /// Quantity-of-interest identifier measured by this channel.
     qoi: QoiId,
+    /// Reporting unit identifier.
     unit: UnitId,
+    /// Typed quantity specification with canonical dimensions.
     quantity: QuantitySpec,
+    /// Source key of the governing unit definition.
     unit_definition: SourceKey,
+    /// Physical reference-frame binding.
     frame: FrameBinding,
+    /// Node name of this channel inside the observation graph.
     graph_node: String,
+    /// Port name inside the observation-graph node.
     graph_port: String,
+    /// Source key of the observation-operator map.
     operator: SourceKey,
+    /// Source key defining aggregation semantics for the channel.
     aggregation: SourceKey,
+    /// Source key of the sensor record.
     sensor: SourceKey,
+    /// Artifact identifier of the measuring instrument.
     instrument: ArtifactId,
+    /// Physical acquisition channel bound by every consumed manifest row.
     acquisition_channel: ArtifactId,
+    /// Artifact identifier of the timing clock source.
     clock: ArtifactId,
+    /// Positive contract version of the observation operator.
     operator_version: u32,
+    /// Marginal noise family for this channel.
     noise: MarginalNoiseSpec,
+    /// Declared missing-data semantics.
     missingness: MissingnessAssumption,
+    /// Optional saturation-clipping value domain.
     saturation: Option<ParameterDomain>,
+    /// Positive contract version of the governing protocol.
     protocol_version: u32,
+    /// Positive refinement version of the row schema.
     refinement_version: u32,
+    /// Prospective status or exact retrospective raw-row set.
     rows: ObservationRows,
 }
 
@@ -1628,6 +1961,9 @@ impl fmt::Debug for StudyObservation {
 
 impl StudyObservation {
     #[allow(clippy::too_many_arguments)]
+    /// Validate and construct an observation channel, enforcing token bounds,
+    /// positive versions, admissible noise parameters, and bounded nonempty
+    /// retrospective row sets.
     pub fn try_new(
         id: ObservationChannelId,
         qoi: QoiId,
@@ -1726,61 +2062,73 @@ impl StudyObservation {
     }
 
     #[must_use]
+    /// Case-local channel identifier.
     pub const fn id(&self) -> &ObservationChannelId {
         &self.id
     }
 
     #[must_use]
+    /// Typed quantity specification.
     pub const fn quantity(&self) -> QuantitySpec {
         self.quantity
     }
 
     #[must_use]
+    /// Quantity-of-interest identifier.
     pub const fn qoi(&self) -> &QoiId {
         &self.qoi
     }
 
     #[must_use]
+    /// Reporting unit identifier.
     pub const fn unit(&self) -> &UnitId {
         &self.unit
     }
 
     #[must_use]
+    /// Unit-definition source key.
     pub const fn unit_definition(&self) -> &SourceKey {
         &self.unit_definition
     }
 
     #[must_use]
+    /// Reference-frame binding.
     pub const fn frame(&self) -> &FrameBinding {
         &self.frame
     }
 
     #[must_use]
+    /// Observation-graph node name.
     pub fn graph_node(&self) -> &str {
         &self.graph_node
     }
 
     #[must_use]
+    /// Observation-graph port name.
     pub fn graph_port(&self) -> &str {
         &self.graph_port
     }
 
     #[must_use]
+    /// Observation-operator source key.
     pub const fn operator(&self) -> &SourceKey {
         &self.operator
     }
 
     #[must_use]
+    /// Aggregation-semantics source key.
     pub const fn aggregation(&self) -> &SourceKey {
         &self.aggregation
     }
 
     #[must_use]
+    /// Sensor-record source key.
     pub const fn sensor(&self) -> &SourceKey {
         &self.sensor
     }
 
     #[must_use]
+    /// Instrument artifact identifier.
     pub const fn instrument(&self) -> &ArtifactId {
         &self.instrument
     }
@@ -1792,41 +2140,49 @@ impl StudyObservation {
     }
 
     #[must_use]
+    /// Clock artifact identifier.
     pub const fn clock(&self) -> &ArtifactId {
         &self.clock
     }
 
     #[must_use]
+    /// Observation-operator contract version.
     pub const fn operator_version(&self) -> u32 {
         self.operator_version
     }
 
     #[must_use]
+    /// Marginal noise family.
     pub const fn noise(&self) -> &MarginalNoiseSpec {
         &self.noise
     }
 
     #[must_use]
+    /// Missingness assumption.
     pub const fn missingness(&self) -> &MissingnessAssumption {
         &self.missingness
     }
 
     #[must_use]
+    /// Optional saturation-clipping domain.
     pub const fn saturation(&self) -> Option<ParameterDomain> {
         self.saturation
     }
 
     #[must_use]
+    /// Protocol contract version.
     pub const fn protocol_version(&self) -> u32 {
         self.protocol_version
     }
 
     #[must_use]
+    /// Refinement version of the row schema.
     pub const fn refinement_version(&self) -> u32 {
         self.refinement_version
     }
 
     #[must_use]
+    /// Row-availability declaration.
     pub const fn rows(&self) -> &ObservationRows {
         &self.rows
     }
@@ -1835,18 +2191,28 @@ impl StudyObservation {
 /// Joint noise/correlation semantics over composite observation keys.
 #[derive(Debug, Clone, PartialEq)]
 pub enum JointNoiseModel {
+    /// Channels are noise-independent under an admitted assumption.
     Independent {
+        /// Source key of the independence assumption.
         assumption: SourceKey,
     },
+    /// Fully dense correlation specified over an ordered key list.
     DenseCorrelation {
+        /// Ordered observation keys aligned with the matrix entries.
         order: Vec<ObservationKey>,
+        /// Dense covariance/correlation matrix over `order`.
         correlation: CovarianceMatrix,
+        /// Source key documenting the correlation model.
         model: SourceKey,
     },
+    /// Correlation kernel defined externally by a model source.
     ExternalKernel {
+        /// Source key of the external kernel definition.
         model: SourceKey,
     },
+    /// Joint noise structure unknown, with a bounded reason.
     Unknown {
+        /// Bounded diagnostic reason joint noise is unknown.
         reason: String,
     },
 }
@@ -1858,7 +2224,10 @@ pub enum DiscrepancyInapplicability {
     /// A physical retrospective channel may omit a discrepancy term only
     /// under an exact, admitted applicability assumption. The assumption is
     /// not promoted to a theorem by this transport layer.
-    PhysicalApplicability { assumption: SourceKey },
+    PhysicalApplicability {
+        /// Source key of the applicability assumption.
+        assumption: SourceKey,
+    },
     /// The problem *declares* that data came from the same forward-model source
     /// used for inference. The constructor binds producer identity and every
     /// `SourceRef` field through a domain-separated production binding, while
@@ -1867,15 +2236,22 @@ pub enum DiscrepancyInapplicability {
     /// gated on a future signed execution receipt binding experiment hash,
     /// executable/build, producer, and the exact forward-model source.
     DeclaredSyntheticSelfModel {
+        /// Source key naming the synthetic-data generator.
         generator: SourceKey,
+        /// Producer artifact identity bound into the production receipt.
         producer: ArtifactId,
+        /// Source key carrying the exact production-binding preimage.
         production_binding: SourceKey,
+        /// Source key of the conditional no-discrepancy assumption.
         assumption: SourceKey,
     },
     /// No observations exist yet. This branch is restricted to an exact
     /// prospective-design case and cannot support a noisy finite-data or
     /// observed-posterior claim.
-    ProspectiveDesign { assumption: SourceKey },
+    ProspectiveDesign {
+        /// Source key declaring the prospective scope.
+        assumption: SourceKey,
+    },
 }
 
 impl fmt::Debug for DiscrepancyInapplicability {
@@ -1896,19 +2272,30 @@ impl fmt::Debug for DiscrepancyInapplicability {
 
 #[derive(Clone, PartialEq, Eq)]
 pub enum StudyDiscrepancy {
+    /// Discrepancy acknowledged present but not characterized.
     Uncharacterized {
+        /// Bounded diagnostic reason characterization is deferred.
         reason: String,
     },
+    /// No discrepancy term applies under a typed applicability basis.
     NotApplicable {
+        /// Typed inapplicability justification.
         basis: DiscrepancyInapplicability,
     },
+    /// Zero discrepancy asserted by an exact admitted assumption.
     AssumedZero {
+        /// Source key of the assumed-zero claim.
         assumption: SourceKey,
     },
+    /// Explicit discrepancy-family model bound to parameters.
     Modeled {
+        /// Source key of the discrepancy-family definition.
         family: SourceKey,
+        /// Roles carrying the discrepancy-model parameters.
         parameters: BTreeSet<ParameterRoleId>,
+        /// Source key declaring where the discrepancy applies.
         support: SourceKey,
+        /// Source key guarding against confounding with signal terms.
         confounding_guard: SourceKey,
     },
 }
@@ -1944,19 +2331,28 @@ impl fmt::Debug for StudyDiscrepancy {
 /// resolution for every key before a [`ProblemId`] can exist.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CasePhysicsSources {
+    /// Key closing the case frame-transform component digest.
     frame_transform: SourceKey,
+    /// Key closing the case specimen-geometry digest.
     specimen_geometry: SourceKey,
+    /// Key closing the case specimen-process digest.
     specimen_process: SourceKey,
+    /// Key closing the case specimen-preparation digest.
     specimen_preparation: SourceKey,
+    /// Key closing the case load-path digest.
     load_path: SourceKey,
+    /// Key closing the case environment-path digest.
     environment_path: SourceKey,
+    /// Key closing the case time-grid digest.
     time_grid: SourceKey,
+    /// Optional key closing the case initial-state digest.
     initial_state: Option<SourceKey>,
 }
 
 impl CasePhysicsSources {
     #[allow(clippy::too_many_arguments)]
     #[must_use]
+    /// Bind component source keys without performing admission itself.
     pub const fn new(
         frame_transform: SourceKey,
         specimen_geometry: SourceKey,
@@ -1980,41 +2376,49 @@ impl CasePhysicsSources {
     }
 
     #[must_use]
+    /// Frame-transform component key.
     pub const fn frame_transform(&self) -> &SourceKey {
         &self.frame_transform
     }
 
     #[must_use]
+    /// Specimen-geometry component key.
     pub const fn specimen_geometry(&self) -> &SourceKey {
         &self.specimen_geometry
     }
 
     #[must_use]
+    /// Specimen-process component key.
     pub const fn specimen_process(&self) -> &SourceKey {
         &self.specimen_process
     }
 
     #[must_use]
+    /// Specimen-preparation component key.
     pub const fn specimen_preparation(&self) -> &SourceKey {
         &self.specimen_preparation
     }
 
     #[must_use]
+    /// Load-path component key.
     pub const fn load_path(&self) -> &SourceKey {
         &self.load_path
     }
 
     #[must_use]
+    /// Environment-path component key.
     pub const fn environment_path(&self) -> &SourceKey {
         &self.environment_path
     }
 
     #[must_use]
+    /// Time-grid component key.
     pub const fn time_grid(&self) -> &SourceKey {
         &self.time_grid
     }
 
     #[must_use]
+    /// Optional initial-state component key.
     pub const fn initial_state(&self) -> Option<&SourceKey> {
         self.initial_state.as_ref()
     }
@@ -2026,9 +2430,13 @@ impl CasePhysicsSources {
 /// source that prevents duplicate likelihood factors from being invented.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ObservationSharingGroup {
+    /// Consumer channels sharing the rows (at least two).
     channels: BTreeSet<ObservationChannelId>,
+    /// Raw-row identifiers being shared.
     rows: BTreeSet<ObservationId>,
+    /// Source key providing exact joint-likelihood semantics.
     joint_likelihood: SourceKey,
+    /// Bounded textual justification for the sharing.
     justification: String,
 }
 
@@ -2043,6 +2451,8 @@ impl fmt::Debug for ObservationSharingGroup {
 }
 
 impl ObservationSharingGroup {
+    /// Validate and construct a sharing group with at least two channels,
+    /// nonempty rows, and a bounded justification.
     pub fn try_new(
         channels: BTreeSet<ObservationChannelId>,
         rows: BTreeSet<ObservationId>,
@@ -2072,21 +2482,25 @@ impl ObservationSharingGroup {
     }
 
     #[must_use]
+    /// Sharing consumer channels.
     pub const fn channels(&self) -> &BTreeSet<ObservationChannelId> {
         &self.channels
     }
 
     #[must_use]
+    /// Shared raw-row identifiers.
     pub const fn rows(&self) -> &BTreeSet<ObservationId> {
         &self.rows
     }
 
     #[must_use]
+    /// Joint-likelihood source key.
     pub const fn joint_likelihood(&self) -> &SourceKey {
         &self.joint_likelihood
     }
 
     #[must_use]
+    /// Sharing justification text.
     pub fn justification(&self) -> &str {
         &self.justification
     }
@@ -2095,16 +2509,27 @@ impl ObservationSharingGroup {
 /// One physical or prospective campaign case.
 #[derive(Clone, PartialEq)]
 pub struct StudyCaseDocument {
+    /// Case identifier token.
     id: CaseId,
+    /// Why this case participates in the campaign.
     purpose: CasePurpose,
+    /// Initial-state declaration or its omission rationale.
     initial_state: InitialStateBinding,
+    /// Specimen provenance binding.
     specimen: SpecimenBinding,
+    /// Protocol provenance binding.
     protocol: ProtocolBinding,
+    /// Keys closing every embedded case-physics digest.
     physics_sources: CasePhysicsSources,
+    /// Source key of the forward-model implementation used.
     forward_model: SourceKey,
+    /// Prospective/retrospective data declaration.
     data: CaseDataDeclaration,
+    /// Observations keyed by channel; duplicates are refused.
     observations: BTreeMap<ObservationChannelId, StudyObservation>,
+    /// Discrepancy semantics; every channel must be covered exactly once.
     discrepancies: BTreeMap<ObservationChannelId, StudyDiscrepancy>,
+    /// Within-case row-sharing groups kept in canonical sorted order.
     observation_sharing: Vec<ObservationSharingGroup>,
 }
 
@@ -2135,6 +2560,9 @@ impl fmt::Debug for StudyCaseDocument {
 
 impl StudyCaseDocument {
     #[allow(clippy::too_many_arguments)]
+    /// Validate and construct a case document, enforcing bounded nonempty
+    /// observations, one discrepancy per channel, canonical sharing-group
+    /// ordering, and exact shared-row consumer sets.
     pub fn try_new(
         id: CaseId,
         purpose: CasePurpose,
@@ -2269,31 +2697,37 @@ impl StudyCaseDocument {
     }
 
     #[must_use]
+    /// Case identifier.
     pub const fn id(&self) -> &CaseId {
         &self.id
     }
 
     #[must_use]
+    /// Observations keyed by channel.
     pub const fn observations(&self) -> &BTreeMap<ObservationChannelId, StudyObservation> {
         &self.observations
     }
 
     #[must_use]
+    /// Campaign participation purpose.
     pub const fn purpose(&self) -> &CasePurpose {
         &self.purpose
     }
 
     #[must_use]
+    /// Initial-state binding.
     pub const fn initial_state(&self) -> InitialStateBinding {
         self.initial_state
     }
 
     #[must_use]
+    /// Specimen binding.
     pub const fn specimen(&self) -> &SpecimenBinding {
         &self.specimen
     }
 
     #[must_use]
+    /// Protocol binding.
     pub const fn protocol(&self) -> &ProtocolBinding {
         &self.protocol
     }
@@ -2305,21 +2739,25 @@ impl StudyCaseDocument {
     }
 
     #[must_use]
+    /// Forward-model source key.
     pub const fn forward_model(&self) -> &SourceKey {
         &self.forward_model
     }
 
     #[must_use]
+    /// Data-declaration phase.
     pub const fn data(&self) -> &CaseDataDeclaration {
         &self.data
     }
 
     #[must_use]
+    /// Discrepancies keyed by channel.
     pub const fn discrepancies(&self) -> &BTreeMap<ObservationChannelId, StudyDiscrepancy> {
         &self.discrepancies
     }
 
     #[must_use]
+    /// Canonical sharing groups in sorted order.
     pub fn observation_sharing(&self) -> &[ObservationSharingGroup] {
         &self.observation_sharing
     }
@@ -2330,20 +2768,31 @@ impl StudyCaseDocument {
 /// endpoint quantities and therefore cannot be supplied inconsistently.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum DistributionFunctional {
+    /// Location functional of one observation distribution.
     Location {
+        /// Observable the functional evaluates.
         observation: ObservationKey,
     },
+    /// Log-scale functional of one observation distribution.
     LogScale {
+        /// Observable the functional evaluates.
         observation: ObservationKey,
     },
+    /// Pairwise correlation between two observables.
     Correlation {
+        /// First correlated observable.
         left: ObservationKey,
+        /// Second correlated observable.
         right: ObservationKey,
     },
+    /// Logit of the missingness probability for one observable.
     MissingnessLogit {
+        /// Observable whose missingness logit is evaluated.
         observation: ObservationKey,
     },
+    /// Logit of the censoring probability for one observable.
     CensoringLogit {
+        /// Observable whose censoring logit is evaluated.
         observation: ObservationKey,
     },
 }
@@ -2352,29 +2801,42 @@ pub enum DistributionFunctional {
 /// nonzero influence belong to an assessment, not here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InfluenceRepresentation {
+    /// Parameter acts on the observable directly.
     Direct,
+    /// Influence flows through a named internal state path.
     StateMediated {
+        /// Source key of the mediated state path.
         state_path: SourceKey,
     },
+    /// Influence composes several declared influences via an operator.
     Composite {
+        /// Source key of the composition operator.
         operator: SourceKey,
+        /// Component influences composed together.
         inputs: BTreeSet<InfluenceId>,
     },
+    /// Influence semantics defined by an external source.
     ExternalDefinition {
+        /// Source key of the external definition.
         definition: SourceKey,
     },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InfluenceDeclaration {
+    /// Influence identifier token.
     id: InfluenceId,
+    /// Acting parameter role.
     parameter: ParameterRoleId,
+    /// Observable-side functional affected.
     functional: DistributionFunctional,
+    /// Structural form of the influence.
     representation: InfluenceRepresentation,
 }
 
 impl InfluenceDeclaration {
     #[must_use]
+    /// Construct an influence declaration.
     pub const fn new(
         id: InfluenceId,
         parameter: ParameterRoleId,
@@ -2390,21 +2852,25 @@ impl InfluenceDeclaration {
     }
 
     #[must_use]
+    /// Influence identifier.
     pub const fn id(&self) -> &InfluenceId {
         &self.id
     }
 
     #[must_use]
+    /// Acting parameter role.
     pub const fn parameter(&self) -> &ParameterRoleId {
         &self.parameter
     }
 
     #[must_use]
+    /// Affected observable functional.
     pub const fn functional(&self) -> &DistributionFunctional {
         &self.functional
     }
 
     #[must_use]
+    /// Structural influence form.
     pub const fn representation(&self) -> &InfluenceRepresentation {
         &self.representation
     }
@@ -2415,18 +2881,29 @@ impl InfluenceDeclaration {
 /// [`GaugeOrbitGeometry`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GaugeDiscreteSize {
-    Finite { order: u64 },
-    CountablyInfinite { presentation: SourceKey },
+    /// Finitely many acting group elements.
+    Finite {
+        /// Number of group elements.
+        order: u64,
+    },
+    /// Countably many acting group elements named by an exact presentation.
+    CountablyInfinite {
+        /// Source key of the group presentation.
+        presentation: SourceKey,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GaugeContinuousDimension {
+    /// Finite-dimensional continuous symmetry.
     Finite {
+        /// Lie-type dimension of the acting group.
         dimension: u64,
     },
     /// Infinite-dimensional Lie/model space. The source names exact
     /// Banach/Frechet/Sobolev semantics; it is not a basis-cardinality label.
     InfiniteDimensional {
+        /// Source key naming the exact infinite-dimensional model space.
         model_space: SourceKey,
     },
 }
@@ -2439,14 +2916,21 @@ impl GaugeContinuousDimension {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GaugeAlgebra {
+    /// Purely continuous acting algebra.
     Continuous {
+        /// Dimension classification of the continuous part.
         group_dimension: GaugeContinuousDimension,
     },
+    /// Purely discrete acting algebra.
     Discrete {
+        /// Algebraic size of the discrete group.
         size: GaugeDiscreteSize,
     },
+    /// Continuous-plus-discrete mixed acting algebra.
     Mixed {
+        /// Dimension of the connected continuous component.
         continuous_group_dimension: GaugeContinuousDimension,
+        /// Size of the discrete component group.
         component_group: GaugeDiscreteSize,
     },
 }
@@ -2458,18 +2942,29 @@ pub enum GaugeAlgebra {
 /// component-group orbit index, not the full stabilizer topology.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GaugeDiscreteOrbitCardinality {
-    Finite { cardinality: u64 },
-    CountablyInfinite { presentation: SourceKey },
+    /// Finitely many distinct regular-orbit representatives.
+    Finite {
+        /// Number of regular-orbit representatives.
+        cardinality: u64,
+    },
+    /// Countably many orbit representatives named by an exact presentation.
+    CountablyInfinite {
+        /// Source key of the orbit presentation.
+        presentation: SourceKey,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegularGaugeOrbit {
+    /// Continuous dimension swept by principal orbits.
     continuous_orbit_dimension: GaugeContinuousDimension,
+    /// Component-group index of principal orbits.
     discrete_orbit_cardinality: GaugeDiscreteOrbitCardinality,
 }
 
 impl RegularGaugeOrbit {
     #[must_use]
+    /// Compose a principal-orbit record from its typed components.
     pub const fn new(
         continuous_orbit_dimension: GaugeContinuousDimension,
         discrete_orbit_cardinality: GaugeDiscreteOrbitCardinality,
@@ -2481,11 +2976,13 @@ impl RegularGaugeOrbit {
     }
 
     #[must_use]
+    /// Orbit-sweeping continuous dimension.
     pub const fn continuous_orbit_dimension(&self) -> &GaugeContinuousDimension {
         &self.continuous_orbit_dimension
     }
 
     #[must_use]
+    /// Component-group orbit index.
     pub const fn discrete_orbit_cardinality(&self) -> &GaugeDiscreteOrbitCardinality {
         &self.discrete_orbit_cardinality
     }
@@ -2496,13 +2993,18 @@ impl RegularGaugeOrbit {
 /// orbit-type/stabilizer profile for singular strata.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GaugeOrbitGeometry {
+    /// Proper/local-covering principal orbit data.
     Regular {
+        /// Principal regular-orbit invariants.
         principal: RegularGaugeOrbit,
+        /// Optional source describing stabilizer topology when required.
         stabilizer_profile: Option<SourceKey>,
     },
     /// Exact orbit-type/stabilizer profile across singular strata.
     Stratified {
+        /// Principal invariants holding on regular strata.
         principal: RegularGaugeOrbit,
+        /// Source giving exact orbit-type/stabilizer profile across strata.
         orbit_type_stabilizer_profile: SourceKey,
     },
 }
@@ -2761,8 +3263,16 @@ fn gauge_orbit_source_keys(geometry: &GaugeOrbitGeometry) -> BTreeSet<SourceKey>
 /// while assumed gauges are part of the declared physical problem.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GaugeStatus {
-    Candidate { rationale: SourceKey },
-    Assumed { assumption: SourceKey },
+    /// Hypothesis that may be tested or refuted by assessment.
+    Candidate {
+        /// Source justifying why this gauge remains under test.
+        rationale: SourceKey,
+    },
+    /// Declared part of the physical problem, not under test.
+    Assumed {
+        /// Source of the assuming authority.
+        assumption: SourceKey,
+    },
 }
 
 /// Exact information regime in which a declared gauge remains invariant.
@@ -2771,29 +3281,51 @@ pub enum GaugeStatus {
 /// registry entry, so a same-key but different prior cannot inherit the gauge.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum GaugeInformationRegime {
+    /// Claims conditioned on the model being exactly correct.
     StructuralExactModel,
+    /// The input-output map itself is exactly known.
     ExactInputOutputMap,
+    /// Standard noisy finite-sample regime.
     NoisyFiniteData,
-    PosteriorUnderDeclaredPrior { joint_prior: SourceKey },
+    /// Bayesian regime under a declared joint prior.
+    PosteriorUnderDeclaredPrior {
+        /// Registry key of the declared joint prior.
+        joint_prior: SourceKey,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum GaugeScalarDomain {
+    /// Ordinary real-valued parameters.
     Real,
-    Complex { extension: SourceKey },
-    MixedDiscreteContinuous { stratification: SourceKey },
+    /// Parameters extended into complex scalars.
+    Complex {
+        /// Admitted source defining extension semantics.
+        extension: SourceKey,
+    },
+    /// Mixed discrete-plus-continuous parameter spaces.
+    MixedDiscreteContinuous {
+        /// Admitted source defining stratification semantics.
+        stratification: SourceKey,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum GaugeLocus {
+    /// Gauge applies over the whole parameter domain.
     WholeDomain,
-    Stratum { definition: SourceKey },
+    /// Gauge applies only within one stratified locus.
+    Stratum {
+        /// Source key defining the stratum.
+        definition: SourceKey,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct GaugeProbabilityThreshold(u64);
 
 impl GaugeProbabilityThreshold {
+    /// Store a threshold in `(0,1]` as canonical bits.
     pub fn try_new(probability: f64) -> Result<Self, IdentifiabilityError> {
         if !probability.is_finite() || probability <= 0.0 || probability > 1.0 {
             return Err(IdentifiabilityError::InvalidNumeric {
@@ -2805,6 +3337,7 @@ impl GaugeProbabilityThreshold {
     }
 
     #[must_use]
+    /// Recover the threshold probability.
     pub fn value(self) -> f64 {
         f64::from_bits(self.0)
     }
@@ -2812,26 +3345,39 @@ impl GaugeProbabilityThreshold {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum GaugeQuantifierScope {
+    /// Invariance asserted at one realization point.
     AtRealization {
+        /// Source key naming the realization.
         realization: SourceKey,
     },
+    /// Invariance holds almost everywhere under a measure.
     AlmostEverywhere {
+        /// Source key of the dominating measure.
         measure: SourceKey,
     },
+    /// Invariance holds pointwise on a domain.
     ForAll {
+        /// Source key defining the quantifier domain.
         domain: SourceKey,
     },
+    /// Invariance holds with at least the given probability.
     ProbabilityAtLeast {
+        /// Canonical probability threshold stored as bits.
         probability: GaugeProbabilityThreshold,
+        /// Source key of the measure used by the probability statement.
         measure: SourceKey,
     },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct GaugeApplicabilityAxes {
+    /// Information regime in which the gauge applies.
     information: GaugeInformationRegime,
+    /// Scalar domain underlying the gauge statement.
     scalar_domain: GaugeScalarDomain,
+    /// Parameter-domain region covered.
     locus: GaugeLocus,
+    /// Quantifier form of the invariance assertion.
     quantifier: GaugeQuantifierScope,
 }
 
@@ -2841,11 +3387,15 @@ pub struct GaugeApplicabilityAxes {
 /// a singleton orbit at a fixed point yet destroy local injectivity nearby.
 /// Local germ obstruction is always a subset of global fiber obstruction.
 pub struct GaugeExtentSupport {
+    /// Parameters whose movement can destroy local injectivity nearby.
     local_obstruction_parameters: BTreeSet<ParameterRoleId>,
+    /// Parameters whose movement obstructs global identifiability.
     global_obstruction_parameters: BTreeSet<ParameterRoleId>,
 }
 
 impl GaugeExtentSupport {
+    /// Validate support, requiring local obstruction to be a bounded subset
+    /// of the global obstruction set.
     pub fn try_new(
         local_obstruction_parameters: BTreeSet<ParameterRoleId>,
         global_obstruction_parameters: BTreeSet<ParameterRoleId>,
@@ -2866,11 +3416,13 @@ impl GaugeExtentSupport {
     }
 
     #[must_use]
+    /// Local germ obstruction parameters.
     pub const fn local_obstruction_parameters(&self) -> &BTreeSet<ParameterRoleId> {
         &self.local_obstruction_parameters
     }
 
     #[must_use]
+    /// Global fiber obstruction parameters.
     pub const fn global_obstruction_parameters(&self) -> &BTreeSet<ParameterRoleId> {
         &self.global_obstruction_parameters
     }
@@ -2878,10 +3430,12 @@ impl GaugeExtentSupport {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GaugeCellDomain {
+    /// Per-case moved-support records keyed by case.
     case_obstruction_support: BTreeMap<CaseId, GaugeExtentSupport>,
 }
 
 impl GaugeCellDomain {
+    /// Validate bounded nonempty case-indexed support.
     pub fn try_new(
         case_obstruction_support: BTreeMap<CaseId, GaugeExtentSupport>,
     ) -> Result<Self, IdentifiabilityError> {
@@ -2900,6 +3454,7 @@ impl GaugeCellDomain {
     }
 
     #[must_use]
+    /// Case-indexed obstruction support.
     pub const fn case_obstruction_support(&self) -> &BTreeMap<CaseId, GaugeExtentSupport> {
         &self.case_obstruction_support
     }
@@ -2907,6 +3462,7 @@ impl GaugeCellDomain {
 
 impl GaugeApplicabilityAxes {
     #[must_use]
+    /// Assemble applicability axes without validation side effects.
     pub const fn new(
         information: GaugeInformationRegime,
         scalar_domain: GaugeScalarDomain,
@@ -2922,21 +3478,25 @@ impl GaugeApplicabilityAxes {
     }
 
     #[must_use]
+    /// Applicable information regime.
     pub const fn information(&self) -> &GaugeInformationRegime {
         &self.information
     }
 
     #[must_use]
+    /// Scalar-domain classification.
     pub const fn scalar_domain(&self) -> &GaugeScalarDomain {
         &self.scalar_domain
     }
 
     #[must_use]
+    /// Covered locus.
     pub const fn locus(&self) -> &GaugeLocus {
         &self.locus
     }
 
     #[must_use]
+    /// Quantifier scope.
     pub const fn quantifier(&self) -> &GaugeQuantifierScope {
         &self.quantifier
     }
@@ -2950,10 +3510,12 @@ impl GaugeApplicabilityAxes {
 /// nor a [`CasePurpose`] label proves symmetry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GaugeValidityScope {
+    /// Cells keyed by applicability axes.
     cells: BTreeMap<GaugeApplicabilityAxes, GaugeCellDomain>,
 }
 
 impl GaugeValidityScope {
+    /// Validate bounded nonempty cells with nonempty case support.
     pub fn try_new(
         cells: BTreeMap<GaugeApplicabilityAxes, GaugeCellDomain>,
     ) -> Result<Self, IdentifiabilityError> {
@@ -2973,6 +3535,7 @@ impl GaugeValidityScope {
     }
 
     #[must_use]
+    /// Validity cells keyed by applicability axes.
     pub const fn cells(&self) -> &BTreeMap<GaugeApplicabilityAxes, GaugeCellDomain> {
         &self.cells
     }
@@ -3014,16 +3577,26 @@ fn gauge_applicability_source_keys(axes: &GaugeApplicabilityAxes) -> BTreeSet<So
 /// in [`GaugeReductionPlan`] and therefore do not perturb physical ProblemId.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GaugeDeclaration {
+    /// Gauge class identifier token.
     id: GaugeClassId,
+    /// Parameter roles subject to the action.
     members: BTreeSet<ParameterRoleId>,
+    /// Source key naming the physical action.
     action: SourceKey,
+    /// Acting-algebra classification.
     algebra: GaugeAlgebra,
+    /// Principal-orbit geometry declaration.
     orbit_geometry: GaugeOrbitGeometry,
+    /// Candidate-vs-assumed epistemic posture.
     status: GaugeStatus,
+    /// Exact validity cells for the declaration.
     validity: GaugeValidityScope,
 }
 
 impl GaugeDeclaration {
+    /// Validate and construct a gauge declaration, enforcing member bounds,
+    /// algebra/orbit compatibility, and explicit infinite-dimensional
+    /// profiles.
     pub fn try_new(
         id: GaugeClassId,
         members: BTreeSet<ParameterRoleId>,
@@ -3064,36 +3637,43 @@ impl GaugeDeclaration {
     }
 
     #[must_use]
+    /// Gauge class identifier.
     pub const fn id(&self) -> &GaugeClassId {
         &self.id
     }
 
     #[must_use]
+    /// Member parameter roles.
     pub const fn members(&self) -> &BTreeSet<ParameterRoleId> {
         &self.members
     }
 
     #[must_use]
+    /// Action source key.
     pub const fn action(&self) -> &SourceKey {
         &self.action
     }
 
     #[must_use]
+    /// Validity scope.
     pub const fn validity(&self) -> &GaugeValidityScope {
         &self.validity
     }
 
     #[must_use]
+    /// Acting-algebra classification.
     pub const fn algebra(&self) -> &GaugeAlgebra {
         &self.algebra
     }
 
     #[must_use]
+    /// Orbit geometry.
     pub const fn orbit_geometry(&self) -> &GaugeOrbitGeometry {
         &self.orbit_geometry
     }
 
     #[must_use]
+    /// Epistemic posture.
     pub const fn status(&self) -> &GaugeStatus {
         &self.status
     }
@@ -3114,17 +3694,27 @@ pub enum GaugeCompositionKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GaugeCompositionDeclaration {
+    /// Composition identifier token.
     id: GaugeCompositionId,
+    /// Constituent gauge classes (at least two).
     members: BTreeSet<GaugeClassId>,
+    /// Composition-semantics classification.
     kind: GaugeCompositionKind,
+    /// Source naming order/commutation/composition law.
     law: SourceKey,
+    /// Algebra of the composed action.
     effective_algebra: GaugeAlgebra,
+    /// Orbit geometry of the composed action.
     effective_orbit_geometry: GaugeOrbitGeometry,
+    /// Epistemic posture of the composition.
     status: GaugeStatus,
+    /// Exact validity cells for the composition.
     validity: GaugeValidityScope,
 }
 
 impl GaugeCompositionDeclaration {
+    /// Validate and construct a composition with at least two members and an
+    /// explicit infinite-dimensional profile where applicable.
     pub fn try_new(
         id: GaugeCompositionId,
         members: BTreeSet<GaugeClassId>,
@@ -3162,41 +3752,49 @@ impl GaugeCompositionDeclaration {
     }
 
     #[must_use]
+    /// Composition identifier.
     pub const fn id(&self) -> &GaugeCompositionId {
         &self.id
     }
 
     #[must_use]
+    /// Constituent gauge classes.
     pub const fn members(&self) -> &BTreeSet<GaugeClassId> {
         &self.members
     }
 
     #[must_use]
+    /// Composition-semantics classification.
     pub const fn kind(&self) -> &GaugeCompositionKind {
         &self.kind
     }
 
     #[must_use]
+    /// Composition-law source key.
     pub const fn law(&self) -> &SourceKey {
         &self.law
     }
 
     #[must_use]
+    /// Effective acting algebra.
     pub const fn effective_algebra(&self) -> &GaugeAlgebra {
         &self.effective_algebra
     }
 
     #[must_use]
+    /// Effective orbit geometry.
     pub const fn effective_orbit_geometry(&self) -> &GaugeOrbitGeometry {
         &self.effective_orbit_geometry
     }
 
     #[must_use]
+    /// Epistemic posture.
     pub const fn status(&self) -> &GaugeStatus {
         &self.status
     }
 
     #[must_use]
+    /// Validity scope.
     pub const fn validity(&self) -> &GaugeValidityScope {
         &self.validity
     }
@@ -3397,14 +3995,21 @@ fn validate_independent_product_invariants(
 /// dimension. Singular actions retain an exact profile source.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GaugeSliceCodimension {
+    /// Slice cutting out a fixed whole-number codimension.
     FixedFinite {
+        /// Expected codimension of the slice.
         codimension: u64,
     },
+    /// Infinite-codimension slice specified by external models.
     FixedInfinite {
+        /// Source naming the codimension semantics.
         codimension_model: SourceRef,
+        /// Source checking compatibility with the action.
         compatibility: SourceRef,
     },
+    /// Codimension varies across singular strata.
     Stratified {
+        /// Source profiling the stratified codimension behavior.
         profile: SourceRef,
     },
 }
@@ -3413,13 +4018,18 @@ pub enum GaugeSliceCodimension {
 /// admissibility constraints and ProblemId.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GaugeSlicePlan {
+    /// Roles fixed by the slice.
     support: BTreeSet<ParameterRoleId>,
+    /// Source ref stating the slice equations.
     constraint: SourceRef,
+    /// Typed codimension expectation.
     expected_codimension: GaugeSliceCodimension,
+    /// Source asserting coverage properties of the slice choice.
     coverage: SourceRef,
 }
 
 impl GaugeSlicePlan {
+    /// Validate bounded nonempty support for a slice plan.
     pub fn try_new(
         support: BTreeSet<ParameterRoleId>,
         constraint: SourceRef,
@@ -3441,21 +4051,25 @@ impl GaugeSlicePlan {
     }
 
     #[must_use]
+    /// Sliced parameter roles.
     pub const fn support(&self) -> &BTreeSet<ParameterRoleId> {
         &self.support
     }
 
     #[must_use]
+    /// Slice-constraint source.
     pub const fn constraint(&self) -> &SourceRef {
         &self.constraint
     }
 
     #[must_use]
+    /// Codimension expectation.
     pub const fn expected_codimension(&self) -> &GaugeSliceCodimension {
         &self.expected_codimension
     }
 
     #[must_use]
+    /// Coverage-assertion source.
     pub const fn coverage(&self) -> &SourceRef {
         &self.coverage
     }
@@ -3463,59 +4077,97 @@ impl GaugeSlicePlan {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GaugeQuotientPlan {
+    /// Principal-bundle quotient with a regular section atlas.
     RegularAtlas {
+        /// Typed quotient map onto the base space.
         quotient_map: SourceRef,
+        /// Sources providing local sections of the fibration.
         local_section_atlas: SourceRef,
+        /// Source proving the atlas covers the action.
         coverage: SourceRef,
     },
+    /// Singular or generalized quotient defined by a profile.
     SingularOrGeneralized {
+        /// Typed quotient map valid off singular strata.
         quotient_map: SourceRef,
+        /// Profile defining generalized/singular quotient semantics.
         quotient_profile: SourceRef,
+        /// Optional functional model spaces for local charts.
         local_models: Option<SourceRef>,
     },
+    /// Quotient via a complete invariant map.
     InvariantMap {
+        /// Typed invariant-map source separating orbits.
         invariants: SourceRef,
+        /// Profile proving completeness of the invariants.
         completeness_profile: SourceRef,
     },
+    /// Groupoid or stack presentation with quotient profile.
     GroupoidOrStack {
+        /// Typed groupoid/stack presentation.
         presentation: SourceRef,
+        /// Profile defining stacky quotient semantics.
         quotient_profile: SourceRef,
     },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContinuousGaugeReductionPlan {
-    Quotient { quotient: GaugeQuotientPlan },
-    Slice { slice: GaugeSlicePlan },
+    /// Reduce the full continuous factor at once.
+    Quotient {
+        /// Exact quotient-plan details.
+        quotient: GaugeQuotientPlan,
+    },
+    /// Fix coordinates by slicing instead of quotienting.
+    Slice {
+        /// Exact slice-plan details.
+        slice: GaugeSlicePlan,
+    },
 }
 
 /// Exact relation from predecessor reductions to one later stage. This is
 /// execution semantics, never inferred from carrier disjointness.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GaugeReductionStageRelation {
+    /// Residual action arises from a normal-subgroup tower.
     NormalSubgroupTower {
+        /// Subgroup-certificate source proving normality.
         normality: SourceRef,
+        /// Source certifying the induced residual action.
         induced_residual_action: SourceRef,
     },
+    /// Residual action arises from generated/semidirect structure.
     SemidirectOrGenerated {
+        /// Extension-law source relating the factors.
         extension: SourceRef,
+        /// Source certifying the induced residual action.
         induced_residual_action: SourceRef,
     },
+    /// Stages compose through transverse slices.
     TransverseSlices {
+        /// Source stating transversality properties.
         transversality: SourceRef,
     },
+    /// Reduction applied to another reduction's residual action.
     GaugeForGauge {
+        /// Source proving reducibility of the outer gauge layer.
         reducibility: SourceRef,
+        /// Source certifying the induced residual action.
         induced_residual_action: SourceRef,
     },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GaugeReductionStage {
+    /// First reduction, composed from nothing.
     Root,
+    /// Later stage built on predecessor reductions.
     After {
+        /// Earlier reductions this stage composes.
         predecessors: BTreeSet<GaugeReductionId>,
+        /// Composition-law source with exact ordering semantics.
         composition_law: SourceRef,
+        /// Structural relation from predecessors to this stage.
         relation: GaugeReductionStageRelation,
     },
 }
@@ -3524,33 +4176,52 @@ pub enum GaugeReductionStage {
 /// coordinates. A generic algorithm name is not a change-of-variables proof.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GaugeMeasureSemantics {
+    /// No measure transport applies, with a bounded reason.
     NotApplicable {
+        /// Bounded reason measure transport is not applicable.
         reason: String,
     },
+    /// Full pushforward chain with explicit transport proofs.
     Pushforward {
+        /// Probability measure before reduction.
         source_measure: SourceRef,
+        /// Probability measure after reduction.
         reduced_measure: SourceRef,
+        /// Change-of-measure source between the measures.
         transport: SourceRef,
+        /// Jacobian-or-disintegration proof source.
         jacobian_or_disintegration: SourceRef,
     },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GaugeReductionPlan {
+    /// Action retained unreduced, with a bounded reason.
     Unreduced {
+        /// Bounded reason no reduction is performed.
         reason: String,
     },
+    /// Pass to a quotient by the action.
     Quotient {
+        /// Exact quotient-plan details.
         quotient: GaugeQuotientPlan,
     },
+    /// Fix a representative via a slice.
     Slice {
+        /// Exact slice-plan details.
         slice: GaugeSlicePlan,
     },
+    /// Reduce continuously while retaining an explicit discrete residual.
     ContinuousReductionWithDiscreteResidual {
+        /// Underlying continuous quotient or slice step.
         reduction: ContinuousGaugeReductionPlan,
+        /// Certificate identifying the normal subgroup factored out.
         normal_subgroup: SourceRef,
+        /// Law relating factors back to the original action.
         factor_extension: SourceRef,
+        /// Certified residual action remaining after the continuous step.
         residual_quotient_action: SourceRef,
+        /// Compatibility proof among the mixed-reduction pieces.
         compatibility: SourceRef,
     },
 }
@@ -3560,15 +4231,23 @@ pub enum GaugeReductionPlan {
 /// duplicating physical applicability metadata into execution identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GaugeReductionBinding {
+    /// Reduction identifier token.
     id: GaugeReductionId,
+    /// Referenced physical gauge action.
     action: GaugeActionReference,
+    /// Exact preregistered claim cells bound by this reduction.
     claims: BTreeSet<ClaimId>,
+    /// Reduced/unreduced computational plan.
     plan: GaugeReductionPlan,
+    /// Position in the staged reduction DAG.
     stage: GaugeReductionStage,
+    /// Measure semantics for posterior/marginalized claim cells.
     measure: GaugeMeasureSemantics,
 }
 
 impl GaugeReductionBinding {
+    /// Validate a binding: bounded nonempty claims, validated reasons,
+    /// self-free stages, and exact composition-law kinds.
     pub fn try_new(
         id: GaugeReductionId,
         action: GaugeActionReference,
@@ -3628,31 +4307,37 @@ impl GaugeReductionBinding {
     }
 
     #[must_use]
+    /// Reduction identifier.
     pub const fn id(&self) -> &GaugeReductionId {
         &self.id
     }
 
     #[must_use]
+    /// Referenced gauge action.
     pub const fn action(&self) -> &GaugeActionReference {
         &self.action
     }
 
     #[must_use]
+    /// Bound claim cells.
     pub const fn claims(&self) -> &BTreeSet<ClaimId> {
         &self.claims
     }
 
     #[must_use]
+    /// Computational plan.
     pub const fn plan(&self) -> &GaugeReductionPlan {
         &self.plan
     }
 
     #[must_use]
+    /// Staged-DAG position.
     pub const fn stage(&self) -> &GaugeReductionStage {
         &self.stage
     }
 
     #[must_use]
+    /// Measure semantics.
     pub const fn measure(&self) -> &GaugeMeasureSemantics {
         &self.measure
     }
@@ -4050,12 +4735,16 @@ fn reduction_uses_regular_atlas(plan: &GaugeReductionPlan) -> bool {
 /// raw experiment sources under one joint likelihood.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DataSharingGroup {
+    /// Cases participating in the sharing arrangement.
     cases: BTreeSet<CaseId>,
+    /// Joint-likelihood source governing the shared data.
     joint_likelihood: SourceKey,
+    /// Bounded textual justification for reuse.
     justification: String,
 }
 
 impl DataSharingGroup {
+    /// Validate a sharing group with at least two cases and a justification.
     pub fn try_new(
         cases: BTreeSet<CaseId>,
         joint_likelihood: SourceKey,
@@ -4077,16 +4766,19 @@ impl DataSharingGroup {
     }
 
     #[must_use]
+    /// Participating cases.
     pub const fn cases(&self) -> &BTreeSet<CaseId> {
         &self.cases
     }
 
     #[must_use]
+    /// Joint-likelihood source key.
     pub const fn joint_likelihood(&self) -> &SourceKey {
         &self.joint_likelihood
     }
 
     #[must_use]
+    /// Reuse justification text.
     pub fn justification(&self) -> &str {
         &self.justification
     }
@@ -4094,8 +4786,13 @@ impl DataSharingGroup {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DataReusePolicy {
+    /// Every case consumes disjoint observations and sources.
     Disjoint,
-    Shared { groups: Vec<DataSharingGroup> },
+    /// Selected groups intentionally share rows under one joint likelihood.
+    Shared {
+        /// Explicit sharing declarations.
+        groups: Vec<DataSharingGroup>,
+    },
 }
 
 fn retrospective_experiment(case: &StudyCaseDocument) -> Option<&SourceKey> {
@@ -4394,21 +5091,37 @@ fn problem_source_reachability(
 /// permitted in this type.
 #[derive(Clone, PartialEq)]
 pub struct IdentifiabilityProblemDocument {
+    /// Stage schema version pinned into the identity preimage.
     schema_version: u32,
+    /// Context-of-use source key.
     context_source: SourceKey,
+    /// Material-card source key.
     material_source: SourceKey,
+    /// Constitutive-model-card source key.
     model_source: SourceKey,
+    /// Constitutive-graph source key.
     graph_source: SourceKey,
+    /// Optional joint-prior source required by posterior claims.
     joint_prior: Option<SourceKey>,
+    /// Exact source references keyed by opaque key.
     sources: BTreeMap<SourceKey, SourceRef>,
+    /// Physical parameters keyed by role.
     parameters: BTreeMap<ParameterRoleId, StudyParameter>,
+    /// Cross-parameter constraints keyed by token.
     constraints: BTreeMap<ConstraintId, JointConstraint>,
+    /// Constructive nonemptiness witness for all parameter domains.
     admissible_domain: AdmissibleDomainWitness,
+    /// Campaign cases keyed by identifier.
     cases: BTreeMap<CaseId, StudyCaseDocument>,
+    /// Declared influences keyed by identifier.
     influences: BTreeMap<InfluenceId, InfluenceDeclaration>,
+    /// Gauge actions keyed by class.
     gauges: BTreeMap<GaugeClassId, GaugeDeclaration>,
+    /// Gauge composition hyperedges keyed by identifier.
     gauge_compositions: BTreeMap<GaugeCompositionId, GaugeCompositionDeclaration>,
+    /// Campaign-wide joint noise model.
     joint_noise: JointNoiseModel,
+    /// Disjoint/shared data-reuse policy.
     data_reuse: DataReusePolicy,
 }
 
@@ -7256,71 +7969,85 @@ impl IdentifiabilityProblemDocument {
     }
 
     #[must_use]
+    /// Stage schema version.
     pub const fn schema_version(&self) -> u32 {
         self.schema_version
     }
 
     #[must_use]
+    /// Context-of-use source key.
     pub const fn context_source(&self) -> &SourceKey {
         &self.context_source
     }
 
     #[must_use]
+    /// Material-card source key.
     pub const fn material_source(&self) -> &SourceKey {
         &self.material_source
     }
 
     #[must_use]
+    /// Constitutive-model-card source key.
     pub const fn model_source(&self) -> &SourceKey {
         &self.model_source
     }
 
     #[must_use]
+    /// Constitutive-graph source key.
     pub const fn graph_source(&self) -> &SourceKey {
         &self.graph_source
     }
 
     #[must_use]
+    /// Optional declared joint-prior key.
     pub const fn joint_prior(&self) -> Option<&SourceKey> {
         self.joint_prior.as_ref()
     }
 
     #[must_use]
+    /// Source references keyed by opaque key.
     pub const fn sources(&self) -> &BTreeMap<SourceKey, SourceRef> {
         &self.sources
     }
 
     #[must_use]
+    /// Parameters keyed by role.
     pub const fn parameters(&self) -> &BTreeMap<ParameterRoleId, StudyParameter> {
         &self.parameters
     }
 
     #[must_use]
+    /// Campaign cases keyed by identifier.
     pub const fn cases(&self) -> &BTreeMap<CaseId, StudyCaseDocument> {
         &self.cases
     }
 
     #[must_use]
+    /// Constraints keyed by token.
     pub const fn constraints(&self) -> &BTreeMap<ConstraintId, JointConstraint> {
         &self.constraints
     }
 
     #[must_use]
+    /// Domain nonemptiness witness.
     pub const fn admissible_domain(&self) -> &AdmissibleDomainWitness {
         &self.admissible_domain
     }
 
     #[must_use]
+    /// Influences keyed by identifier.
     pub const fn influences(&self) -> &BTreeMap<InfluenceId, InfluenceDeclaration> {
         &self.influences
     }
 
     #[must_use]
+    /// Gauge actions keyed by class.
     pub const fn gauges(&self) -> &BTreeMap<GaugeClassId, GaugeDeclaration> {
         &self.gauges
     }
 
     #[must_use]
+    /// Gauge compositions keyed by identifier.
     pub const fn gauge_compositions(
         &self,
     ) -> &BTreeMap<GaugeCompositionId, GaugeCompositionDeclaration> {
@@ -7328,11 +8055,13 @@ impl IdentifiabilityProblemDocument {
     }
 
     #[must_use]
+    /// Joint noise model.
     pub const fn joint_noise(&self) -> &JointNoiseModel {
         &self.joint_noise
     }
 
     #[must_use]
+    /// Data-reuse policy.
     pub const fn data_reuse(&self) -> &DataReusePolicy {
         &self.data_reuse
     }
@@ -7385,8 +8114,11 @@ impl IdentifiabilityProblemDocument {
 /// Concrete V&V sources for one retrospective case.
 #[derive(Clone, Copy)]
 pub struct CaseSourceBundle<'a> {
+    /// Experiment artifact backing retrospective rows.
     experiment: &'a ExperimentArtifact,
+    /// Calibration-split declaration.
     split: &'a CalibrationSplit,
+    /// Optional sealed-blind release receipt.
     blind_release: Option<&'a BlindReleaseReceipt>,
 }
 
@@ -7408,6 +8140,7 @@ impl fmt::Debug for CaseSourceBundle<'_> {
 
 impl<'a> CaseSourceBundle<'a> {
     #[must_use]
+    /// Bind experiment and split artifacts without a blind release.
     pub const fn new(experiment: &'a ExperimentArtifact, split: &'a CalibrationSplit) -> Self {
         Self {
             experiment,
@@ -7425,16 +8158,19 @@ impl<'a> CaseSourceBundle<'a> {
     }
 
     #[must_use]
+    /// Experiment artifact supplying retrospective rows.
     pub const fn experiment(&self) -> &'a ExperimentArtifact {
         self.experiment
     }
 
     #[must_use]
+    /// Calibration-split declaration artifact.
     pub const fn split(&self) -> &'a CalibrationSplit {
         self.split
     }
 
     #[must_use]
+    /// Blind-release receipt when attached.
     pub const fn blind_release(&self) -> Option<&'a BlindReleaseReceipt> {
         self.blind_release
     }
@@ -7443,11 +8179,17 @@ impl<'a> CaseSourceBundle<'a> {
 /// Concrete and opaque artifacts required to resolve a problem document.
 /// Extra, missing, unverified, stale-kind, or stale-version resolutions refuse.
 pub struct ProblemSourceBundle<'a> {
+    /// Resolved context-of-use artifact.
     context: &'a ContextOfUse,
+    /// Resolved material card.
     material: &'a MaterialCard,
+    /// Resolved constitutive-model card.
     model: &'a ConstitutiveModelCard,
+    /// Per-case concrete V&V bundles.
     cases: BTreeMap<CaseId, CaseSourceBundle<'a>>,
+    /// Exact resolutions for opaque sources.
     opaque: SourceResolutionSet,
+    /// Attached trust dispositions for concrete sources.
     concrete_authority: BTreeMap<SourceKey, AuthorityDisposition>,
 }
 
@@ -7472,6 +8214,7 @@ impl fmt::Debug for ProblemSourceBundle<'_> {
 
 impl<'a> ProblemSourceBundle<'a> {
     #[must_use]
+    /// Assemble the bundle from concrete artifacts and opaque resolutions.
     pub fn new(
         context: &'a ContextOfUse,
         material: &'a MaterialCard,
@@ -7528,12 +8271,19 @@ impl<'a> ProblemSourceBundle<'a> {
 /// all derived bindings are read-only and recomputable from the source bundle.
 #[derive(Clone, PartialEq)]
 pub struct AdmittedIdentifiabilityProblem {
+    /// Retained unresolved problem document.
     document: IdentifiabilityProblemDocument,
+    /// Admission-gated problem identity digest.
     problem_id: ProblemId,
+    /// Identity of the source-resolution envelope.
     source_admission_id: SourceAdmissionId,
+    /// Typed context binding.
     context: ContextBinding,
+    /// Typed material/model binding.
     model: MaterialModelBinding,
+    /// Per-case resolved lineage records.
     data: BTreeMap<CaseId, DataLineage>,
+    /// Retained preimage of the admission identity.
     source_admission: SourceAdmissionRecord,
 }
 
@@ -8404,36 +9154,43 @@ impl AdmittedIdentifiabilityProblem {
     }
 
     #[must_use]
+    /// Minted [`ProblemId`].
     pub const fn id(&self) -> ProblemId {
         self.problem_id
     }
 
     #[must_use]
+    /// Minted [`SourceAdmissionId`].
     pub const fn source_admission_id(&self) -> SourceAdmissionId {
         self.source_admission_id
     }
 
     #[must_use]
+    /// Inspect the unresolved document.
     pub const fn document(&self) -> &IdentifiabilityProblemDocument {
         &self.document
     }
 
     #[must_use]
+    /// Per-case lineage records.
     pub const fn data(&self) -> &BTreeMap<CaseId, DataLineage> {
         &self.data
     }
 
     #[must_use]
+    /// Context binding.
     pub const fn context(&self) -> &ContextBinding {
         &self.context
     }
 
     #[must_use]
+    /// Material/model binding.
     pub const fn model(&self) -> &MaterialModelBinding {
         &self.model
     }
 
     #[must_use]
+    /// Resolutions retained by admission.
     pub const fn source_resolutions(&self) -> &BTreeMap<SourceKey, SourceResolution> {
         &self.source_admission.resolutions
     }
@@ -8448,37 +9205,55 @@ impl AdmittedIdentifiabilityProblem {
 /// parameters remain explicit so a plan cannot silently omit them.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ParameterExecutionAction {
+    /// Estimate the parameter freely along a chart coordinate.
     Optimize {
+        /// Coordinate bijective with the parameter domain.
         coordinate: ParameterCoordinate,
     },
+    /// Concentrate the parameter out via profiling.
     Profile {
+        /// Coordinate used while profiling.
         coordinate: ParameterCoordinate,
     },
+    /// Integrate the parameter out against its prior measure.
     Marginalize {
+        /// Coordinate being integrated out.
         coordinate: ParameterCoordinate,
+        /// Analyzer-kind integrator performing the marginalization.
         integrator: SourceRef,
         /// Exact physical-prior to coordinate-measure transport, including
         /// Jacobian, truncation, and normalization semantics.
         measure_transport: SourceRef,
     },
+    /// Parameter fixed externally to its provenance-bound value.
     Conditioned,
+    /// Parameter computed deterministically from its parents.
     Derived,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum RequestedClaimAxis {
+    /// Structural-uniqueness axis projection.
     Structural,
+    /// Local-injectivity axis projection.
     Local,
+    /// Generic-position axis projection.
     Generic,
+    /// Global-injectivity axis projection.
     Global,
+    /// Practical/error-margin axis projection.
     Practical,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArithmeticPolicy {
+    /// Arithmetic exact over symbolic rationals.
     ExactSymbolic,
+    /// Interval arithmetic with certified enclosures.
     CertifiedInterval,
+    /// Deterministically rounded IEEE-754 arithmetic.
     DeterministicFloatingPoint,
+    /// Fast floating point without certified rounding bounds.
     FastFloatingPoint,
 }
 
@@ -8487,12 +9262,16 @@ pub enum ArithmeticPolicy {
 /// equal scalar bounds under different policies are not interchangeable.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DimensionlessErrorPolicy {
+    /// Typed dimensionless-error metric source.
     metric: SourceRef,
+    /// Typed scaling defining the dimensionless coordinates.
     nondimensionalization: SourceRef,
+    /// Certified error bound accepted for the claim.
     maximum_certified_error: f64,
 }
 
 impl DimensionlessErrorPolicy {
+    /// Validate source kinds and accept a finite nonnegative bound.
     pub fn try_new(
         metric: SourceRef,
         nondimensionalization: SourceRef,
@@ -8525,16 +9304,19 @@ impl DimensionlessErrorPolicy {
     }
 
     #[must_use]
+    /// Error-metric source.
     pub const fn metric(&self) -> &SourceRef {
         &self.metric
     }
 
     #[must_use]
+    /// Nondimensionalization source.
     pub const fn nondimensionalization(&self) -> &SourceRef {
         &self.nondimensionalization
     }
 
     #[must_use]
+    /// Accepted certified-error bound.
     pub const fn maximum_certified_error(&self) -> f64 {
         self.maximum_certified_error
     }
@@ -8545,12 +9327,15 @@ impl DimensionlessErrorPolicy {
 /// merely because it shares a coarse local/global/structural label.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClaimRequest {
+    /// Preregistered proposition under test.
     claim: TypedIdentifiabilityClaim,
+    /// Exact acceptance metric applied during assessment.
     error_policy: DimensionlessErrorPolicy,
 }
 
 impl ClaimRequest {
     #[must_use]
+    /// Assemble a claim request.
     pub const fn new(
         claim: TypedIdentifiabilityClaim,
         error_policy: DimensionlessErrorPolicy,
@@ -8562,11 +9347,13 @@ impl ClaimRequest {
     }
 
     #[must_use]
+    /// Preregistered claim.
     pub const fn claim(&self) -> &TypedIdentifiabilityClaim {
         &self.claim
     }
 
     #[must_use]
+    /// Acceptance policy.
     pub const fn error_policy(&self) -> &DimensionlessErrorPolicy {
         &self.error_policy
     }
@@ -8574,14 +9361,20 @@ impl ClaimRequest {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct IdentifiabilityNumericalPolicy {
+    /// Positive finite threshold treating singular values as zero.
     rank_tolerance: f64,
+    /// Nonnegative floor below which spectra are cut off.
     singular_value_floor: f64,
+    /// Finite condition ceiling of at least one.
     maximum_condition_number: f64,
+    /// Declared arithmetic guarantee class.
     arithmetic: ArithmeticPolicy,
+    /// Scaling rendering the controls dimensionless.
     nondimensionalization: SourceRef,
 }
 
 impl IdentifiabilityNumericalPolicy {
+    /// Validate finite ordered tolerances and typed scaling.
     pub fn try_new(
         rank_tolerance: f64,
         singular_value_floor: f64,
@@ -8618,26 +9411,31 @@ impl IdentifiabilityNumericalPolicy {
     }
 
     #[must_use]
+    /// Rank cutoff tolerance.
     pub const fn rank_tolerance(&self) -> f64 {
         self.rank_tolerance
     }
 
     #[must_use]
+    /// Singular-value floor.
     pub const fn singular_value_floor(&self) -> f64 {
         self.singular_value_floor
     }
 
     #[must_use]
+    /// Maximum condition number.
     pub const fn maximum_condition_number(&self) -> f64 {
         self.maximum_condition_number
     }
 
     #[must_use]
+    /// Arithmetic guarantee class.
     pub const fn arithmetic(&self) -> ArithmeticPolicy {
         self.arithmetic
     }
 
     #[must_use]
+    /// Nondimensionalization source.
     pub const fn nondimensionalization(&self) -> &SourceRef {
         &self.nondimensionalization
     }
@@ -8647,20 +9445,35 @@ impl IdentifiabilityNumericalPolicy {
 /// physical problem.
 #[derive(Clone, PartialEq)]
 pub struct IdentifiabilityExecutionPlan {
+    /// Execution-stage schema version.
     schema_version: u32,
+    /// Artifact header carrying capabilities.
     header: ArtifactHeader,
+    /// Bound admitted problem identity.
     problem_id: ProblemId,
+    /// Bound admission identity of that problem.
     source_admission_id: SourceAdmissionId,
+    /// Analyzer reference assessments must match exactly.
     analyzer: SourceRef,
+    /// Build-environment provenance reference.
     build: SourceRef,
+    /// Optional derivative-provider reference.
     derivative_provider: Option<SourceRef>,
+    /// Preregistered claim requests keyed by ID.
     claim_requests: BTreeMap<ClaimId, ClaimRequest>,
+    /// One explicit action per physical parameter.
     actions: BTreeMap<ParameterRoleId, ParameterExecutionAction>,
+    /// Staged gauge reductions keyed by identifier.
     gauge_reductions: BTreeMap<GaugeReductionId, GaugeReductionBinding>,
+    /// Analyzer-internal numerical policy.
     numerical: IdentifiabilityNumericalPolicy,
+    /// Assumption-kind initialization source.
     initialization: SourceRef,
+    /// Assumption-kind stopping-policy source.
     stopping: SourceRef,
+    /// Assumption-kind determinism-contract source.
     determinism_contract: SourceRef,
+    /// Verified authority for every execution source.
     source_authority: SourceResolutionSet,
 }
 
@@ -8803,6 +9616,9 @@ fn validate_coordinate_for_parameter(
 
 impl IdentifiabilityExecutionPlan {
     #[allow(clippy::too_many_arguments)]
+    /// Construct and validate an execution plan, enforcing capabilities,
+    /// collection budgets, treatment/action agreement, gauge-DAG rules,
+    /// source-kind contracts, and closed source authority.
     pub fn try_new(
         header: ArtifactHeader,
         problem: &AdmittedIdentifiabilityProblem,
@@ -9219,30 +10035,36 @@ impl IdentifiabilityExecutionPlan {
         Ok(plan)
     }
 
+    /// Canonical execution bytes feeding the identity hash.
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, IdentifiabilityError> {
         encode_execution(self)
     }
 
+    /// Mint the execution-stage [`ExecutionId`].
     pub fn id(&self) -> Result<ExecutionId, IdentifiabilityError> {
         execution_identity_hash(self)
     }
 
     #[must_use]
+    /// Execution schema version.
     pub const fn schema_version(&self) -> u32 {
         self.schema_version
     }
 
     #[must_use]
+    /// Artifact header.
     pub const fn header(&self) -> &ArtifactHeader {
         &self.header
     }
 
     #[must_use]
+    /// Bound [`ProblemId`].
     pub const fn problem_id(&self) -> ProblemId {
         self.problem_id
     }
 
     #[must_use]
+    /// Bound [`SourceAdmissionId`].
     pub const fn source_admission_id(&self) -> SourceAdmissionId {
         self.source_admission_id
     }
@@ -9254,16 +10076,19 @@ impl IdentifiabilityExecutionPlan {
     }
 
     #[must_use]
+    /// Build-provenance reference.
     pub const fn build(&self) -> &SourceRef {
         &self.build
     }
 
     #[must_use]
+    /// Optional derivative provider.
     pub const fn derivative_provider(&self) -> Option<&SourceRef> {
         self.derivative_provider.as_ref()
     }
 
     #[must_use]
+    /// Preregistered claim requests.
     pub const fn claim_requests(&self) -> &BTreeMap<ClaimId, ClaimRequest> {
         &self.claim_requests
     }
@@ -9279,11 +10104,13 @@ impl IdentifiabilityExecutionPlan {
     }
 
     #[must_use]
+    /// Per-parameter execution actions.
     pub const fn actions(&self) -> &BTreeMap<ParameterRoleId, ParameterExecutionAction> {
         &self.actions
     }
 
     #[must_use]
+    /// Gauge reduction bindings.
     pub const fn gauge_reductions(&self) -> &BTreeMap<GaugeReductionId, GaugeReductionBinding> {
         &self.gauge_reductions
     }
@@ -9304,20 +10131,24 @@ impl IdentifiabilityExecutionPlan {
     }
 
     #[must_use]
+    /// Initialization assumption source.
     pub const fn initialization(&self) -> &SourceRef {
         &self.initialization
     }
 
     #[must_use]
+    /// Stopping-policy assumption source.
     pub const fn stopping(&self) -> &SourceRef {
         &self.stopping
     }
 
     #[must_use]
+    /// Determinism contract source.
     pub const fn determinism_contract(&self) -> &SourceRef {
         &self.determinism_contract
     }
 
+    /// Decode bytes and revalidate against the bound admitted problem.
     pub fn from_canonical_bytes(
         bytes: &[u8],
         problem: &AdmittedIdentifiabilityProblem,
@@ -9330,16 +10161,25 @@ impl IdentifiabilityExecutionPlan {
 /// Information assumed by an identifiability claim.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InformationRegime {
+    /// Assumes the structural model itself is exactly correct.
     StructuralExactModel,
+    /// The input-output map is taken as exactly known.
     ExactInputOutputMap,
+    /// Ordinary noisy-finite-data regime.
     NoisyFiniteData,
-    PosteriorUnderDeclaredPrior { joint_prior: SourceRef },
+    /// Posterior-based claim under an explicitly declared prior.
+    PosteriorUnderDeclaredPrior {
+        /// Exact prior source referenced by the claim.
+        joint_prior: SourceRef,
+    },
 }
 
 /// Extent is independent of information regime and quantifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdentifiabilityExtent {
+    /// Injectivity restricted to a neighborhood.
     Local,
+    /// Injectivity across the full domain.
     Global,
 }
 
@@ -9347,9 +10187,18 @@ pub enum IdentifiabilityExtent {
 /// semantics and independently admitted source bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScalarDomain {
+    /// Real-valued scalar domain.
     Real,
-    Complex { extension: SourceRef },
-    MixedDiscreteContinuous { stratification: SourceRef },
+    /// Parameters extended into complex scalars.
+    Complex {
+        /// Admitted source defining extension semantics.
+        extension: SourceRef,
+    },
+    /// Mixed discrete-plus-continuous parameter spaces.
+    MixedDiscreteContinuous {
+        /// Admitted source defining stratification semantics.
+        stratification: SourceRef,
+    },
 }
 
 /// Geometry and cardinality of the parameter-to-observation fiber, orthogonal
@@ -9358,6 +10207,7 @@ pub enum ScalarDomain {
 /// ordinal axis.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum GaugeActionReference {
+    /// One declared gauge action acts alone.
     Single(GaugeClassId),
     /// Exact direct product. The referenced declaration must have
     /// [`GaugeCompositionKind::IndependentProduct`]; disjoint support alone is
@@ -9370,46 +10220,74 @@ pub enum GaugeActionReference {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FiberCardinalityBound {
+    /// Uniform whole-number cardinality bound.
     UniformU64(u64),
+    /// Symbolic profile naming exact fiber bounds.
     SymbolicProfile(SourceRef),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FiberDimensionLowerBound {
-    Finite { minimum_dimension: u64 },
-    InfiniteDimensional { model_space: SourceRef },
+    /// Positive continuous dimension at least this large.
+    Finite {
+        /// Minimum whole-number dimension bound.
+        minimum_dimension: u64,
+    },
+    /// Infinite-dimensional lower bound with a named model space.
+    InfiniteDimensional {
+        /// Source naming the model-space semantics.
+        model_space: SourceRef,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FiberStructure {
+    /// Fiber is a single point.
     Unique,
+    /// Fibers have bounded whole-number size.
     FiniteToOne {
+        /// Optional symbolic bound on fiber points.
         maximum_cardinality: Option<FiberCardinalityBound>,
     },
+    /// Orbits follow a purely discrete effective action.
     DiscreteOrbit {
+        /// Referenced discrete gauge action.
         action: GaugeActionReference,
     },
     /// Orbit with both continuous and discrete effective components. A
     /// computational reduction choice is execution identity and is not needed
     /// merely to state this physical proposition.
     MixedOrbit {
+        /// Referenced mixed continuous/discrete action.
         action: GaugeActionReference,
     },
+    /// Quotient orbits identify fibers uniquely up to the action.
     OrbitQuotientUnique {
+        /// Referenced quotient-defining action.
         action: GaugeActionReference,
     },
+    /// Uniqueness up to a generalized equivalence defined by sources.
     GeneralizedQuotientUnique {
+        /// Action whose quotient defines the identification.
         action: GaugeActionReference,
+        /// Source defining the equivalence relation.
         equivalence: SourceRef,
     },
+    /// Fibers carry positive dimension bounded below.
     PositiveDimensional {
+        /// Minimum-dimension evidence.
         lower_bound: FiberDimensionLowerBound,
     },
+    /// Orbit structure varies across explicitly profiled strata.
     StratifiedOrbit {
+        /// Referenced acting action.
         action: GaugeActionReference,
+        /// Profile of orbit types and stabilizers per stratum.
         orbit_type_profile: SourceRef,
     },
+    /// Subject partitioned into declared strata.
     Stratified {
+        /// Source defining the strata.
         strata: SourceRef,
     },
 }
@@ -9434,40 +10312,62 @@ fn claim_gauge_action(claim: &TypedIdentifiabilityClaim) -> Option<&GaugeActionR
 /// Mathematical quantifier and its exact domain/measure source.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ClaimQuantifier {
+    /// Claim asserted at a single realization.
     AtRealization {
+        /// Source realizing the evaluation point.
         realization: SourceRef,
     },
+    /// Claim holds almost everywhere under a measure.
     AlmostEverywhere {
+        /// Dominating measure source.
         measure: SourceRef,
     },
+    /// Claim holds for every point of a domain.
     ForAll {
+        /// Quantifier-domain source.
         domain: SourceRef,
     },
+    /// Claim holds with probability at least the stated value.
     ProbabilityAtLeast {
+        /// Canonicalized probability threshold.
         probability: f64,
+        /// Measure used for the probabilistic statement.
         measure: SourceRef,
     },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClaimSubject {
+    /// Single physical parameter.
     Parameter(ParameterRoleId),
+    /// A set of physical parameters jointly.
     ParameterSet(BTreeSet<ParameterRoleId>),
+    /// Derived functional over declared parents.
     DerivedFunctional {
+        /// Definition source of the functional.
         definition: SourceRef,
+        /// Parent roles feeding the functional.
         parameters: BTreeSet<ParameterRoleId>,
     },
+    /// A declared influence channel.
     Influence(InfluenceId),
+    /// A gauge-action residual-symmetry question.
     GaugeAction(GaugeActionReference),
+    /// The entire problem conjunction at once.
     WholeProblem,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClaimScope {
+    /// Scope spans every case in the campaign.
     WholeCampaign,
+    /// Scope limited to enumerated cases.
     Cases(BTreeSet<CaseId>),
+    /// Scope covers listed cases within a stratified definition.
     Stratum {
+        /// Source defining the stratum semantics.
         definition: SourceRef,
+        /// Cases included in this scope cell.
         cases: BTreeSet<CaseId>,
     },
 }
@@ -9477,19 +10377,28 @@ pub enum ClaimScope {
 /// “structural/local/generic/global/practical” into one ordinal label.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypedIdentifiabilityClaim {
+    /// Claim identifier token.
     id: ClaimId,
+    /// Information regime assumed by the proposition.
     information: InformationRegime,
+    /// Local/global extent of the claim.
     extent: IdentifiabilityExtent,
+    /// Fiber-structure statement quantified by the claim.
     fiber: FiberStructure,
+    /// Mathematical quantifier with its exact domain/measure.
     quantifier: ClaimQuantifier,
+    /// Scalar/algebraic domain of the claim.
     scalar_domain: ScalarDomain,
+    /// Subject of the proposition.
     subject: ClaimSubject,
+    /// Case scope covered by the claim.
     scope: ClaimScope,
 }
 
 impl TypedIdentifiabilityClaim {
     #[allow(clippy::too_many_arguments)]
     #[must_use]
+    /// Assemble a typed claim without verifying its truth.
     pub const fn new(
         id: ClaimId,
         information: InformationRegime,
@@ -9513,41 +10422,49 @@ impl TypedIdentifiabilityClaim {
     }
 
     #[must_use]
+    /// Claim identifier.
     pub const fn id(&self) -> &ClaimId {
         &self.id
     }
 
     #[must_use]
+    /// Assumed information regime.
     pub const fn information(&self) -> &InformationRegime {
         &self.information
     }
 
     #[must_use]
+    /// Local/global extent.
     pub const fn extent(&self) -> IdentifiabilityExtent {
         self.extent
     }
 
     #[must_use]
+    /// Fiber-structure statement.
     pub const fn fiber(&self) -> &FiberStructure {
         &self.fiber
     }
 
     #[must_use]
+    /// Mathematical quantifier.
     pub const fn quantifier(&self) -> &ClaimQuantifier {
         &self.quantifier
     }
 
     #[must_use]
+    /// Scalar/algebraic domain.
     pub const fn scalar_domain(&self) -> &ScalarDomain {
         &self.scalar_domain
     }
 
     #[must_use]
+    /// Proposition subject.
     pub const fn subject(&self) -> &ClaimSubject {
         &self.subject
     }
 
     #[must_use]
+    /// Case scope.
     pub const fn scope(&self) -> &ClaimScope {
         &self.scope
     }
@@ -9560,24 +10477,35 @@ impl TypedIdentifiabilityClaim {
 /// sealed theorem token without changing this honest transport layer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GaugeResolutionDisposition {
+    /// A candidate gauge was refuted by assessment evidence.
     CandidateRefuted,
+    /// No projection of the action touches the subject.
     NoProjectionOnSubject,
+    /// The subject descends exactly to the quotient space.
     SubjectDescendsToQuotient,
+    /// Joint information broke the residual symmetry.
     BrokenByJointInformation,
+    /// Residual action intersects the subject trivially.
     TrivialResidualIntersection,
+    /// Evidence remains consistent with the claimed fiber structure.
     ConsistentWithClaimedFiber,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GaugeResolutionEvidence {
+    /// Gauge action this evidence resolves.
     action: GaugeActionReference,
+    /// Typed outcome disposition for that action.
     disposition: GaugeResolutionDisposition,
+    /// Verifier method source producing the outcome.
     method: SourceRef,
+    /// Evidence receipt binding method execution to identity.
     receipt: SourceRef,
 }
 
 impl GaugeResolutionEvidence {
     #[must_use]
+    /// Assemble gauge-resolution evidence.
     pub const fn new(
         action: GaugeActionReference,
         disposition: GaugeResolutionDisposition,
@@ -9593,11 +10521,13 @@ impl GaugeResolutionEvidence {
     }
 
     #[must_use]
+    /// Resolved gauge action.
     pub const fn action(&self) -> &GaugeActionReference {
         &self.action
     }
 
     #[must_use]
+    /// Outcome disposition.
     pub const fn disposition(&self) -> &GaugeResolutionDisposition {
         &self.disposition
     }
@@ -9605,30 +10535,48 @@ impl GaugeResolutionEvidence {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ClaimAssessment {
+    /// Positive result certified by a specific method and metric.
     ClaimedEstablished {
+        /// Method source running the verification procedure.
         method: SourceRef,
+        /// Receipt proving which exact verifier ran.
         receipt: SourceRef,
+        /// Dimensionless error metric used for acceptance.
         metric: SourceRef,
+        /// Nondimensionalization defining the metric scale.
         nondimensionalization: SourceRef,
+        /// Certified error bound satisfied at acceptance.
         certified_error_bound: f64,
         /// Canonical, action-keyed evidence. A map is intentional: caller
         /// insertion order must never perturb assessment identity, and the
         /// key/value action agreement is validated before admission.
         gauge_resolutions: BTreeMap<GaugeActionReference, GaugeResolutionEvidence>,
     },
+    /// Refutation certified by a specific method and metric.
     ClaimedRefuted {
+        /// Method source running the verification procedure.
         method: SourceRef,
+        /// Receipt proving which exact verifier ran.
         receipt: SourceRef,
+        /// Dimensionless error metric used for rejection.
         metric: SourceRef,
+        /// Nondimensionalization defining the metric scale.
         nondimensionalization: SourceRef,
+        /// Certified error bound demonstrated to be violated.
         certified_error_bound: f64,
     },
+    /// Neither establishment nor refutation, with bounded reasons.
     ClaimedInconclusive {
+        /// Optional method source when one attempted verification.
         method: Option<SourceRef>,
+        /// Optional receipt of that attempt.
         receipt: Option<SourceRef>,
+        /// Bounded reason no decision was possible.
         reason: String,
     },
+    /// Never evaluated during this assessment run.
     NotAssessed {
+        /// Bounded reason assessment was not performed.
         reason: String,
     },
 }
@@ -9636,12 +10584,19 @@ pub enum ClaimAssessment {
 /// Typed conclusions for one exact execution.
 #[derive(Clone, PartialEq)]
 pub struct IdentifiabilityAssessment {
+    /// Assessment-stage schema version.
     schema_version: u32,
+    /// Artifact header carrying capabilities.
     header: ArtifactHeader,
+    /// Bound admitted problem identity.
     problem_id: ProblemId,
+    /// Bound execution-plan identity.
     execution_id: ExecutionId,
+    /// Claims concluded by this assessment keyed by ID.
     claims: BTreeMap<ClaimId, TypedIdentifiabilityClaim>,
+    /// Per-claim evidence keyed by claim ID.
     evidence: BTreeMap<ClaimId, ClaimAssessment>,
+    /// Verified authority for every assessment source.
     source_authority: SourceResolutionSet,
 }
 
@@ -12849,6 +13804,9 @@ fn validate_decisive_practical_claim_closure(
 }
 
 impl IdentifiabilityAssessment {
+    /// Construct and validate an assessment, enforcing capability, identity
+    /// chaining to problem and execution, one evidence record per claim, and
+    /// closed source authority.
     pub fn try_new(
         header: ArtifactHeader,
         problem: &AdmittedIdentifiabilityProblem,
@@ -13173,40 +14131,48 @@ impl IdentifiabilityAssessment {
         Ok(assessment)
     }
 
+    /// Canonical assessment bytes feeding the identity hash.
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, IdentifiabilityError> {
         encode_assessment(self)
     }
 
+    /// Mint the assessment-stage [`AssessmentId`].
     pub fn id(&self) -> Result<AssessmentId, IdentifiabilityError> {
         assessment_identity_hash(self)
     }
 
     #[must_use]
+    /// Assessment schema version.
     pub const fn schema_version(&self) -> u32 {
         self.schema_version
     }
 
     #[must_use]
+    /// Artifact header.
     pub const fn header(&self) -> &ArtifactHeader {
         &self.header
     }
 
     #[must_use]
+    /// Bound [`ProblemId`].
     pub const fn problem_id(&self) -> ProblemId {
         self.problem_id
     }
 
     #[must_use]
+    /// Bound [`ExecutionId`].
     pub const fn execution_id(&self) -> ExecutionId {
         self.execution_id
     }
 
     #[must_use]
+    /// Concluded claims keyed by ID.
     pub const fn claims(&self) -> &BTreeMap<ClaimId, TypedIdentifiabilityClaim> {
         &self.claims
     }
 
     #[must_use]
+    /// Per-claim evidence records.
     pub const fn evidence(&self) -> &BTreeMap<ClaimId, ClaimAssessment> {
         &self.evidence
     }
@@ -13218,6 +14184,7 @@ impl IdentifiabilityAssessment {
         &self.source_authority
     }
 
+    /// Decode bytes and revalidate against the bound problem and execution.
     pub fn from_canonical_bytes(
         bytes: &[u8],
         problem: &AdmittedIdentifiabilityProblem,
