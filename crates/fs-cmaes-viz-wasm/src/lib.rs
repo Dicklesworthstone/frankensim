@@ -29,6 +29,7 @@
 // Public parameters (scalar mirror of the JS boundary; native callers build
 // it directly, the wasm mod unpacks scalars 1:1).
 use fs_la::eigen::jacobi_eigh;
+use std::fmt::Write as _;
 
 /// Landscape ids at the ABI (frozen v1).
 pub const LANDSCAPE_SPHERE: u32 = 0;
@@ -799,40 +800,38 @@ fn project_phase_space(
 // JSON envelope (hand-rolled; no serde at the boundary — fs-flyer pattern).
 // ---------------------------------------------------------------------------
 
-fn num(v: f64) -> String {
+fn push_num(out: &mut String, v: f64) {
     if v.is_finite() {
-        format!("{v}")
+        let _ = write!(out, "{v}");
     } else if v.is_nan() {
-        "null".into()
+        out.push_str("null");
     } else if v > 0.0 {
-        "1e999".into()
+        out.push_str("1e999");
     } else {
-        "-1e999".into()
+        out.push_str("-1e999");
     }
 }
 
-fn num_arr(vals: &[f64]) -> String {
-    let mut s = String::from("[");
+fn push_num_arr(out: &mut String, vals: &[f64]) {
+    out.push('[');
     for (i, v) in vals.iter().enumerate() {
         if i > 0 {
-            s.push(',');
+            out.push(',');
         }
-        s.push_str(&num(*v));
+        push_num(out, *v);
     }
-    s.push(']');
-    s
+    out.push(']');
 }
 
-fn byte_arr(vals: &[u8]) -> String {
-    let mut s = String::from("[");
+fn push_byte_arr(out: &mut String, vals: &[u8]) {
+    out.push('[');
     for (i, v) in vals.iter().enumerate() {
         if i > 0 {
-            s.push(',');
+            out.push(',');
         }
-        s.push_str(&v.to_string());
+        let _ = write!(out, "{v}");
     }
-    s.push(']');
-    s
+    out.push(']');
 }
 
 fn refusal_envelope(r: &Refusal) -> String {
@@ -895,49 +894,95 @@ pub fn cmaes_run_json(
 }
 
 fn ok_envelope(run: &VizRun) -> String {
-    let mut gens = String::from("[");
+    // Budget 24 bytes per scalar for the UI-reachable distributions. This is
+    // only a capacity hint (String still grows correctly for an unusually
+    // long fixed-form value), and it avoids both growth copies and the much
+    // more expensive temporary String per scalar/array in the old formatter.
+    let scalar_count: usize = run
+        .generations
+        .iter()
+        .map(|snap| {
+            snap.mean.len()
+                + 1
+                + snap.eigvals.len()
+                + snap.eigvecs.len()
+                + 2
+                + snap.proj_mean.len()
+                + snap.proj_eigvals.len()
+                + snap.proj_eigvecs.len()
+                + snap.sx.len()
+                + snap.sz.len()
+                + snap.sf.len()
+                + snap.p_sigma.len()
+                + snap.p_c.len()
+        })
+        .sum::<usize>()
+        + 1
+        + run.best_x.len()
+        + run.pca.basis.len()
+        + run.pca.center.len()
+        + run.pca.pool_eigvals.len();
+    let byte_count: usize = run.generations.iter().map(|snap| snap.se.len()).sum();
+    let mut out = String::with_capacity(
+        512 + scalar_count * 24 + byte_count * 2 + run.generations.len() * 256,
+    );
+    let _ = write!(
+        out,
+        "{{\"ok\":{{\"kernel\":\"{}\",\"dim\":{},\"landscape\":{},\"stop_reason\":\"{}\",\"best_f\":",
+        KERNEL_VERSION, run.dim, run.landscape, run.stop_reason
+    );
+    push_num(&mut out, run.best_f);
+    out.push_str(",\"best_x\":");
+    push_num_arr(&mut out, &run.best_x);
+    let _ = write!(
+        out,
+        ",\"total_evals\":{},\"generations\":[",
+        run.total_evals
+    );
     for (gi, snap) in run.generations.iter().enumerate() {
         if gi > 0 {
-            gens.push(',');
+            out.push(',');
         }
-        gens.push_str(&format!(
-            "{{\"g\":{},\"mean\":{},\"sigma\":{},\"eigvals\":{},\"eigvecs\":{},\"cond\":{},\"best_f\":{},\"evals\":{},\"proj_mean\":{},\"proj_eigvals\":{},\"proj_eigvecs\":{},\"sx\":{},\"sz\":{},\"sf\":{},\"se\":{},\"p_sigma\":{},\"p_c\":{}}}",
-            snap.g,
-            num_arr(&snap.mean),
-            num(snap.sigma),
-            num_arr(&snap.eigvals),
-            num_arr(&snap.eigvecs),
-            num(snap.cond),
-            num(snap.best_f),
-            snap.evals,
-            num_arr(&snap.proj_mean),
-            num_arr(&snap.proj_eigvals),
-            num_arr(&snap.proj_eigvecs),
-            num_arr(&snap.sx),
-            num_arr(&snap.sz),
-            num_arr(&snap.sf),
-            byte_arr(&snap.se),
-            num_arr(&snap.p_sigma),
-            num_arr(&snap.p_c),
-        ));
+        let _ = write!(out, "{{\"g\":{},\"mean\":", snap.g);
+        push_num_arr(&mut out, &snap.mean);
+        out.push_str(",\"sigma\":");
+        push_num(&mut out, snap.sigma);
+        out.push_str(",\"eigvals\":");
+        push_num_arr(&mut out, &snap.eigvals);
+        out.push_str(",\"eigvecs\":");
+        push_num_arr(&mut out, &snap.eigvecs);
+        out.push_str(",\"cond\":");
+        push_num(&mut out, snap.cond);
+        out.push_str(",\"best_f\":");
+        push_num(&mut out, snap.best_f);
+        let _ = write!(out, ",\"evals\":{},\"proj_mean\":", snap.evals);
+        push_num_arr(&mut out, &snap.proj_mean);
+        out.push_str(",\"proj_eigvals\":");
+        push_num_arr(&mut out, &snap.proj_eigvals);
+        out.push_str(",\"proj_eigvecs\":");
+        push_num_arr(&mut out, &snap.proj_eigvecs);
+        out.push_str(",\"sx\":");
+        push_num_arr(&mut out, &snap.sx);
+        out.push_str(",\"sz\":");
+        push_num_arr(&mut out, &snap.sz);
+        out.push_str(",\"sf\":");
+        push_num_arr(&mut out, &snap.sf);
+        out.push_str(",\"se\":");
+        push_byte_arr(&mut out, &snap.se);
+        out.push_str(",\"p_sigma\":");
+        push_num_arr(&mut out, &snap.p_sigma);
+        out.push_str(",\"p_c\":");
+        push_num_arr(&mut out, &snap.p_c);
+        out.push('}');
     }
-    gens.push(']');
-    // PCA frame computed by project_phase_space and carried on the run.
-    let basis = num_arr(&run.pca.basis);
-    format!(
-        "{{\"ok\":{{\"kernel\":\"{}\",\"dim\":{},\"landscape\":{},\"stop_reason\":\"{}\",\"best_f\":{},\"best_x\":{},\"total_evals\":{},\"generations\":{},\"pca_basis\":{},\"pca_center\":{},\"pca_pool_eigvals\":{}}}}}",
-        KERNEL_VERSION,
-        run.dim,
-        run.landscape,
-        run.stop_reason,
-        num(run.best_f),
-        num_arr(&run.best_x),
-        run.total_evals,
-        gens,
-        basis,
-        num_arr(&run.pca.center),
-        num_arr(&run.pca.pool_eigvals),
-    )
+    out.push_str("],\"pca_basis\":");
+    push_num_arr(&mut out, &run.pca.basis);
+    out.push_str(",\"pca_center\":");
+    push_num_arr(&mut out, &run.pca.center);
+    out.push_str(",\"pca_pool_eigvals\":");
+    push_num_arr(&mut out, &run.pca.pool_eigvals);
+    out.push_str("}}");
+    out
 }
 
 /// Kernel identity probe for the capability check.
