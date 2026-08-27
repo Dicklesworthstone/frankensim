@@ -248,6 +248,9 @@ pub enum BowedRunError {
     Model(ModalAcousticTimeError),
     /// A state limit was exceeded mid-run; earlier samples remain valid.
     LimitExceeded(ModalAcousticTimeError),
+    /// The compact-body radiation filter refused a step; earlier samples
+    /// remain valid.
+    Radiation(String),
 }
 
 impl std::fmt::Display for BowedRunError {
@@ -257,6 +260,7 @@ impl std::fmt::Display for BowedRunError {
             Self::InvalidCard { what } => write!(f, "card refused: {what}"),
             Self::Model(e) => write!(f, "model refused: {e:?}"),
             Self::LimitExceeded(e) => write!(f, "state limit exceeded: {e:?}"),
+            Self::Radiation(what) => write!(f, "radiation refused: {what}"),
         }
     }
 }
@@ -441,7 +445,9 @@ pub fn run_bowed(config: &BowedRunConfig) -> Result<BowedRunLog, BowedRunError> 
         log.bridge_force_n.push(bridge_force);
 
         if let Some(body) = body.as_mut() {
-            let acc = body.drive(bridge_force, dt);
+            let acc = body
+                .drive(bridge_force, dt)
+                .map_err(|error| BowedRunError::Radiation(error.to_string()))?;
             log.body_velocity_m_s.push(body.volume_velocity());
             log.radiated_pressure_pa
                 .push(body.radiate(acc, AIR_DENSITY_KG_M3, config.listener_m));

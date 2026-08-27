@@ -62,11 +62,16 @@ impl CompactBody {
     }
 
     /// Advance under a generalized force and return acceleration.
-    pub fn drive(&mut self, force_n: f64, dt: f64) -> f64 {
+    ///
+    /// # Errors
+    /// Propagates the radiation-filter step refusal instead of silently
+    /// demoting the reaction force to zero (which would mask model
+    /// instability as benign decay).
+    pub fn drive(&mut self, force_n: f64, dt: f64) -> Result<f64, AcousticRealizeError> {
         let f_rad = if let Some((filter, state)) = self.rad.as_mut() {
             match filter.step(state, self.v) {
                 Ok(p_face) => -p_face * self.area_m2,
-                Err(_) => 0.0,
+                Err(e) => return Err(AcousticRealizeError::Nonlinear(e.to_string())),
             }
         } else {
             0.0
@@ -76,7 +81,7 @@ impl CompactBody {
             - self.omega * self.omega * self.y;
         self.v += dt * acc;
         self.y += dt * self.v;
-        acc
+        Ok(acc)
     }
 
     /// Compact monopole pressure at distance `listener_m`.
@@ -93,9 +98,18 @@ impl CompactBody {
     }
 
     /// Drive and radiate in one step.
-    pub fn drive_and_radiate(&mut self, force_n: f64, dt: f64, rho: f64, listener_m: f64) -> f64 {
-        let acc = self.drive(force_n, dt);
-        self.radiate(acc, rho, listener_m)
+    ///
+    /// # Errors
+    /// Propagates [`CompactBody::drive`] radiation refusals.
+    pub fn drive_and_radiate(
+        &mut self,
+        force_n: f64,
+        dt: f64,
+        rho: f64,
+        listener_m: f64,
+    ) -> Result<f64, AcousticRealizeError> {
+        let acc = self.drive(force_n, dt)?;
+        Ok(self.radiate(acc, rho, listener_m))
     }
 
     fn attach_piston_load(&mut self, gas: &GasState, sample_rate_hz: u32) {
@@ -474,7 +488,7 @@ impl PlateBank {
         let mut p = 0.0;
         for body in &mut self.linear {
             let f_cav = p_cav * body.area_m2;
-            p += body.drive_and_radiate(force_n + f_cav, dt, rho, listener_m);
+            p += body.drive_and_radiate(force_n + f_cav, dt, rho, listener_m)?;
         }
         if let Some(vk) = &mut self.vk {
             let a_vk: f64 = vk.areas.iter().sum();

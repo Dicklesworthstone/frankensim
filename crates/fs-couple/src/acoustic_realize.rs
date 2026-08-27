@@ -489,7 +489,9 @@ fn chain_inlet_pressure(body: &fs_phs::PortHamiltonian, x: &[f64], n_plate: usiz
     if n_plate != 0 {
         return 0.0;
     }
-    body.output(x).first().copied().unwrap_or(0.0)
+    // Structural port slot: a shorter output vector is an internal
+    // invariant break, never physics — refuse loudly instead of zeroing.
+    body.output(x)[0]
 }
 
 fn step_chain_inlet(
@@ -1358,7 +1360,8 @@ fn leftover_u(
     let mut col = 0;
     if let Some(bow) = bow {
         let v = y.get(col).copied().unwrap_or(0.0);
-        u[col] = bow_force(bow, v, texture.delta_n(bow.velocity_m_s - v, dt));
+        u[col] = bow_force(bow, v, texture.delta_n(bow.velocity_m_s - v, dt))
+            .map_err(AcousticRealizeError::Nonlinear)?;
         col += 1;
     }
     for spec in obstacles {
@@ -1419,7 +1422,8 @@ fn leftover_u_ode(
     }
     if let Some(bow) = bow {
         let v = y.get(col).copied().unwrap_or(0.0);
-        u[col] = bow_force(bow, v, texture.delta_n(bow.velocity_m_s - v, dt));
+        u[col] = bow_force(bow, v, texture.delta_n(bow.velocity_m_s - v, dt))
+            .map_err(AcousticRealizeError::Nonlinear)?;
         col += 1;
     }
     for spec in obstacles {
@@ -1637,7 +1641,11 @@ fn validate_string(
         && !(bow.station_frac > 0.0
             && bow.station_frac < 1.0
             && bow.normal_force_n > 0.0
+            && bow.velocity_m_s.is_finite()
+            && bow.normal_force_n.is_finite()
             && bow.stribeck_m_s > 0.0
+            && bow.mu_static.is_finite()
+            && bow.mu_dynamic.is_finite()
             && bow.mu_static >= bow.mu_dynamic
             && bow.mu_dynamic >= 0.0)
     {
@@ -1800,7 +1808,8 @@ fn step_linear_member(
             bow,
             v_string,
             texture.delta_n(bow.velocity_m_s - v_string, dt),
-        );
+        )
+        .map_err(AcousticRealizeError::Nonlinear)?;
         for (f, phi) in force.iter_mut().zip(member.phi_bow.iter()) {
             *f = f_bow * *phi;
         }
@@ -1958,7 +1967,8 @@ fn step_kc_member(
             bow,
             v_string,
             texture.delta_n(bow.velocity_m_s - v_string, dt),
-        );
+        )
+        .map_err(AcousticRealizeError::Nonlinear)?;
         #[allow(clippy::needless_range_loop)] // the modal index spans u and shapes
         for k in 0..string.n_modes {
             let phi = det::sin((k + 1) as f64 * pi * bow.station_frac) / mass_scale;
@@ -2011,7 +2021,7 @@ fn triangular_pluck_modal(pluck: Pluck, k: usize) -> f64 {
     2.0 * pluck.height_m * det::sin(kf * pi * xi) / (kf * kf * pi * pi * xi * (1.0 - xi))
 }
 
-fn bow_force(bow: BowStroke, v_string: f64, normal_delta_n: f64) -> f64 {
+fn bow_force(bow: BowStroke, v_string: f64, normal_delta_n: f64) -> Result<f64, String> {
     let law = fs_tribo::FrictionLaw::Stribeck {
         static_mu: bow.mu_static,
         kinetic_mu: bow.mu_dynamic,
@@ -2021,7 +2031,8 @@ fn bow_force(bow: BowStroke, v_string: f64, normal_delta_n: f64) -> f64 {
     let normal = (bow.normal_force_n + normal_delta_n).max(0.0);
     // Driven-body sign: + when the driver is faster.
     law.regularized_traction_1d(bow.velocity_m_s - v_string, normal, bow.stribeck_m_s)
-        .map_or(0.0, |f| -f)
+        .map(|f| -f)
+        .map_err(|e| e.to_string())
 }
 
 /// Declared surface-height drive of the contact normal.
