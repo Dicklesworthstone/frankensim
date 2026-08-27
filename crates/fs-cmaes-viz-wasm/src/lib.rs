@@ -270,10 +270,20 @@ fn transform_matrix(eigvals: &[f64], eigvecs: &[f64], n: usize, inv: bool) -> Ve
     out
 }
 
+#[cfg(test)]
 fn mat_vec(m: &[f64], v: &[f64], n: usize) -> Vec<f64> {
-    (0..n)
-        .map(|i| (0..n).map(|k| m[i * n + k] * v[k]).sum::<f64>())
-        .collect()
+    let mut out = vec![0.0; n];
+    mat_vec_into(m, v, n, &mut out);
+    out
+}
+
+fn mat_vec_into(m: &[f64], v: &[f64], n: usize, out: &mut [f64]) {
+    debug_assert!(m.len() >= n * n);
+    debug_assert!(v.len() >= n);
+    debug_assert!(out.len() >= n);
+    for (i, value) in out.iter_mut().take(n).enumerate() {
+        *value = (0..n).map(|k| m[i * n + k] * v[k]).sum::<f64>();
+    }
 }
 
 /// Advance the cumulative-path decay and return
@@ -489,6 +499,9 @@ pub fn cmaes_run(p: &VizParams) -> Result<VizRun, Refusal> {
     for i in 0..n {
         current_eigvecs[i * n + i] = 1.0;
     }
+    let mut matvec_y = vec![0.0; n];
+    let mut z_mean = vec![0.0; n];
+    let mut whitened = vec![0.0; n];
 
     for g in 0..p.generations {
         let sqrt_c = transform_matrix(&current_eigvals, &current_eigvecs, n, false);
@@ -503,9 +516,9 @@ pub fn cmaes_run(p: &VizParams) -> Result<VizRun, Refusal> {
         for i in 0..lambda {
             let z = &mut sz_raw[i * n..(i + 1) * n];
             rng.fill_gaussian(z);
-            let y = mat_vec(&sqrt_c, z, n);
+            mat_vec_into(&sqrt_c, z, n, &mut matvec_y);
             for k in 0..n {
-                let raw_xk = mean[k] + sigma * y[k];
+                let raw_xk = mean[k] + sigma * matvec_y[k];
                 raw_sx[i * n + k] = raw_xk;
                 let mut xk = raw_xk;
                 if p.bounds_enabled {
@@ -560,7 +573,7 @@ pub fn cmaes_run(p: &VizParams) -> Result<VizRun, Refusal> {
             }
         }
         let mean_shift: Vec<f64> = (0..n).map(|k| (mean[k] - old_mean[k]) / sigma).collect();
-        let z_mean = mat_vec(&inv_sqrt_c, &mean_shift, n);
+        mat_vec_into(&inv_sqrt_c, &mean_shift, n, &mut z_mean);
 
         // 4. Evolution paths.
         let ps_coeff = (cs * (2.0 - cs) * mueff).sqrt();
@@ -590,10 +603,10 @@ pub fn cmaes_run(p: &VizParams) -> Result<VizRun, Refusal> {
                     continue;
                 }
                 let idx = order[rank];
-                let y: Vec<f64> = (0..n)
-                    .map(|k| (raw_sx[idx * n + k] - old_mean[k]) / sigma)
-                    .collect();
-                let whitened = mat_vec(&inv_sqrt_c, &y, n);
+                for k in 0..n {
+                    matvec_y[k] = (raw_sx[idx * n + k] - old_mean[k]) / sigma;
+                }
+                mat_vec_into(&inv_sqrt_c, &matvec_y, n, &mut whitened);
                 let mahalanobis_sq: f64 = whitened.iter().map(|v| v * v).sum();
                 adjusted[rank] = if mahalanobis_sq > 0.0 {
                     adjusted[rank] * nf / mahalanobis_sq
