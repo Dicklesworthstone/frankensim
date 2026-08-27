@@ -11,7 +11,9 @@
 //! checkpoint program.
 
 use crate::Refusal;
-use crate::spine::{Loads, RigidBody, SixDofState, step, tick_digest};
+use crate::spine::{
+    Loads, RigidBody, SixDofState, admit_and_canonicalize_state, step, tick_digest,
+};
 use fs_blake3::hash_domain;
 
 /// The frozen input-trace hash domain (replay-identity-schema-v1).
@@ -222,9 +224,10 @@ where
             ranked_repairs: vec!["the 1903 Flyer has 2 control channels".into()],
         });
     }
+    let canonical_initial = admit_and_canonicalize_state(body, initial, dt_s)?;
     let mut ring = StateRing::new(ring_capacity)?;
     let mut controls = [0.0f64; MAX_CHANNELS];
-    let mut state = *initial;
+    let mut state = canonical_initial;
     let mut digests = Vec::with_capacity(trace.end_tick_exclusive as usize);
     let mut ev = trace.events.iter().peekable();
     for tick in 0..trace.end_tick_exclusive {
@@ -260,10 +263,11 @@ pub fn record<F>(
 where
     F: FnMut(f64, &SixDofState, &[f64]) -> Loads,
 {
-    let (_, digests, _) = run_recorded(body, initial, dt_s, &trace, 64, loads)?;
+    let canonical_initial = admit_and_canonicalize_state(body, initial, dt_s)?;
+    let (_, digests, _) = run_recorded(body, &canonical_initial, dt_s, &trace, 64, loads)?;
     let input_trace_id = trace.trace_id();
     Ok(RunRecord {
-        initial: *initial,
+        initial: canonical_initial,
         body: *body,
         dt_s,
         trace,

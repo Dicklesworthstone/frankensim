@@ -44,6 +44,7 @@ fs-couple = { path = "../fs-couple" }
 fs-evidence = { path = "../fs-evidence" }
 fs-exec = { path = "../fs-exec" }
 fs-flux = { path = "../fs-flux" }
+fs-ga = { path = "../fs-ga" }
 fs-geom = { path = "../fs-geom" }
 fs-govern = { path = "../fs-govern" }
 fs-ir = { path = "../fs-ir", optional = true }

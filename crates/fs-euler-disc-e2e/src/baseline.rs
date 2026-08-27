@@ -9,10 +9,11 @@
 //! does not establish dissipation, impacts, finite stop time, or any
 //! physical-video correspondence.
 
+use fs_ga::{Quat, So3, Vec3 as GaVec3};
 use fs_mbd::{
     Gravity, MassProperties, Pose, RigidBodyIntegrator, RigidBodyState, UnitQuaternion, Vec3,
 };
-use fs_time::{quat_exp_step, quat_rotate};
+use fs_time::{so3_body_exp_step, so3_space_exp_step};
 use fs_tribo::{
     ContactFrame, FrictionLaw, InputAuthority, InterfaceMedium, InterfaceSystemRef, TangentialSlip,
 };
@@ -21,6 +22,20 @@ use fs_tribo::{
 pub const STANDARD_GRAVITY_MPS2: f64 = 9.806_65;
 /// Execution bound that keeps one invocation's retained trajectory finite.
 pub const MAX_BASELINE_STEPS: u32 = 100_000;
+
+fn quaternion_from_boundary(components: [f64; 4]) -> Quat {
+    Quat {
+        w: components[0],
+        x: components[1],
+        y: components[2],
+        z: components[3],
+    }
+}
+
+fn rotation_to_boundary(rotation: So3) -> [f64; 4] {
+    let quaternion = rotation.as_quat();
+    [quaternion.w, quaternion.x, quaternion.y, quaternion.z]
+}
 
 /// Scope assigned to the executed reduced path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -299,6 +314,8 @@ pub enum BaselineRefusalReason {
     MultibodyInputRejected,
     /// A dynamic-oracle invocation failed its thin homogeneous steady-rolling checks.
     DynamicOracleViolation,
+    /// The canonical `fs-ga` group invariant refused an integration step.
+    LieGroupStepRejected,
 }
 
 impl BaselineRefusalReason {
@@ -316,6 +333,7 @@ impl BaselineRefusalReason {
             Self::TribologyInputRejected => "tribology_input_rejected",
             Self::MultibodyInputRejected => "multibody_input_rejected",
             Self::DynamicOracleViolation => "dynamic_oracle_violation",
+            Self::LieGroupStepRejected => "lie_group_step_rejected",
         }
     }
 }
@@ -392,12 +410,23 @@ impl BaselineRunOutput {
 /// `v_cm + omega × r_contact = 0`, gravity sets normal load, and the path ends
 /// if the inferred horizontal support demand exceeds static-friction capacity.
 #[must_use]
-pub fn run_ideal_conservative_baseline(input: SquatDiscInput) -> BaselineRunOutput {
+pub fn run_ideal_conservative_baseline(mut input: SquatDiscInput) -> BaselineRunOutput {
     if let Some(reason) = validate_input(&input) {
         return BaselineRunOutput::Refused(BaselineRefusal { reason });
     }
 
     let mut state = input.initial_state;
+    let mut rotation =
+        match So3::try_from_quat(quaternion_from_boundary(state.orientation_body_to_world)) {
+            Ok(rotation) => rotation,
+            Err(_) => {
+                return BaselineRunOutput::Refused(BaselineRefusal {
+                    reason: BaselineRefusalReason::InvalidOrientation,
+                });
+            }
+        };
+    state.orientation_body_to_world = rotation_to_boundary(rotation);
+    input.initial_state.orientation_body_to_world = state.orientation_body_to_world;
     let initial_total_j = energy(&input, state, 0.0).total_j;
     let equilibrium = equilibrium_receipt(&input, initial_total_j);
     let mut samples = Vec::with_capacity(usize::try_from(input.steps).unwrap_or(0) + 1);
@@ -412,29 +441,53 @@ pub fn run_ideal_conservative_baseline(input: SquatDiscInput) -> BaselineRunOutp
         completed_steps: input.steps,
     };
     for step in 1..=input.steps {
-        let omega_world = world_angular_velocity(&input, state.orientation_body_to_world);
-        let omega_body = world_to_body(state.orientation_body_to_world, omega_world);
-        let orientation_body_to_world = quat_exp_step(
-            state.orientation_body_to_world,
-            omega_body,
+        // The reduced path prescribes the exact Euler-angle factorization
+        // R(t+h) = Exp(h Ω e_z) R(t) Exp(h spin e_3): world-vertical
+        // precession is a space/left action and axial spin is a body/right
+        // action. Collapsing these into one frozen body-rate exponential
+        // introduces an artificial inclination (and energy) drift.
+        rotation = match so3_space_exp_step(
+            rotation,
+            GaVec3::new(0.0, 0.0, input.precession_rad_s),
             input.step_seconds,
-        );
+        )
+        .and_then(|precessed| {
+            so3_body_exp_step(
+                precessed,
+                GaVec3::new(0.0, 0.0, input.spin_rad_s),
+                input.step_seconds,
+            )
+        }) {
+            Ok(next) => next,
+            Err(_) => {
+                return BaselineRunOutput::Refused(BaselineRefusal {
+                    reason: BaselineRefusalReason::LieGroupStepRejected,
+                });
+            }
+        };
+        let orientation_body_to_world = rotation_to_boundary(rotation);
         let next_kinematic = supported_state(
             &input,
             orientation_body_to_world,
             f64::from(step) * input.step_seconds,
             state.position_m,
         );
-        let position_m = add3(
-            state.position_m,
-            scale3(
-                add3(
-                    state.linear_velocity_mps,
-                    next_kinematic.linear_velocity_mps,
-                ),
-                0.5 * input.step_seconds,
+        let displacement_m = scale3(
+            add3(
+                state.linear_velocity_mps,
+                next_kinematic.linear_velocity_mps,
             ),
+            0.5 * input.step_seconds,
         );
+        // The reduced model advances only the two in-plane coordinates. The
+        // support manifold owns z: retaining the integrated z component here
+        // allowed roundoff in an otherwise tangent velocity to accumulate into
+        // a false rim/plane gap.
+        let position_m = [
+            state.position_m[0] + displacement_m[0],
+            state.position_m[1] + displacement_m[1],
+            next_kinematic.position_m[2],
+        ];
         state = BaselineState {
             position_m,
             ..next_kinematic
@@ -513,7 +566,13 @@ fn validate_input(input: &SquatDiscInput) -> Option<BaselineRefusalReason> {
         return Some(BaselineRefusalReason::StepBudgetExceeded);
     }
     let orientation_norm_squared = dot4(input.initial_state.orientation_body_to_world);
-    if !orientation_norm_squared.is_finite() || (orientation_norm_squared - 1.0).abs() > 1.0e-12 {
+    if !orientation_norm_squared.is_finite()
+        || (orientation_norm_squared - 1.0).abs() > 1.0e-12
+        || So3::try_from_quat(quaternion_from_boundary(
+            input.initial_state.orientation_body_to_world,
+        ))
+        .is_err()
+    {
         return Some(BaselineRefusalReason::InvalidOrientation);
     }
     if mbd_diagnostics(input, input.initial_state).is_none() {
@@ -729,18 +788,16 @@ fn world_angular_velocity(input: &SquatDiscInput, orientation_body_to_world: [f6
 }
 
 fn disc_normal(orientation_body_to_world: [f64; 4]) -> Vec3 {
-    let vector = quat_rotate(orientation_body_to_world, [0.0, 0.0, 1.0]);
-    Vec3::new(vector[0], vector[1], vector[2])
+    let vector =
+        quaternion_from_boundary(orientation_body_to_world).rotate(GaVec3::new(0.0, 0.0, 1.0));
+    Vec3::new(vector.x, vector.y, vector.z)
 }
 
 fn world_to_body(orientation_body_to_world: [f64; 4], vector_world: Vec3) -> [f64; 3] {
-    let conjugate = [
-        orientation_body_to_world[0],
-        -orientation_body_to_world[1],
-        -orientation_body_to_world[2],
-        -orientation_body_to_world[3],
-    ];
-    quat_rotate(conjugate, [vector_world.x, vector_world.y, vector_world.z])
+    let vector = quaternion_from_boundary(orientation_body_to_world)
+        .conjugate()
+        .rotate(GaVec3::new(vector_world.x, vector_world.y, vector_world.z));
+    [vector.x, vector.y, vector.z]
 }
 
 fn rim_contact_offset(radius_m: f64, thickness_m: f64, normal: Vec3) -> Vec3 {

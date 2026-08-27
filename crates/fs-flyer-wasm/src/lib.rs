@@ -23,6 +23,7 @@
 //! toolchain, the envelope, and the determinism discipline end to end.
 
 use fs_blake3::hash_domain;
+use fs_ga::{Quat, So3, Vec3};
 use fs_time::lie::rigid_body_step;
 
 pub mod archive;
@@ -197,21 +198,49 @@ pub struct HelloState {
     pub steps: u32,
 }
 
-/// Deterministic free rigid-body spin: principal inertia `inertia_kg_m2`,
-/// initial unit quaternion `q0`, body angular velocity `omega0`, fixed
-/// timestep `dt_s`, `steps` steps of the CG2 Lie-group integrator.
-///
-/// # Errors
-/// Typed refusals for non-finite inputs, non-positive inertia, a non-unit
-/// quaternion, an out-of-domain timestep, or a step count above
-/// [`MAX_HELLO_STEPS`].
-pub fn hello_spin(
+fn rotation_from_boundary(quaternion: [f64; 4]) -> Result<So3, Refusal> {
+    So3::try_from_quat(Quat {
+        w: quaternion[0],
+        x: quaternion[1],
+        y: quaternion[2],
+        z: quaternion[3],
+    })
+    .map_err(|error| Refusal {
+        code: "non-unit-quaternion",
+        message: format!("q0 was refused by the canonical fs-ga SO(3) boundary: {error}"),
+        ranked_repairs: vec![
+            "supply a finite unit quaternion; the simulation never silently normalizes state"
+                .into(),
+            "pass identity [1,0,0,0] if no initial attitude is intended".into(),
+        ],
+    })
+}
+
+fn rotation_to_boundary(rotation: So3) -> [f64; 4] {
+    let quaternion = rotation.as_quat();
+    [quaternion.w, quaternion.x, quaternion.y, quaternion.z]
+}
+
+fn canonical_rigid_body_step(
+    rotation: So3,
+    omega_body: Vec3,
+    inertia: Vec3,
+    dt_s: f64,
+) -> Result<(So3, Vec3), Refusal> {
+    rigid_body_step(rotation, omega_body, inertia, dt_s).map_err(|error| Refusal {
+        code: "lie-step-refused",
+        message: format!("canonical fs-time rigid-body step refused: {error}"),
+        ranked_repairs: vec!["reduce the timestep or inspect the upstream state".into()],
+    })
+}
+
+fn admit_hello(
     inertia_kg_m2: [f64; 3],
     q0: [f64; 4],
     omega0: [f64; 3],
     dt_s: f64,
     steps: u32,
-) -> Result<HelloState, Refusal> {
+) -> Result<(So3, Vec3, Vec3), Refusal> {
     let finite = inertia_kg_m2.iter().all(|v| v.is_finite())
         && q0.iter().all(|v| v.is_finite())
         && omega0.iter().all(|v| v.is_finite())
@@ -233,17 +262,7 @@ pub fn hello_spin(
             ranked_repairs: vec!["supply a physically valid principal inertia triple".into()],
         });
     }
-    let norm2: f64 = q0.iter().map(|v| v * v).sum();
-    if (norm2 - 1.0).abs() > 1.0e-9 {
-        return Err(Refusal {
-            code: "non-unit-quaternion",
-            message: format!("q0 must be unit-norm (|q|² − 1 = {:.3e})", norm2 - 1.0),
-            ranked_repairs: vec![
-                "normalize the quaternion before the call".into(),
-                "pass identity [1,0,0,0] if no initial attitude is intended".into(),
-            ],
-        });
-    }
+    let rotation = rotation_from_boundary(q0)?;
     if !(MIN_DT_S..=MAX_DT_S).contains(&dt_s) {
         return Err(Refusal {
             code: "timestep-outside-domain",
@@ -261,13 +280,35 @@ pub fn hello_spin(
             ],
         });
     }
-    let (mut q, mut w) = (q0, omega0);
+    Ok((
+        rotation,
+        Vec3::new(omega0[0], omega0[1], omega0[2]),
+        Vec3::new(inertia_kg_m2[0], inertia_kg_m2[1], inertia_kg_m2[2]),
+    ))
+}
+
+/// Deterministic free rigid-body spin: principal inertia `inertia_kg_m2`,
+/// initial unit quaternion `q0`, body angular velocity `omega0`, fixed
+/// timestep `dt_s`, `steps` steps of the CG2 Lie-group integrator.
+///
+/// # Errors
+/// Typed refusals for non-finite inputs, non-positive inertia, a non-unit
+/// quaternion, an out-of-domain timestep, or a step count above
+/// [`MAX_HELLO_STEPS`].
+pub fn hello_spin(
+    inertia_kg_m2: [f64; 3],
+    q0: [f64; 4],
+    omega0: [f64; 3],
+    dt_s: f64,
+    steps: u32,
+) -> Result<HelloState, Refusal> {
+    let (mut rotation, mut angular, inertia) = admit_hello(inertia_kg_m2, q0, omega0, dt_s, steps)?;
     for _ in 0..steps {
-        (q, w) = rigid_body_step(q, w, inertia_kg_m2, dt_s);
+        (rotation, angular) = canonical_rigid_body_step(rotation, angular, inertia, dt_s)?;
     }
     Ok(HelloState {
-        quaternion: q,
-        omega_body: w,
+        quaternion: rotation_to_boundary(rotation),
+        omega_body: [angular.x, angular.y, angular.z],
         steps,
     })
 }
@@ -286,22 +327,23 @@ pub fn hello_digest(
     dt_s: f64,
     steps: u32,
 ) -> Result<String, Refusal> {
-    // Admission is shared with hello_spin by running step zero's checks.
-    hello_spin(inertia_kg_m2, q0, omega0, dt_s, 0)?;
+    let (mut rotation, mut angular, inertia) = admit_hello(inertia_kg_m2, q0, omega0, dt_s, steps)?;
+    let canonical_q0 = rotation_to_boundary(rotation);
     let mut payload = Vec::with_capacity(8 * (7 * steps as usize + 11));
     for value in inertia_kg_m2
         .iter()
-        .chain(q0.iter())
+        .chain(canonical_q0.iter())
         .chain(omega0.iter())
         .chain([dt_s].iter())
     {
         payload.extend_from_slice(&value.to_bits().to_le_bytes());
     }
     payload.extend_from_slice(&steps.to_le_bytes());
-    let (mut q, mut w) = (q0, omega0);
     for _ in 0..steps {
-        (q, w) = rigid_body_step(q, w, inertia_kg_m2, dt_s);
-        for value in q.iter().chain(w.iter()) {
+        (rotation, angular) = canonical_rigid_body_step(rotation, angular, inertia, dt_s)?;
+        let quaternion = rotation_to_boundary(rotation);
+        let omega = [angular.x, angular.y, angular.z];
+        for value in quaternion.iter().chain(omega.iter()) {
             payload.extend_from_slice(&value.to_bits().to_le_bytes());
         }
     }
@@ -379,7 +421,7 @@ pub fn aero_step(
     dt_s: f64,
     steps: u32,
 ) -> Result<HelloState, Refusal> {
-    hello_spin(inertia_kg_m2, q0, omega0, dt_s, 0)?;
+    let (mut rotation, mut angular, inertia) = admit_hello(inertia_kg_m2, q0, omega0, dt_s, steps)?;
     if !torque_n_m.iter().all(|v| v.is_finite()) {
         return Err(Refusal {
             code: "non-finite-torque",
@@ -387,16 +429,15 @@ pub fn aero_step(
             ranked_repairs: vec!["replace NaN/inf torque with a finite body wrench".into()],
         });
     }
-    let (mut q, mut w) = (q0, omega0);
     for _ in 0..steps {
-        w[0] += torque_n_m[0] / inertia_kg_m2[0] * dt_s;
-        w[1] += torque_n_m[1] / inertia_kg_m2[1] * dt_s;
-        w[2] += torque_n_m[2] / inertia_kg_m2[2] * dt_s;
-        (q, w) = rigid_body_step(q, w, inertia_kg_m2, dt_s);
+        angular.x += torque_n_m[0] / inertia_kg_m2[0] * dt_s;
+        angular.y += torque_n_m[1] / inertia_kg_m2[1] * dt_s;
+        angular.z += torque_n_m[2] / inertia_kg_m2[2] * dt_s;
+        (rotation, angular) = canonical_rigid_body_step(rotation, angular, inertia, dt_s)?;
     }
     Ok(HelloState {
-        quaternion: q,
-        omega_body: w,
+        quaternion: rotation_to_boundary(rotation),
+        omega_body: [angular.x, angular.y, angular.z],
         steps,
     })
 }
@@ -674,7 +715,7 @@ mod tests {
         // value (the E6.2 six-lane program consumes it). Golden-bump protocol
         // applies to any change.
         assert_eq!(
-            base, "d1ee8e689eebfe8ca4330cab2d256968534962ceaf034dacf788fed1838323f9",
+            base, "03bb383e716e64c7315e29639bc8d49f418396e1f929802f55ed9e500dfc063f",
             "canonical hello digest moved — determinism regression or an \
              intentional kernel change requiring the golden-bump protocol"
         );
@@ -682,6 +723,19 @@ mod tests {
         omega[2] += 1.0e-12;
         let perturbed = hello_digest(INERTIA, IDENTITY_Q, omega, DT, 480).unwrap();
         assert_ne!(base, perturbed, "a 1e-12 input change must move the digest");
+
+        let half = core::f64::consts::FRAC_1_SQRT_2;
+        let positive = [half, 0.0, 0.0, half];
+        let negative = positive.map(|coordinate| -coordinate);
+        assert_eq!(
+            hello_spin(INERTIA, positive, OMEGA, DT, 32).unwrap(),
+            hello_spin(INERTIA, negative, OMEGA, DT, 32).unwrap(),
+        );
+        assert_eq!(
+            hello_digest(INERTIA, positive, OMEGA, DT, 32).unwrap(),
+            hello_digest(INERTIA, negative, OMEGA, DT, 32).unwrap(),
+            "a trajectory digest must identify the canonical rotation, not its raw quaternion representative",
+        );
     }
 
     #[test]
@@ -693,6 +747,20 @@ mod tests {
         let over = hello_spin(INERTIA, IDENTITY_Q, OMEGA, DT, MAX_HELLO_STEPS + 1).unwrap_err();
         assert_eq!(over.code, "step-budget-exceeded");
         assert!(!over.ranked_repairs.is_empty());
+
+        let digest_over =
+            hello_digest(INERTIA, IDENTITY_Q, OMEGA, DT, MAX_HELLO_STEPS + 1).unwrap_err();
+        assert_eq!(digest_over.code, "step-budget-exceeded");
+        let aero_over = aero_step(
+            INERTIA,
+            IDENTITY_Q,
+            OMEGA,
+            [0.0; 3],
+            DT,
+            MAX_HELLO_STEPS + 1,
+        )
+        .unwrap_err();
+        assert_eq!(aero_over.code, "step-budget-exceeded");
 
         let nan = hello_spin([f64::NAN, 1.0, 1.0], IDENTITY_Q, OMEGA, DT, 1).unwrap_err();
         assert_eq!(nan.code, "non-finite-input");

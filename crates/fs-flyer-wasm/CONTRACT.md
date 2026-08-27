@@ -39,7 +39,12 @@ Boundary contracts, inherited by every future API entry:
    canonical golden seeds the six-lane golden program (E6.2). The
    golden-bump protocol applies to any change.
 3. **Admission caps are exact.** Refusal boundaries are tested at cap AND
-   cap+1 (workspace law).
+   cap+1 (workspace law), and every trajectory-bearing entry performs the
+   admission before allocating or stepping.
+4. **Canonical rotation ownership.** Quaternion arrays exist only at the
+   browser ABI. They are admitted into `fs_ga::So3` without silent
+   normalization, and all stepping thereafter uses `fs_ga::{So3, Vec3}`
+   through `fs_time`'s group integrators.
 
 ## Public types and semantics
 
@@ -47,8 +52,8 @@ Boundary contracts, inherited by every future API entry:
 
 | Entry | Kind | Contract |
 |---|---|---|
-| `hello_spin` / `flyer_hello_spin` | pure / wasm | deterministic free rigid-body CG2 spin (`fs_time::lie::rigid_body_step`); refuses non-finite input, non-positive inertia, non-unit quaternion, out-of-domain dt, steps > 1,000,000 |
-| `hello_digest` / `flyer_hello_digest` | pure / wasm | full-trajectory bit-exact content digest (hex) under the versioned domain |
+| `hello_spin` / `flyer_hello_spin` | pure / wasm | deterministic free rigid-body CG2 spin over canonical `fs_ga::So3` state (`fs_time::lie::rigid_body_step`); refuses non-finite input, non-positive inertia, orientation outside SO(3), out-of-domain dt, steps > 1,000,000 |
+| `hello_digest` / `flyer_hello_digest` | pure / wasm | full-trajectory bit-exact content digest (hex) under the versioned domain; performs the same admission, including the exact step cap, before allocation |
 | `hello_spin_json`, `refusal_envelope`, `hello_envelope` | pure | the JS envelope renderers (shared by native tests and the boundary) |
 
 ### Archive-loader surface (E0.9c slice, bead guzez.1.9.3)
@@ -113,7 +118,8 @@ Every fallible entry returns the typed-refusal JS envelope
 stable machine-readable strings tested at cap AND cap+1. Vocabulary:
 
 `non-finite-input`, `non-positive-inertia`, `non-unit-quaternion`,
-`timestep-outside-domain`, `step-budget-exceeded`; archive loader:
+`timestep-outside-domain`, `step-budget-exceeded`, `lie-step-refused`;
+archive loader:
 `archive-size-mismatch`, `archive-content-digest-mismatch`,
 `archive-mirror-divergence`, `archive-envelope-malformed`,
 `archive-replay-digest-mismatch`; ring (E5.0): `ring-config-invalid`,

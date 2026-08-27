@@ -13,6 +13,7 @@ layer = "L4"
 [dependencies]
 fs-airfoil = { path = "../fs-airfoil" }
 fs-blake3 = { path = "../fs-blake3" }
+fs-ga = { path = "../fs-ga" }
 fs-geom = { path = "../fs-geom" }
 fs-math = { path = "../fs-math" }
 fs-mbd = { path = "../fs-mbd" }
@@ -31,7 +32,6 @@ asupersync = { path = "../../../asupersync" }
 fs-alloc = { path = "../fs-alloc" }
 fs-contact = { path = "../fs-contact" }
 fs-exec = { path = "../fs-exec" }
-fs-ga = { path = "../fs-ga" }
 fs-ivl = { path = "../fs-ivl" }
 fs-motion = { path = "../fs-motion" }
 

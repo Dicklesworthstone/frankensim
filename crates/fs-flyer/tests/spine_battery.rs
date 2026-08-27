@@ -139,6 +139,105 @@ fn bit_identity_across_runs_and_digest_sensitivity() {
 }
 
 #[test]
+fn quaternion_double_cover_has_identical_callbacks_state_and_digest() {
+    let half = core::f64::consts::FRAC_1_SQRT_2;
+    let mut positive = rest();
+    positive.quat = [half, 0.0, 0.0, half];
+    positive.omega_body = [0.1, -0.2, 0.3];
+    let mut negative = positive;
+    negative.quat = positive.quat.map(|coordinate| -coordinate);
+
+    let mut positive_callbacks = Vec::new();
+    let positive_end = step(&body(), &positive, 0.0, DT, |_, state| {
+        positive_callbacks.push(state.quat);
+        Loads {
+            force_n: [state.quat[0], state.quat[3], 0.0],
+            moment_nm: [0.0, state.quat[0] - state.quat[3], 0.0],
+        }
+    })
+    .unwrap();
+    let mut negative_callbacks = Vec::new();
+    let negative_end = step(&body(), &negative, 0.0, DT, |_, state| {
+        negative_callbacks.push(state.quat);
+        Loads {
+            force_n: [state.quat[0], state.quat[3], 0.0],
+            moment_nm: [0.0, state.quat[0] - state.quat[3], 0.0],
+        }
+    })
+    .unwrap();
+
+    assert_eq!(positive_callbacks, negative_callbacks);
+    assert_eq!(positive_end, negative_end);
+    assert_eq!(tick_digest(0, &positive_end), tick_digest(0, &negative_end));
+}
+
+#[test]
+fn zero_horizon_still_admits_and_canonicalizes_state() {
+    let half = core::f64::consts::FRAC_1_SQRT_2;
+    let mut negative = rest();
+    negative.quat = [-half, -0.0, -0.0, -half];
+    let mut callback_calls = 0;
+    let (canonical, digests) = advance(&body(), &negative, 0.0, DT, 0, |_, _| {
+        callback_calls += 1;
+        Loads {
+            force_n: [0.0; 3],
+            moment_nm: [0.0; 3],
+        }
+    })
+    .unwrap();
+    assert_eq!(canonical.quat, [half, 0.0, 0.0, half]);
+    assert!(digests.is_empty());
+    assert_eq!(callback_calls, 0);
+
+    let mut invalid = rest();
+    invalid.quat = [2.0, 0.0, 0.0, 0.0];
+    assert_eq!(
+        advance(&body(), &invalid, 0.0, DT, 0, |_, _| unreachable!())
+            .unwrap_err()
+            .code,
+        "orientation-outside-group"
+    );
+}
+
+#[test]
+fn non_finite_time_and_callback_loads_refuse_without_poisoning_state() {
+    let mut calls = 0;
+    let bad_time = step(&body(), &rest(), f64::NAN, DT, |_, _| {
+        calls += 1;
+        Loads {
+            force_n: [0.0; 3],
+            moment_nm: [0.0; 3],
+        }
+    })
+    .unwrap_err();
+    assert_eq!(bad_time.code, "non-finite-input");
+    assert_eq!(calls, 0, "invalid time must refuse before callback effects");
+
+    let first = step(&body(), &rest(), 0.0, DT, |_, _| Loads {
+        force_n: [f64::NAN, 0.0, 0.0],
+        moment_nm: [0.0; 3],
+    })
+    .unwrap_err();
+    assert_eq!(first.code, "non-finite-loads");
+
+    let mut stage = 0;
+    let second = step(&body(), &rest(), 0.0, DT, |_, _| {
+        stage += 1;
+        Loads {
+            force_n: if stage == 2 {
+                [f64::INFINITY, 0.0, 0.0]
+            } else {
+                [0.0; 3]
+            },
+            moment_nm: [0.0; 3],
+        }
+    })
+    .unwrap_err();
+    assert_eq!(second.code, "non-finite-loads");
+    assert_eq!(stage, 2);
+}
+
+#[test]
 fn refusals_at_cap_and_cap_plus_one() {
     let ok = advance(&body(), &rest(), 0.0, DT, 0, |_, _| Loads {
         force_n: [0.0; 3],
@@ -182,7 +281,23 @@ fn refusals_at_cap_and_cap_plus_one() {
         .code,
         "non-finite-input"
     );
-    jlog("refusals", "\"gates\":\"steps cap+1, dt, mass, NaN state\"");
+    let mut invalid_orientation = rest();
+    invalid_orientation.quat = [2.0, 0.0, 0.0, 0.0];
+    let mut callback_calls = 0;
+    let refused = step(&body(), &invalid_orientation, 0.0, DT, |_, _| {
+        callback_calls += 1;
+        Loads {
+            force_n: [0.0; 3],
+            moment_nm: [0.0; 3],
+        }
+    })
+    .unwrap_err();
+    assert_eq!(refused.code, "orientation-outside-group");
+    assert_eq!(callback_calls, 0, "refused state must not invoke loads");
+    jlog(
+        "refusals",
+        "\"gates\":\"steps cap+1, dt, mass, NaN state, canonical SO(3) state\"",
+    );
 }
 
 #[test]
@@ -196,8 +311,10 @@ fn trajectory_golden() {
     .unwrap();
     let last = digests.last().unwrap().clone();
     jlog("golden", &format!("\"digest\":\"{last}\""));
+    // Intentional canonical-state migration: fs-time now advances fs-ga::So3
+    // and canonicalizes the quaternion double cover at every group operation.
     assert_eq!(
-        last, "816e722d0ddbf5d9e864aa3eab7a9cd21b0b1a6fad3d64cf4b76eb4b30c156e5",
+        last, "7f7a61553e3257bf49abc90b27b528a68dea4d195aa9185201b986d7bc5a4a17",
         "spine trajectory digest moved — determinism regression or an \
          intentional integrator change requiring the golden-bump protocol"
     );

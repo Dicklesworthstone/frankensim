@@ -13,6 +13,7 @@
 
 use crate::Refusal;
 use fs_blake3::hash_domain;
+use fs_ga::{Quat, So3, Vec3};
 use fs_time::lie::rigid_body_step;
 
 /// The fixed simulation tick rate [Hz] (plan §4.1).
@@ -88,13 +89,15 @@ impl RigidBody {
     }
 }
 
-fn admit_step(state: &SixDofState, dt_s: f64) -> Result<(), Refusal> {
-    let finite = state.pos_m.iter().all(|v| v.is_finite())
+fn state_is_finite(state: &SixDofState) -> bool {
+    state.pos_m.iter().all(|v| v.is_finite())
         && state.vel_mps.iter().all(|v| v.is_finite())
         && state.quat.iter().all(|v| v.is_finite())
         && state.omega_body.iter().all(|v| v.is_finite())
-        && dt_s.is_finite();
-    if !finite {
+}
+
+fn admit_step(state: &SixDofState, dt_s: f64) -> Result<(), Refusal> {
+    if !state_is_finite(state) || !dt_s.is_finite() {
         return Err(Refusal {
             code: "non-finite-input",
             message: "state and dt must be finite".into(),
@@ -109,6 +112,94 @@ fn admit_step(state: &SixDofState, dt_s: f64) -> Result<(), Refusal> {
         });
     }
     Ok(())
+}
+
+fn admit_time_interval(t_s: f64, dt_s: f64) -> Result<f64, Refusal> {
+    let end_t_s = t_s + dt_s;
+    if !t_s.is_finite() || !end_t_s.is_finite() {
+        return Err(Refusal {
+            code: "non-finite-input",
+            message: "tick start and end times must be finite".into(),
+            ranked_repairs: vec!["restart from a finite simulation clock".into()],
+        });
+    }
+    Ok(end_t_s)
+}
+
+fn admit_loads(loads: Loads, stage: &str) -> Result<Loads, Refusal> {
+    if loads.force_n.iter().all(|value| value.is_finite())
+        && loads.moment_nm.iter().all(|value| value.is_finite())
+    {
+        return Ok(loads);
+    }
+    Err(Refusal {
+        code: "non-finite-loads",
+        message: format!("{stage} loads must be finite"),
+        ranked_repairs: vec!["inspect the upstream force and moment model".into()],
+    })
+}
+
+fn admit_derived_state(state: &SixDofState, stage: &str) -> Result<(), Refusal> {
+    if state_is_finite(state) {
+        return Ok(());
+    }
+    Err(Refusal {
+        code: "non-finite-state",
+        message: format!("{stage} left the finite state domain"),
+        ranked_repairs: vec!["reduce the step or inspect the applied loads".into()],
+    })
+}
+
+fn rotation_from_boundary(quaternion: [f64; 4]) -> Result<So3, Refusal> {
+    So3::try_from_quat(Quat {
+        w: quaternion[0],
+        x: quaternion[1],
+        y: quaternion[2],
+        z: quaternion[3],
+    })
+    .map_err(|error| Refusal {
+        code: "orientation-outside-group",
+        message: format!("body-to-world orientation was refused by fs-ga: {error}"),
+        ranked_repairs: vec![
+            "supply a finite unit quaternion; fs-ga never silently normalizes state".into(),
+        ],
+    })
+}
+
+fn rotation_to_boundary(rotation: So3) -> [f64; 4] {
+    let quaternion = rotation.as_quat();
+    [quaternion.w, quaternion.x, quaternion.y, quaternion.z]
+}
+
+fn admitted_state_and_rotation(
+    body: &RigidBody,
+    state: &SixDofState,
+    dt_s: f64,
+) -> Result<(SixDofState, So3), Refusal> {
+    body.admit()?;
+    admit_step(state, dt_s)?;
+    let rotation = rotation_from_boundary(state.quat)?;
+    let mut canonical_state = *state;
+    canonical_state.quat = rotation_to_boundary(rotation);
+    Ok((canonical_state, rotation))
+}
+
+/// Validate mass properties, state, timestep, and the `SO(3)` boundary, then
+/// return the canonical quaternion representative of the admitted state.
+///
+/// This is the shared zero-horizon admission path for replay and batched
+/// advance callers. It validates but never silently normalizes a non-unit
+/// quaternion.
+///
+/// # Errors
+/// Admission refusals from [`RigidBody::admit`], state/dt checks, or `fs-ga`
+/// group admission.
+pub fn admit_and_canonicalize_state(
+    body: &RigidBody,
+    state: &SixDofState,
+    dt_s: f64,
+) -> Result<SixDofState, Refusal> {
+    admitted_state_and_rotation(body, state, dt_s).map(|(canonical, _)| canonical)
 }
 
 /// One spine tick: velocity-Verlet translation (loads sampled at t and
@@ -131,44 +222,85 @@ pub fn step<F>(
 where
     F: FnMut(f64, &SixDofState) -> Loads,
 {
-    body.admit()?;
-    admit_step(state, dt_s)?;
-    let l0 = loads(t_s, state);
+    // Group admission is part of state admission: a refused orientation must
+    // not invoke a potentially stateful load callback.
+    let (canonical_state, rotation) = admitted_state_and_rotation(body, state, dt_s)?;
+    let end_t_s = admit_time_interval(t_s, dt_s)?;
+    let l0 = admit_loads(loads(t_s, &canonical_state), "start-of-tick")?;
     let inv_m = 1.0 / body.mass_kg;
     let a0 = [
         l0.force_n[0] * inv_m,
         l0.force_n[1] * inv_m,
         l0.force_n[2] * inv_m,
     ];
+    if !a0.iter().all(|value| value.is_finite()) {
+        return Err(Refusal {
+            code: "non-finite-state",
+            message: "start-of-tick acceleration left the finite domain".into(),
+            ranked_repairs: vec!["inspect force magnitude relative to body mass".into()],
+        });
+    }
     // Drift: x+ = x + v·dt + a0·dt²/2.
-    let mut pos = *state;
-    for ((x, v), a) in pos.pos_m.iter_mut().zip(&state.vel_mps).zip(&a0) {
+    let mut pos = canonical_state;
+    for ((x, v), a) in pos.pos_m.iter_mut().zip(&canonical_state.vel_mps).zip(&a0) {
         *x += v * dt_s + 0.5 * a * dt_s * dt_s;
     }
     // Rotation: half-kick, torque-free Lie step, half-kick.
     let half = 0.5 * dt_s;
-    let mut w = state.omega_body;
+    let mut w = canonical_state.omega_body;
     for ((wi, m), inertia) in w.iter_mut().zip(&l0.moment_nm).zip(&body.inertia_kgm2) {
         *wi += m / inertia * half;
     }
-    let (q_new, w_free) = rigid_body_step(state.quat, w, body.inertia_kgm2, dt_s);
-    pos.quat = q_new;
+    if !pos.pos_m.iter().all(|value| value.is_finite()) || !w.iter().all(|value| value.is_finite())
+    {
+        return Err(Refusal {
+            code: "non-finite-state",
+            message: "drift or angular half-kick left the finite state domain".into(),
+            ranked_repairs: vec!["reduce the step or inspect the applied loads".into()],
+        });
+    }
+    let (rotation_new, angular_free) = rigid_body_step(
+        rotation,
+        Vec3::new(w[0], w[1], w[2]),
+        Vec3::new(
+            body.inertia_kgm2[0],
+            body.inertia_kgm2[1],
+            body.inertia_kgm2[2],
+        ),
+        dt_s,
+    )
+    .map_err(|error| Refusal {
+        code: "lie-step-refused",
+        message: format!("canonical fs-time rigid-body step refused: {error}"),
+        ranked_repairs: vec!["reduce the step or inspect the upstream load model".into()],
+    })?;
+    let w_free = [angular_free.x, angular_free.y, angular_free.z];
+    pos.quat = rotation_to_boundary(rotation_new);
     // End-of-tick loads at the predicted state (positions + rotated frame).
     let mut predictor = pos;
     for i in 0..3 {
-        predictor.vel_mps[i] = state.vel_mps[i] + a0[i] * dt_s;
+        predictor.vel_mps[i] = canonical_state.vel_mps[i] + a0[i] * dt_s;
         predictor.omega_body[i] = w_free[i];
     }
-    let l1 = loads(t_s + dt_s, &predictor);
+    admit_derived_state(&predictor, "end-of-tick predictor")?;
+    let l1 = admit_loads(loads(end_t_s, &predictor), "end-of-tick")?;
     let a1 = [
         l1.force_n[0] * inv_m,
         l1.force_n[1] * inv_m,
         l1.force_n[2] * inv_m,
     ];
+    if !a1.iter().all(|value| value.is_finite()) {
+        return Err(Refusal {
+            code: "non-finite-state",
+            message: "end-of-tick acceleration left the finite domain".into(),
+            ranked_repairs: vec!["inspect force magnitude relative to body mass".into()],
+        });
+    }
     for i in 0..3 {
-        pos.vel_mps[i] = state.vel_mps[i] + 0.5 * (a0[i] + a1[i]) * dt_s;
+        pos.vel_mps[i] = canonical_state.vel_mps[i] + 0.5 * (a0[i] + a1[i]) * dt_s;
         pos.omega_body[i] = w_free[i] + l1.moment_nm[i] / body.inertia_kgm2[i] * half;
     }
+    admit_derived_state(&pos, "completed tick")?;
     Ok(pos)
 }
 
@@ -196,7 +328,8 @@ where
             ranked_repairs: vec!["advance long runs in bounded chunks".into()],
         });
     }
-    let mut s = *state;
+    let mut s = admit_and_canonicalize_state(body, state, dt_s)?;
+    admit_time_interval(t0_s, dt_s)?;
     let mut digests = Vec::with_capacity(steps as usize);
     for k in 0..steps {
         let t = t0_s + f64::from(k) * dt_s;

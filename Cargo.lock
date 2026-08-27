@@ -1354,6 +1354,7 @@ dependencies = [
  "fs-evidence",
  "fs-exec",
  "fs-flux",
+ "fs-ga",
  "fs-geom",
  "fs-govern",
  "fs-img",
@@ -1837,6 +1838,9 @@ dependencies = [
 [[package]]
 name = "fs-mbd"
 version = "0.0.1"
+dependencies = [
+ "fs-ga",
+]
 
 [[package]]
 name = "fs-mesh"
@@ -2405,6 +2409,7 @@ dependencies = [
  "fs-cutfem",
  "fs-evidence",
  "fs-exec",
+ "fs-ga",
  "fs-ivl",
  "fs-la",
  "fs-matdb",
@@ -2416,7 +2421,6 @@ dependencies = [
  "fs-scenario",
  "fs-solver",
  "fs-sparse",
- "fs-time",
 ]
 
 [[package]]

@@ -34,6 +34,13 @@ the browser boundary remains in `fs-flyer-wasm`.
   longitudinal state plus Estimated reduced roll/yaw state. Snapshot v2 is a
   14-float layout whose first 12 words are the unchanged v1 prefix and whose
   appended words are roll attitude and heading.
+- `spine::step` / `spine::advance` — deterministic six-DoF fixed-step
+  integration. The array boundary is admitted into canonical `fs-ga::So3`
+  before either load callback runs; body angular velocity advances through the
+  `fs-time` body/right Lie step, and returned quaternions use the canonical
+  representative of the rotation double cover. Zero-horizon advance and replay
+  still perform body/state/timestep/group admission and return that canonical
+  state without invoking the load callback.
 
 ## Invariants
 
@@ -55,11 +62,20 @@ Typed `Refusal { code, message, ranked_repairs }`. Codes:
 `component-mass-invalid`, `mass-spec-mismatch`, `hinge-ratio-invalid`.
 Caps tested at cap AND cap+1 (workspace law).
 
+The six-DoF spine additionally reports `orientation-outside-group` before
+invoking a load callback, `non-finite-loads` for a non-finite force or moment,
+`non-finite-state` when finite admitted inputs overflow during a derived step,
+and `lie-step-refused` if the canonical integration owner refuses a derived
+step. Non-finite start/end time is `non-finite-input` and refuses before load
+callback effects.
+
 ## Determinism class
 
 Deterministic: pure arithmetic + fs-blake3 digests; the reference design
 digest is pinned (golden-bump protocol; one bump recorded when travel_rad
-moved from the 0.5236 literal to exact π/6).
+moved from the 0.5236 literal to exact π/6). Spine digests are computed from
+canonical output states, so quaternion representatives `q` and `-q` describe
+the same callback inputs, trajectory, and digest.
 
 ## Cancellation behavior
 

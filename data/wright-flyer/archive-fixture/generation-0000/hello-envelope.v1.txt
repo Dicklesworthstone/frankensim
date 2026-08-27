@@ -6,4 +6,4 @@ omega0=0.3,-1.2,2.1
 dt_num=1
 dt_den=120
 steps=480
-trajectory_digest=d1ee8e689eebfe8ca4330cab2d256968534962ceaf034dacf788fed1838323f9
+trajectory_digest=03bb383e716e64c7315e29639bc8d49f418396e1f929802f55ed9e500dfc063f

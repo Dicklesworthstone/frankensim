@@ -115,6 +115,42 @@ fn record_replay_bit_identity() {
 }
 
 #[test]
+fn zero_length_replay_admits_and_records_canonical_initial_state() {
+    let half = core::f64::consts::FRAC_1_SQRT_2;
+    let mut negative = rest();
+    negative.quat = [-half, -0.0, -0.0, -half];
+    let empty = InputTrace {
+        end_tick_exclusive: 0,
+        events: vec![],
+    };
+    let mut callback_calls = 0;
+    let (end, digests, ring) = run_recorded(&body(), &negative, DT, &empty, 1, |_, _, _| {
+        callback_calls += 1;
+        Loads {
+            force_n: [0.0; 3],
+            moment_nm: [0.0; 3],
+        }
+    })
+    .unwrap();
+    assert_eq!(end.quat, [half, 0.0, 0.0, half]);
+    assert!(digests.is_empty());
+    assert_eq!(ring.pushes(), 0);
+    assert_eq!(callback_calls, 0);
+
+    let recorded = record(&body(), &negative, DT, empty.clone(), loads).unwrap();
+    assert_eq!(recorded.initial.quat, [half, 0.0, 0.0, half]);
+
+    let mut invalid = rest();
+    invalid.quat = [2.0, 0.0, 0.0, 0.0];
+    assert_eq!(
+        run_recorded(&body(), &invalid, DT, &empty, 1, loads)
+            .unwrap_err()
+            .code,
+        "orientation-outside-group"
+    );
+}
+
+#[test]
 fn divergence_localizes_to_the_tampered_tick() {
     let rec = record(&body(), &rest(), DT, demo_trace(), loads).unwrap();
     // FALSIFIER: tamper one mid-run event (tick 240) AND recompute the trace

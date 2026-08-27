@@ -6,14 +6,15 @@ use fs_euler_disc_e2e::{
 };
 
 #[test]
-fn ideal_conservative_production_slice_emits_deterministic_trajectory_and_ledger() {
+fn ideal_conservative_production_slice_emits_deterministic_trajectory_and_ledger()
+-> Result<(), String> {
     let input = SquatDiscInput::nominal();
     let first = run_ideal_conservative_baseline(input.clone());
     let second = run_ideal_conservative_baseline(input);
     assert_eq!(first, second);
 
     let BaselineRunOutput::Completed(trajectory) = first else {
-        panic!("nominal production input must be admitted");
+        return Err("nominal production input must be admitted".to_owned());
     };
     assert_eq!(trajectory.samples.len(), 101);
     assert_eq!(
@@ -41,6 +42,21 @@ fn ideal_conservative_production_slice_emits_deterministic_trajectory_and_ledger
         trajectory.equilibrium.small_angle_energy_residual_j.abs()
             < 0.03 * trajectory.equilibrium.small_angle_energy_oracle_j
     );
+    Ok(())
+}
+
+#[test]
+fn quaternion_double_cover_produces_one_canonical_trajectory_from_sample_zero() {
+    let positive = SquatDiscInput::nominal();
+    let mut negative = positive.clone();
+    negative.initial_state.orientation_body_to_world = positive
+        .initial_state
+        .orientation_body_to_world
+        .map(|coordinate| -coordinate);
+
+    let positive_run = run_ideal_conservative_baseline(positive);
+    let negative_run = run_ideal_conservative_baseline(negative);
+    assert_eq!(positive_run, negative_run);
 }
 
 #[test]
@@ -56,18 +72,19 @@ fn perturbing_precession_refuses_the_dynamic_steady_rolling_oracle() {
 }
 
 #[test]
-fn non_oracle_rates_are_explicitly_labeled_as_prescribed_kinematics() {
+fn non_oracle_rates_are_explicitly_labeled_as_prescribed_kinematics() -> Result<(), String> {
     let mut input = SquatDiscInput::nominal();
     input.dynamics_class = BaselineDynamicsClass::PrescribedKinematicPath;
     input.precession_rad_s *= 1.01;
     input.reset_supported_initial_state();
     let BaselineRunOutput::Completed(trajectory) = run_ideal_conservative_baseline(input) else {
-        panic!("prescribed path should remain a kinematic, not dynamic, output");
+        return Err("prescribed path should remain a kinematic, not dynamic, output".to_owned());
     };
     assert_eq!(
         trajectory.model_id,
         "prescribed_no_slip_rolling_disc_kinematics"
     );
+    Ok(())
 }
 
 #[test]
