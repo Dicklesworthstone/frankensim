@@ -13,6 +13,7 @@ layer = "L3"
 
 [dependencies]
 fs-ga = { path = "../fs-ga" }
+fs-math = { path = "../fs-math" }
 
 
 [lints]

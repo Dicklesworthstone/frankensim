@@ -33,6 +33,8 @@ use fs_dfo::{
     CmaShapeSnapshot, CmaSnapshot, admit_cma,
 };
 
+pub mod g1_walking;
+
 /// Kernel identity returned by the browser capability probe.
 pub const KERNEL_VERSION: &str = "fs-cmaes-viz-wasm 0.5.0";
 /// Exact binary64 word identifying schema-2 packets (`"CMA2"`).

@@ -8,9 +8,229 @@ use crate::articulated::{
     ArticulatedError, ArticulatedModel, JointLimits, JointModel, Link, SpatialInertia,
 };
 use fs_ga::{Mat3, Se3, So3, So3Tangent, Vec3};
+use fs_math::det;
 
 /// Version of the typed in-source robot catalog layout.
 pub const ROBOT_MODEL_CATALOG_VERSION: u32 = 1;
+
+/// Number of actuators retained by the G1 lower-body-and-waist catalog.
+pub const G1_POLICY_ACTUATORS: usize = 15;
+/// Raw state and command signals supplied to the G1 residual policy.
+pub const G1_POLICY_RAW_SIGNALS: usize = 42;
+/// Periodic phase functions multiplying every raw signal.
+pub const G1_POLICY_PHASE_BASIS: usize = 8;
+/// Features seen by each G1 actuator.
+pub const G1_POLICY_FEATURES_PER_ACTUATOR: usize = G1_POLICY_RAW_SIGNALS * G1_POLICY_PHASE_BASIS;
+/// Exact search-space dimension of the flagship G1 residual policy.
+pub const G1_POLICY_DIMENSION: usize = G1_POLICY_ACTUATORS * G1_POLICY_FEATURES_PER_ACTUATOR;
+
+/// One complete observation for the catalog-owned 5,040-parameter G1 policy.
+///
+/// The signal ordering is deliberately closed and documented: bias, 15 joint
+/// positions, 15 joint velocities, body-frame gravity direction, body angular
+/// velocity, body-frame target-velocity error, and left/right contact state.
+/// A browser or optimizer may choose the parameters, but it must not silently
+/// invent a different feature map under the same dimensional label.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct G1PolicyObservation {
+    /// Joint angles in compact catalog order [rad].
+    pub joint_position_rad: [f64; G1_POLICY_ACTUATORS],
+    /// Joint rates in compact catalog order [rad/s].
+    pub joint_velocity_rad_per_s: [f64; G1_POLICY_ACTUATORS],
+    /// Unit gravity direction expressed in the pelvis frame.
+    pub gravity_direction_body: Vec3,
+    /// Pelvis angular velocity expressed in the pelvis frame [rad/s].
+    pub angular_velocity_body_rad_per_s: Vec3,
+    /// Target minus current translational velocity in the pelvis frame [m/s].
+    pub target_velocity_error_body_m_per_s: Vec3,
+    /// Left and right foot contact-state indicators.
+    pub foot_contact: [bool; 2],
+    /// Gait phase in radians. Periodic wrapping is implicit in the basis.
+    pub phase_rad: f64,
+}
+
+/// Refusal surface for the catalog-owned G1 policy representation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum G1PolicyError {
+    /// An observation field contains NaN or infinity.
+    NonFiniteObservation {
+        /// Stable field name.
+        field: &'static str,
+    },
+    /// The flat actuator-major matrix is not exactly 5,040 entries long.
+    ParameterCount {
+        /// Required parameter count.
+        expected: usize,
+        /// Supplied parameter count.
+        actual: usize,
+    },
+    /// A policy weight contains NaN or infinity.
+    NonFiniteParameter {
+        /// Flat parameter index.
+        index: usize,
+    },
+    /// A fixed-order activation produced a non-finite residual.
+    NonFiniteOutput {
+        /// Compact actuator index.
+        actuator: usize,
+    },
+}
+
+impl core::fmt::Display for G1PolicyError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::NonFiniteObservation { field } => {
+                write!(formatter, "non-finite G1 policy observation: {field}")
+            }
+            Self::ParameterCount { expected, actual } => write!(
+                formatter,
+                "G1 policy requires exactly {expected} parameters, got {actual}"
+            ),
+            Self::NonFiniteParameter { index } => {
+                write!(formatter, "non-finite G1 policy parameter at index {index}")
+            }
+            Self::NonFiniteOutput { actuator } => {
+                write!(
+                    formatter,
+                    "non-finite G1 policy output for actuator {actuator}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for G1PolicyError {}
+
+/// Expand one admitted observation into the exact 336-feature actuator basis.
+///
+/// Features are signal-major. Each of the 42 raw signals is multiplied by
+/// `[1, sin(phi), cos(phi), sin(2phi), cos(2phi), sin(3phi), cos(3phi),
+/// sin(4phi)]`. This makes the 5,040-D search space a typed part of the robot
+/// owner rather than an undocumented browser convention.
+pub fn g1_policy_features(
+    observation: &G1PolicyObservation,
+) -> Result<[f64; G1_POLICY_FEATURES_PER_ACTUATOR], G1PolicyError> {
+    validate_g1_observation(observation)?;
+    let phase = observation.phase_rad;
+    let basis = [
+        1.0,
+        det::sin(phase),
+        det::cos(phase),
+        det::sin(2.0 * phase),
+        det::cos(2.0 * phase),
+        det::sin(3.0 * phase),
+        det::cos(3.0 * phase),
+        det::sin(4.0 * phase),
+    ];
+    let mut raw = [0.0; G1_POLICY_RAW_SIGNALS];
+    raw[0] = 1.0;
+    raw[1..16].copy_from_slice(&observation.joint_position_rad);
+    raw[16..31].copy_from_slice(&observation.joint_velocity_rad_per_s);
+    raw[31..34].copy_from_slice(&vec3_array(observation.gravity_direction_body));
+    raw[34..37].copy_from_slice(&vec3_array(observation.angular_velocity_body_rad_per_s));
+    raw[37..40].copy_from_slice(&vec3_array(observation.target_velocity_error_body_m_per_s));
+    raw[40] = if observation.foot_contact[0] {
+        1.0
+    } else {
+        0.0
+    };
+    raw[41] = if observation.foot_contact[1] {
+        1.0
+    } else {
+        0.0
+    };
+
+    let mut features = [0.0; G1_POLICY_FEATURES_PER_ACTUATOR];
+    for (signal_index, signal) in raw.into_iter().enumerate() {
+        let offset = signal_index * G1_POLICY_PHASE_BASIS;
+        for (basis_index, multiplier) in basis.into_iter().enumerate() {
+            features[offset + basis_index] = signal * multiplier;
+        }
+    }
+    Ok(features)
+}
+
+/// Evaluate the exact 5,040-D G1 residual-torque policy.
+///
+/// The parameter matrix is actuator-major (`15 × 336`). Each row's fixed-order
+/// dot product passes through deterministic `tanh`, yielding a normalized
+/// residual in `[-1, 1]`; the consuming controller alone owns conversion to
+/// torque and enforcement of source effort limits.
+pub fn evaluate_g1_residual_policy(
+    parameters: &[f64],
+    observation: &G1PolicyObservation,
+) -> Result<[f64; G1_POLICY_ACTUATORS], G1PolicyError> {
+    if parameters.len() != G1_POLICY_DIMENSION {
+        return Err(G1PolicyError::ParameterCount {
+            expected: G1_POLICY_DIMENSION,
+            actual: parameters.len(),
+        });
+    }
+    for (index, value) in parameters.iter().copied().enumerate() {
+        if !value.is_finite() {
+            return Err(G1PolicyError::NonFiniteParameter { index });
+        }
+    }
+    let features = g1_policy_features(observation)?;
+    let mut output = [0.0; G1_POLICY_ACTUATORS];
+    for (actuator, row) in parameters
+        .chunks_exact(G1_POLICY_FEATURES_PER_ACTUATOR)
+        .enumerate()
+    {
+        let mut activation = 0.0;
+        for (weight, feature) in row.iter().zip(features) {
+            activation += weight * feature;
+        }
+        output[actuator] = det::tanh(activation);
+        if !output[actuator].is_finite() {
+            return Err(G1PolicyError::NonFiniteOutput { actuator });
+        }
+    }
+    Ok(output)
+}
+
+fn validate_g1_observation(observation: &G1PolicyObservation) -> Result<(), G1PolicyError> {
+    for (values, field) in [
+        (
+            observation.joint_position_rad.as_slice(),
+            "joint_position_rad",
+        ),
+        (
+            observation.joint_velocity_rad_per_s.as_slice(),
+            "joint_velocity_rad_per_s",
+        ),
+    ] {
+        if values.iter().any(|value| !value.is_finite()) {
+            return Err(G1PolicyError::NonFiniteObservation { field });
+        }
+    }
+    for (value, field) in [
+        (observation.gravity_direction_body, "gravity_direction_body"),
+        (
+            observation.angular_velocity_body_rad_per_s,
+            "angular_velocity_body_rad_per_s",
+        ),
+        (
+            observation.target_velocity_error_body_m_per_s,
+            "target_velocity_error_body_m_per_s",
+        ),
+    ] {
+        if vec3_array(value)
+            .iter()
+            .any(|component| !component.is_finite())
+        {
+            return Err(G1PolicyError::NonFiniteObservation { field });
+        }
+    }
+    if !observation.phase_rad.is_finite() {
+        return Err(G1PolicyError::NonFiniteObservation { field: "phase_rad" });
+    }
+    Ok(())
+}
+
+const fn vec3_array(value: Vec3) -> [f64; 3] {
+    [value.x, value.y, value.z]
+}
 
 /// Stable identity for one catalog model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -152,7 +372,7 @@ const UNITREE_OMISSIONS: [&str; 4] = [
     "The 14 arm DoFs, arm links, fixed rubber hands, and their inertias are omitted rather than lumped into torso_link.",
     "Fixed pelvis-contour, logo, head, waist-support, and sensor attachments are omitted; their nonzero masses are not lumped into retained links.",
     "Visual/collision meshes, foot contact spheres, sensors, transmissions, and actuator/gear dynamics are not represented.",
-    "The pelvis is attached to the prescribed BaseState; this is neither a floating-base solve nor a complete G1 mass model.",
+    "The catalog itself prescribes no base boundary: callers may use fs-mbd's prescribed-base or unconstrained free-floating solve; neither adds the omitted upper-body mass nor ground contact.",
 ];
 
 static UNITREE_METADATA: RobotModelMetadata = RobotModelMetadata {
@@ -717,6 +937,61 @@ mod tests {
                 "waist_roll_joint",
                 "waist_pitch_joint",
             ]
+        );
+    }
+
+    #[test]
+    fn g1_policy_is_exactly_5040_dimensional_and_owner_ordered() -> Result<(), G1PolicyError> {
+        assert_eq!(G1_POLICY_RAW_SIGNALS, 42);
+        assert_eq!(G1_POLICY_FEATURES_PER_ACTUATOR, 336);
+        assert_eq!(G1_POLICY_DIMENSION, 5_040);
+        let mut observation = G1PolicyObservation {
+            joint_position_rad: [0.0; G1_POLICY_ACTUATORS],
+            joint_velocity_rad_per_s: [0.0; G1_POLICY_ACTUATORS],
+            gravity_direction_body: Vec3::new(0.0, 0.0, -1.0),
+            angular_velocity_body_rad_per_s: Vec3::new(0.0, 0.0, 0.0),
+            target_velocity_error_body_m_per_s: Vec3::new(1.0, 0.0, 0.0),
+            foot_contact: [true, false],
+            phase_rad: 0.0,
+        };
+        observation.joint_position_rad[0] = 2.0;
+        let features = g1_policy_features(&observation)?;
+        assert_eq!(&features[0..8], &[1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0]);
+        assert_eq!(&features[8..16], &[2.0, 0.0, 2.0, 0.0, 2.0, 0.0, 2.0, 0.0]);
+        assert_eq!(features[40 * G1_POLICY_PHASE_BASIS], 1.0);
+        assert_eq!(features[41 * G1_POLICY_PHASE_BASIS], 0.0);
+
+        let zero_parameters = vec![0.0; G1_POLICY_DIMENSION];
+        assert_eq!(
+            evaluate_g1_residual_policy(&zero_parameters, &observation)?,
+            [0.0; G1_POLICY_ACTUATORS]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn g1_policy_refuses_shape_and_non_finite_inputs() {
+        let observation = G1PolicyObservation {
+            joint_position_rad: [0.0; G1_POLICY_ACTUATORS],
+            joint_velocity_rad_per_s: [0.0; G1_POLICY_ACTUATORS],
+            gravity_direction_body: Vec3::new(0.0, 0.0, -1.0),
+            angular_velocity_body_rad_per_s: Vec3::new(0.0, 0.0, 0.0),
+            target_velocity_error_body_m_per_s: Vec3::new(0.0, 0.0, 0.0),
+            foot_contact: [false; 2],
+            phase_rad: 0.0,
+        };
+        assert!(matches!(
+            evaluate_g1_residual_policy(&[], &observation),
+            Err(G1PolicyError::ParameterCount {
+                expected: G1_POLICY_DIMENSION,
+                actual: 0
+            })
+        ));
+        let mut parameters = vec![0.0; G1_POLICY_DIMENSION];
+        parameters[1_234] = f64::NAN;
+        assert_eq!(
+            evaluate_g1_residual_policy(&parameters, &observation),
+            Err(G1PolicyError::NonFiniteParameter { index: 1_234 })
         );
     }
 

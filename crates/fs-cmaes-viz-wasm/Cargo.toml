@@ -19,6 +19,12 @@ layer = "L6"
 [dependencies]
 # The sole owner of CMA sampling and state transitions.
 fs-dfo = { path = "../fs-dfo" }
+# Existing mathematical owners composed by the G1 flagship rollout.
+fs-contact = { path = "../fs-contact" }
+fs-ga = { path = "../fs-ga" }
+fs-mbd = { path = "../fs-mbd" }
+fs-time = { path = "../fs-time" }
+fs-tribo = { path = "../fs-tribo" }
 
 # wasm-bindgen only enters the wasm32 build — native builds stay dependency-clean.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
