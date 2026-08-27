@@ -6,8 +6,10 @@
 //! tangency laws.
 
 use fs_ga::{
-    Cga, Mat34, Motor, Pga, Plane, Point, Quat, Vec3, cga, exp_bivector, motor_log,
+    Cga, Mat34, Motor, Pga, Plane, Point, Quat, Se3, So3Tangent, Twist, Vec3, Wrench, cga,
+    exp_bivector, motor_log,
     pga::{Line, axis_bivector, ideal_bivector},
+    so3_left_jacobian, so3_left_jacobian_inverse,
 };
 use fs_propcheck::Shrink;
 
@@ -675,5 +677,62 @@ fn ga_007_versor_drift_and_renormalization_policy() {
     verdict(
         "ga-007",
         "20k-product chain, renorm every 64: drift within declared bounds",
+    );
+}
+
+#[test]
+fn ga_008_lie_group_facades_and_duality() {
+    let mut seed = 0x6A_0008u64;
+    for round in 0..256 {
+        let angular = rand_unit_axis(&mut seed).scale(lcg(&mut seed) * 3.0);
+        let linear = Vec3::new(
+            lcg(&mut seed) * 4.0 - 2.0,
+            lcg(&mut seed) * 4.0 - 2.0,
+            lcg(&mut seed) * 4.0 - 2.0,
+        );
+        let twist = Twist::new(angular, linear);
+        let pose = Se3::exp(twist).expect("finite principal-branch twist");
+        let recovered = pose.log();
+        assert!(
+            (recovered.angular - angular).norm() < 2.0e-10,
+            "angular exp/log residual at round {round}"
+        );
+        assert!(
+            (recovered.linear - linear).norm() < 2.0e-10,
+            "linear exp/log residual at round {round}"
+        );
+
+        let phi = So3Tangent::new(angular);
+        let identity = so3_left_jacobian(phi)
+            .unwrap()
+            .compose(so3_left_jacobian_inverse(phi).unwrap());
+        for (index, value) in identity.m.iter().enumerate() {
+            let expected = if index % 4 == 0 { 1.0 } else { 0.0 };
+            assert!(
+                (value - expected).abs() < 2.0e-11,
+                "SO(3) Jacobian inverse residual at round {round}, entry {index}"
+            );
+        }
+
+        let probe = Twist::new(
+            rand_unit_axis(&mut seed).scale(0.7),
+            rand_unit_axis(&mut seed).scale(1.3),
+        );
+        let wrench = Wrench::new(
+            rand_unit_axis(&mut seed).scale(0.9),
+            rand_unit_axis(&mut seed).scale(1.7),
+        );
+        let pairing_before = wrench.pairing(probe);
+        let pairing_after = wrench
+            .transform_by(&pose)
+            .pairing(probe.transform_by(&pose));
+        assert!(
+            (pairing_before - pairing_after).abs() < 2.0e-11,
+            "coadjoint pairing residual at round {round}"
+        );
+    }
+    verdict(
+        "ga-008",
+        "256 fixed rounds: principal exp/log, SO(3) Jacobian inverse, adjoint/coadjoint duality",
     );
 }

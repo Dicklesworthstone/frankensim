@@ -42,6 +42,14 @@ fs-scenario frames, the gradient stack's manifold variants.
 - `facade`: `Vec3` (+, −, dot, cross), `Quat` (Hamilton `*`, `rotate`,
   `from_axis_angle`), `Mat34` (motor lowered to a rigid-motion matrix),
   `Motor::from_parts`/`to_parts` — the no-formalism-tax boundary.
+- `lie`: validated canonical `So3` and `Se3` group façades backed by the
+  existing `Quat` and PGA `Motor` authorities; `So3Tangent`, `Twist`
+  (`[angular, linear]`), and its dual `Wrench` (`[torque, force]`);
+  explicitly named body/right and space/left plus/minus operations; analytic
+  SO(3) left/right Jacobians and inverses; deterministic certified-series
+  SE(3) exponential differentials; group adjoint, coadjoint, Lie bracket,
+  twist/wrench frame transforms, and invariant dual pairing. `Mat3`/`Mat6`
+  are fixed-size differential/interchange views, never pose authorities.
 
 ## Invariants
 
@@ -65,14 +73,26 @@ fs-scenario frames, the gradient stack's manifold variants.
 6. **Versor hygiene**: `renormalize` divides out the full `M M̃ = a + bI`
    residue; a 20 000-product chain renormalized every 64 steps stays
    below 1e−11 drift (ledgered by the conformance run).
+7. **Validated Lie façades**: constructors reject non-finite, degenerate,
+   wrong-grade, and non-unit inputs; they never silently normalize. The
+   quaternion/motor double cover is canonicalized without rescaling, using a
+   deterministic lexicographic tie-break at exactly π.
+8. **Differentials and duality**: SO(3) Jacobian/inverse products agree with
+   identity through zero, tiny, general, and near-π cases; SE(3) `dexp` uses
+   the convergent `Σ adⁿ/(n+1)!` series with a submultiplicative infinity-norm
+   tail bound and structured conditioning refusal; adjoint homomorphism,
+   bracket covariance, and coadjoint dual-pairing invariance are executable
+   G0/G3 laws.
 
 ## Error model
 
-`GaError`: `IdealPoint` (a trivector with zero e123 weight has no
-Cartesian form), `ZeroWeight { context }` (conformal element with no
-finite representative — flat blades, degenerate sphere construction).
-Degenerate constructions return the honest degenerate blade or a
-structured error; nothing silently normalizes garbage.
+`GaError`: `IdealPoint` (a trivector with zero e123 weight has no Cartesian
+form), `ZeroWeight { context }` (conformal element with no finite
+representative), plus structured `NonFinite`, `DegenerateNorm`, `NotUnit`,
+`InvalidRepresentation`, `IllConditioned`, and `SeriesDidNotConverge`
+refusals for Lie-group boundaries and differentials. Degenerate constructions
+return the honest degenerate blade or a structured error; nothing silently
+normalizes garbage.
 
 ## Determinism class
 
@@ -119,6 +139,14 @@ None.
   residual (zero for tangent spheres, large for separated ones).
 - **ga-006** façade exactness (bitwise quat relabel, ULP translation).
 - **ga-007** versor drift statistics under the renormalization policy.
+- **ga-008** 256 fixed-seed principal SE(3) exp/log cases, SO(3)
+  Jacobian/inverse identities, and adjoint/coadjoint dual-pairing invariance.
+
+`lie` unit tests additionally cover zero/tiny/general/near-π SO(3) and SE(3)
+round trips, finite-difference checks of left-trivialized SO(3)/SE(3)
+differentials, adjoint homomorphism, bracket covariance, the exact relation
+between left/space and right/body perturbations, structured refusal, and
+bit-identical deterministic replay (Gauntlet G0/G3/G5).
 
 Unit tests audit the generated tables themselves (exhaustive blade-level
 associativity, metric squares, complements, reverse/involution signs).
@@ -150,6 +178,16 @@ correctness cross-checks and one-off transforms.
 - **Principal branch only.** `motor_log` folds the ±M double cover and
   returns screws with θ ∈ [0, π]; callers interpolating past π must
   compose increments.
+- **No globally unwrapped attitude.** `So3::log` and `Se3::log` return the
+  principal branch. Continuous multi-turn joint coordinates remain the
+  articulated-system owner's responsibility.
+- **SE(3) differential conditioning is bounded.** The deterministic Lie
+  series refuses `‖ad_twist‖∞ > 32` and has a 96-term budget. This is an
+  explicit trustworthy boundary, not a claim for arbitrarily scaled frame
+  coordinates; callers should nondimensionalize extreme translations.
+- **No covariance or uncertainty semantics yet.** `Mat3` and `Mat6` expose
+  deterministic linear maps only; they do not claim stochastic tangent-frame
+  transport or certified interval rounding.
 - Timing numbers above are from a shared, sometimes-loaded worker;
   ratios (not absolute ns) are the claim.
 - The generated dense G0 battery covers coefficients in `[−1, 1)` and is a
