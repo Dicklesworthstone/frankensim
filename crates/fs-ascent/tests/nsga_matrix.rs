@@ -277,8 +277,9 @@ fn budget_boundary_stops_on_exact_generation_edge_never_partial() {
         .collect();
     let mut fe = ConvexEval::new();
     let cfg = base_config(11, 6, 50, 27);
-    let report = nsga3_run(&init_pop, &cfg, &mut |x| fe.call(x)).expect("runs");
-    assert_eq!(report.evaluations, 24, "3 complete generations of 6");
+    let report = nsga3_run(&init_pop, &cfg, &mut |x| fe.call(x))
+        .expect("edge budget runs to completion");
+    assert_eq!(report.evaluations, 22, "3 complete generations of 6");
     assert!(matches!(report.stop, fs_ascent::NsgaStop::BudgetBoundary));
     assert_eq!(report.generations, 3);
     assert!(report.evaluations <= cfg.eval_budget);

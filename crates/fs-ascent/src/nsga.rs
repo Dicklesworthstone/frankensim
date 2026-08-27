@@ -834,14 +834,10 @@ pub fn nsga3_run(
                 survivors.push(idx);
             }
             if survivors.len() < cfg.population_size {
-                let base: Vec<NsgaIndividual> = survivors.clone().iter()
-                    .map(|&i| union[i].clone())
-                    .collect();
-                let base_len = base.len();
+                let base_idx: Vec<usize> = survivors.clone();
+                let base_len = base_idx.len();
                 while survivors.len() < cfg.population_size && base_len > 0 {
-                    survivors.push(
-                        base[survivors.len() % base_len].clone(),
-                    );
+                    survivors.push(base_idx[survivors.len() % base_len]);
                 }
             }
         }
