@@ -1,149 +1,188 @@
 # CONTRACT: fs-cmaes-viz-wasm
 
-Status: **v1 — live surface.** Browser boundary for CMA-ES optimization
-internals visualization. Own nested workspace; wasm-bindgen confined to
-wasm32; native builds stay dependency-clean.
+Status: **schema 2 — live surface.** Stateful packed browser boundary over the
+production CMA-family owner in `fs-dfo`. This crate owns validation, admission,
+numeric packet transport, and browser-specific resource limits. It owns no
+optimizer recurrence.
 
-## Purpose
+## Purpose and ownership
 
-Emit the FULL internal state stream of a deterministic, seeded CMA-ES run
-(Hansen 2016 couplings, mirroring the explainer site's TypeScript fallback
-math) so a browser can visualize covariance ellipsoids, evolution paths, and
-population flow per generation — including an honest PCA marginal for
-dim > 3.
+A browser creates one optimizer session, asks for a complete candidate
+population, evaluates its own black-box objective, and tells one objective per
+candidate. Every accepted state transition delegates directly to
+`fs_dfo::CmaOptimizer`.
 
-v0.2.0: the active update is the canonical Hansen 2016 form — negative
-log-weights on the worst-ranked offspring, scaled by the alpha bounds and
-Mahalanobis-rescaled per candidate (n/‖C^{-1/2}y‖²) — followed by a spectral
-floor-and-rebuild repair, so every snapshot's `eigvals` describe a genuine
-positive-definite covariance. (v0.1.0's simplified mirrored-weight heuristic
-could drive C indefinite and reported the raw spectrum.)
+The available families are:
 
-v0.2.1: the cumulative-path `h_sigma` normalizer uses the canonical
-`sqrt(1 - (1 - c_s)^(2g))` recurrence. The previous linear generation
-multiplier left the square-root domain after a few generations and silently
-disabled rank-one covariance-path updates for the remainder of a run. The
-public `sx`, `sz`, and `sf` population streams are now reordered together so
-rank, elite flag, decision vector, sample vector, and fitness stay aligned.
+| ID | Family | Representation | Sampling / update |
+|---:|---|---|---|
+| 0 | Full | dense active covariance | O(n²) / O(n³) |
+| 1 | Separable | active diagonal covariance | O(n) / O(n) |
+| 2 | LM-CMA | bounded direction memory | O(mn) / O(mn) |
+| 3 | LM-MA | bounded direction memory | O(mn) / O(mn) |
 
-v0.3.0: the step-size damping is the Hansen 2016 default
-`1 + 2 max(0, sqrt((mu_eff - 1)/(n + 1)) - 1) + c_s`; v0.2.1 omitted the
-inner `- 1` and therefore over-damped every UI-reachable configuration. Each
-generation now emits the post-update covariance eigensystem alongside its
-post-update mean, sigma, and paths, rather than mixing two optimizer states.
-The seeded stream uses the site's exact 32-bit LCG transition and paired
-Box-Muller consumption. Reflect-repaired phenotypes are ranked and displayed,
-while the latent Gaussian preimages drive mean and covariance adaptation.
+Full CMA is capped at 256 dimensions at this browser boundary. The scalable
+families are capped at 100,000 dimensions and are admitted from checked,
+owner-reported storage arithmetic. The adapter rejects a conservative browser
+live envelope above 16 Mi binary64 words (128 MiB): owner persistent + pending
++ update workspace, two packed candidate-population transport copies, packet
+headers, and a conservative snapshot payload. The 5,040-dimensional flagship
+is comfortably inside this bound.
 
-v0.4.0: the browser boundary is a versioned packed numeric ABI. A successful
-run crosses wasm-bindgen once as a `Float64Array`; the live site no longer
-formats, UTF-8-decodes, or parses a multi-megabyte JSON document. This is a
-transport-only change: the optimizer, ranking, floating-point ordering, RNG
-stream, projections, and viewer-visible values are unchanged. The native JSON
-entry remains an exact-value oracle for conformance tests, not a browser
-compatibility surface.
+No-claims: this synchronous adapter does not add restarts, parallel objective
+evaluation, cancellation, constraints, or built-in landscapes. It does not
+invent dense covariance diagnostics for a limited-memory representation.
 
-No-claims: teaching/viz surface. NOT fs-dfo's production `cmaes` (no BIPOP
-restarts, no identity ledgers, no adversarial-refusal hardening). For
-production optimization use `fs_dfo::cmaes`.
+## Public surface
 
-## Public surface (wasm32 exports)
+Native Rust exposes `PackedCmaSession::{new,receipt_packet,ask_packet,tell_packet}`
+and `kernel_version()`.
 
-| Export | Signature | Returns |
+On wasm32, wasm-bindgen exports:
+
+| Export | Signature | Result |
 |---|---|---|
-| `cmaes_viz_run` | 18 scalars (dim, x0_0..x0_5, sigma0, lambda, active, seed, generations, landscape, noise, bounds_enabled, bound_min, bound_max, f_target) | packed `Float64Array` packet |
-| `cmaes_viz_kernel_version` | () -> String | `"fs-cmaes-viz-wasm 0.4.0"` |
+| `new CmaesVizSession(config)` | packed `Float64Array` | stateful session; construction never throws for bad input |
+| `session.receipt()` | no arguments | admission/current snapshot or typed refusal |
+| `session.ask()` | no arguments | complete row-major candidate population or typed refusal |
+| `session.tell(objectives)` | packed `Float64Array` | updated snapshot or typed refusal |
+| `cmaes_viz_kernel_version()` | no arguments | `"fs-cmaes-viz-wasm 0.5.0"` |
 
-## Packed browser ABI (schema 1)
+There is no JSON hot path and no schema-1 compatibility shim.
 
-Every word is one IEEE-754 binary64 value. Integer fields are exact safe
-integers. The fixed prefix is:
+## Numeric packet rules
 
-`[magic=0x434d4131, schema=1, status, total_words, ...]`
+Every word is one IEEE-754 binary64 value. Count, selector, and identifier
+fields must be finite exact integers. Dimension, population, memory, budget,
+and packet-length fields deliberately share wasm32's portable unsigned 32-bit
+domain on native and browser builds. A one-word generation is limited to
+JavaScript's exact nonnegative integer domain; 64-bit seeds and Philox block
+counts use low/high unsigned 32-bit words.
 
-Unknown magic, schema, status, stop reason, refusal code, non-integral shape
-field, inconsistent stride/length, invalid dimension/population, or truncated
-payload must fail closed in the JavaScript consumer and use the TypeScript
-fallback for that call.
+Input packets use:
 
-Success (`status=0`) has a 12-word header:
+`[magic=0x434d4132, schema=2, kind, total_words, ...]`
 
-`magic, schema, status, total_words, dim, landscape, stop_reason,
-best_f, total_evals, generation_count, lambda, generation_stride`
+Output packets use:
 
-`stop_reason` is 0 for `generations-exhausted` and 1 for `target-reached`.
-The header is followed by `best_x[n]`, `pca_basis[3n]`, `pca_center[n]`,
-`pca_pool_eigvals[n]`, then fixed-stride generation records. Each generation
-record is:
+`[magic=0x434d4132, schema=2, status, kind, total_words, ...]`
 
-`g, sigma, cond, best_f, evals, mean[n], eigvals[n], eigvecs[n*n],
-proj_mean[3], proj_eigvals[3], proj_eigvecs[9], sx[lambda*n],
-sz[lambda*n], sf[lambda], se[lambda], p_sigma[n], p_c[n]`
+Output status is 0 for success and 1 for refusal. Unknown magic, schema, kind,
+selector, non-integral field, or inconsistent packet length fails closed.
 
-The required generation stride is
-`20 + 4n + n*n + 2*lambda*n + 2*lambda` words. `se` words are exactly 0 or
-1. Population streams remain in rank order.
+### Configuration input (kind 0)
 
-Refusal (`status=1`) is exactly five words:
+`magic, schema, kind, total_words, family, dimension, population_or_zero,
+memory_or_zero, max_evaluations, seed_low32, seed_high32, sigma, mean[n]`
 
-`magic, schema, status, total_words=5, refusal_code`
+Zero selects the reference default population
+`4 + floor(3 ln(n))`. Zero selects the reference dimension-based memory
+default for LM-CMA and LM-MA; explicit memory is invalid for Full or Separable.
+The budget admits only complete populations, and at least one population must
+fit. The receipt reports the exact admitted budget.
 
-The stable refusal-code mapping is:
+### Admission/snapshot output (kinds 1 and 4)
 
-1 `dim-out-of-range` · 2 `x0-non-finite` · 3 `sigma0-non-positive` ·
-4 `lambda-out-of-range` · 5 `generations-out-of-range` ·
-6 `landscape-unknown` · 7 `noise-invalid` · 8 `bounds-inverted` ·
-9 `f-target-invalid` · 10 `eigen-decomposition-failed` ·
-11 `non-finite-objective`.
+Words 0–30 are:
 
-The code uniquely determines the canonical message and ranked repairs in the
-site adapter. Unknown codes fail closed as malformed rather than becoming an
-untyped refusal.
+`magic, schema, status, kind, total_words, family, dimension, generation,
+evaluations, sigma, population, parents, max_generations,
+admitted_evaluations, stream_semantics, stream_kernel, normal_blocks_low32,
+normal_blocks_high32, sampling_order, update_order, persistent_scalars,
+pending_scalars, update_workspace_scalars, dense_matrix_entries,
+memory_capacity, has_best, best_objective, best_generation, best_candidate,
+shape_kind, shape_payload_words`
 
-## Native JSON oracle (not a browser ABI)
+The header is followed by `mean[n]`, `best_point[n]`, and the shape payload.
+Before a best point exists, `has_best=0` and the best fields/point are NaN.
+Complexity order IDs are 0 linear, 1 O(mn), 2 quadratic, and 3 cubic.
 
-- success: `{"ok":{"kernel","dim","landscape","stop_reason","best_f","best_x","total_evals","generations":[...],"pca_basis","pca_center","pca_pool_eigvals"}}`
-- refusal: `{"refusal":{"code","message","ranked_repairs"}}`
+Shape payloads are representation-honest:
 
-Each `generations[i]`:
-`{"g","mean","sigma","eigvals"(asc),"eigvecs"(row-major, col j ↔ eigvals[j]),
-"cond","best_f","evals","proj_mean"[3],"proj_eigvals"[3](asc),
-"proj_eigvecs"[9],"sx"(λ·n, rank order),"sz"(λ·n white-noise, rank order),
-"sf"(noisy),"se"(0/1 elite),"p_sigma","p_c"}`
+- kind 0 Full:
+  `negative_weight_count, min_eigenvalue, max_eigenvalue, covariance_diagonal[n]`
+- kind 1 Separable:
+  `negative_weight_count, variances[n]`
+- kind 2 LM-CMA / LM-MA:
+  `stored_vectors, memory_capacity, direction_norm[stored_vectors]`
 
-## Refusal codes
+### Ask output (kind 2)
 
-`dim-out-of-range` (2..=6) · `x0-non-finite` · `sigma0-non-positive` ·
-`lambda-out-of-range` (4..=48) · `generations-out-of-range` (1..=200) ·
-`landscape-unknown` (0..=4) · `noise-invalid` · `bounds-inverted` ·
-`f-target-invalid` · `eigen-decomposition-failed` · `non-finite-objective`
+`magic, schema, status, kind, total_words, generation, evaluations_before,
+dimension, population, candidates[population * dimension]`
 
-Nothing is silently clamped; no traps cross the boundary.
+Candidates are row-major and retain the opaque ordering owned by `fs-dfo`.
+Only one ask may be outstanding.
 
-## Determinism
+### Tell input (kind 3)
 
-Single 32-bit LCG stream (1664525/1013904223 — transition and scaling shared
-with the site's TS engine) feeding paired Box–Muller draws. Same inputs ⇒
-word-identical packed packets on replay within a target
-(`g0_packed_packet_is_deterministic_and_typed` test).
-`f64::total_cmp` for all orderings; no wall-clock, no entropy.
+`magic, schema, kind, total_words, generation, population,
+objectives[population]`
 
-## Landscapes (minimization)
+Every objective must be finite. A malformed count, non-finite objective, wrong
+generation, or owner refusal retains the pending population so the caller can
+repair the packet and retry. For generation/count/objective failures, refusal
+word 6 names the outstanding owner generation, never an untrusted caller value.
+A successful tell consumes exactly one complete population and returns a
+kind-4 snapshot.
 
-0 sphere · 1 rosenbrock · 2 cigar · 3 rastrigin · 4 elli
+### Refusal output
 
-## Phase-space honesty
+Every refusal is exactly seven words:
 
-dim ≤ 3: projection is the identity frame (direct coordinates).
-dim ≥ 4: basis = top-3 eigenvectors of the FINAL covariance (pooled frame);
-per-generation `proj_*` are the projected 3×3 marginal covariances'
-eigendecompositions — a faithful marginal, never a fake 3D ellipsoid.
-`pca_pool_eigvals` carries the full spectrum for variance-explained display.
+`magic, schema, status=1, attempted_kind, total_words=7, refusal_code,
+expected_generation_or_nan`
 
-## CI gates
+Stable refusal codes:
 
-`cargo check --locked --target wasm32-unknown-unknown` then
-`wasm-pack build --target web --release`; nested `Cargo.lock` must not be
-mutated by the pack step. Native tests: `cargo test` (exact-value and invariant
-tests, including canonical damping, RNG consumption, coherent snapshots, and
-latent reflection adaptation).
+| Code | Meaning |
+|---:|---|
+| 1 | malformed packet |
+| 2 | schema mismatch |
+| 3 | unknown family |
+| 4 | invalid/scalable-limit dimension |
+| 5 | full-CMA browser dimension limit |
+| 6 | invalid population |
+| 7 | invalid/inapplicable memory |
+| 8 | invalid or too-small budget |
+| 9 | invalid seed words |
+| 10 | invalid sigma |
+| 11 | non-finite mean |
+| 12 | checked owner shape overflow |
+| 13 | Philox counter overflow |
+| 14 | dense eigensolver admission refusal |
+| 15 | browser memory-envelope refusal |
+| 16 | ask already pending |
+| 17 | exact budget exhausted |
+| 18 | tell without a pending ask |
+| 19 | generation mismatch |
+| 20 | objective-count mismatch |
+| 21 | non-finite objective |
+| 22 | opaque owner batch mismatch |
+| 23 | owner numerical failure |
+
+Nothing is silently clamped and validation failures do not trap across the
+wasm boundary.
+
+## Determinism and budgets
+
+Seeded candidate generation, normal-draw semantics, and deterministic
+candidate-index tie ordering come from `fs-dfo` / `fs-rand`. The adapter
+adds no entropy or ordering. Replaying the same sequence of valid packets
+produces word-identical ask and snapshot packets within a target.
+
+`max_evaluations` is a hard input budget. Admission truncates it to
+`floor(max_evaluations / population) * population`; ask refuses once that
+many evaluations have been consumed. Failed tells spend nothing and preserve
+the pending batch.
+
+## Required gates
+
+- focused native tests, including four-family dispatch, seeded replay,
+  repair-and-retry ask/tell semantics, exact budget exhaustion, typed
+  refusals, and a real 5,040-dimensional generation for every scalable family;
+- strict crate-local Clippy with warnings denied;
+- locked wasm32 check;
+- release `wasm-pack build --target web` to a unique external cache directory;
+- browser-side packet/replay exercise against the built artifact;
+- changed-file UBS scan and bundle-size report.

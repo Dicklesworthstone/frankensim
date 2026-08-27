@@ -521,13 +521,32 @@ version = "0.0.1"
 
 [[package]]
 name = "fs-cmaes-viz-wasm"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "asupersync",
- "fs-la",
- "fs-math",
+ "fs-dfo",
  "getrandom 0.4.3",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "fs-dfo"
+version = "0.0.1"
+dependencies = [
+ "fs-blake3",
+ "fs-la",
+ "fs-math",
+ "fs-obs",
+ "fs-rand",
+ "fs-robust",
+]
+
+[[package]]
+name = "fs-evidence"
+version = "0.0.1"
+dependencies = [
+ "fs-blake3",
+ "fs-obs",
 ]
 
 [[package]]
@@ -567,6 +586,13 @@ name = "fs-rand"
 version = "0.0.1"
 dependencies = [
  "fs-math",
+]
+
+[[package]]
+name = "fs-robust"
+version = "0.0.1"
+dependencies = [
+ "fs-evidence",
 ]
 
 [[package]]
