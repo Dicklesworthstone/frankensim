@@ -27,8 +27,8 @@
 //! broken, and pretending otherwise is how the swarm steers by fiction.
 
 use std::collections::BTreeMap;
-use std::path::Path;
 use std::fmt::Write as _;
+use std::path::Path;
 
 use crate::depgraph::{JsonParser, JsonValue};
 use crate::{PolicyNote, Violation, fnv1a64};

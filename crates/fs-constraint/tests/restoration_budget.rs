@@ -524,9 +524,9 @@ fn diagnosis_refusal_retains_completed_primary_starts() {
             panic!("expected a typed budget stop, got {outcome:?}");
         };
         assert!(matches!(refusal, fs_exec::BudgetRefusal::Cancelled { .. }));
-        assert!(
-            receipt.starts_completed > 0,
-            "the refusal must retain primary starts completed before cancellation"
+        assert_eq!(
+            receipt.starts_completed, RESTORATION_MAX_STARTS,
+            "the refusal must retain the exact primary-start tally completed before cancellation"
         );
     });
 }

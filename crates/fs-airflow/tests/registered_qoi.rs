@@ -576,13 +576,13 @@ fn rq_008_region_constraints_bind_the_exact_qoi_scope() {
             ));
         }
 
-        for semantic_id in [
-            "airflow.pressure_drop",
-            "airflow.fan_power",
-            "thermal.thermal_margin",
+        for (query_name, expected_semantic_id) in [
+            ("airflow.pressure_drop", QoiSemanticId::PressureDrop),
+            ("airflow.fan_power", QoiSemanticId::FanPower),
+            ("thermal.thermal_margin", QoiSemanticId::ThermalMargin),
         ] {
             let error = extract_registered_qois(
-                &[OutputQuery::scalar_with_region(semantic_id, "package")],
+                &[OutputQuery::scalar_with_region(query_name, "package")],
                 &mesh,
                 &solution,
                 &op,
@@ -593,8 +593,10 @@ fn rq_008_region_constraints_bind_the_exact_qoi_scope() {
             .expect_err("global QoI must reject a region constraint");
             assert!(matches!(
                 error,
-                RegisteredQoiError::RegionNotApplicable { requested, .. }
-                    if requested == "package"
+                RegisteredQoiError::RegionNotApplicable {
+                    semantic_id,
+                    requested,
+                } if semantic_id == expected_semantic_id && requested == "package"
             ));
         }
     });
