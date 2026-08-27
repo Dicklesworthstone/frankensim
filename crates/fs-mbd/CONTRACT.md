@@ -2,16 +2,19 @@
 
 ## Purpose and layer
 
-Layer: **L3 FLUX**. `fs-mbd` currently provides the safe-Rust foundation for
-one smooth, unconstrained rigid body whose reference point is its centre of
-mass. It is intentionally a bounded dependency-free core: validated diagonal
-principal inertia, body-to-world orientation, momentum-form state, point
-kinematics, atomic load/impulse events, uniform gravity, a constant external
-wrench, diagnostics, and a deterministic fixed-step update.
+Layer: **L3 FLUX**. `fs-mbd` provides safe-Rust rigid-body dynamics in two
+deliberately explicit lanes. The original lane covers one smooth,
+unconstrained rigid body whose reference point is its centre of mass. The
+`articulated` lane adds validated general spatial inertia, scalar joints, a
+root-first rigid-body tree, Lie-group forward kinematics, recursive
+Newton-Euler inverse dynamics, and Featherstone articulated-body forward
+dynamics in linear time and storage.
 
-This is a foundation for later rigid multibody work. It does not substitute for
-the blocked contact, joint, constraint, nonlinear-solver, or nonholonomic
-lanes.
+Canonical poses, twists, wrenches, adjoints, and coadjoints remain owned by
+`fs-ga`; the articulated lane consumes those types rather than creating a
+parallel robot-math representation. Contact, impacts, loop constraints,
+free-floating-base equilibrium, and time integration remain dedicated owner
+boundaries and are not approximated here.
 
 ## Public types and semantics
 
@@ -70,6 +73,25 @@ lanes.
 - `RigidBodyIntegrator::advance` invokes its cancellation callback before each
   whole step. It returns `AdvanceOutcome::Cancelled` with the last fully
   committed state and diagnostics when cancellation is observed.
+- `articulated::SpatialInertia` accepts positive mass, a finite centre-of-mass
+  offset, and a full symmetric centre-of-mass inertia. It validates positive
+  definiteness and the principal-moment triangle inequalities before exposing
+  the corresponding 6x6 spatial inertia, momentum, or kinetic energy.
+- `articulated::JointModel` has validated revolute, prismatic, and helical
+  constructors plus a fixed-joint constant. Its axis and motion subspace cannot
+  be forged through public fields. `JointLimits` carries inclusive position and
+  symmetric speed/actuator-effort bounds.
+- `articulated::ArticulatedModel` requires one root at link zero, root-first
+  topological ordering, preceding parents, unique nonempty names, and compact
+  scalar-DoF indexing. The frame above the root is prescribed by `BaseState`,
+  including its body twist and non-gravity body acceleration; it is not a
+  solved floating body.
+- `articulated::forward_kinematics` returns world-from-link `Se3` poses and
+  body-coordinate twists. `inverse_dynamics` implements a recursive
+  Newton-Euler pass and reports required generalized effort. `forward_dynamics`
+  implements Featherstone's articulated-body algorithm without constructing a
+  dense generalized mass matrix; supplied actuator efforts are checked against
+  declared limits.
 
 ## Invariants
 
@@ -90,6 +112,13 @@ lanes.
   values before returning. The event APIs consume state by value and return a
   new state only inside a complete receipt, so a refusal leaves externally held
   state unchanged.
+- Articulated model construction validates topology, names, axes, joint limits,
+  and physical spatial inertia. Evaluation validates dimensions, finite values,
+  joint positions and speeds, external wrenches, and forward-dynamics actuator
+  efforts before running either recursion. Spatial-inertia matrices, momenta,
+  kinetic energies, transformed twists/wrenches, articulated inertias, and
+  returned accelerations are checked after arithmetic; large finite input that
+  overflows a derived quantity refuses instead of publishing `NaN` or infinity.
 
 ## Error model
 
@@ -127,7 +156,9 @@ None. The crate denies unsafe code and contains no unsafe blocks.
 
 ## Feature flags and dependencies
 
-None. This initial core depends only on `std`/`core` and has no feature flags.
+No feature flags. The articulated lane depends on `fs-ga` for its canonical
+Lie-group and spatial-vector types; the legacy single-body lane otherwise
+continues to depend only on `std`/`core`.
 
 ## Conformance tests
 
@@ -159,23 +190,29 @@ The inline test module in `src/lib.rs` contains nineteen focused checks:
 19. bounded-energy symplectic kick-drift stepping under a recomputed
     harmonic force.
 
-These are local G0-style checks. They do not constitute full multibody,
-constraint, contact, physical-validation, performance, G4 fault-injection, or
-G5 cross-ISA evidence.
+The `articulated` module additionally checks spatial-inertia matrix/direct
+momentum agreement, physical-inertia and derived-overflow refusal, two-link
+transform order, a closed-form gravity pendulum, prescribed base acceleration,
+single-body ABA, coupled RNEA/ABA round trip, linear-storage metadata, and
+position/speed/effort limit refusal.
+
+These are local G0-style checks. They do not constitute contact, constrained or
+floating-base validation, full robot-model validation, performance evidence,
+G4 fault injection, or G5 cross-ISA evidence.
 
 ## No-claim boundaries
 
 - No contacts, impacts, friction, complementarity, penetration handling, or
   static-friction capacity are represented.
-- No joints, holonomic constraints, nonholonomic rolling constraints, RATTLE
+- No holonomic loop constraints, nonholonomic rolling constraints, RATTLE
   projection, generalized-alpha lane, Newton/Krylov solve, or constraint
-  impulse/defect receipt is present.
-- No full 6x6 spatial inertia, non-principal inertia tensor, offset reference
-  point, material receipt, geometry-derived inertia assembly, flexible body,
-  articulated multibody graph, or Euler-disc-specific rule is present. The
-  point/impulse API is deliberately parameterized only by the existing checked
-  diagonal principal inertia and is an extension point, not a claim that a
-  general symmetric or spatial inertia has been implemented.
+  impulse/defect receipt is present. The articulated tree supports only fixed
+  and scalar revolute/prismatic/helical joints.
+- The articulated lane provides a full 6x6 spatial inertia and an articulated
+  tree, but no geometry-derived inertia assembly, flexible body, closed-loop
+  graph, free-floating-base solve, or Euler-disc-specific rule. The separate
+  point/impulse API remains parameterized by the legacy centre-of-mass diagonal
+  principal inertia.
 - No collision detection, signed gap, support mapping, common-point proof,
   contact selection, impact/restitution law, complementarity solve, friction
   cone, or no-slip constraint is implemented. An equal-and-opposite impulse is

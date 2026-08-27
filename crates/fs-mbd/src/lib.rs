@@ -1,11 +1,11 @@
-//! Deterministic, safe-Rust foundations for unconstrained rigid-body dynamics.
+//! Deterministic, safe-Rust rigid-body and articulated dynamics.
 //!
-//! This crate deliberately owns only smooth, unconstrained rigid-body motion.
-//! Contact, joints, holonomic/nonholonomic constraints, impacts, and their
-//! receipts require the `fs-contact`, `fs-kinematics`, and `fs-solver` lanes;
-//! they are not approximated here. Orientations are canonical unit quaternions
-//! mapping body vectors into the world frame. The canonical sign convention
-//! removes the quaternion double-cover ambiguity deterministically.
+//! The legacy single-body lane owns smooth unconstrained motion. The
+//! [`articulated`] lane adds validated spatial inertia, scalar joint models,
+//! Lie-group forward kinematics, recursive Newton-Euler inverse dynamics, and
+//! linear-time Featherstone articulated-body forward dynamics over the
+//! canonical `fs-ga` geometry types. Contact, impacts, loop constraints, and
+//! free-floating-base equilibrium remain owned by their dedicated lanes.
 //!
 //! The fixed-step integrator uses a deterministic midpoint update: translation
 //! under a piecewise-constant world force and a Lie-group attitude update at
@@ -15,6 +15,7 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod articulated;
 pub mod goddard;
 
 use core::fmt;

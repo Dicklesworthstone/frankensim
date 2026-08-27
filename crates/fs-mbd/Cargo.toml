@@ -5,11 +5,14 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Deterministic safe-Rust foundations for unconstrained rigid-body dynamics"
+description = "Deterministic safe-Rust rigid-body and articulated dynamics"
 
 
 [package.metadata.frankensim]
 layer = "L3"
+
+[dependencies]
+fs-ga = { path = "../fs-ga" }
 
 
 [lints]
