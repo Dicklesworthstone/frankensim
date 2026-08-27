@@ -10,6 +10,12 @@ root-first rigid-body tree, Lie-group forward kinematics, recursive
 Newton-Euler inverse dynamics, and Featherstone articulated-body forward
 dynamics in linear time and storage.
 
+The `robot_models` catalog is a provenance-bound construction layer over that
+articulated owner. It currently transcribes two pinned upstream descriptions:
+a 15-DoF lower-body-and-waist reduction of Unitree's legacy `g1_29dof` URDF,
+and the seven-axis KUKA LBR iiwa 7 R800 description from `iiwa_stack`. It adds
+no second pose, twist, wrench, inertia, joint, or articulated-model type.
+
 Canonical poses, twists, wrenches, adjoints, and coadjoints remain owned by
 `fs-ga`; the articulated lane consumes those types rather than creating a
 parallel robot-math representation. Contact, impacts, loop constraints,
@@ -92,6 +98,20 @@ boundaries and are not approximated here.
   implements Featherstone's articulated-body algorithm without constructing a
   dense generalized mass matrix; supplied actuator efforts are checked against
   declared limits.
+- `robot_models::unitree_g1_lower_body_waist_15dof` builds a fixed-pelvis tree
+  with the source joint order of six left-leg, six right-leg, and three waist
+  DoFs. It uses the link inertias, joint origins, axes, and hard limits from the
+  official Unitree `g1_29dof.urdf` pinned in the returned metadata. The pinned
+  Unitree README marks that legacy source variant deprecated.
+- `robot_models::kuka_lbr_iiwa7_r800` builds the fixed-base seven-axis chain
+  from `iiwa_stack`'s pinned `iiwa7.xacro`. Its 300 N m effort and 10 rad/s
+  velocity limits are the Xacro's generic macro defaults, not claimed KUKA
+  hardware limits.
+- `robot_models::CatalogRobotModel` binds a validated `ArticulatedModel` to its
+  stable compact joint order and immutable `RobotModelMetadata`. The metadata
+  records exact pinned URLs, revisions, Git blob identities, source status,
+  units, derivation, and material omissions. `ROBOT_MODEL_CATALOG_VERSION`
+  versions this typed in-source layout; it is not a serialized URDF schema.
 
 ## Invariants
 
@@ -119,6 +139,10 @@ boundaries and are not approximated here.
   kinetic energies, transformed twists/wrenches, articulated inertias, and
   returned accelerations are checked after arithmetic; large finite input that
   overflows a derived quantity refuses instead of publishing `NaN` or infinity.
+- Catalog builders deterministically preserve their declared root-first link
+  topology and compact source-joint order. Their retained numeric records use
+  URDF SI units and pass the same articulated topology, limit, pose, and
+  physical-inertia validation as caller-built models.
 
 ## Error model
 
@@ -157,8 +181,9 @@ None. The crate denies unsafe code and contains no unsafe blocks.
 ## Feature flags and dependencies
 
 No feature flags. The articulated lane depends on `fs-ga` for its canonical
-Lie-group and spatial-vector types; the legacy single-body lane otherwise
-continues to depend only on `std`/`core`.
+Lie-group and spatial-vector types; `robot_models` reuses that same dependency
+and the articulated types. The legacy single-body lane otherwise continues to
+depend only on `std`/`core`.
 
 ## Conformance tests
 
@@ -196,6 +221,12 @@ transform order, a closed-form gravity pendulum, prescribed base acceleration,
 single-body ABA, coupled RNEA/ABA round trip, linear-storage metadata, and
 position/speed/effort limit refusal.
 
+The `robot_models` module additionally checks both catalogs' link/DoF counts
+and stable source order, bilateral G1 neutral-origin symmetry, an independent
+iiwa neutral endpoint, admitted hard limits and physical inertias, zero dense
+generalized-matrix entries, zero-input ABA, deterministic rebuilds, and retained
+provenance/omission records.
+
 These are local G0-style checks. They do not constitute contact, constrained or
 floating-base validation, full robot-model validation, performance evidence,
 G4 fault injection, or G5 cross-ISA evidence.
@@ -213,6 +244,16 @@ G4 fault injection, or G5 cross-ISA evidence.
   graph, free-floating-base solve, or Euler-disc-specific rule. The separate
   point/impulse API remains parameterized by the legacy centre-of-mass diagonal
   principal inertia.
+- Catalog entries are transcriptions and explicit reductions, not complete or
+  manufacturer-validated digital twins. The G1 entry omits all arm DoFs and
+  links, fixed body/sensor attachments, contact geometry, and their mass rather
+  than lumping omitted mass into retained links. The iiwa entry omits the world
+  link, fixed massless flange, damping, soft safety limits, and payload/tool.
+  Both use prescribed fixed-base semantics: neither solves a floating base.
+- No catalog entry loads meshes, supplies collision/contact geometry, models
+  actuators/gearing/transmissions, certifies hardware safety envelopes, parses
+  URDF/Xacro at runtime, or claims the omitted upstream structures have no
+  physical effect.
 - No collision detection, signed gap, support mapping, common-point proof,
   contact selection, impact/restitution law, complementarity solve, friction
   cone, or no-slip constraint is implemented. An equal-and-opposite impulse is

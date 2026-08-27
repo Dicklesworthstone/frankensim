@@ -4,8 +4,11 @@
 //! [`articulated`] lane adds validated spatial inertia, scalar joint models,
 //! Lie-group forward kinematics, recursive Newton-Euler inverse dynamics, and
 //! linear-time Featherstone articulated-body forward dynamics over the
-//! canonical `fs-ga` geometry types. Contact, impacts, loop constraints, and
-//! free-floating-base equilibrium remain owned by their dedicated lanes.
+//! canonical `fs-ga` geometry types. The [`robot_models`] catalog provides
+//! provenance-bound builders for selected physical robot trees without adding
+//! another pose or spatial-vector representation. Contact, impacts, loop
+//! constraints, and free-floating-base equilibrium remain owned by their
+//! dedicated lanes.
 //!
 //! The fixed-step integrator uses a deterministic midpoint update: translation
 //! under a piecewise-constant world force and a Lie-group attitude update at
@@ -17,6 +20,7 @@
 
 pub mod articulated;
 pub mod goddard;
+pub mod robot_models;
 
 use core::fmt;
 
