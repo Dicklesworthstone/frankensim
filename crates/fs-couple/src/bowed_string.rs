@@ -239,6 +239,8 @@ pub struct BowedRunLog {
 pub enum BowedRunError {
     /// The gesture failed admission.
     Gesture(BowGestureError),
+    /// The friction law refused a non-finite runtime input.
+    Friction(&'static str),
     /// The card is inconsistent (zeta count, non-physical values).
     InvalidCard {
         /// Human-readable cause.
@@ -261,6 +263,7 @@ impl std::fmt::Display for BowedRunError {
             Self::Model(e) => write!(f, "model refused: {e:?}"),
             Self::LimitExceeded(e) => write!(f, "state limit exceeded: {e:?}"),
             Self::Radiation(what) => write!(f, "radiation refused: {what}"),
+            Self::Friction(what) => write!(f, "friction law refused: {what}"),
         }
     }
 }
@@ -407,6 +410,7 @@ pub fn run_bowed(config: &BowedRunConfig) -> Result<BowedRunLog, BowedRunError> 
                         } else {
                             stuck = false;
                             law.traction(v_rel, config.gesture.normal_force_n)
+                                .map_err(BowedRunError::Friction)?
                         }
                     } else if flipped || v_rel.abs() <= capture_tol {
                         let p = pin();
@@ -415,9 +419,11 @@ pub fn run_bowed(config: &BowedRunConfig) -> Result<BowedRunLog, BowedRunError> 
                             p
                         } else {
                             law.traction(v_rel, config.gesture.normal_force_n)
+                                .map_err(BowedRunError::Friction)?
                         }
                     } else {
                         law.traction(v_rel, config.gesture.normal_force_n)
+                            .map_err(BowedRunError::Friction)?
                     }
                 }
                 FrictionIsland::ViscousOnly {

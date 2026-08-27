@@ -2405,11 +2405,17 @@ fn realize_reed_ode(
     n: usize,
     wall: Option<LocallyReactingWall>,
 ) -> Result<Vec<f64>, AcousticRealizeError> {
+    // Parity with ReedBoreVoice::new (render.rs): the ODE path must
+    // reject non-finite/nonphysical attack ramps and reed stiffnesses
+    // up front, or NaN slips past typed refusals into generic per-step
+    // Nonlinear noise mid-integration (bead frankensim-dtb76).
     if !(reed.rest_opening_m > 0.0
         && reed.width_m > 0.0
         && reed.closing_pressure_pa > 0.0
         && reed.blowing_pressure_pa >= 0.0
+        && reed.attack_s >= 0.0
         && reed.mass_kg >= 0.0
+        && reed.stiffness_n_m >= 0.0
         && reed.mass_kg.is_finite())
     {
         return Err(AcousticRealizeError::InvalidDescription {
