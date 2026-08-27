@@ -148,12 +148,12 @@ impl PorousCard {
                 });
             }
         }
-        if let Some(k0p) = self.thermal_permeability_m2 {
-            if !(k0p.is_finite() && k0p > 0.0) {
-                return Err(MaterialError::Parameters {
-                    what: "thermal permeability must be positive when given".to_string(),
-                });
-            }
+        if let Some(k0p) = self.thermal_permeability_m2
+            && !(k0p.is_finite() && k0p > 0.0)
+        {
+            return Err(MaterialError::Parameters {
+                what: "thermal permeability must be positive when given".to_string(),
+            });
         }
         Ok(())
     }

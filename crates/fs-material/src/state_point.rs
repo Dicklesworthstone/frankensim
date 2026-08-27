@@ -1802,9 +1802,9 @@ mod tests {
             MaterialPropertySelection::SingleClaimOnly,
         )
         .expect("solid lead state resolves inside all supplied domains");
-        assert_eq!(first.density_kg_m3(), 11_230.0);
-        assert_eq!(first.young_modulus_pa(), 12.0e9);
-        assert_eq!(first.poisson_ratio(), 0.45);
+        assert_eq!(first.density_kg_m3().to_bits(), 11_230.0_f64.to_bits());
+        assert_eq!(first.young_modulus_pa().to_bits(), 12.0e9_f64.to_bits());
+        assert_eq!(first.poisson_ratio().to_bits(), 0.45_f64.to_bits());
         assert_eq!(first.resolved().properties().len(), 4);
 
         let mut requirements = [
@@ -1854,7 +1854,7 @@ mod tests {
             MaterialPropertySelection::SingleClaimOnly,
         )
         .expect("temperature-dependent expansion resolves inside its evidence domain");
-        assert_eq!(resolved.linear_coefficient_per_k(), 17.0e-6);
+        assert_eq!(resolved.linear_coefficient_per_k().to_bits(), 17.0e-6_f64.to_bits());
         assert_eq!(resolved.resolved().card_identity(), lead.content_hash());
         assert!(matches!(
             resolve_isotropic_thermal_expansion_state_point(
@@ -1924,10 +1924,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(resolved.samples().len(), 9);
-        assert_eq!(resolved.samples()[0].wavelength_nm, 380.0);
-        assert_eq!(resolved.samples()[8].wavelength_nm, 780.0);
-        assert_eq!(resolved.samples()[0].eta, 1.45);
-        assert_eq!(resolved.samples()[0].k, 2.25);
+        assert_eq!(resolved.samples()[0].wavelength_nm.to_bits(), 380.0_f64.to_bits());
+        assert_eq!(resolved.samples()[8].wavelength_nm.to_bits(), 780.0_f64.to_bits());
+        assert_eq!(resolved.samples()[0].eta.to_bits(), 1.45_f64.to_bits());
+        assert_eq!(resolved.samples()[0].k.to_bits(), 2.25_f64.to_bits());
         assert_eq!(resolved.resolved().card_identity(), card.content_hash());
 
         assert!(matches!(
@@ -1955,12 +1955,12 @@ mod tests {
         let cauchy = resolved.cauchy_coefficients_si();
         assert!((cauchy[0] - 1.49).abs() <= 1.0e-15);
         assert!((cauchy[1] - 4.1e-15).abs() <= 1.0e-30);
-        assert_eq!(cauchy[2], 0.0);
+        assert_eq!(cauchy[2].to_bits(), 0.0_f64.to_bits());
         assert_eq!(
-            resolved.reference_transmittance_linear_rgb(),
-            [0.98, 0.98, 0.94]
+            resolved.reference_transmittance_linear_rgb().map(f64::to_bits),
+            [0.98_f64, 0.98_f64, 0.94_f64].map(f64::to_bits)
         );
-        assert_eq!(resolved.reference_distance_m(), 0.01);
+        assert_eq!(resolved.reference_distance_m().to_bits(), 0.01_f64.to_bits());
         assert_eq!(resolved.resolved().card_identity(), card.content_hash());
 
         assert!(matches!(
@@ -2022,9 +2022,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(elastic.resolved().properties().len(), 3);
-        assert_eq!(elastic.density_kg_m3(), 950.0);
-        assert_eq!(elastic.young_modulus_pa(), 9.0e9);
-        assert_eq!(elastic.poisson_ratio(), 0.275);
+        assert_eq!(elastic.density_kg_m3().to_bits(), 950.0_f64.to_bits());
+        assert_eq!(elastic.young_modulus_pa().to_bits(), 9.0e9_f64.to_bits());
+        assert_eq!(elastic.poisson_ratio().to_bits(), 0.275_f64.to_bits());
 
         let card = orthotropic_card([0.25, 0.10, 0.20]);
         let orthotropic = resolve_orthotropic_elastic_state_point(
@@ -2035,10 +2035,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(orthotropic.resolved().properties().len(), 10);
-        assert_eq!(orthotropic.density_kg_m3(), 780.0);
-        assert_eq!(orthotropic.law().e, [11.0e9, 2.75e9, 1.35e9]);
-        assert_eq!(orthotropic.law().nu, [0.25, 0.10, 0.20]);
-        assert_eq!(orthotropic.law().g, [1.1e9, 0.75e9, 0.55e9]);
+        assert_eq!(orthotropic.density_kg_m3().to_bits(), 780.0_f64.to_bits());
+        assert_eq!(orthotropic.law().e.map(f64::to_bits), [11.0e9_f64, 2.75e9_f64, 1.35e9_f64].map(f64::to_bits));
+        assert_eq!(orthotropic.law().nu.map(f64::to_bits), [0.25_f64, 0.10_f64, 0.20_f64].map(f64::to_bits));
+        assert_eq!(orthotropic.law().g.map(f64::to_bits), [1.1e9_f64, 0.75e9_f64, 0.55e9_f64].map(f64::to_bits));
 
         assert!(matches!(
             resolve_orthotropic_elastic_state_point(

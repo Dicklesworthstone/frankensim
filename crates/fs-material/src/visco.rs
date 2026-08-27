@@ -164,7 +164,7 @@ impl RayleighDamping {
         omega2: f64,
         zeta2: f64,
     ) -> Result<RayleighDamping, ViscoError> {
-        if !(omega1 > 0.0 && omega2 > 0.0 && omega1 != omega2 && zeta1 >= 0.0 && zeta2 >= 0.0) {
+        if !(omega1 > 0.0 && omega2 > 0.0 && omega1.to_bits() != omega2.to_bits() && zeta1 >= 0.0 && zeta2 >= 0.0) {
             return Err(ViscoError::Parameters {
                 what: "two-point Rayleigh fit needs distinct positive frequencies",
             });
@@ -204,7 +204,13 @@ impl FractionalZener {
     /// [`ViscoError::Parameters`].
     pub fn new(e0: f64, e_inf: f64, alpha: f64, tau: f64) -> Result<FractionalZener, ViscoError> {
         let finite = e0.is_finite() && e_inf.is_finite() && alpha.is_finite() && tau.is_finite();
-        if !finite || !(e0 > 0.0 && e_inf > e0 && alpha > 0.0 && alpha <= 1.0 && tau > 0.0) {
+        if !finite
+            || e0 <= 0.0
+            || e_inf <= e0
+            || alpha <= 0.0
+            || alpha > 1.0
+            || tau <= 0.0
+        {
             return Err(ViscoError::Parameters {
                 what: "fractional Zener needs 0 < E0 < Einf, 0 < alpha <= 1, tau > 0",
             });
@@ -536,6 +542,7 @@ pub fn lower_to_prony(
     n_terms: usize,
     tol: f64,
 ) -> Result<LoweredModel, ViscoError> {
+    const MARGIN: f64 = 10.0; // one decade each side (broad fractional kernels)
     if !(f_lo > 0.0 && f_hi > f_lo && f_lo.is_finite() && f_hi.is_finite()) {
         return Err(ViscoError::Parameters {
             what: "lowering band needs 0 < f_lo < f_hi",
@@ -550,7 +557,6 @@ pub fn lower_to_prony(
     let w_lo = two_pi * f_lo;
     let w_hi = two_pi * f_hi;
     // Relaxation ladder spanning the band with half-decade margins.
-    const MARGIN: f64 = 10.0; // one decade each side (broad fractional kernels)
     let tau_hi = MARGIN / w_lo;
     let tau_lo = 1.0 / (w_hi * MARGIN);
     let taus: Vec<f64> = (0..n_terms)
@@ -1250,7 +1256,7 @@ mod tests {
         for k in 0..=20 {
             let w = det::exp(
                 det::ln(2.0 * core::f64::consts::PI * 20.0)
-                    + (k as f64 / 20.0)
+                    + (f64::from(k) / 20.0)
                         * (det::ln(2.0 * core::f64::consts::PI * 2.0e5)
                             - det::ln(2.0 * core::f64::consts::PI * 20.0)),
             );
@@ -1448,7 +1454,7 @@ mod tests {
         let mut samples = Vec::new();
         for k in 0..24 {
             let w =
-                det::exp(det::ln(1.0e1) + (k as f64 / 23.0) * (det::ln(1.0e7) - det::ln(1.0e1)));
+                det::exp(det::ln(1.0e1) + (f64::from(k) / 23.0) * (det::ln(1.0e7) - det::ln(1.0e1)));
             let (ep, epp) = truth.modulus(w);
             samples.push((w, ep, epp));
         }
@@ -1515,7 +1521,7 @@ mod tests {
             let fz = FractionalZener::new(5.0e9, 1.2e10, alpha, tau).expect("fz");
             let lowered = lower_to_prony(&fz, 20.0, 2.0e4, 10, 0.05).expect("lowering");
             for k in 0..=64 {
-                let t = k as f64 / 64.0;
+                let t = f64::from(k) / 64.0;
                 let w = det::exp(
                     det::ln(lowered.band.0)
                         + t * (det::ln(lowered.band.1) - det::ln(lowered.band.0)),

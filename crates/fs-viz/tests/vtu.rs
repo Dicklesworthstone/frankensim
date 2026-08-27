@@ -242,6 +242,63 @@ fn test_vtu_xml_attributes_are_escaped_and_round_trip() {
 }
 
 #[test]
+fn test_vtu_checker_rejects_tampered_piece_counts() {
+    let mut grid = UnstructuredGrid::new();
+    let p0 = grid.add_point(0.0, 0.0, 0.0);
+    grid.add_cell(CellType::Vertex, &[p0]);
+    let xml = VtuWriter::write_ascii(&grid).expect("write VTU");
+
+    let bad_points = xml.replacen("NumberOfPoints=\"1\"", "NumberOfPoints=\"2\"", 1);
+    assert!(matches!(
+        VtuChecker::check(&bad_points),
+        Err(VtuError::ParseError { detail }) if detail.contains("declares 2 points")
+    ));
+
+    let bad_cells = xml.replacen("NumberOfCells=\"1\"", "NumberOfCells=\"2\"", 1);
+    assert!(matches!(
+        VtuChecker::check(&bad_cells),
+        Err(VtuError::ParseError { detail }) if detail.contains("declares 2 cells")
+    ));
+}
+
+#[test]
+fn test_vtu_checker_requires_exact_cell_array_names() {
+    let mut grid = UnstructuredGrid::new();
+    let p0 = grid.add_point(0.0, 0.0, 0.0);
+    grid.add_cell(CellType::Vertex, &[p0]);
+    let xml = VtuWriter::write_ascii(&grid).expect("write VTU");
+    let tampered = xml.replacen("Name=\"connectivity\"", "AliasName=\"connectivity\"", 1);
+
+    assert!(matches!(
+        VtuChecker::check(&tampered),
+        Err(VtuError::ConnectivityOffsetOutOfBounds {
+            cell: 0,
+            offset: 1,
+            connectivity_len: 0,
+        })
+    ));
+}
+
+#[test]
+fn test_vtu_checker_rejects_invalid_component_metadata() {
+    let mut grid = UnstructuredGrid::new();
+    let p0 = grid.add_point(0.0, 0.0, 0.0);
+    grid.add_cell(CellType::Vertex, &[p0]);
+    grid.add_array(DataArray::new_point_scalar("scalar", vec![1.0]));
+    let xml = VtuWriter::write_ascii(&grid).expect("write VTU");
+    let tampered = xml.replacen(
+        "NumberOfComponents=\"1\"",
+        "NumberOfComponents=\"not-a-number\"",
+        1,
+    );
+
+    assert!(matches!(
+        VtuChecker::check(&tampered),
+        Err(VtuError::ParseError { detail }) if detail.contains("invalid NumberOfComponents")
+    ));
+}
+
+#[test]
 fn test_vtu_rejects_xml_forbidden_characters() {
     let mut grid = UnstructuredGrid::new();
     let p0 = grid.add_point(0.0, 0.0, 0.0);

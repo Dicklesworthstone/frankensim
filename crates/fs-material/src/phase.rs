@@ -453,21 +453,21 @@ mod tests {
         let curve = plateau_curve();
         let solid = curve.state_at_specific_enthalpy(20_000.0).unwrap();
         assert_eq!(solid.phase(), SolidLiquidPhase::Solid);
-        assert_eq!(solid.temperature_k(), 500.0);
+        assert_eq!(solid.temperature_k().to_bits(), 500.0_f64.to_bits());
 
         let half_melted = curve.advance_specific_energy(solid, 22_500.0).unwrap();
         assert_eq!(half_melted.phase(), SolidLiquidPhase::SolidLiquid);
-        assert_eq!(half_melted.temperature_k(), 600.0);
-        assert_eq!(half_melted.solid_mass_fraction(), 0.5);
-        assert_eq!(half_melted.liquid_mass_fraction(), 0.5);
+        assert_eq!(half_melted.temperature_k().to_bits(), 600.0_f64.to_bits());
+        assert_eq!(half_melted.solid_mass_fraction().to_bits(), 0.5_f64.to_bits());
+        assert_eq!(half_melted.liquid_mass_fraction().to_bits(), 0.5_f64.to_bits());
         assert!(!half_melted.is_fully_solid());
 
         let liquid = curve
             .advance_specific_energy(half_melted, 32_500.0)
             .unwrap();
         assert_eq!(liquid.phase(), SolidLiquidPhase::Liquid);
-        assert_eq!(liquid.temperature_k(), 700.0);
-        assert_eq!(liquid.liquid_mass_fraction(), 1.0);
+        assert_eq!(liquid.temperature_k().to_bits(), 700.0_f64.to_bits());
+        assert_eq!(liquid.liquid_mass_fraction().to_bits(), 1.0_f64.to_bits());
     }
 
     #[test]

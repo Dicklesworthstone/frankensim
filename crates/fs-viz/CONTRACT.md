@@ -65,6 +65,12 @@ Layer L5 (LUMEN). Safe Rust; the scoped streamline and contour paths consume L0
   before bounded decoding. Node-centered fields convert to `Grid3`;
   cell-centered fields retain one-cell-thick LBM slabs without inventing fake
   nodes.
+- `UnstructuredGrid`, `DataArray`, `VtuWriter`, and `VtuChecker` — deterministic
+  ASCII VTU emission plus a separate canonical-dialect parser/checker for mesh
+  structure, declared counts, field types, finite values, and extrema.
+- `XdmfWriter::write_xdmf_with_binary` — XDMF 3.0 light data paired with one
+  little-endian raw-binary buffer. Topology and field metadata describe the
+  bytes actually emitted; unsupported lossless topology mappings refuse.
 
 ## Invariants
 
@@ -140,6 +146,13 @@ Layer L5 (LUMEN). Safe Rust; the scoped streamline and contour paths consume L0
   replay-deterministic. Byte/sample budgets are checked before allocation;
   dimensions, layout, world geometry, quantity/units, byte length, and sample
   finiteness are validated before any downstream visualization claim.
+- VTU cell offsets are strictly increasing, remain within connectivity, and
+  consume it exactly. Array cardinality uses checked arithmetic. XML text is
+  escaped deterministically and XML-forbidden characters refuse before output.
+- XDMF homogeneous topology uses its declared cell shape; mixed topology binds
+  each cell to the XDMF cell code and required node count. Each binary DataItem
+  declares its actual number type, precision, little-endian order, dimensions,
+  and byte seek.
 - All primitives are deterministic when caller callbacks are deterministic.
 
 ## Error model
@@ -184,6 +197,10 @@ never returns a silently truncated mesh.
 `ScalarField3Error` distinguishes sample/byte budget refusal, malformed or
 unsupported schema bytes, ambiguous semantics, invalid geometry, non-finite
 values, allocation refusal, and node/cell layout mismatch.
+`VtuError` distinguishes malformed topology/count metadata, out-of-range or
+unconsumed connectivity, checked array-cardinality overflow, invalid values,
+unsupported XDMF topology, XML-forbidden text, and canonical-dialect parse
+failures. Writers return no partial artifact through their public result.
 Hessian classification is total and fail-closed: non-finite matrix entries,
 invalid eigenvalue tolerances, and off-diagonal disagreement under the selected
 policy return `Degenerate` with index 0 rather than a confident Morse claim.
@@ -204,6 +221,8 @@ Grid3 sampling is z/y/x with x-fastest storage; isosurface traversal is
 z/y/x/cube-tetrahedron order and uses an ordered edge cache.
 Scalar-field artifacts use fixed little-endian IEEE-754 f64 bits and fixed
 length-prefixed UTF-8 semantics; their bytes are cross-ISA stable.
+VTU and XDMF writers use fixed traversal, formatting, escaping, topology-code,
+and little-endian byte order for identical admitted grids.
 
 ## Cancellation behavior
 
@@ -308,6 +327,11 @@ truncation, semantic validation, and non-finite payload rejection.
   below grid resolution, sharp-feature preservation, Hermite normals,
   watertightness when the surface intersects the domain boundary, or an error
   certificate against an unsampled continuum field.
+- `VtuChecker` verifies the ASCII VTU dialect emitted here; it is not a general
+  XML parser and does not accept appended/base64/compressed VTU encodings.
+  XDMF output is schema-directed raw binary, not a claim of successful loading
+  by every ParaView/VisIt version; that compatibility requires a separate
+  external-viewer smoke gate.
 - The API does not read ledgers or depend on L6. A higher-layer orchestrator
   must compare the ledger artifact kind, bounded-read the bytes by content
   hash, decode this versioned schema, call the appropriate L5 primitive, and
