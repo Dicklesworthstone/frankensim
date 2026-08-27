@@ -8,12 +8,13 @@
 //!
 //! Contracts every entry inherits (fs-flyer-wasm pattern):
 //!
-//! - **Typed-refusal JSON envelope.** Fallible entries return
-//!   `{"ok": ...}` or `{"refusal": {"code","message","ranked_repairs"}}`.
-//!   Nothing is silently clamped and nothing traps across the boundary.
+//! - **Typed refusal.** The browser ABI returns a versioned packed success or
+//!   refusal packet; the native JSON oracle retains the descriptive refusal
+//!   envelope for exact conformance checks. Nothing is silently clamped and
+//!   nothing traps across the boundary.
 //! - **Determinism.** A single LCG stream (constants shared with the site's
-//!   TS engine) feeds Box–Muller gaussians. Same inputs ⇒ identical output
-//!   strings, native AND wasm. No wall-clock, no entropy, `f64::total_cmp`
+//!   TS engine) feeds Box–Muller gaussians. Same inputs ⇒ identical packet
+//!   words within a target. No wall-clock, no entropy, `f64::total_cmp`
 //!   for all orderings.
 //! - **Honest internals.** Every generation exposes the real state: mean, σ,
 //!   the full eigendecomposition of C (via `fs_la::jacobi_eigh`, the same
@@ -39,7 +40,17 @@ pub const LANDSCAPE_RASTRIGIN: u32 = 3;
 pub const LANDSCAPE_ELLI: u32 = 4;
 
 /// Kernel id baked into envelopes so the page can prove which build is live.
-pub const KERNEL_VERSION: &str = "fs-cmaes-viz-wasm 0.3.0";
+pub const KERNEL_VERSION: &str = "fs-cmaes-viz-wasm 0.4.0";
+
+/// Exact `f64` word that identifies the packed browser packet (`"CMA1"`).
+pub const PACKET_MAGIC: u32 = 0x434d_4131;
+/// Packed browser ABI schema. Unknown schemas must be refused by consumers.
+pub const PACKET_SCHEMA_VERSION: u32 = 1;
+
+const PACKET_STATUS_OK: u32 = 0;
+const PACKET_STATUS_REFUSAL: u32 = 1;
+const PACKET_HEADER_WORDS: usize = 12;
+const REFUSAL_PACKET_WORDS: usize = 5;
 
 /// One visualization run request. Field ranges are refused, never clamped.
 #[derive(Debug, Clone)]
@@ -820,7 +831,7 @@ fn project_phase_space(
 }
 
 // ---------------------------------------------------------------------------
-// JSON envelope (hand-rolled; no serde at the boundary — fs-flyer pattern).
+// Native JSON oracle (hand-rolled; not used by the browser boundary).
 // ---------------------------------------------------------------------------
 
 fn push_num(out: &mut String, v: f64) {
@@ -1008,6 +1019,141 @@ fn ok_envelope(run: &VizRun) -> String {
     out
 }
 
+fn generation_packet_words(n: usize, lambda: usize) -> usize {
+    // Five scalar fields, four n-vectors, the n×n eigensystem, fifteen
+    // projection fields, and the two λ×n plus two λ population streams.
+    20 + 4 * n + n * n + 2 * lambda * n + 2 * lambda
+}
+
+fn refusal_code_id(code: &str) -> u32 {
+    match code {
+        "dim-out-of-range" => 1,
+        "x0-non-finite" => 2,
+        "sigma0-non-positive" => 3,
+        "lambda-out-of-range" => 4,
+        "generations-out-of-range" => 5,
+        "landscape-unknown" => 6,
+        "noise-invalid" => 7,
+        "bounds-inverted" => 8,
+        "f-target-invalid" => 9,
+        "eigen-decomposition-failed" => 10,
+        "non-finite-objective" => 11,
+        _ => 0,
+    }
+}
+
+fn refusal_packet(refusal: &Refusal) -> Vec<f64> {
+    vec![
+        f64::from(PACKET_MAGIC),
+        f64::from(PACKET_SCHEMA_VERSION),
+        f64::from(PACKET_STATUS_REFUSAL),
+        REFUSAL_PACKET_WORDS as f64,
+        f64::from(refusal_code_id(refusal.code)),
+    ]
+}
+
+fn ok_packet(run: &VizRun) -> Vec<f64> {
+    let generation_count = run.generations.len();
+    let lambda = run
+        .generations
+        .first()
+        .map_or(0, |snapshot| snapshot.se.len());
+    let generation_words = generation_packet_words(run.dim, lambda);
+    let total_words = PACKET_HEADER_WORDS + 6 * run.dim + generation_count * generation_words;
+    let stop_reason = match run.stop_reason {
+        "generations-exhausted" => 0,
+        "target-reached" => 1,
+        _ => 2,
+    };
+
+    let mut packet = Vec::with_capacity(total_words);
+    packet.extend_from_slice(&[
+        f64::from(PACKET_MAGIC),
+        f64::from(PACKET_SCHEMA_VERSION),
+        f64::from(PACKET_STATUS_OK),
+        total_words as f64,
+        run.dim as f64,
+        run.landscape as f64,
+        f64::from(stop_reason),
+        run.best_f,
+        run.total_evals as f64,
+        generation_count as f64,
+        lambda as f64,
+        generation_words as f64,
+    ]);
+    packet.extend_from_slice(&run.best_x);
+    packet.extend_from_slice(&run.pca.basis);
+    packet.extend_from_slice(&run.pca.center);
+    packet.extend_from_slice(&run.pca.pool_eigvals);
+
+    for snapshot in &run.generations {
+        packet.extend_from_slice(&[
+            snapshot.g as f64,
+            snapshot.sigma,
+            snapshot.cond,
+            snapshot.best_f,
+            snapshot.evals as f64,
+        ]);
+        packet.extend_from_slice(&snapshot.mean);
+        packet.extend_from_slice(&snapshot.eigvals);
+        packet.extend_from_slice(&snapshot.eigvecs);
+        packet.extend_from_slice(&snapshot.proj_mean);
+        packet.extend_from_slice(&snapshot.proj_eigvals);
+        packet.extend_from_slice(&snapshot.proj_eigvecs);
+        packet.extend_from_slice(&snapshot.sx);
+        packet.extend_from_slice(&snapshot.sz);
+        packet.extend_from_slice(&snapshot.sf);
+        packet.extend(snapshot.se.iter().map(|&elite| f64::from(elite)));
+        packet.extend_from_slice(&snapshot.p_sigma);
+        packet.extend_from_slice(&snapshot.p_c);
+    }
+
+    debug_assert_eq!(packet.len(), total_words);
+    packet
+}
+
+/// Packed-envelope entry shared by native conformance tests and wasm-bindgen.
+///
+/// The browser receives this `Vec<f64>` as one `Float64Array`: no UTF-8
+/// string transfer and no JSON parser participate in the live success path.
+#[must_use]
+#[allow(clippy::too_many_arguments)]
+pub fn cmaes_run_packet(
+    dim: u32,
+    x0: [f64; 6],
+    sigma0: f64,
+    lambda: u32,
+    active: bool,
+    seed: u64,
+    generations: u32,
+    landscape: u32,
+    noise: f64,
+    bounds_enabled: bool,
+    bound_min: f64,
+    bound_max: f64,
+    f_target: f64,
+) -> Vec<f64> {
+    let params = VizParams {
+        dim: dim as usize,
+        x0,
+        sigma0,
+        lambda: lambda as usize,
+        active,
+        seed,
+        generations: generations as usize,
+        landscape,
+        noise,
+        bounds_enabled,
+        bound_min,
+        bound_max,
+        f_target,
+    };
+    match cmaes_run(&params) {
+        Ok(run) => ok_packet(&run),
+        Err(refusal) => refusal_packet(&refusal),
+    }
+}
+
 /// Kernel identity probe for the capability check.
 #[must_use]
 pub fn kernel_version() -> &'static str {
@@ -1022,7 +1168,7 @@ pub fn kernel_version() -> &'static str {
 mod js {
     use wasm_bindgen::prelude::wasm_bindgen;
 
-    /// Run the visualization kernel: scalar params in, JSON envelope out.
+    /// Run the visualization kernel: scalar params in, packed f64 packet out.
     /// `x0_0..x0_5` are the initial mean coordinates; only the first `dim`
     /// are read. `f_target` = NaN disables the early-stop target.
     #[wasm_bindgen]
@@ -1047,8 +1193,8 @@ mod js {
         bound_min: f64,
         bound_max: f64,
         f_target: f64,
-    ) -> String {
-        super::cmaes_run_json(
+    ) -> Vec<f64> {
+        super::cmaes_run_packet(
             dim,
             [x0_0, x0_1, x0_2, x0_3, x0_4, x0_5],
             sigma0,
@@ -1205,6 +1351,60 @@ mod tests {
             f64::NAN,
         );
         assert_ne!(a, c, "different seed must diverge");
+    }
+
+    #[test]
+    fn g0_packed_packet_is_deterministic_and_typed() {
+        let success = || {
+            cmaes_run_packet(
+                3,
+                [1.0, 2.0, 3.0, 0.0, 0.0, 0.0],
+                0.5,
+                12,
+                true,
+                42,
+                3,
+                LANDSCAPE_ROSENBROCK,
+                0.0,
+                false,
+                0.0,
+                0.0,
+                f64::NAN,
+            )
+        };
+        let first = success();
+        let second = success();
+        assert_eq!(first, second, "packed runs must replay bitwise");
+        assert_eq!(first[0], f64::from(PACKET_MAGIC));
+        assert_eq!(first[1], f64::from(PACKET_SCHEMA_VERSION));
+        assert_eq!(first[2], f64::from(PACKET_STATUS_OK));
+        assert_eq!(first[3], first.len() as f64);
+        assert_eq!(first[4], 3.0);
+        assert_eq!(first[9], 3.0);
+        assert_eq!(first[10], 12.0);
+        assert_eq!(first[11], generation_packet_words(3, 12) as f64);
+
+        let refusal = cmaes_run_packet(
+            1,
+            [0.0; 6],
+            0.5,
+            12,
+            true,
+            1,
+            10,
+            LANDSCAPE_SPHERE,
+            0.0,
+            false,
+            0.0,
+            0.0,
+            f64::NAN,
+        );
+        assert_eq!(refusal.len(), REFUSAL_PACKET_WORDS);
+        assert_eq!(refusal[0], f64::from(PACKET_MAGIC));
+        assert_eq!(refusal[1], f64::from(PACKET_SCHEMA_VERSION));
+        assert_eq!(refusal[2], f64::from(PACKET_STATUS_REFUSAL));
+        assert_eq!(refusal[3], REFUSAL_PACKET_WORDS as f64);
+        assert_eq!(refusal[4], 1.0, "dim-out-of-range refusal id");
     }
 
     #[test]
