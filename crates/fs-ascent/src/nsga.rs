@@ -820,19 +820,15 @@ pub fn nsga3_run(
         // the documented last resort. The population never shrinks.
         if survivors.len() < cfg.population_size {
             let mut ordered: Vec<usize> = (0..union.len()).collect();
-            ordered.sort_by(|&a, &b| {
-                union[a]
-                    .canonical_ordering(&union[b])
-                    .then(a.cmp(&b))
-            });
+            ordered.sort_by(|&a, &b| union[a].canonical_ordering(&union[b]).then(a.cmp(&b)));
             for idx in ordered {
                 if survivors.len() == cfg.population_size {
                     break;
                 }
                 let already = survivors.contains(&idx);
-                let twin_of_selected = survivors.iter().any(|&s| {
-                    union[s].f == union[idx].f && union[s].x == union[idx].x
-                });
+                let twin_of_selected = survivors
+                    .iter()
+                    .any(|&s| union[s].f == union[idx].f && union[s].x == union[idx].x);
                 if already || twin_of_selected {
                     continue;
                 }

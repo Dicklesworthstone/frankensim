@@ -9,9 +9,8 @@
 //! NO quality or release authority by itself (Estimate-class).
 
 use fs_ascent::{
-    NsgaConfig, NsgaError, NsgaIndividual, NonFiniteKind,
-    build_references, das_dennis_cardinality, fast_nondominated_sort,
-    nsga3_run, partition_tuples,
+    NonFiniteKind, NsgaConfig, NsgaError, NsgaIndividual, build_references, das_dennis_cardinality,
+    fast_nondominated_sort, nsga3_run, partition_tuples,
 };
 
 fn ind(x: &[f64], f: &[f64]) -> NsgaIndividual {
@@ -119,11 +118,11 @@ fn sort_orders_chains_and_incomparable_pairs_deterministically() {
     // A=(0,0) dominates everything; B=(1,0)/(0,1) dominate C=(1,1);
     // E=(2,2) is worst. Incomparable B/D stays same-front.
     let pop = vec![
-        ind(&[0.0], &[0.0, 0.0]),   // A best
-        ind(&[1.0], &[1.0, 0.0]),   // B
-        ind(&[2.0], &[0.0, 1.0]),   // D (incomparable with B)
-        ind(&[3.0], &[1.0, 1.0]),   // C dominated by B and D
-        ind(&[4.0], &[2.0, 2.0]),   // E dominated by all
+        ind(&[0.0], &[0.0, 0.0]), // A best
+        ind(&[1.0], &[1.0, 0.0]), // B
+        ind(&[2.0], &[0.0, 1.0]), // D (incomparable with B)
+        ind(&[3.0], &[1.0, 1.0]), // C dominated by B and D
+        ind(&[4.0], &[2.0, 2.0]), // E dominated by all
     ];
     let fronts = fast_nondominated_sort(&pop);
     assert_eq!(fronts.len(), 4, "{fronts:?}");
@@ -162,21 +161,11 @@ fn sorting_is_invariant_under_input_permutation_up_to_relabeling() {
     for (fa, fb) in fwd.iter().zip(back.iter()) {
         let sa: Vec<[u64; 2]> = fa
             .iter()
-            .map(|&i| {
-                [
-                    base_pop[i].f[0].to_bits(),
-                    base_pop[i].f[1].to_bits(),
-                ]
-            })
+            .map(|&i| [base_pop[i].f[0].to_bits(), base_pop[i].f[1].to_bits()])
             .collect();
         let sb: Vec<[u64; 2]> = fb
             .iter()
-            .map(|&i| {
-                [
-                    rev_pop[i].f[0].to_bits(),
-                    rev_pop[i].f[1].to_bits(),
-                ]
-            })
+            .map(|&i| [rev_pop[i].f[0].to_bits(), rev_pop[i].f[1].to_bits()])
             .collect();
         let mut ca = sa.clone();
         ca.sort_unstable();
@@ -196,10 +185,7 @@ fn admission_refuses_empty_mismatched_and_nonfinite_inputs_typed() {
     let cfg = base_config(7, 4, 3, 32);
     let good_x = [0.25];
     let empty_err = nsga3_run(&[], &cfg, &mut |_| vec![0.0, 0.0]);
-    assert!(matches!(
-        empty_err,
-        Err(NsgaError::PopulationEmpty)
-    ));
+    assert!(matches!(empty_err, Err(NsgaError::PopulationEmpty)));
     let dim_pop = vec![ind(&good_x, &[0.1, 0.2]), ind(&[0.3], &[0.1])];
     assert!(matches!(
         nsga3_run(&dim_pop, &cfg, &mut |_| vec![0.0, 0.0]),
@@ -209,10 +195,7 @@ fn admission_refuses_empty_mismatched_and_nonfinite_inputs_typed() {
             found: 1
         })
     ));
-    let dec_pop = vec![
-        ind(&good_x, &[0.1, 0.2]),
-        ind(&[0.3, 0.4], &[0.1, 0.2]),
-    ];
+    let dec_pop = vec![ind(&good_x, &[0.1, 0.2]), ind(&[0.3, 0.4], &[0.1, 0.2])];
     assert!(matches!(
         nsga3_run(&dec_pop, &cfg, &mut |_| vec![0.0, 0.0]),
         Err(NsgaError::DecisionCountMismatch {
@@ -277,8 +260,8 @@ fn budget_boundary_stops_on_exact_generation_edge_never_partial() {
         .collect();
     let mut fe = ConvexEval::new();
     let cfg = base_config(11, 6, 50, 27);
-    let report = nsga3_run(&init_pop, &cfg, &mut |x| fe.call(x))
-        .expect("edge budget runs to completion");
+    let report =
+        nsga3_run(&init_pop, &cfg, &mut |x| fe.call(x)).expect("edge budget runs to completion");
     assert_eq!(report.evaluations, 22, "3 complete generations of 6");
     assert!(matches!(report.stop, fs_ascent::NsgaStop::BudgetBoundary));
     assert_eq!(report.generations, 3);
@@ -354,10 +337,7 @@ fn positive_affine_objective_maps_preserve_front_structure() {
                 let t = i as f64 / 7.0;
                 ind(&[t], &[t, 1.0 - t])
             })
-            .chain(std::iter::once(ind(
-                &[0.99],
-                &[0.05, 0.95],
-            )))
+            .chain(std::iter::once(ind(&[0.99], &[0.05, 0.95])))
             .collect()
     };
     let pop = mk_case();
@@ -369,7 +349,12 @@ fn positive_affine_objective_maps_preserve_front_structure() {
     let (alpha, beta) = (3.5, 12.75);
     let mapped: Vec<NsgaIndividual> = pop
         .iter()
-        .map(|p| ind(&p.x, &p.f.iter().map(|v| alpha * v + beta).collect::<Vec<_>>()))
+        .map(|p| {
+            ind(
+                &p.x,
+                &p.f.iter().map(|v| alpha * v + beta).collect::<Vec<_>>(),
+            )
+        })
         .collect();
     let fronts_b = fast_nondominated_sort(&mapped);
     assert_eq!(fronts_a.len(), fronts_b.len());
@@ -383,10 +368,7 @@ fn positive_affine_objective_maps_preserve_front_structure() {
             .map(|&i| {
                 let orig = i;
                 let _ = orig;
-                [
-                    mapped[i].f[0].to_bits(),
-                    mapped[i].f[1].to_bits(),
-                ]
+                [mapped[i].f[0].to_bits(), mapped[i].f[1].to_bits()]
             })
             .collect();
         assert_eq!(
@@ -419,12 +401,11 @@ fn normalization_singular_fallback_engages_without_breaking_the_run() {
         })
         .collect();
     let cfg = base_config(31, 4, 3, 40);
-    let report =
-        nsga3_run(&init_pop, &cfg, &mut |x| {
-            let t = x[0] * 0.5 + 0.25;
-            vec![t, t]
-        })
-        .expect("degenerate geometry still realizes");
+    let report = nsga3_run(&init_pop, &cfg, &mut |x| {
+        let t = x[0] * 0.5 + 0.25;
+        vec![t, t]
+    })
+    .expect("degenerate geometry still realizes");
     assert!(
         report.normalization_singular_fallback,
         "rank-deficient ASF system must route through the nadir fallback"
