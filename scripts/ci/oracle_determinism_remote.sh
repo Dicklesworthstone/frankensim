@@ -5,10 +5,13 @@
 # no .git, so archive-based freezing must happen on the origin host).
 #
 # Contract (env):
-#   MODE            pinned|live          (receipt metadata only here)
+#   MODE            pinned|live          (receipt metadata)
 #   LABEL           unique matrix label
-#   DET_DIR         directory containing snapshot/   (also receives outputs)
+#   DET_DIR         directory containing snapshot/ (receives outputs too)
 #   FS_DET_STDOUT   1 => emit receipt + payload blocks on stdout
+#
+# The EXIT trap self-reports the terminal status, so any transport that can
+# pipe stdout gets the verdict regardless of its own quoting behavior.
 # Exit codes: 2 usage; 3 refusal; 1 goldens red (receipts still emitted).
 set -euo pipefail
 
@@ -19,13 +22,20 @@ DET_DIR="${DET_DIR:-}"
     echo "usage: MODE=pinned|live LABEL=<label> DET_DIR=<dir> [$0]" >&2
     exit 2
 }
+
+trap 'echo "LEG_RC=$?"' EXIT
+
 SNAPSHOT="$DET_DIR/snapshot"
 FS_TREE="$SNAPSHOT/frankensim"
-[ -f "$FS_TREE/Cargo.toml" ] || { echo "refusal: snapshot missing at $SNAPSHOT" >&2; exit 3; }
+[ -f "$FS_TREE/Cargo.toml" ] || {
+    echo "refusal: snapshot missing at $SNAPSHOT" >&2
+    exit 3
+}
 
 export CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/oracle-det-target"
 
 cd "$FS_TREE"
+
 GOLDENS_PASS=true
 cargo test -p fs-query --test bore -- gb_003 gb_004 2>&1 |
     tail -200 >"$DET_DIR/bore_goldens.log" || GOLDENS_PASS=false
@@ -49,8 +59,8 @@ if [ "${FS_DET_STDOUT:-0}" = "1" ]; then
     echo "=====FS_DET_END====="
 fi
 
-"$GOLDENS_PASS" || {
+if [ "$GOLDENS_PASS" != "true" ]; then
     echo "leg failed: goldens red inside frozen tree; receipts emitted above" >&2
     exit 1
-}
+fi
 echo "leg complete: $DET_DIR"
