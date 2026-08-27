@@ -89,5 +89,8 @@ None. No cargo features alter semantics.
 
 `tests/` battery: dependency-closure pin, geometry digest stability,
 case-cap refusals both sides, per-fixture series goldens, the receipt
-golden (c439dbce class), and the Wagner-convention sampling rule.
+golden (2dc1262c class; bumped from c439dbce when the Chirp stimulus was
+corrected to its declared 0.5–4 Hz integrated-phase sweep and wake
+retention was enforced at the declared per-station cap), and the
+Wagner-convention sampling rule.
 Repro: `cargo test -p fs-wakeref`.

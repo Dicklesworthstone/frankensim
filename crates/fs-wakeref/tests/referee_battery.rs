@@ -246,8 +246,16 @@ fn v08b1_receipt_emits_with_golden() {
         assert!(grd.steady_wing_lift_n > free.steady_wing_lift_n, "{fx}");
     }
     jlog("receipt", &format!("\"digest\":\"{}\"", r.receipt_digest));
+    // GOLDEN-BUMP (phi67, 2026-08-26): two intentional referee changes —
+    // (1) Chirp fixture now uses the integrated-phase sweep so the
+    //     instantaneous frequency matches the declared 0.5 → 4 Hz
+    //     (the old TAU*f(t)*t phase actually swept 0.5 → 7.5 Hz);
+    // (2) wake retention enforces the DECLARED MAX_WAKE_ROWS per station
+    //     instead of an undocumented /8 shared-budget split.
+    // Prior golden c439dbce… encoded the mis-swept stimulus and the 8x
+    // understated truncation together.
     assert_eq!(
-        r.receipt_digest, "c439dbcea9bcf98543c577456f8d9f34099bf09c1d87b4d5b46eb11f3f3c3258",
+        r.receipt_digest, "2dc1262c1e2fb68248556e6e950d1575e9af0d3ca6b089a0664a13eedfc51494",
         "V-08b1 receipt golden moved — determinism regression or an \
          intentional referee change requiring the golden-bump protocol"
     );

@@ -513,6 +513,7 @@ pub fn run_case(g: &RefereeGeometry, case: &RefereeCase) -> Result<CaseSeries, R
                     [st.te_left[0] + dx, st.te_left[1], st.te_left[2]],
                 ],
                 gamma: gamma[i],
+                station: i,
             });
         }
         // Declared memory cap (MAX_WAKE_ROWS per station): drop the OLDEST
