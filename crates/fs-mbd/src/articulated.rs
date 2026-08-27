@@ -3,7 +3,8 @@
 //! Poses, twists, wrenches, adjoints, and coadjoints remain owned by `fs-ga`.
 //! This module adds their physical meaning: inertias, joint subspaces, a
 //! topologically ordered body tree, forward kinematics, recursive Newton-Euler
-//! inverse dynamics, and Featherstone's articulated-body forward dynamics.
+//! inverse dynamics, and Featherstone's articulated-body forward dynamics for
+//! prescribed-base and unconstrained free-flight boundaries.
 //! Spatial coordinates use `[angular, linear]`; dual force coordinates use
 //! `[torque, force]`.
 
@@ -13,6 +14,9 @@ use fs_ga::{GaError, Mat3, Mat6, Se3, Twist, Vec3, Wrench};
 const SYMMETRY_TOLERANCE: f64 = 64.0 * f64::EPSILON;
 const PHYSICAL_TOLERANCE: f64 = 256.0 * f64::EPSILON;
 const ARTICULATED_PIVOT_TOLERANCE: f64 = 1.0e-14;
+const FLOATING_BASE_SYMMETRY_TOLERANCE: f64 = 1024.0 * f64::EPSILON;
+const FLOATING_BASE_PIVOT_TOLERANCE: f64 = 1024.0 * f64::EPSILON;
+const FLOATING_BASE_CONDITION_LIMIT: f64 = 1.0e12;
 
 /// Refusal channel for articulated model construction and evaluation.
 #[derive(Debug, Clone, PartialEq)]
@@ -103,6 +107,34 @@ pub enum ArticulatedError {
         /// Observed motion-subspace pivot.
         pivot: f64,
     },
+    /// A floating-base solve requires the model root to be rigidly attached to
+    /// the six-DoF base frame; a scalar root joint would create a redundant
+    /// generalized-coordinate gauge.
+    FloatingBaseRootJointNotFixed,
+    /// The fixed-size floating-base articulated inertia has no safely positive
+    /// pivot after scale normalization.
+    SingularFloatingBaseInertia {
+        /// Zero-based pivot in `[angular, linear]` ordering.
+        index: usize,
+        /// Scale-normalized pivot value.
+        pivot: f64,
+    },
+    /// The accumulated floating-base articulated inertia lost the symmetry
+    /// required by its physical energy form beyond the rounding allowance.
+    NonSymmetricFloatingBaseInertia {
+        /// Largest mirrored-entry disagreement.
+        defect: f64,
+        /// Accepted absolute tolerance at the observed matrix scale.
+        tolerance: f64,
+    },
+    /// The fixed-size floating-base articulated inertia is too poorly
+    /// conditioned for a trustworthy acceleration solve.
+    IllConditionedFloatingBaseInertia {
+        /// Deterministic infinity-norm condition estimate.
+        condition_estimate: f64,
+        /// Maximum admitted estimate.
+        limit: f64,
+    },
     /// An `fs-ga` group operation refused.
     Geometry(GaError),
 }
@@ -168,6 +200,24 @@ impl fmt::Display for ArticulatedError {
             Self::SingularArticulatedInertia { link, pivot } => write!(
                 formatter,
                 "articulated inertia pivot for link {link} is singular or non-positive ({pivot})"
+            ),
+            Self::FloatingBaseRootJointNotFixed => formatter.write_str(
+                "a floating-base model root must use a fixed joint to avoid a redundant gauge",
+            ),
+            Self::SingularFloatingBaseInertia { index, pivot } => write!(
+                formatter,
+                "floating-base articulated inertia pivot {index} is singular or non-positive ({pivot})"
+            ),
+            Self::NonSymmetricFloatingBaseInertia { defect, tolerance } => write!(
+                formatter,
+                "floating-base articulated inertia symmetry defect {defect} exceeds {tolerance}"
+            ),
+            Self::IllConditionedFloatingBaseInertia {
+                condition_estimate,
+                limit,
+            } => write!(
+                formatter,
+                "floating-base articulated inertia condition estimate {condition_estimate} exceeds {limit}"
             ),
             Self::Geometry(source) => write!(formatter, "Lie-group operation refused: {source}"),
         }
@@ -418,8 +468,9 @@ pub enum JointKind {
 ///
 /// The articulated solver deliberately specializes its hot path to zero- and
 /// one-degree-of-freedom joints. The frame above the root has a prescribed
-/// `SE(3)` pose and body twist; solving a free-floating base remains a separate
-/// dynamics boundary rather than six fake scalar joints.
+/// `SE(3)` pose and body twist; [`free_floating_forward_dynamics`] solves its
+/// physical six-DoF acceleration as a distinct boundary rather than creating
+/// six fake scalar joints.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct JointModel {
     kind: JointKind,
@@ -656,6 +707,20 @@ impl ArticulatedModel {
         }
     }
 
+    /// Linear working-set claim for the unconstrained free-floating solver.
+    pub fn free_floating_complexity(
+        &self,
+    ) -> Result<FreeFloatingDynamicsComplexity, ArticulatedError> {
+        if self.links[0].joint.kind() != JointKind::Fixed {
+            return Err(ArticulatedError::FloatingBaseRootJointNotFixed);
+        }
+        Ok(FreeFloatingDynamicsComplexity {
+            tree: self.complexity(),
+            base_degrees_of_freedom: 6,
+            fixed_root_solve_matrix_entries: 36,
+        })
+    }
+
     fn validate_generalized(
         &self,
         field: &'static str,
@@ -737,10 +802,26 @@ pub struct DynamicsComplexity {
     pub spatial_matrix_entries_per_link: usize,
 }
 
+/// Complexity metadata for unconstrained free-floating articulated dynamics.
+///
+/// The only dense solve is one fixed-size 6×6 root system. No matrix whose
+/// extent grows with the generalized-coordinate count is formed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FreeFloatingDynamicsComplexity {
+    /// Shared linear tree-pass metadata.
+    pub tree: DynamicsComplexity,
+    /// Unactuated base coordinates solved at the root.
+    pub base_degrees_of_freedom: usize,
+    /// Entries in the single fixed-size root articulated-inertia solve.
+    pub fixed_root_solve_matrix_entries: usize,
+}
+
 /// Prescribed motion of the frame above the model root.
 ///
 /// This is a fixed or externally driven base boundary. The articulated solver
-/// does not infer the base acceleration or solve free-floating equilibrium.
+/// using this input does not infer the base acceleration or solve free-floating
+/// equilibrium; use [`free_floating_forward_dynamics`] for that distinct
+/// boundary.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BaseState {
     /// Pose mapping base coordinates into world coordinates.
@@ -780,6 +861,36 @@ impl BaseState {
     }
 }
 
+/// Pose and body twist of an unconstrained six-DoF frame above the model root.
+///
+/// This record reuses the canonical `fs-ga` pose and twist owners. It contains
+/// no acceleration because [`free_floating_forward_dynamics`] solves that
+/// quantity from force balance.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FreeFloatingBaseState {
+    /// Pose mapping floating-base coordinates into world coordinates.
+    pub world_from_base: Se3,
+    /// Floating-base twist expressed in base coordinates.
+    pub twist_body: Twist,
+}
+
+impl FreeFloatingBaseState {
+    /// Construct a free-floating base state from canonical `fs-ga` values.
+    #[must_use]
+    pub const fn new(world_from_base: Se3, twist_body: Twist) -> Self {
+        Self {
+            world_from_base,
+            twist_body,
+        }
+    }
+
+    /// A stationary free-floating base at a declared world pose.
+    #[must_use]
+    pub fn stationary(world_from_base: Se3) -> Self {
+        Self::new(world_from_base, Twist::zero())
+    }
+}
+
 /// Complete forward-kinematics receipt.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Kinematics {
@@ -807,6 +918,49 @@ pub struct ForwardDynamics {
     pub generalized_acceleration: Vec<f64>,
     /// Body-coordinate link accelerations, including the gravity convention.
     pub body_acceleration: Vec<Twist>,
+}
+
+/// Unconstrained free-flight articulated-body forward-dynamics receipt.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FreeFloatingForwardDynamics {
+    /// Featherstone spatial acceleration of the floating base, in base
+    /// coordinates. Uniform gravity is included rather than hidden in an
+    /// apparent-acceleration convention.
+    ///
+    /// Its linear component is not the ordinary Cartesian acceleration of the
+    /// base origin when the base twist is nonzero. Use
+    /// [`origin_linear_acceleration_body`] for that conversion.
+    pub base_spatial_acceleration_body: Twist,
+    /// Actuated generalized accelerations in compact scalar-joint order.
+    pub generalized_acceleration: Vec<f64>,
+    /// Featherstone spatial acceleration of every retained link, expressed in
+    /// that link's body coordinates. Convert each linear component with
+    /// [`origin_linear_acceleration_body`] and the corresponding body twist
+    /// before integrating a Cartesian origin velocity.
+    pub body_spatial_acceleration: Vec<Twist>,
+}
+
+/// Convert a body-coordinate Featherstone spatial acceleration into the
+/// ordinary Cartesian acceleration of that frame's origin, expressed in the
+/// same body coordinates.
+///
+/// For body twist `[omega, v]` and spatial acceleration `[alpha, a]`, the
+/// origin acceleration is `a + omega x v`. This explicit boundary prevents a
+/// time integrator from treating the spatial acceleration's linear coordinate
+/// as an ordinary vector derivative.
+pub fn origin_linear_acceleration_body(
+    spatial_acceleration_body: Twist,
+    body_twist: Twist,
+) -> Result<Vec3, ArticulatedError> {
+    validate_twist(
+        spatial_acceleration_body,
+        "origin_linear_acceleration.spatial_acceleration_body",
+    )?;
+    validate_twist(body_twist, "origin_linear_acceleration.body_twist")?;
+    let acceleration =
+        spatial_acceleration_body.linear + body_twist.angular.cross(body_twist.linear);
+    validate_vec3(acceleration, "origin_linear_acceleration.result")?;
+    Ok(acceleration)
 }
 
 /// Compute root-first poses and body-coordinate twists.
@@ -962,7 +1116,6 @@ pub fn inverse_dynamics(
 /// This implementation never forms or factors a dense generalized mass
 /// matrix. Every link contributes one fixed 6×6 articulated inertia and a
 /// bounded set of six-vectors.
-#[allow(clippy::too_many_lines)]
 pub fn forward_dynamics(
     model: &ArticulatedModel,
     base: BaseState,
@@ -972,21 +1125,182 @@ pub fn forward_dynamics(
     gravity_world: Vec3,
     external_body_wrench: &[Wrench],
 ) -> Result<ForwardDynamics, ArticulatedError> {
-    model.validate_configuration(joint_position)?;
-    model.validate_velocity(joint_velocity)?;
-    model.validate_applied_effort(generalized_force)?;
-    require_len(
-        "external_body_wrench",
-        external_body_wrench.len(),
-        model.link_count(),
+    validate_forward_dynamics_header(
+        model,
+        base.twist_body,
+        joint_position,
+        joint_velocity,
+        generalized_force,
+        gravity_world,
+        external_body_wrench,
     )?;
-    validate_vec3(gravity_world, "gravity_world")?;
-    validate_twist(base.twist_body, "base.twist_body")?;
     validate_twist(base.acceleration_body, "base.acceleration_body")?;
-    for wrench in external_body_wrench {
-        validate_wrench(*wrench, "external_body_wrench")?;
+    validate_external_wrenches(external_body_wrench)?;
+    let pass = articulated_body_pass(
+        model,
+        base.twist_body,
+        joint_position,
+        joint_velocity,
+        generalized_force,
+        external_body_wrench,
+        None,
+        false,
+        PRESCRIBED_ABA_FIELDS,
+    )?;
+
+    let gravity_base = base
+        .world_from_base
+        .rotation()
+        .inverse()
+        .rotate(gravity_world)?;
+    let base_acceleration = base.acceleration_body.plus(Twist::new(
+        Vec3::new(0.0, 0.0, 0.0),
+        gravity_base.scale(-1.0),
+    ));
+    validate_twist(base_acceleration, "forward_dynamics.base_acceleration")?;
+    let (generalized_acceleration, body_acceleration) = propagate_aba_accelerations(
+        model,
+        &pass,
+        base_acceleration,
+        "forward_dynamics.generalized_acceleration",
+        "forward_dynamics.body_acceleration",
+    )?;
+    Ok(ForwardDynamics {
+        generalized_acceleration,
+        body_acceleration,
+    })
+}
+
+/// Featherstone articulated-body forward dynamics with a physical free base.
+///
+/// The six base coordinates are unactuated and solved together with the scalar
+/// joint accelerations. Gravity is a physical uniform body force in this API,
+/// so the returned base and link accelerations are inertial-frame physical
+/// accelerations expressed in their respective body coordinates.
+///
+/// This is unconstrained free flight. It does not impose support, contact,
+/// impact, friction, or ground reaction forces, and it does not synthesize
+/// controller effort or advance the state in time.
+///
+/// # Errors
+/// Refuses invalid dimensions, limits, non-finite input or derived state, a
+/// non-fixed root joint, scalar articulated-inertia singularity, or a singular
+/// or ill-conditioned fixed-size root system.
+pub fn free_floating_forward_dynamics(
+    model: &ArticulatedModel,
+    base: FreeFloatingBaseState,
+    joint_position: &[f64],
+    joint_velocity: &[f64],
+    generalized_force: &[f64],
+    gravity_world: Vec3,
+    external_body_wrench: &[Wrench],
+) -> Result<FreeFloatingForwardDynamics, ArticulatedError> {
+    validate_forward_dynamics_header(
+        model,
+        base.twist_body,
+        joint_position,
+        joint_velocity,
+        generalized_force,
+        gravity_world,
+        external_body_wrench,
+    )?;
+    validate_external_wrenches(external_body_wrench)?;
+    if model.links[0].joint.kind() != JointKind::Fixed {
+        return Err(ArticulatedError::FloatingBaseRootJointNotFixed);
     }
 
+    let gravity_base = base
+        .world_from_base
+        .rotation()
+        .inverse()
+        .rotate(gravity_world)?;
+    let gravity_acceleration_base = Twist::new(Vec3::new(0.0, 0.0, 0.0), gravity_base);
+    let pass = articulated_body_pass(
+        model,
+        base.twist_body,
+        joint_position,
+        joint_velocity,
+        generalized_force,
+        external_body_wrench,
+        Some(gravity_acceleration_base),
+        true,
+        FREE_FLOATING_ABA_FIELDS,
+    )?;
+    let base_spatial_acceleration_body = solve_floating_base_system(
+        &pass.base_articulated_inertia,
+        wrench_from_array(scale6(pass.base_articulated_bias.to_array(), -1.0)),
+    )?;
+    validate_twist(
+        base_spatial_acceleration_body,
+        "free_floating_forward_dynamics.base_acceleration",
+    )?;
+    let (generalized_acceleration, body_spatial_acceleration) = propagate_aba_accelerations(
+        model,
+        &pass,
+        base_spatial_acceleration_body,
+        "free_floating_forward_dynamics.generalized_acceleration",
+        "free_floating_forward_dynamics.body_acceleration",
+    )?;
+    Ok(FreeFloatingForwardDynamics {
+        base_spatial_acceleration_body,
+        generalized_acceleration,
+        body_spatial_acceleration,
+    })
+}
+
+struct ArticulatedBodyPass {
+    x_up: Vec<Mat6>,
+    bias_acceleration: Vec<Twist>,
+    u: Vec<[f64; 6]>,
+    d: Vec<f64>,
+    scalar_u: Vec<f64>,
+    base_articulated_inertia: Mat6,
+    base_articulated_bias: Wrench,
+}
+
+#[derive(Clone, Copy)]
+struct AbaFieldNames {
+    body_velocity: &'static str,
+    bias_acceleration: &'static str,
+    articulated_bias: &'static str,
+    reduced_inertia: &'static str,
+    reduced_bias: &'static str,
+    propagated_inertia: &'static str,
+    propagated_bias: &'static str,
+}
+
+const PRESCRIBED_ABA_FIELDS: AbaFieldNames = AbaFieldNames {
+    body_velocity: "forward_dynamics.body_velocity",
+    bias_acceleration: "forward_dynamics.bias_acceleration",
+    articulated_bias: "forward_dynamics.articulated_bias",
+    reduced_inertia: "forward_dynamics.reduced_inertia",
+    reduced_bias: "forward_dynamics.reduced_bias",
+    propagated_inertia: "forward_dynamics.propagated_inertia",
+    propagated_bias: "forward_dynamics.propagated_bias",
+};
+
+const FREE_FLOATING_ABA_FIELDS: AbaFieldNames = AbaFieldNames {
+    body_velocity: "free_floating_forward_dynamics.body_velocity",
+    bias_acceleration: "free_floating_forward_dynamics.bias_acceleration",
+    articulated_bias: "free_floating_forward_dynamics.articulated_bias",
+    reduced_inertia: "free_floating_forward_dynamics.reduced_inertia",
+    reduced_bias: "free_floating_forward_dynamics.reduced_bias",
+    propagated_inertia: "free_floating_forward_dynamics.propagated_inertia",
+    propagated_bias: "free_floating_forward_dynamics.propagated_bias",
+};
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn articulated_body_pass(
+    model: &ArticulatedModel,
+    base_twist_body: Twist,
+    joint_position: &[f64],
+    joint_velocity: &[f64],
+    generalized_force: &[f64],
+    external_body_wrench: &[Wrench],
+    gravity_acceleration_base: Option<Twist>,
+    collect_base_system: bool,
+    fields: AbaFieldNames,
+) -> Result<ArticulatedBodyPass, ArticulatedError> {
     let link_count = model.link_count();
     let zero_wrench = Wrench::new(Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 0.0));
     let mut x_up = vec![Mat6::zero(); link_count];
@@ -994,6 +1308,8 @@ pub fn forward_dynamics(
     let mut bias_acceleration = vec![Twist::zero(); link_count];
     let mut articulated_inertia = vec![Mat6::zero(); link_count];
     let mut articulated_bias = vec![zero_wrench; link_count];
+    let mut gravity_acceleration =
+        gravity_acceleration_base.map(|_| vec![Twist::zero(); link_count]);
     let mut u = vec![[0.0; 6]; link_count];
     let mut d = vec![0.0; link_count];
     let mut scalar_u = vec![0.0; link_count];
@@ -1009,30 +1325,42 @@ pub fn forward_dynamics(
         let joint_velocity_body = link.joint.motion_subspace().scale(rate);
         let parent_velocity = link
             .parent
-            .map_or(base.twist_body, |parent| velocity[parent]);
+            .map_or(base_twist_body, |parent| velocity[parent]);
         velocity[link_index] = x_up[link_index]
             .apply_twist(parent_velocity)
             .plus(joint_velocity_body);
         bias_acceleration[link_index] = velocity[link_index].bracket(joint_velocity_body);
-        validate_twist(velocity[link_index], "forward_dynamics.body_velocity")?;
-        validate_twist(
-            bias_acceleration[link_index],
-            "forward_dynamics.bias_acceleration",
-        )?;
+        validate_twist(velocity[link_index], fields.body_velocity)?;
+        validate_twist(bias_acceleration[link_index], fields.bias_acceleration)?;
         articulated_inertia[link_index] = link.inertia.matrix()?;
-        articulated_bias[link_index] = wrench_minus(
-            cross_force(
-                velocity[link_index],
-                link.inertia.momentum(velocity[link_index])?,
-            ),
-            external_body_wrench[link_index],
+        let velocity_bias = cross_force(
+            velocity[link_index],
+            link.inertia.momentum(velocity[link_index])?,
         );
-        validate_wrench(
-            articulated_bias[link_index],
-            "forward_dynamics.articulated_bias",
-        )?;
+        let bias_without_gravity = wrench_minus(velocity_bias, external_body_wrench[link_index]);
+        articulated_bias[link_index] =
+            match (gravity_acceleration_base, gravity_acceleration.as_mut()) {
+                (Some(base_gravity), Some(link_gravity)) => {
+                    let parent_gravity = link
+                        .parent
+                        .map_or(base_gravity, |parent| link_gravity[parent]);
+                    link_gravity[link_index] = x_up[link_index].apply_twist(parent_gravity);
+                    validate_twist(
+                        link_gravity[link_index],
+                        "free_floating_forward_dynamics.gravity_acceleration",
+                    )?;
+                    wrench_minus(
+                        bias_without_gravity,
+                        link.inertia.momentum(link_gravity[link_index])?,
+                    )
+                }
+                _ => bias_without_gravity,
+            };
+        validate_wrench(articulated_bias[link_index], fields.articulated_bias)?;
     }
 
+    let mut base_articulated_inertia = Mat6::zero();
+    let mut base_articulated_bias = zero_wrench;
     for link_index in (0..link_count).rev() {
         let mut reduced_inertia = articulated_inertia[link_index];
         let mut reduced_bias = wrench_plus(
@@ -1061,7 +1389,7 @@ pub fn forward_dynamics(
                 u[link_index],
                 d[link_index].recip(),
             );
-            validate_mat6(&reduced_inertia, "forward_dynamics.reduced_inertia")?;
+            validate_mat6(&reduced_inertia, fields.reduced_inertia)?;
             reduced_bias = wrench_plus(
                 wrench_plus(
                     articulated_bias[link_index],
@@ -1069,7 +1397,7 @@ pub fn forward_dynamics(
                 ),
                 wrench_from_array(scale6(u[link_index], scalar_u[link_index] / d[link_index])),
             );
-            validate_wrench(reduced_bias, "forward_dynamics.reduced_bias")?;
+            validate_wrench(reduced_bias, fields.reduced_bias)?;
         }
 
         if let Some(parent) = model.links[link_index].parent {
@@ -1078,41 +1406,62 @@ pub fn forward_dynamics(
             let transformed_inertia = mat6_compose(&child_to_parent, &inertia_in_child);
             articulated_inertia[parent] =
                 mat6_add(&articulated_inertia[parent], &transformed_inertia);
-            validate_mat6(
-                &articulated_inertia[parent],
-                "forward_dynamics.propagated_inertia",
-            )?;
-            let transformed_bias = x_up[link_index].transpose().apply_wrench(reduced_bias);
+            validate_mat6(&articulated_inertia[parent], fields.propagated_inertia)?;
+            let transformed_bias = child_to_parent.apply_wrench(reduced_bias);
             articulated_bias[parent] = wrench_plus(articulated_bias[parent], transformed_bias);
-            validate_wrench(articulated_bias[parent], "forward_dynamics.propagated_bias")?;
+            validate_wrench(articulated_bias[parent], fields.propagated_bias)?;
+        } else if collect_base_system {
+            let root_to_base = x_up[link_index].transpose();
+            base_articulated_inertia = mat6_compose(
+                &root_to_base,
+                &mat6_compose(&reduced_inertia, &x_up[link_index]),
+            );
+            base_articulated_bias = root_to_base.apply_wrench(reduced_bias);
+            validate_mat6(
+                &base_articulated_inertia,
+                "free_floating_forward_dynamics.base_articulated_inertia",
+            )?;
+            validate_wrench(
+                base_articulated_bias,
+                "free_floating_forward_dynamics.base_articulated_bias",
+            )?;
         }
     }
 
-    let gravity_base = base
-        .world_from_base
-        .rotation()
-        .inverse()
-        .rotate(gravity_world)?;
-    let base_acceleration = base.acceleration_body.plus(Twist::new(
-        Vec3::new(0.0, 0.0, 0.0),
-        gravity_base.scale(-1.0),
-    ));
-    validate_twist(base_acceleration, "forward_dynamics.base_acceleration")?;
-    let mut acceleration = vec![Twist::zero(); link_count];
+    Ok(ArticulatedBodyPass {
+        x_up,
+        bias_acceleration,
+        u,
+        d,
+        scalar_u,
+        base_articulated_inertia,
+        base_articulated_bias,
+    })
+}
+
+fn propagate_aba_accelerations(
+    model: &ArticulatedModel,
+    pass: &ArticulatedBodyPass,
+    base_acceleration: Twist,
+    generalized_field: &'static str,
+    body_field: &'static str,
+) -> Result<(Vec<f64>, Vec<Twist>), ArticulatedError> {
+    let mut acceleration = vec![Twist::zero(); model.link_count()];
     let mut generalized_acceleration = vec![0.0; model.dof_count];
-    for link_index in 0..link_count {
+    for link_index in 0..model.link_count() {
         let parent_acceleration = model.links[link_index]
             .parent
             .map_or(base_acceleration, |parent| acceleration[parent]);
-        let mut link_acceleration = x_up[link_index]
+        let mut link_acceleration = pass.x_up[link_index]
             .apply_twist(parent_acceleration)
-            .plus(bias_acceleration[link_index]);
+            .plus(pass.bias_acceleration[link_index]);
         if let Some(dof_index) = model.dof_index[link_index] {
-            let qdd = (scalar_u[link_index] - dot6(u[link_index], link_acceleration.to_array()))
-                / d[link_index];
+            let qdd = (pass.scalar_u[link_index]
+                - dot6(pass.u[link_index], link_acceleration.to_array()))
+                / pass.d[link_index];
             if !qdd.is_finite() {
                 return Err(ArticulatedError::NonFinite {
-                    field: "forward_dynamics.generalized_acceleration",
+                    field: generalized_field,
                     index: dof_index,
                 });
             }
@@ -1120,13 +1469,213 @@ pub fn forward_dynamics(
             link_acceleration =
                 link_acceleration.plus(model.links[link_index].joint.motion_subspace().scale(qdd));
         }
-        validate_twist(link_acceleration, "forward_dynamics.body_acceleration")?;
+        validate_twist(link_acceleration, body_field)?;
         acceleration[link_index] = link_acceleration;
     }
-    Ok(ForwardDynamics {
-        generalized_acceleration,
-        body_acceleration: acceleration,
-    })
+    Ok((generalized_acceleration, acceleration))
+}
+
+fn validate_forward_dynamics_header(
+    model: &ArticulatedModel,
+    base_twist_body: Twist,
+    joint_position: &[f64],
+    joint_velocity: &[f64],
+    generalized_force: &[f64],
+    gravity_world: Vec3,
+    external_body_wrench: &[Wrench],
+) -> Result<(), ArticulatedError> {
+    model.validate_configuration(joint_position)?;
+    model.validate_velocity(joint_velocity)?;
+    model.validate_applied_effort(generalized_force)?;
+    require_len(
+        "external_body_wrench",
+        external_body_wrench.len(),
+        model.link_count(),
+    )?;
+    validate_vec3(gravity_world, "gravity_world")?;
+    validate_twist(base_twist_body, "base.twist_body")?;
+    Ok(())
+}
+
+fn validate_external_wrenches(external_body_wrench: &[Wrench]) -> Result<(), ArticulatedError> {
+    for wrench in external_body_wrench {
+        validate_wrench(*wrench, "external_body_wrench")?;
+    }
+    Ok(())
+}
+
+fn solve_floating_base_system(
+    matrix: &Mat6,
+    right_hand_side: Wrench,
+) -> Result<Twist, ArticulatedError> {
+    validate_mat6(
+        matrix,
+        "free_floating_forward_dynamics.base_articulated_inertia",
+    )?;
+    validate_wrench(
+        right_hand_side,
+        "free_floating_forward_dynamics.base_right_hand_side",
+    )?;
+    let scale = matrix.max_abs();
+    if scale == 0.0 {
+        return Err(ArticulatedError::SingularFloatingBaseInertia {
+            index: 0,
+            pivot: 0.0,
+        });
+    }
+
+    let normalized = normalize_symmetric6(matrix, scale)?;
+    let lower = cholesky6(&normalized)?;
+    let condition_estimate = cholesky_condition_estimate6(&normalized, &lower);
+    if !condition_estimate.is_finite() || condition_estimate > FLOATING_BASE_CONDITION_LIMIT {
+        return Err(ArticulatedError::IllConditionedFloatingBaseInertia {
+            condition_estimate,
+            limit: FLOATING_BASE_CONDITION_LIMIT,
+        });
+    }
+
+    let mut normalized_right_hand_side = right_hand_side.to_array();
+    for value in &mut normalized_right_hand_side {
+        *value /= scale;
+    }
+    validate_slice(
+        &normalized_right_hand_side,
+        "free_floating_forward_dynamics.normalized_base_right_hand_side",
+    )?;
+    let solution = solve_cholesky6(&lower, normalized_right_hand_side);
+    validate_slice(
+        &solution,
+        "free_floating_forward_dynamics.base_acceleration",
+    )?;
+    Ok(twist_from_array(solution))
+}
+
+fn normalize_symmetric6(matrix: &Mat6, scale: f64) -> Result<[f64; 36], ArticulatedError> {
+    let symmetry_tolerance = FLOATING_BASE_SYMMETRY_TOLERANCE * scale;
+    let mut symmetry_defect = 0.0_f64;
+    let mut row = 0;
+    while row < 6 {
+        let mut column = row + 1;
+        while column < 6 {
+            symmetry_defect = symmetry_defect
+                .max((matrix.m[row * 6 + column] - matrix.m[column * 6 + row]).abs());
+            column += 1;
+        }
+        row += 1;
+    }
+    if symmetry_defect > symmetry_tolerance {
+        return Err(ArticulatedError::NonSymmetricFloatingBaseInertia {
+            defect: symmetry_defect,
+            tolerance: symmetry_tolerance,
+        });
+    }
+
+    let mut normalized = [0.0; 36];
+    row = 0;
+    while row < 6 {
+        let mut column = 0;
+        while column < 6 {
+            normalized[row * 6 + column] =
+                (0.5 * matrix.m[row * 6 + column] + 0.5 * matrix.m[column * 6 + row]) / scale;
+            column += 1;
+        }
+        row += 1;
+    }
+    validate_slice(
+        &normalized,
+        "free_floating_forward_dynamics.normalized_base_inertia",
+    )?;
+    Ok(normalized)
+}
+
+fn cholesky6(normalized: &[f64; 36]) -> Result<[f64; 36], ArticulatedError> {
+    let mut lower = [0.0_f64; 36];
+    let mut row = 0;
+    while row < 6 {
+        let mut column = 0;
+        while column <= row {
+            let mut pivot = normalized[row * 6 + column];
+            let mut inner = 0;
+            while inner < column {
+                pivot = (-lower[row * 6 + inner]).mul_add(lower[column * 6 + inner], pivot);
+                inner += 1;
+            }
+            if row == column {
+                if !pivot.is_finite() || pivot <= FLOATING_BASE_PIVOT_TOLERANCE {
+                    return Err(ArticulatedError::SingularFloatingBaseInertia {
+                        index: row,
+                        pivot,
+                    });
+                }
+                lower[row * 6 + column] = pivot.sqrt();
+            } else {
+                lower[row * 6 + column] = pivot / lower[column * 6 + column];
+            }
+            column += 1;
+        }
+        row += 1;
+    }
+    validate_slice(
+        &lower,
+        "free_floating_forward_dynamics.base_cholesky_factor",
+    )?;
+    Ok(lower)
+}
+
+fn cholesky_condition_estimate6(normalized: &[f64; 36], lower: &[f64; 36]) -> f64 {
+    let mut inverse_row_sums = [0.0; 6];
+    let mut unit_column = 0;
+    while unit_column < 6 {
+        let mut unit = [0.0; 6];
+        unit[unit_column] = 1.0;
+        let inverse_column = solve_cholesky6(lower, unit);
+        let mut inverse_row = 0;
+        while inverse_row < 6 {
+            inverse_row_sums[inverse_row] += inverse_column[inverse_row].abs();
+            inverse_row += 1;
+        }
+        unit_column += 1;
+    }
+    let mut matrix_norm = 0.0_f64;
+    let mut row = 0;
+    while row < 6 {
+        let mut row_sum = 0.0;
+        let mut column = 0;
+        while column < 6 {
+            row_sum += normalized[row * 6 + column].abs();
+            column += 1;
+        }
+        matrix_norm = matrix_norm.max(row_sum);
+        row += 1;
+    }
+    let inverse_norm = inverse_row_sums.into_iter().fold(0.0_f64, f64::max);
+    matrix_norm * inverse_norm
+}
+
+fn solve_cholesky6(lower: &[f64; 36], mut right_hand_side: [f64; 6]) -> [f64; 6] {
+    let mut row = 0;
+    while row < 6 {
+        let mut value = right_hand_side[row];
+        let mut column = 0;
+        while column < row {
+            value = (-lower[row * 6 + column]).mul_add(right_hand_side[column], value);
+            column += 1;
+        }
+        right_hand_side[row] = value / lower[row * 6 + row];
+        row += 1;
+    }
+    row = 6;
+    while row > 0 {
+        row -= 1;
+        let mut value = right_hand_side[row];
+        let mut column = row + 1;
+        while column < 6 {
+            value = (-lower[column * 6 + row]).mul_add(right_hand_side[column], value);
+            column += 1;
+        }
+        right_hand_side[row] = value / lower[row * 6 + row];
+    }
+    right_hand_side
 }
 
 fn validate_slice(values: &[f64], field: &'static str) -> Result<(), ArticulatedError> {
@@ -1290,6 +1839,13 @@ fn wrench_from_array(value: [f64; 6]) -> Wrench {
     )
 }
 
+fn twist_from_array(value: [f64; 6]) -> Twist {
+    Twist::new(
+        Vec3::new(value[0], value[1], value[2]),
+        Vec3::new(value[3], value[4], value[5]),
+    )
+}
+
 fn mat6_apply_twist(matrix: &Mat6, value: Twist) -> Wrench {
     wrench_from_array(mat6_apply_array(matrix, value.to_array()))
 }
@@ -1379,6 +1935,10 @@ mod tests {
         SpatialInertia::new(1.0, center, diagonal(0.02, 0.26, 0.26)).unwrap()
     }
 
+    fn centered_inertia(mass: f64, xx: f64, yy: f64, zz: f64) -> SpatialInertia {
+        SpatialInertia::new(mass, Vec3::new(0.0, 0.0, 0.0), diagonal(xx, yy, zz)).unwrap()
+    }
+
     fn zero_wrenches(count: usize) -> Vec<Wrench> {
         vec![Wrench::new(Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 0.0)); count]
     }
@@ -1388,6 +1948,31 @@ mod tests {
             (actual - expected).abs() <= tolerance,
             "expected {expected:.16e}, got {actual:.16e}"
         );
+    }
+
+    fn assert_twist_close(actual: Twist, expected: Twist, tolerance: f64) {
+        for (actual, expected) in actual.to_array().into_iter().zip(expected.to_array()) {
+            assert_close(actual, expected, tolerance);
+        }
+    }
+
+    fn floating_pendulum_model() -> ArticulatedModel {
+        let root = Link::new(
+            "floating_root",
+            None,
+            Se3::identity(),
+            JointModel::FIXED,
+            centered_inertia(2.0, 0.7, 0.8, 0.9),
+        );
+        let offset = Se3::from_parts(fs_ga::So3::identity(), Vec3::new(0.8, 0.0, 0.0)).unwrap();
+        let pendulum = Link::new(
+            "pendulum",
+            Some(0),
+            offset,
+            JointModel::revolute(Vec3::new(0.0, 0.0, 1.0), None).unwrap(),
+            SpatialInertia::new(1.5, Vec3::new(0.4, 0.0, 0.0), diagonal(0.2, 0.3, 0.4)).unwrap(),
+        );
+        ArticulatedModel::new(vec![root, pendulum]).unwrap()
     }
 
     fn two_link_model() -> ArticulatedModel {
@@ -1751,6 +2336,443 @@ mod tests {
         .unwrap();
         for (actual, expected) in forward.generalized_acceleration.iter().zip(qdd.iter()) {
             assert_close(*actual, *expected, 2.0e-9);
+        }
+    }
+
+    #[test]
+    fn free_rigid_body_accelerates_with_uniform_gravity() {
+        let inertia = centered_inertia(2.0, 0.4, 0.5, 0.6);
+        let model = ArticulatedModel::new(vec![Link::new(
+            "free_body",
+            None,
+            Se3::identity(),
+            JointModel::FIXED,
+            inertia,
+        )])
+        .unwrap();
+        let gravity = Vec3::new(0.4, -9.7, 1.2);
+        let result = free_floating_forward_dynamics(
+            &model,
+            FreeFloatingBaseState::stationary(Se3::identity()),
+            &[],
+            &[],
+            &[],
+            gravity,
+            &zero_wrenches(1),
+        )
+        .unwrap();
+        let expected = Twist::new(Vec3::new(0.0, 0.0, 0.0), gravity);
+        assert_twist_close(result.base_spatial_acceleration_body, expected, EPSILON);
+        assert_twist_close(result.body_spatial_acceleration[0], expected, EPSILON);
+        assert!(result.generalized_acceleration.is_empty());
+    }
+
+    #[test]
+    fn free_rigid_body_no_force_obeys_instantaneous_conservation_identity() {
+        let inertia = centered_inertia(2.0, 0.4, 0.5, 0.6);
+        let model = ArticulatedModel::new(vec![Link::new(
+            "free_body",
+            None,
+            Se3::identity(),
+            JointModel::FIXED,
+            inertia,
+        )])
+        .unwrap();
+        let velocity = Twist::new(Vec3::new(0.7, -0.4, 0.2), Vec3::new(1.0, -0.5, 0.3));
+        let result = free_floating_forward_dynamics(
+            &model,
+            FreeFloatingBaseState::new(Se3::identity(), velocity),
+            &[],
+            &[],
+            &[],
+            Vec3::new(0.0, 0.0, 0.0),
+            &zero_wrenches(1),
+        )
+        .unwrap();
+        let momentum = inertia.momentum(velocity).unwrap();
+        let balance = wrench_plus(
+            inertia
+                .momentum(result.base_spatial_acceleration_body)
+                .unwrap(),
+            cross_force(velocity, momentum),
+        );
+        for residual in balance.to_array() {
+            assert_close(residual, 0.0, EPSILON);
+        }
+        assert_close(
+            momentum.pairing(result.base_spatial_acceleration_body),
+            0.0,
+            EPSILON,
+        );
+    }
+
+    #[test]
+    fn free_rigid_body_external_wrench_matches_closed_form_acceleration() {
+        let model = ArticulatedModel::new(vec![Link::new(
+            "free_body",
+            None,
+            Se3::identity(),
+            JointModel::FIXED,
+            centered_inertia(2.0, 0.4, 0.5, 0.6),
+        )])
+        .unwrap();
+        let external = [Wrench::new(
+            Vec3::new(0.8, -1.0, 1.8),
+            Vec3::new(4.0, -3.0, 2.0),
+        )];
+        let result = free_floating_forward_dynamics(
+            &model,
+            FreeFloatingBaseState::stationary(Se3::identity()),
+            &[],
+            &[],
+            &[],
+            Vec3::new(0.0, 0.0, 0.0),
+            &external,
+        )
+        .unwrap();
+        assert_twist_close(
+            result.base_spatial_acceleration_body,
+            Twist::new(Vec3::new(2.0, -2.0, 3.0), Vec3::new(2.0, -1.5, 1.0)),
+            EPSILON,
+        );
+    }
+
+    #[test]
+    fn free_base_and_one_link_pendulum_have_the_expected_reaction_coupling() {
+        let base_mass = 2.0;
+        let base_inertia_z = 0.8;
+        let pendulum_mass = 1.0;
+        let pendulum_inertia_z = 0.4;
+        let center_distance = 0.5;
+        let root = Link::new(
+            "base_rotor",
+            None,
+            Se3::identity(),
+            JointModel::FIXED,
+            centered_inertia(base_mass, 0.6, 0.7, base_inertia_z),
+        );
+        let child = Link::new(
+            "pendulum",
+            Some(0),
+            Se3::identity(),
+            JointModel::revolute(Vec3::new(0.0, 0.0, 1.0), None).unwrap(),
+            SpatialInertia::new(
+                pendulum_mass,
+                Vec3::new(center_distance, 0.0, 0.0),
+                diagonal(0.2, 0.3, pendulum_inertia_z),
+            )
+            .unwrap(),
+        );
+        let model = ArticulatedModel::new(vec![root, child]).unwrap();
+        let torque = 1.2;
+        let result = free_floating_forward_dynamics(
+            &model,
+            FreeFloatingBaseState::stationary(Se3::identity()),
+            &[0.0],
+            &[0.0],
+            &[torque],
+            Vec3::new(0.0, 0.0, 0.0),
+            &zero_wrenches(2),
+        )
+        .unwrap();
+        let absolute_pendulum_inertia = pendulum_inertia_z
+            + pendulum_mass * center_distance * center_distance * base_mass
+                / (base_mass + pendulum_mass);
+        let absolute_pendulum_acceleration = torque / absolute_pendulum_inertia;
+        assert_close(
+            result.base_spatial_acceleration_body.angular.z,
+            -torque / base_inertia_z,
+            EPSILON,
+        );
+        assert_close(
+            result.base_spatial_acceleration_body.linear.y,
+            -pendulum_mass * center_distance * absolute_pendulum_acceleration
+                / (base_mass + pendulum_mass),
+            EPSILON,
+        );
+        assert_close(
+            result.generalized_acceleration[0],
+            absolute_pendulum_acceleration + torque / base_inertia_z,
+            EPSILON,
+        );
+    }
+
+    #[test]
+    fn free_flight_is_equivariant_under_a_common_world_rotation() {
+        let inertia =
+            SpatialInertia::new(2.0, Vec3::new(0.2, -0.1, 0.3), diagonal(0.4, 0.5, 0.6)).unwrap();
+        let model = ArticulatedModel::new(vec![Link::new(
+            "offset_free_body",
+            None,
+            Se3::identity(),
+            JointModel::FIXED,
+            inertia,
+        )])
+        .unwrap();
+        let velocity = Twist::new(Vec3::new(0.3, -0.2, 0.4), Vec3::new(0.5, 0.1, -0.3));
+        let gravity = Vec3::new(0.2, -9.8, 0.7);
+        let external = [Wrench::new(
+            Vec3::new(0.4, -0.3, 0.2),
+            Vec3::new(1.0, -0.5, 0.7),
+        )];
+        let reference = free_floating_forward_dynamics(
+            &model,
+            FreeFloatingBaseState::new(Se3::identity(), velocity),
+            &[],
+            &[],
+            &[],
+            gravity,
+            &external,
+        )
+        .unwrap();
+        let rotated_pose = Se3::exp(Twist::new(
+            Vec3::new(0.3, -0.4, 0.7),
+            Vec3::new(1.2, -0.6, 0.8),
+        ))
+        .unwrap();
+        let rotated_gravity = rotated_pose.transform_vector(gravity).unwrap();
+        let rotated = free_floating_forward_dynamics(
+            &model,
+            FreeFloatingBaseState::new(rotated_pose, velocity),
+            &[],
+            &[],
+            &[],
+            rotated_gravity,
+            &external,
+        )
+        .unwrap();
+        assert_twist_close(
+            rotated.base_spatial_acceleration_body,
+            reference.base_spatial_acceleration_body,
+            2.0e-9,
+        );
+        assert_twist_close(
+            rotated.body_spatial_acceleration[0],
+            reference.body_spatial_acceleration[0],
+            2.0e-9,
+        );
+    }
+
+    #[test]
+    fn free_floating_aba_round_trips_through_prescribed_base_rnea() {
+        let model = floating_pendulum_model();
+        let base = FreeFloatingBaseState::new(
+            Se3::identity(),
+            Twist::new(Vec3::new(0.1, -0.2, 0.3), Vec3::new(0.4, 0.2, -0.1)),
+        );
+        let q = [0.3];
+        let qd = [0.2];
+        let applied = [0.7];
+        let gravity = Vec3::new(0.0, -9.81, 0.0);
+        let mut external = zero_wrenches(model.link_count());
+        external[1] = Wrench::new(Vec3::new(0.1, -0.2, 0.3), Vec3::new(0.4, 0.2, -0.1));
+        let forward =
+            free_floating_forward_dynamics(&model, base, &q, &qd, &applied, gravity, &external)
+                .unwrap();
+        let inverse = inverse_dynamics(
+            &model,
+            BaseState::prescribed(
+                base.world_from_base,
+                base.twist_body,
+                forward.base_spatial_acceleration_body,
+            ),
+            &q,
+            &qd,
+            &forward.generalized_acceleration,
+            gravity,
+            &external,
+        )
+        .unwrap();
+        assert_close(inverse.generalized_force[0], applied[0], 3.0e-9);
+        for residual in inverse.body_wrench[0].to_array() {
+            assert_close(residual, 0.0, 3.0e-9);
+        }
+    }
+
+    #[test]
+    fn free_floating_boundary_refuses_nonfinite_and_redundant_inputs() {
+        let model = ArticulatedModel::new(vec![Link::new(
+            "finite_root",
+            None,
+            Se3::identity(),
+            JointModel::FIXED,
+            centered_inertia(1.0, 0.4, 0.5, 0.6),
+        )])
+        .unwrap();
+        let invalid_base = FreeFloatingBaseState::new(
+            Se3::identity(),
+            Twist::new(Vec3::new(f64::NAN, 0.0, 0.0), Vec3::new(0.0, 0.0, 0.0)),
+        );
+        assert!(matches!(
+            free_floating_forward_dynamics(
+                &model,
+                invalid_base,
+                &[],
+                &[],
+                &[],
+                Vec3::new(0.0, 0.0, 0.0),
+                &zero_wrenches(1),
+            ),
+            Err(ArticulatedError::NonFinite {
+                field: "base.twist_body",
+                index: 0,
+            })
+        ));
+
+        let redundant = ArticulatedModel::new(vec![Link::new(
+            "redundant_root",
+            None,
+            Se3::identity(),
+            JointModel::revolute(Vec3::new(0.0, 0.0, 1.0), None).unwrap(),
+            centered_inertia(1.0, 0.4, 0.5, 0.6),
+        )])
+        .unwrap();
+        assert_eq!(
+            redundant.free_floating_complexity(),
+            Err(ArticulatedError::FloatingBaseRootJointNotFixed)
+        );
+        assert_eq!(
+            free_floating_forward_dynamics(
+                &redundant,
+                FreeFloatingBaseState::stationary(Se3::identity()),
+                &[0.0],
+                &[0.0],
+                &[0.0],
+                Vec3::new(0.0, 0.0, 0.0),
+                &zero_wrenches(1),
+            ),
+            Err(ArticulatedError::FloatingBaseRootJointNotFixed)
+        );
+    }
+
+    #[test]
+    fn floating_base_root_solver_refuses_singular_and_ill_conditioned_systems() {
+        let mut nonfinite = Mat6::identity();
+        nonfinite.m[10] = f64::INFINITY;
+        assert!(matches!(
+            solve_floating_base_system(
+                &nonfinite,
+                Wrench::new(Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 0.0)),
+            ),
+            Err(ArticulatedError::NonFinite {
+                field: "free_floating_forward_dynamics.base_articulated_inertia",
+                index: 10,
+            })
+        ));
+
+        let mut nonsymmetric = Mat6::identity();
+        nonsymmetric.m[1] = 1.0e-6;
+        assert!(matches!(
+            solve_floating_base_system(
+                &nonsymmetric,
+                Wrench::new(Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 0.0)),
+            ),
+            Err(ArticulatedError::NonSymmetricFloatingBaseInertia { .. })
+        ));
+
+        let ill_scaled = ArticulatedModel::new(vec![Link::new(
+            "ill_scaled_root",
+            None,
+            Se3::identity(),
+            JointModel::FIXED,
+            SpatialInertia::new(1.0, Vec3::new(1.0e8, 0.0, 0.0), diagonal(1.0, 1.0, 1.0)).unwrap(),
+        )])
+        .unwrap();
+        assert!(matches!(
+            free_floating_forward_dynamics(
+                &ill_scaled,
+                FreeFloatingBaseState::stationary(Se3::identity()),
+                &[],
+                &[],
+                &[],
+                Vec3::new(0.0, 0.0, 0.0),
+                &zero_wrenches(1),
+            ),
+            Err(ArticulatedError::SingularFloatingBaseInertia { .. })
+        ));
+
+        let mut ill_conditioned = Mat6::identity();
+        ill_conditioned.m[35] = 5.0e-13;
+        assert!(matches!(
+            solve_floating_base_system(
+                &ill_conditioned,
+                Wrench::new(Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 0.0)),
+            ),
+            Err(ArticulatedError::IllConditionedFloatingBaseInertia { .. })
+        ));
+    }
+
+    #[test]
+    fn floating_base_root_solver_handles_coupling_and_origin_acceleration_is_explicit() {
+        let mut coupled = Mat6::identity();
+        coupled.m[1] = 0.2;
+        coupled.m[6] = 0.2;
+        coupled.m[22] = -0.3;
+        coupled.m[27] = -0.3;
+        let expected = Twist::new(Vec3::new(1.0, -2.0, 0.5), Vec3::new(0.25, -0.75, 1.5));
+        let right_hand_side = mat6_apply_twist(&coupled, expected);
+        let actual = solve_floating_base_system(&coupled, right_hand_side).unwrap();
+        assert_twist_close(actual, expected, EPSILON);
+
+        let body_twist = Twist::new(Vec3::new(0.0, 0.0, 2.0), Vec3::new(3.0, 4.0, 0.0));
+        let spatial_acceleration = Twist::new(Vec3::new(0.1, 0.2, 0.3), Vec3::new(1.0, 2.0, 3.0));
+        let origin = origin_linear_acceleration_body(spatial_acceleration, body_twist).unwrap();
+        assert_close(origin.x, -7.0, EPSILON);
+        assert_close(origin.y, 8.0, EPSILON);
+        assert_close(origin.z, 3.0, EPSILON);
+    }
+
+    #[test]
+    fn g1_catalog_runs_a_linear_storage_free_fall_solve_without_internal_actuation() {
+        let catalog = crate::robot_models::unitree_g1_lower_body_waist_15dof().unwrap();
+        let model = catalog.model();
+        let complexity = model.free_floating_complexity().unwrap();
+        assert_eq!(complexity.tree.links, 16);
+        assert_eq!(complexity.tree.degrees_of_freedom, 15);
+        assert_eq!(complexity.tree.dense_generalized_matrix_entries, 0);
+        assert_eq!(complexity.tree.spatial_matrix_entries_per_link, 36);
+        assert_eq!(complexity.base_degrees_of_freedom, 6);
+        assert_eq!(complexity.fixed_root_solve_matrix_entries, 36);
+
+        let zero = vec![0.0; model.dof_count()];
+        let gravity = Vec3::new(0.0, 0.0, -9.81);
+        let result = free_floating_forward_dynamics(
+            model,
+            FreeFloatingBaseState::stationary(Se3::identity()),
+            &zero,
+            &zero,
+            &zero,
+            gravity,
+            &zero_wrenches(model.link_count()),
+        )
+        .unwrap();
+        assert_twist_close(
+            result.base_spatial_acceleration_body,
+            Twist::new(Vec3::new(0.0, 0.0, 0.0), gravity),
+            3.0e-9,
+        );
+        for acceleration in &result.generalized_acceleration {
+            assert_close(*acceleration, 0.0, 3.0e-9);
+        }
+
+        // Uniform gravity cannot excite internal coordinates in unconstrained
+        // free fall. Each link sees the same world acceleration expressed in
+        // its own body frame; this catches a gravity sign or transform error
+        // that a mere finite-value smoke assertion would miss.
+        let kinematics =
+            forward_kinematics(model, BaseState::stationary(Se3::identity()), &zero, &zero)
+                .unwrap();
+        for (link_index, acceleration) in result.body_spatial_acceleration.iter().enumerate() {
+            let gravity_body = kinematics.world_from_link[link_index]
+                .rotation()
+                .inverse()
+                .rotate(gravity)
+                .unwrap();
+            assert_twist_close(
+                *acceleration,
+                Twist::new(Vec3::new(0.0, 0.0, 0.0), gravity_body),
+                3.0e-9,
+            );
         }
     }
 

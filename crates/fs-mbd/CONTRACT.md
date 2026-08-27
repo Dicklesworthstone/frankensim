@@ -18,9 +18,13 @@ no second pose, twist, wrench, inertia, joint, or articulated-model type.
 
 Canonical poses, twists, wrenches, adjoints, and coadjoints remain owned by
 `fs-ga`; the articulated lane consumes those types rather than creating a
-parallel robot-math representation. Contact, impacts, loop constraints,
-free-floating-base equilibrium, and time integration remain dedicated owner
-boundaries and are not approximated here.
+parallel robot-math representation. The articulated owner now includes both a
+prescribed-base boundary and an unconstrained free-flight boundary that solves
+six unactuated base accelerations together with the scalar joint accelerations.
+Contact, impacts, loop constraints, and time integration remain dedicated owner
+boundaries and are not approximated here. Control policy is likewise a separate
+owner: this crate consumes declared efforts and external wrenches but invents
+neither.
 
 ## Public types and semantics
 
@@ -89,15 +93,38 @@ boundaries and are not approximated here.
   symmetric speed/actuator-effort bounds.
 - `articulated::ArticulatedModel` requires one root at link zero, root-first
   topological ordering, preceding parents, unique nonempty names, and compact
-  scalar-DoF indexing. The frame above the root is prescribed by `BaseState`,
-  including its body twist and non-gravity body acceleration; it is not a
-  solved floating body.
+  scalar-DoF indexing. The prescribed-base API describes the frame above the
+  root with `BaseState`, including its body twist and non-gravity body
+  acceleration; that boundary does not solve the base motion.
+- `articulated::FreeFloatingBaseState` carries the canonical `fs-ga` `Se3`
+  world pose and body-coordinate `Twist` of the frame above the root. It has no
+  acceleration field because `free_floating_forward_dynamics` solves the six
+  unactuated base coordinates. A free-floating model must have a fixed root
+  joint; a scalar root joint would redundantly parameterize motion already
+  represented by the base pose and is refused.
 - `articulated::forward_kinematics` returns world-from-link `Se3` poses and
   body-coordinate twists. `inverse_dynamics` implements a recursive
   Newton-Euler pass and reports required generalized effort. `forward_dynamics`
   implements Featherstone's articulated-body algorithm without constructing a
   dense generalized mass matrix; supplied actuator efforts are checked against
   declared limits.
+- `articulated::free_floating_forward_dynamics` reuses the same linear-time
+  Featherstone factor/back-substitution passes, accumulates one 6×6 articulated
+  inertia at the root, and solves that fixed-size system for the physical base
+  spatial acceleration. Uniform world gravity is applied as physical link body
+  wrenches, so `FreeFloatingForwardDynamics` reports Featherstone spatial
+  accelerations with physical gravity included rather than the prescribed API's
+  gravity-shifted recursion convention. These are explicitly named
+  `base_spatial_acceleration_body` and `body_spatial_acceleration`: for body
+  twist `[omega, v]`, the ordinary Cartesian acceleration of the frame origin
+  is `a.linear + omega x v`, exposed by
+  `origin_linear_acceleration_body`. External wrenches remain body-coordinate
+  per-link values and the returned scalar accelerations retain compact joint
+  order.
+- `ArticulatedModel::free_floating_complexity` admits only the same fixed-root
+  topology as the solver, then records six base DoFs, one fixed 36-entry root
+  solve, zero dense generalized-matrix entries, and the shared linear tree
+  working set.
 - `robot_models::unitree_g1_lower_body_waist_15dof` builds a fixed-pelvis tree
   with the source joint order of six left-leg, six right-leg, and three waist
   DoFs. It uses the link inertias, joint origins, axes, and hard limits from the
@@ -139,6 +166,10 @@ boundaries and are not approximated here.
   kinetic energies, transformed twists/wrenches, articulated inertias, and
   returned accelerations are checked after arithmetic; large finite input that
   overflows a derived quantity refuses instead of publishing `NaN` or infinity.
+- Free-flight evaluation additionally validates the canonical base twist,
+  requires a fixed root joint, and transactionally refuses a non-symmetric,
+  singular, non-finite, or ill-conditioned accumulated root inertia. It never
+  mutates caller-owned state or publishes partial accelerations on refusal.
 - Catalog builders deterministically preserve their declared root-first link
   topology and compact source-joint order. Their retained numeric records use
   URDF SI units and pass the same articulated topology, limit, pose, and
@@ -154,6 +185,13 @@ duration. There are no panics in production paths for those invalid inputs.
 Arithmetic overflow or a non-finite attitude update, kinematic transform,
 effective-mass query, or impulse-work result is returned through the checked
 boundary; already completed earlier steps of `advance` remain committed.
+
+The free-floating root solve scale-normalizes and symmetrizes the accumulated
+6×6 physical inertia within a stated rounding tolerance, performs a private
+fixed-size Cholesky solve, and computes a deterministic infinity-norm condition
+estimate from six checked triangular solves. Non-positive/small pivots and
+condition estimates above `1e12` are structured refusals. This fixed-size
+helper is private and is not a second public linear-algebra API.
 
 ## Determinism class
 
@@ -184,6 +222,13 @@ No feature flags. The articulated lane depends on `fs-ga` for its canonical
 Lie-group and spatial-vector types; `robot_models` reuses that same dependency
 and the articulated types. The legacy single-body lane otherwise continues to
 depend only on `std`/`core`.
+
+`fs-mbd` deliberately does not depend on `fs-la` for the root solve. The live
+`fs-la` factorization entry points are dynamically sized and do not provide the
+required finite/conditioning refusal, while taking that dependency would pull
+the full GEMM/executor/allocation runtime closure into this bounded L3 crate.
+The private six-by-six checked solve is therefore the narrower layer-preserving
+boundary.
 
 ## Conformance tests
 
@@ -221,15 +266,26 @@ transform order, a closed-form gravity pendulum, prescribed base acceleration,
 single-body ABA, coupled RNEA/ABA round trip, linear-storage metadata, and
 position/speed/effort limit refusal.
 
+The free-floating battery additionally checks a zero-DoF rigid body under
+uniform gravity, torque-free instantaneous force/energy balance, a closed-form
+external-wrench acceleration, analytic base/joint reaction coupling, common
+world-rotation equivariance, a free-ABA to prescribed-base-RNEA round trip with
+zero root wrench, redundant-root, non-symmetric, and ill-conditioned-system
+refusal, an off-diagonal 6x6 solve oracle, the explicit spatial-to-Cartesian
+origin-acceleration conversion, and linear-storage metadata. The Unitree
+G1-derived 15-DoF catalog additionally proves the stronger free-fall invariant:
+zero internal joint acceleration and the same world gravity expressed in every
+link's body frame.
+
 The `robot_models` module additionally checks both catalogs' link/DoF counts
 and stable source order, bilateral G1 neutral-origin symmetry, an independent
 iiwa neutral endpoint, admitted hard limits and physical inertias, zero dense
 generalized-matrix entries, zero-input ABA, deterministic rebuilds, and retained
 provenance/omission records.
 
-These are local G0-style checks. They do not constitute contact, constrained or
-floating-base validation, full robot-model validation, performance evidence,
-G4 fault injection, or G5 cross-ISA evidence.
+These are local G0-style checks. They do not constitute contact or constrained
+dynamics validation, full robot-model validation, performance evidence, G4
+fault injection, or G5 cross-ISA evidence.
 
 ## No-claim boundaries
 
@@ -241,15 +297,16 @@ G4 fault injection, or G5 cross-ISA evidence.
   and scalar revolute/prismatic/helical joints.
 - The articulated lane provides a full 6x6 spatial inertia and an articulated
   tree, but no geometry-derived inertia assembly, flexible body, closed-loop
-  graph, free-floating-base solve, or Euler-disc-specific rule. The separate
-  point/impulse API remains parameterized by the legacy centre-of-mass diagonal
-  principal inertia.
+  graph, or Euler-disc-specific rule. The separate point/impulse API remains
+  parameterized by the legacy centre-of-mass diagonal principal inertia.
 - Catalog entries are transcriptions and explicit reductions, not complete or
   manufacturer-validated digital twins. The G1 entry omits all arm DoFs and
   links, fixed body/sensor attachments, contact geometry, and their mass rather
   than lumping omitted mass into retained links. The iiwa entry omits the world
   link, fixed massless flange, damping, soft safety limits, and payload/tool.
-  Both use prescribed fixed-base semantics: neither solves a floating base.
+  Both catalog roots are fixed relative to their declared base frame and can be
+  passed either to prescribed-base dynamics or the free-flight base solver; the
+  catalog builders themselves do not choose a dynamics boundary.
 - No catalog entry loads meshes, supplies collision/contact geometry, models
   actuators/gearing/transmissions, certifies hardware safety envelopes, parses
   URDF/Xacro at runtime, or claims the omitted upstream structures have no
@@ -259,6 +316,11 @@ G4 fault injection, or G5 cross-ISA evidence.
   cone, or no-slip constraint is implemented. An equal-and-opposite impulse is
   algebraic action/reaction only; it does not by itself establish angular-
   momentum conservation about a shared contact point or physical admissibility.
+- Free-floating dynamics means unconstrained free flight only. It supplies no
+  ground, support, contact, impact, friction, complementarity, buoyancy,
+  aerodynamic, or controller force implicitly. A gravity-only robot therefore
+  falls freely; it does not stand, balance, or behave as a ground-supported
+  pendulum without explicit external/contact forces from another owner.
 - The midpoint update is not claimed symplectic, variational, energy exactly
   conserving, momentum exactly conserving for arbitrary inertia, adaptive,
   adjoint-capable, or physically validated.
