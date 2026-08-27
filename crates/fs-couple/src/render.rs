@@ -388,6 +388,14 @@ pub enum RenderError {
         /// What was wrong.
         what: &'static str,
     },
+    /// A caller-supplied size exceeds a documented pre-sized budget (block
+    /// length versus construction-time scratch, or a block-count product).
+    /// This is an admission failure of the request shape, not a control
+    /// defect.
+    Sizing {
+        /// What was wrong.
+        what: &'static str,
+    },
     /// `block` was called with an empty output slice.
     EmptyBlock,
 }
@@ -398,6 +406,7 @@ impl core::fmt::Display for RenderError {
             Self::Voice(e) => write!(f, "voice refusal: {e:?}"),
             Self::Modal(e) => write!(f, "modal voice refusal: {e:?}"),
             Self::Control { what } => write!(f, "control refusal: {what}"),
+            Self::Sizing { what } => write!(f, "sizing refusal: {what}"),
             Self::EmptyBlock => write!(f, "block output slice is empty"),
         }
     }
@@ -510,7 +519,7 @@ impl RenderContext {
             return Err(RenderError::EmptyBlock);
         }
         if out.len() > self.scratch.len() {
-            return Err(RenderError::Control {
+            return Err(RenderError::Sizing {
                 what: "block exceeds the pre-sized maximum; grow max_block at construction",
             });
         }

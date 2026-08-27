@@ -72,9 +72,9 @@ pub(crate) fn map_drive(err: crate::driving_point::DrivingPointError) -> Acousti
         crate::driving_point::DrivingPointError::Realize(_) => AcousticRealizeError::Reed {
             what: "characteristic realization refused",
         },
-        crate::driving_point::DrivingPointError::Discrete(_) => AcousticRealizeError::Reed {
-            what: "characteristic line left the finite set",
-        },
+        crate::driving_point::DrivingPointError::Discrete(e) => AcousticRealizeError::Nonlinear(
+            format!("characteristic-line discretization refused: {e:?}"),
+        ),
     }
 }
 
