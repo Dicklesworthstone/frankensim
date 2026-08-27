@@ -1535,3 +1535,53 @@ fn simple_cylinder_ode_still_tracks_sound_speed() {
         "ODE cylinder period must track 1/c(T): {measured} vs {expected}"
     );
 }
+
+/// Regression for bead frankensim-dtb76: the ODE reed realization must
+/// carry the SAME typed field validation as ReedBoreVoice::new —
+/// non-finite attack ramps and stiffnesses refuse up front with the
+/// shared "reed parameters" message instead of surfacing as generic
+/// per-step Nonlinear noise mid-integration.
+#[test]
+fn reed_ode_refuses_nonfinite_attack_and_stiffness_up_front() {
+    let base = || {
+        let mut a = closed_duct(293.15);
+        a.blow = None;
+        a.reed = Some(BeatingReed {
+            rest_opening_m: 5.0e-4,
+            width_m: 0.01,
+            closing_pressure_pa: 2_000.0,
+            blowing_pressure_pa: 3_000.0,
+            attack_s: 0.02,
+            mass_kg: 0.0,
+            stiffness_n_m: 8_000.0,
+        });
+        a
+    };
+    // Control: a physical carrier still realizes end to end.
+    assert!(
+        realize_assembly(&base()).is_ok(),
+        "physical quasistatic reed carrier must realize"
+    );
+    for (what, fix) in [
+        ("stiffness", 1usize),
+        ("attack", 2usize),
+    ] {
+        let mut bad = base();
+        let r = bad.reed.as_mut().expect("carrier present");
+        match fix {
+            1 => r.stiffness_n_m = f64::NAN,
+            _ => r.attack_s = f64::NAN,
+        }
+        let err = realize_assembly(&bad)
+            .expect_err("non-finite reed field must refuse at admission");
+        assert!(
+            matches!(err, AcousticRealizeError::InvalidDescription { .. }),
+            "{what}: expected the typed admission refusal, got {err:?}"
+        );
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("reed parameters"),
+            "{what}: refusal must be the shared reed-validation message, got {msg}"
+        );
+    }
+}
