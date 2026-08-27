@@ -26,6 +26,15 @@ disabled rank-one covariance-path updates for the remainder of a run. The
 public `sx`, `sz`, and `sf` population streams are now reordered together so
 rank, elite flag, decision vector, sample vector, and fitness stay aligned.
 
+v0.3.0: the step-size damping is the Hansen 2016 default
+`1 + 2 max(0, sqrt((mu_eff - 1)/(n + 1)) - 1) + c_s`; v0.2.1 omitted the
+inner `- 1` and therefore over-damped every UI-reachable configuration. Each
+generation now emits the post-update covariance eigensystem alongside its
+post-update mean, sigma, and paths, rather than mixing two optimizer states.
+The seeded stream uses the site's exact 32-bit LCG transition and paired
+Box-Muller consumption. Reflect-repaired phenotypes are ranked and displayed,
+while the latent Gaussian preimages drive mean and covariance adaptation.
+
 No-claims: teaching/viz surface. NOT fs-dfo's production `cmaes` (no BIPOP
 restarts, no identity ledgers, no adversarial-refusal hardening). For
 production optimization use `fs_dfo::cmaes`.
@@ -35,7 +44,7 @@ production optimization use `fs_dfo::cmaes`.
 | Export | Signature | Returns |
 |---|---|---|
 | `cmaes_viz_run` | 18 scalars (dim, x0_0..x0_5, sigma0, lambda, active, seed, generations, landscape, noise, bounds_enabled, bound_min, bound_max, f_target) -> String | JSON envelope |
-| `cmaes_viz_kernel_version` | () -> String | `"fs-cmaes-viz-wasm 0.2.1"` |
+| `cmaes_viz_kernel_version` | () -> String | `"fs-cmaes-viz-wasm 0.3.0"` |
 
 ## Envelope contract (frozen v1)
 
@@ -59,10 +68,10 @@ Nothing is silently clamped; no traps cross the boundary.
 
 ## Determinism
 
-Single LCG stream (1664525/1013904223 — constants shared with the site's TS
-engine) feeding Box–Muller. Same inputs ⇒ byte-identical envelope, native and
-wasm (`bitwise_replay_same_seed` test). `f64::total_cmp` for all orderings;
-no wall-clock, no entropy.
+Single 32-bit LCG stream (1664525/1013904223 — transition and scaling shared
+with the site's TS engine) feeding paired Box–Muller draws. Same inputs ⇒
+byte-identical envelope, native and wasm (`bitwise_replay_same_seed` test).
+`f64::total_cmp` for all orderings; no wall-clock, no entropy.
 
 ## Landscapes (minimization)
 
@@ -80,5 +89,6 @@ eigendecompositions — a faithful marginal, never a fake 3D ellipsoid.
 
 `cargo check --locked --target wasm32-unknown-unknown` then
 `wasm-pack build --target web --release`; nested `Cargo.lock` must not be
-mutated by the pack step. Native tests: `cargo test` (13 exact-value and
-invariant tests).
+mutated by the pack step. Native tests: `cargo test` (exact-value and invariant
+tests, including canonical damping, RNG consumption, coherent snapshots, and
+latent reflection adaptation).

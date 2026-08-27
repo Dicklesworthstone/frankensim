@@ -25,7 +25,6 @@
 //! restart machinery, identity ledgers, or adversarial-refusal hardening of
 //! `fs_dfo::cmaes`; for production optimization use fs-dfo.
 
-
 // ---------------------------------------------------------------------------
 // Public parameters (scalar mirror of the JS boundary; native callers build
 // it directly, the wasm mod unpacks scalars 1:1).
@@ -39,7 +38,7 @@ pub const LANDSCAPE_RASTRIGIN: u32 = 3;
 pub const LANDSCAPE_ELLI: u32 = 4;
 
 /// Kernel id baked into envelopes so the page can prove which build is live.
-pub const KERNEL_VERSION: &str = "fs-cmaes-viz-wasm 0.2.1";
+pub const KERNEL_VERSION: &str = "fs-cmaes-viz-wasm 0.3.0";
 
 /// One visualization run request. Field ranges are refused, never clamped.
 #[derive(Debug, Clone)]
@@ -139,20 +138,45 @@ pub struct Refusal {
 // fallback and the kernel tell the same sampling story.
 // ---------------------------------------------------------------------------
 
-struct Lcg(u64);
+struct Lcg(u32);
 
 impl Lcg {
     fn next_f64(&mut self) -> f64 {
         self.0 = self.0.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-        // Top 24 bits → [0, 1); the offset keeps log(u) finite without clamping.
-        (self.0 >> 40) as f64 / 16_777_216.0 + 5.960_464_477_539_06e-8
+        f64::from(self.0) / 4_294_967_296.0
     }
 
-    /// Box–Muller standard normal.
+    fn next_open_f64(&mut self) -> f64 {
+        loop {
+            let value = self.next_f64();
+            if value > 0.0 {
+                return value;
+            }
+        }
+    }
+
+    /// Fill standard normals with the paired Box–Muller transform used by
+    /// the TypeScript fallback. A trailing odd coordinate consumes the pair
+    /// but deliberately discards its sine component.
+    fn fill_gaussian(&mut self, out: &mut [f64]) {
+        for pair in out.chunks_mut(2) {
+            let u1 = self.next_open_f64();
+            let u2 = self.next_f64();
+            let magnitude = fs_math::det::sqrt(-2.0 * fs_math::det::ln(u1));
+            let angle = core::f64::consts::TAU * u2;
+            pair[0] = magnitude * fs_math::det::cos(angle);
+            if pair.len() == 2 {
+                pair[1] = magnitude * fs_math::det::sin(angle);
+            }
+        }
+    }
+
+    /// One Box–Muller standard normal, used for scalar evaluation noise.
     fn gauss(&mut self) -> f64 {
-        let u1 = self.next_f64();
+        let u1 = self.next_open_f64();
         let u2 = self.next_f64();
-        (-2.0 * fs_math::det::ln(u1)).sqrt() * (core::f64::consts::TAU * u2).cos()
+        fs_math::det::sqrt(-2.0 * fs_math::det::ln(u1))
+            * fs_math::det::cos(core::f64::consts::TAU * u2)
     }
 }
 
@@ -188,7 +212,11 @@ fn evaluate(landscape: u32, x: &[f64]) -> f64 {
         LANDSCAPE_ELLI => {
             let mut s = 0.0;
             for (i, v) in x.iter().enumerate() {
-                let z = if n > 1 { i as f64 * 6.0 / (n - 1) as f64 } else { 0.0 };
+                let z = if n > 1 {
+                    i as f64 * 6.0 / (n - 1) as f64
+                } else {
+                    0.0
+                };
                 s += 10f64.powf(z) * v * v;
             }
             s
@@ -209,7 +237,11 @@ fn reflect_repair(v: f64, lo: f64, hi: f64) -> f64 {
     let over = v - lo;
     let m = ((over % span) + span) % span;
     let wraps = (over / span).floor();
-    if wraps as i64 % 2 == 0 { lo + m } else { hi - m }
+    if wraps as i64 % 2 == 0 {
+        lo + m
+    } else {
+        hi - m
+    }
 }
 
 /// C^{1/2} (`inv == false`) or C^{-1/2} = V·diag(p)·Vᵀ from the ascending
@@ -253,6 +285,12 @@ fn next_hsig_normalizer(decay_power: &mut f64, one_minus_cs_sq: f64) -> f64 {
     fs_math::det::sqrt(1.0 - *decay_power)
 }
 
+/// Canonical Hansen 2016 default damping for cumulative step-size
+/// adaptation. The `- 1` belongs inside the positive part.
+fn canonical_damps(mueff: f64, dimension: f64, cs: f64) -> f64 {
+    1.0 + 2.0 * (((mueff - 1.0) / (dimension + 1.0)).sqrt() - 1.0).max(0.0) + cs
+}
+
 /// Rebuild C from its decomposition: V·Λ·Vᵀ (NOT C^{1/2} — transform_matrix
 /// applies √λ; here the update rule needs the covariance itself back).
 fn rebuild_c(eigvals: &[f64], eigvecs: &[f64], n: usize) -> Vec<f64> {
@@ -276,7 +314,11 @@ fn rebuild_c(eigvals: &[f64], eigvecs: &[f64], n: usize) -> Vec<f64> {
 /// Validate params; `Err` carries the typed refusal.
 pub fn admit(p: &VizParams) -> Result<(), Refusal> {
     let refuse = |code: &'static str, message: String, repairs: Vec<&'static str>| {
-        Err(Refusal { code, message, ranked_repairs: repairs })
+        Err(Refusal {
+            code,
+            message,
+            ranked_repairs: repairs,
+        })
     };
     if !(2..=6).contains(&p.dim) {
         return refuse(
@@ -302,14 +344,20 @@ pub fn admit(p: &VizParams) -> Result<(), Refusal> {
     if !(4..=48).contains(&p.lambda) {
         return refuse(
             "lambda-out-of-range",
-            format!("lambda {} outside the visualization domain 4..=48", p.lambda),
+            format!(
+                "lambda {} outside the visualization domain 4..=48",
+                p.lambda
+            ),
             vec!["set lambda within 4..=48"],
         );
     }
     if !(1..=200).contains(&p.generations) {
         return refuse(
             "generations-out-of-range",
-            format!("generations {} outside the visualization domain 1..=200", p.generations),
+            format!(
+                "generations {} outside the visualization domain 1..=200",
+                p.generations
+            ),
             vec!["set generations within 1..=200"],
         );
     }
@@ -354,7 +402,7 @@ pub fn admit(p: &VizParams) -> Result<(), Refusal> {
 pub fn cmaes_run(p: &VizParams) -> Result<VizRun, Refusal> {
     admit(p)?;
     let n = p.dim;
-    let mut rng = Lcg(p.seed);
+    let mut rng = Lcg(p.seed as u32);
 
     let mut mean: Vec<f64> = p.x0[..n].to_vec();
     let mut sigma = p.sigma0;
@@ -384,11 +432,10 @@ pub fn cmaes_run(p: &VizParams) -> Result<VizRun, Refusal> {
     let cc = (4.0 + mueff / nf) / (nf + 4.0 + 2.0 * mueff / nf);
     let cs = (mueff + 2.0) / (nf + mueff + 5.0);
     let c1 = 2.0 / ((nf + 1.3) * (nf + 1.3) + mueff);
-    let cmu = ((1.0 - c1).min(
-        (2.0 * (mueff - 2.0 + 1.0 / mueff)) / ((nf + 2.0) * (nf + 2.0) + mueff),
-    ))
+    let cmu = ((1.0 - c1)
+        .min((2.0 * (mueff - 2.0 + 1.0 / mueff)) / ((nf + 2.0) * (nf + 2.0) + mueff)))
     .max(0.0);
-    let damps = 1.0 + 2.0 * ((mueff - 1.0) / (nf + 1.0)).sqrt().max(0.0) + cs;
+    let damps = canonical_damps(mueff, nf, cs);
     let chin = nf.sqrt() * (1.0 - 1.0 / (4.0 * nf) + 1.0 / (21.0 * nf * nf));
     let one_minus_cs_sq = (1.0 - cs) * (1.0 - cs);
     let mut hsig_decay_power = 1.0;
@@ -399,7 +446,11 @@ pub fn cmaes_run(p: &VizParams) -> Result<VizRun, Refusal> {
     // candidate at update time — mirroring the site's rewritten TS engines.
     let neg_abs_sum: f64 = raw_all[mu..].iter().map(|w| w.abs()).sum();
     let neg_sq_sum: f64 = raw_all[mu..].iter().map(|w| w * w).sum();
-    let mueff_minus = if neg_sq_sum > 0.0 { neg_abs_sum * neg_abs_sum / neg_sq_sum } else { 0.0 };
+    let mueff_minus = if neg_sq_sum > 0.0 {
+        neg_abs_sum * neg_abs_sum / neg_sq_sum
+    } else {
+        0.0
+    };
     let mut negative_scale = 0.0;
     if neg_abs_sum > 0.0 && cmu > 0.0 {
         let alpha_mu = 1.0 + c1 / cmu;
@@ -428,36 +479,34 @@ pub fn cmaes_run(p: &VizParams) -> Result<VizRun, Refusal> {
     let mut generations: Vec<GenSnapshot> = Vec::with_capacity(p.generations);
     let mut stop_reason = "generations-exhausted";
 
+    // Cache the decomposition that defines the sampling distribution. Each
+    // generation computes exactly one new decomposition after updating C;
+    // that post-update decomposition is both the next sampling state and the
+    // coherent spectrum emitted in the current snapshot.
+    let mut current_eigvals = vec![1.0f64; n];
+    let mut current_eigvecs = vec![0.0f64; n * n];
+    for i in 0..n {
+        current_eigvecs[i * n + i] = 1.0;
+    }
+
     for g in 0..p.generations {
-        let (eigvals, eigvecs) = jacobi_eigh(&c, n);
-        if eigvals.iter().any(|v| !v.is_finite()) {
-            return Err(Refusal {
-                code: "eigen-decomposition-failed",
-                message: format!(
-                    "covariance eigendecomposition produced non-finite values at generation {g}"
-                ),
-                ranked_repairs: vec!["disable the active update", "reduce sigma0"],
-            });
-        }
-        let sqrt_c = transform_matrix(&eigvals, &eigvecs, n, false);
-        let inv_sqrt_c = transform_matrix(&eigvals, &eigvecs, n, true);
-        // The spectral repair below keeps eigvals[0] >= 1e-12 * eigvals[n-1],
-        // so this ratio is well-defined and bounded by 1e12. (An absolute
-        // denominator clamp here would report cond < 1 once a fully converged
-        // run's whole spectrum drifts below the clamp.)
-        let cond = eigvals[n - 1] / eigvals[0].max(f64::MIN_POSITIVE);
+        let sqrt_c = transform_matrix(&current_eigvals, &current_eigvecs, n, false);
+        let inv_sqrt_c = transform_matrix(&current_eigvals, &current_eigvecs, n, true);
 
         // 1. Sample λ offspring: x = m + σ·C^{1/2}·z.
         let mut sx = vec![0.0f64; lambda * n];
+        let mut raw_sx = vec![0.0f64; lambda * n];
         let mut sz_raw = vec![0.0f64; lambda * n];
         let mut sf = vec![0.0f64; lambda];
         let mut st = vec![0.0f64; lambda]; // true (noiseless) fitness
         for i in 0..lambda {
-            let z: Vec<f64> = (0..n).map(|_| rng.gauss()).collect();
-            sz_raw[i * n..(i + 1) * n].copy_from_slice(&z);
-            let y = mat_vec(&sqrt_c, &z, n);
+            let z = &mut sz_raw[i * n..(i + 1) * n];
+            rng.fill_gaussian(z);
+            let y = mat_vec(&sqrt_c, z, n);
             for k in 0..n {
-                let mut xk = mean[k] + sigma * y[k];
+                let raw_xk = mean[k] + sigma * y[k];
+                raw_sx[i * n + k] = raw_xk;
+                let mut xk = raw_xk;
                 if p.bounds_enabled {
                     xk = reflect_repair(xk, p.bound_min, p.bound_max);
                 }
@@ -475,7 +524,11 @@ pub fn cmaes_run(p: &VizParams) -> Result<VizRun, Refusal> {
                     ranked_repairs: vec!["reduce sigma0", "enable bounds repair"],
                 });
             }
-            let noisy = if p.noise > 0.0 { true_f + rng.gauss() * p.noise } else { true_f };
+            let noisy = if p.noise > 0.0 {
+                true_f + rng.gauss() * p.noise
+            } else {
+                true_f
+            };
             st[i] = true_f;
             sf[i] = noisy;
             evals += 1;
@@ -499,7 +552,10 @@ pub fn cmaes_run(p: &VizParams) -> Result<VizRun, Refusal> {
         mean = vec![0.0; n];
         for (rank, &idx) in order.iter().enumerate().take(mu) {
             for k in 0..n {
-                mean[k] += weights[rank] * sx[idx * n + k];
+                // Reflection is a phenotype transform: selection evaluates
+                // repaired points, while adaptation follows their latent
+                // Gaussian preimages, matching the canonical TS fallback.
+                mean[k] += weights[rank] * raw_sx[idx * n + k];
             }
         }
         let mean_shift: Vec<f64> = (0..n).map(|k| (mean[k] - old_mean[k]) / sigma).collect();
@@ -533,7 +589,9 @@ pub fn cmaes_run(p: &VizParams) -> Result<VizRun, Refusal> {
                     continue;
                 }
                 let idx = order[rank];
-                let y: Vec<f64> = (0..n).map(|k| (sx[idx * n + k] - old_mean[k]) / sigma).collect();
+                let y: Vec<f64> = (0..n)
+                    .map(|k| (raw_sx[idx * n + k] - old_mean[k]) / sigma)
+                    .collect();
                 let whitened = mat_vec(&inv_sqrt_c, &y, n);
                 let mahalanobis_sq: f64 = whitened.iter().map(|v| v * v).sum();
                 adjusted[rank] = if mahalanobis_sq > 0.0 {
@@ -559,8 +617,8 @@ pub fn cmaes_run(p: &VizParams) -> Result<VizRun, Refusal> {
                     if wgt == 0.0 {
                         continue;
                     }
-                    let yi = (sx[idx * n + i] - old_mean[i]) / sigma;
-                    let yk = (sx[idx * n + k] - old_mean[k]) / sigma;
+                    let yi = (raw_sx[idx * n + i] - old_mean[i]) / sigma;
+                    let yk = (raw_sx[idx * n + k] - old_mean[k]) / sigma;
                     rankmu += wgt * yi * yk;
                 }
                 new_c[i * n + k] = old_coeff * c[i * n + k] + c1 * rank1 + cmu * rankmu;
@@ -586,13 +644,15 @@ pub fn cmaes_run(p: &VizParams) -> Result<VizRun, Refusal> {
         let spectrum_scale = repair_ev
             .iter()
             .fold(f64::MIN_POSITIVE, |acc, v| acc.max(v.abs()));
-        let spectrum_floor = 1e-12 * spectrum_scale;
+        let spectrum_floor = 1e-14 * spectrum_scale;
         let repaired: Vec<f64> = repair_ev.iter().map(|v| v.max(spectrum_floor)).collect();
         c = rebuild_c(&repaired, &repair_evec, n);
 
-        // 6. Step-size adaptation with numerical safety clamp (TS parity).
+        let cond = repaired[n - 1] / repaired[0].max(f64::MIN_POSITIVE);
+
+        // 6. Step-size adaptation with the ND fallback's safety envelope.
         sigma *= fs_math::det::exp((cs / damps) * (norm_ps / chin - 1.0));
-        sigma = sigma.min(10.0).max(1e-10);
+        sigma = sigma.clamp(1e-16, 1e16);
 
         // Keep every population stream in the same rank order. Optimization
         // above retains sampling-order storage because `order` indexes it;
@@ -606,12 +666,22 @@ pub fn cmaes_run(p: &VizParams) -> Result<VizRun, Refusal> {
             ranked_sf[rank] = sf[idx];
         }
 
+        let snapshot_mean: Vec<f64> = mean
+            .iter()
+            .map(|&value| {
+                if p.bounds_enabled {
+                    reflect_repair(value, p.bound_min, p.bound_max)
+                } else {
+                    value
+                }
+            })
+            .collect();
         generations.push(GenSnapshot {
             g: g + 1,
-            mean: mean.clone(),
+            mean: snapshot_mean,
             sigma,
-            eigvals,
-            eigvecs,
+            eigvals: repaired.clone(),
+            eigvecs: repair_evec.clone(),
             cond,
             best_f,
             evals,
@@ -625,6 +695,9 @@ pub fn cmaes_run(p: &VizParams) -> Result<VizRun, Refusal> {
             p_sigma: p_sigma.clone(),
             p_c: p_c.clone(),
         });
+
+        current_eigvals = repaired;
+        current_eigvecs = repair_evec;
 
         if !p.f_target.is_nan() && best_f <= p.f_target {
             stop_reason = "target-reached";
@@ -655,12 +728,16 @@ pub fn cmaes_run(p: &VizParams) -> Result<VizRun, Refusal> {
 
 /// Compute and write the 3D phase-space projections into each snapshot.
 /// Returns the PCA frame (basis rows, center, pooled eigenvalues).
-fn project_phase_space(gens: &mut [GenSnapshot], final_c: &[f64], n: usize) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+fn project_phase_space(
+    gens: &mut [GenSnapshot],
+    final_c: &[f64],
+    n: usize,
+) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
     let ng = gens.len().max(1);
     let mut center = vec![0.0; n];
     for snap in gens.iter() {
-        for k in 0..n {
-            center[k] += snap.mean[k] / ng as f64;
+        for (coordinate, &mean) in center.iter_mut().zip(&snap.mean) {
+            *coordinate += mean / ng as f64;
         }
     }
     let (pool_vals, pool_vecs) = jacobi_eigh(final_c, n);
@@ -683,7 +760,9 @@ fn project_phase_space(gens: &mut [GenSnapshot], final_c: &[f64], n: usize) -> (
     for snap in gens.iter_mut() {
         let mut pm = [0.0f64; 3];
         for r in 0..3 {
-            pm[r] = (0..n).map(|i| basis[r * n + i] * (snap.mean[i] - center[i])).sum();
+            pm[r] = (0..n)
+                .map(|i| basis[r * n + i] * (snap.mean[i] - center[i]))
+                .sum();
         }
         // 3×3 marginal M = P·C_t·Pᵀ with C_t rebuilt from this generation's
         // stored decomposition (C = V·Λ·Vᵀ).
@@ -975,7 +1054,11 @@ mod tests {
 
     #[test]
     fn eigendecomposition_reconstructs_c() {
-        let p = VizParams { landscape: LANDSCAPE_ROSENBROCK, generations: 40, ..base_params() };
+        let p = VizParams {
+            landscape: LANDSCAPE_ROSENBROCK,
+            generations: 40,
+            ..base_params()
+        };
         let run = cmaes_run(&p).expect("run");
         let snap = run.generations.last().expect("gens");
         let n = run.dim;
@@ -990,7 +1073,10 @@ mod tests {
                 // Tolerance scales with the spectrum: absolute epsilons are
                 // meaningless once active updates drive cond(C) past 1e4.
                 let scale = snap.eigvals[n - 1].abs().max(1.0);
-                assert!(resid < 1e-9 * scale, "residual {resid} at ({i},{j}), scale {scale}");
+                assert!(
+                    resid < 1e-9 * scale,
+                    "residual {resid} at ({i},{j}), scale {scale}"
+                );
             }
         }
         // Symmetry + positive semidefiniteness.
@@ -1004,31 +1090,144 @@ mod tests {
 
     #[test]
     fn bitwise_replay_same_seed() {
-        let a = cmaes_run_json(3, [1.0, 2.0, 3.0, 0.0, 0.0, 0.0], 0.5, 12, true, 42, 30, 1, 0.0, false, 0.0, 0.0, f64::NAN);
-        let b = cmaes_run_json(3, [1.0, 2.0, 3.0, 0.0, 0.0, 0.0], 0.5, 12, true, 42, 30, 1, 0.0, false, 0.0, 0.0, f64::NAN);
+        let a = cmaes_run_json(
+            3,
+            [1.0, 2.0, 3.0, 0.0, 0.0, 0.0],
+            0.5,
+            12,
+            true,
+            42,
+            30,
+            1,
+            0.0,
+            false,
+            0.0,
+            0.0,
+            f64::NAN,
+        );
+        let b = cmaes_run_json(
+            3,
+            [1.0, 2.0, 3.0, 0.0, 0.0, 0.0],
+            0.5,
+            12,
+            true,
+            42,
+            30,
+            1,
+            0.0,
+            false,
+            0.0,
+            0.0,
+            f64::NAN,
+        );
         assert_eq!(a, b, "same seed must replay bitwise");
-        let c = cmaes_run_json(3, [1.0, 2.0, 3.0, 0.0, 0.0, 0.0], 0.5, 12, true, 43, 30, 1, 0.0, false, 0.0, 0.0, f64::NAN);
+        let c = cmaes_run_json(
+            3,
+            [1.0, 2.0, 3.0, 0.0, 0.0, 0.0],
+            0.5,
+            12,
+            true,
+            43,
+            30,
+            1,
+            0.0,
+            false,
+            0.0,
+            0.0,
+            f64::NAN,
+        );
         assert_ne!(a, c, "different seed must diverge");
     }
 
     #[test]
     fn refusal_codes_are_typed() {
         let cases: Vec<(VizParams, &str)> = vec![
-            (VizParams { dim: 1, ..base_params() }, "dim-out-of-range"),
-            (VizParams { dim: 7, ..base_params() }, "dim-out-of-range"),
-            (VizParams { sigma0: 0.0, ..base_params() }, "sigma0-non-positive"),
-            (VizParams { sigma0: f64::NAN, ..base_params() }, "sigma0-non-positive"),
-            (VizParams { lambda: 3, ..base_params() }, "lambda-out-of-range"),
-            (VizParams { lambda: 49, ..base_params() }, "lambda-out-of-range"),
-            (VizParams { generations: 0, ..base_params() }, "generations-out-of-range"),
-            (VizParams { generations: 201, ..base_params() }, "generations-out-of-range"),
-            (VizParams { landscape: 9, ..base_params() }, "landscape-unknown"),
-            (VizParams { noise: -0.1, ..base_params() }, "noise-invalid"),
             (
-                VizParams { bounds_enabled: true, bound_min: 2.0, bound_max: -2.0, ..base_params() },
+                VizParams {
+                    dim: 1,
+                    ..base_params()
+                },
+                "dim-out-of-range",
+            ),
+            (
+                VizParams {
+                    dim: 7,
+                    ..base_params()
+                },
+                "dim-out-of-range",
+            ),
+            (
+                VizParams {
+                    sigma0: 0.0,
+                    ..base_params()
+                },
+                "sigma0-non-positive",
+            ),
+            (
+                VizParams {
+                    sigma0: f64::NAN,
+                    ..base_params()
+                },
+                "sigma0-non-positive",
+            ),
+            (
+                VizParams {
+                    lambda: 3,
+                    ..base_params()
+                },
+                "lambda-out-of-range",
+            ),
+            (
+                VizParams {
+                    lambda: 49,
+                    ..base_params()
+                },
+                "lambda-out-of-range",
+            ),
+            (
+                VizParams {
+                    generations: 0,
+                    ..base_params()
+                },
+                "generations-out-of-range",
+            ),
+            (
+                VizParams {
+                    generations: 201,
+                    ..base_params()
+                },
+                "generations-out-of-range",
+            ),
+            (
+                VizParams {
+                    landscape: 9,
+                    ..base_params()
+                },
+                "landscape-unknown",
+            ),
+            (
+                VizParams {
+                    noise: -0.1,
+                    ..base_params()
+                },
+                "noise-invalid",
+            ),
+            (
+                VizParams {
+                    bounds_enabled: true,
+                    bound_min: 2.0,
+                    bound_max: -2.0,
+                    ..base_params()
+                },
                 "bounds-inverted",
             ),
-            (VizParams { f_target: f64::INFINITY, ..base_params() }, "f-target-invalid"),
+            (
+                VizParams {
+                    f_target: f64::INFINITY,
+                    ..base_params()
+                },
+                "f-target-invalid",
+            ),
         ];
         let mut x_bad = base_params();
         x_bad.x0[0] = f64::NAN;
@@ -1039,13 +1238,33 @@ mod tests {
         let err = cmaes_run(&x_bad).expect_err("must refuse");
         assert_eq!(err.code, "x0-non-finite");
         // Envelope form is valid JSON-shaped.
-        let env = cmaes_run_json(1, [0.0; 6], 0.5, 12, true, 1, 10, 0, 0.0, false, 0.0, 0.0, f64::NAN);
-        assert!(env.contains("\"code\":\"dim-out-of-range\""), "envelope was: {env}");
+        let env = cmaes_run_json(
+            1,
+            [0.0; 6],
+            0.5,
+            12,
+            true,
+            1,
+            10,
+            0,
+            0.0,
+            false,
+            0.0,
+            0.0,
+            f64::NAN,
+        );
+        assert!(
+            env.contains("\"code\":\"dim-out-of-range\""),
+            "envelope was: {env}"
+        );
     }
 
     #[test]
     fn target_stops_early() {
-        let p = VizParams { f_target: 1.0, ..base_params() };
+        let p = VizParams {
+            f_target: 1.0,
+            ..base_params()
+        };
         let run = cmaes_run(&p).expect("run");
         assert_eq!(run.stop_reason, "target-reached");
         assert!(run.generations.len() < 150);
@@ -1054,7 +1273,10 @@ mod tests {
 
     #[test]
     fn rosenbrock_improves_on_start() {
-        let p = VizParams { landscape: LANDSCAPE_ROSENBROCK, ..base_params() };
+        let p = VizParams {
+            landscape: LANDSCAPE_ROSENBROCK,
+            ..base_params()
+        };
         let run = cmaes_run(&p).expect("run");
         let f0 = evaluate(LANDSCAPE_ROSENBROCK, &run.best_x);
         let _ = f0;
@@ -1083,7 +1305,11 @@ mod tests {
 
     #[test]
     fn pca_marginal_is_consistent() {
-        let p = VizParams { dim: 5, landscape: LANDSCAPE_ELLI, ..base_params() };
+        let p = VizParams {
+            dim: 5,
+            landscape: LANDSCAPE_ELLI,
+            ..base_params()
+        };
         let run = cmaes_run(&p).expect("run");
         let snap = run.generations.last().expect("gens");
         // Projected marginal eigenvalues: ascending, non-negative, and the
@@ -1142,7 +1368,7 @@ mod tests {
 
         for generation in 1..=200 {
             let observed = next_hsig_normalizer(&mut decay_power, one_minus_cs_sq);
-            let exponent = 2 * i32::try_from(generation).expect("bounded generation");
+            let exponent = 2 * generation;
             let expected = fs_math::det::sqrt(1.0 - fs_math::det::powi(1.0 - cs, exponent));
             assert!(
                 observed.is_finite(),
@@ -1156,6 +1382,119 @@ mod tests {
 
         // The former linear multiplier is already outside sqrt's domain here.
         assert!(1.0 - one_minus_cs_sq * 3.0 < 0.0);
+    }
+
+    #[test]
+    fn g0_damping_matches_hansen_2016_default() {
+        // n=5, lambda=16 constants independently evaluated from the Hansen
+        // logarithmic recombination weights. v0.2.1 returned
+        // 3.061140170192783 because it omitted the inner `- 1`.
+        let mueff = 4.840_914_500_901_174;
+        let cs = 0.460_949_660_513_560_5;
+        let observed = canonical_damps(mueff, 5.0, cs);
+        assert_eq!(observed.to_bits(), 1.460_949_660_513_560_6f64.to_bits());
+    }
+
+    #[test]
+    fn g0_rng_uses_shared_u32_transition_and_paired_box_muller() {
+        let mut uniforms = Lcg(1337);
+        assert_eq!(
+            uniforms.next_f64().to_bits(),
+            (3_239_374_148.0f64 / 4_294_967_296.0).to_bits()
+        );
+        assert_eq!(
+            uniforms.next_f64().to_bits(),
+            (2_360_088_531.0f64 / 4_294_967_296.0).to_bits()
+        );
+
+        let mut paired = Lcg(1337);
+        let mut z = [0.0; 3];
+        paired.fill_gaussian(&mut z);
+        assert!(z.iter().all(|value| value.is_finite()));
+        assert_eq!(
+            paired.0, 681_817_981,
+            "three coordinates must consume two Box-Muller pairs"
+        );
+
+        let mut scalar = Lcg(1337);
+        assert!(scalar.gauss().is_finite());
+        assert_eq!(
+            scalar.0, 2_360_088_531,
+            "one scalar Gaussian must consume one pair"
+        );
+    }
+
+    #[test]
+    fn g0_snapshot_eigensystem_is_the_updated_covariance() {
+        let p = VizParams {
+            generations: 1,
+            active: false,
+            ..base_params()
+        };
+        let run = cmaes_run(&p).expect("run");
+        let snap = &run.generations[0];
+
+        assert!(
+            snap.eigvals
+                .iter()
+                .any(|value| value.to_bits() != 1.0f64.to_bits()),
+            "the first post-update covariance must not be reported as the initial identity"
+        );
+        let expected_cond = snap.eigvals[p.dim - 1] / snap.eigvals[0];
+        assert_eq!(snap.cond.to_bits(), expected_cond.to_bits());
+        assert!(
+            snap.eigvals
+                .iter()
+                .all(|value| value.is_finite() && *value > 0.0)
+        );
+    }
+
+    #[test]
+    fn g0_reflection_ranks_phenotypes_and_adapts_latent_preimages() {
+        let p = VizParams {
+            dim: 2,
+            x0: [0.0; 6],
+            sigma0: 1.0,
+            lambda: 8,
+            active: false,
+            generations: 1,
+            bounds_enabled: true,
+            bound_min: -0.1,
+            bound_max: 0.1,
+            ..base_params()
+        };
+        let run = cmaes_run(&p).expect("run");
+        let snap = &run.generations[0];
+
+        let raw_all: Vec<f64> = (0..p.lambda)
+            .map(|rank| {
+                fs_math::det::ln((p.lambda as f64 + 1.0) / 2.0)
+                    - fs_math::det::ln((rank + 1) as f64)
+            })
+            .collect();
+        let mu = raw_all.iter().filter(|weight| **weight > 0.0).count();
+        let positive_sum: f64 = raw_all[..mu].iter().sum();
+
+        for dimension in 0..p.dim {
+            let latent_mean: f64 = (0..mu)
+                .map(|rank| {
+                    let weight = raw_all[rank] / positive_sum;
+                    let raw_x = p.x0[dimension] + p.sigma0 * snap.sz[rank * p.dim + dimension];
+                    weight * raw_x
+                })
+                .sum();
+            let expected = reflect_repair(latent_mean, p.bound_min, p.bound_max);
+            assert!(
+                (snap.mean[dimension] - expected).abs() <= 1e-13,
+                "dimension {dimension}: observed {}, expected {expected}",
+                snap.mean[dimension]
+            );
+        }
+        assert!(
+            snap.sx
+                .iter()
+                .all(|value| (p.bound_min..=p.bound_max).contains(value))
+        );
     }
 
     #[test]
@@ -1200,7 +1539,10 @@ mod tests {
 
     #[test]
     fn dim2_projection_is_direct() {
-        let p = VizParams { dim: 2, ..base_params() };
+        let p = VizParams {
+            dim: 2,
+            ..base_params()
+        };
         let run = cmaes_run(&p).expect("run");
         let snap = run.generations.last().expect("gens");
         // With dim ≤ 3 the projection is the identity frame: proj_mean equals
