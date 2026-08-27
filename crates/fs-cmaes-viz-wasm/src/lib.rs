@@ -185,7 +185,7 @@ impl Lcg {
 // Landscapes (minimization, n-dimensional).
 // ---------------------------------------------------------------------------
 
-fn evaluate(landscape: u32, x: &[f64]) -> f64 {
+fn evaluate(landscape: u32, x: &[f64], elli_scales: &[f64; 6]) -> f64 {
     let n = x.len();
     match landscape {
         LANDSCAPE_SPHERE => x.iter().map(|v| v * v).sum(),
@@ -213,12 +213,7 @@ fn evaluate(landscape: u32, x: &[f64]) -> f64 {
         LANDSCAPE_ELLI => {
             let mut s = 0.0;
             for (i, v) in x.iter().enumerate() {
-                let z = if n > 1 {
-                    i as f64 * 6.0 / (n - 1) as f64
-                } else {
-                    0.0
-                };
-                s += 10f64.powf(z) * v * v;
+                s += elli_scales[i] * v * v;
             }
             s
         }
@@ -415,6 +410,21 @@ pub fn cmaes_run(p: &VizParams) -> Result<VizRun, Refusal> {
     let n = p.dim;
     let mut rng = Lcg(p.seed as u32);
 
+    // ELLI's axis conditioning depends only on the admitted dimension. Keep
+    // its exact powf results once instead of recomputing them for every
+    // candidate in every generation.
+    let mut elli_scales = [1.0f64; 6];
+    if p.landscape == LANDSCAPE_ELLI {
+        for (i, scale) in elli_scales[..n].iter_mut().enumerate() {
+            let exponent = if n > 1 {
+                i as f64 * 6.0 / (n - 1) as f64
+            } else {
+                0.0
+            };
+            *scale = 10f64.powf(exponent);
+        }
+    }
+
     let mut mean: Vec<f64> = p.x0[..n].to_vec();
     let mut sigma = p.sigma0;
     let mut c = vec![0.0f64; n * n];
@@ -527,7 +537,7 @@ pub fn cmaes_run(p: &VizParams) -> Result<VizRun, Refusal> {
                 sx[i * n + k] = xk;
             }
             let row = &sx[i * n..(i + 1) * n];
-            let true_f = evaluate(p.landscape, row);
+            let true_f = evaluate(p.landscape, row, &elli_scales);
             if !true_f.is_finite() {
                 return Err(Refusal {
                     code: "non-finite-objective",
@@ -1336,7 +1346,7 @@ mod tests {
             ..base_params()
         };
         let run = cmaes_run(&p).expect("run");
-        let f0 = evaluate(LANDSCAPE_ROSENBROCK, &run.best_x);
+        let f0 = evaluate(LANDSCAPE_ROSENBROCK, &run.best_x, &[1.0; 6]);
         let _ = f0;
         assert!(run.best_f < 100.0, "best_f = {}", run.best_f);
     }
@@ -1575,7 +1585,7 @@ mod tests {
             for rank in 0..p.lambda {
                 let x = &snap.sx[rank * p.dim..(rank + 1) * p.dim];
                 assert_eq!(
-                    evaluate(p.landscape, x).to_bits(),
+                    evaluate(p.landscape, x, &[1.0; 6]).to_bits(),
                     snap.sf[rank].to_bits(),
                     "generation {}, rank {} has mismatched x/f streams",
                     snap.g,
