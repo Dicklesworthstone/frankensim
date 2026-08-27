@@ -15,7 +15,7 @@
 //!   Taylor/Horner core on |r| ≤ ln2/2, exact 2^k scaling via exponent bits.
 //! - `ln`: mantissa reduction to [√½, √2), atanh series in s=(m−1)/(m+1)
 //!   (|s| ≤ 0.1716), two-part k·ln2 recombination.
-//! - `sin`/`cos`: Cody–Waite THREE-PART π/2 reduction for |x| ≤ 2²⁰,
+//! - `sin`/`cos`/`sin_cos`: Cody–Waite THREE-PART π/2 reduction for |x| ≤ 2²⁰,
 //!   Payne–Hanek 1280-bit reduction beyond (self-verifying Machin-generated
 //!   limbs, see `payne`) — degree-13/12 Taylor cores on |r| ≤ π/4; budgets
 //!   hold for ALL finite arguments.
@@ -181,6 +181,33 @@ pub fn cos(x: f64) -> f64 {
         1 => -sin_core(r),
         2 => -cos_core(r),
         _ => sin_core(r),
+    }
+}
+
+/// `(sin(x), cos(x))` with one shared deterministic range reduction.
+///
+/// Each returned component is bit-identical to calling [`sin`] and [`cos`]
+/// separately. This is the preferred strict-mode primitive when a caller
+/// needs both values, because Cody–Waite or Payne–Hanek reduction is performed
+/// once while both established polynomial cores and quadrant conventions stay
+/// unchanged.
+#[must_use]
+pub fn sin_cos(x: f64) -> (f64, f64) {
+    if x.is_nan() || x.is_infinite() {
+        return (f64::NAN, f64::NAN);
+    }
+    let (r, quadrant) = if x.abs() > TRIG_DOMAIN {
+        crate::payne::reduce_pio2_large(x)
+    } else {
+        reduce_pio2(x)
+    };
+    let sine = sin_core(r);
+    let cosine = cos_core(r);
+    match quadrant {
+        0 => (sine, cosine),
+        1 => (cosine, -sine),
+        2 => (-sine, -cosine),
+        _ => (-cosine, sine),
     }
 }
 

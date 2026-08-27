@@ -238,6 +238,46 @@ mod tests {
     }
 
     #[test]
+    fn paired_sin_cos_is_bit_identical_to_separate_calls() {
+        let check = |x: f64| {
+            let (sine, cosine) = det::sin_cos(x);
+            assert_eq!(sine.to_bits(), det::sin(x).to_bits(), "sin at {x}");
+            assert_eq!(cosine.to_bits(), det::cos(x).to_bits(), "cos at {x}");
+        };
+
+        for x in [
+            0.0,
+            -0.0,
+            std::f64::consts::FRAC_PI_4,
+            std::f64::consts::FRAC_PI_2,
+            std::f64::consts::PI,
+            -std::f64::consts::PI,
+            det::TRIG_DOMAIN,
+            det::TRIG_DOMAIN.next_up(),
+            1.0e20,
+            -1.0e100,
+            f64::MAX,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NAN,
+        ] {
+            check(x);
+        }
+
+        let mut seed = 0x51C0_5001_u64;
+        for _ in 0..20_000 {
+            check((lcg(&mut seed) - 0.5) * 2.0 * det::TRIG_DOMAIN);
+        }
+
+        // Raw bit-pattern sampling covers subnormals and the full exponent
+        // range, especially the Payne–Hanek path outside TRIG_DOMAIN.
+        for _ in 0..10_000 {
+            let _ = lcg(&mut seed);
+            check(f64::from_bits(seed));
+        }
+    }
+
+    #[test]
     fn tanh_meets_budget_and_saturates() {
         let (ulp, at) = max_ulp(
             det::tanh,

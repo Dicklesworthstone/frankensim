@@ -176,9 +176,14 @@ impl Lcg {
             let u2 = self.next_f64();
             let magnitude = fs_math::det::sqrt(-2.0 * fs_math::det::ln(u1));
             let angle = core::f64::consts::TAU * u2;
-            pair[0] = magnitude * fs_math::det::cos(angle);
             if pair.len() == 2 {
-                pair[1] = magnitude * fs_math::det::sin(angle);
+                let (sine, cosine) = fs_math::det::sin_cos(angle);
+                pair[0] = magnitude * cosine;
+                pair[1] = magnitude * sine;
+            } else {
+                // The odd-dimensional tail discards the second Box–Muller
+                // value, so avoid computing an unused sine polynomial.
+                pair[0] = magnitude * fs_math::det::cos(angle);
             }
         }
     }

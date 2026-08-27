@@ -11,10 +11,13 @@ floating-point POLICY: FMA contraction, subnormals, NaN, ULP budgets
   certificate identity for the strict core. Downstream interval, neural, and
   wire artifacts bind both and fail closed after an intentional arithmetic
   change until their own semantic schemas are advanced.
-- `det::{exp, expm1, ln, sin, cos, tanh, sqrt}` — strict-mode functions
+- `det::{exp, expm1, ln, sin, cos, sin_cos, tanh, sqrt}` — strict-mode functions
   built EXCLUSIVELY from IEEE arithmetic (+,−,×,÷, mul_add, sqrt): bit-
   identical cross-ISA BY CONSTRUCTION, empirically PROVEN (golden hash
   0xeb79cab7a01643e5 identical on aarch64-apple M4 Pro and x86-64 TR 5995WX).
+  `sin_cos` shares one range reduction and returns components bit-identical to
+  separate `sin` and `cos` calls; it adds no new numeric semantics to the
+  retained strict-core golden.
 - Declared ULP budgets (measured maxima in parentheses, vs platform-libm
   oracle, 200k samples + edges): exp 3 (1), expm1 3 (2), ln 3 (1),
   sin 3 (2), cos 3 (2), tanh 5 (3). sqrt is 0 ULP (IEEE-correctly-rounded
