@@ -402,8 +402,12 @@ fn compute_normalization(pop: &[NsgaIndividual], m: usize) -> Normalization {
             at.swap(col, piv);
             for r in col + 1..m {
                 let factor = at[r][col] / at[col][col];
-                for cc in col..m {
-                    at[r][cc] -= factor * at[col][cc];
+                for (cc, row_cc) in at[r]
+                    .iter_mut()
+                    .enumerate()
+                    .skip(col)
+                {
+                    *row_cc -= factor * at[col][cc];
                 }
             }
         }
