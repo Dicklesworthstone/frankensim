@@ -23,6 +23,13 @@ pub struct NodeId(pub u32);
 /// Schema version for the typed manifold-layout value.
 pub const MANIFOLD_LAYOUT_SCHEMA_VERSION: u32 = 1;
 
+/// Schema version for ordered product-manifold layouts.
+///
+/// This version is independent of the optimization-problem wire schema: product
+/// layouts are runtime configuration metadata and are not serialized by the
+/// current `fsopt` grammar.
+pub const PRODUCT_MANIFOLD_LAYOUT_SCHEMA_VERSION: u32 = 1;
+
 /// Descriptor-domain-valid storage dimension of one manifold point.
 #[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -203,6 +210,574 @@ impl core::fmt::Display for ManifoldLayoutError {
 }
 
 impl std::error::Error for ManifoldLayoutError {}
+
+/// Caller-assigned stable identity of one factor in an ordered product
+/// manifold.
+///
+/// Identity and order are separate: reordering factors changes block offsets
+/// without changing the identities callers use to find those blocks.
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ProductFactorId(u32);
+
+impl ProductFactorId {
+    /// Construct an identity in the caller's configuration namespace.
+    #[must_use]
+    pub const fn new(value: u32) -> Self {
+        Self(value)
+    }
+
+    /// Underlying caller-assigned identity.
+    #[must_use]
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+
+/// One named factor in an ordered product manifold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProductFactor {
+    id: ProductFactorId,
+    manifold: Manifold,
+}
+
+impl ProductFactor {
+    /// Pair a stable factor identity with one live [`Manifold`] descriptor.
+    #[must_use]
+    pub const fn new(id: ProductFactorId, manifold: Manifold) -> Self {
+        Self { id, manifold }
+    }
+
+    /// Stable caller-assigned factor identity.
+    #[must_use]
+    pub const fn id(self) -> ProductFactorId {
+        self.id
+    }
+
+    /// Existing manifold contract composed by this factor.
+    #[must_use]
+    pub const fn manifold(self) -> Manifold {
+        self.manifold
+    }
+}
+
+/// Typed starting offset of a factor's point-storage block.
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PointOffset(u32);
+
+impl PointOffset {
+    /// Zero-based scalar offset in the concatenated point payload.
+    #[must_use]
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+
+/// Typed starting offset of a factor's retraction-parameter block.
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ParamOffset(u32);
+
+impl ParamOffset {
+    /// Zero-based scalar offset in the concatenated parameter payload.
+    #[must_use]
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+
+/// Typed starting offset of a factor's intrinsic tangent block.
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct TangentOffset(u32);
+
+impl TangentOffset {
+    /// Zero-based scalar offset in the concatenated intrinsic tangent payload.
+    #[must_use]
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+
+/// Coordinate space within a product-manifold layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProductCoordinate {
+    /// Stored manifold points.
+    Point,
+    /// Retraction parameters consumed by each factor.
+    Parameter,
+    /// Intrinsic tangent coordinates.
+    Tangent,
+}
+
+/// Allocation site for a fallible product-manifold operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProductAllocation {
+    /// Retained per-factor layout table.
+    LayoutBlocks,
+    /// Concatenated point returned by blockwise retraction.
+    RetractionOutput,
+}
+
+/// Typed offsets and dimensions for one ordered product factor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProductFactorLayout {
+    index: u32,
+    factor: ProductFactor,
+    manifold_layout: ManifoldLayout,
+    point_offset: PointOffset,
+    param_offset: ParamOffset,
+    tangent_offset: TangentOffset,
+}
+
+impl ProductFactorLayout {
+    /// Zero-based declaration order of this factor.
+    #[must_use]
+    pub const fn index(self) -> u32 {
+        self.index
+    }
+
+    /// Stable identity and live manifold descriptor.
+    #[must_use]
+    pub const fn factor(self) -> ProductFactor {
+        self.factor
+    }
+
+    /// Validated factor-local manifold layout.
+    #[must_use]
+    pub const fn manifold_layout(self) -> ManifoldLayout {
+        self.manifold_layout
+    }
+
+    /// Start of the factor's point-storage block.
+    #[must_use]
+    pub const fn point_offset(self) -> PointOffset {
+        self.point_offset
+    }
+
+    /// Start of the factor's retraction-parameter block.
+    #[must_use]
+    pub const fn param_offset(self) -> ParamOffset {
+        self.param_offset
+    }
+
+    /// Start of the factor's intrinsic tangent block.
+    #[must_use]
+    pub const fn tangent_offset(self) -> TangentOffset {
+        self.tangent_offset
+    }
+}
+
+/// Versioned, typed layout for one ordered product of live manifold factors.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProductManifoldLayout {
+    schema_version: u32,
+    factors: Vec<ProductFactorLayout>,
+    point_dim: PointDim,
+    param_dim: ParamDim,
+    tangent_dim: TangentDim,
+}
+
+impl ProductManifoldLayout {
+    /// Layout schema used to interpret this value.
+    #[must_use]
+    pub const fn schema_version(&self) -> u32 {
+        self.schema_version
+    }
+
+    /// Ordered factor table. Declaration order is the concatenation order.
+    #[must_use]
+    pub fn factors(&self) -> &[ProductFactorLayout] {
+        &self.factors
+    }
+
+    /// Checked cumulative point-storage dimension.
+    #[must_use]
+    pub const fn point_dim(&self) -> PointDim {
+        self.point_dim
+    }
+
+    /// Checked cumulative retraction-parameter dimension.
+    #[must_use]
+    pub const fn param_dim(&self) -> ParamDim {
+        self.param_dim
+    }
+
+    /// Checked cumulative intrinsic tangent dimension.
+    #[must_use]
+    pub const fn tangent_dim(&self) -> TangentDim {
+        self.tangent_dim
+    }
+
+    /// Resolve one factor by stable identity.
+    ///
+    /// # Errors
+    /// Returns [`ProductManifoldError::UnknownFactor`] if no declared factor
+    /// has `id`.
+    pub fn factor(
+        &self,
+        id: ProductFactorId,
+    ) -> Result<&ProductFactorLayout, ProductManifoldError> {
+        self.factors
+            .iter()
+            .find(|layout| layout.factor.id == id)
+            .ok_or(ProductManifoldError::UnknownFactor { id })
+    }
+
+    fn expected_dim(&self, coordinate: ProductCoordinate) -> u32 {
+        match coordinate {
+            ProductCoordinate::Point => self.point_dim.get(),
+            ProductCoordinate::Parameter => self.param_dim.get(),
+            ProductCoordinate::Tangent => self.tangent_dim.get(),
+        }
+    }
+
+    pub(crate) fn validate_payload_len(
+        &self,
+        coordinate: ProductCoordinate,
+        values: &[f64],
+    ) -> Result<(), ProductManifoldError> {
+        let expected = self.expected_dim(coordinate);
+        if values.len() as u64 != u64::from(expected) {
+            return Err(ProductManifoldError::PayloadLength {
+                coordinate,
+                expected,
+                got: values.len() as u64,
+            });
+        }
+        Ok(())
+    }
+
+    fn slice<'a>(
+        &self,
+        id: ProductFactorId,
+        coordinate: ProductCoordinate,
+        values: &'a [f64],
+    ) -> Result<&'a [f64], ProductManifoldError> {
+        self.validate_payload_len(coordinate, values)?;
+        let factor = self.factor(id)?;
+        let (offset, dim) = match coordinate {
+            ProductCoordinate::Point => (
+                factor.point_offset.get(),
+                factor.manifold_layout.point_dim.get(),
+            ),
+            ProductCoordinate::Parameter => (
+                factor.param_offset.get(),
+                factor.manifold_layout.param_dim.get(),
+            ),
+            ProductCoordinate::Tangent => (
+                factor.tangent_offset.get(),
+                factor.manifold_layout.tangent_dim.get(),
+            ),
+        };
+        let end = offset + dim;
+        Ok(&values[offset as usize..end as usize])
+    }
+
+    /// Borrow one factor's block from a complete concatenated point payload.
+    ///
+    /// # Errors
+    /// Refuses a malformed complete payload or an unknown factor identity.
+    pub fn point_block<'a>(
+        &self,
+        id: ProductFactorId,
+        point: &'a [f64],
+    ) -> Result<&'a [f64], ProductManifoldError> {
+        self.slice(id, ProductCoordinate::Point, point)
+    }
+
+    /// Borrow one factor's block from a complete concatenated parameter
+    /// payload.
+    ///
+    /// # Errors
+    /// Refuses a malformed complete payload or an unknown factor identity.
+    pub fn parameter_block<'a>(
+        &self,
+        id: ProductFactorId,
+        parameter: &'a [f64],
+    ) -> Result<&'a [f64], ProductManifoldError> {
+        self.slice(id, ProductCoordinate::Parameter, parameter)
+    }
+
+    /// Borrow one factor's block from a complete concatenated intrinsic
+    /// tangent payload.
+    ///
+    /// # Errors
+    /// Refuses a malformed complete payload or an unknown factor identity.
+    pub fn tangent_block<'a>(
+        &self,
+        id: ProductFactorId,
+        tangent: &'a [f64],
+    ) -> Result<&'a [f64], ProductManifoldError> {
+        self.slice(id, ProductCoordinate::Tangent, tangent)
+    }
+}
+
+/// Ordered composition of existing [`Manifold`] contracts.
+///
+/// This type does not add a robot-specific manifold variant. It retains one
+/// typed block table and delegates every factor operation to the corresponding
+/// live `Manifold` implementation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProductManifold {
+    layout: ProductManifoldLayout,
+}
+
+impl ProductManifold {
+    /// Build a checked ordered product layout.
+    ///
+    /// # Errors
+    /// Refuses empty products, duplicate identities, invalid factor
+    /// descriptors, factor-count or cumulative-dimension overflow, and layout
+    /// table allocation failure.
+    pub fn new(factors: Vec<ProductFactor>) -> Result<Self, ProductManifoldError> {
+        if factors.is_empty() {
+            return Err(ProductManifoldError::EmptyProduct);
+        }
+        let factor_count = u32::try_from(factors.len()).map_err(|_| {
+            ProductManifoldError::FactorCountOverflow {
+                got: factors.len() as u64,
+            }
+        })?;
+        let mut layouts: Vec<ProductFactorLayout> = Vec::new();
+        layouts
+            .try_reserve_exact(factor_count as usize)
+            .map_err(|_| ProductManifoldError::AllocationRefused {
+                target: ProductAllocation::LayoutBlocks,
+                elements: u64::from(factor_count),
+                element_bytes: core::mem::size_of::<ProductFactorLayout>() as u64,
+            })?;
+
+        let mut point_offset = 0_u32;
+        let mut param_offset = 0_u32;
+        let mut tangent_offset = 0_u32;
+        for (index, factor) in factors.into_iter().enumerate() {
+            let index = index as u32;
+            if let Some(first) = layouts.iter().find(|layout| layout.factor.id == factor.id) {
+                return Err(ProductManifoldError::DuplicateFactorId {
+                    id: factor.id,
+                    first_index: first.index,
+                    duplicate_index: index,
+                });
+            }
+            let manifold_layout =
+                factor
+                    .manifold
+                    .layout()
+                    .map_err(|source| ProductManifoldError::FactorLayout {
+                        id: factor.id,
+                        index,
+                        source,
+                    })?;
+            let next_point = point_offset
+                .checked_add(manifold_layout.point_dim.get())
+                .ok_or(ProductManifoldError::DimensionOverflow {
+                    coordinate: ProductCoordinate::Point,
+                    id: factor.id,
+                    index,
+                    offset: point_offset,
+                    factor_dim: manifold_layout.point_dim.get(),
+                })?;
+            let next_param = param_offset
+                .checked_add(manifold_layout.param_dim.get())
+                .ok_or(ProductManifoldError::DimensionOverflow {
+                    coordinate: ProductCoordinate::Parameter,
+                    id: factor.id,
+                    index,
+                    offset: param_offset,
+                    factor_dim: manifold_layout.param_dim.get(),
+                })?;
+            let next_tangent = tangent_offset
+                .checked_add(manifold_layout.tangent_dim.get())
+                .ok_or(ProductManifoldError::DimensionOverflow {
+                    coordinate: ProductCoordinate::Tangent,
+                    id: factor.id,
+                    index,
+                    offset: tangent_offset,
+                    factor_dim: manifold_layout.tangent_dim.get(),
+                })?;
+            layouts.push(ProductFactorLayout {
+                index,
+                factor,
+                manifold_layout,
+                point_offset: PointOffset(point_offset),
+                param_offset: ParamOffset(param_offset),
+                tangent_offset: TangentOffset(tangent_offset),
+            });
+            point_offset = next_point;
+            param_offset = next_param;
+            tangent_offset = next_tangent;
+        }
+
+        Ok(Self {
+            layout: ProductManifoldLayout {
+                schema_version: PRODUCT_MANIFOLD_LAYOUT_SCHEMA_VERSION,
+                factors: layouts,
+                point_dim: PointDim(point_offset),
+                param_dim: ParamDim(param_offset),
+                tangent_dim: TangentDim(tangent_offset),
+            },
+        })
+    }
+
+    /// Retained versioned typed product layout.
+    #[must_use]
+    pub const fn layout(&self) -> &ProductManifoldLayout {
+        &self.layout
+    }
+}
+
+/// Explicit refusal from product layout, slicing, validation, or retraction.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq)]
+pub enum ProductManifoldError {
+    /// A product configuration must contain at least one factor.
+    EmptyProduct,
+    /// The factor table cannot be indexed in the version-one `u32` domain.
+    FactorCountOverflow {
+        /// Supplied number of factors.
+        got: u64,
+    },
+    /// Stable factor identities must be unique within one product.
+    DuplicateFactorId {
+        /// Repeated identity.
+        id: ProductFactorId,
+        /// First declaration index.
+        first_index: u32,
+        /// Repeated declaration index.
+        duplicate_index: u32,
+    },
+    /// One factor's live manifold descriptor is invalid.
+    FactorLayout {
+        /// Factor identity.
+        id: ProductFactorId,
+        /// Declaration index.
+        index: u32,
+        /// Existing factor-local layout refusal.
+        source: ManifoldLayoutError,
+    },
+    /// A checked cumulative dimension left the version-one `u32` domain.
+    DimensionOverflow {
+        /// Coordinate space being accumulated.
+        coordinate: ProductCoordinate,
+        /// Factor at which accumulation failed.
+        id: ProductFactorId,
+        /// Declaration index of that factor.
+        index: u32,
+        /// Valid cumulative offset before this factor.
+        offset: u32,
+        /// Factor-local dimension being added.
+        factor_dim: u32,
+    },
+    /// A complete product payload has the wrong scalar length.
+    PayloadLength {
+        /// Coordinate space of the payload.
+        coordinate: ProductCoordinate,
+        /// Required cumulative dimension.
+        expected: u32,
+        /// Supplied scalar length.
+        got: u64,
+    },
+    /// No factor has the requested stable identity.
+    UnknownFactor {
+        /// Requested identity.
+        id: ProductFactorId,
+    },
+    /// Fallible owned storage could not reserve its exact logical capacity.
+    AllocationRefused {
+        /// Allocation site.
+        target: ProductAllocation,
+        /// Elements requested.
+        elements: u64,
+        /// Size of one element on this target.
+        element_bytes: u64,
+    },
+    /// An existing factor-local runtime operation refused.
+    FactorOperation {
+        /// Factor identity.
+        id: ProductFactorId,
+        /// Declaration index.
+        index: u32,
+        /// Existing factor-local operation refusal.
+        source: OptError,
+    },
+}
+
+impl core::fmt::Display for ProductManifoldError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::EmptyProduct => formatter.write_str("product manifold needs at least one factor"),
+            Self::FactorCountOverflow { got } => write!(
+                formatter,
+                "product manifold has {got} factors, outside the version-one u32 index domain"
+            ),
+            Self::DuplicateFactorId {
+                id,
+                first_index,
+                duplicate_index,
+            } => write!(
+                formatter,
+                "product factor identity {} is duplicated at indices {first_index} and {duplicate_index}",
+                id.get()
+            ),
+            Self::FactorLayout { id, index, source } => write!(
+                formatter,
+                "product factor {} at index {index} has an invalid manifold layout: {source}",
+                id.get()
+            ),
+            Self::DimensionOverflow {
+                coordinate,
+                id,
+                index,
+                offset,
+                factor_dim,
+            } => write!(
+                formatter,
+                "product {coordinate:?} dimension overflows u32 at factor {} index {index}: offset {offset} + factor dimension {factor_dim}",
+                id.get()
+            ),
+            Self::PayloadLength {
+                coordinate,
+                expected,
+                got,
+            } => write!(
+                formatter,
+                "product {coordinate:?} payload has length {got}, expected {expected}"
+            ),
+            Self::UnknownFactor { id } => {
+                write!(
+                    formatter,
+                    "product factor identity {} is not declared",
+                    id.get()
+                )
+            }
+            Self::AllocationRefused {
+                target,
+                elements,
+                element_bytes,
+            } => write!(
+                formatter,
+                "product {target:?} allocation refused for {elements} elements of {element_bytes} bytes"
+            ),
+            Self::FactorOperation { id, index, source } => write!(
+                formatter,
+                "product factor {} at index {index} refused its manifold operation: {source}",
+                id.get()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ProductManifoldError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::FactorLayout { source, .. } => Some(source),
+            Self::FactorOperation { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+}
 
 impl Manifold {
     /// Construct the typed dimension authority for this raw descriptor.

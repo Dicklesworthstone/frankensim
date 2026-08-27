@@ -7,8 +7,8 @@
 
 use crate::admission::AdmissionCaps;
 use crate::ir::{
-    EvalLimit, Expr, Manifold, NodeId, ObjectiveEvalSite, OptError, ProbeDirection, Problem, Shape,
-    VarId,
+    EvalLimit, Expr, Manifold, NodeId, ObjectiveEvalSite, OptError, ProbeDirection, Problem,
+    ProductAllocation, ProductCoordinate, ProductManifold, ProductManifoldError, Shape, VarId,
 };
 use core::num::NonZeroU64;
 use fs_exec::Cx;
@@ -2350,6 +2350,120 @@ impl Manifold {
 
     fn retract_with_cx(&self, x: &[f64], t: &[f64], cx: &Cx<'_>) -> Result<Vec<f64>, OptError> {
         self.retract_with_checkpoint(x, t, &mut || descent_checkpoint(cx))
+    }
+}
+
+impl ProductManifold {
+    /// Validate a complete concatenated product point in declaration order.
+    ///
+    /// Each block is checked by the existing factor-local manifold operation
+    /// contract. The first refusing factor is reported with both its stable
+    /// identity and declaration index.
+    ///
+    /// # Errors
+    /// Returns [`ProductManifoldError::PayloadLength`] for malformed aggregate
+    /// storage, or [`ProductManifoldError::FactorOperation`] for the first
+    /// factor-local descriptor, finiteness, or membership refusal.
+    pub fn validate_point(&self, point: &[f64]) -> Result<(), ProductManifoldError> {
+        self.layout()
+            .validate_payload_len(ProductCoordinate::Point, point)?;
+        for block in self.layout().factors() {
+            let factor = block.factor();
+            let start = block.point_offset().get() as usize;
+            let end = start + block.manifold_layout().point_dim().get() as usize;
+            factor
+                .manifold()
+                .validate_operation_point(&point[start..end])
+                .map_err(|source| ProductManifoldError::FactorOperation {
+                    id: factor.id(),
+                    index: block.index(),
+                    source,
+                })?;
+        }
+        Ok(())
+    }
+
+    /// Validate a complete concatenated retraction-parameter payload in
+    /// declaration order.
+    ///
+    /// # Errors
+    /// Returns [`ProductManifoldError::PayloadLength`] for malformed aggregate
+    /// storage, or [`ProductManifoldError::FactorOperation`] for the first
+    /// factor-local length or finiteness refusal.
+    pub fn validate_parameter(&self, parameter: &[f64]) -> Result<(), ProductManifoldError> {
+        self.layout()
+            .validate_payload_len(ProductCoordinate::Parameter, parameter)?;
+        for block in self.layout().factors() {
+            let factor = block.factor();
+            let start = block.param_offset().get() as usize;
+            let end = start + block.manifold_layout().param_dim().get() as usize;
+            let manifold = factor.manifold();
+            manifold
+                .validate(&AdmissionCaps::default())
+                .and_then(|()| {
+                    manifold.validate_parameter_payload(
+                        "product manifold parameter",
+                        &parameter[start..end],
+                    )
+                })
+                .map_err(|source| ProductManifoldError::FactorOperation {
+                    id: factor.id(),
+                    index: block.index(),
+                    source,
+                })?;
+        }
+        Ok(())
+    }
+
+    /// Retract every factor independently and concatenate the landed points in
+    /// declaration order.
+    ///
+    /// No factor math is duplicated here: each block delegates to
+    /// [`Manifold::retract`] with its existing point and parameter semantics.
+    ///
+    /// # Errors
+    /// Refuses malformed aggregate lengths, output allocation failure, or the
+    /// first factor-local retraction refusal with stable factor attribution.
+    pub fn retract(
+        &self,
+        point: &[f64],
+        parameter: &[f64],
+    ) -> Result<Vec<f64>, ProductManifoldError> {
+        self.layout()
+            .validate_payload_len(ProductCoordinate::Point, point)?;
+        self.layout()
+            .validate_payload_len(ProductCoordinate::Parameter, parameter)?;
+
+        let output_len = self.layout().point_dim().get();
+        let mut output = Vec::new();
+        output.try_reserve_exact(output_len as usize).map_err(|_| {
+            ProductManifoldError::AllocationRefused {
+                target: ProductAllocation::RetractionOutput,
+                elements: u64::from(output_len),
+                element_bytes: core::mem::size_of::<f64>() as u64,
+            }
+        })?;
+
+        for block in self.layout().factors() {
+            let factor = block.factor();
+            let point_start = block.point_offset().get() as usize;
+            let point_end = point_start + block.manifold_layout().point_dim().get() as usize;
+            let param_start = block.param_offset().get() as usize;
+            let param_end = param_start + block.manifold_layout().param_dim().get() as usize;
+            let landed = factor
+                .manifold()
+                .retract(
+                    &point[point_start..point_end],
+                    &parameter[param_start..param_end],
+                )
+                .map_err(|source| ProductManifoldError::FactorOperation {
+                    id: factor.id(),
+                    index: block.index(),
+                    source,
+                })?;
+            output.extend_from_slice(&landed);
+        }
+        Ok(output)
     }
 }
 

@@ -18,6 +18,9 @@
 //! - manifolds carry retraction metadata ([`Manifold::retract`]) that
 //!   a toy Riemannian descent consumes — orientations optimize as
 //!   orientations;
+//! - [`ProductManifold`] gives ordered heterogeneous configurations checked
+//!   point/parameter/tangent block layouts and delegates blockwise validation
+//!   and retraction to those same live manifold operations;
 //! - canonical serialization round-trips bitwise (floats travel as bit
 //!   patterns); admitted semantic identity and exact wire identity are
 //!   domain-separated BLAKE3 values, while the legacy FNV-64 body hash
@@ -50,8 +53,11 @@ pub use guard::{
 pub use ir::{
     BilevelRef, Class, Constraint, ConstraintKind, EvalBudget, EvalLimit, Expr,
     MANIFOLD_LAYOUT_SCHEMA_VERSION, Manifold, ManifoldLayout, ManifoldLayoutError, NodeId,
-    Objective, ObjectiveEvalSite, OptError, OptimizerFamily, ParamDim, PointDim, ProbeDirection,
-    Problem, ProblemBuilder, ProblemTag, Sense, Shape, TangentDim, VarId, Variable, children,
+    Objective, ObjectiveEvalSite, OptError, OptimizerFamily,
+    PRODUCT_MANIFOLD_LAYOUT_SCHEMA_VERSION, ParamDim, ParamOffset, PointDim, PointOffset,
+    ProbeDirection, Problem, ProblemBuilder, ProblemTag, ProductAllocation, ProductCoordinate,
+    ProductFactor, ProductFactorId, ProductFactorLayout, ProductManifold, ProductManifoldError,
+    ProductManifoldLayout, Sense, Shape, TangentDim, TangentOffset, VarId, Variable, children,
 };
 pub use serial::{
     ContentHash, DimensionCrosswalkReceipt, FiveToSixRule, LegacyProblemHash, ParsedProblem,

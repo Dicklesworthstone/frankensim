@@ -181,6 +181,32 @@ structure; FLUX/UQ execute it.
   gradient plus terminal valuation before the first probe, so budget exhaustion
   cannot leave a partially spent gradient. Cancellation is polled before/after
   f0, probe evaluations, retraction boundaries, and final publication.
+- `ProductManifold` is the ordered configuration-space composition of existing
+  live `Manifold` factors. It does not add a robot-specific `Manifold` variant
+  and contains no duplicate retraction formula. Callers assign each
+  `ProductFactor` a typed `ProductFactorId`; identities must be unique and stay
+  distinct from declaration order. `ProductManifoldLayout`, schema
+  `PRODUCT_MANIFOLD_LAYOUT_SCHEMA_VERSION = 1`, retains one
+  `ProductFactorLayout` per declaration with its factor-local
+  `ManifoldLayout`, order index, and non-interchangeable `PointOffset`,
+  `ParamOffset`, and `TangentOffset`. Cumulative point, retraction-parameter,
+  and intrinsic-tangent dimensions use separate typed totals and checked `u32`
+  addition. Empty products, duplicate identities, invalid factor layouts,
+  factor-count overflow, dimension overflow, and layout-table allocation
+  failure refuse explicitly. Identity-resolved point/parameter/tangent slicing
+  first requires one complete aggregate payload of the corresponding typed
+  length and never interprets one coordinate space as another.
+  `ProductManifold::validate_point` and `validate_parameter` visit factors in
+  declaration order and delegate membership, length, and finiteness checks to
+  the live factor operations.
+  `ProductManifold::retract` validates both aggregate lengths before allocation,
+  reserves the complete output fallibly, calls `Manifold::retract` once per
+  factor in declaration order, and concatenates the exact factor outputs.
+  Factor-local refusals retain stable factor identity, declaration index, and
+  the original `OptError`. Rebuilding an identical factor sequence and replaying
+  identical operations are deterministic. Product layouts are runtime
+  configuration metadata in v1; the canonical `fsopt` serial schema and
+  `Manifold` wire grammar are unchanged.
 - Structure: multi-objective (weights), constraint KINDS (`EqZero`,
   `LeZero` — semantics/repair are fs-constraint's), `ProblemTag`
   (multi-fidelity, chance-constrained, bilevel via typed
@@ -403,6 +429,14 @@ structure; FLUX/UQ execute it.
    of semantic sets replays to one receipt, but swapped quantifier order or
    strategy classes produce distinct identities.
 
+9. Ordered products retain stable factor identities independently from block
+   order, reproduce checked point/parameter/tangent offsets and totals, slice
+   only complete typed payloads, and return the bit-exact declaration-ordered
+   concatenation of the corresponding live factor retractions. The fixed
+   R3 x SO(3) and heterogeneous Rn/Sphere/SO(3)/Stiefel fixtures also pin
+   deterministic first-factor refusal and exact replay
+   (`tests/manifold_layout_types.rs`).
+
 ## Error model
 
 `OptError` teaching errors throughout: unknown ids, shape/dimension
@@ -419,6 +453,9 @@ bounded site),
 layout),
 `RetractionLen`/`RetractionNonFinite`/
 `RetractionDomain` (input, manifold rule, location, and measurement),
+`ProductManifoldError` (empty/duplicate/invalid factor layout, factor-count or
+cumulative-dimension overflow, aggregate payload length, unknown factor,
+fallible allocation, or factor-attributed original `OptError`),
 `DescentCapExceeded` (resource + conservative required bound + explicit cap),
 `DescentPlanOverflow` (resource whose exact envelope left `u64`),
 `CapExceeded` (cap name + count + limit),
@@ -459,6 +496,10 @@ ordered, quantifier and sequential-composition order remain significant,
 floating signed zero is normalized, and model, units, information, strategy,
 polarity, horizon, stopping, composition, and budget are domain separated.
 
+Product layouts and operations are declaration-order deterministic. Factor
+identity lookup never changes concatenation order, and retraction delegates to
+the existing deterministic factor operations without an alternate formula.
+
 ## Cancellation behavior
 
 `descend_fn`/`descend_ir` poll `cx.checkpoint()` before and after f0,
@@ -488,6 +529,10 @@ published. A pre-cancelled restart likewise performs zero objective calls.
 Game admission polls before proportional scans, during bounded information,
 strategy-dependency, and composition traversal, and at identity publication.
 Cancellation returns a typed Cancelled issue and no receipt.
+
+Product layout, slicing, validation, and retraction are synchronous like the
+public factor operations they compose. They expose no `Cx` and make no bounded
+cancellation-latency claim; a factor refusal returns no product point.
 
 ## Unsafe boundary
 
@@ -569,6 +614,12 @@ nonidentity power of two, and every generated start is separated from its
 target. The comparator checks coordinate and objective equivariance plus exact
 discrete receipts. Existing opt-005/006 fixed pins remain unchanged.
 
+`tests/manifold_layout_types.rs` covers the versioned factor and product layout
+table; typed cumulative dimensions and offsets; identity-resolved slicing;
+R3 x SO(3) and heterogeneous factor-operation equality; invalid, duplicate,
+overflowing, malformed, non-finite, and off-manifold refusals; deterministic
+first-factor attribution; and exact layout/retraction replay.
+
 ## No-claim boundaries
 
 - The G3 descent adopter covers coherent power-of-two rescaling of a bounded,
@@ -614,6 +665,13 @@ discrete receipts. Existing opt-005/006 fixed pins remain unchanged.
   antipodal and membership/roundoff-conditioned near-antipodal region; Stiefel
   transport makes no metric-isometry or superlinear quasi-Newton claim; SO(3)
   makes no sign-seam or global-chart-smoothness claim.
+- Product layouts are runtime configuration metadata, not a robot model,
+  kinematic tree, joint-limit system, collision model, dynamics solver,
+  optimizer-variable integration, transport/projection implementation,
+  persistent schema, or ledger identity. Their intrinsic tangent blocks are
+  typed layout slices only; factors whose current retractions consume ambient
+  parameters keep that existing distinction. Product operations inherit every
+  numerical and cancellation no-claim boundary of their factor operations.
 - Gradients here are FD-through-retraction toys; exact adjoints and
   reverse-mode graph gradients are the gradient-stack bead (the
   parked draft's `graph.rs` already prototypes reverse-mode — harvest
