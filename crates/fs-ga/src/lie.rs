@@ -660,11 +660,14 @@ impl Se3 {
             });
         }
         let quat = Quat::from_rotor(&motor);
-        let motor = if canonical_quat_needs_flip(quat) {
+        let mut motor = if canonical_quat_needs_flip(quat) {
             Motor(motor.0.scale(-1.0))
         } else {
             motor
         };
+        for coordinate in &mut motor.0.0 {
+            *coordinate = positive_zero(*coordinate);
+        }
         Ok(Self { motor })
     }
 
@@ -1030,7 +1033,7 @@ fn se3_jacobian_series(
 }
 
 fn canonical_quat(quat: Quat) -> Quat {
-    if canonical_quat_needs_flip(quat) {
+    let canonical = if canonical_quat_needs_flip(quat) {
         Quat {
             w: -quat.w,
             x: -quat.x,
@@ -1039,7 +1042,17 @@ fn canonical_quat(quat: Quat) -> Quat {
         }
     } else {
         quat
+    };
+    Quat {
+        w: positive_zero(canonical.w),
+        x: positive_zero(canonical.x),
+        y: positive_zero(canonical.y),
+        z: positive_zero(canonical.z),
     }
+}
+
+fn positive_zero(value: f64) -> f64 {
+    if value == 0.0 { 0.0 } else { value }
 }
 
 fn canonical_quat_needs_flip(quat: Quat) -> bool {
@@ -1340,6 +1353,39 @@ mod tests {
         })
         .unwrap();
         assert_eq!(positive_pi, negative_pi);
+
+        let signed_zero = So3::try_from_quat(Quat {
+            w: 1.0,
+            x: -0.0,
+            y: 0.0,
+            z: -0.0,
+        })
+        .unwrap();
+        for coordinate in [
+            signed_zero.as_quat().w,
+            signed_zero.as_quat().x,
+            signed_zero.as_quat().y,
+            signed_zero.as_quat().z,
+        ] {
+            assert_ne!(coordinate.to_bits(), (-0.0f64).to_bits());
+        }
+
+        let mut signed_zero_motor = Motor::identity();
+        for coordinate in &mut signed_zero_motor.0.0 {
+            if *coordinate == 0.0 {
+                *coordinate = -0.0;
+            }
+        }
+        let canonical_motor = Se3::try_from_motor(signed_zero_motor).unwrap();
+        assert_eq!(canonical_motor, Se3::identity());
+        assert!(
+            canonical_motor
+                .as_motor()
+                .0
+                .0
+                .iter()
+                .all(|coordinate| coordinate.to_bits() != (-0.0f64).to_bits())
+        );
 
         assert!(matches!(
             So3::try_from_quat(Quat {

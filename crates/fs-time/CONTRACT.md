@@ -7,8 +7,9 @@ fs-math, and the shared fs-solver operator/Newton-Krylov spine — all downward
 or same-layer services).
 Structure-preserving time integration (plan §8.5): integrators that
 preserve what the physics preserves — symplectic (Störmer–Verlet with
-its discrete-Lagrangian equivalence tested), Lie-group SO(3) via
-exponential-map updates and SE(3) on fs-ga PGA motors (exp-map lane
+its discrete-Lagrangian equivalence tested), Lie-group SO(3) and SE(3)
+integration over the validated canonical `fs-ga::{So3, Se3, Twist}` owners
+(exp-map lane
 plus a free-body discrete Euler–Poincaré variational lane),
 generalized-α with controllable dissipation, IMEX and exponential
 integrators for stiffness, and embedded-pair adaptivity with a PI
@@ -27,11 +28,13 @@ where claimed below.
   `fs_ad::revolve` checkpointing (O(log N) memory).
   **Precondition: symmetric ∂F/∂q** (conservative forces): the reverse
   pass evaluates Jᵀv through the user's `force_jvp` as Jᵀv = Jv.
-- `lie::{quat_mul, quat_exp, quat_exp_step, quat_rotate}` — (w, x, y, z)
-  unit quaternions; `quat_exp` uses a series branch below θ = 1e−6 (no
-  sinc cancellation). `lie::rigid_body_step(q, ω, I, h)` — torque-free
-  Euler equations via midpoint RK2 + CG2 exp-map attitude update at the
-  midpoint ω; returns (q′, ω′).
+- `fs_ga::{So3, Se3, Twist, Vec3}` are re-exported canonical state/tangent
+  types; fs-time does not own a second quaternion, motor, pose, or twist
+  representation. `lie::{so3_body_exp_step, so3_space_exp_step}` name the
+  right/body update `R Exp(h ω_body)` and left/space update
+  `Exp(h ω_space) R` explicitly. `lie::rigid_body_step(R, ω, I, h)`
+  advances torque-free Euler equations via midpoint RK2 and performs the CG2
+  right/body attitude update at midpoint ω; it returns `(R′, ω′)`.
 - `galpha::GeneralizedAlpha::new(m, c, k, n, h, rho_inf)` +
   `galpha_step(ga, q, v, a, f_next)` — Chung–Hulbert: αm = (2ρ−1)/(ρ+1),
   αf = ρ/(ρ+1), γ = ½ − αm + αf, β = ¼(1 − αm + αf)²; one prefactored
@@ -75,12 +78,12 @@ where claimed below.
   Dormand–Prince 5(4), max-norm error against atol + rtol·|u|, PI
   update h ← h·safety·err^{−0.14}·err_prev^{0.08} clamped to
   [0.2, 5.0]; rejections shrink with the classical −1/5 exponent.
-- `se3` module (bead 3ol0): `Twist` (body ω then v);
-  `se3_exp_step(M, twist, h)` — `M ← M ∘ exp(−(h/2)·B(ω, v))` through
-  fs-ga's screw exponential, returning the CANONICAL double-cover
-  representative (`canonicalize_motor`: first nonzero even component
-  in `EVEN_BLADES` order made positive; `M` and `−M` canonicalize
-  bit-identically; all-zero refuses). `se3_exp_step_renorm` adds
+- `se3` module (bead 3ol0): canonical `fs-ga::Twist` uses
+  `[angular, linear]` ordering. `se3_exp_step(T, twist_body, h)` performs the
+  right/body update `T Exp(h twist_body)` and
+  `se3_space_exp_step(T, twist_space, h)` performs the left/space update
+  `Exp(h twist_space) T`; both delegate group exp/composition and double-cover
+  canonicalization to the sole `fs-ga::Se3` owner. `se3_exp_step_renorm` adds
   drift-controlled versor renormalization gated by `RenormPolicy` and
   returns a `RenormReceipt` (defect before, whether renormalized,
   reported drift) — drift is ledger fodder, never silently absorbed.
@@ -164,7 +167,12 @@ where claimed below.
   its KDK positions satisfy the discrete Euler–Lagrange recurrence
   q_{k+1} = 2q_k − q_{k−1} + h²F(q_k) (Marsden–West).
 - Exp-map attitude updates keep ‖q‖ = 1 by construction — no
-  renormalization anywhere in the crate.
+  renormalization in the SO(3) lane. The SE(3) lane exposes optional,
+  threshold-controlled motor renormalization only through
+  `se3_exp_step_renorm`, with every decision and drift returned in a receipt.
+- Body/right and space/left steps use named entry points and canonical
+  `fs-ga` group operations; no array multiplication order implicitly chooses
+  a frame convention.
 - Generalized-α: high-frequency per-step contraction → ρ∞; order 2
   across the whole ρ∞ range.
 - Dense and operator-backed generalized-α/IMEX paths use the same parameter
@@ -195,7 +203,13 @@ non-finite explicit-stage, Newton-setup, and not-converged refusals; their
 reports retain the exhausted budget or breakdown diagnosis. `verlet_adjoint`
 inherits `fs_ad::revolve`'s budget assertion. Legacy dense steppers themselves
 are panic-free on finite input; NaN/Inf propagate as NaN/Inf
-(garbage-in, garbage-out, never UB).
+(garbage-in, garbage-out, never UB). Lie-group lanes return `LieStepError` or
+`Se3Error`: canonical representation failures preserve the structured
+`fs_ga::GaError`, while invalid step, inertia, damping, renormalization, and
+variational-solver controls carry an explicit parameter-family context.
+`DepSolveParams` requires finite positive tolerance and a nonzero iteration
+budget even for an empty requested trajectory; per-step damping is a fraction
+in `[0, 1]`.
 
 ## Determinism class
 
@@ -206,8 +220,11 @@ the PI controller's `pow`, because the adaptive step SEQUENCE is part
 of the contract. Test-side oracles may use std (disjoint-path rule).
 Golden FNV-64 over Verlet, rigid-body, generalized-α, IMEX, ExpEuler
 and RK45 trajectories (controller state and counters included):
-`0xeae8_ccec_5e2e_cf41`, recorded on Apple M4 Pro (aarch64), verified
-identical on Threadripper (x86_64). The operator-backed paths use
+`0x41c7_740c_1a69_00dd`, recorded on Apple M4 Pro (aarch64) after migrating
+the rigid-body representative to canonical `fs-ga::So3`. The predecessor
+golden was verified on Threadripper (x86_64); this new canonical-state golden
+still needs retained x86_64 re-verification and makes no fresh empirical
+cross-ISA claim. The operator-backed paths use
 `fs-solver`'s deterministic reductions and logical-iteration preconditioner
 contract. Their dense-vs-operator and split-run fixtures are deterministic on
 the exercised build; they do not yet add a retained cross-ISA golden.
@@ -263,7 +280,8 @@ fresh cross-ISA/full-G5 execution.
 `tests/time_battery.rs` (16 cases, JSON logging): 10⁶-step harmonic
 energy boundedness vs RK4's secular decay at the same h + e = 0.6
 Kepler orbit (~16 revolutions); discrete Euler–Lagrange residual
-≤ 1e−12 on a nonlinear potential; quaternion norm drift ≈ 1e−12 over
+≤ 1e−12 on a nonlinear potential; canonical SO(3) quaternion norm drift
+≈ 1e−12 over
 10⁵ steps with no renormalization; gyroscope battery (ω₃ constant to
 1e−9, analytic precession phase Ω = (I₃−I₁)/I₁·ω₃ to 1e−3, energy and
 spatial angular momentum to O(h²)); generalized-α spectral radius → ρ∞
@@ -273,7 +291,8 @@ on the logistic equation; ExpEuler exact (1e−13) on a linear system
 against a disjoint-path oracle + measured ETD1 order 1; RK45 accuracy
 tracking rtol, rejection recovery from an absurd h₀, and bitwise
 split-run resumability at 4 cut points; Verlet adjoint gradcheck vs
-central FD ≤ 1e−7 relative; the cross-ISA golden hash.
+central FD ≤ 1e−7 relative; the retained deterministic golden hash (fresh
+x86_64 replay pending after the canonical-state migration).
 `tests/galpha_probe.rs`: order-2 sweep across ρ∞ ∈ {0, .3, .5, .8, 1}
 at two horizons — kept from the probe that diagnosed the period-point
 metric blindness (at t = 2π, cos′ = 0: a q-only error measures phase
@@ -295,7 +314,7 @@ budget-pie localization, adaptive-vs-uniform cost, G3 repartition
 envelope, activation gate, and fail-fast validation for invalid slab
 counts/substeps/tolerances/budgets, malformed public ledger entries,
 and non-finite couplings.
-`tests/se3.rs` (bead 3ol0, printed measurements on every gate):
+`tests/se3.rs` (bead 3ol0, 10 cases, printed measurements on numerical gates):
 SO(3)-lane agreement for pure rotations (se3-001); constant-twist
 one-parameter composition exactness (se3-002); double-cover
 canonicalization determinism, `M`/`−M` bit-equality, and bitwise
@@ -307,7 +326,11 @@ honesty fixture — a damped run demotes to `MeasuredOnly` with nonzero
 measured drift despite converged solves (se3-006); 10⁵-step
 renormalization receipts bounding the final unit defect (se3-007);
 SE(3) rigid-body agreement with the SO(3) lane and spatial
-free-velocity drift at the measured-order level (se3-008).
+free-velocity drift at the measured-order level (se3-008); explicit
+body/right versus adjoint-related space/left equivalence for both groups plus
+bitwise replay of all four stepping lanes (se3-009); invalid solver controls
+and out-of-domain damping refuse even when a zero-step horizon could otherwise
+bypass the step loop (se3-010).
 `tests/hybrid.rs` (RE.Z1; G0/G3/G4/G5): relay-chatter and positive-dwell
 microcases; mode/event input-order and schema replay; model-version identity
 sensitivity; event-cap and numerical-trace theorem falsifiers; finite
@@ -321,7 +344,7 @@ per-relation and aggregate reset-target caps.
 
 ## No-claim boundaries
 
-- SE(3) motor states ship the exp-map lane and the FREE-BODY
+- Canonical `fs-ga::Se3` states ship the exp-map lane and the FREE-BODY
   variational lane only: no forced/damped/constrained variational
   steps here (constrained lanes are fs-mbd's, through
   `RattleProjection`); the backward-error/modified-energy THEOREM is

@@ -15,6 +15,7 @@
 //!   hysteretic dissipation under a reversal, and G4 checkpoint/resume
 //!   bitwise equality mid-history.
 
+use fs_ga::{So3, So3Tangent, Vec3};
 use fs_solid::fiber::rc_section;
 use fs_solid::{ForceBasedElement, Rod, RodSection, TipLoad, update_sections_batched};
 use std::fmt::Write as _;
@@ -43,32 +44,37 @@ const SECTION: RodSection = RodSection {
 
 #[test]
 fn str_001_rod_objectivity() {
-    use fs_time::lie::{quat_exp, quat_mul, quat_rotate};
     let mut rod = Rod::straight(1.0, 12, SECTION);
     // A visibly deformed state (smooth bend + twist).
-    for (i, q) in rod.quats.iter_mut().enumerate() {
+    for (i, frame) in rod.frames.iter_mut().enumerate() {
         #[allow(clippy::cast_precision_loss)]
         let s = i as f64 / 12.0;
-        *q = quat_exp([0.3 * s, 0.4 * s, 0.1 * s * s]);
+        *frame = So3::exp(So3Tangent::new(Vec3::new(0.3 * s, 0.4 * s, 0.1 * s * s)))
+            .expect("finite frame fixture");
     }
     for (i, p) in rod.positions.iter_mut().enumerate() {
         #[allow(clippy::cast_precision_loss)]
         let s = i as f64 / 12.0;
         *p = [s, 0.2 * s * s, 0.1 * s * s * s];
     }
-    let e0 = rod.energy();
+    let e0 = rod.energy().expect("canonical rod energy");
     // Superpose a rigid motion: rotate everything by R, translate by t.
-    let rq = quat_exp([0.4, -0.7, 0.5]);
+    let rotation =
+        So3::exp(So3Tangent::new(Vec3::new(0.4, -0.7, 0.5))).expect("finite rigid rotation");
     let t = [3.0, -2.0, 1.0];
     let mut moved = rod.clone();
     for p in &mut moved.positions {
-        let r = quat_rotate(rq, *p);
-        *p = [r[0] + t[0], r[1] + t[1], r[2] + t[2]];
+        let rotated = rotation
+            .rotate(Vec3::new(p[0], p[1], p[2]))
+            .expect("finite position");
+        *p = [rotated.x + t[0], rotated.y + t[1], rotated.z + t[2]];
     }
-    for q in &mut moved.quats {
-        *q = quat_mul(rq, *q);
+    for frame in &mut moved.frames {
+        *frame = rotation
+            .compose(*frame)
+            .expect("canonical frame composition");
     }
-    let e1 = moved.energy();
+    let e1 = moved.energy().expect("canonical moved-rod energy");
     let rel = (e1 - e0).abs() / e0.abs().max(1e-30);
     verdict(
         "str-001",
@@ -186,7 +192,7 @@ fn str_003_helical_family() {
     for p in &twist.positions {
         straight_dev = straight_dev.max(p[1].abs().max(p[2].abs()));
     }
-    let (_, kappa_end) = twist.strains(10);
+    let (_, kappa_end) = twist.strains(10).expect("canonical twist strain");
     let twist_rate_dev = (kappa_end[0] - m_t / SECTION.gj).abs() / (m_t / SECTION.gj);
     // (c) Helix: combined bending + torsion moments → constant strain
     // state κ = (m_t/GJ, 0, m_b/EI) along the rod.
@@ -203,7 +209,7 @@ fn str_003_helical_family() {
         .expect("helix converges");
     let mut kdev = 0.0f64;
     for seg in 2..22 {
-        let (_, k) = helix.strains(seg);
+        let (_, k) = helix.strains(seg).expect("canonical helix strain");
         kdev = kdev
             .max((k[0] - 0.4 / SECTION.gj).abs() / (0.4 / SECTION.gj))
             .max((k[2] - 0.6 / SECTION.ei).abs() / (0.6 / SECTION.ei));

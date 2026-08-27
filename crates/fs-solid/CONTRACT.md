@@ -127,9 +127,9 @@ this layer.
   (a state-only perturbation relaxes back to the fundamental branch;
   a basin-scale jump inverts elements — both measured failure modes).
 - `rod` (bead tfz.14): geometrically exact Cosserat rods — nodal
-  positions + unit quaternions updated MULTIPLICATIVELY through
-  fs-time's exponential map; strains Γ = Rᵀr′ − e₁ and
-  κ = 2log(qᵢ⁻¹qᵢ₊₁)/L₀ from RELATIVE quantities (rigid motions give
+  positions plus canonical `fs-ga::So3` frames updated
+  MULTIPLICATIVELY through body/right group operations; strains Γ = Rᵀr′ − e₁ and
+  κ = Log(Rᵢ⁻¹Rᵢ₊₁)/L₀ from RELATIVE quantities (rigid motions give
   exactly zero strain — energy-invariance battery). Statics: FD
   residual/tangent Newton with residual backtracking and load
   stepping, fixture-gated; fixture slenderness matters — a

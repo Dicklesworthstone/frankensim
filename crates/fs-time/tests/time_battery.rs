@@ -10,8 +10,8 @@
 //! everything feeding the golden hash flows through solver code only.
 
 use fs_time::{
-    AdaptiveState, ExpEuler, GeneralizedAlpha, Imex2, PiController, galpha_step, imex2_step,
-    quat_exp_step, quat_rotate, rigid_body_step, rk45_adaptive, verlet_adjoint, verlet_step,
+    AdaptiveState, ExpEuler, GeneralizedAlpha, Imex2, PiController, So3, Vec3, galpha_step,
+    imex2_step, rigid_body_step, rk45_adaptive, so3_body_exp_step, verlet_adjoint, verlet_step,
 };
 
 fn log(case: &str, verdict: &str, detail: &str) {
@@ -147,17 +147,18 @@ fn verlet_is_the_variational_integrator() {
 // ----------------------------------------------------------------- Lie/SO(3)
 
 #[test]
-fn quat_norm_preserved_1e5_steps() {
+fn so3_group_invariant_preserved_1e5_steps() {
     // Time-varying ω from a deterministic recurrence; exp-map updates
     // must keep ‖q‖ = 1 to a roundoff random walk (~√N·ε ≈ 4e-14).
-    let mut q = [1.0f64, 0.0, 0.0, 0.0];
-    let mut w = [0.3f64, -0.2, 0.9];
+    let mut rotation = So3::identity();
+    let mut angular = Vec3::new(0.3, -0.2, 0.9);
     for k in 0..100_000usize {
-        q = quat_exp_step(q, w, 0.01);
+        rotation = so3_body_exp_step(rotation, angular, 0.01).expect("finite SO(3) step");
         let s = if k % 2 == 0 { 1.0 } else { -1.0 };
-        w = [w[1], w[2], w[0] + s * 1e-4];
+        angular = Vec3::new(angular.y, angular.z, angular.x + s * 1e-4);
     }
-    let norm = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]).sqrt();
+    let q = rotation.as_quat();
+    let norm = (q.w * q.w + q.x * q.x + q.y * q.y + q.z * q.z).sqrt();
     // Measured ≈ 1e-12 on M4 Pro: the per-step exp-map is exact to a
     // few ulps but the det::sin/cos roundoff walk is mildly biased, so
     // drift runs ~30× above the ideal √N·ε random walk. Still 10⁻¹²
@@ -180,43 +181,63 @@ fn rigid_body_gyroscope_physics() {
     // give ω₃ EXACTLY constant and (ω₁, ω₂) precessing in the body
     // frame at Ω = (I₃ − I₁)/I₁·ω₃ = −2.5 rad/s. Second-order method ⇒
     // both hold to O(h²) over T = 10.
-    let inertia = [2.0f64, 2.0, 1.0];
+    let inertia = Vec3::new(2.0, 2.0, 1.0);
     let h = 1e-3;
     let steps = 10_000usize;
-    let mut q = [1.0f64, 0.0, 0.0, 0.0];
-    let mut w = [0.1f64, 0.0, 5.0];
-    let l0 = quat_rotate(q, [inertia[0] * w[0], inertia[1] * w[1], inertia[2] * w[2]]);
-    let e0 = 0.5 * (inertia[0] * w[0] * w[0] + inertia[1] * w[1] * w[1] + inertia[2] * w[2] * w[2]);
+    let mut rotation = So3::identity();
+    let mut angular = Vec3::new(0.1, 0.0, 5.0);
+    let l0 = rotation
+        .rotate(Vec3::new(
+            inertia.x * angular.x,
+            inertia.y * angular.y,
+            inertia.z * angular.z,
+        ))
+        .expect("finite spatial momentum");
+    let e0 = 0.5
+        * (inertia.x * angular.x * angular.x
+            + inertia.y * angular.y * angular.y
+            + inertia.z * angular.z * angular.z);
     for _ in 0..steps {
-        let (qn, wn) = rigid_body_step(q, w, inertia, h);
-        q = qn;
-        w = wn;
+        let (next_rotation, next_angular) =
+            rigid_body_step(rotation, angular, inertia, h).expect("finite rigid-body step");
+        rotation = next_rotation;
+        angular = next_angular;
     }
     // (a) ω₃ constant.
     assert!(
-        (w[2] - 5.0).abs() < 1e-9,
+        (angular.z - 5.0).abs() < 1e-9,
         "omega3 drift {:.3e}",
-        (w[2] - 5.0).abs()
+        (angular.z - 5.0).abs()
     );
     // (b) body-frame precession phase after T = 10: Ω·T = −25 rad
     // (phase(t) = −2.5t since d/dt(ω₁ + iω₂) = −2.5i(ω₁ + iω₂)).
     let two_pi = 2.0 * std::f64::consts::PI;
     let expected = (-25.0f64).rem_euclid(two_pi);
-    let measured = w[1].atan2(w[0]).rem_euclid(two_pi);
+    let measured = angular.y.atan2(angular.x).rem_euclid(two_pi);
     let mut diff = (measured - expected).abs();
     if diff > std::f64::consts::PI {
         diff = two_pi - diff;
     }
     assert!(diff < 1e-3, "precession phase error {diff:.3e}");
     // (c) energy and SPATIAL angular momentum conserved to O(h²).
-    let e1 = 0.5 * (inertia[0] * w[0] * w[0] + inertia[1] * w[1] * w[1] + inertia[2] * w[2] * w[2]);
+    let e1 = 0.5
+        * (inertia.x * angular.x * angular.x
+            + inertia.y * angular.y * angular.y
+            + inertia.z * angular.z * angular.z);
     assert!(
         (e1 - e0).abs() / e0 < 1e-4,
         "energy drift {:.3e}",
         (e1 - e0).abs() / e0
     );
-    let l1 = quat_rotate(q, [inertia[0] * w[0], inertia[1] * w[1], inertia[2] * w[2]]);
-    let ldev = (0..3).map(|i| (l1[i] - l0[i]).abs()).fold(0.0f64, f64::max);
+    let l1 = rotation
+        .rotate(Vec3::new(
+            inertia.x * angular.x,
+            inertia.y * angular.y,
+            inertia.z * angular.z,
+        ))
+        .expect("finite spatial momentum");
+    let delta = l1 - l0;
+    let ldev = delta.x.abs().max(delta.y.abs()).max(delta.z.abs());
     assert!(ldev < 1e-3, "spatial L drift {ldev:.3e}");
     log(
         "gyroscope",
@@ -576,7 +597,11 @@ fn verlet_adjoint_gradcheck_vs_central_fd() {
 
 // --------------------------------------------------------------- golden hash
 
-const GOLDEN_HASH: u64 = 0xeae8_ccec_5e2e_cf41; // recorded at tfz.12 landing, frozen
+// Canonical fs-ga So3 migration: the rigid-body lane now canonicalizes the
+// quaternion double cover at every accepted group operation. The other five
+// lanes and the physical SO(3) trajectory are unchanged; the representative
+// bits, and therefore this whole-suite digest, intentionally changed.
+const GOLDEN_HASH: u64 = 0x41c7_740c_1a69_00dd;
 
 #[test]
 fn time_golden_hash() {
@@ -597,17 +622,20 @@ fn time_golden_hash() {
     feed(q[0]);
     feed(p[0]);
     // Lie: asymmetric rigid body, 10k steps.
-    let mut quat = [1.0f64, 0.0, 0.0, 0.0];
-    let mut w = [0.3f64, 1.5, -0.4];
+    let mut rotation = So3::identity();
+    let mut angular = Vec3::new(0.3, 1.5, -0.4);
     for _ in 0..10_000 {
-        let (qn, wn) = rigid_body_step(quat, w, [1.0, 2.0, 3.0], 1e-3);
-        quat = qn;
-        w = wn;
+        let (next_rotation, next_angular) =
+            rigid_body_step(rotation, angular, Vec3::new(1.0, 2.0, 3.0), 1e-3)
+                .expect("finite golden rigid-body step");
+        rotation = next_rotation;
+        angular = next_angular;
     }
-    for v in quat {
+    let quat = rotation.as_quat();
+    for v in [quat.w, quat.x, quat.y, quat.z] {
         feed(v);
     }
-    for v in w {
+    for v in [angular.x, angular.y, angular.z] {
         feed(v);
     }
     // Generalized-α: damped 2-DOF, 1k steps.

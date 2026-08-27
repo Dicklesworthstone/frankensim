@@ -3,9 +3,8 @@
 //!
 //! Three obligations from the bead, each with an honest claim scope:
 //!
-//! 1. **Exp-map lane**: motor states updated by the fs-ga screw
-//!    exponential, with the double cover (`M ~ −M`) fixed by a
-//!    deterministic canonicalization and drift-controlled
+//! 1. **Exp-map lane**: canonical `fs-ga` `Se3` states updated through
+//!    explicit body/right or space/left group operations, with drift-controlled
 //!    renormalization that returns receipts instead of silently
 //!    patching the state.
 //! 2. **Variational lane**: a discrete Euler–Poincaré step for the
@@ -26,21 +25,20 @@
 //! RATTLE-style constraint projection is exposed as a hook trait for
 //! fs-mbd; the constrained lanes live there, not here.
 
-use crate::lie::{quat_exp, quat_mul, quat_rotate};
-use fs_ga::pga::{EVEN_BLADES, axis_bivector, ideal_bivector};
-use fs_ga::{Motor, exp_bivector};
+use fs_ga::{GaError, Se3, So3, So3Tangent, Twist, Vec3};
 use fs_math::det;
 
 /// Typed refusals for the SE(3) lanes.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Se3Error {
-    /// A state or parameter component is NaN or infinite.
-    NonFinite,
-    /// The motor has no usable even component to anchor the
-    /// double-cover sign (all exactly zero).
-    DegenerateMotor,
-    /// A principal inertia or the step size is not positive.
-    InvalidParameter,
+    /// Canonical group/tangent validation refused an input or result.
+    Group(GaError),
+    /// A time-integration control or physical parameter is outside its
+    /// documented domain.
+    InvalidParameter {
+        /// Parameter family that was invalid.
+        context: &'static str,
+    },
     /// The variational fixed-point solve did not converge.
     SolverDiverged {
         /// Iterations spent.
@@ -55,16 +53,8 @@ pub enum Se3Error {
 impl std::fmt::Display for Se3Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Se3Error::NonFinite => write!(f, "non-finite state or parameter"),
-            Se3Error::DegenerateMotor => {
-                write!(f, "motor has no nonzero even component to anchor the sign")
-            }
-            Se3Error::InvalidParameter => {
-                write!(
-                    f,
-                    "step size and principal inertias must be positive and finite"
-                )
-            }
+            Se3Error::Group(error) => write!(f, "SE(3) group refusal: {error}"),
+            Se3Error::InvalidParameter { context } => write!(f, "invalid {context}"),
             Se3Error::SolverDiverged { iters, residual } => write!(
                 f,
                 "variational fixed-point solve diverged after {iters} iterations \
@@ -79,61 +69,32 @@ impl std::fmt::Display for Se3Error {
 
 impl std::error::Error for Se3Error {}
 
-/// A body-frame twist: angular velocity (rad/s) then linear velocity
-/// (m/s).
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Twist {
-    /// Body-frame angular velocity.
-    pub omega: [f64; 3],
-    /// Body-frame linear velocity.
-    pub vel: [f64; 3],
-}
-
-impl Twist {
-    fn is_finite(&self) -> bool {
-        self.omega
-            .iter()
-            .chain(self.vel.iter())
-            .all(|v| v.is_finite())
+impl From<GaError> for Se3Error {
+    fn from(value: GaError) -> Self {
+        Self::Group(value)
     }
 }
 
-/// Deterministically fix the double-cover representative: the first
-/// even component (in fs-ga's `EVEN_BLADES` order) whose magnitude
-/// exceeds zero decides the sign; `M` and `−M` map to the SAME
-/// canonical representative bit-for-bit.
-pub fn canonicalize_motor(m: &Motor) -> Result<(Motor, bool), Se3Error> {
-    for &blade in &EVEN_BLADES {
-        let c = m.0.0[blade];
-        if !c.is_finite() {
-            return Err(Se3Error::NonFinite);
-        }
-        if c != 0.0 {
-            return if c < 0.0 {
-                Ok((Motor(m.0.scale(-1.0)), true))
-            } else {
-                Ok((*m, false))
-            };
-        }
+/// One exp-map step for a body-frame twist:
+/// `T_next = T * Exp(h * twist_body)`.
+pub fn se3_exp_step(pose: Se3, twist: Twist, h: f64) -> Result<Se3, Se3Error> {
+    if !h.is_finite() {
+        return Err(Se3Error::InvalidParameter {
+            context: "SE(3) step size",
+        });
     }
-    Err(Se3Error::DegenerateMotor)
+    Ok(pose.body_plus(twist.scale(h))?)
 }
 
-/// One exp-map step of the motor kinematics for a body-frame twist:
-/// `M ← M ∘ exp(−(h/2)·B(ω, v))`, the SE(3) analogue of
-/// [`crate::lie::quat_exp_step`]. The state stays on the group to
-/// roundoff by construction; the canonical double-cover representative
-/// is returned.
-pub fn se3_exp_step(m: &Motor, twist: &Twist, h: f64) -> Result<Motor, Se3Error> {
-    if !twist.is_finite() || !h.is_finite() {
-        return Err(Se3Error::NonFinite);
+/// One exp-map step for a space-frame twist:
+/// `T_next = Exp(h * twist_space) * T`.
+pub fn se3_space_exp_step(pose: Se3, twist: Twist, h: f64) -> Result<Se3, Se3Error> {
+    if !h.is_finite() {
+        return Err(Se3Error::InvalidParameter {
+            context: "SE(3) step size",
+        });
     }
-    let b = axis_bivector(twist.omega[0], twist.omega[1], twist.omega[2])
-        .add(&ideal_bivector(twist.vel[0], twist.vel[1], twist.vel[2]))
-        .scale(-0.5 * h);
-    let step = exp_bivector(&b);
-    let (canonical, _) = canonicalize_motor(&m.compose(&step))?;
-    Ok(canonical)
+    Ok(pose.space_plus(twist.scale(h))?)
 }
 
 /// Renormalization policy for long exp-lane runs.
@@ -167,19 +128,22 @@ pub struct RenormReceipt {
 /// [`se3_exp_step`] plus drift-controlled renormalization with a
 /// receipt.
 pub fn se3_exp_step_renorm(
-    m: &Motor,
-    twist: &Twist,
+    pose: Se3,
+    twist: Twist,
     h: f64,
     policy: &RenormPolicy,
-) -> Result<(Motor, RenormReceipt), Se3Error> {
-    let mut next = se3_exp_step(m, twist, h)?;
-    let defect_before = next.unit_defect();
+) -> Result<(Se3, RenormReceipt), Se3Error> {
+    if !policy.defect_threshold.is_finite() || policy.defect_threshold < 0.0 {
+        return Err(Se3Error::InvalidParameter {
+            context: "SE(3) renormalization defect threshold",
+        });
+    }
+    let mut next = se3_exp_step(pose, twist, h)?;
+    let defect_before = next.as_motor().unit_defect();
     let (renormalized, drift) = if defect_before > policy.defect_threshold {
-        let drift = next.renormalize();
-        // Renormalization scales uniformly; rescaling cannot flip the
-        // anchor sign, but keep the invariant explicit.
-        let (canonical, _) = canonicalize_motor(&next)?;
-        next = canonical;
+        let mut corrected = *next.as_motor();
+        let drift = corrected.renormalize();
+        next = Se3::try_from_motor(corrected)?;
         (true, drift)
     } else {
         (false, 0.0)
@@ -194,11 +158,41 @@ pub fn se3_exp_step_renorm(
     ))
 }
 
-fn validate_inertia(inertia: [f64; 3]) -> Result<(), Se3Error> {
-    if inertia.iter().all(|i| i.is_finite() && *i > 0.0) {
+fn validate_inertia(inertia: Vec3) -> Result<(), Se3Error> {
+    if [inertia.x, inertia.y, inertia.z]
+        .iter()
+        .all(|value| value.is_finite() && *value > 0.0)
+    {
         Ok(())
     } else {
-        Err(Se3Error::InvalidParameter)
+        Err(Se3Error::InvalidParameter {
+            context: "rigid-body principal inertia",
+        })
+    }
+}
+
+fn validate_dep_params(params: &DepSolveParams) -> Result<(), Se3Error> {
+    if params.tol.is_finite() && params.tol > 0.0 && params.max_iters > 0 {
+        Ok(())
+    } else {
+        Err(Se3Error::InvalidParameter {
+            context: "variational solve controls",
+        })
+    }
+}
+
+fn validate_angular_step(omega: Vec3, h: f64) -> Result<(), Se3Error> {
+    if [omega.x, omega.y, omega.z]
+        .iter()
+        .all(|value| value.is_finite())
+        && h.is_finite()
+        && h != 0.0
+    {
+        Ok(())
+    } else {
+        Err(Se3Error::InvalidParameter {
+            context: "angular velocity or nonzero step size",
+        })
     }
 }
 
@@ -208,61 +202,63 @@ fn validate_inertia(inertia: [f64; 3]) -> Result<(), Se3Error> {
 /// algebra and one exp-map motor update at the midpoint twist.
 /// Returns the canonical motor and the updated twist.
 pub fn se3_rigid_body_step(
-    m: &Motor,
-    twist: &Twist,
-    inertia: [f64; 3],
+    pose: Se3,
+    twist: Twist,
+    inertia: Vec3,
     h: f64,
-) -> Result<(Motor, Twist), Se3Error> {
+) -> Result<(Se3, Twist), Se3Error> {
     validate_inertia(inertia)?;
-    if !twist.is_finite() || !(h.is_finite() && h != 0.0) {
-        return Err(Se3Error::InvalidParameter);
+    if !(twist.to_array().iter().all(|value| value.is_finite()) && h.is_finite() && h != 0.0) {
+        return Err(Se3Error::InvalidParameter {
+            context: "rigid-body twist or nonzero step size",
+        });
     }
-    let torque_free = |w: [f64; 3]| -> [f64; 3] {
-        let l = [inertia[0] * w[0], inertia[1] * w[1], inertia[2] * w[2]];
-        [
-            l[1].mul_add(w[2], -(l[2] * w[1])) / inertia[0],
-            l[2].mul_add(w[0], -(l[0] * w[2])) / inertia[1],
-            l[0].mul_add(w[1], -(l[1] * w[0])) / inertia[2],
-        ]
+    let torque_free = |omega: Vec3| -> Vec3 {
+        let momentum = Vec3::new(
+            inertia.x * omega.x,
+            inertia.y * omega.y,
+            inertia.z * omega.z,
+        );
+        Vec3::new(
+            momentum.y.mul_add(omega.z, -(momentum.z * omega.y)) / inertia.x,
+            momentum.z.mul_add(omega.x, -(momentum.x * omega.z)) / inertia.y,
+            momentum.x.mul_add(omega.y, -(momentum.y * omega.x)) / inertia.z,
+        )
     };
-    let vel_dot = |v: [f64; 3], w: [f64; 3]| -> [f64; 3] {
+    let velocity_derivative = |linear: Vec3, angular: Vec3| -> Vec3 {
         // v̇_b = v_b × ω  (spatially constant free velocity).
-        [
-            v[1].mul_add(w[2], -(v[2] * w[1])),
-            v[2].mul_add(w[0], -(v[0] * w[2])),
-            v[0].mul_add(w[1], -(v[1] * w[0])),
-        ]
+        linear.cross(angular)
     };
-    let k1w = torque_free(twist.omega);
-    let k1v = vel_dot(twist.vel, twist.omega);
-    let mid = Twist {
-        omega: [
-            (0.5 * h).mul_add(k1w[0], twist.omega[0]),
-            (0.5 * h).mul_add(k1w[1], twist.omega[1]),
-            (0.5 * h).mul_add(k1w[2], twist.omega[2]),
-        ],
-        vel: [
-            (0.5 * h).mul_add(k1v[0], twist.vel[0]),
-            (0.5 * h).mul_add(k1v[1], twist.vel[1]),
-            (0.5 * h).mul_add(k1v[2], twist.vel[2]),
-        ],
-    };
-    let k2w = torque_free(mid.omega);
-    let k2v = vel_dot(mid.vel, mid.omega);
-    let next = Twist {
-        omega: [
-            h.mul_add(k2w[0], twist.omega[0]),
-            h.mul_add(k2w[1], twist.omega[1]),
-            h.mul_add(k2w[2], twist.omega[2]),
-        ],
-        vel: [
-            h.mul_add(k2v[0], twist.vel[0]),
-            h.mul_add(k2v[1], twist.vel[1]),
-            h.mul_add(k2v[2], twist.vel[2]),
-        ],
-    };
-    let motor = se3_exp_step(m, &mid, h)?;
-    Ok((motor, next))
+    let first_angular_slope = torque_free(twist.angular);
+    let first_linear_slope = velocity_derivative(twist.linear, twist.angular);
+    let midpoint = Twist::new(
+        Vec3::new(
+            (0.5 * h).mul_add(first_angular_slope.x, twist.angular.x),
+            (0.5 * h).mul_add(first_angular_slope.y, twist.angular.y),
+            (0.5 * h).mul_add(first_angular_slope.z, twist.angular.z),
+        ),
+        Vec3::new(
+            (0.5 * h).mul_add(first_linear_slope.x, twist.linear.x),
+            (0.5 * h).mul_add(first_linear_slope.y, twist.linear.y),
+            (0.5 * h).mul_add(first_linear_slope.z, twist.linear.z),
+        ),
+    );
+    let second_angular_slope = torque_free(midpoint.angular);
+    let second_linear_slope = velocity_derivative(midpoint.linear, midpoint.angular);
+    let next = Twist::new(
+        Vec3::new(
+            h.mul_add(second_angular_slope.x, twist.angular.x),
+            h.mul_add(second_angular_slope.y, twist.angular.y),
+            h.mul_add(second_angular_slope.z, twist.angular.z),
+        ),
+        Vec3::new(
+            h.mul_add(second_linear_slope.x, twist.linear.x),
+            h.mul_add(second_linear_slope.y, twist.linear.y),
+            h.mul_add(second_linear_slope.z, twist.linear.z),
+        ),
+    );
+    let next_pose = se3_exp_step(pose, midpoint, h)?;
+    Ok((next_pose, next))
 }
 
 /// Solve controls for the variational fixed point.
@@ -295,12 +291,12 @@ pub struct DepStepReceipt {
     pub converged: bool,
 }
 
-fn norm3(v: [f64; 3]) -> f64 {
-    det::sqrt(v[0].mul_add(v[0], v[1].mul_add(v[1], v[2] * v[2])))
-}
-
-fn quat_conj(q: [f64; 4]) -> [f64; 4] {
-    [q[0], -q[1], -q[2], -q[3]]
+fn norm3(value: Vec3) -> f64 {
+    det::sqrt(
+        value
+            .x
+            .mul_add(value.x, value.y.mul_add(value.y, value.z * value.z)),
+    )
 }
 
 /// One discrete Euler–Poincaré step for the FREE rigid body in
@@ -311,44 +307,38 @@ fn quat_conj(q: [f64; 4]) -> [f64; 4] {
 /// EXACTLY by construction — the theorem-class claim for energy is
 /// decided separately by [`claim_for`].
 pub fn dep_free_step(
-    q: [f64; 4],
-    omega: [f64; 3],
-    inertia: [f64; 3],
+    rotation: So3,
+    omega: Vec3,
+    inertia: Vec3,
     h: f64,
     params: &DepSolveParams,
-) -> Result<([f64; 4], [f64; 3], DepStepReceipt), Se3Error> {
+) -> Result<(So3, Vec3, DepStepReceipt), Se3Error> {
     validate_inertia(inertia)?;
-    if !omega.iter().all(|v| v.is_finite()) || !(h.is_finite() && h != 0.0) {
-        return Err(Se3Error::InvalidParameter);
-    }
-    let pi_k = [
-        inertia[0] * omega[0],
-        inertia[1] * omega[1],
-        inertia[2] * omega[2],
-    ];
+    validate_angular_step(omega, h)?;
+    validate_dep_params(params)?;
+    let momentum = Vec3::new(
+        inertia.x * omega.x,
+        inertia.y * omega.y,
+        inertia.z * omega.z,
+    );
     let mut w_mid = omega;
     let mut residual = f64::INFINITY;
     let mut iters = 0u32;
-    let mut w_next = omega;
     while iters < params.max_iters {
         iters += 1;
-        let f = quat_exp([h * w_mid[0], h * w_mid[1], h * w_mid[2]]);
-        let pi_next = quat_rotate(quat_conj(f), pi_k);
-        w_next = [
-            pi_next[0] / inertia[0],
-            pi_next[1] / inertia[1],
-            pi_next[2] / inertia[2],
-        ];
-        let candidate = [
-            0.5 * (omega[0] + w_next[0]),
-            0.5 * (omega[1] + w_next[1]),
-            0.5 * (omega[2] + w_next[2]),
-        ];
-        residual = norm3([
-            candidate[0] - w_mid[0],
-            candidate[1] - w_mid[1],
-            candidate[2] - w_mid[2],
-        ]);
+        let increment = So3::exp(So3Tangent::new(w_mid.scale(h)))?;
+        let next_momentum = increment.inverse().rotate(momentum)?;
+        let next_velocity = Vec3::new(
+            next_momentum.x / inertia.x,
+            next_momentum.y / inertia.y,
+            next_momentum.z / inertia.z,
+        );
+        let candidate = Vec3::new(
+            0.5 * (omega.x + next_velocity.x),
+            0.5 * (omega.y + next_velocity.y),
+            0.5 * (omega.z + next_velocity.z),
+        );
+        residual = norm3(candidate - w_mid);
         w_mid = candidate;
         if residual <= params.tol {
             break;
@@ -362,9 +352,19 @@ pub fn dep_free_step(
     if !receipt.converged {
         return Err(Se3Error::SolverDiverged { iters, residual });
     }
-    let f = quat_exp([h * w_mid[0], h * w_mid[1], h * w_mid[2]]);
-    let q_next = quat_mul(q, f);
-    Ok((q_next, w_next, receipt))
+    // Re-evaluate the momentum transport at the accepted midpoint. Without
+    // this final evaluation, `w_next` belongs to the previous fixed-point
+    // iterate while the attitude uses the accepted one, invalidating the
+    // same-increment momentum-conservation construction by the solve tolerance.
+    let increment = So3::exp(So3Tangent::new(w_mid.scale(h)))?;
+    let next_momentum = increment.inverse().rotate(momentum)?;
+    let w_next = Vec3::new(
+        next_momentum.x / inertia.x,
+        next_momentum.y / inertia.y,
+        next_momentum.z / inertia.z,
+    );
+    let next_rotation = rotation.compose(increment)?;
+    Ok((next_rotation, w_next, receipt))
 }
 
 /// Claim classes for variational runs. Composition never upgrades:
@@ -385,6 +385,7 @@ pub enum Se3ClaimClass {
 /// What the caller declares about the fixture; the integrator cannot
 /// infer smoothness or conservativity, so the declaration is part of
 /// the claim's provenance.
+#[allow(clippy::struct_excessive_bools)] // Four independent theorem hypotheses remain explicit.
 #[derive(Debug, Clone, Copy)]
 pub struct Se3FixtureDeclaration {
     /// No dissipation, no external forcing.
@@ -434,21 +435,18 @@ pub struct BalanceReceipt {
     pub max_solver_iters: u32,
 }
 
-fn rotational_energy(omega: [f64; 3], inertia: [f64; 3]) -> f64 {
-    0.5 * (inertia[0] * omega[0] * omega[0]
-        + inertia[1] * omega[1] * omega[1]
-        + inertia[2] * omega[2] * omega[2])
+fn rotational_energy(omega: Vec3, inertia: Vec3) -> f64 {
+    0.5 * (inertia.x * omega.x * omega.x
+        + inertia.y * omega.y * omega.y
+        + inertia.z * omega.z * omega.z)
 }
 
-fn spatial_momentum(q: [f64; 4], omega: [f64; 3], inertia: [f64; 3]) -> [f64; 3] {
-    quat_rotate(
-        q,
-        [
-            inertia[0] * omega[0],
-            inertia[1] * omega[1],
-            inertia[2] * omega[2],
-        ],
-    )
+fn spatial_momentum(rotation: So3, omega: Vec3, inertia: Vec3) -> Result<Vec3, Se3Error> {
+    Ok(rotation.rotate(Vec3::new(
+        inertia.x * omega.x,
+        inertia.y * omega.y,
+        inertia.z * omega.z,
+    ))?)
 }
 
 /// Per-step multiplicative velocity damping for the honesty fixture:
@@ -456,42 +454,46 @@ fn spatial_momentum(q: [f64; 4], omega: [f64; 3], inertia: [f64; 3]) -> [f64; 3]
 /// the claim to [`Se3ClaimClass::MeasuredOnly`] regardless of how
 /// small the measured drift looks.
 pub fn run_dep_free(
-    q0: [f64; 4],
-    omega0: [f64; 3],
-    inertia: [f64; 3],
+    rotation0: So3,
+    omega0: Vec3,
+    inertia: Vec3,
     h: f64,
     steps: usize,
     damping: f64,
     params: &DepSolveParams,
-) -> Result<([f64; 4], [f64; 3], BalanceReceipt), Se3Error> {
-    if !damping.is_finite() || damping < 0.0 {
-        return Err(Se3Error::InvalidParameter);
+) -> Result<(So3, Vec3, BalanceReceipt), Se3Error> {
+    validate_inertia(inertia)?;
+    validate_angular_step(omega0, h)?;
+    validate_dep_params(params)?;
+    if !damping.is_finite() || !(0.0..=1.0).contains(&damping) {
+        return Err(Se3Error::InvalidParameter {
+            context: "per-step damping fraction",
+        });
     }
-    let mut q = q0;
+    let mut rotation = rotation0;
     let mut w = omega0;
     let e0 = rotational_energy(w, inertia);
-    let l0 = spatial_momentum(q, w, inertia);
+    let l0 = spatial_momentum(rotation, w, inertia)?;
     let mut energy_drift = 0.0f64;
     let mut momentum_drift = 0.0f64;
     let mut max_iters = 0u32;
     let mut all_converged = true;
     for _ in 0..steps {
-        let (q1, w1, receipt) = dep_free_step(q, w, inertia, h, params)?;
-        q = q1;
+        let (next_rotation, w1, receipt) = dep_free_step(rotation, w, inertia, h, params)?;
+        rotation = next_rotation;
         w = w1;
         if damping > 0.0 {
-            for wi in &mut w {
-                *wi *= 1.0 - damping;
-            }
+            w = w.scale(1.0 - damping);
         }
         all_converged &= receipt.converged;
         max_iters = max_iters.max(receipt.iters);
         let e = rotational_energy(w, inertia);
         energy_drift = energy_drift.max((e - e0).abs());
-        let l = spatial_momentum(q, w, inertia);
-        for a in 0..3 {
-            momentum_drift = momentum_drift.max((l[a] - l0[a]).abs());
-        }
+        let momentum_delta = spatial_momentum(rotation, w, inertia)? - l0;
+        momentum_drift = momentum_drift
+            .max(momentum_delta.x.abs())
+            .max(momentum_delta.y.abs())
+            .max(momentum_delta.z.abs());
     }
     let decl = Se3FixtureDeclaration {
         conservative: damping == 0.0,
@@ -509,7 +511,7 @@ pub fn run_dep_free(
         all_solves_converged: all_converged,
         max_solver_iters: max_iters,
     };
-    Ok((q, w, receipt))
+    Ok((rotation, w, receipt))
 }
 
 // ---------------------------------------------------------------------
@@ -519,19 +521,15 @@ pub fn run_dep_free(
 
 /// The converged step's residual, as a function of (ω_mid, ω_k):
 /// `g(ω_m, ω_k) = ω_m − ½·(ω_k + I⁻¹·(exp(h ω̂_m)⁻¹ · I ω_k))`.
-fn dep_residual(w_mid: [f64; 3], w_k: [f64; 3], inertia: [f64; 3], h: f64) -> [f64; 3] {
-    let f = quat_exp([h * w_mid[0], h * w_mid[1], h * w_mid[2]]);
-    let pi_k = [
-        inertia[0] * w_k[0],
-        inertia[1] * w_k[1],
-        inertia[2] * w_k[2],
-    ];
-    let pi_next = quat_rotate(quat_conj(f), pi_k);
-    [
-        w_mid[0] - 0.5 * (w_k[0] + pi_next[0] / inertia[0]),
-        w_mid[1] - 0.5 * (w_k[1] + pi_next[1] / inertia[1]),
-        w_mid[2] - 0.5 * (w_k[2] + pi_next[2] / inertia[2]),
-    ]
+fn dep_residual(w_mid: Vec3, w_k: Vec3, inertia: Vec3, h: f64) -> Result<Vec3, Se3Error> {
+    let increment = So3::exp(So3Tangent::new(w_mid.scale(h)))?;
+    let momentum = Vec3::new(inertia.x * w_k.x, inertia.y * w_k.y, inertia.z * w_k.z);
+    let next_momentum = increment.inverse().rotate(momentum)?;
+    Ok(Vec3::new(
+        w_mid.x - 0.5 * (w_k.x + next_momentum.x / inertia.x),
+        w_mid.y - 0.5 * (w_k.y + next_momentum.y / inertia.y),
+        w_mid.z - 0.5 * (w_k.z + next_momentum.z / inertia.z),
+    ))
 }
 
 /// Central-difference 3×3 Jacobian of the residual in its first or
@@ -539,37 +537,46 @@ fn dep_residual(w_mid: [f64; 3], w_k: [f64; 3], inertia: [f64; 3], h: f64) -> [f
 /// differenced (the bead's requirement); replacing the stencils with
 /// analytic tangents is tracked follow-up work.
 fn residual_jacobian(
-    w_mid: [f64; 3],
-    w_k: [f64; 3],
-    inertia: [f64; 3],
+    w_mid: Vec3,
+    w_k: Vec3,
+    inertia: Vec3,
     h: f64,
     wrt_mid: bool,
-) -> [[f64; 3]; 3] {
-    let mut j = [[0.0f64; 3]; 3];
+) -> Result<[[f64; 3]; 3], Se3Error> {
+    let mut columns = [[0.0f64; 3]; 3];
     let base = if wrt_mid { w_mid } else { w_k };
     let scale = 1.0 + norm3(base);
     let eps = 1e-7 * scale;
-    for col in 0..3 {
-        let mut plus = base;
-        let mut minus = base;
-        plus[col] += eps;
-        minus[col] -= eps;
+    let bases = [
+        Vec3::new(eps, 0.0, 0.0),
+        Vec3::new(0.0, eps, 0.0),
+        Vec3::new(0.0, 0.0, eps),
+    ];
+    for (column, basis) in columns.iter_mut().zip(bases) {
+        let plus = base + basis;
+        let minus = base - basis;
         let (gp, gm) = if wrt_mid {
             (
-                dep_residual(plus, w_k, inertia, h),
-                dep_residual(minus, w_k, inertia, h),
+                dep_residual(plus, w_k, inertia, h)?,
+                dep_residual(minus, w_k, inertia, h)?,
             )
         } else {
             (
-                dep_residual(w_mid, plus, inertia, h),
-                dep_residual(w_mid, minus, inertia, h),
+                dep_residual(w_mid, plus, inertia, h)?,
+                dep_residual(w_mid, minus, inertia, h)?,
             )
         };
+        let gp = [gp.x, gp.y, gp.z];
+        let gm = [gm.x, gm.y, gm.z];
         for row in 0..3 {
-            j[row][col] = (gp[row] - gm[row]) / (2.0 * eps);
+            column[row] = (gp[row] - gm[row]) / (2.0 * eps);
         }
     }
-    j
+    Ok([
+        [columns[0][0], columns[1][0], columns[2][0]],
+        [columns[0][1], columns[1][1], columns[2][1]],
+        [columns[0][2], columns[1][2], columns[2][2]],
+    ])
 }
 
 /// Solve `Aᵀ·x = b` for a 3×3 matrix by Gaussian elimination with
@@ -594,10 +601,11 @@ fn solve3_transpose(a: &[[f64; 3]; 3], b: [f64; 3]) -> Result<[f64; 3], Se3Error
             return Err(Se3Error::SingularJacobian);
         }
         m.swap(col, pivot);
+        let pivot_row = m[col];
         for r in (col + 1)..3 {
             let factor = m[r][col] / m[col][col];
-            for c in col..4 {
-                m[r][c] -= factor * m[col][c];
+            for (entry, pivot_entry) in m[r][col..].iter_mut().zip(&pivot_row[col..]) {
+                *entry -= factor * *pivot_entry;
             }
         }
     }
@@ -629,26 +637,33 @@ fn mat_t_vec(a: &[[f64; 3]; 3], v: [f64; 3]) -> [f64; 3] {
 /// and stored (O(N) memory; revolve checkpointing is the follow-up,
 /// matching the Verlet template).
 pub fn dep_momentum_adjoint(
-    omega0: [f64; 3],
-    inertia: [f64; 3],
+    omega0: Vec3,
+    inertia: Vec3,
     h: f64,
     steps: usize,
     params: &DepSolveParams,
-    bar_omega_n: [f64; 3],
-) -> Result<[f64; 3], Se3Error> {
+    bar_omega_n: Vec3,
+) -> Result<Vec3, Se3Error> {
+    validate_inertia(inertia)?;
+    validate_angular_step(omega0, h)?;
+    validate_dep_params(params)?;
+    if ![bar_omega_n.x, bar_omega_n.y, bar_omega_n.z]
+        .iter()
+        .all(|value| value.is_finite())
+    {
+        return Err(Se3Error::InvalidParameter {
+            context: "terminal angular-velocity cotangent",
+        });
+    }
     // Forward sweep: record (ω_k, ω_mid_k) pairs.
     let mut trajectory = Vec::with_capacity(steps);
-    let mut q = [1.0, 0.0, 0.0, 0.0];
+    let mut rotation = So3::identity();
     let mut w = omega0;
     for _ in 0..steps {
-        let (q1, w1, _) = dep_free_step(q, w, inertia, h, params)?;
-        let w_mid = [
-            0.5 * (w[0] + w1[0]),
-            0.5 * (w[1] + w1[1]),
-            0.5 * (w[2] + w1[2]),
-        ];
+        let (next_rotation, w1, _) = dep_free_step(rotation, w, inertia, h, params)?;
+        let w_mid = Vec3::new(0.5 * (w.x + w1.x), 0.5 * (w.y + w1.y), 0.5 * (w.z + w1.z));
         trajectory.push((w, w_mid));
-        q = q1;
+        rotation = next_rotation;
         w = w1;
     }
     // Reverse sweep. With g(ω_m, ω_k) = 0 defining ω_m(ω_k) and
@@ -656,10 +671,10 @@ pub fn dep_momentum_adjoint(
     //   dω_{k+1}/dω_k = −2·(∂g/∂ω_m)⁻¹·(∂g/∂ω_k) − 1
     // so the transposed pull-back of a cotangent v is
     //   bar_ω_k = −2·(∂g/∂ω_k)ᵀ·(∂g/∂ω_m)⁻ᵀ·v − v.
-    let mut bar = bar_omega_n;
+    let mut bar = [bar_omega_n.x, bar_omega_n.y, bar_omega_n.z];
     for (w_k, w_mid) in trajectory.iter().rev() {
-        let dg_dmid = residual_jacobian(*w_mid, *w_k, inertia, h, true);
-        let dg_dk = residual_jacobian(*w_mid, *w_k, inertia, h, false);
+        let dg_dmid = residual_jacobian(*w_mid, *w_k, inertia, h, true)?;
+        let dg_dk = residual_jacobian(*w_mid, *w_k, inertia, h, false)?;
         let y = solve3_transpose(&dg_dmid, bar)?;
         let z = mat_t_vec(&dg_dk, y);
         bar = [
@@ -668,7 +683,7 @@ pub fn dep_momentum_adjoint(
             (-2.0f64).mul_add(z[2], -bar[2]),
         ];
     }
-    Ok(bar)
+    Ok(Vec3::new(bar[0], bar[1], bar[2]))
 }
 
 /// RATTLE-style constraint projection hook. The constrained
@@ -682,13 +697,13 @@ pub trait RattleProjection {
     /// # Errors
     /// Implementation-defined refusals (irregular constraint,
     /// non-convergent projection).
-    fn project_position(&self, motor: &mut Motor) -> Result<f64, Se3Error>;
+    fn project_position(&self, pose: &mut Se3) -> Result<f64, Se3Error>;
 
     /// Project the twist onto the constraint's tangent space.
     ///
     /// # Errors
     /// Implementation-defined refusals.
-    fn project_velocity(&self, motor: &Motor, twist: &mut Twist) -> Result<f64, Se3Error>;
+    fn project_velocity(&self, pose: &Se3, twist: &mut Twist) -> Result<f64, Se3Error>;
 }
 
 /// The trivial (unconstrained) projection: removes nothing, refuses
@@ -697,11 +712,11 @@ pub trait RattleProjection {
 pub struct Unconstrained;
 
 impl RattleProjection for Unconstrained {
-    fn project_position(&self, _motor: &mut Motor) -> Result<f64, Se3Error> {
+    fn project_position(&self, _pose: &mut Se3) -> Result<f64, Se3Error> {
         Ok(0.0)
     }
 
-    fn project_velocity(&self, _motor: &Motor, _twist: &mut Twist) -> Result<f64, Se3Error> {
+    fn project_velocity(&self, _pose: &Se3, _twist: &mut Twist) -> Result<f64, Se3Error> {
         Ok(0.0)
     }
 }

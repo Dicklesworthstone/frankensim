@@ -22,13 +22,13 @@ contact = []
 fs-blake3 = { path = "../fs-blake3" }
 fs-cutfem = { path = "../fs-cutfem" }
 fs-exec = { path = "../fs-exec" }
+fs-ga = { path = "../fs-ga" }
 fs-la = { path = "../fs-la" }
 fs-modal = { path = "../fs-modal" }
 fs-material = { path = "../fs-material" }
 fs-scenario = { path = "../fs-scenario" }
 fs-solver = { path = "../fs-solver" }
 fs-sparse = { path = "../fs-sparse" }
-fs-time = { path = "../fs-time" }
 
 [dev-dependencies]
 fs-alloc = { path = "../fs-alloc" }
