@@ -222,6 +222,31 @@ fn input_radius(duct: &Duct) -> Result<f64, MmLineError> {
     }
 }
 
+/// Eight-round-trip FFT sizing under the driving_point clamp-first
+/// discipline (u6pph precedent; bead frankensim-mxw6x): the grid
+/// DENSIFIES to fit eight round trips of the bore, and only an authored
+/// hard ceiling refuses — typed and loud. Sizing must never grow first
+/// and clamp after, which silently truncates reflectance memory into
+/// wrap-around aliasing exactly where the longest bores need it most.
+const MM_FFT_CEILING_TAPS: usize = 65_536;
+
+fn mm_fft_taps_for(geo_delay: f64) -> Result<usize, MmLineError> {
+    let want = 8.0 * geo_delay;
+    if !want.is_finite() {
+        return Err(MmLineError::Invalid {
+            what: "eight-round-trip demand is not finite",
+        });
+    }
+    if want > MM_FFT_CEILING_TAPS as f64 {
+        return Err(MmLineError::Invalid {
+            what: "eight round trips exceed the 65536-tap authored ceiling",
+        });
+    }
+    Ok((want.ceil() as usize)
+        .next_power_of_two()
+        .clamp(256, MM_FFT_CEILING_TAPS))
+}
+
 impl MmLineBank {
     /// Realize one exact-FIR plane-mode line per valve combination. All
     /// combos share one FFT size (from the LONGEST bore) so the switch
@@ -268,10 +293,9 @@ impl MmLineBank {
             delays.push(geo_delay);
             // Eight round trips: the horn's low-frequency reflection
             // memory is long (measured: a 4-trip tail left the lowest
-            // peak 92 cents flat from wrap-around aliasing).
-            let want = ((8.0 * geo_delay).ceil() as usize)
-                .next_power_of_two()
-                .clamp(256, 4096);
+            // peak 92 cents flat from wrap-around aliasing). Densify or
+            // refuse loudly — never truncate.
+            let want = mm_fft_taps_for(geo_delay)?;
             n_fft = n_fft.max(want);
         }
         let r_in = input_radius(&ducts[0])?;
@@ -545,9 +569,7 @@ impl MatrixFirLine {
         let dt = 1.0 / f64::from(config.sample_rate_hz);
         let length = duct_axial_length(duct);
         let geo_delay = 2.0 * length / gas.sound_speed / dt;
-        let n_fft = ((8.0 * geo_delay).ceil() as usize)
-            .next_power_of_two()
-            .clamp(256, 4096);
+        let n_fft = mm_fft_taps_for(geo_delay)?;
         let r_in = input_radius(duct)?;
         let fft = Fft::new(n_fft);
         // One spectrum buffer per matrix entry.
@@ -1167,6 +1189,57 @@ mod mm_line_tests {
                 (head / tail.max(1e-300)),
                 r.table_bins,
                 r.fallback_bins
+            ),
+        );
+    }
+
+    /// Regression for bead frankensim-mxw6x: the sizing helper must
+    /// DENSIFY past 4096 taps when eight round trips demand it (the old
+    /// grow-then-clamp silently truncated long bores), and must refuse
+    /// typed-and-loud only past the authored ceiling. Short-bore
+    /// behavior is unchanged (existing ml-* gates still green).
+    #[test]
+    fn ml_007_fft_densifies_or_refuses_never_truncates() {
+        let cfg = config();
+        let gas = air20();
+        let load = MmLoad::Analytic(Termination::FlangedOpen);
+        // Round-trip delay g = 2L/c * fs: choose L so ceil(8g) lands in
+        // (4096, 8192] => realized grid must be 8192, not clamped 4096.
+        let fs = f64::from(cfg.sample_rate_hz);
+        let c = gas.sound_speed;
+        let long_l = 700.0f64 * c / (2.0 * fs);
+        let long = Duct {
+            segments: vec![Segment::Cylinder {
+                radius: 0.02,
+                length: long_l,
+            }],
+        };
+        let bank = MmLineBank::new(std::slice::from_ref(&long), &["open"], &gas, &load, &cfg)
+            .expect("long bore densifies instead of truncating");
+        let dense_ok = bank.receipts()[0].n_fft == 8192;
+        // Ceiling refusal: a bore demanding far beyond 65536 taps is
+        // refused with the authored message rather than truncated.
+        let absurd = Duct {
+            segments: vec![Segment::Cylinder {
+                radius: 0.002,
+                length: 100_000.0,
+            }],
+        };
+        let refused = matches!(
+            MmLineBank::new(std::slice::from_ref(&absurd), &["open"], &gas, &load, &cfg),
+            Err(MmLineError::Invalid { what })
+                if what.contains("65536")
+        );
+        // Single-duct matrix path shares the identical discipline.
+        let matrix_long = MatrixFirLine::new(&long, &gas, &load, &cfg).is_ok();
+        let pass = dense_ok && refused && matrix_long;
+        verdict(
+            "ml-007-fft-densify-or-refuse",
+            pass,
+            &format!(
+                "dense n_fft={} (want 8192); ceiling refusal={refused}; \
+                 matrix path ok={matrix_long}",
+                bank.receipts()[0].n_fft
             ),
         );
     }
