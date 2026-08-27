@@ -1,10 +1,11 @@
 # CONTRACT: fs-dfo
 
-> Status: PARTIAL — CMA-ES (IGO form), BIPOP restarts, Nelder–Mead,
+> Status: PARTIAL — full/active, separable, LM-CMA, and LM-MA CMA families,
+> BIPOP restarts, Nelder–Mead,
 > balanced entropic OT, NSGA-II/III, MOEA/D, hypervolume helpers and
 > archives, canonical sample-CVaR delegated to `fs-robust`, and
-> discrete-support Wasserstein-DRO inner sup are in force; sep/low-rank CMA, NES
-> parameterizations, DE, DIRECT, TR-DFO, and fs-exec population waves
+> discrete-support Wasserstein-DRO inner sup are in force; NES parameterizations,
+> DE, DIRECT, TR-DFO, and fs-exec population waves
 > are recorded follow-up scope.
 
 ## Purpose and layer
@@ -51,6 +52,61 @@ the fs-opt problem IR is a wiring bead once that crate stabilizes
   maintenance). Stagnation stops: TolX (σ·√λmax < 1e-12·σ₀) OR TolFun
   (no f_best improvement > 1e-12 relative for 120 generations) — the
   TolFun rule is what frees budget for restart ladders (measured).
+- `CmaOptimizer::new(CmaConfig)`, `ask()`, and `tell(...)` are the unified,
+  generation-oriented surface for `CmaFamily::{Full, Separable, LmCma,
+  LmMa}`. `ask` returns one immutable, complete population carrying private
+  isotropic/distribution steps and a batch signature; only that outstanding
+  batch may be told. A malformed tell does not consume the batch or budget.
+  Objective values, initial means, sigma, and generated coordinates must be
+  finite; all refusals are typed `CmaFamilyError` values. The hard budget admits
+  and spends only complete populations, so `CmaAdmission::admitted_evaluations`
+  is exactly `floor(max_evaluations / lambda) * lambda`. Fitness ordering is
+  `f64::total_cmp` followed by the original candidate index.
+- `CmaFamily::Full` implements the current Hansen active-CMA equations: all
+  lambda log-rank weights are retained, negative weights use the standard three-
+  bound scale, and each negative rank-mu direction is normalized to squared
+  Mahalanobis length `n` before covariance subtraction. The rank-one rate also
+  retains pycma's `min(1, lambda/6)` small-population factor. Every generation
+  symmetrizes/eigendecomposes and reconstructs covariance after a relative
+  `1e-14` eigenvalue floor. This is O(lambda n² + n³) time and retains two
+  dense n-by-n matrices.
+- `CmaFamily::Separable` follows current pycma's active diagonal mode: the
+  Ros--Hansen sep-CMA learning rates finalize all lambda weights, and negative
+  directions receive the same squared-Mahalanobis-length-`n` normalization and
+  active old-covariance factor as full CMA. Sampling, paths, and diagonal
+  updates remain O(lambda n) per generation and no dense square matrix is
+  allocated. A relative `1e-14` floor preserves strictly positive variances;
+  snapshots expose the negative-weight count as well as exact variances.
+- `CmaFamily::LmCma` implements Loshchilov's Algorithm 6 Cholesky-factor and
+  inverse-factor recurrences, reference `c_c=1/m`,
+  `c_1=1/(10 ln(n+1))`, log weights `ln(mu+1)-ln(i)`, and population success
+  rule (`c_sigma=0.3`, target `0.25`). The bounded chronological record set uses
+  the paper's spacing rule in prose form: once full, merge the newer member of
+  the closest pair when their gap is below `N_steps=m`, otherwise retire the
+  oldest record. Reference-default `m=4+floor(3 ln(n))` equals the default
+  population size but remains dimension-based if the population is overridden;
+  configurable `m` is always explicit in complexity/snapshot metadata. Sampling
+  and update are O(lambda m n), storage O(mn), with no dense covariance.
+- `CmaFamily::LmMa` implements Algorithm 1's vector-path transforms,
+  `c_d,i=1/(1.5^(i-1)n)`, `c_c,i=lambda/(4^(i-1)n)`, and
+  `c_sigma=2lambda/n`; reference-default `m=4+floor(3 ln(n))` equals `lambda`
+  only when the population also uses its default. The publication is
+  explicit that each path projection uses the progressively transformed `d`
+  from the previous path, and only `min(t,m)` paths are active at generation
+  `t`; the implementation preserves both details. The publication is
+  aimed at large n, where all rates are at most one. FrankenSim clamps a rate to
+  one only when a caller deliberately uses the method below that regime, so
+  every square-root/path interpolation remains real and finite. Sampling and
+  update are O(lambda m n), storage O(mn), with no dense covariance.
+- `CmaComplexity` and `CmaShapeSnapshot` report representation truth rather
+  than a synthetic common covariance: exact maximum persistent/pending scalar
+  counts, a conservative transactional-update workspace envelope, dense
+  entries, memory capacity, asymptotic transform/update orders, full covariance
+  diagonal/eigenvalue range, exact separable variances, or limited-memory
+  direction counts/norms. The workspace envelope includes the rollback-safe
+  strategy clone and, for full CMA, its old-covariance copy plus fs-la's admitted
+  Jacobi aggregate. Limited-memory snapshots never materialize an n-by-n
+  diagnostic matrix.
 - `admit_bipop(...) -> Result<BipopAdmission, BipopError>` — callback-free
   schema-v3 authority over one proposed BIPOP run. It checks the finite,
   nonempty root point,
@@ -730,6 +786,15 @@ remain assertion-only and silent.
   the crate root. Gradient-based Pareto tracing (fs-ascent
   continuation), ledger world-forking steering, and chance constraints
   are still split lanes.
-- Sep-CMA/low-rank (dim > ~200), NES, DE, DIRECT, TR-DFO: not built.
+- The generation-oriented CMA families currently provide deterministic
+  ask/tell state and diagnostics, not BIPOP restart scheduling, retained
+  cryptographic study identities, cancellation/checkpoint/resume, constraints,
+  mirrored/boundary sampling, or parallel evaluation waves. Full CMA's cubic
+  Jacobi refresh is intentionally a small/medium-dimensional method; LM-CMA and
+  LM-MA expose an implicit search transform rather than a materialized
+  covariance. The low-dimensional LM-MA rate clamp is a documented FrankenSim
+  safety extension, not a claim of bit parity with unclamped reference code in
+  that non-target regime.
+- NES, DE, DIRECT, and TR-DFO: not built.
 - No constraint handling (fs-constraint owns kinds; integration later).
 - No parallel evaluation waves yet (fs-exec bead).

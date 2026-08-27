@@ -17,6 +17,7 @@
 //! rerun-tested and golden-hashed).
 
 pub mod cma;
+pub mod cma_family;
 pub mod dro;
 pub mod moo;
 pub mod neldermead;
@@ -36,6 +37,10 @@ pub use cma::{
     BipopLane, BipopLedgerError, BipopReplayAdmissionError, BipopReport, BipopRestartRecord,
     BipopRootInputs, BipopStudyAdmissionError, BipopStudyIdentity, BipopTraceIdentity, CmaParams,
     CmaReport, CmaStopReason, admit_bipop, bipop_cmaes, cmaes, try_bipop_cmaes,
+};
+pub use cma_family::{
+    CMA_FAMILY_STREAM_KERNEL, CmaAdmission, CmaAsk, CmaBest, CmaComplexity, CmaComplexityOrder,
+    CmaConfig, CmaFamily, CmaFamilyError, CmaOptimizer, CmaShapeSnapshot, CmaSnapshot, admit_cma,
 };
 pub use dro::{DroReport, wasserstein_worst_case};
 pub use moo::{
