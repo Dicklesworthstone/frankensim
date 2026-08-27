@@ -1511,6 +1511,40 @@ fn added_mass_fixture_is_a_bitwise_v2_schema_migration_golden() {
 }
 
 #[test]
+fn g0_fixed_relaxation_residual_belongs_to_the_reported_solution() {
+    let junction = ConservativeJunction::new(
+        stable("junction/added-mass-fixed-residual"),
+        scalar_schema(
+            PortKind::MechanicalForceVelocity,
+            "port/structure-fixed-residual",
+            "frame/fsi-interface",
+            PortOrientation::OutwardFromOwner,
+            32,
+        ),
+        scalar_schema(
+            PortKind::MechanicalForceVelocity,
+            "port/fluid-fixed-residual",
+            "frame/fsi-interface",
+            PortOrientation::OutwardFromOwner,
+            32,
+        ),
+    )
+    .unwrap();
+
+    let legacy = iterate_fixed_relaxation(0.5, 3.0, 0.0, 1.0, 100, 1.0);
+    let schema_bound = junction
+        .iterate_added_mass_fixed(0.5, 3.0, 0.0, 1.0, 100, 1.0)
+        .unwrap();
+
+    assert_fsi_result_bits_eq(schema_bound, legacy);
+    assert!(legacy.converged);
+    assert_eq!(legacy.steps, 3);
+    assert_f64_bits_eq(legacy.solution, 1.5);
+    let residual_at_solution = (-0.5 * legacy.solution + 3.0 - legacy.solution).abs();
+    assert_f64_bits_eq(legacy.final_residual, residual_at_solution);
+}
+
+#[test]
 fn g0_stable_id_clone_preserves_canonical_value_semantics() {
     let id = stable("surface/profile:lower-fillet-v1");
     let cloned = id.clone();

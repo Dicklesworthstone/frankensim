@@ -2223,6 +2223,14 @@ impl ConservativeJunction {
             // discretization.
             let exchange = self.interconnect_scalar(1.0, raw_residual)?;
             let residual = exchange.port_a.flow();
+            if residual.abs() < tol {
+                return Ok(FsiResult {
+                    converged: true,
+                    steps: step,
+                    solution: x,
+                    final_residual: residual.abs(),
+                });
+            }
             x += omega * residual;
             if !x.is_finite() || x.abs() > BLOWUP {
                 return Ok(FsiResult {
@@ -2230,14 +2238,6 @@ impl ConservativeJunction {
                     steps: step,
                     solution: x,
                     final_residual: f64::INFINITY,
-                });
-            }
-            if residual.abs() < tol {
-                return Ok(FsiResult {
-                    converged: true,
-                    steps: step,
-                    solution: x,
-                    final_residual: residual.abs(),
                 });
             }
         }
@@ -5870,9 +5870,10 @@ pub struct FsiResult {
     pub converged: bool,
     /// Iterations taken (or `max_steps` if it did not converge).
     pub steps: usize,
-    /// The final interface value.
+    /// The final interface value. On ordinary completion, `final_residual` is
+    /// evaluated at this value.
     pub solution: f64,
-    /// The final residual magnitude.
+    /// The residual magnitude at `solution`, or infinity after blow-up.
     pub final_residual: f64,
 }
 
@@ -5901,6 +5902,14 @@ pub fn iterate_fixed_relaxation(
     let mut x = x0;
     for step in 1..=max_steps {
         let r = interface_map(mu, c, x) - x;
+        if r.abs() < tol {
+            return FsiResult {
+                converged: true,
+                steps: step,
+                solution: x,
+                final_residual: r.abs(),
+            };
+        }
         x += omega * r;
         if !x.is_finite() || x.abs() > BLOWUP {
             return FsiResult {
@@ -5908,14 +5917,6 @@ pub fn iterate_fixed_relaxation(
                 steps: step,
                 solution: x,
                 final_residual: f64::INFINITY,
-            };
-        }
-        if r.abs() < tol {
-            return FsiResult {
-                converged: true,
-                steps: step,
-                solution: x,
-                final_residual: r.abs(),
             };
         }
     }

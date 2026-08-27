@@ -495,6 +495,42 @@ fn mid_run_deadline_expiry_stops_with_the_crossing_observation() {
     });
 }
 
+#[test]
+fn diagnosis_refusal_retains_completed_primary_starts() {
+    // Two constant-positive hinges make the host infeasible while every
+    // finite-difference gradient is exactly zero. Each primary start therefore
+    // completes after one bounded probe step, giving the clock a deterministic
+    // window to cancel during the later support/filter work.
+    let (problem, nodes) = host_with(&[(0.0, 0, -1.0), (0.0, 0, -1.0)], 1);
+    let specs = [hard("constant-a", nodes[0]), hard("constant-b", nodes[1])];
+    let domain = DomainBox {
+        ranges: vec![(0.0, 1.0)],
+    };
+    let budget = Budget {
+        deadline: Some(Time::from_nanos(1 << 40)),
+        ..infinite_budget()
+    };
+    let gate = Arc::new(CancelGate::new());
+    let clock = CancelAfterObservations {
+        gate: Arc::clone(&gate),
+        observations: AtomicU32::new(0),
+        after: 80,
+    };
+
+    with_cx_raw(&gate, budget, Some(&clock), |cx| {
+        let outcome = diagnose_infeasibility(&problem, &specs, &domain, cx)
+            .expect_err("cancellation during post-base diagnosis work must refuse");
+        let RestorationError::Refused { refusal, receipt } = outcome else {
+            panic!("expected a typed budget stop, got {outcome:?}");
+        };
+        assert!(matches!(refusal, fs_exec::BudgetRefusal::Cancelled { .. }));
+        assert!(
+            receipt.starts_completed > 0,
+            "the refusal must retain primary starts completed before cancellation"
+        );
+    });
+}
+
 // ------------------------------------------------- G3 / G5 / boundaries
 
 #[test]

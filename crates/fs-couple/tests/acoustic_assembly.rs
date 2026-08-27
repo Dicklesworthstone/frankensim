@@ -1562,18 +1562,15 @@ fn reed_ode_refuses_nonfinite_attack_and_stiffness_up_front() {
         realize_assembly(&base()).is_ok(),
         "physical quasistatic reed carrier must realize"
     );
-    for (what, fix) in [
-        ("stiffness", 1usize),
-        ("attack", 2usize),
-    ] {
+    for (what, fix) in [("stiffness", 1usize), ("attack", 2usize)] {
         let mut bad = base();
         let r = bad.reed.as_mut().expect("carrier present");
         match fix {
             1 => r.stiffness_n_m = f64::NAN,
             _ => r.attack_s = f64::NAN,
         }
-        let err = realize_assembly(&bad)
-            .expect_err("non-finite reed field must refuse at admission");
+        let err =
+            realize_assembly(&bad).expect_err("non-finite reed field must refuse at admission");
         assert!(
             matches!(err, AcousticRealizeError::InvalidDescription { .. }),
             "{what}: expected the typed admission refusal, got {err:?}"

@@ -976,9 +976,11 @@ pub fn diagnose_infeasibility(
             });
         }
     };
-    let stopped = |budget: &AdmittedBudget<'_>, refusal: BudgetRefusal| RestorationError::Refused {
-        refusal,
-        receipt: receipt(&plan, budget, memory, 0),
+    let stopped = |budget: &AdmittedBudget<'_>, refusal: BudgetRefusal, starts_completed: u32| {
+        RestorationError::Refused {
+            refusal,
+            receipt: receipt(&plan, budget, memory, starts_completed),
+        }
     };
 
     let mut tally = RunTally::default();
@@ -994,7 +996,9 @@ pub fn diagnose_infeasibility(
     ) {
         Ok(solution) => solution,
         Err(Stop::Fault(error)) => return Err(invalid(error)),
-        Err(Stop::Refused(refusal)) => return Err(stopped(&budget, refusal)),
+        Err(Stop::Refused(refusal)) => {
+            return Err(stopped(&budget, refusal, tally.starts_completed));
+        }
     };
     if base.total_violation <= FEAS_TOL {
         let work = receipt(&plan, &budget, memory, tally.starts_completed);
@@ -1048,7 +1052,9 @@ pub fn diagnose_infeasibility(
     let support = match verify_subset(&core, &mut budget) {
         Ok(solution) => solution,
         Err(Stop::Fault(error)) => return Err(invalid(error)),
-        Err(Stop::Refused(refusal)) => return Err(stopped(&budget, refusal)),
+        Err(Stop::Refused(refusal)) => {
+            return Err(stopped(&budget, refusal, tally.starts_completed));
+        }
     };
     if support.total_violation <= FEAS_TOL {
         core = (0..specs.len()).collect();
@@ -1060,7 +1066,7 @@ pub fn diagnose_infeasibility(
     let mut k = 0;
     while k < core.len() {
         cp(&mut budget, cx, PHASE_FILTER_SOLVE).map_err(|stop| match stop {
-            Stop::Refused(refusal) => stopped(&budget, refusal),
+            Stop::Refused(refusal) => stopped(&budget, refusal, tally.starts_completed),
             Stop::Fault(error) => invalid(error),
         })?;
         let mut without_members = core.clone();
@@ -1068,7 +1074,9 @@ pub fn diagnose_infeasibility(
         let without = match verify_subset(&without_members, &mut budget) {
             Ok(solution) => solution,
             Err(Stop::Fault(error)) => return Err(invalid(error)),
-            Err(Stop::Refused(refusal)) => return Err(stopped(&budget, refusal)),
+            Err(Stop::Refused(refusal)) => {
+                return Err(stopped(&budget, refusal, tally.starts_completed));
+            }
         };
         if without.total_violation <= FEAS_TOL {
             k += 1; // necessary: dropping it restores feasibility
@@ -1079,7 +1087,9 @@ pub fn diagnose_infeasibility(
     let verified_core = match verify_subset(&core, &mut budget) {
         Ok(solution) => solution,
         Err(Stop::Fault(error)) => return Err(invalid(error)),
-        Err(Stop::Refused(refusal)) => return Err(stopped(&budget, refusal)),
+        Err(Stop::Refused(refusal)) => {
+            return Err(stopped(&budget, refusal, tally.starts_completed));
+        }
     };
     assert!(
         verified_core.total_violation > FEAS_TOL,
@@ -1091,7 +1101,7 @@ pub fn diagnose_infeasibility(
     let mut repairs = Vec::new();
     for &i in &core {
         cp(&mut budget, cx, PHASE_REPAIR_CANDIDATE).map_err(|stop| match stop {
-            Stop::Refused(refusal) => stopped(&budget, refusal),
+            Stop::Refused(refusal) => stopped(&budget, refusal, tally.starts_completed),
             Stop::Fault(error) => invalid(error),
         })?;
         let scale = base.violations[i].max(FEAS_TOL);
@@ -1115,7 +1125,9 @@ pub fn diagnose_infeasibility(
             ) {
                 Ok(est) => est,
                 Err(Stop::Fault(error)) => return Err(invalid(error)),
-                Err(Stop::Refused(refusal)) => return Err(stopped(&budget, refusal)),
+                Err(Stop::Refused(refusal)) => {
+                    return Err(stopped(&budget, refusal, tally.starts_completed));
+                }
             };
             repairs.push(RepairAction {
                 description: format!("relax `{}` by {slack:.3} (g <= {slack:.3})", specs[i].name),
@@ -1136,7 +1148,9 @@ pub fn diagnose_infeasibility(
             ) {
                 Ok(est) => est,
                 Err(Stop::Fault(error)) => return Err(invalid(error)),
-                Err(Stop::Refused(refusal)) => return Err(stopped(&budget, refusal)),
+                Err(Stop::Refused(refusal)) => {
+                    return Err(stopped(&budget, refusal, tally.starts_completed));
+                }
             };
             repairs.push(RepairAction {
                 description: format!("drop soft constraint `{}`", specs[i].name),

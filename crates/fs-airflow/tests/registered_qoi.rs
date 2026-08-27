@@ -13,7 +13,7 @@
 
 use fs_airflow::qoi::{
     FanPowerSpec, JunctionRegion, SafetyFactorAuthority, SurfaceRegion, ThermalQoiDeclarations,
-    ThermalRequirement,
+    ThermalQoiKind, ThermalRequirement,
 };
 use fs_airflow::registered_qoi::{
     OutputKind, OutputQuery, QoiExecutionLimits, QoiSemanticId, RegisteredQoiError,
@@ -202,6 +202,40 @@ fn rq_001_extracts_all_canonical_qoi_families() {
         assert_eq!(receipt.requested_query_count, 7);
         assert_eq!(receipt.emitted_qoi_count, 7);
         assert_eq!(receipt.rows.len(), 7);
+
+        let expected_kinds = [
+            (
+                QoiSemanticId::JunctionMaximum,
+                ThermalQoiKind::AbsoluteTemperature,
+            ),
+            (
+                QoiSemanticId::SurfaceMeanTemperature,
+                ThermalQoiKind::AbsoluteTemperature,
+            ),
+            (
+                QoiSemanticId::SurfaceTemperatureSpread,
+                ThermalQoiKind::TemperatureDifference,
+            ),
+            (
+                QoiSemanticId::SurfaceTemperatureStdDev,
+                ThermalQoiKind::TemperatureDifference,
+            ),
+            (QoiSemanticId::PressureDrop, ThermalQoiKind::Pressure),
+            (QoiSemanticId::FanPower, ThermalQoiKind::Power),
+            (
+                QoiSemanticId::ThermalMargin,
+                ThermalQoiKind::TemperatureDifference,
+            ),
+        ];
+        for (semantic_id, expected_kind) in expected_kinds {
+            let row = receipt
+                .rows
+                .iter()
+                .find(|row| row.semantic_id == semantic_id)
+                .expect("requested semantic row");
+            assert_eq!(row.kind, expected_kind);
+            assert_eq!(semantic_id.qoi_kind(), expected_kind);
+        }
 
         // Verify values
         let jm = receipt
@@ -485,4 +519,83 @@ fn rq_007_deterministic_replay_produces_identical_hashes() {
         assert_eq!(r1.value.to_bits(), r2.value.to_bits());
         assert_eq!(r1.semantic_id, r2.semantic_id);
     }
+}
+
+#[test]
+fn rq_008_region_constraints_bind_the_exact_qoi_scope() {
+    with_cx(|cx| {
+        let (mesh, solution) = sample_mesh_and_solution();
+        let op = operating_point();
+
+        let junction = JunctionRegion::try_new("package", vec![0, 1]).unwrap();
+        let surface = SurfaceRegion::try_new("case", vec![0, 1]).unwrap();
+        let fan = FanPowerSpec::try_new(0.5, 0.05, source("fan-efficiency")).unwrap();
+        let req = sample_requirement(400.0, 1.1);
+        let decls = sample_declarations(&junction, &surface, &fan, &req);
+
+        for query in [
+            OutputQuery::scalar_with_region("thermal.junction_maximum", "package"),
+            OutputQuery::scalar_with_region("thermal.surface_mean", "case"),
+        ] {
+            extract_registered_qois(
+                &[query],
+                &mesh,
+                &solution,
+                &op,
+                &decls,
+                QoiExecutionLimits::default(),
+                cx,
+            )
+            .expect("matching region scope");
+        }
+
+        for (query, expected_region) in [
+            (
+                OutputQuery::scalar_with_region("thermal.junction_maximum", "case"),
+                "package",
+            ),
+            (
+                OutputQuery::scalar_with_region("thermal.surface_mean", "package"),
+                "case",
+            ),
+        ] {
+            let error = extract_registered_qois(
+                &[query],
+                &mesh,
+                &solution,
+                &op,
+                &decls,
+                QoiExecutionLimits::default(),
+                cx,
+            )
+            .expect_err("foreign region must fail closed");
+            assert!(matches!(
+                error,
+                RegisteredQoiError::RegionNotFound { available, .. }
+                    if available.len() == 1 && available[0] == expected_region
+            ));
+        }
+
+        for semantic_id in [
+            "airflow.pressure_drop",
+            "airflow.fan_power",
+            "thermal.thermal_margin",
+        ] {
+            let error = extract_registered_qois(
+                &[OutputQuery::scalar_with_region(semantic_id, "package")],
+                &mesh,
+                &solution,
+                &op,
+                &decls,
+                QoiExecutionLimits::default(),
+                cx,
+            )
+            .expect_err("global QoI must reject a region constraint");
+            assert!(matches!(
+                error,
+                RegisteredQoiError::RegionNotApplicable { requested, .. }
+                    if requested == "package"
+            ));
+        }
+    });
 }

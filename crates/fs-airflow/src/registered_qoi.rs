@@ -92,9 +92,9 @@ impl QoiSemanticId {
             }
             Self::SurfaceTemperatureSpread
             | Self::SurfaceTemperatureStdDev
-            | Self::ThermalMargin
-            | Self::PressureDrop
-            | Self::FanPower => ThermalQoiKind::TemperatureDifference,
+            | Self::ThermalMargin => ThermalQoiKind::TemperatureDifference,
+            Self::PressureDrop => ThermalQoiKind::Pressure,
+            Self::FanPower => ThermalQoiKind::Power,
         }
     }
 
@@ -303,6 +303,13 @@ pub enum RegisteredQoiError {
         /// Available region names.
         available: Vec<String>,
     },
+    /// A region was supplied for a QoI that has no regional scope.
+    RegionNotApplicable {
+        /// Canonical QoI semantic identifier.
+        semantic_id: QoiSemanticId,
+        /// Requested region name.
+        requested: String,
+    },
     /// Input work exceeds execution limits.
     WorkLimitExceeded {
         /// Quantity name.
@@ -368,6 +375,15 @@ impl fmt::Display for RegisteredQoiError {
                     f,
                     "requested region `{requested}` not found; available: {}",
                     available.join(", ")
+                )
+            }
+            Self::RegionNotApplicable {
+                semantic_id,
+                requested,
+            } => {
+                write!(
+                    f,
+                    "QoI `{semantic_id}` has no regional scope; region `{requested}` is not applicable"
                 )
             }
             Self::WorkLimitExceeded {
@@ -517,19 +533,34 @@ pub fn extract_registered_qois(
             }
         })?;
 
-        // If region constraint is specified, check against declared regions
+        // A region constraint is an exact scope requirement, not merely a
+        // request that the name appear somewhere in the declarations.
         if let Some(region_name) = &query.region {
-            let available = vec![
-                declarations.junction_region.name().to_string(),
-                declarations.surface_region.name().to_string(),
-            ];
-            let matched = declarations.junction_region.name() == region_name
-                || declarations.surface_region.name() == region_name;
-            if !matched {
-                return Err(RegisteredQoiError::RegionNotFound {
-                    requested: region_name.clone(),
-                    available,
-                });
+            let expected_region = match semantic_id {
+                QoiSemanticId::JunctionMaximum => Some(declarations.junction_region.name()),
+                QoiSemanticId::SurfaceMeanTemperature
+                | QoiSemanticId::SurfaceTemperatureSpread
+                | QoiSemanticId::SurfaceTemperatureStdDev => {
+                    Some(declarations.surface_region.name())
+                }
+                QoiSemanticId::PressureDrop
+                | QoiSemanticId::FanPower
+                | QoiSemanticId::ThermalMargin => None,
+            };
+            match expected_region {
+                Some(expected) if expected == region_name => {}
+                Some(expected) => {
+                    return Err(RegisteredQoiError::RegionNotFound {
+                        requested: region_name.clone(),
+                        available: vec![expected.to_string()],
+                    });
+                }
+                None => {
+                    return Err(RegisteredQoiError::RegionNotApplicable {
+                        semantic_id,
+                        requested: region_name.clone(),
+                    });
+                }
             }
         }
 
