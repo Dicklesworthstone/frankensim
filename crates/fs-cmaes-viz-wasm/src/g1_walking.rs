@@ -17,6 +17,7 @@ use fs_contact::normal_patch::{
 use fs_ga::{Se3, Twist, Vec3, Wrench};
 use fs_mbd::articulated::{
     BaseState, FreeFloatingBaseState, forward_kinematics, free_floating_forward_dynamics,
+    inverse_dynamics,
 };
 use fs_mbd::robot_models::{
     CatalogRobotModel, G1_POLICY_ACTUATORS, G1_POLICY_DIMENSION, G1PolicyObservation,
@@ -37,10 +38,16 @@ pub const G1_LINK_POSE_WORDS: usize = 7;
 
 const LEFT_FOOT_LINK: usize = 6;
 const RIGHT_FOOT_LINK: usize = 12;
-const FOOT_POINT_BODY_M: Vec3 = Vec3::new(0.035, 0.0, -0.032);
-const GRAVITY_WORLD_M_PER_S2: Vec3 = Vec3::new(0.0, 0.0, -9.806_65);
-const UP_WORLD: Vec3 = Vec3::new(0.0, 0.0, 1.0);
-const ZERO_VEC3: Vec3 = Vec3::new(0.0, 0.0, 0.0);
+const FOOT_POINT_BODY_M: Vec3 = Vec3 {
+    x: 0.035,
+    y: 0.0,
+    z: -0.032,
+};
+const GRAVITY_WORLD_M_PER_S2: Vec3 = Vec3 {
+    x: 0.0,
+    y: 0.0,
+    z: -9.806_65,
+};
 const TWO_PI: f64 = 2.0 * core::f64::consts::PI;
 const MAX_CONTACT_INDENTATION_M: f64 = 0.035;
 
@@ -114,15 +121,23 @@ pub struct G1WalkingReceipt {
 /// Typed refusal surface for the composed experiment.
 #[derive(Debug)]
 pub enum G1WalkingError {
+    /// A fixed experiment control is non-finite or outside its admitted range.
     InvalidConfig { field: &'static str },
+    /// The multibody owner refused a malformed or numerically invalid state.
     Robot(fs_mbd::articulated::ArticulatedError),
+    /// The `fs-mbd` policy owner refused the parameter vector or observation.
     Policy(fs_mbd::robot_models::G1PolicyError),
+    /// The normal-contact owner refused an inapplicable contact state.
     Contact(fs_contact::normal_patch::NormalPatchError),
+    /// The friction owner refused an invalid interface or slip state.
     Friction(fs_tribo::TriboError),
+    /// The time-integration owner refused an invalid group step.
     Time(fs_time::Se3Error),
+    /// The Lie-group owner refused invalid geometry.
     Geometry(fs_ga::GaError),
-    ContactPenetration { foot: usize, indentation_m: f64 },
-    JointLimit { actuator: usize, position_rad: f64 },
+    /// The configured sphere/plane request unexpectedly returned a line receipt.
+    UnexpectedContactReceipt,
+    /// A completed rollout produced a non-finite score.
     NonFiniteObjective,
 }
 
@@ -136,20 +151,9 @@ impl fmt::Display for G1WalkingError {
             Self::Friction(error) => write!(formatter, "G1 friction owner refused: {error}"),
             Self::Time(error) => write!(formatter, "G1 time owner refused: {error}"),
             Self::Geometry(error) => write!(formatter, "G1 Lie owner refused: {error}"),
-            Self::ContactPenetration {
-                foot,
-                indentation_m,
-            } => write!(
-                formatter,
-                "G1 foot {foot} penetration {indentation_m} m exceeds the contact model"
-            ),
-            Self::JointLimit {
-                actuator,
-                position_rad,
-            } => write!(
-                formatter,
-                "G1 actuator {actuator} crossed a source hard limit at {position_rad} rad"
-            ),
+            Self::UnexpectedContactReceipt => {
+                formatter.write_str("G1 sphere/plane contact returned a non-point receipt")
+            }
             Self::NonFiniteObjective => formatter.write_str("G1 rollout produced a non-finite objective"),
         }
     }
@@ -292,8 +296,9 @@ impl G1WalkingEvaluator {
         let mut impact_integral = 0.0;
         let mut completed_steps = 0;
         let mut fell = false;
+        let mut terminal_guard_penalty = 0.0;
 
-        for step in 0..self.step_count {
+        'rollout: for step in 0..self.step_count {
             let time_s = step as f64 * self.config.step_s;
             let kinematics = forward_kinematics(
                 model,
@@ -319,17 +324,12 @@ impl G1WalkingEvaluator {
                 phase_rad: TWO_PI * self.config.gait_frequency_hz * time_s,
             };
             let residual = evaluate_g1_residual_policy(parameters, &observation)?;
-            let generalized_force = controller_force(
-                &self.catalog,
-                &self.reference_position,
-                &position,
-                &velocity,
-                &residual,
-            );
-
             let mut external = vec![Wrench::default(); G1_LINK_COUNT];
             let mut next_contact = [false; 2];
-            for (foot, link) in [LEFT_FOOT_LINK, RIGHT_FOOT_LINK].into_iter().enumerate() {
+            for (foot, link) in [LEFT_FOOT_LINK, RIGHT_FOOT_LINK]
+                .into_iter()
+                .enumerate()
+            {
                 let pose = kinematics.world_from_link[link];
                 let point_world = pose.transform_point(FOOT_POINT_BODY_M)?;
                 let point_velocity_body = kinematics.body_twist[link].linear
@@ -342,17 +342,24 @@ impl G1WalkingEvaluator {
                     continue;
                 }
                 if indentation_m > MAX_CONTACT_INDENTATION_M {
-                    return Err(G1WalkingError::ContactPenetration {
-                        foot,
-                        indentation_m,
-                    });
+                    fell = true;
+                    terminal_guard_penalty +=
+                        220.0 + 120.0 * indentation_m / MAX_CONTACT_INDENTATION_M;
+                    break 'rollout;
+                }
+                if point_velocity_world.z.abs() > 8.0 {
+                    fell = true;
+                    terminal_guard_penalty += 260.0 + 10.0 * point_velocity_world.z.abs();
+                    break 'rollout;
                 }
                 next_contact[foot] = true;
                 normal_request.indentation_m = indentation_m;
                 normal_request.indentation_rate_m_per_s = -point_velocity_world.z;
                 let normal_force_n = match normal_request.evaluate()? {
                     NormalPatchReceipt::Point(receipt) => receipt.normal_force_n,
-                    NormalPatchReceipt::Line(_) => unreachable!("sphere/plane request is point contact"),
+                    NormalPatchReceipt::Line(_) => {
+                        return Err(G1WalkingError::UnexpectedContactReceipt);
+                    }
                 };
                 let slip = TangentialSlip::new(
                     &self.contact_frame,
@@ -369,6 +376,25 @@ impl G1WalkingEvaluator {
                 impact_integral += (normal_force_n / 1_000.0).powi(2) * self.config.step_s;
             }
             contact = next_contact;
+
+            let gravity_compensation = inverse_dynamics(
+                model,
+                BaseState::prescribed(base.world_from_base, base.twist_body, Twist::zero()),
+                &position,
+                &velocity,
+                &[0.0; G1_POLICY_ACTUATORS],
+                GRAVITY_WORLD_M_PER_S2,
+                &external,
+            )?
+            .generalized_force;
+            let generalized_force = controller_force(
+                &self.catalog,
+                &self.reference_position,
+                &position,
+                &velocity,
+                &residual,
+                &gravity_compensation,
+            );
 
             let dynamics = free_floating_forward_dynamics(
                 model,
@@ -389,10 +415,16 @@ impl G1WalkingEvaluator {
                 if next_position < source.lower_position_rad
                     || next_position > source.upper_position_rad
                 {
-                    return Err(G1WalkingError::JointLimit {
-                        actuator,
-                        position_rad: next_position,
-                    });
+                    let half_range =
+                        0.5 * (source.upper_position_rad - source.lower_position_rad);
+                    let overshoot = if next_position < source.lower_position_rad {
+                        source.lower_position_rad - next_position
+                    } else {
+                        next_position - source.upper_position_rad
+                    };
+                    fell = true;
+                    terminal_guard_penalty += 200.0 + 100.0 * overshoot / half_range;
+                    break 'rollout;
                 }
                 position[actuator] = next_position;
                 let center = 0.5 * (source.lower_position_rad + source.upper_position_rad);
@@ -412,15 +444,20 @@ impl G1WalkingEvaluator {
             .0;
             completed_steps = step + 1;
 
-            let world_velocity = rotation.rotate(base.twist_body.linear)?;
+            let updated_rotation = base.world_from_base.rotation();
+            let updated_gravity_direction_body = updated_rotation
+                .inverse()
+                .rotate(Vec3::new(0.0, 0.0, -1.0))?;
+            let world_velocity = updated_rotation.rotate(base.twist_body.linear)?;
             let speed_error = world_velocity.x - self.config.target_forward_speed_m_per_s;
             speed_error_integral += speed_error * speed_error * self.config.step_s;
             let height_error = base.world_from_base.translation().z - self.initial_base_height_m;
-            let tilt_error = 1.0 + gravity_direction_body.z;
+            let tilt_error = 1.0 + updated_gravity_direction_body.z;
             posture_integral +=
                 (2.5 * height_error * height_error + 4.0 * tilt_error * tilt_error)
                     * self.config.step_s;
-            fell = base.world_from_base.translation().z < 0.32 || gravity_direction_body.z > -0.35;
+            fell = base.world_from_base.translation().z < 0.32
+                || updated_gravity_direction_body.z > -0.35;
             if fell {
                 break;
             }
@@ -453,7 +490,8 @@ impl G1WalkingEvaluator {
             + 30.0 * posture_integral
             + 2.0 * joint_limit_integral
             + 0.8 * impact_integral
-            + fall_penalty;
+            + fall_penalty
+            + terminal_guard_penalty;
         if !objective.is_finite() {
             return Err(G1WalkingError::NonFiniteObjective);
         }
@@ -551,6 +589,7 @@ fn controller_force(
     position: &[f64; G1_POLICY_ACTUATORS],
     velocity: &[f64; G1_POLICY_ACTUATORS],
     residual: &[f64; G1_POLICY_ACTUATORS],
+    gravity_compensation: &[f64],
 ) -> [f64; G1_POLICY_ACTUATORS] {
     let mut force = [0.0; G1_POLICY_ACTUATORS];
     for actuator in 0..G1_POLICY_ACTUATORS {
@@ -560,7 +599,8 @@ fn controller_force(
         let posture = proportional_gain * (reference[actuator] - position[actuator])
             - derivative_gain * velocity[actuator];
         let residual_force = 0.32 * effort_limit * residual[actuator];
-        force[actuator] = (posture + residual_force).clamp(-effort_limit, effort_limit);
+        force[actuator] = (gravity_compensation[actuator] + posture + residual_force)
+            .clamp(-effort_limit, effort_limit);
     }
     force
 }
@@ -657,9 +697,8 @@ mod tests {
     }
 
     #[test]
-    fn evaluator_refuses_wrong_policy_shape_and_invalid_controls() {
-        let evaluator = G1WalkingEvaluator::new(G1WalkingConfig::default())
-            .expect("default flagship controls are admitted");
+    fn evaluator_refuses_wrong_policy_shape_and_invalid_controls() -> Result<(), G1WalkingError> {
+        let evaluator = G1WalkingEvaluator::new(G1WalkingConfig::default())?;
         assert!(matches!(
             evaluator.evaluate(&[]),
             Err(G1WalkingError::Policy(
@@ -673,6 +712,7 @@ mod tests {
             }),
             Err(G1WalkingError::InvalidConfig { field: "step_s" })
         ));
+        Ok(())
     }
 
     #[test]
