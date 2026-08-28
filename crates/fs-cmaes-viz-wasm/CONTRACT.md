@@ -1,10 +1,11 @@
 # CONTRACT: fs-cmaes-viz-wasm
 
-Status: **CMA schema 2 + G1 schema 5 — live surfaces.** Stateful packed browser
-boundary over the production CMA-family owner in `fs-dfo` and the owner-composed
-G1 walking experiment. This crate owns validation, admission, numeric packet
-transport, and browser-specific resource limits. It owns no optimizer recurrence
-or independent robot mathematics.
+Status: **CMA schema 2 + G1 schema 5 + ARM schema 1 — live surfaces.** Stateful
+packed browser boundary over the production CMA-family owner in `fs-dfo` and
+the owner-composed G1 walking and KUKA household-manipulation experiments. This
+crate owns validation, admission, numeric packet transport, browser-specific
+resource limits, and the disclosed benchmark tasks. It owns no optimizer
+recurrence or independent robot mathematics.
 
 ## Purpose and ownership
 
@@ -35,6 +36,24 @@ policy map, `fs-ga` poses, `fs-time` integration, `fs-contact` normal response,
 and `fs-tribo` friction. It returns the owners' link poses for rendering. The
 binding layer adds no kinematics, dynamics, contact law, or browser-side pose
 reconstruction.
+
+The manipulation surface likewise composes the existing mathematical owners:
+`fs-mbd` supplies its pinned KUKA LBR iiwa 7 R800 topology, source dimensions,
+inertias, hard limits, forward kinematics, inverse dynamics, and articulated-
+body forward dynamics; `fs-ga` supplies SE(3) poses and wrenches; `fs-contact`
+supplies the compliant pad normal response; and `fs-tribo` supplies dry-
+friction capacity. Its 128 coordinates are 16 uniform knots for each of seven
+joint targets and one finger-separation target. The binding returns source-
+ordered world poses and never reconstructs robot kinematics in JavaScript.
+
+The household grasp is deliberately reduced and explicit. A horizontal surface
+supports the object until aligned opposing compliant pads develop enough
+owner-reported static-friction capacity. While held, a bilateral rigid grasp
+follows the flange and applies the object's weight to the articulated arm as an
+external wrench. After release, the object follows ballistic translation and a
+one-sided support response. Kitchen mug, living-room remote, and backyard
+trowel presets change disclosed dimensions, mass, grasp width, stations, and
+keep-out box while sharing the exact same physics and policy contract.
 
 Because the source catalog intentionally omits collision meshes, the experiment
 declares four equal-height compliant patches under each foot. Patch forces and
@@ -81,6 +100,8 @@ coordinates; neither vector is a hidden trajectory or browser controller.
 No-claims: this synchronous adapter does not add restarts, parallel execution,
 cancellation, constraints, or built-in analytic landscapes. The G1 experiment
 is a reduced lower-body-and-waist model, not a full Unitree digital twin or a
+hardware-transfer claim. The arm experiment has no mesh collision,
+self-collision, impact impulse, general grasp planner, deformable object, or
 hardware-transfer claim. Limited-memory snapshots do not invent dense
 covariance diagnostics.
 
@@ -88,8 +109,10 @@ covariance diagnostics.
 
 Native Rust exposes `PackedCmaSession::{new,receipt_packet,ask_packet,tell_packet}`
 and `PackedG1WalkingEvaluator::{new,receipt_packet,evaluate_packet,
-evaluate_population_packet,trace_packet}`, the two public curriculum-mean
-constructors, and `kernel_version()`.
+evaluate_population_packet,trace_packet}`,
+`PackedManipulationEvaluator::{new,receipt_packet,curriculum_policy_mean,
+evaluate_packet,evaluate_population_packet,trace_packet}`, the public
+curriculum-mean constructors, and `kernel_version()`.
 
 On wasm32, wasm-bindgen exports:
 
@@ -106,7 +129,13 @@ On wasm32, wasm-bindgen exports:
 | `evaluator.evaluate(policy)` | 5,040 policy words | decomposed scalar objective receipt |
 | `evaluator.evaluate_population(policies)` | up to 64 row-major policies | one objective per candidate in one boundary call |
 | `evaluator.trace(policy)` | 5,040 policy words | receipt plus decimated world-from-link poses |
-| `cmaes_viz_kernel_version()` | no arguments | `"fs-cmaes-viz-wasm 0.6.4"` |
+| `new HouseholdManipulationVizEvaluator(config)` | packed `Float64Array` | reusable owner-composed KUKA evaluator |
+| `evaluator.receipt()` | no arguments | fixed controls, scene, success criteria, and exact trace layout |
+| `evaluator.curriculum_policy_mean()` | no arguments | source-feasible 128-D pick/lift/transport/place mean |
+| `evaluator.evaluate(policy)` | 128 policy words | decomposed scalar objective receipt |
+| `evaluator.evaluate_population(policies)` | up to 64 row-major policies | one objective per candidate in one boundary call |
+| `evaluator.trace(policy)` | 128 policy words | receipt plus object and source-ordered link poses |
+| `cmaes_viz_kernel_version()` | no arguments | `"fs-cmaes-viz-wasm 0.6.5"` |
 
 There is no JSON hot path and no schema-1 compatibility shim.
 
@@ -277,6 +306,56 @@ zero-based row, so a caller cannot silently replace an owner refusal with a
 fabricated score. All other G1 refusals use the same seven-word envelope with a
 NaN detail word.
 
+## Household-arm packets
+
+Arm packets use magic `0x41524d31` (`"ARM1"`) and schema 1. The common output
+prefix is `magic, schema, status, kind, total_words`. Kinds are configuration 0,
+admission 1, evaluation 2, trace 3, and population 4.
+
+Configuration is:
+
+`magic, schema, kind=0, total_words=8, step_s, duration_s, trace_stride, task`.
+
+Task IDs are 0 kitchen mug, 1 living-room remote, and 2 backyard trowel. The
+browser experiment admits step sizes from 1/240 through 1/45 s, durations from
+3 through 6 s, and at most 1,000 steps between retained trace samples.
+
+Admission appends:
+
+`policy_dimension=128, joint_count=7, policy_knots=16, link_count=8,
+pose_words=7, trace_sample_words=67, step_s, duration_s, trace_stride, task,
+minimum_gripper_width_m, open_gripper_width_m, placement_tolerance_m,
+lift_target_m, object_mass_kg, object_dimensions_xyz_m, grasp_half_width_m,
+initial_object_xyz_m, goal_object_xyz_m, support_height_m,
+obstacle_center_xyz_m, obstacle_half_extents_xyz_m`.
+
+This self-describing packet is the renderer's source of truth. The object
+dimensions and mass are declared benchmark estimates; robot link dimensions,
+poses, inertias, and limits remain source-bound in `fs-mbd`.
+
+Evaluation appends:
+
+`objective, final_object_error_m, minimum_reach_error_m, maximum_lift_m,
+actuator_work_j, obstacle_integral, control_limit_integral, first_grasp_time_s,
+grasp_duration_s, peak_grip_force_n, ever_grasped, released_after_transport,
+placed, completed_steps`.
+
+`placed=1` requires an established bilateral grasp, release after transport,
+at least the admitted lift target, terminal position error no greater than the
+admitted tolerance, and no active grasp at the horizon. The disclosed
+curriculum mean passes those same criteria for all three task presets; it is
+not a hidden browser animation.
+
+Trace adds `sample_count`, followed by 67-word samples containing `time_s,
+gripper_width_m, grip_normal_force_n, grasped`, one object pose, and eight link
+poses in source catalog order. Every pose is world-frame `translation_xyz,
+quaternion_wxyz`; the browser must not recompute forward kinematics.
+
+Population success adds `population, objectives[population]`. Input is a flat
+row-major sequence of 1 through 64 complete 128-word policies. A structural
+candidate refusal fails the packet and word 6 identifies the zero-based row.
+All other arm refusals use the same seven-word envelope with a NaN detail word.
+
 ## Determinism and budgets
 
 Seeded candidate generation, normal-draw semantics, and deterministic
@@ -301,7 +380,9 @@ the pending batch.
 
 - focused native tests, including four-family dispatch, seeded replay,
   repair-and-retry ask/tell semantics, exact budget exhaustion, typed
-  refusals, and a real 5,040-dimensional generation for every scalable family;
+  refusals, a real 5,040-dimensional generation for every scalable family,
+  all three successful household curricula, and a real 128-dimensional arm
+  generation through every CMA family;
 - strict crate-local Clippy with warnings denied;
 - locked wasm32 check;
 - release `wasm-pack build --target web` to a unique external cache directory;

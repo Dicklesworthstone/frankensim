@@ -16,8 +16,9 @@
 //!
 //! No-claims: this is a synchronous browser transport. It does not add BIPOP,
 //! cancellation, parallel evaluation, generic objective functions, or dense
-//! diagnostic matrices for limited-memory families. Its one built-in objective
-//! is the explicitly owner-composed G1 walking experiment in [`g1_walking`].
+//! diagnostic matrices for limited-memory families. Its built-in objectives
+//! are the explicitly owner-composed G1 walking experiment in [`g1_walking`]
+//! and KUKA household manipulation experiment in [`manipulation`].
 
 // This crate's protocol is deliberately binary64-only. Every integer-to-word
 // cast is downstream of exact safe-integer admission or a smaller browser cap;
@@ -36,14 +37,22 @@ use fs_dfo::{
 use fs_mbd::robot_models::G1_POLICY_DIMENSION;
 
 pub mod g1_walking;
+pub mod manipulation;
 
 use g1_walking::{
     G1_LINK_COUNT, G1_LINK_POSE_WORDS, G1Task, G1TraceSample, G1WalkingConfig, G1WalkingError,
     G1WalkingEvaluator, G1WalkingReceipt,
 };
+use manipulation::{
+    ARM_JOINT_COUNT, ARM_LINK_COUNT, ARM_LINK_POSE_WORDS, ARM_POLICY_DIMENSION, ARM_POLICY_KNOTS,
+    LIFT_TARGET_M, MIN_GRIPPER_WIDTH_M, ManipulationConfig, ManipulationError,
+    ManipulationEvaluator, ManipulationReceipt, ManipulationTask, ManipulationTraceSample,
+    OPEN_GRIPPER_WIDTH_M, PLACEMENT_TOLERANCE_M, manipulation_curriculum_mean,
+    manipulation_max_population,
+};
 
 /// Kernel identity returned by the browser capability probe.
-pub const KERNEL_VERSION: &str = "fs-cmaes-viz-wasm 0.6.4";
+pub const KERNEL_VERSION: &str = "fs-cmaes-viz-wasm 0.6.5";
 /// Exact binary64 word identifying schema-2 packets (`"CMA2"`).
 pub const PACKET_MAGIC: u32 = 0x434d_4132;
 /// Packed ask/tell ABI schema.
@@ -85,6 +94,21 @@ pub const G1_PACKET_KIND_TRACE: u32 = 3;
 /// Output packet containing objectives for a complete candidate population.
 pub const G1_PACKET_KIND_POPULATION: u32 = 4;
 
+/// Exact binary64 word identifying household-arm packets (`"ARM1"`).
+pub const ARM_PACKET_MAGIC: u32 = 0x4152_4d31;
+/// Packed household-manipulation objective/trace ABI schema.
+pub const ARM_PACKET_SCHEMA_VERSION: u32 = 1;
+/// Input packet containing fixed manipulation-experiment controls.
+pub const ARM_PACKET_KIND_CONFIG: u32 = 0;
+/// Output packet describing an admitted manipulation evaluator and scene.
+pub const ARM_PACKET_KIND_ADMISSION: u32 = 1;
+/// Output packet containing one manipulation candidate receipt.
+pub const ARM_PACKET_KIND_EVALUATION: u32 = 2;
+/// Output packet containing one receipt plus owner-derived object/link poses.
+pub const ARM_PACKET_KIND_TRACE: u32 = 3;
+/// Output packet containing objectives for a complete policy population.
+pub const ARM_PACKET_KIND_POPULATION: u32 = 4;
+
 const CONFIG_FIXED_WORDS: usize = 12;
 const ASK_FIXED_WORDS: usize = 9;
 const TELL_FIXED_WORDS: usize = 6;
@@ -99,6 +123,12 @@ const G1_RECEIPT_WORDS: usize = 23;
 const G1_REFUSAL_WORDS: usize = 7;
 const G1_TRACE_SAMPLE_WORDS: usize = 3 + G1_LINK_COUNT * G1_LINK_POSE_WORDS;
 const G1_MAX_POPULATION: usize = 64;
+const ARM_CONFIG_WORDS: usize = 8;
+const ARM_ADMISSION_WORDS: usize = 37;
+const ARM_RECEIPT_WORDS: usize = 19;
+const ARM_REFUSAL_WORDS: usize = 7;
+const ARM_TRACE_SAMPLE_WORDS: usize =
+    4 + ARM_LINK_POSE_WORDS + ARM_LINK_COUNT * ARM_LINK_POSE_WORDS;
 
 /// Stable numeric refusal codes for schema 2.
 #[repr(u32)]
@@ -560,6 +590,241 @@ impl PackedG1WalkingEvaluator {
     }
 }
 
+/// Stable refusal codes for the owner-composed household-arm boundary.
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArmPackedRefusalCode {
+    /// Packet prefix, length, or integral field is malformed.
+    MalformedPacket = 1,
+    /// Packet magic or schema is unknown.
+    SchemaMismatch = 2,
+    /// A fixed rollout control or task selector is outside the browser domain.
+    InvalidConfig = 3,
+    /// Policy coordinate count does not match the declared 128-D knot map.
+    ParameterCount = 4,
+    /// A policy coordinate is NaN or infinite.
+    NonFiniteParameter = 5,
+    /// The source-bound articulated owner refused the rollout.
+    Robot = 6,
+    /// A canonical Lie-group operation refused the rollout.
+    Geometry = 7,
+    /// The compliant normal-contact owner refused the rollout.
+    Contact = 8,
+    /// The dry-friction owner refused the rollout.
+    Friction = 9,
+    /// A sphere/plane request returned an impossible receipt kind.
+    UnexpectedContactReceipt = 10,
+    /// A completed rollout produced a non-finite objective or receipt.
+    NonFiniteObjective = 11,
+    /// A flat population is empty, too large, or not candidate-aligned.
+    PopulationInvalid = 12,
+    /// Checked packet-size arithmetic overflowed.
+    ShapeOverflow = 13,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ArmPackedRefusal {
+    code: ArmPackedRefusalCode,
+    detail: Option<usize>,
+}
+
+impl ArmPackedRefusal {
+    const fn new(code: ArmPackedRefusalCode) -> Self {
+        Self { code, detail: None }
+    }
+
+    const fn with_detail(code: ArmPackedRefusalCode, detail: usize) -> Self {
+        Self {
+            code,
+            detail: Some(detail),
+        }
+    }
+}
+
+/// Reusable browser boundary for the fixed KUKA household experiment.
+///
+/// The pinned articulated model and constitutive owners are constructed once;
+/// calls then evaluate complete 128-D policies without rebuilding the catalog.
+pub struct PackedManipulationEvaluator {
+    evaluator: Option<ManipulationEvaluator>,
+    task: Option<ManipulationTask>,
+    creation_refusal: Option<ArmPackedRefusal>,
+}
+
+impl PackedManipulationEvaluator {
+    /// Parse and admit one packed household-manipulation configuration.
+    #[must_use]
+    pub fn new(config_packet: &[f64]) -> Self {
+        let config = match parse_arm_config(config_packet) {
+            Ok(config) => config,
+            Err(refusal) => return Self::refused(refusal),
+        };
+        match ManipulationEvaluator::new(config) {
+            Ok(evaluator) => Self {
+                evaluator: Some(evaluator),
+                task: Some(config.task),
+                creation_refusal: None,
+            },
+            Err(error) => Self::refused(arm_owner_refusal(&error)),
+        }
+    }
+
+    const fn refused(refusal: ArmPackedRefusal) -> Self {
+        Self {
+            evaluator: None,
+            task: None,
+            creation_refusal: Some(refusal),
+        }
+    }
+
+    /// Return exact controls, scene geometry, and render-layout dimensions.
+    #[must_use]
+    pub fn receipt_packet(&self) -> Vec<f64> {
+        if let Some(refusal) = self.creation_refusal {
+            return arm_refusal_packet(ARM_PACKET_KIND_ADMISSION, refusal);
+        }
+        let Some(evaluator) = self.evaluator.as_ref() else {
+            return arm_refusal_packet(
+                ARM_PACKET_KIND_ADMISSION,
+                ArmPackedRefusal::new(ArmPackedRefusalCode::Robot),
+            );
+        };
+        let config = evaluator.config();
+        let scene = evaluator.scene();
+        let mut packet = arm_success_header(ARM_PACKET_KIND_ADMISSION, ARM_ADMISSION_WORDS);
+        packet.extend_from_slice(&[
+            ARM_POLICY_DIMENSION as f64,
+            ARM_JOINT_COUNT as f64,
+            ARM_POLICY_KNOTS as f64,
+            ARM_LINK_COUNT as f64,
+            ARM_LINK_POSE_WORDS as f64,
+            ARM_TRACE_SAMPLE_WORDS as f64,
+            config.step_s,
+            config.duration_s,
+            config.trace_stride as f64,
+            f64::from(config.task as u32),
+            MIN_GRIPPER_WIDTH_M,
+            OPEN_GRIPPER_WIDTH_M,
+            PLACEMENT_TOLERANCE_M,
+            LIFT_TARGET_M,
+            scene.object_mass_kg,
+            scene.object_dimensions_m.x,
+            scene.object_dimensions_m.y,
+            scene.object_dimensions_m.z,
+            scene.grasp_half_width_m,
+            scene.initial_object_position_m.x,
+            scene.initial_object_position_m.y,
+            scene.initial_object_position_m.z,
+            scene.goal_object_position_m.x,
+            scene.goal_object_position_m.y,
+            scene.goal_object_position_m.z,
+            scene.support_height_m,
+            scene.obstacle_center_m.x,
+            scene.obstacle_center_m.y,
+            scene.obstacle_center_m.z,
+            scene.obstacle_half_extents_m.x,
+            scene.obstacle_half_extents_m.y,
+            scene.obstacle_half_extents_m.z,
+        ]);
+        debug_assert_eq!(packet.len(), ARM_ADMISSION_WORDS);
+        packet
+    }
+
+    /// Return the disclosed source-feasible 128-D curriculum mean.
+    #[must_use]
+    pub fn curriculum_policy_mean(&self) -> Vec<f64> {
+        self.task
+            .map_or_else(Vec::new, |task| manipulation_curriculum_mean(task).to_vec())
+    }
+
+    /// Evaluate one 128-D policy without retaining a trajectory.
+    #[must_use]
+    pub fn evaluate_packet(&self, parameters: &[f64]) -> Vec<f64> {
+        if let Some(refusal) = self.creation_refusal {
+            return arm_refusal_packet(ARM_PACKET_KIND_EVALUATION, refusal);
+        }
+        let Some(evaluator) = self.evaluator.as_ref() else {
+            return arm_refusal_packet(
+                ARM_PACKET_KIND_EVALUATION,
+                ArmPackedRefusal::new(ArmPackedRefusalCode::Robot),
+            );
+        };
+        match evaluator.evaluate(parameters) {
+            Ok(receipt) => arm_receipt_packet(ARM_PACKET_KIND_EVALUATION, &receipt, false),
+            Err(error) => arm_refusal_packet(ARM_PACKET_KIND_EVALUATION, arm_owner_refusal(&error)),
+        }
+    }
+
+    /// Evaluate a flat row-major population and return one objective per row.
+    #[must_use]
+    pub fn evaluate_population_packet(&self, parameters: &[f64]) -> Vec<f64> {
+        if let Some(refusal) = self.creation_refusal {
+            return arm_refusal_packet(ARM_PACKET_KIND_POPULATION, refusal);
+        }
+        let Some(evaluator) = self.evaluator.as_ref() else {
+            return arm_refusal_packet(
+                ARM_PACKET_KIND_POPULATION,
+                ArmPackedRefusal::new(ArmPackedRefusalCode::Robot),
+            );
+        };
+        if parameters.is_empty() || !parameters.len().is_multiple_of(ARM_POLICY_DIMENSION) {
+            return arm_refusal_packet(
+                ARM_PACKET_KIND_POPULATION,
+                ArmPackedRefusal::new(ArmPackedRefusalCode::PopulationInvalid),
+            );
+        }
+        let population = parameters.len() / ARM_POLICY_DIMENSION;
+        if population > manipulation_max_population() {
+            return arm_refusal_packet(
+                ARM_PACKET_KIND_POPULATION,
+                ArmPackedRefusal::new(ArmPackedRefusalCode::PopulationInvalid),
+            );
+        }
+        let Some(total_words) = 6usize.checked_add(population) else {
+            return arm_refusal_packet(
+                ARM_PACKET_KIND_POPULATION,
+                ArmPackedRefusal::new(ArmPackedRefusalCode::ShapeOverflow),
+            );
+        };
+        let mut packet = arm_success_header(ARM_PACKET_KIND_POPULATION, total_words);
+        packet.push(population as f64);
+        let (policies, remainder) = parameters.as_chunks::<ARM_POLICY_DIMENSION>();
+        debug_assert!(remainder.is_empty());
+        for (candidate, policy) in policies.iter().enumerate() {
+            match evaluator.evaluate(policy) {
+                Ok(receipt) => packet.push(receipt.objective),
+                Err(error) => {
+                    let refusal = arm_owner_refusal(&error);
+                    return arm_refusal_packet(
+                        ARM_PACKET_KIND_POPULATION,
+                        ArmPackedRefusal::with_detail(refusal.code, candidate),
+                    );
+                }
+            }
+        }
+        debug_assert_eq!(packet.len(), total_words);
+        packet
+    }
+
+    /// Evaluate one policy and retain decimated owner-derived poses.
+    #[must_use]
+    pub fn trace_packet(&self, parameters: &[f64]) -> Vec<f64> {
+        if let Some(refusal) = self.creation_refusal {
+            return arm_refusal_packet(ARM_PACKET_KIND_TRACE, refusal);
+        }
+        let Some(evaluator) = self.evaluator.as_ref() else {
+            return arm_refusal_packet(
+                ARM_PACKET_KIND_TRACE,
+                ArmPackedRefusal::new(ArmPackedRefusalCode::Robot),
+            );
+        };
+        match evaluator.trace(parameters) {
+            Ok(receipt) => arm_receipt_packet(ARM_PACKET_KIND_TRACE, &receipt, true),
+            Err(error) => arm_refusal_packet(ARM_PACKET_KIND_TRACE, arm_owner_refusal(&error)),
+        }
+    }
+}
+
 fn parse_g1_config(packet: &[f64]) -> Result<G1WalkingConfig, G1PackedRefusal> {
     if packet.len() != G1_CONFIG_WORDS {
         return Err(G1PackedRefusal::new(G1PackedRefusalCode::MalformedPacket));
@@ -702,6 +967,144 @@ fn append_g1_trace_sample(packet: &mut Vec<f64>, sample: &G1TraceSample) {
         f64::from(u8::from(sample.foot_contact[0])),
         f64::from(u8::from(sample.foot_contact[1])),
     ]);
+    for pose in &sample.link_pose {
+        packet.extend_from_slice(pose);
+    }
+}
+
+fn parse_arm_config(packet: &[f64]) -> Result<ManipulationConfig, ArmPackedRefusal> {
+    if packet.len() != ARM_CONFIG_WORDS {
+        return Err(ArmPackedRefusal::new(ArmPackedRefusalCode::MalformedPacket));
+    }
+    if exact_u32(packet[0]) != Some(ARM_PACKET_MAGIC)
+        || exact_u32(packet[1]) != Some(ARM_PACKET_SCHEMA_VERSION)
+    {
+        return Err(ArmPackedRefusal::new(ArmPackedRefusalCode::SchemaMismatch));
+    }
+    if exact_u32(packet[2]) != Some(ARM_PACKET_KIND_CONFIG)
+        || exact_usize(packet[3]) != Some(ARM_CONFIG_WORDS)
+    {
+        return Err(ArmPackedRefusal::new(ArmPackedRefusalCode::MalformedPacket));
+    }
+    let trace_stride = exact_usize(packet[6])
+        .filter(|value| (1..=1_000).contains(value))
+        .ok_or(ArmPackedRefusal::new(ArmPackedRefusalCode::InvalidConfig))?;
+    let task = match exact_u32(packet[7]) {
+        Some(0) => ManipulationTask::KitchenMug,
+        Some(1) => ManipulationTask::LivingRoomRemote,
+        Some(2) => ManipulationTask::BackyardTrowel,
+        _ => {
+            return Err(ArmPackedRefusal::new(ArmPackedRefusalCode::InvalidConfig));
+        }
+    };
+    let config = ManipulationConfig {
+        task,
+        step_s: packet[4],
+        duration_s: packet[5],
+        trace_stride,
+    };
+    if !(config.step_s.is_finite()
+        && (1.0 / 240.0..=1.0 / 45.0).contains(&config.step_s)
+        && config.duration_s.is_finite()
+        && (3.0..=6.0).contains(&config.duration_s)
+        && config.duration_s >= config.step_s)
+    {
+        return Err(ArmPackedRefusal::new(ArmPackedRefusalCode::InvalidConfig));
+    }
+    Ok(config)
+}
+
+fn arm_owner_refusal(error: &ManipulationError) -> ArmPackedRefusal {
+    let code = match error {
+        ManipulationError::InvalidConfig { .. } => ArmPackedRefusalCode::InvalidConfig,
+        ManipulationError::ParameterCount { .. } => ArmPackedRefusalCode::ParameterCount,
+        ManipulationError::NonFiniteParameter { .. } => ArmPackedRefusalCode::NonFiniteParameter,
+        ManipulationError::Robot(_) => ArmPackedRefusalCode::Robot,
+        ManipulationError::Geometry(_) => ArmPackedRefusalCode::Geometry,
+        ManipulationError::Contact(_) => ArmPackedRefusalCode::Contact,
+        ManipulationError::Friction(_) => ArmPackedRefusalCode::Friction,
+        ManipulationError::UnexpectedContactReceipt => {
+            ArmPackedRefusalCode::UnexpectedContactReceipt
+        }
+        ManipulationError::NonFiniteObjective => ArmPackedRefusalCode::NonFiniteObjective,
+    };
+    ArmPackedRefusal::new(code)
+}
+
+fn arm_success_header(kind: u32, total_words: usize) -> Vec<f64> {
+    vec![
+        f64::from(ARM_PACKET_MAGIC),
+        f64::from(ARM_PACKET_SCHEMA_VERSION),
+        f64::from(PACKET_STATUS_OK),
+        f64::from(kind),
+        total_words as f64,
+    ]
+}
+
+fn arm_refusal_packet(kind: u32, refusal: ArmPackedRefusal) -> Vec<f64> {
+    vec![
+        f64::from(ARM_PACKET_MAGIC),
+        f64::from(ARM_PACKET_SCHEMA_VERSION),
+        f64::from(PACKET_STATUS_REFUSAL),
+        f64::from(kind),
+        ARM_REFUSAL_WORDS as f64,
+        f64::from(refusal.code as u32),
+        refusal.detail.map_or(f64::NAN, |value| value as f64),
+    ]
+}
+
+fn arm_receipt_packet(kind: u32, receipt: &ManipulationReceipt, include_trace: bool) -> Vec<f64> {
+    let trace_words = if include_trace {
+        receipt
+            .trace
+            .len()
+            .checked_mul(ARM_TRACE_SAMPLE_WORDS)
+            .and_then(|words| words.checked_add(1))
+    } else {
+        Some(0)
+    };
+    let Some(total_words) = trace_words.and_then(|words| ARM_RECEIPT_WORDS.checked_add(words))
+    else {
+        return arm_refusal_packet(
+            kind,
+            ArmPackedRefusal::new(ArmPackedRefusalCode::ShapeOverflow),
+        );
+    };
+    let mut packet = arm_success_header(kind, total_words);
+    packet.extend_from_slice(&[
+        receipt.objective,
+        receipt.final_object_error_m,
+        receipt.minimum_reach_error_m,
+        receipt.maximum_lift_m,
+        receipt.actuator_work_j,
+        receipt.obstacle_integral,
+        receipt.control_limit_integral,
+        receipt.first_grasp_time_s,
+        receipt.grasp_duration_s,
+        receipt.peak_grip_force_n,
+        f64::from(u8::from(receipt.ever_grasped)),
+        f64::from(u8::from(receipt.released_after_transport)),
+        f64::from(u8::from(receipt.placed)),
+        receipt.completed_steps as f64,
+    ]);
+    if include_trace {
+        packet.push(receipt.trace.len() as f64);
+        for sample in &receipt.trace {
+            append_arm_trace_sample(&mut packet, sample);
+        }
+    }
+    debug_assert_eq!(packet.len(), total_words);
+    packet
+}
+
+fn append_arm_trace_sample(packet: &mut Vec<f64>, sample: &ManipulationTraceSample) {
+    packet.extend_from_slice(&[
+        sample.time_s,
+        sample.gripper_width_m,
+        sample.grip_normal_force_n,
+        f64::from(u8::from(sample.grasped)),
+    ]);
+    packet.extend_from_slice(&sample.object_pose);
     for pose in &sample.link_pose {
         packet.extend_from_slice(pose);
     }
@@ -1019,7 +1422,7 @@ const fn split_u64(value: u64) -> (u32, u32) {
 
 #[cfg(target_arch = "wasm32")]
 mod schema_two_wasm {
-    use super::{PackedCmaSession, PackedG1WalkingEvaluator};
+    use super::{PackedCmaSession, PackedG1WalkingEvaluator, PackedManipulationEvaluator};
     use wasm_bindgen::prelude::wasm_bindgen;
 
     /// Stateful schema-2 browser session. Construction never throws; inspect
@@ -1115,6 +1518,56 @@ mod schema_two_wasm {
         }
     }
 
+    /// Stateful browser evaluator for the owner-composed household-arm problem.
+    /// Construction never throws; inspect `receipt()` for admission or a typed
+    /// refusal packet.
+    #[wasm_bindgen]
+    pub struct HouseholdManipulationVizEvaluator {
+        inner: PackedManipulationEvaluator,
+    }
+
+    #[wasm_bindgen]
+    impl HouseholdManipulationVizEvaluator {
+        /// Create an evaluator from one packed experiment configuration.
+        #[wasm_bindgen(constructor)]
+        #[must_use]
+        pub fn new(config: &[f64]) -> Self {
+            Self {
+                inner: PackedManipulationEvaluator::new(config),
+            }
+        }
+
+        /// Return admitted controls, scene data, and render-layout dimensions.
+        #[must_use]
+        pub fn receipt(&self) -> Vec<f64> {
+            self.inner.receipt_packet()
+        }
+
+        /// Return the disclosed source-feasible 128-D curriculum mean.
+        #[must_use]
+        pub fn curriculum_policy_mean(&self) -> Vec<f64> {
+            self.inner.curriculum_policy_mean()
+        }
+
+        /// Evaluate one 128-D policy without retaining object/link poses.
+        #[must_use]
+        pub fn evaluate(&self, parameters: &[f64]) -> Vec<f64> {
+            self.inner.evaluate_packet(parameters)
+        }
+
+        /// Evaluate a flat complete population in one boundary call.
+        #[must_use]
+        pub fn evaluate_population(&self, parameters: &[f64]) -> Vec<f64> {
+            self.inner.evaluate_population_packet(parameters)
+        }
+
+        /// Evaluate one policy and return decimated owner-derived poses.
+        #[must_use]
+        pub fn trace(&self, parameters: &[f64]) -> Vec<f64> {
+            self.inner.trace_packet(parameters)
+        }
+    }
+
     /// Kernel identity probe after module instantiation.
     #[wasm_bindgen]
     #[must_use]
@@ -1186,9 +1639,30 @@ mod schema_two_tests {
         ]
     }
 
+    fn arm_config_packet(task: ManipulationTask, duration_s: f64, trace_stride: usize) -> Vec<f64> {
+        vec![
+            f64::from(ARM_PACKET_MAGIC),
+            f64::from(ARM_PACKET_SCHEMA_VERSION),
+            f64::from(ARM_PACKET_KIND_CONFIG),
+            ARM_CONFIG_WORDS as f64,
+            1.0 / 90.0,
+            duration_s,
+            trace_stride as f64,
+            f64::from(task as u32),
+        ]
+    }
+
     fn assert_g1_success(packet: &[f64], kind: u32) {
         assert_eq!(packet[0], f64::from(G1_PACKET_MAGIC));
         assert_eq!(packet[1], f64::from(G1_PACKET_SCHEMA_VERSION));
+        assert_eq!(packet[2], f64::from(PACKET_STATUS_OK));
+        assert_eq!(packet[3], f64::from(kind));
+        assert_eq!(packet[4], packet.len() as f64);
+    }
+
+    fn assert_arm_success(packet: &[f64], kind: u32) {
+        assert_eq!(packet[0], f64::from(ARM_PACKET_MAGIC));
+        assert_eq!(packet[1], f64::from(ARM_PACKET_SCHEMA_VERSION));
         assert_eq!(packet[2], f64::from(PACKET_STATUS_OK));
         assert_eq!(packet[3], f64::from(kind));
         assert_eq!(packet[4], packet.len() as f64);
@@ -1636,6 +2110,119 @@ mod schema_two_tests {
         assert_eq!(
             refusal[5],
             f64::from(G1PackedRefusalCode::NonFiniteParameter as u32)
+        );
+        assert_eq!(refusal[6], 1.0);
+    }
+
+    #[test]
+    fn arm_packets_expose_self_describing_scenes_and_successful_owner_traces() {
+        for task in [
+            ManipulationTask::KitchenMug,
+            ManipulationTask::LivingRoomRemote,
+            ManipulationTask::BackyardTrowel,
+        ] {
+            let evaluator = PackedManipulationEvaluator::new(&arm_config_packet(task, 4.0, 3));
+            let admission = evaluator.receipt_packet();
+            assert_arm_success(&admission, ARM_PACKET_KIND_ADMISSION);
+            assert_eq!(admission.len(), ARM_ADMISSION_WORDS);
+            assert_eq!(admission[5], ARM_POLICY_DIMENSION as f64);
+            assert_eq!(admission[6], ARM_JOINT_COUNT as f64);
+            assert_eq!(admission[7], ARM_POLICY_KNOTS as f64);
+            assert_eq!(admission[8], ARM_LINK_COUNT as f64);
+            assert_eq!(admission[9], ARM_LINK_POSE_WORDS as f64);
+            assert_eq!(admission[10], ARM_TRACE_SAMPLE_WORDS as f64);
+            assert_eq!(admission[14], f64::from(task as u32));
+            assert!(admission[15] > 0.0);
+            assert!(admission[16..=32].iter().all(|word| word.is_finite()));
+
+            let mean = evaluator.curriculum_policy_mean();
+            assert_eq!(mean.len(), ARM_POLICY_DIMENSION);
+            let evaluation = evaluator.evaluate_packet(&mean);
+            assert_arm_success(&evaluation, ARM_PACKET_KIND_EVALUATION);
+            assert_eq!(evaluation.len(), ARM_RECEIPT_WORDS);
+            assert!(evaluation[5].is_finite());
+            assert!(evaluation[6] <= PLACEMENT_TOLERANCE_M);
+            assert!(evaluation[8] >= LIFT_TARGET_M);
+            assert_eq!(&evaluation[15..=17], &[1.0, 1.0, 1.0]);
+
+            let trace = evaluator.trace_packet(&mean);
+            assert_arm_success(&trace, ARM_PACKET_KIND_TRACE);
+            let sample_count = trace[ARM_RECEIPT_WORDS] as usize;
+            assert!(sample_count >= 50);
+            assert_eq!(
+                trace.len(),
+                ARM_RECEIPT_WORDS + 1 + sample_count * ARM_TRACE_SAMPLE_WORDS
+            );
+            let first_sample = ARM_RECEIPT_WORDS + 1;
+            assert!(trace[first_sample].is_finite());
+            assert!(
+                (MIN_GRIPPER_WIDTH_M..=OPEN_GRIPPER_WIDTH_M).contains(&trace[first_sample + 1])
+            );
+            assert!(
+                trace[first_sample + 4..first_sample + ARM_TRACE_SAMPLE_WORDS]
+                    .iter()
+                    .all(|word| word.is_finite())
+            );
+        }
+    }
+
+    #[test]
+    fn every_cma_family_completes_a_real_128d_arm_generation() {
+        let evaluator = PackedManipulationEvaluator::new(&arm_config_packet(
+            ManipulationTask::KitchenMug,
+            4.0,
+            6,
+        ));
+        let mean = evaluator.curriculum_policy_mean();
+        for family in [
+            CmaFamily::Full,
+            CmaFamily::Separable,
+            CmaFamily::LmCma,
+            CmaFamily::LmMa,
+        ] {
+            let memory = usize::from(matches!(family, CmaFamily::LmCma | CmaFamily::LmMa)) * 4;
+            let mut optimizer = PackedCmaSession::new(&config_packet(
+                family,
+                &mean,
+                0.001,
+                4,
+                memory,
+                4,
+                0x4152_4d31,
+            ));
+            assert_success(&optimizer.receipt_packet(), PACKET_KIND_ADMISSION);
+            let ask = optimizer.ask_packet();
+            assert_success(&ask, PACKET_KIND_ASK);
+            let objectives = evaluator.evaluate_population_packet(&ask[ASK_FIXED_WORDS..]);
+            assert_arm_success(&objectives, ARM_PACKET_KIND_POPULATION);
+            assert_eq!(objectives[5], 4.0);
+            assert!(
+                objectives[6..]
+                    .iter()
+                    .all(|objective| objective.is_finite())
+            );
+            let snapshot = optimizer.tell_packet(&tell_packet(0, &objectives[6..]));
+            assert_success(&snapshot, PACKET_KIND_SNAPSHOT);
+            assert_eq!(snapshot[7], 1.0);
+            assert_eq!(snapshot[8], 4.0);
+        }
+    }
+
+    #[test]
+    fn arm_population_refusals_name_the_failed_candidate() {
+        let evaluator = PackedManipulationEvaluator::new(&arm_config_packet(
+            ManipulationTask::KitchenMug,
+            4.0,
+            3,
+        ));
+        let mut parameters = vec![0.0; 2 * ARM_POLICY_DIMENSION];
+        parameters[ARM_POLICY_DIMENSION + 17] = f64::NAN;
+        let refusal = evaluator.evaluate_population_packet(&parameters);
+        assert_eq!(refusal[0], f64::from(ARM_PACKET_MAGIC));
+        assert_eq!(refusal[2], f64::from(PACKET_STATUS_REFUSAL));
+        assert_eq!(
+            refusal[5],
+            f64::from(ArmPackedRefusalCode::NonFiniteParameter as u32)
         );
         assert_eq!(refusal[6], 1.0);
     }
