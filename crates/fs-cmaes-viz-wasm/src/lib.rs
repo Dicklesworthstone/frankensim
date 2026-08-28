@@ -43,7 +43,7 @@ use g1_walking::{
 };
 
 /// Kernel identity returned by the browser capability probe.
-pub const KERNEL_VERSION: &str = "fs-cmaes-viz-wasm 0.5.4";
+pub const KERNEL_VERSION: &str = "fs-cmaes-viz-wasm 0.5.6";
 /// Exact binary64 word identifying schema-2 packets (`"CMA2"`).
 pub const PACKET_MAGIC: u32 = 0x434d_4132;
 /// Packed ask/tell ABI schema.
@@ -70,10 +70,10 @@ pub const FULL_DIMENSION_LIMIT: usize = 256;
 /// Linear and limited-memory families may admit large browser workloads.
 pub const SCALABLE_DIMENSION_LIMIT: usize = 100_000;
 
-/// Exact binary64 word identifying G1 walking packets (`"G1W1"`).
-pub const G1_PACKET_MAGIC: u32 = 0x4731_5731;
+/// Exact binary64 word identifying G1 walking packets (`"G1W2"`).
+pub const G1_PACKET_MAGIC: u32 = 0x4731_5732;
 /// Packed G1 objective/trace ABI schema.
-pub const G1_PACKET_SCHEMA_VERSION: u32 = 1;
+pub const G1_PACKET_SCHEMA_VERSION: u32 = 2;
 /// Input packet containing fixed walking-experiment controls.
 pub const G1_PACKET_KIND_CONFIG: u32 = 0;
 /// Output packet describing an admitted evaluator.
@@ -522,7 +522,9 @@ impl PackedG1WalkingEvaluator {
         };
         let mut packet = g1_success_header(G1_PACKET_KIND_POPULATION, total_words);
         packet.push(population as f64);
-        for (candidate, policy) in parameters.chunks_exact(G1_POLICY_DIMENSION).enumerate() {
+        let (policies, remainder) = parameters.as_chunks::<G1_POLICY_DIMENSION>();
+        debug_assert!(remainder.is_empty());
+        for (candidate, policy) in policies.iter().enumerate() {
             match evaluator.evaluate(policy) {
                 Ok(receipt) => packet.push(receipt.objective),
                 Err(error) => {
@@ -666,7 +668,7 @@ fn g1_receipt_packet(kind: u32, receipt: &G1WalkingReceipt, include_trace: bool)
         receipt.joint_limit_integral,
         receipt.impact_integral,
         receipt.completed_steps as f64,
-        f64::from(u8::from(receipt.fell)),
+        f64::from(receipt.termination_reason as u32),
     ]);
     if include_trace {
         packet.push(receipt.trace.len() as f64);
@@ -1507,6 +1509,7 @@ mod schema_two_tests {
         assert_g1_success(&evaluation, G1_PACKET_KIND_EVALUATION);
         assert!(evaluation[5].is_finite());
         assert!(evaluation[6].is_finite());
+        assert!((0.0..=6.0).contains(&evaluation[14]));
 
         let trace = evaluator.trace_packet(&parameters);
         assert_g1_success(&trace, G1_PACKET_KIND_TRACE);
@@ -1516,8 +1519,8 @@ mod schema_two_tests {
             trace.len(),
             G1_RECEIPT_WORDS + 1 + sample_count * G1_TRACE_SAMPLE_WORDS
         );
-        assert_eq!(trace[G1_RECEIPT_WORDS + 2], 0.0);
-        assert_eq!(trace[G1_RECEIPT_WORDS + 3], 0.0);
+        assert_eq!(trace[G1_RECEIPT_WORDS + 2], 1.0);
+        assert_eq!(trace[G1_RECEIPT_WORDS + 3], 1.0);
     }
 
     #[test]

@@ -28,7 +28,7 @@ use fs_tribo::{
 };
 
 /// Stable identity of the owner-composed walking experiment.
-pub const G1_WALKING_MODEL_ID: &str = "fs-cmaes/g1-walking-owner-composition-v2";
+pub const G1_WALKING_MODEL_ID: &str = "fs-cmaes/g1-walking-owner-composition-v3";
 /// Links retained by the source-bound lower-body-and-waist catalog.
 pub const G1_LINK_COUNT: usize = 16;
 /// Scalar pose words per link: translation xyz followed by quaternion wxyz.
@@ -36,11 +36,33 @@ pub const G1_LINK_POSE_WORDS: usize = 7;
 
 const LEFT_FOOT_LINK: usize = 6;
 const RIGHT_FOOT_LINK: usize = 12;
-const FOOT_POINT_BODY_M: Vec3 = Vec3 {
-    x: 0.035,
-    y: 0.0,
-    z: -0.032,
-};
+// The source catalog deliberately omits visual/collision meshes, so the
+// experiment owns a small, explicit support footprint instead of pretending
+// that one point under each ankle represents a foot. The four equal-height
+// points form the only admitted ground patches; their moments are accumulated
+// onto the source foot link before the articulated-body solve.
+const FOOT_CONTACT_POINTS_BODY_M: [Vec3; 4] = [
+    Vec3 {
+        x: -0.045,
+        y: -0.035,
+        z: -0.032,
+    },
+    Vec3 {
+        x: -0.045,
+        y: 0.035,
+        z: -0.032,
+    },
+    Vec3 {
+        x: 0.095,
+        y: -0.035,
+        z: -0.032,
+    },
+    Vec3 {
+        x: 0.095,
+        y: 0.035,
+        z: -0.032,
+    },
+];
 const GRAVITY_WORLD_M_PER_S2: Vec3 = Vec3 {
     x: 0.0,
     y: 0.0,
@@ -48,6 +70,8 @@ const GRAVITY_WORLD_M_PER_S2: Vec3 = Vec3 {
 };
 const TWO_PI: f64 = 2.0 * core::f64::consts::PI;
 const MAX_CONTACT_INDENTATION_M: f64 = 0.035;
+const FOOT_EFFECTIVE_RADIUS_M: f64 = 0.035;
+const FOOT_REDUCED_MODULUS_PA: f64 = 2.0e6;
 // Survival is lexicographically primary for this walking experiment. The
 // secondary physical shaping score is smoothly bounded below half of one
 // horizon-step charge, so one additional survived step dominates every
@@ -75,11 +99,11 @@ pub struct G1WalkingConfig {
 impl Default for G1WalkingConfig {
     fn default() -> Self {
         Self {
-            step_s: 1.0 / 120.0,
+            step_s: 1.0 / 480.0,
             duration_s: 1.5,
             target_forward_speed_m_per_s: 0.65,
             gait_frequency_hz: 1.55,
-            trace_stride: 3,
+            trace_stride: 12,
         }
     }
 }
@@ -94,6 +118,36 @@ pub struct G1TraceSample {
     pub link_pose: [[f64; G1_LINK_POSE_WORDS]; G1_LINK_COUNT],
     /// Active left/right ground patches.
     pub foot_contact: [bool; 2],
+}
+
+/// Why a rollout ended. A constitutive-domain or state guard is an evaluated
+/// black-box outcome, not a transport failure: CMA-ES must be able to rank the
+/// remaining valid candidates instead of losing an entire generation.
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum G1TerminationReason {
+    /// Every requested fixed step completed without a terminal guard.
+    Horizon = 0,
+    /// The pelvis crossed the declared minimum height.
+    BaseHeight = 1,
+    /// The pelvis tilt crossed the declared upright envelope.
+    BaseTilt = 2,
+    /// A foot exceeded the maximum admitted ground indentation.
+    ContactIndentation = 3,
+    /// A foot exceeded the admitted normal contact speed.
+    ContactSpeed = 4,
+    /// The normal law refused the candidate-dependent contact state.
+    ContactModel = 5,
+    /// A source joint crossed its hard position limit.
+    JointPositionLimit = 6,
+}
+
+impl G1TerminationReason {
+    /// Whether a guard ended the rollout instead of the requested horizon.
+    #[must_use]
+    pub const fn fell(self) -> bool {
+        !matches!(self, Self::Horizon)
+    }
 }
 
 /// Decomposed non-smooth objective and physical rollout diagnostics.
@@ -117,8 +171,8 @@ pub struct G1WalkingReceipt {
     pub impact_integral: f64,
     /// Number of fixed steps actually completed.
     pub completed_steps: usize,
-    /// Whether the terminal/fall guard ended the rollout early.
-    pub fell: bool,
+    /// Exact horizon or terminal guard that ended the rollout.
+    pub termination_reason: G1TerminationReason,
     /// Optional owner-derived trajectory for rendering.
     pub trace: Vec<G1TraceSample>,
 }
@@ -288,7 +342,10 @@ impl G1WalkingEvaluator {
         } else {
             Vec::new()
         };
-        let mut contact = [false; 2];
+        // The symmetric reference posture begins at the analytically derived
+        // static Hertz indentation. This supplies weight support on the first
+        // step instead of injecting a timestep-dependent free-fall impact.
+        let mut contact = [true; 2];
         let mut speed_error_integral = 0.0;
         let mut actuator_work_j = 0.0;
         let mut slip_integral = 0.0;
@@ -296,7 +353,7 @@ impl G1WalkingEvaluator {
         let mut joint_limit_integral = 0.0;
         let mut impact_integral = 0.0;
         let mut completed_steps = 0;
-        let mut fell = false;
+        let mut termination_reason = G1TerminationReason::Horizon;
         let mut terminal_guard_penalty = 0.0;
 
         'rollout: for step in 0..self.step_count {
@@ -331,49 +388,60 @@ impl G1WalkingEvaluator {
             let mut next_contact = [false; 2];
             for (foot, link) in [LEFT_FOOT_LINK, RIGHT_FOOT_LINK].into_iter().enumerate() {
                 let pose = kinematics.world_from_link[link];
-                let point_world = pose.transform_point(FOOT_POINT_BODY_M)?;
-                let point_velocity_body = kinematics.body_twist[link].linear
-                    + kinematics.body_twist[link].angular.cross(FOOT_POINT_BODY_M);
-                let point_velocity_world = pose.rotation().rotate(point_velocity_body)?;
-                let indentation_m = (-point_world.z).max(0.0);
-                if indentation_m == 0.0 {
-                    continue;
-                }
-                if indentation_m > MAX_CONTACT_INDENTATION_M {
-                    fell = true;
-                    terminal_guard_penalty +=
-                        220.0 + 120.0 * indentation_m / MAX_CONTACT_INDENTATION_M;
-                    break 'rollout;
-                }
-                if point_velocity_world.z.abs() > 8.0 {
-                    fell = true;
-                    terminal_guard_penalty += 260.0 + 10.0 * point_velocity_world.z.abs();
-                    break 'rollout;
-                }
-                next_contact[foot] = true;
-                normal_request.indentation_m = indentation_m;
-                normal_request.indentation_rate_m_per_s = -point_velocity_world.z;
-                let normal_force_n = match normal_request.evaluate()? {
-                    NormalPatchReceipt::Point(receipt) => receipt.normal_force_n,
-                    NormalPatchReceipt::Line(_) => {
-                        return Err(G1WalkingError::UnexpectedContactReceipt);
+                for point_body in FOOT_CONTACT_POINTS_BODY_M {
+                    let point_world = pose.transform_point(point_body)?;
+                    let point_velocity_body = kinematics.body_twist[link].linear
+                        + kinematics.body_twist[link].angular.cross(point_body);
+                    let point_velocity_world = pose.rotation().rotate(point_velocity_body)?;
+                    let indentation_m = (-point_world.z).max(0.0);
+                    if indentation_m == 0.0 {
+                        continue;
                     }
-                };
-                let slip = TangentialSlip::new(
-                    &self.contact_frame,
-                    [point_velocity_world.x, point_velocity_world.y, 0.0],
-                )?;
-                let friction = self
-                    .friction
-                    .evaluate(&self.interface, normal_force_n, slip)?;
-                let traction = friction.traction_n();
-                let force_world = Vec3::new(traction[0], traction[1], normal_force_n);
-                let force_body = pose.rotation().inverse().rotate(force_world)?;
-                external[link] = Wrench::new(FOOT_POINT_BODY_M.cross(force_body), force_body);
-                slip_integral += (point_velocity_world.x * point_velocity_world.x
-                    + point_velocity_world.y * point_velocity_world.y)
-                    * self.config.step_s;
-                impact_integral += (normal_force_n / 1_000.0).powi(2) * self.config.step_s;
+                    if indentation_m > MAX_CONTACT_INDENTATION_M {
+                        termination_reason = G1TerminationReason::ContactIndentation;
+                        terminal_guard_penalty +=
+                            220.0 + 120.0 * indentation_m / MAX_CONTACT_INDENTATION_M;
+                        break 'rollout;
+                    }
+                    if point_velocity_world.z.abs() > 8.0 {
+                        termination_reason = G1TerminationReason::ContactSpeed;
+                        terminal_guard_penalty += 260.0 + 10.0 * point_velocity_world.z.abs();
+                        break 'rollout;
+                    }
+                    next_contact[foot] = true;
+                    normal_request.indentation_m = indentation_m;
+                    normal_request.indentation_rate_m_per_s = -point_velocity_world.z;
+                    let normal_force_n = match normal_request.evaluate() {
+                        Ok(NormalPatchReceipt::Point(receipt)) => receipt.normal_force_n,
+                        Ok(NormalPatchReceipt::Line(_)) => {
+                            return Err(G1WalkingError::UnexpectedContactReceipt);
+                        }
+                        Err(_) => {
+                            termination_reason = G1TerminationReason::ContactModel;
+                            terminal_guard_penalty += 300.0;
+                            break 'rollout;
+                        }
+                    };
+                    let slip = TangentialSlip::new(
+                        &self.contact_frame,
+                        [point_velocity_world.x, point_velocity_world.y, 0.0],
+                    )?;
+                    let friction = self
+                        .friction
+                        .evaluate(&self.interface, normal_force_n, slip)?;
+                    let traction = friction.traction_n();
+                    let force_world = Vec3::new(traction[0], traction[1], normal_force_n);
+                    let force_body = pose.rotation().inverse().rotate(force_world)?;
+                    let previous = external[link];
+                    external[link] = Wrench::new(
+                        previous.torque + point_body.cross(force_body),
+                        previous.force + force_body,
+                    );
+                    slip_integral += (point_velocity_world.x * point_velocity_world.x
+                        + point_velocity_world.y * point_velocity_world.y)
+                        * self.config.step_s;
+                    impact_integral += (normal_force_n / 1_000.0).powi(2) * self.config.step_s;
+                }
             }
             contact = next_contact;
 
@@ -418,7 +486,7 @@ impl G1WalkingEvaluator {
                     } else {
                         next_position - source.upper_position_rad
                     };
-                    fell = true;
+                    termination_reason = G1TerminationReason::JointPositionLimit;
                     terminal_guard_penalty += 200.0 + 100.0 * overshoot / half_range;
                     break 'rollout;
                 }
@@ -453,9 +521,12 @@ impl G1WalkingEvaluator {
             let tilt_error = 1.0 + updated_gravity_direction_body.z;
             posture_integral += (2.5 * height_error * height_error + 4.0 * tilt_error * tilt_error)
                 * self.config.step_s;
-            fell = base.world_from_base.translation().z < 0.32
-                || updated_gravity_direction_body.z > -0.35;
-            if fell {
+            if base.world_from_base.translation().z < 0.32 {
+                termination_reason = G1TerminationReason::BaseHeight;
+                break;
+            }
+            if updated_gravity_direction_body.z > -0.35 {
+                termination_reason = G1TerminationReason::BaseTilt;
                 break;
             }
         }
@@ -478,7 +549,8 @@ impl G1WalkingEvaluator {
         // This keeps the ordering strict even at the horizon boundary: a fall
         // on the final step is worse than completing the horizon upright, and
         // a fall one step earlier is worse again.
-        let failed_horizon_steps = survival_charge_steps(self.step_count, completed_steps, fell);
+        let failed_horizon_steps =
+            survival_charge_steps(self.step_count, completed_steps, termination_reason.fell());
         let raw_shaping_score = -18.0 * distance_m
             + 12.0 * speed_error_integral
             + 0.008 * actuator_work_j
@@ -507,7 +579,7 @@ impl G1WalkingEvaluator {
             joint_limit_integral,
             impact_integral,
             completed_steps,
-            fell,
+            termination_reason,
             trace,
         })
     }
@@ -560,7 +632,7 @@ fn validate_config(config: G1WalkingConfig) -> Result<(), G1WalkingError> {
 
 fn rounded_step_count(config: G1WalkingConfig) -> Result<usize, G1WalkingError> {
     let count = (config.duration_s / config.step_s).round();
-    if !(count.is_finite() && count >= 1.0 && count <= 10_000.0) {
+    if !(count.is_finite() && (1.0..=10_000.0).contains(&count)) {
         return Err(G1WalkingError::InvalidConfig {
             field: "duration_s / step_s",
         });
@@ -584,9 +656,27 @@ fn initial_height(
         position,
         &[0.0; G1_POLICY_ACTUATORS],
     )?;
-    let left = kinematics.world_from_link[LEFT_FOOT_LINK].transform_point(FOOT_POINT_BODY_M)?;
-    let right = kinematics.world_from_link[RIGHT_FOOT_LINK].transform_point(FOOT_POINT_BODY_M)?;
-    Ok(-left.z.min(right.z) + 0.002)
+    let mut minimum_contact_z = f64::INFINITY;
+    for link in [LEFT_FOOT_LINK, RIGHT_FOOT_LINK] {
+        for point_body in FOOT_CONTACT_POINTS_BODY_M {
+            let point = kinematics.world_from_link[link].transform_point(point_body)?;
+            minimum_contact_z = minimum_contact_z.min(point.z);
+        }
+    }
+    Ok(-minimum_contact_z - static_contact_indentation_m(catalog))
+}
+
+fn static_contact_indentation_m(catalog: &CatalogRobotModel) -> f64 {
+    let total_mass_kg = catalog
+        .model()
+        .links()
+        .iter()
+        .map(|link| link.inertia().mass())
+        .sum::<f64>();
+    let contact_count = 2.0 * FOOT_CONTACT_POINTS_BODY_M.len() as f64;
+    let force_per_patch_n = total_mass_kg * GRAVITY_WORLD_M_PER_S2.z.abs() / contact_count;
+    let hertz_coefficient = (4.0 / 3.0) * FOOT_REDUCED_MODULUS_PA * FOOT_EFFECTIVE_RADIUS_M.sqrt();
+    (force_per_patch_n / hertz_coefficient).powf(2.0 / 3.0)
 }
 
 fn controller_force(
@@ -622,8 +712,8 @@ fn normal_request(interface: InterfaceSystemRef, step_s: f64) -> NormalPatchRequ
         },
         interface,
         law: NormalPatchLaw::HuntCrossleySphere {
-            effective_radius_m: 0.035,
-            reduced_modulus_pa: 2.0e6,
+            effective_radius_m: FOOT_EFFECTIVE_RADIUS_M,
+            reduced_modulus_pa: FOOT_REDUCED_MODULUS_PA,
             dissipation_s_per_m: 0.25,
         },
         geometry: NormalPatchGeometry::SpherePlane,
@@ -698,7 +788,13 @@ mod tests {
         assert!(first.trace.len() >= 5);
         assert_eq!(first.trace[0].link_pose.len(), G1_LINK_COUNT);
         assert!(first.objective.is_finite());
-        assert!(first.completed_steps >= 12);
+        assert!(
+            first.completed_steps >= evaluator.step_count / 2,
+            "zero policy terminated as {:?} after {} of {} steps",
+            first.termination_reason,
+            first.completed_steps,
+            evaluator.step_count
+        );
         Ok(())
     }
 
@@ -728,8 +824,14 @@ mod tests {
         let zero = evaluator.evaluate(&vec![0.0; fs_mbd::robot_models::G1_POLICY_DIMENSION])?;
         let aggressive =
             evaluator.evaluate(&vec![0.03; fs_mbd::robot_models::G1_POLICY_DIMENSION])?;
-        assert!(aggressive.completed_steps < zero.completed_steps);
-        assert!(aggressive.objective > zero.objective);
+        assert!(
+            aggressive.completed_steps < zero.completed_steps,
+            "aggressive {aggressive:?}, zero {zero:?}"
+        );
+        assert!(
+            aggressive.objective > zero.objective,
+            "aggressive {aggressive:?}, zero {zero:?}"
+        );
         Ok(())
     }
 
@@ -741,7 +843,7 @@ mod tests {
     }
 
     #[test]
-    fn reference_feet_start_at_the_declared_clearance() -> Result<(), G1WalkingError> {
+    fn reference_feet_start_at_static_contact_preload() -> Result<(), G1WalkingError> {
         let evaluator = G1WalkingEvaluator::new(G1WalkingConfig::default())?;
         let kinematics = forward_kinematics(
             evaluator.catalog.model(),
@@ -752,9 +854,12 @@ mod tests {
             &evaluator.reference_position,
             &[0.0; G1_POLICY_ACTUATORS],
         )?;
+        let expected_z = -static_contact_indentation_m(&evaluator.catalog);
         for link in [LEFT_FOOT_LINK, RIGHT_FOOT_LINK] {
-            let point = kinematics.world_from_link[link].transform_point(FOOT_POINT_BODY_M)?;
-            assert!((point.z - 0.002).abs() < 1.0e-10);
+            for point_body in FOOT_CONTACT_POINTS_BODY_M {
+                let point = kinematics.world_from_link[link].transform_point(point_body)?;
+                assert!((point.z - expected_z).abs() < 1.0e-10);
+            }
         }
         Ok(())
     }

@@ -1,6 +1,6 @@
 # CONTRACT: fs-cmaes-viz-wasm
 
-Status: **CMA schema 2 + G1 schema 1 — live surfaces.** Stateful packed browser
+Status: **CMA schema 2 + G1 schema 2 — live surfaces.** Stateful packed browser
 boundary over the production CMA-family owner in `fs-dfo` and the owner-composed
 G1 walking experiment. This crate owns validation, admission, numeric packet
 transport, and browser-specific resource limits. It owns no optimizer recurrence
@@ -36,12 +36,19 @@ and `fs-tribo` friction. It returns the owners' link poses for rendering. The
 binding layer adds no kinematics, dynamics, contact law, or browser-side pose
 reconstruction.
 
+Because the source catalog intentionally omits collision meshes, the experiment
+declares four equal-height compliant patches under each foot. Patch forces and
+moments accumulate on the source foot links. The reference posture starts at
+the analytic Hertz indentation that shares the model's static weight across
+the eight patches; it does not begin above unloaded contact and rely on a
+timestep-dependent impact to discover support.
+
 The experiment's semi-implicit step projects joint velocities onto the
 catalog's symmetric source speed limits. Any proposed overshoot is accumulated
 in `joint_limit_integral` before projection, so the optimizer sees a graded
 penalty while the next owner call remains inside its admitted state domain.
-Every uncompleted fixed step adds 1,000 objective units, and a fall adds one
-further 1,000-unit terminal charge. The remaining physical shaping terms are
+Every uncompleted fixed step adds 1,000 objective units, and a terminal guard
+adds one further 1,000-unit charge. The remaining physical shaping terms are
 smoothly compressed to `400 * tanh(raw / 10,000)`, hence lie strictly inside
 ±400. Survival is therefore lexicographically primary: one additional completed
 step dominates every possible shaping-score difference, so early termination
@@ -78,7 +85,7 @@ On wasm32, wasm-bindgen exports:
 | `evaluator.evaluate(policy)` | 5,040 policy words | decomposed scalar objective receipt |
 | `evaluator.evaluate_population(policies)` | up to 64 row-major policies | one objective per candidate in one boundary call |
 | `evaluator.trace(policy)` | 5,040 policy words | receipt plus decimated world-from-link poses |
-| `cmaes_viz_kernel_version()` | no arguments | `"fs-cmaes-viz-wasm 0.5.4"` |
+| `cmaes_viz_kernel_version()` | no arguments | `"fs-cmaes-viz-wasm 0.5.6"` |
 
 There is no JSON hot path and no schema-1 compatibility shim.
 
@@ -198,7 +205,7 @@ wasm boundary.
 
 ## G1 walking packets
 
-G1 packets use magic `0x47315731` (`"G1W1"`) and schema 1. The common output
+G1 packets use magic `0x47315732` (`"G1W2"`) and schema 2. The common output
 prefix is `magic, schema, status, kind, total_words`. Kinds are configuration 0,
 admission 1, evaluation 2, trace 3, and population 4.
 
@@ -221,7 +228,14 @@ step_s, duration_s, target_speed, gait_frequency, trace_stride`.
 Evaluation appends:
 
 `objective, distance_m, speed_error_integral, actuator_work_j, slip_integral,
-posture_integral, joint_limit_integral, impact_integral, completed_steps, fell`.
+posture_integral, joint_limit_integral, impact_integral, completed_steps,
+termination_reason`.
+
+Termination IDs are 0 horizon, 1 base height, 2 base tilt, 3 contact
+indentation, 4 contact speed, 5 contact-model domain, and 6 joint-position
+limit. A candidate-dependent contact-domain failure is a terminal evaluated
+outcome with ID 5 and a finite penalty, not a transport refusal that discards
+the rest of a valid CMA generation.
 
 Trace adds `sample_count`, followed by samples containing `time_s,
 left_contact, right_contact` and 16 poses in catalog link order. Every pose is
@@ -229,10 +243,11 @@ world-frame `translation_xyz, quaternion_wxyz`; the browser is a projector and
 must not recompute forward kinematics.
 
 Population success adds `population, objectives[population]`. Input is a flat
-row-major sequence of 1 through 64 complete 5,040-word policies. A candidate
-refusal fails the whole population packet and word 6 names its zero-based row,
-so a caller cannot silently replace an owner refusal with a fabricated score.
-All other G1 refusals use the same seven-word envelope with a NaN detail word.
+row-major sequence of 1 through 64 complete 5,040-word policies. A structural
+candidate refusal still fails the whole population packet and word 6 names its
+zero-based row, so a caller cannot silently replace an owner refusal with a
+fabricated score. All other G1 refusals use the same seven-word envelope with a
+NaN detail word.
 
 ## Determinism and budgets
 
