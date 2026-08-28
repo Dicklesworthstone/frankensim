@@ -1932,8 +1932,16 @@ mod tests {
         assert!((lm_cma.c_c - 0.0625).abs() < f64::EPSILON);
         assert!((lm_cma.c1 - 1.0 / (10.0 * fs_math::det::ln(101.0))).abs() < f64::EPSILON);
         assert_eq!(
-            lm_cma.weights.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
-            shared.weights.iter().map(|value| value.to_bits()).collect::<Vec<_>>()
+            lm_cma
+                .weights
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            shared
+                .weights
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
         );
 
         let lm_ma = LmMaState::new(&shared, 4);
@@ -2270,7 +2278,9 @@ mod tests {
         config.memory = Some(12);
         let mut optimizer = CmaOptimizer::new(config).expect("5,040-D LM-CMA optimizer");
         for _ in 0..GENERATIONS {
-            let batch = optimizer.ask().expect("plateau generation must be admitted");
+            let batch = optimizer
+                .ask()
+                .expect("plateau generation must be admitted");
             let maximum_coordinate = batch
                 .candidates()
                 .iter()

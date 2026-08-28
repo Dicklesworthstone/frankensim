@@ -1017,7 +1017,11 @@ mod tests {
                 } else {
                     0.0
                 };
-                assert_eq!(value.to_bits(), expected.to_bits(), "coordinate {coordinate}");
+                assert_eq!(
+                    value.to_bits(),
+                    expected.to_bits(),
+                    "coordinate {coordinate}"
+                );
             }
             parameters[coordinate] = 0.0;
         }
@@ -1048,7 +1052,10 @@ mod tests {
             G1ResidualPolicy::new(&parameters),
             Err(G1PolicyError::NonFiniteParameter { index: 1_234 })
         );
-        assert_eq!(g1_policy_features(&observation).unwrap().len(), G1_POLICY_FEATURES_PER_ACTUATOR);
+        assert_eq!(
+            g1_policy_features(&observation).unwrap().len(),
+            G1_POLICY_FEATURES_PER_ACTUATOR
+        );
     }
 
     #[test]

@@ -19,8 +19,9 @@ use fs_mbd::articulated::{
     BaseState, FreeFloatingBaseState, forward_kinematics, free_floating_forward_dynamics,
 };
 use fs_mbd::robot_models::{
-    CatalogRobotModel, G1_POLICY_ACTUATORS, G1PolicyObservation, G1ResidualPolicy,
-    g1_policy_phase_basis, unitree_g1_lower_body_waist_15dof,
+    CatalogRobotModel, G1_POLICY_ACTUATORS, G1_POLICY_DIMENSION, G1_POLICY_FEATURES_PER_ACTUATOR,
+    G1PolicyObservation, G1ResidualPolicy, g1_policy_phase_basis,
+    unitree_g1_lower_body_waist_15dof,
 };
 use fs_time::{RenormPolicy, se3_exp_step_renorm};
 use fs_tribo::{
@@ -28,7 +29,7 @@ use fs_tribo::{
 };
 
 /// Stable identity of the owner-composed walking experiment.
-pub const G1_WALKING_MODEL_ID: &str = "fs-cmaes/g1-walking-owner-composition-v4";
+pub const G1_WALKING_MODEL_ID: &str = "fs-cmaes/g1-walking-owner-composition-v5";
 /// Links retained by the source-bound lower-body-and-waist catalog.
 pub const G1_LINK_COUNT: usize = 16;
 /// Scalar pose words per link: translation xyz followed by quaternion wxyz.
@@ -88,10 +89,193 @@ const UNCOMPLETED_STEP_PENALTY: f64 = 1_000.0;
 const SHAPING_SCORE_LIMIT: f64 = 400.0;
 const SHAPING_SCORE_SCALE: f64 = 200.0;
 
+// Deterministic full-CMA balance bootstrap produced by the exact owner stack:
+// seed 0x4731_5040, lambda 12, 100 generations, sigma 0.12. The values shown
+// here include the documented authority-preserving rescale below. Only the
+// constant feature of each actuator row is populated. The browser may refine
+// this mean, but does not duplicate or reinterpret its matrix layout.
+const G1_STABILIZING_BIAS_MEAN: [f64; G1_POLICY_ACTUATORS] = [
+    0.017_766_138_492_429_157,
+    -0.168_057_269_071_138_13,
+    -0.012_697_094_379_504_57,
+    -0.164_599_907_469_318_19,
+    -0.372_055_811_198_347_2,
+    0.148_320_916_018_313_76,
+    0.041_955_640_046_858_97,
+    0.359_933_193_397_239_5,
+    0.247_505_043_063_289,
+    -0.127_277_809_298_783_88,
+    0.132_892_813_269_700_98,
+    0.021_511_844_825_068_634,
+    -0.073_510_126_346_253_52,
+    0.188_926_268_219_776_84,
+    -0.297_659_175_716_657_5,
+];
+
+// Phase-only curriculum coordinates learned on the 0.5 s stepping task by
+// full CMA (seed 0x4731_5040, lambda 16, 100 generations, sigma 0.025).
+// Values are actuator-major [sin(phi), cos(phi)].
+const G1_WALKING_PHASE_MEAN: [f64; 2 * G1_POLICY_ACTUATORS] = [
+    0.036_393_754_119_151_47,
+    -0.023_240_218_730_067_63,
+    -0.162_977_262_354_892_96,
+    -0.511_357_805_428_694_4,
+    -0.069_815_735_005_498_6,
+    -0.146_594_964_346_164_6,
+    -0.154_128_701_822_697,
+    -0.266_421_617_084_475_87,
+    0.366_310_299_251_820_6,
+    -0.047_740_510_541_966_666,
+    0.058_353_505_965_251_73,
+    0.363_539_161_970_823_53,
+    0.164_205_948_363_505_02,
+    -0.159_314_883_542_192_1,
+    0.040_191_223_519_578_954,
+    -0.020_057_558_791_935_708,
+    -0.374_163_375_009_483_43,
+    0.052_286_972_336_066_2,
+    -0.412_921_464_431_744_54,
+    -0.033_993_494_689_927_19,
+    -0.090_643_210_856_099_08,
+    0.250_343_162_439_816_86,
+    -0.094_506_463_949_991_72,
+    -0.007_071_547_211_942_467,
+    0.063_267_420_897_653_68,
+    0.078_955_208_172_530_03,
+    0.198_908_989_149_569_84,
+    0.485_052_992_576_621_6,
+    -0.054_538_445_856_887_004,
+    0.106_950_865_973_288_87,
+];
+
+// Balance-feedback curriculum coordinates. Full CMA first learned the 0.9 s
+// stepping handoff (seed 0x4731_5042, lambda 16, 120 generations, sigma 0.14),
+// then optimized the same coordinates on the 1.5 s walking task (seed
+// 0x4731_5044, lambda 16, 180 generations, sigma 0.055). Values are
+// actuator-major [gravity-x, gravity-y, angular-velocity-x,
+// angular-velocity-y], each on the owner's constant phase basis.
+const G1_WALKING_FEEDBACK_MEAN: [f64; 4 * G1_POLICY_ACTUATORS] = [
+    0.003_420_427_054_854_336,
+    -0.876_484_527_700_439,
+    0.241_735_640_556_958_95,
+    0.379_555_363_336_819_44,
+    -1.276_163_151_608_424_9,
+    -0.690_522_611_733_678_8,
+    0.727_173_366_174_298_8,
+    -0.264_935_017_617_422_44,
+    0.501_894_356_461_206_2,
+    -0.019_743_590_836_131_756,
+    -0.132_422_018_599_374_39,
+    -0.252_025_906_491_332_7,
+    0.520_464_950_336_566_4,
+    0.848_101_718_912_982_9,
+    0.257_696_600_322_882_9,
+    0.151_601_779_600_581_08,
+    0.661_704_314_377_082_5,
+    -0.355_242_847_457_154,
+    -0.150_730_712_825_672_4,
+    0.542_276_377_488_734_5,
+    -0.048_705_458_025_702_07,
+    -0.080_175_621_798_756_8,
+    1.258_327_146_027_464,
+    -1.130_113_557_916_497_6,
+    0.289_264_359_634_348_4,
+    0.675_135_215_623_244_2,
+    0.381_166_507_202_345_6,
+    0.027_381_138_229_414_292,
+    -0.290_047_313_226_315_44,
+    0.176_799_721_029_629_35,
+    0.261_293_873_521_813_8,
+    0.079_630_288_376_450_71,
+    -0.434_296_760_757_015_57,
+    0.114_140_429_150_741_37,
+    -0.390_299_032_591_770_8,
+    0.669_453_649_088_742,
+    0.591_999_814_876_223_7,
+    -0.094_249_526_137_474_37,
+    0.218_310_337_440_797_42,
+    0.103_841_220_026_350_34,
+    -0.158_159_177_265_707_02,
+    -0.458_039_418_117_632_05,
+    -0.125_833_563_476_452_2,
+    0.544_906_149_321_661_7,
+    0.291_300_818_382_965_6,
+    -0.160_772_916_765_562_77,
+    0.619_966_732_075_917_2,
+    0.102_892_939_537_601_84,
+    -1.096_983_433_057_297,
+    -0.274_497_140_410_196_6,
+    0.657_296_186_993_706_1,
+    0.321_872_109_012_967_7,
+    -0.157_473_423_097_482_52,
+    0.412_173_891_760_515_6,
+    -0.082_754_546_433_841_6,
+    0.144_724_766_377_610_64,
+    -0.014_945_163_970_648_712,
+    -0.062_959_761_690_269_16,
+    -0.187_304_731_212_728_34,
+    -0.599_866_140_509_916_4,
+];
+
+// The standing PD controller must leave enough owner-model motor authority for
+// a black-box policy to bend a swing knee and unload a foot. The earlier 0.32
+// fraction could not overcome the knee posture gain over a useful excursion.
+// The disclosed stabilizing biases above are analytically rescaled so
+// `0.65 * tanh(new_bias) == 0.32 * tanh(previous_bias)`: the initial residual
+// torque command is unchanged while learned excursions gain an honest,
+// symmetric authority envelope.
+const RESIDUAL_EFFORT_FRACTION: f64 = 0.65;
+
+/// Declared curriculum task. Balance and walking are different black-box
+/// objectives and are never silently mixed under one receipt.
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum G1Task {
+    /// Track zero velocity while upright in double support.
+    Balance = 0,
+    /// Track alternating support and swing clearance without translation.
+    Stepping = 1,
+    /// Track forward speed and the alternating-support gait schedule.
+    Walking = 2,
+}
+
+/// Owner-layout 5,040-D mean learned by the disclosed deterministic balance
+/// bootstrap. This is initialization data, not a hidden controller: 5,025
+/// coordinates remain exactly zero and CMA-ES may change every coordinate.
+#[must_use]
+pub fn g1_stabilizing_policy_mean() -> [f64; G1_POLICY_DIMENSION] {
+    let mut policy = [0.0; G1_POLICY_DIMENSION];
+    for (actuator, bias) in G1_STABILIZING_BIAS_MEAN.iter().copied().enumerate() {
+        policy[actuator * G1_POLICY_FEATURES_PER_ACTUATOR] = bias;
+    }
+    policy
+}
+
+/// Disclosed owner-layout walking curriculum mean used to initialize the live
+/// 5,040-D scalable-CMA refinement. Exactly 105 coordinates are nonzero: 15
+/// standing biases, 30 periodic gait weights, and 60 pelvis-state feedback
+/// weights. This is initialization data, not a hidden trajectory or browser
+/// controller; every owner policy coordinate remains mutable by CMA.
+#[must_use]
+pub fn g1_walking_curriculum_mean() -> [f64; G1_POLICY_DIMENSION] {
+    let mut policy = g1_stabilizing_policy_mean();
+    for actuator in 0..G1_POLICY_ACTUATORS {
+        let row = actuator * G1_POLICY_FEATURES_PER_ACTUATOR;
+        policy[row + 1] = G1_WALKING_PHASE_MEAN[2 * actuator];
+        policy[row + 2] = G1_WALKING_PHASE_MEAN[2 * actuator + 1];
+        for (feedback, signal) in [31, 32, 34, 35].into_iter().enumerate() {
+            policy[row + signal * 8] = G1_WALKING_FEEDBACK_MEAN[4 * actuator + feedback];
+        }
+    }
+    policy
+}
+
 /// Fixed, public experiment controls. They are intentionally not CMA search
 /// coordinates: changing them defines a different black-box problem.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct G1WalkingConfig {
+    /// Explicit balance or walking curriculum task.
+    pub task: G1Task,
     /// Fixed integrator step [s].
     pub step_s: f64,
     /// Requested physical rollout duration [s].
@@ -107,6 +291,7 @@ pub struct G1WalkingConfig {
 impl Default for G1WalkingConfig {
     fn default() -> Self {
         Self {
+            task: G1Task::Walking,
             step_s: 1.0 / 480.0,
             duration_s: 1.5,
             target_forward_speed_m_per_s: 0.65,
@@ -175,7 +360,7 @@ pub struct G1WalkingReceipt {
     pub posture_integral: f64,
     /// Integrated squared normalized proximity to source hard limits.
     pub joint_limit_integral: f64,
-    /// Integrated squared ground reaction, scaled to kilonewtons.
+    /// Integrated squared excess load above body weight, normalized by body weight.
     pub impact_integral: f64,
     /// Integrated backward pelvis travel [m].
     pub backward_distance_m: f64,
@@ -409,11 +594,14 @@ impl G1WalkingEvaluator {
             }
             let rotation = base.world_from_base.rotation();
             let gravity_direction_body = rotation.inverse().rotate(Vec3::new(0.0, 0.0, -1.0))?;
-            let target_velocity_body = rotation.inverse().rotate(Vec3::new(
-                self.config.target_forward_speed_m_per_s,
-                0.0,
-                0.0,
-            ))?;
+            let target_forward_speed_m_per_s = match self.config.task {
+                G1Task::Balance | G1Task::Stepping => 0.0,
+                G1Task::Walking => self.config.target_forward_speed_m_per_s,
+            };
+            let target_velocity_body =
+                rotation
+                    .inverse()
+                    .rotate(Vec3::new(target_forward_speed_m_per_s, 0.0, 0.0))?;
             let observation = G1PolicyObservation {
                 joint_position_rad: position,
                 joint_velocity_rad_per_s: velocity,
@@ -432,8 +620,7 @@ impl G1WalkingEvaluator {
                 let pose = kinematics.world_from_link[link];
                 for point_body in FOOT_CONTACT_POINTS_BODY_M {
                     let point_world = pose.transform_point(point_body)?;
-                    minimum_sole_height_m[foot] =
-                        minimum_sole_height_m[foot].min(point_world.z);
+                    minimum_sole_height_m[foot] = minimum_sole_height_m[foot].min(point_world.z);
                     let point_velocity_body = kinematics.body_twist[link].linear
                         + kinematics.body_twist[link].angular.cross(point_body);
                     let point_velocity_world = pose.rotation().rotate(point_velocity_body)?;
@@ -488,14 +675,14 @@ impl G1WalkingEvaluator {
                 }
             }
             let phase_signal = g1_policy_phase_basis(observation.phase_rad)?[1];
-            let (desired_contact, target_clearance_m) = gait_targets(phase_signal);
+            let (desired_contact, target_clearance_m) =
+                gait_targets(self.config.task, phase_signal);
             for foot in 0..2 {
                 if next_contact[foot] != desired_contact[foot] {
                     contact_schedule_mismatch_integral += self.config.step_s;
                 }
                 if !desired_contact[foot] {
-                    let clearance_error =
-                        minimum_sole_height_m[foot] - target_clearance_m[foot];
+                    let clearance_error = minimum_sole_height_m[foot] - target_clearance_m[foot];
                     swing_clearance_error_integral +=
                         clearance_error * clearance_error * self.config.step_s;
                 }
@@ -563,8 +750,8 @@ impl G1WalkingEvaluator {
                 let half_range = 0.5 * (source.upper_position_rad - source.lower_position_rad);
                 let normalized = ((position[actuator] - center) / half_range).abs();
                 let soft_limit_excess = ((normalized - 0.80) / 0.20).max(0.0);
-                joint_limit_integral += soft_limit_excess.powi(4) * self.config.step_s
-                    / G1_POLICY_ACTUATORS as f64;
+                joint_limit_integral +=
+                    soft_limit_excess.powi(4) * self.config.step_s / G1_POLICY_ACTUATORS as f64;
             }
             base.twist_body = base.twist_body.plus(
                 dynamics
@@ -585,13 +772,12 @@ impl G1WalkingEvaluator {
                 .inverse()
                 .rotate(Vec3::new(0.0, 0.0, -1.0))?;
             let world_velocity = updated_rotation.rotate(base.twist_body.linear)?;
-            let speed_error = world_velocity.x - self.config.target_forward_speed_m_per_s;
+            let speed_error = world_velocity.x - target_forward_speed_m_per_s;
             speed_error_integral += speed_error * speed_error * self.config.step_s;
             backward_distance_m += (-world_velocity.x).max(0.0) * self.config.step_s;
             let height_error = base.world_from_base.translation().z - self.initial_base_height_m;
             let normalized_height_error = height_error / POSTURE_HEIGHT_SCALE_M;
-            let tilt_sine = (updated_gravity_direction_body.x
-                * updated_gravity_direction_body.x
+            let tilt_sine = (updated_gravity_direction_body.x * updated_gravity_direction_body.x
                 + updated_gravity_direction_body.y * updated_gravity_direction_body.y)
                 .sqrt();
             let normalized_tilt = tilt_sine / POSTURE_TILT_SINE_SCALE;
@@ -637,9 +823,12 @@ impl G1WalkingEvaluator {
             survival_charge_steps(self.step_count, completed_steps, termination_reason.fell());
         let completed_duration_s =
             (completed_steps as f64 * self.config.step_s).max(self.config.step_s);
-        let speed_scale_m_per_s = self.config.target_forward_speed_m_per_s.max(0.25);
-        let target_distance_m =
-            (self.config.target_forward_speed_m_per_s * completed_duration_s).max(0.10);
+        let target_forward_speed_m_per_s = match self.config.task {
+            G1Task::Balance | G1Task::Stepping => 0.0,
+            G1Task::Walking => self.config.target_forward_speed_m_per_s,
+        };
+        let speed_scale_m_per_s = target_forward_speed_m_per_s.max(0.25);
+        let target_distance_m = (target_forward_speed_m_per_s * completed_duration_s).max(0.10);
         let body_weight_n = self.total_mass_kg * GRAVITY_WORLD_M_PER_S2.z.abs();
         let speed_tracking_error = speed_error_integral
             / (speed_scale_m_per_s * speed_scale_m_per_s * completed_duration_s);
@@ -654,19 +843,58 @@ impl G1WalkingEvaluator {
         let normalized_clearance_error = swing_clearance_error_integral
             / (TARGET_SWING_CLEARANCE_M * TARGET_SWING_CLEARANCE_M * completed_duration_s);
         let cost_of_transport = actuator_work_j / (body_weight_n * target_distance_m);
-        let raw_shaping_score = 28.0 * speed_tracking_error
-            + 20.0 * normalized_stance_slip
-            + 22.0 * posture_integral / completed_duration_s
-            + 30.0 * normalized_contact_mismatch
-            + 14.0 * normalized_clearance_error
-            + 8.0 * lateral_error_integral / completed_duration_s
-            + 6.0 * heading_error_integral / completed_duration_s
-            + 12.0 * backward_distance_m / target_distance_m
-            + 6.0 * joint_limit_integral / completed_duration_s
-            + 3.0 * impact_integral / completed_duration_s
-            + 0.15 * cost_of_transport
-            + 10.0 * flight_s / completed_duration_s
-            + terminal_guard_penalty;
+        let raw_shaping_score = match self.config.task {
+            G1Task::Balance => {
+                32.0 * speed_tracking_error
+                    + 18.0 * normalized_stance_slip
+                    + 34.0 * posture_integral / completed_duration_s
+                    + 24.0 * normalized_contact_mismatch
+                    + 12.0 * lateral_error_integral / completed_duration_s
+                    + 10.0 * heading_error_integral / completed_duration_s
+                    + 8.0 * joint_limit_integral / completed_duration_s
+                    + 4.0 * impact_integral / completed_duration_s
+                    + 0.10 * cost_of_transport
+                    + 30.0 * flight_s / completed_duration_s
+                    + terminal_guard_penalty
+            }
+            G1Task::Stepping => {
+                // Isolate the contact-mode transition before asking for
+                // translation. The compact curriculum stage can therefore
+                // learn genuine foot lift without sacrificing the stabilizer
+                // merely to chase forward speed or stance slip.
+                2.0 * speed_tracking_error
+                    + normalized_stance_slip
+                    + 30.0 * posture_integral / completed_duration_s
+                    + 260.0 * normalized_contact_mismatch
+                    + 180.0 * normalized_clearance_error
+                    + 14.0 * lateral_error_integral / completed_duration_s
+                    + 10.0 * heading_error_integral / completed_duration_s
+                    + 10.0 * joint_limit_integral / completed_duration_s
+                    + 8.0 * impact_integral / completed_duration_s
+                    + 0.02 * cost_of_transport
+                    + 60.0 * flight_s / completed_duration_s
+                    + terminal_guard_penalty
+            }
+            G1Task::Walking => {
+                // Alternating support and real swing clearance dominate the
+                // secondary score: a stable two-foot shuffle must not look
+                // like successful walking. Survival remains lexicographically
+                // primary through the separate uncompleted-step charge.
+                40.0 * speed_tracking_error
+                    + 40.0 * normalized_stance_slip
+                    + 20.0 * posture_integral / completed_duration_s
+                    + 180.0 * normalized_contact_mismatch
+                    + 100.0 * normalized_clearance_error
+                    + 12.0 * lateral_error_integral / completed_duration_s
+                    + 10.0 * heading_error_integral / completed_duration_s
+                    + 20.0 * backward_distance_m / target_distance_m
+                    + 8.0 * joint_limit_integral / completed_duration_s
+                    + 6.0 * impact_integral / completed_duration_s
+                    + 0.10 * cost_of_transport
+                    + 40.0 * flight_s / completed_duration_s
+                    + terminal_guard_penalty
+            }
+        };
         if !raw_shaping_score.is_finite() {
             return Err(G1WalkingError::NonFiniteObjective);
         }
@@ -756,10 +984,12 @@ fn rounded_step_count(config: G1WalkingConfig) -> Result<usize, G1WalkingError> 
     Ok(count as usize)
 }
 
-fn gait_targets(phase_signal: f64) -> ([bool; 2], [f64; 2]) {
-    let swing_progress = ((phase_signal.abs() - GAIT_SWITCH_WINDOW)
-        / (1.0 - GAIT_SWITCH_WINDOW))
-        .clamp(0.0, 1.0);
+fn gait_targets(task: G1Task, phase_signal: f64) -> ([bool; 2], [f64; 2]) {
+    if task == G1Task::Balance {
+        return ([true, true], [0.0, 0.0]);
+    }
+    let swing_progress =
+        ((phase_signal.abs() - GAIT_SWITCH_WINDOW) / (1.0 - GAIT_SWITCH_WINDOW)).clamp(0.0, 1.0);
     let swing_clearance_m = TARGET_SWING_CLEARANCE_M * swing_progress;
     if phase_signal > GAIT_SWITCH_WINDOW {
         ([false, true], [swing_clearance_m, 0.0])
@@ -827,7 +1057,7 @@ fn controller_force(
         let derivative_gain = if matches!(actuator, 3 | 9) { 3.8 } else { 2.5 };
         let posture = proportional_gain * (reference[actuator] - position[actuator])
             - derivative_gain * velocity[actuator];
-        let residual_force = 0.32 * effort_limit * residual[actuator];
+        let residual_force = RESIDUAL_EFFORT_FRACTION * effort_limit * residual[actuator];
         force[actuator] = (posture + residual_force).clamp(-effort_limit, effort_limit);
     }
     force
@@ -921,7 +1151,9 @@ mod tests {
         assert!(first.completed_steps > 0);
         assert_eq!(first.termination_reason, G1TerminationReason::BaseHeight);
         let support_time = first.single_support_s + first.double_support_s + first.flight_s;
-        assert!((support_time - first.completed_steps as f64 * evaluator.config.step_s).abs() < 1.0e-9);
+        assert!(
+            (support_time - first.completed_steps as f64 * evaluator.config.step_s).abs() < 1.0e-9
+        );
         Ok(())
     }
 
@@ -988,6 +1220,94 @@ mod tests {
                 assert!((point.z - expected_z).abs() < 1.0e-10);
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn curriculum_targets_are_explicit_and_alternate_without_ambiguity() {
+        assert_eq!(
+            gait_targets(G1Task::Balance, 1.0),
+            ([true, true], [0.0, 0.0])
+        );
+        let (left_swing, left_clearance) = gait_targets(G1Task::Walking, 1.0);
+        assert_eq!(left_swing, [false, true]);
+        assert_eq!(left_clearance, [TARGET_SWING_CLEARANCE_M, 0.0]);
+        assert_eq!(
+            gait_targets(G1Task::Stepping, 1.0),
+            (left_swing, left_clearance)
+        );
+        let (right_swing, right_clearance) = gait_targets(G1Task::Walking, -1.0);
+        assert_eq!(right_swing, [true, false]);
+        assert_eq!(right_clearance, [0.0, TARGET_SWING_CLEARANCE_M]);
+        assert_eq!(
+            gait_targets(G1Task::Walking, 0.0),
+            ([true, true], [0.0, 0.0])
+        );
+    }
+
+    #[test]
+    fn disclosed_stabilizing_mean_is_sparse_in_the_owner_policy_layout() {
+        let mean = g1_stabilizing_policy_mean();
+        assert_eq!(mean.len(), G1_POLICY_DIMENSION);
+        assert_eq!(
+            mean.iter().filter(|value| **value != 0.0).count(),
+            G1_POLICY_ACTUATORS
+        );
+        for (actuator, bias) in G1_STABILIZING_BIAS_MEAN.iter().copied().enumerate() {
+            assert_eq!(mean[actuator * G1_POLICY_FEATURES_PER_ACTUATOR], bias);
+        }
+    }
+
+    #[test]
+    fn authority_rescale_preserves_every_stabilizing_residual_torque() {
+        let previous_biases: [f64; G1_POLICY_ACTUATORS] = [
+            0.036_099_345_398_730_4,
+            -0.352_045_625_016_877_75,
+            -0.025_795_306_931_758_87,
+            -0.344_351_250_162_595_2,
+            -0.913_264_851_071_328_4,
+            0.308_516_452_236_123_34,
+            0.085_379_281_803_809_77,
+            0.869_453_722_515_560_9,
+            0.539_651_667_253_758_6,
+            -0.263_049_902_505_655,
+            0.275_096_343_882_518_25,
+            0.043_717_024_880_734_576,
+            -0.150_167_755_816_794_23,
+            0.399_189_107_437_022_24,
+            -0.673_648_120_290_733_1,
+        ];
+        for (previous, rescaled) in previous_biases.into_iter().zip(G1_STABILIZING_BIAS_MEAN) {
+            let previous_torque_fraction = 0.32 * previous.tanh();
+            let rescaled_torque_fraction = RESIDUAL_EFFORT_FRACTION * rescaled.tanh();
+            assert!((previous_torque_fraction - rescaled_torque_fraction).abs() < 2.0e-16);
+        }
+    }
+
+    #[test]
+    fn walking_curriculum_mean_completes_with_forward_single_support() -> Result<(), G1WalkingError>
+    {
+        let mean = g1_walking_curriculum_mean();
+        assert_eq!(mean.iter().filter(|value| **value != 0.0).count(), 105);
+        let evaluator = G1WalkingEvaluator::new(G1WalkingConfig::default())?;
+        let receipt = evaluator.evaluate(&mean)?;
+        assert_eq!(receipt.termination_reason, G1TerminationReason::Horizon);
+        assert_eq!(receipt.completed_steps, evaluator.step_count);
+        assert!(
+            receipt.distance_m > 0.59,
+            "curriculum distance was {} m",
+            receipt.distance_m
+        );
+        assert!(
+            receipt.single_support_s > 0.54,
+            "curriculum single-support time was {} s",
+            receipt.single_support_s
+        );
+        assert!(
+            receipt.flight_s < 0.01,
+            "curriculum flight time was {} s",
+            receipt.flight_s
+        );
         Ok(())
     }
 }

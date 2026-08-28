@@ -1,6 +1,6 @@
 # CONTRACT: fs-cmaes-viz-wasm
 
-Status: **CMA schema 2 + G1 schema 2 — live surfaces.** Stateful packed browser
+Status: **CMA schema 2 + G1 schema 5 — live surfaces.** Stateful packed browser
 boundary over the production CMA-family owner in `fs-dfo` and the owner-composed
 G1 walking experiment. This crate owns validation, admission, numeric packet
 transport, and browser-specific resource limits. It owns no optimizer recurrence
@@ -49,16 +49,34 @@ in `joint_limit_integral` before projection, so the optimizer sees a graded
 penalty while the next owner call remains inside its admitted state domain.
 Every uncompleted fixed step adds 1,000 objective units, and a terminal guard
 adds one further 1,000-unit charge. The remaining physical shaping terms are
-smoothly compressed to `400 * tanh(raw / 10,000)`, hence lie strictly inside
+smoothly compressed to `400 * tanh(raw / 200)`, hence lie strictly inside
 ±400. Survival is therefore lexicographically primary: one additional completed
 step dominates every possible shaping-score difference, so early termination
 cannot win by skipping future integrated costs.
 
-The raw secondary score is
-`-18 distance + 12 speed_error_integral + 0.008 actuator_work_j +
-16 slip_integral + 30 posture_integral + 2 joint_limit_integral +
-0.8 impact_integral + terminal_guard_penalty`. A non-finite raw score is a typed
-refusal; the bounding transform never conceals overflow.
+The admitted task selector is explicit: balance tracks zero velocity and double
+support, stepping tracks alternating support and swing clearance at zero
+commanded speed, and walking adds the configured forward-speed target. Each
+task applies declared weights to dimensionless speed error, stance slip,
+posture, contact-schedule mismatch, swing-clearance error, lateral/heading
+error, joint-limit proximity, normalized excess load, cost of transport, and
+flight time. Walking additionally charges backward travel. A non-finite raw
+score is a typed refusal; the bounding transform never conceals overflow.
+
+The standing PD controller grants the residual policy 65% of each source
+actuator's effort envelope. The sparse standing mean is analytically rescaled
+from the earlier 32% envelope so its initial residual torques are unchanged.
+This leaves enough symmetric motor authority for a learned policy to unload a
+foot and flex a swing knee instead of making the standing controller an
+unreported hard constraint.
+
+Two initialization vectors are public data. `stabilizing_policy_mean` has 15
+nonzero constant-bias coordinates. `walking_curriculum_mean` has exactly 105
+nonzero owner-layout coordinates: those biases, 30 first-harmonic phase
+weights, and 60 gravity/angular-rate feedback weights. Its full-CMA seed,
+population, generation, and sigma provenance is recorded beside the constants
+in `g1_walking.rs`. The live scalable-CMA stage may mutate all 5,040
+coordinates; neither vector is a hidden trajectory or browser controller.
 
 No-claims: this synchronous adapter does not add restarts, parallel execution,
 cancellation, constraints, or built-in analytic landscapes. The G1 experiment
@@ -70,7 +88,8 @@ covariance diagnostics.
 
 Native Rust exposes `PackedCmaSession::{new,receipt_packet,ask_packet,tell_packet}`
 and `PackedG1WalkingEvaluator::{new,receipt_packet,evaluate_packet,
-evaluate_population_packet,trace_packet}`, plus `kernel_version()`.
+evaluate_population_packet,trace_packet}`, the two public curriculum-mean
+constructors, and `kernel_version()`.
 
 On wasm32, wasm-bindgen exports:
 
@@ -82,10 +101,12 @@ On wasm32, wasm-bindgen exports:
 | `session.tell(objectives)` | packed `Float64Array` | updated snapshot or typed refusal |
 | `new G1WalkingVizEvaluator(config)` | packed `Float64Array` | reusable owner-composed walking evaluator |
 | `evaluator.receipt()` | no arguments | fixed controls and exact trace layout |
+| `evaluator.stabilizing_policy_mean()` | no arguments | sparse 5,040-D standing mean |
+| `evaluator.walking_curriculum_mean()` | no arguments | sparse 5,040-D walking curriculum mean |
 | `evaluator.evaluate(policy)` | 5,040 policy words | decomposed scalar objective receipt |
 | `evaluator.evaluate_population(policies)` | up to 64 row-major policies | one objective per candidate in one boundary call |
 | `evaluator.trace(policy)` | 5,040 policy words | receipt plus decimated world-from-link poses |
-| `cmaes_viz_kernel_version()` | no arguments | `"fs-cmaes-viz-wasm 0.5.7"` |
+| `cmaes_viz_kernel_version()` | no arguments | `"fs-cmaes-viz-wasm 0.6.4"` |
 
 There is no JSON hot path and no schema-1 compatibility shim.
 
@@ -207,14 +228,16 @@ wasm boundary.
 
 ## G1 walking packets
 
-G1 packets use magic `0x47315732` (`"G1W2"`) and schema 2. The common output
+G1 packets use magic `0x47315735` (`"G1W5"`) and schema 5. The common output
 prefix is `magic, schema, status, kind, total_words`. Kinds are configuration 0,
 admission 1, evaluation 2, trace 3, and population 4.
 
 Configuration is:
 
-`magic, schema, kind=0, total_words=9, step_s, duration_s,
-target_forward_speed_m_per_s, gait_frequency_hz, trace_stride`.
+`magic, schema, kind=0, total_words=10, step_s, duration_s,
+target_forward_speed_m_per_s, gait_frequency_hz, trace_stride, task`.
+
+Task IDs are 0 balance, 1 stepping, and 2 walking.
 
 The browser experiment admits step sizes from 1/480 through 1/30 s, durations
 through 4 s, commanded forward speeds through 2 m/s, gait frequencies from
@@ -225,12 +248,15 @@ envelope.
 Admission appends:
 
 `policy_dimension=5040, link_count=16, pose_words=7, trace_sample_words=115,
-step_s, duration_s, target_speed, gait_frequency, trace_stride`.
+step_s, duration_s, target_speed, gait_frequency, trace_stride, task`.
 
 Evaluation appends:
 
 `objective, distance_m, speed_error_integral, actuator_work_j, slip_integral,
-posture_integral, joint_limit_integral, impact_integral, completed_steps,
+posture_integral, joint_limit_integral, impact_integral, backward_distance_m,
+lateral_error_integral, heading_error_integral,
+contact_schedule_mismatch_integral, swing_clearance_error_integral,
+single_support_s, double_support_s, flight_s, completed_steps,
 termination_reason`.
 
 Termination IDs are 0 horizon, 1 base height, 2 base tilt, 3 contact

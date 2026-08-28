@@ -143,6 +143,11 @@ neither.
   actuator-major policy once, then evaluates the exact 42-signal by eight-phase
   feature map for each observation without repeatedly validating immutable
   weights. Deterministic `tanh` bounds every normalized actuator residual.
+- `robot_models::g1_policy_phase_basis` publicly owns the exact periodic basis
+  `[1, sin(phi), cos(phi), sin(2phi), cos(2phi), sin(3phi), cos(3phi),
+  sin(4phi)]`. Features are signal-major within each 336-weight actuator row;
+  curriculum code selects owner coordinates from this layout rather than
+  reproducing a second robot-policy representation.
 
 ## Invariants
 
@@ -178,6 +183,9 @@ neither.
   topology and compact source-joint order. Their retained numeric records use
   URDF SI units and pass the same articulated topology, limit, pose, and
   physical-inertia validation as caller-built models.
+- Every one of the 5,040 flat G1 policy coordinates is covered by an exhaustive
+  owner test that perturbs it and verifies that exactly the corresponding
+  actuator response changes under an observation with nonzero basis support.
 
 ## Error model
 

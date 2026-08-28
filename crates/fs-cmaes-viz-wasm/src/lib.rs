@@ -38,12 +38,12 @@ use fs_mbd::robot_models::G1_POLICY_DIMENSION;
 pub mod g1_walking;
 
 use g1_walking::{
-    G1_LINK_COUNT, G1_LINK_POSE_WORDS, G1TraceSample, G1WalkingConfig, G1WalkingError,
+    G1_LINK_COUNT, G1_LINK_POSE_WORDS, G1Task, G1TraceSample, G1WalkingConfig, G1WalkingError,
     G1WalkingEvaluator, G1WalkingReceipt,
 };
 
 /// Kernel identity returned by the browser capability probe.
-pub const KERNEL_VERSION: &str = "fs-cmaes-viz-wasm 0.5.9";
+pub const KERNEL_VERSION: &str = "fs-cmaes-viz-wasm 0.6.4";
 /// Exact binary64 word identifying schema-2 packets (`"CMA2"`).
 pub const PACKET_MAGIC: u32 = 0x434d_4132;
 /// Packed ask/tell ABI schema.
@@ -70,10 +70,10 @@ pub const FULL_DIMENSION_LIMIT: usize = 256;
 /// Linear and limited-memory families may admit large browser workloads.
 pub const SCALABLE_DIMENSION_LIMIT: usize = 100_000;
 
-/// Exact binary64 word identifying G1 walking packets (`"G1W3"`).
-pub const G1_PACKET_MAGIC: u32 = 0x4731_5733;
+/// Exact binary64 word identifying G1 curriculum packets (`"G1W5"`).
+pub const G1_PACKET_MAGIC: u32 = 0x4731_5735;
 /// Packed G1 objective/trace ABI schema.
-pub const G1_PACKET_SCHEMA_VERSION: u32 = 3;
+pub const G1_PACKET_SCHEMA_VERSION: u32 = 5;
 /// Input packet containing fixed walking-experiment controls.
 pub const G1_PACKET_KIND_CONFIG: u32 = 0;
 /// Output packet describing an admitted evaluator.
@@ -93,8 +93,8 @@ const REFUSAL_WORDS: usize = 7;
 const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
 const BROWSER_PACKET_FIXED_FLOATS: usize = 2 * ASK_FIXED_WORDS + SNAPSHOT_FIXED_WORDS;
 const MAX_BROWSER_LIVE_FLOATS: usize = 16 * 1024 * 1024;
-const G1_CONFIG_WORDS: usize = 9;
-const G1_ADMISSION_WORDS: usize = 14;
+const G1_CONFIG_WORDS: usize = 10;
+const G1_ADMISSION_WORDS: usize = 15;
 const G1_RECEIPT_WORDS: usize = 23;
 const G1_REFUSAL_WORDS: usize = 7;
 const G1_TRACE_SAMPLE_WORDS: usize = 3 + G1_LINK_COUNT * G1_LINK_POSE_WORDS;
@@ -466,6 +466,7 @@ impl PackedG1WalkingEvaluator {
             config.target_forward_speed_m_per_s,
             config.gait_frequency_hz,
             config.trace_stride as f64,
+            f64::from(config.task as u32),
         ]);
         debug_assert_eq!(packet.len(), G1_ADMISSION_WORDS);
         packet
@@ -576,7 +577,14 @@ fn parse_g1_config(packet: &[f64]) -> Result<G1WalkingConfig, G1PackedRefusal> {
     let trace_stride = exact_usize(packet[8])
         .filter(|value| (1..=1_000).contains(value))
         .ok_or(G1PackedRefusal::new(G1PackedRefusalCode::InvalidConfig))?;
+    let task = match exact_u32(packet[9]) {
+        Some(0) => G1Task::Balance,
+        Some(1) => G1Task::Stepping,
+        Some(2) => G1Task::Walking,
+        _ => return Err(G1PackedRefusal::new(G1PackedRefusalCode::InvalidConfig)),
+    };
     let config = G1WalkingConfig {
+        task,
         step_s: packet[4],
         duration_s: packet[5],
         target_forward_speed_m_per_s: packet[6],
@@ -1076,6 +1084,18 @@ mod schema_two_wasm {
             self.inner.receipt_packet()
         }
 
+        /// Return the disclosed sparse 5,040-D stabilizing curriculum mean.
+        #[must_use]
+        pub fn stabilizing_policy_mean(&self) -> Vec<f64> {
+            super::g1_walking::g1_stabilizing_policy_mean().to_vec()
+        }
+
+        /// Return the disclosed sparse 5,040-D walking curriculum mean.
+        #[must_use]
+        pub fn walking_curriculum_mean(&self) -> Vec<f64> {
+            super::g1_walking::g1_walking_curriculum_mean().to_vec()
+        }
+
         /// Evaluate one 5,040-D policy without retaining link poses.
         #[must_use]
         pub fn evaluate(&self, parameters: &[f64]) -> Vec<f64> {
@@ -1162,6 +1182,7 @@ mod schema_two_tests {
             0.65,
             1.55,
             trace_stride as f64,
+            f64::from(G1Task::Walking as u32),
         ]
     }
 
