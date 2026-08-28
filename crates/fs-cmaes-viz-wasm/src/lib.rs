@@ -43,7 +43,7 @@ use g1_walking::{
 };
 
 /// Kernel identity returned by the browser capability probe.
-pub const KERNEL_VERSION: &str = "fs-cmaes-viz-wasm 0.5.6";
+pub const KERNEL_VERSION: &str = "fs-cmaes-viz-wasm 0.5.9";
 /// Exact binary64 word identifying schema-2 packets (`"CMA2"`).
 pub const PACKET_MAGIC: u32 = 0x434d_4132;
 /// Packed ask/tell ABI schema.
@@ -70,10 +70,10 @@ pub const FULL_DIMENSION_LIMIT: usize = 256;
 /// Linear and limited-memory families may admit large browser workloads.
 pub const SCALABLE_DIMENSION_LIMIT: usize = 100_000;
 
-/// Exact binary64 word identifying G1 walking packets (`"G1W2"`).
-pub const G1_PACKET_MAGIC: u32 = 0x4731_5732;
+/// Exact binary64 word identifying G1 walking packets (`"G1W3"`).
+pub const G1_PACKET_MAGIC: u32 = 0x4731_5733;
 /// Packed G1 objective/trace ABI schema.
-pub const G1_PACKET_SCHEMA_VERSION: u32 = 2;
+pub const G1_PACKET_SCHEMA_VERSION: u32 = 3;
 /// Input packet containing fixed walking-experiment controls.
 pub const G1_PACKET_KIND_CONFIG: u32 = 0;
 /// Output packet describing an admitted evaluator.
@@ -95,7 +95,7 @@ const BROWSER_PACKET_FIXED_FLOATS: usize = 2 * ASK_FIXED_WORDS + SNAPSHOT_FIXED_
 const MAX_BROWSER_LIVE_FLOATS: usize = 16 * 1024 * 1024;
 const G1_CONFIG_WORDS: usize = 9;
 const G1_ADMISSION_WORDS: usize = 14;
-const G1_RECEIPT_WORDS: usize = 15;
+const G1_RECEIPT_WORDS: usize = 23;
 const G1_REFUSAL_WORDS: usize = 7;
 const G1_TRACE_SAMPLE_WORDS: usize = 3 + G1_LINK_COUNT * G1_LINK_POSE_WORDS;
 const G1_MAX_POPULATION: usize = 64;
@@ -667,6 +667,14 @@ fn g1_receipt_packet(kind: u32, receipt: &G1WalkingReceipt, include_trace: bool)
         receipt.posture_integral,
         receipt.joint_limit_integral,
         receipt.impact_integral,
+        receipt.backward_distance_m,
+        receipt.lateral_error_integral,
+        receipt.heading_error_integral,
+        receipt.contact_schedule_mismatch_integral,
+        receipt.swing_clearance_error_integral,
+        receipt.single_support_s,
+        receipt.double_support_s,
+        receipt.flight_s,
         receipt.completed_steps as f64,
         f64::from(receipt.termination_reason as u32),
     ]);
@@ -991,6 +999,7 @@ const fn complexity_order_id(order: CmaComplexityOrder) -> u32 {
     match order {
         CmaComplexityOrder::Linear => 0,
         CmaComplexityOrder::MemoryLinear => 1,
+        CmaComplexityOrder::MemoryQuadratic => 4,
         CmaComplexityOrder::Quadratic => 2,
         CmaComplexityOrder::Cubic => 3,
     }
@@ -1218,7 +1227,8 @@ mod schema_two_tests {
             let (sampling_order, update_order) = match family {
                 CmaFamily::Full => (2.0, 3.0),
                 CmaFamily::Separable => (0.0, 0.0),
-                CmaFamily::LmCma | CmaFamily::LmMa => (1.0, 1.0),
+                CmaFamily::LmCma => (1.0, 4.0),
+                CmaFamily::LmMa => (1.0, 1.0),
             };
             assert_eq!(receipt[18], sampling_order);
             assert_eq!(receipt[19], update_order);
@@ -1435,6 +1445,46 @@ mod schema_two_tests {
     #[test]
     fn lm_cma_executes_a_real_5040d_generation_without_dense_state() {
         assert_scalable_5040d_generation(CmaFamily::LmCma);
+    }
+
+    #[test]
+    fn lm_cma_packed_5040d_plateau_remains_finite_for_40_generations() {
+        const N: usize = 5_040;
+        const POPULATION: usize = 16;
+        const GENERATIONS: usize = 40;
+        let config = config_packet(
+            CmaFamily::LmCma,
+            &vec![0.0; N],
+            0.01,
+            POPULATION,
+            12,
+            POPULATION * GENERATIONS,
+            0x4731_5040,
+        );
+        let mut session = PackedCmaSession::new(&config);
+        assert_success(&session.receipt_packet(), PACKET_KIND_ADMISSION);
+        for generation in 0..GENERATIONS {
+            let ask = session.ask_packet();
+            assert_success(&ask, PACKET_KIND_ASK);
+            let maximum_coordinate = ask[ASK_FIXED_WORDS..]
+                .iter()
+                .map(|value| value.abs())
+                .fold(0.0, f64::max);
+            assert!(
+                maximum_coordinate.is_finite() && maximum_coordinate < 1.0e6,
+                "packed LM-CMA escaped its finite search scale: {maximum_coordinate:e}"
+            );
+            let snapshot = session.tell_packet(&tell_packet(generation as u64, &[1.0; POPULATION]));
+            assert_success(&snapshot, PACKET_KIND_SNAPSHOT);
+            let shape_start = SNAPSHOT_FIXED_WORDS + 2 * N;
+            let stored_vectors = snapshot[shape_start] as usize;
+            assert_eq!(snapshot[30] as usize, stored_vectors + 2);
+            assert!(
+                snapshot[shape_start + 2..shape_start + 2 + stored_vectors]
+                    .iter()
+                    .all(|value| value.is_finite())
+            );
+        }
     }
 
     #[test]

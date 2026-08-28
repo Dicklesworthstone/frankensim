@@ -20,7 +20,7 @@ use fs_mbd::articulated::{
 };
 use fs_mbd::robot_models::{
     CatalogRobotModel, G1_POLICY_ACTUATORS, G1PolicyObservation, G1ResidualPolicy,
-    unitree_g1_lower_body_waist_15dof,
+    g1_policy_phase_basis, unitree_g1_lower_body_waist_15dof,
 };
 use fs_time::{RenormPolicy, se3_exp_step_renorm};
 use fs_tribo::{
@@ -28,7 +28,7 @@ use fs_tribo::{
 };
 
 /// Stable identity of the owner-composed walking experiment.
-pub const G1_WALKING_MODEL_ID: &str = "fs-cmaes/g1-walking-owner-composition-v3";
+pub const G1_WALKING_MODEL_ID: &str = "fs-cmaes/g1-walking-owner-composition-v4";
 /// Links retained by the source-bound lower-body-and-waist catalog.
 pub const G1_LINK_COUNT: usize = 16;
 /// Scalar pose words per link: translation xyz followed by quaternion wxyz.
@@ -72,13 +72,21 @@ const TWO_PI: f64 = 2.0 * core::f64::consts::PI;
 const MAX_CONTACT_INDENTATION_M: f64 = 0.035;
 const FOOT_EFFECTIVE_RADIUS_M: f64 = 0.035;
 const FOOT_REDUCED_MODULUS_PA: f64 = 2.0e6;
+const MINIMUM_UPRIGHT_HEIGHT_M: f64 = 0.60;
+const MINIMUM_UPRIGHT_GRAVITY_Z: f64 = -0.866_025_403_784_438_6;
+const GAIT_SWITCH_WINDOW: f64 = 0.20;
+const TARGET_SWING_CLEARANCE_M: f64 = 0.055;
+const POSTURE_HEIGHT_SCALE_M: f64 = 0.12;
+const POSTURE_TILT_SINE_SCALE: f64 = 0.35;
+const LATERAL_POSITION_SCALE_M: f64 = 0.15;
+const HEADING_SINE_SCALE: f64 = 0.35;
 // Survival is lexicographically primary for this walking experiment. The
 // secondary physical shaping score is smoothly bounded below half of one
 // horizon-step charge, so one additional survived step dominates every
 // possible difference between shaping scores.
 const UNCOMPLETED_STEP_PENALTY: f64 = 1_000.0;
 const SHAPING_SCORE_LIMIT: f64 = 400.0;
-const SHAPING_SCORE_SCALE: f64 = 10_000.0;
+const SHAPING_SCORE_SCALE: f64 = 200.0;
 
 /// Fixed, public experiment controls. They are intentionally not CMA search
 /// coordinates: changing them defines a different black-box problem.
@@ -169,6 +177,22 @@ pub struct G1WalkingReceipt {
     pub joint_limit_integral: f64,
     /// Integrated squared ground reaction, scaled to kilonewtons.
     pub impact_integral: f64,
+    /// Integrated backward pelvis travel [m].
+    pub backward_distance_m: f64,
+    /// Integrated squared lateral position, normalized by 0.15 m [s].
+    pub lateral_error_integral: f64,
+    /// Integrated squared heading sine, normalized by 0.35 [s].
+    pub heading_error_integral: f64,
+    /// Integrated disagreement with the declared alternating-support schedule [s].
+    pub contact_schedule_mismatch_integral: f64,
+    /// Integrated squared swing-sole clearance error [m² s].
+    pub swing_clearance_error_integral: f64,
+    /// Time with exactly one foot contacting the ground [s].
+    pub single_support_s: f64,
+    /// Time with both feet contacting the ground [s].
+    pub double_support_s: f64,
+    /// Time with neither foot contacting the ground [s].
+    pub flight_s: f64,
     /// Number of fixed steps actually completed.
     pub completed_steps: usize,
     /// Exact horizon or terminal guard that ended the rollout.
@@ -269,6 +293,7 @@ pub struct G1WalkingEvaluator {
     contact_frame: ContactFrame,
     reference_position: [f64; G1_POLICY_ACTUATORS],
     initial_base_height_m: f64,
+    total_mass_kg: f64,
     step_count: usize,
 }
 
@@ -279,6 +304,12 @@ impl G1WalkingEvaluator {
         let catalog = unitree_g1_lower_body_waist_15dof()?;
         let reference_position = reference_posture();
         let initial_base_height_m = initial_height(&catalog, &reference_position)?;
+        let total_mass_kg = catalog
+            .model()
+            .links()
+            .iter()
+            .map(|link| link.inertia().mass())
+            .sum();
         let interface = InterfaceSystemRef::new(
             "g1-rubber-foot--rigid-dry-ground",
             "g1-walking-rollout-v1",
@@ -302,6 +333,7 @@ impl G1WalkingEvaluator {
             contact_frame,
             reference_position,
             initial_base_height_m,
+            total_mass_kg,
             step_count,
         })
     }
@@ -352,6 +384,14 @@ impl G1WalkingEvaluator {
         let mut posture_integral = 0.0;
         let mut joint_limit_integral = 0.0;
         let mut impact_integral = 0.0;
+        let mut backward_distance_m = 0.0;
+        let mut lateral_error_integral = 0.0;
+        let mut heading_error_integral = 0.0;
+        let mut contact_schedule_mismatch_integral = 0.0;
+        let mut swing_clearance_error_integral = 0.0;
+        let mut single_support_s = 0.0;
+        let mut double_support_s = 0.0;
+        let mut flight_s = 0.0;
         let mut completed_steps = 0;
         let mut termination_reason = G1TerminationReason::Horizon;
         let mut terminal_guard_penalty = 0.0;
@@ -386,10 +426,14 @@ impl G1WalkingEvaluator {
             let residual = policy.evaluate(&observation)?;
             let mut external = [Wrench::default(); G1_LINK_COUNT];
             let mut next_contact = [false; 2];
+            let mut minimum_sole_height_m = [f64::INFINITY; 2];
+            let mut total_normal_force_n = 0.0;
             for (foot, link) in [LEFT_FOOT_LINK, RIGHT_FOOT_LINK].into_iter().enumerate() {
                 let pose = kinematics.world_from_link[link];
                 for point_body in FOOT_CONTACT_POINTS_BODY_M {
                     let point_world = pose.transform_point(point_body)?;
+                    minimum_sole_height_m[foot] =
+                        minimum_sole_height_m[foot].min(point_world.z);
                     let point_velocity_body = kinematics.body_twist[link].linear
                         + kinematics.body_twist[link].angular.cross(point_body);
                     let point_velocity_world = pose.rotation().rotate(point_velocity_body)?;
@@ -422,6 +466,7 @@ impl G1WalkingEvaluator {
                             break 'rollout;
                         }
                     };
+                    total_normal_force_n += normal_force_n;
                     let slip = TangentialSlip::new(
                         &self.contact_frame,
                         [point_velocity_world.x, point_velocity_world.y, 0.0],
@@ -440,9 +485,29 @@ impl G1WalkingEvaluator {
                     slip_integral += (point_velocity_world.x * point_velocity_world.x
                         + point_velocity_world.y * point_velocity_world.y)
                         * self.config.step_s;
-                    impact_integral += (normal_force_n / 1_000.0).powi(2) * self.config.step_s;
                 }
             }
+            let phase_signal = g1_policy_phase_basis(observation.phase_rad)?[1];
+            let (desired_contact, target_clearance_m) = gait_targets(phase_signal);
+            for foot in 0..2 {
+                if next_contact[foot] != desired_contact[foot] {
+                    contact_schedule_mismatch_integral += self.config.step_s;
+                }
+                if !desired_contact[foot] {
+                    let clearance_error =
+                        minimum_sole_height_m[foot] - target_clearance_m[foot];
+                    swing_clearance_error_integral +=
+                        clearance_error * clearance_error * self.config.step_s;
+                }
+            }
+            match next_contact {
+                [true, true] => double_support_s += self.config.step_s,
+                [false, false] => flight_s += self.config.step_s,
+                _ => single_support_s += self.config.step_s,
+            }
+            let body_weight_n = self.total_mass_kg * GRAVITY_WORLD_M_PER_S2.z.abs();
+            let excess_load = (total_normal_force_n / body_weight_n - 1.0).max(0.0);
+            impact_integral += excess_load * excess_load * self.config.step_s;
             contact = next_contact;
 
             let generalized_force = controller_force(
@@ -472,8 +537,11 @@ impl G1WalkingEvaluator {
                 if next_velocity.abs() > velocity_limit {
                     let normalized_overshoot =
                         (next_velocity.abs() - velocity_limit) / velocity_limit;
-                    joint_limit_integral +=
-                        25.0 * normalized_overshoot * normalized_overshoot * self.config.step_s;
+                    joint_limit_integral += normalized_overshoot
+                        .mul_add(normalized_overshoot, 0.0)
+                        .min(1.0)
+                        * self.config.step_s
+                        / G1_POLICY_ACTUATORS as f64;
                 }
                 velocity[actuator] = next_velocity.clamp(-velocity_limit, velocity_limit);
                 let next_position = position[actuator] + velocity[actuator] * self.config.step_s;
@@ -493,8 +561,10 @@ impl G1WalkingEvaluator {
                 position[actuator] = next_position;
                 let center = 0.5 * (source.lower_position_rad + source.upper_position_rad);
                 let half_range = 0.5 * (source.upper_position_rad - source.lower_position_rad);
-                let normalized = (position[actuator] - center) / half_range;
-                joint_limit_integral += normalized.powi(8) * self.config.step_s;
+                let normalized = ((position[actuator] - center) / half_range).abs();
+                let soft_limit_excess = ((normalized - 0.80) / 0.20).max(0.0);
+                joint_limit_integral += soft_limit_excess.powi(4) * self.config.step_s
+                    / G1_POLICY_ACTUATORS as f64;
             }
             base.twist_body = base.twist_body.plus(
                 dynamics
@@ -517,15 +587,29 @@ impl G1WalkingEvaluator {
             let world_velocity = updated_rotation.rotate(base.twist_body.linear)?;
             let speed_error = world_velocity.x - self.config.target_forward_speed_m_per_s;
             speed_error_integral += speed_error * speed_error * self.config.step_s;
+            backward_distance_m += (-world_velocity.x).max(0.0) * self.config.step_s;
             let height_error = base.world_from_base.translation().z - self.initial_base_height_m;
-            let tilt_error = 1.0 + updated_gravity_direction_body.z;
-            posture_integral += (2.5 * height_error * height_error + 4.0 * tilt_error * tilt_error)
+            let normalized_height_error = height_error / POSTURE_HEIGHT_SCALE_M;
+            let tilt_sine = (updated_gravity_direction_body.x
+                * updated_gravity_direction_body.x
+                + updated_gravity_direction_body.y * updated_gravity_direction_body.y)
+                .sqrt();
+            let normalized_tilt = tilt_sine / POSTURE_TILT_SINE_SCALE;
+            posture_integral += 0.5
+                * (normalized_height_error * normalized_height_error
+                    + normalized_tilt * normalized_tilt)
                 * self.config.step_s;
-            if base.world_from_base.translation().z < 0.32 {
+            let lateral_position = base.world_from_base.translation().y;
+            lateral_error_integral +=
+                (lateral_position / LATERAL_POSITION_SCALE_M).powi(2) * self.config.step_s;
+            let forward_axis_world = updated_rotation.rotate(Vec3::new(1.0, 0.0, 0.0))?;
+            heading_error_integral +=
+                (forward_axis_world.y / HEADING_SINE_SCALE).powi(2) * self.config.step_s;
+            if base.world_from_base.translation().z < MINIMUM_UPRIGHT_HEIGHT_M {
                 termination_reason = G1TerminationReason::BaseHeight;
                 break;
             }
-            if updated_gravity_direction_body.z > -0.35 {
+            if updated_gravity_direction_body.z > MINIMUM_UPRIGHT_GRAVITY_Z {
                 termination_reason = G1TerminationReason::BaseTilt;
                 break;
             }
@@ -551,13 +635,37 @@ impl G1WalkingEvaluator {
         // a fall one step earlier is worse again.
         let failed_horizon_steps =
             survival_charge_steps(self.step_count, completed_steps, termination_reason.fell());
-        let raw_shaping_score = -18.0 * distance_m
-            + 12.0 * speed_error_integral
-            + 0.008 * actuator_work_j
-            + 16.0 * slip_integral
-            + 30.0 * posture_integral
-            + 2.0 * joint_limit_integral
-            + 0.8 * impact_integral
+        let completed_duration_s =
+            (completed_steps as f64 * self.config.step_s).max(self.config.step_s);
+        let speed_scale_m_per_s = self.config.target_forward_speed_m_per_s.max(0.25);
+        let target_distance_m =
+            (self.config.target_forward_speed_m_per_s * completed_duration_s).max(0.10);
+        let body_weight_n = self.total_mass_kg * GRAVITY_WORLD_M_PER_S2.z.abs();
+        let speed_tracking_error = speed_error_integral
+            / (speed_scale_m_per_s * speed_scale_m_per_s * completed_duration_s);
+        let normalized_stance_slip = slip_integral
+            / (2.0
+                * FOOT_CONTACT_POINTS_BODY_M.len() as f64
+                * speed_scale_m_per_s
+                * speed_scale_m_per_s
+                * completed_duration_s);
+        let normalized_contact_mismatch =
+            contact_schedule_mismatch_integral / (2.0 * completed_duration_s);
+        let normalized_clearance_error = swing_clearance_error_integral
+            / (TARGET_SWING_CLEARANCE_M * TARGET_SWING_CLEARANCE_M * completed_duration_s);
+        let cost_of_transport = actuator_work_j / (body_weight_n * target_distance_m);
+        let raw_shaping_score = 28.0 * speed_tracking_error
+            + 20.0 * normalized_stance_slip
+            + 22.0 * posture_integral / completed_duration_s
+            + 30.0 * normalized_contact_mismatch
+            + 14.0 * normalized_clearance_error
+            + 8.0 * lateral_error_integral / completed_duration_s
+            + 6.0 * heading_error_integral / completed_duration_s
+            + 12.0 * backward_distance_m / target_distance_m
+            + 6.0 * joint_limit_integral / completed_duration_s
+            + 3.0 * impact_integral / completed_duration_s
+            + 0.15 * cost_of_transport
+            + 10.0 * flight_s / completed_duration_s
             + terminal_guard_penalty;
         if !raw_shaping_score.is_finite() {
             return Err(G1WalkingError::NonFiniteObjective);
@@ -578,6 +686,14 @@ impl G1WalkingEvaluator {
             posture_integral,
             joint_limit_integral,
             impact_integral,
+            backward_distance_m,
+            lateral_error_integral,
+            heading_error_integral,
+            contact_schedule_mismatch_integral,
+            swing_clearance_error_integral,
+            single_support_s,
+            double_support_s,
+            flight_s,
             completed_steps,
             termination_reason,
             trace,
@@ -638,6 +754,20 @@ fn rounded_step_count(config: G1WalkingConfig) -> Result<usize, G1WalkingError> 
         });
     }
     Ok(count as usize)
+}
+
+fn gait_targets(phase_signal: f64) -> ([bool; 2], [f64; 2]) {
+    let swing_progress = ((phase_signal.abs() - GAIT_SWITCH_WINDOW)
+        / (1.0 - GAIT_SWITCH_WINDOW))
+        .clamp(0.0, 1.0);
+    let swing_clearance_m = TARGET_SWING_CLEARANCE_M * swing_progress;
+    if phase_signal > GAIT_SWITCH_WINDOW {
+        ([false, true], [swing_clearance_m, 0.0])
+    } else if phase_signal < -GAIT_SWITCH_WINDOW {
+        ([true, false], [0.0, swing_clearance_m])
+    } else {
+        ([true, true], [0.0, 0.0])
+    }
 }
 
 const fn reference_posture() -> [f64; G1_POLICY_ACTUATORS] {
@@ -788,13 +918,10 @@ mod tests {
         assert!(first.trace.len() >= 5);
         assert_eq!(first.trace[0].link_pose.len(), G1_LINK_COUNT);
         assert!(first.objective.is_finite());
-        assert!(
-            first.completed_steps >= evaluator.step_count / 2,
-            "zero policy terminated as {:?} after {} of {} steps",
-            first.termination_reason,
-            first.completed_steps,
-            evaluator.step_count
-        );
+        assert!(first.completed_steps > 0);
+        assert_eq!(first.termination_reason, G1TerminationReason::BaseHeight);
+        let support_time = first.single_support_s + first.double_support_s + first.flight_s;
+        assert!((support_time - first.completed_steps as f64 * evaluator.config.step_s).abs() < 1.0e-9);
         Ok(())
     }
 

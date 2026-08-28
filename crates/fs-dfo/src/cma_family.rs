@@ -36,6 +36,8 @@ pub enum CmaComplexityOrder {
     Linear,
     /// O(mn), where `m` is the configured limited-memory capacity.
     MemoryLinear,
+    /// O(m²n), where `m` is the configured limited-memory capacity.
+    MemoryQuadratic,
     /// O(n²).
     Quadratic,
     /// O(n³).
@@ -518,7 +520,7 @@ pub fn admit_cma(config: &CmaConfig) -> Result<CmaAdmission, CmaFamilyError> {
         ),
         CmaFamily::LmCma => (
             CmaComplexityOrder::MemoryLinear,
-            CmaComplexityOrder::MemoryLinear,
+            CmaComplexityOrder::MemoryQuadratic,
             0,
             memory
                 .checked_mul(n.checked_mul(2).and_then(|v| v.checked_add(2)).ok_or(
@@ -609,7 +611,6 @@ pub fn admit_cma(config: &CmaConfig) -> Result<CmaAdmission, CmaFamilyError> {
 struct SharedParameters {
     n: usize,
     lambda: usize,
-    mu: usize,
     weights: Vec<f64>,
     mu_eff: f64,
     chi_n: f64,
@@ -630,7 +631,6 @@ impl SharedParameters {
         Self {
             n: admission.dimension,
             lambda,
-            mu,
             weights,
             mu_eff,
             chi_n,
@@ -957,7 +957,11 @@ impl LmCmaState {
     fn new(shared: &SharedParameters, capacity: usize) -> Self {
         let c1 = 1.0 / (10.0 * fs_math::det::ln(shared.n as f64 + 1.0));
         let a = fs_math::det::sqrt(1.0 - c1);
-        let weights = lm_cma_weights(shared.mu);
+        // Loshchilov's reference uses ln(mu + 0.5) - ln(rank), which is the
+        // same recombination rule already owned by SharedParameters for the
+        // default mu = floor(lambda / 2). Reusing it prevents the limited-
+        // memory implementation from silently drifting to ln(mu + 1).
+        let weights = shared.weights.clone();
         let mu_eff = 1.0 / weights.iter().map(|weight| weight * weight).sum::<f64>();
         Self {
             p_c: vec![0.0; shared.n],
@@ -978,13 +982,17 @@ impl LmCmaState {
     fn sample(&self, z: &[f64], output: &mut [f64]) {
         output.copy_from_slice(z);
         for record in &self.records {
-            let projection = dot(&record.v, output);
+            // A_{i+1} z = a A_i z + b_i p_i (v_i^T z): every rank-one
+            // projection uses the original isotropic sample, while only the
+            // accumulated A_i z is progressively transformed.
+            let projection = dot(&record.v, z);
             for (out, &path) in output.iter_mut().zip(&record.p) {
                 *out = self.a.mul_add(*out, record.b * path * projection);
             }
         }
     }
 
+    #[cfg(test)]
     fn inverse_transform(&self, input: &[f64]) -> Vec<f64> {
         let mut output = input.to_vec();
         for record in &self.records {
@@ -1014,23 +1022,15 @@ impl LmCmaState {
                 (1.0 - self.c_c).mul_add(self.p_c[coordinate], path_scale * y_w[coordinate]);
         }
         ensure_vector_finite(&self.p_c, "LM-CMA path")?;
-        let v = self.inverse_transform(&self.p_c);
-        ensure_vector_finite(&v, "LM-CMA inverse transform")?;
-        let norm_squared = norm_squared(&v);
-        let ratio = self.c1 / (1.0 - self.c1);
-        let root = fs_math::det::sqrt(ratio.mul_add(norm_squared, 1.0));
-        let b = self.a * ratio / (root + 1.0);
-        let d = ratio / (self.a * root * (root + 1.0));
-        ensure_finite(b, "LM-CMA factor coefficient", 0)?;
-        ensure_finite(d, "LM-CMA inverse coefficient", 0)?;
         let record = LmCmaRecord {
             generation,
             p: self.p_c.clone(),
-            v,
-            b,
-            d,
+            v: vec![0.0; shared.n],
+            b: 0.0,
+            d: 0.0,
         };
-        self.insert_record(record);
+        let recompute_from = self.insert_record(record);
+        self.recompute_inverse_directions(recompute_from)?;
         if let Some(previous) = &self.previous_objectives {
             let success = population_success_rule(objectives, previous);
             self.success_path = 0.7f64.mul_add(self.success_path, 0.3 * success);
@@ -1041,10 +1041,11 @@ impl LmCmaState {
         Ok(y_w)
     }
 
-    fn insert_record(&mut self, record: LmCmaRecord) {
+    fn insert_record(&mut self, record: LmCmaRecord) -> usize {
         if self.records.len() < self.capacity {
+            let inserted = self.records.len();
             self.records.push(record);
-            return;
+            return inserted;
         }
         let mut closest = 0usize;
         let mut closest_gap = u64::MAX;
@@ -1064,6 +1065,45 @@ impl LmCmaState {
         };
         self.records.remove(remove);
         self.records.push(record);
+        remove
+    }
+
+    /// Rebuild every inverse direction whose prefix transform changed.
+    ///
+    /// The corrected July 2014 LM-CMA reference recomputes `v = A^-1 p`
+    /// after its temporal-memory replacement. Retaining the old `v` values
+    /// reproduces the corruption in the original publication: once a stored
+    /// predecessor is removed, every later inverse direction still encodes
+    /// that deleted factor and `A`/`A^-1` cease to be inverses. In a 5,040-D
+    /// plateaued objective this made sampled coordinates grow past 1e170.
+    /// Records before `start` have an unchanged prefix; rebuilding only the
+    /// suffix is both exact and the minimal corrected work.
+    fn recompute_inverse_directions(&mut self, start: usize) -> Result<(), CmaFamilyError> {
+        let ratio = self.c1 / (1.0 - self.c1);
+        for index in start..self.records.len() {
+            let (prefix, suffix) = self.records.split_at_mut(index);
+            let record = &mut suffix[0];
+            let mut inverse_direction = record.p.clone();
+            for prior in prefix {
+                let projection = dot(&prior.v, &inverse_direction);
+                for (value, &direction) in inverse_direction.iter_mut().zip(&prior.v) {
+                    *value = self
+                        .inverse_a
+                        .mul_add(*value, -prior.d * direction * projection);
+                }
+            }
+            ensure_vector_finite(&inverse_direction, "LM-CMA inverse transform")?;
+            let inverse_norm_squared = norm_squared(&inverse_direction);
+            let root = fs_math::det::sqrt(ratio.mul_add(inverse_norm_squared, 1.0));
+            let b = self.a * ratio / (root + 1.0);
+            let d = ratio / (self.a * root * (root + 1.0));
+            ensure_finite(b, "LM-CMA factor coefficient", index)?;
+            ensure_finite(d, "LM-CMA inverse coefficient", index)?;
+            record.v = inverse_direction;
+            record.b = b;
+            record.d = d;
+        }
+        Ok(())
     }
 }
 
@@ -1435,14 +1475,6 @@ fn normalize(weights: &mut [f64]) {
     for weight in weights {
         *weight /= sum;
     }
-}
-
-fn lm_cma_weights(mu: usize) -> Vec<f64> {
-    let mut weights: Vec<f64> = (1..=mu)
-        .map(|rank| fs_math::det::ln(mu as f64 + 1.0) - fs_math::det::ln(rank as f64))
-        .collect();
-    normalize(&mut weights);
-    weights
 }
 
 fn active_weights(lambda: usize, mu_eff: f64, n: f64, c1: f64, c_mu: f64) -> Vec<f64> {
@@ -1899,6 +1931,10 @@ mod tests {
         let lm_cma = LmCmaState::new(&shared, 16);
         assert!((lm_cma.c_c - 0.0625).abs() < f64::EPSILON);
         assert!((lm_cma.c1 - 1.0 / (10.0 * fs_math::det::ln(101.0))).abs() < f64::EPSILON);
+        assert_eq!(
+            lm_cma.weights.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+            shared.weights.iter().map(|value| value.to_bits()).collect::<Vec<_>>()
+        );
 
         let lm_ma = LmMaState::new(&shared, 4);
         assert!((lm_ma.c_sigma - 0.32).abs() < f64::EPSILON);
@@ -2191,6 +2227,72 @@ mod tests {
                 }
                 _ => panic!("wrong limited-memory snapshot"),
             }
+        }
+    }
+
+    #[test]
+    fn lm_cma_inverse_tracks_temporal_record_replacement() {
+        let mut config = CmaConfig::standard(CmaFamily::LmCma, vec![2.0; 8], 0.8, 80, 41);
+        config.population_size = Some(4);
+        config.memory = Some(3);
+        let mut optimizer = CmaOptimizer::new(config).expect("LM-CMA optimizer");
+        for _ in 0..12 {
+            complete_generation(&mut optimizer, rotated_quadratic);
+        }
+        let Strategy::LmCma(state) = &optimizer.strategy else {
+            panic!("wrong strategy");
+        };
+        let isotropic = [0.25, -0.5, 0.75, -1.0, 1.25, -1.5, 1.75, -2.0];
+        let mut transformed = [0.0; 8];
+        state.sample(&isotropic, &mut transformed);
+        let recovered = state.inverse_transform(&transformed);
+        for (&actual, expected) in recovered.iter().zip(isotropic) {
+            assert!(
+                (actual - expected).abs() < 2.0e-12,
+                "A^-1(Az) must recover z after bounded-memory replacement"
+            );
+        }
+    }
+
+    #[test]
+    fn lm_cma_5040d_plateau_stays_finite_through_memory_replacement() {
+        const N: usize = 5_040;
+        const POPULATION: usize = 16;
+        const GENERATIONS: usize = 40;
+        let mut config = CmaConfig::standard(
+            CmaFamily::LmCma,
+            vec![0.0; N],
+            0.01,
+            POPULATION * GENERATIONS,
+            0x4731_5040,
+        );
+        config.population_size = Some(POPULATION);
+        config.memory = Some(12);
+        let mut optimizer = CmaOptimizer::new(config).expect("5,040-D LM-CMA optimizer");
+        for _ in 0..GENERATIONS {
+            let batch = optimizer.ask().expect("plateau generation must be admitted");
+            let maximum_coordinate = batch
+                .candidates()
+                .iter()
+                .flatten()
+                .map(|value| value.abs())
+                .fold(0.0, f64::max);
+            assert!(
+                maximum_coordinate.is_finite() && maximum_coordinate < 1.0e6,
+                "LM-CMA transform escaped its finite search scale: {maximum_coordinate:e}"
+            );
+            let snapshot = optimizer
+                .tell(&batch, &vec![1.0; POPULATION])
+                .expect("finite plateau generation must update");
+            assert!(snapshot.sigma.is_finite());
+            assert!(snapshot.mean.iter().all(|value| value.is_finite()));
+            let CmaShapeSnapshot::LimitedMemory {
+                direction_norms, ..
+            } = snapshot.shape
+            else {
+                panic!("wrong shape receipt");
+            };
+            assert!(direction_norms.iter().all(|value| value.is_finite()));
         }
     }
 

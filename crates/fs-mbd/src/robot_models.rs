@@ -111,17 +111,7 @@ pub fn g1_policy_features(
     observation: &G1PolicyObservation,
 ) -> Result<[f64; G1_POLICY_FEATURES_PER_ACTUATOR], G1PolicyError> {
     validate_g1_observation(observation)?;
-    let phase = observation.phase_rad;
-    let basis = [
-        1.0,
-        det::sin(phase),
-        det::cos(phase),
-        det::sin(2.0 * phase),
-        det::cos(2.0 * phase),
-        det::sin(3.0 * phase),
-        det::cos(3.0 * phase),
-        det::sin(4.0 * phase),
-    ];
+    let basis = g1_policy_phase_basis(observation.phase_rad)?;
     let mut raw = [0.0; G1_POLICY_RAW_SIGNALS];
     raw[0] = 1.0;
     raw[1..16].copy_from_slice(&observation.joint_position_rad);
@@ -148,6 +138,26 @@ pub fn g1_policy_features(
         }
     }
     Ok(features)
+}
+
+/// Evaluate the exact deterministic periodic basis shared by the G1 policy
+/// and any owner-composed experiment that declares its phase schedule.
+pub fn g1_policy_phase_basis(
+    phase_rad: f64,
+) -> Result<[f64; G1_POLICY_PHASE_BASIS], G1PolicyError> {
+    if !phase_rad.is_finite() {
+        return Err(G1PolicyError::NonFiniteObservation { field: "phase_rad" });
+    }
+    Ok([
+        1.0,
+        det::sin(phase_rad),
+        det::cos(phase_rad),
+        det::sin(2.0 * phase_rad),
+        det::cos(2.0 * phase_rad),
+        det::sin(3.0 * phase_rad),
+        det::cos(3.0 * phase_rad),
+        det::sin(4.0 * phase_rad),
+    ])
 }
 
 /// An admitted, borrowed view of the exact 5,040-D G1 residual policy.
@@ -983,6 +993,38 @@ mod tests {
     }
 
     #[test]
+    fn every_g1_policy_coordinate_reaches_exactly_one_actuator() -> Result<(), G1PolicyError> {
+        let observation = G1PolicyObservation {
+            joint_position_rad: core::array::from_fn(|index| 0.05 * (index + 1) as f64),
+            joint_velocity_rad_per_s: core::array::from_fn(|index| -0.03 * (index + 1) as f64),
+            gravity_direction_body: Vec3::new(0.20, -0.30, -0.93),
+            angular_velocity_body_rad_per_s: Vec3::new(0.11, -0.17, 0.23),
+            target_velocity_error_body_m_per_s: Vec3::new(0.41, -0.29, 0.13),
+            foot_contact: [true, true],
+            phase_rad: 0.37,
+        };
+        let features = g1_policy_features(&observation)?;
+        assert!(features.iter().all(|feature| feature.abs() > 1.0e-9));
+        let mut parameters = vec![0.0; G1_POLICY_DIMENSION];
+        for coordinate in 0..G1_POLICY_DIMENSION {
+            parameters[coordinate] = 0.25;
+            let output = G1ResidualPolicy::new(&parameters)?.evaluate(&observation)?;
+            let expected_actuator = coordinate / G1_POLICY_FEATURES_PER_ACTUATOR;
+            let expected_feature = coordinate % G1_POLICY_FEATURES_PER_ACTUATOR;
+            for (actuator, value) in output.into_iter().enumerate() {
+                let expected = if actuator == expected_actuator {
+                    det::tanh(0.25 * features[expected_feature])
+                } else {
+                    0.0
+                };
+                assert_eq!(value.to_bits(), expected.to_bits(), "coordinate {coordinate}");
+            }
+            parameters[coordinate] = 0.0;
+        }
+        Ok(())
+    }
+
+    #[test]
     fn g1_policy_refuses_shape_and_non_finite_inputs() {
         let observation = G1PolicyObservation {
             joint_position_rad: [0.0; G1_POLICY_ACTUATORS],
@@ -1006,6 +1048,7 @@ mod tests {
             G1ResidualPolicy::new(&parameters),
             Err(G1PolicyError::NonFiniteParameter { index: 1_234 })
         );
+        assert_eq!(g1_policy_features(&observation).unwrap().len(), G1_POLICY_FEATURES_PER_ACTUATOR);
     }
 
     #[test]

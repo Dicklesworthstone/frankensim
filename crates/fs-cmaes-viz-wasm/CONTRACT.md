@@ -19,7 +19,7 @@ The available families are:
 |---:|---|---|---|
 | 0 | Full | dense active covariance | O(n²) / O(n³) |
 | 1 | Separable | active diagonal covariance | O(n) / O(n) |
-| 2 | LM-CMA | bounded direction memory | O(mn) / O(mn) |
+| 2 | LM-CMA | bounded direction memory | O(mn) / O(m²n) worst case |
 | 3 | LM-MA | bounded direction memory | O(mn) / O(mn) |
 
 Full CMA is capped at 256 dimensions at this browser boundary. The scalable
@@ -85,7 +85,7 @@ On wasm32, wasm-bindgen exports:
 | `evaluator.evaluate(policy)` | 5,040 policy words | decomposed scalar objective receipt |
 | `evaluator.evaluate_population(policies)` | up to 64 row-major policies | one objective per candidate in one boundary call |
 | `evaluator.trace(policy)` | 5,040 policy words | receipt plus decimated world-from-link poses |
-| `cmaes_viz_kernel_version()` | no arguments | `"fs-cmaes-viz-wasm 0.5.6"` |
+| `cmaes_viz_kernel_version()` | no arguments | `"fs-cmaes-viz-wasm 0.5.7"` |
 
 There is no JSON hot path and no schema-1 compatibility shim.
 
@@ -134,7 +134,9 @@ shape_kind, shape_payload_words`
 
 The header is followed by `mean[n]`, `best_point[n]`, and the shape payload.
 Before a best point exists, `has_best=0` and the best fields/point are NaN.
-Complexity order IDs are 0 linear, 1 O(mn), 2 quadratic, and 3 cubic.
+Complexity order IDs are 0 linear, 1 O(mn), 2 quadratic, 3 cubic, and 4
+O(m²n). LM-CMA reports ID 1 for sampling and ID 4 for its corrected temporal-
+memory update; LM-MA reports ID 1 for both.
 
 Shape payloads are representation-honest:
 
@@ -255,6 +257,14 @@ Seeded candidate generation, normal-draw semantics, and deterministic
 candidate-index tie ordering come from `fs-dfo` / `fs-rand`. The adapter
 adds no entropy or ordering. Replaying the same sequence of valid packets
 produces word-identical ask and snapshot packets within a target.
+
+LM-CMA follows Loshchilov's corrected July 2014 `LMCMAfixed` source, not the
+known-corrupt original recurrence. Each stored rank-one projection uses the
+original isotropic sample `z`, and deleting a temporal-memory predecessor
+recomputes every affected `v = A^-1 p` suffix direction. The corrected source
+and its note about the original stale-`v` defect are published at
+<https://sites.google.com/site/lmcmaeses/>. A direct `A^-1(Az) = z` regression
+and a 40-generation, 5,040-dimensional plateau regression guard both details.
 
 `max_evaluations` is a hard input budget. Admission truncates it to
 `floor(max_evaluations / population) * population`; ask refuses once that
