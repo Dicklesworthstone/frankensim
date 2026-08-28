@@ -1,6 +1,6 @@
 [package]
 name = "fs-cmaes-viz-wasm"
-version = "0.6.5"
+version = "0.6.6"
 edition = "2024"
 publish = false
 description = "Versioned packed WASM ask/tell boundary over fs-dfo's full, separable, LM-CMA, and LM-MA optimizers."
@@ -21,8 +21,12 @@ layer = "L6"
 fs-dfo = { path = "../fs-dfo" }
 # Existing mathematical owners composed by the G1 flagship rollout.
 fs-contact = { path = "../fs-contact" }
+fs-alloc = { path = "../fs-alloc" }
+fs-exec = { path = "../fs-exec" }
 fs-ga = { path = "../fs-ga" }
+fs-geom = { path = "../fs-geom" }
 fs-mbd = { path = "../fs-mbd" }
+fs-query = { path = "../fs-query" }
 fs-time = { path = "../fs-time" }
 fs-tribo = { path = "../fs-tribo" }
 

@@ -29,7 +29,7 @@ use fs_tribo::{
 };
 
 /// Stable identity of the owner-composed walking experiment.
-pub const G1_WALKING_MODEL_ID: &str = "fs-cmaes/g1-walking-owner-composition-v5";
+pub const G1_WALKING_MODEL_ID: &str = "fs-cmaes/g1-walking-owner-composition-v6";
 /// Links retained by the source-bound lower-body-and-waist catalog.
 pub const G1_LINK_COUNT: usize = 16;
 /// Scalar pose words per link: translation xyz followed by quaternion wxyz.
@@ -88,6 +88,19 @@ const HEADING_SINE_SCALE: f64 = 0.35;
 const UNCOMPLETED_STEP_PENALTY: f64 = 1_000.0;
 const SHAPING_SCORE_LIMIT: f64 = 400.0;
 const SHAPING_SCORE_SCALE: f64 = 200.0;
+/// Peak height of the disclosed smooth challenge terrain [m].
+pub const G1_TERRAIN_AMPLITUDE_M: f64 = 0.008;
+/// Longitudinal spatial frequency of the disclosed terrain [rad/m].
+pub const G1_TERRAIN_WAVENUMBER_RAD_PER_M: f64 = 2.4;
+/// Start of the deterministic lateral push pulse [s].
+pub const G1_PUSH_START_S: f64 = 0.55;
+/// End of the deterministic lateral push pulse [s].
+pub const G1_PUSH_END_S: f64 = 0.70;
+/// Peak of the smooth half-sine lateral push [N].
+pub const G1_PUSH_PEAK_FORCE_N: f64 = 24.0;
+const RECOVERY_TILT_SINE: f64 = 0.10;
+const RECOVERY_ANGULAR_SPEED_RAD_PER_S: f64 = 0.35;
+const RECOVERY_HEIGHT_ERROR_M: f64 = 0.055;
 
 // Deterministic full-CMA balance bootstrap produced by the exact owner stack:
 // seed 0x4731_5040, lambda 12, 100 generations, sigma 0.12. The values shown
@@ -239,6 +252,16 @@ pub enum G1Task {
     Walking = 2,
 }
 
+/// Fixed environment challenge, separate from the mutable policy coordinates.
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum G1Challenge {
+    /// Horizontal ground with no external perturbation.
+    Flat = 0,
+    /// Smooth height field plus one disclosed deterministic lateral push.
+    TerrainAndPush = 1,
+}
+
 /// Owner-layout 5,040-D mean learned by the disclosed deterministic balance
 /// bootstrap. This is initialization data, not a hidden controller: 5,025
 /// coordinates remain exactly zero and CMA-ES may change every coordinate.
@@ -276,6 +299,8 @@ pub fn g1_walking_curriculum_mean() -> [f64; G1_POLICY_DIMENSION] {
 pub struct G1WalkingConfig {
     /// Explicit balance or walking curriculum task.
     pub task: G1Task,
+    /// Fixed terrain/perturbation contract for every candidate in the run.
+    pub challenge: G1Challenge,
     /// Fixed integrator step [s].
     pub step_s: f64,
     /// Requested physical rollout duration [s].
@@ -292,6 +317,7 @@ impl Default for G1WalkingConfig {
     fn default() -> Self {
         Self {
             task: G1Task::Walking,
+            challenge: G1Challenge::Flat,
             step_s: 1.0 / 480.0,
             duration_s: 1.5,
             target_forward_speed_m_per_s: 0.65,
@@ -378,6 +404,16 @@ pub struct G1WalkingReceipt {
     pub double_support_s: f64,
     /// Time with neither foot contacting the ground [s].
     pub flight_s: f64,
+    /// Time integral of the applied push magnitude [N s].
+    pub push_impulse_n_s: f64,
+    /// Delay after the push until the declared recovery envelope is regained [s].
+    pub recovery_time_s: f64,
+    /// Minimum pelvis height over the rollout [m].
+    pub minimum_base_height_m: f64,
+    /// Maximum pelvis tilt sine over the rollout.
+    pub maximum_tilt_sine: f64,
+    /// Maximum absolute terrain height visited by a contact sample [m].
+    pub maximum_abs_terrain_height_m: f64,
     /// Number of fixed steps actually completed.
     pub completed_steps: usize,
     /// Exact horizon or terminal guard that ended the rollout.
@@ -475,7 +511,6 @@ pub struct G1WalkingEvaluator {
     catalog: CatalogRobotModel,
     interface: InterfaceSystemRef,
     friction: FrictionLaw,
-    contact_frame: ContactFrame,
     reference_position: [f64; G1_POLICY_ACTUATORS],
     initial_base_height_m: f64,
     total_mass_kg: f64,
@@ -508,14 +543,12 @@ impl G1WalkingEvaluator {
             characteristic_speed: 0.08,
             viscous_per_speed: 0.015,
         };
-        let contact_frame = ContactFrame::new([0.0, 0.0, 1.0])?;
         let step_count = rounded_step_count(config)?;
         Ok(Self {
             config,
             catalog,
             interface,
             friction,
-            contact_frame,
             reference_position,
             initial_base_height_m,
             total_mass_kg,
@@ -577,6 +610,16 @@ impl G1WalkingEvaluator {
         let mut single_support_s = 0.0;
         let mut double_support_s = 0.0;
         let mut flight_s = 0.0;
+        let mut push_impulse_n_s = 0.0;
+        let mut recovery_time_s = if self.config.challenge == G1Challenge::Flat {
+            0.0
+        } else {
+            (self.config.duration_s - G1_PUSH_END_S).max(0.0)
+        };
+        let mut recovery_recorded = self.config.challenge == G1Challenge::Flat;
+        let mut minimum_base_height_m = self.initial_base_height_m;
+        let mut maximum_tilt_sine = 0.0_f64;
+        let mut maximum_abs_terrain_height_m = 0.0_f64;
         let mut completed_steps = 0;
         let mut termination_reason = G1TerminationReason::Horizon;
         let mut terminal_guard_penalty = 0.0;
@@ -620,11 +663,18 @@ impl G1WalkingEvaluator {
                 let pose = kinematics.world_from_link[link];
                 for point_body in FOOT_CONTACT_POINTS_BODY_M {
                     let point_world = pose.transform_point(point_body)?;
-                    minimum_sole_height_m[foot] = minimum_sole_height_m[foot].min(point_world.z);
+                    let surface =
+                        terrain_surface(self.config.challenge, point_world.x, point_world.y);
+                    maximum_abs_terrain_height_m =
+                        maximum_abs_terrain_height_m.max(surface.height_m.abs());
+                    minimum_sole_height_m[foot] =
+                        minimum_sole_height_m[foot].min(point_world.z - surface.height_m);
                     let point_velocity_body = kinematics.body_twist[link].linear
                         + kinematics.body_twist[link].angular.cross(point_body);
                     let point_velocity_world = pose.rotation().rotate(point_velocity_body)?;
-                    let indentation_m = (-point_world.z).max(0.0);
+                    let normal_speed_m_per_s = point_velocity_world.dot(surface.normal_world);
+                    let indentation_m =
+                        ((surface.height_m - point_world.z) * surface.normal_world.z).max(0.0);
                     if indentation_m == 0.0 {
                         continue;
                     }
@@ -634,14 +684,14 @@ impl G1WalkingEvaluator {
                             220.0 + 120.0 * indentation_m / MAX_CONTACT_INDENTATION_M;
                         break 'rollout;
                     }
-                    if point_velocity_world.z.abs() > 8.0 {
+                    if normal_speed_m_per_s.abs() > 8.0 {
                         termination_reason = G1TerminationReason::ContactSpeed;
-                        terminal_guard_penalty += 260.0 + 10.0 * point_velocity_world.z.abs();
+                        terminal_guard_penalty += 260.0 + 10.0 * normal_speed_m_per_s.abs();
                         break 'rollout;
                     }
                     next_contact[foot] = true;
                     normal_request.indentation_m = indentation_m;
-                    normal_request.indentation_rate_m_per_s = -point_velocity_world.z;
+                    normal_request.indentation_rate_m_per_s = -normal_speed_m_per_s;
                     let normal_force_n = match normal_request.evaluate() {
                         Ok(NormalPatchReceipt::Point(receipt)) => receipt.normal_force_n,
                         Ok(NormalPatchReceipt::Line(_)) => {
@@ -654,25 +704,49 @@ impl G1WalkingEvaluator {
                         }
                     };
                     total_normal_force_n += normal_force_n;
+                    let tangent_velocity_world =
+                        point_velocity_world - surface.normal_world.scale(normal_speed_m_per_s);
+                    let contact_frame = ContactFrame::new([
+                        surface.normal_world.x,
+                        surface.normal_world.y,
+                        surface.normal_world.z,
+                    ])?;
                     let slip = TangentialSlip::new(
-                        &self.contact_frame,
-                        [point_velocity_world.x, point_velocity_world.y, 0.0],
+                        &contact_frame,
+                        [
+                            tangent_velocity_world.x,
+                            tangent_velocity_world.y,
+                            tangent_velocity_world.z,
+                        ],
                     )?;
                     let friction = self
                         .friction
                         .evaluate(&self.interface, normal_force_n, slip)?;
                     let traction = friction.traction_n();
-                    let force_world = Vec3::new(traction[0], traction[1], normal_force_n);
+                    let force_world = surface.normal_world.scale(normal_force_n)
+                        + Vec3::new(traction[0], traction[1], traction[2]);
                     let force_body = pose.rotation().inverse().rotate(force_world)?;
                     let previous = external[link];
                     external[link] = Wrench::new(
                         previous.torque + point_body.cross(force_body),
                         previous.force + force_body,
                     );
-                    slip_integral += (point_velocity_world.x * point_velocity_world.x
-                        + point_velocity_world.y * point_velocity_world.y)
-                        * self.config.step_s;
+                    slip_integral +=
+                        tangent_velocity_world.dot(tangent_velocity_world) * self.config.step_s;
                 }
+            }
+            let push_force_n = challenge_push_force_n(self.config.challenge, time_s);
+            if push_force_n > 0.0 {
+                let root_pose = kinematics.world_from_link[0];
+                let force_world = Vec3::new(0.0, push_force_n, 0.0);
+                let force_body = root_pose.rotation().inverse().rotate(force_world)?;
+                let application_body = Vec3::new(0.0, 0.0, 0.42);
+                let previous = external[0];
+                external[0] = Wrench::new(
+                    previous.torque + application_body.cross(force_body),
+                    previous.force + force_body,
+                );
+                push_impulse_n_s += push_force_n * self.config.step_s;
             }
             let phase_signal = g1_policy_phase_basis(observation.phase_rad)?[1];
             let (desired_contact, target_clearance_m) =
@@ -781,6 +855,17 @@ impl G1WalkingEvaluator {
                 + updated_gravity_direction_body.y * updated_gravity_direction_body.y)
                 .sqrt();
             let normalized_tilt = tilt_sine / POSTURE_TILT_SINE_SCALE;
+            minimum_base_height_m = minimum_base_height_m.min(base.world_from_base.translation().z);
+            maximum_tilt_sine = maximum_tilt_sine.max(tilt_sine);
+            if !recovery_recorded
+                && time_s + self.config.step_s >= G1_PUSH_END_S
+                && tilt_sine <= RECOVERY_TILT_SINE
+                && vec_norm(base.twist_body.angular) <= RECOVERY_ANGULAR_SPEED_RAD_PER_S
+                && height_error.abs() <= RECOVERY_HEIGHT_ERROR_M
+            {
+                recovery_time_s = (time_s + self.config.step_s - G1_PUSH_END_S).max(0.0);
+                recovery_recorded = true;
+            }
             posture_integral += 0.5
                 * (normalized_height_error * normalized_height_error
                     + normalized_tilt * normalized_tilt)
@@ -922,11 +1007,60 @@ impl G1WalkingEvaluator {
             single_support_s,
             double_support_s,
             flight_s,
+            push_impulse_n_s,
+            recovery_time_s,
+            minimum_base_height_m,
+            maximum_tilt_sine,
+            maximum_abs_terrain_height_m,
             completed_steps,
             termination_reason,
             trace,
         })
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TerrainSurface {
+    height_m: f64,
+    normal_world: Vec3,
+}
+
+fn terrain_surface(challenge: G1Challenge, x_m: f64, y_m: f64) -> TerrainSurface {
+    if challenge == G1Challenge::Flat {
+        return TerrainSurface {
+            height_m: 0.0,
+            normal_world: Vec3::new(0.0, 0.0, 1.0),
+        };
+    }
+    let phase = G1_TERRAIN_WAVENUMBER_RAD_PER_M * x_m;
+    let sine = phase.sin();
+    let cosine = phase.cos();
+    let lateral_scale = 1.0 + 0.20 * (3.0 * y_m).sin();
+    let height_m = G1_TERRAIN_AMPLITUDE_M * sine * sine * lateral_scale;
+    let gradient_x = G1_TERRAIN_AMPLITUDE_M
+        * 2.0
+        * sine
+        * cosine
+        * G1_TERRAIN_WAVENUMBER_RAD_PER_M
+        * lateral_scale;
+    let gradient_y = G1_TERRAIN_AMPLITUDE_M * sine * sine * 0.60 * (3.0 * y_m).cos();
+    let raw_normal = Vec3::new(-gradient_x, -gradient_y, 1.0);
+    TerrainSurface {
+        height_m,
+        normal_world: raw_normal.scale(1.0 / vec_norm(raw_normal)),
+    }
+}
+
+fn challenge_push_force_n(challenge: G1Challenge, time_s: f64) -> f64 {
+    if challenge == G1Challenge::Flat || !(G1_PUSH_START_S..=G1_PUSH_END_S).contains(&time_s) {
+        return 0.0;
+    }
+    let phase = (time_s - G1_PUSH_START_S) / (G1_PUSH_END_S - G1_PUSH_START_S);
+    G1_PUSH_PEAK_FORCE_N * (core::f64::consts::PI * phase).sin().max(0.0)
+}
+
+fn vec_norm(vector: Vec3) -> f64 {
+    vector.dot(vector).sqrt()
 }
 
 const fn survival_charge_steps(total_steps: usize, completed_steps: usize, fell: bool) -> usize {
@@ -1202,6 +1336,36 @@ mod tests {
     }
 
     #[test]
+    fn terrain_and_push_challenge_is_smooth_bounded_and_deterministic() {
+        let flat = terrain_surface(G1Challenge::Flat, 0.37, -0.12);
+        assert_eq!(flat.height_m, 0.0);
+        assert_eq!(flat.normal_world, Vec3::new(0.0, 0.0, 1.0));
+
+        let origin = terrain_surface(G1Challenge::TerrainAndPush, 0.0, 0.2);
+        assert_eq!(origin.height_m, 0.0);
+        assert!((origin.normal_world.z - 1.0).abs() < 1.0e-12);
+        let crest = terrain_surface(
+            G1Challenge::TerrainAndPush,
+            core::f64::consts::FRAC_PI_2 / G1_TERRAIN_WAVENUMBER_RAD_PER_M,
+            0.0,
+        );
+        assert!((crest.height_m - G1_TERRAIN_AMPLITUDE_M).abs() < 1.0e-12);
+        assert!((vec_norm(crest.normal_world) - 1.0).abs() < 1.0e-12);
+
+        assert_eq!(challenge_push_force_n(G1Challenge::Flat, 0.625), 0.0);
+        assert_eq!(
+            challenge_push_force_n(G1Challenge::TerrainAndPush, G1_PUSH_START_S),
+            0.0
+        );
+        let midpoint = 0.5 * (G1_PUSH_START_S + G1_PUSH_END_S);
+        assert!(
+            (challenge_push_force_n(G1Challenge::TerrainAndPush, midpoint) - G1_PUSH_PEAK_FORCE_N)
+                .abs()
+                < 1.0e-12
+        );
+    }
+
+    #[test]
     fn reference_feet_start_at_static_contact_preload() -> Result<(), G1WalkingError> {
         let evaluator = G1WalkingEvaluator::new(G1WalkingConfig::default())?;
         let kinematics = forward_kinematics(
@@ -1308,6 +1472,30 @@ mod tests {
             "curriculum flight time was {} s",
             receipt.flight_s
         );
+        Ok(())
+    }
+
+    #[test]
+    fn walking_curriculum_survives_the_disclosed_terrain_and_push_challenge()
+    -> Result<(), G1WalkingError> {
+        let evaluator = G1WalkingEvaluator::new(G1WalkingConfig {
+            challenge: G1Challenge::TerrainAndPush,
+            ..G1WalkingConfig::default()
+        })?;
+        let mean = g1_walking_curriculum_mean();
+        let first = evaluator.evaluate(&mean)?;
+        let second = evaluator.evaluate(&mean)?;
+        assert_eq!(first, second);
+        assert_eq!(
+            first.termination_reason,
+            G1TerminationReason::Horizon,
+            "challenge receipt: {first:?}"
+        );
+        assert_eq!(first.completed_steps, evaluator.step_count);
+        assert!(first.push_impulse_n_s > 0.0);
+        assert!(first.maximum_abs_terrain_height_m > 0.0);
+        assert!(first.minimum_base_height_m > 0.0);
+        assert!((0.0..=1.0).contains(&first.maximum_tilt_sine));
         Ok(())
     }
 }

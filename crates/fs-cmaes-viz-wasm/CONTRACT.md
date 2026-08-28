@@ -1,6 +1,6 @@
 # CONTRACT: fs-cmaes-viz-wasm
 
-Status: **CMA schema 2 + G1 schema 5 + ARM schema 1 — live surfaces.** Stateful
+Status: **CMA schema 2 + G1 schema 6 + ARM schema 2 — live surfaces.** Stateful
 packed browser boundary over the production CMA-family owner in `fs-dfo` and
 the owner-composed G1 walking and KUKA household-manipulation experiments. This
 crate owns validation, admission, numeric packet transport, browser-specific
@@ -41,17 +41,19 @@ The manipulation surface likewise composes the existing mathematical owners:
 `fs-mbd` supplies its pinned KUKA LBR iiwa 7 R800 topology, source dimensions,
 inertias, hard limits, forward kinematics, inverse dynamics, and articulated-
 body forward dynamics; `fs-ga` supplies SE(3) poses and wrenches; `fs-contact`
-supplies the compliant pad normal response; and `fs-tribo` supplies dry-
-friction capacity. Its 128 coordinates are 16 uniform knots for each of seven
+supplies the compliant pad normal response; `fs-tribo` supplies dry-friction
+capacity; and `fs-query` supplies certified convex separation over admitted
+oriented-box envelopes. Its 128 coordinates are 16 uniform knots for each of seven
 joint targets and one finger-separation target. The binding returns source-
 ordered world poses and never reconstructs robot kinematics in JavaScript.
 
 The household grasp is deliberately reduced and explicit. A horizontal surface
-supports the object until aligned opposing compliant pads develop enough
-owner-reported static-friction capacity. While held, a bilateral rigid grasp
-follows the flange and applies the object's weight to the articulated arm as an
-external wrench. After release, the object follows ballistic translation and a
-one-sided support response. Kitchen mug, living-room remote, and backyard
+supports the object until both finite pads engage. The rollout integrates
+owner-reported normal force, Coulomb stick/slip traction, the free object's
+translation, its body-frame angular velocity, and the reciprocal flange wrench;
+there is no Boolean latch, teleport, or rigid pose following. After release, the
+object follows ballistic translation, rotation, and a one-sided support response.
+Kitchen mug, living-room remote, and backyard
 trowel presets change disclosed dimensions, mass, grasp width, stations, and
 keep-out box while sharing the exact same physics and policy contract.
 
@@ -100,9 +102,10 @@ coordinates; neither vector is a hidden trajectory or browser controller.
 No-claims: this synchronous adapter does not add restarts, parallel execution,
 cancellation, constraints, or built-in analytic landscapes. The G1 experiment
 is a reduced lower-body-and-waist model, not a full Unitree digital twin or a
-hardware-transfer claim. The arm experiment has no mesh collision,
-self-collision, impact impulse, general grasp planner, deformable object, or
-hardware-transfer claim. Limited-memory snapshots do not invent dense
+hardware-transfer claim. The arm experiment uses conservative oriented-box
+envelopes rather than triangle meshes and has no general impact impulse solver,
+general grasp planner, deformable object, or hardware-transfer claim.
+Limited-memory snapshots do not invent dense
 covariance diagnostics.
 
 ## Public surface
@@ -135,7 +138,7 @@ On wasm32, wasm-bindgen exports:
 | `evaluator.evaluate(policy)` | 128 policy words | decomposed scalar objective receipt |
 | `evaluator.evaluate_population(policies)` | up to 64 row-major policies | one objective per candidate in one boundary call |
 | `evaluator.trace(policy)` | 128 policy words | receipt plus object and source-ordered link poses |
-| `cmaes_viz_kernel_version()` | no arguments | `"fs-cmaes-viz-wasm 0.6.5"` |
+| `cmaes_viz_kernel_version()` | no arguments | `"fs-cmaes-viz-wasm 0.6.6"` |
 
 There is no JSON hot path and no schema-1 compatibility shim.
 
@@ -257,16 +260,23 @@ wasm boundary.
 
 ## G1 walking packets
 
-G1 packets use magic `0x47315735` (`"G1W5"`) and schema 5. The common output
+G1 packets use magic `0x47315736` (`"G1W6"`) and schema 6. The common output
 prefix is `magic, schema, status, kind, total_words`. Kinds are configuration 0,
 admission 1, evaluation 2, trace 3, and population 4.
 
 Configuration is:
 
-`magic, schema, kind=0, total_words=10, step_s, duration_s,
-target_forward_speed_m_per_s, gait_frequency_hz, trace_stride, task`.
+`magic, schema, kind=0, total_words=11, step_s, duration_s,
+target_forward_speed_m_per_s, gait_frequency_hz, trace_stride, task,
+challenge`.
 
 Task IDs are 0 balance, 1 stepping, and 2 walking.
+Challenge IDs are 0 flat and 1 terrain plus lateral push. The combined challenge
+uses the disclosed smooth height field
+`0.008 sin²(2.4 x) (1 + 0.2 sin(3 y))` metres and a 24 N peak half-sine
+lateral pulse from 0.55 through 0.70 seconds. Contact indentation, normal, and
+tangential slip are all evaluated in the local terrain frame; the push is an
+external root wrench applied 0.42 m above the root origin.
 
 The browser experiment admits step sizes from 1/480 through 1/30 s, durations
 through 4 s, commanded forward speeds through 2 m/s, gait frequencies from
@@ -277,7 +287,9 @@ envelope.
 Admission appends:
 
 `policy_dimension=5040, link_count=16, pose_words=7, trace_sample_words=115,
-step_s, duration_s, target_speed, gait_frequency, trace_stride, task`.
+step_s, duration_s, target_speed, gait_frequency, trace_stride, task,
+challenge, terrain_amplitude_m, terrain_wavenumber_rad_per_m, push_start_s,
+push_end_s, push_peak_force_n`.
 
 Evaluation appends:
 
@@ -285,8 +297,14 @@ Evaluation appends:
 posture_integral, joint_limit_integral, impact_integral, backward_distance_m,
 lateral_error_integral, heading_error_integral,
 contact_schedule_mismatch_integral, swing_clearance_error_integral,
-single_support_s, double_support_s, flight_s, completed_steps,
+single_support_s, double_support_s, flight_s, push_impulse_n_s,
+recovery_time_s, minimum_base_height_m,
+maximum_tilt_sine, maximum_abs_terrain_height_m, completed_steps,
 termination_reason`.
+
+`recovery_time_s` is elapsed time after the push until the disclosed tilt,
+angular-speed, and height bands are all regained. If recovery never occurs, it
+is right-censored at the available post-push horizon rather than fabricated.
 
 Termination IDs are 0 horizon, 1 base height, 2 base tilt, 3 contact
 indentation, 4 contact speed, 5 contact-model domain, and 6 joint-position
@@ -308,7 +326,7 @@ NaN detail word.
 
 ## Household-arm packets
 
-Arm packets use magic `0x41524d31` (`"ARM1"`) and schema 1. The common output
+Arm packets use magic `0x41524d31` (`"ARM1"`) and schema 2. The common output
 prefix is `magic, schema, status, kind, total_words`. Kinds are configuration 0,
 admission 1, evaluation 2, trace 3, and population 4.
 
@@ -336,9 +354,17 @@ poses, inertias, and limits remain source-bound in `fs-mbd`.
 Evaluation appends:
 
 `objective, final_object_error_m, minimum_reach_error_m, maximum_lift_m,
-actuator_work_j, obstacle_integral, control_limit_integral, first_grasp_time_s,
-grasp_duration_s, peak_grip_force_n, ever_grasped, released_after_transport,
-placed, completed_steps`.
+actuator_work_j, collision_risk_integral, minimum_certified_clearance_m,
+possible_collision_time_s, collision_query_iterations, control_limit_integral,
+first_grasp_time_s, grasp_duration_s, peak_grip_force_n, ever_grasped,
+released_after_transport, placed, completed_steps`.
+
+Each arm step constructs conservative oriented boxes for seven moving link
+segments and the object. Containing spheres provide a certified broad reject;
+near pairs delegate to `fs-query` convex separation for obstacle, proximal
+object, and non-adjacent self checks. `possible_collision_time_s` counts steps
+where separation was not proven, while the minimum clearance and iteration
+count expose the query work instead of hiding it in a generic penalty.
 
 `placed=1` requires an established bilateral grasp, release after transport,
 at least the admitted lift target, terminal position error no greater than the

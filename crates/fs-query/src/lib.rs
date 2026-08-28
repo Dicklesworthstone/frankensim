@@ -83,7 +83,7 @@ pub use inflation::{ContactInflation, ContactInflationError};
 
 pub use convex::{
     CONVEX_SEPARATION_DEFAULT_ITERATIONS, CONVEX_SEPARATION_MAX_ITERATIONS, ConvexBox,
-    ConvexSeparation, ConvexSphere, ConvexSupportMap, convex_separation,
+    ConvexOrientedBox, ConvexSeparation, ConvexSphere, ConvexSupportMap, convex_separation,
     convex_separation_with_inflation,
 };
 pub use moments::{

@@ -220,6 +220,109 @@ impl ConvexSupportMap for ConvexBox {
     }
 }
 
+/// Oriented solid box as a support map.
+///
+/// The three axes are world-space unit vectors in local x/y/z order. The
+/// constructor validates the frame instead of silently normalizing it so a
+/// caller cannot smuggle scale or shear into a collision envelope.
+#[derive(Debug, Clone, Copy)]
+pub struct ConvexOrientedBox {
+    center: Point3,
+    axes: [Vec3; 3],
+    half_extents: Vec3,
+    slack: f64,
+}
+
+impl ConvexOrientedBox {
+    /// Construct a finite, non-degenerate oriented box.
+    ///
+    /// # Errors
+    /// [`QueryError::ConvexInvalidShape`] when the center, extents, or frame
+    /// are non-finite, an extent is not positive, or the frame is not a
+    /// right-handed orthonormal basis within the public tolerance.
+    pub fn new(center: Point3, axes: [Vec3; 3], half_extents: Vec3) -> Result<Self, QueryError> {
+        const FRAME_TOLERANCE: f64 = 1.0e-10;
+        let finite_center = center.x.is_finite() && center.y.is_finite() && center.z.is_finite();
+        let finite_extents = half_extents.x.is_finite()
+            && half_extents.y.is_finite()
+            && half_extents.z.is_finite()
+            && half_extents.x > 0.0
+            && half_extents.y > 0.0
+            && half_extents.z > 0.0;
+        let finite_axes = axes
+            .iter()
+            .all(|axis| axis.x.is_finite() && axis.y.is_finite() && axis.z.is_finite());
+        let unit_axes = finite_axes
+            && axes
+                .iter()
+                .all(|axis| (axis.dot(*axis) - 1.0).abs() <= FRAME_TOLERANCE);
+        let orthogonal = unit_axes
+            && axes[0].dot(axes[1]).abs() <= FRAME_TOLERANCE
+            && axes[0].dot(axes[2]).abs() <= FRAME_TOLERANCE
+            && axes[1].dot(axes[2]).abs() <= FRAME_TOLERANCE;
+        let handedness = cross(axes[0], axes[1]).dot(axes[2]);
+        let right_handed = orthogonal && (handedness - 1.0).abs() <= 4.0 * FRAME_TOLERANCE;
+        if !(finite_center && finite_extents && right_handed) {
+            return Err(QueryError::ConvexInvalidShape {
+                reason: "oriented box needs a finite center, positive finite half extents, and a right-handed orthonormal frame",
+            });
+        }
+
+        let center_scale = center.x.abs().max(center.y.abs()).max(center.z.abs());
+        let extent_scale = half_extents.x + half_extents.y + half_extents.z;
+        // Three scaled-axis additions plus the support-direction dots. This is
+        // deliberately conservative; the slack is composed by the query.
+        let slack = ((center_scale + extent_scale) * 2f64.powi(-42)).next_up();
+        Ok(Self {
+            center,
+            axes,
+            half_extents,
+            slack,
+        })
+    }
+}
+
+impl ConvexSupportMap for ConvexOrientedBox {
+    fn support_point(&self, direction: Vec3) -> Point3 {
+        let extents = [
+            self.half_extents.x,
+            self.half_extents.y,
+            self.half_extents.z,
+        ];
+        self.axes
+            .iter()
+            .zip(extents)
+            .fold(self.center, |point, (axis, extent)| {
+                let signed_extent = if direction.dot(*axis) < 0.0 {
+                    -extent
+                } else {
+                    extent
+                };
+                point.offset(axis.scale(signed_extent))
+            })
+    }
+
+    fn interior_point(&self) -> Point3 {
+        self.center
+    }
+
+    fn support_slack(&self) -> f64 {
+        self.slack
+    }
+
+    fn name(&self) -> &'static str {
+        "convex/oriented-box"
+    }
+}
+
+fn cross(a: Vec3, b: Vec3) -> Vec3 {
+    Vec3::new(
+        a.y * b.z - a.z * b.y,
+        a.z * b.x - a.x * b.z,
+        a.x * b.y - a.y * b.x,
+    )
+}
+
 /// A certified separation verdict between two convex sets.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ConvexSeparation {
@@ -465,4 +568,49 @@ fn norm_upper(v: Vec3) -> f64 {
 fn dot_lower(v: Vec3, s: Vec3) -> f64 {
     let sum = ((v.x * s.x).next_down() + (v.y * s.y).next_down()).next_down();
     (sum + (v.z * s.z).next_down()).next_down()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ConvexOrientedBox, ConvexSupportMap};
+    use fs_geom::{Point3, Vec3};
+
+    const AXES: [Vec3; 3] = [
+        Vec3::new(0.0, 1.0, 0.0),
+        Vec3::new(-1.0, 0.0, 0.0),
+        Vec3::new(0.0, 0.0, 1.0),
+    ];
+
+    #[test]
+    fn oriented_box_support_uses_the_declared_world_frame() {
+        let shape = ConvexOrientedBox::new(
+            Point3::new(1.0, 2.0, 3.0),
+            AXES,
+            Vec3::new(0.5, 0.25, 0.125),
+        )
+        .expect("valid quarter-turn box");
+        let support = shape.support_point(Vec3::new(1.0, 1.0, -1.0));
+        assert_eq!(support, Point3::new(1.25, 2.5, 2.875));
+        assert!(shape.support_slack().is_finite());
+        assert!(shape.support_slack() > 0.0);
+    }
+
+    #[test]
+    fn oriented_box_refuses_scaled_left_handed_or_degenerate_frames() {
+        let center = Point3::new(0.0, 0.0, 0.0);
+        let extents = Vec3::new(1.0, 2.0, 3.0);
+        let scaled = [
+            Vec3::new(2.0, 0.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(0.0, 0.0, 1.0),
+        ];
+        let left_handed = [
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(0.0, 0.0, -1.0),
+        ];
+        assert!(ConvexOrientedBox::new(center, scaled, extents).is_err());
+        assert!(ConvexOrientedBox::new(center, left_handed, extents).is_err());
+        assert!(ConvexOrientedBox::new(center, AXES, Vec3::new(1.0, 0.0, 1.0)).is_err());
+    }
 }

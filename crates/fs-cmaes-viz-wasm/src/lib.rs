@@ -40,8 +40,9 @@ pub mod g1_walking;
 pub mod manipulation;
 
 use g1_walking::{
-    G1_LINK_COUNT, G1_LINK_POSE_WORDS, G1Task, G1TraceSample, G1WalkingConfig, G1WalkingError,
-    G1WalkingEvaluator, G1WalkingReceipt,
+    G1_LINK_COUNT, G1_LINK_POSE_WORDS, G1_PUSH_END_S, G1_PUSH_PEAK_FORCE_N, G1_PUSH_START_S,
+    G1_TERRAIN_AMPLITUDE_M, G1_TERRAIN_WAVENUMBER_RAD_PER_M, G1Challenge, G1Task, G1TraceSample,
+    G1WalkingConfig, G1WalkingError, G1WalkingEvaluator, G1WalkingReceipt,
 };
 use manipulation::{
     ARM_JOINT_COUNT, ARM_LINK_COUNT, ARM_LINK_POSE_WORDS, ARM_POLICY_DIMENSION, ARM_POLICY_KNOTS,
@@ -52,7 +53,7 @@ use manipulation::{
 };
 
 /// Kernel identity returned by the browser capability probe.
-pub const KERNEL_VERSION: &str = "fs-cmaes-viz-wasm 0.6.5";
+pub const KERNEL_VERSION: &str = "fs-cmaes-viz-wasm 0.6.6";
 /// Exact binary64 word identifying schema-2 packets (`"CMA2"`).
 pub const PACKET_MAGIC: u32 = 0x434d_4132;
 /// Packed ask/tell ABI schema.
@@ -79,10 +80,10 @@ pub const FULL_DIMENSION_LIMIT: usize = 256;
 /// Linear and limited-memory families may admit large browser workloads.
 pub const SCALABLE_DIMENSION_LIMIT: usize = 100_000;
 
-/// Exact binary64 word identifying G1 curriculum packets (`"G1W5"`).
-pub const G1_PACKET_MAGIC: u32 = 0x4731_5735;
+/// Exact binary64 word identifying G1 curriculum packets (`"G1W6"`).
+pub const G1_PACKET_MAGIC: u32 = 0x4731_5736;
 /// Packed G1 objective/trace ABI schema.
-pub const G1_PACKET_SCHEMA_VERSION: u32 = 5;
+pub const G1_PACKET_SCHEMA_VERSION: u32 = 6;
 /// Input packet containing fixed walking-experiment controls.
 pub const G1_PACKET_KIND_CONFIG: u32 = 0;
 /// Output packet describing an admitted evaluator.
@@ -97,7 +98,7 @@ pub const G1_PACKET_KIND_POPULATION: u32 = 4;
 /// Exact binary64 word identifying household-arm packets (`"ARM1"`).
 pub const ARM_PACKET_MAGIC: u32 = 0x4152_4d31;
 /// Packed household-manipulation objective/trace ABI schema.
-pub const ARM_PACKET_SCHEMA_VERSION: u32 = 1;
+pub const ARM_PACKET_SCHEMA_VERSION: u32 = 2;
 /// Input packet containing fixed manipulation-experiment controls.
 pub const ARM_PACKET_KIND_CONFIG: u32 = 0;
 /// Output packet describing an admitted manipulation evaluator and scene.
@@ -117,15 +118,15 @@ const REFUSAL_WORDS: usize = 7;
 const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
 const BROWSER_PACKET_FIXED_FLOATS: usize = 2 * ASK_FIXED_WORDS + SNAPSHOT_FIXED_WORDS;
 const MAX_BROWSER_LIVE_FLOATS: usize = 16 * 1024 * 1024;
-const G1_CONFIG_WORDS: usize = 10;
-const G1_ADMISSION_WORDS: usize = 15;
-const G1_RECEIPT_WORDS: usize = 23;
+const G1_CONFIG_WORDS: usize = 11;
+const G1_ADMISSION_WORDS: usize = 21;
+const G1_RECEIPT_WORDS: usize = 28;
 const G1_REFUSAL_WORDS: usize = 7;
 const G1_TRACE_SAMPLE_WORDS: usize = 3 + G1_LINK_COUNT * G1_LINK_POSE_WORDS;
 const G1_MAX_POPULATION: usize = 64;
 const ARM_CONFIG_WORDS: usize = 8;
 const ARM_ADMISSION_WORDS: usize = 37;
-const ARM_RECEIPT_WORDS: usize = 19;
+const ARM_RECEIPT_WORDS: usize = 22;
 const ARM_REFUSAL_WORDS: usize = 7;
 const ARM_TRACE_SAMPLE_WORDS: usize =
     4 + ARM_LINK_POSE_WORDS + ARM_LINK_COUNT * ARM_LINK_POSE_WORDS;
@@ -497,6 +498,12 @@ impl PackedG1WalkingEvaluator {
             config.gait_frequency_hz,
             config.trace_stride as f64,
             f64::from(config.task as u32),
+            f64::from(config.challenge as u32),
+            G1_TERRAIN_AMPLITUDE_M,
+            G1_TERRAIN_WAVENUMBER_RAD_PER_M,
+            G1_PUSH_START_S,
+            G1_PUSH_END_S,
+            G1_PUSH_PEAK_FORCE_N,
         ]);
         debug_assert_eq!(packet.len(), G1_ADMISSION_WORDS);
         packet
@@ -620,6 +627,8 @@ pub enum ArmPackedRefusalCode {
     PopulationInvalid = 12,
     /// Checked packet-size arithmetic overflowed.
     ShapeOverflow = 13,
+    /// The certified convex-query owner refused an envelope or query.
+    Query = 14,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -848,8 +857,14 @@ fn parse_g1_config(packet: &[f64]) -> Result<G1WalkingConfig, G1PackedRefusal> {
         Some(2) => G1Task::Walking,
         _ => return Err(G1PackedRefusal::new(G1PackedRefusalCode::InvalidConfig)),
     };
+    let challenge = match exact_u32(packet[10]) {
+        Some(0) => G1Challenge::Flat,
+        Some(1) => G1Challenge::TerrainAndPush,
+        _ => return Err(G1PackedRefusal::new(G1PackedRefusalCode::InvalidConfig)),
+    };
     let config = G1WalkingConfig {
         task,
+        challenge,
         step_s: packet[4],
         duration_s: packet[5],
         target_forward_speed_m_per_s: packet[6],
@@ -948,6 +963,11 @@ fn g1_receipt_packet(kind: u32, receipt: &G1WalkingReceipt, include_trace: bool)
         receipt.single_support_s,
         receipt.double_support_s,
         receipt.flight_s,
+        receipt.push_impulse_n_s,
+        receipt.recovery_time_s,
+        receipt.minimum_base_height_m,
+        receipt.maximum_tilt_sine,
+        receipt.maximum_abs_terrain_height_m,
         receipt.completed_steps as f64,
         f64::from(receipt.termination_reason as u32),
     ]);
@@ -1023,6 +1043,7 @@ fn arm_owner_refusal(error: &ManipulationError) -> ArmPackedRefusal {
         ManipulationError::Geometry(_) => ArmPackedRefusalCode::Geometry,
         ManipulationError::Contact(_) => ArmPackedRefusalCode::Contact,
         ManipulationError::Friction(_) => ArmPackedRefusalCode::Friction,
+        ManipulationError::Query(_) => ArmPackedRefusalCode::Query,
         ManipulationError::UnexpectedContactReceipt => {
             ArmPackedRefusalCode::UnexpectedContactReceipt
         }
@@ -1077,7 +1098,10 @@ fn arm_receipt_packet(kind: u32, receipt: &ManipulationReceipt, include_trace: b
         receipt.minimum_reach_error_m,
         receipt.maximum_lift_m,
         receipt.actuator_work_j,
-        receipt.obstacle_integral,
+        receipt.collision_risk_integral,
+        receipt.minimum_certified_clearance_m,
+        receipt.possible_collision_time_s,
+        receipt.collision_query_iterations as f64,
         receipt.control_limit_integral,
         receipt.first_grasp_time_s,
         receipt.grasp_duration_s,
@@ -1636,6 +1660,7 @@ mod schema_two_tests {
             1.55,
             trace_stride as f64,
             f64::from(G1Task::Walking as u32),
+            f64::from(G1Challenge::Flat as u32),
         ]
     }
 
@@ -2121,7 +2146,7 @@ mod schema_two_tests {
             ManipulationTask::LivingRoomRemote,
             ManipulationTask::BackyardTrowel,
         ] {
-            let evaluator = PackedManipulationEvaluator::new(&arm_config_packet(task, 4.0, 3));
+            let evaluator = PackedManipulationEvaluator::new(&arm_config_packet(task, 6.0, 3));
             let admission = evaluator.receipt_packet();
             assert_arm_success(&admission, ARM_PACKET_KIND_ADMISSION);
             assert_eq!(admission.len(), ARM_ADMISSION_WORDS);
@@ -2143,7 +2168,7 @@ mod schema_two_tests {
             assert!(evaluation[5].is_finite());
             assert!(evaluation[6] <= PLACEMENT_TOLERANCE_M);
             assert!(evaluation[8] >= LIFT_TARGET_M);
-            assert_eq!(&evaluation[15..=17], &[1.0, 1.0, 1.0]);
+            assert_eq!(&evaluation[18..=20], &[1.0, 1.0, 1.0]);
 
             let trace = evaluator.trace_packet(&mean);
             assert_arm_success(&trace, ARM_PACKET_KIND_TRACE);
