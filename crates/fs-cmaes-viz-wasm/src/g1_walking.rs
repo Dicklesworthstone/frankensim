@@ -17,20 +17,18 @@ use fs_contact::normal_patch::{
 use fs_ga::{Se3, Twist, Vec3, Wrench};
 use fs_mbd::articulated::{
     BaseState, FreeFloatingBaseState, forward_kinematics, free_floating_forward_dynamics,
-    inverse_dynamics,
 };
 use fs_mbd::robot_models::{
-    CatalogRobotModel, G1_POLICY_ACTUATORS, G1_POLICY_DIMENSION, G1PolicyObservation,
-    evaluate_g1_residual_policy, unitree_g1_lower_body_waist_15dof,
+    CatalogRobotModel, G1_POLICY_ACTUATORS, G1PolicyObservation, G1ResidualPolicy,
+    unitree_g1_lower_body_waist_15dof,
 };
 use fs_time::{RenormPolicy, se3_exp_step_renorm};
 use fs_tribo::{
-    ContactFrame, FrictionLaw, InputAuthority, InterfaceMedium, InterfaceSystemRef,
-    TangentialSlip,
+    ContactFrame, FrictionLaw, InputAuthority, InterfaceMedium, InterfaceSystemRef, TangentialSlip,
 };
 
 /// Stable identity of the owner-composed walking experiment.
-pub const G1_WALKING_MODEL_ID: &str = "fs-cmaes/g1-walking-owner-composition-v1";
+pub const G1_WALKING_MODEL_ID: &str = "fs-cmaes/g1-walking-owner-composition-v2";
 /// Links retained by the source-bound lower-body-and-waist catalog.
 pub const G1_LINK_COUNT: usize = 16;
 /// Scalar pose words per link: translation xyz followed by quaternion wxyz.
@@ -50,6 +48,13 @@ const GRAVITY_WORLD_M_PER_S2: Vec3 = Vec3 {
 };
 const TWO_PI: f64 = 2.0 * core::f64::consts::PI;
 const MAX_CONTACT_INDENTATION_M: f64 = 0.035;
+// Survival is lexicographically primary for this walking experiment. The
+// secondary physical shaping score is smoothly bounded below half of one
+// horizon-step charge, so one additional survived step dominates every
+// possible difference between shaping scores.
+const UNCOMPLETED_STEP_PENALTY: f64 = 1_000.0;
+const SHAPING_SCORE_LIMIT: f64 = 400.0;
+const SHAPING_SCORE_SCALE: f64 = 10_000.0;
 
 /// Fixed, public experiment controls. They are intentionally not CMA search
 /// coordinates: changing them defines a different black-box problem.
@@ -154,7 +159,9 @@ impl fmt::Display for G1WalkingError {
             Self::UnexpectedContactReceipt => {
                 formatter.write_str("G1 sphere/plane contact returned a non-point receipt")
             }
-            Self::NonFiniteObjective => formatter.write_str("G1 rollout produced a non-finite objective"),
+            Self::NonFiniteObjective => {
+                formatter.write_str("G1 rollout produced a non-finite objective")
+            }
         }
     }
 }
@@ -266,13 +273,7 @@ impl G1WalkingEvaluator {
         parameters: &[f64],
         retain_trace: bool,
     ) -> Result<G1WalkingReceipt, G1WalkingError> {
-        if parameters.len() != G1_POLICY_DIMENSION {
-            return Err(fs_mbd::robot_models::G1PolicyError::ParameterCount {
-                expected: G1_POLICY_DIMENSION,
-                actual: parameters.len(),
-            }
-            .into());
-        }
+        let policy = G1ResidualPolicy::new(parameters)?;
         let model = self.catalog.model();
         let mut position = self.reference_position;
         let mut velocity = [0.0; G1_POLICY_ACTUATORS];
@@ -311,9 +312,11 @@ impl G1WalkingEvaluator {
             }
             let rotation = base.world_from_base.rotation();
             let gravity_direction_body = rotation.inverse().rotate(Vec3::new(0.0, 0.0, -1.0))?;
-            let target_velocity_body = rotation
-                .inverse()
-                .rotate(Vec3::new(self.config.target_forward_speed_m_per_s, 0.0, 0.0))?;
+            let target_velocity_body = rotation.inverse().rotate(Vec3::new(
+                self.config.target_forward_speed_m_per_s,
+                0.0,
+                0.0,
+            ))?;
             let observation = G1PolicyObservation {
                 joint_position_rad: position,
                 joint_velocity_rad_per_s: velocity,
@@ -323,19 +326,14 @@ impl G1WalkingEvaluator {
                 foot_contact: contact,
                 phase_rad: TWO_PI * self.config.gait_frequency_hz * time_s,
             };
-            let residual = evaluate_g1_residual_policy(parameters, &observation)?;
-            let mut external = vec![Wrench::default(); G1_LINK_COUNT];
+            let residual = policy.evaluate(&observation)?;
+            let mut external = [Wrench::default(); G1_LINK_COUNT];
             let mut next_contact = [false; 2];
-            for (foot, link) in [LEFT_FOOT_LINK, RIGHT_FOOT_LINK]
-                .into_iter()
-                .enumerate()
-            {
+            for (foot, link) in [LEFT_FOOT_LINK, RIGHT_FOOT_LINK].into_iter().enumerate() {
                 let pose = kinematics.world_from_link[link];
                 let point_world = pose.transform_point(FOOT_POINT_BODY_M)?;
                 let point_velocity_body = kinematics.body_twist[link].linear
-                    + kinematics.body_twist[link]
-                        .angular
-                        .cross(FOOT_POINT_BODY_M);
+                    + kinematics.body_twist[link].angular.cross(FOOT_POINT_BODY_M);
                 let point_velocity_world = pose.rotation().rotate(point_velocity_body)?;
                 let indentation_m = (-point_world.z).max(0.0);
                 if indentation_m == 0.0 {
@@ -365,7 +363,9 @@ impl G1WalkingEvaluator {
                     &self.contact_frame,
                     [point_velocity_world.x, point_velocity_world.y, 0.0],
                 )?;
-                let friction = self.friction.evaluate(&self.interface, normal_force_n, slip)?;
+                let friction = self
+                    .friction
+                    .evaluate(&self.interface, normal_force_n, slip)?;
                 let traction = friction.traction_n();
                 let force_world = Vec3::new(traction[0], traction[1], normal_force_n);
                 let force_body = pose.rotation().inverse().rotate(force_world)?;
@@ -377,23 +377,12 @@ impl G1WalkingEvaluator {
             }
             contact = next_contact;
 
-            let gravity_compensation = inverse_dynamics(
-                model,
-                BaseState::prescribed(base.world_from_base, base.twist_body, Twist::zero()),
-                &position,
-                &velocity,
-                &[0.0; G1_POLICY_ACTUATORS],
-                GRAVITY_WORLD_M_PER_S2,
-                &external,
-            )?
-            .generalized_force;
             let generalized_force = controller_force(
                 &self.catalog,
                 &self.reference_position,
                 &position,
                 &velocity,
                 &residual,
-                &gravity_compensation,
             );
 
             let dynamics = free_floating_forward_dynamics(
@@ -406,17 +395,24 @@ impl G1WalkingEvaluator {
                 &external,
             )?;
             for actuator in 0..G1_POLICY_ACTUATORS {
-                actuator_work_j += (generalized_force[actuator] * velocity[actuator]).abs()
-                    * self.config.step_s;
-                velocity[actuator] +=
-                    dynamics.generalized_acceleration[actuator] * self.config.step_s;
-                let next_position = position[actuator] + velocity[actuator] * self.config.step_s;
+                actuator_work_j +=
+                    (generalized_force[actuator] * velocity[actuator]).abs() * self.config.step_s;
                 let source = self.catalog.joints()[actuator];
+                let next_velocity = velocity[actuator]
+                    + dynamics.generalized_acceleration[actuator] * self.config.step_s;
+                let velocity_limit = source.velocity_rad_per_second;
+                if next_velocity.abs() > velocity_limit {
+                    let normalized_overshoot =
+                        (next_velocity.abs() - velocity_limit) / velocity_limit;
+                    joint_limit_integral +=
+                        25.0 * normalized_overshoot * normalized_overshoot * self.config.step_s;
+                }
+                velocity[actuator] = next_velocity.clamp(-velocity_limit, velocity_limit);
+                let next_position = position[actuator] + velocity[actuator] * self.config.step_s;
                 if next_position < source.lower_position_rad
                     || next_position > source.upper_position_rad
                 {
-                    let half_range =
-                        0.5 * (source.upper_position_rad - source.lower_position_rad);
+                    let half_range = 0.5 * (source.upper_position_rad - source.lower_position_rad);
                     let overshoot = if next_position < source.lower_position_rad {
                         source.lower_position_rad - next_position
                     } else {
@@ -432,9 +428,11 @@ impl G1WalkingEvaluator {
                 let normalized = (position[actuator] - center) / half_range;
                 joint_limit_integral += normalized.powi(8) * self.config.step_s;
             }
-            base.twist_body = base
-                .twist_body
-                .plus(dynamics.base_spatial_acceleration_body.scale(self.config.step_s));
+            base.twist_body = base.twist_body.plus(
+                dynamics
+                    .base_spatial_acceleration_body
+                    .scale(self.config.step_s),
+            );
             base.world_from_base = se3_exp_step_renorm(
                 base.world_from_base,
                 base.twist_body,
@@ -453,9 +451,8 @@ impl G1WalkingEvaluator {
             speed_error_integral += speed_error * speed_error * self.config.step_s;
             let height_error = base.world_from_base.translation().z - self.initial_base_height_m;
             let tilt_error = 1.0 + updated_gravity_direction_body.z;
-            posture_integral +=
-                (2.5 * height_error * height_error + 4.0 * tilt_error * tilt_error)
-                    * self.config.step_s;
+            posture_integral += (2.5 * height_error * height_error + 4.0 * tilt_error * tilt_error)
+                * self.config.step_s;
             fell = base.world_from_base.translation().z < 0.32
                 || updated_gravity_direction_body.z > -0.35;
             if fell {
@@ -477,21 +474,26 @@ impl G1WalkingEvaluator {
             ));
         }
         let distance_m = base.world_from_base.translation().x - initial_x;
-        let remaining_fraction = 1.0 - completed_steps as f64 / self.step_count as f64;
-        let fall_penalty = if fell {
-            180.0 + 320.0 * remaining_fraction
-        } else {
-            0.0
-        };
-        let objective = -18.0 * distance_m
+        // Falling is one distinct failure in addition to every skipped step.
+        // This keeps the ordering strict even at the horizon boundary: a fall
+        // on the final step is worse than completing the horizon upright, and
+        // a fall one step earlier is worse again.
+        let failed_horizon_steps = survival_charge_steps(self.step_count, completed_steps, fell);
+        let raw_shaping_score = -18.0 * distance_m
             + 12.0 * speed_error_integral
             + 0.008 * actuator_work_j
             + 16.0 * slip_integral
             + 30.0 * posture_integral
             + 2.0 * joint_limit_integral
             + 0.8 * impact_integral
-            + fall_penalty
             + terminal_guard_penalty;
+        if !raw_shaping_score.is_finite() {
+            return Err(G1WalkingError::NonFiniteObjective);
+        }
+        let bounded_shaping_score =
+            SHAPING_SCORE_LIMIT * (raw_shaping_score / SHAPING_SCORE_SCALE).tanh();
+        let objective =
+            UNCOMPLETED_STEP_PENALTY * failed_horizon_steps as f64 + bounded_shaping_score;
         if !objective.is_finite() {
             return Err(G1WalkingError::NonFiniteObjective);
         }
@@ -509,6 +511,11 @@ impl G1WalkingEvaluator {
             trace,
         })
     }
+}
+
+const fn survival_charge_steps(total_steps: usize, completed_steps: usize, fell: bool) -> usize {
+    debug_assert!(completed_steps <= total_steps);
+    total_steps - completed_steps + fell as usize
 }
 
 fn validate_config(config: G1WalkingConfig) -> Result<(), G1WalkingError> {
@@ -563,8 +570,7 @@ fn rounded_step_count(config: G1WalkingConfig) -> Result<usize, G1WalkingError> 
 
 const fn reference_posture() -> [f64; G1_POLICY_ACTUATORS] {
     [
-        -0.20, 0.0, 0.0, 0.42, -0.22, 0.0, -0.20, 0.0, 0.0, 0.42, -0.22, 0.0, 0.0, 0.0,
-        0.0,
+        -0.20, 0.0, 0.0, 0.42, -0.22, 0.0, -0.20, 0.0, 0.0, 0.42, -0.22, 0.0, 0.0, 0.0, 0.0,
     ]
 }
 
@@ -589,18 +595,20 @@ fn controller_force(
     position: &[f64; G1_POLICY_ACTUATORS],
     velocity: &[f64; G1_POLICY_ACTUATORS],
     residual: &[f64; G1_POLICY_ACTUATORS],
-    gravity_compensation: &[f64],
 ) -> [f64; G1_POLICY_ACTUATORS] {
     let mut force = [0.0; G1_POLICY_ACTUATORS];
     for actuator in 0..G1_POLICY_ACTUATORS {
         let effort_limit = catalog.joints()[actuator].effort_newton_metres;
-        let proportional_gain = if matches!(actuator, 3 | 9) { 95.0 } else { 58.0 };
+        let proportional_gain = if matches!(actuator, 3 | 9) {
+            95.0
+        } else {
+            58.0
+        };
         let derivative_gain = if matches!(actuator, 3 | 9) { 3.8 } else { 2.5 };
         let posture = proportional_gain * (reference[actuator] - position[actuator])
             - derivative_gain * velocity[actuator];
         let residual_force = 0.32 * effort_limit * residual[actuator];
-        force[actuator] = (gravity_compensation[actuator] + posture + residual_force)
-            .clamp(-effort_limit, effort_limit);
+        force[actuator] = (posture + residual_force).clamp(-effort_limit, effort_limit);
     }
     force
 }
@@ -682,17 +690,15 @@ mod tests {
 
     #[test]
     fn zero_policy_rollout_is_deterministic_and_owner_derived() -> Result<(), G1WalkingError> {
-        let evaluator = G1WalkingEvaluator::new(G1WalkingConfig {
-            duration_s: 0.10,
-            ..G1WalkingConfig::default()
-        })?;
-        let parameters = vec![0.0; G1_POLICY_DIMENSION];
+        let evaluator = G1WalkingEvaluator::new(G1WalkingConfig::default())?;
+        let parameters = vec![0.0; fs_mbd::robot_models::G1_POLICY_DIMENSION];
         let first = evaluator.trace(&parameters)?;
         let second = evaluator.trace(&parameters)?;
         assert_eq!(first, second);
-        assert!(!first.trace.is_empty());
+        assert!(first.trace.len() >= 5);
         assert_eq!(first.trace[0].link_pose.len(), G1_LINK_COUNT);
         assert!(first.objective.is_finite());
+        assert!(first.completed_steps >= 12);
         Ok(())
     }
 
@@ -713,6 +719,25 @@ mod tests {
             Err(G1WalkingError::InvalidConfig { field: "step_s" })
         ));
         Ok(())
+    }
+
+    #[test]
+    fn early_termination_cannot_win_by_escaping_the_remaining_horizon() -> Result<(), G1WalkingError>
+    {
+        let evaluator = G1WalkingEvaluator::new(G1WalkingConfig::default())?;
+        let zero = evaluator.evaluate(&vec![0.0; fs_mbd::robot_models::G1_POLICY_DIMENSION])?;
+        let aggressive =
+            evaluator.evaluate(&vec![0.03; fs_mbd::robot_models::G1_POLICY_DIMENSION])?;
+        assert!(aggressive.completed_steps < zero.completed_steps);
+        assert!(aggressive.objective > zero.objective);
+        Ok(())
+    }
+
+    #[test]
+    fn survival_charge_is_strict_through_the_horizon_boundary() {
+        assert_eq!(survival_charge_steps(180, 180, false), 0);
+        assert_eq!(survival_charge_steps(180, 180, true), 1);
+        assert_eq!(survival_charge_steps(180, 179, true), 2);
     }
 
     #[test]

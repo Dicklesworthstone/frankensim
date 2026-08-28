@@ -141,52 +141,67 @@ pub fn g1_policy_features(
     };
 
     let mut features = [0.0; G1_POLICY_FEATURES_PER_ACTUATOR];
-    for (signal_index, signal) in raw.into_iter().enumerate() {
+    for (signal_index, signal) in raw.iter().copied().enumerate() {
         let offset = signal_index * G1_POLICY_PHASE_BASIS;
-        for (basis_index, multiplier) in basis.into_iter().enumerate() {
+        for (basis_index, multiplier) in basis.iter().copied().enumerate() {
             features[offset + basis_index] = signal * multiplier;
         }
     }
     Ok(features)
 }
 
-/// Evaluate the exact 5,040-D G1 residual-torque policy.
+/// An admitted, borrowed view of the exact 5,040-D G1 residual policy.
 ///
-/// The parameter matrix is actuator-major (`15 × 336`). Each row's fixed-order
-/// dot product passes through deterministic `tanh`, yielding a normalized
-/// residual in `[-1, 1]`; the consuming controller alone owns conversion to
-/// torque and enforcement of source effort limits.
-pub fn evaluate_g1_residual_policy(
-    parameters: &[f64],
-    observation: &G1PolicyObservation,
-) -> Result<[f64; G1_POLICY_ACTUATORS], G1PolicyError> {
-    if parameters.len() != G1_POLICY_DIMENSION {
-        return Err(G1PolicyError::ParameterCount {
-            expected: G1_POLICY_DIMENSION,
-            actual: parameters.len(),
-        });
-    }
-    for (index, value) in parameters.iter().copied().enumerate() {
-        if !value.is_finite() {
-            return Err(G1PolicyError::NonFiniteParameter { index });
+/// Construction validates the immutable parameter matrix once. A physical
+/// rollout can then evaluate hundreds of observations without rescanning all
+/// 5,040 weights at every integration step. The matrix is actuator-major
+/// (`15 × 336`); each fixed-order dot product passes through deterministic
+/// `tanh`, yielding a normalized residual in `[-1, 1]`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct G1ResidualPolicy<'a> {
+    parameters: &'a [f64],
+}
+
+impl<'a> G1ResidualPolicy<'a> {
+    /// Admit one finite parameter matrix in the catalog-owned layout.
+    pub fn new(parameters: &'a [f64]) -> Result<Self, G1PolicyError> {
+        if parameters.len() != G1_POLICY_DIMENSION {
+            return Err(G1PolicyError::ParameterCount {
+                expected: G1_POLICY_DIMENSION,
+                actual: parameters.len(),
+            });
         }
-    }
-    let features = g1_policy_features(observation)?;
-    let mut output = [0.0; G1_POLICY_ACTUATORS];
-    for (actuator, row) in parameters
-        .chunks_exact(G1_POLICY_FEATURES_PER_ACTUATOR)
-        .enumerate()
-    {
-        let mut activation = 0.0;
-        for (weight, feature) in row.iter().zip(features) {
-            activation += weight * feature;
+        for (index, value) in parameters.iter().copied().enumerate() {
+            if !value.is_finite() {
+                return Err(G1PolicyError::NonFiniteParameter { index });
+            }
         }
-        output[actuator] = det::tanh(activation);
-        if !output[actuator].is_finite() {
-            return Err(G1PolicyError::NonFiniteOutput { actuator });
-        }
+        Ok(Self { parameters })
     }
-    Ok(output)
+
+    /// Evaluate one observation in the policy owner's exact feature order.
+    pub fn evaluate(
+        self,
+        observation: &G1PolicyObservation,
+    ) -> Result<[f64; G1_POLICY_ACTUATORS], G1PolicyError> {
+        let features = g1_policy_features(observation)?;
+        let mut output = [0.0; G1_POLICY_ACTUATORS];
+        for (actuator, row) in self
+            .parameters
+            .chunks_exact(G1_POLICY_FEATURES_PER_ACTUATOR)
+            .enumerate()
+        {
+            let mut activation = 0.0;
+            for (weight, feature) in row.iter().copied().zip(features.iter().copied()) {
+                activation += weight * feature;
+            }
+            output[actuator] = det::tanh(activation);
+            if !output[actuator].is_finite() {
+                return Err(G1PolicyError::NonFiniteOutput { actuator });
+            }
+        }
+        Ok(output)
+    }
 }
 
 fn validate_g1_observation(observation: &G1PolicyObservation) -> Result<(), G1PolicyError> {
@@ -962,10 +977,8 @@ mod tests {
         assert_eq!(features[41 * G1_POLICY_PHASE_BASIS], 0.0);
 
         let zero_parameters = vec![0.0; G1_POLICY_DIMENSION];
-        assert_eq!(
-            evaluate_g1_residual_policy(&zero_parameters, &observation)?,
-            [0.0; G1_POLICY_ACTUATORS]
-        );
+        let policy = G1ResidualPolicy::new(&zero_parameters)?;
+        assert_eq!(policy.evaluate(&observation)?, [0.0; G1_POLICY_ACTUATORS]);
         Ok(())
     }
 
@@ -981,7 +994,7 @@ mod tests {
             phase_rad: 0.0,
         };
         assert!(matches!(
-            evaluate_g1_residual_policy(&[], &observation),
+            G1ResidualPolicy::new(&[]),
             Err(G1PolicyError::ParameterCount {
                 expected: G1_POLICY_DIMENSION,
                 actual: 0
@@ -990,7 +1003,7 @@ mod tests {
         let mut parameters = vec![0.0; G1_POLICY_DIMENSION];
         parameters[1_234] = f64::NAN;
         assert_eq!(
-            evaluate_g1_residual_policy(&parameters, &observation),
+            G1ResidualPolicy::new(&parameters),
             Err(G1PolicyError::NonFiniteParameter { index: 1_234 })
         );
     }

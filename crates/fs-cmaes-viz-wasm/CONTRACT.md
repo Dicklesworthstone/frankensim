@@ -1,9 +1,10 @@
 # CONTRACT: fs-cmaes-viz-wasm
 
-Status: **schema 2 — live surface.** Stateful packed browser boundary over the
-production CMA-family owner in `fs-dfo`. This crate owns validation, admission,
-numeric packet transport, and browser-specific resource limits. It owns no
-optimizer recurrence.
+Status: **CMA schema 2 + G1 schema 1 — live surfaces.** Stateful packed browser
+boundary over the production CMA-family owner in `fs-dfo` and the owner-composed
+G1 walking experiment. This crate owns validation, admission, numeric packet
+transport, and browser-specific resource limits. It owns no optimizer recurrence
+or independent robot mathematics.
 
 ## Purpose and ownership
 
@@ -29,14 +30,40 @@ live envelope above 16 Mi binary64 words (128 MiB): owner persistent + pending
 headers, and a conservative snapshot payload. The 5,040-dimensional flagship
 is comfortably inside this bound.
 
-No-claims: this synchronous adapter does not add restarts, parallel objective
-evaluation, cancellation, constraints, or built-in landscapes. It does not
-invent dense covariance diagnostics for a limited-memory representation.
+The G1 surface composes `fs-mbd`'s source-bound 15-DoF Unitree model and 5,040-D
+policy map, `fs-ga` poses, `fs-time` integration, `fs-contact` normal response,
+and `fs-tribo` friction. It returns the owners' link poses for rendering. The
+binding layer adds no kinematics, dynamics, contact law, or browser-side pose
+reconstruction.
+
+The experiment's semi-implicit step projects joint velocities onto the
+catalog's symmetric source speed limits. Any proposed overshoot is accumulated
+in `joint_limit_integral` before projection, so the optimizer sees a graded
+penalty while the next owner call remains inside its admitted state domain.
+Every uncompleted fixed step adds 1,000 objective units, and a fall adds one
+further 1,000-unit terminal charge. The remaining physical shaping terms are
+smoothly compressed to `400 * tanh(raw / 10,000)`, hence lie strictly inside
+±400. Survival is therefore lexicographically primary: one additional completed
+step dominates every possible shaping-score difference, so early termination
+cannot win by skipping future integrated costs.
+
+The raw secondary score is
+`-18 distance + 12 speed_error_integral + 0.008 actuator_work_j +
+16 slip_integral + 30 posture_integral + 2 joint_limit_integral +
+0.8 impact_integral + terminal_guard_penalty`. A non-finite raw score is a typed
+refusal; the bounding transform never conceals overflow.
+
+No-claims: this synchronous adapter does not add restarts, parallel execution,
+cancellation, constraints, or built-in analytic landscapes. The G1 experiment
+is a reduced lower-body-and-waist model, not a full Unitree digital twin or a
+hardware-transfer claim. Limited-memory snapshots do not invent dense
+covariance diagnostics.
 
 ## Public surface
 
 Native Rust exposes `PackedCmaSession::{new,receipt_packet,ask_packet,tell_packet}`
-and `kernel_version()`.
+and `PackedG1WalkingEvaluator::{new,receipt_packet,evaluate_packet,
+evaluate_population_packet,trace_packet}`, plus `kernel_version()`.
 
 On wasm32, wasm-bindgen exports:
 
@@ -46,7 +73,12 @@ On wasm32, wasm-bindgen exports:
 | `session.receipt()` | no arguments | admission/current snapshot or typed refusal |
 | `session.ask()` | no arguments | complete row-major candidate population or typed refusal |
 | `session.tell(objectives)` | packed `Float64Array` | updated snapshot or typed refusal |
-| `cmaes_viz_kernel_version()` | no arguments | `"fs-cmaes-viz-wasm 0.5.0"` |
+| `new G1WalkingVizEvaluator(config)` | packed `Float64Array` | reusable owner-composed walking evaluator |
+| `evaluator.receipt()` | no arguments | fixed controls and exact trace layout |
+| `evaluator.evaluate(policy)` | 5,040 policy words | decomposed scalar objective receipt |
+| `evaluator.evaluate_population(policies)` | up to 64 row-major policies | one objective per candidate in one boundary call |
+| `evaluator.trace(policy)` | 5,040 policy words | receipt plus decimated world-from-link poses |
+| `cmaes_viz_kernel_version()` | no arguments | `"fs-cmaes-viz-wasm 0.5.4"` |
 
 There is no JSON hot path and no schema-1 compatibility shim.
 
@@ -163,6 +195,44 @@ Stable refusal codes:
 
 Nothing is silently clamped and validation failures do not trap across the
 wasm boundary.
+
+## G1 walking packets
+
+G1 packets use magic `0x47315731` (`"G1W1"`) and schema 1. The common output
+prefix is `magic, schema, status, kind, total_words`. Kinds are configuration 0,
+admission 1, evaluation 2, trace 3, and population 4.
+
+Configuration is:
+
+`magic, schema, kind=0, total_words=9, step_s, duration_s,
+target_forward_speed_m_per_s, gait_frequency_hz, trace_stride`.
+
+The browser experiment admits step sizes from 1/480 through 1/30 s, durations
+through 4 s, commanded forward speeds through 2 m/s, gait frequencies from
+0.25 through 4 Hz, and at most 1,000 steps between trace samples. These are
+transport workload limits, not claims about the robot's validated operating
+envelope.
+
+Admission appends:
+
+`policy_dimension=5040, link_count=16, pose_words=7, trace_sample_words=115,
+step_s, duration_s, target_speed, gait_frequency, trace_stride`.
+
+Evaluation appends:
+
+`objective, distance_m, speed_error_integral, actuator_work_j, slip_integral,
+posture_integral, joint_limit_integral, impact_integral, completed_steps, fell`.
+
+Trace adds `sample_count`, followed by samples containing `time_s,
+left_contact, right_contact` and 16 poses in catalog link order. Every pose is
+world-frame `translation_xyz, quaternion_wxyz`; the browser is a projector and
+must not recompute forward kinematics.
+
+Population success adds `population, objectives[population]`. Input is a flat
+row-major sequence of 1 through 64 complete 5,040-word policies. A candidate
+refusal fails the whole population packet and word 6 names its zero-based row,
+so a caller cannot silently replace an owner refusal with a fabricated score.
+All other G1 refusals use the same seven-word envelope with a NaN detail word.
 
 ## Determinism and budgets
 

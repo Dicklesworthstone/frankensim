@@ -139,6 +139,10 @@ neither.
   records exact pinned URLs, revisions, Git blob identities, source status,
   units, derivation, and material omissions. `ROBOT_MODEL_CATALOG_VERSION`
   versions this typed in-source layout; it is not a serialized URDF schema.
+- `robot_models::G1ResidualPolicy` admits the catalog-owned 5,040-weight
+  actuator-major policy once, then evaluates the exact 42-signal by eight-phase
+  feature map for each observation without repeatedly validating immutable
+  weights. Deterministic `tanh` bounds every normalized actuator residual.
 
 ## Invariants
 
