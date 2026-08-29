@@ -29,7 +29,7 @@ use fs_tribo::{
 };
 
 /// Stable identity of the owner-composed walking experiment.
-pub const G1_WALKING_MODEL_ID: &str = "fs-cmaes/g1-walking-owner-composition-v7";
+pub const G1_WALKING_MODEL_ID: &str = "fs-cmaes/g1-walking-owner-composition-v8";
 /// Pelvis plus all 29 actuated links retained by the source-bound mode-11 catalog.
 pub const G1_LINK_COUNT: usize = 30;
 /// Scalar pose words per link: translation xyz followed by quaternion wxyz.
@@ -73,7 +73,7 @@ const TWO_PI: f64 = 2.0 * core::f64::consts::PI;
 const MAX_CONTACT_INDENTATION_M: f64 = 0.035;
 const FOOT_EFFECTIVE_RADIUS_M: f64 = 0.035;
 const FOOT_REDUCED_MODULUS_PA: f64 = 2.0e6;
-const MINIMUM_UPRIGHT_HEIGHT_M: f64 = 0.60;
+const MINIMUM_UPRIGHT_HEIGHT_M: f64 = 0.55;
 const MINIMUM_UPRIGHT_GRAVITY_Z: f64 = -0.866_025_403_784_438_6;
 const GAIT_SWITCH_WINDOW: f64 = 0.20;
 const TARGET_SWING_CLEARANCE_M: f64 = 0.055;
@@ -88,6 +88,13 @@ const HEADING_SINE_SCALE: f64 = 0.35;
 const UNCOMPLETED_STEP_PENALTY: f64 = 1_000.0;
 const SHAPING_SCORE_LIMIT: f64 = 400.0;
 const SHAPING_SCORE_SCALE: f64 = 200.0;
+// Per-step survival bonus (cmaes-pvz, v068): a small reward per survived step
+// inside the same objective, so the optimizer cannot game a single rollup by
+// collapsing early. Bounded to ~half the full horizon by design
+// (0.4 * 720 ≈ 288, below SHAPING_SCORE_LIMIT).
+const SURVIVAL_BONUS_PER_STEP: f64 = 0.4;
+const MAX_BONUSED_STEPS: f64 = 720.0;
+const SURVIVAL_BONUS_LIMIT: f64 = SURVIVAL_BONUS_PER_STEP * MAX_BONUSED_STEPS;
 /// Peak height of the disclosed smooth challenge terrain [m].
 pub const G1_TERRAIN_AMPLITUDE_M: f64 = 0.008;
 /// Longitudinal spatial frequency of the disclosed terrain [rad/m].
@@ -932,18 +939,29 @@ impl G1WalkingEvaluator {
         let normalized_clearance_error = swing_clearance_error_integral
             / (TARGET_SWING_CLEARANCE_M * TARGET_SWING_CLEARANCE_M * completed_duration_s);
         let cost_of_transport = actuator_work_j / (body_weight_n * target_distance_m);
+        // v068 (cmaes-pvz): rebalance shaping weights for the whole-body 30-link
+        // v067 kernel. The earlier weights were tuned for the 16-link v066 model
+        // whose settling altitude was well above the 0.60 m height guard. The
+        // v067 whole-body equilibrium settles lower (added arms/head/hands as
+        // dynamic bodies), so the same penalty magnitudes now punish a
+        // stabilizing prior that is doing small corrective work. The per-step
+        // survival bonus is added below the same objective, so the optimizer
+        // cannot game a single shaping rollup by collapsing early.
         let raw_shaping_score = match self.config.task {
             G1Task::Balance => {
-                32.0 * speed_tracking_error
-                    + 18.0 * normalized_stance_slip
-                    + 34.0 * posture_integral / completed_duration_s
-                    + 24.0 * normalized_contact_mismatch
-                    + 12.0 * lateral_error_integral / completed_duration_s
-                    + 10.0 * heading_error_integral / completed_duration_s
-                    + 8.0 * joint_limit_integral / completed_duration_s
-                    + 4.0 * impact_integral / completed_duration_s
-                    + 0.10 * cost_of_transport
-                    + 30.0 * flight_s / completed_duration_s
+                // Balance target is zero velocity; speed_err is a tiny numerical
+                // scalar, slip/posture/contact are the real stability signals.
+                // v068: remove the 30*flight term entirely (Balance is meant to
+                // be near-stationary; penalizing zero-flight was anti-curriculum).
+                4.0 * speed_tracking_error
+                    + 12.0 * normalized_stance_slip
+                    + 18.0 * posture_integral / completed_duration_s
+                    + 12.0 * normalized_contact_mismatch
+                    + 6.0 * lateral_error_integral / completed_duration_s
+                    + 6.0 * heading_error_integral / completed_duration_s
+                    + 4.0 * joint_limit_integral / completed_duration_s
+                    + 2.0 * impact_integral / completed_duration_s
+                    + 0.02 * cost_of_transport
                     + terminal_guard_penalty
             }
             G1Task::Stepping => {
@@ -951,9 +969,13 @@ impl G1WalkingEvaluator {
                 // translation. The compact curriculum stage can therefore
                 // learn genuine foot lift without sacrificing the stabilizer
                 // merely to chase forward speed or stance slip.
+                // v068: keep gait signals (contact_mismatch, clearance) dominant;
+                // reduce posture weight so the whole-body inertia drift is not
+                // punished; halve the flight penalty (the curriculum's whole-body
+                // residual needs a little air to learn real stepping).
                 2.0 * speed_tracking_error
                     + normalized_stance_slip
-                    + 30.0 * posture_integral / completed_duration_s
+                    + 18.0 * posture_integral / completed_duration_s
                     + 260.0 * normalized_contact_mismatch
                     + 180.0 * normalized_clearance_error
                     + 14.0 * lateral_error_integral / completed_duration_s
@@ -961,17 +983,25 @@ impl G1WalkingEvaluator {
                     + 10.0 * joint_limit_integral / completed_duration_s
                     + 8.0 * impact_integral / completed_duration_s
                     + 0.02 * cost_of_transport
-                    + 60.0 * flight_s / completed_duration_s
+                    + 30.0 * flight_s / completed_duration_s
                     + terminal_guard_penalty
             }
             G1Task::Walking => {
                 // Alternating support and real swing clearance dominate the
                 // secondary score: a stable two-foot shuffle must not look
                 // like successful walking. Survival remains lexicographically
-                // primary through the separate uncompleted-step charge.
-                40.0 * speed_tracking_error
-                    + 40.0 * normalized_stance_slip
-                    + 20.0 * posture_integral / completed_duration_s
+                // primary through the separate uncompleted-step charge and
+                // (v068) the per-step survival bonus.
+                // v068: halve speed_err, slip, posture, CoT, flight. CoT was the
+                // main culprit — it punishes any policy that lives long enough
+                // to do real corrective work, which is exactly what the
+                // whole-body prior needs. The per-step survival bonus below
+                // (SURVIVAL_BONUS_PER_STEP * completed_steps) makes longer
+                // survival visibly cheaper, so a slow stable walk is preferred
+                // to a fast collapse.
+                20.0 * speed_tracking_error
+                    + 20.0 * normalized_stance_slip
+                    + 12.0 * posture_integral / completed_duration_s
                     + 180.0 * normalized_contact_mismatch
                     + 100.0 * normalized_clearance_error
                     + 12.0 * lateral_error_integral / completed_duration_s
@@ -979,8 +1009,8 @@ impl G1WalkingEvaluator {
                     + 20.0 * backward_distance_m / target_distance_m
                     + 8.0 * joint_limit_integral / completed_duration_s
                     + 6.0 * impact_integral / completed_duration_s
-                    + 0.10 * cost_of_transport
-                    + 40.0 * flight_s / completed_duration_s
+                    + 0.04 * cost_of_transport
+                    + 20.0 * flight_s / completed_duration_s
                     + terminal_guard_penalty
             }
         };
@@ -989,8 +1019,18 @@ impl G1WalkingEvaluator {
         }
         let bounded_shaping_score =
             SHAPING_SCORE_LIMIT * (raw_shaping_score / SHAPING_SCORE_SCALE).tanh();
-        let objective =
-            UNCOMPLETED_STEP_PENALTY * failed_horizon_steps as f64 + bounded_shaping_score;
+        // Per-step survival bonus (cmaes-pvz, v068): the optimizer cannot game
+        // a single shaping rollup by collapsing early, because longer survival
+        // is visibly cheaper (bounded by SURVIVAL_BONUS_LIMIT = 0.4 * 720 = 288,
+        // below the SHAPING_SCORE_LIMIT cap of 400 so it can never offset a fall
+        // penalty but is enough to break ties between a slow stable walk and a
+        // fast collapse).
+        let survival_bonus = (SURVIVAL_BONUS_PER_STEP
+            * (completed_steps as f64).min(MAX_BONUSED_STEPS))
+        .min(SURVIVAL_BONUS_LIMIT);
+        let objective = UNCOMPLETED_STEP_PENALTY * failed_horizon_steps as f64
+            + bounded_shaping_score
+            - survival_bonus;
         if !objective.is_finite() {
             return Err(G1WalkingError::NonFiniteObjective);
         }

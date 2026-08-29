@@ -1,6 +1,6 @@
 [package]
 name = "fs-cmaes-viz-wasm"
-version = "0.6.7"
+version = "0.6.8"
 edition = "2024"
 publish = false
 description = "Versioned packed WASM ask/tell boundary over fs-dfo's full, separable, LM-CMA, and LM-MA optimizers."
