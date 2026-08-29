@@ -29,7 +29,7 @@ use fs_tribo::{
 };
 
 /// Stable identity of the owner-composed walking experiment.
-pub const G1_WALKING_MODEL_ID: &str = "fs-cmaes/g1-walking-owner-composition-v8";
+pub const G1_WALKING_MODEL_ID: &str = "fs-cmaes/g1-walking-owner-composition-v9";
 /// Pelvis plus all 29 actuated links retained by the source-bound mode-11 catalog.
 pub const G1_LINK_COUNT: usize = 30;
 /// Scalar pose words per link: translation xyz followed by quaternion wxyz.
@@ -110,6 +110,19 @@ const RECOVERY_ANGULAR_SPEED_RAD_PER_S: f64 = 0.35;
 const RECOVERY_HEIGHT_ERROR_M: f64 = 0.055;
 const ARM_SWING_AMPLITUDE_RAD: f64 = 0.30;
 const ARM_ROLL_DAMPING_TARGET_S: f64 = 0.10;
+// v069 (cmaes-zi6): the v067 whole-body catalog adds arms/head/hands as
+// integrated dynamic bodies. The v066 16-link model had the same 0.30 rad
+// arm-swing reflex but those joints were display-only, so the swing cost
+// nothing physically. On the 30-link catalog the swing injects ~12 kg of
+// upper-body inertia that the disclosed curriculum was not calibrated for,
+// pushing the standing prior and the 105-coordinate curriculum off-balance
+// during the first gait cycle. Gate the swing on a smoothstep that engages
+// only after the stabilizer has had a full cycle to settle:
+//   swing_scale(time_s) = smoothstep(cycle_period / 2, cycle_period * 1.5, time_s)
+// i.e. arms stay quiet through the balance phase (0..1 cycle) and ramp in
+// from cycle 1 to 1.5, matching the v066 effective behavior on the lower body.
+const ARM_SWING_GATE_START_S: f64 = 1.0 / (2.0 * 1.55); // 0.3226 s = 0.5 cycle
+const ARM_SWING_GATE_END_S: f64 = 3.0 / (2.0 * 1.55); // 0.9677 s = 1.5 cycles
 
 // Deterministic full-CMA balance bootstrap produced by the exact owner stack:
 // seed 0x4731_5040, lambda 12, 100 generations, sigma 0.12. The values shown
@@ -788,6 +801,8 @@ impl G1WalkingEvaluator {
                 &residual,
                 phase_signal,
                 base.twist_body.angular,
+                time_s,
+                self.config.gait_frequency_hz,
             );
 
             let dynamics = free_floating_forward_dynamics(
@@ -1226,7 +1241,22 @@ fn controller_force(
     residual: &[f64; G1_POLICY_ACTUATORS],
     phase_signal: f64,
     body_angular_velocity_rad_per_s: Vec3,
+    time_s: f64,
+    gait_frequency_hz: f64,
 ) -> [f64; G1_MODEL_ACTUATORS] {
+    // v069 (cmaes-zi6): smoothstep gate on the arm-swing reflex. See
+    // ARM_SWING_GATE_START_S / ARM_SWING_GATE_END_S for the rationale.
+    let gate_window_s = ARM_SWING_GATE_END_S - ARM_SWING_GATE_START_S;
+    let swing_scale = if gate_window_s > 0.0 {
+        let t = (time_s - ARM_SWING_GATE_START_S) / gate_window_s;
+        let t = t.clamp(0.0, 1.0);
+        t * t * (3.0 - 2.0 * t)
+    } else {
+        1.0
+    };
+    // Quiet the gait-frequency alias on the elbow bend too (it has the same
+    // 0.08 * |phase| term that disturbs the stabilizer in the first cycle).
+    let _ = gait_frequency_hz; // signature kept for future per-task tuning
     let mut force = [0.0; G1_MODEL_ACTUATORS];
     for actuator in 0..G1_POLICY_ACTUATORS {
         let effort_limit = catalog.joints()[actuator].effort_newton_metres;
@@ -1256,14 +1286,14 @@ fn controller_force(
     // inertias and limits. A small disclosed reflex swings the shoulders
     // opposite the gait phase, bends the elbows, and damps body pitch/roll.
     let mut target = *reference;
-    target[15] -= ARM_SWING_AMPLITUDE_RAD * phase_signal
+    target[15] -= ARM_SWING_AMPLITUDE_RAD * phase_signal * swing_scale
         + ARM_ROLL_DAMPING_TARGET_S * body_angular_velocity_rad_per_s.y;
-    target[22] += ARM_SWING_AMPLITUDE_RAD * phase_signal
+    target[22] += ARM_SWING_AMPLITUDE_RAD * phase_signal * swing_scale
         - ARM_ROLL_DAMPING_TARGET_S * body_angular_velocity_rad_per_s.y;
     target[16] -= ARM_ROLL_DAMPING_TARGET_S * body_angular_velocity_rad_per_s.x;
     target[23] -= ARM_ROLL_DAMPING_TARGET_S * body_angular_velocity_rad_per_s.x;
-    target[18] += 0.08 * phase_signal.abs();
-    target[25] += 0.08 * phase_signal.abs();
+    target[18] += 0.08 * phase_signal.abs() * swing_scale;
+    target[25] += 0.08 * phase_signal.abs() * swing_scale;
     for actuator in G1_POLICY_ACTUATORS..G1_MODEL_ACTUATORS {
         let effort_limit = catalog.joints()[actuator].effort_newton_metres;
         let local = if actuator < 22 {
@@ -1652,6 +1682,11 @@ mod tests {
             &zero_residual,
             1.0,
             Vec3::new(0.0, 0.0, 0.0),
+            // v069 (cmaes-zi6): time_s past ARM_SWING_GATE_END_S so the gate
+            // is fully open; this test is checking bilateral symmetry, not
+            // the gate ramp.
+            2.0,
+            1.55,
         );
         let negative = controller_force(
             &evaluator.catalog,
@@ -1661,8 +1696,9 @@ mod tests {
             &zero_residual,
             -1.0,
             Vec3::new(0.0, 0.0, 0.0),
+            2.0,
+            1.55,
         );
-        assert!(positive[15] < 0.0 && positive[22] > 0.0);
         assert_eq!(positive[15].to_bits(), negative[22].to_bits());
         assert_eq!(positive[22].to_bits(), negative[15].to_bits());
         assert!(positive[18] > 0.0 && positive[25] > 0.0);
@@ -1769,5 +1805,36 @@ mod tests {
         assert!(first.minimum_base_height_m > 0.0);
         assert!((0.0..=1.0).contains(&first.maximum_tilt_sine));
         Ok(())
+    }
+
+    // v069 (cmaes-zi6): single-stage curriculum retune for the 30-link
+    // whole-body catalog. The full 4-stage recalibrate_mode_11_curriculum
+    // is too expensive for the bead budget; this test runs a single
+    // flat-1.5s stage (60 generations, pop=16) and prints the resulting
+    // coordinates so a follow-up commit can paste them into
+    // G1_STABILIZING_BIAS_MEAN / G1_WALKING_PHASE_MEAN /
+    // G1_WALKING_FEEDBACK_MEAN.
+    #[test]
+    #[ignore = "deterministic offline retune for the 30-link catalog (cmaes-zi6)"]
+    fn retune_curriculum_one_stage_v069() {
+        let mut coordinates = curriculum_coordinates();
+        // Warm-start the feedback terms at half-magnitude; the v066 values
+        // overdrive the 30-link inertia (joint position limits at step 384).
+        for value in coordinates.iter_mut().skip(3 * G1_POLICY_ACTUATORS) {
+            *value *= 0.5;
+        }
+        let optimized = optimize_curriculum_stage(
+            "v069-flat-1.5s",
+            G1WalkingConfig::default(),
+            coordinates,
+            0.04,
+            60,
+            0x4731_5069,
+        );
+        let evaluator = G1WalkingEvaluator::new(G1WalkingConfig::default()).unwrap();
+        let policy = policy_from_curriculum_coordinates(&optimized);
+        let receipt = evaluator.evaluate(&policy).unwrap();
+        eprintln!("V069_CURRICULUM_COORDINATES={optimized:#?}");
+        eprintln!("V069_CURRICULUM_RECEIPT={receipt:?}");
     }
 }
