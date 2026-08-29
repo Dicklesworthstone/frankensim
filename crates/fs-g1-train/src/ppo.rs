@@ -2,13 +2,20 @@
 //!
 //! Design: the env is a trait (`G1Env`) so the kernel can plug in whenever
 //! the stepwise API lands (cmaes-j36). For now, tests use a mock env.
-//! The transformer policy is the actor; a linear value head is the critic.
+//! The transformer policy is the actor; the value estimate is a stub
+//! (mean of the policy output) until a separate linear value head lands.
+//!
+//! HONEST STATUS (2026-08-29 fresh-eyes pass): `ppo_update` evaluates the
+//! PPO ratio/KL diagnostic correctly but does NOT yet apply a gradient —
+//! hand-rolled backprop through `GaitTransformer` (RMSNorm/GQA/RoPE/
+//! SwiGLU) is the pending seam. Callers must treat it as an early-stop
+//! KL measurement, not as training. The GAE, rollout, Gaussian policy,
+//! and observation-normalization machinery are real.
 //!
 //! Observation normalization: running mean/var (Welford's method).
 //! GAE: λ=0.95, γ=0.99. PPO clip: 0.2. Entropy bonus: configurable.
 
-use crate::muon::{AdamParam, MuonParam};
-use crate::transformer::{GaitTransformer, N_INPUTS, N_OUTPUTS};
+use crate::transformer::{GaitTransformer, N_INPUTS};
 
 /// A stepwise environment for the G1 walker.
 pub trait G1Env {
@@ -36,12 +43,16 @@ impl RunningNorm {
 
     pub fn update(&mut self, x: &[f32]) {
         self.count += 1.0;
-        let delta = self.count;
+        let n = self.count as f32;
         for i in 0..x.len() {
             let d = x[i] - self.mean[i];
-            self.mean[i] += d as f32 / delta as f32;
+            self.mean[i] += d / n;
             let d2 = x[i] - self.mean[i];
-            self.var[i] += (d2 * d2 - self.var[i]) as f64 as f32 / delta as f32;
+            // Exact Welford population-variance update: the cross term
+            // d*d2 (pre-update x deviation times post-update deviation)
+            // carries the (n-1)/n weighting. Using d2^2 here, as the
+            // first version did, underestimates the variance.
+            self.var[i] += (d * d2 - self.var[i]) / n;
         }
     }
 
@@ -51,7 +62,6 @@ impl RunningNorm {
         }
     }
 }
-
 /// PPO hyperparameters.
 pub struct PpoConfig {
     pub lr: f32,
@@ -148,18 +158,34 @@ fn gaussian_sample(state: &mut u64) -> f32 {
     (-2.0 * u1.ln()).sqrt() * (2.0 * std::f32::consts::PI * u2).cos()
 }
 
-/// PPO policy update on a collected trajectory.
-/// Returns the approximate KL divergence (for early stopping).
+/// PPO ratio/KL diagnostic over a collected trajectory.
+///
+/// For each stored (observation, action) pair this re-evaluates the
+/// CURRENT policy mean and computes the stored action's Gaussian log
+/// density under it — the mathematically correct PPO ratio input. The
+/// first version sampled a FRESH action here instead, which made the
+/// ratio and the KL diagnostic meaningless.
+///
+/// HONEST LIMIT: no gradient is applied. The clipped surrogates are
+/// computed but hand-rolled backprop through `GaitTransformer`
+/// (RMSNorm/GQA/RoPE/SwiGLU) is the pending seam; `model` is passed
+/// `&mut` to reserve that call-site. The return value is the mean
+/// absolute log-ratio — the standard PPO early-stop signal — and the
+/// ONLY effect of this function today. Treat it as a measurement,
+/// not as training.
 pub fn ppo_update(
     model: &mut GaitTransformer,
+    norm: &RunningNorm,
     traj: &Trajectory,
     advantages: &[f32],
-    returns: &[f32],
+    _returns: &[f32],
     old_log_probs: &[f32],
     config: &PpoConfig,
     log_std: &mut f32,
-    rng: &mut u64,
 ) -> f32 {
+    if traj.is_empty() {
+        return 0.0;
+    }
     // Normalize advantages
     let adv_mean: f32 = advantages.iter().sum::<f32>() / advantages.len() as f32;
     let adv_std = (advantages.iter().map(|a| (a - adv_mean).powi(2)).sum::<f32>() / advantages.len() as f32).sqrt() + 1e-8;
@@ -168,21 +194,36 @@ pub fn ppo_update(
     for _epoch in 0..config.epochs_per_batch {
         for t in 0..traj.len() {
             let adv = (advantages[t] - adv_mean) / adv_std;
-            // Re-evaluate the policy at this observation
-            let obs_norm = traj.observations[t].clone();
-            let output = model.forward(&obs_norm.try_into().unwrap_or([0.0; N_INPUTS]), t);
+            // Re-evaluate the policy mean at this observation, with the
+            // SAME normalization AND zero-padding path the rollout used
+            // (try_into on a shorter obs silently produced an all-zero
+            // input here, which is why the KL did not vanish on an
+            // unchanged policy).
+            let mut obs_norm = traj.observations[t].clone();
+            norm.normalize(&mut obs_norm);
+            let mut obs_arr = [0.0f32; N_INPUTS];
+            let copy_len = N_INPUTS.min(obs_norm.len());
+            obs_arr[..copy_len].copy_from_slice(&obs_norm[..copy_len]);
+            let output = model.forward(&obs_arr, t);
 
-            // New log prob (approximately — using the same Gaussian sampling)
-            let (_, new_log_prob) = gaussian_action(&output, *log_std, rng);
+            // log pi_new(a_t | s_t) for the STORED action under the
+            // current Gaussian (no sampling — the density of the
+            // collected action), matching the old_log_probs collected
+            // at rollout time.
+            let std = log_std.exp();
+            let mut new_log_prob = 0.0f32;
+            for (m, a) in output.iter().zip(traj.actions[t].iter()) {
+                let u = (a - m) / std;
+                new_log_prob += -0.5 * u * u - *log_std - 0.5 * (2.0 * std::f32::consts::PI).ln();
+            }
             let old_lp = old_log_probs[t];
 
-            // PPO clipped objective
+            // PPO clipped surrogate — computed for the diagnostic and
+            // the future gradient seam; no optimizer step exists yet.
             let ratio = (new_log_prob - old_lp).exp();
             let clipped = ratio.clamp(1.0 - config.clip_ratio, 1.0 + config.clip_ratio);
             let _surr1 = ratio * adv;
             let _surr2 = clipped * adv;
-            // The gradient signal is implicit through the model update below.
-            // In a real implementation, we'd backprop through the PPO loss.
 
             total_kl += (new_log_prob - old_lp).abs();
         }
@@ -191,16 +232,20 @@ pub fn ppo_update(
 }
 
 /// Collect a trajectory by rolling out the policy in the env.
+/// `horizon` caps the steps and `reset_seed` seeds the env (the first
+/// version hardcoded 64 and 0).
 pub fn collect_trajectory(
     env: &mut dyn G1Env,
     model: &GaitTransformer,
     norm: &RunningNorm,
     log_std: f32,
     rng: &mut u64,
+    horizon: usize,
+    reset_seed: u64,
 ) -> Trajectory {
     let mut traj = Trajectory::new();
-    let mut obs = env.reset(0);
-    for _ in 0..64 {
+    let mut obs = env.reset(reset_seed);
+    for _ in 0..horizon {
         let mut normalized = obs.clone();
         norm.normalize(&mut normalized);
         let mut obs_arr = [0.0f32; N_INPUTS];
@@ -216,7 +261,8 @@ pub fn collect_trajectory(
         traj.log_probs.push(log_prob);
         traj.dones.push(done);
 
-        // Value estimate: for simplicity, use the mean output as a rough value.
+        // Value estimate stub (mean of the policy output) until a
+        // separate linear value head lands.
         let value: f32 = output.iter().sum::<f32>() / output.len() as f32;
         traj.values.push(value);
 
@@ -260,7 +306,7 @@ mod tests {
         let mut seed2 = 0xD1CEu64;
         let model = GaitTransformer::new(&mut seed2);
         let norm = RunningNorm::new(4);
-        let traj = collect_trajectory(&mut env, &model, &norm, -0.5, &mut seed);
+        let traj = collect_trajectory(&mut env, &model, &norm, -0.5, &mut seed, 64, 0);
         assert!(!traj.is_empty());
         assert!(traj.len() <= 32);
         let (advantages, returns) = traj.compute_gae(0.0, 0.99, 0.95);
@@ -273,35 +319,46 @@ mod tests {
     }
 
     #[test]
-    fn ppo_reduces_mock_env_loss() {
+    fn ppo_update_kl_diagnostic_and_rollout_stability() {
+        // HONEST TEST (renamed from `ppo_reduces_mock_env_loss`, which
+        // claimed training that did not happen): `ppo_update` is a
+        // ratio/KL DIAGNOSTIC — it must return a finite, non-negative
+        // value, leave the model untouched, and the rollout reward must
+        // remain stable (no catastrophic degradation). The real
+        // learning test moves to the G1 env once transformer backprop
+        // lands.
         let mut seed = 123u64;
         let mut env = MockEnv { pos: [0.0, 0.0], step_count: 0 };
         let mut model_seed = 0xD1CEu64;
         let mut model = GaitTransformer::new(&mut model_seed);
-        let mut norm = RunningNorm::new(4);
+        let norm = RunningNorm::new(4);
         let config = PpoConfig::default();
         let mut log_std = -0.5f32;
         let initial_reward: f32 = {
-            let traj = collect_trajectory(&mut env, &model, &norm, log_std, &mut seed);
+            let traj = collect_trajectory(&mut env, &model, &norm, log_std, &mut seed, 64, 0);
             traj.rewards.iter().sum::<f32>() / traj.len().max(1) as f32
         };
-        // A few training iterations
+        let mut kl_sum = 0.0f32;
         for _ in 0..3 {
-            let traj = collect_trajectory(&mut env, &model, &norm, log_std, &mut seed);
-            let (advantages, _returns) = traj.compute_gae(0.0, config.gamma, config.gae_lambda);
+            let traj = collect_trajectory(&mut env, &model, &norm, log_std, &mut seed, 64, 0);
+            let (advantages, returns_from_gae) = traj.compute_gae(0.0, config.gamma, config.gae_lambda);
             let old_log_probs = traj.log_probs.clone();
-            let (returns_from_gae, _) = traj.compute_gae(0.0, config.gamma, config.gae_lambda);
-            let _kl = ppo_update(&mut model, &traj, &advantages, &returns_from_gae, &old_log_probs, &config, &mut log_std, &mut seed);
-            // Reset for next roll
+            let kl = ppo_update(&mut model, &norm, &traj, &advantages, &returns_from_gae, &old_log_probs, &config, &mut log_std);
+            assert!(kl.is_finite() && kl >= 0.0, "KL diagnostic must be finite and non-negative, got {kl}");
+            kl_sum += kl;
             let _ = env.reset(0);
         }
-        // The mock env's reward should not get worse (PPO should at least not
-        // degrade on a simple quadratic). The real test is in the G1 env.
+        // Policy is unchanged between rollout and diagnostic, so the
+        // stored-action density under the current policy must EQUAL the
+        // rollout density bit-for-bit -> exactly 0. This pins the
+        // density evaluation; when real gradient application lands,
+        // relax to `>= 0` (it becomes strictly positive).
+        assert_eq!(kl_sum, 0.0, "unchanged policy must give exactly 0 log-ratio drift");
         let final_reward: f32 = {
-            let traj = collect_trajectory(&mut env, &model, &norm, log_std, &mut seed);
+            let traj = collect_trajectory(&mut env, &model, &norm, log_std, &mut seed, 64, 0);
             traj.rewards.iter().sum::<f32>() / traj.len().max(1) as f32
         };
-        assert!(final_reward >= initial_reward - 1.0, "PPO should not catastrophically degrade: {initial_reward} -> {final_reward}");
+        assert!(final_reward >= initial_reward - 1.0, "rollout should not catastrophically degrade: {initial_reward} -> {final_reward}");
     }
 
 
