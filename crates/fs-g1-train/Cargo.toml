@@ -6,12 +6,8 @@ description = "G1 walking policy training: stepwise env, transformer policy, Muo
 license = "MIT"
 
 [dependencies]
-# The env: reuse the source-bound G1 walking evaluator (same crate the wasm binds).
-fs-cmaes-viz-wasm = { path = "../fs-cmaes-viz-wasm" }
-fs-mbd = { path = "../fs-mbd" }
-fs-ga = { path = "../fs-ga" }
-# Deterministic RNG (no external deps).
-fs-rand = { path = "../fs-rand" }
+# Standalone: the env integration plugs back in when the kernel workspace
+# stabilizes. For now, the transformer + Muon + PPO are self-contained.
 
 [dev-dependencies]
 # None needed — all tests are self-contained.
