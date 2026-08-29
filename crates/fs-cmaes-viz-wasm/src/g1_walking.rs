@@ -19,9 +19,9 @@ use fs_mbd::articulated::{
     BaseState, FreeFloatingBaseState, forward_kinematics, free_floating_forward_dynamics,
 };
 use fs_mbd::robot_models::{
-    CatalogRobotModel, G1_POLICY_ACTUATORS, G1_POLICY_DIMENSION, G1_POLICY_FEATURES_PER_ACTUATOR,
-    G1PolicyObservation, G1ResidualPolicy, g1_policy_phase_basis,
-    unitree_g1_lower_body_waist_15dof,
+    CatalogRobotModel, G1_MODEL_ACTUATORS, G1_POLICY_ACTUATORS, G1_POLICY_DIMENSION,
+    G1_POLICY_FEATURES_PER_ACTUATOR, G1PolicyObservation, G1ResidualPolicy, g1_policy_phase_basis,
+    unitree_g1_29dof,
 };
 use fs_time::{RenormPolicy, se3_exp_step_renorm};
 use fs_tribo::{
@@ -29,9 +29,9 @@ use fs_tribo::{
 };
 
 /// Stable identity of the owner-composed walking experiment.
-pub const G1_WALKING_MODEL_ID: &str = "fs-cmaes/g1-walking-owner-composition-v6";
-/// Links retained by the source-bound lower-body-and-waist catalog.
-pub const G1_LINK_COUNT: usize = 16;
+pub const G1_WALKING_MODEL_ID: &str = "fs-cmaes/g1-walking-owner-composition-v7";
+/// Pelvis plus all 29 actuated links retained by the source-bound mode-11 catalog.
+pub const G1_LINK_COUNT: usize = 30;
 /// Scalar pose words per link: translation xyz followed by quaternion wxyz.
 pub const G1_LINK_POSE_WORDS: usize = 7;
 
@@ -101,6 +101,8 @@ pub const G1_PUSH_PEAK_FORCE_N: f64 = 24.0;
 const RECOVERY_TILT_SINE: f64 = 0.10;
 const RECOVERY_ANGULAR_SPEED_RAD_PER_S: f64 = 0.35;
 const RECOVERY_HEIGHT_ERROR_M: f64 = 0.055;
+const ARM_SWING_AMPLITUDE_RAD: f64 = 0.30;
+const ARM_ROLL_DAMPING_TARGET_S: f64 = 0.10;
 
 // Deterministic full-CMA balance bootstrap produced by the exact owner stack:
 // seed 0x4731_5040, lambda 12, 100 generations, sigma 0.12. The values shown
@@ -511,7 +513,7 @@ pub struct G1WalkingEvaluator {
     catalog: CatalogRobotModel,
     interface: InterfaceSystemRef,
     friction: FrictionLaw,
-    reference_position: [f64; G1_POLICY_ACTUATORS],
+    reference_position: [f64; G1_MODEL_ACTUATORS],
     initial_base_height_m: f64,
     total_mass_kg: f64,
     step_count: usize,
@@ -521,7 +523,7 @@ impl G1WalkingEvaluator {
     /// Admit the fixed experiment and build the source-bound model once.
     pub fn new(config: G1WalkingConfig) -> Result<Self, G1WalkingError> {
         validate_config(config)?;
-        let catalog = unitree_g1_lower_body_waist_15dof()?;
+        let catalog = unitree_g1_29dof()?;
         let reference_position = reference_posture();
         let initial_base_height_m = initial_height(&catalog, &reference_position)?;
         let total_mass_kg = catalog
@@ -580,7 +582,7 @@ impl G1WalkingEvaluator {
         let policy = G1ResidualPolicy::new(parameters)?;
         let model = self.catalog.model();
         let mut position = self.reference_position;
-        let mut velocity = [0.0; G1_POLICY_ACTUATORS];
+        let mut velocity = [0.0; G1_MODEL_ACTUATORS];
         let mut base = FreeFloatingBaseState::stationary(Se3::from_parts(
             fs_ga::So3::identity(),
             Vec3::new(0.0, 0.0, self.initial_base_height_m),
@@ -646,8 +648,8 @@ impl G1WalkingEvaluator {
                     .inverse()
                     .rotate(Vec3::new(target_forward_speed_m_per_s, 0.0, 0.0))?;
             let observation = G1PolicyObservation {
-                joint_position_rad: position,
-                joint_velocity_rad_per_s: velocity,
+                joint_position_rad: core::array::from_fn(|actuator| position[actuator]),
+                joint_velocity_rad_per_s: core::array::from_fn(|actuator| velocity[actuator]),
                 gravity_direction_body,
                 angular_velocity_body_rad_per_s: base.twist_body.angular,
                 target_velocity_error_body_m_per_s: target_velocity_body - base.twist_body.linear,
@@ -777,6 +779,8 @@ impl G1WalkingEvaluator {
                 &position,
                 &velocity,
                 &residual,
+                phase_signal,
+                base.twist_body.angular,
             );
 
             let dynamics = free_floating_forward_dynamics(
@@ -788,7 +792,7 @@ impl G1WalkingEvaluator {
                 GRAVITY_WORLD_M_PER_S2,
                 &external,
             )?;
-            for actuator in 0..G1_POLICY_ACTUATORS {
+            for actuator in 0..G1_MODEL_ACTUATORS {
                 actuator_work_j +=
                     (generalized_force[actuator] * velocity[actuator]).abs() * self.config.step_s;
                 let source = self.catalog.joints()[actuator];
@@ -802,7 +806,7 @@ impl G1WalkingEvaluator {
                         .mul_add(normalized_overshoot, 0.0)
                         .min(1.0)
                         * self.config.step_s
-                        / G1_POLICY_ACTUATORS as f64;
+                        / G1_MODEL_ACTUATORS as f64;
                 }
                 velocity[actuator] = next_velocity.clamp(-velocity_limit, velocity_limit);
                 let next_position = position[actuator] + velocity[actuator] * self.config.step_s;
@@ -825,7 +829,7 @@ impl G1WalkingEvaluator {
                 let normalized = ((position[actuator] - center) / half_range).abs();
                 let soft_limit_excess = ((normalized - 0.80) / 0.20).max(0.0);
                 joint_limit_integral +=
-                    soft_limit_excess.powi(4) * self.config.step_s / G1_POLICY_ACTUATORS as f64;
+                    soft_limit_excess.powi(4) * self.config.step_s / G1_MODEL_ACTUATORS as f64;
             }
             base.twist_body = base.twist_body.plus(
                 dynamics
@@ -1134,21 +1138,22 @@ fn gait_targets(task: G1Task, phase_signal: f64) -> ([bool; 2], [f64; 2]) {
     }
 }
 
-const fn reference_posture() -> [f64; G1_POLICY_ACTUATORS] {
+const fn reference_posture() -> [f64; G1_MODEL_ACTUATORS] {
     [
-        -0.20, 0.0, 0.0, 0.42, -0.22, 0.0, -0.20, 0.0, 0.0, 0.42, -0.22, 0.0, 0.0, 0.0, 0.0,
+        -0.20, 0.0, 0.0, 0.42, -0.22, 0.0, -0.20, 0.0, 0.0, 0.42, -0.22, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.10, 0.0, 0.30, 0.0, 0.0, 0.0, 0.0, -0.10, 0.0, 0.30, 0.0, 0.0, 0.0,
     ]
 }
 
 fn initial_height(
     catalog: &CatalogRobotModel,
-    position: &[f64; G1_POLICY_ACTUATORS],
+    position: &[f64; G1_MODEL_ACTUATORS],
 ) -> Result<f64, G1WalkingError> {
     let kinematics = forward_kinematics(
         catalog.model(),
         BaseState::stationary(Se3::identity()),
         position,
-        &[0.0; G1_POLICY_ACTUATORS],
+        &[0.0; G1_MODEL_ACTUATORS],
     )?;
     let mut minimum_contact_z = f64::INFINITY;
     for link in [LEFT_FOOT_LINK, RIGHT_FOOT_LINK] {
@@ -1175,12 +1180,14 @@ fn static_contact_indentation_m(catalog: &CatalogRobotModel) -> f64 {
 
 fn controller_force(
     catalog: &CatalogRobotModel,
-    reference: &[f64; G1_POLICY_ACTUATORS],
-    position: &[f64; G1_POLICY_ACTUATORS],
-    velocity: &[f64; G1_POLICY_ACTUATORS],
+    reference: &[f64; G1_MODEL_ACTUATORS],
+    position: &[f64; G1_MODEL_ACTUATORS],
+    velocity: &[f64; G1_MODEL_ACTUATORS],
     residual: &[f64; G1_POLICY_ACTUATORS],
-) -> [f64; G1_POLICY_ACTUATORS] {
-    let mut force = [0.0; G1_POLICY_ACTUATORS];
+    phase_signal: f64,
+    body_angular_velocity_rad_per_s: Vec3,
+) -> [f64; G1_MODEL_ACTUATORS] {
+    let mut force = [0.0; G1_MODEL_ACTUATORS];
     for actuator in 0..G1_POLICY_ACTUATORS {
         let effort_limit = catalog.joints()[actuator].effort_newton_metres;
         let proportional_gain = if matches!(actuator, 3 | 9) {
@@ -1191,8 +1198,47 @@ fn controller_force(
         let derivative_gain = if matches!(actuator, 3 | 9) { 3.8 } else { 2.5 };
         let posture = proportional_gain * (reference[actuator] - position[actuator])
             - derivative_gain * velocity[actuator];
-        let residual_force = RESIDUAL_EFFORT_FRACTION * effort_limit * residual[actuator];
+        // Mode 11 raises the four hip pitch/roll limits from 88 to 139 N m.
+        // Preserve the learned v6 residual envelope instead of silently
+        // amplifying every existing policy coordinate by 58%.
+        let policy_effort_scale = if matches!(actuator, 0 | 1 | 6 | 7) {
+            88.0 / 139.0
+        } else {
+            1.0
+        };
+        let residual_force =
+            RESIDUAL_EFFORT_FRACTION * effort_limit * policy_effort_scale * residual[actuator];
         force[actuator] = (posture + residual_force).clamp(-effort_limit, effort_limit);
+    }
+
+    // The remaining fourteen source joints are not fake display motion. They
+    // are integrated by the same articulated owner with their official
+    // inertias and limits. A small disclosed reflex swings the shoulders
+    // opposite the gait phase, bends the elbows, and damps body pitch/roll.
+    let mut target = *reference;
+    target[15] -= ARM_SWING_AMPLITUDE_RAD * phase_signal
+        + ARM_ROLL_DAMPING_TARGET_S * body_angular_velocity_rad_per_s.y;
+    target[22] += ARM_SWING_AMPLITUDE_RAD * phase_signal
+        - ARM_ROLL_DAMPING_TARGET_S * body_angular_velocity_rad_per_s.y;
+    target[16] -= ARM_ROLL_DAMPING_TARGET_S * body_angular_velocity_rad_per_s.x;
+    target[23] -= ARM_ROLL_DAMPING_TARGET_S * body_angular_velocity_rad_per_s.x;
+    target[18] += 0.08 * phase_signal.abs();
+    target[25] += 0.08 * phase_signal.abs();
+    for actuator in G1_POLICY_ACTUATORS..G1_MODEL_ACTUATORS {
+        let effort_limit = catalog.joints()[actuator].effort_newton_metres;
+        let local = if actuator < 22 {
+            actuator - 15
+        } else {
+            actuator - 22
+        };
+        let (proportional_gain, derivative_gain) = match local {
+            0..=2 => (32.0, 3.2),
+            3 => (26.0, 2.6),
+            _ => (12.0, 1.2),
+        };
+        let reflex = proportional_gain * (target[actuator] - position[actuator])
+            - derivative_gain * velocity[actuator];
+        force[actuator] = reflex.clamp(-effort_limit, effort_limit);
     }
     force
 }
@@ -1271,6 +1317,149 @@ fn trace_sample(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fs_dfo::{CmaConfig, CmaFamily, CmaOptimizer};
+
+    fn curriculum_coordinates() -> Vec<f64> {
+        G1_STABILIZING_BIAS_MEAN
+            .into_iter()
+            .chain(G1_WALKING_PHASE_MEAN)
+            .chain(G1_WALKING_FEEDBACK_MEAN)
+            .collect()
+    }
+
+    fn policy_from_curriculum_coordinates(coordinates: &[f64]) -> [f64; G1_POLICY_DIMENSION] {
+        assert_eq!(coordinates.len(), 7 * G1_POLICY_ACTUATORS);
+        let mut policy = [0.0; G1_POLICY_DIMENSION];
+        for actuator in 0..G1_POLICY_ACTUATORS {
+            let row = actuator * G1_POLICY_FEATURES_PER_ACTUATOR;
+            policy[row] = coordinates[actuator];
+            policy[row + 1] = coordinates[G1_POLICY_ACTUATORS + 2 * actuator];
+            policy[row + 2] = coordinates[G1_POLICY_ACTUATORS + 2 * actuator + 1];
+            for (feedback, signal) in [31, 32, 34, 35].into_iter().enumerate() {
+                policy[row + signal * 8] =
+                    coordinates[3 * G1_POLICY_ACTUATORS + 4 * actuator + feedback];
+            }
+        }
+        policy
+    }
+
+    fn optimize_curriculum_stage(
+        label: &str,
+        config: G1WalkingConfig,
+        initial: Vec<f64>,
+        sigma: f64,
+        generations: usize,
+        seed: u64,
+    ) -> Vec<f64> {
+        const POPULATION: usize = 16;
+        let evaluator = G1WalkingEvaluator::new(config).expect("calibration evaluator");
+        let mut cma_config = CmaConfig::standard(
+            CmaFamily::Full,
+            initial,
+            sigma,
+            POPULATION * generations,
+            seed,
+        );
+        cma_config.population_size = Some(POPULATION);
+        let mut optimizer = CmaOptimizer::new(cma_config).expect("calibration CMA");
+        for generation in 0..generations {
+            let candidates = optimizer.ask().expect("calibration ask");
+            let objectives = candidates
+                .candidates()
+                .iter()
+                .map(|coordinates| {
+                    evaluator
+                        .evaluate(&policy_from_curriculum_coordinates(coordinates))
+                        .expect("calibration rollout")
+                        .objective
+                })
+                .collect::<Vec<_>>();
+            let snapshot = optimizer
+                .tell(&candidates, &objectives)
+                .expect("calibration tell");
+            if generation % 20 == 19 || generation + 1 == generations {
+                let best = snapshot.best.as_ref().expect("calibration best");
+                let receipt = evaluator
+                    .evaluate(&policy_from_curriculum_coordinates(&best.point))
+                    .expect("calibration best receipt");
+                eprintln!(
+                    "{label} generation={} sigma={:.6} objective={:.6} steps={} distance={:.6} single_support={:.6} ending={:?}",
+                    generation + 1,
+                    snapshot.sigma,
+                    receipt.objective,
+                    receipt.completed_steps,
+                    receipt.distance_m,
+                    receipt.single_support_s,
+                    receipt.termination_reason,
+                );
+            }
+        }
+        optimizer
+            .snapshot()
+            .best
+            .expect("calibration completed best")
+            .point
+    }
+
+    #[test]
+    #[ignore = "deterministic offline provenance for the checked-in mode-11 curriculum"]
+    fn recalibrate_mode_11_curriculum() {
+        let short = optimize_curriculum_stage(
+            "flat-0.65s",
+            G1WalkingConfig {
+                duration_s: 0.65,
+                ..G1WalkingConfig::default()
+            },
+            curriculum_coordinates(),
+            0.08,
+            120,
+            0x4731_5060,
+        );
+        let medium = optimize_curriculum_stage(
+            "flat-1.0s",
+            G1WalkingConfig {
+                duration_s: 1.0,
+                ..G1WalkingConfig::default()
+            },
+            short,
+            0.055,
+            140,
+            0x4731_5061,
+        );
+        let long = optimize_curriculum_stage(
+            "flat-1.5s",
+            G1WalkingConfig::default(),
+            medium,
+            0.04,
+            180,
+            0x4731_5062,
+        );
+        let robust = optimize_curriculum_stage(
+            "terrain-push-1.5s",
+            G1WalkingConfig {
+                challenge: G1Challenge::TerrainAndPush,
+                ..G1WalkingConfig::default()
+            },
+            long,
+            0.025,
+            220,
+            0x4731_5063,
+        );
+        let flat_evaluator = G1WalkingEvaluator::new(G1WalkingConfig::default()).unwrap();
+        let challenge_evaluator = G1WalkingEvaluator::new(G1WalkingConfig {
+            challenge: G1Challenge::TerrainAndPush,
+            ..G1WalkingConfig::default()
+        })
+        .unwrap();
+        let policy = policy_from_curriculum_coordinates(&robust);
+        let flat = flat_evaluator.evaluate(&policy).unwrap();
+        let challenge = challenge_evaluator.evaluate(&policy).unwrap();
+        eprintln!("MODE11_CALIBRATION_FLAT={flat:?}");
+        eprintln!("MODE11_CALIBRATION_CHALLENGE={challenge:?}");
+        eprintln!("MODE11_CALIBRATION_COORDINATES={robust:#?}");
+        assert_eq!(flat.termination_reason, G1TerminationReason::Horizon);
+        assert_eq!(challenge.termination_reason, G1TerminationReason::Horizon);
+    }
 
     #[test]
     fn zero_policy_rollout_is_deterministic_and_owner_derived() -> Result<(), G1WalkingError> {
@@ -1375,7 +1564,7 @@ mod tests {
                 Vec3::new(0.0, 0.0, evaluator.initial_base_height_m),
             )?),
             &evaluator.reference_position,
-            &[0.0; G1_POLICY_ACTUATORS],
+            &[0.0; G1_MODEL_ACTUATORS],
         )?;
         let expected_z = -static_contact_indentation_m(&evaluator.catalog);
         for link in [LEFT_FOOT_LINK, RIGHT_FOOT_LINK] {
@@ -1407,6 +1596,49 @@ mod tests {
             gait_targets(G1Task::Walking, 0.0),
             ([true, true], [0.0, 0.0])
         );
+    }
+
+    #[test]
+    fn arm_reflex_is_bilateral_damped_and_owner_integrated() -> Result<(), G1WalkingError> {
+        let evaluator = G1WalkingEvaluator::new(G1WalkingConfig::default())?;
+        let reference = evaluator.reference_position;
+        let zero_velocity = [0.0; G1_MODEL_ACTUATORS];
+        let zero_residual = [0.0; G1_POLICY_ACTUATORS];
+        let positive = controller_force(
+            &evaluator.catalog,
+            &reference,
+            &reference,
+            &zero_velocity,
+            &zero_residual,
+            1.0,
+            Vec3::new(0.0, 0.0, 0.0),
+        );
+        let negative = controller_force(
+            &evaluator.catalog,
+            &reference,
+            &reference,
+            &zero_velocity,
+            &zero_residual,
+            -1.0,
+            Vec3::new(0.0, 0.0, 0.0),
+        );
+        assert!(positive[15] < 0.0 && positive[22] > 0.0);
+        assert_eq!(positive[15].to_bits(), negative[22].to_bits());
+        assert_eq!(positive[22].to_bits(), negative[15].to_bits());
+        assert!(positive[18] > 0.0 && positive[25] > 0.0);
+
+        let dynamics = free_floating_forward_dynamics(
+            evaluator.catalog.model(),
+            FreeFloatingBaseState::stationary(Se3::identity()),
+            &reference,
+            &zero_velocity,
+            &positive,
+            GRAVITY_WORLD_M_PER_S2,
+            &[Wrench::default(); G1_LINK_COUNT],
+        )?;
+        assert!(dynamics.generalized_acceleration[15].abs() > 1.0e-6);
+        assert!(dynamics.generalized_acceleration[22].abs() > 1.0e-6);
+        Ok(())
     }
 
     #[test]

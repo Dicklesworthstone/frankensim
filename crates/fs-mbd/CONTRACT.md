@@ -12,9 +12,9 @@ dynamics in linear time and storage.
 
 The `robot_models` catalog is a provenance-bound construction layer over that
 articulated owner. It currently transcribes two pinned upstream descriptions:
-a 15-DoF lower-body-and-waist reduction of Unitree's legacy `g1_29dof` URDF,
-and the seven-axis KUKA LBR iiwa 7 R800 description from `iiwa_stack`. It adds
-no second pose, twist, wrench, inertia, joint, or articulated-model type.
+Unitree's current mode-11 G1 description with all 29 actuated joints, and the
+seven-axis KUKA LBR iiwa 7 R800 description from `iiwa_stack`. It adds no
+second pose, twist, wrench, inertia, joint, or articulated-model type.
 
 Canonical poses, twists, wrenches, adjoints, and coadjoints remain owned by
 `fs-ga`; the articulated lane consumes those types rather than creating a
@@ -125,11 +125,12 @@ neither.
   topology as the solver, then records six base DoFs, one fixed 36-entry root
   solve, zero dense generalized-matrix entries, and the shared linear tree
   working set.
-- `robot_models::unitree_g1_lower_body_waist_15dof` builds a fixed-pelvis tree
-  with the source joint order of six left-leg, six right-leg, and three waist
-  DoFs. It uses the link inertias, joint origins, axes, and hard limits from the
-  official Unitree `g1_29dof.urdf` pinned in the returned metadata. The pinned
-  Unitree README marks that legacy source variant deprecated.
+- `robot_models::unitree_g1_29dof` builds a fixed-pelvis tree in the current
+  mode-11 source order: six left-leg, six right-leg, three waist, seven
+  left-arm, and seven right-arm DoFs. It uses all 29 actuated link inertias,
+  joint origins, axes, and hard limits from the official Unitree
+  `g1_29dof_mode_11.urdf` pinned in the returned metadata. The pinned Unitree
+  README identifies mode 11 as the up-to-date 29-DoF configuration.
 - `robot_models::kuka_lbr_iiwa7_r800` builds the fixed-base seven-axis chain
   from `iiwa_stack`'s pinned `iiwa7.xacro`. Its 300 N m effort and 10 rad/s
   velocity limits are the Xacro's generic macro defaults, not claimed KUKA
@@ -285,7 +286,7 @@ world-rotation equivariance, a free-ABA to prescribed-base-RNEA round trip with
 zero root wrench, redundant-root, non-symmetric, and ill-conditioned-system
 refusal, an off-diagonal 6x6 solve oracle, the explicit spatial-to-Cartesian
 origin-acceleration conversion, and linear-storage metadata. The Unitree
-G1-derived 15-DoF catalog additionally proves the stronger free-fall invariant:
+G1-derived 29-DoF catalog additionally proves the stronger free-fall invariant:
 zero internal joint acceleration and the same world gravity expressed in every
 link's body frame.
 

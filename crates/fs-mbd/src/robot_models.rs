@@ -13,8 +13,10 @@ use fs_math::det;
 /// Version of the typed in-source robot catalog layout.
 pub const ROBOT_MODEL_CATALOG_VERSION: u32 = 1;
 
-/// Number of actuators retained by the G1 lower-body-and-waist catalog.
+/// Number of learned locomotion channels retained by the G1 policy.
 pub const G1_POLICY_ACTUATORS: usize = 15;
+/// Number of source actuators in the owner-composed G1 mode-11 model.
+pub const G1_MODEL_ACTUATORS: usize = 29;
 /// Raw state and command signals supplied to the G1 residual policy.
 pub const G1_POLICY_RAW_SIGNALS: usize = 42;
 /// Periodic phase functions multiplying every raw signal.
@@ -260,8 +262,8 @@ const fn vec3_array(value: Vec3) -> [f64; 3] {
 /// Stable identity for one catalog model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RobotModelId {
-    /// Unitree G1 legacy 29-DoF source reduced to 12 leg and three waist joints.
-    UnitreeG1LowerBodyWaist15,
+    /// Unitree G1 mode-11 source with 12 leg, three waist, and 14 arm joints.
+    UnitreeG1Mode11WholeBody29,
     /// KUKA LBR iiwa 7 R800 description from the `iiwa_stack` iiwa7 Xacro.
     KukaLbrIiwa7R800,
 }
@@ -380,34 +382,34 @@ impl CatalogRobotModel {
 
 const UNITREE_SOURCES: [RobotModelSource; 2] = [
     RobotModelSource {
-        role: "selected link inertias, joint origins, axes, and hard limits",
-        url: "https://raw.githubusercontent.com/unitreerobotics/unitree_ros/80b96438bcbc673379b5f35e767c40611f7e0af1/robots/g1_description/g1_29dof.urdf",
-        revision: "80b96438bcbc673379b5f35e767c40611f7e0af1",
-        git_blob_sha1: "49aeacd82072a6cb9847fac05ba59d9c35b0664e",
+        role: "29 actuated link inertias, joint origins, axes, and hard limits",
+        url: "https://raw.githubusercontent.com/unitreerobotics/unitree_ros/7d6075f7f58588b189b940130e3edab3c839b2df/robots/g1_description/g1_29dof_mode_11.urdf",
+        revision: "7d6075f7f58588b189b940130e3edab3c839b2df",
+        git_blob_sha1: "ed990a66e6edc15cc398fdbf5be67b1f72e1e8ee",
     },
     RobotModelSource {
         role: "variant inventory and upstream deprecation status",
-        url: "https://raw.githubusercontent.com/unitreerobotics/unitree_ros/80b96438bcbc673379b5f35e767c40611f7e0af1/robots/g1_description/README.md",
-        revision: "80b96438bcbc673379b5f35e767c40611f7e0af1",
+        url: "https://raw.githubusercontent.com/unitreerobotics/unitree_ros/7d6075f7f58588b189b940130e3edab3c839b2df/robots/g1_description/README.md",
+        revision: "7d6075f7f58588b189b940130e3edab3c839b2df",
         git_blob_sha1: "d1b8ce0f1859bf5f8ae8c4405533434f1d6c13be",
     },
 ];
 
 const UNITREE_OMISSIONS: [&str; 4] = [
-    "The 14 arm DoFs, arm links, fixed rubber hands, and their inertias are omitted rather than lumped into torso_link.",
-    "Fixed pelvis-contour, logo, head, waist-support, and sensor attachments are omitted; their nonzero masses are not lumped into retained links.",
+    "Fixed rubber hands, head, pelvis contour, logo, waist supports, and sensor attachments are omitted; their nonzero masses are not lumped into retained links.",
+    "The catalog retains all 29 actuated links but does not prescribe a controller; the walking composition explicitly declares which 15 channels are learned and how the 14 arm joints are driven.",
     "Visual/collision meshes, foot contact spheres, sensors, transmissions, and actuator/gear dynamics are not represented.",
-    "The catalog itself prescribes no base boundary: callers may use fs-mbd's prescribed-base or unconstrained free-floating solve; neither adds the omitted upper-body mass nor ground contact.",
+    "The catalog itself prescribes no base boundary: callers may use fs-mbd's prescribed-base or unconstrained free-floating solve; neither adds omitted fixed-link mass nor ground contact.",
 ];
 
 static UNITREE_METADATA: RobotModelMetadata = RobotModelMetadata {
-    id: RobotModelId::UnitreeG1LowerBodyWaist15,
-    label: "Unitree G1-inspired 15-DoF lower body and waist",
+    id: RobotModelId::UnitreeG1Mode11WholeBody29,
+    label: "Unitree G1 mode-11 29-DoF whole-body model",
     authority: "Unitree Robotics official unitree_ros repository",
-    source_variant: "g1_29dof.urdf, legacy mode_machine=2",
-    source_status: "Deprecated by the pinned upstream README; retained as the explicitly requested source variant",
+    source_variant: "g1_29dof_mode_11.urdf, mode_machine=11",
+    source_status: "Up-to-date in the pinned upstream README",
     units: "URDF SI: metres, kilograms, kilogram-metres squared, radians, radians/second, newton-metres",
-    derivation: "Exact transcription of the pelvis, 12 leg, and three waist joint/link numeric records into fs-ga frames and fs-mbd articulated types",
+    derivation: "Exact transcription of the pelvis and all 29 actuated link numeric records into fs-ga frames and fs-mbd articulated types",
     sources: &UNITREE_SOURCES,
     omissions: &UNITREE_OMISSIONS,
 };
@@ -520,7 +522,7 @@ impl SourceLink {
 // These decimals intentionally preserve the upstream URDF records instead of
 // silently replacing them with nearby mathematical constants.
 #[allow(clippy::approx_constant, clippy::unreadable_literal)]
-const G1_LINKS: [SourceLink; 16] = [
+const G1_LINKS: [SourceLink; 30] = [
     SourceLink::fixed(
         "pelvis",
         None,
@@ -536,7 +538,7 @@ const G1_LINKS: [SourceLink; 16] = [
         [0.0, 0.064452, -0.1027],
         [0.0, 0.0, 0.0],
         [0.0, 1.0, 0.0],
-        RobotJointMetadata::new("left_hip_pitch_joint", -2.5307, 2.8798, 32.0, 88.0),
+        RobotJointMetadata::new("left_hip_pitch_joint", -2.5307, 2.8798, 20.0, 139.0),
         1.35,
         [0.002741, 0.047791, -0.02606],
         [0.001811, 3.68e-5, -3.44e-5, 0.0014193, 0.000171, 0.0012812],
@@ -547,7 +549,7 @@ const G1_LINKS: [SourceLink; 16] = [
         [0.0, 0.052, -0.030465],
         [0.0, -0.1749, 0.0],
         [1.0, 0.0, 0.0],
-        RobotJointMetadata::new("left_hip_roll_joint", -0.5236, 2.9671, 32.0, 88.0),
+        RobotJointMetadata::new("left_hip_roll_joint", -0.5236, 2.9671, 20.0, 139.0),
         1.52,
         [0.029812, -0.001045, -0.087934],
         [
@@ -606,7 +608,7 @@ const G1_LINKS: [SourceLink; 16] = [
         [0.0, -0.064452, -0.1027],
         [0.0, 0.0, 0.0],
         [0.0, 1.0, 0.0],
-        RobotJointMetadata::new("right_hip_pitch_joint", -2.5307, 2.8798, 32.0, 88.0),
+        RobotJointMetadata::new("right_hip_pitch_joint", -2.5307, 2.8798, 20.0, 139.0),
         1.35,
         [0.002741, -0.047791, -0.02606],
         [
@@ -619,7 +621,7 @@ const G1_LINKS: [SourceLink; 16] = [
         [0.0, -0.052, -0.030465],
         [0.0, -0.1749, 0.0],
         [1.0, 0.0, 0.0],
-        RobotJointMetadata::new("right_hip_roll_joint", -2.9671, 0.5236, 32.0, 88.0),
+        RobotJointMetadata::new("right_hip_roll_joint", -2.9671, 0.5236, 20.0, 139.0),
         1.52,
         [0.029812, 0.001045, -0.087934],
         [
@@ -679,39 +681,260 @@ const G1_LINKS: [SourceLink; 16] = [
         [0.0, 0.0, 0.0],
         [0.0, 0.0, 1.0],
         RobotJointMetadata::new("waist_yaw_joint", -2.618, 2.618, 32.0, 88.0),
-        0.244,
-        [0.003964, 0.0, 0.018769],
+        0.214,
+        [0.003494, 0.000233, 0.018034],
         [
-            9.9587e-5, -1.833e-6, -1.2617e-5, 0.00012411, -1.18e-7, 0.00015586,
+            0.00010673, 2.703e-6, -7.631e-6, 0.00010422, -2.01e-7, 0.0001625,
         ],
     ),
     SourceLink::revolute(
         "waist_roll_link",
         13,
-        [-0.0039635, 0.0, 0.035],
+        [-0.0039635, 0.0, 0.044],
         [0.0, 0.0, 0.0],
         [1.0, 0.0, 0.0],
         RobotJointMetadata::new("waist_roll_joint", -0.52, 0.52, 30.0, 35.0),
-        0.047,
-        [0.0, -0.000236, 0.010111],
-        [7.515e-6, 0.0, 0.0, 6.398e-6, 9.9e-8, 3.988e-6],
+        0.086,
+        [0.0, 2.3e-5, 0.0],
+        [7.079e-6, 0.0, 0.0, 6.339e-6, 0.0, 8.245e-6],
     ),
     SourceLink::revolute(
         "torso_link",
         14,
-        [0.0, 0.0, 0.019],
+        [0.0, 0.0, 0.0],
         [0.0, 0.0, 0.0],
         [0.0, 1.0, 0.0],
         RobotJointMetadata::new("waist_pitch_joint", -0.52, 0.52, 30.0, 35.0),
-        8.562,
-        [0.002601, 0.000257, 0.153719],
+        6.78,
+        [0.000931, 0.000346, 0.15082],
         [
-            0.065674966,
-            -8.597e-5,
-            -0.001737252,
-            0.053535188,
-            8.6899e-5,
-            0.030808125,
+            0.05905, 3.3302e-5, -0.0017715, 0.047014, -2.2399e-5, 0.025652,
+        ],
+    ),
+    SourceLink::revolute(
+        "left_shoulder_pitch_link",
+        15,
+        [0.0039563, 0.10022, 0.24778],
+        [0.27931, 5.4949e-5, -0.00019159],
+        [0.0, 1.0, 0.0],
+        RobotJointMetadata::new("left_shoulder_pitch_joint", -3.0892, 2.6704, 37.0, 25.0),
+        0.718,
+        [0.0, 0.035892, -0.011628],
+        [0.0004291, -9.2e-6, 6.4e-6, 0.000453, 2.26e-5, 0.000423],
+    ),
+    SourceLink::revolute(
+        "left_shoulder_roll_link",
+        16,
+        [0.0, 0.038, -0.013831],
+        [-0.27925, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        RobotJointMetadata::new("left_shoulder_roll_joint", -1.5882, 2.2515, 37.0, 25.0),
+        0.643,
+        [-0.000227, 0.00727, -0.063243],
+        [0.0006177, -1.0e-6, 8.7e-6, 0.0006912, -5.3e-6, 0.0003894],
+    ),
+    SourceLink::revolute(
+        "left_shoulder_yaw_link",
+        17,
+        [0.0, 0.00624, -0.1032],
+        [0.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0],
+        RobotJointMetadata::new("left_shoulder_yaw_joint", -2.618, 2.618, 37.0, 25.0),
+        0.734,
+        [0.010773, -0.002949, -0.072009],
+        [0.0009988, 7.9e-6, 0.0001412, 0.0010605, -2.86e-5, 0.0004354],
+    ),
+    SourceLink::revolute(
+        "left_elbow_link",
+        18,
+        [0.015783, 0.0, -0.080518],
+        [0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        RobotJointMetadata::new("left_elbow_joint", -1.0472, 2.0944, 37.0, 25.0),
+        0.6,
+        [0.064956, 0.004454, -0.010062],
+        [0.0002891, 6.53e-5, 1.72e-5, 0.0004152, -5.6e-6, 0.0004197],
+    ),
+    SourceLink::revolute(
+        "left_wrist_roll_link",
+        19,
+        [0.1, 0.00188791, -0.01],
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        RobotJointMetadata::new(
+            "left_wrist_roll_joint",
+            -1.972222054,
+            1.972222054,
+            37.0,
+            25.0,
+        ),
+        0.08544498,
+        [0.01713944778, 0.00053759094, 0.00000048864],
+        [
+            0.00004821544023,
+            -0.00000424511021,
+            0.00000000510599,
+            0.00003722899093,
+            -0.00000000123525,
+            0.00005482106541,
+        ],
+    ),
+    SourceLink::revolute(
+        "left_wrist_pitch_link",
+        20,
+        [0.038, 0.0, 0.0],
+        [0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        RobotJointMetadata::new(
+            "left_wrist_pitch_joint",
+            -1.614429558,
+            1.614429558,
+            22.0,
+            5.0,
+        ),
+        0.48404956,
+        [0.02299989837, -0.00111685314, -0.00111658096],
+        [
+            0.00016579646273,
+            -0.00001231206746,
+            0.00001231699194,
+            0.00042954057410,
+            0.00000081417712,
+            0.00042953697654,
+        ],
+    ),
+    SourceLink::revolute(
+        "left_wrist_yaw_link",
+        21,
+        [0.046, 0.0, 0.0],
+        [0.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0],
+        RobotJointMetadata::new("left_wrist_yaw_joint", -1.614429558, 1.614429558, 22.0, 5.0),
+        0.08457647,
+        [0.02200381568, 0.00049485096, 0.00053861123],
+        [
+            0.00004929128828,
+            -0.00000045735494,
+            0.00000445867591,
+            0.00005973338134,
+            0.00000043217198,
+            0.00003928083826,
+        ],
+    ),
+    SourceLink::revolute(
+        "right_shoulder_pitch_link",
+        15,
+        [0.0039563, -0.10021, 0.24778],
+        [-0.27931, 5.4949e-5, 0.00019159],
+        [0.0, 1.0, 0.0],
+        RobotJointMetadata::new("right_shoulder_pitch_joint", -3.0892, 2.6704, 37.0, 25.0),
+        0.718,
+        [0.0, -0.035892, -0.011628],
+        [0.0004291, 9.2e-6, 6.4e-6, 0.000453, -2.26e-5, 0.000423],
+    ),
+    SourceLink::revolute(
+        "right_shoulder_roll_link",
+        23,
+        [0.0, -0.038, -0.013831],
+        [0.27925, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        RobotJointMetadata::new("right_shoulder_roll_joint", -2.2515, 1.5882, 37.0, 25.0),
+        0.643,
+        [-0.000227, -0.00727, -0.063243],
+        [0.0006177, 1.0e-6, 8.7e-6, 0.0006912, 5.3e-6, 0.0003894],
+    ),
+    SourceLink::revolute(
+        "right_shoulder_yaw_link",
+        24,
+        [0.0, -0.00624, -0.1032],
+        [0.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0],
+        RobotJointMetadata::new("right_shoulder_yaw_joint", -2.618, 2.618, 37.0, 25.0),
+        0.734,
+        [0.010773, 0.002949, -0.072009],
+        [0.0009988, -7.9e-6, 0.0001412, 0.0010605, 2.86e-5, 0.0004354],
+    ),
+    SourceLink::revolute(
+        "right_elbow_link",
+        25,
+        [0.015783, 0.0, -0.080518],
+        [0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        RobotJointMetadata::new("right_elbow_joint", -1.0472, 2.0944, 37.0, 25.0),
+        0.6,
+        [0.064956, -0.004454, -0.010062],
+        [0.0002891, -6.53e-5, 1.72e-5, 0.0004152, 5.6e-6, 0.0004197],
+    ),
+    SourceLink::revolute(
+        "right_wrist_roll_link",
+        26,
+        [0.1, -0.00188791, -0.01],
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        RobotJointMetadata::new(
+            "right_wrist_roll_joint",
+            -1.972222054,
+            1.972222054,
+            37.0,
+            25.0,
+        ),
+        0.08544498,
+        [0.01713944778, -0.00053759094, 0.00000048864],
+        [
+            0.00004821544023,
+            0.00000424511021,
+            0.00000000510599,
+            0.00003722899093,
+            0.00000000123525,
+            0.00005482106541,
+        ],
+    ),
+    SourceLink::revolute(
+        "right_wrist_pitch_link",
+        27,
+        [0.038, 0.0, 0.0],
+        [0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        RobotJointMetadata::new(
+            "right_wrist_pitch_joint",
+            -1.614429558,
+            1.614429558,
+            22.0,
+            5.0,
+        ),
+        0.48404956,
+        [0.02299989837, 0.00111685314, -0.00111658096],
+        [
+            0.00016579646273,
+            0.00001231206746,
+            0.00001231699194,
+            0.00042954057410,
+            -0.00000081417712,
+            0.00042953697654,
+        ],
+    ),
+    SourceLink::revolute(
+        "right_wrist_yaw_link",
+        28,
+        [0.046, 0.0, 0.0],
+        [0.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0],
+        RobotJointMetadata::new(
+            "right_wrist_yaw_joint",
+            -1.614429558,
+            1.614429558,
+            22.0,
+            5.0,
+        ),
+        0.08457647,
+        [0.02200381568, -0.00049485096, 0.00053861123],
+        [
+            0.00004929128828,
+            0.00000045735494,
+            0.00000445867591,
+            0.00005973338134,
+            -0.00000043217198,
+            0.00003928083826,
         ],
     ),
 ];
@@ -809,12 +1032,12 @@ const IIWA_LINKS: [SourceLink; 8] = [
     ),
 ];
 
-/// Build the requested Unitree G1-inspired 15-DoF lower-body and waist model.
+/// Build the Unitree G1 mode-11 29-DoF whole-body model.
 ///
 /// # Errors
 /// Returns the canonical articulated/Lie refusal if a transcribed source record
 /// violates model, inertia, limit, or pose invariants.
-pub fn unitree_g1_lower_body_waist_15dof() -> Result<CatalogRobotModel, ArticulatedError> {
+pub fn unitree_g1_29dof() -> Result<CatalogRobotModel, ArticulatedError> {
     build_model(&G1_LINKS, &UNITREE_METADATA)
 }
 
@@ -910,9 +1133,9 @@ mod tests {
 
     #[test]
     fn g1_catalog_has_stable_counts_and_source_order() {
-        let catalog = unitree_g1_lower_body_waist_15dof().unwrap();
-        assert_eq!(catalog.model().link_count(), 16);
-        assert_eq!(catalog.model().dof_count(), 15);
+        let catalog = unitree_g1_29dof().unwrap();
+        assert_eq!(catalog.model().link_count(), 30);
+        assert_eq!(catalog.model().dof_count(), G1_MODEL_ACTUATORS);
         assert_eq!(
             catalog
                 .model()
@@ -937,6 +1160,20 @@ mod tests {
                 "waist_yaw_link",
                 "waist_roll_link",
                 "torso_link",
+                "left_shoulder_pitch_link",
+                "left_shoulder_roll_link",
+                "left_shoulder_yaw_link",
+                "left_elbow_link",
+                "left_wrist_roll_link",
+                "left_wrist_pitch_link",
+                "left_wrist_yaw_link",
+                "right_shoulder_pitch_link",
+                "right_shoulder_roll_link",
+                "right_shoulder_yaw_link",
+                "right_elbow_link",
+                "right_wrist_roll_link",
+                "right_wrist_pitch_link",
+                "right_wrist_yaw_link",
             ]
         );
         assert_eq!(
@@ -961,6 +1198,20 @@ mod tests {
                 "waist_yaw_joint",
                 "waist_roll_joint",
                 "waist_pitch_joint",
+                "left_shoulder_pitch_joint",
+                "left_shoulder_roll_joint",
+                "left_shoulder_yaw_joint",
+                "left_elbow_joint",
+                "left_wrist_roll_joint",
+                "left_wrist_pitch_joint",
+                "left_wrist_yaw_joint",
+                "right_shoulder_pitch_joint",
+                "right_shoulder_roll_joint",
+                "right_shoulder_yaw_joint",
+                "right_elbow_joint",
+                "right_wrist_roll_joint",
+                "right_wrist_pitch_joint",
+                "right_wrist_yaw_joint",
             ]
         );
     }
@@ -1060,7 +1311,7 @@ mod tests {
 
     #[test]
     fn g1_neutral_forward_kinematics_preserves_bilateral_origin_symmetry() {
-        let catalog = unitree_g1_lower_body_waist_15dof().unwrap();
+        let catalog = unitree_g1_29dof().unwrap();
         let kinematics = neutral_kinematics(&catalog);
         for (left, right) in (1..=6).zip(7..=12) {
             let left_origin = kinematics.world_from_link[left]
@@ -1073,6 +1324,32 @@ mod tests {
             assert_close(left_origin.y, -right_origin.y);
             assert_close(left_origin.z, right_origin.z);
         }
+        for (left, right) in (16..=22).zip(23..=29) {
+            let left_origin = kinematics.world_from_link[left]
+                .transform_point(Vec3::new(0.0, 0.0, 0.0))
+                .unwrap();
+            let right_origin = kinematics.world_from_link[right]
+                .transform_point(Vec3::new(0.0, 0.0, 0.0))
+                .unwrap();
+            // The official mode-11 file preserves measured 10 µm-scale
+            // shoulder asymmetries rather than forcing an ideal mirror.
+            assert!((left_origin.x - right_origin.x).abs() <= 2.0e-5);
+            assert!((left_origin.y + right_origin.y).abs() <= 2.0e-5);
+            assert!((left_origin.z - right_origin.z).abs() <= 2.0e-5);
+        }
+    }
+
+    #[test]
+    fn g1_mode_11_arm_records_match_pinned_source_values() {
+        let catalog = unitree_g1_29dof().unwrap();
+        assert_eq!(catalog.joints()[15].name, "left_shoulder_pitch_joint");
+        assert_eq!(catalog.joints()[15].effort_newton_metres, 25.0);
+        assert_eq!(catalog.joints()[20].velocity_rad_per_second, 22.0);
+        assert_eq!(catalog.model().links()[16].inertia().mass(), 0.718);
+        assert_eq!(catalog.model().links()[19].inertia().mass(), 0.6);
+        assert_eq!(catalog.model().links()[28].inertia().mass(), 0.48404956);
+        assert_eq!(catalog.model().links()[16].parent(), Some(15));
+        assert_eq!(catalog.model().links()[23].parent(), Some(15));
     }
 
     #[test]
@@ -1125,10 +1402,7 @@ mod tests {
 
     #[test]
     fn catalog_limits_inertias_and_linear_complexity_are_admitted() {
-        for catalog in [
-            unitree_g1_lower_body_waist_15dof().unwrap(),
-            kuka_lbr_iiwa7_r800().unwrap(),
-        ] {
+        for catalog in [unitree_g1_29dof().unwrap(), kuka_lbr_iiwa7_r800().unwrap()] {
             assert_eq!(catalog.joints().len(), catalog.model().dof_count());
             for joint in catalog.joints() {
                 assert!(joint.lower_position_rad <= 0.0);
@@ -1193,11 +1467,11 @@ mod tests {
 
     #[test]
     fn catalog_rebuild_is_deterministic_and_preserves_provenance() {
-        let g1_first = unitree_g1_lower_body_waist_15dof().unwrap();
-        let g1_second = unitree_g1_lower_body_waist_15dof().unwrap();
+        let g1_first = unitree_g1_29dof().unwrap();
+        let g1_second = unitree_g1_29dof().unwrap();
         assert_eq!(g1_first, g1_second);
         assert_eq!(g1_first.metadata().sources.len(), 2);
-        assert!(g1_first.metadata().source_status.contains("Deprecated"));
+        assert!(g1_first.metadata().source_status.contains("Up-to-date"));
 
         let iiwa_first = kuka_lbr_iiwa7_r800().unwrap();
         let iiwa_second = kuka_lbr_iiwa7_r800().unwrap();

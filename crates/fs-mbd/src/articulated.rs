@@ -2724,11 +2724,11 @@ mod tests {
 
     #[test]
     fn g1_catalog_runs_a_linear_storage_free_fall_solve_without_internal_actuation() {
-        let catalog = crate::robot_models::unitree_g1_lower_body_waist_15dof().unwrap();
+        let catalog = crate::robot_models::unitree_g1_29dof().unwrap();
         let model = catalog.model();
         let complexity = model.free_floating_complexity().unwrap();
-        assert_eq!(complexity.tree.links, 16);
-        assert_eq!(complexity.tree.degrees_of_freedom, 15);
+        assert_eq!(complexity.tree.links, 30);
+        assert_eq!(complexity.tree.degrees_of_freedom, 29);
         assert_eq!(complexity.tree.dense_generalized_matrix_entries, 0);
         assert_eq!(complexity.tree.spatial_matrix_entries_per_link, 36);
         assert_eq!(complexity.base_degrees_of_freedom, 6);

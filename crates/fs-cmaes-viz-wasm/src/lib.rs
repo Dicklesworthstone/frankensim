@@ -53,7 +53,7 @@ use manipulation::{
 };
 
 /// Kernel identity returned by the browser capability probe.
-pub const KERNEL_VERSION: &str = "fs-cmaes-viz-wasm 0.6.6";
+pub const KERNEL_VERSION: &str = "fs-cmaes-viz-wasm 0.6.7";
 /// Exact binary64 word identifying schema-2 packets (`"CMA2"`).
 pub const PACKET_MAGIC: u32 = 0x434d_4132;
 /// Packed ask/tell ABI schema.
@@ -80,10 +80,10 @@ pub const FULL_DIMENSION_LIMIT: usize = 256;
 /// Linear and limited-memory families may admit large browser workloads.
 pub const SCALABLE_DIMENSION_LIMIT: usize = 100_000;
 
-/// Exact binary64 word identifying G1 curriculum packets (`"G1W6"`).
-pub const G1_PACKET_MAGIC: u32 = 0x4731_5736;
+/// Exact binary64 word identifying G1 curriculum packets (`"G1W7"`).
+pub const G1_PACKET_MAGIC: u32 = 0x4731_5737;
 /// Packed G1 objective/trace ABI schema.
-pub const G1_PACKET_SCHEMA_VERSION: u32 = 6;
+pub const G1_PACKET_SCHEMA_VERSION: u32 = 7;
 /// Input packet containing fixed walking-experiment controls.
 pub const G1_PACKET_KIND_CONFIG: u32 = 0;
 /// Output packet describing an admitted evaluator.

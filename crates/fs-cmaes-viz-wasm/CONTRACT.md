@@ -1,6 +1,6 @@
 # CONTRACT: fs-cmaes-viz-wasm
 
-Status: **CMA schema 2 + G1 schema 6 + ARM schema 2 — live surfaces.** Stateful
+Status: **CMA schema 2 + G1 schema 7 + ARM schema 2 — live surfaces.** Stateful
 packed browser boundary over the production CMA-family owner in `fs-dfo` and
 the owner-composed G1 walking and KUKA household-manipulation experiments. This
 crate owns validation, admission, numeric packet transport, browser-specific
@@ -31,11 +31,11 @@ live envelope above 16 Mi binary64 words (128 MiB): owner persistent + pending
 headers, and a conservative snapshot payload. The 5,040-dimensional flagship
 is comfortably inside this bound.
 
-The G1 surface composes `fs-mbd`'s source-bound 15-DoF Unitree model and 5,040-D
-policy map, `fs-ga` poses, `fs-time` integration, `fs-contact` normal response,
-and `fs-tribo` friction. It returns the owners' link poses for rendering. The
-binding layer adds no kinematics, dynamics, contact law, or browser-side pose
-reconstruction.
+The G1 surface composes `fs-mbd`'s source-bound mode-11 Unitree model with all
+29 actuated joints and its 5,040-D policy map, `fs-ga` poses, `fs-time`
+integration, `fs-contact` normal response, and `fs-tribo` friction. It returns
+the owners' link poses for rendering. The binding layer adds no kinematics,
+dynamics, contact law, or browser-side pose reconstruction.
 
 The manipulation surface likewise composes the existing mathematical owners:
 `fs-mbd` supplies its pinned KUKA LBR iiwa 7 R800 topology, source dimensions,
@@ -101,8 +101,10 @@ coordinates; neither vector is a hidden trajectory or browser controller.
 
 No-claims: this synchronous adapter does not add restarts, parallel execution,
 cancellation, constraints, or built-in analytic landscapes. The G1 experiment
-is a reduced lower-body-and-waist model, not a full Unitree digital twin or a
-hardware-transfer claim. The arm experiment uses conservative oriented-box
+learns 15 lower-body-and-waist channels while its 14 arm joints use a disclosed
+deterministic reflex; fixed head and hand shells are not source collision
+meshes. It is not a full Unitree digital twin or a hardware-transfer claim. The
+arm experiment uses conservative oriented-box
 envelopes rather than triangle meshes and has no general impact impulse solver,
 general grasp planner, deformable object, or hardware-transfer claim.
 Limited-memory snapshots do not invent dense
@@ -138,7 +140,7 @@ On wasm32, wasm-bindgen exports:
 | `evaluator.evaluate(policy)` | 128 policy words | decomposed scalar objective receipt |
 | `evaluator.evaluate_population(policies)` | up to 64 row-major policies | one objective per candidate in one boundary call |
 | `evaluator.trace(policy)` | 128 policy words | receipt plus object and source-ordered link poses |
-| `cmaes_viz_kernel_version()` | no arguments | `"fs-cmaes-viz-wasm 0.6.6"` |
+| `cmaes_viz_kernel_version()` | no arguments | `"fs-cmaes-viz-wasm 0.6.7"` |
 
 There is no JSON hot path and no schema-1 compatibility shim.
 
@@ -260,7 +262,7 @@ wasm boundary.
 
 ## G1 walking packets
 
-G1 packets use magic `0x47315736` (`"G1W6"`) and schema 6. The common output
+G1 packets use magic `0x47315737` (`"G1W7"`) and schema 7. The common output
 prefix is `magic, schema, status, kind, total_words`. Kinds are configuration 0,
 admission 1, evaluation 2, trace 3, and population 4.
 
@@ -286,7 +288,7 @@ envelope.
 
 Admission appends:
 
-`policy_dimension=5040, link_count=16, pose_words=7, trace_sample_words=115,
+`policy_dimension=5040, link_count=30, pose_words=7, trace_sample_words=213,
 step_s, duration_s, target_speed, gait_frequency, trace_stride, task,
 challenge, terrain_amplitude_m, terrain_wavenumber_rad_per_m, push_start_s,
 push_end_s, push_peak_force_n`.
@@ -313,7 +315,7 @@ outcome with ID 5 and a finite penalty, not a transport refusal that discards
 the rest of a valid CMA generation.
 
 Trace adds `sample_count`, followed by samples containing `time_s,
-left_contact, right_contact` and 16 poses in catalog link order. Every pose is
+left_contact, right_contact` and 30 poses in catalog link order. Every pose is
 world-frame `translation_xyz, quaternion_wxyz`; the browser is a projector and
 must not recompute forward kinematics.
 
