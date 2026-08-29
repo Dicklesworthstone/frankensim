@@ -1,0 +1,19 @@
+[package]
+name = "fs-g1-train"
+version = "0.1.0"
+edition = "2021"
+description = "G1 walking policy training: stepwise env, transformer policy, Muon/Adam, PPO+GAE"
+license = "MIT"
+
+[dependencies]
+# The env: reuse the source-bound G1 walking evaluator (same crate the wasm binds).
+fs-cmaes-viz-wasm = { path = "../fs-cmaes-viz-wasm" }
+fs-mbd = { path = "../fs-mbd" }
+fs-ga = { path = "../fs-ga" }
+# Deterministic RNG (no external deps).
+fs-rand = { path = "../fs-rand" }
+
+[dev-dependencies]
+# None needed — all tests are self-contained.
+
+[workspace]
