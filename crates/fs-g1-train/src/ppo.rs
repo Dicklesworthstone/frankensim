@@ -138,7 +138,7 @@ impl Trajectory {
     }
 }
 
-fn log_gaussian_prob(mean: &[f32], log_std: &[f32], action: &[f32]) -> (f32, Vec<f32>, Vec<f32>) {
+pub fn log_gaussian_prob(mean: &[f32], log_std: &[f32], action: &[f32]) -> (f32, Vec<f32>, Vec<f32>) {
     let mut lp = 0.0f32;
     let mut dmean = Vec::with_capacity(mean.len());
     let mut dlogstd = Vec::with_capacity(mean.len());
@@ -152,7 +152,7 @@ fn log_gaussian_prob(mean: &[f32], log_std: &[f32], action: &[f32]) -> (f32, Vec
     (lp, dmean, dlogstd)
 }
 
-fn gaussian_action(mean: &[f32], log_std: &[f32], rng: &mut u64) -> Vec<f32> {
+pub fn gaussian_action(mean: &[f32], log_std: &[f32], rng: &mut u64) -> Vec<f32> {
     let mut actions = Vec::with_capacity(mean.len());
     for (i, m) in mean.iter().enumerate() {
         let noise = gaussian_sample(rng);

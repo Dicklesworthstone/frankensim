@@ -16,7 +16,11 @@ crate-type = ["cdylib", "rlib"]
 [package.metadata.frankensim]
 layer = "L6"
 
+[features]
+g1-learned = ["dep:fs-g1-train"]
+
 [dependencies]
+fs-g1-train = { path = "../fs-g1-train", optional = true }
 # The sole owner of CMA sampling and state transitions.
 fs-dfo = { path = "../fs-dfo" }
 # Existing mathematical owners composed by the G1 flagship rollout.

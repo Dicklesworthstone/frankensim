@@ -2,6 +2,7 @@ pub mod hpo;
 pub mod muon;
 pub mod onnx_metadata;
 pub mod ppo;
+pub mod standin_env;
 pub mod transformer;
 
 pub use muon::{AdamParam, MuonParam};

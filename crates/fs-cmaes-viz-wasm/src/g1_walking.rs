@@ -23,6 +23,93 @@ use fs_mbd::robot_models::{
     G1_POLICY_FEATURES_PER_ACTUATOR, G1PolicyObservation, G1ResidualPolicy, g1_policy_phase_basis,
     unitree_g1_29dof,
 };
+
+// ─── Learned-policy hook (PPO bridge; used by the fs-g1-train adapter) ───
+
+/// Observation dimensionality of the flattened G1 policy observation:
+/// 15 joint positions + 15 joint velocities + 3 gravity + 3 angular
+/// velocity + 3 velocity error + 2 contacts + 1 phase.
+pub const G1_LEARNED_OBS_DIMS: usize = 42;
+
+/// PPO transition data for one learned rollout episode. The rewards are
+/// the RL shaping signal (survival + forward progress − penalties); the
+/// CMA-ES evaluation objective in [`G1WalkingReceipt`] remains the
+/// separate evaluation metric.
+#[derive(Debug, Clone)]
+pub struct EpisodeTrace {
+    pub rewards: Vec<f32>,
+    /// True when the step ended in a terminal guard (fall).
+    pub done: Vec<bool>,
+    pub completed_steps: usize,
+    pub termination: G1TerminationReason,
+    pub objective: f64,
+}
+
+impl Default for EpisodeTrace {
+    fn default() -> Self {
+        Self {
+            rewards: Vec::new(),
+            done: Vec::new(),
+            completed_steps: 0,
+            termination: G1TerminationReason::Horizon,
+            objective: 0.0,
+        }
+    }
+}
+
+/// Anything that can drive the G1 rollout step-by-step (per-step
+/// observation → 29-dim residual action). Implemented by the
+/// fs-g1-train transformer adapter behind the `g1-learned` feature.
+pub trait LearnedG1Policy {
+    /// Observe, act, return the executed 29-dim residual action.
+    fn act(&mut self, obs: &[f32; G1_LEARNED_OBS_DIMS], step: usize)
+        -> [f64; G1_POLICY_ACTUATORS];
+}
+
+/// Flatten the kernel-owned observation into the transformer's input
+/// order (f32).
+#[must_use]
+pub fn flatten_observation(obs: &G1PolicyObservation) -> [f32; G1_LEARNED_OBS_DIMS] {
+    let mut out = [0.0f32; G1_LEARNED_OBS_DIMS];
+    let mut k = 0usize;
+    for v in obs.joint_position_rad.iter() {
+        out[k] = *v as f32;
+        k += 1;
+    }
+    for v in obs.joint_velocity_rad_per_s.iter() {
+        out[k] = *v as f32;
+        k += 1;
+    }
+    for v in [
+        obs.gravity_direction_body.x,
+        obs.gravity_direction_body.y,
+        obs.gravity_direction_body.z,
+    ] {
+        out[k] = v as f32;
+        k += 1;
+    }
+    for v in [
+        obs.angular_velocity_body_rad_per_s.x,
+        obs.angular_velocity_body_rad_per_s.y,
+        obs.angular_velocity_body_rad_per_s.z,
+    ] {
+        out[k] = v as f32;
+        k += 1;
+    }
+    for v in [
+        obs.target_velocity_error_body_m_per_s.x,
+        obs.target_velocity_error_body_m_per_s.y,
+        obs.target_velocity_error_body_m_per_s.z,
+    ] {
+        out[k] = v as f32;
+        k += 1;
+    }
+    out[k] = f32::from(u8::from(obs.foot_contact[0]));
+    out[k + 1] = f32::from(u8::from(obs.foot_contact[1]));
+    out[k + 2] = obs.phase_rad as f32;
+    out
+}
+
 use fs_time::{RenormPolicy, se3_exp_step_renorm};
 use fs_tribo::{
     ContactFrame, FrictionLaw, InputAuthority, InterfaceMedium, InterfaceSystemRef, TangentialSlip,
@@ -599,6 +686,31 @@ impl G1WalkingEvaluator {
         parameters: &[f64],
         retain_trace: bool,
     ) -> Result<G1WalkingReceipt, G1WalkingError> {
+        self.rollout_inner(parameters, retain_trace, None, None)
+    }
+
+    /// Rollout driven by a LEARNED policy (feature `g1-learned`): records
+    /// the PPO transition data (rewards / done flags / final objective)
+    /// into `trace` while the passed policy acts each step. The returned
+    /// receipt carries the unchanged CMA-ES evaluation objective.
+    pub fn rollout_learned(
+        &self,
+        policy: &mut dyn LearnedG1Policy,
+        trace: &mut EpisodeTrace,
+    ) -> Result<G1WalkingReceipt, G1WalkingError> {
+        // G1ResidualPolicy::new validates finiteness only — the stabilizing
+        // mean is a valid placeholder; the learned hook replaces it.
+        let parameters = g1_stabilizing_policy_mean();
+        self.rollout_inner(&parameters, false, Some(policy), Some(trace))
+    }
+
+    fn rollout_inner(
+        &self,
+        parameters: &[f64],
+        retain_trace: bool,
+        mut learned: Option<&mut dyn LearnedG1Policy>,
+        mut learned_trace: Option<&mut EpisodeTrace>,
+    ) -> Result<G1WalkingReceipt, G1WalkingError> {
         let policy = G1ResidualPolicy::new(parameters)?;
         let model = self.catalog.model();
         let mut position = self.reference_position;
@@ -648,6 +760,8 @@ impl G1WalkingEvaluator {
 
         'rollout: for step in 0..self.step_count {
             let time_s = step as f64 * self.config.step_s;
+            let work_before = actuator_work_j;
+            let backward_before = backward_distance_m;
             let kinematics = forward_kinematics(
                 model,
                 BaseState::prescribed(base.world_from_base, base.twist_body, Twist::zero()),
@@ -676,7 +790,12 @@ impl G1WalkingEvaluator {
                 foot_contact: contact,
                 phase_rad: TWO_PI * self.config.gait_frequency_hz * time_s,
             };
-            let residual = policy.evaluate(&observation)?;
+            let residual = if let Some(learned) = learned.as_deref_mut() {
+                let flat = flatten_observation(&observation);
+                learned.act(&flat, step)
+            } else {
+                policy.evaluate(&observation)?
+            };
             let mut external = [Wrench::default(); G1_LINK_COUNT];
             let mut next_contact = [false; 2];
             let mut minimum_sole_height_m = [f64::INFINITY; 2];
@@ -875,6 +994,16 @@ impl G1WalkingEvaluator {
             let speed_error = world_velocity.x - target_forward_speed_m_per_s;
             speed_error_integral += speed_error * speed_error * self.config.step_s;
             backward_distance_m += (-world_velocity.x).max(0.0) * self.config.step_s;
+            // Per-step shaping reward for the learned-policy path: survival
+            // bonus + forward progress − backward drift − actuator work.
+            // (RL shaping signal — distinct from the CMA-ES objective.)
+            if let Some(t) = learned_trace.as_deref_mut() {
+                let progress = world_velocity.x.max(0.0) * self.config.step_s;
+                let back = backward_distance_m - backward_before;
+                let work = actuator_work_j - work_before;
+                t.rewards.push((0.4 + 2.0 * progress - 2.0 * back - 0.002 * work) as f32);
+                t.done.push(false);
+            }
             let height_error = base.world_from_base.translation().z - self.initial_base_height_m;
             let normalized_height_error = height_error / POSTURE_HEIGHT_SCALE_M;
             let tilt_sine = (updated_gravity_direction_body.x * updated_gravity_direction_body.x
@@ -1048,6 +1177,14 @@ impl G1WalkingEvaluator {
             - survival_bonus;
         if !objective.is_finite() {
             return Err(G1WalkingError::NonFiniteObjective);
+        }
+        if let Some(t) = learned_trace.as_deref_mut() {
+            if let Some(last) = t.done.last_mut() {
+                *last = termination_reason.fell();
+            }
+            t.completed_steps = completed_steps;
+            t.termination = termination_reason;
+            t.objective = objective;
         }
         Ok(G1WalkingReceipt {
             objective,

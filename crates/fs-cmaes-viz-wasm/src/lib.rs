@@ -37,6 +37,8 @@ use fs_dfo::{
 use fs_mbd::robot_models::G1_POLICY_DIMENSION;
 
 pub mod g1_walking;
+#[cfg(feature = "g1-learned")]
+pub mod g1_learned;
 pub mod manipulation;
 
 use g1_walking::{

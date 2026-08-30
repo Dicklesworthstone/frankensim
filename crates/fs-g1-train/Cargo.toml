@@ -10,6 +10,7 @@ license = "MIT"
 # stabilizes. For now, the transformer + Muon + PPO are self-contained.
 
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [dev-dependencies]
 # None needed — all tests are self-contained.

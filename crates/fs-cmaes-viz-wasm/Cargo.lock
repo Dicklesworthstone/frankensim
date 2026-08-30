@@ -540,6 +540,7 @@ dependencies = [
  "fs-contact",
  "fs-dfo",
  "fs-exec",
+ "fs-g1-train",
  "fs-ga",
  "fs-geom",
  "fs-mbd",
@@ -609,6 +610,14 @@ dependencies = [
  "fs-rep-mesh",
  "fs-soa",
  "fs-sparse",
+]
+
+[[package]]
+name = "fs-g1-train"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
