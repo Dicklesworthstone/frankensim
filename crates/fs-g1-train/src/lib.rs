@@ -1,4 +1,6 @@
+pub mod hpo;
 pub mod muon;
+pub mod onnx_metadata;
 pub mod ppo;
 pub mod transformer;
 

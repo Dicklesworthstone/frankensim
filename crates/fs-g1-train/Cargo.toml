@@ -9,7 +9,12 @@ license = "MIT"
 # Standalone: the env integration plugs back in when the kernel workspace
 # stabilizes. For now, the transformer + Muon + PPO are self-contained.
 
+serde = { version = "1", features = ["derive"] }
+
 [dev-dependencies]
 # None needed — all tests are self-contained.
 
 [workspace]
+
+[profile.dev]
+opt-level = 1

@@ -1,19 +1,29 @@
-//! Muon optimizer (Momentum + Orthogonalized weight updates via Newton-Schulz).
+//! Muon optimizer (Momentum + Orthogonalized weight updates).
 //!
-//! For 2-D weight matrices W: momentum buffer M = β·M + grad; orthogonalize
-//! O = NS(M); W -= lr · O · scale. NS uses the 5-iteration quintic polynomial
-//! a·A + b·A³ + c·A⁵ with a=3.4445, b=−4.7750, c=2.0315 to project the
-//! momentum onto the nearest semi-orthogonal matrix.
+//! For 2-D weight matrices W: momentum buffer M = β·M + grad;
+//! orthogonalize O = orth(M); W -= lr · O · scale, optionally with
+//! decoupled weight decay. The orthogonalization here is exact
+//! Gram-Schmidt over the columns (deterministic, well-conditioned in
+//! f32, O(mn²)) — the same "nearest semi-orthogonal matrix" target as
+//! Keller Jordan's 5-iteration quintic Newton–Schulz (a=3.4445,
+//! b=−4.7750, c=2.0315; arXiv 2509.24406), which is the standard
+//! faster approximation. Swapping GS for the NS quintic is a pure
+//! performance lever and must be parity-gated per project doctrine.
 //!
 //! Split: Muon for hidden-layer 2-D weights, Adam for 1-D params (biases,
-//! norms) + embed/head. Refs: arXiv 2509.24406, Keller Jordan's reference
-//! implementation.
+//! norms) + embed/head.
 
-/// Newton–Schulz quintic coefficients (Keller Jordan's tuned constants).
+// Newton–Schulz quintic coefficients (Keller Jordan), reserved for the
+// parity-gated NS fast path; unused by the exact Gram-Schmidt path.
+#[allow(dead_code)]
 const NS_A: f32 = 3.4445;
+#[allow(dead_code)]
 const NS_B: f32 = -4.7750;
+#[allow(dead_code)]
 const NS_C: f32 = 2.0315;
+#[allow(dead_code)]
 const NS_EPS: f32 = 1e-7;
+#[allow(dead_code)]
 const NS_ITERATIONS: usize = 5;
 
 /// Newton–Schulz orthogonalization: projects X onto the nearest
@@ -45,15 +55,7 @@ pub fn newton_schulz_orthogonalize(x: &mut Vec<f32>, rows: usize, cols: usize) {
 }
 
 
-fn transpose(v: &[f32], rows: usize, cols: usize) -> Vec<f32> {
-    let mut out = vec![0.0f32; v.len()];
-    for i in 0..rows {
-        for j in 0..cols {
-            out[j * rows + i] = v[i * cols + j];
-        }
-    }
-    out
-}
+
 
 /// Muon optimizer state for one 2-D weight matrix.
 pub struct MuonParam {
