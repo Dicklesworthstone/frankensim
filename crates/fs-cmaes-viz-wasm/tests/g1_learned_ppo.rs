@@ -36,8 +36,10 @@ fn ppo_trains_transformer_on_real_g1_rollout() {
         n_outputs: ACT_DIMS,
     };
     let model = GaitTransformer::new(model_cfg, 1e-3, 0.9, 3e-4, &mut seed);
-    let log_std = PolicyLogStd::new(ACT_DIMS, 1e-3, -0.5);
-    let mut policy = TransformerG1Policy::new(model, log_std, seed);
+    let log_std = PolicyLogStd::new(ACT_DIMS, 1e-3, -2.3); // sigma ~ 0.1: refine, don't swamp the base
+    // Balance task -> the stabilizing curriculum is the right composed base.
+    let curriculum_params = fs_cmaes_viz_wasm::g1_walking::g1_stabilizing_policy_mean().to_vec();
+    let mut policy = TransformerG1Policy::new(model, log_std, seed, curriculum_params);
 
     let walk_cfg = G1WalkingConfig {
         task: G1Task::Balance,
@@ -54,22 +56,28 @@ fn ppo_trains_transformer_on_real_g1_rollout() {
     };
     let norm = RunningNorm::new(OBS_DIMS);
 
+    let walk_cfg_duration_steps = 240usize; // 0.5 s at 480 Hz
     let episode = |policy: &mut TransformerG1Policy, rng: &mut u64| -> (f32, usize) {
         policy.begin_episode();
         let mut trace = EpisodeTrace::default();
         let receipt = evaluator
             .rollout_learned(policy, &mut trace)
             .expect("learned rollout runs");
-        let mean = trace.rewards.iter().sum::<f32>() / trace.rewards.len().max(1) as f32;
+        // Horizon-normalized: a fall at step 30 must score below a full
+        // survival, even though the mean over surviving steps looks fine.
+        let steps = trace.rewards.len().max(1);
+        let horizon = walk_cfg_duration_steps;
+        let normalized = trace.rewards.iter().sum::<f32>() / horizon as f32;
+        let _ = steps;
         let _ = receipt;
-        (mean, trace.completed_steps)
+        (normalized, trace.completed_steps)
     };
 
     let (initial_reward, initial_steps) = episode(&mut policy, &mut seed);
     println!("[g1-ppo] initial: reward {initial_reward:.3}, steps {initial_steps}");
 
     let mut last_kl = 0.0f32;
-    for iteration in 0..3 {
+    for iteration in 0..40 {
         policy.begin_episode();
         let mut trace = EpisodeTrace::default();
         evaluator
@@ -101,15 +109,20 @@ fn ppo_trains_transformer_on_real_g1_rollout() {
             &ppo,
         );
         let (r, steps) = episode(&mut policy, &mut seed);
-        println!("[g1-ppo] iter {iteration}: reward {r:.3}, steps {steps}, kl {kl:.4}");
+        let sigma = policy.log_std_std();
+        println!("[g1-ppo] iter {iteration}: reward {r:.3}, steps {steps}, kl {kl:.4}, sigma {sigma:.3}");
         last_kl = kl;
         let _ = r;
-        let _ = steps;
     }
     assert!(last_kl.is_finite() && last_kl > 0.0, "a real update must move the policy (KL {last_kl})");
     let (final_reward, _) = episode(&mut policy, &mut seed);
     assert!(
         final_reward >= initial_reward - 0.5,
         "PPO on the real rollout must not catastrophically degrade: {initial_reward:.3} -> {final_reward:.3}"
+    );
+    let sigma_final = policy.log_std_std();
+    assert!(
+        sigma_final > 1e-3,
+        "exploration std collapsed: {sigma_final}"
     );
 }

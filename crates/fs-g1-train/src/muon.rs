@@ -97,7 +97,7 @@ impl MuonParam {
         // the residual of linearly-dependent vectors). The transposed
         // variant orthonormalizes the row space instead, giving every
         // weight a well-defined semi-orthogonal update direction.
-        let mut o = if self.rows >= self.cols {
+        let o = if self.rows >= self.cols {
             let mut o = self.momentum.clone();
             newton_schulz_orthogonalize(&mut o, self.rows, self.cols);
             o

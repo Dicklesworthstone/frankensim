@@ -637,6 +637,22 @@ impl GaitTransformer {
             // ── heads on h_final_post ──
             dh_post.fill(0.0);
             for i in 0..cfg.n_outputs {
+                if t >= dmean.len() {
+                    panic!(
+                        "OOB t={t} dmean.len={} tape.len={} dvalue.len={} tape[t].mean.len={} n_outputs={}",
+                        dmean.len(),
+                        tape.tokens.len(),
+                        dvalue.len(),
+                        tok.mean.len(),
+                        cfg.n_outputs
+                    );
+                }
+                if dmean[t].len() != cfg.n_outputs || tok.mean.len() != cfg.n_outputs {
+                    panic!(
+                        "grad dim mismatch at t={t}: dmean[t].len()={} tok.mean.len()={} n_outputs={} tape_tokens={}",
+                        dmean[t].len(), tok.mean.len(), cfg.n_outputs, tape.tokens.len()
+                    );
+                }
                 let m = tok.mean[i];
                 let dpre = dmean[t][i] * (1.0 - m * m);
                 if dpre == 0.0 {

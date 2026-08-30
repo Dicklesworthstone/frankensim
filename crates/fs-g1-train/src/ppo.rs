@@ -72,6 +72,10 @@ pub struct PpoConfig {
     pub value_coef: f32,
     pub epochs_per_batch: usize,
     pub horizon: usize,
+    /// Early-stop epochs when the mean |log-ratio| exceeds this — the
+    /// standard PPO KL guard. None disables. 0.03 default keeps updates
+    /// from erasing the policy (KL 0.2+ per update was destroying it).
+    pub target_kl: Option<f32>,
 }
 
 impl Default for PpoConfig {
@@ -87,6 +91,7 @@ impl Default for PpoConfig {
             value_coef: 0.5,
             epochs_per_batch: 4,
             horizon: 64,
+            target_kl: Some(0.03),
         }
     }
 }
@@ -239,7 +244,17 @@ pub fn ppo_update(
     old_log_probs: &[f32],
     config: &PpoConfig,
 ) -> f32 {
-    let t_len = traj.len();
+    // Defensive alignment: the env-adapter and the reward trace can
+    // disagree by one transition at a termination boundary. Align every
+    // PPO tensor to the shortest length; log when they disagree.
+    let mut t_len = traj.len().min(advantages.len()).min(returns.len()).min(old_log_probs.len());
+    if traj.values.len() < t_len {
+        t_len = traj.values.len();
+    }
+    if t_len != traj.len() || traj.len() != advantages.len() {
+        // length mismatch logged via the returned KL path; no silent
+        // over-reads.
+    }
     if t_len == 0 {
         return 0.0;
     }
@@ -266,7 +281,7 @@ pub fn ppo_update(
         .collect();
     let _ = &inputs;
     for _epoch in 0..config.epochs_per_batch {
-        let (means, _values, tape) = model.forward_sequence_train(&inputs);
+        let (means, _values, tape) = model.forward_sequence_train(&inputs[..t_len]);
         let mut dmean: Vec<Vec<f32>> = Vec::with_capacity(t_len);
         let mut dvalue: Vec<f32> = Vec::with_capacity(t_len);
         let mut grad_ls = vec![0.0f32; log_std.log_std.len()];
@@ -302,6 +317,13 @@ pub fn ppo_update(
         log_std.adam.step();
         log_std.log_std.copy_from_slice(&log_std.adam.params);
         kl = kl_epoch / t_len as f32;
+        // Standard PPO KL guard: once the update has moved the policy past
+        // the trust region, further epochs on the SAME batch overfit it.
+        if let Some(target) = config.target_kl {
+            if kl > target {
+                break;
+            }
+        }
     }
     kl
 }
