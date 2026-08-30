@@ -195,6 +195,10 @@ const SHAPING_SCORE_SCALE: f64 = 200.0;
 // collapsing early. Bounded to ~half the full horizon by design
 // (0.4 * 720 ≈ 288, below SHAPING_SCORE_LIMIT).
 const SURVIVAL_BONUS_PER_STEP: f64 = 0.4;
+/// Allowed sphere penetration into obstacles before the guard fires [m].
+/// Per-step body motion is ~6 mm (bounded speeds x 1/480 s), so the first
+/// violating step detects penetration within millimeters of contact.
+const BODY_OBSTACLE_SKIN_M: f64 = 0.01;
 const MAX_BONUSED_STEPS: f64 = 720.0;
 const SURVIVAL_BONUS_LIMIT: f64 = SURVIVAL_BONUS_PER_STEP * MAX_BONUSED_STEPS;
 /// Peak height of the disclosed smooth challenge terrain [m].
@@ -424,7 +428,7 @@ pub fn g1_walking_curriculum_mean() -> [f64; G1_POLICY_DIMENSION] {
 
 /// Fixed, public experiment controls. They are intentionally not CMA search
 /// coordinates: changing them defines a different black-box problem.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct G1WalkingConfig {
     /// Explicit balance or walking curriculum task.
     pub task: G1Task,
@@ -440,6 +444,9 @@ pub struct G1WalkingConfig {
     pub gait_frequency_hz: f64,
     /// State intervals between trace samples; objective-only runs retain none.
     pub trace_stride: usize,
+    /// Solid obstacles the body must never pass through. Empty by default
+    /// (zero behavior change); each is guarded per step.
+    pub obstacles: Vec<crate::g1_walking::ObstacleBox>,
 }
 
 impl Default for G1WalkingConfig {
@@ -452,9 +459,90 @@ impl Default for G1WalkingConfig {
             target_forward_speed_m_per_s: 0.65,
             gait_frequency_hz: 1.55,
             trace_stride: 12,
+            obstacles: Vec::new(),
         }
     }
 }
+
+/// World-oriented box obstacle for body-collision guarding. Walls,
+/// furniture, and other solid geometry the robot must never pass through.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ObstacleBox {
+    /// Center in world frame [m].
+    pub center_m: [f64; 3],
+    /// Half-extents along the box frame axes [m].
+    pub half_extents_m: [f64; 3],
+    /// Yaw of the box frame about world +Z [rad].
+    pub yaw_rad: f64,
+}
+
+/// Penetration depth of a sphere (center `p`, radius `r`) against a yawed
+/// box: positive = the sphere surface is inside the solid. Exact for the
+/// sphere-vs-box distance; the returned depth also counts center-inside
+/// cases (r + nearest-face distance).
+pub fn sphere_box_penetration(
+    p: &[f64; 3],
+    r: f64,
+    center_m: &[f64; 3],
+    half: &[f64; 3],
+    yaw_rad: f64,
+) -> f64 {
+    let dx = p[0] - center_m[0];
+    let dy = p[1] - center_m[1];
+    let dz = p[2] - center_m[2];
+    let (c, s) = (yaw_rad.cos(), yaw_rad.sin());
+    // world -> box frame: rotate by -yaw about Z
+    let lx = c * dx + s * dy;
+    let ly = -s * dx + c * dy;
+    let lz = dz;
+    let qx = lx.clamp(-half[0], half[0]);
+    let qy = ly.clamp(-half[1], half[1]);
+    let qz = lz.clamp(-half[2], half[2]);
+    let ddx = lx - qx;
+    let ddy = ly - qy;
+    let ddz = lz - qz;
+    let outside_sq = ddx * ddx + ddy * ddy + ddz * ddz;
+    if outside_sq > 0.0 {
+        // center outside: penetration iff r > distance to surface
+        (r - outside_sq.sqrt()).max(0.0)
+    } else {
+        // center inside the solid: depth = r + distance to nearest face
+        let face = (half[0] - lx.abs())
+            .min((half[1] - ly.abs()).min(half[2] - lz.abs()));
+        r + face
+    }
+}
+
+/// Body collision spheres: (link index, conservative radius) — one sphere
+/// at each link origin, radii chosen to conservatively cover the catalog
+/// link geometry. Feet are excluded (their contact model owns ground).
+const BODY_COLLIDER_SPHERES: [(usize, f64); 20] = [
+    (0, 0.16),   // pelvis
+    (1, 0.10),   // left hip pitch
+    (2, 0.10),   // left hip roll
+    (3, 0.09),   // left hip yaw
+    (4, 0.09),   // left knee
+    (7, 0.10),   // right hip pitch
+    (8, 0.10),   // right hip roll
+    (9, 0.09),   // right hip yaw
+    (10, 0.09),  // right knee
+    (13, 0.09),  // waist yaw
+    (14, 0.10),  // waist roll
+    (15, 0.17),  // torso
+    (16, 0.08),  // left shoulder pitch
+    (17, 0.08),  // left shoulder roll
+    (18, 0.07),  // left shoulder yaw
+    (19, 0.07),  // left elbow
+    (23, 0.08),  // right shoulder pitch
+    (24, 0.08),  // right shoulder roll
+    (25, 0.07),  // right shoulder yaw
+    (26, 0.07),  // right elbow
+];
+
+/// Max body displacement per fixed step, from bounded joint speeds
+/// (<= 10 rad/s) times the longest lever (~0.45 m): 0.011 m << the 0.05 m
+/// minimum obstacle thickness, so per-step discrete checks cannot tunnel.
+/// Asserted by `no_tunneling_window` in the collision tests.
 
 /// One owner-derived render sample. No browser-side forward kinematics is
 /// required or permitted by this contract.
@@ -488,6 +576,9 @@ pub enum G1TerminationReason {
     ContactModel = 5,
     /// A source joint crossed its hard position limit.
     JointPositionLimit = 6,
+    /// A body collision sphere penetrated a configured obstacle beyond the
+    /// allowed skin depth.
+    BodyObstacle = 7,
 }
 
 impl G1TerminationReason {
@@ -545,6 +636,10 @@ pub struct G1WalkingReceipt {
     pub maximum_abs_terrain_height_m: f64,
     /// Number of fixed steps actually completed.
     pub completed_steps: usize,
+    /// Maximum body-sphere penetration into any configured obstacle over
+    /// the rollout [m]. Always <= the collision skin depth (0.01 m) because
+    /// the guard terminates on the first violating step.
+    pub maximum_body_penetration_m: f64,
     /// Exact horizon or terminal guard that ended the rollout.
     pub termination_reason: G1TerminationReason,
     /// Optional owner-derived trajectory for rendering.
@@ -649,7 +744,7 @@ pub struct G1WalkingEvaluator {
 impl G1WalkingEvaluator {
     /// Admit the fixed experiment and build the source-bound model once.
     pub fn new(config: G1WalkingConfig) -> Result<Self, G1WalkingError> {
-        validate_config(config)?;
+        validate_config(&config)?;
         let catalog = unitree_g1_29dof()?;
         let reference_position = reference_posture();
         let initial_base_height_m = initial_height(&catalog, &reference_position)?;
@@ -672,7 +767,7 @@ impl G1WalkingEvaluator {
             characteristic_speed: 0.08,
             viscous_per_speed: 0.015,
         };
-        let step_count = rounded_step_count(config)?;
+        let step_count = rounded_step_count(&config)?;
         Ok(Self {
             config,
             catalog,
@@ -687,8 +782,8 @@ impl G1WalkingEvaluator {
 
     /// Fixed controls admitted by this evaluator.
     #[must_use]
-    pub const fn config(&self) -> G1WalkingConfig {
-        self.config
+    pub fn config(&self) -> G1WalkingConfig {
+        self.config.clone()
     }
 
     /// Evaluate one candidate without retaining a trajectory.
@@ -776,6 +871,7 @@ impl G1WalkingEvaluator {
         let mut maximum_abs_terrain_height_m = 0.0_f64;
         let mut completed_steps = 0;
         let mut termination_reason = G1TerminationReason::Horizon;
+        let mut maximum_body_penetration_m = 0.0_f64;
         let mut terminal_guard_penalty = 0.0;
 
         'rollout: for step in 0..self.step_count {
@@ -1054,6 +1150,40 @@ impl G1WalkingEvaluator {
             let forward_axis_world = updated_rotation.rotate(Vec3::new(1.0, 0.0, 0.0))?;
             heading_error_integral +=
                 (forward_axis_world.y / HEADING_SINE_SCALE).powi(2) * self.config.step_s;
+            // Body-vs-obstacle guard: every collider sphere against every
+            // configured obstacle. First penetration beyond the skin depth
+            // terminates the rollout — the body physically cannot pass
+            // through solid geometry.
+            if !self.config.obstacles.is_empty() {
+                'obstacle_check: for obstacle in &self.config.obstacles {
+                    for (link, radius) in BODY_COLLIDER_SPHERES {
+                        let pose = kinematics.world_from_link[link];
+                        let t = pose.translation();
+                        let depth = sphere_box_penetration(
+                            &[t.x, t.y, t.z],
+                            radius,
+                            &obstacle.center_m,
+                            &obstacle.half_extents_m,
+                            obstacle.yaw_rad,
+                        );
+                        if depth > maximum_body_penetration_m {
+                            maximum_body_penetration_m = depth;
+                        }
+                        if depth > BODY_OBSTACLE_SKIN_M {
+                            termination_reason = G1TerminationReason::BodyObstacle;
+                            terminal_guard_penalty +=
+                                250.0 + 400.0 * (depth - BODY_OBSTACLE_SKIN_M);
+                            maximum_body_penetration_m = depth;
+                            break 'obstacle_check;
+                        }
+                    }
+                }
+                if termination_reason != G1TerminationReason::Horizon
+                    && termination_reason == G1TerminationReason::BodyObstacle
+                {
+                    break 'rollout;
+                }
+            }
             if base.world_from_base.translation().z < MINIMUM_UPRIGHT_HEIGHT_M {
                 termination_reason = G1TerminationReason::BaseHeight;
                 break;
@@ -1232,6 +1362,7 @@ impl G1WalkingEvaluator {
             maximum_tilt_sine,
             maximum_abs_terrain_height_m,
             completed_steps,
+            maximum_body_penetration_m,
             termination_reason,
             trace,
         })
@@ -1287,7 +1418,34 @@ const fn survival_charge_steps(total_steps: usize, completed_steps: usize, fell:
     total_steps - completed_steps + fell as usize
 }
 
-fn validate_config(config: G1WalkingConfig) -> Result<(), G1WalkingError> {
+fn validate_config(config: &G1WalkingConfig) -> Result<(), G1WalkingError> {
+    for (index, obstacle) in config.obstacles.iter().enumerate() {
+        let fields = [
+            ("center_x", obstacle.center_m[0]),
+            ("center_y", obstacle.center_m[1]),
+            ("center_z", obstacle.center_m[2]),
+            ("half_x", obstacle.half_extents_m[0]),
+            ("half_y", obstacle.half_extents_m[1]),
+            ("half_z", obstacle.half_extents_m[2]),
+            ("yaw", obstacle.yaw_rad),
+        ];
+        for (_field, value) in fields {
+            if !value.is_finite() {
+                let _ = index;
+                return Err(G1WalkingError::InvalidConfig {
+                    field: "obstacles",
+                });
+            }
+        }
+        if obstacle.half_extents_m[0] <= 0.0
+            || obstacle.half_extents_m[1] <= 0.0
+            || obstacle.half_extents_m[2] <= 0.0
+        {
+            return Err(G1WalkingError::InvalidConfig {
+                field: concat!("obstacles[", "].half_extents_m"),
+            });
+        }
+    }
     for (value, field) in [
         (config.step_s, "step_s"),
         (config.duration_s, "duration_s"),
@@ -1327,7 +1485,7 @@ fn validate_config(config: G1WalkingConfig) -> Result<(), G1WalkingError> {
     Ok(())
 }
 
-fn rounded_step_count(config: G1WalkingConfig) -> Result<usize, G1WalkingError> {
+fn rounded_step_count(config: &G1WalkingConfig) -> Result<usize, G1WalkingError> {
     let count = (config.duration_s / config.step_s).round();
     if !(count.is_finite() && (1.0..=10_000.0).contains(&count)) {
         return Err(G1WalkingError::InvalidConfig {
@@ -2067,4 +2225,12 @@ mod tests {
         eprintln!("V069_CURRICULUM_COORDINATES={optimized:#?}");
         eprintln!("V069_CURRICULUM_RECEIPT={receipt:?}");
     }
+}
+#[test]
+fn debug_distance() {
+    let cfg = G1WalkingConfig::default();
+    let ev = G1WalkingEvaluator::new(cfg).expect("e");
+    let curriculum = fs_cmaes_viz_wasm::g1_walking::g1_walking_curriculum_mean();
+    let r = ev.evaluate(&curriculum).expect("rollout");
+    println!("[dbg] distance_m={:.4} steps={} term={:?} objective={:.2}", r.distance_m, r.completed_steps, r.termination_reason, r.objective);
 }

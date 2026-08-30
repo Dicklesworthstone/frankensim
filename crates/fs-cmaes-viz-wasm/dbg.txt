@@ -1,0 +1,2787 @@
+   Compiling fs-la v0.0.1 (/Users/jemanuel/projects/frankensim/crates/fs-la)
+warning: missing documentation for a module
+  --> /Users/jemanuel/projects/frankensim/crates/fs-mbd/src/lib.rs:22:1
+   |
+22 | pub mod goddard;
+   | ^^^^^^^^^^^^^^^
+   |
+note: the lint level is defined here
+  --> /Users/jemanuel/projects/frankensim/crates/fs-mbd/src/lib.rs:19:9
+   |
+19 | #![warn(missing_docs)]
+   |         ^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+ --> /Users/jemanuel/projects/frankensim/crates/fs-mbd/src/goddard.rs:2:1
+  |
+2 | pub struct GoddardParams {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+ --> /Users/jemanuel/projects/frankensim/crates/fs-mbd/src/goddard.rs:3:5
+  |
+3 |     pub chamber_pressure_psi: f64,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+ --> /Users/jemanuel/projects/frankensim/crates/fs-mbd/src/goddard.rs:4:5
+  |
+4 |     pub fuel_flow_kg_per_sec: f64,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+ --> /Users/jemanuel/projects/frankensim/crates/fs-mbd/src/goddard.rs:5:5
+  |
+5 |     pub throat_area_cm2: f64,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+ --> /Users/jemanuel/projects/frankensim/crates/fs-mbd/src/goddard.rs:6:5
+  |
+6 |     pub expansion_ratio: f64,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+  --> /Users/jemanuel/projects/frankensim/crates/fs-mbd/src/goddard.rs:10:1
+   |
+10 | pub struct GoddardResult {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> /Users/jemanuel/projects/frankensim/crates/fs-mbd/src/goddard.rs:11:5
+   |
+11 |     pub chamber_pressure_psi: f64,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> /Users/jemanuel/projects/frankensim/crates/fs-mbd/src/goddard.rs:12:5
+   |
+12 |     pub chamber_pressure_pa: f64,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> /Users/jemanuel/projects/frankensim/crates/fs-mbd/src/goddard.rs:13:5
+   |
+13 |     pub exhaust_velocity_mps: f64,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> /Users/jemanuel/projects/frankensim/crates/fs-mbd/src/goddard.rs:14:5
+   |
+14 |     pub thrust_newtons: f64,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> /Users/jemanuel/projects/frankensim/crates/fs-mbd/src/goddard.rs:15:5
+   |
+15 |     pub specific_impulse_sec: f64,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> /Users/jemanuel/projects/frankensim/crates/fs-mbd/src/goddard.rs:16:5
+   |
+16 |     pub mach_exit: f64,
+   |     ^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a function
+  --> /Users/jemanuel/projects/frankensim/crates/fs-mbd/src/goddard.rs:19:1
+   |
+19 | pub fn step_goddard_rocket(params: &GoddardParams) -> GoddardResult {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `fs-mbd` (lib) generated 14 warnings
+warning: hard linking files in the incremental compilation cache failed. copying files instead. consider moving the cache directory to a file system which supports hard linking in session dir `/Volumes/USBNVME16TB/temp_agent_space/cargo-target-rosebasin/debug/incremental/fs_la-29cp06ixi5ad4/s-hlu1eky0qo-0vf6d6m-working`
+
+warning: unused variable: `a`
+   --> /Users/jemanuel/projects/frankensim/crates/fs-la/src/canonical_tree.rs:577:5
+    |
+577 |     a: &[f64],
+    |     ^ help: if this is intentional, prefix it with an underscore: `_a`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: associated function `from_tag` is never used
+   --> /Users/jemanuel/projects/frankensim/crates/fs-la/src/canonical_qr.rs:540:8
+    |
+531 | impl PivotClass {
+    | --------------- associated function in this implementation
+...
+540 |     fn from_tag(tag: u8) -> Option<Self> {
+    |        ^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: associated function `decode_from` is never used
+   --> /Users/jemanuel/projects/frankensim/crates/fs-la/src/canonical_qr.rs:592:8
+    |
+560 | impl CertifiedRankProfile {
+    | ------------------------- associated function in this implementation
+...
+592 |     fn decode_from(bytes: &[u8], cursor: &mut usize) -> Result<Self, PolicyError> {
+    |        ^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> /Users/jemanuel/projects/frankensim/crates/fs-la/src/canonical_qr.rs:72:21
+   |
+72 |     ShapeMismatch { expected: usize, got: usize },
+   |                     ^^^^^^^^^^^^^^^
+   |
+   = note: requested on the command line with `-W missing-docs`
+
+warning: missing documentation for a struct field
+  --> /Users/jemanuel/projects/frankensim/crates/fs-la/src/canonical_qr.rs:72:38
+   |
+72 |     ShapeMismatch { expected: usize, got: usize },
+   |                                      ^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> /Users/jemanuel/projects/frankensim/crates/fs-la/src/canonical_qr.rs:74:26
+   |
+74 |     NotUpperTriangular { row: usize, col: usize },
+   |                          ^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> /Users/jemanuel/projects/frankensim/crates/fs-la/src/canonical_qr.rs:74:38
+   |
+74 |     NotUpperTriangular { row: usize, col: usize },
+   |                                      ^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> /Users/jemanuel/projects/frankensim/crates/fs-la/src/canonical_qr.rs:77:32
+   |
+77 |     StrictlyNegativeDiagonal { index: usize },
+   |                                ^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> /Users/jemanuel/projects/frankensim/crates/fs-la/src/canonical_qr.rs:81:21
+   |
+81 |     StaleIdentity { field: &'static str },
+   |                     ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+   --> /Users/jemanuel/projects/frankensim/crates/fs-la/src/canonical_qr.rs:299:5
+    |
+299 |     SameIsaBitStable,
+    |     ^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+   --> /Users/jemanuel/projects/frankensim/crates/fs-la/src/canonical_qr.rs:344:5
+    |
+344 |     LowestIndexFirst,
+    |     ^^^^^^^^^^^^^^^^
+
+   Compiling fs-ad v0.0.1 (/Users/jemanuel/projects/frankensim/crates/fs-ad)
+   Compiling fs-spectral v0.0.1 (/Users/jemanuel/projects/frankensim/crates/fs-spectral)
+   Compiling fs-feec v0.0.1 (/Users/jemanuel/projects/frankensim/crates/fs-feec)
+   Compiling fs-dfo v0.0.1 (/Users/jemanuel/projects/frankensim/crates/fs-dfo)
+warning: hard linking files in the incremental compilation cache failed. copying files instead. consider moving the cache directory to a file system which supports hard linking in session dir `/Volumes/USBNVME16TB/temp_agent_space/cargo-target-rosebasin/debug/incremental/fs_ad-1h2hdbm43ygft/s-hlu1eptmbm-1vzlx7p-working`
+
+warning: `fs-la` (lib) generated 12 warnings (run `cargo fix --lib -p fs-la` to apply 1 suggestion)
+   Compiling fs-material v0.0.1 (/Users/jemanuel/projects/frankensim/crates/fs-material)
+warning: `fs-ad` (lib) generated 1 warning
+warning: hard linking files in the incremental compilation cache failed. copying files instead. consider moving the cache directory to a file system which supports hard linking in session dir `/Volumes/USBNVME16TB/temp_agent_space/cargo-target-rosebasin/debug/incremental/fs_dfo-3rr3qiagsjs7d/s-hlu1epuels-1iajxsc-working`
+
+warning: hard linking files in the incremental compilation cache failed. copying files instead. consider moving the cache directory to a file system which supports hard linking in session dir `/Volumes/USBNVME16TB/temp_agent_space/cargo-target-rosebasin/debug/incremental/fs_feec-0ygl18kh9hwov/s-hlu1eptqx9-10ybvoz-working`
+
+warning: hard linking files in the incremental compilation cache failed. copying files instead. consider moving the cache directory to a file system which supports hard linking in session dir `/Volumes/USBNVME16TB/temp_agent_space/cargo-target-rosebasin/debug/incremental/fs_spectral-2cwra1rdmsj7w/s-hlu1eptsbd-1cjm81d-working`
+
+   Compiling fs-solver v0.0.1 (/Users/jemanuel/projects/frankensim/crates/fs-solver)
+warning: `fs-feec` (lib) generated 1 warning
+warning: hard linking files in the incremental compilation cache failed. copying files instead. consider moving the cache directory to a file system which supports hard linking in session dir `/Volumes/USBNVME16TB/temp_agent_space/cargo-target-rosebasin/debug/incremental/fs_material-18lxvt8f0eht3/s-hlu1evcw3h-1wsap72-working`
+
+warning: `fs-spectral` (lib) generated 1 warning
+warning: `fs-dfo` (lib) generated 1 warning
+warning: constant `PHYSICAL_DOMAIN` is never used
+  --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:62:7
+   |
+62 | const PHYSICAL_DOMAIN: &str = "org.frankensim.fs-material.identifiability-physical.v2";
+   |       ^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `CANONICAL_MAGIC` is never used
+  --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:63:7
+   |
+63 | const CANONICAL_MAGIC: &[u8] = b"fs-material-identifiability-study\0";
+   |       ^^^^^^^^^^^^^^^
+
+warning: struct `StudySpecId` is never constructed
+   --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:144:19
+    |
+144 | pub(crate) struct StudySpecId(ContentHash);
+    |                   ^^^^^^^^^^^
+
+warning: method `digest` is never used
+   --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:149:18
+    |
+146 | impl StudySpecId {
+    | ---------------- method in this implementation
+...
+149 |     pub const fn digest(self) -> ContentHash {
+    |                  ^^^^^^
+
+warning: struct `PhysicalStudyId` is never constructed
+   --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:156:19
+    |
+156 | pub(crate) struct PhysicalStudyId(ContentHash);
+    |                   ^^^^^^^^^^^^^^^
+
+warning: method `digest` is never used
+   --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:161:18
+    |
+158 | impl PhysicalStudyId {
+    | -------------------- method in this implementation
+...
+161 |     pub const fn digest(self) -> ContentHash {
+    |                  ^^^^^^
+
+warning: method `validate_structural` is never used
+   --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:859:8
+    |
+858 | impl MaterialModelBinding {
+    | ------------------------- method in this implementation
+859 |     fn validate_structural(&self) -> Result<(), IdentifiabilityError> {
+    |        ^^^^^^^^^^^^^^^^^^^
+
+warning: method `validate_structural` is never used
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:1349:8
+     |
+1313 | impl ContextBinding {
+     | ------------------- method in this implementation
+...
+1349 |     fn validate_structural(&self) -> Result<(), IdentifiabilityError> {
+     |        ^^^^^^^^^^^^^^^^^^^
+
+warning: method `observation_ids` is never used
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:1652:25
+     |
+1412 | impl DataLineage {
+     | ---------------- method in this implementation
+...
+1652 |     pub(crate) const fn observation_ids(&self) -> &BTreeSet<ObservationId> {
+     |                         ^^^^^^^^^^^^^^^
+
+warning: method `can_support_candidate` is never used
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:2090:8
+     |
+2073 | impl InfluenceStatus {
+     | -------------------- method in this implementation
+...
+2090 |     fn can_support_candidate(&self) -> bool {
+     |        ^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `canonicalized` is never used
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:2237:8
+     |
+2194 | impl NoiseDependence {
+     | -------------------- method in this implementation
+...
+2237 |     fn canonicalized(
+     |        ^^^^^^^^^^^^^
+
+warning: function `require_header_version` is never used
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:2558:4
+     |
+2558 | fn require_header_version(
+     |    ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `IdentifiabilityStudySpec` is never constructed
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:2610:19
+     |
+2610 | pub(crate) struct IdentifiabilityStudySpec {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `IdentifiabilitySourceArtifacts` is never constructed
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:2631:19
+     |
+2631 | pub(crate) struct IdentifiabilitySourceArtifacts<'a> {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: associated function `new` is never used
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:2643:18
+     |
+2640 | impl<'a> IdentifiabilitySourceArtifacts<'a> {
+     | ------------------------------------------- associated function in this implementation
+...
+2643 |     pub const fn new(
+     |                  ^^^
+
+warning: multiple associated items are never used
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:2665:12
+     |
+2662 | impl IdentifiabilityStudySpec {
+     | ----------------------------- associated items in this implementation
+...
+2665 |     pub fn try_new(
+     |            ^^^^^^^
+...
+3070 |     pub const fn schema_version(&self) -> u32 {
+     |                  ^^^^^^^^^^^^^^
+...
+3076 |     pub const fn header(&self) -> &ArtifactHeader {
+     |                  ^^^^^^
+...
+3082 |     pub const fn model(&self) -> &MaterialModelBinding {
+     |                  ^^^^^
+...
+3088 |     pub const fn parameters(&self) -> &BTreeMap<ParameterRoleId, ParameterSpec> {
+     |                  ^^^^^^^^^^
+...
+3094 |     pub const fn observations(&self) -> &BTreeMap<ObservationChannelId, ObservationSpec> {
+     |                  ^^^^^^^^^^^^
+...
+3100 |     pub fn paths(&self) -> &[ObservationPath] {
+     |            ^^^^^
+...
+3106 |     pub const fn data(&self) -> &DataLineage {
+     |                  ^^^^
+...
+3112 |     pub const fn evidence(&self) -> &IdentifiabilityEvidence {
+     |                  ^^^^^^^^
+...
+3117 |     pub fn canonical_bytes(&self) -> Result<Vec<u8>, IdentifiabilityError> {
+     |            ^^^^^^^^^^^^^^^
+...
+3124 |     pub fn from_canonical_bytes(
+     |            ^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `StudyIdentityReceipt` is never constructed
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:3166:19
+     |
+3166 | pub(crate) struct StudyIdentityReceipt<I> {
+     |                   ^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `id`, `schema_version`, `canonical_bytes`, and `item_count` are never used
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:3176:18
+     |
+3173 | impl<I: Copy> StudyIdentityReceipt<I> {
+     | ------------------------------------- methods in this implementation
+...
+3176 |     pub const fn id(&self) -> I {
+     |                  ^^
+...
+3182 |     pub const fn schema_version(&self) -> u32 {
+     |                  ^^^^^^^^^^^^^^
+...
+3188 |     pub fn canonical_bytes(&self) -> &[u8] {
+     |            ^^^^^^^^^^^^^^^
+...
+3195 |     pub const fn item_count(&self) -> u64 {
+     |                  ^^^^^^^^^^
+
+warning: struct `AdmittedIdentifiabilityStudy` is never constructed
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:3202:19
+     |
+3202 | pub(crate) struct AdmittedIdentifiabilityStudy {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: associated items `admit`, `spec`, `exact_receipt`, and `physical_receipt` are never used
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:3210:12
+     |
+3208 | impl AdmittedIdentifiabilityStudy {
+     | --------------------------------- associated items in this implementation
+3209 |     /// Mint receipts for a structurally admitted/canonicalized specification.
+3210 |     pub fn admit(spec: IdentifiabilityStudySpec) -> Result<Self, IdentifiabilityError> {
+     |            ^^^^^
+...
+3246 |     pub const fn spec(&self) -> &IdentifiabilityStudySpec {
+     |                  ^^^^
+...
+3252 |     pub const fn exact_receipt(&self) -> &StudyIdentityReceipt<StudySpecId> {
+     |                  ^^^^^^^^^^^^^
+...
+3258 |     pub const fn physical_receipt(&self) -> &StudyIdentityReceipt<PhysicalStudyId> {
+     |                  ^^^^^^^^^^^^^^^^
+
+warning: method `i64` is never used
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:3322:8
+     |
+3268 | impl CanonicalWriter {
+     | -------------------- method in this implementation
+...
+3322 |     fn i64(&mut self, value: i64) {
+     |        ^^^
+
+warning: function `encode_artifact_kind` is never used
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:3365:4
+     |
+3365 | fn encode_artifact_kind(writer: &mut CanonicalWriter, kind: ArtifactKind) {
+     |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `encode_artifact_ref` is never used
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:3395:4
+     |
+3395 | fn encode_artifact_ref(
+     |    ^^^^^^^^^^^^^^^^^^^
+
+warning: function `encode_context` is never used
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:3405:4
+     |
+3405 | fn encode_context(
+     |    ^^^^^^^^^^^^^^
+
+warning: function `encode_parameter_class` is never used
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:3548:4
+     |
+3548 | fn encode_parameter_class(
+     |    ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `encode_parameter_scope` is never used
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:3566:4
+     |
+3566 | fn encode_parameter_scope(
+     |    ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `encode_parameter` is never used
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:3593:4
+     |
+3593 | fn encode_parameter(
+     |    ^^^^^^^^^^^^^^^^
+
+warning: function `encode_model` is never used
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:3630:4
+     |
+3630 | fn encode_model(
+     |    ^^^^^^^^^^^^
+
+warning: function `encode_data` is never used
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:3707:4
+     |
+3707 | fn encode_data(
+     |    ^^^^^^^^^^^
+
+warning: function `encode_sensor` is never used
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:3765:4
+     |
+3765 | fn encode_sensor(
+     |    ^^^^^^^^^^^^^
+
+warning: function `encode_noise` is never used
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:3783:4
+     |
+3783 | fn encode_noise(
+     |    ^^^^^^^^^^^^
+
+warning: function `encode_missingness` is never used
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:3822:4
+     |
+3822 | fn encode_missingness(
+     |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `encode_observation` is never used
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:3844:4
+     |
+3844 | fn encode_observation(
+     |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `encode_influence_status` is never used
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:3876:4
+     |
+3876 | fn encode_influence_status(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `encode_path` is never used
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:3902:4
+     |
+3902 | fn encode_path(
+     |    ^^^^^^^^^^^
+
+warning: function `encode_evidence_status` is never used
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:3927:4
+     |
+3927 | fn encode_evidence_status(
+     |    ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `encode_evidence` is never used
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:3953:4
+     |
+3953 | fn encode_evidence(
+     |    ^^^^^^^^^^^^^^^
+
+warning: function `encode_gauge` is never used
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:3969:4
+     |
+3969 | fn encode_gauge(
+     |    ^^^^^^^^^^^^
+
+warning: function `encode_noise_dependence` is never used
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:3986:4
+     |
+3986 | fn encode_noise_dependence(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `encode_discrepancy` is never used
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:4005:4
+     |
+4005 | fn encode_discrepancy(
+     |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `encode_study` is never used
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:4035:4
+     |
+4035 | fn encode_study(
+     |    ^^^^^^^^^^^^
+
+warning: function `check_legacy_identifiability_schema_version` is never used
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:4078:15
+     |
+4078 | pub(crate) fn check_legacy_identifiability_schema_version(
+     |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `LEGACY_IDENTIFIABILITY_SPEC_NONAUTHORITATIVE_DESCRIPTION` is never used
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:4093:7
+     |
+4093 | const LEGACY_IDENTIFIABILITY_SPEC_NONAUTHORITATIVE_DESCRIPTION: &[&str] = &[
+     |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `LEGACY_IDENTIFIABILITY_PHYSICAL_NONAUTHORITATIVE_DESCRIPTION` is never used
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:4114:7
+     |
+4114 | const LEGACY_IDENTIFIABILITY_PHYSICAL_NONAUTHORITATIVE_DESCRIPTION: &[&str] = &[
+     |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `i64` is never used
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:4199:8
+     |
+4137 | impl<'a> CanonicalReader<'a> {
+     | ---------------------------- method in this implementation
+...
+4199 |     fn i64(&mut self, field: &'static str) -> Result<i64, IdentifiabilityError> {
+     |        ^^^
+
+warning: function `decode_artifact_kind` is never used
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:4312:4
+     |
+4312 | fn decode_artifact_kind(
+     |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `decode_artifact_ref` is never used
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:4354:4
+     |
+4354 | fn decode_artifact_ref(
+     |    ^^^^^^^^^^^^^^^^^^^
+
+warning: function `decode_context` is never used
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:4364:4
+     |
+4364 | fn decode_context(
+     |    ^^^^^^^^^^^^^^
+
+warning: function `decode_parameter_scope` is never used
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:4536:4
+     |
+4536 | fn decode_parameter_scope(
+     |    ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `decode_parameter_class` is never used
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:4561:4
+     |
+4561 | fn decode_parameter_class(
+     |    ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `decode_parameter` is never used
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:4579:4
+     |
+4579 | fn decode_parameter(
+     |    ^^^^^^^^^^^^^^^^
+
+warning: function `decode_model` is never used
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:4632:4
+     |
+4632 | fn decode_model(
+     |    ^^^^^^^^^^^^
+
+warning: function `decode_data` is never used
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:4749:4
+     |
+4749 | fn decode_data(reader: &mut CanonicalReader<'_>) -> Result<DataLineage, IdentifiabilityError> {
+     |    ^^^^^^^^^^^
+
+warning: function `decode_sensor` is never used
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:4866:4
+     |
+4866 | fn decode_sensor(reader: &mut CanonicalReader<'_>) -> Result<SensorBinding, IdentifiabilityError> {
+     |    ^^^^^^^^^^^^^
+
+warning: function `decode_noise` is never used
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:4882:4
+     |
+4882 | fn decode_noise(reader: &mut CanonicalReader<'_>) -> Result<NoiseModel, IdentifiabilityError> {
+     |    ^^^^^^^^^^^^
+
+warning: function `decode_missingness` is never used
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:4909:4
+     |
+4909 | fn decode_missingness(
+     |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `decode_observation` is never used
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:4930:4
+     |
+4930 | fn decode_observation(
+     |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `decode_influence_status` is never used
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:4982:4
+     |
+4982 | fn decode_influence_status(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `decode_path` is never used
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:5006:4
+     |
+5006 | fn decode_path(reader: &mut CanonicalReader<'_>) -> Result<ObservationPath, IdentifiabilityError> {
+     |    ^^^^^^^^^^^
+
+warning: function `decode_evidence_status` is never used
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:5047:4
+     |
+5047 | fn decode_evidence_status(
+     |    ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `decode_evidence` is never used
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:5076:4
+     |
+5076 | fn decode_evidence(
+     |    ^^^^^^^^^^^^^^^
+
+warning: function `decode_gauge` is never used
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:5088:4
+     |
+5088 | fn decode_gauge(reader: &mut CanonicalReader<'_>) -> Result<GaugeClass, IdentifiabilityError> {
+     |    ^^^^^^^^^^^^
+
+warning: function `decode_noise_dependence` is never used
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:5107:4
+     |
+5107 | fn decode_noise_dependence(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `decode_discrepancy` is never used
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:5150:4
+     |
+5150 | fn decode_discrepancy(
+     |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `decode_study` is never used
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:5177:4
+     |
+5177 | fn decode_study(bytes: &[u8]) -> Result<IdentifiabilityStudySpec, IdentifiabilityError> {
+     |    ^^^^^^^^^^^^
+
+warning: function `validate_source_key` is never used
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability/authoritative.rs:5519:4
+     |
+5519 | fn validate_source_key(
+     |    ^^^^^^^^^^^^^^^^^^^
+
+warning: function `intrinsic_constraint_codimension` is never used
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability/authoritative.rs:5894:4
+     |
+5894 | fn intrinsic_constraint_codimension(constraint: &JointConstraint) -> Option<u64> {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:170:32
+    |
+170 |     UnsupportedSchemaVersion { declared: u32, supported: u32 },
+    |                                ^^^^^^^^^^^^^
+    |
+    = note: requested on the command line with `-W missing-docs`
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:170:47
+    |
+170 |     UnsupportedSchemaVersion { declared: u32, supported: u32 },
+    |                                               ^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:172:19
+    |
+172 |     InvalidText { field: &'static str, detail: String },
+    |                   ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:172:40
+    |
+172 |     InvalidText { field: &'static str, detail: String },
+    |                                        ^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:174:20
+    |
+174 |     ZeroIdentity { field: &'static str },
+    |                    ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:176:19
+    |
+176 |     Cardinality { field: &'static str, detail: String },
+    |                   ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:176:40
+    |
+176 |     Cardinality { field: &'static str, detail: String },
+    |                                        ^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:178:17
+    |
+178 |     Duplicate { field: &'static str, id: String },
+    |                 ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:178:38
+    |
+178 |     Duplicate { field: &'static str, id: String },
+    |                                      ^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:180:22
+    |
+180 |     InvalidNumeric { field: &'static str, detail: String },
+    |                      ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:180:43
+    |
+180 |     InvalidNumeric { field: &'static str, detail: String },
+    |                                           ^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:183:9
+    |
+183 |         field: &'static str,
+    |         ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:184:9
+    |
+184 |         expected: u32,
+    |         ^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:185:9
+    |
+185 |         actual: u32,
+    |         ^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:188:24
+    |
+188 |     UnknownReference { field: &'static str, id: String },
+    |                        ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:188:45
+    |
+188 |     UnknownReference { field: &'static str, id: String },
+    |                                             ^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:192:26
+    |
+192 |     InitialStatePolicy { detail: String },
+    |                          ^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:194:38
+    |
+194 |     DisconnectedEstimatedParameter { parameter: ParameterRoleId },
+    |                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:196:27
+    |
+196 |     NuisanceCalibration { parameter: ParameterRoleId },
+    |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:198:20
+    |
+198 |     InvalidGauge { gauge: GaugeClassId, detail: String },
+    |                    ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:198:41
+    |
+198 |     InvalidGauge { gauge: GaugeClassId, detail: String },
+    |                                         ^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:200:18
+    |
+200 |     Covariance { detail: String },
+    |                  ^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:202:10
+    |
+202 |     Vv { detail: String },
+    |          ^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:204:16
+    |
+204 |     Material { detail: String },
+    |                ^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:206:22
+    |
+206 |     SourceMismatch { field: &'static str },
+    |                      ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:208:17
+    |
+208 |     Canonical { at: usize, detail: String },
+    |                 ^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:208:28
+    |
+208 |     Canonical { at: usize, detail: String },
+    |                            ^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:317:12
+    |
+317 |     None { reason: String, version: u32 },
+    |            ^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:317:28
+    |
+317 |     None { reason: String, version: u32 },
+    |                            ^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:320:9
+    |
+320 |         domain: ParameterDomain,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:321:9
+    |
+321 |         version: u32,
+    |         ^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:326:9
+    |
+326 |         mean: f64,
+    |         ^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:327:9
+    |
+327 |         standard_deviation: f64,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:328:9
+    |
+328 |         version: u32,
+    |         ^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:334:9
+    |
+334 |         log_mean: f64,
+    |         ^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:335:9
+    |
+335 |         log_standard_deviation: f64,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:336:9
+    |
+336 |         reference: f64,
+    |         ^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:337:9
+    |
+337 |         version: u32,
+    |         ^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:441:9
+    |
+441 |         scale: f64,
+    |         ^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:442:9
+    |
+442 |         scale_quantity: QuantitySpec,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:443:9
+    |
+443 |         offset: f64,
+    |         ^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:446:19
+    |
+446 |     LogPositive { reference: f64 },
+    |                   ^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:558:16
+    |
+558 |     Nuisance { calibration: ArtifactRef },
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:560:13
+    |
+560 |     Fixed { source: ContentHash },
+    |             ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:587:19
+    |
+587 |     MaterialLot { lot: ArtifactId },
+    |                   ^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:589:16
+    |
+589 |     Specimen { specimen: ArtifactId },
+    |                ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:591:13
+    |
+591 |     Field { support: ContentHash },
+    |             ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:593:20
+    |
+593 |     Hierarchical { population: ArtifactId, level: u32 },
+    |                    ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:593:44
+    |
+593 |     Hierarchical { population: ArtifactId, level: u32 },
+    |                                            ^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:605:9
+    |
+605 |         reason: String,
+    |         ^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:606:9
+    |
+606 |         witness: ContentHash,
+    |         ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:609:20
+    |
+609 |     NotEstimated { reason: String },
+    |                    ^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:1020:12
+     |
+1020 |     Zero { schema_version: u32 },
+     |            ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:1023:9
+     |
+1023 |         schema_version: u32,
+     |         ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:1024:9
+     |
+1024 |         artifact: ContentHash,
+     |         ^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:1824:16
+     |
+1824 |     Complete { evidence: ContentHash },
+     |                ^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:1826:15
+     |
+1826 |     Modeled { artifact: ContentHash, version: u32 },
+     |               ^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:1826:38
+     |
+1826 |     Modeled { artifact: ContentHash, version: u32 },
+     |                                      ^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:1828:15
+     |
+1828 |     Unknown { reason: String },
+     |               ^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:1854:15
+     |
+1854 |     Bounded { half_width: f64 },
+     |               ^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:1856:16
+     |
+1856 |     Gaussian { standard_deviation: f64 },
+     |                ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:1858:16
+     |
+1858 |     StudentT { scale: f64, degrees_of_freedom: f64 },
+     |                ^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:1858:28
+     |
+1858 |     StudentT { scale: f64, degrees_of_freedom: f64 },
+     |                            ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:1861:9
+     |
+1861 |         artifact: ContentHash,
+     |         ^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:1862:9
+     |
+1862 |         version: u32,
+     |         ^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:1863:9
+     |
+1863 |         reference_scale: f64,
+     |         ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:1867:15
+     |
+1867 |     Unknown { reason: String },
+     |               ^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:2040:18
+     |
+2040 |     Covariance { other: ObservationChannelId },
+     |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:2064:27
+     |
+2064 |     SymbolicallyNonzero { receipt: ContentHash },
+     |                           ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:2066:28
+     |
+2066 |     NumericallyWitnessed { receipt: ContentHash },
+     |                            ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:2068:18
+     |
+2068 |     ProvenZero { witness: ContentHash },
+     |                  ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:2070:15
+     |
+2070 |     Unknown { reason: String },
+     |               ^^^^^^^^^^^^^^
+
+warning: missing documentation for an enum
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability/authoritative.rs:1465:1
+     |
+1465 | pub enum ConstraintRelation {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an enum
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability/authoritative.rs:1475:1
+     |
+1475 | pub enum ConstraintCodimension {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability/authoritative.rs:1538:1
+     |
+1538 | pub struct JointConstraint {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability/authoritative.rs:1634:1
+     |
+1634 | pub struct AdmissibleDomainWitness {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an enum
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability/authoritative.rs:1873:1
+     |
+1873 | pub enum MissingnessAssumption {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an enum
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability/authoritative.rs:2274:1
+     |
+2274 | pub enum StudyDiscrepancy {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability/authoritative.rs:2826:1
+     |
+2826 | pub struct InfluenceDeclaration {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an enum
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability/authoritative.rs:2897:1
+     |
+2897 | pub enum GaugeContinuousDimension {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an enum
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability/authoritative.rs:2918:1
+     |
+2918 | pub enum GaugeAlgebra {
+     | ^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability/authoritative.rs:2958:1
+     |
+2958 | pub struct RegularGaugeOrbit {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an enum
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability/authoritative.rs:3298:1
+     |
+3298 | pub enum GaugeScalarDomain {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an enum
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability/authoritative.rs:3314:1
+     |
+3314 | pub enum GaugeLocus {
+     | ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability/authoritative.rs:3325:1
+     |
+3325 | pub struct GaugeProbabilityThreshold(u64);
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an enum
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability/authoritative.rs:3347:1
+     |
+3347 | pub enum GaugeQuantifierScope {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability/authoritative.rs:3373:1
+     |
+3373 | pub struct GaugeApplicabilityAxes {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability/authoritative.rs:3432:1
+     |
+3432 | pub struct GaugeCellDomain {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability/authoritative.rs:3696:1
+     |
+3696 | pub struct GaugeCompositionDeclaration {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an enum
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability/authoritative.rs:4079:1
+     |
+4079 | pub enum GaugeQuotientPlan {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an enum
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability/authoritative.rs:4115:1
+     |
+4115 | pub enum ContinuousGaugeReductionPlan {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an enum
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability/authoritative.rs:4161:1
+     |
+4161 | pub enum GaugeReductionStage {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an enum
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability/authoritative.rs:4198:1
+     |
+4198 | pub enum GaugeReductionPlan {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an enum
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability/authoritative.rs:4788:1
+     |
+4788 | pub enum DataReusePolicy {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an enum
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability/authoritative.rs:9235:1
+     |
+9235 | pub enum RequestedClaimAxis {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an enum
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability/authoritative.rs:9249:1
+     |
+9249 | pub enum ArithmeticPolicy {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability/authoritative.rs:9363:1
+     |
+9363 | pub struct IdentifiabilityNumericalPolicy {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an enum
+     --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability/authoritative.rs:10222:1
+      |
+10222 | pub enum FiberCardinalityBound {
+      | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an enum
+     --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability/authoritative.rs:10230:1
+      |
+10230 | pub enum FiberDimensionLowerBound {
+      | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an enum
+     --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability/authoritative.rs:10244:1
+      |
+10244 | pub enum FiberStructure {
+      | ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an enum
+     --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability/authoritative.rs:10340:1
+      |
+10340 | pub enum ClaimSubject {
+      | ^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an enum
+     --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability/authoritative.rs:10361:1
+      |
+10361 | pub enum ClaimScope {
+      | ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+     --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability/authoritative.rs:10495:1
+      |
+10495 | pub struct GaugeResolutionEvidence {
+      | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an enum
+     --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability/authoritative.rs:10537:1
+      |
+10537 | pub enum ClaimAssessment {
+      | ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:2292:19
+     |
+2292 |     NotAssessed { reason: String },
+     |                   ^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:2294:15
+     |
+2294 |     Unknown { reason: String },
+     |               ^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:2296:15
+     |
+2296 |     Refuted { witness: ContentHash },
+     |               ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:2299:9
+     |
+2299 |         method: String,
+     |         ^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:2300:9
+     |
+2300 |         receipt: ContentHash,
+     |         ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:2472:15
+     |
+2472 |     NoModel { reason: String },
+     |               ^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:2474:12
+     |
+2474 |     Zero { evidence: ContentHash },
+     |            ^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:2477:9
+     |
+2477 |         artifact: ContentHash,
+     |         ^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:2478:9
+     |
+2478 |         version: u32,
+     |         ^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:2479:9
+     |
+2479 |         confounding_constraint: ContentHash,
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+    --> /Users/jemanuel/projects/frankensim/crates/fs-material/src/identifiability.rs:2480:9
+     |
+2480 |         evidence: EvidenceStatus,
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^
+
+   Compiling fs-contact v0.0.1 (/Users/jemanuel/projects/frankensim/crates/fs-contact)
+warning: hard linking files in the incremental compilation cache failed. copying files instead. consider moving the cache directory to a file system which supports hard linking in session dir `/Volumes/USBNVME16TB/temp_agent_space/cargo-target-rosebasin/debug/incremental/fs_solver-1jl3xqe7z8udm/s-hlu1f77md6-10gtbze-working`
+
+   Compiling fs-time v0.0.1 (/Users/jemanuel/projects/frankensim/crates/fs-time)
+warning: `fs-material` (lib) generated 183 warnings
+warning: `fs-solver` (lib) generated 1 warning
+warning: hard linking files in the incremental compilation cache failed. copying files instead. consider moving the cache directory to a file system which supports hard linking in session dir `/Volumes/USBNVME16TB/temp_agent_space/cargo-target-rosebasin/debug/incremental/fs_contact-213bxic5pq8js/s-hlu1fgat1u-1hshqnd-working`
+
+warning: hard linking files in the incremental compilation cache failed. copying files instead. consider moving the cache directory to a file system which supports hard linking in session dir `/Volumes/USBNVME16TB/temp_agent_space/cargo-target-rosebasin/debug/incremental/fs_time-323gdlbk5gzsa/s-hlu1fnf25p-1vfyc4x-working`
+
+warning: missing documentation for a struct field
+  --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/embed.rs:31:5
+   |
+31 |     pub solver_id: String,
+   |     ^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: requested on the command line with `-W missing-docs`
+
+warning: missing documentation for a struct field
+  --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/embed.rs:32:5
+   |
+32 |     pub contact_id: String,
+   |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/embed.rs:33:5
+   |
+33 |     pub feature_id: String,
+   |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/embed.rs:34:5
+   |
+34 |     pub sample_id: String,
+   |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/embed.rs:44:5
+   |
+44 |     pub approach_rate_m_per_s: f64,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/embed.rs:45:5
+   |
+45 |     pub time_s: f64,
+   |     ^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/embed.rs:46:5
+   |
+46 |     pub step_s: f64,
+   |     ^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/embed.rs:47:5
+   |
+47 |     pub iteration: u64,
+   |     ^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/embed.rs:59:5
+   |
+59 |     pub identity: NormalPatchEmbedIdentity,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/embed.rs:60:5
+   |
+60 |     pub lane: IntegrationLane,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/embed.rs:61:5
+   |
+61 |     pub converged: bool,
+   |     ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/embed.rs:62:5
+   |
+62 |     pub kinematics: NormalPatchKinematics,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/embed.rs:63:5
+   |
+63 |     pub law_request: NormalPatchRequest,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/embed.rs:86:5
+   |
+86 |     pub checkpoint_id: ContentHash,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/embed.rs:93:5
+   |
+93 |     pub action_force_n: [f64; 3],
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/embed.rs:94:5
+   |
+94 |     pub action_moment_n_m: [f64; 3],
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/embed.rs:95:5
+   |
+95 |     pub reaction_force_n: [f64; 3],
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/embed.rs:96:5
+   |
+96 |     pub reaction_moment_n_m: [f64; 3],
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/embed.rs:97:5
+   |
+97 |     pub residual_force_n: [f64; 3],
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/embed.rs:98:5
+   |
+98 |     pub tangent_n_per_m: f64,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/embed.rs:99:5
+   |
+99 |     pub dissipated_power_w: f64,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/embed.rs:100:5
+    |
+100 |     pub irreversible_work_j: f64,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/embed.rs:107:5
+    |
+107 |     pub action_force_n_per_m: [f64; 3],
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/embed.rs:108:5
+    |
+108 |     pub action_moment_n: [f64; 3],
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/embed.rs:109:5
+    |
+109 |     pub reaction_force_n_per_m: [f64; 3],
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/embed.rs:110:5
+    |
+110 |     pub reaction_moment_n: [f64; 3],
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/embed.rs:111:5
+    |
+111 |     pub residual_force_n_per_m: [f64; 3],
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/embed.rs:112:5
+    |
+112 |     pub tangent_pa: f64,
+    |     ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/embed.rs:113:5
+    |
+113 |     pub dissipated_power_w_per_m: f64,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/embed.rs:114:5
+    |
+114 |     pub irreversible_work_j_per_m: f64,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/embed.rs:120:5
+    |
+120 |     Point(PointNormalPort),
+    |     ^^^^^
+
+warning: missing documentation for a variant
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/embed.rs:121:5
+    |
+121 |     Line(LineNormalPort),
+    |     ^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/embed.rs:127:5
+    |
+127 |     pub embedding_id: ContentHash,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/embed.rs:128:5
+    |
+128 |     pub law_request_id: ContentHash,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/embed.rs:129:5
+    |
+129 |     pub receipt_id: ContentHash,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/embed.rs:130:5
+    |
+130 |     pub receipt: NormalPatchReceipt,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/embed.rs:131:5
+    |
+131 |     pub port: NormalPatchPort,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/embed.rs:132:5
+    |
+132 |     pub applicability: ApplicabilityRatios,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/embed.rs:133:5
+    |
+133 |     pub uncertainty: InputUncertainty,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/embed.rs:134:5
+    |
+134 |     pub next_state: NormalPatchEmbedState,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/embed.rs:140:5
+    |
+140 |     InvalidIdentity {
+    |     ^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/embed.rs:141:9
+    |
+141 |         field: &'static str,
+    |         ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/embed.rs:143:5
+    |
+143 |     InvalidKinematics {
+    |     ^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/embed.rs:144:9
+    |
+144 |         field: &'static str,
+    |         ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/embed.rs:146:5
+    |
+146 |     InvalidFrame,
+    |     ^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/embed.rs:147:5
+    |
+147 |     ApproachGapMismatch {
+    |     ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/embed.rs:148:9
+    |
+148 |         declared_gap_m: f64,
+    |         ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/embed.rs:149:9
+    |
+149 |         approach_m: f64,
+    |         ^^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/embed.rs:151:5
+    |
+151 |     EventfulLane,
+    |     ^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/embed.rs:152:5
+    |
+152 |     Nonconverged,
+    |     ^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/embed.rs:153:5
+    |
+153 |     StaleState {
+    |     ^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/embed.rs:154:9
+    |
+154 |         time_s: f64,
+    |         ^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/embed.rs:155:9
+    |
+155 |         iteration: u64,
+    |         ^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/embed.rs:157:5
+    |
+157 |     FutureState {
+    |     ^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/embed.rs:158:9
+    |
+158 |         time_s: f64,
+    |         ^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/embed.rs:159:9
+    |
+159 |         maximum_time_s: f64,
+    |         ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/embed.rs:161:5
+    |
+161 |     DuplicateWorkKey {
+    |     ^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/embed.rs:162:9
+    |
+162 |         key: String,
+    |         ^^^^^^^^^^^
+
+warning: missing documentation for a variant
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/embed.rs:164:5
+    |
+164 |     OutOfSequenceWork {
+    |     ^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/embed.rs:165:9
+    |
+165 |         iteration: u64,
+    |         ^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/embed.rs:167:5
+    |
+167 |     WorkKeyCapacityExceeded {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/embed.rs:168:9
+    |
+168 |         maximum: usize,
+    |         ^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/embed.rs:170:5
+    |
+170 |     Law(NormalPatchError),
+    |     ^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/finite_gap.rs:166:20
+    |
+166 |     InvalidInput { field: &'static str },
+    |                    ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/finite_gap.rs:169:29
+    |
+169 |     UnsupportedTraceClaim { chart_name: &'static str },
+    |                             ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/finite_gap.rs:173:9
+    |
+173 |         cell_x: usize,
+    |         ^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/finite_gap.rs:174:9
+    |
+174 |         cell_y: usize,
+    |         ^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/finite_gap.rs:175:9
+    |
+175 |         inward_parameter_m: f64,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/finite_gap.rs:178:33
+    |
+178 |     OutsideEndpointNotOutside { cell_x: usize, cell_y: usize },
+    |                                 ^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/finite_gap.rs:178:48
+    |
+178 |     OutsideEndpointNotOutside { cell_x: usize, cell_y: usize },
+    |                                                ^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/finite_gap.rs:180:31
+    |
+180 |     InsideEndpointNotInside { cell_x: usize, cell_y: usize },
+    |                               ^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/finite_gap.rs:180:46
+    |
+180 |     InsideEndpointNotInside { cell_x: usize, cell_y: usize },
+    |                                              ^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/finite_gap.rs:184:9
+    |
+184 |         cell_x: usize,
+    |         ^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/finite_gap.rs:185:9
+    |
+185 |         cell_y: usize,
+    |         ^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/finite_gap.rs:186:9
+    |
+186 |         bracket_width_m: f64,
+    |         ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/finite_gap.rs:190:9
+    |
+190 |         cell_x: usize,
+    |         ^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/finite_gap.rs:191:9
+    |
+191 |         cell_y: usize,
+    |         ^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/finite_gap.rs:192:9
+    |
+192 |         bracket_width_m: f64,
+    |         ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/finite_gap.rs:584:20
+    |
+584 |     InvalidInput { field: &'static str },
+    |                    ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/finite_gap.rs:586:37
+    |
+586 |     ComplianceNotPositiveDefinite { active_index: usize },
+    |                                     ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/finite_gap.rs:588:31
+    |
+588 |     ActiveSetDidNotConverge { iterations: usize, residual_m: f64 },
+    |                               ^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/finite_gap.rs:588:50
+    |
+588 |     ActiveSetDidNotConverge { iterations: usize, residual_m: f64 },
+    |                                                  ^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/finite_gap.rs:592:9
+    |
+592 |         cell_x: usize,
+    |         ^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/finite_gap.rs:593:9
+    |
+593 |         cell_y: usize,
+    |         ^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/finite_gap.rs:594:9
+    |
+594 |         required_clearance_cells: usize,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:35:9
+   |
+35 |         effective_radius_m: f64,
+   |         ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:36:9
+   |
+36 |         reduced_modulus_pa: f64,
+   |         ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:40:9
+   |
+40 |         effective_radius_m: f64,
+   |         ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:41:9
+   |
+41 |         reduced_modulus_pa: f64,
+   |         ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:45:9
+   |
+45 |         effective_radius_m: f64,
+   |         ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:46:9
+   |
+46 |         reduced_modulus_pa: f64,
+   |         ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:47:9
+   |
+47 |         dissipation_s_per_m: f64,
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:59:9
+   |
+59 |         maximum_principal_curvature_m_inverse: f64,
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:60:9
+   |
+60 |         minimum_principal_curvature_m_inverse: f64,
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:61:9
+   |
+61 |         reduced_modulus_pa: f64,
+   |         ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:72:9
+   |
+72 |         maximum_principal_curvature_m_inverse: f64,
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:73:9
+   |
+73 |         minimum_principal_curvature_m_inverse: f64,
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:74:9
+   |
+74 |         reduced_modulus_pa: f64,
+   |         ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:75:9
+   |
+75 |         dissipation_s_per_m: f64,
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:84:9
+   |
+84 |         response_identity: ContentHash,
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:85:9
+   |
+85 |         reference_radius_m: f64,
+   |         ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:86:9
+   |
+86 |         elastic_force_n: f64,
+   |         ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:87:9
+   |
+87 |         elastic_tangent_n_per_m: f64,
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:88:9
+   |
+88 |         reversible_energy_j: f64,
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:89:9
+   |
+89 |         peak_pressure_pa: f64,
+   |         ^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:90:9
+   |
+90 |         equivalent_pressure_semiaxes_m: [f64; 2],
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:91:9
+   |
+91 |         dissipation_s_per_m: f64,
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:120:5
+    |
+120 |     pub half_space_depth_m: f64,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:121:5
+    |
+121 |     pub layer_thickness_m: f64,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:122:5
+    |
+122 |     pub yield_strength_pa: f64,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:123:5
+    |
+123 |     pub characteristic_rate_m_per_s: f64,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:124:5
+    |
+124 |     pub temperature_k: f64,
+    |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:125:5
+    |
+125 |     pub adhesion_energy_j_per_m2: f64,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:131:5
+    |
+131 |     pub max_patch_to_radius: f64,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:132:5
+    |
+132 |     pub max_strain: f64,
+    |     ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:133:5
+    |
+133 |     pub max_patch_to_depth: f64,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:134:5
+    |
+134 |     pub max_patch_to_layer: f64,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:135:5
+    |
+135 |     pub max_pressure_to_yield: f64,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:136:5
+    |
+136 |     pub max_rate_ratio: f64,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:137:5
+    |
+137 |     pub min_temperature_k: f64,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:138:5
+    |
+138 |     pub max_temperature_k: f64,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:144:5
+    |
+144 |     pub radius_relative: f64,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:145:5
+    |
+145 |     pub modulus_relative: f64,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:146:5
+    |
+146 |     pub load_relative: f64,
+    |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:152:5
+    |
+152 |     pub identity: NormalPatchIdentity,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:153:5
+    |
+153 |     pub interface: InterfaceSystemRef,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:154:5
+    |
+154 |     pub law: NormalPatchLaw,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:155:5
+    |
+155 |     pub geometry: NormalPatchGeometry,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:156:5
+    |
+156 |     pub indentation_m: f64,
+    |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:157:5
+    |
+157 |     pub indentation_rate_m_per_s: f64,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:158:5
+    |
+158 |     pub step_s: f64,
+    |     ^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:159:5
+    |
+159 |     pub line_load_n_per_m: f64,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:160:5
+    |
+160 |     pub applicability: ApplicabilityInput,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:161:5
+    |
+161 |     pub limits: ApplicabilityLimits,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:162:5
+    |
+162 |     pub uncertainty: InputUncertainty,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:168:5
+    |
+168 |     pub patch_to_radius: f64,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:169:5
+    |
+169 |     pub strain: f64,
+    |     ^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:170:5
+    |
+170 |     pub patch_to_depth: f64,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:171:5
+    |
+171 |     pub patch_to_layer: f64,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:172:5
+    |
+172 |     pub pressure_to_yield: f64,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:173:5
+    |
+173 |     pub rate_ratio: f64,
+    |     ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:179:5
+    |
+179 |     pub peak_pressure_pa: f64,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:180:5
+    |
+180 |     pub resultant_n: f64,
+    |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:181:5
+    |
+181 |     pub second_moment_m2: f64,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:193:5
+    |
+193 |     pub semi_major_axis_m: f64,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:194:5
+    |
+194 |     pub semi_minor_axis_m: f64,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:195:5
+    |
+195 |     pub aspect_ratio: f64,
+    |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:201:5
+    |
+201 |     pub peak_pressure_pa: f64,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:202:5
+    |
+202 |     pub resultant_n_per_m: f64,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:203:5
+    |
+203 |     pub second_moment_m2: f64,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:209:5
+    |
+209 |     pub request_id: ContentHash,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:210:5
+    |
+210 |     pub receipt_id: ContentHash,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:211:5
+    |
+211 |     pub units: &'static str,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:212:5
+    |
+212 |     pub interface_system_id: String,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:213:5
+    |
+213 |     pub history_id: String,
+    |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:214:5
+    |
+214 |     pub input_source_id: String,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:215:5
+    |
+215 |     pub authority: InputAuthority,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:216:5
+    |
+216 |     pub approach_m: f64,
+    |     ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:217:5
+    |
+217 |     pub normal_force_n: f64,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:218:5
+    |
+218 |     pub tangent_n_per_m: f64,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:226:5
+    |
+226 |     pub pressure: PointPressureMoments,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:227:5
+    |
+227 |     pub reversible_energy_j: f64,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:228:5
+    |
+228 |     pub irreversible_work_j: f64,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:229:5
+    |
+229 |     pub dissipated_power_w: f64,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:230:5
+    |
+230 |     pub ratios: ApplicabilityRatios,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:231:5
+    |
+231 |     pub uncertainty: InputUncertainty,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:237:5
+    |
+237 |     pub request_id: ContentHash,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:238:5
+    |
+238 |     pub receipt_id: ContentHash,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:239:5
+    |
+239 |     pub units: &'static str,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:240:5
+    |
+240 |     pub interface_system_id: String,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:241:5
+    |
+241 |     pub history_id: String,
+    |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:242:5
+    |
+242 |     pub input_source_id: String,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:243:5
+    |
+243 |     pub authority: InputAuthority,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:244:5
+    |
+244 |     pub approach_m: f64,
+    |     ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:245:5
+    |
+245 |     pub normal_line_load_n_per_m: f64,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:246:5
+    |
+246 |     pub tangent_pa: f64,
+    |     ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:247:5
+    |
+247 |     pub patch_half_width_m: f64,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:248:5
+    |
+248 |     pub pressure: LinePressureMoments,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:249:5
+    |
+249 |     pub reversible_energy_j_per_m: f64,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:250:5
+    |
+250 |     pub irreversible_work_j_per_m: f64,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:251:5
+    |
+251 |     pub dissipated_power_w_per_m: f64,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:252:5
+    |
+252 |     pub ratios: ApplicabilityRatios,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:253:5
+    |
+253 |     pub uncertainty: InputUncertainty,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:259:5
+    |
+259 |     Point(PointNormalPatchReceipt),
+    |     ^^^^^
+
+warning: missing documentation for a variant
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:260:5
+    |
+260 |     Line(LineNormalPatchReceipt),
+    |     ^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:284:5
+    |
+284 |     pub request_id: ContentHash,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:285:5
+    |
+285 |     pub scheme_id: String,
+    |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:291:5
+    |
+291 |     MissingIdentity {
+    |     ^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:292:9
+    |
+292 |         field: &'static str,
+    |         ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:294:5
+    |
+294 |     InvalidInput {
+    |     ^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:295:9
+    |
+295 |         field: &'static str,
+    |         ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:297:5
+    |
+297 |     OutsideApplicability {
+    |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:298:9
+    |
+298 |         ratio: &'static str,
+    |         ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:299:9
+    |
+299 |         value: f64,
+    |         ^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:300:9
+    |
+300 |         limit: f64,
+    |         ^^^^^^^^^^
+
+warning: missing documentation for a variant
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:302:5
+    |
+302 |     AdhesionUnsupported {
+    |     ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:303:9
+    |
+303 |         adhesion_energy_j_per_m2: f64,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:305:5
+    |
+305 |     UnsupportedGeometry {
+    |     ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:306:9
+    |
+306 |         geometry: NormalPatchGeometry,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:308:5
+    |
+308 |     GeometryLawMismatch {
+    |     ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:309:9
+    |
+309 |         geometry: NormalPatchGeometry,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:314:9
+    |
+314 |         curvature_ratio: f64,
+    |         ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:315:9
+    |
+315 |         maximum_supported: f64,
+    |         ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:319:5
+    |
+319 |     Overflow {
+    |     ^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/law.rs:320:9
+    |
+320 |         field: &'static str,
+    |         ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/tangential/smooth.rs:697:23
+    |
+697 |     MissingIdentity { field: &'static str },
+    |                       ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/tangential/smooth.rs:699:20
+    |
+699 |     InvalidInput { field: &'static str },
+    |                    ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/tangential/smooth.rs:701:22
+    |
+701 |     InvalidDerived { field: &'static str },
+    |                      ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/tangential/smooth.rs:710:18
+    |
+710 |     StaleState { expected: u64, observed: u64 },
+    |                  ^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/tangential/smooth.rs:710:33
+    |
+710 |     StaleState { expected: u64, observed: u64 },
+    |                                 ^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/tangential/smooth.rs:712:19
+    |
+712 |     FutureState { expected: u64, observed: u64 },
+    |                   ^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/tangential/smooth.rs:712:34
+    |
+712 |     FutureState { expected: u64, observed: u64 },
+    |                                  ^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/tangential/smooth.rs:716:31
+    |
+716 |     WorkKeyCapacityExceeded { max: usize },
+    |                               ^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/tangential/smooth.rs:729:34
+    |
+729 |     CheckpointIdentityMismatch { field: &'static str },
+    |                                  ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/response_curve.rs:153:20
+    |
+153 |     InvalidInput { field: &'static str },
+    |                    ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/response_curve.rs:156:9
+    |
+156 |         node: usize,
+    |         ^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/response_curve.rs:157:9
+    |
+157 |         source: FiniteGapContactError,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/response_curve.rs:161:9
+    |
+161 |         node: usize,
+    |         ^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/response_curve.rs:162:9
+    |
+162 |         previous_force_n: f64,
+    |         ^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/response_curve.rs:163:9
+    |
+163 |         force_n: f64,
+    |         ^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/response_curve.rs:168:9
+    |
+168 |         node: usize,
+    |         ^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/response_curve.rs:169:9
+    |
+169 |         residual_j: f64,
+    |         ^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/response_curve.rs:170:9
+    |
+170 |         allowed_j: f64,
+    |         ^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/response_curve.rs:174:9
+    |
+174 |         approach_m: f64,
+    |         ^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/response_curve.rs:175:9
+    |
+175 |         minimum_m: f64,
+    |         ^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/response_curve.rs:176:9
+    |
+176 |         maximum_m: f64,
+    |         ^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/response_curve.rs:180:9
+    |
+180 |         coordinate: f64,
+    |         ^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/response_curve.rs:181:9
+    |
+181 |         minimum: f64,
+    |         ^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> /Users/jemanuel/projects/frankensim/crates/fs-contact/src/normal_patch/response_curve.rs:182:9
+    |
+182 |         maximum: f64,
+    |         ^^^^^^^^^^^^
+
+warning: `fs-time` (lib) generated 1 warning
+warning: `fs-contact` (lib) generated 230 warnings
+   Compiling fs-cmaes-viz-wasm v0.6.9 (/Users/jemanuel/projects/frankensim/crates/fs-cmaes-viz-wasm)
+error[E0433]: cannot find module or crate `fs_cmaes_viz_wasm` in this scope
+    --> src/g1_walking.rs:2233:22
+     |
+2233 |     let curriculum = fs_cmaes_viz_wasm::g1_walking::g1_walking_curriculum_mean();
+     |                      ^^^^^^^^^^^^^^^^^ use of unresolved module or unlinked crate `fs_cmaes_viz_wasm`
+     |
+     = help: if you wanted to use a crate named `fs_cmaes_viz_wasm`, use `cargo add fs_cmaes_viz_wasm` to add it to your `Cargo.toml`
+help: consider importing this module
+     |
+  11 + use crate::g1_walking;
+     |
+help: if you import `g1_walking`, refer to it directly
+     |
+2233 -     let curriculum = fs_cmaes_viz_wasm::g1_walking::g1_walking_curriculum_mean();
+2233 +     let curriculum = g1_walking::g1_walking_curriculum_mean();
+     |
+
+For more information about this error, try `rustc --explain E0433`.
+error: could not compile `fs-cmaes-viz-wasm` (lib test) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+warning: hard linking files in the incremental compilation cache failed. copying files instead. consider moving the cache directory to a file system which supports hard linking in session dir `/Volumes/USBNVME16TB/temp_agent_space/cargo-target-rosebasin/debug/incremental/fs_cmaes_viz_wasm-3atxjqustwtsf/s-hlu1fyf1mm-0d18vd3-working`
+
+warning: `fs-cmaes-viz-wasm` (lib) generated 1 warning

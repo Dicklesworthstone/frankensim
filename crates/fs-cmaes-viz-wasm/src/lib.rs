@@ -865,6 +865,7 @@ fn parse_g1_config(packet: &[f64]) -> Result<G1WalkingConfig, G1PackedRefusal> {
         _ => return Err(G1PackedRefusal::new(G1PackedRefusalCode::InvalidConfig)),
     };
     let config = G1WalkingConfig {
+            obstacles: Vec::new(),
         task,
         challenge,
         step_s: packet[4],

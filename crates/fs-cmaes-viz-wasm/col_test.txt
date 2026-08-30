@@ -1,0 +1,16 @@
+
+running 4 tests
+test sphere_box_penetration_exact_on_axis_cases ... ok
+test mid_body_wall_is_guarded ... FAILED
+test no_obstacles_guard_is_inert ... ok
+[collision] steps 720 termination Horizon max_pen 0.0000 objective 13.10
+test walking_into_wall_terminates_and_never_penetrates ... FAILED
+
+failures:
+
+failures:
+    mid_body_wall_is_guarded
+    walking_into_wall_terminates_and_never_penetrates
+
+test result: FAILED. 2 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.67s
+
