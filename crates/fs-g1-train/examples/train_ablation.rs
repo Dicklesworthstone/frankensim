@@ -212,7 +212,7 @@ fn main() {
     let mut model_seed: u64 = 0xD1CE_5040_2026_0830u64;
 
     let cfg = Config::default();
-    let mut model = GaitTransformer::new(cfg, 2e-3, 0.9, 3e-4, &mut model_seed);
+    let mut model = GaitTransformer::new(cfg, 7e-4, 0.9, 1e-4, &mut model_seed);
     let norm = RunningNorm::new(cfg.n_inputs);
     // Fall-gated env: sampled exploration noise across 15 joints must keep
     // Σ|action| below ~3.6 or the episode ends in an instant fall, drowning
@@ -220,9 +220,16 @@ fn main() {
     // (σ = e^-1.5 ≈ 0.22 per dim) and let entropy shrink/grow from there.
     let mut log_std = PolicyLogStd::new(model.cfg.n_outputs, 3e-3, -1.5);
     let mut ppo_cfg = PpoConfig::default();
-    ppo_cfg.entropy_coef = 0.003;
+    ppo_cfg.entropy_coef = 0.001;
     let param_count = model.param_count();
 
+    // Zero-init the policy output layer (standard PPO/SAC practice): the
+    // untrained head would otherwise emit large random actions, and this
+    // env's fall gate trips on ANY sizeable Σ|action| — exploration then
+    // starts from near-zero motion and the gradient signal stays clean.
+    for v in model.policy_head.params.iter_mut() {
+        *v = 0.0;
+    }
     println!(
         "[train] params {} iters {} horizon {}",
         param_count, iterations, episode_steps
@@ -231,6 +238,7 @@ fn main() {
     let mut samples: usize = 0;
     let mut mean_rewards: Vec<f64> = Vec::with_capacity(iterations);
     let mut best_mean = f64::NEG_INFINITY;
+    let mut best_weights: Option<Vec<u8>> = None;
     let mut best_iter = 0usize;
 
     for it in 0..iterations {
@@ -243,6 +251,30 @@ fn main() {
         if mean_r > best_mean {
             best_mean = mean_r;
             best_iter = it;
+            best_weights = Some(dump_weights(&model, &norm));
+            // Continuous checkpointing: the operator may stop the run at any
+            // time (compute budgets are real). Whatever is on disk is always
+            // the best-so-far checkpoint with its receipt — honestly labeled
+            // with the completed iteration count.
+            fs::write(
+                format!("{out_dir}/g1-ablation-weights-v1.bin"),
+                best_weights.as_deref().expect("just assigned"),
+            )
+            .expect("write checkpoint weights");
+            fs::write(
+                format!("{out_dir}/g1-ablation-checkpoint.json"),
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "note": "written on every new best-mean iteration; final full receipt lands on normal completion",
+                    "completedIterations": it + 1,
+                    "iterationsPlanned": iterations,
+                    "samplesConsumed": samples,
+                    "bestMeanReward": best_mean,
+                    "bestIteration": best_iter,
+                    "stoppedEarly": true,
+                }))
+                .expect("serialize checkpoint"),
+            )
+            .expect("write checkpoint receipt");
         }
         let (advantages, returns) = traj.compute_gae(0.0, ppo_cfg.gamma, ppo_cfg.gae_lambda);
         let _kl = ppo_update(
@@ -255,7 +287,6 @@ fn main() {
             &traj.log_probs,
             &ppo_cfg,
         );
-        mean_rewards.push(mean_r);
         if it % 10 == 0 || it == iterations - 1 {
             println!(
                 "[train] iter {}/{} mean_reward {:.3} (best {:.3} @ {}) samples {} elapsed {:.1}s",
@@ -273,7 +304,7 @@ fn main() {
 
     // Export weights, then RELOAD them into fresh models for evaluation and
     // golden vectors — the shipped file is the single source of truth.
-    let bytes = dump_weights(&model, &norm);
+    let bytes = best_weights.expect("best checkpoint must exist after iter 0");
     fs::write(format!("{out_dir}/g1-ablation-weights-v1.bin"), &bytes).expect("write weights");
 
     let rebuild = || {
@@ -353,6 +384,7 @@ fn main() {
             "meanRewardLast10": avg(&mean_rewards[mean_rewards.len().saturating_sub(10)..]),
             "bestMeanReward": best_mean,
             "bestIteration": best_iter,
+            "shippedCheckpoint": "best-mean-reward iteration (snapshot reloaded for eval/golden)",
             "seedChain": { "rolloutRng": "0x5EEDC0FFEE5040", "modelInit": "0xD1CE504020260830" },
         },
         "evaluation": { "greedy240": eval_240, "greedy720": eval_720 },
