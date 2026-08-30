@@ -1,0 +1,481 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		0243D494020D17C2AF2027A3 /* SimulationEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7231006CD53988408E23DE2C /* SimulationEngine.swift */; };
+		1187B29DC77496602273C1DD /* SimulationStudioView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F0F321076043E3338859AC5 /* SimulationStudioView.swift */; };
+		2663DD37C6B0911AE06A5825 /* VisualizationViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 789F9037B3EA574C4DDD8996 /* VisualizationViews.swift */; };
+		3A2681A2C915C69FAAE9542F /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = E0738C400C44D75353C6A0B4 /* PrivacyInfo.xcprivacy */; };
+		76FC283CD4FBE49A00167862 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 22D387A5C6AB09E211C8BBEC /* Theme.swift */; };
+		9DA80FE34DAAA771545C3335 /* SimulationCatalogTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D8913908732FDA5F01465327 /* SimulationCatalogTests.swift */; };
+		A20280DA0CD7942D63D33CA9 /* FrankenSimCore.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 920497C01CE1D6C07D6E436A /* FrankenSimCore.xcframework */; };
+		C3A1CAAC40A3E346A42EF437 /* FrankenSimApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1D293681E99572CC9355037 /* FrankenSimApp.swift */; };
+		F9A40C8FFF3D8DE115656869 /* SimulationCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0AF6BEEC0CA5930B9F4B07D8 /* SimulationCatalog.swift */; };
+		FD158FC7BD2435001D5677B9 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 6A4D21ED33B7B43D580AD132 /* Assets.xcassets */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		08F02265F200D3B4B902556B /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = DBB0351A87A6111D6AA060FB /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 2CCDEC9EC02F73871B5D4D6F;
+			remoteInfo = FrankenSim;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		0AF6BEEC0CA5930B9F4B07D8 /* SimulationCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SimulationCatalog.swift; sourceTree = "<group>"; };
+		22D387A5C6AB09E211C8BBEC /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
+		6A4D21ED33B7B43D580AD132 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		7231006CD53988408E23DE2C /* SimulationEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SimulationEngine.swift; sourceTree = "<group>"; };
+		789F9037B3EA574C4DDD8996 /* VisualizationViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VisualizationViews.swift; sourceTree = "<group>"; };
+		920497C01CE1D6C07D6E436A /* FrankenSimCore.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; path = FrankenSimCore.xcframework; sourceTree = "<group>"; };
+		93BE409EA3FE55B7D067C04E /* FrankenSim.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = FrankenSim.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		9F0F321076043E3338859AC5 /* SimulationStudioView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SimulationStudioView.swift; sourceTree = "<group>"; };
+		C1D293681E99572CC9355037 /* FrankenSimApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FrankenSimApp.swift; sourceTree = "<group>"; };
+		D8913908732FDA5F01465327 /* SimulationCatalogTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SimulationCatalogTests.swift; sourceTree = "<group>"; };
+		E0738C400C44D75353C6A0B4 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		ED46DC059970BC4FC577A4F1 /* FrankenSimTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = FrankenSimTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		EEDD479F1A66CD3F769BCCD6 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		B5326A58C24DDA224269184F /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A20280DA0CD7942D63D33CA9 /* FrankenSimCore.xcframework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		6B20BF2E8D269F39ABE9864D /* Sources */ = {
+			isa = PBXGroup;
+			children = (
+				C1D293681E99572CC9355037 /* FrankenSimApp.swift */,
+				EEDD479F1A66CD3F769BCCD6 /* Info.plist */,
+				E0738C400C44D75353C6A0B4 /* PrivacyInfo.xcprivacy */,
+				0AF6BEEC0CA5930B9F4B07D8 /* SimulationCatalog.swift */,
+				7231006CD53988408E23DE2C /* SimulationEngine.swift */,
+				9F0F321076043E3338859AC5 /* SimulationStudioView.swift */,
+				22D387A5C6AB09E211C8BBEC /* Theme.swift */,
+				789F9037B3EA574C4DDD8996 /* VisualizationViews.swift */,
+			);
+			path = Sources;
+			sourceTree = "<group>";
+		};
+		96DCA6BF2C59222F4CA29323 /* Tests */ = {
+			isa = PBXGroup;
+			children = (
+				D8913908732FDA5F01465327 /* SimulationCatalogTests.swift */,
+			);
+			path = Tests;
+			sourceTree = "<group>";
+		};
+		B8EBDCDB2EF2FD23F969F308 = {
+			isa = PBXGroup;
+			children = (
+				6A4D21ED33B7B43D580AD132 /* Assets.xcassets */,
+				6B20BF2E8D269F39ABE9864D /* Sources */,
+				96DCA6BF2C59222F4CA29323 /* Tests */,
+				CE5238306F942407570C316E /* Frameworks */,
+				C478F22B3C7AEED4D04EAA59 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		C478F22B3C7AEED4D04EAA59 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				93BE409EA3FE55B7D067C04E /* FrankenSim.app */,
+				ED46DC059970BC4FC577A4F1 /* FrankenSimTests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		CE5238306F942407570C316E /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				920497C01CE1D6C07D6E436A /* FrankenSimCore.xcframework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		2CCDEC9EC02F73871B5D4D6F /* FrankenSim */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 0472CA74E81CEF1B9A8ACBF5 /* Build configuration list for PBXNativeTarget "FrankenSim" */;
+			buildPhases = (
+				A08E34101950BD647F6081C8 /* Sources */,
+				5C1BE7601C539F89253127E1 /* Resources */,
+				B5326A58C24DDA224269184F /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = FrankenSim;
+			packageProductDependencies = (
+			);
+			productName = FrankenSim;
+			productReference = 93BE409EA3FE55B7D067C04E /* FrankenSim.app */;
+			productType = "com.apple.product-type.application";
+		};
+		9E4A85AD09FCA71E08C0505E /* FrankenSimTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = BD89EFE46384BD1292D641D1 /* Build configuration list for PBXNativeTarget "FrankenSimTests" */;
+			buildPhases = (
+				09F2DA94B3E808A402FCBE3A /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				0ABCC1573989051D9D03B0D6 /* PBXTargetDependency */,
+			);
+			name = FrankenSimTests;
+			packageProductDependencies = (
+			);
+			productName = FrankenSimTests;
+			productReference = ED46DC059970BC4FC577A4F1 /* FrankenSimTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		DBB0351A87A6111D6AA060FB /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+					2CCDEC9EC02F73871B5D4D6F = {
+						DevelopmentTeam = AU8V2Z6NKY;
+						ProvisioningStyle = Automatic;
+					};
+					9E4A85AD09FCA71E08C0505E = {
+						DevelopmentTeam = AU8V2Z6NKY;
+						ProvisioningStyle = Automatic;
+					};
+				};
+			};
+			buildConfigurationList = C628132C4EA8F05D1DC97EF3 /* Build configuration list for PBXProject "FrankenSim" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = B8EBDCDB2EF2FD23F969F308;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = C478F22B3C7AEED4D04EAA59 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				2CCDEC9EC02F73871B5D4D6F /* FrankenSim */,
+				9E4A85AD09FCA71E08C0505E /* FrankenSimTests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		5C1BE7601C539F89253127E1 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				FD158FC7BD2435001D5677B9 /* Assets.xcassets in Resources */,
+				3A2681A2C915C69FAAE9542F /* PrivacyInfo.xcprivacy in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		09F2DA94B3E808A402FCBE3A /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				9DA80FE34DAAA771545C3335 /* SimulationCatalogTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A08E34101950BD647F6081C8 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				C3A1CAAC40A3E346A42EF437 /* FrankenSimApp.swift in Sources */,
+				F9A40C8FFF3D8DE115656869 /* SimulationCatalog.swift in Sources */,
+				0243D494020D17C2AF2027A3 /* SimulationEngine.swift in Sources */,
+				1187B29DC77496602273C1DD /* SimulationStudioView.swift in Sources */,
+				76FC283CD4FBE49A00167862 /* Theme.swift in Sources */,
+				2663DD37C6B0911AE06A5825 /* VisualizationViews.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		0ABCC1573989051D9D03B0D6 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 2CCDEC9EC02F73871B5D4D6F /* FrankenSim */;
+			targetProxy = 08F02265F200D3B4B902556B /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		08E90707BBE3A4770012B291 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = AU8V2Z6NKY;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				"EXCLUDED_ARCHS[sdk=iphonesimulator*]" = x86_64;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MARKETING_VERSION = 0.1.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.10;
+			};
+			name = Debug;
+		};
+		21F71EE278098EC755602FAE /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				DERIVE_MACCATALYST_PRODUCT_BUNDLE_IDENTIFIER = NO;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"\".\"",
+				);
+				INFOPLIST_FILE = Sources/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MACCATALYST_USE_NATIVE_DESIGN = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = com.frankensim.FrankenSim;
+				SDKROOT = iphoneos;
+				SUPPORTS_MACCATALYST = YES;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		839BE707E5AB4A0466A57406 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = AU8V2Z6NKY;
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				"EXCLUDED_ARCHS[sdk=iphonesimulator*]" = x86_64;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MARKETING_VERSION = 0.1.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.10;
+			};
+			name = Release;
+		};
+		866A5DA73745CDC09696E296 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.frankensim.FrankenSimTests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/FrankenSim.app/FrankenSim";
+			};
+			name = Release;
+		};
+		C5F89EE011E6A94902FD5775 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.frankensim.FrankenSimTests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/FrankenSim.app/FrankenSim";
+			};
+			name = Debug;
+		};
+		CC441806799D4EE712C00322 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				DERIVE_MACCATALYST_PRODUCT_BUNDLE_IDENTIFIER = NO;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"\".\"",
+				);
+				INFOPLIST_FILE = Sources/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MACCATALYST_USE_NATIVE_DESIGN = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = com.frankensim.FrankenSim;
+				SDKROOT = iphoneos;
+				SUPPORTS_MACCATALYST = YES;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		0472CA74E81CEF1B9A8ACBF5 /* Build configuration list for PBXNativeTarget "FrankenSim" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				CC441806799D4EE712C00322 /* Debug */,
+				21F71EE278098EC755602FAE /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		BD89EFE46384BD1292D641D1 /* Build configuration list for PBXNativeTarget "FrankenSimTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C5F89EE011E6A94902FD5775 /* Debug */,
+				866A5DA73745CDC09696E296 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		C628132C4EA8F05D1DC97EF3 /* Build configuration list for PBXProject "FrankenSim" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				08E90707BBE3A4770012B291 /* Debug */,
+				839BE707E5AB4A0466A57406 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = DBB0351A87A6111D6AA060FB /* Project object */;
+}

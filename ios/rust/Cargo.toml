@@ -1,0 +1,18 @@
+[package]
+name = "frankensim-apple"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Audited C ABI for FrankenSim's native Apple simulation studio"
+
+[workspace]
+
+[lib]
+name = "frankensim_apple"
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+fs-wasm = { path = "../../crates/fs-wasm" }
+
+[lints.rust]
+unsafe_code = "allow"

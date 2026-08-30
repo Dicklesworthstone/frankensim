@@ -225,6 +225,23 @@ Run the repository policy checks:
 cargo run -p xtask -- check-all
 ```
 
+### Native Apple app
+
+The `ios/` product is a real SwiftUI studio for iPhone, iPad, and resizable
+Mac Catalyst windows. Its 43-entry catalog calls the same bounded Rust kernels
+used by the browser laboratory; it does not replay bundled videos or random
+decorative data. Build the Apple-only static slices on a Darwin host with Xcode,
+then generate the project:
+
+```bash
+./ios/build-rust.sh
+(cd ios && xcodegen generate)
+open ios/FrankenSim.xcodeproj
+```
+
+The product architecture, evidence-language boundary, adaptive layouts, and
+acceptance gates are documented in [`docs/APPLE_APP_PLAN.md`](docs/APPLE_APP_PLAN.md).
+
 The tracked [structural source manifest](frankensim-source-manifest.json)
 enumerates exact Git-index non-tracker source bytes, all seven sibling pins and
 measured usage boundaries, the crate/layer inventory, pinned toolchain
