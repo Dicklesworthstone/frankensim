@@ -1,0 +1,4 @@
+error: failed to open: /Volumes/USBNVME16TB/temp_agent_space/cargo-target-rosebasin/debug/.cargo-build-lock
+
+Caused by:
+  Operation not permitted (os error 1)
