@@ -247,7 +247,7 @@ pub fn swiglu_backward(gate: &[f32], value: &[f32], dout: &[f32], dgate: &mut [f
 
 // ─── Optimizer-tagged weights ───
 
-fn randomize_uniform(w: &mut [f32], fan_in: usize, seed: &mut u64) {
+pub(crate) fn randomize_uniform(w: &mut [f32], fan_in: usize, seed: &mut u64) {
     let scale = (1.0 / fan_in as f64).sqrt() as f32;
     for v in w.iter_mut() {
         *v = (splitmix_uniform(seed) as f32 * 2.0 - 1.0) * scale;

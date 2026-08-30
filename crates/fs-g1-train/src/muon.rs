@@ -26,11 +26,13 @@ const NS_EPS: f32 = 1e-7;
 #[allow(dead_code)]
 const NS_ITERATIONS: usize = 5;
 
-/// Newton–Schulz orthogonalization: projects X onto the nearest
-/// semi-orthogonal matrix (all singular values ≈ 1) via the quintic
-/// polynomial iteration. Operates on a column-major f32 matrix stored
-/// row-major (rows × cols). The input is consumed (overwritten).
+/// Tall-column Gram–Schmidt: orthonormalizes the columns of a TALL
+/// (rows >= cols) matrix in place. Call `orthogonalize_momentum` instead —
+/// this helper is the tall-only core (wide matrices MUST be transposed
+/// first: column GS on a wide matrix exhausts the row rank at column
+/// `rows` and the remaining columns degenerate to amplified noise).
 pub fn newton_schulz_orthogonalize(x: &mut Vec<f32>, rows: usize, cols: usize) {
+    debug_assert!(rows >= cols, "tall-only core: transpose wide matrices first");
     assert_eq!(x.len(), rows * cols);
     // Gram-Schmidt orthonormalization of columns (always correct, O(mn²)).
     // For production use Newton-Schulz; this version is guaranteed to work.
@@ -88,9 +90,33 @@ impl MuonParam {
         for i in 0..self.momentum.len() {
             self.momentum[i] = self.momentum_beta * self.momentum[i] + self.grad[i];
         }
-        // Orthogonalize momentum
-        let mut o = self.momentum.clone();
-        newton_schulz_orthogonalize(&mut o, self.rows, self.cols);
+        // Orthogonalize momentum. For WIDE matrices (cols > rows) the
+        // column Gram-Schmidt must run on the TRANSPOSE (tall orientation):
+        // running it directly exhausts the row rank at column `rows` and
+        // the tail columns degenerate to amplified noise (they normalize
+        // the residual of linearly-dependent vectors). The transposed
+        // variant orthonormalizes the row space instead, giving every
+        // weight a well-defined semi-orthogonal update direction.
+        let mut o = if self.rows >= self.cols {
+            let mut o = self.momentum.clone();
+            newton_schulz_orthogonalize(&mut o, self.rows, self.cols);
+            o
+        } else {
+            let mut t = vec![0.0f32; self.momentum.len()];
+            for r in 0..self.rows {
+                for c in 0..self.cols {
+                    t[c * self.rows + r] = self.momentum[r * self.cols + c];
+                }
+            }
+            newton_schulz_orthogonalize(&mut t, self.cols, self.rows);
+            let mut o = vec![0.0f32; self.momentum.len()];
+            for r in 0..self.rows {
+                for c in 0..self.cols {
+                    o[r * self.cols + c] = t[c * self.rows + r];
+                }
+            }
+            o
+        };
         // Weight update: W -= lr · O
         for i in 0..self.weights.len() {
             self.weights[i] -= self.lr * o[i];
@@ -215,5 +241,61 @@ mod tests {
         adam_b.step();
         assert_ne!(muon_w.weights, before_muon);
         assert_ne!(adam_b.params, before_adam);
+    }
+}
+
+
+#[cfg(test)]
+mod wide_muon {
+    use crate::muon::MuonParam;
+    use crate::transformer::randomize_uniform;
+
+    /// Discriminator for the wide-matrix Gram-Schmidt defect: with a
+    /// full-rank random target, the column-GS orthogonalization zeroes
+    /// updates for columns >= rows (128), so residual mass piles up in
+    /// the tail columns. A correct Muon must shrink BOTH column blocks.
+    #[test]
+    fn muon_wide_matrix_shrinks_both_column_blocks() {
+        let rows = 128usize;
+        let cols = 256usize;
+        let mut seed = 0xDE11u64.wrapping_add(0x9E37); // deterministic
+        let mut p = MuonParam::new(rows, cols, 0.2, 0.9);
+        let mut target = vec![0.0f32; rows * cols];
+        randomize_uniform(&mut target, cols, &mut seed);
+
+        let block_loss = |w: &[f32], c0: usize, c1: usize| -> f32 {
+            let mut l = 0.0;
+            for r in 0..rows {
+                for c in c0..c1 {
+                    let d = w[r * cols + c] - target[r * cols + c];
+                    l += d * d;
+                }
+            }
+            l
+        };
+        let l_head = block_loss(&p.weights, 0, rows / 2);
+        let l_tail = block_loss(&p.weights, rows / 2, cols.min(rows * 2));
+
+        for _ in 0..120 {
+            for i in 0..p.weights.len() {
+                p.grad[i] = 2.0 * (p.weights[i] - target[i]);
+            }
+            p.step();
+        }
+        let l_head_after = block_loss(&p.weights, 0, rows / 2);
+        let l_tail_after = block_loss(&p.weights, rows / 2, cols.min(rows * 2));
+        println!(
+            "[wide-muon] head block {l_head:.2} -> {l_head_after:.2} ; tail block {l_tail:.2} -> {l_tail_after:.2}"
+        );
+        assert!(
+            l_head_after < l_head * 0.9,
+            "head-block residual must shrink ({} -> {})",
+            l_head, l_head_after
+        );
+        assert!(
+            l_tail_after < l_tail * 0.9,
+            "tail-block residual must shrink — if it stalls, wide GS is zeroing the update ({} -> {})",
+            l_tail, l_tail_after
+        );
     }
 }
