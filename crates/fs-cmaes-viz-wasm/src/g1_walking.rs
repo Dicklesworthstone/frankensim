@@ -2230,7 +2230,7 @@ mod tests {
 fn debug_distance() {
     let cfg = G1WalkingConfig::default();
     let ev = G1WalkingEvaluator::new(cfg).expect("e");
-    let curriculum = fs_cmaes_viz_wasm::g1_walking::g1_walking_curriculum_mean();
+    let curriculum = crate::g1_walking::g1_walking_curriculum_mean();
     let r = ev.evaluate(&curriculum).expect("rollout");
     println!("[dbg] distance_m={:.4} steps={} term={:?} objective={:.2}", r.distance_m, r.completed_steps, r.termination_reason, r.objective);
 }
