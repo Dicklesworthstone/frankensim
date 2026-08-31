@@ -465,8 +465,13 @@ impl NormalPatchRequest {
     ) -> Result<NormalPatchReceipt, NormalPatchError> {
         let d = self.indentation_m;
         let a = checked((radius * d).sqrt(), "sphere_patch")?;
+        // The request validator guarantees d >= 0. Express d^(3/2) as
+        // d * sqrt(d) so this hot constitutive path uses only IEEE-754
+        // arithmetic instead of a target-libm pow implementation. Besides
+        // being the exact Hertz form, this keeps native and wasm rollouts on
+        // the same force branch bit-for-bit.
         let elastic_force = checked(
-            (4.0 / 3.0) * modulus * radius.sqrt() * d.powf(1.5),
+            (4.0 / 3.0) * modulus * radius.sqrt() * d * d.sqrt(),
             "sphere_force",
         )?;
         let elastic_tangent = if d == 0.0 {

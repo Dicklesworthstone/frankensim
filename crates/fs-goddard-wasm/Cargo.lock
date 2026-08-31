@@ -51,7 +51,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "asupersync"
-version = "0.4.9"
+version = "0.4.10"
 dependencies = [
  "aes-gcm",
  "base64",
@@ -499,6 +499,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-ga"
+version = "0.0.1"
+dependencies = [
+ "fs-math",
+]
+
+[[package]]
 name = "fs-goddard-wasm"
 version = "0.0.1"
 dependencies = [
@@ -508,8 +515,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-math"
+version = "0.0.1"
+
+[[package]]
 name = "fs-mbd"
 version = "0.0.1"
+dependencies = [
+ "fs-ga",
+ "fs-math",
+]
 
 [[package]]
 name = "futures-core"

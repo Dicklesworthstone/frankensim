@@ -18,7 +18,7 @@ dependency-clean.
 
 | Entry | Kind | Contract |
 |---|---|---|
-| `goddard_rocket_step(chamber_pressure_psi, fuel_flow_kg_per_sec, throat_area_cm2, expansion_ratio) -> String` | wasm + native | Executes one deterministic Goddard rocket step through `fs_mbd::goddard::step_goddard_rocket` and returns `{"ok":{...}}` with the result fields rendered as decimal numbers. The JSON shape is part of the page contract: field names are stable, values are plain JSON numbers. |
+| `goddard_rocket_step(chamber_pressure_psi, fuel_flow_kg_per_sec, throat_area_cm2, expansion_ratio) -> String` | wasm + native | Admits one bounded positive finite input tuple, executes one deterministic Goddard rocket step through `fs_mbd::goddard::step_goddard_rocket`, and returns either `{"ok":{...}}` or a typed `{"refusal":{...}}` envelope. |
 
 ## Invariants
 
@@ -31,14 +31,20 @@ dependency-clean.
 3. **Deterministic content.** Identical inputs produce byte-identical
    output on the same platform; no wall clock, randomness, host identity,
    or allocation-order dependence reaches the string.
+4. **Fail-closed admission.** Non-finite, non-positive, or above-cap inputs
+   refuse before the owning kernel runs. A non-finite or non-positive result
+   also refuses rather than being rendered as JSON `null` or a misleading
+   zero. Each boundary is exercised by native tests.
 
 ## Error model
 
-v0 performs no admission: non-finite or out-of-domain inputs propagate
-into the arithmetic and surface as `null` in JSON (JSON has no NaN). Typed
-refusal envelopes (`{"refusal": ...}` per the fs-flyer-wasm pattern) are
-the v1 upgrade path and are NOT yet implemented; callers must not rely on
-refusal semantics from this crate.
+The boundary returns stable refusal codes with a human-readable message and
+ranked repairs. `non-finite-input` covers NaN and infinity;
+`input-outside-domain` covers non-positive values and the documented safety
+caps; `non-finite-output` catches a broken downstream result;
+`output-outside-domain` catches zero or negative output. The admitted
+maximums are 10,000 psi chamber pressure, 1,000 kg/s flow, 100,000 cm² throat
+area, and expansion ratio 1,000; expansion ratio must be at least 1.4.
 
 ## Determinism class
 
@@ -48,8 +54,8 @@ shortest-roundtrip display).
 
 ## Cancellation behavior
 
-Synchronous single-step entry; there is nothing to cancel. A JS caller
-abandons the promise-like return by simply not using it.
+Synchronous single-step entry; there is nothing to cancel. A JS caller can
+discard the returned string if the result is no longer needed.
 
 ## Unsafe boundary
 
@@ -63,11 +69,10 @@ None. The wasm32 binding is selected by target architecture
 
 ## Conformance tests
 
-Native unit coverage lives with the owning lane's battery plan; today the
-crate is covered indirectly by the fs-mbd kernel tests plus the
-dependency-policy and contract gates (`cargo run -p xtask -- check-deps`,
-`check-contracts`). A dedicated round-trip golden for the rendered string
-is the next planned slice.
+Native unit tests exercise a valid result, non-finite and non-positive input
+refusals, lower and upper admission boundaries, underflowed output refusal,
+and ranked repairs. The fs-mbd kernel tests and dependency-policy/contract
+gates remain complementary evidence.
 
 ## No-claim boundaries
 

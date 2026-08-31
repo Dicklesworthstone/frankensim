@@ -3,11 +3,14 @@
 
 // ─── fs-g1-train adapter (feature-gated dependency) ───
 
-use crate::g1_walking::{flatten_observation, G1_LEARNED_OBS_DIMS, EpisodeTrace, LearnedG1Policy};
-use fs_mbd::robot_models::{G1PolicyObservation, G1ResidualPolicy};
+use crate::g1_walking::{flatten_observation, LearnedG1Policy};
 use fs_g1_train::ppo::{gaussian_action, log_gaussian_prob, PolicyLogStd};
-use fs_mbd::robot_models::G1_POLICY_ACTUATORS;
 use fs_g1_train::transformer::GaitTransformer;
+use fs_mbd::robot_models::{G1PolicyObservation, G1ResidualPolicy, G1_POLICY_ACTUATORS};
+
+/// Collected observations, actions, log probabilities, and values for one PPO
+/// rollout, in that order.
+pub type G1PpoRolloutBatch = (Vec<Vec<f32>>, Vec<Vec<f32>>, Vec<f32>, Vec<f32>);
 
 /// Transformer policy adapter: stepwise inference over the G1 rollout with
 /// Gaussian exploration, recording (obs, action, log-prob, value) for PPO.
@@ -15,6 +18,7 @@ pub struct TransformerG1Policy {
     pub model: GaitTransformer,
     pub log_std: PolicyLogStd,
     pub rng: u64,
+    exploration_enabled: bool,
     /// The tuned composed policy (5040-D catalog parameter vector) whose
     /// per-step residual output is the base the learned delta refines.
     /// Zero-init of the policy head makes the adapter START at exactly the
@@ -43,6 +47,7 @@ impl TransformerG1Policy {
             model,
             log_std,
             rng,
+            exploration_enabled: true,
             curriculum_params,
             collected_obs: Vec::new(),
             collected_actions: Vec::new(),
@@ -65,10 +70,34 @@ impl TransformerG1Policy {
     pub fn log_std_std(&self) -> f32 {
         let n = self.log_std.log_std.len() as f32;
         let mean = self.log_std.log_std.iter().sum::<f32>() / n;
-        (self.log_std.log_std.iter().map(|l| (l - mean) * (l - mean)).sum::<f32>() / n).sqrt()
+        (self
+            .log_std
+            .log_std
+            .iter()
+            .map(|l| (l - mean) * (l - mean))
+            .sum::<f32>()
+            / n)
+            .sqrt()
     }
 
+    /// Enable Gaussian sampling for PPO collection or disable it for a
+    /// deterministic owner-engine evaluation of the policy-head mean.
+    pub fn set_exploration_enabled(&mut self, enabled: bool) {
+        self.exploration_enabled = enabled;
+    }
 
+    /// L2 norm of the learned residual head. A nonzero value proves the
+    /// zero-initialized policy head received an optimizer update.
+    #[must_use]
+    pub fn policy_head_l2_norm(&self) -> f32 {
+        self.model
+            .policy_head
+            .params
+            .iter()
+            .map(|weight| weight * weight)
+            .sum::<f32>()
+            .sqrt()
+    }
 
     pub fn log_std_mut(&mut self) -> &mut PolicyLogStd {
         &mut self.log_std
@@ -86,9 +115,7 @@ impl TransformerG1Policy {
 
     /// (observations, actions, log-probs, values) — the PPO batch.
     #[must_use]
-    pub fn take_collected(
-        &mut self,
-    ) -> (Vec<Vec<f32>>, Vec<Vec<f32>>, Vec<f32>, Vec<f32>) {
+    pub fn take_collected(&mut self) -> G1PpoRolloutBatch {
         (
             std::mem::take(&mut self.collected_obs),
             std::mem::take(&mut self.collected_actions),
@@ -112,7 +139,11 @@ impl LearnedG1Policy for TransformerG1Policy {
         // is what ppo_update re-evaluates).
         let flat = flatten_observation(obs);
         let (delta_mean, value) = self.model.forward_step(&flat, step);
-        let delta = gaussian_action(&delta_mean, &self.log_std.log_std, &mut self.rng);
+        let delta = if self.exploration_enabled {
+            gaussian_action(&delta_mean, &self.log_std.log_std, &mut self.rng)
+        } else {
+            delta_mean.clone()
+        };
         let (log_prob, _, _) = log_gaussian_prob(&delta_mean, &self.log_std.log_std, &delta);
         self.collected_obs.push(flat.to_vec());
         self.collected_actions.push(delta.clone());

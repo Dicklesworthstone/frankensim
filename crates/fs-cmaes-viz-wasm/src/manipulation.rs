@@ -30,7 +30,10 @@ use fs_ga::{Se3, So3Tangent, Twist, Vec3, Wrench};
 use fs_geom::{Aabb, Point3, Vec3 as GeomVec3};
 use fs_mbd::articulated::{BaseState, forward_dynamics, forward_kinematics, inverse_dynamics};
 use fs_mbd::robot_models::{CatalogRobotModel, kuka_lbr_iiwa7_r800};
-use fs_query::{ConvexBox, ConvexOrientedBox, ConvexSupportMap, convex_separation};
+use fs_query::{
+    ConvexBox, ConvexOrientedBox, ConvexSupportMap, convex_overlap_witness,
+    convex_separation,
+};
 use fs_tribo::{
     ContactFrame, FrictionLaw, InputAuthority, InterfaceMedium, InterfaceSystemRef, TangentialSlip,
 };
@@ -477,6 +480,26 @@ impl ManipulationEvaluator {
                     &joint_velocity,
                 )?;
                 let tool_pose = kinematics.world_from_link[END_EFFECTOR_LINK];
+                let current_collision = arena.scope(|collision_arena| {
+                    let collision_cx = Cx::new(
+                        &collision_gate,
+                        collision_arena,
+                        StreamKey {
+                            seed: COLLISION_EXECUTION_SEED,
+                            kernel_id: 2,
+                            tile: 0,
+                            iteration: step as u64,
+                        },
+                        Budget::INFINITE,
+                        ExecMode::Deterministic,
+                    );
+                    collision_state(
+                        &kinematics.world_from_link,
+                        object_pose,
+                        self.scene,
+                        &collision_cx,
+                    )
+                })?;
                 let tool_position = tool_pose.translation();
                 let reach_error = vec_norm(object_pose.translation() - tool_position);
                 if !ever_grasped {
@@ -550,6 +573,8 @@ impl ManipulationEvaluator {
                     GRAVITY_WORLD_M_PER_S2,
                     &external,
                 )?;
+                let previous_joint_position = joint_position;
+                let previous_joint_velocity = joint_velocity;
                 for joint in 0..ARM_JOINT_COUNT {
                     let metadata = self.catalog.joints()[joint];
                     joint_velocity[joint] +=
@@ -569,12 +594,90 @@ impl ManipulationEvaluator {
                     joint_position[joint] = projected;
                 }
 
-                let next_kinematics = forward_kinematics(
+                let proposed_joint_position = joint_position;
+                let proposed_joint_velocity = joint_velocity;
+                let mut next_kinematics = forward_kinematics(
                     self.catalog.model(),
                     base,
                     &joint_position,
                     &joint_velocity,
                 )?;
+                let proposed_collision = arena.scope(|collision_arena| {
+                    let collision_cx = Cx::new(
+                        &collision_gate,
+                        collision_arena,
+                        StreamKey {
+                            seed: COLLISION_EXECUTION_SEED,
+                            kernel_id: 3,
+                            tile: 0,
+                            iteration: step as u64,
+                        },
+                        Budget::INFINITE,
+                        ExecMode::Deterministic,
+                    );
+                    collision_state(
+                        &next_kinematics.world_from_link,
+                        object_pose,
+                        self.scene,
+                        &collision_cx,
+                    )
+                })?;
+                if proposed_collision.hard_penetration_m
+                    > current_collision.hard_penetration_m + 1.0e-12
+                {
+                    let mut accepted = false;
+                    for backtrack in 1..=8 {
+                        let alpha = 0.5_f64.powi(backtrack);
+                        for joint in 0..ARM_JOINT_COUNT {
+                            joint_position[joint] = previous_joint_position[joint]
+                                + alpha * (proposed_joint_position[joint] - previous_joint_position[joint]);
+                            joint_velocity[joint] = previous_joint_velocity[joint]
+                                + alpha * (proposed_joint_velocity[joint] - previous_joint_velocity[joint]);
+                        }
+                        let candidate = forward_kinematics(
+                            self.catalog.model(),
+                            base,
+                            &joint_position,
+                            &joint_velocity,
+                        )?;
+                        let candidate_collision = arena.scope(|collision_arena| {
+                            let collision_cx = Cx::new(
+                                &collision_gate,
+                                collision_arena,
+                                StreamKey {
+                                    seed: COLLISION_EXECUTION_SEED,
+                                    kernel_id: 4,
+                                    tile: backtrack as u64,
+                                    iteration: step as u64,
+                                },
+                                Budget::INFINITE,
+                                ExecMode::Deterministic,
+                            );
+                            collision_state(
+                                &candidate.world_from_link,
+                                object_pose,
+                                self.scene,
+                                &collision_cx,
+                            )
+                        })?;
+                        if candidate_collision.hard_penetration_m
+                            <= current_collision.hard_penetration_m + 1.0e-12
+                        {
+                            next_kinematics = candidate;
+                            accepted = true;
+                            break;
+                        }
+                    }
+                    if !accepted {
+                        joint_position = previous_joint_position;
+                        joint_velocity = previous_joint_velocity;
+                        next_kinematics = kinematics.clone();
+                    }
+                    collision_risk_integral += (proposed_collision.risk_m
+                        - current_collision.risk_m)
+                        .max(0.0)
+                        * self.config.step_s;
+                }
                 let next_tool_pose = next_kinematics.world_from_link[END_EFFECTOR_LINK];
                 let substep_s = self.config.step_s / OBJECT_CONTACT_SUBSTEPS as f64;
                 let mut settled_grip = grip;
@@ -1374,6 +1477,7 @@ struct CollisionEnvelope {
 #[derive(Debug, Clone, Copy)]
 struct CollisionState {
     risk_m: f64,
+    hard_penetration_m: f64,
     minimum_clearance_m: f64,
     possible_collision: bool,
     query_iterations: u32,
@@ -1383,6 +1487,7 @@ impl CollisionState {
     const fn new() -> Self {
         Self {
             risk_m: 0.0,
+            hard_penetration_m: 0.0,
             minimum_clearance_m: f64::INFINITY,
             possible_collision: false,
             query_iterations: 0,
@@ -1425,6 +1530,7 @@ fn collision_state(
             &obstacle,
             scene.obstacle_center_m,
             obstacle_radius_m,
+            true,
             &mut state,
             cx,
         )?;
@@ -1440,6 +1546,7 @@ fn collision_state(
             &object.shape,
             object.center_world,
             object.bounding_radius_m,
+            false,
             &mut state,
             cx,
         )?;
@@ -1457,6 +1564,7 @@ fn collision_state(
                 &links[second].shape,
                 links[second].center_world,
                 links[second].bounding_radius_m,
+                true,
                 &mut state,
                 cx,
             )?;
@@ -1473,6 +1581,7 @@ fn consider_collision_pair(
     second: &dyn ConvexSupportMap,
     second_center: Vec3,
     second_radius_m: f64,
+    hard_constraint: bool,
     state: &mut CollisionState,
     cx: &Cx<'_>,
 ) -> Result<(), ManipulationError> {
@@ -1486,7 +1595,20 @@ fn consider_collision_pair(
     }
     let separation = convex_separation(first, second, COLLISION_QUERY_ITERATIONS, cx)?;
     state.minimum_clearance_m = state.minimum_clearance_m.min(separation.lo);
-    state.risk_m += (PLACEMENT_CLEARANCE_M - separation.lo).max(0.0);
+    let risk_m = (PLACEMENT_CLEARANCE_M - separation.lo).max(0.0);
+    state.risk_m += risk_m;
+    if hard_constraint {
+        if !separation.separation_proven {
+            let center = Point3::new(
+                0.5 * (separation.witness_a[0] + separation.witness_b[0]),
+                0.5 * (separation.witness_a[1] + separation.witness_b[1]),
+                0.5 * (separation.witness_a[2] + separation.witness_b[2]),
+            );
+            if let Ok(witness) = convex_overlap_witness(first, second, center) {
+                state.hard_penetration_m += witness.inradius_lower();
+            }
+        }
+    }
     state.possible_collision |= !separation.separation_proven;
     state.query_iterations = state.query_iterations.saturating_add(separation.iterations);
     Ok(())

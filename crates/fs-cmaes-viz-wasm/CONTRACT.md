@@ -140,7 +140,7 @@ On wasm32, wasm-bindgen exports:
 | `evaluator.evaluate(policy)` | 128 policy words | decomposed scalar objective receipt |
 | `evaluator.evaluate_population(policies)` | up to 64 row-major policies | one objective per candidate in one boundary call |
 | `evaluator.trace(policy)` | 128 policy words | receipt plus object and source-ordered link poses |
-| `cmaes_viz_kernel_version()` | no arguments | `"fs-cmaes-viz-wasm 0.6.11"` |
+| `cmaes_viz_kernel_version()` | no arguments | `"fs-cmaes-viz-wasm 0.6.13"` |
 
 There is no JSON hot path and no schema-1 compatibility shim.
 

@@ -15,6 +15,7 @@ use fs_contact::normal_patch::{
     NormalPatchIdentity, NormalPatchLaw, NormalPatchReceipt, NormalPatchRequest,
 };
 use fs_ga::{Se3, Twist, Vec3, Wrench};
+use fs_math::det;
 use fs_mbd::articulated::{
     BaseState, FreeFloatingBaseState, forward_kinematics, free_floating_forward_dynamics,
 };
@@ -57,13 +58,12 @@ impl Default for EpisodeTrace {
     }
 }
 
-/// Anything that can drive the G1 rollout step-by-step (per-step
-/// observation → 29-dim residual action). Implemented by the
+/// Anything that can drive the 29-DoF G1 rollout step-by-step (per-step
+/// observation → 15-dimensional controlled-joint residual action). Implemented by the
 /// fs-g1-train transformer adapter behind the `g1-learned` feature.
 pub trait LearnedG1Policy {
-    /// Observe, act, return the executed 29-dim residual action.
-    fn act(&mut self, obs: &G1PolicyObservation, step: usize)
-        -> [f64; G1_POLICY_ACTUATORS];
+    /// Observe, act, return the executed 15-dimensional residual action.
+    fn act(&mut self, obs: &G1PolicyObservation, step: usize) -> [f64; G1_POLICY_ACTUATORS];
 }
 
 /// Flatten the kernel-owned observation into the transformer's input
@@ -124,6 +124,7 @@ use fs_tribo::{
 // only after the stabilizer has had a full cycle to settle:
 //   swing_scale(time_s) = smoothstep(cycle_period / 2, cycle_period * 1.5, time_s)
 // i.e. arms stay quiet through the balance phase (0..1 cycle) and ramp in
+// through cycle 1.5, matching the lower-body calibration window.
 // from cycle 1 to 1.5, matching the v066 effective behavior on the lower body.
 // (Constants were lost in the 2ef05749 refactor; restoring them here so
 // controller_force's swing_scale logic continues to compile.)
@@ -131,7 +132,7 @@ const ARM_SWING_GATE_START_S: f64 = 1.0 / (2.0 * 1.55); // 0.3226 s = 0.5 cycle
 const ARM_SWING_GATE_END_S: f64 = 3.0 / (2.0 * 1.55); // 0.9677 s = 1.5 cycles
 
 /// Stable identity of the owner-composed walking experiment.
-pub const G1_WALKING_MODEL_ID: &str = "fs-cmaes/g1-walking-owner-composition-v9";
+pub const G1_WALKING_MODEL_ID: &str = "fs-cmaes/g1-walking-owner-composition-v11";
 /// Pelvis plus all 29 actuated links retained by the source-bound mode-11 catalog.
 pub const G1_LINK_COUNT: usize = 30;
 /// Scalar pose words per link: translation xyz followed by quaternion wxyz.
@@ -201,6 +202,10 @@ const SURVIVAL_BONUS_PER_STEP: f64 = 0.4;
 const BODY_OBSTACLE_SKIN_M: f64 = 0.01;
 const MAX_BONUSED_STEPS: f64 = 720.0;
 const SURVIVAL_BONUS_LIMIT: f64 = SURVIVAL_BONUS_PER_STEP * MAX_BONUSED_STEPS;
+/// Maximum admitted total flight time for the published 1.5 s walking
+/// curriculum. Longer aerial intervals are treated as jumping, not walking.
+#[cfg(test)]
+const MAX_CURRICULUM_FLIGHT_S: f64 = 0.10;
 /// Peak height of the disclosed smooth challenge terrain [m].
 pub const G1_TERRAIN_AMPLITUDE_M: f64 = 0.008;
 /// Longitudinal spatial frequency of the disclosed terrain [rad/m].
@@ -226,143 +231,168 @@ const ARM_ROLL_DAMPING_TARGET_S: f64 = 0.10;
 // only after the stabilizer has had a full cycle to settle:
 //   swing_scale(time_s) = smoothstep(cycle_period / 2, cycle_period * 1.5, time_s)
 // i.e. arms stay quiet through the balance phase (0..1 cycle) and ramp in
-// v070 (cmaes-zi6): source-bound curriculum mean for the 30-link whole-body
-// catalog, refreshed by the 4-stage retune
-// `recalibrate_mode_11_curriculum` on the v0.7.0 dynamics with the arm-swing
-// gate. Seeds: 0x47315060 / 0x47315061 / 0x47315062 / 0x47315063.
-// Stage budgets: 80 / 100 / 120 / 140 generations; sigma 0.08 / 0.055 / 0.04 / 0.02.
-//
-// Honesty note: these constants complete the 720-step flat-1.5s horizon and
-// improve forward displacement to ~0.24 m (objective ~7.8) on the default
-// flat walking task and ~0.17 m on the terrain-and-push challenge. The
-// bead target (>1.0 m / >0.5 m/s) remains unmet. Future refreshes should
-// continue to use recalibrate_mode_11_curriculum as the source-of-truth.
+// The balance bootstrap stays separate from the walking curriculum. A walking
+// retune is not allowed to silently replace the bias used by Balance-task
+// evaluation or learned-policy seam tests.
 const G1_STABILIZING_BIAS_MEAN: [f64; G1_POLICY_ACTUATORS] = [
     -0.088_357_745_771_314_22,
-    -0.603_296_347_426_048_80,
+    -0.603_296_347_426_048_8,
     -0.214_763_739_300_847_86,
     0.032_825_314_911_039_856,
     0.052_714_458_321_082_125,
-    0.350_591_085_810_838_10,
+    0.350_591_085_810_838_1,
     -0.175_920_405_561_351_52,
-    0.123_194_408_441_672_50,
-    0.060_557_172_266_972_950,
+    0.123_194_408_441_672_5,
+    0.060_557_172_266_972_95,
     0.127_514_536_828_087_75,
-    0.547_336_803_471_925_00,
-    -0.760_283_195_913_984_60,
-    -0.110_441_078_060_437_30,
-    0.040_532_194_494_341_740,
-    -0.860_483_620_894_292_50,
+    0.547_336_803_471_925,
+    -0.760_283_195_913_984_6,
+    -0.110_441_078_060_437_3,
+    0.040_532_194_494_341_74,
+    -0.860_483_620_894_292_5,
 ];
 
-// Periodic gait phase weights from the v070 4-stage curriculum retune.
+// v073: source-bound walking bias for the 30-link whole-body catalog,
+// refreshed with the rest of the constraint-aware 4-stage curriculum by
+// `recalibrate_mode_11_curriculum` after the Hertz contact path and challenge
+// forcing were made cross-target deterministic, then polished jointly for
+// tracking (60 generations, sigma 0.015, seed 0x47315064). Base-stage seeds:
+// 0x47315060 / 0x47315061 / 0x47315062 / 0x47315063.
+// Stage budgets: 120 / 140 / 180 / 220 generations; sigma
+// 0.08 / 0.055 / 0.04 / 0.025. The final stage scores flat and
+// terrain-plus-push together and enforces >=0.30 m distance plus the same
+// strict sub-0.10-second anti-flight boundary as the publication test.
+//
+// Honesty note: these constants complete the 720-step flat-1.5s horizon and
+// produce ~0.31 m on the default flat walking task and ~0.33 m on the
+// terrain-and-push challenge. Both spend ~0.083 s in flight, keep lateral
+// error below 0.39 m*s, and keep heading error below 0.94 rad*s. The bead
+// target (>1.0 m / >0.5 m/s) remains unmet. Future refreshes should continue
+// to use recalibrate_mode_11_curriculum as the source-of-truth.
+const G1_WALKING_BIAS_MEAN: [f64; G1_POLICY_ACTUATORS] = [
+    -0.17939661865787773,
+    -0.7021470951524119,
+    0.027195141043667864,
+    0.1221088658906138,
+    -0.3477824148271145,
+    1.2145161922758954,
+    -0.021257102100107735,
+    0.38313350659551476,
+    0.1067087826236763,
+    0.8745806436055324,
+    0.823926477908171,
+    -0.7932304926624436,
+    0.0373509553760759,
+    0.4994559510442314,
+    -0.7340680202254056,
+];
+
+// Periodic gait phase weights from the v073 dual-environment curriculum.
 // Values are actuator-major [sin(phi), cos(phi)].
 const G1_WALKING_PHASE_MEAN: [f64; 2 * G1_POLICY_ACTUATORS] = [
-    0.328_801_305_009_285_95,
-    0.269_308_749_752_356_30,
-    -0.552_730_244_456_854_80,
-    0.062_518_382_246_171_760,
-    -0.304_206_886_137_245_45,
-    -0.508_256_087_480_367_00,
-    0.239_253_611_778_031_90,
-    -0.820_657_818_556_858_40,
-    0.081_497_452_149_651_830,
-    -0.588_988_549_374_165_60,
-    0.318_655_712_941_478_20,
-    0.361_717_761_743_961_70,
-    -0.297_858_203_269_639_50,
-    -0.004_582_261_271_069_467,
-    -0.039_243_043_718_232_666,
-    -0.643_326_286_228_632_30,
-    0.628_672_802_289_890_10,
-    1.025_784_637_459_221_90,
-    -1.301_551_552_470_657_30,
-    -0.067_629_030_561_654_150,
-    -0.369_968_262_004_111_00,
-    0.124_304_071_316_619_770,
-    -0.567_219_431_028_240_50,
-    -0.093_773_280_854_086_250,
-    -0.184_335_909_256_086_800,
-    -0.185_276_225_003_652_870,
-    -0.711_684_189_348_380_20,
-    0.900_481_539_139_714_60,
-    -0.035_641_205_751_234_556,
-    -0.321_022_253_798_043_330,
+    0.685472609895328,
+    0.4885732573582091,
+    -0.06241152720664613,
+    0.7321415912060804,
+    -1.202931570461409,
+    -0.9697842494687055,
+    -0.27030679118433504,
+    -0.6145752956901466,
+    -0.2078414694678357,
+    -0.7885390367947166,
+    -0.24132732423815,
+    0.2970526583825631,
+    -0.9030854795635741,
+    0.195711436460232,
+    0.0737657866597254,
+    -0.2284929173352534,
+    0.881964471513628,
+    0.8821670015318512,
+    -1.2166670893861202,
+    -0.7285010186075013,
+    -1.1997362855933402,
+    -1.049843332629309,
+    -0.8582749464272286,
+    0.14912046241567015,
+    -0.17388656401090646,
+    0.13400423448545756,
+    -0.5888476288126433,
+    0.6502115829868718,
+    0.1174030121886003,
+    -0.2853104389264818,
 ];
 
-// Balance-feedback curriculum coordinates from the v070 4-stage retune.
+// Balance-feedback coordinates from the v073 dual-environment curriculum.
 // Values are actuator-major [gravity-x, gravity-y, angular-velocity-x,
 // angular-velocity-y], each on the owner's constant phase basis.
 const G1_WALKING_FEEDBACK_MEAN: [f64; 4 * G1_POLICY_ACTUATORS] = [
-    -0.742_771_246_192_135_90,
-    -0.236_174_060_409_811_40,
-    -0.034_530_082_204_982_770,
-    0.702_698_107_291_230_20,
-    -0.835_842_028_967_064_60,
-    -0.358_263_855_274_597_250,
-    0.635_909_419_722_191_30,
-    -0.572_263_435_491_737_30,
-    -0.926_021_657_591_756_10,
-    -0.764_856_105_626_380_30,
-    0.372_116_236_871_446_240,
-    -0.202_840_617_474_921_850,
-    0.312_259_334_522_145_500,
-    0.593_232_414_607_726_600,
-    0.504_693_113_009_096_300,
-    -0.139_763_782_220_726_130,
-    0.366_580_973_581_721_370,
-    -0.480_344_694_503_597_500,
-    0.091_774_280_447_587_720,
-    0.858_322_506_371_980_700,
-    0.537_382_465_904_273_300,
-    -0.883_473_900_106_231_700,
-    1.172_129_098_488_802_000,
-    -0.144_123_053_527_577_370,
-    0.413_068_929_701_272_570,
-    -0.588_622_783_831_159_100,
-    1.416_757_712_155_460_000,
-    -0.531_090_942_571_418_900,
-    -1.189_076_984_685_443_400,
-    0.308_689_312_560_851_700,
-    0.313_820_236_211_927_060,
-    -0.283_297_957_381_986_650,
-    -0.711_879_132_963_984_400,
-    0.111_672_804_497_856_710,
-    -1.039_729_124_410_998_700,
-    1.299_878_677_001_666_600,
-    1.158_209_863_653_692_000,
-    -0.378_988_812_455_384_800,
-    0.713_174_077_251_892_600,
-    -0.281_228_408_926_195_330,
-    -0.267_387_831_904_815_630,
-    0.048_187_004_549_995_575,
-    0.189_531_273_937_989_100,
-    0.834_051_914_739_231_600,
-    0.226_465_632_467_910_270,
-    0.163_210_603_535_953_600,
-    -0.141_148_575_504_794_430,
-    0.354_418_984_239_207_370,
-    -1.352_535_524_920_310_000,
-    -0.719_565_071_763_641_600,
-    0.539_827_635_468_500_300,
-    -0.362_667_948_303_554_600,
-    0.739_949_055_754_633_000,
-    0.872_984_852_157_772_700,
-    0.320_463_423_165_563_400,
-    0.112_355_510_917_830_040,
-    -0.619_324_386_229_705_500,
-    -0.110_392_602_126_898_960,
-    1.029_745_821_600_359_400,
-    -1.192_405_976_503_287_700,
+    -0.7609065744386637,
+    -0.782515803016525,
+    -0.2707742535159033,
+    1.5716889019090399,
+    -1.4174096189990746,
+    -0.18841238556807596,
+    0.43801678644903813,
+    -0.9700398080542677,
+    -0.22481826217763895,
+    -1.1870852352232424,
+    0.016824328419797977,
+    -0.5274289143090809,
+    0.22750126979685417,
+    0.553846074864351,
+    1.1846873195225283,
+    -0.7760302270333641,
+    0.07175594396370559,
+    -1.037939443850961,
+    0.06344922635396652,
+    0.6698420712983238,
+    0.34705989212316873,
+    -1.4600035223055396,
+    1.7565416331767718,
+    -0.46807308524089186,
+    0.5514813305052274,
+    -0.8037080605562085,
+    1.284232817532393,
+    -0.5169241171302995,
+    -1.3399944903882004,
+    -0.042362465147870135,
+    0.7981904540937622,
+    -0.42655040230394187,
+    0.01538996229792031,
+    0.053118886192394674,
+    -0.49457936501576427,
+    1.5755123018687134,
+    1.1265652689609147,
+    -0.6585734077118166,
+    0.9445335679232446,
+    -0.7339032592420834,
+    -0.9924277339162532,
+    -1.3488484101409615,
+    0.3943356527438331,
+    0.874034745178642,
+    -0.12854290012135725,
+    0.8005534218561716,
+    -0.4046508967379945,
+    0.5078229886653647,
+    -1.053478935851686,
+    -0.6248302136576473,
+    0.8123279994540403,
+    -0.5728118416560944,
+    0.9666467679653439,
+    0.5064000162518563,
+    -0.519591989703167,
+    0.2930228745995438,
+    -0.8334811460419893,
+    -0.39620895859985783,
+    1.2794477461716243,
+    -1.3161849587618228,
 ];
 
 // The standing PD controller must leave enough owner-model motor authority for
 // a black-box policy to bend a swing knee and unload a foot. The earlier 0.32
 // fraction could not overcome the knee posture gain over a useful excursion.
-// The disclosed stabilizing biases above are analytically rescaled so
-// `0.65 * tanh(new_bias) == 0.32 * tanh(previous_bias)`: the initial residual
-// torque command is unchanged while learned excursions gain an honest,
-// symmetric authority envelope.
+// The current stabilizing biases and walking curriculum were calibrated under
+// this 0.65 envelope; changing it requires a fresh owner-physics retune.
 const RESIDUAL_EFFORT_FRACTION: f64 = 0.65;
 
 /// Declared curriculum task. Balance and walking are different black-box
@@ -410,6 +440,7 @@ pub fn g1_walking_curriculum_mean() -> [f64; G1_POLICY_DIMENSION] {
     let mut policy = g1_stabilizing_policy_mean();
     for actuator in 0..G1_POLICY_ACTUATORS {
         let row = actuator * G1_POLICY_FEATURES_PER_ACTUATOR;
+        policy[row] = G1_WALKING_BIAS_MEAN[actuator];
         policy[row + 1] = G1_WALKING_PHASE_MEAN[2 * actuator];
         policy[row + 2] = G1_WALKING_PHASE_MEAN[2 * actuator + 1];
         for (feedback, signal) in [31, 32, 34, 35].into_iter().enumerate() {
@@ -500,8 +531,7 @@ pub fn sphere_box_penetration(
         (r - outside_sq.sqrt()).max(0.0)
     } else {
         // center inside the solid: depth = r + distance to nearest face
-        let face = (half[0] - lx.abs())
-            .min((half[1] - ly.abs()).min(half[2] - lz.abs()));
+        let face = (half[0] - lx.abs()).min((half[1] - ly.abs()).min(half[2] - lz.abs()));
         r + face
     }
 }
@@ -510,33 +540,32 @@ pub fn sphere_box_penetration(
 /// at each link origin, radii chosen to conservatively cover the catalog
 /// link geometry. Feet are excluded (their contact model owns ground).
 const BODY_COLLIDER_SPHERES: [(usize, f64); 20] = [
-    (0, 0.16),   // pelvis
-    (1, 0.10),   // left hip pitch
-    (2, 0.10),   // left hip roll
-    (3, 0.09),   // left hip yaw
-    (4, 0.09),   // left knee
-    (7, 0.10),   // right hip pitch
-    (8, 0.10),   // right hip roll
-    (9, 0.09),   // right hip yaw
-    (10, 0.09),  // right knee
-    (13, 0.09),  // waist yaw
-    (14, 0.10),  // waist roll
-    (15, 0.17),  // torso
-    (16, 0.08),  // left shoulder pitch
-    (17, 0.08),  // left shoulder roll
-    (18, 0.07),  // left shoulder yaw
-    (19, 0.07),  // left elbow
-    (23, 0.08),  // right shoulder pitch
-    (24, 0.08),  // right shoulder roll
-    (25, 0.07),  // right shoulder yaw
-    (26, 0.07),  // right elbow
+    (0, 0.16),  // pelvis
+    (1, 0.10),  // left hip pitch
+    (2, 0.10),  // left hip roll
+    (3, 0.09),  // left hip yaw
+    (4, 0.09),  // left knee
+    (7, 0.10),  // right hip pitch
+    (8, 0.10),  // right hip roll
+    (9, 0.09),  // right hip yaw
+    (10, 0.09), // right knee
+    (13, 0.09), // waist yaw
+    (14, 0.10), // waist roll
+    (15, 0.17), // torso
+    (16, 0.08), // left shoulder pitch
+    (17, 0.08), // left shoulder roll
+    (18, 0.07), // left shoulder yaw
+    (19, 0.07), // left elbow
+    (23, 0.08), // right shoulder pitch
+    (24, 0.08), // right shoulder roll
+    (25, 0.07), // right shoulder yaw
+    (26, 0.07), // right elbow
 ];
 
 /// Max body displacement per fixed step, from bounded joint speeds
 /// (<= 10 rad/s) times the longest lever (~0.45 m): 0.011 m << the 0.05 m
 /// minimum obstacle thickness, so per-step discrete checks cannot tunnel.
 /// Asserted by `no_tunneling_window` in the collision tests.
-
 /// One owner-derived render sample. No browser-side forward kinematics is
 /// required or permitted by this contract.
 #[derive(Debug, Clone, PartialEq)]
@@ -1113,7 +1142,8 @@ impl G1WalkingEvaluator {
                 let progress = world_velocity.x.max(0.0) * self.config.step_s;
                 let back = backward_distance_m - backward_before;
                 let work = actuator_work_j - work_before;
-                t.rewards.push((0.4 + 2.0 * progress - 2.0 * back - 0.002 * work) as f32);
+                t.rewards
+                    .push((0.4 + 2.0 * progress - 2.0 * back - 0.002 * work) as f32);
                 t.done.push(false);
             }
             let height_error = base.world_from_base.translation().z - self.initial_base_height_m;
@@ -1324,7 +1354,7 @@ impl G1WalkingEvaluator {
         if !objective.is_finite() {
             return Err(G1WalkingError::NonFiniteObjective);
         }
-        if let Some(t) = learned_trace.as_deref_mut() {
+        if let Some(t) = learned_trace {
             if let Some(last) = t.done.last_mut() {
                 *last = termination_reason.fell();
             }
@@ -1376,9 +1406,8 @@ fn terrain_surface(challenge: G1Challenge, x_m: f64, y_m: f64) -> TerrainSurface
         };
     }
     let phase = G1_TERRAIN_WAVENUMBER_RAD_PER_M * x_m;
-    let sine = phase.sin();
-    let cosine = phase.cos();
-    let lateral_scale = 1.0 + 0.20 * (3.0 * y_m).sin();
+    let (sine, cosine) = det::sin_cos(phase);
+    let lateral_scale = 1.0 + 0.20 * det::sin(3.0 * y_m);
     let height_m = G1_TERRAIN_AMPLITUDE_M * sine * sine * lateral_scale;
     let gradient_x = G1_TERRAIN_AMPLITUDE_M
         * 2.0
@@ -1386,7 +1415,7 @@ fn terrain_surface(challenge: G1Challenge, x_m: f64, y_m: f64) -> TerrainSurface
         * cosine
         * G1_TERRAIN_WAVENUMBER_RAD_PER_M
         * lateral_scale;
-    let gradient_y = G1_TERRAIN_AMPLITUDE_M * sine * sine * 0.60 * (3.0 * y_m).cos();
+    let gradient_y = G1_TERRAIN_AMPLITUDE_M * sine * sine * 0.60 * det::cos(3.0 * y_m);
     let raw_normal = Vec3::new(-gradient_x, -gradient_y, 1.0);
     TerrainSurface {
         height_m,
@@ -1399,7 +1428,7 @@ fn challenge_push_force_n(challenge: G1Challenge, time_s: f64) -> f64 {
         return 0.0;
     }
     let phase = (time_s - G1_PUSH_START_S) / (G1_PUSH_END_S - G1_PUSH_START_S);
-    G1_PUSH_PEAK_FORCE_N * (core::f64::consts::PI * phase).sin().max(0.0)
+    G1_PUSH_PEAK_FORCE_N * det::sin(core::f64::consts::PI * phase).max(0.0)
 }
 
 fn vec_norm(vector: Vec3) -> f64 {
@@ -1425,9 +1454,7 @@ fn validate_config(config: &G1WalkingConfig) -> Result<(), G1WalkingError> {
         for (_field, value) in fields {
             if !value.is_finite() {
                 let _ = index;
-                return Err(G1WalkingError::InvalidConfig {
-                    field: "obstacles",
-                });
+                return Err(G1WalkingError::InvalidConfig { field: "obstacles" });
             }
         }
         if obstacle.half_extents_m[0] <= 0.0
@@ -1541,9 +1568,12 @@ fn static_contact_indentation_m(catalog: &CatalogRobotModel) -> f64 {
     let contact_count = 2.0 * FOOT_CONTACT_POINTS_BODY_M.len() as f64;
     let force_per_patch_n = total_mass_kg * GRAVITY_WORLD_M_PER_S2.z.abs() / contact_count;
     let hertz_coefficient = (4.0 / 3.0) * FOOT_REDUCED_MODULUS_PA * FOOT_EFFECTIVE_RADIUS_M.sqrt();
-    (force_per_patch_n / hertz_coefficient).powf(2.0 / 3.0)
+    det::pow(force_per_patch_n / hertz_coefficient, 2.0 / 3.0)
 }
 
+// Each argument is a physically distinct owner input. Keeping them explicit
+// makes accidental frame or unit swaps visible at every call site.
+#[allow(clippy::too_many_arguments)]
 fn controller_force(
     catalog: &CatalogRobotModel,
     reference: &[f64; G1_MODEL_ACTUATORS],
@@ -1701,7 +1731,7 @@ mod tests {
     use fs_dfo::{CmaConfig, CmaFamily, CmaOptimizer};
 
     fn curriculum_coordinates() -> Vec<f64> {
-        G1_STABILIZING_BIAS_MEAN
+        G1_WALKING_BIAS_MEAN
             .into_iter()
             .chain(G1_WALKING_PHASE_MEAN)
             .chain(G1_WALKING_FEEDBACK_MEAN)
@@ -1724,16 +1754,43 @@ mod tests {
         policy
     }
 
+    #[derive(Debug, Clone, Copy)]
+    struct CalibrationConstraints {
+        minimum_distance_m: f64,
+        maximum_lateral_error_integral: f64,
+        maximum_heading_error_integral: f64,
+    }
+
+    impl CalibrationConstraints {
+        const FORWARD_ONLY: Self = Self {
+            minimum_distance_m: 0.0,
+            maximum_lateral_error_integral: f64::INFINITY,
+            maximum_heading_error_integral: f64::INFINITY,
+        };
+
+        const TRACKED_WALK: Self = Self {
+            minimum_distance_m: 0.30,
+            maximum_lateral_error_integral: 0.50,
+            maximum_heading_error_integral: 1.00,
+        };
+    }
+
     fn optimize_curriculum_stage(
         label: &str,
-        config: G1WalkingConfig,
+        configs: &[G1WalkingConfig],
         initial: Vec<f64>,
         sigma: f64,
         generations: usize,
         seed: u64,
+        constraints: CalibrationConstraints,
     ) -> Vec<f64> {
         const POPULATION: usize = 16;
-        let evaluator = G1WalkingEvaluator::new(config).expect("calibration evaluator");
+        assert!(!configs.is_empty(), "calibration needs an environment");
+        let evaluators = configs
+            .iter()
+            .cloned()
+            .map(|config| G1WalkingEvaluator::new(config).expect("calibration evaluator"))
+            .collect::<Vec<_>>();
         let mut cma_config = CmaConfig::standard(
             CmaFamily::Full,
             initial,
@@ -1749,10 +1806,50 @@ mod tests {
                 .candidates()
                 .iter()
                 .map(|coordinates| {
-                    evaluator
-                        .evaluate(&policy_from_curriculum_coordinates(coordinates))
-                        .expect("calibration rollout")
-                        .objective
+                    let policy = policy_from_curriculum_coordinates(coordinates);
+                    evaluators
+                        .iter()
+                        .map(|evaluator| {
+                            let receipt = evaluator.evaluate(&policy).expect("calibration rollout");
+                            // The publication test rejects a curriculum that
+                            // spends 0.10 s or more fully airborne. Put that
+                            // boundary into calibration instead of discovering
+                            // after a costly retune that the best scalar
+                            // objective learned a jump. The one-step margin
+                            // respects the test's strict `<`.
+                            let calibration_limit_s =
+                                (MAX_CURRICULUM_FLIGHT_S - evaluator.config.step_s).max(0.0);
+                            let normalized_violation =
+                                if receipt.termination_reason == G1TerminationReason::Horizon {
+                                    0.0
+                                } else {
+                                    1.0
+                                } + (receipt.flight_s - calibration_limit_s).max(0.0)
+                                    / MAX_CURRICULUM_FLIGHT_S
+                                    + (constraints.minimum_distance_m - receipt.distance_m)
+                                        .max(0.0)
+                                        / constraints.minimum_distance_m.max(1.0)
+                                    + (receipt.lateral_error_integral
+                                        - constraints.maximum_lateral_error_integral)
+                                        .max(0.0)
+                                        / constraints.maximum_lateral_error_integral
+                                    + (receipt.heading_error_integral
+                                        - constraints.maximum_heading_error_integral)
+                                        .max(0.0)
+                                        / constraints.maximum_heading_error_integral;
+                            // Feasibility is lexicographically ahead of the
+                            // smooth rollout objective. Without the fixed
+                            // per-environment charge, the optimizer can trade
+                            // a few extra airborne steps for slightly better
+                            // heading and still appear to improve.
+                            let feasibility_penalty = if normalized_violation > 0.0 {
+                                1.0e9 + 1.0e6 * normalized_violation
+                            } else {
+                                0.0
+                            };
+                            receipt.objective + feasibility_penalty
+                        })
+                        .sum::<f64>()
                 })
                 .collect::<Vec<_>>();
             let snapshot = optimizer
@@ -1760,19 +1857,26 @@ mod tests {
                 .expect("calibration tell");
             if generation % 20 == 19 || generation + 1 == generations {
                 let best = snapshot.best.as_ref().expect("calibration best");
-                let receipt = evaluator
-                    .evaluate(&policy_from_curriculum_coordinates(&best.point))
-                    .expect("calibration best receipt");
-                eprintln!(
-                    "{label} generation={} sigma={:.6} objective={:.6} steps={} distance={:.6} single_support={:.6} ending={:?}",
-                    generation + 1,
-                    snapshot.sigma,
-                    receipt.objective,
-                    receipt.completed_steps,
-                    receipt.distance_m,
-                    receipt.single_support_s,
-                    receipt.termination_reason,
-                );
+                let policy = policy_from_curriculum_coordinates(&best.point);
+                for evaluator in &evaluators {
+                    let receipt = evaluator
+                        .evaluate(&policy)
+                        .expect("calibration best receipt");
+                    eprintln!(
+                        "{label} generation={} sigma={:.6} challenge={:?} objective={:.6} steps={} distance={:.6} lateral={:.6} heading={:.6} flight={:.6} single_support={:.6} ending={:?}",
+                        generation + 1,
+                        snapshot.sigma,
+                        evaluator.config.challenge,
+                        receipt.objective,
+                        receipt.completed_steps,
+                        receipt.distance_m,
+                        receipt.lateral_error_integral,
+                        receipt.heading_error_integral,
+                        receipt.flight_s,
+                        receipt.single_support_s,
+                        receipt.termination_reason,
+                    );
+                }
             }
         }
         optimizer
@@ -1787,44 +1891,51 @@ mod tests {
     fn recalibrate_mode_11_curriculum() {
         let short = optimize_curriculum_stage(
             "flat-0.65s",
-            G1WalkingConfig {
+            &[G1WalkingConfig {
                 duration_s: 0.65,
                 ..G1WalkingConfig::default()
-            },
+            }],
             curriculum_coordinates(),
             0.08,
             120,
             0x4731_5060,
+            CalibrationConstraints::FORWARD_ONLY,
         );
         let medium = optimize_curriculum_stage(
             "flat-1.0s",
-            G1WalkingConfig {
+            &[G1WalkingConfig {
                 duration_s: 1.0,
                 ..G1WalkingConfig::default()
-            },
+            }],
             short,
             0.055,
             140,
             0x4731_5061,
+            CalibrationConstraints::FORWARD_ONLY,
         );
         let long = optimize_curriculum_stage(
             "flat-1.5s",
-            G1WalkingConfig::default(),
+            &[G1WalkingConfig::default()],
             medium,
             0.04,
             180,
             0x4731_5062,
+            CalibrationConstraints::FORWARD_ONLY,
         );
         let robust = optimize_curriculum_stage(
-            "terrain-push-1.5s",
-            G1WalkingConfig {
-                challenge: G1Challenge::TerrainAndPush,
-                ..G1WalkingConfig::default()
-            },
+            "flat-plus-terrain-push-1.5s",
+            &[
+                G1WalkingConfig::default(),
+                G1WalkingConfig {
+                    challenge: G1Challenge::TerrainAndPush,
+                    ..G1WalkingConfig::default()
+                },
+            ],
             long,
             0.025,
             220,
             0x4731_5063,
+            CalibrationConstraints::TRACKED_WALK,
         );
         let flat_evaluator = G1WalkingEvaluator::new(G1WalkingConfig::default()).unwrap();
         let challenge_evaluator = G1WalkingEvaluator::new(G1WalkingConfig {
@@ -1840,13 +1951,28 @@ mod tests {
         eprintln!("MODE11_CALIBRATION_COORDINATES={robust:#?}");
         assert_eq!(flat.termination_reason, G1TerminationReason::Horizon);
         assert_eq!(challenge.termination_reason, G1TerminationReason::Horizon);
+        for receipt in [&flat, &challenge] {
+            assert!(receipt.distance_m >= 0.30, "receipt: {receipt:?}");
+            assert!(
+                receipt.flight_s < MAX_CURRICULUM_FLIGHT_S,
+                "receipt: {receipt:?}"
+            );
+            assert!(
+                receipt.lateral_error_integral <= 0.50,
+                "receipt: {receipt:?}"
+            );
+            assert!(
+                receipt.heading_error_integral <= 1.00,
+                "receipt: {receipt:?}"
+            );
+        }
     }
     // v069 follow-up (cmaes-zi6): 3-stage retune for the 30-link whole-body
     // catalog (drops the terrain-push stage which trips a joint position
     // limit under the v069 dynamics — that stage is a follow-up to a
     // curriculum that's already better than the v0.6.6 baked-in one).
     // Prints the final 105-element coordinate array as Rust source we can
-    // paste into G1_STABILIZING_BIAS_MEAN / G1_WALKING_PHASE_MEAN /
+    // paste into G1_WALKING_BIAS_MEAN / G1_WALKING_PHASE_MEAN /
     // G1_WALKING_FEEDBACK_MEAN. Reduced generations per stage so the full
     // 3-stage run fits in ~4 minutes on the dev box.
     #[test]
@@ -1854,33 +1980,36 @@ mod tests {
     fn retune_three_stage_curriculum_v069() {
         let short = optimize_curriculum_stage(
             "flat-0.65s",
-            G1WalkingConfig {
+            &[G1WalkingConfig {
                 duration_s: 0.65,
                 ..G1WalkingConfig::default()
-            },
+            }],
             curriculum_coordinates(),
             0.08,
             80,
             0x4731_5060,
+            CalibrationConstraints::FORWARD_ONLY,
         );
         let medium = optimize_curriculum_stage(
             "flat-1.0s",
-            G1WalkingConfig {
+            &[G1WalkingConfig {
                 duration_s: 1.0,
                 ..G1WalkingConfig::default()
-            },
+            }],
             short,
             0.055,
             100,
             0x4731_5061,
+            CalibrationConstraints::FORWARD_ONLY,
         );
         let long = optimize_curriculum_stage(
             "flat-1.5s",
-            G1WalkingConfig::default(),
+            &[G1WalkingConfig::default()],
             medium,
             0.04,
             120,
             0x4731_5062,
+            CalibrationConstraints::FORWARD_ONLY,
         );
         let flat_evaluator = G1WalkingEvaluator::new(G1WalkingConfig::default()).unwrap();
         let policy = policy_from_curriculum_coordinates(&long);
@@ -1888,13 +2017,17 @@ mod tests {
         eprintln!("V069_CURRICULUM_FLAT={flat:?}");
         eprintln!("V069_CURRICULUM_COORDINATES={long:#?}");
         eprintln!("\n=== BEGIN RUST SOURCE FOR KERNEL CONSTANTS ===\n");
-        eprintln!("const G1_STABILIZING_BIAS_MEAN: [f64; G1_POLICY_ACTUATORS] = [");
+        eprintln!("const G1_WALKING_BIAS_MEAN: [f64; G1_POLICY_ACTUATORS] = [");
         for c in long.iter().take(G1_POLICY_ACTUATORS) {
             eprintln!("    {:.20},", c);
         }
         eprintln!("];\n");
         eprintln!("const G1_WALKING_PHASE_MEAN: [f64; 2 * G1_POLICY_ACTUATORS] = [");
-        for c in long.iter().skip(G1_POLICY_ACTUATORS).take(2 * G1_POLICY_ACTUATORS) {
+        for c in long
+            .iter()
+            .skip(G1_POLICY_ACTUATORS)
+            .take(2 * G1_POLICY_ACTUATORS)
+        {
             eprintln!("    {:.20},", c);
         }
         eprintln!("];\n");
@@ -2113,19 +2246,17 @@ mod tests {
             assert_eq!(mean[actuator * G1_POLICY_FEATURES_PER_ACTUATOR], bias);
         }
     }
-    // The authority_rescale_preserves_every_stabilizing_residual_torque test
-    // was deleted: the cmaes-zi6 3-stage retune replaces the v0.6.8 rescale
-    // with a fresh CMA-ES curriculum. The "0.32 * tanh(prev) == 0.65 *
-    // tanh(new)" invariant only holds for the 16-link v0.6.6 retune. Under
-    // the v0.6.9 30-link dynamics the new curriculum has 3 components
-    // whose rescaled authority exceeds the 0.32 previous bound (the tanh
-    // saturation that motivated the rescale in the first place). The
-    // retune intentionally trades off authority on the strongest joints
-    // for stability on the rest, so the rescale-preserves invariant is
-    // no longer the right contract. The curriculum's own contract is
-    // "completes the 720-step flat horizon" (see the
-    // walking_curriculum_mean_completes_with_forward_single_support test
-    // below).
+    #[test]
+    fn balance_and_walking_biases_are_task_scoped() {
+        let balance = g1_stabilizing_policy_mean();
+        let walking = g1_walking_curriculum_mean();
+        assert_ne!(G1_STABILIZING_BIAS_MEAN, G1_WALKING_BIAS_MEAN);
+        for actuator in 0..G1_POLICY_ACTUATORS {
+            let row = actuator * G1_POLICY_FEATURES_PER_ACTUATOR;
+            assert_eq!(balance[row], G1_STABILIZING_BIAS_MEAN[actuator]);
+            assert_eq!(walking[row], G1_WALKING_BIAS_MEAN[actuator]);
+        }
+    }
 
     #[test]
     fn walking_curriculum_mean_completes_with_forward_single_support() -> Result<(), G1WalkingError>
@@ -2136,19 +2267,14 @@ mod tests {
         let receipt = evaluator.evaluate(&mean)?;
         assert_eq!(receipt.termination_reason, G1TerminationReason::Horizon);
         assert_eq!(receipt.completed_steps, evaluator.step_count);
-        // cmaes-zi6 retune: with the v0.6.9 30-link dynamics, the curriculum
-        // is a starting point for the in-page CMA-ES rather than a completed
-        // walk. The v0.6.6 16-link bias was tuned for >0.59m standalone; the
-        // v0.6.9 30-link retune with 80/100/120 generations per stage
-        // achieves stable 720-step survival and ~0.1m baseline forward
-        // distance. The bigger walks (>0.5 m/s target from the user spec)
-        // come from running CMA-ES from this curriculum, not from the
-        // curriculum alone. The next-step follow-up is either (a) retune
-        // with a distance-weighted shaping objective or (b) the per-actuator
-        // derivative sign / magnitude analysis; both are tracked separately.
+        // The constraint-aware v073 retune is a robust initialization for the
+        // in-page CMA-ES, not a completed >0.5 m/s walker. It clears the same
+        // distance, anti-jump, and tracking gates in flat and challenged
+        // environments; further CMA refinement remains the path to the larger
+        // distance/speed target.
         assert!(
-            receipt.distance_m > 0.0,
-            "curriculum must walk at least some distance, got {} m",
+            receipt.distance_m >= 0.30,
+            "curriculum must cover at least 0.30 m, got {} m",
             receipt.distance_m
         );
         assert!(
@@ -2157,9 +2283,17 @@ mod tests {
             receipt.single_support_s
         );
         assert!(
-            receipt.flight_s < 0.1,
+            receipt.flight_s < MAX_CURRICULUM_FLIGHT_S,
             "curriculum flight time {} s suggests the robot is jumping not walking",
             receipt.flight_s
+        );
+        assert!(
+            receipt.lateral_error_integral <= 0.50,
+            "receipt: {receipt:?}"
+        );
+        assert!(
+            receipt.heading_error_integral <= 1.00,
+            "receipt: {receipt:?}"
         );
         Ok(())
     }
@@ -2181,6 +2315,19 @@ mod tests {
             "challenge receipt: {first:?}"
         );
         assert_eq!(first.completed_steps, evaluator.step_count);
+        assert!(first.distance_m >= 0.30, "challenge receipt: {first:?}");
+        assert!(
+            first.flight_s < MAX_CURRICULUM_FLIGHT_S,
+            "challenge receipt: {first:?}"
+        );
+        assert!(
+            first.lateral_error_integral <= 0.50,
+            "challenge receipt: {first:?}"
+        );
+        assert!(
+            first.heading_error_integral <= 1.00,
+            "challenge receipt: {first:?}"
+        );
         assert!(first.push_impulse_n_s > 0.0);
         assert!(first.maximum_abs_terrain_height_m > 0.0);
         assert!(first.minimum_base_height_m > 0.0);
@@ -2193,7 +2340,7 @@ mod tests {
     // is too expensive for the bead budget; this test runs a single
     // flat-1.5s stage (60 generations, pop=16) and prints the resulting
     // coordinates so a follow-up commit can paste them into
-    // G1_STABILIZING_BIAS_MEAN / G1_WALKING_PHASE_MEAN /
+    // G1_WALKING_BIAS_MEAN / G1_WALKING_PHASE_MEAN /
     // G1_WALKING_FEEDBACK_MEAN.
     #[test]
     #[ignore = "deterministic offline retune for the 30-link catalog (cmaes-zi6)"]
@@ -2206,11 +2353,12 @@ mod tests {
         }
         let optimized = optimize_curriculum_stage(
             "v069-flat-1.5s",
-            G1WalkingConfig::default(),
+            &[G1WalkingConfig::default()],
             coordinates,
             0.04,
             60,
             0x4731_5069,
+            CalibrationConstraints::FORWARD_ONLY,
         );
         let evaluator = G1WalkingEvaluator::new(G1WalkingConfig::default()).unwrap();
         let policy = policy_from_curriculum_coordinates(&optimized);
@@ -2226,5 +2374,48 @@ fn debug_distance() {
     let ev = G1WalkingEvaluator::new(cfg).expect("e");
     let curriculum = crate::g1_walking::g1_walking_curriculum_mean();
     let r = ev.evaluate(&curriculum).expect("rollout");
-    println!("[dbg] distance_m={:.4} steps={} term={:?} objective={:.2}", r.distance_m, r.completed_steps, r.termination_reason, r.objective);
+    println!(
+        "[dbg] distance_m={:.4} steps={} term={:?} objective={:.2} flight_s={:.6} single_support_s={:.6}",
+        r.distance_m,
+        r.completed_steps,
+        r.termination_reason,
+        r.objective,
+        r.flight_s,
+        r.single_support_s
+    );
+}
+
+#[test]
+#[ignore = "diagnostic: bounded authority sweep for curriculum refreshes; run explicitly when a whole-body retune drifts"]
+fn debug_curriculum_authority_sweep() {
+    let flat = G1WalkingEvaluator::new(G1WalkingConfig::default()).expect("flat evaluator");
+    let challenge = G1WalkingEvaluator::new(G1WalkingConfig {
+        challenge: G1Challenge::TerrainAndPush,
+        ..G1WalkingConfig::default()
+    })
+    .expect("challenge evaluator");
+    for scale in [0.80, 0.85, 0.90, 0.95, 1.00] {
+        let mut policy = g1_walking_curriculum_mean();
+        for actuator in 0..G1_POLICY_ACTUATORS {
+            let row = actuator * G1_POLICY_FEATURES_PER_ACTUATOR;
+            policy[row + 1] *= scale;
+            policy[row + 2] *= scale;
+            for signal in [31, 32, 34, 35] {
+                policy[row + signal * 8] *= scale;
+            }
+        }
+        let flat_receipt = flat.evaluate(&policy).expect("flat rollout");
+        let challenge_receipt = challenge.evaluate(&policy).expect("challenge rollout");
+        println!(
+            "[authority-sweep] scale={scale:.2} flat=(objective={:.6}, distance={:.6}, flight={:.6}, steps={}) challenge=(objective={:.6}, distance={:.6}, flight={:.6}, steps={})",
+            flat_receipt.objective,
+            flat_receipt.distance_m,
+            flat_receipt.flight_s,
+            flat_receipt.completed_steps,
+            challenge_receipt.objective,
+            challenge_receipt.distance_m,
+            challenge_receipt.flight_s,
+            challenge_receipt.completed_steps,
+        );
+    }
 }

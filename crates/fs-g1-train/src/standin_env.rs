@@ -1,11 +1,12 @@
-//! Kinematic stand-in environment for the G1 walker — EXACT port of
-//! cmaes_explainer `app/lib/g1StepwiseEnv.ts` (f64 state, identical reward
-//! decomposition and observation layout), so policies trained here face the
-//! same dynamics the browser evaluates them on.
+//! Kinematic stand-in environment for the G1 walker — exact port of the
+//! default cmaes_explainer `app/lib/g1StepwiseEnv.ts` contract (f64 state,
+//! identical reward decomposition and observation layout), so policies
+//! trained here face the same default dynamics the browser evaluates them on.
 //!
 //! Disclosed scope: this is the stepwise-explainer stand-in, NOT the v068
-//! kernel SE(3) dynamics. Its optimum is a near-zero action (any effort
-//! torque induces tilt), which makes it a clean sample-efficiency benchmark.
+//! kernel SE(3) dynamics. Forward displacement is an action-causal kinematic
+//! proxy derived from lower-body joint motion and bilateral hip opposition;
+//! zero action produces exactly zero locomotion distance.
 
 use crate::ppo::G1Env;
 
@@ -15,6 +16,8 @@ pub const STANDIN_TARGET_SPEED_MPS: f64 = 0.65;
 pub const STANDIN_FALL_HEIGHT_M: f64 = 0.40;
 pub const STANDIN_FALL_TILT_RAD: f64 = 0.85;
 pub const STANDIN_INITIAL_HEIGHT_M: f64 = 0.75;
+/// Identity shared with the browser-side action-causal stand-in.
+pub const STANDIN_CONTRACT_ID: &str = "action-causal-standin-v2";
 
 /// 42-D observation, same layout as the TS env's `rawVector`:
 /// jointPos(15), jointVel(15), roll, pitch, yaw, ω(3), accel(3), sinφ, cosφ, target.
@@ -30,6 +33,7 @@ pub struct StandinEnv {
     yaw: f64,
     height: f64,
     phase: f64,
+    current_forward_speed: f64,
     cumulative_dist: f64,
     cumulative_reward: f64,
     cumulative_work: f64,
@@ -47,6 +51,7 @@ impl StandinEnv {
             yaw: 0.0,
             height: STANDIN_INITIAL_HEIGHT_M,
             phase: 0.0,
+            current_forward_speed: 0.0,
             cumulative_dist: 0.0,
             cumulative_reward: 0.0,
             cumulative_work: 0.0,
@@ -67,6 +72,10 @@ impl StandinEnv {
 
     pub fn cumulative_work_joules(&self) -> f64 {
         self.cumulative_work
+    }
+
+    pub fn current_forward_speed(&self) -> f64 {
+        self.current_forward_speed
     }
 
     fn observation_f64(&self) -> [f64; STANDIN_OBS_DIM] {
@@ -109,6 +118,7 @@ impl G1Env for StandinEnv {
         self.yaw = 0.0;
         self.height = STANDIN_INITIAL_HEIGHT_M;
         self.phase = 0.0;
+        self.current_forward_speed = 0.0;
         self.cumulative_dist = 0.0;
         self.cumulative_reward = 0.0;
         self.cumulative_work = 0.0;
@@ -125,7 +135,12 @@ impl G1Env for StandinEnv {
         let mut step_work = 0.0f64;
         let mut action_effort = 0.0f64;
         for j in 0..15 {
-            let act = action.get(j).copied().unwrap_or(0.0) as f64;
+            let candidate = f64::from(action.get(j).copied().unwrap_or(0.0));
+            let act = if candidate.is_finite() {
+                candidate.clamp(-1.0, 1.0)
+            } else {
+                0.0
+            };
             let target_pos = act * 0.5;
             let torque = 120.0 * (target_pos - self.joint_pos[j]) - 8.0 * self.joint_vel[j];
             self.joint_vel[j] += (torque / 1.5) * dt;
@@ -135,19 +150,38 @@ impl G1Env for StandinEnv {
         }
         self.cumulative_work += step_work;
 
-        // Damped-pendulum pelvis: effort torque tilts, 0.6 damping recovers.
-        let effort_torque = 0.04 * action_effort * action_effort;
+        // Damped-pendulum pelvis: mean effort torque tilts, 0.6 damping
+        // recovers. Normalizing by actuator count keeps an ordinary bounded
+        // gait from behaving like fifteen simultaneous full-body kicks.
+        let mean_action_effort = action_effort / 15.0;
+        let effort_torque = 0.12 * mean_action_effort * mean_action_effort;
         let angular_vel_roll = effort_torque - 0.6 * self.roll;
         let angular_vel_pitch = effort_torque - 0.6 * self.pitch;
         self.roll += angular_vel_roll * dt;
         self.pitch += angular_vel_pitch * dt;
 
-        // Height sinks as tilt grows; tilt also gates forward progress.
+        // Height sinks as tilt grows. Forward displacement is action-causal:
+        // a gait-drive proxy uses actual lower-body joint velocity plus
+        // bilateral hip opposition. This is still only a disclosed kinematic
+        // stand-in, but an inert policy can no longer earn locomotion.
         let tilt_sq = self.roll * self.roll + self.pitch * self.pitch;
         self.height -= 0.5 * tilt_sq * dt;
         let tilt = self.roll.hypot(self.pitch);
         let upright_factor = (1.0 - tilt).max(0.0);
-        let delta_x = STANDIN_TARGET_SPEED_MPS * dt * upright_factor;
+        let leg_velocity_rms = (self.joint_vel[..12]
+            .iter()
+            .map(|velocity| velocity * velocity)
+            .sum::<f64>()
+            / 12.0)
+            .sqrt();
+        let hip_opposition = ((self.joint_vel[0] - self.joint_vel[6]).abs() / 2.0).min(1.0);
+        let motion_drive = (leg_velocity_rms / 2.0).min(1.0);
+        let gait_drive = motion_drive * (0.25 + 0.75 * hip_opposition);
+        let requested_forward_speed = STANDIN_TARGET_SPEED_MPS * gait_drive;
+        let speed_response = (6.0 * dt).min(1.0);
+        self.current_forward_speed +=
+            (requested_forward_speed - self.current_forward_speed) * speed_response;
+        let delta_x = self.current_forward_speed.max(0.0) * dt * upright_factor;
         self.cumulative_dist += delta_x;
 
         let fall = self.height < STANDIN_FALL_HEIGHT_M || tilt > STANDIN_FALL_TILT_RAD;
@@ -179,44 +213,57 @@ impl G1Env for StandinEnv {
 mod tests {
     use super::*;
 
-    /// Zero action is the disclosed near-optimum: no effort torque, no tilt,
-    /// upright factor 1 ⇒ exact analytic distance and reward over 240 steps.
+    /// Planted negative: an inert policy cannot receive commanded progress.
     #[test]
-    fn zero_action_walks_at_target_speed() {
-        let mut env = StandinEnv::new(240);
+    fn zero_action_cannot_earn_locomotion_distance() {
+        let mut env = StandinEnv::new(720);
         let _obs = env.reset(0);
         let zero = [0.0f32; 15];
-        let mut total = 0.0f32;
-        for step in 1..=240 {
-            let (_obs, r, done) = env.step(&zero);
-            total += r;
-            // done must fire ONLY on the horizon step (timeout), never a fall.
-            assert!(step == 240 || !done, "early done at step {step}");
+        for step in 1..=720 {
+            let (_obs, _reward, done) = env.step(&zero);
+            assert!(step == 720 || !done, "early done at step {step}");
         }
-        let expected_dx_per_step = STANDIN_TARGET_SPEED_MPS * STANDIN_DT;
+        assert_eq!(env.cumulative_distance(), 0.0);
+        assert_eq!(env.current_forward_speed(), 0.0);
+        assert_eq!(env.cumulative_work_joules(), 0.0);
+    }
+
+    /// Planted positive: phase-opposed leg motion must diverge from the
+    /// no-action control through the same causal path used by the browser.
+    #[test]
+    fn phase_opposed_leg_actions_cause_forward_progress() {
+        let mut active = StandinEnv::new(180);
+        let mut idle = StandinEnv::new(180);
+        let mut active_obs = active.reset(7);
+        let _idle_obs = idle.reset(7);
+        for _ in 0..180 {
+            let phase_sin = active_obs[39];
+            let mut action = [0.0f32; 15];
+            action[0] = 0.55 * phase_sin;
+            action[3] = -0.4 * phase_sin;
+            action[6] = -0.55 * phase_sin;
+            action[9] = 0.4 * phase_sin;
+            let (next, _reward, _done) = active.step(&action);
+            let _ = idle.step(&[0.0; 15]);
+            active_obs = next;
+        }
         assert!(
-            (env.cumulative_distance() - 240.0 * expected_dx_per_step).abs() < 1e-9,
-            "distance {}",
-            env.cumulative_distance()
+            active.cumulative_distance() > 0.05,
+            "active distance {}",
+            active.cumulative_distance()
         );
-        // reward/step = 15·Δx + 0.5·cos0·cos0 − 0 = 0.1625 + 0.5
-        let expected_total = 240.0 * (15.0 * expected_dx_per_step + 0.5);
-        // f32 accumulation of 240 terms drifts ~1e-4 — that is the env's
-        // output precision, not a port bug (state/distance stay f64-exact).
-        assert!(
-            ((total as f64) - expected_total).abs() < 1e-4,
-            "total reward {total} vs {expected_total}"
-        );
+        assert_eq!(idle.cumulative_distance(), 0.0);
+        assert!(active.cumulative_distance() > idle.cumulative_distance());
     }
 
     /// A large constant action must drive tilt past the fall threshold.
     #[test]
     fn violent_action_falls() {
-        let mut env = StandinEnv::new(240);
+        let mut env = StandinEnv::new(720);
         let _obs = env.reset(0);
         let violent = [1.0f32; 15];
         let mut fell = false;
-        for _ in 0..240 {
+        for _ in 0..720 {
             let (_obs, _r, done) = env.step(&violent);
             if done {
                 fell = true;

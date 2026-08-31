@@ -36,9 +36,9 @@ use fs_dfo::{
 };
 use fs_mbd::robot_models::G1_POLICY_DIMENSION;
 
-pub mod g1_walking;
 #[cfg(feature = "g1-learned")]
 pub mod g1_learned;
+pub mod g1_walking;
 pub mod manipulation;
 
 use g1_walking::{
@@ -55,7 +55,7 @@ use manipulation::{
 };
 
 /// Kernel identity returned by the browser capability probe.
-pub const KERNEL_VERSION: &str = "fs-cmaes-viz-wasm 0.6.11";
+pub const KERNEL_VERSION: &str = "fs-cmaes-viz-wasm 0.6.13";
 /// Exact binary64 word identifying schema-2 packets (`"CMA2"`).
 pub const PACKET_MAGIC: u32 = 0x434d_4132;
 /// Packed ask/tell ABI schema.
@@ -865,7 +865,7 @@ fn parse_g1_config(packet: &[f64]) -> Result<G1WalkingConfig, G1PackedRefusal> {
         _ => return Err(G1PackedRefusal::new(G1PackedRefusalCode::InvalidConfig)),
     };
     let config = G1WalkingConfig {
-            obstacles: Vec::new(),
+        obstacles: Vec::new(),
         task,
         challenge,
         step_s: packet[4],

@@ -6,8 +6,10 @@ description = "G1 walking policy training: stepwise env, transformer policy, Muo
 license = "MIT"
 
 [dependencies]
-# Standalone: the env integration plugs back in when the kernel workspace
-# stabilizes. For now, the transformer + Muon + PPO are self-contained.
+# The transformer/Muon/PPO core and action-causal explanatory stand-in remain
+# standalone. Real owner-rollout training is integrated by the sibling
+# fs-cmaes-viz-wasm `g1-learned` feature so this crate does not duplicate the
+# 29-DoF dynamics owner.
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

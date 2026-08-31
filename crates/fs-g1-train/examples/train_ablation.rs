@@ -1,4 +1,5 @@
-//! Train the real GaitTransformer policy on the disclosed stand-in env and
+//! Train the real GaitTransformer policy on the disclosed action-causal
+//! stand-in env and
 //! export everything the browser ablation needs:
 //!   1. `g1-ablation-weights-v1.bin` — length-prefixed little-endian f32 dump
 //!      (layout documented in `dump_weights`; mirrored in
@@ -14,9 +15,9 @@
 //! Everything is deterministic given the fixed seed chain.
 
 use fs_g1_train::ppo::{
-    collect_trajectory, ppo_update, G1Env, PpoConfig, PolicyLogStd, RunningNorm,
+    collect_trajectory, ppo_update, G1Env, PolicyLogStd, PpoConfig, RunningNorm,
 };
-use fs_g1_train::standin_env::StandinEnv;
+use fs_g1_train::standin_env::{StandinEnv, STANDIN_CONTRACT_ID};
 use fs_g1_train::transformer::{Config, GaitTransformer};
 use fs_g1_train::MuonParam;
 
@@ -147,7 +148,10 @@ fn load_weights(model: &mut GaitTransformer, norm: &mut RunningNorm, bytes: &[u8
         layer.norm2.params.copy_from_slice(&it.next().unwrap());
     }
     model.final_norm.params.copy_from_slice(&it.next().unwrap());
-    model.policy_head.params.copy_from_slice(&it.next().unwrap());
+    model
+        .policy_head
+        .params
+        .copy_from_slice(&it.next().unwrap());
     model.value_w.params.copy_from_slice(&it.next().unwrap());
     model.value_b.params.copy_from_slice(&it.next().unwrap());
     norm.mean.copy_from_slice(&it.next().unwrap());
@@ -244,12 +248,56 @@ fn main() {
     for it in 0..iterations {
         let mut env = StandinEnv::new(episode_steps);
         let traj = collect_trajectory(
-            &mut env, &mut model, &norm, &log_std, &mut rng, episode_steps, it as u64,
+            &mut env,
+            &mut model,
+            &norm,
+            &log_std,
+            &mut rng,
+            episode_steps,
+            it as u64,
         );
         samples += traj.len();
         let mean_r = traj.rewards.iter().sum::<f32>() as f64 / traj.len().max(1) as f64;
-        if mean_r > best_mean {
-            best_mean = mean_r;
+        mean_rewards.push(mean_r);
+        let (advantages, returns) = traj.compute_gae(0.0, ppo_cfg.gamma, ppo_cfg.gae_lambda);
+        let _kl = ppo_update(
+            &mut model,
+            &norm,
+            &mut log_std,
+            &traj,
+            &advantages,
+            &returns,
+            &traj.log_probs,
+            &ppo_cfg,
+        );
+
+        // Publication selection is based on the post-update greedy policy
+        // under the action-causal contract. The previous exporter selected
+        // iteration zero from the noisy training rollout before performing
+        // its update, allowing an all-zero head to become the "best" walker.
+        let mut selection_env = StandinEnv::new(episode_steps);
+        let selection = greedy_eval(&mut selection_env, &mut model, &norm);
+        let greedy_total = selection["totalReward"]
+            .as_f64()
+            .expect("greedy total reward is finite");
+        let greedy_mean = greedy_total / episode_steps as f64;
+        let greedy_distance = selection["distanceMeters"]
+            .as_f64()
+            .expect("greedy distance is finite");
+        let greedy_work = selection["actuatorWorkJoules"]
+            .as_f64()
+            .expect("greedy work is finite");
+        let policy_head_l2 = model
+            .policy_head
+            .params
+            .iter()
+            .map(|weight| f64::from(*weight).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        let release_candidate =
+            policy_head_l2 > 1e-8 && greedy_distance > 1e-6 && greedy_work > 1e-9;
+        if release_candidate && greedy_mean > best_mean {
+            best_mean = greedy_mean;
             best_iter = it;
             best_weights = Some(dump_weights(&model, &norm));
             // Continuous checkpointing: the operator may stop the run at any
@@ -264,29 +312,22 @@ fn main() {
             fs::write(
                 format!("{out_dir}/g1-ablation-checkpoint.json"),
                 serde_json::to_string_pretty(&serde_json::json!({
-                    "note": "written on every new best-mean iteration; final full receipt lands on normal completion",
+                    "note": "written only for a post-update, nonzero-head greedy policy that causes motion under the action-causal stand-in; final full receipt lands on normal completion",
+                    "environmentContract": STANDIN_CONTRACT_ID,
                     "completedIterations": it + 1,
                     "iterationsPlanned": iterations,
                     "samplesConsumed": samples,
                     "bestMeanReward": best_mean,
                     "bestIteration": best_iter,
+                    "bestGreedyEvaluation": selection,
+                    "policyHeadL2": policy_head_l2,
+                    "wallclockSeconds": t0.elapsed().as_secs_f64(),
                     "stoppedEarly": true,
                 }))
                 .expect("serialize checkpoint"),
             )
             .expect("write checkpoint receipt");
         }
-        let (advantages, returns) = traj.compute_gae(0.0, ppo_cfg.gamma, ppo_cfg.gae_lambda);
-        let _kl = ppo_update(
-            &mut model,
-            &norm,
-            &mut log_std,
-            &traj,
-            &advantages,
-            &returns,
-            &traj.log_probs,
-            &ppo_cfg,
-        );
         if it % 10 == 0 || it == iterations - 1 {
             println!(
                 "[train] iter {}/{} mean_reward {:.3} (best {:.3} @ {}) samples {} elapsed {:.1}s",
@@ -304,7 +345,9 @@ fn main() {
 
     // Export weights, then RELOAD them into fresh models for evaluation and
     // golden vectors — the shipped file is the single source of truth.
-    let bytes = best_weights.expect("best checkpoint must exist after iter 0");
+    let bytes = best_weights.expect(
+        "no publishable checkpoint: training must produce a nonzero policy head, nonzero greedy action-caused distance, and nonzero actuator work",
+    );
     fs::write(format!("{out_dir}/g1-ablation-weights-v1.bin"), &bytes).expect("write weights");
 
     let rebuild = || {
@@ -375,7 +418,8 @@ fn main() {
         },
         "training": {
             "algorithm": "PPO (clipped) + GAE; Muon on hidden 2-D weights; Adam on embed/heads/norms/log_std",
-            "environment": "StandinEnv — exact port of cmaes_explainer app/lib/g1StepwiseEnv.ts, full 240-step episodes",
+            "environment": "StandinEnv — action-causal explanatory port of cmaes_explainer app/lib/g1StepwiseEnv.ts, full 240-step episodes; not the owner SE(3) rollout",
+            "environmentContract": STANDIN_CONTRACT_ID,
             "iterations": iterations,
             "episodeSteps": episode_steps,
             "samplesConsumed": samples,
@@ -384,7 +428,7 @@ fn main() {
             "meanRewardLast10": avg(&mean_rewards[mean_rewards.len().saturating_sub(10)..]),
             "bestMeanReward": best_mean,
             "bestIteration": best_iter,
-            "shippedCheckpoint": "best-mean-reward iteration (snapshot reloaded for eval/golden)",
+            "shippedCheckpoint": "best post-update greedy mean reward among candidates with nonzero policy head, action-caused distance, and actuator work (snapshot reloaded for eval/golden)",
             "seedChain": { "rolloutRng": "0x5EEDC0FFEE5040", "modelInit": "0xD1CE504020260830" },
         },
         "evaluation": { "greedy240": eval_240, "greedy720": eval_720 },
@@ -398,8 +442,6 @@ fn main() {
 
     println!(
         "[train] done: {} samples in {:.1}s → {}",
-        samples,
-        wallclock,
-        out_dir
+        samples, wallclock, out_dir
     );
 }

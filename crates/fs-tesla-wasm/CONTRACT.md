@@ -18,7 +18,7 @@ dependency-clean.
 
 | Entry | Kind | Contract |
 |---|---|---|
-| `tesla_coil_step(resonant_freq_khz, input_kv, spark_gap_mm, q_factor) -> String` | wasm + native | Executes one deterministic Tesla-coil LC step through `fs_flux::lc::step_tesla_coil` and returns `{"ok":{...}}` with the result fields rendered as decimal numbers. The JSON shape is part of the page contract: field names are stable, values are plain JSON numbers. |
+| `tesla_coil_step(resonant_freq_khz, input_kv, spark_gap_mm, q_factor) -> String` | wasm + native | Admits one bounded positive finite input tuple, executes one deterministic Tesla-coil LC step through `fs_flux::lc::step_tesla_coil`, and returns either `{"ok":{...}}` or a typed `{"refusal":{...}}` envelope. |
 
 ## Invariants
 
@@ -31,14 +31,19 @@ dependency-clean.
 3. **Deterministic content.** Identical inputs produce byte-identical
    output on the same platform; no wall clock, randomness, host identity,
    or allocation-order dependence reaches the string.
+4. **Fail-closed admission.** Non-finite, non-positive, or above-cap inputs
+   refuse before the owning kernel runs. A non-finite or non-positive result
+   also refuses rather than being rendered as JSON `null` or a misleading
+   zero. Each boundary is exercised by native tests.
 
 ## Error model
 
-v0 performs no admission: non-finite or out-of-domain inputs propagate
-into the arithmetic and surface as `null` in JSON (JSON has no NaN). Typed
-refusal envelopes (`{"refusal": ...}` per the fs-flyer-wasm pattern) are
-the v1 upgrade path and are NOT yet implemented; callers must not rely on
-refusal semantics from this crate.
+The boundary returns stable refusal codes with a human-readable message and
+ranked repairs. `non-finite-input` covers NaN and infinity;
+`input-outside-domain` covers non-positive values and the documented safety
+caps; `non-finite-output` catches a broken downstream result;
+`output-outside-domain` catches zero or negative output. The admitted
+maximums are 10,000 kHz, 1,000 kV, 1,000 mm spark gap, and Q of 1,000,000.
 
 ## Determinism class
 
@@ -48,8 +53,8 @@ shortest-roundtrip display).
 
 ## Cancellation behavior
 
-Synchronous single-step entry; there is nothing to cancel. A JS caller
-abandons the promise-like return by simply not using it.
+Synchronous single-step entry; there is nothing to cancel. A JS caller can
+discard the returned string if the result is no longer needed.
 
 ## Unsafe boundary
 
@@ -63,11 +68,10 @@ None. The wasm32 binding is selected by target architecture
 
 ## Conformance tests
 
-Native unit coverage lives with the owning lane's battery plan; today the
-crate is covered indirectly by the fs-flux kernel tests plus the
-dependency-policy and contract gates (`cargo run -p xtask -- check-deps`,
-`check-contracts`). A dedicated round-trip golden for the rendered string
-is the next planned slice.
+Native unit tests exercise a valid result, non-finite and non-positive input
+refusals, lower and upper admission boundaries, underflowed output refusal,
+and ranked repairs. The fs-flux kernel tests and dependency-policy/contract
+gates remain complementary evidence.
 
 ## No-claim boundaries
 

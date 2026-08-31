@@ -6,7 +6,7 @@
 //! Run: cargo run --release --example finalize_ablation -- <out_dir>
 
 use fs_g1_train::ppo::{G1Env, RunningNorm};
-use fs_g1_train::standin_env::StandinEnv;
+use fs_g1_train::standin_env::{StandinEnv, STANDIN_CONTRACT_ID};
 use fs_g1_train::transformer::{Config, GaitTransformer};
 use fs_g1_train::MuonParam;
 
@@ -19,12 +19,12 @@ const LAYOUT_VERSION: u32 = 1;
 fn load_weights(model: &mut GaitTransformer, norm: &mut RunningNorm, bytes: &[u8]) {
     assert_eq!(&bytes[0..4], WEIGHTS_MAGIC, "bad magic");
     let mut pos = 4usize;
-    let mut read_u32 = |pos: &mut usize| -> u32 {
+    let read_u32 = |pos: &mut usize| -> u32 {
         let v = u32::from_le_bytes(bytes[*pos..*pos + 4].try_into().unwrap());
         *pos += 4;
         v
     };
-    let mut read_f32s = |pos: &mut usize| -> Vec<f32> {
+    let read_f32s = |pos: &mut usize| -> Vec<f32> {
         let len = read_u32(pos) as usize;
         let mut v = Vec::with_capacity(len);
         for i in 0..len {
@@ -79,7 +79,10 @@ fn load_weights(model: &mut GaitTransformer, norm: &mut RunningNorm, bytes: &[u8
         layer.norm2.params.copy_from_slice(&it.next().unwrap());
     }
     model.final_norm.params.copy_from_slice(&it.next().unwrap());
-    model.policy_head.params.copy_from_slice(&it.next().unwrap());
+    model
+        .policy_head
+        .params
+        .copy_from_slice(&it.next().unwrap());
     model.value_w.params.copy_from_slice(&it.next().unwrap());
     model.value_b.params.copy_from_slice(&it.next().unwrap());
     norm.mean.copy_from_slice(&it.next().unwrap());
@@ -139,12 +142,18 @@ fn rebuild() -> (GaitTransformer, RunningNorm) {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let out_dir = args.get(1).cloned().unwrap_or_else(|| "artifacts".to_string());
+    let out_dir = args
+        .get(1)
+        .cloned()
+        .unwrap_or_else(|| "artifacts".to_string());
 
-    let bytes = fs::read(format!("{out_dir}/g1-ablation-weights-v1.bin")).expect("read weights bin");
-    let checkpoint: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(format!("{out_dir}/g1-ablation-checkpoint.json")).expect("read checkpoint"))
-            .expect("parse checkpoint json");
+    let bytes =
+        fs::read(format!("{out_dir}/g1-ablation-weights-v1.bin")).expect("read weights bin");
+    let checkpoint: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(format!("{out_dir}/g1-ablation-checkpoint.json"))
+            .expect("read checkpoint"),
+    )
+    .expect("parse checkpoint json");
 
     let cfg = Config::default();
     let (mut probe, mut probe_norm) = rebuild();
@@ -160,6 +169,31 @@ fn main() {
     let episode_steps = 240usize;
     let eval_240 = eval_at(episode_steps);
     let eval_720 = eval_at(720);
+
+    // Refuse to launder the legacy iteration-zero, all-zero-head artifact
+    // through the finalizer. Only checkpoints selected by the current
+    // action-causal release gate may produce a full receipt and golden set.
+    assert_eq!(
+        checkpoint["environmentContract"].as_str(),
+        Some(STANDIN_CONTRACT_ID),
+        "checkpoint predates the action-causal stand-in contract"
+    );
+    let policy_head_l2 = probe
+        .policy_head
+        .params
+        .iter()
+        .map(|weight| f64::from(*weight).powi(2))
+        .sum::<f64>()
+        .sqrt();
+    assert!(policy_head_l2 > 1e-8, "refusing an all-zero policy head");
+    assert!(
+        eval_240["distanceMeters"].as_f64().unwrap_or(0.0) > 1e-6,
+        "refusing a policy with no action-caused greedy distance"
+    );
+    assert!(
+        eval_240["actuatorWorkJoules"].as_f64().unwrap_or(0.0) > 1e-9,
+        "refusing a policy with no greedy actuator work"
+    );
 
     // Golden forward vectors from the reloaded file (deterministic obs chain,
     // identical LCG to train_ablation.rs).
@@ -215,7 +249,8 @@ fn main() {
         },
         "training": {
             "algorithm": "PPO (clipped) + GAE; Muon on hidden 2-D weights; Adam on embed/heads/norms/log_std; zero-initialized policy head",
-            "environment": "StandinEnv — exact port of cmaes_explainer app/lib/g1StepwiseEnv.ts, full 240-step episodes",
+            "environment": "StandinEnv — action-causal explanatory port of cmaes_explainer app/lib/g1StepwiseEnv.ts, full 240-step episodes; not the owner SE(3) rollout",
+            "environmentContract": STANDIN_CONTRACT_ID,
             "stoppedEarly": true,
             "completedIterations": completed,
             "iterationsPlanned": planned,
@@ -224,7 +259,8 @@ fn main() {
             "wallclockSeconds": checkpoint["wallclockSeconds"],
             "bestMeanReward": checkpoint["bestMeanReward"],
             "bestIteration": checkpoint["bestIteration"],
-            "shippedCheckpoint": "best-mean-reward iteration (snapshot reloaded for eval/golden)",
+            "shippedCheckpoint": "best post-update greedy mean reward among candidates with nonzero policy head, action-caused distance, and actuator work (snapshot reloaded for eval/golden)",
+            "policyHeadL2": policy_head_l2,
             "seedChain": { "rolloutRng": "0x5EEDC0FFEE5040", "modelInit": "0xD1CE504020260830" },
         },
         "evaluation": { "greedy240": eval_240, "greedy720": eval_720 },

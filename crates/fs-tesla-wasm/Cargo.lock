@@ -51,7 +51,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "asupersync"
-version = "0.4.9"
+version = "0.4.10"
 dependencies = [
  "aes-gcm",
  "asupersync-macros",
@@ -812,13 +812,13 @@ dependencies = [
  "fs-blake3",
  "fs-cutfem",
  "fs-exec",
+ "fs-ga",
  "fs-la",
  "fs-material",
  "fs-modal",
  "fs-scenario",
  "fs-solver",
  "fs-sparse",
- "fs-time",
 ]
 
 [[package]]
@@ -875,19 +875,6 @@ dependencies = [
 [[package]]
 name = "fs-tilelang-macros"
 version = "0.0.1"
-
-[[package]]
-name = "fs-time"
-version = "0.0.1"
-dependencies = [
- "fs-ad",
- "fs-blake3",
- "fs-exec",
- "fs-ga",
- "fs-la",
- "fs-math",
- "fs-solver",
-]
 
 [[package]]
 name = "futures-core"
