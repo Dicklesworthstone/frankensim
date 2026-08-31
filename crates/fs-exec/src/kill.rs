@@ -110,10 +110,20 @@ impl KillRegistry {
 
     /// Kill every candidate the predicate condemns (e-BH style batch
     /// elimination). Returns the killed ids, ascending (deterministic).
+    ///
+    /// The batch is a snapshot of the registry at call entry. A concurrently
+    /// released gate can still be signalled through its in-flight `Arc`, while
+    /// a candidate registered after the snapshot waits for the next batch.
     pub fn kill_where(&self, mut condemn: impl FnMut(CandidateId) -> bool) -> Vec<CandidateId> {
-        let entries = self.lock();
+        // SAFETY: never invoke caller-controlled code while holding the registry mutex. A
+        // predicate is allowed to query or mutate this registry without self-deadlocking.
+        let entries: Vec<_> = self
+            .lock()
+            .iter()
+            .map(|(&id, gate)| (id, Arc::clone(gate)))
+            .collect();
         let mut killed = Vec::new();
-        for (&id, gate) in entries.iter() {
+        for (id, gate) in entries {
             if condemn(id) {
                 gate.request();
                 killed.push(id);
@@ -139,6 +149,8 @@ impl KillRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::mpsc;
+    use std::time::Duration;
 
     #[test]
     fn register_kill_release_lifecycle_is_idempotent_and_structured() {
@@ -180,5 +192,28 @@ mod tests {
         assert_eq!(killed, vec![3, 5, 9], "ascending, deterministic");
         assert!(!reg.register(1).is_requested(), "survivor untouched");
         assert!(reg.register(3).is_requested());
+    }
+
+    #[test]
+    fn batch_predicate_can_reenter_registry_without_deadlocking() {
+        for _ in 0..10 {
+            let reg = Arc::new(KillRegistry::new());
+            let _ = reg.register(1);
+            let worker_reg = Arc::clone(&reg);
+            let (tx, rx) = mpsc::channel();
+            std::thread::spawn(move || {
+                let killed = worker_reg.kill_where(|id| {
+                    let _ = worker_reg.register(2);
+                    id == 1
+                });
+                let _ = tx.send(killed);
+            });
+            assert_eq!(
+                rx.recv_timeout(Duration::from_secs(1))
+                    .expect("reentrant predicate must complete"),
+                vec![1]
+            );
+            assert_eq!(reg.live(), 2);
+        }
     }
 }
