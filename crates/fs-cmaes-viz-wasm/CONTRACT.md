@@ -140,7 +140,7 @@ On wasm32, wasm-bindgen exports:
 | `evaluator.evaluate(policy)` | 128 policy words | decomposed scalar objective receipt |
 | `evaluator.evaluate_population(policies)` | up to 64 row-major policies | one objective per candidate in one boundary call |
 | `evaluator.trace(policy)` | 128 policy words | receipt plus object and source-ordered link poses |
-| `cmaes_viz_kernel_version()` | no arguments | `"fs-cmaes-viz-wasm 0.6.7"` |
+| `cmaes_viz_kernel_version()` | no arguments | `"fs-cmaes-viz-wasm 0.6.11"` |
 
 There is no JSON hot path and no schema-1 compatibility shim.
 
@@ -370,9 +370,14 @@ count expose the query work instead of hiding it in a generic penalty.
 
 `placed=1` requires an established bilateral grasp, release after transport,
 at least the admitted lift target, terminal position error no greater than the
-admitted tolerance, and no active grasp at the horizon. The disclosed
-curriculum mean passes those same criteria for all three task presets; it is
-not a hidden browser animation.
+admitted tolerance, no active grasp at the horizon, zero integrated collision
+risk, zero possible-collision time, and a certified clearance of at least
+0.045 m throughout the rollout. The disclosed curriculum mean passes that full
+contract for the kitchen-mug and living-room-remote presets. The backyard-trowel
+mean completes grasp, lift, transport, and release but is truthfully refused as
+a placement because its current trajectory violates the collision contract; it
+remains a deterministic failing curriculum case rather than a hidden browser
+animation.
 
 Trace adds `sample_count`, followed by 67-word samples containing `time_s,
 gripper_width_m, grip_normal_force_n, grasped`, one object pose, and eight link
@@ -409,8 +414,9 @@ the pending batch.
 - focused native tests, including four-family dispatch, seeded replay,
   repair-and-retry ask/tell semantics, exact budget exhaustion, typed
   refusals, a real 5,040-dimensional generation for every scalable family,
-  all three successful household curricula, and a real 128-dimensional arm
-  generation through every CMA family;
+  two collision-certified household placements plus the deterministic trowel
+  collision refusal, and a real 128-dimensional arm generation through every
+  CMA family;
 - strict crate-local Clippy with warnings denied;
 - locked wasm32 check;
 - release `wasm-pack build --target web` to a unique external cache directory;

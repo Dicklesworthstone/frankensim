@@ -36,7 +36,7 @@ use fs_tribo::{
 };
 
 /// Stable identity of the reduced owner-composed manipulation experiment.
-pub const MANIPULATION_MODEL_ID: &str = "fs-cmaes/iiwa-household-manipulation-v2";
+pub const MANIPULATION_MODEL_ID: &str = "fs-cmaes/iiwa-household-manipulation-v3";
 /// Source-bound joints in the KUKA LBR iiwa 7 R800 catalog.
 pub const ARM_JOINT_COUNT: usize = 7;
 /// Source-bound links, including fixed `iiwa_link_0`.
@@ -70,7 +70,8 @@ const PAD_ROTATIONAL_STIFFNESS_NM_PER_RAD: f64 = 0.45;
 const PAD_ROTATIONAL_DAMPING_RATIO: f64 = 0.75;
 const PAD_STICK_SPEED_M_PER_S: f64 = 0.035;
 const OBJECT_CONTACT_SUBSTEPS: usize = 4;
-const COLLISION_MARGIN_M: f64 = 0.045;
+/// Minimum certified separation required throughout a successful placement [m].
+pub const PLACEMENT_CLEARANCE_M: f64 = 0.045;
 const COLLISION_QUERY_ITERATIONS: u32 = 24;
 const COLLISION_EXECUTION_SEED: u64 = 0xC011_1510;
 const LINK_ENVELOPE_RADII_M: [f64; ARM_JOINT_COUNT] =
@@ -683,6 +684,9 @@ impl ManipulationEvaluator {
                 && released_after_transport
                 && maximum_lift_m >= LIFT_TARGET_M
                 && final_object_error_m <= PLACEMENT_TOLERANCE_M
+                && collision_risk_integral == 0.0
+                && minimum_certified_clearance_m >= PLACEMENT_CLEARANCE_M
+                && possible_collision_time_s == 0.0
                 && !grasped;
             let grasp_penalty = if ever_grasped { 0.0 } else { 220.0 };
             let release_penalty = if released_after_transport { 0.0 } else { 100.0 };
@@ -1476,13 +1480,13 @@ fn consider_collision_pair(
     // gap is itself a certified lower separation bound and a cheap broad reject.
     let broad_clearance_m =
         (vec_norm(first_center - second_center) - first_radius_m - second_radius_m).max(0.0);
-    if broad_clearance_m >= COLLISION_MARGIN_M {
+    if broad_clearance_m >= PLACEMENT_CLEARANCE_M {
         state.minimum_clearance_m = state.minimum_clearance_m.min(broad_clearance_m);
         return Ok(());
     }
     let separation = convex_separation(first, second, COLLISION_QUERY_ITERATIONS, cx)?;
     state.minimum_clearance_m = state.minimum_clearance_m.min(separation.lo);
-    state.risk_m += (COLLISION_MARGIN_M - separation.lo).max(0.0);
+    state.risk_m += (PLACEMENT_CLEARANCE_M - separation.lo).max(0.0);
     state.possible_collision |= !separation.separation_proven;
     state.query_iterations = state.query_iterations.saturating_add(separation.iterations);
     Ok(())
@@ -1683,7 +1687,7 @@ mod tests {
     }
 
     #[test]
-    fn curriculum_rollouts_are_deterministic_and_complete_all_three_tasks()
+    fn curriculum_rollouts_are_deterministic_and_do_not_hide_collision_failures()
     -> Result<(), ManipulationError> {
         for task in [
             ManipulationTask::KitchenMug,
@@ -1756,7 +1760,8 @@ mod tests {
                 });
             let summary = format!(
                 "task={task:?}, objective={:.6}, final_error={:.6}, min_reach={:.6}, \
-                 max_lift={:.6}, first_grasp={:.6}, grasp_duration={:.6}, peak_force={:.6}, \
+                 max_lift={:.6}, collision_risk={:.6}, minimum_clearance={:.6}, \
+                 possible_collision_time={:.6}, first_grasp={:.6}, grasp_duration={:.6}, peak_force={:.6}, \
                  ever_grasped={}, released={}, placed={}, closest_time={:.6}, \
                  closest_tool={:?}, closest_object={:?}, snapshots={snapshots:?}, \
                  release_neighborhood={release_neighborhood:?}",
@@ -1764,6 +1769,9 @@ mod tests {
                 first.final_object_error_m,
                 first.minimum_reach_error_m,
                 first.maximum_lift_m,
+                first.collision_risk_integral,
+                first.minimum_certified_clearance_m,
+                first.possible_collision_time_s,
                 first.first_grasp_time_s,
                 first.grasp_duration_s,
                 first.peak_grip_force_n,
@@ -1777,7 +1785,26 @@ mod tests {
             assert!(first.ever_grasped, "{summary}");
             assert!(first.maximum_lift_m >= LIFT_TARGET_M, "{summary}");
             assert!(first.released_after_transport, "{summary}");
-            assert!(first.placed, "{summary}");
+            match task {
+                ManipulationTask::KitchenMug | ManipulationTask::LivingRoomRemote => {
+                    assert_eq!(first.collision_risk_integral, 0.0, "{summary}");
+                    assert!(
+                        first.minimum_certified_clearance_m >= PLACEMENT_CLEARANCE_M,
+                        "{summary}"
+                    );
+                    assert_eq!(first.possible_collision_time_s, 0.0, "{summary}");
+                    assert!(first.placed, "{summary}");
+                }
+                ManipulationTask::BackyardTrowel => {
+                    assert!(first.collision_risk_integral > 0.0, "{summary}");
+                    assert!(
+                        first.minimum_certified_clearance_m < PLACEMENT_CLEARANCE_M,
+                        "{summary}"
+                    );
+                    assert!(first.possible_collision_time_s > 0.0, "{summary}");
+                    assert!(!first.placed, "{summary}");
+                }
+            }
         }
         Ok(())
     }

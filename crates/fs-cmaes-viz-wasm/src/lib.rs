@@ -55,7 +55,7 @@ use manipulation::{
 };
 
 /// Kernel identity returned by the browser capability probe.
-pub const KERNEL_VERSION: &str = "fs-cmaes-viz-wasm 0.6.9";
+pub const KERNEL_VERSION: &str = "fs-cmaes-viz-wasm 0.6.11";
 /// Exact binary64 word identifying schema-2 packets (`"CMA2"`).
 pub const PACKET_MAGIC: u32 = 0x434d_4132;
 /// Packed ask/tell ABI schema.
@@ -1688,7 +1688,7 @@ mod schema_two_tests {
         assert_eq!(packet[4], packet.len() as f64);
     }
 
-    fn assert_arm_success(packet: &[f64], kind: u32) {
+    fn assert_arm_packet_ok(packet: &[f64], kind: u32) {
         assert_eq!(packet[0], f64::from(ARM_PACKET_MAGIC));
         assert_eq!(packet[1], f64::from(ARM_PACKET_SCHEMA_VERSION));
         assert_eq!(packet[2], f64::from(PACKET_STATUS_OK));
@@ -2143,7 +2143,7 @@ mod schema_two_tests {
     }
 
     #[test]
-    fn arm_packets_expose_self_describing_scenes_and_successful_owner_traces() {
+    fn arm_packets_expose_self_describing_scenes_and_honest_owner_outcomes() {
         for task in [
             ManipulationTask::KitchenMug,
             ManipulationTask::LivingRoomRemote,
@@ -2151,7 +2151,7 @@ mod schema_two_tests {
         ] {
             let evaluator = PackedManipulationEvaluator::new(&arm_config_packet(task, 6.0, 3));
             let admission = evaluator.receipt_packet();
-            assert_arm_success(&admission, ARM_PACKET_KIND_ADMISSION);
+            assert_arm_packet_ok(&admission, ARM_PACKET_KIND_ADMISSION);
             assert_eq!(admission.len(), ARM_ADMISSION_WORDS);
             assert_eq!(admission[5], ARM_POLICY_DIMENSION as f64);
             assert_eq!(admission[6], ARM_JOINT_COUNT as f64);
@@ -2166,15 +2166,29 @@ mod schema_two_tests {
             let mean = evaluator.curriculum_policy_mean();
             assert_eq!(mean.len(), ARM_POLICY_DIMENSION);
             let evaluation = evaluator.evaluate_packet(&mean);
-            assert_arm_success(&evaluation, ARM_PACKET_KIND_EVALUATION);
+            assert_arm_packet_ok(&evaluation, ARM_PACKET_KIND_EVALUATION);
             assert_eq!(evaluation.len(), ARM_RECEIPT_WORDS);
             assert!(evaluation[5].is_finite());
             assert!(evaluation[6] <= PLACEMENT_TOLERANCE_M);
             assert!(evaluation[8] >= LIFT_TARGET_M);
-            assert_eq!(&evaluation[18..=20], &[1.0, 1.0, 1.0]);
+            assert_eq!(&evaluation[18..=19], &[1.0, 1.0]);
+            match task {
+                ManipulationTask::KitchenMug | ManipulationTask::LivingRoomRemote => {
+                    assert_eq!(evaluation[10], 0.0);
+                    assert!(evaluation[11] >= manipulation::PLACEMENT_CLEARANCE_M);
+                    assert_eq!(evaluation[12], 0.0);
+                    assert_eq!(evaluation[20], 1.0);
+                }
+                ManipulationTask::BackyardTrowel => {
+                    assert!(evaluation[10] > 0.0);
+                    assert!(evaluation[11] < manipulation::PLACEMENT_CLEARANCE_M);
+                    assert!(evaluation[12] > 0.0);
+                    assert_eq!(evaluation[20], 0.0);
+                }
+            }
 
             let trace = evaluator.trace_packet(&mean);
-            assert_arm_success(&trace, ARM_PACKET_KIND_TRACE);
+            assert_arm_packet_ok(&trace, ARM_PACKET_KIND_TRACE);
             let sample_count = trace[ARM_RECEIPT_WORDS] as usize;
             assert!(sample_count >= 50);
             assert_eq!(
@@ -2222,7 +2236,7 @@ mod schema_two_tests {
             let ask = optimizer.ask_packet();
             assert_success(&ask, PACKET_KIND_ASK);
             let objectives = evaluator.evaluate_population_packet(&ask[ASK_FIXED_WORDS..]);
-            assert_arm_success(&objectives, ARM_PACKET_KIND_POPULATION);
+            assert_arm_packet_ok(&objectives, ARM_PACKET_KIND_POPULATION);
             assert_eq!(objectives[5], 4.0);
             assert!(
                 objectives[6..]
