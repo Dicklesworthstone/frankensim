@@ -23,9 +23,9 @@
 //! shrunk. Claiming more would make the gate itself a claim-integrity
 //! defect.
 //!
-//! Parser note: the in-house JSON parser collapses `true`/`false` into a
-//! payload-less `Bool`, so flags in this registry are string enums
-//! (`"live_default": "yes" | "no"`) — deterministic, greppable, lossless.
+//! Registry note: flags use explicit string enums
+//! (`"live_default": "yes" | "no"`) so the accepted vocabulary stays
+//! deterministic and greppable.
 
 use crate::depgraph::{JsonParser, JsonValue};
 use crate::{PolicyNote, Violation};

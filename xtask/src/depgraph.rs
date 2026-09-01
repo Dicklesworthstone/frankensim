@@ -665,7 +665,7 @@ pub(super) enum JsonValue {
     String(String),
     Array(Vec<JsonValue>),
     Object(BTreeMap<String, JsonValue>),
-    Bool,
+    Bool(bool),
     Number(String),
 }
 
@@ -938,11 +938,11 @@ impl<'a> JsonParser<'a> {
             }
             Some(b't') => {
                 self.expect(b"true")?;
-                Ok(JsonValue::Bool)
+                Ok(JsonValue::Bool(true))
             }
             Some(b'f') => {
                 self.expect(b"false")?;
-                Ok(JsonValue::Bool)
+                Ok(JsonValue::Bool(false))
             }
             Some(b'-' | b'0'..=b'9') => self.number().map(JsonValue::Number),
             _ => Err(format!(
@@ -2065,6 +2065,18 @@ mod tests {
                 .is_ok(),
             "a separately bounded caller may declare a larger string budget",
         );
+    }
+
+    #[test]
+    fn json_parser_preserves_boolean_values() {
+        assert!(matches!(
+            JsonParser::new("true").finish(),
+            Ok(JsonValue::Bool(true))
+        ));
+        assert!(matches!(
+            JsonParser::new("false").finish(),
+            Ok(JsonValue::Bool(false))
+        ));
     }
 
     #[test]

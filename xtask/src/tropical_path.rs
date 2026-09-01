@@ -490,7 +490,7 @@ fn parse_artifact(text: &str) -> Result<TropicalArtifact, String> {
     if !(makespan_hours.is_finite() && makespan_hours >= 0.0) {
         return Err("artifact makespan is not a finite non-negative number".to_string());
     }
-    let path_is_unique = matches!(map.get("path_is_unique"), Some(JsonValue::Bool));
+    let path_is_unique = matches!(map.get("path_is_unique"), Some(JsonValue::Bool(true)));
     let mut critical_path = Vec::new();
     match map.get("critical_path") {
         Some(JsonValue::Array(entries)) => {

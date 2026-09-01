@@ -350,7 +350,7 @@ fn metadata_targets(root: &Path) -> Result<(Vec<(String, String, PathBuf)>, Vec<
                         if !runnable_kind {
                             continue;
                         }
-                        if !matches!(json_obj_field(target, "test"), Some(JsonValue::Bool)) {
+                        if !matches!(json_obj_field(target, "test"), Some(JsonValue::Bool(true))) {
                             continue;
                         }
                         let target_name = json_string(target, "name")
@@ -1001,7 +1001,10 @@ fn parse_receipt(text: &str) -> Result<SuiteReceipt, String> {
                 crate_sum.0 += json_count(value, "passed")?;
                 crate_sum.1 += json_count(value, "failed")?;
                 crate_sum.2 += json_count(value, "ignored")?;
-                if matches!(json_obj_field(value, "target_error"), Some(JsonValue::Bool)) {
+                if matches!(
+                    json_obj_field(value, "target_error"),
+                    Some(JsonValue::Bool(true))
+                ) {
                     target_error_crates.insert(krate.clone());
                 }
             }
