@@ -444,9 +444,13 @@ fn jc_012_archived_sweep_receipts_parse() {
         .filter_map(Result::ok)
         .map(|e| e.path())
         .filter(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.starts_with("slot-jet-3d-re-sweep") && n.ends_with(".jsonl"))
+            p.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+                // The campaign file and the per-rung files; the
+                // post-hoc parity analysis carries its own schema.
+                n.starts_with("slot-jet-3d-re-sweep")
+                    && n.ends_with(".jsonl")
+                    && !n.contains("-parity")
+            })
         })
         .collect::<Vec<_>>();
     files.sort();

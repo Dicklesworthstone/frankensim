@@ -283,7 +283,7 @@ radiation with scope; typed refusals; bitwise determinism; ramp
 structure + rung grid + bitwise determinism; ramp + peak-instrument
 typed refusals.
 
-`tests/jetcard.rs` (9): tonal interim card mints the recorded
+`tests/jetcard.rs` (13): tonal interim card mints the recorded
 stage-I point with X-Struct residual + narrow claim + validity
 refusals; exact round trip + stable content hash; broadband/refusal
 minting laws (no broadband rung -> refuse; out-of-regime rung ->
@@ -291,7 +291,19 @@ refuse; boundary needs >= 2 admitted all-tonal rungs); the
 no-residual X-Est cap and the forged-authority refusal; parser
 refusals on foreign schema, laundered scope, truncation, and
 trailing bytes; momentum-thickness tanh-edge law + refusals; pinned
-schema constant.
+schema constant; the sweep-receipt reader (`SlotJet3dRung::from_jsonl`,
+`parse_sweep_receipts`): bitwise round trip incl. a non-finite flux
+imbalance, pinned-order/schema/trailing-byte/non-finite refusals,
+header-first and foreign-schema file refusals, and every archived
+`tests/receipts/slot-jet-3d-re-sweep*.jsonl` parsing; the
+temporal-Nyquist law (`peak_at_nyquist_edge`, `NYQUIST_EDGE_BINS`):
+a rung whose raw peak sits within 8 bins of the record's Nyquist edge
+is the bounce-back parity artifact (executed at rate 1.60: bin 4095 of
+4096) and no minter admits it; the parity filter
+(`parity_filtered_force_series`, `classify_rung_parity_filtered`):
+non-overlapping pair averaging annihilates the period-2 line exactly,
+keeps a tone's bin index and Strouhal (record duration unchanged; the
+pipeline Strouhal is halved), refuses odd/short records.
 
 `tests/aeroac.rs` (11): Wronskian identity; derivative cross-checks;
 fsci-special oracle; small-argument limits; Hankel far-field
