@@ -411,8 +411,16 @@ fn jc_013_nyquist_edge_peaks_are_parity_artifacts_and_cannot_back_a_card() {
     let (_, raw_peak) = transverse_force_spectrum(&series, 2.5, 0.04, n / 8).expect("raw");
     let (_, filtered_peak) =
         transverse_force_spectrum(&filtered, 2.5, 0.04, n / 16).expect("filtered");
-    assert_eq!(raw_peak.bin, n / 2 - 1, "the raw record peaks at the Nyquist edge");
-    assert_eq!(filtered_peak.bin, tone_bin / 2, "the tone keeps its Strouhal at half the rate");
+    assert_eq!(
+        raw_peak.bin,
+        n / 2 - 1,
+        "the raw record peaks at the Nyquist edge"
+    );
+    assert_eq!(
+        filtered_peak.bin,
+        tone_bin / 2,
+        "the tone keeps its Strouhal at half the rate"
+    );
     assert!(
         (filtered_peak.strouhal - raw_peak.strouhal * (tone_bin as f64 / (n / 2 - 1) as f64)).abs()
             < 1e-9

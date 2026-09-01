@@ -678,7 +678,9 @@ pub fn classify_rung(
 /// [`AeroacError::InvalidParameter`] when the record is not an even
 /// length of at least 128 (so the halved record still admits the
 /// spectrum pipeline's `>= 64` floor).
-pub fn parity_filtered_force_series(force_series: &[[f64; 2]]) -> Result<Vec<[f64; 2]>, AeroacError> {
+pub fn parity_filtered_force_series(
+    force_series: &[[f64; 2]],
+) -> Result<Vec<[f64; 2]>, AeroacError> {
     if force_series.len() < 128 || !force_series.len().is_multiple_of(2) {
         return Err(AeroacError::InvalidParameter {
             what: "parity filter needs an even force record of at least 128 samples",

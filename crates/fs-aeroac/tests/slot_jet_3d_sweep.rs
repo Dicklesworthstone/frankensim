@@ -17,7 +17,8 @@
 //! (chunked runner) absorb worker job walls if routed through RCH.
 
 use fs_aeroac::slot_jet_3d::{
-    SlotJet3dConfig, SweepProgress, classify_rung, run_slot_jet_3d_chunked,
+    SlotJet3dConfig, SweepProgress, classify_rung, classify_rung_parity_filtered,
+    run_slot_jet_3d_chunked,
 };
 use fs_lbm::d3q19::CollisionModel3;
 use std::fmt::Write as _;
@@ -232,6 +233,76 @@ fn re_sweep_campaign() {
     }
 
     archive_receipts(&receipt_path, filtered_rate, &jsonl, &regime_map);
+}
+
+/// Post-hoc re-classification of every completed rung under the
+/// disclosed parity filter (bead law: logging sufficient to re-derive
+/// the classification). Terminal checkpoints retain the raw force
+/// record and `run_slot_jet_3d_chunked` returns a Complete run
+/// idempotently, so this reads physics that already executed and
+/// runs no lattice step. Archives one receipt file with, per rung, the
+/// raw row, the parity-filtered row, and the Nyquist-edge verdict of
+/// the raw peak (the artifact class the 2-D battery pins at
+/// `bin < n/2 - 8`). Rungs without a Complete checkpoint are skipped
+/// and named.
+#[test]
+#[ignore = "post-hoc analysis of executed sweep checkpoints (bead 3ez8g.10.1)"]
+fn re_sweep_parity_reclassify() {
+    let receipt_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/receipts/slot-jet-3d-re-sweep-parity.jsonl");
+    let mut jsonl = String::from(
+        "{\"schema\":\"fs-aeroac.slot-jet-3d.re-sweep-parity/v1\",\"scope\":\"per completed rung: raw row, parity-filtered row (pair-averaged record, bin width doubled), and the raw peak's Nyquist-edge verdict; no lattice step executed\"}\n",
+    );
+    let mut any = false;
+    for rate in LADDER {
+        let cfg = base_config(rate);
+        let ckpt = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target-sweep-ckpt")
+            .join(format!("{rate:.2}"));
+        if !ckpt.join("state.bin").exists() {
+            println!("rate {rate:.2}: no checkpoint; skipped");
+            continue;
+        }
+        let run = match run_slot_jet_3d_chunked(&cfg, &ckpt, 1) {
+            Ok(SweepProgress::Complete(run)) => *run,
+            Ok(SweepProgress::Partial { steps_done }) => {
+                println!("rate {rate:.2}: checkpoint incomplete at {steps_done} steps; skipped");
+                continue;
+            }
+            Err(refusal) => {
+                println!("rate {rate:.2}: checkpoint refused ({refusal}); skipped");
+                continue;
+            }
+        };
+        let raw = classify_rung(&run, &cfg).expect("raw classification");
+        let filtered = classify_rung_parity_filtered(&run, &cfg).expect("filtered classification");
+        let nyquist_bins = run.diagnostics.record_len / 2;
+        let raw_edge = raw.peak_bin + 8 >= nyquist_bins;
+        let _ = writeln!(
+            jsonl,
+            "{{\"schema\":\"fs-aeroac.slot-jet-3d.rung-parity/v1\",\"second_order_rate\":{},\"raw_peak_at_nyquist_edge\":{raw_edge},\"raw\":{},\"filtered\":{}}}",
+            rate,
+            raw.to_jsonl(),
+            filtered.to_jsonl()
+        );
+        println!(
+            "rate {rate:.2}\tRe={:.1}\traw: bin {} of {} (edge={raw_edge}) flatness={:.3e} tonal={}\tfiltered: St={:.4} bin {} flatness={:.3e} tonal={} prominence={:.2e}",
+            raw.reynolds,
+            raw.peak_bin,
+            nyquist_bins,
+            raw.flatness,
+            raw.tonal,
+            filtered.strouhal,
+            filtered.peak_bin,
+            filtered.flatness,
+            filtered.tonal,
+            filtered.prominence
+        );
+        any = true;
+    }
+    assert!(any, "no completed rung checkpoint to re-classify");
+    std::fs::write(&receipt_path, jsonl).expect("archive parity receipts");
+    println!("archived: {}", receipt_path.display());
 }
 
 /// Shared terminal archive: the per-rung file in single-rung mode, the
