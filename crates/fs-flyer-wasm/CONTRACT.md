@@ -95,9 +95,10 @@ and from node against the actual wasm binary
 
 | Entry | Contract |
 |---|---|
-| `flyer_engine_init(seed, rho, headwind, mode, member, rail_m, max_ticks)` | admission (caps at cap AND cap+1) → equilibrate → RunIntentId minted AFTER the tick-0 digest; returns run identity + trim; replaces any prior run (the E5.0 ring epoch bump is the consumer-side guard) |
+| `flyer_engine_init(seed, rho, headwind, mode, member, rail_m, max_ticks)` | invalidates any prior lifecycle BEFORE admission, then equilibrates and mints RunIntentId after the tick-0 digest; a failed replacement leaves no prior run available to step, digest, or checkpoint |
 | `flyer_engine_step(has_input, lever_n, warp_rad)` | one 120 Hz step; mode words: 0=fixed, 1=historical(member), 2=human (input REQUIRED every tick — absent or non-finite input is a typed refusal, never a silent zero-hold); the success envelope carries reduced lateral `p/phi/r/psi` as real engine state |
 | `flyer_engine_digest()` | chained per-tick blake3 digest (`org.frankensim.wf.sim-digest.v1`) — bit-identical lifecycles are checkable |
+| `flyer_engine_checkpoint()` | exact live checkpoint bytes bound to the active `run_intent_id`; browser transport additionally binds each request/reply/refusal to a monotonic request id and discards a reply that is stale for either identity |
 
 Terminal events arrive IN-BAND as `phase` words (`ended:ground-contact`,
 `ended:rail-end-without-lift`, `ended:max-ticks`,

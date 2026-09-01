@@ -813,6 +813,27 @@ fn benign_clock() -> impl FnMut() -> f64 {
     }
 }
 
+/// Run a fresh solve that must complete every stage, including the ledgered
+/// report stage.
+fn run_to_completion(
+    ledger: &Ledger,
+    decoded: &DecodedProject,
+) -> (fs_cli::SolveOutcome, Vec<String>) {
+    let gate = CancelGate::new_clock_free();
+    let mut clock = benign_clock();
+    let mut progress = Vec::new();
+    let outcome = run_solve(
+        ledger,
+        &gate,
+        &mut clock,
+        decoded,
+        &fixture_cards(),
+        &mut progress,
+    )
+    .expect("a conduction-declaring project completes all seven stages");
+    (outcome, progress)
+}
+
 fn run_to_gap(ledger: &Ledger, decoded: &DecodedProject) -> (SolveRefusal, Vec<String>) {
     let gate = CancelGate::new_clock_free();
     let mut clock = benign_clock();
@@ -909,7 +930,7 @@ fn solve_publication_counts(ledger: &Ledger) -> SolvePublicationCounts {
 #[test]
 fn g0_run_identity_is_deterministic_and_input_sensitive() {
     assert_eq!(
-        SOLVE_DRIVER_VERSION, 8,
+        SOLVE_DRIVER_VERSION, 9,
         "authority-semantic changes must deliberately advance this identity-bearing version"
     );
 
@@ -3015,7 +3036,8 @@ fn g0_stage_order_and_gap_owners_are_pinned() {
     assert_eq!(SolveStage::Qoi.gap_dependency(), Some("frankensim-s2l9v"));
     assert_eq!(
         SolveStage::Report.gap_dependency(),
-        Some("frankensim-rc-root-q61wp.12")
+        None,
+        "report executes: it projects retained receipts (bead frankensim-rc-root-q61wp.12)"
     );
 }
 
@@ -3249,13 +3271,21 @@ fn g1_conduction_stage_executes_and_retains_field_and_balance_evidence() {
     let ledger = Ledger::open(":memory:").expect("ledger");
     import_fixture(&ledger, &spec, bytes);
 
-    let (refusal, progress) = run_to_gap(&ledger, &decoded);
-    assert_eq!(refusal.code, "cli-solve-stage-gap");
-    assert_eq!(refusal.stage, Some("report"), "QoI completed");
-    assert_eq!(refusal.dependency, Some("frankensim-rc-root-q61wp.12"));
+    let (outcome, progress) = run_to_completion(&ledger, &decoded);
+    assert!(
+        matches!(outcome.status, fs_cli::SolveRunStatus::Completed),
+        "QoI and the ledgered report stage both execute"
+    );
+    assert_eq!(outcome.stages.len(), 7, "seven producer stages sealed");
     assert!(
         progress.iter().any(|line| line.contains("conduction")),
         "the executing conduction stage reports progress"
+    );
+    assert!(
+        progress
+            .iter()
+            .any(|line| line.contains("\"stage\":\"report\",\"ordinal\":6,\"status\":\"ok\"")),
+        "the report stage reports progress like every other stage"
     );
     let qoi_progress = progress
         .iter()
@@ -3279,9 +3309,9 @@ fn g1_conduction_stage_executes_and_retains_field_and_balance_evidence() {
     let elapsed_ms = receipt_number_field(qoi_progress, "elapsed_ms");
     assert!(elapsed_ms.is_finite() && elapsed_ms >= 0.0);
 
-    let run = refusal.run.expect("run");
+    let run = outcome.run.clone();
     let receipts = stage_receipt_hashes(&ledger, &run);
-    assert_eq!(receipts.len(), 6, "QoI retained the sixth receipt");
+    assert_eq!(receipts.len(), 7, "QoI and report retained the sixth and seventh receipts");
     let receipt =
         String::from_utf8(artifact_bytes(&ledger, &receipts[4])).expect("receipt is utf-8");
     assert_balanced_json(&receipt);
@@ -3337,18 +3367,68 @@ fn g1_conduction_stage_executes_and_retains_field_and_balance_evidence() {
     let mut clock = benign_clock();
     let mut resume_progress = Vec::new();
     let resumed = resume_solve(&ledger, &gate, &mut clock, &run, &mut resume_progress)
-        .expect_err("resume re-attests QoI and stops at the report gap");
-    assert_eq!(resumed.code, "cli-solve-stage-gap");
-    assert_eq!(resumed.stage, Some("report"));
-    assert_eq!(resumed.dependency, Some("frankensim-rc-root-q61wp.12"));
+        .expect_err("a completed run has nothing left to resume");
+    assert_eq!(resumed.code, "cli-solve-resume-complete");
     assert!(
         resume_progress.is_empty(),
-        "a resume whose QoI stage is already committed emits no duplicate stage progress"
+        "a resume of a completed run emits no duplicate stage progress"
     );
     assert_eq!(
         stage_receipt_hashes(&ledger, &run),
         receipts,
-        "resume preserves the exact six-stage prefix"
+        "resume preserves the exact seven-stage run"
+    );
+
+    // The report stage is a pure projection of the retained receipts.
+    let report_receipt =
+        String::from_utf8(artifact_bytes(&ledger, &receipts[6])).expect("report receipt is utf-8");
+    assert_balanced_json(&report_receipt);
+    assert!(report_receipt.contains("frankensim.cli.solve-report.v1"));
+    assert!(report_receipt.contains("\"stage\":\"report\""));
+    assert!(report_receipt.contains("\"verdict\":\"indeterminate\""));
+    assert!(report_receipt.contains("\"budget_terms_measured\":0"));
+    assert!(report_receipt.contains(&format!("\"qoi_receipt\":\"{}\"", receipts[5])));
+    assert!(report_receipt.contains(&format!("\"conduction_receipt\":\"{}\"", receipts[4])));
+    let html = String::from_utf8(artifact_bytes(
+        &ledger,
+        &receipt_str_field(&report_receipt, "report_html"),
+    ))
+    .expect("retained html is utf-8");
+    assert!(html.contains(&run), "the report names its run");
+    assert!(html.contains("temperature-max"));
+    assert!(html.contains("NO-DATA"), "unmeasured terms print as NO-DATA: {html}");
+    assert!(html.contains("no-data"), "the budget term states are copied verbatim");
+    assert!(html.contains(&receipts[4]), "the report cites the conduction receipt hash");
+    assert!(!html.contains("342.15"), "no fabricated literal survives");
+    let twin = String::from_utf8(artifact_bytes(
+        &ledger,
+        &receipt_str_field(&report_receipt, "report_json"),
+    ))
+    .expect("retained twin is utf-8");
+    assert!(twin.contains("\"schema\": \"frankensim.report.engineering.v1\""));
+    assert!(!twin.contains("NaN"), "the JSON twin never emits NaN");
+    assert_eq!(
+        twin.matches("\"state\": \"no-data\"").count(),
+        8,
+        "all eight NO-DATA terms are carried into the twin"
+    );
+    let package_text = String::from_utf8(artifact_bytes(
+        &ledger,
+        &receipt_str_field(&report_receipt, "package"),
+    ))
+    .expect("retained package is utf-8");
+    let package = fs_package::EvidencePackage::from_json(&package_text)
+        .expect("the retained package is a format-9 package");
+    let check = fs_checker::check(&package);
+    assert!(check.passed(), "the solver-free checker accepts the retained package");
+    assert_eq!(
+        check.merkle_root().to_hex(),
+        receipt_str_field(&report_receipt, "package_root"),
+        "the receipt records the exact package root the checker recomputes"
+    );
+    assert!(
+        !package_text.contains("\"verified\""),
+        "an estimate-only run mints no Verified claim: {package_text}"
     );
 
     let interrupted = Ledger::open(":memory:").expect("interrupted ledger");
@@ -3370,10 +3450,18 @@ fn g1_conduction_stage_executes_and_retains_field_and_balance_evidence() {
         &interrupted_run,
         &mut progress,
     )
-    .expect_err("resume executes QoI then stops at report");
-    assert_eq!(after_resume.stage, Some("report"));
+    .expect("resume executes QoI and then the report stage to completion");
+    assert!(matches!(
+        after_resume.status,
+        fs_cli::SolveRunStatus::Completed
+    ));
     let resumed_receipts = stage_receipt_hashes(&interrupted, &interrupted_run);
-    assert_eq!(resumed_receipts.len(), 6);
+    assert_eq!(resumed_receipts.len(), 7);
+    assert_eq!(
+        artifact_bytes(&interrupted, &resumed_receipts[6]),
+        artifact_bytes(&ledger, &receipts[6]),
+        "the report is a pure function of the retained receipts, not of ledger coordinates"
+    );
     assert_eq!(
         progress
             .iter()
@@ -3403,17 +3491,16 @@ fn g0_conduction_stage_executes_declared_card_backed_contact() {
     let gate = CancelGate::new_clock_free();
     let mut clock = benign_clock();
     let mut progress = Vec::new();
-    let refusal = run_solve(&ledger, &gate, &mut clock, &decoded, &cards, &mut progress)
-        .expect_err("contact solve completes QoI and stops at the report gap");
-    assert_eq!(refusal.code, "cli-solve-stage-gap", "{}", refusal.what);
-    assert_eq!(refusal.stage, Some("report"));
+    let outcome = run_solve(&ledger, &gate, &mut clock, &decoded, &cards, &mut progress)
+        .expect("contact solve completes QoI and the report stage");
+    assert!(matches!(outcome.status, fs_cli::SolveRunStatus::Completed));
 
-    let run = refusal.run.expect("run");
+    let run = outcome.run.clone();
     let receipts = stage_receipt_hashes(&ledger, &run);
     assert_eq!(
         receipts.len(),
-        6,
-        "contact conduction and QoI retained six producer receipts"
+        7,
+        "contact conduction, QoI, and report retained seven producer receipts"
     );
     let receipt =
         String::from_utf8(artifact_bytes(&ledger, &receipts[4])).expect("receipt is utf-8");
@@ -3461,9 +3548,8 @@ fn g0_conduction_stage_executes_declared_card_backed_contact() {
         &run,
         &mut resume_progress,
     )
-    .expect_err("resume replays contact and stops at report");
-    assert_eq!(resumed.code, "cli-solve-stage-gap");
-    assert_eq!(resumed.stage, Some("report"));
+    .expect_err("a completed contact run has nothing left to resume");
+    assert_eq!(resumed.code, "cli-solve-resume-complete");
     assert_eq!(stage_receipt_hashes(&ledger, &run), receipts);
     assert!(
         resume_progress.is_empty(),

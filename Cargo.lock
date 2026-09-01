@@ -2070,6 +2070,7 @@ dependencies = [
  "fs-alloc",
  "fs-blake3",
  "fs-conduction",
+ "fs-convection",
  "fs-evidence",
  "fs-exec",
  "fs-geom",

@@ -35,8 +35,8 @@ export interface SimClientEvents {
   }): void;
   /** E5.3a: ApplyNextEligibleTickAndFlag receipt for one control. */
   onControlAck?(ack: { sequence: number; appliedTick: number; lateByTicks: number }): void;
-  /** Exact live SimLoop checkpoint bytes; caller owns persistence. */
-  onCheckpoint?(checkpoint: { bytes: Uint8Array }): void;
+  /** Exact live SimLoop checkpoint bytes, bound to request and run identity. */
+  onCheckpoint?(checkpoint: { requestId: number; runIntentId: string; bytes: Uint8Array }): void;
 }
 
 export class SimClient {
@@ -58,6 +58,9 @@ export class SimClient {
   private readonly syncSamples: ClockSyncSample[] = [];
   private clockOffsetMs = 0;
   private pingNonce = 0;
+  private initGeneration = 0;
+  private checkpointRequestId = 0;
+  private readonly pendingCheckpoints = new Map<number, string>();
   constructor(events: SimClientEvents, workerFactory?: () => Worker) {
     this.worker =
       workerFactory !== undefined
@@ -91,11 +94,16 @@ export class SimClient {
       const msg = event.data;
       switch (msg.kind) {
         case "ready":
+          if (msg.initGeneration !== this.initGeneration) {
+            break;
+          }
           this.ready = { runIntentId: msg.runIntentId, tick0Digest: msg.tick0Digest };
           events.onReady(msg);
           break;
         case "refusal":
-          events.onRefusal(msg.stage, msg.refusal);
+          if (msg.stage !== "init" || msg.initGeneration === this.initGeneration) {
+            events.onRefusal(msg.stage, msg.refusal);
+          }
           break;
         case "terminal":
           this.terminalCode = msg.envelopeRefusalCode;
@@ -117,7 +125,22 @@ export class SimClient {
           break;
         }
         case "checkpoint":
-          events.onCheckpoint?.({ bytes: msg.bytes });
+          if (
+            this.pendingCheckpoints.get(msg.requestId) === msg.runIntentId &&
+            this.ready?.runIntentId === msg.runIntentId
+          ) {
+            this.pendingCheckpoints.delete(msg.requestId);
+            events.onCheckpoint?.(msg);
+          }
+          break;
+        case "checkpoint-refusal":
+          if (
+            this.pendingCheckpoints.get(msg.requestId) === msg.runIntentId &&
+            this.ready?.runIntentId === msg.runIntentId
+          ) {
+            this.pendingCheckpoints.delete(msg.requestId);
+            events.onRefusal("checkpoint", msg.refusal);
+          }
           break;
         case "metrics":
           console.info(JSON.stringify({ suite: "wf-sim-client", stage: "metrics", ...msg }));
@@ -141,7 +164,11 @@ export class SimClient {
 
   /** Start a run. Uses the SAB ring iff the environment grants SAB. */
   start(scenario: ScenarioInit, runEpoch = 1): void {
+    this.initGeneration += 1;
+    const initGeneration = this.initGeneration;
     this.scenario = scenario;
+    this.ready = null;
+    this.pendingCheckpoints.clear();
     this.recorder = new FlightRecorder();
     this.recording = null;
     let init: Extract<MainToWorker, { kind: "init" }>;
@@ -155,10 +182,10 @@ export class SimClient {
         { slots: RING_SLOTS, payloadF64s: PAYLOAD_F64S },
         { runEpoch, layoutHash: payloadLayoutHash(), anchorPrefix: 0 },
       );
-      init = { kind: "init", scenario, sab, slots: RING_SLOTS, runEpoch };
+      init = { kind: "init", scenario, sab, slots: RING_SLOTS, runEpoch, initGeneration };
     } else {
       this.reader = null;
-      init = { kind: "init", scenario, runEpoch };
+      init = { kind: "init", scenario, runEpoch, initGeneration };
     }
     this.worker.postMessage(init);
   }
@@ -200,8 +227,16 @@ export class SimClient {
   }
 
   /** Request the current live SimLoop checkpoint from the worker. */
-  requestCheckpoint(): void {
-    this.worker.postMessage({ kind: "checkpoint" } satisfies MainToWorker);
+  requestCheckpoint(): boolean {
+    const runIntentId = this.ready?.runIntentId;
+    if (runIntentId === undefined) {
+      return false;
+    }
+    this.checkpointRequestId += 1;
+    const requestId = this.checkpointRequestId;
+    this.pendingCheckpoints.set(requestId, runIntentId);
+    this.worker.postMessage({ kind: "checkpoint", requestId, runIntentId } satisfies MainToWorker);
+    return true;
   }
 
   private push(snap: SimSnapshot): void {

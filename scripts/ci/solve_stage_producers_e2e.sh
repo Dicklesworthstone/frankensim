@@ -36,7 +36,7 @@ GEOMETRY="${FIXTURE_DIR}/plate.stl"
 MATERIAL_PACK="${FIXTURE_DIR}/aa6061.fsmcdpk"
 
 PROFILE="pr"
-THROUGH="qoi"
+THROUGH="report"
 CASE=""
 ARTIFACT_DIR=""
 BINARY="${FRANKENSIM_BIN:-}"
@@ -53,7 +53,7 @@ declare -A GAP_OWNER=(
   [flow-network]=""
   [conduction]=""
   [qoi]=""
-  [report]="frankensim-rc-root-q61wp.12"
+  [report]=""
 )
 
 FAILURES=0
@@ -251,18 +251,47 @@ check "STL facet count is the expected tetrahedron (4)" test "${STL_FACETS}" = "
 
 # --------------------------------------------------------- phase 3: solve
 log phase "solve: staged producers through ${THROUGH}"
-# report is the first gap, so a full invocation is EXPECTED to stop there
-# with exit 5 (UNAVAILABLE) naming its owning bead. QoI EXECUTES on the way:
-# it extracts the declared temperature maximum, composes the sourced limit,
-# and retains all eight unavailable uncertainty terms as explicit NO-DATA.
-run_cli solve 5 -- --json solve "${PROJECT}" "${LEDGER}" --materials "${MATERIAL_PACK}"
+# Every stage executes: QoI extracts the declared temperature maximum,
+# composes the sourced limit, and retains all eight unavailable uncertainty
+# terms as explicit NO-DATA; the report stage then projects the retained
+# receipts into an HTML report, a JSON twin, and a checker-accepted evidence
+# package, and seals all three in the ledger. A completed run exits 0 with
+# status "completed" and seven stages; nothing here is a verified decision.
+run_cli solve 0 -- --json solve "${PROJECT}" "${LEDGER}" --materials "${MATERIAL_PACK}"
 
-check "solve stopped as unavailable"   contains "${ARTIFACT_DIR}/solve.stdout" '"status":"unavailable"'
-check "QoI receipt persisted before the report gap" \
-  grep -qF '"stage":"qoi","ordinal":5,"status":"ok"' "${ARTIFACT_DIR}/solve.stderr"
-check "solve names the gapped stage"   contains "${ARTIFACT_DIR}/solve.stdout" '"stage":"report"'
-check "solve names the owning bead"    contains "${ARTIFACT_DIR}/solve.stdout" '"dependency":"frankensim-rc-root-q61wp.12"'
-check "gap owner matches the table"    test "${GAP_OWNER[report]}" = "frankensim-rc-root-q61wp.12"
+check "solve completed"                contains "${ARTIFACT_DIR}/solve.stdout" '"status":"completed"'
+check "solve sealed seven stages"      contains "${ARTIFACT_DIR}/solve.stdout" '"stages_completed":7'
+check "QoI receipt persisted"          grep -qF '"stage":"qoi","ordinal":5,"status":"ok"' "${ARTIFACT_DIR}/solve.stderr"
+check "report stage persisted"         grep -qF '"stage":"report","ordinal":6,"status":"ok"' "${ARTIFACT_DIR}/solve.stderr"
+check "no stage is a typed gap"        test -z "${GAP_OWNER[report]}${GAP_OWNER[qoi]}${GAP_OWNER[conduction]}"
+
+# ------------------------------------------------ phase 3b: export verbs
+# The export verbs copy the exact bytes the report stage retained; they
+# render nothing themselves, so an export can never disagree with the run.
+RUN_MAIN="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("run",""))' "${ARTIFACT_DIR}/solve.stdout" 2>/dev/null || true)"
+log probe "completed run id ${RUN_MAIN}"
+check "solve printed a 64-hex run id" test "${#RUN_MAIN}" = "64"
+if [[ "${#RUN_MAIN}" == "64" ]]; then
+  LEDGER_DIR="$(dirname "${LEDGER}")"
+  run_cli report_export 0 -- --json report "${RUN_MAIN}" "${LEDGER}"
+  check "report export succeeded"            contains "${ARTIFACT_DIR}/report_export.stdout" '"status":"ok"'
+  check "report export names seven stages"   contains "${ARTIFACT_DIR}/report_export.stdout" '"stages_completed":7'
+  check "report export claims projection only" contains "${ARTIFACT_DIR}/report_export.stdout" '"authority":"projection-of-retained-receipts"'
+  check "HTML report written next to the ledger"  test -s "${LEDGER_DIR}/${RUN_MAIN}.report.html"
+  check "JSON twin written next to the ledger"    test -s "${LEDGER_DIR}/${RUN_MAIN}.report.json"
+  check "HTML report prints NO-DATA, not numbers, for unmeasured terms" \
+    grep -qF 'NO-DATA' "${LEDGER_DIR}/${RUN_MAIN}.report.html"
+  check "HTML report carries no fabricated 342.15 literal" \
+    not_contains "${LEDGER_DIR}/${RUN_MAIN}.report.html" '342.15'
+  check "JSON twin never emits NaN"           not_contains "${LEDGER_DIR}/${RUN_MAIN}.report.json" 'NaN'
+  run_cli package_export 0 -- --json package "${RUN_MAIN}" "${LEDGER}"
+  check "package export succeeded"           contains "${ARTIFACT_DIR}/package_export.stdout" '"status":"ok"'
+  check "package re-checked by the solver-free checker" contains "${ARTIFACT_DIR}/package_export.stdout" '"checker":"pass"'
+  check "package written next to the ledger" test -s "${LEDGER_DIR}/${RUN_MAIN}.fspkg"
+  # Exports are idempotent: a second export over identical bytes is accepted.
+  run_cli report_export_again 0 -- --json report "${RUN_MAIN}" "${LEDGER}"
+  check "report export is idempotent"        contains "${ARTIFACT_DIR}/report_export_again.stdout" '"status":"ok"'
+fi
 
 # Every stage up to --through must have emitted an ok progress line.
 for stage in "${STAGES[@]}"; do
@@ -325,20 +354,26 @@ check "directory pack refuses at the size guard" \
 # control on the canonicalization path -- it proves the duplicate handling
 # is live and permissive in exactly the case it should be.
 DUP_DB="$(seeded_ledger dup)"
-run_cli drill_dup_pack 5 -- --json solve "${PROJECT}" "${DUP_DB}" \
+run_cli drill_dup_pack 0 -- --json solve "${PROJECT}" "${DUP_DB}" \
   --materials "${MATERIAL_PACK}" --materials "${MATERIAL_PACK}"
 check "byte-identical duplicate packs are idempotent, not a conflict" \
   not_contains "${ARTIFACT_DIR}/drill_dup_pack.stderr" 'cli-solve-card-pack-conflict'
-check "duplicate-pack run still reaches the same gap" \
-  contains "${ARTIFACT_DIR}/drill_dup_pack.stdout" '"dependency":"frankensim-rc-root-q61wp.12"'
+check "duplicate-pack run still completes every stage" \
+  contains "${ARTIFACT_DIR}/drill_dup_pack.stdout" '"stages_completed":7'
 
-# report/package are unconditional fail-closed stages today.
-run_cli drill_report 5 -- --json report some-run-id
-check "report fails closed naming its producer" \
-  contains "${ARTIFACT_DIR}/drill_report.stderr" 'cli-stage-unavailable'
-run_cli drill_package 5 -- --json package some-run-id
-check "package fails closed naming its producer" \
-  contains "${ARTIFACT_DIR}/drill_package.stderr" 'cli-stage-unavailable'
+# The export verbs read only what a completed run retained: a malformed run
+# id, an unknown run, and a missing ledger each refuse with their own code and
+# write nothing.
+run_cli drill_report_id 4 -- --json report some-run-id "${LEDGER}"
+check "report refuses a malformed run id" \
+  contains "${ARTIFACT_DIR}/drill_report_id.stderr" 'cli-solve-run-id'
+run_cli drill_report_unknown 4 -- --json report 0000000000000000000000000000000000000000000000000000000000000000 "${LEDGER}"
+check "report refuses an unknown run" \
+  contains "${ARTIFACT_DIR}/drill_report_unknown.stderr" 'cli-solve-unknown-run'
+run_cli drill_package_missing_ledger 3 -- --json package 0000000000000000000000000000000000000000000000000000000000000000 "${WORK}/does-not-exist.db"
+check "package refuses a missing ledger without creating it" \
+  contains "${ARTIFACT_DIR}/drill_package_missing_ledger.stderr" 'cli-export-ledger-missing'
+check "a refused export created no ledger" test ! -e "${WORK}/does-not-exist.db"
 
 # --------------------------------------------- phase 5: determinism + resume
 if [[ "${PROFILE}" == "full" || "${PROFILE}" == "recovery" ]]; then
@@ -347,7 +382,7 @@ if [[ "${PROFILE}" == "full" || "${PROFILE}" == "recovery" ]]; then
   # below proves the run id is a function of the INPUTS and not of ledger
   # state carried over from the first run.
   REPEAT_DB="$(seeded_ledger repeat)"
-  run_cli solve_repeat 5 -- --json solve "${PROJECT}" "${REPEAT_DB}" --materials "${MATERIAL_PACK}"
+  run_cli solve_repeat 0 -- --json solve "${PROJECT}" "${REPEAT_DB}" --materials "${MATERIAL_PACK}"
   RUN_A="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("run",""))' "${ARTIFACT_DIR}/solve.stdout" 2>/dev/null || true)"
   RUN_B="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("run",""))' "${ARTIFACT_DIR}/solve_repeat.stdout" 2>/dev/null || true)"
   log probe "run identity A=${RUN_A} B=${RUN_B}"
@@ -355,9 +390,16 @@ if [[ "${PROFILE}" == "full" || "${PROFILE}" == "recovery" ]]; then
 
   if [[ -n "${RUN_A}" ]]; then
     log phase "resume: re-attest retained bytes with no pack flags at all"
-    run_cli resume 5 -- --json solve --resume "${RUN_A}" "${LEDGER}"
-    check "resume reaches the same gap without re-supplying packs" \
-      contains "${ARTIFACT_DIR}/resume.stdout" '"dependency":"frankensim-rc-root-q61wp.12"'
+    run_cli resume 4 -- --json solve --resume "${RUN_A}" "${LEDGER}"
+    check "resume of a completed run refuses honestly instead of re-running" \
+      contains "${ARTIFACT_DIR}/resume.stderr" 'cli-solve-resume-complete'
+    # Cross-ledger determinism of the projection: the report receipt sealed in
+    # the repeat ledger must be byte-identical to the first run's (the report
+    # is a function of retained receipts, never of ledger coordinates).
+    run_cli report_repeat 0 -- --json report "${RUN_B}" "${REPEAT_DB}"
+    REPEAT_DIR="$(dirname "${REPEAT_DB}")"
+    check "report twin is byte-identical across independent ledgers" \
+      cmp -s "$(dirname "${LEDGER}")/${RUN_A}.report.json" "${REPEAT_DIR}/${RUN_B}.report.json"
   fi
 fi
 
@@ -376,9 +418,9 @@ cat > "${ARTIFACT_DIR}/summary.json" <<JSON
   "failures": ${FAILURES},
   "stages_executing": ${STAGES_EXECUTING},
   "stages_total": ${#STAGES[@]},
-  "first_gap": "report",
-  "first_gap_owner": "frankensim-rc-root-q61wp.12",
-  "no_claim": "proves the executing producer prefix and its refusal boundary only; the retained QoI verdict is Estimated and Indeterminate with eight explicit NO-DATA terms, while report and packaging remain typed gaps, so this is NOT a verified decision package"
+  "first_gap": "none",
+  "first_gap_owner": "",
+  "no_claim": "proves that every solve stage executes and that the export verbs reproduce the retained bytes; the retained QoI verdict is Estimated and Indeterminate with eight explicit NO-DATA terms and the report/package are projections of those receipts, so this is NOT a verified decision package and confers no L3/L4 maturity by itself"
 }
 JSON
 
@@ -389,5 +431,5 @@ if [[ "${FAILURES}" -ne 0 ]]; then
   printf 'FAILED: %d of %d checks\n' "${FAILURES}" "${CHECKS}" >&2
   exit 1
 fi
-printf 'OK: %d checks passed; %d of %d solve stages execute (first gap: report, bead frankensim-rc-root-q61wp.12)\n' \
+printf 'OK: %d checks passed; %d of %d solve stages execute (no typed gap; report/package are projections of retained receipts)\n' \
   "${CHECKS}" "${STAGES_EXECUTING}" "${#STAGES[@]}"

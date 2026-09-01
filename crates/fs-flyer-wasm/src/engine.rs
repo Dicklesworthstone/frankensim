@@ -185,6 +185,11 @@ impl EngineSlot {
         assist: bool,
         catapult: bool,
     ) -> String {
+        // A failed replacement must never leave the previous lifecycle
+        // checkpointable. Clear before validating the new request so every
+        // init attempt is a hard generation boundary, not only successful
+        // ones.
+        self.sim = None;
         let pilot_mode = match mode {
             MODE_FIXED => PilotMode::FixedControls,
             MODE_HISTORICAL => PilotMode::Historical(member),
@@ -261,14 +266,15 @@ impl EngineSlot {
 
     /// Capture the exact live [`SimLoop`] state for browser transport.
     /// The caller owns persistence; this boundary only carries the
-    /// self-authenticating checkpoint bytes without inventing an identity.
+    /// self-authenticating checkpoint bytes bound to the active run intent.
     pub fn checkpoint(&self) -> String {
         let Some(sim) = self.sim.as_ref() else {
             return not_initialized();
         };
         match sim.save_checkpoint() {
             Ok(bytes) => format!(
-                "{{\"ok\":{{\"checkpoint_hex\":\"{}\"}}}}",
+                "{{\"ok\":{{\"run_intent_id\":\"{}\",\"checkpoint_hex\":\"{}\"}}}}",
+                json_escape(&sim.run_intent_id),
                 checkpoint_hex(&bytes)
             ),
             Err(e) => refusal_envelope(&map_refusal(e)),

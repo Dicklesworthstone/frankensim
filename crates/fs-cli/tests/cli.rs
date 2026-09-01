@@ -264,37 +264,40 @@ fn g0_argument_grammar_and_json_flag_are_stable() {
 }
 
 #[test]
-fn g0_report_and_package_are_typed_fail_closed_gaps() {
+fn g0_report_and_package_refuse_an_unknown_run_without_writing_anything() {
+    // The export verbs read only what a completed solve retained. A ledger
+    // that never saw the run must yield the solve loader's own refusal code,
+    // and no report, twin, or package file may appear on disk.
     let dir = scratch("typed-stage-gaps");
     let ledger = dir.join("fixture-ledger.db");
     let _ = fs_ledger::Ledger::open(ledger.to_str().expect("UTF-8 fixture path"))
         .expect("fixture ledger opens");
     let run_id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
-    for (verb, owning_bead) in [
-        ("report", "frankensim-rc-root-q61wp.12"),
-        ("package", "frankensim-rc-root-q61wp.12"),
-    ] {
+    for verb in ["report", "package"] {
         let output = run(vec![
             "--json".to_string(),
             verb.to_string(),
             run_id.to_string(),
             ledger.to_string_lossy().into_owned(),
         ]);
-        assert_eq!(
-            output.exit_code,
-            exit::UNAVAILABLE,
+        assert_eq!(output.exit_code, exit::REFUSED, "{verb}: {}", output.stderr);
+        assert!(
+            output.stderr.contains("cli-solve-unknown-run"),
             "{verb}: {}",
             output.stderr
         );
-        assert!(output.stderr.contains("cli-stage-unavailable"));
-        assert!(output.stderr.contains(owning_bead));
-        assert!(output.stdout.contains("\"status\":\"unavailable\""));
-        assert!(output.stdout.contains("\"stage\":\""));
-        assert!(output.stdout.contains("\"owning_bead\":\""));
-        assert!(output.stdout.contains("\"run_id\":\"0123456789abcdef"));
-        assert!(output.stdout.contains("\"ledger_path\":"));
+        assert!(output.stdout.contains("\"status\":\"refused\""));
+        assert!(output.stdout.contains(&format!("\"command\":\"{verb}\"")));
         assert!(!output.stdout.contains("342.15"));
+        assert!(!output.stdout.contains("\"merkle_root\""));
+        assert!(!output.stdout.contains("\"content_hash\""));
+    }
+    for suffix in [".report.html", ".report.json", ".fspkg"] {
+        assert!(
+            !dir.join(format!("{run_id}{suffix}")).exists(),
+            "a refused export must not write {suffix}"
+        );
     }
 }
 
@@ -683,9 +686,13 @@ fn g0_package_missing_ledger_fails_closed() {
         "/nonexistent/ledger.db",
         "--json",
     ]));
-    assert_eq!(output.exit_code, exit::UNAVAILABLE);
-    assert!(output.stderr.contains("cli-stage-unavailable"));
+    assert_eq!(output.exit_code, exit::INPUT, "stderr: {}", output.stderr);
+    assert!(output.stderr.contains("cli-export-ledger-missing"));
     assert!(!output.stdout.contains("\"verdict\":\"pass\""));
+    assert!(
+        !std::path::Path::new("/nonexistent/ledger.db").exists(),
+        "an export must never create a ledger"
+    );
 }
 
 #[test]
@@ -703,15 +710,16 @@ fn g0_empty_ledger_cannot_mint_a_self_consistent_package() {
     ]));
     assert_eq!(
         output.exit_code,
-        exit::UNAVAILABLE,
+        exit::REFUSED,
         "stderr: {}",
         output.stderr
     );
-    assert!(output.stdout.contains("\"status\":\"unavailable\""));
-    assert!(output.stderr.contains("cli-stage-unavailable"));
+    assert!(output.stdout.contains("\"status\":\"refused\""));
+    assert!(output.stderr.contains("cli-solve-unknown-run"));
     assert!(!output.stdout.contains("\"merkle_root\""));
     assert!(!output.stdout.contains("\"verdict\":\"pass\""));
     assert!(!output.stdout.contains("junction_maximum"));
+    assert!(!dir.join(format!("{run_id}.fspkg")).exists());
 }
 
 #[test]
@@ -722,8 +730,8 @@ fn g0_report_missing_ledger_fails_closed() {
         "/nonexistent/ledger.db",
         "--json",
     ]));
-    assert_eq!(output.exit_code, exit::UNAVAILABLE);
-    assert!(output.stderr.contains("cli-stage-unavailable"));
+    assert_eq!(output.exit_code, exit::INPUT, "stderr: {}", output.stderr);
+    assert!(output.stderr.contains("cli-export-ledger-missing"));
     assert!(!output.stdout.contains("junction_maximum"));
 }
 
@@ -742,26 +750,136 @@ fn g0_empty_ledger_cannot_mint_a_verified_engineering_report() {
     ]));
     assert_eq!(
         output.exit_code,
-        exit::UNAVAILABLE,
+        exit::REFUSED,
         "stderr: {}",
         output.stderr
     );
-    assert!(output.stdout.contains("\"status\":\"unavailable\""));
-    assert!(output.stderr.contains("cli-stage-unavailable"));
+    assert!(output.stdout.contains("\"status\":\"refused\""));
+    assert!(output.stderr.contains("cli-solve-unknown-run"));
     assert!(!output.stdout.contains("\"content_hash\""));
     assert!(!output.stdout.contains("junction_maximum"));
     assert!(!output.stdout.contains("Verified"));
 
-    let html_path = dir.join(format!("{run_id}.html"));
+    let html_path = dir.join(format!("{run_id}.report.html"));
     let json_path = dir.join(format!("{run_id}.report.json"));
 
-    assert!(
-        !html_path.exists(),
-        "unavailable report must not write HTML"
-    );
+    assert!(!html_path.exists(), "a refused report must not write HTML");
     assert!(
         !json_path.exists(),
-        "unavailable report must not write a JSON twin"
+        "a refused report must not write a JSON twin"
+    );
+}
+
+#[test]
+fn g1_run_completes_seven_stages_and_exports_report_and_package_for_the_reference_project() {
+    // The tracked reference project declares conduction and a temperature
+    // maximum, so the real binary must now carry it through all seven solve
+    // stages, seal the report stage in the ledger, and export the retained
+    // report, JSON twin, and evidence package. Every displayed value traces to
+    // a retained receipt; nothing here is allowed to be a literal.
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let fsim = root.join("data/reference-project/cooling-reference.fsim");
+    let stl = root.join("data/reference-project/plate.stl");
+    let pack = root.join("data/reference-project/aa6061.fsmcdpk");
+    let dir = scratch("run-complete");
+    let ledger = dir.join("complete.db");
+
+    let imported = run(args(&[
+        "--json",
+        "import",
+        fsim.to_string_lossy().as_ref(),
+        stl.to_string_lossy().as_ref(),
+        ledger.to_string_lossy().as_ref(),
+        "--unit",
+        "m",
+        "--max-hole-edges",
+        "0",
+    ]));
+    assert_eq!(imported.exit_code, exit::SUCCESS, "stderr: {}", imported.stderr);
+
+    let output = run(args(&[
+        "--json",
+        "run",
+        fsim.to_string_lossy().as_ref(),
+        ledger.to_string_lossy().as_ref(),
+        "--materials",
+        pack.to_string_lossy().as_ref(),
+    ]));
+    assert_eq!(
+        output.exit_code,
+        exit::SUCCESS,
+        "stdout: {} / stderr: {}",
+        output.stdout,
+        output.stderr
+    );
+    assert!(output.stdout.contains("\"command\":\"run\""));
+    assert!(output.stdout.contains("\"status\":\"completed\""));
+    assert!(output.stdout.contains("\"stages_completed\":7"));
+    assert!(output.stdout.contains("\"checker\":\"pass\""));
+    assert!(
+        output.stderr.contains("\"stage\":\"report\",\"ordinal\":6,\"status\":\"ok\""),
+        "the report stage reports progress like every other stage: {}",
+        output.stderr
+    );
+    let run_id = output
+        .stdout
+        .split("\"run\":\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .expect("run id in the result")
+        .to_string();
+    assert_eq!(run_id.len(), 64);
+
+    let html = std::fs::read_to_string(dir.join(format!("{run_id}.report.html")))
+        .expect("the retained HTML report was exported");
+    let twin = std::fs::read_to_string(dir.join(format!("{run_id}.report.json")))
+        .expect("the retained JSON twin was exported");
+    let package = std::fs::read_to_string(dir.join(format!("{run_id}.fspkg")))
+        .expect("the retained package was exported");
+    assert!(html.contains(&run_id));
+    assert!(html.contains("temperature-max"));
+    assert!(html.contains("NO-DATA"), "unmeasured terms print as NO-DATA, never as numbers");
+    assert!(html.contains("Estimated"));
+    assert!(!html.contains("342.15"));
+    assert!(twin.contains("\"schema\": \"frankensim.report.engineering.v1\""));
+    assert!(twin.contains("\"state\": \"no-data\""));
+    assert!(twin.contains("\"stage\": \"qoi\""));
+    assert!(!twin.contains("NaN"), "the JSON twin never emits NaN");
+    let parsed = fs_package::EvidencePackage::from_json(&package).expect("format-9 package");
+    assert!(fs_checker::check(&parsed).passed());
+
+    // Exports are idempotent: identical bytes already on disk are accepted.
+    let again = run(args(&[
+        "--json",
+        "report",
+        &run_id,
+        ledger.to_string_lossy().as_ref(),
+    ]));
+    assert_eq!(again.exit_code, exit::SUCCESS, "stderr: {}", again.stderr);
+    assert!(again.stdout.contains("\"stages_completed\":7"));
+    let packaged = run(args(&[
+        "--json",
+        "package",
+        &run_id,
+        ledger.to_string_lossy().as_ref(),
+    ]));
+    assert_eq!(packaged.exit_code, exit::SUCCESS, "stderr: {}", packaged.stderr);
+    assert!(packaged.stdout.contains("\"checker\":\"pass\""));
+    assert!(packaged.stdout.contains("\"merkle_root\":\""));
+
+    // A differing file at the export path is a conflict, never overwritten.
+    std::fs::write(dir.join(format!("{run_id}.fspkg")), b"tampered").expect("tamper");
+    let conflict = run(args(&[
+        "--json",
+        "package",
+        &run_id,
+        ledger.to_string_lossy().as_ref(),
+    ]));
+    assert_eq!(conflict.exit_code, exit::REFUSED);
+    assert!(conflict.stderr.contains("cli-export-output-conflict"));
+    assert_eq!(
+        std::fs::read(dir.join(format!("{run_id}.fspkg"))).expect("still there"),
+        b"tampered"
     );
 }
 

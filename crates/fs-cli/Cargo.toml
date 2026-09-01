@@ -18,6 +18,7 @@ path = "src/main.rs"
 fs-alloc = { path = "../fs-alloc" }
 fs-airflow = { path = "../fs-airflow" }
 fs-blake3 = { path = "../fs-blake3" }
+fs-checker = { path = "../fs-checker" }
 fs-conduction = { path = "../fs-conduction" }
 fs-euler-disc-e2e = { path = "../fs-euler-disc-e2e", default-features = false }
 fs-evidence = { path = "../fs-evidence" }
@@ -26,9 +27,11 @@ fs-io = { path = "../fs-io" }
 fs-ledger = { path = "../fs-ledger" }
 fs-matdb = { path = "../fs-matdb" }
 fs-mesh = { path = "../fs-mesh" }
+fs-package = { path = "../fs-package" }
 fs-project = { path = "../fs-project" }
 fs-qty = { path = "../fs-qty" }
 fs-rep-mesh = { path = "../fs-rep-mesh" }
+fs-report = { path = "../fs-report" }
 fs-session = { path = "../fs-session" }
 
 [dev-dependencies]

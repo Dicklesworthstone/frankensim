@@ -65,6 +65,7 @@ export interface EngineMalformed {
 
 export interface EngineCheckpointOk {
   readonly kind: "ok";
+  readonly runIntentId: string;
   readonly bytes: Uint8Array;
 }
 
@@ -257,19 +258,23 @@ export function parseCheckpointEnvelope(
     const refusal = asRefusal(env.refusal);
     return refusal ? { kind: "refusal", refusal } : malformed("refusal shape invalid");
   }
-  const hex = (env.ok as Record<string, unknown> | undefined)?.checkpoint_hex;
+  const ok = env.ok as Record<string, unknown> | undefined;
+  const runIntentId = ok?.run_intent_id;
+  const hex = ok?.checkpoint_hex;
   if (
+    typeof runIntentId !== "string" ||
+    !/^[0-9a-f]{32}$/.test(runIntentId) ||
     typeof hex !== "string" ||
     hex.length === 0 ||
     hex.length % 2 !== 0 ||
     hex.length > MAX_CHECKPOINT_BYTES * 2 ||
     !/^[0-9a-f]+$/.test(hex)
   ) {
-    return malformed("checkpoint_hex missing, oversized, or not lowercase hex");
+    return malformed("checkpoint run identity or hex is missing, oversized, or malformed");
   }
   const bytes = new Uint8Array(hex.length / 2);
   for (let i = 0; i < bytes.length; i += 1) {
     bytes[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
   }
-  return { kind: "ok", bytes };
+  return { kind: "ok", runIntentId, bytes };
 }

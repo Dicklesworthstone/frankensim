@@ -21,6 +21,7 @@ import {
   PAYLOAD_F64S,
   payloadLayoutHash,
   type MainToWorker,
+  type RefusalEnvelope,
   type WorkerToMain,
 } from "./protocol.ts";
 import { SeqlockWriter } from "../transport/seqlock.ts";
@@ -52,6 +53,9 @@ let scheduler: TickScheduler | null = null;
 let mode = 0;
 let running = false;
 let ended = false;
+let activeRunIntentId: string | null = null;
+let initGeneration = 0;
+let pumpGeneration = 0;
 // E5.3a: Human-mode hold law (ApplyNextEligibleTickAndFlag) + the sim
 // epoch for requested-tick targeting (worker monotonic clock).
 let hold = new ControlHold();
@@ -129,16 +133,36 @@ function runTick(tick: number): boolean {
   return true;
 }
 
-function pump(): void {
-  if (!running || scheduler === null) {
+function pump(generation = pumpGeneration): void {
+  if (generation !== pumpGeneration || !running || scheduler === null) {
     return;
   }
   scheduler.pump(performance.now(), runTick, () => performance.now());
-  setTimeout(pump, TICK_MS / 2);
+  setTimeout(() => pump(generation), TICK_MS / 2);
+}
+
+function invalidateRun(): void {
+  pumpGeneration += 1;
+  running = false;
+  ended = false;
+  writer = null;
+  scheduler = null;
+  activeRunIntentId = null;
+}
+
+function postInitRefusal(initGeneration: number, refusal: RefusalEnvelope): void {
+  post({ kind: "refusal", stage: "init", initGeneration, refusal });
 }
 
 async function handleInit(msg: Extract<MainToWorker, { kind: "init" }>): Promise<void> {
+  const generation = ++initGeneration;
+  // Stop publication before loading or admitting B. A failed B must not leave
+  // A's scheduler, ring writer, or checkpoint authority live.
+  invalidateRun();
   engine = engine ?? (await loadEngine());
+  if (generation !== initGeneration) {
+    return;
+  }
   mode = msg.scenario.mode;
   ended = false;
   hold = new ControlHold();
@@ -155,18 +179,17 @@ async function handleInit(msg: Extract<MainToWorker, { kind: "init" }>): Promise
   );
   const init = parseInitEnvelope(initJson);
   if (init.kind === "refusal") {
-    post({ kind: "refusal", stage: "init", refusal: init.refusal });
+    postInitRefusal(msg.initGeneration, init.refusal);
+    return;
+  }
+  if (generation !== initGeneration) {
     return;
   }
   if (init.kind === "malformed") {
-    post({
-      kind: "refusal",
-      stage: "init",
-      refusal: {
-        code: "envelope-malformed",
-        message: init.detail,
-        ranked_repairs: ["rebuild the wasm pkg (npm run wasm) to match the app protocol"],
-      },
+    postInitRefusal(msg.initGeneration, {
+      code: "envelope-malformed",
+      message: init.detail,
+      ranked_repairs: ["rebuild the wasm pkg (npm run wasm) to match the app protocol"],
     });
     return;
   }
@@ -185,6 +208,7 @@ async function handleInit(msg: Extract<MainToWorker, { kind: "init" }>): Promise
   }
   simEpochMs = performance.now();
   scheduler = new TickScheduler(TICK_MS, simEpochMs);
+  activeRunIntentId = init.runIntentId;
   running = true;
   post({
     kind: "ready",
@@ -192,16 +216,18 @@ async function handleInit(msg: Extract<MainToWorker, { kind: "init" }>): Promise
     tick0Digest: init.tick0Digest,
     trimVMps: init.trimVMps,
     layoutHash,
+    initGeneration: msg.initGeneration,
   });
   jlog("ready", { runIntentId: init.runIntentId, sab: writer !== null });
   pump();
 }
 
-function checkpoint(): void {
-  if (engine === null) {
+function checkpoint(msg: Extract<MainToWorker, { kind: "checkpoint" }>): void {
+  if (engine === null || activeRunIntentId === null) {
     post({
-      kind: "refusal",
-      stage: "checkpoint",
+      kind: "checkpoint-refusal",
+      requestId: msg.requestId,
+      runIntentId: msg.runIntentId,
       refusal: {
         code: "engine-not-initialized",
         message: "call init before checkpoint",
@@ -210,15 +236,29 @@ function checkpoint(): void {
     });
     return;
   }
+  if (msg.runIntentId !== activeRunIntentId) {
+    post({
+      kind: "checkpoint-refusal",
+      requestId: msg.requestId,
+      runIntentId: msg.runIntentId,
+      refusal: {
+        code: "checkpoint-run-mismatch",
+        message: "checkpoint request does not name the active run",
+        ranked_repairs: ["wait for the current run ready receipt before requesting a checkpoint"],
+      },
+    });
+    return;
+  }
   const result = parseCheckpointEnvelope(engine.flyer_engine_checkpoint());
   if (result.kind === "refusal") {
-    post({ kind: "refusal", stage: "checkpoint", refusal: result.refusal });
+    post({ kind: "checkpoint-refusal", requestId: msg.requestId, runIntentId: msg.runIntentId, refusal: result.refusal });
     return;
   }
   if (result.kind === "malformed") {
     post({
-      kind: "refusal",
-      stage: "checkpoint",
+      kind: "checkpoint-refusal",
+      requestId: msg.requestId,
+      runIntentId: msg.runIntentId,
       refusal: {
         code: "checkpoint-envelope-malformed",
         message: result.detail,
@@ -227,7 +267,23 @@ function checkpoint(): void {
     });
     return;
   }
-  post({ kind: "checkpoint", bytes: result.bytes }, [result.bytes.buffer]);
+  if (result.runIntentId !== activeRunIntentId) {
+    post({
+      kind: "checkpoint-refusal",
+      requestId: msg.requestId,
+      runIntentId: msg.runIntentId,
+      refusal: {
+        code: "checkpoint-run-mismatch",
+        message: "engine checkpoint identity does not match the active run",
+        ranked_repairs: ["restart the scenario; do not persist an identity-mismatched checkpoint"],
+      },
+    });
+    return;
+  }
+  post(
+    { kind: "checkpoint", requestId: msg.requestId, runIntentId: result.runIntentId, bytes: result.bytes },
+    [result.bytes.buffer],
+  );
 }
 
 self.addEventListener("message", (event: MessageEvent<MainToWorker>) => {
@@ -260,7 +316,7 @@ self.addEventListener("message", (event: MessageEvent<MainToWorker>) => {
       });
       break;
     case "checkpoint":
-      checkpoint();
+      checkpoint(msg);
       break;
     case "pause":
       running = false;

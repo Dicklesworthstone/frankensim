@@ -40,6 +40,8 @@ import {
   PHASE_CODES,
   payloadLayoutHash,
 } from "../src/sim/protocol.ts";
+import { SimClient } from "../src/sim/simClient.ts";
+import { dec17Scenario, type MainToWorker, type WorkerToMain } from "../src/sim/protocol.ts";
 
 const jlog = (payload: Record<string, unknown>): void => {
   console.info(JSON.stringify({ suite: "wf-e52a-facade", ...payload }));
@@ -145,18 +147,152 @@ test("hostile twins refuse fail-closed (malformed, never a guess)", () => {
 });
 
 test("checkpoint envelope decodes only bounded lowercase hex bytes", () => {
-  const checkpoint = parseCheckpointEnvelope('{"ok":{"checkpoint_hex":"0001fe"}}');
+  const checkpoint = parseCheckpointEnvelope(
+    `{"ok":{"run_intent_id":"${"a".repeat(32)}","checkpoint_hex":"0001fe"}}`,
+  );
   assert.equal(checkpoint.kind, "ok");
   if (checkpoint.kind === "ok") {
     assert.deepEqual([...checkpoint.bytes], [0, 1, 254]);
+    assert.equal(checkpoint.runIntentId, "a".repeat(32));
   }
   assert.equal(parseCheckpointEnvelope('{"ok":{"checkpoint_hex":"0"}}').kind, "malformed");
-  assert.equal(parseCheckpointEnvelope('{"ok":{"checkpoint_hex":"00FF"}}').kind, "malformed");
-  assert.equal(parseCheckpointEnvelope('{"ok":{"checkpoint_hex":"zz"}}').kind, "malformed");
+  assert.equal(
+    parseCheckpointEnvelope(`{"ok":{"run_intent_id":"${"A".repeat(32)}","checkpoint_hex":"00"}}`).kind,
+    "malformed",
+  );
+  assert.equal(
+    parseCheckpointEnvelope(`{"ok":{"run_intent_id":"${"a".repeat(32)}","checkpoint_hex":"00FF"}}`).kind,
+    "malformed",
+  );
   const refusal = parseCheckpointEnvelope(
     '{"refusal":{"code":"checkpoint-after-terminal","message":"m","ranked_repairs":["r"]}}',
   );
   assert.equal(refusal.kind, "refusal");
+});
+
+class FakeWorker {
+  readonly sent: MainToWorker[] = [];
+  private readonly listeners = new Map<string, Array<(event: Event) => void>>();
+
+  addEventListener(type: string, listener: (event: Event) => void): void {
+    this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener]);
+  }
+
+  postMessage(message: MainToWorker): void {
+    this.sent.push(message);
+  }
+
+  terminate(): void {}
+
+  emit(message: WorkerToMain): void {
+    for (const listener of this.listeners.get("message") ?? []) {
+      listener({ data: message } as MessageEvent<WorkerToMain>);
+    }
+  }
+}
+
+test("checkpoint replies bind the request and active run across reinit races", () => {
+  (globalThis as { crossOriginIsolated?: boolean }).crossOriginIsolated = false;
+  const worker = new FakeWorker();
+  const checkpoints: Array<{ requestId: number; runIntentId: string; bytes: Uint8Array }> = [];
+  const refusals: string[] = [];
+  const readyRuns: string[] = [];
+  const client = new SimClient(
+    {
+      onReady(info): void {
+        readyRuns.push(info.runIntentId);
+      },
+      onRefusal(_stage, refusal): void {
+        refusals.push(refusal.code);
+      },
+      onTerminal(): void {},
+      onCheckpoint(checkpoint): void {
+        checkpoints.push(checkpoint);
+      },
+    },
+    () => worker as unknown as Worker,
+  );
+  const runA = "a".repeat(32);
+  const runB = "b".repeat(32);
+  const scenarioA = dec17Scenario(1903n, MODE_FIXED);
+  const scenarioB = dec17Scenario(1904n, MODE_FIXED);
+
+  client.start(scenarioA);
+  const initA = worker.sent.at(-1);
+  assert.equal(initA?.kind, "init");
+  if (initA?.kind === "init") {
+    assert.equal(initA.initGeneration, 1);
+  }
+  worker.emit({
+    kind: "ready",
+    runIntentId: runA,
+    tick0Digest: "c".repeat(64),
+    trimVMps: 10,
+    layoutHash: 1,
+    initGeneration: 1,
+  });
+  assert.equal(client.requestCheckpoint(), true);
+  const r1 = worker.sent.at(-1);
+  assert.deepEqual(r1, { kind: "checkpoint", requestId: 1, runIntentId: runA });
+
+  // Starting B revokes A's ready capability; no B checkpoint can be exposed
+  // until B's new ready receipt arrives.
+  client.start(scenarioB);
+  const initB = worker.sent.at(-1);
+  assert.equal(initB?.kind, "init");
+  if (initB?.kind === "init") {
+    assert.equal(initB.initGeneration, 2);
+  }
+  // Queued A receipts must not re-establish an A capability after B starts.
+  worker.emit({
+    kind: "ready",
+    runIntentId: runA,
+    tick0Digest: "c".repeat(64),
+    trimVMps: 10,
+    layoutHash: 1,
+    initGeneration: 1,
+  });
+  worker.emit({
+    kind: "refusal",
+    stage: "init",
+    initGeneration: 1,
+    refusal: { code: "scenario-invalid", message: "stale", ranked_repairs: [] },
+  });
+  assert.deepEqual(readyRuns, [runA]);
+  assert.deepEqual(refusals, []);
+  assert.equal(client.requestCheckpoint(), false);
+  worker.emit({ kind: "checkpoint", requestId: 1, runIntentId: runA, bytes: new Uint8Array([1]) });
+  assert.deepEqual(checkpoints, []);
+
+  worker.emit({
+    kind: "ready",
+    runIntentId: runB,
+    tick0Digest: "d".repeat(64),
+    trimVMps: 10,
+    layoutHash: 1,
+    initGeneration: 2,
+  });
+  assert.equal(client.requestCheckpoint(), true);
+  const r2 = worker.sent.at(-1);
+  assert.deepEqual(r2, { kind: "checkpoint", requestId: 2, runIntentId: runB });
+  assert.deepEqual(readyRuns, [runA, runB]);
+
+  // Out-of-order r1 and a forged r2 run identity are both stale authority.
+  worker.emit({
+    kind: "checkpoint-refusal",
+    requestId: 1,
+    runIntentId: runA,
+    refusal: { code: "checkpoint-run-mismatch", message: "stale", ranked_repairs: [] },
+  });
+  worker.emit({ kind: "checkpoint", requestId: 2, runIntentId: runA, bytes: new Uint8Array([2]) });
+  assert.deepEqual(checkpoints, []);
+  assert.deepEqual(refusals, []);
+
+  worker.emit({ kind: "checkpoint", requestId: 2, runIntentId: runB, bytes: new Uint8Array([3]) });
+  assert.deepEqual(checkpoints.map(({ requestId, runIntentId, bytes }) => [requestId, runIntentId, [...bytes]]), [
+    [2, runB, [3]],
+  ]);
+  client.dispose();
 });
 
 // --------------------------------------------------------------------------

@@ -98,7 +98,7 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// ambiguous delimiter joining to length-framed fields. Bumped to 8 when the
 /// request-selective temperature-maximum QoI became a real sixth producer and
 /// report became the next typed stage gap.
-pub const SOLVE_DRIVER_VERSION: u32 = 8;
+pub const SOLVE_DRIVER_VERSION: u32 = 9;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";
@@ -135,6 +135,10 @@ const FLOW_NETWORK_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-flow-network-rec
 const CONDUCTION_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-conduction-receipt.v2";
 const CONDUCTION_SOLUTION_SCHEMA: &str = "frankensim.cli.solve-conduction-solution.v1";
 const QOI_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-qoi-candidate.v1";
+
+mod report_stage;
+pub(crate) use report_stage::{CompletedRunExport, load_completed_run};
+use report_stage::{ReportStageProduct, report_receipt};
 const CONDUCTION_INTERFACE_EVIDENCE_SCHEMA: &str =
     "frankensim.cli.solve-conduction-interface-evidence.v2";
 /// Specific gas constant of dry air, J/(kg·K); used only for the declared
@@ -602,7 +606,8 @@ pub enum SolveStage {
     Conduction,
     /// QoI extraction against requirements (gap: frankensim-s2l9v).
     Qoi,
-    /// Product report/package projection (gap: rc-j4).
+    /// Product report, JSON twin, and evidence package projected from the
+    /// retained stage receipts (executes; bead frankensim-rc-root-q61wp.12).
     Report,
 }
 
@@ -655,7 +660,7 @@ impl SolveStage {
             SolveStage::FlowNetwork => None,
             SolveStage::Conduction => Some("frankensim-s93ej"),
             SolveStage::Qoi => Some("frankensim-s2l9v"),
-            SolveStage::Report => Some("frankensim-rc-root-q61wp.12"),
+            SolveStage::Report => None,
         }
     }
 
@@ -1393,7 +1398,7 @@ fn resume_solve_inner<'a>(
         return Err(SolveRefusal::plain(
             "cli-solve-resume-complete",
             format!("run `{}` already completed every stage", run.to_hex()),
-            "use `frankensim report <run-id>` once reporting ships (f85xj.6.9)",
+            "export it with `frankensim report <run-id> <ledger>` or `frankensim package <run-id> <ledger>`",
         ));
     }
     let mut engine = SolveEngine::open(
@@ -1610,7 +1615,9 @@ impl<'a> SolveEngine<'a> {
                     pending_qoi_progress = Some(product.progress);
                     (product.receipt, Vec::new())
                 }),
-                SolveStage::Report => unreachable!("gap stages returned above"),
+                SolveStage::Report => self
+                    .stage_report(&state)
+                    .map(|product| (product.receipt, product.artifacts)),
             };
             let (receipt_json, usages) = match body {
                 Ok(produced) => produced,
@@ -1984,6 +1991,22 @@ impl<'a> SolveEngine<'a> {
         )
     }
 
+    /// Project the completed six-stage prefix into the report, JSON twin, and
+    /// evidence package. Reads only retained receipts; adds no authority.
+    fn stage_report(
+        &mut self,
+        state: &SolveDriverState,
+    ) -> Result<ReportStageProduct, SolveRefusal> {
+        report_receipt(
+            self.ledger,
+            self.spec,
+            state,
+            self.run,
+            self.project_hash,
+            self.work,
+        )
+    }
+
     /// Persist one completed stage as a ledgered op: stage receipt, sealed
     /// driver state (including this stage), and lineage links, atomically.
     fn persist_stage(
@@ -2085,6 +2108,27 @@ impl<'a> SolveEngine<'a> {
                         })?;
                 self.ledger
                     .link(op, &qoi_inputs.solution_artifact, EdgeRole::In)?;
+            }
+            if stage == SolveStage::Report {
+                // The report projects every earlier receipt; link each as an
+                // input so lineage queries reach the numbers it displays.
+                for required in SolveStage::ALL
+                    .into_iter()
+                    .filter(|candidate| *candidate != SolveStage::Report)
+                {
+                    let completed = state_before
+                        .completed
+                        .get(required.ordinal() as usize)
+                        .filter(|completed| completed.ordinal == required.ordinal())
+                        .ok_or_else(|| LedgerError::Invalid {
+                            field: "solve_report_prerequisite_receipt".to_string(),
+                            problem: format!(
+                                "report requires the completed {} stage receipt",
+                                required.name()
+                            ),
+                        })?;
+                    self.ledger.link(op, &completed.receipt, EdgeRole::In)?;
+                }
             }
             for usage in usages {
                 let retained = self.ledger.put_artifact(usage.kind, &usage.bytes, None)?;

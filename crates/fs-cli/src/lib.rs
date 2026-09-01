@@ -11,6 +11,7 @@ mod cards;
 mod cinematic;
 mod compare;
 mod import;
+mod json_read;
 mod package;
 mod report;
 mod solve;
@@ -870,20 +871,23 @@ fn admit_card_packs(
     })
 }
 
-fn solve_path(
+/// Run `solve` and also return `(run id, stages completed)` when the run
+/// completed every stage, so `run` can chain the export verbs on the exact
+/// run the solver sealed.
+fn solve_path_with_run(
     project: &Path,
     ledger_path: &Path,
     declared_cards: &[(CardPackKind, PathBuf)],
     mode: OutputMode,
-) -> CommandOutput {
+) -> (CommandOutput, Option<(String, usize)>) {
     let project_label = project.to_string_lossy();
     let decoded = match read_project_for_solve(project, mode) {
         Ok(decoded) => decoded,
-        Err(output) => return output,
+        Err(output) => return (output, None),
     };
     let cards = match admit_card_packs(declared_cards, mode) {
         Ok(cards) => cards,
-        Err(output) => return output,
+        Err(output) => return (output, None),
     };
     let findings = decoded.findings();
     if !findings.is_empty() {
@@ -898,29 +902,51 @@ fn solve_path(
             .with_subject(project_label.to_string());
             stderr.push_str(&format_diagnostic(mode, &diagnostic));
         }
-        return CommandOutput {
-            exit_code: exit::REFUSED,
-            stdout: format_result(
-                mode,
-                "solve",
-                "refused",
-                &project_label,
-                None,
-                findings.len(),
-            ),
-            stderr,
-        };
+        return (
+            CommandOutput {
+                exit_code: exit::REFUSED,
+                stdout: format_result(
+                    mode,
+                    "solve",
+                    "refused",
+                    &project_label,
+                    None,
+                    findings.len(),
+                ),
+                stderr,
+            },
+            None,
+        );
     }
     let ledger = match open_solve_ledger(ledger_path, &project_label, mode) {
         Ok(ledger) => ledger,
-        Err(output) => return output,
+        Err(output) => return (output, None),
     };
     let gate = fs_exec::CancelGate::new_clock_free();
     let started = std::time::Instant::now();
     let mut clock = move || started.elapsed().as_secs_f64();
     let mut progress = Vec::new();
     let result = run_solve(&ledger, &gate, &mut clock, &decoded, &cards, &mut progress);
-    render_solve_result(mode, &project_label, result, &progress)
+    let completed = match &result {
+        Ok(outcome) if matches!(outcome.status, SolveRunStatus::Completed) => Some((
+            outcome.run.clone(),
+            outcome.prior_stages as usize + outcome.stages.len(),
+        )),
+        _ => None,
+    };
+    (
+        render_solve_result(mode, &project_label, result, &progress),
+        completed,
+    )
+}
+
+fn solve_path(
+    project: &Path,
+    ledger_path: &Path,
+    declared_cards: &[(CardPackKind, PathBuf)],
+    mode: OutputMode,
+) -> CommandOutput {
+    solve_path_with_run(project, ledger_path, declared_cards, mode).0
 }
 
 fn resume_path(run_id: &str, ledger_path: &Path, mode: OutputMode) -> CommandOutput {
@@ -949,23 +975,74 @@ fn run_workflow_path(
         return val_out;
     }
 
-    // 2. Solve
-    let solve_out = solve_path(project, ledger, cards, mode);
+    // 2. Solve (all seven stages, including the ledgered report stage).
+    let (solve_out, completed) = solve_path_with_run(project, ledger, cards, mode);
     if solve_out.exit_code != exit::SUCCESS {
         return solve_out;
     }
+    let Some((run, stages_completed)) = completed else {
+        // A non-completed but zero-exit outcome (e.g. a budget stop rendered
+        // as partial) is not a finished workflow; hand the solve output back
+        // unchanged rather than inventing report and package artifacts.
+        return solve_out;
+    };
 
-    // A successful solve still cannot become a completed product workflow until
-    // the report stage loads the retained run and traces every displayed value.
-    // Do not bypass the public fail-closed dispatcher by calling the staged
-    // report/package helpers directly.
-    unavailable(
-        mode,
-        "run",
-        &project_label,
-        "frankensim-extreal-program-f85xj.6.9",
-        None,
-    )
+    // 3. Export the retained report and package for the exact sealed run.
+    let report = match report::export_report("run", &run, Some(ledger), mode) {
+        Ok(report) => report,
+        Err(mut output) => {
+            output.stderr = format!("{}{}", solve_out.stderr, output.stderr);
+            return output;
+        }
+    };
+    let package = match package::export_package("run", &run, Some(ledger), mode) {
+        Ok(package) => package,
+        Err(mut output) => {
+            output.stderr = format!("{}{}", solve_out.stderr, output.stderr);
+            return output;
+        }
+    };
+
+    let stdout = match mode {
+        OutputMode::Json => {
+            let mut out = String::from("{\"schema\":");
+            push_json_string(&mut out, RESULT_SCHEMA);
+            out.push_str(",\"command\":\"run\",\"status\":\"completed\",\"subject\":");
+            push_json_string(&mut out, &project_label);
+            out.push_str(",\"run\":");
+            push_json_string(&mut out, &run);
+            let _ = write!(out, ",\"stages_completed\":{stages_completed}");
+            out.push_str(",\"report_html\":");
+            push_json_string(&mut out, &report.html_path.to_string_lossy());
+            out.push_str(",\"report_json\":");
+            push_json_string(&mut out, &report.json_path.to_string_lossy());
+            out.push_str(",\"report_content_hash\":");
+            push_json_string(&mut out, &report.content_hash);
+            out.push_str(",\"verdict\":");
+            push_json_string(&mut out, &report.verdict);
+            out.push_str(",\"package\":");
+            push_json_string(&mut out, &package.path.to_string_lossy());
+            out.push_str(",\"package_root\":");
+            push_json_string(&mut out, &package.merkle_root);
+            out.push_str(",\"checker\":\"pass\"}\n");
+            out
+        }
+        OutputMode::Text => format!(
+            "status=completed\ncommand=run\nsubject={}\nrun={run}\nstages_completed={stages_completed}\nreport_html={}\nreport_json={}\nreport_content_hash={}\nverdict={}\npackage={}\npackage_root={}\nchecker=pass\n",
+            escape_text(&project_label),
+            escape_text(&report.html_path.to_string_lossy()),
+            escape_text(&report.json_path.to_string_lossy()),
+            report.content_hash,
+            escape_text(&report.verdict),
+            escape_text(&package.path.to_string_lossy()),
+            package.merkle_root,
+        ),
+    };
+    CommandOutput {
+        exit_code: exit::SUCCESS,
+        stdout,
+        stderr: solve_out.stderr,
+    }
 }
 
 fn read_project_for_solve(

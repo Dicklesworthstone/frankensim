@@ -117,9 +117,11 @@ fn checkpoint_envelope_carries_live_simloop_bytes_and_refuses_after_terminal() {
     assert!(env.starts_with("{\"ok\":{"), "{env}");
     slot.step(false, 0.0, 0.0);
     let checkpoint = slot.checkpoint();
-    let prefix = "{\"ok\":{\"checkpoint_hex\":\"";
-    assert!(checkpoint.starts_with(prefix), "{checkpoint}");
-    let hex = &checkpoint[prefix.len()..checkpoint.len() - 3];
+    assert!(checkpoint.starts_with("{\"ok\":{"), "{checkpoint}");
+    assert!(checkpoint.contains("\"run_intent_id\":\""), "{checkpoint}");
+    let hex_prefix = "\"checkpoint_hex\":\"";
+    let hex_start = checkpoint.find(hex_prefix).expect("checkpoint hex field") + hex_prefix.len();
+    let hex = &checkpoint[hex_start..checkpoint.len() - 3];
     assert!(!hex.is_empty() && hex.len() % 2 == 0, "{checkpoint}");
     assert!(
         hex.bytes().all(|byte| byte.is_ascii_hexdigit()),
@@ -137,6 +139,24 @@ fn checkpoint_envelope_carries_live_simloop_bytes_and_refuses_after_terminal() {
         "{after_terminal}"
     );
     jlog("checkpoint", &format!("\"bytes_hex\":{}", hex.len()));
+}
+
+#[test]
+fn failed_reinit_invalidates_the_previous_lifecycle_before_refusing() {
+    let mut slot = EngineSlot::default();
+    let valid = init_short(&mut slot, 1903, MODE_FIXED, 0);
+    assert!(valid.starts_with("{\"ok\":{"), "{valid}");
+    assert!(slot.checkpoint().starts_with("{\"ok\":{"));
+
+    // Mode 3 is deliberately invalid. The former implementation kept the
+    // valid A lifecycle live when this B request refused.
+    let refused = slot.init(1904, 1.294, 11.0, 3, 0, 18.3, 40, false, false);
+    assert!(refused.contains("\"code\":\"mode-invalid\""), "{refused}");
+    let stale = slot.checkpoint();
+    assert!(
+        stale.contains("\"code\":\"engine-not-initialized\""),
+        "failed B must not expose A checkpoint: {stale}"
+    );
 }
 
 #[test]

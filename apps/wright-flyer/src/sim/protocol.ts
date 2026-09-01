@@ -123,6 +123,8 @@ export type MainToWorker =
       readonly sab?: SharedArrayBuffer;
       readonly slots?: number;
       readonly runEpoch: number;
+      /** Client-issued lifecycle generation; receipts echo it verbatim. */
+      readonly initGeneration: number;
     }
   | {
       readonly kind: "control";
@@ -135,7 +137,13 @@ export type MainToWorker =
       readonly deviceWorkerMs: number;
     }
   | { readonly kind: "ping"; readonly nonce: number; readonly localSentMs: number }
-  | { readonly kind: "checkpoint" }
+  | {
+      readonly kind: "checkpoint";
+      /** Monotonic client-side correlation id for this exact request. */
+      readonly requestId: number;
+      /** Active run expected by the caller; the worker must not substitute. */
+      readonly runIntentId: string;
+    }
   | { readonly kind: "pause" }
   | { readonly kind: "resume" };
 
@@ -153,16 +161,34 @@ export type WorkerToMain =
       readonly tick0Digest: string;
       readonly trimVMps: number;
       readonly layoutHash: number;
+      /** Echo of the client-issued init generation. */
+      readonly initGeneration: number;
     }
   | {
       readonly kind: "refusal";
-      readonly stage: "init" | "step" | "checkpoint";
+      readonly stage: "init";
+      /** Echo of the client-issued init generation. */
+      readonly initGeneration: number;
+      readonly refusal: RefusalEnvelope;
+    }
+  | {
+      readonly kind: "refusal";
+      readonly stage: "step";
       readonly refusal: RefusalEnvelope;
     }
   | {
       /** Exact live SimLoop checkpoint bytes, transferable to persistence. */
       readonly kind: "checkpoint";
+      readonly requestId: number;
+      readonly runIntentId: string;
       readonly bytes: Uint8Array;
+    }
+  | {
+      /** A checkpoint refusal bound to its request and expected run. */
+      readonly kind: "checkpoint-refusal";
+      readonly requestId: number;
+      readonly runIntentId: string;
+      readonly refusal: RefusalEnvelope;
     }
   | {
       readonly kind: "terminal";
