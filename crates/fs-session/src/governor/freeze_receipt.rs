@@ -157,9 +157,9 @@ pub(super) fn publish_freeze_terminal(
     inputs: FreezePublishInputs<'_>,
     ledger: &fs_ledger::Ledger,
 ) -> Result<SnapshotFreezeReceiptWrite, SessionError> {
-    use fs_ledger::{
-        EventRow, SessionMutationClaim, SessionTerminalBatch, SessionTerminalGroup,
-        SessionTerminalRow,
+    use fs_ledger::EventRow;
+    use fs_ledger::session_registry::{
+        SessionMutationClaim, SessionTerminalBatch, SessionTerminalGroup, SessionTerminalRow,
     };
 
     if ledger.in_transaction() {
@@ -211,11 +211,24 @@ pub(super) fn publish_freeze_terminal(
     }
 
     let session_be = inputs.session.to_be_bytes();
+    // The event payload is the ledger's JSON observability channel; the
+    // authoritative receipt bytes live in the terminal row keyed by the
+    // authority hash, so the event carries that key rather than a second
+    // copy of the binary receipt (EventRow::payload is a JSON &str).
+    let mut event_payload = String::with_capacity(96);
+    event_payload.push_str("{\"schema\":\"fs-session.snapshot-freeze-event/v1\",\"authority\":\"");
+    {
+        use core::fmt::Write as _;
+        for byte in authority.as_bytes() {
+            let _ = write!(event_payload, "{byte:02x}");
+        }
+    }
+    event_payload.push_str("\"}");
     let event = EventRow {
         session: Some(&session_be),
         t: inputs.logical_time,
         kind: KIND_SNAPSHOT_FREEZE_RECEIPT,
-        payload: Some(&terminal_bytes),
+        payload: Some(&event_payload),
     };
     let claim = SessionMutationClaim {
         authority,

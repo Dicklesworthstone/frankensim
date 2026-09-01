@@ -2,7 +2,7 @@
   "schema": "frankensim-source-manifest-v1",
   "identity_domain": "org.frankensim.xtask.source-manifest.v1",
   "identity_version": 1,
-  "manifest_identity": "853cb774b6040f2f0e12a450140a3e4cdd4263e92ed866083b9396d77b7db128",
+  "manifest_identity": "19a77e3ac0a888b506777acae72b1d8af13abda31518583342a6a4406295703e",
   "bead_id": "frankensim-extreal-program-f85xj.13.2",
   "authority": "canonical structural inventory over exact Git-index non-tracker bytes; release observations are intentionally unbound here",
   "release_binding": {
@@ -15,7 +15,7 @@
     "repository": "https://github.com/Dicklesworthstone/frankensim",
     "workspace_version": "0.0.1",
     "source_root_domain": "org.frankensim.xtask.source-root.v1",
-    "source_root": "f6d994408672f845fef7d6faecdf933ef1d85874feb5576dcbb92cceefb95a78",
+    "source_root": "9a6460f969fa522a131082ac3b7888378a49fb32b1cfc3c547caae2842e11d36",
     "tracked_file_count": 3166,
     "excluded_paths": [".beads/**", "frankensim-source-manifest.json", "frankensim-source-manifest.spdx.json"],
     "files": [
@@ -2111,7 +2111,7 @@
       {"path": "crates/fs-session/src/estimate.rs", "git_mode": "100644", "bytes": 20248, "content_blake3": "8a3f04e62f0a2ba5fe7bbc8269b8a4947a08c9044aef4991d44ccf436be884ee"},
       {"path": "crates/fs-session/src/gemm_tune.rs", "git_mode": "100644", "bytes": 148112, "content_blake3": "12bcdf566257ddb15ee64b0847c71138c73d3c160974860e1c21558f0a1fbcb5"},
       {"path": "crates/fs-session/src/governor.rs", "git_mode": "100644", "bytes": 471438, "content_blake3": "905f23246ef87d463d1aa615182d905b23cc9ca3c4145bc43ca23600e0e154c4"},
-      {"path": "crates/fs-session/src/governor/freeze_receipt.rs", "git_mode": "100644", "bytes": 10509, "content_blake3": "21273296353b8af7725d2db863a0527ae3bc3f01b2e5eec88704a04fb67663b2"},
+      {"path": "crates/fs-session/src/governor/freeze_receipt.rs", "git_mode": "100644", "bytes": 11174, "content_blake3": "ba928d1f8320a2369812c93f92736f14a546c65a3da93d56aaf4fe03fb324e8c"},
       {"path": "crates/fs-session/src/governor/recovery.rs", "git_mode": "100644", "bytes": 105864, "content_blake3": "a80b1cb4b7f8f321865ca1862a1c83b83c4fb98d96e1dcf82adc94753cea2673"},
       {"path": "crates/fs-session/src/grant.rs", "git_mode": "100644", "bytes": 20406, "content_blake3": "23a860e290272d36767111f8aaf880d615ebf0e67bc9f86a9a9cf34536bc49ca"},
       {"path": "crates/fs-session/src/guidance.rs", "git_mode": "100644", "bytes": 1625, "content_blake3": "90fa0b20aac40979012f0f1bda945ea3bd687a157d7acd4d80c5f41c07a37f12"},
