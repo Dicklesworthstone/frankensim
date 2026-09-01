@@ -172,12 +172,37 @@ fn mq_001c_armijo_records_bounded_acceptance_for_an_oversized_proposal() {
             pair[0].compliance,
             pair[1].compliance
         );
+        assert_eq!(
+            pair[0].accepted_cert_dwr.to_bits(),
+            pair[1].cert_dwr.to_bits(),
+            "the accepted successor retains its DWR evidence"
+        );
+        assert_eq!(
+            pair[0].accepted_cert_algebraic.to_bits(),
+            pair[1].cert_algebraic.to_bits(),
+            "the accepted successor retains its algebraic evidence"
+        );
+        assert_eq!(
+            pair[0].accepted_cut_cell_count, pair[1].cut_cell_count,
+            "the accepted successor retains its cut-cell evidence"
+        );
+        assert_eq!(
+            pair[0].accepted_color.canonical_bytes(),
+            pair[1].color.canonical_bytes(),
+            "the accepted successor retains its composed color"
+        );
     }
     let final_record = report.iterations.last().expect("nonempty trajectory");
     assert_eq!(report.design.radii, final_record.accepted_radii);
     assert!(
         final_record.accepted_compliance <= final_record.compliance + AREA_PROJECTION_TOLERANCE,
         "the final design carries an Armijo-accepted successor objective"
+    );
+    assert!(
+        final_record.accepted_cert_dwr > 0.0
+            && final_record.accepted_cert_algebraic.is_finite()
+            && final_record.accepted_cut_cell_count > 0,
+        "the final retained design carries its own certificate evidence"
     );
     verdict(
         "mq-001c",
@@ -236,8 +261,8 @@ fn mq_001f_refuses_a_candidate_that_grows_into_overlap() {
         ..smoke_config()
     };
     assert!(
-        std::panic::catch_unwind(|| run_study(initially_valid, &config)).is_err(),
-        "post-projection overlap must be refused before the first solve"
+        run_study(initially_valid, &config).is_err(),
+        "the fixed-ratio projection refuses a center-infeasible target before the first solve"
     );
 }
 
@@ -295,8 +320,15 @@ fn mq_001g_iteration_jsonl_rows_are_complete_and_deterministic() {
         "\"accepted_step\":",
         "\"backtracks\":",
         "\"accepted_compliance\":",
+        "\"accepted_cert_geometry\":",
+        "\"accepted_dwr_estimate\":",
+        "\"accepted_cert_algebraic\":",
+        "\"accepted_solver_iters\":",
+        "\"accepted_cut_cell_count\":",
         "\"color_rank\":",
         "\"color_payload\":",
+        "\"accepted_color_rank\":",
+        "\"accepted_color_payload\":",
     ] {
         assert!(row.contains(field), "JSONL row retains {field}");
     }
@@ -380,6 +412,26 @@ fn mq_003_replay_bit_equal_and_flat_cadence() {
         "mq-003",
         "bit-equal replay (G5); solver iterations within a 2x band across the study — \
          the no-remeshing cadence",
+    );
+}
+
+#[test]
+fn mq_003b_trace_identity_binds_study_config() {
+    let no_steps = StudyConfig {
+        steps: 0,
+        ..smoke_config()
+    };
+    let changed_level = StudyConfig {
+        level: no_steps.level + 1,
+        ..no_steps.clone()
+    };
+    let a = run_study(two_hole_plate(), &no_steps).expect("empty trace a");
+    let b = run_study(two_hole_plate(), &changed_level).expect("empty trace b");
+
+    assert!(a.iterations.is_empty() && b.iterations.is_empty());
+    assert_ne!(
+        a.trace_hash, b.trace_hash,
+        "replay identity binds StudyConfig even when no solve records exist"
     );
 }
 

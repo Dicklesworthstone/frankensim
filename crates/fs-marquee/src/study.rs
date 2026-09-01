@@ -144,6 +144,22 @@ fn validate_hole_geometry(design: &PlateWithHoles) {
     );
 }
 
+/// Refuse a projected layout whose fixed-ratio projection is not a valid disk
+/// configuration. This study deliberately does not claim to search the
+/// center-aware feasible set; callers must supply a target that remains valid
+/// under its documented projection.
+fn ensure_projected_hole_geometry(design: &PlateWithHoles) -> Result<(), fs_cutfem::CutFemError> {
+    if hole_geometry_is_valid(design) {
+        Ok(())
+    } else {
+        Err(fs_cutfem::CutFemError::InvalidFemInput {
+            what: "area projection produced a non-interior or overlapping hole layout; \
+                   center-aware feasible allocation is unsupported"
+                .to_string(),
+        })
+    }
+}
+
 /// Project candidate radii onto their box and the declared hole-area equality.
 ///
 /// A single clamp-then-rescale can leave the sum outside the target when a
@@ -255,6 +271,18 @@ pub struct IterRecord {
     pub accepted_radii: Vec<f64>,
     /// Objective evaluated at `accepted_radii` (or `compliance` on exhaustion).
     pub accepted_compliance: f64,
+    /// Geometry contribution of the solve at `accepted_radii`.
+    pub accepted_cert_geometry: f64,
+    /// DWR contribution of the solve at `accepted_radii`.
+    pub accepted_cert_dwr: f64,
+    /// Algebraic-residual contribution of the solve at `accepted_radii`.
+    pub accepted_cert_algebraic: f64,
+    /// Composed certificate color of the solve at `accepted_radii`.
+    pub accepted_color: Color,
+    /// Solver iterations of the solve at `accepted_radii`.
+    pub accepted_solver_iters: usize,
+    /// Cut-cell rules of the solve at `accepted_radii`.
+    pub accepted_cut_cell_count: usize,
     /// Shape gradient dJ/dr per hole (the self-adjoint boundary form).
     pub gradient: Vec<f64>,
     /// Euclidean norm of `gradient`.
@@ -291,7 +319,10 @@ impl IterRecord {
                 "\"gradient_norm\":{:.17e},\"dwr_estimate\":{:.17e},",
                 "\"cut_cell_count\":{},\"accepted_step\":{:.17e},",
                 "\"backtracks\":{},\"accepted_compliance\":{:.17e},",
-                "\"color_rank\":{},\"color_payload\":{}}\\n"
+                "\"accepted_cert_geometry\":{:.17e},\"accepted_dwr_estimate\":{:.17e},",
+                "\"accepted_cert_algebraic\":{:.17e},\"accepted_solver_iters\":{},",
+                "\"accepted_cut_cell_count\":{},\"color_rank\":{},\"color_payload\":{},",
+                "\"accepted_color_rank\":{},\"accepted_color_payload\":{}}\\n"
             ),
             self.iter,
             self.compliance,
@@ -302,8 +333,15 @@ impl IterRecord {
             self.accepted_step,
             self.backtracks,
             self.accepted_compliance,
+            self.accepted_cert_geometry,
+            self.accepted_cert_dwr,
+            self.accepted_cert_algebraic,
+            self.accepted_solver_iters,
+            self.accepted_cut_cell_count,
             color_rank_tag(self.color.rank()),
             self.color.payload_json(),
+            color_rank_tag(self.accepted_color.rank()),
+            self.accepted_color.payload_json(),
         )
     }
 }
@@ -439,9 +477,20 @@ fn armijo_next_design(
     config: &StudyConfig,
     current_objective: f64,
     gradient: &[f64],
-) -> Result<(PlateWithHoles, f64, f64, usize), fs_cutfem::CutFemError> {
+    current_cert: [f64; 3],
+    current_solver_iters: usize,
+    current_cut_cell_count: usize,
+) -> Result<(PlateWithHoles, f64, f64, usize, [f64; 3], usize, usize), fs_cutfem::CutFemError> {
     if config.step_size == 0.0 {
-        return Ok((design.clone(), current_objective, 0.0, 0));
+        return Ok((
+            design.clone(),
+            current_objective,
+            0.0,
+            0,
+            current_cert,
+            current_solver_iters,
+            current_cut_cell_count,
+        ));
     }
 
     for backtracks in 0..=MAX_ARMIJO_BACKTRACKS {
@@ -468,11 +517,25 @@ fn armijo_next_design(
             continue;
         }
 
-        let (candidate_objective, _, _, _, _) = solve_and_grade(&candidate, config.level)?;
+        let (
+            candidate_objective,
+            _,
+            candidate_cert,
+            candidate_solver_iters,
+            candidate_cut_cell_count,
+        ) = solve_and_grade(&candidate, config.level)?;
         if candidate_objective
             <= current_objective + ARMIJO_SUFFICIENT_DECREASE * directional_derivative
         {
-            return Ok((candidate, candidate_objective, step, backtracks));
+            return Ok((
+                candidate,
+                candidate_objective,
+                step,
+                backtracks,
+                candidate_cert,
+                candidate_solver_iters,
+                candidate_cut_cell_count,
+            ));
         }
     }
 
@@ -481,7 +544,31 @@ fn armijo_next_design(
         current_objective,
         0.0,
         MAX_ARMIJO_BACKTRACKS,
+        current_cert,
+        current_solver_iters,
+        current_cut_cell_count,
     ))
+}
+
+fn certificate_color(cert: [f64; 3]) -> Color {
+    // COMPOSED certificate color: exact geometry (verified) ⊗ DWR
+    // (estimated) ⊗ algebraic residual (estimated) — weakest wins.
+    compose(
+        &compose(
+            // declared-color-ok: exact-arithmetic identity leaf inside a compose() whose weakest-input rule keeps the result estimated (6pf9)
+            &Color::Verified { lo: 0.0, hi: 0.0 },
+            &Color::Estimated {
+                estimator: "dwr(compliance)".to_string(),
+                dispersion: cert[1],
+            },
+            IntervalOp::Add,
+        ),
+        &Color::Estimated {
+            estimator: "recomputed-euclidean-cg-residual".to_string(),
+            dispersion: cert[2],
+        },
+        IntervalOp::Add,
+    )
 }
 
 /// Run the marquee study: projected gradient on hole radii at a fixed
@@ -496,30 +583,21 @@ pub fn run_study(
 ) -> Result<StudyReport, fs_cutfem::CutFemError> {
     validate_study_input(&design, config);
     project_radii_to_area(&mut design.radii, config);
-    validate_hole_geometry(&design);
+    ensure_projected_hole_geometry(&design)?;
     let mut iterations = Vec::with_capacity(config.steps);
     for iter in 0..config.steps {
         let (j, grads, cert, iters, cut_cell_count) = solve_and_grade(&design, config.level)?;
-        let (next_design, accepted_compliance, accepted_step, backtracks) =
-            armijo_next_design(&design, config, j, &grads)?;
-        // COMPOSED certificate color: exact geometry (verified) ⊗ DWR
-        // (estimated) ⊗ algebraic residual (estimated) — weakest wins.
-        let color = compose(
-            &compose(
-                // declared-color-ok: exact-arithmetic identity leaf inside a compose() whose weakest-input rule keeps the result estimated (6pf9)
-                &Color::Verified { lo: 0.0, hi: 0.0 },
-                &Color::Estimated {
-                    estimator: "dwr(compliance)".to_string(),
-                    dispersion: cert[1],
-                },
-                IntervalOp::Add,
-            ),
-            &Color::Estimated {
-                estimator: "recomputed-euclidean-cg-residual".to_string(),
-                dispersion: cert[2],
-            },
-            IntervalOp::Add,
-        );
+        let (
+            next_design,
+            accepted_compliance,
+            accepted_step,
+            backtracks,
+            accepted_cert,
+            accepted_solver_iters,
+            accepted_cut_cell_count,
+        ) = armijo_next_design(&design, config, j, &grads, cert, iters, cut_cell_count)?;
+        let color = certificate_color(cert);
+        let accepted_color = certificate_color(accepted_cert);
         let gradient_norm = grads
             .iter()
             .map(|gradient| gradient * gradient)
@@ -533,6 +611,12 @@ pub fn run_study(
             radii: design.radii.clone(),
             accepted_radii: next_design.radii.clone(),
             accepted_compliance,
+            accepted_cert_geometry: accepted_cert[0],
+            accepted_cert_dwr: accepted_cert[1],
+            accepted_cert_algebraic: accepted_cert[2],
+            accepted_color,
+            accepted_solver_iters,
+            accepted_cut_cell_count,
             gradient: grads.clone(),
             gradient_norm,
             cert_geometry: cert[0],
@@ -547,7 +631,7 @@ pub fn run_study(
         });
         design = next_design;
     }
-    let trace_hash = canonical_trace_hash(&iterations, &design);
+    let trace_hash = canonical_trace_hash(&iterations, &design, config);
     Ok(StudyReport {
         iterations,
         design,
@@ -585,8 +669,18 @@ fn color_rank_tag(rank: ColorRank) -> u8 {
 /// Canonical replay identity for every recorded solve/acceptance transition
 /// and the final retained geometry. Floats are committed by IEEE bits, and
 /// colors use their versioned canonical payload bytes.
-fn canonical_trace_hash(iterations: &[IterRecord], design: &PlateWithHoles) -> String {
-    let mut bytes = b"fs-marquee-study-trace-v2\0".to_vec();
+fn canonical_trace_hash(
+    iterations: &[IterRecord],
+    design: &PlateWithHoles,
+    config: &StudyConfig,
+) -> String {
+    let mut bytes = b"fs-marquee-study-trace-v3\0".to_vec();
+    bytes.extend_from_slice(&config.level.to_le_bytes());
+    append_usize(&mut bytes, config.steps);
+    append_f64(&mut bytes, config.step_size);
+    append_f64(&mut bytes, config.area_target);
+    append_f64(&mut bytes, config.r_min);
+    append_f64(&mut bytes, config.r_max);
     append_usize(&mut bytes, iterations.len());
     for record in iterations {
         append_usize(&mut bytes, record.iter);
@@ -596,6 +690,15 @@ fn canonical_trace_hash(iterations: &[IterRecord], design: &PlateWithHoles) -> S
         append_f64_slice(&mut bytes, &record.radii);
         append_f64_slice(&mut bytes, &record.accepted_radii);
         append_f64(&mut bytes, record.accepted_compliance);
+        append_f64(&mut bytes, record.accepted_cert_geometry);
+        append_f64(&mut bytes, record.accepted_cert_dwr);
+        append_f64(&mut bytes, record.accepted_cert_algebraic);
+        bytes.push(color_rank_tag(record.accepted_color.rank()));
+        let accepted_color = record.accepted_color.canonical_bytes();
+        append_usize(&mut bytes, accepted_color.len());
+        bytes.extend_from_slice(&accepted_color);
+        append_usize(&mut bytes, record.accepted_solver_iters);
+        append_usize(&mut bytes, record.accepted_cut_cell_count);
         append_f64_slice(&mut bytes, &record.gradient);
         append_f64(&mut bytes, record.gradient_norm);
         append_f64(&mut bytes, record.cert_geometry);

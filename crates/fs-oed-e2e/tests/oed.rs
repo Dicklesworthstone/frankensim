@@ -322,6 +322,31 @@ fn sensors_target_the_decision_and_the_campaign_knows_when_to_stop() {
 }
 
 #[test]
+fn evpi_evidence_does_not_mislabel_the_decision_value_as_dispersion() {
+    let candidates = demo_candidates().expect("compiled demo candidates are valid");
+    let report = campaign(&candidates, 0.01, 12).expect("demo campaign succeeds");
+    let final_evpi = report.final_evpi().value();
+    assert!(final_evpi.is_finite(), "campaign output must remain finite");
+
+    match report.evpi_color() {
+        Color::Estimated { dispersion, .. } => {
+            assert_eq!(
+                dispersion.to_bits(),
+                f64::INFINITY.to_bits(),
+                "EVPI has no estimator/model uncertainty bound yet; its finite decision value \
+                 must not be reported as evidence dispersion"
+            );
+            assert_ne!(
+                dispersion.to_bits(),
+                final_evpi.to_bits(),
+                "the decision value is not an uncertainty bound"
+            );
+        }
+        color => panic!("EVPI evidence must remain Estimated, got {color:?}"),
+    }
+}
+
+#[test]
 fn a_clear_winner_needs_no_sensors() {
     // A is far cheaper than B, well beyond any uncertainty. The initial STOP
     // check must run even when no placements are permitted.

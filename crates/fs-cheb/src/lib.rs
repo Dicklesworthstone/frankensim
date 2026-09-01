@@ -68,7 +68,7 @@ impl Eq for Cheb1 {}
 
 #[cfg(test)]
 mod cheb1_bitwise_equality_tests {
-    use super::Cheb1;
+    use super::{Cheb1, affine_from_reference, sample_first_kind};
 
     #[test]
     fn equality_observes_signed_zero_and_nan_payload_bits() {
@@ -124,6 +124,33 @@ mod cheb1_bitwise_equality_tests {
         assert_eq!(cancelled, Err("cancelled"));
         assert_eq!(polls, 3);
     }
+
+    #[test]
+    fn one_ulp_subnormal_domain_rounds_first_kind_samples_to_both_endpoints() {
+        let a = f64::from_bits(1);
+        let b = f64::from_bits(2);
+
+        assert_eq!(affine_from_reference(-0.25, a, b).to_bits(), a.to_bits());
+        assert_eq!(affine_from_reference(0.25, a, b).to_bits(), b.to_bits());
+        // The exact midpoint is 1.5 ulps, a nearest-even tie to b (bit 2).
+        assert_eq!(affine_from_reference(0.0, a, b).to_bits(), b.to_bits());
+
+        let samples = sample_first_kind(
+            &|x| {
+                if x == a {
+                    0.0
+                } else if x == b {
+                    1.0
+                } else {
+                    f64::NAN
+                }
+            },
+            a,
+            b,
+            4,
+        );
+        assert_eq!(samples, [1.0, 1.0, 0.0, 0.0]);
+    }
 }
 
 /// Relative plateau threshold for adaptive truncation. Sits ABOVE the
@@ -175,6 +202,23 @@ pub(crate) fn affine_from_reference(t: f64, a: f64, b: f64) -> f64 {
     } else {
         half_width(a, b)
     };
+    // A one-ulp-wide subnormal interval has no representable interior point:
+    // halving its finite width rounds to zero. First-kind sampling still needs
+    // a faithful rounded affine image rather than silently collapsing every
+    // node to `a`. Within the admitted reference interval, negative/positive
+    // coordinates round to their respective endpoints; the exact midpoint is
+    // the IEEE nearest-even endpoint selected by the low significand bit.
+    if radius == 0.0 && (-1.0..=1.0).contains(&t) {
+        return if t < 0.0 {
+            a
+        } else if t > 0.0 {
+            b
+        } else if a.to_bits() & 1 == 0 {
+            a
+        } else {
+            b
+        };
+    }
     // This is the pre-existing sampling expression whenever b-a is finite,
     // preserving ordinary-domain golden bits. Unlike convex weights, it does
     // not lose a tiny t in the rounded expressions 1±t on extreme domains.

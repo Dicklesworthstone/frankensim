@@ -3059,7 +3059,9 @@ fn finish_report(
             admitted_work_units: plan.admitted_work_units,
         })?;
     let variance_color_dispersion = f64::INFINITY;
-    let evpi_color_dispersion = final_evpi;
+    // EVPI is the modeled decision value, not an uncertainty bound on that
+    // estimator. Until such a bound exists, retain the explicit no-claim.
+    let evpi_color_dispersion = f64::INFINITY;
     let (variance_identity, evpi_identity) = {
         let source = ReportIdentitySource {
             candidates,
