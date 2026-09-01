@@ -181,6 +181,10 @@ export class SimClient {
     this.scenario = scenario;
     this.ready = null;
     this.pendingCheckpoints.clear();
+    this.prev = null;
+    this.latest = null;
+    this.latestArrivalMs = 0;
+    this.terminalCode = undefined;
     this.recorder = new FlightRecorder();
     this.recording = null;
     let init: Extract<MainToWorker, { kind: "init" }>;

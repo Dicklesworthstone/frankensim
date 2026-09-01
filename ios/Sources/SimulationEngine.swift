@@ -328,9 +328,9 @@ final class PCMPlayback {
         self.schedule = schedule
         control?.stop()
         if stopsImmediately || scheduledBuffers.isEmpty {
-            scheduledBuffers.removeAll()
             player.stop()
             engine.pause()
+            scheduledBuffers.removeAll()
             onFinished()
         }
     }

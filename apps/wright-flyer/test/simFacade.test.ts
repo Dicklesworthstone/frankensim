@@ -234,6 +234,15 @@ test("checkpoint replies bind the request and active run across reinit races", (
     layoutHash: 1,
     initGeneration: 1,
   });
+  worker.emit({
+    kind: "snapshot",
+    runIntentId: runA,
+    initGeneration: 1,
+    tick: 7,
+    payload: new Float64Array(PAYLOAD_F64S),
+  });
+  assert.equal(client.latestTick(), 7, "accepted A snapshot reaches the render cache");
+  assert.equal(client.sample(0)?.tick, 7);
   assert.equal(client.requestCheckpoint(), true);
   const r1 = worker.sent.at(-1);
   assert.deepEqual(r1, { kind: "checkpoint", requestId: 1, runIntentId: runA });
@@ -241,6 +250,8 @@ test("checkpoint replies bind the request and active run across reinit races", (
   // Starting B revokes A's ready capability; no B checkpoint can be exposed
   // until B's new ready receipt arrives.
   client.start(scenarioB);
+  assert.equal(client.latestTick(), 0, "B start must clear A's cached latest tick");
+  assert.equal(client.sample(0), null, "B cannot render A while awaiting B's first snapshot");
   const initB = worker.sent.at(-1);
   assert.equal(initB?.kind, "init");
   if (initB?.kind === "init") {
