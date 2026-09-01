@@ -26,7 +26,9 @@ fn rung(reynolds: f64, tonal: bool) -> SlotJet3dRung {
         prominence: 1.0e3,
         force_rms: 1.0e-3,
         amplitude_qualified: true,
-        strouhal_bin_width: 1.0e-3,
+        // The staging profile (u 0.04, slot_half 2.5) on an 8192-step
+        // record, exactly as the real campaign rows disclose it.
+        strouhal_bin_width: 2.0 * 2.5 / (0.04 * 8192.0),
         mach_max_lattice: 0.07,
         flux_imbalance: 0.01,
     }

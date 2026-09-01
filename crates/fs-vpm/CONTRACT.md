@@ -121,3 +121,7 @@ cost/poll refusal without partial publication.
 - G4 cancellation evidence is synchronous and deterministic. It does not yet
   establish cancellation under multi-threaded signal races or a wall-time
   latency bound.
+- Retired from v1 (owner decision 2026-09-01, bead frankensim-rc-root-q61wp.25):
+  FMM-accelerated Biot–Savart, particle-strength-exchange viscosity, remeshing,
+  and the BEM+VPM hybrid are NOT scheduled; the promise is preserved in deferred
+  epic frankensim-rc-root-q61wp.43 and un-parks only behind a consumer journey.

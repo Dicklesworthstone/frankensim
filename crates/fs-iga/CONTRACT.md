@@ -72,3 +72,7 @@ determinism; and one-element degree-2 through degree-8 rank/reproduction.
   fs-feec's batched small-dense assembly + the sparse solver stack.
 - Inhomogeneous / typed BCs via fs-scenario on patch boundaries are a downstream
   integration.
+- Retired from v1 (owner decision 2026-09-01, bead frankensim-rc-root-q61wp.25):
+  NURBS weights, Bézier extraction, mortar coupling, 2D/3D spaces, and
+  Kirchhoff–Love shells are NOT scheduled; the promise is preserved in deferred
+  epic frankensim-rc-root-q61wp.40 and un-parks only behind a consumer journey.

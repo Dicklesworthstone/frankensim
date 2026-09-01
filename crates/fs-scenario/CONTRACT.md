@@ -770,6 +770,13 @@ control code renders BITWISE identical audio through the render API.
 
 ## No-claim boundaries
 
+- **The `rans-rung` fixture is not a turbulence model**: the feature-gated
+  1-D channel Launder–Sharma rung is a convergence-of-toy check, not RANS or LES
+  on a mesh. Turbulence modelling was retired from v1 by owner decision
+  2026-09-01 (bead frankensim-rc-root-q61wp.25); the promise is preserved in
+  deferred epic frankensim-rc-root-q61wp.41 and un-parks only behind a consumer
+  journey.
+
 - **Acoustic assemblies are descriptions, not instruments**:
   `AcousticAssembly` can name a reed, bow, plate, and tone holes as data.
   It does not own a named instrument law. Empty assemblies are valid data

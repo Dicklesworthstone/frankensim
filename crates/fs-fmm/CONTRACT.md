@@ -101,3 +101,7 @@ ordinary Rust test failure as well as a canonical error event.
 - The `fmm-003/measurement` timing rows are diagnostic observations, not
   portable performance authority; performance claims still require the
   machine-fingerprinted perf lanes and their acceptance bands.
+- Retired from v1 (owner decision 2026-09-01, bead frankensim-rc-root-q61wp.25):
+  the adaptive kernel-independent (bbFMM) tree that would drive an FMM-accelerated
+  vortex particle method is NOT scheduled; the promise is preserved in deferred
+  epic frankensim-rc-root-q61wp.43 and un-parks only behind a consumer journey.

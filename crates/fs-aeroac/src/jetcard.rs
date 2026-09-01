@@ -492,7 +492,46 @@ pub fn staging_rig_config() -> JetLabiumConfig {
 
 /// Regime gates a 3-D rung must pass before it can back any card
 /// (an out-of-regime rung would mint a fabricated authority).
-fn admit_rung(rung: &SlotJet3dRung) -> Result<(), AeroacError> {
+/// Bins from the record's temporal-Nyquist edge within which a peak is
+/// the parity artifact, not a tone (the 2-D staging battery's law:
+/// `bin < n/2 - 8`).
+pub const NYQUIST_EDGE_BINS: usize = 8;
+
+/// Recover the FFT record length from a rung's bin-width disclosure and
+/// the profile it was measured on: `bin_width = (1/n) 2 slot_half / u`.
+fn record_len_of(rung: &SlotJet3dRung, profile: &MeanJetProfile) -> Option<usize> {
+    let n = 2.0 * profile.slot_half / (profile.u_centerline * rung.strouhal_bin_width);
+    if !n.is_finite() || n < 64.0 {
+        return None;
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let rounded = n.round() as usize;
+    ((n - n.round()).abs() < 1e-6 && rounded.is_power_of_two()).then_some(rounded)
+}
+
+/// Whether the rung's peak sits at the temporal-Nyquist edge of its
+/// record (the LBM bounce-back parity artifact class): such a "tone"
+/// is numerical and no card may cite it.
+///
+/// # Errors
+/// [`AeroacError::InvalidParameter`] when the rung's bin-width
+/// disclosure and the profile do not reproduce a power-of-two record.
+pub fn peak_at_nyquist_edge(
+    rung: &SlotJet3dRung,
+    profile: &MeanJetProfile,
+) -> Result<bool, AeroacError> {
+    let n = record_len_of(rung, profile).ok_or(AeroacError::InvalidParameter {
+        what: "rung bin-width disclosure does not reproduce a power-of-two record on this profile",
+    })?;
+    Ok(rung.peak_bin + NYQUIST_EDGE_BINS >= n / 2)
+}
+
+fn admit_rung(rung: &SlotJet3dRung, profile: &MeanJetProfile) -> Result<(), AeroacError> {
+    if peak_at_nyquist_edge(rung, profile)? {
+        return Err(AeroacError::InvalidParameter {
+            what: "rung peak sits at the temporal-Nyquist edge (parity artifact, not a tone) and cannot back a card",
+        });
+    }
     if !rung.amplitude_qualified {
         return Err(AeroacError::InvalidParameter {
             what: "rung below the force-RMS amplitude floor cannot back a card",
@@ -532,7 +571,7 @@ pub fn mint_broadband_card(
 ) -> Result<JetCard, AeroacError> {
     let mut demo: Option<&SlotJet3dRung> = None;
     for rung in rungs {
-        if !rung.tonal && admit_rung(rung).is_ok() {
+        if !rung.tonal && admit_rung(rung, &profile).is_ok() {
             let better = demo.is_none_or(|d| rung.reynolds < d.reynolds);
             if better {
                 demo = Some(rung);
@@ -552,7 +591,7 @@ pub fn mint_broadband_card(
     };
     let hi = rungs
         .iter()
-        .filter(|r| !r.tonal && admit_rung(r).is_ok())
+        .filter(|r| !r.tonal && admit_rung(r, &profile).is_ok())
         .map(|r| r.reynolds)
         .fold(rung.reynolds, f64::max);
     let card = JetCard {
@@ -598,7 +637,10 @@ pub fn mint_refusal_boundary_card(
     rig_fingerprint: u64,
     receipts: Vec<String>,
 ) -> Result<JetCard, AeroacError> {
-    let admitted: Vec<&SlotJet3dRung> = rungs.iter().filter(|r| admit_rung(r).is_ok()).collect();
+    let admitted: Vec<&SlotJet3dRung> = rungs
+        .iter()
+        .filter(|r| admit_rung(r, &profile).is_ok())
+        .collect();
     if admitted.len() < 2 {
         return Err(AeroacError::InvalidParameter {
             what: "a refusal boundary needs at least two admitted rungs",
