@@ -104,7 +104,13 @@ function runTick(tick: number): boolean {
   if (step.kind === "refusal") {
     // Refusal consumes the tick as before (typed receipt posted); only
     // the pre-first-touch / loading waits return false above.
-    post({ kind: "refusal", stage: "step", refusal: step.refusal });
+    post({
+      kind: "refusal",
+      stage: "step",
+      runIntentId,
+      initGeneration: currentInitGeneration,
+      refusal: step.refusal,
+    });
     return true;
   }
   if (step.kind === "malformed") {

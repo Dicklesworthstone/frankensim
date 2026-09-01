@@ -272,6 +272,13 @@ test("checkpoint replies bind the request and active run across reinit races", (
     initGeneration: 1,
     refusal: { code: "scenario-invalid", message: "stale", ranked_repairs: [] },
   });
+  worker.emit({
+    kind: "refusal",
+    stage: "step",
+    runIntentId: runA,
+    initGeneration: 1,
+    refusal: { code: "run-ended", message: "stale", ranked_repairs: [] },
+  });
   assert.deepEqual(readyRuns, [runA]);
   assert.deepEqual(refusals, []);
   assert.equal(client.requestCheckpoint(), false);

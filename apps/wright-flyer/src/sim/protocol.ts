@@ -174,6 +174,10 @@ export type WorkerToMain =
   | {
       readonly kind: "refusal";
       readonly stage: "step";
+      /** Active run that produced this step refusal. */
+      readonly runIntentId: string;
+      /** Client lifecycle generation that admitted this run. */
+      readonly initGeneration: number;
       readonly refusal: RefusalEnvelope;
     }
   | {

@@ -101,7 +101,12 @@ export class SimClient {
           events.onReady(msg);
           break;
         case "refusal":
-          if (msg.stage !== "init" || msg.initGeneration === this.initGeneration) {
+          if (
+            msg.stage === "init"
+              ? msg.initGeneration === this.initGeneration
+              : this.ready?.runIntentId === msg.runIntentId &&
+                msg.initGeneration === this.initGeneration
+          ) {
             events.onRefusal(msg.stage, msg.refusal);
           }
           break;
