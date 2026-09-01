@@ -6,9 +6,8 @@
 use fs_asbuilt::{
     AS_BUILT_POLL_POLICY_VERSION, AS_BUILT_POLL_STRIDE_BYTES, AS_BUILT_POLL_STRIDE_POINTS,
     AS_BUILT_WORK_PLAN_VERSION, Color, Fiducial, Point2, RegError, Registration,
-    SampledConformance, as_built_diff,
-    as_built_diff_budgeted, as_built_diff_invocation_resources, register, register_budgeted,
-    registration_invocation_resources, well_posed,
+    SampledConformance, as_built_diff, as_built_diff_budgeted, as_built_diff_invocation_resources,
+    register, register_budgeted, registration_invocation_resources, well_posed,
 };
 use fs_blake3::hash_domain;
 use fs_exec::{
