@@ -100,6 +100,18 @@ final class SimulationCatalogTests: XCTestCase {
         XCTAssertFalse(schedule.reserveNextBlock())
     }
 
+    func testPreplayStopTerminatesPartialPrefillWithoutADevice() {
+        var schedule = PCMStreamSchedule(plan: .reedDemo)
+        for _ in 0..<(PCMStreamPlan.reedDemo.maximumQueuedBlocks - 1) {
+            XCTAssertTrue(schedule.reserveNextBlock())
+        }
+
+        XCTAssertTrue(schedule.stopsImmediately)
+        schedule.requestStopAfterDrain()
+        XCTAssertTrue(schedule.stopping)
+        XCTAssertFalse(schedule.reserveNextBlock())
+    }
+
     func testEmptyQueueBeforeFiniteProductionCompletesIsStarvation() {
         var schedule = PCMStreamSchedule(
             plan: PCMStreamPlan(totalBlocks: 3, maximumQueuedBlocks: 1)

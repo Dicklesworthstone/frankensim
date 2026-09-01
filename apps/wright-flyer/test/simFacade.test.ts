@@ -197,6 +197,7 @@ test("checkpoint replies bind the request and active run across reinit races", (
   const checkpoints: Array<{ requestId: number; runIntentId: string; bytes: Uint8Array }> = [];
   const refusals: string[] = [];
   const readyRuns: string[] = [];
+  const terminals: string[] = [];
   const client = new SimClient(
     {
       onReady(info): void {
@@ -205,7 +206,9 @@ test("checkpoint replies bind the request and active run across reinit races", (
       onRefusal(_stage, refusal): void {
         refusals.push(refusal.code);
       },
-      onTerminal(): void {},
+      onTerminal(info): void {
+        terminals.push(info.digest);
+      },
       onCheckpoint(checkpoint): void {
         checkpoints.push(checkpoint);
       },
@@ -261,6 +264,24 @@ test("checkpoint replies bind the request and active run across reinit races", (
   assert.deepEqual(readyRuns, [runA]);
   assert.deepEqual(refusals, []);
   assert.equal(client.requestCheckpoint(), false);
+  worker.emit({
+    kind: "snapshot",
+    runIntentId: runA,
+    initGeneration: 1,
+    tick: 99,
+    payload: new Float64Array(PAYLOAD_F64S),
+  });
+  worker.emit({
+    kind: "terminal",
+    runIntentId: runA,
+    initGeneration: 1,
+    phase: "ended:max-ticks",
+    tick: 99,
+    digest: "e".repeat(64),
+  });
+  assert.equal(client.latestTick(), 0, "queued A snapshot must not enter B view state");
+  assert.deepEqual(terminals, [], "queued A terminal must not notify or seal B");
+  assert.equal(client.takeRecording(), null, "queued A terminal must not create a B recording");
   worker.emit({ kind: "checkpoint", requestId: 1, runIntentId: runA, bytes: new Uint8Array([1]) });
   assert.deepEqual(checkpoints, []);
 

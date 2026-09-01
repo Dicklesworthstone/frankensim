@@ -54,6 +54,7 @@ let mode = 0;
 let running = false;
 let ended = false;
 let activeRunIntentId: string | null = null;
+let activeInitGeneration: number | null = null;
 let initGeneration = 0;
 let pumpGeneration = 0;
 // E5.3a: Human-mode hold law (ApplyNextEligibleTickAndFlag) + the sim
@@ -76,7 +77,9 @@ async function loadEngine(): Promise<WasmEngine> {
 }
 
 function runTick(tick: number): boolean {
-  if (engine === null || ended) {
+  const runIntentId = activeRunIntentId;
+  const currentInitGeneration = activeInitGeneration;
+  if (engine === null || ended || runIntentId === null || currentInitGeneration === null) {
     return false; // wasm still loading / run over: sim time waits
   }
   // E5.3a Human mode: the ControlHold supplies the zero-order-held
@@ -113,7 +116,16 @@ function runTick(tick: number): boolean {
   } else {
     const copy = new Float64Array(PAYLOAD_F64S);
     fillPayload(step, copy);
-    post({ kind: "snapshot", tick: step.tick, payload: copy }, [copy.buffer]);
+    post(
+      {
+        kind: "snapshot",
+        runIntentId,
+        initGeneration: currentInitGeneration,
+        tick: step.tick,
+        payload: copy,
+      },
+      [copy.buffer],
+    );
   }
   if (step.ended) {
     ended = true;
@@ -121,6 +133,8 @@ function runTick(tick: number): boolean {
     const digest = parseDigestEnvelope(engine.flyer_engine_digest());
     post({
       kind: "terminal",
+      runIntentId,
+      initGeneration: currentInitGeneration,
       phase: step.phase,
       tick: step.tick,
       ...(step.envelopeRefusalCode !== undefined
@@ -148,6 +162,7 @@ function invalidateRun(): void {
   writer = null;
   scheduler = null;
   activeRunIntentId = null;
+  activeInitGeneration = null;
 }
 
 function postInitRefusal(initGeneration: number, refusal: RefusalEnvelope): void {
@@ -209,6 +224,7 @@ async function handleInit(msg: Extract<MainToWorker, { kind: "init" }>): Promise
   simEpochMs = performance.now();
   scheduler = new TickScheduler(TICK_MS, simEpochMs);
   activeRunIntentId = init.runIntentId;
+  activeInitGeneration = msg.initGeneration;
   running = true;
   post({
     kind: "ready",

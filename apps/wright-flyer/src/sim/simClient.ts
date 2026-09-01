@@ -106,6 +106,12 @@ export class SimClient {
           }
           break;
         case "terminal":
+          if (
+            this.ready?.runIntentId !== msg.runIntentId ||
+            msg.initGeneration !== this.initGeneration
+          ) {
+            break;
+          }
           this.terminalCode = msg.envelopeRefusalCode;
           if (this.scenario !== null && this.ready !== null && this.recorder.frameCount() > 0) {
             this.recording = this.recorder.seal({
@@ -120,6 +126,12 @@ export class SimClient {
           break;
         case "snapshot": {
           // postMessage fallback transport.
+          if (
+            this.ready?.runIntentId !== msg.runIntentId ||
+            msg.initGeneration !== this.initGeneration
+          ) {
+            break;
+          }
           this.recorder.append(msg.tick, msg.payload);
           this.push(decodeSnapshot(msg.tick, msg.payload));
           break;

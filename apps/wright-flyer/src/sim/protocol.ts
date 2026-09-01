@@ -192,6 +192,10 @@ export type WorkerToMain =
     }
   | {
       readonly kind: "terminal";
+      /** Active run that produced this terminal receipt. */
+      readonly runIntentId: string;
+      /** Client lifecycle generation that admitted this run. */
+      readonly initGeneration: number;
       readonly phase: PhaseWord;
       readonly tick: number;
       readonly envelopeRefusalCode?: string;
@@ -200,6 +204,10 @@ export type WorkerToMain =
   | {
       /** postMessage fallback transport only (no SAB): one snapshot. */
       readonly kind: "snapshot";
+      /** Active run that produced this fallback snapshot. */
+      readonly runIntentId: string;
+      /** Client lifecycle generation that admitted this run. */
+      readonly initGeneration: number;
       readonly tick: number;
       readonly payload: Float64Array;
     }

@@ -151,6 +151,10 @@ struct PCMStreamSchedule: Equatable {
             && queuedBlocks == min(plan.totalBlocks, plan.maximumQueuedBlocks)
     }
 
+    var stopsImmediately: Bool {
+        !playbackStarted
+    }
+
     mutating func markPlaybackStarted() {
         precondition(isReadyToStartPlayback)
         playbackStarted = true
@@ -319,10 +323,12 @@ final class PCMPlayback {
 
     func stopAndDrain() {
         guard var schedule else { return }
+        let stopsImmediately = schedule.stopsImmediately
         schedule.requestStopAfterDrain()
         self.schedule = schedule
         control?.stop()
-        if scheduledBuffers.isEmpty {
+        if stopsImmediately || scheduledBuffers.isEmpty {
+            scheduledBuffers.removeAll()
             player.stop()
             engine.pause()
             onFinished()
