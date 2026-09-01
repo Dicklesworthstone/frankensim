@@ -49,8 +49,8 @@ pub mod rigid3;
 /// decision bounds, and authenticated evidence admission.
 pub mod uncertainty;
 
-const AS_BUILT_ESTIMATOR_DOMAIN: &str = "org.frankensim.fs-asbuilt.diff-estimator.v5";
-const AS_BUILT_ESTIMATOR_SCHEMA: &[u8] = b"fs-asbuilt-diff-estimator-v5";
+const AS_BUILT_ESTIMATOR_DOMAIN: &str = "org.frankensim.fs-asbuilt.diff-estimator.v6";
+const AS_BUILT_ESTIMATOR_SCHEMA: &[u8] = b"fs-asbuilt-diff-estimator-v6";
 /// Identity-bound work-plan version for resource-driving scans and hashing.
 pub const AS_BUILT_WORK_PLAN_VERSION: u32 = 2;
 /// Identity-bound cancellation policy version for resource-driving scans.
@@ -1315,6 +1315,23 @@ pub fn well_posed(reg: &Registration, certified_deviation: f64) -> bool {
         && reg.residual_rms < certified_deviation
 }
 
+/// Sample-scoped conformance from the direct-difference path.
+///
+/// This concerns only supplied correspondences. It never establishes a
+/// whole-part claim: unsampled geometry, occlusion, and any nonzero declared
+/// registration or measurement uncertainty remain outside this path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SampledConformance {
+    /// Every supplied deviation is strictly below tolerance and both declared
+    /// registration residual and measurement noise are exactly zero.
+    Pass,
+    /// A supplied correspondence exceeds the declared tolerance.
+    Fail,
+    /// The supplied samples do not refute conformance, but nonzero uncertainty
+    /// or a boundary comparison prevents even a sample-scoped pass.
+    Indeterminate,
+}
+
 /// The as-built δ between design and scanned sections.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AsBuiltDiff {
@@ -1330,6 +1347,8 @@ pub struct AsBuiltDiff {
     /// Advisory one-dispersion screen for whether the maximum deviation rises
     /// above the conservatively combined estimated dispersion.
     above_noise_floor: bool,
+    /// Explicit sample-scoped result. It is never a whole-part verdict.
+    sampled_conformance: SampledConformance,
     /// Exact run conditions; this legacy accessor does not generalize them.
     proposed_regime: ValidityDomain,
     /// The δ's honest candidate color. This API never emits `Validated`.
@@ -1371,6 +1390,17 @@ impl AsBuiltDiff {
         self.above_noise_floor
     }
 
+    /// Tri-state conformance for the supplied correspondences only.
+    ///
+    /// A [`SampledConformance::Pass`] is deliberately narrower than a
+    /// whole-part conformance claim. The calibrated uncertainty path supplies
+    /// its own tri-state decision; geometry coverage/generalization requires
+    /// separate retained evidence.
+    #[must_use]
+    pub const fn sampled_conformance(&self) -> SampledConformance {
+        self.sampled_conformance
+    }
+
     /// Exact, unauthenticated run conditions for this result.
     ///
     /// Every bound is a singleton. A wider validity domain needs a separate,
@@ -1399,6 +1429,10 @@ impl AsBuiltDiff {
 /// advisory one-dispersion screens: registration residual RMS is a global fit
 /// diagnostic rather than a pointwise uncertainty bound, so neither boolean is
 /// a tolerance certificate or statistical-significance claim.
+/// `sampled_conformance` is the non-authoritative tri-state replacement for
+/// relying on those booleans: only a zero-uncertainty strict sampled margin can
+/// pass, a witnessed sample above tolerance fails, and every other case is
+/// indeterminate. It makes no whole-part claim.
 ///
 /// # Errors
 /// Refuses empty/mismatched/oversized point sets, malformed calibration
@@ -1704,6 +1738,16 @@ fn as_built_diff_with_poll(
     let within_tolerance =
         max_deviation <= design_tolerance && dispersion <= design_tolerance - max_deviation;
     let above_noise_floor = max_deviation > dispersion;
+    let sampled_conformance = if max_deviation > design_tolerance {
+        SampledConformance::Fail
+    } else if max_deviation < design_tolerance
+        && reg.residual_rms == 0.0
+        && measurement_noise == 0.0
+    {
+        SampledConformance::Pass
+    } else {
+        SampledConformance::Indeterminate
+    };
     progress.require_completed(DIFF_IDENTITY_PHASE, plan.total)?;
     let output = AsBuiltDiff {
         deviations,
@@ -1711,6 +1755,7 @@ fn as_built_diff_with_poll(
         max_deviation_index,
         within_tolerance,
         above_noise_floor,
+        sampled_conformance,
         proposed_regime,
         color: Color::Estimated {
             estimator,
@@ -1902,7 +1947,7 @@ fn estimator_identity(
     progress.require_completed(DIFF_IDENTITY_PHASE, work_plan.total)?;
     let preimage_hash = hasher.finalize();
     Ok(format!(
-        "asbuilt-diff-v5:{}",
+        "asbuilt-diff-v6:{}",
         fs_blake3::hash_domain(AS_BUILT_ESTIMATOR_DOMAIN, preimage_hash.as_bytes())
     ))
 }

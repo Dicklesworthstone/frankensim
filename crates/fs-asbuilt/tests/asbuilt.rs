@@ -5,7 +5,8 @@
 
 use fs_asbuilt::{
     AS_BUILT_POLL_POLICY_VERSION, AS_BUILT_POLL_STRIDE_BYTES, AS_BUILT_POLL_STRIDE_POINTS,
-    AS_BUILT_WORK_PLAN_VERSION, Color, Fiducial, Point2, RegError, Registration, as_built_diff,
+    AS_BUILT_WORK_PLAN_VERSION, Color, Fiducial, Point2, RegError, Registration,
+    SampledConformance, as_built_diff,
     as_built_diff_budgeted, as_built_diff_invocation_resources, register, register_budgeted,
     registration_invocation_resources, well_posed,
 };
@@ -222,11 +223,83 @@ fn the_as_built_diff_is_an_estimated_candidate_with_exact_run_conditions() {
             estimator,
             dispersion,
         } => {
-            assert!(estimator.starts_with("asbuilt-diff-v5:"));
+            assert!(estimator.starts_with("asbuilt-diff-v6:"));
             assert_eq!(dispersion.to_bits(), 0.05f64.to_bits());
         }
         other => panic!("expected estimated candidate, got {other:?}"),
     }
+}
+
+#[test]
+fn sampled_conformance_is_tri_state_and_never_whole_part_authority() {
+    let design = [point(0.0, 0.0)];
+
+    let exact_pass = with_default_cx(|cx| {
+        as_built_diff(
+            &registration(0.0, 0.0, 0.0, 0.0),
+            &design,
+            &[point(0.0, 0.1)],
+            0.2,
+            0.0,
+            "cal",
+            cx,
+        )
+    })
+    .expect("zero-uncertainty supplied sample");
+    assert_eq!(exact_pass.sampled_conformance(), SampledConformance::Pass);
+
+    let sampled_failure = with_default_cx(|cx| {
+        as_built_diff(
+            &registration(0.0, 0.0, 0.0, 0.0),
+            &design,
+            &[point(0.0, 0.3)],
+            0.2,
+            0.0,
+            "cal",
+            cx,
+        )
+    })
+    .expect("witnessed sampled violation");
+    assert_eq!(
+        sampled_failure.sampled_conformance(),
+        SampledConformance::Fail
+    );
+
+    let unmodeled_noise = with_default_cx(|cx| {
+        as_built_diff(
+            &registration(0.0, 0.0, 0.0, 0.0),
+            &design,
+            &[point(0.0, 0.1)],
+            0.2,
+            0.01,
+            "cal",
+            cx,
+        )
+    })
+    .expect("finite noisy supplied sample");
+    assert_eq!(
+        unmodeled_noise.sampled_conformance(),
+        SampledConformance::Indeterminate,
+        "finite samples with an unmodeled uncertainty term cannot become a whole-part pass"
+    );
+
+    let boundary = with_default_cx(|cx| {
+        as_built_diff(
+            &registration(0.0, 0.0, 0.0, 0.0),
+            &design,
+            &[point(0.0, 0.2)],
+            0.2,
+            0.0,
+            "cal",
+            cx,
+        )
+    })
+    .expect("finite boundary sample");
+    assert_eq!(
+        boundary.sampled_conformance(),
+        SampledConformance::Indeterminate,
+        "touching tolerance has no positive margin"
+    );
 }
 
 #[test]
@@ -538,7 +611,7 @@ fn g5_retained_identity_declares_the_v2_work_and_poll_policies() {
     assert_eq!(AS_BUILT_POLL_STRIDE_POINTS, 256);
     assert_eq!(AS_BUILT_POLL_STRIDE_BYTES, 256);
     let diff = fixture_diff(ExecMode::Deterministic, Budget::INFINITE);
-    assert!(estimator_identity(&diff).starts_with("asbuilt-diff-v5:"));
+    assert!(estimator_identity(&diff).starts_with("asbuilt-diff-v6:"));
 }
 
 #[test]
@@ -903,8 +976,8 @@ fn contract_tracks_live_dependencies_api_schema_cancellation_and_no_claims() {
         ),
         (
             "Invariants",
-            "const AS_BUILT_ESTIMATOR_SCHEMA: &[u8] = b\"fs-asbuilt-diff-estimator-v5\";",
-            "asbuilt-diff-v5 identity",
+            "const AS_BUILT_ESTIMATOR_SCHEMA: &[u8] = b\"fs-asbuilt-diff-estimator-v6\";",
+            "asbuilt-diff-v6 identity",
         ),
         (
             "Invariants",
