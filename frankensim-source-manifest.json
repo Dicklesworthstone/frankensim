@@ -2,7 +2,7 @@
   "schema": "frankensim-source-manifest-v1",
   "identity_domain": "org.frankensim.xtask.source-manifest.v1",
   "identity_version": 1,
-  "manifest_identity": "4dd2ee6ba50f494730e8a453af99dd5902bb0d64e3aed3f29cf5b54844be41e0",
+  "manifest_identity": "be389d6e1349b79cecc87b696310d2cec7af1e4ad851d0c3377eaaa3fa2b1890",
   "bead_id": "frankensim-extreal-program-f85xj.13.2",
   "authority": "canonical structural inventory over exact Git-index non-tracker bytes; release observations are intentionally unbound here",
   "release_binding": {
@@ -15,7 +15,7 @@
     "repository": "https://github.com/Dicklesworthstone/frankensim",
     "workspace_version": "0.0.1",
     "source_root_domain": "org.frankensim.xtask.source-root.v1",
-    "source_root": "4724ed2bf3855ac406e8c4510433f107d7aa6b56db2266e6614005750b4370ce",
+    "source_root": "0849c9bb4029a687134b94d28b622a1749581bfa28107939f3944e2b62a35186",
     "tracked_file_count": 3166,
     "excluded_paths": [".beads/**", "frankensim-source-manifest.json", "frankensim-source-manifest.spdx.json"],
     "files": [
@@ -225,7 +225,7 @@
       {"path": "crates/fs-aeroac/tests/noisetable.rs", "git_mode": "100644", "bytes": 6675, "content_blake3": "dd0d93a6944d3321ea039b0780bad6970acfcb5792a445d8969e9a6f01c6d50e"},
       {"path": "crates/fs-aeroac/tests/regime.rs", "git_mode": "100644", "bytes": 3307, "content_blake3": "a7668a80be36343806243c7b184fdf72d7486d4ec420b7910cf7125e0b0a85ec"},
       {"path": "crates/fs-aeroac/tests/slot_jet_3d.rs", "git_mode": "100644", "bytes": 16290, "content_blake3": "e7527e3eb9408d073a0a84c5d7e113a2bbe6adfbdefe599b5c944bbe0ffa5289"},
-      {"path": "crates/fs-aeroac/tests/slot_jet_3d_sweep.rs", "git_mode": "100644", "bytes": 7892, "content_blake3": "97fa9e19a392649aebc7f3f795f6d6f29a33e9dabf6465ade4a95892db08f73b"},
+      {"path": "crates/fs-aeroac/tests/slot_jet_3d_sweep.rs", "git_mode": "100644", "bytes": 10861, "content_blake3": "ef33601f07c8f6ec0dd1a2cd58844fc9121fc76c4c452e1184d7719d4078ac8c"},
       {"path": "crates/fs-airflow/CONTRACT.md", "git_mode": "100644", "bytes": 40293, "content_blake3": "ee6420f53243c346ddbeb642f792308ea33a5a19e86c23e6517923c870e248e6"},
       {"path": "crates/fs-airflow/Cargo.toml", "git_mode": "100644", "bytes": 1443, "content_blake3": "f395999fb3667956752db7426cffc5e716517b5277bbc22c0cff6a7d45d79e66"},
       {"path": "crates/fs-airflow/src/composite.rs", "git_mode": "100644", "bytes": 12436, "content_blake3": "b68be9930ff09f39422a8d2ca7d6d3bf69e237b2f10735685350a7fb850d7a6e"},

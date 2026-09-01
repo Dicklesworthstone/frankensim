@@ -104,12 +104,46 @@ fn re_sweep_campaign() {
         let ckpt = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../target-sweep-ckpt")
             .join(format!("{rate:.2}"));
-        let run = loop {
-            match run_slot_jet_3d_chunked(&cfg, &ckpt, 1_024).expect("chunk executes") {
-                SweepProgress::Complete(run) => break *run,
-                SweepProgress::Partial { steps_done } => {
+        // HONEST OUTCOMES (bead law): a rung that destabilizes inside the
+        // rig's own containment (typed NonFinite refusal from the density
+        // guard) is a RESULT — the stability edge of this operator family —
+        // and is recorded as a typed refusal row rather than aborting the
+        // campaign. Executed: rate 1.92 with the clamped nuisance rate 1.99
+        // blew up during settle (rho -0.244) on 2026-09-01 while 1.96 and
+        // 1.98 stayed stable — a nonmonotonic edge worth mapping, not hiding.
+        let outcome = loop {
+            match run_slot_jet_3d_chunked(&cfg, &ckpt, 1_024) {
+                Ok(SweepProgress::Complete(run)) => break Ok(*run),
+                Ok(SweepProgress::Partial { steps_done }) => {
                     println!("  rate {rate:.2}: {steps_done} steps done");
                 }
+                Err(refusal) => break Err(refusal),
+            }
+        };
+        let run = match outcome {
+            Ok(run) => run,
+            Err(refusal) => {
+                let CollisionModel3::CentralMoment {
+                    second_order_rate,
+                    higher_order_rate,
+                } = cfg.collision
+                else {
+                    unreachable!("base_config pins the central-moment operator");
+                };
+                let row = format!(
+                    "{{\"schema\":\"fs-aeroac.slot-jet-3d.rung-refusal/v1\",\
+                     \"second_order_rate\":{second_order_rate},\
+                     \"higher_order_rate\":{higher_order_rate},\
+                     \"refusal\":\"{refusal}\"}}"
+                );
+                jsonl.push_str(&row);
+                jsonl.push('\n');
+                println!("rung\t{rate:.3}\tREFUSED\t{refusal}");
+                let _ = writeln!(
+                    regime_map,
+                    "{rate:.3}\tREFUSED: {refusal}\t-\t-\t-\t-\t-\t-\t-\t-\t-"
+                );
+                continue;
             }
         };
         let rung = classify_rung(&run, &cfg).expect("classification succeeds");
@@ -149,41 +183,75 @@ fn re_sweep_campaign() {
     // on the highest-Re rung — 2-D-ness is exactly what we are testing
     // our way out of, so a too-thin box must be ruled out explicitly.
     // Skipped in single-rung distributed mode unless that rung IS the
-    // highest-Re one (its owner also owns the octave).
+    // highest-Re one (its owner also owns the octave). The archive
+    // still happens: the pre-fix early return here silently discarded
+    // every non-octave single-rung receipt (executed on 2026-09-01 —
+    // the recorded lesson behind the shared archive path below).
     if only.is_some_and(|o| o + 1 != LADDER.len()) {
         println!("octave skipped in single-rung mode");
+        archive_receipts(&receipt_path, filtered_rate, &jsonl, &regime_map);
         return;
     }
     let mut cfg_hi = base_config(*LADDER.last().expect("non-empty ladder"));
     cfg_hi.nz *= 2;
     let ckpt_hi =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target-sweep-ckpt/octave");
-    let run_hi = loop {
-        match run_slot_jet_3d_chunked(&cfg_hi, &ckpt_hi, 1_024).expect("chunk executes") {
-            SweepProgress::Complete(run) => break *run,
-            SweepProgress::Partial { steps_done } => {
+    let octave_outcome = loop {
+        match run_slot_jet_3d_chunked(&cfg_hi, &ckpt_hi, 1_024) {
+            Ok(SweepProgress::Complete(run)) => break Ok(*run),
+            Ok(SweepProgress::Partial { steps_done }) => {
                 println!("  octave: {steps_done} steps done");
             }
+            Err(refusal) => break Err(refusal),
         }
     };
-    let cls_hi = classify_rung(&run_hi, &cfg_hi).expect("octave classification");
-    jsonl.push_str(&cls_hi.to_jsonl());
-    jsonl.push('\n');
-    println!(
-        "octave\tnz={}\tRe={:.1}\tflatness={:.3e}\ttonal={}\tSt={:.4}",
-        cfg_hi.nz, cls_hi.reynolds, cls_hi.flatness, cls_hi.tonal, cls_hi.strouhal
-    );
+    match octave_outcome {
+        Ok(run_hi) => {
+            let cls_hi = classify_rung(&run_hi, &cfg_hi).expect("octave classification");
+            jsonl.push_str(&cls_hi.to_jsonl());
+            jsonl.push('\n');
+            println!(
+                "octave\tnz={}\tRe={:.1}\tflatness={:.3e}\ttonal={}\tSt={:.4}",
+                cfg_hi.nz, cls_hi.reynolds, cls_hi.flatness, cls_hi.tonal, cls_hi.strouhal
+            );
+        }
+        Err(refusal) => {
+            let row = format!(
+                "{{\"schema\":\"fs-aeroac.slot-jet-3d.rung-refusal/v1\",\
+                 \"octave\":true,\"nz\":{},\"refusal\":\"{refusal}\"}}",
+                cfg_hi.nz
+            );
+            jsonl.push_str(&row);
+            jsonl.push('\n');
+            println!("octave\tnz={}\tREFUSED\t{refusal}", cfg_hi.nz);
+            let _ = writeln!(
+                regime_map,
+                "octave\tREFUSED: {refusal}\t-\t-\t-\t-\t-\t-\t-\t-\t-"
+            );
+        }
+    }
 
+    archive_receipts(&receipt_path, filtered_rate, &jsonl, &regime_map);
+}
+
+/// Shared terminal archive: the per-rung file in single-rung mode, the
+/// full campaign file otherwise, plus the printed regime map.
+fn archive_receipts(
+    receipt_path: &std::path::Path,
+    filtered_rate: Option<f64>,
+    jsonl: &str,
+    regime_map: &str,
+) {
     if let Some(rate) = filtered_rate {
         let rung_path =
             receipt_path.with_file_name(format!("slot-jet-3d-re-sweep-rung{rate:.2}.jsonl"));
-        std::fs::write(&rung_path, &jsonl).expect("archive per-rung receipts");
+        std::fs::write(&rung_path, jsonl).expect("archive per-rung receipts");
         println!("archived: {}", rung_path.display());
     } else {
-        std::fs::write(&receipt_path, &jsonl).expect("archive sweep receipts");
+        std::fs::write(receipt_path, jsonl).expect("archive sweep receipts");
+        println!("archived: {}", receipt_path.display());
     }
     println!(
         "\nREGIME MAP (rate/Re/flatness/tonal/St/bin/prominence/rms/qualified/mach/imbalance):\n{regime_map}"
     );
-    println!("archived: {}", receipt_path.display());
 }
