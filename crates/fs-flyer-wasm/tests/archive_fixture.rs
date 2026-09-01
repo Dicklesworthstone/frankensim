@@ -5,7 +5,8 @@
 //! JSONL receipts on stdout.
 
 use fs_flyer_wasm::archive::{
-    ArchiveTarget, HELLO_ENVELOPE_SCHEMA, parse_hello_envelope, replay_generation,
+    ArchivePublicationStore, ArchiveTarget, HELLO_ENVELOPE_SCHEMA, TufTargetsPublisher,
+    parse_hello_envelope, publish_dual_with_verification, replay_generation,
     verify_dual_publication, verify_target_bytes,
 };
 use std::fs;
@@ -30,6 +31,60 @@ fn load_targets() -> Vec<ArchiveTarget> {
             }
         })
         .collect()
+}
+
+struct MemoryStore {
+    provider: &'static str,
+    stored: Option<Vec<u8>>,
+    read_override: Option<Vec<u8>>,
+    writes: usize,
+}
+
+impl MemoryStore {
+    fn new(provider: &'static str) -> Self {
+        Self {
+            provider,
+            stored: None,
+            read_override: None,
+            writes: 0,
+        }
+    }
+}
+
+impl ArchivePublicationStore for MemoryStore {
+    fn provider_id(&self) -> &str {
+        self.provider
+    }
+
+    fn put_immutable(
+        &mut self,
+        _target: &ArchiveTarget,
+        bytes: &[u8],
+    ) -> Result<(), fs_flyer_wasm::Refusal> {
+        self.stored = Some(bytes.to_vec());
+        self.writes += 1;
+        Ok(())
+    }
+
+    fn read_back(&mut self, _target: &ArchiveTarget) -> Result<Vec<u8>, fs_flyer_wasm::Refusal> {
+        Ok(self
+            .read_override
+            .clone()
+            .or_else(|| self.stored.clone())
+            .expect("read-back follows a successful test write"))
+    }
+}
+
+#[derive(Default)]
+struct MemoryTargetsPublisher {
+    published: Vec<String>,
+}
+
+impl TufTargetsPublisher for MemoryTargetsPublisher {
+    fn publish_target(&mut self, target: &ArchiveTarget) -> Result<(), fs_flyer_wasm::Refusal> {
+        self.published.push(target.path.clone());
+        Ok(())
+    }
 }
 
 #[test]
@@ -129,4 +184,58 @@ fn wrong_kernel_replay_twin_refuses() {
     println!(
         "{{\"suite\":\"wf-archive\",\"case\":\"wrong-kernel-replay\",\"verdict\":\"REFUSED\"}}"
     );
+}
+
+#[test]
+fn dual_publication_writes_reads_back_and_only_then_publishes_targets() {
+    let target = load_targets().remove(0);
+    let bytes = fs::read(fixture_root().join(&target.path)).unwrap();
+    let mut primary = MemoryStore::new("r2-production-primary");
+    let mut mirror = MemoryStore::new("s3-separate-admin-mirror");
+    let mut tuf = MemoryTargetsPublisher::default();
+
+    publish_dual_with_verification(&target, &bytes, &mut primary, &mut mirror, &mut tuf).unwrap();
+
+    assert_eq!(primary.writes, 1);
+    assert_eq!(mirror.writes, 1);
+    assert_eq!(tuf.published, vec![target.path]);
+}
+
+#[test]
+fn dual_publication_refuses_bad_mirror_before_target_publication() {
+    let target = load_targets().remove(0);
+    let bytes = fs::read(fixture_root().join(&target.path)).unwrap();
+    let mut primary = MemoryStore::new("r2-production-primary");
+    let mut mirror = MemoryStore::new("s3-separate-admin-mirror");
+    let mut altered = bytes.clone();
+    altered[0] ^= 1;
+    mirror.read_override = Some(altered);
+    let mut tuf = MemoryTargetsPublisher::default();
+
+    let refusal =
+        publish_dual_with_verification(&target, &bytes, &mut primary, &mut mirror, &mut tuf)
+            .unwrap_err();
+
+    assert_eq!(refusal.code, "archive-content-digest-mismatch");
+    assert_eq!(primary.writes, 1);
+    assert_eq!(mirror.writes, 1);
+    assert!(tuf.published.is_empty());
+}
+
+#[test]
+fn dual_publication_refuses_shared_endpoint_before_any_write() {
+    let target = load_targets().remove(0);
+    let bytes = fs::read(fixture_root().join(&target.path)).unwrap();
+    let mut primary = MemoryStore::new("same-endpoint");
+    let mut mirror = MemoryStore::new("same-endpoint");
+    let mut tuf = MemoryTargetsPublisher::default();
+
+    let refusal =
+        publish_dual_with_verification(&target, &bytes, &mut primary, &mut mirror, &mut tuf)
+            .unwrap_err();
+
+    assert_eq!(refusal.code, "archive-publication-topology-invalid");
+    assert_eq!(primary.writes, 0);
+    assert_eq!(mirror.writes, 0);
+    assert!(tuf.published.is_empty());
 }

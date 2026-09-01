@@ -10,9 +10,8 @@
 //!
 //! How the run is made (no format guessing, no coverage laundering):
 //!
-//! 1. `cargo metadata` enumerates every test target of every workspace
-//!    package (fs-wasm is a separate nested workspace and is recorded as
-//!    excluded, matching the README's own boundary).
+//! 1. `cargo metadata` enumerates every test target of every native-workspace
+//!    package and of the attested fs-wasm nested workspace.
 //! 2. `cargo test --workspace --no-run --message-format json --keep-going`
 //!    builds every test target it can; targets with no emitted executable
 //!    are recorded as BUILD FAILURES by name (a broken integration-test
@@ -46,19 +45,23 @@ pub(crate) const CHECK: &str = "suite-receipt";
 const RECEIPT_PATH: &str = "suite-receipt.json";
 const REGISTRY_PATH: &str = "suite-known-red.json";
 const ISSUES_PATH: &str = ".beads/issues.jsonl";
-const SCHEMA: &str = "frankensim-suite-receipt-v1";
+const SCHEMA: &str = "frankensim-suite-receipt-v2";
 const REGISTRY_SCHEMA: &str = "frankensim-suite-known-red-v1";
 const MAX_RUN_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_JSON_STRING: usize = 8 * 1024 * 1024;
 /// One test executable may not run longer than this before it is recorded
 /// as a timeout rather than allowed to hang the receipt forever.
 const TARGET_TIMEOUT_SECS: u64 = 900;
+/// Browser flagships are intentionally a separate Cargo workspace, but their
+/// native test result is still part of the repository suite receipt.
+const ATTESTED_NESTED_WORKSPACES: &[&str] = &["crates/fs-wasm"];
 
 /// A failing or passing-again registered known-red test.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct KnownRedEntry {
     test: String,
     krate: String,
+    workspace: String,
     owner_bead: String,
     disposition: String,
 }
@@ -84,6 +87,9 @@ struct RunModel {
     head_sha: String,
     head_dirty: bool,
     lock_hash: String,
+    /// Stable workspace identity -> that workspace's Cargo.lock fingerprint.
+    /// A nested workspace can resolve a different graph than the native root.
+    workspace_locks: BTreeMap<String, String>,
     target_triple: String,
     crates: BTreeMap<String, TargetOutcome>,
     build_failures: Vec<String>,
@@ -204,6 +210,8 @@ fn load_registry(root: &Path) -> Result<Vec<KnownRedEntry>, String> {
                 entries.push(KnownRedEntry {
                     test: get("test")?,
                     krate: get("crate")?,
+                    workspace: json_string(row, "workspace")
+                        .unwrap_or_else(|| "native".to_string()),
                     owner_bead: get("owner_bead")?,
                     disposition,
                 });
@@ -380,10 +388,21 @@ fn metadata_targets(root: &Path) -> Result<(Vec<(String, String, PathBuf)>, Vec<
 
 /// Run the workspace suite and build the model. This is the long pole: a
 /// full test-target build plus every test executable, sequentially.
-pub(crate) fn run_suite(root: &Path) -> Result<RunModel, String> {
-    let (targets, feature_excluded) = metadata_targets(root)?;
+fn crate_key(workspace: &str, package: &str) -> String {
+    format!("{workspace}::{package}")
+}
+
+fn run_workspace_targets(
+    cargo: &str,
+    workspace_id: &str,
+    workspace_root: &Path,
+    targets: Vec<(String, String, PathBuf)>,
+    crates: &mut BTreeMap<String, TargetOutcome>,
+    build_failures: &mut Vec<String>,
+) -> Result<(), String> {
+    let build_failures_before = build_failures.len();
     let (build_ok, build_stdout, build_stderr) = run_command(
-        "cargo",
+        cargo,
         &[
             "build",
             "--tests",
@@ -392,7 +411,7 @@ pub(crate) fn run_suite(root: &Path) -> Result<RunModel, String> {
             "json",
             "--keep-going",
         ],
-        root,
+        workspace_root,
     )?;
     // Map (package, target-name) -> executable for successfully built targets.
     let mut executables: BTreeMap<(String, String), (PathBuf, PathBuf)> = BTreeMap::new();
@@ -420,45 +439,98 @@ pub(crate) fn run_suite(root: &Path) -> Result<RunModel, String> {
         let package_root = package_roots
             .get(&package)
             .cloned()
-            .unwrap_or_else(|| root.to_path_buf());
+            .unwrap_or_else(|| workspace_root.to_path_buf());
         executables.insert(
             (package, target_name),
             (PathBuf::from(executable), package_root),
         );
     }
-    let mut build_failures = Vec::new();
     if !build_ok {
         for (package, target_name, _) in &targets {
             // Doc-test targets have no executable artifact by construction;
             // they run through rustdoc, not the linker.
             if !executables.contains_key(&(package.clone(), target_name.clone())) {
-                build_failures.push(format!("{package} (test target {target_name})"));
+                build_failures.push(format!(
+                    "{} (test target {target_name})",
+                    crate_key(workspace_id, package)
+                ));
             }
         }
-        if build_failures.is_empty() {
+        if build_failures.len() == build_failures_before {
             build_failures.push(format!(
                 "unidentified target; cargo said: {}",
                 stderr_tail(&build_stderr)
             ));
         }
     }
-    let mut crates: BTreeMap<String, TargetOutcome> = BTreeMap::new();
     let mut sorted_executables: Vec<_> = executables.into_iter().collect();
     sorted_executables.sort();
     for ((package, target_name), (executable, package_root)) in sorted_executables {
-        eprintln!("suite-receipt: running {package}::{target_name}");
-        let outcome = crates.entry(package.clone()).or_default();
+        let key = crate_key(workspace_id, &package);
+        eprintln!("suite-receipt: running {key}::{target_name}");
+        let outcome = crates.entry(key).or_default();
         run_test_executable(&executable, &package_root, outcome);
     }
     // Doc tests per package (rustdoc has no executable artifact).
     for (package, package_root) in &package_roots {
-        eprintln!("suite-receipt: running {package} doc tests");
-        let outcome = crates.entry(package.clone()).or_default();
-        run_doc_tests(root, package, package_root, outcome);
+        let key = crate_key(workspace_id, package);
+        eprintln!("suite-receipt: running {key} doc tests");
+        let outcome = crates.entry(key).or_default();
+        if cargo == "cargo" {
+            run_doc_tests(workspace_root, package, package_root, outcome);
+        } else {
+            run_doc_tests_with_cargo(cargo, workspace_root, package, package_root, outcome);
+        }
     }
+    Ok(())
+}
+
+/// Run the native workspace plus each explicitly attested nested workspace.
+/// A nested target-build failure is recorded as a build failure, never an
+/// exclusion; metadata admission failures instead prevent a receipt.
+pub(crate) fn run_suite(root: &Path) -> Result<RunModel, String> {
+    let (targets, mut feature_excluded) = metadata_targets(root)?;
+    let mut crates = BTreeMap::new();
+    let mut build_failures = Vec::new();
+    let mut workspace_locks = BTreeMap::new();
+    workspace_locks.insert("native".to_string(), cargo_lock_hash(root));
+    run_workspace_targets(
+        "cargo",
+        "native",
+        root,
+        targets,
+        &mut crates,
+        &mut build_failures,
+    )?;
+
+    for nested in ATTESTED_NESTED_WORKSPACES {
+        let nested_root = root.join(nested);
+        workspace_locks.insert((*nested).to_string(), cargo_lock_hash(&nested_root));
+        let (targets, nested_excluded) = metadata_targets(&nested_root)
+            .map_err(|error| format!("nested workspace {nested}: {error}"))?;
+        feature_excluded.extend(
+            nested_excluded
+                .into_iter()
+                .map(|target| format!("{nested}/{target}")),
+        );
+        run_workspace_targets(
+            "cargo",
+            nested,
+            &nested_root,
+            targets,
+            &mut crates,
+            &mut build_failures,
+        )
+        .map_err(|error| format!("nested workspace {nested}: {error}"))?;
+    }
+    if crates.is_empty() {
+        return Err("suite receipt recorded no runnable crate outcomes".to_string());
+    }
+
     Ok(RunModel {
-        command: "cargo build --tests --workspace --message-format json --keep-going; \
-                  then each test executable with -Z unstable-options --format json"
+        command: "cargo build --tests --workspace --message-format json --keep-going in the \
+                  native workspace and each attested nested workspace; then each test executable \
+                  with -Z unstable-options --format json"
             .to_string(),
         executed_at: utc_now(),
         host: host_fingerprint(),
@@ -466,19 +538,13 @@ pub(crate) fn run_suite(root: &Path) -> Result<RunModel, String> {
         head_sha: head_sha(root),
         head_dirty: head_dirty(root),
         lock_hash: constellation_lock_hash(root),
+        workspace_locks,
         target_triple: target_triple(),
         crates,
         build_failures,
         known_red: Vec::new(),
         unexpected_red: Vec::new(),
-        excluded: {
-            let mut excluded = feature_excluded;
-            excluded.push(
-                "fs-wasm (standalone nested workspace, not a member of the native workspace)"
-                    .to_string(),
-            );
-            excluded
-        },
+        excluded: feature_excluded,
     })
 }
 
@@ -563,6 +629,16 @@ fn run_test_executable(executable: &Path, cwd: &Path, outcome: &mut TargetOutcom
 }
 
 fn run_doc_tests(root: &Path, package: &str, package_root: &Path, outcome: &mut TargetOutcome) {
+    run_doc_tests_with_cargo("cargo", root, package, package_root, outcome);
+}
+
+fn run_doc_tests_with_cargo(
+    cargo: &str,
+    root: &Path,
+    package: &str,
+    package_root: &Path,
+    outcome: &mut TargetOutcome,
+) {
     let args = [
         "test",
         "--doc",
@@ -574,9 +650,9 @@ fn run_doc_tests(root: &Path, package: &str, package_root: &Path, outcome: &mut 
         "--format",
         "json",
     ];
-    let result = run_command("cargo", &args, root);
+    let result = run_command(cargo, &args, root);
     match result {
-        Ok((_, stdout, _)) => {
+        Ok((ok, stdout, stderr)) => {
             for map in parse_json_lines(&stdout, "rustdoc") {
                 if json_string(&map, "type").as_deref() == Some("test") {
                     match json_string(&map, "event").as_deref() {
@@ -591,6 +667,13 @@ fn run_doc_tests(root: &Path, package: &str, package_root: &Path, outcome: &mut 
                         _ => {}
                     }
                 }
+            }
+            if !ok {
+                outcome.target_error = Some(format!(
+                    "doc tests for {package} at {} failed: {}",
+                    package_root.display(),
+                    stderr_tail(&stderr)
+                ));
             }
         }
         Err(error) => {
@@ -683,6 +766,12 @@ fn constellation_lock_hash(root: &Path) -> String {
         .unwrap_or_else(|_| "no-lock".to_string())
 }
 
+fn cargo_lock_hash(workspace_root: &Path) -> String {
+    std::fs::read(workspace_root.join("Cargo.lock"))
+        .map(|bytes| format!("{:016x}", fnv1a64(&bytes)))
+        .unwrap_or_else(|_| "no-cargo-lock".to_string())
+}
+
 fn target_triple() -> String {
     run_command("rustc", &["-vV"], Path::new("/"))
         .ok()
@@ -702,15 +791,15 @@ fn partition_failures(root: &Path, model: &mut RunModel) -> Result<(), String> {
     for entry in &registry {
         let observed = model
             .crates
-            .get(&entry.krate)
+            .get(&crate_key(&entry.workspace, &entry.krate))
             .is_some_and(|outcome| outcome.failures.iter().any(|name| name == &entry.test));
         known_red.push((entry.clone(), observed));
     }
     for (krate, outcome) in &model.crates {
         for failure in &outcome.failures {
-            let registered = registry
-                .iter()
-                .any(|entry| entry.krate == *krate && entry.test == *failure);
+            let registered = registry.iter().any(|entry| {
+                crate_key(&entry.workspace, &entry.krate) == *krate && entry.test == *failure
+            });
             if !registered {
                 unexpected.push((krate.clone(), failure.clone()));
             }
@@ -748,6 +837,22 @@ fn render(model: &RunModel) -> String {
         model.target_triple
     )
     .ok();
+    out.push_str("  \"workspaces\": {\n");
+    for (index, (workspace, lock_hash)) in model.workspace_locks.iter().enumerate() {
+        let comma = if index + 1 == model.workspace_locks.len() {
+            ""
+        } else {
+            ","
+        };
+        writeln!(
+            out,
+            "    \"{}\": {{\"cargo_lock_fnv1a64\": \"{}\"}}{comma}",
+            escape(workspace),
+            escape(lock_hash)
+        )
+        .ok();
+    }
+    out.push_str("  },\n");
     writeln!(out, "  \"status\": \"{}\",", model.status()).ok();
     writeln!(
         out,
@@ -786,10 +891,11 @@ fn render(model: &RunModel) -> String {
         };
         writeln!(
             out,
-            "    {{\"test\": \"{}\", \"crate\": \"{}\", \"owner_bead\": \"{}\", \"disposition\": \
+            "    {{\"test\": \"{}\", \"crate\": \"{}\", \"workspace\": \"{}\", \"owner_bead\": \"{}\", \"disposition\": \
              \"{}\", \"observed_failed\": {observed}}}{comma}",
             escape(&entry.test),
             escape(&entry.krate),
+            escape(&entry.workspace),
             escape(&entry.owner_bead),
             entry.disposition
         )
@@ -920,16 +1026,18 @@ fn parse_receipt(text: &str) -> Result<SuiteReceipt, String> {
                 let JsonValue::Object(row) = row else {
                     return Err(format!("{RECEIPT_PATH} known_red row is not an object"));
                 };
-                let observed = matches!(
-                    json_obj_field(row, "observed_failed"),
-                    Some(JsonValue::Bool)
-                );
+                let observed = match json_obj_field(row, "observed_failed") {
+                    Some(JsonValue::Bool(observed)) => *observed,
+                    _ => return Err("known_red row without observed_failed boolean".to_string()),
+                };
                 known_red.push((
                     KnownRedEntry {
                         test: json_string(row, "test")
                             .ok_or_else(|| "known_red row without test".to_string())?,
                         krate: json_string(row, "crate")
                             .ok_or_else(|| "known_red row without crate".to_string())?,
+                        workspace: json_string(row, "workspace")
+                            .unwrap_or_else(|| "native".to_string()),
                         owner_bead: json_string(row, "owner_bead")
                             .ok_or_else(|| "known_red row without owner_bead".to_string())?,
                         disposition: json_string(row, "disposition")
@@ -958,6 +1066,22 @@ fn parse_receipt(text: &str) -> Result<SuiteReceipt, String> {
         return Err(format!(
             "{RECEIPT_PATH} claims `{status}` while carrying {build_failures} build failure(s)"
         ));
+    }
+    let Some(JsonValue::Object(workspaces)) = json_obj_field(map, "workspaces") else {
+        return Err(format!("{RECEIPT_PATH} has no workspaces object"));
+    };
+    let Some(JsonValue::Object(fs_wasm)) = workspaces.get("crates/fs-wasm") else {
+        return Err(format!(
+            "{RECEIPT_PATH} omits the attested crates/fs-wasm workspace"
+        ));
+    };
+    match json_string(fs_wasm, "cargo_lock_fnv1a64") {
+        Some(lock) if lock != "no-cargo-lock" => {}
+        _ => {
+            return Err(format!(
+                "{RECEIPT_PATH} crates/fs-wasm workspace has no Cargo.lock identity"
+            ));
+        }
     }
     Ok(SuiteReceipt {
         status,
@@ -1009,7 +1133,9 @@ pub(crate) fn check(root: &Path) -> (Vec<Violation>, Vec<PolicyNote>) {
         Ok(registry) => {
             for entry in &registry {
                 let recorded = receipt.known_red.iter().any(|(receipt_entry, _)| {
-                    receipt_entry.test == entry.test && receipt_entry.krate == entry.krate
+                    receipt_entry.test == entry.test
+                        && receipt_entry.krate == entry.krate
+                        && receipt_entry.workspace == entry.workspace
                 });
                 if !recorded {
                     violations.push(violation(format!(
@@ -1040,7 +1166,10 @@ pub(crate) fn check(root: &Path) -> (Vec<Violation>, Vec<PolicyNote>) {
     // target error (watchdog timeout, no suite summary) proves NOTHING about
     // its known-red tests — "unknown", never "repaired".
     for (entry, observed) in &receipt.known_red {
-        if receipt.target_error_crates.contains(&entry.krate) {
+        if receipt
+            .target_error_crates
+            .contains(&crate_key(&entry.workspace, &entry.krate))
+        {
             notes.push(PolicyNote {
                 check: CHECK,
                 crate_name: RECEIPT_PATH.to_string(),
@@ -1151,7 +1280,7 @@ mod tests {
     #[test]
     fn g0_receipt_refuses_totals_that_do_not_match_crate_sums() {
         let receipt = "{
-  \"schema\": \"frankensim-suite-receipt-v1\",
+  \"schema\": \"frankensim-suite-receipt-v2\",
   \"run\": {\"head_sha\": \"abc\"},
   \"status\": \"green\",
   \"totals\": {\"passed\": 2, \"failed\": 0, \"ignored\": 0},
@@ -1167,14 +1296,15 @@ mod tests {
     #[test]
     fn g0_the_negative_control_no_green_over_unexpected_red() {
         let receipt = "{
-  \"schema\": \"frankensim-suite-receipt-v1\",
+  \"schema\": \"frankensim-suite-receipt-v2\",
   \"run\": {\"head_sha\": \"abc\"},
   \"status\": \"green-with-known-red\",
   \"totals\": {\"passed\": 1, \"failed\": 1, \"ignored\": 0},
   \"crates\": {\"fs-x\": {\"passed\": 1, \"failed\": 1, \"ignored\": 0}},
   \"build_failures\": [],
   \"known_red\": [],
-  \"unexpected_red\": [{\"crate\": \"fs-x\", \"test\": \"t\"}]
+  \"unexpected_red\": [{\"crate\": \"fs-x\", \"test\": \"t\"}],
+  \"workspaces\": {\"crates/fs-wasm\": {\"cargo_lock_fnv1a64\": \"nested-lock\"}}
 }\n";
         let error = parse_receipt(receipt).expect_err("green over unexpected red must refuse");
         assert!(error.contains("launder"), "{error}");
@@ -1183,7 +1313,7 @@ mod tests {
     #[test]
     fn g0_no_green_over_build_failures_either() {
         let receipt = "{
-  \"schema\": \"frankensim-suite-receipt-v1\",
+  \"schema\": \"frankensim-suite-receipt-v2\",
   \"run\": {\"head_sha\": \"abc\"},
   \"status\": \"green\",
   \"totals\": {\"passed\": 1, \"failed\": 0, \"ignored\": 0},
@@ -1199,18 +1329,36 @@ mod tests {
     #[test]
     fn g0_honest_not_green_receipt_validates() {
         let receipt = "{
-  \"schema\": \"frankensim-suite-receipt-v1\",
+  \"schema\": \"frankensim-suite-receipt-v2\",
   \"run\": {\"head_sha\": \"abc\"},
   \"status\": \"not-green\",
   \"totals\": {\"passed\": 1, \"failed\": 1, \"ignored\": 0},
   \"crates\": {\"fs-x\": {\"passed\": 1, \"failed\": 1, \"ignored\": 0}},
   \"build_failures\": [],
   \"known_red\": [],
-  \"unexpected_red\": [{\"crate\": \"fs-x\", \"test\": \"t\"}]
+  \"unexpected_red\": [{\"crate\": \"fs-x\", \"test\": \"t\"}],
+  \"workspaces\": {\"crates/fs-wasm\": {\"cargo_lock_fnv1a64\": \"nested-lock\"}}
 }\n";
         let receipt = parse_receipt(receipt).expect("an honest not-green receipt validates");
         assert_eq!(receipt.status, "not-green");
         assert_eq!(receipt.unexpected_red, 1);
+    }
+
+    #[test]
+    fn g0_receipt_preserves_observed_failed_false() {
+        let receipt = "{
+  \"schema\": \"frankensim-suite-receipt-v2\",
+  \"run\": {\"head_sha\": \"abc\"},
+  \"status\": \"green\",
+  \"totals\": {\"passed\": 1, \"failed\": 0, \"ignored\": 0},
+  \"crates\": {\"native::fs-x\": {\"passed\": 1, \"failed\": 0, \"ignored\": 0}},
+  \"build_failures\": [],
+  \"known_red\": [{\"test\": \"t\", \"crate\": \"fs-x\", \"workspace\": \"native\", \"owner_bead\": \"b\", \"disposition\": \"blocked-upstream\", \"observed_failed\": false}],
+  \"unexpected_red\": [],
+  \"workspaces\": {\"crates/fs-wasm\": {\"cargo_lock_fnv1a64\": \"nested-lock\"}}
+}\n";
+        let receipt = parse_receipt(receipt).expect("receipt parses");
+        assert!(!receipt.known_red[0].1, "false must not mean observed");
     }
 
     #[test]
@@ -1228,6 +1376,131 @@ mod tests {
             package_name("registry+https://github.com/rust-lang/crates.io-index#serde@1.0.0"),
             "serde"
         );
+    }
+
+    #[test]
+    fn g0_fs_wasm_nested_workspace_is_attested() {
+        assert_eq!(ATTESTED_NESTED_WORKSPACES, ["crates/fs-wasm"]);
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace root")
+            .to_path_buf();
+        let nested = root.join("crates/fs-wasm");
+        let (targets, _) = metadata_targets(&nested).expect("fs-wasm metadata");
+        assert!(
+            targets
+                .iter()
+                .any(|(krate, target, _)| krate == "fs-wasm" && target == "fs_wasm"),
+            "the receipt must enumerate the fs-wasm test target"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn g0_nested_workspace_target_survives_render_and_known_red_partition() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let scratch = std::env::temp_dir().join(format!("fsim-receipt-{nonce}"));
+        std::fs::create_dir_all(&scratch).expect("scratch");
+        let executable = scratch.join("fs-wasm-test");
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\nprintf '%s\\n' '{\"type\":\"test\",\"event\":\"failed\",\"name\":\"campaigns::tests::sensorforge_defaults\"}' '{\"type\":\"suite\",\"event\":\"ok\"}'\n",
+        )
+        .expect("test executable");
+        let mut permissions = std::fs::metadata(&executable)
+            .expect("metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).expect("executable mode");
+
+        let cargo = scratch.join("cargo");
+        std::fs::write(
+            &cargo,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = build ]; then printf '%s\\n' '{{\"reason\":\"compiler-artifact\",\"package_id\":\"fs-wasm@0.0.1\",\"target\":{{\"name\":\"fs_wasm\"}},\"executable\":\"{}\"}}'; elif [ \"$1\" = test ]; then echo doc-test-failure >&2; exit 1; fi\n",
+                executable.display()
+            ),
+        )
+        .expect("cargo shim");
+        let mut permissions = std::fs::metadata(&cargo).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&cargo, permissions).expect("cargo mode");
+        std::fs::write(
+            scratch.join(REGISTRY_PATH),
+            registry_text(&[("fs-wasm", "campaigns::tests::sensorforge_defaults", "vxnd3")])
+                .replace(
+                    "\"crate\":\"fs-wasm\"",
+                    "\"crate\":\"fs-wasm\",\"workspace\":\"crates/fs-wasm\"",
+                ),
+        )
+        .expect("registry");
+
+        let mut crates = BTreeMap::new();
+        let mut build_failures = Vec::new();
+        run_workspace_targets(
+            cargo.to_str().expect("utf8 path"),
+            "crates/fs-wasm",
+            &scratch,
+            vec![(
+                "fs-wasm".to_string(),
+                "fs_wasm".to_string(),
+                scratch.clone(),
+            )],
+            &mut crates,
+            &mut build_failures,
+        )
+        .expect("target run");
+        assert!(
+            crates
+                .get("crates/fs-wasm::fs-wasm")
+                .and_then(|outcome| outcome.target_error.as_ref())
+                .is_some(),
+            "a failing cargo doc-test command is a target error"
+        );
+        // The same package name in the native workspace must not overwrite
+        // the exercised nested-workspace result.
+        crates.insert(
+            crate_key("native", "fs-wasm"),
+            TargetOutcome {
+                passed: 1,
+                ..TargetOutcome::default()
+            },
+        );
+        assert_eq!(crates.len(), 2, "workspace identity prevents key collision");
+        let mut model = RunModel {
+            command: "test".to_string(),
+            executed_at: "now".to_string(),
+            host: "host".to_string(),
+            toolchain: "toolchain".to_string(),
+            head_sha: "head".to_string(),
+            head_dirty: false,
+            lock_hash: "lock".to_string(),
+            workspace_locks: BTreeMap::from([
+                ("native".to_string(), "native-lock".to_string()),
+                ("crates/fs-wasm".to_string(), "nested-lock".to_string()),
+            ]),
+            target_triple: "target".to_string(),
+            crates,
+            build_failures,
+            known_red: Vec::new(),
+            unexpected_red: Vec::new(),
+            excluded: Vec::new(),
+        };
+        partition_failures(&scratch, &mut model).expect("partition");
+        assert!(model.known_red[0].1, "the fs-wasm known red was observed");
+        let rendered = render(&model);
+        assert!(
+            parse_receipt(&rendered).is_ok(),
+            "nested lock identity validates"
+        );
+        assert!(rendered.contains("\"native::fs-wasm\""));
+        assert!(rendered.contains("crates/fs-wasm::fs-wasm"));
+        assert!(rendered.contains("\"crates/fs-wasm\": {\"cargo_lock_fnv1a64\": \"nested-lock\"}"));
     }
 
     #[test]

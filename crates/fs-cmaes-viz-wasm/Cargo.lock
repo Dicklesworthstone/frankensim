@@ -575,6 +575,7 @@ name = "fs-dfo"
 version = "0.0.1"
 dependencies = [
  "fs-blake3",
+ "fs-exec",
  "fs-la",
  "fs-math",
  "fs-obs",

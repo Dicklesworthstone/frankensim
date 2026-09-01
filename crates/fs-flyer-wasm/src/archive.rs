@@ -84,6 +84,91 @@ pub fn verify_dual_publication(
     Ok(())
 }
 
+/// A caller-supplied immutable archive endpoint.
+///
+/// Implementors own provider authentication, conditional-create semantics,
+/// retention controls, and any provider-specific receipt. The coordinator
+/// never fabricates those facts: it only orders independent writes and checks
+/// the bytes it reads back.
+pub trait ArchivePublicationStore {
+    /// Stable identity of the independently administered provider endpoint.
+    ///
+    /// This is a configuration guard, not an authentication claim. A real
+    /// deployment must bind it to provider-side authority outside this crate.
+    fn provider_id(&self) -> &str;
+
+    /// Create this content-addressed object only when the endpoint admits an
+    /// immutable publication.
+    fn put_immutable(&mut self, target: &ArchiveTarget, bytes: &[u8]) -> Result<(), Refusal>;
+
+    /// Read the published object back through the endpoint's normal retrieval
+    /// path. The coordinator verifies the returned bytes before proceeding.
+    fn read_back(&mut self, target: &ArchiveTarget) -> Result<Vec<u8>, Refusal>;
+}
+
+/// Caller-supplied authority for publishing TUF targets metadata.
+///
+/// Its implementation owns role keys, threshold policy, signatures, and
+/// rollback/freeze protection. It is invoked only after both archive copies
+/// independently pass read-back verification.
+pub trait TufTargetsPublisher {
+    /// Publish metadata that names this already verified target.
+    fn publish_target(&mut self, target: &ArchiveTarget) -> Result<(), Refusal>;
+}
+
+fn invalid_publication_topology(detail: String) -> Refusal {
+    Refusal {
+        code: "archive-publication-topology-invalid",
+        message: detail,
+        ranked_repairs: vec![
+            "configure distinct, independently administered primary and mirror endpoints".into(),
+            "bind each endpoint identity to its provider-side authorization policy".into(),
+        ],
+    }
+}
+
+/// Publish to two independently identified endpoints, read both copies back,
+/// verify them against the immutable target, then allow TUF target publication.
+///
+/// The input is verified before any write. Target metadata therefore cannot be
+/// published after a failed upload, read-back, or byte verification. This is
+/// deliberately transport- and key-agnostic: it does not create cloud
+/// resources, select retention controls, sign metadata, or claim that an
+/// endpoint's reported identity is authentic.
+///
+/// # Errors
+/// Returns input/read-back verification errors, endpoint refusals, or
+/// `archive-publication-topology-invalid` when endpoints are blank or not
+/// independently identified. TUF metadata publication is attempted only after
+/// both copies verify.
+pub fn publish_dual_with_verification(
+    target: &ArchiveTarget,
+    bytes: &[u8],
+    primary: &mut impl ArchivePublicationStore,
+    mirror: &mut impl ArchivePublicationStore,
+    tuf_targets: &mut impl TufTargetsPublisher,
+) -> Result<(), Refusal> {
+    verify_target_bytes(target, bytes)?;
+
+    let primary_id = primary.provider_id();
+    let mirror_id = mirror.provider_id();
+    if primary_id.is_empty() || mirror_id.is_empty() || primary_id == mirror_id {
+        return Err(invalid_publication_topology(format!(
+            "primary {:?} and mirror {:?} must be distinct non-empty provider identities",
+            primary_id, mirror_id
+        )));
+    }
+
+    primary.put_immutable(target, bytes)?;
+    let primary_bytes = primary.read_back(target)?;
+
+    mirror.put_immutable(target, bytes)?;
+    let mirror_bytes = mirror.read_back(target)?;
+
+    verify_dual_publication(target, &primary_bytes, &mirror_bytes)?;
+    tuf_targets.publish_target(target)
+}
+
 /// The archived hello generation: exact scenario parameters plus the pinned
 /// trajectory digest. dt is an INTEGER RATIO (plan integer-ratio doctrine) so
 /// the envelope never round-trips a float through text formatting.

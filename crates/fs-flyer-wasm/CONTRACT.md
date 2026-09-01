@@ -66,6 +66,7 @@ LOCAL content-addressed store (`data/wright-flyer/archive-fixture/`):
 |---|---|
 | `verify_target_bytes` | size check BEFORE hashing, then BLAKE3 content identity vs the targets manifest |
 | `verify_dual_publication` | both copies verified independently + byte equality (the read-back rule; never provider-native replication) |
+| `publish_dual_with_verification` | caller-supplied immutable primary and mirror writes, independent read-back verification, then caller-supplied TUF targets publication; shared/blank endpoint identities and every failed verification refuse before metadata publication |
 | `parse_hello_envelope` | STRICT fail-closed v1 parser — exact nine keys in canonical order; any deviation refuses (a tolerant line reader is how a gate dies silently) |
 | `replay_generation` | backward playback: re-executes the archived generation, compares trajectory digests; divergence is a typed refusal, the "old-exact" contract's teeth |
 
@@ -73,6 +74,13 @@ The fixture archives generation 0 (the canonical hello scenario, dt as the
 integer ratio 1/120) with its pinned trajectory digest; the battery drives
 corruption, truncation, mirror-divergence, malformed-envelope, and
 wrong-kernel-replay twins.
+
+`ArchivePublicationStore` and `TufTargetsPublisher` are deliberately injected
+capabilities. They do not configure R2/S3, establish retention locks, hold
+credentials or TUF keys, sign metadata, or mint provider receipts; those are
+external E0.9b authorities. The coordinator only prevents target metadata
+publication until two distinct endpoint identities have independently uploaded
+and read back the exact immutable bytes.
 
 ### Engine surface v1 (E5.1, bead guzez.6.2)
 
@@ -122,7 +130,7 @@ stable machine-readable strings tested at cap AND cap+1. Vocabulary:
 archive loader:
 `archive-size-mismatch`, `archive-content-digest-mismatch`,
 `archive-mirror-divergence`, `archive-envelope-malformed`,
-`archive-replay-digest-mismatch`; ring (E5.0): `ring-config-invalid`,
+`archive-replay-digest-mismatch`, `archive-publication-topology-invalid`; ring (E5.0): `ring-config-invalid`,
 `ring-abi-mismatch`, `ring-publish-invalid`, `ring-lease-torn`,
 `ring-epoch-stale`; engine (E5.1): `engine-not-initialized`,
 `mode-invalid`, `scenario-invalid`, `control-input-missing`,

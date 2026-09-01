@@ -36,8 +36,6 @@ use fs_bo::{Gp, Kernel, Matern, expected_improvement};
 use fs_eproc::{BettingEProcess, GaussianMixtureCs};
 use fs_evidence::{Color, ColorRank};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
-use fs_fab::min_feature_size;
-use fs_grammar_e2e::{SimplificationSummary, assess_simplification};
 use fs_lbm::{Lbm, plan_scaling, poiseuille_analytic};
 use fs_neuroshape_e2e::{
     CancellationDetail, ComponentCountEvidence, LocalizationStage,
@@ -1580,9 +1578,14 @@ pub fn grammarforge(match_tol: f64, simplify_radius_threshold: f64) -> Vec<f64> 
     let match_tol = match_tol.clamp(0.01, 1.0);
     let simplify_radius_threshold = simplify_radius_threshold.clamp(0.0, 0.2);
 
+    // The headline and every certificate/status field come from the native
+    // campaign. The browser keeps its grid only as visualization data; it
+    // must not independently recompute the campaign decision that users see.
+    let report = fs_grammar_e2e::run_campaign(match_tol, simplify_radius_threshold);
+    let simplification = &report.simplification;
+
     let target = fs_grammar_e2e::target();
     let samples = grammar_sample_points();
-    let fab = min_feature_size(0.8);
 
     let r_vals = [0.7, 0.9, 1.0, 1.1];
     let d_vals = [0.6, 0.8, 1.0];
@@ -1612,68 +1615,39 @@ pub fn grammarforge(match_tol: f64, simplify_radius_threshold: f64) -> Vec<f64> 
         grid[rb * 4 + db] = e.fitness;
     }
 
-    // Post-process through the same typed assessment/summary used natively.
-    let mut simplification = SimplificationSummary::new(simplify_radius_threshold);
-    let mut fab_satisfied = 0;
-    for e in archive.elites() {
-        let prog = fs_grammar_e2e::build_program(
-            e.solution[0],
-            e.solution[1],
-            e.solution[2],
-            e.solution[3],
-        );
-        let assessment = assess_simplification(&prog, simplify_radius_threshold, &samples);
-        simplification.observe(&assessment);
-        if fab.satisfied(e.solution[0].min(e.solution[1])) {
-            fab_satisfied += 1;
-        }
-    }
-
-    let (best_disc, best_params, best_fab_ok) = match archive.best() {
-        Some(best) => {
-            let bd = 1.0 / best.fitness - 1.0;
-            let bp = [
-                best.solution[0],
-                best.solution[1],
-                best.solution[2],
-                best.solution[3],
-            ];
-            (
-                bd,
-                bp,
-                fab.satisfied(best.solution[0].min(best.solution[1])),
-            )
-        }
-        None => (f64::NAN, [f64::NAN; 4], false),
-    };
-    let simplification_sound = simplification.is_complete_and_sound(archive.num_elites());
-    let headline_verified = best_disc <= match_tol && best_fab_ok && simplification_sound;
-
     // Representative shape: best program z=0 slice, 64×64 over [-2,2]².
     let repr_n = 64usize;
     let repr = fs_grammar_e2e::build_program(
-        best_params[0],
-        best_params[1],
-        best_params[2],
-        best_params[3],
+        report.best_params[0],
+        report.best_params[1],
+        report.best_params[2],
+        report.best_params[3],
     );
 
     let mut out = Vec::with_capacity(32 + 24 + repr_n * repr_n);
     out.push(6.0);
     out.push(4.0);
-    out.push(archive.num_elites() as f64);
+    out.push(report.num_elites as f64);
     out.push(archive.capacity() as f64);
-    out.push(fon(archive.coverage()));
-    out.push(fon(archive.qd_score()));
-    out.push(fon(best_disc));
-    out.extend_from_slice(&best_params);
-    out.push(simplification.size_before() as f64);
-    out.push(simplification.size_after() as f64);
-    out.push(simplification.simplified_count() as f64);
+    out.push(fon(report.coverage));
+    out.push(fon(report.qd_score));
+    out.push(fon(report.best_discrepancy));
+    out.extend_from_slice(&report.best_params);
+    out.push(report.size_before as f64);
+    out.push(report.size_after as f64);
+    out.push(report.simplified_count as f64);
     out.push(fon(simplification.max_certified_error()));
-    out.push(if simplification_sound { 1.0 } else { 0.0 });
-    out.push(fab_satisfied as f64);
-    out.push(if headline_verified { 1.0 } else { 0.0 });
+    out.push(if report.simplification_sound {
+        1.0
+    } else {
+        0.0
+    });
+    out.push(report.fab_satisfied as f64);
+    out.push(if matches!(report.headline_color, Color::Verified { .. }) {
+        1.0
+    } else {
+        0.0
+    });
     out.push(repr_n as f64);
     out.push(-2.0);
     out.push(2.0);
@@ -2269,6 +2243,22 @@ mod tests {
         let trace_last = v[10 + t - 1];
         assert!((trace0 - initial).abs() < 1e-12);
         assert!((trace_last - final_evpi).abs() < 1e-12);
+    }
+
+    #[test]
+    fn sensorforge_strict_math_trace_is_bit_stable() {
+        // SensorForge's EVPI trace passes through fs-voi's strict normal-CDF
+        // path. Keep the browser serialization bit-stable, not merely close.
+        let first = sensorforge(0.01, 12, 0.65);
+        let second = sensorforge(0.01, 12, 0.65);
+        assert_eq!(first.len(), second.len());
+        assert!(
+            first
+                .iter()
+                .zip(&second)
+                .all(|(left, right)| left.to_bits() == right.to_bits()),
+            "SensorForge payload drifted despite strict-math EVPI"
+        );
     }
 
     #[test]
@@ -2868,8 +2858,24 @@ mod tests {
         assert_eq!(v[24], v[2], "every elite has one assessment");
         assert_eq!(&v[25..32], &[0.0; 7], "all exceptional counts");
 
-        // Native and browser transcriptions share the same typed assessment
-        // accumulator, so every status/envelope field must agree exactly.
+        // The browser header is now a lossless projection of the canonical
+        // native report. Its visualization grid may be recomputed, but it
+        // cannot choose a different campaign winner or headline.
+        assert_eq!(v[4].to_bits(), native.coverage.to_bits());
+        assert_eq!(v[5].to_bits(), native.qd_score.to_bits());
+        assert_eq!(v[6].to_bits(), native.best_discrepancy.to_bits());
+        assert_eq!(&v[7..11], &native.best_params);
+        assert_eq!(v[16], native.fab_satisfied as f64);
+        assert_eq!(
+            v[17],
+            if matches!(native.headline_color, Color::Verified { .. }) {
+                1.0
+            } else {
+                0.0
+            }
+        );
+
+        // Every typed assessment/status field also remains exact.
         assert_eq!(v[2], summary.assessments() as f64);
         assert_eq!(v[11], summary.size_before() as f64);
         assert_eq!(v[12], summary.size_after() as f64);
