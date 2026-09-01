@@ -647,3 +647,25 @@ fn voi_is_deterministic() {
         recommend(&designs, &actions, 1e-4)
     );
 }
+
+#[test]
+fn strict_gaussian_exp_keeps_voi_bits_stable() {
+    let designs = [
+        design("a", 0.0, unc(0.3, 0.2, 0.1)),
+        design("b", 0.17, unc(0.2, 0.25, 0.1)),
+        design("c", 0.41, unc(0.45, 0.1, 0.2)),
+    ];
+    let first = (
+        ranking_flip_probability(&designs[0], &designs[1]),
+        top_two_evpi_surrogate(&designs),
+        expected_opportunity_loss(&designs),
+    );
+    let second = (
+        ranking_flip_probability(&designs[0], &designs[1]),
+        top_two_evpi_surrogate(&designs),
+        expected_opportunity_loss(&designs),
+    );
+    assert_eq!(first.0.to_bits(), second.0.to_bits());
+    assert_eq!(first.1.to_bits(), second.1.to_bits());
+    assert_eq!(first.2.to_bits(), second.2.to_bits());
+}

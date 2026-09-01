@@ -550,7 +550,13 @@ impl FgmresState {
                     h[(row + 1) * m + column] = (-sn[row]).mul_add(upper, cs[row] * lower);
                 }
                 let diagonal = h[column * m + column];
-                let denominator = diagonal.hypot(next_norm);
+                // det::hypot, not `f64::hypot`: this denominator sets `cs`/`sn`
+                // and the `h` diagonal, so it feeds every later Arnoldi column
+                // and the back-substitution. Platform libm hypot diverges
+                // across ISAs, which would break the crate's bitwise split-run
+                // contract; the det seam is bit-identical on every conforming
+                // target.
+                let denominator = fs_math::det::hypot(diagonal, next_norm);
                 if !denominator.is_finite() || denominator == 0.0 {
                     broken = true;
                     break;

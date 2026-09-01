@@ -28,8 +28,9 @@
 //!   to the exact unknowns that keep an `fs-evidence` requirement verdict
 //!   indeterminate, while preserving an explicit unpriced fallback.
 //!
-//! Deterministic; the decision algebra uses an in-house normal CDF and the
-//! requirement adapter depends only on the lower-layer `fs-evidence` types.
+//! Deterministic; the decision algebra uses an in-house normal CDF with the
+//! strict `fs-math` exponential, and the requirement adapter depends only on
+//! lower-layer types.
 
 /// Semantic version of the decision algebra. Bump this whenever a change can
 /// alter opportunity-loss result bits, best/runner-up selection, uncertainty
@@ -735,7 +736,7 @@ fn scaled_norm(components: &[f64]) -> f64 {
 }
 
 fn normal_pdf(z: f64) -> f64 {
-    (-0.5 * z * z).exp() / std::f64::consts::TAU.sqrt()
+    fs_math::det::exp(-0.5 * z * z) / std::f64::consts::TAU.sqrt()
 }
 
 fn normal_cdf(z: f64) -> f64 {
@@ -752,6 +753,6 @@ fn erf(x: f64) -> f64 {
         - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t
             + 0.254829592)
             * t
-            * (-x * x).exp();
+            * fs_math::det::exp(-x * x);
     sign * y
 }

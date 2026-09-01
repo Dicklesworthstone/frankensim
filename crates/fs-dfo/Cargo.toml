@@ -12,6 +12,7 @@ layer = "L4"
 
 [dependencies]
 fs-blake3 = { path = "../fs-blake3" }
+fs-alloc = { path = "../fs-alloc" }
 fs-exec = { path = "../fs-exec" }
 fs-la = { path = "../fs-la" }
 fs-obs = { path = "../fs-obs" }

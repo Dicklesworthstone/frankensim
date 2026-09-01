@@ -17,6 +17,8 @@
 //! certificate and no quality claim about optima; those live with the
 //! KKT-bearing tracing engines in [`crate::pareto`].
 
+use fs_exec::{AdmittedBudget, BudgetConsumption, BudgetRefusal, Cx};
+
 /// Authored baseline ceiling on reference-direction family size.
 const REFERENCE_DIRECTION_CAP: usize = 10_000;
 
@@ -63,6 +65,16 @@ pub enum NsgaError {
         /// Authored refusal reason.
         what: String,
     },
+    /// An admitted reference-geometry operation was refused before it could
+    /// publish a revised geometry or report.
+    ReferenceAdmissionRefused {
+        /// Stable fs-exec budget/cancellation refusal rendered for callers
+        /// that do not otherwise depend on the executor error vocabulary.
+        what: String,
+    },
+    /// A prepared reference snapshot was completed against a different
+    /// geometry revision. Re-admit from the current geometry instead.
+    ReferenceSnapshotStale,
     /// The authored evaluation budget cannot host even one complete
     /// generation, so nothing could ever converge honestly.
     BudgetInfeasible {
@@ -120,6 +132,13 @@ impl core::fmt::Display for NsgaError {
                 write!(f, "box bounds invalid on axis {axis} (finite min<=max)")
             }
             Self::ReferenceInvalid { what } => write!(f, "reference invalid: {what}"),
+            Self::ReferenceAdmissionRefused { what } => {
+                write!(f, "reference adaptation was not admitted: {what}")
+            }
+            Self::ReferenceSnapshotStale => write!(
+                f,
+                "reference adaptation snapshot no longer matches the supplied geometry"
+            ),
             Self::BudgetInfeasible {
                 minimum_population,
                 budget,
@@ -319,6 +338,659 @@ pub fn build_references(divisions: usize, objectives: usize) -> Result<Vec<Vec<f
     Ok(das_dennis(divisions, objectives))
 }
 
+/// Schema for deterministic adaptive reference-geometry receipts.
+pub const NSGA_REFERENCE_GEOMETRY_SCHEMA_VERSION: u32 = 1;
+
+/// A versioned, canonical NSGA-III reference geometry.
+///
+/// Directions and observed front points live on the non-negative unit simplex.
+/// The geometry is immutable: an accepted adaptation returns a new revision, so
+/// callers retain the previous value as their exact rollback point.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NsgaReferenceGeometry {
+    /// Receipt schema version.
+    pub schema_version: u32,
+    /// Number of objective axes.
+    pub objectives: usize,
+    /// Lexicographically canonical simplex directions.
+    pub directions: Vec<Vec<f64>>,
+    /// Monotone revision number; fixed geometry starts at zero.
+    pub revision: u64,
+}
+
+/// Complete, independently comparable identity of a reference geometry.
+///
+/// This intentionally retains direction bits rather than claiming a short hash
+/// is an authority anchor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NsgaReferenceGeometryIdentity {
+    /// Receipt schema version.
+    pub schema_version: u32,
+    /// Number of objective axes.
+    pub objectives: usize,
+    /// Geometry revision.
+    pub revision: u64,
+    /// Canonical IEEE-754 direction bits.
+    pub direction_bits: Vec<Vec<u64>>,
+}
+
+/// Immutable identity of an admitted normalized-front snapshot.
+///
+/// The complete direction and front bits are retained deliberately: this is
+/// evidence for replay and stale-snapshot refusal, not a short-hash claim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NsgaReferenceGeometrySnapshotIdentity {
+    /// Schema of the snapshot encoding.
+    pub schema_version: u32,
+    /// Geometry against which this front was admitted.
+    pub geometry: NsgaReferenceGeometryIdentity,
+    /// Canonical policy that governed this decision. Distinct caps or
+    /// hysteresis thresholds are distinct replay inputs even on one front.
+    pub policy: NsgaReferenceGeometryPolicyIdentity,
+    /// Sorted, de-duplicated normalized front-point IEEE-754 bits.
+    pub front_bits: Vec<Vec<u64>>,
+}
+
+/// Canonical identity of the explicit adaptive-geometry policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NsgaReferenceGeometryPolicyIdentity {
+    /// Inclusive cap on the direction family.
+    pub max_directions: usize,
+    /// IEEE-754 bits of the non-negative cover trigger.
+    pub cover_trigger_bits: u64,
+}
+
+/// Evidence retained only after an admitted adaptation has completed.
+///
+/// `budget` is the exact ambient fs-exec budget admitted and charged.  Its
+/// deadline, work quota, and cancellation result are therefore not advisory
+/// metadata. A refusal returns no adaptation and cannot publish this evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NsgaReferenceGeometryEvidence {
+    /// Input snapshot identity used for the decision.
+    pub snapshot: NsgaReferenceGeometrySnapshotIdentity,
+    /// Exact planned and charged work under the admitted context budget.
+    pub budget: BudgetConsumption,
+}
+
+/// A bounded adaptation policy. It is explicit so a caller cannot silently
+/// spend additional reference-direction capacity.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NsgaReferenceGeometryPolicy {
+    /// Inclusive maximum direction count for all revisions.
+    pub max_directions: usize,
+    /// Refine only when the observed-front cover radius is strictly larger.
+    /// This is the hysteresis boundary.
+    pub cover_trigger: f64,
+}
+
+impl NsgaReferenceGeometryPolicy {
+    /// Complete canonical policy identity retained in every run receipt.
+    #[must_use]
+    pub fn identity(self) -> NsgaReferenceGeometryPolicyIdentity {
+        NsgaReferenceGeometryPolicyIdentity {
+            max_directions: self.max_directions,
+            cover_trigger_bits: self.cover_trigger.to_bits(),
+        }
+    }
+}
+
+/// One empty interior reference interval bracketed by observed 2D directions.
+///
+/// This is a sentinel, not a topology certificate: it reports an occupancy gap
+/// on the ordered two-objective reference family only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NsgaDisconnectedFrontSentinel {
+    /// Occupied reference immediately before the gap.
+    pub left_reference: usize,
+    /// First empty reference in the gap.
+    pub first_empty_reference: usize,
+    /// Occupied reference immediately after the gap.
+    pub right_reference: usize,
+}
+
+/// Checkable geometry measurements for one normalized front snapshot.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NsgaReferenceGeometryMetrics {
+    /// Number of admitted front points.
+    pub front_points: usize,
+    /// Number of reference directions associated with at least one point.
+    pub covered_directions: usize,
+    /// Maximum point-to-nearest-reference Euclidean distance, if a front exists.
+    pub front_cover_radius: Option<f64>,
+    /// Maximum reference-to-nearest-point Euclidean distance, if a front exists.
+    pub reference_cover_radius: Option<f64>,
+    /// Maximum difference between observed association share and uniform
+    /// reference share, if a front exists.
+    pub occupancy_discrepancy: Option<f64>,
+    /// Ordered 2D occupancy gaps; higher-dimensional fronts deliberately emit
+    /// no topology-shaped sentinel.
+    pub disconnected_front_sentinels: Vec<NsgaDisconnectedFrontSentinel>,
+}
+
+/// The deterministic result of attempting one bounded refinement.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NsgaReferenceGeometryAdaptation {
+    /// Geometry to use after this decision (identical to the input on hold).
+    pub geometry: NsgaReferenceGeometry,
+    /// Measurements computed from the admitted front snapshot.
+    pub metrics: NsgaReferenceGeometryMetrics,
+    /// Explicit route selected by the policy.
+    pub decision: NsgaReferenceGeometryDecision,
+    /// Present only for the context-admitted path. Context-free inspection via
+    /// [`NsgaReferenceGeometry::adapt`] intentionally cannot mint budget or
+    /// cancellation evidence.
+    pub evidence: Option<NsgaReferenceGeometryEvidence>,
+}
+
+/// Why an adaptive reference-geometry attempt appended or held.
+#[derive(Debug, Clone, PartialEq)]
+pub enum NsgaReferenceGeometryDecision {
+    /// A canonical observed point was appended as one new direction.
+    Appended {
+        /// The simplex point appended to the new geometry revision.
+        direction: Vec<f64>,
+    },
+    /// No admitted point requires refinement beyond the hysteresis threshold.
+    HeldWithinCoverTrigger,
+    /// Every admitted point was already represented exactly.
+    HeldNoNovelDirection,
+    /// The front snapshot contained no points.
+    HeldEmptyFront,
+    /// The explicit direction budget prevented refinement.
+    HeldDirectionBudget,
+}
+
+/// A prepared, context-admitted reference-geometry adaptation.
+///
+/// This is the resume/fork boundary for geometry work: completing it against
+/// the original geometry is deterministic; completing it against a changed
+/// geometry fails closed as stale. The object owns normalized input and the
+/// admitted executor accountant, so an untrusted caller cannot substitute a
+/// different front after admission.
+pub struct NsgaReferenceGeometryAdmission<'clock> {
+    snapshot: NsgaReferenceGeometrySnapshotIdentity,
+    points: Vec<Vec<f64>>,
+    policy: NsgaReferenceGeometryPolicy,
+    budget: AdmittedBudget<'clock>,
+}
+
+impl<'clock> NsgaReferenceGeometryAdmission<'clock> {
+    /// The complete snapshot identity bound at admission.
+    #[must_use]
+    pub fn snapshot(&self) -> &NsgaReferenceGeometrySnapshotIdentity {
+        &self.snapshot
+    }
+
+    /// Complete a previously admitted operation without partial publication.
+    ///
+    /// Cancellation, deadline, and work-quota checks run before the result is
+    /// materialized and again immediately before returning it. A refusal is an
+    /// error, never a held geometry masquerading as an accepted receipt.
+    pub fn complete(
+        mut self,
+        geometry: &NsgaReferenceGeometry,
+        cx: &Cx<'_>,
+    ) -> Result<NsgaReferenceGeometryAdaptation, NsgaError> {
+        if geometry.identity() != self.snapshot.geometry {
+            return Err(NsgaError::ReferenceSnapshotStale);
+        }
+        self.budget
+            .checkpoint("nsga-reference-geometry/entry", cx)
+            .map_err(reference_admission_refusal)?;
+        let planned = self.budget.consumption().planned_cost;
+        self.budget
+            .charge_cost("nsga-reference-geometry/work", planned)
+            .map_err(reference_admission_refusal)?;
+        let mut adaptation = geometry.adapt_normalized(&self.points, self.policy)?;
+        self.budget
+            .checkpoint("nsga-reference-geometry/publication", cx)
+            .map_err(reference_admission_refusal)?;
+        adaptation.evidence = Some(NsgaReferenceGeometryEvidence {
+            snapshot: self.snapshot,
+            budget: self.budget.consumption(),
+        });
+        Ok(adaptation)
+    }
+}
+
+impl NsgaReferenceGeometry {
+    /// Build the canonical fixed Das--Dennis geometry at revision zero.
+    pub fn fixed(divisions: usize, objectives: usize) -> Result<Self, NsgaError> {
+        Ok(Self {
+            schema_version: NSGA_REFERENCE_GEOMETRY_SCHEMA_VERSION,
+            objectives,
+            directions: build_references(divisions, objectives)?,
+            revision: 0,
+        })
+    }
+
+    /// Return the complete canonical identity used by metrics and route receipts.
+    #[must_use]
+    pub fn identity(&self) -> NsgaReferenceGeometryIdentity {
+        NsgaReferenceGeometryIdentity {
+            schema_version: self.schema_version,
+            objectives: self.objectives,
+            revision: self.revision,
+            direction_bits: self
+                .directions
+                .iter()
+                .map(|direction| direction.iter().map(|value| value.to_bits()).collect())
+                .collect(),
+        }
+    }
+
+    /// Measure one normalized front against this geometry.
+    pub fn assess(
+        &self,
+        normalized_front: &[Vec<f64>],
+    ) -> Result<NsgaReferenceGeometryMetrics, NsgaError> {
+        validate_reference_geometry(self)?;
+        let points = normalize_front_points(normalized_front, self.objectives)?;
+        Ok(reference_geometry_metrics(
+            &self.directions,
+            &points,
+            self.objectives,
+        ))
+    }
+
+    /// Adapt by appending at most one canonical observed point under `policy`.
+    ///
+    /// The input geometry is never mutated. Callers can therefore roll back by
+    /// retaining `self`; no hidden evaluation, seed, or comparison work occurs.
+    pub fn adapt(
+        &self,
+        normalized_front: &[Vec<f64>],
+        policy: NsgaReferenceGeometryPolicy,
+    ) -> Result<NsgaReferenceGeometryAdaptation, NsgaError> {
+        validate_reference_geometry(self)?;
+        validate_reference_geometry_policy(policy, self.directions.len())?;
+        let points = normalize_front_points(normalized_front, self.objectives)?;
+        self.adapt_normalized(&points, policy)
+    }
+
+    /// Admit a bounded adaptation under the caller's executor context.
+    ///
+    /// The exact checked work plan is charged to `cx.budget()`; a finite
+    /// deadline without an attached deterministic clock refuses at admission.
+    /// The returned object can be retained for replay, but only completes when
+    /// its geometry identity still matches.
+    pub fn prepare_adaptation<'clock>(
+        &self,
+        normalized_front: &[Vec<f64>],
+        policy: NsgaReferenceGeometryPolicy,
+        cx: &Cx<'clock>,
+    ) -> Result<NsgaReferenceGeometryAdmission<'clock>, NsgaError> {
+        validate_reference_geometry(self)?;
+        validate_reference_geometry_policy(policy, self.directions.len())?;
+        let points = normalize_front_points(normalized_front, self.objectives)?;
+        self.prepare_canonical_adaptation(points, policy, cx)
+    }
+
+    fn prepare_canonical_adaptation<'clock>(
+        &self,
+        points: Vec<Vec<f64>>,
+        policy: NsgaReferenceGeometryPolicy,
+        cx: &Cx<'clock>,
+    ) -> Result<NsgaReferenceGeometryAdmission<'clock>, NsgaError> {
+        let planned_work = reference_geometry_work_units(points.len(), self.directions.len())?;
+        let budget =
+            AdmittedBudget::admit_ambient(cx, planned_work).map_err(reference_admission_refusal)?;
+        Ok(NsgaReferenceGeometryAdmission {
+            snapshot: reference_snapshot_identity(self.identity(), policy, &points),
+            points,
+            policy,
+            budget,
+        })
+    }
+
+    fn adapt_normalized(
+        &self,
+        points: &[Vec<f64>],
+        policy: NsgaReferenceGeometryPolicy,
+    ) -> Result<NsgaReferenceGeometryAdaptation, NsgaError> {
+        let metrics = reference_geometry_metrics(&self.directions, &points, self.objectives);
+        if points.is_empty() {
+            return Ok(NsgaReferenceGeometryAdaptation {
+                geometry: self.clone(),
+                metrics,
+                decision: NsgaReferenceGeometryDecision::HeldEmptyFront,
+                evidence: None,
+            });
+        }
+        if metrics
+            .front_cover_radius
+            .is_some_and(|radius| radius <= policy.cover_trigger)
+        {
+            return Ok(NsgaReferenceGeometryAdaptation {
+                geometry: self.clone(),
+                metrics,
+                decision: NsgaReferenceGeometryDecision::HeldWithinCoverTrigger,
+                evidence: None,
+            });
+        }
+        if self.directions.len() == policy.max_directions {
+            return Ok(NsgaReferenceGeometryAdaptation {
+                geometry: self.clone(),
+                metrics,
+                decision: NsgaReferenceGeometryDecision::HeldDirectionBudget,
+                evidence: None,
+            });
+        }
+
+        let candidate = farthest_novel_point(&points, &self.directions);
+        let Some(direction) = candidate else {
+            return Ok(NsgaReferenceGeometryAdaptation {
+                geometry: self.clone(),
+                metrics,
+                decision: NsgaReferenceGeometryDecision::HeldNoNovelDirection,
+                evidence: None,
+            });
+        };
+        let mut directions = self.directions.clone();
+        directions.push(direction.clone());
+        directions.sort_by(|left, right| vec_ordering(left, right));
+        let geometry = Self {
+            schema_version: self.schema_version,
+            objectives: self.objectives,
+            directions,
+            revision: self
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| NsgaError::ReferenceInvalid {
+                    what: "reference geometry revision overflow".to_owned(),
+                })?,
+        };
+        Ok(NsgaReferenceGeometryAdaptation {
+            geometry,
+            metrics,
+            decision: NsgaReferenceGeometryDecision::Appended { direction },
+            evidence: None,
+        })
+    }
+}
+
+fn reference_admission_refusal(refusal: BudgetRefusal) -> NsgaError {
+    NsgaError::ReferenceAdmissionRefused {
+        what: refusal.to_string(),
+    }
+}
+
+fn reference_geometry_work_units(points: usize, directions: usize) -> Result<u64, NsgaError> {
+    // Association, reverse cover, and novel-point selection each inspect the
+    // same bounded point/direction grid. The extra direction-plus-one charge
+    // covers materializing and ordering a possible appended direction, even
+    // when the decision later holds. Charging this checked upper bound before
+    // materialization makes a later refusal unable to publish partial output.
+    let grid = u64::try_from(points)
+        .ok()
+        .and_then(|points| {
+            u64::try_from(directions)
+                .ok()
+                .and_then(|dirs| points.checked_mul(dirs))
+        })
+        .and_then(|value| value.checked_mul(3))
+        .and_then(|grid| {
+            u64::try_from(directions)
+                .ok()
+                .and_then(|directions| directions.checked_add(1))
+                .and_then(|append_work| grid.checked_add(append_work))
+        })
+        .ok_or_else(|| NsgaError::ReferenceInvalid {
+            what: "reference geometry work plan overflow".to_owned(),
+        })?;
+    Ok(grid)
+}
+
+fn reference_snapshot_identity(
+    geometry: NsgaReferenceGeometryIdentity,
+    policy: NsgaReferenceGeometryPolicy,
+    points: &[Vec<f64>],
+) -> NsgaReferenceGeometrySnapshotIdentity {
+    let mut front_bits: Vec<Vec<u64>> = points
+        .iter()
+        .map(|point| point.iter().map(|value| value.to_bits()).collect())
+        .collect();
+    front_bits.sort();
+    front_bits.dedup();
+    NsgaReferenceGeometrySnapshotIdentity {
+        schema_version: NSGA_REFERENCE_GEOMETRY_SCHEMA_VERSION,
+        geometry,
+        policy: policy.identity(),
+        front_bits,
+    }
+}
+
+fn validate_reference_geometry(geometry: &NsgaReferenceGeometry) -> Result<(), NsgaError> {
+    if geometry.schema_version != NSGA_REFERENCE_GEOMETRY_SCHEMA_VERSION {
+        return Err(NsgaError::ReferenceInvalid {
+            what: format!(
+                "unsupported reference geometry schema {}",
+                geometry.schema_version
+            ),
+        });
+    }
+    if geometry.objectives < 2 || geometry.directions.is_empty() {
+        return Err(NsgaError::ReferenceInvalid {
+            what: "reference geometry needs at least two objectives and one direction".to_owned(),
+        });
+    }
+    if geometry.directions.len() > REFERENCE_DIRECTION_CAP {
+        return Err(NsgaError::ReferenceInvalid {
+            what: "reference geometry exceeds the baseline direction cap".to_owned(),
+        });
+    }
+    for (index, direction) in geometry.directions.iter().enumerate() {
+        if direction.len() != geometry.objectives
+            || direction.iter().any(|value| {
+                !value.is_finite() || *value < 0.0 || value.to_bits() == (-0.0f64).to_bits()
+            })
+            || (direction.iter().sum::<f64>() - 1.0).abs() > 32.0 * f64::EPSILON
+        {
+            return Err(NsgaError::ReferenceInvalid {
+                what: format!("direction {index} is not a finite unit-simplex point"),
+            });
+        }
+    }
+    for pair in geometry.directions.windows(2) {
+        if vec_ordering(&pair[0], &pair[1]) != core::cmp::Ordering::Less {
+            return Err(NsgaError::ReferenceInvalid {
+                what: "reference geometry directions must be unique and lexicographically ordered"
+                    .to_owned(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_reference_geometry_policy(
+    policy: NsgaReferenceGeometryPolicy,
+    current_directions: usize,
+) -> Result<(), NsgaError> {
+    if policy.max_directions < current_directions
+        || policy.max_directions > REFERENCE_DIRECTION_CAP
+        || !policy.cover_trigger.is_finite()
+        || policy.cover_trigger < 0.0
+        || policy.cover_trigger.to_bits() == (-0.0f64).to_bits()
+    {
+        return Err(NsgaError::ReferenceInvalid {
+            what: "adaptive reference policy needs a finite non-negative trigger and a bounded non-shrinking direction cap".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn normalize_front_points(
+    front: &[Vec<f64>],
+    objectives: usize,
+) -> Result<Vec<Vec<f64>>, NsgaError> {
+    let mut normalized: Vec<Vec<f64>> = front
+        .iter()
+        .enumerate()
+        .map(|(index, point)| {
+            if point.len() != objectives
+                || point.iter().any(|value| {
+                    !value.is_finite() || *value < 0.0 || value.to_bits() == (-0.0f64).to_bits()
+                })
+            {
+                return Err(NsgaError::ReferenceInvalid {
+                    what: format!(
+                        "front point {index} is not finite non-negative objective geometry"
+                    ),
+                });
+            }
+            let sum: f64 = point.iter().sum();
+            if !(sum > 0.0) || !sum.is_finite() {
+                return Err(NsgaError::ReferenceInvalid {
+                    what: format!("front point {index} has zero simplex scale"),
+                });
+            }
+            Ok(point
+                .iter()
+                .map(|value| canonical_positive_zero(value / sum))
+                .collect())
+        })
+        .collect::<Result<_, _>>()?;
+    normalized.sort_by(|left, right| vec_ordering(left, right));
+    normalized.dedup_by(|left, right| {
+        left.iter()
+            .zip(right)
+            .all(|(a, b)| a.to_bits() == b.to_bits())
+    });
+    Ok(normalized)
+}
+
+fn canonical_positive_zero(value: f64) -> f64 {
+    if value == 0.0 { 0.0 } else { value }
+}
+
+fn squared_distance(left: &[f64], right: &[f64]) -> f64 {
+    left.iter()
+        .zip(right)
+        .map(|(a, b)| {
+            let delta = a - b;
+            delta * delta
+        })
+        .sum()
+}
+
+fn nearest_reference(point: &[f64], directions: &[Vec<f64>]) -> (usize, f64) {
+    let mut best = (0usize, f64::INFINITY);
+    for (index, direction) in directions.iter().enumerate() {
+        let distance = squared_distance(point, direction);
+        if distance < best.1 || (distance == best.1 && index < best.0) {
+            best = (index, distance);
+        }
+    }
+    best
+}
+
+fn reference_geometry_metrics(
+    directions: &[Vec<f64>],
+    points: &[Vec<f64>],
+    objectives: usize,
+) -> NsgaReferenceGeometryMetrics {
+    if points.is_empty() {
+        return NsgaReferenceGeometryMetrics {
+            front_points: 0,
+            covered_directions: 0,
+            front_cover_radius: None,
+            reference_cover_radius: None,
+            occupancy_discrepancy: None,
+            disconnected_front_sentinels: Vec::new(),
+        };
+    }
+    let mut counts = vec![0usize; directions.len()];
+    let mut front_cover_sq = 0.0f64;
+    for point in points {
+        let (reference, _) = associate_one(point, directions);
+        counts[reference] += 1;
+        let (_, distance) = nearest_reference(point, directions);
+        front_cover_sq = front_cover_sq.max(distance);
+    }
+    let reference_cover_sq = directions
+        .iter()
+        .map(|direction| {
+            points
+                .iter()
+                .map(|point| squared_distance(direction, point))
+                .fold(f64::INFINITY, f64::min)
+        })
+        .fold(0.0f64, f64::max);
+    let uniform = 1.0 / directions.len() as f64;
+    let discrepancy = counts
+        .iter()
+        .map(|count| ((*count as f64 / points.len() as f64) - uniform).abs())
+        .fold(0.0f64, f64::max);
+    let disconnected_front_sentinels = if objectives == 2 {
+        disconnected_sentinels(&counts)
+    } else {
+        Vec::new()
+    };
+    NsgaReferenceGeometryMetrics {
+        front_points: points.len(),
+        covered_directions: counts.iter().filter(|&&count| count > 0).count(),
+        front_cover_radius: Some(front_cover_sq.sqrt()),
+        reference_cover_radius: Some(reference_cover_sq.sqrt()),
+        occupancy_discrepancy: Some(discrepancy),
+        disconnected_front_sentinels,
+    }
+}
+
+fn disconnected_sentinels(counts: &[usize]) -> Vec<NsgaDisconnectedFrontSentinel> {
+    let mut sentinels = Vec::new();
+    let mut left = None;
+    let mut index = 0usize;
+    while index < counts.len() {
+        if counts[index] > 0 {
+            left = Some(index);
+            index += 1;
+            continue;
+        }
+        let first_empty = index;
+        while index < counts.len() && counts[index] == 0 {
+            index += 1;
+        }
+        if let (Some(left_reference), Some(right_reference)) =
+            (left, (index < counts.len()).then_some(index))
+        {
+            sentinels.push(NsgaDisconnectedFrontSentinel {
+                left_reference,
+                first_empty_reference: first_empty,
+                right_reference,
+            });
+        }
+    }
+    sentinels
+}
+
+fn farthest_novel_point(points: &[Vec<f64>], directions: &[Vec<f64>]) -> Option<Vec<f64>> {
+    let mut candidates = points.to_vec();
+    candidates.sort_by(|left, right| vec_ordering(left, right));
+    candidates.dedup_by(|left, right| {
+        left.iter()
+            .zip(right)
+            .all(|(a, b)| a.to_bits() == b.to_bits())
+    });
+    candidates
+        .into_iter()
+        .filter(|point| {
+            !directions.iter().any(|direction| {
+                point
+                    .iter()
+                    .zip(direction)
+                    .all(|(a, b)| a.to_bits() == b.to_bits())
+            })
+        })
+        .max_by(|left, right| {
+            let left_distance = nearest_reference(left, directions).1;
+            let right_distance = nearest_reference(right, directions).1;
+            left_distance
+                .total_cmp(&right_distance)
+                .then_with(|| vec_ordering(right, left))
+        })
+}
+
 /// Outcome of ideal/extreme/intercept normalization.
 #[derive(Debug, Clone)]
 struct Normalization {
@@ -465,11 +1137,14 @@ fn compute_normalization(pop: &[NsgaIndividual], m: usize) -> Normalization {
 
 fn perpendicular_distance(t_norm: &[f64], dir: &[f64]) -> f64 {
     let dot: f64 = t_norm.iter().zip(dir.iter()).map(|(t, d)| t * d).sum();
+    let direction_norm_sq: f64 = dir.iter().map(|value| value * value).sum();
+    debug_assert!(direction_norm_sq.is_finite() && direction_norm_sq > 0.0);
+    let projection = dot / direction_norm_sq;
     t_norm
         .iter()
         .zip(dir.iter())
         .map(|(t, d)| {
-            let v = t - dot * d;
+            let v = t - projection * d;
             v * v
         })
         .sum::<f64>()
@@ -483,7 +1158,7 @@ fn associate_one(t_norm: &[f64], dirs: &[Vec<f64>]) -> (usize, f64) {
     let mut best_dist = f64::INFINITY;
     for (j, d) in dirs.iter().enumerate() {
         let dist = perpendicular_distance(t_norm, d);
-        if dist < best_dist {
+        if dist < best_dist || (dist == best_dist && j < best_idx) {
             best_dist = dist;
             best_idx = j;
         }
@@ -560,6 +1235,22 @@ pub struct NsgaReport {
     pub fronts: Vec<Vec<usize>>,
     /// Whether ANY normalization step fell back to nadir scaling.
     pub normalization_singular_fallback: bool,
+    /// Identity of the geometry admitted before the first generation.
+    pub reference_geometry_initial: NsgaReferenceGeometryIdentity,
+    /// Identity of the geometry used after the final completed generation.
+    pub reference_geometry_final: NsgaReferenceGeometryIdentity,
+    /// Policy identity retained even when no generation can run.
+    pub reference_geometry_policy: NsgaReferenceGeometryPolicyIdentity,
+    /// One checkable metric snapshot per completed generation.
+    pub reference_geometry_metrics: Vec<NsgaReferenceGeometryMetrics>,
+    /// One explicit geometry route decision per completed generation.
+    pub reference_geometry_decisions: Vec<NsgaReferenceGeometryDecision>,
+    /// Complete normalized-front identities used by each generation's decision.
+    pub reference_geometry_snapshots: Vec<NsgaReferenceGeometrySnapshotIdentity>,
+    /// Budget/cancellation evidence for context-admitted generations. The
+    /// context-free compatibility route leaves this empty rather than claiming
+    /// executor authority it did not receive.
+    pub reference_geometry_evidence: Vec<NsgaReferenceGeometryEvidence>,
 }
 
 /// Deterministic xorshift64* stream: exact bit-sequence spec so future
@@ -678,6 +1369,66 @@ pub fn nsga3_run(
     if initial_pop.is_empty() {
         return Err(NsgaError::PopulationEmpty);
     }
+    let geometry = NsgaReferenceGeometry::fixed(cfg.reference_divisions, initial_pop[0].f.len())?;
+    let policy = NsgaReferenceGeometryPolicy {
+        max_directions: geometry.directions.len(),
+        cover_trigger: 0.0,
+    };
+    nsga3_run_with_reference_geometry(initial_pop, cfg, geometry, policy, eval)
+}
+
+/// Run NSGA-III with explicit immutable adaptive reference geometry.
+///
+/// This is the production environmental-selection route: each completed
+/// generation receives exactly one policy decision from its normalized union,
+/// and the report retains all pre/post identities, metrics, and decisions for
+/// replay. The default [`nsga3_run`] supplies a zero-growth policy to preserve
+/// its historical fixed Das--Dennis behavior.
+pub fn nsga3_run_with_reference_geometry(
+    initial_pop: &[NsgaIndividual],
+    cfg: &NsgaConfig,
+    geometry: NsgaReferenceGeometry,
+    geometry_policy: NsgaReferenceGeometryPolicy,
+    eval: &mut dyn FnMut(&[f64]) -> Vec<f64>,
+) -> Result<NsgaReport, NsgaError> {
+    nsga3_run_with_reference_geometry_inner(initial_pop, cfg, geometry, geometry_policy, eval, None)
+}
+
+/// Run production NSGA-III with context-admitted adaptive geometry.
+///
+/// A cancellation, deadline, or work-budget refusal returns no report, so a
+/// caller cannot accidentally publish a partial selection as a completed run.
+/// Each completed generation retains its complete snapshot and exact fs-exec
+/// budget consumption in [`NsgaReport`].
+pub fn nsga3_run_with_reference_geometry_cancellable(
+    initial_pop: &[NsgaIndividual],
+    cfg: &NsgaConfig,
+    geometry: NsgaReferenceGeometry,
+    geometry_policy: NsgaReferenceGeometryPolicy,
+    eval: &mut dyn FnMut(&[f64]) -> Vec<f64>,
+    cx: &Cx<'_>,
+) -> Result<NsgaReport, NsgaError> {
+    nsga3_run_with_reference_geometry_inner(
+        initial_pop,
+        cfg,
+        geometry,
+        geometry_policy,
+        eval,
+        Some(cx),
+    )
+}
+
+fn nsga3_run_with_reference_geometry_inner(
+    initial_pop: &[NsgaIndividual],
+    cfg: &NsgaConfig,
+    mut geometry: NsgaReferenceGeometry,
+    geometry_policy: NsgaReferenceGeometryPolicy,
+    eval: &mut dyn FnMut(&[f64]) -> Vec<f64>,
+    cx: Option<&Cx<'_>>,
+) -> Result<NsgaReport, NsgaError> {
+    if initial_pop.is_empty() {
+        return Err(NsgaError::PopulationEmpty);
+    }
     let m = initial_pop[0].f.len();
     let dx = initial_pop[0].x.len();
     for (i, ind) in initial_pop.iter().enumerate() {
@@ -715,7 +1466,18 @@ pub fn nsga3_run(
         }
     }
     let cfg = cfg.clone().validated(dx)?;
-    let dirs = build_references(cfg.reference_divisions, m)?;
+    validate_reference_geometry(&geometry)?;
+    if geometry.objectives != m {
+        return Err(NsgaError::ReferenceInvalid {
+            what: format!(
+                "reference geometry has {} objectives; population has {m}",
+                geometry.objectives
+            ),
+        });
+    }
+    validate_reference_geometry_policy(geometry_policy, geometry.directions.len())?;
+    let reference_geometry_initial = geometry.identity();
+    let reference_geometry_policy = geometry_policy.identity();
 
     let mut rng = XorShift::new(cfg.seed);
     let mut pop: Vec<NsgaIndividual> = initial_pop.to_vec();
@@ -723,8 +1485,17 @@ pub fn nsga3_run(
     let mut generations_done = 0usize;
     let mut stop = NsgaStop::MaxGenerations;
     let mut normalization_fallback = false;
+    let mut reference_geometry_metrics = Vec::new();
+    let mut reference_geometry_decisions = Vec::new();
+    let mut reference_geometry_snapshots = Vec::new();
+    let mut reference_geometry_evidence = Vec::new();
 
     for _g in 0..cfg.max_generations {
+        if cx.is_some_and(Cx::is_cancel_requested) {
+            return Err(NsgaError::ReferenceAdmissionRefused {
+                what: "cancellation requested before NSGA generation".to_owned(),
+            });
+        }
         if evaluations + cfg.population_size > cfg.eval_budget {
             stop = NsgaStop::BudgetBoundary;
             break;
@@ -778,6 +1549,50 @@ pub fn nsga3_run(
         let norm = compute_normalization(&union, m);
         normalization_fallback |= norm.singular_fallback;
         let fronts_union = fast_nondominated_sort(&union);
+        let geometry_front: Vec<Vec<f64>> = fronts_union
+            .first()
+            .into_iter()
+            .flatten()
+            .filter_map(|&index| {
+                let ind = &union[index];
+                let point: Vec<f64> = (0..m)
+                    .map(|j| canonical_positive_zero((ind.f[j] - norm.ideal[j]) / norm.scales[j]))
+                    .collect();
+                // The ideal itself has no ray direction. It remains part of
+                // environmental selection, but is intentionally absent from
+                // reference-geometry adaptation rather than turning a valid
+                // run into a zero-simplex-scale refusal.
+                (point.iter().sum::<f64>() > 0.0).then_some(point)
+            })
+            .collect();
+        let canonical_geometry_front = normalize_front_points(&geometry_front, m)?;
+        let snapshot = reference_snapshot_identity(
+            geometry.identity(),
+            geometry_policy,
+            &canonical_geometry_front,
+        );
+        let adaptation = if let Some(cx) = cx {
+            geometry
+                .prepare_canonical_adaptation(canonical_geometry_front, geometry_policy, cx)?
+                .complete(&geometry, cx)?
+        } else {
+            geometry.adapt_normalized(&canonical_geometry_front, geometry_policy)?
+        };
+        if let Some(evidence) = adaptation.evidence.as_ref()
+            && evidence.snapshot != snapshot
+        {
+            return Err(NsgaError::ReferenceInvalid {
+                what: "admitted reference evidence did not bind the production snapshot".to_owned(),
+            });
+        }
+        geometry = adaptation.geometry;
+        reference_geometry_metrics.push(adaptation.metrics);
+        reference_geometry_decisions.push(adaptation.decision);
+        reference_geometry_snapshots.push(snapshot);
+        if let Some(evidence) = adaptation.evidence {
+            reference_geometry_evidence.push(evidence);
+        }
+        let dirs = &geometry.directions;
         let assoc: Vec<(usize, f64)> = union
             .iter()
             .map(|ind| {
@@ -855,5 +1670,12 @@ pub fn nsga3_run(
         population: pop,
         fronts: fronts_final,
         normalization_singular_fallback: normalization_fallback,
+        reference_geometry_initial,
+        reference_geometry_final: geometry.identity(),
+        reference_geometry_policy,
+        reference_geometry_metrics,
+        reference_geometry_decisions,
+        reference_geometry_snapshots,
+        reference_geometry_evidence,
     })
 }

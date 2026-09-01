@@ -6,9 +6,9 @@ information to acquire next — spend where it can CHANGE A DECISION.
 ## Purpose and layer
 
 Layer L4 (decision/optimization). The Gaussian decision algebra uses an
-in-house normal CDF (`erf`); the requirement-resolution adapter depends on the
-lower-layer `fs-evidence` verdict and action-taxonomy types. Pure,
-deterministic.
+in-house normal CDF (`erf`) backed by `fs-math::det::exp`, rather than platform
+libm; the requirement-resolution adapter depends on the lower-layer
+`fs-evidence` verdict and action-taxonomy types. Pure, deterministic.
 
 ## Public types and semantics
 

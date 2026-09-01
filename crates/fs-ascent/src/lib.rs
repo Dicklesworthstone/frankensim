@@ -27,8 +27,14 @@ pub mod stop;
 pub mod trust;
 pub mod wolfe;
 pub use nsga::{
-    NonFiniteKind, NsgaConfig, NsgaError, NsgaIndividual, NsgaReport, NsgaStop, build_references,
-    das_dennis_cardinality, fast_nondominated_sort, nsga3_run, partition_tuples,
+    NSGA_REFERENCE_GEOMETRY_SCHEMA_VERSION, NonFiniteKind, NsgaConfig,
+    NsgaDisconnectedFrontSentinel, NsgaError, NsgaIndividual, NsgaReferenceGeometry,
+    NsgaReferenceGeometryAdaptation, NsgaReferenceGeometryAdmission, NsgaReferenceGeometryDecision,
+    NsgaReferenceGeometryEvidence, NsgaReferenceGeometryIdentity, NsgaReferenceGeometryMetrics,
+    NsgaReferenceGeometryPolicy, NsgaReferenceGeometryPolicyIdentity,
+    NsgaReferenceGeometrySnapshotIdentity, NsgaReport, NsgaStop, build_references,
+    das_dennis_cardinality, fast_nondominated_sort, nsga3_run, nsga3_run_with_reference_geometry,
+    nsga3_run_with_reference_geometry_cancellable, partition_tuples,
 };
 pub use pareto::{ParetoPoint, epsilon_constraint_sweep, nondominated_front, weighted_sum_sweep};
 

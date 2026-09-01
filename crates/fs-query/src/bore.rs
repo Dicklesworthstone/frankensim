@@ -348,7 +348,27 @@ pub fn extract_bore(
     //    end) always sit next to a strictly larger axis pole, so this
     //    local-maximality filter deletes sheets and keeps the 1-D spine.
     let poles = crate::medial_poles(chart, boundary, config.lambda, cx)?;
-    let poles = thin_poles(poles, config.max_poles);
+    let mut poles = thin_poles(poles, config.max_poles);
+    // `medial_poles` reports the Delaunay CIRCUMRADIUS — the distance from
+    // the circumcenter to a boundary SAMPLE. On a discretized boundary the
+    // surface bulges inward between samples, so that OVERSTATES the
+    // inscribed radius, and it overstates it worst for the sliver tetrahedra
+    // that span the tube off-axis. Both selectors below rank BY radius
+    // (`spinal_filter` keeps local radius maxima; `bin_centroids` keeps the
+    // top of each bin weighted by r^2), so an inflated off-axis pole is
+    // promoted rather than averaged away — it captures the bin, drags the
+    // station centre off the centerline, and the section plane then cuts
+    // obliquely and reads too much area. Re-key every pole to its
+    // definitional medial radius: the distance from the pole to the
+    // BOUNDARY. Thinning is position-ordered, so doing this after it leaves
+    // the retained pole set identical while bounding the query count.
+    for (point, radius) in &mut poles {
+        crate::query_checkpoint(cx)?;
+        let signed = checked_bore_signed_distance(chart, *point, cx)?;
+        if signed < 0.0 {
+            *radius = -signed;
+        }
+    }
     let poles = spinal_filter(&poles, cx)?;
     if poles.len() < 4 {
         return Err(BoreError::TooFewPoles {
@@ -845,6 +865,98 @@ fn polyline_length(poles: &[(Point3, f64)], spine: &[usize]) -> f64 {
         .sum()
 }
 
+/// Depth of the flat-cap medial SHEET at each open end.
+///
+/// At a flat cap the medial set is a disc-shaped sheet, not a curve: a point
+/// at depth `d` on the axis is equidistant from the cap plane and the side
+/// wall when its inscribed radius is `rho = d`, so the sheet spans depths
+/// `[0, R]` for lumen radius `R` and the chain radius it induces ramps from
+/// near zero at the face up to `R` at depth `R`. The correct trim depth is
+/// therefore `R` itself.
+///
+/// `R` cannot be read off a fixed window of terminal nodes, because every
+/// radius measured INSIDE the sheet underestimates it — that is precisely
+/// why a window-max trim keyed to the contaminated terminal is inert.
+///
+/// The depth is therefore taken as a LEVEL crossing against a
+/// side-appropriate interior reference. `smooth_chain` holds the raw
+/// endpoints of an open chain, so no criterion may depend on the first
+/// segment: a single noisy tip that out-radiuses its neighbour would
+/// otherwise disable trimming entirely (fail-open). Two properties make
+/// this robust:
+///
+/// - The reference is read at probe depth `min(r_max, cap)` measured from
+///   THIS end. A sheet reaches at most the local lumen and the local lumen
+///   is at most `r_max`, so a node that deep is past this side's sheet —
+///   and reading it per-side keeps a cone's narrow end from inheriting the
+///   wide end's radius.
+/// - The depth is the DEEPEST sub-level node, not the first. A noisy tip
+///   above the level cannot shorten the trim, because deeper contaminated
+///   nodes still set it.
+///
+/// A sustained taper sits above its own side's level almost everywhere, so
+/// it keeps its body; the cap and the short-body fallback bound the rest.
+fn terminal_sheet_depths(skeleton: &[(Point3, f64)], cum: &[f64], total: f64) -> (f64, f64) {
+    // Fraction of the side's interior reference below which a node still
+    // counts as sheet. Loose enough that a sustained taper's own falloff
+    // stays above it, tight enough to catch a collapsing cap ramp.
+    const LEVEL_FRAC: f64 = 0.85;
+    // Never surrender more than a third of the centerline to either cap.
+    let cap = total / 3.0;
+    let n = skeleton.len();
+    if n < 2 {
+        return (0.0, 0.0);
+    }
+    let r_max = skeleton.iter().map(|node| node.1).fold(0.0f64, f64::max);
+    if !(r_max > 0.0) {
+        return (0.0, 0.0);
+    }
+    let probe = r_max.min(cap);
+    let depth_of =
+        |i: usize, from_end: bool| -> f64 { if from_end { total - cum[i] } else { cum[i] } };
+    let side = |from_end: bool| -> f64 {
+        // Walk this side's nodes in order of increasing depth.
+        let node_at = |pos: usize| -> usize { if from_end { n - 1 - pos } else { pos } };
+        // Interior reference: first node at least `probe` deep on this side.
+        let mut reference = r_max;
+        for pos in 0..n {
+            let i = node_at(pos);
+            if depth_of(i, from_end) >= probe {
+                reference = skeleton[i].1;
+                break;
+            }
+        }
+        let level = LEVEL_FRAC * reference;
+        // Deepest sub-level node within the cap; trim through it.
+        let mut last: Option<usize> = None;
+        for pos in 0..n {
+            let i = node_at(pos);
+            if depth_of(i, from_end) > cap {
+                break;
+            }
+            if skeleton[i].1 < level {
+                last = Some(pos);
+            }
+        }
+        match last {
+            None => 0.0,
+            Some(pos) => {
+                let next = (pos + 1).min(n - 1);
+                depth_of(node_at(next), from_end).min(cap)
+            }
+        }
+    };
+    let (head, tail) = (side(false), side(true));
+    // Keep a substantial interior; a trim that would consume most of the
+    // centerline cannot separate sheet from lumen, and the untrimmed chain
+    // is then the honest one.
+    if total - head - tail >= 0.3 * total {
+        (head, tail)
+    } else {
+        (0.0, 0.0)
+    }
+}
+
 /// Radius^2-weighted pole centroids binned by arc length along the
 /// SMOOTHED spine polyline (segment projection, not nearest node — the raw
 /// MST diameter path zigzags through the 3-D pole thicket and nearest-node
@@ -859,50 +971,17 @@ fn bin_centroids(
 ) -> Result<Vec<(Point3, f64)>, BoreError> {
     // Heavily smoothed spine as the parameterization skeleton.
     let spine_pts: Vec<(Point3, f64)> = spine.iter().map(|&i| poles[i]).collect();
-    let mut skeleton = smooth_chain(&spine_pts, 3, closed);
+    let skeleton = smooth_chain(&spine_pts, 3, closed);
     // Near a flat tube end the medial set is a disc-shaped SHEET reaching
-    // about one local radius in from the cap; the MST diameter path can
-    // curl through it when a face-adjacent sheet pole survives the
-    // spinal filter (its local-maximality neighborhood can lack a
-    // strictly larger pole). Keying the trim to the CONTAMINATED
-    // terminal's own shrunken radius self-defeats, so take the trim
-    // depth from a WINDOW of interior-skeleton radii instead: a
-    // single-dip remnant lifts the window maximum back to the local
-    // lumen scale, while a legitimate sustained narrow section keeps
-    // every radius inside its own window low and preserves its trim.
-    if !closed {
-        let arc_at = |sk: &[(Point3, f64)]| -> Vec<f64> {
-            let mut c = vec![0.0f64; sk.len()];
-            for i in 1..sk.len() {
-                c[i] = c[i - 1] + sk[i].0.delta_from(sk[i - 1].0).norm();
-            }
-            c
-        };
-        let c = arc_at(&skeleton);
-        let total_raw = c[skeleton.len() - 1];
-        const TRIM_WINDOW: usize = 4;
-        let head_n = TRIM_WINDOW.min(skeleton.len());
-        let tail_start = skeleton.len().saturating_sub(TRIM_WINDOW);
-        let r_start = skeleton[..head_n]
-            .iter()
-            .map(|node| node.1)
-            .fold(f64::NEG_INFINITY, f64::max);
-        let r_end = skeleton[tail_start..]
-            .iter()
-            .map(|node| node.1)
-            .fold(f64::NEG_INFINITY, f64::max);
-        if total_raw > 3.0 * (r_start + r_end) {
-            let keep: Vec<(Point3, f64)> = skeleton
-                .iter()
-                .zip(&c)
-                .filter(|&(_, &a)| a >= r_start && a <= total_raw - r_end)
-                .map(|(&node, _)| node)
-                .collect();
-            if keep.len() >= 3 {
-                skeleton = keep;
-            }
-        }
-    }
+    // one local radius in from the cap; the MST diameter path can curl
+    // through it when a face-adjacent sheet pole survives the spinal
+    // filter (its local-maximality neighborhood can lack a strictly
+    // larger pole). Sheet poles that reach the chain drag the terminal
+    // radius far below the lumen, and every downstream end guard is keyed
+    // to that radius (the boundary-bracket cap, the station inset, the
+    // end-station retreat threshold, the plane-section ray cap), so one
+    // contaminated terminal radius is enough to blow the end-station area
+    // band. `terminal_sheet_depths` locates the sheet below.
     let m = skeleton.len();
     let mut cum = vec![0.0f64; m];
     for i in 1..m {
@@ -910,6 +989,28 @@ fn bin_centroids(
     }
     let total = cum[m - 1];
     if !(total > 0.0) {
+        return Err(BoreError::DegeneratePoleChain {
+            reason: "zero-length spine",
+        });
+    }
+    // The terminal sheet has to be removed from the POLE SET, not from the
+    // skeleton. Dropping skeleton nodes cannot work: pass 1 below projects
+    // every pole onto the polyline with the segment parameter clamped to
+    // [0, 1], so a pole sitting beyond a trimmed end simply re-clamps onto
+    // the new terminal node and lands back in bin 0 / bin bins-1. That is
+    // why a node-only trim measures as a no-op.
+    let (trim_head, trim_tail) = if closed {
+        (0.0, 0.0)
+    } else {
+        terminal_sheet_depths(&skeleton, &cum, total)
+    };
+    let (span_lo, span_hi) = if trim_head + trim_tail > 0.0 {
+        (trim_head, total - trim_tail)
+    } else {
+        (0.0, total)
+    };
+    let span = span_hi - span_lo;
+    if !(span > 0.0) {
         return Err(BoreError::DegeneratePoleChain {
             reason: "zero-length spine",
         });
@@ -941,8 +1042,13 @@ fn bin_centroids(
                 best_s = cum[i] + t * (cum[i + 1] - cum[i]);
             }
         }
-        let bin = ((best_s / total * bins as f64) as usize).min(bins - 1);
-        params.push(bin);
+        // Poles inside either end's medial sheet are discarded outright.
+        if best_s < span_lo || best_s > span_hi {
+            params.push(None);
+            continue;
+        }
+        let bin = (((best_s - span_lo) / span * bins as f64) as usize).min(bins - 1);
+        params.push(Some(bin));
         bin_max[bin] = bin_max[bin].max(r);
     }
     // Pass 2: accumulate only the locally-most-medial poles of each bin
@@ -952,6 +1058,9 @@ fn bin_centroids(
     // — radius-local-maximality is exactly what makes a pole spinal.
     let mut acc: Vec<(f64, f64, f64, f64, f64)> = vec![(0.0, 0.0, 0.0, 0.0, 0.0); bins];
     for (&(p, r), &bin) in poles.iter().zip(&params) {
+        let Some(bin) = bin else {
+            continue;
+        };
         if r < 0.8 * bin_max[bin] {
             continue;
         }
@@ -1426,11 +1535,11 @@ mod tests {
     }
 
     /// Regression (bead frankensim-b2can): a face-adjacent medial SHEET
-    /// remnant — a single shrunken terminal pole beyond an otherwise
-    /// healthy interior — must be trimmed by the WINDOW-max depth, not
-    /// its own (self-defeating) radius.
+    /// remnant — a shrunken terminal pole beyond an otherwise healthy
+    /// interior — must be removed by the sheet-ramp depth, and a healthy
+    /// tube must not be trimmed at all.
     #[test]
-    fn trim_depth_uses_interior_window_not_contaminated_terminal() {
+    fn sheet_remnant_trimmed_and_healthy_tube_untouched() {
         let mut chain: Vec<(Point3, f64)> = (0..12).map(|i| p(i as f64 * 0.3, 0.0, 0.0)).collect();
         // Sheet remnant: terminal pole at half the lumen radius, sitting
         // slightly OFF-axis the way a face-adjacent disc pole does.
@@ -1455,21 +1564,177 @@ mod tests {
             let first = binned[0].0.x;
             assert!(
                 first >= 0.4,
-                "window trim must remove the sheet-remnant reach; first centroid {first}"
+                "span exclusion must drop the sub-level sheet remnant; first centroid {first}"
             );
             // A healthy line keeps its full extent under the same rule.
             let healthy: Vec<(Point3, f64)> =
                 (0..12).map(|i| p(i as f64 * 0.3, 0.0, 0.0)).collect();
             let binned2 =
                 bin_centroids(&healthy, &(0..12).collect::<Vec<_>>(), 6, false, &cx).expect("bin");
-            // Post-trim rebasing puts the first centroid near the kept
-            // span edge plus projection stacking; >=0.35 proves the
-            // window did not eat the interior. The DISCRIMINATOR for the
-            // sheet remnant is the >=0.4 case above.
+            // A uniform tube has no cap ramp in this pole set, so it earns
+            // ZERO trim and bin 0 sits at the true start of the chain.
+            // (The previous form of this assertion demanded a LARGE first
+            // centroid here, which only held because untrimmed poles were
+            // re-clamped onto the terminal skeleton node and stacked —
+            // i.e. it was pinning the very projection artifact that made
+            // the trim inert. Asserting it now would require over-trimming
+            // a healthy tube.)
             assert!(
-                binned2[0].0.x >= 0.35,
-                "window trim must not eat healthy interior length; {}",
+                binned2[0].0.x < 0.35,
+                "a healthy tube must not be trimmed; first centroid {}",
                 binned2[0].0.x
+            );
+            assert!(
+                (binned2[0].1 - 0.5).abs() < 1.0e-9,
+                "healthy terminal radius must stay at the lumen scale; {}",
+                binned2[0].1
+            );
+        });
+    }
+
+    /// Straight axial chain with radius profile `radii`, one node per 0.1
+    /// of arc, returned as (skeleton, cum, total) for depth-criterion tests.
+    fn axial_chain(radii: &[f64]) -> (Vec<(Point3, f64)>, Vec<f64>, f64) {
+        let skeleton: Vec<(Point3, f64)> = radii
+            .iter()
+            .enumerate()
+            .map(|(k, &r)| (Point3::new(k as f64 * 0.1, 0.0, 0.0), r))
+            .collect();
+        let cum: Vec<f64> = (0..radii.len()).map(|k| k as f64 * 0.1).collect();
+        let total = cum[cum.len() - 1];
+        (skeleton, cum, total)
+    }
+
+    /// Regression (bead frankensim-b2can): a SUSTAINED cap-sheet ramp is
+    /// the case that defeats a fixed terminal window — every node in the
+    /// window sits inside the sheet, so the window maximum is itself
+    /// contaminated. FALSIFIER for the first-segment criterion: because
+    /// `smooth_chain` holds the raw endpoint of an open chain, a noisy tip
+    /// that OUT-RADIUSES its neighbour makes the first segment's growth
+    /// negative. A first-segment slope break reads that as "no sheet" and
+    /// disables the trim entirely (fail-open); the level criterion must
+    /// still trim, because the depth comes from the DEEPEST sub-level node
+    /// rather than the first.
+    #[test]
+    fn noisy_terminal_node_cannot_disable_the_trim() {
+        // Ideal flat-cap sheet rho(d) = min(d, R), R = 0.5, then lumen.
+        let clean: Vec<f64> = (0..=30).map(|k| (k as f64 * 0.1).min(0.5)).collect();
+        let (sk, cum, total) = axial_chain(&clean);
+        let (head, tail) = terminal_sheet_depths(&sk, &cum, total);
+        // Reference at probe depth 0.5 is 0.5, level 0.425; the deepest
+        // sub-level node is k=4 (0.4), so the trim runs through k=5.
+        assert!(
+            (head - 0.5).abs() < 1.0e-9,
+            "sheet depth must reach the lumen radius; head {head}"
+        );
+        assert!(tail == 0.0, "a clean end must not be trimmed; tail {tail}");
+
+        // Same ramp, but the held raw tip out-radiuses its neighbour
+        // (0.30 against 0.10). This is the fail-open case.
+        let mut noisy = clean.clone();
+        noisy[0] = 0.30;
+        let (sk_n, cum_n, total_n) = axial_chain(&noisy);
+        let (head_n, tail_n) = terminal_sheet_depths(&sk_n, &cum_n, total_n);
+        assert!(
+            (head_n - 0.5).abs() < 1.0e-9,
+            "a noisy tip must not disable trimming; head {head_n}"
+        );
+        assert!(tail_n == 0.0, "far end still clean; tail {tail_n}");
+    }
+
+    /// Regression (bead frankensim-b2can): neither a sustained taper nor a
+    /// uniform tube may have its body consumed by the terminal trim.
+    #[test]
+    fn taper_and_healthy_tube_are_not_overtrimmed() {
+        // Cone lumen 0.5 -> 0.3 over arc 1.6, no cap ramp at all.
+        let cone: Vec<f64> = (0..=16).map(|k| 0.5 - 0.125 * (k as f64 * 0.1)).collect();
+        let (sk, cum, total) = axial_chain(&cone);
+        let (head, tail) = terminal_sheet_depths(&sk, &cum, total);
+        // Per-side references (0.4375 wide end, 0.3625 narrow end) keep the
+        // taper above its own level almost everywhere: the wide end trims
+        // nothing and the narrow end gives up a single node.
+        assert!(head == 0.0, "wide end of a taper must not trim; {head}");
+        assert!(
+            head + tail <= 0.15 * total,
+            "a taper must keep its body; head {head} tail {tail} total {total}"
+        );
+
+        // A uniform tube has no sub-level node anywhere: zero trim.
+        let flat: Vec<f64> = (0..=30).map(|_| 0.5).collect();
+        let (sk2, cum2, total2) = axial_chain(&flat);
+        let (h2, t2) = terminal_sheet_depths(&sk2, &cum2, total2);
+        assert!(
+            h2 == 0.0 && t2 == 0.0,
+            "a uniform tube must not be trimmed; head {h2} tail {t2}"
+        );
+    }
+
+    /// Regression (bead frankensim-b2can): poles outside the retained span
+    /// must be DROPPED, not re-clamped back into the terminal bins. This is
+    /// the defect that made the previous skeleton-only trim inert, so it is
+    /// pinned metamorphically: the spine (and therefore the skeleton and
+    /// both trim depths) is held fixed while cloud poles are added inside
+    /// the trimmed zone. Exclusion means they cannot move the chain at all.
+    #[test]
+    fn poles_outside_the_span_are_not_reinjected() {
+        // Spine: cap ramp 0 -> 0.5 then lumen, arc 0.0 ..= 2.0. Head trims
+        // to 0.5; the tail is clean.
+        let mut poles: Vec<(Point3, f64)> = (0..=20)
+            .map(|k| {
+                let x = k as f64 * 0.1;
+                (Point3::new(x, 0.0, 0.0), x.min(0.5))
+            })
+            .collect();
+        let spine: Vec<usize> = (0..poles.len()).collect();
+        let base = poles.clone();
+        // Extra CLOUD poles (not in the spine, so the skeleton and the trim
+        // depths are untouched) sitting inside the trimmed head zone, at
+        // full lumen radius so the per-bin 0.8 filter cannot mask them.
+        for x in [0.05f64, 0.15, 0.25] {
+            poles.push((Point3::new(x, 0.0, 0.0), 0.5));
+        }
+        let gate = fs_exec::CancelGate::new_clock_free();
+        let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+        pool.scope(|arena| {
+            let cx = Cx::new(
+                &gate,
+                arena,
+                fs_exec::StreamKey {
+                    seed: 0,
+                    kernel_id: 943,
+                    tile: 0,
+                    iteration: 0,
+                },
+                fs_exec::Budget::INFINITE,
+                fs_exec::ExecMode::Deterministic,
+            );
+            let with_extras = bin_centroids(&poles, &spine, 6, false, &cx).expect("bin");
+            let without = bin_centroids(&base, &spine, 6, false, &cx).expect("bin");
+            assert_eq!(
+                with_extras.len(),
+                without.len(),
+                "excluded poles must not add or remove bins"
+            );
+            for (i, (a, b)) in with_extras.iter().zip(&without).enumerate() {
+                // Skipped poles never reach the accumulator, so the chains
+                // must agree exactly, not merely closely.
+                assert!(
+                    a.0.x == b.0.x && a.0.y == b.0.y && a.0.z == b.0.z && a.1 == b.1,
+                    "bin {i} moved: {:?}/{} vs {:?}/{}",
+                    a.0,
+                    a.1,
+                    b.0,
+                    b.1
+                );
+            }
+            // And the retained head carries the LUMEN radius rather than a
+            // sheet-ramp value (0.0 ..= 0.4 here). Asserted on the radius,
+            // not the bin position, because the exact head depth depends on
+            // how `smooth_chain` rounds the ramp.
+            assert!(
+                without[0].1 >= 0.4,
+                "first bin must carry the lumen radius, not a sheet value; {}",
+                without[0].1
             );
         });
     }

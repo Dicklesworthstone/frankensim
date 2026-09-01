@@ -211,6 +211,57 @@ fn gb_002_torus_certified_closure_and_falsifier() {
     });
 }
 
+/// Regression (bead frankensim-b2can): a pole's medial radius is BY
+/// DEFINITION the distance from it to the boundary, so no station of a
+/// constant-section bend may report a pole radius above the tube's minor
+/// radius. `medial_poles` reports the Delaunay circumradius instead, which
+/// overstates that on a discretized boundary; because `spinal_filter` and
+/// `bin_centroids` both rank BY radius, the overstatement was promoted
+/// rather than averaged away and reached the stations (measured 0.304
+/// against a 0.25 lumen, alongside a matching area inflation).
+///
+/// This is a hard geometric bound, not a tuned band: the inscribed sphere
+/// at any interior point of the bend cannot exceed the minor radius.
+#[test]
+fn bent_tube_pole_radius_never_exceeds_the_minor_radius() {
+    with_cx(|cx| {
+        let major = 1.0f64;
+        let minor = 0.25f64;
+        let mut b = FrepBuilder::new();
+        let torus = b
+            .torus(Point3::new(0.0, 0.0, 0.0), major, minor)
+            .expect("torus");
+        let hx = b.half_space(Vec3::new(-1.0, 0.0, 0.0), 0.0).expect("hx");
+        let hy = b.half_space(Vec3::new(0.0, -1.0, 0.0), 0.0).expect("hy");
+        let quad = b
+            .boolean(BoolOp::Intersect, BoolStyle::Hard, hx, hy)
+            .expect("quad");
+        let root = b
+            .boolean(BoolOp::Intersect, BoolStyle::Hard, torus, quad)
+            .expect("root");
+        let bend = b.finish(root).expect("frep");
+        let (soup, _) = dual_contour(&bend, DcOptions::sharp(0.08), cx).expect("dc");
+        let bore = extract_bore(
+            &bend,
+            &soup,
+            &BoreConfig::default(),
+            "test/bend90/pole-radius-bound/v1",
+            cx,
+        )
+        .expect("bend extracts");
+        let worst = bore
+            .stations
+            .iter()
+            .map(|s| s.pole_radius_m)
+            .fold(0.0f64, f64::max);
+        assert!(
+            worst <= minor + 1.0e-6,
+            "pole radius {worst} exceeds the {minor} lumen: a medial radius \
+             larger than the tube cannot be a distance to its boundary"
+        );
+    });
+}
+
 #[test]
 fn gb_003_bent_tube_oracle() {
     with_cx(|cx| {

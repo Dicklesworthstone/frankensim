@@ -55,6 +55,19 @@ so converged and stalled are distinguishable outcomes.
   rows retain the first occurrence. The output preserves input order, so
   disconnected front segments keep the schedule's stable presentation while
   dominated bridge rows disappear.
+- `nsga::{NsgaReferenceGeometry, NsgaReferenceGeometryPolicy}` — immutable,
+  versioned Das--Dennis reference geometry plus a bounded deterministic
+  one-direction refinement. Geometry identities retain all canonical direction
+  bits; admitted snapshots additionally retain canonical front bits and policy
+  bits (cap plus cover trigger), with duplicates removed and `-0.0` refused.
+  The assessment reports bidirectional cover radii and association-share
+  discrepancy. A 2D empty interior association interval is a disconnected-front
+  sentinel only, not a claim about continuous Pareto-front topology. Adaptation
+  consumes only its supplied normalized front and explicit direction cap, and
+  returns a new revision so the caller's old geometry is the rollback value.
+  `nsga3_run_with_reference_geometry` applies that decision from rank-zero
+  geometry in production environmental selection and retains each route/metric,
+  policy identity, and pre/post identities.
 - `stop::{StopRule, StopReason}` — the stopping-condition algebra:
   grad-norm / objective / budget / stall leaves under Any/All
   combinators, with REASON attribution in every report.

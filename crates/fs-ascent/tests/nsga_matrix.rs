@@ -9,9 +9,12 @@
 //! NO quality or release authority by itself (Estimate-class).
 
 use fs_ascent::{
-    NonFiniteKind, NsgaConfig, NsgaError, NsgaIndividual, build_references, das_dennis_cardinality,
-    fast_nondominated_sort, nsga3_run, partition_tuples,
+    NonFiniteKind, NsgaConfig, NsgaError, NsgaIndividual, NsgaReferenceGeometry,
+    NsgaReferenceGeometryDecision, NsgaReferenceGeometryPolicy, build_references,
+    das_dennis_cardinality, fast_nondominated_sort, nsga3_run, nsga3_run_with_reference_geometry,
+    nsga3_run_with_reference_geometry_cancellable, partition_tuples,
 };
+use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey, Time, VirtualClock};
 
 fn ind(x: &[f64], f: &[f64]) -> NsgaIndividual {
     NsgaIndividual {
@@ -54,6 +57,34 @@ fn base_config(seed: u64, pop: usize, generations: usize, budget: usize) -> Nsga
         seed,
         bounds: vec![(0.0, 1.0)],
     }
+}
+
+fn with_reference_cx<R>(cancelled: bool, budget: Budget, f: impl FnOnce(&Cx<'_>) -> R) -> R {
+    let gate = CancelGate::new_clock_free();
+    if cancelled {
+        gate.request();
+    }
+    let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+    let result = pool.scope(|arena| {
+        let cx = Cx::new(
+            &gate,
+            arena,
+            StreamKey {
+                seed: 0x7a24_0014,
+                kernel_id: 0x4e53_4741,
+                tile: 0,
+                iteration: 0,
+            },
+            budget,
+            ExecMode::Deterministic,
+        );
+        f(&cx)
+    });
+    assert!(
+        pool.stats().quiescent(),
+        "reference context releases its arena"
+    );
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -106,6 +137,485 @@ fn references_refuse_zero_divisions_single_objective_and_cap_overflow() {
         }
         other => panic!("expected three typed refusals, got {other:?}"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// 1b. Adaptive geometry: exact identity, cover/discrepancy measurements,
+//     2D disconnected-front sentinels, budgeted hysteresis and rollback.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn adaptive_reference_geometry_measures_and_refines_deterministically() {
+    let geometry = NsgaReferenceGeometry::fixed(2, 2).expect("fixed geometry");
+    let identity = geometry.identity();
+    assert_eq!(identity.revision, 0);
+    assert_eq!(identity.direction_bits.len(), 3);
+
+    // The endpoint observations leave the middle reference direction empty.
+    // That is a gap sentinel, not a statement about continuous-front topology.
+    let front = vec![vec![1.0, 0.0], vec![0.0, 1.0], vec![0.8, 0.2]];
+    let metrics = geometry.assess(&front).expect("admitted simplex front");
+    assert_eq!(metrics.front_points, 3);
+    assert_eq!(metrics.covered_directions, 2);
+    assert_eq!(metrics.disconnected_front_sentinels.len(), 1);
+    assert_eq!(metrics.disconnected_front_sentinels[0].left_reference, 0);
+    assert_eq!(metrics.disconnected_front_sentinels[0].right_reference, 2);
+    assert!(metrics.front_cover_radius.expect("nonempty front") > 0.0);
+    assert!(metrics.occupancy_discrepancy.expect("nonempty front") > 0.0);
+
+    let policy = NsgaReferenceGeometryPolicy {
+        max_directions: 4,
+        cover_trigger: 0.0,
+    };
+    let first = geometry.adapt(&front, policy).expect("bounded adaptation");
+    let second = geometry.adapt(&front, policy).expect("replay adaptation");
+    assert_eq!(first, second, "same identity and snapshot replay exactly");
+    assert_eq!(first.geometry.revision, 1);
+    assert_eq!(first.geometry.directions.len(), 4);
+    assert_eq!(
+        geometry.revision, 0,
+        "input geometry remains the rollback point"
+    );
+    assert!(matches!(
+        first.decision,
+        NsgaReferenceGeometryDecision::Appended { .. }
+    ));
+}
+
+#[test]
+fn adaptive_reference_geometry_honors_hysteresis_and_direction_budget() {
+    let geometry = NsgaReferenceGeometry::fixed(1, 2).expect("fixed geometry");
+    let front = vec![vec![0.5, 0.5]];
+    let held = geometry
+        .adapt(
+            &front,
+            NsgaReferenceGeometryPolicy {
+                max_directions: 3,
+                cover_trigger: 1.0,
+            },
+        )
+        .expect("hysteresis hold");
+    assert!(matches!(
+        held.decision,
+        NsgaReferenceGeometryDecision::HeldWithinCoverTrigger
+    ));
+    assert_eq!(held.geometry, geometry);
+
+    let budget = geometry
+        .adapt(
+            &front,
+            NsgaReferenceGeometryPolicy {
+                max_directions: 2,
+                cover_trigger: 0.0,
+            },
+        )
+        .expect("budget hold");
+    assert!(matches!(
+        budget.decision,
+        NsgaReferenceGeometryDecision::HeldDirectionBudget
+    ));
+
+    let appended = geometry
+        .adapt(
+            &front,
+            NsgaReferenceGeometryPolicy {
+                max_directions: 3,
+                cover_trigger: 0.0,
+            },
+        )
+        .expect("one extra direction fits exactly");
+    assert_eq!(appended.geometry.directions.len(), 3);
+    let edge = appended
+        .geometry
+        .adapt(
+            &front,
+            NsgaReferenceGeometryPolicy {
+                max_directions: 3,
+                cover_trigger: 0.0,
+            },
+        )
+        .expect("the exact cap is a hold, not an overflow");
+    assert!(matches!(
+        edge.decision,
+        NsgaReferenceGeometryDecision::HeldWithinCoverTrigger
+    ));
+}
+
+#[test]
+fn adaptive_geometry_metrics_have_independent_closed_form_and_3d_boundary() {
+    let geometry = NsgaReferenceGeometry::fixed(1, 2).expect("two endpoints");
+    let front = vec![vec![1.0, 3.0], vec![3.0, 1.0]];
+    let metrics = geometry.assess(&front).expect("positive-scale front");
+    // Each normalized point is sqrt(1/8) from its nearest endpoint; both
+    // endpoint buckets receive one point, so the association discrepancy is 0.
+    let expected = (1.0_f64 / 8.0).sqrt();
+    assert!((metrics.front_cover_radius.unwrap() - expected).abs() < 1e-15);
+    assert!((metrics.reference_cover_radius.unwrap() - expected).abs() < 1e-15);
+    assert_eq!(metrics.occupancy_discrepancy, Some(0.0));
+    assert!(metrics.disconnected_front_sentinels.is_empty());
+
+    let three_d = NsgaReferenceGeometry::fixed(1, 3).expect("3d simplex");
+    let boundary = three_d
+        .assess(&[vec![1.0, 0.0, 0.0], vec![0.0, 1.0, 0.0]])
+        .expect("3d boundary observations");
+    assert_eq!(boundary.covered_directions, 2);
+    assert!(
+        boundary.disconnected_front_sentinels.is_empty(),
+        "2d occupancy sentinels must not impersonate 3d topology"
+    );
+
+    // The middle Das--Dennis ray has squared norm 1/2. Correct perpendicular
+    // projection associates both points to it; omitting the norm denominator
+    // incorrectly associates them to opposite axis rays.
+    let three_rays = NsgaReferenceGeometry::fixed(2, 2).expect("three rays");
+    let projected = three_rays
+        .assess(&[vec![0.7, 0.3], vec![0.3, 0.7]])
+        .expect("projected associations");
+    assert_eq!(projected.covered_directions, 1);
+    assert!((projected.occupancy_discrepancy.unwrap() - 2.0 / 3.0).abs() < 1e-15);
+}
+
+#[test]
+fn adaptive_geometry_is_permutation_scaling_duplicate_and_corruption_hardened() {
+    let geometry = NsgaReferenceGeometry::fixed(1, 2).expect("fixed geometry");
+    let policy = NsgaReferenceGeometryPolicy {
+        max_directions: 3,
+        cover_trigger: 0.0,
+    };
+    let a = vec![vec![1.0, 3.0], vec![3.0, 1.0], vec![1.0, 1.0]];
+    let b = vec![vec![30.0, 10.0], vec![10.0, 30.0], vec![10.0, 10.0]];
+    let mut reversed = b.clone();
+    reversed.reverse();
+    assert_eq!(
+        geometry.assess(&a).unwrap(),
+        geometry.assess(&reversed).unwrap()
+    );
+    assert_eq!(
+        geometry.adapt(&a, policy).unwrap().geometry,
+        geometry.adapt(&reversed, policy).unwrap().geometry,
+        "canonical candidate selection is independent of enumeration and scale"
+    );
+    let mut duplicated = a.clone();
+    duplicated.push(a[2].clone());
+    assert_eq!(
+        geometry.assess(&a).unwrap(),
+        geometry.assess(&duplicated).unwrap()
+    );
+    assert_eq!(
+        geometry.adapt(&a, policy).unwrap().geometry,
+        geometry.adapt(&duplicated, policy).unwrap().geometry,
+        "duplicate observations cannot mint duplicate directions"
+    );
+    with_reference_cx(false, Budget::INFINITE, |cx| {
+        let left = geometry
+            .prepare_adaptation(&a, policy, cx)
+            .unwrap()
+            .complete(&geometry, cx)
+            .unwrap();
+        let right = geometry
+            .prepare_adaptation(&duplicated, policy, cx)
+            .unwrap()
+            .complete(&geometry, cx)
+            .unwrap();
+        assert_eq!(left.metrics, right.metrics);
+        assert_eq!(left.evidence, right.evidence);
+    });
+
+    let corrupt = NsgaReferenceGeometry {
+        schema_version: 1,
+        objectives: 2,
+        directions: vec![vec![0.0, 1.0], vec![0.0, 1.0]],
+        revision: 0,
+    };
+    assert!(matches!(
+        corrupt.assess(&a),
+        Err(NsgaError::ReferenceInvalid { .. })
+    ));
+    assert!(matches!(
+        geometry.assess(&[vec![f64::NAN, 1.0]]),
+        Err(NsgaError::ReferenceInvalid { .. })
+    ));
+    assert!(matches!(
+        geometry.assess(&[vec![-0.0, 1.0]]),
+        Err(NsgaError::ReferenceInvalid { .. })
+    ));
+    assert!(matches!(
+        geometry.adapt(
+            &a,
+            NsgaReferenceGeometryPolicy {
+                max_directions: 3,
+                cover_trigger: -0.0,
+            }
+        ),
+        Err(NsgaError::ReferenceInvalid { .. })
+    ));
+}
+
+#[test]
+fn admitted_geometry_replay_fork_stale_and_cancellation_do_not_publish() {
+    let base = NsgaReferenceGeometry::fixed(1, 2).expect("fixed geometry");
+    let front = vec![vec![0.5, 0.5]];
+    let policy = NsgaReferenceGeometryPolicy {
+        max_directions: 3,
+        cover_trigger: 0.0,
+    };
+    with_reference_cx(false, Budget::INFINITE, |cx| {
+        // Prepared admission is the replay checkpoint: it binds a complete
+        // snapshot and can resume on the exact geometry only.
+        let prepared = base.prepare_adaptation(&front, policy, cx).unwrap();
+        let snapshot = prepared.snapshot().clone();
+        let resumed = prepared.complete(&base, cx).expect("resume snapshot");
+        let evidence = resumed.evidence.expect("admitted evidence");
+        assert_eq!(evidence.snapshot, snapshot);
+        assert_eq!(evidence.budget.cost_charged, evidence.budget.planned_cost);
+        assert!(evidence.budget.refusal.is_none());
+
+        let fork_left = base.adapt(&front, policy).unwrap().geometry;
+        let fork_right = base.adapt(&[vec![0.25, 0.75]], policy).unwrap().geometry;
+        assert_eq!(base.revision, 0, "forks never mutate their parent");
+        assert_ne!(
+            fork_left, fork_right,
+            "front snapshots choose fork-local geometry"
+        );
+
+        let stale = base.prepare_adaptation(&front, policy, cx).unwrap();
+        assert!(matches!(
+            stale.complete(&fork_left, cx),
+            Err(NsgaError::ReferenceSnapshotStale)
+        ));
+
+        let distinct_policy = NsgaReferenceGeometryPolicy {
+            max_directions: 3,
+            cover_trigger: 0.25,
+        };
+        let same_front_other_policy = base
+            .prepare_adaptation(&front, distinct_policy, cx)
+            .unwrap();
+        assert_ne!(
+            snapshot,
+            same_front_other_policy.snapshot().clone(),
+            "policy bits are part of replay identity"
+        );
+    });
+    with_reference_cx(true, Budget::INFINITE, |cx| {
+        let refusal = base
+            .prepare_adaptation(&front, policy, cx)
+            .unwrap()
+            .complete(&base, cx);
+        assert!(matches!(
+            refusal,
+            Err(NsgaError::ReferenceAdmissionRefused { .. })
+        ));
+    });
+    with_reference_cx(
+        false,
+        Budget {
+            deadline: None,
+            poll_quota: u32::MAX,
+            cost_quota: Some(0),
+            priority: 0,
+        },
+        |cx| {
+            assert!(matches!(
+                base.prepare_adaptation(&front, policy, cx),
+                Err(NsgaError::ReferenceAdmissionRefused { .. })
+            ));
+        },
+    );
+    // One point against two directions performs three point-grid passes
+    // (six units) plus the checked three-unit append/order allowance.
+    for (quota, admitted) in [(8, false), (9, true)] {
+        with_reference_cx(
+            false,
+            Budget {
+                deadline: None,
+                poll_quota: u32::MAX,
+                cost_quota: Some(quota),
+                priority: 0,
+            },
+            |cx| {
+                let result = base
+                    .prepare_adaptation(&front, policy, cx)
+                    .and_then(|prepared| prepared.complete(&base, cx));
+                assert_eq!(result.is_ok(), admitted, "quota {quota}");
+                if let Ok(adaptation) = result {
+                    assert_eq!(adaptation.evidence.unwrap().budget.cost_charged, 9);
+                }
+            },
+        );
+    }
+
+    let gate = CancelGate::new_clock_free();
+    let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+    let clock = VirtualClock::new();
+    pool.scope(|arena| {
+        let cx = Cx::new(
+            &gate,
+            arena,
+            StreamKey {
+                seed: 0x7a24_0014,
+                kernel_id: 0x4e53_4741,
+                tile: 0,
+                iteration: 1,
+            },
+            Budget {
+                deadline: Some(Time::from_secs(1)),
+                poll_quota: u32::MAX,
+                cost_quota: None,
+                priority: 0,
+            },
+            ExecMode::Deterministic,
+        )
+        .with_time_source(&clock);
+        let prepared = base.prepare_adaptation(&front, policy, &cx).unwrap();
+        clock.advance(1_000_000_000);
+        assert!(matches!(
+            prepared.complete(&base, &cx),
+            Err(NsgaError::ReferenceAdmissionRefused { .. })
+        ));
+    });
+    assert!(
+        pool.stats().quiescent(),
+        "deadline refusal releases its context"
+    );
+}
+
+#[test]
+fn adaptive_reference_geometry_is_consumed_by_the_production_nsga_route() {
+    let initial_pop = vec![
+        ind(&[0.2], &[0.2, 0.8]),
+        ind(&[0.4], &[0.4, 0.6]),
+        ind(&[0.6], &[0.6, 0.4]),
+        ind(&[0.8], &[0.8, 0.2]),
+    ];
+    let cfg = base_config(51, 4, 1, 16);
+    let geometry = NsgaReferenceGeometry::fixed(1, 2).expect("fixed geometry");
+    let mut eval = |x: &[f64]| vec![x[0], 1.0 - x[0]];
+    let report = nsga3_run_with_reference_geometry(
+        &initial_pop,
+        &cfg,
+        geometry,
+        NsgaReferenceGeometryPolicy {
+            max_directions: 3,
+            cover_trigger: 0.0,
+        },
+        &mut eval,
+    )
+    .expect("production adaptive NSGA route");
+    assert_eq!(report.reference_geometry_initial.direction_bits.len(), 2);
+    assert_eq!(report.reference_geometry_final.direction_bits.len(), 3);
+    assert_eq!(report.reference_geometry_metrics.len(), report.generations);
+    assert_eq!(
+        report.reference_geometry_decisions.len(),
+        report.generations
+    );
+    assert!(matches!(
+        report.reference_geometry_decisions.as_slice(),
+        [NsgaReferenceGeometryDecision::Appended { .. }]
+    ));
+    assert_eq!(
+        report.reference_geometry_snapshots.len(),
+        report.generations
+    );
+    assert!(report.reference_geometry_evidence.is_empty());
+    assert_eq!(report.reference_geometry_policy.max_directions, 3);
+    assert_eq!(
+        report.reference_geometry_policy.cover_trigger_bits,
+        0.0f64.to_bits()
+    );
+
+    let no_generation = NsgaConfig {
+        max_generations: 0,
+        ..cfg.clone()
+    };
+    let boundary_policy = NsgaReferenceGeometryPolicy {
+        max_directions: 2,
+        cover_trigger: 0.25,
+    };
+    let zero_report = nsga3_run_with_reference_geometry(
+        &initial_pop,
+        &no_generation,
+        NsgaReferenceGeometry::fixed(1, 2).unwrap(),
+        boundary_policy,
+        &mut |x| vec![x[0], 1.0 - x[0]],
+    )
+    .expect("zero-generation receipt");
+    assert_eq!(zero_report.generations, 0);
+    assert_eq!(
+        zero_report.reference_geometry_policy,
+        boundary_policy.identity()
+    );
+    assert!(zero_report.reference_geometry_snapshots.is_empty());
+
+    with_reference_cx(false, Budget::INFINITE, |cx| {
+        let mut admitted_eval = |x: &[f64]| vec![x[0], 1.0 - x[0]];
+        let admitted = nsga3_run_with_reference_geometry_cancellable(
+            &initial_pop,
+            &cfg,
+            NsgaReferenceGeometry::fixed(1, 2).unwrap(),
+            NsgaReferenceGeometryPolicy {
+                max_directions: 3,
+                cover_trigger: 0.0,
+            },
+            &mut admitted_eval,
+            cx,
+        )
+        .expect("admitted production route");
+        assert_eq!(
+            admitted.reference_geometry_evidence.len(),
+            admitted.generations
+        );
+        assert_eq!(
+            admitted.reference_geometry_evidence[0].snapshot,
+            admitted.reference_geometry_snapshots[0]
+        );
+    });
+
+    with_reference_cx(true, Budget::INFINITE, |cx| {
+        let mut calls = 0usize;
+        let mut cancelled_eval = |_x: &[f64]| {
+            calls += 1;
+            vec![0.0, 0.0]
+        };
+        assert!(matches!(
+            nsga3_run_with_reference_geometry_cancellable(
+                &initial_pop,
+                &cfg,
+                NsgaReferenceGeometry::fixed(1, 2).unwrap(),
+                NsgaReferenceGeometryPolicy {
+                    max_directions: 3,
+                    cover_trigger: 0.0,
+                },
+                &mut cancelled_eval,
+                cx,
+            ),
+            Err(NsgaError::ReferenceAdmissionRefused { .. })
+        ));
+        assert_eq!(calls, 0, "cancelled run publishes neither report nor evals");
+    });
+}
+
+#[test]
+fn production_adaptation_snapshot_uses_only_rank_zero_geometry() {
+    let initial_pop = vec![
+        ind(&[0.1], &[0.1, 0.9]),
+        ind(&[0.9], &[0.9, 0.1]),
+        ind(&[0.2], &[0.2, 0.95]),
+        ind(&[0.95], &[0.95, 0.2]),
+    ];
+    let cfg = base_config(88, 4, 1, 16);
+    let report = nsga3_run_with_reference_geometry(
+        &initial_pop,
+        &cfg,
+        NsgaReferenceGeometry::fixed(1, 2).unwrap(),
+        NsgaReferenceGeometryPolicy {
+            max_directions: 2,
+            cover_trigger: 0.0,
+        },
+        &mut |_| vec![10.0, 10.0],
+    )
+    .expect("rank-zero production run");
+    assert_eq!(report.reference_geometry_snapshots[0].front_bits.len(), 2);
 }
 
 // ---------------------------------------------------------------------------
