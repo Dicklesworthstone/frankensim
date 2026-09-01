@@ -50,7 +50,8 @@ use fs_session::DecisionAssessment;
 pub mod engineering_report;
 
 pub use engineering_report::{
-    EngineeringReport, MaterialReportItem, NoClaimItem, QoiReportItem, ReportProvenance,
+    BudgetTermItem, EngineeringReport, LineageItem, MaterialReportItem, NoClaimItem,
+    QoiReportItem, ReportProvenance, RequirementReportItem, StageReceiptItem,
 };
 
 /// Estimator identity used by package declarations that retain demotion receipts.

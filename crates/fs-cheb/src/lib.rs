@@ -151,6 +151,56 @@ mod cheb1_bitwise_equality_tests {
         );
         assert_eq!(samples, [1.0, 1.0, 0.0, 0.0]);
     }
+
+    #[test]
+    fn one_ulp_normal_domain_rounds_affine_images_once() {
+        let a = 1.0;
+        let b = a.next_up();
+
+        assert_eq!(affine_from_reference(-0.5, a, b).to_bits(), a.to_bits());
+        assert_eq!(affine_from_reference(0.0, a, b).to_bits(), a.to_bits());
+        assert_eq!(affine_from_reference(0.5, a, b).to_bits(), b.to_bits());
+
+        let samples = sample_first_kind(
+            &|x| {
+                if x == a {
+                    0.0
+                } else if x == b {
+                    1.0
+                } else {
+                    f64::NAN
+                }
+            },
+            a,
+            b,
+            4,
+        );
+        assert_eq!(samples, [1.0, 1.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn adjacent_domains_round_midpoints_without_sign_bit_parity() {
+        let negative_a = -f64::from_bits(2);
+        let negative_b = -f64::from_bits(1);
+        assert_eq!(
+            affine_from_reference(0.0, negative_a, negative_b).to_bits(),
+            negative_a.to_bits()
+        );
+
+        let cross_zero_a = -f64::from_bits(1);
+        let cross_zero_b = 0.0;
+        assert_eq!(
+            affine_from_reference(0.0, cross_zero_a, cross_zero_b).to_bits(),
+            (-0.0).to_bits()
+        );
+
+        let signed_zero_a = -0.0;
+        let signed_zero_b = f64::from_bits(1);
+        assert_eq!(
+            affine_from_reference(0.0, signed_zero_a, signed_zero_b).to_bits(),
+            0.0f64.to_bits()
+        );
+    }
 }
 
 /// Relative plateau threshold for adaptive truncation. Sits ABOVE the
@@ -202,21 +252,18 @@ pub(crate) fn affine_from_reference(t: f64, a: f64, b: f64) -> f64 {
     } else {
         half_width(a, b)
     };
-    // A one-ulp-wide subnormal interval has no representable interior point:
-    // halving its finite width rounds to zero. First-kind sampling still needs
-    // a faithful rounded affine image rather than silently collapsing every
-    // node to `a`. Within the admitted reference interval, negative/positive
-    // coordinates round to their respective endpoints; the exact midpoint is
-    // the IEEE nearest-even endpoint selected by the low significand bit.
-    if radius == 0.0 && (-1.0..=1.0).contains(&t) {
+    // An adjacent-f64 domain has no representable interior point. Rounding the
+    // midpoint before adding `t * radius` would double-round every interior
+    // image to the even endpoint. Round the exact affine image once instead:
+    // negative/positive reference coordinates select their respective
+    // endpoints, and the exact midpoint uses the IEEE nearest-even endpoint.
+    if a.next_up() == b && (-1.0..=1.0).contains(&t) {
         return if t < 0.0 {
             a
         } else if t > 0.0 {
             b
-        } else if a.to_bits() & 1 == 0 {
-            a
         } else {
-            b
+            f64::midpoint(a, b)
         };
     }
     // This is the pre-existing sampling expression whenever b-a is finite,
@@ -578,7 +625,7 @@ impl Cheb1 {
     /// Evaluate by Clenshaw recurrence (fixed order, fused).
     #[must_use]
     pub fn eval(&self, x: f64) -> f64 {
-        let t = affine_to_reference(x, self.a, self.b);
+        let t = self.evaluation_reference_coordinate(x);
         fma::cheb_eval_dispatch(self, t)
     }
 
@@ -597,7 +644,7 @@ impl Cheb1 {
         x: f64,
         checkpoint: &mut impl FnMut() -> Result<(), E>,
     ) -> Result<f64, E> {
-        let t = affine_to_reference(x, self.a, self.b);
+        let t = self.evaluation_reference_coordinate(x);
         let (mut b1, mut b2) = (0.0f64, 0.0f64);
         for &c in self.coeffs.iter().skip(1).rev() {
             checkpoint()?;
@@ -606,6 +653,19 @@ impl Cheb1 {
             b1 = b0;
         }
         Ok(t.mul_add(b1, 0.5f64.mul_add(self.coeffs[0], -b2)))
+    }
+
+    /// Preserve Clenshaw's bit-level behavior for ordinary and nonfinite
+    /// coordinates. A constant has no dependence on t, so a finite physical
+    /// coordinate whose affine conversion alone overflowed can use t's sign
+    /// as a finite representative instead of producing inf * 0.
+    fn evaluation_reference_coordinate(&self, x: f64) -> f64 {
+        let t = affine_to_reference(x, self.a, self.b);
+        if self.coeffs.len() == 1 && x.is_finite() && t.is_infinite() {
+            t.signum()
+        } else {
+            t
+        }
     }
 
     /// The Clenshaw loop body, extracted so the x86 FMA-codegen capsule

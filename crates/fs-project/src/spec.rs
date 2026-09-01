@@ -567,6 +567,37 @@ pub enum ThermalBoundaryCondition {
         /// Reference-fluid absolute temperature (K).
         reference_temperature: QtyAny,
     },
+    /// Conjugate forced convection fed by the solved flow network (schema
+    /// v4): the coefficient is DERIVED from a named `fs-convection` card at
+    /// the branch's solved operating point, and the reference temperature is
+    /// the air's own marched temperature along the branch, iterated to a
+    /// solid/air fixed point. Nothing here is a coefficient or a reference
+    /// temperature; every field is a geometric or inlet declaration the
+    /// derivation needs and cannot invent.
+    AirflowConvection {
+        /// Flow-network branch (a declared vent region) whose solved volumetric
+        /// flow carries the air over this boundary. The leakage branch is not
+        /// a cooling path and refuses.
+        branch: String,
+        /// Stream-wise position of this boundary along `branch` (0 = first
+        /// segment the inlet air meets). Unique per branch.
+        order: u32,
+        /// Air temperature entering the branch (K); must lie inside the
+        /// operating envelope's ambient range.
+        inlet_temperature: QtyAny,
+        /// Channel hydraulic diameter over this boundary (m).
+        hydraulic_diameter: QtyAny,
+        /// Channel free-flow cross-section carrying the branch flow (m^2).
+        flow_area: QtyAny,
+        /// Stream-wise channel length over this boundary (m); with the
+        /// hydraulic diameter it fixes the developing-flow ratio the card
+        /// domain may require.
+        channel_length: QtyAny,
+        /// `fs-convection` card name (for example
+        /// `convection.circular-duct-laminar-cwt`). The card's own validity
+        /// domain gates the derivation at solve time.
+        correlation: String,
+    },
 }
 
 /// One thermal boundary, keyed by an existing geometry-assignment target.
@@ -1504,6 +1535,7 @@ impl ProjectSpec {
                     ));
                 }
                 let mut has_anchor = false;
+                let mut airflow_orders: BTreeSet<(String, u32)> = BTreeSet::new();
                 for boundary in &conduction.boundaries {
                     match &boundary.condition {
                         ThermalBoundaryCondition::FixedTemperature { temperature } => {
@@ -1587,6 +1619,93 @@ impl ProjectSpec {
                                         boundary.target, reference_temperature.value
                                     ),
                                     "declare a finite absolute temperature greater than zero",
+                                ));
+                            }
+                        }
+                        ThermalBoundaryCondition::AirflowConvection {
+                            branch,
+                            order,
+                            inlet_temperature,
+                            hydraulic_diameter,
+                            flow_area,
+                            channel_length,
+                            correlation,
+                        } => {
+                            has_anchor = true;
+                            let target = &boundary.target;
+                            if branch.is_empty()
+                                || !cooling.vents.iter().any(|vent| vent.region == *branch)
+                            {
+                                out.push(violation(
+                                    "project-conduction-airflow-branch",
+                                    format!(
+                                        "airflow convection on `{target}` names branch `{branch}`, which is not a declared vent region"
+                                    ),
+                                    "name a declared cooling vent region; the leakage branch is not a cooling path",
+                                ));
+                            }
+                            if !airflow_orders.insert((branch.clone(), *order)) {
+                                out.push(violation(
+                                    "project-conduction-airflow-order",
+                                    format!(
+                                        "airflow convection on `{target}` repeats stream-wise order {order} on branch `{branch}`"
+                                    ),
+                                    "give every boundary on one branch a distinct stream-wise order",
+                                ));
+                            }
+                            for (what, qty, dims) in [
+                                ("inlet temperature", inlet_temperature, dims::TEMPERATURE),
+                                ("hydraulic diameter", hydraulic_diameter, dims::LENGTH),
+                                ("flow area", flow_area, dims::AREA),
+                                ("channel length", channel_length, dims::LENGTH),
+                            ] {
+                                check_dims(
+                                    out,
+                                    "project-conduction-boundary-dims",
+                                    &format!("airflow convection {what} on `{target}`"),
+                                    *qty,
+                                    dims,
+                                );
+                                if !(qty.value.is_finite() && qty.value > 0.0) {
+                                    out.push(violation(
+                                        "project-conduction-airflow-range",
+                                        format!(
+                                            "airflow convection {what} on `{target}` is {}",
+                                            qty.value
+                                        ),
+                                        "declare a finite positive quantity",
+                                    ));
+                                }
+                            }
+                            if let Some(envelope) = &self.envelope
+                                && inlet_temperature.dims == dims::TEMPERATURE
+                                && envelope.ambient_lo.dims == dims::TEMPERATURE
+                                && envelope.ambient_hi.dims == dims::TEMPERATURE
+                                && inlet_temperature.value.is_finite()
+                                && !(envelope.ambient_lo.value..=envelope.ambient_hi.value)
+                                    .contains(&inlet_temperature.value)
+                            {
+                                out.push(violation(
+                                    "project-conduction-airflow-inlet-envelope",
+                                    format!(
+                                        "airflow convection inlet on `{target}` is {} K, outside the envelope ambient range [{}, {}] K",
+                                        inlet_temperature.value,
+                                        envelope.ambient_lo.value,
+                                        envelope.ambient_hi.value
+                                    ),
+                                    "declare an inlet temperature the operating envelope covers",
+                                ));
+                            }
+                            if !fs_convection::CorrelationId::ALL
+                                .iter()
+                                .any(|id| id.name() == correlation)
+                            {
+                                out.push(violation(
+                                    "project-conduction-airflow-correlation",
+                                    format!(
+                                        "airflow convection on `{target}` names correlation `{correlation}`, which is not an fs-convection card"
+                                    ),
+                                    "name one card from the fs-convection catalog by its `convection.*` id",
                                 ));
                             }
                         }

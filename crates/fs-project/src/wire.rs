@@ -619,6 +619,33 @@ fn lower_conduction(setup: &ConductionSetup) -> Result<Node, ProjectError> {
                 kw("reference-temperature"),
                 qty(*reference_temperature)?,
             ]),
+            ThermalBoundaryCondition::AirflowConvection {
+                branch,
+                order,
+                inlet_temperature,
+                hydraulic_diameter,
+                flow_area,
+                channel_length,
+                correlation,
+            } => list(vec![
+                sym("airflow-convection"),
+                kw("target"),
+                text(&boundary.target),
+                kw("branch"),
+                text(branch),
+                kw("order"),
+                int(i64::from(*order)),
+                kw("inlet-temperature"),
+                qty(*inlet_temperature)?,
+                kw("hydraulic-diameter"),
+                qty(*hydraulic_diameter)?,
+                kw("flow-area"),
+                qty(*flow_area)?,
+                kw("channel-length"),
+                qty(*channel_length)?,
+                kw("correlation"),
+                text(correlation),
+            ]),
         };
         boundaries.push(row);
     }
@@ -2388,10 +2415,90 @@ fn read_conduction(body: &[Node], out: &mut Vec<Violation>) -> Option<Conduction
                             },
                         });
                     }
+                    Some(("airflow-convection", b_body)) => {
+                        let b_pairs = read_pairs(
+                            b_body,
+                            "airflow-convection",
+                            &[
+                                "target",
+                                "branch",
+                                "order",
+                                "inlet-temperature",
+                                "hydraulic-diameter",
+                                "flow-area",
+                                "channel-length",
+                                "correlation",
+                            ],
+                            out,
+                        );
+                        let target = expect_str(
+                            field(&b_pairs, "target"),
+                            "conduction.boundary.target",
+                            out,
+                        );
+                        let branch = expect_str(
+                            field(&b_pairs, "branch"),
+                            "conduction.boundary.branch",
+                            out,
+                        );
+                        let order = match field(&b_pairs, "order") {
+                            Some(Node {
+                                kind: NodeKind::Int(v),
+                                ..
+                            }) if u32::try_from(*v).is_ok() => {
+                                u32::try_from(*v).unwrap_or_default()
+                            }
+                            _ => {
+                                out.push(Violation {
+                                    code: "project-malformed-clause",
+                                    what: "`conduction.boundary.order` expected a non-negative integer".to_string(),
+                                    fix: "spell the stream-wise order as a small non-negative integer".to_string(),
+                                });
+                                0
+                            }
+                        };
+                        let inlet_temperature = expect_qty(
+                            field(&b_pairs, "inlet-temperature"),
+                            "conduction.boundary.inlet-temperature",
+                            out,
+                        );
+                        let hydraulic_diameter = expect_qty(
+                            field(&b_pairs, "hydraulic-diameter"),
+                            "conduction.boundary.hydraulic-diameter",
+                            out,
+                        );
+                        let flow_area = expect_qty(
+                            field(&b_pairs, "flow-area"),
+                            "conduction.boundary.flow-area",
+                            out,
+                        );
+                        let channel_length = expect_qty(
+                            field(&b_pairs, "channel-length"),
+                            "conduction.boundary.channel-length",
+                            out,
+                        );
+                        let correlation = expect_str(
+                            field(&b_pairs, "correlation"),
+                            "conduction.boundary.correlation",
+                            out,
+                        );
+                        boundaries.push(ThermalBoundary {
+                            target,
+                            condition: ThermalBoundaryCondition::AirflowConvection {
+                                branch,
+                                order,
+                                inlet_temperature,
+                                hydraulic_diameter,
+                                flow_area,
+                                channel_length,
+                                correlation,
+                            },
+                        });
+                    }
                     _ => {
                         out.push(Violation {
                         code: "project-malformed-clause",
-                        what: "`conduction.boundaries` rows must be `(fixed-temperature ...)`, `(heat-flux ...)`, or `(convection ...)`".to_string(),
+                        what: "`conduction.boundaries` rows must be `(fixed-temperature ...)`, `(heat-flux ...)`, `(convection ...)`, or `(airflow-convection ...)`".to_string(),
                         fix: "declare one of the supported thermal boundary condition types".to_string(),
                     });
                     }

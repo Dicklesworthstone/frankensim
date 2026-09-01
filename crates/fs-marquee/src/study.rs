@@ -188,7 +188,7 @@ fn project_radii_to_area(radii: &mut [f64], config: &StudyConfig) {
         }
     }
 
-    for radius in radii {
+    for radius in radii.iter_mut() {
         *radius = (hi * *radius).clamp(config.r_min, config.r_max);
     }
     let projected_material_area =
@@ -315,14 +315,14 @@ impl IterRecord {
     pub fn jsonl_row(&self) -> String {
         format!(
             concat!(
-                "{\"iter\":{},\"compliance\":{:.17e},\"volume\":{:.17e},",
+                "{{\"iter\":{},\"compliance\":{:.17e},\"volume\":{:.17e},",
                 "\"gradient_norm\":{:.17e},\"dwr_estimate\":{:.17e},",
                 "\"cut_cell_count\":{},\"accepted_step\":{:.17e},",
                 "\"backtracks\":{},\"accepted_compliance\":{:.17e},",
                 "\"accepted_cert_geometry\":{:.17e},\"accepted_dwr_estimate\":{:.17e},",
                 "\"accepted_cert_algebraic\":{:.17e},\"accepted_solver_iters\":{},",
                 "\"accepted_cut_cell_count\":{},\"color_rank\":{},\"color_payload\":{},",
-                "\"accepted_color_rank\":{},\"accepted_color_payload\":{}}\\n"
+                "\"accepted_color_rank\":{},\"accepted_color_payload\":{}}}\n"
             ),
             self.iter,
             self.compliance,

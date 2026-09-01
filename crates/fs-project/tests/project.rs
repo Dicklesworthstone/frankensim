@@ -783,7 +783,7 @@ fn the_version_bump_machinery_is_proven_with_the_synthetic_migration() {
 }
 
 #[test]
-fn v2_envelopes_migrate_to_v3_without_inventing_conduction_inputs() {
+fn v2_envelopes_migrate_to_current_without_inventing_conduction_inputs() {
     let mut historical = reference_project();
     historical
         .cooling
@@ -827,7 +827,199 @@ fn v2_envelopes_migrate_to_v3_without_inventing_conduction_inputs() {
     );
     assert_eq!(migrated.receipt.source_version, 2);
     assert_eq!(migrated.receipt.target_version, FSIM_VERSION);
-    assert_eq!(migrated.receipt.rule.label(), "cooling-conduction-v3");
+    assert_eq!(
+        migrated.receipt.rule.label(),
+        "cooling-conduction-v3-then-airflow-convection-v4"
+    );
+}
+
+#[test]
+fn v3_envelopes_migrate_to_v4_without_inventing_airflow_convection() {
+    // A version-3 document names only fixed-temperature / heat-flux /
+    // convection laws; the v4 rewrite must not conjure an airflow branch,
+    // inlet, channel geometry, or correlation onto any of them.
+    let historical = reference_project();
+    let current = print_sexpr(&historical).expect("current project renders");
+    let v3 = current
+        .replacen(
+            &format!("(fsim-project :version {FSIM_VERSION}"),
+            "(fsim-project :version 3",
+            1,
+        )
+        .replacen(
+            &format!("(versions :schema {FSIM_VERSION}"),
+            "(versions :schema 3",
+            1,
+        );
+    assert_ne!(v3, current, "the version rewrite must bite");
+
+    let refusal = parse_sexpr(&v3).expect_err("v3 does not parse directly as v4");
+    assert_eq!(refusal.code, "fsim-unsupported-version");
+
+    let migrated = migrate_envelope(&v3, 3).expect("registered v3 rule migrates");
+    assert_eq!(migrated.decoded.canonical, current);
+    assert_eq!(migrated.decoded.spec, historical);
+    let conduction = migrated
+        .decoded
+        .spec
+        .cooling
+        .as_ref()
+        .and_then(|cooling| cooling.conduction.as_ref())
+        .expect("the reference conduction setup survives");
+    assert!(
+        conduction.boundaries.iter().all(|boundary| !matches!(
+            boundary.condition,
+            ThermalBoundaryCondition::AirflowConvection { .. }
+        )),
+        "migration must not fabricate an airflow-convection law"
+    );
+    assert!(
+        migrated
+            .receipt
+            .verifies(v3.as_bytes(), migrated.decoded.canonical.as_bytes())
+    );
+    assert_eq!(migrated.receipt.source_version, 3);
+    assert_eq!(migrated.receipt.target_version, FSIM_VERSION);
+    assert_eq!(
+        migrated.receipt.rule.label(),
+        "conduction-airflow-convection-v4"
+    );
+}
+
+/// One admissible airflow-convection law on the reference project's vent.
+fn airflow_convection_law(order: u32) -> ThermalBoundary {
+    ThermalBoundary {
+        target: "sink-base".to_string(),
+        condition: ThermalBoundaryCondition::AirflowConvection {
+            branch: "sink-base".to_string(),
+            order,
+            inlet_temperature: kelvin(300.15),
+            hydraulic_diameter: QtyAny::new(0.004, fs_project::spec::dims::LENGTH),
+            flow_area: QtyAny::new(8.0e-4, fs_project::spec::dims::AREA),
+            channel_length: QtyAny::new(0.05, fs_project::spec::dims::LENGTH),
+            correlation: "convection.circular-duct-laminar-cwt".to_string(),
+        },
+    }
+}
+
+fn with_airflow_laws(laws: Vec<ThermalBoundary>) -> ProjectSpec {
+    let mut spec = reference_project();
+    let conduction = spec
+        .cooling
+        .as_mut()
+        .and_then(|cooling| cooling.conduction.as_mut())
+        .expect("reference conduction");
+    // Replace the fixed-temperature anchor on the vent region with the
+    // derived law so the target set stays disjoint.
+    conduction
+        .boundaries
+        .retain(|boundary| boundary.target != "sink-base");
+    conduction.boundaries.extend(laws);
+    spec
+}
+
+#[test]
+fn airflow_convection_law_round_trips_and_validates_clean() {
+    let spec = with_airflow_laws(vec![airflow_convection_law(0)]);
+    assert!(spec.validate().is_empty(), "{:?}", spec.validate());
+    let rendered = print_sexpr(&spec).expect("v4 law renders");
+    assert!(rendered.contains("(airflow-convection :target \"sink-base\" :branch \"sink-base\" :order 0 :inlet-temperature 300.15K"));
+    assert!(rendered.contains(":correlation \"convection.circular-duct-laminar-cwt\")"));
+    let decoded = parse_sexpr(&rendered).expect("v4 law parses");
+    assert_eq!(decoded.spec, spec, "wire round trip must be exact");
+    assert_eq!(
+        decoded.canonical, rendered,
+        "the writer output is canonical"
+    );
+    assert!(decoded.spec.validate().is_empty());
+}
+
+#[test]
+fn airflow_convection_law_hostile_declarations_refuse_by_name() {
+    let codes = |spec: &ProjectSpec| {
+        spec.validate()
+            .into_iter()
+            .map(|finding| finding.code)
+            .collect::<Vec<_>>()
+    };
+    // A branch that is not a declared vent region.
+    let mut unknown_branch = airflow_convection_law(0);
+    if let ThermalBoundaryCondition::AirflowConvection { branch, .. } =
+        &mut unknown_branch.condition
+    {
+        *branch = "leakage".to_string();
+    }
+    assert!(
+        codes(&with_airflow_laws(vec![unknown_branch]))
+            .contains(&"project-conduction-airflow-branch"),
+    );
+    // Two laws on one branch sharing a stream-wise order.
+    let mut second = airflow_convection_law(0);
+    second.target = "cpu-sink-tim".to_string();
+    let duplicate = with_airflow_laws(vec![airflow_convection_law(0), second]);
+    assert!(codes(&duplicate).contains(&"project-conduction-airflow-order"));
+    // Distinct orders on one branch are admissible.
+    let mut second_ok = airflow_convection_law(1);
+    second_ok.target = "cpu-sink-tim".to_string();
+    let chained = with_airflow_laws(vec![airflow_convection_law(0), second_ok]);
+    assert!(
+        !codes(&chained)
+            .iter()
+            .any(|code| code.starts_with("project-conduction-airflow")),
+        "{:?}",
+        codes(&chained)
+    );
+    // An inlet outside the envelope's ambient range.
+    let mut hot_inlet = airflow_convection_law(0);
+    if let ThermalBoundaryCondition::AirflowConvection {
+        inlet_temperature, ..
+    } = &mut hot_inlet.condition
+    {
+        *inlet_temperature = kelvin(350.0);
+    }
+    assert!(
+        codes(&with_airflow_laws(vec![hot_inlet]))
+            .contains(&"project-conduction-airflow-inlet-envelope"),
+    );
+    // A correlation id that is not an fs-convection card.
+    let mut unknown_card = airflow_convection_law(0);
+    if let ThermalBoundaryCondition::AirflowConvection { correlation, .. } =
+        &mut unknown_card.condition
+    {
+        *correlation = "convection.made-up".to_string();
+    }
+    assert!(
+        codes(&with_airflow_laws(vec![unknown_card]))
+            .contains(&"project-conduction-airflow-correlation"),
+    );
+    // Non-positive channel geometry and a wrong dimension.
+    let mut flat = airflow_convection_law(0);
+    if let ThermalBoundaryCondition::AirflowConvection {
+        flow_area,
+        hydraulic_diameter,
+        ..
+    } = &mut flat.condition
+    {
+        *flow_area = QtyAny::new(0.0, fs_project::spec::dims::AREA);
+        *hydraulic_diameter = QtyAny::new(0.004, fs_project::spec::dims::AREA);
+    }
+    let flat_codes = codes(&with_airflow_laws(vec![flat]));
+    assert!(flat_codes.contains(&"project-conduction-airflow-range"));
+    assert!(flat_codes.contains(&"project-conduction-boundary-dims"));
+    // The wire refuses a malformed stream-wise order.
+    let rendered =
+        print_sexpr(&with_airflow_laws(vec![airflow_convection_law(0)])).expect("renders");
+    let negative = rendered.replacen(":order 0", ":order -1", 1);
+    assert_ne!(negative, rendered);
+    let decoded = parse_sexpr_lenient(&negative).expect("structurally parses");
+    assert!(
+        decoded
+            .spec
+            .validate()
+            .iter()
+            .chain(decoded.recognition.iter())
+            .any(|finding| finding.code == "project-malformed-clause")
+    );
 }
 
 #[test]

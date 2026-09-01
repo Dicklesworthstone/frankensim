@@ -72,6 +72,74 @@ pub struct NoClaimItem {
     pub statement: String,
 }
 
+/// One sourced requirement evaluated against a QoI.
+///
+/// Every number is copied from the retained requirement evaluation; a
+/// renderer never derives a verdict of its own.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RequirementReportItem {
+    /// Requirement identity as the producer recorded it.
+    pub id: String,
+    /// QoI the requirement constrains.
+    pub qoi: String,
+    /// Region the requirement is bound to.
+    pub region: String,
+    /// Effective limit after the sourced safety factor.
+    pub effective_limit: f64,
+    /// Required margin declared by the requirement.
+    pub required_margin: f64,
+    /// Nominal achieved margin (limit minus nominal value).
+    pub nominal_margin: f64,
+    /// Unit shared by the three values above.
+    pub unit: String,
+    /// Producer-recorded outcome (`indeterminate`, `pass`, `fail`, ...).
+    pub outcome: String,
+}
+
+/// One term of the engineering uncertainty budget.
+///
+/// `value` is `None` when the producer recorded the term as NO-DATA; the
+/// renderer prints exactly that and never substitutes a zero.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BudgetTermItem {
+    /// QoI the term belongs to.
+    pub qoi: String,
+    /// Term kind (discretization, model-form, ...).
+    pub kind: String,
+    /// Producer-recorded state (`no-data`, `measured`, ...).
+    pub state: String,
+    /// Magnitude when measured.
+    pub value: Option<f64>,
+    /// Producer-recorded reason for the state.
+    pub reason: String,
+    /// Owner that must supply the term.
+    pub owner: String,
+}
+
+/// One retained stage receipt the report was projected from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StageReceiptItem {
+    /// Stage name.
+    pub stage: String,
+    /// Stage ordinal.
+    pub ordinal: u32,
+    /// Content hash (hex) of the retained receipt artifact. Ledger operation
+    /// ids are deliberately absent: they are ledger coordinates, not content,
+    /// and the report must be a pure function of the retained receipts.
+    pub receipt_hash: String,
+    /// Key/value summary copied from the receipt (never computed here).
+    pub summary: Vec<(String, String)>,
+}
+
+/// One lineage pointer (label plus content hash, hex).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LineageItem {
+    /// What the hash identifies.
+    pub label: String,
+    /// Content hash, hex.
+    pub hash: String,
+}
+
 /// Run metadata and Five Explicits.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReportProvenance {
@@ -112,6 +180,34 @@ pub struct EngineeringReport {
     pub no_claims: Vec<NoClaimItem>,
     /// Deterministic command to replay this exact run.
     pub replay_command: String,
+    /// Sourced requirement evaluations copied from the producer.
+    pub requirements: Vec<RequirementReportItem>,
+    /// Engineering uncertainty budget terms copied from the producer.
+    pub budget_terms: Vec<BudgetTermItem>,
+    /// Retained stage receipts this report was projected from.
+    pub stages: Vec<StageReceiptItem>,
+    /// Lineage pointers (project, solution, receipts) by content hash.
+    pub lineage: Vec<LineageItem>,
+}
+
+/// Render a possibly-unavailable magnitude for HTML: finite values print with
+/// four decimals, anything else prints the literal `NO-DATA`.
+fn html_num(value: f64) -> String {
+    if value.is_finite() {
+        format!("{value:.4}")
+    } else {
+        "NO-DATA".to_string()
+    }
+}
+
+/// Render a possibly-unavailable magnitude for JSON: finite values print
+/// with six decimals, anything else prints `null` (JSON has no NaN).
+fn json_num(value: f64) -> String {
+    if value.is_finite() {
+        format!("{value:.6}")
+    } else {
+        "null".to_string()
+    }
 }
 
 impl EngineeringReport {
@@ -136,6 +232,10 @@ impl EngineeringReport {
             materials: Vec::new(),
             no_claims: Vec::new(),
             replay_command: String::new(),
+            requirements: Vec::new(),
+            budget_terms: Vec::new(),
+            stages: Vec::new(),
+            lineage: Vec::new(),
         }
     }
 
@@ -143,6 +243,62 @@ impl EngineeringReport {
     #[must_use]
     pub fn with_qoi(mut self, item: QoiReportItem) -> Self {
         self.qois.push(item);
+        self
+    }
+
+    /// Replace the default provenance with the run's recorded Five Explicits.
+    #[must_use]
+    pub fn with_provenance(mut self, provenance: ReportProvenance) -> Self {
+        self.provenance = provenance;
+        self
+    }
+
+    /// Add a sourced requirement evaluation.
+    #[must_use]
+    pub fn with_requirement(mut self, item: RequirementReportItem) -> Self {
+        self.requirements.push(item);
+        self
+    }
+
+    /// Add one uncertainty budget term.
+    #[must_use]
+    pub fn with_budget_term(mut self, item: BudgetTermItem) -> Self {
+        self.budget_terms.push(item);
+        self
+    }
+
+    /// Add a retained stage receipt row.
+    #[must_use]
+    pub fn with_stage(mut self, item: StageReceiptItem) -> Self {
+        self.stages.push(item);
+        self
+    }
+
+    /// Add a lineage pointer.
+    #[must_use]
+    pub fn with_lineage(mut self, item: LineageItem) -> Self {
+        self.lineage.push(item);
+        self
+    }
+
+    /// Add a material provenance row.
+    #[must_use]
+    pub fn with_material(mut self, item: MaterialReportItem) -> Self {
+        self.materials.push(item);
+        self
+    }
+
+    /// Add a no-claim boundary.
+    #[must_use]
+    pub fn with_no_claim(mut self, item: NoClaimItem) -> Self {
+        self.no_claims.push(item);
+        self
+    }
+
+    /// Set the replay command.
+    #[must_use]
+    pub fn with_replay_command(mut self, command: impl Into<String>) -> Self {
+        self.replay_command = command.into();
         self
     }
 
@@ -245,19 +401,61 @@ impl EngineeringReport {
             };
             let _ = write!(
                 html,
-                "<tr><td><strong>{}</strong><br><small>{}</small></td><td>{:.4}</td><td>{}</td><td>{}</td><td>±{:.4}</td><td>±{:.4}</td><td>±{:.4}</td><td><strong>±{:.4}</strong></td></tr>\n",
+                "<tr><td><strong>{}</strong><br><small>{}</small></td><td>{}</td><td>{}</td><td>{}</td><td>±{}</td><td>±{}</td><td>±{}</td><td><strong>±{}</strong></td></tr>\n",
                 escape_html(&q.name),
                 escape_html(&q.description),
-                q.nominal_value,
+                html_num(q.nominal_value),
                 escape_html(&q.unit),
                 color_badge,
-                q.discretization_error,
-                q.parameter_uncertainty,
-                q.surrogate_error,
-                q.total_uncertainty_budget
+                html_num(q.discretization_error),
+                html_num(q.parameter_uncertainty),
+                html_num(q.surrogate_error),
+                html_num(q.total_uncertainty_budget)
             );
         }
         html.push_str("</table>\n");
+
+        // 2a. Requirements
+        if !self.requirements.is_empty() {
+            html.push_str("<h3>2a. Requirement Evaluations</h3>\n");
+            html.push_str("<table>\n<tr><th>QoI</th><th>Region</th><th>Effective Limit</th><th>Required Margin</th><th>Nominal Margin</th><th>Unit</th><th>Outcome</th><th>Requirement Identity</th></tr>\n");
+            for r in &self.requirements {
+                let _ = write!(
+                    html,
+                    "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td><code>{}</code></td><td><small><code>{}</code></small></td></tr>\n",
+                    escape_html(&r.qoi),
+                    escape_html(&r.region),
+                    html_num(r.effective_limit),
+                    html_num(r.required_margin),
+                    html_num(r.nominal_margin),
+                    escape_html(&r.unit),
+                    escape_html(&r.outcome),
+                    escape_html(&r.id)
+                );
+            }
+            html.push_str("</table>\n");
+        }
+
+        // 2b. Engineering uncertainty budget terms
+        if !self.budget_terms.is_empty() {
+            html.push_str("<h3>2b. Engineering Uncertainty Budget Terms</h3>\n");
+            html.push_str("<p><em>A term marked <code>no-data</code> has no measured magnitude; the report prints the producer's state and reason and invents nothing.</em></p>\n");
+            html.push_str("<table>\n<tr><th>QoI</th><th>Term</th><th>State</th><th>Magnitude</th><th>Reason</th><th>Owner</th></tr>\n");
+            for t in &self.budget_terms {
+                let magnitude = t.value.map_or_else(|| "NO-DATA".to_string(), html_num);
+                let _ = write!(
+                    html,
+                    "<tr><td>{}</td><td>{}</td><td><code>{}</code></td><td>{}</td><td>{}</td><td>{}</td></tr>\n",
+                    escape_html(&t.qoi),
+                    escape_html(&t.kind),
+                    escape_html(&t.state),
+                    magnitude,
+                    escape_html(&t.reason),
+                    escape_html(&t.owner)
+                );
+            }
+            html.push_str("</table>\n");
+        }
 
         // 3. Discretization Convergence Section
         if let Some(conv) = &self.convergence {
@@ -336,6 +534,50 @@ impl EngineeringReport {
                     escape_html(&m.specific_heat),
                     escape_html(&m.density),
                     escape_html(&m.source_pack)
+                );
+            }
+            html.push_str("</table>\n");
+        }
+
+        // 5b. Retained stage receipts
+        if !self.stages.is_empty() {
+            html.push_str("<h2>5b. Retained Stage Receipts</h2>\n");
+            html.push_str("<p><em>Every value in this report is projected from one of these ledger artifacts; the hashes are the audit trail.</em></p>\n");
+            html.push_str("<table>\n<tr><th>Ordinal</th><th>Stage</th><th>Receipt Hash</th><th>Summary (copied from the receipt)</th></tr>\n");
+            for s in &self.stages {
+                let mut summary = String::new();
+                for (index, (key, value)) in s.summary.iter().enumerate() {
+                    if index > 0 {
+                        summary.push_str("<br>");
+                    }
+                    let _ = write!(
+                        summary,
+                        "<code>{}</code> = {}",
+                        escape_html(key),
+                        escape_html(value)
+                    );
+                }
+                let _ = write!(
+                    html,
+                    "<tr><td>{}</td><td><strong>{}</strong></td><td><small><code>{}</code></small></td><td><small>{}</small></td></tr>\n",
+                    s.ordinal,
+                    escape_html(&s.stage),
+                    escape_html(&s.receipt_hash),
+                    summary
+                );
+            }
+            html.push_str("</table>\n");
+        }
+
+        // 5c. Lineage
+        if !self.lineage.is_empty() {
+            html.push_str("<h2>5c. Lineage</h2>\n<table>\n<tr><th>Artifact</th><th>Content Hash</th></tr>\n");
+            for l in &self.lineage {
+                let _ = write!(
+                    html,
+                    "<tr><td>{}</td><td><small><code>{}</code></small></td></tr>\n",
+                    escape_html(&l.label),
+                    escape_html(&l.hash)
                 );
             }
             html.push_str("</table>\n");
@@ -436,15 +678,119 @@ impl EngineeringReport {
             };
             let _ = write!(
                 json,
-                "    {{\"name\": \"{}\", \"value\": {:.6}, \"unit\": \"{}\", \"color\": \"{}\", \"discretization_error\": {:.6}, \"parameter_uncertainty\": {:.6}, \"surrogate_error\": {:.6}, \"total_budget\": {:.6}}}",
+                "    {{\"name\": \"{}\", \"value\": {}, \"unit\": \"{}\", \"color\": \"{}\", \"discretization_error\": {}, \"parameter_uncertainty\": {}, \"surrogate_error\": {}, \"total_budget\": {}, \"source_root\": \"{}\"}}",
                 escape_json(&q.name),
-                q.nominal_value,
+                json_num(q.nominal_value),
                 escape_json(&q.unit),
                 color_str,
-                q.discretization_error,
-                q.parameter_uncertainty,
-                q.surrogate_error,
-                q.total_uncertainty_budget
+                json_num(q.discretization_error),
+                json_num(q.parameter_uncertainty),
+                json_num(q.surrogate_error),
+                json_num(q.total_uncertainty_budget),
+                escape_json(&q.source_root)
+            );
+        }
+        json.push_str("\n  ],\n");
+
+        // Requirements
+        json.push_str("  \"requirements\": [\n");
+        for (i, r) in self.requirements.iter().enumerate() {
+            if i > 0 {
+                json.push_str(",\n");
+            }
+            let _ = write!(
+                json,
+                "    {{\"id\": \"{}\", \"qoi\": \"{}\", \"region\": \"{}\", \"effective_limit\": {}, \"required_margin\": {}, \"nominal_margin\": {}, \"unit\": \"{}\", \"outcome\": \"{}\"}}",
+                escape_json(&r.id),
+                escape_json(&r.qoi),
+                escape_json(&r.region),
+                json_num(r.effective_limit),
+                json_num(r.required_margin),
+                json_num(r.nominal_margin),
+                escape_json(&r.unit),
+                escape_json(&r.outcome)
+            );
+        }
+        json.push_str("\n  ],\n");
+
+        // Budget terms
+        json.push_str("  \"budget_terms\": [\n");
+        for (i, t) in self.budget_terms.iter().enumerate() {
+            if i > 0 {
+                json.push_str(",\n");
+            }
+            let value = t.value.map_or_else(|| "null".to_string(), json_num);
+            let _ = write!(
+                json,
+                "    {{\"qoi\": \"{}\", \"kind\": \"{}\", \"state\": \"{}\", \"value\": {}, \"reason\": \"{}\", \"owner\": \"{}\"}}",
+                escape_json(&t.qoi),
+                escape_json(&t.kind),
+                escape_json(&t.state),
+                value,
+                escape_json(&t.reason),
+                escape_json(&t.owner)
+            );
+        }
+        json.push_str("\n  ],\n");
+
+        // Stage receipts
+        json.push_str("  \"stages\": [\n");
+        for (i, s) in self.stages.iter().enumerate() {
+            if i > 0 {
+                json.push_str(",\n");
+            }
+            let _ = write!(
+                json,
+                "    {{\"ordinal\": {}, \"stage\": \"{}\", \"receipt_hash\": \"{}\", \"summary\": {{",
+                s.ordinal,
+                escape_json(&s.stage),
+                escape_json(&s.receipt_hash)
+            );
+            for (index, (key, value)) in s.summary.iter().enumerate() {
+                if index > 0 {
+                    json.push_str(", ");
+                }
+                let _ = write!(
+                    json,
+                    "\"{}\": \"{}\"",
+                    escape_json(key),
+                    escape_json(value)
+                );
+            }
+            json.push_str("}}");
+        }
+        json.push_str("\n  ],\n");
+
+        // Lineage
+        json.push_str("  \"lineage\": [\n");
+        for (i, l) in self.lineage.iter().enumerate() {
+            if i > 0 {
+                json.push_str(",\n");
+            }
+            let _ = write!(
+                json,
+                "    {{\"label\": \"{}\", \"hash\": \"{}\"}}",
+                escape_json(&l.label),
+                escape_json(&l.hash)
+            );
+        }
+        json.push_str("\n  ],\n");
+
+        // Materials
+        json.push_str("  \"materials\": [\n");
+        for (i, m) in self.materials.iter().enumerate() {
+            if i > 0 {
+                json.push_str(",\n");
+            }
+            let _ = write!(
+                json,
+                "    {{\"region\": \"{}\", \"card\": \"{}\", \"thermal_conductivity\": \"{}\", \"specific_heat\": \"{}\", \"density\": \"{}\", \"pack\": \"{}\"}}",
+                escape_json(&m.region_name),
+                escape_json(&m.material_card_id),
+                escape_json(&m.thermal_conductivity),
+                escape_json(&m.specific_heat),
+                escape_json(&m.density),
+                escape_json(&m.source_pack)
             );
         }
         json.push_str("\n  ],\n");
@@ -507,7 +853,12 @@ impl EngineeringReport {
                 escape_json(&nc.statement)
             );
         }
-        json.push_str("\n  ]\n}\n");
+        json.push_str("\n  ],\n");
+        let _ = write!(
+            json,
+            "  \"replay_command\": \"{}\"\n}}\n",
+            escape_json(&self.replay_command)
+        );
 
         json
     }

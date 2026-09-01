@@ -23,11 +23,15 @@ pub mod wire;
 /// The current `.fsim` schema version. Readers admit exactly this version;
 /// older envelopes must pass through [`migration::migrate_envelope`].
 ///
-/// Version 3 adds the optional `(conduction ...)` cooling subsection (bead
-/// frankensim-s93ej.3). Version-2 documents are valid version-3 documents
-/// unchanged, and the migration is a receipted envelope rewrite. Version 2
-/// similarly added the optional `(fan-system ...)` subsection (bead frn2i.1).
-pub const FSIM_VERSION: u32 = 3;
+/// Version 4 adds the optional `(airflow-convection ...)` conduction boundary
+/// law (bead frankensim-s93ej.3, conjugate exchange): a boundary whose
+/// coefficient and reference temperature are DERIVED at solve time from the
+/// solved flow-network branch and a named `fs-convection` card. Version-3
+/// documents carry no such law and are valid version-4 documents unchanged,
+/// so the migration is a receipted envelope rewrite. Version 3 added the
+/// optional `(conduction ...)` cooling subsection and version 2 the optional
+/// `(fan-system ...)` subsection (bead frn2i.1), under the same rule.
+pub const FSIM_VERSION: u32 = 4;
 
 pub use assignment::{
     ConductionInterfaceLimits, ConductionInterfaceResolution, ConductionSourceFace,

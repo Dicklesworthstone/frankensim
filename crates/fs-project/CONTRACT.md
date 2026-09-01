@@ -72,10 +72,18 @@ bindings; it runs no solves and admits no scenarios itself.
   of either is a declaration the flow-network stage must refuse, never
   repair). Cooling may also carry an optional `ConductionSetup`: one explicit
   interior length-quantity seed per volumetric region, typed fixed-temperature,
-  outward-heat-flux, or convection boundary laws keyed by assignment target,
-  and an explicit adiabatic-remainder decision. Its absence remains loadable
-  but is a typed execution gap; this layer never invents a seed or boundary
-  condition. The remaining sections are `Envelope`, sourced `ThermalLimit`
+  outward-heat-flux, convection, or airflow-convection boundary laws keyed by
+  assignment target, and an explicit adiabatic-remainder decision. Its absence
+  remains loadable but is a typed execution gap; this layer never invents a
+  seed or boundary condition. An `AirflowConvection` law (schema v4) declares
+  no coefficient and no reference temperature: it names a declared vent
+  branch, a per-branch unique stream-wise order, an inlet temperature inside
+  the envelope's ambient range, positive channel hydraulic diameter, flow
+  area, and length, and an `fs-convection` card id that must exist in that
+  crate's catalog. Structural validation checks exactly those facts
+  (`project-conduction-airflow-*` findings); deriving the coefficient, marching
+  the air, and closing the solid/air fixed point are solve-stage authority,
+  not this layer's. The remaining sections are `Envelope`, sourced `ThermalLimit`
   requirements
   with explicit QoI, direction, effective limit, guard margin, severity,
   versioned base authority, and an already-applied `SafetyFactorPolicy` with

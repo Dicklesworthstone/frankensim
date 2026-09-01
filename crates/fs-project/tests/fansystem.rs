@@ -510,7 +510,7 @@ mod wire_surface {
     }
 
     #[test]
-    fn v1_envelopes_migrate_to_v3_with_a_receipted_rewrite() {
+    fn v1_envelopes_migrate_to_current_with_a_receipted_rewrite() {
         let mut v1_spec = spec_with_fan_system();
         v1_spec.cooling.as_mut().expect("cooling").fan_system = None;
         let current = print_sexpr(&v1_spec).expect("current schema renders");
@@ -527,7 +527,8 @@ mod wire_surface {
             );
         assert_ne!(v1, current, "the version rewrite must bite");
 
-        let refusal = parse_sexpr(&v1).expect_err("v1 must not parse at v3 directly");
+        let refusal =
+            parse_sexpr(&v1).expect_err("v1 must not parse at the current version directly");
         assert_eq!(refusal.code, "fsim-unsupported-version");
 
         let migrated = migrate_envelope(&v1, 1).expect("registered v1 rule migrates");
@@ -541,7 +542,7 @@ mod wire_surface {
         assert_eq!(migrated.receipt.target_version, fs_project::FSIM_VERSION);
         assert_eq!(
             migrated.receipt.rule.label(),
-            "cooling-fan-system-v2-then-conduction-v3"
+            "cooling-fan-system-v2-then-conduction-v3-then-airflow-convection-v4"
         );
         let cooling = migrated.decoded.spec.cooling.expect("cooling survives");
         assert!(

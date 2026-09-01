@@ -22,17 +22,25 @@ pub enum MigrationRule {
     /// only the envelope version is rewritten. Registered to prove the
     /// machinery; no released artifact ever carried version 0.
     SyntheticV0EnvelopeRewrite,
-    /// Version 1 to current: schema v2 adds optional `(fan-system ...)` and
-    /// schema v3 adds optional `(conduction ...)`. A version-1 document is
-    /// valid through both accretions unchanged, so this composite rule rewrites
-    /// only the envelope/schema declarations and records both semantic steps;
-    /// no fan system, seed, or boundary law is invented.
-    CoolingFanSystemV2ThenConductionV3,
-    /// Version 2 to 3: the cooling section gains the optional
-    /// `(conduction ...)` subsection (bead frankensim-s93ej.3). Existing
+    /// Version 1 to current: schema v2 adds optional `(fan-system ...)`,
+    /// schema v3 adds optional `(conduction ...)`, and schema v4 adds the
+    /// optional `(airflow-convection ...)` boundary law. A version-1 document
+    /// is valid through every accretion unchanged, so this composite rule
+    /// rewrites only the envelope/schema declarations and records the
+    /// semantic steps; no fan system, seed, boundary law, or channel geometry
+    /// is invented.
+    CoolingFanSystemV2ThenConductionV3ThenAirflowConvectionV4,
+    /// Version 2 to current: the cooling section gained the optional
+    /// `(conduction ...)` subsection at v3 (bead frankensim-s93ej.3) and the
+    /// optional `(airflow-convection ...)` boundary law at v4. Existing
     /// version-2 documents carry no implicit conduction inputs and remain
     /// semantically unchanged after the receipted envelope rewrite.
-    CoolingConductionV3,
+    CoolingConductionV3ThenAirflowConvectionV4,
+    /// Version 3 to 4: the conduction boundary grammar gains the optional
+    /// `(airflow-convection ...)` law (bead frankensim-s93ej.3, conjugate
+    /// exchange). A version-3 document names no such boundary, so no branch,
+    /// inlet, channel geometry, or correlation is invented by the rewrite.
+    ConductionAirflowConvectionV4,
 }
 
 impl MigrationRule {
@@ -41,10 +49,13 @@ impl MigrationRule {
     pub const fn label(self) -> &'static str {
         match self {
             MigrationRule::SyntheticV0EnvelopeRewrite => "synthetic-v0-envelope-rewrite",
-            MigrationRule::CoolingFanSystemV2ThenConductionV3 => {
-                "cooling-fan-system-v2-then-conduction-v3"
+            MigrationRule::CoolingFanSystemV2ThenConductionV3ThenAirflowConvectionV4 => {
+                "cooling-fan-system-v2-then-conduction-v3-then-airflow-convection-v4"
             }
-            MigrationRule::CoolingConductionV3 => "cooling-conduction-v3",
+            MigrationRule::CoolingConductionV3ThenAirflowConvectionV4 => {
+                "cooling-conduction-v3-then-airflow-convection-v4"
+            }
+            MigrationRule::ConductionAirflowConvectionV4 => "conduction-airflow-convection-v4",
         }
     }
 
@@ -53,8 +64,9 @@ impl MigrationRule {
     pub const fn source_version(self) -> u32 {
         match self {
             MigrationRule::SyntheticV0EnvelopeRewrite => 0,
-            MigrationRule::CoolingFanSystemV2ThenConductionV3 => 1,
-            MigrationRule::CoolingConductionV3 => 2,
+            MigrationRule::CoolingFanSystemV2ThenConductionV3ThenAirflowConvectionV4 => 1,
+            MigrationRule::CoolingConductionV3ThenAirflowConvectionV4 => 2,
+            MigrationRule::ConductionAirflowConvectionV4 => 3,
         }
     }
 }
@@ -155,8 +167,9 @@ pub fn migrate_envelope(
 ) -> Result<MigratedProject, ProjectError> {
     let rule = match declared_version {
         0 => MigrationRule::SyntheticV0EnvelopeRewrite,
-        1 => MigrationRule::CoolingFanSystemV2ThenConductionV3,
-        2 => MigrationRule::CoolingConductionV3,
+        1 => MigrationRule::CoolingFanSystemV2ThenConductionV3ThenAirflowConvectionV4,
+        2 => MigrationRule::CoolingConductionV3ThenAirflowConvectionV4,
+        3 => MigrationRule::ConductionAirflowConvectionV4,
         v if v == FSIM_VERSION => {
             return Err(ProjectError {
                 code: "fsim-migration-not-needed",
@@ -188,7 +201,9 @@ pub fn migrate_envelope(
     let envelope_rewritten = format!("{new_prefix}{rest}");
     let migrated = match rule {
         MigrationRule::SyntheticV0EnvelopeRewrite => envelope_rewritten,
-        MigrationRule::CoolingFanSystemV2ThenConductionV3 | MigrationRule::CoolingConductionV3 => {
+        MigrationRule::CoolingFanSystemV2ThenConductionV3ThenAirflowConvectionV4
+        | MigrationRule::CoolingConductionV3ThenAirflowConvectionV4
+        | MigrationRule::ConductionAirflowConvectionV4 => {
             // The document's internal `versions.schema` field must move with
             // the envelope: the validator admits only the current schema.
             // The rewrite is exactly these two byte strings, never a

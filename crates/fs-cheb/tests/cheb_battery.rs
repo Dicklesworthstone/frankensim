@@ -16,6 +16,29 @@ fn extreme_finite_domains_do_not_overflow_the_affine_map() {
     for x in [a, 0.0, b] {
         assert_eq!(constant.eval(x), 1.0, "constant failed at {x}");
     }
+    // A finite extrapolated constant remains finite even when the affine
+    // coordinate itself overflows. Constants do not need that coordinate.
+    let one_sided_constant = Cheb1::from_coeffs(-f64::MAX, 0.0, vec![2.0]);
+    assert_eq!(one_sided_constant.eval(f64::MAX), 1.0);
+    let mut polls = 0;
+    assert_eq!(
+        one_sided_constant
+            .eval_with_checkpoint(f64::MAX, &mut || -> Result<(), &str> {
+                polls += 1;
+                Err("constant evaluation has no checkpoint")
+            })
+            .unwrap(),
+        1.0
+    );
+    assert_eq!(polls, 0);
+    assert!(one_sided_constant.eval(f64::INFINITY).is_nan());
+
+    let signed_zero_constant = Cheb1::from_coeffs(-1.0, 1.0, vec![-0.0]);
+    assert_eq!(
+        signed_zero_constant.eval(-0.5).to_bits(),
+        (-0.0f64).to_bits()
+    );
+    assert_eq!(signed_zero_constant.eval(0.5).to_bits(), 0.0f64.to_bits());
 
     let reference_linear = Cheb1::from_coeffs(a, b, vec![0.0, 1.0]);
     assert_eq!(reference_linear.eval(a), -1.0);

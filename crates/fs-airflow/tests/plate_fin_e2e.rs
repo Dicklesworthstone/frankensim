@@ -686,22 +686,27 @@ fn solved_fan_rates_drive_a_declared_plate_fin_thermal_chain() {
 
     for run in &runs {
         // A monotonic bulk temperature only proves a direction. The stated
-        // one-way model is stronger: its midpoint bulk temperature implies an
-        // outlet whose enthalpy rise carries exactly the declared base power.
-        // This intentionally validates the disclosed closure, not a conjugate
-        // fluid solve.
+        // one-way model supplies an air-side gain from its midpoint bulk
+        // temperature. Compare that gain to the conduction solver's independent
+        // Robin receipt, rather than deriving both sides from declared source.
         let implied_outlet_temperature_k = 2.0 * run.mean_bulk_temperature_k - INLET_TEMPERATURE_K;
-        let implied_air_power_w = AIR_DENSITY_KG_M3
+        let implied_air_gain_w = AIR_DENSITY_KG_M3
             * AIR_SPECIFIC_HEAT_J_KG_K
             * run.branch_flow_m3_s
             * (implied_outlet_temperature_k - INLET_TEMPERATURE_K);
-        let one_way_closure_error =
-            (implied_air_power_w - declared_base_power_w()).abs() / declared_base_power_w();
+        let robin_total_w = run.solution.report.energy.robin_out_w;
         assert!(
-            one_way_closure_error < 1.0e-12,
-            "declared one-way bulk-air closure carries {implied_air_power_w} W, \
-             expected {} W (relative error {one_way_closure_error})",
-            declared_base_power_w()
+            implied_air_gain_w > 0.0 && robin_total_w > 0.0,
+            "air gain and Robin receipt are W positive into air / leaving solid: \
+             air={implied_air_gain_w} W, robin={robin_total_w} W"
+        );
+        let air_solid_residual_w = (implied_air_gain_w - robin_total_w).abs();
+        let air_solid_bound_w = 1.0e-10 + 1.0e-8 * robin_total_w.abs();
+        assert!(
+            air_solid_residual_w <= air_solid_bound_w,
+            "one-way air gain must match the solver Robin receipt: air={implied_air_gain_w} W, \
+             robin={robin_total_w} W, residual={air_solid_residual_w} W, \
+             bound={air_solid_bound_w} W"
         );
 
         assert_eq!(run.solution.report.interface_fluxes.len(), FIN_COUNT);
@@ -771,7 +776,6 @@ fn solved_fan_rates_drive_a_declared_plate_fin_thermal_chain() {
         // boundary quadrature and therefore do not independently validate
         // the convection physics.
         let attributed_robin_w: f64 = rows.iter().map(|row| row.heat_rate_w).sum();
-        let robin_total_w = run.solution.report.energy.robin_out_w;
         let attribution_error = (attributed_robin_w - robin_total_w).abs() / robin_total_w.abs();
         assert!(
             attribution_error < 1.0e-12,
