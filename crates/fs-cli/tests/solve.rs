@@ -930,7 +930,7 @@ fn solve_publication_counts(ledger: &Ledger) -> SolvePublicationCounts {
 #[test]
 fn g0_run_identity_is_deterministic_and_input_sensitive() {
     assert_eq!(
-        SOLVE_DRIVER_VERSION, 9,
+        SOLVE_DRIVER_VERSION, 10,
         "authority-semantic changes must deliberately advance this identity-bearing version"
     );
 
@@ -3261,7 +3261,7 @@ fn g0_flow_network_stage_retains_an_interval_certified_operating_point_receipt()
 /// a labeled volume, the card-backed conductivity operator receives 5 W, and
 /// the declared full-surface Robin law removes that heat. The declared region
 /// maximum then executes as the sixth producer with eight explicit NO-DATA
-/// terms; report is the next typed gap.
+/// terms; report projects the retained producer prefix as the seventh stage.
 #[test]
 fn g1_conduction_stage_executes_and_retains_field_and_balance_evidence() {
     let bytes = tetra_stl();
@@ -3311,11 +3311,15 @@ fn g1_conduction_stage_executes_and_retains_field_and_balance_evidence() {
 
     let run = outcome.run.clone();
     let receipts = stage_receipt_hashes(&ledger, &run);
-    assert_eq!(receipts.len(), 7, "QoI and report retained the sixth and seventh receipts");
+    assert_eq!(
+        receipts.len(),
+        7,
+        "QoI and report retained the sixth and seventh receipts"
+    );
     let receipt =
         String::from_utf8(artifact_bytes(&ledger, &receipts[4])).expect("receipt is utf-8");
     assert_balanced_json(&receipt);
-    assert!(receipt.contains("frankensim.cli.solve-conduction-receipt.v2"));
+    assert!(receipt.contains("frankensim.cli.solve-conduction-receipt.v3"));
     assert!(receipt.contains("\"interfaces\":{\"pair_count\":0"));
     assert!(receipt.contains("\"elements\":1"));
     assert_eq!(receipt_number_field(&receipt, "source_w"), 5.0);
@@ -3396,9 +3400,18 @@ fn g1_conduction_stage_executes_and_retains_field_and_balance_evidence() {
     .expect("retained html is utf-8");
     assert!(html.contains(&run), "the report names its run");
     assert!(html.contains("temperature-max"));
-    assert!(html.contains("NO-DATA"), "unmeasured terms print as NO-DATA: {html}");
-    assert!(html.contains("no-data"), "the budget term states are copied verbatim");
-    assert!(html.contains(&receipts[4]), "the report cites the conduction receipt hash");
+    assert!(
+        html.contains("NO-DATA"),
+        "unmeasured terms print as NO-DATA: {html}"
+    );
+    assert!(
+        html.contains("no-data"),
+        "the budget term states are copied verbatim"
+    );
+    assert!(
+        html.contains(&receipts[4]),
+        "the report cites the conduction receipt hash"
+    );
     assert!(!html.contains("342.15"), "no fabricated literal survives");
     let twin = String::from_utf8(artifact_bytes(
         &ledger,
@@ -3420,7 +3433,10 @@ fn g1_conduction_stage_executes_and_retains_field_and_balance_evidence() {
     let package = fs_package::EvidencePackage::from_json(&package_text)
         .expect("the retained package is a format-9 package");
     let check = fs_checker::check(&package);
-    assert!(check.passed(), "the solver-free checker accepts the retained package");
+    assert!(
+        check.passed(),
+        "the solver-free checker accepts the retained package"
+    );
     assert_eq!(
         check.merkle_root().to_hex(),
         receipt_str_field(&report_receipt, "package_root"),
@@ -3475,12 +3491,163 @@ fn g1_conduction_stage_executes_and_retains_field_and_balance_evidence() {
         artifact_bytes(&ledger, &receipts[5]),
         "resume before QoI reproduces the uninterrupted candidate receipt byte-for-byte"
     );
+
+    // G3: a completed run is not resumable merely because its report edge and
+    // descriptor still name the expected content identity. Corrupt retained
+    // bytes in place without changing their length; completed-run admission
+    // must stream-verify the report artifact and fail closed.
+    let html_hash =
+        fs_ledger::ContentHash::from_hex(&receipt_str_field(&report_receipt, "report_html"))
+            .expect("report HTML hash");
+    ledger
+        .corrupt_artifact_for_test(&html_hash)
+        .expect("test report corruption");
+    let gate = CancelGate::new_clock_free();
+    let mut clock = benign_clock();
+    let mut progress = Vec::new();
+    let refusal = resume_solve(&ledger, &gate, &mut clock, &run, &mut progress)
+        .expect_err("corrupted retained report bytes refuse completed-run admission");
+    assert_eq!(refusal.code, "cli-solve-ledger", "{refusal:?}");
+    assert!(
+        refusal
+            .what
+            .contains("verifying a retained report artifact failed"),
+        "{refusal:?}"
+    );
+    assert!(
+        progress.is_empty(),
+        "failed re-attestation emits no progress"
+    );
 }
 
 /// G0 product contact path: two retained solids are volumetricized together,
 /// split back into region-owned matching-P1 traces, mapped to the declared
 /// scenario interface and finite-resistance card, and solved without treating
 /// the joint as either perfect contact or an adiabatic gap.
+/// The conduction fixture with its declared convection law replaced by an
+/// airflow-convection law on the fixture's one vent branch: the coefficient
+/// and reference temperature are DERIVED from the flow-network operating
+/// point through the named card, never declared.
+fn conjugate_fixture_project(seed_root: u64, bytes: &[u8], correlation: &str) -> ProjectSpec {
+    let mut spec = conduction_fixture_project(seed_root, bytes);
+    let conduction = spec
+        .cooling
+        .as_mut()
+        .and_then(|cooling| cooling.conduction.as_mut())
+        .expect("fixture conduction");
+    conduction.boundaries = vec![ThermalBoundary {
+        target: "air".to_string(),
+        condition: ThermalBoundaryCondition::AirflowConvection {
+            branch: "air".to_string(),
+            order: 0,
+            inlet_temperature: QtyAny::new(293.15, fs_project::spec::dims::TEMPERATURE),
+            hydraulic_diameter: QtyAny::new(0.02, fs_project::spec::dims::LENGTH),
+            flow_area: QtyAny::new(0.004, fs_project::spec::dims::AREA),
+            channel_length: QtyAny::new(0.1, fs_project::spec::dims::LENGTH),
+            correlation: correlation.to_string(),
+        },
+    }];
+    spec
+}
+
+#[test]
+fn g0_conduction_stage_closes_the_conjugate_airflow_exchange_from_the_flow_network() {
+    let bytes = tetra_stl();
+    let spec = conjugate_fixture_project(7, &bytes, "convection.gnielinski");
+    assert!(spec.validate().is_empty(), "{:?}", spec.validate());
+    let decoded = decode(&spec);
+    let ledger = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&ledger, &spec, bytes.clone());
+    let gate = CancelGate::new_clock_free();
+    let mut clock = benign_clock();
+    let mut progress = Vec::new();
+    let outcome = run_solve(
+        &ledger,
+        &gate,
+        &mut clock,
+        &decoded,
+        &fixture_cards(),
+        &mut progress,
+    )
+    .expect("the conjugate conduction solve completes QoI and the report stage");
+    assert!(matches!(outcome.status, fs_cli::SolveRunStatus::Completed));
+
+    let run = outcome.run.clone();
+    let receipts = stage_receipt_hashes(&ledger, &run);
+    assert_eq!(receipts.len(), 7);
+    let receipt =
+        String::from_utf8(artifact_bytes(&ledger, &receipts[4])).expect("receipt is utf-8");
+    assert_balanced_json(&receipt);
+    assert!(receipt.contains("frankensim.cli.solve-conduction-receipt.v3"));
+    // The exchange is in the receipt: the branch, the card, the derived
+    // coefficient, the marched air, and the two independent watt gates.
+    assert!(receipt.contains("\"conjugate\":{\"branch\":\"air\",\"path\":\"vent:air\""));
+    assert!(receipt.contains("\"card\":\"convection.gnielinski\",\"in_domain\":true"));
+    assert!(receipt_number_field(&receipt, "htc_w_m2_k") > 0.0);
+    assert!(
+        receipt_number_field(&receipt, "reynolds") > 3000.0,
+        "{receipt}"
+    );
+    let inlet = receipt_number_field(&receipt, "inlet_k");
+    let outlet = receipt_number_field(&receipt, "outlet_k");
+    assert!(
+        outlet > inlet,
+        "positive power warms the air along the branch: inlet {inlet} outlet {outlet}"
+    );
+    let reference = receipt_number_field(&receipt, "reference_k");
+    assert!(
+        reference > inlet && reference < receipt_number_field(&receipt, "max"),
+        "the effective Robin reference lies between inlet air and the hottest solid: {receipt}"
+    );
+    assert!(receipt_number_field(&receipt, "iterations") >= 1.0);
+    let tolerance = receipt_number_field(&receipt, "balance_tolerance_w");
+    assert!(receipt_number_field(&receipt, "max_region_imbalance_w").abs() <= tolerance);
+    assert!(receipt_number_field(&receipt, "decomposition_residual_w").abs() <= tolerance);
+    assert!(
+        receipt_number_field(&receipt, "relative_closure") < 1e-6,
+        "{receipt}"
+    );
+    // The solid's Robin heat rate is the air's heat rate: the derived
+    // reference reproduces what the air absorbed by construction.
+    let solid_w = receipt_number_field(&receipt, "solid_total_w");
+    let air_w = receipt_number_field(&receipt, "air_total_w");
+    assert!((solid_w - air_w).abs() <= tolerance, "{solid_w} vs {air_w}");
+    assert!(solid_w > 0.0);
+
+    // A declared card whose domain does not cover the solved regime refuses
+    // by name instead of extrapolating (the fixture's branch is turbulent).
+    let laminar = conjugate_fixture_project(7, &bytes, "convection.circular-duct-laminar-cwt");
+    let decoded_laminar = decode(&laminar);
+    let laminar_ledger = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&laminar_ledger, &laminar, bytes);
+    let mut laminar_progress = Vec::new();
+    let refusal = run_solve(
+        &laminar_ledger,
+        &gate,
+        &mut benign_clock(),
+        &decoded_laminar,
+        &fixture_cards(),
+        &mut laminar_progress,
+    )
+    .expect_err("an out-of-domain card refuses the exchange");
+    assert_eq!(refusal.code, "cli-solve-conduction-airflow-card-domain");
+
+    // Exact replay: a completed conjugate run has nothing left to resume
+    // and its retained receipts are unchanged.
+    let mut resume_clock = benign_clock();
+    let mut resume_progress = Vec::new();
+    let resumed = resume_solve(
+        &ledger,
+        &gate,
+        &mut resume_clock,
+        &run,
+        &mut resume_progress,
+    )
+    .expect_err("a completed run has nothing left to resume");
+    assert_eq!(resumed.code, "cli-solve-resume-complete");
+    assert_eq!(stage_receipt_hashes(&ledger, &run), receipts);
+}
+
 #[test]
 fn g0_conduction_stage_executes_declared_card_backed_contact() {
     let spec = multi_region_contact_project();
@@ -3505,7 +3672,7 @@ fn g0_conduction_stage_executes_declared_card_backed_contact() {
     let receipt =
         String::from_utf8(artifact_bytes(&ledger, &receipts[4])).expect("receipt is utf-8");
     assert_balanced_json(&receipt);
-    assert!(receipt.contains("frankensim.cli.solve-conduction-receipt.v2"));
+    assert!(receipt.contains("frankensim.cli.solve-conduction-receipt.v3"));
     // The production volumetricizer's facet recovery inserts a Steiner
     // point at the joint centroid and re-triangulates the shared unit
     // face into a deterministic four-triangle fan, so the declared

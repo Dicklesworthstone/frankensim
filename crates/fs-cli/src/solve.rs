@@ -21,7 +21,8 @@
 //! projects without that optional setup retain the typed frankensim-s93ej gap.
 //! `qoi` executes the request-selective declared region temperature maximum
 //! when that exact producer is available; unsupported QoI families remain the
-//! typed frankensim-s2l9v gap. `report` remains the typed rc-j4 gap.
+//! typed frankensim-s2l9v gap. `report` projects the completed producer prefix
+//! into retained HTML, JSON, and format-9 package artifacts.
 //!
 //! Card packs are invocation inputs, so their canonical set root is bound
 //! into the run identity: a different pack set is a different run, never the
@@ -97,8 +98,14 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// Bumped to 7 when interface-resolution evidence identities switched from
 /// ambiguous delimiter joining to length-framed fields. Bumped to 8 when the
 /// request-selective temperature-maximum QoI became a real sixth producer and
-/// report became the next typed stage gap.
-pub const SOLVE_DRIVER_VERSION: u32 = 9;
+/// report became the next typed stage gap. Bumped to 9 when report, package,
+/// and run became real. Bumped to 10 when the conduction stage began
+/// consuming the flow-network operating point through a declared
+/// airflow-convection law (derived Robin rows, conjugate solid/air fixed
+/// point, receipt schema v3): a v9 conduction checkpoint describes a solve
+/// whose Robin rows were all declared, and cannot resume into a stage set
+/// where some are derived.
+pub const SOLVE_DRIVER_VERSION: u32 = 10;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";
@@ -132,10 +139,11 @@ const IMPORT_VERIFY_NO_CLAIM: &str =
     "does not prove the imported geometry is watertight, meshable, or physically meaningful";
 const MATERIAL_RESOLVE_AUTHORITY: &str = "declared-binding-resolution-against-admitted-card-packs";
 const FLOW_NETWORK_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-flow-network-receipt.v1";
-const CONDUCTION_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-conduction-receipt.v2";
+const CONDUCTION_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-conduction-receipt.v3";
 const CONDUCTION_SOLUTION_SCHEMA: &str = "frankensim.cli.solve-conduction-solution.v1";
 const QOI_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-qoi-candidate.v1";
 
+mod conjugate;
 mod report_stage;
 pub(crate) use report_stage::{CompletedRunExport, load_completed_run};
 use report_stage::{ReportStageProduct, report_receipt};
@@ -156,8 +164,11 @@ const CONDUCTION_AUTHORITY: &str = "retained-promoted-mesh-plus-declared-region-
 const CONDUCTION_NO_CLAIM: &str = "the stage solves the declared finite mesh with static \
     Dirichlet, Neumann, and Robin laws, exact matching-P1 finite contact resistance, and audits \
     algebraic residual and energy closure; it does not authenticate source geometry or material \
-    claims, establish mesh convergence, support nonmatching or temperature-varying contact, or \
-    perform conjugate airflow exchange";
+    claims, establish mesh convergence, or support nonmatching or temperature-varying contact; \
+    when a declared airflow-convection law is present it closes ONE branch's solid/air fixed \
+    point over card-derived Robin rows with frozen dry-air properties and a 1-D stream-wise air \
+    chain, disclosing rather than propagating the flow bracket, and claims no experimental \
+    validation and no maturity level for that exchange";
 const MATERIAL_RESOLVE_NO_CLAIM: &str = "the stage proves that every declared region and \
     interface resolves to an admitted card whose selected claim covers the declared temperature \
     range, and retains that claim's replayable usage receipt; it does not authenticate the pack \
@@ -1061,6 +1072,19 @@ struct StageContext {
     /// Resume reconstructs these values by rerunning and byte-attesting the
     /// conduction producer; they are not decoded from a partial transport.
     qoi_inputs: Option<QoiStageInputs>,
+    /// The flow-network stage's native operating point, consumed by a
+    /// conduction stage that declares an airflow-convection law. Resume
+    /// reconstructs it by rerunning and byte-attesting the flow-network
+    /// producer; it is never decoded from the receipt's decimal strings.
+    flow_network: Option<FlowNetworkHandoff>,
+}
+
+/// Native flow-network product handed to later stages.
+#[derive(Debug)]
+struct FlowNetworkHandoff {
+    operating: fs_airflow::OperatingPoint,
+    /// The envelope-derived ideal-gas density the network was lowered with.
+    air_density_kg_m3: f64,
 }
 
 #[derive(Debug)]
@@ -1605,7 +1629,7 @@ impl<'a> SolveEngine<'a> {
                     .map(|receipt| (receipt, Vec::new())),
                 SolveStage::MaterialResolve => self.stage_material_resolve(),
                 SolveStage::FlowNetwork => self
-                    .stage_flow_network()
+                    .stage_flow_network(&mut context)
                     .map(|receipt| (receipt, Vec::new())),
                 SolveStage::Conduction => self.stage_conduction(&context).map(|product| {
                     pending_qoi_inputs = Some(product.qoi_inputs);
@@ -1956,8 +1980,10 @@ impl<'a> SolveEngine<'a> {
         material_resolve_receipt(self.spec, self.cards, self.run, self.work, false)
     }
 
-    fn stage_flow_network(&mut self) -> Result<String, SolveRefusal> {
-        flow_network_receipt(self.spec, self.run, self.work, false)
+    fn stage_flow_network(&mut self, context: &mut StageContext) -> Result<String, SolveRefusal> {
+        let (receipt, handoff) = flow_network_receipt(self.spec, self.run, self.work, false)?;
+        context.flow_network = Some(handoff);
+        Ok(receipt)
     }
 
     fn stage_conduction(
@@ -2833,7 +2859,7 @@ fn flow_network_receipt(
     run: SolveRunId,
     work: EvidenceWork<'_>,
     resume: bool,
-) -> Result<String, SolveRefusal> {
+) -> Result<(String, FlowNetworkHandoff), SolveRefusal> {
     let stage = SolveStage::FlowNetwork;
     let cancelled = || {
         if resume {
@@ -3055,7 +3081,13 @@ fn flow_network_receipt(
     .map_err(|error| invocation_work_refusal(Some(run), Some(stage), error))?;
     work.checkpoint(phase, None, u64::MAX)
         .map_err(|_| cancelled())?;
-    Ok(receipt)
+    Ok((
+        receipt,
+        FlowNetworkHandoff {
+            operating,
+            air_density_kg_m3: air_density,
+        },
+    ))
 }
 
 fn qoi_error(code: &'static str, what: impl Into<String>, fix: impl Into<String>) -> SolveRefusal {
@@ -3977,6 +4009,17 @@ fn conduction_source(
     })
 }
 
+/// The thermal boundary partition plus the exterior face area every target
+/// owns after volumetricization (the wetted area a derived airflow row uses).
+struct ConductionBoundaryLowering {
+    boundary: fs_conduction::ThermalBoundary,
+    target_area_m2: BTreeMap<String, f64>,
+}
+
+/// Lower the declared boundary laws. An `AirflowConvection` law lowers to a
+/// Robin row ONLY from `derived` (target -> (h, T_ref)) supplied by the
+/// conjugate exchange; without an entry it refuses rather than inventing a
+/// coefficient.
 fn conduction_boundary(
     setup: &ConductionSetup,
     mesh: &fs_conduction::ConductionMesh,
@@ -3984,7 +4027,9 @@ fn conduction_boundary(
     surfaces: &BTreeMap<String, AssignmentSurface>,
     regions: &[fs_mesh::RegionSpec],
     interface_faces: &BTreeSet<CoordinateFaceKey>,
-) -> Result<fs_conduction::ThermalBoundary, SolveRefusal> {
+    derived: &BTreeMap<String, (f64, f64)>,
+) -> Result<ConductionBoundaryLowering, SolveRefusal> {
+    let mut target_area_m2 = BTreeMap::new();
     let mut unique_facets = BTreeSet::new();
     for region in regions {
         for &triangle in &region.triangles {
@@ -4034,7 +4079,7 @@ fn conduction_boundary(
             })?;
             parents.insert(*parent);
         }
-        let matched = mesh
+        let (matched, area_m2) = mesh
             .boundary()
             .iter()
             .filter(|face| {
@@ -4044,7 +4089,22 @@ fn conduction_boundary(
                         .get(&key)
                         .is_some_and(|parent| parents.contains(parent))
             })
-            .count();
+            .fold((0usize, 0.0f64), |(count, area), face| {
+                let p = mesh.positions();
+                let [a, b, c] = face.vertices.map(|v| p[v as usize]);
+                let u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+                let w = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+                let n = [
+                    u[1] * w[2] - u[2] * w[1],
+                    u[2] * w[0] - u[0] * w[2],
+                    u[0] * w[1] - u[1] * w[0],
+                ];
+                (
+                    count + 1,
+                    area + 0.5 * fs_math::det::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]),
+                )
+            });
+        target_area_m2.insert(row.target.clone(), area_m2);
         if matched == 0 {
             return Err(conduction_error(
                 "cli-solve-conduction-boundary-empty",
@@ -4066,6 +4126,19 @@ fn conduction_boundary(
                 coefficient,
                 reference_temperature,
             } => fs_conduction::ThermalBc::robin(coefficient.value, reference_temperature.value),
+            ThermalBoundaryCondition::AirflowConvection { .. } => {
+                let (htc, t_ref) = derived.get(&row.target).copied().ok_or_else(|| {
+                    conduction_error(
+                        "cli-solve-conduction-airflow-underived",
+                        format!(
+                            "airflow convection on `{}` has no derived coefficient and reference; the conjugate exchange did not run",
+                            row.target
+                        ),
+                        "report the driver defect; a derived Robin row is never invented",
+                    )
+                })?;
+                fs_conduction::ThermalBc::robin(htc, t_ref)
+            }
         }
         .map_err(|error| {
             conduction_error(
@@ -4097,12 +4170,16 @@ fn conduction_boundary(
     if setup.adiabatic_remainder {
         builder = builder.adiabatic_remainder();
     }
-    builder.finish().map_err(|error| {
+    let boundary = builder.finish().map_err(|error| {
         conduction_error(
             "cli-solve-conduction-boundary",
             format!("thermal boundary partition is incomplete: {error}"),
             "cover every exterior face or explicitly declare an adiabatic remainder",
         )
+    })?;
+    Ok(ConductionBoundaryLowering {
+        boundary,
+        target_area_m2,
     })
 }
 
@@ -4520,46 +4597,157 @@ fn conduction_receipt(
             .flat_map(|pair| [pair.from_boundary_slot, pair.to_boundary_slot])
             .map(|slot| coordinate_face_key(mesh.positions(), mesh.boundary()[slot].vertices))
             .collect::<BTreeSet<_>>();
-        let boundary = conduction_boundary(
-            setup,
-            &mesh,
-            &audited,
-            &surfaces,
-            &regions,
-            &interface_faces,
-        )?;
-        let interfaces =
-            lower_thermal_interfaces(spec, cards, &mesh, &boundary, &interface_resolution)?;
-        let mut config = fs_conduction::SolveConfig::default();
-        if let Some(solver) = &spec.solver {
-            config.stop.residual_rtol = solver.tolerance_rel;
-        }
-        if let Some(envelope) = &spec.envelope {
-            config.initial = fs_conduction::InitialGuess::Uniform(
-                (envelope.ambient_lo.value + envelope.ambient_hi.value) / 2.0,
-            );
-        }
-        let problem = fs_conduction::ConductionProblem {
-            mesh: &mesh,
-            boundary: &boundary,
-            material: &fallback,
-            element_materials: Some(&element_materials),
-            source: &source,
-        };
-        let solution = match interfaces.as_ref() {
-            Some(interfaces) => {
-                fs_conduction::solve_with_interfaces(&cx, problem, interfaces, config)
+        // One solid solve against a given set of derived Robin rows (empty
+        // when no airflow-convection law is declared). The conjugate
+        // exchange calls it once per outer iteration and once more at the
+        // converged references so the published field is exactly the one
+        // the balance audit describes.
+        let solve_once = |derived: &BTreeMap<String, (f64, f64)>| -> Result<
+            fs_conduction::ConductionSolution,
+            SolveRefusal,
+        > {
+            let lowering = conduction_boundary(
+                setup,
+                &mesh,
+                &audited,
+                &surfaces,
+                &regions,
+                &interface_faces,
+                derived,
+            )?;
+            let boundary = lowering.boundary;
+            let interfaces =
+                lower_thermal_interfaces(spec, cards, &mesh, &boundary, &interface_resolution)?;
+            let mut config = fs_conduction::SolveConfig::default();
+            if let Some(solver) = &spec.solver {
+                config.stop.residual_rtol = solver.tolerance_rel;
             }
-            None => fs_conduction::solve(&cx, problem, config),
-        }
-        .map_err(|error| match error {
-            fs_conduction::ConductionError::Cancelled { .. } => cancelled(),
-            other => conduction_error(
-                "cli-solve-conduction-solve",
-                format!("steady heterogeneous conduction solve refused: {other}"),
-                "inspect the declared boundary anchor, material span, and solver tolerance",
-            ),
-        })?;
+            if let Some(envelope) = &spec.envelope {
+                config.initial = fs_conduction::InitialGuess::Uniform(
+                    (envelope.ambient_lo.value + envelope.ambient_hi.value) / 2.0,
+                );
+            }
+            let problem = fs_conduction::ConductionProblem {
+                mesh: &mesh,
+                boundary: &boundary,
+                material: &fallback,
+                element_materials: Some(&element_materials),
+                source: &source,
+            };
+            match interfaces.as_ref() {
+                Some(interfaces) => {
+                    fs_conduction::solve_with_interfaces(&cx, problem, interfaces, config)
+                }
+                None => fs_conduction::solve(&cx, problem, config),
+            }
+            .map_err(|error| match error {
+                fs_conduction::ConductionError::Cancelled { .. } => cancelled(),
+                other => conduction_error(
+                    "cli-solve-conduction-solve",
+                    format!("steady heterogeneous conduction solve refused: {other}"),
+                    "inspect the declared boundary anchor, material span, and solver tolerance",
+                ),
+            })
+        };
+        let laws = conjugate::airflow_laws(setup)?;
+        let (solution, conjugate_fragment) = if laws.is_empty() {
+            (solve_once(&BTreeMap::new())?, None)
+        } else {
+            let handoff = context.flow_network.as_ref().ok_or_else(|| {
+                conduction_error(
+                    "cli-solve-conduction-airflow-no-flow-network",
+                    "an airflow-convection law is declared but the flow-network stage handed off no operating point",
+                    "resume from or rerun the flow-network producer before the conduction stage",
+                )
+            })?;
+            // Area pass: lower the partition once with placeholder rows
+            // (unit coefficient at the inlet) purely to read each target's
+            // retained exterior area; nothing is solved against them.
+            let placeholder: BTreeMap<String, (f64, f64)> = laws
+                .iter()
+                .map(|law| (law.target.clone(), (1.0, law.inlet_temperature_k)))
+                .collect();
+            let areas = conduction_boundary(
+                setup,
+                &mesh,
+                &audited,
+                &surfaces,
+                &regions,
+                &interface_faces,
+                &placeholder,
+            )?
+            .target_area_m2;
+            let path = conjugate::derive_air_path(
+                &laws,
+                &handoff.operating,
+                handoff.air_density_kg_m3,
+                |target| areas.get(target).copied(),
+            )?;
+            let coefficients = conjugate::derived_coefficients(&path);
+            let path_targets: BTreeSet<&str> = path
+                .segments
+                .iter()
+                .map(|segment| segment.target.as_str())
+                .collect();
+            let states_of = |solution: &fs_conduction::ConductionSolution| {
+                path.segments
+                    .iter()
+                    .map(|segment| {
+                        solution
+                            .report
+                            .robin_fluxes
+                            .iter()
+                            .find(|flux| flux.region == segment.target)
+                            .map(fs_airflow::conjugate::SolidRegionState::from_robin_flux)
+                            .ok_or_else(|| {
+                                conduction_error(
+                                    "cli-solve-conduction-airflow-region",
+                                    format!(
+                                        "the conduction report carries no Robin decomposition for airflow target `{}`",
+                                        segment.target
+                                    ),
+                                    "report the driver defect; every airflow target lowers to a Robin region",
+                                )
+                            })
+                    })
+                    .collect::<Result<Vec<_>, SolveRefusal>>()
+            };
+            let outcome = conjugate::run_exchange(&cx, &path, |_, references| {
+                let derived: BTreeMap<String, (f64, f64)> = references
+                    .iter()
+                    .map(|(target, reference)| {
+                        (
+                            target.clone(),
+                            (coefficients.get(target).copied().unwrap_or(f64::NAN), *reference),
+                        )
+                    })
+                    .collect();
+                states_of(&solve_once(&derived)?)
+            })?;
+            let converged: BTreeMap<String, (f64, f64)> = path
+                .segments
+                .iter()
+                .zip(outcome.solution.reference_temperatures_k.iter())
+                .map(|(segment, reference)| {
+                    (segment.target.clone(), (segment.htc_w_m2_k, *reference))
+                })
+                .collect();
+            let solution = solve_once(&converged)?;
+            let off_path_w: f64 = solution
+                .report
+                .robin_fluxes
+                .iter()
+                .filter(|flux| !path_targets.contains(flux.region.as_str()))
+                .map(|flux| flux.heat_rate_w)
+                .sum();
+            let outcome = conjugate::cross_check_decomposition(
+                outcome,
+                solution.report.energy.robin_out_w,
+                off_path_w,
+            )?;
+            let fragment = conjugate::receipt_fragment(&path, &outcome)?;
+            (solution, Some(fragment))
+        };
         let interface_evidence = (!interface_resolution.pairs.is_empty())
             .then(|| interface_evidence_bytes(run, &interface_resolution))
             .transpose()?;
@@ -4571,6 +4759,7 @@ fn conduction_receipt(
             region_ids,
             interface_resolution.pairs.len(),
             interface_evidence,
+            conjugate_fragment,
         ))
     })?;
     let (
@@ -4581,6 +4770,7 @@ fn conduction_receipt(
         region_ids,
         interface_pair_count,
         interface_evidence,
+        conjugate_fragment,
     ) = result;
     work.checkpoint(SolveEvidencePhase::AssignmentDerivation, None, 1)
         .map_err(|_| cancelled())?;
@@ -4664,7 +4854,7 @@ fn conduction_receipt(
          \"residual_threshold\":{},\"free_dofs\":{}}},\
          \"energy\":{{\"source_w\":{},\"neumann_out_w\":{},\"robin_out_w\":{},\
          \"dirichlet_in_w\":{},\"closure_w\":{},\"relative_closure\":{}}},\
-         \"authority\":{},\"no_claim\":{}}}",
+         \"conjugate\":{},\"authority\":{},\"no_claim\":{}}}",
         json_string(CONDUCTION_RECEIPT_SCHEMA),
         json_string(&run.to_hex()),
         mesh.vertex_count(),
@@ -4692,6 +4882,7 @@ fn conduction_receipt(
         finite("energy.dirichlet_in_w", report.energy.dirichlet_in_w)?,
         finite("energy.closure_w", report.energy.closure_w)?,
         finite("energy.relative_closure", report.energy.relative_closure())?,
+        conjugate_fragment.as_deref().unwrap_or("null"),
         json_string(CONDUCTION_AUTHORITY),
         json_string(CONDUCTION_NO_CLAIM),
     );
@@ -5944,8 +6135,8 @@ fn is_supported_stage_discovery_row(row: &OpRow, run: SolveRunId) -> bool {
     // Conduction and the request-selective QoI are conditional on the retained
     // project. Discovery cannot inspect that project yet, so admit their
     // candidates here and let `validate_resume_candidate` re-attest the
-    // project and enforce `stage_has_declared_producer`. Report remains
-    // unavailable.
+    // project and enforce `stage_has_declared_producer`. Report is an
+    // unconditional projection of the retained producer prefix.
     (stage.gap_dependency().is_none() || matches!(stage, SolveStage::Conduction | SolveStage::Qoi))
         && row.t_start == i64::from(stage.ordinal()) * 2
         && row.t_end == Some(i64::from(stage.ordinal()) * 2 + 1)
@@ -6097,6 +6288,7 @@ fn validate_resume_candidate(
         require_artifact_kind_resume(
             ledger,
             run,
+            stage,
             completed.receipt,
             STAGE_RECEIPT_KIND,
             "stage receipt",
@@ -6445,7 +6637,12 @@ fn validate_resume_candidate(
                     0,
                 )
                 .map_err(|_| cancelled_resume_refusal(run))?;
-                let rebuilt = flow_network_receipt(&project.spec, run, work, true);
+                let rebuilt = flow_network_receipt(&project.spec, run, work, true).map(
+                    |(receipt, handoff)| {
+                        context.flow_network = Some(handoff);
+                        receipt
+                    },
+                );
                 work.checkpoint(
                     SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
                     receipt_stage_index,
@@ -6557,6 +6754,7 @@ fn validate_resume_candidate(
                     require_artifact_kind_resume(
                         ledger,
                         run,
+                        stage,
                         output.artifact,
                         output.kind,
                         "conduction side artifact",
@@ -6655,7 +6853,130 @@ fn validate_resume_candidate(
                 })?;
                 expected_edges.push((EdgeRole::In, inputs.solution_artifact));
             }
-            SolveStage::Report => unreachable!("completed unavailable stages were refused above"),
+            SolveStage::Report => {
+                let receipt_stage_index = Some(index);
+                work.checkpoint(
+                    SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
+                    receipt_stage_index,
+                    0,
+                )
+                .map_err(|_| cancelled_resume_refusal(run))?;
+                let rebuilt =
+                    report_receipt(ledger, &project.spec, &state, run, project_hash, work);
+                work.checkpoint(
+                    SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
+                    receipt_stage_index,
+                    1,
+                )
+                .map_err(|_| cancelled_resume_refusal(run))?;
+                let ReportStageProduct {
+                    receipt: expected_receipt,
+                    artifacts: outputs,
+                } = match rebuilt {
+                    Ok(rebuilt) => rebuilt,
+                    Err(error)
+                        if matches!(
+                            error.code,
+                            "cli-solve-cancelled" | "cli-solve-work-envelope"
+                        ) =>
+                    {
+                        return Err(error);
+                    }
+                    Err(error) => {
+                        return Err(resume_identity(format!(
+                            "the retained report no longer reproduces: {}",
+                            error.what
+                        )));
+                    }
+                };
+                let receipt_matches = evidence_bytes_equal(
+                    receipt_text.as_bytes(),
+                    expected_receipt.as_bytes(),
+                    work,
+                    SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
+                    receipt_stage_index,
+                )
+                .map_err(|error| match error {
+                    EvidenceCompareError::Cancelled => cancelled_resume_refusal(run),
+                    EvidenceCompareError::WorkEnvelope(error) => {
+                        invocation_work_refusal(Some(run), Some(stage), error)
+                    }
+                })?;
+                if !receipt_matches {
+                    return Err(resume_identity(
+                        "the retained report receipt is not the canonical driver receipt",
+                    ));
+                }
+                for output in &outputs {
+                    require_artifact_kind_resume(
+                        ledger,
+                        run,
+                        stage,
+                        output.artifact,
+                        output.kind,
+                        "report side artifact",
+                        work,
+                        index,
+                    )?;
+                    let expected_len = u64::try_from(output.bytes.len()).map_err(|_| {
+                        resume_identity(
+                            "the regenerated report artifact length is outside the ledger byte range",
+                        )
+                    })?;
+                    let retained_len = verify_evidence_artifact(
+                        ledger,
+                        work,
+                        output.artifact,
+                        expected_len,
+                        SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
+                        Some(index),
+                    )
+                    .map_err(|error| match error {
+                        EvidenceReadError::Cancelled => cancelled_resume_refusal(run),
+                        EvidenceReadError::WorkEnvelope(error) => {
+                            invocation_work_refusal(Some(run), Some(stage), error)
+                        }
+                        EvidenceReadError::Ledger(error) => {
+                            resume_ledger("verifying a retained report artifact failed", error)
+                        }
+                    })?
+                    .ok_or_else(|| {
+                        resume_identity(format!(
+                            "the retained report side artifact {} is missing",
+                            output.artifact.to_hex()
+                        ))
+                    })?;
+                    if retained_len != expected_len {
+                        return Err(resume_identity(format!(
+                            "the retained report side artifact {} has length {retained_len}, not the regenerated length {expected_len}",
+                            output.artifact.to_hex()
+                        )));
+                    }
+                    expected_edges.push((EdgeRole::Out, output.artifact));
+                }
+                let predecessor = predecessor_state.ok_or_else(|| {
+                    resume_identity(
+                        "the retained report stage has no verified QoI-stage predecessor",
+                    )
+                })?;
+                expected_edges.push((EdgeRole::In, predecessor));
+                for required in SolveStage::ALL
+                    .into_iter()
+                    .filter(|candidate| *candidate != SolveStage::Report)
+                {
+                    let completed = state
+                        .completed
+                        .get(required.ordinal() as usize)
+                        .filter(|completed| completed.ordinal == required.ordinal())
+                        .ok_or_else(|| {
+                            resume_identity(format!(
+                                "the retained report stage has no verified {} receipt",
+                                required.name()
+                            ))
+                        })?;
+                    expected_edges.push((EdgeRole::In, completed.receipt));
+                }
+            }
         }
         require_exact_edges(
             run,
@@ -7277,6 +7598,7 @@ fn decode_driver_state(
 fn require_artifact_kind_resume(
     ledger: &Ledger,
     run: SolveRunId,
+    stage: SolveStage,
     artifact: ContentHash,
     expected_kind: &str,
     label: &str,
@@ -7287,7 +7609,7 @@ fn require_artifact_kind_resume(
         .map_err(|error| match error {
             EvidenceReadError::Cancelled => cancelled_resume_refusal(run),
             EvidenceReadError::WorkEnvelope(error) => {
-                invocation_work_refusal(Some(run), Some(SolveStage::ImportVerify), error)
+                invocation_work_refusal(Some(run), Some(stage), error)
             }
             EvidenceReadError::Ledger(error) => {
                 resume_ledger("reading an artifact descriptor failed", error)
