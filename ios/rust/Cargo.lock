@@ -706,7 +706,9 @@ dependencies = [
 name = "fs-dfo"
 version = "0.0.1"
 dependencies = [
+ "fs-alloc",
  "fs-blake3",
+ "fs-exec",
  "fs-la",
  "fs-math",
  "fs-obs",
@@ -1393,6 +1395,7 @@ name = "fs-voi"
 version = "0.0.1"
 dependencies = [
  "fs-evidence",
+ "fs-math",
 ]
 
 [[package]]

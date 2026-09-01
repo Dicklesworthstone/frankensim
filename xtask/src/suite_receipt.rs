@@ -111,7 +111,13 @@ impl RunModel {
 
     fn status(&self) -> &'static str {
         let (_, failed, _) = self.totals();
-        if !self.build_failures.is_empty() || !self.unexpected_red.is_empty() {
+        if !self.build_failures.is_empty()
+            || !self.unexpected_red.is_empty()
+            || self
+                .crates
+                .values()
+                .any(|outcome| outcome.target_error.is_some())
+        {
             "not-green"
         } else if failed == 0 {
             "green"
@@ -1070,6 +1076,12 @@ fn parse_receipt(text: &str) -> Result<SuiteReceipt, String> {
             "{RECEIPT_PATH} claims `{status}` while carrying {build_failures} build failure(s)"
         ));
     }
+    if !target_error_crates.is_empty() && status != "not-green" {
+        return Err(format!(
+            "{RECEIPT_PATH} claims `{status}` while carrying target errors for {} crate(s)",
+            target_error_crates.len()
+        ));
+    }
     let Some(JsonValue::Object(workspaces)) = json_obj_field(map, "workspaces") else {
         return Err(format!("{RECEIPT_PATH} has no workspaces object"));
     };
@@ -1327,6 +1339,55 @@ mod tests {
 }\n";
         let error = parse_receipt(receipt).expect_err("green over build failure must refuse");
         assert!(error.contains("build failure"), "{error}");
+    }
+
+    #[test]
+    fn g0_target_error_forces_not_green_status() {
+        let model = RunModel {
+            command: "test".to_string(),
+            executed_at: "now".to_string(),
+            host: "host".to_string(),
+            toolchain: "toolchain".to_string(),
+            head_sha: "head".to_string(),
+            head_dirty: false,
+            lock_hash: "lock".to_string(),
+            workspace_locks: BTreeMap::new(),
+            target_triple: "target".to_string(),
+            crates: BTreeMap::from([(
+                "native::fs-x".to_string(),
+                TargetOutcome {
+                    target_error: Some("no suite summary".to_string()),
+                    ..TargetOutcome::default()
+                },
+            )]),
+            build_failures: Vec::new(),
+            known_red: Vec::new(),
+            unexpected_red: Vec::new(),
+            excluded: Vec::new(),
+        };
+
+        assert_eq!(model.status(), "not-green");
+        let rendered = render(&model);
+        assert!(rendered.contains("\"status\": \"not-green\""));
+        assert!(rendered.contains("\"target_error\": true"));
+    }
+
+    #[test]
+    fn g0_receipt_refuses_green_over_target_error() {
+        let receipt = "{
+  \"schema\": \"frankensim-suite-receipt-v2\",
+  \"run\": {\"head_sha\": \"abc\"},
+  \"status\": \"green\",
+  \"totals\": {\"passed\": 0, \"failed\": 0, \"ignored\": 0},
+  \"crates\": {\"native::fs-x\": {\"passed\": 0, \"failed\": 0, \"ignored\": 0, \"target_error\": true}},
+  \"build_failures\": [],
+  \"known_red\": [],
+  \"unexpected_red\": [],
+  \"workspaces\": {\"crates/fs-wasm\": {\"cargo_lock_fnv1a64\": \"nested-lock\"}}
+}\n";
+
+        let error = parse_receipt(receipt).expect_err("green over target error must refuse");
+        assert!(error.contains("target errors"), "{error}");
     }
 
     #[test]

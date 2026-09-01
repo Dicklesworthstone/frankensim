@@ -4,30 +4,52 @@ struct SimulationStudioView: View {
     @StateObject private var model = SimulationStudioModel()
     @State private var search = ""
     @State private var showsAtlas = false
+    @State private var showsCatalogSheet = false
     @State private var preferredColumn = NavigationSplitViewColumn.detail
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+
+    init() {
+#if DEBUG
+        let environment = ProcessInfo.processInfo.environment
+        if environment["FSIM_SHOW_ATLAS"] == "1" {
+            _showsAtlas = State(initialValue: true)
+        }
+        if environment["FSIM_SHOW_CATALOG"] == "1" {
+            _preferredColumn = State(initialValue: .sidebar)
+            _showsCatalogSheet = State(initialValue: true)
+        }
+#endif
+    }
 
     var body: some View {
-        NavigationSplitView(preferredCompactColumn: $preferredColumn) {
-            catalogSidebar
-                .navigationSplitViewColumnWidth(min: 250, ideal: 300, max: 390)
-        } detail: {
-            GeometryReader { proxy in
-                ZStack {
-                    ForgeBackground()
-                    if proxy.size.width >= 1_040 {
-                        wideStudio(size: proxy.size)
-                    } else {
-                        compactStudio(size: proxy.size)
-                    }
-                }
+        Group {
+            if horizontalSizeClass == .compact {
+                NavigationStack { studioDetail }
+            } else {
+                splitStudio
             }
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar { studioToolbar }
         }
-        .navigationSplitViewStyle(.balanced)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(ForgeTheme.background.ignoresSafeArea())
         .preferredColorScheme(.dark)
-        .sheet(isPresented: $showsAtlas) { EpistemicAtlasView() }
+        .sheet(isPresented: $showsAtlas) {
+            EpistemicAtlasView()
+                .presentationDetents([.large])
+        }
+        .sheet(isPresented: $showsCatalogSheet) {
+            NavigationStack {
+                catalogSidebar
+                    .navigationTitle("Kernel catalog")
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("Done") { showsCatalogSheet = false }
+                        }
+                    }
+            }
+            .preferredColorScheme(.dark)
+            .presentationDetents([.large])
+        }
         .onAppear {
             if model.result == nil && !model.isRunning { model.run() }
         }
@@ -39,6 +61,32 @@ struct SimulationStudioView: View {
         }
     }
 
+    private var splitStudio: some View {
+        NavigationSplitView(preferredCompactColumn: $preferredColumn) {
+            catalogSidebar
+                .navigationSplitViewColumnWidth(min: 250, ideal: 300, max: 390)
+        } detail: {
+            studioDetail
+        }
+        .navigationSplitViewStyle(.balanced)
+    }
+
+    private var studioDetail: some View {
+        GeometryReader { proxy in
+            ZStack {
+                ForgeBackground()
+                if proxy.size.width >= 1_040 {
+                    wideStudio(size: proxy.size)
+                } else {
+                    compactStudio(size: proxy.size)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar { studioToolbar }
+    }
+
     private var catalogSidebar: some View {
         ZStack {
             ForgeBackground()
@@ -48,6 +96,9 @@ struct SimulationStudioView: View {
                     guard let id, let experiment = SimulationCatalog.all.first(where: { $0.id == id }) else { return }
                     model.select(experiment)
                     preferredColumn = .detail
+                    if horizontalSizeClass == .compact {
+                        showsCatalogSheet = false
+                    }
                 }
             )) {
                 Section {
@@ -107,6 +158,14 @@ struct SimulationStudioView: View {
     }
 
     @ToolbarContentBuilder private var studioToolbar: some ToolbarContent {
+        if horizontalSizeClass == .compact {
+            ToolbarItem(placement: .topBarLeading) {
+                Button { showsCatalogSheet = true } label: {
+                    Image(systemName: "square.grid.2x2")
+                }
+                .accessibilityLabel("Kernel catalog")
+            }
+        }
         ToolbarItem(placement: .principal) {
             FrankenSimWordmark()
                 .frame(maxWidth: 170)

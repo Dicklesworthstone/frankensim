@@ -147,6 +147,23 @@ final class SimulationStudioModel: ObservableObject {
     private var runTask: Task<Void, Never>?
     private var activeRunID: UUID?
 
+    init() {
+#if DEBUG
+        let environment = ProcessInfo.processInfo.environment
+        if let rawID = environment["FSIM_INITIAL_EXPERIMENT"],
+           let id = UInt32(rawID),
+           let experiment = SimulationCatalog.all.first(where: { $0.id == id })
+        {
+            selection = experiment
+        }
+        if let rawQuality = environment["FSIM_INITIAL_QUALITY"],
+           let requested = Double(rawQuality)
+        {
+            quality = min(0.92, max(0.12, requested))
+        }
+#endif
+    }
+
     func select(_ experiment: SimulationExperiment) {
         guard selection.id != experiment.id else { return }
         runTask?.cancel()

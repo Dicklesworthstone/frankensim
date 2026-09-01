@@ -45,6 +45,20 @@ targets:
         embed: false
     info:
       path: Sources/Info.plist
+      properties:
+        ITSAppUsesNonExemptEncryption: false
+        LSApplicationCategoryType: public.app-category.education
+        UIApplicationSupportsIndirectInputEvents: true
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        "UISupportedInterfaceOrientations~ipad":
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
   FrankenSimTests:
     type: bundle.unit-test
     platform: iOS
@@ -55,3 +69,5 @@ targets:
       - Tests
     dependencies:
       - target: FrankenSim
+      - framework: FrankenSimCore.xcframework
+        embed: false

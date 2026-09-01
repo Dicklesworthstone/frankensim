@@ -88,6 +88,7 @@ enum SimulationCatalog {
         flagship(40, "Ornithoid aircraft", "Lift, stability, maneuverability", "fs-ornith"),
         flagship(41, "Laminar vessel", "The spout that never dribbles", "fs-vessel"),
         flagship(42, "Seismic frame", "Minimum material, explicit fragility", "fs-frame"),
+        item(43, "Reed bore", "Bounded Rust PCM block", "A control-rate breath gesture drives the admitted reed-bore voice and returns one 10 ms floating-point PCM block.", .frontier, "music.note", .amber, .estimated, "Interactive playback is not a listening receipt, a performance budget receipt, or a live-default promotion.", "fs-couple"),
     ]
 
     static let initial = all.first { $0.id == 13 } ?? all[0]

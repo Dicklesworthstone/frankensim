@@ -2,6 +2,16 @@
   "schema": "frankensim-capability-maturity-v1",
   "staleness_days": 90,
   "note": "Levels are defined in docs/MATURITY_LEVELS.md and enforced by `cargo run -p xtask -- check-maturity`. A capability sits at the highest level its RECORDED evidence meets, not the level anyone hopes it reaches. Promotions are events the claim-integrity gate (bead f85xj.2.3) inspects; demotions are always allowed. Nothing here is L4 or L5, because the external V&V corpus (e04) and any written support policy do not exist yet -- that is the honest state, not an oversight.",
+  "promotion_events": [
+    {
+      "capability": "thermal.conduction-solve",
+      "from": "L3",
+      "to": "L2",
+      "date": "2026-09-01",
+      "bead": "frankensim-rc-root-q61wp.2",
+      "reason": "The cited cooling_01 lane stops at the conduction gap; no retained receipt records the thermal conduction stage as executed. Journey A (frankensim-rc-root-q61wp.13) owns an honest lane and any later re-promotion."
+    }
+  ],
   "capabilities": [
     {
       "id": "evidence.colour-algebra",
@@ -321,14 +331,14 @@
           "ref": "xtask/src/maturity.rs::a_well_formed_entry_passes_structural_checks"
         }
       ],
-      "notes": "Promoted to L2 under bead frankensim-4gh8t. Rehearsed clean promotion (thermal.conduction-solve L2 -> L3) and rehearsed blocked-promotion defect gate are both verified live in xtask."
+      "notes": "L2 structural maturity evidence is live in xtask. L3+ now requires a cited lane plus a retained receipt that records the capability stage as executed at a HEAD no older than that lane. No capability currently meets that bar."
     },
     {
       "id": "thermal.conduction-solve",
       "title": "Steady conduction FEM solve on solids",
-      "level": "L3",
+      "level": "L2",
       "owner": "jemanuel",
-      "last_review": "2026-08-25",
+      "last_review": "2026-09-01",
       "crates": [
         "fs-conduction",
         "fs-feec",
@@ -368,7 +378,7 @@
           "ref": "crates/fs-conduction/tests/adjoint.rs::ift_gradient_matches_central_differences"
         }
       ],
-      "notes": "Promoted to L3 under bead frankensim-4gh8t via end-to-end acceptance lane scripts/e2e/cooling_01.sh and the Cooling 0.1 integrated product workflow. Boundary: L3 integration covers the tracked single-command pipeline and composable verbs through report and evidence packaging. It does NOT cover L4 validation against an external physical corpus (e04), cross-ISA bit-exactness outside declared platforms, or nonlinear material extrapolation."
+      "notes": "Demoted from L3 under bead frankensim-rc-root-q61wp.2: the cited cooling_01 lane intentionally stops at the conduction gap, and no retained receipt records this capability's conduction stage as executed. The listed tests remain L2 evidence only. Journey A (frankensim-rc-root-q61wp.13) owns an honest six-stage lane, retained receipt, and any future L3 re-promotion."
     },
     {
       "id": "ledger.design-ledger",

@@ -62,6 +62,14 @@ fn grid_packet(id: u32, n: usize, frames: usize, payload: Vec<f64>) -> Vec<f64> 
     )
 }
 
+/// Mirror `fs_wasm::wave2d_frames`' admitted FFT grid so the packet metadata
+/// describes the payload the kernel actually returns. The wave kernel rounds
+/// non-power-of-two requests upward; reporting the pre-admission request made
+/// the 48-cell quality tier claim a 48x48 field while carrying 64x64 frames.
+fn admitted_wave_grid(n_in: usize) -> usize {
+    n_in.clamp(8, 128).next_power_of_two().min(128)
+}
+
 fn signal_packet(id: u32, payload: Vec<f64>) -> Vec<f64> {
     packet(id, Shape::Signal, payload.len(), 1, 1, payload)
 }
@@ -154,7 +162,15 @@ fn run(id: u32, quality: f64, seed: u32) -> Option<Vec<f64>> {
             1,
             fs_wasm::lorenz_points(5_000, 0.006, 28.0),
         ),
-        14 => grid_packet(id, grid, frames, fs_wasm::wave2d_frames(grid, frames, 3)),
+        14 => {
+            let wave_grid = admitted_wave_grid(grid);
+            grid_packet(
+                id,
+                wave_grid,
+                frames,
+                fs_wasm::wave2d_frames(wave_grid, frames, 3),
+            )
+        }
         15 => grid_packet(id, grid, frames, fs_wasm::fluid_frames(grid, frames)),
         16 => grid_packet(
             id,
@@ -202,6 +218,7 @@ fn run(id: u32, quality: f64, seed: u32) -> Option<Vec<f64>> {
         40 => campaign_packet(id, fs_wasm::run_ornithoid(seed)),
         41 => campaign_packet(id, fs_wasm::run_vessel(650)),
         42 => campaign_packet(id, fs_wasm::run_frame(seed)),
+        43 => signal_packet(id, fs_wasm::run_instrument_reed(2_800.0 + quality * 4_000.0)),
         _ => return None,
     };
     Some(result)
@@ -292,8 +309,20 @@ mod tests {
     }
 
     #[test]
+    fn spectral_wave_metadata_matches_the_fft_admitted_grid() {
+        let medium = run(14, 0.55, 1).expect("medium spectral wave packet");
+        assert_eq!(medium[2], Shape::GridFrames as u32 as f64);
+        assert_eq!(&medium[3..6], &[64.0, 64.0, 14.0]);
+        assert_eq!(medium.len(), HEADER_LEN + 64 * 64 * 14);
+
+        let low = run(14, 0.2, 1).expect("low spectral wave packet");
+        assert_eq!(&low[3..6], &[32.0, 32.0, 8.0]);
+        assert_eq!(low.len(), HEADER_LEN + 32 * 32 * 8);
+    }
+
+    #[test]
     fn every_public_catalog_entry_returns_a_bounded_packet() {
-        for id in 0..43 {
+        for id in 0..44 {
             let result = run(id, 0.0, 0x5EED).unwrap_or_else(|| panic!("catalog id {id}"));
             assert!(result.len() >= HEADER_LEN, "catalog id {id}");
             assert!(

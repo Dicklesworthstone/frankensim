@@ -32,6 +32,7 @@ use std::path::Path;
 
 pub const REGISTRY_FILE: &str = "capability-maturity.json";
 const REGISTRY_SCHEMA: &str = "frankensim-capability-maturity-v1";
+const SPINE_E2E_RECEIPT_SCHEMA: &str = "frankensim-spine-e2e-receipt-v1";
 const CHECK: &str = "capability-maturity";
 const LEVELS: [&str; 5] = ["L1", "L2", "L3", "L4", "L5"];
 const README_MATRIX_BEGIN: &str = "<!-- BEGIN GENERATED FRANKENSIM CAPABILITY MATRIX -->";
@@ -40,7 +41,7 @@ const README_MATRIX_END: &str = "<!-- END GENERATED FRANKENSIM CAPABILITY MATRIX
 /// Evidence kinds and whether the check can resolve them against the tree.
 /// `corpus` is recorded but unresolvable until the V&V corpus registry (e04)
 /// exists — an honest gap, and the reason nothing is L4 today.
-const RESOLVABLE_KINDS: [&str; 4] = ["test", "contract", "lane", "doc"];
+const RESOLVABLE_KINDS: [&str; 5] = ["test", "contract", "lane", "doc", "receipt"];
 const RECORDED_ONLY_KINDS: [&str; 1] = ["corpus"];
 
 pub struct MaturityReport {
@@ -202,6 +203,16 @@ struct Entry {
     crates: Vec<String>,
     notes: String,
     kinds: BTreeSet<String>,
+    lanes: Vec<String>,
+    receipts: Vec<ReceiptEvidence>,
+}
+
+/// The receipt evidence an L3+ entry must carry. `stage` is deliberate: a
+/// successful adjacent stage cannot silently stand in for this capability.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReceiptEvidence {
+    path: String,
+    stage: String,
 }
 
 /// Parse the registry into entries, pushing a violation for every structural
@@ -318,7 +329,7 @@ fn parse_registry(source: &str, entity: &str, violations: &mut Vec<Violation>) -
                 ),
             )),
         }
-        let kinds = collect_evidence(map, id, violations);
+        let (kinds, lanes, receipts) = collect_evidence(map, id, violations);
         entries.push(Entry {
             id: id.to_string(),
             title: field(map, "title")
@@ -332,6 +343,8 @@ fn parse_registry(source: &str, entity: &str, violations: &mut Vec<Violation>) -
                 .unwrap_or_default()
                 .to_string(),
             kinds,
+            lanes,
+            receipts,
         });
     }
     entries
@@ -559,14 +572,16 @@ fn collect_evidence(
     map: &BTreeMap<String, JsonValue>,
     id: &str,
     violations: &mut Vec<Violation>,
-) -> BTreeSet<String> {
+) -> (BTreeSet<String>, Vec<String>, Vec<ReceiptEvidence>) {
     let mut kinds = BTreeSet::new();
+    let mut lanes = Vec::new();
+    let mut receipts = Vec::new();
     let Some(items) = field(map, "evidence").and_then(arr) else {
         violations.push(violation(
             id,
             format!("capability {id:?} has no \"evidence\" array"),
         ));
-        return kinds;
+        return (kinds, lanes, receipts);
     };
     for (index, item) in items.iter().enumerate() {
         let Some(entry) = obj(item) else {
@@ -596,8 +611,30 @@ fn collect_evidence(
             continue;
         }
         kinds.insert(kind.to_string());
+        if kind == "lane" {
+            lanes.push(reference.to_string());
+        }
+        if kind == "receipt" {
+            let Some(stage) = field(entry, "stage")
+                .and_then(text)
+                .filter(|stage| !stage.is_empty())
+            else {
+                violations.push(violation(
+                    id,
+                    format!(
+                        "capability {id:?} receipt evidence {reference:?} needs a non-empty \"stage\"; \
+                         L3 proof is capability-stage-specific"
+                    ),
+                ));
+                continue;
+            };
+            receipts.push(ReceiptEvidence {
+                path: reference.to_string(),
+                stage: stage.to_string(),
+            });
+        }
     }
-    kinds
+    (kinds, lanes, receipts)
 }
 
 /// Resolve every evidence ref against the tree. A registry that cites evidence
@@ -672,7 +709,138 @@ fn resolve_refs(root: &Path, source: &str, violations: &mut Vec<Violation>) {
 /// The qualitative bars in `docs/MATURITY_LEVELS.md` (independent oracle,
 /// stated coverage, written support policy) are reviewer obligations; this
 /// check only enforces the parts a machine can see.
-fn check_level_bars(entries: &[Entry], violations: &mut Vec<Violation>) {
+struct ReceiptRun {
+    head: String,
+    script: String,
+}
+
+fn receipt_stage_run(source: &str, capability: &str, stage: &str) -> Result<ReceiptRun, String> {
+    let parsed = JsonParser::new(source)
+        .finish()
+        .map_err(|error| format!("receipt is not valid JSON: {error}"))?;
+    let root = obj(&parsed).ok_or_else(|| "receipt is not a JSON object".to_string())?;
+    match field(root, "schema").and_then(text) {
+        Some(SPINE_E2E_RECEIPT_SCHEMA) => {}
+        Some(schema) => {
+            return Err(format!(
+                "receipt schema {schema:?} is not the admitted {SPINE_E2E_RECEIPT_SCHEMA:?}"
+            ));
+        }
+        None => return Err("receipt has no schema string".to_string()),
+    }
+    let run = field(root, "run")
+        .and_then(obj)
+        .ok_or_else(|| "receipt has no run object".to_string())?;
+    let head = field(run, "head_sha")
+        .and_then(text)
+        .filter(|head| !head.is_empty())
+        .ok_or_else(|| "receipt has no non-empty run.head_sha".to_string())?;
+    let script = field(run, "script")
+        .and_then(text)
+        .filter(|script| !script.is_empty())
+        .ok_or_else(|| "receipt has no non-empty run.script".to_string())?;
+    let stages = field(root, "stages")
+        .and_then(arr)
+        .ok_or_else(|| "receipt has no stages array".to_string())?;
+    let matching: Vec<&BTreeMap<String, JsonValue>> = stages
+        .iter()
+        .filter_map(obj)
+        .filter(|stage_entry| {
+            matches!(
+                (
+                    field(stage_entry, "capability").and_then(text),
+                    field(stage_entry, "stage").and_then(text),
+                ),
+                (Some(receipt_capability), Some(receipt_stage))
+                    if receipt_capability == capability && receipt_stage == stage
+            )
+        })
+        .collect();
+    match matching.as_slice() {
+        [stage_entry] if field(*stage_entry, "status").and_then(text) == Some("executed") => {
+            Ok(ReceiptRun {
+                head: head.to_string(),
+                script: script.to_string(),
+            })
+        }
+        [] => Err(format!(
+            "receipt does not list capability {capability:?} stage {stage:?} as executed"
+        )),
+        [_] => Err(format!(
+            "receipt does not mark capability {capability:?} stage {stage:?} as executed"
+        )),
+        _ => Err(format!(
+            "receipt lists capability {capability:?} stage {stage:?} more than once"
+        )),
+    }
+}
+
+fn receipt_head_covers_lanes(
+    root: &Path,
+    receipt_head: &str,
+    receipt_script: &str,
+    lanes: &[String],
+) -> Result<(), String> {
+    if !lanes.is_empty() && !lanes.iter().any(|lane| lane == receipt_script) {
+        return Err(format!(
+            "receipt run.script {receipt_script:?} does not match any cited lane {lanes:?}"
+        ));
+    }
+    for lane in lanes {
+        let output = std::process::Command::new("git")
+            .args(["log", "-1", "--format=%H", "--", lane])
+            .current_dir(root)
+            .output()
+            .map_err(|error| format!("cannot read last commit for cited lane {lane:?}: {error}"))?;
+        let lane_head = String::from_utf8(output.stdout)
+            .map_err(|_| format!("git returned non-UTF-8 for cited lane {lane:?}"))?;
+        let lane_head = lane_head.trim();
+        if lane_head.is_empty() {
+            return Err(format!("cited lane {lane:?} has no committed history"));
+        }
+        let covered = std::process::Command::new("git")
+            .args(["merge-base", "--is-ancestor", lane_head, receipt_head])
+            .current_dir(root)
+            .status()
+            .map_err(|error| {
+                format!("cannot compare receipt HEAD to cited lane {lane:?}: {error}")
+            })?;
+        if !covered.success() {
+            return Err(format!(
+                "receipt HEAD {receipt_head} is not at or after cited lane {lane:?} commit {lane_head}"
+            ));
+        }
+    }
+    let current_head = std::process::Command::new("git")
+        .args(["rev-parse", "--verify", "HEAD^{commit}"])
+        .current_dir(root)
+        .output()
+        .map_err(|error| format!("cannot read current HEAD for receipt admission: {error}"))?;
+    let current_head = String::from_utf8(current_head.stdout)
+        .map_err(|_| "git returned non-UTF-8 for current HEAD".to_string())?;
+    let current_head = current_head.trim();
+    if current_head.is_empty() {
+        return Err("current HEAD has no commit for receipt admission".to_string());
+    }
+    let reachable = std::process::Command::new("git")
+        .args(["merge-base", "--is-ancestor", receipt_head, current_head])
+        .current_dir(root)
+        .status()
+        .map_err(|error| format!("cannot compare receipt HEAD to current HEAD: {error}"))?;
+    if !reachable.success() {
+        return Err(format!(
+            "receipt HEAD {receipt_head} is not reachable from current HEAD {current_head}"
+        ));
+    }
+    Ok(())
+}
+
+fn check_level_bars(
+    root: &Path,
+    entries: &[Entry],
+    violations: &mut Vec<Violation>,
+    decisions: &mut Vec<PolicyNote>,
+) {
     for entry in entries {
         let Some(index) = level_index(&entry.level) else {
             continue;
@@ -688,7 +856,9 @@ fn check_level_bars(entries: &[Entry], violations: &mut Vec<Violation>) {
                 ),
             ));
         }
-        // L3+ : must cite an e2e lane.
+        // L3+ : must cite an e2e lane and a retained receipt for this exact
+        // capability stage. A script exists only as an intention until its
+        // recorded run proves the stage executed at a current-enough HEAD.
         if index >= 2 && !entry.kinds.contains("lane") {
             violations.push(violation(
                 &entry.id,
@@ -698,6 +868,44 @@ fn check_level_bars(entries: &[Entry], violations: &mut Vec<Violation>) {
                     entry.id, entry.level
                 ),
             ));
+        }
+        if index >= 2 && entry.receipts.is_empty() {
+            violations.push(violation(
+                &entry.id,
+                format!(
+                    "capability {:?} claims {} but cites no `receipt` evidence; L3 and above \
+                     require a retained executed-stage receipt",
+                    entry.id, entry.level
+                ),
+            ));
+        }
+        if index >= 2 {
+            for receipt in &entry.receipts {
+                let verdict = std::fs::read_to_string(root.join(&receipt.path))
+                    .map_err(|error| format!("cannot read receipt {:?}: {error}", receipt.path))
+                    .and_then(|source| receipt_stage_run(&source, &entry.id, &receipt.stage))
+                    .and_then(|run| {
+                        receipt_head_covers_lanes(root, &run.head, &run.script, &entry.lanes)?;
+                        Ok(run)
+                    });
+                match verdict {
+                    Ok(run) => decisions.push(note(
+                        &entry.id,
+                        "executed-receipt",
+                        format!(
+                            "L3 receipt={} HEAD={} stage={} verdict=executed",
+                            receipt.path, run.head, receipt.stage
+                        ),
+                    )),
+                    Err(error) => violations.push(violation(
+                        &entry.id,
+                        format!(
+                            "capability {:?} L3 receipt {:?} stage {:?} is not admitted: {error}",
+                            entry.id, receipt.path, receipt.stage
+                        ),
+                    )),
+                }
+            }
         }
         // L4+ : must cite corpus validation.
         if index >= 3 && !entry.kinds.contains("corpus") {
@@ -831,7 +1039,7 @@ pub fn check_maturity(root: &Path) -> MaturityReport {
         decisions.extend(projection.decisions);
     }
     resolve_refs(root, &source, &mut violations);
-    check_level_bars(&entries, &mut violations);
+    check_level_bars(root, &entries, &mut violations, &mut decisions);
     check_transitions(root, &entries, &mut decisions);
 
     let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
@@ -966,9 +1174,12 @@ mod tests {
                 crates: vec!["fs-cap".to_string()],
                 notes: "Boundary".to_string(),
                 kinds: kinds.iter().map(|k| (*k).to_string()).collect(),
+                lanes: Vec::new(),
+                receipts: Vec::new(),
             }];
             let mut v = Vec::new();
-            check_level_bars(&entries, &mut v);
+            let mut decisions = Vec::new();
+            check_level_bars(Path::new("."), &entries, &mut v, &mut decisions);
             v
         };
         assert!(bar("L1", &[]).is_empty(), "L1 needs no test evidence");
@@ -989,6 +1200,159 @@ mod tests {
                 .iter()
                 .any(|x| x.detail.contains("support policy"))
         );
+    }
+
+    #[test]
+    fn l3_receipt_requires_its_capability_stage_to_be_executed() {
+        let root =
+            std::env::temp_dir().join(format!("fsim-maturity-receipt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("scripts/e2e")).unwrap();
+        std::fs::write(root.join("scripts/e2e/cooling_01.sh"), "#!/bin/sh\n").unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&root)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "maturity-test@example.invalid"]);
+        git(&["config", "user.name", "maturity-test"]);
+        git(&["add", "scripts/e2e/cooling_01.sh"]);
+        git(&["commit", "-qm", "lane"]);
+        let lane_head = git(&["rev-parse", "HEAD"]);
+
+        let mut parse_violations = Vec::new();
+        let entries = parse_registry(
+            &registry(
+                "L3",
+                r#"{"kind":"test","ref":"xtask/src/maturity.rs::l3_receipt_requires_its_capability_stage_to_be_executed"},{"kind":"lane","ref":"scripts/e2e/cooling_01.sh"},{"kind":"receipt","ref":"spine-e2e-summary.json","stage":"conduction"}"#,
+            ),
+            "synthetic",
+            &mut parse_violations,
+        );
+        assert!(
+            parse_violations.is_empty(),
+            "synthetic registry: {parse_violations:?}"
+        );
+        let mut entries = entries;
+        entries[0].receipts[0].path = "receipt.json".to_string();
+
+        let missing_stage = format!(
+            r#"{{
+            "schema":"frankensim-spine-e2e-receipt-v1",
+            "run":{{"head_sha":"{lane_head}","script":"scripts/e2e/cooling_01.sh"}},
+            "stages":[{"capability":"a.b","stage":"flow","status":"executed"}]
+        }}"#
+        );
+        std::fs::write(root.join("receipt.json"), missing_stage).unwrap();
+        let mut violations = Vec::new();
+        let mut decisions = Vec::new();
+        check_level_bars(&root, &entries, &mut violations, &mut decisions);
+        assert!(
+            violations.iter().any(|violation| violation
+                .detail
+                .contains("does not list capability \"a.b\" stage \"conduction\" as executed")),
+            "missing stage must be a gate violation: {violations:?}"
+        );
+
+        let executed = format!(
+            r#"{{
+            "schema":"frankensim-spine-e2e-receipt-v1",
+            "run":{{"head_sha":"{lane_head}","script":"scripts/e2e/cooling_01.sh"}},
+            "stages":[{"capability":"a.b","stage":"conduction","status":"executed"}]
+        }}"#
+        );
+        std::fs::write(root.join("receipt.json"), &executed).unwrap();
+        let mut violations = Vec::new();
+        let mut decisions = Vec::new();
+        check_level_bars(&root, &entries, &mut violations, &mut decisions);
+        assert!(
+            violations.is_empty(),
+            "executed stage must pass the maturity gate: {violations:?}"
+        );
+        assert_eq!(
+            decisions
+                .iter()
+                .filter(|decision| decision.verdict == "executed-receipt")
+                .count(),
+            1,
+            "executed stage must emit one receipt decision: {decisions:?}"
+        );
+
+        let wrong_script =
+            executed.replace("scripts/e2e/cooling_01.sh", "scripts/e2e/unrelated.sh");
+        std::fs::write(root.join("receipt.json"), wrong_script).unwrap();
+        let mut violations = Vec::new();
+        let mut decisions = Vec::new();
+        check_level_bars(&root, &entries, &mut violations, &mut decisions);
+        assert!(
+            violations
+                .iter()
+                .any(|violation| violation.detail.contains("run.script")),
+            "a receipt from another script must be a gate violation: {violations:?}"
+        );
+
+        git(&["checkout", "-qb", "foreign"]);
+        std::fs::write(root.join("foreign"), "divergent receipt\n").unwrap();
+        git(&["add", "foreign"]);
+        git(&["commit", "-qm", "foreign receipt"]);
+        let foreign_head = git(&["rev-parse", "HEAD"]);
+        git(&["checkout", "-q", "main"]);
+        std::fs::write(
+            root.join("receipt.json"),
+            executed.replace(&lane_head, &foreign_head),
+        )
+        .unwrap();
+        let mut violations = Vec::new();
+        let mut decisions = Vec::new();
+        check_level_bars(&root, &entries, &mut violations, &mut decisions);
+        assert!(
+            violations
+                .iter()
+                .any(|violation| violation.detail.contains("not reachable from current HEAD")),
+            "a divergent receipt HEAD must be a gate violation: {violations:?}"
+        );
+
+        let foreign_schema =
+            executed.replace("frankensim-spine-e2e-receipt-v1", "unadmitted-receipt-v1");
+        std::fs::write(root.join("receipt.json"), foreign_schema).unwrap();
+        let mut violations = Vec::new();
+        let mut decisions = Vec::new();
+        check_level_bars(&root, &entries, &mut violations, &mut decisions);
+        assert!(
+            violations
+                .iter()
+                .any(|violation| violation.detail.contains("is not the admitted")),
+            "foreign receipt schema must be a gate violation: {violations:?}"
+        );
+
+        let duplicate_stage = r#"{
+            "schema":"frankensim-spine-e2e-receipt-v1",
+            "run":{"head_sha":"0123456789abcdef0123456789abcdef01234567","script":"scripts/e2e/cooling_01.sh"},
+            "stages":[
+                {"capability":"a.b","stage":"conduction","status":"executed"},
+                {"capability":"a.b","stage":"conduction","status":"failed"}
+            ]
+        }"#;
+        std::fs::write(root.join("receipt.json"), duplicate_stage).unwrap();
+        let mut violations = Vec::new();
+        let mut decisions = Vec::new();
+        check_level_bars(&root, &entries, &mut violations, &mut decisions);
+        assert!(
+            violations
+                .iter()
+                .any(|violation| violation.detail.contains("more than once")),
+            "duplicate stage rows must be a gate violation: {violations:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -1062,6 +1426,8 @@ mod tests {
                 crates: vec!["fs-z".to_string()],
                 notes: "Experimental boundary".to_string(),
                 kinds: BTreeSet::new(),
+                lanes: Vec::new(),
+                receipts: Vec::new(),
             },
             Entry {
                 id: "a.first".to_string(),
@@ -1070,6 +1436,8 @@ mod tests {
                 crates: vec!["fs-a".to_string(), "fs-b".to_string()],
                 notes: "Verified against A | B".to_string(),
                 kinds: BTreeSet::from(["test".to_string()]),
+                lanes: Vec::new(),
+                receipts: Vec::new(),
             },
         ];
         let generated = render_readme_matrix(&entries);
@@ -1100,6 +1468,8 @@ mod tests {
                 crates: vec!["fs-a".to_string()],
                 notes: String::new(),
                 kinds: BTreeSet::new(),
+                lanes: Vec::new(),
+                receipts: Vec::new(),
             },
             Entry {
                 id: "b".to_string(),
@@ -1108,6 +1478,8 @@ mod tests {
                 crates: vec!["fs-b".to_string()],
                 notes: String::new(),
                 kinds: BTreeSet::new(),
+                lanes: Vec::new(),
+                receipts: Vec::new(),
             },
         ];
         let summary = concat!(
@@ -1156,8 +1528,9 @@ mod tests {
             report
                 .decisions
                 .iter()
-                .any(|note| note.verdict == "inventory"),
-            "an inventory note is always emitted"
+                .any(|note| note.verdict == "inventory" && note.detail.contains("L1=3 L2=12 L3=0")),
+            "the live registry must report the demoted L1=3 L2=12 L3=0 inventory: {:?}",
+            report.decisions
         );
     }
 }
