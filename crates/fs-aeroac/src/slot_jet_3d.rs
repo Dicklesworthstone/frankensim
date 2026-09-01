@@ -662,6 +662,64 @@ pub fn classify_rung(
     })
 }
 
+/// Pair-average a per-step force record: `y[k] = (x[2k] + x[2k+1]) / 2`.
+///
+/// The LBM bounce-back plate exchanges momentum in a two-step parity
+/// pattern, which puts a numerical line at the temporal-Nyquist bin of
+/// the raw record (executed on this rig at rate 1.60: peak bin 4095 of
+/// 4096). Non-overlapping pair averaging annihilates every period-2
+/// component exactly (`(x + (-x)) / 2 = 0`), halves the sample rate so
+/// the new Nyquist is the old quarter-rate, and leaves a tone at
+/// Strouhal `St` at the same `St` with the bin width doubled. It is a
+/// disclosed measurement filter, not a change to the physics: the
+/// retained checkpoint still carries the raw record.
+///
+/// # Errors
+/// [`AeroacError::InvalidParameter`] when the record is not an even
+/// length of at least 128 (so the halved record still admits the
+/// spectrum pipeline's `>= 64` floor).
+pub fn parity_filtered_force_series(force_series: &[[f64; 2]]) -> Result<Vec<[f64; 2]>, AeroacError> {
+    if force_series.len() < 128 || !force_series.len().is_multiple_of(2) {
+        return Err(AeroacError::InvalidParameter {
+            what: "parity filter needs an even force record of at least 128 samples",
+        });
+    }
+    Ok(force_series
+        .chunks_exact(2)
+        .map(|pair| {
+            [
+                0.5 * (pair[0][0] + pair[1][0]),
+                0.5 * (pair[0][1] + pair[1][1]),
+            ]
+        })
+        .collect())
+}
+
+/// [`classify_rung`] on the parity-filtered record (see
+/// [`parity_filtered_force_series`]): the same pipeline, the same
+/// classifier thresholds, half the record, double the Strouhal bin
+/// width (disclosed on the row). Use it to read the physical content
+/// under a Nyquist-edge artifact; the raw classification stays the
+/// primary receipt.
+///
+/// # Errors
+/// Filter refusals and the pipeline refusals of [`classify_rung`].
+pub fn classify_rung_parity_filtered(
+    run: &SlotJet3dRun,
+    cfg: &SlotJet3dConfig,
+) -> Result<SlotJet3dRung, AeroacError> {
+    let filtered = SlotJet3dRun {
+        force_series: parity_filtered_force_series(&run.force_series)?,
+        diagnostics: SlotJet3dDiagnostics {
+            record_len: run.diagnostics.record_len / 2,
+            strouhal_bin_width: run.diagnostics.strouhal_bin_width * 2.0,
+            ..run.diagnostics.clone()
+        },
+        scope: run.scope,
+    };
+    classify_rung(&filtered, cfg)
+}
+
 impl SlotJet3dRung {
     /// One deterministic JSONL receipt line (schema
     /// `fs-aeroac.slot-jet-3d.rung/v1`). Field order is pinned; the
