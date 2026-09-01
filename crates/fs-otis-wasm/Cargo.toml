@@ -1,0 +1,25 @@
+[package]
+name = "fs-otis-wasm"
+version = "0.0.1"
+edition = "2024"
+publish = false
+description = "Browser boundary for the source-bounded US 31,128 hoisting-apparatus topology."
+
+[workspace]
+
+[lib]
+name = "fs_otis_wasm"
+crate-type = ["cdylib", "rlib"]
+
+[package.metadata.frankensim]
+layer = "L6"
+
+[dependencies]
+fs-mbd = { path = "../fs-mbd" }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"

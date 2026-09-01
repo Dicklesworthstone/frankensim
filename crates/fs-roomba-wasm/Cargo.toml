@@ -1,0 +1,25 @@
+[package]
+name = "fs-roomba-wasm"
+version = "0.0.1"
+edition = "2024"
+publish = false
+description = "Browser boundary for the source-bounded US 6,594,844 optical redirect composition."
+
+[workspace]
+
+[lib]
+name = "fs_roomba_wasm"
+crate-type = ["cdylib", "rlib"]
+
+[package.metadata.frankensim]
+layer = "L6"
+
+[dependencies]
+fs-mbd = { path = "../fs-mbd" }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"

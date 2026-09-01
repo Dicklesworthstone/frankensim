@@ -40,6 +40,12 @@ adjoints.
   `WorkWindow` refuses duplicate caller keys,
   providing one domain-level exactly-once work receipt before the coupling
   driver supplies its chosen closed accounting chart.
+- `lc::step_quarter_wave`: a lossless distributed-line coordinate transform.
+  `QuarterWaveParams` admits disturbance frequency [Hz], propagation speed
+  along the circuit [m/s], and developed conductor length [m]. The result
+  retains wavelength, quarter-wave target, signed length/phase errors,
+  electrical length, length ratio, and `abs(sin(beta*l))` as a normalized
+  standing-wave profile only. It does not promote that profile into volts.
 - `bdm` module: `cell_basis` builds the per-cell BDM1 basis (all of
   P1², 6 dofs = mean + signed-arclength normal moments per edge,
   BOTH against the global edge normal and orientation — orientation
@@ -147,9 +153,19 @@ counts); chunked Cx polling belongs to the fs-exec driver layer.
 
 ## Feature flags
 
-None.
+- `continuum` (default): the CFD, ALE, gas-film, and reduced-aerodynamics
+  surfaces with their numerical dependencies.
+- `quarter-wave` (default): the dependency-free distributed-line coordinate
+  transform. Browser boundaries that only need this law may disable default
+  features and select `quarter-wave`, avoiding unrelated continuum solvers and
+  runtime infrastructure without copying the equation.
 
 ## Conformance tests
+
+The `lc` unit tests reproduce Tesla's printed 925 Hz, 185,000 mi/s,
+200-mile-wavelength, 50-mile-quarter-wave example after exact mile-to-metre
+conversion. A second test establishes the inverse frequency/quarter-length
+relation without adding a device-specific coil model.
 
 `tests/battery.rs`: flux-001 basis exactness + conformity; flux-002
 Stokes MMS orders + exact divergence; flux-003 pressure-robustness
@@ -170,6 +186,12 @@ work; aero-009 hostile thin-gap/target-fit refusal; aero-014 forged wrench,
 power, and receipt-identity refusal.
 
 ## No-claim boundaries
+
+The `lc` quarter-wave result is not an absolute-voltage, current, energy,
+coupling, quality-factor, loss, load, air-breakdown, corona, or streamer-length
+prediction. Those require independently sourced boundary data and owning
+physics. `remote_terminal_profile_fraction` is dimensionless standing-wave
+geometry and must never be labelled as volts or discharge reach.
 
 - Turbulence: NO LES/RANS closure ships here and nothing pretends
   otherwise; the DG dissipation is a numerical property, not a

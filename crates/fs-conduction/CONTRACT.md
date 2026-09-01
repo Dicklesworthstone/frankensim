@@ -7,6 +7,12 @@
 
 ## Purpose and layer
 
+`incandescent` also exposes a deliberately lumped steady balance for a
+declared filament operating point: `V²/R = εσA(T⁴ - T_ambient⁴)`. It composes
+the crate-owned Stefan-Boltzmann constant with explicit electrical and geometry
+inputs. It does not infer carbon resistance, emissivity, surface area, lead
+conduction, gas conduction, lifetime, or visible-light efficacy.
+
 Assemble and solve the STEADY heat-conduction equation on `fs-feec` tet
 complexes, with anisotropic and temperature-dependent conductivity from
 `fs-matdb` cards whose query receipts travel with the solve. Layer: **L3**

@@ -11,14 +11,22 @@
 //! and LES closures are recorded successors with honesty labels —
 //! no turbulence model ships here, and nothing pretends otherwise.
 
+#[cfg(feature = "continuum")]
 pub mod ale;
+#[cfg(feature = "continuum")]
 pub mod bdm;
+#[cfg(feature = "continuum")]
 pub mod gas_film;
+#[cfg(feature = "quarter-wave")]
 pub mod lc;
+#[cfg(feature = "continuum")]
 pub mod ns;
+#[cfg(feature = "continuum")]
 pub mod reduced_aero;
+#[cfg(feature = "continuum")]
 pub mod trimesh;
 
+#[cfg(feature = "continuum")]
 pub use gas_film::{
     ContactExclusionMask, GasFilmApplicability, GasFilmBoundaryTopology, GasFilmBudget,
     GasFilmCheckpoint, GasFilmError, GasFilmGrid1d, GasFilmIdentity, GasFilmInput,
@@ -26,7 +34,9 @@ pub use gas_film::{
     MovingWallInput, RoughnessPolicy, SlipPolicy, isothermal_compressible_reynolds_model_id,
     solve_isothermal_gas_film_1d,
 };
+#[cfg(feature = "continuum")]
 pub use ns::{FluxParams, FluxSolution, FluxSystem};
+#[cfg(feature = "continuum")]
 pub use reduced_aero::{
     AlternativeWrenchSet, ApplicabilityEnvelope, BodyKinematics, CandidateWrench, ClosedRange,
     ComponentWrenches, ContributionFamily, CorrelationIdentity, CorrelationUncertainty,
@@ -34,6 +44,7 @@ pub use reduced_aero::{
     OrientationRateDamping, ReducedAeroComponents, ReducedAeroError, ReducedAeroInput,
     ReducedAeroModel, RotationalSkinFriction, SurfaceRoughness, Vec3, WorkReceipt, WorkWindow,
 };
+#[cfg(feature = "continuum")]
 pub use trimesh::TriMesh;
 
 /// Crate version, re-exported for provenance stamping.

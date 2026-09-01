@@ -1,0 +1,28 @@
+[package]
+name = "fs-edison-wasm"
+version = "0.0.1"
+edition = "2024"
+publish = false
+description = "Browser boundary for the US 223,898 declared incandescent filament balance."
+
+[workspace]
+
+[lib]
+name = "fs_edison_wasm"
+crate-type = ["cdylib", "rlib"]
+
+[package.metadata.frankensim]
+layer = "L6"
+
+[dependencies]
+fs-conduction = { path = "../fs-conduction" }
+# fs-conduction reaches the fs-exec cone; wasm32 must select one canonical
+# asupersync browser profile explicitly.
+asupersync = { path = "../../../asupersync", default-features = false, features = ["wasm-browser-prod"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"

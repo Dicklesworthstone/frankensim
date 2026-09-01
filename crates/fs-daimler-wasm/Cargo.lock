@@ -15,15 +15,30 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
-name = "fs-flux"
+name = "fs-daimler-wasm"
+version = "0.0.1"
+dependencies = [
+ "fs-mbd",
+ "wasm-bindgen",
+]
+
+[[package]]
+name = "fs-ga"
+version = "0.0.1"
+dependencies = [
+ "fs-math",
+]
+
+[[package]]
+name = "fs-math"
 version = "0.0.1"
 
 [[package]]
-name = "fs-tesla-wasm"
+name = "fs-mbd"
 version = "0.0.1"
 dependencies = [
- "fs-flux",
- "wasm-bindgen",
+ "fs-ga",
+ "fs-math",
 ]
 
 [[package]]

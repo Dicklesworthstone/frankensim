@@ -6,8 +6,8 @@ state of unrelated in-progress native crates.
 
 ## Purpose and layer
 
-The single boundary between the Tesla Coil museum page (browser JS) and
-the simulation plane (`fs-flux` lumped LC step), compiled to
+The single boundary between the Tesla transformer museum page (browser JS) and
+the simulation plane (`fs-flux` distributed-line step), compiled to
 `wasm32-unknown-unknown`. It exposes one step function over the
 `fs_flux::lc` kernel and renders its result as one flat JSON record.
 Native builds compile the same pure function for tests; `wasm-bindgen` is
@@ -18,12 +18,12 @@ dependency-clean.
 
 | Entry | Kind | Contract |
 |---|---|---|
-| `tesla_coil_step(resonant_freq_khz, input_kv, spark_gap_mm, q_factor) -> String` | wasm + native | Admits one bounded positive finite input tuple, executes one deterministic Tesla-coil LC step through `fs_flux::lc::step_tesla_coil`, and returns either `{"ok":{...}}` or a typed `{"refusal":{...}}` envelope. |
+| `tesla_transformer_step(frequency_hz, propagation_speed_mps, conductor_length_m) -> String` | wasm + native | Admits one bounded positive finite SI tuple, executes `fs_flux::lc::step_quarter_wave`, and returns either `{"ok":{...}}` or a typed `{"refusal":{...}}` envelope. |
 
 ## Invariants
 
 1. **Shape stability.** The emitted record keeps exactly the fields of
-   `TeslaCoilResult` under their struct names inside an `"ok"` object; no
+   `QuarterWaveResult` under their struct names inside an `"ok"` object; no
    field is dropped, renamed, or reordered semantically by the renderer.
 2. **Dependency purity.** Runtime dependencies are the workspace crate
    `fs-flux` only (Decalogue P1); serialization is explicit formatting,
@@ -43,7 +43,9 @@ ranked repairs. `non-finite-input` covers NaN and infinity;
 `input-outside-domain` covers non-positive values and the documented safety
 caps; `non-finite-output` catches a broken downstream result;
 `output-outside-domain` catches zero or negative output. The admitted
-maximums are 10,000 kHz, 1,000 kV, 1,000 mm spark gap, and Q of 1,000,000.
+maximums are 1 GHz, 400,000,000 m/s propagation speed, and 1,000,000,000 m
+developed conductor length. The speed cap is a boundary guard, not permission
+to interpret a superluminal value as physical.
 
 ## Determinism class
 
@@ -68,15 +70,16 @@ None. The wasm32 binding is selected by target architecture
 
 ## Conformance tests
 
-Native unit tests exercise a valid result, non-finite and non-positive input
-refusals, lower and upper admission boundaries, underflowed output refusal,
-and ranked repairs. The fs-flux kernel tests and dependency-policy/contract
-gates remain complementary evidence.
+Native unit tests exercise Tesla's printed quarter-wave example, non-finite and
+non-positive input refusals, upper admission boundaries, underflowed output
+refusal, and ranked repairs. The fs-flux inverse-frequency test and
+dependency-policy/contract gates remain complementary evidence.
 
 ## No-claim boundaries
 
-This crate is a presentation seam. It makes no claim that the embedded
-LC-step model is validated, that its lumped constants match any measured
-coil, or that the rendered numbers carry uncertainty bounds. Physics
-claims belong to `fs-flux`'s own contract and evidence artifacts — never
-to this renderer.
+This crate is a presentation seam. It computes only distributed wavelength,
+quarter-wave target, electrical length, signed mismatch, and normalized
+standing-wave profile. It makes no claim about absolute voltage, current,
+energy, impedance, coupling, Q, loss, load, air breakdown, corona, or streamer
+length. Physics claims belong to `fs-flux`'s contract and evidence artifacts —
+never to this renderer.
