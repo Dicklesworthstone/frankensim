@@ -5,11 +5,14 @@
 use fs_aeroac::jetcard::{
     CardAuthority, CardResidual, JET_CARD_SCHEMA, JetCard, JetCardClaim, MeanJetProfile,
     jet_labium_fingerprint, mint_broadband_card, mint_refusal_boundary_card,
-    mint_tonal_interim_card, momentum_thickness_smoothed_tophat, staging_rig_config,
+    mint_tonal_interim_card, momentum_thickness_smoothed_tophat, peak_at_nyquist_edge,
+    staging_rig_config,
 };
+use fs_aeroac::jetlab::transverse_force_spectrum;
 use fs_aeroac::noisetable::N_BANDS;
 use fs_aeroac::slot_jet_3d::{
-    SWEEP_HEADER_SCHEMA, SlotJet3dRung, SweepReceiptRow, parse_sweep_receipts,
+    SWEEP_HEADER_SCHEMA, SlotJet3dRung, SweepReceiptRow, parity_filtered_force_series,
+    parse_sweep_receipts,
 };
 use fs_aeroac::{AeroacError, SCOPE_STATEMENT};
 
@@ -354,6 +357,67 @@ fn jc_011_sweep_receipt_file_parses_typed_rows_and_refuses_foreign_ones() {
     assert!(parse_sweep_receipts(&late_header).is_err());
     let foreign = format!("{header}\n{{\"schema\":\"fs-aeroac.somebody-else/v1\",\"x\":1}}\n");
     assert!(parse_sweep_receipts(&foreign).is_err());
+}
+
+#[test]
+fn jc_013_nyquist_edge_peaks_are_parity_artifacts_and_cannot_back_a_card() {
+    // Executed on the rig (rate 1.60, Re 4.8): flatness 1.2e-15 with the
+    // peak in bin 4095 of 4096. That "tone" is the bounce-back parity
+    // artifact; the minters must refuse it whatever its flatness says.
+    let mut edge = rung(4.8, true);
+    edge.peak_bin = 4095;
+    edge.strouhal = 4095.0 * edge.strouhal_bin_width;
+    assert!(peak_at_nyquist_edge(&edge, &profile()).expect("record recovers"));
+    let interior = rung(4.8, true);
+    assert!(!peak_at_nyquist_edge(&interior, &profile()).expect("record recovers"));
+    // A refusal-boundary card over two rungs refuses when one is the
+    // artifact rung (only one admitted rung remains).
+    let err = mint_refusal_boundary_card(
+        &[edge.clone(), rung(9.6, true)],
+        profile(),
+        7,
+        vec!["sweep receipts".to_owned()],
+    )
+    .expect_err("an artifact rung is not an admitted rung");
+    assert!(matches!(err, AeroacError::InvalidParameter { .. }));
+    // ...and a broadband card cannot be demonstrated by an artifact rung.
+    edge.tonal = false;
+    edge.flatness = 3.0e-3;
+    let err = mint_broadband_card(&[edge], profile(), [-3.0f64; N_BANDS], None, 1, vec![])
+        .expect_err("an artifact rung cannot demonstrate broadband");
+    assert!(matches!(err, AeroacError::InvalidParameter { .. }));
+    // The record-length recovery refuses a bin width that is not a
+    // power-of-two record on this profile.
+    let mut bogus = rung(4.8, true);
+    bogus.strouhal_bin_width = 1.0e-3;
+    assert!(peak_at_nyquist_edge(&bogus, &profile()).is_err());
+
+    // The parity filter on a synthetic record: a pure period-2 line
+    // vanishes exactly, while a low-Strouhal tone survives at the same
+    // Strouhal with the bin width doubled.
+    let n = 8192usize;
+    let tone_bin = 40usize;
+    let series: Vec<[f64; 2]> = (0..n)
+        .map(|i| {
+            #[allow(clippy::cast_precision_loss)]
+            let t = i as f64;
+            let parity = if i % 2 == 0 { 1.0 } else { -1.0 };
+            let tone = (2.0 * core::f64::consts::PI * tone_bin as f64 * t / n as f64).sin();
+            [0.0, 1.0e-3 * tone + 5.0e-2 * parity]
+        })
+        .collect();
+    let filtered = parity_filtered_force_series(&series).expect("even record");
+    assert_eq!(filtered.len(), n / 2);
+    let (_, raw_peak) = transverse_force_spectrum(&series, 2.5, 0.04, n / 8).expect("raw");
+    let (_, filtered_peak) =
+        transverse_force_spectrum(&filtered, 2.5, 0.04, n / 16).expect("filtered");
+    assert_eq!(raw_peak.bin, n / 2 - 1, "the raw record peaks at the Nyquist edge");
+    assert_eq!(filtered_peak.bin, tone_bin / 2, "the tone keeps its Strouhal at half the rate");
+    assert!(
+        (filtered_peak.strouhal - raw_peak.strouhal * (tone_bin as f64 / (n / 2 - 1) as f64)).abs()
+            < 1e-9
+    );
+    assert!(parity_filtered_force_series(&series[..127]).is_err());
 }
 
 /// Every archived per-rung receipt file in the tree parses; the
