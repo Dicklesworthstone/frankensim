@@ -698,11 +698,13 @@ pub fn parity_filtered_force_series(
 }
 
 /// [`classify_rung`] on the parity-filtered record (see
-/// [`parity_filtered_force_series`]): the same pipeline, the same
-/// classifier thresholds, half the record, double the Strouhal bin
-/// width (disclosed on the row). Use it to read the physical content
-/// under a Nyquist-edge artifact; the raw classification stays the
-/// primary receipt.
+/// [`parity_filtered_force_series`]): the same pipeline and classifier
+/// thresholds on half the samples at twice the sample period. The
+/// record DURATION is unchanged, so the Strouhal bin width is the raw
+/// one and the Nyquist Strouhal halves; the shared pipeline does not
+/// know the sample period, so its Strouhal is halved here. Use it to
+/// read the physical content under a Nyquist-edge artifact; the raw
+/// classification stays the primary receipt.
 ///
 /// # Errors
 /// Filter refusals and the pipeline refusals of [`classify_rung`].
@@ -714,12 +716,15 @@ pub fn classify_rung_parity_filtered(
         force_series: parity_filtered_force_series(&run.force_series)?,
         diagnostics: SlotJet3dDiagnostics {
             record_len: run.diagnostics.record_len / 2,
-            strouhal_bin_width: run.diagnostics.strouhal_bin_width * 2.0,
             ..run.diagnostics.clone()
         },
         scope: run.scope,
     };
-    classify_rung(&filtered, cfg)
+    let mut rung = classify_rung(&filtered, cfg)?;
+    // bin k of the halved record at sample period 2 is the frequency
+    // k / (2 n') = k / n of the raw record.
+    rung.strouhal *= 0.5;
+    Ok(rung)
 }
 
 impl SlotJet3dRung {

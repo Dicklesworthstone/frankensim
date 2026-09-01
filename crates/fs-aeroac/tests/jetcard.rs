@@ -396,7 +396,9 @@ fn jc_013_nyquist_edge_peaks_are_parity_artifacts_and_cannot_back_a_card() {
     // vanishes exactly, while a low-Strouhal tone survives at the same
     // Strouhal with the bin width doubled.
     let n = 8192usize;
-    let tone_bin = 40usize;
+    // Above both pipelines' fringe-transient guards (n/8 raw, n/16
+    // filtered) so the peak search admits it.
+    let tone_bin = 1100usize;
     let series: Vec<[f64; 2]> = (0..n)
         .map(|i| {
             #[allow(clippy::cast_precision_loss)]
@@ -416,15 +418,16 @@ fn jc_013_nyquist_edge_peaks_are_parity_artifacts_and_cannot_back_a_card() {
         n / 2 - 1,
         "the raw record peaks at the Nyquist edge"
     );
+    // Record duration is unchanged, so the tone keeps its bin INDEX in
+    // the halved record; the pipeline's Strouhal (which assumes unit
+    // sample period) is exactly twice the true one, which is what
+    // `classify_rung_parity_filtered` halves.
     assert_eq!(
-        filtered_peak.bin,
-        tone_bin / 2,
-        "the tone keeps its Strouhal at half the rate"
+        filtered_peak.bin, tone_bin,
+        "the tone keeps its bin index at half the rate"
     );
-    assert!(
-        (filtered_peak.strouhal - raw_peak.strouhal * (tone_bin as f64 / (n / 2 - 1) as f64)).abs()
-            < 1e-9
-    );
+    let true_strouhal = tone_bin as f64 / n as f64 * 2.0 * 2.5 / 0.04;
+    assert!((filtered_peak.strouhal * 0.5 - true_strouhal).abs() < 1e-9);
     assert!(parity_filtered_force_series(&series[..127]).is_err());
 }
 
