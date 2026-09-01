@@ -4,6 +4,56 @@
 Muon/Adam optimizers, deterministic weight codec, and training receipts. It
 does not own Unitree G1 rigid-body or contact dynamics.
 
+## Purpose and layer
+
+Layer L6 standalone policy-training support for the G1 browser product; it
+owns the transformer, PPO/GAE, optimizers, codec, and training receipts.
+
+## Public types and semantics
+
+The public surface re-exports `GaitTransformer`, `G1Env`, `PpoConfig`,
+`RunningNorm`, `Trajectory`, `MuonParam`, and `AdamParam`; the stand-in
+environment and checkpoint rules below define their product boundary.
+
+## Invariants
+
+Published stand-in checkpoints require a post-update deterministic greedy
+evaluation with nonzero policy-head norm, forward distance, and actuator work.
+
+## Error model
+
+The finalizer refuses legacy checkpoints lacking the required identity or any
+of those three publication facts; it does not relabel them.
+
+## Determinism class
+
+Training and export use explicit seeds and a length-prefixed little-endian f32
+codec; the documented focused gates check this boundary.
+
+## Cancellation behavior
+
+No cancellation behavior is documented for this standalone training contract.
+
+## Unsafe boundary
+
+No unsafe boundary is claimed by this contract.
+
+## Feature flags
+
+None are declared in the current manifest; `g1-learned` belongs to the sibling
+`fs-cmaes-viz-wasm` integration feature.
+
+## Conformance tests
+
+The standalone and owner-seam focused commands listed below are the current
+conformance gates.
+
+## No-claim boundaries
+
+A stand-in checkpoint is not learned humanoid locomotion, robust performance,
+hardware transfer, or superiority evidence without the additional receipts
+already specified below.
+
 ## Environment boundaries
 
 - `standin_env::StandinEnv` is the disclosed `action-causal-standin-v2`

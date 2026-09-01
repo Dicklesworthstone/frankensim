@@ -3312,7 +3312,7 @@ fn g0_conduction_stage_executes_declared_card_backed_contact() {
     let mut progress = Vec::new();
     let refusal = run_solve(&ledger, &gate, &mut clock, &decoded, &cards, &mut progress)
         .expect_err("contact solve completes and stops at the QoI gap");
-    assert_eq!(refusal.code, "cli-solve-stage-gap");
+    assert_eq!(refusal.code, "cli-solve-stage-gap", "TEMP-DIAG: {}", refusal.what);
     assert_eq!(refusal.stage, Some("qoi"));
 
     let run = refusal.run.expect("run");

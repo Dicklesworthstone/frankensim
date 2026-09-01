@@ -7,6 +7,58 @@ crate owns validation, admission, numeric packet transport, browser-specific
 resource limits, and the disclosed benchmark tasks. It owns no optimizer
 recurrence or independent robot mathematics.
 
+## Purpose and layer
+
+Layer L6 browser transport over `fs-dfo` and the named owner-composed G1 and
+household experiments; it owns packet admission and rendering data, not the
+underlying optimizer or robot mathematics.
+
+## Public types and semantics
+
+`PackedCmaSession`, `PackedG1WalkingEvaluator`, and
+`PackedManipulationEvaluator` exchange the versioned packets documented below;
+the wasm32 exports are their browser boundary.
+
+## Invariants
+
+Accepted asks and tells contain complete populations, only one ask is pending,
+and snapshots expose only state actually retained by the selected owner.
+
+## Error model
+
+Malformed or inadmissible packets return the documented seven-word typed
+refusal without trapping; a failed tell retains its pending population for a
+repair-and-retry.
+
+## Determinism class
+
+Deterministic within a target for the same valid packet sequence, inherited
+from the seeded `fs-dfo` sampling and tie-ordering contract.
+
+## Cancellation behavior
+
+None: this is synchronous browser transport and adds no cancellation or
+parallel execution protocol.
+
+## Unsafe boundary
+
+No unsafe boundary is claimed; the manifest forbids unsafe code.
+
+## Feature flags
+
+`g1-learned` enables the optional `fs-g1-train` transformer adapter.
+
+## Conformance tests
+
+The focused native, wasm32, browser-packet, replay, and UBS gates listed under
+Required gates exercise the declared packet and experiment contracts.
+
+## No-claim boundaries
+
+This adapter adds no restart strategy, generic objective, hardware-transfer,
+mesh-contact, or dense limited-memory diagnostic claim; the detailed limits
+remain stated in the existing ownership text below.
+
 ## Purpose and ownership
 
 A browser creates one optimizer session, asks for a complete candidate

@@ -4,6 +4,54 @@ Status: **v1 — live surface.** Browser boundary for the CMA-ES explainer
 site's continuous Lenia field. Own nested workspace; wasm-bindgen confined to
 wasm32; native builds stay dependency-clean.
 
+## Purpose and layer
+
+Layer L6 browser implementation of the explainer's Lenia display field and
+snapshot-seeded CMA-ES fitness evaluation.
+
+## Public types and semantics
+
+The wasm32 `lenia_*` exports initialize, evolve, render, snapshot, and evaluate
+the stateful field according to the documented buffer and JSON semantics.
+
+## Invariants
+
+The toroidal model, ring kernel, growth update, clamping, metrics, and frozen
+evaluation seed follow the stated site-fallback model.
+
+## Error model
+
+Invalid size, evaluation size, radius, scalar input, or missing initialization
+returns the listed typed refusal; inputs are not silently clamped.
+
+## Determinism class
+
+The same field state and scalar call sequence replay bitwise within a build;
+no wall-clock or entropy is used.
+
+## Cancellation behavior
+
+None: simulation stepping and evaluation are synchronous and no cancellation
+protocol is published.
+
+## Unsafe boundary
+
+No unsafe boundary is claimed; the manifest forbids unsafe code.
+
+## Feature flags
+
+None are declared in the current manifest.
+
+## Conformance tests
+
+The native and wasm32 gates listed below cover registry/state behavior,
+refusals, determinism, and FFT-versus-direct convolution equivalence.
+
+## No-claim boundaries
+
+This is a teaching/visualization surface, not a general spectral PDE solver;
+the TypeScript fallback remains the behavioral reference at its stated scale.
+
 ## Purpose
 
 Replace the site's O(N²·R²) direct-convolution TypeScript Lenia (capped at

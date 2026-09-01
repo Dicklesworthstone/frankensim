@@ -4,6 +4,53 @@ Status: **v1 — live surface.** Browser boundary for the CMA-ES explainer
 site's objective-landscape heatmaps. Own nested workspace; wasm-bindgen
 confined to wasm32; native builds stay dependency-clean.
 
+## Purpose and layer
+
+Layer L6 browser rasterizer for the explainer's objective-landscape heatmaps.
+
+## Public types and semantics
+
+The wasm32 exports `heatmap_render`, `heatmap_rgba_ptr`, `heatmap_rgba_len`,
+and `heatmap_version` have the buffer-lifetime and envelope semantics stated
+below.
+
+## Invariants
+
+Rasterization preserves the shared pixel mapping, normalization modes, and
+truncating color-ramp arithmetic used by the site's reference template.
+
+## Error model
+
+Unknown fields or modes, invalid scale, size, domain, or non-finite inputs
+return the listed refusal codes; the boundary does not silently clamp or trap.
+
+## Determinism class
+
+Pure deterministic rasterization: identical scalar inputs produce identical
+buffer bytes.
+
+## Cancellation behavior
+
+None: rendering is synchronous and this crate publishes no cancellation API.
+
+## Unsafe boundary
+
+No unsafe boundary is claimed; the manifest forbids unsafe code.
+
+## Feature flags
+
+None are declared in the current manifest.
+
+## Conformance tests
+
+The native, wasm32, and site parity checks listed below cover registry,
+orientation, refusal, determinism, and reference-template agreement.
+
+## No-claim boundaries
+
+This is a teaching/visualization surface, not a general plotting library; the
+site's JavaScript template remains its behavioral reference and fallback.
+
 ## Purpose
 
 Seven site components rasterize a 2D objective into a background canvas with

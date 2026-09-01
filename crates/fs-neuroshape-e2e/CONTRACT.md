@@ -98,6 +98,14 @@ mint here.
   critical point or minimum, much less uniqueness or a component count.
 - Deterministic (fixed net + grid; no RNG).
 
+## Error model
+
+`try_run_campaign` returns typed `CampaignError` for wrong network dimension or
+non-finite/out-of-range geometry, while `run_campaign` panics on those trusted
+programmer inputs. Grid construction and isocontour failures are retained as
+typed `SurfaceLocalization` outcomes in the report; they are never rewritten
+as valid-empty localization or certificate evidence.
+
 Total on the demo net; `eval_interval`/`classify_hessian` are total.
 `try_run_campaign` returns a typed `CampaignError` for a wrong input dimension or
 a non-finite/out-of-range geometric parameter; `run_campaign` panics on the same

@@ -4,6 +4,53 @@ Status: **v1 — live surface.** Browser boundary for the CMA-ES explainer
 site's parametric wing and bridge demo physics. Own nested workspace;
 wasm-bindgen confined to wasm32; native builds stay dependency-clean.
 
+## Purpose and layer
+
+Layer L6 browser surface for the explainer's parametric wing and bridge
+analytic evaluators, preserving the site's TypeScript fallback mathematics.
+
+## Public types and semantics
+
+`wing_eval`, `bridge_eval`, and `demo_physics_kernel_version` are the wasm32
+exports and return the versioned JSON envelopes documented below.
+
+## Invariants
+
+The exported formulas and display field names mirror the site's stated
+fallback model; inputs are validated before an envelope is produced.
+
+## Error model
+
+Non-finite or out-of-domain inputs, and non-finite calculated results, return
+the listed typed refusal envelope; inputs are never silently clamped.
+
+## Determinism class
+
+Deterministic for scalar inputs: no wall-clock or entropy is used.
+
+## Cancellation behavior
+
+None: each evaluator is a synchronous analytic calculation and this crate has
+no cancellation protocol.
+
+## Unsafe boundary
+
+No unsafe boundary is claimed; the manifest forbids unsafe code.
+
+## Feature flags
+
+None are declared in the current manifest.
+
+## Conformance tests
+
+The native and wasm32 gates listed below cover refusal, invariant, and stated
+model-behavior checks.
+
+## No-claim boundaries
+
+These are teaching and visualization surrogates, not certified structural or
+aeroelastic analysis, time integration, or FEA.
+
 ## Purpose
 
 Give the explainer site (cmaes_explainer) real FrankenSim-computed physics

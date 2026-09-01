@@ -1012,11 +1012,38 @@ pub fn resolve_conduction_interface_pairs(
         }
         match claims.as_slice() {
             [] => {
+                // TEMP-DIAG (NobleLion s93ej.3): dump the mismatch geometry.
+                let side_coords = mesh.boundary()[candidate.side_a]
+                    .vertices
+                    .map(|v| mesh.positions()[v as usize]);
+                let key_in_index: Vec<String> = index
+                    .keys()
+                    .filter(|(_, k)| *k == key)
+                    .map(|(t, _)| t.clone())
+                    .collect();
+                let near_joint: Vec<String> = index
+                    .keys()
+                    .filter(|(_, k)| {
+                        k.iter()
+                            .all(|p| f64::from_bits(p[0]) == 1.0)
+                    })
+                    .map(|(t, k)| {
+                        format!(
+                            "{t}@{:?}",
+                            k.map(|p| [
+                                f64::from_bits(p[0]),
+                                f64::from_bits(p[1]),
+                                f64::from_bits(p[2])
+                            ])
+                        )
+                    })
+                    .collect();
                 result.violations.push(violation(
                     "project-conduction-interface-undeclared",
                     format!(
-                        "coincident conduction boundary slots {} and {} have no uniquely oriented declared scenario interface",
-                        candidate.side_a, candidate.side_b
+                        "coincident conduction boundary slots {} and {} have no uniquely oriented declared scenario interface; DIAG side_a coords {:?}; targets holding this exact key: {:?}; index entries on the x=1 plane: {}",
+                        candidate.side_a, candidate.side_b, side_coords, key_in_index,
+                        near_joint.join(" | ")
                     ),
                     "declare and geometrically assign the interface between the two owning regions; no contact law is inferred",
                 ));

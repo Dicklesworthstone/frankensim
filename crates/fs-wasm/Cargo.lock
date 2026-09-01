@@ -51,7 +51,7 @@ checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
 
 [[package]]
 name = "asupersync"
-version = "0.4.9"
+version = "0.4.10"
 dependencies = [
  "aes-gcm",
  "asupersync-macros",
@@ -699,7 +699,9 @@ dependencies = [
 name = "fs-dfo"
 version = "0.0.1"
 dependencies = [
+ "fs-alloc",
  "fs-blake3",
+ "fs-exec",
  "fs-la",
  "fs-math",
  "fs-obs",
@@ -1221,13 +1223,13 @@ dependencies = [
  "fs-blake3",
  "fs-cutfem",
  "fs-exec",
+ "fs-ga",
  "fs-la",
  "fs-material",
  "fs-modal",
  "fs-scenario",
  "fs-solver",
  "fs-sparse",
- "fs-time",
 ]
 
 [[package]]
@@ -1291,19 +1293,6 @@ dependencies = [
 [[package]]
 name = "fs-tilelang-macros"
 version = "0.0.1"
-
-[[package]]
-name = "fs-time"
-version = "0.0.1"
-dependencies = [
- "fs-ad",
- "fs-blake3",
- "fs-exec",
- "fs-ga",
- "fs-la",
- "fs-math",
- "fs-solver",
-]
 
 [[package]]
 name = "fs-toleralloc"
@@ -1399,6 +1388,7 @@ name = "fs-voi"
 version = "0.0.1"
 dependencies = [
  "fs-evidence",
+ "fs-math",
 ]
 
 [[package]]
