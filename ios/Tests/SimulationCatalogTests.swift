@@ -53,6 +53,70 @@ final class SimulationCatalogTests: XCTestCase {
         }
     }
 
+    func testStartupPrefillCallbackDefersPlaybackUntilFourBuffersAreQueued() {
+        var schedule = PCMStreamSchedule(plan: .reedDemo)
+        for _ in 0..<(PCMStreamPlan.reedDemo.maximumQueuedBlocks - 1) {
+            XCTAssertTrue(schedule.reserveNextBlock())
+            XCTAssertFalse(schedule.isReadyToStartPlayback)
+        }
+        XCTAssertEqual(schedule.scheduledBlocks, 3)
+        XCTAssertEqual(schedule.queuedBlocks, 3)
+
+        XCTAssertTrue(schedule.reserveNextBlock())
+        XCTAssertEqual(schedule.queuedBlocks, 4)
+        XCTAssertTrue(schedule.isReadyToStartPlayback)
+        schedule.markPlaybackStarted()
+        XCTAssertTrue(schedule.playbackStarted)
+        XCTAssertFalse(schedule.isReadyToStartPlayback)
+    }
+
+    func testRefillAndDrainCallbacksCompleteFiniteStreamWithoutADevice() {
+        var schedule = PCMStreamSchedule(
+            plan: PCMStreamPlan(totalBlocks: 3, maximumQueuedBlocks: 2)
+        )
+        XCTAssertTrue(schedule.reserveNextBlock())
+        XCTAssertTrue(schedule.reserveNextBlock())
+        XCTAssertTrue(schedule.isReadyToStartPlayback)
+        schedule.markPlaybackStarted()
+        XCTAssertEqual(schedule.didDrainBlock(), .awaitingRefill)
+        XCTAssertTrue(schedule.reserveNextBlock())
+        XCTAssertEqual(schedule.didDrainBlock(), .awaitingRefill)
+        XCTAssertEqual(schedule.didDrainBlock(), .complete)
+        XCTAssertEqual(schedule.scheduledBlocks, 3)
+        XCTAssertEqual(schedule.drainedBlocks, 3)
+    }
+
+    func testStopCallbackDrainsAllProducedBuffersBeforeStopping() {
+        var schedule = PCMStreamSchedule(plan: .reedDemo)
+        for _ in 0..<PCMStreamPlan.reedDemo.maximumQueuedBlocks {
+            XCTAssertTrue(schedule.reserveNextBlock())
+        }
+        schedule.markPlaybackStarted()
+        schedule.requestStopAfterDrain()
+        XCTAssertEqual(schedule.didDrainBlock(), .awaitingRefill)
+        XCTAssertEqual(schedule.didDrainBlock(), .awaitingRefill)
+        XCTAssertEqual(schedule.didDrainBlock(), .awaitingRefill)
+        XCTAssertEqual(schedule.didDrainBlock(), .stopped)
+        XCTAssertFalse(schedule.reserveNextBlock())
+    }
+
+    func testEmptyQueueBeforeFiniteProductionCompletesIsStarvation() {
+        var schedule = PCMStreamSchedule(
+            plan: PCMStreamPlan(totalBlocks: 3, maximumQueuedBlocks: 1)
+        )
+        XCTAssertTrue(schedule.reserveNextBlock())
+        XCTAssertEqual(schedule.didDrainBlock(), .starved)
+    }
+
+    func testStaleCompletionCallbackIsRejectedAfterStreamRestart() {
+        var generation = PCMStreamGeneration()
+        let staleStreamID = generation.begin()
+        let replacementStreamID = generation.begin()
+
+        XCTAssertFalse(generation.accepts(staleStreamID))
+        XCTAssertTrue(generation.accepts(replacementStreamID))
+    }
+
     func testNativeBridgeRefusesAnUnknownCatalogID() async {
         let unknown = SimulationExperiment(
             id: .max,

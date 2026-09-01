@@ -365,6 +365,7 @@ Three discretization frontends share this machinery:
 1. **Body-fitted simplicial FEEC** [S] on MORPH's tet meshes.
 2. **CutFEM on SDFs** [F] — octree background grids (FrankenVDB-aligned) with cut cells at the zero level set, ghost-penalty stabilization for small-cut robustness, and aggregated-element fallback. **This is the marquee bridge**: level-set/SDF geometry is simulated with FEM-grade accuracy and *zero meshing*, which is what makes topology optimization loops (§9.5) run at interactive cadence. Non-uniform resolution comes free from the octree; the error estimator (§8.6) drives refinement.
 3. **Isogeometric analysis (IGA)** [S/F] — Galerkin directly on NURBS/B-spline spaces, multi-patch coupling via mortar methods; Kirchhoff–Love shells on spline surfaces (the right tool for thin aero skins and vessel walls). Geometry basis = analysis basis: the CAD→mesh information massacre simply never happens.
+   Status 2026-09-01: not started (`fs-iga` is a 1-D clamped B-spline Poisson fixture); retired from v1 by owner decision (bead frankensim-rc-root-q61wp.25); retained as [M] behind a consumer journey — see deferred epic frankensim-rc-root-q61wp.40.
 
 ### 8.2 Solid mechanics [S/F]
 
@@ -378,7 +379,10 @@ Multiple solvers, deliberately, because the flagship problems span regimes:
 - **Lattice Boltzmann (`fs-lbm`)** [S] — the many-core queen: D3Q19/D3Q27 on sparse FrankenVDB tiles, **cumulant/central-moment collision** for high-Re stability, interpolated (Bouzidi-type) curved boundaries sampled *directly from SDF charts*, octree grid refinement with rescaling, thermal double-population, non-Newtonian via local relaxation (power-law/Carreau — "a liquid of a given viscosity" is a parameter, including shear-dependent ones), and **free-surface LBM** (mass-tracking VOF-style) for pouring and sloshing. LBM is embarrassingly tile-parallel, bandwidth-bound with a precisely computable roofline (§14), and pairs perfectly with the substrate's Morton tiles. A *lattice-scaling assistant* automates the dx/dt/τ/Mach bookkeeping under stability constraints — a chronic source of human LBM error that agents should never be exposed to raw.
 - **Boundary elements + fast multipole (`fs-bem`, `fs-fmm`)** [F]: kernel-independent black-box FMM (Chebyshev interpolation based) driving Laplace BEM — potential-flow panel methods with Kutta condition and free wakes for O(N) exterior aerodynamics screening; elastostatic BEM later.
 - **Vortex particle methods** [F]: Lagrangian vorticity with FMM Biot–Savart, particle-strength-exchange viscosity, hybridized with the BEM surface solution — the natural tool for unsteady, wake-dominated flapping flight (§15.1).
+  Status 2026-09-01 (FMM-accelerated VPM with PSE and BEM hybridization): not started (`fs-vpm` is 2-D direct O(N²); `fs-fmm` is a uniform-depth Laplace FMM); retired from v1 by owner decision (bead frankensim-rc-root-q61wp.25); retained as [M] behind a consumer journey — see deferred epic frankensim-rc-root-q61wp.43.
 - Turbulence honesty: LES (Smagorinsky/WALE) on LBM and NS for resolved-eddy regimes; RANS-style closures only as clearly-labeled low-fidelity screens; the multi-fidelity optimizer (§9.7) is the system's answer to "LES everywhere is unaffordable," not wishful meshing.
+  Status 2026-09-01 (turbulence on a mesh): not started (the only RANS code is a 1-D channel fixture behind `fs-scenario`'s `rans-rung` feature); retired from v1 by owner decision (bead frankensim-rc-root-q61wp.25); retained as [M] behind a consumer journey — see deferred epic frankensim-rc-root-q61wp.41.
+  Status 2026-09-01 (compressible flow): not started (no compressible solver, Riemann solver, or shock capturing exists; `fs-thermochem` supplies 0-D gas state only); retired from v1 by owner decision (bead frankensim-rc-root-q61wp.25); retained as [M] behind a consumer journey — see deferred epic frankensim-rc-root-q61wp.42.
 
 ### 8.4 Multiphysics composition: port-Hamiltonian Dirac structures [F]
 
@@ -703,6 +707,8 @@ Geneva exit cannot precede the dry-tribology baseline. **Ratification note:**
 | P4 — Structures at scale | 34–44 | IGA + Kirchhoff–Love shells, fiber beams, ground-structure PDHG, Kanai–Tajimi + MLMC + e-stop | Frame flagship v1: fragility with anytime-valid stopping; NAFEMS shell suite green |
 | P5 — Aero stack | 44–56 | BEM+FMM+Kutta, vortex particles, Dirac coupling, SE(3) integrators, Koopman surrogates | Ornithopter flagship v1: screened→refined Pareto with e-raced generations live |
 | P6 — Certificates & self-optimization | 56–68 | SOS/Lasserre SDP, sheaf certificates promoted, conformal e-prediction hardened, §11.4 planner, diff-rendering | [M] features pass §13.2 or ship flagged-off; planner beats hand-allocated budgets on all three flagships |
+
+Status 2026-09-01: P0 open (performance bars unmet, re-baselining under rc-root-q61wp.28); P1 open; P2 open (marquee un-gate in progress, rc-root-q61wp.16); P3–P6 not started. The P4 IGA-shell and P5 FMM-VPM scope items were retired from v1 by owner decision (rc-root-q61wp.25; deferred epics .40 and .43).
 
 Phases overlap deliberately (geometry hardens while physics starts); each phase gate is a Gauntlet state, not a date. Nothing [M] gates anything [S].
 

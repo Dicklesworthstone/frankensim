@@ -52,6 +52,8 @@ enum PCMPlaybackError: LocalizedError {
     case malformedPayload(String)
     case bufferAllocation
     case engineStart(String)
+    case streamScheduling
+    case starved
 
     var errorDescription: String? {
         switch self {
@@ -61,6 +63,8 @@ enum PCMPlaybackError: LocalizedError {
         case .malformedPayload(let reason): "Invalid PCM payload: \(reason)."
         case .bufferAllocation: "The audio engine could not allocate a PCM buffer."
         case .engineStart(let reason): "The audio engine could not start: \(reason)"
+        case .streamScheduling: "The PCM stream exceeded its bounded refill schedule."
+        case .starved: "The Rust PCM producer did not refill the audio queue before it drained."
         }
     }
 }
@@ -89,15 +93,163 @@ struct PCMBlock: Sendable {
     }
 }
 
-/// Real AVAudioEngine consumer for the Rust PCM packet. `scheduledBuffer`
-/// retains the buffer for the node's complete scheduled lifetime; it is only
-/// replaced after `stop()` interrupts the preceding block.
+/// A finite, one-second reed demonstration. Four queued 10 ms blocks give the
+/// non-real-time Rust producer 40 ms of refill slack without unbounded audio
+/// buffering or a device-dependent scheduling policy.
+struct PCMStreamPlan: Sendable, Equatable {
+    static let reedDemo = PCMStreamPlan(totalBlocks: 100, maximumQueuedBlocks: 4)
+
+    let totalBlocks: Int
+    let maximumQueuedBlocks: Int
+
+    init(totalBlocks: Int, maximumQueuedBlocks: Int) {
+        precondition(totalBlocks > 0 && maximumQueuedBlocks > 0)
+        self.totalBlocks = totalBlocks
+        self.maximumQueuedBlocks = maximumQueuedBlocks
+    }
+}
+
+enum PCMStreamDrain: Equatable {
+    case awaitingRefill
+    case complete
+    case starved
+    case stopped
+}
+
+/// Device-independent bookkeeping for the bounded player queue. It is the
+/// deterministic test seam for initial prefill, recurring refills, completion,
+/// explicit drain, and starvation detection.
+struct PCMStreamSchedule: Equatable {
+    let plan: PCMStreamPlan
+    private(set) var scheduledBlocks = 0
+    private(set) var drainedBlocks = 0
+    private(set) var queuedBlocks = 0
+    private(set) var stopping = false
+    private(set) var playbackStarted = false
+
+    init(plan: PCMStreamPlan) {
+        self.plan = plan
+    }
+
+    mutating func reserveNextBlock() -> Bool {
+        guard !stopping,
+              scheduledBlocks < plan.totalBlocks,
+              queuedBlocks < plan.maximumQueuedBlocks else {
+            return false
+        }
+        scheduledBlocks += 1
+        queuedBlocks += 1
+        return true
+    }
+
+    mutating func requestStopAfterDrain() {
+        stopping = true
+    }
+
+    var isReadyToStartPlayback: Bool {
+        !playbackStarted
+            && queuedBlocks == min(plan.totalBlocks, plan.maximumQueuedBlocks)
+    }
+
+    mutating func markPlaybackStarted() {
+        precondition(isReadyToStartPlayback)
+        playbackStarted = true
+    }
+
+    mutating func didDrainBlock() -> PCMStreamDrain {
+        precondition(queuedBlocks > 0)
+        queuedBlocks -= 1
+        drainedBlocks += 1
+        if stopping {
+            return queuedBlocks == 0 ? .stopped : .awaitingRefill
+        }
+        if drainedBlocks == plan.totalBlocks {
+            return .complete
+        }
+        return queuedBlocks == 0 ? .starved : .awaitingRefill
+    }
+}
+
+/// The current stream identifier is captured by AVAudioPlayerNode completion
+/// callbacks. A callback from a replaced stream must not mutate its successor.
+struct PCMStreamGeneration: Equatable {
+    private(set) var currentID: UUID?
+
+    mutating func begin() -> UUID {
+        let id = UUID()
+        currentID = id
+        return id
+    }
+
+    func accepts(_ id: UUID) -> Bool {
+        currentID == id
+    }
+}
+
+/// Thread-safe bounded handoff between the dedicated Rust producer closure and
+/// the main-actor AVAudioEngine scheduler. A permit represents one queued PCM
+/// buffer; stopping wakes a waiting producer without publishing more audio.
+final class PCMStreamControl: @unchecked Sendable {
+    private let permits: DispatchSemaphore
+    private let lock = NSLock()
+    private var stopped = false
+    private let wakeCount: Int
+
+    init(maximumQueuedBlocks: Int) {
+        permits = DispatchSemaphore(value: maximumQueuedBlocks)
+        wakeCount = maximumQueuedBlocks
+    }
+
+    func acquireProducerPermit() -> Bool {
+        while true {
+            if permits.wait(timeout: .now() + .milliseconds(50)) == .success {
+                lock.lock()
+                let isStopped = stopped
+                lock.unlock()
+                if isStopped {
+                    permits.signal()
+                    return false
+                }
+                return true
+            }
+            lock.lock()
+            let isStopped = stopped
+            lock.unlock()
+            if isStopped { return false }
+        }
+    }
+
+    func releasePlaybackPermit() {
+        permits.signal()
+    }
+
+    func stop() {
+        lock.lock()
+        let wasStopped = stopped
+        stopped = true
+        lock.unlock()
+        if !wasStopped {
+            for _ in 0..<wakeCount {
+                permits.signal()
+            }
+        }
+    }
+}
+
+/// Real AVAudioEngine consumer for recurring Rust PCM. Each scheduled buffer
+/// remains retained until the player reports data playback; producer permits
+/// limit the queued lead and completion callbacks detect starvation.
 @MainActor
 final class PCMPlayback {
     private let engine = AVAudioEngine()
     private let player = AVAudioPlayerNode()
     private let format: AVAudioFormat
-    private var scheduledBuffer: AVAudioPCMBuffer?
+    private var scheduledBuffers: [UUID: AVAudioPCMBuffer] = [:]
+    private var schedule: PCMStreamSchedule?
+    private var control: PCMStreamControl?
+    private var generation = PCMStreamGeneration()
+    private var onTerminalError: @MainActor (PCMPlaybackError) -> Void = { _ in }
+    private var onFinished: @MainActor () -> Void = {}
 
     init() throws {
         guard let format = AVAudioFormat(
@@ -114,7 +266,30 @@ final class PCMPlayback {
         engine.connect(player, to: engine.mainMixerNode, format: format)
     }
 
-    func play(_ block: PCMBlock) throws {
+    func begin(
+        plan: PCMStreamPlan,
+        onTerminalError: @escaping @MainActor (PCMPlaybackError) -> Void,
+        onFinished: @escaping @MainActor () -> Void
+    ) -> (UUID, PCMStreamControl) {
+        player.stop()
+        scheduledBuffers.removeAll()
+        control?.stop()
+        let control = PCMStreamControl(maximumQueuedBlocks: plan.maximumQueuedBlocks)
+        let id = generation.begin()
+        self.control = control
+        schedule = PCMStreamSchedule(plan: plan)
+        self.onTerminalError = onTerminalError
+        self.onFinished = onFinished
+        return (id, control)
+    }
+
+    func enqueue(_ block: PCMBlock, streamID incomingStreamID: UUID) throws {
+        guard generation.accepts(incomingStreamID),
+              var schedule,
+              schedule.reserveNextBlock() else {
+            throw PCMPlaybackError.streamScheduling
+        }
+        self.schedule = schedule
         guard let buffer = AVAudioPCMBuffer(
             pcmFormat: format,
             frameCapacity: AVAudioFrameCount(block.samples.count)
@@ -126,18 +301,75 @@ final class PCMPlayback {
         }
         buffer.frameLength = AVAudioFrameCount(block.samples.count)
 
-        player.stop()
-        scheduledBuffer = buffer
+        let token = UUID()
+        scheduledBuffers[token] = buffer
+        let control = control
+        player.scheduleBuffer(
+            buffer,
+            at: nil,
+            options: [],
+            completionCallbackType: .dataPlayedBack
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.didDrain(token: token, streamID: incomingStreamID, control: control)
+            }
+        }
+        try startPlaybackWhenPrefilled()
+    }
+
+    func stopAndDrain() {
+        guard var schedule else { return }
+        schedule.requestStopAfterDrain()
+        self.schedule = schedule
+        control?.stop()
+        if scheduledBuffers.isEmpty {
+            player.stop()
+            engine.pause()
+            onFinished()
+        }
+    }
+
+    private func startPlaybackWhenPrefilled() throws {
+        guard var schedule, schedule.isReadyToStartPlayback else { return }
         do {
             if !engine.isRunning {
                 try engine.start()
             }
         } catch {
-            scheduledBuffer = nil
             throw PCMPlaybackError.engineStart(error.localizedDescription)
         }
-        player.scheduleBuffer(buffer, at: nil, options: .interrupts)
+        schedule.markPlaybackStarted()
+        self.schedule = schedule
         player.play()
+    }
+
+    private func didDrain(token: UUID, streamID incomingStreamID: UUID, control: PCMStreamControl) {
+        guard generation.accepts(incomingStreamID),
+              var schedule,
+              scheduledBuffers.removeValue(forKey: token) != nil else {
+            return
+        }
+        control.releasePlaybackPermit()
+        let outcome = schedule.didDrainBlock()
+        self.schedule = schedule
+        switch outcome {
+        case .awaitingRefill:
+            break
+        case .complete, .stopped:
+            player.stop()
+            engine.pause()
+            onFinished()
+        case .starved:
+            abort(.starved)
+        }
+    }
+
+    func abort(_ error: PCMPlaybackError) {
+        control?.stop()
+        player.stop()
+        engine.pause()
+        scheduledBuffers.removeAll()
+        onTerminalError(error)
     }
 }
 
@@ -160,6 +392,17 @@ actor NativeSimulationKernel {
     private static let maximumValues = 2_000_006
 
     func run(experiment: SimulationExperiment, quality: Double, seed: UInt32) throws -> SimulationResult {
+        try Self.runPacket(experiment: experiment, quality: quality, seed: seed)
+    }
+
+    /// One synchronous C-ABI round trip. The bounded PCM producer invokes this
+    /// repeatedly within one dedicated dispatch closure so the Rust voice's
+    /// thread-local render state remains on that producer thread.
+    nonisolated static func runPacket(
+        experiment: SimulationExperiment,
+        quality: Double,
+        seed: UInt32
+    ) throws -> SimulationResult {
         let clock = ContinuousClock()
         let start = clock.now
         let reported = Int(frankensim_apple_run(experiment.id, quality, seed))
@@ -244,6 +487,10 @@ final class SimulationStudioModel: ObservableObject {
 
     private let kernel = NativeSimulationKernel()
     private var pcmPlayback: PCMPlayback?
+    private let pcmProducerQueue = DispatchQueue(
+        label: "org.frankensim.reed-pcm-producer",
+        qos: .userInitiated
+    )
     private var runTask: Task<Void, Never>?
     private var activeRunID: UUID?
 
@@ -275,6 +522,7 @@ final class SimulationStudioModel: ObservableObject {
 
     func run() {
         runTask?.cancel()
+        pcmPlayback?.stopAndDrain()
         let experiment = selection
         let runQuality = quality
         let runSeed = seed
@@ -282,24 +530,28 @@ final class SimulationStudioModel: ObservableObject {
         activeRunID = runID
         isRunning = true
         errorMessage = nil
+        if experiment.id == 43 {
+            do {
+                try startPCMStream(
+                    experiment: experiment,
+                    quality: runQuality,
+                    seed: runSeed,
+                    runID: runID
+                )
+            } catch {
+                guard activeRunID == runID else { return }
+                errorMessage = error.localizedDescription
+                activeRunID = nil
+                isRunning = false
+            }
+            return
+        }
         runTask = Task { [weak self] in
             guard let self else { return }
             do {
                 let output = try await kernel.run(experiment: experiment, quality: runQuality, seed: runSeed)
                 try Task.checkCancellation()
                 guard self.activeRunID == runID, self.selection.id == experiment.id else { return }
-                if output.shape == .pcm {
-                    let block = try PCMBlock(result: output)
-                    let playback: PCMPlayback
-                    if let existing = self.pcmPlayback {
-                        playback = existing
-                    } else {
-                        let created = try PCMPlayback()
-                        self.pcmPlayback = created
-                        playback = created
-                    }
-                    try playback.play(block)
-                }
                 self.result = output
                 self.activeRunID = nil
                 self.isRunning = false
@@ -324,7 +576,76 @@ final class SimulationStudioModel: ObservableObject {
 
     func cancel() {
         runTask?.cancel()
+        pcmPlayback?.stopAndDrain()
         activeRunID = nil
         isRunning = false
+    }
+
+    private func startPCMStream(
+        experiment: SimulationExperiment,
+        quality: Double,
+        seed: UInt32,
+        runID: UUID
+    ) throws {
+        let playback: PCMPlayback
+        if let existing = pcmPlayback {
+            playback = existing
+        } else {
+            let created = try PCMPlayback()
+            pcmPlayback = created
+            playback = created
+        }
+        let plan = PCMStreamPlan.reedDemo
+        let (streamID, control) = playback.begin(
+            plan: plan,
+            onTerminalError: { [weak self] error in
+                guard let self, self.activeRunID == runID else { return }
+                self.errorMessage = error.localizedDescription
+                self.activeRunID = nil
+                self.isRunning = false
+            },
+            onFinished: { [weak self] in
+                guard let self, self.activeRunID == runID else { return }
+                self.activeRunID = nil
+                self.isRunning = false
+            }
+        )
+
+        pcmProducerQueue.async {
+            for blockIndex in 0..<plan.totalBlocks {
+                guard control.acquireProducerPermit() else { return }
+                do {
+                    let result = try NativeSimulationKernel.runPacket(
+                        experiment: experiment,
+                        quality: quality,
+                        seed: seed
+                    )
+                    let block = try PCMBlock(result: result)
+                    Task { @MainActor [weak self] in
+                        guard let self, self.activeRunID == runID else {
+                            control.stop()
+                            return
+                        }
+                        do {
+                            try playback.enqueue(block, streamID: streamID)
+                            if blockIndex == 0 {
+                                self.result = result
+                            }
+                        } catch let error as PCMPlaybackError {
+                            playback.abort(error)
+                        } catch {
+                            playback.abort(.malformedPayload(error.localizedDescription))
+                        }
+                    }
+                } catch {
+                    control.stop()
+                    Task { @MainActor [weak self] in
+                        guard let self, self.activeRunID == runID else { return }
+                        playback.abort(.malformedPayload(error.localizedDescription))
+                    }
+                    return
+                }
+            }
+        }
     }
 }
