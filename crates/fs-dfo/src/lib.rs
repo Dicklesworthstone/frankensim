@@ -22,6 +22,7 @@ pub mod dro;
 pub mod moo;
 pub mod neldermead;
 pub mod ot;
+pub mod population;
 pub mod steer;
 pub mod wfg;
 
@@ -50,6 +51,11 @@ pub use moo::{
 };
 pub use neldermead::nelder_mead;
 pub use ot::{OtReport, cost_sq_1d, monotone_cost_1d, sinkhorn};
+pub use population::{
+    PopulationCandidate, PopulationCheckpoint, PopulationEvaluation, PopulationEvaluator,
+    PopulationGeneration, PopulationLimits, PopulationProvenance, PopulationPublishError,
+    PopulationPublisher, PopulationRefusal,
+};
 pub use steer::{SteerEvent, SteeredStudy, StudyState};
 
 /// Crate version, re-exported for provenance stamping.
