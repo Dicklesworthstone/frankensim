@@ -125,7 +125,7 @@ pub struct SlotJet3dRun {
 }
 
 /// One classified rung of the Re ladder.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SlotJet3dRung {
     /// Jet Reynolds number.
     pub reynolds: f64,
@@ -689,6 +689,199 @@ impl SlotJet3dRung {
             self.flux_imbalance
         )
     }
+}
+
+/// Campaign header schema written first in every archived sweep file.
+pub const SWEEP_HEADER_SCHEMA: &str = "fs-aeroac.slot-jet-3d.re-sweep/v1";
+/// Per-rung classified row schema ([`SlotJet3dRung::to_jsonl`]).
+pub const RUNG_ROW_SCHEMA: &str = "fs-aeroac.slot-jet-3d.rung/v1";
+/// Typed rung-refusal row schema: a rung that destabilized inside the
+/// rig's own containment is a RESULT (the operator family's stability
+/// edge), recorded rather than aborting the campaign.
+pub const RUNG_REFUSAL_SCHEMA: &str = "fs-aeroac.slot-jet-3d.rung-refusal/v1";
+
+/// One row of an archived sweep receipt file
+/// (`tests/receipts/slot-jet-3d-re-sweep*.jsonl`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum SweepReceiptRow {
+    /// The campaign header line.
+    Header {
+        /// The writer's scope note.
+        scope: String,
+    },
+    /// One classified rung.
+    Rung(SlotJet3dRung),
+    /// One ladder rung that refused (typed destabilization).
+    Refusal {
+        /// Central-moment second-order rate of the refused rung.
+        second_order_rate: f64,
+        /// Central-moment higher-order rate of the refused rung.
+        higher_order_rate: f64,
+        /// The rig's refusal text.
+        refusal: String,
+    },
+    /// The spanwise-octave box check refused.
+    OctaveRefusal {
+        /// Spanwise cell count of the refused octave box.
+        nz: usize,
+        /// The rig's refusal text.
+        refusal: String,
+    },
+}
+
+fn receipt_refusal(what: &'static str) -> AeroacError {
+    AeroacError::InvalidParameter { what }
+}
+
+impl SlotJet3dRung {
+    /// Strict inverse of [`Self::to_jsonl`]: exactly the pinned field
+    /// order, the pinned schema, finite measured quantities, and no
+    /// trailing bytes. `flux_imbalance` alone may be non-finite (the
+    /// writer records `inf` when the plate-plane flux vanished); the
+    /// card minters re-check it before admitting a rung.
+    ///
+    /// # Errors
+    /// [`AeroacError::InvalidParameter`] on any deviation from the
+    /// writer's shape (fail closed; no lenient JSON).
+    pub fn from_jsonl(line: &str) -> Result<Self, AeroacError> {
+        let mut p = crate::jetcard::Parser::new(line.trim_end_matches(['\n', '\r']));
+        let bad = |_: AeroacError| receipt_refusal("slot-jet-3d receipt: malformed rung/v1 row");
+        p.lit("{\"schema\":\"").map_err(bad)?;
+        if p.string().map_err(bad)? != RUNG_ROW_SCHEMA {
+            return Err(receipt_refusal(
+                "slot-jet-3d receipt: unknown rung row schema (refused by name)",
+            ));
+        }
+        p.lit("\"reynolds\":").map_err(bad)?;
+        let reynolds = p.number().map_err(bad)?;
+        p.lit("\"second_order_rate\":").map_err(bad)?;
+        let second_order_rate = p.number().map_err(bad)?;
+        p.lit("\"higher_order_rate\":").map_err(bad)?;
+        let higher_order_rate = p.number().map_err(bad)?;
+        p.lit("\"flatness\":").map_err(bad)?;
+        let flatness = p.number().map_err(bad)?;
+        p.lit("\"tonal\":").map_err(bad)?;
+        let tonal = p.boolean().map_err(bad)?;
+        p.lit("\"strouhal\":").map_err(bad)?;
+        let strouhal = p.number().map_err(bad)?;
+        p.lit("\"peak_bin\":").map_err(bad)?;
+        let peak_bin = usize::try_from(p.integer().map_err(bad)?)
+            .map_err(|_| receipt_refusal("slot-jet-3d receipt: peak bin overflows usize"))?;
+        p.lit("\"prominence\":").map_err(bad)?;
+        let prominence = p.number().map_err(bad)?;
+        p.lit("\"force_rms\":").map_err(bad)?;
+        let force_rms = p.number().map_err(bad)?;
+        p.lit("\"amplitude_qualified\":").map_err(bad)?;
+        let amplitude_qualified = p.boolean().map_err(bad)?;
+        p.lit("\"strouhal_bin_width\":").map_err(bad)?;
+        let strouhal_bin_width = p.number().map_err(bad)?;
+        p.lit("\"mach_max_lattice\":").map_err(bad)?;
+        let mach_max_lattice = p.number().map_err(bad)?;
+        p.lit("\"flux_imbalance\":").map_err(bad)?;
+        let flux_imbalance = p.number_allow_nonfinite().map_err(bad)?;
+        p.lit("}").map_err(bad)?;
+        if !p.at_end() {
+            return Err(receipt_refusal(
+                "slot-jet-3d receipt: trailing bytes after rung row",
+            ));
+        }
+        Ok(Self {
+            reynolds,
+            second_order_rate,
+            higher_order_rate,
+            flatness,
+            tonal,
+            strouhal,
+            peak_bin,
+            prominence,
+            force_rms,
+            amplitude_qualified,
+            strouhal_bin_width,
+            mach_max_lattice,
+            flux_imbalance,
+        })
+    }
+}
+
+/// Parse one archived sweep receipt file into typed rows. The first
+/// non-empty line must be the campaign header; every later line must
+/// be a rung row or a typed refusal row. Unknown schemas refuse by
+/// name so a receipt from a different writer cannot be mistaken for
+/// this campaign's.
+///
+/// # Errors
+/// [`AeroacError::InvalidParameter`] for a missing/misplaced header,
+/// an unknown row schema, or a malformed row.
+pub fn parse_sweep_receipts(text: &str) -> Result<Vec<SweepReceiptRow>, AeroacError> {
+    let mut rows = Vec::new();
+    for raw in text.lines() {
+        let line = raw.trim_end_matches('\r');
+        if line.is_empty() {
+            continue;
+        }
+        let bad = |_: AeroacError| receipt_refusal("slot-jet-3d receipt: malformed row");
+        let mut p = crate::jetcard::Parser::new(line);
+        p.lit("{\"schema\":\"").map_err(bad)?;
+        let schema = p.string().map_err(bad)?;
+        let row = match schema.as_str() {
+            SWEEP_HEADER_SCHEMA => {
+                if !rows.is_empty() {
+                    return Err(receipt_refusal(
+                        "slot-jet-3d receipt: campaign header is not the first row",
+                    ));
+                }
+                p.lit("\"scope\":\"").map_err(bad)?;
+                let scope = p.string().map_err(bad)?;
+                p.lit("}").map_err(bad)?;
+                SweepReceiptRow::Header { scope }
+            }
+            RUNG_ROW_SCHEMA => {
+                // The rung reader owns its own end-of-row check.
+                rows.push(SweepReceiptRow::Rung(SlotJet3dRung::from_jsonl(line)?));
+                continue;
+            }
+            RUNG_REFUSAL_SCHEMA => {
+                if p.lit("\"octave\":true,\"nz\":").is_ok() {
+                    let nz = usize::try_from(p.integer().map_err(bad)?)
+                        .map_err(|_| receipt_refusal("slot-jet-3d receipt: nz overflows usize"))?;
+                    p.lit("\"refusal\":\"").map_err(bad)?;
+                    let refusal = p.string().map_err(bad)?;
+                    p.lit("}").map_err(bad)?;
+                    SweepReceiptRow::OctaveRefusal { nz, refusal }
+                } else {
+                    p.lit("\"second_order_rate\":").map_err(bad)?;
+                    let second_order_rate = p.number().map_err(bad)?;
+                    p.lit("\"higher_order_rate\":").map_err(bad)?;
+                    let higher_order_rate = p.number().map_err(bad)?;
+                    p.lit("\"refusal\":\"").map_err(bad)?;
+                    let refusal = p.string().map_err(bad)?;
+                    p.lit("}").map_err(bad)?;
+                    SweepReceiptRow::Refusal {
+                        second_order_rate,
+                        higher_order_rate,
+                        refusal,
+                    }
+                }
+            }
+            _ => {
+                return Err(receipt_refusal(
+                    "slot-jet-3d receipt: unknown row schema (refused by name)",
+                ));
+            }
+        };
+        if !p.at_end() {
+            return Err(receipt_refusal(
+                "slot-jet-3d receipt: trailing bytes after row",
+            ));
+        }
+        rows.push(row);
+    }
+    if !matches!(rows.first(), Some(SweepReceiptRow::Header { .. })) {
+        return Err(receipt_refusal(
+            "slot-jet-3d receipt: missing campaign header",
+        ));
+    }
+    Ok(rows)
 }
 
 /// Outcome of one chunked invocation.

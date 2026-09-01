@@ -967,22 +967,45 @@ impl JetCard {
     }
 }
 
-/// Minimal strict cursor over the pinned v1 document shape.
-struct Parser<'a> {
+/// Minimal strict cursor over a pinned document shape. Shared with
+/// the sweep-receipt reader in [`crate::slot_jet_3d`]: both formats are
+/// writer-pinned field orders, and a strict cursor is exactly the
+/// fail-closed reader they want.
+pub(crate) struct Parser<'a> {
     s: &'a str,
     pos: usize,
 }
 
-impl Parser<'_> {
+impl<'a> Parser<'a> {
+    pub(crate) fn new(s: &'a str) -> Self {
+        Self { s, pos: 0 }
+    }
+
     fn refuse(what: &'static str) -> AeroacError {
         AeroacError::InvalidParameter { what }
+    }
+
+    /// Whether the cursor has consumed the whole input (trailing
+    /// bytes after a document are a refusal for line-framed receipts).
+    pub(crate) fn at_end(&self) -> bool {
+        self.pos == self.s.len()
+    }
+
+    /// A number token that may be non-finite (`inf`/`NaN` as the
+    /// writer's `Display` emits them). Only for fields whose
+    /// non-finite value is itself a recorded fact, never for
+    /// quantities a downstream gate consumes without re-checking.
+    pub(crate) fn number_allow_nonfinite(&mut self) -> Result<f64, AeroacError> {
+        let tok = self.number_token()?;
+        tok.parse()
+            .map_err(|_| Self::refuse("jet-card parse: malformed number"))
     }
 
     /// Expect the literal `lit` at the cursor. Number/bool fields
     /// are separated by `,`/`}` consumed by the value readers, so
     /// literals starting with a field key also swallow a single
     /// leading separator if present.
-    fn lit(&mut self, lit: &str) -> Result<(), AeroacError> {
+    pub(crate) fn lit(&mut self, lit: &str) -> Result<(), AeroacError> {
         let rest = &self.s[self.pos..];
         let rest = match rest.strip_prefix(',') {
             Some(stripped)
@@ -1007,7 +1030,7 @@ impl Parser<'_> {
     /// A quoted string body up to the closing quote, unescaping the
     /// writer's escapes; consumes the closing `"` and a following
     /// `,` when present.
-    fn string(&mut self) -> Result<String, AeroacError> {
+    pub(crate) fn string(&mut self) -> Result<String, AeroacError> {
         let bytes = self.s.as_bytes();
         let mut out = String::new();
         let mut i = self.pos;
@@ -1057,7 +1080,7 @@ impl Parser<'_> {
         Ok(tok)
     }
 
-    fn number(&mut self) -> Result<f64, AeroacError> {
+    pub(crate) fn number(&mut self) -> Result<f64, AeroacError> {
         let tok = self.number_token()?;
         let v: f64 = tok
             .parse()
@@ -1068,13 +1091,13 @@ impl Parser<'_> {
         Ok(v)
     }
 
-    fn integer(&mut self) -> Result<u64, AeroacError> {
+    pub(crate) fn integer(&mut self) -> Result<u64, AeroacError> {
         let tok = self.number_token()?;
         tok.parse()
             .map_err(|_| Self::refuse("jet-card parse: malformed integer"))
     }
 
-    fn boolean(&mut self) -> Result<bool, AeroacError> {
+    pub(crate) fn boolean(&mut self) -> Result<bool, AeroacError> {
         if self.lit("true").is_ok() {
             return Ok(true);
         }

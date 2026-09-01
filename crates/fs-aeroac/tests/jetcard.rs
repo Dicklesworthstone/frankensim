@@ -8,7 +8,9 @@ use fs_aeroac::jetcard::{
     mint_tonal_interim_card, momentum_thickness_smoothed_tophat, staging_rig_config,
 };
 use fs_aeroac::noisetable::N_BANDS;
-use fs_aeroac::slot_jet_3d::SlotJet3dRung;
+use fs_aeroac::slot_jet_3d::{
+    SWEEP_HEADER_SCHEMA, SlotJet3dRung, SweepReceiptRow, parse_sweep_receipts,
+};
 use fs_aeroac::{AeroacError, SCOPE_STATEMENT};
 
 /// A synthetic admitted rung (in-regime, amplitude-qualified).
@@ -269,4 +271,116 @@ fn jc_009_schema_constant_is_pinned() {
         card.to_json()
             .contains(&format!("\"claim_kind\":\"{}\"", card.claim.kind()))
     );
+}
+
+#[test]
+fn jc_010_rung_receipt_row_round_trips_bitwise() {
+    // The writer's pinned row shape is the reader's contract: a rung
+    // survives to_jsonl -> from_jsonl with every field bit-identical,
+    // including a non-finite flux imbalance (recorded fact, re-gated
+    // by the minters).
+    let mut row = rung(37.5, false);
+    row.flux_imbalance = f64::INFINITY;
+    row.flatness = 1.2076567157010974e-15;
+    let text = row.to_jsonl();
+    let back = SlotJet3dRung::from_jsonl(&text).expect("pinned row parses");
+    assert_eq!(back.reynolds.to_bits(), row.reynolds.to_bits());
+    assert_eq!(back.flatness.to_bits(), row.flatness.to_bits());
+    assert_eq!(back.strouhal.to_bits(), row.strouhal.to_bits());
+    assert_eq!(back.prominence.to_bits(), row.prominence.to_bits());
+    assert_eq!(back.force_rms.to_bits(), row.force_rms.to_bits());
+    assert_eq!(
+        back.strouhal_bin_width.to_bits(),
+        row.strouhal_bin_width.to_bits()
+    );
+    assert_eq!(
+        back.mach_max_lattice.to_bits(),
+        row.mach_max_lattice.to_bits()
+    );
+    assert_eq!(back.peak_bin, row.peak_bin);
+    assert_eq!(back.tonal, row.tonal);
+    assert_eq!(back.amplitude_qualified, row.amplitude_qualified);
+    assert!(back.flux_imbalance.is_infinite());
+    assert_eq!(back.to_jsonl(), text);
+    // Refusals: wrong schema by name, a reordered field, trailing bytes,
+    // and a non-finite measured quantity outside the one tolerated field.
+    let wrong_schema = text.replacen("rung/v1", "rung/v2", 1);
+    assert!(SlotJet3dRung::from_jsonl(&wrong_schema).is_err());
+    let reordered = text.replacen(
+        "\"tonal\":false,\"strouhal\":0.2",
+        "\"strouhal\":0.2,\"tonal\":false",
+        1,
+    );
+    assert_ne!(reordered, text);
+    assert!(SlotJet3dRung::from_jsonl(&reordered).is_err());
+    assert!(SlotJet3dRung::from_jsonl(&format!("{text} ")).is_err());
+    let nan_rms = text.replacen("\"force_rms\":0.001", "\"force_rms\":NaN", 1);
+    assert_ne!(nan_rms, text);
+    assert!(SlotJet3dRung::from_jsonl(&nan_rms).is_err());
+}
+
+#[test]
+fn jc_011_sweep_receipt_file_parses_typed_rows_and_refuses_foreign_ones() {
+    let header = format!(
+        "{{\"schema\":\"{SWEEP_HEADER_SCHEMA}\",\"scope\":\"campaign header; per-rung rows follow\"}}"
+    );
+    let refusal = "{\"schema\":\"fs-aeroac.slot-jet-3d.rung-refusal/v1\",\"second_order_rate\":1.92,\"higher_order_rate\":1.99,\"refusal\":\"non-finite input: 3-D lattice destabilized during chunked settle\"}";
+    let octave = "{\"schema\":\"fs-aeroac.slot-jet-3d.rung-refusal/v1\",\"octave\":true,\"nz\":24,\"refusal\":\"non-finite input: octave box destabilized\"}";
+    let text = format!(
+        "{header}\n{}\n{refusal}\n{octave}\n\n",
+        rung(4.8, true).to_jsonl()
+    );
+    let rows = parse_sweep_receipts(&text).expect("the archived shape parses");
+    assert_eq!(rows.len(), 4);
+    assert!(
+        matches!(&rows[0], SweepReceiptRow::Header { scope } if scope.starts_with("campaign header"))
+    );
+    assert!(matches!(&rows[1], SweepReceiptRow::Rung(r) if r.reynolds == 4.8 && r.tonal));
+    assert!(matches!(
+        &rows[2],
+        SweepReceiptRow::Refusal { second_order_rate, higher_order_rate, refusal }
+            if *second_order_rate == 1.92 && *higher_order_rate == 1.99 && refusal.contains("destabilized")
+    ));
+    assert!(matches!(
+        &rows[3],
+        SweepReceiptRow::OctaveRefusal { nz: 24, .. }
+    ));
+    // The header must come first; a foreign schema refuses by name.
+    let headerless = format!("{}\n", rung(4.8, true).to_jsonl());
+    assert!(parse_sweep_receipts(&headerless).is_err());
+    let late_header = format!("{}\n{header}\n", rung(4.8, true).to_jsonl());
+    assert!(parse_sweep_receipts(&late_header).is_err());
+    let foreign = format!("{header}\n{{\"schema\":\"fs-aeroac.somebody-else/v1\",\"x\":1}}\n");
+    assert!(parse_sweep_receipts(&foreign).is_err());
+}
+
+/// Every archived per-rung receipt file in the tree parses; the
+/// campaign's real rows are what the broadband-or-refusal card is
+/// minted from (the receipt-fed minting test lives beside this one).
+#[test]
+fn jc_012_archived_sweep_receipts_parse() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/receipts");
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    let mut files = entries
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("slot-jet-3d-re-sweep") && n.ends_with(".jsonl"))
+        })
+        .collect::<Vec<_>>();
+    files.sort();
+    for path in files {
+        let text = std::fs::read_to_string(&path).expect("receipt readable");
+        let rows = parse_sweep_receipts(&text)
+            .unwrap_or_else(|e| panic!("{} does not parse: {e}", path.display()));
+        assert!(
+            rows.len() >= 2,
+            "{} carries no rung or refusal row",
+            path.display()
+        );
+    }
 }
