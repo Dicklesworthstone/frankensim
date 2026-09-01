@@ -147,6 +147,16 @@ fn cae_receipts_distinguish_equal_count_models() {
         abaqus_a_model.source_receipt.source_hash,
         fs_obs::fnv1a64(abaqus_a.as_bytes())
     );
+    let (abaqus_a_again, abaqus_a_receipt_again) =
+        parse_abaqus_inp(abaqus_a).expect("Abaqus A replay");
+    assert_eq!(
+        abaqus_a_receipt.content_hash,
+        abaqus_a_receipt_again.content_hash
+    );
+    assert_eq!(
+        abaqus_a_model.source_receipt.source_hash,
+        abaqus_a_again.source_receipt.source_hash
+    );
 
     let bdf_a = "GRID,1,,0,0,0\nGRID,2,,1,0,0\nCTETRA,1,1,1,1,1,1\n";
     let bdf_b = "GRID,1,,0,0,0\nGRID,2,,1,0,0\nCTETRA,1,1,1,1,1,2\n";
@@ -160,6 +170,12 @@ fn cae_receipts_distinguish_equal_count_models() {
     assert_eq!(
         bdf_a_model.source_receipt.source_hash,
         fs_obs::fnv1a64(bdf_a.as_bytes())
+    );
+    let (bdf_a_again, bdf_a_receipt_again) = parse_nastran_bdf(bdf_a).expect("BDF A replay");
+    assert_eq!(bdf_a_receipt.content_hash, bdf_a_receipt_again.content_hash);
+    assert_eq!(
+        bdf_a_model.source_receipt.source_hash,
+        bdf_a_again.source_receipt.source_hash
     );
 
     let mut gmsh_a = GmshMesh::new("2.2");

@@ -1,9 +1,10 @@
-//! fs-marquee — admission/status shell for the P2 marquee study.
+//! fs-marquee — smoke-tier admission path for the P2 marquee study.
 //!
 //! The actual marquee pipeline is a frontier integration lane: raw SDF
 //! geometry, CutFEM physics, DWR certificates, ledgered evidence, and
 //! LUMEN renders. This crate exists so the workspace can name and gate
-//! that lane without pretending the end-to-end runner is already shipped.
+//! that lane without claiming that the full-resolution end-to-end runner is
+//! already shipped.
 
 /// Crate version, re-exported for provenance stamping.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -17,7 +18,7 @@ pub mod study;
 /// Current availability of the marquee lane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MarqueeStatus {
-    /// The feature gate is disabled; no runner is exposed.
+    /// The optional smoke runner was explicitly disabled; no runner is exposed.
     Disabled,
     /// The feature gate is enabled and the SMOKE-TIER runner
     /// ([`study::run_study`]) is available; the full-resolution nightly

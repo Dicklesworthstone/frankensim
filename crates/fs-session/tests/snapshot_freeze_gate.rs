@@ -178,7 +178,11 @@ fn commit_freeze(
             &mut cancellation,
         )
         .expect("state frozen");
-    permit.seal(cancellation).expect("envelope sealed")
+    permit
+        .seal(cancellation)
+        .expect("envelope sealed")
+        .receipt()
+        .clone()
 }
 
 #[test]

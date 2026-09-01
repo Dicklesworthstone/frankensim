@@ -4,15 +4,15 @@
 
 Layer: L6 (HELM/integration). `fs-marquee` names the P2 marquee study lane:
 raw SDF geometry through CutFEM physics, DWR evidence, ledger records, and
-renderable artifacts. The default build remains an admission/status shell. With
-the `marquee` feature enabled, the crate exposes a smoke-tier study runner for
-the raw-SDF/CutFEM/DWR slice; the full-resolution nightly golden lane remains a
+renderable artifacts. The default build exposes the smoke-tier study runner for
+the raw-SDF/CutFEM/DWR slice. The `marquee` feature remains available as an
+explicit opt-out boundary; the full-resolution nightly golden lane remains a
 no-claim boundary.
 
 ## Public types and semantics
 
-- `MarqueeStatus`: status of the lane. `Disabled` means the `marquee` feature
-  is off. `SmokeRunnerAvailable` means the feature flag is enabled and the
+- `MarqueeStatus`: status of the lane. `Disabled` means the optional `marquee`
+  feature was disabled. `SmokeRunnerAvailable` is the default and means the
   smoke-tier runner API is available.
 - `status()`: deterministic status query derived only from Cargo feature
   configuration.
@@ -23,9 +23,8 @@ no-claim boundary.
   radius optimization over circular cooling holes, records per-iteration
   compliance/certificate fields, and returns a replay hash for the smoke trace.
 
-The default build exposes no simulation entrypoint. The feature-gated smoke
-runner performs in-process CutFEM solves and does not mutate ledgers or the
-filesystem.
+The default build exposes the smoke-tier simulation entrypoint. It performs
+in-process CutFEM solves and does not mutate ledgers or the filesystem.
 
 - `study` module (the smoke-tier runner, bead mye.1): `PlateWithHoles`
   (an EXACT parametric SDF with a certified box enclosure — the CutSdf
@@ -40,9 +39,8 @@ filesystem.
 
 ## Invariants
 
-1. The default build cannot accidentally execute a marquee study.
-2. Enabling the `marquee` feature is required before the smoke runner is
-   available.
+1. The default build makes the smoke-tier marquee study available.
+2. Disabling default features prevents the smoke runner from being exposed.
 3. Runner inputs are admitted before CutFEM work starts: at least one hole,
    matching center/radius lengths, finite unit-plate centers, positive finite
    radii, finite area target in `(0, 1)`, nonnegative finite step size, and
@@ -65,14 +63,14 @@ a recomputed Euclidean residual.
 
 ## Determinism class
 
-D0 for the default status API. The smoke runner is deterministic for fixed
+D0 for the status API. The smoke runner is deterministic for fixed
 inputs and code, but it is not yet a cross-ISA golden-proofed lane.
 
 ## Cancellation behavior
 
-No long-running work exists in the default build. The feature-gated smoke
-runner is synchronous and currently has no explicit `Cx` cancellation polling;
-production runner cancellation remains a no-claim boundary.
+The default smoke runner is synchronous and currently has no explicit `Cx`
+cancellation polling; production runner cancellation remains a no-claim
+boundary.
 
 ## Unsafe boundary
 
@@ -80,14 +78,15 @@ No unsafe code.
 
 ## Feature flags
 
-- `marquee`: frontier gate for the smoke-tier raw-SDF/CutFEM/DWR study runner.
-  The default build remains status-only.
+- `marquee`: enables the smoke-tier raw-SDF/CutFEM/DWR study runner. It is
+  enabled by default and may be explicitly disabled for a status-only build.
 
 ## Conformance tests
 
-Unit tests check version stamping, feature-derived status, and the explicit
-nightly-golden no-claim boundary. With `marquee`, tests also check that invalid
-runner inputs are rejected before solver work starts.
+Unit tests check version stamping, default smoke-runner admission,
+feature-derived status, and the explicit nightly-golden no-claim boundary. With
+`marquee`, tests also check that invalid runner inputs are rejected before
+solver work starts.
 
 ## No-claim boundaries
 

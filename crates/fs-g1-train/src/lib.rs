@@ -1,5 +1,6 @@
 pub mod hpo;
 pub mod muon;
+#[cfg(feature = "train-io")]
 pub mod onnx_metadata;
 pub mod ppo;
 pub mod standin_env;

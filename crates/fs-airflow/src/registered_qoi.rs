@@ -16,11 +16,14 @@ use std::collections::BTreeSet;
 use fs_blake3::{ContentHash, hash_domain};
 use fs_conduction::{ConductionMesh, ConductionSolution};
 use fs_evidence::uncertainty::EngineeringUncertaintyBudget;
-use fs_evidence::{ModelEvidence, ProvenanceHash};
+use fs_evidence::{ColorRank, ModelEvidence, ProvenanceHash, color_of};
 use fs_exec::Cx;
 
 use crate::OperatingPoint;
-use crate::qoi::{QoiError, ThermalQoiDeclarations, ThermalQoiKind, extract_thermal_qois};
+use crate::qoi::{
+    DiscretizationReceipt, JunctionRegion, QoiError, ThermalQoiDeclarations, ThermalQoiKind,
+    extract_junction_maximum_qoi, extract_thermal_qois,
+};
 
 const CANDIDATE_ROW_DOMAIN: &str = "org.frankensim.fs-airflow.candidate-qoi-row.v1";
 
@@ -108,7 +111,8 @@ impl QoiSemanticId {
             | "junction_temp"
             | "junction_max"
             | "t_j_max"
-            | "max_temperature" => Some(Self::JunctionMaximum),
+            | "max_temperature"
+            | "temperature-max" => Some(Self::JunctionMaximum),
 
             "thermal.surface_mean"
             | "surface_mean"
@@ -247,6 +251,9 @@ pub struct CandidateQoiRow {
     pub uncertainty: EngineeringUncertaintyBudget,
     /// Associated model evidence.
     pub evidence: ModelEvidence,
+    /// Honest evidence lattice rank derived from the full numerical and model
+    /// certificates before the lower-layer evidence is projected into this row.
+    pub color: ColorRank,
     /// Content-addressed identity hash of this candidate row.
     pub identity_hash: ContentHash,
     /// Lineage parent digests.
@@ -582,60 +589,67 @@ pub fn extract_registered_qois(
     let mut rows = Vec::with_capacity(parsed_queries.len());
 
     for (query, semantic_id) in parsed_queries {
-        let (value, uncertainty, evidence, region_name, tie_vertex) = match semantic_id {
+        let (value, uncertainty, evidence, color, region_name, tie_vertex) = match semantic_id {
             QoiSemanticId::JunctionMaximum => {
                 let jm = &qoi_set.junction_maximum;
                 let val = jm.qoi.evidence.value.value();
                 let unc = jm.qoi.uncertainty.clone();
                 let ev = jm.qoi.evidence.model.clone();
+                let color = color_of(&jm.qoi.evidence.numerical, &jm.qoi.evidence.model).rank();
                 let reg = Some(declarations.junction_region.name().to_string());
                 let v_idx = jm.vertex;
-                (val, unc, ev, reg, Some(v_idx))
+                (val, unc, ev, color, reg, Some(v_idx))
             }
             QoiSemanticId::SurfaceMeanTemperature => {
                 let sm = &qoi_set.uniformity.mean_temperature;
                 let val = sm.evidence.value.value();
                 let unc = sm.uncertainty.clone();
                 let ev = sm.evidence.model.clone();
+                let color = color_of(&sm.evidence.numerical, &sm.evidence.model).rank();
                 let reg = Some(declarations.surface_region.name().to_string());
-                (val, unc, ev, reg, None)
+                (val, unc, ev, color, reg, None)
             }
             QoiSemanticId::SurfaceTemperatureSpread => {
                 let ss = &qoi_set.uniformity.spread;
                 let val = ss.evidence.value.value();
                 let unc = ss.uncertainty.clone();
                 let ev = ss.evidence.model.clone();
+                let color = color_of(&ss.evidence.numerical, &ss.evidence.model).rank();
                 let reg = Some(declarations.surface_region.name().to_string());
-                (val, unc, ev, reg, None)
+                (val, unc, ev, color, reg, None)
             }
             QoiSemanticId::SurfaceTemperatureStdDev => {
                 let sd = &qoi_set.uniformity.face_mean_standard_deviation;
                 let val = sd.evidence.value.value();
                 let unc = sd.uncertainty.clone();
                 let ev = sd.evidence.model.clone();
+                let color = color_of(&sd.evidence.numerical, &sd.evidence.model).rank();
                 let reg = Some(declarations.surface_region.name().to_string());
-                (val, unc, ev, reg, None)
+                (val, unc, ev, color, reg, None)
             }
             QoiSemanticId::PressureDrop => {
                 let pd = &qoi_set.pressure_drop;
                 let val = pd.evidence.value.value();
                 let unc = pd.uncertainty.clone();
                 let ev = pd.evidence.model.clone();
-                (val, unc, ev, None, None)
+                let color = color_of(&pd.evidence.numerical, &pd.evidence.model).rank();
+                (val, unc, ev, color, None, None)
             }
             QoiSemanticId::FanPower => {
                 let fp = &qoi_set.fan_power;
                 let val = fp.evidence.value.value();
                 let unc = fp.uncertainty.clone();
                 let ev = fp.evidence.model.clone();
-                (val, unc, ev, None, None)
+                let color = color_of(&fp.evidence.numerical, &fp.evidence.model).rank();
+                (val, unc, ev, color, None, None)
             }
             QoiSemanticId::ThermalMargin => {
                 let tm = &qoi_set.thermal_margin;
                 let val = tm.evidence.value.value();
                 let unc = tm.uncertainty.clone();
                 let ev = tm.evidence.model.clone();
-                (val, unc, ev, None, None)
+                let color = color_of(&tm.evidence.numerical, &tm.evidence.model).rank();
+                (val, unc, ev, color, None, None)
             }
         };
 
@@ -656,6 +670,12 @@ pub fn extract_registered_qois(
         payload.extend_from_slice(semantic_id.units().as_bytes());
         payload.extend_from_slice(&value.to_bits().to_le_bytes());
         payload.extend_from_slice(uncertainty.qoi().as_bytes());
+        payload.extend_from_slice(uncertainty.content_id().as_bytes());
+        payload.push(match color {
+            ColorRank::Estimated => 1,
+            ColorRank::Validated => 2,
+            ColorRank::Verified => 3,
+        });
         if let Some(r) = &region_name {
             payload.extend_from_slice(r.as_bytes());
         }
@@ -674,6 +694,7 @@ pub fn extract_registered_qois(
             value,
             uncertainty,
             evidence,
+            color,
             identity_hash,
             source_lineage,
             region_name,
@@ -696,6 +717,179 @@ pub fn extract_registered_qois(
         emitted_qoi_count: rows.len(),
         executed_work_items: mesh.element_count() + mesh.vertex_count(),
         provenance,
+        rows,
+    })
+}
+
+/// Execute the registered junction-maximum slice without requiring unrelated
+/// surface-uniformity or fan-efficiency declarations.
+///
+/// Every query must resolve to [`QoiSemanticId::JunctionMaximum`]. This is the
+/// honest request-selective seam for conduction-only clients: it preserves the
+/// canonical maximum extractor, evidence color, eight-term uncertainty budget,
+/// deterministic witness, work limits, and candidate identity, while refusing
+/// to invent declarations for other QoI families.
+///
+/// # Errors
+/// Refuses non-scalar, duplicate, unknown, non-junction, or incorrectly scoped
+/// queries; invalid solved fields; resource-limit breaches; and cancellation.
+pub fn extract_registered_junction_maximum(
+    queries: &[OutputQuery],
+    mesh: &ConductionMesh,
+    solution: &ConductionSolution,
+    junction_region: &JunctionRegion,
+    discretization: Option<&DiscretizationReceipt>,
+    source_identity: ContentHash,
+    limits: QoiExecutionLimits,
+    cx: &Cx<'_>,
+) -> Result<RegisteredQoiExtractionReceipt, RegisteredQoiError> {
+    if cx.checkpoint().is_err() {
+        return Err(RegisteredQoiError::Cancelled);
+    }
+    if mesh.element_count() > limits.max_elements {
+        return Err(RegisteredQoiError::WorkLimitExceeded {
+            field: "element count",
+            actual: mesh.element_count(),
+            limit: limits.max_elements,
+        });
+    }
+    if mesh.vertex_count() > limits.max_vertices {
+        return Err(RegisteredQoiError::WorkLimitExceeded {
+            field: "vertex count",
+            actual: mesh.vertex_count(),
+            limit: limits.max_vertices,
+        });
+    }
+    if queries.len() > limits.max_queries {
+        return Err(RegisteredQoiError::WorkLimitExceeded {
+            field: "query count",
+            actual: queries.len(),
+            limit: limits.max_queries,
+        });
+    }
+    let estimated_memory = mesh.vertex_count() * core::mem::size_of::<f64>()
+        + mesh.element_count() * 4 * core::mem::size_of::<usize>()
+        + queries.len() * 1024;
+    if estimated_memory > limits.max_memory_bytes {
+        return Err(RegisteredQoiError::MemoryLimitExceeded {
+            estimated_bytes: estimated_memory,
+            limit_bytes: limits.max_memory_bytes,
+        });
+    }
+
+    let mut seen_names = BTreeSet::new();
+    for query in queries {
+        if !seen_names.insert(query.name.clone()) {
+            return Err(RegisteredQoiError::DuplicateQuery {
+                name: query.name.clone(),
+            });
+        }
+        match &query.kind {
+            OutputKind::Scalar => {}
+            OutputKind::Field => {
+                return Err(RegisteredQoiError::NonScalarOutputKind {
+                    name: query.name.clone(),
+                    kind: "field".to_string(),
+                    downstream_owner: "conduction / field export stage",
+                });
+            }
+            OutputKind::Report => {
+                return Err(RegisteredQoiError::NonScalarOutputKind {
+                    name: query.name.clone(),
+                    kind: "report".to_string(),
+                    downstream_owner: "fs-report stage",
+                });
+            }
+            OutputKind::Other(kind) => {
+                return Err(RegisteredQoiError::NonScalarOutputKind {
+                    name: query.name.clone(),
+                    kind: kind.clone(),
+                    downstream_owner: "unknown non-scalar producer",
+                });
+            }
+        }
+        let semantic_id = QoiSemanticId::parse(&query.name).ok_or_else(|| {
+            RegisteredQoiError::UnsupportedOutputName {
+                name: query.name.clone(),
+                suggested: vec![QoiSemanticId::JunctionMaximum.as_str()],
+            }
+        })?;
+        if semantic_id != QoiSemanticId::JunctionMaximum {
+            return Err(RegisteredQoiError::UnsupportedOutputName {
+                name: query.name.clone(),
+                suggested: vec![QoiSemanticId::JunctionMaximum.as_str()],
+            });
+        }
+        if let Some(region) = &query.region
+            && region != junction_region.name()
+        {
+            return Err(RegisteredQoiError::RegionNotFound {
+                requested: region.clone(),
+                available: vec![junction_region.name().to_string()],
+            });
+        }
+    }
+    if cx.checkpoint().is_err() {
+        return Err(RegisteredQoiError::Cancelled);
+    }
+
+    let maximum = extract_junction_maximum_qoi(mesh, solution, junction_region, discretization)?;
+    let value = maximum.qoi.evidence.value.value();
+    if !value.is_finite() {
+        return Err(RegisteredQoiError::NonFiniteScalar {
+            semantic_id: QoiSemanticId::JunctionMaximum,
+            value,
+        });
+    }
+    if value < 0.0 {
+        return Err(RegisteredQoiError::NegativeAbsoluteTemperature { kelvin: value });
+    }
+    let color = color_of(&maximum.qoi.evidence.numerical, &maximum.qoi.evidence.model).rank();
+    let uncertainty = maximum.qoi.uncertainty;
+    let evidence = maximum.qoi.evidence.model;
+    let region_name = junction_region.name().to_string();
+    let mut rows = Vec::with_capacity(queries.len());
+    for query in queries {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(QoiSemanticId::JunctionMaximum.as_str().as_bytes());
+        payload.extend_from_slice(query.name.as_bytes());
+        payload.extend_from_slice(QoiSemanticId::JunctionMaximum.units().as_bytes());
+        payload.extend_from_slice(&value.to_bits().to_le_bytes());
+        payload.extend_from_slice(uncertainty.qoi().as_bytes());
+        payload.extend_from_slice(uncertainty.content_id().as_bytes());
+        payload.push(match color {
+            ColorRank::Estimated => 1,
+            ColorRank::Validated => 2,
+            ColorRank::Verified => 3,
+        });
+        payload.extend_from_slice(region_name.as_bytes());
+        payload.extend_from_slice(&maximum.vertex.to_le_bytes());
+        payload.extend_from_slice(source_identity.as_bytes());
+        let identity_hash = hash_domain(CANDIDATE_ROW_DOMAIN, &payload);
+        rows.push(CandidateQoiRow {
+            semantic_id: QoiSemanticId::JunctionMaximum,
+            query_name: query.name.clone(),
+            kind: ThermalQoiKind::AbsoluteTemperature,
+            units: QoiSemanticId::JunctionMaximum.units(),
+            value,
+            uncertainty: uncertainty.clone(),
+            evidence: evidence.clone(),
+            color,
+            identity_hash,
+            source_lineage: vec![source_identity],
+            region_name: Some(region_name.clone()),
+            tie_witness_vertex: Some(maximum.vertex),
+        });
+    }
+    rows.sort_by(|a, b| a.query_name.cmp(&b.query_name));
+    if cx.checkpoint().is_err() {
+        return Err(RegisteredQoiError::Cancelled);
+    }
+    Ok(RegisteredQoiExtractionReceipt {
+        requested_query_count: queries.len(),
+        emitted_qoi_count: rows.len(),
+        executed_work_items: mesh.element_count() + mesh.vertex_count(),
+        provenance: ProvenanceHash::of_bytes(b"fs-airflow/registered-junction-maximum/v1"),
         rows,
     })
 }

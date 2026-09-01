@@ -22,6 +22,7 @@
 //! before falling back to corner-sign integration.
 
 use crate::sdf::CutSdf;
+use fs_ivl::Interval;
 
 /// Bulk and interface rules for one cut cell, in global coordinates.
 /// Bulk weights sum to the inside area (up to the documented error);
@@ -33,6 +34,278 @@ pub struct CutRules {
     pub bulk: Vec<([f64; 2], f64)>,
     /// Interface points: (position, weight, outward unit normal).
     pub iface: Vec<([f64; 2], f64, [f64; 2])>,
+}
+
+/// A certified implicit field over an axis-aligned 3-D cell.
+///
+/// `enclose` must contain every field value in its box, and
+/// `derivative_enclose` must contain every partial derivative in its box.
+/// The vertical-line isolator relies on continuity plus a derivative interval
+/// excluding zero to prove that a line has at most one crossing; it refuses
+/// instead of inferring a root from sampled values.
+pub trait CutSdf3 {
+    /// Field value at a point; negative values are inside the domain.
+    fn value(&self, point: [f64; 3]) -> f64;
+    /// Certified enclosure of the field over `[lo, hi]`.
+    fn enclose(&self, lo: [f64; 3], hi: [f64; 3]) -> Interval;
+    /// Certified enclosure of the partial derivative along `axis`.
+    fn derivative_enclose(&self, lo: [f64; 3], hi: [f64; 3], axis: HeightAxis) -> Interval;
+}
+
+/// A finite, nondegenerate axis-aligned hexahedral cell.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HexCell {
+    /// Lower coordinates.
+    lo: [f64; 3],
+    /// Upper coordinates.
+    hi: [f64; 3],
+}
+
+impl HexCell {
+    /// Construct a cell only when every axis is finite and has positive span.
+    pub fn try_new(lo: [f64; 3], hi: [f64; 3]) -> Result<Self, CutQuadrature3dError> {
+        for axis in 0..3 {
+            if !(lo[axis].is_finite() && hi[axis].is_finite()) {
+                return Err(CutQuadrature3dError::NonFiniteCell { axis });
+            }
+            if lo[axis] >= hi[axis] {
+                return Err(CutQuadrature3dError::NonPositiveCellSpan { axis });
+            }
+        }
+        Ok(Self { lo, hi })
+    }
+
+    /// Validated lower coordinates.
+    #[must_use]
+    pub const fn lo(self) -> [f64; 3] {
+        self.lo
+    }
+
+    /// Validated upper coordinates.
+    #[must_use]
+    pub const fn hi(self) -> [f64; 3] {
+        self.hi
+    }
+}
+
+/// Candidate height directions for Saye-style dimension reduction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeightAxis {
+    /// Use x as the vertical coordinate.
+    X,
+    /// Use y as the vertical coordinate.
+    Y,
+    /// Use z as the vertical coordinate.
+    Z,
+}
+
+impl HeightAxis {
+    const ALL: [Self; 3] = [Self::X, Self::Y, Self::Z];
+
+    const fn index(self) -> usize {
+        match self {
+            Self::X => 0,
+            Self::Y => 1,
+            Self::Z => 2,
+        }
+    }
+
+    const fn base_axes(self) -> [usize; 2] {
+        match self {
+            Self::X => [1, 2],
+            Self::Y => [0, 2],
+            Self::Z => [0, 1],
+        }
+    }
+}
+
+/// Input refusals for the certified 3-D vertical-line primitive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CutQuadrature3dError {
+    /// A cell coordinate was not finite.
+    NonFiniteCell { axis: usize },
+    /// A cell coordinate did not have strictly positive span.
+    NonPositiveCellSpan { axis: usize },
+    /// A base-line coordinate was not finite.
+    NonFiniteBase { coordinate: usize },
+    /// A base-line coordinate lies outside the selected cell.
+    BaseOutsideCell { axis: usize },
+}
+
+impl core::fmt::Display for CutQuadrature3dError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::NonFiniteCell { axis } => write!(f, "3-D cut cell axis {axis} is non-finite"),
+            Self::NonPositiveCellSpan { axis } => {
+                write!(f, "3-D cut cell axis {axis} has non-positive span")
+            }
+            Self::NonFiniteBase { coordinate } => {
+                write!(f, "3-D cut-line base coordinate {coordinate} is non-finite")
+            }
+            Self::BaseOutsideCell { axis } => {
+                write!(f, "3-D cut-line base lies outside cell axis {axis}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for CutQuadrature3dError {}
+
+/// Fail-closed outcome of one certified height line.
+#[derive(Debug, Clone, PartialEq)]
+pub enum VerticalLineRoot {
+    /// The derivative certificate proves the line cannot cross zero.
+    NoIntersection { height_axis: HeightAxis },
+    /// Exactly one root is proven and retained as a closed interval.
+    CertifiedRoot {
+        /// Selected height coordinate.
+        height_axis: HeightAxis,
+        /// Certified enclosure of the unique crossing.
+        enclosure: Interval,
+    },
+    /// No root count is claimed; the caller must subdivide or refuse.
+    Ambiguous,
+}
+
+/// Isolate the unique crossing on one Saye-style height line when possible.
+///
+/// The height axis is selected deterministically from derivative enclosures:
+/// the largest certified lower bound on `|∂φ|` wins, with X/Y/Z as the tie
+/// order. `base` is ordered by the two remaining coordinates (Y,Z for X;
+/// X,Z for Y; X,Y for Z). If no finite derivative enclosure excludes zero, or
+/// any sampled line point cannot be sign-certified, this returns `Ambiguous`.
+/// In particular, an endpoint enclosure containing zero is not proof that the
+/// endpoint is a root: it could contain either strict sign.
+/// It therefore supplies a certified root primitive to a future 3-D tensor
+/// quadrature driver without claiming volume/surface quadrature by itself.
+pub fn isolate_certified_height_root(
+    sdf: &dyn CutSdf3,
+    cell: HexCell,
+    base: [f64; 2],
+    max_bisections: u32,
+) -> Result<VerticalLineRoot, CutQuadrature3dError> {
+    let Some(height_axis) = select_height_axis(sdf, cell) else {
+        return Ok(VerticalLineRoot::Ambiguous);
+    };
+    let base_axes = height_axis.base_axes();
+    for coordinate in 0..2 {
+        let axis = base_axes[coordinate];
+        if !base[coordinate].is_finite() {
+            return Err(CutQuadrature3dError::NonFiniteBase { coordinate });
+        }
+        if base[coordinate] < cell.lo[axis] || base[coordinate] > cell.hi[axis] {
+            return Err(CutQuadrature3dError::BaseOutsideCell { axis });
+        }
+    }
+
+    let axis = height_axis.index();
+    let derivative = sdf.derivative_enclose(cell.lo, cell.hi, height_axis);
+    if !is_finite_interval(derivative) {
+        return Ok(VerticalLineRoot::Ambiguous);
+    }
+    let increasing = derivative.lo() > 0.0;
+    let mut lower = cell.lo[axis];
+    let mut upper = cell.hi[axis];
+    let lower_sign = sign_of(sdf.enclose(
+        line_point(height_axis, base, lower),
+        line_point(height_axis, base, lower),
+    ));
+    let upper_sign = sign_of(sdf.enclose(
+        line_point(height_axis, base, upper),
+        line_point(height_axis, base, upper),
+    ));
+
+    let has_crossing = match (increasing, lower_sign, upper_sign) {
+        (true, Some(Sign::Positive), _) | (true, _, Some(Sign::Negative)) => {
+            return Ok(VerticalLineRoot::NoIntersection { height_axis });
+        }
+        (false, Some(Sign::Negative), _) | (false, _, Some(Sign::Positive)) => {
+            return Ok(VerticalLineRoot::NoIntersection { height_axis });
+        }
+        (true, Some(Sign::Negative), Some(Sign::Positive))
+        | (false, Some(Sign::Positive), Some(Sign::Negative)) => true,
+        _ => false,
+    };
+    if !has_crossing {
+        return Ok(VerticalLineRoot::Ambiguous);
+    }
+
+    let lower_is_negative = matches!(lower_sign, Some(Sign::Negative));
+    for _ in 0..max_bisections {
+        let midpoint = f64::midpoint(lower, upper);
+        if midpoint == lower || midpoint == upper {
+            break;
+        }
+        match sign_of(sdf.enclose(
+            line_point(height_axis, base, midpoint),
+            line_point(height_axis, base, midpoint),
+        )) {
+            Some(Sign::Negative) if lower_is_negative => lower = midpoint,
+            Some(Sign::Positive) if lower_is_negative => upper = midpoint,
+            Some(Sign::Positive) => lower = midpoint,
+            Some(Sign::Negative) => upper = midpoint,
+            None => return Ok(VerticalLineRoot::Ambiguous),
+        }
+    }
+    Ok(VerticalLineRoot::CertifiedRoot {
+        height_axis,
+        enclosure: Interval::new(lower, upper),
+    })
+}
+
+#[derive(Clone, Copy)]
+enum Sign {
+    Negative,
+    Positive,
+}
+
+fn sign_of(interval: Interval) -> Option<Sign> {
+    if !is_finite_interval(interval) {
+        None
+    } else if interval.hi() < 0.0 {
+        Some(Sign::Negative)
+    } else if interval.lo() > 0.0 {
+        Some(Sign::Positive)
+    } else {
+        None
+    }
+}
+
+fn is_finite_interval(interval: Interval) -> bool {
+    interval.lo().is_finite() && interval.hi().is_finite()
+}
+
+fn select_height_axis(sdf: &dyn CutSdf3, cell: HexCell) -> Option<HeightAxis> {
+    let mut selected = None;
+    let mut lower_bound = 0.0;
+    for axis in HeightAxis::ALL {
+        let derivative = sdf.derivative_enclose(cell.lo, cell.hi, axis);
+        if !is_finite_interval(derivative) {
+            // An unusable derivative certificate rules out only this height
+            // direction. Another axis can still prove strict monotonicity.
+            continue;
+        }
+        let candidate = if derivative.lo() > 0.0 {
+            derivative.lo()
+        } else if derivative.hi() < 0.0 {
+            -derivative.hi()
+        } else {
+            0.0
+        };
+        if candidate > lower_bound {
+            selected = Some(axis);
+            lower_bound = candidate;
+        }
+    }
+    selected
+}
+
+fn line_point(height_axis: HeightAxis, base: [f64; 2], height: f64) -> [f64; 3] {
+    match height_axis {
+        HeightAxis::X => [height, base[0], base[1]],
+        HeightAxis::Y => [base[0], height, base[1]],
+        HeightAxis::Z => [base[0], base[1], height],
+    }
 }
 
 /// 3-point Gauss–Legendre on [-1, 1].

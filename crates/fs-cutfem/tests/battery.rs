@@ -21,9 +21,11 @@
 //!   tree) and estimate-driven h-refinement efficiency.
 
 use fs_cutfem::{
-    AggPolicy, CellClass, Circle, CutFemError, CutSdf, FemParams, HalfPlane, Quadtree, Space,
-    condition_estimate, cut_cell_rules,
+    AggPolicy, CellClass, Circle, CutFemError, CutSdf, CutSdf3, FemParams, HalfPlane, HeightAxis,
+    HexCell, Quadtree, Space, VerticalLineRoot, condition_estimate, cut_cell_rules,
+    isolate_certified_height_root,
 };
+use fs_ivl::Interval;
 use fs_solver::krylov::CgState;
 use fs_solver::op::CsrOp;
 use fs_sparse::Coo;
@@ -986,6 +988,272 @@ fn cut_009_scalar_sampler_fails_closed() {
              \"missing_refuses\":{missing_ok},\"non_finite_refuses\":{poisoned_ok},\
              \"out_of_box_refuses\":{out_of_box},\"rim_refuses\":{box_rim},\
              \"nan_point_refuses\":{non_finite_point}"
+        ),
+    );
+}
+
+struct AffinePlane3 {
+    normal: [f64; 3],
+    offset: f64,
+}
+
+impl CutSdf3 for AffinePlane3 {
+    fn value(&self, point: [f64; 3]) -> f64 {
+        self.normal[0] * point[0] + self.normal[1] * point[1] + self.normal[2] * point[2]
+            - self.offset
+    }
+
+    fn enclose(&self, lo: [f64; 3], hi: [f64; 3]) -> Interval {
+        let mut enclosure = Interval::point(-self.offset);
+        for axis in 0..3 {
+            enclosure =
+                enclosure + Interval::point(self.normal[axis]) * Interval::new(lo[axis], hi[axis]);
+        }
+        enclosure
+    }
+
+    fn derivative_enclose(&self, _lo: [f64; 3], _hi: [f64; 3], axis: HeightAxis) -> Interval {
+        Interval::point(
+            self.normal[match axis {
+                HeightAxis::X => 0,
+                HeightAxis::Y => 1,
+                HeightAxis::Z => 2,
+            }],
+        )
+    }
+}
+
+struct DoubleRoot3;
+
+impl CutSdf3 for DoubleRoot3 {
+    fn value(&self, point: [f64; 3]) -> f64 {
+        (point[2] - 0.5).powi(2)
+    }
+
+    fn enclose(&self, lo: [f64; 3], hi: [f64; 3]) -> Interval {
+        let z = Interval::new(lo[2], hi[2]) - Interval::point(0.5);
+        z * z
+    }
+
+    fn derivative_enclose(&self, lo: [f64; 3], hi: [f64; 3], axis: HeightAxis) -> Interval {
+        if axis == HeightAxis::Z {
+            (Interval::new(lo[2], hi[2]) - Interval::point(0.5)) * Interval::point(2.0)
+        } else {
+            Interval::point(0.0)
+        }
+    }
+}
+
+struct FuzzyLowerEndpoint3;
+
+impl CutSdf3 for FuzzyLowerEndpoint3 {
+    fn value(&self, point: [f64; 3]) -> f64 {
+        point[2] + 0.1
+    }
+
+    fn enclose(&self, lo: [f64; 3], hi: [f64; 3]) -> Interval {
+        if lo[2] == 0.0 && hi[2] == 0.0 {
+            Interval::new(-0.1, 0.1)
+        } else {
+            Interval::new(lo[2], hi[2]) + Interval::point(0.1)
+        }
+    }
+
+    fn derivative_enclose(&self, _lo: [f64; 3], _hi: [f64; 3], axis: HeightAxis) -> Interval {
+        if axis == HeightAxis::Z {
+            Interval::point(1.0)
+        } else {
+            Interval::point(0.0)
+        }
+    }
+}
+
+struct NonFiniteDerivative3;
+
+impl CutSdf3 for NonFiniteDerivative3 {
+    fn value(&self, point: [f64; 3]) -> f64 {
+        point[2] - 0.3
+    }
+
+    fn enclose(&self, lo: [f64; 3], hi: [f64; 3]) -> Interval {
+        Interval::new(lo[2], hi[2]) - Interval::point(0.3)
+    }
+
+    fn derivative_enclose(&self, _lo: [f64; 3], _hi: [f64; 3], _axis: HeightAxis) -> Interval {
+        Interval::new(f64::INFINITY, f64::INFINITY)
+    }
+}
+
+struct NonFiniteValue3;
+
+impl CutSdf3 for NonFiniteValue3 {
+    fn value(&self, point: [f64; 3]) -> f64 {
+        point[2] - 0.3
+    }
+
+    fn enclose(&self, _lo: [f64; 3], _hi: [f64; 3]) -> Interval {
+        Interval::WHOLE
+    }
+
+    fn derivative_enclose(&self, _lo: [f64; 3], _hi: [f64; 3], axis: HeightAxis) -> Interval {
+        if axis == HeightAxis::Z {
+            Interval::point(1.0)
+        } else {
+            Interval::point(0.0)
+        }
+    }
+}
+
+struct MixedDerivativeEvidence3;
+
+impl CutSdf3 for MixedDerivativeEvidence3 {
+    fn value(&self, point: [f64; 3]) -> f64 {
+        point[2] - 0.3
+    }
+
+    fn enclose(&self, lo: [f64; 3], hi: [f64; 3]) -> Interval {
+        Interval::new(lo[2], hi[2]) - Interval::point(0.3)
+    }
+
+    fn derivative_enclose(&self, _lo: [f64; 3], _hi: [f64; 3], axis: HeightAxis) -> Interval {
+        match axis {
+            HeightAxis::X => Interval::new(f64::INFINITY, f64::INFINITY),
+            HeightAxis::Y => Interval::point(0.0),
+            HeightAxis::Z => Interval::point(1.0),
+        }
+    }
+}
+
+/// G0: a certified monotone height line isolates its root, while a double
+/// root whose derivative enclosure contains zero remains explicitly ambiguous.
+#[test]
+fn cut_010_certified_3d_vertical_line_isolation_fails_closed() {
+    let cell = HexCell::try_new([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]).expect("unit hex cell");
+    let vertical = AffinePlane3 {
+        normal: [0.0, 0.0, 1.0],
+        offset: 0.3,
+    };
+    let resolved = isolate_certified_height_root(&vertical, cell, [0.5, 0.5], 12)
+        .expect("finite interior height line");
+    let (axis, enclosure) = match resolved {
+        VerticalLineRoot::CertifiedRoot {
+            height_axis,
+            enclosure,
+        } => (height_axis, enclosure),
+        other => panic!("monotone plane must certify one root, got {other:?}"),
+    };
+    let plane_ok =
+        axis == HeightAxis::Z && enclosure.contains(0.3) && enclosure.width() <= 1.0 / 4096.0;
+
+    let double_root = isolate_certified_height_root(&DoubleRoot3, cell, [0.5, 0.5], 12)
+        .expect("finite interior height line");
+    let double_root_refuses = matches!(double_root, VerticalLineRoot::Ambiguous);
+
+    let increasing_outside = isolate_certified_height_root(
+        &AffinePlane3 {
+            normal: [0.0, 0.0, 1.0],
+            offset: -1.0,
+        },
+        cell,
+        [0.5, 0.5],
+        12,
+    )
+    .expect("increasing exterior line");
+    let decreasing_outside = isolate_certified_height_root(
+        &AffinePlane3 {
+            normal: [0.0, 0.0, -1.0],
+            offset: 1.0,
+        },
+        cell,
+        [0.5, 0.5],
+        12,
+    )
+    .expect("decreasing interior line");
+    let no_intersection_both_directions = matches!(
+        increasing_outside,
+        VerticalLineRoot::NoIntersection {
+            height_axis: HeightAxis::Z
+        }
+    ) && matches!(
+        decreasing_outside,
+        VerticalLineRoot::NoIntersection {
+            height_axis: HeightAxis::Z
+        }
+    );
+
+    let tie_break = isolate_certified_height_root(
+        &AffinePlane3 {
+            normal: [1.0, 1.0, 1.0],
+            offset: 0.3,
+        },
+        cell,
+        [0.0, 0.0],
+        12,
+    )
+    .expect("tied derivative bounds");
+    let x_wins_equal_derivative_tie = matches!(
+        tie_break,
+        VerticalLineRoot::CertifiedRoot {
+            height_axis: HeightAxis::X,
+            ..
+        }
+    );
+
+    let non_finite_cell_refuses = matches!(
+        HexCell::try_new([f64::NAN, 0.0, 0.0], [1.0, 1.0, 1.0]),
+        Err(fs_cutfem::CutQuadrature3dError::NonFiniteCell { axis: 0 })
+    );
+    let collapsed_cell_refuses = matches!(
+        HexCell::try_new([0.0, 0.0, 0.0], [1.0, 0.0, 1.0]),
+        Err(fs_cutfem::CutQuadrature3dError::NonPositiveCellSpan { axis: 1 })
+    );
+    let invalid_base_refuses = matches!(
+        isolate_certified_height_root(&vertical, cell, [f64::NAN, 0.5], 12),
+        Err(fs_cutfem::CutQuadrature3dError::NonFiniteBase { coordinate: 0 })
+    ) && matches!(
+        isolate_certified_height_root(&vertical, cell, [1.5, 0.5], 12),
+        Err(fs_cutfem::CutQuadrature3dError::BaseOutsideCell { axis: 0 })
+    );
+    let endpoint_zero_is_not_a_root_proof = matches!(
+        isolate_certified_height_root(&FuzzyLowerEndpoint3, cell, [0.5, 0.5], 12),
+        Ok(VerticalLineRoot::Ambiguous)
+    );
+    let non_finite_evidence_is_ambiguous = matches!(
+        isolate_certified_height_root(&NonFiniteDerivative3, cell, [0.5, 0.5], 12),
+        Ok(VerticalLineRoot::Ambiguous)
+    ) && matches!(
+        isolate_certified_height_root(&NonFiniteValue3, cell, [0.5, 0.5], 12),
+        Ok(VerticalLineRoot::Ambiguous)
+    );
+    let usable_axis_survives_unusable_peer = matches!(
+        isolate_certified_height_root(&MixedDerivativeEvidence3, cell, [0.5, 0.5], 12),
+        Ok(VerticalLineRoot::CertifiedRoot {
+            height_axis: HeightAxis::Z,
+            ..
+        })
+    );
+
+    verdict(
+        "cut-010",
+        plane_ok
+            && double_root_refuses
+            && no_intersection_both_directions
+            && x_wins_equal_derivative_tie
+            && non_finite_cell_refuses
+            && collapsed_cell_refuses
+            && invalid_base_refuses
+            && endpoint_zero_is_not_a_root_proof
+            && non_finite_evidence_is_ambiguous
+            && usable_axis_survives_unusable_peer,
+        &format!(
+            "\"detail\":\"certified 3-D monotone height root with no-intersection, tie, and refusal checks\",\
+             \"root_width\":{:.3e},\"double_root_ambiguous\":{double_root_refuses},\
+             \"no_intersection_both_directions\":{no_intersection_both_directions},\
+             \"x_wins_equal_derivative_tie\":{x_wins_equal_derivative_tie},\
+             \"invalid_inputs_refuse\":{},\"endpoint_zero_ambiguous\":{endpoint_zero_is_not_a_root_proof},\
+             \"non_finite_evidence_ambiguous\":{non_finite_evidence_is_ambiguous}",
+            enclosure.width(),
+            non_finite_cell_refuses && collapsed_cell_refuses && invalid_base_refuses
         ),
     );
 }

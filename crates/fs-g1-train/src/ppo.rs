@@ -38,7 +38,11 @@ pub struct RunningNorm {
 
 impl RunningNorm {
     pub fn new(dim: usize) -> Self {
-        Self { mean: vec![0.0; dim], var: vec![1.0; dim], count: 0.0 }
+        Self {
+            mean: vec![0.0; dim],
+            var: vec![1.0; dim],
+            count: 0.0,
+        }
     }
 
     pub fn update(&mut self, x: &[f32]) {
@@ -132,7 +136,11 @@ impl Trajectory {
         let mut returns = vec![0.0f32; n];
         let mut gae = 0.0f32;
         for t in (0..n).rev() {
-            let next_value = if t + 1 < n { self.values[t + 1] } else { last_value };
+            let next_value = if t + 1 < n {
+                self.values[t + 1]
+            } else {
+                last_value
+            };
             let next_non_terminal = if self.dones[t] { 0.0 } else { 1.0 };
             let delta = self.rewards[t] + gamma * next_value * next_non_terminal - self.values[t];
             gae = delta + gamma * lambda * next_non_terminal * gae;
@@ -143,7 +151,11 @@ impl Trajectory {
     }
 }
 
-pub fn log_gaussian_prob(mean: &[f32], log_std: &[f32], action: &[f32]) -> (f32, Vec<f32>, Vec<f32>) {
+pub fn log_gaussian_prob(
+    mean: &[f32],
+    log_std: &[f32],
+    action: &[f32],
+) -> (f32, Vec<f32>, Vec<f32>) {
     let mut lp = 0.0f32;
     let mut dmean = Vec::with_capacity(mean.len());
     let mut dlogstd = Vec::with_capacity(mean.len());
@@ -171,7 +183,8 @@ fn gaussian_sample(state: &mut u64) -> f32 {
     *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
     let u1 = ((state.wrapping_mul(0xBF58_476D_1CE4_E5B9) >> 11) as f64 / (1u64 << 53) as f64)
         .max(1e-10) as f32;
-    let u2 = ((state.wrapping_mul(0x94D0_49BB_1331_11EB) >> 11) as f64 / (1u64 << 53) as f64) as f32;
+    let u2 =
+        ((state.wrapping_mul(0x94D0_49BB_1331_11EB) >> 11) as f64 / (1u64 << 53) as f64) as f32;
     (-2.0 * u1.ln()).sqrt() * (2.0 * std::f32::consts::PI * u2).cos()
 }
 
@@ -186,7 +199,10 @@ impl PolicyLogStd {
     pub fn new(dim: usize, lr: f32, init: f32) -> Self {
         let mut adam = AdamParam::new(dim, lr);
         adam.params.fill(init);
-        Self { log_std: adam.params.clone(), adam }
+        Self {
+            log_std: adam.params.clone(),
+            adam,
+        }
     }
 }
 
@@ -247,7 +263,11 @@ pub fn ppo_update(
     // Defensive alignment: the env-adapter and the reward trace can
     // disagree by one transition at a termination boundary. Align every
     // PPO tensor to the shortest length; log when they disagree.
-    let mut t_len = traj.len().min(advantages.len()).min(returns.len()).min(old_log_probs.len());
+    let mut t_len = traj
+        .len()
+        .min(advantages.len())
+        .min(returns.len())
+        .min(old_log_probs.len());
     if traj.values.len() < t_len {
         t_len = traj.values.len();
     }
@@ -260,8 +280,13 @@ pub fn ppo_update(
     }
     // Normalize advantages
     let adv_mean: f32 = advantages.iter().sum::<f32>() / t_len as f32;
-    let adv_std =
-        (advantages.iter().map(|a| (a - adv_mean).powi(2)).sum::<f32>() / t_len as f32).sqrt() + 1e-8;
+    let adv_std = (advantages
+        .iter()
+        .map(|a| (a - adv_mean).powi(2))
+        .sum::<f32>()
+        / t_len as f32)
+        .sqrt()
+        + 1e-8;
 
     let inv_t = 1.0 / t_len as f32;
     let mut kl = 0.0f32;
@@ -294,7 +319,11 @@ pub fn ppo_update(
             let surr1 = rho * a;
             let surr2 = rho.clamp(1.0 - config.clip_ratio, 1.0 + config.clip_ratio) * a;
             // min(surr1, surr2): gradient flows only through the active branch.
-            let unclipped_active = if a >= 0.0 { surr1 <= surr2 } else { surr1 >= surr2 };
+            let unclipped_active = if a >= 0.0 {
+                surr1 <= surr2
+            } else {
+                surr1 >= surr2
+            };
             let n_out = model.cfg.n_outputs;
             let mut dm = vec![0.0f32; n_out];
             for i in 0..n_out {
@@ -342,7 +371,10 @@ mod tests {
 
     impl MockEnv {
         fn new() -> Self {
-            Self { pos: [0.0, 0.0], step_count: 0 }
+            Self {
+                pos: [0.0, 0.0],
+                step_count: 0,
+            }
         }
     }
 
@@ -357,10 +389,18 @@ mod tests {
             self.pos[1] += action[1].clamp(-1.0, 1.0) * 0.1;
             self.step_count += 1;
             let reward = -(self.pos[0] * self.pos[0] + self.pos[1] * self.pos[1]);
-            (vec![self.pos[0], self.pos[1], 0.0, 0.0], reward, self.step_count >= 32)
+            (
+                vec![self.pos[0], self.pos[1], 0.0, 0.0],
+                reward,
+                self.step_count >= 32,
+            )
         }
-        fn obs_dim(&self) -> usize { 4 }
-        fn action_dim(&self) -> usize { 2 }
+        fn obs_dim(&self) -> usize {
+            4
+        }
+        fn action_dim(&self) -> usize {
+            2
+        }
     }
 
     #[test]
@@ -413,16 +453,34 @@ mod tests {
         for _ in 0..6 {
             let traj = collect_trajectory(&mut env, &mut model, &norm, &log_std, &mut seed, 64, 0);
             let (advantages, returns) = traj.compute_gae(0.0, config.gamma, config.gae_lambda);
-            let kl = ppo_update(&mut model, &norm, &mut log_std, &traj, &advantages, &returns, &traj.log_probs, &config);
+            let kl = ppo_update(
+                &mut model,
+                &norm,
+                &mut log_std,
+                &traj,
+                &advantages,
+                &returns,
+                &traj.log_probs,
+                &config,
+            );
             last_kl = kl;
         }
         let final_r = mean_reward(&mut env, &mut model, &norm, &log_std, &mut seed);
         println!("[ppo] initial {initial:.4} -> final {final_r:.4}, kl {last_kl:.4}");
-        assert!(last_kl.is_finite() && last_kl >= 0.0, "KL must be finite and non-negative");
+        assert!(
+            last_kl.is_finite() && last_kl >= 0.0,
+            "KL must be finite and non-negative"
+        );
         // The policy must ACTUALLY move (KL > 0 after real updates).
-        assert!(last_kl > 0.0, "a real update must change the policy (KL > 0)");
+        assert!(
+            last_kl > 0.0,
+            "a real update must change the policy (KL > 0)"
+        );
         // And the mock reward must improve beyond noise.
-        assert!(final_r > initial + 0.2, "PPO must improve reward: {initial:.4} -> {final_r:.4}");
+        assert!(
+            final_r > initial + 0.2,
+            "PPO must improve reward: {initial:.4} -> {final_r:.4}"
+        );
     }
 
     #[test]
@@ -433,7 +491,11 @@ mod tests {
         }
         assert!((norm.mean[0] - 49.5).abs() < 1.0);
         // Exact population variance of 0..99 = (100^2 - 1)/12 ≈ 832.5.
-        assert!((norm.var[0] - 833.25).abs() < 2.0, "Welford var: {}", norm.var[0]);
+        assert!(
+            (norm.var[0] - 833.25).abs() < 2.0,
+            "Welford var: {}",
+            norm.var[0]
+        );
     }
 
     #[test]

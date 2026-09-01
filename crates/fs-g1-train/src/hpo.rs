@@ -61,8 +61,7 @@ pub const HPO_BOUNDS: [(f32, f32); HPO_DIM] = [
 ];
 
 /// Whether each hyperparameter is searched in log space.
-pub const HPO_LOG_SCALE: [bool; HPO_DIM] =
-    [true, false, true, false, false, false, false, false];
+pub const HPO_LOG_SCALE: [bool; HPO_DIM] = [true, false, true, false, false, false, false, false];
 
 /// Clip a hyperparameter vector to the search bounds.
 pub fn clip_to_bounds(hp: &[f32; HPO_DIM]) -> [f32; HPO_DIM] {
@@ -165,7 +164,8 @@ impl HyperparameterSearch {
         }
         self.sigma = self.sigma.clamp(1e-6, 10.0);
         self.generation += 1;
-        self.best_history.push((self.generation, self.incumbent_fitness));
+        self.best_history
+            .push((self.generation, self.incumbent_fitness));
     }
 }
 
@@ -181,7 +181,11 @@ mod tests {
         for c in candidates.iter() {
             for i in 0..HPO_DIM {
                 let (lo, hi) = HPO_BOUNDS[i];
-                assert!(c[i] >= lo && c[i] <= hi, "param {i} = {} out of [{lo}, {hi}]", c[i]);
+                assert!(
+                    c[i] >= lo && c[i] <= hi,
+                    "param {i} = {} out of [{lo}, {hi}]",
+                    c[i]
+                );
             }
         }
     }
@@ -211,9 +215,16 @@ mod tests {
         }
         // The default's fitness is 0.1 + 0.1 = 0.2. With anchoring, the
         // search must climb well past it (the max is 2.0 at the bounds).
-        assert!(hpo.incumbent_fitness > 0.5, "HPO should improve on the default's 0.2, got {}", hpo.incumbent_fitness);
+        assert!(
+            hpo.incumbent_fitness > 0.5,
+            "HPO should improve on the default's 0.2, got {}",
+            hpo.incumbent_fitness
+        );
         // Anchoring must have MOVED the incumbent vector.
-        assert!(hpo.incumbent != HPO_DEFAULT, "incumbent vector must move when improvements anchor");
+        assert!(
+            hpo.incumbent != HPO_DEFAULT,
+            "incumbent vector must move when improvements anchor"
+        );
     }
 
     #[test]
@@ -249,13 +260,19 @@ mod tests {
         let fitnesses: Vec<f32> = candidates.iter().map(|_| 0.05).collect();
         hpo.tell(&candidates, &fitnesses);
         let after_widen = hpo.sigma;
-        assert!(after_widen > before_widen, "sigma must widen when the record does not improve");
+        assert!(
+            after_widen > before_widen,
+            "sigma must widen when the record does not improve"
+        );
         // Batch that beats the record -> tighten relative to post-widen.
         let candidates = hpo.ask(8);
         let mut fitnesses: Vec<f32> = candidates.iter().map(|_| 0.05).collect();
         fitnesses[3] = 1.0; // a clear record-beater
         hpo.tell(&candidates, &fitnesses);
-        assert!(hpo.sigma < after_widen, "a record improvement must tighten sigma");
+        assert!(
+            hpo.sigma < after_widen,
+            "a record improvement must tighten sigma"
+        );
     }
 
     #[test]
@@ -278,6 +295,9 @@ mod tests {
                 }
             }
         }
-        assert!(ups > 0 && downs > 0, "log-scale sampling must go both ways (ups={ups}, downs={downs})");
+        assert!(
+            ups > 0 && downs > 0,
+            "log-scale sampling must go both ways (ups={ups}, downs={downs})"
+        );
     }
 }

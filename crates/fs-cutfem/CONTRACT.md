@@ -33,6 +33,11 @@ same certified cuts; its constitutive parameters come from
   area) and interface points (weights sum to interface length, with
   outward unit normals) for one cut cell; `depth` is the error-control
   knob.
+- `CutSdf3` / `HexCell` / `isolate_certified_height_root`: the narrow
+  3-D Saye-style height-line primitive. It deterministically selects a
+  derivative-certified monotone height direction and returns either one
+  interval-enclosed root, a proven no-intersection result, or `Ambiguous`.
+  It is not yet a 3-D volume/surface quadrature rule.
 - `Space::build(grid, sdf, params)`: classify → quadrature → hanging /
   aggregation / strong-outer constraints → free-DOF numbering → ghost
   faces. `assemble` produces the SPD stiffness + load for −Δu = f,
@@ -324,8 +329,10 @@ ledger evidence.
 
 ## No-claim boundaries
 
-- 3D octree instantiation (the design is dimension-generic — dyadic
-  keys, face constraints, tensor rules — but only 2D ships here).
+- 3D octree instantiation and 3-D bulk/surface quadrature: the narrow
+  height-line root primitive ships, but no octree, tensor base rule,
+  root-count subdivision, volume/surface enclosure, or 3-D ghost penalty
+  path exists here yet.
 - Higher-order elements (Qk, k ≥ 2) and the matching higher-order
   ghost penalties (derivative jumps beyond first order).
 - Moment-fitting quadrature (tessellation-based scheme ships; the

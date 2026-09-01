@@ -16,13 +16,19 @@
 //! temperature 0; minimize thermal compliance `J = ∫ f·u` over hole
 //! radii at a fixed material-area budget — the canonical heat-sink
 //! layout problem, meshed never.
-use std::collections::BTreeMap;
-
 use fs_cutfem::sdf::CutSdf;
 use fs_cutfem::{FemParams, Quadtree, ScalarSample, Space};
 use fs_dwr::{GoalContext, estimate, goal_value};
-use fs_evidence::{Color, IntervalOp, compose};
+use fs_evidence::{Color, ColorRank, IntervalOp, compose};
 use fs_ledger::hash_bytes;
+
+/// The fixed projection iteration count and its admissible scale bracket.
+/// With a ratio of at most 2^20, 80 bisections leave less than 2^-60 of
+/// unresolved scale width before the radius-to-area conversion.
+const PROJECTION_BISECTION_STEPS: usize = 80;
+const MAX_RADIUS_RATIO: f64 = 1_048_576.0;
+/// Largest permitted material-area residual after radius projection.
+pub const AREA_PROJECTION_TOLERANCE: f64 = 1e-12;
 
 /// The design: a unit plate minus k circular cooling holes
 /// (φ < 0 inside the material). EXACT geometry: circles.
@@ -83,6 +89,97 @@ fn validate_study_input(design: &PlateWithHoles, config: &StudyConfig) {
             && config.r_min > 0.0
             && config.r_min <= config.r_max,
         "radius bounds must be finite and satisfy 0 < r_min <= r_max"
+    );
+    let ratio = config.r_max / config.r_min;
+    assert!(
+        ratio.is_finite() && ratio <= MAX_RADIUS_RATIO,
+        "radius ratio must be finite and no larger than {MAX_RADIUS_RATIO} for deterministic projection"
+    );
+    validate_hole_geometry(design);
+    #[allow(clippy::cast_precision_loss)]
+    let count = design.radii.len() as f64;
+    let target_hole = (1.0 - config.area_target) / std::f64::consts::PI;
+    assert!(
+        target_hole >= count * config.r_min * config.r_min
+            && target_hole <= count * config.r_max * config.r_max,
+        "area target is infeasible for the number of holes and radius bounds"
+    );
+}
+
+/// Require the disk layout assumed by the summed-disc area and CutSdf model.
+fn hole_geometry_is_valid(design: &PlateWithHoles) -> bool {
+    if design.centers.len() != design.radii.len() {
+        return false;
+    }
+    if !design
+        .centers
+        .iter()
+        .zip(&design.radii)
+        .all(|(center, radius)| {
+            center[0] - radius > 0.0
+                && center[0] + radius < 1.0
+                && center[1] - radius > 0.0
+                && center[1] + radius < 1.0
+        })
+    {
+        return false;
+    }
+    for left in 0..design.radii.len() {
+        for right in (left + 1)..design.radii.len() {
+            let dx = design.centers[left][0] - design.centers[right][0];
+            let dy = design.centers[left][1] - design.centers[right][1];
+            let minimum_separation = design.radii[left] + design.radii[right];
+            if dx.mul_add(dx, dy * dy) <= minimum_separation * minimum_separation {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn validate_hole_geometry(design: &PlateWithHoles) {
+    assert!(
+        hole_geometry_is_valid(design),
+        "holes must be strictly interior and pairwise disjoint"
+    );
+}
+
+/// Project candidate radii onto their box and the declared hole-area equality.
+///
+/// A single clamp-then-rescale can leave the sum outside the target when a
+/// bound activates. Scaling followed by clamping is monotone, so fixed-count
+/// bisection finds the deterministic feasible multiplier without changing the
+/// background grid or remeshing the design.
+fn project_radii_to_area(radii: &mut [f64], config: &StudyConfig) {
+    let target_hole = (1.0 - config.area_target) / std::f64::consts::PI;
+    let max_scale = config.r_max / config.r_min;
+    for radius in radii.iter_mut() {
+        *radius = radius.clamp(config.r_min, config.r_max);
+    }
+    let mut lo = 0.0;
+    let mut hi = max_scale;
+
+    for _ in 0..PROJECTION_BISECTION_STEPS {
+        let scale = 0.5 * (lo + hi);
+        let hole_area = radii
+            .iter()
+            .map(|radius| (scale * radius).clamp(config.r_min, config.r_max).powi(2))
+            .sum::<f64>();
+        if hole_area < target_hole {
+            lo = scale;
+        } else {
+            hi = scale;
+        }
+    }
+
+    for radius in radii {
+        *radius = (hi * *radius).clamp(config.r_min, config.r_max);
+    }
+    let projected_material_area =
+        1.0 - std::f64::consts::PI * radii.iter().map(|radius| radius * radius).sum::<f64>();
+    assert!(
+        (projected_material_area - config.area_target).abs() <= AREA_PROJECTION_TOLERANCE,
+        "radius projection residual exceeds {AREA_PROJECTION_TOLERANCE}"
     );
 }
 
@@ -146,18 +243,28 @@ impl CutSdf for PlateWithHoles {
 pub struct IterRecord {
     /// Iteration index.
     pub iter: usize,
-    /// The compliance J(u_h).
+    /// The compliance J(u_h) at `radii`, before the accepted step.
     pub compliance: f64,
     /// Material area.
     pub area: f64,
-    /// The design radii after this step.
+    /// Material volume in the unit-thickness 2-D study (equal to `area`).
+    pub volume: f64,
+    /// The design radii evaluated for `compliance`, before the accepted step.
     pub radii: Vec<f64>,
+    /// Candidate radii retained after the Armijo decision.
+    pub accepted_radii: Vec<f64>,
+    /// Objective evaluated at `accepted_radii` (or `compliance` on exhaustion).
+    pub accepted_compliance: f64,
     /// Shape gradient dJ/dr per hole (the self-adjoint boundary form).
     pub gradient: Vec<f64>,
+    /// Euclidean norm of `gradient`.
+    pub gradient_norm: f64,
     /// The COMPOSED certificate components.
     pub cert_geometry: f64,
     /// |DWR estimate| (discretization).
     pub cert_dwr: f64,
+    /// The per-iteration DWR estimate retained for JSONL rows.
+    pub dwr_estimate: f64,
     /// Estimated goal-error contribution derived from a recomputed Euclidean
     /// algebraic residual (not CG's recursive residual estimate).
     pub cert_algebraic: f64,
@@ -165,6 +272,40 @@ pub struct IterRecord {
     pub color: Color,
     /// Solver iterations (flat-cadence evidence: no remeshing spikes).
     pub solver_iters: usize,
+    /// Certified cut-cell quadrature rules retained by the state solve.
+    pub cut_cell_count: usize,
+    /// Accepted Armijo step after the current objective evaluation.
+    pub accepted_step: f64,
+    /// Number of deterministic half-step retries before acceptance.
+    pub backtracks: usize,
+}
+
+impl IterRecord {
+    /// Serialize one deterministic JSONL object, including its terminating
+    /// newline, for the per-iteration study ledger stream.
+    #[must_use]
+    pub fn jsonl_row(&self) -> String {
+        format!(
+            concat!(
+                "{\"iter\":{},\"compliance\":{:.17e},\"volume\":{:.17e},",
+                "\"gradient_norm\":{:.17e},\"dwr_estimate\":{:.17e},",
+                "\"cut_cell_count\":{},\"accepted_step\":{:.17e},",
+                "\"backtracks\":{},\"accepted_compliance\":{:.17e},",
+                "\"color_rank\":{},\"color_payload\":{}}\\n"
+            ),
+            self.iter,
+            self.compliance,
+            self.volume,
+            self.gradient_norm,
+            self.dwr_estimate,
+            self.cut_cell_count,
+            self.accepted_step,
+            self.backtracks,
+            self.accepted_compliance,
+            color_rank_tag(self.color.rank()),
+            self.color.payload_json(),
+        )
+    }
 }
 
 /// The study configuration.
@@ -225,7 +366,7 @@ impl LevelHint for FemParams {
 fn solve_and_grade(
     design: &PlateWithHoles,
     level: u32,
-) -> Result<(f64, Vec<f64>, [f64; 3], usize, BTreeMap<(u32, u32), f64>), fs_cutfem::CutFemError> {
+) -> Result<(f64, Vec<f64>, [f64; 3], usize, usize), fs_cutfem::CutFemError> {
     let grid = Quadtree::uniform(level);
     let params = fem_params(level);
     let f = |_x: f64, _y: f64| 1.0;
@@ -285,7 +426,62 @@ fn solve_and_grade(
                     .to_string(),
             })?;
     let cert = [0.0, dwr.eta_abs, euclidean_rel_residual * j.abs().max(1.0)];
-    Ok((j, grads, cert, sol.iters, nodal))
+    Ok((j, grads, cert, sol.iters, space.cut_rules().len()))
+}
+
+const ARMIJO_SUFFICIENT_DECREASE: f64 = 1e-4;
+const MAX_ARMIJO_BACKTRACKS: usize = 8;
+
+/// Return an accepted box-and-area-feasible design, or retain the current one
+/// after the bounded Armijo budget is exhausted.
+fn armijo_next_design(
+    design: &PlateWithHoles,
+    config: &StudyConfig,
+    current_objective: f64,
+    gradient: &[f64],
+) -> Result<(PlateWithHoles, f64, f64, usize), fs_cutfem::CutFemError> {
+    if config.step_size == 0.0 {
+        return Ok((design.clone(), current_objective, 0.0, 0));
+    }
+
+    for backtracks in 0..=MAX_ARMIJO_BACKTRACKS {
+        #[allow(clippy::cast_precision_loss)]
+        let step = config.step_size * 0.5_f64.powi(backtracks as i32);
+        let mut candidate = design.clone();
+        for (radius, derivative) in candidate.radii.iter_mut().zip(gradient) {
+            *radius = (*radius - step * derivative).clamp(config.r_min, config.r_max);
+        }
+        project_radii_to_area(&mut candidate.radii, config);
+        if !hole_geometry_is_valid(&candidate) {
+            continue;
+        }
+
+        let directional_derivative = gradient
+            .iter()
+            .zip(&candidate.radii)
+            .zip(&design.radii)
+            .map(|((derivative, candidate_radius), current_radius)| {
+                derivative * (candidate_radius - current_radius)
+            })
+            .sum::<f64>();
+        if directional_derivative >= 0.0 {
+            continue;
+        }
+
+        let (candidate_objective, _, _, _, _) = solve_and_grade(&candidate, config.level)?;
+        if candidate_objective
+            <= current_objective + ARMIJO_SUFFICIENT_DECREASE * directional_derivative
+        {
+            return Ok((candidate, candidate_objective, step, backtracks));
+        }
+    }
+
+    Ok((
+        design.clone(),
+        current_objective,
+        0.0,
+        MAX_ARMIJO_BACKTRACKS,
+    ))
 }
 
 /// Run the marquee study: projected gradient on hole radii at a fixed
@@ -299,9 +495,13 @@ pub fn run_study(
     config: &StudyConfig,
 ) -> Result<StudyReport, fs_cutfem::CutFemError> {
     validate_study_input(&design, config);
+    project_radii_to_area(&mut design.radii, config);
+    validate_hole_geometry(&design);
     let mut iterations = Vec::with_capacity(config.steps);
     for iter in 0..config.steps {
-        let (j, grads, cert, iters, _) = solve_and_grade(&design, config.level)?;
+        let (j, grads, cert, iters, cut_cell_count) = solve_and_grade(&design, config.level)?;
+        let (next_design, accepted_compliance, accepted_step, backtracks) =
+            armijo_next_design(&design, config, j, &grads)?;
         // COMPOSED certificate color: exact geometry (verified) ⊗ DWR
         // (estimated) ⊗ algebraic residual (estimated) — weakest wins.
         let color = compose(
@@ -320,50 +520,102 @@ pub fn run_study(
             },
             IntervalOp::Add,
         );
+        let gradient_norm = grads
+            .iter()
+            .map(|gradient| gradient * gradient)
+            .sum::<f64>()
+            .sqrt();
         iterations.push(IterRecord {
             iter,
             compliance: j,
             area: design.area(),
+            volume: design.area(),
             radii: design.radii.clone(),
+            accepted_radii: next_design.radii.clone(),
+            accepted_compliance,
             gradient: grads.clone(),
+            gradient_norm,
             cert_geometry: cert[0],
             cert_dwr: cert[1],
+            dwr_estimate: cert[1],
             cert_algebraic: cert[2],
             color,
             solver_iters: iters,
+            cut_cell_count,
+            accepted_step,
+            backtracks,
         });
-        // Descent: dJ/dr < 0 — every hole wants to grow; the area
-        // budget's rescale projection turns that into REDISTRIBUTION:
-        // holes with the larger per-radius payoff grow at the expense
-        // of the rest (flux equalization, the optimality condition).
-        for (r, g) in design.radii.iter_mut().zip(&grads) {
-            *r = (*r - config.step_size * g).clamp(config.r_min, config.r_max);
-        }
-        // Area-equality projection: rescale radii to hit the target.
-        let hole_area: f64 = design.radii.iter().map(|r| r * r).sum::<f64>();
-        let target_hole = (1.0 - config.area_target) / std::f64::consts::PI;
-        if hole_area > 0.0 {
-            let scale = (target_hole / hole_area).sqrt();
-            for r in &mut design.radii {
-                *r = (*r * scale).clamp(config.r_min, config.r_max);
-            }
-        }
+        design = next_design;
     }
-    let mut canon = String::new();
-    for rec in &iterations {
-        use std::fmt::Write as _;
-        let _ = write!(
-            canon,
-            "{}:{:.12e}:{:.12e};",
-            rec.iter, rec.compliance, rec.area
-        );
-        for r in &rec.radii {
-            let _ = write!(canon, "{r:.12e},");
-        }
-    }
+    let trace_hash = canonical_trace_hash(&iterations, &design);
     Ok(StudyReport {
         iterations,
         design,
-        trace_hash: hash_bytes(canon.as_bytes()).to_hex(),
+        trace_hash,
     })
+}
+
+fn append_usize(bytes: &mut Vec<u8>, value: usize) {
+    bytes.extend_from_slice(
+        &u64::try_from(value)
+            .expect("a Rust allocation length fits u64")
+            .to_le_bytes(),
+    );
+}
+
+fn append_f64(bytes: &mut Vec<u8>, value: f64) {
+    bytes.extend_from_slice(&value.to_bits().to_le_bytes());
+}
+
+fn append_f64_slice(bytes: &mut Vec<u8>, values: &[f64]) {
+    append_usize(bytes, values.len());
+    for value in values {
+        append_f64(bytes, *value);
+    }
+}
+
+fn color_rank_tag(rank: ColorRank) -> u8 {
+    match rank {
+        ColorRank::Estimated => 0,
+        ColorRank::Validated => 1,
+        ColorRank::Verified => 2,
+    }
+}
+
+/// Canonical replay identity for every recorded solve/acceptance transition
+/// and the final retained geometry. Floats are committed by IEEE bits, and
+/// colors use their versioned canonical payload bytes.
+fn canonical_trace_hash(iterations: &[IterRecord], design: &PlateWithHoles) -> String {
+    let mut bytes = b"fs-marquee-study-trace-v2\0".to_vec();
+    append_usize(&mut bytes, iterations.len());
+    for record in iterations {
+        append_usize(&mut bytes, record.iter);
+        append_f64(&mut bytes, record.compliance);
+        append_f64(&mut bytes, record.area);
+        append_f64(&mut bytes, record.volume);
+        append_f64_slice(&mut bytes, &record.radii);
+        append_f64_slice(&mut bytes, &record.accepted_radii);
+        append_f64(&mut bytes, record.accepted_compliance);
+        append_f64_slice(&mut bytes, &record.gradient);
+        append_f64(&mut bytes, record.gradient_norm);
+        append_f64(&mut bytes, record.cert_geometry);
+        append_f64(&mut bytes, record.cert_dwr);
+        append_f64(&mut bytes, record.dwr_estimate);
+        append_f64(&mut bytes, record.cert_algebraic);
+        bytes.push(color_rank_tag(record.color.rank()));
+        let color = record.color.canonical_bytes();
+        append_usize(&mut bytes, color.len());
+        bytes.extend_from_slice(&color);
+        append_usize(&mut bytes, record.solver_iters);
+        append_usize(&mut bytes, record.cut_cell_count);
+        append_f64(&mut bytes, record.accepted_step);
+        append_usize(&mut bytes, record.backtracks);
+    }
+    append_usize(&mut bytes, design.centers.len());
+    for center in &design.centers {
+        append_f64(&mut bytes, center[0]);
+        append_f64(&mut bytes, center[1]);
+    }
+    append_f64_slice(&mut bytes, &design.radii);
+    hash_bytes(&bytes).to_hex()
 }

@@ -235,7 +235,13 @@ pub fn swiglu(gate: &[f32], value: &[f32], out: &mut [f32]) {
 }
 
 /// Backward of out = silu(gate) ∘ value. Adds into dgate/dvalue.
-pub fn swiglu_backward(gate: &[f32], value: &[f32], dout: &[f32], dgate: &mut [f32], dvalue: &mut [f32]) {
+pub fn swiglu_backward(
+    gate: &[f32],
+    value: &[f32],
+    dout: &[f32],
+    dgate: &mut [f32],
+    dvalue: &mut [f32],
+) {
     for i in 0..dout.len() {
         let g = gate[i];
         let sigmoid = 1.0 / (1.0 + (-g).exp());
@@ -292,7 +298,12 @@ struct KvCache {
 
 impl KvCache {
     fn new() -> Self {
-        Self { k: Vec::new(), v: Vec::new(), start: 0, count: 0 }
+        Self {
+            k: Vec::new(),
+            v: Vec::new(),
+            start: 0,
+            count: 0,
+        }
     }
     fn clear(&mut self) {
         self.k.clear();
@@ -342,7 +353,7 @@ pub struct TrainTape {
 
 pub struct GaitTransformer {
     pub cfg: Config,
-    pub embed: AdamParam,       // d_model × n_inputs
+    pub embed: AdamParam, // d_model × n_inputs
     pub layers: Vec<LayerWeights>,
     pub policy_head: AdamParam, // n_outputs × d_model
     pub value_w: AdamParam,     // 1 × d_model
@@ -480,14 +491,28 @@ impl GaitTransformer {
             rope_in_place(&mut k, cfg.head_dim, position);
             self.cache[li].push(cfg.kv_dim, cfg.context, &k, &v);
             let c = &self.cache[li];
-            attention_causal(&q, &c.k, &c.v, c.count, cfg.n_heads, cfg.head_dim, &mut attn);
+            attention_causal(
+                &q,
+                &c.k,
+                &c.v,
+                c.count,
+                cfg.n_heads,
+                cfg.head_dim,
+                &mut attn,
+            );
             matvec(&layer.wo.weights, d, d, &attn, &mut proj);
             for (hi, pi) in h.iter_mut().zip(proj.iter()) {
                 *hi += pi;
             }
             scratch.copy_from_slice(&h);
             rms_norm(&mut scratch, &layer.norm2.params, 1e-6);
-            matvec(&layer.w_gate.weights, cfg.mlp_hidden, d, &scratch, &mut gate);
+            matvec(
+                &layer.w_gate.weights,
+                cfg.mlp_hidden,
+                d,
+                &scratch,
+                &mut gate,
+            );
             matvec(&layer.w_up.weights, cfg.mlp_hidden, d, &scratch, &mut up);
             swiglu(&gate, &up, &mut mid);
             matvec(&layer.w_down.weights, d, cfg.mlp_hidden, &mid, &mut proj);
@@ -543,7 +568,15 @@ impl GaitTransformer {
                 self.cache[li].push(cfg.kv_dim, cfg.context, &k, &v);
                 let c = &self.cache[li];
                 let (k_snap, v_snap, count) = (c.k.clone(), c.v.clone(), c.count);
-                attention_causal(&q, &c.k, &c.v, c.count, cfg.n_heads, cfg.head_dim, &mut attn);
+                attention_causal(
+                    &q,
+                    &c.k,
+                    &c.v,
+                    c.count,
+                    cfg.n_heads,
+                    cfg.head_dim,
+                    &mut attn,
+                );
                 let att_out = attn.clone();
                 matvec(&layer.wo.weights, d, d, &attn, &mut proj);
                 for (hi, pi) in h.iter_mut().zip(proj.iter()) {
@@ -553,7 +586,13 @@ impl GaitTransformer {
                 scratch.copy_from_slice(&h);
                 rms_norm(&mut scratch, &layer.norm2.params, 1e-6);
                 let normed2 = scratch.clone();
-                matvec(&layer.w_gate.weights, cfg.mlp_hidden, d, &normed2, &mut gate);
+                matvec(
+                    &layer.w_gate.weights,
+                    cfg.mlp_hidden,
+                    d,
+                    &normed2,
+                    &mut gate,
+                );
                 matvec(&layer.w_up.weights, cfg.mlp_hidden, d, &normed2, &mut up);
                 swiglu(&gate, &up, &mut mid);
                 matvec(&layer.w_down.weights, d, cfg.mlp_hidden, &mid, &mut proj);
@@ -704,13 +743,44 @@ impl GaitTransformer {
                 dup.fill(0.0);
                 swiglu_backward(&lt.gate, &lt.up, &dmid, &mut dgate, &mut dup);
                 dn2.fill(0.0);
-                matvec_backward(&layer.w_gate.weights, cfg.mlp_hidden, d, &lt.normed2, &dgate, &mut layer.w_gate.grad, &mut dn2);
-                matvec_backward(&layer.w_up.weights, cfg.mlp_hidden, d, &lt.normed2, &dup, &mut layer.w_up.grad, &mut dn2);
+                matvec_backward(
+                    &layer.w_gate.weights,
+                    cfg.mlp_hidden,
+                    d,
+                    &lt.normed2,
+                    &dgate,
+                    &mut layer.w_gate.grad,
+                    &mut dn2,
+                );
+                matvec_backward(
+                    &layer.w_up.weights,
+                    cfg.mlp_hidden,
+                    d,
+                    &lt.normed2,
+                    &dup,
+                    &mut layer.w_up.grad,
+                    &mut dn2,
+                );
                 da.copy_from_slice(&dh);
-                rms_norm_backward(&lt.a_vec, &layer.norm2.params, 1e-6, &dn2, &mut layer.norm2.grads, &mut da);
+                rms_norm_backward(
+                    &lt.a_vec,
+                    &layer.norm2.params,
+                    1e-6,
+                    &dn2,
+                    &mut layer.norm2.grads,
+                    &mut da,
+                );
                 // attention residual: a = hidden_in + wo·att_out
                 dattn.fill(0.0);
-                matvec_backward(&layer.wo.weights, d, d, &lt.att_out, &da, &mut layer.wo.grad, &mut dattn);
+                matvec_backward(
+                    &layer.wo.weights,
+                    d,
+                    d,
+                    &lt.att_out,
+                    &da,
+                    &mut layer.wo.grad,
+                    &mut dattn,
+                );
                 // attention backward: dq_t own; dk/dv per slot
                 dq.fill(0.0);
                 let start_abs = t + 1 - lt.cache_count; // 0 while t < context
@@ -724,9 +794,17 @@ impl GaitTransformer {
                     dk_own.fill(0.0);
                     dv_own.fill(0.0);
                     attention_causal_backward_slot(
-                        &lt.q, &lt.k_cache, &lt.v_cache, lt.cache_count,
-                        slot, cfg.n_heads, cfg.head_dim, &dattn,
-                        &mut dq, &mut dk_own, &mut dv_own,
+                        &lt.q,
+                        &lt.k_cache,
+                        &lt.v_cache,
+                        lt.cache_count,
+                        slot,
+                        cfg.n_heads,
+                        cfg.head_dim,
+                        &dattn,
+                        &mut dq,
+                        &mut dk_own,
+                        &mut dv_own,
                     );
                     for i in 0..cfg.kv_dim {
                         gk[li][off + i] += dk_own[i];
@@ -736,18 +814,54 @@ impl GaitTransformer {
                 // own token's total k/v gradient (own + all later inflow)
                 let own_off = t * cfg.kv_dim;
                 dk_pre.fill(0.0);
-                rope_backward(cfg.head_dim, t, &gk[li][own_off..own_off + cfg.kv_dim], &mut dk_pre);
+                rope_backward(
+                    cfg.head_dim,
+                    t,
+                    &gk[li][own_off..own_off + cfg.kv_dim],
+                    &mut dk_pre,
+                );
                 dq_pre.fill(0.0);
                 rope_backward(cfg.head_dim, t, &dq, &mut dq_pre);
                 // projections back into normed1
                 dn1.fill(0.0);
-                matvec_backward(&layer.wq.weights, d, d, &lt.normed1, &dq_pre, &mut layer.wq.grad, &mut dn1);
-                matvec_backward(&layer.wk.weights, cfg.kv_dim, d, &lt.normed1, &dk_pre, &mut layer.wk.grad, &mut dn1);
+                matvec_backward(
+                    &layer.wq.weights,
+                    d,
+                    d,
+                    &lt.normed1,
+                    &dq_pre,
+                    &mut layer.wq.grad,
+                    &mut dn1,
+                );
+                matvec_backward(
+                    &layer.wk.weights,
+                    cfg.kv_dim,
+                    d,
+                    &lt.normed1,
+                    &dk_pre,
+                    &mut layer.wk.grad,
+                    &mut dn1,
+                );
                 let dv_own: Vec<f32> = gv[li][own_off..own_off + cfg.kv_dim].to_vec();
-                matvec_backward(&layer.wv.weights, cfg.kv_dim, d, &lt.normed1, &dv_own, &mut layer.wv.grad, &mut dn1);
+                matvec_backward(
+                    &layer.wv.weights,
+                    cfg.kv_dim,
+                    d,
+                    &lt.normed1,
+                    &dv_own,
+                    &mut layer.wv.grad,
+                    &mut dn1,
+                );
                 // residual 1 + RMSNorm 1 → gradient into block input
                 dh_in.copy_from_slice(&da);
-                rms_norm_backward(&lt.hidden_in, &layer.norm1.params, 1e-6, &dn1, &mut layer.norm1.grads, &mut dh_in);
+                rms_norm_backward(
+                    &lt.hidden_in,
+                    &layer.norm1.params,
+                    1e-6,
+                    &dn1,
+                    &mut layer.norm1.grads,
+                    &mut dh_in,
+                );
                 dh.copy_from_slice(&dh_in);
             }
             // embed gradient (token-local): runs ONCE per token with the
@@ -945,9 +1059,15 @@ mod tests {
         pub(crate) fn new(seed: &mut u64, t_len: usize, n_out: usize) -> Self {
             Self {
                 w_mean: (0..t_len)
-                    .map(|_| (0..n_out).map(|_| splitmix_uniform(seed) as f32 - 0.5).collect())
+                    .map(|_| {
+                        (0..n_out)
+                            .map(|_| splitmix_uniform(seed) as f32 - 0.5)
+                            .collect()
+                    })
                     .collect(),
-                w_val: (0..t_len).map(|_| splitmix_uniform(seed) as f32 - 0.5).collect(),
+                w_val: (0..t_len)
+                    .map(|_| splitmix_uniform(seed) as f32 - 0.5)
+                    .collect(),
             }
         }
         pub(crate) fn loss(&self, means: &[Vec<f32>], values: &[f32]) -> f32 {
@@ -1057,7 +1177,11 @@ mod tests {
         let mut checked = 0usize;
         let codes = 0..14usize;
         for code in codes {
-            let layers: &[usize] = if code < 5 { &[0] } else { &[0, cfg.n_layers - 1] };
+            let layers: &[usize] = if code < 5 {
+                &[0]
+            } else {
+                &[0, cfg.n_layers - 1]
+            };
             for &layer in layers {
                 let len = site_len(&model, code, layer);
                 for idx in [0usize, len / 2, len - 1] {
@@ -1117,7 +1241,10 @@ mod tests {
         }
         let (pert_means, pert_values, _t) = model.forward_sequence_train(&obs);
         for t in 0..4 {
-            assert_eq!(base_means[t], pert_means[t], "future leaked into past at t={t}");
+            assert_eq!(
+                base_means[t], pert_means[t],
+                "future leaked into past at t={t}"
+            );
             assert_eq!(base_values[t], pert_values[t]);
         }
     }
@@ -1149,9 +1276,15 @@ mod tests {
         let obs: Vec<Vec<f32>> = (0..t_len).map(|t| probe_obs(&mut seed, t)).collect();
         // Fixed targets in (-0.5, 0.5) for the policy head; fixed value targets.
         let targets: Vec<Vec<f32>> = (0..t_len)
-            .map(|_| (0..cfg.n_outputs).map(|_| splitmix_uniform(&mut seed) as f32 - 0.5).collect())
+            .map(|_| {
+                (0..cfg.n_outputs)
+                    .map(|_| splitmix_uniform(&mut seed) as f32 - 0.5)
+                    .collect()
+            })
             .collect();
-        let v_targets: Vec<f32> = (0..t_len).map(|_| splitmix_uniform(&mut seed) as f32 * 0.4).collect();
+        let v_targets: Vec<f32> = (0..t_len)
+            .map(|_| splitmix_uniform(&mut seed) as f32 * 0.4)
+            .collect();
 
         let loss_at = |model: &mut GaitTransformer| -> f32 {
             let (means, values, _t) = model.forward_sequence_train(&obs);
@@ -1183,14 +1316,16 @@ mod tests {
         }
         let l1 = loss_at(&mut model);
         println!("[supervised] loss {l0:.5} -> {l1:.5}");
-        assert!(l1 < l0 * 0.25, "supervised loss must drop >4x, went {l0:.5} -> {l1:.5}");
+        assert!(
+            l1 < l0 * 0.25,
+            "supervised loss must drop >4x, went {l0:.5} -> {l1:.5}"
+        );
     }
 
     fn config_value_grad(v: f32, target: f32, t_len: usize) -> f32 {
         2.0 * (v - target) / t_len as f32
     }
 }
-
 
 #[cfg(test)]
 mod op_gradcheck {
@@ -1199,7 +1334,6 @@ mod op_gradcheck {
     /// Per-op finite-difference gradchecks (L1 rung): each hand-rolled
     /// backward is verified against central differences on small fixtures.
     /// Tolerance 2% — measured f32 FD noise at h=1e-2 on these magnitudes.
-
 
     #[test]
     fn op_rms_norm_backward_matches_fd() {
@@ -1220,11 +1354,17 @@ mod op_gradcheck {
         };
         let h = 1e-2;
         for i in 0..n {
-            let mut xp = x.clone(); xp[i] += h;
-            let mut xm = x.clone(); xm[i] -= h;
+            let mut xp = x.clone();
+            xp[i] += h;
+            let mut xm = x.clone();
+            xm[i] -= h;
             let g_fd = (f(&xp) - f(&xm)) / (2.0 * h);
             let rel = (dx[i] - g_fd).abs() / (dx[i].abs() + g_fd.abs() + 1e-6);
-            assert!(rel < 0.02, "rms dx[{i}] analytic={} fd={g_fd} rel={rel}", dx[i]);
+            assert!(
+                rel < 0.02,
+                "rms dx[{i}] analytic={} fd={g_fd} rel={rel}",
+                dx[i]
+            );
         }
         for i in 0..n {
             let loss = |ww: &[f32]| -> f32 {
@@ -1232,11 +1372,17 @@ mod op_gradcheck {
                 rms_norm(&mut y, ww, 1e-6);
                 y.iter().zip(dy.iter()).map(|(yi, di)| yi * di).sum::<f32>()
             };
-            let mut wp = w.clone(); wp[i] += h;
-            let mut wm = w.clone(); wm[i] -= h;
+            let mut wp = w.clone();
+            wp[i] += h;
+            let mut wm = w.clone();
+            wm[i] -= h;
             let g_fd = (loss(&wp) - loss(&wm)) / (2.0 * h);
             let rel = (dw[i] - g_fd).abs() / (dw[i].abs() + g_fd.abs() + 1e-6);
-            assert!(rel < 0.02, "rms dw[{i}] analytic={} fd={g_fd} rel={rel}", dw[i]);
+            assert!(
+                rel < 0.02,
+                "rms dw[{i}] analytic={} fd={g_fd} rel={rel}",
+                dw[i]
+            );
         }
     }
 
@@ -1258,11 +1404,17 @@ mod op_gradcheck {
         };
         let h = 1e-2;
         for i in 0..8 {
-            let mut xp = x.clone(); xp[i] += h;
-            let mut xm = x.clone(); xm[i] -= h;
+            let mut xp = x.clone();
+            xp[i] += h;
+            let mut xm = x.clone();
+            xm[i] -= h;
             let g_fd = (f(&xp) - f(&xm)) / (2.0 * h);
             let rel = (dx[i] - g_fd).abs() / (dx[i].abs() + g_fd.abs() + 1e-6);
-            assert!(rel < 0.02, "rope dx[{i}] analytic={} fd={g_fd} rel={rel}", dx[i]);
+            assert!(
+                rel < 0.02,
+                "rope dx[{i}] analytic={} fd={g_fd} rel={rel}",
+                dx[i]
+            );
         }
     }
 
@@ -1284,16 +1436,28 @@ mod op_gradcheck {
         };
         let h = 1e-2;
         for i in 0..4 {
-            let mut gp = g.clone(); gp[i] += h;
-            let mut gm = g.clone(); gm[i] -= h;
+            let mut gp = g.clone();
+            gp[i] += h;
+            let mut gm = g.clone();
+            gm[i] -= h;
             let g_fd = (f(&gp, &u) - f(&gm, &u)) / (2.0 * h);
             let rel = (dg[i] - g_fd).abs() / (dg[i].abs() + g_fd.abs() + 1e-6);
-            assert!(rel < 0.02, "swiglu dg[{i}] analytic={} fd={g_fd} rel={rel}", dg[i]);
-            let mut up = u.clone(); up[i] += h;
-            let mut um = u.clone(); um[i] -= h;
+            assert!(
+                rel < 0.02,
+                "swiglu dg[{i}] analytic={} fd={g_fd} rel={rel}",
+                dg[i]
+            );
+            let mut up = u.clone();
+            up[i] += h;
+            let mut um = u.clone();
+            um[i] -= h;
             let g_fd = (f(&g, &up) - f(&g, &um)) / (2.0 * h);
             let rel = (du[i] - g_fd).abs() / (du[i].abs() + g_fd.abs() + 1e-6);
-            assert!(rel < 0.02, "swiglu du[{i}] analytic={} fd={g_fd} rel={rel}", du[i]);
+            assert!(
+                rel < 0.02,
+                "swiglu du[{i}] analytic={} fd={g_fd} rel={rel}",
+                du[i]
+            );
         }
     }
 
@@ -1319,18 +1483,30 @@ mod op_gradcheck {
         };
         let h = 1e-2;
         for c in 0..cols {
-            let mut xp = x.clone(); xp[c] += h;
-            let mut xm = x.clone(); xm[c] -= h;
+            let mut xp = x.clone();
+            xp[c] += h;
+            let mut xm = x.clone();
+            xm[c] -= h;
             let g_fd = (f(&w, &xp) - f(&w, &xm)) / (2.0 * h);
             let rel = (dx[c] - g_fd).abs() / (dx[c].abs() + g_fd.abs() + 1e-6);
-            assert!(rel < 0.02, "matvec dx[{c}] analytic={} fd={g_fd} rel={rel}", dx[c]);
+            assert!(
+                rel < 0.02,
+                "matvec dx[{c}] analytic={} fd={g_fd} rel={rel}",
+                dx[c]
+            );
         }
         for i in 0..rows * cols {
-            let mut wp = w.clone(); wp[i] += h;
-            let mut wm = w.clone(); wm[i] -= h;
+            let mut wp = w.clone();
+            wp[i] += h;
+            let mut wm = w.clone();
+            wm[i] -= h;
             let g_fd = (f(&wp, &x) - f(&wm, &x)) / (2.0 * h);
             let rel = (dw[i] - g_fd).abs() / (dw[i].abs() + g_fd.abs() + 1e-6);
-            assert!(rel < 0.02, "matvec dw[{i}] analytic={} fd={g_fd} rel={rel}", dw[i]);
+            assert!(
+                rel < 0.02,
+                "matvec dw[{i}] analytic={} fd={g_fd} rel={rel}",
+                dw[i]
+            );
         }
     }
 }
@@ -1400,11 +1576,19 @@ mod composition_oracle {
 
         // deterministic inputs and head weights
         let obs: Vec<Vec<f32>> = (0..2)
-            .map(|t| (0..MD).map(|i| ((i + 1 + 3 * t) as f32 * 0.21).sin()).collect())
+            .map(|t| {
+                (0..MD)
+                    .map(|i| ((i + 1 + 3 * t) as f32 * 0.21).sin())
+                    .collect()
+            })
             .collect();
         // probe: per-token weights over means and values
         let w_mean: Vec<Vec<f32>> = (0..2)
-            .map(|t| (0..MD).map(|i| (i + 1) as f32 * 0.3 - 0.1 * (t + 1) as f32).collect())
+            .map(|t| {
+                (0..MD)
+                    .map(|i| (i + 1) as f32 * 0.3 - 0.1 * (t + 1) as f32)
+                    .collect()
+            })
             .collect();
         let w_val: Vec<f32> = (0..2).map(|t| 0.4 - 0.1 * t as f32).collect();
 
@@ -1510,8 +1694,8 @@ mod slot_helper_fd {
             let mut dks = vec![0.0f32; d];
             let mut dvs = vec![0.0f32; d];
             attention_causal_backward_slot(
-                &q1, &k_cache, &v_cache, count, slot, n_heads, head_dim, &dattn,
-                &mut dq, &mut dks, &mut dvs,
+                &q1, &k_cache, &v_cache, count, slot, n_heads, head_dim, &dattn, &mut dq, &mut dks,
+                &mut dvs,
             );
             for i in 0..d {
                 dk[slot * d + i] += dks[i];
@@ -1565,6 +1749,6 @@ mod slot_helper_fd {
             check(format!("dv[{i}]"), dv[i], g_fd);
         }
         println!("[slot-helper] worst rel {worst:.5} at {worst_name}");
-assert!(worst < 0.02, "slot helper failed: {worst_name}");
+        assert!(worst < 0.02, "slot helper failed: {worst_name}");
     }
 }

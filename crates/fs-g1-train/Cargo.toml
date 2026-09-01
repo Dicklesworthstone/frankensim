@@ -12,17 +12,29 @@ license = "MIT"
 [package.metadata.frankensim]
 layer = "L6"
 
+[features]
+train-io = []
+
 [dependencies]
 # The transformer/Muon/PPO core and action-causal explanatory stand-in remain
 # standalone. Real owner-rollout training is integrated by the sibling
 # fs-cmaes-viz-wasm `g1-learned` feature so this crate does not duplicate the
 # 29-DoF dynamics owner.
 
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+[[example]]
+name = "train_ablation"
+path = "examples/train_ablation.rs"
+required-features = ["train-io"]
+
+[[example]]
+name = "finalize_ablation"
+path = "examples/finalize_ablation.rs"
+required-features = ["train-io"]
 
 [dev-dependencies]
-# None needed — all tests are self-contained.
+# The two train-io examples write/read their local JSON artifacts. This is not
+# part of the fs-g1-train runtime dependency graph.
+serde_json = "1"
 
 [workspace]
 

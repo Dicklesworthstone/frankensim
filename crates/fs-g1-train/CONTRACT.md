@@ -46,7 +46,12 @@ None are declared in the current manifest; `g1-learned` belongs to the sibling
 ## Conformance tests
 
 The standalone and owner-seam focused commands listed below are the current
-conformance gates.
+conformance gates. The owner seam's declared training environment is the
+source-bound `G1Task::Walking` / `G1Challenge::Flat` owner rollout at 480 Hz
+for 0.5 s, initialized from the disclosed walking curriculum. It records PPO
+updates and the deterministic zero-head/base-policy counterfactual. It is a
+training seam only: no held-out validation split, seed-disjoint terrain/push
+campaign, or publishable locomotion artifact is implemented by this gate.
 
 ## No-claim boundaries
 
@@ -67,7 +72,9 @@ already specified below.
   terrain, or push authority.
 - Real 29-DoF owner training is composed by `fs-cmaes-viz-wasm` behind its
   `g1-learned` feature. That adapter consumes the owner observation and action
-  layouts directly; `fs-g1-train` must not duplicate them.
+  layouts directly; `fs-g1-train` must not duplicate them. The focused seam
+  uses the owner's 42-element observation vector and 15 residual-action
+  coordinates, as defined by the owner, rather than the stand-in units.
 
 ## Artifact publication
 
@@ -98,12 +105,15 @@ arrays. The focused standalone gate is:
 cargo test --manifest-path crates/fs-g1-train/Cargo.toml
 ```
 
-The real-owner seam gate is:
+The real-owner Walking/Flat training-seam gate is:
 
 ```text
 cargo test --manifest-path crates/fs-cmaes-viz-wasm/Cargo.toml \
   --features g1-learned --test g1_learned_ppo
 ```
 
-Neither gate by itself proves athletic performance, robustness, sample
-efficiency, hardware transfer, or superiority to the phase-basis controller.
+Neither gate by itself proves learned locomotion, athletic performance,
+held-out terrain/push robustness, sample efficiency, hardware transfer, or
+superiority to the phase-basis controller. It also does not make the walking
+curriculum a from-scratch baseline: the curriculum remains an explicitly
+disclosed owner-policy initialization.

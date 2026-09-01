@@ -28,8 +28,9 @@ fs-render = { path = "../fs-render", features = ["chart-backends"] }
 fs-rep-frep = { path = "../fs-rep-frep" }
 
 [features]
-# [F]-gated per the Ambition-Tag rule: the marquee study ships disabled
-# until its golden ledger joins nightly CI.
+# The smoke-tier runner is the shipped P2 admission path.  Consumers may opt
+# out for a status-only build while the full-resolution golden remains pending.
+default = ["marquee"]
 marquee = []
 
 [lints]

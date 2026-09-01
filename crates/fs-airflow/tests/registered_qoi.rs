@@ -12,12 +12,12 @@
 //! - Bit-identical deterministic replay.
 
 use fs_airflow::qoi::{
-    FanPowerSpec, JunctionRegion, SafetyFactorAuthority, SurfaceRegion, ThermalQoiDeclarations,
-    ThermalQoiKind, ThermalRequirement,
+    DiscretizationReceipt, FanPowerSpec, JunctionRegion, SafetyFactorAuthority, SurfaceRegion,
+    ThermalQoiDeclarations, ThermalQoiKind, ThermalRequirement,
 };
 use fs_airflow::registered_qoi::{
     OutputKind, OutputQuery, QoiExecutionLimits, QoiSemanticId, RegisteredQoiError,
-    extract_registered_qois,
+    extract_registered_junction_maximum, extract_registered_qois,
 };
 use fs_airflow::{
     EnclosureNetwork, FanArrangement, FanBank, FanCurve, FanPoint, LeakageElement, LossElement,
@@ -25,11 +25,14 @@ use fs_airflow::{
     solve_operating_point,
 };
 use fs_alloc::{ArenaConfig, ArenaPool};
+use fs_blake3::hash_bytes;
 use fs_conduction::fixtures::unit_cube;
 use fs_conduction::solve::StopReason;
 use fs_conduction::{
     ConductionMesh, ConductionReport, ConductionSolution, EnergyBalance, ProvenanceClass,
 };
+use fs_evidence::ColorRank;
+use fs_evidence::uncertainty::BudgetTotal;
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_qty::{Pressure, Temperature, VolumetricFlowRate};
 
@@ -277,7 +280,7 @@ fn rq_002_query_aliases_map_deterministically() {
         let decls = sample_declarations(&junction, &surface, &fan, &req);
 
         let queries = vec![
-            OutputQuery::scalar("junction_temp"),
+            OutputQuery::scalar("temperature-max"),
             OutputQuery::scalar("case_mean_temp"),
             OutputQuery::scalar("delta_p"),
             OutputQuery::scalar("margin"),
@@ -599,5 +602,191 @@ fn rq_008_region_constraints_bind_the_exact_qoi_scope() {
                 } if semantic_id == expected_semantic_id && requested == "package"
             ));
         }
+    });
+}
+
+#[test]
+fn rq_009_request_selective_junction_maximum_needs_no_surface_or_fan_declaration() {
+    with_cx(|cx| {
+        let (mesh, solution) = sample_mesh_and_solution();
+        let junction = JunctionRegion::try_new("package", vec![0, 1, 2, 6, 7]).unwrap();
+        let receipt = extract_registered_junction_maximum(
+            &[OutputQuery::scalar_with_region(
+                "temperature-max",
+                "package",
+            )],
+            &mesh,
+            &solution,
+            &junction,
+            None,
+            hash_bytes(b"selective-junction-solution"),
+            QoiExecutionLimits::default(),
+            cx,
+        )
+        .expect("declared region maximum needs no unrelated declarations");
+
+        assert_eq!(receipt.requested_query_count, 1);
+        assert_eq!(receipt.emitted_qoi_count, 1);
+        let row = &receipt.rows[0];
+        assert_eq!(row.semantic_id, QoiSemanticId::JunctionMaximum);
+        assert_eq!(row.query_name, "temperature-max");
+        assert_eq!(row.region_name.as_deref(), Some("package"));
+        assert_eq!(row.tie_witness_vertex, Some(6));
+        assert_eq!(row.color, ColorRank::Estimated);
+        assert!(matches!(
+            row.uncertainty.total(),
+            BudgetTotal::Unknown { .. }
+        ));
+        assert_eq!(
+            row.source_lineage,
+            vec![hash_bytes(b"selective-junction-solution")]
+        );
+
+        let different_source = extract_registered_junction_maximum(
+            &[OutputQuery::scalar_with_region(
+                "temperature-max",
+                "package",
+            )],
+            &mesh,
+            &solution,
+            &junction,
+            None,
+            hash_bytes(b"different-conduction-solution"),
+            QoiExecutionLimits::default(),
+            cx,
+        )
+        .expect("the same scalar from a different solved field remains extractable");
+        assert_ne!(
+            row.identity_hash, different_source.rows[0].identity_hash,
+            "candidate identity must bind the retained solved-field artifact"
+        );
+
+        let discretization_a =
+            DiscretizationReceipt::try_new(1.0, source("selective-ladder")).unwrap();
+        let discretization_b =
+            DiscretizationReceipt::try_new(2.0, source("selective-ladder")).unwrap();
+        let with_discretization_a = extract_registered_junction_maximum(
+            &[OutputQuery::scalar_with_region(
+                "temperature-max",
+                "package",
+            )],
+            &mesh,
+            &solution,
+            &junction,
+            Some(&discretization_a),
+            hash_bytes(b"selective-junction-solution"),
+            QoiExecutionLimits::default(),
+            cx,
+        )
+        .unwrap();
+        let with_discretization_b = extract_registered_junction_maximum(
+            &[OutputQuery::scalar_with_region(
+                "temperature-max",
+                "package",
+            )],
+            &mesh,
+            &solution,
+            &junction,
+            Some(&discretization_b),
+            hash_bytes(b"selective-junction-solution"),
+            QoiExecutionLimits::default(),
+            cx,
+        )
+        .unwrap();
+        let row_a = &with_discretization_a.rows[0];
+        let row_b = &with_discretization_b.rows[0];
+        assert_eq!(row_a.value.to_bits(), row_b.value.to_bits());
+        assert_eq!(row_a.tie_witness_vertex, row_b.tie_witness_vertex);
+        assert_eq!(row_a.color, row_b.color);
+        assert_eq!(row_a.source_lineage, row_b.source_lineage);
+        assert_ne!(
+            row_a.uncertainty.content_id(),
+            row_b.uncertainty.content_id(),
+            "the retained discretization evidence must change the uncertainty identity"
+        );
+        assert_ne!(
+            row_a.identity_hash, row_b.identity_hash,
+            "candidate identity must bind the retained discretization evidence"
+        );
+
+        let error = extract_registered_junction_maximum(
+            &[OutputQuery::scalar("airflow.fan_power")],
+            &mesh,
+            &solution,
+            &junction,
+            None,
+            hash_bytes(b"selective-junction-solution"),
+            QoiExecutionLimits::default(),
+            cx,
+        )
+        .expect_err("request-selective extractor must not invent fan authority");
+        assert!(matches!(
+            error,
+            RegisteredQoiError::UnsupportedOutputName { .. }
+        ));
+    });
+}
+
+#[test]
+fn rq_010_general_junction_candidate_identity_binds_discretization() {
+    with_cx(|cx| {
+        let (mesh, solution) = sample_mesh_and_solution();
+        let operating = operating_point();
+        let junction = JunctionRegion::try_new("package", vec![0, 1, 2, 6, 7]).unwrap();
+        let surface = SurfaceRegion::try_new("case", vec![0, 1, 2]).unwrap();
+        let fan = FanPowerSpec::try_new(0.6, 0.05, source("fan-efficiency")).unwrap();
+        let requirement = sample_requirement(380.0, 1.1);
+        let discretization_a =
+            DiscretizationReceipt::try_new(1.0, source("general-ladder-v1")).unwrap();
+        let discretization_b =
+            DiscretizationReceipt::try_new(2.0, source("general-ladder-v1")).unwrap();
+        let declarations_a = ThermalQoiDeclarations {
+            junction_region: &junction,
+            surface_region: &surface,
+            fan_power: &fan,
+            requirement: Some(&requirement),
+            discretization: Some(&discretization_a),
+        };
+        let queries = [OutputQuery::scalar_with_region(
+            "thermal.junction_maximum",
+            "package",
+        )];
+        let receipt_a = extract_registered_qois(
+            &queries,
+            &mesh,
+            &solution,
+            &operating,
+            &declarations_a,
+            QoiExecutionLimits::default(),
+            cx,
+        )
+        .unwrap();
+        let declarations_b = ThermalQoiDeclarations {
+            discretization: Some(&discretization_b),
+            ..declarations_a
+        };
+        let receipt_b = extract_registered_qois(
+            &queries,
+            &mesh,
+            &solution,
+            &operating,
+            &declarations_b,
+            QoiExecutionLimits::default(),
+            cx,
+        )
+        .unwrap();
+        let row_a = &receipt_a.rows[0];
+        let row_b = &receipt_b.rows[0];
+
+        assert_eq!(row_a.value.to_bits(), row_b.value.to_bits());
+        assert_eq!(row_a.tie_witness_vertex, row_b.tie_witness_vertex);
+        assert_eq!(row_a.color, row_b.color);
+        assert_eq!(row_a.query_name, row_b.query_name);
+        assert_eq!(row_a.region_name, row_b.region_name);
+        assert_ne!(
+            row_a.uncertainty.content_id(),
+            row_b.uncertainty.content_id()
+        );
+        assert_ne!(row_a.identity_hash, row_b.identity_hash);
     });
 }

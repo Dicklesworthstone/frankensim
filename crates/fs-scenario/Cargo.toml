@@ -13,6 +13,11 @@ layer = "L3"
 [features]
 rans-rung = []
 
+[[test]]
+name = "rans_card_gates"
+path = "tests/rans_card_gates.rs"
+required-features = ["rans-rung"]
+
 [dependencies]
 fs-blake3 = { path = "../fs-blake3" }
 fs-cheb = { path = "../fs-cheb" }

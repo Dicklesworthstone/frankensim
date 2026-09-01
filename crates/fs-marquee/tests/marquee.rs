@@ -4,6 +4,8 @@
 //! `marquee` feature exposes a smoke-tier in-process runner, but it must not
 //! claim the full nightly golden lane or ledger/filesystem side effects.
 
+#[cfg(feature = "marquee")]
+use fs_marquee::study::{PlateWithHoles, StudyConfig};
 use fs_marquee::{MarqueeStatus, VERSION, scope_summary, status};
 
 fn expected_status() -> MarqueeStatus {
@@ -32,8 +34,30 @@ fn marquee_scope_keeps_nightly_golden_boundary_explicit() {
 
 #[cfg(feature = "marquee")]
 #[test]
+fn default_feature_set_exposes_smoke_runner() {
+    assert_eq!(status(), MarqueeStatus::SmokeRunnerAvailable);
+
+    // These values keep the default-enabled public runner API covered without
+    // making an explicit `--no-default-features` status-only build fail to
+    // compile.
+    let _design = PlateWithHoles {
+        centers: vec![[0.5, 0.5]],
+        radii: vec![0.1],
+    };
+    let _config = StudyConfig {
+        level: 1,
+        steps: 1,
+        step_size: 0.0,
+        area_target: 0.1,
+        r_min: 0.05,
+        r_max: 0.2,
+    };
+}
+
+#[cfg(feature = "marquee")]
+#[test]
 fn marquee_runner_rejects_invalid_inputs_before_solver() {
-    use fs_marquee::study::{PlateWithHoles, StudyConfig, run_study};
+    use fs_marquee::study::run_study;
 
     let design = PlateWithHoles {
         centers: Vec::new(),
@@ -55,7 +79,6 @@ fn marquee_runner_rejects_invalid_inputs_before_solver() {
 #[test]
 fn marquee_empty_design_sdf_is_total_even_when_runner_rejects_it() {
     use fs_cutfem::sdf::CutSdf;
-    use fs_marquee::study::PlateWithHoles;
 
     let design = PlateWithHoles {
         centers: Vec::new(),

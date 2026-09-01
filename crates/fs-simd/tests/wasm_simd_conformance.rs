@@ -1,7 +1,40 @@
-//! Wasm SIMD128 Tier-1w capsule conformance and scalar referee equivalence (bead `frankensim-wf-root-guzez.1.5`).
+//! Host-fallback lane/tail boundary coverage for the Wasm SIMD128 Tier-1w
+//! capsule; this does not execute wasm32 SIMD instructions (bead
+//! frankensim-wf-root-guzez.1.5).
 
 use fs_simd::scalar;
 use fs_simd::wasm;
+
+#[test]
+fn wasm_simd128_lane_and_tail_boundaries_match_scalar() {
+    for len in 0..=3 {
+        let x = (0..len).map(|index| index as f64 + 0.5).collect::<Vec<_>>();
+        let mut y_wasm = (0..len)
+            .map(|index| -(index as f64) - 0.25)
+            .collect::<Vec<_>>();
+        let mut y_scalar = y_wasm.clone();
+
+        wasm::axpy(1.5, &x, &mut y_wasm);
+        scalar::axpy(1.5, &x, &mut y_scalar);
+
+        assert_eq!(
+            y_wasm
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            y_scalar
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            "length {len} must preserve scalar AXPY semantics"
+        );
+        assert_eq!(
+            wasm::dot(&x, &y_wasm).to_bits(),
+            scalar::dot(&x, &y_wasm).to_bits()
+        );
+        assert_eq!(wasm::sum(&x).to_bits(), scalar::sum(&x).to_bits());
+    }
+}
 
 #[test]
 fn wasm_simd128_axpy_matches_scalar() {

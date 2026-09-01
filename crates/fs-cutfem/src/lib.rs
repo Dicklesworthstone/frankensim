@@ -64,7 +64,10 @@ pub use fem::{BuildStats, CellClass, FemParams, ScalarSample, Solution, Space};
 pub use grid::{
     CellKey, FaceAxis, FaceDirection, FaceTopologyError, NodeKey, Quadtree, SharedFacePatch,
 };
-pub use quad::{CutRules, cut_cell_rules};
+pub use quad::{
+    CutQuadrature3dError, CutRules, CutSdf3, HeightAxis, HexCell, VerticalLineRoot, cut_cell_rules,
+    isolate_certified_height_root,
+};
 pub use sdf::{Circle, CutSdf, HalfPlane};
 
 /// Crate version, re-exported for provenance stamping (the Five

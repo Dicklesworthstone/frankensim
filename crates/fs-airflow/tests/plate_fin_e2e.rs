@@ -641,10 +641,6 @@ fn solved_fan_rates_drive_a_declared_plate_fin_thermal_chain() {
             "fixed geometry and fluid properties make the developing Nu change reach h"
         );
         assert!(
-            pair[1].mean_bulk_temperature_k < pair[0].mean_bulk_temperature_k,
-            "more solved mass flow lowers the declared channel-mean bulk temperature"
-        );
-        assert!(
             pair[1].mean_base_temperature_k < pair[0].mean_base_temperature_k,
             "the solved airflow change must reach the solid temperature field"
         );
@@ -689,6 +685,25 @@ fn solved_fan_rates_drive_a_declared_plate_fin_thermal_chain() {
     }
 
     for run in &runs {
+        // A monotonic bulk temperature only proves a direction. The stated
+        // one-way model is stronger: its midpoint bulk temperature implies an
+        // outlet whose enthalpy rise carries exactly the declared base power.
+        // This intentionally validates the disclosed closure, not a conjugate
+        // fluid solve.
+        let implied_outlet_temperature_k = 2.0 * run.mean_bulk_temperature_k - INLET_TEMPERATURE_K;
+        let implied_air_power_w = AIR_DENSITY_KG_M3
+            * AIR_SPECIFIC_HEAT_J_KG_K
+            * run.branch_flow_m3_s
+            * (implied_outlet_temperature_k - INLET_TEMPERATURE_K);
+        let one_way_closure_error =
+            (implied_air_power_w - declared_base_power_w()).abs() / declared_base_power_w();
+        assert!(
+            one_way_closure_error < 1.0e-12,
+            "declared one-way bulk-air closure carries {implied_air_power_w} W, \
+             expected {} W (relative error {one_way_closure_error})",
+            declared_base_power_w()
+        );
+
         assert_eq!(run.solution.report.interface_fluxes.len(), FIN_COUNT);
         for (fin, flux) in run.solution.report.interface_fluxes.iter().enumerate() {
             assert_eq!(flux.interface, format!("fin-{fin}-bondline"));

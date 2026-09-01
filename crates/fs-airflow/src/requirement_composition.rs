@@ -124,11 +124,13 @@ pub struct ThermalLimitSpec {
     pub semantic_id: QoiSemanticId,
     /// Declared target region.
     pub region_name: String,
-    /// Limit value in Kelvin. Must be finite and non-negative.
+    /// Effective limit value in Kelvin after the retained safety-factor
+    /// policy has already been applied. Must be finite and non-negative.
     pub limit_kelvin: f64,
     /// Required margin in Kelvin. Must be finite and non-negative.
     pub margin_kelvin: f64,
-    /// Applied safety factor (>= 1.0).
+    /// Applied safety factor (>= 1.0), retained for identity only. Composition
+    /// never applies it a second time.
     pub safety_factor: f64,
     /// Requirement revision or source document ID.
     pub revision: String,
@@ -309,29 +311,33 @@ pub fn compose_thermal_limits(
         });
 
         let eval = if let Some(row) = candidate {
-            // Apply safety factor to effective limit
-            let effective_limit = req.limit_kelvin / req.safety_factor;
+            // ThermalLimit stores the effective post-factor value. Applying
+            // the retained factor again here would silently double-derate the
+            // requirement.
+            let effective_limit = req.limit_kelvin;
             let achieved_margin = effective_limit - row.value;
 
             let (outcome, weakest_color) = if outside_domain {
                 (ComplianceOutcome::OutsideDomain, ColorRank::Estimated)
-            } else if !row.value.is_finite() || row.value < 0.0 {
+            } else if !row.value.is_finite() || (row.value < 0.0 && !row.kind.admits_negative()) {
                 (ComplianceOutcome::Corrupt, ColorRank::Estimated)
-            } else if achieved_margin >= req.margin_kelvin {
-                // If uncertainty total exists and bound is large enough to cross boundary, mark Indeterminate
-                let half_width = match row.uncertainty.total() {
+            } else {
+                let outcome = match row.uncertainty.total() {
                     BudgetTotal::Bounded {
                         conservative_half_width,
-                    } => conservative_half_width,
-                    _ => 0.0,
+                    } if achieved_margin - conservative_half_width >= req.margin_kelvin => {
+                        ComplianceOutcome::Satisfied
+                    }
+                    BudgetTotal::Bounded {
+                        conservative_half_width,
+                    } if achieved_margin + conservative_half_width < req.margin_kelvin => {
+                        ComplianceOutcome::Violated
+                    }
+                    BudgetTotal::Bounded { .. }
+                    | BudgetTotal::Unknown { .. }
+                    | BudgetTotal::Unbounded { .. } => ComplianceOutcome::Indeterminate,
                 };
-                if achieved_margin - half_width < req.margin_kelvin && half_width > 0.0 {
-                    (ComplianceOutcome::Indeterminate, ColorRank::Validated)
-                } else {
-                    (ComplianceOutcome::Satisfied, ColorRank::Verified)
-                }
-            } else {
-                (ComplianceOutcome::Violated, ColorRank::Verified)
+                (outcome, row.color)
             };
 
             match outcome {
@@ -347,20 +353,18 @@ pub fn compose_thermal_limits(
                 tie_witness_vertex: row.tie_witness_vertex,
                 weakest_stage: if outside_domain {
                     "fs-regime"
+                } else if matches!(
+                    row.semantic_id,
+                    QoiSemanticId::PressureDrop | QoiSemanticId::FanPower
+                ) {
+                    "fs-airflow"
                 } else {
                     "fs-conduction"
                 },
                 weakest_color,
             };
 
-            let identity_hash = compute_evaluation_hash(
-                &req.id,
-                req.semantic_id,
-                &req.region_name,
-                effective_limit,
-                row.value,
-                outcome,
-            );
+            let identity_hash = compute_evaluation_hash(req, row, outcome, weakest_color);
 
             ThermalLimitEvaluation {
                 requirement_id: req.id.clone(),
@@ -410,24 +414,33 @@ pub fn compose_thermal_limits(
 }
 
 fn compute_evaluation_hash(
-    req_id: &str,
-    semantic_id: QoiSemanticId,
-    region: &str,
-    effective_limit: f64,
-    measured_value: f64,
+    requirement: &ThermalLimitSpec,
+    row: &CandidateQoiRow,
     outcome: ComplianceOutcome,
+    weakest_color: ColorRank,
 ) -> ContentHash {
     let mut buf = Vec::new();
     buf.extend_from_slice(REQUIREMENT_COMPOSITION_DOMAIN.as_bytes());
-    buf.push(0);
-    buf.extend_from_slice(req_id.as_bytes());
-    buf.push(0);
-    buf.extend_from_slice(semantic_id.as_str().as_bytes());
-    buf.push(0);
-    buf.extend_from_slice(region.as_bytes());
-    buf.push(0);
-    buf.extend_from_slice(&effective_limit.to_bits().to_le_bytes());
-    buf.extend_from_slice(&measured_value.to_bits().to_le_bytes());
-    buf.extend_from_slice(outcome.as_str().as_bytes());
+    push_framed(&mut buf, requirement.id.as_bytes());
+    push_framed(&mut buf, requirement.semantic_id.as_str().as_bytes());
+    push_framed(&mut buf, requirement.region_name.as_bytes());
+    push_framed(&mut buf, requirement.revision.as_bytes());
+    buf.extend_from_slice(&requirement.limit_kelvin.to_bits().to_le_bytes());
+    buf.extend_from_slice(&requirement.margin_kelvin.to_bits().to_le_bytes());
+    buf.extend_from_slice(&requirement.safety_factor.to_bits().to_le_bytes());
+    buf.extend_from_slice(row.identity_hash.as_bytes());
+    buf.extend_from_slice(row.uncertainty.content_id().as_bytes());
+    buf.extend_from_slice(&row.value.to_bits().to_le_bytes());
+    buf.push(match weakest_color {
+        ColorRank::Estimated => 1,
+        ColorRank::Validated => 2,
+        ColorRank::Verified => 3,
+    });
+    push_framed(&mut buf, outcome.as_str().as_bytes());
     hash_domain(REQUIREMENT_COMPOSITION_DOMAIN, &buf)
+}
+
+fn push_framed(output: &mut Vec<u8>, value: &[u8]) {
+    output.extend_from_slice(&(value.len() as u64).to_le_bytes());
+    output.extend_from_slice(value);
 }

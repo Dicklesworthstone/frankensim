@@ -4102,6 +4102,12 @@ mod tests {
         let case = semantic_seed_case("unit:value:semantic-seed-policy");
         let zero = SeedMaterialV2::from_array([0; 32]);
         let nonzero = SeedMaterialV2::from_array([7; 32]);
+        let domain = semantic_seed_domain(
+            1,
+            "coverage.semantic-seed-policy",
+            "generator-v7",
+            "minimizer-v3",
+        );
 
         let no_randomness_binding = NoRandomnessSeedBindingV2::new(case.clone());
         assert_eq!(

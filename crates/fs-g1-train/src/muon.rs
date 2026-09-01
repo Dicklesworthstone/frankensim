@@ -32,7 +32,10 @@ const NS_ITERATIONS: usize = 5;
 /// first: column GS on a wide matrix exhausts the row rank at column
 /// `rows` and the remaining columns degenerate to amplified noise).
 pub fn newton_schulz_orthogonalize(x: &mut Vec<f32>, rows: usize, cols: usize) {
-    debug_assert!(rows >= cols, "tall-only core: transpose wide matrices first");
+    debug_assert!(
+        rows >= cols,
+        "tall-only core: transpose wide matrices first"
+    );
     assert_eq!(x.len(), rows * cols);
     // Gram-Schmidt orthonormalization of columns (always correct, O(mn²)).
     // For production use Newton-Schulz; this version is guaranteed to work.
@@ -41,23 +44,30 @@ pub fn newton_schulz_orthogonalize(x: &mut Vec<f32>, rows: usize, cols: usize) {
         // Subtract projections onto all previous columns
         for k in 0..j {
             let mut dot = 0.0f32;
-            for i in 0..rows { dot += x[i * cols + j] * x[i * cols + k]; }
-            for i in 0..rows { x[i * cols + j] -= dot * x[i * cols + k]; }
+            for i in 0..rows {
+                dot += x[i * cols + j] * x[i * cols + k];
+            }
+            for i in 0..rows {
+                x[i * cols + j] -= dot * x[i * cols + k];
+            }
         }
         // Normalize
         let mut norm = 0.0f32;
-        for i in 0..rows { norm += x[i * cols + j] * x[i * cols + j]; }
+        for i in 0..rows {
+            norm += x[i * cols + j] * x[i * cols + j];
+        }
         let norm = norm.sqrt();
         if norm > EPS {
-            for i in 0..rows { x[i * cols + j] /= norm; }
+            for i in 0..rows {
+                x[i * cols + j] /= norm;
+            }
         } else {
-            for i in 0..rows { x[i * cols + j] = 0.0; }
+            for i in 0..rows {
+                x[i * cols + j] = 0.0;
+            }
         }
     }
 }
-
-
-
 
 /// Muon optimizer state for one 2-D weight matrix.
 pub struct MuonParam {
@@ -74,7 +84,8 @@ pub struct MuonParam {
 impl MuonParam {
     pub fn new(rows: usize, cols: usize, lr: f32, momentum_beta: f32) -> Self {
         Self {
-            rows, cols,
+            rows,
+            cols,
             weights: vec![0.0; rows * cols],
             momentum: vec![0.0; rows * cols],
             grad: vec![0.0; rows * cols],
@@ -175,8 +186,11 @@ mod tests {
 
     #[test]
     fn ns_orthonormalizes_small_matrix() {
-        let rows = 4; let cols = 3;
-        let mut x: Vec<f32> = (0..rows * cols).map(|i| ((i * 7 + 3) % 13) as f32 / 13.0 - 0.5).collect();
+        let rows = 4;
+        let cols = 3;
+        let mut x: Vec<f32> = (0..rows * cols)
+            .map(|i| ((i * 7 + 3) % 13) as f32 / 13.0 - 0.5)
+            .collect();
         newton_schulz_orthogonalize(&mut x, rows, cols);
         // Check: X^T X ≈ I (cols × cols identity) for semi-orthogonal
         for j in 0..cols {
@@ -197,21 +211,35 @@ mod tests {
     #[test]
     fn muon_step_reduces_loss_on_quadratic() {
         // Simple quadratic loss: L = ||W - target||²
-        let rows = 4; let cols = 3;
-        let target: Vec<f32> = (0..rows * cols).map(|i| ((i * 11) % 7) as f32 / 7.0 - 0.5).collect();
+        let rows = 4;
+        let cols = 3;
+        let target: Vec<f32> = (0..rows * cols)
+            .map(|i| ((i * 11) % 7) as f32 / 7.0 - 0.5)
+            .collect();
         let mut param = MuonParam::new(rows, cols, 0.05, 0.9);
         param.weights.copy_from_slice(&vec![0.0; rows * cols]);
-        let initial_loss: f32 = param.weights.iter()
-            .zip(target.iter()).map(|(w, t)| (w - t) * (w - t)).sum();
+        let initial_loss: f32 = param
+            .weights
+            .iter()
+            .zip(target.iter())
+            .map(|(w, t)| (w - t) * (w - t))
+            .sum();
         for _ in 0..100 {
             for i in 0..param.grad.len() {
                 param.grad[i] = 2.0 * (param.weights[i] - target[i]);
             }
             param.step();
         }
-        let final_loss: f32 = param.weights.iter()
-            .zip(target.iter()).map(|(w, t)| (w - t) * (w - t)).sum();
-        assert!(final_loss < initial_loss * 0.5, "Muon should reduce loss: {initial_loss} -> {final_loss}");
+        let final_loss: f32 = param
+            .weights
+            .iter()
+            .zip(target.iter())
+            .map(|(w, t)| (w - t) * (w - t))
+            .sum();
+        assert!(
+            final_loss < initial_loss * 0.5,
+            "Muon should reduce loss: {initial_loss} -> {final_loss}"
+        );
     }
 
     #[test]
@@ -224,8 +252,14 @@ mod tests {
         // v = 0.999*0 + 0.001*[0.01, 0.04] = [1e-5, 4e-5]
         // m_hat = m/0.1, v_hat = v/0.001
         // update = 0.01 * m_hat / (sqrt(v_hat) + eps)
-        assert!(adam.params[0] < 1.0, "Adam should decrease param[0] with positive grad");
-        assert!(adam.params[1] > 2.0, "Adam should increase param[1] with negative grad");
+        assert!(
+            adam.params[0] < 1.0,
+            "Adam should decrease param[0] with positive grad"
+        );
+        assert!(
+            adam.params[1] > 2.0,
+            "Adam should increase param[1] with negative grad"
+        );
     }
 
     #[test]
@@ -235,15 +269,22 @@ mod tests {
         let mut adam_b = AdamParam::new(3, 0.001);
         let before_muon = muon_w.weights.clone();
         let before_adam = adam_b.params.clone();
-        muon_w.grad.iter_mut().enumerate().for_each(|(i, g)| *g = (i % 5) as f32 * 0.1);
-        adam_b.grads.iter_mut().enumerate().for_each(|(i, g)| *g = (i % 3) as f32 * 0.01);
+        muon_w
+            .grad
+            .iter_mut()
+            .enumerate()
+            .for_each(|(i, g)| *g = (i % 5) as f32 * 0.1);
+        adam_b
+            .grads
+            .iter_mut()
+            .enumerate()
+            .for_each(|(i, g)| *g = (i % 3) as f32 * 0.01);
         muon_w.step();
         adam_b.step();
         assert_ne!(muon_w.weights, before_muon);
         assert_ne!(adam_b.params, before_adam);
     }
 }
-
 
 #[cfg(test)]
 mod wide_muon {
@@ -290,7 +331,8 @@ mod wide_muon {
         assert!(
             l_head_after < l_head * 0.9,
             "head-block residual must shrink ({} -> {})",
-            l_head, l_head_after
+            l_head,
+            l_head_after
         );
         assert!(
             l_tail_after < l_tail * 0.9,

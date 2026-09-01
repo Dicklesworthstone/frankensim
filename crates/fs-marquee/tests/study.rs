@@ -9,7 +9,7 @@
 //! sphere-traces through the render backend (no meshing for pictures).
 #![cfg(feature = "marquee")]
 
-use fs_marquee::study::{PlateWithHoles, StudyConfig, run_study};
+use fs_marquee::study::{AREA_PROJECTION_TOLERANCE, PlateWithHoles, StudyConfig, run_study};
 
 fn verdict(case: &str, detail: &str) {
     println!(
@@ -78,6 +78,234 @@ fn mq_001_end_to_end_objective_improves() {
         "mq-001",
         "8-step smoke study: compliance improves, area budget held, every value carries \
          its composed estimated-color certificate",
+    );
+}
+
+#[test]
+fn mq_001b_bound_active_projection_keeps_the_entire_trajectory_feasible() {
+    let config = StudyConfig {
+        r_min: 0.14,
+        r_max: 0.16,
+        steps: 3,
+        ..smoke_config()
+    };
+    let report = run_study(two_hole_plate(), &config).expect("bound-active study runs");
+    let target = config.area_target;
+
+    assert_eq!(report.iterations.len(), 3);
+    assert!(
+        report.iterations[0]
+            .radii
+            .iter()
+            .any(|radius| (*radius - config.r_max).abs() < 1e-12),
+        "the fixture activates a radius bound"
+    );
+    for record in &report.iterations {
+        assert!(
+            (record.area - target).abs() <= AREA_PROJECTION_TOLERANCE,
+            "iteration {} honors the declared material-area equality: {} vs {target}",
+            record.iter,
+            record.area
+        );
+        assert!(
+            record
+                .radii
+                .iter()
+                .all(|radius| *radius >= config.r_min && *radius <= config.r_max),
+            "iteration {} stays within the radius box: {:?}",
+            record.iter,
+            record.radii
+        );
+    }
+    let final_record = report.iterations.last().expect("nonempty trajectory");
+    assert_eq!(report.design.radii, final_record.accepted_radii);
+    assert!(
+        (report.design.area() - target).abs() <= AREA_PROJECTION_TOLERANCE,
+        "final accepted design honors the declared material-area equality"
+    );
+    verdict(
+        "mq-001b",
+        "bound-active three-step trajectory preserves every radius bound and material area \
+         within AREA_PROJECTION_TOLERANCE",
+    );
+}
+
+#[test]
+fn mq_001c_armijo_records_bounded_acceptance_for_an_oversized_proposal() {
+    let config = StudyConfig {
+        step_size: 64.0,
+        steps: 3,
+        ..smoke_config()
+    };
+    let report = run_study(two_hole_plate(), &config).expect("Armijo study runs");
+
+    assert_eq!(report.iterations.len(), 3);
+    for record in &report.iterations {
+        assert!(
+            record.backtracks <= 8,
+            "the retry budget is bounded: {:?}",
+            record
+        );
+        if record.accepted_step == 0.0 {
+            assert_eq!(record.backtracks, 8, "only exhaustion retains the design");
+        } else {
+            let expected = config.step_size * 0.5_f64.powi(record.backtracks as i32);
+            assert_eq!(
+                record.accepted_step, expected,
+                "the recorded step is the deterministically accepted trial"
+            );
+        }
+    }
+    for pair in report.iterations.windows(2) {
+        assert_eq!(
+            pair[0].accepted_radii, pair[1].radii,
+            "each accepted successor is the next recorded design"
+        );
+        assert_eq!(
+            pair[0].accepted_compliance.to_bits(),
+            pair[1].compliance.to_bits(),
+            "each accepted successor objective is retained in the next record"
+        );
+        assert!(
+            pair[1].compliance <= pair[0].compliance + AREA_PROJECTION_TOLERANCE,
+            "accepted Armijo trajectory does not increase compliance: {} -> {}",
+            pair[0].compliance,
+            pair[1].compliance
+        );
+    }
+    let final_record = report.iterations.last().expect("nonempty trajectory");
+    assert_eq!(report.design.radii, final_record.accepted_radii);
+    assert!(
+        final_record.accepted_compliance <= final_record.compliance + AREA_PROJECTION_TOLERANCE,
+        "the final design carries an Armijo-accepted successor objective"
+    );
+    verdict(
+        "mq-001c",
+        "oversized proposal records a bounded Armijo acceptance decision instead of an \
+         unconditional radius update",
+    );
+}
+
+#[test]
+fn mq_001d_refuses_extreme_projection_ratios() {
+    for (r_min, r_max) in [(1e-300, 1.0), (1e-320, 1e308)] {
+        let config = StudyConfig {
+            r_min,
+            r_max,
+            area_target: 0.9,
+            ..smoke_config()
+        };
+        assert!(
+            std::panic::catch_unwind(|| run_study(two_hole_plate(), &config)).is_err(),
+            "ratio {r_max} / {r_min} must be refused before projection"
+        );
+    }
+}
+
+#[test]
+fn mq_001e_refuses_overlapping_or_boundary_clipped_holes() {
+    let overlap = PlateWithHoles {
+        centers: vec![[0.45, 0.5], [0.55, 0.5]],
+        radii: vec![0.1, 0.1],
+    };
+    assert!(
+        std::panic::catch_unwind(|| run_study(overlap, &smoke_config())).is_err(),
+        "overlapping disks must be refused before summed-area optimization"
+    );
+
+    let boundary_clipped = PlateWithHoles {
+        centers: vec![[0.1, 0.5], [0.7, 0.5]],
+        radii: vec![0.1, 0.1],
+    };
+    assert!(
+        std::panic::catch_unwind(|| run_study(boundary_clipped, &smoke_config())).is_err(),
+        "boundary-clipped disks must be refused before summed-area optimization"
+    );
+}
+
+#[test]
+fn mq_001f_refuses_a_candidate_that_grows_into_overlap() {
+    let initially_valid = PlateWithHoles {
+        centers: vec![[0.35, 0.5], [0.65, 0.5]],
+        radii: vec![0.1, 0.1],
+    };
+    let config = StudyConfig {
+        r_min: 0.05,
+        r_max: 0.2,
+        area_target: 1.0 - std::f64::consts::PI * (0.2_f64.powi(2) + 0.2_f64.powi(2)),
+        ..smoke_config()
+    };
+    assert!(
+        std::panic::catch_unwind(|| run_study(initially_valid, &config)).is_err(),
+        "post-projection overlap must be refused before the first solve"
+    );
+}
+
+#[test]
+fn mq_001h_invalid_armijo_trial_backtracks_without_panicking_the_study() {
+    let design = PlateWithHoles {
+        centers: vec![[0.35, 0.5], [0.65, 0.5]],
+        radii: vec![0.05, 0.24],
+    };
+    let config = StudyConfig {
+        r_min: 0.05,
+        r_max: 0.25,
+        step_size: f64::MAX,
+        steps: 1,
+        area_target: design.area(),
+        ..smoke_config()
+    };
+    let report = run_study(design, &config).expect("invalid trial is rejected, not fatal");
+    let record = report.iterations.first().expect("one iteration");
+
+    assert!(record.backtracks > 0, "the oversized trial was rejected");
+    assert!(
+        record.accepted_radii[0] + record.accepted_radii[1] < 0.3,
+        "the retained design remains disjoint after trial rejection"
+    );
+    assert_eq!(report.design.radii, record.accepted_radii);
+}
+
+#[test]
+fn mq_001g_iteration_jsonl_rows_are_complete_and_deterministic() {
+    let report = run_study(
+        two_hole_plate(),
+        &StudyConfig {
+            steps: 1,
+            ..smoke_config()
+        },
+    )
+    .expect("study runs");
+    let record = report.iterations.first().expect("one row");
+    let row = record.jsonl_row();
+
+    assert_eq!(
+        row,
+        record.jsonl_row(),
+        "JSONL serialization is deterministic"
+    );
+    assert!(row.ends_with('\n'), "a JSONL row has a newline delimiter");
+    for field in [
+        "\"iter\":",
+        "\"compliance\":",
+        "\"volume\":",
+        "\"gradient_norm\":",
+        "\"dwr_estimate\":",
+        "\"cut_cell_count\":",
+        "\"accepted_step\":",
+        "\"backtracks\":",
+        "\"accepted_compliance\":",
+        "\"color_rank\":",
+        "\"color_payload\":",
+    ] {
+        assert!(row.contains(field), "JSONL row retains {field}");
+    }
+    assert!(record.gradient_norm.is_finite() && record.gradient_norm >= 0.0);
+    assert_eq!(record.volume.to_bits(), record.area.to_bits());
+    assert_eq!(record.dwr_estimate.to_bits(), record.cert_dwr.to_bits());
+    assert!(
+        record.cut_cell_count > 0,
+        "the CutFEM solve retained cut cells"
     );
 }
 

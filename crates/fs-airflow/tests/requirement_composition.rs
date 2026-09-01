@@ -25,12 +25,17 @@ use fs_airflow::{
     solve_operating_point,
 };
 use fs_alloc::{ArenaConfig, ArenaPool};
+use fs_blake3::hash_bytes;
 use fs_conduction::fixtures::unit_cube;
 use fs_conduction::solve::StopReason;
 use fs_conduction::{
     ConductionMesh, ConductionReport, ConductionSolution, EnergyBalance, ProvenanceClass,
 };
 use fs_evidence::ColorRank;
+use fs_evidence::uncertainty::{
+    EngineeringUncertaintyBudget, EngineeringUncertaintyKind, EngineeringUncertaintyTerm,
+    TermValue, UncertaintyArtifactRef,
+};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_qty::{Pressure, Temperature, VolumetricFlowRate};
 
@@ -151,6 +156,25 @@ fn sample_requirement(limit_k: f64, factor: f64) -> ThermalRequirement {
     .unwrap()
 }
 
+fn bounded_zero_budget(qoi: &str, unit: &str) -> EngineeringUncertaintyBudget {
+    let terms = EngineeringUncertaintyKind::ALL
+        .into_iter()
+        .map(|kind| {
+            EngineeringUncertaintyTerm::try_new(
+                kind,
+                TermValue::negligible("synthetic exact G0 composition fixture").unwrap(),
+                UncertaintyArtifactRef::new(
+                    kind.name(),
+                    hash_bytes(format!("bounded-zero:{}", kind.name()).as_bytes()),
+                )
+                .unwrap(),
+            )
+            .unwrap()
+        })
+        .collect();
+    EngineeringUncertaintyBudget::try_new(qoi, unit, terms).unwrap()
+}
+
 #[test]
 fn rc_001_satisfied_and_violated_composition() {
     with_cx(|cx| {
@@ -175,7 +199,7 @@ fn rc_001_satisfied_and_violated_composition() {
             OutputQuery::scalar("thermal.surface_mean"),
         ];
 
-        let qoi_receipt = extract_registered_qois(
+        let mut qoi_receipt = extract_registered_qois(
             &queries,
             &mesh,
             &solution,
@@ -185,6 +209,10 @@ fn rc_001_satisfied_and_violated_composition() {
             cx,
         )
         .unwrap();
+        for row in &mut qoi_receipt.rows {
+            row.uncertainty = bounded_zero_budget(row.semantic_id.as_str(), row.units);
+            row.color = ColorRank::Validated;
+        }
 
         // 1. Satisfied limit: max 390 K with 10 K margin (junction measured = 360 K -> achieved margin 30 K >= 10 K)
         let req_sat = ThermalLimitSpec::try_new(
@@ -220,7 +248,7 @@ fn rc_001_satisfied_and_violated_composition() {
         let eval_sat = &receipt.evaluations[0];
         assert_eq!(eval_sat.requirement_id, "REQ-JUNC-01");
         assert_eq!(eval_sat.outcome, ComplianceOutcome::Satisfied);
-        assert_eq!(eval_sat.witness.weakest_color, ColorRank::Verified);
+        assert_eq!(eval_sat.witness.weakest_color, ColorRank::Validated);
         assert_eq!(eval_sat.witness.primary_vertex, Some(6)); // tie-breaker witness
 
         let eval_viol = &receipt.evaluations[1];
@@ -230,7 +258,102 @@ fn rc_001_satisfied_and_violated_composition() {
 }
 
 #[test]
-fn rc_002_outside_domain_demotes_weakest_color_honestly() {
+fn rc_002_effective_limit_is_not_safety_factored_twice() {
+    with_cx(|cx| {
+        let (mesh, solution) = sample_mesh_and_solution();
+        let op = operating_point();
+        let junction = JunctionRegion::try_new("package", vec![0, 1, 2, 6, 7]).unwrap();
+        let surface = SurfaceRegion::try_new("case", vec![0, 1, 2]).unwrap();
+        let fan = FanPowerSpec::try_new(0.6, 0.05, source("fan-efficiency")).unwrap();
+        let req = sample_requirement(390.0, 2.0);
+        let declarations = ThermalQoiDeclarations {
+            junction_region: &junction,
+            surface_region: &surface,
+            fan_power: &fan,
+            requirement: Some(&req),
+            discretization: None,
+        };
+        let mut extracted = extract_registered_qois(
+            &[OutputQuery::scalar("thermal.junction_maximum")],
+            &mesh,
+            &solution,
+            &op,
+            &declarations,
+            QoiExecutionLimits::default(),
+            cx,
+        )
+        .unwrap();
+        extracted.rows[0].uncertainty = bounded_zero_budget(
+            extracted.rows[0].semantic_id.as_str(),
+            extracted.rows[0].units,
+        );
+
+        let requirement = ThermalLimitSpec::try_new(
+            "REQ-EFFECTIVE",
+            QoiSemanticId::JunctionMaximum,
+            "package",
+            390.0,
+            10.0,
+            2.0,
+            "REV-A",
+        )
+        .unwrap();
+        let receipt = compose_thermal_limits(&extracted.rows, &[requirement], false, cx).unwrap();
+        let evaluation = &receipt.evaluations[0];
+        assert_eq!(evaluation.effective_limit.to_bits(), 390.0f64.to_bits());
+        assert_eq!(evaluation.achieved_margin.to_bits(), 30.0f64.to_bits());
+        assert_eq!(evaluation.outcome, ComplianceOutcome::Satisfied);
+    });
+}
+
+#[test]
+fn rc_003_unknown_budget_cannot_mint_a_binary_verdict_or_stronger_color() {
+    with_cx(|cx| {
+        let (mesh, solution) = sample_mesh_and_solution();
+        let op = operating_point();
+        let junction = JunctionRegion::try_new("package", vec![0, 1, 2, 6, 7]).unwrap();
+        let surface = SurfaceRegion::try_new("case", vec![0, 1, 2]).unwrap();
+        let fan = FanPowerSpec::try_new(0.6, 0.05, source("fan-efficiency")).unwrap();
+        let req = sample_requirement(400.0, 1.0);
+        let declarations = ThermalQoiDeclarations {
+            junction_region: &junction,
+            surface_region: &surface,
+            fan_power: &fan,
+            requirement: Some(&req),
+            discretization: None,
+        };
+        let extracted = extract_registered_qois(
+            &[OutputQuery::scalar("thermal.junction_maximum")],
+            &mesh,
+            &solution,
+            &op,
+            &declarations,
+            QoiExecutionLimits::default(),
+            cx,
+        )
+        .unwrap();
+        let source_color = extracted.rows[0].color;
+        let requirement = ThermalLimitSpec::try_new(
+            "REQ-UNKNOWN",
+            QoiSemanticId::JunctionMaximum,
+            "package",
+            400.0,
+            10.0,
+            1.0,
+            "REV-A",
+        )
+        .unwrap();
+        let receipt = compose_thermal_limits(&extracted.rows, &[requirement], false, cx).unwrap();
+        assert_eq!(
+            receipt.evaluations[0].outcome,
+            ComplianceOutcome::Indeterminate
+        );
+        assert_eq!(receipt.evaluations[0].witness.weakest_color, source_color);
+    });
+}
+
+#[test]
+fn rc_004_outside_domain_demotes_weakest_color_honestly() {
     with_cx(|cx| {
         let (mesh, solution) = sample_mesh_and_solution();
         let op = operating_point();
@@ -289,7 +412,7 @@ fn rc_002_outside_domain_demotes_weakest_color_honestly() {
 }
 
 #[test]
-fn rc_003_duplicate_requirements_and_missing_qoi_refuse() {
+fn rc_005_duplicate_requirements_and_missing_qoi_refuse() {
     with_cx(|cx| {
         let (mesh, solution) = sample_mesh_and_solution();
         let op = operating_point();
@@ -367,7 +490,7 @@ fn rc_003_duplicate_requirements_and_missing_qoi_refuse() {
 }
 
 #[test]
-fn rc_004_cancellation_checkpoints_drain_safely() {
+fn rc_006_cancellation_checkpoints_drain_safely() {
     let gate = CancelGate::new();
     gate.request();
 
@@ -418,7 +541,7 @@ fn rc_004_cancellation_checkpoints_drain_safely() {
 }
 
 #[test]
-fn rc_005_deterministic_replay_produces_identical_receipt_hashes() {
+fn rc_007_deterministic_replay_produces_identical_receipt_hashes() {
     let (mesh, solution) = sample_mesh_and_solution();
     let op = operating_point();
 

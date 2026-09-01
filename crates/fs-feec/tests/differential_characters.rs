@@ -9,8 +9,9 @@ use fs_feec::differential_characters::{
     BoundaryRole, CharacterError, CoefficientLattice, CoefficientProductSchema, CoefficientSector,
     CoefficientSystem, CohomologicalDegree, ComplexLane, ExactSequenceKind, ExactnessStatus,
     FiniteComplexSchema, FiniteExactnessAssumption, MapKind, NilpotenceLaw, ObjectKind,
-    ObjectSupport, Orientation, RelativeDifferentialCharacter, RelativeModel, RelativePairSchema,
-    RelativeTrivialization, RepresentativeKind, TerminalTrivialization,
+    ObjectSpace, ObjectSupport, Orientation, RelativeDifferentialCharacter, RelativeModel,
+    RelativePairSchema, RelativeTrivialization, RepresentativeKind, TerminalTrivialization,
+    TypedMap,
 };
 use fs_qty::Dims;
 

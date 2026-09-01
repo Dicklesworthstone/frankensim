@@ -843,6 +843,44 @@ pub fn extract_thermal_qois(
     })
 }
 
+/// Extract only the declared junction-region maximum from a solved conduction
+/// field.
+///
+/// This request-selective entry point exists for callers that have authority
+/// for a volumetric temperature maximum but do not have an independently
+/// declared reporting surface or fan-efficiency interval. It preserves the
+/// same solution validation, deterministic witness, model evidence, and
+/// exactly-eight-term uncertainty budget as [`extract_thermal_qois`]; it does
+/// not manufacture the declarations required by the other QoI families.
+///
+/// # Errors
+/// Refuses an invalid or unconverged solution, a region containing a vertex
+/// outside the solved mesh, or malformed evidence/budget construction.
+pub fn extract_junction_maximum_qoi(
+    mesh: &ConductionMesh,
+    solution: &ConductionSolution,
+    junction_region: &JunctionRegion,
+    discretization: Option<&DiscretizationReceipt>,
+) -> Result<JunctionMaximum, QoiError> {
+    validate_solution(mesh, solution)?;
+    validate_junction_region_indices(mesh, junction_region)?;
+
+    let solution_id = solution_identity(mesh, solution);
+    let discretization_id = discretization.map(discretization_identity);
+    let temperature_model = conduction_model(solution);
+    let parameter_term = material_parameter_term(solution, solution_id)?;
+    let (maximum, _) = junction_maximum_qoi(
+        solution,
+        junction_region,
+        solution_id,
+        discretization,
+        discretization_id,
+        &temperature_model,
+        &parameter_term,
+    )?;
+    Ok(maximum)
+}
+
 /// Build the junction-maximum QoI (stage of `extract_thermal_qois`).
 ///
 /// A declared refinement-ladder half-width is the ONLY route by which the
@@ -1445,19 +1483,7 @@ fn validate_region_indices(
     junction: &JunctionRegion,
     surface: &SurfaceRegion,
 ) -> Result<(), QoiError> {
-    if let Some(&vertex) = junction
-        .vertices()
-        .iter()
-        .find(|&&vertex| vertex >= mesh.vertex_count())
-    {
-        return Err(QoiError::invalid(
-            "junction region",
-            format!(
-                "vertex {vertex} is outside {} vertices",
-                mesh.vertex_count()
-            ),
-        ));
-    }
+    validate_junction_region_indices(mesh, junction)?;
     if let Some(&face) = surface
         .boundary_faces()
         .iter()
@@ -1468,6 +1494,26 @@ fn validate_region_indices(
             format!(
                 "boundary-face slot {face} is outside {} boundary faces",
                 mesh.boundary().len()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_junction_region_indices(
+    mesh: &ConductionMesh,
+    junction: &JunctionRegion,
+) -> Result<(), QoiError> {
+    if let Some(&vertex) = junction
+        .vertices()
+        .iter()
+        .find(|&&vertex| vertex >= mesh.vertex_count())
+    {
+        return Err(QoiError::invalid(
+            "junction region",
+            format!(
+                "vertex {vertex} is outside {} vertices",
+                mesh.vertex_count()
             ),
         ));
     }
