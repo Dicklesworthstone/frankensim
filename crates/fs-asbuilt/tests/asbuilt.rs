@@ -14,6 +14,7 @@ use fs_exec::{
     Budget, CancelGate, Cx, ExecMode, InvocationAdmitter, InvocationDisposition, InvocationLimits,
     StreamKey, VirtualClock,
 };
+use std::collections::BTreeMap;
 
 fn with_cx<R>(cancelled: bool, mode: ExecMode, budget: Budget, f: impl FnOnce(&Cx<'_>) -> R) -> R {
     let gate = CancelGate::new_clock_free();
@@ -197,7 +198,7 @@ fn the_r8_gate_rejects_registration_below_the_noise_floor() {
 }
 
 #[test]
-fn the_as_built_diff_is_an_estimated_candidate_with_a_proposed_regime() {
+fn the_as_built_diff_is_an_estimated_candidate_with_exact_run_conditions() {
     let reg = registration(0.0, 0.0, 0.0, 0.0);
     let design = vec![point(0.0, 0.0), point(1.0, 1.0)];
     let scanned = vec![point(0.0, 0.1), point(1.0, 1.0)];
@@ -210,22 +211,45 @@ fn the_as_built_diff_is_an_estimated_candidate_with_a_proposed_regime() {
     assert!(diff.above_noise_floor()); // 0.1 > combined dispersion 0.05
     assert_eq!(
         diff.proposed_regime().bound("measurement_noise"),
-        Some((0.0, 0.05))
+        Some((0.05, 0.05))
     );
     assert_eq!(
         diff.proposed_regime().bound("design_tolerance"),
-        Some((0.0, 0.2))
+        Some((0.2, 0.2))
     );
     match diff.color() {
         Color::Estimated {
             estimator,
             dispersion,
         } => {
-            assert!(estimator.starts_with("asbuilt-diff-v4:"));
+            assert!(estimator.starts_with("asbuilt-diff-v5:"));
             assert_eq!(dispersion.to_bits(), 0.05f64.to_bits());
         }
         other => panic!("expected estimated candidate, got {other:?}"),
     }
+}
+
+#[test]
+fn diff_run_conditions_refuse_unevaluated_interior_values() {
+    let reg = registration(0.0, 0.0, 0.0, 0.03);
+    let design = [point(0.0, 0.0), point(1.0, 0.0)];
+    let scanned = [point(0.0, 0.1), point(1.0, 0.0)];
+    let diff = with_default_cx(|cx| as_built_diff(&reg, &design, &scanned, 0.2, 0.05, "cal", cx))
+        .expect("finite exact-run diff");
+
+    let exact = BTreeMap::from([
+        ("registration_residual".to_string(), 0.03),
+        ("measurement_noise".to_string(), 0.05),
+        ("design_tolerance".to_string(), 0.2),
+    ]);
+    assert!(diff.proposed_regime().contains(&exact));
+
+    let mut unevaluated_interior = exact;
+    unevaluated_interior.insert("measurement_noise".to_string(), 0.0);
+    assert!(
+        !diff.proposed_regime().contains(&unevaluated_interior),
+        "a result at 0.05 noise must not claim the unevaluated 0.0 interior"
+    );
 }
 
 #[test]
@@ -514,7 +538,7 @@ fn g5_retained_identity_declares_the_v2_work_and_poll_policies() {
     assert_eq!(AS_BUILT_POLL_STRIDE_POINTS, 256);
     assert_eq!(AS_BUILT_POLL_STRIDE_BYTES, 256);
     let diff = fixture_diff(ExecMode::Deterministic, Budget::INFINITE);
-    assert!(estimator_identity(&diff).starts_with("asbuilt-diff-v4:"));
+    assert!(estimator_identity(&diff).starts_with("asbuilt-diff-v5:"));
 }
 
 #[test]
@@ -879,8 +903,8 @@ fn contract_tracks_live_dependencies_api_schema_cancellation_and_no_claims() {
         ),
         (
             "Invariants",
-            "const AS_BUILT_ESTIMATOR_SCHEMA: &[u8] = b\"fs-asbuilt-diff-estimator-v4\";",
-            "asbuilt-diff-v4 identity",
+            "const AS_BUILT_ESTIMATOR_SCHEMA: &[u8] = b\"fs-asbuilt-diff-estimator-v5\";",
+            "asbuilt-diff-v5 identity",
         ),
         (
             "Invariants",

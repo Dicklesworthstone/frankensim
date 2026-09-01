@@ -51,8 +51,9 @@ as correlated cross-QoI geometry terms.
   per-point δ after registration; `within_tolerance`, `above_noise_floor`, and
   a `Color::Estimated` whose domain-separated BLAKE3 identity binds every
   scientific function input plus the documented execution subset below.
-  `proposed_regime` carries residual/noise/tolerance bounds for later
-  authenticated review. The calibration string is a bounded, structurally
+  `proposed_regime` carries exact singleton residual/noise/tolerance run
+  conditions, not a generalized interval. Wider validity requires a separate
+  replayable generalization argument. The calibration string is a bounded, structurally
   valid candidate identity, never authority. Result fields are private and
   exposed through read-only accessors, so callers cannot forge or mutate an
   authenticated-looking `AsBuiltDiff` value. `max_deviation_index()` retains
@@ -275,7 +276,7 @@ as correlated cross-QoI geometry terms.
   child; scientific refusals are latched into the parent receipt. Unused
   capacity returns only when the child is consumed by `finish`, so sibling
   stages cannot mint fresh authority through this crate.
-- The `asbuilt-diff-v4` identity binds execution mode, every field of the
+- The `asbuilt-diff-v5` identity binds execution mode, every field of the
   ambient `fs_exec::Budget`, work-plan v2 and exact `3n` shape, poll-policy v2
   and its 256-point/256-byte strides, plus all scientific and provenance inputs.
   `StreamKey` is intentionally not part of this identity. Registration has no
@@ -447,7 +448,7 @@ None.
 ## Conformance tests
 
 `tests/asbuilt.rs`: exact/noisy registration, fiducial well-posedness, R8,
-estimated diff semantics, proposed regime, empty/length errors, NaN/infinity/
+estimated diff semantics, exact run conditions and their interior refusal, empty/length errors, NaN/infinity/
 negative rejection, invalid registration, arithmetic overflow, malformed and
 forged calibration identities, delimiter-collision resistance, bounded
 identity, signed-zero canonicalization, scale-invariant rank admission, and
@@ -605,7 +606,7 @@ eight-term-budget e2e lane logging the correlation structure.
   placement binding and the nominal-versus-as-built report rendering are the
   product layers' integrations and are NOT provided here.
 - Registration is treated as an optimization whose global fit RMS diagnostic
-  is propagated into advisory screens and the proposed regime. That residual
+  is propagated into advisory screens and exact run conditions. That residual
   is not transform covariance or a pointwise spatial uncertainty bound.
   Writing it (and the as-built δ) to the design ledger is fs-ledger's
   integration, and the fiducial/datum PRIMITIVES at design time are fs-geom's

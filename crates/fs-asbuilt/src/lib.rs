@@ -19,7 +19,7 @@
 //!   ([`well_posed`]); no certification claim follows from passing it.
 //!
 //! The as-built δ ([`as_built_diff`]) is measurement-noise-aware and emits
-//! an **estimated candidate** with a proposed regime. A caller-supplied
+//! an **estimated candidate** with exact run conditions. A caller-supplied
 //! calibration identity is provenance, not authority: this crate exposes no
 //! validated-promotion API until an authenticated verifier and retained
 //! calibration artifact are available. Both resource-driving entry points
@@ -49,8 +49,8 @@ pub mod rigid3;
 /// decision bounds, and authenticated evidence admission.
 pub mod uncertainty;
 
-const AS_BUILT_ESTIMATOR_DOMAIN: &str = "org.frankensim.fs-asbuilt.diff-estimator.v4";
-const AS_BUILT_ESTIMATOR_SCHEMA: &[u8] = b"fs-asbuilt-diff-estimator-v4";
+const AS_BUILT_ESTIMATOR_DOMAIN: &str = "org.frankensim.fs-asbuilt.diff-estimator.v5";
+const AS_BUILT_ESTIMATOR_SCHEMA: &[u8] = b"fs-asbuilt-diff-estimator-v5";
 /// Identity-bound work-plan version for resource-driving scans and hashing.
 pub const AS_BUILT_WORK_PLAN_VERSION: u32 = 2;
 /// Identity-bound cancellation policy version for resource-driving scans.
@@ -752,7 +752,7 @@ pub fn as_built_diff_invocation_resources(
         .and_then(|bytes| bytes.checked_add("registration_residual".len()))
         .and_then(|bytes| bytes.checked_add("measurement_noise".len()))
         .and_then(|bytes| bytes.checked_add("design_tolerance".len()))
-        .and_then(|bytes| bytes.checked_add("asbuilt-diff-v4:".len() + 64))
+        .and_then(|bytes| bytes.checked_add("asbuilt-diff-v5:".len() + 64))
         .ok_or(RegError::WorkPlanOverflow {
             operation: "as-built diff output shape",
         })?;
@@ -1330,7 +1330,7 @@ pub struct AsBuiltDiff {
     /// Advisory one-dispersion screen for whether the maximum deviation rises
     /// above the conservatively combined estimated dispersion.
     above_noise_floor: bool,
-    /// Proposed regime for later calibration-authority review.
+    /// Exact run conditions; this legacy accessor does not generalize them.
     proposed_regime: ValidityDomain,
     /// The δ's honest candidate color. This API never emits `Validated`.
     color: Color,
@@ -1371,7 +1371,10 @@ impl AsBuiltDiff {
         self.above_noise_floor
     }
 
-    /// Proposed, unauthenticated validity regime for later review.
+    /// Exact, unauthenticated run conditions for this result.
+    ///
+    /// Every bound is a singleton. A wider validity domain needs a separate,
+    /// replayable generalization argument; this point-sample API has none.
     #[must_use]
     pub const fn proposed_regime(&self) -> &ValidityDomain {
         &self.proposed_regime
@@ -1390,8 +1393,9 @@ impl AsBuiltDiff {
 /// every point, registration component, tolerance, noise value, and the
 /// structurally valid calibration candidate identity, plus the execution mode,
 /// every budget field, the exact checked work plan, and the versioned poll
-/// policy. The proposed regime is carried separately for later authenticated
-/// calibration review. The returned decision booleans are conservative,
+/// policy. The returned run conditions bind only the exact residual, noise,
+/// and tolerance supplied for this run; they make no interval generalization.
+/// The returned decision booleans are conservative,
 /// advisory one-dispersion screens: registration residual RMS is a global fit
 /// diagnostic rather than a pointwise uncertainty bound, so neither boolean is
 /// a tolerance certificate or statistical-significance claim.
@@ -1672,22 +1676,13 @@ fn as_built_diff_with_poll(
         plan.calibration_validation_byte_units + plan.points_per_scan * 2,
     )?;
     require_finite("maximum as-built deviation", max_deviation)?;
+    // This sampled computation establishes facts at exactly one operating
+    // point. Do not widen any axis from zero to the observed value: that would
+    // assert the same result for conditions the computation did not evaluate.
     let proposed_regime = ValidityDomain::unconstrained()
-        .with(
-            "registration_residual",
-            0.0,
-            reg.residual_rms.max(f64::MIN_POSITIVE),
-        )
-        .with(
-            "measurement_noise",
-            0.0,
-            measurement_noise.max(f64::MIN_POSITIVE),
-        )
-        .with(
-            "design_tolerance",
-            0.0,
-            design_tolerance.max(f64::MIN_POSITIVE),
-        );
+        .with("registration_residual", reg.residual_rms, reg.residual_rms)
+        .with("measurement_noise", measurement_noise, measurement_noise)
+        .with("design_tolerance", design_tolerance, design_tolerance);
     // `Estimated` dispersions compose additively unless a calibrated
     // independence model establishes a sharper rule. The registration RMS is
     // only a global fit diagnostic, not a pointwise uncertainty bound.
@@ -1907,7 +1902,7 @@ fn estimator_identity(
     progress.require_completed(DIFF_IDENTITY_PHASE, work_plan.total)?;
     let preimage_hash = hasher.finalize();
     Ok(format!(
-        "asbuilt-diff-v4:{}",
+        "asbuilt-diff-v5:{}",
         fs_blake3::hash_domain(AS_BUILT_ESTIMATOR_DOMAIN, preimage_hash.as_bytes())
     ))
 }
