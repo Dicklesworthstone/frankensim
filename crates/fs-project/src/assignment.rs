@@ -31,7 +31,7 @@ pub const GEOMETRY_ASSIGNMENT_REPORT_DOMAIN: &str =
 
 const PROJECT_ASSIGNMENT_NO_CLAIM: &str = "the adapter binds exact project entity identities, one declared selector plan, and one supplied finite tessellation; it does not authenticate the mesh supplier, prove continuum/CAD/physical-region sameness, or make fs-io face ordinals stable across re-import";
 const INTERFACE_AUDIT_NO_CLAIM: &str = "the audit reports finite-mesh region pairs whose supplied triangle soups approach within the declared tolerance in one shared coordinate unit; it does not certify continuum contact, infer a physical interface law, authenticate assembly transforms, or prove that a declared interface is complete";
-const CONDUCTION_INTERFACE_NO_CLAIM: &str = "the lowering binds exact coordinate-bit equality among one resolved imported triangle soup, its retained face ordinals, declared region/interface selectors, and one exact ConductionMesh boundary; it does not authenticate the importer, prove continuum or CAD identity, infer region ownership when oriented source faces do not establish it, select an interface card, or construct a thermal operator";
+const CONDUCTION_INTERFACE_NO_CLAIM: &str = "the lowering binds each exact ConductionMesh boundary triangle to the unique outward-oriented imported source face that contains it in exact f64 arithmetic (facet recovery may refine a declared face, so the retained trace is a refinement, not necessarily a bitwise copy; recovery points not bitwise on the source plane refuse); it does not authenticate the importer, prove continuum or CAD identity, infer region ownership when oriented source faces do not establish it, select an interface card, or construct a thermal operator";
 
 /// One caller-supplied promoted mesh and its importer-provided named groups.
 #[derive(Debug)]
@@ -712,13 +712,11 @@ pub fn resolve_geometry_assignments(
     result
 }
 
-type ConductionPointKey = [u64; 3];
-type ConductionFaceKey = [ConductionPointKey; 3];
-
 #[derive(Debug, Clone)]
 struct IndexedConductionSourceFace {
     source: ConductionSourceFace,
     outward: [f64; 3],
+    coordinates: [[f64; 3]; 3],
 }
 
 /// Lower exact, oriented imported surface assignments to the boundary-slot
@@ -726,11 +724,21 @@ struct IndexedConductionSourceFace {
 ///
 /// This function deliberately resolves geometry assignments itself while
 /// borrowing the imported library and conduction mesh for the complete call.
-/// A source face associates with a boundary slot only when all three vertex
-/// coordinate bit patterns agree and the source triangle orientation agrees
-/// with that slot's outward normal. Interface selectors must cover the same
-/// exact triangle, every coincident conduction pair must be claimed once, and
-/// every declared interface must lower at least once.
+/// A source face associates with a boundary slot when the slot's exact
+/// boundary triangle lies inside the closed source triangle (the production
+/// volumetricizer's facet recovery may insert Steiner points and
+/// re-triangulate a declared facet, so the retained trace is a refinement of
+/// the imported face, not necessarily a bitwise copy of it — executed on the
+/// canonical two-solid fixture, whose joint recovers as a four-triangle fan)
+/// and the source triangle orientation agrees with that slot's outward
+/// normal. Containment is evaluated in plain f64 arithmetic against exact
+/// zero: a boundary vertex must lie bitwise on the source triangle's
+/// supporting plane, so recovery points that were rounded off the exact
+/// plane REFUSE rather than bind approximately (the fail-closed direction;
+/// upgrading the predicate to fs-ivl exact arithmetic is tracked follow-up).
+/// Interface selectors must cover every coincident trace triangle, every
+/// coincident conduction pair must be claimed once, and every declared
+/// interface must lower at least once.
 #[must_use]
 pub fn resolve_conduction_interface_pairs(
     spec: &ProjectSpec,
@@ -784,8 +792,7 @@ pub fn resolve_conduction_interface_pairs(
         return result;
     }
 
-    let mut index =
-        BTreeMap::<(String, ConductionFaceKey), Vec<IndexedConductionSourceFace>>::new();
+    let mut index = BTreeMap::<String, Vec<IndexedConductionSourceFace>>::new();
     for artifact in &geometry.artifacts {
         let Some(imported) = library.get(&artifact.source_identity) else {
             result.violations.push(violation(
@@ -860,10 +867,7 @@ pub fn resolve_conduction_interface_pairs(
                     return result;
                 }
                 index
-                    .entry((
-                        entity.declared_target.clone(),
-                        coordinate_face_key(coordinates),
-                    ))
+                    .entry(entity.declared_target.clone())
                     .or_default()
                     .push(IndexedConductionSourceFace {
                         source: ConductionSourceFace {
@@ -872,6 +876,7 @@ pub fn resolve_conduction_interface_pairs(
                             face,
                         },
                         outward,
+                        coordinates,
                     });
             }
         }
@@ -897,13 +902,15 @@ pub fn resolve_conduction_interface_pairs(
             ));
             return result;
         }
-        let key = conduction_face_key(mesh, candidate.side_a);
+        let candidate_coords = mesh.boundary()[candidate.side_a]
+            .vertices
+            .map(|vertex| mesh.positions()[vertex as usize]);
         let mut claims = Vec::new();
         for &(interface, from, to) in &declarations {
             let direct_from = match unique_oriented_source(
                 &index,
                 from,
-                key,
+                candidate_coords,
                 mesh.boundary()[candidate.side_a].outward_normal,
             ) {
                 Ok(source) => source,
@@ -915,7 +922,7 @@ pub fn resolve_conduction_interface_pairs(
             let direct_to = match unique_oriented_source(
                 &index,
                 to,
-                key,
+                candidate_coords,
                 mesh.boundary()[candidate.side_b].outward_normal,
             ) {
                 Ok(source) => source,
@@ -927,7 +934,7 @@ pub fn resolve_conduction_interface_pairs(
             let reverse_from = match unique_oriented_source(
                 &index,
                 from,
-                key,
+                candidate_coords,
                 mesh.boundary()[candidate.side_b].outward_normal,
             ) {
                 Ok(source) => source,
@@ -939,7 +946,7 @@ pub fn resolve_conduction_interface_pairs(
             let reverse_to = match unique_oriented_source(
                 &index,
                 to,
-                key,
+                candidate_coords,
                 mesh.boundary()[candidate.side_a].outward_normal,
             ) {
                 Ok(source) => source,
@@ -971,17 +978,25 @@ pub fn resolve_conduction_interface_pairs(
             let Some((from_slot, to_slot, from_source, to_source)) = orientation else {
                 continue;
             };
-            let Some(interface_rows) = index.get(&(interface.to_string(), key)) else {
+            let interface_rows: Vec<&IndexedConductionSourceFace> = index
+                .get(interface)
+                .map(|rows| {
+                    rows.iter()
+                        .filter(|row| source_contains_triangle(row, candidate_coords))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if interface_rows.is_empty() {
                 result.violations.push(violation(
                     "project-conduction-interface-selector-miss",
                     format!(
-                        "interface `{interface}` joins the exact boundary triangle at slots {} and {}, but its geometry selector does not select that triangle",
+                        "interface `{interface}` joins the exact boundary triangle at slots {} and {}, but its geometry selector selects no imported face containing that triangle",
                         candidate.side_a, candidate.side_b
                     ),
                     "make the interface selector cover the exact shared face while retaining explicit overlap with both region selectors",
                 ));
                 return result;
-            };
+            }
             let mut interface_sources = interface_rows
                 .iter()
                 .map(|row| row.source.clone())
@@ -1012,38 +1027,11 @@ pub fn resolve_conduction_interface_pairs(
         }
         match claims.as_slice() {
             [] => {
-                // TEMP-DIAG (NobleLion s93ej.3): dump the mismatch geometry.
-                let side_coords = mesh.boundary()[candidate.side_a]
-                    .vertices
-                    .map(|v| mesh.positions()[v as usize]);
-                let key_in_index: Vec<String> = index
-                    .keys()
-                    .filter(|(_, k)| *k == key)
-                    .map(|(t, _)| t.clone())
-                    .collect();
-                let near_joint: Vec<String> = index
-                    .keys()
-                    .filter(|(_, k)| {
-                        k.iter()
-                            .all(|p| f64::from_bits(p[0]) == 1.0)
-                    })
-                    .map(|(t, k)| {
-                        format!(
-                            "{t}@{:?}",
-                            k.map(|p| [
-                                f64::from_bits(p[0]),
-                                f64::from_bits(p[1]),
-                                f64::from_bits(p[2])
-                            ])
-                        )
-                    })
-                    .collect();
                 result.violations.push(violation(
                     "project-conduction-interface-undeclared",
                     format!(
-                        "coincident conduction boundary slots {} and {} have no uniquely oriented declared scenario interface; DIAG side_a coords {:?}; targets holding this exact key: {:?}; index entries on the x=1 plane: {}",
-                        candidate.side_a, candidate.side_b, side_coords, key_in_index,
-                        near_joint.join(" | ")
+                        "coincident conduction boundary slots {} and {} have no uniquely oriented declared scenario interface",
+                        candidate.side_a, candidate.side_b
                     ),
                     "declare and geometrically assign the interface between the two owning regions; no contact law is inferred",
                 ));
@@ -1511,35 +1499,49 @@ fn norm3(vector: [f64; 3]) -> f64 {
     dot3(vector, vector).sqrt()
 }
 
-fn coordinate_point_key(point: [f64; 3]) -> ConductionPointKey {
-    [point[0].to_bits(), point[1].to_bits(), point[2].to_bits()]
+/// Closed-triangle containment evaluated in plain f64 arithmetic against
+/// exact zero: `point` must lie bitwise on the triangle's supporting plane
+/// (`normal` is the triangle's own winding cross product) and inside or on
+/// its closed edges. Conservative by construction — rounding that pushes an
+/// on-facet recovery point off the exact plane yields `false`, so the
+/// resolver refuses rather than binds approximately.
+fn triangle_contains_point(tri: [[f64; 3]; 3], normal: [f64; 3], point: [f64; 3]) -> bool {
+    if dot3(subtract(point, tri[0]), normal) != 0.0 {
+        return false;
+    }
+    for edge in 0..3 {
+        let u = tri[edge];
+        let v = tri[(edge + 1) % 3];
+        if dot3(cross3(subtract(v, u), subtract(point, u)), normal) < 0.0 {
+            return false;
+        }
+    }
+    true
 }
 
-fn coordinate_face_key(coordinates: [[f64; 3]; 3]) -> ConductionFaceKey {
-    let mut key = coordinates.map(coordinate_point_key);
-    key.sort_unstable();
-    key
-}
-
-fn conduction_face_key(mesh: &ConductionMesh, slot: usize) -> ConductionFaceKey {
-    let coordinates = mesh.boundary()[slot]
-        .vertices
-        .map(|vertex| mesh.positions()[vertex as usize]);
-    coordinate_face_key(coordinates)
+/// Whether the candidate boundary triangle lies inside the closed source
+/// triangle (every vertex contained; refinement sub-triangles of a recovered
+/// facet satisfy this against exactly one non-degenerate source face).
+fn source_contains_triangle(row: &IndexedConductionSourceFace, candidate: [[f64; 3]; 3]) -> bool {
+    candidate
+        .iter()
+        .all(|point| triangle_contains_point(row.coordinates, row.outward, *point))
 }
 
 fn unique_oriented_source(
-    index: &BTreeMap<(String, ConductionFaceKey), Vec<IndexedConductionSourceFace>>,
+    index: &BTreeMap<String, Vec<IndexedConductionSourceFace>>,
     entity: &str,
-    key: ConductionFaceKey,
+    candidate: [[f64; 3]; 3],
     outward_normal: [f64; 3],
 ) -> Result<Option<ConductionSourceFace>, Violation> {
-    let Some(rows) = index.get(&(entity.to_string(), key)) else {
+    let Some(rows) = index.get(entity) else {
         return Ok(None);
     };
     let matching = rows
         .iter()
-        .filter(|row| dot3(row.outward, outward_normal) > 0.0)
+        .filter(|row| {
+            dot3(row.outward, outward_normal) > 0.0 && source_contains_triangle(row, candidate)
+        })
         .collect::<Vec<_>>();
     match matching.as_slice() {
         [] => Ok(None),
@@ -1547,10 +1549,10 @@ fn unique_oriented_source(
         many => Err(violation(
             "project-conduction-interface-source-ambiguous",
             format!(
-                "entity `{entity}` has {} outward-oriented imported faces for one exact conduction boundary slot",
+                "entity `{entity}` has {} outward-oriented imported faces containing one exact conduction boundary slot",
                 many.len()
             ),
-            "remove duplicate source faces or make the selector identify one retained oriented trace",
+            "remove duplicate or overlapping source faces so one retained oriented trace covers the slot",
         )),
     }
 }

@@ -3312,7 +3312,7 @@ fn g0_conduction_stage_executes_declared_card_backed_contact() {
     let mut progress = Vec::new();
     let refusal = run_solve(&ledger, &gate, &mut clock, &decoded, &cards, &mut progress)
         .expect_err("contact solve completes and stops at the QoI gap");
-    assert_eq!(refusal.code, "cli-solve-stage-gap", "TEMP-DIAG: {}", refusal.what);
+    assert_eq!(refusal.code, "cli-solve-stage-gap", "{}", refusal.what);
     assert_eq!(refusal.stage, Some("qoi"));
 
     let run = refusal.run.expect("run");
@@ -3326,7 +3326,14 @@ fn g0_conduction_stage_executes_declared_card_backed_contact() {
         String::from_utf8(artifact_bytes(&ledger, &receipts[4])).expect("receipt is utf-8");
     assert_balanced_json(&receipt);
     assert!(receipt.contains("frankensim.cli.solve-conduction-receipt.v2"));
-    assert!(receipt.contains("\"interfaces\":{\"pair_count\":2"));
+    // The production volumetricizer's facet recovery inserts a Steiner
+    // point at the joint centroid and re-triangulates the shared unit
+    // face into a deterministic four-triangle fan, so the declared
+    // interface lowers to FOUR coincident matching-P1 pairs (one per
+    // retained sub-triangle), each bound by containment to the covering
+    // imported face. Two was the pre-execution guess written against the
+    // unrefined soup triangulation.
+    assert!(receipt.contains("\"interfaces\":{\"pair_count\":4"));
     assert!(receipt.contains("\"interface\":\"cold-hot-joint\""));
     assert!(
         receipt_number_field(&receipt, "heat_rate_a_to_b_w").abs() > 1e-12,
@@ -3342,7 +3349,7 @@ fn g0_conduction_stage_executes_declared_card_backed_contact() {
         .expect("interface evidence is utf-8");
     assert_balanced_json(&evidence);
     assert!(evidence.contains("frankensim.cli.solve-conduction-interface-evidence.v2"));
-    assert!(evidence.contains("\"pair_count\":2"));
+    assert!(evidence.contains("\"pair_count\":4"));
     assert!(evidence.contains("\"name\":\"cold-hot-joint\""));
     assert!(receipt_number_field(&evidence, "source_faces_indexed") > 0.0);
 

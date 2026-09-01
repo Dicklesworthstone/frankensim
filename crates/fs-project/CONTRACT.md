@@ -214,15 +214,23 @@ bindings; it runs no solves and admits no scenarios itself.
 - `assignment::resolve_conduction_interface_pairs` is the explicit
   scenario-to-E05_3 topology seam. It reruns assignment resolution while
   holding the same immutable `ImportedMeshLibrary`, indexes only explicit
-  metre (`m`) source faces under an exact sorted coordinate-bit key, and
-  requires each region source triangle's winding to agree with one
+  metre (`m`) source faces per declared target, and binds each coincident
+  boundary triangle to the unique outward-oriented source face that
+  CONTAINS it in exact f64 arithmetic (closed-triangle containment against
+  exact zero: the production volumetricizer's facet recovery may insert
+  Steiner points and re-triangulate a declared facet, so a retained trace
+  triangle is a refinement of the imported face — executed on the canonical
+  two-solid fixture, whose joint recovers as a four-triangle fan; recovery
+  points not bitwise on the source plane refuse rather than bind
+  approximately). Each region's covering face winding must agree with its
   `ConductionMesh` boundary slot's outward normal. Every exact coincident
   matching-P1 pair reported by `fs_conduction::ThermalInterfaces` must be
   claimed by exactly one declared interface; that interface's own selector
-  must cover the same triangle. Every declared interface must lower at least
-  once. Success retains the oriented `from`/`to` slots plus source
-  artifact/source-identity/face ordinals for both regions and the interface
-  selector. It does not select a card or construct an operator.
+  must select a face containing the same triangle. Every declared interface
+  must lower at least once. Success retains the oriented `from`/`to` slots
+  plus covering source artifact/source-identity/face ordinals for both
+  regions and the interface selector. It does not select a card or
+  construct an operator.
 
 ## Invariants
 
@@ -384,12 +392,15 @@ refuse atomically.
   hashes (a key cannot lie about its card), while WHO supplied the collection
   is the caller's trust channel — resolution proves binding coverage, never
   card authenticity or scientific truth of the underlying claims.
-- A successful conduction interface mapping proves exact coordinate-bit,
-  retained source-face, selector, and outward-orientation agreement for the
-  supplied finite meshes. It does not authenticate the importer, prove the
-  finite mesh is the intended continuum/CAD assembly, establish material or
-  contact-law authority, support nonmatching/mortar contact, or construct
-  `InterfaceResistance`, `InterfaceSurface`, or `ThermalInterfaces`.
+- A successful conduction interface mapping proves exact-arithmetic
+  containment of each retained boundary triangle in one outward-oriented
+  imported source face per region, plus selector coverage, for the supplied
+  finite meshes. It does not authenticate the importer, prove the finite
+  mesh is the intended continuum/CAD assembly, establish material or
+  contact-law authority, support nonmatching/mortar contact, bind recovery
+  points that were rounded off the exact source plane (those refuse), or
+  construct `InterfaceResistance`, `InterfaceSurface`, or
+  `ThermalInterfaces`.
 - Binding resolution is temperature-axis-only in v1: cards whose claims
   depend on further validity axes refuse (`project-binding-axis`) rather
   than being partially resolved. The required ceiling uses DECLARED thermal
