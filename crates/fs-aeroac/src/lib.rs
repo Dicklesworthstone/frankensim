@@ -35,10 +35,17 @@
 //!   central-moment operator (bead frankensim-music-v8-root-3ez8g.10.1)
 //!   — the executed follow-up lane to the recorded 2-D tonal lock,
 //!   with its own discipline laws and honest both-outcomes framing.
+//! - [`jetcard`]: minted jet cards (bead
+//!   frankensim-music-v8-root-3ez8g.10.2) — the typed boundary
+//!   object between this lab lane and the audio-rate performance
+//!   lane; the tonal interim card, the broadband card, and the
+//!   honest refusal-boundary card, under the "no card -> refuse"
+//!   menu law and the X-Struct-needs-a-residual authority rule.
 
 pub mod bessel;
 pub mod bickley;
 pub mod curle2d;
+pub mod jetcard;
 pub mod jetlab;
 pub mod noisetable;
 pub mod regime;

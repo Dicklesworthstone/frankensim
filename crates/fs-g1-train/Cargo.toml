@@ -5,6 +5,13 @@ edition = "2021"
 description = "G1 walking policy training: stepwise env, transformer policy, Muon/Adam, PPO+GAE"
 license = "MIT"
 
+# Workspace-excluded standalone training crate (own [workspace] below,
+# like the browser wasm workspaces); the layer declaration follows the
+# fs-wasm/fs-flyer-wasm standalone precedent — it feeds the L6
+# fs-cmaes-viz-wasm product's `g1-learned` feature.
+[package.metadata.frankensim]
+layer = "L6"
+
 [dependencies]
 # The transformer/Muon/PPO core and action-causal explanatory stand-in remain
 # standalone. Real owner-rollout training is integrated by the sibling

@@ -33,7 +33,15 @@ fn base_config(second_order_rate: f64) -> SlotJet3dConfig {
         u_jet: 0.04,
         collision: CollisionModel3::CentralMoment {
             second_order_rate,
-            higher_order_rate: second_order_rate + 0.1,
+            // The +0.1 nuisance-rate offset leaves the D3Q19 physical
+            // window (0, 2) EXCLUSIVE for the top three ladder rungs
+            // (2.02/2.06/2.08 refused at validation — executed on
+            // 2026-09-01; those rungs had never actually run). The
+            // clamp keeps the committed offset family where it is
+            // legal and pins the top rungs just inside the window;
+            // both rates are disclosed in every rung receipt, so the
+            // family definition stays transparent.
+            higher_order_rate: (second_order_rate + 0.1).min(1.99),
         },
         nozzle_thickness: 1,
         edge_distance: 8,

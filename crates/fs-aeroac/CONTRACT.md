@@ -104,6 +104,25 @@ scope law, pinned as data and by test).
   `scripts/e2e/music/slot_jet_3d_sweep.sh`. No experimental,
   video-backed, or absolute-level claim survives this lane; the
   crate scope statement applies to every spectral quantity.
+- `jetcard::{JetCard, JetCardClaim, CardAuthority, mint_tonal_interim_card,
+  mint_broadband_card, mint_refusal_boundary_card}` — minted jet
+  cards (bead 3ez8g.10.2), the typed boundary object between this
+  lab lane and the audio-rate performance lane under the downstream
+  "no card -> refuse" menu law. Authority law enforced at minting
+  and revalidated on parse: `X-Struct` requires a residual issued
+  against lab data, `X-Est` otherwise; a broadband claim requires
+  16-band noise content; every card embeds the scope statement and
+  refuses queries outside its demonstrated Reynolds range. The
+  serialization is a pinned-field-order v1 JSON document with a
+  strict fail-closed parser (foreign schema/claim kinds, tampered
+  scope, trailing bytes all refuse by name); `content_hash` is
+  FNV-1a over those canonical bytes — a deterministic correlation
+  identity, NOT a cryptographic or authenticity anchor (the
+  workspace `ProvenanceHash` caveat applies verbatim). The tonal
+  interim card is minted from the recorded stage-I staging point
+  (St 0.03662 vs Brown 0.03554, +3.0% inside the ±6% bin; ramp
+  hysteresis and 0.0366/0.0458 multi-stability recorded) with the
+  exact staging-rig FNV fingerprint as provenance.
 
 ## Invariants
 
@@ -264,6 +283,16 @@ radiation with scope; typed refusals; bitwise determinism; ramp
 structure + rung grid + bitwise determinism; ramp + peak-instrument
 typed refusals.
 
+`tests/jetcard.rs` (9): tonal interim card mints the recorded
+stage-I point with X-Struct residual + narrow claim + validity
+refusals; exact round trip + stable content hash; broadband/refusal
+minting laws (no broadband rung -> refuse; out-of-regime rung ->
+refuse; boundary needs >= 2 admitted all-tonal rungs); the
+no-residual X-Est cap and the forged-authority refusal; parser
+refusals on foreign schema, laundered scope, truncation, and
+trailing bytes; momentum-thickness tanh-edge law + refusals; pinned
+schema constant.
+
 `tests/aeroac.rs` (11): Wronskian identity; derivative cross-checks;
 fsci-special oracle; small-argument limits; Hankel far-field
 amplitude; Curle spreading + directivity + scope guard; Curle typed
@@ -297,6 +326,15 @@ determinism.
   but no 3D Re-sweep has been executed; a demonstrated 3D broadband
   regime remains a no-claim. The 2D inverse-cascade mechanism is the
   recorded physics boundary.
+- Jet cards: the tonal interim card claims EDGE-TONE CLASS ONLY —
+  it is not flute broadband, carries no band noise content, no
+  absolute SPL, and no oscillation-amplitude authority; consuming
+  it as a noise source is a type error by construction. The
+  broadband and refusal-boundary minters are law + schema today:
+  no card of either kind has been minted from executed 3-D sweep
+  receipts (the .10.1 sweep is the pending producer). The card
+  content hash is FNV-1a: deterministic correlation identity only,
+  never authenticity.
 - Quadrupole (volume) sources: dipoles dominate at low Mach over
   rigid surfaces; the Lighthill volume term is out of scope v1.
 - Only orders 0 and 1 of the Bessel functions are provided (all the
