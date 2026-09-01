@@ -25,8 +25,8 @@ use fs_ledger::{EdgeRole, Ledger};
 use fs_package::{Claim, EvidencePackage, Provenance};
 use fs_project::spec::ProjectSpec;
 use fs_report::{
-    BudgetTermItem, EngineeringReport, LineageItem, MaterialReportItem, NoClaimItem,
-    QoiReportItem, ReportProvenance, RequirementReportItem, StageReceiptItem,
+    BudgetTermItem, EngineeringReport, LineageItem, MaterialReportItem, NoClaimItem, QoiReportItem,
+    ReportProvenance, RequirementReportItem, StageReceiptItem,
 };
 
 use super::{
@@ -110,8 +110,8 @@ fn load_receipt(
     let charged = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
     work.charge(charged)
         .map_err(|error| invocation_work_refusal(Some(run), Some(SolveStage::Report), error))?;
-    let text = String::from_utf8(bytes)
-        .map_err(|_| shape_error(stage, "receipt bytes are not UTF-8"))?;
+    let text =
+        String::from_utf8(bytes).map_err(|_| shape_error(stage, "receipt bytes are not UTF-8"))?;
     let value = JsonValue::parse(&text).map_err(|error| shape_error(stage, error.to_string()))?;
     Ok(LoadedReceipt {
         stage,
@@ -157,7 +157,12 @@ fn scalar_text(node: &JsonValue) -> Option<String> {
     }
 }
 
-fn push_summary(summary: &mut Vec<(String, String)>, receipt: &JsonValue, label: &str, path: &[&str]) {
+fn push_summary(
+    summary: &mut Vec<(String, String)>,
+    receipt: &JsonValue,
+    label: &str,
+    path: &[&str],
+) {
     if let Some(text) = receipt.path(path).and_then(scalar_text) {
         summary.push((label.to_string(), text));
     }
@@ -195,7 +200,11 @@ fn stage_summary(stage: SolveStage, receipt: &JsonValue) -> Vec<(String, String)
                 ("authority", &["authority"][..]),
             ] {
                 push_summary(&mut summary, receipt, label, path);
-                if summary.last().is_none_or(|(last, _)| last != label) && path.len() > 1 {
+                if summary
+                    .last()
+                    .is_none_or(|(last, _)| last.as_str() != label)
+                    && path.len() > 1
+                {
                     push_summary(&mut summary, receipt, label, &path[1..]);
                 }
             }
@@ -208,20 +217,32 @@ fn stage_summary(stage: SolveStage, receipt: &JsonValue) -> Vec<(String, String)
                 ("iterations", &["solver", "iterations"][..]),
                 ("final_residual", &["solver", "final_residual"][..]),
                 ("stop_reason", &["solver", "stop_reason"][..]),
-                ("energy_relative_closure", &["energy", "relative_closure"][..]),
+                (
+                    "energy_relative_closure",
+                    &["energy", "relative_closure"][..],
+                ),
                 ("elements", &["mesh", "elements"][..]),
                 ("vertices", &["mesh", "vertices"][..]),
                 ("authority", &["authority"][..]),
             ] {
                 push_summary(&mut summary, receipt, label, path);
-                if summary.last().is_none_or(|(last, _)| last != label) && path.len() > 1 {
+                if summary
+                    .last()
+                    .is_none_or(|(last, _)| last.as_str() != label)
+                    && path.len() > 1
+                {
                     push_summary(&mut summary, receipt, label, &path[1..]);
                 }
             }
         }
         SolveStage::Qoi => {
             push_summary(&mut summary, receipt, "authority", &["authority"]);
-            push_summary(&mut summary, receipt, "composition_identity", &["composition_identity"]);
+            push_summary(
+                &mut summary,
+                receipt,
+                "composition_identity",
+                &["composition_identity"],
+            );
         }
         SolveStage::Report => {}
     }
@@ -253,7 +274,10 @@ fn material_rows(receipt: &JsonValue) -> Vec<MaterialReportItem> {
             let mut conductivity = "not retained in receipt".to_string();
             let mut specific_heat = "not retained in receipt".to_string();
             let mut density = "not retained in receipt".to_string();
-            if let Some(properties) = binding.get("material_properties").and_then(JsonValue::as_array) {
+            if let Some(properties) = binding
+                .get("material_properties")
+                .and_then(JsonValue::as_array)
+            {
                 for property in properties {
                     let Some(name) = property.str_field("property") else {
                         continue;
@@ -262,9 +286,13 @@ fn material_rows(receipt: &JsonValue) -> Vec<MaterialReportItem> {
                     let hi = property.get("value_hi").and_then(scalar_text);
                     let dims = property.str_field("dims").unwrap_or("");
                     let text = match (lo, hi) {
-                        (Some(lo), Some(hi)) if lo == hi => format!("{lo} {dims}").trim().to_string(),
+                        (Some(lo), Some(hi)) if lo == hi => {
+                            format!("{lo} {dims}").trim().to_string()
+                        }
                         (Some(lo), Some(hi)) => format!("{lo}..{hi} {dims}").trim().to_string(),
-                        (Some(one), None) | (None, Some(one)) => format!("{one} {dims}").trim().to_string(),
+                        (Some(one), None) | (None, Some(one)) => {
+                            format!("{one} {dims}").trim().to_string()
+                        }
                         (None, None) => continue,
                     };
                     if name.contains("conductivity") {
@@ -301,7 +329,10 @@ fn provenance_from_spec(spec: &ProjectSpec) -> ReportProvenance {
         .map_or(0, |b| b.solve_time.value.max(0.0).floor() as u64);
     let mem_budget_bytes = spec.budgets.as_ref().map_or(0, |b| b.memory_bytes);
     ReportProvenance {
-        code_version: format!("fs-cli {}; project workspace {workspace}", env!("CARGO_PKG_VERSION")),
+        code_version: format!(
+            "fs-cli {}; project workspace {workspace}",
+            env!("CARGO_PKG_VERSION")
+        ),
         constellation_lock: constellation.to_string(),
         machine_fingerprint: "not retained by the solve run (roofline lanes own machine identity)"
             .to_string(),
@@ -345,7 +376,10 @@ pub(super) fn report_receipt(
             .ok_or_else(|| {
                 report_error(
                     "cli-solve-report-prefix",
-                    format!("the report stage requires the completed {} receipt", stage.name()),
+                    format!(
+                        "the report stage requires the completed {} receipt",
+                        stage.name()
+                    ),
                     "rerun the ordered producer prefix; report projects only completed stages",
                 )
             })?;
@@ -678,8 +712,9 @@ pub(crate) fn load_completed_run(
     let work = EvidenceWork::new(&gate, None, &invocation);
     let VerifiedResume { state, .. } = load_latest_state(ledger, run, work)?;
     if state.completed.len() < SolveStage::ALL.len() {
-        let next = SolveStage::from_ordinal(u32::try_from(state.completed.len()).unwrap_or(u32::MAX))
-            .map_or("unknown", SolveStage::name);
+        let next =
+            SolveStage::from_ordinal(u32::try_from(state.completed.len()).unwrap_or(u32::MAX))
+                .map_or("unknown", SolveStage::name);
         return Err(SolveRefusal::plain(
             "cli-report-run-incomplete",
             format!(
@@ -687,7 +722,9 @@ pub(crate) fn load_completed_run(
                 state.completed.len(),
                 SolveStage::ALL.len()
             ),
-            format!("resume with `frankensim solve --resume {run_id_hex} <ledger>` and rerun the export"),
+            format!(
+                "resume with `frankensim solve --resume {run_id_hex} <ledger>` and rerun the export"
+            ),
         ));
     }
     let report_stage = state

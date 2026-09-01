@@ -17,8 +17,8 @@ use fs_ledger::Ledger;
 use crate::json_read::JsonValue;
 use crate::solve::{CompletedRunExport, SolveRefusal, load_completed_run};
 use crate::{
-    CommandOutput, Diagnostic, OutputMode, RESULT_SCHEMA, escape_text, exit, format_result,
-    push_json_string, refusal,
+    CommandOutput, Diagnostic, OutputMode, RESULT_SCHEMA, escape_text, exit, push_json_string,
+    refusal,
 };
 
 /// A completed run located in a ledger, with its parsed report receipt and the
@@ -270,7 +270,6 @@ pub fn report_path(run_id: &str, ledger_path: Option<&Path>, mode: OutputMode) -
             export.stages_completed,
         ),
     };
-    let _ = format_result; // the export result carries more fields than the generic renderer
     CommandOutput {
         exit_code: exit::SUCCESS,
         stdout,
