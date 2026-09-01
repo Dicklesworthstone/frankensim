@@ -614,10 +614,22 @@ publication.
   path proves only the declared finite-mesh, static Dirichlet/Neumann/Robin
   solve, exact matching-P1 finite contact, and the reported algebraic residual
   and energy balance. It does not authenticate source geometry or material
-  claims, establish mesh convergence, lower nonmatching or
-  temperature-dependent contact, or perform conjugate airflow exchange.
-  Unsupported interface models refuse rather than silently assuming perfect
-  contact.
+  claims, establish mesh convergence, or lower nonmatching or
+  temperature-dependent contact. Unsupported interface models refuse rather
+  than silently assuming perfect contact. When the project declares a
+  schema-v4 `(airflow-convection ...)` law, the stage performs ONE branch's
+  conjugate airflow exchange (driver v10, receipt v3 `conjugate` object):
+  the coefficient is derived from the named `fs-convection` card at the
+  flow-network branch Reynolds number with dry-air properties frozen at
+  300 K, the reference temperature is the exponential-law marched air
+  temperature over the target's retained exterior area, and the solid/air
+  fixed point must pass a kelvin convergence test, a scale-free watt
+  balance gate, and an `fs-conduction` decomposition cross-check or the
+  stage refuses by name (`cli-solve-conduction-airflow-*`). It does not
+  close more than one branch, re-evaluate properties or the coefficient at
+  film temperature, model recirculation, buoyancy, redistribution, or
+  momentum feedback, propagate the flow bracket through the card, or claim
+  experimental validation or a maturity level for the exchange.
 - `material-resolve` proves that every declared region and interface resolves
   to an admitted card whose selected claim answers the required property at
   both endpoints of the declared temperature range, and it retains that
