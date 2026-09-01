@@ -4,10 +4,10 @@ import FrankenSimCore
 
 final class SimulationCatalogTests: XCTestCase {
     func testCompleteWebsiteAndCampaignInventoryIsUnique() {
-        XCTAssertEqual(SimulationCatalog.all.count, 43)
-        XCTAssertEqual(Set(SimulationCatalog.all.map(\.id)).count, 43)
+        XCTAssertEqual(SimulationCatalog.all.count, 44)
+        XCTAssertEqual(Set(SimulationCatalog.all.map(\.id)).count, 44)
         XCTAssertEqual(SimulationCatalog.all.filter { $0.tier == .foundations }.count, 10)
-        XCTAssertEqual(SimulationCatalog.all.filter { $0.tier == .frontier }.count, 10)
+        XCTAssertEqual(SimulationCatalog.all.filter { $0.tier == .frontier }.count, 11)
         XCTAssertEqual(SimulationCatalog.all.filter { $0.tier == .deep }.count, 10)
         XCTAssertEqual(SimulationCatalog.all.filter { $0.tier == .campaigns }.count, 10)
         XCTAssertEqual(SimulationCatalog.all.filter { $0.tier == .flagships }.count, 3)
@@ -33,6 +33,24 @@ final class SimulationCatalogTests: XCTestCase {
         let header = runAndCopyHeader(id: 3)
 
         XCTAssertEqual(header, [1, 3, 0, 14, 1, 1])
+    }
+
+    func testNativeReedPacketIsTypedMonoPCM() {
+        let header = runAndCopyHeader(id: 43)
+
+        XCTAssertEqual(header, [1, 43, 6, 480, 1, 48_000])
+    }
+
+    func testPCMBlockAcceptsOnlyTheDeclaredMonoFormatAndFiniteSamples() throws {
+        let block = try PCMBlock(result: pcmResult(values: [0, -0.5, 1]))
+        XCTAssertEqual(block.samples, [0, -0.5, 1])
+
+        XCTAssertThrowsError(try PCMBlock(result: pcmResult(channels: 2))) { error in
+            XCTAssertEqual(error.localizedDescription, "Unsupported PCM format: 2 channel(s) at 48000 Hz.")
+        }
+        XCTAssertThrowsError(try PCMBlock(result: pcmResult(values: [Double.nan]))) { error in
+            XCTAssertEqual(error.localizedDescription, "Invalid PCM payload: samples must be finite normalized PCM")
+        }
     }
 
     func testNativeBridgeRefusesAnUnknownCatalogID() async {
@@ -69,5 +87,25 @@ final class SimulationCatalogTests: XCTestCase {
         let header = (0..<6).map { frankensim_apple_result_value(UInt64($0)) }
         XCTAssertTrue(header.allSatisfy(\.isFinite))
         return header
+    }
+
+    private func pcmResult(
+        values: [Double] = [0],
+        channels: Int = 1,
+        sampleRate: Int = 48_000
+    ) -> SimulationResult {
+        SimulationResult(
+            experimentID: 43,
+            shape: .pcm,
+            width: values.count,
+            height: channels,
+            frames: sampleRate,
+            values: values,
+            finiteMinimum: values.filter(\.isFinite).min() ?? 0,
+            finiteMaximum: values.filter(\.isFinite).max() ?? 0,
+            quality: 0,
+            seed: 0,
+            elapsed: .zero
+        )
     }
 }

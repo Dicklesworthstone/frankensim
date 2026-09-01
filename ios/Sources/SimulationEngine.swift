@@ -1,3 +1,4 @@
+import AVFoundation
 import Foundation
 import FrankenSimCore
 
@@ -8,6 +9,8 @@ enum ResultShape: UInt32, Sendable {
     case xyzPath = 3
     case triangles = 4
     case campaign = 5
+    /// ABI dimensions are frame count, channel count, and sample rate in hertz.
+    case pcm = 6
 }
 
 struct SimulationResult: Sendable {
@@ -38,7 +41,103 @@ struct SimulationResult: Sendable {
         case .triangles: "\(max(0, values.count / 18)) triangles"
         case .signal: "\(values.count) values"
         case .campaign: "\(values.count) evidence values"
+        case .pcm: "\(width) mono PCM frames @ \(frames) Hz"
         }
+    }
+}
+
+enum PCMPlaybackError: LocalizedError {
+    case notPCM
+    case unsupportedFormat(channels: Int, sampleRate: Int)
+    case malformedPayload(String)
+    case bufferAllocation
+    case engineStart(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .notPCM: "The selected kernel result is not an audio PCM packet."
+        case .unsupportedFormat(let channels, let sampleRate):
+            "Unsupported PCM format: \(channels) channel(s) at \(sampleRate) Hz."
+        case .malformedPayload(let reason): "Invalid PCM payload: \(reason)."
+        case .bufferAllocation: "The audio engine could not allocate a PCM buffer."
+        case .engineStart(let reason): "The audio engine could not start: \(reason)"
+        }
+    }
+}
+
+/// Typed Swift ownership of one Rust-produced, mono PCM block. The C ABI's
+/// `width`, `height`, and `frames` dimensions carry frame count, channels, and
+/// sample rate respectively for `ResultShape.pcm` only.
+struct PCMBlock: Sendable {
+    static let sampleRate = 48_000
+    static let channels = 1
+
+    let samples: [Float]
+
+    init(result: SimulationResult) throws {
+        guard result.shape == .pcm else { throw PCMPlaybackError.notPCM }
+        guard result.width > 0, result.width == result.values.count else {
+            throw PCMPlaybackError.malformedPayload("frame count does not match the payload")
+        }
+        guard result.height == Self.channels, result.frames == Self.sampleRate else {
+            throw PCMPlaybackError.unsupportedFormat(channels: result.height, sampleRate: result.frames)
+        }
+        guard result.values.allSatisfy({ $0.isFinite && (-1...1).contains($0) }) else {
+            throw PCMPlaybackError.malformedPayload("samples must be finite normalized PCM")
+        }
+        samples = result.values.map(Float.init)
+    }
+}
+
+/// Real AVAudioEngine consumer for the Rust PCM packet. `scheduledBuffer`
+/// retains the buffer for the node's complete scheduled lifetime; it is only
+/// replaced after `stop()` interrupts the preceding block.
+@MainActor
+final class PCMPlayback {
+    private let engine = AVAudioEngine()
+    private let player = AVAudioPlayerNode()
+    private let format: AVAudioFormat
+    private var scheduledBuffer: AVAudioPCMBuffer?
+
+    init() throws {
+        guard let format = AVAudioFormat(
+            standardFormatWithSampleRate: Double(PCMBlock.sampleRate),
+            channels: AVAudioChannelCount(PCMBlock.channels)
+        ) else {
+            throw PCMPlaybackError.unsupportedFormat(
+                channels: PCMBlock.channels,
+                sampleRate: PCMBlock.sampleRate
+            )
+        }
+        self.format = format
+        engine.attach(player)
+        engine.connect(player, to: engine.mainMixerNode, format: format)
+    }
+
+    func play(_ block: PCMBlock) throws {
+        guard let buffer = AVAudioPCMBuffer(
+            pcmFormat: format,
+            frameCapacity: AVAudioFrameCount(block.samples.count)
+        ), let destination = buffer.floatChannelData?.pointee else {
+            throw PCMPlaybackError.bufferAllocation
+        }
+        for (index, sample) in block.samples.enumerated() {
+            destination[index] = sample
+        }
+        buffer.frameLength = AVAudioFrameCount(block.samples.count)
+
+        player.stop()
+        scheduledBuffer = buffer
+        do {
+            if !engine.isRunning {
+                try engine.start()
+            }
+        } catch {
+            scheduledBuffer = nil
+            throw PCMPlaybackError.engineStart(error.localizedDescription)
+        }
+        player.scheduleBuffer(buffer, at: nil, options: .interrupts)
+        player.play()
     }
 }
 
@@ -144,6 +243,7 @@ final class SimulationStudioModel: ObservableObject {
     @Published var seed: UInt32 = 0x5EED_0001
 
     private let kernel = NativeSimulationKernel()
+    private var pcmPlayback: PCMPlayback?
     private var runTask: Task<Void, Never>?
     private var activeRunID: UUID?
 
@@ -188,6 +288,18 @@ final class SimulationStudioModel: ObservableObject {
                 let output = try await kernel.run(experiment: experiment, quality: runQuality, seed: runSeed)
                 try Task.checkCancellation()
                 guard self.activeRunID == runID, self.selection.id == experiment.id else { return }
+                if output.shape == .pcm {
+                    let block = try PCMBlock(result: output)
+                    let playback: PCMPlayback
+                    if let existing = self.pcmPlayback {
+                        playback = existing
+                    } else {
+                        let created = try PCMPlayback()
+                        self.pcmPlayback = created
+                        playback = created
+                    }
+                    try playback.play(block)
+                }
                 self.result = output
                 self.activeRunID = nil
                 self.isRunning = false

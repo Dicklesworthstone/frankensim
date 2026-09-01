@@ -6,6 +6,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 const SCHEMA_VERSION: f64 = 1.0;
 const HEADER_LEN: usize = 6;
 const MAX_RESULT_VALUES: usize = 2_000_000;
+const INSTRUMENT_REED_CHANNELS: usize = 1;
 
 #[repr(u32)]
 #[derive(Clone, Copy)]
@@ -16,6 +17,7 @@ enum Shape {
     XyzPath = 3,
     Triangles = 4,
     Campaign = 5,
+    Pcm = 6,
 }
 
 thread_local! {
@@ -72,6 +74,19 @@ fn admitted_wave_grid(n_in: usize) -> usize {
 
 fn signal_packet(id: u32, payload: Vec<f64>) -> Vec<f64> {
     packet(id, Shape::Signal, payload.len(), 1, 1, payload)
+}
+
+/// Six-field ABI packet for interleaved floating-point PCM: the three shape
+/// dimensions are frame count, channel count, and sample rate in hertz.
+fn pcm_packet(id: u32, payload: Vec<f64>) -> Vec<f64> {
+    packet(
+        id,
+        Shape::Pcm,
+        payload.len(),
+        INSTRUMENT_REED_CHANNELS,
+        fs_wasm::INSTRUMENT_REED_SAMPLE_RATE_HZ as usize,
+        payload,
+    )
 }
 
 fn campaign_packet(id: u32, payload: Vec<f64>) -> Vec<f64> {
@@ -218,7 +233,7 @@ fn run(id: u32, quality: f64, seed: u32) -> Option<Vec<f64>> {
         40 => campaign_packet(id, fs_wasm::run_ornithoid(seed)),
         41 => campaign_packet(id, fs_wasm::run_vessel(650)),
         42 => campaign_packet(id, fs_wasm::run_frame(seed)),
-        43 => signal_packet(
+        43 => pcm_packet(
             id,
             fs_wasm::run_instrument_reed(2_800.0 + quality * 4_000.0),
         ),
@@ -321,6 +336,29 @@ mod tests {
         let low = run(14, 0.2, 1).expect("low spectral wave packet");
         assert_eq!(&low[3..6], &[32.0, 32.0, 8.0]);
         assert_eq!(low.len(), HEADER_LEN + 32 * 32 * 8);
+    }
+
+    #[test]
+    fn reed_packet_declares_mono_pcm_rate_and_block_length() {
+        let reed = run(43, 0.0, 0x5EED).expect("reed PCM packet");
+        assert_eq!(reed[2], Shape::Pcm as u32 as f64);
+        assert_eq!(
+            &reed[3..6],
+            &[
+                fs_wasm::INSTRUMENT_REED_BLOCK_SAMPLES as f64,
+                INSTRUMENT_REED_CHANNELS as f64,
+                fs_wasm::INSTRUMENT_REED_SAMPLE_RATE_HZ as f64,
+            ]
+        );
+        assert_eq!(
+            reed.len(),
+            HEADER_LEN + fs_wasm::INSTRUMENT_REED_BLOCK_SAMPLES
+        );
+        assert!(
+            reed[HEADER_LEN..]
+                .iter()
+                .all(|sample| sample.is_finite() && sample.abs() <= 1.0)
+        );
     }
 
     #[test]
