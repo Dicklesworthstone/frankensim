@@ -19,7 +19,9 @@
 //! interval-certified operating point (bead frankensim-frn2i.2). `conduction`
 //! executes when the project declares an explicit conduction setup; older
 //! projects without that optional setup retain the typed frankensim-s93ej gap.
-//! `qoi` (frankensim-s2l9v) remains a typed gap.
+//! `qoi` executes the request-selective declared region temperature maximum
+//! when that exact producer is available; unsupported QoI families remain the
+//! typed frankensim-s2l9v gap. `report` remains the typed rc-j4 gap.
 //!
 //! Card packs are invocation inputs, so their canonical set root is bound
 //! into the run identity: a different pack set is a different run, never the
@@ -41,8 +43,17 @@ use std::hash::BuildHasherDefault;
 use std::ops::ControlFlow;
 use std::rc::Rc;
 
+use fs_airflow::qoi::JunctionRegion;
+use fs_airflow::registered_qoi::{
+    OutputQuery, QoiExecutionLimits, QoiSemanticId, extract_registered_junction_maximum,
+};
+use fs_airflow::requirement_composition::{
+    ComplianceOutcome, ThermalLimitSpec, compose_thermal_limits,
+};
 use fs_blake3::identity::ContentId;
 use fs_blake3::{DomainHasher, hash_bytes, hash_domain};
+use fs_evidence::ColorRank;
+use fs_evidence::uncertainty::{EngineeringUncertaintyKind, TermValue};
 use fs_exec::CancelGate;
 use fs_exec::solver::{
     LegacySnapshotExpectationV1, LegacySnapshotLimitsV1, LegacySnapshotV1Adapter,
@@ -56,7 +67,9 @@ use fs_ledger::{
     OpVariableField, PrehashedOpContent, VisibleOpCursor, VisibleOpPage,
 };
 use fs_matdb::{ClaimId, QueryPoint, SelectionPolicy};
-use fs_project::spec::{ConductionSetup, ThermalBoundaryCondition};
+use fs_project::spec::{
+    ConductionSetup, RequirementDirection, RequirementSeverity, ThermalBoundaryCondition,
+};
 use fs_project::{
     BindingRequirements, BindingTarget, ConductionInterfaceLimits, DecodedProject, EntityDecl,
     GeometryArtifact, ImportedMeshLibrary, ProjectSpec, geometry_source_identity, resolve_bindings,
@@ -82,8 +95,10 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// Bumped to 6 when declared matching-P1 interfaces began executing through
 /// region-owned traces and the card-backed contact operator.
 /// Bumped to 7 when interface-resolution evidence identities switched from
-/// ambiguous delimiter joining to length-framed fields.
-pub const SOLVE_DRIVER_VERSION: u32 = 7;
+/// ambiguous delimiter joining to length-framed fields. Bumped to 8 when the
+/// request-selective temperature-maximum QoI became a real sixth producer and
+/// report became the next typed stage gap.
+pub const SOLVE_DRIVER_VERSION: u32 = 8;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";
@@ -119,6 +134,7 @@ const MATERIAL_RESOLVE_AUTHORITY: &str = "declared-binding-resolution-against-ad
 const FLOW_NETWORK_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-flow-network-receipt.v1";
 const CONDUCTION_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-conduction-receipt.v2";
 const CONDUCTION_SOLUTION_SCHEMA: &str = "frankensim.cli.solve-conduction-solution.v1";
+const QOI_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-qoi-candidate.v1";
 const CONDUCTION_INTERFACE_EVIDENCE_SCHEMA: &str =
     "frankensim.cli.solve-conduction-interface-evidence.v2";
 /// Specific gas constant of dry air, J/(kg·K); used only for the declared
@@ -214,6 +230,7 @@ const EDGE_ITEM_WORK_BYTES: u64 = 33;
 const DERIVATION_ITEM_WORK_BYTES: u64 = 64;
 /// Edge scan cap per operation while locating retained evidence.
 const EDGE_SCAN_CAP: usize = 1024;
+const QOI_REGION_POLL_ITEMS: usize = 1024;
 /// Largest distinct claim-usage receipt set one `material-resolve` operation
 /// retains. Together with the card-pack ceiling this keeps the stage's typed
 /// edge set inside the ledger's bounded scan.
@@ -263,6 +280,8 @@ pub enum SolveEvidencePhase {
     /// Lower the declared cooling fan system and solve the enclosure's
     /// network operating point, or build the canonical flow-network receipt.
     FlowNetworkSolve,
+    /// Extract and compose the declared request-selective thermal QoI.
+    QoiExtraction,
     /// Materialize one retained card pack during resume.
     ///
     /// The optional plan index is the pack's canonical position in the set.
@@ -583,17 +602,20 @@ pub enum SolveStage {
     Conduction,
     /// QoI extraction against requirements (gap: frankensim-s2l9v).
     Qoi,
+    /// Product report/package projection (gap: rc-j4).
+    Report,
 }
 
 impl SolveStage {
     /// All stages in execution order.
-    pub const ALL: [SolveStage; 6] = [
+    pub const ALL: [SolveStage; 7] = [
         SolveStage::ImportVerify,
         SolveStage::Assign,
         SolveStage::MaterialResolve,
         SolveStage::FlowNetwork,
         SolveStage::Conduction,
         SolveStage::Qoi,
+        SolveStage::Report,
     ];
 
     /// Stable kebab-case stage name used in IR, receipts, and diagnostics.
@@ -606,6 +628,7 @@ impl SolveStage {
             SolveStage::FlowNetwork => "flow-network",
             SolveStage::Conduction => "conduction",
             SolveStage::Qoi => "qoi",
+            SolveStage::Report => "report",
         }
     }
 
@@ -619,6 +642,7 @@ impl SolveStage {
             SolveStage::FlowNetwork => "solve.flow-network",
             SolveStage::Conduction => "solve.conduction",
             SolveStage::Qoi => "solve.qoi",
+            SolveStage::Report => "solve.report",
         }
     }
 
@@ -631,6 +655,7 @@ impl SolveStage {
             SolveStage::FlowNetwork => None,
             SolveStage::Conduction => Some("frankensim-s93ej"),
             SolveStage::Qoi => Some("frankensim-s2l9v"),
+            SolveStage::Report => Some("frankensim-rc-root-q61wp.12"),
         }
     }
 
@@ -642,6 +667,7 @@ impl SolveStage {
             SolveStage::FlowNetwork => 3,
             SolveStage::Conduction => 4,
             SolveStage::Qoi => 5,
+            SolveStage::Report => 6,
         }
     }
 
@@ -651,12 +677,53 @@ impl SolveStage {
 }
 
 fn stage_has_declared_producer(stage: SolveStage, spec: &ProjectSpec) -> bool {
-    stage == SolveStage::Conduction
-        && spec
+    match stage {
+        SolveStage::Conduction => spec
             .cooling
             .as_ref()
             .and_then(|cooling| cooling.conduction.as_ref())
-            .is_some()
+            .is_some(),
+        SolveStage::Qoi => has_declared_temperature_maximum(spec),
+        SolveStage::ImportVerify
+        | SolveStage::Assign
+        | SolveStage::MaterialResolve
+        | SolveStage::FlowNetwork
+        | SolveStage::Report => false,
+    }
+}
+
+fn has_declared_temperature_maximum(spec: &ProjectSpec) -> bool {
+    let Some(setup) = spec
+        .cooling
+        .as_ref()
+        .and_then(|cooling| cooling.conduction.as_ref())
+    else {
+        return false;
+    };
+    let outputs = spec.outputs.as_deref().unwrap_or(&[]);
+    let requirements = spec.requirements.as_deref().unwrap_or(&[]);
+    let matching_outputs = outputs
+        .iter()
+        .filter(|output| {
+            output.kind == "scalar"
+                && QoiSemanticId::parse(&output.name) == Some(QoiSemanticId::JunctionMaximum)
+        })
+        .count();
+    let has_unsupported_scalar = outputs.iter().any(|output| {
+        output.kind == "scalar"
+            && QoiSemanticId::parse(&output.name) != Some(QoiSemanticId::JunctionMaximum)
+    });
+    matching_outputs == 1
+        && !has_unsupported_scalar
+        && requirements.len() == 1
+        && requirements.iter().all(|requirement| {
+            requirement.direction == RequirementDirection::AtMost
+                && QoiSemanticId::parse(&requirement.qoi) == Some(QoiSemanticId::JunctionMaximum)
+                && setup
+                    .regions
+                    .iter()
+                    .any(|region| region.region == requirement.region)
+        })
 }
 
 /// Content-derived run identity: the hash of the exact inputs that determine
@@ -985,6 +1052,41 @@ struct StageContext {
     import_sources: Vec<ImportIrSource>,
     /// Assignment resource envelope retained by the import operation.
     import_limits: Option<ImportIrLimits>,
+    /// Native solved values needed by the request-selective QoI producer.
+    /// Resume reconstructs these values by rerunning and byte-attesting the
+    /// conduction producer; they are not decoded from a partial transport.
+    qoi_inputs: Option<QoiStageInputs>,
+}
+
+#[derive(Debug)]
+struct QoiStageInputs {
+    mesh: fs_conduction::ConductionMesh,
+    solution: fs_conduction::ConductionSolution,
+    element_regions: Vec<u32>,
+    region_ids: BTreeMap<String, u32>,
+    solution_artifact: ContentHash,
+}
+
+#[derive(Debug)]
+struct ConductionStageProduct {
+    receipt: String,
+    artifacts: Vec<RetainedSideArtifact>,
+    qoi_inputs: QoiStageInputs,
+}
+
+#[derive(Debug)]
+struct QoiStageProduct {
+    receipt: String,
+    progress: QoiProgressSummary,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct QoiProgressSummary {
+    qoi_count: usize,
+    verdict: &'static str,
+    weakest_term: Option<&'static str>,
+    budget_terms_measured: usize,
+    budget_terms_total: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1487,6 +1589,8 @@ impl<'a> SolveEngine<'a> {
             // Stages that retain no side evidence yield an empty list;
             // material resolution retains replayable usage receipts and
             // conduction retains its temperature field.
+            let mut pending_qoi_inputs = None;
+            let mut pending_qoi_progress = None;
             let body = match stage {
                 SolveStage::ImportVerify => self
                     .stage_import_verify(&mut context)
@@ -1498,8 +1602,15 @@ impl<'a> SolveEngine<'a> {
                 SolveStage::FlowNetwork => self
                     .stage_flow_network()
                     .map(|receipt| (receipt, Vec::new())),
-                SolveStage::Conduction => self.stage_conduction(&context),
-                SolveStage::Qoi => unreachable!("gap stages returned above"),
+                SolveStage::Conduction => self.stage_conduction(&context).map(|product| {
+                    pending_qoi_inputs = Some(product.qoi_inputs);
+                    (product.receipt, product.artifacts)
+                }),
+                SolveStage::Qoi => self.stage_qoi(&context, &state).map(|product| {
+                    pending_qoi_progress = Some(product.progress);
+                    (product.receipt, Vec::new())
+                }),
+                SolveStage::Report => unreachable!("gap stages returned above"),
             };
             let (receipt_json, usages) = match body {
                 Ok(produced) => produced,
@@ -1534,6 +1645,21 @@ impl<'a> SolveEngine<'a> {
                 );
                 return Err(self.record_refusal(&state, stage, refusal));
             }
+            let qoi_elapsed_ms = if pending_qoi_progress.is_some() {
+                let elapsed_ms = elapsed * 1000.0;
+                if !elapsed_ms.is_finite() {
+                    let refusal = SolveRefusal::staged(
+                        "cli-solve-budget",
+                        stage,
+                        "the finite QoI wall interval overflowed its millisecond progress field",
+                        "supply a bounded monotonic clock interval; no checkpoint was sealed",
+                    );
+                    return Err(self.record_refusal(&state, stage, refusal));
+                }
+                Some(elapsed_ms)
+            } else {
+                None
+            };
             #[allow(clippy::cast_precision_loss)]
             let charge = Charge {
                 core_s: elapsed * SOLVE_CORES as f64,
@@ -1567,6 +1693,9 @@ impl<'a> SolveEngine<'a> {
                     predecessor_state,
                 )
                 .map_err(|error| self.ledger_refusal(stage, &error))?;
+            if let Some(inputs) = pending_qoi_inputs {
+                context.qoi_inputs = Some(inputs);
+            }
             state.completed.push(CompletedStage {
                 ordinal: stage.ordinal(),
                 op_id,
@@ -1584,13 +1713,24 @@ impl<'a> SolveEngine<'a> {
                 receipt: receipt_hash.to_hex(),
                 wall_s: elapsed,
             });
-            self.progress.push(progress_line(
-                &self.run.to_hex(),
-                stage.name(),
-                stage.ordinal(),
-                "ok",
-                elapsed,
-            ));
+            self.progress.push(if let Some(qoi) = pending_qoi_progress {
+                qoi_progress_line(
+                    &self.run.to_hex(),
+                    stage.ordinal(),
+                    "ok",
+                    elapsed,
+                    qoi_elapsed_ms.expect("QoI progress has a prevalidated millisecond interval"),
+                    qoi,
+                )
+            } else {
+                progress_line(
+                    &self.run.to_hex(),
+                    stage.name(),
+                    stage.ordinal(),
+                    "ok",
+                    elapsed,
+                )
+            });
             let enforcement = self.charge(stage.verb(), charge)?;
             match enforcement {
                 Enforcement::Ok => {
@@ -1816,13 +1956,29 @@ impl<'a> SolveEngine<'a> {
     fn stage_conduction(
         &mut self,
         context: &StageContext,
-    ) -> Result<(String, Vec<RetainedSideArtifact>), SolveRefusal> {
+    ) -> Result<ConductionStageProduct, SolveRefusal> {
         conduction_receipt(
             self.ledger,
             self.spec,
             self.cards,
             context,
             self.run,
+            self.work,
+            false,
+        )
+    }
+
+    fn stage_qoi(
+        &mut self,
+        context: &StageContext,
+        state: &SolveDriverState,
+    ) -> Result<QoiStageProduct, SolveRefusal> {
+        qoi_receipt(
+            self.spec,
+            context,
+            state,
+            self.run,
+            self.project_hash,
             self.work,
             false,
         )
@@ -1902,6 +2058,33 @@ impl<'a> SolveEngine<'a> {
                 for pack in self.cards.iter() {
                     self.ledger.link(op, &pack.artifact(), EdgeRole::In)?;
                 }
+            }
+            if stage == SolveStage::Qoi {
+                for required in [SolveStage::Conduction] {
+                    let completed = state_before
+                        .completed
+                        .get(required.ordinal() as usize)
+                        .filter(|completed| completed.ordinal == required.ordinal())
+                        .ok_or_else(|| LedgerError::Invalid {
+                            field: "solve_qoi_prerequisite_receipt".to_string(),
+                            problem: format!(
+                                "QoI requires the completed {} stage receipt",
+                                required.name()
+                            ),
+                        })?;
+                    self.ledger.link(op, &completed.receipt, EdgeRole::In)?;
+                }
+                let qoi_inputs =
+                    context
+                        .qoi_inputs
+                        .as_ref()
+                        .ok_or_else(|| LedgerError::Invalid {
+                            field: "solve_qoi_inputs".to_string(),
+                            problem: "QoI publication has no attested conduction solution input"
+                                .to_string(),
+                        })?;
+                self.ledger
+                    .link(op, &qoi_inputs.solution_artifact, EdgeRole::In)?;
             }
             for usage in usages {
                 let retained = self.ledger.put_artifact(usage.kind, &usage.bytes, None)?;
@@ -2831,6 +3014,487 @@ fn flow_network_receipt(
     Ok(receipt)
 }
 
+fn qoi_error(code: &'static str, what: impl Into<String>, fix: impl Into<String>) -> SolveRefusal {
+    SolveRefusal::staged(code, SolveStage::Qoi, what, fix)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum QoiRegionTraceError {
+    Cancelled { completed_units: u64 },
+    UnitCountOverflow,
+}
+
+fn trace_qoi_region_vertices(
+    element_regions: &[u32],
+    tets: &[[u32; 4]],
+    vertex_count: usize,
+    region_id: u32,
+    work: EvidenceWork<'_>,
+) -> Result<(Vec<usize>, u64), QoiRegionTraceError> {
+    let mut completed_units = 0_u64;
+    let mut selected_vertices = vec![false; vertex_count];
+    for (labels, tets) in element_regions
+        .chunks(QOI_REGION_POLL_ITEMS)
+        .zip(tets.chunks(QOI_REGION_POLL_ITEMS))
+    {
+        work.checkpoint(SolveEvidencePhase::QoiExtraction, None, completed_units)
+            .map_err(|_| QoiRegionTraceError::Cancelled { completed_units })?;
+        for (&label, tet) in labels.iter().zip(tets) {
+            if label == region_id {
+                for &vertex in tet {
+                    selected_vertices[vertex as usize] = true;
+                }
+            }
+        }
+        completed_units = completed_units
+            .checked_add(
+                u64::try_from(labels.len()).map_err(|_| QoiRegionTraceError::UnitCountOverflow)?,
+            )
+            .ok_or(QoiRegionTraceError::UnitCountOverflow)?;
+        work.checkpoint(SolveEvidencePhase::QoiExtraction, None, completed_units)
+            .map_err(|_| QoiRegionTraceError::Cancelled { completed_units })?;
+    }
+
+    let mut vertices = Vec::new();
+    for (chunk_index, selected) in selected_vertices.chunks(QOI_REGION_POLL_ITEMS).enumerate() {
+        work.checkpoint(SolveEvidencePhase::QoiExtraction, None, completed_units)
+            .map_err(|_| QoiRegionTraceError::Cancelled { completed_units })?;
+        let base = chunk_index.saturating_mul(QOI_REGION_POLL_ITEMS);
+        vertices.extend(
+            selected
+                .iter()
+                .enumerate()
+                .filter_map(|(offset, &is_selected)| is_selected.then_some(base + offset)),
+        );
+        completed_units = completed_units
+            .checked_add(
+                u64::try_from(selected.len())
+                    .map_err(|_| QoiRegionTraceError::UnitCountOverflow)?,
+            )
+            .ok_or(QoiRegionTraceError::UnitCountOverflow)?;
+        work.checkpoint(SolveEvidencePhase::QoiExtraction, None, completed_units)
+            .map_err(|_| QoiRegionTraceError::Cancelled { completed_units })?;
+    }
+    Ok((vertices, completed_units))
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn qoi_receipt(
+    spec: &ProjectSpec,
+    context: &StageContext,
+    state: &SolveDriverState,
+    run: SolveRunId,
+    project_hash: ContentHash,
+    work: EvidenceWork<'_>,
+    resume: bool,
+) -> Result<QoiStageProduct, SolveRefusal> {
+    let cancelled = || {
+        if resume {
+            cancelled_resume_refusal(run)
+        } else {
+            cancelled_fresh_refusal(run, Some(SolveStage::Qoi))
+        }
+    };
+    work.checkpoint(SolveEvidencePhase::QoiExtraction, None, 0)
+        .map_err(|_| cancelled())?;
+
+    let inputs = context.qoi_inputs.as_ref().ok_or_else(|| {
+        qoi_error(
+            "cli-solve-qoi-no-conduction-inputs",
+            "the QoI stage has no attested native conduction mesh and solution",
+            "resume from or rerun the real conduction producer before extracting QoIs",
+        )
+    })?;
+    if inputs.element_regions.len() != inputs.mesh.element_count() {
+        return Err(qoi_error(
+            "cli-solve-qoi-region-map",
+            format!(
+                "the conduction handoff carries {} element labels for {} elements",
+                inputs.element_regions.len(),
+                inputs.mesh.element_count()
+            ),
+            "report the inconsistent conduction-to-QoI handoff",
+        ));
+    }
+
+    let outputs = spec.outputs.as_deref().unwrap_or(&[]);
+    let requested = outputs
+        .iter()
+        .filter(|output| {
+            output.kind == "scalar"
+                && QoiSemanticId::parse(&output.name) == Some(QoiSemanticId::JunctionMaximum)
+        })
+        .collect::<Vec<_>>();
+    if requested.len() != 1 {
+        return Err(qoi_error(
+            "cli-solve-qoi-output",
+            format!(
+                "the request-selective producer requires exactly one scalar temperature-maximum output, found {}",
+                requested.len()
+            ),
+            "declare one scalar `temperature-max` output; other QoI families need their own authoritative declarations",
+        ));
+    }
+    if let Some(unsupported) = outputs.iter().find(|output| {
+        output.kind == "scalar"
+            && QoiSemanticId::parse(&output.name) != Some(QoiSemanticId::JunctionMaximum)
+    }) {
+        return Err(qoi_error(
+            "cli-solve-qoi-unsupported-output",
+            format!(
+                "scalar output `{}` is not supported by the request-selective temperature-maximum producer",
+                unsupported.name
+            ),
+            "remove the unsupported scalar or supply its missing declarations through its owning producer",
+        ));
+    }
+
+    let requirements = spec.requirements.as_deref().unwrap_or(&[]);
+    let matched = requirements
+        .iter()
+        .filter(|requirement| {
+            QoiSemanticId::parse(&requirement.qoi) == Some(QoiSemanticId::JunctionMaximum)
+        })
+        .collect::<Vec<_>>();
+    if matched.len() != 1 {
+        return Err(qoi_error(
+            "cli-solve-qoi-requirement",
+            format!(
+                "the request-selective producer requires exactly one temperature-maximum limit, found {}",
+                matched.len()
+            ),
+            "declare one sourced at-most temperature-maximum ThermalLimit",
+        ));
+    }
+    if matched.len() != requirements.len() {
+        let unsupported = requirements
+            .iter()
+            .find(|requirement| {
+                QoiSemanticId::parse(&requirement.qoi) != Some(QoiSemanticId::JunctionMaximum)
+            })
+            .expect("a requirement outside the singleton matched set exists");
+        return Err(qoi_error(
+            "cli-solve-qoi-unsupported-requirement",
+            format!(
+                "ThermalLimit `{}` is not evaluated by the request-selective temperature-maximum producer",
+                unsupported.qoi
+            ),
+            "remove the unsupported limit or keep the QoI stage unavailable until its authoritative producer is wired",
+        ));
+    }
+    let requirement = matched[0];
+    if requirement.direction != RequirementDirection::AtMost {
+        return Err(qoi_error(
+            "cli-solve-qoi-requirement-direction",
+            "temperature maximum currently supports only an at-most ThermalLimit",
+            "declare an at-most effective temperature limit or use a producer for the requested direction",
+        ));
+    }
+    if requirement.limit.dims != fs_project::spec::dims::TEMPERATURE
+        || requirement.margin.dims != fs_project::spec::dims::TEMPERATURE
+    {
+        return Err(qoi_error(
+            "cli-solve-qoi-requirement-units",
+            format!(
+                "temperature limit/margin carry dimensions `{}` and `{}` rather than kelvin",
+                requirement.limit.dims.unit_string(),
+                requirement.margin.dims.unit_string()
+            ),
+            "declare both the effective temperature limit and required margin with kelvin dimensions",
+        ));
+    }
+    let region_id = *inputs.region_ids.get(&requirement.region).ok_or_else(|| {
+        qoi_error(
+            "cli-solve-qoi-region-unbound",
+            format!(
+                "ThermalLimit region `{}` is not a seeded conduction region",
+                requirement.region
+            ),
+            "bind the limit to one exact declared conduction region",
+        )
+    })?;
+
+    let memory_limit = spec
+        .budgets
+        .as_ref()
+        .map(|budget| usize::try_from(budget.memory_bytes).unwrap_or(usize::MAX))
+        .unwrap_or(QoiExecutionLimits::default().max_memory_bytes);
+    let vertex_count = inputs.mesh.vertex_count();
+    let element_count = inputs.mesh.element_count();
+    let extractor_memory = vertex_count
+        .saturating_mul(core::mem::size_of::<f64>())
+        .saturating_add(element_count.saturating_mul(4 * core::mem::size_of::<usize>()))
+        .saturating_add(1024);
+    let region_trace_memory =
+        vertex_count.saturating_mul(core::mem::size_of::<usize>().saturating_add(1));
+    let estimated_memory = extractor_memory.saturating_add(region_trace_memory);
+    if estimated_memory > memory_limit {
+        return Err(qoi_error(
+            "cli-solve-qoi-memory-limit",
+            format!(
+                "temperature-maximum extraction needs an estimated {estimated_memory} bytes, above the admitted {memory_limit}-byte memory budget"
+            ),
+            "raise the declared memory budget or reduce the retained conduction mesh",
+        ));
+    }
+    let limits = QoiExecutionLimits {
+        max_elements: element_count,
+        max_vertices: vertex_count,
+        max_queries: 1,
+        max_memory_bytes: memory_limit,
+    };
+    let (vertices, mut completed_qoi_units) = trace_qoi_region_vertices(
+        &inputs.element_regions,
+        &inputs.mesh.complex().tets,
+        vertex_count,
+        region_id,
+        work,
+    )
+    .map_err(|error| match error {
+        QoiRegionTraceError::Cancelled { .. } => cancelled(),
+        QoiRegionTraceError::UnitCountOverflow => qoi_error(
+            "cli-solve-qoi-work-overflow",
+            "the QoI region trace exceeded the representable completed-work count",
+            "reduce the admitted conduction mesh or report the platform-size defect",
+        ),
+    })?;
+    work.checkpoint(SolveEvidencePhase::QoiExtraction, None, completed_qoi_units)
+        .map_err(|_| cancelled())?;
+    let junction =
+        JunctionRegion::try_new(requirement.region.clone(), vertices).map_err(|error| {
+            qoi_error(
+                "cli-solve-qoi-region-unbound",
+                format!(
+                    "ThermalLimit region `{}` has no valid region-owned vertex trace: {error}",
+                    requirement.region
+                ),
+                "repair the declared region seed and audited volumetric mesh",
+            )
+        })?;
+    completed_qoi_units = completed_qoi_units.saturating_add(1);
+    work.checkpoint(SolveEvidencePhase::QoiExtraction, None, completed_qoi_units)
+        .map_err(|_| cancelled())?;
+
+    let conduction_receipt = state
+        .completed
+        .get(SolveStage::Conduction.ordinal() as usize)
+        .filter(|completed| completed.ordinal == SolveStage::Conduction.ordinal())
+        .map(|completed| completed.receipt)
+        .ok_or_else(|| {
+            qoi_error(
+                "cli-solve-qoi-lineage",
+                "the QoI stage has no completed conduction receipt",
+                "rerun the ordered producer prefix",
+            )
+        })?;
+
+    let query = OutputQuery::scalar_with_region(&requested[0].name, &requirement.region);
+    let severity = match requirement.severity {
+        RequirementSeverity::ReliabilityDerating => "reliability-derating",
+        RequirementSeverity::DamageLimit => "damage-limit",
+        RequirementSeverity::SafetyCritical => "safety-critical",
+    };
+    let requirement_id = format!(
+        "{{\"qoi\":{},\"class\":{},\"region\":{},\"severity\":{},\"source\":{{\"kind\":{},\"document\":{},\"version\":{},\"locator\":{}}},\"safety_factor_source\":{{\"kind\":{},\"document\":{},\"version\":{},\"locator\":{}}}}}",
+        json_string(&requirement.qoi),
+        json_string(&requirement.class),
+        json_string(&requirement.region),
+        json_string(severity),
+        json_string(requirement.source.kind.slug()),
+        json_string(&requirement.source.document),
+        json_string(&requirement.source.version),
+        json_string(&requirement.source.locator),
+        json_string(requirement.safety_factor.source.kind.slug()),
+        json_string(&requirement.safety_factor.source.document),
+        json_string(&requirement.safety_factor.source.version),
+        json_string(&requirement.safety_factor.source.locator),
+    );
+    let requirement_spec = ThermalLimitSpec::try_new(
+        requirement_id,
+        QoiSemanticId::JunctionMaximum,
+        requirement.region.clone(),
+        requirement.limit.value,
+        requirement.margin.value,
+        requirement.safety_factor.factor,
+        requirement.source.version.clone(),
+    )
+    .map_err(|error| {
+        qoi_error(
+            "cli-solve-qoi-requirement",
+            format!("the admitted ThermalLimit did not lower: {error}"),
+            "repair the sourced effective limit, margin, or safety-factor authority",
+        )
+    })?;
+
+    let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+    let ((extracted, composed), completed_qoi_units) = pool.scope(|arena| {
+        let cx = fs_exec::Cx::new(
+            work.gate,
+            arena,
+            fs_exec::StreamKey {
+                seed: spec.seeds.as_ref().map_or(0, |seeds| seeds.root),
+                kernel_id: 0x66_73_71_6f_69_6d_61_78,
+                tile: 0,
+                iteration: 0,
+            },
+            fs_exec::Budget::INFINITE,
+            fs_exec::ExecMode::Deterministic,
+        );
+        work.checkpoint(SolveEvidencePhase::QoiExtraction, None, completed_qoi_units)
+            .map_err(|_| cancelled())?;
+        let extracted = extract_registered_junction_maximum(
+            &[query],
+            &inputs.mesh,
+            &inputs.solution,
+            &junction,
+            None,
+            inputs.solution_artifact,
+            limits,
+            &cx,
+        )
+        .map_err(|error| match error {
+            fs_airflow::registered_qoi::RegisteredQoiError::Cancelled => cancelled(),
+            other => qoi_error(
+                "cli-solve-qoi-extraction",
+                format!("temperature-maximum extraction refused: {other}"),
+                "repair the solved field, declared region, or QoI resource envelope",
+            ),
+        })?;
+        let completed_after_extraction = completed_qoi_units.saturating_add(1);
+        work.checkpoint(
+            SolveEvidencePhase::QoiExtraction,
+            None,
+            completed_after_extraction,
+        )
+        .map_err(|_| cancelled())?;
+        let composed = compose_thermal_limits(&extracted.rows, &[requirement_spec], false, &cx)
+            .map_err(|error| match error {
+                fs_airflow::requirement_composition::RequirementCompositionError::Cancelled => {
+                    cancelled()
+                }
+                other => qoi_error(
+                    "cli-solve-qoi-composition",
+                    format!("thermal requirement composition refused: {other}"),
+                    "repair the exact QoI-to-requirement binding",
+                ),
+            })?;
+        let completed_after_composition = completed_after_extraction.saturating_add(1);
+        work.checkpoint(
+            SolveEvidencePhase::QoiExtraction,
+            None,
+            completed_after_composition,
+        )
+        .map_err(|_| cancelled())?;
+        Ok::<_, SolveRefusal>(((extracted, composed), completed_after_composition))
+    })?;
+    work.checkpoint(SolveEvidencePhase::QoiExtraction, None, completed_qoi_units)
+        .map_err(|_| cancelled())?;
+
+    let row = extracted.rows.first().expect("one requested row");
+    let evaluation = composed.evaluations.first().expect("one requirement");
+    if row.color != ColorRank::Estimated
+        || evaluation.witness.weakest_color != ColorRank::Estimated
+        || evaluation.outcome != ComplianceOutcome::Indeterminate
+    {
+        return Err(qoi_error(
+            "cli-solve-qoi-authority",
+            format!(
+                "the estimate-only producer unexpectedly yielded row color {:?}, verdict color {:?}, and outcome {}",
+                row.color, evaluation.witness.weakest_color, evaluation.outcome
+            ),
+            "do not promote this producer without the separately admitted evidence path",
+        ));
+    }
+    let mut terms = Vec::with_capacity(EngineeringUncertaintyKind::ALL.len());
+    for kind in EngineeringUncertaintyKind::ALL {
+        let term = row.uncertainty.term(kind);
+        let TermValue::Unknown { reason } = term.value() else {
+            return Err(qoi_error(
+                "cli-solve-qoi-budget-authority",
+                format!(
+                    "estimate-only term `{}` unexpectedly carries measured authority",
+                    kind.name()
+                ),
+                "route measured terms through the owning verified producer and bump the receipt schema",
+            ));
+        };
+        terms.push(format!(
+            "{{\"kind\":{},\"state\":\"no-data\",\"reason\":{},\"owner\":{},\"source\":{}}}",
+            json_string(kind.name()),
+            json_string(reason),
+            json_string(term.provenance().role()),
+            json_string(&term.provenance().digest().to_hex()),
+        ));
+    }
+    let nominal = canonical_f64(row.value).ok_or_else(|| {
+        qoi_error(
+            "cli-solve-qoi-nonfinite",
+            "the extracted temperature maximum is non-finite",
+            "report the lower-layer extraction defect",
+        )
+    })?;
+    let limit = canonical_f64(evaluation.effective_limit).expect("admitted finite limit");
+    let required_margin =
+        canonical_f64(evaluation.required_margin).expect("admitted finite margin");
+    let nominal_margin = canonical_f64(evaluation.achieved_margin).ok_or_else(|| {
+        qoi_error(
+            "cli-solve-qoi-nonfinite",
+            "the nominal thermal margin is non-finite",
+            "repair the effective limit and extracted temperature",
+        )
+    })?;
+    let witness = evaluation
+        .witness
+        .primary_vertex
+        .expect("junction maximum has a witness");
+    let receipt = format!(
+        "{{\"schema\":{},\"run\":{},\"stage\":\"qoi\",\"qoi\":[{{\"name\":{},\"semantic\":{},\"region\":{},\"value\":{},\"unit\":\"kelvin\",\"witness_vertex\":{},\"color\":\"estimated\",\"identity\":{}}}],\"requirements\":[{{\"id\":{},\"effective_limit_kelvin\":{},\"required_margin_kelvin\":{},\"nominal_margin_kelvin\":{},\"outcome\":\"indeterminate\",\"identity\":{}}}],\"budget\":[{{\"identity\":{},\"qoi\":{},\"unit\":{},\"terms\":[{}],\"total\":\"unknown\"}}],\"lineage\":{{\"project\":{},\"conduction_receipt\":{},\"conduction_solution\":{}}},\"composition_identity\":{},\"authority\":\"estimated-candidate\",\"no_claim\":\"all eight engineering uncertainty terms are explicit NO-DATA; this receipt makes no binary compliance, DWR, validation, measurement, package, promotion, or conjugate-exchange claim\"}}",
+        json_string(QOI_RECEIPT_SCHEMA),
+        json_string(&run.to_hex()),
+        json_string(&row.query_name),
+        json_string(row.semantic_id.as_str()),
+        json_string(&requirement.region),
+        nominal,
+        witness,
+        json_string(&row.identity_hash.to_hex()),
+        json_string(&evaluation.requirement_id),
+        limit,
+        required_margin,
+        nominal_margin,
+        json_string(&evaluation.identity_hash.to_hex()),
+        json_string(&row.uncertainty.content_id().to_hex()),
+        json_string(row.uncertainty.qoi()),
+        json_string(row.uncertainty.unit()),
+        terms.join(","),
+        json_string(&project_hash.to_hex()),
+        json_string(&conduction_receipt.to_hex()),
+        json_string(&inputs.solution_artifact.to_hex()),
+        json_string(&composed.receipt_hash.to_hex()),
+    );
+    work.charge(u64::try_from(receipt.len()).map_err(|_| {
+        invocation_work_refusal(
+            Some(run),
+            Some(SolveStage::Qoi),
+            InvocationWorkExceeded::CumulativeBytes {
+                attempted: u64::MAX,
+            },
+        )
+    })?)
+    .map_err(|error| invocation_work_refusal(Some(run), Some(SolveStage::Qoi), error))?;
+    work.checkpoint(SolveEvidencePhase::QoiExtraction, None, u64::MAX)
+        .map_err(|_| cancelled())?;
+    Ok(QoiStageProduct {
+        receipt,
+        progress: QoiProgressSummary {
+            qoi_count: extracted.rows.len(),
+            verdict: evaluation.outcome.as_str(),
+            weakest_term: Some("all-eight-no-data"),
+            budget_terms_measured: 0,
+            budget_terms_total: terms.len(),
+        },
+    })
+}
+
 #[derive(Debug)]
 struct AssignmentSurface {
     triangles: Vec<[u32; 3]>,
@@ -3601,7 +4265,7 @@ fn conduction_receipt(
     run: SolveRunId,
     work: EvidenceWork<'_>,
     resume: bool,
-) -> Result<(String, Vec<RetainedSideArtifact>), SolveRefusal> {
+) -> Result<ConductionStageProduct, SolveRefusal> {
     let stage = SolveStage::Conduction;
     let cancelled = || {
         if resume {
@@ -3859,11 +4523,21 @@ fn conduction_receipt(
             audited,
             mesh,
             solution,
+            labels,
+            region_ids,
             interface_resolution.pairs.len(),
             interface_evidence,
         ))
     })?;
-    let (audited, mesh, solution, interface_pair_count, interface_evidence) = result;
+    let (
+        audited,
+        mesh,
+        solution,
+        element_regions,
+        region_ids,
+        interface_pair_count,
+        interface_evidence,
+    ) = result;
     work.checkpoint(SolveEvidencePhase::AssignmentDerivation, None, 1)
         .map_err(|_| cancelled())?;
 
@@ -4007,7 +4681,17 @@ fn conduction_receipt(
             bytes,
         });
     }
-    Ok((receipt, artifacts))
+    Ok(ConductionStageProduct {
+        receipt,
+        artifacts,
+        qoi_inputs: QoiStageInputs {
+            mesh,
+            solution,
+            element_regions,
+            region_ids,
+            solution_artifact,
+        },
+    })
 }
 
 fn assignment_receipt(
@@ -4138,6 +4822,29 @@ fn progress_line(run: &str, stage: &str, ordinal: u32, status: &str, wall_s: f64
         json_string(run),
         json_string(stage),
         json_string(status),
+    )
+}
+
+fn qoi_progress_line(
+    run: &str,
+    ordinal: u32,
+    status: &str,
+    wall_s: f64,
+    elapsed_ms: f64,
+    summary: QoiProgressSummary,
+) -> String {
+    let weakest_term = summary
+        .weakest_term
+        .map_or_else(|| "null".to_string(), json_string);
+    format!(
+        "{{\"schema\":\"frankensim.cli.solve-progress.v1\",\"run\":{},\"stage\":\"qoi\",\"ordinal\":{ordinal},\"status\":{},\"wall_s\":{wall_s},\"elapsed_ms\":{},\"qoi_count\":{},\"verdict\":{},\"weakest_term\":{weakest_term},\"budget_terms_measured\":{},\"budget_terms_total\":{}}}",
+        json_string(run),
+        json_string(status),
+        elapsed_ms,
+        summary.qoi_count,
+        json_string(summary.verdict),
+        summary.budget_terms_measured,
+        summary.budget_terms_total,
     )
 }
 
@@ -5190,11 +5897,12 @@ fn is_supported_stage_discovery_row(row: &OpRow, run: SolveRunId) -> bool {
     let Ok(stage) = parse_stage_discovery_ir(&row.ir, run) else {
         return false;
     };
-    // Conduction is conditional on the retained project's explicit setup.
-    // Discovery cannot inspect that project yet, so admit the candidate here
-    // and let `validate_resume_candidate` re-attest the project and enforce
-    // `stage_has_declared_producer`. QoI remains unconditionally unavailable.
-    (stage.gap_dependency().is_none() || stage == SolveStage::Conduction)
+    // Conduction and the request-selective QoI are conditional on the retained
+    // project. Discovery cannot inspect that project yet, so admit their
+    // candidates here and let `validate_resume_candidate` re-attest the
+    // project and enforce `stage_has_declared_producer`. Report remains
+    // unavailable.
+    (stage.gap_dependency().is_none() || matches!(stage, SolveStage::Conduction | SolveStage::Qoi))
         && row.t_start == i64::from(stage.ordinal()) * 2
         && row.t_end == Some(i64::from(stage.ordinal()) * 2 + 1)
 }
@@ -5417,6 +6125,7 @@ fn validate_resume_candidate(
             (EdgeRole::Out, completed.receipt),
             (EdgeRole::Out, checkpoint_hash),
         ];
+        let mut validated_qoi_inputs = None;
         match stage {
             SolveStage::ImportVerify => {
                 expected_edges.push((EdgeRole::In, project_source));
@@ -5761,7 +6470,11 @@ fn validate_resume_candidate(
                     1,
                 )
                 .map_err(|_| cancelled_resume_refusal(run))?;
-                let (expected_receipt, outputs) = match rebuilt {
+                let ConductionStageProduct {
+                    receipt: expected_receipt,
+                    artifacts: outputs,
+                    qoi_inputs,
+                } = match rebuilt {
                     Ok(rebuilt) => rebuilt,
                     Err(error)
                         if matches!(
@@ -5796,7 +6509,7 @@ fn validate_resume_candidate(
                         "the retained conduction receipt is not the canonical driver receipt",
                     ));
                 }
-                for output in outputs {
+                for output in &outputs {
                     require_artifact_kind_resume(
                         ledger,
                         run,
@@ -5808,6 +6521,7 @@ fn validate_resume_candidate(
                     )?;
                     expected_edges.push((EdgeRole::Out, output.artifact));
                 }
+                validated_qoi_inputs = Some(qoi_inputs);
                 let predecessor = predecessor_state.ok_or_else(|| {
                     resume_identity(
                         "the retained conduction stage has no verified flow-network predecessor",
@@ -5815,7 +6529,89 @@ fn validate_resume_candidate(
                 })?;
                 expected_edges.push((EdgeRole::In, predecessor));
             }
-            SolveStage::Qoi => unreachable!("completed unavailable stages were refused above"),
+            SolveStage::Qoi => {
+                let receipt_stage_index = Some(index);
+                work.checkpoint(
+                    SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
+                    receipt_stage_index,
+                    0,
+                )
+                .map_err(|_| cancelled_resume_refusal(run))?;
+                let rebuilt = qoi_receipt(
+                    &project.spec,
+                    &context,
+                    &state,
+                    run,
+                    project_hash,
+                    work,
+                    true,
+                );
+                work.checkpoint(
+                    SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
+                    receipt_stage_index,
+                    1,
+                )
+                .map_err(|_| cancelled_resume_refusal(run))?;
+                let expected_receipt = match rebuilt {
+                    Ok(product) => product.receipt,
+                    Err(error)
+                        if matches!(
+                            error.code,
+                            "cli-solve-cancelled" | "cli-solve-work-envelope"
+                        ) =>
+                    {
+                        return Err(error);
+                    }
+                    Err(error) => {
+                        return Err(resume_identity(format!(
+                            "the retained QoI no longer reproduces: {}",
+                            error.what
+                        )));
+                    }
+                };
+                let receipt_matches = evidence_bytes_equal(
+                    receipt_text.as_bytes(),
+                    expected_receipt.as_bytes(),
+                    work,
+                    SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
+                    receipt_stage_index,
+                )
+                .map_err(|error| match error {
+                    EvidenceCompareError::Cancelled => cancelled_resume_refusal(run),
+                    EvidenceCompareError::WorkEnvelope(error) => {
+                        invocation_work_refusal(Some(run), Some(stage), error)
+                    }
+                })?;
+                if !receipt_matches {
+                    return Err(resume_identity(
+                        "the retained QoI receipt is not the canonical driver receipt",
+                    ));
+                }
+                let predecessor = predecessor_state.ok_or_else(|| {
+                    resume_identity(
+                        "the retained QoI stage has no verified conduction-stage predecessor",
+                    )
+                })?;
+                expected_edges.push((EdgeRole::In, predecessor));
+                for required in [SolveStage::Conduction] {
+                    let completed = state
+                        .completed
+                        .get(required.ordinal() as usize)
+                        .filter(|completed| completed.ordinal == required.ordinal())
+                        .ok_or_else(|| {
+                            resume_identity(format!(
+                                "the retained QoI stage has no verified {} receipt",
+                                required.name()
+                            ))
+                        })?;
+                    expected_edges.push((EdgeRole::In, completed.receipt));
+                }
+                let inputs = context.qoi_inputs.as_ref().ok_or_else(|| {
+                    resume_identity("the retained QoI stage has no rebuilt conduction inputs")
+                })?;
+                expected_edges.push((EdgeRole::In, inputs.solution_artifact));
+            }
+            SolveStage::Report => unreachable!("completed unavailable stages were refused above"),
         }
         require_exact_edges(
             run,
@@ -5826,6 +6622,9 @@ fn validate_resume_candidate(
             work,
             index,
         )?;
+        if let Some(inputs) = validated_qoi_inputs {
+            context.qoi_inputs = Some(inputs);
+        }
 
         if index + 1 == state.completed.len() {
             if discovery_op != completed.op_id {
@@ -9955,5 +10754,43 @@ mod tests {
             .expect_err("limit plus one is refused")
             .contains("solve label ceiling")
         );
+    }
+
+    #[test]
+    fn qoi_region_trace_polls_during_vertex_compaction() {
+        let element_count = 257;
+        let element_regions = vec![7; element_count];
+        let tets = (0..element_count)
+            .map(|element| {
+                let base = u32::try_from(element * 4).unwrap();
+                [base, base + 1, base + 2, base + 3]
+            })
+            .collect::<Vec<_>>();
+        let vertex_count = element_count * 4;
+        let cancellation_boundary =
+            u64::try_from(element_count + super::QOI_REGION_POLL_ITEMS).unwrap();
+        let gate = CancelGate::new_clock_free();
+        let plan = SolveCancellationPlan::new(
+            SolveEvidencePhase::QoiExtraction,
+            None,
+            cancellation_boundary,
+        );
+
+        let traced = super::trace_qoi_region_vertices(
+            &element_regions,
+            &tets,
+            vertex_count,
+            7,
+            EvidenceWork::unmetered(&gate, Some(&plan)),
+        );
+
+        assert_eq!(
+            traced,
+            Err(super::QoiRegionTraceError::Cancelled {
+                completed_units: cancellation_boundary,
+            })
+        );
+        assert!(plan.fired());
+        assert!(gate.is_requested());
     }
 }

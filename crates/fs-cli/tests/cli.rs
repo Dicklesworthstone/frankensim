@@ -264,16 +264,37 @@ fn g0_argument_grammar_and_json_flag_are_stable() {
 }
 
 #[test]
-fn g0_all_product_workflow_stages_are_integrated() {
-    // All 5 primary product stages (validate, import, solve, report, package)
-    // are now integrated product capabilities.
-    for verb in ["validate", "import", "solve", "report", "package"] {
-        let output = run(args(&[verb]));
-        assert_ne!(
+fn g0_report_and_package_are_typed_fail_closed_gaps() {
+    let dir = scratch("typed-stage-gaps");
+    let ledger = dir.join("fixture-ledger.db");
+    let _ = fs_ledger::Ledger::open(ledger.to_str().expect("UTF-8 fixture path"))
+        .expect("fixture ledger opens");
+    let run_id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    for (verb, owning_bead) in [
+        ("report", "frankensim-rc-root-q61wp.12"),
+        ("package", "frankensim-rc-root-q61wp.12"),
+    ] {
+        let output = run(vec![
+            "--json".to_string(),
+            verb.to_string(),
+            run_id.to_string(),
+            ledger.to_string_lossy().into_owned(),
+        ]);
+        assert_eq!(
             output.exit_code,
             exit::UNAVAILABLE,
-            "verb `{verb}` must be integrated rather than returning unavailable"
+            "{verb}: {}",
+            output.stderr
         );
+        assert!(output.stderr.contains("cli-stage-unavailable"));
+        assert!(output.stderr.contains(owning_bead));
+        assert!(output.stdout.contains("\"status\":\"unavailable\""));
+        assert!(output.stdout.contains("\"stage\":\""));
+        assert!(output.stdout.contains("\"owning_bead\":\""));
+        assert!(output.stdout.contains("\"run_id\":\"0123456789abcdef"));
+        assert!(output.stdout.contains("\"ledger_path\":"));
+        assert!(!output.stdout.contains("342.15"));
     }
 }
 

@@ -20,4 +20,5 @@ declare module "*/wasm-pkg/fs_flyer_wasm.js" {
     warp_cmd_rad: number,
   ): string;
   export function flyer_engine_digest(): string;
+  export function flyer_engine_checkpoint(): string;
 }

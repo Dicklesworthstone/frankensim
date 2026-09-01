@@ -51,6 +51,7 @@ fs-tropical = { path = "../fs-tropical" }
 fs-voi = { path = "../fs-voi" }
 fs-spectral = { path = "../fs-spectral" }
 fs-couple = { path = "../fs-couple" }
+fs-duct = { path = "../fs-duct" }
 fs-rep-neural = { path = "../fs-rep-neural" }
 fs-viz = { path = "../fs-viz" }
 fs-shapeprog = { path = "../fs-shapeprog" }

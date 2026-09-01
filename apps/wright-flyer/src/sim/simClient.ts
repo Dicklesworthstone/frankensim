@@ -26,7 +26,7 @@ export interface SimClientEvents {
   /** `stage` includes "worker" for boot/load failures of the worker
    * itself — without this surface, a dead worker silently degrades the
    * app to the scripted attract loop and nobody can tell. */
-  onRefusal(stage: "init" | "step" | "worker", refusal: RefusalEnvelope): void;
+  onRefusal(stage: "init" | "step" | "checkpoint" | "worker", refusal: RefusalEnvelope): void;
   onTerminal(info: {
     phase: string;
     tick: number;
@@ -35,6 +35,8 @@ export interface SimClientEvents {
   }): void;
   /** E5.3a: ApplyNextEligibleTickAndFlag receipt for one control. */
   onControlAck?(ack: { sequence: number; appliedTick: number; lateByTicks: number }): void;
+  /** Exact live SimLoop checkpoint bytes; caller owns persistence. */
+  onCheckpoint?(checkpoint: { bytes: Uint8Array }): void;
 }
 
 export class SimClient {
@@ -114,6 +116,9 @@ export class SimClient {
           this.push(decodeSnapshot(msg.tick, msg.payload));
           break;
         }
+        case "checkpoint":
+          events.onCheckpoint?.({ bytes: msg.bytes });
+          break;
         case "metrics":
           console.info(JSON.stringify({ suite: "wf-sim-client", stage: "metrics", ...msg }));
           break;
@@ -192,6 +197,11 @@ export class SimClient {
       nonce: this.pingNonce,
       localSentMs: performance.now(),
     } satisfies MainToWorker);
+  }
+
+  /** Request the current live SimLoop checkpoint from the worker. */
+  requestCheckpoint(): void {
+    this.worker.postMessage({ kind: "checkpoint" } satisfies MainToWorker);
   }
 
   private push(snap: SimSnapshot): void {

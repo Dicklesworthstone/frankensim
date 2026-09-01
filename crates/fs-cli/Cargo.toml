@@ -26,16 +26,10 @@ fs-io = { path = "../fs-io" }
 fs-ledger = { path = "../fs-ledger" }
 fs-matdb = { path = "../fs-matdb" }
 fs-mesh = { path = "../fs-mesh" }
-fs-package = { path = "../fs-package" }
 fs-project = { path = "../fs-project" }
 fs-qty = { path = "../fs-qty" }
 fs-rep-mesh = { path = "../fs-rep-mesh" }
 fs-session = { path = "../fs-session" }
-fs-checker = { path = "../fs-checker" }
-fs-crosswalk = { path = "../fs-crosswalk" }
-fs-ladder = { path = "../fs-ladder" }
-fs-report = { path = "../fs-report" }
-fs-uq = { path = "../fs-uq" }
 
 [dev-dependencies]
 fs-geom = { path = "../fs-geom" }

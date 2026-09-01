@@ -11,13 +11,13 @@
 #
 # THE LOAD-BEARING RULE: this script FAILS (nonzero) if it is asked to
 # reach a stage that is still a typed gap. Honest partial progress is
-# reported as partial. A green run through three of six stages must be
-# impossible to mistake for a green run through six.
+# reported as partial. A green run through six of seven stages must be
+# impossible to mistake for a green run through all seven.
 #
 # Usage:
 #   scripts/ci/solve_stage_producers_e2e.sh
 #       [--profile pr|full|recovery]
-#       [--through import-verify|assign|material-resolve|flow-network|conduction|qoi]
+#       [--through import-verify|assign|material-resolve|flow-network|conduction|qoi|report]
 #       [--case multi-region-volumetricization]
 #       [--artifact-dir PATH]
 #       [--binary PATH]
@@ -36,7 +36,7 @@ GEOMETRY="${FIXTURE_DIR}/plate.stl"
 MATERIAL_PACK="${FIXTURE_DIR}/aa6061.fsmcdpk"
 
 PROFILE="pr"
-THROUGH="conduction"
+THROUGH="qoi"
 CASE=""
 ARTIFACT_DIR=""
 BINARY="${FRANKENSIM_BIN:-}"
@@ -45,14 +45,15 @@ BINARY="${FRANKENSIM_BIN:-}"
 # SolveStage::ALL / gap_dependency() in crates/fs-cli/src/solve.rs; the
 # script cross-checks the gap owners it observes against this table, so a
 # drift here surfaces rather than silently weakening the proof.
-STAGES=(import-verify assign material-resolve flow-network conduction qoi)
+STAGES=(import-verify assign material-resolve flow-network conduction qoi report)
 declare -A GAP_OWNER=(
   [import-verify]=""
   [assign]=""
   [material-resolve]=""
   [flow-network]=""
   [conduction]=""
-  [qoi]="frankensim-s2l9v"
+  [qoi]=""
+  [report]="frankensim-rc-root-q61wp.12"
 )
 
 FAILURES=0
@@ -250,17 +251,18 @@ check "STL facet count is the expected tetrahedron (4)" test "${STL_FACETS}" = "
 
 # --------------------------------------------------------- phase 3: solve
 log phase "solve: staged producers through ${THROUGH}"
-# conduction is the first gap, so a full invocation is EXPECTED to stop
-# there with exit 5 (UNAVAILABLE) naming its owning bead. flow-network
-# EXECUTES on the way (bead frankensim-frn2i.2): fan-system lowering,
-# envelope-derived density, orifice vents/leakage, and the
-# interval-certified operating point all run inside the real binary.
+# report is the first gap, so a full invocation is EXPECTED to stop there
+# with exit 5 (UNAVAILABLE) naming its owning bead. QoI EXECUTES on the way:
+# it extracts the declared temperature maximum, composes the sourced limit,
+# and retains all eight unavailable uncertainty terms as explicit NO-DATA.
 run_cli solve 5 -- --json solve "${PROJECT}" "${LEDGER}" --materials "${MATERIAL_PACK}"
 
 check "solve stopped as unavailable"   contains "${ARTIFACT_DIR}/solve.stdout" '"status":"unavailable"'
-check "solve names the gapped stage"   contains "${ARTIFACT_DIR}/solve.stdout" '"stage":"qoi"'
-check "solve names the owning bead"    contains "${ARTIFACT_DIR}/solve.stdout" '"dependency":"frankensim-s2l9v"'
-check "gap owner matches the table"    test "${GAP_OWNER[qoi]}" = "frankensim-s2l9v"
+check "QoI receipt persisted before the report gap" \
+  grep -qF '"stage":"qoi","ordinal":5,"status":"ok"' "${ARTIFACT_DIR}/solve.stderr"
+check "solve names the gapped stage"   contains "${ARTIFACT_DIR}/solve.stdout" '"stage":"report"'
+check "solve names the owning bead"    contains "${ARTIFACT_DIR}/solve.stdout" '"dependency":"frankensim-rc-root-q61wp.12"'
+check "gap owner matches the table"    test "${GAP_OWNER[report]}" = "frankensim-rc-root-q61wp.12"
 
 # Every stage up to --through must have emitted an ok progress line.
 for stage in "${STAGES[@]}"; do
@@ -328,7 +330,7 @@ run_cli drill_dup_pack 5 -- --json solve "${PROJECT}" "${DUP_DB}" \
 check "byte-identical duplicate packs are idempotent, not a conflict" \
   not_contains "${ARTIFACT_DIR}/drill_dup_pack.stderr" 'cli-solve-card-pack-conflict'
 check "duplicate-pack run still reaches the same gap" \
-  contains "${ARTIFACT_DIR}/drill_dup_pack.stdout" '"dependency":"frankensim-s2l9v"'
+  contains "${ARTIFACT_DIR}/drill_dup_pack.stdout" '"dependency":"frankensim-rc-root-q61wp.12"'
 
 # report/package are unconditional fail-closed stages today.
 run_cli drill_report 5 -- --json report some-run-id
@@ -355,7 +357,7 @@ if [[ "${PROFILE}" == "full" || "${PROFILE}" == "recovery" ]]; then
     log phase "resume: re-attest retained bytes with no pack flags at all"
     run_cli resume 5 -- --json solve --resume "${RUN_A}" "${LEDGER}"
     check "resume reaches the same gap without re-supplying packs" \
-      contains "${ARTIFACT_DIR}/resume.stdout" '"dependency":"frankensim-s2l9v"'
+      contains "${ARTIFACT_DIR}/resume.stdout" '"dependency":"frankensim-rc-root-q61wp.12"'
   fi
 fi
 
@@ -374,9 +376,9 @@ cat > "${ARTIFACT_DIR}/summary.json" <<JSON
   "failures": ${FAILURES},
   "stages_executing": ${STAGES_EXECUTING},
   "stages_total": ${#STAGES[@]},
-  "first_gap": "qoi",
-  "first_gap_owner": "frankensim-s2l9v",
-  "no_claim": "proves the executing producer prefix and its refusal boundary only; flow-network and conduction solve declared-physics operating points, but qoi remains a typed gap, so this is NOT an end-to-end simulation result"
+  "first_gap": "report",
+  "first_gap_owner": "frankensim-rc-root-q61wp.12",
+  "no_claim": "proves the executing producer prefix and its refusal boundary only; the retained QoI verdict is Estimated and Indeterminate with eight explicit NO-DATA terms, while report and packaging remain typed gaps, so this is NOT a verified decision package"
 }
 JSON
 
@@ -387,5 +389,5 @@ if [[ "${FAILURES}" -ne 0 ]]; then
   printf 'FAILED: %d of %d checks\n' "${FAILURES}" "${CHECKS}" >&2
   exit 1
 fi
-printf 'OK: %d checks passed; %d of %d solve stages execute (first gap: qoi, bead frankensim-s2l9v)\n' \
+printf 'OK: %d checks passed; %d of %d solve stages execute (first gap: report, bead frankensim-rc-root-q61wp.12)\n' \
   "${CHECKS}" "${STAGES_EXECUTING}" "${#STAGES[@]}"

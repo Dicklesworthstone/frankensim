@@ -135,6 +135,7 @@ export type MainToWorker =
       readonly deviceWorkerMs: number;
     }
   | { readonly kind: "ping"; readonly nonce: number; readonly localSentMs: number }
+  | { readonly kind: "checkpoint" }
   | { readonly kind: "pause" }
   | { readonly kind: "resume" };
 
@@ -153,7 +154,16 @@ export type WorkerToMain =
       readonly trimVMps: number;
       readonly layoutHash: number;
     }
-  | { readonly kind: "refusal"; readonly stage: "init" | "step"; readonly refusal: RefusalEnvelope }
+  | {
+      readonly kind: "refusal";
+      readonly stage: "init" | "step" | "checkpoint";
+      readonly refusal: RefusalEnvelope;
+    }
+  | {
+      /** Exact live SimLoop checkpoint bytes, transferable to persistence. */
+      readonly kind: "checkpoint";
+      readonly bytes: Uint8Array;
+    }
   | {
       readonly kind: "terminal";
       readonly phase: PhaseWord;

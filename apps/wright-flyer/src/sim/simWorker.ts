@@ -11,6 +11,7 @@
 
 import {
   fillPayload,
+  parseCheckpointEnvelope,
   parseDigestEnvelope,
   parseInitEnvelope,
   parseStepEnvelope,
@@ -42,6 +43,7 @@ interface WasmEngine {
   ): string;
   flyer_engine_step(hasInput: boolean, leverN: number, warpRad: number): string;
   flyer_engine_digest(): string;
+  flyer_engine_checkpoint(): string;
 }
 
 let engine: WasmEngine | null = null;
@@ -195,6 +197,39 @@ async function handleInit(msg: Extract<MainToWorker, { kind: "init" }>): Promise
   pump();
 }
 
+function checkpoint(): void {
+  if (engine === null) {
+    post({
+      kind: "refusal",
+      stage: "checkpoint",
+      refusal: {
+        code: "engine-not-initialized",
+        message: "call init before checkpoint",
+        ranked_repairs: ["start a scenario before requesting its checkpoint"],
+      },
+    });
+    return;
+  }
+  const result = parseCheckpointEnvelope(engine.flyer_engine_checkpoint());
+  if (result.kind === "refusal") {
+    post({ kind: "refusal", stage: "checkpoint", refusal: result.refusal });
+    return;
+  }
+  if (result.kind === "malformed") {
+    post({
+      kind: "refusal",
+      stage: "checkpoint",
+      refusal: {
+        code: "checkpoint-envelope-malformed",
+        message: result.detail,
+        ranked_repairs: ["rebuild the wasm pkg (npm run wasm) to match the app protocol"],
+      },
+    });
+    return;
+  }
+  post({ kind: "checkpoint", bytes: result.bytes }, [result.bytes.buffer]);
+}
+
 self.addEventListener("message", (event: MessageEvent<MainToWorker>) => {
   const msg = event.data;
   switch (msg.kind) {
@@ -223,6 +258,9 @@ self.addEventListener("message", (event: MessageEvent<MainToWorker>) => {
         localSentMs: msg.localSentMs,
         remoteMs: performance.now(),
       });
+      break;
+    case "checkpoint":
+      checkpoint();
       break;
     case "pause":
       running = false;

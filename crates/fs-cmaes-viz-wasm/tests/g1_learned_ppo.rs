@@ -1,12 +1,13 @@
 //! Integration test (feature `g1-learned`): REAL PPO training of the
 //! fs-g1-train transformer policy against the REAL G1 walking rollout
-//! (Balance task, Flat challenge, 0.5 s episodes).
+//! (Walking task, Flat challenge, 0.5 s episodes).
 //!
 //! Honest gate for this milestone: the seam runs end-to-end — episodes
 //! complete on real physics, gradients flow through the transformer, the
 //! policy moves (KL > 0), deterministic learned deltas causally change owner
 //! receipts, and the shaped episode reward avoids catastrophic regression.
-//! This pins the seam and its counterfactuals, not locomotion performance.
+//! This pins the owner-coupled Walking/Flat training seam and its
+//! counterfactuals, not held-out locomotion performance.
 
 #![cfg(feature = "g1-learned")]
 
@@ -39,12 +40,14 @@ fn ppo_trains_transformer_on_real_g1_rollout() {
     let model = GaitTransformer::new(model_cfg, 1e-3, 0.9, 3e-4, &mut seed);
     // Sigma ~0.1: refine rather than swamp the composed base.
     let log_std = PolicyLogStd::new(ACT_DIMS, 1e-3, -2.3);
-    // Balance task -> the stabilizing curriculum is the right composed base.
-    let curriculum_params = fs_cmaes_viz_wasm::g1_walking::g1_stabilizing_policy_mean().to_vec();
+    // Walking/Flat is the declared short training environment. The disclosed
+    // walking curriculum is the composed owner-policy base; the zero-initialized
+    // transformer head therefore begins at exact base-policy parity.
+    let curriculum_params = fs_cmaes_viz_wasm::g1_walking::g1_walking_curriculum_mean().to_vec();
     let mut policy = TransformerG1Policy::new(model, log_std, seed, curriculum_params);
 
     let walk_cfg = G1WalkingConfig {
-        task: G1Task::Balance,
+        task: G1Task::Walking,
         challenge: G1Challenge::Flat,
         duration_s: 0.5, // 240 fixed steps at 480 Hz
         ..G1WalkingConfig::default()
@@ -103,10 +106,7 @@ fn ppo_trains_transformer_on_real_g1_rollout() {
         let (observations, actions, log_probs, values) = policy.take_collected();
         let traj = Trajectory {
             observations: observations.clone(),
-            actions: actions
-                .iter()
-                .map(|a| a.to_vec())
-                .collect(),
+            actions: actions.iter().map(|a| a.to_vec()).collect(),
             rewards: trace.rewards.clone(),
             values,
             log_probs: log_probs.clone(),

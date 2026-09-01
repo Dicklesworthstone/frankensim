@@ -56,6 +56,16 @@ fn not_initialized() -> String {
     })
 }
 
+fn checkpoint_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    encoded
+}
+
 fn phase_word(phase: Phase) -> &'static str {
     match phase {
         Phase::OnRail => "on-rail",
@@ -247,5 +257,21 @@ impl EngineSlot {
         self.sim.as_ref().map_or_else(not_initialized, |sim| {
             format!("{{\"ok\":{{\"digest\":\"{}\"}}}}", sim.digest_hex())
         })
+    }
+
+    /// Capture the exact live [`SimLoop`] state for browser transport.
+    /// The caller owns persistence; this boundary only carries the
+    /// self-authenticating checkpoint bytes without inventing an identity.
+    pub fn checkpoint(&self) -> String {
+        let Some(sim) = self.sim.as_ref() else {
+            return not_initialized();
+        };
+        match sim.save_checkpoint() {
+            Ok(bytes) => format!(
+                "{{\"ok\":{{\"checkpoint_hex\":\"{}\"}}}}",
+                checkpoint_hex(&bytes)
+            ),
+            Err(e) => refusal_envelope(&map_refusal(e)),
+        }
     }
 }

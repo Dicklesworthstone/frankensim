@@ -13,6 +13,7 @@ import { test } from "node:test";
 
 import {
   fillPayload,
+  parseCheckpointEnvelope,
   parseDigestEnvelope,
   parseInitEnvelope,
   parseStepEnvelope,
@@ -141,6 +142,21 @@ test("hostile twins refuse fail-closed (malformed, never a guess)", () => {
   assert.equal(parseDigestEnvelope(`{"ok":{"digest":"${"a".repeat(64)}"}}`), "a".repeat(64));
   const short = parseDigestEnvelope(`{"ok":{"digest":"${"a".repeat(63)}"}}`);
   assert.equal(typeof short === "string" ? "string" : short.kind, "malformed");
+});
+
+test("checkpoint envelope decodes only bounded lowercase hex bytes", () => {
+  const checkpoint = parseCheckpointEnvelope('{"ok":{"checkpoint_hex":"0001fe"}}');
+  assert.equal(checkpoint.kind, "ok");
+  if (checkpoint.kind === "ok") {
+    assert.deepEqual([...checkpoint.bytes], [0, 1, 254]);
+  }
+  assert.equal(parseCheckpointEnvelope('{"ok":{"checkpoint_hex":"0"}}').kind, "malformed");
+  assert.equal(parseCheckpointEnvelope('{"ok":{"checkpoint_hex":"00FF"}}').kind, "malformed");
+  assert.equal(parseCheckpointEnvelope('{"ok":{"checkpoint_hex":"zz"}}').kind, "malformed");
+  const refusal = parseCheckpointEnvelope(
+    '{"refusal":{"code":"checkpoint-after-terminal","message":"m","ranked_repairs":["r"]}}',
+  );
+  assert.equal(refusal.kind, "refusal");
 });
 
 // --------------------------------------------------------------------------

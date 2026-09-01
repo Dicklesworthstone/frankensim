@@ -63,6 +63,13 @@ export interface EngineMalformed {
   readonly detail: string;
 }
 
+export interface EngineCheckpointOk {
+  readonly kind: "ok";
+  readonly bytes: Uint8Array;
+}
+
+const MAX_CHECKPOINT_BYTES = 1 << 20;
+
 function malformed(detail: string): EngineMalformed {
   return { kind: "malformed", detail };
 }
@@ -236,4 +243,33 @@ export function parseDigestEnvelope(json: string): string | EngineRefusal | Engi
     return malformed("digest missing or not 64-hex");
   }
   return digest;
+}
+
+/** Parse the opaque, integrity-bearing SimLoop checkpoint transport envelope. */
+export function parseCheckpointEnvelope(
+  json: string,
+): EngineCheckpointOk | EngineRefusal | EngineMalformed {
+  const env = parseEnvelope(json);
+  if ("kind" in env) {
+    return env;
+  }
+  if (env.refusal !== undefined) {
+    const refusal = asRefusal(env.refusal);
+    return refusal ? { kind: "refusal", refusal } : malformed("refusal shape invalid");
+  }
+  const hex = (env.ok as Record<string, unknown> | undefined)?.checkpoint_hex;
+  if (
+    typeof hex !== "string" ||
+    hex.length === 0 ||
+    hex.length % 2 !== 0 ||
+    hex.length > MAX_CHECKPOINT_BYTES * 2 ||
+    !/^[0-9a-f]+$/.test(hex)
+  ) {
+    return malformed("checkpoint_hex missing, oversized, or not lowercase hex");
+  }
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < bytes.length; i += 1) {
+    bytes[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  }
+  return { kind: "ok", bytes };
 }

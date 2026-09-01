@@ -19,13 +19,20 @@
 //! input is clamped to a safe range and every fallible kernel result is
 //! folded to `NaN` / an empty vector — nothing here can trap at runtime.
 
+use std::cell::RefCell;
+
 use fs_ad::{Real, second_directional};
 use fs_cheb::{Cheb1, orr_sommerfeld};
+use fs_couple::render::{ControlDelta, ReedBoreVoice, RenderContext, RenderVoice};
+use fs_couple::thin_plate::PlateBank;
+use fs_duct::{Duct, Segment, Termination};
 use fs_fft::RealFft;
 use fs_ivl::{Interval, Sign, TaylorModel1, orient2d};
 use fs_la::{eigen::jacobi_eigh, rand_nla::rsvd};
 use fs_math::{det, eft::two_sum};
+use fs_material::gas::{GasSpec, GasState};
 use fs_rand::{StreamKey, qmc::Sobol};
+use fs_scenario::BeatingReed;
 use fs_sparse::{Coo, Csr};
 
 // ---------------------------------------------------------------------------
@@ -55,6 +62,97 @@ pub use dynamics::{ga_motor_orbit, lorenz_points, symplectic_vs_euler};
 pub use flagships::{run_frame, run_ornithoid, run_vessel};
 pub use geom::{marching_cubes, sdf_volume};
 pub use pde::{fluid_frames, gray_scott_frames, topopt_frames, wave2d_frames};
+
+/// One admitted audio-rate callback block. The renderer keeps its state in the
+/// calling browser/Apple thread and accepts one control-rate gesture between
+/// successive blocks.
+pub const INSTRUMENT_REED_BLOCK_SAMPLES: usize = 480;
+/// The fixed sample rate of the exposed reed image.
+pub const INSTRUMENT_REED_SAMPLE_RATE_HZ: u32 = 48_000;
+const INSTRUMENT_REED_MAX_PRESSURE_PA: f64 = 8_000.0;
+const INSTRUMENT_REED_FULL_SCALE_PA: f64 = 200.0;
+
+thread_local! {
+    static INSTRUMENT_REED_CONTEXT: RefCell<Option<RenderContext>> = const { RefCell::new(None) };
+}
+
+fn new_instrument_reed_context() -> Option<RenderContext> {
+    let air = GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101_325.0).ok()?;
+    let bore = Duct {
+        segments: vec![Segment::Cylinder {
+            radius: 0.0022,
+            length: 0.50,
+        }],
+    };
+    let reed = BeatingReed {
+        rest_opening_m: 4.0e-4,
+        width_m: 0.013,
+        closing_pressure_pa: 6_000.0,
+        blowing_pressure_pa: 2_800.0,
+        attack_s: 0.008,
+        mass_kg: 0.0,
+        stiffness_n_m: 0.0,
+    };
+    let voice = ReedBoreVoice::new(
+        &bore,
+        &air,
+        reed,
+        Termination::UnflangedOpen,
+        PlateBank::default(),
+        1.0,
+        INSTRUMENT_REED_SAMPLE_RATE_HZ,
+        INSTRUMENT_REED_BLOCK_SAMPLES,
+        None,
+    )
+    .ok()?;
+    Some(RenderContext::new(
+        vec![RenderVoice::ReedBore(voice)],
+        INSTRUMENT_REED_BLOCK_SAMPLES,
+    ))
+}
+
+/// Render one non-peak-normalized, mono floating-point PCM block from the
+/// existing reed-bore kernel. `blowing_pressure_pa` is the single control-rate
+/// gesture for this boundary; non-finite input refuses, while finite input is
+/// clamped to the admitted `[0, 8000] Pa` budget. A refusal returns an empty
+/// block and discards a potentially advanced context instead of publishing a
+/// partial block.
+///
+/// This is a bounded interactive image only: it does not promote the reed to
+/// `live_default` or stand in for the owner-adjudicated listening receipt.
+pub fn run_instrument_reed(blowing_pressure_pa: f64) -> Vec<f64> {
+    if !blowing_pressure_pa.is_finite() {
+        return Vec::new();
+    }
+    let pressure_pa = blowing_pressure_pa.clamp(0.0, INSTRUMENT_REED_MAX_PRESSURE_PA);
+    INSTRUMENT_REED_CONTEXT.with(|slot| {
+        let mut stored = slot.borrow_mut();
+        if stored.is_none() {
+            *stored = new_instrument_reed_context();
+        }
+        let Some(context) = stored.as_mut() else {
+            return Vec::new();
+        };
+        if context
+            .apply_controls(&[ControlDelta::SetBlowingPressure {
+                voice: 0,
+                pressure_pa,
+            }])
+            .is_err()
+        {
+            return Vec::new();
+        }
+        let mut pressure = vec![0.0; INSTRUMENT_REED_BLOCK_SAMPLES];
+        if context.block(&mut pressure).is_err() {
+            *stored = None;
+            return Vec::new();
+        }
+        pressure
+            .into_iter()
+            .map(|sample_pa| (sample_pa / INSTRUMENT_REED_FULL_SCALE_PA).clamp(-1.0, 1.0))
+            .collect()
+    })
+}
 
 /* ----------------------------------------------------------------------- */
 /*  L1 · BEDROCK — sparse linear algebra: a real 2D Poisson solve           */
@@ -978,6 +1076,11 @@ mod wasm {
     #[wasm_bindgen]
     pub fn flowcert(steps: usize, tol: f64) -> Vec<f64> {
         super::flowcert(steps, tol)
+    }
+
+    #[wasm_bindgen]
+    pub fn run_instrument_reed(blowing_pressure_pa: f64) -> Vec<f64> {
+        super::run_instrument_reed(blowing_pressure_pa)
     }
 
     /// A build stamp so the page can prove it's running the real engine.

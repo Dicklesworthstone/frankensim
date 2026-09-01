@@ -18,12 +18,12 @@ pub fn compare_path(
     ledger_override: Option<&Path>,
     mode: OutputMode,
 ) -> CommandOutput {
-    let _ = ledger_override;
     let subject = format!("{left_run}..{right_run}");
     unavailable(
         mode,
         "compare",
         &subject,
         "frankensim-extreal-program-f85xj.6.14.1",
+        ledger_override,
     )
 }

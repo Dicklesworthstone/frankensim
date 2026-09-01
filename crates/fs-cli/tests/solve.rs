@@ -12,6 +12,7 @@ use fs_cli::{
     SolveRunStatus, SolveStage, import_project_geometry, resume_solve,
     resume_solve_with_cancellation_plan, run_solve, run_solve_with_cancellation_plan,
 };
+use fs_evidence::uncertainty::EngineeringUncertaintyKind;
 use fs_exec::solver::LegacySnapshotV1Adapter;
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_io::{NamedFaceGroup, quarantine::import_mesh};
@@ -908,7 +909,7 @@ fn solve_publication_counts(ledger: &Ledger) -> SolvePublicationCounts {
 #[test]
 fn g0_run_identity_is_deterministic_and_input_sensitive() {
     assert_eq!(
-        SOLVE_DRIVER_VERSION, 7,
+        SOLVE_DRIVER_VERSION, 8,
         "authority-semantic changes must deliberately advance this identity-bearing version"
     );
 
@@ -3000,6 +3001,7 @@ fn g0_stage_order_and_gap_owners_are_pinned() {
             "flow-network",
             "conduction",
             "qoi",
+            "report",
         ],
     );
     assert_eq!(SolveStage::ImportVerify.gap_dependency(), None);
@@ -3011,6 +3013,10 @@ fn g0_stage_order_and_gap_owners_are_pinned() {
         Some("frankensim-s93ej")
     );
     assert_eq!(SolveStage::Qoi.gap_dependency(), Some("frankensim-s2l9v"));
+    assert_eq!(
+        SolveStage::Report.gap_dependency(),
+        Some("frankensim-rc-root-q61wp.12")
+    );
 }
 
 /// One-shot generator for the tracked reference project fixture
@@ -3231,29 +3237,51 @@ fn g0_flow_network_stage_retains_an_interval_certified_operating_point_receipt()
 
 /// G1 manufactured single-tet path: retained import evidence is replayed into
 /// a labeled volume, the card-backed conductivity operator receives 5 W, and
-/// the declared full-surface Robin law removes that heat. The next refusal is
-/// QoI, proving conduction itself is no longer a skeleton or typed gap when
-/// its physical inputs are declared.
+/// the declared full-surface Robin law removes that heat. The declared region
+/// maximum then executes as the sixth producer with eight explicit NO-DATA
+/// terms; report is the next typed gap.
 #[test]
 fn g1_conduction_stage_executes_and_retains_field_and_balance_evidence() {
     let bytes = tetra_stl();
-    let spec = conduction_fixture_project(7, &bytes);
+    let mut spec = conduction_fixture_project(7, &bytes);
+    spec.requirements.as_mut().unwrap()[0].safety_factor.factor = 2.0;
     let decoded = decode(&spec);
     let ledger = Ledger::open(":memory:").expect("ledger");
     import_fixture(&ledger, &spec, bytes);
 
     let (refusal, progress) = run_to_gap(&ledger, &decoded);
     assert_eq!(refusal.code, "cli-solve-stage-gap");
-    assert_eq!(refusal.stage, Some("qoi"), "conduction completed");
-    assert_eq!(refusal.dependency, Some("frankensim-s2l9v"));
+    assert_eq!(refusal.stage, Some("report"), "QoI completed");
+    assert_eq!(refusal.dependency, Some("frankensim-rc-root-q61wp.12"));
     assert!(
         progress.iter().any(|line| line.contains("conduction")),
         "the executing conduction stage reports progress"
     );
+    let qoi_progress = progress
+        .iter()
+        .find(|line| line.contains("\"stage\":\"qoi\""))
+        .expect("the persisted QoI stage reports its assessment summary");
+    for expected in [
+        "\"ordinal\":5",
+        "\"status\":\"ok\"",
+        "\"elapsed_ms\":",
+        "\"qoi_count\":1",
+        "\"verdict\":\"indeterminate\"",
+        "\"weakest_term\":\"all-eight-no-data\"",
+        "\"budget_terms_measured\":0",
+        "\"budget_terms_total\":8",
+    ] {
+        assert!(
+            qoi_progress.contains(expected),
+            "{expected}: {qoi_progress}"
+        );
+    }
+    let elapsed_ms = receipt_number_field(qoi_progress, "elapsed_ms");
+    assert!(elapsed_ms.is_finite() && elapsed_ms >= 0.0);
 
     let run = refusal.run.expect("run");
     let receipts = stage_receipt_hashes(&ledger, &run);
-    assert_eq!(receipts.len(), 5, "conduction retained the fifth receipt");
+    assert_eq!(receipts.len(), 6, "QoI retained the sixth receipt");
     let receipt =
         String::from_utf8(artifact_bytes(&ledger, &receipts[4])).expect("receipt is utf-8");
     assert_balanced_json(&receipt);
@@ -3281,18 +3309,83 @@ fn g1_conduction_stage_executes_and_retains_field_and_balance_evidence() {
     assert!(solution_text.contains("frankensim.cli.solve-conduction-solution.v1"));
     assert!(solution_text.contains("\"temperature_unit\":\"K\""));
 
+    let qoi_receipt =
+        String::from_utf8(artifact_bytes(&ledger, &receipts[5])).expect("QoI receipt is utf-8");
+    assert_balanced_json(&qoi_receipt);
+    assert!(qoi_receipt.contains("frankensim.cli.solve-qoi-candidate.v1"));
+    assert!(qoi_receipt.contains("\"stage\":\"qoi\""));
+    assert!(qoi_receipt.contains("\"name\":\"temperature-max\""));
+    assert!(qoi_receipt.contains("\"outcome\":\"indeterminate\""));
+    assert_eq!(
+        receipt_number_field(&qoi_receipt, "effective_limit_kelvin"),
+        353.15,
+        "the project limit is already effective and must not be safety-factored twice"
+    );
+    assert!(qoi_receipt.contains(&format!("\"conduction_solution\":\"{solution_hash}\"")));
+    assert_eq!(qoi_receipt.matches("\"state\":\"no-data\"").count(), 8);
+    for kind in EngineeringUncertaintyKind::ALL {
+        let needle = format!("\"kind\":\"{}\",\"state\":\"no-data\"", kind.name());
+        assert_eq!(
+            qoi_receipt.matches(&needle).count(),
+            1,
+            "the QoI receipt must retain exactly one explicit NO-DATA term for {}",
+            kind.name()
+        );
+    }
+
     let gate = CancelGate::new_clock_free();
     let mut clock = benign_clock();
     let mut resume_progress = Vec::new();
     let resumed = resume_solve(&ledger, &gate, &mut clock, &run, &mut resume_progress)
-        .expect_err("resume re-attests conduction and stops at the QoI gap");
+        .expect_err("resume re-attests QoI and stops at the report gap");
     assert_eq!(resumed.code, "cli-solve-stage-gap");
-    assert_eq!(resumed.stage, Some("qoi"));
-    assert_eq!(resumed.dependency, Some("frankensim-s2l9v"));
+    assert_eq!(resumed.stage, Some("report"));
+    assert_eq!(resumed.dependency, Some("frankensim-rc-root-q61wp.12"));
+    assert!(
+        resume_progress.is_empty(),
+        "a resume whose QoI stage is already committed emits no duplicate stage progress"
+    );
     assert_eq!(
         stage_receipt_hashes(&ledger, &run),
         receipts,
-        "resume preserves the exact five-stage prefix"
+        "resume preserves the exact six-stage prefix"
+    );
+
+    let interrupted = Ledger::open(":memory:").expect("interrupted ledger");
+    import_fixture(&interrupted, &spec, tetra_stl());
+    let (cancelled, _) = run_to_stage_prefix(&interrupted, &decoded, 5);
+    let interrupted_run = cancelled.run.expect("interrupted run");
+    assert_eq!(
+        stage_receipt_hashes(&interrupted, &interrupted_run).len(),
+        5,
+        "the cancellation checkpoint is immediately before QoI"
+    );
+    let gate = CancelGate::new_clock_free();
+    let mut clock = benign_clock();
+    let mut progress = Vec::new();
+    let after_resume = resume_solve(
+        &interrupted,
+        &gate,
+        &mut clock,
+        &interrupted_run,
+        &mut progress,
+    )
+    .expect_err("resume executes QoI then stops at report");
+    assert_eq!(after_resume.stage, Some("report"));
+    let resumed_receipts = stage_receipt_hashes(&interrupted, &interrupted_run);
+    assert_eq!(resumed_receipts.len(), 6);
+    assert_eq!(
+        progress
+            .iter()
+            .filter(|line| line.contains("\"stage\":\"qoi\""))
+            .count(),
+        1,
+        "resume from the pre-QoI checkpoint emits exactly one committed QoI summary"
+    );
+    assert_eq!(
+        artifact_bytes(&interrupted, &resumed_receipts[5]),
+        artifact_bytes(&ledger, &receipts[5]),
+        "resume before QoI reproduces the uninterrupted candidate receipt byte-for-byte"
     );
 }
 
@@ -3311,16 +3404,16 @@ fn g0_conduction_stage_executes_declared_card_backed_contact() {
     let mut clock = benign_clock();
     let mut progress = Vec::new();
     let refusal = run_solve(&ledger, &gate, &mut clock, &decoded, &cards, &mut progress)
-        .expect_err("contact solve completes and stops at the QoI gap");
+        .expect_err("contact solve completes QoI and stops at the report gap");
     assert_eq!(refusal.code, "cli-solve-stage-gap", "{}", refusal.what);
-    assert_eq!(refusal.stage, Some("qoi"));
+    assert_eq!(refusal.stage, Some("report"));
 
     let run = refusal.run.expect("run");
     let receipts = stage_receipt_hashes(&ledger, &run);
     assert_eq!(
         receipts.len(),
-        5,
-        "contact conduction retained the fifth receipt"
+        6,
+        "contact conduction and QoI retained six producer receipts"
     );
     let receipt =
         String::from_utf8(artifact_bytes(&ledger, &receipts[4])).expect("receipt is utf-8");
@@ -3353,6 +3446,12 @@ fn g0_conduction_stage_executes_declared_card_backed_contact() {
     assert!(evidence.contains("\"name\":\"cold-hot-joint\""));
     assert!(receipt_number_field(&evidence, "source_faces_indexed") > 0.0);
 
+    let qoi_receipt =
+        String::from_utf8(artifact_bytes(&ledger, &receipts[5])).expect("QoI receipt is utf-8");
+    assert_balanced_json(&qoi_receipt);
+    assert!(qoi_receipt.contains("frankensim.cli.solve-qoi-candidate.v1"));
+    assert!(qoi_receipt.contains("\"stage\":\"qoi\""));
+
     let mut resume_clock = benign_clock();
     let mut resume_progress = Vec::new();
     let resumed = resume_solve(
@@ -3362,10 +3461,14 @@ fn g0_conduction_stage_executes_declared_card_backed_contact() {
         &run,
         &mut resume_progress,
     )
-    .expect_err("resume replays contact and stops at QoI");
+    .expect_err("resume replays contact and stops at report");
     assert_eq!(resumed.code, "cli-solve-stage-gap");
-    assert_eq!(resumed.stage, Some("qoi"));
+    assert_eq!(resumed.stage, Some("report"));
     assert_eq!(stage_receipt_hashes(&ledger, &run), receipts);
+    assert!(
+        resume_progress.is_empty(),
+        "completed QoI is not re-emitted"
+    );
 }
 
 /// Declarations the flow-network stage requires but validation deliberately

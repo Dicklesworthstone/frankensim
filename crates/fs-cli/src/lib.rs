@@ -11,6 +11,8 @@ mod cards;
 mod cinematic;
 mod compare;
 mod import;
+mod package;
+mod report;
 mod solve;
 
 use std::ffi::OsString;
@@ -197,18 +199,10 @@ pub fn run(args: impl IntoIterator<Item = String>) -> CommandOutput {
             cards,
         } => solve_path(&project, &ledger, &cards, mode),
         Command::Resume { run_id, ledger } => resume_path(&run_id, &ledger, mode),
-        Command::Report { run_id, ledger: _ } => unavailable(
-            mode,
-            "report",
-            &run_id,
-            "frankensim-extreal-program-f85xj.6.9",
-        ),
-        Command::Package { run_id, ledger: _ } => unavailable(
-            mode,
-            "package",
-            &run_id,
-            "frankensim-extreal-program-f85xj.6.10",
-        ),
+        Command::Report { run_id, ledger } => report::report_path(&run_id, ledger.as_deref(), mode),
+        Command::Package { run_id, ledger } => {
+            package::package_path(&run_id, ledger.as_deref(), mode)
+        }
         Command::Run {
             project,
             ledger,
@@ -970,6 +964,7 @@ fn run_workflow_path(
         "run",
         &project_label,
         "frankensim-extreal-program-f85xj.6.9",
+        None,
     )
 }
 
@@ -1596,6 +1591,7 @@ fn unavailable(
     command: &'static str,
     subject: &str,
     dependency: &'static str,
+    ledger_path: Option<&Path>,
 ) -> CommandOutput {
     let message = format!(
         "`{command}` is reserved but cannot execute until `{dependency}` supplies its authoritative product stage"
@@ -1612,12 +1608,27 @@ fn unavailable(
     if mode == OutputMode::Json {
         let marker = "}\n";
         if let Some(at) = output.stdout.rfind(marker) {
-            output
-                .stdout
-                .insert_str(at, &format!(",\"dependency\":\"{dependency}\""));
+            let mut details = format!(
+                ",\"stage\":\"{command}\",\"dependency\":\"{dependency}\",\"owning_bead\":\"{dependency}\",\"run_id\":"
+            );
+            push_json_string(&mut details, subject);
+            if let Some(ledger_path) = ledger_path {
+                details.push_str(",\"ledger_path\":");
+                push_json_string(&mut details, &ledger_path.to_string_lossy());
+            }
+            output.stdout.insert_str(at, &details);
         }
     } else {
         let _ = writeln!(output.stdout, "dependency={dependency}");
+        let _ = writeln!(output.stdout, "owning_bead={dependency}");
+        let _ = writeln!(output.stdout, "run_id={}", escape_text(subject));
+        if let Some(ledger_path) = ledger_path {
+            let _ = writeln!(
+                output.stdout,
+                "ledger_path={}",
+                escape_text(&ledger_path.to_string_lossy())
+            );
+        }
     }
     output
 }

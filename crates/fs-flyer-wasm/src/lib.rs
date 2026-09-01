@@ -534,6 +534,15 @@ mod js {
         ENGINE.with(|e| e.borrow().digest())
     }
 
+    /// Capture the complete live SimLoop checkpoint as a typed envelope.
+    /// The browser worker decodes and transfers the exact bytes through the
+    /// existing typed-envelope boundary.
+    #[wasm_bindgen]
+    #[must_use]
+    pub fn flyer_engine_checkpoint() -> String {
+        ENGINE.with(|e| e.borrow().checkpoint())
+    }
+
     /// Determinism probe (E6.2 six-lane diagnostics; doc-hidden class):
     /// bit patterns of the det:: kernel + fma on this platform.
     #[wasm_bindgen]

@@ -66,6 +66,11 @@ fn every_documented_surface_refusal_code_executes() {
     assert!(e1.contains("\"code\":\"engine-not-initialized\""), "{e1}");
     let e2 = fresh.digest();
     assert!(e2.contains("\"code\":\"engine-not-initialized\""), "{e2}");
+    let e_checkpoint = fresh.checkpoint();
+    assert!(
+        e_checkpoint.contains("\"code\":\"engine-not-initialized\""),
+        "{e_checkpoint}"
+    );
     // mode-invalid (3 is one past the last mode word — cap AND cap+1).
     let e3 = fresh.init(1, 1.294, 11.0, 3, 0, 18.3, 40, false, false);
     assert!(e3.contains("\"code\":\"mode-invalid\""), "{e3}");
@@ -103,6 +108,35 @@ fn every_documented_surface_refusal_code_executes() {
     let e7 = ended.step(false, 0.0, 0.0);
     assert!(e7.contains("\"code\":\"run-ended\""), "{e7}");
     jlog("refusals", "\"codes\":6");
+}
+
+#[test]
+fn checkpoint_envelope_carries_live_simloop_bytes_and_refuses_after_terminal() {
+    let mut slot = EngineSlot::default();
+    let env = init_short(&mut slot, 1903, MODE_FIXED, 0);
+    assert!(env.starts_with("{\"ok\":{"), "{env}");
+    slot.step(false, 0.0, 0.0);
+    let checkpoint = slot.checkpoint();
+    let prefix = "{\"ok\":{\"checkpoint_hex\":\"";
+    assert!(checkpoint.starts_with(prefix), "{checkpoint}");
+    let hex = &checkpoint[prefix.len()..checkpoint.len() - 3];
+    assert!(!hex.is_empty() && hex.len() % 2 == 0, "{checkpoint}");
+    assert!(
+        hex.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "{checkpoint}"
+    );
+
+    let mut terminal = EngineSlot::default();
+    let (rho, wind, rail, _) = DEC17;
+    let init = terminal.init(1903, rho, wind, MODE_FIXED, 0, rail, 1, false, false);
+    assert!(init.starts_with("{\"ok\":{"), "{init}");
+    terminal.step(false, 0.0, 0.0);
+    let after_terminal = terminal.checkpoint();
+    assert!(
+        after_terminal.contains("\"code\":\"checkpoint-after-terminal\""),
+        "{after_terminal}"
+    );
+    jlog("checkpoint", &format!("\"bytes_hex\":{}", hex.len()));
 }
 
 #[test]
