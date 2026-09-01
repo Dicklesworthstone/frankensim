@@ -18,7 +18,7 @@
 
 use fs_aeroac::slot_jet_3d::{
     SlotJet3dConfig, SweepProgress, classify_rung, classify_rung_parity_filtered,
-    run_slot_jet_3d_chunked,
+    load_completed_run, run_slot_jet_3d_chunked,
 };
 use fs_lbm::d3q19::CollisionModel3;
 use std::fmt::Write as _;
@@ -259,14 +259,12 @@ fn re_sweep_parity_reclassify() {
         let ckpt = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../target-sweep-ckpt")
             .join(format!("{rate:.2}"));
-        if !ckpt.join("state.bin").exists() {
-            println!("rate {rate:.2}: no checkpoint; skipped");
-            continue;
-        }
-        let run = match run_slot_jet_3d_chunked(&cfg, &ckpt, 1) {
-            Ok(SweepProgress::Complete(run)) => *run,
-            Ok(SweepProgress::Partial { steps_done }) => {
-                println!("rate {rate:.2}: checkpoint incomplete at {steps_done} steps; skipped");
+        // Load-only: a checkpoint a live rung still owns is never
+        // stepped or rewritten by the analyser.
+        let run = match load_completed_run(&cfg, &ckpt) {
+            Ok(Some(run)) => run,
+            Ok(None) => {
+                println!("rate {rate:.2}: no terminal checkpoint; skipped");
                 continue;
             }
             Err(refusal) => {
@@ -278,15 +276,19 @@ fn re_sweep_parity_reclassify() {
         let filtered = classify_rung_parity_filtered(&run, &cfg).expect("filtered classification");
         let nyquist_bins = run.diagnostics.record_len / 2;
         let raw_edge = raw.peak_bin + 8 >= nyquist_bins;
+        // A filtered peak sitting exactly on the pipeline's low-bin
+        // guard (n'/8) means the admitted spectrum is monotone from the
+        // guard down: drift, not a tone. Recorded, not asserted.
+        let filtered_guard = filtered.peak_bin == run.diagnostics.record_len / 2 / 8;
         let _ = writeln!(
             jsonl,
-            "{{\"schema\":\"fs-aeroac.slot-jet-3d.rung-parity/v1\",\"second_order_rate\":{},\"raw_peak_at_nyquist_edge\":{raw_edge},\"raw\":{},\"filtered\":{}}}",
+            "{{\"schema\":\"fs-aeroac.slot-jet-3d.rung-parity/v1\",\"second_order_rate\":{},\"raw_peak_at_nyquist_edge\":{raw_edge},\"filtered_peak_at_guard_floor\":{filtered_guard},\"raw\":{},\"filtered\":{}}}",
             rate,
             raw.to_jsonl(),
             filtered.to_jsonl()
         );
         println!(
-            "rate {rate:.2}\tRe={:.1}\traw: bin {} of {} (edge={raw_edge}) flatness={:.3e} tonal={}\tfiltered: St={:.4} bin {} flatness={:.3e} tonal={} prominence={:.2e}",
+            "rate {rate:.2}\tRe={:.1}\traw: bin {} of {} (edge={raw_edge}) flatness={:.3e} tonal={}\tfiltered: St={:.4} bin {} (guard_floor={filtered_guard}) flatness={:.3e} tonal={} prominence={:.2e}",
             raw.reynolds,
             raw.peak_bin,
             nyquist_bins,

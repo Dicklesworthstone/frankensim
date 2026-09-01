@@ -1066,6 +1066,39 @@ fn write_checkpoint(
     Ok(())
 }
 
+/// Read a rung's retained TERMINAL checkpoint back as its completed
+/// run without stepping the lattice or writing anything: the post-hoc
+/// analysis path. Returns `Ok(None)` when the checkpoint is absent or
+/// not yet terminal (a live sweep may own it), so an analyser can never
+/// advance or rewrite a run in flight.
+///
+/// # Errors
+/// Config validation and checkpoint decode/fingerprint refusals.
+pub fn load_completed_run(
+    cfg: &SlotJet3dConfig,
+    checkpoint_dir: &std::path::Path,
+) -> Result<Option<SlotJet3dRun>, AeroacError> {
+    validate_config(cfg)?;
+    let ckpt_path = checkpoint_dir.join("state.bin");
+    if !ckpt_path.exists() {
+        return Ok(None);
+    }
+    let (rig, state) = load_checkpoint(cfg, &ckpt_path)?;
+    let total_settle = u64::try_from(cfg.steps_settle).unwrap_or(u64::MAX);
+    let total_record = u64::try_from(cfg.steps_record).unwrap_or(u64::MAX);
+    if state.settle_done < total_settle || state.record_done < total_record {
+        return Ok(None);
+    }
+    let (mach_max, flux_plate, flux_fringe) = rig.plane_diagnostics();
+    Ok(Some(finish_run(
+        cfg,
+        state.force_series,
+        mach_max,
+        flux_plate,
+        flux_fringe,
+    )))
+}
+
 /// Run the sweep under an explicit per-invocation step budget,
 /// checkpointing atomically so repeated invocations chain into one
 /// bit-identical execution (the recorded checkpoint-between-rungs

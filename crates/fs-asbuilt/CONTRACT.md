@@ -48,7 +48,9 @@ as correlated cross-QoI geometry terms.
 - `as_built_diff(&Registration, design, scanned, design_tolerance,
   measurement_noise, calibration_candidate, &fs_exec::Cx<'_>) ->
   Result<AsBuiltDiff, RegError>` — the
-  per-point δ after registration; `within_tolerance`, `above_noise_floor`, and
+  per-point δ after registration; the legacy advisory `within_tolerance` and
+  `above_noise_floor` screens, plus `SampledConformance::{Pass, Fail,
+  Indeterminate}` for the exact supplied correspondences, and
   a `Color::Estimated` whose domain-separated BLAKE3 identity binds every
   scientific function input plus the documented execution subset below.
   `proposed_regime` carries exact singleton residual/noise/tolerance run
@@ -276,7 +278,7 @@ as correlated cross-QoI geometry terms.
   child; scientific refusals are latched into the parent receipt. Unused
   capacity returns only when the child is consumed by `finish`, so sibling
   stages cannot mint fresh authority through this crate.
-- The `asbuilt-diff-v5` identity binds execution mode, every field of the
+- The `asbuilt-diff-v6` identity binds execution mode, every field of the
   ambient `fs_exec::Budget`, work-plan v2 and exact `3n` shape, poll-policy v2
   and its 256-point/256-byte strides, plus all scientific and provenance inputs.
   `StreamKey` is intentionally not part of this identity. Registration has no
@@ -618,7 +620,11 @@ eight-term-budget e2e lane logging the correlation structure.
   machinery is the geometry layer's.
 - `well_posed`, `within_tolerance`, and `above_noise_floor` are advisory
   residual/dispersion screens, not pointwise uncertainty bounds, statistical
-  significance tests, or tolerance certificates.
+  significance tests, or tolerance certificates. `SampledConformance` is
+  explicit and narrower: an exact zero-uncertainty strict margin can pass only
+  for the supplied correspondences; an observed excess fails; nonzero
+  uncertainty and a boundary comparison remain Indeterminate. None of those
+  cases is a whole-part claim without separate retained coverage evidence.
 - The calibrated module provides evidence-bearing tri-state bounds, but the
   legacy boolean API remains for compatibility until downstream consumers
   migrate. Those booleans are not projections of the calibrated bounds and
