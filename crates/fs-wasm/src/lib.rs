@@ -29,8 +29,8 @@ use fs_duct::{Duct, Segment, Termination};
 use fs_fft::RealFft;
 use fs_ivl::{Interval, Sign, TaylorModel1, orient2d};
 use fs_la::{eigen::jacobi_eigh, rand_nla::rsvd};
-use fs_math::{det, eft::two_sum};
 use fs_material::gas::{GasSpec, GasState};
+use fs_math::{det, eft::two_sum};
 use fs_rand::{StreamKey, qmc::Sobol};
 use fs_scenario::BeatingReed;
 use fs_sparse::{Coo, Csr};
@@ -71,6 +71,7 @@ pub const INSTRUMENT_REED_BLOCK_SAMPLES: usize = 480;
 pub const INSTRUMENT_REED_SAMPLE_RATE_HZ: u32 = 48_000;
 const INSTRUMENT_REED_MAX_PRESSURE_PA: f64 = 8_000.0;
 const INSTRUMENT_REED_FULL_SCALE_PA: f64 = 200.0;
+const INSTRUMENT_REED_LINE_SAMPLES: usize = 4_800;
 
 thread_local! {
     static INSTRUMENT_REED_CONTEXT: RefCell<Option<RenderContext>> = const { RefCell::new(None) };
@@ -101,7 +102,7 @@ fn new_instrument_reed_context() -> Option<RenderContext> {
         PlateBank::default(),
         1.0,
         INSTRUMENT_REED_SAMPLE_RATE_HZ,
-        INSTRUMENT_REED_BLOCK_SAMPLES,
+        INSTRUMENT_REED_LINE_SAMPLES,
         None,
     )
     .ok()?;
@@ -828,7 +829,7 @@ pub fn compensated_sum(count_in: usize, log10_big_in: i32) -> Vec<f64> {
 #[cfg(test)]
 mod tests {
     use super::dynamics::push_motor_image;
-    use super::{ga_motor_orbit, taylor_bound};
+    use super::{INSTRUMENT_REED_BLOCK_SAMPLES, ga_motor_orbit, run_instrument_reed, taylor_bound};
     use fs_ga::{Motor, Pga, Point};
 
     #[test]
@@ -836,6 +837,18 @@ mod tests {
         assert!(taylor_bound(f64::NAN, 1.0, 5).is_empty());
         assert!(taylor_bound(0.0, f64::INFINITY, 5).is_empty());
         assert_eq!(taylor_bound(0.0, 0.25, 5).len(), 7);
+    }
+
+    #[test]
+    fn reed_block_refuses_non_finite_gestures_and_stays_pcm_bounded() {
+        assert!(run_instrument_reed(f64::NAN).is_empty());
+        let block = run_instrument_reed(2_800.0);
+        assert_eq!(block.len(), INSTRUMENT_REED_BLOCK_SAMPLES);
+        assert!(
+            block
+                .iter()
+                .all(|sample| sample.is_finite() && sample.abs() <= 1.0)
+        );
     }
 
     /// A refused motor sandwich must serialize as `NaN`, never as the

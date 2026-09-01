@@ -218,7 +218,10 @@ fn run(id: u32, quality: f64, seed: u32) -> Option<Vec<f64>> {
         40 => campaign_packet(id, fs_wasm::run_ornithoid(seed)),
         41 => campaign_packet(id, fs_wasm::run_vessel(650)),
         42 => campaign_packet(id, fs_wasm::run_frame(seed)),
-        43 => signal_packet(id, fs_wasm::run_instrument_reed(2_800.0 + quality * 4_000.0)),
+        43 => signal_packet(
+            id,
+            fs_wasm::run_instrument_reed(2_800.0 + quality * 4_000.0),
+        ),
         _ => return None,
     };
     Some(result)
