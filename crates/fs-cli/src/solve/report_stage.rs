@@ -750,7 +750,17 @@ pub(crate) fn load_completed_run(
         state,
         last_expected_edges,
         ..
-    } = load_latest_state(ledger, run, work)?;
+    } = {
+        let t_state = std::time::Instant::now();
+        let loaded = load_latest_state(ledger, run, work)?;
+        if std::env::var_os("FS_CLI_TRACE_EXPORT").is_some() {
+            eprintln!(
+                "TRACE export: load_latest_state {:.3}s",
+                t_state.elapsed().as_secs_f64()
+            );
+        }
+        loaded
+    };
     if state.completed.len() < SolveStage::ALL.len() {
         let next =
             SolveStage::from_ordinal(u32::try_from(state.completed.len()).unwrap_or(u32::MAX))

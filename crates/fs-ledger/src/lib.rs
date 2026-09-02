@@ -3596,6 +3596,17 @@ enum ControlledOpFieldStop<B> {
     Corrupt(String),
 }
 
+/// Hashes of the six identity-bearing operation fields, in canonical order
+/// (session is optional).
+type OpFieldHashes = (
+    Option<ContentHash>,
+    ContentHash,
+    ContentHash,
+    ContentHash,
+    ContentHash,
+    ContentHash,
+);
+
 fn controlled_op_field_column(field: OpVariableField) -> (&'static str, bool) {
     match field {
         OpVariableField::Session => ("session", false),
@@ -4756,17 +4767,26 @@ impl Ledger {
     /// Engine errors or [`LedgerError::Corrupt`] when the stored envelope is
     /// malformed or exceeds its materialization bounds; absence is `Ok(None)`.
     pub fn artifact_info(&self, h: &ContentHash) -> Result<Option<ArtifactInfo>, LedgerError> {
-        if !self.artifact_envelope_is_bounded(h)? {
-            return Ok(None);
-        }
+        // ONE statement (was an envelope preflight plus a guarded select — two
+        // round trips per lookup, and a seven-stage export makes about 85 of
+        // them). The envelope columns are read verbatim; the payload columns
+        // are materialized through CASE only when the envelope is within its
+        // bounds, so an oversized `kind`/`meta` still never reaches the engine's
+        // result row, and the verdict is decided here with the same
+        // missing / corrupt / present outcomes as before.
         let rows = self
             .conn
             .query_with_params(
-                "SELECT kind, len, chunk_count, meta, created_at FROM artifacts \
-                 WHERE hash = ?1 AND typeof(kind) = 'text' \
-                 AND length(CAST(kind AS BLOB)) BETWEEN 1 AND ?2 \
-                 AND (meta IS NULL OR (typeof(meta) = 'text' \
-                      AND length(CAST(meta AS BLOB)) <= ?3))",
+                "SELECT typeof(kind), length(CAST(kind AS BLOB)), typeof(meta), \
+                 CASE WHEN meta IS NULL THEN 0 ELSE length(CAST(meta AS BLOB)) END, \
+                 CASE WHEN typeof(kind) = 'text' \
+                           AND length(CAST(kind AS BLOB)) BETWEEN 1 AND ?2 \
+                      THEN kind ELSE NULL END, \
+                 len, chunk_count, \
+                 CASE WHEN meta IS NULL THEN NULL \
+                      WHEN typeof(meta) = 'text' AND length(CAST(meta AS BLOB)) <= ?3 \
+                      THEN meta ELSE NULL END, \
+                 created_at FROM artifacts WHERE hash = ?1",
                 &[
                     blob_param(h.as_bytes()),
                     SqliteValue::Integer(int_from_usize(MAX_ARTIFACT_KIND_BYTES)),
@@ -4774,12 +4794,53 @@ impl Ledger {
                 ],
             )
             .map_err(|e| sql_err("artifact_info", &e))?;
-        let row = rows.first().ok_or_else(|| LedgerError::Corrupt {
+        let Some(row) = rows.first() else {
+            return Ok(None);
+        };
+        let envelope_detail = (|| {
+            let kind_type = match row.get(0) {
+                Some(SqliteValue::Text(value)) => value.as_str(),
+                other => {
+                    return Err(format!(
+                        "artifact kind type preflight expected TEXT, got {other:?}"
+                    ));
+                }
+            };
+            let meta_type = match row.get(2) {
+                Some(SqliteValue::Text(value)) => value.as_str(),
+                other => {
+                    return Err(format!(
+                        "artifact metadata type preflight expected TEXT, got {other:?}"
+                    ));
+                }
+            };
+            let kind_len = storage_u64(row, 1, "artifact kind byte length")?;
+            let meta_len = storage_u64(row, 3, "artifact metadata byte length")?;
+            if kind_type != "text" {
+                return Err(format!("artifact kind must be TEXT, found {kind_type}"));
+            }
+            if kind_len == 0 || kind_len > MAX_ARTIFACT_KIND_BYTES as u64 {
+                return Err(format!(
+                    "artifact kind byte length {kind_len} is outside 1..={MAX_ARTIFACT_KIND_BYTES}"
+                ));
+            }
+            if meta_type != "null" && meta_type != "text" {
+                return Err(format!(
+                    "artifact metadata must be TEXT or NULL, found {meta_type}"
+                ));
+            }
+            if meta_len > MAX_ARTIFACT_META_BYTES as u64 {
+                return Err(format!(
+                    "artifact metadata byte length {meta_len} exceeds {MAX_ARTIFACT_META_BYTES}"
+                ));
+            }
+            Ok(())
+        })();
+        envelope_detail.map_err(|detail| LedgerError::Corrupt {
             hash_hex: h.to_hex(),
-            detail: "artifact envelope disappeared or exceeded its bound after preflight"
-                .to_string(),
+            detail,
         })?;
-        let kind = match row.get(0) {
+        let kind = match row.get(4) {
             Some(SqliteValue::Text(t)) => t.as_str().to_string(),
             other => {
                 return Err(LedgerError::Sql {
@@ -4788,7 +4849,7 @@ impl Ledger {
                 });
             }
         };
-        let meta = match row.get(3) {
+        let meta = match row.get(7) {
             Some(SqliteValue::Text(t)) => Some(t.as_str().to_string()),
             Some(SqliteValue::Null) | None => None,
             other => {
@@ -4813,10 +4874,10 @@ impl Ledger {
         Ok(Some(ArtifactInfo {
             hash: *h,
             kind,
-            len: row_u64(row, 1, "artifact_info.len")?,
-            chunk_count: row_u64(row, 2, "artifact_info.chunk_count")?,
+            len: row_u64(row, 5, "artifact_info.len")?,
+            chunk_count: row_u64(row, 6, "artifact_info.chunk_count")?,
             meta,
-            created_at: row_i64(row, 4, "artifact_info.created_at")?,
+            created_at: row_i64(row, 8, "artifact_info.created_at")?,
         }))
     }
 
@@ -5746,93 +5807,43 @@ impl Ledger {
         let Some(metadata) = self.controlled_op_metadata_inner(id)? else {
             return Ok(ControlledOpRead::NotFound);
         };
-        let session = if let Some(len) = metadata.session_len {
-            match self.read_controlled_op_field(
-                id,
-                OpVariableField::Session,
-                len,
-                metadata.source_generation,
-                &mut callback,
-            )? {
+        // Small operations (the common case: a few KiB of IR, versions, budget
+        // and capability JSON) are read with ONE guarded statement when their
+        // variable fields together fit the same [`MAX_OP_FIELD_BYTES`] bound a
+        // single field may occupy, so the engine still materializes at most
+        // that many bytes per statement. Anything larger takes the per-field
+        // path below. MEASURED 2026-09-02: a seven-stage export read 17 ops at
+        // about nine statements each; this cuts each to three.
+        let total_variable_bytes = metadata
+            .session_len
+            .unwrap_or(0)
+            .saturating_add(metadata.ir_len)
+            .saturating_add(metadata.seed_len)
+            .saturating_add(metadata.versions_len)
+            .saturating_add(metadata.budget_len)
+            .saturating_add(metadata.capability_len)
+            .saturating_add(metadata.diagnostic_len.unwrap_or(0));
+        let together = if total_variable_bytes <= MAX_OP_FIELD_BYTES as u64 {
+            match self.read_controlled_op_fields_together(id, &metadata, &mut callback)? {
                 std::ops::ControlFlow::Break(reason) => {
                     return Ok(ControlledOpRead::Break(reason));
                 }
-                std::ops::ControlFlow::Continue(hash) => Some(hash),
+                std::ops::ControlFlow::Continue(hashes) => Some(hashes),
             }
         } else {
             None
         };
-        let ir = match self.read_controlled_op_field(
-            id,
-            OpVariableField::Ir,
-            metadata.ir_len,
-            metadata.source_generation,
-            &mut callback,
-        )? {
-            std::ops::ControlFlow::Break(reason) => {
-                return Ok(ControlledOpRead::Break(reason));
+        let (session, ir, seed, versions, budget, capability) = match together {
+            Some(hashes) => hashes,
+            None => {
+                match self.read_controlled_op_fields_separately(id, &metadata, &mut callback)? {
+                    std::ops::ControlFlow::Break(reason) => {
+                        return Ok(ControlledOpRead::Break(reason));
+                    }
+                    std::ops::ControlFlow::Continue(hashes) => hashes,
+                }
             }
-            std::ops::ControlFlow::Continue(hash) => hash,
         };
-        let seed = match self.read_controlled_op_field(
-            id,
-            OpVariableField::Seed,
-            metadata.seed_len,
-            metadata.source_generation,
-            &mut callback,
-        )? {
-            std::ops::ControlFlow::Break(reason) => {
-                return Ok(ControlledOpRead::Break(reason));
-            }
-            std::ops::ControlFlow::Continue(hash) => hash,
-        };
-        let versions = match self.read_controlled_op_field(
-            id,
-            OpVariableField::Versions,
-            metadata.versions_len,
-            metadata.source_generation,
-            &mut callback,
-        )? {
-            std::ops::ControlFlow::Break(reason) => {
-                return Ok(ControlledOpRead::Break(reason));
-            }
-            std::ops::ControlFlow::Continue(hash) => hash,
-        };
-        let budget = match self.read_controlled_op_field(
-            id,
-            OpVariableField::Budget,
-            metadata.budget_len,
-            metadata.source_generation,
-            &mut callback,
-        )? {
-            std::ops::ControlFlow::Break(reason) => {
-                return Ok(ControlledOpRead::Break(reason));
-            }
-            std::ops::ControlFlow::Continue(hash) => hash,
-        };
-        let capability = match self.read_controlled_op_field(
-            id,
-            OpVariableField::Capability,
-            metadata.capability_len,
-            metadata.source_generation,
-            &mut callback,
-        )? {
-            std::ops::ControlFlow::Break(reason) => {
-                return Ok(ControlledOpRead::Break(reason));
-            }
-            std::ops::ControlFlow::Continue(hash) => hash,
-        };
-        if let Some(len) = metadata.diagnostic_len {
-            if let std::ops::ControlFlow::Break(reason) = self.read_controlled_op_field(
-                id,
-                OpVariableField::Diagnostic,
-                len,
-                metadata.source_generation,
-                &mut callback,
-            )? {
-                return Ok(ControlledOpRead::Break(reason));
-            }
-        }
         let Some(current_metadata) = self.controlled_op_metadata_inner(id)? else {
             return Err(LedgerError::OpCorrupt {
                 op: id,
@@ -5863,6 +5874,247 @@ impl Ledger {
                 capability,
             },
         }))
+    }
+
+    /// The historical per-field path: each present variable field selected by
+    /// its own guarded statement.
+    fn read_controlled_op_fields_separately<B>(
+        &self,
+        id: i64,
+        metadata: &ControlledOpMetadata,
+        callback: &mut dyn FnMut(OpVariableField, u64, &[u8]) -> std::ops::ControlFlow<B>,
+    ) -> Result<std::ops::ControlFlow<B, OpFieldHashes>, LedgerError> {
+        let session = if let Some(len) = metadata.session_len {
+            match self.read_controlled_op_field(
+                id,
+                OpVariableField::Session,
+                len,
+                metadata.source_generation,
+                callback,
+            )? {
+                std::ops::ControlFlow::Break(reason) => {
+                    return Ok(std::ops::ControlFlow::Break(reason));
+                }
+                std::ops::ControlFlow::Continue(hash) => Some(hash),
+            }
+        } else {
+            None
+        };
+        let ir = match self.read_controlled_op_field(
+            id,
+            OpVariableField::Ir,
+            metadata.ir_len,
+            metadata.source_generation,
+            callback,
+        )? {
+            std::ops::ControlFlow::Break(reason) => {
+                return Ok(std::ops::ControlFlow::Break(reason));
+            }
+            std::ops::ControlFlow::Continue(hash) => hash,
+        };
+        let seed = match self.read_controlled_op_field(
+            id,
+            OpVariableField::Seed,
+            metadata.seed_len,
+            metadata.source_generation,
+            callback,
+        )? {
+            std::ops::ControlFlow::Break(reason) => {
+                return Ok(std::ops::ControlFlow::Break(reason));
+            }
+            std::ops::ControlFlow::Continue(hash) => hash,
+        };
+        let versions = match self.read_controlled_op_field(
+            id,
+            OpVariableField::Versions,
+            metadata.versions_len,
+            metadata.source_generation,
+            callback,
+        )? {
+            std::ops::ControlFlow::Break(reason) => {
+                return Ok(std::ops::ControlFlow::Break(reason));
+            }
+            std::ops::ControlFlow::Continue(hash) => hash,
+        };
+        let budget = match self.read_controlled_op_field(
+            id,
+            OpVariableField::Budget,
+            metadata.budget_len,
+            metadata.source_generation,
+            callback,
+        )? {
+            std::ops::ControlFlow::Break(reason) => {
+                return Ok(std::ops::ControlFlow::Break(reason));
+            }
+            std::ops::ControlFlow::Continue(hash) => hash,
+        };
+        let capability = match self.read_controlled_op_field(
+            id,
+            OpVariableField::Capability,
+            metadata.capability_len,
+            metadata.source_generation,
+            callback,
+        )? {
+            std::ops::ControlFlow::Break(reason) => {
+                return Ok(std::ops::ControlFlow::Break(reason));
+            }
+            std::ops::ControlFlow::Continue(hash) => hash,
+        };
+        if let Some(len) = metadata.diagnostic_len {
+            if let std::ops::ControlFlow::Break(reason) = self.read_controlled_op_field(
+                id,
+                OpVariableField::Diagnostic,
+                len,
+                metadata.source_generation,
+                callback,
+            )? {
+                return Ok(std::ops::ControlFlow::Break(reason));
+            }
+        }
+        Ok(std::ops::ControlFlow::Continue((
+            session, ir, seed, versions, budget, capability,
+        )))
+    }
+
+    /// The small-operation fast path: every present variable field in one
+    /// statement guarded by its preflighted storage type, exact byte length
+    /// and the captured source generation (any disagreement selects no row
+    /// and is `OpCorrupt`, exactly as the per-field path reports it).
+    /// Delivery, tiling and hashing are identical to the per-field path.
+    fn read_controlled_op_fields_together<B>(
+        &self,
+        id: i64,
+        metadata: &ControlledOpMetadata,
+        callback: &mut dyn FnMut(OpVariableField, u64, &[u8]) -> std::ops::ControlFlow<B>,
+    ) -> Result<std::ops::ControlFlow<B, OpFieldHashes>, LedgerError> {
+        let fields: [(OpVariableField, Option<u64>); 7] = [
+            (OpVariableField::Session, metadata.session_len),
+            (OpVariableField::Ir, Some(metadata.ir_len)),
+            (OpVariableField::Seed, Some(metadata.seed_len)),
+            (OpVariableField::Versions, Some(metadata.versions_len)),
+            (OpVariableField::Budget, Some(metadata.budget_len)),
+            (OpVariableField::Capability, Some(metadata.capability_len)),
+            (OpVariableField::Diagnostic, metadata.diagnostic_len),
+        ];
+        let mut select = String::from("SELECT ");
+        let mut guards = String::new();
+        let mut params: Vec<SqliteValue> = vec![SqliteValue::Integer(id)];
+        for (index, (field, len)) in fields.iter().enumerate() {
+            let (column, text_field) = controlled_op_field_column(*field);
+            if index > 0 {
+                select.push_str(", ");
+            }
+            select.push_str(column);
+            match len {
+                None => {
+                    guards.push_str(&format!(" AND {column} IS NULL"));
+                }
+                Some(len) => {
+                    let len_param = i64::try_from(*len).map_err(|_| LedgerError::OpCorrupt {
+                        op: id,
+                        detail: format!(
+                            "{} byte length is outside the SQLite INTEGER domain",
+                            field.as_str()
+                        ),
+                    })?;
+                    params.push(SqliteValue::Integer(len_param));
+                    let slot = params.len();
+                    if text_field {
+                        guards.push_str(&format!(
+                            " AND typeof({column}) = 'text' AND length(CAST({column} AS BLOB)) = ?{slot}"
+                        ));
+                    } else {
+                        guards.push_str(&format!(
+                            " AND typeof({column}) = 'blob' AND length({column}) = ?{slot}"
+                        ));
+                    }
+                }
+            }
+        }
+        params.push(SqliteValue::Integer(metadata.source_generation));
+        let generation_slot = params.len();
+        let sql = format!(
+            "{select} FROM ops WHERE id = ?1{guards} \
+             AND (SELECT generation FROM identity_reconcile_source_generation \
+                  WHERE singleton = 1) = ?{generation_slot} LIMIT 2"
+        );
+        let rows = self
+            .conn
+            .query_with_params(&sql, &params)
+            .map_err(|e| sql_err("controlled operation fields", &e))?;
+        if rows.len() != 1 {
+            return Err(LedgerError::OpCorrupt {
+                op: id,
+                detail: if rows.is_empty() {
+                    "operation fields disappeared or changed after bounded metadata preflight"
+                        .to_string()
+                } else {
+                    "one operation ID selected multiple field rows".to_string()
+                },
+            });
+        }
+        let row = &rows[0];
+        let mut hashes: Vec<Option<ContentHash>> = Vec::with_capacity(7);
+        for (index, (field, len)) in fields.iter().enumerate() {
+            let Some(expected_len) = len else {
+                hashes.push(None);
+                continue;
+            };
+            let expected_len =
+                usize::try_from(*expected_len).map_err(|_| LedgerError::OpCorrupt {
+                    op: id,
+                    detail: format!(
+                        "{} byte length is outside the platform address domain",
+                        field.as_str()
+                    ),
+                })?;
+            let (_, text_field) = controlled_op_field_column(*field);
+            let bytes: &[u8] = match (text_field, row.get(index)) {
+                (true, Some(SqliteValue::Text(value))) => value.as_bytes(),
+                (false, Some(SqliteValue::Blob(value))) => value.as_ref(),
+                _ => {
+                    return Err(LedgerError::OpCorrupt {
+                        op: id,
+                        detail: format!(
+                            "{} changed storage type after bounded metadata preflight",
+                            field.as_str()
+                        ),
+                    });
+                }
+            };
+            if bytes.len() != expected_len {
+                return Err(LedgerError::OpCorrupt {
+                    op: id,
+                    detail: format!(
+                        "{} changed byte length after bounded metadata preflight: expected \
+                         {expected_len}, found {}",
+                        field.as_str(),
+                        bytes.len()
+                    ),
+                });
+            }
+            let mut hasher = Blake3::new();
+            let mut offset = 0u64;
+            for tile in bytes.chunks(CONTROLLED_OP_FIELD_TILE_LEN) {
+                hasher.update(tile);
+                if let std::ops::ControlFlow::Break(reason) = callback(*field, offset, tile) {
+                    return Ok(std::ops::ControlFlow::Break(reason));
+                }
+                offset = offset.saturating_add(
+                    u64::try_from(tile.len()).expect("controlled operation tile fits u64"),
+                );
+            }
+            hashes.push(Some(hasher.finalize()));
+        }
+        let take = |index: usize| -> ContentHash { hashes[index].expect("required field hashed") };
+        Ok(std::ops::ControlFlow::Continue((
+            hashes[0],
+            take(1),
+            take(2),
+            take(3),
+            take(4),
+            take(5),
+        )))
     }
 
     /// Fetch one op row, if present. Every variable-size field is checked by

@@ -5317,6 +5317,7 @@ fn materialize_evidence_artifact(
     phase: SolveEvidencePhase,
     source_index: Option<usize>,
 ) -> Result<Option<Vec<u8>>, EvidenceReadError> {
+    let _span = TraceSpan::new("materialize_evidence_artifact");
     work.checkpoint(phase, source_index, 0)
         .map_err(|_| EvidenceReadError::Cancelled)?;
     let mut bytes = Vec::new();
@@ -5379,6 +5380,7 @@ fn verify_evidence_artifact(
     phase: SolveEvidencePhase,
     source_index: Option<usize>,
 ) -> Result<Option<u64>, EvidenceReadError> {
+    let _span = TraceSpan::new("verify_evidence_artifact");
     work.checkpoint(phase, source_index, 0)
         .map_err(|_| EvidenceReadError::Cancelled)?;
     let mut processed = 0u64;
@@ -5669,6 +5671,7 @@ fn read_visible_op_page(
     work: EvidenceWork<'_>,
     page_index: usize,
 ) -> Result<VisibleOpPage, VisibleOpScanError> {
+    let _span = TraceSpan::new("read_visible_op_page");
     let phase = SolveEvidencePhase::VisibleOpPage;
     let plan_index = Some(page_index);
     work.checkpoint(phase, plan_index, 0)
@@ -5757,6 +5760,7 @@ fn read_artifact_info_controlled(
     work: EvidenceWork<'_>,
     descriptor_index: usize,
 ) -> Result<Option<ArtifactInfo>, EvidenceReadError> {
+    let _span = TraceSpan::new("read_artifact_info_controlled");
     let phase = SolveEvidencePhase::ArtifactDescriptorRead;
     let plan_index = Some(descriptor_index);
     work.checkpoint(phase, plan_index, 0)
@@ -5796,6 +5800,7 @@ fn read_candidate_op(
     work: EvidenceWork<'_>,
     candidate_index: usize,
 ) -> Result<Option<ControlledCandidateOp>, CandidateOpReadError> {
+    let _span = TraceSpan::new("read_candidate_op");
     let phase = SolveEvidencePhase::CandidateOpRowRead;
     let plan_index = Some(candidate_index);
     work.checkpoint(phase, plan_index, 0)
@@ -6107,6 +6112,47 @@ fn find_import_summary(
 /// grants no authority. Resume eligibility comes exclusively from
 /// [`validate_resume_candidate`], which re-attests the complete canonical
 /// operation and checkpoint chain before a governor is opened.
+thread_local! {
+    /// Export-trace accumulators: helper name → (calls, seconds). Populated only
+    /// when `FS_CLI_TRACE_EXPORT` is set; dumped by `dump_trace_spans`.
+    static TRACE_SPANS: std::cell::RefCell<BTreeMap<&'static str, (u64, f64)>> =
+        std::cell::RefCell::new(BTreeMap::new());
+}
+
+struct TraceSpan {
+    name: &'static str,
+    start: Option<std::time::Instant>,
+}
+
+impl TraceSpan {
+    fn new(name: &'static str) -> Self {
+        let start = std::env::var_os("FS_CLI_TRACE_EXPORT").map(|_| std::time::Instant::now());
+        Self { name, start }
+    }
+}
+
+impl Drop for TraceSpan {
+    fn drop(&mut self) {
+        if let Some(start) = self.start {
+            let secs = start.elapsed().as_secs_f64();
+            TRACE_SPANS.with(|spans| {
+                let mut spans = spans.borrow_mut();
+                let entry = spans.entry(self.name).or_insert((0, 0.0));
+                entry.0 += 1;
+                entry.1 += secs;
+            });
+        }
+    }
+}
+
+fn dump_trace_spans() {
+    TRACE_SPANS.with(|spans| {
+        for (name, (calls, secs)) in spans.borrow().iter() {
+            eprintln!("TRACE span {name}: {calls} calls, {secs:.3}s");
+        }
+    });
+}
+
 fn load_latest_state(
     ledger: &Ledger,
     run: SolveRunId,
@@ -6119,6 +6165,9 @@ fn load_latest_state(
     let mut best: Option<VerifiedResume> = None;
     let mut best_is_ambiguous = false;
     let mut import_cache = None;
+    let mut candidates: Vec<(SolveDriverState, ContentHash, i64)> = Vec::new();
+    let trace_export = std::env::var_os("FS_CLI_TRACE_EXPORT").is_some();
+    let t_scan = std::time::Instant::now();
     // Ops that belong to this run but were not admissible, by reason, so a
     // run retained under another driver or receipt schema is reported as
     // incompatible rather than nonexistent.
@@ -6237,34 +6286,12 @@ fn load_latest_state(
                 saw_state = true;
                 let state = decode_driver_state(ledger, run, edge.artifact, work)?;
                 validate_state_shape(&state, run)?;
-                if best
-                    .as_ref()
-                    .is_some_and(|existing| existing.state.completed.len() > state.completed.len())
-                {
-                    continue;
-                }
-                let verified = validate_resume_candidate(
-                    ledger,
-                    run,
-                    state,
-                    edge.artifact,
-                    id,
-                    work,
-                    &mut import_cache,
-                )?;
-                match best.as_ref() {
-                    Some(existing)
-                        if existing.state.completed.len() == verified.state.completed.len() =>
-                    {
-                        best_is_ambiguous = true;
-                    }
-                    Some(existing)
-                        if existing.state.completed.len() > verified.state.completed.len() => {}
-                    _ => {
-                        best = Some(verified);
-                        best_is_ambiguous = false;
-                    }
-                }
+                // Collect now, validate later: every retained state of the run
+                // is a candidate, but validating each one re-reads and re-hashes
+                // its whole prefix (bridge plan B8a measured 60-130 s exports on
+                // a 7-stage ledger from exactly this). The longest prefix is
+                // validated first below; shorter ones only if it fails.
+                candidates.push((state, edge.artifact, id));
             }
             if !saw_state {
                 *rejections
@@ -6286,6 +6313,58 @@ fn load_latest_state(
                 cursor = Some(next);
             }
             None => break,
+        }
+    }
+    if trace_export {
+        eprintln!(
+            "TRACE export: op scan {:.3}s ({visible_ids} ops, {} candidates)",
+            t_scan.elapsed().as_secs_f64(),
+            candidates.len()
+        );
+    }
+    // Longest prefix first (ties in op order so the ambiguity refusal is
+    // deterministic); stop as soon as a strictly shorter prefix would follow
+    // an accepted one. Validation errors still refuse, as before.
+    candidates.sort_by(|left, right| {
+        right
+            .0
+            .completed
+            .len()
+            .cmp(&left.0.completed.len())
+            .then_with(|| left.2.cmp(&right.2))
+    });
+    for (state, state_artifact, discovery_op) in candidates {
+        if let Some(existing) = best.as_ref()
+            && existing.state.completed.len() > state.completed.len()
+        {
+            break;
+        }
+        let t_validate = std::time::Instant::now();
+        let prefix_len = state.completed.len();
+        let verified = validate_resume_candidate(
+            ledger,
+            run,
+            state,
+            state_artifact,
+            discovery_op,
+            work,
+            &mut import_cache,
+        )?;
+        if trace_export {
+            eprintln!(
+                "TRACE export: validate prefix {prefix_len} {:.3}s",
+                t_validate.elapsed().as_secs_f64()
+            );
+        }
+        match best.as_ref() {
+            Some(existing) if existing.state.completed.len() == verified.state.completed.len() => {
+                best_is_ambiguous = true;
+            }
+            Some(_) => {}
+            None => {
+                best = Some(verified);
+                best_is_ambiguous = false;
+            }
         }
     }
     let best = best.ok_or_else(|| {
@@ -6324,6 +6403,9 @@ fn load_latest_state(
         )));
     }
     drop(import_cache);
+    if trace_export {
+        dump_trace_spans();
+    }
     Ok(best)
 }
 
@@ -6417,6 +6499,7 @@ fn validate_resume_candidate(
     work: EvidenceWork<'_>,
     import_cache: &mut Option<Rc<ResumeImportCache>>,
 ) -> Result<VerifiedResume, SolveRefusal> {
+    let _span = TraceSpan::new("validate_resume_candidate");
     validate_state_shape(&state, run)?;
     let first = state
         .completed
@@ -7333,6 +7416,7 @@ fn validate_stage_row(
     work: EvidenceWork<'_>,
     candidate_index: usize,
 ) -> Result<(), SolveRefusal> {
+    let _span = TraceSpan::new("validate_stage_row");
     let StageRowExpectation {
         stage,
         run,
@@ -7429,6 +7513,7 @@ fn resume_edges(
     work: EvidenceWork<'_>,
     candidate_index: usize,
 ) -> Result<Vec<OpArtifactEdge>, SolveRefusal> {
+    let _span = TraceSpan::new("resume_edges");
     let edges =
         read_op_edges_controlled(ledger, op, work, candidate_index).map_err(
             |error| match error {
@@ -7458,6 +7543,7 @@ fn require_stage_edge_seal(
     work: EvidenceWork<'_>,
     candidate_index: usize,
 ) -> Result<(), SolveRefusal> {
+    let _span = TraceSpan::new("require_stage_edge_seal");
     let phase = SolveEvidencePhase::EdgeSealRead;
     let plan_index = Some(candidate_index);
     work.checkpoint(phase, plan_index, 0)
@@ -7783,6 +7869,7 @@ fn decode_driver_state(
     artifact: ContentHash,
     work: EvidenceWork<'_>,
 ) -> Result<SolveDriverState, SolveRefusal> {
+    let _span = TraceSpan::new("decode_driver_state");
     let bytes = materialize_evidence_artifact(
         ledger,
         work,
@@ -8948,6 +9035,7 @@ fn read_parsed_import_artifact(
     source_index: usize,
     phase: SolveEvidencePhase,
 ) -> Result<Vec<u8>, ImportSummaryError> {
+    let _span = TraceSpan::new("read_parsed_import_artifact");
     let info =
         read_artifact_info_controlled(ledger, &artifact, work, source_index)?.ok_or_else(|| {
             ImportSummaryError::Invalid(format!(

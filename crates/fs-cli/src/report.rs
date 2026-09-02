@@ -398,6 +398,8 @@ pub(crate) fn load_export(
             "pass a UTF-8 ledger path",
         ));
     };
+    let trace = std::env::var_os("FS_CLI_TRACE_EXPORT").is_some();
+    let t_open = std::time::Instant::now();
     let opened = Ledger::open(path_str).map_err(|error| {
         refuse(
             mode,
@@ -409,8 +411,21 @@ pub(crate) fn load_export(
             "pass the ledger the solve wrote into",
         )
     })?;
+    if trace {
+        eprintln!(
+            "TRACE export: ledger open {:.3}s",
+            t_open.elapsed().as_secs_f64()
+        );
+    }
+    let t_load = std::time::Instant::now();
     let export = load_completed_run(&opened, run_id)
         .map_err(|solve_refusal| refuse_solve(mode, command, run_id, &solve_refusal))?;
+    if trace {
+        eprintln!(
+            "TRACE export: load_completed_run {:.3}s",
+            t_load.elapsed().as_secs_f64()
+        );
+    }
     let receipt = JsonValue::parse(&export.report_receipt).map_err(|error| {
         refuse(
             mode,

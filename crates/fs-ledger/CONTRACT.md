@@ -162,7 +162,11 @@ validation.
   provenance is a consumer claim that the ledger cannot infer from historic
   edges alone. Consumers may atomically adopt missing seals only after
   revalidating their complete bounded historic lineage; conflicting seals are
-  immutable and must fail closed.
+  immutable and must fail closed. Small operations whose variable fields total at most
+  `MAX_OP_FIELD_BYTES` are read with ONE guarded statement (the engine still
+  materializes at most that many bytes per statement); larger ones keep the
+  per-field statements. `artifact_info` is one statement with CASE-guarded
+  payload materialization (2026-09-02, export cost).
 - Streams: `record_metric` (finite REAL only), `append_event` /
   `append_events` (full-batch kind/payload prevalidation followed by bounded
   1,000-row SQL statements; atomic when it owns the transaction, while a
