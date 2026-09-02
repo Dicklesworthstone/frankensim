@@ -4640,3 +4640,45 @@ fn g1_ladder_fidelity_refines_three_rungs_and_measures_the_discretization_term()
         );
     }
 }
+
+/// Replay falsifier for the ladder path (bead q61wp.14 item 5, extended to
+/// B2): two fresh runs of the ladder fidelity must retain byte-identical
+/// conduction and QoI receipts — the Richardson step's logarithm and power
+/// go through `fs_math::det`, so a platform libm cannot leak into a receipt.
+#[test]
+fn g1_ladder_replay_reproduces_the_conduction_and_qoi_receipts_bitwise() {
+    let run_once = || {
+        let bytes = tetra_stl();
+        let mut spec = conduction_fixture_project(7, &bytes);
+        spec.solver.as_mut().expect("fixture solver").fidelity = "ladder".to_string();
+        let decoded = decode(&spec);
+        let ledger = Ledger::open(":memory:").expect("ledger");
+        import_fixture(&ledger, &spec, bytes);
+        let (outcome, _) = run_to_completion(&ledger, &decoded);
+        assert!(matches!(outcome.status, fs_cli::SolveRunStatus::Completed));
+        let receipts = stage_receipt_hashes(&ledger, &outcome.run);
+        (
+            outcome.run.clone(),
+            receipts.clone(),
+            artifact_bytes(&ledger, &receipts[4]),
+            artifact_bytes(&ledger, &receipts[5]),
+        )
+    };
+    let first = run_once();
+    let second = run_once();
+    assert_eq!(first.0, second.0, "same project, same run id");
+    assert_eq!(first.1, second.1, "every stage receipt hash reproduces");
+    assert_eq!(
+        first.2, second.2,
+        "conduction receipt bytes (ladder rows, Richardson) reproduce"
+    );
+    assert_eq!(
+        first.3, second.3,
+        "QoI receipt bytes (interval term) reproduce"
+    );
+    let conduction = String::from_utf8(first.2).expect("utf-8");
+    assert!(
+        conduction.contains("\"ladder\":{\"rungs\":[{\"rung\":0,"),
+        "{conduction}"
+    );
+}

@@ -12253,4 +12253,41 @@ mod tests {
         // Exactly the floor is admitted (the floor is a strict lower bound).
         assert!(mesh_quality_refusal(&census(0, CONDUCTION_MIN_DIHEDRAL_DEG, 0)).is_none());
     }
+
+    /// Falsifier for the sealed-evidence export proof (B8a): the retained
+    /// receipt bytes must re-hash to the hash the sealed driver state
+    /// recorded; one changed byte after sealing refuses with the
+    /// resume-identity code. Without this check an export would happily
+    /// project a receipt somebody rewrote in place.
+    #[test]
+    fn sealed_receipt_proof_rehashes_the_retained_bytes() {
+        let gate = CancelGate::new_clock_free();
+        let invocation = super::InvocationWorkLedger::default();
+        let work = super::EvidenceWork::new(&gate, None, &invocation);
+        let run = super::SolveRunId::parse_hex(
+            "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        )
+        .expect("64-hex run id");
+        let text = "{\"schema\":\"frankensim.cli.solve-conduction-receipt.v6\",\"value\":1}";
+        let recorded = hash_bytes(text.as_bytes());
+        super::require_sealed_receipt(run, super::SolveStage::Conduction, recorded, text, work, 4)
+            .expect("the sealed bytes prove themselves");
+        let tampered = "{\"schema\":\"frankensim.cli.solve-conduction-receipt.v6\",\"value\":2}";
+        let refusal = super::require_sealed_receipt(
+            run,
+            super::SolveStage::Conduction,
+            recorded,
+            tampered,
+            work,
+            4,
+        )
+        .expect_err("one changed byte after sealing must refuse");
+        assert_eq!(refusal.code, "cli-solve-resume-identity");
+        assert!(refusal.what.contains("re-hashes to"), "{}", refusal.what);
+        assert!(
+            refusal.what.contains(&recorded.to_hex()),
+            "{}",
+            refusal.what
+        );
+    }
 }
