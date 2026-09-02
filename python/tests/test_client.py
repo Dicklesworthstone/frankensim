@@ -193,6 +193,26 @@ class TestFrankenSimClientIntegration(unittest.TestCase):
                 else:
                     self.assertIsInstance(term["value"], (int, float))
 
+            # Independent re-derivation (bead q61wp.14 item 1): `package`
+            # re-runs the solver-free checker on the retained bytes, and the
+            # QoI claim's colour read from the package itself must equal the
+            # colour the report shows. A report that coloured a claim more
+            # strongly than its package would fail here.
+            audit = self.client.package(outcome.run_id, ledger_path=ledger, strict=True)
+            self.assertEqual(audit.exit_code, ExitCode.SUCCESS)
+            self.assertTrue(audit.is_verified, audit)
+            self.assertEqual(audit.authority, "structural-integrity-only")
+            self.assertEqual(len(audit.merkle_root), 64)
+            self.assertGreaterEqual(audit.claim_count, 2)
+            package_path = Path(audit.package_path)
+            self.assertTrue(package_path.is_file(), audit)
+            package = json.loads(package_path.read_text())
+            prefix = f"qoi.{qois[0]['name']}."
+            claims = [c for c in package["claims"] if c["id"].startswith(prefix)]
+            self.assertEqual(len(claims), 1, [c["id"] for c in package["claims"]])
+            package_color = claims[0]["color"]["kind"].capitalize()
+            self.assertEqual(package_color, qois[0]["color"], claims[0])
+
     def test_run_without_materials_surfaces_material_resolve_refusal(self):
         if not (
             self.reference_fsim.exists()

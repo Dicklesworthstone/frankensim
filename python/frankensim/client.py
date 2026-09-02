@@ -375,12 +375,13 @@ class FrankenSimClient:
         result = PackageAuditResult(
             status=data.get("status", "unknown"),
             command="package",
-            package_path=data.get("package_path", ""),
-            content_hash=data.get("content_hash", ""),
-            receipt_count=int(data.get("receipt_count", 0)),
-            audit_verdict=data.get("audit_verdict", "unspecified"),
+            package_path=data.get("package", ""),
+            merkle_root=data.get("merkle_root", ""),
+            claim_count=int(data.get("claim_count", 0)),
+            checker=data.get("checker", "unspecified"),
             exit_code=exit_code,
             diagnostics=diagnostics,
+            authority=data.get("authority", ""),
         )
 
         if strict and exit_code != ExitCode.SUCCESS:
