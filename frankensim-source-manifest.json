@@ -2,7 +2,7 @@
   "schema": "frankensim-source-manifest-v1",
   "identity_domain": "org.frankensim.xtask.source-manifest.v1",
   "identity_version": 1,
-  "manifest_identity": "099faa79a723f575036ff36d4f5199b083da1e6f047b6ebac77a0f0f0da56ecf",
+  "manifest_identity": "c63fd16d4c3c68a8d1905c966e98bbd8d417e214ec45d789ed1f26abbfaaa2f1",
   "bead_id": "frankensim-extreal-program-f85xj.13.2",
   "authority": "canonical structural inventory over exact Git-index non-tracker bytes; release observations are intentionally unbound here",
   "release_binding": {
@@ -15,7 +15,7 @@
     "repository": "https://github.com/Dicklesworthstone/frankensim",
     "workspace_version": "0.0.1",
     "source_root_domain": "org.frankensim.xtask.source-root.v1",
-    "source_root": "9d2e0d98242b51d8f3418eeb391a9aad75c285d8e7d14573d5ac0b97342ee977",
+    "source_root": "1a6858e6e62931b26b740463b375aff2d518871bd14d04f1c9eedc4384a7c5c3",
     "tracked_file_count": 3183,
     "excluded_paths": [".beads/**", "frankensim-source-manifest.json", "frankensim-source-manifest.spdx.json"],
     "files": [
@@ -224,7 +224,7 @@
       {"path": "crates/fs-aeroac/tests/jetcard.rs", "git_mode": "100644", "bytes": 24258, "content_blake3": "22dff93b6eb2cc41d36686802288db01753c41625e6280a869f1a7444cb86b37"},
       {"path": "crates/fs-aeroac/tests/jetlab.rs", "git_mode": "100644", "bytes": 11225, "content_blake3": "61a5f0e26248840659c931f8e0c9ca78ce57e92997762ff38ea1da9fac76f417"},
       {"path": "crates/fs-aeroac/tests/noisetable.rs", "git_mode": "100644", "bytes": 6675, "content_blake3": "dd0d93a6944d3321ea039b0780bad6970acfcb5792a445d8969e9a6f01c6d50e"},
-      {"path": "crates/fs-aeroac/tests/receipts/jet-card-refusal-boundary.json", "git_mode": "100644", "bytes": 1131, "content_blake3": "62331993348977f84cf44b4cc017951fd6a6b9c5652974f5fa3cdcd8a9809386"},
+      {"path": "crates/fs-aeroac/tests/receipts/jet-card-refusal-boundary.json", "git_mode": "100644", "bytes": 1169, "content_blake3": "476284d3899e6996925bcd7d0d776cfa4603dd13affb2052ea00d2f2fc7a7ff4"},
       {"path": "crates/fs-aeroac/tests/receipts/slot-jet-3d-re-sweep-parity.jsonl", "git_mode": "100644", "bytes": 4345, "content_blake3": "80dae8b32109cb50d97dbf62aac3ad0f7f55fdd70f83dfef27d7039a414bd127"},
       {"path": "crates/fs-aeroac/tests/receipts/slot-jet-3d-re-sweep-rung1.60.jsonl", "git_mode": "100644", "bytes": 542, "content_blake3": "6b3751bc19e66d183a473fd3a9a731347385afe572d80bd4ead1c45aa2cf3116"},
       {"path": "crates/fs-aeroac/tests/receipts/slot-jet-3d-re-sweep-rung1.75.jsonl", "git_mode": "100644", "bytes": 529, "content_blake3": "08eca4ff48f2d7403a058e1bfb333d639d181feb11cc9457a39c1637db28899a"},
