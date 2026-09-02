@@ -125,7 +125,12 @@ fn parse_nodes(text: &str) -> Result<Vec<BeadNode>, String> {
         };
         let status = string_field("status")
             .ok_or_else(|| format!("{ISSUES_PATH} line {} has no string `status`", index + 1))?;
-        if status == "closed" {
+        // Live work only: closed beads are done, deferred beads are parked by
+        // an owner decision (reversible, but not on any critical path until
+        // un-deferred), tombstones are gone. MEASURED 2026-09-02: counting the
+        // 1,182 deferred beads as open put the whole critical path through
+        // parked Runner V2 work packages and made the P0 re-tier meaningless.
+        if matches!(status.as_str(), "closed" | "deferred" | "tombstone") {
             continue;
         }
         let id = string_field("id")
@@ -777,6 +782,22 @@ mod tests {
         assert_eq!(projection.open, 2);
         assert_eq!(projection.makespan_hours.to_bits(), 1.0f64.to_bits());
         assert!(!projection.slack_hours.contains_key("b"));
+    }
+
+    #[test]
+    fn g0_deferred_and_tombstone_nodes_drop_out_like_closed() {
+        let text = [
+            issue("a", "open", Some(60), &[]),
+            issue("b", "deferred", Some(6000), &[]),
+            issue("c", "open", Some(60), &[("blocks", "b")]),
+            issue("d", "tombstone", Some(6000), &[]),
+        ]
+        .join("\n");
+        let projection = project(&text).expect("projection");
+        assert_eq!(projection.open, 2);
+        assert_eq!(projection.makespan_hours.to_bits(), 1.0f64.to_bits());
+        assert!(!projection.slack_hours.contains_key("b"));
+        assert!(!projection.slack_hours.contains_key("d"));
     }
 
     #[test]

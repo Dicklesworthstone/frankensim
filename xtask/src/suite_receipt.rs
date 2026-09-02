@@ -825,7 +825,7 @@ fn render(model: &RunModel) -> String {
     let (passed, failed, ignored) = model.totals();
     let mut out = String::new();
     out.push_str("{\n");
-    writeln!(out, "  \"schema\": \"{SCHEMA}\"").ok();
+    writeln!(out, "  \"schema\": \"{SCHEMA}\",").ok();
     out.push_str("  \"bead\": \"frankensim-fluz9\",\n");
     out.push_str("  \"run\": {\n");
     writeln!(
