@@ -1028,9 +1028,9 @@ fn g0_solve_executes_the_real_prefix_then_refuses_at_the_first_gap() {
     let ops_after_import = ledger.table_count("ops").expect("count");
 
     let (refusal, progress) = run_to_gap(&ledger, &decoded);
-    assert_eq!(refusal.code, "cli-solve-stage-gap");
+    assert_eq!(refusal.code, "cli-solve-conduction-undeclared");
     assert_eq!(refusal.stage, Some("conduction"));
-    assert_eq!(refusal.dependency, Some("frankensim-s93ej"));
+    assert_eq!(refusal.dependency, None);
     assert!(refusal.recorded_op.is_some(), "the gap refusal is ledgered");
     let run = refusal.run.clone().expect("run id derived");
     assert_eq!(run, SolveRunId::derive(&decoded, &fixture_cards()).to_hex());
@@ -1195,7 +1195,7 @@ fn g4_resume_recovers_card_packs_and_reproduces_material_evidence() {
     let mut progress = Vec::new();
     let resumed = resume_solve(&ledger, &gate, &mut clock, &run, &mut progress)
         .expect_err("resume runs the remaining prefix and stops at the first gap");
-    assert_eq!(resumed.code, "cli-solve-stage-gap");
+    assert_eq!(resumed.code, "cli-solve-conduction-undeclared");
     assert_eq!(
         resumed.stage,
         Some("conduction"),
@@ -1725,9 +1725,9 @@ fn g4_cancel_between_stages_leaves_a_durable_prefix_that_resumes_identically() {
         &mut resume_progress,
     )
     .expect_err("resume still refuses at the gap");
-    assert_eq!(resumed.code, "cli-solve-stage-gap");
+    assert_eq!(resumed.code, "cli-solve-conduction-undeclared");
     assert_eq!(resumed.stage, Some("conduction"));
-    assert_eq!(resumed.dependency, Some("frankensim-s93ej"));
+    assert_eq!(resumed.dependency, None);
 
     // The interrupted-then-resumed evidence equals the uninterrupted run's:
     // identical stage receipt artifact hashes, in order.
@@ -1905,7 +1905,7 @@ fn g4_resume_reattestation_cancellation_is_zero_publication_and_retryable() {
     let mut progress = Vec::new();
     let retry = resume_solve(&ledger, &fresh_gate, &mut clock, &run, &mut progress)
         .expect_err("unchanged durable prefix still reaches the known gap");
-    assert_eq!(retry.code, "cli-solve-stage-gap");
+    assert_eq!(retry.code, "cli-solve-conduction-undeclared");
     assert_eq!(retry.stage, Some("conduction"));
     assert_eq!(
         stage_receipt_hashes(&ledger, &run).len(),
@@ -1953,7 +1953,7 @@ fn g4_resume_prepublication_cancellation_preserves_prefix_and_replay_identity() 
     let mut retry_progress = Vec::new();
     let retry = resume_solve(&ledger, &fresh_gate, &mut clock, &run, &mut retry_progress)
         .expect_err("retry completes assign then reaches the known gap");
-    assert_eq!(retry.code, "cli-solve-stage-gap");
+    assert_eq!(retry.code, "cli-solve-conduction-undeclared");
     assert_eq!(
         stage_receipt_hashes(&ledger, &run),
         reference_receipts,
@@ -2773,7 +2773,10 @@ fn g3_unrelated_wide_success_does_not_mask_an_older_valid_import() {
     ledger.commit().expect("commit wide fixture transaction");
 
     let (refusal, progress) = run_to_gap(&ledger, &decoded);
-    assert_eq!(refusal.code, "cli-solve-stage-gap", "{refusal:?}");
+    assert_eq!(
+        refusal.code, "cli-solve-conduction-undeclared",
+        "{refusal:?}"
+    );
     assert_eq!(refusal.stage, Some("conduction"));
     assert!(
         progress.iter().any(|line| line.contains("import-verify")),
@@ -2823,7 +2826,10 @@ fn g3_multi_page_unrelated_history_still_finds_the_older_valid_import() {
     append_unrelated_completed_ops(&ledger, 193);
 
     let (refusal, progress) = run_to_gap(&ledger, &decoded);
-    assert_eq!(refusal.code, "cli-solve-stage-gap", "{refusal:?}");
+    assert_eq!(
+        refusal.code, "cli-solve-conduction-undeclared",
+        "{refusal:?}"
+    );
     assert_eq!(refusal.stage, Some("conduction"));
     assert!(
         progress.iter().any(|line| line.contains("import-verify")),
@@ -2919,7 +2925,7 @@ fn g4_maximum_operation_fields_are_tiled_cancelled_and_retryable() {
     assert_eq!(solve_publication_counts(&ledger), before);
 
     let (retry, retry_progress) = run_to_gap(&ledger, &decoded);
-    assert_eq!(retry.code, "cli-solve-stage-gap", "{retry:?}");
+    assert_eq!(retry.code, "cli-solve-conduction-undeclared", "{retry:?}");
     assert!(
         retry_progress
             .iter()
@@ -2973,7 +2979,10 @@ fn g3_unrelated_same_run_wide_success_does_not_mask_a_valid_checkpoint() {
     let mut progress = Vec::new();
     let refusal = resume_solve(&ledger, &gate, &mut clock, &run_hex, &mut progress)
         .expect_err("valid checkpoint resumes to the known stage gap");
-    assert_eq!(refusal.code, "cli-solve-stage-gap", "{refusal:?}");
+    assert_eq!(
+        refusal.code, "cli-solve-conduction-undeclared",
+        "{refusal:?}"
+    );
     assert_eq!(refusal.stage, Some("conduction"));
     assert!(progress.is_empty(), "no new stage executes before the gap");
     assert_eq!(
@@ -3063,9 +3072,14 @@ fn g0_stage_order_and_gap_owners_are_pinned() {
     assert_eq!(SolveStage::FlowNetwork.gap_dependency(), None);
     assert_eq!(
         SolveStage::Conduction.gap_dependency(),
-        Some("frankensim-s93ej")
+        None,
+        "conduction executes; an undeclared section refuses with cli-solve-conduction-undeclared"
     );
-    assert_eq!(SolveStage::Qoi.gap_dependency(), Some("frankensim-s2l9v"));
+    assert_eq!(
+        SolveStage::Qoi.gap_dependency(),
+        None,
+        "qoi executes; an undeclared requirement refuses with cli-solve-qoi-undeclared"
+    );
     assert_eq!(
         SolveStage::Report.gap_dependency(),
         None,
@@ -4073,9 +4087,9 @@ fn g4_resume_reattests_the_flow_network_receipt() {
     let mut progress = Vec::new();
     let resumed = resume_solve(&ledger, &gate, &mut clock, &run, &mut progress)
         .expect_err("resume re-attests the prefix and stops at the conduction gap");
-    assert_eq!(resumed.code, "cli-solve-stage-gap");
+    assert_eq!(resumed.code, "cli-solve-conduction-undeclared");
     assert_eq!(resumed.stage, Some("conduction"));
-    assert_eq!(resumed.dependency, Some("frankensim-s93ej"));
+    assert_eq!(resumed.dependency, None);
     assert_eq!(
         stage_receipt_hashes(&ledger, &run),
         reference_receipts,

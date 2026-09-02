@@ -212,9 +212,12 @@ power, resolves declared matching-P1 contact faces against their interface
 cards, solves the heterogeneous steady problem, and retains the canonical
 stage receipt, a `solve-conduction-solution` temperature-field artifact, and
 interface-resolution evidence when contact is present.
-Projects without that optional declaration retain the `frankensim-s93ej`
-typed gap; `qoi` remains the `frankensim-s2l9v` typed gap. Gap refusals use
-`cli-solve-stage-gap` (exit 5), name their producer bead, and are retained as
+Projects without that optional declaration refuse with
+`cli-solve-conduction-undeclared` (exit 4), and a project with no
+`temperature-max` requirement refuses at `qoi` with `cli-solve-qoi-undeclared`
+(exit 4): project defects named at the stage, not stage gaps. `cli-solve-stage-gap`
+(exit 5) is reserved for a stage with no producer at all (none today); such
+refusals name their producer bead and are retained as
 terminal error operations.
 
 Card packs reach the run through the repeatable `--materials <pack>` and
@@ -343,7 +346,8 @@ Solve refusal codes: `cli-solve-project-invalid`, `cli-solve-budget`,
 `cli-solve-session`, `cli-solve-ledger`, `cli-solve-ledger-transaction`,
 `cli-solve-import-evidence`, `cli-solve-import-envelope`,
 `cli-solve-work-envelope`, `cli-solve-assignment`, `cli-solve-capability`,
-`cli-solve-stage-gap`, `cli-solve-cancelled`, `cli-solve-run-id`,
+`cli-solve-stage-gap`, `cli-solve-conduction-undeclared`, `cli-solve-qoi-undeclared`,
+`cli-solve-cancelled`, `cli-solve-run-id`,
 `cli-solve-unknown-run`, `cli-solve-resume-identity`,
 `cli-solve-resume-complete`, `cli-solve-resume-budget`,
 `cli-solve-ledger-path`, `cli-solve-ledger-open`, `cli-solve-budget-exceeded`,

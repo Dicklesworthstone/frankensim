@@ -989,10 +989,11 @@ fn g3_report_json_conflict_does_not_publish_a_partial_html_twin() {
 #[test]
 fn g0_run_stops_at_the_conduction_gap_when_the_project_declares_no_conduction() {
     // Strip the conduction declaration from the heatsink example in a scratch
-    // copy: `run` must then stop at the conduction stage as a typed gap
-    // (exit 5), name the stage, and write no report or package. This pins the
-    // negative space of the example above: conduction executes only for a
-    // declared solid problem, never by inventing one.
+    // copy: `run` must then refuse at the conduction stage by name (exit 4,
+    // `cli-solve-conduction-undeclared` — a project defect, not a stage gap),
+    // name the stage, and write no report or package. This pins the negative
+    // space of the example above: conduction executes only for a declared
+    // solid problem, never by inventing one.
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let source = std::fs::read_to_string(root.join("examples/heatsink-fan/heatsink-fan.fsim"))
         .expect("example is readable");
@@ -1062,13 +1063,13 @@ fn g0_run_stops_at_the_conduction_gap_when_the_project_declares_no_conduction() 
     ]));
     assert_eq!(
         output.exit_code,
-        exit::UNAVAILABLE,
+        exit::REFUSED,
         "stdout: {} / stderr: {}",
         output.stdout,
         output.stderr
     );
     assert!(
-        output.stderr.contains("cli-solve-stage-gap"),
+        output.stderr.contains("cli-solve-conduction-undeclared"),
         "stderr: {}",
         output.stderr
     );

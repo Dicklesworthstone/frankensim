@@ -46,9 +46,12 @@ Two deliberate teaching points hide in this minimality:
 
 ## What this example deliberately does not do
 
-It does not solve. The solve prefix runs import-verify, assign,
+It does not solve. The solve pipeline runs import-verify, assign,
 material-resolve, and the flow-network operating point; with no fan system
-declared, the airflow stage refuses rather than inventing a fan curve, and
-the conduction stage refuses as a typed gap owned by an open bead. See
-`examples/cooling-enclosure/README.md` for the full prefix walkthrough and
-`docs/QUICKSTART.md` for the end-to-end path.
+declared, the airflow stage refuses rather than inventing a fan curve. A
+project that reaches conduction without a `cooling.conduction` section
+refuses there by name (`cli-solve-conduction-undeclared`, exit 4) — the
+stage exists; the declaration does not. See
+`examples/cooling-enclosure/README.md` for the seven-stage walkthrough on the
+reference project, `examples/heatsink-fan/README.md` for a real finned body,
+and `docs/QUICKSTART.md` for the end-to-end path.

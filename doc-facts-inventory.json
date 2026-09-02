@@ -904,6 +904,7 @@
   "crates/fs-math/tests/payne_battery.rs",
   "crates/fs-math/tests/qd_canonical.rs",
   "crates/fs-mesh/tests/adaptivity.rs",
+  "crates/fs-mesh/tests/comb_prism.rs",
   "crates/fs-mesh/tests/conformance.rs",
   "crates/fs-mesh/tests/hexdom.rs",
   "crates/fs-mesh/tests/perf_lane.rs",

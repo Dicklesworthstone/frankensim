@@ -18,10 +18,10 @@
 //! and `flow-network` executes the declared Cooling lowering to an
 //! interval-certified operating point (bead frankensim-frn2i.2). `conduction`
 //! executes when the project declares an explicit conduction setup; older
-//! projects without that optional setup retain the typed frankensim-s93ej gap.
+//! projects without that optional setup refuse with `cli-solve-conduction-undeclared`.
 //! `qoi` executes the request-selective declared region temperature maximum
 //! when that exact producer is available; unsupported QoI families remain the
-//! typed frankensim-s2l9v gap. `report` projects the completed producer prefix
+//! `cli-solve-qoi-undeclared` refusal. `report` projects the completed producer prefix
 //! into retained HTML, JSON, and format-9 package artifacts.
 //!
 //! Card packs are invocation inputs, so their canonical set root is bound
@@ -619,7 +619,7 @@ pub enum SolveStage {
     /// Conduction solve over an explicitly declared domain; conjugate
     /// exchange remains successor scope under frankensim-s93ej.
     Conduction,
-    /// QoI extraction against requirements (gap: frankensim-s2l9v).
+    /// QoI extraction against requirements (refuses by name when undeclared).
     Qoi,
     /// Product report, JSON twin, and evidence package projected from the
     /// retained stage receipts (executes; bead frankensim-rc-root-q61wp.12).
@@ -673,8 +673,10 @@ impl SolveStage {
         match self {
             SolveStage::ImportVerify | SolveStage::Assign | SolveStage::MaterialResolve => None,
             SolveStage::FlowNetwork => None,
-            SolveStage::Conduction => Some("frankensim-s93ej"),
-            SolveStage::Qoi => Some("frankensim-s2l9v"),
+            // Conduction and QoI execute (s93ej / s2l9v landed); a project
+            // that does not DECLARE their inputs refuses by name through
+            // `declaration_gap`, which is a project defect, not a stage gap.
+            SolveStage::Conduction | SolveStage::Qoi => None,
             SolveStage::Report => None,
         }
     }
@@ -693,6 +695,46 @@ impl SolveStage {
 
     fn from_ordinal(ordinal: u32) -> Option<SolveStage> {
         SolveStage::ALL.get(ordinal as usize).copied()
+    }
+}
+
+/// A stage whose producer exists but whose INPUTS the project does not
+/// declare: `(code, what, fix)`. This is a refusal of the project (exit 4),
+/// distinct from `cli-solve-stage-gap`, which names a stage with no
+/// producer at all. Before this split an undeclared conduction section was
+/// reported as "cannot execute until frankensim-s93ej supplies its
+/// producer" — false once the producer existed.
+fn declaration_gap(
+    stage: SolveStage,
+    spec: &ProjectSpec,
+) -> Option<(&'static str, String, String)> {
+    if stage_has_declared_producer(stage, spec) {
+        return None;
+    }
+    match stage {
+        SolveStage::Conduction => Some((
+            "cli-solve-conduction-undeclared",
+            "stage `conduction` needs a declared `cooling.conduction` section (at least one \
+             seeded region and one boundary); this project declares none"
+                .to_string(),
+            "declare `cooling.conduction` with a strictly interior seed per region and a \
+             boundary per exposed surface, or stop the study after flow-network"
+                .to_string(),
+        )),
+        SolveStage::Qoi => Some((
+            "cli-solve-qoi-undeclared",
+            "stage `qoi` needs a `temperature-max` requirement on a declared conduction \
+             region; this project declares none"
+                .to_string(),
+            "add a `t-limit` with `:qoi \"temperature-max\"` (sourced limit and margin) on a \
+             region named in `cooling.conduction`, or drop the QoI output"
+                .to_string(),
+        )),
+        SolveStage::ImportVerify
+        | SolveStage::Assign
+        | SolveStage::MaterialResolve
+        | SolveStage::FlowNetwork
+        | SolveStage::Report => None,
     }
 }
 
@@ -1584,9 +1626,7 @@ impl<'a> SolveEngine<'a> {
             if self.work.is_requested() {
                 return Err(self.cancelled_refusal(&state));
             }
-            if let Some(dependency) = stage.gap_dependency()
-                && !stage_has_declared_producer(stage, self.spec)
-            {
+            if let Some(dependency) = stage.gap_dependency() {
                 let refusal = SolveRefusal {
                     code: "cli-solve-stage-gap",
                     stage: Some(stage.name()),
@@ -1600,6 +1640,18 @@ impl<'a> SolveEngine<'a> {
                          stage or placeholder artifact"
                     ),
                     dependency: Some(dependency),
+                    run: Some(self.run.to_hex()),
+                    recorded_op: None,
+                };
+                return Err(self.record_refusal(&state, stage, refusal));
+            }
+            if let Some((code, what, fix)) = declaration_gap(stage, self.spec) {
+                let refusal = SolveRefusal {
+                    code,
+                    stage: Some(stage.name()),
+                    what,
+                    fix,
+                    dependency: None,
                     run: Some(self.run.to_hex()),
                     recorded_op: None,
                 };
@@ -6149,11 +6201,11 @@ fn is_supported_stage_discovery_row(row: &OpRow, run: SolveRunId) -> bool {
         return false;
     };
     // Conduction and the request-selective QoI are conditional on the retained
-    // project. Discovery cannot inspect that project yet, so admit their
-    // candidates here and let `validate_resume_candidate` re-attest the
-    // project and enforce `stage_has_declared_producer`. Report is an
+    // project. Discovery cannot inspect that project yet, so admit every
+    // producing stage's candidates here and let `validate_resume_candidate`
+    // re-attest the project and enforce `declaration_gap`. Report is an
     // unconditional projection of the retained producer prefix.
-    (stage.gap_dependency().is_none() || matches!(stage, SolveStage::Conduction | SolveStage::Qoi))
+    stage.gap_dependency().is_none()
         && row.t_start == i64::from(stage.ordinal()) * 2
         && row.t_end == Some(i64::from(stage.ordinal()) * 2 + 1)
 }
@@ -6268,9 +6320,10 @@ fn validate_resume_candidate(
     let mut last_expected_edges = Vec::new();
     for (index, completed) in state.completed.iter().enumerate() {
         let stage = SolveStage::ALL[index];
-        if stage.gap_dependency().is_some() && !stage_has_declared_producer(stage, &project.spec) {
+        if stage.gap_dependency().is_some() || declaration_gap(stage, &project.spec).is_some() {
             return Err(resume_identity(format!(
-                "driver version {SOLVE_DRIVER_VERSION} cannot have completed unavailable stage `{}`",
+                "driver version {SOLVE_DRIVER_VERSION} cannot have completed stage `{}`: the \
+                 project does not declare its producer inputs",
                 stage.name()
             )));
         }

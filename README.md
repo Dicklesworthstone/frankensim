@@ -288,13 +288,19 @@ GitHub Actions is not the source of truth for this project. Use DSR for automati
 
 ## Command Reference
 
-FrankenSim ships an initial strict validation CLI. Its solve verb executes a
-durable producer prefix through an interval-certified flow-network operating
-point and, when the project declares `cooling.conduction`, a heterogeneous
-steady conduction stage with exact matching-P1 finite contact. Projects without
-that declaration retain the typed conduction gap; every run currently stops at
-the unavailable QoI stage. Report and package remain explicit unavailable
-stages rather than presenting an incomplete simulator as a working product.
+FrankenSim ships a strict validation CLI whose solve verb runs seven durable
+stages: import-verify, assign, material-resolve, an interval-certified
+flow-network operating point, a heterogeneous steady conduction stage (exact
+matching-P1 finite contact; convection either declared or derived from the
+fan network through an `fs-convection` card with domain gating), a
+requirement-checked QoI with an explicit eight-term uncertainty budget, and a
+report stage that seals an HTML report, its JSON twin and a format-9 evidence
+package in the ledger. `report`, `package` and `run` are projections of those
+retained receipts. A project that omits `cooling.conduction` refuses at
+conduction by name (`cli-solve-conduction-undeclared`); one that omits a
+`temperature-max` requirement refuses at `qoi`. Every QoI today is Estimated /
+indeterminate: the budget terms are honest NO-DATA until measured, and no
+capability is at L3 until a retained lane receipt backs it.
 
 | Command | Purpose |
 |---------|---------|

@@ -66,14 +66,16 @@ cargo run -p fs-cli --bin frankensim -- --json solve \
   --materials data/reference-project/aa6061.fsmcdpk
 ```
 
-What you should see, in order, on stderr as JSON progress lines: the four
-executing stages complete (`import-verify`, `assign`, `material-resolve`,
-`flow-network`), each with an ordinal and a durable ledger receipt. Then
-stdout reports:
+What you should see, in order, on stderr as JSON progress lines: all seven
+stages complete (`import-verify`, `assign`, `material-resolve`,
+`flow-network`, `conduction`, `qoi`, `report`), each with an ordinal, a
+wall-clock, and a durable ledger receipt. Then stdout reports:
 
-- `"status":"unavailable"` with `"stage":"conduction"` and
-  `"dependency":"frankensim-s93ej"` — the first unimplemented stage,
-  named, with the bead that owns it.
+- `"status":"completed"` with `"stages_completed":7`, the 64-hex `run` id,
+  and the run receipt hash. The QoI verdict is Estimated / indeterminate
+  (every engineering-uncertainty term is an explicit NO-DATA), and
+  `frankensim report <run> <ledger>` / `frankensim package <run> <ledger>`
+  export exactly the bytes the report stage sealed.
 
 How to read what DID happen:
 
@@ -103,12 +105,16 @@ Resuming is first-class: `frankensim --json solve --resume <run-id>
 re-derivation, not trust) and continues to the same honest stop with no
 pack flags at all.
 
-## What this example does NOT show yet
+## What this example does NOT show
 
-Conduction and QoI extraction refuse as unavailable (owned by
-`frankensim-s93ej` and `frankensim-s2l9v`); `report` and `package` refuse
-likewise. When those land, this walkthrough extends rather than changes:
-the four stages above keep their receipts and their semantics.
+A verified answer. The conduction mesh is the recovered surface itself (no
+refinement ladder yet), the eight uncertainty terms are NO-DATA, and the
+convection boundary is a declared coefficient rather than one derived from
+the fan network — see `examples/heatsink-fan/README.md` for the derived
+`airflow-convection` law on a real body. A project that omits
+`cooling.conduction` refuses at conduction by name
+(`cli-solve-conduction-undeclared`, exit 4); one that omits the
+`temperature-max` requirement refuses at `qoi` (`cli-solve-qoi-undeclared`).
 
 For the refusal/fix loop — what it looks like when validation says no —
 see `examples/refusal-loop/`.
