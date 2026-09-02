@@ -367,6 +367,20 @@ pub(crate) fn load_export(
     ledger: Option<&Path>,
     mode: OutputMode,
 ) -> Result<LoadedExport, CommandOutput> {
+    let (opened, dir) = open_export_ledger(command, run_id, ledger, mode)?;
+    load_export_from(command, run_id, &opened, dir, mode)
+}
+
+/// Open the ledger read path for an export verb without locating a run.
+///
+/// Returns the opened ledger and the directory exports are written into.
+/// Refuses (never creates a ledger) when the path is missing.
+pub(crate) fn open_export_ledger(
+    command: &'static str,
+    run_id: &str,
+    ledger: Option<&Path>,
+    mode: OutputMode,
+) -> Result<(Ledger, PathBuf), CommandOutput> {
     let Some(ledger_path) = ledger else {
         return Err(refuse(
             mode,
@@ -421,8 +435,25 @@ pub(crate) fn load_export(
             t_open.elapsed().as_secs_f64()
         );
     }
+    let dir = ledger_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+    Ok((opened, dir))
+}
+
+/// Locate the completed run in an already opened ledger and bind its report
+/// receipt to the loaded artifacts.
+pub(crate) fn load_export_from(
+    command: &'static str,
+    run_id: &str,
+    opened: &Ledger,
+    dir: PathBuf,
+    mode: OutputMode,
+) -> Result<LoadedExport, CommandOutput> {
+    let trace = std::env::var_os("FS_CLI_TRACE_EXPORT").is_some();
     let t_load = std::time::Instant::now();
-    let export = load_completed_run(&opened, run_id)
+    let export = load_completed_run(opened, run_id)
         .map_err(|solve_refusal| refuse_solve(mode, command, run_id, &solve_refusal))?;
     if trace {
         eprintln!(
@@ -452,10 +483,6 @@ pub(crate) fn load_export(
             "regenerate the run; exports never write bytes named by an unbound receipt",
         )
     })?;
-    let dir = ledger_path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
     Ok(LoadedExport {
         export,
         receipt,

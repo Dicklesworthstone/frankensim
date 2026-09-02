@@ -70,11 +70,34 @@ as `"verification":"sealed-evidence"` next to
 replay, `report`/`package` on the heatsink example cost twice the solve
 (3.4 s of a 4.2 s validation was re-solving conduction).
 
-`compare` is present in the parser but returns the stable
-`cli-stage-unavailable` refusal naming its producer Bead
-(`frankensim-extreal-program-f85xj.6.14.1`). This is a deliberate fail-closed
-integration seam: emitting a placeholder comparison would turn a CLI-shaped
-mock into a product claim.
+`compare <left-run> <right-run> <ledger.db>` diffs two completed runs of the
+same project by their retained receipts and, like the other export verbs,
+never replays physics. Both runs go through the resume loader and the report
+receipt binding above; the rows are read from the retained QoI receipt (values,
+colours, requirement outcomes, the eight budget terms), the material-resolve
+receipt (pack-set root and per-kind card identities), and the seven stage
+receipts. A stage row is `unchanged (same receipt)` when the hashes agree,
+`unchanged (same inputs; differs only by binding keys)` when the two receipts
+differ in no top-level key but `run`, `project_hash`, or `import_op` (which
+run, project, and import op the receipt belongs to, not what the stage
+computed), and `changed` otherwise; the differing keys are listed so the
+reader can see why. A design change (another card pack, limit, fidelity, or
+geometry import) is a different canonical project, so the two project hashes
+are reported side by side with `same_project` and a changed hash is one of the
+rows. The result carries `"authority":"projection-of-retained-receipts"` and a
+no-claim: a changed value is a change between two Estimated candidates, not a
+verified effect. Refusals: no ledger operand (`cli-export-ledger-required`), a
+missing ledger (`cli-export-ledger-missing`), an unknown or incomplete run (the
+solve loader's own codes), two runs with no common requirement to diff
+against because their QoI names or requirement identities differ
+(`cli-compare-project-mismatch`, naming both project hashes), and a receipt
+whose shape cannot be read (`cli-compare-receipt-shape`). Comparing a run with
+itself reports `changed:false` and no row marked changed. MEASURED 2026-09-02:
+the hostile foam twin of the reference project (rebound to a 0.04 W/mK card
+under the same chemistry key) shows exactly one material card change, a hotter
+maximum with a smaller nominal margin, both verdicts `indeterminate`, and five
+of seven stages changed (`import-verify` and `assign` differ only by binding
+keys); a merely renamed project shows the hash change and a bit-identical QoI.
 
 ### Euler cinematic static admission
 
@@ -688,9 +711,9 @@ publication.
   tessellation, component nesting, self-intersection certification, or
   physical/CAD sameness. Named face groups are caller-supplied labels on the
   promoted soup, not independently certified CAD product-structure identity.
-- `report` and `package` execute against a completed run and prove it by
-  sealed evidence (see the verb section); only `compare` is still a parsed
-  verb without a producer, and it fails before side effects.
+- `report`, `package`, and `compare` execute against completed runs and prove
+  them by sealed evidence (see the verb section); none of them replays
+  physics, and `compare` writes nothing.
 - All seven stages execute; a project without an explicit conduction setup or
   without a `temperature-max` requirement refuses at the stage that needs it
   (`cli-solve-conduction-undeclared`, `cli-solve-qoi-undeclared`). The

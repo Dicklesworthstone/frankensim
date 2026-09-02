@@ -242,7 +242,14 @@ class CompareResult:
     summary: str
     qoi_count: int
     qoi_diffs: List[QoiDiffItem] = field(default_factory=list)
-    authority: str = "evidence-aware-semantic-run-diff"
+    #: True when any retained receipt row differs between the two runs.
+    changed: bool = False
+    #: Canonical project hashes of the two runs; a design change is a
+    #: different project hash, so they may differ.
+    project_hash_left: str = ""
+    project_hash_right: str = ""
+    same_project: bool = True
+    authority: str = "projection-of-retained-receipts"
     no_claim: str = ""
     exit_code: int = 0
     diagnostics: List[Diagnostic] = field(default_factory=list)

@@ -108,26 +108,36 @@ class TestFrankenSimClientIntegration(unittest.TestCase):
             self.assertEqual(solve_res.status, "completed")
             self.assertEqual(solve_res.stages_completed, 7)
 
-            # 3. Compare remains fail-closed until it can load retained run data.
-            with self.assertRaises(UnavailableError):
+            # 3. Compare reads retained runs only: an unknown run id refuses
+            # through the solve loader, and a run compared with itself is
+            # a real, empty comparison (one QoI, zero delta, nothing changed).
+            with self.assertRaises(RefusalError):
                 self.client.compare(
-                    "baseline_run",
-                    "candidate_run",
+                    solve_res.run_id,
+                    "f" * 64,
                     ledger_path=ledger,
                     strict=True,
                 )
 
             comp = self.client.compare(
-                "baseline_run",
-                "candidate_run",
+                solve_res.run_id,
+                solve_res.run_id,
                 ledger_path=ledger,
-                strict=False,
+                strict=True,
             )
-            self.assertEqual(comp.status, "unavailable")
-            self.assertEqual(comp.exit_code, ExitCode.UNAVAILABLE)
-            self.assertEqual(comp.authority, "none")
-            self.assertEqual(comp.qoi_count, 0)
-            self.assertEqual(comp.qoi_diffs, [])
+            self.assertEqual(comp.status, "ok")
+            self.assertEqual(comp.exit_code, ExitCode.SUCCESS)
+            self.assertEqual(comp.authority, "projection-of-retained-receipts")
+            self.assertFalse(comp.changed)
+            self.assertTrue(comp.same_project)
+            self.assertEqual(len(comp.project_hash_left), 64)
+            self.assertEqual(comp.project_hash_left, comp.project_hash_right)
+            self.assertEqual(comp.qoi_count, 1)
+            self.assertEqual(len(comp.qoi_diffs), 1)
+            self.assertEqual(comp.qoi_diffs[0].name, "temperature-max")
+            self.assertEqual(comp.qoi_diffs[0].delta, 0.0)
+            self.assertEqual(comp.qoi_diffs[0].classification, "same")
+            self.assertIn("identical runs", comp.summary)
 
     def test_run_exposes_retained_qoi_vocabulary(self):
         if not (
