@@ -25,8 +25,9 @@ use fs_ledger::{EdgeRole, Ledger, OpArtifactEdge};
 use fs_package::{Claim, EvidencePackage, Provenance};
 use fs_project::spec::ProjectSpec;
 use fs_report::{
-    BudgetTermItem, EngineeringReport, LineageItem, MaterialReportItem, NoClaimItem, QoiReportItem,
-    ReportProvenance, RequirementReportItem, StageReceiptItem,
+    BudgetTermItem, ConvergenceResult, ConvergenceStatus, EngineeringReport, LineageItem,
+    MaterialReportItem, MeshRung, NoClaimItem, QoiReportItem, ReportProvenance,
+    RequirementReportItem, StageReceiptItem,
 };
 
 use super::{
@@ -59,6 +60,77 @@ fn report_error(
     fix: impl Into<String>,
 ) -> SolveRefusal {
     SolveRefusal::staged(code, SolveStage::Report, what, fix)
+}
+
+/// The conduction receipt's `ladder` block as the report's convergence
+/// study (fs-ladder's vocabulary): one row per rung, the grid-refinement
+/// estimate as observed order / extrapolated value / GCI (the half-width
+/// relative to the finest value), and fs-ladder's status mapped from the
+/// ladder's. `None` when fewer than two rungs ran — the receipt still says
+/// why (`ladder.stop`), the report just has no study to show.
+fn ladder_convergence(
+    receipt: &JsonValue,
+    qoi_name: &str,
+    qoi_unit: &str,
+    finest_value: f64,
+) -> Option<ConvergenceResult> {
+    let ladder = receipt.get("ladder")?;
+    let rows = ladder.get("rungs").and_then(JsonValue::as_array)?;
+    if rows.len() < 2 {
+        return None;
+    }
+    let mut admitted_rungs = Vec::with_capacity(rows.len());
+    for row in rows {
+        let ordinal = row.f64_field("rung")? as usize;
+        admitted_rungs.push(MeshRung {
+            ordinal,
+            mesh_id: format!("uniform-rung-{ordinal}"),
+            h: row.f64_field("h_m")?,
+            h_unit: "m".to_string(),
+            dof: row.f64_field("vertices")? as usize,
+            solver_status: "converged".to_string(),
+            solver_residual: row.f64_field("final_residual").unwrap_or(f64::NAN),
+            qoi_name: qoi_name.to_string(),
+            qoi_value: row.f64_field("t_max_k")?,
+            qoi_unit: qoi_unit.to_string(),
+            budget_consumed_s: f64::NAN,
+        });
+    }
+    let richardson = ladder.get("richardson")?;
+    let ladder_status = richardson.str_field("status").unwrap_or("");
+    let observed_order = richardson.f64_field("order");
+    let half_width = richardson.f64_field("half_width_k");
+    let status = match (ladder_status, observed_order) {
+        ("observed-order", Some(order)) if order >= 1.5 => ConvergenceStatus::Asymptotic,
+        ("observed-order", _) => ConvergenceStatus::PreAsymptotic,
+        ("converged-exactly", _) => ConvergenceStatus::Asymptotic,
+        ("data-range", _) => ConvergenceStatus::Oscillatory,
+        _ => ConvergenceStatus::InsufficientRungs,
+    };
+    let detail = richardson.str_field("detail").unwrap_or("").to_string();
+    Some(ConvergenceResult {
+        qoi_name: qoi_name.to_string(),
+        status,
+        theoretical_order: 2.0,
+        observed_order,
+        fit_residual: observed_order.map(|order| (order - 2.0).abs()),
+        richardson_extrapolated_qoi: richardson.f64_field("extrapolated_k"),
+        discretization_error_gci: half_width
+            .filter(|_| finest_value.is_finite() && finest_value != 0.0)
+            .map(|half_width| half_width / finest_value.abs()),
+        evidence_color: Color::Estimated {
+            estimator: "uniform-h-ladder".to_string(),
+            dispersion: half_width.map_or(f64::NAN, |half_width| {
+                if finest_value.is_finite() && finest_value != 0.0 {
+                    half_width / finest_value.abs()
+                } else {
+                    f64::NAN
+                }
+            }),
+        },
+        admitted_rungs,
+        rejection_reason: (ladder_status != "observed-order").then_some(detail),
+    })
 }
 
 fn shape_error(stage: SolveStage, what: impl Into<String>) -> SolveRefusal {
@@ -457,10 +529,33 @@ pub(super) fn report_receipt(
         .ok_or_else(|| shape_error(qoi_stage, "missing `budget[0].terms`"))?;
     let mut budget_items = Vec::with_capacity(terms.len());
     let mut measured_terms = 0usize;
+    let mut discretization_half_width: Option<f64> = None;
     for term in terms {
         let kind = required_str(qoi_stage, term, "kind")?;
         let term_state = required_str(qoi_stage, term, "state")?;
-        let value = term.f64_field("value");
+        // An `interval` term (QoI receipt v2) is a certified half-width: its
+        // magnitude is the upper bound and its reason is the derivation the
+        // producer recorded; every other state carries `value`/`reason`.
+        let (value, reason) = if term_state == "interval" {
+            let upper = term.f64_field("upper_kelvin");
+            let derivation = term.get("derivation");
+            let method = derivation.and_then(|d| d.str_field("method")).unwrap_or("");
+            let status = derivation
+                .and_then(|d| d.str_field("ladder_status"))
+                .unwrap_or("");
+            let rungs = derivation.and_then(|d| d.f64_field("rungs")).unwrap_or(0.0);
+            (
+                upper,
+                format!(
+                    "half-width in kelvin from the conduction stage's uniform h-ladder: {method} ({status}) over {rungs} rungs"
+                ),
+            )
+        } else {
+            (
+                term.f64_field("value"),
+                term.str_field("reason").unwrap_or("").to_string(),
+            )
+        };
         if term_state != "no-data" && value.is_none() {
             return Err(shape_error(
                 qoi_stage,
@@ -470,12 +565,15 @@ pub(super) fn report_receipt(
         if value.is_some() {
             measured_terms += 1;
         }
+        if kind == "discretization" && term_state == "interval" {
+            discretization_half_width = value;
+        }
         budget_items.push(BudgetTermItem {
             qoi: qoi_name.to_string(),
             kind: kind.to_string(),
             state: term_state.to_string(),
             value,
-            reason: term.str_field("reason").unwrap_or("").to_string(),
+            reason,
             owner: term.str_field("owner").unwrap_or("").to_string(),
         });
     }
@@ -522,7 +620,7 @@ pub(super) fn report_receipt(
                 estimator: QOI_RECEIPT_SCHEMA.to_string(),
                 dispersion: f64::NAN,
             },
-            discretization_error: f64::NAN,
+            discretization_error: discretization_half_width.unwrap_or(f64::NAN),
             parameter_uncertainty: f64::NAN,
             surrogate_error: f64::NAN,
             total_uncertainty_budget: f64::NAN,
@@ -538,6 +636,10 @@ pub(super) fn report_receipt(
             unit: "kelvin".to_string(),
             outcome: outcome.to_string(),
         });
+    if let Some(convergence) = ladder_convergence(&conduction.value, qoi_name, qoi_unit, qoi_value)
+    {
+        report = report.with_convergence(convergence);
+    }
     for item in budget_items {
         report = report.with_budget_term(item);
     }

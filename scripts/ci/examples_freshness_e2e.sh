@@ -18,6 +18,11 @@
 #                                a derived airflow-convection law), and
 #                                the report/package verbs export exactly
 #                                the retained bytes of that run.
+#   5. heatsink-fan-ladder      — the same project with solver fidelity
+#                                "ladder": three uniform 1->8 rungs, the
+#                                QoI budget's discretization term measured
+#                                (interval), the report's convergence
+#                                section present. Minutes in a debug build.
 #
 # FROZEN BYTES: the canonical project hashes are frozen as literals in the
 # G0 battery (`crates/fs-cli/tests/cli.rs`,
@@ -159,6 +164,32 @@ unknown_run_refuses() {
   test "${RC}" -eq 4 && grep -q 'cli-solve-unknown-run' "${WORK}/unk.err"
 }
 check "report of an unknown run refuses with cli-solve-unknown-run (exit 4)" unknown_run_refuses
+
+# ---- 8. the ladder variant: three uniform rungs and a measured discretization term
+LADDER="${REPO_ROOT}/examples/heatsink-fan/heatsink-fan-ladder.fsim"
+check "heatsink-fan-ladder validates ok" validate_ok "${LADDER}"
+ladder_import_ok() {
+  "${BINARY}" --json import "${LADDER}" "${STL}" "${WORK}/ladder.db" --unit m --max-hole-edges 0 > "${WORK}/limp.json" 2> "${WORK}/limp.err"
+}
+check "ladder variant imports into its own ledger" ladder_import_ok
+ladder_solve_completes() {
+  "${BINARY}" --json solve "${LADDER}" "${WORK}/ladder.db" --materials "${PACK}" > "${WORK}/ls.json" 2> "${WORK}/ls.err"
+}
+check "ladder solve completes every stage (three uniform rungs; minutes in a debug build)" ladder_solve_completes
+check "ladder solve reports seven completed stages" grep -q '"stages_completed":7' "${WORK}/ls.json"
+check "QoI stage measured exactly one budget term" grep -q '"budget_terms_measured":1' "${WORK}/ls.err"
+check "the weakest term is now seven-no-data, not all-eight" grep -q '"weakest_term":"seven-no-data"' "${WORK}/ls.err"
+LADDER_RUN="$(grep -oE '"run":"[0-9a-f]{64}"' "${WORK}/ls.json" | head -1 | cut -d'"' -f4)"
+ladder_report_ok() {
+  (cd "${WORK}" && "${BINARY}" --json report "${LADDER_RUN}" "${WORK}/ladder.db" > "${WORK}/lrep.json" 2> "${WORK}/lrep.err")
+}
+check "ladder report exports" ladder_report_ok
+check "report JSON twin carries the interval discretization term" \
+  grep -q '"state": "interval"' "${WORK}/${LADDER_RUN}.report.json"
+check "report JSON twin names the grid-refinement method" \
+  grep -Eq 'richardson-gci|eca-hoekstra-data-range|bitwise-agreement' "${WORK}/${LADDER_RUN}.report.json"
+check "report JSON twin has a convergence section" grep -q '"convergence"' "${WORK}/${LADDER_RUN}.report.json"
+check "ladder verdict stays the honest Estimated/indeterminate one" grep -q '"verdict":"indeterminate"' "${WORK}/lrep.json"
 
 # ------------------------------------------------------------------- verdict
 log summary "checks=${CHECKS} failures=${FAILURES}"

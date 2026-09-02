@@ -48,10 +48,14 @@ use fs_regime::{OutputClaimReceipt, ProductOutputAudit};
 use fs_session::DecisionAssessment;
 
 pub mod engineering_report;
+/// The convergence-study types the engineering report renders (owned by
+/// `fs-ladder`); re-exported so a producer can attach a study without
+/// depending on that crate directly.
+pub use fs_ladder::{ConvergenceResult, ConvergenceStatus, MeshRung};
 
 pub use engineering_report::{
-    BudgetTermItem, EngineeringReport, LineageItem, MaterialReportItem, NoClaimItem,
-    QoiReportItem, ReportProvenance, RequirementReportItem, StageReceiptItem,
+    BudgetTermItem, EngineeringReport, LineageItem, MaterialReportItem, NoClaimItem, QoiReportItem,
+    ReportProvenance, RequirementReportItem, StageReceiptItem,
 };
 
 /// Estimator identity used by package declarations that retain demotion receipts.

@@ -160,6 +160,7 @@ mod tests {
         let package = EvidencePackage::new(fs_package::Provenance::new("test", "test"));
         let package_json = package.to_json().expect("fixture package serializes");
         let export = CompletedRunExport {
+            verification: "sealed-evidence",
             run: "1".repeat(64),
             project_hash: "2".repeat(64),
             stages: vec![

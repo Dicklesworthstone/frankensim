@@ -571,7 +571,9 @@ impl EngineeringReport {
 
         // 5c. Lineage
         if !self.lineage.is_empty() {
-            html.push_str("<h2>5c. Lineage</h2>\n<table>\n<tr><th>Artifact</th><th>Content Hash</th></tr>\n");
+            html.push_str(
+                "<h2>5c. Lineage</h2>\n<table>\n<tr><th>Artifact</th><th>Content Hash</th></tr>\n",
+            );
             for l in &self.lineage {
                 let _ = write!(
                     html,
@@ -750,12 +752,7 @@ impl EngineeringReport {
                 if index > 0 {
                     json.push_str(", ");
                 }
-                let _ = write!(
-                    json,
-                    "\"{}\": \"{}\"",
-                    escape_json(key),
-                    escape_json(value)
-                );
+                let _ = write!(json, "\"{}\": \"{}\"", escape_json(key), escape_json(value));
             }
             json.push_str("}}");
         }
@@ -806,16 +803,62 @@ impl EngineeringReport {
             let _ = write!(json, "    \"status\": \"{}\",\n", conv.status.label());
             let _ = write!(
                 json,
-                "    \"theoretical_order\": {:.4},\n",
-                conv.theoretical_order
+                "    \"theoretical_order\": {},\n",
+                json_num(conv.theoretical_order)
             );
-            let _ = write!(json, "    \"observed_order\": {:?},\n", conv.observed_order);
+            // Optional magnitudes print as JSON numbers or null, never as
+            // Rust debug text (the section was unexercised until the uniform
+            // h-ladder fed it; `Some(..)`/`None` broke the twin's parse).
+            let optional = |value: Option<f64>| value.map_or_else(|| "null".to_string(), json_num);
             let _ = write!(
                 json,
-                "    \"richardson_extrapolated\": {:?},\n",
-                conv.richardson_extrapolated_qoi
+                "    \"observed_order\": {},\n",
+                optional(conv.observed_order)
             );
-            let _ = write!(json, "    \"gci\": {:?}\n", conv.discretization_error_gci);
+            let _ = write!(
+                json,
+                "    \"fit_residual\": {},\n",
+                optional(conv.fit_residual)
+            );
+            let _ = write!(
+                json,
+                "    \"richardson_extrapolated\": {},\n",
+                optional(conv.richardson_extrapolated_qoi)
+            );
+            let _ = write!(
+                json,
+                "    \"gci\": {},\n",
+                optional(conv.discretization_error_gci)
+            );
+            let _ = write!(
+                json,
+                "    \"rejection_reason\": {},\n",
+                conv.rejection_reason
+                    .as_deref()
+                    .map_or_else(|| "null".to_string(), |r| format!("\"{}\"", escape_json(r)))
+            );
+            json.push_str("    \"rungs\": [\n");
+            for (index, r) in conv.admitted_rungs.iter().enumerate() {
+                let _ = write!(
+                    json,
+                    "      {{\"ordinal\": {}, \"mesh_id\": \"{}\", \"h\": {}, \"h_unit\": \"{}\", \"dof\": {}, \"solver_status\": \"{}\", \"solver_residual\": {}, \"qoi_value\": {}, \"qoi_unit\": \"{}\"}}{}\n",
+                    r.ordinal,
+                    escape_json(&r.mesh_id),
+                    json_num(r.h),
+                    escape_json(&r.h_unit),
+                    r.dof,
+                    escape_json(&r.solver_status),
+                    json_num(r.solver_residual),
+                    json_num(r.qoi_value),
+                    escape_json(&r.qoi_unit),
+                    if index + 1 < conv.admitted_rungs.len() {
+                        ","
+                    } else {
+                        ""
+                    }
+                );
+            }
+            json.push_str("    ]\n");
             json.push_str("  },\n");
         }
 

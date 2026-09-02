@@ -975,7 +975,7 @@ fn solve_publication_counts(ledger: &Ledger) -> SolvePublicationCounts {
 #[test]
 fn g0_run_identity_is_deterministic_and_input_sensitive() {
     assert_eq!(
-        SOLVE_DRIVER_VERSION, 11,
+        SOLVE_DRIVER_VERSION, 12,
         "authority-semantic changes must deliberately advance this identity-bearing version"
     );
 
@@ -3378,7 +3378,13 @@ fn g1_conduction_stage_executes_and_retains_field_and_balance_evidence() {
     let receipt =
         String::from_utf8(artifact_bytes(&ledger, &receipts[4])).expect("receipt is utf-8");
     assert_balanced_json(&receipt);
-    assert!(receipt.contains("frankensim.cli.solve-conduction-receipt.v5"));
+    assert!(receipt.contains("frankensim.cli.solve-conduction-receipt.v6"));
+    assert!(
+        receipt.contains("\"ladder\":{\"rungs\":[{\"rung\":0,")
+            && receipt.contains("\"stop\":\"fidelity-single-rung\"")
+            && receipt.contains("\"status\":\"single-rung\""),
+        "the default fidelity solves one rung and says so: {receipt}"
+    );
     // v4 discloses mesh quality and the recovery budgets that produced the
     // mesh (bridge plan B3): disclosure, not enforcement.
     assert!(
@@ -3429,7 +3435,7 @@ fn g1_conduction_stage_executes_and_retains_field_and_balance_evidence() {
     let qoi_receipt =
         String::from_utf8(artifact_bytes(&ledger, &receipts[5])).expect("QoI receipt is utf-8");
     assert_balanced_json(&qoi_receipt);
-    assert!(qoi_receipt.contains("frankensim.cli.solve-qoi-candidate.v1"));
+    assert!(qoi_receipt.contains("frankensim.cli.solve-qoi-candidate.v2"));
     assert!(qoi_receipt.contains("\"stage\":\"qoi\""));
     assert!(qoi_receipt.contains("\"name\":\"temperature-max\""));
     assert!(qoi_receipt.contains("\"outcome\":\"indeterminate\""));
@@ -3664,7 +3670,7 @@ fn g0_conduction_stage_closes_the_conjugate_airflow_exchange_from_the_flow_netwo
     let receipt =
         String::from_utf8(artifact_bytes(&ledger, &receipts[4])).expect("receipt is utf-8");
     assert_balanced_json(&receipt);
-    assert!(receipt.contains("frankensim.cli.solve-conduction-receipt.v5"));
+    assert!(receipt.contains("frankensim.cli.solve-conduction-receipt.v6"));
     // The exchange is in the receipt: the branch, the card, the derived
     // coefficient, the marched air, and the two independent watt gates.
     assert!(receipt.contains("\"conjugate\":{\"branch\":\"air\",\"path\":\"vent:air\""));
@@ -3790,7 +3796,7 @@ fn g0_conduction_stage_executes_declared_card_backed_contact() {
     let receipt =
         String::from_utf8(artifact_bytes(&ledger, &receipts[4])).expect("receipt is utf-8");
     assert_balanced_json(&receipt);
-    assert!(receipt.contains("frankensim.cli.solve-conduction-receipt.v5"));
+    assert!(receipt.contains("frankensim.cli.solve-conduction-receipt.v6"));
     // The production volumetricizer's facet recovery inserts a Steiner
     // point at the joint centroid and re-triangulates the shared unit
     // face into a deterministic four-triangle fan, so the declared
@@ -3821,7 +3827,7 @@ fn g0_conduction_stage_executes_declared_card_backed_contact() {
     let qoi_receipt =
         String::from_utf8(artifact_bytes(&ledger, &receipts[5])).expect("QoI receipt is utf-8");
     assert_balanced_json(&qoi_receipt);
-    assert!(qoi_receipt.contains("frankensim.cli.solve-qoi-candidate.v1"));
+    assert!(qoi_receipt.contains("frankensim.cli.solve-qoi-candidate.v2"));
     assert!(qoi_receipt.contains("\"stage\":\"qoi\""));
 
     let mut resume_clock = benign_clock();
@@ -4509,4 +4515,128 @@ fn ja_004_replay_reproduces_every_receipt_and_the_field_bitwise() {
         a.0,
         a.1.len()
     );
+}
+
+/// B2 ladder slice: `solver.fidelity = "ladder"` runs the uniform h-ladder
+/// (three 1->8 rungs within the memory budget), the conduction receipt (v6)
+/// carries every rung and the grid-refinement estimate, and the QoI stage
+/// turns that estimate into the FIRST measured budget term through
+/// fs-airflow's discretization-receipt seam (QoI receipt v2). The default
+/// fidelity solves one rung and says so; that path is pinned by the g1
+/// conduction test above.
+#[test]
+fn g1_ladder_fidelity_refines_three_rungs_and_measures_the_discretization_term() {
+    let bytes = tetra_stl();
+    let mut spec = conduction_fixture_project(7, &bytes);
+    spec.solver.as_mut().expect("fixture solver").fidelity = "ladder".to_string();
+    let decoded = decode(&spec);
+    let ledger = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&ledger, &spec, bytes);
+    let (outcome, progress) = run_to_completion(&ledger, &decoded);
+    assert!(
+        matches!(outcome.status, fs_cli::SolveRunStatus::Completed),
+        "all seven stages execute under the ladder fidelity"
+    );
+    let run = outcome.run.clone();
+    let receipts = stage_receipt_hashes(&ledger, &run);
+    let conduction =
+        String::from_utf8(artifact_bytes(&ledger, &receipts[4])).expect("receipt is utf-8");
+    assert_balanced_json(&conduction);
+    assert!(conduction.contains("frankensim.cli.solve-conduction-receipt.v6"));
+    assert!(
+        conduction.contains("\"ladder\":{\"rungs\":[{\"rung\":0,"),
+        "{conduction}"
+    );
+    assert_eq!(
+        conduction.matches("\"rung\":").count(),
+        3,
+        "three rungs: {conduction}"
+    );
+    assert!(conduction.contains("\"stop\":\"complete\""), "{conduction}");
+    // Every rung halves h; tets multiply by eight (read inside the ladder
+    // block: the quality census carries a `tets` key of its own).
+    let ladder_block = &conduction[conduction.find("\"ladder\":").expect("ladder block")..];
+    let numbers = |key: &str| -> Vec<f64> {
+        ladder_block
+            .split(key)
+            .skip(1)
+            .map(|rest| {
+                rest.split([',', '}'])
+                    .next()
+                    .and_then(|v| v.parse::<f64>().ok())
+                    .expect("numeric ladder field")
+            })
+            .collect()
+    };
+    let h = numbers("\"h_m\":");
+    let tets = numbers("\"tets\":");
+    assert_eq!(h.len(), 3);
+    for k in 1..3 {
+        assert!(
+            ((h[k - 1] / h[k]) - 2.0).abs() < 1e-9,
+            "h halves per rung: {h:?}"
+        );
+        assert!(
+            (tets[k] / tets[k - 1] - 8.0).abs() < 1e-12,
+            "tets x8 per rung: {tets:?}"
+        );
+    }
+    let status = conduction
+        .split("\"richardson\":{\"status\":\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .expect("richardson status");
+    assert!(
+        matches!(
+            status,
+            "observed-order" | "data-range" | "converged-exactly"
+        ),
+        "three rungs always yield a grid-refinement estimate, found {status}: {conduction}"
+    );
+    assert!(
+        !conduction.contains("\"half_width_k\":null"),
+        "{conduction}"
+    );
+
+    // The QoI stage carries the estimate as the Discretization term, bound
+    // to the conduction receipt, and every other term stays NO-DATA.
+    let qoi = String::from_utf8(artifact_bytes(&ledger, &receipts[5])).expect("receipt is utf-8");
+    assert_balanced_json(&qoi);
+    assert!(qoi.contains("frankensim.cli.solve-qoi-candidate.v2"));
+    assert!(
+        qoi.contains("\"kind\":\"discretization\",\"state\":\"interval\",\"lower_kelvin\":0"),
+        "{qoi}"
+    );
+    assert!(
+        qoi.contains("\"owner\":\"thermal-qoi-discretization-receipt\""),
+        "{qoi}"
+    );
+    assert!(
+        qoi.contains(&format!("\"ladder_status\":\"{status}\"")),
+        "{qoi}"
+    );
+    assert!(
+        qoi.contains(&format!("\"conduction_receipt\":\"{}\"", receipts[4])),
+        "{qoi}"
+    );
+    assert_eq!(qoi.matches("\"state\":\"no-data\"").count(), 7, "{qoi}");
+    assert!(
+        qoi.contains("7 of eight engineering uncertainty terms are explicit NO-DATA"),
+        "{qoi}"
+    );
+    let qoi_progress = progress
+        .iter()
+        .find(|line| line.contains("\"stage\":\"qoi\""))
+        .expect("QoI progress row");
+    for expected in [
+        "\"weakest_term\":\"seven-no-data\"",
+        "\"budget_terms_measured\":1",
+        "\"budget_terms_total\":8",
+        "\"verdict\":\"indeterminate\"",
+    ] {
+        assert!(
+            qoi_progress.contains(expected),
+            "{expected}: {qoi_progress}"
+        );
+    }
 }

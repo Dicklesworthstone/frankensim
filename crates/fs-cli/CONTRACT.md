@@ -229,18 +229,63 @@ Projects without that optional declaration refuse with
 (exit 5) is reserved for a stage with no producer at all (none today); such
 refusals name their producer bead and are retained as
 terminal error operations.
-The conduction receipt (schema v5) discloses the mesh's quality census (tets,
-vertices, min dihedral, max radius-edge, sliver and flat-tet counts), the
-flat-tet repair (found / repaired / unrepaired / rounds — fs-mesh removes
-zero-volume tets by edge removal before the audit) and the recovery budgets and
-statistics that produced the mesh (memory budget, Steiner cap and depth,
-segment/facet recovery rows). Radius-edge is disclosed, not enforced:
-refinement is bridge plan B2c. The stage REFUSES (`cli-solve-conduction-mesh-quality`,
-exit 4) when a zero-volume tet survives the repair or the smallest dihedral is
-below 1° (measured: the reference heatsink sits at 6.1° after repair); slivers
-between 1° and 5° solve and are disclosed. The Steiner cap derives from the declared
-memory budget with the fixture default as a floor, so identical inputs at the
-fixture budget mesh identically.
+The conduction receipt (schema v6) discloses the PUBLISHED mesh's quality
+census (tets, vertices, min dihedral, max radius-edge, sliver and flat-tet
+counts), the base mesh's flat-tet repair (found / repaired / unrepaired /
+rounds — fs-mesh removes zero-volume tets by edge removal before the audit) and
+the recovery budgets and statistics that produced it (memory budget, Steiner
+cap and depth, segment/facet recovery rows). Radius-edge is disclosed, not
+enforced: constrained refinement is bridge plan B2c. The stage REFUSES
+(`cli-solve-conduction-mesh-quality`, exit 4) when a zero-volume tet survives
+the repair or the smallest dihedral of any solved rung is below 1° (measured:
+the reference heatsink sits at 7.3° after repair, 6.4° on its second uniform
+rung); slivers between 1° and 5° solve and are disclosed. The Steiner cap
+derives from the declared memory budget with the fixture default as a floor,
+so identical inputs at the fixture budget mesh identically.
+
+**The uniform h-ladder** (receipt block `ladder`, driver version 12). When the
+project declares `solver.fidelity = "ladder"`, the stage solves the audited base
+and then up to two further rungs, each one uniform 1→8 refinement of the
+labeled complex (fs-mesh CONTRACT item 16: walls split in place with their
+parent facet, labels replicated, volume preserved), taken while the next rung
+still fits the declared memory budget (`memory_bytes / 256` tets) and the
+project declares no interface pairs (they bind to base faces: `stop` says so).
+Every other fidelity solves the base once and the block says
+`"stop":"fidelity-single-rung"`. The block carries one row per rung (tets,
+vertices, `h_m = (volume/tets)^(1/3)`, min dihedral, the QoI stage's functional
+`t_max_k` — the nodal maximum over the ThermalLimit region — nonlinear and
+Krylov iterations, final residual) and a `richardson` estimate over the last
+three rungs by the Eça–Hoekstra procedure: `observed-order` (monotone
+differences, observed order in [0.5, 2]: GCI half-width `1.25|f3−f2|/(2^p−1)`
+and the extrapolated value), `data-range` (anything else three rungs can show:
+`3 × (max − min)` of the QoI over the rungs, a bound on the observed variation
+rather than an asymptotic estimate), `converged-exactly`, or `single-rung` /
+`two-rungs` (no estimate). The published field, temperature range, energy
+balance and quality census are the FINEST rung's. Cost is disclosed, not
+hidden: three rungs are about seventy base solves (MEASURED 2026-09-02, debug
+build, heatsink example: 685 → 5,480 → 43,840 tets in 0.5 s, 7.8 s and 130 s;
+T_max 301.99578 → 301.99615 → 301.99610 K, i.e. `data-range`, half-width
+1.1 mK), which is why the ladder is a declared study and not the default. The
+linear solve's true-residual gate is two decades below the declared
+`tolerance-rel` (floor 1e-13); the crate default of 1e-12 refused the second
+rung at 1.37e-12 after 1,256 Krylov iterations.
+
+The QoI receipt (schema v2) carries the ladder's estimate as the
+**Discretization term** — the first measured term of the eight — through
+fs-airflow's discretization-receipt seam: `"state":"interval"` with the
+half-width in kelvin, the term's provenance role
+`thermal-qoi-discretization-receipt`, and a `derivation` naming the method
+(`richardson-gci`, `eca-hoekstra-data-range` or `bitwise-agreement`), the
+ladder status, order, rung count, refinement ratio, safety factor and the
+conduction receipt it was read from. The stage still refuses
+(`cli-solve-qoi-budget-authority`) if any OTHER term, or this term without a
+ladder estimate, carries measured authority; the seven remaining terms are
+explicit NO-DATA and the `no_claim` text counts them. The verdict stays
+Estimated / indeterminate: one measured term does not close a budget. The
+report projects the interval term's magnitude into the uncertainty table and
+the QoI's `discretization_error`, and renders the ladder rows and estimate as
+its convergence section (fs-ladder's vocabulary via fs-report); a single-rung
+run shows no study.
 A run id whose ops exist in the ledger but none of which is admissible under the
 running driver (another driver version, a stage-receipt schema this driver does
 not read, a non-deterministic or off-branch op) refuses with
@@ -643,17 +688,19 @@ publication.
   tessellation, component nesting, self-intersection certification, or
   physical/CAD sameness. Named face groups are caller-supplied labels on the
   promoted soup, not independently certified CAD product-structure identity.
-- The presence of report/package in help and parsing is not an implementation
-  claim. Until their named authorities land, execution fails before side
-  effects.
-- The solve verb executes only its available leading prefix. A run cannot
-  currently complete because `qoi` remains a typed gap. Projects without an
-  explicit conduction setup also stop at the conduction gap. The conduction
-  path proves only the declared finite-mesh, static Dirichlet/Neumann/Robin
-  solve, exact matching-P1 finite contact, and the reported algebraic residual
-  and energy balance. It does not authenticate source geometry or material
-  claims, establish mesh convergence, or lower nonmatching or
-  temperature-dependent contact. Unsupported interface models refuse rather
+- `report` and `package` execute against a completed run and prove it by
+  sealed evidence (see the verb section); only `compare` is still a parsed
+  verb without a producer, and it fails before side effects.
+- All seven stages execute; a project without an explicit conduction setup or
+  without a `temperature-max` requirement refuses at the stage that needs it
+  (`cli-solve-conduction-undeclared`, `cli-solve-qoi-undeclared`). The
+  conduction path proves only the declared finite-mesh, static
+  Dirichlet/Neumann/Robin solve, exact matching-P1 finite contact, and the
+  reported algebraic residual and energy balance. It does not authenticate
+  source geometry or material claims, establish mesh convergence beyond what a
+  declared uniform h-ladder measured on the QoI's nodal maximum (no
+  energy-norm or DWR bound), or lower nonmatching or temperature-dependent
+  contact. Unsupported interface models refuse rather
   than silently assuming perfect contact. When the project declares a
   schema-v4 `(airflow-convection ...)` law, the stage performs ONE branch's
   conjugate airflow exchange (driver v10, receipt v3 `conjugate` object):

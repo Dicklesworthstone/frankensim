@@ -110,5 +110,13 @@ import-verify → assign → material-resolve → flow-network → conduction �
 
 Read the HTML: every number cites the receipt hash it was copied from, and
 the uncertainty table prints `NO-DATA` where nothing was measured. See
+`heatsink-fan-ladder.fsim` for the same project with `(solver :fidelity
+"ladder")` and a 900 s time budget: the conduction stage then solves the
+audited mesh and two uniform refinements (685 → 5,480 → 43,840 tets), the
+receipt's `ladder` block lists every rung, and the QoI budget's discretization
+term becomes a measured `interval` (on this body the maximum moves by 0.37 mK
+then 0.05 mK, so the bound is the disclosed data-range one, 1.1 mK). It costs
+about seventy base solves; the default `auto` fidelity solves once and says
+`"stop":"fidelity-single-rung"`. See
 `examples/cooling-enclosure/README.md` for receipt anatomy and
 `examples/heated-plate/README.md` for the minimal schema tour.
