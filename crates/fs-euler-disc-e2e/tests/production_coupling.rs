@@ -1894,6 +1894,19 @@ fn profile_native_fillet_curvature_reaches_production_normal_and_rolling_receipt
             Err(fs_euler_disc_e2e::RenderTrajectoryError::ProductionPrefixModelMismatch)
         ));
 
+        let mut stale_density_profile = profile.clone();
+        stale_density_profile.density_kg_per_m3 *= 2.0;
+        assert!(matches!(
+            RenderTrajectory::from_production_coupling_prefix(
+                &model,
+                &production_prefix,
+                &stale_density_profile,
+                first_request.duration_s,
+                cx,
+            ),
+            Err(fs_euler_disc_e2e::RenderTrajectoryError::ProductionPrefixModelMismatch)
+        ));
+
         let first = model
             .step(&checkpoint, &first_request)
             .expect("profile-native production step");

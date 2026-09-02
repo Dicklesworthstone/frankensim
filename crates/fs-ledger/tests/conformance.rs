@@ -665,12 +665,10 @@ fn ledger_003e_checked_identity_re_attests_exact_mutation_guards() {
             ledger.checked_instance_id(),
             Err(LedgerError::SchemaMismatch { .. })
         ));
-        if index == 0 {
-            assert!(matches!(
-                ledger.lint(),
-                Err(LedgerError::SchemaMismatch { .. })
-            ));
-        }
+        assert!(matches!(
+            ledger.lint(),
+            Err(LedgerError::SchemaMismatch { .. })
+        ));
         raw.execute(fs_ledger::schema::V5[index])
             .expect("restore exact shipped identity guard");
         assert_eq!(

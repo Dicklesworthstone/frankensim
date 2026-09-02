@@ -796,6 +796,18 @@ impl PcbStackup {
                 detail: "summing layer thicknesses overflowed".to_string(),
             })?;
         let separation_ratio = self.scale_separation.feature_size_m / total_thickness;
+        if !separation_ratio.is_finite() {
+            return Err(PcbHomogenizationError::InvalidField {
+                field: "feature-to-thickness-ratio",
+                detail: "feature-size / total stack thickness overflowed".to_string(),
+            });
+        }
+        if separation_ratio <= 0.0 {
+            return Err(PcbHomogenizationError::InvalidField {
+                field: "feature-to-thickness-ratio",
+                detail: "feature-size / total stack thickness underflowed to zero".to_string(),
+            });
+        }
         if separation_ratio > self.scale_separation.maximum_feature_to_thickness_ratio {
             return Err(PcbHomogenizationError::ScaleSeparation {
                 observed_ratio: separation_ratio,
@@ -805,7 +817,28 @@ impl PcbStackup {
 
         let (principal, structural_bounds) =
             principal_and_structural(&self.layers, total_thickness);
+        let mut derived_values = principal
+            .nominal_w_mk
+            .into_iter()
+            .chain(principal.lower_w_mk)
+            .chain(principal.upper_w_mk)
+            .chain([structural_bounds.reuss_w_mk, structural_bounds.voigt_w_mk]);
+        if !derived_values.all(|value| value.is_finite() && value > 0.0) {
+            return Err(PcbHomogenizationError::InvalidField {
+                field: "effective-conductivity",
+                detail: "the admitted stackup overflowed or underflowed while deriving finite \
+                         positive effective conductivities"
+                    .to_string(),
+            });
+        }
         let tensor = rotate_principal(self.frame.axes, principal.nominal_w_mk);
+        if tensor.iter().flatten().any(|value| !value.is_finite()) {
+            return Err(PcbHomogenizationError::InvalidField {
+                field: "conductivity-tensor",
+                detail: "the admitted frame overflowed while rotating the effective conductivity"
+                    .to_string(),
+            });
+        }
         let coverage_influences = self
             .layers
             .iter()

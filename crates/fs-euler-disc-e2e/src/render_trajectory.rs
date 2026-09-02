@@ -535,17 +535,13 @@ impl RenderTrajectory {
         if !(declared_maximum_timestep_s.is_finite() && declared_maximum_timestep_s > 0.0) {
             return Err(RenderTrajectoryError::InvalidTimestep);
         }
-        let profile_mass = profile_mass_to_mbd(profile.mass_properties)
-            .map_err(|error| RenderTrajectoryError::DerivedState(error.to_string()))?;
+        admit_production_render_profile(model, profile, cx)?;
         model
             .validate_checkpoint(&source.start_checkpoint)
             .map_err(|_| RenderTrajectoryError::ProductionPrefixModelMismatch)?;
         model
             .validate_checkpoint(&source.last_accepted_checkpoint)
             .map_err(|_| RenderTrajectoryError::ProductionPrefixModelMismatch)?;
-        if model.disc_mass_properties != profile_mass {
-            return Err(RenderTrajectoryError::ProductionPrefixModelMismatch);
-        }
         let expected_version = source
             .start_checkpoint
             .committed_version
@@ -809,17 +805,13 @@ impl RenderTrajectory {
         if !(declared_maximum_timestep_s.is_finite() && declared_maximum_timestep_s > 0.0) {
             return Err(RenderTrajectoryError::InvalidTimestep);
         }
-        let profile_mass = profile_mass_to_mbd(profile.mass_properties)
-            .map_err(|error| RenderTrajectoryError::DerivedState(error.to_string()))?;
+        admit_production_render_profile(model, profile, cx)?;
         model
             .validate_checkpoint(&source.start_checkpoint)
             .map_err(|_| RenderTrajectoryError::ProductionPrefixModelMismatch)?;
         model
             .validate_checkpoint(&source.last_accepted_checkpoint)
             .map_err(|_| RenderTrajectoryError::ProductionPrefixModelMismatch)?;
-        if model.disc_mass_properties != profile_mass {
-            return Err(RenderTrajectoryError::ProductionPrefixModelMismatch);
-        }
         let expected_version = source
             .start_checkpoint
             .committed_version
@@ -1181,17 +1173,13 @@ impl RenderTrajectory {
         if !(declared_maximum_timestep_s.is_finite() && declared_maximum_timestep_s > 0.0) {
             return Err(RenderTrajectoryError::InvalidTimestep);
         }
-        let profile_mass = profile_mass_to_mbd(profile.mass_properties)
-            .map_err(|error| RenderTrajectoryError::DerivedState(error.to_string()))?;
+        admit_production_render_profile(model, profile, cx)?;
         model
             .validate_checkpoint(&source.start_checkpoint)
             .map_err(|_| RenderTrajectoryError::ProductionPrefixModelMismatch)?;
         model
             .validate_checkpoint(&source.last_accepted_checkpoint)
             .map_err(|_| RenderTrajectoryError::ProductionPrefixModelMismatch)?;
-        if model.disc_mass_properties != profile_mass {
-            return Err(RenderTrajectoryError::ProductionPrefixModelMismatch);
-        }
         let accepted_steps = u64::try_from(source.accepted_mechanics_steps).map_err(|_| {
             RenderTrajectoryError::Capacity {
                 artifact: "production-control accepted mechanics steps",
@@ -2985,6 +2973,17 @@ fn production_prefix_disposition(
             )
         }
     }
+}
+
+fn admit_production_render_profile(
+    model: &ProductionCouplingModel,
+    profile: &ResolvedDiscProfile,
+    cx: &Cx<'_>,
+) -> Result<(), RenderTrajectoryError> {
+    model
+        .admit_axisymmetric_profile(profile, cx)
+        .map(|_| ())
+        .map_err(|_| RenderTrajectoryError::ProductionPrefixModelMismatch)
 }
 
 const fn production_refusal_code(error: &ProductionCouplingError) -> u32 {

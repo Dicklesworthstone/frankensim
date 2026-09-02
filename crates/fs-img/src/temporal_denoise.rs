@@ -892,6 +892,12 @@ fn validate_history(
         }
         return Ok(());
     };
+    // A cut discards the supplied history completely. A new shot may restart
+    // its segment-local frame index, so successor ordering is meaningful only
+    // when the caller asks to consume that history across a continuous edge.
+    if boundary == TemporalFrameBoundary::Cut {
+        return Ok(());
+    }
     let expected = previous
         .frame_index
         .checked_add(1)
@@ -901,9 +907,6 @@ fn validate_history(
             expected,
             got: input.frame_index,
         });
-    }
-    if boundary == TemporalFrameBoundary::Cut {
-        return Ok(());
     }
     if input.width != previous.width || input.height != previous.height {
         return Err(TemporalDenoiseError::HistoryShapeMismatch);
@@ -1612,14 +1615,16 @@ mod tests {
 
     #[test]
     fn cut_reset_equals_fresh_reset_and_changes_may_cross_cut() {
-        let first = Fixture::surface(3, 2, 0, [1.0, 0.0, 0.0]);
-        let mut cut = Fixture::surface(3, 2, 1, [0.0, 1.0, 0.0]);
+        let first = Fixture::surface(3, 2, 41, [1.0, 0.0, 0.0]);
+        // A cut starts a new segment, so its local frame index need not
+        // continue the old shot's index.
+        let mut cut = Fixture::surface(3, 2, 0, [0.0, 1.0, 0.0]);
         cut.object_ids = None;
         cut.material_ids = None;
         let first_output = run(
             &first,
             None,
-            TemporalFrameBoundary::Continuous,
+            TemporalFrameBoundary::Cut,
             TemporalDenoiseConfig::default(),
         )
         .unwrap();

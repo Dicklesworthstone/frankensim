@@ -10438,6 +10438,7 @@ fn brushed_shading_frame(
                 shading_normal: transform.transform_vector(local_frame.shading_normal),
                 tangent: transform.transform_vector(local_frame.tangent),
                 bitangent: transform.transform_vector(local_frame.bitangent),
+                mark_covered: local_frame.mark_covered,
             },
             None => local_frame,
         })),
@@ -17540,6 +17541,84 @@ mod tests {
     }
 
     #[test]
+    fn brushed_radial_mark_changes_shading_and_preserves_sample_pdf_agreement() {
+        let detail = crate::surface_detail::SurfaceDetail::try_new(
+            0.12,
+            2.0,
+            crate::surface_detail::BrushingPattern::Circular,
+            0.0,
+            Some(crate::surface_detail::RadialMark {
+                azimuth_rad: 0.0,
+                half_width_rad: 0.1,
+            }),
+        )
+        .unwrap();
+        let brushed = Material::BrushedConductor {
+            optics: ConductorOptics::representative_stainless_steel(),
+            detail,
+        };
+        let n = Vec3::new(0.0, 0.0, 1.0);
+        let marked =
+            crate::surface_detail::shading_frame(&detail, Point3::new(0.5, 0.0, 0.0), n).unwrap();
+        assert!(marked.mark_covered);
+        let plain =
+            crate::surface_detail::shading_frame(&detail, Point3::new(0.0, 0.5, 0.0), n).unwrap();
+        assert!(
+            !plain.mark_covered,
+            "off-sector radial point must take the unmarked brushed branch"
+        );
+
+        let wo = Vec3::new(
+            0.3,
+            0.2,
+            (1.0_f64 - 0.3_f64 * 0.3_f64 - 0.2_f64 * 0.2_f64).sqrt(),
+        );
+        let expected_frame_pdf = |frame: &crate::surface_detail::ShadingFrame, wi: Vec3| {
+            let half = unit(Vec3::new(wo.x + wi.x, wo.y + wi.y, wo.z + wi.z));
+            let (alpha_x, alpha_y) = detail.alpha_pair_for_mark(frame.mark_covered);
+            ggx_vndf_reflection_pdf_aniso(
+                alpha_x,
+                alpha_y,
+                brushed_local(frame, wo),
+                brushed_local(frame, half),
+            )
+        };
+        let (wi, sampled_pdf) = bsdf_sample(&brushed, n, wo, 0.37, 0.61, Some(&marked))
+            .expect("admitted marked sample");
+        let expected_pdf = expected_frame_pdf(&marked, wi);
+        assert!(
+            (sampled_pdf - expected_pdf).abs() <= 4.0e-12 * sampled_pdf.abs().max(1.0),
+            "marked sampler must use marked roughness: sampled={sampled_pdf:.17e}, expected={expected_pdf:.17e}"
+        );
+        let evaluated_pdf = bsdf_pdf(&brushed, n, wo, wi, Some(&marked));
+        assert!(
+            (sampled_pdf - evaluated_pdf).abs() <= 4.0e-12 * sampled_pdf.abs().max(1.0),
+            "marked sample/pdf mismatch: sampled={sampled_pdf:.17e}, evaluated={evaluated_pdf:.17e}"
+        );
+        let (plain_wi, plain_sampled_pdf) = bsdf_sample(&brushed, n, wo, 0.37, 0.61, Some(&plain))
+            .expect("admitted unmarked sample");
+        let plain_expected_pdf = expected_frame_pdf(&plain, plain_wi);
+        assert!(
+            (plain_sampled_pdf - plain_expected_pdf).abs()
+                <= 4.0e-12 * plain_sampled_pdf.abs().max(1.0),
+            "unmarked sampler must use base roughness: sampled={plain_sampled_pdf:.17e}, expected={plain_expected_pdf:.17e}"
+        );
+        let plain_evaluated_pdf = bsdf_pdf(&brushed, n, wo, plain_wi, Some(&plain));
+        assert!(
+            (plain_sampled_pdf - plain_evaluated_pdf).abs()
+                <= 4.0e-12 * plain_sampled_pdf.abs().max(1.0),
+            "unmarked sample/pdf mismatch: sampled={plain_sampled_pdf:.17e}, evaluated={plain_evaluated_pdf:.17e}"
+        );
+        let marked_eval =
+            opaque_bsdf_eval(&brushed, n, wo, wi, 550.0, None, Some(&marked)).unwrap();
+        let plain_eval = opaque_bsdf_eval(&brushed, n, wo, wi, 550.0, None, Some(&plain)).unwrap();
+        assert!(
+            (marked_eval - plain_eval).abs() > 1.0e-12 * plain_eval.abs().max(1.0),
+            "radial mark must reach the BSDF rather than remain identity-only"
+        );
+    }
+
+    #[test]
     fn brushed_shading_frame_is_body_locked_through_instance_placement() {
         let detail = crate::surface_detail::SurfaceDetail::try_new(
             0.12,
@@ -18591,7 +18670,7 @@ fn opaque_bsdf_eval(
             return Ok(0.0);
         }
         let microfacet_normal = hsum.scale(1.0 / hn);
-        let (alpha_x, alpha_y) = detail.alpha_pair();
+        let (alpha_x, alpha_y) = detail.alpha_pair_for_mark(frame.mark_covered);
         let m_local = brushed_local(frame, microfacet_normal);
         let wo_local = brushed_local(frame, wo);
         let wi_local = brushed_local(frame, wi);
@@ -18671,16 +18750,18 @@ fn bsdf_pdf(
                 return 0.0;
             }
             let m = hsum.scale(1.0 / hn);
-            let (alpha_x, alpha_y) = detail.alpha_pair();
             match brushed {
-                Some(frame) => ggx_vndf_reflection_pdf_aniso(
-                    alpha_x,
-                    alpha_y,
-                    brushed_local(frame, wo),
-                    brushed_local(frame, m),
-                ),
+                Some(frame) => {
+                    let (alpha_x, alpha_y) = detail.alpha_pair_for_mark(frame.mark_covered);
+                    ggx_vndf_reflection_pdf_aniso(
+                        alpha_x,
+                        alpha_y,
+                        brushed_local(frame, wo),
+                        brushed_local(frame, m),
+                    )
+                }
                 // Pole fallback: isotropic base alpha (see opaque_bsdf_eval).
-                None => ggx_vndf_reflection_pdf(alpha_x, n, wo, m),
+                None => ggx_vndf_reflection_pdf(detail.alpha_pair().0, n, wo, m),
             }
         }
         Material::Dielectric { .. } => 0.0,
@@ -18705,9 +18786,9 @@ fn bsdf_sample(
             sample_ggx_vndf_reflection(n, wo, surface.roughness_alpha(), u1, u2)
         }
         Material::BrushedConductor { detail, .. } => {
-            let (alpha_x, alpha_y) = detail.alpha_pair();
             match brushed {
                 Some(frame) => {
+                    let (alpha_x, alpha_y) = detail.alpha_pair_for_mark(frame.mark_covered);
                     let (wi_local, pdf) = sample_ggx_vndf_reflection_aniso(
                         brushed_local(frame, wo),
                         alpha_x,
@@ -18721,7 +18802,7 @@ fn bsdf_sample(
                     (n.dot(wi) > 0.0 && pdf > 0.0).then_some((wi, pdf))
                 }
                 // Pole fallback: isotropic base alpha.
-                None => sample_ggx_vndf_reflection(n, wo, alpha_x, u1, u2),
+                None => sample_ggx_vndf_reflection(n, wo, detail.alpha_pair().0, u1, u2),
             }
         }
         Material::Dielectric { .. } => None,

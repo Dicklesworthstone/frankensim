@@ -189,11 +189,11 @@ fn screen_full_drift(res: &SimResult, impulse_scale: f64, tol_rel: f64) -> Scree
     };
     if !res.drift.is_finite()
         || !res.impulse_error.is_finite()
-        || res.impulse_error < 0.0
+        || res.impulse_error.is_sign_negative()
         || !impulse_scale.is_finite()
         || impulse_scale <= 0.0
         || !tol_rel.is_finite()
-        || tol_rel < 0.0
+        || tol_rel.is_sign_negative()
     {
         return malformed;
     }
@@ -743,6 +743,10 @@ mod screen_and_domain_tests {
                 drift: 1.0,
                 impulse_error: -1.0,
             },
+            SimResult {
+                drift: 1.0,
+                impulse_error: -0.0,
+            },
         ] {
             assert_invalid_estimated(result, 1.0, 0.1);
         }
@@ -754,7 +758,13 @@ mod screen_and_domain_tests {
         for scale in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0, -0.0, 0.0] {
             assert_invalid_estimated(valid, scale, 0.1);
         }
-        for tolerance in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -f64::EPSILON] {
+        for tolerance in [
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            -f64::EPSILON,
+            -0.0,
+        ] {
             assert_invalid_estimated(valid, 1.0, tolerance);
         }
 
@@ -788,6 +798,20 @@ mod screen_and_domain_tests {
             }
         );
         assert_eq!(pass.band, Some((1.5, 2.5)));
+
+        let zero_tolerance = screen_full_drift(
+            &SimResult {
+                drift: 2.0,
+                impulse_error: 0.0,
+            },
+            1.0,
+            0.0,
+        );
+        assert!(
+            zero_tolerance.screened,
+            "a zero residual must admit at the +0.0 inclusive threshold"
+        );
+        assert_eq!(zero_tolerance.band, Some((2.0, 2.0)));
 
         let leaked = screen_full_drift(
             &SimResult {

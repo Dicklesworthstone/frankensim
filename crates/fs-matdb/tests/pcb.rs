@@ -424,6 +424,179 @@ fn scale_separation_and_malformed_inputs_refuse_typed() {
 }
 
 #[test]
+fn scale_separation_ratio_overflow_refuses_before_publishing_an_infinite_diagnostic() {
+    let (copper, fr4) = exact_cards();
+    let layer = PcbLayer::new(
+        "minimum-normal-stack",
+        f64::MIN_POSITIVE,
+        datum(&copper),
+        datum(&fr4),
+        coverage("coverage/ratio-overflow", 0.5, 0.5, 0.5),
+    )
+    .expect("finite positive thickness remains an admitted input");
+    let error = PcbStackup::new(
+        "ratio-overflow",
+        vec![layer],
+        PcbPrincipalFrame::default(),
+        PcbScaleSeparation::new(f64::MAX, 1.0).expect("finite scale rule"),
+    )
+    .expect("stackup")
+    .homogenize()
+    .expect_err("an infinite feature/thickness ratio must not enter a receipt or diagnostic");
+    assert!(matches!(
+        error,
+        PcbHomogenizationError::InvalidField {
+            field: "feature-to-thickness-ratio",
+            ref detail,
+        } if detail.contains("overflowed")
+    ));
+}
+
+#[test]
+fn scale_separation_ratio_underflow_refuses_before_publishing_a_zero_diagnostic() {
+    let (copper, fr4) = exact_cards();
+    let layer = PcbLayer::new(
+        "maximum-finite-stack",
+        f64::MAX,
+        datum(&copper),
+        datum(&fr4),
+        coverage("coverage/ratio-underflow", 0.5, 0.5, 0.5),
+    )
+    .expect("finite positive thickness remains an admitted input");
+    assert_eq!(
+        f64::MIN_POSITIVE / f64::MAX,
+        0.0,
+        "the finite positive ratio underflows in IEEE-754 arithmetic"
+    );
+    let error = PcbStackup::new(
+        "ratio-underflow",
+        vec![layer],
+        PcbPrincipalFrame::default(),
+        PcbScaleSeparation::new(f64::MIN_POSITIVE, 1.0).expect("finite scale rule"),
+    )
+    .expect("stackup")
+    .homogenize()
+    .expect_err("an underflowed feature/thickness ratio must not publish a zero result");
+    assert!(matches!(
+        error,
+        PcbHomogenizationError::InvalidField {
+            field: "feature-to-thickness-ratio",
+            ref detail,
+        } if detail.contains("underflowed to zero")
+    ));
+}
+
+#[test]
+fn finite_admitted_inputs_refuse_when_through_plane_effective_conductivity_underflows() {
+    let smallest_positive = f64::from_bits(1);
+    assert!(smallest_positive.is_finite() && smallest_positive > 0.0);
+    let mixed_layer_conductivity = 1.0_f64.mul_add(smallest_positive, (1.0 - 1.0) * 1.0);
+    assert_eq!(
+        mixed_layer_conductivity.to_bits(),
+        smallest_positive.to_bits()
+    );
+    let harmonic_denominator = 1.0 / mixed_layer_conductivity;
+    assert!(harmonic_denominator.is_infinite());
+    assert_eq!(harmonic_denominator.recip(), 0.0);
+    let copper = material_card(
+        "minimum-copper",
+        "minimum-conductivity",
+        smallest_positive,
+        UncertaintyModel::HalfWidth {
+            half_width: 0.0,
+            confidence: 0.95,
+        },
+    );
+    let matrix = material_card(
+        "minimum-matrix",
+        "normal-conductivity",
+        1.0,
+        UncertaintyModel::HalfWidth {
+            half_width: 0.0,
+            confidence: 0.95,
+        },
+    );
+    let layer = PcbLayer::new(
+        "minimum-finite-layer",
+        1.0,
+        datum(&copper),
+        datum(&matrix),
+        coverage("coverage/effective-underflow", 1.0, 1.0, 1.0),
+    )
+    .expect("finite positive layer and conductivities remain admitted inputs");
+    let error = PcbStackup::new(
+        "effective-underflow",
+        vec![layer],
+        PcbPrincipalFrame::default(),
+        PcbScaleSeparation::new(1.0, 1.0).expect("finite scale rule"),
+    )
+    .expect("stackup")
+    .homogenize()
+    .expect_err("a zero through-plane effective conductivity must not be published");
+    assert!(matches!(
+        error,
+        PcbHomogenizationError::InvalidField {
+            field: "effective-conductivity",
+            ref detail,
+        } if detail.contains("overflowed or underflowed")
+    ));
+}
+
+#[test]
+fn finite_admitted_frame_refuses_when_rotation_overflows_the_effective_tensor() {
+    let copper = material_card(
+        "maximum-copper",
+        "maximum-conductivity",
+        f64::MAX,
+        UncertaintyModel::HalfWidth {
+            half_width: 0.0,
+            confidence: 0.95,
+        },
+    );
+    let matrix = material_card(
+        "maximum-matrix",
+        "maximum-conductivity",
+        f64::MAX,
+        UncertaintyModel::HalfWidth {
+            half_width: 0.0,
+            confidence: 0.95,
+        },
+    );
+    let stretch = (1.0 + 5.0e-13_f64).sqrt();
+    assert!((f64::MAX * stretch).is_infinite());
+    let frame = PcbPrincipalFrame::new([
+        [stretch, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, stretch.recip()],
+    ])
+    .expect("the declared near-orthonormal frame remains admitted");
+    let layer = PcbLayer::new(
+        "maximum-finite-layer",
+        1.0,
+        datum(&copper),
+        datum(&matrix),
+        coverage("coverage/tensor-overflow", 0.5, 0.5, 0.5),
+    )
+    .expect("finite positive layer and conductivities remain admitted inputs");
+    let error = PcbStackup::new(
+        "tensor-overflow",
+        vec![layer],
+        frame,
+        PcbScaleSeparation::new(1.0, 1.0).expect("finite scale rule"),
+    )
+    .expect("stackup")
+    .homogenize()
+    .expect_err("an infinite rotated conductivity tensor must not be published");
+    assert!(matches!(
+        error,
+        PcbHomogenizationError::InvalidField {
+            field: "conductivity-tensor",
+            ref detail,
+        } if detail.contains("overflowed")
+    ));
+}
+
+#[test]
 fn stack_order_is_identity_bearing_even_when_the_series_value_is_equal() {
     let stackup = reference_stackup();
     let forward = stackup.homogenize().expect("forward");

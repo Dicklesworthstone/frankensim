@@ -29,6 +29,9 @@ use fs_geom::{Point3, Vec3};
 pub const MIN_DETAIL_ALPHA: f64 = 1.0e-4;
 /// Upper admitted GGX alpha.
 pub const MAX_DETAIL_ALPHA: f64 = 1.0;
+/// Fixed roughness contrast for an optional radial reference mark. The mark
+/// stays inside the same admitted GGX domain as the unmarked finish.
+pub const RADIAL_MARK_ROUGHNESS_SCALE: f64 = 1.25;
 /// Hard cap on shading-normal perturbation (radians). Bounded so a shading
 /// normal can never flip below the geometric horizon.
 pub const MAX_NORMAL_PERTURBATION_RAD: f64 = 0.35;
@@ -173,6 +176,21 @@ impl SurfaceDetail {
         (self.base_alpha, self.base_alpha * self.anisotropy_ratio)
     }
 
+    /// GGX alpha pair at a local chart point. A mark is a shading-only
+    /// roughness contrast, clamped to the admitted GGX domain.
+    #[must_use]
+    pub fn alpha_pair_for_mark(&self, mark_covered: bool) -> (f64, f64) {
+        let (alpha_x, alpha_y) = self.alpha_pair();
+        if mark_covered {
+            (
+                (alpha_x * RADIAL_MARK_ROUGHNESS_SCALE).min(MAX_DETAIL_ALPHA),
+                (alpha_y * RADIAL_MARK_ROUGHNESS_SCALE).min(MAX_DETAIL_ALPHA),
+            )
+        } else {
+            (alpha_x, alpha_y)
+        }
+    }
+
     /// Whether this set is exactly the zero-detail limit.
     #[must_use]
     pub fn is_zero_detail(&self) -> bool {
@@ -235,6 +253,9 @@ pub struct ShadingFrame {
     pub tangent: Vec3,
     /// Second tangent: `geometric_normal x tangent` (unit; right-handed).
     pub bitangent: Vec3,
+    /// Whether this local frame lies inside the optional radial-mark sector.
+    /// It remains body-locked with the tangent frame and changes shading only.
+    pub mark_covered: bool,
 }
 
 /// Derive the deterministic tangent frame for the axisymmetric chart at a
@@ -301,6 +322,7 @@ pub fn shading_frame(
         shading_normal,
         tangent,
         bitangent,
+        mark_covered: detail.mark_covers(local),
     })
 }
 
@@ -501,5 +523,23 @@ mod tests {
         // Wraparound: an azimuth just below +pi is far from the mark; the
         // delta normalization must not misclassify it.
         assert!(!detail.mark_covers(Point3::new(-1.0, -1.0e-6, 0.0)));
+    }
+
+    #[test]
+    fn radial_mark_uses_bounded_shading_only_roughness_contrast() {
+        let detail = detail();
+        assert_eq!(detail.alpha_pair_for_mark(false), detail.alpha_pair());
+        let (marked_x, marked_y) = detail.alpha_pair_for_mark(true);
+        let (plain_x, plain_y) = detail.alpha_pair();
+        assert!(marked_x > plain_x && marked_y > plain_y);
+        assert!(marked_x <= MAX_DETAIL_ALPHA && marked_y <= MAX_DETAIL_ALPHA);
+
+        let frame = shading_frame(
+            &detail,
+            Point3::new(0.5, 0.0, 0.0),
+            Vec3::new(0.0, 0.0, 1.0),
+        )
+        .expect("off-axis frame");
+        assert!(frame.mark_covered, "frame retains the local mark predicate");
     }
 }
