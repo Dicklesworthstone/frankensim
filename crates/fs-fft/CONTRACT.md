@@ -51,6 +51,15 @@ is recorded under No-claim boundaries.
   grouped consecutively per tile (~8 tiles/worker target) and the column
   group cannot shrink below the floor at high worker counts. Grouping is
   timing-only; it never reorders pencils or changes bits.
+- `FftNd::{forward,inverse}_pooled_scoped(&mut [C64], &TilePool,
+  &asupersync::Cx, &CancelGate)` — the same N-D pencil transforms under the
+  caller's live asupersync task scope (bead lx0e). Each parallel pass uses
+  `TilePool::run_scoped`, so task cancellation or budget exhaustion reaches
+  the pool's ordinary drain boundary; serial-pencil boundaries checkpoint the
+  same task before transforming. Arithmetic and output bits remain those of
+  the local pooled API. This is the task-owned path. The generic
+  `KernelRunner` entry points remain explicit local-worker APIs and do not
+  imply task ancestry.
 - `FftNd::{forward,inverse}_pooled_observed(..., &mut dyn FnMut(NdPassReport))`
   (bead 3f6c) — the same transforms, additionally reporting each axis pass's
   geometry (`axis`, `kernel`, `n`, `stride`, `outer`, `tiles`, `completed`,

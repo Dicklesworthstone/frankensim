@@ -705,7 +705,65 @@ impl ReducedAeroModel {
         let speed = checked_norm(relative_velocity, "relative_speed_m_per_s")?;
         let angular = input.kinematics.angular_velocity_world_rad_per_s;
         let angular_speed = checked_norm(angular, "angular_speed_rad_per_s")?;
+        if density == 0.0 {
+            let candidate = self.zero_limit_candidate(input, relative_velocity, angular);
+            candidate.validate()?;
+            return Ok(candidate);
+        }
         let normal = input.pose.unit_normal()?;
+        let spin = finite_vec3(
+            normal.scaled(checked_dot(angular, normal, "spin_projection")?),
+            "spin_angular_velocity",
+        )?;
+        let spin_speed = checked_norm(spin, "spin_angular_speed")?;
+        let reorientation = finite_vec3(angular.minus(spin), "reorientation_angular_velocity")?;
+        let reorientation_speed = checked_norm(reorientation, "reorientation_angular_speed")?;
+        // Correlation domains describe actual nonzero exterior-flow
+        // contributions. A supplied component with a zero coefficient, a
+        // kinematically inactive component, or a zero exterior area cannot
+        // turn the exact zero limit into a roughness-domain refusal.
+        let form_component_active = if let Some(term) = self.components.form_drag {
+            if term.coefficient == 0.0 || speed == 0.0 {
+                false
+            } else {
+                let direction = finite_vec3(
+                    relative_velocity.scaled(1.0 / speed),
+                    "relative_velocity_direction",
+                )?;
+                let face_projection = finite_derived(
+                    checked_dot(normal, direction, "face_projection")?.abs(),
+                    "face_projection",
+                )?;
+                face_projection > 0.0 || geometry.exterior_thickness_m > 0.0
+            }
+        } else {
+            false
+        };
+        let skin_component_active = self
+            .components
+            .rotational_skin_friction
+            .is_some_and(|term| term.coefficient > 0.0)
+            && spin_speed > 0.0;
+        let edge_component_active = self
+            .components
+            .edge_flow
+            .is_some_and(|term| term.coefficient > 0.0)
+            && spin_speed > 0.0
+            && geometry.exterior_thickness_m > 0.0;
+        let orientation_component_active = self
+            .components
+            .orientation_rate_damping
+            .is_some_and(|term| term.coefficient > 0.0)
+            && reorientation_speed > 0.0;
+        if !(form_component_active
+            || skin_component_active
+            || edge_component_active
+            || orientation_component_active)
+        {
+            let candidate = self.zero_limit_candidate(input, relative_velocity, angular);
+            candidate.validate()?;
+            return Ok(candidate);
+        }
         let relative_roughness = finite_derived(
             input.roughness.height_m / geometry.radius_m,
             "relative_roughness",
@@ -714,7 +772,7 @@ impl ReducedAeroModel {
             .relative_roughness
             .require("relative_roughness", relative_roughness)?;
 
-        if density > 0.0 && speed > 0.0 && self.components.form_drag.is_some() {
+        if form_component_active {
             let re = finite_derived(
                 density * speed * (2.0 * geometry.radius_m) / input.gas.dynamic_viscosity_pa_s,
                 "translational_reynolds",
@@ -723,7 +781,7 @@ impl ReducedAeroModel {
                 .translational_reynolds
                 .require("translational_reynolds", re)?;
         }
-        if density > 0.0 && angular_speed > 0.0 && self.has_rotational_component() {
+        if skin_component_active || edge_component_active || orientation_component_active {
             let re = finite_derived(
                 density * angular_speed * geometry.radius_m * geometry.radius_m
                     / input.gas.dynamic_viscosity_pa_s,
@@ -788,21 +846,13 @@ impl ReducedAeroModel {
             force = finite_vec3(force.plus(form_force), "force_world_n")?;
         }
 
-        let spin = finite_vec3(
-            normal.scaled(checked_dot(angular, normal, "spin_projection")?),
-            "spin_angular_velocity",
-        )?;
-        let reorientation = finite_vec3(angular.minus(spin), "reorientation_angular_velocity")?;
         let torque_scale = finite_derived(
             0.5 * density * roughness_factor * geometry.radius_m.powi(3),
             "torque_scale",
         )?;
         if let Some(term) = self.components.rotational_skin_friction {
             let scale = finite_derived(
-                -torque_scale
-                    * face_area
-                    * term.coefficient
-                    * checked_norm(spin, "spin_angular_speed")?,
+                -torque_scale * face_area * term.coefficient * spin_speed,
                 "rotational_skin_torque_scale",
             )?;
             skin_torque = finite_vec3(spin.scaled(scale), "rotational_skin_torque_world_n_m")?;
@@ -810,10 +860,7 @@ impl ReducedAeroModel {
         }
         if let Some(term) = self.components.edge_flow {
             let scale = finite_derived(
-                -torque_scale
-                    * rim_wetted_area
-                    * term.coefficient
-                    * checked_norm(spin, "spin_angular_speed")?,
+                -torque_scale * rim_wetted_area * term.coefficient * spin_speed,
                 "edge_flow_torque_scale",
             )?;
             edge_torque = finite_vec3(spin.scaled(scale), "edge_flow_torque_world_n_m")?;
@@ -821,10 +868,7 @@ impl ReducedAeroModel {
         }
         if let Some(term) = self.components.orientation_rate_damping {
             let scale = finite_derived(
-                -torque_scale
-                    * face_area
-                    * term.coefficient
-                    * checked_norm(reorientation, "reorientation_angular_speed")?,
+                -torque_scale * face_area * term.coefficient * reorientation_speed,
                 "orientation_rate_torque_scale",
             )?;
             orientation_torque = finite_vec3(
@@ -857,6 +901,22 @@ impl ReducedAeroModel {
             input.gas.velocity_world_m_per_s,
             "ambient_boundary_power_w",
         )?;
+        let moving_ambient_requires_total_energy_accounting = ambient_boundary_power_w != 0.0;
+        let receipt = ReducedAeroReceipt {
+            authority: EstimateAuthority::EstimateOnly,
+            gas_source_id: input.gas.source_id.clone(),
+            roughness_source_id: input.roughness.source_id.clone(),
+            correlation_uncertainty_source_id: self.uncertainty.source_id.clone(),
+            coefficient_relative_half_width: self.uncertainty.coefficient_relative_half_width,
+            relative_power_w,
+            dissipated_relative_power_w: finite_derived(
+                -relative_power_w,
+                "dissipated_relative_power_w",
+            )?,
+            body_power_w,
+            ambient_boundary_power_w,
+            moving_ambient_requires_total_energy_accounting,
+        };
         let candidate = CandidateWrench {
             correlation: self.correlation.clone(),
             force_world_n: force,
@@ -867,31 +927,56 @@ impl ReducedAeroModel {
                 edge_flow_torque_world_n_m: edge_torque,
                 orientation_rate_torque_world_n_m: orientation_torque,
             },
-            receipt: ReducedAeroReceipt {
-                authority: EstimateAuthority::EstimateOnly,
-                gas_source_id: input.gas.source_id.clone(),
-                roughness_source_id: input.roughness.source_id.clone(),
-                correlation_uncertainty_source_id: self.uncertainty.source_id.clone(),
-                coefficient_relative_half_width: self.uncertainty.coefficient_relative_half_width,
-                relative_power_w,
-                dissipated_relative_power_w: finite_derived(
-                    -relative_power_w,
-                    "dissipated_relative_power_w",
-                )?,
-                body_power_w,
-                ambient_boundary_power_w,
-                moving_ambient_requires_total_energy_accounting: input.gas.velocity_world_m_per_s
-                    != Vec3::ZERO,
+            receipt_identity: ReceiptIdentity::from_evaluation(&self.correlation, &receipt),
+            receipt,
+            power_kinematics: ReceiptPowerKinematics {
+                relative_velocity_world_m_per_s: relative_velocity,
+                body_velocity_world_m_per_s: input.kinematics.linear_velocity_world_m_per_s,
+                ambient_velocity_world_m_per_s: input.gas.velocity_world_m_per_s,
+                angular_velocity_world_rad_per_s: angular,
             },
         };
         candidate.validate()?;
         Ok(candidate)
     }
 
-    fn has_rotational_component(&self) -> bool {
-        self.components.rotational_skin_friction.is_some()
-            || self.components.edge_flow.is_some()
-            || self.components.orientation_rate_damping.is_some()
+    fn zero_limit_candidate(
+        &self,
+        input: &ReducedAeroInput,
+        relative_velocity: Vec3,
+        angular_velocity: Vec3,
+    ) -> CandidateWrench {
+        let receipt = ReducedAeroReceipt {
+            authority: EstimateAuthority::EstimateOnly,
+            gas_source_id: input.gas.source_id.clone(),
+            roughness_source_id: input.roughness.source_id.clone(),
+            correlation_uncertainty_source_id: self.uncertainty.source_id.clone(),
+            coefficient_relative_half_width: self.uncertainty.coefficient_relative_half_width,
+            relative_power_w: 0.0,
+            dissipated_relative_power_w: 0.0,
+            body_power_w: 0.0,
+            ambient_boundary_power_w: 0.0,
+            moving_ambient_requires_total_energy_accounting: false,
+        };
+        CandidateWrench {
+            correlation: self.correlation.clone(),
+            force_world_n: Vec3::ZERO,
+            torque_world_n_m: Vec3::ZERO,
+            components: ComponentWrenches {
+                form_force_world_n: Vec3::ZERO,
+                rotational_skin_torque_world_n_m: Vec3::ZERO,
+                edge_flow_torque_world_n_m: Vec3::ZERO,
+                orientation_rate_torque_world_n_m: Vec3::ZERO,
+            },
+            receipt_identity: ReceiptIdentity::from_evaluation(&self.correlation, &receipt),
+            receipt,
+            power_kinematics: ReceiptPowerKinematics {
+                relative_velocity_world_m_per_s: relative_velocity,
+                body_velocity_world_m_per_s: input.kinematics.linear_velocity_world_m_per_s,
+                ambient_velocity_world_m_per_s: input.gas.velocity_world_m_per_s,
+                angular_velocity_world_rad_per_s: angular_velocity,
+            },
+        }
     }
 
     fn validate(&self) -> Result<(), ReducedAeroError> {
@@ -976,6 +1061,84 @@ pub struct ReducedAeroReceipt {
     pub moving_ambient_requires_total_energy_accounting: bool,
 }
 
+/// Evaluation kinematics retained privately so a public power receipt can be
+/// reconstructed before a work window accepts it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ReceiptPowerKinematics {
+    relative_velocity_world_m_per_s: Vec3,
+    body_velocity_world_m_per_s: Vec3,
+    ambient_velocity_world_m_per_s: Vec3,
+    angular_velocity_world_rad_per_s: Vec3,
+}
+
+/// Private snapshot of the evaluated public identity/authority fields.
+///
+/// `CandidateWrench` deliberately exposes its receipt for inspection, so this
+/// snapshot is the admission-time anchor that prevents a cloned candidate from
+/// relabelling its correlation, source cards, or caller-declared uncertainty.
+#[derive(Debug, Clone, PartialEq)]
+struct ReceiptIdentity {
+    correlation: CorrelationIdentity,
+    authority: EstimateAuthority,
+    gas_source_id: String,
+    roughness_source_id: String,
+    correlation_uncertainty_source_id: String,
+    coefficient_relative_half_width: f64,
+}
+
+impl ReceiptIdentity {
+    fn from_evaluation(correlation: &CorrelationIdentity, receipt: &ReducedAeroReceipt) -> Self {
+        Self {
+            correlation: correlation.clone(),
+            authority: receipt.authority,
+            gas_source_id: receipt.gas_source_id.clone(),
+            roughness_source_id: receipt.roughness_source_id.clone(),
+            correlation_uncertainty_source_id: receipt.correlation_uncertainty_source_id.clone(),
+            coefficient_relative_half_width: receipt.coefficient_relative_half_width,
+        }
+    }
+
+    fn validate_public(
+        &self,
+        correlation: &CorrelationIdentity,
+        receipt: &ReducedAeroReceipt,
+    ) -> Result<(), ReducedAeroError> {
+        if correlation != &self.correlation {
+            return Err(ReducedAeroError::InvalidCandidateWrench {
+                field: "candidate.correlation",
+            });
+        }
+        if receipt.authority != self.authority {
+            return Err(ReducedAeroError::InvalidCandidateWrench {
+                field: "candidate.receipt.authority",
+            });
+        }
+        if receipt.gas_source_id != self.gas_source_id {
+            return Err(ReducedAeroError::InvalidCandidateWrench {
+                field: "candidate.receipt.gas_source_id",
+            });
+        }
+        if receipt.roughness_source_id != self.roughness_source_id {
+            return Err(ReducedAeroError::InvalidCandidateWrench {
+                field: "candidate.receipt.roughness_source_id",
+            });
+        }
+        if receipt.correlation_uncertainty_source_id != self.correlation_uncertainty_source_id {
+            return Err(ReducedAeroError::InvalidCandidateWrench {
+                field: "candidate.receipt.correlation_uncertainty_source_id",
+            });
+        }
+        if receipt.coefficient_relative_half_width.to_bits()
+            != self.coefficient_relative_half_width.to_bits()
+        {
+            return Err(ReducedAeroError::InvalidCandidateWrench {
+                field: "candidate.receipt.coefficient_relative_half_width",
+            });
+        }
+        Ok(())
+    }
+}
+
 /// One correlation candidate's wrench, expressed in its request's world frame.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CandidateWrench {
@@ -989,11 +1152,15 @@ pub struct CandidateWrench {
     pub components: ComponentWrenches,
     /// Estimate authority and energy-accounting information.
     pub receipt: ReducedAeroReceipt,
+    receipt_identity: ReceiptIdentity,
+    power_kinematics: ReceiptPowerKinematics,
 }
 
 impl CandidateWrench {
     fn validate(&self) -> Result<(), ReducedAeroError> {
         self.correlation.validate()?;
+        self.receipt_identity
+            .validate_public(&self.correlation, &self.receipt)?;
         for (value, field) in [
             (self.force_world_n, "candidate.force_world_n"),
             (self.torque_world_n_m, "candidate.torque_world_n_m"),
@@ -1070,6 +1237,13 @@ impl CandidateWrench {
                 return Err(ReducedAeroError::InvalidCandidateWrench { field });
             }
         }
+        if self.receipt.moving_ambient_requires_total_energy_accounting
+            != (self.receipt.ambient_boundary_power_w != 0.0)
+        {
+            return Err(ReducedAeroError::InvalidCandidateWrench {
+                field: "candidate.receipt.moving_ambient_requires_total_energy_accounting",
+            });
+        }
         if self.receipt.relative_power_w > 0.0 {
             return Err(ReducedAeroError::PassivePowerViolation {
                 relative_power_w: self.receipt.relative_power_w,
@@ -1093,6 +1267,91 @@ impl CandidateWrench {
         if !within_roundoff(self.receipt.body_power_w, reconstructed_body_power_w) {
             return Err(ReducedAeroError::InvalidCandidateWrench {
                 field: "candidate.receipt.body_power_w",
+            });
+        }
+        for (value, field) in [
+            (
+                self.power_kinematics.relative_velocity_world_m_per_s,
+                "candidate.power_kinematics.relative_velocity_world_m_per_s",
+            ),
+            (
+                self.power_kinematics.body_velocity_world_m_per_s,
+                "candidate.power_kinematics.body_velocity_world_m_per_s",
+            ),
+            (
+                self.power_kinematics.ambient_velocity_world_m_per_s,
+                "candidate.power_kinematics.ambient_velocity_world_m_per_s",
+            ),
+            (
+                self.power_kinematics.angular_velocity_world_rad_per_s,
+                "candidate.power_kinematics.angular_velocity_world_rad_per_s",
+            ),
+        ] {
+            if !value.finite() {
+                return Err(ReducedAeroError::InvalidCandidateWrench { field });
+            }
+        }
+        let reconstructed_relative_velocity = finite_vec3(
+            self.power_kinematics
+                .body_velocity_world_m_per_s
+                .minus(self.power_kinematics.ambient_velocity_world_m_per_s),
+            "candidate.power_kinematics.relative_velocity_world_m_per_s",
+        )?;
+        if !within_vec_roundoff(
+            self.power_kinematics.relative_velocity_world_m_per_s,
+            reconstructed_relative_velocity,
+        ) {
+            return Err(ReducedAeroError::InvalidCandidateWrench {
+                field: "candidate.power_kinematics.relative_velocity_world_m_per_s",
+            });
+        }
+        let torque_power_w = checked_dot(
+            self.torque_world_n_m,
+            self.power_kinematics.angular_velocity_world_rad_per_s,
+            "candidate.receipt.torque_power_w",
+        )?;
+        let reconstructed_relative_power_w = checked_sum(
+            checked_dot(
+                self.force_world_n,
+                self.power_kinematics.relative_velocity_world_m_per_s,
+                "candidate.receipt.relative_force_power_w",
+            )?,
+            torque_power_w,
+            "candidate.receipt.relative_power_w",
+        )?;
+        if !within_roundoff(
+            self.receipt.relative_power_w,
+            reconstructed_relative_power_w,
+        ) {
+            return Err(ReducedAeroError::InvalidCandidateWrench {
+                field: "candidate.receipt.relative_power_w",
+            });
+        }
+        let reconstructed_body_power_w = checked_sum(
+            checked_dot(
+                self.force_world_n,
+                self.power_kinematics.body_velocity_world_m_per_s,
+                "candidate.receipt.body_force_power_w",
+            )?,
+            torque_power_w,
+            "candidate.receipt.body_power_w",
+        )?;
+        if !within_roundoff(self.receipt.body_power_w, reconstructed_body_power_w) {
+            return Err(ReducedAeroError::InvalidCandidateWrench {
+                field: "candidate.receipt.body_power_w",
+            });
+        }
+        let reconstructed_ambient_boundary_power_w = checked_dot(
+            self.force_world_n,
+            self.power_kinematics.ambient_velocity_world_m_per_s,
+            "candidate.receipt.ambient_boundary_power_w",
+        )?;
+        if !within_roundoff(
+            self.receipt.ambient_boundary_power_w,
+            reconstructed_ambient_boundary_power_w,
+        ) {
+            return Err(ReducedAeroError::InvalidCandidateWrench {
+                field: "candidate.receipt.ambient_boundary_power_w",
             });
         }
         Ok(())

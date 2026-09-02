@@ -49,8 +49,8 @@ pub mod rigid3;
 /// decision bounds, and authenticated evidence admission.
 pub mod uncertainty;
 
-const AS_BUILT_ESTIMATOR_DOMAIN: &str = "org.frankensim.fs-asbuilt.diff-estimator.v6";
-const AS_BUILT_ESTIMATOR_SCHEMA: &[u8] = b"fs-asbuilt-diff-estimator-v6";
+const AS_BUILT_ESTIMATOR_DOMAIN: &str = "org.frankensim.fs-asbuilt.diff-estimator.v7";
+const AS_BUILT_ESTIMATOR_SCHEMA: &[u8] = b"fs-asbuilt-diff-estimator-v7";
 /// Identity-bound work-plan version for resource-driving scans and hashing.
 pub const AS_BUILT_WORK_PLAN_VERSION: u32 = 2;
 /// Identity-bound cancellation policy version for resource-driving scans.
@@ -752,7 +752,7 @@ pub fn as_built_diff_invocation_resources(
         .and_then(|bytes| bytes.checked_add("registration_residual".len()))
         .and_then(|bytes| bytes.checked_add("measurement_noise".len()))
         .and_then(|bytes| bytes.checked_add("design_tolerance".len()))
-        .and_then(|bytes| bytes.checked_add("asbuilt-diff-v5:".len() + 64))
+        .and_then(|bytes| bytes.checked_add("asbuilt-diff-v7:".len() + 64))
         .ok_or(RegError::WorkPlanOverflow {
             operation: "as-built diff output shape",
         })?;
@@ -1325,7 +1325,8 @@ pub enum SampledConformance {
     /// Every supplied deviation is strictly below tolerance and both declared
     /// registration residual and measurement noise are exactly zero.
     Pass,
-    /// A supplied correspondence exceeds the declared tolerance.
+    /// A supplied correspondence exceeds the declared tolerance with zero
+    /// declared registration residual and measurement noise.
     Fail,
     /// The supplied samples do not refute conformance, but nonzero uncertainty
     /// or a boundary comparison prevents even a sample-scoped pass.
@@ -1738,13 +1739,14 @@ fn as_built_diff_with_poll(
     let within_tolerance =
         max_deviation <= design_tolerance && dispersion <= design_tolerance - max_deviation;
     let above_noise_floor = max_deviation > dispersion;
-    let sampled_conformance = if max_deviation > design_tolerance {
-        SampledConformance::Fail
-    } else if max_deviation < design_tolerance
-        && reg.residual_rms == 0.0
-        && measurement_noise == 0.0
-    {
-        SampledConformance::Pass
+    let sampled_conformance = if reg.residual_rms == 0.0 && measurement_noise == 0.0 {
+        if max_deviation > design_tolerance {
+            SampledConformance::Fail
+        } else if max_deviation < design_tolerance {
+            SampledConformance::Pass
+        } else {
+            SampledConformance::Indeterminate
+        }
     } else {
         SampledConformance::Indeterminate
     };
@@ -1947,7 +1949,7 @@ fn estimator_identity(
     progress.require_completed(DIFF_IDENTITY_PHASE, work_plan.total)?;
     let preimage_hash = hasher.finalize();
     Ok(format!(
-        "asbuilt-diff-v6:{}",
+        "asbuilt-diff-v7:{}",
         fs_blake3::hash_domain(AS_BUILT_ESTIMATOR_DOMAIN, preimage_hash.as_bytes())
     ))
 }

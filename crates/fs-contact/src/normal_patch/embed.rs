@@ -14,6 +14,7 @@ use super::{
 };
 
 const EMBED_DOMAIN: &str = "org.frankensim.fs-contact.normal-patch.embed.v1";
+const EMBED_STATE_DOMAIN: &str = "org.frankensim.fs-contact.normal-patch.embed-state.v1";
 const FRAME_TOLERANCE: f64 = 1.0e-12;
 
 /// Explicit solver lane. Only a smooth, fixed branch can publish a residual.
@@ -487,12 +488,8 @@ impl NormalPatchEmbedRequest {
 
     fn mapped_law_state_id(&self) -> String {
         format!(
-            "embed/v1/{}/{}/{}/{:016x}/{}",
-            self.identity.solver_id,
-            self.identity.contact_id,
-            self.identity.feature_id,
-            self.kinematics.time_s.to_bits(),
-            self.kinematics.iteration,
+            "embed/v1/{}",
+            self.canonical_sample_identity(EMBED_STATE_DOMAIN)
         )
     }
 
@@ -506,6 +503,22 @@ impl NormalPatchEmbedRequest {
             self.kinematics.time_s.to_bits(),
             self.kinematics.iteration,
         )
+    }
+
+    fn canonical_sample_identity(&self, domain: &str) -> ContentHash {
+        let mut bytes = Vec::new();
+        for value in [
+            &self.identity.solver_id,
+            &self.identity.contact_id,
+            &self.identity.feature_id,
+            &self.identity.sample_id,
+        ] {
+            bytes.extend_from_slice(&(value.len() as u64).to_le_bytes());
+            bytes.extend_from_slice(value.as_bytes());
+        }
+        bytes.extend_from_slice(&self.kinematics.time_s.to_bits().to_le_bytes());
+        bytes.extend_from_slice(&self.kinematics.iteration.to_le_bytes());
+        hash_domain(domain, &bytes)
     }
 }
 

@@ -5,9 +5,14 @@ use std::cell::Cell;
 use fs_assimilate::{
     AssimError, Belief, FiniteDifferenceSettings, LinearizationDisposition,
     NonlinearObservationSpec, Observation, assimilate, assimilate_nonlinear_fd,
-    linearize_nonlinear_fd,
+    assimilate_nonlinear_fd_budgeted, linearize_nonlinear_fd,
+    nonlinear_assimilation_invocation_resources,
 };
-use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey, VirtualClock};
+use fs_blake3::hash_domain;
+use fs_exec::{
+    Budget, CancelGate, Cx, ExecMode, InvocationAdmitter, InvocationDisposition, InvocationLimits,
+    StreamKey, VirtualClock,
+};
 
 fn bits_eq(a: f64, b: f64) -> bool {
     a.to_bits() == b.to_bits()
@@ -153,6 +158,113 @@ fn large_innovation_is_demoted_without_observation_or_posterior() {
         ));
         assert!(result.linearization().observation().is_none());
         assert!(result.posterior().is_none());
+    });
+}
+
+#[test]
+fn budgeted_nonlinear_update_uses_one_sealed_child_for_probes_and_publication() {
+    let gate = CancelGate::new();
+    let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+    let clock = VirtualClock::new();
+    pool.scope(|arena| {
+        let cx = Cx::new(
+            &gate,
+            arena,
+            TEST_STREAM,
+            Budget::INFINITE,
+            ExecMode::Deterministic,
+        )
+        .with_time_source(&clock);
+        let prior = Belief::scalar(2.0, 1.5).expect("valid prior");
+        let nonlinear_spec = spec(5.5, 0.5, "budgeted-affine-v1", settings(0.25, 10.0));
+        let resources = nonlinear_assimilation_invocation_resources(&prior, &nonlinear_spec, &cx)
+            .expect("nonlinear typed plan");
+        let limits = InvocationLimits::new(
+            resources,
+            None,
+            hash_domain("fs-assimilate.test.accuracy", b"nonlinear-budgeted"),
+            hash_domain("fs-assimilate.test.capability", b"nonlinear-budgeted"),
+        );
+        let admission = InvocationAdmitter::new()
+            .admit(
+                hash_domain("fs-assimilate.test.invocation", b"nonlinear-budgeted"),
+                limits,
+                resources,
+            )
+            .expect("exact nonlinear plan admitted");
+        let mut root = admission.begin(&cx, &clock).expect("root begins");
+        let mut child = root
+            .split_child("nonlinear-assimilation", resources)
+            .expect("sealed nonlinear child");
+        let result = assimilate_nonlinear_fd_budgeted(
+            &prior,
+            &nonlinear_spec,
+            |state| 2.0 * state[0] + 1.0,
+            &cx,
+            &mut child,
+        )
+        .expect("budgeted nonlinear update");
+        assert_eq!(
+            result.linearization().disposition(),
+            LinearizationDisposition::Admitted
+        );
+        assert!(result.posterior().is_some());
+        assert_eq!(
+            child.finish().expect("nonlinear child finalizes"),
+            InvocationDisposition::Completed
+        );
+        assert_eq!(
+            root.finish().expect("root finalizes").disposition(),
+            InvocationDisposition::Completed
+        );
+    });
+    assert!(pool.stats().quiescent());
+}
+
+#[test]
+fn nonlinear_output_envelope_counts_the_retained_affine_instrument_identity() {
+    let gate = CancelGate::new();
+    with_cx(&gate, |cx| {
+        let prior = Belief::scalar(2.0, 1.5).expect("valid prior");
+        let short = NonlinearObservationSpec::new(
+            5.5,
+            0.5,
+            "sensor",
+            "budgeted-affine-v1",
+            settings(0.25, 10.0),
+        )
+        .expect("short identity is valid");
+        let long = NonlinearObservationSpec::new(
+            5.5,
+            0.5,
+            "sensor-with-a-substantially-longer-retained-identity",
+            "budgeted-affine-v1",
+            settings(0.25, 10.0),
+        )
+        .expect("long identity is valid");
+
+        let short_resources = nonlinear_assimilation_invocation_resources(&prior, &short, cx)
+            .expect("short resources");
+        let long_resources =
+            nonlinear_assimilation_invocation_resources(&prior, &long, cx).expect("long resources");
+        let identity_growth = u64::try_from(long.instrument().len() - short.instrument().len())
+            .expect("identity-length delta fits");
+
+        assert_eq!(
+            long_resources.work().get(),
+            short_resources.work().get() + u128::from(identity_growth),
+            "shape-only planning charges the affine observation's retained identity bytes"
+        );
+        assert_eq!(
+            long_resources.output().get(),
+            short_resources.output().get() + identity_growth,
+            "the published affine observation retains its instrument identity"
+        );
+        assert_eq!(
+            long_resources.memory().get(),
+            short_resources.memory().get() + identity_growth,
+            "the peak memory envelope includes the retained output"
+        );
     });
 }
 

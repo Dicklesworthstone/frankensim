@@ -580,6 +580,76 @@ impl ViewFactorMatrix {
         )
     }
 
+    /// Closed-form diffuse view factors for two concentric spherical surfaces.
+    ///
+    /// The inner convex surface sees only the outer surface, while the outer
+    /// surface sees the inner sphere with the area ratio and itself otherwise.
+    /// Both radii are in metres and must describe distinct, finite spheres.
+    pub fn concentric_spheres(
+        inner_radius_m: f64,
+        outer_radius_m: f64,
+    ) -> Result<Self, ConductionError> {
+        if !(inner_radius_m.is_finite() && inner_radius_m > 0.0) {
+            return Err(radiation_error(
+                "concentric-spheres",
+                format!("inner radius {inner_radius_m} m must be finite and positive"),
+                "supply a positive finite inner-sphere radius",
+            ));
+        }
+        if !(outer_radius_m.is_finite() && outer_radius_m > inner_radius_m) {
+            return Err(radiation_error(
+                "concentric-spheres",
+                format!(
+                    "outer radius {outer_radius_m} m must be finite and exceed inner radius {inner_radius_m} m"
+                ),
+                "supply a finite outer-sphere radius larger than the inner sphere",
+            ));
+        }
+
+        let surface_scale = 4.0 * core::f64::consts::PI;
+        let inner_area_m2 = surface_scale * inner_radius_m * inner_radius_m;
+        let outer_area_m2 = surface_scale * outer_radius_m * outer_radius_m;
+        if !(inner_area_m2.is_finite()
+            && inner_area_m2 > 0.0
+            && outer_area_m2.is_finite()
+            && outer_area_m2 > 0.0)
+        {
+            return Err(radiation_error(
+                "concentric-spheres",
+                "sphere radius leaves the finite positive surface-area domain",
+                "supply radii whose 4 pi r^2 areas remain finite and positive",
+            ));
+        }
+        let radius_ratio = inner_radius_m / outer_radius_m;
+        let inner_to_outer = radius_ratio * radius_ratio;
+        // The ratio is mathematically positive after the radius checks above.
+        // Publishing zero would turn a representable, finite-area enclosure
+        // into a false all-self outer row and can be masked by the generic
+        // reciprocity residual floor.
+        if inner_to_outer == 0.0 {
+            return Err(radiation_error(
+                "concentric-spheres",
+                "positive outer-to-inner view factor underflows the f64 domain",
+                "supply radii whose squared ratio remains representable as a positive f64",
+            ));
+        }
+        Self::admit(
+            vec![inner_area_m2, outer_area_m2],
+            vec![vec![0.0, 1.0], vec![inner_to_outer, 1.0 - inner_to_outer]],
+            ViewFactorEvidence::Analytic {
+                geometry: "concentric-spheres-v1".to_string(),
+            },
+            ViewFactorTolerance::default(),
+        )
+        .map_err(|error| {
+            radiation_error(
+                "concentric-spheres",
+                format!("closed-form enclosure is not representable: {error}"),
+                "supply radii whose closed-form factors satisfy the admitted reciprocity tolerance",
+            )
+        })
+    }
+
     /// Number of enclosure surfaces.
     #[must_use]
     pub fn len(&self) -> usize {

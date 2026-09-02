@@ -331,6 +331,132 @@ fn view_factor_admission_refuses_a_non_closing_row() {
 }
 
 #[test]
+fn concentric_spheres_emit_the_closed_form_reciprocal_enclosure() {
+    let matrix = ViewFactorMatrix::concentric_spheres(3.0, 5.0)
+        .expect("finite nested spheres form a closed enclosure");
+
+    assert_eq!(matrix.len(), 2);
+    assert_eq!(
+        matrix.areas_m2(),
+        &[
+            4.0 * core::f64::consts::PI * 3.0 * 3.0,
+            4.0 * core::f64::consts::PI * 5.0 * 5.0,
+        ],
+        "each concentric sphere retains its own 4 pi r^2 area"
+    );
+    assert_eq!(matrix.factors()[0], [0.0, 1.0]);
+    assert!((matrix.factors()[1][0] - 0.36).abs() <= 1.0e-15);
+    assert!((matrix.factors()[1][1] - 0.64).abs() <= 1.0e-15);
+    assert!(
+        matrix
+            .row_sums()
+            .iter()
+            .all(|&sum| (sum - 1.0).abs() <= f64::EPSILON)
+    );
+    assert!(matrix.max_reciprocity_residual() <= 1.0e-15);
+    assert!(matches!(
+        matrix.evidence(),
+        ViewFactorEvidence::Analytic { geometry } if geometry == "concentric-spheres-v1"
+    ));
+}
+
+#[test]
+fn concentric_spheres_refuse_nonphysical_or_overflowing_radii() {
+    for (label, inner_radius_m, outer_radius_m, expected_what) in [
+        ("zero inner radius", 0.0, 1.0, "inner radius"),
+        ("negative inner radius", -1.0, 1.0, "inner radius"),
+        ("NaN inner radius", f64::NAN, 1.0, "inner radius"),
+        ("equal radii", 1.0, 1.0, "outer radius"),
+        ("negative outer radius", 1.0, -2.0, "outer radius"),
+        ("NaN outer radius", 1.0, f64::NAN, "outer radius"),
+        ("infinite outer radius", 1.0, f64::INFINITY, "outer radius"),
+        (
+            "finite radii with overflowing areas",
+            1.0e308,
+            1.1e308,
+            "surface-area domain",
+        ),
+        (
+            "finite radii with underflowing inner area",
+            1.0e-200,
+            1.0,
+            "surface-area domain",
+        ),
+    ] {
+        let refusal =
+            ViewFactorMatrix::concentric_spheres(inner_radius_m, outer_radius_m).expect_err(label);
+        assert!(
+            matches!(
+                &refusal,
+                ConductionError::Radiation { surface, what, .. }
+                    if surface == "concentric-spheres" && what.contains(expected_what)
+            ),
+            "{label} must refuse as the expected concentric-sphere input error: {refusal}"
+        );
+    }
+}
+
+#[test]
+fn concentric_spheres_refuse_a_positive_factor_that_underflows_to_zero() {
+    let inner_radius_m = 1.0e-161;
+    // This leaves the outer area finite but near the top of the f64 area
+    // domain, while the mathematically positive squared ratio underflows.
+    let outer_radius_m = 3.0e153;
+    let surface_scale = 4.0 * core::f64::consts::PI;
+    for area in [
+        surface_scale * inner_radius_m * inner_radius_m,
+        surface_scale * outer_radius_m * outer_radius_m,
+    ] {
+        assert!(
+            area.is_finite() && area > 0.0,
+            "fixture area must be admitted"
+        );
+    }
+    assert_eq!(
+        (inner_radius_m / outer_radius_m) * (inner_radius_m / outer_radius_m),
+        0.0,
+        "fixture must exercise the positive view-factor underflow boundary",
+    );
+
+    let refusal = ViewFactorMatrix::concentric_spheres(inner_radius_m, outer_radius_m)
+        .expect_err("a positive factor that underflows cannot be represented faithfully");
+    assert!(matches!(
+        refusal,
+        ConductionError::Radiation { surface, what, .. }
+            if surface == "concentric-spheres" && what.contains("view factor underflows")
+    ));
+}
+
+#[test]
+fn concentric_spheres_name_subnormal_reciprocity_refusals() {
+    let inner_radius_m = 3.0e-7;
+    let outer_radius_m = 3.0e153;
+    let surface_scale = 4.0 * core::f64::consts::PI;
+    let inner_area_m2 = surface_scale * inner_radius_m * inner_radius_m;
+    let outer_area_m2 = surface_scale * outer_radius_m * outer_radius_m;
+    let factor = (inner_radius_m / outer_radius_m) * (inner_radius_m / outer_radius_m);
+    assert!(
+        factor > 0.0 && factor < f64::MIN_POSITIVE,
+        "fixture must reach the nonzero subnormal-factor boundary"
+    );
+    let lhs = inner_area_m2;
+    let rhs = outer_area_m2 * factor;
+    let residual = (lhs - rhs).abs() / lhs.abs().max(rhs.abs()).max(f64::MIN_POSITIVE);
+    assert!(
+        residual > ViewFactorTolerance::default().reciprocity_rel,
+        "fixture must require a reciprocity refusal after the factor remains nonzero"
+    );
+
+    let refusal = ViewFactorMatrix::concentric_spheres(inner_radius_m, outer_radius_m)
+        .expect_err("subnormal factor cannot satisfy the admitted reciprocal enclosure");
+    assert!(matches!(
+        refusal,
+        ConductionError::Radiation { surface, what, .. }
+            if surface == "concentric-spheres" && what.contains("closed-form enclosure")
+    ));
+}
+
+#[test]
 fn three_surface_unequal_area_radiosity_has_nontrivial_energy_closure() {
     let (complex, positions) = box_grid([2, 2, 2], [1.0, 1.0, 1.0]);
     let mesh = ConductionMesh::new(complex, positions).expect("mesh");

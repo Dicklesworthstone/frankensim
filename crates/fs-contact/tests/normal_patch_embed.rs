@@ -257,3 +257,37 @@ fn npe_006_identity_mutation_changes_embedded_identity() {
     assert_ne!(changed.embedding_id, base.embedding_id);
     assert_ne!(changed.law_request_id, base.law_request_id);
 }
+
+#[test]
+fn npe_007_distinct_samples_do_not_share_a_mapped_law_state_identity() {
+    let law = NormalPatchLaw::HertzSpherePlane {
+        effective_radius_m: 0.02,
+        reduced_modulus_pa: 2.0e9,
+    };
+    let state = NormalPatchEmbedState::new(0.0, 0.01).unwrap();
+    let first = request(law, "sample-a", 1.0e-5).evaluate(&state).unwrap();
+    let second = request(law, "sample-b", 1.0e-5).evaluate(&state).unwrap();
+
+    assert_ne!(first.law_request_id, second.law_request_id);
+    assert_ne!(first.receipt_id, second.receipt_id);
+    assert_ne!(first.embedding_id, second.embedding_id);
+}
+
+#[test]
+fn npe_008_delimited_identity_fields_remain_unambiguous() {
+    let law = NormalPatchLaw::HertzSpherePlane {
+        effective_radius_m: 0.02,
+        reduced_modulus_pa: 2.0e9,
+    };
+    let state = NormalPatchEmbedState::new(0.0, 0.01).unwrap();
+    let mut first = request(law, "sample-b", 1.0e-5);
+    first.identity.feature_id = "feature/a".into();
+    let mut second = request(law, "a/sample-b", 1.0e-5);
+    second.identity.feature_id = "feature".into();
+
+    let first = first.evaluate(&state).unwrap();
+    let second = second.evaluate(&state).unwrap();
+    assert_ne!(first.law_request_id, second.law_request_id);
+    assert_ne!(first.receipt_id, second.receipt_id);
+    assert_ne!(first.embedding_id, second.embedding_id);
+}

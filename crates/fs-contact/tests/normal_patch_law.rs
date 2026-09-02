@@ -509,8 +509,9 @@ fn np_011_hunt_crossley_elliptic_is_passive_and_preserves_true_patch_geometry() 
 
 #[test]
 fn np_012_finite_gap_retains_estimate_authority_and_nonlocal_applicability() {
+    let response_identity = hash_domain("test/finite-gap-response", b"node");
     let law = NormalPatchLaw::FiniteGapPoint {
-        response_identity: hash_domain("test/finite-gap-response", b"node"),
+        response_identity,
         reference_radius_m: 1.0e-3,
         elastic_force_n: 4.0,
         elastic_tangent_n_per_m: 3.0e5,
@@ -523,6 +524,10 @@ fn np_012_finite_gap_retains_estimate_authority_and_nonlocal_applicability() {
     let receipt = point(request.evaluate().unwrap()).unwrap();
     let factor = 1.0 + 10.0 * request.indentation_rate_m_per_s;
     assert_eq!(receipt.authority, InputAuthority::Estimated);
+    assert_eq!(
+        receipt.finite_gap_response_identity,
+        Some(response_identity)
+    );
     assert!((receipt.normal_force_n - 4.0 * factor).abs() <= 1.0e-14);
     assert!((receipt.tangent_n_per_m - 3.0e5 * factor).abs() <= 1.0e-9);
     assert_eq!(receipt.reversible_energy_j, 2.0e-5);
@@ -533,6 +538,21 @@ fn np_012_finite_gap_retains_estimate_authority_and_nonlocal_applicability() {
     assert_eq!(axes.semi_minor_axis_m, 3.0e-4);
     assert_eq!(axes.aspect_ratio, 2.0);
 
+    let mut different_response = request.clone();
+    let NormalPatchLaw::FiniteGapPoint {
+        response_identity, ..
+    } = &mut different_response.law
+    else {
+        panic!("test request remains finite-gap");
+    };
+    *response_identity = hash_domain("test/finite-gap-response", b"different-node");
+    let different_receipt = point(different_response.evaluate().unwrap()).unwrap();
+    assert_eq!(
+        different_receipt.finite_gap_response_identity,
+        Some(*response_identity)
+    );
+    assert_ne!(different_receipt.receipt_id, receipt.receipt_id);
+
     let mut shallow_half_space = request;
     shallow_half_space.applicability.half_space_depth_m = 1.0e-3;
     assert!(matches!(
@@ -542,4 +562,88 @@ fn np_012_finite_gap_retains_estimate_authority_and_nonlocal_applicability() {
             ..
         })
     ));
+}
+
+#[test]
+fn np_013_finite_gap_refuses_nonzero_response_without_a_pressure_footprint() {
+    let mut request = request(NormalPatchLaw::FiniteGapPoint {
+        response_identity: hash_domain("test/finite-gap-response", b"force-only-footprint"),
+        reference_radius_m: 1.0e-3,
+        elastic_force_n: 4.0,
+        elastic_tangent_n_per_m: 0.0,
+        reversible_energy_j: 0.0,
+        peak_pressure_pa: 0.0,
+        equivalent_pressure_semiaxes_m: [0.0, 6.0e-4],
+        dissipation_s_per_m: 0.0,
+    });
+    assert!(matches!(
+        request.evaluate(),
+        Err(NormalPatchError::InvalidInput {
+            field: "finite_gap_pressure_footprint"
+        })
+    ));
+
+    request.law = NormalPatchLaw::FiniteGapPoint {
+        response_identity: hash_domain("test/finite-gap-response", b"zero-pressure-footprint"),
+        reference_radius_m: 1.0e-3,
+        elastic_force_n: 0.0,
+        elastic_tangent_n_per_m: 0.0,
+        reversible_energy_j: 0.0,
+        peak_pressure_pa: 1.0e7,
+        equivalent_pressure_semiaxes_m: [3.0e-4, 0.0],
+        dissipation_s_per_m: 0.0,
+    };
+    assert!(matches!(
+        request.evaluate(),
+        Err(NormalPatchError::InvalidInput {
+            field: "finite_gap_pressure_footprint"
+        })
+    ));
+
+    let underflowing_axes = [1.0e-200, 1.0e-200];
+    assert!(
+        underflowing_axes.iter().all(|axis| *axis > 0.0)
+            && underflowing_axes[0] * underflowing_axes[1] == 0.0,
+        "fixture must exercise a positive-semiaxis product that underflows"
+    );
+    request.law = NormalPatchLaw::FiniteGapPoint {
+        response_identity: hash_domain("test/finite-gap-response", b"underflowing-footprint"),
+        reference_radius_m: 1.0e-3,
+        elastic_force_n: 4.0,
+        elastic_tangent_n_per_m: 0.0,
+        reversible_energy_j: 0.0,
+        peak_pressure_pa: 0.0,
+        equivalent_pressure_semiaxes_m: underflowing_axes,
+        dissipation_s_per_m: 0.0,
+    };
+    assert!(matches!(
+        request.evaluate(),
+        Err(NormalPatchError::InvalidInput {
+            field: "finite_gap_pressure_footprint"
+        })
+    ));
+
+    request.law = NormalPatchLaw::FiniteGapPoint {
+        response_identity: hash_domain("test/finite-gap-response", b"zero-load-footprint"),
+        reference_radius_m: 1.0e-3,
+        elastic_force_n: 0.0,
+        elastic_tangent_n_per_m: 0.0,
+        reversible_energy_j: 0.0,
+        peak_pressure_pa: 0.0,
+        equivalent_pressure_semiaxes_m: [0.0, 6.0e-4],
+        dissipation_s_per_m: 0.0,
+    };
+    let zero_load = point(
+        request
+            .evaluate()
+            .expect("zero-load degenerate footprint remains valid"),
+    )
+    .expect("finite-gap response is a point receipt");
+    assert_eq!(zero_load.normal_force_n, 0.0);
+    assert_eq!(zero_load.pressure.peak_pressure_pa, 0.0);
+    let axes = zero_load
+        .elliptic_patch_axes
+        .expect("retains declared footprint axes");
+    assert_eq!(axes.semi_major_axis_m, 6.0e-4);
+    assert_eq!(axes.semi_minor_axis_m, 0.0);
 }

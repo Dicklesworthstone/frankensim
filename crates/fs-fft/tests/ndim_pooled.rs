@@ -2,8 +2,20 @@
 //! at every worker count (the P2 law — parallel placement changes
 //! timing, never bits), plus the cancellation contract.
 
-use fs_exec::{CancelGate, PoolConfig, TilePool};
+use fs_exec::{CancelGate, LatencyLane, PoolConfig, TilePool};
 use fs_fft::{C64, FftNd};
+
+fn in_task<R>(f: impl FnOnce(asupersync::Cx) -> R + Send + 'static) -> R
+where
+    R: Send + 'static,
+{
+    let lane = LatencyLane::new(1).expect("one-worker latency lane");
+    let root = lane
+        .runtime()
+        .handle()
+        .spawn(async move { f(asupersync::Cx::current().expect("live task context")) });
+    lane.block_on(root)
+}
 
 fn fixture(total: usize) -> Vec<C64> {
     let mut seed = 0xD1D5_u64;
@@ -66,6 +78,53 @@ fn pooled_ndim_is_bitwise_across_worker_counts() {
     println!(
         "{{\"suite\":\"fs-fft\",\"case\":\"ndim-pooled-bitwise\",\"verdict\":\"pass\",\
          \"detail\":\"pooled == serial bitwise over 5 shapes x 4 worker counts, forward+inverse\"}}"
+    );
+}
+
+#[test]
+fn task_scoped_pooled_ndim_preserves_bits_and_refuses_cancelled_task() {
+    let dims = [64_usize, 256];
+    let plan = FftNd::new(&dims);
+    let input = fixture(plan.total());
+    let mut serial = input.clone();
+    plan.forward(&mut serial);
+
+    let scoped_input = input.clone();
+    let scoped = in_task(move |task_cx| {
+        let plan = FftNd::new(&dims);
+        let pool = TilePool::new(PoolConfig::for_host(3, 0x5C0E_D));
+        let gate = CancelGate::new();
+        let mut output = scoped_input;
+        plan.forward_pooled_scoped(&mut output, &pool, &task_cx, &gate)
+            .expect("task-scoped forward runs");
+        output
+    });
+    assert!(
+        bits_equal(&scoped, &serial),
+        "task-scoped pooled transform must preserve serial bits"
+    );
+
+    let serial_plan = FftNd::new(&[32]);
+    let refused_input = fixture(serial_plan.total());
+    let refused_expected = refused_input.clone();
+    let (error, after) = in_task(move |task_cx| {
+        let plan = FftNd::new(&[32]);
+        let pool = TilePool::new(PoolConfig::for_host(2, 0x5C0E_D));
+        let gate = CancelGate::new();
+        task_cx.set_cancel_requested(true);
+        let mut output = refused_input.clone();
+        let error = plan
+            .forward_pooled_scoped(&mut output, &pool, &task_cx, &gate)
+            .expect_err("cancelled task refuses before the first pencil pass");
+        (error, output)
+    });
+    assert!(matches!(
+        error,
+        fs_exec::RunError::Cancelled { completed: 0, .. }
+    ));
+    assert!(
+        bits_equal(&after, &refused_expected),
+        "task cancellation at a serial pencil boundary must leave the scratch buffer untouched"
     );
 }
 

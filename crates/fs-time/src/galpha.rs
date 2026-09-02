@@ -39,6 +39,17 @@ impl GeneralizedAlpha {
         h: f64,
         rho_inf: f64,
     ) -> GeneralizedAlpha {
+        assert!(n > 0, "generalized-alpha dimension must be positive");
+        let matrix_len = n
+            .checked_mul(n)
+            .expect("generalized-alpha matrix dimension overflows usize");
+        assert_eq!(m_mat.len(), matrix_len, "generalized-alpha mass shape");
+        assert_eq!(c_mat.len(), matrix_len, "generalized-alpha damping shape");
+        assert_eq!(k_mat.len(), matrix_len, "generalized-alpha stiffness shape");
+        assert!(
+            h.is_finite() && h > 0.0,
+            "generalized-alpha h must be positive and finite"
+        );
         assert!((0.0..=1.0).contains(&rho_inf), "rho_inf in [0,1]");
         // Chung–Hulbert parameterization.
         let alpha_m = (2.0 * rho_inf - 1.0) / (rho_inf + 1.0);
@@ -49,8 +60,8 @@ impl GeneralizedAlpha {
         let cm = (1.0 - alpha_m) / (beta * h * h);
         let cc = (1.0 - alpha_f) * gamma / (beta * h);
         let ck = 1.0 - alpha_f;
-        let mut eff = vec![0.0f64; n * n];
-        for i in 0..n * n {
+        let mut eff = vec![0.0f64; matrix_len];
+        for i in 0..matrix_len {
             eff[i] = cm.mul_add(m_mat[i], cc.mul_add(c_mat[i], ck * k_mat[i]));
         }
         let eff = lu(&eff, n).expect("generalized-alpha effective matrix must be nonsingular");
@@ -96,6 +107,10 @@ pub fn galpha_step(
     f_next: &[f64],
 ) {
     let n = ga.n;
+    assert_eq!(q.len(), n, "generalized-alpha displacement state dimension");
+    assert_eq!(v.len(), n, "generalized-alpha velocity state dimension");
+    assert_eq!(a.len(), n, "generalized-alpha acceleration state dimension");
+    assert_eq!(f_next.len(), n, "generalized-alpha forcing dimension");
     let (h, am, af, beta, gamma) = (ga.h, ga.alpha_m, ga.alpha_f, ga.beta, ga.gamma);
     // Predictors (Newmark form).
     let cm = (1.0 - am) / (beta * h * h);

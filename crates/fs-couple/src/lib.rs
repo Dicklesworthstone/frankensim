@@ -39,6 +39,7 @@ pub mod bowed_string;
 pub mod brass_loop;
 pub mod broadband_radiation;
 pub mod cavity_phs;
+pub mod cinematic_stem;
 pub mod driving_point;
 pub mod glottis;
 pub mod mm_line;

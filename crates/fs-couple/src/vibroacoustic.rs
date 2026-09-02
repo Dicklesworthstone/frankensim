@@ -58,7 +58,11 @@
 //! statistical-energy regimes.
 
 use fs_la::eigen_complex::{eig, lu_complex};
+use fs_material::gas::{GasSpec, GasState};
 use fs_math::c64::C64;
+
+const ROOM_TEMPERATURE_K: f64 = 293.15;
+const STANDARD_ATMOSPHERE_PA: f64 = 101_325.0;
 
 /// Typed refusals with stable `FS-COUPLE-VIBRO-*` codes.
 #[derive(Debug, Clone, PartialEq)]
@@ -166,17 +170,21 @@ pub struct AcousticMedium {
 }
 
 impl AcousticMedium {
-    /// Air at roughly 20 degC (matches `fs_bem::helmholtz::Medium::air`).
-    /// These constants are `fs_material::gas::GasState` evaluated at
-    /// (293.15 K, 101325 Pa) — parameterized studies should DERIVE the
-    /// medium from that first-principles primitive (any temperature,
-    /// pressure, or gas) instead of using this fixed convenience; the
-    /// casebook asserts the equivalence.
+    /// Dry USSA-1976 air at the declared room state of 293.15 K and 101325 Pa.
+    /// Parameterized studies should construct their own [`GasState`] for their
+    /// actual temperature, pressure, and gas identity instead of using this
+    /// convenience.
     #[must_use]
-    pub const fn air() -> AcousticMedium {
+    pub fn air() -> AcousticMedium {
+        let gas = GasState::try_new(
+            &GasSpec::dry_air_ussa1976(),
+            ROOM_TEMPERATURE_K,
+            STANDARD_ATMOSPHERE_PA,
+        )
+        .expect("declared dry-air room state is within GasState's validity window");
         AcousticMedium {
-            rho0: 1.204,
-            c0: 343.0,
+            rho0: gas.density,
+            c0: gas.sound_speed,
         }
     }
 }
@@ -1275,12 +1283,13 @@ mod tests {
         // closed form.
         let (lx, ly, lz) = (0.5, 0.4, 0.3);
         let points = [[0.1, 0.1], [0.25, 0.2], [0.4, 0.35]];
-        let cav = rectangular_cavity_modes(lx, ly, lz, AcousticMedium::air(), 0.01, 6, &points)
-            .expect("cavity modes");
+        let air = AcousticMedium::air();
+        let cav =
+            rectangular_cavity_modes(lx, ly, lz, air, 0.01, 6, &points).expect("cavity modes");
         assert_eq!(cav.omegas.len(), 6);
         assert_eq!(cav.omegas[0].to_bits(), 0);
         assert!((cav.lambdas[0] - lx * ly * lz).abs() < 1e-15);
-        let expected_second = 343.0 * core::f64::consts::PI / lx;
+        let expected_second = air.c0 * core::f64::consts::PI / lx;
         assert!(
             (cav.omegas[1] - expected_second).abs() < 1e-9 * expected_second,
             "second mode {} vs {expected_second}",
@@ -1295,12 +1304,11 @@ mod tests {
         // Resonator: 1 liter, 5 mm neck radius, 10 mm neck length ->
         // f = omega / 2 pi ~ 112.5 Hz with the 2 * 8/(3 pi) a end
         // correction.
-        let res = helmholtz_resonator_mode(1e-3, 0.005, 0.010, AcousticMedium::air(), 0.01, 4)
-            .expect("resonator");
+        let res = helmholtz_resonator_mode(1e-3, 0.005, 0.010, air, 0.01, 4).expect("resonator");
         let a = 0.005f64;
         let s_neck = core::f64::consts::PI * a * a;
         let l_eff = 0.010 + 2.0 * (8.0 / (3.0 * core::f64::consts::PI)) * a;
-        let omega_expected = 343.0 * (s_neck / (1e-3 * l_eff)).sqrt();
+        let omega_expected = air.c0 * (s_neck / (1e-3 * l_eff)).sqrt();
         assert!(
             (res.omegas[0] - omega_expected).abs() < 1e-12 * omega_expected,
             "resonator omega {} vs {omega_expected}",
@@ -1311,6 +1319,22 @@ mod tests {
             "{{\"suite\":\"fs-couple-vibro\",\"case\":\"cavity-resonator-pins\",\"resonator_hz\":{:.2},\"verdict\":\"pass\"}}",
             res.omegas[0] / (2.0 * core::f64::consts::PI)
         );
+    }
+
+    #[test]
+    fn acoustic_medium_air_is_bitwise_the_declared_room_temperature_gas_state() {
+        let gas = GasState::try_new(
+            &GasSpec::dry_air_ussa1976(),
+            ROOM_TEMPERATURE_K,
+            STANDARD_ATMOSPHERE_PA,
+        )
+        .expect("declared dry-air room state");
+        let air = AcousticMedium::air();
+
+        assert_eq!(gas.temperature.to_bits(), ROOM_TEMPERATURE_K.to_bits());
+        assert_eq!(gas.pressure.to_bits(), STANDARD_ATMOSPHERE_PA.to_bits());
+        assert_eq!(air.rho0.to_bits(), gas.density.to_bits());
+        assert_eq!(air.c0.to_bits(), gas.sound_speed.to_bits());
     }
 
     #[test]
@@ -1387,19 +1411,12 @@ mod review_regressions {
         // 0.1 duct, silently dropping the true (4,0,0) and (5,0,0)
         // axial modes. The sufficiency-checked box must return the
         // pure axial ladder omega_l = l pi c0 / lx.
-        let cav = rectangular_cavity_modes(
-            1.0,
-            0.1,
-            0.1,
-            AcousticMedium::air(),
-            0.0,
-            6,
-            &[[0.25, 0.05]],
-        )
-        .expect("elongated cavity");
+        let air = AcousticMedium::air();
+        let cav = rectangular_cavity_modes(1.0, 0.1, 0.1, air, 0.0, 6, &[[0.25, 0.05]])
+            .expect("elongated cavity");
         let pi = core::f64::consts::PI;
         for (l, &omega) in cav.omegas.iter().enumerate() {
-            let expected = l as f64 * pi * 343.0 / 1.0;
+            let expected = l as f64 * pi * air.c0;
             assert!(
                 (omega - expected).abs() <= 1e-9 * expected.max(1.0),
                 "mode {l}: {omega} vs axial ladder {expected}"

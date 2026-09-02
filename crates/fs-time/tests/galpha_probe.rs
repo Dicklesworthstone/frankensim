@@ -66,3 +66,84 @@ fn galpha_reaches_the_static_response_under_a_constant_load() {
         );
     }
 }
+
+#[test]
+fn dense_galpha_rejects_malformed_systems_before_assembly() {
+    let rejects = [
+        std::panic::catch_unwind(|| GeneralizedAlpha::new(&[1.0], &[0.0], &[1.0], 0, 0.1, 0.8))
+            .is_err(),
+        std::panic::catch_unwind(|| {
+            GeneralizedAlpha::new(&[1.0], &[0.0; 4], &[1.0; 4], 2, 0.1, 0.8)
+        })
+        .is_err(),
+        std::panic::catch_unwind(|| {
+            GeneralizedAlpha::new(&[1.0; 4], &[0.0], &[1.0; 4], 2, 0.1, 0.8)
+        })
+        .is_err(),
+        std::panic::catch_unwind(|| {
+            GeneralizedAlpha::new(&[1.0; 4], &[0.0; 4], &[1.0], 2, 0.1, 0.8)
+        })
+        .is_err(),
+        std::panic::catch_unwind(|| GeneralizedAlpha::new(&[1.0], &[0.0], &[1.0], 1, 0.0, 0.8))
+            .is_err(),
+        std::panic::catch_unwind(|| {
+            GeneralizedAlpha::new(&[1.0], &[0.0], &[1.0], 1, f64::INFINITY, 0.8)
+        })
+        .is_err(),
+    ];
+    assert!(rejects.into_iter().all(|rejects| rejects));
+}
+
+#[test]
+#[should_panic(expected = "generalized-alpha mass shape")]
+fn dense_galpha_rejects_oversized_mass_matrix() {
+    let _ = GeneralizedAlpha::new(&[1.0; 5], &[0.0; 4], &[1.0; 4], 2, 0.1, 0.8);
+}
+
+#[test]
+#[should_panic(expected = "generalized-alpha damping shape")]
+fn dense_galpha_rejects_oversized_damping_matrix() {
+    let _ = GeneralizedAlpha::new(&[1.0; 4], &[0.0; 5], &[1.0; 4], 2, 0.1, 0.8);
+}
+
+#[test]
+#[should_panic(expected = "generalized-alpha stiffness shape")]
+fn dense_galpha_rejects_oversized_stiffness_matrix() {
+    let _ = GeneralizedAlpha::new(&[1.0; 4], &[0.0; 4], &[1.0; 5], 2, 0.1, 0.8);
+}
+
+#[test]
+fn galpha_step_rejects_oversized_state_without_mutation() {
+    let ga = GeneralizedAlpha::new(&[1.0], &[0.0], &[1.0], 1, 0.1, 0.8);
+    let mut q = vec![1.0, 99.0];
+    let mut v = vec![0.0];
+    let mut a = vec![-1.0];
+    let f = vec![0.0];
+    let before = (q.clone(), v.clone(), a.clone());
+
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            galpha_step(&ga, &mut q, &mut v, &mut a, &f);
+        }))
+        .is_err()
+    );
+    assert_eq!(q, before.0);
+    assert_eq!(v, before.1);
+    assert_eq!(a, before.2);
+}
+
+#[test]
+#[should_panic(expected = "generalized-alpha matrix dimension overflows usize")]
+fn dense_galpha_rejects_overflowing_dimension_before_allocation() {
+    let _ = GeneralizedAlpha::new(&[], &[], &[], usize::MAX, 0.1, 0.8);
+}
+
+#[test]
+fn dense_galpha_rejects_nan_timestep() {
+    assert!(
+        std::panic::catch_unwind(|| {
+            GeneralizedAlpha::new(&[1.0], &[0.0], &[1.0], 1, f64::NAN, 0.8)
+        })
+        .is_err()
+    );
+}

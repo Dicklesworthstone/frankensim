@@ -278,7 +278,7 @@ as correlated cross-QoI geometry terms.
   child; scientific refusals are latched into the parent receipt. Unused
   capacity returns only when the child is consumed by `finish`, so sibling
   stages cannot mint fresh authority through this crate.
-- The `asbuilt-diff-v6` identity binds execution mode, every field of the
+- The `asbuilt-diff-v7` identity binds execution mode, every field of the
   ambient `fs_exec::Budget`, work-plan v2 and exact `3n` shape, poll-policy v2
   and its 256-point/256-byte strides, plus all scientific and provenance inputs.
   `StreamKey` is intentionally not part of this identity. Registration has no
@@ -622,9 +622,9 @@ eight-term-budget e2e lane logging the correlation structure.
   residual/dispersion screens, not pointwise uncertainty bounds, statistical
   significance tests, or tolerance certificates. `SampledConformance` is
   explicit and narrower: an exact zero-uncertainty strict margin can pass only
-  for the supplied correspondences; an observed excess fails; nonzero
-  uncertainty and a boundary comparison remain Indeterminate. None of those
-  cases is a whole-part claim without separate retained coverage evidence.
+  for the supplied correspondences; a zero-uncertainty observed excess fails;
+  nonzero uncertainty and a boundary comparison remain Indeterminate. None of
+  those cases is a whole-part claim without separate retained coverage evidence.
 - The calibrated module provides evidence-bearing tri-state bounds, but the
   legacy boolean API remains for compatibility until downstream consumers
   migrate. Those booleans are not projections of the calibrated bounds and

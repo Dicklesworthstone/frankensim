@@ -37,8 +37,9 @@
 //!   transient staging in this crate.
 //! - Surface radiation supports a card-backed linearized Robin model and
 //!   deterministic gray-diffuse enclosure exchange over an admitted
-//!   view-factor matrix. This crate does not generate view factors, run QMC,
-//!   model participating media, or propagate a nonlinear uncertainty bound.
+//!   view-factor matrix. It generates one closed-form concentric-sphere matrix,
+//!   but does not generate general view factors, run QMC, model participating
+//!   media, or propagate a nonlinear uncertainty bound.
 //! - NO convection PHYSICS. The Robin row is a convective boundary *coupling*:
 //!   `h` is an input, never a computed correlation.
 //! - Thermal contact supports matching P1 traces on exact duplicated

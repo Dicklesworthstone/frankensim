@@ -80,6 +80,12 @@ linear-Gaussian core of weak-constraint assimilation.
   `DemotedLargeInnovation` exposes neither an affine observation nor a
   posterior; demotion is an audited no-publication result, not a failed
   Gaussian update.
+- `nonlinear_assimilation_invocation_resources(...)` and
+  `assimilate_nonlinear_fd_budgeted(...)` — the typed composition boundary for
+  one nonlinear FD update. The parent seals conservative probe, receipt,
+  Joseph-workspace, poll, output, and one-evaluation capacity before execution;
+  the borrowed child owns deadline and cancellation polling through final
+  publication. Demotion uses the admitted envelope but publishes no posterior.
 - `assimilate_colored(&Belief, &[Observation], regime_param, lo, hi, &Cx) ->
   AssimilatedPosterior { belief, color, misfit_before, misfit_after }` — a
   read-only, regime-tagged **estimated candidate**. Access is through getters.
@@ -357,8 +363,10 @@ yet expose a separate typed invocation resource planner.
 Nonlinear errors additionally distinguish invalid finite-difference/gate
 settings, an unrepresentable perturbation, a non-finite model evaluation, and a
 non-finite Jacobian coefficient. A large but finite standardized innovation is
-a successful typed demotion rather than an error. The bounded nonlinear wrapper
-has no separate typed invocation resource planner.
+a successful typed demotion rather than an error. The budgeted nonlinear wrapper
+charges its parent-issued child before allocation and latches scientific
+refusals into that child; a refusal, deadline, or cancellation publishes no
+partial linearization or posterior.
 
 ## Determinism class
 
@@ -398,10 +406,12 @@ Assimilation polls again before returning a result, so no posterior or audit is
 published after an observed cancellation.
 Nonlinear linearization polls before the base evaluation, before each
 component's two probes, and before receipt publication. The wrapper polls again
-after the delegated scalar update and before publishing its result. A model
-callback is one bounded synchronous evaluation and cannot be interrupted from
-inside this crate; callers needing finer cancellation must implement it inside
-their callback.
+after the scalar update and before publishing its result. The budgeted form uses
+the same boundaries through the child invocation authority, so its deadline and
+cancellation cannot be bypassed by the inner scalar update. A model callback is
+one bounded synchronous evaluation and cannot be interrupted from inside this
+crate; callers needing finer cancellation must implement it inside their
+callback.
 
 ## Unsafe boundary
 

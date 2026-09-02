@@ -9,8 +9,11 @@ use fs_blake3::DomainHasher;
 use fs_exec::Cx;
 
 use super::{
-    AssimError, Belief, Observation, assimilate, canonical_f64_bits, canonicalize_zero,
-    validate_leaf_identity, validate_noise,
+    AssimError, Belief, Observation, WorkPlan, WorkProgress, assimilate_canonical,
+    canonical_f64_bits, canonicalize_zero, checked_memory_sum, latch_invocation_refusal,
+    linear_allocation_bytes, matrix_allocation_bytes, psd_workspace_bytes,
+    single_observation_assimilation_work_plan_for_shape, typed_invocation_resources,
+    validate_leaf_identity, validate_noise, validated_canonical_observations,
 };
 
 const LINEARIZATION_ID_DOMAIN: &str = "org.frankensim.fs-assimilate.nonlinear-fd-linearization.v1";
@@ -305,8 +308,118 @@ pub fn linearize_nonlinear_fd<F>(
 where
     F: Fn(&[f64]) -> f64,
 {
-    cx.checkpoint()
-        .map_err(|_| nonlinear_cancelled("nonlinear preflight", 0, prior.dim() as u128 + 2))?;
+    let plan = nonlinear_linearization_work_plan(prior, spec)?;
+    let mut progress = WorkProgress::new(cx, plan)?;
+    linearize_nonlinear_fd_planned(prior, spec, predict, &mut progress)
+}
+
+/// Checked typed invocation envelope for a nonlinear finite-difference update.
+///
+/// The envelope covers the finite-difference probes, receipt material, and the
+/// admitted scalar Joseph update. It deliberately reserves the admitted-path
+/// output shape: a demoted result spends less output but cannot mint additional
+/// authority by changing disposition after admission.
+pub fn nonlinear_assimilation_invocation_resources(
+    prior: &Belief,
+    spec: &NonlinearObservationSpec,
+    cx: &Cx<'_>,
+) -> Result<fs_exec::InvocationResources, AssimError> {
+    let plan = nonlinear_assimilation_work_plan(prior, spec)?;
+    let polls = 3_u128
+        .checked_add(plan.total / super::RECORD_POLL_STRIDE)
+        .ok_or(AssimError::WorkPlanOverflow {
+            phase: "nonlinear assimilation poll plan",
+        })?;
+    let output = nonlinear_assimilation_output_bytes(prior.dim(), spec.instrument.len())?;
+    let state = linear_allocation_bytes::<f64>(prior.dim(), "nonlinear assimilation memory plan")?;
+    let probes = linear_allocation_bytes::<FiniteDifferenceProbe>(
+        prior.dim(),
+        "nonlinear assimilation memory plan",
+    )?;
+    let vector = linear_allocation_bytes::<f64>(prior.dim(), "nonlinear assimilation memory plan")?;
+    let matrix = matrix_allocation_bytes::<f64>(prior.dim(), "nonlinear assimilation memory plan")?;
+    let belief = super::belief_retained_bytes(prior.dim())?;
+    let update_peak = checked_memory_sum(
+        &[
+            belief.checked_mul(2).ok_or(AssimError::WorkPlanOverflow {
+                phase: "nonlinear assimilation memory plan",
+            })?,
+            vector.checked_mul(4).ok_or(AssimError::WorkPlanOverflow {
+                phase: "nonlinear assimilation memory plan",
+            })?,
+            matrix.checked_mul(3).ok_or(AssimError::WorkPlanOverflow {
+                phase: "nonlinear assimilation memory plan",
+            })?,
+            psd_workspace_bytes(prior.dim(), "nonlinear assimilation memory plan")?,
+        ],
+        "nonlinear assimilation memory plan",
+    )?;
+    let memory = checked_memory_sum(
+        &[output, state, probes, update_peak],
+        "nonlinear assimilation memory plan",
+    )?;
+    typed_invocation_resources(plan.total, polls, memory, output)
+}
+
+/// Linearize and assimilate through one affine child budget.
+///
+/// The child is charged before allocation and provides the only deadline and
+/// cancellation authority used by the finite-difference and Joseph paths.
+pub fn assimilate_nonlinear_fd_budgeted<F>(
+    prior: &Belief,
+    spec: &NonlinearObservationSpec,
+    predict: F,
+    cx: &Cx<'_>,
+    budget: &mut fs_exec::ChildBudget<'_, '_>,
+) -> Result<NonlinearAssimilation, AssimError>
+where
+    F: Fn(&[f64]) -> f64,
+{
+    let resources = match nonlinear_assimilation_invocation_resources(prior, spec, cx) {
+        Ok(resources) => resources,
+        Err(error) => {
+            latch_invocation_refusal(budget, "nonlinear-assimilation.preflight", &error);
+            return Err(error);
+        }
+    };
+    let plan = match nonlinear_assimilation_work_plan(prior, spec) {
+        Ok(plan) => plan,
+        Err(error) => {
+            latch_invocation_refusal(budget, "nonlinear-assimilation.work-plan", &error);
+            return Err(error);
+        }
+    };
+    budget.charge_work(resources.work())?;
+    budget.charge_cost(resources.cost())?;
+    budget.charge_evaluations(resources.evaluations())?;
+    let mut memory = budget.reserve_memory("nonlinear-assimilation", resources.memory())?;
+    let result = {
+        let mut progress = WorkProgress::new_with_invocation(cx, plan, memory.budget());
+        assimilate_nonlinear_fd_planned(prior, spec, predict, &mut progress)
+    };
+    let assimilation = match result {
+        Ok(assimilation) => assimilation,
+        Err(error) => {
+            latch_invocation_refusal(memory.budget(), "nonlinear-assimilation.scientific", &error);
+            return Err(error);
+        }
+    };
+    memory.budget().publish_output(resources.output())?;
+    drop(memory);
+    Ok(assimilation)
+}
+
+fn linearize_nonlinear_fd_planned<F>(
+    prior: &Belief,
+    spec: &NonlinearObservationSpec,
+    predict: F,
+    progress: &mut WorkProgress<'_, '_>,
+) -> Result<NonlinearLinearization, AssimError>
+where
+    F: Fn(&[f64]) -> f64,
+{
+    progress.checkpoint("nonlinear preflight")?;
+    progress.scalar("nonlinear base evaluation", 1)?;
     let prediction = predict(prior.mean());
     if !prediction.is_finite() {
         return Err(AssimError::NonFiniteModelPrediction {
@@ -319,27 +432,28 @@ where
     let mut jacobian = Vec::with_capacity(prior.dim());
     let mut probes = Vec::with_capacity(prior.dim());
     for component in 0..prior.dim() {
-        cx.checkpoint().map_err(|_| {
-            nonlinear_cancelled(
-                "nonlinear finite differences",
-                component as u128,
-                prior.dim() as u128 + 2,
-            )
-        })?;
-        let (derivative, probe) =
-            central_difference_probe(&mut state, component, spec.settings.relative_step, &predict)?;
+        progress.checkpoint("nonlinear finite differences")?;
+        let (derivative, probe) = central_difference_probe(
+            &mut state,
+            component,
+            spec.settings.relative_step,
+            &predict,
+            progress,
+        )?;
         jacobian.push(derivative);
         probes.push(probe);
     }
 
     let innovation = spec.reading - prediction;
+    progress.scalar("nonlinear innovation", 1)?;
     if !innovation.is_finite() {
         return Err(AssimError::NonFiniteComputation {
             stage: "nonlinear innovation",
         });
     }
-    let innovation_variance = innovation_variance(prior, &jacobian, spec.noise_var)?;
+    let innovation_variance = innovation_variance(prior, &jacobian, spec.noise_var, progress)?;
     let standardized_innovation = innovation.abs() / innovation_variance.sqrt();
+    progress.scalar("nonlinear standardized innovation", 3)?;
     if !standardized_innovation.is_finite() {
         return Err(AssimError::NonFiniteComputation {
             stage: "standardized nonlinear innovation",
@@ -351,7 +465,14 @@ where
         LinearizationDisposition::DemotedLargeInnovation
     };
     let observation = if disposition == LinearizationDisposition::Admitted {
-        let affine_value = spec.reading - prediction + checked_dot(&jacobian, prior.mean())?;
+        let affine_value = spec.reading - prediction
+            + checked_dot(
+                &jacobian,
+                prior.mean(),
+                "nonlinear affine observation",
+                progress,
+            )?;
+        progress.scalar("nonlinear affine observation", 2)?;
         Some(Observation::new(
             jacobian.clone(),
             affine_value,
@@ -361,13 +482,7 @@ where
     } else {
         None
     };
-    cx.checkpoint().map_err(|_| {
-        nonlinear_cancelled(
-            "nonlinear receipt",
-            prior.dim() as u128 + 1,
-            prior.dim() as u128 + 2,
-        )
-    })?;
+    progress.checkpoint("nonlinear receipt")?;
     let receipt_id = linearization_receipt(
         prior,
         spec,
@@ -378,7 +493,8 @@ where
         &jacobian,
         &probes,
         disposition,
-    );
+        progress,
+    )?;
     Ok(NonlinearLinearization {
         prediction: canonicalize_zero(prediction),
         innovation: canonicalize_zero(innovation),
@@ -403,22 +519,168 @@ pub fn assimilate_nonlinear_fd<F>(
 where
     F: Fn(&[f64]) -> f64,
 {
-    let linearization = linearize_nonlinear_fd(prior, spec, predict, cx)?;
+    let plan = nonlinear_assimilation_work_plan(prior, spec)?;
+    let mut progress = WorkProgress::new(cx, plan)?;
+    assimilate_nonlinear_fd_planned(prior, spec, predict, &mut progress)
+}
+
+fn assimilate_nonlinear_fd_planned<F>(
+    prior: &Belief,
+    spec: &NonlinearObservationSpec,
+    predict: F,
+    progress: &mut WorkProgress<'_, '_>,
+) -> Result<NonlinearAssimilation, AssimError>
+where
+    F: Fn(&[f64]) -> f64,
+{
+    let linearization = linearize_nonlinear_fd_planned(prior, spec, predict, progress)?;
     let posterior = match linearization.observation() {
-        Some(observation) => Some(assimilate(prior, observation, cx)?),
+        Some(observation) => {
+            let observations = core::slice::from_ref(observation);
+            let canonical = validated_canonical_observations(observations, prior.dim(), progress)?;
+            Some(assimilate_canonical(prior, &canonical, progress)?)
+        }
         None => None,
     };
-    cx.checkpoint().map_err(|_| {
-        nonlinear_cancelled(
-            "nonlinear publication",
-            prior.dim() as u128 + 1,
-            prior.dim() as u128 + 2,
-        )
-    })?;
+    progress.checkpoint("nonlinear publication")?;
     Ok(NonlinearAssimilation {
         linearization,
         posterior,
     })
+}
+
+fn nonlinear_linearization_work_plan(
+    prior: &Belief,
+    spec: &NonlinearObservationSpec,
+) -> Result<WorkPlan, AssimError> {
+    let dimension = u128::try_from(prior.dim()).map_err(|_| AssimError::WorkPlanOverflow {
+        phase: "nonlinear linearization dimension",
+    })?;
+    let squared = dimension
+        .checked_mul(dimension)
+        .ok_or(AssimError::WorkPlanOverflow {
+            phase: "nonlinear linearization work",
+        })?;
+    // One base evaluation, eight scalar units per central probe, innovation
+    // arithmetic, the covariance-Jacobian products, and an admitted affine
+    // observation. The affine branch is budgeted even when a result demotes.
+    let arithmetic = squared
+        .checked_add(
+            dimension
+                .checked_mul(10)
+                .ok_or(AssimError::WorkPlanOverflow {
+                    phase: "nonlinear linearization work",
+                })?,
+        )
+        .and_then(|work| work.checked_add(8))
+        .ok_or(AssimError::WorkPlanOverflow {
+            phase: "nonlinear linearization work",
+        })?;
+    // Receipt framing hashes the full covariance, probe record, and both
+    // caller identities. Each byte is charged through the hash polling path.
+    let receipt_bytes = squared
+        .checked_mul(8)
+        .and_then(|bytes| bytes.checked_add(dimension.checked_mul(72)?))
+        .and_then(|bytes| bytes.checked_add(113))
+        .and_then(|bytes| bytes.checked_add(spec.instrument.len() as u128))
+        .and_then(|bytes| bytes.checked_add(spec.model_id.len() as u128))
+        .ok_or(AssimError::WorkPlanOverflow {
+            phase: "nonlinear receipt work",
+        })?;
+    WorkPlan::checked(0, 0, 0, arithmetic, 0, 0, receipt_bytes)
+}
+
+fn nonlinear_assimilation_work_plan(
+    prior: &Belief,
+    spec: &NonlinearObservationSpec,
+) -> Result<WorkPlan, AssimError> {
+    let linearization = nonlinear_linearization_work_plan(prior, spec)?;
+    // The local affine observation's numerical values do not affect its
+    // canonical/update work shape. Keep this pre-admission calculation free
+    // of a representative operator or identity allocation.
+    let update =
+        single_observation_assimilation_work_plan_for_shape(prior.dim(), spec.instrument.len())?;
+    WorkPlan::checked(
+        linearization
+            .validation_psd
+            .checked_add(update.validation_psd)
+            .ok_or(AssimError::WorkPlanOverflow {
+                phase: "nonlinear assimilation work",
+            })?,
+        linearization
+            .record_materialization
+            .checked_add(update.record_materialization)
+            .ok_or(AssimError::WorkPlanOverflow {
+                phase: "nonlinear assimilation work",
+            })?,
+        linearization
+            .canonical_ordering
+            .checked_add(update.canonical_ordering)
+            .ok_or(AssimError::WorkPlanOverflow {
+                phase: "nonlinear assimilation work",
+            })?,
+        linearization
+            .misfit_passes
+            .checked_add(update.misfit_passes)
+            .ok_or(AssimError::WorkPlanOverflow {
+                phase: "nonlinear assimilation work",
+            })?,
+        linearization
+            .joseph_update
+            .checked_add(update.joseph_update)
+            .ok_or(AssimError::WorkPlanOverflow {
+                phase: "nonlinear assimilation work",
+            })?,
+        linearization
+            .psd_revalidation
+            .checked_add(update.psd_revalidation)
+            .ok_or(AssimError::WorkPlanOverflow {
+                phase: "nonlinear assimilation work",
+            })?,
+        linearization
+            .hashing
+            .checked_add(update.hashing)
+            .ok_or(AssimError::WorkPlanOverflow {
+                phase: "nonlinear assimilation work",
+            })?,
+    )
+}
+
+fn nonlinear_assimilation_output_bytes(
+    dimension: usize,
+    instrument_identity_bytes: usize,
+) -> Result<usize, AssimError> {
+    let jacobian = linear_allocation_bytes::<f64>(dimension, "nonlinear assimilation output plan")?;
+    let probes = linear_allocation_bytes::<FiniteDifferenceProbe>(
+        dimension,
+        "nonlinear assimilation output plan",
+    )?;
+    let observation = checked_memory_sum(
+        &[
+            core::mem::size_of::<Observation>(),
+            linear_allocation_bytes::<f64>(dimension, "nonlinear assimilation output plan")?,
+            instrument_identity_bytes,
+        ],
+        "nonlinear assimilation output plan",
+    )?;
+    let linearization = checked_memory_sum(
+        &[
+            core::mem::size_of::<NonlinearLinearization>(),
+            jacobian,
+            probes,
+            observation,
+            LINEARIZATION_ID_PREFIX.len() + 64,
+        ],
+        "nonlinear assimilation output plan",
+    )?;
+    checked_memory_sum(
+        &[
+            core::mem::size_of::<NonlinearAssimilation>(),
+            linearization,
+            super::belief_retained_bytes(dimension)?,
+        ],
+        "nonlinear assimilation output plan",
+    )
 }
 
 fn central_difference_probe<F>(
@@ -426,10 +688,12 @@ fn central_difference_probe<F>(
     component: usize,
     relative_step: f64,
     predict: &F,
+    progress: &mut WorkProgress<'_, '_>,
 ) -> Result<(f64, FiniteDifferenceProbe), AssimError>
 where
     F: Fn(&[f64]) -> f64,
 {
+    progress.scalar("nonlinear finite differences", 8)?;
     let base = state[component];
     let nominal_step = relative_step * base.abs().max(1.0);
     if !nominal_step.is_finite() || nominal_step <= 0.0 {
@@ -488,12 +752,24 @@ fn innovation_variance(
     prior: &Belief,
     jacobian: &[f64],
     noise_var: f64,
+    progress: &mut WorkProgress<'_, '_>,
 ) -> Result<f64, AssimError> {
     let mut covariance_times_jacobian = Vec::with_capacity(prior.dim());
     for row in prior.covariance() {
-        covariance_times_jacobian.push(checked_dot(row, jacobian)?);
+        covariance_times_jacobian.push(checked_dot(
+            row,
+            jacobian,
+            "nonlinear innovation variance",
+            progress,
+        )?);
     }
-    let variance = checked_dot(jacobian, &covariance_times_jacobian)? + noise_var;
+    let variance = checked_dot(
+        jacobian,
+        &covariance_times_jacobian,
+        "nonlinear innovation variance",
+        progress,
+    )? + noise_var;
+    progress.scalar("nonlinear innovation variance", 1)?;
     if !variance.is_finite() {
         return Err(AssimError::NonFiniteComputation {
             stage: "nonlinear innovation variance",
@@ -505,10 +781,16 @@ fn innovation_variance(
     Ok(variance)
 }
 
-fn checked_dot(left: &[f64], right: &[f64]) -> Result<f64, AssimError> {
+fn checked_dot(
+    left: &[f64],
+    right: &[f64],
+    phase: &'static str,
+    progress: &mut WorkProgress<'_, '_>,
+) -> Result<f64, AssimError> {
     let mut sum = 0.0;
     for (&left, &right) in left.iter().zip(right) {
         sum = left.mul_add(right, sum);
+        progress.scalar(phase, 1)?;
         if !sum.is_finite() {
             return Err(AssimError::NonFiniteComputation {
                 stage: "nonlinear linearization dot product",
@@ -529,70 +811,91 @@ fn linearization_receipt(
     jacobian: &[f64],
     probes: &[FiniteDifferenceProbe],
     disposition: LinearizationDisposition,
-) -> String {
+    progress: &mut WorkProgress<'_, '_>,
+) -> Result<String, AssimError> {
     let mut hasher = DomainHasher::new(LINEARIZATION_ID_DOMAIN);
-    hash_belief(&mut hasher, prior);
-    hash_f64(&mut hasher, spec.reading);
-    hash_f64(&mut hasher, spec.noise_var);
-    hash_bytes(&mut hasher, spec.instrument.as_bytes());
-    hash_bytes(&mut hasher, spec.model_id.as_bytes());
-    hash_f64(&mut hasher, spec.settings.relative_step);
-    hash_f64(&mut hasher, spec.settings.max_standardized_innovation);
-    hash_f64(&mut hasher, prediction);
-    hash_f64(&mut hasher, innovation);
-    hash_f64(&mut hasher, innovation_variance);
-    hash_f64(&mut hasher, standardized_innovation);
-    hash_u64(&mut hasher, jacobian.len() as u64);
+    hash_belief(&mut hasher, prior, progress)?;
+    hash_f64(&mut hasher, spec.reading, progress)?;
+    hash_f64(&mut hasher, spec.noise_var, progress)?;
+    hash_bytes(&mut hasher, spec.instrument.as_bytes(), progress)?;
+    hash_bytes(&mut hasher, spec.model_id.as_bytes(), progress)?;
+    hash_f64(&mut hasher, spec.settings.relative_step, progress)?;
+    hash_f64(
+        &mut hasher,
+        spec.settings.max_standardized_innovation,
+        progress,
+    )?;
+    hash_f64(&mut hasher, prediction, progress)?;
+    hash_f64(&mut hasher, innovation, progress)?;
+    hash_f64(&mut hasher, innovation_variance, progress)?;
+    hash_f64(&mut hasher, standardized_innovation, progress)?;
+    hash_u64(&mut hasher, jacobian.len() as u64, progress)?;
     for derivative in jacobian {
-        hash_f64(&mut hasher, *derivative);
+        hash_f64(&mut hasher, *derivative, progress)?;
     }
-    hash_u64(&mut hasher, probes.len() as u64);
+    hash_u64(&mut hasher, probes.len() as u64, progress)?;
     for probe in probes {
-        hash_u64(&mut hasher, probe.component as u64);
-        hash_f64(&mut hasher, probe.nominal_step);
-        hash_f64(&mut hasher, probe.plus_state);
-        hash_f64(&mut hasher, probe.minus_state);
-        hash_f64(&mut hasher, probe.plus_prediction);
-        hash_f64(&mut hasher, probe.minus_prediction);
+        hash_u64(&mut hasher, probe.component as u64, progress)?;
+        hash_f64(&mut hasher, probe.nominal_step, progress)?;
+        hash_f64(&mut hasher, probe.plus_state, progress)?;
+        hash_f64(&mut hasher, probe.minus_state, progress)?;
+        hash_f64(&mut hasher, probe.plus_prediction, progress)?;
+        hash_f64(&mut hasher, probe.minus_prediction, progress)?;
     }
+    progress.hash_bytes("nonlinear receipt", 1)?;
     hasher.update(&[match disposition {
         LinearizationDisposition::Admitted => 0,
         LinearizationDisposition::DemotedLargeInnovation => 1,
     }]);
-    format!("{LINEARIZATION_ID_PREFIX}{}", hasher.finalize())
+    Ok(format!("{LINEARIZATION_ID_PREFIX}{}", hasher.finalize()))
 }
 
-fn hash_belief(hasher: &mut DomainHasher, belief: &Belief) {
-    hash_u64(hasher, belief.dim() as u64);
+fn hash_belief(
+    hasher: &mut DomainHasher,
+    belief: &Belief,
+    progress: &mut WorkProgress<'_, '_>,
+) -> Result<(), AssimError> {
+    hash_u64(hasher, belief.dim() as u64, progress)?;
     for value in belief.mean() {
-        hash_f64(hasher, *value);
+        hash_f64(hasher, *value, progress)?;
     }
-    hash_u64(hasher, belief.covariance().len() as u64);
+    hash_u64(hasher, belief.covariance().len() as u64, progress)?;
     for row in belief.covariance() {
-        hash_u64(hasher, row.len() as u64);
+        hash_u64(hasher, row.len() as u64, progress)?;
         for value in row {
-            hash_f64(hasher, *value);
+            hash_f64(hasher, *value, progress)?;
         }
     }
+    Ok(())
 }
 
-fn hash_bytes(hasher: &mut DomainHasher, bytes: &[u8]) {
-    hash_u64(hasher, bytes.len() as u64);
+fn hash_bytes(
+    hasher: &mut DomainHasher,
+    bytes: &[u8],
+    progress: &mut WorkProgress<'_, '_>,
+) -> Result<(), AssimError> {
+    hash_u64(hasher, bytes.len() as u64, progress)?;
+    progress.hash_bytes("nonlinear receipt", bytes.len() as u128)?;
     hasher.update(bytes);
+    Ok(())
 }
 
-fn hash_f64(hasher: &mut DomainHasher, value: f64) {
+fn hash_f64(
+    hasher: &mut DomainHasher,
+    value: f64,
+    progress: &mut WorkProgress<'_, '_>,
+) -> Result<(), AssimError> {
+    progress.hash_bytes("nonlinear receipt", 8)?;
     hasher.update(&canonical_f64_bits(value).to_le_bytes());
+    Ok(())
 }
 
-fn hash_u64(hasher: &mut DomainHasher, value: u64) {
+fn hash_u64(
+    hasher: &mut DomainHasher,
+    value: u64,
+    progress: &mut WorkProgress<'_, '_>,
+) -> Result<(), AssimError> {
+    progress.hash_bytes("nonlinear receipt", 8)?;
     hasher.update(&value.to_le_bytes());
-}
-
-fn nonlinear_cancelled(phase: &'static str, completed: u128, planned: u128) -> AssimError {
-    AssimError::Cancelled {
-        phase,
-        completed,
-        planned,
-    }
+    Ok(())
 }

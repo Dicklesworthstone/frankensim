@@ -38,7 +38,8 @@ pub mod groups;
 pub use nonlinear::{
     FiniteDifferenceProbe, FiniteDifferenceSettings, LinearizationDisposition,
     NonlinearAssimilation, NonlinearLinearization, NonlinearObservationSpec,
-    assimilate_nonlinear_fd, linearize_nonlinear_fd,
+    assimilate_nonlinear_fd, assimilate_nonlinear_fd_budgeted, linearize_nonlinear_fd,
+    nonlinear_assimilation_invocation_resources,
 };
 pub use robust::{
     BatchOutcome, CensorDirection, MAX_CORRELATED_OBSERVATIONS, ObservationAudit, ObservationBatch,
@@ -1921,6 +1922,47 @@ fn assimilation_work_plan(
     )
 }
 
+/// Shape-only work plan for one scalar observation already known to have the
+/// given state dimension and instrument-identity byte length.
+///
+/// This keeps callers that must seal a child before allocating a derived
+/// observation from materializing a planning-only operator or identity clone.
+fn single_observation_assimilation_work_plan_for_shape(
+    state_dimension: usize,
+    instrument_identity_bytes: usize,
+) -> Result<WorkPlan, AssimError> {
+    validate_state_dimension(state_dimension)?;
+    if state_dimension == 0 {
+        return Err(AssimError::EmptyBelief);
+    }
+    validate_assimilation_work(state_dimension, 1)?;
+    let _dense_matrix_bytes = checked_square_usize(state_dimension, "Joseph matrices")?;
+    let _certificate_bytes =
+        checked_square_allocation::<PsdCell>(state_dimension, "posterior PSD certificate")?;
+    let n = state_dimension as u128;
+    let n2 = checked_work_mul(n, n, "assimilation preflight")?;
+    let n3 = checked_work_mul(n2, n, "assimilation preflight")?;
+    let validation_psd = checked_work_add(n, 4, "observation validation")?;
+    let record_materialization = u128::try_from(canonical_observation_size_for_shape(
+        state_dimension,
+        instrument_identity_bytes,
+    )?)
+    .map_err(|_| AssimError::WorkPlanOverflow {
+        phase: "canonical record materialization",
+    })?;
+    let canonical_ordering = 2;
+    let (joseph_update, psd_revalidation) = assimilation_update_work(n, n2, n3, 1, true)?;
+    WorkPlan::checked(
+        validation_psd,
+        record_materialization,
+        canonical_ordering,
+        0,
+        joseph_update,
+        psd_revalidation,
+        0,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn assimilation_work_plan_for_dimension(
     state_dimension: usize,
@@ -2745,19 +2787,24 @@ fn atom_encoded_size(label_len: usize, value_len: usize) -> Result<usize, AssimE
 }
 
 fn canonical_observation_size(observation: &Observation) -> Result<usize, AssimError> {
+    canonical_observation_size_for_shape(observation.operator.len(), observation.instrument.len())
+}
+
+fn canonical_observation_size_for_shape(
+    operator_dimension: usize,
+    instrument_identity_bytes: usize,
+) -> Result<usize, AssimError> {
     let mut size = atom_encoded_size(b"operator-length".len(), size_of::<u128>())?;
     let coefficient_atom = atom_encoded_size(b"operator-coefficient".len(), size_of::<u64>())?;
     let value_atom = atom_encoded_size(b"value".len(), size_of::<u64>())?;
     let noise_atom = atom_encoded_size(b"noise-variance".len(), size_of::<u64>())?;
-    let instrument_atom = atom_encoded_size(b"instrument".len(), observation.instrument.len())?;
+    let instrument_atom = atom_encoded_size(b"instrument".len(), instrument_identity_bytes)?;
     size = size
-        .checked_add(
-            coefficient_atom
-                .checked_mul(observation.operator.len())
-                .ok_or(AssimError::WorkPlanOverflow {
-                    phase: "canonical operator",
-                })?,
-        )
+        .checked_add(coefficient_atom.checked_mul(operator_dimension).ok_or(
+            AssimError::WorkPlanOverflow {
+                phase: "canonical operator",
+            },
+        )?)
         .and_then(|value| value.checked_add(value_atom))
         .and_then(|value| value.checked_add(noise_atom))
         .and_then(|value| value.checked_add(instrument_atom))

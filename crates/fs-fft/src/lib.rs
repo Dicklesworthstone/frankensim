@@ -1044,6 +1044,80 @@ pub struct NdPassReport {
     pub wall_ns: u64,
 }
 
+/// Private runner boundary shared by the local and task-scoped N-D paths.
+///
+/// Both forms execute the same pencil kernels in the same axis order. The
+/// distinction is only worker ownership: [`fs_exec::KernelRunner`] supplies
+/// the historical local lane, while [`ScopedNdimRunner`] borrows workers from
+/// the caller's live asupersync task.
+trait NdimRunner {
+    fn workers(&self) -> usize;
+
+    /// Observe task-owned cancellation at a serial pencil boundary.
+    fn cancellation_requested(&self, gate: &fs_exec::CancelGate) -> bool;
+
+    fn run<K: fs_exec::TileKernel<Out = ()>>(
+        &self,
+        kernel: &K,
+        gate: &fs_exec::CancelGate,
+    ) -> (Result<(), fs_exec::RunError>, fs_exec::RunReport);
+}
+
+impl<P: fs_exec::KernelRunner> NdimRunner for P {
+    fn workers(&self) -> usize {
+        fs_exec::KernelRunner::workers(self)
+    }
+
+    fn cancellation_requested(&self, gate: &fs_exec::CancelGate) -> bool {
+        gate.is_requested()
+    }
+
+    fn run<K: fs_exec::TileKernel<Out = ()>>(
+        &self,
+        kernel: &K,
+        gate: &fs_exec::CancelGate,
+    ) -> (Result<(), fs_exec::RunError>, fs_exec::RunReport) {
+        fs_exec::KernelRunner::run_with_gate(self, kernel, gate)
+    }
+}
+
+/// Borrowed task-scope runner for one N-D transform invocation.
+struct ScopedNdimRunner<'a, Caps> {
+    pool: &'a fs_exec::TilePool,
+    task_cx: &'a asupersync::Cx<Caps>,
+}
+
+impl<Caps> NdimRunner for ScopedNdimRunner<'_, Caps>
+where
+    Caps: Send + Sync + 'static,
+{
+    fn workers(&self) -> usize {
+        self.pool.workers()
+    }
+
+    fn cancellation_requested(&self, gate: &fs_exec::CancelGate) -> bool {
+        if !gate.is_requested() && self.task_cx.checkpoint().is_err() {
+            gate.request();
+        }
+        gate.is_requested()
+    }
+
+    fn run<K: fs_exec::TileKernel<Out = ()>>(
+        &self,
+        kernel: &K,
+        gate: &fs_exec::CancelGate,
+    ) -> (Result<(), fs_exec::RunError>, fs_exec::RunReport) {
+        self.pool.run_scoped(
+            self.task_cx,
+            kernel,
+            gate,
+            fs_exec::RunId::default(),
+            fs_exec::Budget::INFINITE,
+            &fs_alloc::OperationMemoryLease::unbounded(),
+        )
+    }
+}
+
 impl FftNd {
     /// Executor-tiled forward N-D DFT: bitwise identical to
     /// [`FftNd::forward`] at every worker count (gated). See
@@ -1079,6 +1153,43 @@ impl FftNd {
         gate: &fs_exec::CancelGate,
     ) -> Result<(), fs_exec::RunError> {
         self.run_pooled(data, true, pool, gate)
+    }
+
+    /// Task-scoped executor-tiled forward N-D DFT.
+    ///
+    /// Every parallel pencil pass borrows its workers from `task_cx` through
+    /// [`fs_exec::TilePool::run_scoped`]. Task cancellation or budget
+    /// exhaustion therefore drains the same pool gate used by the local API.
+    /// Arithmetic, pencil order, and tiling are identical to
+    /// [`Self::forward_pooled`].
+    pub fn forward_pooled_scoped<Caps>(
+        &self,
+        data: &mut [C64],
+        pool: &fs_exec::TilePool,
+        task_cx: &asupersync::Cx<Caps>,
+        gate: &fs_exec::CancelGate,
+    ) -> Result<(), fs_exec::RunError>
+    where
+        Caps: Send + Sync + 'static,
+    {
+        self.run_pooled(data, false, &ScopedNdimRunner { pool, task_cx }, gate)
+    }
+
+    /// Task-scoped executor-tiled inverse N-D DFT.
+    ///
+    /// See [`Self::forward_pooled_scoped`] for worker ownership and
+    /// cancellation semantics.
+    pub fn inverse_pooled_scoped<Caps>(
+        &self,
+        data: &mut [C64],
+        pool: &fs_exec::TilePool,
+        task_cx: &asupersync::Cx<Caps>,
+        gate: &fs_exec::CancelGate,
+    ) -> Result<(), fs_exec::RunError>
+    where
+        Caps: Send + Sync + 'static,
+    {
+        self.run_pooled(data, true, &ScopedNdimRunner { pool, task_cx }, gate)
     }
 
     /// As [`FftNd::forward_pooled`], additionally reporting each axis
@@ -1125,11 +1236,11 @@ impl FftNd {
     /// some pencils of the interrupted axis may be). Callers needing
     /// transactional output stage a copy first; the drained pool and the
     /// structured error are the guarantees, torn-freedom of `data` is not.
-    fn run_pooled<P: fs_exec::KernelRunner>(
+    fn run_pooled<R: NdimRunner>(
         &self,
         data: &mut [C64],
         inverse: bool,
-        pool: &P,
+        pool: &R,
         gate: &fs_exec::CancelGate,
     ) -> Result<(), fs_exec::RunError> {
         self.run_pooled_observed(data, inverse, pool, gate, &mut |_| {})
@@ -1139,11 +1250,11 @@ impl FftNd {
     /// the pass itself; the observer runs between passes, outside any
     /// measured window, and results never depend on it.
     #[allow(clippy::too_many_lines)]
-    fn run_pooled_observed<P: fs_exec::KernelRunner>(
+    fn run_pooled_observed<R: NdimRunner>(
         &self,
         data: &mut [C64],
         inverse: bool,
-        pool: &P,
+        pool: &R,
         gate: &fs_exec::CancelGate,
         observe: &mut dyn FnMut(NdPassReport),
     ) -> Result<(), fs_exec::RunError> {
@@ -1164,7 +1275,7 @@ impl FftNd {
             if outer == 1 && stride == 1 {
                 // Degenerate single pencil (1-D or all-leading-1 shapes):
                 // serial, gate-checked.
-                if gate.is_requested() {
+                if pool.cancellation_requested(gate) {
                     return Err(fs_exec::RunError::Cancelled {
                         kernel: "fs-fft/ndim-axis-serial-v1",
                         completed: 0,
@@ -1219,7 +1330,7 @@ impl FftNd {
                     inverse,
                 };
                 let pass_start = std::time::Instant::now();
-                let (outcome, report) = pool.run_with_gate(&kernel, gate);
+                let (outcome, report) = pool.run(&kernel, gate);
                 observe(NdPassReport {
                     axis: ax,
                     inverse,
@@ -1257,7 +1368,7 @@ impl FftNd {
                 inverse,
             };
             let pass_start = std::time::Instant::now();
-            let (outcome, report) = pool.run_with_gate(&kernel, gate);
+            let (outcome, report) = pool.run(&kernel, gate);
             observe(NdPassReport {
                 axis: ax,
                 inverse,

@@ -208,6 +208,10 @@ pub struct LinePressureMoments {
 pub struct PointNormalPatchReceipt {
     pub request_id: ContentHash,
     pub receipt_id: ContentHash,
+    /// Content identity of the finite-gap response-curve evaluation when this
+    /// Estimate-only receipt was derived from one. Analytic point laws do not
+    /// carry an external response-curve identity.
+    pub finite_gap_response_identity: Option<ContentHash>,
     pub units: &'static str,
     pub interface_system_id: String,
     pub history_id: String,
@@ -674,7 +678,7 @@ impl NormalPatchRequest {
     fn finite_gap_point(
         &self,
         request_id: ContentHash,
-        _response_identity: ContentHash,
+        response_identity: ContentHash,
         reference_radius_m: f64,
         elastic_force_n: f64,
         elastic_tangent_n_per_m: f64,
@@ -723,6 +727,7 @@ impl NormalPatchRequest {
         )?;
         self.estimated_elliptic_point_receipt(
             request_id,
+            response_identity,
             approach,
             force,
             tangent,
@@ -786,6 +791,7 @@ impl NormalPatchRequest {
         Ok(NormalPatchReceipt::Point(PointNormalPatchReceipt {
             request_id,
             receipt_id,
+            finite_gap_response_identity: None,
             units: POINT_SI_UNITS,
             interface_system_id: self.interface.ordered_system_id().to_owned(),
             history_id: self.interface.history_id().to_owned(),
@@ -837,6 +843,7 @@ impl NormalPatchRequest {
         )?;
         let receipt_id = self.elliptic_receipt_id(
             request_id,
+            None,
             approach,
             force,
             tangent,
@@ -852,6 +859,7 @@ impl NormalPatchRequest {
         Ok(NormalPatchReceipt::Point(PointNormalPatchReceipt {
             request_id,
             receipt_id,
+            finite_gap_response_identity: None,
             units: POINT_SI_UNITS,
             interface_system_id: self.interface.ordered_system_id().to_owned(),
             history_id: self.interface.history_id().to_owned(),
@@ -881,6 +889,7 @@ impl NormalPatchRequest {
     fn estimated_elliptic_point_receipt(
         &self,
         request_id: ContentHash,
+        response_identity: ContentHash,
         approach: f64,
         force: f64,
         tangent: f64,
@@ -905,6 +914,7 @@ impl NormalPatchRequest {
         )?;
         let receipt_id = self.elliptic_receipt_id(
             request_id,
+            Some(response_identity),
             approach,
             force,
             tangent,
@@ -920,6 +930,7 @@ impl NormalPatchRequest {
         Ok(NormalPatchReceipt::Point(PointNormalPatchReceipt {
             request_id,
             receipt_id,
+            finite_gap_response_identity: Some(response_identity),
             units: POINT_SI_UNITS,
             interface_system_id: self.interface.ordered_system_id().to_owned(),
             history_id: self.interface.history_id().to_owned(),
@@ -1088,6 +1099,7 @@ impl NormalPatchRequest {
     fn elliptic_receipt_id(
         &self,
         request_id: ContentHash,
+        finite_gap_response_identity: Option<ContentHash>,
         approach: f64,
         force: f64,
         tangent: f64,
@@ -1104,11 +1116,12 @@ impl NormalPatchRequest {
         write!(
             &mut hasher,
             concat!(
-                "elliptic-point|{}|{}|{:.17e}|{:.17e}|{:.17e}|{:.17e}|",
+                "elliptic-point|{}|{:?}|{}|{:.17e}|{:.17e}|{:.17e}|{:.17e}|",
                 "{:.17e}|{:.17e}|{:.17e}|{:.17e}|{:.17e}|{:.17e}|",
                 "{:.17e}|{:.17e}|{:?}|{:.17e}|{:.17e}|{:.17e}|{:?}|{}|{}|{}"
             ),
             request_id,
+            finite_gap_response_identity,
             self.identity.state_id,
             approach,
             force,
@@ -1370,6 +1383,17 @@ impl NormalPatchRequest {
                 {
                     return Err(NormalPatchError::InvalidInput {
                         field: "finite_gap_response",
+                    });
+                }
+                // A zero-load response may intentionally retain a degenerate
+                // footprint; any positive force or pressure may not.
+                let collapsed_footprint = equivalent_pressure_semiaxes_m
+                    .iter()
+                    .any(|axis| *axis == 0.0)
+                    || equivalent_pressure_semiaxes_m[0] * equivalent_pressure_semiaxes_m[1] == 0.0;
+                if (elastic_force_n > 0.0 || peak_pressure_pa > 0.0) && collapsed_footprint {
+                    return Err(NormalPatchError::InvalidInput {
+                        field: "finite_gap_pressure_footprint",
                     });
                 }
             }

@@ -222,7 +222,7 @@ fn the_as_built_diff_is_an_estimated_candidate_with_exact_run_conditions() {
             estimator,
             dispersion,
         } => {
-            assert!(estimator.starts_with("asbuilt-diff-v6:"));
+            assert!(estimator.starts_with("asbuilt-diff-v7:"));
             assert_eq!(dispersion.to_bits(), 0.05f64.to_bits());
         }
         other => panic!("expected estimated candidate, got {other:?}"),
@@ -280,6 +280,42 @@ fn sampled_conformance_is_tri_state_and_never_whole_part_authority() {
         unmodeled_noise.sampled_conformance(),
         SampledConformance::Indeterminate,
         "finite samples with an unmodeled uncertainty term cannot become a whole-part pass"
+    );
+
+    let noisy_exceedance = with_default_cx(|cx| {
+        as_built_diff(
+            &registration(0.0, 0.0, 0.0, 0.0),
+            &design,
+            &[point(0.0, 0.3)],
+            0.2,
+            0.05,
+            "cal",
+            cx,
+        )
+    })
+    .expect("finite noisy exceedance");
+    assert_eq!(
+        noisy_exceedance.sampled_conformance(),
+        SampledConformance::Indeterminate,
+        "a noisy observed excess does not establish a true tolerance failure"
+    );
+
+    let registration_uncertain_exceedance = with_default_cx(|cx| {
+        as_built_diff(
+            &registration(0.0, 0.0, 0.0, 0.05),
+            &design,
+            &[point(0.0, 0.3)],
+            0.2,
+            0.0,
+            "cal",
+            cx,
+        )
+    })
+    .expect("finite registration-uncertain exceedance");
+    assert_eq!(
+        registration_uncertain_exceedance.sampled_conformance(),
+        SampledConformance::Indeterminate,
+        "a registration-uncertain observed excess does not establish a true tolerance failure"
     );
 
     let boundary = with_default_cx(|cx| {
@@ -610,7 +646,7 @@ fn g5_retained_identity_declares_the_v2_work_and_poll_policies() {
     assert_eq!(AS_BUILT_POLL_STRIDE_POINTS, 256);
     assert_eq!(AS_BUILT_POLL_STRIDE_BYTES, 256);
     let diff = fixture_diff(ExecMode::Deterministic, Budget::INFINITE);
-    assert!(estimator_identity(&diff).starts_with("asbuilt-diff-v6:"));
+    assert!(estimator_identity(&diff).starts_with("asbuilt-diff-v7:"));
 }
 
 #[test]
@@ -975,8 +1011,8 @@ fn contract_tracks_live_dependencies_api_schema_cancellation_and_no_claims() {
         ),
         (
             "Invariants",
-            "const AS_BUILT_ESTIMATOR_SCHEMA: &[u8] = b\"fs-asbuilt-diff-estimator-v6\";",
-            "asbuilt-diff-v6 identity",
+            "const AS_BUILT_ESTIMATOR_SCHEMA: &[u8] = b\"fs-asbuilt-diff-estimator-v7\";",
+            "asbuilt-diff-v7 identity",
         ),
         (
             "Invariants",

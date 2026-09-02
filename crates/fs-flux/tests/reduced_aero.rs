@@ -119,6 +119,16 @@ fn aero_001_zero_density_and_zero_motion_are_exact_zero_limits() {
     assert_eq!(vacuum_wrench.torque_world_n_m, Vec3::ZERO);
     assert_eq!(vacuum_wrench.receipt.relative_power_w, 0.0);
 
+    // A roughness correlation is inapplicable when the gas cannot exert a
+    // wrench. Its domain must not turn the exact vacuum limit into a refusal.
+    let mut rough_vacuum = vacuum.clone();
+    rough_vacuum.roughness.height_m = rough_vacuum.geometry.radius_m;
+    let rough_vacuum_wrench = model
+        .evaluate(&rough_vacuum)
+        .expect("vacuum bypasses an inapplicable roughness domain");
+    assert_eq!(rough_vacuum_wrench.force_world_n, Vec3::ZERO);
+    assert_eq!(rough_vacuum_wrench.torque_world_n_m, Vec3::ZERO);
+
     let mut stationary = input(Vec3::ZERO);
     stationary.kinematics = BodyKinematics {
         reference_point_world_m: stationary.kinematics.reference_point_world_m,
@@ -129,6 +139,98 @@ fn aero_001_zero_density_and_zero_motion_are_exact_zero_limits() {
     assert_eq!(stationary_wrench.force_world_n, Vec3::ZERO);
     assert_eq!(stationary_wrench.torque_world_n_m, Vec3::ZERO);
     assert_eq!(stationary_wrench.receipt.dissipated_relative_power_w, 0.0);
+
+    let mut rough_stationary = stationary;
+    rough_stationary.roughness.height_m = rough_stationary.geometry.radius_m;
+    let rough_stationary_wrench = model
+        .evaluate(&rough_stationary)
+        .expect("static limit bypasses an inapplicable roughness domain");
+    assert_eq!(rough_stationary_wrench.force_world_n, Vec3::ZERO);
+    assert_eq!(rough_stationary_wrench.torque_world_n_m, Vec3::ZERO);
+}
+
+#[test]
+fn aero_001_inactive_component_motion_bypasses_inapplicable_roughness_gate() {
+    let form_only = ReducedAeroModel::try_new(
+        identity("fixture.form-only-zero-limit"),
+        envelope(),
+        uncertainty(),
+        ReducedAeroComponents {
+            form_drag: Some(FormDrag { coefficient: 1.0 }),
+            ..ReducedAeroComponents::default()
+        },
+        &[ContributionFamily::TranslationalFormDrag],
+    )
+    .expect("form-only model is admitted");
+    let mut pure_spin = input(Vec3::ZERO);
+    pure_spin.kinematics.linear_velocity_world_m_per_s = Vec3::ZERO;
+    pure_spin.roughness.height_m = pure_spin.geometry.radius_m;
+    let pure_spin_wrench = form_only
+        .evaluate(&pure_spin)
+        .expect("irrelevant spin cannot invoke the form-drag roughness gate");
+    assert_eq!(pure_spin_wrench.force_world_n, Vec3::ZERO);
+    assert_eq!(pure_spin_wrench.torque_world_n_m, Vec3::ZERO);
+
+    let rotation_only = ReducedAeroModel::try_new(
+        identity("fixture.rotation-only-zero-limit"),
+        envelope(),
+        uncertainty(),
+        ReducedAeroComponents {
+            rotational_skin_friction: Some(RotationalSkinFriction { coefficient: 0.1 }),
+            ..ReducedAeroComponents::default()
+        },
+        &[ContributionFamily::RotationalSkinFriction],
+    )
+    .expect("rotation-only model is admitted");
+    let mut pure_translation = input(Vec3::ZERO);
+    pure_translation.kinematics.angular_velocity_world_rad_per_s = Vec3::ZERO;
+    pure_translation.roughness.height_m = pure_translation.geometry.radius_m;
+    let pure_translation_wrench = rotation_only
+        .evaluate(&pure_translation)
+        .expect("irrelevant translation cannot invoke the rotational roughness gate");
+    assert_eq!(pure_translation_wrench.force_world_n, Vec3::ZERO);
+    assert_eq!(pure_translation_wrench.torque_world_n_m, Vec3::ZERO);
+
+    let skin_only = ReducedAeroModel::try_new(
+        identity("fixture.skin-only-zero-limit"),
+        envelope(),
+        uncertainty(),
+        ReducedAeroComponents {
+            rotational_skin_friction: Some(RotationalSkinFriction { coefficient: 0.1 }),
+            ..ReducedAeroComponents::default()
+        },
+        &[ContributionFamily::RotationalSkinFriction],
+    )
+    .expect("skin-only model is admitted");
+    let mut pure_reorientation = input(Vec3::ZERO);
+    pure_reorientation.pose = DiscPose::try_new(Vec3::new(0.0, 0.0, 1.0)).expect("unit normal");
+    pure_reorientation.kinematics.linear_velocity_world_m_per_s = Vec3::ZERO;
+    pure_reorientation
+        .kinematics
+        .angular_velocity_world_rad_per_s = Vec3::new(1.0, 0.0, 0.0);
+    pure_reorientation.roughness.height_m = pure_reorientation.geometry.radius_m;
+    let pure_reorientation_wrench = skin_only
+        .evaluate(&pure_reorientation)
+        .expect("skin friction is inactive under pure reorientation");
+    assert_eq!(pure_reorientation_wrench.torque_world_n_m, Vec3::ZERO);
+
+    let orientation_only = ReducedAeroModel::try_new(
+        identity("fixture.orientation-only-zero-limit"),
+        envelope(),
+        uncertainty(),
+        ReducedAeroComponents {
+            orientation_rate_damping: Some(OrientationRateDamping { coefficient: 0.1 }),
+            ..ReducedAeroComponents::default()
+        },
+        &[ContributionFamily::OrientationRateDamping],
+    )
+    .expect("orientation-only model is admitted");
+    let mut pure_spin = pure_reorientation;
+    pure_spin.kinematics.angular_velocity_world_rad_per_s = Vec3::new(0.0, 0.0, 1.0);
+    let pure_spin_wrench = orientation_only
+        .evaluate(&pure_spin)
+        .expect("orientation damping is inactive under pure spin");
+    assert_eq!(pure_spin_wrench.torque_world_n_m, Vec3::ZERO);
 }
 
 #[test]
@@ -212,11 +314,6 @@ fn aero_004_moving_ambient_uses_relative_motion_and_demands_total_accounting() {
         .expect("matching ambient result");
 
     assert_eq!(matching_ambient.components.form_force_world_n, Vec3::ZERO);
-    assert!(
-        matching_ambient
-            .receipt
-            .moving_ambient_requires_total_energy_accounting
-    );
     assert!(still_air.receipt.body_power_w <= 1.0e-12);
     assert!(matching_ambient.receipt.relative_power_w <= 1.0e-12);
     assert!(
@@ -226,6 +323,43 @@ fn aero_004_moving_ambient_uses_relative_motion_and_demands_total_accounting() {
             .abs()
             <= 1.0e-12
     );
+
+    assert_eq!(matching_ambient.receipt.ambient_boundary_power_w, 0.0);
+    assert!(
+        !matching_ambient
+            .receipt
+            .moving_ambient_requires_total_energy_accounting
+    );
+    let exchanging_ambient = model
+        .evaluate(&input(Vec3::new(1.0, 0.0, 0.0)))
+        .expect("moving ambient with nonzero boundary power evaluates");
+    assert_ne!(exchanging_ambient.receipt.ambient_boundary_power_w, 0.0);
+    assert!(
+        exchanging_ambient
+            .receipt
+            .moving_ambient_requires_total_energy_accounting
+    );
+
+    let mut false_positive = matching_ambient.clone();
+    false_positive
+        .receipt
+        .moving_ambient_requires_total_energy_accounting = true;
+    assert!(matches!(
+        WorkWindow::default().record_once(41, 0.25, &false_positive),
+        Err(ReducedAeroError::InvalidCandidateWrench {
+            field: "candidate.receipt.moving_ambient_requires_total_energy_accounting"
+        })
+    ));
+    let mut false_negative = exchanging_ambient.clone();
+    false_negative
+        .receipt
+        .moving_ambient_requires_total_energy_accounting = false;
+    assert!(matches!(
+        WorkWindow::default().record_once(42, 0.25, &false_negative),
+        Err(ReducedAeroError::InvalidCandidateWrench {
+            field: "candidate.receipt.moving_ambient_requires_total_energy_accounting"
+        })
+    ));
 }
 
 #[test]
@@ -533,6 +667,69 @@ fn aero_014_forged_wrenches_and_overflow_do_not_consume_work_keys_or_totals() {
         window.record_once(29, 0.25, &forged_vector),
         Err(ReducedAeroError::InvalidCandidateWrench {
             field: "candidate.force_world_n"
+        })
+    ));
+    assert_eq!(window.body_work_j(), 0.0);
+    assert_eq!(window.relative_dissipation_j(), 0.0);
+
+    let mut forged_correlation = wrench.clone();
+    forged_correlation.correlation = identity("fixture.forged-correlation");
+    assert!(matches!(
+        WorkWindow::default().record_once(30, 0.25, &forged_correlation),
+        Err(ReducedAeroError::InvalidCandidateWrench {
+            field: "candidate.correlation"
+        })
+    ));
+
+    let mut forged_gas_source = wrench.clone();
+    forged_gas_source.receipt.gas_source_id = "gas.forged.fixture".to_owned();
+    assert!(matches!(
+        WorkWindow::default().record_once(31, 0.25, &forged_gas_source),
+        Err(ReducedAeroError::InvalidCandidateWrench {
+            field: "candidate.receipt.gas_source_id"
+        })
+    ));
+
+    let mut forged_roughness_source = wrench.clone();
+    forged_roughness_source.receipt.roughness_source_id = "roughness.forged.fixture".to_owned();
+    assert!(matches!(
+        WorkWindow::default().record_once(32, 0.25, &forged_roughness_source),
+        Err(ReducedAeroError::InvalidCandidateWrench {
+            field: "candidate.receipt.roughness_source_id"
+        })
+    ));
+
+    let mut forged_uncertainty_source = wrench.clone();
+    forged_uncertainty_source
+        .receipt
+        .correlation_uncertainty_source_id = "uncertainty.forged.fixture".to_owned();
+    assert!(matches!(
+        WorkWindow::default().record_once(33, 0.25, &forged_uncertainty_source),
+        Err(ReducedAeroError::InvalidCandidateWrench {
+            field: "candidate.receipt.correlation_uncertainty_source_id"
+        })
+    ));
+
+    let mut forged_uncertainty_width = wrench.clone();
+    forged_uncertainty_width
+        .receipt
+        .coefficient_relative_half_width = 0.0;
+    assert!(matches!(
+        WorkWindow::default().record_once(34, 0.25, &forged_uncertainty_width),
+        Err(ReducedAeroError::InvalidCandidateWrench {
+            field: "candidate.receipt.coefficient_relative_half_width"
+        })
+    ));
+
+    let mut forged_zero_power = wrench.clone();
+    forged_zero_power.receipt.relative_power_w = 0.0;
+    forged_zero_power.receipt.dissipated_relative_power_w = 0.0;
+    forged_zero_power.receipt.body_power_w = 0.0;
+    forged_zero_power.receipt.ambient_boundary_power_w = 0.0;
+    assert!(matches!(
+        window.record_once(29, 0.25, &forged_zero_power),
+        Err(ReducedAeroError::InvalidCandidateWrench {
+            field: "candidate.receipt.relative_power_w"
         })
     ));
     assert_eq!(window.body_work_j(), 0.0);

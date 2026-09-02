@@ -34,7 +34,9 @@ adjoints.
   damping. `CandidateWrench` is force/moment **on the body** about the supplied
   reference point; it retains every component rather than hiding a thin-gap or
   fitted term in a total coefficient. Gas, roughness, and caller-supplied
-  coefficient-uncertainty card identities flow into the `EstimateOnly` receipt.
+  coefficient-uncertainty card identities flow into the `EstimateOnly` receipt;
+  a private evaluation snapshot makes `WorkWindow` refuse any later public
+  correlation, source-identity, or uncertainty-width relabelling.
   `WorkWindow` refuses duplicate caller keys,
   providing one domain-level exactly-once work receipt before the coupling
   driver supplies its chosen closed accounting chart.
@@ -103,10 +105,13 @@ adjoints.
    dissipation is non-negative. It uses translational Reynolds (diameter),
    rotational Reynolds (`omega * radius^2`), relative roughness, and tip-Mach
    gates as explicit inclusive correlation domains. Moving ambient flow retains
-   the identity `body_power = relative_power + F dot ambient_velocity`, but it
-   requires a total gas-plus-boundary accounting window rather than asserting
-   a sign for body power. Zero density/motion are exact zero limits; forbidden
-   thin-gap-pressure and target-fitted families fail admission (aero-001
+   the identity `body_power = relative_power + F dot ambient_velocity`; a
+   nonzero `F dot ambient_velocity` is flagged and requires a total
+   gas-plus-boundary accounting window rather than asserting a sign for body
+   power. `WorkWindow` reconstructs every public power from private kinematics
+   and refuses forged public power or receipt-identity fields. Zero
+   density/motion are exact zero limits; forbidden thin-gap-pressure and
+   target-fitted families fail admission (aero-001
    through aero-009, G0/G3).
 
 ## Error model
@@ -161,7 +166,8 @@ reversal and stationary-ambient dissipation; aero-003 quadratic scaling and
 source receipt mutation; aero-004 moving-ambient accounting identity;
 aero-005 frame objectivity; aero-006 correlation-domain and missing-property
 refusal; aero-007 alternative-correlation disagreement; aero-008 exactly-once
-work; aero-009 hostile thin-gap/target-fit refusal.
+work; aero-009 hostile thin-gap/target-fit refusal; aero-014 forged wrench,
+power, and receipt-identity refusal.
 
 ## No-claim boundaries
 
@@ -192,8 +198,9 @@ work; aero-009 hostile thin-gap/target-fit refusal.
   target outcomes. It makes no claim that air dominates a device. Its compact
   domain gates are correlation applicability checks, not independent physical
   validation. `WorkWindow` prevents duplicate application inside one caller
-  window but is not an `fs-couple` closed first-law/entropy audit; a moving
-  ambient/boundary specifically needs that separate total accounting closure.
+  window but is not an `fs-couple` closed first-law/entropy audit; nonzero
+  far-field boundary power specifically needs that separate total accounting
+  closure.
 
 ### Bounded gas-film foundation (bead frankensim-b8bxd.10)
 
