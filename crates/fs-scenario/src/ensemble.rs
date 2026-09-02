@@ -468,8 +468,11 @@ impl StochasticEnsemble {
                 fix: "give duration and dt the SI dimensions of time".to_string(),
             });
         }
-        let dt_ok = self.dt.value.is_finite() && self.dt.value > 0.0;
-        let duration_ok = self.duration.value.is_finite()
+        // A subnormal time step or duration is finite but cannot support a
+        // trustworthy realization plan: spectral spacing can overflow, while
+        // a band model would otherwise return a draw without inspecting it.
+        let dt_ok = self.dt.value.is_normal() && self.dt.value > 0.0;
+        let duration_ok = self.duration.value.is_normal()
             && self.duration.value > 0.0
             && self.duration.value >= self.dt.value;
         if !dt_ok || !duration_ok {
@@ -479,7 +482,7 @@ impl StochasticEnsemble {
                     "{ctx}: dt {} vs duration {}",
                     self.dt.value, self.duration.value
                 ),
-                fix: "choose finite values satisfying 0 < dt <= duration".to_string(),
+                fix: "choose finite normal values satisfying 0 < dt <= duration".to_string(),
             });
         }
         if dt_ok && duration_ok && !matches!(self.model, SpectrumModel::CarreauBand { .. }) {

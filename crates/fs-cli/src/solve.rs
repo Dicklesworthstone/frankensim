@@ -1183,6 +1183,10 @@ enum ImportPromotionPolicy {
 struct VerifiedResume {
     state: SolveDriverState,
     state_artifact: ContentHash,
+    /// Canonical edge set re-attested for the last completed operation.
+    /// Consumers that reread that operation must compare against this exact
+    /// snapshot instead of trusting a later, independently mutable query.
+    last_expected_edges: Vec<(EdgeRole, ContentHash)>,
     attestation: Rc<ResumeImportCache>,
     context: StageContext,
     /// Card packs recovered from the run's retained inputs and re-admitted
@@ -1404,6 +1408,7 @@ fn resume_solve_inner<'a>(
         attestation,
         context,
         cards,
+        ..
     } = verified;
     let attestation = Rc::try_unwrap(attestation).unwrap_or_else(|_| {
         unreachable!("latest-state selection releases every non-selected attestation reference")
@@ -6029,7 +6034,14 @@ fn load_latest_state(
             {
                 continue;
             }
-            let edges = resume_edges(ledger, run, id, work, this_candidate)?;
+            let edges = resume_edges(
+                ledger,
+                run,
+                SolveStage::ImportVerify,
+                id,
+                work,
+                this_candidate,
+            )?;
             for (descriptor_index, edge) in edges.iter().enumerate() {
                 if edge.role != EdgeRole::Out {
                     continue;
@@ -6189,8 +6201,16 @@ fn validate_resume_candidate(
         .completed
         .first()
         .expect("state shape requires a completed prefix");
-    let first_edges = resume_edges(ledger, run, first.op_id, work, 0)?;
-    require_stage_edge_seal(ledger, run, first.op_id, first_edges.len(), work, 0)?;
+    let first_edges = resume_edges(ledger, run, SolveStage::ImportVerify, first.op_id, work, 0)?;
+    require_stage_edge_seal(
+        ledger,
+        run,
+        SolveStage::ImportVerify,
+        first.op_id,
+        first_edges.len(),
+        work,
+        0,
+    )?;
     let (project_source, retained_source) =
         read_retained_project_source(ledger, run, &first_edges, work)?;
     let attestation = if let Some(cached) = import_cache
@@ -6241,6 +6261,7 @@ fn validate_resume_candidate(
     let mut recovered_cards: Option<CardPackSet> = None;
     let mut predecessor_state = None;
     let mut predecessor_checkpoint: Option<SolveDriverState> = None;
+    let mut last_expected_edges = Vec::new();
     for (index, completed) in state.completed.iter().enumerate() {
         let stage = SolveStage::ALL[index];
         if stage.gap_dependency().is_some() && !stage_has_declared_producer(stage, &project.spec) {
@@ -6280,10 +6301,18 @@ fn validate_resume_candidate(
         let edges = if index == 0 {
             first_edges.clone()
         } else {
-            resume_edges(ledger, run, completed.op_id, work, index)?
+            resume_edges(ledger, run, stage, completed.op_id, work, index)?
         };
         if index > 0 {
-            require_stage_edge_seal(ledger, run, completed.op_id, edges.len(), work, index)?;
+            require_stage_edge_seal(
+                ledger,
+                run,
+                stage,
+                completed.op_id,
+                edges.len(),
+                work,
+                index,
+            )?;
         }
         require_artifact_kind_resume(
             ledger,
@@ -6987,6 +7016,9 @@ fn validate_resume_candidate(
             work,
             index,
         )?;
+        if index + 1 == state.completed.len() {
+            last_expected_edges = expected_edges.clone();
+        }
         if let Some(inputs) = validated_qoi_inputs {
             context.qoi_inputs = Some(inputs);
         }
@@ -7024,6 +7056,7 @@ fn validate_resume_candidate(
     Ok(VerifiedResume {
         state,
         state_artifact,
+        last_expected_edges,
         attestation,
         context,
         cards,
@@ -7169,6 +7202,7 @@ fn validate_checkpoint_prefix(
 fn resume_edges(
     ledger: &Ledger,
     run: SolveRunId,
+    stage: SolveStage,
     op: i64,
     work: EvidenceWork<'_>,
     candidate_index: usize,
@@ -7178,7 +7212,7 @@ fn resume_edges(
             |error| match error {
                 EvidenceReadError::Cancelled => cancelled_resume_refusal(run),
                 EvidenceReadError::WorkEnvelope(error) => {
-                    invocation_work_refusal(Some(run), Some(SolveStage::ImportVerify), error)
+                    invocation_work_refusal(Some(run), Some(stage), error)
                 }
                 EvidenceReadError::Ledger(error) => {
                     resume_ledger("reading solve operation edges failed", error)
@@ -7196,6 +7230,7 @@ fn resume_edges(
 fn require_stage_edge_seal(
     ledger: &Ledger,
     run: SolveRunId,
+    stage: SolveStage,
     op: i64,
     edge_count: usize,
     work: EvidenceWork<'_>,
@@ -7208,9 +7243,8 @@ fn require_stage_edge_seal(
     let seal = ledger.op_artifact_edge_seal(op);
     work.checkpoint(phase, plan_index, 1)
         .map_err(|_| cancelled_resume_refusal(run))?;
-    work.charge(DERIVATION_ITEM_WORK_BYTES).map_err(|error| {
-        invocation_work_refusal(Some(run), Some(SolveStage::ImportVerify), error)
-    })?;
+    work.charge(DERIVATION_ITEM_WORK_BYTES)
+        .map_err(|error| invocation_work_refusal(Some(run), Some(stage), error))?;
     let seal =
         seal.map_err(|error| resume_ledger("validating solve operation edge seal failed", error))?;
     if seal != Some(edge_count) {

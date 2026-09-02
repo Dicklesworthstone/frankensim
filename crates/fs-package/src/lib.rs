@@ -4933,6 +4933,17 @@ impl EvidencePackage {
             what: "package semantics".to_string(),
             why: error.to_string(),
         })?;
+        let canonical = pkg.to_json().map_err(|error| ParseError {
+            what: "package canonical transport".to_string(),
+            why: error.to_string(),
+        })?;
+        if text != canonical {
+            return Err(ParseError {
+                what: "package".to_string(),
+                why: "package JSON is not canonical; re-emit with EvidencePackage::to_json"
+                    .to_string(),
+            });
+        }
         Ok(pkg)
     }
 

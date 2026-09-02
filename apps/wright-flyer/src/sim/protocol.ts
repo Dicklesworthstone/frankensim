@@ -128,6 +128,10 @@ export type MainToWorker =
     }
   | {
       readonly kind: "control";
+      /** Active run that this control is allowed to affect. */
+      readonly runIntentId: string;
+      /** Client lifecycle generation that admitted the run. */
+      readonly initGeneration: number;
       readonly leverForceN: number;
       readonly warpCmdRad: number;
       /** E5.3a: identity of this device sample in the latency ledger. */
@@ -136,7 +140,15 @@ export type MainToWorker =
        * (main applies the ping-exchange offset before sending). */
       readonly deviceWorkerMs: number;
     }
-  | { readonly kind: "ping"; readonly nonce: number; readonly localSentMs: number }
+  | {
+      readonly kind: "ping";
+      /** Active run requesting this clock sample. */
+      readonly runIntentId: string;
+      /** Client lifecycle generation that admitted the run. */
+      readonly initGeneration: number;
+      readonly nonce: number;
+      readonly localSentMs: number;
+    }
   | {
       readonly kind: "checkpoint";
       /** Monotonic client-side correlation id for this exact request. */
@@ -224,6 +236,10 @@ export type WorkerToMain =
   | {
       /** E5.3a clock-sync reply (estimateClockOffsetMs consumes these). */
       readonly kind: "pong";
+      /** Active run that requested this clock sample. */
+      readonly runIntentId: string;
+      /** Client lifecycle generation that admitted the run. */
+      readonly initGeneration: number;
       readonly nonce: number;
       readonly localSentMs: number;
       readonly remoteMs: number;
@@ -231,6 +247,10 @@ export type WorkerToMain =
   | {
       /** E5.3a ApplyNextEligibleTickAndFlag receipt for one control. */
       readonly kind: "control-ack";
+      /** Active run that admitted the control. */
+      readonly runIntentId: string;
+      /** Client lifecycle generation that admitted the run. */
+      readonly initGeneration: number;
       readonly sequence: number;
       readonly appliedTick: number;
       readonly lateByTicks: number;

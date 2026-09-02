@@ -718,6 +718,70 @@ fn g0_conduction_interface_lowering_binds_exact_oriented_boundary_slots() {
 }
 
 #[test]
+fn g3_conduction_interface_undeclared_names_slots_regions_and_candidates() {
+    let (mut spec, library, mesh, from_slot, to_slot) = two_trace_conduction_fixture();
+    spec.assembly.as_mut().expect("fixture assembly").retain(
+        |entity| !matches!(entity, EntityDecl::Interface { name, .. } if name == "bondline"),
+    );
+    spec.assignments
+        .as_mut()
+        .expect("fixture assignments")
+        .retain(|assignment| assignment.target != "bondline");
+    let mut findings = Vec::new();
+    let ids = spec.resolve_entities(&mut findings);
+    assert!(findings.is_empty(), "{findings:?}");
+
+    let gate = CancelGate::new_clock_free();
+    with_cx(&gate, |cx| {
+        let resolution = resolve_conduction_interface_pairs(
+            &spec,
+            &library,
+            AssignmentLimits::DEFAULT,
+            ConductionInterfaceLimits::DEFAULT,
+            &mesh,
+            cx,
+        );
+        let violation = &resolution.violations[0];
+        assert_eq!(violation.code, "project-conduction-interface-undeclared");
+        let candidate = ThermalInterfaces::coincident_face_pairs(&mesh)
+            .expect("fixture has valid coincident traces")
+            .pop()
+            .expect("fixture has one coincident pair");
+        let region_for_slot = |slot| {
+            if slot == from_slot {
+                ids["solid-a"].token()
+            } else {
+                assert_eq!(slot, to_slot, "candidate uses the two fixture traces");
+                ids["solid-b"].token()
+            }
+        };
+        assert!(
+            violation.what.contains(&format!(
+                "slot {} (region {})",
+                candidate.side_a,
+                region_for_slot(candidate.side_a)
+            )),
+            "{violation:?}"
+        );
+        assert!(
+            violation.what.contains(&format!(
+                "slot {} (region {})",
+                candidate.side_b,
+                region_for_slot(candidate.side_b)
+            )),
+            "{violation:?}"
+        );
+        assert!(
+            violation
+                .what
+                .contains("interface candidates considered: []"),
+            "{violation:?}"
+        );
+        assert!(resolution.pairs.is_empty());
+    });
+}
+
+#[test]
 fn g0_g4_conduction_interface_lowering_refuses_orientation_and_budget_atomically() {
     let (mut wrong_orientation, library, mesh, _, _) = two_trace_conduction_fixture();
     let assignments = wrong_orientation

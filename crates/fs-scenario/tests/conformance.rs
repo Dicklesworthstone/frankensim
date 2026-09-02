@@ -2400,6 +2400,63 @@ fn sc_008a_realization_budgets_and_carreau_domains_fail_closed() {
         "ignored band-grid placeholders still travel in canonical IR and must be finite"
     );
     assert!(nonfinite_band_grid.realize(0).is_err());
+    let mut subnormal_duration = valid_carreau.clone();
+    subnormal_duration.duration.value = f64::from_bits(1);
+    let mut subnormal_dt = valid_carreau.clone();
+    subnormal_dt.dt.value = f64::from_bits(1);
+    let mut negative_duration = valid_carreau.clone();
+    negative_duration.duration.value = -1.0;
+    let mut negative_dt = valid_carreau.clone();
+    negative_dt.dt.value = -1.0;
+    // Both values are normal and preserve duration >= dt. This is the exact
+    // Carreau bypass when admission checked `is_normal()` without positivity.
+    let mut paired_negative = valid_carreau.clone();
+    paired_negative.dt.value = -1.0;
+    paired_negative.duration.value = -2.0;
+    for (label, ensemble) in [
+        ("subnormal duration", subnormal_duration),
+        ("subnormal dt", subnormal_dt),
+        ("negative normal duration", negative_duration),
+        ("negative normal dt", negative_dt),
+        ("paired negative Carreau time placeholders", paired_negative),
+    ] {
+        assert!(
+            ensemble
+                .realize_with_budget(0, RealizationBudget::default())
+                .is_err(),
+            "direct realization must refuse {label}"
+        );
+        let scenario = Scenario {
+            ensembles: vec![ensemble],
+            ..Scenario::new(format!("bad-carreau-{label}"), 1, Environment::earth_lab())
+        };
+        assert!(
+            scenario
+                .validate()
+                .iter()
+                .any(|violation| violation.code == "ensemble-time-range"),
+            "Scenario::validate must refuse {label}"
+        );
+    }
+    let mut empty_members = valid_carreau.clone();
+    empty_members.members = 0;
+    assert!(
+        empty_members
+            .realize_with_budget(0, RealizationBudget::default())
+            .is_err(),
+        "direct realization must refuse a zero-member ensemble"
+    );
+    let empty_member_scenario = Scenario {
+        ensembles: vec![empty_members],
+        ..Scenario::new("zero-carreau-members", 1, Environment::earth_lab())
+    };
+    assert!(
+        empty_member_scenario
+            .validate()
+            .iter()
+            .any(|violation| violation.code == "ensemble-empty"),
+        "Scenario::validate must refuse a zero-member ensemble"
+    );
     assert!(
         parse_ir(&write_ir(&Scenario {
             ensembles: vec![nonfinite_band_grid],

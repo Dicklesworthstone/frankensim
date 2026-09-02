@@ -98,7 +98,7 @@ pub(crate) fn export_package(
     Ok(PackageExport {
         path,
         merkle_root,
-        claim_count: package.claims(),
+        claim_count: package.declared_claims_unverified().len(),
     })
 }
 

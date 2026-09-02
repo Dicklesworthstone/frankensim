@@ -1434,6 +1434,8 @@ dependencies = [
 name = "fs-fft"
 version = "0.0.1"
 dependencies = [
+ "asupersync",
+ "fs-alloc",
  "fs-casebook",
  "fs-exec",
  "fs-math",
@@ -2081,6 +2083,7 @@ dependencies = [
  "fs-geom",
  "fs-io",
  "fs-ir",
+ "fs-ivl",
  "fs-matdb",
  "fs-package",
  "fs-qty",

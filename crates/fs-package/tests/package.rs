@@ -2206,6 +2206,28 @@ fn v3_round_trip_and_fail_closed_walls() {
     let back = EvidencePackage::from_json(&json).expect("canonical JSON parses");
     assert_eq!(back, pkg, "semantic round trip");
     assert_eq!(package_json(&back), json, "textual round trip");
+    let root = package_root(&pkg).to_hex();
+    let reordered = json.replacen(
+        &format!("{{\"format_version\":9,\"merkle_root\":\"{root}\","),
+        &format!("{{\"merkle_root\":\"{root}\",\"format_version\":9,"),
+        1,
+    );
+    for (label, noncanonical) in [
+        ("outer whitespace", format!(" \n{json}\t")),
+        ("top-level member order", reordered),
+        (
+            "equivalent string escape",
+            json.replacen("surrogate prediction", r"surrogate predicti\u006fn", 1),
+        ),
+    ] {
+        let error = EvidencePackage::from_json(&noncanonical)
+            .expect_err("noncanonical JSON must not be admitted");
+        assert_eq!(error.what, "package", "{label}: {error}");
+        assert_eq!(
+            error.why, "package JSON is not canonical; re-emit with EvidencePackage::to_json",
+            "{label}: {error}"
+        );
+    }
     let leading_zero = json.replacen("\"format_version\":9", "\"format_version\":09", 1);
     assert!(
         EvidencePackage::from_json(&leading_zero).is_err(),
@@ -2215,6 +2237,13 @@ fn v3_round_trip_and_fail_closed_walls() {
     // no longer recomputes from the tampered content — refused at parse.
     let forged = json.replace("tip deflection within bound", "tip deflection PROVEN SAFE");
     let err = EvidencePackage::from_json(&forged).expect_err("forgery refused");
+    assert!(err.why.contains("does not recompute"), "{err}");
+    // Integrity refuses before canonical transport: formatting cannot obscure
+    // a forged declaration or change which repair the caller receives.
+    let forged_noncanonical = format!(" \n{forged}\t");
+    let err = EvidencePackage::from_json(&forged_noncanonical)
+        .expect_err("forged noncanonical package refused by its root");
+    assert_eq!(err.what, "merkle_root", "{err}");
     assert!(err.why.contains("does not recompute"), "{err}");
     // Widening the certified interval (payload tamper) also refused.
     let widened = json.replace(
@@ -2263,7 +2292,6 @@ fn v3_round_trip_and_fail_closed_walls() {
     assert!(EvidencePackage::from_json("").is_err());
     // Canonical fixed-width roots and JSON's control-character rule are
     // enforced at the parser boundary, before semantic verification.
-    let root = package_root(&pkg).to_hex();
     let short_root = json.replacen(&format!("\"{root}\""), &format!("\"{}\"", &root[1..]), 1);
     let err = EvidencePackage::from_json(&short_root).expect_err("short root refused");
     assert!(err.why.contains("64 lowercase hex chars"), "{err}");

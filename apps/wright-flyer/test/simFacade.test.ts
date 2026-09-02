@@ -198,6 +198,7 @@ test("checkpoint replies bind the request and active run across reinit races", (
   const refusals: string[] = [];
   const readyRuns: string[] = [];
   const terminals: string[] = [];
+  const controlAcks: number[] = [];
   const client = new SimClient(
     {
       onReady(info): void {
@@ -208,6 +209,9 @@ test("checkpoint replies bind the request and active run across reinit races", (
       },
       onTerminal(info): void {
         terminals.push(info.digest);
+      },
+      onControlAck(ack): void {
+        controlAcks.push(ack.sequence);
       },
       onCheckpoint(checkpoint): void {
         checkpoints.push(checkpoint);
@@ -246,6 +250,13 @@ test("checkpoint replies bind the request and active run across reinit races", (
   assert.equal(client.requestCheckpoint(), true);
   const r1 = worker.sent.at(-1);
   assert.deepEqual(r1, { kind: "checkpoint", requestId: 1, runIntentId: runA });
+  client.sendPing();
+  const pingA = worker.sent.at(-1);
+  assert.equal(pingA?.kind, "ping");
+  if (pingA?.kind === "ping") {
+    assert.equal(pingA.runIntentId, runA);
+    assert.equal(pingA.initGeneration, 1);
+  }
 
   // Starting B revokes A's ready capability; no B checkpoint can be exposed
   // until B's new ready receipt arrives.
@@ -257,6 +268,13 @@ test("checkpoint replies bind the request and active run across reinit races", (
   if (initB?.kind === "init") {
     assert.equal(initB.initGeneration, 2);
   }
+  const postsBeforeBReadyControl = worker.sent.length;
+  client.sendControl(0, 0, 17, 0);
+  assert.equal(
+    worker.sent.length,
+    postsBeforeBReadyControl,
+    "start(B) before B ready must not post a control for either lifecycle",
+  );
   // Queued A receipts must not re-establish an A capability after B starts.
   worker.emit({
     kind: "ready",
@@ -281,6 +299,23 @@ test("checkpoint replies bind the request and active run across reinit races", (
   });
   assert.deepEqual(readyRuns, [runA]);
   assert.deepEqual(refusals, []);
+  worker.emit({
+    kind: "pong",
+    runIntentId: runA,
+    initGeneration: 1,
+    nonce: 1,
+    localSentMs: 0,
+    remoteMs: 1_000_000,
+  });
+  worker.emit({
+    kind: "control-ack",
+    runIntentId: runA,
+    initGeneration: 1,
+    sequence: 17,
+    appliedTick: 8,
+    lateByTicks: 0,
+  });
+  assert.deepEqual(controlAcks, [], "queued A control acknowledgement must not notify B");
   assert.equal(client.requestCheckpoint(), false);
   worker.emit({
     kind: "snapshot",
@@ -311,10 +346,30 @@ test("checkpoint replies bind the request and active run across reinit races", (
     layoutHash: 1,
     initGeneration: 2,
   });
+  client.sendControl(0, 0, 18, 0);
+  const controlB = worker.sent.at(-1);
+  assert.deepEqual(controlB, {
+    kind: "control",
+    runIntentId: runB,
+    initGeneration: 2,
+    leverForceN: 0,
+    warpCmdRad: 0,
+    sequence: 18,
+    deviceWorkerMs: 0,
+  });
   assert.equal(client.requestCheckpoint(), true);
   const r2 = worker.sent.at(-1);
   assert.deepEqual(r2, { kind: "checkpoint", requestId: 2, runIntentId: runB });
   assert.deepEqual(readyRuns, [runA, runB]);
+  worker.emit({
+    kind: "control-ack",
+    runIntentId: runB,
+    initGeneration: 2,
+    sequence: 18,
+    appliedTick: 9,
+    lateByTicks: 1,
+  });
+  assert.deepEqual(controlAcks, [18], "the admitted B acknowledgement remains observable");
 
   // Out-of-order r1 and a forged r2 run identity are both stale authority.
   worker.emit({

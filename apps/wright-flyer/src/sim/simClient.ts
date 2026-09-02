@@ -163,6 +163,12 @@ export class SimClient {
           console.info(JSON.stringify({ suite: "wf-sim-client", stage: "metrics", ...msg }));
           break;
         case "pong": {
+          if (
+            this.ready?.runIntentId !== msg.runIntentId ||
+            msg.initGeneration !== this.initGeneration
+          ) {
+            break;
+          }
           // Clock sync: worker ≈ main + offset (min-RTT midpoint).
           this.syncSamples.push({
             localSentMs: msg.localSentMs,
@@ -173,7 +179,12 @@ export class SimClient {
           break;
         }
         case "control-ack":
-          events.onControlAck?.(msg);
+          if (
+            this.ready?.runIntentId === msg.runIntentId &&
+            msg.initGeneration === this.initGeneration
+          ) {
+            events.onControlAck?.(msg);
+          }
           break;
       }
     });
@@ -228,8 +239,14 @@ export class SimClient {
   /** Send a control sample. `deviceMs` is the MAIN-clock device event
    * time; the ping-derived offset translates it into the worker clock. */
   sendControl(leverForceN: number, warpCmdRad: number, sequence: number, deviceMs: number): void {
+    const ready = this.ready;
+    if (ready === null) {
+      return;
+    }
     this.worker.postMessage({
       kind: "control",
+      runIntentId: ready.runIntentId,
+      initGeneration: this.initGeneration,
       leverForceN,
       warpCmdRad,
       sequence,
@@ -239,9 +256,15 @@ export class SimClient {
 
   /** One clock-sync ping (call a few times; min-RTT sample wins). */
   sendPing(): void {
+    const ready = this.ready;
+    if (ready === null) {
+      return;
+    }
     this.pingNonce += 1;
     this.worker.postMessage({
       kind: "ping",
+      runIntentId: ready.runIntentId,
+      initGeneration: this.initGeneration,
       nonce: this.pingNonce,
       localSentMs: performance.now(),
     } satisfies MainToWorker);

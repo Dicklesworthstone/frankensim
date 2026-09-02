@@ -10,17 +10,21 @@
 use std::collections::BTreeMap;
 
 use fs_blake3::hash_bytes;
+use fs_conduction::{ConductionMesh, ThermalBoundaryBuilder, ThermalInterfaces};
 use fs_evidence::{Color, ValidityDomain};
+use fs_geom::TetComplex;
 use fs_matdb::{
     ClaimSet, InterfaceSystemCard, InterpolationPolicy, MaterialCard, MaterialStateId,
-    PINNED_CLAIM_POLICY_TAG, PropertyClaim, PropertyKey, PropertyValue, Provenance, SurfaceSpec,
-    SystemContext, UncertaintyModel,
+    PINNED_CLAIM_POLICY_TAG, PropertyClaim, PropertyKey, PropertyValue, Provenance, QueryPoint,
+    SurfaceSpec, SystemContext, UncertaintyModel,
 };
+use fs_project::bind::lower_card_backed_thermal_interfaces;
 use fs_project::{
     BindingRequirements, CONTACT_RESISTANCE_DIMS, CONTACT_RESISTANCE_PROPERTY, CardLibrary,
-    EntityDecl, Envelope, InterfaceCardBinding, InterfaceState, MaterialBinding,
-    MaterialResolution, PerfectContactBinding, ProjectSpec, RequirementDirection,
-    RequirementSeverity, RequirementSource, RequirementSourceKind, SafetyFactorPolicy,
+    ConductionInterfaceResolution, ConductionSourceFace, EntityDecl, Envelope,
+    InterfaceCardBinding, InterfaceState, MaterialBinding, MaterialResolution,
+    PerfectContactBinding, ProjectSpec, RequirementDirection, RequirementSeverity,
+    RequirementSource, RequirementSourceKind, ResolvedConductionInterfacePair, SafetyFactorPolicy,
     TEMPERATURE_AXIS, THERMAL_CONDUCTIVITY_DIMS, THERMAL_CONDUCTIVITY_PROPERTY, ThermalLimit,
     resolve_bindings,
 };
@@ -280,6 +284,53 @@ fn reference_spec(board_card: &str, spreader_card: &str, tim_card: &str) -> Proj
             },
         }]),
         ..ProjectSpec::default()
+    }
+}
+
+fn two_trace_contact_mesh() -> (ConductionMesh, fs_conduction::InterfaceFacePair) {
+    let positions = vec![
+        [0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0],
+        [-1.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0],
+        [1.0, 0.0, 0.0],
+    ];
+    let mesh = ConductionMesh::new(
+        TetComplex::from_tets(positions.len(), vec![[0, 1, 2, 3], [4, 6, 5, 7]]),
+        positions,
+    )
+    .expect("two valid duplicated-trace tetrahedra");
+    let pair = ThermalInterfaces::coincident_face_pairs(&mesh)
+        .expect("coincident contact candidate")
+        .pop()
+        .expect("one contact candidate");
+    (mesh, pair)
+}
+
+fn resolved_contact_topology(
+    pair: fs_conduction::InterfaceFacePair,
+) -> ConductionInterfaceResolution {
+    let source = ConductionSourceFace {
+        artifact: "reference-mesh".to_string(),
+        source_identity: "fixture".to_string(),
+        face: 0,
+    };
+    ConductionInterfaceResolution {
+        violations: Vec::new(),
+        pairs: vec![ResolvedConductionInterfacePair {
+            interface: "tim".to_string(),
+            from_region: "board".to_string(),
+            to_region: "spreader".to_string(),
+            from_boundary_slot: pair.side_a,
+            to_boundary_slot: pair.side_b,
+            from_source: source.clone(),
+            to_source: source.clone(),
+            interface_sources: vec![source],
+        }],
+        source_faces_indexed: 2,
     }
 }
 
@@ -800,6 +851,68 @@ fn structural_refusals_cover_cards_states_targets_and_coverage() {
         "region `board`",
         "bind a card that states this property",
     );
+}
+
+#[test]
+fn card_backed_interface_lowering_binds_the_selected_claim_to_the_exact_face_pair() {
+    let (library, board, spreader, tim) = reference_library();
+    let spec = reference_spec(&board, &spreader, &tim);
+    let bindings = resolve_bindings(&spec, &library, &BindingRequirements::thermal_steady_v1());
+    assert!(bindings.admissible(), "{:?}", bindings.violations);
+    let (mesh, pair) = two_trace_contact_mesh();
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .adiabatic_remainder()
+        .finish()
+        .expect("explicit all-adiabatic boundary");
+    let point = QueryPoint::new()
+        .with(TEMPERATURE_AXIS, 300.0)
+        .expect("finite temperature query point");
+
+    let interfaces = lower_card_backed_thermal_interfaces(
+        &bindings,
+        &resolved_contact_topology(pair),
+        &library,
+        &mesh,
+        &boundary,
+        &point,
+    )
+    .expect("resolved card and exact pair lower into the contact operator");
+
+    assert_eq!(interfaces.surface_count(), 1);
+    assert_eq!(interfaces.surface_is_mapped("tim"), Some(false));
+    assert_eq!(
+        interfaces.surface_face_resistances("tim"),
+        Some(vec![2.0e-5]),
+        "the operator must retain the card claim rather than infer perfect contact"
+    );
+}
+
+#[test]
+fn card_backed_interface_lowering_refuses_a_solve_point_outside_the_pinned_claim_domain() {
+    let (library, board, spreader, tim) = reference_library();
+    let spec = reference_spec(&board, &spreader, &tim);
+    let bindings = resolve_bindings(&spec, &library, &BindingRequirements::thermal_steady_v1());
+    let (mesh, pair) = two_trace_contact_mesh();
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .adiabatic_remainder()
+        .finish()
+        .expect("explicit all-adiabatic boundary");
+    let point = QueryPoint::new()
+        .with(TEMPERATURE_AXIS, 500.0)
+        .expect("finite temperature query point");
+
+    let refusal = lower_card_backed_thermal_interfaces(
+        &bindings,
+        &resolved_contact_topology(pair),
+        &library,
+        &mesh,
+        &boundary,
+        &point,
+    )
+    .expect_err("out-of-domain solve point must not reuse an endpoint receipt");
+    assert_eq!(refusal.len(), 1);
+    assert_eq!(refusal[0].code, "project-conduction-interface-card-query");
+    assert!(refusal[0].what.contains("supplied solve point"));
 }
 
 #[test]

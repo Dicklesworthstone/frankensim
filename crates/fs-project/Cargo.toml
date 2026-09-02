@@ -18,6 +18,7 @@ fs-convection = { path = "../fs-convection" }
 fs-evidence = { path = "../fs-evidence" }
 fs-exec = { path = "../fs-exec" }
 fs-io = { path = "../fs-io" }
+fs-ivl = { path = "../fs-ivl" }
 fs-ir = { path = "../fs-ir" }
 fs-matdb = { path = "../fs-matdb" }
 fs-package = { path = "../fs-package" }

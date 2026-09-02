@@ -25,6 +25,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use fs_blake3::ContentHash;
+use fs_conduction::{
+    ConductionMesh, InterfaceResistance, InterfaceSurface, ThermalBoundary, ThermalInterfaces,
+};
 use fs_matdb::{
     ClaimId, ClaimSet, InterfaceSystemCard, MatDbError, MaterialAnswer, MaterialCard,
     PropertyUsageReceipt, QueryPoint, SelectionPolicy, UncertaintyModel,
@@ -466,6 +469,128 @@ pub fn resolve_bindings(
         ambient_hi.value,
     );
     resolution
+}
+
+/// Lower already-resolved card-backed scenario interfaces into the exact
+/// matching-P1 contact operator input for one conduction mesh and boundary.
+///
+/// The topology resolution supplies the declared interface name and oriented
+/// boundary slots; this resolver supplies the exact card claim selected during
+/// [`resolve_bindings`].  Re-querying that selected claim by its content hash
+/// prevents a later policy choice from silently substituting a different
+/// in-domain resistance.  The caller supplies the physical query point used
+/// by this solve, so an out-of-domain temperature remains a typed refusal.
+///
+/// # Errors
+/// Returns all pre-existing project refusals when either input resolution is
+/// inadmissible, or one typed lowering refusal when a retained card, selected
+/// claim, or contact-operator construction cannot be admitted.  No partial
+/// [`ThermalInterfaces`] value is returned.
+pub fn lower_card_backed_thermal_interfaces(
+    bindings: &MaterialResolution,
+    topology: &crate::assignment::ConductionInterfaceResolution,
+    library: &CardLibrary,
+    mesh: &ConductionMesh,
+    boundary: &ThermalBoundary,
+    point: &QueryPoint,
+) -> Result<ThermalInterfaces, Vec<Violation>> {
+    if !bindings.admissible() {
+        return Err(bindings.violations.clone());
+    }
+    if !topology.admissible() {
+        return Err(topology.violations.clone());
+    }
+
+    let mut pairs_by_interface = BTreeMap::<&str, Vec<fs_conduction::InterfaceFacePair>>::new();
+    for pair in &topology.pairs {
+        pairs_by_interface
+            .entry(&pair.interface)
+            .or_default()
+            .push(pair.face_pair());
+    }
+
+    let mut surfaces = Vec::with_capacity(pairs_by_interface.len());
+    for (interface, pairs) in pairs_by_interface {
+        let Some(binding) = bindings
+            .bindings
+            .iter()
+            .find(|binding| binding.target == BindingTarget::Interface(interface.to_string()))
+        else {
+            return Err(vec![violation(
+                "project-conduction-interface-card-unresolved",
+                format!(
+                    "declared interface `{interface}` lowered to boundary faces but has no resolved card-backed binding"
+                ),
+                "resolve one in-domain interface-system card for every interface before constructing the conduction operator",
+            )]);
+        };
+        let Some(property) = binding
+            .properties
+            .iter()
+            .find(|property| property.property == CONTACT_RESISTANCE_PROPERTY)
+        else {
+            return Err(vec![violation(
+                "project-conduction-interface-property-unresolved",
+                format!(
+                    "resolved interface `{interface}` has no retained `{CONTACT_RESISTANCE_PROPERTY}` claim"
+                ),
+                "resolve the required area-specific thermal-resistance property before constructing the conduction operator",
+            )]);
+        };
+        let Some(card) = library.interface(&binding.card) else {
+            return Err(vec![violation(
+                "project-conduction-interface-card-unavailable",
+                format!(
+                    "resolved interface `{interface}` references card {}, which is absent from the supplied card library",
+                    binding.card
+                ),
+                "retain the exact card library through interface lowering; do not substitute a same-named card",
+            )]);
+        };
+        let Some(claim_hash) = ContentHash::from_hex(&property.selected_claim) else {
+            return Err(vec![violation(
+                "project-conduction-interface-claim-malformed",
+                format!(
+                    "resolved interface `{interface}` retained malformed selected claim {}",
+                    property.selected_claim
+                ),
+                "discard the corrupt resolution and rerun card binding from the canonical project bytes",
+            )]);
+        };
+        let resistance = InterfaceResistance::from_card_pinned(
+            interface,
+            card,
+            point,
+            ClaimId(claim_hash),
+        )
+        .map_err(|error| {
+            vec![violation(
+                "project-conduction-interface-card-query",
+                format!(
+                    "interface `{interface}` cannot resolve its retained resistance claim at the supplied solve point: {error}"
+                ),
+                "use a solve point inside the retained claim domain or select a card qualified for that operating range",
+            )]
+        })?;
+        let surface = InterfaceSurface::new(interface, pairs, resistance).map_err(|error| {
+            vec![violation(
+                "project-conduction-interface-operator",
+                format!(
+                    "interface `{interface}` cannot construct a matching-P1 contact surface: {error}"
+                ),
+                "repair the exact boundary-pair lowering or use the same mesh and boundary that produced it",
+            )]
+        })?;
+        surfaces.push(surface);
+    }
+
+    ThermalInterfaces::new(mesh, boundary, surfaces).map_err(|error| {
+        vec![violation(
+            "project-conduction-interface-operator",
+            format!("fs-conduction refused the complete card-backed interface set: {error}"),
+            "repair the declared interface coverage or leave paired faces free of external boundary conditions",
+        )]
+    })
 }
 
 fn resolve_material_bindings(

@@ -318,6 +318,17 @@ self.addEventListener("message", (event: MessageEvent<MainToWorker>) => {
       // Requested tick from the device time (already translated into
       // this worker's clock) under the minimum-lead rule; the ack is
       // the ApplyNextEligibleTickAndFlag receipt.
+      const runIntentId = activeRunIntentId;
+      const currentInitGeneration = activeInitGeneration;
+      if (runIntentId === null || currentInitGeneration === null) {
+        break;
+      }
+      if (
+        msg.runIntentId !== runIntentId ||
+        msg.initGeneration !== currentInitGeneration
+      ) {
+        break;
+      }
       const currentTick = scheduler?.currentTick() ?? 0;
       const requested = Math.ceil((msg.deviceWorkerMs - simEpochMs) / TICK_MS) + 1;
       const receipt = hold.admit(
@@ -326,12 +337,26 @@ self.addEventListener("message", (event: MessageEvent<MainToWorker>) => {
         requested,
         currentTick,
       );
-      post({ kind: "control-ack", sequence: msg.sequence, ...receipt });
+      post({
+        kind: "control-ack",
+        runIntentId,
+        initGeneration: currentInitGeneration,
+        sequence: msg.sequence,
+        ...receipt,
+      });
       break;
     }
     case "ping":
+      if (
+        msg.runIntentId !== activeRunIntentId ||
+        msg.initGeneration !== activeInitGeneration
+      ) {
+        break;
+      }
       post({
         kind: "pong",
+        runIntentId: msg.runIntentId,
+        initGeneration: msg.initGeneration,
         nonce: msg.nonce,
         localSentMs: msg.localSentMs,
         remoteMs: performance.now(),

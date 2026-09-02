@@ -575,6 +575,38 @@ fn multi_region_contact_project() -> ProjectSpec {
     spec
 }
 
+/// Leave the two real solids and their imported traces intact, but remove the
+/// complete declared-interface bundle so conduction must refuse the retained
+/// coincident boundary faces rather than infer a zero-resistance joint.
+fn multi_region_project_without_declared_interface(reverse_region_order: bool) -> ProjectSpec {
+    let mut spec = multi_region_contact_project();
+    spec.assembly.as_mut().expect("fixture assembly").retain(
+        |entity| !matches!(entity, EntityDecl::Interface { name, .. } if name == "cold-hot-joint"),
+    );
+    spec.assignments
+        .as_mut()
+        .expect("fixture assignments")
+        .retain(|assignment| assignment.target != "cold-hot-joint");
+    spec.interface_cards
+        .as_mut()
+        .expect("fixture interface cards")
+        .retain(|binding| binding.interface != "cold-hot-joint");
+
+    if reverse_region_order {
+        let assembly = spec.assembly.as_mut().expect("fixture assembly");
+        let cold = assembly
+            .iter()
+            .position(|entity| matches!(entity, EntityDecl::Region { name, .. } if name == "cold"))
+            .expect("cold region remains declared");
+        let hot = assembly
+            .iter()
+            .position(|entity| matches!(entity, EntityDecl::Region { name, .. } if name == "hot"))
+            .expect("hot region remains declared");
+        assembly.swap(cold, hot);
+    }
+    spec
+}
+
 fn import_multi_region_contact(ledger: &Ledger, spec: &ProjectSpec) {
     let mut raw = RawGeometryLibrary::new();
     for artifact in spec.geometry.as_deref().expect("geometry") {
@@ -3494,8 +3526,10 @@ fn g1_conduction_stage_executes_and_retains_field_and_balance_evidence() {
 
     // G3: a completed run is not resumable merely because its report edge and
     // descriptor still name the expected content identity. Corrupt retained
-    // bytes in place without changing their length; completed-run admission
-    // must stream-verify the report artifact and fail closed.
+    // storage through the ledger's public test hook; completed-run admission
+    // must exercise the controlled integrity read and fail closed. The
+    // ledger's own controlled-read tests separately cover same-length byte
+    // substitution reaching the final content-hash check.
     let html_hash =
         fs_ledger::ContentHash::from_hex(&receipt_str_field(&report_receipt, "report_html"))
             .expect("report HTML hash");
@@ -3543,7 +3577,8 @@ fn conjugate_fixture_project(seed_root: u64, bytes: &[u8], correlation: &str) ->
             inlet_temperature: QtyAny::new(293.15, fs_project::spec::dims::TEMPERATURE),
             hydraulic_diameter: QtyAny::new(0.02, fs_project::spec::dims::LENGTH),
             flow_area: QtyAny::new(0.004, fs_project::spec::dims::AREA),
-            channel_length: QtyAny::new(0.1, fs_project::spec::dims::LENGTH),
+            // L/Dh = 15: inside Gnielinski's developed-flow floor of 10.
+            channel_length: QtyAny::new(0.3, fs_project::spec::dims::LENGTH),
             correlation: correlation.to_string(),
         },
     }];
@@ -3613,6 +3648,38 @@ fn g0_conduction_stage_closes_the_conjugate_airflow_exchange_from_the_flow_netwo
     let air_w = receipt_number_field(&receipt, "air_total_w");
     assert!((solid_w - air_w).abs() <= tolerance, "{solid_w} vs {air_w}");
     assert!(solid_w > 0.0);
+
+    // A channel too short for the card's developed-flow floor (L/Dh = 5
+    // against Gnielinski's [10, 1e6]) refuses by name; executed on the rch
+    // fleet 2026-09-02 before the fixture was lengthened.
+    let mut short = conjugate_fixture_project(7, &bytes, "convection.gnielinski");
+    for boundary in &mut short
+        .cooling
+        .as_mut()
+        .and_then(|cooling| cooling.conduction.as_mut())
+        .expect("fixture conduction")
+        .boundaries
+    {
+        if let ThermalBoundaryCondition::AirflowConvection { channel_length, .. } =
+            &mut boundary.condition
+        {
+            *channel_length = QtyAny::new(0.1, fs_project::spec::dims::LENGTH);
+        }
+    }
+    let decoded_short = decode(&short);
+    let short_ledger = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&short_ledger, &short, bytes.clone());
+    let refusal = run_solve(
+        &short_ledger,
+        &gate,
+        &mut benign_clock(),
+        &decoded_short,
+        &fixture_cards(),
+        &mut Vec::new(),
+    )
+    .expect_err("a developing-length channel outside the card domain refuses");
+    assert_eq!(refusal.code, "cli-solve-conduction-airflow-card-domain");
+    assert!(refusal.what.contains("L_over_Dh"), "{}", refusal.what);
 
     // A declared card whose domain does not cover the solved regime refuses
     // by name instead of extrapolating (the fixture's branch is turbulent).
@@ -3721,6 +3788,111 @@ fn g0_conduction_stage_executes_declared_card_backed_contact() {
     assert!(
         resume_progress.is_empty(),
         "completed QoI is not re-emitted"
+    );
+}
+
+fn assert_undeclared_conduction_interface_refusal(reverse_region_order: bool) -> (usize, usize) {
+    let spec = multi_region_project_without_declared_interface(reverse_region_order);
+    let decoded = decode(&spec);
+    assert!(
+        decoded.findings().is_empty(),
+        "removing the complete interface bundle remains project-validation clean: {:?}",
+        decoded.findings()
+    );
+    let ledger = Ledger::open(":memory:").expect("ledger");
+    import_multi_region_contact(&ledger, &spec);
+    let gate = CancelGate::new_clock_free();
+    let mut clock = benign_clock();
+    let mut progress = Vec::new();
+    let refusal = run_solve(
+        &ledger,
+        &gate,
+        &mut clock,
+        &decoded,
+        &contact_cards(),
+        &mut progress,
+    )
+    .expect_err("undeclared coincident traces must refuse before conduction publishes");
+    assert_eq!(
+        refusal.code, "project-conduction-interface-undeclared",
+        "{refusal:?}"
+    );
+    assert_eq!(refusal.stage, Some("conduction"));
+    assert!(
+        refusal
+            .what
+            .contains("coincident conduction boundary slots"),
+        "{refusal:?}"
+    );
+    let slots = refusal
+        .what
+        .split_once("coincident conduction boundary slots ")
+        .expect("typed refusal names candidate slots")
+        .1;
+    let (first_slot, second_slot) = slots
+        .split_once(" and ")
+        .expect("candidate slots use the typed `and` separator");
+    let first_slot = first_slot
+        .parse::<usize>()
+        .expect("first slot is an integer");
+    let second_slot = second_slot
+        .split_whitespace()
+        .next()
+        .expect("second slot precedes the diagnostic detail")
+        .parse::<usize>()
+        .expect("second slot is an integer");
+    assert!(
+        refusal.recorded_op.is_some(),
+        "the typed refusal is durable"
+    );
+
+    let run = refusal.run.expect("refusal identifies the run");
+    assert_eq!(
+        stage_receipt_hashes(&ledger, &run).len(),
+        4,
+        "the refusal publishes no conduction, QoI, or report receipt"
+    );
+    for stage in [
+        "import-verify",
+        "assign",
+        "material-resolve",
+        "flow-network",
+    ] {
+        assert!(
+            progress
+                .iter()
+                .any(|line| line.contains(&format!("\"stage\":\"{stage}\""))),
+            "{stage} completed before the conduction refusal: {progress:?}"
+        );
+    }
+    for stage in ["conduction", "qoi", "report"] {
+        assert!(
+            !progress
+                .iter()
+                .any(|line| line.contains(&format!("\"stage\":\"{stage}\""))),
+            "{stage} must not publish progress after the refusal: {progress:?}"
+        );
+    }
+    (first_slot, second_slot)
+}
+
+#[test]
+fn g3_conduction_undeclared_interface_refuses_in_direct_slot_order() {
+    let (first_slot, second_slot) = assert_undeclared_conduction_interface_refusal(false);
+    assert_ne!(
+        first_slot, second_slot,
+        "a coincident interface candidate joins two distinct boundary slots"
+    );
+}
+
+#[test]
+fn g3_conduction_undeclared_interface_refuses_in_reverse_slot_order() {
+    let direct = assert_undeclared_conduction_interface_refusal(false);
+    let reverse = assert_undeclared_conduction_interface_refusal(true);
+    assert_eq!(
+        reverse,
+        (direct.1, direct.0),
+        "reversing the region declaration order reverses the ConductionMesh candidate slots"
     );
 }
 

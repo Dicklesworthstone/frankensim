@@ -568,7 +568,7 @@ fn g0_the_worked_example_fixtures_stay_fresh_through_the_real_cli_verb() {
     // fixture + hash in the same commit.
     assert!(
         output.stdout.contains(
-            "\"project_hash\":\"5171668d33c8c3b02d68b779425ef2efb69333506f0ebca0b177c7e415e8f31f\""
+            "\"project_hash\":\"1f135da400dec2bed1bba833b033026ce37bc93c113c79c25f6c6fb4e730780b\""
         ),
         "heated-plate.fsim drifted from its frozen canonical hash"
     );
@@ -578,7 +578,7 @@ fn g0_the_worked_example_fixtures_stay_fresh_through_the_real_cli_verb() {
     assert_eq!(ref_out.exit_code, exit::SUCCESS);
     assert!(
         ref_out.stdout.contains(
-            "\"project_hash\":\"8dff1c52c0494b960cb438919e1b1da04781cebabded874f80b563a0ff3a9069\""
+            "\"project_hash\":\"4e2d71ab877ec805b7aa617d5d8bd2ca70f6ea38ca5afd8f0742b23ae60d7135\""
         ),
         "cooling-reference.fsim drifted from its frozen canonical hash"
     );
@@ -708,12 +708,7 @@ fn g0_empty_ledger_cannot_mint_a_self_consistent_package() {
         ledger.to_string_lossy().as_ref(),
         "--json",
     ]));
-    assert_eq!(
-        output.exit_code,
-        exit::REFUSED,
-        "stderr: {}",
-        output.stderr
-    );
+    assert_eq!(output.exit_code, exit::REFUSED, "stderr: {}", output.stderr);
     assert!(output.stdout.contains("\"status\":\"refused\""));
     assert!(output.stderr.contains("cli-solve-unknown-run"));
     assert!(!output.stdout.contains("\"merkle_root\""));
@@ -748,12 +743,7 @@ fn g0_empty_ledger_cannot_mint_a_verified_engineering_report() {
         ledger.to_string_lossy().as_ref(),
         "--json",
     ]));
-    assert_eq!(
-        output.exit_code,
-        exit::REFUSED,
-        "stderr: {}",
-        output.stderr
-    );
+    assert_eq!(output.exit_code, exit::REFUSED, "stderr: {}", output.stderr);
     assert!(output.stdout.contains("\"status\":\"refused\""));
     assert!(output.stderr.contains("cli-solve-unknown-run"));
     assert!(!output.stdout.contains("\"content_hash\""));
@@ -795,7 +785,12 @@ fn g1_run_completes_seven_stages_and_exports_report_and_package_for_the_referenc
         "--max-hole-edges",
         "0",
     ]));
-    assert_eq!(imported.exit_code, exit::SUCCESS, "stderr: {}", imported.stderr);
+    assert_eq!(
+        imported.exit_code,
+        exit::SUCCESS,
+        "stderr: {}",
+        imported.stderr
+    );
 
     let output = run(args(&[
         "--json",
@@ -817,7 +812,9 @@ fn g1_run_completes_seven_stages_and_exports_report_and_package_for_the_referenc
     assert!(output.stdout.contains("\"stages_completed\":7"));
     assert!(output.stdout.contains("\"checker\":\"pass\""));
     assert!(
-        output.stderr.contains("\"stage\":\"report\",\"ordinal\":6,\"status\":\"ok\""),
+        output
+            .stderr
+            .contains("\"stage\":\"report\",\"ordinal\":6,\"status\":\"ok\""),
         "the report stage reports progress like every other stage: {}",
         output.stderr
     );
@@ -838,7 +835,10 @@ fn g1_run_completes_seven_stages_and_exports_report_and_package_for_the_referenc
         .expect("the retained package was exported");
     assert!(html.contains(&run_id));
     assert!(html.contains("temperature-max"));
-    assert!(html.contains("NO-DATA"), "unmeasured terms print as NO-DATA, never as numbers");
+    assert!(
+        html.contains("NO-DATA"),
+        "unmeasured terms print as NO-DATA, never as numbers"
+    );
     assert!(html.contains("Estimated"));
     assert!(!html.contains("342.15"));
     assert!(twin.contains("\"schema\": \"frankensim.report.engineering.v1\""));
@@ -863,7 +863,12 @@ fn g1_run_completes_seven_stages_and_exports_report_and_package_for_the_referenc
         &run_id,
         ledger.to_string_lossy().as_ref(),
     ]));
-    assert_eq!(packaged.exit_code, exit::SUCCESS, "stderr: {}", packaged.stderr);
+    assert_eq!(
+        packaged.exit_code,
+        exit::SUCCESS,
+        "stderr: {}",
+        packaged.stderr
+    );
     assert!(packaged.stdout.contains("\"checker\":\"pass\""));
     assert!(packaged.stdout.contains("\"merkle_root\":\""));
 
@@ -880,6 +885,69 @@ fn g1_run_completes_seven_stages_and_exports_report_and_package_for_the_referenc
     assert_eq!(
         std::fs::read(dir.join(format!("{run_id}.fspkg"))).expect("still there"),
         b"tampered"
+    );
+}
+
+#[test]
+fn g3_report_json_conflict_does_not_publish_a_partial_html_twin() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let fsim = root.join("data/reference-project/cooling-reference.fsim");
+    let stl = root.join("data/reference-project/plate.stl");
+    let pack = root.join("data/reference-project/aa6061.fsmcdpk");
+    let dir = scratch("report-twin-conflict");
+    let ledger = dir.join("report_twin_conflict.db");
+
+    let imported = run(args(&[
+        "--json",
+        "import",
+        fsim.to_string_lossy().as_ref(),
+        stl.to_string_lossy().as_ref(),
+        ledger.to_string_lossy().as_ref(),
+        "--unit",
+        "m",
+        "--max-hole-edges",
+        "0",
+    ]));
+    assert_eq!(imported.exit_code, exit::SUCCESS, "{}", imported.stderr);
+
+    // `solve` seals all seven stages without running the workflow exports, so
+    // both twin destinations begin absent.
+    let solved = run(args(&[
+        "--json",
+        "solve",
+        fsim.to_string_lossy().as_ref(),
+        ledger.to_string_lossy().as_ref(),
+        "--materials",
+        pack.to_string_lossy().as_ref(),
+    ]));
+    assert_eq!(solved.exit_code, exit::SUCCESS, "{}", solved.stderr);
+    let run_id = solved
+        .stdout
+        .split("\"run\":\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .expect("completed solve reports its run identity");
+    let html_path = dir.join(format!("{run_id}.report.html"));
+    let json_path = dir.join(format!("{run_id}.report.json"));
+    assert!(!html_path.exists());
+    assert!(!json_path.exists());
+
+    std::fs::write(&json_path, b"conflicting JSON twin").expect("hostile twin writes");
+    let refused = run(args(&[
+        "--json",
+        "report",
+        run_id,
+        ledger.to_string_lossy().as_ref(),
+    ]));
+    assert_eq!(refused.exit_code, exit::REFUSED, "{}", refused.stderr);
+    assert!(refused.stderr.contains("cli-export-output-conflict"));
+    assert!(
+        !html_path.exists(),
+        "a known JSON conflict must refuse before the HTML twin is published"
+    );
+    assert_eq!(
+        std::fs::read(json_path).expect("hostile twin remains"),
+        b"conflicting JSON twin"
     );
 }
 

@@ -21,7 +21,7 @@ use fs_blake3::{ContentHash, hash_bytes};
 use fs_checker::check as check_package;
 use fs_evidence::Color;
 use fs_exec::CancelGate;
-use fs_ledger::{EdgeRole, Ledger};
+use fs_ledger::{EdgeRole, Ledger, OpArtifactEdge};
 use fs_package::{Claim, EvidencePackage, Provenance};
 use fs_project::spec::ProjectSpec;
 use fs_report::{
@@ -32,7 +32,7 @@ use fs_report::{
 use super::{
     CompletedStage, EDGE_SCAN_CAP, EvidenceWork, InvocationWorkLedger, QOI_RECEIPT_SCHEMA,
     RetainedSideArtifact, SolveDriverState, SolveRefusal, SolveRunId, SolveStage, VerifiedResume,
-    invocation_work_refusal, load_latest_state,
+    invocation_work_refusal, load_latest_state, require_exact_edges,
 };
 use crate::import::json_string;
 use crate::json_read::JsonValue;
@@ -316,6 +316,30 @@ fn material_rows(receipt: &JsonValue) -> Vec<MaterialReportItem> {
         .collect()
 }
 
+/// Spell an arbitrary declared name as a package identity token: every byte
+/// outside fs-package's identity alphabet becomes `_`, and an empty result
+/// becomes `undeclared`. The original spelling stays visible in the claim
+/// statement, so nothing is lost — only the machine identity is normalised.
+fn identity_token(text: &str) -> String {
+    let token: String = text
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric()
+                || matches!(ch, '-' | '_' | '.' | '/' | ':' | '@' | '+' | '=')
+            {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if token.is_empty() {
+        "undeclared".to_string()
+    } else {
+        token
+    }
+}
+
 fn provenance_from_spec(spec: &ProjectSpec) -> ReportProvenance {
     let (constellation, workspace) = spec
         .versions
@@ -566,6 +590,8 @@ pub(super) fn report_receipt(
     let content_hash = report.content_hash();
 
     // ---- Evidence package: one Estimated claim per retained statement.
+    // Package identities admit only `[A-Za-z0-9-_./:@+=]` (fs-package's
+    // identity policy), so provenance and claim ids are spelled as tokens.
     let (constellation, workspace) = spec
         .versions
         .as_ref()
@@ -573,11 +599,15 @@ pub(super) fn report_receipt(
             (v.constellation.as_str(), v.workspace.as_str())
         });
     let package = EvidencePackage::new(Provenance::new(
-        format!("fs-cli {}; project workspace {workspace}", env!("CARGO_PKG_VERSION")),
-        constellation,
+        format!(
+            "fs-cli@{}+workspace={}",
+            env!("CARGO_PKG_VERSION"),
+            identity_token(workspace)
+        ),
+        identity_token(constellation),
     ))
     .with_claim(Claim::estimated(
-        format!("qoi.{qoi_name}.{qoi_region}"),
+        format!("qoi.{}.{}", identity_token(qoi_name), identity_token(qoi_region)),
         format!(
             "{qoi_name} in region `{qoi_region}` = {qoi_value} {qoi_unit}; estimate-only candidate from {QOI_RECEIPT_SCHEMA} with all {} engineering-uncertainty terms NO-DATA (receipt {})",
             terms.len(),
@@ -587,7 +617,11 @@ pub(super) fn report_receipt(
         f64::INFINITY,
     ))
     .with_claim(Claim::estimated(
-        format!("requirement.{qoi_name}.{qoi_region}"),
+        format!(
+            "requirement.{}.{}",
+            identity_token(qoi_name),
+            identity_token(qoi_region)
+        ),
         format!(
             "requirement outcome `{outcome}`: effective limit {effective_limit} K, required margin {required_margin} K, nominal margin {nominal_margin} K (composition {composition_identity})"
         ),
@@ -678,6 +712,8 @@ pub(super) fn report_receipt(
 pub(crate) struct CompletedRunExport {
     /// Run id, hex.
     pub(crate) run: String,
+    /// Canonical project identity bound into the completed driver state.
+    pub(crate) project_hash: String,
     /// `(stage, op id, receipt hash hex)` for every completed stage.
     pub(crate) stages: Vec<(&'static str, i64, String)>,
     /// The report stage receipt (JSON text).
@@ -710,7 +746,11 @@ pub(crate) fn load_completed_run(
     let gate = CancelGate::new_clock_free();
     let invocation = InvocationWorkLedger::default();
     let work = EvidenceWork::new(&gate, None, &invocation);
-    let VerifiedResume { state, .. } = load_latest_state(ledger, run, work)?;
+    let VerifiedResume {
+        state,
+        last_expected_edges,
+        ..
+    } = load_latest_state(ledger, run, work)?;
     if state.completed.len() < SolveStage::ALL.len() {
         let next =
             SolveStage::from_ordinal(u32::try_from(state.completed.len()).unwrap_or(u32::MAX))
@@ -749,8 +789,6 @@ pub(crate) fn load_completed_run(
         .get_artifact(&report_stage.receipt)
         .map_err(|error| ledger_refusal(format!("reading the report receipt failed: {error}")))?
         .ok_or_else(|| ledger_refusal("the report receipt is not retained".to_string()))?;
-    let report_receipt = String::from_utf8(receipt_bytes)
-        .map_err(|_| ledger_refusal("the report receipt is not UTF-8".to_string()))?;
     let edges = ledger
         .op_artifact_edges_bounded(report_stage.op_id, EDGE_SCAN_CAP)
         .map_err(|error| ledger_refusal(format!("reading the report op edges failed: {error}")))?;
@@ -759,6 +797,18 @@ pub(crate) fn load_completed_run(
             "the report op exceeds the {EDGE_SCAN_CAP}-edge verification cap"
         )));
     }
+    require_authenticated_report_snapshot(
+        run,
+        report_stage.op_id,
+        report_stage.receipt,
+        &receipt_bytes,
+        &edges.edges,
+        &last_expected_edges,
+        work,
+        SolveStage::Report.ordinal() as usize,
+    )?;
+    let report_receipt = String::from_utf8(receipt_bytes)
+        .map_err(|_| ledger_refusal("the report receipt is not UTF-8".to_string()))?;
     let mut report_html = None;
     let mut report_json = None;
     let mut package_json = None;
@@ -815,10 +865,109 @@ pub(crate) fn load_completed_run(
         .collect();
     Ok(CompletedRunExport {
         run: run.to_hex(),
+        project_hash: ContentHash(state.project).to_hex(),
         stages,
         report_receipt,
         report_html,
         report_json,
         package_json,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn require_authenticated_report_snapshot(
+    run: SolveRunId,
+    op: i64,
+    expected_receipt: ContentHash,
+    receipt_bytes: &[u8],
+    edges: &[OpArtifactEdge],
+    expected_edges: &[(EdgeRole, ContentHash)],
+    work: EvidenceWork<'_>,
+    candidate_index: usize,
+) -> Result<(), SolveRefusal> {
+    if hash_bytes(receipt_bytes) != expected_receipt {
+        return Err(SolveRefusal::plain(
+            "cli-report-ledger",
+            "the reread report receipt does not hash to the identity re-attested by resume",
+            "repair or restore the ledger; exports never follow a substituted report snapshot",
+        ));
+    }
+    require_exact_edges(
+        run,
+        SolveStage::Report,
+        op,
+        edges,
+        expected_edges,
+        work,
+        candidate_index,
+    )
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+
+    #[test]
+    fn reread_report_snapshot_refuses_receipt_and_edge_substitution() {
+        let run = SolveRunId::parse_hex(&"11".repeat(32)).expect("run id");
+        let receipt = hash_bytes(b"sealed report receipt");
+        let output = hash_bytes(b"sealed report output");
+        let expected_edges = [(EdgeRole::Out, receipt), (EdgeRole::Out, output)];
+        let edges = [
+            OpArtifactEdge {
+                role: EdgeRole::Out,
+                artifact: receipt,
+            },
+            OpArtifactEdge {
+                role: EdgeRole::Out,
+                artifact: output,
+            },
+        ];
+        let gate = CancelGate::new_clock_free();
+        let work = EvidenceWork::unmetered(&gate, None);
+
+        require_authenticated_report_snapshot(
+            run,
+            7,
+            receipt,
+            b"sealed report receipt",
+            &edges,
+            &expected_edges,
+            work,
+            SolveStage::Report.ordinal() as usize,
+        )
+        .expect("the authenticated reread is accepted");
+
+        let receipt_error = require_authenticated_report_snapshot(
+            run,
+            7,
+            receipt,
+            b"substituted report receipt",
+            &edges,
+            &expected_edges,
+            work,
+            SolveStage::Report.ordinal() as usize,
+        )
+        .expect_err("a substituted receipt is refused");
+        assert_eq!(receipt_error.code, "cli-report-ledger");
+
+        let substituted_edges = [
+            edges[0],
+            OpArtifactEdge {
+                role: EdgeRole::Out,
+                artifact: hash_bytes(b"substituted report output"),
+            },
+        ];
+        require_authenticated_report_snapshot(
+            run,
+            7,
+            receipt,
+            b"sealed report receipt",
+            &substituted_edges,
+            &expected_edges,
+            work,
+            SolveStage::Report.ordinal() as usize,
+        )
+        .expect_err("a substituted edge set is refused");
+    }
 }

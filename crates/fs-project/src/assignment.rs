@@ -17,6 +17,7 @@ use fs_exec::Cx;
 use fs_io::{
     AssignmentLimits, AssignmentReport, AssignmentRequest, NamedFaceGroup, resolve_mesh_assignments,
 };
+use fs_ivl::{Sign, orient2d, orient3d};
 use fs_rep_mesh::{Soup, point_triangle_distance};
 use fs_scenario::{EntityId, EntityKind, Violation};
 
@@ -31,7 +32,7 @@ pub const GEOMETRY_ASSIGNMENT_REPORT_DOMAIN: &str =
 
 const PROJECT_ASSIGNMENT_NO_CLAIM: &str = "the adapter binds exact project entity identities, one declared selector plan, and one supplied finite tessellation; it does not authenticate the mesh supplier, prove continuum/CAD/physical-region sameness, or make fs-io face ordinals stable across re-import";
 const INTERFACE_AUDIT_NO_CLAIM: &str = "the audit reports finite-mesh region pairs whose supplied triangle soups approach within the declared tolerance in one shared coordinate unit; it does not certify continuum contact, infer a physical interface law, authenticate assembly transforms, or prove that a declared interface is complete";
-const CONDUCTION_INTERFACE_NO_CLAIM: &str = "the lowering binds each exact ConductionMesh boundary triangle to the unique outward-oriented imported source face that contains it in exact f64 arithmetic (facet recovery may refine a declared face, so the retained trace is a refinement, not necessarily a bitwise copy; recovery points not bitwise on the source plane refuse); it does not authenticate the importer, prove continuum or CAD identity, infer region ownership when oriented source faces do not establish it, select an interface card, or construct a thermal operator";
+const CONDUCTION_INTERFACE_NO_CLAIM: &str = "the lowering binds each exact ConductionMesh boundary triangle to the unique outward-oriented imported source face that contains it under fs-ivl exact predicates over the represented f64 coordinates (facet recovery may refine a declared face, so the retained trace is a refinement, not necessarily a bitwise copy; off-plane recovery points and coordinates outside the predicates' finite preliminary-arithmetic domain refuse); it does not authenticate the importer, prove continuum or CAD identity, infer region ownership when oriented source faces do not establish it, select an interface card, or construct a thermal operator";
 
 /// One caller-supplied promoted mesh and its importer-provided named groups.
 #[derive(Debug)]
@@ -715,6 +716,7 @@ pub fn resolve_geometry_assignments(
 #[derive(Debug, Clone)]
 struct IndexedConductionSourceFace {
     source: ConductionSourceFace,
+    entity_id: EntityId,
     outward: [f64; 3],
     coordinates: [[f64; 3]; 3],
 }
@@ -731,11 +733,10 @@ struct IndexedConductionSourceFace {
 /// the imported face, not necessarily a bitwise copy of it — executed on the
 /// canonical two-solid fixture, whose joint recovers as a four-triangle fan)
 /// and the source triangle orientation agrees with that slot's outward
-/// normal. Containment is evaluated in plain f64 arithmetic against exact
-/// zero: a boundary vertex must lie bitwise on the source triangle's
-/// supporting plane, so recovery points that were rounded off the exact
-/// plane REFUSE rather than bind approximately (the fail-closed direction;
-/// upgrading the predicate to fs-ivl exact arithmetic is tracked follow-up).
+/// normal. Containment uses fs-ivl exact predicates over the represented f64
+/// coordinates: a boundary vertex off the source triangle's supporting plane
+/// REFUSES without tolerance matching. Coordinates outside the predicates'
+/// finite preliminary-arithmetic domain also REFUSE before predicate entry.
 /// Interface selectors must cover every coincident trace triangle, every
 /// coincident conduction pair must be claimed once, and every declared
 /// interface must lower at least once.
@@ -875,6 +876,7 @@ pub fn resolve_conduction_interface_pairs(
                             source_identity: artifact.source_identity.clone(),
                             face,
                         },
+                        entity_id: entity.entity_id,
                         outward,
                         coordinates,
                     });
@@ -1027,11 +1029,32 @@ pub fn resolve_conduction_interface_pairs(
         }
         match claims.as_slice() {
             [] => {
+                let side_a_region = unique_containing_region_token(
+                    &index,
+                    candidate_coords,
+                    mesh.boundary()[candidate.side_a].outward_normal,
+                )
+                .unwrap_or_else(|| "<unresolved>".to_string());
+                let side_b_region = unique_containing_region_token(
+                    &index,
+                    candidate_coords,
+                    mesh.boundary()[candidate.side_b].outward_normal,
+                )
+                .unwrap_or_else(|| "<unresolved>".to_string());
+                let mut considered_interfaces = declarations
+                    .iter()
+                    .map(|(interface, _, _)| *interface)
+                    .collect::<Vec<_>>();
+                considered_interfaces.sort_unstable();
                 result.violations.push(violation(
                     "project-conduction-interface-undeclared",
                     format!(
-                        "coincident conduction boundary slots {} and {} have no uniquely oriented declared scenario interface",
-                        candidate.side_a, candidate.side_b
+                        "coincident conduction boundary slots {} (region {}) and {} (region {}) have no uniquely oriented declared scenario interface; interface candidates considered: {:?}",
+                        candidate.side_a,
+                        side_a_region,
+                        candidate.side_b,
+                        side_b_region,
+                        considered_interfaces,
                     ),
                     "declare and geometrically assign the interface between the two owning regions; no contact law is inferred",
                 ));
@@ -1499,20 +1522,152 @@ fn norm3(vector: [f64; 3]) -> f64 {
     dot3(vector, vector).sqrt()
 }
 
-/// Closed-triangle containment evaluated in plain f64 arithmetic against
-/// exact zero: `point` must lie bitwise on the triangle's supporting plane
-/// (`normal` is the triangle's own winding cross product) and inside or on
-/// its closed edges. Conservative by construction — rounding that pushes an
-/// on-facet recovery point off the exact plane yields `false`, so the
-/// resolver refuses rather than binds approximately.
+const PREDICATE_EPS: f64 = f64::EPSILON / 2.0;
+const ORIENT2D_ERRBOUND_A: f64 = (3.0 + 16.0 * PREDICATE_EPS) * PREDICATE_EPS;
+const ORIENT3D_ERRBOUND_A: f64 = (7.0 + 56.0 * PREDICATE_EPS) * PREDICATE_EPS;
+
+fn orient2d_preflight(pa: [f64; 2], pb: [f64; 2], pc: [f64; 2]) -> bool {
+    let acx = pa[0] - pc[0];
+    let bcx = pb[0] - pc[0];
+    let acy = pa[1] - pc[1];
+    let bcy = pb[1] - pc[1];
+    let detleft = acx * bcy;
+    let detright = acy * bcx;
+    let det = detleft - detright;
+    let detsum = if detleft > 0.0 {
+        if detright <= 0.0 {
+            det
+        } else {
+            detleft + detright
+        }
+    } else if detleft < 0.0 {
+        if detright >= 0.0 {
+            det
+        } else {
+            -detleft - detright
+        }
+    } else {
+        det
+    };
+    [
+        acx,
+        bcx,
+        acy,
+        bcy,
+        detleft,
+        detright,
+        det,
+        detsum,
+        ORIENT2D_ERRBOUND_A * detsum,
+    ]
+    .into_iter()
+    .all(f64::is_finite)
+}
+
+fn orient3d_preflight(pa: [f64; 3], pb: [f64; 3], pc: [f64; 3], pd: [f64; 3]) -> bool {
+    let adx = pa[0] - pd[0];
+    let bdx = pb[0] - pd[0];
+    let cdx = pc[0] - pd[0];
+    let ady = pa[1] - pd[1];
+    let bdy = pb[1] - pd[1];
+    let cdy = pc[1] - pd[1];
+    let adz = pa[2] - pd[2];
+    let bdz = pb[2] - pd[2];
+    let cdz = pc[2] - pd[2];
+    let bdxcdy = bdx * cdy;
+    let cdxbdy = cdx * bdy;
+    let cdxady = cdx * ady;
+    let adxcdy = adx * cdy;
+    let adxbdy = adx * bdy;
+    let bdxady = bdx * ady;
+    let first = bdxcdy - cdxbdy;
+    let second = cdxady - adxcdy;
+    let third = adxbdy - bdxady;
+    let first_term = adz * first;
+    let second_term = bdz * second;
+    let third_term = cdz * third;
+    let det = first_term + second_term + third_term;
+    let permanent = (bdxcdy.abs() + cdxbdy.abs()) * adz.abs()
+        + (cdxady.abs() + adxcdy.abs()) * bdz.abs()
+        + (adxbdy.abs() + bdxady.abs()) * cdz.abs();
+    [
+        adx,
+        bdx,
+        cdx,
+        ady,
+        bdy,
+        cdy,
+        adz,
+        bdz,
+        cdz,
+        bdxcdy,
+        cdxbdy,
+        cdxady,
+        adxcdy,
+        adxbdy,
+        bdxady,
+        first,
+        second,
+        third,
+        first_term,
+        second_term,
+        third_term,
+        det,
+        permanent,
+        ORIENT3D_ERRBOUND_A * permanent,
+    ]
+    .into_iter()
+    .all(f64::is_finite)
+}
+
+/// Closed-triangle containment under exact predicates over the represented
+/// f64 coordinates. The plane test is `orient3d`; edge-side tests use
+/// `orient2d` after dropping the dominant normal axis. This keeps the
+/// refinement-only, no-tolerance rule while refusing a point whose f64
+/// cross/dot arithmetic would round an off-plane position onto the face.
 fn triangle_contains_point(tri: [[f64; 3]; 3], normal: [f64; 3], point: [f64; 3]) -> bool {
-    if dot3(subtract(point, tri[0]), normal) != 0.0 {
+    if !tri
+        .into_iter()
+        .flatten()
+        .chain(normal)
+        .chain(point)
+        .all(f64::is_finite)
+        || !orient3d_preflight(tri[0], tri[1], tri[2], point)
+    {
+        return false;
+    }
+    if orient3d(tri[0], tri[1], tri[2], point) != Sign::Zero {
+        return false;
+    }
+    let dropped_axis = normal
+        .iter()
+        .enumerate()
+        .max_by(|(_, left), (_, right)| left.abs().total_cmp(&right.abs()))
+        .map_or(0, |(axis, _)| axis);
+    let projected = |p: [f64; 3]| match dropped_axis {
+        0 => [p[1], p[2]],
+        1 => [p[0], p[2]],
+        _ => [p[0], p[1]],
+    };
+    let winding_a = projected(tri[0]);
+    let winding_b = projected(tri[1]);
+    let winding_c = projected(tri[2]);
+    if !orient2d_preflight(winding_a, winding_b, winding_c) {
+        return false;
+    }
+    let winding = orient2d(winding_a, winding_b, winding_c);
+    if winding == Sign::Zero {
         return false;
     }
     for edge in 0..3 {
-        let u = tri[edge];
-        let v = tri[(edge + 1) % 3];
-        if dot3(cross3(subtract(v, u), subtract(point, u)), normal) < 0.0 {
+        let edge_start = projected(tri[edge]);
+        let edge_end = projected(tri[(edge + 1) % 3]);
+        let projected_point = projected(point);
+        if !orient2d_preflight(edge_start, edge_end, projected_point) {
+            return false;
+        }
+        let edge_sign = orient2d(edge_start, edge_end, projected_point);
+        if edge_sign != Sign::Zero && edge_sign != winding {
             return false;
         }
     }
@@ -1526,6 +1681,58 @@ fn source_contains_triangle(row: &IndexedConductionSourceFace, candidate: [[f64;
     candidate
         .iter()
         .all(|point| triangle_contains_point(row.coordinates, row.outward, *point))
+}
+
+#[cfg(test)]
+mod containment_tests {
+    use super::{cross3, dot3, subtract, triangle_contains_point};
+
+    fn legacy_contains_point(tri: [[f64; 3]; 3], normal: [f64; 3], point: [f64; 3]) -> bool {
+        if dot3(subtract(point, tri[0]), normal) != 0.0 {
+            return false;
+        }
+        for edge in 0..3 {
+            let u = tri[edge];
+            let v = tri[(edge + 1) % 3];
+            if dot3(cross3(subtract(v, u), subtract(point, u)), normal) < 0.0 {
+                return false;
+            }
+        }
+        true
+    }
+
+    #[test]
+    fn exact_containment_refuses_an_off_plane_point_rounded_onto_the_face() {
+        // The exact plane is z = x + y. At this scale, the legacy f64
+        // cross/dot sum loses the nonzero y contribution and reports zero.
+        // The projected point is inside the source triangle, so this was a
+        // false bind rather than merely a conservative refusal.
+        let tri = [[0.0, 0.0, 0.0], [1.0e16, 0.0, 1.0e16], [0.0, 1.0, 1.0]];
+        let normal = cross3(subtract(tri[1], tri[0]), subtract(tri[2], tri[0]));
+        let point = [5.0e15, 0.5, 5.0e15];
+        assert_eq!(dot3(subtract(point, tri[0]), normal), 0.0);
+        assert!(legacy_contains_point(tri, normal, point));
+        assert!(
+            !triangle_contains_point(tri, normal, point),
+            "exact predicates must refuse the rounded off-plane candidate"
+        );
+    }
+
+    #[test]
+    fn exact_containment_refuses_finite_extreme_coordinates_without_panicking() {
+        let tri = [
+            [1.0e308, 0.0, 0.0],
+            [-1.0e308, 0.0, 0.0],
+            [0.0, 1.0e308, 0.0],
+        ];
+        let normal = [0.0, 0.0, 1.0];
+        let point = [0.0, 0.0, 0.0];
+        assert!(tri.into_iter().flatten().all(f64::is_finite));
+        assert!(
+            !triangle_contains_point(tri, normal, point),
+            "finite coordinates outside fs-ivl's preliminary arithmetic domain must refuse"
+        );
+    }
 }
 
 fn unique_oriented_source(
@@ -1555,6 +1762,27 @@ fn unique_oriented_source(
             "remove duplicate or overlapping source faces so one retained oriented trace covers the slot",
         )),
     }
+}
+
+fn unique_containing_region_token(
+    index: &BTreeMap<String, Vec<IndexedConductionSourceFace>>,
+    candidate: [[f64; 3]; 3],
+    outward_normal: [f64; 3],
+) -> Option<String> {
+    let mut tokens = BTreeSet::new();
+    for rows in index.values() {
+        for row in rows {
+            if row.entity_id.kind() == EntityKind::Region
+                && dot3(row.outward, outward_normal) > 0.0
+                && source_contains_triangle(row, candidate)
+            {
+                tokens.insert(row.entity_id.token());
+            }
+        }
+    }
+    let mut tokens = tokens.into_iter();
+    let token = tokens.next()?;
+    tokens.next().is_none().then_some(token)
 }
 
 fn conduction_interface_cancelled(stage: &'static str) -> Violation {

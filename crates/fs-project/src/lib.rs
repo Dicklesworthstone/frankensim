@@ -44,7 +44,8 @@ pub use bind::{
     Advisory, BindingRequirements, BindingTarget, CONTACT_RESISTANCE_DIMS,
     CONTACT_RESISTANCE_PROPERTY, CardLibrary, MaterialResolution, RequiredProperty,
     ResolvedBinding, ResolvedProperty, RetainedReceipt, TEMPERATURE_AXIS,
-    THERMAL_CONDUCTIVITY_DIMS, THERMAL_CONDUCTIVITY_PROPERTY, resolve_bindings,
+    THERMAL_CONDUCTIVITY_DIMS, THERMAL_CONDUCTIVITY_PROPERTY,
+    lower_card_backed_thermal_interfaces, resolve_bindings,
 };
 pub use decision::{
     PROJECT_DECISION_CONTEXT_IDENTITY_DOMAIN, PROJECT_REQUIREMENT_IDENTITY_DOMAIN,
