@@ -17,8 +17,8 @@
 //! (chunked runner) absorb worker job walls if routed through RCH.
 
 use fs_aeroac::slot_jet_3d::{
-    SlotJet3dConfig, SweepProgress, classify_rung, classify_rung_parity_filtered,
-    load_completed_run, run_slot_jet_3d_chunked,
+    RE_LADDER, SlotJet3dConfig, SweepProgress, classify_rung, classify_rung_parity_filtered,
+    ladder_config, load_completed_run, run_slot_jet_3d_chunked,
 };
 use fs_lbm::d3q19::CollisionModel3;
 use std::fmt::Write as _;
@@ -26,38 +26,14 @@ use std::fmt::Write as _;
 /// Fixed geometry for the whole ladder (the clean actuator is the
 /// collision rate at fixed `u_jet`, per the executed ramp protocol).
 fn base_config(second_order_rate: f64) -> SlotJet3dConfig {
-    SlotJet3dConfig {
-        nx: 96,
-        ny: 48,
-        nz: 12,
-        slot_half: 2.5,
-        u_jet: 0.04,
-        collision: CollisionModel3::CentralMoment {
-            second_order_rate,
-            // The +0.1 nuisance-rate offset leaves the D3Q19 physical
-            // window (0, 2) EXCLUSIVE for the top three ladder rungs
-            // (2.02/2.06/2.08 refused at validation — executed on
-            // 2026-09-01; those rungs had never actually run). The
-            // clamp keeps the committed offset family where it is
-            // legal and pins the top rungs just inside the window;
-            // both rates are disclosed in every rung receipt, so the
-            // family definition stays transparent.
-            higher_order_rate: (second_order_rate + 0.1).min(1.99),
-        },
-        nozzle_thickness: 1,
-        edge_distance: 8,
-        plate_length: 16,
-        fringe_width: 12,
-        fringe_sigma: 0.4,
-        seed_amplitude: 0.05,
-        steps_settle: 8_000,
-        steps_record: 8_192,
-    }
+    // The rig definition lives in the library so the card minter's
+    // provenance fingerprint and this driver cannot drift apart.
+    ladder_config(second_order_rate)
 }
 
 /// Ladder from the sub-tonal floor to the central-moment stability
 /// edge. Higher rate = lower nu = higher jet Re.
-const LADDER: [f64; 6] = [1.60, 1.75, 1.85, 1.92, 1.96, 1.98];
+const LADDER: [f64; 6] = RE_LADDER;
 
 /// Optional single-rung filter for distributed execution:
 /// `SWEEP_ONLY_RUNG=<index into LADDER>` runs just that rung and
@@ -123,7 +99,13 @@ fn re_sweep_campaign() {
         };
         let run = match outcome {
             Ok(run) => run,
-            Err(refusal) => {
+            // Only the rig's own containment refusal is a RESULT. Any
+            // other error (checkpoint I/O on a full disk, a fingerprint
+            // mismatch, config refusal) is infrastructure and must abort
+            // loudly rather than be archived as a physics refusal row —
+            // executed hazard 2026-09-01: yto's root filesystem hit 100%
+            // while three rungs were 800 steps from their terminal write.
+            Err(refusal @ fs_aeroac::AeroacError::NonFinite { .. }) => {
                 let CollisionModel3::CentralMoment {
                     second_order_rate,
                     higher_order_rate,
@@ -146,6 +128,9 @@ fn re_sweep_campaign() {
                 );
                 continue;
             }
+            Err(other) => panic!(
+                "rate {rate:.2}: infrastructure error, not a rung result (nothing archived): {other}"
+            ),
         };
         let rung = classify_rung(&run, &cfg).expect("classification succeeds");
         jsonl.push_str(&rung.to_jsonl());
@@ -215,6 +200,9 @@ fn re_sweep_campaign() {
                 "octave\tnz={}\tRe={:.1}\tflatness={:.3e}\ttonal={}\tSt={:.4}",
                 cfg_hi.nz, cls_hi.reynolds, cls_hi.flatness, cls_hi.tonal, cls_hi.strouhal
             );
+        }
+        Err(other) if !matches!(other, fs_aeroac::AeroacError::NonFinite { .. }) => {
+            panic!("octave: infrastructure error, not a rung result (nothing archived): {other}")
         }
         Err(refusal) => {
             let row = format!(

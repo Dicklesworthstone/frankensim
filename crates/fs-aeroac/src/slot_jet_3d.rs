@@ -756,6 +756,41 @@ impl SlotJet3dRung {
     }
 }
 
+/// The executed Re ladder (central-moment second-order rates) of the
+/// 3-D campaign, from the sub-tonal floor to the operator's stability
+/// edge (bead 3ez8g.10.1). Fixed geometry across the ladder is what
+/// makes the rungs comparable.
+pub const RE_LADDER: [f64; 6] = [1.60, 1.75, 1.85, 1.92, 1.96, 1.98];
+
+/// The campaign's fixed-geometry rig at one ladder rate: the clean
+/// actuator is the collision rate at fixed `u_jet`, per the executed
+/// ramp protocol. The `+0.1` nuisance-rate offset is clamped to 1.99 so
+/// the top rungs stay inside the D3Q19 physical window `(0, 2)`
+/// (2.02/2.06/2.08 refused at validation on 2026-09-01); both rates
+/// are disclosed on every rung receipt, so the family stays transparent.
+#[must_use]
+pub fn ladder_config(second_order_rate: f64) -> SlotJet3dConfig {
+    SlotJet3dConfig {
+        nx: 96,
+        ny: 48,
+        nz: 12,
+        slot_half: 2.5,
+        u_jet: 0.04,
+        collision: CollisionModel3::CentralMoment {
+            second_order_rate,
+            higher_order_rate: (second_order_rate + 0.1).min(1.99),
+        },
+        nozzle_thickness: 1,
+        edge_distance: 8,
+        plate_length: 16,
+        fringe_width: 12,
+        fringe_sigma: 0.4,
+        seed_amplitude: 0.05,
+        steps_settle: 8_000,
+        steps_record: 8_192,
+    }
+}
+
 /// Campaign header schema written first in every archived sweep file.
 pub const SWEEP_HEADER_SCHEMA: &str = "fs-aeroac.slot-jet-3d.re-sweep/v1";
 /// Per-rung classified row schema ([`SlotJet3dRung::to_jsonl`]).
@@ -944,6 +979,104 @@ pub fn parse_sweep_receipts(text: &str) -> Result<Vec<SweepReceiptRow>, AeroacEr
     if !matches!(rows.first(), Some(SweepReceiptRow::Header { .. })) {
         return Err(receipt_refusal(
             "slot-jet-3d receipt: missing campaign header",
+        ));
+    }
+    Ok(rows)
+}
+
+/// Parity-analysis header schema (`slot-jet-3d-re-sweep-parity.jsonl`).
+pub const PARITY_HEADER_SCHEMA: &str = "fs-aeroac.slot-jet-3d.re-sweep-parity/v1";
+/// One completed rung's parity analysis row.
+pub const PARITY_ROW_SCHEMA: &str = "fs-aeroac.slot-jet-3d.rung-parity/v1";
+
+/// One completed rung read both ways: the raw classification and the
+/// parity-filtered one, plus the two verdict flags the analyser
+/// records (raw peak at the Nyquist edge; filtered peak on the
+/// pipeline's guard floor, i.e. drift rather than a tone).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SweepParityRow {
+    pub second_order_rate: f64,
+    pub raw_peak_at_nyquist_edge: bool,
+    pub filtered_peak_at_guard_floor: bool,
+    pub raw: SlotJet3dRung,
+    pub filtered: SlotJet3dRung,
+}
+
+/// Parse the archived parity-analysis file: header first, then one
+/// [`SweepParityRow`] per completed rung. Fail closed on any deviation.
+///
+/// # Errors
+/// [`AeroacError::InvalidParameter`] for a missing header, a foreign
+/// schema, or a malformed row.
+pub fn parse_parity_receipts(text: &str) -> Result<Vec<SweepParityRow>, AeroacError> {
+    let bad = |_: AeroacError| receipt_refusal("slot-jet-3d parity receipt: malformed row");
+    let mut rows = Vec::new();
+    let mut seen_header = false;
+    for raw in text.lines() {
+        let line = raw.trim_end_matches('\r');
+        if line.is_empty() {
+            continue;
+        }
+        let mut p = crate::jetcard::Parser::new(line);
+        p.lit("{\"schema\":\"").map_err(bad)?;
+        let schema = p.string().map_err(bad)?;
+        if schema == PARITY_HEADER_SCHEMA {
+            if seen_header || !rows.is_empty() {
+                return Err(receipt_refusal(
+                    "slot-jet-3d parity receipt: header is not the single first row",
+                ));
+            }
+            seen_header = true;
+            continue;
+        }
+        if schema != PARITY_ROW_SCHEMA {
+            return Err(receipt_refusal(
+                "slot-jet-3d parity receipt: unknown row schema (refused by name)",
+            ));
+        }
+        if !seen_header {
+            return Err(receipt_refusal(
+                "slot-jet-3d parity receipt: missing header",
+            ));
+        }
+        p.lit("\"second_order_rate\":").map_err(bad)?;
+        let second_order_rate = p.number().map_err(bad)?;
+        p.lit("\"raw_peak_at_nyquist_edge\":").map_err(bad)?;
+        let raw_peak_at_nyquist_edge = p.boolean().map_err(bad)?;
+        p.lit("\"filtered_peak_at_guard_floor\":").map_err(bad)?;
+        let filtered_peak_at_guard_floor = p.boolean().map_err(bad)?;
+        // The two nested rung rows carry no nested braces, so each ends
+        // at the next `}`; the rung reader owns their strict shape.
+        let nested = |line: &str, key: &str| -> Result<SlotJet3dRung, AeroacError> {
+            let start = line.find(key).map(|at| at + key.len()).ok_or_else(|| {
+                receipt_refusal("slot-jet-3d parity receipt: nested rung missing")
+            })?;
+            let end = line[start..]
+                .find('}')
+                .map(|at| start + at + 1)
+                .ok_or_else(|| {
+                    receipt_refusal("slot-jet-3d parity receipt: nested rung unterminated")
+                })?;
+            SlotJet3dRung::from_jsonl(&line[start..end])
+        };
+        let raw = nested(line, "\"raw\":")?;
+        let filtered = nested(line, "\"filtered\":")?;
+        if !line.ends_with("}}") {
+            return Err(receipt_refusal(
+                "slot-jet-3d parity receipt: trailing bytes after row",
+            ));
+        }
+        rows.push(SweepParityRow {
+            second_order_rate,
+            raw_peak_at_nyquist_edge,
+            filtered_peak_at_guard_floor,
+            raw,
+            filtered,
+        });
+    }
+    if !seen_header {
+        return Err(receipt_refusal(
+            "slot-jet-3d parity receipt: missing header",
         ));
     }
     Ok(rows)

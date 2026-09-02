@@ -3,7 +3,7 @@
 //! refusals, and the tonal interim card's recorded facts.
 
 use fs_aeroac::jetcard::{
-    CardAuthority, CardResidual, JET_CARD_SCHEMA, JetCard, JetCardClaim, MeanJetProfile,
+    CardAuthority, CardResidual, JET_CARD_SCHEMA, JetCard, JetCardClaim, MeanJetProfile, fnv1a,
     jet_labium_fingerprint, mint_broadband_card, mint_refusal_boundary_card,
     mint_tonal_interim_card, momentum_thickness_smoothed_tophat, peak_at_nyquist_edge,
     staging_rig_config,
@@ -11,8 +11,8 @@ use fs_aeroac::jetcard::{
 use fs_aeroac::jetlab::transverse_force_spectrum;
 use fs_aeroac::noisetable::N_BANDS;
 use fs_aeroac::slot_jet_3d::{
-    SWEEP_HEADER_SCHEMA, SlotJet3dRung, SweepReceiptRow, parity_filtered_force_series,
-    parse_sweep_receipts,
+    RE_LADDER, SWEEP_HEADER_SCHEMA, SlotJet3dRung, SweepReceiptRow, config_fingerprint,
+    ladder_config, parity_filtered_force_series, parse_parity_receipts, parse_sweep_receipts,
 };
 use fs_aeroac::{AeroacError, SCOPE_STATEMENT};
 
@@ -429,6 +429,107 @@ fn jc_013_nyquist_edge_peaks_are_parity_artifacts_and_cannot_back_a_card() {
     let true_strouhal = tone_bin as f64 / n as f64 * 2.0 * 2.5 / 0.04;
     assert!((filtered_peak.strouhal * 0.5 - true_strouhal).abs() < 1e-9);
     assert!(parity_filtered_force_series(&series[..127]).is_err());
+}
+
+/// The card the executed campaign actually supports, minted from the
+/// archived receipts and nothing else (bead 3ez8g.10.2, "the card is
+/// minted by the lab, never typed from vibes"). The parity-analysis file
+/// carries every completed rung read both ways; the raw rows all sit on
+/// the Nyquist edge (the minters refuse them by law), the filtered rows
+/// are the admissible reading, and every one of them is far below the
+/// broadband flatness ceiling — so the honest artifact is the
+/// REFUSAL-BOUNDARY card. The minted document is retained beside the
+/// receipts and must reproduce bitwise.
+#[test]
+fn jc_014_refusal_boundary_card_mints_from_the_archived_campaign_receipts() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/receipts");
+    let parity_path = dir.join("slot-jet-3d-re-sweep-parity.jsonl");
+    let Ok(parity_text) = std::fs::read_to_string(&parity_path) else {
+        return;
+    };
+    let rows = parse_parity_receipts(&parity_text).expect("parity receipts parse");
+    assert!(rows.len() >= 2, "the campaign completed at least two rungs");
+    let profile = MeanJetProfile {
+        u_centerline: ladder_config(RE_LADDER[0]).u_jet,
+        slot_half: ladder_config(RE_LADDER[0]).slot_half,
+        // The 3-D slit is BINARY (one-cell edge); its effective
+        // momentum thickness is modeled with a one-cell smoothing
+        // width, disclosed here rather than measured.
+        momentum_thickness: momentum_thickness_smoothed_tophat(2.5, 1.0, 48)
+            .expect("staging geometry computes"),
+    };
+    // Law check on the real rows: every raw peak is the parity
+    // artifact; no filtered row is near its own edge.
+    for row in &rows {
+        assert!(
+            row.raw_peak_at_nyquist_edge,
+            "rate {}",
+            row.second_order_rate
+        );
+        assert!(peak_at_nyquist_edge(&row.raw, &profile).expect("record recovers"));
+        assert!(!peak_at_nyquist_edge(&row.filtered, &profile).expect("record recovers"));
+        assert!(row.filtered.tonal, "no filtered row is broadband");
+    }
+    let filtered: Vec<SlotJet3dRung> = rows.iter().map(|row| row.filtered.clone()).collect();
+    // The rig fingerprint binds the whole fixed-geometry ladder.
+    let mut fingerprint_bytes = Vec::new();
+    for rate in RE_LADDER {
+        fingerprint_bytes
+            .extend_from_slice(&config_fingerprint(&ladder_config(rate)).to_le_bytes());
+    }
+    let rig_fingerprint = fnv1a(&fingerprint_bytes);
+    let mut receipts: Vec<String> = std::fs::read_dir(&dir)
+        .expect("receipt dir")
+        .filter_map(Result::ok)
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| n.starts_with("slot-jet-3d-re-sweep") && n.ends_with(".jsonl"))
+        .collect();
+    receipts.sort();
+    // Broadband refuses on these receipts: nothing to demonstrate.
+    assert!(
+        mint_broadband_card(
+            &filtered,
+            profile.clone(),
+            [-3.0f64; N_BANDS],
+            None,
+            rig_fingerprint,
+            receipts.clone()
+        )
+        .is_err()
+    );
+    let card = mint_refusal_boundary_card(&filtered, profile, rig_fingerprint, receipts)
+        .expect("the executed campaign mints the refusal-boundary card");
+    let JetCardClaim::BroadbandRefusalBoundary {
+        max_reynolds_probed,
+        rungs_probed,
+    } = &card.claim
+    else {
+        panic!("wrong claim kind");
+    };
+    assert_eq!(*rungs_probed, filtered.len());
+    let max_re = filtered.iter().map(|r| r.reynolds).fold(0.0, f64::max);
+    assert!((max_reynolds_probed - max_re).abs() < 1e-12);
+    assert_eq!(card.authority, CardAuthority::XEst);
+    assert!(card.band_db.is_none());
+    card.validate().expect("validates");
+    assert_eq!(
+        JetCard::from_json(&card.to_json()).expect("round trip"),
+        card
+    );
+    // Retained artifact: minted bitwise-identically or refused.
+    let card_path = dir.join("jet-card-refusal-boundary.json");
+    let json = card.to_json();
+    match std::fs::read_to_string(&card_path) {
+        Ok(retained) => assert_eq!(
+            retained, json,
+            "the retained refusal-boundary card must reproduce bitwise from the receipts"
+        ),
+        Err(_) => std::fs::write(&card_path, &json).expect("retain the minted card"),
+    }
+    println!(
+        "{{\"suite\":\"fs-aeroac\",\"case\":\"jc-014-refusal-boundary-card\",\"content_hash\":\"{:016x}\",\"max_reynolds_probed\":{max_reynolds_probed},\"rungs_probed\":{rungs_probed}}}",
+        card.content_hash()
+    );
 }
 
 /// Every archived per-rung receipt file in the tree parses; the
