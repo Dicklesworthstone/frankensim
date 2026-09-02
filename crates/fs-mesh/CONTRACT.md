@@ -291,6 +291,46 @@ half-edge round-trips, closed-manifold audits).
     budget; the re-tiled facets were not recognised by the coplanar-tiling
     classifier (`tile:none` under `FS_MESH_TRACE_RECOVERY=1`), the open
     question for the next increment.
+18. Delaunay kernel, coplanar ghost rule. A point exactly coplanar with a hull
+    facet conflicts with that facet's ghost iff it lies strictly inside the
+    facet's circumcircle, tested with the exact `insphere` against an apex
+    lifted off the facet plane. The apex is `a` offset along the coordinate
+    axis most aligned with the facet normal by the facet's longest edge —
+    NOT `a + n`: on a hull sliver with nearly collinear vertices the normal is
+    tiny (MEASURED 2026-09-02 on the rotated two-fin comb: |n| = 7e-20 against
+    coordinates of 0.1), `a + n` rounds back to `a`, both predicates return
+    Zero, `Zero == Zero` read as a conflict, the cavity's growth repair then
+    absorbed a real tet that was not in conflict, the mesh ended with 227
+    local-Delaunay violations and insertion of a later point swallowed hull
+    vertex 9. Every sphere through a, b, c meets the plane in the same
+    circumcircle, so the decision is apex-independent: a differential test
+    over 2.4 million coplanar integer configurations shows zero disagreements
+    with the previous rule wherever it was sound (`delaunay::ghost_rule_probe`).
+    An exactly collinear ghost facet keeps the historical convention (it
+    conflicts with everything and never survives the next insertion; the
+    collinear-run battery mints such ghosts). The exact audit now also reports
+    an input vertex absent from every live tet (bitwise duplicates exempt:
+    whichever twin BRIO order met first is the present one), and
+    `AdmittedPlc::recover` audits BEFORE counting unrecovered constraints so a
+    kernel defect is named as one instead of as a recovery budget problem.
+    Corpus: `tests/body_corpus.rs` — the rotated comb's point set keeps all 32
+    vertices under the full audit (116 tets); the rotated comb volumetricizes
+    with the exact volume (247 tets, 60/60 facets, 43 Steiner points, min
+    dihedral 2.5°, no flat tets); a plate with a rectangular through-hole
+    volumetricizes with the exact volume (180 tets).
+19. Flat-tet repair, boundary cases. `repair_flat_tets` no longer refuses every
+    flat tet that touches a wall; wall safety is decided per removal edge by
+    the ring walk (a wall face on the ring refuses). A flat tet that sits IN
+    the boundary — two wall faces, its other two faces shared with same-region
+    tets, every vertex attached elsewhere — is DROPPED: rotation rounding
+    leaves a segment Steiner point a hair off its edge, the Delaunay keeps the
+    original triangle and mints a zero-volume tet between it and the
+    degenerate sliver face (rotated comb: [0, 2, 3, 56], volume 1.9e-22), and
+    neither diagonal is removable (one is a wall edge, the other's fan mints
+    another zero-volume tet). Dropping removes zero volume, moves the two
+    walls onto the tet's interior faces with the parent facet inherited, and
+    the independent winding audit re-checks the result. Any other flat tet
+    that resists removal stays disclosed as `unrepaired`.
 
 ## Error model
 

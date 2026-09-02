@@ -612,15 +612,18 @@ impl AdmittedPlc {
             .collect();
         let (facet_stats, correspondence) =
             recover_facets(&mut tetra, &facet_loops, self.policy.recovery, cx)?;
+        // Audit FIRST: a kernel defect (a swallowed vertex, a non-Delaunay
+        // cavity) shows up as unrecoverable constraints, and the constraint
+        // count would mislabel it as a recovery budget problem.
+        if !tetra.audit(false).clean() {
+            return Err(VolumetricError::Audit {
+                reason: "recovered complex failed the exact Delaunay audit",
+            });
+        }
         if seg_stats.unrecovered > 0 || facet_stats.unrecovered > 0 {
             return Err(VolumetricError::UnrecoveredConstraint {
                 segments: seg_stats.unrecovered,
                 facets: facet_stats.unrecovered,
-            });
-        }
-        if !tetra.audit(false).clean() {
-            return Err(VolumetricError::Audit {
-                reason: "recovered complex failed the exact Delaunay audit",
             });
         }
         Ok(ConstraintRecoveredPlc {
@@ -773,15 +776,15 @@ impl ConstraintRecoveredPlc {
                     facet_stats.steiner_inserted
                 );
             }
+            if !self.tetra.audit(false).clean() {
+                return Err(VolumetricError::Audit {
+                    reason: "refined complex failed the exact Delaunay audit",
+                });
+            }
             if seg_stats.unrecovered > 0 || facet_stats.unrecovered > 0 {
                 return Err(VolumetricError::UnrecoveredConstraint {
                     segments: seg_stats.unrecovered,
                     facets: facet_stats.unrecovered,
-                });
-            }
-            if !self.tetra.audit(false).clean() {
-                return Err(VolumetricError::Audit {
-                    reason: "refined complex failed the exact Delaunay audit",
                 });
             }
             self.correspondence = correspondence;
@@ -966,7 +969,6 @@ impl LabeledTetComplex {
     /// follows this pass is what the receipt discloses.
     pub fn repair_flat_tets(&mut self) -> FlatTetRepair {
         let mut report = FlatTetRepair::default();
-        let walls: BTreeSet<[u32; 3]> = self.source_faces.iter().map(|(face, _)| *face).collect();
         let volume =
             |positions: &[[f64; 3]], tet: [u32; 4]| tet_volume_triple(positions, tet).abs();
         let largest = self
@@ -989,6 +991,10 @@ impl LabeledTetComplex {
         let mut gave_up: BTreeSet<[u32; 4]> = BTreeSet::new();
         for _round in 0..32 {
             report.rounds += 1;
+            // Walls are re-read per round: dropping a boundary flat tet moves
+            // two wall faces (see `drop_boundary_flat`).
+            let walls: BTreeSet<[u32; 3]> =
+                self.source_faces.iter().map(|(face, _)| *face).collect();
             // Face → incident tet indices, rebuilt per flip because a flip
             // changes three tets.
             let mut by_face: BTreeMap<[u32; 3], Vec<usize>> = BTreeMap::new();
@@ -1009,7 +1015,7 @@ impl LabeledTetComplex {
             key.sort_unstable();
             let region = self.region_of_tet[flat_index];
             let flipped = self.try_remove_flat(flat_index, flat, region, &by_face, &walls, largest);
-            if !flipped {
+            if !flipped && !self.drop_boundary_flat(flat_index, region, &by_face, &walls) {
                 gave_up.insert(key);
             }
         }
@@ -1027,6 +1033,87 @@ impl LabeledTetComplex {
         report
     }
 
+    /// Drop a flat tet that sits IN the boundary. A boundary quad of a body
+    /// that is not axis-aligned leaves, after segment recovery, a Steiner point
+    /// a rounding error off the quad's edge; the Delaunay then keeps the
+    /// original triangle AND mints a zero-volume tet between it and the
+    /// degenerate sliver face, so the retained complex holds a flat tet with
+    /// two wall faces and two faces shared with same-region tets (MEASURED
+    /// 2026-09-02 on the rotated two-fin comb: [0, 2, 3, 56], volume 1.9e-22).
+    /// Edge removal cannot fix it — both diagonals are wall edges or the fan
+    /// mints another zero-volume tet. Deleting the tet removes zero volume,
+    /// keeps the boundary a closed surface (its two interior faces become the
+    /// walls, inheriting the parent facet of the wall they share an edge with)
+    /// and leaves every vertex attached; anything else is refused and stays
+    /// disclosed as unrepaired.
+    fn drop_boundary_flat(
+        &mut self,
+        flat_index: usize,
+        region: RegionId,
+        by_face: &BTreeMap<[u32; 3], Vec<usize>>,
+        walls: &BTreeSet<[u32; 3]>,
+    ) -> bool {
+        let flat = self.tets[flat_index];
+        let faces = tet_sorted_faces(flat);
+        let wall_faces: Vec<[u32; 3]> = faces
+            .iter()
+            .copied()
+            .filter(|face| walls.contains(face))
+            .collect();
+        let interior: Vec<[u32; 3]> = faces
+            .iter()
+            .copied()
+            .filter(|face| !walls.contains(face))
+            .collect();
+        if wall_faces.len() != 2 {
+            return false;
+        }
+        for face in &interior {
+            let Some(list) = by_face.get(face) else {
+                return false;
+            };
+            let others: Vec<usize> = list.iter().copied().filter(|&i| i != flat_index).collect();
+            if others.len() != 1 || self.region_of_tet[others[0]] != region {
+                return false;
+            }
+        }
+        for &v in &flat {
+            let attached = self
+                .tets
+                .iter()
+                .enumerate()
+                .any(|(i, tet)| i != flat_index && tet.contains(&v));
+            if !attached {
+                return false;
+            }
+        }
+        let parent_of = |face: [u32; 3]| -> Option<u32> {
+            self.source_faces
+                .iter()
+                .find(|(wall, _)| *wall == face)
+                .map(|(_, parent)| *parent)
+        };
+        let mut new_rows = Vec::with_capacity(2);
+        for face in &interior {
+            let parent = wall_faces
+                .iter()
+                .max_by_key(|wall| wall.iter().filter(|v| face.contains(v)).count())
+                .and_then(|wall| parent_of(*wall));
+            let Some(parent) = parent else {
+                return false;
+            };
+            new_rows.push((*face, parent));
+        }
+        self.source_faces
+            .retain(|(face, _)| !wall_faces.contains(face));
+        self.source_faces.extend(new_rows);
+        let last = self.tets.len() - 1;
+        self.tets.swap(flat_index, last);
+        self.region_of_tet.swap(flat_index, last);
+        self.tets.pop();
+        self.region_of_tet.pop();
+        true
+    }
     /// One edge-removal attempt for the flat tet at `flat_index`; true when committed.
     ///
     /// The flat tet's two in-plane diagonals each carry a ring of tets on one
@@ -1050,12 +1137,14 @@ impl LabeledTetComplex {
         walls: &BTreeSet<[u32; 3]>,
         largest: f64,
     ) -> bool {
-        if tet_sorted_faces(flat)
-            .iter()
-            .any(|face| walls.contains(face))
-        {
-            return false;
-        }
+        // A flat tet may touch the walls: a rotated grid quad on the boundary
+        // yields a sliver whose two wall faces are the quad's two surface
+        // triangles (MEASURED 2026-09-02: volume 1.9e-22 on the rotated comb,
+        // audit-refused because its centroid sits on the surface). Its
+        // removable edge is the OTHER diagonal, whose ring never crosses a
+        // wall, and the fan keeps both wall faces as faces of the new tets.
+        // Wall safety is therefore decided per edge inside
+        // `remove_edge_through_flat`, not by refusing every wall-touching flat.
         let [a, b, c, d] = flat;
         // Opposite-edge pairings; the two diagonals are the pairing whose
         // segments cross in the quad's plane.
@@ -1085,6 +1174,11 @@ impl LabeledTetComplex {
                 && side(f[0], f[1], e[0]) * side(f[0], f[1], e[1]) < 0.0
         };
         let Some((diag_1, diag_2)) = pairings.into_iter().find(|(e, f)| crossing(*e, *f)) else {
+            if std::env::var_os("FS_MESH_TRACE_REPAIR").is_some() {
+                eprintln!(
+                    "TRACE repair: flat {flat:?}: no crossing diagonal pairing (not a planar quad)"
+                );
+            }
             return false;
         };
         for (edge, others) in [(diag_1, diag_2), (diag_2, diag_1)] {
@@ -1093,6 +1187,15 @@ impl LabeledTetComplex {
             {
                 return true;
             }
+        }
+        if std::env::var_os("FS_MESH_TRACE_REPAIR").is_some() {
+            let wall_faces: Vec<[u32; 3]> = tet_sorted_faces(flat)
+                .into_iter()
+                .filter(|face| walls.contains(face))
+                .collect();
+            eprintln!(
+                "TRACE repair: flat {flat:?} (wall faces {wall_faces:?}): both diagonals {diag_1:?}/{diag_2:?} refused"
+            );
         }
         false
     }
@@ -1133,20 +1236,40 @@ impl LabeledTetComplex {
         for _ in 0..64 {
             let face = sorted(u, v, apex);
             if walls.contains(&face) {
+                if std::env::var_os("FS_MESH_TRACE_REPAIR").is_some() {
+                    eprintln!(
+                        "TRACE repair:   flat #{flat_index} edge {edge:?} refused at point 1: if walls.contains(&face)"
+                    );
+                }
                 return false;
             }
             let Some(next) = other_tet(face, current) else {
+                if std::env::var_os("FS_MESH_TRACE_REPAIR").is_some() {
+                    eprintln!(
+                        "TRACE repair:   flat #{flat_index} edge {edge:?} refused at point 2: let Some(next) = other_tet(face, current) else"
+                    );
+                }
                 return false;
             };
             if next == flat_index {
                 break;
             }
             if self.region_of_tet[next] != region {
+                if std::env::var_os("FS_MESH_TRACE_REPAIR").is_some() {
+                    eprintln!(
+                        "TRACE repair:   flat #{flat_index} edge {edge:?} refused at point 3: if self.region_of_tet[next] != region"
+                    );
+                }
                 return false;
             }
             let tet = self.tets[next];
             let Some(next_apex) = tet.iter().copied().find(|&w| w != u && w != v && w != apex)
             else {
+                if std::env::var_os("FS_MESH_TRACE_REPAIR").is_some() {
+                    eprintln!(
+                        "TRACE repair:   flat #{flat_index} edge {edge:?} refused at point 4: else"
+                    );
+                }
                 return false;
             };
             ring.push(next);
@@ -1155,6 +1278,11 @@ impl LabeledTetComplex {
             apex = next_apex;
         }
         if ring.is_empty() || *polygon.last().expect("polygon has b") != d {
+            if std::env::var_os("FS_MESH_TRACE_REPAIR").is_some() {
+                eprintln!(
+                    "TRACE repair:   flat #{flat_index} edge {edge:?} refused at point 5: if ring.is_empty() || *polygon.last().expect('polygon has b') != d"
+                );
+            }
             return false;
         }
         let old_volume: f64 = ring
@@ -1343,6 +1471,20 @@ impl LabeledTetComplex {
                 let at_s = winding_exact(soup, Point3::new(seed[0], seed[1], seed[2]));
                 let match_seed = (at_q - at_s).abs() < 0.25;
                 if *id == region && !match_seed {
+                    if std::env::var_os("FS_MESH_TRACE_AUDIT").is_some() {
+                        let p = &self.positions;
+                        let q = [
+                            p[tet[0] as usize],
+                            p[tet[1] as usize],
+                            p[tet[2] as usize],
+                            p[tet[3] as usize],
+                        ];
+                        let volume = tet_volume_triple(&self.positions, *tet);
+                        eprintln!(
+                            "TRACE audit: tet {i} {:?} region {} centroid {:?} winding {at_q:.4} vs seed {at_s:.4}; volume {volume:.3e}; vertices {:?}",
+                            tet, region.0, centroid, q
+                        );
+                    }
                     return Err(VolumetricError::Audit {
                         reason: "retained tet winding does not match its seed",
                     });

@@ -252,6 +252,66 @@ pub fn recover_segments(
             stats.recovered += 1;
         } else {
             stats.unrecovered += 1;
+            if std::env::var_os("FS_MESH_TRACE_RECOVERY").is_some() {
+                let missing: Vec<String> = chain
+                    .windows(2)
+                    .filter(|w| {
+                        let (u, v) = (w[0].1, w[1].1);
+                        !edges.contains(&if u < v { [u, v] } else { [v, u] })
+                    })
+                    .map(|w| format!("[{:.6}..{:.6}]", w[0].0, w[1].0))
+                    .collect();
+                eprintln!(
+                    "TRACE segments: segment {sid} ({a}-{b}) FAILED: chain {} vertices, depth-capped {failed}, missing sub-edges {}: {} (steiner so far {}, duplicates_skipped {}, exhaustive_locates {})",
+                    chain.len(),
+                    missing.len(),
+                    missing.join(" "),
+                    stats.steiner_inserted,
+                    tetra.mesh.stats.duplicates_skipped,
+                    tetra.mesh.stats.exhaustive_locates
+                );
+                // Anatomy of the first missing sub-edge: how far apart its
+                // endpoints are, how many live tets each touches, whether
+                // either sits on the hull, and whether any live tet holds
+                // both (which would contradict `edges`).
+                if let Some(w) = chain.windows(2).find(|w| {
+                    let (u, v) = (w[0].1, w[1].1);
+                    !edges.contains(&if u < v { [u, v] } else { [v, u] })
+                }) {
+                    let (u, v) = (w[0].1, w[1].1);
+                    let (pu, pv) = (tetra.mesh.points[u as usize], tetra.mesh.points[v as usize]);
+                    let dist = ((pu[0] - pv[0]).powi(2)
+                        + (pu[1] - pv[1]).powi(2)
+                        + (pu[2] - pv[2]).powi(2))
+                    .sqrt();
+                    let mut touch_u = 0;
+                    let mut touch_v = 0;
+                    let mut both = 0;
+                    let mut hull_u = false;
+                    let mut hull_v = false;
+                    for (ti, tet) in tetra.mesh.tets.iter().enumerate() {
+                        if !tetra.mesh.alive[ti] {
+                            continue;
+                        }
+                        let ghost = tet[3] == GHOST;
+                        let has_u = tet.contains(&u);
+                        let has_v = tet.contains(&v);
+                        if ghost {
+                            hull_u |= has_u;
+                            hull_v |= has_v;
+                            continue;
+                        }
+                        touch_u += usize::from(has_u);
+                        touch_v += usize::from(has_v);
+                        both += usize::from(has_u && has_v);
+                    }
+                    let along = parameter_on_segment(pv, oa, ob)
+                        .or_else(|| parameter_on_segment(pu, oa, ob));
+                    eprintln!(
+                        "TRACE segments:   first missing ({u},{v}): |uv| {dist:.3e} m, live tets touching u {touch_u} v {touch_v} both {both}, hull u {hull_u} v {hull_v}, on-segment parameter {along:?}"
+                    );
+                }
+            }
         }
     }
     Ok((stats, table))

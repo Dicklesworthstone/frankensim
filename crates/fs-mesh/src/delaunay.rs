@@ -22,7 +22,7 @@ use fs_exec::{Cancelled, Cx};
 use fs_geom::Point3;
 use fs_ivl::{Sign, insphere, orient3d, orient3d_sos};
 use fs_rep_mesh::{Soup, TetComplex};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// The vertex-at-infinity sentinel carried by hull (ghost) tets.
 pub const GHOST: u32 = u32::MAX;
@@ -259,6 +259,20 @@ impl Mesh {
                 // an isometry, so it maps the circumcircle to an ellipse and flips
                 // the in-circle decision, producing silently non-Delaunay meshes on
                 // coplanar inputs (tilted flats, lattices, collinear runs + apex).
+                //
+                // The apex must be off the plane by a REPRESENTABLE amount. `a + n`
+                // is not: on a hull sliver whose vertices are nearly collinear the
+                // normal is tiny (MEASURED 2026-09-02 on a rotated comb: |n| =
+                // 7e-20 against coordinates of 0.1), `a + n` rounds back to `a`,
+                // both predicates return Zero, `Zero == Zero` reads as a conflict,
+                // the cavity's growth repair then absorbs a neighbour that is not
+                // in conflict, and the mesh ends non-Delaunay with an input vertex
+                // swallowed. Offsetting `a` along the coordinate axis most aligned
+                // with the normal by the facet's longest edge length gives an apex
+                // exactly off the plane whenever the facet has any area; the
+                // predicates are exact for whatever apex results, and every sphere
+                // through a, b, c meets the facet plane in the same circumcircle,
+                // so the decision does not depend on which apex is used.
                 let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
                 let ac = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
                 let n = [
@@ -266,8 +280,23 @@ impl Mesh {
                     ab[2] * ac[0] - ab[0] * ac[2],
                     ab[0] * ac[1] - ab[1] * ac[0],
                 ];
-                let apex = [a[0] + n[0], a[1] + n[1], a[2] + n[2]];
-                insphere(a, b, c, apex, p) == orient3d(a, b, c, apex)
+                let axis = (0..3)
+                    .max_by(|&i, &j| n[i].abs().partial_cmp(&n[j].abs()).expect("finite normal"))
+                    .expect("three axes");
+                let edge = (ab[0] * ab[0] + ab[1] * ab[1] + ab[2] * ab[2])
+                    .max(ac[0] * ac[0] + ac[1] * ac[1] + ac[2] * ac[2])
+                    .sqrt();
+                let mut apex = a;
+                apex[axis] += if n[axis] >= 0.0 { edge } else { -edge };
+                let side = orient3d(a, b, c, apex);
+                if side == Sign::Zero {
+                    // The facet has no area at all (exactly collinear vertices — a
+                    // degenerate ghost the collinear-run battery does mint). Keep
+                    // the historical convention: it conflicts with everything, so
+                    // it never survives the next insertion.
+                    return true;
+                }
+                insphere(a, b, c, apex, p) == side
             }
         }
     }
@@ -390,6 +419,37 @@ impl Mesh {
                     }
                     let vis = orient3d(self.coords(f[0]), self.coords(f[1]), self.coords(f[2]), p);
                     if vis != Sign::Positive {
+                        if std::env::var_os("FS_MESH_TRACE_DELAUNAY").is_some() {
+                            let tv = self.tets[t as usize];
+                            let nv = self.tets[n as usize];
+                            let sphere = |tet: [u32; 4]| {
+                                if tet[3] == GHOST {
+                                    "ghost".to_string()
+                                } else {
+                                    format!(
+                                        "{:?}",
+                                        insphere(
+                                            self.coords(tet[0]),
+                                            self.coords(tet[1]),
+                                            self.coords(tet[2]),
+                                            self.coords(tet[3]),
+                                            p
+                                        )
+                                    )
+                                }
+                            };
+                            eprintln!(
+                                "TRACE growth-repair: inserting {p_idx}: boundary facet {:?} of tet {t} {:?} (insphere {}) with outside {} {:?} (ghost {}, insphere {}, in_conflict {}) has vis {vis:?}; absorbing",
+                                f,
+                                tv,
+                                sphere(tv),
+                                n,
+                                nv,
+                                self.is_ghost(n),
+                                sphere(nv),
+                                self.in_conflict(n, p, p_idx)
+                            );
+                        }
                         self.mark[n as usize] = epoch;
                         cavity.push(n);
                         self.stats.growth_repairs += 1;
@@ -595,12 +655,105 @@ pub(crate) fn bootstrap_mesh(points: &[Point3]) -> Result<(Mesh, [u32; 4], Vec<u
 pub fn delaunay(points: &[Point3], cx: &Cx<'_>) -> Result<Tetrahedralization, MeshError> {
     let (mut mesh, quad, order) = bootstrap_mesh(points)?;
     let mut inserted = 0u64;
+    let trace = std::env::var_os("FS_MESH_TRACE_DELAUNAY").is_some();
+    let mut placed: Vec<u32> = quad.to_vec();
     for &i in &order {
         if quad.contains(&i) {
             continue;
         }
-        mesh.insert(i);
+        let before_hull: Vec<u32> = if trace {
+            placed
+                .iter()
+                .copied()
+                .filter(|&v| {
+                    (0..mesh.tets.len()).any(|t| {
+                        mesh.alive[t] && mesh.tets[t][3] == GHOST && mesh.tets[t].contains(&v)
+                    })
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let (gr0, ex0, cav0) = (
+            mesh.stats.growth_repairs,
+            mesh.stats.exhaustive_locates,
+            mesh.stats.cavity_tets,
+        );
+        let accepted = mesh.insert(i);
         inserted += 1;
+        if trace {
+            // Trip-wire: no previously placed vertex may lose every tet.
+            if accepted {
+                placed.push(i);
+            }
+            let mut present = vec![false; mesh.points.len()];
+            for (t, tet) in mesh.tets.iter().enumerate() {
+                if mesh.alive[t] {
+                    for &v in tet {
+                        if v != GHOST {
+                            present[v as usize] = true;
+                        }
+                    }
+                }
+            }
+            // First local-Delaunay violation: which insertion broke the mesh.
+            let mut violations = 0usize;
+            let mut first = String::new();
+            for (ti, tet) in mesh.tets.iter().enumerate() {
+                if !mesh.alive[ti] || tet[3] == GHOST {
+                    continue;
+                }
+                let q: [[f64; 3]; 4] = core::array::from_fn(|k| mesh.points[tet[k] as usize]);
+                if orient3d(q[0], q[1], q[2], q[3]) != Sign::Positive {
+                    violations += 1;
+                    if first.is_empty() {
+                        first = format!("tet {ti} {:?} not positively oriented", tet);
+                    }
+                }
+                for slot in 0..4 {
+                    let n = mesh.adj[ti][slot];
+                    if n == GHOST || !mesh.alive[n as usize] || mesh.tets[n as usize][3] == GHOST {
+                        continue;
+                    }
+                    let apex = mesh.tets[n as usize]
+                        .iter()
+                        .copied()
+                        .find(|v| !tet.contains(v))
+                        .expect("neighbour has an apex");
+                    if insphere(q[0], q[1], q[2], q[3], mesh.points[apex as usize])
+                        == Sign::Positive
+                    {
+                        violations += 1;
+                        if first.is_empty() {
+                            first = format!(
+                                "apex {apex} strictly inside tet {ti} {:?} (neighbour {n})",
+                                tet
+                            );
+                        }
+                    }
+                }
+            }
+            if violations > 0 {
+                eprintln!(
+                    "TRACE delaunay: after inserting {i} (#{inserted}, accepted {accepted}): {violations} local-Delaunay violations; first: {first}; this insertion growth_repairs +{} cavity {}",
+                    mesh.stats.growth_repairs - gr0,
+                    mesh.stats.cavity_tets - cav0
+                );
+            }
+            for &v in &placed {
+                if !present[v as usize] {
+                    eprintln!(
+                        "TRACE delaunay: inserting {i} {:?} (accepted {accepted}) EATS vertex {v} {:?} (was on hull: {}); this insertion: growth_repairs +{}, exhaustive_locates +{}, cavity tets {}",
+                        mesh.points[i as usize],
+                        mesh.points[v as usize],
+                        before_hull.contains(&v),
+                        mesh.stats.growth_repairs - gr0,
+                        mesh.stats.exhaustive_locates - ex0,
+                        mesh.stats.cavity_tets - cav0
+                    );
+                }
+            }
+        }
         if inserted.is_multiple_of(256) {
             cx.checkpoint()?;
         }
@@ -782,6 +935,34 @@ impl Tetrahedralization {
         let live: Vec<u32> = (0..m.tets.len() as u32)
             .filter(|&t| m.alive[t as usize])
             .collect();
+        // Every input point is a vertex of some live tet. A construction that
+        // swallows a vertex (MEASURED 2026-09-02: a rotated comb lost a hull
+        // vertex to a spurious coplanar-ghost conflict) must fail HERE, not
+        // downstream as "unrecoverable constraints".
+        let mut present = vec![false; m.points.len()];
+        for &t in &live {
+            for &v in &m.tets[t as usize] {
+                if v != GHOST {
+                    present[v as usize] = true;
+                }
+            }
+        }
+        // A bitwise duplicate is skipped by construction (counted in
+        // `duplicates_skipped`); whichever twin BRIO order met first is the
+        // one present, so absence is legitimate iff SOME vertex with the same
+        // coordinates is present.
+        let mut present_bits: BTreeSet<[u64; 3]> = BTreeSet::new();
+        for (v, &q) in m.points.iter().enumerate() {
+            if present[v] {
+                present_bits.insert([q[0].to_bits(), q[1].to_bits(), q[2].to_bits()]);
+            }
+        }
+        for v in 0..self.steiner_from as usize {
+            let q = m.points[v];
+            if !present_bits.contains(&[q[0].to_bits(), q[1].to_bits(), q[2].to_bits()]) {
+                violations.push(format!("input vertex {v} is absent from every live tet"));
+            }
+        }
         // Orientation + adjacency reciprocity + facet agreement.
         for &t in &live {
             let tv = m.tets[t as usize];
@@ -940,5 +1121,97 @@ impl Tetrahedralization {
             }
         }
         AuditReport { violations }
+    }
+}
+
+#[cfg(test)]
+mod ghost_rule_probe {
+    use fs_ivl::{Sign, insphere, orient3d};
+
+    fn old_rule(a: [f64; 3], b: [f64; 3], c: [f64; 3], p: [f64; 3]) -> bool {
+        let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+        let ac = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+        let n = [
+            ab[1] * ac[2] - ab[2] * ac[1],
+            ab[2] * ac[0] - ab[0] * ac[2],
+            ab[0] * ac[1] - ab[1] * ac[0],
+        ];
+        let apex = [a[0] + n[0], a[1] + n[1], a[2] + n[2]];
+        insphere(a, b, c, apex, p) == orient3d(a, b, c, apex)
+    }
+
+    fn new_rule(a: [f64; 3], b: [f64; 3], c: [f64; 3], p: [f64; 3]) -> bool {
+        let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+        let ac = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+        let n = [
+            ab[1] * ac[2] - ab[2] * ac[1],
+            ab[2] * ac[0] - ab[0] * ac[2],
+            ab[0] * ac[1] - ab[1] * ac[0],
+        ];
+        let axis = (0..3)
+            .max_by(|&i, &j| n[i].abs().partial_cmp(&n[j].abs()).expect("finite"))
+            .expect("axes");
+        let edge = (ab[0] * ab[0] + ab[1] * ab[1] + ab[2] * ab[2])
+            .max(ac[0] * ac[0] + ac[1] * ac[1] + ac[2] * ac[2])
+            .sqrt();
+        let mut apex = a;
+        apex[axis] += if n[axis] >= 0.0 { edge } else { -edge };
+        let side = orient3d(a, b, c, apex);
+        if side == Sign::Zero {
+            return false;
+        }
+        insphere(a, b, c, apex, p) == side
+    }
+
+    #[test]
+    fn probe_old_vs_new_coplanar_ghost_rule_on_integer_planes() {
+        // Planes: z = 0, x + z = 0, x + y + z = 0; integer points in [-5, 5].
+        let mut disagreements = 0;
+        let mut checked = 0;
+        for plane in 0..3 {
+            let on_plane = |x: i32, y: i32| -> [f64; 3] {
+                match plane {
+                    0 => [f64::from(x), f64::from(y), 0.0],
+                    1 => [f64::from(x), f64::from(y), f64::from(-x)],
+                    _ => [f64::from(x), f64::from(y), f64::from(-x - y)],
+                }
+            };
+            let pts: Vec<[f64; 3]> = (-3..=3)
+                .flat_map(|x| (-3..=3).map(move |y| on_plane(x, y)))
+                .collect();
+            for i in 0..pts.len() {
+                for j in (i + 1)..pts.len() {
+                    for k in (j + 1)..pts.len() {
+                        let (a, b, c) = (pts[i], pts[j], pts[k]);
+                        if orient3d(a, b, c, [a[0] + 1.0, a[1] + 2.0, a[2] + 3.0]) == Sign::Zero
+                            && orient3d(a, b, c, [a[0] - 2.0, a[1] + 1.0, a[2] + 5.0]) == Sign::Zero
+                        {
+                            continue; // collinear triple
+                        }
+                        for (l, &p) in pts.iter().enumerate() {
+                            if l == i || l == j || l == k {
+                                continue;
+                            }
+                            checked += 1;
+                            let o = old_rule(a, b, c, p);
+                            let n = new_rule(a, b, c, p);
+                            if o != n {
+                                disagreements += 1;
+                                if disagreements <= 5 {
+                                    eprintln!(
+                                        "PROBE disagreement: plane {plane} a {a:?} b {b:?} c {c:?} p {p:?}: old {o} new {n}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        eprintln!("PROBE ghost rule: checked {checked}, disagreements {disagreements}");
+        assert_eq!(
+            disagreements, 0,
+            "old and new coplanar rules must agree on non-degenerate facets"
+        );
     }
 }
