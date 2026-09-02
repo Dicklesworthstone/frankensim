@@ -5,7 +5,7 @@ metrics: 27
 measured: 14
 no_data: 13
 trend_basis: NO-DATA (no generation recorded yet; every trend cell reads `no prior generation`)
-source_identity: 236a5b7b614bb1a21b6020fda1171cb6997bc4760917ce45a182e0aba1be7fb2
+source_identity: 1dd8355a0e4cebaf59e1c6fdc9c17a21be87483b75a0542d03f272e042deafba
 
 This dashboard measures OUTCOMES. A `NO-DATA` row means no measurement machinery exists yet, so no number is invented; a measured `0` means the population is enumerable and the answer is genuinely none. The two are never conflated, and a measured zero is deliberately left visible rather than hidden behind `NO-DATA`.
 
@@ -45,11 +45,11 @@ This dashboard measures OUTCOMES. A `NO-DATA` row means no measurement machinery
 | --- | --- | --- | --- | --- |
 | Open beads with no open blocker, from the tracker snapshot | 369 | no prior generation | neutral | spine-metrics.json (xtask spine-metrics beads snapshot) |
 | Open beads with at least one open blocker, from the tracker snapshot | 1791 of 2160 (82.91%) | no prior generation | lower-is-better | spine-metrics.json (xtask spine-metrics beads snapshot) |
-| Registered capabilities at L2 (numerically verified) or above | 11 of 15 (73.33%) | no prior generation | higher-is-better | capability-maturity.json |
+| Registered capabilities at L2 (numerically verified) or above | 12 of 15 (80.00%) | no prior generation | higher-is-better | capability-maturity.json |
 | Registered capabilities at L3 (integrated workflow) or above | 0 of 15 (0.00%) | no prior generation | higher-is-better | capability-maturity.json |
 | Reality-check spine beads on the certified tropical critical path | 0 of 5 (0.00%) | no prior generation | higher-is-better | tropical-critical-path.json (fs-tropical over the bead graph, xtask tropical-path) |
 | Staged-producer e2e lane stages proven green by a retained checked receipt | 4 | no prior generation | higher-is-better | spine-e2e-summary.json (solve_stage_producers_e2e.sh full-profile receipt) |
-| Solve pipeline stages executing in the checked spine ratchet | 4 of 6 (66.66%) | no prior generation | higher-is-better | spine-ratchet.json (fs-cli SolveStage table, xtask spine-ratchet) |
+| Solve pipeline stages executing in the checked spine ratchet | 4 of 7 (57.14%) | no prior generation | higher-is-better | spine-ratchet.json (fs-cli SolveStage table, xtask spine-ratchet) |
 
 ## What each metric does not capture
 
@@ -105,4 +105,4 @@ These are legitimate signals that are NOT outcome metrics. They move without the
 - crate count — inventory, not capability; the capability maturity registry is the outcome measure
 - integration-test file count — inventory, not proof; check-docs already pins it and a test file is not an outcome
 
-identity: d2c9cb9b4750cca885b01ec1b36e4f512cd84269ae27a8440c2bd213b0c970f7
+identity: d25060ce2aa3d88a55ebb26a78201d6ee8e0f8b0378065de1e2a48b482ca1abe

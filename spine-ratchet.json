@@ -1,8 +1,8 @@
 {
-  "schema": "frankensim-spine-ratchet-v1",
+  "schema": "frankensim-spine-ratchet-v1"
   "bead": "frankensim-o5et9",
   "high_water_stages_executing": 4,
-  "stages_total": 6,
+  "stages_total": 7,
   "executing_prefix": ["import-verify", "assign", "material-resolve", "flow-network"],
   "first_gap": "conduction",
   "first_gap_owner": "frankensim-s93ej",
