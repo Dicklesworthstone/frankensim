@@ -1249,7 +1249,7 @@ mod tests {
             r#"{{
             "schema":"frankensim-spine-e2e-receipt-v1",
             "run":{{"head_sha":"{lane_head}","script":"scripts/e2e/cooling_01.sh"}},
-            "stages":[{"capability":"a.b","stage":"flow","status":"executed"}]
+            "stages":[{{"capability":"a.b","stage":"flow","status":"executed"}}]
         }}"#
         );
         std::fs::write(root.join("receipt.json"), missing_stage).unwrap();
@@ -1267,7 +1267,7 @@ mod tests {
             r#"{{
             "schema":"frankensim-spine-e2e-receipt-v1",
             "run":{{"head_sha":"{lane_head}","script":"scripts/e2e/cooling_01.sh"}},
-            "stages":[{"capability":"a.b","stage":"conduction","status":"executed"}]
+            "stages":[{{"capability":"a.b","stage":"conduction","status":"executed"}}]
         }}"#
         );
         std::fs::write(root.join("receipt.json"), &executed).unwrap();
@@ -1524,12 +1524,24 @@ mod tests {
             "live capability-maturity.json must be clean: {:?}",
             report.violations
         );
+        // The inventory the registry reports today: one L3 admitted on the
+        // retained lane receipt (bead frankensim-rc-root-q61wp.13). A change
+        // here must come with the registry change that justifies it.
         assert!(
             report
                 .decisions
                 .iter()
-                .any(|note| note.verdict == "inventory" && note.detail.contains("L1=3 L2=12 L3=0")),
-            "the live registry must report the demoted L1=3 L2=12 L3=0 inventory: {:?}",
+                .any(|note| note.verdict == "inventory" && note.detail.contains("L1=3 L2=11 L3=1")),
+            "the live registry must report the L1=3 L2=11 L3=1 inventory: {:?}",
+            report.decisions
+        );
+        assert!(
+            report.decisions.iter().any(|note| {
+                note.verdict == "executed-receipt"
+                    && note.crate_name == "thermal.conduction-solve"
+                    && note.detail.contains("stage=conduction verdict=executed")
+            }),
+            "the L3 must be admitted from an executed-stage receipt, never by assertion: {:?}",
             report.decisions
         );
     }

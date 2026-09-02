@@ -109,6 +109,19 @@ fn material_pack_bytes_with_domain(
     t_lo: f64,
     t_hi: f64,
 ) -> Vec<u8> {
+    material_pack_bytes_with_domain_and_conductivity(chemistry, pack_id, t_lo, t_hi, 167.0)
+}
+
+/// Pack fixture with a caller-chosen conductivity value: the hostile
+/// material twin (Journey A falsifier) swaps the aluminium card for a
+/// low-conductivity foam under the same chemistry key.
+fn material_pack_bytes_with_domain_and_conductivity(
+    chemistry: &str,
+    pack_id: &str,
+    t_lo: f64,
+    t_hi: f64,
+    conductivity_w_mk: f64,
+) -> Vec<u8> {
     use fs_matdb::{
         ClaimSet, InterpolationPolicy, MaterialStateId, NormalizedMaterialCardPack, NormalizedPack,
         ObservationDataset, PropertyClaim, PropertyKey, PropertyValue, Provenance,
@@ -136,7 +149,7 @@ fn material_pack_bytes_with_domain(
         .insert_claim(PropertyClaim {
             key: PropertyKey::new("thermal-conductivity", CONDUCTIVITY_DIMS),
             value: PropertyValue::Scalar {
-                value: 167.0,
+                value: conductivity_w_mk,
                 dims: CONDUCTIVITY_DIMS,
             },
             validity: fs_evidence::ValidityDomain::unconstrained().with("T", t_lo, t_hi),
@@ -4185,4 +4198,311 @@ fn g3_binding_admitted_range_wider_than_card_validity_refuses_domain_uncovered()
         "{refusal:?}"
     );
     assert_eq!(refusal.stage, Some("material-resolve"));
+}
+
+// ---------------------------------------------------------------------------
+// Journey A falsifier battery (bead frankensim-rc-root-q61wp.14).
+//
+// The L3 claim on `thermal.conduction-solve` says the pipeline EXECUTES
+// conduction end to end with retained receipts. These tests are what make
+// "the product works" distinguishable from "the scripts exit 0": each one
+// changes the world in a way the pipeline must notice, and asserts the
+// exact, typed way it noticed. Every falsifier below was executed against a
+// deliberately broken build once (recorded in the landing commit), because
+// a falsifier that has never fired is a demo.
+// ---------------------------------------------------------------------------
+
+/// The admitted card-pack set with the fixture's aluminium card replaced by
+/// a declared low-conductivity foam under the SAME chemistry key, so the
+/// project binds unchanged and only the physics moves.
+fn foam_cards() -> CardPackSet {
+    CardPackSet::admit(vec![raw_pack(
+        CardPackKind::Material,
+        "fixtures/foam.fsmcdpk",
+        material_pack_bytes_with_domain_and_conductivity(
+            "AA6061",
+            "solve-fixture-foam",
+            200.0,
+            450.0,
+            0.04,
+        ),
+    )])
+    .expect("the foam pack admits")
+}
+
+/// Rebind the project's one material binding to the card a pack set carries:
+/// bindings name cards by content hash, so a swapped card is otherwise
+/// "unknown", not "different".
+fn rebind_to(spec: &mut ProjectSpec, cards: &CardPackSet) {
+    let pack = &cards.materials()[0];
+    let binding = &mut spec.materials.as_mut().expect("materials")[0];
+    binding.card = pack.card().to_hex();
+    binding.state = pack.identity().to_string();
+}
+
+/// Run the conjugate fixture to completion with the given cards and return
+/// (run id, QoI receipt text, conduction receipt text, solution artifact text).
+fn run_conjugate_to_completion(
+    ledger: &Ledger,
+    decoded: &DecodedProject,
+    cards: &CardPackSet,
+) -> (String, String, String, String) {
+    let gate = CancelGate::new_clock_free();
+    let mut clock = benign_clock();
+    let mut progress = Vec::new();
+    let outcome = run_solve(ledger, &gate, &mut clock, decoded, cards, &mut progress)
+        .expect("the conjugate fixture completes every stage");
+    assert!(matches!(outcome.status, fs_cli::SolveRunStatus::Completed));
+    let receipts = stage_receipt_hashes(ledger, &outcome.run);
+    assert_eq!(receipts.len(), 7);
+    let conduction =
+        String::from_utf8(artifact_bytes(ledger, &receipts[4])).expect("receipt is utf-8");
+    let qoi = String::from_utf8(artifact_bytes(ledger, &receipts[5])).expect("receipt is utf-8");
+    let solution_hex = receipt_str_field(&conduction, "solution_artifact");
+    let solution =
+        String::from_utf8(artifact_bytes(ledger, &solution_hex)).expect("solution is utf-8");
+    (outcome.run.clone(), qoi, conduction, solution)
+}
+
+/// Falsifier: INDEPENDENT EXTRACTION ORACLE. The QoI stage reports one
+/// temperature maximum. Re-derive it from the retained conduction-solution
+/// artifact alone — the bytes a reviewer would hold — with no shared code
+/// path (a plain fold over the decoded temperature array), and require the
+/// two to agree bit for bit. A stage that reported a stale, permuted, or
+/// wrong-region maximum cannot pass this.
+#[test]
+fn ja_001_qoi_maximum_rederives_bitwise_from_the_retained_solution_artifact() {
+    let bytes = tetra_stl();
+    let spec = conjugate_fixture_project(7, &bytes, "convection.gnielinski");
+    let decoded = decode(&spec);
+    let ledger = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&ledger, &spec, bytes);
+    let (_, qoi, _, solution) = run_conjugate_to_completion(&ledger, &decoded, &fixture_cards());
+
+    let reported = receipt_number_field(&qoi, "value");
+    let key = "\"temperature\":[";
+    let start = solution
+        .find(key)
+        .expect("solution carries a temperature array")
+        + key.len();
+    let end = start + solution[start..].find(']').expect("array is terminated");
+    let temperatures: Vec<f64> = solution[start..end]
+        .split(',')
+        .map(|token| token.parse::<f64>().expect("canonical f64"))
+        .collect();
+    assert!(
+        temperatures.len() >= 4,
+        "the tetra fixture has at least four vertices"
+    );
+    let independent = temperatures
+        .iter()
+        .copied()
+        .fold(f64::NEG_INFINITY, f64::max);
+    assert_eq!(
+        reported.to_bits(),
+        independent.to_bits(),
+        "QoI value {reported} vs retained-field maximum {independent}: {qoi}"
+    );
+    // The witness vertex named by the stage must hold that value.
+    let witness = receipt_number_field(&qoi, "witness_vertex") as usize;
+    assert_eq!(temperatures[witness].to_bits(), independent.to_bits());
+    println!(
+        "{{\"falsifier\":\"extraction-oracle\",\"mutation\":\"none\",\"reported_k\":{reported},\"rederived_k\":{independent},\"witness\":{witness}}}"
+    );
+}
+
+/// Falsifier: HOSTILE MATERIAL TWIN. The same project with the aluminium
+/// card swapped for a declared foam (k = 0.04 W/mK) must run to completion
+/// and move the junction maximum UP and the nominal margin DOWN; the two
+/// runs must have different run identities (the card-pack-set root is in
+/// the preimage) and different conduction receipts.
+#[test]
+fn ja_002_hostile_foam_card_moves_the_junction_maximum_and_margin() {
+    let bytes = tetra_stl();
+    let spec = conjugate_fixture_project(7, &bytes, "convection.gnielinski");
+    let decoded = decode(&spec);
+
+    let ledger_al = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&ledger_al, &spec, bytes.clone());
+    let (run_al, qoi_al, cond_al, _) =
+        run_conjugate_to_completion(&ledger_al, &decoded, &fixture_cards());
+
+    let foam = foam_cards();
+    let mut spec_foam = spec.clone();
+    rebind_to(&mut spec_foam, &foam);
+    let decoded_foam = decode(&spec_foam);
+    let ledger_foam = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&ledger_foam, &spec_foam, bytes);
+    let (run_foam, qoi_foam, cond_foam, _) =
+        run_conjugate_to_completion(&ledger_foam, &decoded_foam, &foam);
+
+    assert_ne!(
+        run_al, run_foam,
+        "the card-pack-set root is bound into run identity"
+    );
+    assert_ne!(
+        cond_al, cond_foam,
+        "the conduction receipt carries the material identity"
+    );
+    let max_al = receipt_number_field(&qoi_al, "value");
+    let max_foam = receipt_number_field(&qoi_foam, "value");
+    let margin_al = receipt_number_field(&qoi_al, "nominal_margin_kelvin");
+    let margin_foam = receipt_number_field(&qoi_foam, "nominal_margin_kelvin");
+    // The fixture is a unit tetrahedron carrying 5 W: aluminium holds it
+    // essentially isothermal at the conjugate wall level, so the foam's
+    // signature is a strictly higher maximum and a much larger internal
+    // spread, not a large shift of the maximum itself. Executed on yto
+    // 2026-09-02: 293.3125 K vs 293.3396 K; the range grows by orders of
+    // magnitude.
+    assert!(
+        max_foam > max_al,
+        "foam must run hotter than aluminium: {max_al} vs {max_foam}"
+    );
+    let spread = |conduction: &str| {
+        receipt_number_field(conduction, "max") - receipt_number_field(conduction, "min")
+    };
+    let (spread_al, spread_foam) = (spread(&cond_al), spread(&cond_foam));
+    assert!(
+        spread_foam > 10.0 * spread_al && spread_foam > 1e-3,
+        "the foam's internal temperature spread must dwarf aluminium's: {spread_al} vs {spread_foam}"
+    );
+    assert!(
+        margin_foam < margin_al,
+        "the nominal margin must shrink with the foam: {margin_al} vs {margin_foam}"
+    );
+    // The conjugate exchange saw it too: the air absorbed the same power
+    // in both runs (steady state), so the reference temperature is the
+    // same to solver precision while the wall got hotter.
+    let ref_al = receipt_number_field(&cond_al, "reference_k");
+    let ref_foam = receipt_number_field(&cond_foam, "reference_k");
+    assert!((ref_al - ref_foam).abs() < 1e-6, "{ref_al} vs {ref_foam}");
+    println!(
+        "{{\"falsifier\":\"hostile-material-twin\",\"mutation\":\"k 167 -> 0.04 W/mK\",\"max_al_k\":{max_al},\"max_foam_k\":{max_foam},\"spread_al_k\":{spread_al},\"spread_foam_k\":{spread_foam},\"margin_al_k\":{margin_al},\"margin_foam_k\":{margin_foam}}}"
+    );
+}
+
+/// Falsifier: HOSTILE REFUSAL TWINS. The same project (a) without any
+/// card pack refuses at material-resolve with the binding layer's own code,
+/// (b) with the geometry's source hash tampered refuses at import-verify,
+/// (c) with a card whose validity domain does not cover the envelope refuses
+/// at material-resolve. Each drill asserts the CODE and the STAGE, because
+/// an exit status alone cannot tell "refused at the right stage" from
+/// "refused before the drill's target".
+#[test]
+fn ja_003_hostile_refusal_twins_refuse_at_the_named_stage_with_the_named_code() {
+    let bytes = tetra_stl();
+    let spec = conjugate_fixture_project(7, &bytes, "convection.gnielinski");
+    let decoded = decode(&spec);
+
+    // (a) no card pack at all.
+    let ledger = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&ledger, &spec, bytes.clone());
+    let empty = CardPackSet::admit(Vec::new()).expect("an empty set admits");
+    let gate = CancelGate::new_clock_free();
+    let refusal = run_solve(
+        &ledger,
+        &gate,
+        &mut benign_clock(),
+        &decoded,
+        &empty,
+        &mut Vec::new(),
+    )
+    .expect_err("no cards refuses");
+    assert_eq!(refusal.code, "project-material-card-unknown");
+    assert_eq!(refusal.stage.as_deref(), Some("material-resolve"));
+
+    // (b) tampered source hash: the project names a geometry the ledger
+    // never imported.
+    let mut tampered = spec.clone();
+    tampered.geometry.as_mut().expect("geometry")[0].source_hash ^= 0x1;
+    let decoded_tampered = decode(&tampered);
+    let ledger = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&ledger, &spec, bytes.clone());
+    let refusal = run_solve(
+        &ledger,
+        &gate,
+        &mut benign_clock(),
+        &decoded_tampered,
+        &fixture_cards(),
+        &mut Vec::new(),
+    )
+    .expect_err("a tampered geometry hash refuses");
+    assert_eq!(
+        refusal.stage.as_deref(),
+        Some("import-verify"),
+        "{}",
+        refusal.code
+    );
+    assert!(
+        refusal.code.starts_with("cli-solve-import"),
+        "{}",
+        refusal.code
+    );
+
+    // (c) a card whose domain stops short of the envelope, bound by name so
+    // the refusal is the DOMAIN gate and not the unknown-card gate.
+    let narrow = CardPackSet::admit(vec![raw_pack(
+        CardPackKind::Material,
+        "fixtures/narrow.fsmcdpk",
+        material_pack_bytes_with_domain("AA6061", "solve-fixture-narrow", 250.0, 300.0),
+    )])
+    .expect("the narrow pack admits");
+    let mut spec_narrow = spec.clone();
+    rebind_to(&mut spec_narrow, &narrow);
+    let decoded_narrow = decode(&spec_narrow);
+    let ledger = Ledger::open(":memory:").expect("ledger");
+    import_fixture(&ledger, &spec_narrow, bytes);
+    let refusal = run_solve(
+        &ledger,
+        &gate,
+        &mut benign_clock(),
+        &decoded_narrow,
+        &narrow,
+        &mut Vec::new(),
+    )
+    .expect_err("an uncovered domain refuses");
+    assert_eq!(refusal.code, "project-binding-domain-uncovered");
+    assert_eq!(refusal.stage.as_deref(), Some("material-resolve"));
+    println!(
+        "{{\"falsifier\":\"hostile-refusal-twins\",\"drills\":[\"no-pack:material-resolve\",\"tampered-hash:import-verify\",\"narrow-domain:material-resolve\"]}}"
+    );
+}
+
+/// Falsifier: REPLAY. The same inputs on a fresh ledger reproduce the run
+/// identity, every stage receipt, and the retained temperature field byte
+/// for byte; a completed run has nothing to resume and re-attests unchanged.
+#[test]
+fn ja_004_replay_reproduces_every_receipt_and_the_field_bitwise() {
+    let bytes = tetra_stl();
+    let spec = conjugate_fixture_project(7, &bytes, "convection.gnielinski");
+    let decoded = decode(&spec);
+    let mut runs = Vec::new();
+    for _ in 0..2 {
+        let ledger = Ledger::open(":memory:").expect("ledger");
+        import_fixture(&ledger, &spec, bytes.clone());
+        let (run, qoi, conduction, solution) =
+            run_conjugate_to_completion(&ledger, &decoded, &fixture_cards());
+        let receipts = stage_receipt_hashes(&ledger, &run);
+        // Resume of a complete run: refuses by name, receipts unchanged.
+        let gate = CancelGate::new_clock_free();
+        let resumed = resume_solve(&ledger, &gate, &mut benign_clock(), &run, &mut Vec::new())
+            .expect_err("nothing to resume");
+        assert_eq!(resumed.code, "cli-solve-resume-complete");
+        assert_eq!(stage_receipt_hashes(&ledger, &run), receipts);
+        runs.push((run, receipts, qoi, conduction, solution));
+    }
+    let (a, b) = (&runs[0], &runs[1]);
+    assert_eq!(a.0, b.0, "run identity replays");
+    assert_eq!(a.1, b.1, "every stage receipt hash replays");
+    assert_eq!(a.2, b.2, "the QoI receipt replays byte for byte");
+    assert_eq!(a.3, b.3, "the conduction receipt replays byte for byte");
+    assert_eq!(
+        a.4, b.4,
+        "the retained temperature field replays byte for byte"
+    );
+    println!(
+        "{{\"falsifier\":\"replay\",\"run\":\"{}\",\"receipts\":{}}}",
+        a.0,
+        a.1.len()
+    );
 }
