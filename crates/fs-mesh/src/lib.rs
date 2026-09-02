@@ -36,6 +36,7 @@ mod recovery;
 mod refine;
 mod remesh;
 mod rounded_cylinder;
+mod uniform;
 mod volumetric;
 
 pub use adaptivity::{

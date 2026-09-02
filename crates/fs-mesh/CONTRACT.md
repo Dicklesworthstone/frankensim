@@ -243,6 +243,28 @@ half-edge round-trips, closed-manifold audits).
     representable value outside either interval refuses with stable field,
     rejected bits, and exact inclusive bound bits. Geometry translation or
     rescaling cannot change that scalar admission result (G0/G3).
+16. `LabeledTetComplex::refine_uniform` is the h-ladder CONTROL, not a
+    quality improver: one uniform 1→8 split (Bey/Zhang red refinement) of
+    every retained tet by its edge midpoints — four corner copies in the
+    parent's vertex order and four interior tets on the central
+    octahedron's SHORTEST diagonal (canonical tie-break), each interior
+    child given the parent's exact orientation sign by the predicate.
+    Conforming by construction (a shared face splits identically on both
+    sides); recovered walls (source faces) split four ways in their own
+    plane with the parent facet inherited, so boundary classification by
+    parent facet survives every rung; region labels replicate; per-region
+    volume is preserved to the rounding of the midpoints; recovery and
+    flat-repair evidence are carried unchanged as the base's provenance.
+    Liu–Joe (1996) bounds every descendant's quality below by a constant
+    times the parent's. MEASURED 2026-09-02 (`tests/uniform_refine.rs`,
+    `src/uniform.rs`): two-fin comb 425 → 3,400 → 27,200 tets, smallest
+    dihedral 6.86° → 4.738° → 4.738° (the interior class appears once and
+    then persists; a regular tet and a skewed tet show the same over five
+    generations), max radius-edge 45.0 unchanged (scale-invariant, so no
+    uniform rung can improve it — that is constrained refinement's job).
+    CONSEQUENCE for consumers: a dihedral floor applied to refined rungs
+    must allow the first-generation class drop (here ×0.69); a 5° floor on
+    the base would pass and then refuse rung 1 of this very comb.
 
 ## Error model
 

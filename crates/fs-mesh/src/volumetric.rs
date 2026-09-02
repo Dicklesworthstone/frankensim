@@ -958,6 +958,32 @@ impl LabeledTetComplex {
         false
     }
 
+    /// One uniform 1→8 refinement (the h-ladder control): every tet split
+    /// by its edge midpoints into four corner copies and four interior tets
+    /// on the octahedron's shortest diagonal, walls (source faces) split
+    /// four ways in place with the parent facet inherited, region labels
+    /// replicated, volume preserved. Recovery and flat-repair evidence are
+    /// carried unchanged: they describe the base this rung derives from.
+    /// See `crate::uniform` for the quality argument (Liu–Joe 1996).
+    #[must_use]
+    pub fn refine_uniform(&self) -> Self {
+        let split = crate::uniform::split_uniform(&self.positions, &self.tets, &self.source_faces);
+        let region_of_tet = self
+            .region_of_tet
+            .iter()
+            .flat_map(|&region| std::iter::repeat_n(region, 8))
+            .collect();
+        Self {
+            positions: split.positions,
+            tets: split.tets,
+            region_of_tet,
+            source_faces: split.source_faces,
+            length_unit: self.length_unit.clone(),
+            recovery: self.recovery,
+            flat_repair: self.flat_repair,
+        }
+    }
+
     /// Deterministic tet-quality census (see [`QualityCensus`]).
     #[must_use]
     pub fn quality(&self) -> QualityCensus {

@@ -909,6 +909,7 @@
   "crates/fs-mesh/tests/conformance.rs",
   "crates/fs-mesh/tests/hexdom.rs",
   "crates/fs-mesh/tests/perf_lane.rs",
+  "crates/fs-mesh/tests/uniform_refine.rs",
   "crates/fs-mesh/tests/volumetric.rs",
   "crates/fs-metamat-e2e/tests/metamat.rs",
   "crates/fs-mms/tests/mms.rs",
