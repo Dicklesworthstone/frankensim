@@ -1,17 +1,29 @@
 import SwiftUI
 import UIKit
 
+enum ForgeAppearance: String {
+    static let storageKey = "frankensim.appearance"
+    case dark
+    case light
+    var colorScheme: ColorScheme { self == .dark ? .dark : .light }
+}
+
 enum ForgeTheme {
-    static let background = Color(red: 0.012, green: 0.024, blue: 0.032)
-    static let panel = Color(red: 0.025, green: 0.050, blue: 0.062)
-    static let raised = Color(red: 0.038, green: 0.073, blue: 0.086)
-    static let text = Color(red: 0.93, green: 0.96, blue: 0.98)
-    static let secondary = Color(red: 0.62, green: 0.70, blue: 0.76)
-    static let emerald = Color(red: 0.25, green: 0.90, blue: 0.65)
-    static let cyan = Color(red: 0.22, green: 0.80, blue: 0.96)
-    static let violet = Color(red: 0.64, green: 0.46, blue: 0.98)
-    static let amber = Color(red: 0.98, green: 0.69, blue: 0.25)
-    static let coral = Color(red: 0.97, green: 0.42, blue: 0.48)
+    static let background = adaptive(dark: UIColor(red: 0.012, green: 0.024, blue: 0.032, alpha: 1), light: UIColor(red: 0.93, green: 0.96, blue: 0.972, alpha: 1))
+    static let panel = adaptive(dark: UIColor(red: 0.025, green: 0.050, blue: 0.062, alpha: 1), light: UIColor(red: 0.985, green: 0.995, blue: 1, alpha: 1))
+    static let raised = adaptive(dark: UIColor(red: 0.038, green: 0.073, blue: 0.086, alpha: 1), light: UIColor(red: 0.84, green: 0.91, blue: 0.935, alpha: 1))
+    static let stroke = adaptive(dark: UIColor(white: 1, alpha: 0.06), light: UIColor(red: 0.03, green: 0.22, blue: 0.29, alpha: 0.16))
+    static let text = adaptive(dark: UIColor(red: 0.93, green: 0.96, blue: 0.98, alpha: 1), light: UIColor(red: 0.035, green: 0.09, blue: 0.125, alpha: 1))
+    static let secondary = adaptive(dark: UIColor(red: 0.62, green: 0.70, blue: 0.76, alpha: 1), light: UIColor(red: 0.27, green: 0.35, blue: 0.39, alpha: 1))
+    static let emerald = adaptive(dark: UIColor(red: 0.25, green: 0.90, blue: 0.65, alpha: 1), light: UIColor(red: 0.015, green: 0.415, blue: 0.255, alpha: 1))
+    static let cyan = adaptive(dark: UIColor(red: 0.22, green: 0.80, blue: 0.96, alpha: 1), light: UIColor(red: 0.015, green: 0.39, blue: 0.545, alpha: 1))
+    static let violet = adaptive(dark: UIColor(red: 0.64, green: 0.46, blue: 0.98, alpha: 1), light: UIColor(red: 0.39, green: 0.22, blue: 0.68, alpha: 1))
+    static let amber = adaptive(dark: UIColor(red: 0.98, green: 0.69, blue: 0.25, alpha: 1), light: UIColor(red: 0.66, green: 0.35, blue: 0.01, alpha: 1))
+    static let coral = adaptive(dark: UIColor(red: 0.97, green: 0.42, blue: 0.48, alpha: 1), light: UIColor(red: 0.70, green: 0.12, blue: 0.18, alpha: 1))
+
+    private static func adaptive(dark: UIColor, light: UIColor) -> Color {
+        Color(uiColor: UIColor { traits in traits.userInterfaceStyle == .dark ? dark : light })
+    }
 
     static func accent(_ family: AccentFamily) -> Color {
         switch family {
@@ -29,6 +41,25 @@ enum ForgeTheme {
 #else
         UIFontMetrics(forTextStyle: .body).scaledValue(for: base)
 #endif
+    }
+}
+
+struct ForgeAppearanceButton: View {
+    @Binding var selection: String
+    private var appearance: ForgeAppearance { ForgeAppearance(rawValue: selection) ?? .dark }
+
+    var body: some View {
+        Button {
+            selection = appearance == .dark ? ForgeAppearance.light.rawValue : ForgeAppearance.dark.rawValue
+        } label: {
+            Image(systemName: appearance == .dark ? "sun.max.fill" : "moon.stars.fill")
+                .frame(width: 44, height: 44)
+        }
+        .foregroundStyle(appearance == .dark ? ForgeTheme.amber : ForgeTheme.cyan)
+        .accessibilityIdentifier("appearance-toggle")
+        .accessibilityLabel(appearance == .dark ? "Switch to light mode" : "Switch to dark mode")
+        .accessibilityValue(appearance == .dark ? "Dark mode" : "Light mode")
+        .accessibilityHint("Remembers this choice for future launches")
     }
 }
 
@@ -90,7 +121,7 @@ struct ForgePanel<Content: View>: View {
                 RoundedRectangle(cornerRadius: 22, style: .continuous)
                     .stroke(
                         LinearGradient(
-                            colors: [accent.opacity(0.42), Color.white.opacity(0.06), ForgeTheme.violet.opacity(0.18)],
+                            colors: [accent.opacity(0.42), ForgeTheme.stroke, ForgeTheme.violet.opacity(0.18)],
                             startPoint: .topLeading,
                             endPoint: .bottomTrailing
                         ),

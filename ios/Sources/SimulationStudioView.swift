@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct SimulationStudioView: View {
+    @AppStorage(ForgeAppearance.storageKey) private var appearance = ForgeAppearance.dark.rawValue
     @StateObject private var model = SimulationStudioModel()
     @State private var search = ""
     @State private var showsAtlas = false
@@ -32,7 +33,7 @@ struct SimulationStudioView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(ForgeTheme.background.ignoresSafeArea())
-        .preferredColorScheme(.dark)
+        .preferredColorScheme((ForgeAppearance(rawValue: appearance) ?? .dark).colorScheme)
         .sheet(isPresented: $showsAtlas) {
             EpistemicAtlasView()
                 .presentationDetents([.large])
@@ -47,7 +48,6 @@ struct SimulationStudioView: View {
                         }
                     }
             }
-            .preferredColorScheme(.dark)
             .presentationDetents([.large])
         }
         .onAppear {
@@ -171,8 +171,11 @@ struct SimulationStudioView: View {
                 .frame(maxWidth: 170)
         }
         ToolbarItem(placement: .primaryAction) {
-            Button { showsAtlas = true } label: { Image(systemName: "info.circle") }
-                .accessibilityLabel("Theory atlas")
+            HStack(spacing: 2) {
+                ForgeAppearanceButton(selection: $appearance)
+                Button { showsAtlas = true } label: { Image(systemName: "info.circle") }
+                    .accessibilityLabel("Theory atlas")
+            }
         }
     }
 
@@ -304,7 +307,7 @@ struct SimulationStudioView: View {
                     panelLabel("RUN RECEIPT")
                     HStack(spacing: 16) {
                         Metric(value: result.elapsedText, label: "wall time")
-                        Divider().overlay(Color.white.opacity(0.08))
+                        Divider().overlay(ForgeTheme.stroke)
                         Metric(value: result.payloadSummary, label: "native payload")
                     }
                     Text("seed 0x\(String(result.seed, radix: 16, uppercase: true)) · schema 1 · entirely on this device")
@@ -329,7 +332,7 @@ struct SimulationStudioView: View {
                     .font(.system(size: ForgeTheme.size(14), design: .rounded))
                     .foregroundStyle(ForgeTheme.text)
                     .fixedSize(horizontal: false, vertical: true)
-                Divider().overlay(Color.white.opacity(0.08))
+                Divider().overlay(ForgeTheme.stroke)
                 Label(model.selection.noClaim, systemImage: "hand.raised")
                     .font(.system(size: ForgeTheme.size(12.5), design: .rounded))
                     .foregroundStyle(ForgeTheme.secondary)
@@ -470,7 +473,6 @@ struct EpistemicAtlasView: View {
                 ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
             }
         }
-        .preferredColorScheme(.dark)
     }
 
     private func atlasCard(_ title: String, _ formula: String, _ body: String, _ accent: AccentFamily) -> some View {
