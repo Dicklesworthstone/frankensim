@@ -738,7 +738,8 @@ fn explain_tiling(
     };
     let mut out = String::new();
     let mut tiles = 0usize;
-    let mut edge_use: BTreeMap<[u32; 2], (u32, u8)> = BTreeMap::new();
+    let mut edge_use: std::collections::BTreeMap<[u32; 2], (u32, u8)> =
+        std::collections::BTreeMap::new();
     for face in faces {
         if !(loose(face[0]) && loose(face[1]) && loose(face[2])) {
             continue;
