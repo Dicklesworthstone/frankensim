@@ -143,7 +143,7 @@ const IMPORT_VERIFY_NO_CLAIM: &str =
     "does not prove the imported geometry is watertight, meshable, or physically meaningful";
 const MATERIAL_RESOLVE_AUTHORITY: &str = "declared-binding-resolution-against-admitted-card-packs";
 const FLOW_NETWORK_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-flow-network-receipt.v1";
-const CONDUCTION_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-conduction-receipt.v3";
+const CONDUCTION_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-conduction-receipt.v4";
 const CONDUCTION_SOLUTION_SCHEMA: &str = "frankensim.cli.solve-conduction-solution.v1";
 const QOI_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-qoi-candidate.v1";
 
@@ -172,7 +172,9 @@ const CONDUCTION_NO_CLAIM: &str = "the stage solves the declared finite mesh wit
     when a declared airflow-convection law is present it closes ONE branch's solid/air fixed \
     point over card-derived Robin rows with frozen dry-air properties and a 1-D stream-wise air \
     chain, disclosing rather than propagating the flow bracket, and claims no experimental \
-    validation and no maturity level for that exchange";
+    validation and no maturity level for that exchange; mesh quality (dihedral, radius-edge, \
+    flat and sliver tets) and the recovery budgets that produced the mesh are DISCLOSED in this \
+    receipt, not enforced";
 const MATERIAL_RESOLVE_NO_CLAIM: &str = "the stage proves that every declared region and \
     interface resolves to an admitted card whose selected claim covers the declared temperature \
     range, and retains that claim's replayable usage receipt; it does not authenticate the pack \
@@ -735,6 +737,25 @@ fn declaration_gap(
         | SolveStage::MaterialResolve
         | SolveStage::FlowNetwork
         | SolveStage::Report => None,
+    }
+}
+
+/// Kernel bytes charged per facet Steiner point when the recovery budget is
+/// derived from the declared memory budget: a point (24 B), about six
+/// incident tets (16 B of indices plus 16 B of adjacency each) and the
+/// kernel's bookkeeping, rounded up an order of magnitude so the derived
+/// cap stays conservative. 64 MiB therefore admits 32 768 facet Steiner
+/// points; the fixture default (4 000) is the floor whatever the budget.
+const RECOVERY_BYTES_PER_STEINER: u64 = 2048;
+
+fn recovery_budget(memory_bytes: u64) -> fs_mesh::RecoveryOptions {
+    let floor = fs_mesh::RecoveryOptions::default();
+    let derived =
+        u32::try_from((memory_bytes / RECOVERY_BYTES_PER_STEINER).min(u64::from(u32::MAX)))
+            .unwrap_or(u32::MAX);
+    fs_mesh::RecoveryOptions {
+        max_depth: floor.max_depth,
+        max_steiner: floor.max_steiner.max(derived),
     }
 }
 
@@ -4570,9 +4591,14 @@ fn conduction_receipt(
         let max_tets = usize::try_from(memory_bytes / 256)
             .unwrap_or(usize::MAX)
             .clamp(1, 4_000_000);
+        // The recovery budget follows the same declared memory budget, with
+        // the fixture-proven default as a FLOOR: a small declared budget
+        // cannot starve recovery below today's behaviour, and a large one
+        // lets real bodies (Steiner need grows with facet area over feature
+        // size squared) recover instead of refusing at the fixture cap.
         let policy = fs_mesh::VolumetricPolicy {
             length_unit: "m".to_string(),
-            recovery: fs_mesh::RecoveryOptions::default(),
+            recovery: recovery_budget(memory_bytes),
             max_vertices: positions.len(),
             max_tets,
         };
@@ -4904,10 +4930,15 @@ fn conduction_receipt(
         fs_mesh::VolumeMethod::ExactDyadic => "exact-dyadic",
         fs_mesh::VolumeMethod::MeasuredF64 => "measured-f64",
     };
+    let recovery_evidence = audited.labeled().recovery();
+    let memory_bytes = spec
+        .budgets
+        .as_ref()
+        .map_or(0, |budgets| budgets.memory_bytes);
     let receipt = format!(
         "{{\"schema\":{},\"run\":{},\"stage\":\"conduction\",\
          \"mesh\":{{\"vertices\":{},\"elements\":{},\"boundary_faces\":{},\
-         \"regions\":{},\"length_unit\":\"m\",\"volume_audit\":{}}},\
+         \"regions\":{},\"length_unit\":\"m\",\"volume_audit\":{},\"quality\":{}}},\
          \"material_assignment\":\"{:016x}\",\"solution_artifact\":{},\
          \"temperature\":{{\"unit\":\"K\",\"min\":{},\"max\":{}}},\
          \"interfaces\":{{\"pair_count\":{},\"evidence_artifact\":{},\"fluxes\":[{}]}},\
@@ -4915,6 +4946,8 @@ fn conduction_receipt(
          \"residual_threshold\":{},\"free_dofs\":{}}},\
          \"energy\":{{\"source_w\":{},\"neumann_out_w\":{},\"robin_out_w\":{},\
          \"dirichlet_in_w\":{},\"closure_w\":{},\"relative_closure\":{}}},\
+         \"recovery\":{{\"memory_bytes\":{},\"max_depth\":{},\"max_steiner\":{},\
+         \"segments\":{},\"facets\":{}}},\
          \"conjugate\":{},\"authority\":{},\"no_claim\":{}}}",
         json_string(CONDUCTION_RECEIPT_SCHEMA),
         json_string(&run.to_hex()),
@@ -4923,6 +4956,7 @@ fn conduction_receipt(
         mesh.boundary().len(),
         audited.witness().per_region_auditor.len(),
         json_string(method),
+        audited.labeled().quality().to_json(),
         report
             .element_material_identity
             .expect("heterogeneous assignment"),
@@ -4943,6 +4977,11 @@ fn conduction_receipt(
         finite("energy.dirichlet_in_w", report.energy.dirichlet_in_w)?,
         finite("energy.closure_w", report.energy.closure_w)?,
         finite("energy.relative_closure", report.energy.relative_closure())?,
+        memory_bytes,
+        recovery_evidence.options.max_depth,
+        recovery_evidence.options.max_steiner,
+        recovery_evidence.segments.to_json(),
+        recovery_evidence.facets.to_json(),
         conjugate_fragment.as_deref().unwrap_or("null"),
         json_string(CONDUCTION_AUTHORITY),
         json_string(CONDUCTION_NO_CLAIM),

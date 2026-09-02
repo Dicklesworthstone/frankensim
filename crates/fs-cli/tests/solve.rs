@@ -3365,7 +3365,21 @@ fn g1_conduction_stage_executes_and_retains_field_and_balance_evidence() {
     let receipt =
         String::from_utf8(artifact_bytes(&ledger, &receipts[4])).expect("receipt is utf-8");
     assert_balanced_json(&receipt);
-    assert!(receipt.contains("frankensim.cli.solve-conduction-receipt.v3"));
+    assert!(receipt.contains("frankensim.cli.solve-conduction-receipt.v4"));
+    // v4 discloses mesh quality and the recovery budgets that produced the
+    // mesh (bridge plan B3): disclosure, not enforcement.
+    assert!(
+        receipt.contains("\"quality\":{\"tets\":"),
+        "conduction receipt discloses the quality census: {receipt}"
+    );
+    assert!(
+        receipt.contains("\"recovery\":{\"memory_bytes\":"),
+        "conduction receipt names the recovery budget: {receipt}"
+    );
+    assert!(
+        receipt.contains("\"max_steiner\":4000"),
+        "the fixture budget keeps the default recovery floor: {receipt}"
+    );
     assert!(receipt.contains("\"interfaces\":{\"pair_count\":0"));
     assert!(receipt.contains("\"elements\":1"));
     assert_eq!(receipt_number_field(&receipt, "source_w"), 5.0);
@@ -3627,7 +3641,7 @@ fn g0_conduction_stage_closes_the_conjugate_airflow_exchange_from_the_flow_netwo
     let receipt =
         String::from_utf8(artifact_bytes(&ledger, &receipts[4])).expect("receipt is utf-8");
     assert_balanced_json(&receipt);
-    assert!(receipt.contains("frankensim.cli.solve-conduction-receipt.v3"));
+    assert!(receipt.contains("frankensim.cli.solve-conduction-receipt.v4"));
     // The exchange is in the receipt: the branch, the card, the derived
     // coefficient, the marched air, and the two independent watt gates.
     assert!(receipt.contains("\"conjugate\":{\"branch\":\"air\",\"path\":\"vent:air\""));
@@ -3753,7 +3767,7 @@ fn g0_conduction_stage_executes_declared_card_backed_contact() {
     let receipt =
         String::from_utf8(artifact_bytes(&ledger, &receipts[4])).expect("receipt is utf-8");
     assert_balanced_json(&receipt);
-    assert!(receipt.contains("frankensim.cli.solve-conduction-receipt.v3"));
+    assert!(receipt.contains("frankensim.cli.solve-conduction-receipt.v4"));
     // The production volumetricizer's facet recovery inserts a Steiner
     // point at the joint centroid and re-triangulates the shared unit
     // face into a deterministic four-triangle fan, so the declared

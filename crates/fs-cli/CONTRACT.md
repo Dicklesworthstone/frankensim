@@ -219,6 +219,13 @@ Projects without that optional declaration refuse with
 (exit 5) is reserved for a stage with no producer at all (none today); such
 refusals name their producer bead and are retained as
 terminal error operations.
+The conduction receipt (schema v4) discloses the mesh's quality census (tets,
+vertices, min dihedral, max radius-edge, sliver and flat-tet counts) and the
+recovery budgets and statistics that produced the mesh (memory budget, Steiner
+cap and depth, segment/facet recovery rows). Disclosure, not enforcement: the
+quality floor is bridge plan B2. The Steiner cap derives from the declared
+memory budget with the fixture default as a floor, so identical inputs at the
+fixture budget mesh identically.
 
 Card packs reach the run through the repeatable `--materials <pack>` and
 `--interfaces <pack>` flags. Admission decodes each pack through its own

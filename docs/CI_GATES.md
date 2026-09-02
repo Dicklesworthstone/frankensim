@@ -376,6 +376,27 @@ cannot become the terminal record merely because `set -e` fired. SIGKILL,
 host/process loss, or a storage failure can still prevent the finalizer from
 writing, so a missing or malformed seal is always a failed proof, never a skip.
 
+### Native-binary example lanes (human-runnable; not in `check-all`)
+
+Three shell lanes drive the REAL `frankensim` binary against the tracked
+worked examples. None is run by an xtask gate (the rch offload regime means no
+native binary is guaranteed at gate time); the always-on gate for the same
+facts is the fs-cli G0/G1 battery (`crates/fs-cli/tests/cli.rs`, in
+particular `g1_the_heatsink_fan_example_runs_every_stage_through_the_real_cli_verb`
+and `g1_run_completes_seven_stages_and_exports_report_and_package_for_the_reference_project`),
+which runs wherever `cargo test -p fs-cli --test cli` runs. Expected counts
+are measured values with the commit they were measured at; a lane that
+returns a different count is a regression owned by the bead named here.
+
+| Lane | What it proves | Expected (commit) | Owner |
+|---|---|---|---|
+| `scripts/ci/examples_freshness_e2e.sh --binary PATH` | heated-plate, cooling-reference and refusal-loop validate as documented; the finned heatsink imports, solves all seven stages, `report`/`package` export the retained bytes, an unknown run refuses with `cli-solve-unknown-run` | 22 checks, 0 failures (974b1cc6) | q61wp.61 (registration), q61wp.8 lineage |
+| `scripts/ci/solve_stage_producers_e2e.sh --profile full --binary PATH` | every solve stage executes on the cooling reference; refusal drills; determinism of the run identity; resume of a completed run refuses; cross-ledger byte-identical report twins; `--retain-receipt` mints the spine e2e receipt with the `stages` rows check-maturity reads | 65 checks, 0 failures, 7/7 stages (974b1cc6) | q61wp.13 (receipt), NobleLion lane |
+| `scripts/ci/e2e_extreal_vertical_profile.sh --run` | per-stage wall-clock of validate/import/solve/report/package | stage rows only; the synthesized kernel-attribution rows are literal fractions of the solve time and are NOT measurements until q61wp.60 lands | q61wp.60 |
+
+Under the RCH offload regime set `FRANKENSIM_BIN` (or `--binary`) to a native
+build; the lanes refuse without one rather than pretending.
+
 ## Constellation
 
 The workspace path-depends on sibling repos. The canonical fresh-checkout
