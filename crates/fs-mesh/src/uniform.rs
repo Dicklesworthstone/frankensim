@@ -29,8 +29,6 @@ pub(crate) struct UniformSplit {
     pub(crate) positions: Vec<[f64; 3]>,
     pub(crate) tets: Vec<[u32; 4]>,
     pub(crate) source_faces: Vec<([u32; 3], u32)>,
-    /// Edge midpoints appended after the input vertices.
-    pub(crate) midpoints_added: usize,
 }
 
 struct Midpoints {
@@ -83,7 +81,6 @@ pub(crate) fn split_uniform(
     tets: &[[u32; 4]],
     source_faces: &[([u32; 3], u32)],
 ) -> UniformSplit {
-    let input_vertices = positions.len();
     let mut mids = Midpoints {
         by_edge: BTreeMap::new(),
         positions: positions.to_vec(),
@@ -140,12 +137,10 @@ pub(crate) fn split_uniform(
         faces.push(([ca, bc, c], parent));
         faces.push(([ab, bc, ca], parent));
     }
-    let midpoints_added = mids.positions.len() - input_vertices;
     UniformSplit {
         positions: mids.positions,
         tets: out,
         source_faces: faces,
-        midpoints_added,
     }
 }
 
@@ -286,7 +281,7 @@ mod tests {
         let split = split_uniform(&start, &[[0, 1, 2, 3]], &faces);
         assert_eq!(split.tets.len(), 8);
         assert_eq!(split.source_faces.len(), 8);
-        assert_eq!(split.midpoints_added, 6);
+        assert_eq!(split.positions.len(), start.len() + 6, "six edge midpoints");
         let mut count = std::collections::BTreeMap::new();
         for t in &split.tets {
             for f in [
