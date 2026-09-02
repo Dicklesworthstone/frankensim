@@ -397,6 +397,48 @@ returns a different count is a regression owned by the bead named here.
 Under the RCH offload regime set `FRANKENSIM_BIN` (or `--binary`) to a native
 build; the lanes refuse without one rather than pretending.
 
+### Local build hygiene for concurrent agents (measured 2026-09-01/02)
+
+Facts an agent needs before its first local build on the shared Mac; each
+number is from a real run on that box (41 sessions, load average 160–860):
+
+- **The shell exports a global `CARGO_TARGET_DIR`** (`/Volumes/USB_NVME/cargo-target`)
+  shared by every repository and agent. One lock serialises everyone; waits of
+  10+ minutes behind another agent's build were observed twice in one evening.
+  For local verification use a private target: `CARGO_TARGET_DIR=/Volumes/USB_NVME/rch-targets/<agent>-<crate> cargo ltest -p <crate> ...`.
+  Cost: a cold private target rebuilt fs-cli's cone in ~20 minutes (asupersync
+  alone 19 minutes under load); afterwards fs-cli rebuilt in 4 m 29 s after a
+  fs-mesh edit and 1 m 08 s after a solve.rs edit; a native `xtask` built in
+  7.5 s.
+- **`cargo build|check|test|clippy` are hooked to the rch offload** (the hook
+  fires even through an absolute cargo path or `sh -c`). The local aliases
+  `cargo lcheck`, `cargo ltest`, `cargo lbuild`, `cargo lclippy` run the real
+  cargo locally. Root-workspace offload is refused on this host (`hz3` alias);
+  crate-scoped offload works. An rch client that dies with exit 144 was killed
+  by the local supervisor; the remote job survives — check the worker before
+  rerunning.
+- **`cargo test` rebuilds the package's binaries too.** A `frankensim` binary in
+  a private target changes under you when an integration test run finishes;
+  record the binary's mtime next to any lane receipt (the freshness and
+  vertical-profile lanes print it).
+- **The tracked `target/debug/xtask` on the Mac may be a Linux ELF** (built by
+  a yto/rch job; `exec format error`). Build a native one:
+  `CARGO_TARGET_DIR=<private> cargo lbuild -p xtask`, then run
+  `<private>/debug/xtask <subcommand>` from the repository root.
+- **macOS first-exec wedge:** a freshly linked binary can hang at `_dyld_start`
+  under `syspolicyd` on first execution; a second invocation runs. Diagnose
+  with `sample <pid>`; do not "fix" it by rebuilding.
+- **Generators read the git INDEX.** Stage new tracked files before
+  `generate-source-manifest` / `generate-program-metrics`, and add every new
+  tracked file to `doc-facts-inventory.json` (hand-maintained; `check-docs`
+  refuses an uninventoried file and prints the exact facts block to paste).
+- **Never commit `Cargo.lock` from a local build**: the sibling constellation
+  is off-pin on this host and a local resolve records drifted sibling versions
+  (memory of the 2026-09-01 audit: committed lock at asupersync 0.4.10 vs pin
+  0.4.9). Commit by pathspec (`git commit -m ... -- <paths>`); a sweeper agent
+  commits the whole tree every few minutes, so verify before you edit shared
+  files, not after.
+
 ## Constellation
 
 The workspace path-depends on sibling repos. The canonical fresh-checkout
