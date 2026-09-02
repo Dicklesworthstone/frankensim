@@ -93,11 +93,11 @@ struct PCMBlock: Sendable {
     }
 }
 
-/// A finite, one-second reed demonstration. Four queued 10 ms blocks give the
-/// non-real-time Rust producer 40 ms of refill slack without unbounded audio
-/// buffering or a device-dependent scheduling policy.
+/// A finite, one-second reed demonstration. Sixteen queued 10 ms blocks give
+/// the non-real-time Rust producer enough refill slack for transient main-actor
+/// and simulator scheduling stalls while keeping the queue strictly bounded.
 struct PCMStreamPlan: Sendable, Equatable {
-    static let reedDemo = PCMStreamPlan(totalBlocks: 100, maximumQueuedBlocks: 4)
+    static let reedDemo = PCMStreamPlan(totalBlocks: 100, maximumQueuedBlocks: 16)
 
     let totalBlocks: Int
     let maximumQueuedBlocks: Int
@@ -268,6 +268,12 @@ final class PCMPlayback {
         self.format = format
         engine.attach(player)
         engine.connect(player, to: engine.mainMixerNode, format: format)
+#if targetEnvironment(simulator)
+        // Simulator devices keep their own volume state and can bypass the
+        // host's expected listening level. Keep automated visual/runtime QA at
+        // a deliberately near-silent -40 dB gain without changing device audio.
+        player.volume = 0.01
+#endif
     }
 
     func begin(

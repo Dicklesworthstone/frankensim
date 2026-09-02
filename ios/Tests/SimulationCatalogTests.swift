@@ -49,21 +49,27 @@ final class SimulationCatalogTests: XCTestCase {
             XCTAssertEqual(error.localizedDescription, "Unsupported PCM format: 2 channel(s) at 48000 Hz.")
         }
         XCTAssertThrowsError(try PCMBlock(result: pcmResult(values: [Double.nan]))) { error in
-            XCTAssertEqual(error.localizedDescription, "Invalid PCM payload: samples must be finite normalized PCM")
+            XCTAssertEqual(error.localizedDescription, "Invalid PCM payload: samples must be finite normalized PCM.")
         }
     }
 
-    func testStartupPrefillCallbackDefersPlaybackUntilFourBuffersAreQueued() {
+    func testStartupPrefillCallbackDefersPlaybackUntilBoundedLeadIsQueued() {
         var schedule = PCMStreamSchedule(plan: .reedDemo)
         for _ in 0..<(PCMStreamPlan.reedDemo.maximumQueuedBlocks - 1) {
             XCTAssertTrue(schedule.reserveNextBlock())
             XCTAssertFalse(schedule.isReadyToStartPlayback)
         }
-        XCTAssertEqual(schedule.scheduledBlocks, 3)
-        XCTAssertEqual(schedule.queuedBlocks, 3)
+        XCTAssertEqual(
+            schedule.scheduledBlocks,
+            PCMStreamPlan.reedDemo.maximumQueuedBlocks - 1
+        )
+        XCTAssertEqual(
+            schedule.queuedBlocks,
+            PCMStreamPlan.reedDemo.maximumQueuedBlocks - 1
+        )
 
         XCTAssertTrue(schedule.reserveNextBlock())
-        XCTAssertEqual(schedule.queuedBlocks, 4)
+        XCTAssertEqual(schedule.queuedBlocks, PCMStreamPlan.reedDemo.maximumQueuedBlocks)
         XCTAssertTrue(schedule.isReadyToStartPlayback)
         schedule.markPlaybackStarted()
         XCTAssertTrue(schedule.playbackStarted)
@@ -93,9 +99,9 @@ final class SimulationCatalogTests: XCTestCase {
         }
         schedule.markPlaybackStarted()
         schedule.requestStopAfterDrain()
-        XCTAssertEqual(schedule.didDrainBlock(), .awaitingRefill)
-        XCTAssertEqual(schedule.didDrainBlock(), .awaitingRefill)
-        XCTAssertEqual(schedule.didDrainBlock(), .awaitingRefill)
+        for _ in 1..<PCMStreamPlan.reedDemo.maximumQueuedBlocks {
+            XCTAssertEqual(schedule.didDrainBlock(), .awaitingRefill)
+        }
         XCTAssertEqual(schedule.didDrainBlock(), .stopped)
         XCTAssertFalse(schedule.reserveNextBlock())
     }
