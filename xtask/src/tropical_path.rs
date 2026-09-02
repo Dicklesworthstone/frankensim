@@ -333,7 +333,7 @@ fn render_f64(value: f64) -> String {
 fn render(projection: &Projection) -> String {
     let mut out = String::new();
     out.push_str("{\n");
-    writeln!(out, "  \"schema\": \"{SCHEMA}\"").ok();
+    writeln!(out, "  \"schema\": \"{SCHEMA}\",").ok();
     out.push_str("  \"bead\": \"frankensim-kx95s\",\n");
     writeln!(
         out,
