@@ -248,6 +248,72 @@ Critical path to the first legitimate L3 (execution claim): A2 → A8 → B10 �
 
 Existing steering beads carry A1–A7 (q61wp.1–.6), B1/B5/B6/B7/B10 (q61wp.8 closed, .9, .11, .14, .13 closed at 974b1cc6), D1–D3 (q61wp.16–.20), E1–E2 (q61wp.26 closed, .27), F1 (q61wp.28), G1 (q61wp.39), H (q61wp.29–.33), I (q61wp.34–.43; .36 closed). **Beads created from this plan (Phase 3a, 2026-09-02, label `bridge-plan`):** B2 = q61wp.44, B3 (+A12) = .45, B4 = .46, B8 = .47, B9 = .48, B11 = .49, B12 = .50, C1 = .51, C2 = .52, C3 = .53, D4 = .54, E3 = .55, F2 = .56, G2 = .57, G3 = .58 (owner decision), G4 = .59, A9 = .60, A10 = .61; A11 is a note on .16. Dependencies as in §13 (C2→C1, C3→B4, F2→.28, .14→B9 and B2, .11→B2, B11→.13 and B2, D4→.19); no cycles. Refinement rounds R1–R4 live as dated notes on the beads.
 
+### 16.1 Status (generated from the tracker, 2026-09-02)
+
+Steering epic `frankensim-rc-root-q61wp`: closed 18, in_progress 13, open 28. Items are the plan's codes read from each bead's title; `—` marks beads that are not plan items (owner decisions, hygiene). Regenerate rather than hand-edit: `br list --status open --status in_progress --status closed | grep q61wp` and the same title parse.
+
+| Item | Bead | P | Status | Title |
+|---|---|---|---|---|
+| A9 | q61wp.60 | P1 | closed | A9 Remove the fabricated kernel attribution from scripts/ci/e2e_extreal_vertical_profile.s |
+| A10 | q61wp.61 | P2 | closed | A10 Register the examples freshness lane (22 checks) and the vertical-profile lane in docs |
+| A13 | q61wp.63 | P1 | closed | A13 export of a run retained under an older receipt schema refuses as unknown-run: name th |
+| B2 | q61wp.44 | P0 | in_progress | B2 Goal-oriented mesh refinement + quality floor after recovery (conduction QoI becomes a  |
+| B3 | q61wp.45 | P1 | closed | B3 Recovery budget derived from the declared memory budget (default as floor) + recovery s |
+| B4 | q61wp.46 | P1 | open | B4 Facet recovery for the rest of real geometry: polygonal loops with holes, incremental f |
+| B8 | q61wp.47 | P2 | open | B8 frankensim compare: diff two retained runs by identity (QoIs, budgets, stage receipts)  |
+| B8a | q61wp.62 | P1 | closed | B8a report/package export verbs take 60-130 s on a 7-stage ledger: profile load_completed_ |
+| B9 | q61wp.48 | P1 | closed | B9 Level-A hand-calculation row for the heatsink (fin efficiency x Hausen developing-flow  |
+| B11 | q61wp.49 | P2 | open | B11 Transient conduction stage behind an explicit project flag, and the enclosure example  |
+| B12 | q61wp.50 | P3 | open | B12 Order-canonical meshes: geometric simulation-of-simplicity tie-break so identical geom |
+| C1 | q61wp.51 | P2 | open | C1 STEP import path parity with STL for the heatsink body: same assignment, volumetricizat |
+| C2 | q61wp.52 | P2 | open | C2 Face-set assignment selectors from STEP named faces so a chip footprint can be a region |
+| C3 | q61wp.53 | P2 | open | C3 Tracked corpus of physical bodies with generators and freshness-lane rows (enclosure wi |
+| D4 | q61wp.54 | P3 | open | D4 (stretch) Persistent-homology density constraint on the marquee level set |
+| E3 | q61wp.55 | P2 | in_progress | E3 Bead template hygiene: every implementation bead carries goal, falsifier, seams, receip |
+| F2 | q61wp.56 | P2 | open | F2 Plan §14.1 performance page: bars restated as measured values with dated receipts; orig |
+| G2 | q61wp.57 | P2 | closed | G2 Shared build hygiene: per-agent private CARGO_TARGET_DIR, rch as the root-workspace def |
+| G3 | q61wp.58 | P2 | open | G3 OWNER DECISION: free space on yto (verification host at 100 percent) — which build targ |
+| G4 | q61wp.59 | P3 | closed | G4 Native tooling notes: the tracked target/debug/xtask is a Linux ELF on the Mac; documen |
+| — | q61wp.1 | P0 | in_progress | Fix four committed-red test targets; add a no-run workspace test build to the DSR quality  |
+| — | q61wp.10 | P0 | closed | Wire the QoI stage: extract_thermal_qois → requirement verdict with colour and 8-term budg |
+| — | q61wp.11 | P1 | open | Guaranteed equilibrated-flux error bound for the conduction QoI (Verified-colour discretiz |
+| — | q61wp.12 | P0 | in_progress | Make report, package, run, compare real: ledger-traced renderers, one-command run |
+| — | q61wp.13 | P0 | closed | cooling_01.sh becomes the honest six-stage lane; retain the receipt; promote L3 via the re |
+| — | q61wp.14 | P0 | open | Journey A falsifier battery: independent client + checker, hostile twins, hand-calc anchor |
+| — | q61wp.15 | P1 | open | JOURNEY B — the P2 marquee un-gated: SDF → CutFEM → adjoint → optimizer → geometry, with c |
+| — | q61wp.16 | P1 | in_progress | Un-gate fs-marquee and make run_study a real 2-D level-set topology-optimization loop |
+| — | q61wp.17 | P1 | open | Marquee falsifiers: rung climb, body-fitted cross-solve, adjoint-FD, objective twins, repl |
+| — | q61wp.18 | P1 | in_progress | Certified 3-D cut quadrature on implicit regions (Saye-style dimension reduction + interva |
+| — | q61wp.19 | P2 | open | 3-D marquee on an fs-rep-sdf VDB grid with DWR octree refinement; optimization.marquee-top |
+| — | q61wp.2 | P0 | in_progress | Demote thermal.conduction-solve to L2; make check-maturity read the lane receipt for any L |
+| — | q61wp.20 | P1 | open | frankensim study verb: run the marquee through the product pipeline with report and packag |
+| — | q61wp.21 | P1 | closed | OWNER DECISION: park leapfrog-2026, theorem lanes, machine flagships, Euler lab beads (~1, |
+| — | q61wp.22 | P1 | closed | OWNER DECISION: P0 performance bars — fund kernels to the 80 % targets or re-baseline with |
+| — | q61wp.23 | P1 | closed | OWNER DECISION: advance constellation.lock to the fast-forwarded sibling heads, or build a |
+| — | q61wp.24 | P1 | open | OWNER DECISION: adjudicate the seven retained instrument listening receipts (about 30 minu |
+| — | q61wp.25 | P1 | closed | OWNER DECISION: build or retire IGA shells, turbulence, compressible flow, FMM-VPM from v1 |
+| — | q61wp.26 | P1 | closed | Execute the parking decision with br defer; write the un-park criterion on each parked roo |
+| — | q61wp.27 | P1 | open | Bead-graph hygiene: stale in_progress audit, P0 re-tier via tropical critical path, epic c |
+| — | q61wp.28 | P1 | open | P0 measurements: fix SpMV STREAM denominator, measure cancel latency, citable x86 GEMM; cl |
+| — | q61wp.29 | P2 | in_progress | Wright Flyer finish-out: redeploy current dist, measure V-14 on a qualified device, decide |
+| — | q61wp.3 | P0 | in_progress | fs-cli report.rs/package.rs: replace fabricated literals with declared gaps; de-vacuate th |
+| — | q61wp.30 | P2 | open | Expose one gated instrument in fs-wasm and the Apple catalog; budget rows; jet receipts in |
+| — | q61wp.31 | P2 | in_progress | Euler cinematic: retain one 1080p daily-fixture frame and one campaign JSONL, or park h7xu |
+| — | q61wp.32 | P2 | in_progress | Apple app runtime proof: restore Info.plist metadata, run XCTests, launch on three form fa |
+| — | q61wp.33 | P2 | open | Redeploy frankensim.org with current fs-wasm; bring fs-wasm into the suite-receipt univers |
+| — | q61wp.34 | P2 | open | Fluids for the wedge: LBM G2 lanes on by default; Boussinesq conjugate channel as Level-B  |
+| — | q61wp.35 | P3 | open | GATED EPIC: 3-D incompressible Navier–Stokes with scalable saddle preconditioning (after W |
+| — | q61wp.36 | P3 | closed | Execute the retire-or-build decision: dated plan/README edits or gated epics for IGA, turb |
+| — | q61wp.37 | P2 | open | Split instrument synthesis out of fs-couple into fs-instrument; fs-couple states its coupl |
+| — | q61wp.38 | P2 | open | FrankenScript executor v0: lower admitted studies to the shared stage pipeline (Journeys A |
+| — | q61wp.39 | P1 | in_progress | Execute the constellation decision: advance pins via the compatibility train (or build at  |
+| — | q61wp.4 | P1 | open | README/QUICKSTART/plan §16 truth pass: L3 count, .fsim v3, verb expectations, workspace in |
+| — | q61wp.5 | P1 | in_progress | Clear the five violating xtask gates: manifest, program-metrics, fs-g1-train serde, fs-sim |
+| — | q61wp.6 | P0 | closed | Fix failing g0_conduction_stage_executes_declared_card_backed_contact (coincident boundary |
+| — | q61wp.7 | P0 | open | JOURNEY A — Cooling 0.1 completes six stages and earns a receipt-backed L3 |
+| — | q61wp.8 | P0 | closed | Give heatsink-fan and cooling-enclosure real cooling.conduction sections |
+| — | q61wp.9 | P0 | open | Conjugate coupling: branch-fed Robin rows, IQN-ILS fixed point, coupling residual in the b |
+
 ## 17. What this plan deliberately does not do
 
 - It does not re-beadify the 880 KB of plans; parked work stays parked until a journey consumes its solver.
