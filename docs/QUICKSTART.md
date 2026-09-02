@@ -127,7 +127,9 @@ ls "${WORK}"
 
 Expected: `<run>.report.html`, `<run>.report.json` and `<run>.fspkg` in
 `${WORK}`; the report JSON carries `"verdict":"indeterminate"` and
-`"authority":"projection-of-retained-receipts"`; the package result carries
+`"authority":"projection-of-retained-receipts"` and
+`"verification":"sealed-evidence"` (exports re-hash the sealed receipts and
+lineage; only `solve --resume` replays the physics); the package result carries
 `"checker":"pass"`. Open the HTML: every number cites the receipt hash it was
 copied from, and the uncertainty table prints NO-DATA where nothing was
 measured. Exporting twice is idempotent; an unknown run refuses without

@@ -39,6 +39,9 @@ pub(crate) struct ReportExport {
     pub(crate) content_hash: String,
     pub(crate) verdict: String,
     pub(crate) stages_completed: usize,
+    /// How the retained run was proven before export; exports never replay
+    /// physics, they re-emit sealed evidence and say so.
+    pub(crate) verification: &'static str,
 }
 
 const REPORT_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-report.v1";
@@ -583,6 +586,7 @@ pub(crate) fn export_report(
     Ok(ReportExport {
         html_path,
         json_path,
+        verification: loaded.export.verification,
         content_hash,
         verdict,
         stages_completed: loaded.export.stages.len(),
@@ -614,18 +618,19 @@ pub fn report_path(run_id: &str, ledger_path: Option<&Path>, mode: OutputMode) -
             out.push_str(",\"verdict\":");
             push_json_string(&mut out, &export.verdict);
             out.push_str(&format!(
-                ",\"stages_completed\":{},\"authority\":\"projection-of-retained-receipts\"}}\n",
-                export.stages_completed
+                ",\"stages_completed\":{},\"authority\":\"projection-of-retained-receipts\",\"verification\":\"{}\"}}\n",
+                export.stages_completed, export.verification
             ));
             out
         }
         OutputMode::Text => format!(
-            "status=ok\ncommand=report\nsubject={run}\nrun={run}\nreport_html={}\nreport_json={}\ncontent_hash={}\nverdict={}\nstages_completed={}\nauthority=projection-of-retained-receipts\n",
+            "status=ok\ncommand=report\nsubject={run}\nrun={run}\nreport_html={}\nreport_json={}\ncontent_hash={}\nverdict={}\nstages_completed={}\nauthority=projection-of-retained-receipts\nverification={}\n",
             escape_text(&export.html_path.to_string_lossy()),
             escape_text(&export.json_path.to_string_lossy()),
             export.content_hash,
             escape_text(&export.verdict),
             export.stages_completed,
+            export.verification,
         ),
     };
     CommandOutput {

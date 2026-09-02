@@ -54,17 +54,27 @@ and semantic checks. A successful result reports the canonical project hash,
 schema version, zero findings, and the exact authority class
 `structural-project-admission`.
 
-`report`, `package`, and `compare` are present in the parser but currently
-return the stable `cli-stage-unavailable` refusal naming the producer Bead that
-must land before each verb can execute:
+`report` and `package` execute against a run whose seven stages are all
+sealed (an incomplete run refuses `cli-report-run-incomplete` and names the
+next stage). Before either verb reads a byte of the retained report or
+package, it proves the run by **sealed evidence**: the driver-state chain is
+re-attested exactly as resume does (row identity, driver version, exact
+lineage edges, intact edge seals, recovered card packs reproducing the run
+identity), every retained receipt is re-hashed against the hash the sealed
+driver state recorded, and the conduction operation's retained outputs are
+taken from the sealed operation itself with their kinds checked. Exports never
+replay physics; only `solve --resume` re-executes retained stages, because it
+continues computing from the verified state. The report result discloses this
+as `"verification":"sealed-evidence"` next to
+`"authority":"projection-of-retained-receipts"`. MEASURED 2026-09-02: with the
+replay, `report`/`package` on the heatsink example cost twice the solve
+(3.4 s of a 4.2 s validation was re-solving conduction).
 
-- report: `frankensim-extreal-program-f85xj.6.9`;
-- package: `frankensim-extreal-program-f85xj.6.10`;
-- compare: `frankensim-extreal-program-f85xj.6.14.1`.
-
-This is a deliberate fail-closed integration seam. Reusing the photovoltaic
-skeleton or emitting placeholder artifacts would turn a CLI-shaped mock into
-a product claim.
+`compare` is present in the parser but returns the stable
+`cli-stage-unavailable` refusal naming its producer Bead
+(`frankensim-extreal-program-f85xj.6.14.1`). This is a deliberate fail-closed
+integration seam: emitting a placeholder comparison would turn a CLI-shaped
+mock into a product claim.
 
 ### Euler cinematic static admission
 
@@ -262,11 +272,16 @@ ledger content hash and `open_expected` admission prove only bounded codec
 integrity. Public `SolveDriverState`/`CompletedStage` construction and a valid
 legacy envelope grant no resume authority.
 
-Before opening a governor or publishing progress, resume independently
-re-attests every candidate prefix that can tie or extend the longest verified
-prefix. After bounded checkpoint decode and shape validation, a candidate
-strictly shorter than an already verified prefix is skipped because it cannot
-affect longest-prefix selection. Resume discovery requires the exact supported
+Before opening a governor or publishing progress, resume collects every
+retained driver state of the run (bounded checkpoint decode plus shape
+validation), then independently re-attests candidates longest prefix first:
+the first fully verified prefix wins, an equally long valid competitor refuses
+as ambiguous, and strictly shorter candidates are re-attested only when every
+longer one failed, because they cannot otherwise affect longest-prefix
+selection. `solve --resume` re-attests by replay (each retained stage is
+re-executed and its receipt must be bitwise the retained one); the export
+verbs re-attest the same chain by sealed evidence (re-hashed receipts, sealed
+outputs) and say so. Resume discovery requires the exact supported
 solve-stage schema, field order, run, driver version, stage/ordinal pairing,
 diagnostic state, and logical clocks before reading that operation's bounded
 edge set; unrelated successful same-session operations therefore cannot

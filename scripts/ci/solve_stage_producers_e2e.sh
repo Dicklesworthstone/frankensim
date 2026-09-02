@@ -285,6 +285,7 @@ if [[ "${#RUN_MAIN}" == "64" ]]; then
   check "report export succeeded"            contains "${ARTIFACT_DIR}/report_export.stdout" '"status":"ok"'
   check "report export names seven stages"   contains "${ARTIFACT_DIR}/report_export.stdout" '"stages_completed":7'
   check "report export claims projection only" contains "${ARTIFACT_DIR}/report_export.stdout" '"authority":"projection-of-retained-receipts"'
+  check "report export proves by sealed evidence, not replay" contains "${ARTIFACT_DIR}/report_export.stdout" '"verification":"sealed-evidence"'
   check "HTML report written next to the ledger"  test -s "${LEDGER_DIR}/${RUN_MAIN}.report.html"
   check "JSON twin written next to the ledger"    test -s "${LEDGER_DIR}/${RUN_MAIN}.report.json"
   check "HTML report prints NO-DATA, not numbers, for unmeasured terms" \

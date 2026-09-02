@@ -892,6 +892,11 @@ fn g1_run_completes_seven_stages_and_exports_report_and_package_for_the_referenc
     ]));
     assert_eq!(again.exit_code, exit::SUCCESS, "stderr: {}", again.stderr);
     assert!(again.stdout.contains("\"stages_completed\":7"));
+    assert!(
+        again.stdout.contains("\"verification\":\"sealed-evidence\""),
+        "exports prove the run by sealed evidence, never by replaying physics: {}",
+        again.stdout
+    );
     let packaged = run(args(&[
         "--json",
         "package",

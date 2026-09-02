@@ -31,8 +31,8 @@ use fs_report::{
 
 use super::{
     CompletedStage, EDGE_SCAN_CAP, EvidenceWork, InvocationWorkLedger, QOI_RECEIPT_SCHEMA,
-    RetainedSideArtifact, SolveDriverState, SolveRefusal, SolveRunId, SolveStage, VerifiedResume,
-    invocation_work_refusal, load_latest_state, require_exact_edges,
+    ResumeProof, RetainedSideArtifact, SolveDriverState, SolveRefusal, SolveRunId, SolveStage,
+    VerifiedResume, invocation_work_refusal, load_latest_state, require_exact_edges,
 };
 use crate::import::json_string;
 use crate::json_read::JsonValue;
@@ -718,6 +718,8 @@ pub(crate) struct CompletedRunExport {
     pub(crate) stages: Vec<(&'static str, i64, String)>,
     /// The report stage receipt (JSON text).
     pub(crate) report_receipt: String,
+    /// How the retained run was proven before export (`ResumeProof::as_str`).
+    pub(crate) verification: &'static str,
     /// Retained HTML report bytes.
     pub(crate) report_html: Vec<u8>,
     /// Retained JSON twin bytes.
@@ -752,7 +754,7 @@ pub(crate) fn load_completed_run(
         ..
     } = {
         let t_state = std::time::Instant::now();
-        let loaded = load_latest_state(ledger, run, work)?;
+        let loaded = load_latest_state(ledger, run, work, ResumeProof::SealedEvidence)?;
         if std::env::var_os("FS_CLI_TRACE_EXPORT").is_some() {
             eprintln!(
                 "TRACE export: load_latest_state {:.3}s",
@@ -881,6 +883,7 @@ pub(crate) fn load_completed_run(
         report_html,
         report_json,
         package_json,
+        verification: ResumeProof::SealedEvidence.as_str(),
     })
 }
 

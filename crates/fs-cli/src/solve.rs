@@ -1514,7 +1514,7 @@ fn resume_solve_inner<'a>(
     if work.is_requested() {
         return Err(cancelled_resume_refusal(run));
     }
-    let verified = load_latest_state(ledger, run, work)?;
+    let verified = load_latest_state(ledger, run, work, ResumeProof::Replay)?;
     let VerifiedResume {
         state,
         state_artifact,
@@ -5504,6 +5504,7 @@ fn evidence_bytes_equal(
     phase: SolveEvidencePhase,
     source_index: Option<usize>,
 ) -> Result<bool, EvidenceCompareError> {
+    let _span = TraceSpan::new("evidence_bytes_equal");
     work.checkpoint(phase, source_index, 0)
         .map_err(|_| EvidenceCompareError::Cancelled)?;
     if left.len() != right.len() {
@@ -5765,7 +5766,10 @@ fn read_artifact_info_controlled(
     let plan_index = Some(descriptor_index);
     work.checkpoint(phase, plan_index, 0)
         .map_err(|_| EvidenceReadError::Cancelled)?;
-    let result = ledger.artifact_info(artifact);
+    let result = {
+        let _raw = TraceSpan::new("raw.artifact_info");
+        ledger.artifact_info(artifact)
+    };
     work.checkpoint(phase, plan_index, 1)
         .map_err(|_| EvidenceReadError::Cancelled)?;
     let info = result.map_err(EvidenceReadError::Ledger)?;
@@ -5807,6 +5811,7 @@ fn read_candidate_op(
         .map_err(|_| CandidateOpReadError::Cancelled)?;
     let mut fields = CandidateOpFields::default();
     let mut delivered = 0u64;
+    let raw_span = TraceSpan::new("raw.read_op_fields_controlled");
     let controlled = ledger.read_op_fields_controlled(op, |field, offset, tile| {
         let callback_units = delivered.saturating_add(1);
         if work.checkpoint(phase, plan_index, callback_units).is_err() {
@@ -5847,6 +5852,7 @@ fn read_candidate_op(
             ControlFlow::Continue(())
         }
     });
+    drop(raw_span);
     work.checkpoint(phase, plan_index, u64::MAX)
         .map_err(|_| CandidateOpReadError::Cancelled)?;
     let controlled = controlled.map_err(CandidateOpReadError::Ledger)?;
@@ -6105,13 +6111,6 @@ fn find_import_summary(
     }
 }
 
-/// Load and independently attest the latest sealed driver state for a run.
-///
-/// The legacy envelope expectation used while decoding is only a bounded
-/// codec check: its byte identity is derived from the candidate bytes and
-/// grants no authority. Resume eligibility comes exclusively from
-/// [`validate_resume_candidate`], which re-attests the complete canonical
-/// operation and checkpoint chain before a governor is opened.
 thread_local! {
     /// Export-trace accumulators: helper name → (calls, seconds). Populated only
     /// when `FS_CLI_TRACE_EXPORT` is set; dumped by `dump_trace_spans`.
@@ -6153,10 +6152,18 @@ fn dump_trace_spans() {
     });
 }
 
+/// Load and independently attest the latest sealed driver state for a run.
+///
+/// The legacy envelope expectation used while decoding is only a bounded
+/// codec check: its byte identity is derived from the candidate bytes and
+/// grants no authority. Resume eligibility comes exclusively from
+/// [`validate_resume_candidate`], which re-attests the complete canonical
+/// operation and checkpoint chain before a governor is opened.
 fn load_latest_state(
     ledger: &Ledger,
     run: SolveRunId,
     work: EvidenceWork<'_>,
+    proof: ResumeProof,
 ) -> Result<VerifiedResume, SolveRefusal> {
     let mut cursor = None;
     let mut page_index = 0usize;
@@ -6349,6 +6356,7 @@ fn load_latest_state(
             discovery_op,
             work,
             &mut import_cache,
+            proof,
         )?;
         if trace_export {
             eprintln!(
@@ -6490,6 +6498,135 @@ fn parse_stage_discovery_ir(ir: &str, run: SolveRunId) -> Result<SolveStage, Str
 }
 
 #[allow(clippy::too_many_lines)]
+/// How a retained run is proven before a verb consumes it.
+///
+/// Both modes verify the same ledger evidence: driver-state shape, per-stage
+/// row identity (run, project hash, driver version, explicits), artifact-edge
+/// seals, exact lineage edges, and recovered card packs reproducing the run
+/// identity. They differ in what proves a retained *receipt*.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResumeProof {
+    /// Re-execute every retained stage and require the rebuilt receipt to be
+    /// bitwise the retained one. `solve --resume` continues computing from
+    /// the verified state, so it must know this binary reproduces it. Costs
+    /// a full solve.
+    Replay,
+    /// Re-hash every retained receipt against the hash the sealed driver
+    /// state recorded, and take stage outputs from the sealed operation
+    /// itself (kinds checked, exactly one solution artifact). Proves the run
+    /// is the recorded, sealed history under this driver version; does not
+    /// prove this binary would compute it again. Exports only re-emit what
+    /// was recorded, so this is their proof, and they disclose it. MEASURED
+    /// 2026-09-02 (bridge plan B8a): the replay made `report`/`package` cost
+    /// twice the solve (3.4 s of a 4.2 s validation on the heatsink example).
+    SealedEvidence,
+}
+
+impl ResumeProof {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Replay => "replayed-stages",
+            Self::SealedEvidence => "sealed-evidence",
+        }
+    }
+}
+
+/// Sealed-evidence proof of one retained receipt: its retained bytes re-hash
+/// to the receipt hash the sealed driver state recorded for that stage.
+fn require_sealed_receipt(
+    run: SolveRunId,
+    stage: SolveStage,
+    recorded: ContentHash,
+    receipt_text: &str,
+    work: EvidenceWork<'_>,
+    index: usize,
+) -> Result<(), SolveRefusal> {
+    work.checkpoint(
+        SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
+        Some(index),
+        0,
+    )
+    .map_err(|_| cancelled_resume_refusal(run))?;
+    let actual = hash_bytes(receipt_text.as_bytes());
+    if actual != recorded {
+        return Err(resume_identity(format!(
+            "the retained {} receipt re-hashes to {}, not the sealed driver state's {}",
+            stage.name(),
+            actual.to_hex(),
+            recorded.to_hex()
+        )));
+    }
+    Ok(())
+}
+
+/// Sealed conduction outputs: every `Out` edge of the sealed conduction
+/// operation other than its receipt and checkpoint, each retained with a
+/// conduction output kind, exactly one of them the solution the QoI stage
+/// consumed.
+struct SealedConductionOutputs {
+    out_edges: Vec<(EdgeRole, ContentHash)>,
+    solution: ContentHash,
+}
+
+fn sealed_conduction_outputs(
+    ledger: &Ledger,
+    run: SolveRunId,
+    stage: SolveStage,
+    edges: &[OpArtifactEdge],
+    receipt: ContentHash,
+    checkpoint: ContentHash,
+    work: EvidenceWork<'_>,
+    index: usize,
+) -> Result<SealedConductionOutputs, SolveRefusal> {
+    let mut out_edges = Vec::new();
+    let mut solution = None;
+    for edge in edges {
+        if edge.role != EdgeRole::Out || edge.artifact == receipt || edge.artifact == checkpoint {
+            continue;
+        }
+        let info = read_artifact_info_controlled(ledger, &edge.artifact, work, index)
+            .map_err(|error| match error {
+                EvidenceReadError::Cancelled => cancelled_resume_refusal(run),
+                EvidenceReadError::WorkEnvelope(error) => {
+                    invocation_work_refusal(Some(run), Some(stage), error)
+                }
+                EvidenceReadError::Ledger(error) => {
+                    resume_ledger("reading a conduction output descriptor failed", error)
+                }
+            })?
+            .ok_or_else(|| {
+                resume_identity(format!(
+                    "the sealed conduction output {} is not retained",
+                    edge.artifact.to_hex()
+                ))
+            })?;
+        match info.kind.as_str() {
+            CONDUCTION_SOLUTION_KIND => {
+                if solution.replace(edge.artifact).is_some() {
+                    return Err(resume_identity(
+                        "the sealed conduction operation retains more than one solution artifact",
+                    ));
+                }
+            }
+            CONDUCTION_INTERFACE_EVIDENCE_KIND => {}
+            other => {
+                return Err(resume_identity(format!(
+                    "the sealed conduction output {} has kind `{other}`, not a conduction output kind",
+                    edge.artifact.to_hex()
+                )));
+            }
+        }
+        out_edges.push((EdgeRole::Out, edge.artifact));
+    }
+    let solution = solution.ok_or_else(|| {
+        resume_identity("the sealed conduction operation retains no solution artifact")
+    })?;
+    Ok(SealedConductionOutputs {
+        out_edges,
+        solution,
+    })
+}
+
 fn validate_resume_candidate(
     ledger: &Ledger,
     run: SolveRunId,
@@ -6498,6 +6635,7 @@ fn validate_resume_candidate(
     discovery_op: i64,
     work: EvidenceWork<'_>,
     import_cache: &mut Option<Rc<ResumeImportCache>>,
+    proof: ResumeProof,
 ) -> Result<VerifiedResume, SolveRefusal> {
     let _span = TraceSpan::new("validate_resume_candidate");
     validate_state_shape(&state, run)?;
@@ -6566,6 +6704,7 @@ fn validate_resume_candidate(
     let mut predecessor_state = None;
     let mut predecessor_checkpoint: Option<SolveDriverState> = None;
     let mut last_expected_edges = Vec::new();
+    let mut sealed_solution: Option<ContentHash> = None;
     for (index, completed) in state.completed.iter().enumerate() {
         let stage = SolveStage::ALL[index];
         if stage.gap_dependency().is_some() || declaration_gap(stage, &project.spec).is_some() {
@@ -6965,58 +7104,69 @@ fn validate_resume_candidate(
             }
             SolveStage::FlowNetwork => {
                 let receipt_stage_index = Some(index);
-                work.checkpoint(
-                    SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
-                    receipt_stage_index,
-                    0,
-                )
-                .map_err(|_| cancelled_resume_refusal(run))?;
-                let rebuilt = flow_network_receipt(&project.spec, run, work, true).map(
-                    |(receipt, handoff)| {
-                        context.flow_network = Some(handoff);
-                        receipt
-                    },
-                );
-                work.checkpoint(
-                    SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
-                    receipt_stage_index,
-                    1,
-                )
-                .map_err(|_| cancelled_resume_refusal(run))?;
-                let expected_receipt = match rebuilt {
-                    Ok(rebuilt) => rebuilt,
-                    Err(error)
-                        if matches!(
-                            error.code,
-                            "cli-solve-cancelled" | "cli-solve-work-envelope"
-                        ) =>
-                    {
-                        return Err(error);
+                if proof == ResumeProof::Replay {
+                    work.checkpoint(
+                        SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
+                        receipt_stage_index,
+                        0,
+                    )
+                    .map_err(|_| cancelled_resume_refusal(run))?;
+                    let rebuilt = flow_network_receipt(&project.spec, run, work, true).map(
+                        |(receipt, handoff)| {
+                            context.flow_network = Some(handoff);
+                            receipt
+                        },
+                    );
+                    work.checkpoint(
+                        SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
+                        receipt_stage_index,
+                        1,
+                    )
+                    .map_err(|_| cancelled_resume_refusal(run))?;
+                    let expected_receipt = match rebuilt {
+                        Ok(rebuilt) => rebuilt,
+                        Err(error)
+                            if matches!(
+                                error.code,
+                                "cli-solve-cancelled" | "cli-solve-work-envelope"
+                            ) =>
+                        {
+                            return Err(error);
+                        }
+                        Err(error) => {
+                            return Err(resume_identity(format!(
+                                "the retained cooling declaration no longer lowers or solves: {}",
+                                error.what
+                            )));
+                        }
+                    };
+                    let receipt_matches = evidence_bytes_equal(
+                        receipt_text.as_bytes(),
+                        expected_receipt.as_bytes(),
+                        work,
+                        SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
+                        receipt_stage_index,
+                    )
+                    .map_err(|error| match error {
+                        EvidenceCompareError::Cancelled => cancelled_resume_refusal(run),
+                        EvidenceCompareError::WorkEnvelope(error) => {
+                            invocation_work_refusal(Some(run), Some(stage), error)
+                        }
+                    })?;
+                    if !receipt_matches {
+                        return Err(resume_identity(
+                            "the retained flow-network receipt is not the canonical driver receipt",
+                        ));
                     }
-                    Err(error) => {
-                        return Err(resume_identity(format!(
-                            "the retained cooling declaration no longer lowers or solves: {}",
-                            error.what
-                        )));
-                    }
-                };
-                let receipt_matches = evidence_bytes_equal(
-                    receipt_text.as_bytes(),
-                    expected_receipt.as_bytes(),
-                    work,
-                    SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
-                    receipt_stage_index,
-                )
-                .map_err(|error| match error {
-                    EvidenceCompareError::Cancelled => cancelled_resume_refusal(run),
-                    EvidenceCompareError::WorkEnvelope(error) => {
-                        invocation_work_refusal(Some(run), Some(stage), error)
-                    }
-                })?;
-                if !receipt_matches {
-                    return Err(resume_identity(
-                        "the retained flow-network receipt is not the canonical driver receipt",
-                    ));
+                } else {
+                    require_sealed_receipt(
+                        run,
+                        stage,
+                        completed.receipt,
+                        &receipt_text,
+                        work,
+                        index,
+                    )?;
                 }
                 let predecessor = predecessor_state.ok_or_else(|| {
                     resume_identity(
@@ -7031,73 +7181,96 @@ fn validate_resume_candidate(
                     resume_identity("the retained conduction stage has no recovered card-pack set")
                 })?;
                 let receipt_stage_index = Some(index);
-                work.checkpoint(
-                    SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
-                    receipt_stage_index,
-                    0,
-                )
-                .map_err(|_| cancelled_resume_refusal(run))?;
-                let rebuilt =
-                    conduction_receipt(ledger, &project.spec, cards, &context, run, work, true);
-                work.checkpoint(
-                    SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
-                    receipt_stage_index,
-                    1,
-                )
-                .map_err(|_| cancelled_resume_refusal(run))?;
-                let ConductionStageProduct {
-                    receipt: expected_receipt,
-                    artifacts: outputs,
-                    qoi_inputs,
-                } = match rebuilt {
-                    Ok(rebuilt) => rebuilt,
-                    Err(error)
-                        if matches!(
-                            error.code,
-                            "cli-solve-cancelled" | "cli-solve-work-envelope"
-                        ) =>
-                    {
-                        return Err(error);
+                if proof == ResumeProof::Replay {
+                    work.checkpoint(
+                        SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
+                        receipt_stage_index,
+                        0,
+                    )
+                    .map_err(|_| cancelled_resume_refusal(run))?;
+                    let rebuilt =
+                        conduction_receipt(ledger, &project.spec, cards, &context, run, work, true);
+                    work.checkpoint(
+                        SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
+                        receipt_stage_index,
+                        1,
+                    )
+                    .map_err(|_| cancelled_resume_refusal(run))?;
+                    let ConductionStageProduct {
+                        receipt: expected_receipt,
+                        artifacts: outputs,
+                        qoi_inputs,
+                    } = match rebuilt {
+                        Ok(rebuilt) => rebuilt,
+                        Err(error)
+                            if matches!(
+                                error.code,
+                                "cli-solve-cancelled" | "cli-solve-work-envelope"
+                            ) =>
+                        {
+                            return Err(error);
+                        }
+                        Err(error) => {
+                            return Err(resume_identity(format!(
+                                "the retained conduction problem no longer reproduces: {}",
+                                error.what
+                            )));
+                        }
+                    };
+                    let receipt_matches = evidence_bytes_equal(
+                        receipt_text.as_bytes(),
+                        expected_receipt.as_bytes(),
+                        work,
+                        SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
+                        receipt_stage_index,
+                    )
+                    .map_err(|error| match error {
+                        EvidenceCompareError::Cancelled => cancelled_resume_refusal(run),
+                        EvidenceCompareError::WorkEnvelope(error) => {
+                            invocation_work_refusal(Some(run), Some(stage), error)
+                        }
+                    })?;
+                    if !receipt_matches {
+                        return Err(resume_identity(
+                            "the retained conduction receipt is not the canonical driver receipt",
+                        ));
                     }
-                    Err(error) => {
-                        return Err(resume_identity(format!(
-                            "the retained conduction problem no longer reproduces: {}",
-                            error.what
-                        )));
+                    for output in &outputs {
+                        require_artifact_kind_resume(
+                            ledger,
+                            run,
+                            stage,
+                            output.artifact,
+                            output.kind,
+                            "conduction side artifact",
+                            work,
+                            index,
+                        )?;
+                        expected_edges.push((EdgeRole::Out, output.artifact));
                     }
-                };
-                let receipt_matches = evidence_bytes_equal(
-                    receipt_text.as_bytes(),
-                    expected_receipt.as_bytes(),
-                    work,
-                    SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
-                    receipt_stage_index,
-                )
-                .map_err(|error| match error {
-                    EvidenceCompareError::Cancelled => cancelled_resume_refusal(run),
-                    EvidenceCompareError::WorkEnvelope(error) => {
-                        invocation_work_refusal(Some(run), Some(stage), error)
-                    }
-                })?;
-                if !receipt_matches {
-                    return Err(resume_identity(
-                        "the retained conduction receipt is not the canonical driver receipt",
-                    ));
-                }
-                for output in &outputs {
-                    require_artifact_kind_resume(
-                        ledger,
+                    validated_qoi_inputs = Some(qoi_inputs);
+                } else {
+                    require_sealed_receipt(
                         run,
                         stage,
-                        output.artifact,
-                        output.kind,
-                        "conduction side artifact",
+                        completed.receipt,
+                        &receipt_text,
                         work,
                         index,
                     )?;
-                    expected_edges.push((EdgeRole::Out, output.artifact));
+                    let sealed = sealed_conduction_outputs(
+                        ledger,
+                        run,
+                        stage,
+                        &edges,
+                        completed.receipt,
+                        checkpoint_hash,
+                        work,
+                        index,
+                    )?;
+                    expected_edges.extend(sealed.out_edges);
+                    sealed_solution = Some(sealed.solution);
                 }
-                validated_qoi_inputs = Some(qoi_inputs);
                 let predecessor = predecessor_state.ok_or_else(|| {
                     resume_identity(
                         "the retained conduction stage has no verified flow-network predecessor",
@@ -7107,61 +7280,72 @@ fn validate_resume_candidate(
             }
             SolveStage::Qoi => {
                 let receipt_stage_index = Some(index);
-                work.checkpoint(
-                    SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
-                    receipt_stage_index,
-                    0,
-                )
-                .map_err(|_| cancelled_resume_refusal(run))?;
-                let rebuilt = qoi_receipt(
-                    &project.spec,
-                    &context,
-                    &state,
-                    run,
-                    project_hash,
-                    work,
-                    true,
-                );
-                work.checkpoint(
-                    SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
-                    receipt_stage_index,
-                    1,
-                )
-                .map_err(|_| cancelled_resume_refusal(run))?;
-                let expected_receipt = match rebuilt {
-                    Ok(product) => product.receipt,
-                    Err(error)
-                        if matches!(
-                            error.code,
-                            "cli-solve-cancelled" | "cli-solve-work-envelope"
-                        ) =>
-                    {
-                        return Err(error);
+                if proof == ResumeProof::Replay {
+                    work.checkpoint(
+                        SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
+                        receipt_stage_index,
+                        0,
+                    )
+                    .map_err(|_| cancelled_resume_refusal(run))?;
+                    let rebuilt = qoi_receipt(
+                        &project.spec,
+                        &context,
+                        &state,
+                        run,
+                        project_hash,
+                        work,
+                        true,
+                    );
+                    work.checkpoint(
+                        SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
+                        receipt_stage_index,
+                        1,
+                    )
+                    .map_err(|_| cancelled_resume_refusal(run))?;
+                    let expected_receipt = match rebuilt {
+                        Ok(product) => product.receipt,
+                        Err(error)
+                            if matches!(
+                                error.code,
+                                "cli-solve-cancelled" | "cli-solve-work-envelope"
+                            ) =>
+                        {
+                            return Err(error);
+                        }
+                        Err(error) => {
+                            return Err(resume_identity(format!(
+                                "the retained QoI no longer reproduces: {}",
+                                error.what
+                            )));
+                        }
+                    };
+                    let receipt_matches = evidence_bytes_equal(
+                        receipt_text.as_bytes(),
+                        expected_receipt.as_bytes(),
+                        work,
+                        SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
+                        receipt_stage_index,
+                    )
+                    .map_err(|error| match error {
+                        EvidenceCompareError::Cancelled => cancelled_resume_refusal(run),
+                        EvidenceCompareError::WorkEnvelope(error) => {
+                            invocation_work_refusal(Some(run), Some(stage), error)
+                        }
+                    })?;
+                    if !receipt_matches {
+                        return Err(resume_identity(
+                            "the retained QoI receipt is not the canonical driver receipt",
+                        ));
                     }
-                    Err(error) => {
-                        return Err(resume_identity(format!(
-                            "the retained QoI no longer reproduces: {}",
-                            error.what
-                        )));
-                    }
-                };
-                let receipt_matches = evidence_bytes_equal(
-                    receipt_text.as_bytes(),
-                    expected_receipt.as_bytes(),
-                    work,
-                    SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
-                    receipt_stage_index,
-                )
-                .map_err(|error| match error {
-                    EvidenceCompareError::Cancelled => cancelled_resume_refusal(run),
-                    EvidenceCompareError::WorkEnvelope(error) => {
-                        invocation_work_refusal(Some(run), Some(stage), error)
-                    }
-                })?;
-                if !receipt_matches {
-                    return Err(resume_identity(
-                        "the retained QoI receipt is not the canonical driver receipt",
-                    ));
+                } else {
+                    require_sealed_receipt(
+                        run,
+                        stage,
+                        completed.receipt,
+                        &receipt_text,
+                        work,
+                        index,
+                    )?;
                 }
                 let predecessor = predecessor_state.ok_or_else(|| {
                     resume_identity(
@@ -7182,10 +7366,23 @@ fn validate_resume_candidate(
                         })?;
                     expected_edges.push((EdgeRole::In, completed.receipt));
                 }
-                let inputs = context.qoi_inputs.as_ref().ok_or_else(|| {
-                    resume_identity("the retained QoI stage has no rebuilt conduction inputs")
-                })?;
-                expected_edges.push((EdgeRole::In, inputs.solution_artifact));
+                let solution_artifact = match proof {
+                    ResumeProof::Replay => context
+                        .qoi_inputs
+                        .as_ref()
+                        .map(|inputs| inputs.solution_artifact)
+                        .ok_or_else(|| {
+                            resume_identity(
+                                "the retained QoI stage has no rebuilt conduction inputs",
+                            )
+                        })?,
+                    ResumeProof::SealedEvidence => sealed_solution.ok_or_else(|| {
+                        resume_identity(
+                            "the retained QoI stage has no sealed conduction solution artifact",
+                        )
+                    })?,
+                };
+                expected_edges.push((EdgeRole::In, solution_artifact));
             }
             SolveStage::Report => {
                 let receipt_stage_index = Some(index);
@@ -7369,6 +7566,7 @@ fn validate_resume_candidate(
 }
 
 fn validate_state_shape(state: &SolveDriverState, run: SolveRunId) -> Result<(), SolveRefusal> {
+    let _span = TraceSpan::new("validate_state_shape");
     if state.run != *run.as_bytes() {
         return Err(resume_identity(
             "the retained driver state carries a different run identity",
@@ -7480,6 +7678,7 @@ fn validate_checkpoint_prefix(
     index: usize,
     predecessor: Option<&SolveDriverState>,
 ) -> Result<(), SolveRefusal> {
+    let _span = TraceSpan::new("validate_checkpoint_prefix");
     if checkpoint.run != final_state.run
         || checkpoint.project != final_state.project
         || checkpoint.completed.as_slice() != &final_state.completed[..=index]
@@ -7569,6 +7768,7 @@ fn read_retained_project_source(
     edges: &[OpArtifactEdge],
     work: EvidenceWork<'_>,
 ) -> Result<(ContentHash, String), SolveRefusal> {
+    let _span = TraceSpan::new("read_retained_project_source");
     let mut sources = Vec::new();
     for (descriptor_index, edge) in edges.iter().enumerate() {
         if edge.role != EdgeRole::In {
@@ -7642,6 +7842,7 @@ fn attest_retained_project(
     source: &str,
     work: EvidenceWork<'_>,
 ) -> Result<ResumeImportCache, SolveRefusal> {
+    let _span = TraceSpan::new("attest_retained_project");
     work.checkpoint(SolveEvidencePhase::ResumeProjectParse, None, 0)
         .map_err(|_| cancelled_resume_refusal(run))?;
     let project = fs_project::parse_sexpr_migrating(source).map(|migrated| migrated.decoded);
@@ -7843,6 +8044,7 @@ fn cancelled_resume_refusal(run: SolveRunId) -> SolveRefusal {
 }
 
 fn resume_import_envelope(run: SolveRunId, what: impl Into<String>) -> SolveRefusal {
+    let _span = TraceSpan::new("resume_import_envelope");
     SolveRefusal {
         code: "cli-solve-import-envelope",
         stage: Some(SolveStage::ImportVerify.name()),
@@ -7948,6 +8150,7 @@ fn require_artifact_kind_resume(
     work: EvidenceWork<'_>,
     descriptor_index: usize,
 ) -> Result<(), SolveRefusal> {
+    let _span = TraceSpan::new("require_artifact_kind_resume");
     let info = read_artifact_info_controlled(ledger, &artifact, work, descriptor_index)
         .map_err(|error| match error {
             EvidenceReadError::Cancelled => cancelled_resume_refusal(run),
@@ -7987,6 +8190,7 @@ fn recover_card_packs_resume(
     edges: &[OpArtifactEdge],
     work: EvidenceWork<'_>,
 ) -> Result<(CardPackSet, Vec<ContentHash>), SolveRefusal> {
+    let _span = TraceSpan::new("recover_card_packs_resume");
     let mut builder = CardPackSetBuilder::new();
     let mut artifacts = Vec::new();
     for kind in [CardPackKind::Material, CardPackKind::Interface] {
@@ -8069,6 +8273,7 @@ fn artifacts_with_kind_resume(
     kind: &str,
     work: EvidenceWork<'_>,
 ) -> Result<Vec<ContentHash>, SolveRefusal> {
+    let _span = TraceSpan::new("artifacts_with_kind_resume");
     let mut matches = Vec::new();
     for (descriptor_index, edge) in edges.iter().enumerate() {
         if edge.role != role {
@@ -8107,6 +8312,7 @@ fn read_text_resume(
     read_phase: SolveEvidencePhase,
     text_phase: SolveEvidencePhase,
 ) -> Result<String, SolveRefusal> {
+    let _span = TraceSpan::new("read_text_resume");
     let bytes = materialize_evidence_artifact(ledger, work, artifact, cap, read_phase, None)
         .map_err(|error| match error {
             EvidenceReadError::Cancelled => cancelled_resume_refusal(run),
@@ -8142,6 +8348,7 @@ fn has_edge_controlled(
     work: EvidenceWork<'_>,
     candidate_index: usize,
 ) -> Result<bool, EvidenceCompareError> {
+    let _span = TraceSpan::new("has_edge_controlled");
     let phase = SolveEvidencePhase::EdgeSetCompare;
     let plan_index = Some(candidate_index);
     work.checkpoint(phase, plan_index, 0)
@@ -8237,6 +8444,7 @@ fn require_exact_edges(
     work: EvidenceWork<'_>,
     candidate_index: usize,
 ) -> Result<(), SolveRefusal> {
+    let _span = TraceSpan::new("require_exact_edges");
     let matches =
         edge_sets_match_controlled(edges, expected, work, candidate_index).map_err(|error| {
             match error {
@@ -8266,6 +8474,7 @@ fn validate_import_candidate(
     candidate_index: usize,
     expectations: RenderedExplicitsRef<'_>,
 ) -> Result<ImportSummary, ImportSummaryError> {
+    let _span = TraceSpan::new("validate_import_candidate");
     let ImportCandidateLocator {
         op,
         summary_artifact,
