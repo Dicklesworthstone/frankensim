@@ -636,6 +636,17 @@ Performance claims in design documents are usually vibes. Ours are rooflines wit
 | Stockham FFT 3D, in-cache pencils | mixed | ≥ 40% of memory-bound limit | ≥ 40% |
 | Sphere-traced SDF primary rays | latency-bound | ≥ 80 Mray/s | ≥ 120 Mray/s |
 
+Status 2026-09-01 (owner decision, bead frankensim-rc-root-q61wp.22, option C): the
+table above is retained as the stretch target; the P0 exit bar is re-based to the
+measured values recorded in the crate contracts on that date — all-core f64 GEMM
+0.39 of peak on the M4 Pro and 0.32 on the Threadripper (single-core 85–87 %
+exploratory, non-citable); batched small dense 10–29 %; 3-D Stockham FFT 0.22–0.25
+(M4) and 0.17–0.31 (x86) of the memory-bound limit; SpMV x86 row invalidated by a
+STREAM-denominator defect and unmeasured; LBM GLUP/s and the ≤ 200 µs cancel
+latency unclaimed. Bead rc-root-q61wp.28 owns the corrected SpMV and cancel-latency
+measurements and closes the P0 milestone (huq.9) with whichever statement is true;
+kernel work toward the original bars is a gated epic after the marquee journey.
+
 Two honest caveats: the M4's 546 GB/s unified memory makes it a *bandwidth monster per core* (LBM and SpMV love it), while the Threadripper's strength is aggregate compute and cache — so kernel-level winners flip by workload, and the Rep Router's cost models are machine-specific on purpose. And every target is stored in the ledger with the machine fingerprint; a "target" that was never re-measured is a lie waiting to happen.
 
 ### 14.2 Machine-adaptive execution [S/F]
