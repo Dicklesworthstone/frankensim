@@ -3669,6 +3669,25 @@ impl Ledger {
             path: path.to_string(),
             detail: e.to_string(),
         })?;
+        // REFUSE BEFORE WRITING (sibling-review drill D1): a file written by a
+        // newer fs-ledger must be refused and never clobbered. The pragma
+        // contract below (journal_mode=WAL in particular) can rewrite the
+        // header and sidecars, so the future-schema check has to run on the
+        // bare connection first; `migrate` re-reads the version afterwards
+        // on the configured connection, which is harmless for a file this
+        // build may open.
+        {
+            let row = conn
+                .query_row("PRAGMA user_version")
+                .map_err(|e| sql_err("read user_version", &e))?;
+            let found = row_i64(&row, 0, "read user_version")?;
+            if found > SCHEMA_VERSION {
+                return Err(LedgerError::FutureSchema {
+                    found,
+                    supported: SCHEMA_VERSION,
+                });
+            }
+        }
         for pragma in [
             "PRAGMA journal_mode=WAL",
             "PRAGMA synchronous=FULL",
