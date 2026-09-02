@@ -305,9 +305,12 @@ final class PCMPlayback {
         }
         buffer.frameLength = AVAudioFrameCount(block.samples.count)
 
+        guard let control else {
+            throw PCMPlaybackError.streamScheduling
+        }
+
         let token = UUID()
         scheduledBuffers[token] = buffer
-        let control = control
         player.scheduleBuffer(
             buffer,
             at: nil,
