@@ -16,13 +16,12 @@ Usage: python3 examples/heatsink-fan/generate_heatsink_stl.py examples/heatsink-
 translated: the rotation-invariance twin for the mesh corpus (bead
 q61wp.46). Every facet is then oblique and no coordinate is dyadic, which is
 what real CAD looks like. Rotated vertices are written with round-trip-exact
-digits (Python repr). MEASURED 2026-09-02: the two-fin comb rotated this way
-meshes with the exact volume (fs-mesh CONTRACT items 18-19 record the kernel
-defects that took); the four-fin shell does not yet — its coplanar clusters
-leave chains of zero-volume tets the flat-tet repair cannot clear — and a
-copy rounded to nine decimals is worse still (a 1e-10-noisy point cloud).
-The precision an STL carries is part of its meshability; the twin is not
-tracked until the mesher clears it.
+digits (Python repr). The tracked twin `heatsink-rotated.stl` is
+`--rotate 35 21 --shift 0.1 0.2 0.05`; MEASURED 2026-09-02 it meshes with
+the exact volume (378 tets, 98 Steiner points; fs-mesh CONTRACT items 18-21
+record the kernel and recovery defects that took). A copy rounded to nine
+decimals does NOT mesh: every coplanar facet grid becomes a 1e-10-noisy
+point cloud. The precision an STL carries is part of its meshability.
 """
 import math
 import sys

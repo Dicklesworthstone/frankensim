@@ -102,6 +102,11 @@ pub struct Correspondence {
     pub rows: Vec<([u32; 2], u32)>,
 }
 
+/// Live mesh edge set, for the volumetric layer's diagnostics.
+pub(crate) fn edge_set_of(tetra: &Tetrahedralization) -> BTreeSet<[u32; 2]> {
+    edge_set(tetra)
+}
+
 /// Live mesh edge set (sorted vertex pairs of live real tets).
 fn edge_set(tetra: &Tetrahedralization) -> BTreeSet<[u32; 2]> {
     let mut edges = BTreeSet::new();
@@ -211,6 +216,12 @@ pub fn recover_segments(
                     stats.max_depth_used = stats.max_depth_used.max(depth + 1);
                     by_bits.insert(bits, new_idx);
                     edges = edge_set(tetra);
+                    if std::env::var_os("FS_MESH_TRACE_RECOVERY").is_some() && edges.contains(&key)
+                    {
+                        eprintln!(
+                            "TRACE recovery: segment {sid} midpoint {new_idx} of sub-edge {key:?} left the edge alive"
+                        );
+                    }
                     Some(new_idx)
                 } else {
                     // A vertex with different stored bits collided in
@@ -360,16 +371,31 @@ pub struct FacetCorrespondence {
 }
 
 /// Live mesh face set (sorted vertex triples of live real tets).
-fn face_set(tetra: &Tetrahedralization) -> BTreeSet<[u32; 3]> {
-    let mut faces = BTreeSet::new();
+/// Live real faces → the apex of each incident real tet (`GHOST` in the
+/// second slot of a hull face). Which side of a facet's plane those apexes
+/// lie on is what tells a tiling apart from a double cover
+/// (`coplanar_tiling`).
+type FaceApexes = std::collections::BTreeMap<[u32; 3], [u32; 2]>;
+
+fn face_set(tetra: &Tetrahedralization) -> FaceApexes {
+    let mut faces = FaceApexes::new();
     for tet in tetra.tets() {
         for skip in 0..4 {
-            let mut f: Vec<u32> = (0..4).filter(|&i| i != skip).map(|i| tet[i]).collect();
-            if f.contains(&GHOST) {
-                continue;
+            let mut f = [0u32; 3];
+            let mut j = 0;
+            for i in 0..4 {
+                if i != skip {
+                    f[j] = tet[i];
+                    j += 1;
+                }
             }
             f.sort_unstable();
-            faces.insert([f[0], f[1], f[2]]);
+            let slots = faces.entry(f).or_insert([GHOST, GHOST]);
+            if slots[0] == GHOST {
+                slots[0] = tet[skip];
+            } else {
+                slots[1] = tet[skip];
+            }
         }
     }
     faces
@@ -483,6 +509,98 @@ fn parameter_on_segment(p: [f64; 3], a: [f64; 3], b: [f64; 3]) -> Option<f64> {
     Some(t)
 }
 
+fn sorted2(a: u32, b: u32) -> [u32; 2] {
+    if a < b { [a, b] } else { [b, a] }
+}
+
+/// Vertex `i` lies strictly between the chord endpoints `a` and `b` within
+/// the segment tolerance. The chord is evaluated with its endpoints in index
+/// order so that the two facets sharing a segment — which walk it in
+/// opposite directions — reach the same verdict on every vertex near it.
+fn on_chord(points: &[[f64; 3]], i: u32, a: u32, b: u32) -> bool {
+    let (lo, hi) = if a < b { (a, b) } else { (b, a) };
+    parameter_on_segment(points[i as usize], points[lo as usize], points[hi as usize]).is_some()
+}
+
+/// Every mesh vertex on the chord `(a, b)` — its endpoints and each vertex
+/// within the segment tolerance of it — in parameter order from the lower
+/// index to the higher. Consecutive pairs are the sub-edges any tiling that
+/// touches this segment must use as its free edges: a chain that skipped a
+/// vertex would pass a rounding hair from it, and the facet across the
+/// segment, tiled through that vertex, would then not meet this one.
+fn chain_on_chord(points: &[[f64; 3]], a: u32, b: u32) -> Vec<u32> {
+    let (lo, hi) = if a < b { (a, b) } else { (b, a) };
+    let (pa, pb) = (points[lo as usize], points[hi as usize]);
+    let d = [pb[0] - pa[0], pb[1] - pa[1], pb[2] - pa[2]];
+    let pad = 1e-12 * d[0].mul_add(d[0], d[1].mul_add(d[1], d[2] * d[2])).sqrt();
+    let min = [
+        pa[0].min(pb[0]) - pad,
+        pa[1].min(pb[1]) - pad,
+        pa[2].min(pb[2]) - pad,
+    ];
+    let max = [
+        pa[0].max(pb[0]) + pad,
+        pa[1].max(pb[1]) + pad,
+        pa[2].max(pb[2]) + pad,
+    ];
+    let mut on: Vec<(f64, u32)> = vec![(0.0, lo), (1.0, hi)];
+    for (i, p) in points.iter().enumerate() {
+        let i = u32::try_from(i).expect("point count fits u32");
+        if i == lo
+            || i == hi
+            || p[0] < min[0]
+            || p[0] > max[0]
+            || p[1] < min[1]
+            || p[1] > max[1]
+            || p[2] < min[2]
+            || p[2] > max[2]
+        {
+            continue;
+        }
+        if let Some(t) = parameter_on_segment(*p, pa, pb) {
+            on.push((t, i));
+        }
+    }
+    on.sort_by(|x, y| x.0.total_cmp(&y.0).then(x.1.cmp(&y.1)));
+    on.into_iter().map(|(_, v)| v).collect()
+}
+
+/// The free edges every tiling of the facet must have: the consecutive
+/// pairs of each loop edge's chord chain.
+fn required_boundary(points: &[[f64; 3]], loop_verts: &[u32]) -> BTreeSet<[u32; 2]> {
+    let n = loop_verts.len();
+    let mut required = BTreeSet::new();
+    for k in 0..n {
+        let chain = chain_on_chord(points, loop_verts[k], loop_verts[(k + 1) % n]);
+        for w in chain.windows(2) {
+            required.insert(sorted2(w[0], w[1]));
+        }
+    }
+    required
+}
+
+/// Edges used by exactly one of `tiles`; `None` when some edge is used more
+/// than twice (not a tiling of anything).
+fn free_edges(tiles: &[[u32; 3]]) -> Option<BTreeSet<[u32; 2]>> {
+    let mut edge_use: std::collections::BTreeMap<[u32; 2], u32> = std::collections::BTreeMap::new();
+    for t in tiles {
+        for (x, y) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+            *edge_use.entry(sorted2(x, y)).or_insert(0) += 1;
+        }
+    }
+    let mut free = BTreeSet::new();
+    for (edge, uses) in edge_use {
+        match uses {
+            1 => {
+                free.insert(edge);
+            }
+            2 => {}
+            _ => return None,
+        }
+    }
+    Some(free)
+}
+
 /// Orthogonal projection onto the line through `a` and `b`. A point
 /// already on the line is returned unchanged so axis-aligned bitwise
 /// identity and concurrent-segment twins survive.
@@ -531,9 +649,20 @@ fn snap_to_plane(point: [f64; 3], origin: [f64; 3], normal: [f64; 3]) -> [f64; 3
 }
 
 fn project_facet(points: &[[f64; 3]], loop_verts: &[u32]) -> Vec<[f64; 2]> {
-    let nrm = newell_normal(points, loop_verts);
-    // Dominant axis = largest |component|; keep the other two in ascending
-    // axis order (a fixed, deterministic choice).
+    let (u, v) = plane_axes(newell_normal(points, loop_verts));
+    loop_verts
+        .iter()
+        .map(|&idx| {
+            let p = points[idx as usize];
+            [p[u], p[v]]
+        })
+        .collect()
+}
+
+/// The two coordinate axes a plane with normal `nrm` projects onto: drop
+/// the dominant axis (largest |component|) and keep the other two in
+/// ascending axis order (a fixed, deterministic choice).
+fn plane_axes(nrm: [f64; 3]) -> (usize, usize) {
     let mut ax = 0usize;
     let mut best = nrm[0].abs();
     for (a, &c) in nrm.iter().enumerate().skip(1) {
@@ -542,18 +671,11 @@ fn project_facet(points: &[[f64; 3]], loop_verts: &[u32]) -> Vec<[f64; 2]> {
             ax = a;
         }
     }
-    let (u, v) = match ax {
+    match ax {
         0 => (1usize, 2usize),
         1 => (0usize, 2usize),
         _ => (0usize, 1usize),
-    };
-    loop_verts
-        .iter()
-        .map(|&idx| {
-            let p = points[idx as usize];
-            [p[u], p[v]]
-        })
-        .collect()
+    }
 }
 
 /// True iff the projected simple polygon is convex (every turn one way;
@@ -737,7 +859,7 @@ fn inside_facet_interior(p: [f64; 3], corners: &[[f64; 3]; 3]) -> bool {
 /// that stop the tiling from closing.
 fn explain_tiling(
     points: &[[f64; 3]],
-    faces: &BTreeSet<[u32; 3]>,
+    faces: &FaceApexes,
     loop_verts: &[u32],
     interior: &BTreeSet<u32>,
 ) -> String {
@@ -800,7 +922,7 @@ fn explain_tiling(
     let mut tiles = 0usize;
     let mut edge_use: std::collections::BTreeMap<[u32; 2], (u32, u8)> =
         std::collections::BTreeMap::new();
-    for face in faces {
+    for face in faces.keys() {
         if !(loose(face[0]) && loose(face[1]) && loose(face[2])) {
             continue;
         }
@@ -836,11 +958,32 @@ fn explain_tiling(
     )
 }
 
+/// The tiles of the facet's plane on `side`: the in-plane faces with
+/// exactly one incident tet whose apex lies strictly on that side. That is
+/// the boundary of the tets on that side, restricted to the plane — a
+/// manifold sheet by construction, whatever stack of zero-volume tets the
+/// kernel left between the two triangulations of each co-circular quad.
+fn sheet_on_side(
+    tiles: &[([u32; 3], [u32; 2])],
+    side: Sign,
+    plane_side: &dyn Fn(u32) -> Option<Sign>,
+) -> Vec<[u32; 3]> {
+    tiles
+        .iter()
+        .filter(|(_, apexes)| {
+            (plane_side(apexes[0]) == Some(side)) != (plane_side(apexes[1]) == Some(side))
+        })
+        .map(|(face, _)| *face)
+        .collect()
+}
+
 fn coplanar_tiling(
     points: &[[f64; 3]],
-    faces: &BTreeSet<[u32; 3]>,
+    faces: &FaceApexes,
     loop_verts: &[u32],
     interior: &BTreeSet<u32>,
+    required: &BTreeSet<[u32; 2]>,
+    trace: bool,
 ) -> Option<Vec<[u32; 3]>> {
     if loop_verts.len() != 3 {
         return None;
@@ -871,15 +1014,7 @@ fn coplanar_tiling(
         for k in 0..3 {
             let a = corners[k];
             let b = corners[(k + 1) % 3];
-            if i == a
-                || i == b
-                || parameter_on_segment(
-                    points[i as usize],
-                    corner_points[k],
-                    corner_points[(k + 1) % 3],
-                )
-                .is_some()
-            {
+            if i == a || i == b || on_chord(points, i, a, b) {
                 bits |= 1 << k;
             }
         }
@@ -894,43 +1029,149 @@ fn coplanar_tiling(
         cache.insert(i, verdict);
         verdict
     };
-    let mut tiles: Vec<[u32; 3]> = Vec::new();
+    let mut tiles: Vec<([u32; 3], [u32; 2])> = Vec::new();
     let mut edge_use: std::collections::BTreeMap<[u32; 2], (u32, u8)> =
         std::collections::BTreeMap::new();
-    for face in faces {
+    for (face, apexes) in faces {
         let (Some(b0), Some(b1), Some(b2)) =
             (classify(face[0]), classify(face[1]), classify(face[2]))
         else {
             continue;
         };
-        tiles.push(*face);
-        for (x, bx, y, by) in [
+        let edges = [
             (face[0], b0, face[1], b1),
             (face[1], b1, face[2], b2),
             (face[0], b0, face[2], b2),
-        ] {
-            let key = if x < y { [x, y] } else { [y, x] };
-            let entry = edge_use.entry(key).or_insert((0, bx & by));
+        ];
+        // A face with an edge along a facet edge that is not one of that
+        // edge's chain sub-edges skips a vertex sitting on the segment (a
+        // midpoint a rounding hair off its chord, kept alive beside the
+        // edge by a needle tet). The facet across the segment is tiled
+        // through that vertex, so this face would leave a hole between
+        // the two tilings: it is not a tile of anything.
+        if edges
+            .iter()
+            .any(|&(x, bx, y, by)| bx & by != 0 && !required.contains(&sorted2(x, y)))
+        {
+            continue;
+        }
+        tiles.push((*face, *apexes));
+        for (x, bx, y, by) in edges {
+            let entry = edge_use.entry(sorted2(x, y)).or_insert((0, bx & by));
             entry.0 += 1;
         }
     }
     if tiles.is_empty() {
         return None;
     }
-    // Every free edge (used once) must lie on ONE facet edge: both
-    // endpoints on that edge (inside the facet) ⇒ the edge is on it.
-    for &(uses, shared_bits) in edge_use.values() {
+    // Fast path — the in-plane faces are already one tiling: every free
+    // edge (used once) lies on ONE facet edge (both endpoints on that
+    // edge, inside the facet ⇒ the edge is on it), no edge is used more
+    // than twice, and the free edges together are exactly the boundary
+    // chains — fewer is a hole on the boundary, a different set a skipped
+    // vertex. This is the historical answer, byte-identical.
+    let mut free = BTreeSet::new();
+    let mut single_cover = true;
+    for (&edge, &(uses, shared_bits)) in &edge_use {
         match uses {
             2 => {}
             1 => {
                 if shared_bits == 0 {
-                    return None;
+                    single_cover = false;
+                    break;
                 }
+                free.insert(edge);
             }
-            _ => return None,
+            _ => {
+                single_cover = false;
+                break;
+            }
         }
     }
-    Some(tiles)
+    if single_cover && free == *required {
+        return Some(tiles.iter().map(|(face, _)| *face).collect());
+    }
+    // Otherwise the plane holds both triangulations of some quads (the
+    // kernel's zero-volume tets between them, `repair_flat_tets`): take
+    // the sheet on one side of the plane — the boundary of that side's
+    // tets. Either side is a tiling of a conformed facet; a hull layer has
+    // real tets on one side only, so both are tried.
+    let normal = {
+        let u = [
+            corner_points[1][0] - corner_points[0][0],
+            corner_points[1][1] - corner_points[0][1],
+            corner_points[1][2] - corner_points[0][2],
+        ];
+        let v = [
+            corner_points[2][0] - corner_points[0][0],
+            corner_points[2][1] - corner_points[0][1],
+            corner_points[2][2] - corner_points[0][2],
+        ];
+        let n = [
+            u[1] * v[2] - u[2] * v[1],
+            u[2] * v[0] - u[0] * v[2],
+            u[0] * v[1] - u[1] * v[0],
+        ];
+        let nn = n[0] * n[0] + n[1] * n[1] + n[2] * n[2];
+        let scale2 =
+            (u[0] * u[0] + u[1] * u[1] + u[2] * u[2]).max(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+        (n, nn * scale2 * 1e-24)
+    };
+    let plane_side = |q: u32| -> Option<Sign> {
+        if q == GHOST {
+            return None;
+        }
+        let p = points[q as usize];
+        let (n, tol2) = normal;
+        let h = n[0] * (p[0] - corner_points[0][0])
+            + n[1] * (p[1] - corner_points[0][1])
+            + n[2] * (p[2] - corner_points[0][2]);
+        if h * h <= tol2 {
+            None
+        } else if h > 0.0 {
+            Some(Sign::Positive)
+        } else {
+            Some(Sign::Negative)
+        }
+    };
+    for side in [Sign::Positive, Sign::Negative] {
+        let sheet = sheet_on_side(&tiles, side, &plane_side);
+        if sheet.is_empty() {
+            continue;
+        }
+        match free_edges(&sheet) {
+            Some(free) if free == *required => return Some(sheet),
+            outcome => {
+                if trace {
+                    let free_len = outcome.as_ref().map_or(0, BTreeSet::len);
+                    let off: Vec<[u32; 2]> = outcome
+                        .as_ref()
+                        .map(|f| f.symmetric_difference(required).copied().take(8).collect())
+                        .unwrap_or_default();
+                    eprintln!(
+                        "TRACE sheet: side {side:?}: {} tiles, {} free edges vs {} required (overused: {}); first differences {off:?}{}",
+                        sheet.len(),
+                        free_len,
+                        required.len(),
+                        outcome.is_none(),
+                        if required.len() <= 20 {
+                            format!(
+                                "; free {:?} required {:?} tiles {:?}",
+                                outcome
+                                    .as_ref()
+                                    .map(|f| f.iter().copied().collect::<Vec<_>>()),
+                                required.iter().copied().collect::<Vec<_>>(),
+                                sheet
+                            )
+                        } else {
+                            String::new()
+                        }
+                    );
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Recover every SIMPLE planar PLC facet (vertex loop into the
@@ -1122,10 +1363,11 @@ pub fn recover_facets_with_points(
     /// byte-identical), else any coplanar tiling.
     fn satisfied(
         points: &[[f64; 3]],
-        faces: &BTreeSet<[u32; 3]>,
+        faces: &FaceApexes,
         loop_verts: &[u32],
         work: &FacetWork,
     ) -> Option<Vec<[u32; 3]>> {
+        let required = required_boundary(points, loop_verts);
         let own: Vec<[u32; 3]> = work
             .tris
             .iter()
@@ -1135,10 +1377,16 @@ pub fn recover_facets_with_points(
                 k
             })
             .collect();
-        if own.iter().all(|k| faces.contains(k)) {
+        // The facet's own sub-triangles count only while their boundary is
+        // the current chains: a neighbour may have minted a vertex on a
+        // shared edge that the mesh kept beside the edge (see
+        // `chain_on_chord`), and a tiling that skips it is not closed
+        // against the neighbour's.
+        if own.iter().all(|k| faces.contains_key(k)) && free_edges(&own).as_ref() == Some(&required)
+        {
             return Some(own);
         }
-        coplanar_tiling(points, faces, loop_verts, &work.interior)
+        coplanar_tiling(points, faces, loop_verts, &work.interior, &required, false)
     }
 
     let mut work: Vec<Option<FacetWork>> = Vec::with_capacity(facets.len());
@@ -1242,6 +1490,9 @@ pub fn recover_facets_with_points(
     // budget are the honest caps; MEASURED: a four-fin comb needed 13+
     // passes but only 8 rounds on its worst facet), and only the
     // verification against the FINISHED mesh below decides.
+    // Trace bookkeeping: where the Steiner points went.
+    let mut constraint_splits = 0u64;
+    let mut interior_splits = 0u64;
     'passes: loop {
         cx.checkpoint()?;
         let faces = face_set(tetra);
@@ -1272,7 +1523,7 @@ pub fn recover_facets_with_points(
                         .filter(|t| {
                             let mut k = **t;
                             k.sort_unstable();
-                            !faces.contains(&k)
+                            !faces.contains_key(&k)
                         })
                         .count();
                     format!(
@@ -1285,15 +1536,24 @@ pub fn recover_facets_with_points(
                             .iter()
                             .filter(|(f, _)| *f as usize == fid)
                             .count(),
-                        coplanar_tiling(&tetra.mesh.points, &faces, &facets[fid], &w.interior)
-                            .map_or("none", |_| "found")
+                        coplanar_tiling(
+                            &tetra.mesh.points,
+                            &faces,
+                            &facets[fid],
+                            &w.interior,
+                            &required_boundary(&tetra.mesh.points, &facets[fid]),
+                            false
+                        )
+                        .map_or("none", |_| "found")
                     )
                 })
                 .collect();
             eprintln!(
-                "TRACE recovery pass: pending {} steiner {} :: {}",
+                "TRACE recovery pass: pending {} steiner {} (constraint {} interior {}) :: {}",
                 pending.len(),
                 stats.steiner_inserted,
+                constraint_splits,
+                interior_splits,
                 detail.join(" ")
             );
             if let Some(&fid) = pending
@@ -1330,7 +1590,7 @@ pub fn recover_facets_with_points(
                         .filter(|t| {
                             let mut k = **t;
                             k.sort_unstable();
-                            !faces.contains(&k)
+                            !faces.contains_key(&k)
                         })
                         .count();
                     eprintln!(
@@ -1343,8 +1603,15 @@ pub fn recover_facets_with_points(
                             .iter()
                             .filter(|(f, _)| *f as usize == fid)
                             .count(),
-                        coplanar_tiling(&tetra.mesh.points, &faces, loop_verts, &w.interior)
-                            .map_or("none", |_| "found")
+                        coplanar_tiling(
+                            &tetra.mesh.points,
+                            &faces,
+                            loop_verts,
+                            &w.interior,
+                            &required_boundary(&tetra.mesh.points, loop_verts),
+                            false
+                        )
+                        .map_or("none", |_| "found")
                     );
                 }
                 continue;
@@ -1356,6 +1623,42 @@ pub fn recover_facets_with_points(
             w.rounds += 1;
             progressed = true;
             stats.rounds_used = stats.rounds_used.max(w.rounds);
+            // Own sub-triangles to refine: those that are not mesh faces,
+            // and those that ARE faces but skip a vertex a neighbour put on
+            // one of this facet's edges (a midpoint the mesh kept beside its
+            // edge in a needle tet, see `chain_on_chord`): such a face exists
+            // but no tiling through it closes against the neighbour's.
+            // Longest-edge bisection then adopts the vertex when its edge
+            // comes up — raw midpoints of dyadic chains coincide bitwise and
+            // `adopt_near` covers the ulp — while keeping the sub-triangles
+            // balanced (MEASURED 2026-09-02: fanning a triangle over a long
+            // chain instead made interior splits run away, 3393 of 3703
+            // Steiner points on the four-fin comb that needs 136).
+            let chains: Vec<std::collections::BTreeMap<u32, usize>> = (0..loop_verts.len())
+                .map(|k| {
+                    chain_on_chord(
+                        &tetra.mesh.points,
+                        loop_verts[k],
+                        loop_verts[(k + 1) % loop_verts.len()],
+                    )
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, v)| (v, i))
+                    .collect()
+                })
+                .collect();
+            let skips_chain = |t: &[u32; 3]| -> bool {
+                chains.iter().any(|position| {
+                    [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])]
+                        .iter()
+                        .any(|&(x, y)| {
+                            matches!(
+                                (position.get(&x), position.get(&y)),
+                                (Some(&i), Some(&j)) if i.abs_diff(j) > 1
+                            )
+                        })
+                })
+            };
             let missing: Vec<usize> = w
                 .tris
                 .iter()
@@ -1363,7 +1666,7 @@ pub fn recover_facets_with_points(
                 .filter(|(_, t)| {
                     let mut k = **t;
                     k.sort_unstable();
-                    !faces.contains(&k)
+                    !faces.contains_key(&k) || skips_chain(t)
                 })
                 .map(|(i, _)| i)
                 .collect();
@@ -1431,6 +1734,18 @@ pub fn recover_facets_with_points(
                     if tetra.mesh.insert(new_idx) {
                         stats.steiner_inserted += 1;
                         by_bits.insert(bits, new_idx);
+                        if on_constraint {
+                            constraint_splits += 1;
+                        } else {
+                            interior_splits += 1;
+                        }
+                        if std::env::var_os("FS_MESH_TRACE_RECOVERY").is_some()
+                            && edge_set(tetra).contains(&edge)
+                        {
+                            eprintln!(
+                                "TRACE recovery: facet {fid} midpoint {new_idx} of edge {edge:?} (constraint {on_constraint}) left the edge alive"
+                            );
+                        }
                         new_idx
                     } else {
                         w.failed = true;
@@ -1471,6 +1786,37 @@ pub fn recover_facets_with_points(
 
     // Verify against the FINISHED mesh and record correspondence.
     let faces = face_set(tetra);
+    if std::env::var_os("FS_MESH_TRACE_RECOVERY").is_some() {
+        let report = tetra.audit(false);
+        eprintln!(
+            "TRACE recovery: finished mesh: {} points, kernel stats {}, exact audit violations {} (first: {:?})",
+            tetra.mesh.points.len(),
+            tetra.mesh.stats.to_json(),
+            report.violations.len(),
+            report.violations.first()
+        );
+        if let Some(path) = std::env::var_os("FS_MESH_DUMP_MESH") {
+            // Debug aid: the finished mesh as text (`p x y z` per point in
+            // index order, `t a b c d` per live real tet, `f v0 v1 v2 ...`
+            // per facet loop) for offline analysis of a failed recovery.
+            let mut out = String::new();
+            for p in &tetra.mesh.points {
+                out.push_str(&format!("p {:?} {:?} {:?}\n", p[0], p[1], p[2]));
+            }
+            for tet in tetra.tets() {
+                if tet[3] != GHOST {
+                    out.push_str(&format!("t {} {} {} {}\n", tet[0], tet[1], tet[2], tet[3]));
+                }
+            }
+            for loop_verts in facets {
+                let ids: Vec<String> = loop_verts.iter().map(u32::to_string).collect();
+                out.push_str(&format!("f {}\n", ids.join(" ")));
+            }
+            if let Err(err) = std::fs::write(&path, out) {
+                eprintln!("TRACE recovery: mesh dump to {path:?} failed: {err}");
+            }
+        }
+    }
     for (fid, loop_verts) in facets.iter().enumerate() {
         let fid32 = u32::try_from(fid).expect("facet count fits u32");
         let rows = work[fid]
@@ -1486,6 +1832,43 @@ pub fn recover_facets_with_points(
             }
             None => {
                 stats.unrecovered += 1;
+                if std::env::var_os("FS_MESH_TRACE_RECOVERY").is_some() {
+                    let corners: Vec<[f64; 3]> = loop_verts
+                        .iter()
+                        .map(|&v| tetra.mesh.points[v as usize])
+                        .collect();
+                    let (rounds, tris, missing, interior) =
+                        work[fid].as_ref().map_or((0, 0, 0, 0), |w| {
+                            let missing = w
+                                .tris
+                                .iter()
+                                .filter(|t| {
+                                    let mut k = **t;
+                                    k.sort_unstable();
+                                    !faces.contains_key(&k)
+                                })
+                                .count();
+                            (w.rounds, w.tris.len(), missing, w.interior.len())
+                        });
+                    let explain = work[fid].as_ref().map_or_else(String::new, |w| {
+                        explain_tiling(&tetra.mesh.points, &faces, loop_verts, &w.interior)
+                    });
+                    let explain: String = explain.chars().take(700).collect();
+                    eprintln!(
+                        "TRACE recovery: facet {fid} UNRECOVERED {loop_verts:?} corners {corners:?}: rounds {rounds} own tris {tris} missing {missing} interior {interior}; {explain}"
+                    );
+                    if let Some(w) = work[fid].as_ref() {
+                        // The sheet extraction's own account of the failure.
+                        let _ = coplanar_tiling(
+                            &tetra.mesh.points,
+                            &faces,
+                            loop_verts,
+                            &w.interior,
+                            &required_boundary(&tetra.mesh.points, loop_verts),
+                            true,
+                        );
+                    }
+                }
             }
         }
     }
@@ -1494,7 +1877,38 @@ pub fn recover_facets_with_points(
 
 #[cfg(test)]
 mod tests {
-    use super::{ear_clip, is_convex, project_facet};
+    use super::{ear_clip, is_convex, project_facet, sheet_on_side};
+    use crate::delaunay::GHOST;
+    use fs_ivl::Sign;
+
+    /// The sheet on one side of a facet's plane is the boundary of that
+    /// side's tets: a square carrying both triangulations (a zero-volume
+    /// tet between them, apexes in the plane) contributes exactly the
+    /// diagonal facing that side, a face with real tets on both sides is in
+    /// both sheets, and a hull face is in the sheet of its one real tet.
+    #[test]
+    fn sheet_on_side_is_the_boundary_of_that_sides_tets() {
+        // Vertices 0..=8 in the plane; 9 above, 10 below.
+        let plane_side = |q: u32| -> Option<Sign> {
+            match q {
+                9 => Some(Sign::Positive),
+                10 => Some(Sign::Negative),
+                _ => None,
+            }
+        };
+        let tiles: Vec<([u32; 3], [u32; 2])> = vec![
+            ([5, 6, 7], [9, 8]),     // top of the flat [5,6,7,8]
+            ([5, 7, 8], [9, 6]),     // top of the flat
+            ([5, 6, 8], [7, 10]),    // bottom of the flat
+            ([6, 7, 8], [5, 10]),    // bottom of the flat
+            ([0, 3, 5], [9, 10]),    // ordinary sheet face
+            ([1, 2, 7], [9, GHOST]), // hull face, real tet above
+        ];
+        let above = sheet_on_side(&tiles, Sign::Positive, &plane_side);
+        assert_eq!(above, vec![[5, 6, 7], [5, 7, 8], [0, 3, 5], [1, 2, 7]]);
+        let below = sheet_on_side(&tiles, Sign::Negative, &plane_side);
+        assert_eq!(below, vec![[5, 6, 8], [6, 7, 8], [0, 3, 5]]);
+    }
 
     fn poly_area(p: &[[f64; 2]]) -> f64 {
         let m = p.len();

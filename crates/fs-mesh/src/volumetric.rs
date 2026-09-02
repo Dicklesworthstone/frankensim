@@ -258,14 +258,16 @@ pub struct RefinementEvidence {
     pub steiner_inserted: u32,
     /// Steiner points the re-recovery passes added on top.
     pub recovery_steiner: u64,
-    /// Worst radius-edge ratio inside the solid before / after.
+    /// Worst radius-edge ratio inside the solid before refinement.
     pub worst_before: f64,
+    /// Worst radius-edge ratio inside the solid after refinement.
     pub worst_after: f64,
     /// Offenders left inside the solid when refinement stopped.
     pub offenders_remaining: u32,
     /// Circumcenters that landed outside the solid without encroaching a
-    /// wall (skipped), and insertions the minimum-edge policy yielded.
+    /// wall (skipped).
     pub skipped_outside: u32,
+    /// Insertions the minimum-edge policy yielded.
     pub protected_by_policy: u32,
     /// Wall splits (encroached facets split in place; none until that
     /// increment lands).
@@ -626,7 +628,7 @@ impl AdmittedPlc {
                 facets: facet_stats.unrecovered,
             });
         }
-        Ok(ConstraintRecoveredPlc {
+        let recovered = ConstraintRecoveredPlc {
             tetra,
             regions: self.regions,
             correspondence,
@@ -639,11 +641,59 @@ impl AdmittedPlc {
                 facets: facet_stats,
             },
             policy: self.policy,
-        })
+        };
+        recovered.check_tile_surface_closed()?;
+        Ok(recovered)
     }
 }
 
 impl ConstraintRecoveredPlc {
+    /// The tiles of a region's facets must form a closed surface: every
+    /// tile edge used exactly twice within the region. That is the property
+    /// the seed flood relies on — the walls separate the region from the
+    /// exterior only if they close — and per-facet tiling cannot prove it
+    /// alone: two coplanar facets sharing a segment may each be tiled
+    /// legitimately yet with different vertex chains along that segment
+    /// (one through a recovery midpoint, one across the original edge when
+    /// the midpoint sits a rounding hair off the line), leaving a sliver-
+    /// shaped hole the flood walks through. Refused here with the gap
+    /// named (trace `FS_MESH_TRACE_RECOVERY`), not downstream as a winding
+    /// failure on some zero-volume tet.
+    fn check_tile_surface_closed(&self) -> Result<(), VolumetricError> {
+        for region in &self.regions {
+            let gaps = tile_surface_gaps(&self.correspondence.rows, &self.unique_facets, region);
+            if gaps.is_empty() {
+                continue;
+            }
+            if std::env::var_os("FS_MESH_TRACE_RECOVERY").is_some() {
+                let edges = crate::recovery::edge_set_of(&self.tetra);
+                let shown: Vec<String> = gaps
+                    .iter()
+                    .take(16)
+                    .map(|(edge, uses)| {
+                        let p = &self.tetra.mesh.points;
+                        format!(
+                            "{edge:?}x{uses} mesh-edge:{} {:?}-{:?}",
+                            edges.contains(edge),
+                            p[edge[0] as usize],
+                            p[edge[1] as usize]
+                        )
+                    })
+                    .collect();
+                eprintln!(
+                    "TRACE recovery: region {} tile surface is not closed: {} edges used other than twice: {}",
+                    region.id.0,
+                    gaps.len(),
+                    shown.join(" ")
+                );
+            }
+            return Err(VolumetricError::Audit {
+                reason: "recovered facet tiles do not close the region surface",
+            });
+        }
+        Ok(())
+    }
+
     /// The tets of every seeded chamber (what carve-and-label will keep),
     /// by the same flood carve uses; `None` when a seed cannot be located
     /// (carve will report that refusal).
@@ -788,6 +838,7 @@ impl ConstraintRecoveredPlc {
                 });
             }
             self.correspondence = correspondence;
+            self.check_tile_surface_closed()?;
             let Some(next_inside) = self.inside_tets() else {
                 evidence.stop = "seed-unlocatable";
                 break;
@@ -1679,6 +1730,33 @@ fn triangle_area2(vertices: &[[f64; 3]], tri: [u32; 3]) -> f64 {
 
 fn sorted2(a: u32, b: u32) -> [u32; 2] {
     if a < b { [a, b] } else { [b, a] }
+}
+
+/// Edges of `region`'s tile surface (the correspondence rows whose parent
+/// facet is one of the region's triangles) used other than exactly twice,
+/// with their use counts; empty iff the tiles close the region.
+fn tile_surface_gaps(
+    rows: &[([u32; 3], u32)],
+    unique_facets: &[[u32; 3]],
+    region: &RegionSpec,
+) -> Vec<([u32; 2], u32)> {
+    let mine: BTreeSet<[u32; 3]> = region.triangles.iter().map(|t| sorted3(*t)).collect();
+    let mut edge_use: BTreeMap<[u32; 2], u32> = BTreeMap::new();
+    for (face, parent) in rows {
+        let Some(facet) = unique_facets.get(*parent as usize) else {
+            continue;
+        };
+        if !mine.contains(facet) {
+            continue;
+        }
+        for (x, y) in [(face[0], face[1]), (face[1], face[2]), (face[0], face[2])] {
+            *edge_use.entry(sorted2(x, y)).or_insert(0) += 1;
+        }
+    }
+    edge_use
+        .into_iter()
+        .filter(|(_, uses)| *uses != 2)
+        .collect()
 }
 
 fn sorted3(mut f: [u32; 3]) -> [u32; 3] {

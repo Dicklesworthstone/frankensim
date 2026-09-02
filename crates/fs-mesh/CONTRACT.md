@@ -331,6 +331,59 @@ half-edge round-trips, closed-manifold audits).
     walls onto the tet's interior faces with the parent facet inherited, and
     the independent winding audit re-checks the result. Any other flat tet
     that resists removal stays disclosed as `unrepaired`.
+20. Facet tilings close against their neighbours. A facet is recovered only
+    by a tiling whose free edges are exactly the CHAIN of every mesh vertex
+    on each of its edges (`recovery::chain_on_chord`: the endpoints and every
+    vertex within the segment tolerance of the chord, in parameter order,
+    evaluated with the endpoints in index order so both facets sharing a
+    segment reach the same verdict). A face whose edge lies along a facet
+    edge without being a chain sub-edge is never a tile, and a facet's own
+    sub-triangle that is a mesh face but skips a chain vertex counts as
+    missing, so longest-edge bisection adopts the vertex when its edge comes
+    up (raw midpoints of dyadic chains coincide bitwise; `adopt_near` covers
+    the ulp). After recovery, `AdmittedPlc::recover` and the constrained
+    refinement re-recovery refuse with `Audit { reason: "recovered facet
+    tiles do not close the region surface" }` unless every edge of each
+    region's tile set is used exactly twice — the property the seed flood
+    depends on and per-facet tiling cannot prove. MEASURED 2026-09-02 on the
+    rotated four-fin heatsink shell: the crease edge (10, 13) between fin 1's
+    top and side was tiled across the original edge by one facet and through
+    the midpoint 114 minted on that edge by the other; both tilings passed
+    the old test; the flood walked through the one sliver-shaped hole into
+    the exterior, every zero-volume tet under the bottom plane was retained,
+    and the winding audit tripped on the first of them far from the hole.
+    The edge survived its own midpoint because the fin tops are a nearly
+    coplanar HULL layer whose flat tets have circumspheres so large that the
+    exact f64 midpoint, a rounding hair off the plane, falls outside them:
+    Bowyer–Watson did not consume the whole star of the edge and a needle
+    tet kept the edge alive beside its midpoint (14 such midpoints on that
+    shell; none with eight far bounding-box points, which is not what ships).
+    Dead end, measured: adopting the chain vertices by fanning the facet's
+    triangle over them made interior splits run away (3393 of 3703 Steiner
+    points on the four-fin comb that needs 136); balanced bisection does not.
+    `FS_MESH_TRACE_RECOVERY` names the open edges, every midpoint that left
+    its edge alive, and each unrecovered facet's anatomy; `FS_MESH_DUMP_MESH`
+    writes the finished mesh as text for offline analysis.
+21. Coplanar tiling is a one-sided sheet. Four coplanar co-circular points —
+    every rectangle of a facet grid and every square bisection makes of one —
+    are tetrahedralized with a zero-volume tet whose faces are BOTH
+    triangulations of the quad (item 19), so once bisection has moved a facet
+    away from its own sub-triangles the faces in its plane are a stack of
+    double covers and no edge count can accept a tiling: on the rotated
+    four-fin shell one base-top strip reached 4614 sub-triangles, twenty
+    times its local feature size. `coplanar_tiling` therefore takes, when the
+    in-plane faces are not already one clean tiling (that answer is kept,
+    byte-identical), the sheet on one side of the facet's plane: the
+    in-plane faces with exactly one incident tet whose apex lies strictly on
+    that side — the boundary of that side's tets, manifold by construction;
+    both sides are tried because a hull layer has real tets on one side only
+    (`recovery::sheet_on_side`, unit-tested on a synthetic double cover). The
+    flat tet between the two triangulations then lies either outside the
+    walls (carved) or inside with two wall faces (item 19 drops it). Corpus:
+    the rotated four-fin heatsink shell volumetricizes with the exact volume
+    — 378 tets, 154 vertices, 98 Steiner points, 108/108 facets, two interior
+    zero-volume tets disclosed — and the axis-aligned bodies are unchanged
+    (four-fin comb prism 136 Steiner points).
 
 ## Error model
 
