@@ -409,13 +409,15 @@ class FrankenSimClient:
         exit_code, data, diagnostics, _, stderr_raw = self._execute(args, timeout_s=timeout_s)
         result = RunOutcome(
             status=data.get("status", "unknown"),
-            command="run",
+            command=data.get("command", "run"),
             subject=data.get("subject", str(project_path)),
             run_id=data.get("run", ""),
             # Empty means the engine minted no artifact (e.g. an unavailable
             # stage under strict=False): never fabricate success-shaped paths.
-            report_file=data.get("report", ""),
+            report_file=data.get("report_json", ""),
             package_file=data.get("package", ""),
+            verdict=data.get("verdict", ""),
+            stage=data.get("stage"),
             exit_code=exit_code,
             diagnostics=diagnostics,
         )

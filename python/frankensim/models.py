@@ -212,6 +212,8 @@ class RunOutcome:
     package_file: str
     exit_code: int = 0
     diagnostics: List[Diagnostic] = field(default_factory=list)
+    verdict: str = ""
+    stage: Optional[str] = None
 
 
 @dataclass(frozen=True)

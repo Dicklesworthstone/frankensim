@@ -13,6 +13,11 @@
 #                                code `project-duty-range`, and its one-
 #                                token repair stays byte-equal to the
 #                                tracked reference project.
+#   4. examples/heatsink-fan   — the finned heatsink validates, imports,
+#                                SOLVES all seven stages (conduction with
+#                                a derived airflow-convection law), and
+#                                the report/package verbs export exactly
+#                                the retained bytes of that run.
 #
 # FROZEN BYTES: the canonical project hashes are frozen as literals in the
 # G0 battery (`crates/fs-cli/tests/cli.rs`,
@@ -123,23 +128,37 @@ import_ok() {
 check "heatsink import into ledger ok" import_ok
 check "import reports artifact count >= 1" grep -q '"artifact_count":1' "${WORK}/imp.json"
 
-solve_prefix() {
-  RC=0
-  "${BINARY}" --json solve "${HEATSINK}" "${WORK}/ledger.db" --materials "${PACK}" > "${WORK}/s.json" 2> "${WORK}/s.err" || RC=$?
-  test "${RC}" -eq 5
+solve_completes() {
+  "${BINARY}" --json solve "${HEATSINK}" "${WORK}/ledger.db" --materials "${PACK}" > "${WORK}/s.json" 2> "${WORK}/s.err"
 }
-check "solve prefix halts honestly at conduction gap with exit 5" solve_prefix
+check "solve completes every stage on the finned heatsink (exit 0)" solve_completes
+check "solve reports seven completed stages" grep -q '"stages_completed":7' "${WORK}/s.json"
+check "conduction stage executed (derived airflow convection, not a typed gap)" \
+  grep -q '"stage":"conduction","ordinal":4,"status":"ok"' "${WORK}/s.err"
 
-# ---- 7. deterministic engineering report and package ------------------------
+# ---- 7. report and package are projections of the retained run --------------
+RUN_ID="$(grep -oE '"run":"[0-9a-f]{64}"' "${WORK}/s.json" | head -1 | cut -d'"' -f4)"
+check "solve result names its 64-hex run id" test "${#RUN_ID}" -eq 64
+
 report_ok() {
-  "${BINARY}" --json report "cooling_demo_run" "${WORK}/ledger.db" > "${WORK}/rep.json" 2> "${WORK}/rep.err"
+  (cd "${WORK}" && "${BINARY}" --json report "${RUN_ID}" "${WORK}/ledger.db" > "${WORK}/rep.json" 2> "${WORK}/rep.err")
 }
-check "report generator creates html and json twin" report_ok
+check "report exports the retained HTML and JSON twin" report_ok
+check "report export names the retained content hash" grep -q '"content_hash":"' "${WORK}/rep.json"
+check "report verdict is the retained Estimated/indeterminate one" grep -q '"verdict":"indeterminate"' "${WORK}/rep.json"
 
 package_ok() {
-  "${BINARY}" --json package "cooling_demo_run" "${WORK}/ledger.db" > "${WORK}/pkg.json" 2> "${WORK}/pkg.err"
+  (cd "${WORK}" && "${BINARY}" --json package "${RUN_ID}" "${WORK}/ledger.db" > "${WORK}/pkg.json" 2> "${WORK}/pkg.err")
 }
-check "package generator creates audited archive" package_ok
+check "package exports the retained evidence package" package_ok
+check "package passes the checker" grep -q '"checker":"pass"' "${WORK}/pkg.json"
+
+unknown_run_refuses() {
+  RC=0
+  "${BINARY}" --json report "0000000000000000000000000000000000000000000000000000000000000000" "${WORK}/ledger.db" > "${WORK}/unk.json" 2> "${WORK}/unk.err" || RC=$?
+  test "${RC}" -eq 4 && grep -q 'cli-solve-unknown-run' "${WORK}/unk.err"
+}
+check "report of an unknown run refuses with cli-solve-unknown-run (exit 4)" unknown_run_refuses
 
 # ------------------------------------------------------------------- verdict
 log summary "checks=${CHECKS} failures=${FAILURES}"

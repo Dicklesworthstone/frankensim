@@ -64,12 +64,18 @@ case "${COMMAND}" in
     "${BINARY}" --json solve "${PROJECT}" "${LEDGER}" --materials "${PACK}" > "${ARTIFACT_DIR}/solve.json" 2> "${ARTIFACT_DIR}/solve.err" || RC=$?
     T3=$(python3 -c 'import time; print(time.perf_counter())')
 
-    # Step 4: Report
-    "${BINARY}" --json report "profile_run" "${LEDGER}" > "${ARTIFACT_DIR}/report.json"
+    # Step 4: Report — the export verbs take the REAL run id the solve
+    # retained; an export of an unknown run refuses and writes nothing.
+    RUN_ID="$(grep -oE '"run":"[0-9a-f]{64}"' "${ARTIFACT_DIR}/solve.json" | head -1 | cut -d'"' -f4)"
+    if [ "${#RUN_ID}" -ne 64 ]; then
+      printf "ERROR: solve retained no run id (exit %s); see %s\n" "${RC}" "${ARTIFACT_DIR}/solve.err" >&2
+      exit 1
+    fi
+    (cd "${RUN_DIR}" && "${BINARY}" --json report "${RUN_ID}" "${LEDGER}" > "${ARTIFACT_DIR}/report.json")
     T4=$(python3 -c 'import time; print(time.perf_counter())')
 
     # Step 5: Package
-    "${BINARY}" --json package "profile_run" "${LEDGER}" > "${ARTIFACT_DIR}/package.json"
+    (cd "${RUN_DIR}" && "${BINARY}" --json package "${RUN_ID}" "${LEDGER}" > "${ARTIFACT_DIR}/package.json")
     T5=$(python3 -c 'import time; print(time.perf_counter())')
 
     printf "==> 2. Synthesizing PipelineAttributionReceipt\n"

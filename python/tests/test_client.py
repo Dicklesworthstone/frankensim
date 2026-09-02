@@ -56,6 +56,8 @@ class TestFrankenSimClientIntegration(unittest.TestCase):
         cls.fsim = repo_root / "examples" / "heatsink-fan" / "heatsink-fan.fsim"
         cls.stl = repo_root / "examples" / "heatsink-fan" / "heatsink.stl"
         cls.pack = repo_root / "data" / "reference-project" / "aa6061.fsmcdpk"
+        cls.reference_fsim = repo_root / "data" / "reference-project" / "cooling-reference.fsim"
+        cls.reference_stl = repo_root / "data" / "reference-project" / "plate.stl"
 
         # Build frankensim binary if needed or locate
         cls.client = FrankenSimClient()
@@ -122,6 +124,102 @@ class TestFrankenSimClientIntegration(unittest.TestCase):
             self.assertEqual(comp.authority, "none")
             self.assertEqual(comp.qoi_count, 0)
             self.assertEqual(comp.qoi_diffs, [])
+
+    def test_run_exposes_retained_qoi_vocabulary(self):
+        if not (
+            self.reference_fsim.exists()
+            and self.reference_stl.exists()
+            and self.pack.exists()
+            and Path(self.client.binary_path).is_file()
+        ):
+            self.skipTest("reference fixtures or frankensim binary unavailable")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ledger = Path(tmpdir) / "python_run_ledger.db"
+            imported = self.client.import_mesh(
+                project_path=self.reference_fsim,
+                source_path=self.reference_stl,
+                ledger_path=ledger,
+                unit="m",
+                max_hole_edges=0,
+            )
+            self.assertEqual(imported.exit_code, ExitCode.SUCCESS)
+
+            outcome = self.client.run(
+                project_path=self.reference_fsim,
+                ledger_path=ledger,
+                materials=[self.pack],
+            )
+            self.assertEqual(outcome.exit_code, ExitCode.SUCCESS)
+            self.assertEqual(outcome.status, "completed")
+            self.assertIn(outcome.verdict, {"pass", "fail", "indeterminate"})
+
+            report_path = Path(outcome.report_file)
+            self.assertTrue(report_path.is_file(), outcome)
+            report = json.loads(report_path.read_text())
+            self.assertEqual(report["schema"], "frankensim.report.engineering.v1")
+
+            qois = report["qois"]
+            self.assertEqual(len(qois), 1)
+            self.assertEqual(qois[0]["name"], "temperature-max")
+            self.assertIn(qois[0]["color"], {"Verified", "Validated", "Estimated"})
+
+            requirements = report["requirements"]
+            self.assertEqual(len(requirements), 1)
+            self.assertEqual(requirements[0]["qoi"], "temperature-max")
+            self.assertEqual(requirements[0]["outcome"], outcome.verdict)
+
+            budget_terms = report["budget_terms"]
+            self.assertEqual(len(budget_terms), 8)
+            for term in budget_terms:
+                self.assertEqual(term["qoi"], "temperature-max")
+                self.assertIn(term["state"], {"measured", "no-data"})
+                if term["state"] == "no-data":
+                    self.assertIsNone(term["value"])
+                else:
+                    self.assertIsInstance(term["value"], (int, float))
+
+    def test_run_without_materials_surfaces_material_resolve_refusal(self):
+        if not (
+            self.reference_fsim.exists()
+            and self.reference_stl.exists()
+            and Path(self.client.binary_path).is_file()
+        ):
+            self.skipTest("reference fixtures or frankensim binary unavailable")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ledger = Path(tmpdir) / "python_no_materials_ledger.db"
+            imported = self.client.import_mesh(
+                project_path=self.reference_fsim,
+                source_path=self.reference_stl,
+                ledger_path=ledger,
+                unit="m",
+                max_hole_edges=0,
+            )
+            self.assertEqual(imported.exit_code, ExitCode.SUCCESS)
+
+            # The public client emits no --materials flags for None; the real
+            # CLI must therefore reach its material-resolve refusal rather
+            # than inventing a default card or a success-shaped export.
+            outcome = self.client.run(
+                project_path=self.reference_fsim,
+                ledger_path=ledger,
+                materials=None,
+                strict=False,
+            )
+            self.assertEqual(outcome.exit_code, ExitCode.REFUSED)
+            self.assertEqual(outcome.status, "refused")
+            self.assertEqual(outcome.command, "solve")
+            self.assertEqual(outcome.stage, "material-resolve")
+            self.assertEqual(outcome.report_file, "")
+            self.assertEqual(outcome.package_file, "")
+            self.assertTrue(
+                any(
+                    diagnostic.code == "project-material-card-unknown"
+                    for diagnostic in outcome.diagnostics
+                ),
+                outcome.diagnostics,
+            )
 
 
 if __name__ == "__main__":
