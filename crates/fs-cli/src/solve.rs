@@ -6064,6 +6064,12 @@ fn load_latest_state(
     let mut best: Option<VerifiedResume> = None;
     let mut best_is_ambiguous = false;
     let mut import_cache = None;
+    // Ops that belong to this run but were not admissible, by reason, so a
+    // run retained under another driver or receipt schema is reported as
+    // incompatible rather than nonexistent.
+    let run_bytes: &[u8] = run.as_bytes().as_slice();
+    let mut seen_for_run = 0usize;
+    let mut rejections: BTreeMap<String, usize> = BTreeMap::new();
     loop {
         if page_index >= MAX_SOLVE_VISIBLE_OP_PAGES {
             return Err(invocation_work_refusal(
@@ -6123,12 +6129,24 @@ fn load_latest_state(
             else {
                 continue;
             };
-            if candidate.branch != MAIN_BRANCH
-                || candidate.exec_mode != ExecMode::Deterministic
-                || !is_supported_stage_discovery_row(&candidate.row, run)
-            {
+            let this_run = candidate.row.session.as_deref() == Some(run_bytes);
+            if this_run {
+                seen_for_run = seen_for_run.saturating_add(1);
+            }
+            let rejection = if candidate.branch != MAIN_BRANCH {
+                Some("op is not on the main branch".to_string())
+            } else if candidate.exec_mode != ExecMode::Deterministic {
+                Some("op did not execute deterministically".to_string())
+            } else {
+                stage_discovery_rejection(&candidate.row, run).err()
+            };
+            if let Some(reason) = rejection {
+                if this_run {
+                    *rejections.entry(reason).or_insert(0) += 1;
+                }
                 continue;
             }
+            let mut saw_state = false;
             let edges = resume_edges(
                 ledger,
                 run,
@@ -6161,6 +6179,7 @@ fn load_latest_state(
                 if info.kind != STAGE_STATE_KIND {
                     continue;
                 }
+                saw_state = true;
                 let state = decode_driver_state(ledger, run, edge.artifact, work)?;
                 validate_state_shape(&state, run)?;
                 if best
@@ -6192,6 +6211,11 @@ fn load_latest_state(
                     }
                 }
             }
+            if !saw_state {
+                *rejections
+                    .entry("op retains no driver-state artifact".to_string())
+                    .or_insert(0) += 1;
+            }
         }
         match page.next_cursor {
             Some(next) => {
@@ -6210,6 +6234,27 @@ fn load_latest_state(
         }
     }
     let best = best.ok_or_else(|| {
+        if seen_for_run > 0 {
+            let mut reasons: Vec<String> = rejections
+                .iter()
+                .map(|(reason, count)| format!("{count} x {reason}"))
+                .collect();
+            if reasons.is_empty() {
+                reasons.push("no candidate op carried an admissible driver state".to_string());
+            }
+            return SolveRefusal::plain(
+                "cli-solve-run-incompatible",
+                format!(
+                    "solve run `{}` has {seen_for_run} retained operation(s) in this ledger but \
+                     none is admissible under driver version {SOLVE_DRIVER_VERSION}: {}",
+                    run.to_hex(),
+                    reasons.join("; ")
+                ),
+                "the run was retained by a different driver or stage-receipt schema; re-run the \
+                 solve with this binary (the retained run stays in the ledger) or export it with \
+                 the binary that produced it",
+            );
+        }
         SolveRefusal::plain(
             "cli-solve-unknown-run",
             format!("no solve run `{}` exists in this ledger", run.to_hex()),
@@ -6227,26 +6272,52 @@ fn load_latest_state(
     Ok(best)
 }
 
-fn is_supported_stage_discovery_row(row: &OpRow, run: SolveRunId) -> bool {
-    if row.id <= 0
-        || row.session.as_deref() != Some(run.as_bytes().as_slice())
-        || row.outcome.as_deref() != Some("ok")
-        || row.diag.is_some()
-        || row.ir.len() > 512
-    {
-        return false;
+/// Why an op row is NOT a discovery candidate for `run` (or the stage it
+/// names when it is). Every predicate names itself so the loader can tell
+/// "no op for this run" from "ops exist, none admissible" — the latter was
+/// reported as `cli-solve-unknown-run` until 2026-09-02, which blamed the
+/// user for a run their previous binary retained (bridge plan A13).
+fn stage_discovery_rejection(row: &OpRow, run: SolveRunId) -> Result<SolveStage, String> {
+    if row.id <= 0 {
+        return Err("op id is not positive".to_string());
     }
-    let Ok(stage) = parse_stage_discovery_ir(&row.ir, run) else {
-        return false;
-    };
+    if row.session.as_deref() != Some(run.as_bytes().as_slice()) {
+        return Err("op belongs to another run".to_string());
+    }
+    if row.outcome.as_deref() != Some("ok") {
+        return Err(format!(
+            "op outcome is {}, not ok",
+            row.outcome.as_deref().unwrap_or("absent")
+        ));
+    }
+    if row.diag.is_some() {
+        return Err("op carries a diagnostic".to_string());
+    }
+    if row.ir.len() > 512 {
+        return Err("op IR exceeds the discovery size cap".to_string());
+    }
+    let stage = parse_stage_discovery_ir(&row.ir, run)
+        .map_err(|error| format!("discovery IR rejected ({error})"))?;
     // Conduction and the request-selective QoI are conditional on the retained
     // project. Discovery cannot inspect that project yet, so admit every
     // producing stage's candidates here and let `validate_resume_candidate`
     // re-attest the project and enforce `declaration_gap`. Report is an
     // unconditional projection of the retained producer prefix.
-    stage.gap_dependency().is_none()
-        && row.t_start == i64::from(stage.ordinal()) * 2
-        && row.t_end == Some(i64::from(stage.ordinal()) * 2 + 1)
+    if stage.gap_dependency().is_some() {
+        return Err(format!(
+            "stage `{}` has no producer under this driver",
+            stage.name()
+        ));
+    }
+    if row.t_start != i64::from(stage.ordinal()) * 2
+        || row.t_end != Some(i64::from(stage.ordinal()) * 2 + 1)
+    {
+        return Err(format!(
+            "stage `{}` timing slots do not match its ordinal",
+            stage.name()
+        ));
+    }
+    Ok(stage)
 }
 
 fn parse_stage_discovery_ir(ir: &str, run: SolveRunId) -> Result<SolveStage, String> {

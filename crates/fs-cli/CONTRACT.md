@@ -226,6 +226,12 @@ cap and depth, segment/facet recovery rows). Disclosure, not enforcement: the
 quality floor is bridge plan B2. The Steiner cap derives from the declared
 memory budget with the fixture default as a floor, so identical inputs at the
 fixture budget mesh identically.
+A run id whose ops exist in the ledger but none of which is admissible under the
+running driver (another driver version, a stage-receipt schema this driver does
+not read, a non-deterministic or off-branch op) refuses with
+`cli-solve-run-incompatible` (exit 4), listing how many ops were seen and why
+each class was rejected; `cli-solve-unknown-run` is reserved for a run id with
+no ops at all.
 
 Card packs reach the run through the repeatable `--materials <pack>` and
 `--interfaces <pack>` flags. Admission decodes each pack through its own
@@ -354,6 +360,7 @@ Solve refusal codes: `cli-solve-project-invalid`, `cli-solve-budget`,
 `cli-solve-import-evidence`, `cli-solve-import-envelope`,
 `cli-solve-work-envelope`, `cli-solve-assignment`, `cli-solve-capability`,
 `cli-solve-stage-gap`, `cli-solve-conduction-undeclared`, `cli-solve-qoi-undeclared`,
+`cli-solve-run-incompatible`,
 `cli-solve-cancelled`, `cli-solve-run-id`,
 `cli-solve-unknown-run`, `cli-solve-resume-identity`,
 `cli-solve-resume-complete`, `cli-solve-resume-budget`,
