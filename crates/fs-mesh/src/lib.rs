@@ -61,9 +61,10 @@ pub use rounded_cylinder::{
     rounded_cylinder_tet_mesh,
 };
 pub use volumetric::{
-    AdmittedPlc, AuditedLabeledTetComplex, ConstraintRecoveredPlc, LabeledTetComplex, RegionId,
-    RegionKind, RegionSpec, UnverifiedPlc, VolumeConservationWitness, VolumeMethod,
-    VolumetricError, VolumetricPolicy, box_triangles, box_vertices, volumetricize,
+    AdmittedPlc, AuditedLabeledTetComplex, ConstraintRecoveredPlc, LabeledTetComplex,
+    QualityCensus, RecoveryEvidence, RegionId, RegionKind, RegionSpec, UnverifiedPlc,
+    VolumeConservationWitness, VolumeMethod, VolumetricError, VolumetricPolicy, box_triangles,
+    box_vertices, volumetricize,
 };
 
 /// Crate version, re-exported for provenance stamping.

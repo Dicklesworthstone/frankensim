@@ -9,7 +9,10 @@
 //! plus the closed-surface triple-product identity.
 
 use crate::delaunay::{GHOST, MeshError, Tetrahedralization, delaunay};
-use crate::recovery::{FacetCorrespondence, RecoveryOptions, recover_facets, recover_segments};
+use crate::recovery::{
+    FacetCorrespondence, FacetRecoveryStats, RecoveryOptions, RecoveryStats, recover_facets,
+    recover_segments,
+};
 use fs_exec::Cx;
 use fs_geom::Point3;
 use fs_ivl::{Sign, orient3d};
@@ -261,6 +264,72 @@ pub struct ConstraintRecoveredPlc {
     regions: Vec<RegionSpec>,
     correspondence: FacetCorrespondence,
     policy: VolumetricPolicy,
+    recovery: RecoveryEvidence,
+}
+
+/// What segment and facet recovery did, retained so a receipt can
+/// reproduce the mesh row (budgets used, Steiner points, rounds) without
+/// re-running the kernel.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RecoveryEvidence {
+    /// The recovery policy that ran.
+    pub options: RecoveryOptions,
+    /// Segment recovery statistics.
+    pub segments: RecoveryStats,
+    /// Facet recovery statistics.
+    pub facets: FacetRecoveryStats,
+}
+
+impl RecoveryEvidence {
+    /// Canonical JSON ledger row.
+    #[must_use]
+    pub fn to_json(&self) -> String {
+        format!(
+            "{{\"max_depth\":{},\"max_steiner\":{},\"segments\":{},\"facets\":{}}}",
+            self.options.max_depth,
+            self.options.max_steiner,
+            self.segments.to_json(),
+            self.facets.to_json()
+        )
+    }
+}
+
+/// Tet-quality census of a retained complex (disclosure, not enforcement:
+/// the audited volume is exact even when the shapes are poor). Angles route
+/// through `fs_math::det` so the census is bit-identical across targets.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct QualityCensus {
+    /// Retained solid tets.
+    pub tets: usize,
+    /// Positions referenced by the complex (input + Steiner).
+    pub vertices: usize,
+    /// Smallest dihedral angle over all tets, degrees.
+    pub min_dihedral_deg: f64,
+    /// Largest circumradius-to-shortest-edge ratio over tets that are not
+    /// flat (flat tets are counted separately; their ratio is unbounded).
+    pub max_radius_edge: f64,
+    /// Tets whose smallest dihedral is below 5 degrees.
+    pub slivers_below_5deg: u32,
+    /// Tets whose volume is below 1e-9 of the largest tet's volume —
+    /// coplanar quadruples the kernel's symbolic perturbation admits.
+    pub flat_tets: u32,
+}
+
+impl QualityCensus {
+    /// Canonical JSON ledger row.
+    #[must_use]
+    pub fn to_json(&self) -> String {
+        format!(
+            "{{\"tets\":{},\"vertices\":{},\"min_dihedral_deg\":{},\"max_radius_edge\":{},\
+             \"slivers_below_5deg\":{},\"flat_tets\":{}}}",
+            self.tets,
+            self.vertices,
+            self.min_dihedral_deg,
+            self.max_radius_edge,
+            self.slivers_below_5deg,
+            self.flat_tets
+        )
+    }
 }
 
 /// Carved, region-labeled solid tets. Not yet independently audited.
@@ -271,6 +340,7 @@ pub struct LabeledTetComplex {
     region_of_tet: Vec<RegionId>,
     source_faces: Vec<([u32; 3], u32)>,
     length_unit: String,
+    recovery: RecoveryEvidence,
 }
 
 /// Volume witness computed by the auditor, not the producer flood.
@@ -419,6 +489,11 @@ impl AdmittedPlc {
             tetra,
             regions: self.regions,
             correspondence,
+            recovery: RecoveryEvidence {
+                options: self.policy.recovery,
+                segments: seg_stats,
+                facets: facet_stats,
+            },
             policy: self.policy,
         })
     }
@@ -518,6 +593,7 @@ impl ConstraintRecoveredPlc {
             region_of_tet,
             source_faces,
             length_unit: self.policy.length_unit,
+            recovery: self.recovery,
         })
     }
 }
@@ -551,6 +627,48 @@ impl LabeledTetComplex {
     #[must_use]
     pub fn length_unit(&self) -> &str {
         &self.length_unit
+    }
+
+    /// Segment/facet recovery evidence retained from the producer.
+    #[must_use]
+    pub const fn recovery(&self) -> &RecoveryEvidence {
+        &self.recovery
+    }
+
+    /// Deterministic tet-quality census (see [`QualityCensus`]).
+    #[must_use]
+    pub fn quality(&self) -> QualityCensus {
+        let mut census = QualityCensus {
+            tets: self.tets.len(),
+            vertices: self.positions.len(),
+            min_dihedral_deg: 180.0,
+            max_radius_edge: 0.0,
+            slivers_below_5deg: 0,
+            flat_tets: 0,
+        };
+        let mut volumes = Vec::with_capacity(self.tets.len());
+        for tet in &self.tets {
+            let p: [[f64; 3]; 4] = core::array::from_fn(|k| self.positions[tet[k] as usize]);
+            let a = sub3(p[1], p[0]);
+            let b = sub3(p[2], p[0]);
+            let c = sub3(p[3], p[0]);
+            volumes.push(dot3(a, cross3(b, c)).abs() / 6.0);
+        }
+        let largest = volumes.iter().copied().fold(0.0f64, f64::max);
+        for (tet, volume) in self.tets.iter().zip(volumes) {
+            let p: [[f64; 3]; 4] = core::array::from_fn(|k| self.positions[tet[k] as usize]);
+            let dihedral = crate::exude::min_dihedral_deg(&p);
+            census.min_dihedral_deg = census.min_dihedral_deg.min(dihedral);
+            if dihedral < 5.0 {
+                census.slivers_below_5deg += 1;
+            }
+            if volume <= 1e-9 * largest {
+                census.flat_tets += 1;
+                continue;
+            }
+            census.max_radius_edge = census.max_radius_edge.max(radius_edge_ratio(&p, volume));
+        }
+        census
     }
 
     /// Independent winding, orientation, partition, and volume audit.
@@ -1083,4 +1201,44 @@ pub fn box_triangles(base: u32) -> Vec<[u32; 3]> {
         [i(1), i(2), i(6)],
         [i(1), i(6), i(5)],
     ]
+}
+
+fn sub3(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+fn cross3(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+fn dot3(a: [f64; 3], b: [f64; 3]) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+/// Circumradius over shortest edge for a tet of known positive volume.
+/// Circumradius = |a^2 (b x c) + b^2 (c x a) + c^2 (a x b)| / (12 V).
+fn radius_edge_ratio(p: &[[f64; 3]; 4], volume: f64) -> f64 {
+    let a = sub3(p[1], p[0]);
+    let b = sub3(p[2], p[0]);
+    let c = sub3(p[3], p[0]);
+    let (aa, bb, cc) = (dot3(a, a), dot3(b, b), dot3(c, c));
+    let (bc, ca, ab) = (cross3(b, c), cross3(c, a), cross3(a, b));
+    let num = [
+        aa * bc[0] + bb * ca[0] + cc * ab[0],
+        aa * bc[1] + bb * ca[1] + cc * ab[1],
+        aa * bc[2] + bb * ca[2] + cc * ab[2],
+    ];
+    let circumradius = dot3(num, num).sqrt() / (12.0 * volume);
+    let mut shortest = f64::INFINITY;
+    for i in 0..4 {
+        for j in (i + 1)..4 {
+            let d = sub3(p[i], p[j]);
+            shortest = shortest.min(dot3(d, d).sqrt());
+        }
+    }
+    circumradius / shortest
 }

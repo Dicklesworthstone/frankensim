@@ -93,7 +93,7 @@ fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
 }
 
 /// Minimum dihedral angle of a tet (degrees).
-fn min_dihedral_deg(p: &[[f64; 3]; 4]) -> f64 {
+pub(crate) fn min_dihedral_deg(p: &[[f64; 3]; 4]) -> f64 {
     // Face normals opposite each vertex.
     let n = [
         cross(sub(p[2], p[1]), sub(p[3], p[1])), // opposite 0

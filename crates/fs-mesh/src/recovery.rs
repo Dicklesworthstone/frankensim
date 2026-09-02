@@ -59,7 +59,7 @@ impl Default for RecoveryOptions {
 }
 
 /// Recovery evidence.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct RecoveryStats {
     /// Segments requested.
     pub segments_in: u64,
@@ -258,7 +258,7 @@ pub fn recover_segments(
 }
 
 /// Facet-recovery evidence.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct FacetRecoveryStats {
     /// Facets requested.
     pub facets_in: u64,
