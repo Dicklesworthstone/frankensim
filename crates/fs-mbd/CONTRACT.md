@@ -61,6 +61,13 @@ logic of US 6,594,844. Its room and low-furniture boundaries perform bounded
 kinematic non-penetration projection for a museum display; they do not add a
 contact-force, impact, tire, friction, traction, or cleaning-performance model.
 
+The `salisbury` module exposes the source-bounded joint topology and static
+tendon law printed in US 4,921,293. It composes three generic revolute joints
+for each of three digits and evaluates the grant's three Figure 3 torque
+equations from caller-declared SI tensions and an explicitly illustrative
+pulley-radius scale. It publishes neither a fabricated historical dimension nor
+a dynamic, contact, grasp-stability, or force-closure result.
+
 ## Public types and semantics
 
 - `Vec3` is a small Cartesian vector. Every public field that carries a vector
@@ -159,6 +166,19 @@ contact-force, impact, tire, friction, traction, or cleaning-performance model.
   redirect, projects a circular display bumper outside room/low-solid
   boundaries, and returns stable contact indices (`-1` clear, `-2` room wall,
   otherwise the caller's collider index). At most 64 colliders are admitted.
+- `salisbury::step_salisbury_hand` admits four finite non-negative cable-end
+  tensions in newtons, a finite positive visitor-declared R2 scale in metres,
+  and a Claim 2 first-idler predicate. It composes nine scalar revolute joint
+  coordinates through `articulated::JointModel`, reports twelve cable ends,
+  and emits the root-first parent map
+  `[-1, 0, 1, -1, 3, 4, -1, 6, 7]`: each `-1` is one digit's palm anchor,
+  and each following pair is its serial Axis-2/Axis-3 chain. This topology
+  proves attachment without fabricating a link length, mass, or inertia. It
+  evaluates the exact printed relations
+  `Torque1 = -T1 R1 + T2 R2 + T3 R2 - T4 R1`,
+  `Torque2 = T1 R3 + T2 R2 - T3 R2 - T4 R3`, and
+  `Torque3 = T2 R2 - T3 R2`. The study ratios `R1=1.2 R2` and `R3=1.4 R2`
+  only retain Figure 3's depicted ordering; they are not historical dimensions.
 - `articulated::SpatialInertia` accepts positive mass, a finite centre-of-mass
   offset, and a full symmetric centre-of-mass inertia. It validates positive
   definiteness and the principal-moment triangle inequalities before exposing
@@ -446,3 +466,8 @@ fault injection, or G5 cross-ISA evidence.
   speed, spring rate, force, stopping distance, engagement time, power, or
   unprinted dimensions. Its lower-limit threshold is a declared normalized
   display boundary.
+- The source-bounded Salisbury lane claims no historical pulley or link
+  dimensions, cable material or diameter, mass, inertia, damping, motor rating,
+  friction coefficient, contact modulus, grasp force, speed, stability margin,
+  or force-closure guarantee. Its normalized display pose belongs to the
+  browser presentation layer and is not returned by `fs-mbd`.

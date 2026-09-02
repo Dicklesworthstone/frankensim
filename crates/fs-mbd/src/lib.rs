@@ -28,6 +28,7 @@ pub mod otto;
 pub mod planar_drive;
 pub mod robot_models;
 pub mod roomba;
+pub mod salisbury;
 
 use core::fmt;
 
