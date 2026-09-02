@@ -267,6 +267,7 @@ fn uniform_refinement_of_the_comb_keeps_volume_walls_and_quality_over_two_rungs(
         recovery: RecoveryOptions::default(),
         max_vertices: verts.len(),
         max_tets: 4_000_000,
+        refinement: None,
     };
     let audited = with_cx(|cx| volumetricize(UnverifiedPlc::new(verts, vec![spec]), policy, cx))
         .expect("comb volumetricizes");

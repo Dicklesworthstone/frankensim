@@ -265,6 +265,32 @@ half-edge round-trips, closed-manifold audits).
     CONSEQUENCE for consumers: a dihedral floor applied to refined rungs
     must allow the first-generation class drop (here ×0.69); a 5° floor on
     the base would pass and then refuse rung 1 of this very comb.
+17. Constrained refinement (`VolumetricPolicy::refinement`, off when `None`)
+    runs between recovery and carving: rounds of worst-first circumcenter
+    insertion restricted to the seeded chambers, every recovered wall
+    (correspondence row) protected by its EQUATORIAL sphere — the smallest
+    sphere through the three vertices, the only one whose emptiness keeps a
+    face Delaunay (the hull code's minimum ENCLOSING sphere under-protects
+    obtuse faces: guarding walls with it broke six comb facets in one
+    round) — each round followed by segment and facet re-recovery and the
+    exact audit, with the facet driver seeded INCREMENTALLY from the previous
+    correspondence (`recover_facets_with_points`) so bisection repairs only
+    what an insertion destroyed; re-recovery from a previous tiling with no
+    insertions is a proven no-op (`tests/constrained_refine.rs`). A vertex
+    that lies in a facet's plane strictly inside its loop is classified
+    interior by geometry as well as by provenance. Evidence
+    (`RecoveryEvidence::refinement`) discloses rounds, insertions, worst
+    radius-edge before/after, offenders remaining, encroach-skips, wall
+    splits and the stop reason. MEASURED 2026-09-02 on the two-fin comb
+    with `split_walls: false` (the default): all 171 offenders' circumcenters
+    encroach a wall, nothing is inserted, the mesh is untouched and the
+    evidence says so — on thin bodies wall splitting is the whole game.
+    `split_walls: true` (split the encroached wall at its in-plane point,
+    handed to the driver as a known interior point) is opt-in and NOT yet
+    claimed: 23 splits left 13 of 60 facets unrecovered within the recovery
+    budget; the re-tiled facets were not recognised by the coplanar-tiling
+    classifier (`tile:none` under `FS_MESH_TRACE_RECOVERY=1`), the open
+    question for the next increment.
 
 ## Error model
 

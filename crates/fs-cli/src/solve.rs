@@ -5019,6 +5019,7 @@ fn conduction_receipt(
             recovery: recovery_budget(memory_bytes),
             max_vertices: positions.len(),
             max_tets,
+            refinement: None,
         };
         let audited = fs_mesh::volumetricize(
             fs_mesh::UnverifiedPlc::new(positions, regions.clone()),

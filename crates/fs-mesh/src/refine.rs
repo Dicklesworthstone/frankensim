@@ -241,6 +241,35 @@ fn facet_diametral_ball(a: [f64; 3], b: [f64; 3], c: [f64; 3]) -> Option<([f64; 
     }
 }
 
+/// The equatorial sphere of a triangle — the SMALLEST sphere through all
+/// three vertices (centre at the in-plane circumcentre, radius the
+/// circumradius) — as `(center, radius²)`. A face persists in a Delaunay
+/// tetrahedralization as long as some circumscribing sphere is empty, and
+/// the equatorial one is the smallest, so a point strictly inside it is the
+/// only kind that can delete the face. Distinct from
+/// [`facet_diametral_ball`]: for an obtuse triangle the minimum ENCLOSING
+/// sphere (the longest edge's diametral ball) is smaller than this and does
+/// not protect the face (MEASURED 2026-09-02: guarding recovered walls with
+/// it broke six comb facets in one refinement round).
+fn facet_equatorial_sphere(a: [f64; 3], b: [f64; 3], c: [f64; 3]) -> Option<([f64; 3], f64)> {
+    let (u, v) = (sub(b, a), sub(c, a));
+    let uu = dot(u, u);
+    let vv = dot(v, v);
+    let uv = dot(u, v);
+    let den = 2.0 * (uu * vv - uv * uv);
+    if den.abs() < 1e-300 {
+        return None;
+    }
+    let s = (vv * (uu - uv)) / den;
+    let t = (uu * (vv - uv)) / den;
+    let center = [
+        a[0] + s * u[0] + t * v[0],
+        a[1] + s * u[1] + t * v[1],
+        a[2] + s * u[2] + t * v[2],
+    ];
+    Some((center, dot(sub(center, a), sub(center, a))))
+}
+
 /// The first hull (ghost) facet whose diametral ball STRICTLY contains `p` — the
 /// boundary facet `p` encroaches. Scans all ghost tets (O(hull) — the 1e7 perf
 /// lane owns a spatial index); deterministic in tet-slot order.
@@ -275,6 +304,172 @@ fn closest_pair(points: &[[f64; 3]], upto: usize) -> f64 {
         }
     }
     best.sqrt()
+}
+
+/// Worst radius-edge ratio over the tets in `inside`, and how many of them
+/// exceed `max_radius_edge`.
+pub(crate) fn inside_offenders(
+    tetra: &Tetrahedralization,
+    inside: &std::collections::BTreeSet<u32>,
+    max_radius_edge: f64,
+) -> (f64, u32) {
+    let pts = &tetra.mesh.points;
+    let mut worst = 0.0f64;
+    let mut count = 0u32;
+    for &t in inside {
+        let tet = tetra.mesh.tets[t as usize];
+        let q: [[f64; 3]; 4] = core::array::from_fn(|k| pts[tet[k] as usize]);
+        if let Some(r) = radius_edge(&q) {
+            worst = worst.max(r);
+            if r > max_radius_edge {
+                count += 1;
+            }
+        }
+    }
+    (worst, count)
+}
+
+/// One round of CONSTRAINED refinement (bridge plan B2, WORK 1): worst-first
+/// circumcenter insertion restricted to the tets in `inside` (the seeded
+/// chambers), with every `protected` wall — the recovered PLC facets as
+/// sorted vertex triples — guarded by Shewchuk's diametral-ball rule: a
+/// circumcenter that encroaches a wall splits the wall instead (an
+/// in-plane point the next recovery pass adopts, see
+/// `recovery::inside_facet_interior`, once wall splitting lands); today an
+/// encroaching circumcenter is skipped and counted as unrefinable, and one
+/// that lands outside the solid is skipped and counted. At most
+/// `budget` points are inserted; the caller re-recovers the constraints,
+/// re-audits, recomputes `inside` and calls again. Deterministic: worst
+/// first with a canonical tie-break, exact-predicate insertion.
+///
+/// # Errors
+/// [`MeshError::Cancelled`] between insertions.
+#[allow(clippy::too_many_lines)]
+pub(crate) fn refine_constrained_round(
+    tetra: &mut Tetrahedralization,
+    protected: &[([u32; 3], u32)],
+    inside: &std::collections::BTreeSet<u32>,
+    opts: RefineOptions,
+    budget: u32,
+    stats: &mut RefineStats,
+    split_points: &mut Vec<(u32, u32)>,
+    cx: &Cx<'_>,
+) -> Result<u32, MeshError> {
+    let canon = |t: [u32; 4]| {
+        let mut s = t;
+        s.sort_unstable();
+        s
+    };
+    let offenders: Vec<(f64, [u32; 4])> = {
+        let pts = &tetra.mesh.points;
+        let mut list: Vec<(f64, [u32; 4])> = inside
+            .iter()
+            .filter_map(|&t| {
+                let tet = tetra.mesh.tets[t as usize];
+                let q: [[f64; 3]; 4] = core::array::from_fn(|k| pts[tet[k] as usize]);
+                radius_edge(&q).map(|r| (r, tet))
+            })
+            .filter(|&(r, _)| r > opts.max_radius_edge)
+            .collect();
+        list.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap().then(b.1.cmp(&a.1)));
+        list
+    };
+    if offenders.is_empty() {
+        return Ok(0);
+    }
+    let edge_floor = opts.min_edge_factor
+        * closest_pair(&tetra.mesh.points, (tetra.steiner_from as usize).min(4096));
+    let live_set = |t: &Tetrahedralization| -> std::collections::BTreeSet<[u32; 4]> {
+        t.tets().into_iter().map(canon).collect()
+    };
+    let mut live = live_set(tetra);
+    let mut inserted = 0u32;
+    for &(_, tet) in &offenders {
+        if inserted >= budget {
+            break;
+        }
+        cx.checkpoint()?;
+        let key = canon(tet);
+        if !live.contains(&key) {
+            continue; // killed by an earlier insertion this round
+        }
+        let pts = &tetra.mesh.points;
+        let q: [[f64; 3]; 4] = core::array::from_fn(|k| pts[tet[k] as usize]);
+        let Some(cc) =
+            circumcenter(q[0], q[1], q[2], q[3]).filter(|cc| cc.iter().all(|x| x.is_finite()))
+        else {
+            continue;
+        };
+        // Wall protection first (Shewchuk's rule): a circumcenter strictly
+        // inside a protected wall's equatorial sphere could delete that wall
+        // face, so the FIRST such wall (row order, deterministic) is split at
+        // its own in-plane point instead, and the point is reported with the
+        // wall's parent facet so the re-recovery stitches it into that
+        // facet's triangulation.
+        let encroached = {
+            let pts = &tetra.mesh.points;
+            protected.iter().find(|(wall, _)| {
+                facet_equatorial_sphere(
+                    pts[wall[0] as usize],
+                    pts[wall[1] as usize],
+                    pts[wall[2] as usize],
+                )
+                .is_some_and(|(c, r2)| {
+                    let d = sub(cc, c);
+                    dot(d, d) < r2
+                })
+            })
+        };
+        let new_idx = tetra.mesh.points.len() as u32;
+        let (point, split_of) = if let Some(&(wall, parent)) = encroached {
+            if !opts.split_hull_facets {
+                stats.unrefinable_remaining += 1;
+                continue;
+            }
+            let pts = &tetra.mesh.points;
+            let Some(split) = facet_split_point(
+                pts[wall[0] as usize],
+                pts[wall[1] as usize],
+                pts[wall[2] as usize],
+            ) else {
+                stats.unrefinable_remaining += 1;
+                continue;
+            };
+            (split, Some(parent))
+        } else {
+            let seed = tetra.mesh.locate(cc, new_idx);
+            let outside = tetra.mesh.tets[seed as usize][3] == GHOST || !inside.contains(&seed);
+            if outside {
+                stats.skipped_outside_hull += 1;
+                continue;
+            }
+            (cc, None)
+        };
+        let nearest = {
+            let mut best = f64::INFINITY;
+            for p in &tetra.mesh.points {
+                let d = sub(*p, point);
+                best = best.min(dot(d, d));
+            }
+            best.sqrt()
+        };
+        if nearest < edge_floor {
+            stats.protected_by_policy += 1;
+            continue;
+        }
+        tetra.mesh.points.push(point);
+        if tetra.mesh.insert(new_idx) {
+            inserted += 1;
+            stats.steiner_inserted += 1;
+            if let Some(parent) = split_of {
+                stats.hull_facets_split += 1;
+                split_points.push((parent, new_idx));
+            }
+            live = live_set(tetra);
+        }
+    }
+    tetra.mesh.stats.tets_final = tetra.tets().len() as u64;
+    Ok(inserted)
 }
 
 /// Refine in place until the radius-edge bound holds or budgets run out.

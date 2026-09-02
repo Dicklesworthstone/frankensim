@@ -11,7 +11,7 @@
 use crate::delaunay::{GHOST, MeshError, Tetrahedralization, delaunay};
 use crate::recovery::{
     FacetCorrespondence, FacetRecoveryStats, RecoveryOptions, RecoveryStats, recover_facets,
-    recover_segments,
+    recover_facets_with_points, recover_segments,
 };
 use fs_exec::Cx;
 use fs_geom::Point3;
@@ -200,7 +200,7 @@ impl From<MeshError> for VolumetricError {
 }
 
 /// Caps and recovery policy for one volumetricization.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct VolumetricPolicy {
     /// SI length unit of the vertex coordinates, e.g. `"m"`.
     pub length_unit: String,
@@ -211,6 +211,112 @@ pub struct VolumetricPolicy {
     pub max_vertices: usize,
     /// Maximum retained solid tetrahedra.
     pub max_tets: usize,
+    /// Constrained refinement between recovery and carving; `None` solves
+    /// on the recovered PLC itself (the pre-B2 behaviour).
+    pub refinement: Option<RefinementOptions>,
+}
+
+/// Constrained-refinement policy (bridge plan B2, WORK 1): worst-first
+/// circumcenter insertion inside the seeded chambers with the recovered
+/// walls protected by the diametral-ball rule, re-recovering and re-auditing
+/// after every round.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RefinementOptions {
+    /// Radius-edge target (2.0 is the classical safe bound).
+    pub max_radius_edge: f64,
+    /// Rounds of insert / re-recover / audit.
+    pub max_rounds: u32,
+    /// Total refinement Steiner budget (recovery keeps its own).
+    pub max_steiner: u32,
+    /// Split an encroached wall at its in-plane point instead of skipping
+    /// the offender. OFF by default: MEASURED 2026-09-02 on the two-fin comb,
+    /// 23 wall splits left 13 of 60 facets unrecoverable within the recovery
+    /// budget even with incremental re-recovery (the re-tiled facets are not
+    /// recognised: `tile:none` in the trace) — the next increment. With it
+    /// off, refinement inserts only strictly interior circumcenters that
+    /// encroach no wall's equatorial sphere, so walls are never broken.
+    pub split_walls: bool,
+}
+
+impl Default for RefinementOptions {
+    fn default() -> Self {
+        RefinementOptions {
+            max_radius_edge: 2.0,
+            max_rounds: 8,
+            max_steiner: 20_000,
+            split_walls: false,
+        }
+    }
+}
+
+/// What constrained refinement did (receipt evidence).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RefinementEvidence {
+    /// Rounds run (0 when refinement was off or nothing offended).
+    pub rounds: u32,
+    /// Circumcenters and facet split points inserted by refinement.
+    pub steiner_inserted: u32,
+    /// Steiner points the re-recovery passes added on top.
+    pub recovery_steiner: u64,
+    /// Worst radius-edge ratio inside the solid before / after.
+    pub worst_before: f64,
+    pub worst_after: f64,
+    /// Offenders left inside the solid when refinement stopped.
+    pub offenders_remaining: u32,
+    /// Circumcenters that landed outside the solid without encroaching a
+    /// wall (skipped), and insertions the minimum-edge policy yielded.
+    pub skipped_outside: u32,
+    pub protected_by_policy: u32,
+    /// Wall splits (encroached facets split in place; none until that
+    /// increment lands).
+    pub walls_split: u32,
+    /// Circumcenters not inserted because they would encroach a wall.
+    pub encroach_skipped: u32,
+    /// Why it stopped: `off`, `converged`, `round-cap`, `steiner-budget`,
+    /// `tet-cap`, `no-progress`.
+    pub stop: &'static str,
+}
+
+impl Default for RefinementEvidence {
+    fn default() -> Self {
+        RefinementEvidence {
+            rounds: 0,
+            steiner_inserted: 0,
+            recovery_steiner: 0,
+            worst_before: 0.0,
+            worst_after: 0.0,
+            offenders_remaining: 0,
+            skipped_outside: 0,
+            protected_by_policy: 0,
+            walls_split: 0,
+            encroach_skipped: 0,
+            stop: "off",
+        }
+    }
+}
+
+impl RefinementEvidence {
+    /// Canonical JSON object.
+    #[must_use]
+    pub fn to_json(&self) -> String {
+        format!(
+            "{{\"rounds\":{},\"steiner_inserted\":{},\"recovery_steiner\":{},\
+             \"worst_before\":{:.4},\"worst_after\":{:.4},\"offenders_remaining\":{},\
+             \"skipped_outside\":{},\"protected_by_policy\":{},\"walls_split\":{},\
+             \"encroach_skipped\":{},\"stop\":\"{}\"}}",
+            self.rounds,
+            self.steiner_inserted,
+            self.recovery_steiner,
+            self.worst_before,
+            self.worst_after,
+            self.offenders_remaining,
+            self.skipped_outside,
+            self.protected_by_policy,
+            self.walls_split,
+            self.encroach_skipped,
+            self.stop
+        )
+    }
 }
 
 impl VolumetricPolicy {
@@ -222,6 +328,7 @@ impl VolumetricPolicy {
             recovery: RecoveryOptions::default(),
             max_vertices: 4_096,
             max_tets: 65_536,
+            refinement: None,
         }
     }
 }
@@ -263,6 +370,8 @@ pub struct ConstraintRecoveredPlc {
     tetra: Tetrahedralization,
     regions: Vec<RegionSpec>,
     correspondence: FacetCorrespondence,
+    unique_facets: Vec<[u32; 3]>,
+    unique_segments: Vec<[u32; 2]>,
     policy: VolumetricPolicy,
     recovery: RecoveryEvidence,
 }
@@ -272,6 +381,8 @@ pub struct ConstraintRecoveredPlc {
 /// re-running the kernel.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RecoveryEvidence {
+    /// Constrained refinement between recovery and carving.
+    pub refinement: RefinementEvidence,
     /// The recovery policy that ran.
     pub options: RecoveryOptions,
     /// Segment recovery statistics.
@@ -516,13 +627,180 @@ impl AdmittedPlc {
             tetra,
             regions: self.regions,
             correspondence,
+            unique_facets: self.unique_facets,
+            unique_segments: self.unique_segments,
             recovery: RecoveryEvidence {
                 options: self.policy.recovery,
+                refinement: RefinementEvidence::default(),
                 segments: seg_stats,
                 facets: facet_stats,
             },
             policy: self.policy,
         })
+    }
+}
+
+impl ConstraintRecoveredPlc {
+    /// The tets of every seeded chamber (what carve-and-label will keep),
+    /// by the same flood carve uses; `None` when a seed cannot be located
+    /// (carve will report that refusal).
+    fn inside_tets(&self) -> Option<BTreeSet<u32>> {
+        let mesh = &self.tetra.mesh;
+        let walls: BTreeSet<[u32; 3]> = self
+            .correspondence
+            .rows
+            .iter()
+            .map(|(face, _)| *face)
+            .collect();
+        let live = live_real_tets(mesh);
+        let mut inside = BTreeSet::new();
+        for region in &self.regions {
+            let tet = locate_seed_tet(mesh, region.seed, &live, &walls).ok()?;
+            inside.extend(flood_chamber(mesh, tet, &walls));
+        }
+        Some(inside)
+    }
+
+    /// Constrained refinement (bridge plan B2, WORK 1): rounds of worst-first
+    /// circumcenter insertion inside the seeded chambers with the recovered
+    /// walls protected (`refine::refine_constrained_round`), each followed by
+    /// segment and facet re-recovery and the exact Delaunay audit, until no
+    /// tet inside the solid exceeds the radius-edge target or a cap stops it.
+    /// Volumes, walls and labels are preserved by construction: refinement
+    /// inserts points strictly inside the solid or on its facets, and the
+    /// re-recovered correspondence is what carve-and-label reads.
+    ///
+    /// # Errors
+    /// A re-recovery that leaves a constraint unrecovered, or an audit that
+    /// fails, refuses like `recover` does; cancellation propagates.
+    pub fn refine_constrained(
+        mut self,
+        opts: RefinementOptions,
+        cx: &Cx<'_>,
+    ) -> Result<Self, VolumetricError> {
+        let mut evidence = RefinementEvidence {
+            stop: "converged",
+            ..RefinementEvidence::default()
+        };
+        let refine_opts = crate::refine::RefineOptions {
+            max_radius_edge: opts.max_radius_edge,
+            max_steiner: opts.max_steiner,
+            split_hull_facets: opts.split_walls,
+            min_edge_factor: 0.25,
+        };
+        let mut stats = crate::refine::RefineStats::default();
+        let mut split_points: Vec<(u32, u32)> = Vec::new();
+        let Some(inside0) = self.inside_tets() else {
+            evidence.stop = "seed-unlocatable";
+            self.recovery.refinement = evidence;
+            return Ok(self);
+        };
+        let (worst0, offenders0) =
+            crate::refine::inside_offenders(&self.tetra, &inside0, opts.max_radius_edge);
+        evidence.worst_before = worst0;
+        evidence.worst_after = worst0;
+        evidence.offenders_remaining = offenders0;
+        let mut inside = inside0;
+        loop {
+            if evidence.offenders_remaining == 0 {
+                evidence.stop = "converged";
+                break;
+            }
+            if evidence.rounds >= opts.max_rounds {
+                evidence.stop = "round-cap";
+                break;
+            }
+            if evidence.steiner_inserted >= opts.max_steiner {
+                evidence.stop = "steiner-budget";
+                break;
+            }
+            if inside.len() >= self.policy.max_tets {
+                evidence.stop = "tet-cap";
+                break;
+            }
+            let budget = opts.max_steiner - evidence.steiner_inserted;
+            let inserted = crate::refine::refine_constrained_round(
+                &mut self.tetra,
+                &self.correspondence.rows,
+                &inside,
+                refine_opts,
+                budget,
+                &mut stats,
+                &mut split_points,
+                cx,
+            )?;
+            evidence.rounds += 1;
+            if inserted == 0 {
+                evidence.stop = "no-progress";
+                break;
+            }
+            evidence.steiner_inserted += inserted;
+            // Re-recover the constraints the insertions may have crossed,
+            // then audit, exactly as `recover` did on the fresh Delaunay.
+            let (seg_stats, _) = recover_segments(
+                &mut self.tetra,
+                &self.unique_segments,
+                self.policy.recovery,
+                cx,
+            )?;
+            let facet_loops: Vec<Vec<u32>> = self
+                .unique_facets
+                .iter()
+                .map(|f| vec![f[0], f[1], f[2]])
+                .collect();
+            let (facet_stats, correspondence) = recover_facets_with_points(
+                &mut self.tetra,
+                &facet_loops,
+                &split_points,
+                &self.correspondence.rows,
+                self.policy.recovery,
+                cx,
+            )?;
+            evidence.recovery_steiner += seg_stats.steiner_inserted + facet_stats.steiner_inserted;
+            if std::env::var_os("FS_MESH_TRACE_RECOVERY").is_some() {
+                eprintln!(
+                    "TRACE refine round {}: inserted {} (splits so far {}), recovery: segments {}/{} unrecovered {}, facets {}/{} unrecovered {} rounds_used {} steiner {}",
+                    evidence.rounds,
+                    inserted,
+                    split_points.len(),
+                    seg_stats.recovered,
+                    seg_stats.segments_in,
+                    seg_stats.unrecovered,
+                    facet_stats.recovered,
+                    facet_stats.facets_in,
+                    facet_stats.unrecovered,
+                    facet_stats.rounds_used,
+                    facet_stats.steiner_inserted
+                );
+            }
+            if seg_stats.unrecovered > 0 || facet_stats.unrecovered > 0 {
+                return Err(VolumetricError::UnrecoveredConstraint {
+                    segments: seg_stats.unrecovered,
+                    facets: facet_stats.unrecovered,
+                });
+            }
+            if !self.tetra.audit(false).clean() {
+                return Err(VolumetricError::Audit {
+                    reason: "refined complex failed the exact Delaunay audit",
+                });
+            }
+            self.correspondence = correspondence;
+            let Some(next_inside) = self.inside_tets() else {
+                evidence.stop = "seed-unlocatable";
+                break;
+            };
+            inside = next_inside;
+            let (worst, offenders) =
+                crate::refine::inside_offenders(&self.tetra, &inside, opts.max_radius_edge);
+            evidence.worst_after = worst;
+            evidence.offenders_remaining = offenders;
+        }
+        evidence.skipped_outside = stats.skipped_outside_hull;
+        evidence.protected_by_policy = stats.protected_by_policy;
+        evidence.walls_split = stats.hull_facets_split;
+        evidence.encroach_skipped = stats.unrefinable_remaining;
+        self.recovery.refinement = evidence;
+        Ok(self)
     }
 }
 
@@ -1149,7 +1427,10 @@ pub fn volumetricize(
 ) -> Result<AuditedLabeledTetComplex, VolumetricError> {
     let regions = plc.regions.clone();
     let admitted = plc.admit(policy, cx)?;
-    let recovered = admitted.recover(cx)?;
+    let mut recovered = admitted.recover(cx)?;
+    if let Some(refinement) = recovered.policy.refinement {
+        recovered = recovered.refine_constrained(refinement, cx)?;
+    }
     let (cavity_vol, exterior_vol) = discarded_volumes(&recovered);
     let mut labeled = recovered.carve_and_label(cx)?;
     labeled.repair_flat_tets();

@@ -907,6 +907,7 @@
   "crates/fs-mesh/tests/comb_prism.rs",
   "crates/fs-mesh/tests/comb_quality.rs",
   "crates/fs-mesh/tests/conformance.rs",
+  "crates/fs-mesh/tests/constrained_refine.rs",
   "crates/fs-mesh/tests/hexdom.rs",
   "crates/fs-mesh/tests/perf_lane.rs",
   "crates/fs-mesh/tests/uniform_refine.rs",

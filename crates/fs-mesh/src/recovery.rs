@@ -635,6 +635,146 @@ fn ear_clip(proj: &[[f64; 2]], loop_verts: &[u32]) -> Option<Vec<[u32; 3]>> {
 /// that is not recognised simply does not count, which can only delay
 /// recognition, never fake it. Non-triangular loops return `None` and
 /// keep the sub-triangle path.
+/// A vertex IN the facet's plane and STRICTLY inside its triangle, by the
+/// same relative tolerance the segment classifier uses (1e-12 of the facet
+/// scale). Constrained refinement inserts facet split points that no facet
+/// minted; a valid PLC has no other vertex there, so recognising such a
+/// point by geometry lets the next recovery pass adopt it into the tiling
+/// instead of calling the facet broken.
+fn inside_facet_interior(p: [f64; 3], corners: &[[f64; 3]; 3]) -> bool {
+    let sub = |a: [f64; 3], b: [f64; 3]| [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+    let dot = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    let cross = |a: [f64; 3], b: [f64; 3]| {
+        [
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ]
+    };
+    let u = sub(corners[1], corners[0]);
+    let v = sub(corners[2], corners[0]);
+    let w = sub(p, corners[0]);
+    let n = cross(u, v);
+    let nn = dot(n, n);
+    if nn == 0.0 || !nn.is_finite() {
+        return false;
+    }
+    let scale2 = dot(u, u).max(dot(v, v));
+    let h = dot(n, w);
+    if h * h > 1e-24 * nn * scale2 {
+        return false;
+    }
+    let inv = 1.0 / nn;
+    let s = dot(cross(w, v), n) * inv;
+    let t = dot(cross(u, w), n) * inv;
+    let eps = 1e-12;
+    s > eps && t > eps && s + t < 1.0 - eps
+}
+
+/// Diagnostic twin of [`coplanar_tiling`] (trace only): lists the faces whose
+/// three vertices are geometrically in the facet's plane and within its
+/// triangle (loose test), each vertex's classification, and the free edges
+/// that stop the tiling from closing.
+fn explain_tiling(
+    points: &[[f64; 3]],
+    faces: &BTreeSet<[u32; 3]>,
+    loop_verts: &[u32],
+    interior: &BTreeSet<u32>,
+) -> String {
+    if loop_verts.len() != 3 {
+        return "non-triangular loop".to_string();
+    }
+    let corners = [loop_verts[0], loop_verts[1], loop_verts[2]];
+    let cp = [
+        points[corners[0] as usize],
+        points[corners[1] as usize],
+        points[corners[2] as usize],
+    ];
+    let classify = |i: u32| -> Option<u8> {
+        let mut bits = 0u8;
+        for k in 0..3 {
+            let a = corners[k];
+            let b = corners[(k + 1) % 3];
+            if i == a
+                || i == b
+                || parameter_on_segment(points[i as usize], cp[k], cp[(k + 1) % 3]).is_some()
+            {
+                bits |= 1 << k;
+            }
+        }
+        if bits != 0 {
+            Some(bits)
+        } else if interior.contains(&i) || inside_facet_interior(points[i as usize], &cp) {
+            Some(0)
+        } else {
+            None
+        }
+    };
+    // Loose geometric membership: in the plane (1e-9 relative) and inside the
+    // triangle (barycentric within 1e-6).
+    let loose = |i: u32| -> bool {
+        let sub = |a: [f64; 3], b: [f64; 3]| [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+        let dot = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+        let cross = |a: [f64; 3], b: [f64; 3]| {
+            [
+                a[1] * b[2] - a[2] * b[1],
+                a[2] * b[0] - a[0] * b[2],
+                a[0] * b[1] - a[1] * b[0],
+            ]
+        };
+        let u = sub(cp[1], cp[0]);
+        let v = sub(cp[2], cp[0]);
+        let w = sub(points[i as usize], cp[0]);
+        let n = cross(u, v);
+        let nn = dot(n, n);
+        let scale2 = dot(u, u).max(dot(v, v));
+        let h = dot(n, w);
+        if h * h > 1e-18 * nn * scale2 {
+            return false;
+        }
+        let s = dot(cross(w, v), n) / nn;
+        let tt = dot(cross(u, w), n) / nn;
+        s > -1e-6 && tt > -1e-6 && s + tt < 1.0 + 1e-6
+    };
+    let mut out = String::new();
+    let mut tiles = 0usize;
+    let mut edge_use: BTreeMap<[u32; 2], (u32, u8)> = BTreeMap::new();
+    for face in faces {
+        if !(loose(face[0]) && loose(face[1]) && loose(face[2])) {
+            continue;
+        }
+        let c = [classify(face[0]), classify(face[1]), classify(face[2])];
+        if c.iter().any(Option::is_none) {
+            out.push_str(&format!(" face{:?} unclassified {:?};", face, c));
+            continue;
+        }
+        tiles += 1;
+        for (x, bx, y, by) in [
+            (face[0], c[0].unwrap(), face[1], c[1].unwrap()),
+            (face[1], c[1].unwrap(), face[2], c[2].unwrap()),
+            (face[0], c[0].unwrap(), face[2], c[2].unwrap()),
+        ] {
+            let key = if x < y { [x, y] } else { [y, x] };
+            let e = edge_use.entry(key).or_insert((0, bx & by));
+            e.0 += 1;
+        }
+    }
+    let free: Vec<String> = edge_use
+        .iter()
+        .filter(|(_, (uses, bits))| *uses == 1 && *bits == 0)
+        .map(|(k, _)| format!("{:?}", k))
+        .collect();
+    let over: Vec<String> = edge_use
+        .iter()
+        .filter(|(_, (uses, _))| *uses > 2)
+        .map(|(k, (uses, _))| format!("{:?}x{uses}", k))
+        .collect();
+    format!(
+        "{tiles} in-plane tiles; free-off-boundary edges {:?}; overused {:?};{out}",
+        free, over
+    )
+}
+
 fn coplanar_tiling(
     points: &[[f64; 3]],
     faces: &BTreeSet<[u32; 3]>,
@@ -684,7 +824,8 @@ fn coplanar_tiling(
         }
         let verdict = if bits != 0 {
             Some(bits)
-        } else if interior.contains(&i) {
+        } else if interior.contains(&i) || inside_facet_interior(points[i as usize], &corner_points)
+        {
             Some(0)
         } else {
             None
@@ -741,10 +882,144 @@ fn coplanar_tiling(
 ///
 /// # Panics
 /// Only on kernel programmer contracts (and facets with < 3 vertices).
-#[allow(clippy::too_many_lines)] // one facet-recovery narrative: rounds loop + verification
 pub fn recover_facets(
     tetra: &mut Tetrahedralization,
     facets: &[Vec<u32>],
+    opts: RecoveryOptions,
+    cx: &Cx<'_>,
+) -> Result<(FacetRecoveryStats, FacetCorrespondence), MeshError> {
+    recover_facets_with_points(tetra, facets, &[], &[], opts, cx)
+}
+
+/// Split `tris` (a facet's own triangulation) at mesh vertex `v`, which
+/// lies in the facet's plane: strictly inside one triangle → that triangle
+/// becomes three; on an edge shared by two → both become two. A vertex the
+/// tolerant test places in no triangle leaves `tris` alone (the coplanar
+/// tiling classifier still recognises it by geometry). Returns whether the
+/// triangulation changed.
+fn split_tris_at_vertex(points: &[[f64; 3]], tris: &mut Vec<[u32; 3]>, v: u32) -> bool {
+    let p = points[v as usize];
+    let bary = |t: [u32; 3]| -> Option<(f64, f64)> {
+        let a = points[t[0] as usize];
+        let b = points[t[1] as usize];
+        let c = points[t[2] as usize];
+        let u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+        let w = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+        let q = [p[0] - a[0], p[1] - a[1], p[2] - a[2]];
+        let n = [
+            u[1] * w[2] - u[2] * w[1],
+            u[2] * w[0] - u[0] * w[2],
+            u[0] * w[1] - u[1] * w[0],
+        ];
+        let nn = n[0] * n[0] + n[1] * n[1] + n[2] * n[2];
+        if nn == 0.0 || !nn.is_finite() {
+            return None;
+        }
+        let cross = |x: [f64; 3], y: [f64; 3]| {
+            [
+                x[1] * y[2] - x[2] * y[1],
+                x[2] * y[0] - x[0] * y[2],
+                x[0] * y[1] - x[1] * y[0],
+            ]
+        };
+        let dot = |x: [f64; 3], y: [f64; 3]| x[0] * y[0] + x[1] * y[1] + x[2] * y[2];
+        Some((dot(cross(q, w), n) / nn, dot(cross(u, q), n) / nn))
+    };
+    let eps = 1e-9;
+    // Strictly inside one triangle.
+    for i in 0..tris.len() {
+        let t = tris[i];
+        if t.contains(&v) {
+            return false;
+        }
+        if let Some((s, r)) = bary(t)
+            && s > eps
+            && r > eps
+            && s + r < 1.0 - eps
+        {
+            tris.swap_remove(i);
+            tris.push([t[0], t[1], v]);
+            tris.push([t[1], t[2], v]);
+            tris.push([t[2], t[0], v]);
+            return true;
+        }
+    }
+    // On an edge: split every triangle that has it.
+    for i in 0..tris.len() {
+        let t = tris[i];
+        let Some((s, r)) = bary(t) else {
+            continue;
+        };
+        if s < -eps || r < -eps || s + r > 1.0 + eps {
+            continue;
+        }
+        let edge = if r.abs() <= eps {
+            Some([t[0], t[1]])
+        } else if (1.0 - s - r).abs() <= eps {
+            Some([t[1], t[2]])
+        } else if s.abs() <= eps {
+            Some([t[2], t[0]])
+        } else {
+            None
+        };
+        let Some(edge) = edge else {
+            continue;
+        };
+        let key = if edge[0] < edge[1] {
+            [edge[0], edge[1]]
+        } else {
+            [edge[1], edge[0]]
+        };
+        let mut next = Vec::with_capacity(tris.len() + 2);
+        let mut changed = false;
+        for tt in tris.iter() {
+            let has = |x: u32, y: u32| {
+                let k = if x < y { [x, y] } else { [y, x] };
+                k == key
+            };
+            if has(tt[0], tt[1]) {
+                next.push([tt[0], v, tt[2]]);
+                next.push([v, tt[1], tt[2]]);
+                changed = true;
+            } else if has(tt[1], tt[2]) {
+                next.push([tt[0], tt[1], v]);
+                next.push([tt[0], v, tt[2]]);
+                changed = true;
+            } else if has(tt[2], tt[0]) {
+                next.push([tt[0], tt[1], v]);
+                next.push([v, tt[1], tt[2]]);
+                changed = true;
+            } else {
+                next.push(*tt);
+            }
+        }
+        if changed {
+            *tris = next;
+            return true;
+        }
+    }
+    false
+}
+
+/// INCREMENTAL [`recover_facets`]: a facet whose sub-faces from an earlier
+/// recovery are given in `seed_tiles` (`(sorted sub-face, facet index)`,
+/// i.e. the previous correspondence rows) starts from THAT triangulation
+/// rather than from its loop triangle, and vertices that already lie inside
+/// a facet (constrained refinement's wall split points,
+/// `(facet index, vertex)`) are stitched into it before the passes begin and
+/// counted as interior. Bisection then repairs only the sub-faces an
+/// insertion actually destroyed. MEASURED 2026-09-02: restarting from the
+/// loop triangle after 23 wall splits on the two-fin comb burned the whole
+/// 4,000-point recovery budget and left 30 of 60 facets open.
+///
+/// # Errors
+/// [`MeshError::Cancelled`] between insertions.
+#[allow(clippy::too_many_lines)] // one facet-recovery narrative: rounds loop + verification
+pub fn recover_facets_with_points(
+    tetra: &mut Tetrahedralization,
+    facets: &[Vec<u32>],
+    points_on_facets: &[(u32, u32)],
+    seed_tiles: &[([u32; 3], u32)],
     opts: RecoveryOptions,
     cx: &Cx<'_>,
 ) -> Result<(FacetRecoveryStats, FacetCorrespondence), MeshError> {
@@ -806,7 +1081,7 @@ pub fn recover_facets(
     }
 
     let mut work: Vec<Option<FacetWork>> = Vec::with_capacity(facets.len());
-    for loop_verts in facets {
+    for (fid, loop_verts) in facets.iter().enumerate() {
         cx.checkpoint()?;
         assert!(loop_verts.len() >= 3, "facet needs at least 3 vertices");
         // Triangulate the facet: CONVEX → the exact fan (unchanged — cheapest,
@@ -834,10 +1109,62 @@ pub fn recover_facets(
             let b = loop_verts[(i + 1) % nloop];
             constraint_edges.insert(if a < b { [a, b] } else { [b, a] });
         }
+        let mut interior = BTreeSet::new();
+        let mut tris = tris;
+        let mut constraint_edges = constraint_edges;
+        // Incremental start: the previous recovery's sub-faces of this facet,
+        // their boundary edges (used once) as the constraint edges, and every
+        // vertex not on the loop boundary as interior.
+        let seeded: Vec<[u32; 3]> = seed_tiles
+            .iter()
+            .filter(|(_, parent)| *parent as usize == fid)
+            .map(|(face, _)| *face)
+            .collect();
+        if !seeded.is_empty() {
+            let mut edge_use: std::collections::BTreeMap<[u32; 2], u32> =
+                std::collections::BTreeMap::new();
+            for t in &seeded {
+                for (x, y) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+                    *edge_use
+                        .entry(if x < y { [x, y] } else { [y, x] })
+                        .or_insert(0) += 1;
+                }
+            }
+            constraint_edges = edge_use
+                .into_iter()
+                .filter(|(_, uses)| *uses == 1)
+                .map(|(edge, _)| edge)
+                .collect();
+            let on_loop = |v: u32| {
+                loop_verts.contains(&v)
+                    || (0..nloop).any(|i| {
+                        parameter_on_segment(
+                            tetra.mesh.points[v as usize],
+                            tetra.mesh.points[loop_verts[i] as usize],
+                            tetra.mesh.points[loop_verts[(i + 1) % nloop] as usize],
+                        )
+                        .is_some()
+                    })
+            };
+            for t in &seeded {
+                for &v in t {
+                    if !on_loop(v) {
+                        interior.insert(v);
+                    }
+                }
+            }
+            tris = seeded;
+        }
+        for &(facet_id, v) in points_on_facets {
+            if facet_id as usize == fid {
+                split_tris_at_vertex(&tetra.mesh.points, &mut tris, v);
+                interior.insert(v);
+            }
+        }
         work.push(Some(FacetWork {
             tris,
             constraint_edges,
-            interior: BTreeSet::new(),
+            interior,
             origin,
             normal,
             rounds: 0,
@@ -872,6 +1199,53 @@ pub fn recover_facets(
         if pending.is_empty() {
             break;
         }
+        if std::env::var_os("FS_MESH_TRACE_RECOVERY").is_some() {
+            let detail: Vec<String> = pending
+                .iter()
+                .take(6)
+                .map(|&fid| {
+                    let w = work[fid].as_ref().expect("pending facet has work");
+                    let missing = w
+                        .tris
+                        .iter()
+                        .filter(|t| {
+                            let mut k = **t;
+                            k.sort_unstable();
+                            !faces.contains(&k)
+                        })
+                        .count();
+                    format!(
+                        "f{fid}(r{} tris{} miss{} int{} pts{} tile:{})",
+                        w.rounds,
+                        w.tris.len(),
+                        missing,
+                        w.interior.len(),
+                        points_on_facets
+                            .iter()
+                            .filter(|(f, _)| *f as usize == fid)
+                            .count(),
+                        coplanar_tiling(&tetra.mesh.points, &faces, &facets[fid], &w.interior)
+                            .map_or("none", |_| "found")
+                    )
+                })
+                .collect();
+            eprintln!(
+                "TRACE recovery pass: pending {} steiner {} :: {}",
+                pending.len(),
+                stats.steiner_inserted,
+                detail.join(" ")
+            );
+            if let Some(&fid) = pending
+                .iter()
+                .find(|&&fid| points_on_facets.iter().any(|(f, _)| *f as usize == fid))
+            {
+                let w = work[fid].as_ref().expect("pending facet has work");
+                eprintln!(
+                    "TRACE recovery explain f{fid}: {}",
+                    explain_tiling(&tetra.mesh.points, &faces, &facets[fid], &w.interior)
+                );
+            }
+        }
         // A pass that gives no facet a round has nothing left to try
         // (every pending facet is capped); stop rather than spin. Total
         // passes are bounded by facets × `max_depth` rounds.
@@ -887,6 +1261,31 @@ pub fn recover_facets(
             }
             if w.rounds >= opts.max_depth {
                 w.failed = true;
+                if std::env::var_os("FS_MESH_TRACE_RECOVERY").is_some() {
+                    let faces = face_set(tetra);
+                    let missing = w
+                        .tris
+                        .iter()
+                        .filter(|t| {
+                            let mut k = **t;
+                            k.sort_unstable();
+                            !faces.contains(&k)
+                        })
+                        .count();
+                    eprintln!(
+                        "TRACE recovery: facet {fid} FAILED at round cap {}: {} own tris, {} missing, {} interior points, {} stitched split points, tiling {}",
+                        w.rounds,
+                        w.tris.len(),
+                        missing,
+                        w.interior.len(),
+                        points_on_facets
+                            .iter()
+                            .filter(|(f, _)| *f as usize == fid)
+                            .count(),
+                        coplanar_tiling(&tetra.mesh.points, &faces, loop_verts, &w.interior)
+                            .map_or("none", |_| "found")
+                    );
+                }
                 continue;
             }
             if stats.steiner_inserted >= u64::from(opts.max_steiner) {
