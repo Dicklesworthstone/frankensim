@@ -32,7 +32,7 @@ fn assert_reference(id: &str, expected: f64) {
 #[test]
 fn catalog_is_unique_and_covers_every_requested_family() {
     let cases = thermal_level_a_cases();
-    assert_eq!(cases.len(), 19);
+    assert_eq!(cases.len(), 20);
 
     let ids = cases.iter().map(|case| case.id).collect::<BTreeSet<_>>();
     assert_eq!(ids.len(), cases.len());
@@ -58,7 +58,7 @@ fn catalog_is_unique_and_covers_every_requested_family() {
             .iter()
             .filter(|case| case.kind == ThermalLevelAKind::AnalyticReference)
             .count(),
-        12
+        13
     );
     assert_eq!(
         cases
@@ -94,6 +94,14 @@ fn retained_closed_form_values_reproduce_from_independent_formulas() {
     assert_reference("thermal-a-duct-nu-cwt", 3.66);
     assert_reference("thermal-a-duct-nu-chf", 4.36);
     assert_reference("thermal-a-parallel-plate-view-factor", 1.0);
+    // Heatsink anchor: the lumped NTU chain from the retained operating point
+    // (same operation order as the formula text; libm exp may differ by an ulp).
+    let c_air: f64 = 1.164_398_101_419_160_7 * 1.592_152_707_554_481_7 * 0.000_72 * 1_007.0;
+    let eps = 1.0 - (-(18.160_746_085_275_434 * 0.021_559_999_818_503_896) / c_air).exp();
+    assert_reference(
+        "thermal-a-heatsink-fin-array-ntu",
+        293.15 + 3.0 / (c_air * eps),
+    );
     assert_reference(
         "thermal-a-contact-series",
         0.01 / (10.0 * 0.01) + 0.1 + 0.02 / (20.0 * 0.01),

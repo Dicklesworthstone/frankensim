@@ -180,6 +180,38 @@ const fn analytic(
     }
 }
 
+/// Analytic reference with an explicit comparison envelope: for anchors whose
+/// inputs are retained solver-run values, the envelope is the modelling
+/// residual (here the lumped-solid and straight-fin assumptions), not machine
+/// precision.
+#[allow(clippy::too_many_arguments)] // the manifest row IS this many columns
+const fn anchored(
+    id: &'static str,
+    title: &'static str,
+    family: ThermalLevelAFamily,
+    metric: &'static str,
+    metric_dims: Dims,
+    reference_value_si: f64,
+    formula: &'static str,
+    context: &'static [ThermalLevelAContext],
+    atol: f64,
+    rtol: f64,
+) -> ThermalLevelACase {
+    ThermalLevelACase {
+        id,
+        title,
+        family,
+        kind: ThermalLevelAKind::AnalyticReference,
+        metric,
+        metric_dims,
+        reference_value_si,
+        formula,
+        acceptance: ThermalLevelAAcceptance::Tolerance { atol, rtol },
+        context,
+        no_claim_reason: REFERENCE_ONLY,
+    }
+}
+
 const fn mms(
     id: &'static str,
     title: &'static str,
@@ -215,7 +247,17 @@ static P2_MMS_CONTEXT: [ThermalLevelAContext; 2] = [
     context("mesh-size-m", LENGTH_DIMS, 0.0625, 0.25),
 ];
 
-static THERMAL_LEVEL_A_CASES: [ThermalLevelACase; 19] = [
+static HEATSINK_ANCHOR_CONTEXT: [ThermalLevelAContext; 2] = [
+    context(
+        "reynolds-number",
+        Dims::NONE,
+        1_506.418_951_662_363,
+        1_506.418_951_662_363,
+    ),
+    context("length-over-hydraulic-diameter", Dims::NONE, 4.0, 4.0),
+];
+
+static THERMAL_LEVEL_A_CASES: [ThermalLevelACase; 20] = [
     analytic(
         "thermal-a-slab-dirichlet",
         "Planar slab with two prescribed temperatures",
@@ -392,6 +434,18 @@ static THERMAL_LEVEL_A_CASES: [ThermalLevelACase; 19] = [
         ThermalLevelAFamily::ManufacturedAdjoint,
         3.0,
         &P2_MMS_CONTEXT,
+    ),
+    anchored(
+        "thermal-a-heatsink-fin-array-ntu",
+        "Forced-air finned heatsink: lumped NTU junction temperature at the retained operating point",
+        ThermalLevelAFamily::Fin,
+        "array-junction-temperature",
+        TEMPERATURE_DIMS,
+        301.98198889046773,
+        "T_s = T_in + Q / (C_air * eps); eps = 1 - exp(-h * A_w / C_air); C_air = rho * V * A_flow * c_p; inputs retained by the reference heatsink run (examples/heatsink-fan, 2026-09-02): Q=3 W, T_in=293.15 K, rho=1.1643981014191607 kg/m3, V=1.5921527075544817 m/s, A_flow=0.00072 m2, c_p=1007 J/(kg K), h=18.160746085275434 W/(m2 K) (Hausen developing flow, Nu=10.358 at Re=1506, L/D_h=4), A_w=0.021559999818503896 m2; lumped isothermal solid; the straight-fin efficiency eta=tanh(mL)/(mL)=0.9947 (k=167 W/(m K)) is a 0.047 K tip deficit inside the envelope",
+        &HEATSINK_ANCHOR_CONTEXT,
+        0.1,
+        0.0,
     ),
 ];
 
