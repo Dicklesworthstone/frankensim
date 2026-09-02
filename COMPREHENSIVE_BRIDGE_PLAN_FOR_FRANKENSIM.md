@@ -26,7 +26,7 @@
 | Conjugate solid/air coupling | declared coefficients only | derived Robin rows from the flow-network operating point through `fs-convection` cards with domain gating (Hausen in domain at Re ≈ 1.5 × 10³; energy imbalance 9 × 10⁻¹¹ W; 12 fixed-point iterations) |
 | QoI with the 8-term budget | unreachable | executes; all eight terms are honest NO-DATA → Estimated / indeterminate |
 | Gap table truth | conduction and QoI were "typed gaps" even when they executed | `gap_dependency` is `None` for every stage; undeclared inputs refuse by name (`cli-solve-conduction-undeclared`, `cli-solve-qoi-undeclared`, exit 4) |
-| L3 capabilities | one, falsely certified | zero (demoted); the promotion of `thermal.conduction-solve` is in flight on the receipt rule (q61wp.13, NobleLion) |
+| L3 capabilities | one, falsely certified | **one, legitimately**: `thermal.conduction-solve` at L3 on the retained seven-stage lane receipt (65/65 at 503205c8; commit 974b1cc6), stated in the registry and README as "executes end to end with retained receipts, not converged or validated"; five gates at 0 violations on yto |
 | Marquee (P2) | gated, library did not compile | compiles; `mq_004` shows the gradient sign is wrong (q61wp.16 owner) |
 | Frontier (NS, 3-D LBM, VPM, compressible, turbulence, IGA) | absent or 2-D | unchanged; IGA / turbulence / compressible / FMM-VPM **retired from v1** by owner decision (q61wp.40–.43); NS gated behind the LBM wedge (q61wp.35) |
 | Graph | 2 ready, 83 % blocked, 204 in_progress | 41 ready, 164 in_progress, 1,173 beads deferred to 2026-12-01 |
@@ -242,7 +242,7 @@ Critical path to the first legitimate L3 (execution claim): A2 → A8 → B10 �
 
 ## 16. Bead mapping
 
-Existing steering beads carry A1–A7 (q61wp.1–.6), B1/B5/B6/B7/B10 (q61wp.8, .9, .11, .14, .13), B8 (q61wp.12 remainder), D1–D3 (q61wp.16–.20), E (q61wp.26–.27), F (q61wp.28), G (q61wp.39), H (q61wp.29–.33), I (q61wp.34–.43). **New beads from rounds 1–2:** A9, A10, A11 (or fold into .16), A12, B2, B3, B4, B9, B11, B12, C1–C3, D4 (stretch), E3, F2, G2–G4. Phase 3a creates them self-contained (§15 template) under the steering epic with the dependencies of §13.
+Existing steering beads carry A1–A7 (q61wp.1–.6), B1/B5/B6/B7/B10 (q61wp.8 closed, .9, .11, .14, .13 closed at 974b1cc6), D1–D3 (q61wp.16–.20), E1–E2 (q61wp.26 closed, .27), F1 (q61wp.28), G1 (q61wp.39), H (q61wp.29–.33), I (q61wp.34–.43; .36 closed). **Beads created from this plan (Phase 3a, 2026-09-02, label `bridge-plan`):** B2 = q61wp.44, B3 (+A12) = .45, B4 = .46, B8 = .47, B9 = .48, B11 = .49, B12 = .50, C1 = .51, C2 = .52, C3 = .53, D4 = .54, E3 = .55, F2 = .56, G2 = .57, G3 = .58 (owner decision), G4 = .59, A9 = .60, A10 = .61; A11 is a note on .16. Dependencies as in §13 (C2→C1, C3→B4, F2→.28, .14→B9 and B2, .11→B2, B11→.13 and B2, D4→.19); no cycles. Refinement rounds R1–R4 live as dated notes on the beads.
 
 ## 17. What this plan deliberately does not do
 
