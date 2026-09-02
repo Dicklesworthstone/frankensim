@@ -24,6 +24,8 @@ struct NativeSimulationCanvas: View {
                         drawSignal(result, context: &context, size: size)
                     case .campaign:
                         drawCampaign(result, context: &context, size: size)
+                    case .pcm:
+                        drawPCM(result, context: &context, size: size)
                     }
                 } else if !isRunning {
                     drawIdle(in: &context, size: size)
@@ -175,6 +177,53 @@ struct NativeSimulationCanvas: View {
         }
         context.stroke(path, with: .color(accent.opacity(0.18)), style: StrokeStyle(lineWidth: 8, lineCap: .round, lineJoin: .round))
         context.stroke(path, with: .linearGradient(Gradient(colors: [accent, ForgeTheme.violet, ForgeTheme.emerald]), startPoint: .zero, endPoint: CGPoint(x: size.width, y: size.height)), style: StrokeStyle(lineWidth: 2.2, lineCap: .round, lineJoin: .round))
+    }
+
+    private func drawPCM(_ result: SimulationResult, context: inout GraphicsContext, size: CGSize) {
+        guard result.width == result.values.count,
+              result.height == PCMBlock.channels,
+              result.frames == PCMBlock.sampleRate,
+              result.values.count > 1 else {
+            return
+        }
+
+        let midY = size.height * 0.54
+        var baseline = Path()
+        baseline.move(to: CGPoint(x: 0, y: midY))
+        baseline.addLine(to: CGPoint(x: size.width, y: midY))
+        context.stroke(baseline, with: .color(accent.opacity(0.18)), lineWidth: 1)
+
+        let strideBy = max(1, result.values.count / max(1, Int(size.width * 1.5)))
+        var waveform = Path()
+        var started = false
+        for index in stride(from: 0, to: result.values.count, by: strideBy) {
+            let sample = result.values[index]
+            guard sample.isFinite else { continue }
+            let x = CGFloat(index) / CGFloat(max(1, result.values.count - 1)) * size.width
+            let y = midY - CGFloat(sample.clamped(to: -1...1)) * size.height * 0.36
+            let point = CGPoint(x: x, y: y)
+            if started {
+                waveform.addLine(to: point)
+            } else {
+                waveform.move(to: point)
+                started = true
+            }
+        }
+
+        context.stroke(
+            waveform,
+            with: .color(accent.opacity(0.16)),
+            style: StrokeStyle(lineWidth: 8, lineCap: .round, lineJoin: .round)
+        )
+        context.stroke(
+            waveform,
+            with: .linearGradient(
+                Gradient(colors: [ForgeTheme.cyan, accent, ForgeTheme.violet]),
+                startPoint: .zero,
+                endPoint: CGPoint(x: size.width, y: size.height)
+            ),
+            style: StrokeStyle(lineWidth: 2.2, lineCap: .round, lineJoin: .round)
+        )
     }
 
     private func drawCampaign(_ result: SimulationResult, context: inout GraphicsContext, size: CGSize) {

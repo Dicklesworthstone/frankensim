@@ -15,6 +15,7 @@
 		9DA80FE34DAAA771545C3335 /* SimulationCatalogTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D8913908732FDA5F01465327 /* SimulationCatalogTests.swift */; };
 		A20280DA0CD7942D63D33CA9 /* FrankenSimCore.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 920497C01CE1D6C07D6E436A /* FrankenSimCore.xcframework */; };
 		C3A1CAAC40A3E346A42EF437 /* FrankenSimApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1D293681E99572CC9355037 /* FrankenSimApp.swift */; };
+		C9F96F91B5E1BF0423F87211 /* FrankenSimCore.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 920497C01CE1D6C07D6E436A /* FrankenSimCore.xcframework */; };
 		F9A40C8FFF3D8DE115656869 /* SimulationCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0AF6BEEC0CA5930B9F4B07D8 /* SimulationCatalog.swift */; };
 		FD158FC7BD2435001D5677B9 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 6A4D21ED33B7B43D580AD132 /* Assets.xcassets */; };
 /* End PBXBuildFile section */
@@ -46,6 +47,14 @@
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
+		063B9EE9853B359DAB633E8A /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				C9F96F91B5E1BF0423F87211 /* FrankenSimCore.xcframework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		B5326A58C24DDA224269184F /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -135,6 +144,7 @@
 			buildConfigurationList = BD89EFE46384BD1292D641D1 /* Build configuration list for PBXNativeTarget "FrankenSimTests" */;
 			buildPhases = (
 				09F2DA94B3E808A402FCBE3A /* Sources */,
+				063B9EE9853B359DAB633E8A /* Frameworks */,
 			);
 			buildRules = (
 			);
@@ -391,6 +401,10 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"\".\"",
+				);
 				GENERATE_INFOPLIST_FILE = YES;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -408,6 +422,10 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"\".\"",
+				);
 				GENERATE_INFOPLIST_FILE = YES;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
