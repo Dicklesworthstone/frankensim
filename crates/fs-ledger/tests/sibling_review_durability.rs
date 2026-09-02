@@ -44,6 +44,15 @@ fn stamp_user_version(path: &str, version: u32) {
 
 /// Every durable byte of a WAL-mode database: the main file plus every sidecar
 /// the engine created beside it, keyed by name and sorted for determinism.
+///
+/// The `-shm` file is deliberately NOT durable state: it is the WAL index
+/// (reader marks and lock words) that any connection rewrites merely by
+/// attaching, and SQLite itself documents it as reconstructible scratch.
+/// Executed 2026-09-02 on the rch fleet: a refused future-schema open left
+/// the main file, the WAL, the WAL certificate, and the migration-state
+/// sidecar byte-identical and changed exactly one reader-mark byte of the
+/// shm; counting that as "clobbered" would fail the drill on lock state, not
+/// on data.
 fn snapshot_database(path: &str) -> Vec<(String, Vec<u8>)> {
     let file = std::path::Path::new(path);
     let dir = file.parent().expect("database has a parent directory");
@@ -52,10 +61,8 @@ fn snapshot_database(path: &str) -> Vec<(String, Vec<u8>)> {
         .expect("read database directory")
         .flatten()
         .filter(|entry| {
-            entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with(&*stem.to_string_lossy())
+            let name = entry.file_name().to_string_lossy().into_owned();
+            name.starts_with(&*stem.to_string_lossy()) && !name.ends_with("-shm")
         })
         .filter_map(|entry| {
             let name = entry.file_name().to_string_lossy().into_owned();
