@@ -34,7 +34,7 @@ use fs_conduction::solve::{
 use fs_vvreg::thermal_level_a::{ThermalLevelAKind, thermal_level_a_cases};
 use support::{l2_error, max_nodal_error, with_cx};
 
-const LEVEL_A_ANALYTIC_BINDINGS: [(&str, Option<&str>, &str); 12] = [
+const LEVEL_A_ANALYTIC_BINDINGS: [(&str, Option<&str>, &str); 13] = [
     (
         "thermal-a-slab-dirichlet",
         Some("tests/analytic.rs::slab_dirichlet_dirichlet"),
@@ -94,6 +94,11 @@ const LEVEL_A_ANALYTIC_BINDINGS: [(&str, Option<&str>, &str); 12] = [
         "thermal-a-contact-series",
         Some("tests/contact.rs::two_slab_contact_matches_level_a_series_and_retains_receipt"),
         "the matching-P1 two-slab fixture binds an ordered interface card and retains its property receipt",
+    ),
+    (
+        "thermal-a-heatsink-fin-array-ntu",
+        None,
+        "the lumped NTU junction chain is the air-side exchange owned by fs-airflow::conjugate and the fs-cli conduction stage's conjugate exchange, not the conduction kernel; fs-vvreg's thermal_level_a test reproduces the formula and fs-cli's conjugate G0 test executes the chain at the retained operating point",
     ),
 ];
 

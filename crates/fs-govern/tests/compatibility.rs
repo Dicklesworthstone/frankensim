@@ -970,3 +970,249 @@ fn train_2026_07_25_exact_heads_are_admitted_after_golden_disposition() {
         "the exact-head train is admissible only after the full golden implication is declared"
     );
 }
+
+/// A unit-test surface must render its `--exact` names as libtest's FULL
+/// path (`<module>::tests::<name>`): a bare unit-test name matches nothing
+/// and the surface "passes" with zero tests. Executed on constellation
+/// train 3 (2026-09-02): franken_networkx and franken_numpy reported
+/// `0 passed; 47 filtered out` under the bare-name selector.
+#[test]
+fn unit_test_surfaces_render_module_qualified_exact_names() {
+    for lib in ["franken_networkx", "franken_numpy", "frankentorch"] {
+        let entry = surface(lib).expect("registered");
+        let selectors = entry.selectors();
+        assert!(!selectors.is_empty());
+        for test in entry.tests {
+            let qualified = format!("{}::tests::{}", test.test_target, test.test_name);
+            assert!(
+                selectors.iter().any(|selector| {
+                    selector
+                        .split(" -- --exact ")
+                        .nth(1)
+                        .is_some_and(|names| names.split(' ').any(|name| name == qualified))
+                }),
+                "{lib}: unit test {qualified} is not pinned by an exact selector: {selectors:?}"
+            );
+            assert!(
+                !selectors.iter().any(|selector| {
+                    selector
+                        .split(" -- --exact ")
+                        .nth(1)
+                        .is_some_and(|names| names.split(' ').any(|name| name == test.test_name))
+                }),
+                "{lib}: bare unit-test name {} would match nothing under --exact",
+                test.test_name
+            );
+        }
+    }
+    // Integration surfaces keep bare names: libtest's path for a `tests/`
+    // target IS the bare function name.
+    let asupersync = surface("asupersync").expect("registered");
+    for selector in asupersync.selectors() {
+        assert!(selector.contains(" --exact asupersync_links_and_budget_vocabulary_holds"));
+    }
+}
+
+/// Exact-head release-owner record for the 2026-09-02 constellation train
+/// (bead frankensim-rc-root-q61wp.39; owner decision rc-o3 = advance).
+///
+/// The candidate heads are the seven sibling heads the Mac checkouts had
+/// fast-forwarded to, all clean and pushed at freeze time. The registered
+/// compatibility selectors executed EXACTLY as `compatibility-report` prints
+/// them on the yto verification host (x86-64, release) after its sibling
+/// clones were moved forward to these heads: whole-target totals asupersync
+/// 6/6, franken_networkx 4/4, franken_numpy 2/2, frankenscipy 3/3,
+/// frankensqlite 5/5 (exact-selector totals; registry rows 6/4/2/3/5).
+/// frankentorch did not move (see below). Frankenpandas has
+/// no registered claim and no runtime consumer, so moving it requires no
+/// suite result.
+///
+/// The 24 coupled golden surfaces are the same list train 2 named, checked
+/// below against the registry-derived union. Their owner-crate identity
+/// batteries executed green at the new heads (fs-exec, fs-ledger, fs-plan,
+/// fs-vskeleton), so this train records `Unaffected`: no golden is re-frozen
+/// and no semantic identity is promoted by the pin movement itself.
+#[test]
+fn train_2026_09_02_exact_heads_are_admitted_after_golden_disposition() {
+    let movers = [
+        (
+            "asupersync",
+            "0.4.9",
+            "76c9363726b9730f10210b995250f08b44fbc62e",
+            "0.4.10",
+            "03a0a298d07f565c56b3d80ad85cf2bbc69ad3c2",
+        ),
+        (
+            "franken_networkx",
+            "0.2.0",
+            "2f6b35990ba50a161a67597d9f7c220f208e1ddd",
+            "0.2.0",
+            "ab73033517f47250ac9477148fc055f148e838b0",
+        ),
+        (
+            "franken_numpy",
+            "0.2.0",
+            "e815dd3dc0bf8ae6d1555cfb7f8d787f4132196b",
+            "0.2.0",
+            "9b6b5828317dbeda36a6a9e53c8fa754527f0d0c",
+        ),
+        (
+            "frankenpandas",
+            "0.2.0",
+            "8464603d90d96168fd2fb331b0480a5962d04f16",
+            "0.2.0",
+            "38a4b26fe652d7a7783d7f8f5a0961cf19c9c1a0",
+        ),
+        (
+            "frankenscipy",
+            "0.1.0",
+            "0599340ea778b7cfaaee197a8ea5f97fb1369efb",
+            "0.1.0",
+            "a75ad6ed2e9f72e72b8d393fd92805909958630b",
+        ),
+        (
+            "frankensqlite",
+            "unversioned-workspace",
+            "06d4f90c2e5da698603a86f672b94aca0ec80123",
+            "unversioned-workspace",
+            "d5c68ea3ab4a938e4d6b38fdfbba86872c65e82f",
+        ),
+    ];
+    // frankentorch is NOT moved: at the Mac head 74df606b its kernel-cpu
+    // crate does not compile under the pinned nightly-2026-07-06 (portable-
+    // SIMD `Mask::select`, bead frankensim-r55qa), so its surface could not
+    // execute and the protocol refuses that mover. It stays at 9627f39c; as
+    // a P3 sibling that did not move it needs no suite result on this train.
+    let mut deltas: Vec<PinDelta> = movers
+        .iter()
+        .map(
+            |(lib, from_version, from_head, to_version, to_head)| PinDelta {
+                lib: (*lib).to_string(),
+                movement: PinMovement::Moved {
+                    from_version: (*from_version).to_string(),
+                    from_head: (*from_head).to_string(),
+                    to_version: (*to_version).to_string(),
+                    to_head: (*to_head).to_string(),
+                },
+            },
+        )
+        .collect();
+    deltas.push(PinDelta {
+        lib: "frankentorch".to_string(),
+        movement: PinMovement::Unchanged,
+    });
+
+    for (lib, expected_rows) in [
+        ("asupersync", 6),
+        ("franken_networkx", 4),
+        ("franken_numpy", 2),
+        ("frankenscipy", 3),
+        ("frankensqlite", 5),
+        ("frankentorch", 4),
+    ] {
+        assert_eq!(
+            surface(lib)
+                .expect("moved sibling is registered")
+                .tests
+                .len(),
+            expected_rows,
+            "{lib} compatibility-row count drifted"
+        );
+    }
+
+    // Measured whole-target totals from the yto run (registry rows are a
+    // different quantity; both stay executable).
+    let results = vec![
+        SuiteResult::new(
+            "asupersync",
+            SuiteOutcome::Executed {
+                passed: 6,
+                failed: 0,
+            },
+        ),
+        SuiteResult::new(
+            "franken_networkx",
+            SuiteOutcome::Executed {
+                passed: 4,
+                failed: 0,
+            },
+        ),
+        SuiteResult::new(
+            "franken_numpy",
+            SuiteOutcome::Executed {
+                passed: 2,
+                failed: 0,
+            },
+        ),
+        SuiteResult::new(
+            "frankenscipy",
+            SuiteOutcome::Executed {
+                passed: 3,
+                failed: 0,
+            },
+        ),
+        SuiteResult::new(
+            "frankensqlite",
+            SuiteOutcome::Executed {
+                passed: 5,
+                failed: 0,
+            },
+        ),
+    ];
+
+    let coupled_ids = [
+        "fs-exec:gemm-tune-key",
+        "fs-exec:tilepool-placement",
+        "fs-exec:tune-row",
+        "fs-exec:tuning-decision",
+        "fs-ledger:artifact-content",
+        "fs-ledger:color-admission-policy",
+        "fs-ledger:color-node",
+        "fs-ledger:derived-color-waiver-subject",
+        "fs-ledger:physical-instance",
+        "fs-ledger:session-flush-batch",
+        "fs-ledger:session-mutation-claim",
+        "fs-ledger:session-terminal-events",
+        "fs-ledger:solver-checkpoint-receipt",
+        "fs-ledger:source-color-waiver-subject",
+        "fs-ledger:source-origin-request",
+        "fs-ledger:state-checkpoint-receipt",
+        "fs-ledger:vcs-commit-envelope",
+        "fs-ledger:vcs-commit-leaf",
+        "fs-ledger:vcs-commit-root",
+        "fs-ledger:vcs-ledger-lineage",
+        "fs-plan:voi-audit-context",
+        "fs-plan:voi-ranked-menu",
+        "fs-plan:voi-ranked-source",
+        "fs-vskeleton:artifact-content",
+    ];
+    assert_eq!(coupled_ids.len(), 24);
+    let mut derived: Vec<&str> = movers
+        .iter()
+        .flat_map(|(lib, ..)| coupled_golden_surfaces(lib, &coupled_ids))
+        .collect();
+    derived.sort_unstable();
+    derived.dedup();
+    assert_eq!(derived.as_slice(), coupled_ids.as_slice());
+
+    let real = BumpAttempt {
+        kind: BumpKind::ReleaseTrain,
+        deltas,
+        results,
+        golden: GoldenDisposition::Unaffected {
+            justification: concat!(
+                "Exact-head compatibility selectors are green on the yto verification ",
+                "host at the candidate heads; the fs-exec, fs-ledger, fs-plan, and ",
+                "fs-vskeleton identity batteries executed green there, so sibling pin ",
+                "metadata remains outside the 24 named semantic identities. No golden ",
+                "bytes are re-frozen by this train."
+            )
+            .to_string(),
+        },
+        coupled_goldens: coupled_ids.iter().map(|id| (*id).to_string()).collect(),
+    };
+    assert!(
+        evaluate_bump(&real).admitted(),
+        "the 2026-09-02 train is admissible only with every surface executed green and the golden implication declared"
+    );
+}

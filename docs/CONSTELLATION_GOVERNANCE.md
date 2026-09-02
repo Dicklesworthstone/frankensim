@@ -199,7 +199,7 @@ or a critical sibling becoming unavailable. Convenience, new upstream features,
 and version freshness are not merely discouraged — they are unrepresentable in
 the type, so they cannot be argued into an emergency.
 
-### Current state: two trains run, both refused, for different reasons
+### Current state: three trains run; the third advanced six of seven pins
 
 The protocol has now been exercised twice end to end against live pins. Neither
 was a synthetic drill, and both transcripts are pinned as executable tests so
@@ -247,6 +247,70 @@ Two boundaries this exposed and fixed:
   no evidence, because a pin move cannot break something nothing depends on.
   Both conditions are required, so "no claims" cannot become a way to dodge
   evidence for something that is actually consumed.
+
+**Train 3 (2026-09-02) — six of seven advanced; frankentorch REFUSED on
+absent evidence; golden implication declared.** Owner decision rc-o3 (bead
+frankensim-rc-root-q61wp.23) chose to advance the lock to the seven
+fast-forwarded sibling heads; bead frankensim-rc-root-q61wp.39 executed it.
+The verification host (yto, x86-64, release) had been bootstrapped at the old
+pins with the drift gate reporting all seven `on-pin`; its sibling clones were
+moved forward to the exact candidate heads (forward-only; the Mac's shared
+checkouts were never touched) and the registered selectors ran exactly as
+`compatibility-report` prints them:
+
+| sibling | head | measured |
+|---|---|---|
+| asupersync | 03a0a298 (0.4.9 → 0.4.10) | 6/6 |
+| franken_networkx | ab730335 | 4/4 (after the selector fix; 0/0 before) |
+| franken_numpy | 9b6b5828 | 2/2 (after the selector fix; 0/0 before) |
+| frankenscipy | a75ad6ed | 3/3 |
+| frankensqlite | d5c68ea3 (fsqlite 0.3.8 → 0.3.15) | 5/5 |
+| frankentorch | HELD at 9627f39c | candidate 74df606b does not compile under nightly-2026-07-06 (kernel-cpu `Mask::select`, bead frankensim-r55qa): 0 tests executed, refused |
+| frankenpandas | 38a4b26f | no claim, no runtime consumer — no evidence required |
+
+The golden obligation that refused train 2 is discharged the way train 2's
+transcript said it must be: the 24 coupled semantic golden surfaces (the same
+registry-derived list) are declared `Unaffected`, backed by the owner-crate
+identity batteries executing green at the new heads (fs-exec, fs-ledger,
+fs-plan, fs-vskeleton). The sibling-review drills re-ran at the new heads
+(`sibling_review_cancellation` 7/7, `sibling_review_durability` 5/5),
+and the Journey A spine crates were run there as the bead's step 4: fs-conduction
+13/13 across its first three targets (analytic 8/8 once the new Level-A
+`thermal-a-heatsink-fin-array-ntu` row got its declared gap entry in the
+binding matrix), while fs-project's `fansystem` target and fs-cli did not
+execute because the train's own debug-profile builds filled the host's disk
+(ENOSPC, linker bus error) — an environment refusal recorded as NotRun, to be
+re-run after the host is reclaimed, not a sibling incompatibility. The transcript is pinned as
+`train_2026_09_02_exact_heads_are_admitted_after_golden_disposition` in
+`crates/fs-govern/tests/compatibility.rs`.
+
+One audit fact this train closes: the committed `Cargo.lock` had already
+recorded the drifted sibling versions (asupersync 0.4.10, fsqlite 0.3.15,
+frankentorch-kernel-cpu 0.1.1) against pins that named older heads, so `HEAD`
+was building against a trusted computing base the lock did not declare. After
+this train the declared TCB and the built TCB agree on six of the seven
+heads, with frankentorch the one declared exception. The
+four fs-ledger GC tests carried in `suite-known-red.json` under bead
+frankensim-fsqlite-fk-cascade-ordering-f2jag pass at the new frankensqlite
+head and leave that registry in the same change.
+
+Two boundaries this train exposed and fixed:
+
+- **Unit-test selectors matched nothing.** The registry rendered
+  `--exact <bare name>` for `#[cfg(test)]` tests inside `src/`, but libtest's
+  exact match is against the full path `<module>::tests::<name>`, so
+  franken_networkx and franken_numpy each reported `0 passed; 47 filtered
+  out` — precisely the vacuous pass the renderer exists to prevent, and it
+  had been printing that selector since train 2 without anyone executing it
+  exactly. The renderer now emits the qualified path for unit surfaces
+  (integration surfaces keep bare names, which ARE their libtest path), with
+  a regression test that refuses the bare form.
+- **A mover that cannot compile is refused, not skipped.** frankentorch's
+  candidate head builds on the sibling's own newer nightly but not on the
+  workspace's pinned one. The train moved the other six and left
+  frankentorch at its recorded pin; the Mac's frankentorch checkout is
+  therefore the one remaining off-pin sibling, visible as `stale-lock` in
+  the drift gate until bead frankensim-r55qa resolves it.
 
 ## Archival, escrow, and retention
 

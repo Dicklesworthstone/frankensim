@@ -2,15 +2,15 @@
   "schema": "frankensim-constellation-lock-v2",
   "identity_domain": "org.frankensim.xtask.constellation-lock.v1",
   "identity_version": 1,
-  "lock_hash": "a6922d3ee80cba57",
+  "lock_hash": "4a7ffa243c0cf006",
   "note": "lock_hash covers (lib, version, git_head) only — paths are per-machine; remote is transport for bootstrap-constellation (content identity is the git head)",
   "libraries": [
-    {"lib": "asupersync", "version": "0.4.9", "git_head": "76c9363726b9730f10210b995250f08b44fbc62e", "remote": "https://github.com/Dicklesworthstone/asupersync.git", "path": "/Users/jemanuel/projects/asupersync"},
-    {"lib": "franken_networkx", "version": "0.2.0", "git_head": "2f6b35990ba50a161a67597d9f7c220f208e1ddd", "remote": "https://github.com/Dicklesworthstone/franken_networkx.git", "path": "/Users/jemanuel/projects/franken_networkx"},
-    {"lib": "franken_numpy", "version": "0.2.0", "git_head": "e815dd3dc0bf8ae6d1555cfb7f8d787f4132196b", "remote": "https://github.com/Dicklesworthstone/franken_numpy.git", "path": "/Users/jemanuel/projects/franken_numpy"},
-    {"lib": "frankenpandas", "version": "0.2.0", "git_head": "8464603d90d96168fd2fb331b0480a5962d04f16", "remote": "https://github.com/Dicklesworthstone/frankenpandas.git", "path": "/Users/jemanuel/projects/frankenpandas"},
-    {"lib": "frankenscipy", "version": "0.1.0", "git_head": "0599340ea778b7cfaaee197a8ea5f97fb1369efb", "remote": "https://github.com/Dicklesworthstone/frankenscipy.git", "path": "/Users/jemanuel/projects/frankenscipy"},
-    {"lib": "frankensqlite", "version": "unversioned-workspace", "git_head": "06d4f90c2e5da698603a86f672b94aca0ec80123", "remote": "https://github.com/Dicklesworthstone/frankensqlite.git", "path": "/Users/jemanuel/projects/frankensqlite"},
+    {"lib": "asupersync", "version": "0.4.10", "git_head": "03a0a298d07f565c56b3d80ad85cf2bbc69ad3c2", "remote": "https://github.com/Dicklesworthstone/asupersync.git", "path": "/Users/jemanuel/projects/asupersync"},
+    {"lib": "franken_networkx", "version": "0.2.0", "git_head": "ab73033517f47250ac9477148fc055f148e838b0", "remote": "https://github.com/Dicklesworthstone/franken_networkx.git", "path": "/Users/jemanuel/projects/franken_networkx"},
+    {"lib": "franken_numpy", "version": "0.2.0", "git_head": "9b6b5828317dbeda36a6a9e53c8fa754527f0d0c", "remote": "https://github.com/Dicklesworthstone/franken_numpy.git", "path": "/Users/jemanuel/projects/franken_numpy"},
+    {"lib": "frankenpandas", "version": "0.2.0", "git_head": "38a4b26fe652d7a7783d7f8f5a0961cf19c9c1a0", "remote": "https://github.com/Dicklesworthstone/frankenpandas.git", "path": "/Users/jemanuel/projects/frankenpandas"},
+    {"lib": "frankenscipy", "version": "0.1.0", "git_head": "a75ad6ed2e9f72e72b8d393fd92805909958630b", "remote": "https://github.com/Dicklesworthstone/frankenscipy.git", "path": "/Users/jemanuel/projects/frankenscipy"},
+    {"lib": "frankensqlite", "version": "unversioned-workspace", "git_head": "d5c68ea3ab4a938e4d6b38fdfbba86872c65e82f", "remote": "https://github.com/Dicklesworthstone/frankensqlite.git", "path": "/Users/jemanuel/projects/frankensqlite"},
     {"lib": "frankentorch", "version": "0.1.0", "git_head": "9627f39cea7462b8f6d55bed5009c271ec6c736b", "remote": "https://github.com/Dicklesworthstone/frankentorch.git", "path": "/Users/jemanuel/projects/frankentorch"}
   ]
 }

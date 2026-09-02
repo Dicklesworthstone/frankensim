@@ -187,13 +187,27 @@ impl SiblingSurface {
                 // throughput floor, say — can fail a surface for a reason the
                 // registry never claimed, and machine contention becomes
                 // indistinguishable from sibling incompatibility.
-                let mut names: Vec<&str> = self
+                //
+                // `--exact` matches libtest's FULL path. An integration test's
+                // path is its bare name; a unit test inside `src/` lives under
+                // `<module>::tests::<name>`, so a bare unit-test name matches
+                // nothing and the surface "passes" with zero tests executed —
+                // the vacuous pass this renderer exists to prevent. Executed
+                // on constellation train 3 (2026-09-02): franken_networkx and
+                // franken_numpy both reported `0 passed; 47 filtered out`
+                // before this rendered the qualified path.
+                let mut names: Vec<String> = self
                     .tests
                     .iter()
                     .filter(|test| {
                         test.crate_name == crate_name && test.required_features == features
                     })
-                    .map(|test| test.test_name)
+                    .map(|test| match test.kind {
+                        TestKind::Unit => {
+                            format!("{}::tests::{}", test.test_target, test.test_name)
+                        }
+                        TestKind::Integration => test.test_name.to_string(),
+                    })
                     .collect();
                 names.sort_unstable();
                 names.dedup();
