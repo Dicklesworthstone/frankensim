@@ -992,6 +992,7 @@ dependencies = [
  "fs-fmm",
  "fs-geom",
  "fs-la",
+ "fs-material",
  "fs-math",
  "fs-rep-mesh",
  "fs-solver",

@@ -605,6 +605,7 @@ dependencies = [
  "fs-fmm",
  "fs-geom",
  "fs-la",
+ "fs-material",
  "fs-math",
  "fs-rep-mesh",
  "fs-solver",
@@ -768,6 +769,8 @@ dependencies = [
 name = "fs-fft"
 version = "0.0.1"
 dependencies = [
+ "asupersync",
+ "fs-alloc",
  "fs-exec",
  "fs-math",
  "fs-simd",
@@ -1415,6 +1418,7 @@ dependencies = [
  "fs-couple",
  "fs-cutfem",
  "fs-dfo",
+ "fs-duct",
  "fs-eproc",
  "fs-evidence",
  "fs-exec",
@@ -1454,6 +1458,7 @@ dependencies = [
  "fs-sos",
  "fs-sparse",
  "fs-spectral",
+ "fs-substrate",
  "fs-symmetry",
  "fs-toleralloc",
  "fs-tropical",

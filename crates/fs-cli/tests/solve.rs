@@ -962,7 +962,7 @@ fn solve_publication_counts(ledger: &Ledger) -> SolvePublicationCounts {
 #[test]
 fn g0_run_identity_is_deterministic_and_input_sensitive() {
     assert_eq!(
-        SOLVE_DRIVER_VERSION, 10,
+        SOLVE_DRIVER_VERSION, 11,
         "authority-semantic changes must deliberately advance this identity-bearing version"
     );
 
@@ -3791,7 +3791,9 @@ fn g0_conduction_stage_executes_declared_card_backed_contact() {
     );
 }
 
-fn assert_undeclared_conduction_interface_refusal(reverse_region_order: bool) -> (usize, usize) {
+fn assert_undeclared_conduction_interface_refusal(
+    reverse_region_order: bool,
+) -> ((usize, usize), (String, String)) {
     let spec = multi_region_project_without_declared_interface(reverse_region_order);
     let decoded = decode(&spec);
     assert!(
@@ -3832,7 +3834,24 @@ fn assert_undeclared_conduction_interface_refusal(reverse_region_order: bool) ->
     let (first_slot, second_slot) = slots
         .split_once(" and ")
         .expect("candidate slots use the typed `and` separator");
+    // Each slot is `<index> (region <id>)`; the index leads, the region
+    // identity follows and is what a declaration-order permutation must
+    // preserve.
+    let region_of = |slot: &str| -> String {
+        slot.split_once("(region ")
+            .expect("slot names its region")
+            .1
+            .split(')')
+            .next()
+            .expect("region id closes")
+            .to_string()
+    };
+    let first_region = region_of(first_slot);
+    let second_region = region_of(second_slot);
     let first_slot = first_slot
+        .split_whitespace()
+        .next()
+        .expect("first slot names an index")
         .parse::<usize>()
         .expect("first slot is an integer");
     let second_slot = second_slot
@@ -3873,26 +3892,37 @@ fn assert_undeclared_conduction_interface_refusal(reverse_region_order: bool) ->
             "{stage} must not publish progress after the refusal: {progress:?}"
         );
     }
-    (first_slot, second_slot)
+    ((first_slot, second_slot), (first_region, second_region))
 }
 
 #[test]
 fn g3_conduction_undeclared_interface_refuses_in_direct_slot_order() {
-    let (first_slot, second_slot) = assert_undeclared_conduction_interface_refusal(false);
+    let ((first_slot, second_slot), (first_region, second_region)) =
+        assert_undeclared_conduction_interface_refusal(false);
     assert_ne!(
         first_slot, second_slot,
         "a coincident interface candidate joins two distinct boundary slots"
+    );
+    assert_ne!(
+        first_region, second_region,
+        "the coincident slots belong to the two distinct regions"
     );
 }
 
 #[test]
 fn g3_conduction_undeclared_interface_refuses_in_reverse_slot_order() {
-    let direct = assert_undeclared_conduction_interface_refusal(false);
-    let reverse = assert_undeclared_conduction_interface_refusal(true);
+    // Slot INDICES follow the tet complex, and fs-mesh keeps whichever
+    // coplanar tiling the kernel's index-ordered tie-break produced, so a
+    // declaration-order permutation is not a pure relabelling of slots any
+    // more. The invariant a permutation must preserve is semantic: the same
+    // two regions are named, in swapped roles, and both slots are distinct.
+    let (direct_slots, direct_regions) = assert_undeclared_conduction_interface_refusal(false);
+    let (reverse_slots, reverse_regions) = assert_undeclared_conduction_interface_refusal(true);
+    assert_ne!(reverse_slots.0, reverse_slots.1);
     assert_eq!(
-        reverse,
-        (direct.1, direct.0),
-        "reversing the region declaration order reverses the ConductionMesh candidate slots"
+        reverse_regions,
+        (direct_regions.1.clone(), direct_regions.0.clone()),
+        "reversing the region declaration order swaps which region owns the first candidate slot; direct slots {direct_slots:?}, reverse slots {reverse_slots:?}"
     );
 }
 

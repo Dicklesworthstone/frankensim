@@ -25,6 +25,7 @@ pub const MAX_TEMPORAL_DENOISE_SPATIAL_ITERATIONS: u8 = 8;
 
 const CONFIG_MAGIC: [u8; 8] = *b"FSTDNV3\0";
 const CONFIG_VERSION: u16 = 3;
+const POLL_RASTER_PIXELS: usize = 256;
 const B3: [f64; 5] = [1.0 / 16.0, 4.0 / 16.0, 6.0 / 16.0, 4.0 / 16.0, 1.0 / 16.0];
 // Inverse of fs-render's frozen E-XYZ -> Bradford D65 -> linear-sRGB transform,
 // selecting the source CIE-Y row carried by `variance_luminance`.
@@ -419,6 +420,8 @@ pub enum TemporalDenoiseError {
         /// Exact vector payload bytes requested.
         requested: u64,
     },
+    /// Caller cancellation was observed before a result was published.
+    Cancelled,
 }
 
 impl fmt::Display for TemporalDenoiseError {
@@ -475,6 +478,7 @@ impl fmt::Display for TemporalDenoiseError {
                 f,
                 "allocator refused {requested} bytes for temporal denoiser {resource}"
             ),
+            Self::Cancelled => f.write_str("temporal denoising was cancelled"),
         }
     }
 }
@@ -500,6 +504,28 @@ pub fn temporal_denoise_rgb(
     boundary: TemporalFrameBoundary,
     config: TemporalDenoiseConfig,
     limits: TemporalDenoiseLimits,
+) -> Result<TemporalDenoisedFrame, TemporalDenoiseError> {
+    temporal_denoise_rgb_with_poll(input, previous, boundary, config, limits, || true)
+}
+
+/// Cancellable form of [`temporal_denoise_rgb`].
+///
+/// The poll is checked after all refusal-only preflight and before every
+/// allocation phase, then at most every [`POLL_RASTER_PIXELS`] temporal or
+/// spatial raster samples. Cancellation returns no partially published
+/// history.
+///
+/// # Errors
+/// Returns the same errors as [`temporal_denoise_rgb`], plus
+/// [`TemporalDenoiseError::Cancelled`] when `poll` returns `false`.
+#[allow(clippy::too_many_lines)]
+pub fn temporal_denoise_rgb_with_poll(
+    input: TemporalDenoiseInput<'_>,
+    previous: Option<&TemporalDenoisedFrame>,
+    boundary: TemporalFrameBoundary,
+    config: TemporalDenoiseConfig,
+    limits: TemporalDenoiseLimits,
+    mut poll: impl FnMut() -> bool,
 ) -> Result<TemporalDenoisedFrame, TemporalDenoiseError> {
     let config_identity = config.identity()?;
     let pixel_count = validate_input(input)?;
@@ -533,6 +559,7 @@ pub fn temporal_denoise_rgb(
             limit: limits.max_new_bytes,
         });
     }
+    poll_or_cancel(&mut poll)?;
 
     let mut rgb = [
         try_filled(pixel_count, 0.0_f32, "red result")?,
@@ -545,6 +572,9 @@ pub fn temporal_denoise_rgb(
     let use_history = boundary == TemporalFrameBoundary::Continuous && previous.is_some();
     let previous = previous.filter(|_| use_history);
     for index in 0..pixel_count {
+        if index % POLL_RASTER_PIXELS == 0 {
+            poll_or_cancel(&mut poll)?;
+        }
         let current_rgb = [input.red[index], input.green[index], input.blue[index]];
         let current_variance = input.variance_luminance[index] / sample_count(input, index) as f32;
         let Some(history) = previous else {
@@ -597,6 +627,7 @@ pub fn temporal_denoise_rgb(
         history_length[index] = old_length.saturating_add(1).min(config.max_history_frames);
     }
 
+    poll_or_cancel(&mut poll)?;
     let mut scratch = [
         try_filled(pixel_count, 0.0_f32, "spatial red scratch")?,
         try_filled(pixel_count, 0.0_f32, "spatial green scratch")?,
@@ -610,20 +641,26 @@ pub fn temporal_denoise_rgb(
             &mut scratch,
             config,
             iteration,
-        );
+            &mut poll,
+        )?;
         core::mem::swap(&mut rgb, &mut scratch);
     }
 
+    poll_or_cancel(&mut poll)?;
     let axial_depth_m = try_copy(input.axial_depth_m, "depth history")?;
     let primary_coverage = try_copy(input.primary_coverage, "coverage history")?;
     let mut normal = try_filled(pixel_count, [0.0; 3], "normal history")?;
     for (index, sample) in normal.iter_mut().enumerate() {
+        if index % POLL_RASTER_PIXELS == 0 {
+            poll_or_cancel(&mut poll)?;
+        }
         *sample = [
             input.normal_x[index],
             input.normal_y[index],
             input.normal_z[index],
         ];
     }
+    poll_or_cancel(&mut poll)?;
     let object_ids = input
         .object_ids
         .map(|values| try_copy(values, "object-ID history"))
@@ -632,6 +669,7 @@ pub fn temporal_denoise_rgb(
         .material_ids
         .map(|values| try_copy(values, "material-ID history"))
         .transpose()?;
+    poll_or_cancel(&mut poll)?;
 
     Ok(TemporalDenoisedFrame {
         frame_index: input.frame_index,
@@ -1145,10 +1183,14 @@ fn spatial_atrous_pass(
     next: &mut [Vec<f32>; 3],
     config: TemporalDenoiseConfig,
     iteration: u8,
-) {
+    poll: &mut impl FnMut() -> bool,
+) -> Result<(), TemporalDenoiseError> {
     let step = 1_isize << iteration;
     let sigma_squared = f64::from(config.spatial_sigma_rgb).powi(2);
     for center in 0..(input.width * input.height) {
+        if center % POLL_RASTER_PIXELS == 0 {
+            poll_or_cancel(poll)?;
+        }
         let x = center % input.width;
         let y = center / input.width;
         let center_rgb = core::array::from_fn(|channel| current[channel][center]);
@@ -1209,6 +1251,15 @@ fn spatial_atrous_pass(
         for channel in 0..3 {
             next[channel][center] = output[channel];
         }
+    }
+    Ok(())
+}
+
+fn poll_or_cancel(poll: &mut impl FnMut() -> bool) -> Result<(), TemporalDenoiseError> {
+    if poll() {
+        Ok(())
+    } else {
+        Err(TemporalDenoiseError::Cancelled)
     }
 }
 
@@ -1839,6 +1890,43 @@ mod tests {
             .unwrap()
         }
         assert_eq!(sequence(), sequence());
+    }
+
+    #[test]
+    fn cancellable_denoise_refuses_mid_frame_and_clean_retry_is_identical() {
+        let fixture = Fixture::surface(32, 16, 0, [0.3, 0.4, 0.5]);
+        let config = TemporalDenoiseConfig::default();
+        let clean = run(&fixture, None, TemporalFrameBoundary::Continuous, config)
+            .expect("clean reference denoise");
+
+        let mut polls = 0_usize;
+        let cancelled = temporal_denoise_rgb_with_poll(
+            fixture.input(),
+            None,
+            TemporalFrameBoundary::Continuous,
+            config,
+            TemporalDenoiseLimits::default(),
+            || {
+                polls += 1;
+                polls < 5
+            },
+        );
+        assert_eq!(cancelled, Err(TemporalDenoiseError::Cancelled));
+        assert_eq!(polls, 5, "cancellation must reach a spatial raster poll");
+
+        let retried = temporal_denoise_rgb_with_poll(
+            fixture.input(),
+            None,
+            TemporalFrameBoundary::Continuous,
+            config,
+            TemporalDenoiseLimits::default(),
+            || true,
+        )
+        .expect("uncancelled retry");
+        assert_eq!(
+            retried, clean,
+            "cancellation must not publish partial history"
+        );
     }
 
     #[test]

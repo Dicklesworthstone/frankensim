@@ -610,13 +610,16 @@ fn g0_the_worked_example_fixtures_stay_fresh_through_the_real_cli_verb() {
 }
 
 #[test]
-fn g0_the_heatsink_fan_example_reaches_the_flow_network_operating_point() {
+fn g1_the_heatsink_fan_example_runs_every_stage_through_the_real_cli_verb() {
     // The heatsink+fan worked example (bead frankensim-extreal-program-
-    // f85xj.6.12) is the deepest walkthrough the product honestly supports:
-    // with a declared fan system, vent area, and airflow-leakage bypass it
-    // must clear import-verify, assign, material-resolve, AND the
-    // interval-certified flow-network operating point, then refuse at the
-    // conduction stage with the typed gap naming its owner bead.
+    // f85xj.6.12; conduction declared under rc-root-q61wp.8) is the deepest
+    // walkthrough the product supports: a real finned body (one closed
+    // 108-facet shell), a declared fan system, vent, airflow-leakage bypass,
+    // a seeded aluminium region, and an airflow-convection boundary whose
+    // coefficient is derived from the vent branch's operating point through
+    // the Hausen developing-flow card. It must clear all seven solve stages
+    // through the one-command `run` verb and export a report and package
+    // next to the ledger, every value of which traces to a retained receipt.
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let fsim = root.join("examples/heatsink-fan/heatsink-fan.fsim");
     let stl = root.join("examples/heatsink-fan/heatsink.stl");
@@ -636,7 +639,8 @@ fn g0_the_heatsink_fan_example_reaches_the_flow_network_operating_point() {
     assert!(validated.stdout.contains("\"status\":\"ok\""));
     assert!(validated.stdout.contains("\"finding_count\":0"));
 
-    let ledger = scratch("heatsink-ledger").join("heatsink.db");
+    let dir = scratch("heatsink-run");
+    let ledger = dir.join("heatsink.db");
     let imported = run(args(&[
         "--json",
         "import",
@@ -655,27 +659,58 @@ fn g0_the_heatsink_fan_example_reaches_the_flow_network_operating_point() {
         imported.stderr
     );
 
-    let solved = run(args(&[
-        "solve",
+    let output = run(args(&[
+        "--json",
+        "run",
         fsim.to_string_lossy().as_ref(),
         ledger.to_string_lossy().as_ref(),
         "--materials",
         pack.to_string_lossy().as_ref(),
     ]));
-    assert_ne!(
-        solved.exit_code,
+    assert_eq!(
+        output.exit_code,
         exit::SUCCESS,
-        "solve must refuse at the conduction typed gap, stdout: {}",
-        solved.stdout
+        "stdout: {} / stderr: {}",
+        output.stdout,
+        output.stderr
+    );
+    assert!(output.stdout.contains("\"status\":\"completed\""));
+    assert!(output.stdout.contains("\"stages_completed\":7"));
+    // Conduction executed (not a typed gap), and the retained verdict is the
+    // honest Estimated/indeterminate one with a checker-clean package.
+    assert!(
+        output
+            .stderr
+            .contains("\"stage\":\"conduction\",\"ordinal\":4,\"status\":\"ok\""),
+        "stderr: {}",
+        output.stderr
     );
     assert!(
-        (solved.stderr.contains("cli-solve-stage-gap") && solved.stderr.contains("conduction"))
-            || (solved.stdout.contains("stage=conduction")
-                && solved.stdout.contains("dependency=frankensim-s93ej")),
-        "expected the conduction typed-gap refusal, got stdout: {} / stderr: {}",
-        solved.stdout,
-        solved.stderr
+        output.stdout.contains("\"verdict\":\"indeterminate\""),
+        "stdout: {}",
+        output.stdout
     );
+    assert!(
+        output.stdout.contains("\"checker\":\"pass\""),
+        "stdout: {}",
+        output.stdout
+    );
+    let run_id = output
+        .stdout
+        .split("\"run\":\"")
+        .nth(1)
+        .and_then(|rest| rest.get(..64))
+        .expect("run result names its 64-hex run id");
+    assert!(
+        run_id.chars().all(|c| c.is_ascii_hexdigit()),
+        "run id {run_id}"
+    );
+    for suffix in [".report.html", ".report.json", ".fspkg"] {
+        let path = dir.join(format!("{run_id}{suffix}"));
+        let bytes = std::fs::read(&path)
+            .unwrap_or_else(|error| panic!("{} was not exported: {error}", path.display()));
+        assert!(!bytes.is_empty(), "{} is empty", path.display());
+    }
 }
 
 #[test]
@@ -952,28 +987,53 @@ fn g3_report_json_conflict_does_not_publish_a_partial_html_twin() {
 }
 
 #[test]
-fn g0_run_command_preserves_the_first_unavailable_stage() {
+fn g0_run_stops_at_the_conduction_gap_when_the_project_declares_no_conduction() {
+    // Strip the conduction declaration from the heatsink example in a scratch
+    // copy: `run` must then stop at the conduction stage as a typed gap
+    // (exit 5), name the stage, and write no report or package. This pins the
+    // negative space of the example above: conduction executes only for a
+    // declared solid problem, never by inventing one.
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let fsim = root.join("examples/heatsink-fan/heatsink-fan.fsim");
+    let source = std::fs::read_to_string(root.join("examples/heatsink-fan/heatsink-fan.fsim"))
+        .expect("example is readable");
+    let start = source
+        .find("(conduction ")
+        .expect("example declares conduction");
+    let mut depth = 0usize;
+    let mut end = None;
+    for (offset, ch) in source[start..].char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = Some(start + offset + 1);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let end = end.expect("balanced conduction form");
+    let stripped = format!("{}{}", &source[..start], &source[end..]).replace(" )", ")");
+    let dir = scratch("run-no-conduction");
+    let fsim = dir.join("heatsink-no-conduction.fsim");
+    std::fs::write(&fsim, stripped.trim_end()).expect("scratch project");
     let stl = root.join("examples/heatsink-fan/heatsink.stl");
     let pack = root.join("data/reference-project/aa6061.fsmcdpk");
+    let ledger = dir.join("no-conduction.db");
 
-    let dir = scratch("run-workflow");
-    let ledger = dir.join("run_workflow_ledger.db");
-
-    // 1. Unimported ledger fails closed honestly
-    let unimported = run(args(&[
-        "run",
-        fsim.to_string_lossy().as_ref(),
-        ledger.to_string_lossy().as_ref(),
-        "--materials",
-        pack.to_string_lossy().as_ref(),
+    let validated = run(args(&[
         "--json",
+        "validate",
+        fsim.to_string_lossy().as_ref(),
     ]));
-    assert_eq!(unimported.exit_code, exit::REFUSED);
-    assert!(unimported.stderr.contains("cli-solve-import-evidence"));
-
-    // 2. Import geometry into ledger
+    assert_eq!(
+        validated.exit_code,
+        exit::SUCCESS,
+        "stderr: {}",
+        validated.stderr
+    );
     let imported = run(args(&[
         "--json",
         "import",
@@ -985,9 +1045,13 @@ fn g0_run_command_preserves_the_first_unavailable_stage() {
         "--max-hole-edges",
         "0",
     ]));
-    assert_eq!(imported.exit_code, exit::SUCCESS);
+    assert_eq!(
+        imported.exit_code,
+        exit::SUCCESS,
+        "stderr: {}",
+        imported.stderr
+    );
 
-    // 3. One-command run executes workflow
     let output = run(args(&[
         "run",
         fsim.to_string_lossy().as_ref(),
@@ -996,12 +1060,33 @@ fn g0_run_command_preserves_the_first_unavailable_stage() {
         pack.to_string_lossy().as_ref(),
         "--json",
     ]));
-
-    assert_eq!(output.exit_code, exit::UNAVAILABLE); // solver stops at conduction stage gap
+    assert_eq!(
+        output.exit_code,
+        exit::UNAVAILABLE,
+        "stdout: {} / stderr: {}",
+        output.stdout,
+        output.stderr
+    );
     assert!(
-        output.stderr.contains("cli-solve-stage-gap") || output.stdout.contains("stage=conduction")
+        output.stderr.contains("cli-solve-stage-gap"),
+        "stderr: {}",
+        output.stderr
+    );
+    assert!(
+        output.stdout.contains("\"stage\":\"conduction\""),
+        "stdout: {}",
+        output.stdout
     );
     assert!(!output.stdout.contains("\"status\":\"completed\""));
-    assert!(!output.stdout.contains("\"report\""));
-    assert!(!output.stdout.contains("\"package\""));
+    assert!(!output.stdout.contains("\"report_html\""));
+    let exported: Vec<_> = std::fs::read_dir(&dir)
+        .expect("scratch dir")
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".report.html") || name.ends_with(".fspkg"))
+        .collect();
+    assert!(
+        exported.is_empty(),
+        "a gapped run must export nothing: {exported:?}"
+    );
 }

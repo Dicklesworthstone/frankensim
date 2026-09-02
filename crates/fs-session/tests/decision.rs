@@ -384,6 +384,57 @@ fn fs_voi_priced_zero_cost_action_preserves_infinite_ratio() {
 }
 
 #[test]
+fn priced_action_refuses_a_mismatched_value_per_cost() {
+    let package = replay_package("decision-test-a");
+    let budget = budget();
+    let requirement = decision_requirement("factor-policy");
+    let smallest_subnormal = f64::from_bits(1);
+    let compliance = budget
+        .assess_requirement(90.0, requirement.scalar(), &[])
+        .expect("compliance");
+    let attribution = budget
+        .attribute_requirement(90.0, requirement.scalar(), &[])
+        .expect("attribution");
+    let mut actions = recommend_unknown_resolutions(
+        &compliance,
+        &[UnknownResolutionCandidate::new(
+            EngineeringUncertaintyKind::BoundaryConditions,
+            ActionKind::SensorCampaign,
+            ActionValue {
+                action: "measure-fan-tolerance".to_string(),
+                value: smallest_subnormal + smallest_subnormal,
+                cost: smallest_subnormal,
+                value_per_cost: 2.0,
+            },
+        )],
+    );
+    let RecommendedEvidence::Priced { value_per_cost, .. } = &mut actions[0].recommended_evidence
+    else {
+        panic!("positive priced action must remain recommended");
+    };
+    *value_per_cost = 1.0;
+
+    let error = DecisionAssessment::<MaximumTemperature>::try_assemble(
+        EvidenceRef::try_new(
+            "temperature:max",
+            "kelvin",
+            "fs-evidence:certified-f64:v1",
+            digest("quantity"),
+        )
+        .expect("quantity"),
+        requirement,
+        context("thermal-context", digest("context")),
+        compliance,
+        budget,
+        attribution,
+        actions,
+        &package,
+    )
+    .expect_err("a retained ranking must equal its retained value and cost");
+    assert_eq!(error, DecisionAssessmentError::InvalidActionValue);
+}
+
+#[test]
 fn authority_lineage_is_identity_bearing_and_trim_canonical() {
     let package = replay_package("decision-test-lineage");
     let first = assemble(

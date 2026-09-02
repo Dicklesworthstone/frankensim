@@ -53,6 +53,7 @@ pub use temporal_denoise::{
     TEMPORAL_DENOISE_PIPELINE_VERSION, TemporalDenoiseConfig, TemporalDenoiseConfigIdentity,
     TemporalDenoiseError, TemporalDenoiseInput, TemporalDenoiseLimits, TemporalDenoiseProvenance,
     TemporalDenoisedFrame, TemporalFrameBoundary, TemporalReprojection, temporal_denoise_rgb,
+    temporal_denoise_rgb_with_poll,
 };
 
 use core::fmt;

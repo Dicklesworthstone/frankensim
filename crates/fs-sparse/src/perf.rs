@@ -46,6 +46,7 @@ fn bounded_worker_count(requested: usize, useful_rows: usize) -> usize {
 pub struct CsrCompact {
     nrows: usize,
     ncols: usize,
+    nonempty_rows: usize,
     row_ptr: Vec<usize>,
     col_idx: Vec<u32>,
     vals: Vec<f64>,
@@ -65,9 +66,11 @@ impl CsrCompact {
         let mut row_ptr = Vec::with_capacity(a.nrows() + 1);
         let mut col_idx = Vec::with_capacity(a.nnz());
         let mut vals = Vec::with_capacity(a.nnz());
+        let mut nonempty_rows = 0usize;
         row_ptr.push(0usize);
         for r in 0..a.nrows() {
             let (cols, v) = a.row(r);
+            nonempty_rows += usize::from(!cols.is_empty());
             for &c in cols {
                 col_idx.push(u32::try_from(c).expect("checked ncols bound"));
             }
@@ -77,6 +80,7 @@ impl CsrCompact {
         CsrCompact {
             nrows: a.nrows(),
             ncols: a.ncols(),
+            nonempty_rows,
             row_ptr,
             col_idx,
             vals,
@@ -146,28 +150,23 @@ impl CsrCompact {
     /// nnz-balanced contiguous row shards for `threads` workers.
     fn shard_bounds(&self, threads: usize) -> Vec<usize> {
         // Empty rows do not justify independent workers, and more workers than
-        // the host can run only amplify allocation and spawn overhead.
-        let useful_rows = self
-            .row_ptr
-            .windows(2)
-            .filter(|window| window[0] != window[1])
-            .count();
-        let t = bounded_worker_count(threads, useful_rows);
+        // the host can run only amplify allocation and spawn overhead. The
+        // count is fixed at construction, so this hot path does not rescan
+        // every row pointer merely to rediscover it.
+        let t = bounded_worker_count(threads, self.nonempty_rows);
         let total = self.nnz();
         let mut bounds = Vec::with_capacity(t + 1);
         bounds.push(0usize);
-        let mut next_target = 1usize;
-        for r in 0..self.nrows {
-            let filled = self.row_ptr[r + 1];
-            while next_target < t
-                && (filled as u128) * (t as u128) >= (next_target as u128) * (total as u128)
-            {
-                bounds.push(r + 1);
-                next_target += 1;
-            }
-        }
-        while bounds.len() < t {
-            bounds.push(self.nrows);
+        for target in 1..t {
+            let threshold = (target as u128) * (total as u128);
+            // Preserve the former scan's tie rule: select the FIRST row
+            // whose cumulative nnz reaches this target. `row_ptr` is
+            // monotone, including across empty rows, so this is O(log nrows)
+            // instead of a full cumulative scan per SpMV invocation.
+            let boundary = self.row_ptr[1..]
+                .partition_point(|&filled| (filled as u128) * (t as u128) < threshold)
+                + 1;
+            bounds.push(boundary);
         }
         bounds.push(self.nrows);
         bounds
@@ -211,6 +210,7 @@ impl CsrCompact {
         CsrCompact {
             nrows: self.nrows,
             ncols: self.ncols,
+            nonempty_rows: self.nonempty_rows,
             row_ptr: self.row_ptr.clone(),
             col_idx,
             vals,
@@ -362,5 +362,47 @@ fn assemble_tile(coo: &Coo, idxs: &[usize], row_lo: usize, row_hi: usize) -> Til
         col_idx,
         vals,
         row_lo,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compact_shard_bounds_preserve_empty_rows_and_exact_thresholds() {
+        // Leading, interior, and trailing empty rows surround an exact first
+        // two-way threshold (four of eight stored entries in row 2).
+        let mut coo = Coo::new(10, 8);
+        for col in 0..4 {
+            coo.push(2, col, 1.0);
+        }
+        coo.push(4, 4, 1.0);
+        for col in 0..3 {
+            coo.push(7, col, 1.0);
+        }
+        let compact = CsrCompact::from_csr(&coo.assemble());
+        assert_eq!(compact.nonempty_rows, 3);
+
+        let host_capped = bounded_worker_count(usize::MAX, compact.nonempty_rows);
+        assert_eq!(
+            compact.shard_bounds(usize::MAX),
+            match host_capped {
+                1 => vec![0, 10],
+                2 => vec![0, 3, 10],
+                3 => vec![0, 3, 8, 10],
+                _ => unreachable!("three nonempty rows cap the worker count"),
+            }
+        );
+        if bounded_worker_count(2, compact.nonempty_rows) == 2 {
+            assert_eq!(compact.shard_bounds(2), vec![0, 3, 10]);
+        }
+
+        let localized = compact.numa_localized(1);
+        assert_eq!(localized.nonempty_rows, compact.nonempty_rows);
+        assert_eq!(
+            localized.shard_bounds(usize::MAX),
+            compact.shard_bounds(usize::MAX)
+        );
     }
 }

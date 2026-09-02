@@ -578,6 +578,17 @@ fn validate_actions(
                 {
                     return Err(DecisionAssessmentError::InvalidActionValue);
                 }
+                // Keep the stored ranking faithful to fs-voi's action-value
+                // semantics: positive costs divide normally, while an
+                // admissible zero cost has unbounded value per cost.
+                let canonical_value_per_cost = if *cost > 0.0 {
+                    *decision_value / *cost
+                } else {
+                    f64::INFINITY
+                };
+                if value_per_cost.to_bits() != canonical_value_per_cost.to_bits() {
+                    return Err(DecisionAssessmentError::InvalidActionValue);
+                }
             }
             RecommendedEvidence::Unpriced { suggested_action } => {
                 action_kind_slug(*suggested_action)?;

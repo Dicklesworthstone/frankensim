@@ -92,6 +92,11 @@ fs-grammar-e2e = { path = "../fs-grammar-e2e" }
 fs-adaptbo-e2e = { path = "../fs-adaptbo-e2e" }
 fs-flowcert-e2e = { path = "../fs-flowcert-e2e" }
 
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+# Native-only budget witness for the actual browser-wrapper function. This is
+# not part of the wasm32 product graph.
+fs-substrate = { path = "../fs-substrate" }
+
 # wasm-bindgen only enters the wasm32 build — native builds stay dependency-clean.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "0.2"

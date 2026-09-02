@@ -104,8 +104,12 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// airflow-convection law (derived Robin rows, conjugate solid/air fixed
 /// point, receipt schema v3): a v9 conduction checkpoint describes a solve
 /// whose Robin rows were all declared, and cannot resume into a stage set
-/// where some are derived.
-pub const SOLVE_DRIVER_VERSION: u32 = 10;
+/// where some are derived. Bumped to 11 when fs-mesh facet recovery began
+/// accepting any coplanar tiling and iterating to a fixed point: identical
+/// inputs now volumetricize to a different (and, for finned bodies, an
+/// existing rather than refused) tet complex, so a v10 conduction
+/// checkpoint must not resume into it.
+pub const SOLVE_DRIVER_VERSION: u32 = 11;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";

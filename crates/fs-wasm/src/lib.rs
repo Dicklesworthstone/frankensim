@@ -832,6 +832,11 @@ mod tests {
     use super::{INSTRUMENT_REED_BLOCK_SAMPLES, ga_motor_orbit, run_instrument_reed, taylor_bound};
     use fs_ga::{Motor, Pga, Point};
 
+    #[cfg(not(target_arch = "wasm32"))]
+    use fs_substrate::CapabilityProbe;
+    #[cfg(not(target_arch = "wasm32"))]
+    use std::time::Instant;
+
     #[test]
     fn taylor_bound_refuses_non_finite_inputs_without_trapping() {
         assert!(taylor_bound(f64::NAN, 1.0, 5).is_empty());
@@ -848,6 +853,100 @@ mod tests {
             block
                 .iter()
                 .all(|sample| sample.is_finite() && sample.abs() <= 1.0)
+        );
+    }
+
+    /// Native measurement seam for the actual 480-sample public wrapper.
+    ///
+    /// This deliberately times the thread-local context, control application,
+    /// output allocation, and PCM scaling in [`run_instrument_reed`]. It is
+    /// not wasm32 or browser-performance evidence.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    #[ignore = "heavy native wrapper budget minting; run in release on an identified host"]
+    fn mint_native_instrument_reed_wrapper_budget_row() {
+        const REPS: usize = 32;
+        const BLOCKS_PER_REP: usize = 32;
+        const PRESSURE_PA: f64 = 2_800.0;
+
+        let cold_started = Instant::now();
+        let cold_block = run_instrument_reed(PRESSURE_PA);
+        let cold_first_call_seconds = cold_started.elapsed().as_secs_f64();
+        assert_eq!(cold_block.len(), INSTRUMENT_REED_BLOCK_SAMPLES);
+        assert!(
+            cold_block
+                .iter()
+                .all(|sample| sample.is_finite() && (-1.0..=1.0).contains(sample))
+        );
+
+        // Warm the same thread-local context that the steady-state calls use.
+        for _ in 0..BLOCKS_PER_REP {
+            let block = run_instrument_reed(PRESSURE_PA);
+            assert_eq!(block.len(), INSTRUMENT_REED_BLOCK_SAMPLES);
+            assert!(
+                block
+                    .iter()
+                    .all(|sample| sample.is_finite() && (-1.0..=1.0).contains(sample))
+            );
+        }
+
+        let mut seconds = Vec::with_capacity(REPS);
+        for _ in 0..REPS {
+            let started = Instant::now();
+            for _ in 0..BLOCKS_PER_REP {
+                std::hint::black_box(run_instrument_reed(PRESSURE_PA));
+            }
+            seconds.push(started.elapsed().as_secs_f64());
+        }
+        let post_timing_block = run_instrument_reed(PRESSURE_PA);
+        assert_eq!(post_timing_block.len(), INSTRUMENT_REED_BLOCK_SAMPLES);
+        assert!(
+            post_timing_block
+                .iter()
+                .all(|sample| sample.is_finite() && (-1.0..=1.0).contains(sample))
+        );
+        seconds.sort_by(f64::total_cmp);
+        let median = seconds[seconds.len() / 2];
+        let p25 = seconds[seconds.len() / 4];
+        let p75 = seconds[(3 * seconds.len()) / 4];
+        let dispersion = if median > 0.0 {
+            (p75 - p25) / median
+        } else {
+            f64::INFINITY
+        };
+        let samples = (BLOCKS_PER_REP * INSTRUMENT_REED_BLOCK_SAMPLES) as f64;
+        let samples_per_sec = samples / median;
+        let headroom_at_48k = samples_per_sec / f64::from(super::INSTRUMENT_REED_SAMPLE_RATE_HZ);
+        let median_block_deadline_ratio = (median / BLOCKS_PER_REP as f64) / 0.010;
+        let nondebug_build = !cfg!(debug_assertions);
+        // The binary can prove only this code-generation property, not the
+        // exact Cargo invocation or profile identity. Keep the emitted row
+        // diagnostic-only; an external retained `cargo test --release ...`
+        // command receipt must adjudicate canonical eligibility.
+        let admissible = false;
+
+        assert!(
+            nondebug_build,
+            "wrapper budget rows require debug assertions disabled; use --release for the canonical lane"
+        );
+        assert!(samples_per_sec.is_finite() && samples_per_sec > 0.0);
+        assert!(dispersion.is_finite() && dispersion >= 0.0);
+        assert!(cold_first_call_seconds.is_finite() && cold_first_call_seconds > 0.0);
+        assert!(headroom_at_48k > 1.0, "native wrapper is below real time");
+
+        println!(
+            "frankensim-host-native-wrapper-diagnostic-v1\ncold-first-call-seconds\t{cold_first_call_seconds:e}\nmedian-block-deadline-ratio\t{median_block_deadline_ratio:e}\n"
+        );
+        println!(
+            "frankensim-budget-row-v1\nfixture\trun_instrument_reed host-native wrapper, massless-reed 2.2mm radiation-damped pipe, empty plate bank\nimage\twind-reed/interactive-wrapper-host-native\nstates\t1\nblock\t{}\nrate\t{}\nprofile\tdebug-assertions-disabled\nmachine\t{:016x}\nreps\t{}\nmedian-samples-per-sec\t{:e}\ndispersion\t{:e}\nheadroom-48k\t{:e}\nadmissible\t{}\n",
+            INSTRUMENT_REED_BLOCK_SAMPLES,
+            super::INSTRUMENT_REED_SAMPLE_RATE_HZ,
+            CapabilityProbe::topology_only().fingerprint(),
+            REPS,
+            samples_per_sec,
+            dispersion,
+            headroom_at_48k,
+            admissible,
         );
     }
 

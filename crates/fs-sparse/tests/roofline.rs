@@ -5,8 +5,9 @@
 //! bytes = nnz·(8 val + idx bytes + 8 x[c]) plus each format's actual
 //! row/chunk metadata and output accesses.
 //! Attainment is LEDGERED; the >=85% acceptance
-//!     gate is asserted for the SHARDED all-core kernel only (the bead's
-//!     criterion; serial single-thread numbers are reported as evidence).
+//!     gate is asserted for the best sharded kernel at the reported STREAM
+//!     concurrency only (the bead's criterion; serial single-thread numbers
+//!     are reported as evidence).
 
 use std::time::Instant;
 
@@ -15,20 +16,52 @@ use fs_sparse::{Coo, Csr, CsrCompact, Sell};
 /// Logical byte traffic for one CSR-style SpMV invocation.
 ///
 /// The inner loop loads one value, one column index, and `x[c]` for each
-/// stored nonzero. `row_ptr_loads_per_row` includes setup passes performed by
-/// the measured kernel: serial CSR reads two bounds; sharded compact CSR first
-/// scans two bounds and then one cumulative bound before its two-bound compute
-/// pass. This is logical source-array traffic, not a cache-miss claim.
+/// stored nonzero. Both CSR bodies read two row bounds per output row. The
+/// sharded compact path additionally performs one binary `partition_point`
+/// search per internal shard boundary; its bounded row-pointer probes are
+/// charged separately. This is logical source-array traffic, not a cache-miss
+/// claim.
+fn partition_point_row_ptr_probes(nrows: usize) -> u128 {
+    if nrows == 0 {
+        return 0;
+    }
+    // Slice partition_point delegates to binary_search_by. The current
+    // standard-library algorithm deliberately makes its loop count depend
+    // only on the slice length, then performs one final probe. This is
+    // ceil(log2(nrows)) + 1 without overflowing at usize::MAX.
+    u128::from(usize::BITS - (nrows - 1).leading_zeros()) + 1
+}
+
+fn sharded_worker_count(requested: usize, nonempty_rows: usize) -> usize {
+    let host_parallelism = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+    requested
+        .max(1)
+        .min(nonempty_rows.max(1))
+        .min(host_parallelism)
+}
+
+fn stream_concurrency_label(thread_override: bool) -> (&'static str, &'static str) {
+    if thread_override {
+        ("stream_selected_concurrency_gbs", "selected-concurrency")
+    } else {
+        ("stream_allcore_gbs", "all-core")
+    }
+}
+
 fn csr_spmv_logical_bytes(
     nnz: usize,
     nrows: usize,
     index_bytes: usize,
     row_ptr_loads_per_row: usize,
+    partition_searches: usize,
 ) -> f64 {
     let per_nnz = (2 * std::mem::size_of::<f64>() + index_bytes) as u128;
     let per_row =
         (row_ptr_loads_per_row * std::mem::size_of::<usize>() + std::mem::size_of::<f64>()) as u128;
-    (nnz as u128 * per_nnz + nrows as u128 * per_row) as f64
+    let partition_probes = (partition_searches as u128)
+        * partition_point_row_ptr_probes(nrows)
+        * std::mem::size_of::<usize>() as u128;
+    (nnz as u128 * per_nnz + nrows as u128 * per_row + partition_probes) as f64
 }
 
 /// SELL metadata accesses that the chunk-major kernels perform for one matrix.
@@ -80,8 +113,8 @@ fn sell_spmv_logical_bytes(nnz: usize, layout: SellLogicalLayout, sharded: bool)
     bytes as f64
 }
 
-/// The all-core attainment is associated with the better measured sharded
-/// kernel, rather than implicitly with compact CSR.
+/// Sharded attainment is associated with the better measured sharded kernel,
+/// rather than implicitly with compact CSR.
 fn best_sharded_kernel(compact_gbs: f64, sell_gbs: f64) -> (&'static str, f64) {
     if compact_gbs >= sell_gbs {
         ("compact_csr", compact_gbs)
@@ -124,12 +157,20 @@ fn banded_matrix(nrows: usize, band: usize) -> fs_sparse::Csr {
 fn wsbf_roofline() {
     // FS_SPARSE_THREADS overrides (heterogeneous-core machines: equal
     // nnz shards let E-cores drag the tail — pin to P-core count).
-    let threads = std::env::var("FS_SPARSE_THREADS")
+    let requested_threads = std::env::var("FS_SPARSE_THREADS")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
+        .map(|threads| threads.max(1));
+    let thread_override = requested_threads.is_some();
+    let requested_threads = requested_threads
         .unwrap_or_else(|| std::thread::available_parallelism().map_or(8, std::num::NonZero::get));
     let nrows = 4_000_000usize;
     let band = 8usize;
+    // `banded_matrix` stores `band` entries in every row, so nrows is its
+    // nonempty-row count. Use the same capped count for the compact kernel and
+    // its STREAM denominator; the output's `threads` is actual concurrency.
+    let threads = sharded_worker_count(requested_threads, nrows);
+    let (stream_metric, stream_scope) = stream_concurrency_label(thread_override);
     let a = banded_matrix(nrows, band);
     let compact = CsrCompact::from_csr(&a).numa_localized(threads);
     let nnz = compact.nnz();
@@ -158,9 +199,17 @@ fn wsbf_roofline() {
     let t_sell = time_best(&mut || sell.spmv_chunked(&x, &mut y));
     let t_sell_sh = time_best(&mut || sell.spmv_chunked_sharded(&x, &mut y, threads));
     std::hint::black_box(y[nrows / 2]);
-    let g_wide = csr_spmv_logical_bytes(nnz, nrows, std::mem::size_of::<usize>(), 2) / t_wide / 1e9;
-    let g_cmp = csr_spmv_logical_bytes(nnz, nrows, std::mem::size_of::<u32>(), 2) / t_cmp / 1e9;
-    let g_shard = csr_spmv_logical_bytes(nnz, nrows, std::mem::size_of::<u32>(), 5) / t_shard / 1e9;
+    let g_wide =
+        csr_spmv_logical_bytes(nnz, nrows, std::mem::size_of::<usize>(), 2, 0) / t_wide / 1e9;
+    let g_cmp = csr_spmv_logical_bytes(nnz, nrows, std::mem::size_of::<u32>(), 2, 0) / t_cmp / 1e9;
+    let g_shard = csr_spmv_logical_bytes(
+        nnz,
+        nrows,
+        std::mem::size_of::<u32>(),
+        2,
+        threads.saturating_sub(1),
+    ) / t_shard
+        / 1e9;
     // SELL moves usize indices today (u32 SELL is follow-up) and has distinct
     // chunk metadata plus sharded staging traffic.
     let g_sell = sell_spmv_logical_bytes(nnz, sell_layout, false) / t_sell / 1e9;
@@ -170,7 +219,7 @@ fn wsbf_roofline() {
     let att_shard = sharded_gbs / stream.all_core_gbs;
     println!(
         "{{\"metric\":\"wsbf-roofline\",\"nrows\":{nrows},\"nnz\":{nnz},\"threads\":{threads},\
-         \"stream_single_gbs\":{:.1},\"stream_allcore_gbs\":{:.1},\
+         \"stream_single_gbs\":{:.1},\"{stream_metric}\":{:.1},\
          \"spmv_wide_gbs\":{g_wide:.1},\"spmv_compact_gbs\":{g_cmp:.1},\"spmv_sharded_gbs\":{g_shard:.1},\
          \"sell_chunked_gbs\":{g_sell:.1},\"sell_sharded_gbs\":{g_sell_sh:.1},\
          \"attainment_serial\":{att_serial:.3},\"attainment_sharded_kernel\":\"{sharded_kernel}\",\
@@ -186,7 +235,7 @@ fn wsbf_roofline() {
         assert!(
             att_shard >= 0.85,
             "sharded SpMV attainment {att_shard:.3} below the 85% STREAM gate \
-             ({sharded_kernel} {sharded_gbs:.1} GB/s vs all-core triad {:.1} GB/s)",
+             ({sharded_kernel} {sharded_gbs:.1} GB/s vs {stream_scope} STREAM {:.1} GB/s)",
             stream.all_core_gbs
         );
     }
@@ -199,7 +248,8 @@ fn logical_traffic_counts_kernel_array_accesses() {
     let index_bytes = std::mem::size_of::<u32>();
     let word = std::mem::size_of::<usize>();
     let csr_expected = nnz * (8 + index_bytes + 8) + nrows * (2 * word + 8);
-    let shard_expected = nnz * (8 + index_bytes + 8) + nrows * (5 * word + 8);
+    let partition_probes = partition_point_row_ptr_probes(nrows) as usize;
+    let shard_expected = csr_expected + partition_probes * word;
     let mut sell_coo = Coo::new(5, 5);
     sell_coo.push(0, 0, 1.0);
     sell_coo.push(0, 1, 1.0);
@@ -221,13 +271,22 @@ fn logical_traffic_counts_kernel_array_accesses() {
     let sell_sharded_expected = sell_expected + 5 * 2 * (word + 8);
 
     assert_eq!(
-        csr_spmv_logical_bytes(nnz, nrows, index_bytes, 2),
+        csr_spmv_logical_bytes(nnz, nrows, index_bytes, 2, 0),
         csr_expected as f64
     );
     assert_eq!(
-        csr_spmv_logical_bytes(nnz, nrows, index_bytes, 5),
+        csr_spmv_logical_bytes(nnz, nrows, index_bytes, 2, 1),
         shard_expected as f64
     );
+    assert_eq!(
+        csr_spmv_logical_bytes(nnz, nrows, index_bytes, 2, 2),
+        (csr_expected + 2 * partition_probes * word) as f64
+    );
+    assert_eq!(partition_point_row_ptr_probes(0), 0);
+    assert_eq!(partition_point_row_ptr_probes(1), 1);
+    assert_eq!(partition_point_row_ptr_probes(2), 2);
+    assert_eq!(partition_point_row_ptr_probes(3), 3);
+    assert_eq!(partition_point_row_ptr_probes(4), 3);
     assert_eq!(
         sell_spmv_logical_bytes(sell_matrix.nnz(), sell, false),
         sell_expected as f64
@@ -238,4 +297,16 @@ fn logical_traffic_counts_kernel_array_accesses() {
     );
     assert_eq!(best_sharded_kernel(91.0, 90.0), ("compact_csr", 91.0));
     assert_eq!(best_sharded_kernel(90.0, 91.0), ("sell_chunked", 91.0));
+}
+
+#[test]
+fn roofline_stream_label_tracks_thread_override() {
+    assert_eq!(
+        stream_concurrency_label(false),
+        ("stream_allcore_gbs", "all-core")
+    );
+    assert_eq!(
+        stream_concurrency_label(true),
+        ("stream_selected_concurrency_gbs", "selected-concurrency")
+    );
 }
