@@ -94,15 +94,19 @@ class TestFrankenSimClientIntegration(unittest.TestCase):
             self.assertGreater(imp.artifact_count, 0)
             self.assertEqual(imp.op_id, 1)
 
-            # 2. Solve (stops at conduction gap with exit code UNAVAILABLE = 5)
+            # 2. Solve: the heatsink example declares a conduction section
+            # with an airflow-convection law, so every stage executes and the
+            # run completes (executed 2026-09-02 on yto with the release
+            # binary; the old expectation of a conduction gap is gone).
             solve_res = self.client.solve(
                 project_path=self.fsim,
                 ledger_path=ledger,
                 materials=[self.pack],
-                strict=False,
+                strict=True,
             )
-            self.assertEqual(solve_res.exit_code, ExitCode.UNAVAILABLE)
-            self.assertTrue(any("conduction" in d.message or "conduction" in d.fix for d in solve_res.diagnostics))
+            self.assertEqual(solve_res.exit_code, ExitCode.SUCCESS)
+            self.assertEqual(solve_res.status, "completed")
+            self.assertEqual(solve_res.stages_completed, 7)
 
             # 3. Compare remains fail-closed until it can load retained run data.
             with self.assertRaises(UnavailableError):
