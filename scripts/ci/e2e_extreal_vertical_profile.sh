@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 #
-# e2e_extreal_vertical_profile.sh — End-to-end vertical profiling: wall-time + energy attribution,
-# top-3 kernels (bead frankensim-extreal-program-f85xj.15.2).
+# e2e_extreal_vertical_profile.sh — End-to-end vertical profiling: wall-clock of
+# the CLI phases (validate, import, solve, report, package) on one host
+# (bead frankensim-extreal-program-f85xj.15.2). Kernel attribution, energy and
+# memory are NOT measured by this lane and are recorded as absent, never
+# estimated (bridge plan A9 / q61wp.60); the accelerator falsifier therefore
+# refuses with evidence until a named profiler supplies measured kernel rows.
 #
 # Usage:
 #   scripts/ci/e2e_extreal_vertical_profile.sh [--list|--check|--run]
@@ -99,7 +103,7 @@ phases = [
         "wall_s": round(t_validate, 6),
         "wall_share_bps": to_bps(t_validate, t_total),
         "energy_j": None,
-        "memory_bytes": 1024 * 1024,
+        "memory_bytes": None,
         "is_accelerator_addressable": False
     },
     {
@@ -107,7 +111,7 @@ phases = [
         "wall_s": round(t_import, 6),
         "wall_share_bps": to_bps(t_import, t_total),
         "energy_j": None,
-        "memory_bytes": 4 * 1024 * 1024,
+        "memory_bytes": None,
         "is_accelerator_addressable": False
     },
     {
@@ -115,7 +119,7 @@ phases = [
         "wall_s": round(t_solve, 6),
         "wall_share_bps": to_bps(t_solve, t_total),
         "energy_j": None,
-        "memory_bytes": 32 * 1024 * 1024,
+        "memory_bytes": None,
         "is_accelerator_addressable": True
     },
     {
@@ -123,7 +127,7 @@ phases = [
         "wall_s": round(t_report, 6),
         "wall_share_bps": to_bps(t_report, t_total),
         "energy_j": None,
-        "memory_bytes": 2 * 1024 * 1024,
+        "memory_bytes": None,
         "is_accelerator_addressable": False
     },
     {
@@ -131,48 +135,29 @@ phases = [
         "wall_s": round(t_package, 6),
         "wall_share_bps": to_bps(t_package, t_total),
         "energy_j": None,
-        "memory_bytes": 2 * 1024 * 1024,
+        "memory_bytes": None,
         "is_accelerator_addressable": False
     }
 ]
 
-top_three_kernels = [
-    {
-        "kernel_name": "feec_matrix_assembly",
-        "wall_s": round(t_solve * 0.45, 6),
-        "wall_share_bps": to_bps(t_solve * 0.45, t_total),
-        "arithmetic_intensity": 1.25,
-        "roofline_regime": "Compute-Bound",
-        "suitability": "candidate"
-    },
-    {
-        "kernel_name": "krylov_spmv",
-        "wall_s": round(t_solve * 0.35, 6),
-        "wall_share_bps": to_bps(t_solve * 0.35, t_total),
-        "arithmetic_intensity": 0.25,
-        "roofline_regime": "Bandwidth-Bound",
-        "suitability": "marginal"
-    },
-    {
-        "kernel_name": "radiation_view_factors",
-        "wall_s": round(t_solve * 0.10, 6),
-        "wall_share_bps": to_bps(t_solve * 0.10, t_total),
-        "arithmetic_intensity": 4.80,
-        "roofline_regime": "Compute-Bound",
-        "suitability": "candidate"
-    }
-]
-
-top_three_bps = sum(k["wall_share_bps"] for k in top_three_kernels)
-lead_bps = top_three_kernels[0]["wall_share_bps"]
-top_three_meets = top_three_bps >= 5000
-lead_meets = lead_bps >= 1500
-
-decision = "admitted-candidate" if (top_three_meets and lead_meets) else "refused-with-evidence"
+# No profiler ran in this lane. Kernel attribution is therefore NOT measured
+# and is not synthesized: an earlier revision wrote literal fractions of the
+# solve wall-clock as kernel rows (0.45 / 0.35 / 0.10 with invented
+# arithmetic intensities) under the "measured" authority string and let the
+# accelerator falsifier admit a candidate from them. That was a fabricated
+# receipt. Until a named profiler produces kernel rows, the list is empty,
+# the falsifier refuses with evidence, and the receipt says why.
+top_three_kernels = []
+top_three_bps = 0
+lead_bps = 0
+top_three_meets = False
+lead_meets = False
+decision = "refused-with-evidence"
 reason = (
-    f"Top 3 kernels account for {top_three_bps/100:.1f}% (threshold 50.0%) and lead kernel accounts for {lead_bps/100:.1f}% (threshold 15.0%)"
-    if decision == "admitted-candidate" else
-    f"Doctrine falsifier triggered: top 3 kernels account for {top_three_bps/100:.1f}% (threshold 50.0%) and lead kernel accounts for {lead_bps/100:.1f}% (threshold 15.0%); unaccelerated phases dominate end-to-end workflow"
+    "no measured kernel attribution: this lane times the CLI phases only "
+    "(validate, import, solve, report, package) and ran no profiler; the "
+    "accelerator doctrine falsifier cannot evaluate top-three or lead-kernel "
+    "shares from stage wall-clock alone"
 )
 
 receipt = {
@@ -192,8 +177,10 @@ receipt = {
         "decision": decision,
         "reason": reason
     },
-    "authority": "measured-pipeline-attribution-and-accelerator-falsifier",
-    "no_claim": "pipeline profiling attributes wall time and energy across stages; it does not authorize device execution or assert speedup without separate dependency admission and moonshot displacement"
+    "authority": "measured-stage-wall-clock-only",
+    "kernel_attribution": {"measured": False, "profiler": None, "reason": "no profiler ran; kernel rows are absent, not estimated"},
+    "measured": {"phase_wall_s": True, "energy_j": False, "memory_bytes": False, "kernels": False},
+    "no_claim": "this lane measures CLI phase wall-clock on one host; it attributes nothing to kernels, measures no energy or memory, and authorizes no device execution or speedup claim; the accelerator falsifier is refused by construction until a named profiler supplies measured kernel rows"
 }
 
 with open("${ARTIFACT_DIR}/pipeline_attribution_receipt.json", "w") as f:
@@ -205,7 +192,9 @@ EOF
 
     printf "==> 3. Verifying receipt artifact integrity\n"
     grep -q '"schema": "frankensim.roofline.pipeline-attribution.v1"' "${ARTIFACT_DIR}/pipeline_attribution_receipt.json"
-    grep -q '"authority": "measured-pipeline-attribution-and-accelerator-falsifier"' "${ARTIFACT_DIR}/pipeline_attribution_receipt.json"
+    grep -q '"authority": "measured-stage-wall-clock-only"' "${ARTIFACT_DIR}/pipeline_attribution_receipt.json"
+    grep -q '"decision": "refused-with-evidence"' "${ARTIFACT_DIR}/pipeline_attribution_receipt.json"
+    grep -q '"top_three_kernels": \[\]' "${ARTIFACT_DIR}/pipeline_attribution_receipt.json"
 
     printf "All vertical profiling checks passed!\n"
     exit 0
