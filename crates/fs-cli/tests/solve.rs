@@ -3376,9 +3376,15 @@ fn g1_conduction_stage_executes_and_retains_field_and_balance_evidence() {
         receipt.contains("\"recovery\":{\"memory_bytes\":"),
         "conduction receipt names the recovery budget: {receipt}"
     );
+    // The fixture declares 64 MiB; at 2 KiB per facet Steiner point the
+    // derived cap is 32 768, above the 4 000 default floor.
     assert!(
-        receipt.contains("\"max_steiner\":4000"),
-        "the fixture budget keeps the default recovery floor: {receipt}"
+        receipt.contains("\"max_steiner\":32768"),
+        "the recovery cap derives from the declared 64 MiB budget: {receipt}"
+    );
+    assert!(
+        receipt.contains("\"memory_bytes\":67108864"),
+        "the receipt names the declared memory budget: {receipt}"
     );
     assert!(receipt.contains("\"interfaces\":{\"pair_count\":0"));
     assert!(receipt.contains("\"elements\":1"));

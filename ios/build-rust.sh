@@ -20,6 +20,15 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
   exit 2
 fi
 
+# The nested Apple workspace owns an intentionally separate lockfile. Refresh
+# it only when the caller opts in after changing path dependencies; ordinary
+# release builds remain locked and therefore fail closed on dependency drift.
+if [[ "${APPLE_REFRESH_LOCKFILE:-0}" == "1" ]]; then
+  RUSTUP_TOOLCHAIN="$APPLE_RUST_TOOLCHAIN" \
+    RCH_CARGO_WRAPPER_BYPASS=1 \
+    "$APPLE_CARGO" generate-lockfile --offline --manifest-path "$MANIFEST"
+fi
+
 for target in \
   aarch64-apple-ios \
   aarch64-apple-ios-sim \
