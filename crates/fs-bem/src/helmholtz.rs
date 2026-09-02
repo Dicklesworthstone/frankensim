@@ -58,6 +58,7 @@
 //! physics-level diagnostic).
 
 use fs_la::eigen_complex::{LuComplex, lu_complex};
+use fs_material::gas::{GasSpec, GasState};
 use fs_math::c64::C64;
 use fs_math::det;
 
@@ -78,6 +79,9 @@ pub const MAX_RADIATION_FIELDS_PER_BATCH: usize = 256;
 /// centroid-collocation solution degrades silently, so the boundary is a
 /// named refusal instead.
 pub const MIN_PANELS_PER_WAVELENGTH: f64 = 6.0;
+
+const ROOM_TEMPERATURE_K: f64 = 293.15;
+const STANDARD_ATMOSPHERE_PA: f64 = 101_325.0;
 
 /// Typed refusals with stable `FS-BEM-HELM-*` codes.
 #[derive(Debug, Clone, PartialEq)]
@@ -143,16 +147,21 @@ pub struct Medium {
 }
 
 impl Medium {
-    /// Air at roughly 20 degC. These constants are
-    /// `fs_material::gas::GasState` evaluated at (293.15 K, 101325 Pa);
-    /// parameterized studies should derive (density, sound_speed) from
-    /// that first-principles primitive for any ambient state instead of
-    /// hardcoding this convenience.
+    /// Dry USSA-1976 air at the declared room state of 293.15 K and 101325 Pa.
+    /// Parameterized studies should construct their own [`GasState`] for their
+    /// actual temperature, pressure, and gas identity instead of using this
+    /// convenience.
     #[must_use]
-    pub const fn air() -> Medium {
+    pub fn air() -> Medium {
+        let gas = GasState::try_new(
+            &GasSpec::dry_air_ussa1976(),
+            ROOM_TEMPERATURE_K,
+            STANDARD_ATMOSPHERE_PA,
+        )
+        .expect("declared dry-air room state is within GasState's validity window");
         Medium {
-            density: 1.204,
-            sound_speed: 343.0,
+            density: gas.density,
+            sound_speed: gas.sound_speed,
         }
     }
 }
@@ -1417,13 +1426,32 @@ fn norm_assoc_legendre(l_max: usize, x: f64) -> Vec<f64> {
 mod tests {
     use super::*;
 
-    const RHO_C: f64 = 1.204 * 343.0;
+    fn rho_c() -> f64 {
+        let medium = Medium::air();
+        medium.density * medium.sound_speed
+    }
 
     /// Analytic pulsating-sphere surface impedance under e^{-i omega t}:
     /// `z = rho c (k^2 R^2 - i k R) / (1 + k^2 R^2)`.
     fn pulsating_sphere_impedance(k: f64, radius: f64) -> C64 {
         let ka = k * radius;
-        C64::new(ka * ka, -ka).scale(RHO_C / (1.0 + ka * ka))
+        C64::new(ka * ka, -ka).scale(rho_c() / (1.0 + ka * ka))
+    }
+
+    #[test]
+    fn medium_air_is_bitwise_the_declared_room_temperature_gas_state() {
+        let gas = GasState::try_new(
+            &GasSpec::dry_air_ussa1976(),
+            ROOM_TEMPERATURE_K,
+            STANDARD_ATMOSPHERE_PA,
+        )
+        .expect("declared dry-air room state");
+        let medium = Medium::air();
+
+        assert_eq!(gas.temperature.to_bits(), ROOM_TEMPERATURE_K.to_bits());
+        assert_eq!(gas.pressure.to_bits(), STANDARD_ATMOSPHERE_PA.to_bits());
+        assert_eq!(medium.density.to_bits(), gas.density.to_bits());
+        assert_eq!(medium.sound_speed.to_bits(), gas.sound_speed.to_bits());
     }
 
     fn uniform_velocity(n: usize) -> Vec<C64> {
@@ -1937,7 +1965,7 @@ mod tests {
         for (idx, &(ka, tol)) in [(0.1, 0.02), (0.25, 0.04), (0.5, 0.12)].iter().enumerate() {
             let z = baffled_piston_impedance(1.0, ka, Medium::air(), 24).expect("piston");
             let z_series =
-                C64::new(0.5 * ka * ka, -8.0 * ka / (3.0 * core::f64::consts::PI)).scale(RHO_C);
+                C64::new(0.5 * ka * ka, -8.0 * ka / (3.0 * core::f64::consts::PI)).scale(rho_c());
             let rel = (z - z_series).abs() / z_series.abs();
             assert!(
                 rel < tol,

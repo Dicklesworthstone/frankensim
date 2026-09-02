@@ -5,7 +5,10 @@
 //! the plate's flow port). A bottle and a vented enclosure are the
 //! same objects. There is no guitar type.
 
-use fs_material::visco::{ThermoelasticZener, loss_factor_to_zeta};
+use fs_material::{
+    gas::GasState,
+    visco::{ThermoelasticZener, loss_factor_to_zeta},
+};
 use fs_phs::{
     MouthFlange, PortHamiltonian, QuadraticStorage, compact_radiation_impedance,
     helmholtz_resonator_flow, step, transformer,
@@ -55,12 +58,9 @@ pub struct PlateCavitySpec {
     pub neck_radius_m: f64,
     /// Neck length [m] (end correction is applied inside the pHS).
     pub neck_length_m: f64,
-    /// Gas density [kg/m³].
-    pub density: f64,
-    /// Sound speed [m/s].
-    pub sound_speed: f64,
-    /// Gas temperature [K] (thermoelastic T₀).
-    pub temperature_k: f64,
+    /// Admitted ambient state used consistently by the cavity, radiation,
+    /// observer, thermoelastic loss, and propagation path.
+    pub gas: GasState,
     /// Relative humidity in `[0, 1]` for the observer path.
     pub relative_humidity: f64,
 }
@@ -89,12 +89,22 @@ pub fn realize_plate_cavity(
             what: "sample rate and listener distance must be positive",
         });
     }
+    if !gas_state_is_admitted(&spec.gas) {
+        return Err(CavityPhsError::Invalid {
+            what: "gas state must remain inside its admitted physical domain",
+        });
+    }
+    if !(spec.relative_humidity.is_finite() && (0.0..=1.0).contains(&spec.relative_humidity)) {
+        return Err(CavityPhsError::Invalid {
+            what: "relative humidity must be finite and inside [0, 1]",
+        });
+    }
     let mut zetas = spec.zetas.clone();
     if spec.thickness_m > 0.0 && spec.plate_density_kg_m3 > 0.0 {
         let te = if spec.plate_density_kg_m3 > 5_000.0 {
-            ThermoelasticZener::structural_steel(spec.temperature_k)
+            ThermoelasticZener::structural_steel(spec.gas.temperature)
         } else {
-            ThermoelasticZener::aluminum(spec.temperature_k)
+            ThermoelasticZener::aluminum(spec.gas.temperature)
         }
         .map_err(|e| CavityPhsError::Phs(e.to_string()))?;
         for (z, &w) in zetas.iter_mut().zip(&spec.omegas) {
@@ -106,10 +116,10 @@ pub fn realize_plate_cavity(
     let pi = core::f64::consts::PI;
     let neck_area = pi * spec.neck_radius_m * spec.neck_radius_m;
     let l_eff = spec.neck_length_m + 2.0 * (8.0 / (3.0 * pi)) * spec.neck_radius_m;
-    let omega0 = spec.sound_speed * (neck_area / (spec.volume_m3 * l_eff)).sqrt();
+    let omega0 = spec.gas.sound_speed * (neck_area / (spec.volume_m3 * l_eff)).sqrt();
     let r_rad = compact_radiation_impedance(
-        spec.density,
-        spec.sound_speed,
+        spec.gas.density,
+        spec.gas.sound_speed,
         spec.neck_radius_m,
         omega0,
         MouthFlange::Unflanged,
@@ -119,8 +129,8 @@ pub fn realize_plate_cavity(
         spec.volume_m3,
         spec.neck_radius_m,
         spec.neck_length_m,
-        spec.density,
-        spec.sound_speed,
+        spec.gas.density,
+        spec.gas.sound_speed,
         r_rad,
     )
     .map_err(|e| CavityPhsError::Phs(e.to_string()))?;
@@ -139,7 +149,7 @@ pub fn realize_plate_cavity(
         let mut p_obs = 0.0;
         for k in 0..n_m {
             let acc = (rec.x[2 * k + 1] - x[2 * k + 1]) / dt;
-            p_obs += spec.density * spec.areas[k] * acc / (two_pi * listener_m);
+            p_obs += spec.gas.density * spec.areas[k] * acc / (two_pi * listener_m);
         }
         debug_assert!(rec.x.len() >= n_plate);
         x = rec.x;
@@ -150,20 +160,39 @@ pub fn realize_plate_cavity(
         }
         out.push(p_obs);
     }
-    if let Ok(gas) = fs_material::gas::GasState::try_new(
-        &fs_material::gas::GasSpec::dry_air_ussa1976(),
-        spec.temperature_k,
-        101_325.0,
-    ) {
-        crate::air_path::absorb_pressure_history(
-            &mut out,
-            dt,
-            listener_m,
-            &gas,
-            spec.relative_humidity,
-        );
-    }
+    crate::air_path::absorb_pressure_history(
+        &mut out,
+        dt,
+        listener_m,
+        &spec.gas,
+        spec.relative_humidity,
+    );
     Ok(out)
+}
+
+fn gas_state_is_admitted(gas: &GasState) -> bool {
+    [
+        gas.temperature,
+        gas.pressure,
+        gas.density,
+        gas.sound_speed,
+        gas.dynamic_viscosity,
+        gas.thermal_conductivity,
+        gas.specific_gas_constant,
+        gas.specific_heat_cp,
+        gas.prandtl,
+        gas.characteristic_impedance,
+    ]
+    .into_iter()
+    .all(|value| value.is_finite() && value > 0.0)
+        && (50.0..=2_000.0).contains(&gas.temperature)
+        && gas.pressure <= 1.0e7
+        && gas.gamma.is_finite()
+        && gas.gamma > 1.0
+        && gas.gamma < 5.0 / 3.0 + 1.0e-9
+        && gas.water_mole_fraction.is_finite()
+        && (0.0..=0.15).contains(&gas.water_mole_fraction)
+        && (gas.water_mole_fraction == 0.0 || (253.15..=323.15).contains(&gas.temperature))
 }
 
 fn plate_force_and_flow(
@@ -200,6 +229,12 @@ fn plate_force_and_flow(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fs_material::gas::GasSpec;
+
+    fn air_at(temperature_k: f64) -> GasState {
+        GasState::try_new(&GasSpec::dry_air_ussa1976(), temperature_k, 101_325.0)
+            .expect("admitted dry air")
+    }
 
     fn panel(volume: f64) -> PlateCavitySpec {
         PlateCavitySpec {
@@ -212,9 +247,7 @@ mod tests {
             volume_m3: volume,
             neck_radius_m: 0.02,
             neck_length_m: 0.03,
-            density: 1.2,
-            sound_speed: 343.0,
-            temperature_k: 293.0,
+            gas: air_at(293.15),
             relative_humidity: 0.0,
         }
     }
@@ -269,5 +302,95 @@ mod tests {
         let b = realize_plate_cavity(&with, &f, 8_000, 1.0).expect("te");
         let err: f64 = a.iter().zip(&b).map(|(x, y)| (x - y).abs()).sum();
         assert!(err > 1.0e-10, "thermoelastic ζ must move the waveform");
+    }
+
+    #[test]
+    fn admitted_gas_state_sets_the_cavity_period_without_a_hidden_air_default() {
+        let f = pulse(2_000, 8.0);
+        let mut cold = panel(0.008);
+        cold.gas = air_at(273.15);
+        let mut warm = cold.clone();
+        warm.gas = air_at(313.15);
+
+        let cold_period =
+            period(&realize_plate_cavity(&cold, &f, 8_000, 1.0).expect("cold cavity realizes"));
+        let warm_period =
+            period(&realize_plate_cavity(&warm, &f, 8_000, 1.0).expect("warm cavity realizes"));
+        assert!(
+            warm_period < cold_period * 0.98,
+            "warmer admitted air must raise c and shorten the cavity period ({warm_period:.2} vs {cold_period:.2})"
+        );
+    }
+
+    #[test]
+    fn forged_gas_state_is_refused_before_cavity_compute() {
+        let mut spec = panel(0.008);
+        spec.thickness_m = 0.0;
+        let admitted = spec.gas;
+        let mut cases: Vec<(&str, GasState)> = Vec::new();
+        for (name, mutate) in [
+            (
+                "temperature",
+                (|gas: &mut GasState| gas.temperature = f64::NAN) as fn(&mut GasState),
+            ),
+            ("pressure", |gas: &mut GasState| gas.pressure = 0.0),
+            ("density", |gas: &mut GasState| gas.density = f64::NAN),
+            ("sound speed", |gas: &mut GasState| gas.sound_speed = 0.0),
+            ("dynamic viscosity", |gas: &mut GasState| {
+                gas.dynamic_viscosity = f64::NAN
+            }),
+            ("thermal conductivity", |gas: &mut GasState| {
+                gas.thermal_conductivity = 0.0
+            }),
+            ("gamma", |gas: &mut GasState| gas.gamma = f64::NAN),
+            ("gamma ceiling", |gas: &mut GasState| {
+                gas.gamma = 5.0 / 3.0 + 1.0e-9
+            }),
+            ("specific gas constant", |gas: &mut GasState| {
+                gas.specific_gas_constant = 0.0
+            }),
+            ("specific heat", |gas: &mut GasState| {
+                gas.specific_heat_cp = f64::NAN
+            }),
+            ("Prandtl number", |gas: &mut GasState| gas.prandtl = 0.0),
+            ("characteristic impedance", |gas: &mut GasState| {
+                gas.characteristic_impedance = f64::NAN
+            }),
+            ("water fraction", |gas: &mut GasState| {
+                gas.water_mole_fraction = -1.0
+            }),
+            ("moist temperature window", |gas: &mut GasState| {
+                gas.temperature = 200.0;
+                gas.water_mole_fraction = 0.01;
+            }),
+        ] {
+            let mut forged = admitted;
+            mutate(&mut forged);
+            cases.push((name, forged));
+        }
+
+        for (name, forged) in cases {
+            spec.gas = forged;
+            let result = realize_plate_cavity(&spec, &[1.0], 8_000, 1.0);
+            assert!(
+                matches!(result, Err(CavityPhsError::Invalid { what }) if what == "gas state must remain inside its admitted physical domain"),
+                "forged {name} must be refused, got {result:?}"
+            );
+        }
+
+        spec.gas = admitted;
+        spec.relative_humidity = f64::NAN;
+        assert!(matches!(
+            realize_plate_cavity(&spec, &[1.0], 8_000, 1.0),
+            Err(CavityPhsError::Invalid { what })
+                if what == "relative humidity must be finite and inside [0, 1]"
+        ));
+
+        spec.gas = GasState::try_new_moist_air(293.15, 101_325.0, 0.5).expect("admitted moist air");
+        spec.relative_humidity = 0.5;
+        assert!(
+            realize_plate_cavity(&spec, &[1.0], 8_000, 1.0).is_ok(),
+            "the local guard must preserve an admitted moist state"
+        );
     }
 }

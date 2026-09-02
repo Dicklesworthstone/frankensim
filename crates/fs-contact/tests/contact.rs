@@ -511,8 +511,9 @@ fn ct_009_rotated_near_miss_boxes_cannot_clear_but_hulls_prune() {
         };
 
         // The refinement prunes every retained window with a certified gap.
-        let refined = refine_possible_windows(&a_verts, &tube, &b_verts, &tube, windows, 256, cx)
-            .expect("refinement completes");
+        let refined =
+            refine_possible_windows(&a_verts, &tube, &b_verts, &tube, windows, 1 << 16, 256, cx)
+                .expect("refinement completes");
         // Analytic gap sqrt(2)*(2-sqrt(2)) ≈ 0.828; allow enclosure slack.
         let all_pruned = refined
             .windows
@@ -570,6 +571,7 @@ fn ct_010_refinement_never_drops_a_true_crossing() {
             &bullet_verts,
             &bullet_tube,
             windows,
+            1 << 16,
             256,
             cx,
         )
@@ -582,6 +584,151 @@ fn ct_010_refinement_never_drops_a_true_crossing() {
             crossing_retained,
             "the true crossing window must survive refinement as Retained",
         );
+    });
+}
+
+/// G0: refinement rejects every malformed input window before attempting any
+/// motion/query work, and its explicit budget preserves the exact completed
+/// unresolved prefix plus the unexamined suffix.
+#[test]
+fn ct_013_refinement_window_admission_and_budget_are_complete() {
+    let domain = Interval::new(0.0, 1.0);
+    let tube = translation_tube([1.0, 0.0, 0.0], 0.0, domain);
+    let vertices = rotated_cube(1.0, 0.0, 0.0);
+    let valid = [
+        Interval::new(0.0, 0.25),
+        Interval::new(0.25, 0.5),
+        Interval::new(0.5, 0.75),
+    ];
+
+    with_cx(|cx| {
+        for invalid in [Interval::point(0.0), Interval::new(0.0, f64::INFINITY)] {
+            assert!(matches!(
+                refine_possible_windows(
+                    &vertices,
+                    &tube,
+                    &vertices,
+                    &tube,
+                    &[valid[0], invalid],
+                    3,
+                    256,
+                    cx,
+                ),
+                Err(ContactError::InvalidWindow { .. })
+            ));
+        }
+        assert!(matches!(
+            refine_possible_windows(
+                &vertices,
+                &tube,
+                &vertices,
+                &tube,
+                &[valid[1], valid[0]],
+                2,
+                256,
+                cx,
+            ),
+            Err(ContactError::InvalidWindow { .. })
+        ));
+
+        match refine_possible_windows(&vertices, &tube, &vertices, &tube, &valid, 0, 256, cx) {
+            Err(ContactError::CcdBudgetExhausted {
+                max_windows,
+                examined,
+                pending,
+                possible,
+            }) => {
+                assert_eq!(max_windows, 0);
+                assert_eq!(examined, 0);
+                assert_eq!(pending, valid);
+                assert!(possible.is_empty());
+            }
+            other => panic!("expected zero-budget refinement refusal, got {other:?}"),
+        }
+
+        match refine_possible_windows(&vertices, &tube, &vertices, &tube, &valid, 2, 256, cx) {
+            Err(ContactError::CcdBudgetExhausted {
+                max_windows,
+                examined,
+                pending,
+                possible,
+            }) => {
+                assert_eq!(max_windows, 2);
+                assert_eq!(examined, 2);
+                assert_eq!(pending, valid[2..].to_vec());
+                assert_eq!(possible, valid[..2].to_vec());
+            }
+            other => panic!("expected n-1 refinement budget refusal, got {other:?}"),
+        }
+
+        let at_budget =
+            refine_possible_windows(&vertices, &tube, &vertices, &tube, &valid, 3, 256, cx)
+                .expect("n refinement budget completes");
+        let above_budget =
+            refine_possible_windows(&vertices, &tube, &vertices, &tube, &valid, 4, 256, cx)
+                .expect("n+1 refinement budget completes");
+        assert_eq!(at_budget, above_budget);
+        assert_eq!(
+            at_budget.windows,
+            valid
+                .iter()
+                .copied()
+                .map(|window| RefinedWindow::Retained { window })
+                .collect::<Vec<_>>()
+        );
+
+        // A completed pruned prefix is not a possible-contact result. Keep a
+        // retained crossing behind it so exhaustion proves the receipt filters
+        // the completed prefix without disturbing time order.
+        let plate_tube = translation_tube([1.0, 0.0, 0.0], 0.0, domain);
+        let bullet_tube = translation_tube([1.0, 0.0, 0.0], 100.0, domain);
+        let plate_vertices = vec![
+            Point3::new(-0.01, -2.0, -2.0),
+            Point3::new(0.01, -2.0, -2.0),
+            Point3::new(-0.01, 2.0, -2.0),
+            Point3::new(0.01, 2.0, -2.0),
+            Point3::new(-0.01, -2.0, 2.0),
+            Point3::new(0.01, -2.0, 2.0),
+            Point3::new(-0.01, 2.0, 2.0),
+            Point3::new(0.01, 2.0, 2.0),
+        ];
+        let bullet_vertices: Vec<Point3> = (0..8)
+            .map(|index| {
+                Point3::new(
+                    -50.0 + if index & 1 == 0 { -0.01 } else { 0.01 },
+                    if index & 2 == 0 { -0.01 } else { 0.01 },
+                    if index & 4 == 0 { -0.01 } else { 0.01 },
+                )
+            })
+            .collect();
+        let mixed = [
+            Interval::new(0.0, 0.25),
+            Interval::new(0.49, 0.51),
+            Interval::new(0.75, 1.0),
+        ];
+        match refine_possible_windows(
+            &plate_vertices,
+            &plate_tube,
+            &bullet_vertices,
+            &bullet_tube,
+            &mixed,
+            2,
+            256,
+            cx,
+        ) {
+            Err(ContactError::CcdBudgetExhausted {
+                max_windows,
+                examined,
+                pending,
+                possible,
+            }) => {
+                assert_eq!(max_windows, 2);
+                assert_eq!(examined, 2);
+                assert_eq!(pending, mixed[2..]);
+                assert_eq!(possible, mixed[1..2]);
+            }
+            other => panic!("expected mixed-prefix budget refusal, got {other:?}"),
+        }
     });
 }
 
@@ -738,5 +885,30 @@ fn ct_012_sdf_route_never_prunes_a_real_hit() {
             entry_retained,
             "the true sphere-entry window must survive SDF refinement as Retained",
         );
+    });
+}
+
+#[test]
+fn ct_014_sdf_route_refuses_malformed_or_out_of_order_windows() {
+    with_cx(|cx| {
+        let domain = Interval::new(0.0, 1.0);
+        let tube = translation_tube([1.0, 0.0, 0.0], 0.0, domain);
+        let vertices = rotated_cube(0.1, 0.0, 0.0);
+        let sphere = SphereChart {
+            center: Point3::new(0.0, 0.0, 0.0),
+            radius: 1.0,
+        };
+        let first = Interval::new(0.0, 0.25);
+        let second = Interval::new(0.25, 0.5);
+        for windows in [
+            vec![Interval::point(0.25)],
+            vec![Interval::new(0.0, f64::INFINITY)],
+            vec![second, first],
+        ] {
+            assert!(matches!(
+                refine_windows_against_sdf(&vertices, &tube, &sphere, &windows, 1.0e-3, 4, cx,),
+                Err(ContactError::InvalidWindow { .. })
+            ));
+        }
     });
 }

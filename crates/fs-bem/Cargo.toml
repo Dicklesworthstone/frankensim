@@ -16,6 +16,7 @@ fs-math = { path = "../fs-math" }
 fs-fmm = { path = "../fs-fmm" }
 fs-geom = { path = "../fs-geom" }
 fs-la = { path = "../fs-la" }
+fs-material = { path = "../fs-material" }
 fs-rep-mesh = { path = "../fs-rep-mesh" }
 fs-solver = { path = "../fs-solver" }
 

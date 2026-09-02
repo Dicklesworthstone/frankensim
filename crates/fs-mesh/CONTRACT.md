@@ -201,6 +201,32 @@ half-edge round-trips, closed-manifold audits).
     Facet Steiner midpoints snap to the parent supporting plane, so a
     planar facet stays planar under bisection even when it is not
     axis-aligned.
+    A facet counts as recovered when SOME set of coplanar mesh faces
+    tiles it — its own bisected sub-triangles when they are all faces
+    (the historical rows, byte-identical), otherwise any tiling whose
+    only free edges lie on the facet boundary (vertex membership by
+    provenance and the `1e-12` chord tolerance). The old sub-triangle
+    test was a sufficient condition that co-circular ties defeat: an
+    axis-aligned rectangle's corners share a circle, the kernel's tie
+    break picks one diagonal, and bisection only manufactures smaller
+    squares with the same tie. Facet recovery runs in PASSES until a
+    whole sweep changes nothing, because a later insertion can flip
+    away faces an earlier facet had conformed to; only the verification
+    against the finished mesh decides, and the independent winding
+    audit is what caught the single-sweep leak. A facet Steiner point
+    within the chord tolerance of an existing vertex adopts it (no
+    ulp-twin vertices). Corpus: `tests/comb_prism.rs` — a finned
+    heatsink comb prism (one, two and four fins; 36/60/108 facets)
+    volumetricizes under the default policy with the analytic volume,
+    where every earlier build refused with unrecovered facets at any
+    budget. CONSEQUENCE, stated plainly: which coplanar tiling a facet
+    ends up with follows the kernel's index-ordered tie-break, so the
+    tet complex (and every downstream face numbering) depends on the
+    input vertex ORDER as well as the point set; identical bytes still
+    replay bit-for-bit, but a permutation of the input is a different
+    mesh, not a relabelling of the same one. Consumers that need a
+    permutation-invariant statement must state it on geometry (region
+    identity, coordinates), never on face or slot indices.
 15. Every public remesh call validates its two floating-point policy controls
     before geometry-dependent work. Exact endpoints admit; the adjacent
     representable value outside either interval refuses with stable field,

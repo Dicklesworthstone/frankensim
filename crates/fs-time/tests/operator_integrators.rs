@@ -3,15 +3,16 @@
 use fs_solver::{Globalization, LineSearchConfig, LinearOp, NewtonKrylovConfig};
 use fs_time::{
     FirstOrderGeneralizedAlpha, FirstOrderProblem, FirstOrderState, GeneralizedAlpha,
-    IdentityPreconditioner, Imex2, ImexSolveConfig, ImexState, ImplicitSolveConfig,
+    IdentityPreconditioner, Imex2, ImexSolveConfig, ImexSolveError, ImexState, ImplicitSolveConfig,
     LinearFirstOrderSystem, LinearSecondOrderSystem, OperatorFirstOrderGeneralizedAlpha,
-    OperatorGeneralizedAlpha, OperatorImex2, SecondOrderState, first_order_galpha_step,
-    galpha_step, imex2_step,
+    OperatorGeneralizedAlpha, OperatorImex2, SecondOrderState, TimeSolveError,
+    first_order_galpha_step, galpha_step, imex2_step,
 };
 use fs_vvreg::thermal_level_a::{
     ThermalLevelAAcceptance, ThermalLevelACase, ThermalLevelAFamily, ThermalLevelAKind,
     thermal_level_a_cases,
 };
+use std::cell::Cell;
 
 const LEVEL_A_LUMPED_BINDINGS: [(&str, &str); 1] = [(
     "thermal-a-lumped-transient",
@@ -112,6 +113,19 @@ impl LinearOp for DiagonalOp {
         for ((output, diagonal), input) in output.iter_mut().zip(&self.0).zip(input) {
             *output = *diagonal * *input;
         }
+    }
+}
+
+struct CountingIdentity<'a>(&'a Cell<usize>);
+
+impl LinearOp for CountingIdentity<'_> {
+    fn n(&self) -> usize {
+        1
+    }
+
+    fn apply(&self, input: &[f64], output: &mut [f64]) {
+        self.0.set(self.0.get() + 1);
+        output.copy_from_slice(input);
     }
 }
 
@@ -475,4 +489,210 @@ fn imex_dense_operator_agreement_order_and_split_replay() {
             .map(|row| row.stage_two.iters)
             .sum::<usize>()
     );
+}
+
+#[test]
+fn imex_refuses_invalid_time_advance_before_stage_work() {
+    let linear = DiagonalOp(vec![0.0]);
+    for (t, h) in [
+        (f64::NAN, 1.0),
+        (f64::INFINITY, 1.0),
+        (f64::NEG_INFINITY, 1.0),
+        (f64::MAX, f64::MAX),
+        (9_007_199_254_740_992.0, 1.0),
+    ] {
+        let method = OperatorImex2::new(1, h, imex_config());
+        let mut state = ImexState::new(t, &[0.5]);
+        let before = state.clone();
+        let calls = Cell::new(0usize);
+        let error = method
+            .step(
+                &mut state,
+                &linear,
+                &IdentityPreconditioner,
+                &|_, output| {
+                    calls.set(calls.get() + 1);
+                    output[0] = 0.0;
+                },
+            )
+            .expect_err("invalid clock must refuse before either stage");
+        let next_t = t + h;
+        match error {
+            ImexSolveError::InvalidTimeAdvance {
+                t_bits,
+                h_bits,
+                next_t_bits,
+            } => {
+                assert_eq!(t_bits, t.to_bits());
+                assert_eq!(h_bits, h.to_bits());
+                assert_eq!(next_t_bits, next_t.to_bits());
+            }
+            other => panic!("expected invalid-time refusal, got {other:?}"),
+        }
+        assert_eq!(calls.get(), 0, "stage callback must not run");
+        assert_eq!(state.t.to_bits(), before.t.to_bits());
+        assert_eq!(state.u, before.u);
+        assert_eq!(state.steps, before.steps);
+        assert_eq!(state.history, before.history);
+    }
+}
+
+fn assert_invalid_galpha_endpoint(error: TimeSolveError, t: f64, h: f64) {
+    let next_t = t + h;
+    match error {
+        TimeSolveError::InvalidTimeAdvance {
+            t_bits,
+            h_bits,
+            next_t_bits,
+        } => {
+            assert_eq!(t_bits, t.to_bits());
+            assert_eq!(h_bits, h.to_bits());
+            assert_eq!(next_t_bits, next_t.to_bits());
+        }
+        other => panic!("expected generalized-alpha invalid-time refusal, got {other:?}"),
+    }
+}
+
+#[test]
+fn generalized_alpha_refuses_invalid_endpoint_and_stage_times_before_newton() {
+    for (t, h) in [
+        (f64::NAN, 1.0),
+        (f64::INFINITY, 1.0),
+        (f64::NEG_INFINITY, 1.0),
+        (f64::MAX, f64::MAX),
+        (9_007_199_254_740_992.0, 1.0),
+    ] {
+        let calls = Cell::new(0usize);
+        let identity = CountingIdentity(&calls);
+        let structural_problem = LinearSecondOrderSystem::new(&identity, &identity, &identity);
+        let mut structural = SecondOrderState::new(t, &[1.0], &[0.0], &[-1.0]);
+        let structural_before = structural.clone();
+        let error = OperatorGeneralizedAlpha::new(1, h, 0.8, tight_newton())
+            .step(&mut structural, &structural_problem, &[0.0])
+            .expect_err("invalid structural clock must refuse before Newton");
+        assert_invalid_galpha_endpoint(error, t, h);
+        assert_eq!(calls.get(), 0, "structural operator must not run");
+        assert_eq!(structural.t.to_bits(), structural_before.t.to_bits());
+        assert_same_bits(&structural.q, &structural_before.q);
+        assert_same_bits(&structural.v, &structural_before.v);
+        assert_same_bits(&structural.a, &structural_before.a);
+        assert_eq!(structural.steps, structural_before.steps);
+        assert_eq!(structural.history, structural_before.history);
+
+        calls.set(0);
+        let first_order_problem = LinearFirstOrderSystem::new(&identity, &identity);
+        let mut first_order = FirstOrderState::new(t, &[1.0], &[-1.0]);
+        let first_order_before = first_order.clone();
+        let error = OperatorFirstOrderGeneralizedAlpha::new(1, h, 0.6, tight_newton())
+            .step(&mut first_order, &first_order_problem, &[0.0])
+            .expect_err("invalid first-order clock must refuse before Newton");
+        assert_invalid_galpha_endpoint(error, t, h);
+        assert_eq!(calls.get(), 0, "first-order operator must not run");
+        assert_eq!(first_order.t.to_bits(), first_order_before.t.to_bits());
+        assert_same_bits(&first_order.u, &first_order_before.u);
+        assert_same_bits(&first_order.rate, &first_order_before.rate);
+        assert_eq!(first_order.steps, first_order_before.steps);
+        assert_eq!(first_order.history, first_order_before.history);
+    }
+
+    // The endpoint advances by one ULP, but rho_inf=1 gives alpha_f=1/2,
+    // whose internal stage time rounds back to the source clock.
+    let t = 9_007_199_254_740_992.0;
+    let h = 2.0;
+    let calls = Cell::new(0usize);
+    let identity = CountingIdentity(&calls);
+    let problem = LinearFirstOrderSystem::new(&identity, &identity);
+    let mut state = FirstOrderState::new(t, &[1.0], &[-1.0]);
+    let before = state.clone();
+    let error = OperatorFirstOrderGeneralizedAlpha::new(1, h, 1.0, tight_newton())
+        .step(&mut state, &problem, &[0.0])
+        .expect_err("unrepresentable internal stage time must refuse");
+    match error {
+        TimeSolveError::InvalidStageTime {
+            t_bits,
+            h_bits,
+            fraction_bits,
+            stage_t_bits,
+        } => {
+            assert_eq!(t_bits, t.to_bits());
+            assert_eq!(h_bits, h.to_bits());
+            assert_eq!(fraction_bits, 0.5f64.to_bits());
+            assert_eq!(stage_t_bits, t.to_bits());
+        }
+        other => panic!("expected generalized-alpha invalid-stage refusal, got {other:?}"),
+    }
+    assert_eq!(calls.get(), 0, "stage refusal must precede operator work");
+    assert_eq!(state.t.to_bits(), before.t.to_bits());
+    assert_same_bits(&state.u, &before.u);
+    assert_same_bits(&state.rate, &before.rate);
+    assert_eq!(state.steps, before.steps);
+    assert_eq!(state.history, before.history);
+}
+
+#[test]
+fn operator_integrators_refuse_step_counter_overflow_before_work() {
+    let calls = Cell::new(0usize);
+    let mut imex = ImexState::new(0.0, &[0.5]);
+    imex.steps = usize::MAX;
+    let imex_before = imex.clone();
+    let error = OperatorImex2::new(1, 0.1, imex_config())
+        .step(
+            &mut imex,
+            &DiagonalOp(vec![0.0]),
+            &IdentityPreconditioner,
+            &|_, output| {
+                calls.set(calls.get() + 1);
+                output[0] = 0.0;
+            },
+        )
+        .expect_err("IMEX counter overflow must refuse before either stage");
+    assert!(matches!(
+        error,
+        ImexSolveError::StepCounterOverflow { steps: usize::MAX }
+    ));
+    assert_eq!(calls.get(), 0, "IMEX stage callback must not run");
+    assert_eq!(imex.t.to_bits(), imex_before.t.to_bits());
+    assert_same_bits(&imex.u, &imex_before.u);
+    assert_eq!(imex.steps, imex_before.steps);
+    assert_eq!(imex.history, imex_before.history);
+
+    calls.set(0);
+    let identity = CountingIdentity(&calls);
+    let structural_problem = LinearSecondOrderSystem::new(&identity, &identity, &identity);
+    let mut structural = SecondOrderState::new(0.0, &[1.0], &[0.0], &[-1.0]);
+    structural.steps = usize::MAX;
+    let structural_before = structural.clone();
+    let error = OperatorGeneralizedAlpha::new(1, 0.1, 0.8, tight_newton())
+        .step(&mut structural, &structural_problem, &[0.0])
+        .expect_err("structural counter overflow must refuse before Newton");
+    assert!(matches!(
+        error,
+        TimeSolveError::StepCounterOverflow { steps: usize::MAX }
+    ));
+    assert_eq!(calls.get(), 0, "structural operator must not run");
+    assert_eq!(structural.t.to_bits(), structural_before.t.to_bits());
+    assert_same_bits(&structural.q, &structural_before.q);
+    assert_same_bits(&structural.v, &structural_before.v);
+    assert_same_bits(&structural.a, &structural_before.a);
+    assert_eq!(structural.steps, structural_before.steps);
+    assert_eq!(structural.history, structural_before.history);
+
+    calls.set(0);
+    let first_order_problem = LinearFirstOrderSystem::new(&identity, &identity);
+    let mut first_order = FirstOrderState::new(0.0, &[1.0], &[-1.0]);
+    first_order.steps = usize::MAX;
+    let first_order_before = first_order.clone();
+    let error = OperatorFirstOrderGeneralizedAlpha::new(1, 0.1, 0.6, tight_newton())
+        .step(&mut first_order, &first_order_problem, &[0.0])
+        .expect_err("first-order counter overflow must refuse before Newton");
+    assert!(matches!(
+        error,
+        TimeSolveError::StepCounterOverflow { steps: usize::MAX }
+    ));
+    assert_eq!(calls.get(), 0, "first-order operator must not run");
+    assert_eq!(first_order.t.to_bits(), first_order_before.t.to_bits());
+    assert_same_bits(&first_order.u, &first_order_before.u);
+    assert_same_bits(&first_order.rate, &first_order_before.rate);
+    assert_eq!(first_order.steps, first_order_before.steps);
+    assert_eq!(first_order.history, first_order_before.history);
 }

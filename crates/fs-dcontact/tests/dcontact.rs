@@ -212,6 +212,91 @@ fn hunt_crossley_lowers_restitution() {
     );
 }
 
+#[test]
+fn hunt_crossley_unloading_saturates_at_nonattractive_reaction() {
+    let obstacle = Obstacle::new(
+        vec![1.0],
+        1,
+        1,
+        vec![0.5],
+        vec![1.0],
+        1.0e6,
+        2.0,
+        "test-fixture: unilateral Hunt-Crossley saturation".to_string(),
+    )
+    .expect("obstacle")
+    .with_internal_loss(0.8)
+    .expect("chi");
+    let storage = ContactStorage::new(Box::new(FreeMass { m: 1.0 }), 1, vec![obstacle.clone()])
+        .expect("storage");
+    // p = 0.5 m and chi * p_dot = -1.6: the raw 1 + chi * p_dot
+    // multiplier would reverse the stored unilateral reaction.
+    let x = [1.0, -2.0];
+    let mut gradient = [0.0; 2];
+    storage.gradient(&x, &mut gradient);
+    let port = obstacle.dissipative_modal_forces(1, &x, &[-2.0]);
+    let net_local_reaction = -gradient[0] + port[0];
+    assert_eq!(
+        net_local_reaction, 0.0,
+        "unloading contact must not attract"
+    );
+
+    let extreme = Obstacle::new(
+        vec![1.0],
+        1,
+        1,
+        vec![0.5],
+        vec![1.0],
+        1.0e200,
+        2.0,
+        "test-fixture: finite extreme-scale Hunt-Crossley".to_string(),
+    )
+    .expect("extreme obstacle")
+    .with_internal_loss(1.0e200)
+    .expect("extreme chi");
+    let extreme_storage =
+        ContactStorage::new(Box::new(FreeMass { m: 1.0 }), 1, vec![extreme.clone()])
+            .expect("extreme storage");
+    let extreme_x = [1.0, -5.0e-201];
+    let mut extreme_gradient = [0.0; 2];
+    extreme_storage.gradient(&extreme_x, &mut extreme_gradient);
+    let extreme_port = extreme.dissipative_modal_forces(1, &extreme_x, &[-5.0e-201]);
+    let extreme_net = -extreme_gradient[0] + extreme_port[0];
+    assert!(extreme_net.is_finite());
+    assert_eq!(extreme_net, -0.5 * extreme_gradient[0]);
+
+    // Two independently active collocation points exercise the ordering that
+    // a single-point test cannot: clamp each local loss factor before modal
+    // projection. The sign-varying dense projection makes the two local
+    // factors observable: point 0 fully unloads while point 1 retains half its
+    // reaction.
+    let multimode = Obstacle::new(
+        vec![1.0, 1.0, 1.0, -1.0],
+        2,
+        2,
+        vec![0.5, 0.5],
+        vec![1.0, 2.0],
+        64.0,
+        2.0,
+        "test-fixture: independent local Hunt-Crossley saturation".to_string(),
+    )
+    .expect("multimode obstacle")
+    .with_internal_loss(1.0)
+    .expect("multimode chi");
+    let multimode_port =
+        multimode.dissipative_modal_forces(2, &[1.0, 0.0, 0.0, 0.0], &[-1.25, -0.75]);
+    assert_eq!(
+        multimode_port,
+        [32.0, 0.0],
+        "local unloading factors must be clamped before modal projection"
+    );
+    let nonfinite_port = obstacle.dissipative_modal_forces(1, &[f64::NAN, 0.0], &[0.0]);
+    assert!(
+        nonfinite_port[0].is_nan(),
+        "a non-fallible port must propagate invalid state instead of erasing contact"
+    );
+}
+
 /// The string + flat-fret fixture used by several tests.
 fn fret_system(n_modes: usize, gap: f64, k_c: f64) -> (PortHamiltonian, ContactStorage, Vec<f64>) {
     let (length, tension, mu) = (0.65, 70.0, 5.0e-3);

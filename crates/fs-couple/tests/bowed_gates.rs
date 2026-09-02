@@ -10,11 +10,12 @@
 //! `fs_couple::bowed_string`). No wall-clock, no RNG.
 
 use fs_couple::bowed_string::{
-    BowGesture, BowGestureError, BowedRunConfig, BowedStringCard, FrictionIsland, Termination,
-    cents_deviation, classify, gate_metrics, run_bowed, run_log_hash,
+    BowGesture, BowGestureError, BowedRunConfig, BowedRunError, BowedStringCard, FrictionIsland,
+    Termination, cents_deviation, classify, gate_metrics, run_bowed, run_log_hash,
 };
 use fs_couple::stribeck_friction::StribeckFriction;
 use fs_couple::thin_plate::CompactBody;
+use fs_material::gas::{GasSpec, GasState};
 use fs_scenario::RadiatingPlate;
 
 /// Shared string card: same physical family as `bakeoff_string.rs`, with 16
@@ -224,7 +225,11 @@ fn plate_one_port_configuration_runs_bounded_and_logs_body_motion() {
         gesture: playable_gesture(),
         steps: 12_000,
         subsamples: 16,
-        termination: Termination::PlateOnePort(Box::new(body)),
+        termination: Termination::PlateOnePort {
+            body: Box::new(body),
+            ambient: GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101_325.0)
+                .expect("declared ambient admits"),
+        },
         listener_m: 1.0,
     };
     let log = run_bowed(&cfg).expect("plate configuration runs");
@@ -244,4 +249,105 @@ fn plate_one_port_configuration_runs_bounded_and_logs_body_motion() {
         .fold(0.0_f64, |a, v| a.max(v.abs()));
     println!("plate body max |volume velocity| = {body_speed_max:.3e} m^3/s");
     assert!(body_speed_max > 0.0, "the body must actually move");
+}
+
+/// A public `GasState` can be forged, so the plate boundary must refuse an
+/// invalid density before it can publish a radiation trace.
+#[test]
+fn plate_one_port_refuses_nonphysical_declared_ambient_density() {
+    let body_spec = RadiatingPlate {
+        area_m2: 3.0e-3,
+        mass_kg: 0.15,
+        frequency_hz: 280.0,
+        damping_ratio: 0.02,
+    };
+    for density_kg_m3 in [f64::NAN, 0.0, -1.0] {
+        let mut ambient =
+            GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101_325.0).expect("air");
+        ambient.density = density_kg_m3;
+        let cfg = BowedRunConfig {
+            card: card(),
+            island: FrictionIsland::Stribeck(rosin()),
+            gesture: playable_gesture(),
+            steps: 1,
+            subsamples: 16,
+            termination: Termination::PlateOnePort {
+                body: Box::new(CompactBody::from_radiator(body_spec).expect("body spec admits")),
+                ambient,
+            },
+            listener_m: 1.0,
+        };
+        match run_bowed(&cfg) {
+            Err(BowedRunError::InvalidAmbientDensity {
+                density_kg_m3: refused,
+            }) if refused.to_bits() == density_kg_m3.to_bits() => {}
+            result => {
+                panic!("invalid ambient density {density_kg_m3:?} must refuse, got {result:?}")
+            }
+        }
+    }
+}
+
+/// Declared ambient pressure scales only the one-way radiation conversion;
+/// the string/body trajectory is independent of it.
+#[test]
+fn plate_one_port_radiation_scales_with_declared_ambient_density() {
+    let air = GasSpec::dry_air_ussa1976();
+    let low_pressure = GasState::try_new(&air, 293.15, 101_325.0).expect("low pressure admits");
+    let high_pressure = GasState::try_new(&air, 293.15, 202_650.0).expect("high pressure admits");
+    let body_spec = RadiatingPlate {
+        area_m2: 3.0e-3,
+        mass_kg: 0.15,
+        frequency_hz: 280.0,
+        damping_ratio: 0.02,
+    };
+    let config_with = |ambient| BowedRunConfig {
+        card: card(),
+        island: FrictionIsland::Stribeck(rosin()),
+        gesture: playable_gesture(),
+        steps: 12_000,
+        subsamples: 16,
+        termination: Termination::PlateOnePort {
+            body: Box::new(CompactBody::from_radiator(body_spec).expect("body spec admits")),
+            ambient,
+        },
+        listener_m: 1.0,
+    };
+    let low = run_bowed(&config_with(low_pressure)).expect("low-pressure run completes");
+    let high = run_bowed(&config_with(high_pressure)).expect("high-pressure run completes");
+
+    assert_eq!(low.body_velocity_m_s, high.body_velocity_m_s);
+    assert_eq!(low.radiated_pressure_pa.len(), 12_000);
+    assert_eq!(high.radiated_pressure_pa.len(), 12_000);
+    assert!(
+        low.radiated_pressure_pa.iter().all(|p| p.is_finite())
+            && high.radiated_pressure_pa.iter().all(|p| p.is_finite()),
+        "both radiation traces must stay finite"
+    );
+    let expected_ratio = high_pressure.density / low_pressure.density;
+    let mut nonzero_samples = 0;
+    for (sample, (low_pressure_pa, high_pressure_pa)) in low
+        .radiated_pressure_pa
+        .iter()
+        .zip(&high.radiated_pressure_pa)
+        .enumerate()
+    {
+        if *low_pressure_pa == 0.0 && *high_pressure_pa == 0.0 {
+            continue;
+        }
+        assert!(
+            *low_pressure_pa != 0.0 && *high_pressure_pa != 0.0,
+            "density scaling must not introduce a one-sided zero at sample {sample}"
+        );
+        let observed_ratio = high_pressure_pa / low_pressure_pa;
+        assert!(
+            (observed_ratio - expected_ratio).abs() <= 1e-12 * expected_ratio,
+            "radiation ratio {observed_ratio} must match density ratio {expected_ratio} at sample {sample}"
+        );
+        nonzero_samples += 1;
+    }
+    assert!(
+        nonzero_samples > 0,
+        "bridge-driven body must radiate at least one nonzero pressure sample"
+    );
 }

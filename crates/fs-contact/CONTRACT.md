@@ -246,7 +246,8 @@ bisection over `CertifiedMotorTube::box_action_over` enclosures:
 ## Swept-vertex-hull refinement (bead tqag, increment 3)
 
 `refine_possible_windows(a_vertices, a_tube, b_vertices, b_tube,
-windows, max_iterations, cx)` re-tests each `PossibleContact` window
+windows, max_windows, max_iterations, cx)` re-tests each
+`PossibleContact` window
 for POLYTOPE bodies: every body-frame vertex trajectory is enclosed by
 `point_action_over`, and the convex hull of all trajectory-box corners
 contains the body's image at every instant (a rigid image of a hull is

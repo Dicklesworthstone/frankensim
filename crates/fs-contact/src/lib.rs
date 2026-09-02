@@ -56,7 +56,7 @@ pub enum ContactError {
         /// The offending body index.
         body: usize,
     },
-    /// The query window is empty, inverted, or non-finite.
+    /// The query window is empty, inverted, non-finite, or out of required time order.
     InvalidWindow {
         /// Window low endpoint.
         lo: f64,
@@ -650,14 +650,18 @@ pub struct CcdRefinement {
 /// # Errors
 /// [`ContactError::TooManyBodies`] reusing the vertex ceiling
 /// ([`MAX_CCD_VERTICES`]); empty vertex sets refuse as
-/// [`ContactError::InvalidSupport`]; motion/query refusals pass
-/// through typed; [`ContactError::Cancelled`] per vertex and window.
+/// [`ContactError::InvalidSupport`]; non-finite or empty input windows
+/// refuse as [`ContactError::InvalidWindow`];
+/// [`ContactError::CcdBudgetExhausted`] returns the exact completed
+/// retained and pending windows; motion/query refusals pass through
+/// typed; [`ContactError::Cancelled`] per vertex and window.
 pub fn refine_possible_windows(
     a_vertices: &[fs_geom::Point3],
     a_tube: &CertifiedMotorTube,
     b_vertices: &[fs_geom::Point3],
     b_tube: &CertifiedMotorTube,
     windows: &[Interval],
+    max_windows: usize,
     max_iterations: u32,
     cx: &Cx<'_>,
 ) -> Result<CcdRefinement, ContactError> {
@@ -672,11 +676,47 @@ pub fn refine_possible_windows(
             });
         }
     }
-    let mut out = Vec::with_capacity(windows.len());
-    let mut max_defect = 0.0f64;
+    let mut previous_lo = None;
     for &window in windows {
+        if !(window.lo().is_finite() && window.hi().is_finite() && window.lo() < window.hi()) {
+            return Err(ContactError::InvalidWindow {
+                lo: window.lo(),
+                hi: window.hi(),
+            });
+        }
+        if previous_lo.is_some_and(|lo| window.lo() < lo) {
+            return Err(ContactError::InvalidWindow {
+                lo: window.lo(),
+                hi: window.hi(),
+            });
+        }
+        previous_lo = Some(window.lo());
         if cx.checkpoint().is_err() {
             return Err(ContactError::Cancelled);
+        }
+    }
+    // Do not let an over-budget caller force an allocation proportional to
+    // the entire hostile candidate set before the budget guard can run.
+    let mut out = Vec::with_capacity(windows.len().min(max_windows));
+    let mut max_defect = 0.0f64;
+    for (examined, &window) in windows.iter().enumerate() {
+        if cx.checkpoint().is_err() {
+            return Err(ContactError::Cancelled);
+        }
+        if examined >= max_windows {
+            let possible = out
+                .iter()
+                .filter_map(|refined| match refined {
+                    RefinedWindow::Retained { window } => Some(*window),
+                    RefinedWindow::Pruned { .. } => None,
+                })
+                .collect();
+            return Err(ContactError::CcdBudgetExhausted {
+                max_windows,
+                examined,
+                pending: windows[examined..].to_vec(),
+                possible,
+            });
         }
         let (hull_a, defect_a) = swept_vertex_hull(a_vertices, a_tube, window, cx)?;
         let (hull_b, defect_b) = swept_vertex_hull(b_vertices, b_tube, window, cx)?;
@@ -799,7 +839,8 @@ fn valid_sdf_trace_sample(nominal: f64, certificate: fs_evidence::NumericalCerti
 /// [`ContactError::MissingCapability`] (stable name
 /// `"exact-distance-chart"`) when the obstacle's trace claim is weaker;
 /// [`ContactError::InvalidSupport`]/[`ContactError::TooManyBodies`] on
-/// vertex-set refusals; motion refusals pass through typed;
+/// vertex-set refusals; [`ContactError::InvalidWindow`] for empty,
+/// non-finite, or out-of-order input windows; motion refusals pass through typed;
 /// [`ContactError::Query`] wrapping non-finite swept corners or an unusable
 /// chart enclosure;
 /// [`ContactError::Cancelled`] per vertex, window, and chart-producer handoff.
@@ -834,6 +875,25 @@ pub fn refine_windows_against_sdf(
             lo: time_tolerance,
             hi: time_tolerance,
         });
+    }
+    let mut previous_lo = None;
+    for &window in windows {
+        if !(window.lo().is_finite() && window.hi().is_finite() && window.lo() < window.hi()) {
+            return Err(ContactError::InvalidWindow {
+                lo: window.lo(),
+                hi: window.hi(),
+            });
+        }
+        if previous_lo.is_some_and(|lo| window.lo() < lo) {
+            return Err(ContactError::InvalidWindow {
+                lo: window.lo(),
+                hi: window.hi(),
+            });
+        }
+        previous_lo = Some(window.lo());
+        if cx.checkpoint().is_err() {
+            return Err(ContactError::Cancelled);
+        }
     }
     // The ball around a long sweep is hopelessly loose (the input windows
     // arrive MERGED from certified_ccd), so the route bisects internally:

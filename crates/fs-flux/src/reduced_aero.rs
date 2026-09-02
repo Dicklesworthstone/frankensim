@@ -901,7 +901,8 @@ impl ReducedAeroModel {
             input.gas.velocity_world_m_per_s,
             "ambient_boundary_power_w",
         )?;
-        let moving_ambient_requires_total_energy_accounting = ambient_boundary_power_w != 0.0;
+        let moving_ambient_requires_total_energy_accounting =
+            input.gas.velocity_world_m_per_s != Vec3::ZERO;
         let receipt = ReducedAeroReceipt {
             authority: EstimateAuthority::EstimateOnly,
             gas_source_id: input.gas.source_id.clone(),
@@ -956,7 +957,8 @@ impl ReducedAeroModel {
             dissipated_relative_power_w: 0.0,
             body_power_w: 0.0,
             ambient_boundary_power_w: 0.0,
-            moving_ambient_requires_total_energy_accounting: false,
+            moving_ambient_requires_total_energy_accounting: input.gas.velocity_world_m_per_s
+                != Vec3::ZERO,
         };
         CandidateWrench {
             correlation: self.correlation.clone(),
@@ -1057,7 +1059,7 @@ pub struct ReducedAeroReceipt {
     pub body_power_w: f64,
     /// `F dot v_ambient` [W]; with moving ambient, use this in a total accounting window.
     pub ambient_boundary_power_w: f64,
-    /// True exactly when a far-field boundary supplies/removes mechanical power.
+    /// True whenever the far-field ambient frame moves, requiring total-energy accounting.
     pub moving_ambient_requires_total_energy_accounting: bool,
 }
 
@@ -1238,7 +1240,7 @@ impl CandidateWrench {
             }
         }
         if self.receipt.moving_ambient_requires_total_energy_accounting
-            != (self.receipt.ambient_boundary_power_w != 0.0)
+            != (self.power_kinematics.ambient_velocity_world_m_per_s != Vec3::ZERO)
         {
             return Err(ReducedAeroError::InvalidCandidateWrench {
                 field: "candidate.receipt.moving_ambient_requires_total_energy_accounting",

@@ -207,6 +207,33 @@ pub enum TimeSolveError {
         /// Supplied dimension.
         actual: usize,
     },
+    /// The configured positive step cannot advance the checkpoint clock to a
+    /// distinct finite endpoint.
+    InvalidTimeAdvance {
+        /// Exact source-time bits.
+        t_bits: u64,
+        /// Exact configured-step bits.
+        h_bits: u64,
+        /// Exact rounded endpoint bits.
+        next_t_bits: u64,
+    },
+    /// A time-indexed internal stage cannot be represented strictly after the
+    /// source clock even though the endpoint itself is valid.
+    InvalidStageTime {
+        /// Exact source-time bits.
+        t_bits: u64,
+        /// Exact configured-step bits.
+        h_bits: u64,
+        /// Exact stage-fraction bits.
+        fraction_bits: u64,
+        /// Exact rounded stage-time bits.
+        stage_t_bits: u64,
+    },
+    /// The accepted-step counter cannot represent another commit.
+    StepCounterOverflow {
+        /// Exact current counter value.
+        steps: usize,
+    },
     /// `fs-solver` refused the initial Newton checkpoint.
     NewtonSetup(NewtonError),
     /// The configured nonlinear budget ended without an accepted solution.
@@ -224,6 +251,30 @@ impl fmt::Display for TimeSolveError {
                 f,
                 "{role} dimension {actual} differs from integrator dimension {expected}"
             ),
+            Self::InvalidTimeAdvance {
+                t_bits,
+                h_bits,
+                next_t_bits,
+            } => write!(
+                f,
+                "generalized-alpha clock cannot advance finitely (t bits 0x{t_bits:016x}, h bits \
+                 0x{h_bits:016x}, next bits 0x{next_t_bits:016x})"
+            ),
+            Self::InvalidStageTime {
+                t_bits,
+                h_bits,
+                fraction_bits,
+                stage_t_bits,
+            } => write!(
+                f,
+                "generalized-alpha stage time cannot advance finitely (t bits 0x{t_bits:016x}, \
+                 h bits 0x{h_bits:016x}, fraction bits 0x{fraction_bits:016x}, stage bits \
+                 0x{stage_t_bits:016x})"
+            ),
+            Self::StepCounterOverflow { steps } => write!(
+                f,
+                "generalized-alpha accepted-step counter cannot advance past {steps}"
+            ),
             Self::NewtonSetup(error) => write!(f, "could not initialize Newton step: {error}"),
             Self::NotConverged(report) => write!(
                 f,
@@ -235,6 +286,19 @@ impl fmt::Display for TimeSolveError {
 }
 
 impl core::error::Error for TimeSolveError {}
+
+fn checked_time_advance(t: f64, h: f64) -> Result<f64, TimeSolveError> {
+    let next_t = t + h;
+    if t.is_finite() && next_t.is_finite() && next_t > t {
+        Ok(next_t)
+    } else {
+        Err(TimeSolveError::InvalidTimeAdvance {
+            t_bits: t.to_bits(),
+            h_bits: h.to_bits(),
+            next_t_bits: next_t.to_bits(),
+        })
+    }
+}
 
 /// Structural residual `M a + C v + r(q) = f` used by the generalized-alpha
 /// driver. The tangent action must differentiate the exact `internal_force`
@@ -403,6 +467,11 @@ impl OperatorGeneralizedAlpha {
         require_dimension("velocity state", self.n, state.v.len())?;
         require_dimension("acceleration state", self.n, state.a.len())?;
         require_dimension("forcing", self.n, forcing.len())?;
+        let next_t = checked_time_advance(state.t, self.h)?;
+        let next_steps = state
+            .steps
+            .checked_add(1)
+            .ok_or(TimeSolveError::StepCounterOverflow { steps: state.steps })?;
 
         let residual = StructuralStepResidual {
             method: self,
@@ -438,8 +507,8 @@ impl OperatorGeneralizedAlpha {
         state.q = q_new;
         state.v = v_new;
         state.a = a_new;
-        state.t += self.h;
-        state.steps += 1;
+        state.t = next_t;
+        state.steps = next_steps;
         state.history.push(telemetry.clone());
         Ok(telemetry)
     }
@@ -759,10 +828,24 @@ impl OperatorFirstOrderGeneralizedAlpha {
         require_dimension("first-order state", self.n, state.u.len())?;
         require_dimension("first-order rate", self.n, state.rate.len())?;
         require_dimension("forcing", self.n, forcing.len())?;
+        let next_t = checked_time_advance(state.t, self.h)?;
+        let t_eval = self.h.mul_add(self.alpha_f, state.t);
+        if !(t_eval.is_finite() && t_eval > state.t) {
+            return Err(TimeSolveError::InvalidStageTime {
+                t_bits: state.t.to_bits(),
+                h_bits: self.h.to_bits(),
+                fraction_bits: self.alpha_f.to_bits(),
+                stage_t_bits: t_eval.to_bits(),
+            });
+        }
+        let next_steps = state
+            .steps
+            .checked_add(1)
+            .ok_or(TimeSolveError::StepCounterOverflow { steps: state.steps })?;
         let residual = FirstOrderStepResidual {
             method: self,
             problem,
-            t0: state.t,
+            t_eval,
             u0: &state.u,
             rate0: &state.rate,
             forcing,
@@ -789,8 +872,8 @@ impl OperatorFirstOrderGeneralizedAlpha {
         };
         state.u = u_new;
         state.rate = rate_new;
-        state.t += self.h;
-        state.steps += 1;
+        state.t = next_t;
+        state.steps = next_steps;
         state.history.push(telemetry.clone());
         Ok(telemetry)
     }
@@ -799,7 +882,7 @@ impl OperatorFirstOrderGeneralizedAlpha {
 struct FirstOrderStepResidual<'a, P: ?Sized> {
     method: &'a OperatorFirstOrderGeneralizedAlpha,
     problem: &'a P,
-    t0: f64,
+    t_eval: f64,
     u0: &'a [f64],
     rate0: &'a [f64],
     forcing: &'a [f64],
@@ -823,11 +906,11 @@ impl<P: FirstOrderProblem + ?Sized> NonlinearProblem for FirstOrderStepResidual<
                 .alpha_m
                 .mul_add(rate_new[i], (1.0 - method.alpha_m) * self.rate0[i]);
         }
-        let t_eval = method.h.mul_add(method.alpha_f, self.t0);
         let mut mass = vec![0.0; method.n];
         let mut internal = vec![0.0; method.n];
         self.problem.mass_apply(&rate_eval, &mut mass);
-        self.problem.internal_force(t_eval, &u_eval, &mut internal);
+        self.problem
+            .internal_force(self.t_eval, &u_eval, &mut internal);
         for i in 0..method.n {
             output[i] = mass[i] + internal[i] - self.forcing[i];
         }
@@ -846,10 +929,9 @@ impl<P: FirstOrderProblem + ?Sized> NonlinearProblem for FirstOrderStepResidual<
                 .mul_add(u_new[i], (1.0 - method.alpha_f) * self.u0[i]);
             tangent_direction[i] = method.alpha_f * direction[i];
         }
-        let t_eval = method.h.mul_add(method.alpha_f, self.t0);
         let mut tangent = vec![0.0; method.n];
         self.problem
-            .tangent_apply(t_eval, &u_eval, &tangent_direction, &mut tangent);
+            .tangent_apply(self.t_eval, &u_eval, &tangent_direction, &mut tangent);
         for i in 0..method.n {
             output[i] = mass_scale.mul_add(mass[i], tangent[i]);
         }

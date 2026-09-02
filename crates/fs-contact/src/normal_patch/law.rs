@@ -484,7 +484,7 @@ impl NormalPatchRequest {
             checked(2.0 * modulus * (radius * d).sqrt(), "sphere_tangent")?
         };
         let factor = dissipative.map_or(1.0, |c| 1.0 + c * self.indentation_rate_m_per_s);
-        if factor < 0.0 {
+        if factor <= 0.0 {
             return Err(NormalPatchError::OutsideApplicability {
                 ratio: "Hunt-Crossley force factor",
                 value: factor,
@@ -623,7 +623,7 @@ impl NormalPatchRequest {
             checked(1.5 * elastic_force / d, "elliptic_elastic_tangent")?
         };
         let factor = dissipative.map_or(1.0, |c| 1.0 + c * self.indentation_rate_m_per_s);
-        if factor < 0.0 {
+        if factor <= 0.0 {
             return Err(NormalPatchError::OutsideApplicability {
                 ratio: "Hunt-Crossley force factor",
                 value: factor,
@@ -689,7 +689,7 @@ impl NormalPatchRequest {
     ) -> Result<NormalPatchReceipt, NormalPatchError> {
         let approach = self.indentation_m;
         let factor = 1.0 + dissipation_s_per_m * self.indentation_rate_m_per_s;
-        if factor < 0.0 {
+        if factor <= 0.0 {
             return Err(NormalPatchError::OutsideApplicability {
                 ratio: "Hunt-Crossley force factor",
                 value: factor,

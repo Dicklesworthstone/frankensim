@@ -440,7 +440,18 @@ fn reed_flow_mismatch(
 mod fast_mode_tests {
     use super::*;
 
+    use fs_material::gas::{GasSpec, GasState};
     use fs_scenario::BeatingReed;
+
+    const BORE_RADIUS_M: f64 = 0.0022;
+
+    fn air20_at(pressure_pa: f64) -> GasState {
+        GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, pressure_pa).expect("air")
+    }
+
+    fn air20() -> GasState {
+        air20_at(101_325.0)
+    }
 
     fn reed() -> BeatingReed {
         BeatingReed {
@@ -454,16 +465,35 @@ mod fast_mode_tests {
         }
     }
 
-    fn zc_typical() -> f64 {
-        let area = core::f64::consts::PI * 0.0022 * 0.0022;
-        1.2 * 343.0 / area
+    fn fixture_impedance(gas: &GasState) -> f64 {
+        let area = core::f64::consts::PI * BORE_RADIUS_M * BORE_RADIUS_M;
+        gas.characteristic_impedance / area
+    }
+
+    #[test]
+    fn fixture_impedance_is_derived_from_declared_gas_state() {
+        let sea_level = air20();
+        let reduced_pressure = air20_at(90_000.0);
+        let area = core::f64::consts::PI * BORE_RADIUS_M * BORE_RADIUS_M;
+        for gas in [sea_level, reduced_pressure] {
+            assert_eq!(
+                fixture_impedance(&gas).to_bits(),
+                (gas.characteristic_impedance / area).to_bits()
+            );
+        }
+        assert_ne!(
+            fixture_impedance(&sea_level).to_bits(),
+            fixture_impedance(&reduced_pressure).to_bits(),
+            "fixture impedance must retain the declared pressure dependence"
+        );
     }
 
     #[test]
     fn jacobian_matches_central_finite_difference_in_smooth_regions() {
         let reed = reed();
-        let rho = 1.2;
-        let zc = zc_typical();
+        let gas = air20();
+        let rho = gas.density;
+        let zc = fixture_impedance(&gas);
         // Interior points: away from the dp ≈ 0 kink, both clamp ends,
         // and the flow dead zone.
         let cases = [
@@ -492,8 +522,9 @@ mod fast_mode_tests {
     #[test]
     fn corner_regions_are_refused_not_guessed() {
         let reed = reed();
-        let rho = 1.2;
-        let zc = zc_typical();
+        let gas = air20();
+        let rho = gas.density;
+        let zc = fixture_impedance(&gas);
         // Drive dp → 0: with r0 = 0, dp = pm − p − h, so the
         // equal-pressure point is p = pm − h; the sqrt-kink guard must
         // refuse its neighborhood.
@@ -512,8 +543,9 @@ mod fast_mode_tests {
         const FLOW_ACCEPT_TOL: f64 = 1.0e-8;
         const POSITION_HEADROOM: f64 = 4.0;
         let reed = reed();
-        let rho = 1.2;
-        let zc = zc_typical();
+        let gas = air20();
+        let rho = gas.density;
+        let zc = fixture_impedance(&gas);
         let mut stats = FastSolveStats::default();
         // A sweep across open/interior/closing phases with varied
         // history and reflection. TWO gates, both derived from the
@@ -580,8 +612,9 @@ mod fast_mode_tests {
     #[test]
     fn cornered_guess_hands_to_strict_and_still_matches() {
         let reed = reed();
-        let rho = 1.2;
-        let zc = zc_typical();
+        let gas = air20();
+        let rho = gas.density;
+        let zc = fixture_impedance(&gas);
         let mut stats = FastSolveStats::default();
         // A guess landing EXACTLY on the kink (dp = 0) must hand the
         // sample to the strict path and return the strict root.

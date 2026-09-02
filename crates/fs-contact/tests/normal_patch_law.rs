@@ -647,3 +647,45 @@ fn np_013_finite_gap_refuses_nonzero_response_without_a_pressure_footprint() {
     assert_eq!(axes.semi_major_axis_m, 6.0e-4);
     assert_eq!(axes.semi_minor_axis_m, 0.0);
 }
+
+#[test]
+fn np_014_hunt_crossley_refuses_zero_nonadhesive_force_factor() {
+    let zero_factor_rate_m_per_s = -1.0;
+    for law in [
+        NormalPatchLaw::HuntCrossleySphere {
+            effective_radius_m: 0.02,
+            reduced_modulus_pa: 2.0e9,
+            dissipation_s_per_m: 1.0,
+        },
+        NormalPatchLaw::HuntCrossleyEllipticParaboloid {
+            maximum_principal_curvature_m_inverse: 100.0,
+            minimum_principal_curvature_m_inverse: 25.0,
+            reduced_modulus_pa: 2.0e9,
+            dissipation_s_per_m: 1.0,
+        },
+        NormalPatchLaw::FiniteGapPoint {
+            response_identity: hash_domain("test/finite-gap-response", b"zero-force-factor"),
+            reference_radius_m: 1.0e-3,
+            elastic_force_n: 4.0,
+            elastic_tangent_n_per_m: 3.0e5,
+            reversible_energy_j: 2.0e-5,
+            peak_pressure_pa: 1.0e7,
+            equivalent_pressure_semiaxes_m: [3.0e-4, 6.0e-4],
+            dissipation_s_per_m: 1.0,
+        },
+    ] {
+        let mut request = request(law);
+        request.indentation_rate_m_per_s = zero_factor_rate_m_per_s;
+        let Err(NormalPatchError::OutsideApplicability {
+            ratio,
+            value,
+            limit,
+        }) = request.evaluate()
+        else {
+            panic!("a zero nonadhesive force factor must refuse before a receipt");
+        };
+        assert_eq!(ratio, "Hunt-Crossley force factor");
+        assert_eq!(value, 0.0);
+        assert_eq!(limit, 0.0);
+    }
+}

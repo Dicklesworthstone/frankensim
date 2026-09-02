@@ -315,6 +315,12 @@ fn aero_004_moving_ambient_uses_relative_motion_and_demands_total_accounting() {
 
     assert_eq!(matching_ambient.components.form_force_world_n, Vec3::ZERO);
     assert!(still_air.receipt.body_power_w <= 1.0e-12);
+    assert!(
+        !still_air
+            .receipt
+            .moving_ambient_requires_total_energy_accounting,
+        "still air does not require total gas-plus-boundary accounting"
+    );
     assert!(matching_ambient.receipt.relative_power_w <= 1.0e-12);
     assert!(
         (matching_ambient.receipt.body_power_w
@@ -326,7 +332,20 @@ fn aero_004_moving_ambient_uses_relative_motion_and_demands_total_accounting() {
 
     assert_eq!(matching_ambient.receipt.ambient_boundary_power_w, 0.0);
     assert!(
-        !matching_ambient
+        matching_ambient
+            .receipt
+            .moving_ambient_requires_total_energy_accounting,
+        "a moving ambient requires total accounting even when this instant has zero F dot u_ambient"
+    );
+    let mut co_moving_static = input(Vec3::new(4.0, -1.0, 2.0));
+    co_moving_static.kinematics.angular_velocity_world_rad_per_s = Vec3::ZERO;
+    let co_moving_static = model
+        .evaluate(&co_moving_static)
+        .expect("zero-wrench moving ambient evaluates");
+    assert_eq!(co_moving_static.force_world_n, Vec3::ZERO);
+    assert_eq!(co_moving_static.torque_world_n_m, Vec3::ZERO);
+    assert!(
+        co_moving_static
             .receipt
             .moving_ambient_requires_total_energy_accounting
     );
@@ -340,22 +359,32 @@ fn aero_004_moving_ambient_uses_relative_motion_and_demands_total_accounting() {
             .moving_ambient_requires_total_energy_accounting
     );
 
-    let mut false_positive = matching_ambient.clone();
+    let mut false_positive = still_air.clone();
     false_positive
         .receipt
         .moving_ambient_requires_total_energy_accounting = true;
     assert!(matches!(
-        WorkWindow::default().record_once(41, 0.25, &false_positive),
+        WorkWindow::default().record_once(40, 0.25, &false_positive),
         Err(ReducedAeroError::InvalidCandidateWrench {
             field: "candidate.receipt.moving_ambient_requires_total_energy_accounting"
         })
     ));
-    let mut false_negative = exchanging_ambient.clone();
+    let mut false_negative = matching_ambient.clone();
     false_negative
         .receipt
         .moving_ambient_requires_total_energy_accounting = false;
     assert!(matches!(
-        WorkWindow::default().record_once(42, 0.25, &false_negative),
+        WorkWindow::default().record_once(41, 0.25, &false_negative),
+        Err(ReducedAeroError::InvalidCandidateWrench {
+            field: "candidate.receipt.moving_ambient_requires_total_energy_accounting"
+        })
+    ));
+    let mut false_negative_exchange = exchanging_ambient.clone();
+    false_negative_exchange
+        .receipt
+        .moving_ambient_requires_total_energy_accounting = false;
+    assert!(matches!(
+        WorkWindow::default().record_once(42, 0.25, &false_negative_exchange),
         Err(ReducedAeroError::InvalidCandidateWrench {
             field: "candidate.receipt.moving_ambient_requires_total_energy_accounting"
         })

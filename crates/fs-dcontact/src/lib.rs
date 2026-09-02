@@ -279,12 +279,22 @@ impl Obstacle {
                 for k in 0..n_modes {
                     disp += self.collocation[i * n_modes + k] * x[2 * k];
                 }
-                (disp - self.gaps[i]).max(0.0)
+                let penetration = disp - self.gaps[i];
+                if penetration.is_nan() {
+                    penetration
+                } else {
+                    penetration.max(0.0)
+                }
             })
             .collect()
     }
 
     /// Hunt–Crossley modal forces `f_k = −Σ_i w_i χ K [p_i]_+^α ṗ_i Φ_ik`.
+    ///
+    /// During sufficiently fast unloading, the local loss increment
+    /// saturates at the magnitude of the stored penalty reaction. This
+    /// non-fallible port therefore leaves the combined reaction at zero,
+    /// rather than allowing a unilateral contact to become attractive.
     ///
     /// `velocities[k]` is the physical modal velocity (the inner
     /// storage's `∂H/∂p_k`). `χ = 0` returns zeros. This is **not** a
@@ -309,11 +319,19 @@ impl Obstacle {
             for (k, v) in velocities.iter().enumerate().take(n_modes) {
                 pdot += self.collocation[i * n_modes + k] * v;
             }
-            let f = self.weights[i]
-                * self.internal_loss
-                * self.stiffness
-                * det::pow(p, self.alpha)
-                * pdot;
+            let elastic = self.weights[i] * self.stiffness * det::pow(p, self.alpha);
+            // Form the dimensionless Hunt--Crossley factor first. Computing
+            // `elastic * chi * pdot` left-to-right can overflow at admitted
+            // finite scales even when `chi * pdot` and the final force are
+            // both finite. Preserve NaN propagation while clamping only the
+            // over-fast unloading branch.
+            let loss_factor = self.internal_loss * pdot;
+            let loss_factor = if loss_factor < -1.0 {
+                -1.0
+            } else {
+                loss_factor
+            };
+            let f = elastic * loss_factor;
             for (k, slot) in forces.iter_mut().enumerate().take(n_modes) {
                 *slot -= f * self.collocation[i * n_modes + k];
             }
@@ -394,12 +412,13 @@ impl ContactStorage {
         let mut energy = 0.0f64;
         for ob in &self.obstacles {
             for (i, &p) in ob.penetrations(self.n_modes, x).iter().enumerate() {
-                if p > 0.0 {
-                    active += 1;
-                    max_p = max_p.max(p);
-                    energy += ob.weights[i] * ob.stiffness / (ob.alpha + 1.0)
-                        * det::pow(p, ob.alpha + 1.0);
+                if p <= 0.0 {
+                    continue;
                 }
+                active += 1;
+                max_p = if p.is_nan() { p } else { max_p.max(p) };
+                energy +=
+                    ob.weights[i] * ob.stiffness / (ob.alpha + 1.0) * det::pow(p, ob.alpha + 1.0);
             }
         }
         ContactProbe {
@@ -437,10 +456,10 @@ impl Storage for ContactStorage {
         let mut h = self.inner.hamiltonian(x);
         for ob in &self.obstacles {
             for (i, &p) in ob.penetrations(self.n_modes, x).iter().enumerate() {
-                if p > 0.0 {
-                    h += ob.weights[i] * ob.stiffness / (ob.alpha + 1.0)
-                        * det::pow(p, ob.alpha + 1.0);
+                if p <= 0.0 {
+                    continue;
                 }
+                h += ob.weights[i] * ob.stiffness / (ob.alpha + 1.0) * det::pow(p, ob.alpha + 1.0);
             }
         }
         h
@@ -450,11 +469,12 @@ impl Storage for ContactStorage {
         self.inner.gradient(x, out);
         for ob in &self.obstacles {
             for (i, &p) in ob.penetrations(self.n_modes, x).iter().enumerate() {
-                if p > 0.0 {
-                    let f = ob.weights[i] * ob.stiffness * det::pow(p, ob.alpha);
-                    for k in 0..self.n_modes {
-                        out[2 * k] += f * ob.collocation[i * self.n_modes + k];
-                    }
+                if p <= 0.0 {
+                    continue;
+                }
+                let f = ob.weights[i] * ob.stiffness * det::pow(p, ob.alpha);
+                for k in 0..self.n_modes {
+                    out[2 * k] += f * ob.collocation[i * self.n_modes + k];
                 }
             }
         }

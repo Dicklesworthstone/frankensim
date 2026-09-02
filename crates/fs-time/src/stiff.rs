@@ -168,6 +168,21 @@ pub enum ImexSolveError {
         /// Supplied dimension.
         actual: usize,
     },
+    /// The configured positive step cannot advance the supplied clock to a
+    /// distinct finite time.
+    InvalidTimeAdvance {
+        /// Exact source-time bits.
+        t_bits: u64,
+        /// Exact configured-step bits.
+        h_bits: u64,
+        /// Exact rounded-sum bits.
+        next_t_bits: u64,
+    },
+    /// The accepted-step counter cannot represent another commit.
+    StepCounterOverflow {
+        /// Exact current counter value.
+        steps: usize,
+    },
     /// The explicit nonlinearity produced NaN or infinity.
     NonFiniteNonlinearity {
         /// Stage whose explicit evaluation failed.
@@ -193,6 +208,18 @@ impl fmt::Display for ImexSolveError {
                 f,
                 "IMEX operator/state dimension {actual} differs from method dimension {expected}"
             ),
+            Self::InvalidTimeAdvance {
+                t_bits,
+                h_bits,
+                next_t_bits,
+            } => write!(
+                f,
+                "IMEX clock cannot advance finitely (t bits 0x{t_bits:016x}, h bits \
+                 0x{h_bits:016x}, next bits 0x{next_t_bits:016x})"
+            ),
+            Self::StepCounterOverflow { steps } => {
+                write!(f, "IMEX accepted-step counter cannot advance past {steps}")
+            }
             Self::NonFiniteNonlinearity { stage, index, bits } => write!(
                 f,
                 "IMEX stage {stage:?} nonlinearity entry {index} is non-finite (bits 0x{bits:016x})"
@@ -294,6 +321,18 @@ impl OperatorImex2 {
                 actual: state.u.len(),
             });
         }
+        let next_t = state.t + self.h;
+        if !(state.t.is_finite() && next_t.is_finite() && next_t > state.t) {
+            return Err(ImexSolveError::InvalidTimeAdvance {
+                t_bits: state.t.to_bits(),
+                h_bits: self.h.to_bits(),
+                next_t_bits: next_t.to_bits(),
+            });
+        }
+        let next_steps = state
+            .steps
+            .checked_add(1)
+            .ok_or(ImexSolveError::StepCounterOverflow { steps: state.steps })?;
         let shifted = ShiftedLinearOp {
             linear,
             shift: -self.gamma * self.h,
@@ -349,8 +388,8 @@ impl OperatorImex2 {
             stage_two: report_two,
         };
         state.u = stage_two.x;
-        state.t += self.h;
-        state.steps += 1;
+        state.t = next_t;
+        state.steps = next_steps;
         state.history.push(telemetry.clone());
         Ok(telemetry)
     }

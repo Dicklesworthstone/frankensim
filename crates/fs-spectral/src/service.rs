@@ -51,8 +51,12 @@ pub enum ServiceError {
     /// The operator produced a non-finite value (the tick's state
     /// mutation was rolled back; the service remains usable).
     NonFiniteOperator,
-    /// A warm-start seed was rejected (wrong size, non-finite, zero,
-    /// or rank-deficient).
+    /// An operator method panicked while panic unwinding was enabled. The
+    /// tick's state mutation was rolled back; `panic = "abort"` builds cannot
+    /// contain an operator panic.
+    OperatorFault,
+    /// A warm-start seed was rejected (wrong size, non-finite, zero, or a
+    /// rank-deficient selected LOBPCG block).
     InvalidSeed,
     /// The Krylov space is exhausted (invariant subspace) with fewer
     /// pairs than requested; more ticks cannot help.
@@ -101,6 +105,9 @@ impl std::fmt::Display for ServiceError {
             ),
             ServiceError::NonFiniteOperator => {
                 write!(f, "operator application produced a non-finite value")
+            }
+            ServiceError::OperatorFault => {
+                write!(f, "operator method panicked; state rolled back")
             }
             ServiceError::InvalidSeed => write!(f, "warm-start seed rejected"),
             ServiceError::SubspaceExhausted { available } => write!(
@@ -446,7 +453,13 @@ impl EigenService {
         seed_vectors: &[Vec<f64>],
     ) -> Result<EigenService, ServiceError> {
         validate_query(n, &query, backend)?;
-        if seed_vectors.is_empty() || seed_vectors.iter().any(|v| v.len() != n) {
+        if seed_vectors.is_empty()
+            || seed_vectors.iter().any(|v| {
+                v.len() != n
+                    || v.iter().any(|value| !value.is_finite())
+                    || v.iter().all(|value| *value == 0.0)
+            })
+        {
             return Err(ServiceError::InvalidSeed);
         }
         if backend == EigenBackend::Lanczos
@@ -501,7 +514,8 @@ impl EigenService {
 
     /// Advance one bounded tick (`steps_per_tick` backend steps with a
     /// cancellation poll between steps) and report. Error paths
-    /// (dimension mismatch, non-finite operator output, cancellation)
+    /// (dimension mismatch, non-finite operator output, operator unwind,
+    /// cancellation)
     /// ROLL BACK the in-flight tick, so accepted state is never
     /// corrupted; `clone()` before or after any tick is a valid
     /// checkpoint and split runs replay bitwise-identically.
@@ -510,10 +524,12 @@ impl EigenService {
         op: &dyn SymmetricOp,
         cx: &Cx<'_>,
     ) -> Result<EigenProgress, ServiceError> {
-        if op.dim() != self.n {
+        let op_dim = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| op.dim()))
+            .map_err(|_| ServiceError::OperatorFault)?;
+        if op_dim != self.n {
             return Err(ServiceError::DimensionMismatch {
                 expected: self.n,
-                got: op.dim(),
+                got: op_dim,
             });
         }
         if cx.checkpoint().is_err() {
@@ -528,6 +544,7 @@ impl EigenService {
         }
         let snapshot = self.state.clone();
         let nonfinite = Cell::new(false);
+        let operator_fault = Cell::new(false);
         let cancelled = Cell::new(false);
         let apply = |x: &[f64], y: &mut [f64]| {
             if cx.checkpoint().is_err() {
@@ -535,7 +552,12 @@ impl EigenService {
                 y.fill(0.0);
                 return;
             }
-            op.apply(x, y);
+            if let Err(payload) =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| op.apply(x, y)))
+            {
+                operator_fault.set(true);
+                std::panic::resume_unwind(payload);
+            }
             if y.iter().any(|v| !v.is_finite()) {
                 nonfinite.set(true);
             }
@@ -549,17 +571,29 @@ impl EigenService {
                 self.state = snapshot;
                 return Err(ServiceError::Cancelled);
             }
-            pairs = match &mut self.state {
-                BackendState::Lanczos(state) => {
-                    lanczos_run(&apply, state, 1, self.query.k, self.query.largest)
+            let step =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match &mut self.state {
+                    BackendState::Lanczos(state) => {
+                        lanczos_run(&apply, state, 1, self.query.k, self.query.largest)
+                    }
+                    BackendState::Lobpcg(state) => lobpcg_run(
+                        &apply,
+                        state,
+                        1,
+                        self.query.largest,
+                        &|r: &[f64], out: &mut [f64]| out.copy_from_slice(r),
+                    ),
+                }));
+            pairs = match step {
+                Ok(pairs) => pairs,
+                Err(_) if operator_fault.get() => {
+                    self.state = snapshot;
+                    return Err(ServiceError::OperatorFault);
                 }
-                BackendState::Lobpcg(state) => lobpcg_run(
-                    &apply,
-                    state,
-                    1,
-                    self.query.largest,
-                    &|r: &[f64], out: &mut [f64]| out.copy_from_slice(r),
-                ),
+                Err(payload) => {
+                    self.state = snapshot;
+                    std::panic::resume_unwind(payload)
+                }
             };
             if cancelled.get() {
                 self.state = snapshot;

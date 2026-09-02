@@ -32,6 +32,7 @@ use crate::modal_acoustic_time::{
 };
 use crate::stribeck_friction::StribeckFriction;
 use crate::thin_plate::CompactBody;
+use fs_material::gas::GasState;
 
 /// Typed refusal for a bow gesture outside its physical domain.
 #[derive(Clone, Debug, PartialEq)]
@@ -190,8 +191,14 @@ pub enum Termination {
     /// Rigid bridge; nothing but the string is logged.
     Rigid,
     /// The bridge force drives this one-port body (one-way rigid-bridge
-    /// approximation, disclosed in the run receipt).
-    PlateOnePort(Box<CompactBody>),
+    /// approximation, disclosed in the run receipt). `ambient` is the
+    /// admitted gas state used only for the listener-radiation conversion.
+    PlateOnePort {
+        /// One-port plate body driven by the bridge force.
+        body: Box<CompactBody>,
+        /// Declared ambient state for radiation density.
+        ambient: GasState,
+    },
 }
 
 /// Full run configuration after admission.
@@ -246,6 +253,11 @@ pub enum BowedRunError {
         /// Human-readable cause.
         what: String,
     },
+    /// The declared ambient state cannot supply a physical radiation density.
+    InvalidAmbientDensity {
+        /// Rejected density [kg/m^3].
+        density_kg_m3: f64,
+    },
     /// The modal runtime refused admission or a step.
     Model(ModalAcousticTimeError),
     /// A state limit was exceeded mid-run; earlier samples remain valid.
@@ -260,6 +272,9 @@ impl std::fmt::Display for BowedRunError {
         match self {
             Self::Gesture(e) => write!(f, "gesture refused: {e:?}"),
             Self::InvalidCard { what } => write!(f, "card refused: {what}"),
+            Self::InvalidAmbientDensity { density_kg_m3 } => {
+                write!(f, "ambient density refused: {density_kg_m3} kg/m^3")
+            }
             Self::Model(e) => write!(f, "model refused: {e:?}"),
             Self::LimitExceeded(e) => write!(f, "state limit exceeded: {e:?}"),
             Self::Radiation(what) => write!(f, "radiation refused: {what}"),
@@ -303,6 +318,13 @@ pub fn run_bowed(config: &BowedRunConfig) -> Result<BowedRunLog, BowedRunError> 
         config.gesture.station_fraction,
     )
     .map_err(BowedRunError::Gesture)?;
+    if let Termination::PlateOnePort { ambient, .. } = &config.termination
+        && !(ambient.density.is_finite() && ambient.density > 0.0)
+    {
+        return Err(BowedRunError::InvalidAmbientDensity {
+            density_kg_m3: ambient.density,
+        });
+    }
     let card = &config.card;
     let mu = card.linear_density_kg_m;
     let c = card.wave_speed_m_s();
@@ -339,11 +361,13 @@ pub fn run_bowed(config: &BowedRunConfig) -> Result<BowedRunLog, BowedRunError> 
         final_total_energy_j: 0.0,
         peak_total_energy_j: f64::MIN,
     };
-    let mut body: Option<CompactBody> = match &config.termination {
-        Termination::PlateOnePort(boxed) => Some(boxed.as_ref().clone()),
+    let mut plate: Option<(CompactBody, f64)> = match &config.termination {
+        Termination::PlateOnePort { body, ambient } => {
+            Some((body.as_ref().clone(), ambient.density))
+        }
         Termination::Rigid => None,
     };
-    if body.is_some() {
+    if plate.is_some() {
         log.body_velocity_m_s.reserve(config.steps);
         log.radiated_pressure_pa.reserve(config.steps);
     }
@@ -450,21 +474,22 @@ pub fn run_bowed(config: &BowedRunConfig) -> Result<BowedRunLog, BowedRunError> 
         log.relative_velocity_m_s.push(v_rel);
         log.bridge_force_n.push(bridge_force);
 
-        if let Some(body) = body.as_mut() {
+        if let Some((body, ambient_density_kg_m3)) = plate.as_mut() {
             let acc = body
                 .drive(bridge_force, dt)
                 .map_err(|error| BowedRunError::Radiation(error.to_string()))?;
             log.body_velocity_m_s.push(body.volume_velocity());
-            log.radiated_pressure_pa
-                .push(body.radiate(acc, AIR_DENSITY_KG_M3, config.listener_m));
+            log.radiated_pressure_pa.push(body.radiate(
+                acc,
+                *ambient_density_kg_m3,
+                config.listener_m,
+            ));
         }
     }
     log.final_total_energy_j = frame_total_energy(&model);
     log.peak_total_energy_j = peak_energy_j;
     Ok(log)
 }
-
-const AIR_DENSITY_KG_M3: f64 = 1.204;
 
 fn frame_total_energy(model: &ModalAcousticTimeModel) -> f64 {
     model

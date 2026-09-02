@@ -854,6 +854,10 @@ impl VibroacousticModel {
 mod tests {
     use super::*;
 
+    fn test_air() -> AcousticMedium {
+        AcousticMedium::air()
+    }
+
     /// Deterministic small model used across tests: n_s structure
     /// modes, n_a cavity modes, fixed synthetic data.
     fn synthetic_model(
@@ -863,6 +867,7 @@ mod tests {
         eta_s: f64,
         eta_a: f64,
     ) -> VibroacousticModel {
+        let air = test_air();
         let structure = StructuralModes {
             omegas: (0..n_s).map(|r| 100.0 + 60.0 * r as f64).collect(),
             shapes: (0..n_s).map(|r| vec![1.0 + 0.1 * r as f64]).collect(),
@@ -873,8 +878,8 @@ mod tests {
             lambdas: (0..n_a).map(|q| 0.02 + 0.005 * q as f64).collect(),
             interface: (0..n_a).map(|q| vec![1.0 - 0.05 * q as f64]).collect(),
             loss_factor: eta_a,
-            rho0: 1.204,
-            c0: 343.0,
+            rho0: air.rho0,
+            c0: air.c0,
         };
         let coupling: Vec<f64> = (0..n_s * n_a)
             .map(|i| coupling_scale * (1.0 + 0.3 * (i % 5) as f64))
@@ -891,6 +896,7 @@ mod tests {
         //   = (L p / pi) (1 - (-1)^(p+l)) / (p^2 - l^2)   for p != l,
         //   = 0 for p = l.
         let (a, b) = (0.42, 0.31);
+        let air = test_air();
         let one_d = |p: usize, l: usize, len: f64| -> f64 {
             if p == l {
                 0.0
@@ -933,8 +939,8 @@ mod tests {
                 lambdas: vec![1.0],
                 interface: vec![psi],
                 loss_factor: 0.0,
-                rho0: 1.204,
-                c0: 343.0,
+                rho0: air.rho0,
+                c0: air.c0,
             };
             let c = assemble_coupling(&structure, &cavity, &areas).expect("coupling");
             let exact = one_d(p, l, a) * one_d(q, m, b);
@@ -963,8 +969,9 @@ mod tests {
         // the uncoupled frequencies and is caught by the same gate.
         let ws = 2.0 * core::f64::consts::PI * 180.0;
         let wc = 2.0 * core::f64::consts::PI * 210.0;
-        let rho0 = 1.204;
-        let c0 = 343.0;
+        let air = test_air();
+        let rho0 = air.rho0;
+        let c0 = air.c0;
         let lambda = 0.012;
         let mut rows = String::new();
         let mut first = true;
@@ -1072,8 +1079,9 @@ mod tests {
         // must reduce the defect against the linear formula by ~4x.
         let ws = 2.0 * core::f64::consts::PI * 120.0;
         let wc = 2.0 * core::f64::consts::PI * 400.0;
-        let rho0 = 1.204;
-        let c0 = 343.0;
+        let air = test_air();
+        let rho0 = air.rho0;
+        let c0 = air.c0;
         let lambda = 0.02;
         let defect = |c_val: f64| -> (f64, f64) {
             let structure = StructuralModes {
@@ -1163,11 +1171,12 @@ mod tests {
         // consistent) convention. What a one-SIDED flip breaks is the
         // cross-row identity interface == cavity dissipation, so THAT
         // residual is the discriminating alarm.
+        let air = test_air();
         let (ws, wc, lambda, rho_c2, c_val, eta_s, eta_a, omega) = (
             100.0f64,
             140.0f64,
             0.02f64,
-            1.204 * 343.0 * 343.0,
+            air.rho0 * air.c0 * air.c0,
             2e-3f64,
             0.02f64,
             0.01f64,
@@ -1368,13 +1377,14 @@ mod tests {
             shapes: vec![],
             loss_factor: 0.0,
         };
+        let air = test_air();
         let cavity = CavityModes {
             omegas: vec![1.0],
             lambdas: vec![1.0],
             interface: vec![vec![1.0]],
             loss_factor: 0.0,
-            rho0: 1.2,
-            c0: 343.0,
+            rho0: air.rho0,
+            c0: air.c0,
         };
         assert!(matches!(
             VibroacousticModel::try_new(&structure, &cavity, vec![], None),
@@ -1437,6 +1447,7 @@ mod review_regressions {
         //   D(x) = [[Omega_s^2 - x I, -C], [-s_q x C^T, Omega_a^2 - x I]]
         // — a transpose-index typo in the engine's linearization gives
         // roots that fail to zero this determinant.
+        let air = AcousticMedium::air();
         let structure = StructuralModes {
             omegas: vec![100.0, 170.0],
             shapes: vec![vec![1.0], vec![1.0]],
@@ -1447,8 +1458,8 @@ mod review_regressions {
             lambdas: vec![0.02, 0.011],
             interface: vec![vec![1.0], vec![1.0]],
             loss_factor: 0.0,
-            rho0: 1.204,
-            c0: 343.0,
+            rho0: air.rho0,
+            c0: air.c0,
         };
         // Row-major n_s x n_a with four distinct entries.
         let coupling = vec![2.0e-3, -1.1e-3, 0.7e-3, 1.9e-3];
@@ -1459,7 +1470,7 @@ mod review_regressions {
         for pair in freqs.windows(2) {
             assert!(pair[0] <= pair[1], "roots must be ascending");
         }
-        let rho_c2 = 1.204 * 343.0 * 343.0;
+        let rho_c2 = air.rho0 * air.c0 * air.c0;
         let det_at = |x: f64| -> f64 {
             let n = 4usize;
             let mut d = vec![C64::ZERO; n * n];

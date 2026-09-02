@@ -22,6 +22,7 @@ use fs_couple::bowed_string::{
 use fs_couple::pcm_wav::encode_pcm16_wav;
 use fs_couple::stribeck_friction::StribeckFriction;
 use fs_couple::thin_plate::CompactBody;
+use fs_material::gas::{GasSpec, GasState};
 use fs_scenario::RadiatingPlate;
 
 const SCHEMA: &str = "frankensim.bowed-listen.v1";
@@ -97,13 +98,23 @@ fn main() -> std::process::ExitCode {
             return std::process::ExitCode::from(2);
         }
     };
+    let ambient = match GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101_325.0) {
+        Ok(state) => state,
+        Err(e) => {
+            eprintln!("bowed_listen: ambient refused: {e}");
+            return std::process::ExitCode::from(2);
+        }
+    };
     let cfg = BowedRunConfig {
         card,
         island: FrictionIsland::Stribeck(rosin),
         gesture,
         steps: 24_000, // 500 ms open-string stroke
         subsamples: 16,
-        termination: Termination::PlateOnePort(Box::new(body)),
+        termination: Termination::PlateOnePort {
+            body: Box::new(body),
+            ambient,
+        },
         listener_m: 1.0,
     };
     let log = match run_bowed(&cfg) {

@@ -353,6 +353,61 @@ fn sv_005_typed_refusals() {
             &[vec![f64::NAN; op.dim()]],
         );
         assert!(matches!(bad_seed, Err(ServiceError::InvalidSeed)));
+
+        // Every supplied seed is part of the admitted warm-start request,
+        // including entries a backend would otherwise ignore after selecting
+        // its seed subset.
+        let trailing_nan_lanczos = EigenService::warm(
+            EigenBackend::Lanczos,
+            op.dim(),
+            EigenQuery {
+                k: 2,
+                largest: true,
+                tol: 1e-9,
+                steps_per_tick: 4,
+            },
+            &[vec![1.0; op.dim()], vec![f64::NAN; op.dim()]],
+        );
+        assert!(matches!(
+            trailing_nan_lanczos,
+            Err(ServiceError::InvalidSeed)
+        ));
+        let trailing_zero_lanczos = EigenService::warm(
+            EigenBackend::Lanczos,
+            op.dim(),
+            EigenQuery {
+                k: 2,
+                largest: true,
+                tol: 1e-9,
+                steps_per_tick: 4,
+            },
+            &[vec![1.0; op.dim()], vec![0.0; op.dim()]],
+        );
+        assert!(matches!(
+            trailing_zero_lanczos,
+            Err(ServiceError::InvalidSeed)
+        ));
+
+        let mut first = vec![0.0; op.dim()];
+        first[0] = 1.0;
+        let mut second = vec![0.0; op.dim()];
+        second[1] = 1.0;
+        let trailing_nan_lobpcg = EigenService::warm(
+            EigenBackend::Lobpcg,
+            op.dim(),
+            EigenQuery {
+                k: 2,
+                largest: true,
+                tol: 1e-9,
+                steps_per_tick: 4,
+            },
+            &[first, second, vec![f64::NAN; op.dim()]],
+        );
+        assert!(matches!(
+            trailing_nan_lobpcg,
+            Err(ServiceError::InvalidSeed)
+        ));
+
         // Rank-deficient warm block: two identical seed vectors.
         let same = vec![1.0f64; op.dim()];
         let rank_deficient = EigenService::warm(
@@ -739,6 +794,25 @@ fn sv_011_cancel_and_nonfinite_ticks_roll_back_bitwise() {
             steps_per_tick: 1,
         };
 
+        struct PanicDim;
+        impl SymmetricOp for PanicDim {
+            fn dim(&self) -> usize {
+                panic!("injected operator dimension fault");
+            }
+
+            fn apply(&self, _: &[f64], _: &mut [f64]) {
+                unreachable!("dimension fault must refuse before apply");
+            }
+        }
+
+        let mut dim_faulted =
+            EigenService::new(EigenBackend::Lanczos, op.dim(), query).expect("valid");
+        assert!(matches!(
+            dim_faulted.tick(&PanicDim, &clean_cx),
+            Err(ServiceError::OperatorFault)
+        ));
+        assert_eq!(dim_faulted.ticks(), 0, "dimension fault must not commit");
+
         struct CancelAfterApply<'a> {
             inner: &'a DenseSymOp,
             gate: &'a CancelGate,
@@ -808,6 +882,42 @@ fn sv_011_cancel_and_nonfinite_ticks_roll_back_bitwise() {
             .tick(&poison, &clean_cx)
             .expect("resume after rollback");
         assert_progress_bits_equal(EigenBackend::Lanczos, &resumed, &expected);
-        println!("sv-011: cancellation/non-finite ticks roll back full replay state");
+
+        struct PanicOnSecondApply<'a> {
+            inner: &'a DenseSymOp,
+            calls: Cell<usize>,
+        }
+        impl SymmetricOp for PanicOnSecondApply<'_> {
+            fn dim(&self) -> usize {
+                self.inner.dim()
+            }
+
+            fn apply(&self, x: &[f64], y: &mut [f64]) {
+                self.inner.apply(x, y);
+                let call = self.calls.get();
+                self.calls.set(call + 1);
+                if call == 1 {
+                    panic!("injected operator fault after output mutation");
+                }
+            }
+        }
+
+        let panicking = PanicOnSecondApply {
+            inner: &op,
+            calls: Cell::new(0),
+        };
+        let mut faulted = EigenService::new(EigenBackend::Lanczos, op.dim(), query).expect("valid");
+        assert!(matches!(
+            faulted.tick(&panicking, &clean_cx),
+            Err(ServiceError::OperatorFault)
+        ));
+        assert_eq!(faulted.ticks(), 0, "faulted tick must not commit");
+        let resumed = faulted
+            .tick(&panicking, &clean_cx)
+            .expect("resume after operator-fault rollback");
+        assert_progress_bits_equal(EigenBackend::Lanczos, &resumed, &expected);
+        println!(
+            "sv-011: cancellation/non-finite/operator-fault ticks roll back full replay state"
+        );
     });
 }

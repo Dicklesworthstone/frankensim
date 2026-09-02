@@ -24,6 +24,7 @@
 //! exists to prevent. FORBIDDEN and absent: cabinet IR packs — the
 //! cabinet is charts and cards, never a convolution.
 
+use fs_material::gas::{GasSpec, GasState};
 use fs_phs::{PhsError, PortHamiltonian, QuadraticStorage, StepRecord};
 
 /// Thiele–Small parameter card (datasheet-class, with provenance).
@@ -133,9 +134,18 @@ pub struct TsDriver {
     has_panel: bool,
 }
 
-/// Air constants for the acoustic terms (20 C).
-const RHO: f64 = 1.204;
-const C_SOUND: f64 = 343.0;
+/// Declared room state for the driver's convenience constructor.
+const SPEAKER_AIR_TEMPERATURE_K: f64 = 293.15;
+const SPEAKER_AIR_PRESSURE_PA: f64 = 101_325.0;
+
+fn declared_air() -> GasState {
+    GasState::try_new(
+        &GasSpec::dry_air_ussa1976(),
+        SPEAKER_AIR_TEMPERATURE_K,
+        SPEAKER_AIR_PRESSURE_PA,
+    )
+    .expect("declared dry-air room state is within GasState's validity window")
+}
 
 impl TsDriver {
     /// Compose the driver. `box_volume_m3 = None` is free air;
@@ -148,6 +158,15 @@ impl TsDriver {
         card: TsCard,
         box_volume_m3: Option<f64>,
         panel: Option<PanelMode>,
+    ) -> Result<Self, SpeakerError> {
+        Self::new_with_gas(card, box_volume_m3, panel, declared_air())
+    }
+
+    fn new_with_gas(
+        card: TsCard,
+        box_volume_m3: Option<f64>,
+        panel: Option<PanelMode>,
+        gas: GasState,
     ) -> Result<Self, SpeakerError> {
         card.validate()?;
         if let Some(v) = box_volume_m3
@@ -166,9 +185,9 @@ impl TsDriver {
         // small frequency-independent resistance class (disclosed
         // approximation).
         let a_eff = (card.sd_m2 / core::f64::consts::PI).sqrt();
-        let m_air = 8.0 * RHO * a_eff.powi(3) / 3.0;
+        let m_air = 8.0 * gas.density * a_eff.powi(3) / 3.0;
         let m_tot = card.mms_kg + m_air;
-        let r_rad = RHO * C_SOUND * card.sd_m2 * 0.05;
+        let r_rad = gas.density * gas.sound_speed * card.sd_m2 * 0.05;
         let k_susp = 1.0 / card.cms_m_per_n;
         // State: [phi_Le, x_cone, p_cone] (+ [x_p, p_p] with a panel).
         let n = if panel.is_some() { 5 } else { 3 };
@@ -177,7 +196,7 @@ impl TsDriver {
         q[n + 1] = k_susp;
         q[2 * n + 2] = 1.0 / m_tot;
         if let Some(vb) = box_volume_m3 {
-            let k_box_scale = RHO * C_SOUND * C_SOUND / vb;
+            let k_box_scale = gas.density * gas.sound_speed * gas.sound_speed / vb;
             if let Some(p) = panel {
                 if !(p.frequency_hz > 0.0 && p.mass_kg > 0.0 && p.area_m2 > 0.0) {
                     return Err(SpeakerError::Invalid {
@@ -221,7 +240,7 @@ impl TsDriver {
             phs,
             x: vec![0.0; n],
             card,
-            rho: RHO,
+            rho: gas.density,
             ix_cone: 1,
             has_panel: panel.is_some(),
         })
@@ -307,7 +326,7 @@ mod speaker_tests {
     fn fs_free_hz() -> f64 {
         let c = card();
         let a_eff = (c.sd_m2 / core::f64::consts::PI).sqrt();
-        let m_tot = c.mms_kg + 8.0 * RHO * a_eff.powi(3) / 3.0;
+        let m_tot = c.mms_kg + 8.0 * declared_air().density * a_eff.powi(3) / 3.0;
         1.0 / (core::f64::consts::TAU * (m_tot * c.cms_m_per_n).sqrt())
     }
 
@@ -330,7 +349,9 @@ mod speaker_tests {
         // Vas = rho c^2 Cms Sd^2 — the analytic oracle from the same
         // card numbers, never from the stepped system.
         let c = card();
-        let vas = RHO * C_SOUND * C_SOUND * c.cms_m_per_n * c.sd_m2 * c.sd_m2;
+        let air = declared_air();
+        let vas =
+            air.density * air.sound_speed * air.sound_speed * c.cms_m_per_n * c.sd_m2 * c.sd_m2;
         let vb = 0.020;
         let fs = fs_free_hz();
         let fc_expected = fs * (1.0 + vas / vb).sqrt();
@@ -362,9 +383,10 @@ mod speaker_tests {
         // Z = Re + jwLe + Bl^2 / (Rms+Rrad + j(w M - 1/(w Cms))):
         // compared at frequencies across the motional peak.
         let c = card();
+        let air = declared_air();
         let a_eff = (c.sd_m2 / core::f64::consts::PI).sqrt();
-        let m_tot = c.mms_kg + 8.0 * RHO * a_eff.powi(3) / 3.0;
-        let r_rad = RHO * C_SOUND * c.sd_m2 * 0.05;
+        let m_tot = c.mms_kg + 8.0 * air.density * a_eff.powi(3) / 3.0;
+        let r_rad = air.density * air.sound_speed * c.sd_m2 * 0.05;
         let factory = || TsDriver::new(card(), None, None).expect("driver");
         let fs = fs_free_hz();
         for f_ratio in [0.5f64, 1.0, 2.0, 6.0] {
@@ -496,6 +518,67 @@ mod speaker_tests {
         assert!(worst < 1.0e-9, "supply defect {worst:.3e}");
         println!(
             "{{\"suite\":\"fs-couple\",\"case\":\"ts-005-ledger\",\"worst_defect\":{worst:.3e}}}"
+        );
+    }
+
+    #[test]
+    fn ts_006_admitted_gas_sets_every_acoustic_coefficient() {
+        let cold = GasState::try_new(&GasSpec::dry_air_ussa1976(), 273.15, 101_325.0)
+            .expect("admitted cold dry air");
+        let warm = GasState::try_new(&GasSpec::dry_air_ussa1976(), 313.15, 101_325.0)
+            .expect("admitted warm dry air");
+        assert!(cold.density > warm.density, "cold air is denser");
+        assert!(warm.sound_speed > cold.sound_speed, "warm air is faster");
+
+        let c = card();
+        let a_eff = (c.sd_m2 / core::f64::consts::PI).sqrt();
+        let box_volume_m3 = 0.020;
+        for gas in [cold, warm] {
+            let driver = TsDriver::new_with_gas(c, Some(box_volume_m3), None, gas).expect("driver");
+            let n = driver.phs.state_dim();
+            assert_eq!(n, 3, "the no-panel driver has three states");
+
+            let expected_m_tot = c.mms_kg + 8.0 * gas.density * a_eff.powi(3) / 3.0;
+            let mut unit_cone_momentum = vec![0.0; n];
+            unit_cone_momentum[2] = 1.0;
+            let momentum_effort = driver.phs.effort(&unit_cone_momentum);
+            assert_eq!(
+                (1.0 / expected_m_tot).to_bits(),
+                momentum_effort[2].to_bits(),
+                "admitted density sets the cone mass"
+            );
+
+            let (_, r, _) = driver.phs.structure();
+            let expected_radiation = gas.density * gas.sound_speed * c.sd_m2 * 0.05;
+            let actual_radiation = r[2 * n + 2] - c.rms_n_s_m;
+            assert!(
+                (actual_radiation - expected_radiation).abs() <= expected_radiation.abs() * 1.0e-14,
+                "admitted density and sound speed set radiation loss"
+            );
+
+            let mut unit_cone_displacement = vec![0.0; n];
+            unit_cone_displacement[driver.ix_cone] = 1.0;
+            let effort = driver.phs.effort(&unit_cone_displacement);
+            let expected_box_stiffness =
+                gas.density * gas.sound_speed * gas.sound_speed * c.sd_m2 * c.sd_m2 / box_volume_m3;
+            let actual_box_stiffness = effort[driver.ix_cone] - 1.0 / c.cms_m_per_n;
+            assert!(
+                (actual_box_stiffness - expected_box_stiffness).abs()
+                    <= expected_box_stiffness.abs() * 1.0e-14,
+                "admitted density and sound speed set box stiffness"
+            );
+            assert_eq!(
+                driver.rho.to_bits(),
+                gas.density.to_bits(),
+                "observer pressure retains the admitted density"
+            );
+        }
+
+        let default_driver = TsDriver::new(c, Some(box_volume_m3), None).expect("default");
+        assert_eq!(
+            default_driver.rho.to_bits(),
+            declared_air().density.to_bits(),
+            "the public convenience wrapper retains its declared-air provenance"
         );
     }
 }
