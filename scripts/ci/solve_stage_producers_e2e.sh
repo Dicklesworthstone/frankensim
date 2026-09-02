@@ -21,6 +21,7 @@
 #       [--case multi-region-volumetricization]
 #       [--artifact-dir PATH]
 #       [--binary PATH]
+#       [--retain-receipt PATH]   write the spine e2e receipt (clean full run only)
 #
 # Profiles:
 #   pr        happy path + the cheap refusal drills (default)
@@ -40,6 +41,12 @@ THROUGH="report"
 CASE=""
 ARTIFACT_DIR=""
 BINARY="${FRANKENSIM_BIN:-}"
+# When set, the lane writes the retained spine receipt
+# (frankensim-spine-e2e-receipt-v1) to this path: the run identity (HEAD,
+# host, binary digest) plus one row per solve stage naming the registry
+# capability it executed. `xtask check-maturity` admits an L3 claim only
+# from such a receipt, so this is the ONLY producer of that file.
+RETAIN_RECEIPT=""
 
 # Stage order and the bead that owns each typed gap. Kept in lockstep with
 # SolveStage::ALL / gap_dependency() in crates/fs-cli/src/solve.rs; the
@@ -73,6 +80,7 @@ while [[ $# -gt 0 ]]; do
     --case)         CASE="${2:-}"; shift 2 ;;
     --artifact-dir) ARTIFACT_DIR="${2:-}"; shift 2 ;;
     --binary)       BINARY="${2:-}"; shift 2 ;;
+    --retain-receipt) RETAIN_RECEIPT="${2:-}"; shift 2 ;;
     -h|--help)      usage ;;
     *)              die "unknown argument: $1 (try --help)" ;;
   esac
@@ -426,6 +434,63 @@ JSON
 
 log summary "checks=${CHECKS} failures=${FAILURES} stages_executing=${STAGES_EXECUTING}/${#STAGES[@]}"
 log summary "artifacts written to ${ARTIFACT_DIR}"
+
+# ------------------------------------------------- retained spine receipt
+# Only a clean run through `report` may mint the receipt; a partial or
+# failed lane leaves the retained file untouched so a stale-but-honest
+# receipt is never replaced by a truncated one. Each stage row names the
+# maturity-registry capability it executed (only conduction is registered
+# today); `xtask check-maturity` reads exactly these rows.
+if [[ -n "${RETAIN_RECEIPT}" ]]; then
+  if [[ "${FAILURES}" -ne 0 || "${THROUGH}" != "report" ]]; then
+    log summary "receipt NOT retained: failures=${FAILURES} through=${THROUGH}"
+  else
+    declare -A STAGE_CAPABILITY=(
+      [import-verify]="" [assign]="" [material-resolve]="" [flow-network]=""
+      [conduction]="thermal.conduction-solve" [qoi]="" [report]=""
+    )
+    HEAD_SHA="$(git -C "${REPO_ROOT}" rev-parse --verify 'HEAD^{commit}')"
+    HOST_FP="$(uname -srm), $(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc) cpus"
+    if command -v md5sum >/dev/null 2>&1; then
+      BIN_MD5="$(md5sum "${BINARY}" | cut -c1-16)"
+    else
+      BIN_MD5="$(md5 -q "${BINARY}" | cut -c1-16)"
+    fi
+    STAGE_ROWS=""
+    for stage in "${STAGES[@]}"; do
+      if grep -qF "\"stage\":\"${stage}\",\"ordinal\"" "${ARTIFACT_DIR}/solve.stderr"; then
+        status="executed"
+      else
+        status="refused"
+      fi
+      cap="${STAGE_CAPABILITY[${stage}]}"
+      if [[ -n "${cap}" ]]; then cap_json="\"${cap}\""; else cap_json="null"; fi
+      [[ -z "${STAGE_ROWS}" ]] || STAGE_ROWS="${STAGE_ROWS},"
+      STAGE_ROWS="${STAGE_ROWS}
+    {\"stage\": \"${stage}\", \"capability\": ${cap_json}, \"status\": \"${status}\"}"
+    done
+    cat > "${RETAIN_RECEIPT}" <<JSON
+{
+  "schema": "frankensim-spine-e2e-receipt-v1",
+  "bead": "frankensim-rc-root-q61wp.13",
+  "run": {
+    "script": "scripts/ci/solve_stage_producers_e2e.sh",
+    "profile": "${PROFILE}",
+    "through": "${THROUGH}",
+    "project": "data/reference-project/cooling-reference.fsim",
+    "executed_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+    "host_fingerprint": "${HOST_FP}",
+    "binary_md5_16": "${BIN_MD5}",
+    "head_sha": "${HEAD_SHA}"
+  },
+  "stages": [${STAGE_ROWS}
+  ],
+  "summary": $(cat "${ARTIFACT_DIR}/summary.json")
+}
+JSON
+    log summary "receipt retained at ${RETAIN_RECEIPT} (HEAD ${HEAD_SHA})"
+  fi
+fi
 
 if [[ "${FAILURES}" -ne 0 ]]; then
   printf 'FAILED: %d of %d checks\n' "${FAILURES}" "${CHECKS}" >&2

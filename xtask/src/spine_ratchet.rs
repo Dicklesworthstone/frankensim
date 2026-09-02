@@ -264,7 +264,7 @@ pub(crate) fn render(stages: &[Stage]) -> String {
     let first_gap = stages.iter().find(|stage| stage.gap_owner.is_some());
     let mut out = String::new();
     out.push_str("{\n");
-    writeln!(out, "  \"schema\": \"{SCHEMA}\"").ok();
+    writeln!(out, "  \"schema\": \"{SCHEMA}\",").ok();
     out.push_str("  \"bead\": \"frankensim-o5et9\",\n");
     writeln!(out, "  \"high_water_stages_executing\": {},", prefix.len()).ok();
     writeln!(out, "  \"stages_total\": {},", stages.len()).ok();
