@@ -336,9 +336,9 @@
     {
       "id": "thermal.conduction-solve",
       "title": "Steady conduction FEM solve on solids",
-      "level": "L2",
+      "level": "L3",
       "owner": "jemanuel",
-      "last_review": "2026-09-01",
+      "last_review": "2026-09-02",
       "crates": [
         "fs-conduction",
         "fs-feec",
@@ -355,7 +355,12 @@
         },
         {
           "kind": "lane",
-          "ref": "scripts/e2e/cooling_01.sh"
+          "ref": "scripts/ci/solve_stage_producers_e2e.sh"
+        },
+        {
+          "kind": "receipt",
+          "ref": "spine-e2e-summary.json",
+          "stage": "conduction"
         },
         {
           "kind": "test",
@@ -378,7 +383,7 @@
           "ref": "crates/fs-conduction/tests/adjoint.rs::ift_gradient_matches_central_differences"
         }
       ],
-      "notes": "Demoted from L3 under bead frankensim-rc-root-q61wp.2: the cited cooling_01 lane intentionally stops at the conduction gap, and no retained receipt records this capability's conduction stage as executed. The listed tests remain L2 evidence only. Journey A (frankensim-rc-root-q61wp.13) owns an honest six-stage lane, retained receipt, and any future L3 re-promotion."
+      "notes": "L3 asserts that the pipeline executes conduction end to end with retained receipts, not that the answer is converged or validated. Under the receipt rule (bead frankensim-rc-root-q61wp.13): the cited lane drives the real `frankensim` binary through validate/import/solve/report/package on the tracked reference project and its retained receipt (spine-e2e-summary.json) lists the conduction stage as executed at a HEAD at or after the lane's own commit, with the seven-stage run, the export verbs, determinism repeat and resume drills green. What L3 covers: the single-command pipeline through all seven stages; the heterogeneous steady conduction solve with card-backed matching-P1 contact; the declared-Robin and the one-branch conjugate airflow path (card-bounded convection, frozen dry-air properties) when a project declares it; the retained QoI/report/package projections. What it does NOT cover: L4 corpus validation (every row is Estimated), CFD or transient thermal physics, multi-branch air networks, mesh-convergence claims, cross-ISA bit-exactness outside the declared platforms, or any authority beyond what each stage receipt records; the QoI verdict in the retained run is Indeterminate with eight explicit NO-DATA terms."
     },
     {
       "id": "ledger.design-ledger",

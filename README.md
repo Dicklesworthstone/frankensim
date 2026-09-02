@@ -10,7 +10,7 @@
 [![Rust](https://img.shields.io/badge/rust-nightly%202024-b7410e)](rust-toolchain.toml)
 [![Crates](https://img.shields.io/badge/workspace-162%20native%20fs--%2A%20crates-0969da)](#implemented-workspace)
 [![Contracts](https://img.shields.io/badge/contracts-171%20of%20171%20crates-8250df)](#contracts-and-verification)
-[![Tests](https://img.shields.io/badge/tests-860%20tracked%20integration%20test%20files-1f883d)](#contracts-and-verification)
+[![Tests](https://img.shields.io/badge/tests-861%20tracked%20integration%20test%20files-1f883d)](#contracts-and-verification)
 [![License](https://img.shields.io/badge/license-MIT%20%2B%20AI%20rider-yellow)](LICENSE)
 
 </div>
@@ -36,7 +36,7 @@ edge is valid.
 | Standalone `fs-*` workspaces | 9 (`fs-cmaes-viz-wasm`, `fs-demo-physics-wasm`, `fs-flyer-wasm`, `fs-g1-train`, `fs-goddard-wasm`, `fs-heatmap-wasm`, `fs-lenia-wasm`, `fs-tesla-wasm`, `fs-wasm`) |
 | Tracked `fs-*` crate directories | 171 |
 | Tracked `CONTRACT.md` files | 171 of 171 |
-| Tracked crate integration-test files | 860 |
+| Tracked crate integration-test files | 861 |
 | `fs-*` layer inventory | `UTIL=15`, `L0=7`, `L1=14`, `L2=22`, `L3=40`, `L4=33`, `L5=4`, `L6=35`, `TOOL=1` |
 <!-- END GENERATED FRANKENSIM DOC FACTS -->
 
@@ -61,7 +61,7 @@ An initial stable validation CLI now exists, but there is not yet an integrated 
 | Evidence and ledger | L2 evidence-colour and evidence-packaging capabilities; `fs-vvreg` now has a fail-closed validation-corpus schema with 19 Level-A thermal definitions/targets, five thermal Level-B cross-code cases, and four retained Level-C published-experiment records (Martin–Moyce plus three further digitized curves), while the FrankenSQLite-backed design ledger remains registered at L1 with known suite failures open |
 | Euler-disc flagship contract and bounded campaign | `fs-euler-disc-e2e` freezes an exact Context of Use, nine claim kinds, a 15-role owner/schema-routing matrix, evidence minima, binding no-claims, permutation-invariant prerequisite assessment, and a literal-digest structural self-consistency checker. Its deterministic JSONL campaign now adds twelve profile-native reduced closed trajectories, 2/4/8/16/32 s censor-aware continuation, bounded interior contact-event scanning plus bracketed terminal events, five-rung timestep/ranking diagnostics, and a typed physical-calibration NO-DATA record. The ranking refinement compares matched 1 mm outer fillets and derives the ring's equal-mass density from resolved chart volume. Separately, Estimate-only finite-patch normal, partial-slip, rolling, exterior-air, thin-gap gas-film, and reduced-base adapters compose atomically for restartable smooth-contact prefixes. The campaign is still a reduced numerical model, not experimental or video validation, calibrated physics, or a spin-time prediction |
 | Policy tooling | `xtask` checks for layer direction, Franken-only runtime dependencies, contracts, unsafe capsules, and constellation lock verification |
-| Tests | 860 Rust files under crate `tests/` directories in the checked inventory, in addition to inline unit tests; this is an inventory count, not a claim that every test is green on the current tree |
+| Tests | 861 Rust files under crate `tests/` directories in the checked inventory, in addition to inline unit tests; this is an inventory count, not a claim that every test is green on the current tree |
 
 ### Bounded Euler-disc campaign
 
@@ -119,8 +119,8 @@ are enforced from [`docs/MATURITY_LEVELS.md`](docs/MATURITY_LEVELS.md). As of
 | Level | Meaning | Registered capabilities | Current boundary |
 |-------|---------|-------------------------|------------------|
 | L1 | Experimental component | 3 | Mesh and strict faceted STEP admission is implemented under explicit format, unit, root, and repair policy; the design ledger has known suite failures; and browser flagships retain their recorded test boundary |
-| L2 | Numerically verified | 12 | Evidence colour/packaging, chart conversion, topology certificates, sparse assembly, certified arithmetic, Krylov solves, adjoint verification, the point-vortex quality-diversity campaign, claim-integrity governance, capability-maturity governance, and the conduction solver cite independent tests |
-| L3 | Integrated workflow | 0 | No capability currently carries an admitted end-to-end integration claim: thermal conduction was demoted because its cited lane stops at the conduction gap rather than executing that stage |
+| L2 | Numerically verified | 11 | Evidence colour/packaging, chart conversion, topology certificates, sparse assembly, certified arithmetic, Krylov solves, adjoint verification, the point-vortex quality-diversity campaign, claim-integrity governance, and capability-maturity governance cite independent tests |
+| L3 | Integrated workflow | 1 | `thermal.conduction-solve` holds the first receipt-backed integration claim, which asserts that the pipeline executes conduction end to end with retained receipts, not that the answer is converged or validated: the no-mock lane drives the real `frankensim` binary through all seven solve stages on the tracked reference project and the retained receipt (`spine-e2e-summary.json`) lists the conduction stage as executed at a HEAD at or after the lane's own commit. The claim covers the single-command pipeline, card-backed contact, and the declared or one-branch conjugate-airflow Robin rows; it does not cover corpus validation, CFD or transients, multi-branch air networks, or mesh convergence, and the retained QoI verdict is Indeterminate with eight NO-DATA terms |
 | L4 | Experimentally validated | 0 | The V&V corpus registry contains 19 Level-A thermal definitions/targets, five thermal Level-B cross-code cases, and four retained Level-C published-experiment records (Martin–Moyce plus three further digitized curves). Eighteen of the 19 Level-A rows have test-time executing-kernel bindings; the infinite-parallel-plate view-factor row remains reference-only because the current constructor stores its limiting value rather than computing it. No binding persists a corpus receipt or machine fingerprint; the experimental row also lacks original raw data, metrology, replayable digitization lineage, resolved redistribution authority, and a defensible scalar envelope. Every row is capped `Estimated`, so no L4 claim exists |
 | L5 | Supported product | 0 | No written support and migration policy exists |
 
@@ -140,7 +140,7 @@ are enforced from [`docs/MATURITY_LEVELS.md`](docs/MATURITY_LEVELS.md). As of
 | `numerics.certified-arithmetic` — Outward-rounded intervals and exact geometric predicates | L2 | `fs-ivl` | Containment under randomized expression trees is the independent oracle. Rigor is conditional on fs-math ULP budgets, per the crate's own no-claim section. |
 | `numerics.sparse-assembly` — Deterministic sparse assembly and cross-format SpMV | L2 | `fs-sparse` | Cross-format bitwise equality is an independent check, not only a golden: COO/CSR/BSR/SELL are separate implementations agreeing exactly. |
 | `solvers.krylov` — Resumable Krylov solves with typed residual provenance | L2 | `fs-solver` | SolveReport now carries a private ResidualClaim plus fail-closed Euclidean accessors (commit 8493ab35), so a driver holding only the report can distinguish recomputed-Euclidean, recursive-estimate and M-norm quantities; bead f85xj.2.24 is closed. Still L2, not L3: no admitted end-to-end lane exercises it, and the untyped rel_residual field remains readable pending a 3-crate slice named in the CONTRACT. |
-| `thermal.conduction-solve` — Steady conduction FEM solve on solids | L2 | `fs-conduction`, `fs-feec`, `fs-solid` | Demoted from L3 under bead frankensim-rc-root-q61wp.2: the cited cooling_01 lane intentionally stops at the conduction gap, and no retained receipt records this capability's conduction stage as executed. The listed tests remain L2 evidence only. Journey A (frankensim-rc-root-q61wp.13) owns an honest six-stage lane, retained receipt, and any future L3 re-promotion. |
+| `thermal.conduction-solve` — Steady conduction FEM solve on solids | L3 | `fs-conduction`, `fs-feec`, `fs-solid` | L3 asserts that the pipeline executes conduction end to end with retained receipts, not that the answer is converged or validated. Under the receipt rule (bead frankensim-rc-root-q61wp.13): the cited lane drives the real `frankensim` binary through validate/import/solve/report/package on the tracked reference project and its retained receipt (spine-e2e-summary.json) lists the conduction stage as executed at a HEAD at or after the lane's own commit, with the seven-stage run, the export verbs, determinism repeat and resume drills green. What L3 covers: the single-command pipeline through all seven stages; the heterogeneous steady conduction solve with card-backed matching-P1 contact; the declared-Robin and the one-branch conjugate airflow path (card-bounded convection, frozen dry-air properties) when a project declares it; the retained QoI/report/package projections. What it does NOT cover: L4 corpus validation (every row is Estimated), CFD or transient thermal physics, multi-branch air networks, mesh-convergence claims, cross-ISA bit-exactness outside the declared platforms, or any authority beyond what each stage receipt records; the QoI verdict in the retained run is Indeterminate with eight explicit NO-DATA terms. |
 | `wasm.browser-flagships` — Browser-facing reduced flagship campaigns | L1 | `fs-wasm` | Builds again as of the safe-step propagation (bead f85xj.2.39): the browser payload now carries an interval-derived certified sign margin at schema v3 instead of a nominal \|f\|/L quotient; v3 also crosses the typed surface-localization record through the ABI (bead frankensim-o33vo). Still L1: two campaign tests (grammarforge, sensorforge) are red from an earlier code-first slice, so no test evidence is cited yet. |
 <!-- END GENERATED FRANKENSIM CAPABILITY MATRIX -->
 
@@ -982,7 +982,8 @@ its determinism class, tests pin representative behavior, the no-claim boundary
 is explicit, and any performance claim is tied to a measured lane.
 
 The rows in this snapshot are implementation inventory. They do not supersede
-the registry: no capability is currently registered at L3, L4, or L5.
+the registry: one capability (`thermal.conduction-solve`) is registered at L3
+on a retained lane receipt; none is registered at L4 or L5.
 
 ## Latest Implementation Deep Dives
 
@@ -1528,7 +1529,9 @@ The long-form architecture reference remains in `COMPREHENSIVE_PLAN_FOR_FRANKENS
 
 Yes, as a Rust source workspace and simulation-infrastructure library substrate.
 It is not yet a polished end-user simulator, and the current maturity registry
-contains no L3 integrated-workflow, L4 validated, or L5 supported capability.
+holds one L3 integrated-workflow capability (steady conduction through the
+seven-stage solve pipeline, on a retained lane receipt) and no L4 validated or
+L5 supported capability.
 
 ### What should I run first?
 

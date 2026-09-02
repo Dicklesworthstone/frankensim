@@ -1,26 +1,35 @@
 {
   "schema": "frankensim-spine-e2e-receipt-v1",
-  "bead": "frankensim-rc-root-q61wp.12",
+  "bead": "frankensim-rc-root-q61wp.13",
   "run": {
     "script": "scripts/ci/solve_stage_producers_e2e.sh",
     "profile": "full",
     "through": "report",
-    "executed_at": "2026-09-02T03:03:00Z",
-    "host_fingerprint": "Darwin 25.2.0 arm64, 14 cpus",
-    "binary_md5_16": "f4a1dbe9ab630507",
-    "head_sha": "f44062bc4d51b64498621e3fdb4a9028e9f691af",
-    "checkout_note": "run executed on the live main checkout; the binary was built from the working tree that this commit lands (report stage, fs-mesh coplanar-tiling facet recovery, driver version 11); the same tree carried other agents' unrelated in-flight edits"
+    "project": "data/reference-project/cooling-reference.fsim",
+    "executed_at": "2026-09-02T03:30:47Z",
+    "host_fingerprint": "Linux 7.0.0-30-generic x86_64, 8 cpus",
+    "binary_md5_16": "ff5c9181283a25cc",
+    "head_sha": "503205c8e0dc96ce7b12791a768b3f244fe13e46"
   },
+  "stages": [
+    {"stage": "import-verify", "capability": null, "status": "executed"},
+    {"stage": "assign", "capability": null, "status": "executed"},
+    {"stage": "material-resolve", "capability": null, "status": "executed"},
+    {"stage": "flow-network", "capability": null, "status": "executed"},
+    {"stage": "conduction", "capability": "thermal.conduction-solve", "status": "executed"},
+    {"stage": "qoi", "capability": null, "status": "executed"},
+    {"stage": "report", "capability": null, "status": "executed"}
+  ],
   "summary": {
-    "schema": "frankensim.ci.solve-e2e-summary.v1",
-    "profile": "full",
-    "through": "report",
-    "checks": 65,
-    "failures": 0,
-    "stages_executing": 7,
-    "stages_total": 7,
-    "first_gap": "none",
-    "first_gap_owner": "",
-    "no_claim": "proves that every solve stage executes and that the export verbs reproduce the retained bytes; the retained QoI verdict is Estimated and Indeterminate with eight explicit NO-DATA terms and the report/package are projections of those receipts, so this is NOT a verified decision package and confers no L3/L4 maturity by itself"
-  }
+  "schema": "frankensim.ci.solve-e2e-summary.v1",
+  "profile": "full",
+  "through": "report",
+  "checks": 65,
+  "failures": 0,
+  "stages_executing": 7,
+  "stages_total": 7,
+  "first_gap": "none",
+  "first_gap_owner": "",
+  "no_claim": "proves that every solve stage executes and that the export verbs reproduce the retained bytes; the retained QoI verdict is Estimated and Indeterminate with eight explicit NO-DATA terms and the report/package are projections of those receipts, so this is NOT a verified decision package and confers no L3/L4 maturity by itself"
+}
 }
