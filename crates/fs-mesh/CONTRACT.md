@@ -215,7 +215,18 @@ half-edge round-trips, closed-manifold audits).
     against the finished mesh decides, and the independent winding
     audit is what caught the single-sweep leak. A facet Steiner point
     within the chord tolerance of an existing vertex adopts it (no
-    ulp-twin vertices). Corpus: `tests/comb_prism.rs` — a finned
+    ulp-twin vertices). After carve-and-label and BEFORE the audit,
+    `repair_flat_tets` removes zero-volume tets — coplanar co-circular
+    quadruples the kernel's symbolic perturbation admits between two
+    triangulations of one planar quad — by edge removal: the flat tet's
+    in-plane diagonal is shared by a ring of tets on one side; the ring
+    polygon is re-triangulated (a fan from a ring vertex, the first whose
+    tets are all positively oriented, none flat, volumes conserved) and
+    paired with both edge endpoints. Boundary faces, region labels and the
+    union are unchanged by construction; the audit re-checks orientation,
+    volume and winding, and the census after the pass is what consumers
+    read. MEASURED on the comb: 3/220 and 9/722 flat tets, all removed;
+    smallest dihedral 6.4° / 6.1° afterwards (`tests/comb_quality.rs`). Corpus: `tests/comb_prism.rs` — a finned
     heatsink comb prism (one, two and four fins; 36/60/108 facets)
     volumetricizes under the default policy with the analytic volume,
     where every earlier build refused with unrecovered facets at any

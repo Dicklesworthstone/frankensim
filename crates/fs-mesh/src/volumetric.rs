@@ -332,6 +332,32 @@ impl QualityCensus {
     }
 }
 
+/// Outcome of the flat-tet repair pass (disclosure; the audit re-checks the
+/// complex afterwards, so these counts never stand in for it).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct FlatTetRepair {
+    /// Retained tets whose volume was below 1e-9 of the largest tet's.
+    pub found: u32,
+    /// Flat tets no longer present after the pass (`found - unrepaired`).
+    pub repaired: u32,
+    /// Flat tets remaining after the pass (a face or ring face on a wall, a
+    /// ring crossing a region, an open ring, or no volume-conserving fan).
+    pub unrepaired: u32,
+    /// Repair rounds run.
+    pub rounds: u32,
+}
+
+impl FlatTetRepair {
+    /// Canonical JSON ledger row.
+    #[must_use]
+    pub fn to_json(&self) -> String {
+        format!(
+            "{{\"found\":{},\"repaired\":{},\"unrepaired\":{},\"rounds\":{}}}",
+            self.found, self.repaired, self.unrepaired, self.rounds
+        )
+    }
+}
+
 /// Carved, region-labeled solid tets. Not yet independently audited.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LabeledTetComplex {
@@ -341,6 +367,7 @@ pub struct LabeledTetComplex {
     source_faces: Vec<([u32; 3], u32)>,
     length_unit: String,
     recovery: RecoveryEvidence,
+    flat_repair: FlatTetRepair,
 }
 
 /// Volume witness computed by the auditor, not the producer flood.
@@ -594,6 +621,7 @@ impl ConstraintRecoveredPlc {
             source_faces,
             length_unit: self.policy.length_unit,
             recovery: self.recovery,
+            flat_repair: FlatTetRepair::default(),
         })
     }
 }
@@ -633,6 +661,301 @@ impl LabeledTetComplex {
     #[must_use]
     pub const fn recovery(&self) -> &RecoveryEvidence {
         &self.recovery
+    }
+
+    /// What the flat-tet repair did (see [`Self::repair_flat_tets`]).
+    #[must_use]
+    pub const fn flat_repair(&self) -> &FlatTetRepair {
+        &self.flat_repair
+    }
+
+    /// Remove zero-volume tets by 2-2 flips.
+    ///
+    /// A flat tet is a coplanar, co-circular quadruple the kernel's symbolic
+    /// perturbation admits between two triangulations of the same planar
+    /// quad: its faces `abc, acd` (diagonal `ac`) are shared with the tets
+    /// on one side and `abd, bcd` (diagonal `bd`) with the tets on the other.
+    /// When the two tets on one side share a single apex `p`, re-triangulating
+    /// that side with the other diagonal — `(a,b,c,p),(a,c,d,p)` becomes
+    /// `(a,b,d,p),(b,c,d,p)` — makes both sides agree and the flat tet
+    /// disappears. The union, the boundary faces and the region labels are
+    /// unchanged by construction; a flip is committed only if both new tets
+    /// are positively oriented and their volumes sum to the two old ones
+    /// (a non-convex quad fails that), and never when a face of the flat tet
+    /// is a source (wall) face or the regions differ. Everything else is
+    /// counted `unrepaired`. In a P1 solve a flat tet pins its four nodes to
+    /// one value, so leaving them in is a silent constraint; the census that
+    /// follows this pass is what the receipt discloses.
+    pub fn repair_flat_tets(&mut self) -> FlatTetRepair {
+        let mut report = FlatTetRepair::default();
+        let walls: BTreeSet<[u32; 3]> = self.source_faces.iter().map(|(face, _)| *face).collect();
+        let volume =
+            |positions: &[[f64; 3]], tet: [u32; 4]| tet_volume_triple(positions, tet).abs();
+        let largest = self
+            .tets
+            .iter()
+            .map(|tet| volume(&self.positions, *tet))
+            .fold(0.0f64, f64::max);
+        let is_flat =
+            |positions: &[[f64; 3]], tet: [u32; 4]| volume(positions, tet) <= 1e-9 * largest;
+        report.found = u32::try_from(
+            self.tets
+                .iter()
+                .filter(|tet| is_flat(&self.positions, **tet))
+                .count(),
+        )
+        .expect("tet count fits u32");
+        if report.found == 0 {
+            return report;
+        }
+        let mut gave_up: BTreeSet<[u32; 4]> = BTreeSet::new();
+        for _round in 0..32 {
+            report.rounds += 1;
+            // Face → incident tet indices, rebuilt per flip because a flip
+            // changes three tets.
+            let mut by_face: BTreeMap<[u32; 3], Vec<usize>> = BTreeMap::new();
+            for (index, tet) in self.tets.iter().enumerate() {
+                for face in tet_sorted_faces(*tet) {
+                    by_face.entry(face).or_default().push(index);
+                }
+            }
+            let Some(flat_index) = self.tets.iter().enumerate().find_map(|(index, tet)| {
+                let mut key = *tet;
+                key.sort_unstable();
+                (is_flat(&self.positions, *tet) && !gave_up.contains(&key)).then_some(index)
+            }) else {
+                break;
+            };
+            let flat = self.tets[flat_index];
+            let mut key = flat;
+            key.sort_unstable();
+            let region = self.region_of_tet[flat_index];
+            let flipped = self.try_remove_flat(flat_index, flat, region, &by_face, &walls, largest);
+            if !flipped {
+                gave_up.insert(key);
+            }
+        }
+        // Outcomes, not events: a census after the loop is what the receipt
+        // discloses, so `unrepaired` is exactly what remains.
+        report.unrepaired = u32::try_from(
+            self.tets
+                .iter()
+                .filter(|tet| is_flat(&self.positions, **tet))
+                .count(),
+        )
+        .expect("tet count fits u32");
+        report.repaired = report.found.saturating_sub(report.unrepaired);
+        self.flat_repair = report;
+        report
+    }
+
+    /// One edge-removal attempt for the flat tet at `flat_index`; true when committed.
+    ///
+    /// The flat tet's two in-plane diagonals each carry a ring of tets on one
+    /// side of the plane (the flat tet closes the ring). Removing a diagonal
+    /// `uv` means re-triangulating the ring polygon `r0..rm` (from the flat
+    /// tet's other two vertices around through the neighbours' apexes) and
+    /// pairing every triangle with `u` and with `v`: `m + 1` tets become
+    /// `2(m - 1)`, the edge `uv` and the flat tet disappear, and the faces on
+    /// the far side of the quad are matched exactly. `m = 2` is the classic
+    /// 2-2 flip; `m = 3` the 4-4 flip. A fan from each ring vertex is tried in
+    /// turn; the first whose tets are all positively oriented and whose
+    /// volumes sum to the removed ones is committed. Nothing is committed
+    /// when a ring face is a wall, the ring crosses a region, or the ring is
+    /// not a closed cycle.
+    fn try_remove_flat(
+        &mut self,
+        flat_index: usize,
+        flat: [u32; 4],
+        region: RegionId,
+        by_face: &BTreeMap<[u32; 3], Vec<usize>>,
+        walls: &BTreeSet<[u32; 3]>,
+        largest: f64,
+    ) -> bool {
+        if tet_sorted_faces(flat)
+            .iter()
+            .any(|face| walls.contains(face))
+        {
+            return false;
+        }
+        let [a, b, c, d] = flat;
+        // Opposite-edge pairings; the two diagonals are the pairing whose
+        // segments cross in the quad's plane.
+        let pairings: [([u32; 2], [u32; 2]); 3] =
+            [([a, c], [b, d]), ([a, b], [c, d]), ([a, d], [b, c])];
+        let pos = |v: u32| self.positions[v as usize];
+        let normal = {
+            // normal of the largest-area triangle among the four points
+            let mut best = ([0.0f64; 3], 0.0f64);
+            for tri in [[a, b, c], [a, b, d], [a, c, d], [b, c, d]] {
+                let n = cross3(
+                    sub3(pos(tri[1]), pos(tri[0])),
+                    sub3(pos(tri[2]), pos(tri[0])),
+                );
+                let area2 = dot3(n, n);
+                if area2 > best.1 {
+                    best = (n, area2);
+                }
+            }
+            best.0
+        };
+        let side = |u: u32, v: u32, w: u32| -> f64 {
+            dot3(cross3(sub3(pos(v), pos(u)), sub3(pos(w), pos(u))), normal)
+        };
+        let crossing = |e: [u32; 2], f: [u32; 2]| -> bool {
+            side(e[0], e[1], f[0]) * side(e[0], e[1], f[1]) < 0.0
+                && side(f[0], f[1], e[0]) * side(f[0], f[1], e[1]) < 0.0
+        };
+        let Some((diag_1, diag_2)) = pairings.into_iter().find(|(e, f)| crossing(*e, *f)) else {
+            return false;
+        };
+        for (edge, others) in [(diag_1, diag_2), (diag_2, diag_1)] {
+            if self
+                .remove_edge_through_flat(flat_index, edge, others, region, by_face, walls, largest)
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Edge removal of `edge` = [u, v] whose ring is closed by the flat tet
+    /// `flat_index` with in-plane vertices `others` = [b, d].
+    #[allow(clippy::too_many_arguments)]
+    fn remove_edge_through_flat(
+        &mut self,
+        flat_index: usize,
+        edge: [u32; 2],
+        others: [u32; 2],
+        region: RegionId,
+        by_face: &BTreeMap<[u32; 3], Vec<usize>>,
+        walls: &BTreeSet<[u32; 3]>,
+        largest: f64,
+    ) -> bool {
+        let [u, v] = edge;
+        let [b, d] = others;
+        let sorted = |x: u32, y: u32, z: u32| {
+            let mut key = [x, y, z];
+            key.sort_unstable();
+            key
+        };
+        let other_tet = |face: [u32; 3], not: usize| -> Option<usize> {
+            by_face
+                .get(&face)?
+                .iter()
+                .copied()
+                .find(|&index| index != not)
+        };
+        // Walk the ring from the flat tet across face (u, v, b) until the tet
+        // that carries face (u, v, d) hands back to the flat tet.
+        let mut ring: Vec<usize> = Vec::new();
+        let mut polygon: Vec<u32> = vec![b];
+        let mut current = flat_index;
+        let mut apex = b;
+        for _ in 0..64 {
+            let face = sorted(u, v, apex);
+            if walls.contains(&face) {
+                return false;
+            }
+            let Some(next) = other_tet(face, current) else {
+                return false;
+            };
+            if next == flat_index {
+                break;
+            }
+            if self.region_of_tet[next] != region {
+                return false;
+            }
+            let tet = self.tets[next];
+            let Some(next_apex) = tet.iter().copied().find(|&w| w != u && w != v && w != apex)
+            else {
+                return false;
+            };
+            ring.push(next);
+            polygon.push(next_apex);
+            current = next;
+            apex = next_apex;
+        }
+        if ring.is_empty() || *polygon.last().expect("polygon has b") != d {
+            return false;
+        }
+        let old_volume: f64 = ring
+            .iter()
+            .map(|&index| tet_volume_triple(&self.positions, self.tets[index]).abs())
+            .sum();
+        let oriented = |tet: [u32; 4]| -> Option<[u32; 4]> {
+            match tet_orient(&self.positions, tet) {
+                Sign::Positive => Some(tet),
+                Sign::Negative => Some([tet[0], tet[2], tet[1], tet[3]]),
+                Sign::Zero => None,
+            }
+        };
+        let m = polygon.len();
+        // Try a fan from each polygon vertex.
+        for pivot in 0..m {
+            let mut new_tets: Vec<[u32; 4]> = Vec::with_capacity(2 * (m - 2));
+            let mut ok = true;
+            for k in 1..(m - 1) {
+                let i = (pivot + k) % m;
+                let j = (pivot + k + 1) % m;
+                let tri = [polygon[pivot], polygon[i], polygon[j]];
+                for &apex_end in &[u, v] {
+                    match oriented([tri[0], tri[1], tri[2], apex_end]) {
+                        Some(tet) => new_tets.push(tet),
+                        None => {
+                            ok = false;
+                            break;
+                        }
+                    }
+                }
+                if !ok {
+                    break;
+                }
+            }
+            if !ok {
+                continue;
+            }
+            let volumes: Vec<f64> = new_tets
+                .iter()
+                .map(|tet| tet_volume_triple(&self.positions, *tet).abs())
+                .collect();
+            if volumes.iter().any(|&volume| volume <= 1e-9 * largest) {
+                continue;
+            }
+            let new_volume: f64 = volumes.iter().sum();
+            if (new_volume - old_volume).abs() > 1e-9 * largest.max(old_volume) {
+                continue;
+            }
+            // Commit: overwrite ring tets in place, drop the rest and the flat tet.
+            let mut targets: Vec<usize> = ring.clone();
+            targets.push(flat_index);
+            targets.sort_unstable();
+            let mut new_iter = new_tets.into_iter();
+            let mut leftover: Vec<usize> = Vec::new();
+            for &index in &targets {
+                match new_iter.next() {
+                    Some(tet) => {
+                        self.tets[index] = tet;
+                        self.region_of_tet[index] = region;
+                    }
+                    None => leftover.push(index),
+                }
+            }
+            for tet in new_iter {
+                self.tets.push(tet);
+                self.region_of_tet.push(region);
+            }
+            // Remove leftover slots from the back so earlier indices stay valid.
+            for &index in leftover.iter().rev() {
+                let last = self.tets.len() - 1;
+                self.tets.swap(index, last);
+                self.region_of_tet.swap(index, last);
+                self.tets.pop();
+                self.region_of_tet.pop();
+            }
+            return true;
+        }
+        false
     }
 
     /// Deterministic tet-quality census (see [`QualityCensus`]).
@@ -802,7 +1125,8 @@ pub fn volumetricize(
     let admitted = plc.admit(policy, cx)?;
     let recovered = admitted.recover(cx)?;
     let (cavity_vol, exterior_vol) = discarded_volumes(&recovered);
-    let labeled = recovered.carve_and_label(cx)?;
+    let mut labeled = recovered.carve_and_label(cx)?;
+    labeled.repair_flat_tets();
     labeled.audit(&regions, cavity_vol, exterior_vol, cx)
 }
 

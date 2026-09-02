@@ -2,15 +2,19 @@
 //! computation (bridge plan B3/A12): `LabeledTetComplex::quality` is what
 //! the conduction receipt discloses, so it is checked here against a
 //! second implementation of dihedral, radius-edge and volume on the
-//! four-fin comb prism. The census is DISCLOSURE: this test does not assert
-//! the mesh is good (as of 2026-09-02 the comb carries flat tets — coplanar
-//! quadruples at the fin roots — and slivers; the quality floor is B2), only
-//! that the numbers in the receipt are the numbers a reviewer would compute.
+//! four-fin comb prism. It also pins the flat-tet repair (bridge plan B2a):
+//! before it, the comb carried coplanar quadruples at the fin roots (3 of
+//! 220 tets on one fin, 9 of 722 on four, dihedral 0.000°) that a P1 solve
+//! would turn into equal-temperature constraints; after edge removal there
+//! are none and the smallest dihedral is 6.4° / 6.1° (MEASURED 2026-09-02;
+//! the assertion keeps 2x headroom). Radius-edge is still disclosed, not
+//! enforced — refinement is B2c.
 
 use asupersync::types::Budget;
 use fs_exec::{CancelGate, Cx, ExecMode, StreamKey};
 use fs_mesh::{
-    RecoveryOptions, RegionId, RegionKind, RegionSpec, UnverifiedPlc, VolumetricPolicy, volumetricize,
+    RecoveryOptions, RegionId, RegionKind, RegionSpec, UnverifiedPlc, VolumetricPolicy,
+    volumetricize,
 };
 use std::collections::BTreeMap;
 
@@ -62,7 +66,11 @@ impl Builder {
         let u = sub(b, a);
         let v = sub(c, a);
         let n = cross(u, v);
-        let (a, b, c, d) = if dot(n, outward) > 0.0 { (a, b, c, d) } else { (a, d, c, b) };
+        let (a, b, c, d) = if dot(n, outward) > 0.0 {
+            (a, b, c, d)
+        } else {
+            (a, d, c, b)
+        };
         let (ia, ib, ic, id) = (self.vid(a), self.vid(b), self.vid(c), self.vid(d));
         self.tris.push([ia, ib, ic]);
         self.tris.push([ia, ic, id]);
@@ -93,7 +101,12 @@ fn comb(fins: usize) -> (Vec<[f64; 3]>, Vec<[u32; 3]>) {
     for i in 0..xs.len() - 1 {
         let (x0, x1) = (xs[i], xs[i + 1]);
         b.quad(
-            [[x0, 0.0, 0.0], [x1, 0.0, 0.0], [x1, BASE_Y, 0.0], [x0, BASE_Y, 0.0]],
+            [
+                [x0, 0.0, 0.0],
+                [x1, 0.0, 0.0],
+                [x1, BASE_Y, 0.0],
+                [x0, BASE_Y, 0.0],
+            ],
             [0.0, 0.0, -1.0],
         );
         let z_top = if is_fin(i) { top } else { BASE_Z };
@@ -140,7 +153,12 @@ fn comb(fins: usize) -> (Vec<[f64; 3]>, Vec<[u32; 3]>) {
         }
     }
     b.quad(
-        [[0.0, 0.0, 0.0], [0.0, BASE_Y, 0.0], [0.0, BASE_Y, BASE_Z], [0.0, 0.0, BASE_Z]],
+        [
+            [0.0, 0.0, 0.0],
+            [0.0, BASE_Y, 0.0],
+            [0.0, BASE_Y, BASE_Z],
+            [0.0, 0.0, BASE_Z],
+        ],
         [-1.0, 0.0, 0.0],
     );
     b.quad(
@@ -180,7 +198,11 @@ fn min_dihedral_deg(p: &[[f64; 3]; 4]) -> f64 {
         let n = cross(sub(p[f[1]], p[f[0]]), sub(p[f[2]], p[f[0]]));
         let l = norm(n).max(1e-300);
         let n = [n[0] / l, n[1] / l, n[2] / l];
-        let n = if dot(n, sub(p[f[3]], p[f[0]])) > 0.0 { n } else { [-n[0], -n[1], -n[2]] };
+        let n = if dot(n, sub(p[f[3]], p[f[0]])) > 0.0 {
+            n
+        } else {
+            [-n[0], -n[1], -n[2]]
+        };
         normals.push(n);
     }
     let mut worst = 180.0f64;
@@ -243,7 +265,12 @@ fn quality_census_matches_an_independent_computation_on_the_comb() {
         let mut min_dih = 180.0f64;
         let mut slivers = 0u32;
         for t in labeled.tets() {
-            let p = [pts[t[0] as usize], pts[t[1] as usize], pts[t[2] as usize], pts[t[3] as usize]];
+            let p = [
+                pts[t[0] as usize],
+                pts[t[1] as usize],
+                pts[t[2] as usize],
+                pts[t[3] as usize],
+            ];
             volumes.push(dot(sub(p[1], p[0]), cross(sub(p[2], p[0]), sub(p[3], p[0]))).abs() / 6.0);
             let d = min_dihedral_deg(&p);
             min_dih = min_dih.min(d);
@@ -259,13 +286,43 @@ fn quality_census_matches_an_independent_computation_on_the_comb() {
                 flats += 1;
                 continue;
             }
-            let p = [pts[t[0] as usize], pts[t[1] as usize], pts[t[2] as usize], pts[t[3] as usize]];
+            let p = [
+                pts[t[0] as usize],
+                pts[t[1] as usize],
+                pts[t[2] as usize],
+                pts[t[3] as usize],
+            ];
             if let Some(re) = radius_edge(&p) {
                 max_re = max_re.max(re);
             }
         }
         println!(
-            "census fins={fins}: {} | independent: min_dihedral={min_dih:.6} max_radius_edge={max_re:.6} slivers={slivers} flats={flats}",
+            "census fins={fins}: {} | repair: {} | independent: min_dihedral={min_dih:.6} max_radius_edge={max_re:.6} slivers={slivers} flats={flats}",
+            census.to_json(),
+            labeled.flat_repair().to_json()
+        );
+        // The repair pass ran before the audit: whatever flat tets remain are
+        // exactly the ones it could not remove, and every removal kept the
+        // volume (the audit that produced `audited` re-checked it).
+        assert_eq!(census.flat_tets, labeled.flat_repair().unrepaired);
+        assert_eq!(
+            labeled.flat_repair().found,
+            labeled.flat_repair().repaired + labeled.flat_repair().unrepaired
+        );
+        assert!(
+            labeled.flat_repair().found > 0,
+            "the comb is the flat-tet fixture; if the kernel stops producing them, retire this pin"
+        );
+        assert_eq!(
+            census.flat_tets,
+            0,
+            "flat tets remain after repair: {}",
+            census.to_json()
+        );
+        assert_eq!(census.slivers_below_5deg, 0, "{}", census.to_json());
+        assert!(
+            census.min_dihedral_deg >= 3.0,
+            "min dihedral regressed below 3 deg (measured 6.4 / 6.1 on 2026-09-02): {}",
             census.to_json()
         );
         assert_eq!(census.tets, labeled.tets().len());

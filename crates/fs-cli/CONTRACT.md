@@ -219,11 +219,16 @@ Projects without that optional declaration refuse with
 (exit 5) is reserved for a stage with no producer at all (none today); such
 refusals name their producer bead and are retained as
 terminal error operations.
-The conduction receipt (schema v4) discloses the mesh's quality census (tets,
-vertices, min dihedral, max radius-edge, sliver and flat-tet counts) and the
-recovery budgets and statistics that produced the mesh (memory budget, Steiner
-cap and depth, segment/facet recovery rows). Disclosure, not enforcement: the
-quality floor is bridge plan B2. The Steiner cap derives from the declared
+The conduction receipt (schema v5) discloses the mesh's quality census (tets,
+vertices, min dihedral, max radius-edge, sliver and flat-tet counts), the
+flat-tet repair (found / repaired / unrepaired / rounds — fs-mesh removes
+zero-volume tets by edge removal before the audit) and the recovery budgets and
+statistics that produced the mesh (memory budget, Steiner cap and depth,
+segment/facet recovery rows). Radius-edge is disclosed, not enforced:
+refinement is bridge plan B2c. The stage REFUSES (`cli-solve-conduction-mesh-quality`,
+exit 4) when a zero-volume tet survives the repair or the smallest dihedral is
+below 1° (measured: the reference heatsink sits at 6.1° after repair); slivers
+between 1° and 5° solve and are disclosed. The Steiner cap derives from the declared
 memory budget with the fixture default as a floor, so identical inputs at the
 fixture budget mesh identically.
 A run id whose ops exist in the ledger but none of which is admissible under the
@@ -360,7 +365,7 @@ Solve refusal codes: `cli-solve-project-invalid`, `cli-solve-budget`,
 `cli-solve-import-evidence`, `cli-solve-import-envelope`,
 `cli-solve-work-envelope`, `cli-solve-assignment`, `cli-solve-capability`,
 `cli-solve-stage-gap`, `cli-solve-conduction-undeclared`, `cli-solve-qoi-undeclared`,
-`cli-solve-run-incompatible`,
+`cli-solve-run-incompatible`, `cli-solve-conduction-mesh-quality`,
 `cli-solve-cancelled`, `cli-solve-run-id`,
 `cli-solve-unknown-run`, `cli-solve-resume-identity`,
 `cli-solve-resume-complete`, `cli-solve-resume-budget`,

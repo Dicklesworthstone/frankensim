@@ -143,7 +143,7 @@ const IMPORT_VERIFY_NO_CLAIM: &str =
     "does not prove the imported geometry is watertight, meshable, or physically meaningful";
 const MATERIAL_RESOLVE_AUTHORITY: &str = "declared-binding-resolution-against-admitted-card-packs";
 const FLOW_NETWORK_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-flow-network-receipt.v1";
-const CONDUCTION_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-conduction-receipt.v4";
+const CONDUCTION_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-conduction-receipt.v5";
 const CONDUCTION_SOLUTION_SCHEMA: &str = "frankensim.cli.solve-conduction-solution.v1";
 const QOI_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-qoi-candidate.v1";
 
@@ -173,8 +173,8 @@ const CONDUCTION_NO_CLAIM: &str = "the stage solves the declared finite mesh wit
     point over card-derived Robin rows with frozen dry-air properties and a 1-D stream-wise air \
     chain, disclosing rather than propagating the flow bracket, and claims no experimental \
     validation and no maturity level for that exchange; mesh quality (dihedral, radius-edge, \
-    flat and sliver tets) and the recovery budgets that produced the mesh are DISCLOSED in this \
-    receipt, not enforced";
+    flat and sliver tets), the flat-tet repair and the recovery budgets that produced the mesh \
+    are DISCLOSED in this receipt; radius-edge is not enforced";
 const MATERIAL_RESOLVE_NO_CLAIM: &str = "the stage proves that every declared region and \
     interface resolves to an admitted card whose selected claim covers the declared temperature \
     range, and retains that claim's replayable usage receipt; it does not authenticate the pack \
@@ -747,6 +747,52 @@ fn declaration_gap(
 /// cap stays conservative. 64 MiB therefore admits 32 768 facet Steiner
 /// points; the fixture default (4 000) is the floor whatever the budget.
 const RECOVERY_BYTES_PER_STEINER: u64 = 2048;
+
+/// Smallest dihedral angle (degrees) the conduction stage will solve on.
+/// Below it an element is degenerate for P1 conduction (its stiffness is a
+/// near-singular constraint, not a physical conductance); a flat tet (zero
+/// volume) is the limiting case and refuses outright. MEASURED 2026-09-02
+/// on the reference finned heatsink after fs-mesh's flat-tet repair: the
+/// smallest dihedral is 6.1° (one fin: 6.4°), so a 1° floor sits 6x below
+/// the fixtures. Slivers between 1° and 5° are DISCLOSED in the receipt's
+/// quality census, not refused; refinement (bridge plan B2c) is what raises
+/// them.
+const CONDUCTION_MIN_DIHEDRAL_DEG: f64 = 1.0;
+
+/// The quality-floor refusal for a retained complex: `(what, fix)` when the
+/// mesh must not be solved on, `None` when it may (bridge plan B2b).
+fn mesh_quality_refusal(census: &fs_mesh::QualityCensus) -> Option<(String, String)> {
+    if census.flat_tets > 0 {
+        return Some((
+            format!(
+                "the recovered mesh keeps {} zero-volume tet(s) after repair (tets {}, smallest \
+                 dihedral {:.3} deg); a flat tet pins its four nodes to one temperature",
+                census.flat_tets, census.tets, census.min_dihedral_deg
+            ),
+            "repair the region surface where coplanar quadruples remain (the receipt's \
+             recovery.flat_tets row names how many were found and repaired), or raise \
+             budgets.memory_bytes so recovery can spend more Steiner points"
+                .to_string(),
+        ));
+    }
+    if census.min_dihedral_deg < CONDUCTION_MIN_DIHEDRAL_DEG {
+        return Some((
+            format!(
+                "the recovered mesh's smallest dihedral angle is {:.4} deg, below the {} deg \
+                 floor (tets {}, {} sliver(s) below 5 deg)",
+                census.min_dihedral_deg,
+                CONDUCTION_MIN_DIHEDRAL_DEG,
+                census.tets,
+                census.slivers_below_5deg
+            ),
+            "repair or re-tessellate the region surface near the degenerate element, or raise \
+             budgets.memory_bytes; mesh refinement that lifts sliver angles is not yet part of \
+             the conduction stage"
+                .to_string(),
+        ));
+    }
+    None
+}
 
 fn recovery_budget(memory_bytes: u64) -> fs_mesh::RecoveryOptions {
     let floor = fs_mesh::RecoveryOptions::default();
@@ -4616,6 +4662,14 @@ fn conduction_receipt(
             ),
         })?;
         let labeled = audited.labeled();
+        let census = labeled.quality();
+        if let Some((what, fix)) = mesh_quality_refusal(&census) {
+            return Err(conduction_error(
+                "cli-solve-conduction-mesh-quality",
+                what,
+                fix,
+            ));
+        }
         let labels: Vec<u32> = labeled
             .region_of_tet()
             .iter()
@@ -4947,7 +5001,7 @@ fn conduction_receipt(
          \"energy\":{{\"source_w\":{},\"neumann_out_w\":{},\"robin_out_w\":{},\
          \"dirichlet_in_w\":{},\"closure_w\":{},\"relative_closure\":{}}},\
          \"recovery\":{{\"memory_bytes\":{},\"max_depth\":{},\"max_steiner\":{},\
-         \"segments\":{},\"facets\":{}}},\
+         \"segments\":{},\"facets\":{},\"flat_tets\":{}}},\
          \"conjugate\":{},\"authority\":{},\"no_claim\":{}}}",
         json_string(CONDUCTION_RECEIPT_SCHEMA),
         json_string(&run.to_hex()),
@@ -4982,6 +5036,7 @@ fn conduction_receipt(
         recovery_evidence.options.max_steiner,
         recovery_evidence.segments.to_json(),
         recovery_evidence.facets.to_json(),
+        audited.labeled().flat_repair().to_json(),
         conjugate_fragment.as_deref().unwrap_or("null"),
         json_string(CONDUCTION_AUTHORITY),
         json_string(CONDUCTION_NO_CLAIM),
@@ -10900,12 +10955,12 @@ impl<'a> JsonCursor<'a> {
 #[cfg(test)]
 mod tests {
     use super::{
-        EVIDENCE_POLL_BYTES, EvidenceReadError, EvidenceUtf8Error, EvidenceWork,
-        InvocationWorkExceeded, InvocationWorkLedger, JsonCursor, MAX_CANONICAL_F64_BYTES,
-        MAX_CANONICAL_PLY_VERTEX_LINE_BYTES, MAX_SOLVE_EVIDENCE_LABEL_BYTES,
-        MAX_SOLVE_INVOCATION_WORK_BYTES, SolveCancellationPlan, SolveEvidencePhase,
-        evidence_bytes_equal, evidence_utf8_string, interface_resolution_root,
-        materialize_evidence_artifact, parse_canonical_ply_face_line,
+        CONDUCTION_MIN_DIHEDRAL_DEG, EVIDENCE_POLL_BYTES, EvidenceReadError, EvidenceUtf8Error,
+        EvidenceWork, InvocationWorkExceeded, InvocationWorkLedger, JsonCursor,
+        MAX_CANONICAL_F64_BYTES, MAX_CANONICAL_PLY_VERTEX_LINE_BYTES,
+        MAX_SOLVE_EVIDENCE_LABEL_BYTES, MAX_SOLVE_INVOCATION_WORK_BYTES, SolveCancellationPlan,
+        SolveEvidencePhase, evidence_bytes_equal, evidence_utf8_string, interface_resolution_root,
+        materialize_evidence_artifact, mesh_quality_refusal, parse_canonical_ply_face_line,
         parse_canonical_ply_vertex_line, preflight_canonical_ply, require_solve_evidence_label,
         validate_named_group_face_ranges, verify_evidence_artifact,
     };
@@ -11359,5 +11414,42 @@ mod tests {
         );
         assert!(plan.fired());
         assert!(gate.is_requested());
+    }
+
+    fn census(
+        flat_tets: u32,
+        min_dihedral_deg: f64,
+        slivers_below_5deg: u32,
+    ) -> fs_mesh::QualityCensus {
+        fs_mesh::QualityCensus {
+            tets: 700,
+            vertices: 250,
+            min_dihedral_deg,
+            max_radius_edge: 12.0,
+            slivers_below_5deg,
+            flat_tets,
+        }
+    }
+
+    #[test]
+    fn mesh_quality_floor_refuses_flat_tets_and_sub_floor_dihedrals_only() {
+        // A surviving flat tet refuses regardless of the angle statistics.
+        let flat = mesh_quality_refusal(&census(1, 6.0, 0)).expect("flat tet refuses");
+        assert!(flat.0.contains("zero-volume"), "{}", flat.0);
+        // Below the floor refuses and names the floor and the sliver count.
+        let thin = mesh_quality_refusal(&census(0, 0.4, 3)).expect("sub-floor refuses");
+        assert!(
+            thin.0
+                .contains(&format!("{CONDUCTION_MIN_DIHEDRAL_DEG} deg floor")),
+            "{}",
+            thin.0
+        );
+        assert!(thin.0.contains("3 sliver(s)"), "{}", thin.0);
+        // The measured fixture floor (6.1 deg) and a 1-5 deg sliver both solve:
+        // slivers are disclosed, not refused.
+        assert!(mesh_quality_refusal(&census(0, 6.084, 0)).is_none());
+        assert!(mesh_quality_refusal(&census(0, 2.5, 4)).is_none());
+        // Exactly the floor is admitted (the floor is a strict lower bound).
+        assert!(mesh_quality_refusal(&census(0, CONDUCTION_MIN_DIHEDRAL_DEG, 0)).is_none());
     }
 }
