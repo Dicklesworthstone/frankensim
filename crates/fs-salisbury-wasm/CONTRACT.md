@@ -13,8 +13,8 @@ and serializes a stable JSON envelope.
 first_idler_fixed)` returns a JSON string containing either:
 
 - `ok`: the palm-rooted three-digit parent graph, nine-joint/12-cable topology,
-  three generic axes, admitted SI tensions and radii, three source-law torques,
-  Claim 1/2 predicates, and an explicit
+  three generic axes, one representative digit's four admitted SI tensions and
+  radii, three source-law torques, Claim 1/2 predicates, and an explicit
   `historical_dynamics_available: false`; or
 - `refusal`: a stable code, diagnostic, and repair.
 

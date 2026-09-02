@@ -8,7 +8,7 @@
 #![warn(missing_docs)]
 
 use core::fmt::Write as _;
-use fs_mbd::salisbury::{step_salisbury_hand, SalisburyHandError, SalisburyHandParams};
+use fs_mbd::salisbury::{SalisburyHandError, SalisburyHandParams, step_salisbury_hand};
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
@@ -21,8 +21,10 @@ fn refusal_json(code: &str, message: &str, repair: &str) -> String {
 
 /// Evaluate the source-printed four-tension/three-torque relation.
 ///
-/// Tensions are newtons. `radius_scale_m` is the visitor-declared R2 radius in
-/// metres and does not claim to reproduce an unpublished historic dimension.
+/// Tensions are the four cable ends of one representative digit, in newtons.
+/// The returned topology separately reports all twelve cable ends. The
+/// `radius_scale_m` argument is the visitor-declared R2 radius in metres and
+/// does not claim to reproduce an unpublished historic dimension.
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 #[must_use]
 #[allow(clippy::too_many_arguments)]

@@ -7,8 +7,8 @@
 //! therefore owns the connected generic joint topology and exact static torque
 //! law only; all radii and tensions are caller-declared SI study inputs.
 
-use crate::articulated::{ArticulatedError, JointModel};
 use crate::Vec3;
+use crate::articulated::{ArticulatedError, JointModel};
 
 /// Failure to admit the source-bounded hand composition.
 #[derive(Clone, Debug, PartialEq)]
@@ -61,7 +61,7 @@ pub struct SalisburyHandStep {
     pub axis_2: [f64; 3],
     /// Axis 3 of each digit, parallel to Axis 2 in the preferred embodiment.
     pub axis_3: [f64; 3],
-    /// Admitted cable tensions `[T1, T2, T3, T4]` in newtons.
+    /// One representative digit's admitted tensions `[T1, T2, T3, T4]` in newtons.
     pub tendon_tensions_n: [f64; 4],
     /// Declared illustrative radii `[R1, R2, R3]` in metres.
     pub pulley_radii_m: [f64; 3],
@@ -92,6 +92,9 @@ fn valid_tension(value: f64) -> bool {
 pub fn step_salisbury_hand(
     params: SalisburyHandParams,
 ) -> Result<SalisburyHandStep, SalisburyHandError> {
+    // Figure 3 prints this law for one digit. The topology receipt separately
+    // proves three four-cable digit chains; these four values are not the full
+    // hand's twelve independent cable tensions.
     let tensions = [
         params.tension_t1_n,
         params.tension_t2_n,
