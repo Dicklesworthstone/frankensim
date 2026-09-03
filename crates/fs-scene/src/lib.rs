@@ -328,6 +328,86 @@ pub struct ScenePenetration {
     pub collider_index: usize,
 }
 
+/// A scene body with its per-body constants hoisted out of the query loop.
+///
+/// A scan over many colliders against many bodies otherwise recomputes each
+/// box's yaw trigonometry and bounding radius once per PAIR. Preparing the
+/// scene once per rollout turns that into once per body, and adds a
+/// bounding-sphere reject that skips the exact test for distant pairs.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PreparedBody {
+    /// The admitted geometry.
+    pub body: SceneBody,
+    /// Keep-out or support.
+    pub role: BodyRole,
+    /// Overlap tolerated before it counts as a violation \[m\].
+    pub skin_m: f64,
+    cos_yaw: f64,
+    sin_yaw: f64,
+    center_m: [f64; 3],
+    bounding_radius_m: f64,
+    bounded: bool,
+}
+
+impl PreparedBody {
+    fn new(entry: &SceneEntry) -> Self {
+        let (cos_yaw, sin_yaw) = match entry.body {
+            SceneBody::Box { yaw_rad, .. } => {
+                let (s, c) = yaw_rad.sin_cos();
+                (c, s)
+            }
+            SceneBody::HalfSpace { .. } => (1.0, 0.0),
+        };
+        Self {
+            body: entry.body,
+            role: entry.role,
+            skin_m: entry.skin_m,
+            cos_yaw,
+            sin_yaw,
+            center_m: entry.body.center_m().unwrap_or([0.0; 3]),
+            bounding_radius_m: entry.body.bounding_radius_m().unwrap_or(0.0),
+            bounded: entry.body.center_m().is_some(),
+        }
+    }
+
+    /// Cheap conservative reject: `false` guarantees the sphere cannot breach
+    /// this body's skin, so the exact test can be skipped. Never rejects a
+    /// pair that could violate.
+    #[inline]
+    #[must_use]
+    pub fn may_breach(&self, center_m: &[f64; 3], radius_m: f64) -> bool {
+        if !self.bounded {
+            return true;
+        }
+        let dx = center_m[0] - self.center_m[0];
+        let dy = center_m[1] - self.center_m[1];
+        let dz = center_m[2] - self.center_m[2];
+        let reach = self.bounding_radius_m + radius_m;
+        dx * dx + dy * dy + dz * dz <= reach * reach
+    }
+
+    /// Overlap depth, with the body's trigonometry already resolved.
+    #[inline]
+    #[must_use]
+    pub fn sphere_overlap_depth(&self, center_m: &[f64; 3], radius_m: f64) -> f64 {
+        match self.body {
+            SceneBody::Box {
+                center_m: box_center,
+                half_extents_m: half,
+                ..
+            } => sphere_box_overlap_depth(
+                center_m,
+                radius_m,
+                &box_center,
+                &half,
+                self.cos_yaw,
+                self.sin_yaw,
+            ),
+            SceneBody::HalfSpace { .. } => self.body.sphere_overlap_depth(center_m, radius_m),
+        }
+    }
+}
+
 /// A validated static environment.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct StaticScene {
@@ -442,6 +522,12 @@ impl StaticScene {
             }
         }
         deepest
+    }
+
+    /// The scene with per-body constants hoisted, for a hot scan loop.
+    #[must_use]
+    pub fn prepare(&self) -> Vec<PreparedBody> {
+        self.entries.iter().map(PreparedBody::new).collect()
     }
 
     /// Convex support maps for the bounded bodies, paired with their index,
@@ -654,5 +740,72 @@ mod tests {
             .abs()
                 < 1e-12
         );
+    }
+}
+
+#[cfg(test)]
+mod prepared_tests {
+    use super::*;
+
+    fn scene() -> StaticScene {
+        let mut scene = StaticScene::new();
+        for index in 0..30 {
+            scene
+                .push(
+                    SceneBody::Box {
+                        center_m: [index as f64 * 0.37 - 3.0, (index % 5) as f64 * 0.4, 0.5],
+                        half_extents_m: [0.22, 0.18, 0.3],
+                        yaw_rad: 0.11 * index as f64,
+                    },
+                    BodyRole::KeepOut,
+                    0.01,
+                )
+                .expect("admits");
+        }
+        scene
+            .push(SceneBody::ground_plane(0.0), BodyRole::Support, 0.05)
+            .expect("admits");
+        scene
+    }
+
+    /// The prepared form is a pure optimisation: identical depths, and the
+    /// reject never hides a breach.
+    #[test]
+    fn prepared_bodies_agree_with_the_direct_query_everywhere() {
+        let scene = scene();
+        let prepared = scene.prepare();
+        assert_eq!(prepared.len(), scene.len());
+        for step in 0..120 {
+            let center = [
+                (step as f64) * 0.09 - 4.0,
+                ((step % 11) as f64) * 0.21 - 1.0,
+                ((step % 7) as f64) * 0.15 - 0.2,
+            ];
+            for radius in [0.05, 0.17, 0.4] {
+                for (index, body) in prepared.iter().enumerate() {
+                    let direct = scene.entries()[index].body.sphere_overlap_depth(&center, radius);
+                    let fast = body.sphere_overlap_depth(&center, radius);
+                    assert!(
+                        (direct - fast).abs() < 1e-12,
+                        "body {index} disagreed: {direct} vs {fast}"
+                    );
+                    if !body.may_breach(&center, radius) {
+                        assert!(
+                            direct <= body.skin_m,
+                            "the reject discarded a real breach of depth {direct}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn an_unbounded_body_is_never_rejected() {
+        let scene = scene();
+        let prepared = scene.prepare();
+        let ground = prepared.last().expect("ground is last");
+        assert!(matches!(ground.body, SceneBody::HalfSpace { .. }));
+        assert!(ground.may_breach(&[500.0, -500.0, 900.0], 0.01));
     }
 }
