@@ -1798,6 +1798,7 @@ dependencies = [
  "fs-ledger",
  "fs-render",
  "fs-rep-frep",
+ "fs-solid",
 ]
 
 [[package]]

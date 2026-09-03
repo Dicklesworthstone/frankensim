@@ -1158,8 +1158,7 @@ impl LabeledTetComplex {
                 // only for a zero-volume flat, so a sliver that resists every
                 // flip stays disclosed rather than shaved off.
                 if flipped
-                    || (degenerate
-                        && self.drop_boundary_flat(flat_index, region, &by_face, &walls))
+                    || (degenerate && self.drop_boundary_flat(flat_index, region, &by_face, &walls))
                 {
                     // The mesh changed under `by_face`: re-sweep.
                     committed = true;

@@ -477,12 +477,14 @@ pub fn solve_and_grade(
     Ok((j, grads, cert, sol.iters, space.cut_rules().len()))
 }
 
-const ARMIJO_SUFFICIENT_DECREASE: f64 = 1e-4;
-const MAX_ARMIJO_BACKTRACKS: usize = 8;
+/// Sufficient decrease parameter (c1) in the Armijo line search condition.
+pub const ARMIJO_SUFFICIENT_DECREASE: f64 = 1e-4;
+/// Maximum number of deterministic half-step retries in Armijo line search.
+pub const MAX_ARMIJO_BACKTRACKS: usize = 8;
 
 /// Return an accepted box-and-area-feasible design, or retain the current one
 /// after the bounded Armijo budget is exhausted.
-fn armijo_next_design(
+pub fn armijo_next_design(
     design: &PlateWithHoles,
     config: &StudyConfig,
     current_objective: f64,
