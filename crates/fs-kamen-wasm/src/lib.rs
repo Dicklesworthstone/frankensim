@@ -184,10 +184,9 @@ pub fn kamen_cluster_step(state_index: u8) -> String {
     let riser_clearance_json = result.signed_riser_clearances_m.map(|value| {
         value.map_or_else(|| "null".to_owned(), |clearance_m| clearance_m.to_string())
     });
-    let minimum_riser_clearance_json = result.minimum_riser_clearance_m.map_or_else(
-        || "null".to_owned(),
-        |clearance_m| clearance_m.to_string(),
-    );
+    let minimum_riser_clearance_json = result
+        .minimum_riser_clearance_m
+        .map_or_else(|| "null".to_owned(), |clearance_m| clearance_m.to_string());
     let _ = write!(
         output,
         "{{\"ok\":{{\
