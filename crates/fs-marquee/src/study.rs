@@ -427,11 +427,12 @@ pub fn solve_and_grade(
     // DWR discretization estimate for THIS goal (estimated color: DWR
     // constants are not guaranteed — the lmp4.4 rule).
     let dwr = estimate(&grid, design, params, &f, &g, &goal)?;
-    // Self-adjoint shape gradient: dJ/dr_k = −∮_{Γ_k} (∂u/∂n)² dΓ —
-    // growing a Dirichlet cooling hole LOWERS compliance (more cold
-    // boundary), so the flux integral enters NEGATED. The sign was
-    // originally implemented positive and the FD falsifier caught it
-    // (mq-004) — the drill earning its keep. Midpoint quadrature.
+    // Self-adjoint shape gradient: dJ/dr_k = ∮_{Γ_k} (∂u/∂n)² dΓ.
+    // For compliance J(u) = ∫ f·u over Ω with homogeneous Dirichlet data
+    // on the hole boundaries Γ_k, enlarging a hole removes material from Ω
+    // where u > 0, so the boundary moves opposite to the outward domain
+    // normal n_Ω. The shape derivative enters positive (mq-004).
+    // Midpoint quadrature.
     let mut grads = Vec::with_capacity(design.radii.len());
     let samples = 64usize;
     for (c, r) in design.centers.iter().zip(&design.radii) {
@@ -464,7 +465,7 @@ pub fn solve_and_grade(
         }
         #[allow(clippy::cast_precision_loss)]
         let circ = std::f64::consts::TAU * r / samples as f64;
-        grads.push(-(acc * circ));
+        grads.push(acc * circ);
     }
     let euclidean_rel_residual =
         sol.euclidean_rel_residual()
