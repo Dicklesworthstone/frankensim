@@ -34,7 +34,11 @@
 //!   deflects the jet root; the deflection convects to the labium in
 //!   `tau = W / c_p` with `c_p / U` DERIVED from the card's stage-I lock
 //!   (`St = f * 2b / U` at `h / delta`, phase condition
-//!   `f * h / c_p = n + 1/4`), and grows by an authored spatial gain;
+//!   `f * h / c_p = n + 1/4`), and grows by an authored spatial gain
+//!   inside the sinuous mode's amplification band, which ends at the
+//!   tanh shear layer's neutral frequency `omega_c = U / (4 theta)`
+//!   (Michalke; `theta` from the card's profile ratio): the loop cannot
+//!   lock above the band, and the band rises with the jet speed;
 //! - the jet is cut by the labium: the volume flow entering the pipe is
 //!   `Q_j = Q_max * (1 + tanh((eta - y0) / b)) / 2`, the card's
 //!   smoothed top-hat profile integrated, `b` its half-width scaled to
@@ -204,7 +208,7 @@ impl JetIsland {
             displacement_gain,
             seed_amplitude_rel,
             provenance: format!(
-                "card-backed: claim class {} (stage {stage} lock St {:.5} at h/delta {:.1} -> c_p/U {:.4}), theta/b {:.4}, Re band [{:.1}, {:.1}], {} receipts; authored: displacement gain {displacement_gain}, onset seed {seed_amplitude_rel} x U, mouth radiation resistance; medium and geometry from the chart",
+                "card-backed: claim class {} (stage {stage} lock St {:.5} at h/delta {:.1} -> c_p/U {:.4}), theta/b {:.4} (amplification band omega_c = U/(4 theta), Michalke tanh neutral), Re band [{:.1}, {:.1}], {} receipts; authored: displacement gain {displacement_gain}, onset seed {seed_amplitude_rel} x U, mouth radiation resistance; medium and geometry from the chart",
                 card.claim.kind(),
                 feedback.locked_strouhal,
                 card.validity.h_over_delta,
@@ -348,6 +352,10 @@ pub struct FlueVoice {
     head: usize,
     q_prev: f64,
     flow_prev: f64,
+    // Jet amplification band: two cascaded first-order sections at the
+    // shear layer's neutral frequency (state of each section).
+    band_state: [f64; 2],
+    momentum_thickness_m: f64,
     // Mouth loop coefficients.
     inertance: f64,
     resistance: f64,
@@ -421,6 +429,8 @@ impl FlueVoice {
             head: 0,
             q_prev: 0.0,
             flow_prev: 0.0,
+            band_state: [0.0; 2],
+            momentum_thickness_m: island.theta_over_b * 0.5 * geometry.flue_height_m,
             inertance,
             resistance,
             source_coeff: rho * geometry.end_correction_m() / s_m,
@@ -532,6 +542,19 @@ impl FlueVoice {
             0.0
         };
         let seed_scale = self.island.seed_amplitude_rel * u;
+        // Amplification band of the sinuous jet mode: the tanh shear
+        // layer is spatially amplified only below its neutral frequency
+        // omega_c = U / (4 theta) (Michalke: neutral wavenumber
+        // alpha theta = 1/2 convecting at U/2), so the deflection path is
+        // band-limited by two first-order sections at omega_c. The
+        // cutoff rises with the jet speed: that, with the shrinking
+        // transit, is the overblowing mechanism.
+        let omega_c = if u > 0.0 {
+            u / (4.0 * self.momentum_thickness_m)
+        } else {
+            0.0
+        };
+        let band_alpha = omega_c * dt / (1.0 + omega_c * dt);
         let (l, r, zc) = (self.inertance, self.resistance, self.zc);
         // Implicit mouth loop: p_j = L (q - q_prev)/dt + R q + p_in, with
         // p_in = p_plus + p_minus and q = (p_plus - p_minus)/zc.
@@ -546,7 +569,10 @@ impl FlueVoice {
         for slot in out.iter_mut() {
             // Jet deflection at the labium from the delayed mouth velocity
             // plus the voice-keyed onset seed.
-            let v_delayed = self.delayed_velocity(delay_samples);
+            let v_raw = self.delayed_velocity(delay_samples);
+            self.band_state[0] += band_alpha * (v_raw - self.band_state[0]);
+            self.band_state[1] += band_alpha * (self.band_state[0] - self.band_state[1]);
+            let v_delayed = self.band_state[1];
             let seed = if seed_scale > 0.0 {
                 seed_scale * (2.0 * self.seed.next_f64() - 1.0)
             } else {

@@ -7,11 +7,14 @@
 
 use fs_aeroac::jetcard::{JetCard, mint_tonal_interim_card};
 use fs_couple::flue_loop::{FlueControl, FlueError, FlueGeometry, FlueRank, FlueVoice};
-use fs_duct::{Duct, Fingering, FingeringTable, Segment, Termination};
+use fs_duct::{Duct, Fingering, FingeringTable, HoleState, Segment, Termination};
 use fs_material::gas::{GasSpec, GasState};
 
 const RATE: u32 = 48_000;
 const BLOCK: usize = 2048;
+/// Bore radius [m]: the duct's radiation law admits `ka < 1` up to the
+/// line's Nyquist, which at 48 kHz means a radius under 2.2 mm.
+const BORE_R: f64 = 0.002;
 /// Authored spatial gain of the jet deflection (no receptivity gain on
 /// the tonal card; labeled authored in the island's provenance).
 const GAIN: f64 = 6.0;
@@ -22,19 +25,33 @@ fn air20() -> GasState {
     GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101_325.0).expect("air")
 }
 
-/// A plain open cylinder (recorder-class bore, no tone holes): the
-/// pipe the island drives. One fingering, zero holes.
+/// A recorder-class open cylinder with one tone hole near the foot,
+/// closed in the only fingering (the chart law needs at least one
+/// hole; a closed hole leaves the bore an open-open pipe of the full
+/// length up to its small chimney compliance).
 fn open_pipe(length_m: f64, radius_m: f64) -> FingeringTable {
     FingeringTable::try_new(
         Duct {
-            segments: vec![Segment::Cylinder {
-                radius: radius_m,
-                length: length_m,
-            }],
+            segments: vec![
+                Segment::Cylinder {
+                    radius: radius_m,
+                    length: 0.9 * length_m,
+                },
+                Segment::ToneHole {
+                    hole_radius: 0.0015,
+                    chimney_height: 0.0015,
+                    bore_radius: radius_m,
+                    state: HoleState::Closed,
+                },
+                Segment::Cylinder {
+                    radius: radius_m,
+                    length: 0.1 * length_m,
+                },
+            ],
         },
         vec![Fingering {
-            label: "open".to_string(),
-            holes: Vec::new(),
+            label: "closed".to_string(),
+            holes: vec![HoleState::Closed],
         }],
     )
     .expect("table admits")
@@ -47,7 +64,7 @@ fn geometry(cut_up_m: f64, labium_offset_m: f64, jet_angle_rad: f64) -> FlueGeom
         cut_up_m,
         labium_offset_m,
         jet_angle_rad,
-        bore_area_m2: core::f64::consts::PI * 0.0095 * 0.0095,
+        bore_area_m2: core::f64::consts::PI * BORE_R * BORE_R,
         mouth_loss_rel: 0.02,
     }
 }
@@ -63,7 +80,7 @@ fn voice(
         GAIN,
         SEED_REL,
         geom,
-        &open_pipe(0.30, 0.0095),
+        &open_pipe(0.30, BORE_R),
         &air20(),
         Termination::UnflangedOpen,
         RATE,
@@ -154,8 +171,8 @@ fn fg_002_energy_ledger_closes_to_roundoff_every_block() {
 fn fg_003_overblowing_ladder_walks_fundamental_to_octave() {
     let card = mint_tonal_interim_card().expect("card");
     let gas = air20();
-    let f1 = pipe_mode_hz(&gas, 0.30, 0.0095, 1.0);
-    let f2 = pipe_mode_hz(&gas, 0.30, 0.0095, 2.0);
+    let f1 = pipe_mode_hz(&gas, 0.30, BORE_R, 1.0);
+    let f2 = pipe_mode_hz(&gas, 0.30, BORE_R, 2.0);
     let mut v = voice(Some(&card), geometry(0.004, 0.0, 0.0), 3, 0).expect("voice");
     let pressures = [60.0, 100.0, 160.0, 250.0, 400.0, 650.0, 1000.0, 1500.0];
     let mut map = Vec::new();
@@ -247,7 +264,7 @@ fn fg_004_voicing_gestures_move_onset_and_duty_in_the_expected_direction() {
 fn fg_005_rank_voices_are_independent_and_order_free() {
     let card = mint_tonal_interim_card().expect("card");
     let gas = air20();
-    let table = open_pipe(0.30, 0.0095);
+    let table = open_pipe(0.30, BORE_R);
     let geoms = [
         geometry(0.004, 0.0, 0.0),
         geometry(0.0045, 0.0001, 0.0),
