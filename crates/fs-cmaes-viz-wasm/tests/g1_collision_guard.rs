@@ -4,6 +4,7 @@
 
 #![cfg(test)]
 
+use fs_scene::BodyRole;
 use fs_cmaes_viz_wasm::g1_walking::{G1TerminationReason, 
     sphere_box_penetration, G1Challenge, G1Task, G1WalkingConfig, G1WalkingEvaluator,
     ObstacleBox,
@@ -40,6 +41,7 @@ fn walking_into_wall_terminates_and_never_penetrates() {
         center_m: [0.30, 0.0, 0.6],
         half_extents_m: [0.05, 2.0, 1.2], // 0.1 m thin wall, tall/wide
         yaw_rad: 0.0,
+        role: BodyRole::KeepOut,
     };
     let cfg = G1WalkingConfig {
         task: G1Task::Walking,
@@ -89,6 +91,7 @@ fn mid_body_wall_is_guarded() {
         center_m: [0.20, 0.0, 0.75],
         half_extents_m: [0.03, 1.5, 1.0],
         yaw_rad: 0.0,
+        role: BodyRole::KeepOut,
     };
     let cfg = G1WalkingConfig {
         task: G1Task::Walking,
