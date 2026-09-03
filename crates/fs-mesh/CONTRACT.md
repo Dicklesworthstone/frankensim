@@ -384,6 +384,49 @@ half-edge round-trips, closed-manifold audits).
     — 378 tets, 154 vertices, 98 Steiner points, 108/108 facets, two interior
     zero-volume tets disclosed — and the axis-aligned bodies are unchanged
     (four-fin comb prism 136 Steiner points).
+22. Sliver repair by dihedral. `repair_flat_tets` treats a tet as removable
+    when it is flat by volume (≤ 1e-9 of the largest, item 19) OR when its
+    smallest dihedral angle is below 1° (`REPAIR_SLIVER_DIHEDRAL_DEG`, the
+    conduction stage's mesh-quality floor): an STL imported at f32 precision
+    (fs-io's weld) leaves the two triangulations of each facet a rounding
+    hair apart, and the tets between them have a volume of 1e-6 of the
+    largest — never "flat" — with dihedrals of 1e-6 degrees. Edge removal
+    conserves the volume of the ring INCLUDING the removed tet (exact for a
+    flat, its own volume for a sliver), and a fan that would mint a flat tet
+    or a sliver is rejected, so every accepted flip strictly improves the
+    census. Boundary drops stay reserved for true zero-volume flats: dropping
+    a sliver would shave its volume off the region. MEASURED 2026-09-03 on
+    the rotated four-fin shell at f32: 28 slivers → 2 (701 tets, exact
+    volume); at f64 the two interior zero-volume tets of item 21 remain. The
+    survivors are coplanar-cluster slivers whose ring apexes all lie in the
+    same near-plane, so every re-triangulation of the ring mints another thin
+    tet (`FS_MESH_TRACE_REPAIR` names the ring, the apex distances and the
+    reason each fan was refused); item 23 clears them.
+23. Needles and Steiner perturbation. Two more repairs finish the job. (a) A
+    needle — a tet with one vertex ON the chord of one of its own edges (an
+    original edge the kernel kept alive beside its midpoint, item 20, or two
+    collinear input segments whose f32 rounding bent the line) — is repaired
+    by removing THAT edge, whose star re-tiles through the on-chord vertex;
+    its planar-quad diagonals are chord sub-edges and were rightly refused.
+    (b) `volumetricize` then spends up to three rounds of Steiner
+    perturbation on whatever survives: ONE Steiner vertex per surviving tet
+    (moving every corner of a co-circular rectangle toward its centre only
+    scales it — measured) is moved 5 % of the tet's shortest edge toward its
+    centroid ALONG its own constraint — its input segment's chord, its wall
+    tile's plane, or freely — the mesh is rebuilt from all points through
+    the same kernel, recovery, carve and repair, and the result is kept only
+    if the survivor count strictly drops; input vertices are never moved and
+    a cancelled rebuild propagates. For the rebuild, `recover_segments`
+    seeds each segment's chain with every mesh vertex already on its chord
+    (a fresh PLC has none, so its chains are unchanged): bisection beside a
+    moved chord vertex would otherwise mint midpoints until the depth cap
+    (measured: 6 segments unrecovered). MEASURED 2026-09-03: rotated four-fin
+    shell at f64 379 tets, smallest dihedral 1.64°, no flat tet, exact volume
+    (survivors 2 → 1 → 0); the same shell at f32 (the CLI's PLC) 704 tets,
+    smallest dihedral 1.09°, no flat tet, exact volume (2 → 0 in one round).
+    `FS_MESH_TRACE_REPAIR` prints each round. Evidence fields for the rounds
+    are deferred to the next conduction-receipt schema bump; the census
+    (`flat_tets`, `min_dihedral_deg`) already discloses the outcome.
 
 ## Error model
 

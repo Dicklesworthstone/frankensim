@@ -485,11 +485,12 @@ fn the_tracked_heatsink_shell_volumetricizes_with_the_exact_volume() {
 /// The rotated twin of the tracked shell (`generate_heatsink_stl.py OUT
 /// --rotate 35 21 --shift 0.1 0.2 0.05`, tracked as `heatsink-rotated.stl`):
 /// four fins, every facet oblique, round-trip-exact coordinates, the seed the
-/// tracked `heatsink-fan-rotated.fsim` declares. MEASURED 2026-09-02 after the
-/// fixes it forced (CONTRACT items 20 and 21): 378 tets, 154 vertices (98
-/// Steiner points), 108/108 facets, exact volume, two interior zero-volume
-/// tets left disclosed by the repair. The counts are pinned so a change in
-/// recovery is a visible event, not a silent drift.
+/// tracked `heatsink-fan-rotated.fsim` declares. MEASURED 2026-09-03 after the
+/// fixes it forced (CONTRACT items 20–23): 379 tets, 154 vertices (98 Steiner
+/// points), 108/108 facets, exact volume, no zero-volume tet left — the two
+/// coplanar-cluster flats the flip repair could not clear go in two rounds
+/// of Steiner perturbation, and the smallest dihedral is 1.64°. The counts
+/// are pinned so a change in recovery is a visible event, not a silent drift.
 #[test]
 fn the_rotated_heatsink_shell_volumetricizes_with_the_exact_volume() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/heatsink-fan");
@@ -508,8 +509,13 @@ fn the_rotated_heatsink_shell_volumetricizes_with_the_exact_volume() {
     let census = audited.labeled().quality();
     assert_eq!(
         (census.tets, census.vertices, census.flat_tets),
-        (378, 154, 2),
+        (379, 154, 0),
         "{}",
+        census.to_json()
+    );
+    assert!(
+        census.min_dihedral_deg > 1.0,
+        "above the conduction floor: {}",
         census.to_json()
     );
     eprintln!(

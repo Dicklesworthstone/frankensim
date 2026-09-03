@@ -1,5 +1,5 @@
 //! The polygon-soup repair suite (plan §7.2): duplicate/degenerate-face
-//! removal, orientation unification (flood fill + global winding vote),
+//! removal, orientation unification (flood fill + signed-volume vote),
 //! and small-hole fan filling — every action logged as a structured
 //! RECEIPT (defect type, location, action) in the format the fs-io
 //! quarantine consumes. Self-intersection FLAGGING is the validity-
@@ -7,8 +7,7 @@
 //! certified); this suite repairs what winding-robust queries cannot
 //! absorb.
 
-use crate::winding::{Soup, winding_exact};
-use fs_geom::Point3;
+use crate::winding::Soup;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
@@ -128,9 +127,8 @@ fn cross3(a: fs_geom::Vec3, b: fs_geom::Vec3) -> fs_geom::Vec3 {
 }
 
 /// Flood-fill orientation unification: neighbors sharing an edge must
-/// traverse it in OPPOSITE directions; components are then globally
-/// oriented by a winding-number vote (outward = the far-field winding of
-/// a point well outside stays near 0 and the centroid stays near 1).
+/// traverse it in OPPOSITE directions; the shell is then globally oriented
+/// outward by the sign of its enclosed volume.
 fn unify_orientation(soup: &mut Soup, receipts: &mut Vec<RepairReceipt>) {
     let nt = soup.triangles.len();
     // Edge → incident (face, direction) map.
@@ -178,17 +176,55 @@ fn unify_orientation(soup: &mut Soup, receipts: &mut Vec<RepairReceipt>) {
             soup.triangles[f].swap(1, 2);
         }
     }
-    // Global sign vote: the winding at the soup centroid should be
-    // positive-ish for an outward-oriented enclosure.
-    let centroid = {
-        let mut c = Point3::new(0.0, 0.0, 0.0);
-        for p in &soup.positions {
-            c = Point3::new(c.x + p.x, c.y + p.y, c.z + p.z);
-        }
+    // Global orientation: the SIGNED enclosed volume of the now-consistent
+    // shell (divergence theorem), negative iff every face points inward.
+    // It is +-V for any closed shell, so the decision is never made from
+    // rounding. The vertex-centroid winding number used before is only
+    // meaningful when that centroid lies inside the solid; for a finned
+    // heatsink, a ring or an L it lies in the air, the winding is a
+    // floating-point residual of order 1e-16 with an arbitrary sign, and the
+    // rotated four-fin heatsink (MEASURED 2026-09-02, fs-io's f32 weld) was
+    // inverted by it — every downstream consumer then saw an inward surface
+    // (fs-mesh's audit refused: retained volume +V against a closed-surface
+    // volume of -V).
+    let signed_volume: f64 = soup
+        .triangles
+        .iter()
+        .map(|&[a, b, c]| {
+            let (a, b, c) = (
+                soup.positions[a as usize],
+                soup.positions[b as usize],
+                soup.positions[c as usize],
+            );
+            let bc = [
+                b.y * c.z - b.z * c.y,
+                b.z * c.x - b.x * c.z,
+                b.x * c.y - b.y * c.x,
+            ];
+            (a.x * bc[0] + a.y * bc[1] + a.z * bc[2]) / 6.0
+        })
+        .sum();
+    if std::env::var_os("FS_REPMESH_TRACE_ORIENT").is_some() {
+        // Diagnostic: the old vote next to the new one, per shell.
         let n = soup.positions.len().max(1) as f64;
-        Point3::new(c.x / n, c.y / n, c.z / n)
-    };
-    if winding_exact(soup, centroid) < 0.0 {
+        let mut c = [0.0f64; 3];
+        for p in &soup.positions {
+            c = [c[0] + p.x / n, c[1] + p.y / n, c[2] + p.z / n];
+        }
+        let centroid_winding =
+            crate::winding::winding_exact(soup, fs_geom::Point3::new(c[0], c[1], c[2]));
+        eprintln!(
+            "TRACE orient: {} faces, {} vertices: signed volume {signed_volume:e}, vertex-centroid winding {centroid_winding:e} (old rule would {})",
+            soup.triangles.len(),
+            soup.positions.len(),
+            if centroid_winding < 0.0 {
+                "flip"
+            } else {
+                "keep"
+            }
+        );
+    }
+    if signed_volume < 0.0 {
         for tri in &mut soup.triangles {
             tri.swap(1, 2);
         }
@@ -196,7 +232,7 @@ fn unify_orientation(soup: &mut Soup, receipts: &mut Vec<RepairReceipt>) {
         receipts.push(RepairReceipt {
             defect: "flipped-patch",
             location: "global".to_string(),
-            action: "inverted every face (centroid winding was negative)".to_string(),
+            action: format!("inverted every face (signed enclosed volume was {signed_volume:e})"),
         });
     }
     if total_flips > 0 {

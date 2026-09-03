@@ -123,9 +123,14 @@ about seventy base solves; the default `auto` fidelity solves once and says
 and translated (`generate_heatsink_stl.py OUT --rotate 35 21 --shift 0.1 0.2
 0.05`): every facet oblique, no coordinate dyadic, which is what real CAD
 looks like. It is the rotation-invariance body of the mesh corpus
-(`crates/fs-mesh/tests/body_corpus.rs`): the mesher recovers all 108 facets
-and audits the exact volume from those bytes (378 tets, 98 Steiner points;
-fs-mesh `CONTRACT.md` items 18–21 record the four kernel and recovery defects
-this one body found). See
+(`crates/fs-mesh/tests/body_corpus.rs`: all 108 facets recovered, exact
+volume, 379 tets, smallest dihedral 1.6°; fs-mesh `CONTRACT.md` items 18–23
+record the kernel, recovery, repair and import-orientation defects this one
+body found) and of the product path: `heatsink-fan-rotated.fsim` is the same
+project on the rotated shell, and the freshness lane solves both and requires
+the two maximum temperatures to agree within 1 mK. MEASURED 2026-09-03:
+axis-aligned 301.99578 K on 713 tets, rotated 301.99562 K on 704 tets, a
+0.16 mK difference on an 8.85 K rise, inside the 1.1 mK discretization bound
+the ladder measured. See
 `examples/cooling-enclosure/README.md` for receipt anatomy and
 `examples/heated-plate/README.md` for the minimal schema tour.

@@ -64,9 +64,21 @@ fs-exec, fs-evidence, fs-alloc, fs-obs.
   nominal samples as `Estimate` (non-finite samples as `NoClaim`) even for a
   clean-looking closed soup; `raycast` is watertight.
 - `repair(soup, max_hole_edges)` — dedupe → degenerate removal →
-  orientation unification (flood fill + centroid winding vote) →
-  fan-fill of small boundary loops, each action a `RepairReceipt`
-  (defect/location/action, the fs-io quarantine format).
+  orientation unification (flood fill for consistency, then the SIGNED
+  enclosed volume of the shell decides the global orientation: negative
+  means inward, every face is inverted and a `global` `flipped-patch`
+  receipt records the volume) → fan-fill of small boundary loops, each
+  action a `RepairReceipt` (defect/location/action, the fs-io quarantine
+  format). The vote used to be the winding number at the vertex centroid;
+  that point lies in the air for a finned heatsink, a ring or an L, the
+  winding there is a rounding residual of order 1e-16 with an arbitrary
+  sign, and the rotated four-fin heatsink was inverted by it (MEASURED
+  2026-09-02 through the STL import; fs-mesh's audit refused the inward
+  region with retained volume +V against a closed-surface volume of −V).
+  Conformance `rmesh-006` pins both starting orientations of a comb;
+  `FS_REPMESH_TRACE_ORIENT=1` prints both votes per shell (on the retained
+  supplier corpus the two agree on all eleven shells that reach the step,
+  so only the receipt text of its one inward body changed).
 - `shapes` (PUBLIC fixture vocabulary): `cube`, `icosphere`,
   deterministic `corrupt` (dups/degens/flips/hole).
 - `dual_contour` / `dual_contour_clipped` / `DcOptions` /

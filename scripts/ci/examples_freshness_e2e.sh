@@ -23,6 +23,11 @@
 #                                QoI budget's discretization term measured
 #                                (interval), the report's convergence
 #                                section present. Minutes in a debug build.
+#   6. heatsink-fan-rotated     — the same project on the shell rotated
+#                                35/21 deg (every facet oblique, f32 import
+#                                precision): imports, solves all seven
+#                                stages, and its T_max matches the
+#                                axis-aligned body's within 1 mK.
 #
 # FROZEN BYTES: the canonical project hashes are frozen as literals in the
 # G0 battery (`crates/fs-cli/tests/cli.rs`,
@@ -190,6 +195,45 @@ check "report JSON twin names the grid-refinement method" \
   grep -Eq 'richardson-gci|eca-hoekstra-data-range|bitwise-agreement' "${WORK}/${LADDER_RUN}.report.json"
 check "report JSON twin has a convergence section" grep -q '"convergence"' "${WORK}/${LADDER_RUN}.report.json"
 check "ladder verdict stays the honest Estimated/indeterminate one" grep -q '"verdict":"indeterminate"' "${WORK}/lrep.json"
+
+# ---- 9. the rotated twin: rotation invariance of the whole product path -----
+# The same shell rotated 35 deg about z and 21 deg about x and translated
+# (generate_heatsink_stl.py --rotate 35 21 --shift 0.1 0.2 0.05): every facet
+# oblique, imported at fs-io's f32 weld precision. It must import, mesh
+# (fs-mesh CONTRACT items 18-23), solve every stage, and reproduce the
+# axis-aligned body's maximum temperature on a different mesh within the
+# discretization scale. TOLERANCE 1 mK: MEASURED 2026-09-03 (binary of that
+# day, axis 713 tets vs rotated 704 tets) |dT_max| = 0.157 mK on a rise of
+# 8.85 K, ~6x headroom, and the ladder's data-range discretization bound on
+# this body is 1.1 mK — two meshes of one body agreeing better than that
+# bound is the honest expectation.
+ROTATED="${REPO_ROOT}/examples/heatsink-fan/heatsink-fan-rotated.fsim"
+ROTATED_STL="${REPO_ROOT}/examples/heatsink-fan/heatsink-rotated.stl"
+check "heatsink-fan-rotated validates ok" validate_ok "${ROTATED}"
+rotated_import_ok() {
+  "${BINARY}" --json import "${ROTATED}" "${ROTATED_STL}" "${WORK}/rotated.db" --unit m --max-hole-edges 0 > "${WORK}/rimp.json" 2> "${WORK}/rimp.err"
+}
+check "rotated twin imports into its own ledger" rotated_import_ok
+rotated_solve_completes() {
+  "${BINARY}" --json solve "${ROTATED}" "${WORK}/rotated.db" --materials "${PACK}" > "${WORK}/rs.json" 2> "${WORK}/rs.err"
+}
+check "rotated twin solves every stage (oblique facets, f32 import precision)" rotated_solve_completes
+check "rotated solve reports seven completed stages" grep -q '"stages_completed":7' "${WORK}/rs.json"
+ROTATED_RUN="$(grep -oE '"run":"[0-9a-f]{64}"' "${WORK}/rs.json" | head -1 | cut -d'"' -f4)"
+rotated_report_ok() {
+  (cd "${WORK}" && "${BINARY}" --json report "${ROTATED_RUN}" "${WORK}/rotated.db" > "${WORK}/rrep.json" 2> "${WORK}/rrep.err")
+}
+check "rotated report exports" rotated_report_ok
+t_max_of() {
+  grep -oE '"temperature_max": ?"[0-9.]+"' "$1" | head -1 | grep -oE '[0-9]+\.[0-9]+'
+}
+AXIS_TMAX="$(t_max_of "${WORK}/${RUN_ID}.report.json")"
+ROTATED_TMAX="$(t_max_of "${WORK}/${ROTATED_RUN}.report.json")"
+rotation_invariant() {
+  test -n "${AXIS_TMAX}" && test -n "${ROTATED_TMAX}" \
+    && awk -v a="${AXIS_TMAX}" -v r="${ROTATED_TMAX}" 'BEGIN { d = a - r; if (d < 0) d = -d; exit !(d <= 0.001) }'
+}
+check "rotated T_max matches the axis-aligned body within 1 mK (axis ${AXIS_TMAX:-?} K, rotated ${ROTATED_TMAX:-?} K)" rotation_invariant
 
 # ------------------------------------------------------------------- verdict
 log summary "checks=${CHECKS} failures=${FAILURES}"

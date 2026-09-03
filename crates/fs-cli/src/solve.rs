@@ -4266,6 +4266,7 @@ fn build_conduction_surfaces(
 fn region_specs(
     spec: &ProjectSpec,
     setup: &ConductionSetup,
+    positions: &[[f64; 3]],
     surfaces: &BTreeMap<String, AssignmentSurface>,
 ) -> Result<(Vec<fs_mesh::RegionSpec>, BTreeMap<String, u32>), SolveRefusal> {
     let seeds: BTreeMap<&str, [f64; 3]> = setup
@@ -4319,7 +4320,28 @@ fn region_specs(
                 "repair the closed surface so it encloses a finite nonzero volume",
             ));
         }
-        let triangles = if volume > 0.0 {
+        // Orient the region outward from the SIGNED volume of its own
+        // surface (divergence theorem). `enclosed_volume` above is fs-io's
+        // absolute value, so it cannot tell inward from outward; an inward
+        // promoted surface reached the mesher that way (MEASURED 2026-09-02:
+        // the rotated four-fin heatsink, inverted by the import repair's
+        // centroid-winding vote, refused at fs-mesh's volume identity).
+        let signed = surface
+            .triangles
+            .iter()
+            .map(|&[a, b, c]| {
+                let (a, b, c) = (
+                    positions[a as usize],
+                    positions[b as usize],
+                    positions[c as usize],
+                );
+                a[0] * (b[1] * c[2] - b[2] * c[1])
+                    + a[1] * (b[2] * c[0] - b[0] * c[2])
+                    + a[2] * (b[0] * c[1] - b[1] * c[0])
+            })
+            .sum::<f64>()
+            / 6.0;
+        let triangles = if signed >= 0.0 {
             surface.triangles.clone()
         } else {
             surface
@@ -4990,7 +5012,7 @@ fn conduction_receipt(
             ));
         }
         let (positions, surfaces) = build_conduction_surfaces(spec, &mut soups, resolution)?;
-        let (regions, region_ids) = region_specs(spec, setup, &surfaces)?;
+        let (regions, region_ids) = region_specs(spec, setup, &positions, &surfaces)?;
         if context
             .import_sources
             .iter()

@@ -2428,7 +2428,7 @@ fn sc_008a_realization_budgets_and_carreau_domains_fail_closed() {
         );
         let scenario = Scenario {
             ensembles: vec![ensemble],
-            ..Scenario::new(format!("bad-carreau-{label}"), 1, Environment::earth_lab())
+            ..Scenario::new(&format!("bad-carreau-{label}"), 1, Environment::earth_lab())
         };
         assert!(
             scenario
