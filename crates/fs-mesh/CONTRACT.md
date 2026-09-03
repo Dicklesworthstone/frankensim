@@ -384,6 +384,25 @@ half-edge round-trips, closed-manifold audits).
     — 378 tets, 154 vertices, 98 Steiner points, 108/108 facets, two interior
     zero-volume tets disclosed — and the axis-aligned bodies are unchanged
     (four-fin comb prism 136 Steiner points).
+22. Sliver repair by dihedral. `repair_flat_tets` treats a tet as removable
+    when it is flat by volume (≤ 1e-9 of the largest, item 19) OR when its
+    smallest dihedral angle is below 1° (`REPAIR_SLIVER_DIHEDRAL_DEG`, the
+    conduction stage's mesh-quality floor): an STL imported at f32 precision
+    (fs-io's weld) leaves the two triangulations of each facet a rounding
+    hair apart, and the tets between them have a volume of 1e-6 of the
+    largest — never "flat" — with dihedrals of 1e-6 degrees. Edge removal
+    conserves the volume of the ring INCLUDING the removed tet (exact for a
+    flat, its own volume for a sliver), and a fan that would mint a flat tet
+    or a sliver is rejected, so every accepted flip strictly improves the
+    census. Boundary drops stay reserved for true zero-volume flats: dropping
+    a sliver would shave its volume off the region. MEASURED 2026-09-03 on
+    the rotated four-fin shell at f32: 28 slivers → 2 (701 tets, exact
+    volume); at f64 the two interior zero-volume tets of item 21 remain. The
+    survivors are coplanar-cluster slivers whose ring apexes all lie in the
+    same near-plane, so every re-triangulation of the ring mints another thin
+    tet (`FS_MESH_TRACE_REPAIR` names the ring, the apex distances and the
+    reason each fan was refused); their vertices are Steiner points, and
+    nudging those within their facet is the next increment.
 
 ## Error model
 

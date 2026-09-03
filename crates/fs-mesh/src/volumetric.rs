@@ -24,6 +24,11 @@ use std::fmt;
 /// vertex is Positive (interior below the facet).
 const FACET: [[usize; 3]; 4] = [[1, 3, 2], [0, 2, 3], [0, 3, 1], [0, 1, 2]];
 
+/// Smallest dihedral angle (degrees) below which `repair_flat_tets` treats a
+/// tet as a sliver to remove, whatever its volume. Matches the conduction
+/// stage's mesh-quality floor: a tet this thin pins its nodes like a flat one.
+const REPAIR_SLIVER_DIHEDRAL_DEG: f64 = 1.0;
+
 /// Stable region identity. Caller-chosen, unique within one PLC.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RegionId(pub u32);
@@ -1049,8 +1054,19 @@ impl LabeledTetComplex {
             .iter()
             .map(|tet| volume(&self.positions, *tet))
             .fold(0.0f64, f64::max);
-        let is_flat =
+        // A tet is repaired when it is flat by volume OR a sliver by dihedral:
+        // the two triangulations of a facet that an f32 import left a
+        // rounding hair apart make tets whose volume is 1e-6 of the largest
+        // (never "flat") and whose smallest dihedral is 1e-6 degrees. Both
+        // pin the P1 solve the same way; the conduction floor is 1 degree.
+        let volume_flat =
             |positions: &[[f64; 3]], tet: [u32; 4]| volume(positions, tet) <= 1e-9 * largest;
+        let is_flat = |positions: &[[f64; 3]], tet: [u32; 4]| {
+            volume_flat(positions, tet) || {
+                let p: [[f64; 3]; 4] = core::array::from_fn(|k| positions[tet[k] as usize]);
+                crate::exude::min_dihedral_deg(&p) < REPAIR_SLIVER_DIHEDRAL_DEG
+            }
+        };
         report.found = u32::try_from(
             self.tets
                 .iter()
@@ -1088,8 +1104,33 @@ impl LabeledTetComplex {
             key.sort_unstable();
             let region = self.region_of_tet[flat_index];
             let flipped = self.try_remove_flat(flat_index, flat, region, &by_face, &walls, largest);
-            if !flipped && !self.drop_boundary_flat(flat_index, region, &by_face, &walls) {
+            // Dropping removes the tet's volume from the region: exact only
+            // for a zero-volume flat, so a sliver that resists every flip
+            // stays disclosed rather than shaved off.
+            if !flipped
+                && !(volume_flat(&self.positions, flat)
+                    && self.drop_boundary_flat(flat_index, region, &by_face, &walls))
+            {
                 gave_up.insert(key);
+            }
+        }
+        if std::env::var_os("FS_MESH_TRACE_REPAIR").is_some() {
+            let walls: BTreeSet<[u32; 3]> =
+                self.source_faces.iter().map(|(face, _)| *face).collect();
+            for tet in &self.tets {
+                if !is_flat(&self.positions, *tet) {
+                    continue;
+                }
+                let p: [[f64; 3]; 4] = core::array::from_fn(|k| self.positions[tet[k] as usize]);
+                let wall_faces = tet_sorted_faces(*tet)
+                    .iter()
+                    .filter(|face| walls.contains(*face))
+                    .count();
+                eprintln!(
+                    "TRACE repair: remaining {tet:?}: min dihedral {:.3e} deg, volume/largest {:.3e}, wall faces {wall_faces}",
+                    crate::exude::min_dihedral_deg(&p),
+                    volume(&self.positions, *tet) / largest
+                );
             }
         }
         // Outcomes, not events: a census after the loop is what the receipt
@@ -1358,8 +1399,13 @@ impl LabeledTetComplex {
             }
             return false;
         }
+        // The removed set is the ring AND the flat tet: their union is the
+        // polyhedron the fan re-tiles, so conservation must include the flat
+        // tet's own volume (zero for a true flat, 1e-6 of the largest for an
+        // f32-import sliver).
         let old_volume: f64 = ring
             .iter()
+            .chain(core::iter::once(&flat_index))
             .map(|&index| tet_volume_triple(&self.positions, self.tets[index]).abs())
             .sum();
         let oriented = |tet: [u32; 4]| -> Option<[u32; 4]> {
@@ -1370,6 +1416,7 @@ impl LabeledTetComplex {
             }
         };
         let m = polygon.len();
+        let (mut rejected_orient, mut rejected_thin, mut rejected_volume) = (0u32, 0u32, 0u32);
         // Try a fan from each polygon vertex.
         for pivot in 0..m {
             let mut new_tets: Vec<[u32; 4]> = Vec::with_capacity(2 * (m - 2));
@@ -1392,17 +1439,27 @@ impl LabeledTetComplex {
                 }
             }
             if !ok {
+                rejected_orient += 1;
                 continue;
             }
             let volumes: Vec<f64> = new_tets
                 .iter()
                 .map(|tet| tet_volume_triple(&self.positions, *tet).abs())
                 .collect();
-            if volumes.iter().any(|&volume| volume <= 1e-9 * largest) {
+            // A fan that mints a flat tet or a sliver is no repair.
+            if new_tets.iter().zip(&volumes).any(|(tet, &volume)| {
+                volume <= 1e-9 * largest || {
+                    let p: [[f64; 3]; 4] =
+                        core::array::from_fn(|k| self.positions[tet[k] as usize]);
+                    crate::exude::min_dihedral_deg(&p) < REPAIR_SLIVER_DIHEDRAL_DEG
+                }
+            }) {
+                rejected_thin += 1;
                 continue;
             }
             let new_volume: f64 = volumes.iter().sum();
             if (new_volume - old_volume).abs() > 1e-9 * largest.max(old_volume) {
+                rejected_volume += 1;
                 continue;
             }
             // Commit: overwrite ring tets in place, drop the rest and the flat tet.
@@ -1433,6 +1490,31 @@ impl LabeledTetComplex {
                 self.region_of_tet.pop();
             }
             return true;
+        }
+        if std::env::var_os("FS_MESH_TRACE_REPAIR").is_some() {
+            let apex_heights: Vec<String> = polygon
+                .iter()
+                .map(|&w| {
+                    let (pu, pv, pw) = (
+                        self.positions[u as usize],
+                        self.positions[v as usize],
+                        self.positions[w as usize],
+                    );
+                    let d = sub3(pv, pu);
+                    let dd = dot3(d, d);
+                    let t = dot3(sub3(pw, pu), d) / dd;
+                    let foot = [
+                        t.mul_add(d[0], pu[0]),
+                        t.mul_add(d[1], pu[1]),
+                        t.mul_add(d[2], pu[2]),
+                    ];
+                    format!("{w}:{:.2e}", dot3(sub3(pw, foot), sub3(pw, foot)).sqrt())
+                })
+                .collect();
+            eprintln!(
+                "TRACE repair:   flat #{flat_index} edge {edge:?}: ring of {m} (polygon {polygon:?}, apex distances from the edge {}) — no fan accepted: {rejected_orient} not positively oriented, {rejected_thin} minted a thin tet, {rejected_volume} changed the volume",
+                apex_heights.join(" ")
+            );
         }
         false
     }
