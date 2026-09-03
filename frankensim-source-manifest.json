@@ -2,7 +2,7 @@
   "schema": "frankensim-source-manifest-v1",
   "identity_domain": "org.frankensim.xtask.source-manifest.v1",
   "identity_version": 1,
-  "manifest_identity": "e39299ca008f8a8eecb2f1261fbd17c137578558063dfe8d33e7dab0c9e059ca",
+  "manifest_identity": "6ccb91e6fb91dfd8896b5bddede9a1eeba3e130920097b5056b42e1bcfa92140",
   "bead_id": "frankensim-extreal-program-f85xj.13.2",
   "authority": "canonical structural inventory over exact Git-index non-tracker bytes; release observations are intentionally unbound here",
   "release_binding": {
@@ -15,7 +15,7 @@
     "repository": "https://github.com/Dicklesworthstone/frankensim",
     "workspace_version": "0.0.1",
     "source_root_domain": "org.frankensim.xtask.source-root.v1",
-    "source_root": "cd35d3a8950cfe0ad1ab7cbac02fe42448ac818e37cb9fe7cfbf3bb682832705",
+    "source_root": "e0833601078f608d3c2705e0dc41225436f44bd81d3c26dfbb182da5c80a181b",
     "tracked_file_count": 3235,
     "excluded_paths": [".beads/**", "frankensim-source-manifest.json", "frankensim-source-manifest.spdx.json"],
     "files": [
@@ -748,7 +748,7 @@
       {"path": "crates/fs-dwr/src/mark.rs", "git_mode": "100644", "bytes": 1240, "content_blake3": "8ca3fe99c9db7f6952db7d2b69a036da13d80f86766bb44a18c3110b83033f1f"},
       {"path": "crates/fs-dwr/src/tiles.rs", "git_mode": "100644", "bytes": 5420, "content_blake3": "4c92c294e7b57a3999ea22061081cf9689260dc3f86f56d823b62cd860523c8b"},
       {"path": "crates/fs-dwr/tests/battery.rs", "git_mode": "100644", "bytes": 18970, "content_blake3": "e657e9af1a2cd895693abc3491235ed1141836c0a02cba78c80a4e772b05dc94"},
-      {"path": "crates/fs-dwr/tests/elasticity.rs", "git_mode": "100644", "bytes": 28131, "content_blake3": "e4debaa0220a7628fcb2246c0ce756228e5d2e79b2c30dcdd93d195a3973b69e"},
+      {"path": "crates/fs-dwr/tests/elasticity.rs", "git_mode": "100644", "bytes": 28074, "content_blake3": "0f013758a4f114e6e5c6c680d2026471e29c23231dd5375801cd304827dffce7"},
       {"path": "crates/fs-edison-wasm/CONTRACT.md", "git_mode": "100644", "bytes": 2082, "content_blake3": "8bb5f9617aad135db5b20e4328660814f9a08ef66e5283d3844da048b13ba778"},
       {"path": "crates/fs-edison-wasm/Cargo.lock", "git_mode": "100644", "bytes": 46294, "content_blake3": "d787327c4c602fc763167f5f1d92e1934ae8b2f2c7b55be809d35f7769b2d26f"},
       {"path": "crates/fs-edison-wasm/Cargo.toml", "git_mode": "100644", "bytes": 714, "content_blake3": "da946d577bc4942b0fbf459e037b584e444e676adad0eadad96a30f343b9c3cc"},
