@@ -465,7 +465,7 @@ pub fn solve_and_grade(
         }
         #[allow(clippy::cast_precision_loss)]
         let circ = std::f64::consts::TAU * r / samples as f64;
-        grads.push(acc * circ);
+        grads.push(-(acc * circ));
     }
     let euclidean_rel_residual =
         sol.euclidean_rel_residual()

@@ -546,10 +546,14 @@ fn np_012_finite_gap_retains_estimate_authority_and_nonlocal_applicability() {
         panic!("test request remains finite-gap");
     };
     *response_identity = hash_domain("test/finite-gap-response", b"different-node");
+    // Copy the identity out so the mutable borrow of `law` ends before the
+    // request is evaluated (the borrow is what the assertion is about, not
+    // what it needs to hold).
+    let expected_identity = *response_identity;
     let different_receipt = point(different_response.evaluate().unwrap()).unwrap();
     assert_eq!(
         different_receipt.finite_gap_response_identity,
-        Some(*response_identity)
+        Some(expected_identity)
     );
     assert_ne!(different_receipt.receipt_id, receipt.receipt_id);
 

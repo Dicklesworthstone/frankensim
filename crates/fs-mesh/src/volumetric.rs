@@ -1081,40 +1081,57 @@ impl LabeledTetComplex {
             return report;
         }
         let mut gave_up: BTreeSet<[u32; 4]> = BTreeSet::new();
-        for _round in 0..32 {
+        // Attempts are bounded by the census, not by a fixed round count: a
+        // hard 32 silently capped the pass at 32 removals however many
+        // candidates there were (MEASURED 2026-09-03 on a 128-segment
+        // tessellated cylinder: 767 found, 17 repaired). A refused attempt
+        // changes nothing, so the face map is rebuilt only after a commit and
+        // a body full of irreparable slivers costs one sweep, not one rebuild
+        // per candidate.
+        let attempt_cap = report.found.saturating_mul(2).saturating_add(64);
+        let mut attempts = 0u32;
+        'sweeps: loop {
             report.rounds += 1;
-            // Walls are re-read per round: dropping a boundary flat tet moves
+            // Walls are re-read per sweep: dropping a boundary flat tet moves
             // two wall faces (see `drop_boundary_flat`).
             let walls: BTreeSet<[u32; 3]> =
                 self.source_faces.iter().map(|(face, _)| *face).collect();
-            // Face → incident tet indices, rebuilt per flip because a flip
-            // changes three tets.
             let mut by_face: BTreeMap<[u32; 3], Vec<usize>> = BTreeMap::new();
             for (index, tet) in self.tets.iter().enumerate() {
                 for face in tet_sorted_faces(*tet) {
                     by_face.entry(face).or_default().push(index);
                 }
             }
-            let Some(flat_index) = self.tets.iter().enumerate().find_map(|(index, tet)| {
-                let mut key = *tet;
+            let mut committed = false;
+            for flat_index in 0..self.tets.len() {
+                let flat = self.tets[flat_index];
+                let mut key = flat;
                 key.sort_unstable();
-                (is_flat(&self.positions, *tet) && !gave_up.contains(&key)).then_some(index)
-            }) else {
-                break;
-            };
-            let flat = self.tets[flat_index];
-            let mut key = flat;
-            key.sort_unstable();
-            let region = self.region_of_tet[flat_index];
-            let flipped = self.try_remove_flat(flat_index, flat, region, &by_face, &walls, largest);
-            // Dropping removes the tet's volume from the region: exact only
-            // for a zero-volume flat, so a sliver that resists every flip
-            // stays disclosed rather than shaved off.
-            if !flipped
-                && !(volume_flat(&self.positions, flat)
-                    && self.drop_boundary_flat(flat_index, region, &by_face, &walls))
-            {
+                if !is_flat(&self.positions, flat) || gave_up.contains(&key) {
+                    continue;
+                }
+                if attempts >= attempt_cap {
+                    break 'sweeps;
+                }
+                attempts += 1;
+                let region = self.region_of_tet[flat_index];
+                let flipped =
+                    self.try_remove_flat(flat_index, flat, region, &by_face, &walls, largest);
+                // Dropping removes the tet's volume from the region: exact
+                // only for a zero-volume flat, so a sliver that resists every
+                // flip stays disclosed rather than shaved off.
+                if flipped
+                    || (volume_flat(&self.positions, flat)
+                        && self.drop_boundary_flat(flat_index, region, &by_face, &walls))
+                {
+                    // The mesh changed under `by_face`: re-sweep.
+                    committed = true;
+                    break;
+                }
                 gave_up.insert(key);
+            }
+            if !committed {
+                break;
             }
         }
         if std::env::var_os("FS_MESH_TRACE_REPAIR").is_some() {
@@ -1859,6 +1876,13 @@ const PERTURB_ROUNDS: u32 = 3;
 /// enough to stay between the vertex's chord or facet neighbours.
 const PERTURB_FRACTION: f64 = 0.05;
 
+/// Steiner vertices one perturbation round may move. This is a FINISHING
+/// step for the last few slivers, not a mesh-quality tool: a body whose
+/// tessellation is intrinsically sliver-rich (a cylinder's co-circular rims)
+/// needs refinement, and moving hundreds of vertices at once would make each
+/// rebuild a different mesh rather than a repair of this one.
+const PERTURB_MAX_VERTICES: usize = 32;
+
 /// The complex's positions with every Steiner vertex of a surviving flat or
 /// sliver moved toward that tet's centroid along its own constraint; `None`
 /// when no survivor has a Steiner vertex to move.
@@ -1880,12 +1904,25 @@ fn perturbed_points(
             crate::exude::min_dihedral_deg(&p) < REPAIR_SLIVER_DIHEDRAL_DEG
         }
     };
-    // Vertex → (target direction, step), first survivor wins (deterministic:
-    // tets are in canonical order).
+    // Survivors worst-dihedral first, so a body with hundreds of them (a
+    // tessellated cylinder's co-circular rims) still spends its bounded
+    // budget on the worst, and the "strictly fewer survivors" test stays a
+    // meaningful comparison rather than a global shotgun.
+    let mut worst: Vec<(u64, [u32; 4])> = labeled
+        .tets
+        .iter()
+        .filter(|tet| survivor(**tet))
+        .map(|tet| {
+            let p: [[f64; 3]; 4] = core::array::from_fn(|k| positions[tet[k] as usize]);
+            (crate::exude::min_dihedral_deg(&p).to_bits(), *tet)
+        })
+        .collect();
+    worst.sort_unstable();
+    // Vertex → (target direction, step), first survivor wins.
     let mut moves: BTreeMap<u32, ([f64; 3], f64)> = BTreeMap::new();
-    for tet in &labeled.tets {
-        if !survivor(*tet) {
-            continue;
+    for (_, tet) in &worst {
+        if moves.len() >= PERTURB_MAX_VERTICES {
+            break;
         }
         let p: [[f64; 3]; 4] = core::array::from_fn(|k| positions[tet[k] as usize]);
         let centroid = tet_centroid(positions, *tet);
