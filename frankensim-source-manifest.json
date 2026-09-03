@@ -2,7 +2,7 @@
   "schema": "frankensim-source-manifest-v1",
   "identity_domain": "org.frankensim.xtask.source-manifest.v1",
   "identity_version": 1,
-  "manifest_identity": "7cc6bf6baf3179da5bf22736e404ff4f7d14b41971a9ab7a49f59f5244141558",
+  "manifest_identity": "897311b65b62a45f9984a3441d7cc844f66eeb854b3a90984c1870419eca80bc",
   "bead_id": "frankensim-extreal-program-f85xj.13.2",
   "authority": "canonical structural inventory over exact Git-index non-tracker bytes; release observations are intentionally unbound here",
   "release_binding": {
@@ -15,7 +15,7 @@
     "repository": "https://github.com/Dicklesworthstone/frankensim",
     "workspace_version": "0.0.1",
     "source_root_domain": "org.frankensim.xtask.source-root.v1",
-    "source_root": "80e96baae3650d25adb28e5a50912b74618ae73785a3025cd19f9666822c001a",
+    "source_root": "e344940dace0dfa9c1b5bdd13bb0467fafba7dbc06cccb54fafc687bc11c77a0",
     "tracked_file_count": 3234,
     "excluded_paths": [".beads/**", "frankensim-source-manifest.json", "frankensim-source-manifest.spdx.json"],
     "files": [
@@ -25,7 +25,7 @@
       {"path": ".github/workflows/ci-self-test.yml", "git_mode": "100644", "bytes": 2547, "content_blake3": "be2304e47a075b2462506f70356f61dbf6d959fdcfdec9232a5c929a18fa6a0b"},
       {"path": ".github/workflows/ci.yml", "git_mode": "100644", "bytes": 2937, "content_blake3": "8cd8482ed74fd98589031758c7e2f5b05678733b1a426da5edb4d32d94714d85"},
       {"path": ".github/workflows/nightly.yml", "git_mode": "100644", "bytes": 2627, "content_blake3": "0c56e84ad43c85574a076003c0d97e0d93bd5025bec9fad67c2083526cd61334"},
-      {"path": ".gitignore", "git_mode": "100644", "bytes": 3515, "content_blake3": "57dce0c757325918afad06dfee07ede69983adda5a1c52436aee3144296b9e3b"},
+      {"path": ".gitignore", "git_mode": "100644", "bytes": 3593, "content_blake3": "b15b5e4f1e23661c5370cf0437afa6a2b0d367bba8abda8004af358e5fcc66a0"},
       {"path": "AGENTS.md", "git_mode": "100644", "bytes": 39721, "content_blake3": "bcd6e37f1d1a339adcd0c1c88022e5c0842c2e92696d5e77d28ac0548f3c4ef4"},
       {"path": "CHANGELOG.md", "git_mode": "100644", "bytes": 162362, "content_blake3": "845440be462cbd5b3a82e7981989c97747f85dfaeead9f7b5518ecb5abe40f9e"},
       {"path": "CHANGELOG_RESEARCH.md", "git_mode": "100644", "bytes": 24075, "content_blake3": "70bfadc3e204c233e7eb3633ba22f140ce3ec5f45cac997f225d2021430beae3"},
