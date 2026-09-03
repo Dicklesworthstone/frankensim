@@ -66,7 +66,10 @@ impl JsonValue {
         if text.len() > MAX_BYTES {
             return Err(JsonReadError {
                 offset: 0,
-                what: format!("document is {} bytes, above the {MAX_BYTES}-byte bound", text.len()),
+                what: format!(
+                    "document is {} bytes, above the {MAX_BYTES}-byte bound",
+                    text.len()
+                ),
             });
         }
         let mut parser = Parser {
@@ -86,9 +89,7 @@ impl JsonValue {
     #[must_use]
     pub fn get(&self, key: &str) -> Option<&JsonValue> {
         match self {
-            JsonValue::Object(members) => members
-                .iter()
-                .find_map(|(k, v)| (k == key).then_some(v)),
+            JsonValue::Object(members) => members.iter().find_map(|(k, v)| (k == key).then_some(v)),
             _ => None,
         }
     }
@@ -199,7 +200,9 @@ impl Parser<'_> {
             Some(b'[') => self.array(depth),
             Some(b'"') => self.string().map(JsonValue::Str),
             Some(b't') => self.expect_literal("true").map(|()| JsonValue::Bool(true)),
-            Some(b'f') => self.expect_literal("false").map(|()| JsonValue::Bool(false)),
+            Some(b'f') => self
+                .expect_literal("false")
+                .map(|()| JsonValue::Bool(false)),
             Some(b'n') => self.expect_literal("null").map(|()| JsonValue::Null),
             Some(b'-' | b'0'..=b'9') => self.number(),
             Some(other) => Err(self.error(format!("unexpected byte 0x{other:02x}"))),
@@ -360,9 +363,11 @@ impl Parser<'_> {
                                 if !(0xDC00..=0xDFFF).contains(&low) {
                                     return Err(self.error("invalid low surrogate"));
                                 }
-                                let code =
-                                    0x10000 + ((u32::from(unit) - 0xD800) << 10) + (u32::from(low) - 0xDC00);
-                                char::from_u32(code).ok_or_else(|| self.error("invalid code point"))?
+                                let code = 0x10000
+                                    + ((u32::from(unit) - 0xD800) << 10)
+                                    + (u32::from(low) - 0xDC00);
+                                char::from_u32(code)
+                                    .ok_or_else(|| self.error("invalid code point"))?
                             } else if (0xDC00..=0xDFFF).contains(&unit) {
                                 return Err(self.error("unpaired low surrogate"));
                             } else {

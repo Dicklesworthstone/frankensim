@@ -790,10 +790,7 @@ fn mesh_quality_refusal(
             format!(
                 "the recovered mesh's smallest dihedral angle is {:.4} deg, below the {} deg \
                  floor (tets {}, {} sliver(s) below 5 deg)",
-                census.min_dihedral_deg,
-                min_dihedral_floor,
-                census.tets,
-                census.slivers_below_5deg
+                census.min_dihedral_deg, min_dihedral_floor, census.tets, census.slivers_below_5deg
             ),
             "repair or re-tessellate the region surface near the degenerate element, or raise \
              budgets.memory_bytes; mesh refinement that lifts sliver angles is not yet part of \
