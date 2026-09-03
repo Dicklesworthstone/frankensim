@@ -536,3 +536,38 @@ fn step_faceted_009_inconsistent_plane_placement_and_direction_refuse() {
         }
     });
 }
+
+#[test]
+fn step_faceted_010_heatsink_step_decodes_to_exact_shell() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/heatsink-fan/heatsink.step");
+    let bytes = std::fs::read(&path).expect("read heatsink.step");
+    let parsed_doc = parse_step(&bytes).expect("parse heatsink.step");
+    let gate = CancelGate::new_clock_free();
+    with_cx(&gate, |cx| {
+        let decoded = decode_faceted_brep_with_limits(
+            &parsed_doc,
+            5001,
+            StepFacetedLimits::default(),
+            cx,
+        )
+        .expect("decode heatsink.step");
+        assert_eq!(decoded.soup().triangles.len(), 108);
+        assert_eq!(decoded.soup().positions.len(), 56);
+        let fp = parsed_doc.receipt().source_fingerprint();
+        println!("heatsink.step source fingerprint: {:016x}", fp);
+
+        let outcome = import_faceted_brep(
+            &parsed_doc,
+            5001,
+            UnitId::try_new("m".to_string()).unwrap(),
+            0.005,
+            cx,
+        )
+        .expect("heatsink.step imports cleanly through quarantine and SDF generation");
+        assert_eq!(outcome.import().repaired_soup().triangles.len(), 108);
+        assert_eq!(outcome.import().repaired_soup().positions.len(), 56);
+    });
+}
+
+

@@ -1,0 +1,18 @@
+{
+  "generator": "examples/heatsink-fan/generate_heatsink_step.py",
+  "generator_version": "1.0.0",
+  "command": "python3 examples/heatsink-fan/generate_heatsink_step.py /Users/jemanuel/projects/frankensim/examples/heatsink-fan/heatsink.step 4",
+  "created_utc": "2026-09-03T00:00:00Z",
+  "entity_type": "FACETED_BREP",
+  "root_id": 5001,
+  "shell_id": 5000,
+  "vertex_count": 56,
+  "face_count": 108,
+  "volume_m3": 5.280000000000002e-05,
+  "format": "step",
+  "source_fingerprint": "2ad6dfc2e3e7ff92",
+  "parser_version": "step-triangular-faceted-brep-v2",
+  "schema": "CONFIG_CONTROL_DESIGN",
+  "unit": "m",
+  "manifold": true
+}
