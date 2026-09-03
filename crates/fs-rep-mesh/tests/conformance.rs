@@ -538,6 +538,162 @@ fn rmesh_004_dipole_approximation_tracks_exact_within_declared_error() {
     );
 }
 
+/// A closed comb (base plate with two fins) as an indexed soup, oriented
+/// outward when `outward` is true and inward otherwise. Its vertex centroid
+/// lies in the air between the fins, which is what makes it the falsifier
+/// for `repair`'s global orientation step.
+fn comb_soup(outward: bool) -> fs_rep_mesh::Soup {
+    let mut positions: Vec<Point3> = Vec::new();
+    let mut index: std::collections::BTreeMap<[u64; 3], u32> = std::collections::BTreeMap::new();
+    let mut triangles: Vec<[u32; 3]> = Vec::new();
+    let mut vid = |p: [f64; 3]| -> u32 {
+        *index
+            .entry([p[0].to_bits(), p[1].to_bits(), p[2].to_bits()])
+            .or_insert_with(|| {
+                positions.push(Point3::new(p[0], p[1], p[2]));
+                u32::try_from(positions.len() - 1).expect("small soup")
+            })
+    };
+    for (corners, normal) in comb_quads() {
+        let [a, b, c, d] = corners;
+        let u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+        let v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+        let n = [
+            u[1] * v[2] - u[2] * v[1],
+            u[2] * v[0] - u[0] * v[2],
+            u[0] * v[1] - u[1] * v[0],
+        ];
+        let dot = n[0] * normal[0] + n[1] * normal[1] + n[2] * normal[2];
+        assert!(dot != 0.0, "degenerate quad");
+        let (a, b, c, d) = if (dot < 0.0) == outward {
+            (a, d, c, b)
+        } else {
+            (a, b, c, d)
+        };
+        let (ia, ib, ic, id) = (vid(a), vid(b), vid(c), vid(d));
+        triangles.push([ia, ib, ic]);
+        triangles.push([ia, ic, id]);
+    }
+    fs_rep_mesh::Soup {
+        positions,
+        triangles,
+    }
+}
+
+/// The comb's quads (four corners in any winding, outward normal): the base
+/// plate 80 x 60 x 5 mm with two fins 6 x 60 x 20 mm, every quad an
+/// axis-aligned rectangle of the breakpoint grid, so the shell is closed with
+/// no T-junctions.
+fn comb_quads() -> Vec<([[f64; 3]; 4], [f64; 3])> {
+    let (base_x, base_y, base_z, fin_w, fin_h) = (0.080, 0.060, 0.005, 0.006, 0.020);
+    let xs = [0.0, 0.008, 0.008 + fin_w, 0.026, 0.026 + fin_w, base_x];
+    let top = base_z + fin_h;
+    let rect_z =
+        |x0: f64, x1: f64, z: f64| [[x0, 0.0, z], [x1, 0.0, z], [x1, base_y, z], [x0, base_y, z]];
+    let rect_y = |x0: f64, x1: f64, y: f64, z0: f64, z1: f64| {
+        [[x0, y, z0], [x1, y, z0], [x1, y, z1], [x0, y, z1]]
+    };
+    let rect_x =
+        |x: f64, z0: f64, z1: f64| [[x, 0.0, z0], [x, base_y, z0], [x, base_y, z1], [x, 0.0, z1]];
+    let mut quads = Vec::new();
+    for i in 0..xs.len() - 1 {
+        let (x0, x1) = (xs[i], xs[i + 1]);
+        let is_fin = i % 2 == 1;
+        quads.push((rect_z(x0, x1, 0.0), [0.0, 0.0, -1.0]));
+        quads.push((
+            rect_z(x0, x1, if is_fin { top } else { base_z }),
+            [0.0, 0.0, 1.0],
+        ));
+        for (y, ny) in [(0.0, -1.0), (base_y, 1.0)] {
+            quads.push((rect_y(x0, x1, y, 0.0, base_z), [0.0, ny, 0.0]));
+            if is_fin {
+                quads.push((rect_y(x0, x1, y, base_z, top), [0.0, ny, 0.0]));
+            }
+        }
+        if is_fin {
+            quads.push((rect_x(x0, base_z, top), [-1.0, 0.0, 0.0]));
+            quads.push((rect_x(x1, base_z, top), [1.0, 0.0, 0.0]));
+        }
+    }
+    quads.push((rect_x(0.0, 0.0, base_z), [-1.0, 0.0, 0.0]));
+    quads.push((rect_x(base_x, 0.0, base_z), [1.0, 0.0, 0.0]));
+    quads
+}
+
+fn signed_volume(soup: &fs_rep_mesh::Soup) -> f64 {
+    soup.triangles
+        .iter()
+        .map(|&[a, b, c]| {
+            let (a, b, c) = (
+                soup.positions[a as usize],
+                soup.positions[b as usize],
+                soup.positions[c as usize],
+            );
+            a.x * (b.y * c.z - b.z * c.y)
+                + a.y * (b.z * c.x - b.x * c.z)
+                + a.z * (b.x * c.y - b.y * c.x)
+        })
+        .sum::<f64>()
+        / 6.0
+}
+
+/// G0. Repair decides the global orientation from the signed enclosed
+/// volume, not from the winding number at the vertex centroid. For a comb
+/// the vertex centroid lies in the air between the fins, where the winding
+/// is a rounding residual of either sign: the old rule left an inward comb
+/// inward and inverted an outward one whenever the residual came out
+/// negative (MEASURED 2026-09-02: the rotated four-fin heatsink through the
+/// STL import). Both orientations must leave repair outward, with the
+/// global flip receipted exactly when it happened.
+#[test]
+fn rmesh_006_repair_orients_by_signed_volume_when_the_centroid_is_outside() {
+    let expected = 0.080 * 0.060 * 0.005 + 2.0 * 0.006 * 0.060 * 0.020;
+    let outward = comb_soup(true);
+    let centroid = {
+        let n = outward.positions.len() as f64;
+        let mut c = [0.0f64; 3];
+        for p in &outward.positions {
+            c = [c[0] + p.x / n, c[1] + p.y / n, c[2] + p.z / n];
+        }
+        Point3::new(c[0], c[1], c[2])
+    };
+    assert!(
+        winding_exact(&outward, centroid).abs() < 0.5,
+        "premise: the comb's vertex centroid is in the air"
+    );
+    assert!((signed_volume(&outward) - expected).abs() < 1e-12);
+    let kept = repair(outward, 0);
+    assert!(
+        (signed_volume(&kept.soup) - expected).abs() < 1e-12,
+        "an outward comb stays outward: {}",
+        kept.receipts_json()
+    );
+    assert!(
+        !kept.receipts.iter().any(|r| r.location == "global"),
+        "no global flip on an outward shell: {}",
+        kept.receipts_json()
+    );
+    let inward = comb_soup(false);
+    assert!((signed_volume(&inward) + expected).abs() < 1e-12);
+    let fixed = repair(inward, 0);
+    assert!(
+        (signed_volume(&fixed.soup) - expected).abs() < 1e-12,
+        "an inward comb is inverted to outward: {}",
+        fixed.receipts_json()
+    );
+    assert!(
+        fixed.receipts.iter().any(|r| r.location == "global"),
+        "the global flip is receipted: {}",
+        fixed.receipts_json()
+    );
+    verdict(
+        "rmesh-006",
+        true,
+        "repair orients a comb by signed volume in both starting orientations",
+        FIXED_INPUT_SEED,
+    );
+}
+
 #[test]
 fn rmesh_005_repair_battery_heals_the_corpus_with_receipts() {
     let clean = shapes::icosphere(Point3::new(0.0, 0.0, 0.0), 1.0, 1);

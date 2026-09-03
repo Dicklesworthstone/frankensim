@@ -5,7 +5,7 @@ metrics: 27
 measured: 14
 no_data: 13
 trend_basis: NO-DATA (no generation recorded yet; every trend cell reads `no prior generation`)
-source_identity: 15ca081630c07b7617c7a13986e273812d6eb96b54f9e371b8d84583a23b222b
+source_identity: 03451ba29f0a73ee55c021bf726e60f7b7ef8fb7c7eea38b9c72e299546a70e9
 
 This dashboard measures OUTCOMES. A `NO-DATA` row means no measurement machinery exists yet, so no number is invented; a measured `0` means the population is enumerable and the answer is genuinely none. The two are never conflated, and a measured zero is deliberately left visible rather than hidden behind `NO-DATA`.
 
@@ -24,7 +24,7 @@ This dashboard measures OUTCOMES. A `NO-DATA` row means no measurement machinery
 | Human-locked supplier import annotations that disagree with current observations | 0 | no prior generation | lower-is-better | fs_io::supplier_corpus + data/cad-import-corpus/{corpus-v1.tsv,scorecard-summary-v1.json} |
 | Human-reviewed supplier CAD files refused by the standing import policy | NO-DATA (needs f85xj.11.6) | no prior generation | neutral | - |
 | Human-reviewed supplier CAD files admitted after repair | NO-DATA (needs f85xj.11.6) | no prior generation | neutral | - |
-| Datasets reproduced by an independent team or implementation lineage | 0 of 34 (0.00%) | no prior generation | higher-is-better | fs_vvreg::corpus seeded validation registry |
+| Datasets reproduced by an independent team or implementation lineage | 0 of 35 (0.00%) | no prior generation | higher-is-better | fs_vvreg::corpus seeded validation registry |
 | Correctness of certify-or-escalate decisions by learned components | NO-DATA (needs f85xj.14.2) | no prior generation | higher-is-better | - |
 | Time to explain a surprising result through ledger lineage | NO-DATA | no prior generation | lower-is-better | - |
 | Setup time, diagnosis time, and decision quality from real user sessions | NO-DATA (needs f85xj.7.6) | no prior generation | higher-is-better | - |
@@ -34,10 +34,10 @@ This dashboard measures OUTCOMES. A `NO-DATA` row means no measurement machinery
 | metric | value | trend | direction | sources |
 | --- | --- | --- | --- | --- |
 | Registered adversarial challenges actually executed | 0 of 8 (0.00%) | no prior generation | higher-is-better | fs_vvreg::adversarial registry; vv-scorecard.json (fs_vvreg::scorecard) |
-| Validation datasets on the blind-predictive axis | 0 of 34 (0.00%) | no prior generation | higher-is-better | fs_vvreg::corpus seeded validation registry |
-| Validation datasets supplying an external evidence axis | 11 of 34 (32.35%) | no prior generation | higher-is-better | fs_vvreg::corpus seeded validation registry |
-| Claim cells carrying at least one external reference | 15 of 31 (48.38%) | no prior generation | higher-is-better | vv-scorecard.json (fs_vvreg::scorecard) |
-| Claim cells with no external reference at all | 16 | no prior generation | lower-is-better | vv-scorecard.json (fs_vvreg::scorecard) |
+| Validation datasets on the blind-predictive axis | 0 of 35 (0.00%) | no prior generation | higher-is-better | fs_vvreg::corpus seeded validation registry |
+| Validation datasets supplying an external evidence axis | 11 of 35 (31.42%) | no prior generation | higher-is-better | fs_vvreg::corpus seeded validation registry |
+| Claim cells carrying at least one external reference | 15 of 32 (46.87%) | no prior generation | higher-is-better | vv-scorecard.json (fs_vvreg::scorecard) |
+| Claim cells with no external reference at all | 17 | no prior generation | lower-is-better | vv-scorecard.json (fs_vvreg::scorecard) |
 
 ## Governance metrics
 
@@ -47,7 +47,7 @@ This dashboard measures OUTCOMES. A `NO-DATA` row means no measurement machinery
 | Open beads with at least one open blocker, from the tracker snapshot | 1487 of 2031 (73.21%) | no prior generation | lower-is-better | spine-metrics.json (xtask spine-metrics beads snapshot) |
 | Registered capabilities at L2 (numerically verified) or above | 12 of 15 (80.00%) | no prior generation | higher-is-better | capability-maturity.json |
 | Registered capabilities at L3 (integrated workflow) or above | 1 of 15 (6.66%) | no prior generation | higher-is-better | capability-maturity.json |
-| Reality-check spine beads on the certified tropical critical path | 0 of 5 (0.00%) | no prior generation | higher-is-better | tropical-critical-path.json (fs-tropical over the bead graph, xtask tropical-path) |
+| Reality-check spine beads on the certified tropical critical path | 0 of 3 (0.00%) | no prior generation | higher-is-better | tropical-critical-path.json (fs-tropical over the bead graph, xtask tropical-path) |
 | Staged-producer e2e lane stages proven green by a retained checked receipt | 7 | no prior generation | higher-is-better | spine-e2e-summary.json (solve_stage_producers_e2e.sh full-profile receipt) |
 | Solve pipeline stages executing in the checked spine ratchet | 7 of 7 (100.00%) | no prior generation | higher-is-better | spine-ratchet.json (fs-cli SolveStage table, xtask spine-ratchet) |
 
@@ -105,4 +105,4 @@ These are legitimate signals that are NOT outcome metrics. They move without the
 - crate count — inventory, not capability; the capability maturity registry is the outcome measure
 - integration-test file count — inventory, not proof; check-docs already pins it and a test file is not an outcome
 
-identity: 1194bca62879bc87533b67c7265a090e8ffc63eb7ccd91c0f9996d509d6b6834
+identity: 5da58796a52baa2a2de8aec46abc3e2b7260bae4d049f8808cdcf1f9fd77e11c
