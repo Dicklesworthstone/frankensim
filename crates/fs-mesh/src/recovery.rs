@@ -1529,7 +1529,7 @@ pub fn recover_facets_with_points(
     let mut interior_splits = 0u64;
     'passes: loop {
         cx.checkpoint()?;
-        let faces = face_set(tetra);
+        let mut faces = face_set(tetra);
         let pending: Vec<usize> = work
             .iter()
             .enumerate()
@@ -1605,19 +1605,28 @@ pub fn recover_facets_with_points(
         // (every pending facet is capped); stop rather than spin. Total
         // passes are bounded by facets × `max_depth` rounds.
         let mut progressed = false;
+        // The face set is rebuilt only when the mesh has actually changed:
+        // a facet's round either inserts Steiner points (invalidating it) or
+        // leaves the mesh alone. Rebuilding per facet made the pass
+        // O(facets x tets) — MEASURED 2026-09-03 on the vented enclosure,
+        // 188 facets over 1137 tets, one Steiner point inserted and 188 full
+        // face maps built per pass for it.
+        let mut mesh_dirty = false;
         for fid in pending {
             let loop_verts = &facets[fid];
             let Some(w) = work[fid].as_mut() else {
                 continue;
             };
-            let faces = face_set(tetra);
+            if mesh_dirty {
+                faces = face_set(tetra);
+                mesh_dirty = false;
+            }
             if satisfied(&tetra.mesh.points, &faces, loop_verts, w).is_some() {
                 continue; // a neighbour's round conformed it meanwhile
             }
             if w.rounds >= opts.max_depth {
                 w.failed = true;
                 if std::env::var_os("FS_MESH_TRACE_RECOVERY").is_some() {
-                    let faces = face_set(tetra);
                     let missing = w
                         .tris
                         .iter()
@@ -1768,6 +1777,8 @@ pub fn recover_facets_with_points(
                     if tetra.mesh.insert(new_idx) {
                         stats.steiner_inserted += 1;
                         by_bits.insert(bits, new_idx);
+                        // The next facet needs a fresh face set.
+                        mesh_dirty = true;
                         if on_constraint {
                             constraint_splits += 1;
                         } else {

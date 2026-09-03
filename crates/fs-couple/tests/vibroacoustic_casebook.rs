@@ -678,7 +678,9 @@ fn radiated_power_and_accounting_window_audit() {
     for (label, energy) in channels {
         // Dissipated energy leaves as heat at ambient: energy INTO the
         // system is negative, carrying -E/T of entropy.
-        contributions.push(contribution(label, -energy, -energy / ambient));
+        let heat_entropy = -energy / ambient;
+        let heat_energy = ambient * heat_entropy;
+        contributions.push(contribution(label, heat_energy, heat_entropy));
     }
     let initial = steady(WindowEndpoint::Initial);
     let final_snapshot = steady(WindowEndpoint::Final);
