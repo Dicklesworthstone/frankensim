@@ -454,17 +454,7 @@ fn mq_004_seeded_failure_drills() {
             centers: design.centers.clone(),
             radii: radii.to_vec(),
         };
-        run_study(
-            d,
-            &StudyConfig {
-                steps: 1,
-                step_size: 0.0,
-                ..smoke_config()
-            },
-        )
-        .expect("probe")
-        .iterations[0]
-            .compliance
+        d.compliance(smoke_config().level).expect("probe")
     };
     // The HONEST gradient passes the conditioning-aware FD check…
     let dir = vec![1.0, -1.0];

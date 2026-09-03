@@ -51,6 +51,15 @@ impl PlateWithHoles {
             .map(|r| std::f64::consts::PI * r * r)
             .sum::<f64>()
     }
+
+    /// Compute the unprojected compliance of this design on a uniform quadtree.
+    ///
+    /// Evaluates the true PDE compliance functional J(u_h) = ∫ f·u over the
+    /// design domain without applying area or radius projections.
+    pub fn compliance(&self, level: u32) -> Result<f64, fs_cutfem::CutFemError> {
+        let (j, _, _, _, _) = solve_and_grade(self, level)?;
+        Ok(j)
+    }
 }
 
 fn validate_study_input(design: &PlateWithHoles, config: &StudyConfig) {
@@ -401,7 +410,7 @@ impl LevelHint for FemParams {
 /// Solve the state problem on the CURRENT design; return
 /// (compliance, per-hole shape gradients, certificate parts, iters).
 #[allow(clippy::type_complexity)]
-fn solve_and_grade(
+pub fn solve_and_grade(
     design: &PlateWithHoles,
     level: u32,
 ) -> Result<(f64, Vec<f64>, [f64; 3], usize, usize), fs_cutfem::CutFemError> {
