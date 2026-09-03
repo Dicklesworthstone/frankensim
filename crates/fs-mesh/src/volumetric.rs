@@ -599,6 +599,28 @@ impl AdmittedPlc {
     /// # Errors
     /// Kernel errors, cancellation, or honest unrecovered constraints.
     pub fn recover(self, cx: &Cx<'_>) -> Result<ConstraintRecoveredPlc, VolumetricError> {
+        if let Some(path) = std::env::var_os("FS_MESH_DUMP_PLC") {
+            // Debug aid: the admitted PLC exactly as the mesher sees it (`p x
+            // y z` per vertex in order, `s id x y z` per region seed, `r id a
+            // b c` per region triangle), so a failure seen through a product
+            // path can be replayed in a crate test.
+            let mut out = String::new();
+            for p in &self.vertices {
+                out.push_str(&format!("p {:?} {:?} {:?}\n", p[0], p[1], p[2]));
+            }
+            for region in &self.regions {
+                out.push_str(&format!(
+                    "s {} {:?} {:?} {:?}\n",
+                    region.id.0, region.seed[0], region.seed[1], region.seed[2]
+                ));
+                for t in &region.triangles {
+                    out.push_str(&format!("r {} {} {} {}\n", region.id.0, t[0], t[1], t[2]));
+                }
+            }
+            if let Err(err) = std::fs::write(&path, out) {
+                eprintln!("TRACE recovery: PLC dump to {path:?} failed: {err}");
+            }
+        }
         let points: Vec<Point3> = self
             .vertices
             .iter()
@@ -1566,6 +1588,14 @@ impl LabeledTetComplex {
                 exact = false;
             }
             if (prod - surface).abs() > f64::max(1.0e-6, 1.0e-9 * surface.abs()) {
+                if std::env::var_os("FS_MESH_TRACE_AUDIT").is_some() {
+                    eprintln!(
+                        "TRACE audit: region {} retained volume {prod:.9e} (homogeneous {aud:.9e}) vs closed-surface {surface:.9e}; {} tets retained, flat repair {}",
+                        region.id.0,
+                        self.tets.len(),
+                        self.flat_repair.to_json()
+                    );
+                }
                 return Err(VolumetricError::Audit {
                     reason: "retained tet volume disagrees with the closed-surface identity",
                 });

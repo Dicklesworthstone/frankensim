@@ -51,6 +51,15 @@ impl PlateWithHoles {
             .map(|r| std::f64::consts::PI * r * r)
             .sum::<f64>()
     }
+
+    /// Compute the unprojected compliance of this design on a uniform quadtree.
+    ///
+    /// Evaluates the true PDE compliance functional J(u_h) = ∫ f·u over the
+    /// design domain without applying area or radius projections.
+    pub fn compliance(&self, level: u32) -> Result<f64, fs_cutfem::CutFemError> {
+        let (j, _, _, _, _) = solve_and_grade(self, level)?;
+        Ok(j)
+    }
 }
 
 fn validate_study_input(design: &PlateWithHoles, config: &StudyConfig) {
@@ -401,7 +410,7 @@ impl LevelHint for FemParams {
 /// Solve the state problem on the CURRENT design; return
 /// (compliance, per-hole shape gradients, certificate parts, iters).
 #[allow(clippy::type_complexity)]
-fn solve_and_grade(
+pub fn solve_and_grade(
     design: &PlateWithHoles,
     level: u32,
 ) -> Result<(f64, Vec<f64>, [f64; 3], usize, usize), fs_cutfem::CutFemError> {
@@ -418,11 +427,12 @@ fn solve_and_grade(
     // DWR discretization estimate for THIS goal (estimated color: DWR
     // constants are not guaranteed — the lmp4.4 rule).
     let dwr = estimate(&grid, design, params, &f, &g, &goal)?;
-    // Self-adjoint shape gradient: dJ/dr_k = −∮_{Γ_k} (∂u/∂n)² dΓ —
-    // growing a Dirichlet cooling hole LOWERS compliance (more cold
-    // boundary), so the flux integral enters NEGATED. The sign was
-    // originally implemented positive and the FD falsifier caught it
-    // (mq-004) — the drill earning its keep. Midpoint quadrature.
+    // Self-adjoint shape gradient: dJ/dr_k = ∮_{Γ_k} (∂u/∂n)² dΓ.
+    // For compliance J(u) = ∫ f·u over Ω with homogeneous Dirichlet data
+    // on the hole boundaries Γ_k, enlarging a hole removes material from Ω
+    // where u > 0, so the boundary moves opposite to the outward domain
+    // normal n_Ω. The shape derivative enters positive (mq-004).
+    // Midpoint quadrature.
     let mut grads = Vec::with_capacity(design.radii.len());
     let samples = 64usize;
     for (c, r) in design.centers.iter().zip(&design.radii) {
@@ -455,7 +465,7 @@ fn solve_and_grade(
         }
         #[allow(clippy::cast_precision_loss)]
         let circ = std::f64::consts::TAU * r / samples as f64;
-        grads.push(-(acc * circ));
+        grads.push(acc * circ);
     }
     let euclidean_rel_residual =
         sol.euclidean_rel_residual()

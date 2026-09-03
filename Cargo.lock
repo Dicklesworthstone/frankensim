@@ -814,7 +814,7 @@ dependencies = [
 
 [[package]]
 name = "frankentorch-kernel-cpu"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "frankentorch-core",
  "libm",
@@ -1185,6 +1185,7 @@ dependencies = [
 name = "fs-couple"
 version = "0.0.1"
 dependencies = [
+ "fs-aeroac",
  "fs-alloc",
  "fs-bem",
  "fs-blake3",
@@ -1208,6 +1209,7 @@ dependencies = [
  "fs-psycho",
  "fs-qty",
  "fs-query",
+ "fs-rand",
  "fs-scenario",
  "fs-solid",
  "fs-substrate",

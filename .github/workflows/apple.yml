@@ -1,0 +1,37 @@
+name: Apple source contract
+
+on:
+  push:
+    branches: [main]
+    paths: ["ios/**", ".github/workflows/apple.yml"]
+  pull_request:
+    paths: ["ios/**", ".github/workflows/apple.yml"]
+
+concurrency:
+  group: apple-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  source-contract:
+    # FrankenSimCore.xcframework is generated from the Rust workspace. Keep
+    # this lane cheap and honest; a future artifact-backed job can link and run
+    # the full bridge battery.
+    runs-on: macos-14
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install project generator
+        run: brew install xcodegen
+      - name: Prove generated project is current
+        working-directory: ios
+        run: |
+          xcodegen generate --spec project.yml
+          git diff --exit-code -- FrankenSim.xcodeproj Sources/Info.plist
+      - name: Parse every tracked Swift target
+        working-directory: ios
+        run: xcrun swiftc -parse $(git ls-files '*.swift')
+      - name: Validate property lists and privacy manifest
+        working-directory: ios
+        run: |
+          plutil -lint Sources/Info.plist
+          plutil -lint Sources/PrivacyInfo.xcprivacy

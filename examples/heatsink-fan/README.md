@@ -117,6 +117,15 @@ receipt's `ladder` block lists every rung, and the QoI budget's discretization
 term becomes a measured `interval` (on this body the maximum moves by 0.37 mK
 then 0.05 mK, so the bound is the disclosed data-range one, 1.1 mK). It costs
 about seventy base solves; the default `auto` fidelity solves once and says
-`"stop":"fidelity-single-rung"`. See
+`"stop":"fidelity-single-rung"`.
+
+`heatsink-rotated.stl` is the same shell rotated 35° about z and 21° about x
+and translated (`generate_heatsink_stl.py OUT --rotate 35 21 --shift 0.1 0.2
+0.05`): every facet oblique, no coordinate dyadic, which is what real CAD
+looks like. It is the rotation-invariance body of the mesh corpus
+(`crates/fs-mesh/tests/body_corpus.rs`): the mesher recovers all 108 facets
+and audits the exact volume from those bytes (378 tets, 98 Steiner points;
+fs-mesh `CONTRACT.md` items 18–21 record the four kernel and recovery defects
+this one body found). See
 `examples/cooling-enclosure/README.md` for receipt anatomy and
 `examples/heated-plate/README.md` for the minimal schema tour.

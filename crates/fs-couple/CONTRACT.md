@@ -673,6 +673,48 @@ None.
   the lock estimate, gap statistics, blow/bore work, and the lip
   island's supply defect.
 
+- `flue_loop` module (bead 3ez8g.10.3): the composed flue playing loop
+  — no `Flute` type. `FlueVoice` = the jet-drive island x the wind
+  line. NO CARD -> REFUSE: the island is parameterized only from a jet
+  card minted by fs-aeroac's lab (`JetIsland::from_card`), and only a
+  card whose claim class can drive a tone is admitted (the tonal
+  interim card; the broadband-refusal-boundary card refuses with
+  `CardClassCannotDrive`). Card-backed numbers: convection ratio
+  `c_p/U = St (h/delta) / (stage + 1/4)` from the stage-I lock, the
+  profile ratio `theta/b`, the Reynolds validity band, the claim class;
+  authored and labeled: the spatial deflection gain, the onset seed,
+  the mouth radiation resistance. PITCH IS NEVER ASSIGNED: blowing
+  pressure and geometry gestures (cut-up, labium offset, jet angle)
+  are the controls. Model: Bernoulli jet speed; receptivity = the
+  leaky INTEGRAL of the delayed mouth velocity (its 1/omega cancels the
+  drive derivative's omega, so the pipe's resonance alone selects the
+  mode); the sinuous mode's amplification BAND from the card's theta
+  (two low-pass sections at Michalke's tanh neutral `omega_c = U/(4
+  theta)` and a high-pass at `omega_c/2` because growth vanishes at
+  low Strouhal); labium cut `Q_j = Q_max (1 + tanh((eta - y0)/b))/2`;
+  series drive source `rho (Delta_m/S_m) dQ_j/dt` in an implicit mouth
+  loop with the mouth inertance, radiation resistance, and the line;
+  an EXACT per-block energy ledger (source = stored + numerical +
+  radiation + pipe; closure ~1e-15). THREE EXECUTED TRAPS on the way
+  to a note: (1) a frequency-flat deflection with the omega of the
+  drive derivative locks the highest stage the delay allows (9.4 kHz);
+  (2) a continuous onset seed at 1e-3 U, integrated, flaps the jet by
+  its own half-width and the labium slope averages to nothing (no
+  lock; the seed-independence falsifier in the fixture is the guard:
+  a limit cycle's RMS does not move when the seed drops tenfold);
+  (3) an amplification band with no low edge lets the integral gain
+  win at 6 Hz where the open pipe has no impedance (a relaxation cycle,
+  not a note). MEASURED on the flute-class fixture (6 mm bore, 12 kHz
+  line for the radiation law's `ka < 1`, 10 x 1 mm flue, 4 mm cut-up,
+  tonal interim card): 10-50 Pa lock the fundamental (0.90-1.01 f1),
+  110-240 Pa the octave (1.85-2.02 f1), 360 Pa the twelfth (2.84 f1);
+  a 5 mm cut-up locks one mode below a 3 mm one at equal pressure; four
+  rank voices are bitwise their solo selves in any stepping order;
+  replay is bitwise and keyed by Philox voice identity. The card's
+  Reynolds band (144-264) does not cover playing pressures (Re ~1500),
+  so `claim_check` refuses every claim from this fixture: that boundary
+  is inherited by the flue-gates bead, not papered over.
+
 - `wind_line` module (bead 3ez8g.6.3): the wind articulation runtime —
   `WindLineBank` holds per-fingering exact-FIR characteristic lines
   over a typed `FingeringTable` with the carry-history + crossfade

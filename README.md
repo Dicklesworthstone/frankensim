@@ -230,8 +230,11 @@ cargo run -p xtask -- check-all
 The `ios/` product is a real SwiftUI studio for iPhone, iPad, and resizable
 Mac Catalyst windows. Its 43-entry catalog calls the same bounded Rust kernels
 used by the browser laboratory; it does not replay bundled videos or random
-decorative data. Build the Apple-only static slices on a Darwin host with Xcode,
-then generate the project:
+decorative data. Completed non-streaming runs can be shared as full JSON
+snapshots containing the native payload, dimensions, seed, budget, timing,
+evidence label, and no-claim boundary; those snapshots explicitly are not
+Design Ledger certificates. Build the Apple-only static slices on a Darwin host
+with Xcode, then generate the project:
 
 ```bash
 ./ios/build-rust.sh

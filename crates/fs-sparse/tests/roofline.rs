@@ -174,8 +174,32 @@ fn wsbf_roofline() {
     let a = banded_matrix(nrows, band);
     let compact = CsrCompact::from_csr(&a).numa_localized(threads);
     let nnz = compact.nnz();
-    let x: Vec<f64> = (0..nrows).map(|i| 0.5 + (i % 13) as f64 * 0.01).collect();
+    // FIRST-TOUCH initialization for dense vectors x and y:
+    // Parallel first-touch matches the sharded thread partitions so
+    // that pages land on the local NUMA memory node (matching the
+    // NUMA-localized matrix and parallel STREAM denominator, q61wp.28).
+    let bounds = compact.shard_bounds(threads);
+    let mut x = vec![0.0f64; nrows];
     let mut y = vec![0.0f64; nrows];
+    std::thread::scope(|scope| {
+        let mut rest_x = x.as_mut_slice();
+        let mut rest_y = y.as_mut_slice();
+        for w in bounds.windows(2) {
+            let (lo, hi) = (w[0], w[1]);
+            let take = hi - lo;
+            let (x_slice, tail_x) = rest_x.split_at_mut(take);
+            let (y_slice, tail_y) = rest_y.split_at_mut(take);
+            rest_x = tail_x;
+            rest_y = tail_y;
+            scope.spawn(move || {
+                for (offset, xi) in x_slice.iter_mut().enumerate() {
+                    let i = lo + offset;
+                    *xi = 0.5 + (i % 13) as f64 * 0.01;
+                }
+                y_slice.fill(0.0);
+            });
+        }
+    });
     let stream = fs_substrate::bandwidth::measure(threads);
     let time_best = |f: &mut dyn FnMut()| -> f64 {
         let mut best = f64::INFINITY;

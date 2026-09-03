@@ -313,6 +313,23 @@ struct SimulationStudioView: View {
                     Text("seed 0x\(String(result.seed, radix: 16, uppercase: true)) · schema 1 · entirely on this device")
                         .font(.system(size: ForgeTheme.size(10.5), design: .monospaced))
                         .foregroundStyle(ForgeTheme.secondary)
+                    if result.shape != .pcm,
+                       let snapshot = try? SimulationRunSnapshot(
+                           result: result,
+                           experiment: model.selection
+                       )
+                    {
+                        ShareLink(
+                            item: SimulationRunSnapshotFile(snapshot: snapshot),
+                            preview: SharePreview(snapshot.filename)
+                        ) {
+                            Label("Share run data", systemImage: "square.and.arrow.up")
+                        }
+                        .buttonStyle(SecondaryForgeButtonStyle(tint: ForgeTheme.cyan))
+                        .accessibilityHint(
+                            "Exports the complete numeric payload and its evidence boundary as JSON"
+                        )
+                    }
                 }
             }
         }
