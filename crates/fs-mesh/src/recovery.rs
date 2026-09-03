@@ -192,10 +192,11 @@ pub fn recover_segments(
         // edge, and bisection would only mint midpoints beside it until the
         // depth cap. A fresh PLC has none, so its chain is unchanged.
         for v in chain_on_chord(&tetra.mesh.points, a, b) {
-            if v != a && v != b {
-                if let Some(t) = parameter_on_segment(tetra.mesh.points[v as usize], oa, ob) {
-                    chain.push((t, v));
-                }
+            if v != a
+                && v != b
+                && let Some(t) = parameter_on_segment(tetra.mesh.points[v as usize], oa, ob)
+            {
+                chain.push((t, v));
             }
         }
         chain.sort_by(|x, y| x.0.total_cmp(&y.0).then(x.1.cmp(&y.1)));
