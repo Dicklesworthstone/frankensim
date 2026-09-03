@@ -16,6 +16,7 @@ use fs_contact::normal_patch::{
 };
 use fs_ga::{Se3, Twist, Vec3, Wrench};
 use fs_math::det;
+use fs_scene::{BodyRole, SceneBody, StaticScene};
 use fs_mbd::articulated::{
     BaseState, FreeFloatingBaseState, forward_kinematics, free_floating_forward_dynamics,
 };
@@ -200,6 +201,12 @@ const SURVIVAL_BONUS_PER_STEP: f64 = 0.4;
 /// Per-step body motion is ~6 mm (bounded speeds x 1/480 s), so the first
 /// violating step detects penetration within millimeters of contact.
 const BODY_OBSTACLE_SKIN_M: f64 = 0.01;
+/// Overlap tolerated with a declared support surface before it counts as
+/// sinking through it [m]. Generous next to the keep-out skin because the
+/// collider spheres sit at joint origins and are a coarse proxy for the
+/// limb around them; it is still two orders of magnitude tighter than the
+/// quarter-metre burial this guard exists to refuse.
+const SUPPORT_SURFACE_SKIN_M: f64 = 0.06;
 const MAX_BONUSED_STEPS: f64 = 720.0;
 const SURVIVAL_BONUS_LIMIT: f64 = SURVIVAL_BONUS_PER_STEP * MAX_BONUSED_STEPS;
 /// Maximum admitted total flight time for the published 1.5 s walking
@@ -498,12 +505,51 @@ pub struct ObstacleBox {
     pub half_extents_m: [f64; 3],
     /// Yaw of the box frame about world +Z [rad].
     pub yaw_rad: f64,
+    /// Keep-out (nothing may enter) or support (things rest on it).
+    ///
+    /// A caller that draws a floor, a foundation, or a work surface declares
+    /// it here as [`BodyRole::Support`]. That is what makes a mis-placed
+    /// surface a refusal instead of a robot rendered inside the floor.
+    pub role: BodyRole,
 }
 
 /// Penetration depth of a sphere (center `p`, radius `r`) against a yawed
 /// box: positive = the sphere surface is inside the solid. Exact for the
 /// sphere-vs-box distance; the returned depth also counts center-inside
 /// cases (r + nearest-face distance).
+/// Same test as [`sphere_box_penetration`], with the box's yaw trig supplied
+/// by the caller so a loop over many spheres against one box computes it once.
+#[allow(clippy::inline_always)]
+#[inline(always)]
+fn sphere_box_penetration_prerotated(
+    p: &[f64; 3],
+    r: f64,
+    center_m: &[f64; 3],
+    half: &[f64; 3],
+    cos_yaw: f64,
+    sin_yaw: f64,
+) -> f64 {
+    let dx = p[0] - center_m[0];
+    let dy = p[1] - center_m[1];
+    let dz = p[2] - center_m[2];
+    let lx = cos_yaw * dx + sin_yaw * dy;
+    let ly = -sin_yaw * dx + cos_yaw * dy;
+    let lz = dz;
+    let qx = lx.clamp(-half[0], half[0]);
+    let qy = ly.clamp(-half[1], half[1]);
+    let qz = lz.clamp(-half[2], half[2]);
+    let ddx = lx - qx;
+    let ddy = ly - qy;
+    let ddz = lz - qz;
+    let outside_sq = ddx * ddx + ddy * ddy + ddz * ddz;
+    if outside_sq > 0.0 {
+        (r - outside_sq.sqrt()).max(0.0)
+    } else {
+        let face = (half[0] - lx.abs()).min((half[1] - ly.abs()).min(half[2] - lz.abs()));
+        r + face
+    }
+}
+
 pub fn sphere_box_penetration(
     p: &[f64; 3],
     r: f64,
@@ -536,10 +582,33 @@ pub fn sphere_box_penetration(
     }
 }
 
+/// Links whose spheres are the walking contact set. They are expected to
+/// touch support surfaces, so only keep-out bodies apply to them.
+const CONTACT_COLLIDER_LINKS: [usize; 4] = [5, 6, 11, 12];
+
+/// Tiny helper so the guard can ask "is there an environment at all?" without
+/// re-summing two scenes each step.
+struct ScenePresence {
+    len: usize,
+}
+
+impl ScenePresence {
+    const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
 /// Body collision spheres: (link index, conservative radius) — one sphere
 /// at each link origin, radii chosen to conservatively cover the catalog
-/// link geometry. Feet are excluded (their contact model owns ground).
-const BODY_COLLIDER_SPHERES: [(usize, f64); 20] = [
+/// link geometry.
+///
+/// All 30 links are covered, including the ankles and wrists. The ground is
+/// not an obstacle box (the foot contact model owns it), so a foot sphere can
+/// only ever register against declared geometry such as a wall base or a
+/// cabinet toe kick — which is exactly where a foot should not be. Leaving
+/// the hands and feet out meant a rollout could put a hand through a table
+/// and still be certified.
+const BODY_COLLIDER_SPHERES: [(usize, f64); 30] = [
     (0, 0.16),  // pelvis
     (1, 0.10),  // left hip pitch
     (2, 0.10),  // left hip roll
@@ -556,10 +625,20 @@ const BODY_COLLIDER_SPHERES: [(usize, f64); 20] = [
     (17, 0.08), // left shoulder roll
     (18, 0.07), // left shoulder yaw
     (19, 0.07), // left elbow
+    (20, 0.06), // left wrist roll
+    (21, 0.06), // left wrist pitch
+    (22, 0.07), // left wrist yaw (hand)
     (23, 0.08), // right shoulder pitch
     (24, 0.08), // right shoulder roll
     (25, 0.07), // right shoulder yaw
     (26, 0.07), // right elbow
+    (27, 0.06), // right wrist roll
+    (28, 0.06), // right wrist pitch
+    (29, 0.07), // right wrist yaw (hand)
+    (5, 0.07),  // left ankle pitch
+    (6, 0.08),  // left ankle roll (foot)
+    (11, 0.07), // right ankle pitch
+    (12, 0.08), // right ankle roll (foot)
 ];
 
 /// Max body displacement per fixed step, from bounded joint speeds
@@ -764,6 +843,31 @@ pub struct G1WalkingEvaluator {
 }
 
 impl G1WalkingEvaluator {
+    /// The admitted environment, split by role.
+    ///
+    /// Keep-out bodies apply to every collider sphere. Support bodies apply
+    /// only to the off-contact colliders, because the feet are supposed to
+    /// rest on them and the compliant patch model already owns that contact.
+    fn static_scenes(&self) -> Result<(StaticScene, StaticScene), G1WalkingError> {
+        let mut keep_out = StaticScene::new();
+        let mut support = StaticScene::new();
+        for obstacle in &self.config.obstacles {
+            let body = SceneBody::Box {
+                center_m: obstacle.center_m,
+                half_extents_m: obstacle.half_extents_m,
+                yaw_rad: obstacle.yaw_rad,
+            };
+            let admitted = match obstacle.role {
+                BodyRole::KeepOut => keep_out.push(body, BodyRole::KeepOut, BODY_OBSTACLE_SKIN_M),
+                BodyRole::Support => {
+                    support.push(body, BodyRole::Support, SUPPORT_SURFACE_SKIN_M)
+                }
+            };
+            admitted.map_err(|_| G1WalkingError::InvalidConfig { field: "obstacles" })?;
+        }
+        Ok((keep_out, support))
+    }
+
     /// Admit the fixed experiment and build the source-bound model once.
     pub fn new(config: G1WalkingConfig) -> Result<Self, G1WalkingError> {
         validate_config(&config)?;
@@ -896,6 +1000,11 @@ impl G1WalkingEvaluator {
         let mut maximum_body_penetration_m = 0.0_f64;
         let mut terminal_guard_penalty = 0.0;
 
+        // The static environment this rollout moves through. Built once from
+        // the admitted config; every per-step query is an fs-scene call.
+        let (keep_out_scene, support_scene) = self.static_scenes()?;
+        let scene_len = keep_out_scene.len() + support_scene.len();
+        let scene = ScenePresence { len: scene_len };
         'rollout: for step in 0..self.step_count {
             let time_s = step as f64 * self.config.step_s;
             let work_before = actuator_work_j;
@@ -1177,33 +1286,47 @@ impl G1WalkingEvaluator {
             // configured obstacle. First penetration beyond the skin depth
             // terminates the rollout — the body physically cannot pass
             // through solid geometry.
-            if !self.config.obstacles.is_empty() {
-                'obstacle_check: for obstacle in &self.config.obstacles {
-                    for (link, radius) in BODY_COLLIDER_SPHERES {
-                        let pose = kinematics.world_from_link[link];
-                        let t = pose.translation();
-                        let depth = sphere_box_penetration(
-                            &[t.x, t.y, t.z],
-                            radius,
-                            &obstacle.center_m,
-                            &obstacle.half_extents_m,
-                            obstacle.yaw_rad,
-                        );
+            if !scene.is_empty() {
+                // Collider centres are read once per step. The geometry itself
+                // is fs-scene's: this experiment owns no collision mathematics.
+                let mut colliders = [([0.0_f64; 3], 0.0_f64); BODY_COLLIDER_SPHERES.len()];
+                for (slot, (link, radius)) in BODY_COLLIDER_SPHERES.iter().enumerate() {
+                    let t = kinematics.world_from_link[*link].translation();
+                    colliders[slot] = ([t.x, t.y, t.z], *radius);
+                }
+                // Scan bodies outer, colliders inner, and stop at the FIRST
+                // breach. Reporting the deepest breach instead would inflate
+                // the published penetration: with conservative per-link radii
+                // a larger sphere legitimately overlaps a surface further at
+                // the instant a smaller one first crosses the skin, and the
+                // number this receipt publishes is "how far in did we get
+                // before noticing", which is a no-tunnelling claim.
+                'obstacle_check: for entry in keep_out_scene
+                    .entries()
+                    .iter()
+                    .chain(support_scene.entries().iter())
+                {
+                    // Feet rest on support surfaces by design; the compliant
+                    // patch model owns that contact. Only keep-out bodies
+                    // apply to them.
+                    let contact_exempt = entry.role == BodyRole::Support;
+                    for (slot, (center, radius)) in colliders.iter().enumerate() {
+                        if contact_exempt && CONTACT_COLLIDER_LINKS.contains(&BODY_COLLIDER_SPHERES[slot].0) {
+                            continue;
+                        }
+                        let depth = entry.body.sphere_overlap_depth(center, *radius);
                         if depth > maximum_body_penetration_m {
                             maximum_body_penetration_m = depth;
                         }
-                        if depth > BODY_OBSTACLE_SKIN_M {
+                        if depth > entry.skin_m {
                             termination_reason = G1TerminationReason::BodyObstacle;
-                            terminal_guard_penalty +=
-                                250.0 + 400.0 * (depth - BODY_OBSTACLE_SKIN_M);
+                            terminal_guard_penalty += 250.0 + 400.0 * (depth - entry.skin_m);
                             maximum_body_penetration_m = depth;
                             break 'obstacle_check;
                         }
                     }
                 }
-                if termination_reason != G1TerminationReason::Horizon
-                    && termination_reason == G1TerminationReason::BodyObstacle
-                {
+                if termination_reason == G1TerminationReason::BodyObstacle {
                     break 'rollout;
                 }
             }

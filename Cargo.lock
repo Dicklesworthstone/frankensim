@@ -2345,6 +2345,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-scene"
+version = "0.0.1"
+dependencies = [
+ "fs-ga",
+ "fs-geom",
+ "fs-query",
+]
+
+[[package]]
 name = "fs-schedule-e2e"
 version = "0.0.1"
 dependencies = [

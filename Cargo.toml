@@ -22,6 +22,7 @@ members = [
     "crates/fs-ornith",
     "crates/fs-constraint",
     "crates/fs-query",
+    "crates/fs-scene",
     "crates/fs-geocon",
     "crates/fs-topo",
     "crates/fs-recompute",

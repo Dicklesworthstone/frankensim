@@ -15,6 +15,9 @@
 pub mod ale;
 #[cfg(feature = "continuum")]
 pub mod bdm;
+/// Reduced circular-capillary flow screening with an explicit Newtonian,
+/// fully-developed applicability boundary.
+pub mod capillary;
 #[cfg(feature = "continuum")]
 pub mod gas_film;
 #[cfg(feature = "quarter-wave")]
@@ -26,6 +29,10 @@ pub mod reduced_aero;
 #[cfg(feature = "continuum")]
 pub mod trimesh;
 
+pub use capillary::{
+    CircularCapillaryError, CircularCapillaryInput, CircularCapillaryStep,
+    step_newtonian_circular_capillary,
+};
 #[cfg(feature = "continuum")]
 pub use gas_film::{
     ContactExclusionMask, GasFilmApplicability, GasFilmBoundaryTopology, GasFilmBudget,

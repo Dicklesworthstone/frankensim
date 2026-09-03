@@ -14,13 +14,13 @@ dependencies = [
 
 [[package]]
 name = "aes"
-version = "0.9.2"
+version = "0.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f8eb277bec05f56a0e0591f155a484cbd0f4f07ff2905051a48c72f004f7ed58"
+checksum = "35f0f96ce78e38c3dc6d8948aa8163d06385be74000f3c7a95bf1eef35d3ea32"
 dependencies = [
  "cipher",
  "cpubits",
- "cpufeatures 0.3.0",
+ "cpufeatures 0.3.1",
 ]
 
 [[package]]
@@ -200,13 +200,13 @@ checksum = "f079e83a288787bcd14a6aea84cee5c87a67c5a3e660c30f557a3d24761b3527"
 
 [[package]]
 name = "chacha20"
-version = "0.10.1"
+version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d524456ba66e72eb8b115ff89e01e497f8e6d11d78b70b1aa13c0fbd97540a81"
+checksum = "65c35e4b699c7e15ccbe7ee35c005e4fc0a278d22238a2857e6ce2dadeda1b06"
 dependencies = [
  "cfg-if",
  "cipher",
- "cpufeatures 0.3.0",
+ "cpufeatures 0.3.1",
 ]
 
 [[package]]
@@ -276,9 +276,9 @@ dependencies = [
 
 [[package]]
 name = "cpufeatures"
-version = "0.3.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8b2a41393f66f16b0823bb79094d54ac5fbd34ab292ddafb9a0456ac9f87d201"
+checksum = "5ca28b0ae3115b884660db4118d803791fd6756b6e88f39c0f3f7859060d7566"
 dependencies = [
  "libc",
 ]
@@ -517,6 +517,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-adjoint"
+version = "0.0.1"
+dependencies = [
+ "fs-ad",
+ "fs-blake3",
+ "fs-evidence",
+ "fs-exec",
+ "fs-feec",
+ "fs-geom",
+ "fs-ivl",
+ "fs-la",
+ "fs-math",
+ "fs-rep-mesh",
+ "fs-solver",
+ "fs-sparse",
+]
+
+[[package]]
 name = "fs-alloc"
 version = "0.0.1"
 dependencies = [
@@ -532,57 +550,42 @@ name = "fs-casebook"
 version = "0.0.1"
 
 [[package]]
-name = "fs-cmaes-viz-wasm"
-version = "0.6.17"
-dependencies = [
- "asupersync",
- "fs-alloc",
- "fs-contact",
- "fs-dfo",
- "fs-exec",
- "fs-g1-train",
- "fs-ga",
- "fs-geom",
- "fs-math",
- "fs-mbd",
- "fs-query",
- "fs-scene",
- "fs-time",
- "fs-tribo",
- "getrandom 0.4.3",
- "wasm-bindgen",
-]
-
-[[package]]
-name = "fs-contact"
+name = "fs-cheb"
 version = "0.0.1"
 dependencies = [
- "fs-blake3",
- "fs-evidence",
  "fs-exec",
- "fs-geom",
+ "fs-fft",
  "fs-ivl",
  "fs-la",
- "fs-matdb",
- "fs-material",
- "fs-motion",
- "fs-qty",
- "fs-query",
- "fs-tribo",
+ "fs-math",
 ]
 
 [[package]]
-name = "fs-dfo"
+name = "fs-conduction"
 version = "0.0.1"
 dependencies = [
- "fs-alloc",
+ "fs-adjoint",
  "fs-blake3",
  "fs-exec",
- "fs-la",
+ "fs-feec",
+ "fs-matdb",
+ "fs-material",
  "fs-math",
- "fs-obs",
- "fs-rand",
- "fs-robust",
+ "fs-qty",
+ "fs-rep-mesh",
+ "fs-scenario",
+ "fs-solver",
+ "fs-sparse",
+]
+
+[[package]]
+name = "fs-crump-wasm"
+version = "0.0.1"
+dependencies = [
+ "asupersync",
+ "fs-conduction",
+ "fs-flux",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -617,8 +620,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "fs-g1-train"
-version = "0.1.0"
+name = "fs-fft"
+version = "0.0.1"
+dependencies = [
+ "asupersync",
+ "fs-alloc",
+ "fs-exec",
+ "fs-math",
+ "fs-simd",
+]
+
+[[package]]
+name = "fs-flux"
+version = "0.0.1"
 
 [[package]]
 name = "fs-ga"
@@ -685,14 +699,6 @@ dependencies = [
 [[package]]
 name = "fs-math"
 version = "0.0.1"
-
-[[package]]
-name = "fs-mbd"
-version = "0.0.1"
-dependencies = [
- "fs-ga",
- "fs-math",
-]
 
 [[package]]
 name = "fs-mesh"
@@ -789,19 +795,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "fs-robust"
+name = "fs-scenario"
 version = "0.0.1"
 dependencies = [
- "fs-evidence",
-]
-
-[[package]]
-name = "fs-scene"
-version = "0.0.1"
-dependencies = [
+ "fs-blake3",
+ "fs-cheb",
+ "fs-exec",
  "fs-ga",
- "fs-geom",
- "fs-query",
+ "fs-ivl",
+ "fs-math",
+ "fs-motion",
+ "fs-qty",
+ "fs-rand",
 ]
 
 [[package]]
@@ -867,27 +872,6 @@ dependencies = [
 [[package]]
 name = "fs-tilelang-macros"
 version = "0.0.1"
-
-[[package]]
-name = "fs-time"
-version = "0.0.1"
-dependencies = [
- "fs-ad",
- "fs-blake3",
- "fs-exec",
- "fs-ga",
- "fs-la",
- "fs-math",
- "fs-solver",
-]
-
-[[package]]
-name = "fs-tribo"
-version = "0.0.1"
-dependencies = [
- "fs-math",
- "fs-rand",
-]
 
 [[package]]
 name = "futures-core"
@@ -989,9 +973,9 @@ dependencies = [
 
 [[package]]
 name = "hermit-abi"
-version = "0.5.2"
+version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fc0fef456e4baa96da950455cd02c081ca953b141298e41db3fc7e36b1da849c"
+checksum = "e17592d60ebacc7d5e169f4663c5f84f9161cc90328abcfe8456f41e4dfcb284"
 
 [[package]]
 name = "hex"
@@ -1303,7 +1287,7 @@ version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6e2d0073b297041425c7c3df6eb4792d598a15323fe63346852b092eca02904c"
 dependencies = [
- "cpufeatures 0.3.0",
+ "cpufeatures 0.3.1",
  "universal-hash",
 ]
 
@@ -1314,7 +1298,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f0fa31d631f2b2cb2a544d0aa321ce847a94764d701ca2becc411138b93d49cd"
 dependencies = [
  "cpubits",
- "cpufeatures 0.3.0",
+ "cpufeatures 0.3.1",
  "universal-hash",
 ]
 
@@ -1541,7 +1525,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aacc4cc499359472b4abe1bf11d0b12e688af9a805fa5e3016f9a386dc2d0214"
 dependencies = [
  "cfg-if",
- "cpufeatures 0.3.0",
+ "cpufeatures 0.3.1",
  "digest 0.11.3",
 ]
 
@@ -1563,7 +1547,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "446ba717509524cb3f22f17ecc096f10f4822d76ab5c0b9822c5f9c284e825f4"
 dependencies = [
  "cfg-if",
- "cpufeatures 0.3.0",
+ "cpufeatures 0.3.1",
  "digest 0.11.3",
 ]
 
@@ -1617,9 +1601,9 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
 name = "smallvec"
-version = "1.15.2"
+version = "1.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
+checksum = "b9be42f50aa861c555654aa3a37f52f4b1074bacf4e48fe0ef7fa584e80f1f0f"
 
 [[package]]
 name = "socket2"

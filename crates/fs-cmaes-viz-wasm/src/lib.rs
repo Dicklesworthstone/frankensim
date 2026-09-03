@@ -55,7 +55,7 @@ use manipulation::{
 };
 
 /// Kernel identity returned by the browser capability probe.
-pub const KERNEL_VERSION: &str = "fs-cmaes-viz-wasm 0.6.15";
+pub const KERNEL_VERSION: &str = "fs-cmaes-viz-wasm 0.6.17";
 /// Exact binary64 word identifying schema-2 packets (`"CMA2"`).
 pub const PACKET_MAGIC: u32 = 0x434d_4132;
 /// Packed ask/tell ABI schema.
@@ -132,7 +132,7 @@ const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
 const BROWSER_PACKET_FIXED_FLOATS: usize = 2 * ASK_FIXED_WORDS + SNAPSHOT_FIXED_WORDS;
 const MAX_BROWSER_LIVE_FLOATS: usize = 16 * 1024 * 1024;
 const G1_CONFIG_FIXED_WORDS: usize = 12;
-const G1_OBSTACLE_WORDS: usize = 7;
+const G1_OBSTACLE_WORDS: usize = 8;
 /// Largest caller-declared keep-out roster the walking owner admits.
 pub const G1_MAX_OBSTACLES: usize = 64;
 const G1_ADMISSION_WORDS: usize = 21;
@@ -862,9 +862,11 @@ impl PackedManipulationEvaluator {
 /// Layout: `[magic, schema, kind, wordCount, step_s, duration_s,
 /// target_forward_speed, gait_frequency, trace_stride, task, challenge,
 /// obstacleCount]` followed by `obstacleCount` groups of
-/// `[cx, cy, cz, hx, hy, hz, yaw_rad]` in the owner world frame (z up, yaw
-/// about +Z). `wordCount` is self-describing and must equal the packet
-/// length. An empty roster leaves the rollout identical to schema 7.
+/// `[cx, cy, cz, hx, hy, hz, yaw_rad, role]` in the owner world frame (z up,
+/// yaw about +Z), where role 0 is keep-out (nothing may enter) and role 1 is
+/// support (things rest on it but may not sink through). `wordCount` is
+/// self-describing and must equal the packet length. An empty roster leaves
+/// the rollout identical to schema 7.
 fn parse_g1_config(packet: &[f64]) -> Result<G1WalkingConfig, G1PackedRefusal> {
     if packet.len() < G1_CONFIG_FIXED_WORDS {
         return Err(G1PackedRefusal::new(G1PackedRefusalCode::MalformedPacket));
@@ -892,10 +894,16 @@ fn parse_g1_config(packet: &[f64]) -> Result<G1WalkingConfig, G1PackedRefusal> {
         if words.iter().any(|value| !value.is_finite()) {
             return Err(G1PackedRefusal::new(G1PackedRefusalCode::InvalidConfig));
         }
+        let role = match exact_u32(words[7]) {
+            Some(0) => fs_scene::BodyRole::KeepOut,
+            Some(1) => fs_scene::BodyRole::Support,
+            _ => return Err(G1PackedRefusal::new(G1PackedRefusalCode::InvalidConfig)),
+        };
         obstacles.push(crate::g1_walking::ObstacleBox {
             center_m: [words[0], words[1], words[2]],
             half_extents_m: [words[3], words[4], words[5]],
             yaw_rad: words[6],
+            role,
         });
     }
     let trace_stride = exact_usize(packet[8])
@@ -1779,6 +1787,10 @@ mod schema_two_tests {
                 obstacle.half_extents_m[1],
                 obstacle.half_extents_m[2],
                 obstacle.yaw_rad,
+                match obstacle.role {
+                    fs_scene::BodyRole::KeepOut => 0.0,
+                    fs_scene::BodyRole::Support => 1.0,
+                },
             ]);
         }
         packet
@@ -2443,6 +2455,7 @@ mod schema_two_tests {
             center_m: [0.1, 0.0, 0.6],
             half_extents_m: [0.15, 1.0, 0.6],
             yaw_rad: 0.0,
+            role: fs_scene::BodyRole::KeepOut,
         };
         let blocked = PackedG1WalkingEvaluator::new(&g1_config_packet_with(1.5, 12, &[wall]));
         let blocked_receipt = blocked.evaluate_packet(&mean);
@@ -2497,6 +2510,7 @@ mod schema_two_tests {
                 center_m: [index as f64 * 0.01, 0.0, 0.5],
                 half_extents_m: [0.05, 0.05, 0.05],
                 yaw_rad: 0.0,
+                role: fs_scene::BodyRole::KeepOut,
             })
             .collect();
         assert_eq!(
@@ -2508,6 +2522,7 @@ mod schema_two_tests {
             center_m: [0.5, 0.0, 0.5],
             half_extents_m: [0.0, 0.05, 0.05],
             yaw_rad: 0.0,
+            role: fs_scene::BodyRole::KeepOut,
         };
         assert_eq!(
             refusal_code(g1_config_packet_with(1.5, 12, &[degenerate])),
@@ -2518,6 +2533,7 @@ mod schema_two_tests {
             center_m: [0.5, 0.0, f64::NAN],
             half_extents_m: [0.05, 0.05, 0.05],
             yaw_rad: 0.0,
+            role: fs_scene::BodyRole::KeepOut,
         };
         assert_eq!(
             refusal_code(g1_config_packet_with(1.5, 12, &[non_finite])),
