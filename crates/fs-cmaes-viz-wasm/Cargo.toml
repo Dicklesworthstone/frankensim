@@ -1,6 +1,6 @@
 [package]
 name = "fs-cmaes-viz-wasm"
-version = "0.6.15"
+version = "0.6.17"
 edition = "2024"
 publish = false
 description = "Versioned packed WASM ask/tell boundary over fs-dfo's full, separable, LM-CMA, and LM-MA optimizers."
@@ -32,6 +32,7 @@ fs-geom = { path = "../fs-geom" }
 fs-math = { path = "../fs-math" }
 fs-mbd = { path = "../fs-mbd" }
 fs-query = { path = "../fs-query" }
+fs-scene = { path = "../fs-scene" }
 fs-time = { path = "../fs-time" }
 fs-tribo = { path = "../fs-tribo" }
 

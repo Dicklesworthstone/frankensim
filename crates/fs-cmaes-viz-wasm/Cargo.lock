@@ -533,7 +533,7 @@ version = "0.0.1"
 
 [[package]]
 name = "fs-cmaes-viz-wasm"
-version = "0.6.15"
+version = "0.6.17"
 dependencies = [
  "asupersync",
  "fs-alloc",
@@ -546,6 +546,7 @@ dependencies = [
  "fs-math",
  "fs-mbd",
  "fs-query",
+ "fs-scene",
  "fs-time",
  "fs-tribo",
  "getrandom 0.4.3",
@@ -792,6 +793,15 @@ name = "fs-robust"
 version = "0.0.1"
 dependencies = [
  "fs-evidence",
+]
+
+[[package]]
+name = "fs-scene"
+version = "0.0.1"
+dependencies = [
+ "fs-ga",
+ "fs-geom",
+ "fs-query",
 ]
 
 [[package]]
