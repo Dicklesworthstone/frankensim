@@ -1287,40 +1287,46 @@ impl G1WalkingEvaluator {
             // terminates the rollout — the body physically cannot pass
             // through solid geometry.
             if !scene.is_empty() {
-                // Collider centres are read once per step. The environment
-                // query itself lives in fs-scene: this experiment owns no
-                // collision mathematics of its own.
-                let mut all_colliders = [([0.0_f64; 3], 0.0_f64); BODY_COLLIDER_SPHERES.len()];
+                // Collider centres are read once per step. The geometry itself
+                // is fs-scene's: this experiment owns no collision mathematics.
+                let mut colliders = [([0.0_f64; 3], 0.0_f64); BODY_COLLIDER_SPHERES.len()];
                 for (slot, (link, radius)) in BODY_COLLIDER_SPHERES.iter().enumerate() {
                     let t = kinematics.world_from_link[*link].translation();
-                    all_colliders[slot] = ([t.x, t.y, t.z], *radius);
+                    colliders[slot] = ([t.x, t.y, t.z], *radius);
                 }
-                // Feet are the contact set: standing on a support surface is
-                // what they are for, and the compliant patch model already
-                // owns that interaction. Everything else must stay out of it.
-                let mut off_contact = [([0.0_f64; 3], 0.0_f64); BODY_COLLIDER_SPHERES.len()];
-                let mut off_contact_len = 0;
-                for (slot, (link, _)) in BODY_COLLIDER_SPHERES.iter().enumerate() {
-                    if CONTACT_COLLIDER_LINKS.contains(link) {
-                        continue;
+                // Scan bodies outer, colliders inner, and stop at the FIRST
+                // breach. Reporting the deepest breach instead would inflate
+                // the published penetration: with conservative per-link radii
+                // a larger sphere legitimately overlaps a surface further at
+                // the instant a smaller one first crosses the skin, and the
+                // number this receipt publishes is "how far in did we get
+                // before noticing", which is a no-tunnelling claim.
+                'obstacle_check: for entry in keep_out_scene
+                    .entries()
+                    .iter()
+                    .chain(support_scene.entries().iter())
+                {
+                    // Feet rest on support surfaces by design; the compliant
+                    // patch model owns that contact. Only keep-out bodies
+                    // apply to them.
+                    let contact_exempt = entry.role == BodyRole::Support;
+                    for (slot, (center, radius)) in colliders.iter().enumerate() {
+                        if contact_exempt && CONTACT_COLLIDER_LINKS.contains(&BODY_COLLIDER_SPHERES[slot].0) {
+                            continue;
+                        }
+                        let depth = entry.body.sphere_overlap_depth(center, *radius);
+                        if depth > maximum_body_penetration_m {
+                            maximum_body_penetration_m = depth;
+                        }
+                        if depth > entry.skin_m {
+                            termination_reason = G1TerminationReason::BodyObstacle;
+                            terminal_guard_penalty += 250.0 + 400.0 * (depth - entry.skin_m);
+                            maximum_body_penetration_m = depth;
+                            break 'obstacle_check;
+                        }
                     }
-                    off_contact[off_contact_len] = all_colliders[slot];
-                    off_contact_len += 1;
                 }
-
-                let keep_out_hit = keep_out_scene.deepest_sphere_penetration(&all_colliders);
-                let support_hit =
-                    support_scene.deepest_sphere_penetration(&off_contact[..off_contact_len]);
-                let deepest = keep_out_scene
-                    .maximum_sphere_overlap(&all_colliders)
-                    .max(support_scene.maximum_sphere_overlap(&off_contact[..off_contact_len]));
-                if deepest > maximum_body_penetration_m {
-                    maximum_body_penetration_m = deepest;
-                }
-                if let Some(hit) = keep_out_hit.or(support_hit) {
-                    termination_reason = G1TerminationReason::BodyObstacle;
-                    terminal_guard_penalty += 250.0 + 400.0 * hit.excess_m;
-                    maximum_body_penetration_m = maximum_body_penetration_m.max(hit.depth_m);
+                if termination_reason == G1TerminationReason::BodyObstacle {
                     break 'rollout;
                 }
             }
