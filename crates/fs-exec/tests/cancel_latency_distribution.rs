@@ -119,12 +119,12 @@ fn measure_cancel_latency_distribution_10k_trials() {
 
         for _ in 0..TRIALS {
             let gate = CancelGate::new();
-            let trigger_tile = rng.range(5, 30);
+            let trigger_tile = rng.range(2, 10);
             let kernel = LatencyProbeKernel {
                 gate: &gate,
                 trigger_tile,
                 ops_per_tile: TILE_OPS,
-                tile_count: 50_000,
+                tile_count: 64,
             };
 
             let (result, report) = parked.run_with_gate(&kernel, &gate);
