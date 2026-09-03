@@ -676,6 +676,88 @@ fn check_registry_sources(
 
 /// Filesystem/git entry point used by `check-instrument-claims` and
 /// `check-all`.
+/// Directory of retained jet cards (every card the aeroacoustic lab has
+/// minted, as data): the source of truth for what a card-driven image may
+/// claim.
+pub const JET_CARD_RECEIPTS_DIR: &str = "crates/fs-aeroac/tests/receipts";
+/// Registry images driven by a jet card.
+const JET_DRIVEN_IMAGE_PREFIX: &str = "jet-island";
+/// Card claim kinds that can drive a tone at all.
+const DRIVING_CARD_KINDS: [&str; 2] = ["edge-tone-tonal", "broadband"];
+
+/// Claim kinds of the retained jet cards under `dir` (`jet-card-*.json`,
+/// field `claim_kind`).
+pub fn retained_jet_card_kinds(dir: &Path) -> BTreeSet<String> {
+    let mut kinds = BTreeSet::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return kinds;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !(name.starts_with("jet-card-") && name.ends_with(".json")) {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(entry.path()) else {
+            continue;
+        };
+        if let Some(kind) = text
+            .split("\"claim_kind\":\"")
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+        {
+            kinds.insert(kind.to_string());
+        }
+    }
+    kinds
+}
+
+/// The card-class claim boundary (bead 3ez8g.10.4): a jet-driven image may
+/// claim only what a retained card's class supports. A `broadband*` QoI on
+/// a `jet-island*` image must be `refused` unless a retained card of kind
+/// `broadband` exists, and a green `jet-island*` row needs a retained card
+/// of a driving kind at all. The cards are data in the tree, so the rule
+/// tracks the lab, never prose.
+fn check_card_class_boundary(rows: &[Row], card_kinds: &BTreeSet<String>) -> Vec<Violation> {
+    let mut violations = Vec::new();
+    let has_broadband = card_kinds.contains("broadband");
+    let has_driver = DRIVING_CARD_KINDS
+        .iter()
+        .any(|kind| card_kinds.contains(*kind));
+    for row in rows {
+        let mut parts = row.key.split('/');
+        let _filling = parts.next();
+        let image = parts.next().unwrap_or("");
+        let qoi = parts.next().unwrap_or("");
+        if !image.starts_with(JET_DRIVEN_IMAGE_PREFIX) {
+            continue;
+        }
+        if qoi.contains("broadband") && !has_broadband && row.gate != "refused" {
+            violations.push(violation(
+                &row.key,
+                format!(
+                    "broadband claim on a jet-driven image with no retained broadband jet card \
+                     (retained kinds: {:?}); the row must be gate=refused until the lab mints one",
+                    card_kinds
+                ),
+            ));
+        }
+        if row.gate == "green" && !has_driver {
+            violations.push(violation(
+                &row.key,
+                format!(
+                    "green jet-driven row with no retained driving jet card (retained kinds: \
+                     {:?}); no card -> refuse",
+                    card_kinds
+                ),
+            ));
+        }
+    }
+    violations
+}
+
 pub fn check(root: &Path) -> InstrumentClaimsReport {
     let current = match std::fs::read_to_string(root.join(REGISTRY_FILE)) {
         Ok(source) => source,
@@ -708,13 +790,20 @@ pub fn check(root: &Path) -> InstrumentClaimsReport {
     let corpus_ids = std::fs::read_to_string(root.join(ACOUSTIC_MANIFEST_FILE))
         .ok()
         .map(|manifest| manifest_case_ids(&manifest));
-    check_registry_sources(
+    let mut report = check_registry_sources(
         &current,
         committed.as_deref(),
         &path_exists,
         &owner_exists,
         corpus_ids.as_ref(),
-    )
+    );
+    let mut scratch = Vec::new();
+    let rows = parse_registry(&current, &mut scratch);
+    let card_kinds = retained_jet_card_kinds(&root.join(JET_CARD_RECEIPTS_DIR));
+    report
+        .violations
+        .extend(check_card_class_boundary(&rows, &card_kinds));
+    report
 }
 
 #[cfg(test)]
@@ -887,6 +976,80 @@ mod tests {
         assert!(details(&report).contains("gate=refused without a reason"));
     }
 
+    fn kinds(list: &[&str]) -> BTreeSet<String> {
+        list.iter().map(|k| (*k).to_string()).collect()
+    }
+
+    #[test]
+    fn card_class_boundary_refuses_broadband_without_a_broadband_card() {
+        let mut scratch = Vec::new();
+        let rows = parse_registry(
+            &registry(&[row_with(&[
+                ("filling", r#""flue""#),
+                ("image", r#""jet-island-char-line""#),
+                ("qoi", r#""broadband-flute-noise""#),
+                ("gate", r#""green""#),
+                ("evidence", r#"[{"kind":"test","ref":"x.rs::y"}]"#),
+            ])]),
+            &mut scratch,
+        );
+        let tonal_only = check_card_class_boundary(&rows, &kinds(&["edge-tone-tonal"]));
+        assert!(
+            tonal_only
+                .iter()
+                .any(|v| v.detail.contains("no retained broadband jet card")),
+            "{tonal_only:?}"
+        );
+        let with_broadband =
+            check_card_class_boundary(&rows, &kinds(&["edge-tone-tonal", "broadband"]));
+        assert!(with_broadband.is_empty(), "{with_broadband:?}");
+        // A refused broadband row is the honest shape without the card.
+        let refused = parse_registry(
+            &registry(&[row_with(&[
+                ("filling", r#""flue""#),
+                ("image", r#""jet-island-char-line""#),
+                ("qoi", r#""broadband-flute-noise""#),
+                ("gate", r#""refused""#),
+                ("notes", r#""no 3-D broadband card""#),
+            ])]),
+            &mut scratch,
+        );
+        assert!(check_card_class_boundary(&refused, &kinds(&["edge-tone-tonal"])).is_empty());
+    }
+
+    #[test]
+    fn card_class_boundary_needs_a_driving_card_for_a_green_jet_row() {
+        let mut scratch = Vec::new();
+        let rows = parse_registry(
+            &registry(&[row_with(&[
+                ("filling", r#""flue""#),
+                ("image", r#""jet-island-char-line""#),
+                ("qoi", r#""overblowing-ladder""#),
+                ("gate", r#""green""#),
+                ("evidence", r#"[{"kind":"test","ref":"x.rs::y"}]"#),
+            ])]),
+            &mut scratch,
+        );
+        let boundary_only =
+            check_card_class_boundary(&rows, &kinds(&["broadband-refusal-boundary"]));
+        assert!(
+            boundary_only
+                .iter()
+                .any(|v| v.detail.contains("no card -> refuse")),
+            "{boundary_only:?}"
+        );
+        assert!(check_card_class_boundary(&rows, &kinds(&["edge-tone-tonal"])).is_empty());
+        // Non-jet images are outside the rule.
+        let brass = parse_registry(
+            &registry(&[row_with(&[
+                ("gate", r#""green""#),
+                ("evidence", r#"[{"kind":"test","ref":"x.rs::y"}]"#),
+            ])]),
+            &mut scratch,
+        );
+        assert!(check_card_class_boundary(&brass, &kinds(&[])).is_empty());
+    }
+
     #[test]
     fn live_default_requires_green_and_budget() {
         let ungated = run(
@@ -1021,16 +1184,21 @@ mod tests {
 
     #[test]
     fn determinism_above_the_default_ceiling_refuses() {
-        // Zero cross-ISA goldens exist in the music stack, so the default
+        // fs-tribo's CONTRACT declares no cross-ISA bit-stability, so its
         // ceiling is one-host: both higher ladder classes refuse, naming
-        // the capping crate and the promotion path.
+        // the capping crate and the promotion path. (fs-duct, the seed
+        // row's owner, was promoted to cross-isa by the 2026-08-23 golden
+        // audit, which left this test stale until 2026-09-03.)
         for claimed in ["same-isa", "cross-isa"] {
             let report = run(
-                &registry(&[row_with(&[("determinism", &format!("\"{claimed}\""))])]),
+                &registry(&[row_with(&[
+                    ("owner_crates", r#"["fs-tribo"]"#),
+                    ("determinism", &format!("\"{claimed}\"")),
+                ])]),
                 None,
             );
             let text = details(&report);
-            assert!(text.contains("exceeds owner crate \"fs-duct\""), "{text}");
+            assert!(text.contains("exceeds owner crate \"fs-tribo\""), "{text}");
             assert!(text.contains("3ez8g.13.4"), "{text}");
         }
     }

@@ -1607,6 +1607,241 @@
    "budget_row": null,
    "corpus_refs": [],
    "notes": "Bead 3ez8g.11.2 gate 2: lock frequency vs lip tension on the lip island + plane-wave bore Z(n*omega) (plane TMM authority; regenerate against the MM matrix when T-Brass lands it). MEASURED FINDING: under Q=10 the lock-in band is a single 5 Hz cell at f_lip=270 locking onto the ~302 Hz bore peak - narrow lock-in recorded, not swept away."
+  },
+  {
+   "filling": "jet",
+   "image": "lbm-slot-jet-3d",
+   "qoi": "broadband-refusal-boundary",
+   "owner_crates": [
+    "fs-aeroac",
+    "fs-lbm"
+   ],
+   "exactness": [
+    "X-Est"
+   ],
+   "gate": "green",
+   "live_default": "no",
+   "determinism": "one-host",
+   "evidence": [
+    {
+     "kind": "test",
+     "ref": "crates/fs-aeroac/tests/jetcard.rs::jc_014_refusal_boundary_card_mints_from_the_archived_campaign_receipts"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-aeroac/tests/jetcard.rs::jc_013_nyquist_edge_peaks_are_parity_artifacts_and_cannot_back_a_card"
+    },
+    {
+     "kind": "receipt",
+     "ref": "crates/fs-aeroac/tests/receipts/jet-card-refusal-boundary.json"
+    },
+    {
+     "kind": "receipt",
+     "ref": "crates/fs-aeroac/tests/receipts/slot-jet-3d-re-sweep-rung1.98.jsonl"
+    }
+   ],
+   "budget_row": null,
+   "corpus_refs": [],
+   "notes": "Authority lab (3-D D3Q19 central-moment slot jet, bead 3ez8g.10.1): the executed Re ladder 4.8/8.4/14.8/118.8 plus the nz=24 octave found no broadband regime; every raw peak is the record-length Nyquist-edge artifact (bin 4095 of 4096 at both spanwise resolutions) and every parity-filtered rung is tonal, so the lab minted a broadband-REFUSAL-BOUNDARY card (max Re probed 118.8, X-Est; rungs 1.92/1.96 refused by lattice instability). This row is the cited receipt for every refused broadband claim below. Absolute SPL is never claimed."
+  },
+  {
+   "filling": "flue",
+   "image": "jet-island-char-line",
+   "qoi": "overblowing-ladder",
+   "owner_crates": [
+    "fs-couple",
+    "fs-aeroac"
+   ],
+   "exactness": [
+    "X-Est"
+   ],
+   "gate": "green",
+   "live_default": "no",
+   "determinism": "one-host",
+   "evidence": [
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/tests/flue_gates.rs::fg_003_overblowing_ladder_walks_fundamental_to_octave"
+    },
+    {
+     "kind": "contract",
+     "ref": "crates/fs-couple/CONTRACT.md"
+    }
+   ],
+   "budget_row": null,
+   "corpus_refs": [],
+   "notes": "Bead 3ez8g.10.3/.10.4: the jet-drive island (parameterized ONLY from the retained tonal interim jet card: c_p/U = St (h/delta)/(stage+1/4) from the stage-I lock validated vs Brown 1937, theta/b, the Re band) x the wind line. MEASURED regime map (flute-class 6 mm bore, 12 kHz line, 10x1 mm flue, 4 mm cut-up): 10-50 Pa lock 0.90-1.01 f1, 110-240 Pa lock 1.85-2.02 f1, 360 Pa locks 2.84 f1 (the twelfth); multistable jumps at 15 and 75 Pa. CLAIM BOUNDARY: the driving card is edge-tone-class, so this row is capped at edge-tone-class claims (no broadband flute noise; see the refused row), and the card's Re band (144-264) does not cover playing pressures (Re ~1500), so FlueVoice::claim_check refuses every claim minted from this fixture: the ladder is an executed structure, not a validated one, until a card covering that band exists. The spatial deflection gain is authored (Bickley growth estimate), labeled in the island provenance."
+  },
+  {
+   "filling": "flue",
+   "image": "jet-island-char-line",
+   "qoi": "self-sustained-limit-cycle",
+   "owner_crates": [
+    "fs-couple"
+   ],
+   "exactness": [
+    "X-Est"
+   ],
+   "gate": "green",
+   "live_default": "no",
+   "determinism": "one-host",
+   "evidence": [
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/tests/flue_gates.rs::fg_003_overblowing_ladder_walks_fundamental_to_octave"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/tests/flue_gates.rs::fg_002_energy_ledger_closes_to_roundoff_every_block"
+    }
+   ],
+   "budget_row": null,
+   "corpus_refs": [],
+   "notes": "The oscillation is a limit cycle, not a pipe filtering the onset seed: at the fundamental the launched-wave RMS is 19.333127 Pa with the seed at 1e-6 U and 19.333128 Pa at 1e-7 U, same lock (the seed-independence falsifier that caught two earlier artifacts, recorded in CONTRACT.md). The per-block energy ledger source = stored + numerical + radiation + pipe closes to 2e-15 relative."
+  },
+  {
+   "filling": "flue",
+   "image": "jet-island-char-line",
+   "qoi": "voicing-direction",
+   "owner_crates": [
+    "fs-couple"
+   ],
+   "exactness": [
+    "X-Est"
+   ],
+   "gate": "green",
+   "live_default": "no",
+   "determinism": "one-host",
+   "evidence": [
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/tests/flue_gates.rs::fg_004_voicing_gestures_move_onset_and_duty_in_the_expected_direction"
+    }
+   ],
+   "budget_row": null,
+   "corpus_refs": [],
+   "notes": "Direction checks only: at equal blowing pressure a 5 mm cut-up (longer transit) locks one mode below a 3 mm one (1037 vs 1547 Hz); moving the labium into the jet lowers the pipe-side cut duty (0.499 -> 0.481). Onset pressure vs cut-up is logged, NOT asserted: jet spreading beyond the card's profile is not modeled."
+  },
+  {
+   "filling": "flue",
+   "image": "jet-island-char-line",
+   "qoi": "card-admission-refusal",
+   "owner_crates": [
+    "fs-couple",
+    "fs-aeroac"
+   ],
+   "exactness": [
+    "X-Exact"
+   ],
+   "gate": "green",
+   "live_default": "no",
+   "determinism": "one-host",
+   "evidence": [
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/tests/flue_gates.rs::fg_001_no_card_refuses_and_a_refusal_boundary_card_cannot_drive"
+    },
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/tests/flue_gates.rs::fg_007_claims_outside_the_card_validity_region_are_refused"
+    }
+   ],
+   "budget_row": null,
+   "corpus_refs": [],
+   "notes": "NO CARD -> REFUSE (typed NoCard); the retained broadband-refusal-boundary card refuses to drive (CardClassCannotDrive); blocks outside the card's Reynolds band refuse the claim gate (OutsideCardValidity, naming the excursion). The registry lint check-instrument-claims enforces the same boundary on rows: a broadband QoI on a jet-island image must be refused unless a retained broadband card exists, and a green jet-island row needs a retained driving card."
+  },
+  {
+   "filling": "flue",
+   "image": "jet-island-char-line",
+   "qoi": "broadband-flute-noise",
+   "owner_crates": [
+    "fs-couple",
+    "fs-aeroac"
+   ],
+   "exactness": [
+    "X-Est"
+   ],
+   "gate": "refused",
+   "live_default": "no",
+   "determinism": "one-host",
+   "evidence": [
+    {
+     "kind": "receipt",
+     "ref": "crates/fs-aeroac/tests/receipts/jet-card-refusal-boundary.json"
+    },
+    {
+     "kind": "receipt",
+     "ref": "crates/fs-aeroac/tests/receipts/slot-jet-3d-re-sweep-parity.jsonl"
+    }
+   ],
+   "budget_row": null,
+   "corpus_refs": [],
+   "notes": "REFUSED: the only driving card in the tree is edge-tone-class (tonal interim), and the 3-D lab mapped a broadband REFUSAL boundary (no broadband regime up to Re 118.8; jet/lbm-slot-jet-3d row). The tonal card carries no NoiseTable rows, so the island injects no noise shape. This row flips only when the lab retains a card of claim_kind broadband; the lint refuses any other transition."
+  },
+  {
+   "filling": "flue",
+   "image": "organ-rank",
+   "qoi": "voice-independence",
+   "owner_crates": [
+    "fs-couple"
+   ],
+   "exactness": [
+    "X-Exact"
+   ],
+   "gate": "green",
+   "live_default": "no",
+   "determinism": "one-host",
+   "evidence": [
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/tests/flue_gates.rs::fg_005_rank_voices_are_independent_and_order_free"
+    }
+   ],
+   "budget_row": null,
+   "corpus_refs": [],
+   "notes": "FlueRank: four voices from one chart (shared kernels: chart, medium, card; per-voice state; no shared wind stepper). Each voice's output is bitwise its solo self and the stepping order (forward vs reversed) changes nothing: no cross-voice state leakage. Cardinality economics is claimed as independence only; timing is not a row until a budget row exists."
+  },
+  {
+   "filling": "flue",
+   "image": "organ-rank",
+   "qoi": "replay-voice-identity",
+   "owner_crates": [
+    "fs-couple",
+    "fs-rand"
+   ],
+   "exactness": [
+    "X-Exact"
+   ],
+   "gate": "green",
+   "live_default": "no",
+   "determinism": "one-host",
+   "evidence": [
+    {
+     "kind": "test",
+     "ref": "crates/fs-couple/tests/flue_gates.rs::fg_006_replay_is_bitwise_and_keyed_by_voice_identity"
+    }
+   ],
+   "budget_row": null,
+   "corpus_refs": [],
+   "notes": "Onset seed from a Philox StreamKey {seed, kernel 'flue', tile = voice index}: the same logical voice replays bitwise; a different voice identity draws a different seed. Determinism recorded as one-host (executed on yto x86-64 only); the cross-isa claim waits on a second-ISA run."
+  },
+  {
+   "filling": "flue",
+   "image": "tmm-pipe",
+   "qoi": "open-pipe-mode-cents",
+   "owner_crates": [
+    "fs-duct"
+   ],
+   "exactness": [
+    "X-Consist"
+   ],
+   "gate": "ungated",
+   "live_default": "no",
+   "determinism": "one-host",
+   "evidence": [],
+   "budget_row": null,
+   "corpus_refs": [],
+   "notes": "Design image: the flue pipe as a TMM input impedance (open-open with mouth end correction), used to place the ladder's reference modes in the fixture log. No gate yet: an open-pipe mode-placement fixture against a registered corpus row is the next lab item for this filling."
   }
  ]
 }

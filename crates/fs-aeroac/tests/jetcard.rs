@@ -87,6 +87,20 @@ fn jc_001_tonal_interim_card_mints_the_recorded_stage_one_point() {
         card.content_hash()
     );
     println!("{}", card.to_json());
+    // Retained artifact (bead 3ez8g.10.4): the tree carries every minted
+    // card as data so the instrument-claims lint can read each card's
+    // class without depending on this crate. Minted bitwise-identically
+    // or refused, like the refusal-boundary card.
+    let card_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/receipts/jet-card-tonal-interim.json");
+    let json = card.to_json();
+    match std::fs::read_to_string(&card_path) {
+        Ok(retained) => assert_eq!(
+            retained, json,
+            "the retained tonal interim card must reproduce bitwise from the staging record"
+        ),
+        Err(_) => std::fs::write(&card_path, &json).expect("retain the minted card"),
+    }
 }
 
 #[test]

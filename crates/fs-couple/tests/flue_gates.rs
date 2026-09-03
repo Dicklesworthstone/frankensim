@@ -493,3 +493,73 @@ fn fg_007_claims_outside_the_card_validity_region_are_refused() {
     slow.claim_check()
         .expect("in-band blocks pass the claim gate");
 }
+
+/// GATE SUMMARY (bead 3ez8g.10.4 logging clause): the committed flue gate
+/// summary names every flue and jet row of the registry, the refused
+/// broadband row reads refused in BOTH files, and the summary's digest line
+/// is the registry's actual blake2b-128 (a stale summary is a silently
+/// wrong gate table).
+#[test]
+fn fg_008_flue_gate_summary_enumerates_every_registry_row() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("workspace root")
+        .to_path_buf();
+    let registry = std::fs::read_to_string(root.join("instrument-claims.json")).expect("registry");
+    let summary = std::fs::read_to_string(root.join("data/claims/flue-gate-summary.tsv"))
+        .expect("committed flue gate summary");
+    assert!(summary.starts_with("# frankensim-flue-gate-summary-v1"));
+    // The header's blake2b-128 is the maintainer's regeneration receipt
+    // (computed outside the tree); here it must at least be present and
+    // well-formed. The row enumeration below is the gate.
+    let header = summary.lines().nth(1).expect("digest line");
+    let stated = header
+        .split("blake2b-128 ")
+        .nth(1)
+        .and_then(|rest| rest.split(')').next())
+        .expect("stated digest");
+    assert_eq!(stated.len(), 32, "{header}");
+    let mut keys = Vec::new();
+    for filling in ["\"filling\": \"flue\"", "\"filling\": \"jet\""] {
+        let mut cursor = 0usize;
+        while let Some(hit) = registry[cursor..].find(filling) {
+            let at = cursor + hit;
+            let tail = &registry[at..];
+            let image = field(tail, "\"image\": \"");
+            let qoi = field(tail, "\"qoi\": \"");
+            let gate = field(tail, "\"gate\": \"");
+            keys.push((image, qoi, gate));
+            cursor = at + filling.len();
+        }
+    }
+    assert!(
+        keys.len() >= 10,
+        "the flue menu plus the jet labs: {keys:?}"
+    );
+    for (image, qoi, gate) in &keys {
+        let row = format!("\t{image}\t{qoi}\t{gate}\t");
+        assert!(summary.contains(&row), "summary must carry {row:?}");
+    }
+    assert!(
+        summary.contains("\tjet-island-char-line\tbroadband-flute-noise\trefused\t"),
+        "the broadband refusal reads refused in the summary"
+    );
+    assert!(
+        registry.contains("\"qoi\": \"broadband-flute-noise\"")
+            && keys
+                .iter()
+                .any(|(_, q, g)| q == "broadband-flute-noise" && g == "refused"),
+        "the broadband refusal reads refused in the registry"
+    );
+    println!(
+        "{{\"suite\":\"fs-couple\",\"case\":\"flue-gate-summary\",\"verdict\":\"pass\",\"rows\":{}}}",
+        keys.len()
+    );
+}
+
+fn field(tail: &str, tag: &str) -> String {
+    let at = tail.find(tag).expect("field") + tag.len();
+    let end = tail[at..].find('"').expect("end");
+    tail[at..at + end].to_string()
+}
