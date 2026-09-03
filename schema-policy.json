@@ -57,6 +57,29 @@
       "deprecation_horizon": "a removed field stays accepted for one major version after the release that deprecates it"
     },
     {
+      "id": "study.fsim",
+      "title": "The .fsim study schema",
+      "owner": "fs-project",
+      "version_kind": "integer-const",
+      "version_constant": "STUDY_FSIM_VERSION",
+      "version_location": "crates/fs-project/src/lib.rs",
+      "current_version": "1",
+      "lockstep": [],
+      "surface": [
+        "the canonical s-expression and JSON envelope of an fsim-study document",
+        "the Five Explicits over optimization problems (versions, seeds, budgets, capabilities, units)",
+        "the design domain declaration (SDF plate with holes or grid)",
+        "physics discretization, boundary conditions, and loads",
+        "objective dimensional checking and volume fraction constraint",
+        "canonical study hashing under STUDY_CANONICAL_DOMAIN"
+      ],
+      "minor_bump": "may add optional fields with receipted defaults; must keep every prior document loadable and its canonical hash stable",
+      "major_bump": "may remove or retype fields, or change canonical-hash construction; requires a migration path and a new deprecation horizon",
+      "migration_obligation": "no-predecessor",
+      "migration_evidence": [],
+      "deprecation_horizon": "none: version 1 is the initial freeze"
+    },
+    {
       "id": "package.format",
       "title": "The evidence-package format",
       "owner": "fs-package",

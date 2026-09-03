@@ -1,0 +1,48 @@
+(fsim-study
+  :version 1
+  (metadata
+    :name "bracket-2d"
+    :created "2026-09-01"
+    :context-of-use "2D topology optimization marquee benchmark"
+    :intended-decision "select optimal material layout under compliance objective"
+    :decision-gate scoping-estimate
+    :consequence advisory)
+  (versions
+    :frankensim "0.0.1"
+    :schema 1)
+  (seeds
+    :rng 1337)
+  (budgets
+    :wall-time 60 s
+    :memory 1073741824 B
+    :max-iterations 8)
+  (capabilities
+    "optimization.marquee-topopt"
+    "geometry.sdf"
+    "physics.cutfem")
+  (units
+    :system "SI")
+  (domain
+    :type sdf-plate-with-holes
+    :bounds ((0.0 0.0) (1.0 1.0))
+    :initial-holes (
+      (hole :center (0.3 0.5) :radius 0.12)
+      (hole :center (0.7 0.5) :radius 0.18)))
+  (physics
+    :type elasticity-2d
+    :mesh-level 4)
+  (scenario
+    :fixed-boundary left
+    :load-region right)
+  (objective
+    :type compliance
+    :sense minimize
+    :unit "J")
+  (constraints
+    :volume-fraction 0.853)
+  (optimizer
+    :type projected-gradient
+    :step-size 1.0
+    :r-min 0.08
+    :r-max 0.20
+    :steps 8))

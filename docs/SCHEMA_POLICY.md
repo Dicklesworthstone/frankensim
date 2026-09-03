@@ -15,13 +15,14 @@ matter how stable it looks or how many consumers have started reading it.
 
 ## The frozen set
 
-Twelve schemas are promised. Each has a policy record in `schema-policy.json`
+Thirteen schemas are promised. Each has a policy record in `schema-policy.json`
 carrying its version location, compatibility promise, migration obligation, and
 deprecation horizon.
 
 | Id | Owner | Version constant | Current |
 |----|-------|------------------|---------|
-| `project.fsim` | `fs-project` | `FSIM_VERSION` | 3 |
+| `project.fsim` | `fs-project` | `FSIM_VERSION` | 4 |
+| `study.fsim` | `fs-project` | `STUDY_FSIM_VERSION` | 1 |
 | `package.format` | `fs-package` | `FORMAT_VERSION` | 9 |
 | `checker.protocol` | `fs-checker` | `CHECKER_PROTOCOL_VERSION` | 7 |
 | `euler.scientific-contract` | `fs-euler-disc-e2e` | `EULER_CONTRACT_SCHEMA_VERSION` | 1 |

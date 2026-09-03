@@ -15,6 +15,7 @@ mod json_read;
 mod package;
 mod report;
 mod solve;
+// mod study;
 
 use std::ffi::OsString;
 use std::fmt::Write as _;
@@ -69,7 +70,7 @@ const DIAGNOSTIC_SCHEMA: &str = "frankensim.cli.diagnostic.v1";
 const VALIDATION_AUTHORITY: &str = "structural-project-admission";
 const VALIDATION_NO_CLAIM: &str =
     "does not prove artifact existence, capability availability, solvability, or physical validity";
-const USAGE: &str = "frankensim [--json] validate <project.fsim|project.json> | import <project> <source> <ledger.db> --unit <unit> (--max-hole-edges <n> | --step-root <id> --target-h <spacing>) | solve <project> <ledger.db> [--materials <pack>]... [--interfaces <pack>]... | solve --resume <run-id> <ledger.db> | report <run-id> [<ledger.db>] | package <run-id> [<ledger.db>] | run <project> <ledger.db> [--materials <pack>]... [--interfaces <pack>]... | compare <left-run> <right-run> [<ledger.db>] | cinematic <mode> <config.fscine> <trajectory-source> [cinematic options] (verify/mux require --trajectory <artifact>; other cinematic modes also allow --run-reduced)";
+const USAGE: &str = "frankensim [--json] validate <project.fsim|project.json> | import <project> <source> <ledger.db> --unit <unit> (--max-hole-edges <n> | --step-root <id> --target-h <spacing>) | solve <project> <ledger.db> [--materials <pack>]... [--interfaces <pack>]... | solve --resume <run-id> <ledger.db> | report <run-id> [<ledger.db>] | package <run-id> [<ledger.db>] | run <project> <ledger.db> [--materials <pack>]... [--interfaces <pack>]... | compare <left-run> <right-run> [<ledger.db>] | study <study.fsim> <ledger.db> [--budget <N>] | cinematic <mode> <config.fscine> <trajectory-source> [cinematic options] (verify/mux require --trajectory <artifact>; other cinematic modes also allow --run-reduced)";
 
 /// Captured command output. Final result records are on stdout; diagnostics
 /// are on stderr.
@@ -123,6 +124,11 @@ enum Command {
         left: String,
         right: String,
         ledger: Option<PathBuf>,
+    },
+    Study {
+        study: PathBuf,
+        ledger: PathBuf,
+        budget: Option<String>,
     },
 }
 
@@ -214,6 +220,9 @@ pub fn run(args: impl IntoIterator<Item = String>) -> CommandOutput {
             right,
             ledger,
         } => compare::compare_path(&left, &right, ledger.as_deref(), mode),
+        Command::Study { .. } => {
+            unimplemented!("study command is currently in development by sibling agent")
+        }
     }
 }
 
@@ -379,6 +388,16 @@ fn parse_args(
                 ledger: Some(PathBuf::from(ledger)),
             }
         }
+        [verb, study, ledger, rest @ ..]
+            if verb == "study" && is_operand(study) && is_operand(ledger) =>
+        {
+            let budget = parse_study_budget_args(rest).map_err(|diagnostic| (mode, diagnostic))?;
+            Command::Study {
+                study: PathBuf::from(study),
+                ledger: PathBuf::from(ledger),
+                budget,
+            }
+        }
         _ => {
             return Err((
                 mode,
@@ -392,6 +411,30 @@ fn parse_args(
         }
     };
     Ok((mode, command))
+}
+
+fn parse_study_budget_args(args: &[String]) -> Result<Option<String>, Diagnostic> {
+    match args {
+        [] => Ok(None),
+        [flag, value] if flag == "--budget" => {
+            if is_operand(value) {
+                Ok(Some(value.clone()))
+            } else {
+                Err(Diagnostic::new(
+                    "study",
+                    "cli-study-argument",
+                    format!("`--budget` requires a positive integer value; got `{value}`"),
+                    USAGE,
+                ))
+            }
+        }
+        _ => Err(Diagnostic::new(
+            "study",
+            "cli-study-usage",
+            "study requires one study file, one ledger, and optional `--budget <N>`",
+            USAGE,
+        )),
+    }
 }
 
 /// Parse the solve verb's repeatable card-pack flags.

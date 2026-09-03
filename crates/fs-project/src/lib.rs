@@ -18,9 +18,13 @@ pub mod decision;
 pub mod fansystem;
 pub mod migration;
 pub mod spec;
+pub mod study;
 pub mod wire;
 
-/// The current `.fsim` schema version. Readers admit exactly this version;
+/// The current `.fsim` study schema version.
+pub const STUDY_FSIM_VERSION: u32 = 1;
+
+/// The current `.fsim` project schema version. Readers admit exactly this version;
 /// older envelopes must pass through [`migration::migrate_envelope`].
 ///
 /// Version 4 adds the optional `(airflow-convection ...)` conduction boundary
@@ -71,3 +75,9 @@ pub use wire::{
     CanonicalizationReceipt, DecodedProject, ProjectError, canonical_hash, lower, parse_json,
     parse_sexpr, parse_sexpr_lenient, print_json, print_sexpr, recognize,
 };
+pub use study::{
+    StudyBudgets, StudyConstraints, StudyDomain, StudyHole, StudyObjective, StudyOptimizer,
+    StudyPhysics, StudyScenario, StudySpec, canonical_study_hash, parse_study_json,
+    parse_study_sexpr, print_study_json, print_study_sexpr,
+};
+
