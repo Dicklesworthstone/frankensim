@@ -97,8 +97,38 @@ pub enum ManipulationTask {
     BackyardTrowel = 2,
 }
 
-/// Fixed workload controls for one evaluator.
+/// One caller-declared keep-out box, yawed about the world +Z axis.
+///
+/// The task presets each carry one box the scene has always owned. Callers
+/// may declare additional boxes (for example the browser's counter
+/// backsplash, wall cabinet, and nearby furniture) so the owner's hard
+/// link-vs-box constraint sees the same room the renderer draws instead of
+/// leaving that fidelity to a display-side guard.
 #[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ObstacleBox {
+    /// Box centre in world coordinates [m].
+    pub center_m: Vec3,
+    /// Half extents along the box's own axes before yaw [m].
+    pub half_extents_m: Vec3,
+    /// Rotation about the world +Z axis [rad].
+    pub yaw_rad: f64,
+}
+
+/// Largest caller-declared keep-out roster the owner admits.
+pub const MAX_DECLARED_OBSTACLES: usize = 32;
+
+/// Owner default static Coulomb coefficient for the pad/object interface.
+pub const DEFAULT_STATIC_MU: f64 = 0.82;
+/// Owner default kinetic Coulomb coefficient for the pad/object interface.
+pub const DEFAULT_KINETIC_MU: f64 = 0.68;
+
+/// Fixed workload controls for one evaluator.
+///
+/// `object_mass_kg`, `static_mu`, and `kinetic_mu` are optional overrides of
+/// the task preset and the owner's declared interface. `obstacles` extends
+/// the preset keep-out box. Leaving all four at their defaults reproduces the
+/// pre-0.6.14 receipts exactly.
+#[derive(Debug, Clone, PartialEq)]
 pub struct ManipulationConfig {
     /// Household scene/object preset.
     pub task: ManipulationTask,
@@ -108,6 +138,14 @@ pub struct ManipulationConfig {
     pub duration_s: f64,
     /// Whole steps between retained render samples.
     pub trace_stride: usize,
+    /// Caller override of the preset object mass [kg].
+    pub object_mass_kg: Option<f64>,
+    /// Caller override of the static Coulomb coefficient.
+    pub static_mu: Option<f64>,
+    /// Caller override of the kinetic Coulomb coefficient.
+    pub kinetic_mu: Option<f64>,
+    /// Keep-out boxes declared in addition to the task preset box.
+    pub obstacles: Vec<ObstacleBox>,
 }
 
 impl Default for ManipulationConfig {
@@ -117,6 +155,10 @@ impl Default for ManipulationConfig {
             step_s: 1.0 / 90.0,
             duration_s: 6.0,
             trace_stride: 3,
+            object_mass_kg: None,
+            static_mu: None,
+            kinetic_mu: None,
+            obstacles: Vec::new(),
         }
     }
 }
@@ -140,6 +182,12 @@ pub struct ManipulationScene {
     pub obstacle_center_m: Vec3,
     /// Half extents of the keep-out box [m].
     pub obstacle_half_extents_m: Vec3,
+    /// Effective static Coulomb coefficient the rollout ran with.
+    pub static_friction_mu: f64,
+    /// Effective kinetic Coulomb coefficient the rollout ran with.
+    pub kinetic_friction_mu: f64,
+    /// Caller-declared keep-out boxes beyond the preset box.
+    pub extra_obstacle_count: usize,
 }
 
 /// One decimated owner trajectory sample.
@@ -353,7 +401,7 @@ pub struct ManipulationEvaluator {
 impl ManipulationEvaluator {
     /// Admit a complete fixed benchmark configuration.
     pub fn new(config: ManipulationConfig) -> Result<Self, ManipulationError> {
-        validate_config(config)?;
+        validate_config(&config)?;
         let catalog = kuka_lbr_iiwa7_r800()?;
         let definition = TaskDefinition::for_task(config.task);
         let initial_configuration = grasp_configuration(definition.initial_yaw);
@@ -373,8 +421,10 @@ impl ManipulationEvaluator {
                 field: "source-derived grasp/place support heights",
             });
         }
+        let static_mu = config.static_mu.unwrap_or(DEFAULT_STATIC_MU);
+        let kinetic_mu = config.kinetic_mu.unwrap_or(DEFAULT_KINETIC_MU);
         let scene = ManipulationScene {
-            object_mass_kg: definition.mass_kg,
+            object_mass_kg: config.object_mass_kg.unwrap_or(definition.mass_kg),
             object_dimensions_m: definition.dimensions_m,
             grasp_half_width_m: definition.grasp_half_width_m,
             initial_object_position_m,
@@ -382,20 +432,31 @@ impl ManipulationEvaluator {
             support_height_m,
             obstacle_center_m: definition.obstacle_center_m,
             obstacle_half_extents_m: definition.obstacle_half_extents_m,
+            static_friction_mu: static_mu,
+            kinetic_friction_mu: kinetic_mu,
+            extra_obstacle_count: config.obstacles.len(),
+        };
+        // The provenance string names the coefficients actually in force, so a
+        // caller-overridden interface can never be read back as the owner's
+        // declared dry-pad default.
+        let provenance = if config.static_mu.is_some() || config.kinetic_mu.is_some() {
+            "caller-declared-browser-demo-interface--caller-friction"
+        } else {
+            "caller-declared-browser-demo-interface"
         };
         let interface = InterfaceSystemRef::new(
             "iiwa-polyurethane-pad--household-object",
             "iiwa-manipulation-rollout-v1",
-            "caller-declared-browser-demo-interface",
+            provenance,
             InputAuthority::Estimated,
             InterfaceMedium::Dry,
         )?;
         let friction = FrictionLaw::Coulomb {
-            static_mu: 0.82,
-            kinetic_mu: 0.68,
+            static_mu,
+            kinetic_mu,
         };
         let contact_frame = ContactFrame::new([1.0, 0.0, 0.0])?;
-        let step_count = rounded_step_count(config)?;
+        let step_count = rounded_step_count(&config)?;
         Ok(Self {
             config,
             catalog,
@@ -410,8 +471,8 @@ impl ManipulationEvaluator {
 
     /// Fixed admitted controls.
     #[must_use]
-    pub const fn config(&self) -> ManipulationConfig {
-        self.config
+    pub fn config(&self) -> ManipulationConfig {
+        self.config.clone()
     }
 
     /// Source-derived scene geometry and declared object estimates.
@@ -497,6 +558,7 @@ impl ManipulationEvaluator {
                         &kinematics.world_from_link,
                         object_pose,
                         self.scene,
+                        &self.config.obstacles,
                         &collision_cx,
                     )
                 })?;
@@ -619,6 +681,7 @@ impl ManipulationEvaluator {
                         &next_kinematics.world_from_link,
                         object_pose,
                         self.scene,
+                        &self.config.obstacles,
                         &collision_cx,
                     )
                 })?;
@@ -657,6 +720,7 @@ impl ManipulationEvaluator {
                                 &candidate.world_from_link,
                                 object_pose,
                                 self.scene,
+                                &self.config.obstacles,
                                 &collision_cx,
                             )
                         })?;
@@ -734,6 +798,7 @@ impl ManipulationEvaluator {
                         &next_kinematics.world_from_link,
                         object_pose,
                         self.scene,
+                        &self.config.obstacles,
                         &collision_cx,
                     )
                 })?;
@@ -1233,9 +1298,57 @@ pub fn manipulation_curriculum_mean(task: ManipulationTask) -> [f64; ARM_POLICY_
     mean
 }
 
-fn validate_config(config: ManipulationConfig) -> Result<(), ManipulationError> {
+fn validate_config(config: &ManipulationConfig) -> Result<(), ManipulationError> {
     if !config.step_s.is_finite() || !(1.0 / 240.0..=1.0 / 45.0).contains(&config.step_s) {
         return Err(ManipulationError::InvalidConfig { field: "step_s" });
+    }
+    if let Some(mass_kg) = config.object_mass_kg
+        && (!mass_kg.is_finite() || !(0.02..=20.0).contains(&mass_kg))
+    {
+        return Err(ManipulationError::InvalidConfig {
+            field: "object_mass_kg",
+        });
+    }
+    for (field, mu) in [("static_mu", config.static_mu), ("kinetic_mu", config.kinetic_mu)] {
+        if let Some(mu) = mu
+            && (!mu.is_finite() || mu <= 0.05 || mu > 2.5)
+        {
+            return Err(ManipulationError::InvalidConfig { field });
+        }
+    }
+    let static_mu = config.static_mu.unwrap_or(DEFAULT_STATIC_MU);
+    let kinetic_mu = config.kinetic_mu.unwrap_or(DEFAULT_KINETIC_MU);
+    if kinetic_mu > static_mu {
+        return Err(ManipulationError::InvalidConfig {
+            field: "kinetic_mu exceeds static_mu",
+        });
+    }
+    if config.obstacles.len() > MAX_DECLARED_OBSTACLES {
+        return Err(ManipulationError::InvalidConfig {
+            field: "declared obstacle count",
+        });
+    }
+    for obstacle in &config.obstacles {
+        let center = [
+            obstacle.center_m.x,
+            obstacle.center_m.y,
+            obstacle.center_m.z,
+        ];
+        let half = [
+            obstacle.half_extents_m.x,
+            obstacle.half_extents_m.y,
+            obstacle.half_extents_m.z,
+        ];
+        if !obstacle.yaw_rad.is_finite()
+            || center.iter().any(|value| !value.is_finite() || value.abs() > 10.0)
+            || half
+                .iter()
+                .any(|value| !value.is_finite() || *value <= 0.001 || *value > 5.0)
+        {
+            return Err(ManipulationError::InvalidConfig {
+                field: "declared obstacle geometry",
+            });
+        }
     }
     if !config.duration_s.is_finite()
         || !(3.0..=6.0).contains(&config.duration_s)
@@ -1253,7 +1366,7 @@ fn validate_config(config: ManipulationConfig) -> Result<(), ManipulationError> 
     Ok(())
 }
 
-fn rounded_step_count(config: ManipulationConfig) -> Result<usize, ManipulationError> {
+fn rounded_step_count(config: &ManipulationConfig) -> Result<usize, ManipulationError> {
     let steps = (config.duration_s / config.step_s).round();
     if !steps.is_finite() || !(1.0..=1_440.0).contains(&steps) {
         return Err(ManipulationError::InvalidConfig {
@@ -1499,6 +1612,7 @@ fn collision_state(
     poses: &[Se3],
     object_pose: Se3,
     scene: ManipulationScene,
+    declared_obstacles: &[ObstacleBox],
     cx: &Cx<'_>,
 ) -> Result<CollisionState, ManipulationError> {
     if poses.len() != ARM_LINK_COUNT {
@@ -1534,6 +1648,27 @@ fn collision_state(
             &mut state,
             cx,
         )?;
+    }
+
+    // Caller-declared keep-out boxes are hard constraints for every link,
+    // exactly like the preset box. The object is deliberately NOT scored
+    // against them: it starts and ends resting on caller geometry (a counter
+    // top), so a box-vs-object test would refuse every rollout.
+    for declared in declared_obstacles {
+        let envelope = yawed_box_envelope(*declared)?;
+        for link in &links {
+            consider_collision_pair(
+                &link.shape,
+                link.center_world,
+                link.bounding_radius_m,
+                &envelope.shape,
+                envelope.center_world,
+                envelope.bounding_radius_m,
+                true,
+                &mut state,
+                cx,
+            )?;
+        }
     }
 
     // The last two link envelopes intentionally meet the object at the
@@ -1647,6 +1782,24 @@ fn link_envelope(
         shape,
         center_world,
         bounding_radius_m: vec_norm(half_extents),
+    })
+}
+
+/// Convex envelope for a keep-out box yawed about the world +Z axis.
+fn yawed_box_envelope(obstacle: ObstacleBox) -> Result<CollisionEnvelope, ManipulationError> {
+    let (sin_yaw, cos_yaw) = obstacle.yaw_rad.sin_cos();
+    let axis_x = Vec3::new(cos_yaw, sin_yaw, 0.0);
+    let axis_y = Vec3::new(-sin_yaw, cos_yaw, 0.0);
+    let axis_z = Vec3::new(0.0, 0.0, 1.0);
+    let shape = ConvexOrientedBox::new(
+        point3(obstacle.center_m),
+        [geom_vec(axis_x), geom_vec(axis_y), geom_vec(axis_z)],
+        geom_vec(obstacle.half_extents_m),
+    )?;
+    Ok(CollisionEnvelope {
+        shape,
+        center_world: obstacle.center_m,
+        bounding_radius_m: vec_norm(obstacle.half_extents_m),
     })
 }
 
