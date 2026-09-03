@@ -675,14 +675,13 @@ fn two_cycle_graded_band_journey_is_deterministic_and_refines() {
         center: [0.5, 0.5],
         radius: 0.35,
     };
-    let clamp = |x: f64, _: f64| x == 0.0;
     let body = |x: f64, y: f64| [8.0 * (y - 0.5), 12.0 * (0.5 - x)];
     let zero_embedded = |_: f64, _: f64| [0.0, 0.0];
     let theta = 0.5;
 
     let reference = {
         let grid = Quadtree::uniform(5);
-        let cut = problem(&grid, &disk, &material, Some(&clamp), None, true, 0.5);
+        let cut = problem(&grid, &disk, &material, None, None, false, 0.5);
         estimate_elasticity_compliance(&cut, &body, &zero_embedded)
             .expect("uniform reference estimate")
             .j_primal
@@ -693,7 +692,7 @@ fn two_cycle_graded_band_journey_is_deterministic_and_refines() {
         grid.refine_toward_interface(&disk, 3);
         let mut rows = Vec::new();
         for cycle in 0..2 {
-            let cut = problem(&grid, &disk, &material, Some(&clamp), None, true, 0.5);
+            let cut = problem(&grid, &disk, &material, None, None, false, 0.5);
             let solution = cut.solve(&body, &zero_embedded).expect("graded solve");
             let est = estimate_elasticity_compliance(&cut, &body, &zero_embedded)
                 .expect("cycle estimate");
