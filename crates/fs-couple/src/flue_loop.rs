@@ -31,14 +31,19 @@
 //!   only (the lab works in lattice units), so every dimensional number
 //!   comes from the geometry chart and the medium;
 //! - the transverse acoustic velocity at the mouth, `v = q / S_m`,
-//!   deflects the jet root; the deflection convects to the labium in
+//!   displaces the jet root by its time integral (receptivity is a
+//!   displacement, so its `1/omega` cancels the drive derivative's
+//!   `omega` and the pipe's resonance alone selects the mode); the
+//!   displacement convects to the labium in
 //!   `tau = W / c_p` with `c_p / U` DERIVED from the card's stage-I lock
 //!   (`St = f * 2b / U` at `h / delta`, phase condition
 //!   `f * h / c_p = n + 1/4`), and grows by an authored spatial gain
 //!   inside the sinuous mode's amplification band, which ends at the
 //!   tanh shear layer's neutral frequency `omega_c = U / (4 theta)`
-//!   (Michalke; `theta` from the card's profile ratio): the loop cannot
-//!   lock above the band, and the band rises with the jet speed;
+//!   (Michalke; `theta` from the card's profile ratio) and opens
+//!   linearly from zero at low Strouhal (a high-pass at half the neutral
+//!   frequency): the loop cannot lock above or far below the band, and
+//!   the band rises with the jet speed;
 //! - the jet is cut by the labium: the volume flow entering the pipe is
 //!   `Q_j = Q_max * (1 + tanh((eta - y0) / b)) / 2`, the card's
 //!   smoothed top-hat profile integrated, `b` its half-width scaled to
@@ -314,12 +319,15 @@ pub struct FlueBlockDiag {
     pub inside_card_validity: bool,
     /// Jet transit delay [s].
     pub transit_s: f64,
-    /// Zero-crossing lock estimate of the mouth pressure [Hz].
+    /// Zero-crossing lock estimate of the wave launched into the pipe [Hz].
     pub lock_hz: f64,
-    /// RMS mouth pressure [Pa].
+    /// RMS of the wave launched into the pipe [Pa].
     pub p_rms_pa: f64,
     /// Fraction of samples the labium cut on the pipe side.
     pub duty_pipe_side: f64,
+    /// RMS jet displacement at the labium over the jet half-width
+    /// (above about 1 the labium cut saturates: a limit cycle).
+    pub eta_rms_over_b: f64,
     /// Work the blowing pressure did on the jet flow [J].
     pub blow_work_j: f64,
     /// Work the jet drive source did on the mouth loop [J].
@@ -355,7 +363,15 @@ pub struct FlueVoice {
     // Jet amplification band: two cascaded first-order sections at the
     // shear layer's neutral frequency (state of each section).
     band_state: [f64; 2],
+    // Low-frequency edge of the band: growth vanishes linearly at small
+    // Strouhal, a first-order high-pass (previous input, previous output).
+    band_hp: [f64; 2],
     momentum_thickness_m: f64,
+    // Jet root displacement: the leaky integral of the band-limited,
+    // delayed mouth velocity (receptivity is displacement, so the
+    // integral's 1/omega cancels the drive derivative's omega and the
+    // pipe's resonance alone selects the mode).
+    displacement_state: f64,
     // Mouth loop coefficients.
     inertance: f64,
     resistance: f64,
@@ -431,7 +447,9 @@ impl FlueVoice {
             q_prev: 0.0,
             flow_prev: 0.0,
             band_state: [0.0; 2],
+            band_hp: [0.0; 2],
             momentum_thickness_m,
+            displacement_state: 0.0,
             inertance,
             resistance,
             source_coeff: rho * geometry.end_correction_m() / s_m,
@@ -511,7 +529,8 @@ impl FlueVoice {
         (1.0 - frac) * idx(k) + frac * idx(k + 1)
     }
 
-    /// Advance one block, writing the mouth pressure into `out`.
+    /// Advance one block, writing the wave launched into the pipe
+    /// (`p_plus` at the mouth plane) into `out`.
     ///
     /// # Errors
     /// [`FlueError`] on an empty block or a wind line refusal.
@@ -537,11 +556,6 @@ impl FlueVoice {
         } else {
             0.0
         };
-        let deflection_scale = if u > 0.0 {
-            self.island.displacement_gain * self.geometry.cut_up_m / u
-        } else {
-            0.0
-        };
         let seed_scale = self.island.seed_amplitude_rel * u;
         // Amplification band of the sinuous jet mode: the tanh shear
         // layer is spatially amplified only below its neutral frequency
@@ -556,6 +570,17 @@ impl FlueVoice {
             0.0
         };
         let band_alpha = omega_c * dt / (1.0 + omega_c * dt);
+        // Low edge of the band: the growth rate vanishes linearly below
+        // the most amplified Strouhal (about half the neutral one), so a
+        // first-order high-pass at omega_c / 2 carries that slope. Without
+        // it the integral receptivity has its largest gain at the lowest
+        // frequencies, where the open pipe offers no impedance, and the
+        // loop falls into a slow relaxation cycle instead of a note
+        // (executed: 6 Hz at every blowing pressure).
+        let omega_h = 0.5 * omega_c;
+        let hp_alpha = 1.0 / (1.0 + omega_h * dt);
+        // Displacement leak two decades below the amplification band.
+        let leak_rate = omega_c / 100.0;
         let (l, r, zc) = (self.inertance, self.resistance, self.zc);
         // Implicit mouth loop: p_j = L (q - q_prev)/dt + R q + p_in, with
         // p_in = p_plus + p_minus and q = (p_plus - p_minus)/zc.
@@ -567,19 +592,29 @@ impl FlueVoice {
         let mut stored_delta = 0.0;
         let mut numerical = 0.0;
         let mut pipe_side = 0usize;
+        let mut eta_sq = 0.0;
         for slot in out.iter_mut() {
             // Jet deflection at the labium from the delayed mouth velocity
             // plus the voice-keyed onset seed.
             let v_raw = self.delayed_velocity(delay_samples);
             self.band_state[0] += band_alpha * (v_raw - self.band_state[0]);
             self.band_state[1] += band_alpha * (self.band_state[0] - self.band_state[1]);
-            let v_delayed = self.band_state[1];
+            let hp_in = self.band_state[1];
+            let hp_out = hp_alpha * (self.band_hp[1] + hp_in - self.band_hp[0]);
+            self.band_hp = [hp_in, hp_out];
+            let v_delayed = hp_out;
             let seed = if seed_scale > 0.0 {
                 seed_scale * (2.0 * self.seed.next_f64() - 1.0)
             } else {
                 0.0
             };
-            let eta = deflection_scale * v_delayed + seed * self.geometry.cut_up_m / u.max(1e-9);
+            // Receptivity: the jet root is displaced by the integral of the
+            // transverse velocity (with a leak far below the band to keep
+            // the mean at zero); the seed enters as transverse velocity.
+            self.displacement_state +=
+                dt * (v_delayed + seed - leak_rate * self.displacement_state);
+            let eta = self.island.displacement_gain * self.displacement_state;
+            eta_sq += eta * eta;
             let flow = if u > 0.0 {
                 0.5 * q_max * (1.0 + ((eta - y0) / b).tanh())
             } else {
@@ -606,7 +641,10 @@ impl FlueVoice {
             // Mouth transverse velocity into the history ring.
             self.history[self.head] = q / s_m;
             self.head = (self.head + 1) % self.history.len();
-            *slot = p_in;
+            // The observable is the wave launched into the pipe: the mouth
+            // plane is the pipe's pressure node, so the total pressure
+            // there says little about the standing wave the pipe carries.
+            *slot = p_plus;
         }
         let n = out.len() as f64;
         let mean = out.iter().sum::<f64>() / n;
@@ -633,6 +671,7 @@ impl FlueVoice {
             lock_hz: crossings as f64 / (n * dt),
             p_rms_pa: (sq / n).sqrt(),
             duty_pipe_side: pipe_side as f64 / n,
+            eta_rms_over_b: (eta_sq / n).sqrt() / b,
             blow_work_j: blow_work,
             source_work_j: source_work,
             pipe_work_j: pipe_work,
