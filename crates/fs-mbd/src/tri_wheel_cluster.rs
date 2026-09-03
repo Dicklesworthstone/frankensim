@@ -1,9 +1,10 @@
 //! Rigid planar kinematics for an equal-radius three-wheel cluster on level
 //! ground or an ideal two-riser stair profile.
 //!
-//! This module owns geometry and vertical contact-gap evaluation only. It does
+//! This module owns geometry and rigid contact-gap evaluation only. It does
 //! not infer normal force, friction, tire compliance, motor torque, controller
-//! response, impact, or side contact with a stair riser.
+//! response, or impact. It does evaluate finite-segment vertical-riser
+//! clearance so a wheel cannot pass through the stair geometry.
 
 use core::f64::consts::{PI, TAU};
 use core::fmt;
@@ -47,6 +48,16 @@ pub struct TriWheelStairResult {
     pub contact_count: u8,
     /// Smallest signed vertical gap [m].
     pub minimum_gap_m: f64,
+    /// Wheel-to-nearest-riser signed clearances, ordered A/B/C [m].
+    /// `None` when the evaluated surface is level ground.
+    pub signed_riser_clearances_m: [Option<f64>; TRI_WHEEL_COUNT],
+    /// Whether each wheel touches either finite vertical riser segment.
+    pub riser_contact_mask: [bool; TRI_WHEEL_COUNT],
+    /// Number of wheel-to-riser contacts.
+    pub riser_contact_count: u8,
+    /// Smallest wheel-to-riser signed clearance [m].
+    /// `None` when the evaluated surface is level ground.
+    pub minimum_riser_clearance_m: Option<f64>,
 }
 
 /// Typed refusal from the rigid tri-wheel support evaluator.
@@ -59,6 +70,15 @@ pub enum TriWheelStairError {
         /// Zero-based A/B/C wheel index.
         wheel_index: usize,
         /// Signed vertical gap [m].
+        gap_m: f64,
+    },
+    /// A wheel intersects a finite vertical stair-riser segment.
+    PenetratingRiser {
+        /// Zero-based A/B/C wheel index.
+        wheel_index: usize,
+        /// Zero-based first/second riser index.
+        riser_index: usize,
+        /// Signed wheel-surface clearance [m].
         gap_m: f64,
     },
     /// No wheel touches a horizontal support within the declared tolerance.
@@ -76,6 +96,14 @@ impl fmt::Display for TriWheelStairError {
                 formatter,
                 "tri-wheel {wheel_index} penetrates its horizontal support by signed gap {gap_m:.9e} m"
             ),
+            Self::PenetratingRiser {
+                wheel_index,
+                riser_index,
+                gap_m,
+            } => write!(
+                formatter,
+                "tri-wheel {wheel_index} penetrates stair-riser {riser_index} by signed gap {gap_m:.9e} m"
+            ),
             Self::Unsupported { nearest_gap_m } => write!(
                 formatter,
                 "tri-wheel cluster has no horizontal support contact; nearest gap is {nearest_gap_m:.9e} m"
@@ -85,6 +113,26 @@ impl fmt::Display for TriWheelStairError {
 }
 
 impl std::error::Error for TriWheelStairError {}
+
+/// Signed clearance from a circular wheel to a finite vertical segment [m].
+///
+/// The result is the distance from the wheel axis to the closest point on the
+/// segment, minus the wheel radius. A negative result is geometric
+/// penetration, and a zero result is rigid tangent contact.
+#[must_use]
+pub fn wheel_to_vertical_segment_clearance_m(
+    wheel_x_m: f64,
+    wheel_y_m: f64,
+    wheel_radius_m: f64,
+    segment_x_m: f64,
+    segment_y_min_m: f64,
+    segment_y_max_m: f64,
+) -> f64 {
+    let closest_y_m = wheel_y_m.clamp(segment_y_min_m, segment_y_max_m);
+    let dx_m = wheel_x_m - segment_x_m;
+    let dy_m = wheel_y_m - closest_y_m;
+    dx_m.hypot(dy_m) - wheel_radius_m
+}
 
 /// Height of the ideal horizontal support beneath one wheel axis [m].
 ///
@@ -122,6 +170,10 @@ pub fn step_tri_wheel_stair_contact(
     let mut contact_count = 0_u8;
     let mut minimum_gap_m = f64::INFINITY;
     let mut nearest_gap_m = f64::INFINITY;
+    let mut signed_riser_clearances_m = [None; TRI_WHEEL_COUNT];
+    let mut riser_contact_mask = [false; TRI_WHEEL_COUNT];
+    let mut riser_contact_count = 0_u8;
+    let mut minimum_riser_clearance_m = input.stair_active.then_some(f64::INFINITY);
 
     for wheel_index in 0..TRI_WHEEL_COUNT {
         let phase_rad = -PI / 2.0 + wheel_index as f64 * TAU / TRI_WHEEL_COUNT as f64;
@@ -143,6 +195,49 @@ pub fn step_tri_wheel_stair_contact(
             return Err(TriWheelStairError::PenetratingSupport { wheel_index, gap_m });
         }
 
+        if input.stair_active {
+            let risers = [
+                (0.0, 0.0, input.stair_rise_m),
+                (
+                    input.stair_tread_m,
+                    input.stair_rise_m,
+                    2.0 * input.stair_rise_m,
+                ),
+            ];
+            let mut wheel_minimum_riser_clearance_m = f64::INFINITY;
+            for (riser_index, (riser_x_m, riser_y_min_m, riser_y_max_m)) in
+                risers.into_iter().enumerate()
+            {
+                let riser_gap_m = wheel_to_vertical_segment_clearance_m(
+                    x_m,
+                    y_m,
+                    input.wheel_radius_m,
+                    riser_x_m,
+                    riser_y_min_m,
+                    riser_y_max_m,
+                );
+                if riser_gap_m < -input.contact_tolerance_m {
+                    return Err(TriWheelStairError::PenetratingRiser {
+                        wheel_index,
+                        riser_index,
+                        gap_m: riser_gap_m,
+                    });
+                }
+                wheel_minimum_riser_clearance_m =
+                    wheel_minimum_riser_clearance_m.min(riser_gap_m);
+            }
+            let touching_riser =
+                wheel_minimum_riser_clearance_m.abs() <= input.contact_tolerance_m;
+            signed_riser_clearances_m[wheel_index] = Some(wheel_minimum_riser_clearance_m);
+            riser_contact_mask[wheel_index] = touching_riser;
+            riser_contact_count += u8::from(touching_riser);
+            minimum_riser_clearance_m = Some(
+                minimum_riser_clearance_m
+                    .unwrap_or(f64::INFINITY)
+                    .min(wheel_minimum_riser_clearance_m),
+            );
+        }
+
         let touching = gap_m.abs() <= input.contact_tolerance_m;
         wheel_centres_m[wheel_index] = [x_m, y_m];
         signed_vertical_gaps_m[wheel_index] = gap_m;
@@ -162,6 +257,10 @@ pub fn step_tri_wheel_stair_contact(
         contact_mask,
         contact_count,
         minimum_gap_m,
+        signed_riser_clearances_m,
+        riser_contact_mask,
+        riser_contact_count,
+        minimum_riser_clearance_m,
     })
 }
 
@@ -207,7 +306,7 @@ mod tests {
     const WHEEL_RADIUS_M: f64 = 3.81 * INCH_M;
     const STAIR_RISE_M: f64 = 6.85 * INCH_M;
     const STAIR_TREAD_M: f64 = 10.9 * INCH_M;
-    const RISER_OFFSET_M: f64 = 3.011 * INCH_M;
+    const UPPER_TREAD_CONTACT_OFFSET_M: f64 = 3.011 * INCH_M;
     const TOLERANCE_M: f64 = 1.0e-9;
 
     fn start_rotation_rad() -> f64 {
@@ -232,6 +331,9 @@ mod tests {
         assert_eq!(result.contact_mask, [true, false, false]);
         assert_eq!(result.contact_count, 1);
         assert!(result.minimum_gap_m.abs() <= TOLERANCE_M);
+        assert_eq!(result.signed_riser_clearances_m, [None, None, None]);
+        assert_eq!(result.riser_contact_count, 0);
+        assert_eq!(result.minimum_riser_clearance_m, None);
     }
 
     #[test]
@@ -242,7 +344,9 @@ mod tests {
         let result = step_tri_wheel_stair_contact(TriWheelStairInput {
             cluster_radius_m: CLUSTER_RADIUS_M,
             wheel_radius_m: WHEEL_RADIUS_M,
-            axle_x_m: -RISER_OFFSET_M - wheel_a_relative_x,
+            // The lower wheel is one wheel radius before the riser. Table 1's
+            // z-value is where the upper wheel contacts the tread beyond it.
+            axle_x_m: -WHEEL_RADIUS_M - wheel_a_relative_x,
             axle_y_m: WHEEL_RADIUS_M - wheel_a_relative_y,
             carrier_rotation_rad: rotation,
             stair_rise_m: STAIR_RISE_M,
@@ -254,6 +358,12 @@ mod tests {
 
         assert_eq!(result.contact_mask, [true, true, false]);
         assert_eq!(result.contact_count, 2);
+        assert_eq!(result.riser_contact_mask, [true, false, false]);
+        assert_eq!(result.riser_contact_count, 1);
+        assert!(result.minimum_riser_clearance_m.unwrap().abs() <= TOLERANCE_M);
+        assert!(
+            (result.wheel_centres_m[1][0] - UPPER_TREAD_CONTACT_OFFSET_M).abs() < 2.0e-5
+        );
     }
 
     #[test]
@@ -265,7 +375,7 @@ mod tests {
         let result = step_tri_wheel_stair_contact(TriWheelStairInput {
             cluster_radius_m: CLUSTER_RADIUS_M,
             wheel_radius_m: WHEEL_RADIUS_M,
-            axle_x_m: STAIR_TREAD_M - RISER_OFFSET_M - wheel_b_relative_x,
+            axle_x_m: STAIR_TREAD_M - WHEEL_RADIUS_M - wheel_b_relative_x,
             axle_y_m: STAIR_RISE_M + WHEEL_RADIUS_M - wheel_b_relative_y,
             carrier_rotation_rad: rotation,
             stair_rise_m: STAIR_RISE_M,
@@ -277,6 +387,15 @@ mod tests {
 
         assert_eq!(result.contact_mask, [false, true, true]);
         assert_eq!(result.contact_count, 2);
+        assert_eq!(result.riser_contact_mask, [false, true, false]);
+        assert_eq!(result.riser_contact_count, 1);
+        assert!(result.minimum_riser_clearance_m.unwrap().abs() <= TOLERANCE_M);
+        assert!(
+            (result.wheel_centres_m[2][0]
+                - (STAIR_TREAD_M + UPPER_TREAD_CONTACT_OFFSET_M))
+                .abs()
+                < 2.0e-5
+        );
     }
 
     #[test]
@@ -306,6 +425,33 @@ mod tests {
                 ..base
             }),
             Err(TriWheelStairError::Unsupported { .. })
+        ));
+    }
+
+    #[test]
+    fn refuses_the_previous_swapped_z_pose_that_crossed_the_riser() {
+        let rotation = -start_rotation_rad();
+        let wheel_a_relative_x = CLUSTER_RADIUS_M * (-PI / 2.0 + rotation).cos();
+        let wheel_a_relative_y = CLUSTER_RADIUS_M * (-PI / 2.0 + rotation).sin();
+        let result = step_tri_wheel_stair_contact(TriWheelStairInput {
+            cluster_radius_m: CLUSTER_RADIUS_M,
+            wheel_radius_m: WHEEL_RADIUS_M,
+            axle_x_m: -UPPER_TREAD_CONTACT_OFFSET_M - wheel_a_relative_x,
+            axle_y_m: WHEEL_RADIUS_M - wheel_a_relative_y,
+            carrier_rotation_rad: rotation,
+            stair_rise_m: STAIR_RISE_M,
+            stair_tread_m: STAIR_TREAD_M,
+            stair_active: true,
+            contact_tolerance_m: TOLERANCE_M,
+        });
+
+        assert!(matches!(
+            result,
+            Err(TriWheelStairError::PenetratingRiser {
+                wheel_index: 0,
+                riser_index: 0,
+                ..
+            })
         ));
     }
 }
