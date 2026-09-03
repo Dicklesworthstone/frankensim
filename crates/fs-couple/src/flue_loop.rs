@@ -416,6 +416,7 @@ impl FlueVoice {
             kernel: FLUE_SEED_KERNEL,
             tile: voice_index,
         };
+        let momentum_thickness_m = island.theta_over_b * 0.5 * geometry.flue_height_m;
         Ok(FlueVoice {
             island,
             geometry,
@@ -430,7 +431,7 @@ impl FlueVoice {
             q_prev: 0.0,
             flow_prev: 0.0,
             band_state: [0.0; 2],
-            momentum_thickness_m: island.theta_over_b * 0.5 * geometry.flue_height_m,
+            momentum_thickness_m,
             inertance,
             resistance,
             source_coeff: rho * geometry.end_correction_m() / s_m,
