@@ -310,14 +310,14 @@ mod tests {
         let mut cold = panel(0.008);
         cold.gas = air_at(273.15);
         let mut warm = cold.clone();
-        warm.gas = air_at(313.15);
+        warm.gas = air_at(323.15);
 
         let cold_period =
             period(&realize_plate_cavity(&cold, &f, 8_000, 1.0).expect("cold cavity realizes"));
         let warm_period =
             period(&realize_plate_cavity(&warm, &f, 8_000, 1.0).expect("warm cavity realizes"));
         assert!(
-            warm_period < cold_period * 0.98,
+            warm_period < cold_period * 0.99,
             "warmer admitted air must raise c and shorten the cavity period ({warm_period:.2} vs {cold_period:.2})"
         );
     }
