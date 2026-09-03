@@ -5,7 +5,7 @@ machine (measured: Apple M4 Pro, pinned nightly toolchain, siblings already
 materialized; the first cold build takes longer because it compiles the
 workspace). Every command below is executed continuously by
 `scripts/ci/examples_freshness_e2e.sh` (22 checks) and
-`scripts/ci/solve_stage_producers_e2e.sh` (65 checks), and the same facts are
+`scripts/ci/solve_stage_producers_e2e.sh` (66 checks), and the same facts are
 pinned by the fs-cli G0/G1 battery (`crates/fs-cli/tests/cli.rs`), so if a
 command here drifts from what the product actually does, a lane breaks.
 

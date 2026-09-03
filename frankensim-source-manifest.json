@@ -2,7 +2,7 @@
   "schema": "frankensim-source-manifest-v1",
   "identity_domain": "org.frankensim.xtask.source-manifest.v1",
   "identity_version": 1,
-  "manifest_identity": "897311b65b62a45f9984a3441d7cc844f66eeb854b3a90984c1870419eca80bc",
+  "manifest_identity": "d7e840bf33f4f94ce198171c0b8d8ec67b685a9ba2b120a8df35d75362982b51",
   "bead_id": "frankensim-extreal-program-f85xj.13.2",
   "authority": "canonical structural inventory over exact Git-index non-tracker bytes; release observations are intentionally unbound here",
   "release_binding": {
@@ -15,7 +15,7 @@
     "repository": "https://github.com/Dicklesworthstone/frankensim",
     "workspace_version": "0.0.1",
     "source_root_domain": "org.frankensim.xtask.source-root.v1",
-    "source_root": "e344940dace0dfa9c1b5bdd13bb0467fafba7dbc06cccb54fafc687bc11c77a0",
+    "source_root": "979fc036523b969315a3d0ca87c4c5be6fc388701f8fb0cabcd010fe781faaff",
     "tracked_file_count": 3234,
     "excluded_paths": [".beads/**", "frankensim-source-manifest.json", "frankensim-source-manifest.spdx.json"],
     "files": [
@@ -3164,7 +3164,7 @@
       {"path": "scripts/e2e/music_wind.sh", "git_mode": "100755", "bytes": 282, "content_blake3": "4d16bd0f292c38a38fd16671641fa4443cbdc8bcc84528b6c93265e229fa1009"},
       {"path": "scripts/hooks/install.sh", "git_mode": "100755", "bytes": 1856, "content_blake3": "708c4ad54d2588f38115fd12b343d8ee2b216df5e5a9411f52b5a82ea71e47d3"},
       {"path": "scripts/hooks/pre-commit", "git_mode": "100755", "bytes": 4875, "content_blake3": "d2fac289f5057261fa182f80e9dc5c2afbc4fd013308789c6e61a9cfa942b030"},
-      {"path": "spine-e2e-summary.json", "git_mode": "100644", "bytes": 1598, "content_blake3": "76e88778534cfa17da8e45918e50beeda42b402141118bf05f873a6a4745cf07"},
+      {"path": "spine-e2e-summary.json", "git_mode": "100644", "bytes": 1589, "content_blake3": "94c2bb22248b21070fb9cdcbc4e9201b7ed81a4ee6f8916b963ede8a0abd6f7c"},
       {"path": "spine-metrics.json", "git_mode": "100644", "bytes": 626, "content_blake3": "adad4d078a8d51f76b3f14c22fe5f0ba5b55189774da446f8c9971cf9ffde2d0"},
       {"path": "spine-ratchet.json", "git_mode": "100644", "bytes": 461, "content_blake3": "28b8c44efbbdf4f932a02b827e4dbb6cedd1991cf6600b755e1a41e215f4ee6c"},
       {"path": "suite-known-red.json", "git_mode": "100644", "bytes": 443, "content_blake3": "685f75aac0abc6e2f7b15766e2a9d698c7127931c848baeec725756697ee1860"},
