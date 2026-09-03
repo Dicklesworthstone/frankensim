@@ -148,7 +148,8 @@ impl CsrCompact {
     }
 
     /// nnz-balanced contiguous row shards for `threads` workers.
-    fn shard_bounds(&self, threads: usize) -> Vec<usize> {
+    #[must_use]
+    pub fn shard_bounds(&self, threads: usize) -> Vec<usize> {
         // Empty rows do not justify independent workers, and more workers than
         // the host can run only amplify allocation and spawn overhead. The
         // count is fixed at construction, so this hot path does not rescan
