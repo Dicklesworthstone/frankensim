@@ -216,7 +216,7 @@ pub fn recover_segments(
                     stats.max_depth_used = stats.max_depth_used.max(depth + 1);
                     by_bits.insert(bits, new_idx);
                     edges = edge_set(tetra);
-                    if std::env::var_os("FS_MESH_TRACE_RECOVERY").is_some() && edges.contains(&key)
+                    if std::env::var_os("FS_MESH_TRACE_MIDPOINTS").is_some() && edges.contains(&key)
                     {
                         eprintln!(
                             "TRACE recovery: segment {sid} midpoint {new_idx} of sub-edge {key:?} left the edge alive"
@@ -1739,7 +1739,9 @@ pub fn recover_facets_with_points(
                         } else {
                             interior_splits += 1;
                         }
-                        if std::env::var_os("FS_MESH_TRACE_RECOVERY").is_some()
+                        // Rebuilding the edge set per insertion is O(tets): its
+                        // own switch, so the pass trace stays usable on big runs.
+                        if std::env::var_os("FS_MESH_TRACE_MIDPOINTS").is_some()
                             && edge_set(tetra).contains(&edge)
                         {
                             eprintln!(
