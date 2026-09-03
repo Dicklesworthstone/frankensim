@@ -1,3 +1,4 @@
+import Foundation
 import XCTest
 @testable import FrankenSim
 import FrankenSimCore
@@ -157,6 +158,73 @@ final class SimulationCatalogTests: XCTestCase {
             XCTAssertEqual(frankensim_apple_result_len(), 0)
         } catch {
             XCTFail("unexpected error: \(error)")
+        }
+    }
+
+    func testRunSnapshotExportsCompletePayloadAndAuthorityBoundary() throws {
+        let experiment = try XCTUnwrap(SimulationCatalog.all.first { $0.id == 13 })
+        let values = [1.25, .nan, .infinity, -.infinity]
+        let result = SimulationResult(
+            experimentID: experiment.id,
+            shape: .signal,
+            width: values.count,
+            height: 1,
+            frames: 1,
+            values: values,
+            finiteMinimum: 1.25,
+            finiteMaximum: 1.25,
+            quality: 0.55,
+            seed: 0x5EED,
+            elapsed: .milliseconds(125)
+        )
+
+        let snapshot = try SimulationRunSnapshot(
+            result: result,
+            experiment: experiment,
+            createdAt: Date(timeIntervalSince1970: 2)
+        )
+        let json = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: snapshot.encoded()) as? [String: Any]
+        )
+        let payload = try XCTUnwrap(json["payload"] as? [Any])
+        let run = try XCTUnwrap(json["run"] as? [String: Any])
+
+        XCTAssertEqual(json["schema"] as? String, SimulationRunSnapshot.schema)
+        XCTAssertEqual(json["authorityBoundary"] as? String, SimulationRunSnapshot.boundary)
+        XCTAssertEqual(json["noClaim"] as? String, experiment.noClaim)
+        XCTAssertEqual(payload.count, values.count)
+        XCTAssertEqual(payload[0] as? Double, 1.25)
+        XCTAssertEqual(payload[1] as? String, "nan")
+        XCTAssertEqual(payload[2] as? String, "+infinity")
+        XCTAssertEqual(payload[3] as? String, "-infinity")
+        XCTAssertEqual(run["qualityTier"] as? String, "balanced")
+        XCTAssertEqual(run["elapsedMilliseconds"] as? Double, 125)
+        XCTAssertTrue(snapshot.filename.hasSuffix("-5eed.json"))
+    }
+
+    func testRunSnapshotRefusesMismatchedExperimentIdentity() throws {
+        let experiment = try XCTUnwrap(SimulationCatalog.all.first { $0.id == 13 })
+        let result = SimulationResult(
+            experimentID: 12,
+            shape: .signal,
+            width: 1,
+            height: 1,
+            frames: 1,
+            values: [1],
+            finiteMinimum: 1,
+            finiteMaximum: 1,
+            quality: 0.12,
+            seed: 1,
+            elapsed: .zero
+        )
+
+        XCTAssertThrowsError(
+            try SimulationRunSnapshot(result: result, experiment: experiment)
+        ) { error in
+            XCTAssertEqual(
+                error.localizedDescription,
+                "The result does not belong to the selected experiment."
+            )
         }
     }
 

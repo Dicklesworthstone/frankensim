@@ -11,6 +11,7 @@
 		1187B29DC77496602273C1DD /* SimulationStudioView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F0F321076043E3338859AC5 /* SimulationStudioView.swift */; };
 		2663DD37C6B0911AE06A5825 /* VisualizationViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 789F9037B3EA574C4DDD8996 /* VisualizationViews.swift */; };
 		3A2681A2C915C69FAAE9542F /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = E0738C400C44D75353C6A0B4 /* PrivacyInfo.xcprivacy */; };
+		59C06FDF3A9EBB3F6A79074D /* SimulationRunSnapshot.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0180E2E2721B6E3CE63ED8EB /* SimulationRunSnapshot.swift */; };
 		76FC283CD4FBE49A00167862 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 22D387A5C6AB09E211C8BBEC /* Theme.swift */; };
 		9DA80FE34DAAA771545C3335 /* SimulationCatalogTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D8913908732FDA5F01465327 /* SimulationCatalogTests.swift */; };
 		A20280DA0CD7942D63D33CA9 /* FrankenSimCore.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 920497C01CE1D6C07D6E436A /* FrankenSimCore.xcframework */; };
@@ -31,6 +32,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		0180E2E2721B6E3CE63ED8EB /* SimulationRunSnapshot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SimulationRunSnapshot.swift; sourceTree = "<group>"; };
 		0AF6BEEC0CA5930B9F4B07D8 /* SimulationCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SimulationCatalog.swift; sourceTree = "<group>"; };
 		22D387A5C6AB09E211C8BBEC /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
 		6A4D21ED33B7B43D580AD132 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
@@ -74,6 +76,7 @@
 				E0738C400C44D75353C6A0B4 /* PrivacyInfo.xcprivacy */,
 				0AF6BEEC0CA5930B9F4B07D8 /* SimulationCatalog.swift */,
 				7231006CD53988408E23DE2C /* SimulationEngine.swift */,
+				0180E2E2721B6E3CE63ED8EB /* SimulationRunSnapshot.swift */,
 				9F0F321076043E3338859AC5 /* SimulationStudioView.swift */,
 				22D387A5C6AB09E211C8BBEC /* Theme.swift */,
 				789F9037B3EA574C4DDD8996 /* VisualizationViews.swift */,
@@ -225,6 +228,7 @@
 				C3A1CAAC40A3E346A42EF437 /* FrankenSimApp.swift in Sources */,
 				F9A40C8FFF3D8DE115656869 /* SimulationCatalog.swift in Sources */,
 				0243D494020D17C2AF2027A3 /* SimulationEngine.swift in Sources */,
+				59C06FDF3A9EBB3F6A79074D /* SimulationRunSnapshot.swift in Sources */,
 				1187B29DC77496602273C1DD /* SimulationStudioView.swift in Sources */,
 				76FC283CD4FBE49A00167862 /* Theme.swift in Sources */,
 				2663DD37C6B0911AE06A5825 /* VisualizationViews.swift in Sources */,

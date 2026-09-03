@@ -18,7 +18,8 @@ surfaces with their real maturity and no-claim boundaries.
 ## Information architecture
 
 1. **Studio** — one focused experiment with immediate parameter controls, an
-   animated native visualization, runtime statistics, and an evidence card.
+   animated native visualization, runtime statistics, an evidence card, and a
+   complete JSON run-snapshot export for every non-streaming result.
 2. **Laboratory** — the website's 30 kernels grouped into Foundations, Frontier,
    and Deep Kernel. Search and filters remain visible on wide layouts.
 3. **Campaigns** — ten evidence-bearing end-to-end campaigns plus the ornithoid,
@@ -53,6 +54,12 @@ The result packet begins with six finite `f64` values:
 
 Unknown schemas, malformed dimensions, non-finite metadata, and over-budget
 payloads are refused in Swift before rendering.
+
+The share action exports the full bounded payload with a versioned Apple-run
+schema, dimensions, seed, compute budget, observed wall time, evidence label,
+and the experiment's no-claim text. Non-finite payload sentinels use explicit
+JSON strings. The file calls itself a visualization snapshot and explicitly
+does not claim to be an authenticated Design Ledger certificate.
 
 ## Visual language
 
