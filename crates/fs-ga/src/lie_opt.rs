@@ -17,9 +17,9 @@
 //! `space_*` = left perturbation (`Exp(delta) * group`); `body_*` = right
 //! perturbation (`group * Exp(delta)`).
 
+use crate::GaError;
 use crate::facade::Vec3;
 use crate::lie::{Se3, So3, So3Tangent, Twist};
-use crate::GaError;
 
 /// Deterministic splitmix64 for the tangent samplers (module-scope
 /// determinism; keyed production streams stay in fs-rand).
@@ -96,8 +96,16 @@ pub fn se3_tangent_step(
     let mut best_score = incumbent;
     for _ in 0..k.max(1) {
         let twist = Twist::new(
-            Vec3::new(unit_pm(state) * sigma, unit_pm(state) * sigma, unit_pm(state) * sigma),
-            Vec3::new(unit_pm(state) * sigma, unit_pm(state) * sigma, unit_pm(state) * sigma),
+            Vec3::new(
+                unit_pm(state) * sigma,
+                unit_pm(state) * sigma,
+                unit_pm(state) * sigma,
+            ),
+            Vec3::new(
+                unit_pm(state) * sigma,
+                unit_pm(state) * sigma,
+                unit_pm(state) * sigma,
+            ),
         );
         let candidate = Se3::exp(twist)?.compose(*pose)?;
         let score = objective(&candidate);
@@ -111,7 +119,9 @@ pub fn se3_tangent_step(
     }
     let an = best_twist.angular;
     let ln = best_twist.linear;
-    let norm = (an.x * an.x + an.y * an.y + an.z * an.z).sqrt().max((ln.x * ln.x + ln.y * ln.y + ln.z * ln.z).sqrt());
+    let norm = (an.x * an.x + an.y * an.y + an.z * an.z)
+        .sqrt()
+        .max((ln.x * ln.x + ln.y * ln.y + ln.z * ln.z).sqrt());
     *pose = Se3::exp(best_twist)?.compose(*pose)?;
     Ok(Some((norm, best_score)))
 }
@@ -277,8 +287,9 @@ mod tests {
         let mut state = 0xD1CE_5EED_u64;
         // The (1+12)-ES converges logarithmically near the optimum — this
         // utility is for coarse pose alignment, not precision polishing.
-        let final_objective = se3_optimize(&mut start, &objective, 0.12, 32, 6000, 1e-3, &mut state)
-            .expect("se3_optimize must not refuse");
+        let final_objective =
+            se3_optimize(&mut start, &objective, 0.12, 32, 6000, 1e-3, &mut state)
+                .expect("se3_optimize must not refuse");
         assert!(
             final_objective < 5e-3,
             "did not coarsely converge: objective = {final_objective}"

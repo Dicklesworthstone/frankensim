@@ -770,9 +770,7 @@ fn mq_007_falsifier_cross_representation_solid() {
         let p0 = mesh.nodes[conn[0]];
         let p1 = mesh.nodes[conn[1]];
         let p2 = mesh.nodes[conn[2]];
-        let area = 0.5
-            * (p1[0].mul_add(p2[1] - p0[1], -(p1[1] - p0[1]) * (p2[0] - p0[0])))
-                .abs();
+        let area = 0.5 * (p1[0].mul_add(p2[1] - p0[1], -(p1[1] - p0[1]) * (p2[0] - p0[0]))).abs();
         let u_mean = [
             (u[conn[0]][0] + u[conn[1]][0] + u[conn[2]][0]) / 3.0,
             (u[conn[0]][1] + u[conn[1]][1] + u[conn[2]][1]) / 3.0,
@@ -842,14 +840,8 @@ fn mq_008_falsifier_adjoint_fd_gate_at_stages() {
             d.compliance(smoke_config().level).expect("probe")
         };
 
-        let verdict_fd = fs_adjoint::verify::verify_gradient(
-            &objective,
-            radii,
-            &grad,
-            &directions,
-            5e-3,
-            0.35,
-        );
+        let verdict_fd =
+            fs_adjoint::verify::verify_gradient(&objective, radii, &grad, &directions, 5e-3, 0.35);
         assert!(
             verdict_fd.pass,
             "honest gradient must pass FD gate at stage {stage}: err={:.3e}",
@@ -975,10 +967,7 @@ fn mq_010_falsifier_replay_and_checkpoint_resume() {
     )
     .expect("resumed study");
 
-    assert_eq!(
-        resumed_run.design.radii.len(),
-        full_run.design.radii.len()
-    );
+    assert_eq!(resumed_run.design.radii.len(), full_run.design.radii.len());
     for (resumed_r, full_r) in resumed_run.design.radii.iter().zip(&full_run.design.radii) {
         assert_eq!(
             resumed_r.to_bits(),
@@ -1008,24 +997,9 @@ fn mq_011_falsifier_mutation_proof_monotonicity() {
     let flipped_grad: Vec<f64> = grad.iter().map(|g| -g).collect();
 
     // Armijo line search must reject the ascent step and retain the unmutated design
-    let (
-        mutated_design,
-        accepted_compliance,
-        accepted_step,
-        backtracks,
-        _,
-        _,
-        _,
-    ) = armijo_next_design(
-        &design,
-        &config,
-        j0,
-        &flipped_grad,
-        cert,
-        iters,
-        cut_rules,
-    )
-    .expect("armijo handles ascent");
+    let (mutated_design, accepted_compliance, accepted_step, backtracks, _, _, _) =
+        armijo_next_design(&design, &config, j0, &flipped_grad, cert, iters, cut_rules)
+            .expect("armijo handles ascent");
 
     assert_eq!(
         accepted_step, 0.0,
@@ -1050,4 +1024,3 @@ fn mq_011_falsifier_mutation_proof_monotonicity() {
         "mutation proof: sign-flipped ascent fails Armijo monotonicity check and is rejected by falsifier",
     );
 }
-

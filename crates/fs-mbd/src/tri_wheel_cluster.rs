@@ -223,11 +223,9 @@ pub fn step_tri_wheel_stair_contact(
                         gap_m: riser_gap_m,
                     });
                 }
-                wheel_minimum_riser_clearance_m =
-                    wheel_minimum_riser_clearance_m.min(riser_gap_m);
+                wheel_minimum_riser_clearance_m = wheel_minimum_riser_clearance_m.min(riser_gap_m);
             }
-            let touching_riser =
-                wheel_minimum_riser_clearance_m.abs() <= input.contact_tolerance_m;
+            let touching_riser = wheel_minimum_riser_clearance_m.abs() <= input.contact_tolerance_m;
             signed_riser_clearances_m[wheel_index] = Some(wheel_minimum_riser_clearance_m);
             riser_contact_mask[wheel_index] = touching_riser;
             riser_contact_count += u8::from(touching_riser);
@@ -361,9 +359,7 @@ mod tests {
         assert_eq!(result.riser_contact_mask, [true, false, false]);
         assert_eq!(result.riser_contact_count, 1);
         assert!(result.minimum_riser_clearance_m.unwrap().abs() <= TOLERANCE_M);
-        assert!(
-            (result.wheel_centres_m[1][0] - UPPER_TREAD_CONTACT_OFFSET_M).abs() < 2.0e-5
-        );
+        assert!((result.wheel_centres_m[1][0] - UPPER_TREAD_CONTACT_OFFSET_M).abs() < 2.0e-5);
     }
 
     #[test]
@@ -391,9 +387,7 @@ mod tests {
         assert_eq!(result.riser_contact_count, 1);
         assert!(result.minimum_riser_clearance_m.unwrap().abs() <= TOLERANCE_M);
         assert!(
-            (result.wheel_centres_m[2][0]
-                - (STAIR_TREAD_M + UPPER_TREAD_CONTACT_OFFSET_M))
-                .abs()
+            (result.wheel_centres_m[2][0] - (STAIR_TREAD_M + UPPER_TREAD_CONTACT_OFFSET_M)).abs()
                 < 2.0e-5
         );
     }

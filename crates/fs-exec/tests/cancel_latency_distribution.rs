@@ -4,9 +4,7 @@
 //! for tile kernels under `Cx` polling at tile boundaries across warm worker threads.
 
 use core::ops::ControlFlow;
-use fs_exec::{
-    CancelGate, Cancelled, Cx, PoolConfig, RunError, TileKernel, TilePlan, TilePool,
-};
+use fs_exec::{CancelGate, Cancelled, Cx, PoolConfig, RunError, TileKernel, TilePlan, TilePool};
 struct LatencyProbeKernel<'a> {
     gate: &'a CancelGate,
     trigger_tile: u64,
@@ -147,19 +145,66 @@ fn measure_cancel_latency_distribution_10k_trials() {
         let dist = LatencyDistribution::compute(drain_samples_ns, TILE_OPS);
         let obs_dist = LatencyDistribution::compute(worker_observed_p99_samples_ns, TILE_OPS);
 
-        println!("=== CANCEL LATENCY OVER {} TRIALS (IN-BAND TRIGGER) ===", dist.trials);
+        println!(
+            "=== CANCEL LATENCY OVER {} TRIALS (IN-BAND TRIGGER) ===",
+            dist.trials
+        );
         println!("Request -> Drain-Complete Latency:");
-        println!("  min:    {:>8.2} µs ({} ns)", dist.min_ns as f64 / 1_000.0, dist.min_ns);
-        println!("  p50:    {:>8.2} µs ({} ns)", dist.p50_ns as f64 / 1_000.0, dist.p50_ns);
-        println!("  p90:    {:>8.2} µs ({} ns)", dist.p90_ns as f64 / 1_000.0, dist.p90_ns);
-        println!("  p95:    {:>8.2} µs ({} ns)", dist.p95_ns as f64 / 1_000.0, dist.p95_ns);
-        println!("  p99:    {:>8.2} µs ({} ns)", dist.p99_ns as f64 / 1_000.0, dist.p99_ns);
-        println!("  p99.9:  {:>8.2} µs ({} ns)", dist.p999_ns as f64 / 1_000.0, dist.p999_ns);
-        println!("  max:    {:>8.2} µs ({} ns)", dist.max_ns as f64 / 1_000.0, dist.max_ns);
-        println!("  mean:   {:>8.2} µs ({} ns)", dist.mean_ns as f64 / 1_000.0, dist.mean_ns);
+        println!(
+            "  min:    {:>8.2} µs ({} ns)",
+            dist.min_ns as f64 / 1_000.0,
+            dist.min_ns
+        );
+        println!(
+            "  p50:    {:>8.2} µs ({} ns)",
+            dist.p50_ns as f64 / 1_000.0,
+            dist.p50_ns
+        );
+        println!(
+            "  p90:    {:>8.2} µs ({} ns)",
+            dist.p90_ns as f64 / 1_000.0,
+            dist.p90_ns
+        );
+        println!(
+            "  p95:    {:>8.2} µs ({} ns)",
+            dist.p95_ns as f64 / 1_000.0,
+            dist.p95_ns
+        );
+        println!(
+            "  p99:    {:>8.2} µs ({} ns)",
+            dist.p99_ns as f64 / 1_000.0,
+            dist.p99_ns
+        );
+        println!(
+            "  p99.9:  {:>8.2} µs ({} ns)",
+            dist.p999_ns as f64 / 1_000.0,
+            dist.p999_ns
+        );
+        println!(
+            "  max:    {:>8.2} µs ({} ns)",
+            dist.max_ns as f64 / 1_000.0,
+            dist.max_ns
+        );
+        println!(
+            "  mean:   {:>8.2} µs ({} ns)",
+            dist.mean_ns as f64 / 1_000.0,
+            dist.mean_ns
+        );
         println!("Worker-Observed p99 Latency Distribution:");
-        println!("  p50:    {:>8.2} µs ({} ns)", obs_dist.p50_ns as f64 / 1_000.0, obs_dist.p50_ns);
-        println!("  p99:    {:>8.2} µs ({} ns)", obs_dist.p99_ns as f64 / 1_000.0, obs_dist.p99_ns);
-        println!("  max:    {:>8.2} µs ({} ns)", obs_dist.max_ns as f64 / 1_000.0, obs_dist.max_ns);
+        println!(
+            "  p50:    {:>8.2} µs ({} ns)",
+            obs_dist.p50_ns as f64 / 1_000.0,
+            obs_dist.p50_ns
+        );
+        println!(
+            "  p99:    {:>8.2} µs ({} ns)",
+            obs_dist.p99_ns as f64 / 1_000.0,
+            obs_dist.p99_ns
+        );
+        println!(
+            "  max:    {:>8.2} µs ({} ns)",
+            obs_dist.max_ns as f64 / 1_000.0,
+            obs_dist.max_ns
+        );
     });
 }

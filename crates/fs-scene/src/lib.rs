@@ -59,7 +59,7 @@ pub enum SceneError {
         /// Which field failed admission.
         field: &'static str,
     },
-    /// A box half-extent or a collider radius was not strictly positive.
+    /// A box half-extent was not strictly positive, or a skin was negative.
     NonPositive {
         /// Which field failed admission.
         field: &'static str,
@@ -430,15 +430,14 @@ impl StaticScene {
         role: BodyRole,
         skin_m: f64,
     ) -> Result<usize, SceneError> {
-        if !skin_m.is_finite() || skin_m < 0.0 {
+        if !skin_m.is_finite() {
             return Err(SceneError::NonFinite { field: "skin_m" });
         }
+        if skin_m < 0.0 {
+            return Err(SceneError::NonPositive { field: "skin_m" });
+        }
         let body = body.validate()?;
-        self.entries.push(SceneEntry {
-            body,
-            role,
-            skin_m,
-        });
+        self.entries.push(SceneEntry { body, role, skin_m });
         Ok(self.entries.len() - 1)
     }
 
@@ -474,10 +473,7 @@ impl StaticScene {
         let mut worst: Option<ScenePenetration> = None;
         for (body_index, entry) in self.entries.iter().enumerate() {
             // Bounded bodies get a cheap sphere reject before the exact test.
-            let bound = entry
-                .body
-                .center_m()
-                .zip(entry.body.bounding_radius_m());
+            let bound = entry.body.center_m().zip(entry.body.bounding_radius_m());
             for (collider_index, (center, radius)) in colliders.iter().enumerate() {
                 if let Some((body_center, body_radius)) = bound {
                     let dx = center[0] - body_center[0];
@@ -538,10 +534,7 @@ impl StaticScene {
             .iter()
             .enumerate()
             .filter_map(|(index, entry)| {
-                entry
-                    .body
-                    .convex_support_map()
-                    .map(|shape| (index, shape))
+                entry.body.convex_support_map().map(|shape| (index, shape))
             })
             .collect()
     }
@@ -582,7 +575,11 @@ mod tests {
     #[test]
     fn yaw_rotates_the_box_and_the_query_follows_it() {
         let long = boxed([0.0, 0.0, 0.0], [1.0, 0.1, 0.5], 0.0);
-        let turned = boxed([0.0, 0.0, 0.0], [1.0, 0.1, 0.5], core::f64::consts::FRAC_PI_2);
+        let turned = boxed(
+            [0.0, 0.0, 0.0],
+            [1.0, 0.1, 0.5],
+            core::f64::consts::FRAC_PI_2,
+        );
         // A point 0.5 m along +y clears the unrotated slab and hits the turned one.
         assert_eq!(long.sphere_overlap_depth(&[0.0, 0.5, 0.0], 0.05), 0.0);
         assert!(turned.sphere_overlap_depth(&[0.0, 0.5, 0.0], 0.05) > 0.0);
@@ -606,9 +603,11 @@ mod tests {
             .push(SceneBody::ground_plane(0.0), BodyRole::Support, 0.01)
             .expect("ground admits");
         // 3 mm of compliant indentation: normal contact.
-        assert!(scene
-            .deepest_sphere_penetration(&[([0.0, 0.0, 0.247], 0.25)])
-            .is_none());
+        assert!(
+            scene
+                .deepest_sphere_penetration(&[([0.0, 0.0, 0.247], 0.25)])
+                .is_none()
+        );
         // 27 cm below the floor: the failure this crate exists to catch.
         let sunk = scene
             .deepest_sphere_penetration(&[([0.0, 0.0, -0.02], 0.25)])
@@ -623,10 +622,18 @@ mod tests {
     fn the_deepest_violation_wins_and_names_its_collider() {
         let mut scene = StaticScene::new();
         scene
-            .push(boxed([0.0, 0.0, 0.0], [0.5, 0.5, 0.5], 0.0), BodyRole::KeepOut, 0.0)
+            .push(
+                boxed([0.0, 0.0, 0.0], [0.5, 0.5, 0.5], 0.0),
+                BodyRole::KeepOut,
+                0.0,
+            )
             .expect("box admits");
         scene
-            .push(boxed([3.0, 0.0, 0.0], [0.5, 0.5, 0.5], 0.0), BodyRole::KeepOut, 0.0)
+            .push(
+                boxed([3.0, 0.0, 0.0], [0.5, 0.5, 0.5], 0.0),
+                BodyRole::KeepOut,
+                0.0,
+            )
             .expect("box admits");
         let hit = scene
             .deepest_sphere_penetration(&[
@@ -645,7 +652,11 @@ mod tests {
         for index in 0..40 {
             scene
                 .push(
-                    boxed([index as f64 * 0.5, 0.0, 0.0], [0.2, 0.2, 0.2], 0.1 * index as f64),
+                    boxed(
+                        [index as f64 * 0.5, 0.0, 0.0],
+                        [0.2, 0.2, 0.2],
+                        0.1 * index as f64,
+                    ),
                     BodyRole::KeepOut,
                     0.0,
                 )
@@ -681,13 +692,21 @@ mod tests {
     fn malformed_bodies_are_refused_by_name() {
         let mut scene = StaticScene::new();
         assert_eq!(
-            scene.push(boxed([0.0; 3], [0.0, 0.1, 0.1], 0.0), BodyRole::KeepOut, 0.0),
+            scene.push(
+                boxed([0.0; 3], [0.0, 0.1, 0.1], 0.0),
+                BodyRole::KeepOut,
+                0.0
+            ),
             Err(SceneError::NonPositive {
                 field: "half_extents_m"
             })
         );
         assert_eq!(
-            scene.push(boxed([f64::NAN, 0.0, 0.0], [0.1; 3], 0.0), BodyRole::KeepOut, 0.0),
+            scene.push(
+                boxed([f64::NAN, 0.0, 0.0], [0.1; 3], 0.0),
+                BodyRole::KeepOut,
+                0.0
+            ),
             Err(SceneError::NonFinite { field: "center_m" })
         );
         assert_eq!(
@@ -703,6 +722,10 @@ mod tests {
         );
         assert_eq!(
             scene.push(SceneBody::ground_plane(0.0), BodyRole::Support, -0.1),
+            Err(SceneError::NonPositive { field: "skin_m" })
+        );
+        assert_eq!(
+            scene.push(SceneBody::ground_plane(0.0), BodyRole::Support, f64::NAN),
             Err(SceneError::NonFinite { field: "skin_m" })
         );
         assert!(scene.is_empty(), "nothing malformed was admitted");
@@ -783,16 +806,21 @@ mod prepared_tests {
             ];
             for radius in [0.05, 0.17, 0.4] {
                 for (index, body) in prepared.iter().enumerate() {
-                    let direct = scene.entries()[index].body.sphere_overlap_depth(&center, radius);
+                    let direct = scene.entries()[index]
+                        .body
+                        .sphere_overlap_depth(&center, radius);
                     let fast = body.sphere_overlap_depth(&center, radius);
                     assert!(
                         (direct - fast).abs() < 1e-12,
                         "body {index} disagreed: {direct} vs {fast}"
                     );
                     if !body.may_breach(&center, radius) {
+                        // The reject is bounding-sphere based, so a rejected
+                        // pair cannot touch the body at all, not merely stay
+                        // inside its skin.
                         assert!(
-                            direct <= body.skin_m,
-                            "the reject discarded a real breach of depth {direct}"
+                            direct == 0.0,
+                            "the reject discarded a pair with overlap {direct}"
                         );
                     }
                 }
