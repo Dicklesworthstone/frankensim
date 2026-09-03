@@ -29,6 +29,12 @@ const FACET: [[usize; 3]; 4] = [[1, 3, 2], [0, 2, 3], [0, 3, 1], [0, 1, 2]];
 /// stage's mesh-quality floor: a tet this thin pins its nodes like a flat one.
 const REPAIR_SLIVER_DIHEDRAL_DEG: f64 = 1.0;
 
+/// Flip attempts `repair_flat_tets` spends on dihedral slivers (zero-volume
+/// tets are always attempted). Past this the body's tessellation, not its
+/// triangulation, is the problem: it needs refinement, and the census
+/// discloses what remains.
+const SLIVER_ATTEMPT_CAP: u32 = 128;
+
 /// Stable region identity. Caller-chosen, unique within one PLC.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RegionId(pub u32);
@@ -1090,6 +1096,16 @@ impl LabeledTetComplex {
         // per candidate.
         let attempt_cap = report.found.saturating_mul(2).saturating_add(64);
         let mut attempts = 0u32;
+        // Zero-volume tets are FATAL (they pin four nodes to one value) and
+        // few, so every one is attempted. Dihedral slivers are a QUALITY
+        // problem: on a tessellation whose every rim is co-circular they
+        // number in the hundreds, no flip helps (their neighbours are slivers
+        // too), and the body needs refinement — so their attempts are capped
+        // and what remains is disclosed. MEASURED 2026-09-03, 128-segment
+        // cylinder: 529 sliver candidates, 159 removable, 12 s of sweeps for
+        // a mesh whose census (1662 slivers under 5°, radius-edge 1661) the
+        // conduction floor refuses either way.
+        let mut sliver_attempts = 0u32;
         'sweeps: loop {
             report.rounds += 1;
             // Walls are re-read per sweep: dropping a boundary flat tet moves
@@ -1102,17 +1118,38 @@ impl LabeledTetComplex {
                     by_face.entry(face).or_default().push(index);
                 }
             }
+            // Candidates for this sweep, ZERO-VOLUME FIRST (`false < true`):
+            // a fatal tet must not be starved of fresh face maps by the
+            // sliver budget (MEASURED: sharing one queue left 53 zero-volume
+            // tets on the 128-segment cylinder where priority leaves 1).
+            let mut candidates: Vec<(bool, usize)> = (0..self.tets.len())
+                .filter_map(|index| {
+                    let tet = self.tets[index];
+                    let mut key = tet;
+                    key.sort_unstable();
+                    if gave_up.contains(&key) || !is_flat(&self.positions, tet) {
+                        return None;
+                    }
+                    Some((!volume_flat(&self.positions, tet), index))
+                })
+                .collect();
+            candidates.sort_unstable();
             let mut committed = false;
-            for flat_index in 0..self.tets.len() {
+            for (is_sliver, flat_index) in candidates {
                 let flat = self.tets[flat_index];
                 let mut key = flat;
                 key.sort_unstable();
-                if !is_flat(&self.positions, flat) || gave_up.contains(&key) {
-                    continue;
-                }
                 if attempts >= attempt_cap {
                     break 'sweeps;
                 }
+                if is_sliver {
+                    if sliver_attempts >= SLIVER_ATTEMPT_CAP {
+                        gave_up.insert(key);
+                        continue;
+                    }
+                    sliver_attempts += 1;
+                }
+                let degenerate = !is_sliver;
                 attempts += 1;
                 let region = self.region_of_tet[flat_index];
                 let flipped =
@@ -1121,7 +1158,7 @@ impl LabeledTetComplex {
                 // only for a zero-volume flat, so a sliver that resists every
                 // flip stays disclosed rather than shaved off.
                 if flipped
-                    || (volume_flat(&self.positions, flat)
+                    || (degenerate
                         && self.drop_boundary_flat(flat_index, region, &by_face, &walls))
                 {
                     // The mesh changed under `by_face`: re-sweep.
@@ -1808,7 +1845,12 @@ pub fn volumetricize(
     // constrained pipeline.
     let trace = std::env::var_os("FS_MESH_TRACE_REPAIR").is_some();
     for round in 1..=PERTURB_ROUNDS {
-        if labeled.flat_repair.unrepaired == 0 {
+        // A finishing step for the last few, not a mesh-quality tool: past a
+        // round's move budget the body is intrinsically sliver-rich and each
+        // rebuild would be a different mesh rather than a repair of this one.
+        if labeled.flat_repair.unrepaired == 0
+            || labeled.flat_repair.unrepaired as usize > PERTURB_MAX_VERTICES
+        {
             break;
         }
         let Some(points) = perturbed_points(&labeled, input_vertices, &unique_segments) else {
