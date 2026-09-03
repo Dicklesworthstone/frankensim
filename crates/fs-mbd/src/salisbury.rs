@@ -7,8 +7,8 @@
 //! therefore owns the connected generic joint topology and exact static torque
 //! law only; all radii and tensions are caller-declared SI study inputs.
 
-use crate::Vec3;
 use crate::articulated::{ArticulatedError, JointModel};
+use fs_ga::Vec3;
 
 /// Failure to admit the source-bounded hand composition.
 #[derive(Clone, Debug, PartialEq)]
