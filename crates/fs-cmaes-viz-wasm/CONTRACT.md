@@ -1,6 +1,6 @@
 # CONTRACT: fs-cmaes-viz-wasm
 
-Status: **CMA schema 2 + G1 schema 7 + ARM schema 2 — live surfaces.** Stateful
+Status: **CMA schema 2 + G1 schema 8 + ARM schema 3 — live surfaces.** Stateful
 packed browser boundary over the production CMA-family owner in `fs-dfo` and
 the owner-composed G1 walking and KUKA household-manipulation experiments. This
 crate owns validation, admission, numeric packet transport, browser-specific
@@ -314,15 +314,34 @@ wasm boundary.
 
 ## G1 walking packets
 
-G1 packets use magic `0x47315737` (`"G1W7"`) and schema 7. The common output
+G1 packets use magic `0x47315737` (`"G1W7"`) and schema 8. The common output
 prefix is `magic, schema, status, kind, total_words`. Kinds are configuration 0,
 admission 1, evaluation 2, trace 3, and population 4.
 
-Configuration is:
+Configuration is variable length: eleven fixed words, a keep-out box
+count, then seven words per box.
 
-`magic, schema, kind=0, total_words=11, step_s, duration_s,
+`magic, schema, kind=0, total_words=12+7n, step_s, duration_s,
 target_forward_speed_m_per_s, gait_frequency_hz, trace_stride, task,
-challenge`.
+challenge, obstacle_count=n`, then `n` groups of
+`center_xyz_m, half_extents_xyz_m, yaw_rad`.
+
+`total_words` is self-describing and must equal the packet length. Boxes
+are capped at 64, must be finite, and must have strictly positive half
+extents; anything else is refused, never clamped. An empty roster leaves
+the rollout identical to schema 7.
+
+The body-vs-obstacle guard has always been implemented: every step, each
+body collider sphere is tested against every declared box, the deepest
+penetration is tracked, and the first penetration past the 0.01 m skin
+depth terminates the rollout as `BodyObstacle` with a shaped terminal
+penalty. Until schema 8 no packet could declare a box, so the guard was
+unreachable from the browser and the renderer carried the whole burden of
+keeping the robot out of the furniture. It no longer does: the walking
+policy is scored against solid geometry, so passing through a wall costs
+the optimizer its rollout. The evaluation receipt now reports the deepest
+penetration the guard measured, so the browser states the number the
+kernel computed instead of re-deriving contact from rendered poses.
 
 Task IDs are 0 balance, 1 stepping, and 2 walking.
 Challenge IDs are 0 flat and 1 terrain plus lateral push. The combined challenge

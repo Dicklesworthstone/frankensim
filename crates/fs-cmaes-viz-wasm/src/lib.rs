@@ -55,7 +55,7 @@ use manipulation::{
 };
 
 /// Kernel identity returned by the browser capability probe.
-pub const KERNEL_VERSION: &str = "fs-cmaes-viz-wasm 0.6.14";
+pub const KERNEL_VERSION: &str = "fs-cmaes-viz-wasm 0.6.15";
 /// Exact binary64 word identifying schema-2 packets (`"CMA2"`).
 pub const PACKET_MAGIC: u32 = 0x434d_4132;
 /// Packed ask/tell ABI schema.
@@ -85,7 +85,12 @@ pub const SCALABLE_DIMENSION_LIMIT: usize = 100_000;
 /// Exact binary64 word identifying G1 curriculum packets (`"G1W7"`).
 pub const G1_PACKET_MAGIC: u32 = 0x4731_5737;
 /// Packed G1 objective/trace ABI schema.
-pub const G1_PACKET_SCHEMA_VERSION: u32 = 7;
+///
+/// Schema 8 makes the walking config self-describing: eleven fixed words
+/// followed by a keep-out box count and seven words per box. The receipt
+/// gains the maximum body penetration the guard measured, so the browser can
+/// report the number the kernel already computed instead of re-deriving it.
+pub const G1_PACKET_SCHEMA_VERSION: u32 = 8;
 /// Input packet containing fixed walking-experiment controls.
 pub const G1_PACKET_KIND_CONFIG: u32 = 0;
 /// Output packet describing an admitted evaluator.
@@ -126,9 +131,12 @@ const REFUSAL_WORDS: usize = 7;
 const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
 const BROWSER_PACKET_FIXED_FLOATS: usize = 2 * ASK_FIXED_WORDS + SNAPSHOT_FIXED_WORDS;
 const MAX_BROWSER_LIVE_FLOATS: usize = 16 * 1024 * 1024;
-const G1_CONFIG_WORDS: usize = 11;
+const G1_CONFIG_FIXED_WORDS: usize = 12;
+const G1_OBSTACLE_WORDS: usize = 7;
+/// Largest caller-declared keep-out roster the walking owner admits.
+pub const G1_MAX_OBSTACLES: usize = 64;
 const G1_ADMISSION_WORDS: usize = 21;
-const G1_RECEIPT_WORDS: usize = 28;
+const G1_RECEIPT_WORDS: usize = 29;
 const G1_REFUSAL_WORDS: usize = 7;
 const G1_TRACE_SAMPLE_WORDS: usize = 3 + G1_LINK_COUNT * G1_LINK_POSE_WORDS;
 const G1_MAX_POPULATION: usize = 64;
@@ -849,8 +857,16 @@ impl PackedManipulationEvaluator {
     }
 }
 
+/// Parse a schema-8 G1 walking config packet.
+///
+/// Layout: `[magic, schema, kind, wordCount, step_s, duration_s,
+/// target_forward_speed, gait_frequency, trace_stride, task, challenge,
+/// obstacleCount]` followed by `obstacleCount` groups of
+/// `[cx, cy, cz, hx, hy, hz, yaw_rad]` in the owner world frame (z up, yaw
+/// about +Z). `wordCount` is self-describing and must equal the packet
+/// length. An empty roster leaves the rollout identical to schema 7.
 fn parse_g1_config(packet: &[f64]) -> Result<G1WalkingConfig, G1PackedRefusal> {
-    if packet.len() != G1_CONFIG_WORDS {
+    if packet.len() < G1_CONFIG_FIXED_WORDS {
         return Err(G1PackedRefusal::new(G1PackedRefusalCode::MalformedPacket));
     }
     if exact_u32(packet[0]) != Some(G1_PACKET_MAGIC)
@@ -859,9 +875,28 @@ fn parse_g1_config(packet: &[f64]) -> Result<G1WalkingConfig, G1PackedRefusal> {
         return Err(G1PackedRefusal::new(G1PackedRefusalCode::SchemaMismatch));
     }
     if exact_u32(packet[2]) != Some(G1_PACKET_KIND_CONFIG)
-        || exact_usize(packet[3]) != Some(G1_CONFIG_WORDS)
+        || exact_usize(packet[3]) != Some(packet.len())
     {
         return Err(G1PackedRefusal::new(G1PackedRefusalCode::MalformedPacket));
+    }
+    let obstacle_count = exact_usize(packet[11])
+        .filter(|value| *value <= G1_MAX_OBSTACLES)
+        .ok_or(G1PackedRefusal::new(G1PackedRefusalCode::InvalidConfig))?;
+    if packet.len() != G1_CONFIG_FIXED_WORDS + obstacle_count * G1_OBSTACLE_WORDS {
+        return Err(G1PackedRefusal::new(G1PackedRefusalCode::MalformedPacket));
+    }
+    let mut obstacles = Vec::with_capacity(obstacle_count);
+    for index in 0..obstacle_count {
+        let base = G1_CONFIG_FIXED_WORDS + index * G1_OBSTACLE_WORDS;
+        let words = &packet[base..base + G1_OBSTACLE_WORDS];
+        if words.iter().any(|value| !value.is_finite()) {
+            return Err(G1PackedRefusal::new(G1PackedRefusalCode::InvalidConfig));
+        }
+        obstacles.push(crate::g1_walking::ObstacleBox {
+            center_m: [words[0], words[1], words[2]],
+            half_extents_m: [words[3], words[4], words[5]],
+            yaw_rad: words[6],
+        });
     }
     let trace_stride = exact_usize(packet[8])
         .filter(|value| (1..=1_000).contains(value))
@@ -878,7 +913,7 @@ fn parse_g1_config(packet: &[f64]) -> Result<G1WalkingConfig, G1PackedRefusal> {
         _ => return Err(G1PackedRefusal::new(G1PackedRefusalCode::InvalidConfig)),
     };
     let config = G1WalkingConfig {
-        obstacles: Vec::new(),
+        obstacles,
         task,
         challenge,
         step_s: packet[4],
@@ -986,6 +1021,10 @@ fn g1_receipt_packet(kind: u32, receipt: &G1WalkingReceipt, include_trace: bool)
         receipt.maximum_abs_terrain_height_m,
         receipt.completed_steps as f64,
         f64::from(receipt.termination_reason as u32),
+        // Schema 8: the deepest body-sphere penetration the obstacle guard
+        // measured. Zero with an empty roster; the browser reports this
+        // instead of re-deriving contact from the rendered poses.
+        receipt.maximum_body_penetration_m,
     ]);
     if include_trace {
         packet.push(receipt.trace.len() as f64);
@@ -1707,11 +1746,21 @@ mod schema_two_tests {
     }
 
     fn g1_config_packet(duration_s: f64, trace_stride: usize) -> Vec<f64> {
-        vec![
+        g1_config_packet_with(duration_s, trace_stride, &[])
+    }
+
+    /// Schema-8 walking config with an explicit keep-out roster. An empty
+    /// roster is the schema-7 equivalent.
+    fn g1_config_packet_with(
+        duration_s: f64,
+        trace_stride: usize,
+        obstacles: &[crate::g1_walking::ObstacleBox],
+    ) -> Vec<f64> {
+        let mut packet = vec![
             f64::from(G1_PACKET_MAGIC),
             f64::from(G1_PACKET_SCHEMA_VERSION),
             f64::from(G1_PACKET_KIND_CONFIG),
-            G1_CONFIG_WORDS as f64,
+            (G1_CONFIG_FIXED_WORDS + obstacles.len() * G1_OBSTACLE_WORDS) as f64,
             1.0 / 120.0,
             duration_s,
             0.65,
@@ -1719,7 +1768,20 @@ mod schema_two_tests {
             trace_stride as f64,
             f64::from(G1Task::Walking as u32),
             f64::from(G1Challenge::Flat as u32),
-        ]
+            obstacles.len() as f64,
+        ];
+        for obstacle in obstacles {
+            packet.extend_from_slice(&[
+                obstacle.center_m[0],
+                obstacle.center_m[1],
+                obstacle.center_m[2],
+                obstacle.half_extents_m[0],
+                obstacle.half_extents_m[1],
+                obstacle.half_extents_m[2],
+                obstacle.yaw_rad,
+            ]);
+        }
+        packet
     }
 
     fn arm_config_packet(task: ManipulationTask, duration_s: f64, trace_stride: usize) -> Vec<f64> {
@@ -2352,6 +2414,115 @@ mod schema_two_tests {
             f64::from(ArmPackedRefusalCode::NonFiniteParameter as u32)
         );
         assert_eq!(refusal[6], 1.0);
+    }
+
+    /// The walking owner's body-vs-obstacle guard has always been
+    /// implemented; schema 8 is the first packet that can reach it. An empty
+    /// roster must leave the rollout exactly as schema 7 produced it, and a
+    /// wall across the walking axis must terminate it as `BodyObstacle` with
+    /// a measured penetration the receipt now reports.
+    #[test]
+    fn g1_declared_obstacles_stop_the_body_and_report_penetration() {
+        let clear = PackedG1WalkingEvaluator::new(&g1_config_packet(1.5, 12));
+        let mean = crate::g1_walking::g1_walking_curriculum_mean().to_vec();
+        let clear_receipt = clear.evaluate_packet(&mean);
+        assert_g1_success(&clear_receipt, G1_PACKET_KIND_EVALUATION);
+        assert_eq!(clear_receipt.len(), G1_RECEIPT_WORDS);
+        // With no declared geometry the guard never fires, whatever else
+        // ends the rollout at this step size.
+        assert_ne!(
+            clear_receipt[27],
+            f64::from(crate::g1_walking::G1TerminationReason::BodyObstacle as u32),
+            "an empty roster cannot terminate on an obstacle"
+        );
+        assert_eq!(clear_receipt[28], 0.0, "no roster means no measured penetration");
+
+        // A wall straddling the start pose on the walking axis: the body
+        // spheres are inside it from the first step.
+        let wall = crate::g1_walking::ObstacleBox {
+            center_m: [0.1, 0.0, 0.6],
+            half_extents_m: [0.15, 1.0, 0.6],
+            yaw_rad: 0.0,
+        };
+        let blocked = PackedG1WalkingEvaluator::new(&g1_config_packet_with(1.5, 12, &[wall]));
+        let blocked_receipt = blocked.evaluate_packet(&mean);
+        assert_g1_success(&blocked_receipt, G1_PACKET_KIND_EVALUATION);
+        assert_eq!(
+            blocked_receipt[27],
+            f64::from(crate::g1_walking::G1TerminationReason::BodyObstacle as u32),
+            "a wall on the walking axis must terminate the rollout"
+        );
+        assert!(
+            blocked_receipt[28] > 0.0,
+            "the guard must report the penetration it measured"
+        );
+        assert!(
+            blocked_receipt[26] < clear_receipt[26],
+            "termination must cut the completed step count"
+        );
+
+        // The same wall behind the robot leaves the rollout untouched.
+        let behind = crate::g1_walking::ObstacleBox {
+            center_m: [-2.0, 0.0, 0.6],
+            ..wall
+        };
+        let unaffected = PackedG1WalkingEvaluator::new(&g1_config_packet_with(1.5, 12, &[behind]));
+        let unaffected_receipt = unaffected.evaluate_packet(&mean);
+        assert_eq!(
+            unaffected_receipt[5].to_bits(),
+            clear_receipt[5].to_bits(),
+            "a box off the path must not perturb the objective"
+        );
+    }
+
+    /// Schema-8 refuses a malformed or oversized keep-out roster by name.
+    #[test]
+    fn g1_schema_eight_refuses_bad_rosters() {
+        let refusal_code = |packet: Vec<f64>| -> f64 {
+            let evaluator = PackedG1WalkingEvaluator::new(&packet);
+            let receipt = evaluator.receipt_packet();
+            assert_eq!(receipt[2], f64::from(PACKET_STATUS_REFUSAL));
+            receipt[5]
+        };
+
+        let mut wrong_count = g1_config_packet(1.5, 12);
+        wrong_count[3] = 77.0;
+        assert_eq!(
+            refusal_code(wrong_count),
+            f64::from(G1PackedRefusalCode::MalformedPacket as u32)
+        );
+
+        let too_many: Vec<crate::g1_walking::ObstacleBox> = (0..=G1_MAX_OBSTACLES)
+            .map(|index| crate::g1_walking::ObstacleBox {
+                center_m: [index as f64 * 0.01, 0.0, 0.5],
+                half_extents_m: [0.05, 0.05, 0.05],
+                yaw_rad: 0.0,
+            })
+            .collect();
+        assert_eq!(
+            refusal_code(g1_config_packet_with(1.5, 12, &too_many)),
+            f64::from(G1PackedRefusalCode::InvalidConfig as u32)
+        );
+
+        let degenerate = crate::g1_walking::ObstacleBox {
+            center_m: [0.5, 0.0, 0.5],
+            half_extents_m: [0.0, 0.05, 0.05],
+            yaw_rad: 0.0,
+        };
+        assert_eq!(
+            refusal_code(g1_config_packet_with(1.5, 12, &[degenerate])),
+            f64::from(G1PackedRefusalCode::InvalidConfig as u32)
+        );
+
+        let non_finite = crate::g1_walking::ObstacleBox {
+            center_m: [0.5, 0.0, f64::NAN],
+            half_extents_m: [0.05, 0.05, 0.05],
+            yaw_rad: 0.0,
+        };
+        assert_eq!(
+            refusal_code(g1_config_packet_with(1.5, 12, &[non_finite])),
+            f64::from(G1PackedRefusalCode::InvalidConfig as u32)
+        );
     }
 
     /// Schema-3 words are additive: a packet whose three override words are
