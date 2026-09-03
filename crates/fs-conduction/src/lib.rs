@@ -61,6 +61,8 @@ pub mod duty;
 pub mod field;
 pub mod fixtures;
 pub mod interface;
+/// Declared Joule-input to gray-body-radiation balance for incandescent filaments.
+pub mod incandescent;
 /// The lumped-network reduced transient rung: the cheap fidelity tier, gated
 /// on the Biot number that decides whether lumping is admissible at all.
 pub mod lumped;

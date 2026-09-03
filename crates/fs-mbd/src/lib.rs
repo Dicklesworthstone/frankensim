@@ -19,8 +19,17 @@
 #![warn(missing_docs)]
 
 pub mod articulated;
+pub mod daimler;
+pub mod davinci;
 pub mod goddard;
+pub mod howe;
+pub mod otis;
+pub mod otto;
+pub mod planar_drive;
 pub mod robot_models;
+pub mod roomba;
+pub mod salisbury;
+pub mod versatran;
 
 use core::fmt;
 

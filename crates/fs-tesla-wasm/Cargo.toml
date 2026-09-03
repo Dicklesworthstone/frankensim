@@ -6,7 +6,7 @@ publish = false
 
 [package.metadata.frankensim]
 layer = "L6"
-description = "Browser (WASM) surface for the Tesla Coil simulation — real FrankenSim physics in the browser."
+description = "Browser boundary for source-bounded Tesla transformer distributed-wave geometry."
 
 [workspace]
 
@@ -15,11 +15,10 @@ name = "fs_tesla_wasm"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-fs-flux = { path = "../fs-flux" }
+fs-flux = { path = "../fs-flux", default-features = false, features = ["quarter-wave"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "0.2"
-asupersync = { path = "../../../asupersync", default-features = false, features = ["wasm-browser-prod"] }
 
 [lints.rust]
 unsafe_code = "forbid"

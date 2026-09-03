@@ -10,11 +10,36 @@ description = "Incompressible Navier-Stokes, FEEC-native: H(div)-conforming RT0 
 [package.metadata.frankensim]
 layer = "L3"
 
+[features]
+default = ["continuum", "quarter-wave"]
+continuum = ["dep:fs-la", "dep:fs-solid", "dep:fs-solver", "dep:fs-sparse"]
+quarter-wave = []
+
 [dependencies]
-fs-la = { path = "../fs-la" }
-fs-solid = { path = "../fs-solid" }
-fs-solver = { path = "../fs-solver" }
-fs-sparse = { path = "../fs-sparse" }
+fs-la = { path = "../fs-la", optional = true }
+fs-solid = { path = "../fs-solid", optional = true }
+fs-solver = { path = "../fs-solver", optional = true }
+fs-sparse = { path = "../fs-sparse", optional = true }
+
+[[test]]
+name = "ale_gcl"
+path = "tests/ale_gcl.rs"
+required-features = ["continuum"]
+
+[[test]]
+name = "battery"
+path = "tests/battery.rs"
+required-features = ["continuum"]
+
+[[test]]
+name = "gas_film"
+path = "tests/gas_film.rs"
+required-features = ["continuum"]
+
+[[test]]
+name = "reduced_aero"
+path = "tests/reduced_aero.rs"
+required-features = ["continuum"]
 
 [lints]
 workspace = true

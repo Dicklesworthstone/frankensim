@@ -26,6 +26,48 @@ boundaries and are not approximated here. Control policy is likewise a separate
 owner: this crate consumes declared efforts and external wrenches but invents
 neither.
 
+The `goddard` module also exposes a narrow museum-facing composition for US
+1,102,653. It reuses the single-body owner for torque-free primary and
+gyroscope display poses, then reports only source sequence predicates and the
+Claim 2 tapered-tube ratio. The older `step_goddard_rocket` liquid-nozzle
+calculation remains an explicitly adjacent interpretive model; it is not a
+model of the mechanism claimed in US 1,102,653.
+
+The `daimler` module exposes a second narrow museum-facing composition for US
+361,931. It constructs the printed longitudinal propeller-shaft freedom through
+the generic articulated prismatic-joint owner, then reports the mutually
+exclusive ahead, neutral, and astern contact topology plus the passive/pumped
+cooling-path selection. Because the grant prints no travel, load, friction,
+speed, flow, or power values, this composition publishes normalized topology
+only and no quantitative performance.
+
+The `davinci` module exposes the source-bounded joint topology printed in Figs.
+2 and 2A of US 6,331,181. It composes five generic revolute joints and one
+normalized prismatic insertion joint, retains the claimed compatibility
+identifier as a predicate, and deliberately publishes no link dimensions,
+motor data, force, power, accuracy, or clinical-performance quantity.
+
+The `howe` module exposes the source-order joint topology printed in US 4,750:
+one main shaft constrains the curved needle arm, picker-driven shuttle in its
+horizontal trough, loop-lifting rod, and baster-plate feed to one prescribed
+drive coordinate. It publishes normalized kinematics, interlock predicates,
+and only the two local dimensions printed by the grant; it publishes no
+invented machine dimension, force, torque, speed, friction, or power.
+
+The `planar_drive` module owns a reusable constant-twist SE(2) update for
+prescribed left/right wheel speeds. The `roomba` module composes that generic
+owner with the intersecting emitter/detector field and change-of-direction
+logic of US 6,594,844. Its room and low-furniture boundaries perform bounded
+kinematic non-penetration projection for a museum display; they do not add a
+contact-force, impact, tire, friction, traction, or cleaning-performance model.
+
+The `salisbury` module exposes the source-bounded joint topology and static
+tendon law printed in US 4,921,293. It composes three generic revolute joints
+for each of three digits and evaluates the grant's three Figure 3 torque
+equations from caller-declared SI tensions and an explicitly illustrative
+pulley-radius scale. It publishes neither a fabricated historical dimension nor
+a dynamic, contact, grasp-stability, or force-closure result.
+
 ## Public types and semantics
 
 - `Vec3` is a small Cartesian vector. Every public field that carries a vector
@@ -83,6 +125,60 @@ neither.
 - `RigidBodyIntegrator::advance` invokes its cancellation callback before each
   whole step. It returns `AdvanceOutcome::Cancelled` with the last fully
   committed state and diagnostics when cancellation is observed.
+- `goddard::step_goddard_apparatus` admits declared primary/gyroscope RPM,
+  elapsed seconds, the exact `L/D` source ratio, auxiliary-release progress,
+  the source's "substantially consumed" state, and gyroscope presence. It
+  returns normalized torque-free `fs-mbd` quaternions, angular velocities,
+  Claim 1/2 sequence predicates, and ideal instrument-support isolation only
+  while the declared gyroscope is both present and spinning. A present but
+  stopped gyroscope shares the primary body's world rate. The normalized
+  spherical mass properties affect no published force, energy, or trajectory
+  quantity.
+- `daimler::step_daimler_marine` admits exactly three shaft selections
+  (`-1` astern, `0` neutral, `1` ahead) and optional pump state. It constructs
+  a normalized one-DoF `articulated::JointModel::prismatic` along the vessel's
+  longitudinal axis. Ahead returns negative sternward translation (movement
+  toward the motor), closes only `a/a²`, and retains the source-stated thrust
+  contact predicate; astern opens that contact and closes only the
+  `e¹/e²`-with-`a²/c` path. The motor sign remains positive in every state,
+  matching the continuously one-direction source statement. Pump activation
+  never removes the printed fore/aft pipe path.
+- `davinci::step_davinci_topology` admits finite support/tool angles, one
+  dimensionless insertion coordinate in `[-1, 1]`, and the tool compatibility
+  identifier predicate. Its revolute axes and prismatic tool axis come from
+  generic `articulated::JointModel` owners. Compatibility is reported rather
+  than reinterpreted as a fabricated motor interlock, and normalized insertion
+  is not represented as measured travel.
+- `howe::step_howe_topology` admits a finite main-shaft angle, normalized
+  displayed loop slack in `[0, 1]`, and the Claim 1 combination predicate. It
+  composes seven generic scalar joint coordinates constrained to one prescribed
+  drive coordinate, returns the source-order needle/loop/shuttle/feed phase,
+  and refuses to label declared display slack as a printed dimension.
+- `planar_drive::step_differential_drive` admits a finite planar axle-midpoint
+  pose, finite prescribed left/right tangential wheel speeds, positive track
+  width and wheel radius, and a fixed step in `(0, 0.25]` seconds. It applies
+  the exact constant-twist SE(2) exponential and updates wheel display angles;
+  equal speeds translate, opposite speeds spin about the axle midpoint.
+- `roomba::step_roomba` admits the shared room dimensions, procedural low-solid
+  footprints, reader-selected speed/turn controls, optical sensor geometry,
+  and the previous deterministic tape state. It composes the generic planar
+  drive, reports the source-bounded surface-field overlap and wall-field
+  redirect, projects a circular display bumper outside room/low-solid
+  boundaries, and returns stable contact indices (`-1` clear, `-2` room wall,
+  otherwise the caller's collider index). At most 64 colliders are admitted.
+- `salisbury::step_salisbury_hand` admits four finite non-negative cable-end
+  tensions in newtons, a finite positive visitor-declared R2 scale in metres,
+  and a Claim 2 first-idler predicate. It composes nine scalar revolute joint
+  coordinates through `articulated::JointModel`, reports twelve cable ends,
+  and emits the root-first parent map
+  `[-1, 0, 1, -1, 3, 4, -1, 6, 7]`: each `-1` is one digit's palm anchor,
+  and each following pair is its serial Axis-2/Axis-3 chain. This topology
+  proves attachment without fabricating a link length, mass, or inertia. It
+  evaluates the exact printed relations
+  `Torque1 = -T1 R1 + T2 R2 + T3 R2 - T4 R1`,
+  `Torque2 = T1 R3 + T2 R2 - T3 R2 - T4 R3`, and
+  `Torque3 = T2 R2 - T3 R2`. The study ratios `R1=1.2 R2` and `R3=1.4 R2`
+  only retain Figure 3's depicted ordering; they are not historical dimensions.
 - `articulated::SpatialInertia` accepts positive mass, a finite centre-of-mass
   offset, and a full symmetric centre-of-mass inertia. It validates positive
   definiteness and the principal-moment triangle inequalities before exposing
@@ -296,6 +392,15 @@ iiwa neutral endpoint, admitted hard limits and physical inertias, zero dense
 generalized-matrix entries, zero-input ABA, deterministic rebuilds, and retained
 provenance/omission records.
 
+The `goddard` module additionally checks its torque-free quaternions, exact RPM
+conversion, Claim 2 signed ratio margin, auxiliary firing order, gyroscope
+omission probe, and non-finite/out-of-domain refusal.
+
+The `planar_drive` and `roomba` modules additionally check analytic straight,
+spin, and constant-curvature motion; invalid geometry/time refusal; optical
+surface-absence redirect; Claim 1 subsystem inversion; room and low-solid
+non-penetration; bounded collider admission; and bit-identical replay.
+
 These are local G0-style checks. They do not constitute contact or constrained
 dynamics validation, full robot-model validation, performance evidence, G4
 fault injection, or G5 cross-ISA evidence.
@@ -329,6 +434,13 @@ fault injection, or G5 cross-ISA evidence.
   cone, or no-slip constraint is implemented. An equal-and-opposite impulse is
   algebraic action/reaction only; it does not by itself establish angular-
   momentum conservation about a shared contact point or physical admissibility.
+- The Roomba room boundary is a display-only kinematic projection and reports
+  only which declared boundary was projected plus its geometric normal. It
+  supplies no contact time, impulse, normal force, restitution, friction,
+  traction, wheel slip, motor torque, battery load, dust pickup, path coverage,
+  localization accuracy, or hardware-validation claim. Its expanding spiral
+  and randomized turn duration are contextual museum motion, not printed
+  performance promises of US 6,594,844.
 - Free-floating dynamics means unconstrained free flight only. It supplies no
   ground, support, contact, impact, friction, complementarity, buoyancy,
   aerodynamic, or controller force implicitly. A gravity-only robot therefore
@@ -339,3 +451,23 @@ fault injection, or G5 cross-ISA evidence.
   adjoint-capable, or physically validated.
 - Diagnostics describe the simulated smooth state; they do not mint a
   certificate, authority, or release-level conservation claim.
+- The source-bounded Goddard apparatus lane claims no absolute patent
+  dimensions, mass properties, burn rate, force, thrust, Mach number,
+  trajectory, aerodynamic stability, gyroscope torque capacity, or empirical
+  validation. Its ideal zero-world-rate camera support is a kinematic teaching
+  limit, not a prediction that the printed mechanism rejects arbitrary loads.
+- `goddard::step_goddard_rocket` uses an adjacent liquid-propellant/de Laval
+  interpretation. No consumer may present those outputs as a claim, disclosed
+  embodiment, or source-derived parameter of US 1,102,653.
+- The source-bounded `otis` lane composes twelve generic scalar joints for
+  platform D, safety bar F, levers E and pawls f, winding drum H, shaft I,
+  power drum N, shipper S, brake linkage X/Y/Z, and counterpoise R. It enforces
+  the printed belt/stop/hook-lock topology but claims no historical mass,
+  speed, spring rate, force, stopping distance, engagement time, power, or
+  unprinted dimensions. Its lower-limit threshold is a declared normalized
+  display boundary.
+- The source-bounded Salisbury lane claims no historical pulley or link
+  dimensions, cable material or diameter, mass, inertia, damping, motor rating,
+  friction coefficient, contact modulus, grasp force, speed, stability margin,
+  or force-closure guarantee. Its normalized display pose belongs to the
+  browser presentation layer and is not returned by `fs-mbd`.

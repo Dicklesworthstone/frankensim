@@ -1597,16 +1597,14 @@ fn consider_collision_pair(
     state.minimum_clearance_m = state.minimum_clearance_m.min(separation.lo);
     let risk_m = (PLACEMENT_CLEARANCE_M - separation.lo).max(0.0);
     state.risk_m += risk_m;
-    if hard_constraint {
-        if !separation.separation_proven {
-            let center = Point3::new(
-                0.5 * (separation.witness_a[0] + separation.witness_b[0]),
-                0.5 * (separation.witness_a[1] + separation.witness_b[1]),
-                0.5 * (separation.witness_a[2] + separation.witness_b[2]),
-            );
-            if let Ok(witness) = convex_overlap_witness(first, second, center) {
-                state.hard_penetration_m += witness.inradius_lower();
-            }
+    if hard_constraint && !separation.separation_proven {
+        let center = Point3::new(
+            0.5 * (separation.witness_a[0] + separation.witness_b[0]),
+            0.5 * (separation.witness_a[1] + separation.witness_b[1]),
+            0.5 * (separation.witness_a[2] + separation.witness_b[2]),
+        );
+        if let Ok(witness) = convex_overlap_witness(first, second, center) {
+            state.hard_penetration_m += witness.inradius_lower();
         }
     }
     state.possible_collision |= !separation.separation_proven;
