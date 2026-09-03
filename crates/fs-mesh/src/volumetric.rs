@@ -454,12 +454,15 @@ impl QualityCensus {
 /// complex afterwards, so these counts never stand in for it).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct FlatTetRepair {
-    /// Retained tets whose volume was below 1e-9 of the largest tet's.
+    /// Retained tets whose volume was below 1e-9 of the largest tet's or
+    /// whose smallest dihedral angle was below 1° (CONTRACT item 22).
     pub found: u32,
-    /// Flat tets no longer present after the pass (`found - unrepaired`).
+    /// Flat tets and slivers no longer present after the pass
+    /// (`found - unrepaired`).
     pub repaired: u32,
-    /// Flat tets remaining after the pass (a face or ring face on a wall, a
-    /// ring crossing a region, an open ring, or no volume-conserving fan).
+    /// Flat tets and slivers remaining after the pass (a face or ring face
+    /// on a wall, a ring crossing a region, an open ring, or no
+    /// volume-conserving fan that does not mint another thin tet).
     pub unrepaired: u32,
     /// Repair rounds run.
     pub rounds: u32,
@@ -1264,6 +1267,37 @@ impl LabeledTetComplex {
         // segments cross in the quad's plane.
         let pairings: [([u32; 2], [u32; 2]); 3] =
             [([a, c], [b, d]), ([a, b], [c, d]), ([a, d], [b, c])];
+        // A needle: one vertex lies ON the chord of an edge of the tet — an
+        // original edge the kernel kept alive beside its midpoint (item 20),
+        // or two collinear input segments whose f32 rounding bent the line.
+        // Its planar-quad diagonals are chord sub-edges (walls in the ring,
+        // refused); the repair is to remove the stale edge itself, whose star
+        // re-tiles through the on-chord vertex.
+        for (edge, rest) in pairings {
+            for (x, y, p, q) in [
+                (edge[0], edge[1], rest[0], rest[1]),
+                (rest[0], rest[1], edge[0], edge[1]),
+            ] {
+                let needle = {
+                    let at = |z: u32| self.positions[z as usize];
+                    crate::recovery::chord_parameter(at(p), at(x), at(y)).is_some()
+                        || crate::recovery::chord_parameter(at(q), at(x), at(y)).is_some()
+                };
+                if needle
+                    && self.remove_edge_through_flat(
+                        flat_index,
+                        [x, y],
+                        [p, q],
+                        region,
+                        by_face,
+                        walls,
+                        largest,
+                    )
+                {
+                    return true;
+                }
+            }
+        }
         let pos = |v: u32| self.positions[v as usize];
         let normal = {
             // normal of the largest-area triangle among the four points
@@ -1731,15 +1765,223 @@ pub fn volumetricize(
     cx: &Cx<'_>,
 ) -> Result<AuditedLabeledTetComplex, VolumetricError> {
     let regions = plc.regions.clone();
+    let input_vertices = plc.vertices.len();
     let admitted = plc.admit(policy, cx)?;
     let mut recovered = admitted.recover(cx)?;
     if let Some(refinement) = recovered.policy.refinement {
         recovered = recovered.refine_constrained(refinement, cx)?;
     }
-    let (cavity_vol, exterior_vol) = discarded_volumes(&recovered);
+    let (unique_facets, unique_segments, policy) = (
+        recovered.unique_facets.clone(),
+        recovered.unique_segments.clone(),
+        recovered.policy.clone(),
+    );
+    let (mut cavity_vol, mut exterior_vol) = discarded_volumes(&recovered);
     let mut labeled = recovered.carve_and_label(cx)?;
     labeled.repair_flat_tets();
+    // Survivors of the repair are coplanar-cluster flats and slivers: four
+    // (nearly) co-circular points in one facet plane whose every ring
+    // re-triangulation mints another thin tet. Their vertices are Steiner
+    // points, and a Steiner point is ours to place: nudge each one a few
+    // percent of the survivor's shortest edge ALONG its own constraint (its
+    // chord, its facet plane, or freely inside the solid), then rebuild
+    // through the same kernel, recovery, carve and repair, and keep the
+    // result only if the survivor count strictly drops. Input vertices are
+    // never moved. The perturbation flavour of `exude`, inside the
+    // constrained pipeline.
+    let trace = std::env::var_os("FS_MESH_TRACE_REPAIR").is_some();
+    for round in 1..=PERTURB_ROUNDS {
+        if labeled.flat_repair.unrepaired == 0 {
+            break;
+        }
+        let Some(points) = perturbed_points(&labeled, input_vertices, &unique_segments) else {
+            if trace {
+                eprintln!(
+                    "TRACE perturb: round {round}: no Steiner vertex among the {} survivors",
+                    labeled.flat_repair.unrepaired
+                );
+            }
+            break;
+        };
+        let retry = AdmittedPlc {
+            vertices: points,
+            regions: regions.clone(),
+            unique_facets: unique_facets.clone(),
+            unique_segments: unique_segments.clone(),
+            policy: policy.clone(),
+        };
+        let candidate = retry.recover(cx).and_then(|recovered| {
+            let volumes = discarded_volumes(&recovered);
+            recovered
+                .carve_and_label(cx)
+                .map(|labeled| (labeled, volumes))
+        });
+        let (mut candidate, volumes) = match candidate {
+            Ok(value) => value,
+            Err(VolumetricError::Mesh(MeshError::Cancelled)) => {
+                return Err(VolumetricError::Mesh(MeshError::Cancelled));
+            }
+            Err(error) => {
+                if trace {
+                    eprintln!(
+                        "TRACE perturb: round {round}: rebuild refused ({error}); keeping the previous mesh"
+                    );
+                }
+                break;
+            }
+        };
+        candidate.repair_flat_tets();
+        if trace {
+            eprintln!(
+                "TRACE perturb: round {round}: survivors {} -> {} (tets {} -> {})",
+                labeled.flat_repair.unrepaired,
+                candidate.flat_repair.unrepaired,
+                labeled.tets.len(),
+                candidate.tets.len()
+            );
+        }
+        if candidate.flat_repair.unrepaired < labeled.flat_repair.unrepaired {
+            labeled = candidate;
+            (cavity_vol, exterior_vol) = volumes;
+        } else {
+            break;
+        }
+    }
     labeled.audit(&regions, cavity_vol, exterior_vol, cx)
+}
+
+/// Rounds of Steiner perturbation and re-meshing `volumetricize` spends on
+/// survivors of the flat-tet repair.
+const PERTURB_ROUNDS: u32 = 3;
+
+/// Perturbation step as a fraction of the survivor's shortest edge: large
+/// enough that the re-triangulated tets clear the 1° sliver floor, small
+/// enough to stay between the vertex's chord or facet neighbours.
+const PERTURB_FRACTION: f64 = 0.05;
+
+/// The complex's positions with every Steiner vertex of a surviving flat or
+/// sliver moved toward that tet's centroid along its own constraint; `None`
+/// when no survivor has a Steiner vertex to move.
+fn perturbed_points(
+    labeled: &LabeledTetComplex,
+    input_vertices: usize,
+    unique_segments: &[[u32; 2]],
+) -> Option<Vec<[f64; 3]>> {
+    let positions = &labeled.positions;
+    let volume = |tet: [u32; 4]| tet_volume_triple(positions, tet).abs();
+    let largest = labeled
+        .tets
+        .iter()
+        .map(|tet| volume(*tet))
+        .fold(0.0f64, f64::max);
+    let survivor = |tet: [u32; 4]| {
+        volume(tet) <= 1e-9 * largest || {
+            let p: [[f64; 3]; 4] = core::array::from_fn(|k| positions[tet[k] as usize]);
+            crate::exude::min_dihedral_deg(&p) < REPAIR_SLIVER_DIHEDRAL_DEG
+        }
+    };
+    // Vertex → (target direction, step), first survivor wins (deterministic:
+    // tets are in canonical order).
+    let mut moves: BTreeMap<u32, ([f64; 3], f64)> = BTreeMap::new();
+    for tet in &labeled.tets {
+        if !survivor(*tet) {
+            continue;
+        }
+        let p: [[f64; 3]; 4] = core::array::from_fn(|k| positions[tet[k] as usize]);
+        let centroid = tet_centroid(positions, *tet);
+        let mut shortest = f64::INFINITY;
+        for i in 0..4 {
+            for j in (i + 1)..4 {
+                let d = sub3(p[i], p[j]);
+                shortest = shortest.min(dot3(d, d).sqrt());
+            }
+        }
+        // ONE vertex per survivor: moving every corner of a co-circular
+        // rectangle toward its centre scales it and leaves it co-circular
+        // (MEASURED: the flat survived the round unchanged).
+        for (k, &v) in tet.iter().enumerate() {
+            if (v as usize) < input_vertices || moves.contains_key(&v) {
+                continue;
+            }
+            moves.insert(v, (sub3(centroid, p[k]), PERTURB_FRACTION * shortest));
+            break;
+        }
+    }
+    if moves.is_empty() {
+        return None;
+    }
+    let input = |i: u32| positions[i as usize];
+    let mut out = positions.clone();
+    let mut moved = 0usize;
+    for (&v, &(direction, step)) in &moves {
+        let p = positions[v as usize];
+        // Constraint of this Steiner vertex: a chord of an input segment
+        // (move along it), else a wall tile's plane (move within it), else
+        // free.
+        let chord = unique_segments
+            .iter()
+            .copied()
+            .find(|&[a, b]| crate::recovery::chord_parameter(p, input(a), input(b)).is_some());
+        let tile = labeled
+            .source_faces
+            .iter()
+            .find(|(face, _)| face.contains(&v))
+            .map(|(face, _)| *face);
+        let mut d = direction;
+        let target = if let Some([a, b]) = chord {
+            let axis = sub3(input(b), input(a));
+            let along = dot3(d, axis) / dot3(axis, axis);
+            d = [along * axis[0], along * axis[1], along * axis[2]];
+            let len = dot3(d, d).sqrt();
+            if len == 0.0 {
+                continue;
+            }
+            let q = [
+                p[0] + step * d[0] / len,
+                p[1] + step * d[1] / len,
+                p[2] + step * d[2] / len,
+            ];
+            crate::recovery::snap_point_to_line(q, input(a), input(b))
+        } else if let Some(face) = tile {
+            let (a, b, c) = (
+                positions[face[0] as usize],
+                positions[face[1] as usize],
+                positions[face[2] as usize],
+            );
+            let n = cross3(sub3(b, a), sub3(c, a));
+            let nn = dot3(n, n);
+            if nn == 0.0 {
+                continue;
+            }
+            let off = dot3(d, n) / nn;
+            d = [d[0] - off * n[0], d[1] - off * n[1], d[2] - off * n[2]];
+            let len = dot3(d, d).sqrt();
+            if len == 0.0 {
+                continue;
+            }
+            let q = [
+                p[0] + step * d[0] / len,
+                p[1] + step * d[1] / len,
+                p[2] + step * d[2] / len,
+            ];
+            crate::recovery::snap_point_to_plane(q, a, n)
+        } else {
+            let len = dot3(d, d).sqrt();
+            if len == 0.0 {
+                continue;
+            }
+            [
+                p[0] + step * d[0] / len,
+                p[1] + step * d[1] / len,
+                p[2] + step * d[2] / len,
+            ]
+        };
+        if target != p {
+            out[v as usize] = target;
+            moved += 1;
+        }
+    }
+    (moved > 0).then_some(out)
 }
 
 fn discarded_volumes(recovered: &ConstraintRecoveredPlc) -> (f64, f64) {

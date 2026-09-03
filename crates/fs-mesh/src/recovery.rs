@@ -107,6 +107,23 @@ pub(crate) fn edge_set_of(tetra: &Tetrahedralization) -> BTreeSet<[u32; 2]> {
     edge_set(tetra)
 }
 
+/// The crate's segment membership test (parameter strictly inside `(a, b)`
+/// within the chord tolerance), for the volumetric layer's Steiner
+/// perturbation: a point on a chord must be moved ALONG it.
+pub(crate) fn chord_parameter(p: [f64; 3], a: [f64; 3], b: [f64; 3]) -> Option<f64> {
+    parameter_on_segment(p, a, b)
+}
+
+/// `snap_to_line` for the volumetric layer.
+pub(crate) fn snap_point_to_line(point: [f64; 3], a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    snap_to_line(point, a, b)
+}
+
+/// `snap_to_plane` for the volumetric layer.
+pub(crate) fn snap_point_to_plane(point: [f64; 3], origin: [f64; 3], normal: [f64; 3]) -> [f64; 3] {
+    snap_to_plane(point, origin, normal)
+}
+
 /// Live mesh edge set (sorted vertex pairs of live real tets).
 fn edge_set(tetra: &Tetrahedralization) -> BTreeSet<[u32; 2]> {
     let mut edges = BTreeSet::new();
@@ -169,9 +186,25 @@ pub fn recover_segments(
         // (dyadic parameter, vertex) is the whole bookkeeping.
         let (oa, ob) = (tetra.mesh.points[a as usize], tetra.mesh.points[b as usize]);
         let mut chain: Vec<(f64, u32)> = vec![(0.0, a), (1.0, b)];
+        // Vertices already ON the chord (a re-mesh after Steiner
+        // perturbation, or a refinement re-recovery) are part of the chain
+        // from the start: a sub-edge that skipped one could never be a mesh
+        // edge, and bisection would only mint midpoints beside it until the
+        // depth cap. A fresh PLC has none, so its chain is unchanged.
+        for v in chain_on_chord(&tetra.mesh.points, a, b) {
+            if v != a && v != b {
+                if let Some(t) = parameter_on_segment(tetra.mesh.points[v as usize], oa, ob) {
+                    chain.push((t, v));
+                }
+            }
+        }
+        chain.sort_by(|x, y| x.0.total_cmp(&y.0).then(x.1.cmp(&y.1)));
         // Work stack of open sub-intervals (param lo, vert lo, param
         // hi, vert hi, depth).
-        let mut stack: Vec<(f64, u32, f64, u32, u32)> = vec![(0.0, a, 1.0, b, 0)];
+        let mut stack: Vec<(f64, u32, f64, u32, u32)> = chain
+            .windows(2)
+            .map(|w| (w[0].0, w[0].1, w[1].0, w[1].1, 0))
+            .collect();
         let mut failed = false;
         while let Some((tlo, vlo, thi, vhi, depth)) = stack.pop() {
             let key = if vlo < vhi { [vlo, vhi] } else { [vhi, vlo] };
