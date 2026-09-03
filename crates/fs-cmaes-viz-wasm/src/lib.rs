@@ -48,14 +48,14 @@ use g1_walking::{
 };
 use manipulation::{
     ARM_JOINT_COUNT, ARM_LINK_COUNT, ARM_LINK_POSE_WORDS, ARM_POLICY_DIMENSION, ARM_POLICY_KNOTS,
-    LIFT_TARGET_M, MIN_GRIPPER_WIDTH_M, ManipulationConfig, ManipulationError,
-    ManipulationEvaluator, ManipulationReceipt, ManipulationTask, ManipulationTraceSample,
-    OPEN_GRIPPER_WIDTH_M, PLACEMENT_TOLERANCE_M, manipulation_curriculum_mean,
-    manipulation_max_population,
+    LIFT_TARGET_M, MAX_DECLARED_OBSTACLES, MIN_GRIPPER_WIDTH_M, ManipulationConfig,
+    ManipulationError, ManipulationEvaluator, ManipulationReceipt, ManipulationTask,
+    ManipulationTraceSample, OPEN_GRIPPER_WIDTH_M, ObstacleBox, PLACEMENT_TOLERANCE_M,
+    manipulation_curriculum_mean, manipulation_max_population,
 };
 
 /// Kernel identity returned by the browser capability probe.
-pub const KERNEL_VERSION: &str = "fs-cmaes-viz-wasm 0.6.13";
+pub const KERNEL_VERSION: &str = "fs-cmaes-viz-wasm 0.6.14";
 /// Exact binary64 word identifying schema-2 packets (`"CMA2"`).
 pub const PACKET_MAGIC: u32 = 0x434d_4132;
 /// Packed ask/tell ABI schema.
@@ -100,7 +100,13 @@ pub const G1_PACKET_KIND_POPULATION: u32 = 4;
 /// Exact binary64 word identifying household-arm packets (`"ARM1"`).
 pub const ARM_PACKET_MAGIC: u32 = 0x4152_4d31;
 /// Packed household-manipulation objective/trace ABI schema.
-pub const ARM_PACKET_SCHEMA_VERSION: u32 = 2;
+///
+/// Schema 3 (0.6.14) makes the config packet self-describing: twelve fixed
+/// words followed by seven per caller-declared keep-out box. The three added
+/// fixed words are an object-mass override and the two Coulomb coefficients;
+/// all default to zero, which selects the owner's preset values and
+/// reproduces the schema-2 receipts exactly.
+pub const ARM_PACKET_SCHEMA_VERSION: u32 = 3;
 /// Input packet containing fixed manipulation-experiment controls.
 pub const ARM_PACKET_KIND_CONFIG: u32 = 0;
 /// Output packet describing an admitted manipulation evaluator and scene.
@@ -126,8 +132,9 @@ const G1_RECEIPT_WORDS: usize = 28;
 const G1_REFUSAL_WORDS: usize = 7;
 const G1_TRACE_SAMPLE_WORDS: usize = 3 + G1_LINK_COUNT * G1_LINK_POSE_WORDS;
 const G1_MAX_POPULATION: usize = 64;
-const ARM_CONFIG_WORDS: usize = 8;
-const ARM_ADMISSION_WORDS: usize = 37;
+const ARM_CONFIG_FIXED_WORDS: usize = 12;
+const ARM_OBSTACLE_WORDS: usize = 7;
+const ARM_ADMISSION_WORDS: usize = 40;
 const ARM_RECEIPT_WORDS: usize = 22;
 const ARM_REFUSAL_WORDS: usize = 7;
 const ARM_TRACE_SAMPLE_WORDS: usize =
@@ -670,10 +677,11 @@ impl PackedManipulationEvaluator {
             Ok(config) => config,
             Err(refusal) => return Self::refused(refusal),
         };
+        let task = config.task;
         match ManipulationEvaluator::new(config) {
             Ok(evaluator) => Self {
                 evaluator: Some(evaluator),
-                task: Some(config.task),
+                task: Some(task),
                 creation_refusal: None,
             },
             Err(error) => Self::refused(arm_owner_refusal(&error)),
@@ -736,6 +744,11 @@ impl PackedManipulationEvaluator {
             scene.obstacle_half_extents_m.x,
             scene.obstacle_half_extents_m.y,
             scene.obstacle_half_extents_m.z,
+            // Schema 3: the effective interface the rollout actually ran with,
+            // so a caller override can never be read back as the owner default.
+            scene.static_friction_mu,
+            scene.kinetic_friction_mu,
+            scene.extra_obstacle_count as f64,
         ]);
         debug_assert_eq!(packet.len(), ARM_ADMISSION_WORDS);
         packet
@@ -995,8 +1008,16 @@ fn append_g1_trace_sample(packet: &mut Vec<f64>, sample: &G1TraceSample) {
     }
 }
 
+/// Parse a schema-3 household-arm config packet.
+///
+/// Layout: `[magic, schema, kind, wordCount, step_s, duration_s,
+/// trace_stride, task, object_mass_kg, static_mu, kinetic_mu, obstacleCount]`
+/// followed by `obstacleCount` groups of
+/// `[cx, cy, cz, hx, hy, hz, yaw_rad]` in world coordinates. `wordCount` is
+/// self-describing and must equal the packet length. A zero in any of the
+/// three override words selects the owner's preset value.
 fn parse_arm_config(packet: &[f64]) -> Result<ManipulationConfig, ArmPackedRefusal> {
-    if packet.len() != ARM_CONFIG_WORDS {
+    if packet.len() < ARM_CONFIG_FIXED_WORDS {
         return Err(ArmPackedRefusal::new(ArmPackedRefusalCode::MalformedPacket));
     }
     if exact_u32(packet[0]) != Some(ARM_PACKET_MAGIC)
@@ -1005,8 +1026,14 @@ fn parse_arm_config(packet: &[f64]) -> Result<ManipulationConfig, ArmPackedRefus
         return Err(ArmPackedRefusal::new(ArmPackedRefusalCode::SchemaMismatch));
     }
     if exact_u32(packet[2]) != Some(ARM_PACKET_KIND_CONFIG)
-        || exact_usize(packet[3]) != Some(ARM_CONFIG_WORDS)
+        || exact_usize(packet[3]) != Some(packet.len())
     {
+        return Err(ArmPackedRefusal::new(ArmPackedRefusalCode::MalformedPacket));
+    }
+    let obstacle_count = exact_usize(packet[11])
+        .filter(|value| *value <= MAX_DECLARED_OBSTACLES)
+        .ok_or(ArmPackedRefusal::new(ArmPackedRefusalCode::InvalidConfig))?;
+    if packet.len() != ARM_CONFIG_FIXED_WORDS + obstacle_count * ARM_OBSTACLE_WORDS {
         return Err(ArmPackedRefusal::new(ArmPackedRefusalCode::MalformedPacket));
     }
     let trace_stride = exact_usize(packet[6])
@@ -1020,11 +1047,39 @@ fn parse_arm_config(packet: &[f64]) -> Result<ManipulationConfig, ArmPackedRefus
             return Err(ArmPackedRefusal::new(ArmPackedRefusalCode::InvalidConfig));
         }
     };
+    // Zero selects the owner preset; any other value must be finite and is
+    // range-checked by the owner's own validate_config.
+    let optional_override = |value: f64| -> Result<Option<f64>, ArmPackedRefusal> {
+        if !value.is_finite() || value < 0.0 {
+            return Err(ArmPackedRefusal::new(ArmPackedRefusalCode::InvalidConfig));
+        }
+        Ok(if value == 0.0 { None } else { Some(value) })
+    };
+    let object_mass_kg = optional_override(packet[8])?;
+    let static_mu = optional_override(packet[9])?;
+    let kinetic_mu = optional_override(packet[10])?;
+    let mut obstacles = Vec::with_capacity(obstacle_count);
+    for index in 0..obstacle_count {
+        let base = ARM_CONFIG_FIXED_WORDS + index * ARM_OBSTACLE_WORDS;
+        let words = &packet[base..base + ARM_OBSTACLE_WORDS];
+        if words.iter().any(|value| !value.is_finite()) {
+            return Err(ArmPackedRefusal::new(ArmPackedRefusalCode::InvalidConfig));
+        }
+        obstacles.push(ObstacleBox {
+            center_m: fs_ga::Vec3::new(words[0], words[1], words[2]),
+            half_extents_m: fs_ga::Vec3::new(words[3], words[4], words[5]),
+            yaw_rad: words[6],
+        });
+    }
     let config = ManipulationConfig {
         task,
         step_s: packet[4],
         duration_s: packet[5],
         trace_stride,
+        object_mass_kg,
+        static_mu,
+        kinetic_mu,
+        obstacles,
     };
     if !(config.step_s.is_finite()
         && (1.0 / 240.0..=1.0 / 45.0).contains(&config.step_s)
@@ -1668,16 +1723,46 @@ mod schema_two_tests {
     }
 
     fn arm_config_packet(task: ManipulationTask, duration_s: f64, trace_stride: usize) -> Vec<f64> {
-        vec![
+        arm_config_packet_with(task, duration_s, trace_stride, 0.0, 0.0, 0.0, &[])
+    }
+
+    /// Schema-3 config packet with explicit overrides and keep-out boxes.
+    /// Zero overrides plus an empty roster is the schema-2 equivalent.
+    fn arm_config_packet_with(
+        task: ManipulationTask,
+        duration_s: f64,
+        trace_stride: usize,
+        object_mass_kg: f64,
+        static_mu: f64,
+        kinetic_mu: f64,
+        obstacles: &[ObstacleBox],
+    ) -> Vec<f64> {
+        let mut packet = vec![
             f64::from(ARM_PACKET_MAGIC),
             f64::from(ARM_PACKET_SCHEMA_VERSION),
             f64::from(ARM_PACKET_KIND_CONFIG),
-            ARM_CONFIG_WORDS as f64,
+            (ARM_CONFIG_FIXED_WORDS + obstacles.len() * ARM_OBSTACLE_WORDS) as f64,
             1.0 / 90.0,
             duration_s,
             trace_stride as f64,
             f64::from(task as u32),
-        ]
+            object_mass_kg,
+            static_mu,
+            kinetic_mu,
+            obstacles.len() as f64,
+        ];
+        for obstacle in obstacles {
+            packet.extend_from_slice(&[
+                obstacle.center_m.x,
+                obstacle.center_m.y,
+                obstacle.center_m.z,
+                obstacle.half_extents_m.x,
+                obstacle.half_extents_m.y,
+                obstacle.half_extents_m.z,
+                obstacle.yaw_rad,
+            ]);
+        }
+        packet
     }
 
     fn assert_g1_success(packet: &[f64], kind: u32) {
@@ -2267,5 +2352,273 @@ mod schema_two_tests {
             f64::from(ArmPackedRefusalCode::NonFiniteParameter as u32)
         );
         assert_eq!(refusal[6], 1.0);
+    }
+
+    /// Schema-3 words are additive: a packet whose three override words are
+    /// zero and whose keep-out roster is empty must reproduce the schema-2
+    /// rollout bit for bit, and must report the owner's declared interface.
+    #[test]
+    fn schema_three_defaults_reproduce_the_preset_owner_rollout() {
+        for task in [
+            ManipulationTask::KitchenMug,
+            ManipulationTask::LivingRoomRemote,
+            ManipulationTask::BackyardTrowel,
+        ] {
+            let packed =
+                PackedManipulationEvaluator::new(&arm_config_packet(task, 6.0, 3));
+            let admission = packed.receipt_packet();
+            assert_arm_packet_ok(&admission, ARM_PACKET_KIND_ADMISSION);
+            assert_eq!(admission.len(), ARM_ADMISSION_WORDS);
+            assert_eq!(admission[37], 0.82, "default static mu for {task:?}");
+            assert_eq!(admission[38], 0.68, "default kinetic mu for {task:?}");
+            assert_eq!(admission[39], 0.0, "no declared boxes for {task:?}");
+
+            let mean = packed.curriculum_policy_mean();
+            let packed_receipt = packed.evaluate_packet(&mean);
+            assert_arm_packet_ok(&packed_receipt, ARM_PACKET_KIND_EVALUATION);
+
+            // The same rollout through the internal API with an untouched
+            // default config: identical bits, so the packet layer adds nothing.
+            let direct = ManipulationEvaluator::new(ManipulationConfig {
+                task,
+                ..ManipulationConfig::default()
+            })
+            .expect("preset config admits");
+            let direct_receipt = direct.evaluate(&mean).expect("preset rollout");
+            assert_eq!(
+                packed_receipt[5].to_bits(),
+                direct_receipt.objective.to_bits(),
+                "objective drift for {task:?}"
+            );
+            assert_eq!(packed_receipt[10], direct_receipt.collision_risk_integral);
+            assert_eq!(packed_receipt[17], direct_receipt.peak_grip_force_n);
+            assert_eq!(packed_receipt[20], f64::from(u8::from(direct_receipt.placed)));
+        }
+    }
+
+    /// A declared keep-out box straddling the transport path must be scored
+    /// as a hard link constraint; the identical box moved out of the workspace
+    /// must leave the rollout exactly as it was.
+    #[test]
+    fn declared_obstacles_block_the_transport_path_only_where_they_stand() {
+        let baseline = PackedManipulationEvaluator::new(&arm_config_packet(
+            ManipulationTask::KitchenMug,
+            6.0,
+            3,
+        ));
+        let admission = baseline.receipt_packet();
+        let mean = baseline.curriculum_policy_mean();
+        let clear = baseline.evaluate_packet(&mean);
+        assert_arm_packet_ok(&clear, ARM_PACKET_KIND_EVALUATION);
+        assert_eq!(clear[10], 0.0, "preset mug path is collision free");
+        assert_eq!(clear[20], 1.0, "preset mug rollout places the object");
+
+        // Midpoint of the source-derived grasp and place stations.
+        let midpoint = fs_ga::Vec3::new(
+            0.5 * (admission[24] + admission[27]),
+            0.5 * (admission[25] + admission[28]),
+            0.5 * (admission[26] + admission[29]),
+        );
+        let blocker = ObstacleBox {
+            center_m: midpoint,
+            half_extents_m: fs_ga::Vec3::new(0.09, 0.09, 0.09),
+            yaw_rad: 0.3,
+        };
+        let blocked = PackedManipulationEvaluator::new(&arm_config_packet_with(
+            ManipulationTask::KitchenMug,
+            6.0,
+            3,
+            0.0,
+            0.0,
+            0.0,
+            &[blocker],
+        ));
+        let blocked_admission = blocked.receipt_packet();
+        assert_eq!(blocked_admission[39], 1.0, "admission echoes the roster size");
+        let blocked_receipt = blocked.evaluate_packet(&mean);
+        assert_arm_packet_ok(&blocked_receipt, ARM_PACKET_KIND_EVALUATION);
+        assert!(
+            blocked_receipt[10] > 0.0,
+            "a box on the path must accrue collision risk"
+        );
+        assert_eq!(blocked_receipt[20], 0.0, "a blocked rollout cannot be placed");
+
+        // The same box, 1.5 m away in +x, is outside every link envelope.
+        let distant = ObstacleBox {
+            center_m: fs_ga::Vec3::new(midpoint.x + 1.5, midpoint.y, midpoint.z),
+            ..blocker
+        };
+        let unaffected = PackedManipulationEvaluator::new(&arm_config_packet_with(
+            ManipulationTask::KitchenMug,
+            6.0,
+            3,
+            0.0,
+            0.0,
+            0.0,
+            &[distant],
+        ));
+        let unaffected_receipt = unaffected.evaluate_packet(&mean);
+        assert_eq!(
+            unaffected_receipt[5].to_bits(),
+            clear[5].to_bits(),
+            "a distant box must not perturb the objective"
+        );
+        assert_eq!(unaffected_receipt[20], 1.0);
+    }
+
+    /// Mass and friction overrides reach the physics and are echoed back.
+    #[test]
+    fn mass_and_friction_overrides_change_the_rollout_and_the_admission() {
+        let baseline = PackedManipulationEvaluator::new(&arm_config_packet(
+            ManipulationTask::KitchenMug,
+            6.0,
+            3,
+        ));
+        let mean = baseline.curriculum_policy_mean();
+        let baseline_admission = baseline.receipt_packet();
+        let baseline_receipt = baseline.evaluate_packet(&mean);
+        let preset_mass = baseline_admission[19];
+
+        let heavy = PackedManipulationEvaluator::new(&arm_config_packet_with(
+            ManipulationTask::KitchenMug,
+            6.0,
+            3,
+            2.0,
+            0.0,
+            0.0,
+            &[],
+        ));
+        let heavy_admission = heavy.receipt_packet();
+        assert_eq!(heavy_admission[19], 2.0, "admission reports the effective mass");
+        assert!((preset_mass - 2.0).abs() > 1.0);
+        let heavy_receipt = heavy.evaluate_packet(&mean);
+        assert_ne!(
+            heavy_receipt[5].to_bits(),
+            baseline_receipt[5].to_bits(),
+            "a 6x heavier object must change the objective"
+        );
+
+        let slippery = PackedManipulationEvaluator::new(&arm_config_packet_with(
+            ManipulationTask::KitchenMug,
+            6.0,
+            3,
+            0.0,
+            0.3,
+            0.2,
+            &[],
+        ));
+        let slippery_admission = slippery.receipt_packet();
+        assert_eq!(slippery_admission[37], 0.3);
+        assert_eq!(slippery_admission[38], 0.2);
+        let slippery_receipt = slippery.evaluate_packet(&mean);
+        assert_ne!(
+            slippery_receipt[5].to_bits(),
+            baseline_receipt[5].to_bits(),
+            "a low-friction interface must change the objective"
+        );
+    }
+
+    /// Every schema-3 envelope violation is refused by name, not clamped.
+    #[test]
+    fn schema_three_refuses_malformed_and_out_of_range_declarations() {
+        let refusal_code = |packet: Vec<f64>| -> f64 {
+            let evaluator = PackedManipulationEvaluator::new(&packet);
+            let admission = evaluator.receipt_packet();
+            assert_eq!(admission[2], f64::from(PACKET_STATUS_REFUSAL));
+            admission[5]
+        };
+
+        // wordCount that disagrees with the packet length.
+        let mut wrong_count = arm_config_packet(ManipulationTask::KitchenMug, 6.0, 3);
+        wrong_count[3] = 99.0;
+        assert_eq!(
+            refusal_code(wrong_count),
+            f64::from(ArmPackedRefusalCode::MalformedPacket as u32)
+        );
+
+        // A roster one box past the declared cap.
+        let too_many: Vec<ObstacleBox> = (0..=MAX_DECLARED_OBSTACLES)
+            .map(|index| ObstacleBox {
+                center_m: fs_ga::Vec3::new(index as f64 * 0.01, 0.0, 1.0),
+                half_extents_m: fs_ga::Vec3::new(0.05, 0.05, 0.05),
+                yaw_rad: 0.0,
+            })
+            .collect();
+        assert_eq!(
+            refusal_code(arm_config_packet_with(
+                ManipulationTask::KitchenMug,
+                6.0,
+                3,
+                0.0,
+                0.0,
+                0.0,
+                &too_many
+            )),
+            f64::from(ArmPackedRefusalCode::InvalidConfig as u32)
+        );
+
+        // Kinetic friction above static friction is not a physical interface.
+        assert_eq!(
+            refusal_code(arm_config_packet_with(
+                ManipulationTask::KitchenMug,
+                6.0,
+                3,
+                0.0,
+                0.4,
+                0.9,
+                &[]
+            )),
+            f64::from(ArmPackedRefusalCode::InvalidConfig as u32)
+        );
+
+        // Negative mass.
+        assert_eq!(
+            refusal_code(arm_config_packet_with(
+                ManipulationTask::KitchenMug,
+                6.0,
+                3,
+                -1.0,
+                0.0,
+                0.0,
+                &[]
+            )),
+            f64::from(ArmPackedRefusalCode::InvalidConfig as u32)
+        );
+
+        // Non-finite obstacle extent.
+        assert_eq!(
+            refusal_code(arm_config_packet_with(
+                ManipulationTask::KitchenMug,
+                6.0,
+                3,
+                0.0,
+                0.0,
+                0.0,
+                &[ObstacleBox {
+                    center_m: fs_ga::Vec3::new(0.3, 0.0, 0.8),
+                    half_extents_m: fs_ga::Vec3::new(f64::NAN, 0.05, 0.05),
+                    yaw_rad: 0.0,
+                }]
+            )),
+            f64::from(ArmPackedRefusalCode::InvalidConfig as u32)
+        );
+
+        // A degenerate (zero-thickness) box is refused rather than admitted.
+        assert_eq!(
+            refusal_code(arm_config_packet_with(
+                ManipulationTask::KitchenMug,
+                6.0,
+                3,
+                0.0,
+                0.0,
+                0.0,
+                &[ObstacleBox {
+                    center_m: fs_ga::Vec3::new(0.3, 0.0, 0.8),
+                    half_extents_m: fs_ga::Vec3::new(0.0, 0.05, 0.05),
+                    yaw_rad: 0.0,
+                }]
+            )),
+            f64::from(ArmPackedRefusalCode::InvalidConfig as u32)
+        );
     }
 }

@@ -533,7 +533,7 @@ version = "0.0.1"
 
 [[package]]
 name = "fs-cmaes-viz-wasm"
-version = "0.6.13"
+version = "0.6.14"
 dependencies = [
  "asupersync",
  "fs-alloc",
@@ -574,6 +574,7 @@ dependencies = [
 name = "fs-dfo"
 version = "0.0.1"
 dependencies = [
+ "fs-alloc",
  "fs-blake3",
  "fs-exec",
  "fs-la",
@@ -617,10 +618,6 @@ dependencies = [
 [[package]]
 name = "fs-g1-train"
 version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
 
 [[package]]
 name = "fs-ga"

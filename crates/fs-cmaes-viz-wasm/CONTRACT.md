@@ -380,17 +380,41 @@ NaN detail word.
 
 ## Household-arm packets
 
-Arm packets use magic `0x41524d31` (`"ARM1"`) and schema 2. The common output
+Arm packets use magic `0x41524d31` (`"ARM1"`) and schema 3. The common output
 prefix is `magic, schema, status, kind, total_words`. Kinds are configuration 0,
 admission 1, evaluation 2, trace 3, and population 4.
 
-Configuration is:
+Configuration is variable length: twelve fixed words followed by seven words
+per caller-declared keep-out box.
 
-`magic, schema, kind=0, total_words=8, step_s, duration_s, trace_stride, task`.
+`magic, schema, kind=0, total_words=12+7n, step_s, duration_s, trace_stride,
+task, object_mass_kg, static_mu, kinetic_mu, obstacle_count=n`, then `n`
+groups of `center_xyz_m, half_extents_xyz_m, yaw_rad`.
 
-Task IDs are 0 kitchen mug, 1 living-room remote, and 2 backyard trowel. The
-browser experiment admits step sizes from 1/240 through 1/45 s, durations from
-3 through 6 s, and at most 1,000 steps between retained trace samples.
+`total_words` is self-describing and must equal the packet length; a
+disagreement is a malformed packet, not a clamp. Task IDs are 0 kitchen mug,
+1 living-room remote, and 2 backyard trowel. The browser experiment admits
+step sizes from 1/240 through 1/45 s, durations from 3 through 6 s, and at
+most 1,000 steps between retained trace samples.
+
+`object_mass_kg`, `static_mu`, and `kinetic_mu` are overrides: **zero selects
+the owner's preset value**, so a schema-3 packet with all three zero and
+`n=0` reproduces the schema-2 rollout bit for bit. That parity is pinned by
+`schema_three_defaults_reproduce_the_preset_owner_rollout`, which compares the
+packed objective against the same rollout driven through the internal API.
+Non-zero overrides admit mass in `[0.02, 20]` kg and each coefficient in
+`(0.05, 2.5]`, with kinetic never exceeding static; the interface provenance
+string gains a `--caller-friction` suffix whenever either coefficient is
+caller-declared, so an overridden interface can never be read back as the
+owner's declared dry-pad default.
+
+Declared keep-out boxes are yawed about the world +Z axis, capped at 32, with
+centres within 10 m of the origin and half extents in `(0.001, 5]` m. They are
+**hard link-vs-box constraints for all seven moving link segments**, exactly
+like the preset box. The manipulated object is deliberately not scored against
+them: it begins and ends resting on caller-declared support geometry, so an
+object-vs-box test would refuse every rollout. Any envelope violation is a
+refusal (`InvalidConfig`), never a silent clamp.
 
 Admission appends:
 
@@ -399,11 +423,15 @@ pose_words=7, trace_sample_words=67, step_s, duration_s, trace_stride, task,
 minimum_gripper_width_m, open_gripper_width_m, placement_tolerance_m,
 lift_target_m, object_mass_kg, object_dimensions_xyz_m, grasp_half_width_m,
 initial_object_xyz_m, goal_object_xyz_m, support_height_m,
-obstacle_center_xyz_m, obstacle_half_extents_xyz_m`.
+obstacle_center_xyz_m, obstacle_half_extents_xyz_m, static_friction_mu,
+kinetic_friction_mu, declared_obstacle_count`.
 
-This self-describing packet is the renderer's source of truth. The object
-dimensions and mass are declared benchmark estimates; robot link dimensions,
-poses, inertias, and limits remain source-bound in `fs-mbd`.
+This self-describing 40-word packet is the renderer's source of truth.
+`object_mass_kg` and the two coefficients report the values the rollout
+**actually ran with**, preset or overridden, so the renderer never has to
+guess which interface produced a receipt. The object dimensions and mass are
+declared benchmark estimates; robot link dimensions, poses, inertias, and
+limits remain source-bound in `fs-mbd`.
 
 Evaluation appends:
 
