@@ -60,9 +60,9 @@ pub mod bc;
 pub mod duty;
 pub mod field;
 pub mod fixtures;
-pub mod interface;
 /// Declared Joule-input to gray-body-radiation balance for incandescent filaments.
 pub mod incandescent;
+pub mod interface;
 /// The lumped-network reduced transient rung: the cheap fidelity tier, gated
 /// on the Biot number that decides whether lumping is admissible at all.
 pub mod lumped;
@@ -70,6 +70,9 @@ pub mod material;
 pub mod mesh;
 pub mod power;
 pub mod radiation;
+/// Reduced one-dimensional slab cooling screen with an explicit fixed-boundary
+/// and first-mode applicability boundary.
+pub mod reduced_slab;
 pub mod solve;
 /// Transient conduction by the method of lines: declared volumetric heat
 /// capacity, the exact P1 capacitance matrix, and theta-method stepping.
@@ -105,6 +108,9 @@ pub use radiation::{
     GrayDiffuseEnclosure, LinearizedRadiationPoint, LinearizedSurfaceRadiation, RadiationSurface,
     RadiosityReport, STEFAN_BOLTZMANN_W_M2_K4, SURFACE_EMISSIVITY_PROPERTY, SurfaceEmissivity,
     ViewFactorEvidence, ViewFactorMatrix, ViewFactorTolerance, solve_with_gray_diffuse_enclosure,
+};
+pub use reduced_slab::{
+    FirstModeSlabError, FirstModeSlabInput, FirstModeSlabStep, step_first_mode_slab_cooling,
 };
 pub use solve::{
     ConductionProblem, ConductionReport, ConductionSolution, ConductionSolver, ConductionState,

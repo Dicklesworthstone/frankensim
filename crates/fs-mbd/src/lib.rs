@@ -29,6 +29,7 @@ pub mod planar_drive;
 pub mod robot_models;
 pub mod roomba;
 pub mod salisbury;
+pub mod tri_wheel_cluster;
 pub mod versatran;
 
 use core::fmt;
