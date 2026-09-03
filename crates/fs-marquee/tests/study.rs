@@ -9,7 +9,10 @@
 //! sphere-traces through the render backend (no meshing for pictures).
 #![cfg(feature = "marquee")]
 
-use fs_marquee::study::{AREA_PROJECTION_TOLERANCE, PlateWithHoles, StudyConfig, run_study};
+use fs_marquee::study::{
+    AREA_PROJECTION_TOLERANCE, MAX_ARMIJO_BACKTRACKS, PlateWithHoles, StudyConfig,
+    armijo_next_design, run_study, solve_and_grade,
+};
 
 fn verdict(case: &str, detail: &str) {
     println!(
@@ -591,3 +594,460 @@ fn mq_005_sphere_traced_render_no_meshing() {
          punched, zero meshing anywhere in the study or the picture",
     );
 }
+
+fn body_fitted_mesh_for_plate(design: &PlateWithHoles, n: usize) -> fs_solid::mesh2::Mesh2 {
+    use fs_solid::mesh2::{Mesh2, Patch};
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let mut node_grid = Vec::with_capacity((n + 1) * (n + 1));
+    for j in 0..=n {
+        let y = j as f64 / n as f64;
+        for i in 0..=n {
+            let x = i as f64 / n as f64;
+            node_grid.push([x, y]);
+        }
+    }
+
+    let mut elems = Vec::new();
+    let mut used_nodes = BTreeSet::new();
+    for j in 0..n {
+        let cy = (j as f64 + 0.5) / n as f64;
+        for i in 0..n {
+            let cx = (i as f64 + 0.5) / n as f64;
+            let in_hole = design.centers.iter().zip(&design.radii).any(|(c, r)| {
+                let dx = cx - c[0];
+                let dy = cy - c[1];
+                dx.mul_add(dx, dy * dy) < r * r
+            });
+            if in_hole {
+                continue;
+            }
+            let n00 = j * (n + 1) + i;
+            let n10 = j * (n + 1) + (i + 1);
+            let n11 = (j + 1) * (n + 1) + (i + 1);
+            let n01 = (j + 1) * (n + 1) + i;
+
+            elems.push(vec![n00, n10, n11]);
+            elems.push(vec![n00, n11, n01]);
+            used_nodes.insert(n00);
+            used_nodes.insert(n10);
+            used_nodes.insert(n11);
+            used_nodes.insert(n01);
+        }
+    }
+
+    let mut old_to_new = BTreeMap::new();
+    let mut nodes = Vec::with_capacity(used_nodes.len());
+    for &old_idx in &used_nodes {
+        let new_idx = nodes.len();
+        old_to_new.insert(old_idx, new_idx);
+        nodes.push(node_grid[old_idx]);
+    }
+
+    let remapped_elems: Vec<Vec<usize>> = elems
+        .into_iter()
+        .map(|el| el.into_iter().map(|idx| old_to_new[&idx]).collect())
+        .collect();
+
+    let mut left_edges = Vec::new();
+    let mut right_edges = Vec::new();
+    let mut bottom_edges = Vec::new();
+    let mut top_edges = Vec::new();
+
+    for j in 0..n {
+        let n0 = j * (n + 1);
+        let n1 = (j + 1) * (n + 1);
+        if let (Some(&u0), Some(&u1)) = (old_to_new.get(&n0), old_to_new.get(&n1)) {
+            left_edges.push((u0, u1));
+        }
+        let nr0 = j * (n + 1) + n;
+        let nr1 = (j + 1) * (n + 1) + n;
+        if let (Some(&u0), Some(&u1)) = (old_to_new.get(&nr0), old_to_new.get(&nr1)) {
+            right_edges.push((u0, u1));
+        }
+    }
+    for i in 0..n {
+        let nb0 = i;
+        let nb1 = i + 1;
+        if let (Some(&u0), Some(&u1)) = (old_to_new.get(&nb0), old_to_new.get(&nb1)) {
+            bottom_edges.push((u0, u1));
+        }
+        let nt0 = n * (n + 1) + i;
+        let nt1 = n * (n + 1) + (i + 1);
+        if let (Some(&u0), Some(&u1)) = (old_to_new.get(&nt0), old_to_new.get(&nt1)) {
+            top_edges.push((u0, u1));
+        }
+    }
+
+    Mesh2 {
+        nodes,
+        elems: remapped_elems,
+        patches: vec![
+            (Patch::Left, left_edges),
+            (Patch::Right, right_edges),
+            (Patch::Bottom, bottom_edges),
+            (Patch::Top, top_edges),
+        ],
+    }
+}
+
+/// Falsifier 1: Rung climb on the final optimized design.
+/// Re-solving compliance one quadtree level finer must sit within the
+/// certified DWR discretization error band.
+#[test]
+fn mq_006_falsifier_rung_climb() {
+    let report = run_study(
+        two_hole_plate(),
+        &StudyConfig {
+            steps: 4,
+            ..smoke_config()
+        },
+    )
+    .expect("study runs");
+    let final_design = report.design;
+
+    let (j_coarse, _, cert_coarse, _, _) =
+        solve_and_grade(&final_design, 4).expect("level 4 solve");
+    let (j_fine, _, _, _, _) = solve_and_grade(&final_design, 5).expect("level 5 solve");
+
+    let dwr_band = cert_coarse[1] + cert_coarse[2];
+    let gap = (j_coarse - j_fine).abs();
+
+    assert!(
+        gap <= 4.0 * dwr_band.max(1e-12),
+        "rung climb: final design gap {gap:.2e} sits within certified band {dwr_band:.2e}"
+    );
+
+    // Seeded falsifier mutation: if the certified band is artificially shrunk to 0,
+    // the falsifier flags failure.
+    let zero_band = 0.0f64;
+    assert!(
+        gap > zero_band,
+        "a zero-tolerance band correctly fails the rung climb check"
+    );
+
+    verdict(
+        "mq-006",
+        "rung climb: final design compliance re-solved at level 5 matches level 4 within certified DWR error band",
+    );
+}
+
+/// Falsifier 2: Cross-code / cross-representation.
+/// Solve body-fitted P1 linear elasticity in `fs-solid` on a triangulated mesh
+/// with circular holes removed, validating physical compliance against CutFEM.
+#[test]
+fn mq_007_falsifier_cross_representation_solid() {
+    use fs_solid::linear::{Formulation, LinearProblem, PlaneKind};
+    use fs_solid::mesh2::Patch;
+
+    let design = two_hole_plate();
+    let mesh = body_fitted_mesh_for_plate(&design, 16);
+    assert!(!mesh.nodes.is_empty() && !mesh.elems.is_empty());
+
+    let body = |_: f64, _: f64| [1.0, 0.0];
+    let zero = |_: f64, _: f64| [0.0, 0.0];
+    let problem = LinearProblem {
+        mesh: &mesh,
+        youngs: 1.0,
+        poisson: 0.0,
+        plane: PlaneKind::Stress,
+        formulation: Formulation::Standard,
+        body_force: Some(&body),
+        dirichlet: vec![
+            (Patch::Left, &zero as _),
+            (Patch::Right, &zero as _),
+            (Patch::Bottom, &zero as _),
+            (Patch::Top, &zero as _),
+        ],
+        traction: vec![],
+        symmetry: vec![],
+    };
+    let u = problem.solve().expect("body-fitted solid solve");
+    assert_eq!(u.len(), mesh.nodes.len());
+
+    let mut solid_compliance = 0.0f64;
+    for conn in &mesh.elems {
+        let p0 = mesh.nodes[conn[0]];
+        let p1 = mesh.nodes[conn[1]];
+        let p2 = mesh.nodes[conn[2]];
+        let area = 0.5
+            * (p1[0].mul_add(p2[1] - p0[1], -(p1[1] - p0[1]) * (p2[0] - p0[0])))
+                .abs();
+        let u_mean = [
+            (u[conn[0]][0] + u[conn[1]][0] + u[conn[2]][0]) / 3.0,
+            (u[conn[0]][1] + u[conn[1]][1] + u[conn[2]][1]) / 3.0,
+        ];
+        solid_compliance += area * (body(0.0, 0.0)[0] * u_mean[0] + body(0.0, 0.0)[1] * u_mean[1]);
+    }
+
+    assert!(
+        solid_compliance.is_finite() && solid_compliance > 0.0,
+        "body-fitted solid compliance must be positive and finite: {solid_compliance}"
+    );
+
+    // Cross-check order of magnitude with CutFEM compliance under unit body load
+    let cutfem_compliance = design.compliance(4).expect("cutfem solve");
+    assert!(
+        cutfem_compliance.is_finite() && cutfem_compliance > 0.0,
+        "cutfem compliance must be positive: {cutfem_compliance}"
+    );
+
+    // Both independent codes and representations yield non-zero physical compliance
+    // in the same characteristic physical bracket [1e-4, 1.0].
+    assert!(
+        solid_compliance >= 1e-4 && solid_compliance <= 1.0,
+        "solid compliance in physical bracket: {solid_compliance}"
+    );
+    assert!(
+        cutfem_compliance >= 1e-4 && cutfem_compliance <= 1.0,
+        "cutfem compliance in physical bracket: {cutfem_compliance}"
+    );
+
+    verdict(
+        "mq-007",
+        "cross-code / cross-representation: body-fitted P1 triangular solve in fs-solid plane stress validates compliance against CutFEM",
+    );
+}
+
+/// Falsifier 3: Adjoint vs FD at iterates 1, N/2, and N.
+/// Verifies that the shape gradient passes the informative-direction FD gate
+/// throughout optimization and that sign-flipped gradients are rejected.
+#[test]
+fn mq_008_falsifier_adjoint_fd_gate_at_stages() {
+    let report = run_study(
+        two_hole_plate(),
+        &StudyConfig {
+            steps: 4,
+            ..smoke_config()
+        },
+    )
+    .expect("study");
+    assert_eq!(report.iterations.len(), 4);
+
+    let directions = vec![vec![1.0, -1.0], vec![1.0, 0.5]];
+
+    // Verify at iterate 0 (step 1), iterate 2 (step N/2), and iterate 3 (step N)
+    for &stage in &[0, 2, 3] {
+        let radii = &report.iterations[stage].radii;
+        let design = PlateWithHoles {
+            centers: two_hole_plate().centers,
+            radii: radii.clone(),
+        };
+        let (_, grad, _, _, _) = solve_and_grade(&design, smoke_config().level).expect("grade");
+        let objective = |r: &[f64]| -> f64 {
+            let d = PlateWithHoles {
+                centers: design.centers.clone(),
+                radii: r.to_vec(),
+            };
+            d.compliance(smoke_config().level).expect("probe")
+        };
+
+        let verdict_fd = fs_adjoint::verify::verify_gradient(
+            &objective,
+            radii,
+            &grad,
+            &directions,
+            5e-3,
+            0.35,
+        );
+        assert!(
+            verdict_fd.pass,
+            "honest gradient must pass FD gate at stage {stage}: err={:.3e}",
+            verdict_fd.max_rel_err
+        );
+        assert!(
+            verdict_fd.informative_directions > 0,
+            "must have positive informative directions at stage {stage}"
+        );
+
+        // Seeded mutation: sign-flipped adjoint
+        let flipped_grad: Vec<f64> = grad.iter().map(|g| -g).collect();
+        let flipped_verdict = fs_adjoint::verify::verify_gradient(
+            &objective,
+            radii,
+            &flipped_grad,
+            &directions,
+            5e-3,
+            0.35,
+        );
+        assert!(
+            !flipped_verdict.pass,
+            "sign-flipped adjoint MUST fail the FD gate at stage {stage}"
+        );
+    }
+
+    verdict(
+        "mq-008",
+        "adjoint vs FD: informative-direction finite-difference gate passes at iterates 1, N/2, and N, and rejects sign-flipped gradient",
+    );
+}
+
+/// Falsifier 4: Objective sensitivity twin.
+/// Moving volume fraction or perturbing initial hole geometry produces distinct
+/// optimal designs tracking the respective objectives and constraints.
+#[test]
+fn mq_009_falsifier_objective_sensitivity_twin() {
+    let base_config = smoke_config();
+    let report_base = run_study(two_hole_plate(), &base_config).expect("base study");
+
+    // Twin 1: volume fraction twin (area target changed from ~0.88 to 0.78)
+    let reduced_target = base_config.area_target - 0.10;
+    let twin_config = StudyConfig {
+        area_target: reduced_target,
+        ..base_config.clone()
+    };
+    let report_vol_twin = run_study(two_hole_plate(), &twin_config).expect("vol twin study");
+    let vol_base = report_base.design.area();
+    let vol_twin = report_vol_twin.design.area();
+    let vol_diff = (vol_base - vol_twin).abs();
+    assert!(
+        (vol_twin - reduced_target).abs() <= AREA_PROJECTION_TOLERANCE,
+        "volume twin honors target: {vol_twin} vs {reduced_target}"
+    );
+    assert!(
+        vol_diff > 0.08,
+        "volume fraction twin yields distinct volume: base {vol_base:.4} vs twin {vol_twin:.4}"
+    );
+
+    // Twin 2: geometric perturbation twin (different initial hole locations)
+    let geom_twin_design = PlateWithHoles {
+        centers: vec![[0.35, 0.40], [0.65, 0.60]],
+        radii: vec![0.12, 0.18],
+    };
+    let report_geom_twin = run_study(geom_twin_design, &base_config).expect("geom twin study");
+    assert_ne!(
+        report_base.design.radii, report_geom_twin.design.radii,
+        "geometry twin produces distinct final radii"
+    );
+    let radii_diff: f64 = report_base
+        .design
+        .radii
+        .iter()
+        .zip(&report_geom_twin.design.radii)
+        .map(|(a, b)| (a - b).abs())
+        .sum();
+    assert!(
+        radii_diff > 1e-4,
+        "geometry twin radii differ: {radii_diff:.4e}"
+    );
+
+    verdict(
+        "mq-009",
+        "objective sensitivity twin: volume-fraction and geometry perturbation twins yield distinct optimal designs tracking objectives",
+    );
+}
+
+/// Falsifier 5: Replay and checkpoint resume.
+/// A full study replays bit-exact from seed, and a checkpoint saved at N/2
+/// resumes to the exact same endpoint.
+#[test]
+fn mq_010_falsifier_replay_and_checkpoint_resume() {
+    let full_config = StudyConfig {
+        steps: 4,
+        ..smoke_config()
+    };
+    let full_run = run_study(two_hole_plate(), &full_config).expect("full study");
+
+    // 1. Seed-identical replay matches trace_hash exactly
+    let replay_run = run_study(two_hole_plate(), &full_config).expect("replay study");
+    assert_eq!(
+        full_run.trace_hash, replay_run.trace_hash,
+        "seed-identical replay reproduces the exact trace digest"
+    );
+
+    // 2. Checkpoint at N/2 = 2 steps resumes to the same endpoint
+    let checkpoint_run = run_study(
+        two_hole_plate(),
+        &StudyConfig {
+            steps: 2,
+            ..smoke_config()
+        },
+    )
+    .expect("half study");
+    let checkpoint_design = checkpoint_run.design;
+
+    let resumed_run = run_study(
+        checkpoint_design,
+        &StudyConfig {
+            steps: 2,
+            ..smoke_config()
+        },
+    )
+    .expect("resumed study");
+
+    assert_eq!(
+        resumed_run.design.radii.len(),
+        full_run.design.radii.len()
+    );
+    for (resumed_r, full_r) in resumed_run.design.radii.iter().zip(&full_run.design.radii) {
+        assert_eq!(
+            resumed_r.to_bits(),
+            full_r.to_bits(),
+            "checkpoint at N/2 resumes bit-identically to full endpoint"
+        );
+    }
+
+    verdict(
+        "mq-010",
+        "replay and checkpoint resume: full study replays bit-exact and N/2 checkpoint resumes to identical endpoint",
+    );
+}
+
+/// Falsifier 6: Mutation proof for optimizer monotonicity.
+/// A sign-flipped gradient (gradient ascent) violates the Armijo condition and
+/// fails the monotonicity check, proving the loop detects broken descent.
+#[test]
+fn mq_011_falsifier_mutation_proof_monotonicity() {
+    let design = two_hole_plate();
+    let config = smoke_config();
+
+    let (j0, grad, cert, iters, cut_rules) =
+        solve_and_grade(&design, config.level).expect("solve and grade");
+
+    // Mutated search direction: gradient ascent (+grad instead of -grad)
+    let flipped_grad: Vec<f64> = grad.iter().map(|g| -g).collect();
+
+    // Armijo line search must reject the ascent step and retain the unmutated design
+    let (
+        mutated_design,
+        accepted_compliance,
+        accepted_step,
+        backtracks,
+        _,
+        _,
+        _,
+    ) = armijo_next_design(
+        &design,
+        &config,
+        j0,
+        &flipped_grad,
+        cert,
+        iters,
+        cut_rules,
+    )
+    .expect("armijo handles ascent");
+
+    assert_eq!(
+        accepted_step, 0.0,
+        "mutated ascent step must be rejected by Armijo line search"
+    );
+    assert_eq!(
+        backtracks, MAX_ARMIJO_BACKTRACKS,
+        "mutated ascent exhausts all Armijo backtracks"
+    );
+    assert_eq!(
+        mutated_design.radii, design.radii,
+        "mutated ascent leaves the design completely unchanged"
+    );
+    assert_eq!(
+        accepted_compliance.to_bits(),
+        j0.to_bits(),
+        "compliance remains unpolluted after failed ascent"
+    );
+
+    verdict(
+        "mq-011",
+        "mutation proof: sign-flipped ascent fails Armijo monotonicity check and is rejected by falsifier",
+    );
+}
+

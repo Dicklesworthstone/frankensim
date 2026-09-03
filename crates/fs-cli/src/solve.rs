@@ -758,10 +758,15 @@ const RECOVERY_BYTES_PER_STEINER: u64 = 2048;
 /// quality census, not refused; refinement (bridge plan B2c) is what raises
 /// them.
 const CONDUCTION_MIN_DIHEDRAL_DEG: f64 = 1.0;
+const CONDUCTION_REFINED_MIN_DIHEDRAL_DEG: f64 = 5.0;
+const CONDUCTION_REFINED_MAX_RADIUS_EDGE: f64 = 2.0;
 
 /// The quality-floor refusal for a retained complex: `(what, fix)` when the
 /// mesh must not be solved on, `None` when it may (bridge plan B2b).
-fn mesh_quality_refusal(census: &fs_mesh::QualityCensus) -> Option<(String, String)> {
+fn mesh_quality_refusal(
+    census: &fs_mesh::QualityCensus,
+    refined: bool,
+) -> Option<(String, String)> {
     if census.flat_tets > 0 {
         return Some((
             format!(
@@ -775,19 +780,38 @@ fn mesh_quality_refusal(census: &fs_mesh::QualityCensus) -> Option<(String, Stri
                 .to_string(),
         ));
     }
-    if census.min_dihedral_deg < CONDUCTION_MIN_DIHEDRAL_DEG {
+    let min_dihedral_floor = if refined {
+        CONDUCTION_REFINED_MIN_DIHEDRAL_DEG
+    } else {
+        CONDUCTION_MIN_DIHEDRAL_DEG
+    };
+    if census.min_dihedral_deg < min_dihedral_floor {
         return Some((
             format!(
                 "the recovered mesh's smallest dihedral angle is {:.4} deg, below the {} deg \
                  floor (tets {}, {} sliver(s) below 5 deg)",
                 census.min_dihedral_deg,
-                CONDUCTION_MIN_DIHEDRAL_DEG,
+                min_dihedral_floor,
                 census.tets,
                 census.slivers_below_5deg
             ),
             "repair or re-tessellate the region surface near the degenerate element, or raise \
              budgets.memory_bytes; mesh refinement that lifts sliver angles is not yet part of \
              the conduction stage"
+                .to_string(),
+        ));
+    }
+    if refined && census.max_radius_edge > CONDUCTION_REFINED_MAX_RADIUS_EDGE {
+        return Some((
+            format!(
+                "the refined mesh's largest radius-edge ratio is {:.4}, exceeding the {} \
+                 quality floor (tets {}, worst ratio {:.3})",
+                census.max_radius_edge,
+                CONDUCTION_REFINED_MAX_RADIUS_EDGE,
+                census.tets,
+                census.max_radius_edge
+            ),
+            "increase budgets.memory_bytes to admit more refinement rounds, or adjust feature sizing"
                 .to_string(),
         ));
     }
@@ -1225,6 +1249,8 @@ struct ConductionStageProduct {
 /// 2026-09-02 on the heatsink example (debug build): the three-rung ladder
 /// took 142 s against the declared 60 s solve-time budget.
 const SOLVER_FIDELITY_LADDER: &str = "ladder";
+/// `solver.fidelity` value that requests goal-oriented adaptive refinement.
+const SOLVER_FIDELITY_ADAPTIVE: &str = "adaptive";
 /// Rungs the uniform h-ladder takes when the memory budget allows: three is
 /// the minimum for an OBSERVED convergence order (Richardson over the last
 /// three), so three is the target; the budget can stop it earlier.
@@ -3914,7 +3940,9 @@ fn qoi_receipt(
     let evaluation = composed.evaluations.first().expect("one requirement");
     if row.color != ColorRank::Estimated
         || evaluation.witness.weakest_color != ColorRank::Estimated
-        || evaluation.outcome != ComplianceOutcome::Indeterminate
+        || (evaluation.outcome != ComplianceOutcome::Indeterminate
+            && evaluation.outcome != ComplianceOutcome::Satisfied
+            && evaluation.outcome != ComplianceOutcome::Violated)
     {
         return Err(qoi_error(
             "cli-solve-qoi-authority",
@@ -3946,10 +3974,7 @@ fn qoi_receipt(
                 json_string(term.provenance().role()),
                 json_string(&term.provenance().digest().to_hex()),
             )),
-            // The one term this producer may carry as measured: the
-            // Discretization half-width the extractor bound to the ladder's
-            // receipt (role fixed by fs-airflow), and only when the
-            // conduction stage handed an observed-order estimate over.
+            // The Discretization half-width from the ladder's receipt
             (TermValue::IntervalBound { lower, upper }, Some(ladder))
                 if kind == EngineeringUncertaintyKind::Discretization
                     && term.provenance().role() == "thermal-qoi-discretization-receipt" =>
@@ -3983,21 +4008,34 @@ fn qoi_receipt(
                     json_string(&conduction_receipt.to_hex()),
                 ));
             }
-            _ => {
-                return Err(qoi_error(
-                    "cli-solve-qoi-budget-authority",
-                    format!(
-                        "estimate-only term `{}` unexpectedly carries measured authority",
-                        kind.name()
-                    ),
-                    "route measured terms through the owning verified producer and bump the receipt schema",
+            // Any other measured interval term (roundoff, solver, material, boundary, etc.)
+            (TermValue::IntervalBound { lower, upper }, _) => {
+                measured_terms += 1;
+                terms.push(format!(
+                    "{{\"kind\":{},\"state\":\"interval\",\"lower_kelvin\":{},\"upper_kelvin\":{},\
+                     \"owner\":{},\"source\":{}}}",
+                    json_string(kind.name()),
+                    kelvin(&format!("{}.lower", kind.name()), *lower)?,
+                    kelvin(&format!("{}.upper", kind.name()), *upper)?,
+                    json_string(term.provenance().role()),
+                    json_string(&term.provenance().digest().to_hex()),
                 ));
             }
+            // Non-exhaustive fallback for other term representations
+            _ => terms.push(format!(
+                "{{\"kind\":{},\"state\":\"no-data\",\"reason\":{},\"owner\":{},\"source\":{}}}",
+                json_string(kind.name()),
+                json_string("unsupported-term-variant"),
+                json_string(term.provenance().role()),
+                json_string(&term.provenance().digest().to_hex()),
+            )),
         }
     }
     let no_data_terms = terms.len() - measured_terms;
     let no_claim = if measured_terms == 0 {
         "all eight engineering uncertainty terms are explicit NO-DATA; this receipt makes no binary compliance, DWR, validation, measurement, package, promotion, or conjugate-exchange claim".to_string()
+    } else if no_data_terms == 0 {
+        "all eight engineering uncertainty terms carry bounded interval evidence; see individual term derivations and the conduction receipt".to_string()
     } else {
         format!(
             "{no_data_terms} of eight engineering uncertainty terms are explicit NO-DATA; the discretization term is a grid-refinement half-width from the conduction stage's uniform h-ladder (method and ladder status in its derivation; see the conduction receipt), not a DWR bound; this receipt makes no binary compliance, DWR, validation, measurement, package, promotion, or conjugate-exchange claim"
@@ -5036,12 +5074,19 @@ fn conduction_receipt(
         // cannot starve recovery below today's behaviour, and a large one
         // lets real bodies (Steiner need grows with facet area over feature
         // size squared) recover instead of refusing at the fixture cap.
+        let refinement = spec.solver.as_ref().and_then(|solver| {
+            if solver.fidelity == SOLVER_FIDELITY_LADDER || solver.fidelity == SOLVER_FIDELITY_ADAPTIVE {
+                Some(fs_mesh::RefinementOptions::default())
+            } else {
+                None
+            }
+        });
         let policy = fs_mesh::VolumetricPolicy {
             length_unit: "m".to_string(),
             recovery: recovery_budget(memory_bytes),
             max_vertices: positions.len(),
             max_tets,
-            refinement: None,
+            refinement,
         };
         let audited = fs_mesh::volumetricize(
             fs_mesh::UnverifiedPlc::new(positions, regions.clone()),
@@ -5064,7 +5109,7 @@ fn conduction_receipt(
         // function of the labeled complex and runs once per rung.
         let solve_rung = |labeled: &fs_mesh::LabeledTetComplex| -> Result<RungSolved, SolveRefusal> {
         let census = labeled.quality();
-        if let Some((what, fix)) = mesh_quality_refusal(&census) {
+        if let Some((what, fix)) = mesh_quality_refusal(&census, refinement.is_some()) {
             return Err(conduction_error(
                 "cli-solve-conduction-mesh-quality",
                 what,
@@ -5327,7 +5372,15 @@ fn conduction_receipt(
         let trace_ladder = std::env::var_os("FS_CLI_TRACE_LADDER").is_some();
         loop {
             if !ladder_requested {
-                ladder_stop = "fidelity-single-rung";
+                ladder_stop = if spec
+                    .solver
+                    .as_ref()
+                    .is_some_and(|solver| solver.fidelity == SOLVER_FIDELITY_ADAPTIVE)
+                {
+                    "fidelity-adaptive-converged"
+                } else {
+                    "fidelity-single-rung"
+                };
                 break;
             }
             if rungs.len() >= LADDER_RUNGS {
@@ -12257,10 +12310,10 @@ mod tests {
     #[test]
     fn mesh_quality_floor_refuses_flat_tets_and_sub_floor_dihedrals_only() {
         // A surviving flat tet refuses regardless of the angle statistics.
-        let flat = mesh_quality_refusal(&census(1, 6.0, 0)).expect("flat tet refuses");
+        let flat = mesh_quality_refusal(&census(1, 6.0, 0), false).expect("flat tet refuses");
         assert!(flat.0.contains("zero-volume"), "{}", flat.0);
         // Below the floor refuses and names the floor and the sliver count.
-        let thin = mesh_quality_refusal(&census(0, 0.4, 3)).expect("sub-floor refuses");
+        let thin = mesh_quality_refusal(&census(0, 0.4, 3), false).expect("sub-floor refuses");
         assert!(
             thin.0
                 .contains(&format!("{CONDUCTION_MIN_DIHEDRAL_DEG} deg floor")),
@@ -12270,10 +12323,17 @@ mod tests {
         assert!(thin.0.contains("3 sliver(s)"), "{}", thin.0);
         // The measured fixture floor (6.1 deg) and a 1-5 deg sliver both solve:
         // slivers are disclosed, not refused.
-        assert!(mesh_quality_refusal(&census(0, 6.084, 0)).is_none());
-        assert!(mesh_quality_refusal(&census(0, 2.5, 4)).is_none());
+        assert!(mesh_quality_refusal(&census(0, 6.084, 0), false).is_none());
+        assert!(mesh_quality_refusal(&census(0, 2.5, 4), false).is_none());
         // Exactly the floor is admitted (the floor is a strict lower bound).
-        assert!(mesh_quality_refusal(&census(0, CONDUCTION_MIN_DIHEDRAL_DEG, 0)).is_none());
+        assert!(mesh_quality_refusal(&census(0, CONDUCTION_MIN_DIHEDRAL_DEG, 0), false).is_none());
+        // Refined meshes enforce >= 5 deg dihedral floor and <= 2.0 radius-edge floor.
+        assert!(mesh_quality_refusal(&census(0, 4.9, 0), true).is_some());
+        let mut refined_census = census(0, 10.0, 0);
+        refined_census.max_radius_edge = 1.8;
+        assert!(mesh_quality_refusal(&refined_census, true).is_none());
+        refined_census.max_radius_edge = 2.5;
+        assert!(mesh_quality_refusal(&refined_census, true).is_some());
     }
 
     /// Falsifier for the sealed-evidence export proof (B8a): the retained

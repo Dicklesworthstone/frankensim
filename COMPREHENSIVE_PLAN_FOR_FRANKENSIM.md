@@ -636,16 +636,17 @@ Performance claims in design documents are usually vibes. Ours are rooflines wit
 | Stockham FFT 3D, in-cache pencils | mixed | ≥ 40% of memory-bound limit | ≥ 40% |
 | Sphere-traced SDF primary rays | latency-bound | ≥ 80 Mray/s | ≥ 120 Mray/s |
 
-Status 2026-09-01 (owner decision, bead frankensim-rc-root-q61wp.22, option C): the
+Status 2026-09-03 (owner decision, bead frankensim-rc-root-q61wp.22, option C): the
 table above is retained as the stretch target; the P0 exit bar is re-based to the
-measured values recorded in the crate contracts on that date — all-core f64 GEMM
-0.39 of peak on the M4 Pro and 0.32 on the Threadripper (single-core 85–87 %
-exploratory, non-citable); batched small dense 10–29 %; 3-D Stockham FFT 0.22–0.25
-(M4) and 0.17–0.31 (x86) of the memory-bound limit; SpMV x86 row invalidated by a
-STREAM-denominator defect and unmeasured; LBM GLUP/s and the ≤ 200 µs cancel
-latency unclaimed. Bead rc-root-q61wp.28 owns the corrected SpMV and cancel-latency
-measurements and closes the P0 milestone (huq.9) with whichever statement is true;
-kernel work toward the original bars is a gated epic after the marquee journey.
+measured values recorded in the crate contracts — all-core f64 GEMM
+0.39 of peak on the M4 Pro and 0.33 on the Threadripper/EPYC (206.8 GFLOP/s on hz3);
+batched small dense 10–29 %; 3-D Stockham FFT 0.22–0.25 (M4) and 0.17–0.31 (x86) of
+the memory-bound limit; SpMV parallel STREAM denominator defect corrected via NUMA
+placement (commit 24950a6d); cancel-latency measured over 10,000 trials (fs-exec CONTRACT:
+x86-64 request-to-drain p99 = 17.86 µs, max = 96.00 µs; worker-observed p99 = 2.75 µs;
+Apple Silicon request-to-drain p50 = 122.6 µs, p90 = 166.1 µs). Bead rc-root-q61wp.28
+completed; milestone P0 (huq.9) closed. Kernel work toward original bars is a gated
+epic after the marquee journey.
 
 Two honest caveats: the M4's 546 GB/s unified memory makes it a *bandwidth monster per core* (LBM and SpMV love it), while the Threadripper's strength is aggregate compute and cache — so kernel-level winners flip by workload, and the Rep Router's cost models are machine-specific on purpose. And every target is stored in the ledger with the machine fingerprint; a "target" that was never re-measured is a lie waiting to happen.
 
@@ -719,7 +720,7 @@ Geneva exit cannot precede the dry-tribology baseline. **Ratification note:**
 | P5 — Aero stack | 44–56 | BEM+FMM+Kutta, vortex particles, Dirac coupling, SE(3) integrators, Koopman surrogates | Ornithopter flagship v1: screened→refined Pareto with e-raced generations live |
 | P6 — Certificates & self-optimization | 56–68 | SOS/Lasserre SDP, sheaf certificates promoted, conformal e-prediction hardened, §11.4 planner, diff-rendering | [M] features pass §13.2 or ship flagged-off; planner beats hand-allocated budgets on all three flagships |
 
-Status 2026-09-01: P0 open (performance bars unmet, re-baselining under rc-root-q61wp.28); P1 open; P2 open (marquee un-gate in progress, rc-root-q61wp.16); P3–P6 not started. The P4 IGA-shell and P5 FMM-VPM scope items were retired from v1 by owner decision (rc-root-q61wp.25; deferred epics .40 and .43).
+Status 2026-09-03: P0 closed (re-baselined to measured values under rc-root-q61wp.28; huq.9 closed); P1 open; P2 open (marquee un-gated and verified green, rc-root-q61wp.16); P3–P6 not started. The P4 IGA-shell and P5 FMM-VPM scope items were retired from v1 by owner decision (rc-root-q61wp.25; deferred epics .40 and .43).
 
 Phases overlap deliberately (geometry hardens while physics starts); each phase gate is a Gauntlet state, not a date. Nothing [M] gates anything [S].
 

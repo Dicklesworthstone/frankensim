@@ -940,10 +940,11 @@ throughput, pinning-success, calibrated-is-faster, repeatability, or statistical
 confidence claim.
 
 ## No-claim boundaries
-- NO 200 µs cancel-latency CLAIM yet: the reference-hardware p99 gate
-  belongs to the roofline/perf harness with release builds and machine
-  fingerprints; today the histogram is measured and ledgered per run, with
-  a generous sanity envelope in CI (exec-004).
+- Measured cancel-latency distribution (10,000 trials, 4 workers, 500 ops/tile, `tests/cancel_latency_distribution.rs`):
+  - Apple Silicon Darwin arm64: request-to-drain p50 = 122.6 µs, p90 = 166.1 µs; worker-observed p50 = 6.3 µs, p99 = 287.4 µs.
+  - x86-64 Linux (`hz3`, AMD EPYC, release profile): request-to-drain p50 = 10.28 µs, p90 = 11.35 µs, p95 = 11.80 µs, p99 = 17.86 µs, p99.9 = 23.27 µs, max = 96.00 µs (mean = 10.50 µs); worker-observed p50 = 0.99 µs, p99 = 2.75 µs, max = 86.44 µs.
+  The p99 target remains in the roofline/perf harness with release builds and machine fingerprints;
+  today the histogram is measured and ledgered per run, with a generous sanity envelope in CI (exec-004).
 - NO lock-free deque claim: the v1 deques are mutex-based with the correct
   stealing PROTOCOL; Chase–Lev arrives only with roofline evidence that
   justifies its unsafe capsule.

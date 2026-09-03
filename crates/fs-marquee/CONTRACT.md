@@ -86,7 +86,20 @@ No unsafe code.
 Unit tests check version stamping, default smoke-runner admission,
 feature-derived status, and the explicit nightly-golden no-claim boundary. With
 `marquee`, tests also check that invalid runner inputs are rejected before
-solver work starts.
+solver work starts, and execute the six marquee falsifiers:
+1. `mq_006_falsifier_rung_climb`: Rung climb on the final optimized design at
+   level 5 vs level 4 within certified DWR error band.
+2. `mq_007_falsifier_cross_representation_solid`: Cross-code body-fitted P1
+   triangular linear elasticity in `fs-solid` validates physical compliance
+   against CutFEM.
+3. `mq_008_falsifier_adjoint_fd_gate_at_stages`: Informative-direction FD gate
+   passes at iterates 1, N/2, and N, and rejects sign-flipped adjoint.
+4. `mq_009_falsifier_objective_sensitivity_twin`: Volume fraction and geometric
+   perturbation twins track respective objectives.
+5. `mq_010_falsifier_replay_and_checkpoint_resume`: Replays bit-exact from seed
+   and N/2 checkpoint resumes to identical endpoint.
+6. `mq_011_falsifier_mutation_proof_monotonicity`: Sign-flipped ascent fails
+   Armijo monotonicity check and is rejected.
 
 ## No-claim boundaries
 

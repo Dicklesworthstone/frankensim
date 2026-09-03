@@ -29,6 +29,12 @@ const FACET: [[usize; 3]; 4] = [[1, 3, 2], [0, 2, 3], [0, 3, 1], [0, 1, 2]];
 /// stage's mesh-quality floor: a tet this thin pins its nodes like a flat one.
 const REPAIR_SLIVER_DIHEDRAL_DEG: f64 = 1.0;
 
+/// Flip attempts `repair_flat_tets` spends on dihedral slivers (zero-volume
+/// tets are always attempted). Past this the body's tessellation, not its
+/// triangulation, is the problem: it needs refinement, and the census
+/// discloses what remains.
+const SLIVER_ATTEMPT_CAP: u32 = 128;
+
 /// Stable region identity. Caller-chosen, unique within one PLC.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RegionId(pub u32);
@@ -1081,40 +1087,87 @@ impl LabeledTetComplex {
             return report;
         }
         let mut gave_up: BTreeSet<[u32; 4]> = BTreeSet::new();
-        for _round in 0..32 {
+        // Attempts are bounded by the census, not by a fixed round count: a
+        // hard 32 silently capped the pass at 32 removals however many
+        // candidates there were (MEASURED 2026-09-03 on a 128-segment
+        // tessellated cylinder: 767 found, 17 repaired). A refused attempt
+        // changes nothing, so the face map is rebuilt only after a commit and
+        // a body full of irreparable slivers costs one sweep, not one rebuild
+        // per candidate.
+        let attempt_cap = report.found.saturating_mul(2).saturating_add(64);
+        let mut attempts = 0u32;
+        // Zero-volume tets are FATAL (they pin four nodes to one value) and
+        // few, so every one is attempted. Dihedral slivers are a QUALITY
+        // problem: on a tessellation whose every rim is co-circular they
+        // number in the hundreds, no flip helps (their neighbours are slivers
+        // too), and the body needs refinement — so their attempts are capped
+        // and what remains is disclosed. MEASURED 2026-09-03, 128-segment
+        // cylinder: 529 sliver candidates, 159 removable, 12 s of sweeps for
+        // a mesh whose census (1662 slivers under 5°, radius-edge 1661) the
+        // conduction floor refuses either way.
+        let mut sliver_attempts = 0u32;
+        'sweeps: loop {
             report.rounds += 1;
-            // Walls are re-read per round: dropping a boundary flat tet moves
+            // Walls are re-read per sweep: dropping a boundary flat tet moves
             // two wall faces (see `drop_boundary_flat`).
             let walls: BTreeSet<[u32; 3]> =
                 self.source_faces.iter().map(|(face, _)| *face).collect();
-            // Face → incident tet indices, rebuilt per flip because a flip
-            // changes three tets.
             let mut by_face: BTreeMap<[u32; 3], Vec<usize>> = BTreeMap::new();
             for (index, tet) in self.tets.iter().enumerate() {
                 for face in tet_sorted_faces(*tet) {
                     by_face.entry(face).or_default().push(index);
                 }
             }
-            let Some(flat_index) = self.tets.iter().enumerate().find_map(|(index, tet)| {
-                let mut key = *tet;
+            // Candidates for this sweep, ZERO-VOLUME FIRST (`false < true`):
+            // a fatal tet must not be starved of fresh face maps by the
+            // sliver budget (MEASURED: sharing one queue left 53 zero-volume
+            // tets on the 128-segment cylinder where priority leaves 1).
+            let mut candidates: Vec<(bool, usize)> = (0..self.tets.len())
+                .filter_map(|index| {
+                    let tet = self.tets[index];
+                    let mut key = tet;
+                    key.sort_unstable();
+                    if gave_up.contains(&key) || !is_flat(&self.positions, tet) {
+                        return None;
+                    }
+                    Some((!volume_flat(&self.positions, tet), index))
+                })
+                .collect();
+            candidates.sort_unstable();
+            let mut committed = false;
+            for (is_sliver, flat_index) in candidates {
+                let flat = self.tets[flat_index];
+                let mut key = flat;
                 key.sort_unstable();
-                (is_flat(&self.positions, *tet) && !gave_up.contains(&key)).then_some(index)
-            }) else {
-                break;
-            };
-            let flat = self.tets[flat_index];
-            let mut key = flat;
-            key.sort_unstable();
-            let region = self.region_of_tet[flat_index];
-            let flipped = self.try_remove_flat(flat_index, flat, region, &by_face, &walls, largest);
-            // Dropping removes the tet's volume from the region: exact only
-            // for a zero-volume flat, so a sliver that resists every flip
-            // stays disclosed rather than shaved off.
-            if !flipped
-                && !(volume_flat(&self.positions, flat)
-                    && self.drop_boundary_flat(flat_index, region, &by_face, &walls))
-            {
+                if attempts >= attempt_cap {
+                    break 'sweeps;
+                }
+                if is_sliver {
+                    if sliver_attempts >= SLIVER_ATTEMPT_CAP {
+                        gave_up.insert(key);
+                        continue;
+                    }
+                    sliver_attempts += 1;
+                }
+                let degenerate = !is_sliver;
+                attempts += 1;
+                let region = self.region_of_tet[flat_index];
+                let flipped =
+                    self.try_remove_flat(flat_index, flat, region, &by_face, &walls, largest);
+                // Dropping removes the tet's volume from the region: exact
+                // only for a zero-volume flat, so a sliver that resists every
+                // flip stays disclosed rather than shaved off.
+                if flipped
+                    || (degenerate && self.drop_boundary_flat(flat_index, region, &by_face, &walls))
+                {
+                    // The mesh changed under `by_face`: re-sweep.
+                    committed = true;
+                    break;
+                }
                 gave_up.insert(key);
+            }
+            if !committed {
+                break;
             }
         }
         if std::env::var_os("FS_MESH_TRACE_REPAIR").is_some() {
@@ -1791,7 +1844,12 @@ pub fn volumetricize(
     // constrained pipeline.
     let trace = std::env::var_os("FS_MESH_TRACE_REPAIR").is_some();
     for round in 1..=PERTURB_ROUNDS {
-        if labeled.flat_repair.unrepaired == 0 {
+        // A finishing step for the last few, not a mesh-quality tool: past a
+        // round's move budget the body is intrinsically sliver-rich and each
+        // rebuild would be a different mesh rather than a repair of this one.
+        if labeled.flat_repair.unrepaired == 0
+            || labeled.flat_repair.unrepaired as usize > PERTURB_MAX_VERTICES
+        {
             break;
         }
         let Some(points) = perturbed_points(&labeled, input_vertices, &unique_segments) else {
@@ -1859,6 +1917,13 @@ const PERTURB_ROUNDS: u32 = 3;
 /// enough to stay between the vertex's chord or facet neighbours.
 const PERTURB_FRACTION: f64 = 0.05;
 
+/// Steiner vertices one perturbation round may move. This is a FINISHING
+/// step for the last few slivers, not a mesh-quality tool: a body whose
+/// tessellation is intrinsically sliver-rich (a cylinder's co-circular rims)
+/// needs refinement, and moving hundreds of vertices at once would make each
+/// rebuild a different mesh rather than a repair of this one.
+const PERTURB_MAX_VERTICES: usize = 32;
+
 /// The complex's positions with every Steiner vertex of a surviving flat or
 /// sliver moved toward that tet's centroid along its own constraint; `None`
 /// when no survivor has a Steiner vertex to move.
@@ -1880,12 +1945,25 @@ fn perturbed_points(
             crate::exude::min_dihedral_deg(&p) < REPAIR_SLIVER_DIHEDRAL_DEG
         }
     };
-    // Vertex → (target direction, step), first survivor wins (deterministic:
-    // tets are in canonical order).
+    // Survivors worst-dihedral first, so a body with hundreds of them (a
+    // tessellated cylinder's co-circular rims) still spends its bounded
+    // budget on the worst, and the "strictly fewer survivors" test stays a
+    // meaningful comparison rather than a global shotgun.
+    let mut worst: Vec<(u64, [u32; 4])> = labeled
+        .tets
+        .iter()
+        .filter(|tet| survivor(**tet))
+        .map(|tet| {
+            let p: [[f64; 3]; 4] = core::array::from_fn(|k| positions[tet[k] as usize]);
+            (crate::exude::min_dihedral_deg(&p).to_bits(), *tet)
+        })
+        .collect();
+    worst.sort_unstable();
+    // Vertex → (target direction, step), first survivor wins.
     let mut moves: BTreeMap<u32, ([f64; 3], f64)> = BTreeMap::new();
-    for tet in &labeled.tets {
-        if !survivor(*tet) {
-            continue;
+    for (_, tet) in &worst {
+        if moves.len() >= PERTURB_MAX_VERTICES {
+            break;
         }
         let p: [[f64; 3]; 4] = core::array::from_fn(|k| positions[tet[k] as usize]);
         let centroid = tet_centroid(positions, *tet);

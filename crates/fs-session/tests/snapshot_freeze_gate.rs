@@ -79,10 +79,16 @@ fn gated_fixture(session: u64, scope: &'static str) -> GatedFixture {
         .expect("fixture gated session");
     let ledger = fs_ledger::Ledger::open(":memory:").expect("fixture ledger");
     gate.request();
-    let events = governor
-        .apply_memory_pressure(SessionId(session), 3)
+    // Memory pressure is a declared mutation: mint its action authority
+    // first, then read the pause request out of the receipt's events.
+    let action_id = governor
+        .pressure_action_id(SessionId(session), "freeze-gate-pressure")
+        .expect("pressure action authority");
+    let receipt = governor
+        .apply_memory_pressure(action_id, 3)
         .expect("pause request minted");
-    let request_id = events
+    let request_id = receipt
+        .events()
         .last()
         .and_then(|event| event.pause_request_id)
         .expect("pause request authority");
@@ -167,7 +173,7 @@ fn commit_freeze(
     let tracker = fs_exec::DrainTracker::new(fs_exec::RunId(9), &run_gate);
     drop(tracker.register_worker().expect("fixture freeze worker"));
     let request = registry.begin_freeze().expect("freeze admitted");
-    let cancellation = || false;
+    let mut cancellation = || false;
     let permit = request
         .freeze(
             FixtureState { marker: 7 },

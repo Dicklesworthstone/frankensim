@@ -20,8 +20,11 @@
 //!   twin found three more defects — facet tilings that did not meet along a
 //!   shared segment (a hole the seed flood walked through), a segment
 //!   midpoint the mesh kept beside its own edge, and coplanar face sets that
-//!   were double covers (CONTRACT items 20 and 21). 378 tets, 154 vertices,
-//!   108/108 facets, exact volume, two interior zero-volume tets disclosed.
+//!   were double covers (CONTRACT items 20 and 21). 379 tets, 154 vertices,
+//!   108/108 facets, exact volume, no flat tet after items 22-23;
+//! * a vented enclosure (box shell, interior void reaching the outside
+//!   through a slot, thin walls): 188 facets, 1137 tets, 368 vertices,
+//!   exact volume, smallest dihedral 2.0°.
 
 use asupersync::types::Budget;
 use fs_exec::{CancelGate, Cx, ExecMode, StreamKey};
@@ -299,6 +302,132 @@ fn plate_with_hole() -> (Vec<[f64; 3]>, Vec<[u32; 3]>, f64, [f64; 3]) {
     (b.verts, b.tris, volume, [0.010, 0.010, 0.0025])
 }
 
+/// A closed box shell of wall thickness `t` with one full-height slot vent
+/// through the `x = bx` wall: the solid is the shell, and its interior void
+/// reaches the outside through the vent, so nothing is a sealed cavity and
+/// every wall is a thin feature. Returns points, triangles, the exact
+/// analytic volume and a seed inside the `x = 0` wall.
+fn vented_enclosure() -> (Vec<[f64; 3]>, Vec<[u32; 3]>, f64, [f64; 3]) {
+    let (bx, by, bz, t) = (0.060f64, 0.040f64, 0.030f64, 0.005f64);
+    let vent = (0.014f64, 0.026f64, t, bz - t);
+    // Breakpoints shared by EVERY face of both boxes: a face that carries a
+    // vent edge subdivides its neighbours' shared edges too, or the shell has
+    // T-junctions and is not a closed manifold.
+    let sorted = |mut v: Vec<f64>| {
+        v.sort_by(f64::total_cmp);
+        v.dedup();
+        v
+    };
+    let xs = sorted(vec![0.0, t, bx - t, bx]);
+    let ys = sorted(vec![0.0, t, vent.0, vent.1, by - t, by]);
+    let zs = sorted(vec![0.0, t, vent.2, vent.3, bz - t, bz]);
+    let clip = |v: &[f64], lo: f64, hi: f64| -> Vec<f64> {
+        v.iter()
+            .copied()
+            .filter(|x| *x >= lo - 1e-12 && *x <= hi + 1e-12)
+            .collect()
+    };
+    let mut b = Builder::new();
+    let grid_face = |b: &mut Builder,
+                         axis: usize,
+                         fixed: f64,
+                         outward: [f64; 3],
+                         us: &[f64],
+                         vs: &[f64],
+                         skip_vent: bool| {
+        for wu in us.windows(2) {
+            for wv in vs.windows(2) {
+                if skip_vent
+                    && wu[0] >= vent.0 - 1e-12
+                    && wu[1] <= vent.1 + 1e-12
+                    && wv[0] >= vent.2 - 1e-12
+                    && wv[1] <= vent.3 + 1e-12
+                {
+                    continue;
+                }
+                let at = |u: f64, v: f64| match axis {
+                    0 => [fixed, u, v],
+                    1 => [u, fixed, v],
+                    _ => [u, v, fixed],
+                };
+                b.quad(
+                    [
+                        at(wu[0], wv[0]),
+                        at(wu[1], wv[0]),
+                        at(wu[1], wv[1]),
+                        at(wu[0], wv[1]),
+                    ],
+                    outward,
+                );
+            }
+        }
+    };
+    grid_face(&mut b, 0, 0.0, [-1.0, 0.0, 0.0], &ys, &zs, false);
+    grid_face(&mut b, 0, bx, [1.0, 0.0, 0.0], &ys, &zs, true);
+    grid_face(&mut b, 1, 0.0, [0.0, -1.0, 0.0], &xs, &zs, false);
+    grid_face(&mut b, 1, by, [0.0, 1.0, 0.0], &xs, &zs, false);
+    grid_face(&mut b, 2, 0.0, [0.0, 0.0, -1.0], &xs, &ys, false);
+    grid_face(&mut b, 2, bz, [0.0, 0.0, 1.0], &xs, &ys, false);
+    let (xi, yi, zi) = (
+        clip(&xs, t, bx - t),
+        clip(&ys, t, by - t),
+        clip(&zs, t, bz - t),
+    );
+    // Outward from the SOLID points INTO the void.
+    grid_face(&mut b, 0, t, [1.0, 0.0, 0.0], &yi, &zi, false);
+    grid_face(&mut b, 0, bx - t, [-1.0, 0.0, 0.0], &yi, &zi, true);
+    grid_face(&mut b, 1, t, [0.0, 1.0, 0.0], &xi, &zi, false);
+    grid_face(&mut b, 1, by - t, [0.0, -1.0, 0.0], &xi, &zi, false);
+    grid_face(&mut b, 2, t, [0.0, 0.0, 1.0], &xi, &yi, false);
+    grid_face(&mut b, 2, bz - t, [0.0, 0.0, -1.0], &xi, &yi, false);
+    // The vent tube's four walls, from x = bx - t to x = bx.
+    let (vy0, vy1, vz0, vz1) = vent;
+    b.quad(
+        [
+            [bx - t, vy0, vz0],
+            [bx, vy0, vz0],
+            [bx, vy0, vz1],
+            [bx - t, vy0, vz1],
+        ],
+        [0.0, 1.0, 0.0],
+    );
+    b.quad(
+        [
+            [bx - t, vy1, vz0],
+            [bx, vy1, vz0],
+            [bx, vy1, vz1],
+            [bx - t, vy1, vz1],
+        ],
+        [0.0, -1.0, 0.0],
+    );
+    b.quad(
+        [
+            [bx - t, vy0, vz0],
+            [bx, vy0, vz0],
+            [bx, vy1, vz0],
+            [bx - t, vy1, vz0],
+        ],
+        [0.0, 0.0, 1.0],
+    );
+    b.quad(
+        [
+            [bx - t, vy0, vz1],
+            [bx, vy0, vz1],
+            [bx, vy1, vz1],
+            [bx - t, vy1, vz1],
+        ],
+        [0.0, 0.0, -1.0],
+    );
+    let void = (bx - 2.0 * t) * (by - 2.0 * t) * (bz - 2.0 * t);
+    let tube = (vy1 - vy0) * (vz1 - vz0) * t;
+    (
+        b.verts,
+        b.tris,
+        bx * by * bz - void - tube,
+        [t / 2.0, by / 2.0, bz / 2.0],
+    )
+}
+
 fn solve_body(
     verts: Vec<[f64; 3]>,
     tris: Vec<[u32; 3]>,
@@ -452,6 +581,46 @@ fn read_ascii_stl(path: &std::path::Path) -> (Vec<[f64; 3]>, Vec<[u32; 3]>) {
         }
     }
     (b.verts, b.tris)
+}
+
+/// A vented enclosure: a box shell whose interior void reaches the outside
+/// through a slot, so the flood must keep the void OUTSIDE the solid without
+/// any of it being a sealed cavity, and every wall is a thin feature between
+/// two constraint surfaces. MEASURED 2026-09-03: 188 facets recovered with a
+/// single Steiner point, 1137 tets, 368 vertices, EXACT volume, no flat tet,
+/// smallest dihedral 2.0°.
+#[test]
+fn a_vented_enclosure_volumetricizes_with_the_exact_volume() {
+    let (verts, tris, expected, seed) = vented_enclosure();
+    assert_eq!(tris.len(), 188, "the tracked coarse shell");
+    let audited = solve_body(verts, tris, seed).expect("the vented enclosure volumetricizes");
+    let volume = region_volume(&audited);
+    assert!(
+        ((volume - expected) / expected).abs() < 1e-9,
+        "volume {volume} vs analytic {expected}"
+    );
+    let facets = audited.labeled().recovery().facets;
+    assert_eq!(facets.recovered, 188, "{}", facets.to_json());
+    let census = audited.labeled().quality();
+    assert_eq!(
+        (census.tets, census.vertices, census.flat_tets),
+        (1137, 368, 0),
+        "{}",
+        census.to_json()
+    );
+    assert!(
+        census.min_dihedral_deg > 1.0,
+        "above the conduction floor: {}",
+        census.to_json()
+    );
+    eprintln!(
+        "vented enclosure: tets {} vertices {} min_dihedral {:.3} max_radius_edge {:.3}; recovery {}",
+        census.tets,
+        census.vertices,
+        census.min_dihedral_deg,
+        census.max_radius_edge,
+        facets.to_json()
+    );
 }
 
 /// The tracked heatsink shell (generated by `examples/heatsink-fan/

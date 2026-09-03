@@ -6,10 +6,10 @@
     "profile": "full",
     "through": "report",
     "project": "data/reference-project/cooling-reference.fsim",
-    "executed_at": "2026-09-02T03:30:47Z",
-    "host_fingerprint": "Linux 7.0.0-30-generic x86_64, 8 cpus",
-    "binary_md5_16": "ff5c9181283a25cc",
-    "head_sha": "503205c8e0dc96ce7b12791a768b3f244fe13e46"
+    "executed_at": "2026-09-03T19:54:12Z",
+    "host_fingerprint": "Darwin 25.2.0 arm64, 14 cpus",
+    "binary_md5_16": "27ba60afc1e960a9",
+    "head_sha": "51acb4b0ce10ea5145237643593b68fde23e8744"
   },
   "stages": [
     {"stage": "import-verify", "capability": null, "status": "executed"},
@@ -24,7 +24,7 @@
   "schema": "frankensim.ci.solve-e2e-summary.v1",
   "profile": "full",
   "through": "report",
-  "checks": 65,
+  "checks": 66,
   "failures": 0,
   "stages_executing": 7,
   "stages_total": 7,

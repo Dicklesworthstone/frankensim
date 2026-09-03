@@ -427,6 +427,29 @@ half-edge round-trips, closed-manifold audits).
     `FS_MESH_TRACE_REPAIR` prints each round. Evidence fields for the rounds
     are deferred to the next conduction-receipt schema bump; the census
     (`flat_tets`, `min_dihedral_deg`) already discloses the outcome.
+24. What the repair is, and is not, budgeted for. `repair_flat_tets` sweeps
+    candidates with one face map per sweep and rebuilds it only after a
+    commit, because a refused attempt changes nothing: the previous fixed
+    32-round loop silently stopped after 32 removals however many candidates
+    there were (MEASURED 2026-09-03 on a 128-segment tessellated cylinder:
+    767 found, 17 removed, 5 s). Within a sweep ZERO-VOLUME tets are tried
+    first and without a budget — they are fatal and few — while dihedral
+    slivers share a cap of `SLIVER_ATTEMPT_CAP` flip attempts, and the
+    perturbation of item 23 is skipped entirely once more than
+    `PERTURB_MAX_VERTICES` tets survive. NO CLAIM is made that this produces
+    a usable mesh on a body whose tessellation is intrinsically sliver-rich:
+    every rim of a tessellated cylinder is a set of co-circular points, its
+    Delaunay is slivers almost everywhere, and no flip helps because the
+    neighbours are slivers too. MEASURED on that cylinder at 1280 facets:
+    recovery is free (all 1280 facets recovered, ZERO Steiner points — the
+    Delaunay already contains the surface), 1.3 s total, and the census
+    discloses 1373 tets under 5° and a radius-edge ratio of 1642, which the
+    conduction stage's quality floor refuses. Such a body needs REFINEMENT
+    (`VolumetricPolicy::refinement`, item 17), not repair. Corpus: a vented
+    enclosure — a box shell whose interior void reaches the outside through a
+    slot, so no part of the void is a sealed cavity and every wall is a thin
+    feature — recovers all 188 facets with one Steiner point, 1137 tets,
+    exact volume, smallest dihedral 2.0°.
 
 ## Error model
 
