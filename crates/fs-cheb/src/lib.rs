@@ -154,7 +154,9 @@ mod cheb1_bitwise_equality_tests {
 
     #[test]
     fn one_ulp_normal_domain_rounds_affine_images_once() {
-        let a = 1.0;
+        // Annotated: method resolution on `next_up` happens before the
+        // later `affine_from_reference` call can infer the literal's type.
+        let a: f64 = 1.0;
         let b = a.next_up();
 
         assert_eq!(affine_from_reference(-0.5, a, b).to_bits(), a.to_bits());
@@ -191,7 +193,7 @@ mod cheb1_bitwise_equality_tests {
         let cross_zero_b = 0.0;
         assert_eq!(
             affine_from_reference(0.0, cross_zero_a, cross_zero_b).to_bits(),
-            (-0.0).to_bits()
+            (-0.0f64).to_bits()
         );
 
         let signed_zero_a = -0.0;
