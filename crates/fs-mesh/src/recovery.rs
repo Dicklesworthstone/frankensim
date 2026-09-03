@@ -38,7 +38,7 @@
 use crate::delaunay::{GHOST, MeshError, Tetrahedralization};
 use fs_exec::Cx;
 use fs_ivl::{Sign, orient2d};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Recovery policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -191,7 +191,7 @@ pub fn recover_segments(
         // from the start: a sub-edge that skipped one could never be a mesh
         // edge, and bisection would only mint midpoints beside it until the
         // depth cap. A fresh PLC has none, so its chain is unchanged.
-        for v in chain_on_chord(&tetra.mesh.points, a, b) {
+        for v in chain_on_chord(&tetra.mesh.points, None, a, b) {
             if v != a
                 && v != b
                 && let Some(t) = parameter_on_segment(tetra.mesh.points[v as usize], oa, ob)
@@ -1502,11 +1502,11 @@ pub fn recover_facets_with_points(
     /// byte-identical), else any coplanar tiling.
     fn satisfied(
         points: &[[f64; 3]],
-        faces: &FaceApexes,
+        index: &MeshIndex,
         loop_verts: &[u32],
         work: &FacetWork,
     ) -> Option<Vec<[u32; 3]>> {
-        let required = required_boundary(points, loop_verts);
+        let required = required_boundary(points, Some(index), loop_verts);
         let own: Vec<[u32; 3]> = work
             .tris
             .iter()
@@ -1521,11 +1521,12 @@ pub fn recover_facets_with_points(
         // shared edge that the mesh kept beside the edge (see
         // `chain_on_chord`), and a tiling that skips it is not closed
         // against the neighbour's.
-        if own.iter().all(|k| faces.contains_key(k)) && free_edges(&own).as_ref() == Some(&required)
+        if own.iter().all(|k| index.faces.contains_key(k))
+            && free_edges(&own).as_ref() == Some(&required)
         {
             return Some(own);
         }
-        coplanar_tiling(points, faces, loop_verts, &work.interior, &required, false)
+        coplanar_tiling(points, index, loop_verts, &work.interior, &required, false)
     }
 
     let mut work: Vec<Option<FacetWork>> = Vec::with_capacity(facets.len());
@@ -1634,13 +1635,13 @@ pub fn recover_facets_with_points(
     let mut interior_splits = 0u64;
     'passes: loop {
         cx.checkpoint()?;
-        let mut faces = face_set(tetra);
+        let mut index = MeshIndex::build(tetra);
         let pending: Vec<usize> = work
             .iter()
             .enumerate()
             .filter_map(|(fid, w)| {
                 let w = w.as_ref()?;
-                if w.failed || satisfied(&tetra.mesh.points, &faces, &facets[fid], w).is_some() {
+                if w.failed || satisfied(&tetra.mesh.points, &index, &facets[fid], w).is_some() {
                     None
                 } else {
                     Some(fid)
@@ -1662,7 +1663,7 @@ pub fn recover_facets_with_points(
                         .filter(|t| {
                             let mut k = **t;
                             k.sort_unstable();
-                            !faces.contains_key(&k)
+                            !index.faces.contains_key(&k)
                         })
                         .count();
                     format!(
@@ -1677,10 +1678,10 @@ pub fn recover_facets_with_points(
                             .count(),
                         coplanar_tiling(
                             &tetra.mesh.points,
-                            &faces,
+                            &index,
                             &facets[fid],
                             &w.interior,
-                            &required_boundary(&tetra.mesh.points, &facets[fid]),
+                            &required_boundary(&tetra.mesh.points, Some(&index), &facets[fid]),
                             false
                         )
                         .map_or("none", |_| "found")
@@ -1702,7 +1703,7 @@ pub fn recover_facets_with_points(
                 let w = work[fid].as_ref().expect("pending facet has work");
                 eprintln!(
                     "TRACE recovery explain f{fid}: {}",
-                    explain_tiling(&tetra.mesh.points, &faces, &facets[fid], &w.interior)
+                    explain_tiling(&tetra.mesh.points, &index.faces, &facets[fid], &w.interior)
                 );
             }
         }
@@ -1723,10 +1724,10 @@ pub fn recover_facets_with_points(
                 continue;
             };
             if mesh_dirty {
-                faces = face_set(tetra);
+                index = MeshIndex::build(tetra);
                 mesh_dirty = false;
             }
-            if satisfied(&tetra.mesh.points, &faces, loop_verts, w).is_some() {
+            if satisfied(&tetra.mesh.points, &index, loop_verts, w).is_some() {
                 continue; // a neighbour's round conformed it meanwhile
             }
             if w.rounds >= opts.max_depth {
@@ -1738,7 +1739,7 @@ pub fn recover_facets_with_points(
                         .filter(|t| {
                             let mut k = **t;
                             k.sort_unstable();
-                            !faces.contains_key(&k)
+                            !index.faces.contains_key(&k)
                         })
                         .count();
                     eprintln!(
@@ -1753,10 +1754,10 @@ pub fn recover_facets_with_points(
                             .count(),
                         coplanar_tiling(
                             &tetra.mesh.points,
-                            &faces,
+                            &index,
                             loop_verts,
                             &w.interior,
-                            &required_boundary(&tetra.mesh.points, loop_verts),
+                            &required_boundary(&tetra.mesh.points, Some(&index), loop_verts),
                             false
                         )
                         .map_or("none", |_| "found")
@@ -1786,6 +1787,7 @@ pub fn recover_facets_with_points(
                 .map(|k| {
                     chain_on_chord(
                         &tetra.mesh.points,
+                        Some(&index),
                         loop_verts[k],
                         loop_verts[(k + 1) % loop_verts.len()],
                     )
@@ -1814,7 +1816,7 @@ pub fn recover_facets_with_points(
                 .filter(|(_, t)| {
                     let mut k = **t;
                     k.sort_unstable();
-                    !faces.contains_key(&k) || skips_chain(t)
+                    !index.faces.contains_key(&k) || skips_chain(t)
                 })
                 .map(|(i, _)| i)
                 .collect();
@@ -1937,7 +1939,7 @@ pub fn recover_facets_with_points(
     }
 
     // Verify against the FINISHED mesh and record correspondence.
-    let faces = face_set(tetra);
+    let index = MeshIndex::build(tetra);
     if std::env::var_os("FS_MESH_TRACE_RECOVERY").is_some() {
         let report = tetra.audit(false);
         eprintln!(
@@ -1973,7 +1975,7 @@ pub fn recover_facets_with_points(
         let fid32 = u32::try_from(fid).expect("facet count fits u32");
         let rows = work[fid]
             .as_ref()
-            .and_then(|w| satisfied(&tetra.mesh.points, &faces, loop_verts, w));
+            .and_then(|w| satisfied(&tetra.mesh.points, &index, loop_verts, w));
         match rows {
             Some(rows) => {
                 for k in rows {
@@ -1997,13 +1999,13 @@ pub fn recover_facets_with_points(
                                 .filter(|t| {
                                     let mut k = **t;
                                     k.sort_unstable();
-                                    !faces.contains_key(&k)
+                                    !index.faces.contains_key(&k)
                                 })
                                 .count();
                             (w.rounds, w.tris.len(), missing, w.interior.len())
                         });
                     let explain = work[fid].as_ref().map_or_else(String::new, |w| {
-                        explain_tiling(&tetra.mesh.points, &faces, loop_verts, &w.interior)
+                        explain_tiling(&tetra.mesh.points, &index.faces, loop_verts, &w.interior)
                     });
                     let explain: String = explain.chars().take(700).collect();
                     eprintln!(
@@ -2013,10 +2015,10 @@ pub fn recover_facets_with_points(
                         // The sheet extraction's own account of the failure.
                         let _ = coplanar_tiling(
                             &tetra.mesh.points,
-                            &faces,
+                            &index,
                             loop_verts,
                             &w.interior,
-                            &required_boundary(&tetra.mesh.points, loop_verts),
+                            &required_boundary(&tetra.mesh.points, Some(&index), loop_verts),
                             true,
                         );
                     }
