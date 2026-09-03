@@ -411,6 +411,54 @@ pub struct FacetCorrespondence {
 /// (`coplanar_tiling`).
 type FaceApexes = std::collections::BTreeMap<[u32; 3], [u32; 2]>;
 
+/// The indices a facet-recovery pass reuses for one state of the mesh: the
+/// face map, the faces incident to each vertex, and the vertices sorted by x.
+///
+/// Facet recovery asks the same two questions of every facet — "which faces
+/// lie in this facet's plane" and "which vertices lie on this chord" — and
+/// answering either by walking the whole mesh makes a pass O(facets × mesh).
+/// Both are answered here from the facet's own bounding box: a vertex on a
+/// facet is inside that box by definition, and a face can only tile the facet
+/// if all three of its vertices are.
+struct MeshIndex {
+    faces: FaceApexes,
+    vertex_faces: BTreeMap<u32, Vec<[u32; 3]>>,
+    by_x: Vec<(f64, u32)>,
+}
+
+impl MeshIndex {
+    fn build(tetra: &Tetrahedralization) -> Self {
+        let faces = face_set(tetra);
+        let mut vertex_faces: BTreeMap<u32, Vec<[u32; 3]>> = BTreeMap::new();
+        for face in faces.keys() {
+            for &v in face {
+                vertex_faces.entry(v).or_default().push(*face);
+            }
+        }
+        let mut by_x: Vec<(f64, u32)> = tetra
+            .mesh
+            .points
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (p[0], u32::try_from(i).expect("point count fits u32")))
+            .collect();
+        by_x.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+        MeshIndex {
+            faces,
+            vertex_faces,
+            by_x,
+        }
+    }
+
+    /// The vertices whose x coordinate lies in `[lo, hi]`, in index order
+    /// within equal coordinates (deterministic).
+    fn in_x_range(&self, lo: f64, hi: f64) -> &[(f64, u32)] {
+        let start = self.by_x.partition_point(|(x, _)| *x < lo);
+        let end = self.by_x.partition_point(|(x, _)| *x <= hi);
+        &self.by_x[start..end]
+    }
+}
+
 fn face_set(tetra: &Tetrahedralization) -> FaceApexes {
     let mut faces = FaceApexes::new();
     for tet in tetra.tets() {
@@ -562,7 +610,10 @@ fn on_chord(points: &[[f64; 3]], i: u32, a: u32, b: u32) -> bool {
 /// touches this segment must use as its free edges: a chain that skipped a
 /// vertex would pass a rounding hair from it, and the facet across the
 /// segment, tiled through that vertex, would then not meet this one.
-fn chain_on_chord(points: &[[f64; 3]], a: u32, b: u32) -> Vec<u32> {
+/// `index` restricts the search to the chord's x slab; `None` scans every
+/// point, which is what segment recovery does because it mutates the mesh
+/// between chords and has nothing to index.
+fn chain_on_chord(points: &[[f64; 3]], index: Option<&MeshIndex>, a: u32, b: u32) -> Vec<u32> {
     let (lo, hi) = if a < b { (a, b) } else { (b, a) };
     let (pa, pb) = (points[lo as usize], points[hi as usize]);
     let d = [pb[0] - pa[0], pb[1] - pa[1], pb[2] - pa[2]];
@@ -578,8 +629,8 @@ fn chain_on_chord(points: &[[f64; 3]], a: u32, b: u32) -> Vec<u32> {
         pa[2].max(pb[2]) + pad,
     ];
     let mut on: Vec<(f64, u32)> = vec![(0.0, lo), (1.0, hi)];
-    for (i, p) in points.iter().enumerate() {
-        let i = u32::try_from(i).expect("point count fits u32");
+    let mut consider = |i: u32| {
+        let p = points[i as usize];
         if i == lo
             || i == hi
             || p[0] < min[0]
@@ -589,10 +640,22 @@ fn chain_on_chord(points: &[[f64; 3]], a: u32, b: u32) -> Vec<u32> {
             || p[2] < min[2]
             || p[2] > max[2]
         {
-            continue;
+            return;
         }
-        if let Some(t) = parameter_on_segment(*p, pa, pb) {
+        if let Some(t) = parameter_on_segment(p, pa, pb) {
             on.push((t, i));
+        }
+    };
+    match index {
+        Some(index) => {
+            for &(_, i) in index.in_x_range(min[0], max[0]) {
+                consider(i);
+            }
+        }
+        None => {
+            for i in 0..u32::try_from(points.len()).expect("point count fits u32") {
+                consider(i);
+            }
         }
     }
     on.sort_by(|x, y| x.0.total_cmp(&y.0).then(x.1.cmp(&y.1)));
@@ -601,11 +664,15 @@ fn chain_on_chord(points: &[[f64; 3]], a: u32, b: u32) -> Vec<u32> {
 
 /// The free edges every tiling of the facet must have: the consecutive
 /// pairs of each loop edge's chord chain.
-fn required_boundary(points: &[[f64; 3]], loop_verts: &[u32]) -> BTreeSet<[u32; 2]> {
+fn required_boundary(
+    points: &[[f64; 3]],
+    index: Option<&MeshIndex>,
+    loop_verts: &[u32],
+) -> BTreeSet<[u32; 2]> {
     let n = loop_verts.len();
     let mut required = BTreeSet::new();
     for k in 0..n {
-        let chain = chain_on_chord(points, loop_verts[k], loop_verts[(k + 1) % n]);
+        let chain = chain_on_chord(points, index, loop_verts[k], loop_verts[(k + 1) % n]);
         for w in chain.windows(2) {
             required.insert(sorted2(w[0], w[1]));
         }
@@ -1013,7 +1080,7 @@ fn sheet_on_side(
 
 fn coplanar_tiling(
     points: &[[f64; 3]],
-    faces: &FaceApexes,
+    index: &MeshIndex,
     loop_verts: &[u32],
     interior: &BTreeSet<u32>,
     required: &BTreeSet<[u32; 2]>,
@@ -1063,10 +1130,48 @@ fn coplanar_tiling(
         cache.insert(i, verdict);
         verdict
     };
+    // Candidate faces. Only a face whose three vertices ALL classify onto
+    // this facet can be one of its tiles, and every such vertex lies in the
+    // facet's bounding box, so the facet's vertex set is found in an x slab
+    // and the candidates are gathered from the vertex → faces index. Scanning
+    // the whole face map here made a pass O(facets × faces) — MEASURED
+    // 2026-09-03: on the vented enclosure that is 188 facets against ~4.5k
+    // faces, every pass.
+    let mut lo = corner_points[0];
+    let mut hi = corner_points[0];
+    for p in &corner_points[1..] {
+        for k in 0..3 {
+            lo[k] = lo[k].min(p[k]);
+            hi[k] = hi[k].max(p[k]);
+        }
+    }
+    let pad = 1e-12 * (0..3).map(|k| hi[k] - lo[k]).fold(0.0f64, f64::max);
+    let mut on_facet: BTreeSet<u32> = BTreeSet::new();
+    for &(_, i) in index.in_x_range(lo[0] - pad, hi[0] + pad) {
+        let p = points[i as usize];
+        if p[1] < lo[1] - pad || p[1] > hi[1] + pad || p[2] < lo[2] - pad || p[2] > hi[2] + pad {
+            continue;
+        }
+        if classify(i).is_some() {
+            on_facet.insert(i);
+        }
+    }
+    let mut candidates: BTreeSet<[u32; 3]> = BTreeSet::new();
+    for v in &on_facet {
+        let Some(incident) = index.vertex_faces.get(v) else {
+            continue;
+        };
+        for face in incident {
+            if face.iter().all(|w| on_facet.contains(w)) {
+                candidates.insert(*face);
+            }
+        }
+    }
     let mut tiles: Vec<([u32; 3], [u32; 2])> = Vec::new();
     let mut edge_use: std::collections::BTreeMap<[u32; 2], (u32, u8)> =
         std::collections::BTreeMap::new();
-    for (face, apexes) in faces {
+    for face in &candidates {
+        let apexes = index.faces.get(face).expect("candidate came from the map");
         let (Some(b0), Some(b1), Some(b2)) =
             (classify(face[0]), classify(face[1]), classify(face[2]))
         else {
