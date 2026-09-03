@@ -79,7 +79,11 @@ impl Builder {
         ];
         let dot = n[0] * outward[0] + n[1] * outward[1] + n[2] * outward[2];
         assert!(dot != 0.0, "degenerate quad");
-        let (a, b, c, d) = if dot > 0.0 { (a, b, c, d) } else { (a, d, c, b) };
+        let (a, b, c, d) = if dot > 0.0 {
+            (a, b, c, d)
+        } else {
+            (a, d, c, b)
+        };
         let (ia, ib, ic, id) = (self.vid(a), self.vid(b), self.vid(c), self.vid(d));
         self.tris.push([ia, ib, ic]);
         self.tris.push([ia, ic, id]);
@@ -111,7 +115,12 @@ fn comb(fins: usize) -> (Vec<[f64; 3]>, Vec<[u32; 3]>, f64) {
     for i in 0..xs.len() - 1 {
         let (x0, x1) = (xs[i], xs[i + 1]);
         b.quad(
-            [[x0, 0.0, 0.0], [x1, 0.0, 0.0], [x1, BASE_Y, 0.0], [x0, BASE_Y, 0.0]],
+            [
+                [x0, 0.0, 0.0],
+                [x1, 0.0, 0.0],
+                [x1, BASE_Y, 0.0],
+                [x0, BASE_Y, 0.0],
+            ],
             [0.0, 0.0, -1.0],
         );
         let z_top = if is_fin(i) { top } else { BASE_Z };
@@ -158,7 +167,12 @@ fn comb(fins: usize) -> (Vec<[f64; 3]>, Vec<[u32; 3]>, f64) {
         }
     }
     b.quad(
-        [[0.0, 0.0, 0.0], [0.0, BASE_Y, 0.0], [0.0, BASE_Y, BASE_Z], [0.0, 0.0, BASE_Z]],
+        [
+            [0.0, 0.0, 0.0],
+            [0.0, BASE_Y, 0.0],
+            [0.0, BASE_Y, BASE_Z],
+            [0.0, 0.0, BASE_Z],
+        ],
         [-1.0, 0.0, 0.0],
     );
     b.quad(
@@ -191,6 +205,7 @@ fn policy(vertices: usize) -> VolumetricPolicy {
         recovery: RecoveryOptions::default(),
         max_vertices: vertices,
         max_tets: 4_000_000,
+        refinement: None,
     }
 }
 
@@ -262,12 +277,25 @@ fn comb_prism_facets_are_all_recovered_with_a_bounded_steiner_spend() {
     let loops: Vec<Vec<u32>> = unique.iter().map(|f| vec![f[0], f[1], f[2]]).collect();
     let opts = RecoveryOptions::default();
     with_cx(|cx| {
-        let points: Vec<Point3> = verts.iter().map(|p| Point3::new(p[0], p[1], p[2])).collect();
+        let points: Vec<Point3> = verts
+            .iter()
+            .map(|p| Point3::new(p[0], p[1], p[2]))
+            .collect();
         let mut tetra = delaunay(&points, cx).expect("delaunay");
         let (seg_stats, _) = recover_segments(&mut tetra, &segs, opts, cx).expect("segments");
-        assert_eq!(seg_stats.unrecovered, 0, "segments: {}", seg_stats.to_json());
+        assert_eq!(
+            seg_stats.unrecovered,
+            0,
+            "segments: {}",
+            seg_stats.to_json()
+        );
         let (facet_stats, table) = recover_facets(&mut tetra, &loops, opts, cx).expect("facets");
-        assert_eq!(facet_stats.unrecovered, 0, "facets: {}", facet_stats.to_json());
+        assert_eq!(
+            facet_stats.unrecovered,
+            0,
+            "facets: {}",
+            facet_stats.to_json()
+        );
         assert_eq!(facet_stats.recovered, loops.len() as u64);
         assert!(
             facet_stats.steiner_inserted <= 600,
@@ -288,7 +316,10 @@ fn comb_prism_facets_are_all_recovered_with_a_bounded_steiner_spend() {
         }
         let mut per_facet = vec![0usize; loops.len()];
         for (face, fid) in &table.rows {
-            assert!(faces.contains(face), "recorded row {face:?} is not a mesh face");
+            assert!(
+                faces.contains(face),
+                "recorded row {face:?} is not a mesh face"
+            );
             per_facet[*fid as usize] += 1;
         }
         assert!(per_facet.iter().all(|&n| n > 0), "a facet has no rows");

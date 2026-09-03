@@ -36,6 +36,7 @@ mod recovery;
 mod refine;
 mod remesh;
 mod rounded_cylinder;
+mod uniform;
 mod volumetric;
 
 pub use adaptivity::{
@@ -52,7 +53,7 @@ pub use exude::{ExudeOptions, ExudeStats, exude};
 pub use parallel::{ColoredStats, delaunay_colored, delaunay_colored_reversed};
 pub use recovery::{
     Correspondence, FacetCorrespondence, FacetRecoveryStats, RecoveryOptions, RecoveryStats,
-    recover_facets, recover_segments,
+    recover_facets, recover_facets_with_points, recover_segments,
 };
 pub use refine::{RefineOptions, RefineStats, refine};
 pub use remesh::{MetricField, RemeshOptions, RemeshStats, UniformMetric, remesh};
@@ -62,9 +63,9 @@ pub use rounded_cylinder::{
 };
 pub use volumetric::{
     AdmittedPlc, AuditedLabeledTetComplex, ConstraintRecoveredPlc, FlatTetRepair,
-    LabeledTetComplex, QualityCensus, RecoveryEvidence, RegionId, RegionKind, RegionSpec,
-    UnverifiedPlc, VolumeConservationWitness, VolumeMethod, VolumetricError, VolumetricPolicy,
-    box_triangles, box_vertices, volumetricize,
+    LabeledTetComplex, QualityCensus, RecoveryEvidence, RefinementEvidence, RefinementOptions,
+    RegionId, RegionKind, RegionSpec, UnverifiedPlc, VolumeConservationWitness, VolumeMethod,
+    VolumetricError, VolumetricPolicy, box_triangles, box_vertices, volumetricize,
 };
 
 /// Crate version, re-exported for provenance stamping.

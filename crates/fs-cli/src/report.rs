@@ -39,6 +39,9 @@ pub(crate) struct ReportExport {
     pub(crate) content_hash: String,
     pub(crate) verdict: String,
     pub(crate) stages_completed: usize,
+    /// How the retained run was proven before export; exports never replay
+    /// physics, they re-emit sealed evidence and say so.
+    pub(crate) verification: &'static str,
 }
 
 const REPORT_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-report.v1";
@@ -157,6 +160,7 @@ mod tests {
         let package = EvidencePackage::new(fs_package::Provenance::new("test", "test"));
         let package_json = package.to_json().expect("fixture package serializes");
         let export = CompletedRunExport {
+            verification: "sealed-evidence",
             run: "1".repeat(64),
             project_hash: "2".repeat(64),
             stages: vec![
@@ -363,6 +367,20 @@ pub(crate) fn load_export(
     ledger: Option<&Path>,
     mode: OutputMode,
 ) -> Result<LoadedExport, CommandOutput> {
+    let (opened, dir) = open_export_ledger(command, run_id, ledger, mode)?;
+    load_export_from(command, run_id, &opened, dir, mode)
+}
+
+/// Open the ledger read path for an export verb without locating a run.
+///
+/// Returns the opened ledger and the directory exports are written into.
+/// Refuses (never creates a ledger) when the path is missing.
+pub(crate) fn open_export_ledger(
+    command: &'static str,
+    run_id: &str,
+    ledger: Option<&Path>,
+    mode: OutputMode,
+) -> Result<(Ledger, PathBuf), CommandOutput> {
     let Some(ledger_path) = ledger else {
         return Err(refuse(
             mode,
@@ -417,8 +435,25 @@ pub(crate) fn load_export(
             t_open.elapsed().as_secs_f64()
         );
     }
+    let dir = ledger_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+    Ok((opened, dir))
+}
+
+/// Locate the completed run in an already opened ledger and bind its report
+/// receipt to the loaded artifacts.
+pub(crate) fn load_export_from(
+    command: &'static str,
+    run_id: &str,
+    opened: &Ledger,
+    dir: PathBuf,
+    mode: OutputMode,
+) -> Result<LoadedExport, CommandOutput> {
+    let trace = std::env::var_os("FS_CLI_TRACE_EXPORT").is_some();
     let t_load = std::time::Instant::now();
-    let export = load_completed_run(&opened, run_id)
+    let export = load_completed_run(opened, run_id)
         .map_err(|solve_refusal| refuse_solve(mode, command, run_id, &solve_refusal))?;
     if trace {
         eprintln!(
@@ -448,10 +483,6 @@ pub(crate) fn load_export(
             "regenerate the run; exports never write bytes named by an unbound receipt",
         )
     })?;
-    let dir = ledger_path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
     Ok(LoadedExport {
         export,
         receipt,
@@ -583,6 +614,7 @@ pub(crate) fn export_report(
     Ok(ReportExport {
         html_path,
         json_path,
+        verification: loaded.export.verification,
         content_hash,
         verdict,
         stages_completed: loaded.export.stages.len(),
@@ -614,18 +646,19 @@ pub fn report_path(run_id: &str, ledger_path: Option<&Path>, mode: OutputMode) -
             out.push_str(",\"verdict\":");
             push_json_string(&mut out, &export.verdict);
             out.push_str(&format!(
-                ",\"stages_completed\":{},\"authority\":\"projection-of-retained-receipts\"}}\n",
-                export.stages_completed
+                ",\"stages_completed\":{},\"authority\":\"projection-of-retained-receipts\",\"verification\":\"{}\"}}\n",
+                export.stages_completed, export.verification
             ));
             out
         }
         OutputMode::Text => format!(
-            "status=ok\ncommand=report\nsubject={run}\nrun={run}\nreport_html={}\nreport_json={}\ncontent_hash={}\nverdict={}\nstages_completed={}\nauthority=projection-of-retained-receipts\n",
+            "status=ok\ncommand=report\nsubject={run}\nrun={run}\nreport_html={}\nreport_json={}\ncontent_hash={}\nverdict={}\nstages_completed={}\nauthority=projection-of-retained-receipts\nverification={}\n",
             escape_text(&export.html_path.to_string_lossy()),
             escape_text(&export.json_path.to_string_lossy()),
             export.content_hash,
             escape_text(&export.verdict),
             export.stages_completed,
+            export.verification,
         ),
     };
     CommandOutput {

@@ -127,7 +127,9 @@ ls "${WORK}"
 
 Expected: `<run>.report.html`, `<run>.report.json` and `<run>.fspkg` in
 `${WORK}`; the report JSON carries `"verdict":"indeterminate"` and
-`"authority":"projection-of-retained-receipts"`; the package result carries
+`"authority":"projection-of-retained-receipts"` and
+`"verification":"sealed-evidence"` (exports re-hash the sealed receipts and
+lineage; only `solve --resume` replays the physics); the package result carries
 `"checker":"pass"`. Open the HTML: every number cites the receipt hash it was
 copied from, and the uncertainty table prints NO-DATA where nothing was
 measured. Exporting twice is idempotent; an unknown run refuses without
@@ -139,6 +141,22 @@ cargo run -p fs-cli --bin frankensim -- --json report \
 ```
 
 Expected: exit 4, `cli-solve-unknown-run`.
+
+### 5b. Ask for a convergence study
+
+The default solve meshes the body once and says so: the conduction receipt's
+`ladder` block reads `"stop":"fidelity-single-rung"` and the QoI budget's
+discretization term is `NO-DATA`. Declare `(solver :fidelity "ladder" ...)`
+and the conduction stage solves the audited mesh plus two uniform 1→8
+refinements (while they fit the memory budget), records every rung, and
+reports a grid-refinement half-width that the QoI stage carries as the first
+measured budget term; the report gains a convergence section. Budget the time:
+three rungs cost about seventy base solves (the finned heatsink takes a few
+minutes in a debug build), so raise `:solve-time` accordingly.
+`examples/heatsink-fan/heatsink-fan-ladder.fsim` is that variant of the
+worked example; on it the maximum moves by 0.37 mK and then 0.05 mK across a
+factor four in mesh size, so the estimate is the disclosed `data-range` bound
+(1.1 mK), not an observed-order extrapolation — the receipt says which.
 
 ## 6. One-command run, and the two named refusals
 

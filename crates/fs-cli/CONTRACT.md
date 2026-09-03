@@ -54,17 +54,50 @@ and semantic checks. A successful result reports the canonical project hash,
 schema version, zero findings, and the exact authority class
 `structural-project-admission`.
 
-`report`, `package`, and `compare` are present in the parser but currently
-return the stable `cli-stage-unavailable` refusal naming the producer Bead that
-must land before each verb can execute:
+`report` and `package` execute against a run whose seven stages are all
+sealed (an incomplete run refuses `cli-report-run-incomplete` and names the
+next stage). Before either verb reads a byte of the retained report or
+package, it proves the run by **sealed evidence**: the driver-state chain is
+re-attested exactly as resume does (row identity, driver version, exact
+lineage edges, intact edge seals, recovered card packs reproducing the run
+identity), every retained receipt is re-hashed against the hash the sealed
+driver state recorded, and the conduction operation's retained outputs are
+taken from the sealed operation itself with their kinds checked. Exports never
+replay physics; only `solve --resume` re-executes retained stages, because it
+continues computing from the verified state. The report result discloses this
+as `"verification":"sealed-evidence"` next to
+`"authority":"projection-of-retained-receipts"`. MEASURED 2026-09-02: with the
+replay, `report`/`package` on the heatsink example cost twice the solve
+(3.4 s of a 4.2 s validation was re-solving conduction).
 
-- report: `frankensim-extreal-program-f85xj.6.9`;
-- package: `frankensim-extreal-program-f85xj.6.10`;
-- compare: `frankensim-extreal-program-f85xj.6.14.1`.
-
-This is a deliberate fail-closed integration seam. Reusing the photovoltaic
-skeleton or emitting placeholder artifacts would turn a CLI-shaped mock into
-a product claim.
+`compare <left-run> <right-run> <ledger.db>` diffs two completed runs of the
+same project by their retained receipts and, like the other export verbs,
+never replays physics. Both runs go through the resume loader and the report
+receipt binding above; the rows are read from the retained QoI receipt (values,
+colours, requirement outcomes, the eight budget terms), the material-resolve
+receipt (pack-set root and per-kind card identities), and the seven stage
+receipts. A stage row is `unchanged (same receipt)` when the hashes agree,
+`unchanged (same inputs; differs only by binding keys)` when the two receipts
+differ in no top-level key but `run`, `project_hash`, or `import_op` (which
+run, project, and import op the receipt belongs to, not what the stage
+computed), and `changed` otherwise; the differing keys are listed so the
+reader can see why. A design change (another card pack, limit, fidelity, or
+geometry import) is a different canonical project, so the two project hashes
+are reported side by side with `same_project` and a changed hash is one of the
+rows. The result carries `"authority":"projection-of-retained-receipts"` and a
+no-claim: a changed value is a change between two Estimated candidates, not a
+verified effect. Refusals: no ledger operand (`cli-export-ledger-required`), a
+missing ledger (`cli-export-ledger-missing`), an unknown or incomplete run (the
+solve loader's own codes), two runs with no common requirement to diff
+against because their QoI names or requirement identities differ
+(`cli-compare-project-mismatch`, naming both project hashes), and a receipt
+whose shape cannot be read (`cli-compare-receipt-shape`). Comparing a run with
+itself reports `changed:false` and no row marked changed. MEASURED 2026-09-02:
+the hostile foam twin of the reference project (rebound to a 0.04 W/mK card
+under the same chemistry key) shows exactly one material card change, a hotter
+maximum with a smaller nominal margin, both verdicts `indeterminate`, and five
+of seven stages changed (`import-verify` and `assign` differ only by binding
+keys); a merely renamed project shows the hash change and a bit-identical QoI.
 
 ### Euler cinematic static admission
 
@@ -219,18 +252,63 @@ Projects without that optional declaration refuse with
 (exit 5) is reserved for a stage with no producer at all (none today); such
 refusals name their producer bead and are retained as
 terminal error operations.
-The conduction receipt (schema v5) discloses the mesh's quality census (tets,
-vertices, min dihedral, max radius-edge, sliver and flat-tet counts), the
-flat-tet repair (found / repaired / unrepaired / rounds — fs-mesh removes
-zero-volume tets by edge removal before the audit) and the recovery budgets and
-statistics that produced the mesh (memory budget, Steiner cap and depth,
-segment/facet recovery rows). Radius-edge is disclosed, not enforced:
-refinement is bridge plan B2c. The stage REFUSES (`cli-solve-conduction-mesh-quality`,
-exit 4) when a zero-volume tet survives the repair or the smallest dihedral is
-below 1° (measured: the reference heatsink sits at 6.1° after repair); slivers
-between 1° and 5° solve and are disclosed. The Steiner cap derives from the declared
-memory budget with the fixture default as a floor, so identical inputs at the
-fixture budget mesh identically.
+The conduction receipt (schema v6) discloses the PUBLISHED mesh's quality
+census (tets, vertices, min dihedral, max radius-edge, sliver and flat-tet
+counts), the base mesh's flat-tet repair (found / repaired / unrepaired /
+rounds — fs-mesh removes zero-volume tets by edge removal before the audit) and
+the recovery budgets and statistics that produced it (memory budget, Steiner
+cap and depth, segment/facet recovery rows). Radius-edge is disclosed, not
+enforced: constrained refinement is bridge plan B2c. The stage REFUSES
+(`cli-solve-conduction-mesh-quality`, exit 4) when a zero-volume tet survives
+the repair or the smallest dihedral of any solved rung is below 1° (measured:
+the reference heatsink sits at 7.3° after repair, 6.4° on its second uniform
+rung); slivers between 1° and 5° solve and are disclosed. The Steiner cap
+derives from the declared memory budget with the fixture default as a floor,
+so identical inputs at the fixture budget mesh identically.
+
+**The uniform h-ladder** (receipt block `ladder`, driver version 12). When the
+project declares `solver.fidelity = "ladder"`, the stage solves the audited base
+and then up to two further rungs, each one uniform 1→8 refinement of the
+labeled complex (fs-mesh CONTRACT item 16: walls split in place with their
+parent facet, labels replicated, volume preserved), taken while the next rung
+still fits the declared memory budget (`memory_bytes / 256` tets) and the
+project declares no interface pairs (they bind to base faces: `stop` says so).
+Every other fidelity solves the base once and the block says
+`"stop":"fidelity-single-rung"`. The block carries one row per rung (tets,
+vertices, `h_m = (volume/tets)^(1/3)`, min dihedral, the QoI stage's functional
+`t_max_k` — the nodal maximum over the ThermalLimit region — nonlinear and
+Krylov iterations, final residual) and a `richardson` estimate over the last
+three rungs by the Eça–Hoekstra procedure: `observed-order` (monotone
+differences, observed order in [0.5, 2]: GCI half-width `1.25|f3−f2|/(2^p−1)`
+and the extrapolated value), `data-range` (anything else three rungs can show:
+`3 × (max − min)` of the QoI over the rungs, a bound on the observed variation
+rather than an asymptotic estimate), `converged-exactly`, or `single-rung` /
+`two-rungs` (no estimate). The published field, temperature range, energy
+balance and quality census are the FINEST rung's. Cost is disclosed, not
+hidden: three rungs are about seventy base solves (MEASURED 2026-09-02, debug
+build, heatsink example: 685 → 5,480 → 43,840 tets in 0.5 s, 7.8 s and 130 s;
+T_max 301.99578 → 301.99615 → 301.99610 K, i.e. `data-range`, half-width
+1.1 mK), which is why the ladder is a declared study and not the default. The
+linear solve's true-residual gate is two decades below the declared
+`tolerance-rel` (floor 1e-13); the crate default of 1e-12 refused the second
+rung at 1.37e-12 after 1,256 Krylov iterations.
+
+The QoI receipt (schema v2) carries the ladder's estimate as the
+**Discretization term** — the first measured term of the eight — through
+fs-airflow's discretization-receipt seam: `"state":"interval"` with the
+half-width in kelvin, the term's provenance role
+`thermal-qoi-discretization-receipt`, and a `derivation` naming the method
+(`richardson-gci`, `eca-hoekstra-data-range` or `bitwise-agreement`), the
+ladder status, order, rung count, refinement ratio, safety factor and the
+conduction receipt it was read from. The stage still refuses
+(`cli-solve-qoi-budget-authority`) if any OTHER term, or this term without a
+ladder estimate, carries measured authority; the seven remaining terms are
+explicit NO-DATA and the `no_claim` text counts them. The verdict stays
+Estimated / indeterminate: one measured term does not close a budget. The
+report projects the interval term's magnitude into the uncertainty table and
+the QoI's `discretization_error`, and renders the ladder rows and estimate as
+its convergence section (fs-ladder's vocabulary via fs-report); a single-rung
+run shows no study.
 A run id whose ops exist in the ledger but none of which is admissible under the
 running driver (another driver version, a stage-receipt schema this driver does
 not read, a non-deterministic or off-branch op) refuses with
@@ -262,11 +340,16 @@ ledger content hash and `open_expected` admission prove only bounded codec
 integrity. Public `SolveDriverState`/`CompletedStage` construction and a valid
 legacy envelope grant no resume authority.
 
-Before opening a governor or publishing progress, resume independently
-re-attests every candidate prefix that can tie or extend the longest verified
-prefix. After bounded checkpoint decode and shape validation, a candidate
-strictly shorter than an already verified prefix is skipped because it cannot
-affect longest-prefix selection. Resume discovery requires the exact supported
+Before opening a governor or publishing progress, resume collects every
+retained driver state of the run (bounded checkpoint decode plus shape
+validation), then independently re-attests candidates longest prefix first:
+the first fully verified prefix wins, an equally long valid competitor refuses
+as ambiguous, and strictly shorter candidates are re-attested only when every
+longer one failed, because they cannot otherwise affect longest-prefix
+selection. `solve --resume` re-attests by replay (each retained stage is
+re-executed and its receipt must be bitwise the retained one); the export
+verbs re-attest the same chain by sealed evidence (re-hashed receipts, sealed
+outputs) and say so. Resume discovery requires the exact supported
 solve-stage schema, field order, run, driver version, stage/ordinal pairing,
 diagnostic state, and logical clocks before reading that operation's bounded
 edge set; unrelated successful same-session operations therefore cannot
@@ -628,17 +711,19 @@ publication.
   tessellation, component nesting, self-intersection certification, or
   physical/CAD sameness. Named face groups are caller-supplied labels on the
   promoted soup, not independently certified CAD product-structure identity.
-- The presence of report/package in help and parsing is not an implementation
-  claim. Until their named authorities land, execution fails before side
-  effects.
-- The solve verb executes only its available leading prefix. A run cannot
-  currently complete because `qoi` remains a typed gap. Projects without an
-  explicit conduction setup also stop at the conduction gap. The conduction
-  path proves only the declared finite-mesh, static Dirichlet/Neumann/Robin
-  solve, exact matching-P1 finite contact, and the reported algebraic residual
-  and energy balance. It does not authenticate source geometry or material
-  claims, establish mesh convergence, or lower nonmatching or
-  temperature-dependent contact. Unsupported interface models refuse rather
+- `report`, `package`, and `compare` execute against completed runs and prove
+  them by sealed evidence (see the verb section); none of them replays
+  physics, and `compare` writes nothing.
+- All seven stages execute; a project without an explicit conduction setup or
+  without a `temperature-max` requirement refuses at the stage that needs it
+  (`cli-solve-conduction-undeclared`, `cli-solve-qoi-undeclared`). The
+  conduction path proves only the declared finite-mesh, static
+  Dirichlet/Neumann/Robin solve, exact matching-P1 finite contact, and the
+  reported algebraic residual and energy balance. It does not authenticate
+  source geometry or material claims, establish mesh convergence beyond what a
+  declared uniform h-ladder measured on the QoI's nodal maximum (no
+  energy-norm or DWR bound), or lower nonmatching or temperature-dependent
+  contact. Unsupported interface models refuse rather
   than silently assuming perfect contact. When the project declares a
   schema-v4 `(airflow-convection ...)` law, the stage performs ONE branch's
   conjugate airflow exchange (driver v10, receipt v3 `conjugate` object):

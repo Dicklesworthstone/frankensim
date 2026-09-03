@@ -108,26 +108,36 @@ class TestFrankenSimClientIntegration(unittest.TestCase):
             self.assertEqual(solve_res.status, "completed")
             self.assertEqual(solve_res.stages_completed, 7)
 
-            # 3. Compare remains fail-closed until it can load retained run data.
-            with self.assertRaises(UnavailableError):
+            # 3. Compare reads retained runs only: an unknown run id refuses
+            # through the solve loader, and a run compared with itself is
+            # a real, empty comparison (one QoI, zero delta, nothing changed).
+            with self.assertRaises(RefusalError):
                 self.client.compare(
-                    "baseline_run",
-                    "candidate_run",
+                    solve_res.run_id,
+                    "f" * 64,
                     ledger_path=ledger,
                     strict=True,
                 )
 
             comp = self.client.compare(
-                "baseline_run",
-                "candidate_run",
+                solve_res.run_id,
+                solve_res.run_id,
                 ledger_path=ledger,
-                strict=False,
+                strict=True,
             )
-            self.assertEqual(comp.status, "unavailable")
-            self.assertEqual(comp.exit_code, ExitCode.UNAVAILABLE)
-            self.assertEqual(comp.authority, "none")
-            self.assertEqual(comp.qoi_count, 0)
-            self.assertEqual(comp.qoi_diffs, [])
+            self.assertEqual(comp.status, "ok")
+            self.assertEqual(comp.exit_code, ExitCode.SUCCESS)
+            self.assertEqual(comp.authority, "projection-of-retained-receipts")
+            self.assertFalse(comp.changed)
+            self.assertTrue(comp.same_project)
+            self.assertEqual(len(comp.project_hash_left), 64)
+            self.assertEqual(comp.project_hash_left, comp.project_hash_right)
+            self.assertEqual(comp.qoi_count, 1)
+            self.assertEqual(len(comp.qoi_diffs), 1)
+            self.assertEqual(comp.qoi_diffs[0].name, "temperature-max")
+            self.assertEqual(comp.qoi_diffs[0].delta, 0.0)
+            self.assertEqual(comp.qoi_diffs[0].classification, "same")
+            self.assertIn("identical runs", comp.summary)
 
     def test_run_exposes_retained_qoi_vocabulary(self):
         if not (
@@ -182,6 +192,26 @@ class TestFrankenSimClientIntegration(unittest.TestCase):
                     self.assertIsNone(term["value"])
                 else:
                     self.assertIsInstance(term["value"], (int, float))
+
+            # Independent re-derivation (bead q61wp.14 item 1): `package`
+            # re-runs the solver-free checker on the retained bytes, and the
+            # QoI claim's colour read from the package itself must equal the
+            # colour the report shows. A report that coloured a claim more
+            # strongly than its package would fail here.
+            audit = self.client.package(outcome.run_id, ledger_path=ledger, strict=True)
+            self.assertEqual(audit.exit_code, ExitCode.SUCCESS)
+            self.assertTrue(audit.is_verified, audit)
+            self.assertEqual(audit.authority, "structural-integrity-only")
+            self.assertEqual(len(audit.merkle_root), 64)
+            self.assertGreaterEqual(audit.claim_count, 2)
+            package_path = Path(audit.package_path)
+            self.assertTrue(package_path.is_file(), audit)
+            package = json.loads(package_path.read_text())
+            prefix = f"qoi.{qois[0]['name']}."
+            claims = [c for c in package["claims"] if c["id"].startswith(prefix)]
+            self.assertEqual(len(claims), 1, [c["id"] for c in package["claims"]])
+            package_color = claims[0]["color"]["kind"].capitalize()
+            self.assertEqual(package_color, qois[0]["color"], claims[0])
 
     def test_run_without_materials_surfaces_material_resolve_refusal(self):
         if not (

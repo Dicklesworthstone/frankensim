@@ -1,11 +1,11 @@
 //! Deterministic command-line contract for FrankenSim's Cooling 0.1 product
 //! workflow.
 //!
-//! The v0 surface exposes `validate`, one-source `import`, `solve`, `report`,
-//! and `package` while keeping authority honest. Project validation delegates
-//! to the strict [`fs_project`] readers. Product stages whose producing Beads
-//! remain open fail before side effects with `cli-stage-unavailable`; a
-//! CLI-shaped mock is not substituted for an integrated workflow.
+//! The v0 surface exposes `validate`, one-source `import`, `solve`, `run`,
+//! `report`, `package`, and `compare` while keeping authority honest. Project
+//! validation delegates to the strict [`fs_project`] readers. The export verbs
+//! (`report`, `package`, `compare`) project retained receipts and never replay
+//! physics; a CLI-shaped mock is not substituted for an integrated workflow.
 
 mod cards;
 mod cinematic;
@@ -1661,53 +1661,6 @@ fn validate_loaded(
         stdout,
         stderr: String::new(),
     }
-}
-
-fn unavailable(
-    mode: OutputMode,
-    command: &'static str,
-    subject: &str,
-    dependency: &'static str,
-    ledger_path: Option<&Path>,
-) -> CommandOutput {
-    let message = format!(
-        "`{command}` is reserved but cannot execute until `{dependency}` supplies its authoritative product stage"
-    );
-    let fix = format!(
-        "complete and verify `{dependency}`; do not substitute a skeleton run or placeholder artifact"
-    );
-    let mut output = refusal(
-        mode,
-        exit::UNAVAILABLE,
-        &Diagnostic::new(command, "cli-stage-unavailable", message, fix).with_subject(subject),
-        Some((command, "unavailable", subject, None, 0)),
-    );
-    if mode == OutputMode::Json {
-        let marker = "}\n";
-        if let Some(at) = output.stdout.rfind(marker) {
-            let mut details = format!(
-                ",\"stage\":\"{command}\",\"dependency\":\"{dependency}\",\"owning_bead\":\"{dependency}\",\"run_id\":"
-            );
-            push_json_string(&mut details, subject);
-            if let Some(ledger_path) = ledger_path {
-                details.push_str(",\"ledger_path\":");
-                push_json_string(&mut details, &ledger_path.to_string_lossy());
-            }
-            output.stdout.insert_str(at, &details);
-        }
-    } else {
-        let _ = writeln!(output.stdout, "dependency={dependency}");
-        let _ = writeln!(output.stdout, "owning_bead={dependency}");
-        let _ = writeln!(output.stdout, "run_id={}", escape_text(subject));
-        if let Some(ledger_path) = ledger_path {
-            let _ = writeln!(
-                output.stdout,
-                "ledger_path={}",
-                escape_text(&ledger_path.to_string_lossy())
-            );
-        }
-    }
-    output
 }
 
 fn refusal(

@@ -243,6 +243,147 @@ half-edge round-trips, closed-manifold audits).
     representable value outside either interval refuses with stable field,
     rejected bits, and exact inclusive bound bits. Geometry translation or
     rescaling cannot change that scalar admission result (G0/G3).
+16. `LabeledTetComplex::refine_uniform` is the h-ladder CONTROL, not a
+    quality improver: one uniform 1→8 split (Bey/Zhang red refinement) of
+    every retained tet by its edge midpoints — four corner copies in the
+    parent's vertex order and four interior tets on the central
+    octahedron's SHORTEST diagonal (canonical tie-break), each interior
+    child given the parent's exact orientation sign by the predicate.
+    Conforming by construction (a shared face splits identically on both
+    sides); recovered walls (source faces) split four ways in their own
+    plane with the parent facet inherited, so boundary classification by
+    parent facet survives every rung; region labels replicate; per-region
+    volume is preserved to the rounding of the midpoints; recovery and
+    flat-repair evidence are carried unchanged as the base's provenance.
+    Liu–Joe (1996) bounds every descendant's quality below by a constant
+    times the parent's. MEASURED 2026-09-02 (`tests/uniform_refine.rs`,
+    `src/uniform.rs`): two-fin comb 425 → 3,400 → 27,200 tets, smallest
+    dihedral 6.86° → 4.738° → 4.738° (the interior class appears once and
+    then persists; a regular tet and a skewed tet show the same over five
+    generations), max radius-edge 45.0 unchanged (scale-invariant, so no
+    uniform rung can improve it — that is constrained refinement's job).
+    CONSEQUENCE for consumers: a dihedral floor applied to refined rungs
+    must allow the first-generation class drop (here ×0.69); a 5° floor on
+    the base would pass and then refuse rung 1 of this very comb.
+17. Constrained refinement (`VolumetricPolicy::refinement`, off when `None`)
+    runs between recovery and carving: rounds of worst-first circumcenter
+    insertion restricted to the seeded chambers, every recovered wall
+    (correspondence row) protected by its EQUATORIAL sphere — the smallest
+    sphere through the three vertices, the only one whose emptiness keeps a
+    face Delaunay (the hull code's minimum ENCLOSING sphere under-protects
+    obtuse faces: guarding walls with it broke six comb facets in one
+    round) — each round followed by segment and facet re-recovery and the
+    exact audit, with the facet driver seeded INCREMENTALLY from the previous
+    correspondence (`recover_facets_with_points`) so bisection repairs only
+    what an insertion destroyed; re-recovery from a previous tiling with no
+    insertions is a proven no-op (`tests/constrained_refine.rs`). A vertex
+    that lies in a facet's plane strictly inside its loop is classified
+    interior by geometry as well as by provenance. Evidence
+    (`RecoveryEvidence::refinement`) discloses rounds, insertions, worst
+    radius-edge before/after, offenders remaining, encroach-skips, wall
+    splits and the stop reason. MEASURED 2026-09-02 on the two-fin comb
+    with `split_walls: false` (the default): all 171 offenders' circumcenters
+    encroach a wall, nothing is inserted, the mesh is untouched and the
+    evidence says so — on thin bodies wall splitting is the whole game.
+    `split_walls: true` (split the encroached wall at its in-plane point,
+    handed to the driver as a known interior point) is opt-in and NOT yet
+    claimed: 23 splits left 13 of 60 facets unrecovered within the recovery
+    budget; the re-tiled facets were not recognised by the coplanar-tiling
+    classifier (`tile:none` under `FS_MESH_TRACE_RECOVERY=1`), the open
+    question for the next increment.
+18. Delaunay kernel, coplanar ghost rule. A point exactly coplanar with a hull
+    facet conflicts with that facet's ghost iff it lies strictly inside the
+    facet's circumcircle, tested with the exact `insphere` against an apex
+    lifted off the facet plane. The apex is `a` offset along the coordinate
+    axis most aligned with the facet normal by the facet's longest edge —
+    NOT `a + n`: on a hull sliver with nearly collinear vertices the normal is
+    tiny (MEASURED 2026-09-02 on the rotated two-fin comb: |n| = 7e-20 against
+    coordinates of 0.1), `a + n` rounds back to `a`, both predicates return
+    Zero, `Zero == Zero` read as a conflict, the cavity's growth repair then
+    absorbed a real tet that was not in conflict, the mesh ended with 227
+    local-Delaunay violations and insertion of a later point swallowed hull
+    vertex 9. Every sphere through a, b, c meets the plane in the same
+    circumcircle, so the decision is apex-independent: a differential test
+    over 2.4 million coplanar integer configurations shows zero disagreements
+    with the previous rule wherever it was sound (`delaunay::ghost_rule_probe`).
+    An exactly collinear ghost facet keeps the historical convention (it
+    conflicts with everything and never survives the next insertion; the
+    collinear-run battery mints such ghosts). The exact audit now also reports
+    an input vertex absent from every live tet (bitwise duplicates exempt:
+    whichever twin BRIO order met first is the present one), and
+    `AdmittedPlc::recover` audits BEFORE counting unrecovered constraints so a
+    kernel defect is named as one instead of as a recovery budget problem.
+    Corpus: `tests/body_corpus.rs` — the rotated comb's point set keeps all 32
+    vertices under the full audit (116 tets); the rotated comb volumetricizes
+    with the exact volume (247 tets, 60/60 facets, 43 Steiner points, min
+    dihedral 2.5°, no flat tets); a plate with a rectangular through-hole
+    volumetricizes with the exact volume (180 tets).
+19. Flat-tet repair, boundary cases. `repair_flat_tets` no longer refuses every
+    flat tet that touches a wall; wall safety is decided per removal edge by
+    the ring walk (a wall face on the ring refuses). A flat tet that sits IN
+    the boundary — two wall faces, its other two faces shared with same-region
+    tets, every vertex attached elsewhere — is DROPPED: rotation rounding
+    leaves a segment Steiner point a hair off its edge, the Delaunay keeps the
+    original triangle and mints a zero-volume tet between it and the
+    degenerate sliver face (rotated comb: [0, 2, 3, 56], volume 1.9e-22), and
+    neither diagonal is removable (one is a wall edge, the other's fan mints
+    another zero-volume tet). Dropping removes zero volume, moves the two
+    walls onto the tet's interior faces with the parent facet inherited, and
+    the independent winding audit re-checks the result. Any other flat tet
+    that resists removal stays disclosed as `unrepaired`.
+20. Facet tilings close against their neighbours. A facet is recovered only
+    by a tiling whose free edges are exactly the CHAIN of every mesh vertex
+    on each of its edges (`recovery::chain_on_chord`: the endpoints and every
+    vertex within the segment tolerance of the chord, in parameter order,
+    evaluated with the endpoints in index order so both facets sharing a
+    segment reach the same verdict). A face whose edge lies along a facet
+    edge without being a chain sub-edge is never a tile, and a facet's own
+    sub-triangle that is a mesh face but skips a chain vertex counts as
+    missing, so longest-edge bisection adopts the vertex when its edge comes
+    up (raw midpoints of dyadic chains coincide bitwise; `adopt_near` covers
+    the ulp). After recovery, `AdmittedPlc::recover` and the constrained
+    refinement re-recovery refuse with `Audit { reason: "recovered facet
+    tiles do not close the region surface" }` unless every edge of each
+    region's tile set is used exactly twice — the property the seed flood
+    depends on and per-facet tiling cannot prove. MEASURED 2026-09-02 on the
+    rotated four-fin heatsink shell: the crease edge (10, 13) between fin 1's
+    top and side was tiled across the original edge by one facet and through
+    the midpoint 114 minted on that edge by the other; both tilings passed
+    the old test; the flood walked through the one sliver-shaped hole into
+    the exterior, every zero-volume tet under the bottom plane was retained,
+    and the winding audit tripped on the first of them far from the hole.
+    The edge survived its own midpoint because the fin tops are a nearly
+    coplanar HULL layer whose flat tets have circumspheres so large that the
+    exact f64 midpoint, a rounding hair off the plane, falls outside them:
+    Bowyer–Watson did not consume the whole star of the edge and a needle
+    tet kept the edge alive beside its midpoint (14 such midpoints on that
+    shell; none with eight far bounding-box points, which is not what ships).
+    Dead end, measured: adopting the chain vertices by fanning the facet's
+    triangle over them made interior splits run away (3393 of 3703 Steiner
+    points on the four-fin comb that needs 136); balanced bisection does not.
+    `FS_MESH_TRACE_RECOVERY` names the open edges, every midpoint that left
+    its edge alive, and each unrecovered facet's anatomy; `FS_MESH_DUMP_MESH`
+    writes the finished mesh as text for offline analysis.
+21. Coplanar tiling is a one-sided sheet. Four coplanar co-circular points —
+    every rectangle of a facet grid and every square bisection makes of one —
+    are tetrahedralized with a zero-volume tet whose faces are BOTH
+    triangulations of the quad (item 19), so once bisection has moved a facet
+    away from its own sub-triangles the faces in its plane are a stack of
+    double covers and no edge count can accept a tiling: on the rotated
+    four-fin shell one base-top strip reached 4614 sub-triangles, twenty
+    times its local feature size. `coplanar_tiling` therefore takes, when the
+    in-plane faces are not already one clean tiling (that answer is kept,
+    byte-identical), the sheet on one side of the facet's plane: the
+    in-plane faces with exactly one incident tet whose apex lies strictly on
+    that side — the boundary of that side's tets, manifold by construction;
+    both sides are tried because a hull layer has real tets on one side only
+    (`recovery::sheet_on_side`, unit-tested on a synthetic double cover). The
+    flat tet between the two triangulations then lies either outside the
+    walls (carved) or inside with two wall faces (item 19 drops it). Corpus:
+    the rotated four-fin heatsink shell volumetricizes with the exact volume
+    — 378 tets, 154 vertices, 98 Steiner points, 108/108 facets, two interior
+    zero-volume tets disclosed — and the axis-aligned bodies are unchanged
+    (four-fin comb prism 136 Steiner points).
 
 ## Error model
 

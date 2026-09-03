@@ -53,15 +53,17 @@ case "${COMMAND}" in
     BINARY="$(cd "$(dirname "${BINARY}")" && pwd)/$(basename "${BINARY}")"
     mkdir -p "${ARTIFACT_DIR}"
     ARTIFACT_DIR="$(cd "${ARTIFACT_DIR}" && pwd)"
-    log_json "run_start" "started" "verifying report refuses without retained-run loading"
+    log_json "run_start" "started" "verifying report refuses a missing ledger before writing anything"
     set +e
     (cd "${ARTIFACT_DIR}" && "${BINARY}" --json report unbound_run /definitely/missing/ledger.db) \
       > "${ARTIFACT_DIR}/report.json" 2> "${ARTIFACT_DIR}/report.stderr.jsonl"
     report_exit=$?
     set -e
-    test "${report_exit}" -eq 5
-    grep -q '"status":"unavailable"' "${ARTIFACT_DIR}/report.json"
-    grep -q '"code":"cli-stage-unavailable"' "${ARTIFACT_DIR}/report.stderr.jsonl"
+    # `report` executes against a completed run since 2026-08-25; a missing
+    # ledger is an input refusal (exit 3), never a fabricated export.
+    test "${report_exit}" -eq 3
+    grep -q '"status":"refused"' "${ARTIFACT_DIR}/report.json"
+    grep -q '"code":"cli-export-ledger-missing"' "${ARTIFACT_DIR}/report.stderr.jsonl"
     if grep -Eq 'junction_maximum|thermal_margin|Verified|content_hash' \
       "${ARTIFACT_DIR}/report.json"; then
       log_json "run_terminal" "failed" "report emitted fabricated scientific evidence"
@@ -69,7 +71,7 @@ case "${COMMAND}" in
     fi
     test ! -e "${ARTIFACT_DIR}/unbound_run.html"
     test ! -e "${ARTIFACT_DIR}/unbound_run.report.json"
-    log_json "run_terminal" "pass" "report remained unavailable and emitted no scientific claim"
+    log_json "run_terminal" "pass" "report refused the missing ledger and emitted no scientific claim"
     exit 0
     ;;
   *)

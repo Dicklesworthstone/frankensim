@@ -107,8 +107,10 @@ pack flags at all.
 
 ## What this example does NOT show
 
-A verified answer. The conduction mesh is the recovered surface itself (no
-refinement ladder yet), the eight uncertainty terms are NO-DATA, and the
+A verified answer. This example solves the default single rung on the
+recovered surface itself (the uniform h-ladder is opt-in through
+`(solver :fidelity "ladder")`, see the heatsink example), so all eight
+uncertainty terms are NO-DATA here, and the
 convection boundary is a declared coefficient rather than one derived from
 the fan network — see `examples/heatsink-fan/README.md` for the derived
 `airflow-convection` law on a real body. A project that omits

@@ -254,6 +254,7 @@ fn quality_census_matches_an_independent_computation_on_the_comb() {
             recovery: RecoveryOptions::default(),
             max_vertices: verts.len(),
             max_tets: 4_000_000,
+            refinement: None,
         };
         let audited =
             with_cx(|cx| volumetricize(UnverifiedPlc::new(verts, vec![spec]), policy, cx))

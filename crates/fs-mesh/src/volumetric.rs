@@ -11,7 +11,7 @@
 use crate::delaunay::{GHOST, MeshError, Tetrahedralization, delaunay};
 use crate::recovery::{
     FacetCorrespondence, FacetRecoveryStats, RecoveryOptions, RecoveryStats, recover_facets,
-    recover_segments,
+    recover_facets_with_points, recover_segments,
 };
 use fs_exec::Cx;
 use fs_geom::Point3;
@@ -200,7 +200,7 @@ impl From<MeshError> for VolumetricError {
 }
 
 /// Caps and recovery policy for one volumetricization.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct VolumetricPolicy {
     /// SI length unit of the vertex coordinates, e.g. `"m"`.
     pub length_unit: String,
@@ -211,6 +211,114 @@ pub struct VolumetricPolicy {
     pub max_vertices: usize,
     /// Maximum retained solid tetrahedra.
     pub max_tets: usize,
+    /// Constrained refinement between recovery and carving; `None` solves
+    /// on the recovered PLC itself (the pre-B2 behaviour).
+    pub refinement: Option<RefinementOptions>,
+}
+
+/// Constrained-refinement policy (bridge plan B2, WORK 1): worst-first
+/// circumcenter insertion inside the seeded chambers with the recovered
+/// walls protected by the diametral-ball rule, re-recovering and re-auditing
+/// after every round.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RefinementOptions {
+    /// Radius-edge target (2.0 is the classical safe bound).
+    pub max_radius_edge: f64,
+    /// Rounds of insert / re-recover / audit.
+    pub max_rounds: u32,
+    /// Total refinement Steiner budget (recovery keeps its own).
+    pub max_steiner: u32,
+    /// Split an encroached wall at its in-plane point instead of skipping
+    /// the offender. OFF by default: MEASURED 2026-09-02 on the two-fin comb,
+    /// 23 wall splits left 13 of 60 facets unrecoverable within the recovery
+    /// budget even with incremental re-recovery (the re-tiled facets are not
+    /// recognised: `tile:none` in the trace) — the next increment. With it
+    /// off, refinement inserts only strictly interior circumcenters that
+    /// encroach no wall's equatorial sphere, so walls are never broken.
+    pub split_walls: bool,
+}
+
+impl Default for RefinementOptions {
+    fn default() -> Self {
+        RefinementOptions {
+            max_radius_edge: 2.0,
+            max_rounds: 8,
+            max_steiner: 20_000,
+            split_walls: false,
+        }
+    }
+}
+
+/// What constrained refinement did (receipt evidence).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RefinementEvidence {
+    /// Rounds run (0 when refinement was off or nothing offended).
+    pub rounds: u32,
+    /// Circumcenters and facet split points inserted by refinement.
+    pub steiner_inserted: u32,
+    /// Steiner points the re-recovery passes added on top.
+    pub recovery_steiner: u64,
+    /// Worst radius-edge ratio inside the solid before refinement.
+    pub worst_before: f64,
+    /// Worst radius-edge ratio inside the solid after refinement.
+    pub worst_after: f64,
+    /// Offenders left inside the solid when refinement stopped.
+    pub offenders_remaining: u32,
+    /// Circumcenters that landed outside the solid without encroaching a
+    /// wall (skipped).
+    pub skipped_outside: u32,
+    /// Insertions the minimum-edge policy yielded.
+    pub protected_by_policy: u32,
+    /// Wall splits (encroached facets split in place; none until that
+    /// increment lands).
+    pub walls_split: u32,
+    /// Circumcenters not inserted because they would encroach a wall.
+    pub encroach_skipped: u32,
+    /// Why it stopped: `off`, `converged`, `round-cap`, `steiner-budget`,
+    /// `tet-cap`, `no-progress`.
+    pub stop: &'static str,
+}
+
+impl Default for RefinementEvidence {
+    fn default() -> Self {
+        RefinementEvidence {
+            rounds: 0,
+            steiner_inserted: 0,
+            recovery_steiner: 0,
+            worst_before: 0.0,
+            worst_after: 0.0,
+            offenders_remaining: 0,
+            skipped_outside: 0,
+            protected_by_policy: 0,
+            walls_split: 0,
+            encroach_skipped: 0,
+            stop: "off",
+        }
+    }
+}
+
+impl RefinementEvidence {
+    /// Canonical JSON object.
+    #[must_use]
+    pub fn to_json(&self) -> String {
+        format!(
+            "{{\"rounds\":{},\"steiner_inserted\":{},\"recovery_steiner\":{},\
+             \"worst_before\":{:.4},\"worst_after\":{:.4},\"offenders_remaining\":{},\
+             \"skipped_outside\":{},\"protected_by_policy\":{},\"walls_split\":{},\
+             \"encroach_skipped\":{},\"stop\":\"{}\"}}",
+            self.rounds,
+            self.steiner_inserted,
+            self.recovery_steiner,
+            self.worst_before,
+            self.worst_after,
+            self.offenders_remaining,
+            self.skipped_outside,
+            self.protected_by_policy,
+            self.walls_split,
+            self.encroach_skipped,
+            self.stop
+        )
+    }
 }
 
 impl VolumetricPolicy {
@@ -222,6 +330,7 @@ impl VolumetricPolicy {
             recovery: RecoveryOptions::default(),
             max_vertices: 4_096,
             max_tets: 65_536,
+            refinement: None,
         }
     }
 }
@@ -263,6 +372,8 @@ pub struct ConstraintRecoveredPlc {
     tetra: Tetrahedralization,
     regions: Vec<RegionSpec>,
     correspondence: FacetCorrespondence,
+    unique_facets: Vec<[u32; 3]>,
+    unique_segments: Vec<[u32; 2]>,
     policy: VolumetricPolicy,
     recovery: RecoveryEvidence,
 }
@@ -272,6 +383,8 @@ pub struct ConstraintRecoveredPlc {
 /// re-running the kernel.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RecoveryEvidence {
+    /// Constrained refinement between recovery and carving.
+    pub refinement: RefinementEvidence,
     /// The recovery policy that ran.
     pub options: RecoveryOptions,
     /// Segment recovery statistics.
@@ -501,28 +614,247 @@ impl AdmittedPlc {
             .collect();
         let (facet_stats, correspondence) =
             recover_facets(&mut tetra, &facet_loops, self.policy.recovery, cx)?;
+        // Audit FIRST: a kernel defect (a swallowed vertex, a non-Delaunay
+        // cavity) shows up as unrecoverable constraints, and the constraint
+        // count would mislabel it as a recovery budget problem.
+        if !tetra.audit(false).clean() {
+            return Err(VolumetricError::Audit {
+                reason: "recovered complex failed the exact Delaunay audit",
+            });
+        }
         if seg_stats.unrecovered > 0 || facet_stats.unrecovered > 0 {
             return Err(VolumetricError::UnrecoveredConstraint {
                 segments: seg_stats.unrecovered,
                 facets: facet_stats.unrecovered,
             });
         }
-        if !tetra.audit(false).clean() {
-            return Err(VolumetricError::Audit {
-                reason: "recovered complex failed the exact Delaunay audit",
-            });
-        }
-        Ok(ConstraintRecoveredPlc {
+        let recovered = ConstraintRecoveredPlc {
             tetra,
             regions: self.regions,
             correspondence,
+            unique_facets: self.unique_facets,
+            unique_segments: self.unique_segments,
             recovery: RecoveryEvidence {
                 options: self.policy.recovery,
+                refinement: RefinementEvidence::default(),
                 segments: seg_stats,
                 facets: facet_stats,
             },
             policy: self.policy,
-        })
+        };
+        recovered.check_tile_surface_closed()?;
+        Ok(recovered)
+    }
+}
+
+impl ConstraintRecoveredPlc {
+    /// The tiles of a region's facets must form a closed surface: every
+    /// tile edge used exactly twice within the region. That is the property
+    /// the seed flood relies on — the walls separate the region from the
+    /// exterior only if they close — and per-facet tiling cannot prove it
+    /// alone: two coplanar facets sharing a segment may each be tiled
+    /// legitimately yet with different vertex chains along that segment
+    /// (one through a recovery midpoint, one across the original edge when
+    /// the midpoint sits a rounding hair off the line), leaving a sliver-
+    /// shaped hole the flood walks through. Refused here with the gap
+    /// named (trace `FS_MESH_TRACE_RECOVERY`), not downstream as a winding
+    /// failure on some zero-volume tet.
+    fn check_tile_surface_closed(&self) -> Result<(), VolumetricError> {
+        for region in &self.regions {
+            let gaps = tile_surface_gaps(&self.correspondence.rows, &self.unique_facets, region);
+            if gaps.is_empty() {
+                continue;
+            }
+            if std::env::var_os("FS_MESH_TRACE_RECOVERY").is_some() {
+                let edges = crate::recovery::edge_set_of(&self.tetra);
+                let shown: Vec<String> = gaps
+                    .iter()
+                    .take(16)
+                    .map(|(edge, uses)| {
+                        let p = &self.tetra.mesh.points;
+                        format!(
+                            "{edge:?}x{uses} mesh-edge:{} {:?}-{:?}",
+                            edges.contains(edge),
+                            p[edge[0] as usize],
+                            p[edge[1] as usize]
+                        )
+                    })
+                    .collect();
+                eprintln!(
+                    "TRACE recovery: region {} tile surface is not closed: {} edges used other than twice: {}",
+                    region.id.0,
+                    gaps.len(),
+                    shown.join(" ")
+                );
+            }
+            return Err(VolumetricError::Audit {
+                reason: "recovered facet tiles do not close the region surface",
+            });
+        }
+        Ok(())
+    }
+
+    /// The tets of every seeded chamber (what carve-and-label will keep),
+    /// by the same flood carve uses; `None` when a seed cannot be located
+    /// (carve will report that refusal).
+    fn inside_tets(&self) -> Option<BTreeSet<u32>> {
+        let mesh = &self.tetra.mesh;
+        let walls: BTreeSet<[u32; 3]> = self
+            .correspondence
+            .rows
+            .iter()
+            .map(|(face, _)| *face)
+            .collect();
+        let live = live_real_tets(mesh);
+        let mut inside = BTreeSet::new();
+        for region in &self.regions {
+            let tet = locate_seed_tet(mesh, region.seed, &live, &walls).ok()?;
+            inside.extend(flood_chamber(mesh, tet, &walls));
+        }
+        Some(inside)
+    }
+
+    /// Constrained refinement (bridge plan B2, WORK 1): rounds of worst-first
+    /// circumcenter insertion inside the seeded chambers with the recovered
+    /// walls protected (`refine::refine_constrained_round`), each followed by
+    /// segment and facet re-recovery and the exact Delaunay audit, until no
+    /// tet inside the solid exceeds the radius-edge target or a cap stops it.
+    /// Volumes, walls and labels are preserved by construction: refinement
+    /// inserts points strictly inside the solid or on its facets, and the
+    /// re-recovered correspondence is what carve-and-label reads.
+    ///
+    /// # Errors
+    /// A re-recovery that leaves a constraint unrecovered, or an audit that
+    /// fails, refuses like `recover` does; cancellation propagates.
+    pub fn refine_constrained(
+        mut self,
+        opts: RefinementOptions,
+        cx: &Cx<'_>,
+    ) -> Result<Self, VolumetricError> {
+        let mut evidence = RefinementEvidence {
+            stop: "converged",
+            ..RefinementEvidence::default()
+        };
+        let refine_opts = crate::refine::RefineOptions {
+            max_radius_edge: opts.max_radius_edge,
+            max_steiner: opts.max_steiner,
+            split_hull_facets: opts.split_walls,
+            min_edge_factor: 0.25,
+        };
+        let mut stats = crate::refine::RefineStats::default();
+        let mut split_points: Vec<(u32, u32)> = Vec::new();
+        let Some(inside0) = self.inside_tets() else {
+            evidence.stop = "seed-unlocatable";
+            self.recovery.refinement = evidence;
+            return Ok(self);
+        };
+        let (worst0, offenders0) =
+            crate::refine::inside_offenders(&self.tetra, &inside0, opts.max_radius_edge);
+        evidence.worst_before = worst0;
+        evidence.worst_after = worst0;
+        evidence.offenders_remaining = offenders0;
+        let mut inside = inside0;
+        loop {
+            if evidence.offenders_remaining == 0 {
+                evidence.stop = "converged";
+                break;
+            }
+            if evidence.rounds >= opts.max_rounds {
+                evidence.stop = "round-cap";
+                break;
+            }
+            if evidence.steiner_inserted >= opts.max_steiner {
+                evidence.stop = "steiner-budget";
+                break;
+            }
+            if inside.len() >= self.policy.max_tets {
+                evidence.stop = "tet-cap";
+                break;
+            }
+            let budget = opts.max_steiner - evidence.steiner_inserted;
+            let inserted = crate::refine::refine_constrained_round(
+                &mut self.tetra,
+                &self.correspondence.rows,
+                &inside,
+                refine_opts,
+                budget,
+                &mut stats,
+                &mut split_points,
+                cx,
+            )?;
+            evidence.rounds += 1;
+            if inserted == 0 {
+                evidence.stop = "no-progress";
+                break;
+            }
+            evidence.steiner_inserted += inserted;
+            // Re-recover the constraints the insertions may have crossed,
+            // then audit, exactly as `recover` did on the fresh Delaunay.
+            let (seg_stats, _) = recover_segments(
+                &mut self.tetra,
+                &self.unique_segments,
+                self.policy.recovery,
+                cx,
+            )?;
+            let facet_loops: Vec<Vec<u32>> = self
+                .unique_facets
+                .iter()
+                .map(|f| vec![f[0], f[1], f[2]])
+                .collect();
+            let (facet_stats, correspondence) = recover_facets_with_points(
+                &mut self.tetra,
+                &facet_loops,
+                &split_points,
+                &self.correspondence.rows,
+                self.policy.recovery,
+                cx,
+            )?;
+            evidence.recovery_steiner += seg_stats.steiner_inserted + facet_stats.steiner_inserted;
+            if std::env::var_os("FS_MESH_TRACE_RECOVERY").is_some() {
+                eprintln!(
+                    "TRACE refine round {}: inserted {} (splits so far {}), recovery: segments {}/{} unrecovered {}, facets {}/{} unrecovered {} rounds_used {} steiner {}",
+                    evidence.rounds,
+                    inserted,
+                    split_points.len(),
+                    seg_stats.recovered,
+                    seg_stats.segments_in,
+                    seg_stats.unrecovered,
+                    facet_stats.recovered,
+                    facet_stats.facets_in,
+                    facet_stats.unrecovered,
+                    facet_stats.rounds_used,
+                    facet_stats.steiner_inserted
+                );
+            }
+            if !self.tetra.audit(false).clean() {
+                return Err(VolumetricError::Audit {
+                    reason: "refined complex failed the exact Delaunay audit",
+                });
+            }
+            if seg_stats.unrecovered > 0 || facet_stats.unrecovered > 0 {
+                return Err(VolumetricError::UnrecoveredConstraint {
+                    segments: seg_stats.unrecovered,
+                    facets: facet_stats.unrecovered,
+                });
+            }
+            self.correspondence = correspondence;
+            self.check_tile_surface_closed()?;
+            let Some(next_inside) = self.inside_tets() else {
+                evidence.stop = "seed-unlocatable";
+                break;
+            };
+            inside = next_inside;
+            let (worst, offenders) =
+                crate::refine::inside_offenders(&self.tetra, &inside, opts.max_radius_edge);
+            evidence.worst_after = worst;
+            evidence.offenders_remaining = offenders;
+        }
+        evidence.skipped_outside = stats.skipped_outside_hull;
+        evidence.protected_by_policy = stats.protected_by_policy;
+        evidence.walls_split = stats.hull_facets_split;
+        evidence.encroach_skipped = stats.unrefinable_remaining;
+        self.recovery.refinement = evidence;
+        Ok(self)
     }
 }
 
@@ -688,7 +1020,6 @@ impl LabeledTetComplex {
     /// follows this pass is what the receipt discloses.
     pub fn repair_flat_tets(&mut self) -> FlatTetRepair {
         let mut report = FlatTetRepair::default();
-        let walls: BTreeSet<[u32; 3]> = self.source_faces.iter().map(|(face, _)| *face).collect();
         let volume =
             |positions: &[[f64; 3]], tet: [u32; 4]| tet_volume_triple(positions, tet).abs();
         let largest = self
@@ -711,6 +1042,10 @@ impl LabeledTetComplex {
         let mut gave_up: BTreeSet<[u32; 4]> = BTreeSet::new();
         for _round in 0..32 {
             report.rounds += 1;
+            // Walls are re-read per round: dropping a boundary flat tet moves
+            // two wall faces (see `drop_boundary_flat`).
+            let walls: BTreeSet<[u32; 3]> =
+                self.source_faces.iter().map(|(face, _)| *face).collect();
             // Face → incident tet indices, rebuilt per flip because a flip
             // changes three tets.
             let mut by_face: BTreeMap<[u32; 3], Vec<usize>> = BTreeMap::new();
@@ -731,7 +1066,7 @@ impl LabeledTetComplex {
             key.sort_unstable();
             let region = self.region_of_tet[flat_index];
             let flipped = self.try_remove_flat(flat_index, flat, region, &by_face, &walls, largest);
-            if !flipped {
+            if !flipped && !self.drop_boundary_flat(flat_index, region, &by_face, &walls) {
                 gave_up.insert(key);
             }
         }
@@ -749,6 +1084,87 @@ impl LabeledTetComplex {
         report
     }
 
+    /// Drop a flat tet that sits IN the boundary. A boundary quad of a body
+    /// that is not axis-aligned leaves, after segment recovery, a Steiner point
+    /// a rounding error off the quad's edge; the Delaunay then keeps the
+    /// original triangle AND mints a zero-volume tet between it and the
+    /// degenerate sliver face, so the retained complex holds a flat tet with
+    /// two wall faces and two faces shared with same-region tets (MEASURED
+    /// 2026-09-02 on the rotated two-fin comb: [0, 2, 3, 56], volume 1.9e-22).
+    /// Edge removal cannot fix it — both diagonals are wall edges or the fan
+    /// mints another zero-volume tet. Deleting the tet removes zero volume,
+    /// keeps the boundary a closed surface (its two interior faces become the
+    /// walls, inheriting the parent facet of the wall they share an edge with)
+    /// and leaves every vertex attached; anything else is refused and stays
+    /// disclosed as unrepaired.
+    fn drop_boundary_flat(
+        &mut self,
+        flat_index: usize,
+        region: RegionId,
+        by_face: &BTreeMap<[u32; 3], Vec<usize>>,
+        walls: &BTreeSet<[u32; 3]>,
+    ) -> bool {
+        let flat = self.tets[flat_index];
+        let faces = tet_sorted_faces(flat);
+        let wall_faces: Vec<[u32; 3]> = faces
+            .iter()
+            .copied()
+            .filter(|face| walls.contains(face))
+            .collect();
+        let interior: Vec<[u32; 3]> = faces
+            .iter()
+            .copied()
+            .filter(|face| !walls.contains(face))
+            .collect();
+        if wall_faces.len() != 2 {
+            return false;
+        }
+        for face in &interior {
+            let Some(list) = by_face.get(face) else {
+                return false;
+            };
+            let others: Vec<usize> = list.iter().copied().filter(|&i| i != flat_index).collect();
+            if others.len() != 1 || self.region_of_tet[others[0]] != region {
+                return false;
+            }
+        }
+        for &v in &flat {
+            let attached = self
+                .tets
+                .iter()
+                .enumerate()
+                .any(|(i, tet)| i != flat_index && tet.contains(&v));
+            if !attached {
+                return false;
+            }
+        }
+        let parent_of = |face: [u32; 3]| -> Option<u32> {
+            self.source_faces
+                .iter()
+                .find(|(wall, _)| *wall == face)
+                .map(|(_, parent)| *parent)
+        };
+        let mut new_rows = Vec::with_capacity(2);
+        for face in &interior {
+            let parent = wall_faces
+                .iter()
+                .max_by_key(|wall| wall.iter().filter(|v| face.contains(v)).count())
+                .and_then(|wall| parent_of(*wall));
+            let Some(parent) = parent else {
+                return false;
+            };
+            new_rows.push((*face, parent));
+        }
+        self.source_faces
+            .retain(|(face, _)| !wall_faces.contains(face));
+        self.source_faces.extend(new_rows);
+        let last = self.tets.len() - 1;
+        self.tets.swap(flat_index, last);
+        self.region_of_tet.swap(flat_index, last);
+        self.tets.pop();
+        self.region_of_tet.pop();
+        true
+    }
     /// One edge-removal attempt for the flat tet at `flat_index`; true when committed.
     ///
     /// The flat tet's two in-plane diagonals each carry a ring of tets on one
@@ -772,12 +1188,14 @@ impl LabeledTetComplex {
         walls: &BTreeSet<[u32; 3]>,
         largest: f64,
     ) -> bool {
-        if tet_sorted_faces(flat)
-            .iter()
-            .any(|face| walls.contains(face))
-        {
-            return false;
-        }
+        // A flat tet may touch the walls: a rotated grid quad on the boundary
+        // yields a sliver whose two wall faces are the quad's two surface
+        // triangles (MEASURED 2026-09-02: volume 1.9e-22 on the rotated comb,
+        // audit-refused because its centroid sits on the surface). Its
+        // removable edge is the OTHER diagonal, whose ring never crosses a
+        // wall, and the fan keeps both wall faces as faces of the new tets.
+        // Wall safety is therefore decided per edge inside
+        // `remove_edge_through_flat`, not by refusing every wall-touching flat.
         let [a, b, c, d] = flat;
         // Opposite-edge pairings; the two diagonals are the pairing whose
         // segments cross in the quad's plane.
@@ -807,6 +1225,11 @@ impl LabeledTetComplex {
                 && side(f[0], f[1], e[0]) * side(f[0], f[1], e[1]) < 0.0
         };
         let Some((diag_1, diag_2)) = pairings.into_iter().find(|(e, f)| crossing(*e, *f)) else {
+            if std::env::var_os("FS_MESH_TRACE_REPAIR").is_some() {
+                eprintln!(
+                    "TRACE repair: flat {flat:?}: no crossing diagonal pairing (not a planar quad)"
+                );
+            }
             return false;
         };
         for (edge, others) in [(diag_1, diag_2), (diag_2, diag_1)] {
@@ -815,6 +1238,15 @@ impl LabeledTetComplex {
             {
                 return true;
             }
+        }
+        if std::env::var_os("FS_MESH_TRACE_REPAIR").is_some() {
+            let wall_faces: Vec<[u32; 3]> = tet_sorted_faces(flat)
+                .into_iter()
+                .filter(|face| walls.contains(face))
+                .collect();
+            eprintln!(
+                "TRACE repair: flat {flat:?} (wall faces {wall_faces:?}): both diagonals {diag_1:?}/{diag_2:?} refused"
+            );
         }
         false
     }
@@ -855,20 +1287,40 @@ impl LabeledTetComplex {
         for _ in 0..64 {
             let face = sorted(u, v, apex);
             if walls.contains(&face) {
+                if std::env::var_os("FS_MESH_TRACE_REPAIR").is_some() {
+                    eprintln!(
+                        "TRACE repair:   flat #{flat_index} edge {edge:?} refused at point 1: if walls.contains(&face)"
+                    );
+                }
                 return false;
             }
             let Some(next) = other_tet(face, current) else {
+                if std::env::var_os("FS_MESH_TRACE_REPAIR").is_some() {
+                    eprintln!(
+                        "TRACE repair:   flat #{flat_index} edge {edge:?} refused at point 2: let Some(next) = other_tet(face, current) else"
+                    );
+                }
                 return false;
             };
             if next == flat_index {
                 break;
             }
             if self.region_of_tet[next] != region {
+                if std::env::var_os("FS_MESH_TRACE_REPAIR").is_some() {
+                    eprintln!(
+                        "TRACE repair:   flat #{flat_index} edge {edge:?} refused at point 3: if self.region_of_tet[next] != region"
+                    );
+                }
                 return false;
             }
             let tet = self.tets[next];
             let Some(next_apex) = tet.iter().copied().find(|&w| w != u && w != v && w != apex)
             else {
+                if std::env::var_os("FS_MESH_TRACE_REPAIR").is_some() {
+                    eprintln!(
+                        "TRACE repair:   flat #{flat_index} edge {edge:?} refused at point 4: else"
+                    );
+                }
                 return false;
             };
             ring.push(next);
@@ -877,6 +1329,11 @@ impl LabeledTetComplex {
             apex = next_apex;
         }
         if ring.is_empty() || *polygon.last().expect("polygon has b") != d {
+            if std::env::var_os("FS_MESH_TRACE_REPAIR").is_some() {
+                eprintln!(
+                    "TRACE repair:   flat #{flat_index} edge {edge:?} refused at point 5: if ring.is_empty() || *polygon.last().expect('polygon has b') != d"
+                );
+            }
             return false;
         }
         let old_volume: f64 = ring
@@ -956,6 +1413,32 @@ impl LabeledTetComplex {
             return true;
         }
         false
+    }
+
+    /// One uniform 1→8 refinement (the h-ladder control): every tet split
+    /// by its edge midpoints into four corner copies and four interior tets
+    /// on the octahedron's shortest diagonal, walls (source faces) split
+    /// four ways in place with the parent facet inherited, region labels
+    /// replicated, volume preserved. Recovery and flat-repair evidence are
+    /// carried unchanged: they describe the base this rung derives from.
+    /// See `crate::uniform` for the quality argument (Liu–Joe 1996).
+    #[must_use]
+    pub fn refine_uniform(&self) -> Self {
+        let split = crate::uniform::split_uniform(&self.positions, &self.tets, &self.source_faces);
+        let region_of_tet = self
+            .region_of_tet
+            .iter()
+            .flat_map(|&region| std::iter::repeat_n(region, 8))
+            .collect();
+        Self {
+            positions: split.positions,
+            tets: split.tets,
+            region_of_tet,
+            source_faces: split.source_faces,
+            length_unit: self.length_unit.clone(),
+            recovery: self.recovery,
+            flat_repair: self.flat_repair,
+        }
     }
 
     /// Deterministic tet-quality census (see [`QualityCensus`]).
@@ -1039,6 +1522,20 @@ impl LabeledTetComplex {
                 let at_s = winding_exact(soup, Point3::new(seed[0], seed[1], seed[2]));
                 let match_seed = (at_q - at_s).abs() < 0.25;
                 if *id == region && !match_seed {
+                    if std::env::var_os("FS_MESH_TRACE_AUDIT").is_some() {
+                        let p = &self.positions;
+                        let q = [
+                            p[tet[0] as usize],
+                            p[tet[1] as usize],
+                            p[tet[2] as usize],
+                            p[tet[3] as usize],
+                        ];
+                        let volume = tet_volume_triple(&self.positions, *tet);
+                        eprintln!(
+                            "TRACE audit: tet {i} {:?} region {} centroid {:?} winding {at_q:.4} vs seed {at_s:.4}; volume {volume:.3e}; vertices {:?}",
+                            tet, region.0, centroid, q
+                        );
+                    }
                     return Err(VolumetricError::Audit {
                         reason: "retained tet winding does not match its seed",
                     });
@@ -1123,7 +1620,10 @@ pub fn volumetricize(
 ) -> Result<AuditedLabeledTetComplex, VolumetricError> {
     let regions = plc.regions.clone();
     let admitted = plc.admit(policy, cx)?;
-    let recovered = admitted.recover(cx)?;
+    let mut recovered = admitted.recover(cx)?;
+    if let Some(refinement) = recovered.policy.refinement {
+        recovered = recovered.refine_constrained(refinement, cx)?;
+    }
     let (cavity_vol, exterior_vol) = discarded_volumes(&recovered);
     let mut labeled = recovered.carve_and_label(cx)?;
     labeled.repair_flat_tets();
@@ -1230,6 +1730,33 @@ fn triangle_area2(vertices: &[[f64; 3]], tri: [u32; 3]) -> f64 {
 
 fn sorted2(a: u32, b: u32) -> [u32; 2] {
     if a < b { [a, b] } else { [b, a] }
+}
+
+/// Edges of `region`'s tile surface (the correspondence rows whose parent
+/// facet is one of the region's triangles) used other than exactly twice,
+/// with their use counts; empty iff the tiles close the region.
+fn tile_surface_gaps(
+    rows: &[([u32; 3], u32)],
+    unique_facets: &[[u32; 3]],
+    region: &RegionSpec,
+) -> Vec<([u32; 2], u32)> {
+    let mine: BTreeSet<[u32; 3]> = region.triangles.iter().map(|t| sorted3(*t)).collect();
+    let mut edge_use: BTreeMap<[u32; 2], u32> = BTreeMap::new();
+    for (face, parent) in rows {
+        let Some(facet) = unique_facets.get(*parent as usize) else {
+            continue;
+        };
+        if !mine.contains(facet) {
+            continue;
+        }
+        for (x, y) in [(face[0], face[1]), (face[1], face[2]), (face[0], face[2])] {
+            *edge_use.entry(sorted2(x, y)).or_insert(0) += 1;
+        }
+    }
+    edge_use
+        .into_iter()
+        .filter(|(_, uses)| *uses != 2)
+        .collect()
 }
 
 fn sorted3(mut f: [u32; 3]) -> [u32; 3] {

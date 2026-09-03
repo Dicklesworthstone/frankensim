@@ -44,7 +44,7 @@ use std::hash::BuildHasherDefault;
 use std::ops::ControlFlow;
 use std::rc::Rc;
 
-use fs_airflow::qoi::JunctionRegion;
+use fs_airflow::qoi::{DiscretizationReceipt, JunctionRegion};
 use fs_airflow::registered_qoi::{
     OutputQuery, QoiExecutionLimits, QoiSemanticId, extract_registered_junction_maximum,
 };
@@ -109,7 +109,7 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// inputs now volumetricize to a different (and, for finned bodies, an
 /// existing rather than refused) tet complex, so a v10 conduction
 /// checkpoint must not resume into it.
-pub const SOLVE_DRIVER_VERSION: u32 = 11;
+pub const SOLVE_DRIVER_VERSION: u32 = 12;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";
@@ -143,9 +143,9 @@ const IMPORT_VERIFY_NO_CLAIM: &str =
     "does not prove the imported geometry is watertight, meshable, or physically meaningful";
 const MATERIAL_RESOLVE_AUTHORITY: &str = "declared-binding-resolution-against-admitted-card-packs";
 const FLOW_NETWORK_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-flow-network-receipt.v1";
-const CONDUCTION_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-conduction-receipt.v5";
+const CONDUCTION_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-conduction-receipt.v6";
 const CONDUCTION_SOLUTION_SCHEMA: &str = "frankensim.cli.solve-conduction-solution.v1";
-const QOI_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-qoi-candidate.v1";
+const QOI_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-qoi-candidate.v2";
 
 mod conjugate;
 mod report_stage;
@@ -1207,6 +1207,8 @@ struct QoiStageInputs {
     element_regions: Vec<u32>,
     region_ids: BTreeMap<String, u32>,
     solution_artifact: ContentHash,
+    /// An observed-order Richardson estimate from the h-ladder, when one ran.
+    discretization: Option<LadderDiscretization>,
 }
 
 #[derive(Debug)]
@@ -1214,6 +1216,282 @@ struct ConductionStageProduct {
     receipt: String,
     artifacts: Vec<RetainedSideArtifact>,
     qoi_inputs: QoiStageInputs,
+}
+
+/// `solver.fidelity` value that requests the uniform h-ladder. Any other
+/// fidelity (the example's `auto` included) solves the audited base once:
+/// three rungs of 1->8 refinement cost about seventy base solves, which is a
+/// convergence STUDY the project asks for, not the default path. MEASURED
+/// 2026-09-02 on the heatsink example (debug build): the three-rung ladder
+/// took 142 s against the declared 60 s solve-time budget.
+const SOLVER_FIDELITY_LADDER: &str = "ladder";
+/// Rungs the uniform h-ladder takes when the memory budget allows: three is
+/// the minimum for an OBSERVED convergence order (Richardson over the last
+/// three), so three is the target; the budget can stop it earlier.
+const LADDER_RUNGS: usize = 3;
+/// Uniform 1->8 refinement halves the mesh size exactly.
+const LADDER_REFINEMENT_RATIO: f64 = 2.0;
+/// Roache's grid-convergence-index safety factor for an observed order over
+/// three grids (ASME V&V 20-2009, section 2-4).
+const LADDER_SAFETY_FACTOR: f64 = 1.25;
+/// Eça & Hoekstra's factor on the data range when no order is observable.
+const LADDER_DATA_RANGE_FACTOR: f64 = 3.0;
+
+/// One solved rung: the region-owned mesh, its solution and what the receipt
+/// and the QoI stage need from it.
+struct RungSolved {
+    census: fs_mesh::QualityCensus,
+    mesh: fs_conduction::ConductionMesh,
+    solution: fs_conduction::ConductionSolution,
+    labels: Vec<u32>,
+    interface_pair_count: usize,
+    interface_evidence: Option<Vec<u8>>,
+    conjugate_fragment: Option<String>,
+}
+
+/// One row of the conduction receipt's `ladder.rungs`.
+#[derive(Debug, Clone, Copy)]
+struct LadderRung {
+    rung: usize,
+    tets: usize,
+    vertices: usize,
+    /// `(volume / tets)^(1/3)`, m — halves per rung by construction.
+    h_m: f64,
+    min_dihedral_deg: f64,
+    /// The QoI stage's functional on this rung: the nodal temperature
+    /// maximum over the ThermalLimit region (global maximum when the project
+    /// declares no temperature-maximum limit).
+    t_max_k: f64,
+    nonlinear_iterations: usize,
+    /// Krylov iterations summed over the nonlinear iterations.
+    krylov_iterations: usize,
+    /// The solver's final residual on this rung.
+    final_residual: f64,
+}
+
+/// Richardson extrapolation over the ladder (`ladder.richardson`). Only an
+/// `observed-order` estimate becomes the QoI budget's Discretization term;
+/// every other status leaves that term NO-DATA with the reason disclosed.
+#[derive(Debug, Clone)]
+struct LadderEstimate {
+    status: &'static str,
+    stop: &'static str,
+    rungs: usize,
+    order: Option<f64>,
+    extrapolated_k: Option<f64>,
+    half_width_k: Option<f64>,
+    detail: String,
+}
+
+/// The ThermalLimit region the QoI stage will extract on, if the project
+/// declares exactly the temperature-maximum limit that producer admits.
+fn ladder_target_region(spec: &ProjectSpec, region_ids: &BTreeMap<String, u32>) -> Option<u32> {
+    spec.requirements
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .find(|requirement| {
+            QoiSemanticId::parse(&requirement.qoi) == Some(QoiSemanticId::JunctionMaximum)
+        })
+        .and_then(|requirement| region_ids.get(&requirement.region).copied())
+}
+
+/// The QoI stage's junction maximum on one rung: the largest nodal
+/// temperature over vertices of tets labelled `region` (all vertices when
+/// there is no target region).
+fn ladder_functional(
+    labels: &[u32],
+    tets: &[[u32; 4]],
+    temperature: &[f64],
+    region: Option<u32>,
+) -> f64 {
+    let mut best = f64::NEG_INFINITY;
+    for (tet, label) in tets.iter().zip(labels) {
+        if region.is_some_and(|region| *label != region) {
+            continue;
+        }
+        for &v in tet {
+            best = best.max(temperature[v as usize]);
+        }
+    }
+    best
+}
+
+/// `(total volume / tets)^(1/3)` through the routed power.
+fn effective_h(positions: &[[f64; 3]], tets: &[[u32; 4]]) -> f64 {
+    let mut volume = 0.0f64;
+    for tet in tets {
+        let [a, b, c, d] = tet.map(|v| positions[v as usize]);
+        let u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+        let v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+        let w = [d[0] - a[0], d[1] - a[1], d[2] - a[2]];
+        let det = u[0] * (v[1] * w[2] - v[2] * w[1]) - u[1] * (v[0] * w[2] - v[2] * w[0])
+            + u[2] * (v[0] * w[1] - v[1] * w[0]);
+        volume += det.abs() / 6.0;
+    }
+    if tets.is_empty() {
+        return 0.0;
+    }
+    fs_math::det::pow(volume / tets.len() as f64, 1.0 / 3.0)
+}
+
+fn ladder_row(
+    rung: usize,
+    complex: &fs_mesh::LabeledTetComplex,
+    solved: &RungSolved,
+    region: Option<u32>,
+) -> LadderRung {
+    LadderRung {
+        rung,
+        tets: complex.tets().len(),
+        vertices: complex.positions().len(),
+        h_m: effective_h(complex.positions(), complex.tets()),
+        min_dihedral_deg: solved.census.min_dihedral_deg,
+        t_max_k: ladder_functional(
+            &solved.labels,
+            complex.tets(),
+            &solved.solution.temperature,
+            region,
+        ),
+        nonlinear_iterations: solved.solution.report.iterations,
+        final_residual: solved.solution.report.final_residual,
+        krylov_iterations: solved
+            .solution
+            .report
+            .linear
+            .iter()
+            .map(|linear| linear.iterations)
+            .sum(),
+    }
+}
+
+/// The discretization half-width from the ladder, by the grid-refinement
+/// procedure of Eça & Hoekstra (J. Comput. Phys. 262, 2014) with Roache's
+/// grid convergence index at its core:
+///
+/// * `observed-order` — over the last three rungs (ratio 2) the differences
+///   are monotone and the observed order `p = ln(|f2 - f1| / |f3 - f2|) / ln 2`
+///   lies in `[0.5, 2]` (P1 nodal values converge at order 2): half-width
+///   `1.25 |f3 - f2| / (2^p - 1)`, extrapolated `f3 + (f3 - f2)/(2^p - 1)`.
+/// * `data-range` — anything else three rungs can show (oscillatory, stalled,
+///   or an order outside `[0.5, 2]`): the conservative fallback
+///   `3 x (max - min)` of the QoI over every rung, which bounds how far the
+///   value moved across a factor four in mesh size. Disclosed as such: a
+///   bound on the observed variation, not an asymptotic estimate.
+/// * `converged-exactly` — three rungs agree bit-for-bit: half-width 0.
+/// * `single-rung` / `two-rungs` — no estimate (NO-DATA with the reason).
+fn richardson(rungs: &[LadderRung], stop: &'static str) -> LadderEstimate {
+    let n = rungs.len();
+    let none = |status: &'static str, detail: String| LadderEstimate {
+        status,
+        stop,
+        rungs: n,
+        order: None,
+        extrapolated_k: None,
+        half_width_k: None,
+        detail,
+    };
+    if n < 2 {
+        return none(
+            "single-rung",
+            format!(
+                "the ladder stopped at one rung ({stop}); a grid-refinement estimate needs three"
+            ),
+        );
+    }
+    if n == 2 {
+        let e21 = rungs[1].t_max_k - rungs[0].t_max_k;
+        return none(
+            "two-rungs",
+            format!(
+                "the ladder stopped at two rungs ({stop}); the coarse-to-fine change was {e21:e} K, not an observed order"
+            ),
+        );
+    }
+    let (f1, f2, f3) = (
+        rungs[n - 3].t_max_k,
+        rungs[n - 2].t_max_k,
+        rungs[n - 1].t_max_k,
+    );
+    let e21 = f2 - f1;
+    let e32 = f3 - f2;
+    if e21 == 0.0 && e32 == 0.0 {
+        return LadderEstimate {
+            status: "converged-exactly",
+            stop,
+            rungs: n,
+            order: None,
+            extrapolated_k: Some(f3),
+            half_width_k: Some(0.0),
+            detail: "three consecutive rungs agree bit-for-bit".to_string(),
+        };
+    }
+    let (low, high) = rungs
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(low, high), row| {
+            (low.min(row.t_max_k), high.max(row.t_max_k))
+        });
+    let data_range = |order: Option<f64>, why: String| LadderEstimate {
+        status: "data-range",
+        stop,
+        rungs: n,
+        order,
+        extrapolated_k: None,
+        half_width_k: Some(LADDER_DATA_RANGE_FACTOR * (high - low)),
+        detail: format!(
+            "{why}; Eça-Hoekstra fallback: {LADDER_DATA_RANGE_FACTOR} x the QoI range {:e} K over {n} rungs",
+            high - low
+        ),
+    };
+    if e32 == 0.0 || e21 == 0.0 {
+        return data_range(
+            None,
+            format!(
+                "consecutive changes {e21:e} K then {e32:e} K; one is exactly zero, so no order is observable"
+            ),
+        );
+    }
+    if (e21 > 0.0) != (e32 > 0.0) {
+        return data_range(
+            None,
+            format!(
+                "consecutive changes {e21:e} K then {e32:e} K alternate in sign; not in the asymptotic range"
+            ),
+        );
+    }
+    let order = fs_math::det::ln(e21.abs() / e32.abs()) / fs_math::det::ln(LADDER_REFINEMENT_RATIO);
+    if !(0.5..=2.0).contains(&order) {
+        return data_range(
+            Some(order),
+            format!(
+                "observed order {order:.3} outside [0.5, 2] (P1 nodal maximum expects 2); changes {e21:e} K then {e32:e} K"
+            ),
+        );
+    }
+    let denominator = fs_math::det::pow(LADDER_REFINEMENT_RATIO, order) - 1.0;
+    LadderEstimate {
+        status: "observed-order",
+        stop,
+        rungs: n,
+        order: Some(order),
+        extrapolated_k: Some(f3 + e32 / denominator),
+        half_width_k: Some(LADDER_SAFETY_FACTOR * e32.abs() / denominator),
+        detail: format!(
+            "Richardson over rungs {}-{} with ratio {LADDER_REFINEMENT_RATIO} and safety factor {LADDER_SAFETY_FACTOR} (grid convergence index)",
+            n - 3,
+            n - 1
+        ),
+    }
+}
+
+/// What the QoI stage may turn into the Discretization term.
+#[derive(Debug, Clone, Copy)]
+struct LadderDiscretization {
+    half_width_k: f64,
+    /// `observed-order`, `data-range`, or `converged-exactly`.
+    status: &'static str,
+    order: Option<f64>,
+    rungs: usize,
 }
 
 #[derive(Debug)]
@@ -1514,7 +1792,7 @@ fn resume_solve_inner<'a>(
     if work.is_requested() {
         return Err(cancelled_resume_refusal(run));
     }
-    let verified = load_latest_state(ledger, run, work)?;
+    let verified = load_latest_state(ledger, run, work, ResumeProof::Replay)?;
     let VerifiedResume {
         state,
         state_artifact,
@@ -3492,6 +3770,44 @@ fn qoi_receipt(
             )
         })?;
 
+    // The conduction stage's h-ladder, when it reached an OBSERVED order, is
+    // the retained authority for the Discretization term: the receipt cites
+    // the conduction receipt that carries the rungs and the estimate, and
+    // fs-airflow's extractor binds the term's provenance to it. Any other
+    // ladder outcome leaves the term NO-DATA with its reason in that receipt.
+    let discretization = inputs
+        .discretization
+        .map(|ladder| {
+            DiscretizationReceipt::try_new(
+                ladder.half_width_k,
+                fs_airflow::SourceProvenance::new(
+                    match ladder.status {
+                        "observed-order" => format!(
+                            "Richardson extrapolation over the conduction stage's uniform h-ladder: observed order {:.4} over {} rungs, refinement ratio 2, safety factor 1.25 (Roache grid convergence index; ASME V&V 20-2009 section 2-4)",
+                            ladder.order.unwrap_or(f64::NAN),
+                            ladder.rungs
+                        ),
+                        "converged-exactly" => format!(
+                            "the last three of {} uniform h-ladder rungs agree bit-for-bit",
+                            ladder.rungs
+                        ),
+                        _ => format!(
+                            "Eça & Hoekstra (J. Comput. Phys. 262, 2014) data-range fallback over the conduction stage's uniform h-ladder: 3 x the QoI range over {} rungs, refinement ratio 2 (no observable order)",
+                            ladder.rungs
+                        ),
+                    },
+                    format!("solve-conduction-receipt:{}", conduction_receipt.to_hex()),
+                ),
+            )
+            .map_err(|error| {
+                qoi_error(
+                    "cli-solve-qoi-discretization-receipt",
+                    format!("the ladder's discretization half-width was refused: {error}"),
+                    "report the driver defect; an observed-order estimate is finite and non-negative by construction",
+                )
+            })
+        })
+        .transpose()?;
     let query = OutputQuery::scalar_with_region(&requested[0].name, &requirement.region);
     let severity = match requirement.severity {
         RequirementSeverity::ReliabilityDerating => "reliability-derating",
@@ -3551,7 +3867,7 @@ fn qoi_receipt(
             &inputs.mesh,
             &inputs.solution,
             &junction,
-            None,
+            discretization.as_ref(),
             inputs.solution_artifact,
             limits,
             &cx,
@@ -3610,26 +3926,83 @@ fn qoi_receipt(
         ));
     }
     let mut terms = Vec::with_capacity(EngineeringUncertaintyKind::ALL.len());
+    let mut measured_terms = 0usize;
+    let kelvin = |name: &str, value: f64| {
+        canonical_f64(value).ok_or_else(|| {
+            qoi_error(
+                "cli-solve-qoi-nonfinite",
+                format!("budget field `{name}` is non-finite ({value})"),
+                "report the lower-layer budget defect",
+            )
+        })
+    };
     for kind in EngineeringUncertaintyKind::ALL {
         let term = row.uncertainty.term(kind);
-        let TermValue::Unknown { reason } = term.value() else {
-            return Err(qoi_error(
-                "cli-solve-qoi-budget-authority",
-                format!(
-                    "estimate-only term `{}` unexpectedly carries measured authority",
-                    kind.name()
-                ),
-                "route measured terms through the owning verified producer and bump the receipt schema",
-            ));
-        };
-        terms.push(format!(
-            "{{\"kind\":{},\"state\":\"no-data\",\"reason\":{},\"owner\":{},\"source\":{}}}",
-            json_string(kind.name()),
-            json_string(reason),
-            json_string(term.provenance().role()),
-            json_string(&term.provenance().digest().to_hex()),
-        ));
+        match (term.value(), inputs.discretization) {
+            (TermValue::Unknown { reason }, _) => terms.push(format!(
+                "{{\"kind\":{},\"state\":\"no-data\",\"reason\":{},\"owner\":{},\"source\":{}}}",
+                json_string(kind.name()),
+                json_string(reason),
+                json_string(term.provenance().role()),
+                json_string(&term.provenance().digest().to_hex()),
+            )),
+            // The one term this producer may carry as measured: the
+            // Discretization half-width the extractor bound to the ladder's
+            // receipt (role fixed by fs-airflow), and only when the
+            // conduction stage handed an observed-order estimate over.
+            (TermValue::IntervalBound { lower, upper }, Some(ladder))
+                if kind == EngineeringUncertaintyKind::Discretization
+                    && term.provenance().role() == "thermal-qoi-discretization-receipt" =>
+            {
+                measured_terms += 1;
+                let (method, factor) = match ladder.status {
+                    "observed-order" => ("richardson-gci", LADDER_SAFETY_FACTOR),
+                    "converged-exactly" => ("bitwise-agreement", 0.0),
+                    _ => ("eca-hoekstra-data-range", LADDER_DATA_RANGE_FACTOR),
+                };
+                let order = match ladder.order {
+                    Some(order) => kelvin("discretization.order", order)?,
+                    None => "null".to_string(),
+                };
+                terms.push(format!(
+                    "{{\"kind\":{},\"state\":\"interval\",\"lower_kelvin\":{},\"upper_kelvin\":{},\
+                     \"owner\":{},\"source\":{},\"derivation\":{{\"method\":{},\"ladder_status\":{},\
+                     \"order\":{},\"rungs\":{},\"refinement_ratio\":{},\"safety_factor\":{},\
+                     \"conduction_receipt\":{}}}}}",
+                    json_string(kind.name()),
+                    kelvin("discretization.lower", *lower)?,
+                    kelvin("discretization.upper", *upper)?,
+                    json_string(term.provenance().role()),
+                    json_string(&term.provenance().digest().to_hex()),
+                    json_string(method),
+                    json_string(ladder.status),
+                    order,
+                    ladder.rungs,
+                    kelvin("discretization.refinement_ratio", LADDER_REFINEMENT_RATIO)?,
+                    kelvin("discretization.safety_factor", factor)?,
+                    json_string(&conduction_receipt.to_hex()),
+                ));
+            }
+            _ => {
+                return Err(qoi_error(
+                    "cli-solve-qoi-budget-authority",
+                    format!(
+                        "estimate-only term `{}` unexpectedly carries measured authority",
+                        kind.name()
+                    ),
+                    "route measured terms through the owning verified producer and bump the receipt schema",
+                ));
+            }
+        }
     }
+    let no_data_terms = terms.len() - measured_terms;
+    let no_claim = if measured_terms == 0 {
+        "all eight engineering uncertainty terms are explicit NO-DATA; this receipt makes no binary compliance, DWR, validation, measurement, package, promotion, or conjugate-exchange claim".to_string()
+    } else {
+        format!(
+            "{no_data_terms} of eight engineering uncertainty terms are explicit NO-DATA; the discretization term is a grid-refinement half-width from the conduction stage's uniform h-ladder (method and ladder status in its derivation; see the conduction receipt), not a DWR bound; this receipt makes no binary compliance, DWR, validation, measurement, package, promotion, or conjugate-exchange claim"
+        )
+    };
     let nominal = canonical_f64(row.value).ok_or_else(|| {
         qoi_error(
             "cli-solve-qoi-nonfinite",
@@ -3652,7 +4025,7 @@ fn qoi_receipt(
         .primary_vertex
         .expect("junction maximum has a witness");
     let receipt = format!(
-        "{{\"schema\":{},\"run\":{},\"stage\":\"qoi\",\"qoi\":[{{\"name\":{},\"semantic\":{},\"region\":{},\"value\":{},\"unit\":\"kelvin\",\"witness_vertex\":{},\"color\":\"estimated\",\"identity\":{}}}],\"requirements\":[{{\"id\":{},\"effective_limit_kelvin\":{},\"required_margin_kelvin\":{},\"nominal_margin_kelvin\":{},\"outcome\":\"indeterminate\",\"identity\":{}}}],\"budget\":[{{\"identity\":{},\"qoi\":{},\"unit\":{},\"terms\":[{}],\"total\":\"unknown\"}}],\"lineage\":{{\"project\":{},\"conduction_receipt\":{},\"conduction_solution\":{}}},\"composition_identity\":{},\"authority\":\"estimated-candidate\",\"no_claim\":\"all eight engineering uncertainty terms are explicit NO-DATA; this receipt makes no binary compliance, DWR, validation, measurement, package, promotion, or conjugate-exchange claim\"}}",
+        "{{\"schema\":{},\"run\":{},\"stage\":\"qoi\",\"qoi\":[{{\"name\":{},\"semantic\":{},\"region\":{},\"value\":{},\"unit\":\"kelvin\",\"witness_vertex\":{},\"color\":\"estimated\",\"identity\":{}}}],\"requirements\":[{{\"id\":{},\"effective_limit_kelvin\":{},\"required_margin_kelvin\":{},\"nominal_margin_kelvin\":{},\"outcome\":\"indeterminate\",\"identity\":{}}}],\"budget\":[{{\"identity\":{},\"qoi\":{},\"unit\":{},\"terms\":[{}],\"total\":\"unknown\"}}],\"lineage\":{{\"project\":{},\"conduction_receipt\":{},\"conduction_solution\":{}}},\"composition_identity\":{},\"authority\":\"estimated-candidate\",\"no_claim\":{}}}",
         json_string(QOI_RECEIPT_SCHEMA),
         json_string(&run.to_hex()),
         json_string(&row.query_name),
@@ -3674,6 +4047,7 @@ fn qoi_receipt(
         json_string(&conduction_receipt.to_hex()),
         json_string(&inputs.solution_artifact.to_hex()),
         json_string(&composed.receipt_hash.to_hex()),
+        json_string(&no_claim),
     );
     work.charge(u64::try_from(receipt.len()).map_err(|_| {
         invocation_work_refusal(
@@ -3692,8 +4066,12 @@ fn qoi_receipt(
         progress: QoiProgressSummary {
             qoi_count: extracted.rows.len(),
             verdict: evaluation.outcome.as_str(),
-            weakest_term: Some("all-eight-no-data"),
-            budget_terms_measured: 0,
+            weakest_term: Some(if measured_terms == 0 {
+                "all-eight-no-data"
+            } else {
+                "seven-no-data"
+            }),
+            budget_terms_measured: measured_terms,
             budget_terms_total: terms.len(),
         },
     })
@@ -4151,7 +4529,7 @@ struct ConductionBoundaryLowering {
 fn conduction_boundary(
     setup: &ConductionSetup,
     mesh: &fs_conduction::ConductionMesh,
-    audited: &fs_mesh::AuditedLabeledTetComplex,
+    labeled: &fs_mesh::LabeledTetComplex,
     surfaces: &BTreeMap<String, AssignmentSurface>,
     regions: &[fs_mesh::RegionSpec],
     interface_faces: &BTreeSet<CoordinateFaceKey>,
@@ -4169,16 +4547,10 @@ fn conduction_boundary(
         .enumerate()
         .map(|(index, face)| (face, u32::try_from(index).expect("facet count fits u32")))
         .collect();
-    let parent_by_boundary: BTreeMap<CoordinateFaceKey, u32> = audited
-        .labeled()
+    let parent_by_boundary: BTreeMap<CoordinateFaceKey, u32> = labeled
         .source_faces()
         .iter()
-        .map(|(face, parent)| {
-            (
-                coordinate_face_key(audited.labeled().positions(), *face),
-                *parent,
-            )
-        })
+        .map(|(face, parent)| (coordinate_face_key(labeled.positions(), *face), *parent))
         .collect();
     let mut builder = fs_conduction::ThermalBoundaryBuilder::new(mesh);
     for row in &setup.boundaries {
@@ -4647,6 +5019,7 @@ fn conduction_receipt(
             recovery: recovery_budget(memory_bytes),
             max_vertices: positions.len(),
             max_tets,
+            refinement: None,
         };
         let audited = fs_mesh::volumetricize(
             fs_mesh::UnverifiedPlc::new(positions, regions.clone()),
@@ -4661,7 +5034,13 @@ fn conduction_receipt(
                 "repair region surfaces/seeds or increase the declared memory budget",
             ),
         })?;
-        let labeled = audited.labeled();
+        let ladder_region = ladder_target_region(spec, &region_ids);
+        // One solid solve on one rung of the h-ladder. Everything below the
+        // volumetric audit depends on the rung's complex (element materials,
+        // the region-owned mesh, source lumping, interface lowering, boundary
+        // lowering by parent facet, the conjugate exchange), so it is one
+        // function of the labeled complex and runs once per rung.
+        let solve_rung = |labeled: &fs_mesh::LabeledTetComplex| -> Result<RungSolved, SolveRefusal> {
         let census = labeled.quality();
         if let Some((what, fix)) = mesh_quality_refusal(&census) {
             return Err(conduction_error(
@@ -4750,7 +5129,7 @@ fn conduction_receipt(
             let lowering = conduction_boundary(
                 setup,
                 &mesh,
-                &audited,
+                labeled,
                 &surfaces,
                 &regions,
                 &interface_faces,
@@ -4762,6 +5141,14 @@ fn conduction_receipt(
             let mut config = fs_conduction::SolveConfig::default();
             if let Some(solver) = &spec.solver {
                 config.stop.residual_rtol = solver.tolerance_rel;
+                // The linear solve is gated on its RECOMPUTED residual; the
+                // crate default (1e-12) sits below what conjugate gradients
+                // attain in double precision once the h-ladder reaches tens of
+                // thousands of unknowns (MEASURED 2026-09-02: rung refused at
+                // 1.37e-12 after 1256 iterations). Two decades under the
+                // declared stop keeps the linear residual out of the nonlinear
+                // clause; the floor keeps a tiny declared tolerance sane.
+                config.linear.tolerance = (solver.tolerance_rel * 1e-2).max(1e-13);
             }
             if let Some(envelope) = &spec.envelope {
                 config.initial = fs_conduction::InitialGuess::Uniform(
@@ -4811,7 +5198,7 @@ fn conduction_receipt(
             let areas = conduction_boundary(
                 setup,
                 &mesh,
-                &audited,
+                labeled,
                 &surfaces,
                 &regions,
                 &interface_faces,
@@ -4892,27 +5279,96 @@ fn conduction_receipt(
         let interface_evidence = (!interface_resolution.pairs.is_empty())
             .then(|| interface_evidence_bytes(run, &interface_resolution))
             .transpose()?;
-        Ok((
-            audited,
+        Ok(RungSolved {
+            census,
             mesh,
             solution,
             labels,
-            region_ids,
-            interface_resolution.pairs.len(),
+            interface_pair_count: interface_resolution.pairs.len(),
             interface_evidence,
             conjugate_fragment,
-        ))
+        })
+        };
+        // The h-ladder: rung 0 is the audited base; every further rung is one
+        // uniform 1->8 refinement (fs-mesh CONTRACT item 16), taken while the
+        // next rung still fits the declared memory budget and the ladder is
+        // short of LADDER_RUNGS. Interface pairs bind to base faces, so a
+        // project with interfaces solves one rung and the receipt says so.
+        let mut complex = audited.labeled().clone();
+        let mut solved = solve_rung(&complex)?;
+        let mut rungs = vec![ladder_row(0, &complex, &solved, ladder_region)];
+        let mut ladder_stop: &'static str = "complete";
+        let ladder_requested = spec
+            .solver
+            .as_ref()
+            .is_some_and(|solver| solver.fidelity == SOLVER_FIDELITY_LADDER);
+        let trace_ladder = std::env::var_os("FS_CLI_TRACE_LADDER").is_some();
+        loop {
+            if !ladder_requested {
+                ladder_stop = "fidelity-single-rung";
+                break;
+            }
+            if rungs.len() >= LADDER_RUNGS {
+                break;
+            }
+            if solved.interface_pair_count > 0 {
+                ladder_stop = "interface-pairs-bind-base-faces";
+                break;
+            }
+            if complex.tets().len().saturating_mul(8) > max_tets {
+                ladder_stop = "memory-budget";
+                break;
+            }
+            if work.is_requested() {
+                return Err(cancelled());
+            }
+            complex = complex.refine_uniform();
+            let rung_started = std::time::Instant::now();
+            solved = solve_rung(&complex).map_err(|error| {
+                if matches!(error.code, "cli-solve-cancelled" | "cli-solve-work-envelope") {
+                    error
+                } else {
+                    conduction_error(
+                        error.code,
+                        format!(
+                            "h-ladder rung {} ({} tets, {} vertices): {}",
+                            rungs.len(),
+                            complex.tets().len(),
+                            complex.positions().len(),
+                            error.what
+                        ),
+                        error.fix,
+                    )
+                }
+            })?;
+            rungs.push(ladder_row(rungs.len(), &complex, &solved, ladder_region));
+            if trace_ladder {
+                let row = rungs[rungs.len() - 1];
+                eprintln!(
+                    "TRACE ladder rung {}: {} tets, {} vertices, h {:.4e} m, T_max {:.6} K, {} Krylov iterations, {:.2}s",
+                    row.rung,
+                    row.tets,
+                    row.vertices,
+                    row.h_m,
+                    row.t_max_k,
+                    row.krylov_iterations,
+                    rung_started.elapsed().as_secs_f64()
+                );
+            }
+        }
+        let estimate = richardson(&rungs, ladder_stop);
+        Ok((audited, solved, region_ids, rungs, estimate))
     })?;
-    let (
-        audited,
+    let (audited, solved, region_ids, ladder_rungs, ladder_estimate) = result;
+    let RungSolved {
+        census,
         mesh,
         solution,
-        element_regions,
-        region_ids,
+        labels: element_regions,
         interface_pair_count,
         interface_evidence,
         conjugate_fragment,
-    ) = result;
+    } = solved;
     work.checkpoint(SolveEvidencePhase::AssignmentDerivation, None, 1)
         .map_err(|_| cancelled())?;
 
@@ -4989,6 +5445,49 @@ fn conduction_receipt(
         .budgets
         .as_ref()
         .map_or(0, |budgets| budgets.memory_bytes);
+    let ladder_rows_json = ladder_rungs
+        .iter()
+        .map(|row| {
+            Ok(format!(
+                "{{\"rung\":{},\"tets\":{},\"vertices\":{},\"h_m\":{},\"min_dihedral_deg\":{},\
+                 \"t_max_k\":{},\"nonlinear_iterations\":{},\"krylov_iterations\":{},\
+                 \"final_residual\":{}}}",
+                row.rung,
+                row.tets,
+                row.vertices,
+                finite("ladder.h_m", row.h_m)?,
+                finite("ladder.min_dihedral_deg", row.min_dihedral_deg)?,
+                finite("ladder.t_max_k", row.t_max_k)?,
+                row.nonlinear_iterations,
+                row.krylov_iterations,
+                finite("ladder.final_residual", row.final_residual)?,
+            ))
+        })
+        .collect::<Result<Vec<_>, SolveRefusal>>()?
+        .join(",");
+    let optional = |name: &str, value: Option<f64>| -> Result<String, SolveRefusal> {
+        value.map_or(Ok("null".to_string()), |value| finite(name, value))
+    };
+    let ladder_estimate_json = format!(
+        "{{\"status\":{},\"rungs\":{},\"ratio\":{},\"safety_factor\":{},\"order\":{},\
+         \"extrapolated_k\":{},\"half_width_k\":{},\"detail\":{}}}",
+        json_string(ladder_estimate.status),
+        ladder_estimate.rungs,
+        finite("ladder.ratio", LADDER_REFINEMENT_RATIO)?,
+        finite("ladder.safety_factor", LADDER_SAFETY_FACTOR)?,
+        optional("ladder.order", ladder_estimate.order)?,
+        optional("ladder.extrapolated_k", ladder_estimate.extrapolated_k)?,
+        optional("ladder.half_width_k", ladder_estimate.half_width_k)?,
+        json_string(&ladder_estimate.detail),
+    );
+    let discretization = ladder_estimate
+        .half_width_k
+        .map(|half_width_k| LadderDiscretization {
+            half_width_k,
+            status: ladder_estimate.status,
+            order: ladder_estimate.order,
+            rungs: ladder_estimate.rungs,
+        });
     let receipt = format!(
         "{{\"schema\":{},\"run\":{},\"stage\":\"conduction\",\
          \"mesh\":{{\"vertices\":{},\"elements\":{},\"boundary_faces\":{},\
@@ -5002,6 +5501,7 @@ fn conduction_receipt(
          \"dirichlet_in_w\":{},\"closure_w\":{},\"relative_closure\":{}}},\
          \"recovery\":{{\"memory_bytes\":{},\"max_depth\":{},\"max_steiner\":{},\
          \"segments\":{},\"facets\":{},\"flat_tets\":{}}},\
+         \"ladder\":{{\"rungs\":[{}],\"stop\":{},\"richardson\":{}}},\
          \"conjugate\":{},\"authority\":{},\"no_claim\":{}}}",
         json_string(CONDUCTION_RECEIPT_SCHEMA),
         json_string(&run.to_hex()),
@@ -5010,7 +5510,7 @@ fn conduction_receipt(
         mesh.boundary().len(),
         audited.witness().per_region_auditor.len(),
         json_string(method),
-        audited.labeled().quality().to_json(),
+        census.to_json(),
         report
             .element_material_identity
             .expect("heterogeneous assignment"),
@@ -5037,6 +5537,9 @@ fn conduction_receipt(
         recovery_evidence.segments.to_json(),
         recovery_evidence.facets.to_json(),
         audited.labeled().flat_repair().to_json(),
+        ladder_rows_json,
+        json_string(ladder_estimate.stop),
+        ladder_estimate_json,
         conjugate_fragment.as_deref().unwrap_or("null"),
         json_string(CONDUCTION_AUTHORITY),
         json_string(CONDUCTION_NO_CLAIM),
@@ -5080,6 +5583,7 @@ fn conduction_receipt(
             element_regions,
             region_ids,
             solution_artifact,
+            discretization,
         },
     })
 }
@@ -5504,6 +6008,7 @@ fn evidence_bytes_equal(
     phase: SolveEvidencePhase,
     source_index: Option<usize>,
 ) -> Result<bool, EvidenceCompareError> {
+    let _span = TraceSpan::new("evidence_bytes_equal");
     work.checkpoint(phase, source_index, 0)
         .map_err(|_| EvidenceCompareError::Cancelled)?;
     if left.len() != right.len() {
@@ -5765,7 +6270,10 @@ fn read_artifact_info_controlled(
     let plan_index = Some(descriptor_index);
     work.checkpoint(phase, plan_index, 0)
         .map_err(|_| EvidenceReadError::Cancelled)?;
-    let result = ledger.artifact_info(artifact);
+    let result = {
+        let _raw = TraceSpan::new("raw.artifact_info");
+        ledger.artifact_info(artifact)
+    };
     work.checkpoint(phase, plan_index, 1)
         .map_err(|_| EvidenceReadError::Cancelled)?;
     let info = result.map_err(EvidenceReadError::Ledger)?;
@@ -5807,6 +6315,7 @@ fn read_candidate_op(
         .map_err(|_| CandidateOpReadError::Cancelled)?;
     let mut fields = CandidateOpFields::default();
     let mut delivered = 0u64;
+    let raw_span = TraceSpan::new("raw.read_op_fields_controlled");
     let controlled = ledger.read_op_fields_controlled(op, |field, offset, tile| {
         let callback_units = delivered.saturating_add(1);
         if work.checkpoint(phase, plan_index, callback_units).is_err() {
@@ -5847,6 +6356,7 @@ fn read_candidate_op(
             ControlFlow::Continue(())
         }
     });
+    drop(raw_span);
     work.checkpoint(phase, plan_index, u64::MAX)
         .map_err(|_| CandidateOpReadError::Cancelled)?;
     let controlled = controlled.map_err(CandidateOpReadError::Ledger)?;
@@ -6105,13 +6615,6 @@ fn find_import_summary(
     }
 }
 
-/// Load and independently attest the latest sealed driver state for a run.
-///
-/// The legacy envelope expectation used while decoding is only a bounded
-/// codec check: its byte identity is derived from the candidate bytes and
-/// grants no authority. Resume eligibility comes exclusively from
-/// [`validate_resume_candidate`], which re-attests the complete canonical
-/// operation and checkpoint chain before a governor is opened.
 thread_local! {
     /// Export-trace accumulators: helper name → (calls, seconds). Populated only
     /// when `FS_CLI_TRACE_EXPORT` is set; dumped by `dump_trace_spans`.
@@ -6153,10 +6656,18 @@ fn dump_trace_spans() {
     });
 }
 
+/// Load and independently attest the latest sealed driver state for a run.
+///
+/// The legacy envelope expectation used while decoding is only a bounded
+/// codec check: its byte identity is derived from the candidate bytes and
+/// grants no authority. Resume eligibility comes exclusively from
+/// [`validate_resume_candidate`], which re-attests the complete canonical
+/// operation and checkpoint chain before a governor is opened.
 fn load_latest_state(
     ledger: &Ledger,
     run: SolveRunId,
     work: EvidenceWork<'_>,
+    proof: ResumeProof,
 ) -> Result<VerifiedResume, SolveRefusal> {
     let mut cursor = None;
     let mut page_index = 0usize;
@@ -6349,6 +6860,7 @@ fn load_latest_state(
             discovery_op,
             work,
             &mut import_cache,
+            proof,
         )?;
         if trace_export {
             eprintln!(
@@ -6490,6 +7002,135 @@ fn parse_stage_discovery_ir(ir: &str, run: SolveRunId) -> Result<SolveStage, Str
 }
 
 #[allow(clippy::too_many_lines)]
+/// How a retained run is proven before a verb consumes it.
+///
+/// Both modes verify the same ledger evidence: driver-state shape, per-stage
+/// row identity (run, project hash, driver version, explicits), artifact-edge
+/// seals, exact lineage edges, and recovered card packs reproducing the run
+/// identity. They differ in what proves a retained *receipt*.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResumeProof {
+    /// Re-execute every retained stage and require the rebuilt receipt to be
+    /// bitwise the retained one. `solve --resume` continues computing from
+    /// the verified state, so it must know this binary reproduces it. Costs
+    /// a full solve.
+    Replay,
+    /// Re-hash every retained receipt against the hash the sealed driver
+    /// state recorded, and take stage outputs from the sealed operation
+    /// itself (kinds checked, exactly one solution artifact). Proves the run
+    /// is the recorded, sealed history under this driver version; does not
+    /// prove this binary would compute it again. Exports only re-emit what
+    /// was recorded, so this is their proof, and they disclose it. MEASURED
+    /// 2026-09-02 (bridge plan B8a): the replay made `report`/`package` cost
+    /// twice the solve (3.4 s of a 4.2 s validation on the heatsink example).
+    SealedEvidence,
+}
+
+impl ResumeProof {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Replay => "replayed-stages",
+            Self::SealedEvidence => "sealed-evidence",
+        }
+    }
+}
+
+/// Sealed-evidence proof of one retained receipt: its retained bytes re-hash
+/// to the receipt hash the sealed driver state recorded for that stage.
+fn require_sealed_receipt(
+    run: SolveRunId,
+    stage: SolveStage,
+    recorded: ContentHash,
+    receipt_text: &str,
+    work: EvidenceWork<'_>,
+    index: usize,
+) -> Result<(), SolveRefusal> {
+    work.checkpoint(
+        SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
+        Some(index),
+        0,
+    )
+    .map_err(|_| cancelled_resume_refusal(run))?;
+    let actual = hash_bytes(receipt_text.as_bytes());
+    if actual != recorded {
+        return Err(resume_identity(format!(
+            "the retained {} receipt re-hashes to {}, not the sealed driver state's {}",
+            stage.name(),
+            actual.to_hex(),
+            recorded.to_hex()
+        )));
+    }
+    Ok(())
+}
+
+/// Sealed conduction outputs: every `Out` edge of the sealed conduction
+/// operation other than its receipt and checkpoint, each retained with a
+/// conduction output kind, exactly one of them the solution the QoI stage
+/// consumed.
+struct SealedConductionOutputs {
+    out_edges: Vec<(EdgeRole, ContentHash)>,
+    solution: ContentHash,
+}
+
+fn sealed_conduction_outputs(
+    ledger: &Ledger,
+    run: SolveRunId,
+    stage: SolveStage,
+    edges: &[OpArtifactEdge],
+    receipt: ContentHash,
+    checkpoint: ContentHash,
+    work: EvidenceWork<'_>,
+    index: usize,
+) -> Result<SealedConductionOutputs, SolveRefusal> {
+    let mut out_edges = Vec::new();
+    let mut solution = None;
+    for edge in edges {
+        if edge.role != EdgeRole::Out || edge.artifact == receipt || edge.artifact == checkpoint {
+            continue;
+        }
+        let info = read_artifact_info_controlled(ledger, &edge.artifact, work, index)
+            .map_err(|error| match error {
+                EvidenceReadError::Cancelled => cancelled_resume_refusal(run),
+                EvidenceReadError::WorkEnvelope(error) => {
+                    invocation_work_refusal(Some(run), Some(stage), error)
+                }
+                EvidenceReadError::Ledger(error) => {
+                    resume_ledger("reading a conduction output descriptor failed", error)
+                }
+            })?
+            .ok_or_else(|| {
+                resume_identity(format!(
+                    "the sealed conduction output {} is not retained",
+                    edge.artifact.to_hex()
+                ))
+            })?;
+        match info.kind.as_str() {
+            CONDUCTION_SOLUTION_KIND => {
+                if solution.replace(edge.artifact).is_some() {
+                    return Err(resume_identity(
+                        "the sealed conduction operation retains more than one solution artifact",
+                    ));
+                }
+            }
+            CONDUCTION_INTERFACE_EVIDENCE_KIND => {}
+            other => {
+                return Err(resume_identity(format!(
+                    "the sealed conduction output {} has kind `{other}`, not a conduction output kind",
+                    edge.artifact.to_hex()
+                )));
+            }
+        }
+        out_edges.push((EdgeRole::Out, edge.artifact));
+    }
+    let solution = solution.ok_or_else(|| {
+        resume_identity("the sealed conduction operation retains no solution artifact")
+    })?;
+    Ok(SealedConductionOutputs {
+        out_edges,
+        solution,
+    })
+}
+
 fn validate_resume_candidate(
     ledger: &Ledger,
     run: SolveRunId,
@@ -6498,6 +7139,7 @@ fn validate_resume_candidate(
     discovery_op: i64,
     work: EvidenceWork<'_>,
     import_cache: &mut Option<Rc<ResumeImportCache>>,
+    proof: ResumeProof,
 ) -> Result<VerifiedResume, SolveRefusal> {
     let _span = TraceSpan::new("validate_resume_candidate");
     validate_state_shape(&state, run)?;
@@ -6566,6 +7208,7 @@ fn validate_resume_candidate(
     let mut predecessor_state = None;
     let mut predecessor_checkpoint: Option<SolveDriverState> = None;
     let mut last_expected_edges = Vec::new();
+    let mut sealed_solution: Option<ContentHash> = None;
     for (index, completed) in state.completed.iter().enumerate() {
         let stage = SolveStage::ALL[index];
         if stage.gap_dependency().is_some() || declaration_gap(stage, &project.spec).is_some() {
@@ -6965,58 +7608,69 @@ fn validate_resume_candidate(
             }
             SolveStage::FlowNetwork => {
                 let receipt_stage_index = Some(index);
-                work.checkpoint(
-                    SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
-                    receipt_stage_index,
-                    0,
-                )
-                .map_err(|_| cancelled_resume_refusal(run))?;
-                let rebuilt = flow_network_receipt(&project.spec, run, work, true).map(
-                    |(receipt, handoff)| {
-                        context.flow_network = Some(handoff);
-                        receipt
-                    },
-                );
-                work.checkpoint(
-                    SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
-                    receipt_stage_index,
-                    1,
-                )
-                .map_err(|_| cancelled_resume_refusal(run))?;
-                let expected_receipt = match rebuilt {
-                    Ok(rebuilt) => rebuilt,
-                    Err(error)
-                        if matches!(
-                            error.code,
-                            "cli-solve-cancelled" | "cli-solve-work-envelope"
-                        ) =>
-                    {
-                        return Err(error);
+                if proof == ResumeProof::Replay {
+                    work.checkpoint(
+                        SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
+                        receipt_stage_index,
+                        0,
+                    )
+                    .map_err(|_| cancelled_resume_refusal(run))?;
+                    let rebuilt = flow_network_receipt(&project.spec, run, work, true).map(
+                        |(receipt, handoff)| {
+                            context.flow_network = Some(handoff);
+                            receipt
+                        },
+                    );
+                    work.checkpoint(
+                        SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
+                        receipt_stage_index,
+                        1,
+                    )
+                    .map_err(|_| cancelled_resume_refusal(run))?;
+                    let expected_receipt = match rebuilt {
+                        Ok(rebuilt) => rebuilt,
+                        Err(error)
+                            if matches!(
+                                error.code,
+                                "cli-solve-cancelled" | "cli-solve-work-envelope"
+                            ) =>
+                        {
+                            return Err(error);
+                        }
+                        Err(error) => {
+                            return Err(resume_identity(format!(
+                                "the retained cooling declaration no longer lowers or solves: {}",
+                                error.what
+                            )));
+                        }
+                    };
+                    let receipt_matches = evidence_bytes_equal(
+                        receipt_text.as_bytes(),
+                        expected_receipt.as_bytes(),
+                        work,
+                        SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
+                        receipt_stage_index,
+                    )
+                    .map_err(|error| match error {
+                        EvidenceCompareError::Cancelled => cancelled_resume_refusal(run),
+                        EvidenceCompareError::WorkEnvelope(error) => {
+                            invocation_work_refusal(Some(run), Some(stage), error)
+                        }
+                    })?;
+                    if !receipt_matches {
+                        return Err(resume_identity(
+                            "the retained flow-network receipt is not the canonical driver receipt",
+                        ));
                     }
-                    Err(error) => {
-                        return Err(resume_identity(format!(
-                            "the retained cooling declaration no longer lowers or solves: {}",
-                            error.what
-                        )));
-                    }
-                };
-                let receipt_matches = evidence_bytes_equal(
-                    receipt_text.as_bytes(),
-                    expected_receipt.as_bytes(),
-                    work,
-                    SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
-                    receipt_stage_index,
-                )
-                .map_err(|error| match error {
-                    EvidenceCompareError::Cancelled => cancelled_resume_refusal(run),
-                    EvidenceCompareError::WorkEnvelope(error) => {
-                        invocation_work_refusal(Some(run), Some(stage), error)
-                    }
-                })?;
-                if !receipt_matches {
-                    return Err(resume_identity(
-                        "the retained flow-network receipt is not the canonical driver receipt",
-                    ));
+                } else {
+                    require_sealed_receipt(
+                        run,
+                        stage,
+                        completed.receipt,
+                        &receipt_text,
+                        work,
+                        index,
+                    )?;
                 }
                 let predecessor = predecessor_state.ok_or_else(|| {
                     resume_identity(
@@ -7031,73 +7685,96 @@ fn validate_resume_candidate(
                     resume_identity("the retained conduction stage has no recovered card-pack set")
                 })?;
                 let receipt_stage_index = Some(index);
-                work.checkpoint(
-                    SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
-                    receipt_stage_index,
-                    0,
-                )
-                .map_err(|_| cancelled_resume_refusal(run))?;
-                let rebuilt =
-                    conduction_receipt(ledger, &project.spec, cards, &context, run, work, true);
-                work.checkpoint(
-                    SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
-                    receipt_stage_index,
-                    1,
-                )
-                .map_err(|_| cancelled_resume_refusal(run))?;
-                let ConductionStageProduct {
-                    receipt: expected_receipt,
-                    artifacts: outputs,
-                    qoi_inputs,
-                } = match rebuilt {
-                    Ok(rebuilt) => rebuilt,
-                    Err(error)
-                        if matches!(
-                            error.code,
-                            "cli-solve-cancelled" | "cli-solve-work-envelope"
-                        ) =>
-                    {
-                        return Err(error);
+                if proof == ResumeProof::Replay {
+                    work.checkpoint(
+                        SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
+                        receipt_stage_index,
+                        0,
+                    )
+                    .map_err(|_| cancelled_resume_refusal(run))?;
+                    let rebuilt =
+                        conduction_receipt(ledger, &project.spec, cards, &context, run, work, true);
+                    work.checkpoint(
+                        SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
+                        receipt_stage_index,
+                        1,
+                    )
+                    .map_err(|_| cancelled_resume_refusal(run))?;
+                    let ConductionStageProduct {
+                        receipt: expected_receipt,
+                        artifacts: outputs,
+                        qoi_inputs,
+                    } = match rebuilt {
+                        Ok(rebuilt) => rebuilt,
+                        Err(error)
+                            if matches!(
+                                error.code,
+                                "cli-solve-cancelled" | "cli-solve-work-envelope"
+                            ) =>
+                        {
+                            return Err(error);
+                        }
+                        Err(error) => {
+                            return Err(resume_identity(format!(
+                                "the retained conduction problem no longer reproduces: {}",
+                                error.what
+                            )));
+                        }
+                    };
+                    let receipt_matches = evidence_bytes_equal(
+                        receipt_text.as_bytes(),
+                        expected_receipt.as_bytes(),
+                        work,
+                        SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
+                        receipt_stage_index,
+                    )
+                    .map_err(|error| match error {
+                        EvidenceCompareError::Cancelled => cancelled_resume_refusal(run),
+                        EvidenceCompareError::WorkEnvelope(error) => {
+                            invocation_work_refusal(Some(run), Some(stage), error)
+                        }
+                    })?;
+                    if !receipt_matches {
+                        return Err(resume_identity(
+                            "the retained conduction receipt is not the canonical driver receipt",
+                        ));
                     }
-                    Err(error) => {
-                        return Err(resume_identity(format!(
-                            "the retained conduction problem no longer reproduces: {}",
-                            error.what
-                        )));
+                    for output in &outputs {
+                        require_artifact_kind_resume(
+                            ledger,
+                            run,
+                            stage,
+                            output.artifact,
+                            output.kind,
+                            "conduction side artifact",
+                            work,
+                            index,
+                        )?;
+                        expected_edges.push((EdgeRole::Out, output.artifact));
                     }
-                };
-                let receipt_matches = evidence_bytes_equal(
-                    receipt_text.as_bytes(),
-                    expected_receipt.as_bytes(),
-                    work,
-                    SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
-                    receipt_stage_index,
-                )
-                .map_err(|error| match error {
-                    EvidenceCompareError::Cancelled => cancelled_resume_refusal(run),
-                    EvidenceCompareError::WorkEnvelope(error) => {
-                        invocation_work_refusal(Some(run), Some(stage), error)
-                    }
-                })?;
-                if !receipt_matches {
-                    return Err(resume_identity(
-                        "the retained conduction receipt is not the canonical driver receipt",
-                    ));
-                }
-                for output in &outputs {
-                    require_artifact_kind_resume(
-                        ledger,
+                    validated_qoi_inputs = Some(qoi_inputs);
+                } else {
+                    require_sealed_receipt(
                         run,
                         stage,
-                        output.artifact,
-                        output.kind,
-                        "conduction side artifact",
+                        completed.receipt,
+                        &receipt_text,
                         work,
                         index,
                     )?;
-                    expected_edges.push((EdgeRole::Out, output.artifact));
+                    let sealed = sealed_conduction_outputs(
+                        ledger,
+                        run,
+                        stage,
+                        &edges,
+                        completed.receipt,
+                        checkpoint_hash,
+                        work,
+                        index,
+                    )?;
+                    expected_edges.extend(sealed.out_edges);
+                    sealed_solution = Some(sealed.solution);
                 }
-                validated_qoi_inputs = Some(qoi_inputs);
                 let predecessor = predecessor_state.ok_or_else(|| {
                     resume_identity(
                         "the retained conduction stage has no verified flow-network predecessor",
@@ -7107,61 +7784,72 @@ fn validate_resume_candidate(
             }
             SolveStage::Qoi => {
                 let receipt_stage_index = Some(index);
-                work.checkpoint(
-                    SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
-                    receipt_stage_index,
-                    0,
-                )
-                .map_err(|_| cancelled_resume_refusal(run))?;
-                let rebuilt = qoi_receipt(
-                    &project.spec,
-                    &context,
-                    &state,
-                    run,
-                    project_hash,
-                    work,
-                    true,
-                );
-                work.checkpoint(
-                    SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
-                    receipt_stage_index,
-                    1,
-                )
-                .map_err(|_| cancelled_resume_refusal(run))?;
-                let expected_receipt = match rebuilt {
-                    Ok(product) => product.receipt,
-                    Err(error)
-                        if matches!(
-                            error.code,
-                            "cli-solve-cancelled" | "cli-solve-work-envelope"
-                        ) =>
-                    {
-                        return Err(error);
+                if proof == ResumeProof::Replay {
+                    work.checkpoint(
+                        SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
+                        receipt_stage_index,
+                        0,
+                    )
+                    .map_err(|_| cancelled_resume_refusal(run))?;
+                    let rebuilt = qoi_receipt(
+                        &project.spec,
+                        &context,
+                        &state,
+                        run,
+                        project_hash,
+                        work,
+                        true,
+                    );
+                    work.checkpoint(
+                        SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
+                        receipt_stage_index,
+                        1,
+                    )
+                    .map_err(|_| cancelled_resume_refusal(run))?;
+                    let expected_receipt = match rebuilt {
+                        Ok(product) => product.receipt,
+                        Err(error)
+                            if matches!(
+                                error.code,
+                                "cli-solve-cancelled" | "cli-solve-work-envelope"
+                            ) =>
+                        {
+                            return Err(error);
+                        }
+                        Err(error) => {
+                            return Err(resume_identity(format!(
+                                "the retained QoI no longer reproduces: {}",
+                                error.what
+                            )));
+                        }
+                    };
+                    let receipt_matches = evidence_bytes_equal(
+                        receipt_text.as_bytes(),
+                        expected_receipt.as_bytes(),
+                        work,
+                        SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
+                        receipt_stage_index,
+                    )
+                    .map_err(|error| match error {
+                        EvidenceCompareError::Cancelled => cancelled_resume_refusal(run),
+                        EvidenceCompareError::WorkEnvelope(error) => {
+                            invocation_work_refusal(Some(run), Some(stage), error)
+                        }
+                    })?;
+                    if !receipt_matches {
+                        return Err(resume_identity(
+                            "the retained QoI receipt is not the canonical driver receipt",
+                        ));
                     }
-                    Err(error) => {
-                        return Err(resume_identity(format!(
-                            "the retained QoI no longer reproduces: {}",
-                            error.what
-                        )));
-                    }
-                };
-                let receipt_matches = evidence_bytes_equal(
-                    receipt_text.as_bytes(),
-                    expected_receipt.as_bytes(),
-                    work,
-                    SolveEvidencePhase::ResumeStageReceiptCanonicalCompare,
-                    receipt_stage_index,
-                )
-                .map_err(|error| match error {
-                    EvidenceCompareError::Cancelled => cancelled_resume_refusal(run),
-                    EvidenceCompareError::WorkEnvelope(error) => {
-                        invocation_work_refusal(Some(run), Some(stage), error)
-                    }
-                })?;
-                if !receipt_matches {
-                    return Err(resume_identity(
-                        "the retained QoI receipt is not the canonical driver receipt",
-                    ));
+                } else {
+                    require_sealed_receipt(
+                        run,
+                        stage,
+                        completed.receipt,
+                        &receipt_text,
+                        work,
+                        index,
+                    )?;
                 }
                 let predecessor = predecessor_state.ok_or_else(|| {
                     resume_identity(
@@ -7182,10 +7870,23 @@ fn validate_resume_candidate(
                         })?;
                     expected_edges.push((EdgeRole::In, completed.receipt));
                 }
-                let inputs = context.qoi_inputs.as_ref().ok_or_else(|| {
-                    resume_identity("the retained QoI stage has no rebuilt conduction inputs")
-                })?;
-                expected_edges.push((EdgeRole::In, inputs.solution_artifact));
+                let solution_artifact = match proof {
+                    ResumeProof::Replay => context
+                        .qoi_inputs
+                        .as_ref()
+                        .map(|inputs| inputs.solution_artifact)
+                        .ok_or_else(|| {
+                            resume_identity(
+                                "the retained QoI stage has no rebuilt conduction inputs",
+                            )
+                        })?,
+                    ResumeProof::SealedEvidence => sealed_solution.ok_or_else(|| {
+                        resume_identity(
+                            "the retained QoI stage has no sealed conduction solution artifact",
+                        )
+                    })?,
+                };
+                expected_edges.push((EdgeRole::In, solution_artifact));
             }
             SolveStage::Report => {
                 let receipt_stage_index = Some(index);
@@ -7369,6 +8070,7 @@ fn validate_resume_candidate(
 }
 
 fn validate_state_shape(state: &SolveDriverState, run: SolveRunId) -> Result<(), SolveRefusal> {
+    let _span = TraceSpan::new("validate_state_shape");
     if state.run != *run.as_bytes() {
         return Err(resume_identity(
             "the retained driver state carries a different run identity",
@@ -7480,6 +8182,7 @@ fn validate_checkpoint_prefix(
     index: usize,
     predecessor: Option<&SolveDriverState>,
 ) -> Result<(), SolveRefusal> {
+    let _span = TraceSpan::new("validate_checkpoint_prefix");
     if checkpoint.run != final_state.run
         || checkpoint.project != final_state.project
         || checkpoint.completed.as_slice() != &final_state.completed[..=index]
@@ -7569,6 +8272,7 @@ fn read_retained_project_source(
     edges: &[OpArtifactEdge],
     work: EvidenceWork<'_>,
 ) -> Result<(ContentHash, String), SolveRefusal> {
+    let _span = TraceSpan::new("read_retained_project_source");
     let mut sources = Vec::new();
     for (descriptor_index, edge) in edges.iter().enumerate() {
         if edge.role != EdgeRole::In {
@@ -7642,6 +8346,7 @@ fn attest_retained_project(
     source: &str,
     work: EvidenceWork<'_>,
 ) -> Result<ResumeImportCache, SolveRefusal> {
+    let _span = TraceSpan::new("attest_retained_project");
     work.checkpoint(SolveEvidencePhase::ResumeProjectParse, None, 0)
         .map_err(|_| cancelled_resume_refusal(run))?;
     let project = fs_project::parse_sexpr_migrating(source).map(|migrated| migrated.decoded);
@@ -7843,6 +8548,7 @@ fn cancelled_resume_refusal(run: SolveRunId) -> SolveRefusal {
 }
 
 fn resume_import_envelope(run: SolveRunId, what: impl Into<String>) -> SolveRefusal {
+    let _span = TraceSpan::new("resume_import_envelope");
     SolveRefusal {
         code: "cli-solve-import-envelope",
         stage: Some(SolveStage::ImportVerify.name()),
@@ -7948,6 +8654,7 @@ fn require_artifact_kind_resume(
     work: EvidenceWork<'_>,
     descriptor_index: usize,
 ) -> Result<(), SolveRefusal> {
+    let _span = TraceSpan::new("require_artifact_kind_resume");
     let info = read_artifact_info_controlled(ledger, &artifact, work, descriptor_index)
         .map_err(|error| match error {
             EvidenceReadError::Cancelled => cancelled_resume_refusal(run),
@@ -7987,6 +8694,7 @@ fn recover_card_packs_resume(
     edges: &[OpArtifactEdge],
     work: EvidenceWork<'_>,
 ) -> Result<(CardPackSet, Vec<ContentHash>), SolveRefusal> {
+    let _span = TraceSpan::new("recover_card_packs_resume");
     let mut builder = CardPackSetBuilder::new();
     let mut artifacts = Vec::new();
     for kind in [CardPackKind::Material, CardPackKind::Interface] {
@@ -8069,6 +8777,7 @@ fn artifacts_with_kind_resume(
     kind: &str,
     work: EvidenceWork<'_>,
 ) -> Result<Vec<ContentHash>, SolveRefusal> {
+    let _span = TraceSpan::new("artifacts_with_kind_resume");
     let mut matches = Vec::new();
     for (descriptor_index, edge) in edges.iter().enumerate() {
         if edge.role != role {
@@ -8107,6 +8816,7 @@ fn read_text_resume(
     read_phase: SolveEvidencePhase,
     text_phase: SolveEvidencePhase,
 ) -> Result<String, SolveRefusal> {
+    let _span = TraceSpan::new("read_text_resume");
     let bytes = materialize_evidence_artifact(ledger, work, artifact, cap, read_phase, None)
         .map_err(|error| match error {
             EvidenceReadError::Cancelled => cancelled_resume_refusal(run),
@@ -8142,6 +8852,7 @@ fn has_edge_controlled(
     work: EvidenceWork<'_>,
     candidate_index: usize,
 ) -> Result<bool, EvidenceCompareError> {
+    let _span = TraceSpan::new("has_edge_controlled");
     let phase = SolveEvidencePhase::EdgeSetCompare;
     let plan_index = Some(candidate_index);
     work.checkpoint(phase, plan_index, 0)
@@ -8237,6 +8948,7 @@ fn require_exact_edges(
     work: EvidenceWork<'_>,
     candidate_index: usize,
 ) -> Result<(), SolveRefusal> {
+    let _span = TraceSpan::new("require_exact_edges");
     let matches =
         edge_sets_match_controlled(edges, expected, work, candidate_index).map_err(|error| {
             match error {
@@ -8266,6 +8978,7 @@ fn validate_import_candidate(
     candidate_index: usize,
     expectations: RenderedExplicitsRef<'_>,
 ) -> Result<ImportSummary, ImportSummaryError> {
+    let _span = TraceSpan::new("validate_import_candidate");
     let ImportCandidateLocator {
         op,
         summary_artifact,
@@ -11539,5 +12252,42 @@ mod tests {
         assert!(mesh_quality_refusal(&census(0, 2.5, 4)).is_none());
         // Exactly the floor is admitted (the floor is a strict lower bound).
         assert!(mesh_quality_refusal(&census(0, CONDUCTION_MIN_DIHEDRAL_DEG, 0)).is_none());
+    }
+
+    /// Falsifier for the sealed-evidence export proof (B8a): the retained
+    /// receipt bytes must re-hash to the hash the sealed driver state
+    /// recorded; one changed byte after sealing refuses with the
+    /// resume-identity code. Without this check an export would happily
+    /// project a receipt somebody rewrote in place.
+    #[test]
+    fn sealed_receipt_proof_rehashes_the_retained_bytes() {
+        let gate = CancelGate::new_clock_free();
+        let invocation = super::InvocationWorkLedger::default();
+        let work = super::EvidenceWork::new(&gate, None, &invocation);
+        let run = super::SolveRunId::parse_hex(
+            "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        )
+        .expect("64-hex run id");
+        let text = "{\"schema\":\"frankensim.cli.solve-conduction-receipt.v6\",\"value\":1}";
+        let recorded = hash_bytes(text.as_bytes());
+        super::require_sealed_receipt(run, super::SolveStage::Conduction, recorded, text, work, 4)
+            .expect("the sealed bytes prove themselves");
+        let tampered = "{\"schema\":\"frankensim.cli.solve-conduction-receipt.v6\",\"value\":2}";
+        let refusal = super::require_sealed_receipt(
+            run,
+            super::SolveStage::Conduction,
+            recorded,
+            tampered,
+            work,
+            4,
+        )
+        .expect_err("one changed byte after sealing must refuse");
+        assert_eq!(refusal.code, "cli-solve-resume-identity");
+        assert!(refusal.what.contains("re-hashes to"), "{}", refusal.what);
+        assert!(
+            refusal.what.contains(&recorded.to_hex()),
+            "{}",
+            refusal.what
+        );
     }
 }

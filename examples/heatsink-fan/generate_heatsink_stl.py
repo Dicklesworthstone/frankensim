@@ -10,7 +10,20 @@ comb_prism.rs) builds the identical triangulation in Rust. Facet vertices are
 written with 6 decimals, exactly like the values used to build them.
 
 Usage: python3 examples/heatsink-fan/generate_heatsink_stl.py examples/heatsink-fan/heatsink.stl [NFINS]
+       python3 examples/heatsink-fan/generate_heatsink_stl.py OUT [NFINS] --rotate ZDEG XDEG --shift X Y Z
+
+`--rotate`/`--shift` write the SAME shell rotated (about z, then x) and
+translated: the rotation-invariance twin for the mesh corpus (bead
+q61wp.46). Every facet is then oblique and no coordinate is dyadic, which is
+what real CAD looks like. Rotated vertices are written with round-trip-exact
+digits (Python repr). The tracked twin `heatsink-rotated.stl` is
+`--rotate 35 21 --shift 0.1 0.2 0.05`; MEASURED 2026-09-02 it meshes with
+the exact volume (378 tets, 98 Steiner points; fs-mesh CONTRACT items 18-21
+record the kernel and recovery defects that took). A copy rounded to nine
+decimals does NOT mesh: every coplanar facet grid becomes a 1e-10-noisy
+point cloud. The precision an STL carries is part of its meshability.
 """
+import math
 import sys
 
 BASE_X, BASE_Y, BASE_Z = 0.080, 0.060, 0.005
@@ -71,19 +84,55 @@ def build(nfins):
     return facets, vol
 
 
+def transform(rotate, shift):
+    """Rotation about z by rotate[0] degrees, then about x by rotate[1], then shift."""
+    if rotate is None and shift is None:
+        return None
+    zr = math.radians(rotate[0]) if rotate else 0.0
+    xr = math.radians(rotate[1]) if rotate else 0.0
+    sz, cz, sx, cx = math.sin(zr), math.cos(zr), math.sin(xr), math.cos(xr)
+    dx, dy, dz = shift if shift else (0.0, 0.0, 0.0)
+
+    def point(p):
+        q = (cz * p[0] - sz * p[1], sz * p[0] + cz * p[1], p[2])
+        r = (q[0], cx * q[1] - sx * q[2], sx * q[1] + cx * q[2])
+        return (r[0] + dx, r[1] + dy, r[2] + dz)
+
+    def vector(v):
+        q = (cz * v[0] - sz * v[1], sz * v[0] + cz * v[1], v[2])
+        return (q[0], cx * q[1] - sx * q[2], sx * q[1] + cx * q[2])
+
+    return point, vector
+
+
 def main():
-    out = sys.argv[1]
-    nfins = int(sys.argv[2]) if len(sys.argv) > 2 else 4
+    argv = sys.argv[1:]
+    rotate = shift = None
+    if "--rotate" in argv:
+        i = argv.index("--rotate")
+        rotate = (float(argv[i + 1]), float(argv[i + 2]))
+        del argv[i:i + 3]
+    if "--shift" in argv:
+        i = argv.index("--shift")
+        shift = (float(argv[i + 1]), float(argv[i + 2]), float(argv[i + 3]))
+        del argv[i:i + 4]
+    out = argv[0]
+    nfins = int(argv[1]) if len(argv) > 1 else 4
     facets, vol = build(nfins)
+    mapping = transform(rotate, shift)
+    fmt = "%f" if mapping is None else "%r"
     with open(out, "w") as f:
         f.write("solid heatsink\n")
         for nrm, a, b, c in facets:
-            f.write("  facet normal %f %f %f\n    outer loop\n" % nrm)
+            if mapping is not None:
+                point, vector = mapping
+                nrm, a, b, c = vector(nrm), point(a), point(b), point(c)
+            f.write(("  facet normal %s %s %s\n    outer loop\n" % ((fmt,) * 3)) % nrm)
             for v in (a, b, c):
-                f.write("      vertex %f %f %f\n" % v)
+                f.write(("      vertex %s %s %s\n" % ((fmt,) * 3)) % v)
             f.write("    endloop\n  endfacet\n")
         f.write("endsolid heatsink\n")
-    print(f"facets={len(facets)} fins={nfins} volume_m3={vol:.6e} -> {out}")
+    print(f"facets={len(facets)} fins={nfins} volume_m3={vol:.6e} rotate={rotate} shift={shift} -> {out}")
 
 
 if __name__ == "__main__":

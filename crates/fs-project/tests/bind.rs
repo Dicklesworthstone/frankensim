@@ -12,7 +12,6 @@ use std::collections::BTreeMap;
 use fs_blake3::hash_bytes;
 use fs_conduction::{ConductionMesh, ThermalBoundaryBuilder, ThermalInterfaces};
 use fs_evidence::{Color, ValidityDomain};
-use fs_geom::TetComplex;
 use fs_matdb::{
     ClaimSet, InterfaceSystemCard, InterpolationPolicy, MaterialCard, MaterialStateId,
     PINNED_CLAIM_POLICY_TAG, PropertyClaim, PropertyKey, PropertyValue, Provenance, QueryPoint,
@@ -32,6 +31,7 @@ use fs_qty::QtyAny;
 use fs_regime::{
     AxisViolationKind, EnvelopeCoverage, OperatingPoint, QoiClaim, audit_product_output_with_cards,
 };
+use fs_rep_mesh::TetComplex;
 use fs_scenario::Violation;
 
 const KELVIN: fs_qty::Dims = fs_qty::Dims([0, 0, 0, 1, 0, 0]);

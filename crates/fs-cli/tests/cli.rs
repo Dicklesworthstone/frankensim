@@ -892,6 +892,13 @@ fn g1_run_completes_seven_stages_and_exports_report_and_package_for_the_referenc
     ]));
     assert_eq!(again.exit_code, exit::SUCCESS, "stderr: {}", again.stderr);
     assert!(again.stdout.contains("\"stages_completed\":7"));
+    assert!(
+        again
+            .stdout
+            .contains("\"verification\":\"sealed-evidence\""),
+        "exports prove the run by sealed evidence, never by replaying physics: {}",
+        again.stdout
+    );
     let packaged = run(args(&[
         "--json",
         "package",
@@ -1089,5 +1096,245 @@ fn g0_run_stops_at_the_conduction_gap_when_the_project_declares_no_conduction() 
     assert!(
         exported.is_empty(),
         "a gapped run must export nothing: {exported:?}"
+    );
+}
+
+/// Hex content hashes of every `solve-stage-receipt` the run retained, in op
+/// order (import-verify, assign, material-resolve, flow-network, conduction,
+/// qoi, report).
+fn stage_receipt_hashes(ledger: &fs_ledger::Ledger, run_hex: &str) -> Vec<String> {
+    let run = fs_cli::SolveRunId::parse_hex(run_hex).expect("hex run id");
+    let mut ids = ledger
+        .visible_op_ids(fs_ledger::MAIN_BRANCH, None)
+        .expect("ops");
+    ids.sort_unstable();
+    let mut receipts = Vec::new();
+    for id in ids {
+        let Some(row) = ledger.op(id).expect("op row") else {
+            continue;
+        };
+        if row.session.as_deref() != Some(run.as_bytes().as_slice())
+            || row.outcome.as_deref() != Some("ok")
+        {
+            continue;
+        }
+        let edges = ledger.op_artifact_edges_bounded(id, 64).expect("edges");
+        for edge in &edges.edges {
+            if edge.role != fs_ledger::EdgeRole::Out {
+                continue;
+            }
+            let info = ledger
+                .artifact_info(&edge.artifact)
+                .expect("info")
+                .expect("artifact");
+            if info.kind == "solve-stage-receipt" {
+                receipts.push(edge.artifact.to_hex());
+            }
+        }
+    }
+    receipts
+}
+
+fn receipt_text(ledger: &fs_ledger::Ledger, hex: &str) -> String {
+    let hash = fs_ledger::ContentHash::from_hex(hex).expect("content hash");
+    let bytes = ledger
+        .get_artifact(&hash)
+        .expect("read")
+        .expect("retained receipt");
+    String::from_utf8(bytes).expect("receipt is UTF-8")
+}
+
+/// The number that follows `marker` in a receipt.
+fn number_after(text: &str, marker: &str) -> f64 {
+    text.split(marker)
+        .nth(1)
+        .and_then(|rest| rest.split([',', '}']).next())
+        .and_then(|value| value.parse::<f64>().ok())
+        .unwrap_or_else(|| panic!("numeric field after `{marker}` in {text}"))
+}
+
+/// Journey A physical anchor (bead frankensim-rc-root-q61wp.14 item 4): a
+/// Level-A hand calculation from the same project and card, with no
+/// independent loose tolerance.
+///
+/// The reference plate dissipates `Q` uniformly and loses it through one
+/// uniform convection boundary `h` to `T_ref`, with no other heat path. At
+/// steady state the surface energy balance is an identity, not a model:
+/// `h · ∮ (T − T_ref) dA = Q`, so the area-weighted mean surface excess is
+/// exactly `Q / (h · A)` and the solver's minimum and maximum must bracket
+/// `T_ref + Q / (h · A)`. That bracket has no tolerance. The width of the
+/// bracket is the solid's internal spread, which conduction bounds by the
+/// Biot number `h · L / k`: with aluminium (`k` read from the card) and
+/// `h = 10 W/m²K` the spread must be a small fraction of the lumped excess.
+/// The receipt's own energy block must close the same balance. Every input
+/// is read from the project, the card, and the STL; every output from the
+/// retained conduction and QoI receipts.
+#[test]
+fn ja_005_level_a_energy_balance_brackets_the_retained_maximum() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let fsim = root.join("data/reference-project/cooling-reference.fsim");
+    let stl = root.join("data/reference-project/plate.stl");
+    let pack = root.join("data/reference-project/aa6061.fsmcdpk");
+    let dir = scratch("ja-005");
+    let ledger_path = dir.join("anchor.db");
+
+    // Inputs from the project itself.
+    let source = std::fs::read_to_string(&fsim).expect("reference project reads");
+    let decoded = fs_project::parse_sexpr(&source).expect("reference project parses");
+    let power = decoded.spec.power.as_ref().expect("power declared");
+    assert_eq!(power.len(), 1, "one dissipating region");
+    let q_w = power[0].watts.value * power[0].duty;
+    let conduction = decoded
+        .spec
+        .cooling
+        .as_ref()
+        .expect("cooling declared")
+        .conduction
+        .as_ref()
+        .expect("conduction declared");
+    assert_eq!(conduction.boundaries.len(), 1, "one thermal boundary");
+    assert!(!conduction.adiabatic_remainder);
+    let (h, t_ref) = match &conduction.boundaries[0].condition {
+        fs_project::spec::ThermalBoundaryCondition::Convection {
+            coefficient,
+            reference_temperature,
+        } => (coefficient.value, reference_temperature.value),
+        other => {
+            panic!("the reference plate declares a coefficient convection law, found {other:?}")
+        }
+    };
+    assert!(q_w > 0.0 && h > 0.0 && t_ref > 0.0);
+
+    // Conductivity from the card the project binds.
+    let card = fs_matdb::NormalizedMaterialCardPack::from_bytes(
+        &std::fs::read(&pack).expect("card pack reads"),
+    )
+    .expect("card pack parses");
+    let claims = card.card().claims_for("thermal-conductivity");
+    assert_eq!(claims.len(), 1, "one conductivity claim");
+    let k = match &claims[0].1.value {
+        fs_matdb::PropertyValue::Scalar { value, .. } => *value,
+        other => panic!("scalar conductivity expected, found {other:?}"),
+    };
+    assert!(k > 0.0);
+
+    // Wetted area and characteristic length from the STL.
+    let soup = fs_io::quarantine::import_mesh(&std::fs::read(&stl).expect("stl reads"), "stl")
+        .expect("plate imports")
+        .into_inner();
+    let mut area = 0.0_f64;
+    let (mut lo, mut hi) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
+    for point in &soup.positions {
+        for (axis, value) in [point.x, point.y, point.z].into_iter().enumerate() {
+            lo[axis] = lo[axis].min(value);
+            hi[axis] = hi[axis].max(value);
+        }
+    }
+    for t in 0..soup.triangles.len() {
+        let [a, b, c] = soup.tri(t);
+        let u = [b.x - a.x, b.y - a.y, b.z - a.z];
+        let v = [c.x - a.x, c.y - a.y, c.z - a.z];
+        let cross = [
+            u[1] * v[2] - u[2] * v[1],
+            u[2] * v[0] - u[0] * v[2],
+            u[0] * v[1] - u[1] * v[0],
+        ];
+        area += 0.5 * (cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2]).sqrt();
+    }
+    let length = (0..3)
+        .map(|axis| hi[axis] - lo[axis])
+        .fold(0.0_f64, f64::max);
+    assert!(area > 0.0 && length > 0.0);
+    let biot = h * length / k;
+    let lumped_excess_k = q_w / (h * area);
+
+    // The solver's retained answer.
+    let imported = run(args(&[
+        "--json",
+        "import",
+        fsim.to_string_lossy().as_ref(),
+        stl.to_string_lossy().as_ref(),
+        ledger_path.to_string_lossy().as_ref(),
+        "--unit",
+        "m",
+        "--max-hole-edges",
+        "0",
+    ]));
+    assert_eq!(imported.exit_code, exit::SUCCESS, "{}", imported.stderr);
+    let output = run(args(&[
+        "--json",
+        "run",
+        fsim.to_string_lossy().as_ref(),
+        ledger_path.to_string_lossy().as_ref(),
+        "--materials",
+        pack.to_string_lossy().as_ref(),
+    ]));
+    assert_eq!(output.exit_code, exit::SUCCESS, "{}", output.stderr);
+    let run_id = output
+        .stdout
+        .split("\"run\":\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .expect("run id")
+        .to_string();
+    let ledger =
+        fs_ledger::Ledger::open(ledger_path.to_str().expect("utf-8 path")).expect("ledger");
+    let receipts = stage_receipt_hashes(&ledger, &run_id);
+    assert_eq!(receipts.len(), 7, "seven stage receipts");
+    let conduction_receipt = receipt_text(&ledger, &receipts[4]);
+    assert!(conduction_receipt.contains("\"stage\":\"conduction\""));
+    let qoi_receipt = receipt_text(&ledger, &receipts[5]);
+    assert!(qoi_receipt.contains("\"stage\":\"qoi\""));
+    let t_min = number_after(
+        &conduction_receipt,
+        "\"temperature\":{\"unit\":\"K\",\"min\":",
+    );
+    let t_max = number_after(&conduction_receipt, "\"max\":");
+    let source_w = number_after(&conduction_receipt, "\"source_w\":");
+    let robin_out_w = number_after(&conduction_receipt, "\"robin_out_w\":");
+    let closure_w = number_after(&conduction_receipt, "\"closure_w\":");
+    let qoi_value = number_after(&qoi_receipt, "\"value\":");
+
+    // (1) The receipt's energy block is the same balance the hand calc uses.
+    assert!(
+        (source_w - q_w).abs() <= 1e-9 * q_w,
+        "retained source {source_w} W is the declared duty {q_w} W"
+    );
+    assert!(
+        closure_w.abs() <= 1e-6 * q_w,
+        "the retained balance closes: closure {closure_w} W of {q_w} W"
+    );
+    assert!(
+        (robin_out_w - q_w).abs() <= 1e-6 * q_w,
+        "all heat leaves through the convection boundary: {robin_out_w} W of {q_w} W"
+    );
+
+    // (2) The exact bracket: min excess <= Q/(hA) <= max excess.
+    let min_excess = t_min - t_ref;
+    let max_excess = t_max - t_ref;
+    assert!(
+        min_excess <= lumped_excess_k && lumped_excess_k <= max_excess,
+        "the solver's surface temperatures must bracket the lumped excess: \
+         min {min_excess} K <= Q/(hA) = {lumped_excess_k} K <= max {max_excess} K"
+    );
+    assert_eq!(qoi_value, t_max, "the QoI is the retained maximum");
+
+    // (3) The bracket width is the internal conduction spread, bounded by
+    // the Biot number: for Bi << 1 the body is near-isothermal, so the
+    // spread is a small fraction of the lumped excess. The factor is the
+    // order-one geometry constant of a 1-D slab with distributed source
+    // (spread <= Q L / (2 k A) = Bi/2 · Q/(hA)); assert it with 2x headroom.
+    let spread = t_max - t_min;
+    assert!(
+        biot < 0.5,
+        "the anchor is a lumped calculation; Bi = {biot} must be small"
+    );
+    assert!(
+        spread <= biot * lumped_excess_k,
+        "internal spread {spread} K exceeds the Biot bound {} K (Bi = {biot})",
+        biot * lumped_excess_k
+    );
+    println!(
+        "{{\"falsifier\":\"level-a-energy-balance-anchor\",\"q_w\":{q_w},\"h_w_m2k\":{h},\"t_ref_k\":{t_ref},\"k_w_mk\":{k},\"area_m2\":{area},\"length_m\":{length},\"biot\":{biot},\"lumped_excess_k\":{lumped_excess_k},\"t_min_k\":{t_min},\"t_max_k\":{t_max},\"spread_k\":{spread},\"closure_w\":{closure_w}}}"
     );
 }

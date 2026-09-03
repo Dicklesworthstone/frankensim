@@ -189,16 +189,23 @@ class PackageAuditResult:
     """Outcome of offline evidence package generation and audit."""
     status: str
     command: str
+    #: Path of the exported evidence package (`<run>.fspkg` next to the ledger).
     package_path: str
-    content_hash: str
-    receipt_count: int
-    audit_verdict: str
+    #: Merkle root the solver-free checker recomputed over the exact bytes.
+    merkle_root: str
+    #: Number of claims the package carries.
+    claim_count: int
+    #: The checker's verdict on the retained bytes (`pass`; a refusal is a
+    #: diagnostic, never a value here).
+    checker: str
     exit_code: int = 0
     diagnostics: List[Diagnostic] = field(default_factory=list)
+    #: Structural integrity is not authenticity: the CLI says so itself.
+    authority: str = ""
 
     @property
     def is_verified(self) -> bool:
-        return self.status == "ok" and self.audit_verdict == "admissible"
+        return self.status == "ok" and self.checker == "pass"
 
 
 @dataclass(frozen=True)
@@ -242,7 +249,14 @@ class CompareResult:
     summary: str
     qoi_count: int
     qoi_diffs: List[QoiDiffItem] = field(default_factory=list)
-    authority: str = "evidence-aware-semantic-run-diff"
+    #: True when any retained receipt row differs between the two runs.
+    changed: bool = False
+    #: Canonical project hashes of the two runs; a design change is a
+    #: different project hash, so they may differ.
+    project_hash_left: str = ""
+    project_hash_right: str = ""
+    same_project: bool = True
+    authority: str = "projection-of-retained-receipts"
     no_claim: str = ""
     exit_code: int = 0
     diagnostics: List[Diagnostic] = field(default_factory=list)
