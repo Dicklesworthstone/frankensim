@@ -41,6 +41,7 @@ pub mod broadband_radiation;
 pub mod cavity_phs;
 pub mod cinematic_stem;
 pub mod driving_point;
+pub mod flue_loop;
 pub mod glottis;
 pub mod mm_line;
 pub mod modal_acoustic_time;
