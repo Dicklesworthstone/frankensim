@@ -189,8 +189,21 @@ fn step_heatsink_001_qoi_parity_with_stl_across_seven_stages() {
     assert!(run_step.stdout.contains("\"status\":\"completed\""));
     let qoi_step = temperature_max_of(&run_step.stdout);
 
-    // 4. Verify QoI parity: within discretization term
+    // 4. Verify QoI parity.
+    //
+    // TOLERANCE PROVENANCE: 1e-4 relative is a fixed bound, not the run's
+    // own discretization term. The bead asks for parity "within the
+    // discretization term", but under the default solver fidelity every
+    // budget term is explicit NO-DATA (only the "ladder" fidelity measures
+    // one), so there is no measured half-width to compare against yet.
+    // When this example runs under the ladder, tighten this to the report's
+    // discretization term instead of the constant.
     let rel_diff = ((qoi_step - qoi_stl) / qoi_stl).abs();
+    println!(
+        "{{\"suite\":\"fs-cli\",\"case\":\"step-heatsink-qoi-parity\",\
+         \"qoi_stl_k\":{qoi_stl},\"qoi_step_k\":{qoi_step},\"rel_diff\":{rel_diff:e},\
+         \"bound\":1e-4,\"bound_source\":\"fixed; the run's discretization term is NO-DATA at the default fidelity\"}}"
+    );
     assert!(
         rel_diff < 1e-4,
         "QoI parity failure: STL qoi={qoi_stl}, STEP qoi={qoi_step}, rel_diff={rel_diff:.6e} exceeds 1e-4"
