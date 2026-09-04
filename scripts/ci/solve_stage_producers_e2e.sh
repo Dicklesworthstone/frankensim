@@ -457,19 +457,39 @@ if [[ -n "${RETAIN_RECEIPT}" ]]; then
     else
       BIN_MD5="$(md5 -q "${BINARY}" | cut -c1-16)"
     fi
+    # Per-stage wall-clock comes from the driver's own progress line, which
+    # already carries wall_s; the lane used to read those lines only to
+    # decide executed-vs-refused and threw the timing away. Recording it
+    # makes the receipt say how long each stage took on this host, which is
+    # what an end-to-end turnaround number has to be built from. It is the
+    # SOLVER's stage time on this machine, not a user's wall clock.
     STAGE_ROWS=""
+    STAGE_WALL_TOTAL="null"
+    wall_sum=""
     for stage in "${STAGES[@]}"; do
-      if grep -qF "\"stage\":\"${stage}\",\"ordinal\"" "${ARTIFACT_DIR}/solve.stderr"; then
+      progress_line="$(grep -F "\"stage\":\"${stage}\",\"ordinal\"" "${ARTIFACT_DIR}/solve.stderr" | tail -1)"
+      if [[ -n "${progress_line}" ]]; then
         status="executed"
+        wall="$(printf '%s' "${progress_line}" | sed -n 's/.*"wall_s":\([0-9.eE+-]*\).*/\1/p')"
       else
         status="refused"
+        wall=""
+      fi
+      if [[ -n "${wall}" ]]; then
+        wall_json="${wall}"
+        wall_sum="${wall_sum}${wall_sum:+ }${wall}"
+      else
+        wall_json="null"
       fi
       cap="${STAGE_CAPABILITY[${stage}]}"
       if [[ -n "${cap}" ]]; then cap_json="\"${cap}\""; else cap_json="null"; fi
       [[ -z "${STAGE_ROWS}" ]] || STAGE_ROWS="${STAGE_ROWS},"
       STAGE_ROWS="${STAGE_ROWS}
-    {\"stage\": \"${stage}\", \"capability\": ${cap_json}, \"status\": \"${status}\"}"
+    {\"stage\": \"${stage}\", \"capability\": ${cap_json}, \"status\": \"${status}\", \"wall_s\": ${wall_json}}"
     done
+    if [[ -n "${wall_sum}" ]]; then
+      STAGE_WALL_TOTAL="$(printf '%s\n' ${wall_sum} | awk '{s+=$1} END {printf "%.6f", s}')"
+    fi
     cat > "${RETAIN_RECEIPT}" <<JSON
 {
   "schema": "frankensim-spine-e2e-receipt-v1",
@@ -482,7 +502,9 @@ if [[ -n "${RETAIN_RECEIPT}" ]]; then
     "executed_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
     "host_fingerprint": "${HOST_FP}",
     "binary_md5_16": "${BIN_MD5}",
-    "head_sha": "${HEAD_SHA}"
+    "head_sha": "${HEAD_SHA}",
+    "stage_wall_s_total": ${STAGE_WALL_TOTAL},
+    "timing_no_claim": "per-stage solver wall-clock on this host and binary; it is not a user's end-to-end turnaround and does not include import, export, or any human step"
   },
   "stages": [${STAGE_ROWS}
   ],
