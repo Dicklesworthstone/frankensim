@@ -34,6 +34,7 @@ use fs_query::{
     ConvexBox, ConvexOrientedBox, ConvexSupportMap, convex_overlap_witness,
     convex_separation,
 };
+use fs_scene::BodyRole;
 use fs_tribo::{
     ContactFrame, FrictionLaw, InputAuthority, InterfaceMedium, InterfaceSystemRef, TangentialSlip,
 };
@@ -97,7 +98,7 @@ pub enum ManipulationTask {
     BackyardTrowel = 2,
 }
 
-/// One caller-declared keep-out box, yawed about the world +Z axis.
+/// One caller-declared body, yawed about the world +Z axis.
 ///
 /// The task presets each carry one box the scene has always owned. Callers
 /// may declare additional boxes (for example the browser's counter
@@ -112,10 +113,38 @@ pub struct ObstacleBox {
     pub half_extents_m: Vec3,
     /// Rotation about the world +Z axis [rad].
     pub yaw_rad: f64,
+    /// What the body means: a volume to stay out of, or a surface to work on.
+    pub role: BodyRole,
 }
 
 /// Largest caller-declared keep-out roster the owner admits.
 pub const MAX_DECLARED_OBSTACLES: usize = 32;
+
+/// Link envelopes exempt from declared support surfaces.
+///
+/// The wrist-to-flange envelope is a conservative proxy for a slim gripper, so
+/// picking an object up OFF a surface necessarily puts it where the surface is:
+/// a 120 mm pad under the object's start station alone is enough to refuse the
+/// whole task, at any skin thin enough to leave the slab guarding anything.
+/// This is the arm's version of the exemption the walking owner already grants
+/// its feet -- the parts that are supposed to touch the surface are scored
+/// against keep-out volumes but not against the surface they work on. Every
+/// other link stays guarded, so an elbow driven through the counter is still
+/// refused.
+const SURFACE_CONTACT_ENVELOPES: [usize; 1] = [6];
+
+/// How far a link envelope may reach below a declared support surface [m].
+///
+/// Measured, not assumed. The flange envelope is a 46 mm sphere standing in
+/// for a slim gripper, so closing on an object that rests ON the surface puts
+/// that sphere's centre within a few centimetres of the top face: the
+/// curriculum policies reach 40 mm into the counter slab for the remote, 28 mm
+/// for the trowel, and 0 mm for the mug. Fifty millimetres admits every one of
+/// those with a centimetre to spare while still refusing a link that drives
+/// through the table.
+pub const ARM_SUPPORT_SURFACE_SKIN_M: f64 = 0.05;
+
+
 
 /// Owner default static Coulomb coefficient for the pad/object interface.
 pub const DEFAULT_STATIC_MU: f64 = 0.82;
@@ -1650,13 +1679,25 @@ fn collision_state(
         )?;
     }
 
-    // Caller-declared keep-out boxes are hard constraints for every link,
-    // exactly like the preset box. The object is deliberately NOT scored
-    // against them: it starts and ends resting on caller geometry (a counter
-    // top), so a box-vs-object test would refuse every rollout.
+    // Caller-declared bodies are hard constraints for every link, exactly like
+    // the preset box. The object is deliberately NOT scored against them: it
+    // starts and ends resting on caller geometry (a counter top), so a
+    // box-vs-object test would refuse every rollout.
+    //
+    // A support body is guarded as the column beneath its top face rather than
+    // as the slab itself, so the arm may work ON the counter but not THROUGH
+    // it. See `support_sink_limit_body`.
     for declared in declared_obstacles {
-        let envelope = yawed_box_envelope(*declared)?;
-        for link in &links {
+        let envelope = yawed_box_envelope(match declared.role {
+            BodyRole::KeepOut => *declared,
+            BodyRole::Support => support_sink_limit_body(*declared),
+        })?;
+        for (index, link) in links.iter().enumerate() {
+            if declared.role == BodyRole::Support
+                && SURFACE_CONTACT_ENVELOPES.contains(&index)
+            {
+                continue;
+            }
             consider_collision_pair(
                 &link.shape,
                 link.center_world,
@@ -1791,6 +1832,38 @@ fn link_envelope(
 /// The box-to-support-map conversion lives in fs-scene, so this experiment and
 /// the walking experiment describe the same geometry the same way rather than
 /// each carrying a private copy of the axis construction.
+/// The volume a declared support surface actually forbids.
+///
+/// The solid part of a work surface is the slab itself, so the guarded body is
+/// that slab with only its TOP face lowered by `ARM_SUPPORT_SURFACE_SKIN_M`.
+/// Its footprint, yaw and underside are untouched.
+///
+/// Guarding the whole column beneath the surface instead is tempting and
+/// wrong: the air under a counter is exactly the space an arm's own links
+/// sweep through to reach across it, so a column refuses every task that
+/// works on the surface it is meant to model. What is solid is the slab.
+fn support_sink_limit_body(surface: ObstacleBox) -> ObstacleBox {
+    let top_m = surface.center_m.z + surface.half_extents_m.z;
+    let bottom_m = surface.center_m.z - surface.half_extents_m.z;
+    // validate_config refuses a support surface thinner than the skin, so the
+    // lowered top face always stays above the underside.
+    let limit_top_m = (top_m - ARM_SUPPORT_SURFACE_SKIN_M).max(bottom_m);
+    ObstacleBox {
+        center_m: Vec3::new(
+            surface.center_m.x,
+            surface.center_m.y,
+            0.5 * (limit_top_m + bottom_m),
+        ),
+        half_extents_m: Vec3::new(
+            surface.half_extents_m.x,
+            surface.half_extents_m.y,
+            0.5 * (limit_top_m - bottom_m),
+        ),
+        yaw_rad: surface.yaw_rad,
+        role: BodyRole::KeepOut,
+    }
+}
+
 fn yawed_box_envelope(obstacle: ObstacleBox) -> Result<CollisionEnvelope, ManipulationError> {
     let body = fs_scene::SceneBody::Box {
         center_m: [

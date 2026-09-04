@@ -55,7 +55,7 @@ use manipulation::{
 };
 
 /// Kernel identity returned by the browser capability probe.
-pub const KERNEL_VERSION: &str = "fs-cmaes-viz-wasm 0.6.18";
+pub const KERNEL_VERSION: &str = "fs-cmaes-viz-wasm 0.6.19";
 /// Exact binary64 word identifying schema-2 packets (`"CMA2"`).
 pub const PACKET_MAGIC: u32 = 0x434d_4132;
 /// Packed ask/tell ABI schema.
@@ -111,7 +111,7 @@ pub const ARM_PACKET_MAGIC: u32 = 0x4152_4d31;
 /// fixed words are an object-mass override and the two Coulomb coefficients;
 /// all default to zero, which selects the owner's preset values and
 /// reproduces the schema-2 receipts exactly.
-pub const ARM_PACKET_SCHEMA_VERSION: u32 = 3;
+pub const ARM_PACKET_SCHEMA_VERSION: u32 = 4;
 /// Input packet containing fixed manipulation-experiment controls.
 pub const ARM_PACKET_KIND_CONFIG: u32 = 0;
 /// Output packet describing an admitted manipulation evaluator and scene.
@@ -141,7 +141,7 @@ const G1_REFUSAL_WORDS: usize = 7;
 const G1_TRACE_SAMPLE_WORDS: usize = 3 + G1_LINK_COUNT * G1_LINK_POSE_WORDS;
 const G1_MAX_POPULATION: usize = 64;
 const ARM_CONFIG_FIXED_WORDS: usize = 12;
-const ARM_OBSTACLE_WORDS: usize = 7;
+const ARM_OBSTACLE_WORDS: usize = 8;
 const ARM_ADMISSION_WORDS: usize = 40;
 const ARM_RECEIPT_WORDS: usize = 22;
 const ARM_REFUSAL_WORDS: usize = 7;
@@ -1112,10 +1112,16 @@ fn parse_arm_config(packet: &[f64]) -> Result<ManipulationConfig, ArmPackedRefus
         if words.iter().any(|value| !value.is_finite()) {
             return Err(ArmPackedRefusal::new(ArmPackedRefusalCode::InvalidConfig));
         }
+        let role = match exact_u32(words[7]) {
+            Some(0) => fs_scene::BodyRole::KeepOut,
+            Some(1) => fs_scene::BodyRole::Support,
+            _ => return Err(ArmPackedRefusal::new(ArmPackedRefusalCode::InvalidConfig)),
+        };
         obstacles.push(ObstacleBox {
             center_m: fs_ga::Vec3::new(words[0], words[1], words[2]),
             half_extents_m: fs_ga::Vec3::new(words[3], words[4], words[5]),
             yaw_rad: words[6],
+            role,
         });
     }
     let config = ManipulationConfig {
@@ -1834,6 +1840,10 @@ mod schema_two_tests {
                 obstacle.half_extents_m.y,
                 obstacle.half_extents_m.z,
                 obstacle.yaw_rad,
+                match obstacle.role {
+                    fs_scene::BodyRole::KeepOut => 0.0,
+                    fs_scene::BodyRole::Support => 1.0,
+                },
             ]);
         }
         packet
@@ -2583,6 +2593,90 @@ mod schema_two_tests {
         }
     }
 
+    /// A declared work surface may be worked ON but not THROUGH.
+    ///
+    /// This is the arm's half of the lesson the humanoid learned by shipping a
+    /// robot buried in the floor: a surface the renderer draws is not a body
+    /// until the owner is told about it. Declaring the counter as a keep-out
+    /// volume is not the fix either -- the flange envelope is a 46 mm sphere
+    /// standing in for a slim gripper, so closing on an object that rests on
+    /// the counter unavoidably overlaps it, and a keep-out counter refuses
+    /// every rollout that does the task. Support is the role that makes the
+    /// surface real without making the task impossible.
+    #[test]
+    fn a_work_surface_may_be_worked_on_but_not_through() {
+        let baseline = PackedManipulationEvaluator::new(&arm_config_packet(
+            ManipulationTask::LivingRoomRemote,
+            6.0,
+            3,
+        ));
+        let admission = baseline.receipt_packet();
+        let mean = baseline.curriculum_policy_mean();
+        let clear = baseline.evaluate_packet(&mean);
+        assert_arm_packet_ok(&clear, ARM_PACKET_KIND_EVALUATION);
+        assert_eq!(clear[20], 1.0, "the undeclared baseline places the object");
+
+        // The work surface under the object's start station: a 240 mm pad
+        // 90 mm thick, whose top face is the admitted support height. A pad
+        // rather than the whole counter, because this test is about what the
+        // role MEANS; declaring the full tabletop the browser draws is a
+        // separate, unfinished question -- the curriculum policies sweep their
+        // mid-arm links through three bands of it.
+        let support_height_m = admission[30];
+        let station = fs_ga::Vec3::new(admission[24], admission[25], admission[26]);
+        let counter = |role, lift_m: f64| ObstacleBox {
+            center_m: fs_ga::Vec3::new(
+                station.x,
+                station.y,
+                support_height_m - 0.045 + lift_m,
+            ),
+            half_extents_m: fs_ga::Vec3::new(0.12, 0.12, 0.045),
+            yaw_rad: 0.0,
+            role,
+        };
+        let with_counter = |body| {
+            PackedManipulationEvaluator::new(&arm_config_packet_with(
+                ManipulationTask::LivingRoomRemote,
+                6.0,
+                3,
+                0.0,
+                0.0,
+                0.0,
+                &[body],
+            ))
+            .evaluate_packet(&mean)
+        };
+
+        // A hard body is a motion filter, not a penalty: the owner refuses any
+        // step that drives a link further into one. So the visible consequence
+        // of getting the role wrong is that the task stops working.
+        let as_keep_out = with_counter(counter(fs_scene::BodyRole::KeepOut, 0.0));
+        assert_arm_packet_ok(&as_keep_out, ARM_PACKET_KIND_EVALUATION);
+        assert_eq!(
+            as_keep_out[20], 0.0,
+            "a keep-out surface blocks the grasp that has to reach onto it"
+        );
+
+        // Declared as the surface it is, the same geometry leaves the task
+        // exactly as it was.
+        let as_support = with_counter(counter(fs_scene::BodyRole::Support, 0.0));
+        assert_arm_packet_ok(&as_support, ARM_PACKET_KIND_EVALUATION);
+        assert_eq!(
+            as_support[20], 1.0,
+            "a support surface must leave a rollout that works on it placeable"
+        );
+
+        // Support is not a blanket exemption. Raise the same surface 150 mm and
+        // doing the task would mean reaching far below its top face, which is
+        // exactly what the skin refuses.
+        let raised = with_counter(counter(fs_scene::BodyRole::Support, 0.15));
+        assert_arm_packet_ok(&raised, ARM_PACKET_KIND_EVALUATION);
+        assert_eq!(
+            raised[20], 0.0,
+            "sinking past the support skin must still be refused"
+        );
+    }
+
     /// A declared keep-out box straddling the transport path must be scored
     /// as a hard link constraint; the identical box moved out of the workspace
     /// must leave the rollout exactly as it was.
@@ -2610,6 +2704,7 @@ mod schema_two_tests {
             center_m: midpoint,
             half_extents_m: fs_ga::Vec3::new(0.09, 0.09, 0.09),
             yaw_rad: 0.3,
+            role: fs_scene::BodyRole::KeepOut,
         };
         let blocked = PackedManipulationEvaluator::new(&arm_config_packet_with(
             ManipulationTask::KitchenMug,
@@ -2729,6 +2824,7 @@ mod schema_two_tests {
                 center_m: fs_ga::Vec3::new(index as f64 * 0.01, 0.0, 1.0),
                 half_extents_m: fs_ga::Vec3::new(0.05, 0.05, 0.05),
                 yaw_rad: 0.0,
+                role: fs_scene::BodyRole::KeepOut,
             })
             .collect();
         assert_eq!(
@@ -2785,6 +2881,7 @@ mod schema_two_tests {
                     center_m: fs_ga::Vec3::new(0.3, 0.0, 0.8),
                     half_extents_m: fs_ga::Vec3::new(f64::NAN, 0.05, 0.05),
                     yaw_rad: 0.0,
+                    role: fs_scene::BodyRole::KeepOut,
                 }]
             )),
             f64::from(ArmPackedRefusalCode::InvalidConfig as u32)
@@ -2803,6 +2900,7 @@ mod schema_two_tests {
                     center_m: fs_ga::Vec3::new(0.3, 0.0, 0.8),
                     half_extents_m: fs_ga::Vec3::new(0.0, 0.05, 0.05),
                     yaw_rad: 0.0,
+                    role: fs_scene::BodyRole::KeepOut,
                 }]
             )),
             f64::from(ArmPackedRefusalCode::InvalidConfig as u32)
