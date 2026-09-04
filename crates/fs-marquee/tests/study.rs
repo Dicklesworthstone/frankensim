@@ -693,7 +693,7 @@ fn body_fitted_mesh_for_plate(design: &PlateWithHoles, n: usize) -> fs_solid::me
 
 /// Falsifier 1: Rung climb on the final optimized design.
 /// Re-solving compliance one quadtree level finer must sit within the
-/// certified DWR discretization error band.
+/// estimated DWR consistency band.
 #[test]
 fn mq_006_falsifier_rung_climb() {
     let report = run_study(
@@ -715,7 +715,7 @@ fn mq_006_falsifier_rung_climb() {
 
     assert!(
         gap <= 4.0 * dwr_band.max(1e-12),
-        "rung climb: final design gap {gap:.2e} sits within certified band {dwr_band:.2e}"
+        "rung climb: final design gap {gap:.2e} sits within estimated band {dwr_band:.2e}"
     );
 
     // Seeded falsifier mutation: if the certified band is artificially shrunk to 0,
@@ -728,7 +728,7 @@ fn mq_006_falsifier_rung_climb() {
 
     verdict(
         "mq-006",
-        "rung climb: final design compliance re-solved at level 5 matches level 4 within certified DWR error band",
+        "rung climb: final design compliance re-solved at level 5 matches level 4 within the estimated DWR consistency band",
     );
 }
 
@@ -821,7 +821,7 @@ fn body_fitted_poisson_compliance(design: &PlateWithHoles, n: usize, source: f64
     }
     let op = CsrOp::symmetric(matrix.assemble());
     let mut state = CgState::new(&op, &IdentityPrecond, &rhs);
-    state.run(&op, &IdentityPrecond, 1e-12, 20_000);
+    let _ = state.run(&op, &IdentityPrecond, 1e-12, 20_000);
     let mut ax = vec![0.0; count];
     op.apply(&state.x, &mut ax);
     let residual = ax
@@ -953,7 +953,7 @@ fn mq_009_falsifier_objective_sensitivity_twin() {
     let base_config = smoke_config();
     let report_base = run_study(two_hole_plate(), &base_config).expect("base study");
 
-    // Twin 1: volume fraction twin (area target changed from ~0.88 to 0.78)
+    // Twin 1: volume fraction twin (area target changes from ~0.853 to 0.753).
     let reduced_target = base_config.area_target - 0.10;
     let twin_config = StudyConfig {
         area_target: reduced_target,
