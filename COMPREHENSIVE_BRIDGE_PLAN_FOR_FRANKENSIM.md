@@ -1,10 +1,160 @@
 # Comprehensive Bridge Plan for FrankenSim
 
-**Status:** round 3, 2026-09-02 (early). Revised in place; rounds are logged in §18.
+**Status:** refreshed 2026-09-04 against `34f9fc0a8d2dc1e03b5d215db13aae76436d889a`. The current execution delta below supersedes the dated September 1–3 status statements; earlier measurements remain historical evidence.
 **Inputs:** `docs/REALITY_CHECK_2026-09-01.md` (Phase 1: where the code really is), the steering epic `frankensim-rc-root-q61wp` (.1–.43, label `reality-check-2026-09`), the five owner decisions of 2026-09-01, and the landings of 2026-09-01/02: the report stage and `run`; the finned heatsink solving seven stages; the fs-mesh facet-recovery fix; the A8 gap-table truth fix.
 **Purpose:** the Phase 2 document of the reality check — a plan that closes **every** gap between `COMPREHENSIVE_PLAN_FOR_FRANKENSIM.md` (plus its addendum) and the code, granular enough that each item becomes a self-contained bead and no reader needs this document afterwards. The plan is the measuring stick; the code is the ground truth; every item names the code it starts from.
 
 ---
+
+## Current execution delta — 2026-09-04
+
+The immediate goal is two usable engineering journeys: a cooling decision whose
+uncertainty is honestly quantified, and an admitted design study that actually
+changes geometry through physics and optimization. Cooling already executes
+seven stages and exports retained reports/packages. Rebuilding that pipeline
+would waste the progress. The remaining work is in its numerical producers and
+in the unshipped study producer.
+
+### Delivery order and ownership
+
+| Order | Existing owner | Landed and preserved | Remaining implementation and direct proof |
+|---|---|---|---|
+| 1 | q61wp.20, q61wp.16 | Study grammar, tracked example, default scalar CutFEM radius optimizer, Armijo search | Compile the CLI producer against actual APIs; run under budgets/cancellation and retain recoverable iterates. Complete the separately promised free-boundary elasticity topology loop; a scalar radius study is a useful first slice, not that completion. |
+| 1 | q61wp.44 | Optional constrained refinement; 5°/2.0 quality checks on refined meshes; uniform ladder | Replace the one-solve `fidelity-adaptive-converged` terminal with a real solve/adjoint/mark/refine loop and an observed stopping condition. Preserve the existing 1° base-mode boundary and report mode-specific quality. |
+| 1 | q61wp.17 | Replay, FD, volume-twin and mutation tests | Replace mq_007's unrelated Poisson/elasticity range checks with a matched-PDE independent solve and a quantitative discrepancy gate. Add the actual changed-load twin; geometry changes are not a substitute. |
+| 2 | f85xj.6.7 | UQ library primitives and product-plan tests | Wire project uncertainty through repeated real cooling solves, correlation-aware inference, budgeted stop/resume, and report/package projection. `cooling_uq.sh` currently runs only a library test; turn that existing lane into the promised product test. |
+| 2 | q61wp.11, related sj31i.25 | Interval serialization and an Estimated grid-ladder term | Implement equilibrated primal/dual flux reconstruction, outward numerical bounds, and a justified transfer to the exact declared QoI. Serialization is not the missing numerical producer. |
+| Alongside | q61wp.4, q61wp.33 | README command section and existing maturity/website machinery | Reconcile contradictory product statements and tracked inventory; correct public claim strength before publishing current bundles. Reuse the existing checks. |
+| Verification | rnhok; q61wp.39 compatibility follow-up | Earlier compile repairs and retained seven-stage receipt | Finish the existing census and classify current sibling movement. Never roll newer clean siblings backwards. A dry run and an unfinished census cannot close the workspace gate. |
+
+The six closed tasks above with incomplete acceptance (`q61wp.4`, `.11`, `.16`,
+`.17`, `.44`, and `f85xj.6.7`) need their original ownership restored, not
+duplicate implementation tickets. `q61wp.20` stays with its current lane.
+The missing `fs-scene/CONTRACT.md` is a separate bounded contract omission:
+document the existing primitive scene behavior and its limits; do not redesign
+the crate (`q61wp.65`, blocking the complete-inventory close of `.4`). Frontier
+work remains parked under the owner's existing decision. Flux-bound development
+does not require adaptive-mesh completion: `.11` relates to `.44` and
+`sj31i.25`, but can build and test on a fixed admissible mesh independently.
+
+### Acceptance at the actual mathematical boundary
+
+**Ambition round 1 — make each increment usable.** The first study increment
+must let an outsider supply an admitted problem, obtain a changed feasible
+design, inspect the actual iteration history, and export it. Keep the scalar
+thermal study explicitly named while completing the elasticity/topology
+successor; no UI, parser, or default-feature change alone closes Journey B.
+Cooling uncertainty must change the user's reported interval or refusal when
+the declared uncertainty changes, with deterministic zero-uncertainty and
+correlated-input controls. Reuse the seven-stage pipeline and existing tests.
+
+**Ambition round 2 — recover useful work without publishing false success.**
+Study and uncertainty drivers must admit resources before allocation, poll at
+bounded solver/iteration/sample boundaries, and preserve the last accepted
+iterate or completed sample set on cancellation or exhaustion. The terminal
+states distinguish converged, budget-exhausted, cancelled and failed. A
+failed ledger append, report write, or package write propagates an error;
+no ignored `Result` may leave a success record. Resume must reproduce the
+uninterrupted result under the same source, problem, seed and budget semantics.
+Use the existing ledger and governor; this requires product wiring and focused
+fault tests, not a new checkpoint framework.
+
+**Ambition round 3 — make the guarantee composable and useful.** Share the
+admitted functional, coefficient, mesh and residual semantics with the existing
+`sj31i.25` goal-bound work. The thermal product adapter owns binding that
+mathematics to its real receipt; it must not implement a rival general verifier.
+Unsupported contact, nonlinear or point-maximum regimes keep an explicit
+Estimated result or refusal until their own obligations are discharged. A
+tight but wrongly scoped bound is a failure. Report bound width and cost on
+named fixtures, and compare adaptation at equal achieved QoI accuracy. Keep
+the larger physics ambitions behind their existing consumer and validation
+gates; a new mathematical method is worthwhile only if it improves one of
+these concrete results.
+
+- **Cooling convergence:** record the measured stopping test, number of solved
+  meshes, selected QoI, and memory/accuracy termination. One quality-refined
+  solve cannot report goal convergence. DWR efficiency versus uniform is a
+  measured target on named fixtures, not a universal quarter-tet theorem.
+- **Guaranteed error:** first prove the energy bound on its admitted linear
+  problem. A point maximum in 3-D is not a bounded functional of the H1 energy
+  norm: a unit-height smooth bump supported in a radius-epsilon ball has
+  gradient L2 norm proportional to sqrt(epsilon), while its maximum stays one.
+  Therefore an energy bound alone cannot certify `temperature-max`. A bounded
+  averaged functional, a justified regularization plus its error, or a separate
+  maximum-norm argument must explicitly bridge that gap. Do not rename the QoI
+  or promote a frozen-coefficient nonlinear solve without bounding the omitted
+  nonlinear residual. Robin/contact, data oscillation, quadrature, algebraic
+  residual and rounding obligations remain explicit.
+- **Optimization:** compare improvement against a feasible baseline at the
+  same material budget and under identical loads. A full-material elasticity
+  baseline is not an appropriate mandatory 30% improvement target after
+  material removal. Preserve the intended 30-step topology study, and measure
+  its useful improvement on a fixed feasible baseline.
+- **Independent comparison:** both solvers must represent the same geometry,
+  PDE, coefficients, sources, boundary conditions and functional. An actual
+  difference must be compared with an independently justified error band.
+  Mutating only one solver's load or scale must fail the comparison.
+- **Statistical versus numerical evidence:** use exact comparison for a stated
+  bitwise replay claim. Statistical testing can characterize sampled failure
+  rates under explicit assumptions; it cannot prove universal determinism.
+- **Uncertainty:** a declared interval is not a probability law. Missing
+  dependence, missing model discrepancy or unresolved solver error keeps the
+  decision indeterminate. A small discretization estimate alone cannot make a
+  material or safety decision certain.
+
+### Whole-vision coverage
+
+Completing only currently open/in-progress tasks would not fulfill the original
+vision: some required work was closed at a smaller scope, some is explicitly
+deferred, and empirical validation needs data and execution beyond source code.
+Keep the core/addendum, Wright Flyer, music, Apple, Euler, and new-domain
+programs distinct. Existing q61wp.18–.19, .29–.38, .46, .49–.54, .64 and their
+program roots retain those paths. IGA, turbulence, compressible flow and FMM-VPM
+stay retired from v1 under .40–.43. Surrogate neural operators/DEIM/Koopman and
+the full scientific-visualization suite remain deferred residual scope of
+their original implementation beads, rather than being counted as delivered
+by their POD/streamline subsets.
+
+For every delivery, use the existing unit/integration seam plus one real
+consumer path. Retain input identity, observed value, tolerance, terminal
+reason and artifact location sufficient to diagnose a failure. No new audit
+framework, success-count quota, or fabricated completion receipt is required.
+
+### Completed refinement passes — 2026-09-04
+
+1. **Ownership/dependencies:** reused the six original incomplete tasks; created
+   only `.65` for the missing scene contract. Changed `.11 → .44` from a block
+   to a relation because flux verification can start on a fixed mesh; related
+   `.11` to existing `sj31i.25`; made `.4` depend on `.65` for a complete-contract
+   claim. Existing implementation assignees were preserved.
+2. **Mathematical acceptance:** updated the acceptance fields as well as the
+   descriptions, so the exact-QoI, nonlinear residual, feasible optimization
+   baseline and real adaptive stopping requirements cannot be overridden by
+   the earlier text. A first linear/averaged rung does not silently close the
+   broader promised maximum/nonlinear scope.
+3. **Tests and product wiring:** specified matched-PDE discrepancy/mutation
+   checks, an actual load twin, distinct UQ script modes using real cooling
+   solves, and CLI ledger/export failure propagation. Existing unit tests
+   remain; library success alone cannot close an end-to-end requirement.
+4. **Scope and authority:** named the scalar study as a partial thermal mode,
+   required partial terminals to preserve their actual evidence colour, updated
+   the schema-v4 truth task, and preserved optional visualization/surrogate
+   residuals as deferred. Added the public claim correction to the existing
+   website task. No original feature was deleted or declared complete by scope
+   reduction.
+5. **Final consistency:** re-read the changed statuses/acceptance and checked
+   ready/dependency views; found no further change needed within this audited
+   task set. `bv --robot-insights --label reality-check-2026-09` and
+   `bv --robot-triage` exited 0, with cycles computed and none found in their
+   analyzed views. The latter graph had 2,175 nodes and 3,247 edges (data hash
+   `7f58f7fc2f050236`). `br ready --limit 0 --json` returned 128 tasks; its
+   actionable semantics differ from bv's 305, so those counts are not mixed.
+
+Final full tracker snapshot: 3,364 issues = 1,353 closed + 724 open + 1,185
+deferred + 53 in progress + 49 blocked. This is bookkeeping, not a completion
+percentage. Phase 1 assessment, Phase 2 bridge, Phase 3a restoration/creation,
+three ambition revisions, bead regeneration and five refinement passes have
+been performed. Implementation remains on the explicit open/deferred tasks.
 
 ## 0. How to read this plan
 
@@ -56,11 +206,11 @@
 The substrate already carries exact predicates, intervals, e-processes and deterministic streams; the items below use mathematics from the last sixty years to turn "runs" into "verified" with fewer tets, fewer runs and stronger claims than the textbook path.
 
 1. **Goal-oriented (dual-weighted-residual) mesh adaptation for the QoI — B2.** Becker–Rannacher (2001): refine where the adjoint of the junction-temperature functional weights the residual, not uniformly. fs-conduction has the heat adjoint; fs-dwr exists. Alpha: a converged junction temperature at a fraction of the tets a uniform ladder needs, and an error *indicator* per element that the report can show. Falsifier: on the heatsink, DWR-adapted meshes reach the uniform ladder's fine-rung QoI within the stated tolerance with ≤ ¼ of its tets; the effectivity index is reported and stays in [0.5, 2].
-2. **Equilibrated-flux, constant-free error bound — B6.** Prager–Synge hypercircle through Braess–Schöberl (2008) and Ern–Vohralík (2015): reconstruct an H(div) flux on the RT0 patches (fs-feec `whitney`), and the energy-norm error is bounded above *without an unknown constant*; the QoI bound follows by the adjoint. This is what lets the discretization term carry the Verified colour. Falsifier: the bound brackets the true error on every rung of the B2 ladder; a mesh coarsened on purpose widens it.
+2. **Equilibrated-flux error bound — B6.** Reconstruct an H(div) flux on admitted patches, verify equilibrium and boundary conditions, and enclose the energy error including data oscillation and numerical errors. Transfer to a QoI only after proving that exact functional's bound; the 3-D maximum needs the separate argument specified in the current execution delta. Independent MMS containment and a corrupted-flux refusal test the implementation. Neither coarsening nor refinement is assumed universally monotone.
 3. **Conforming-Delaunay termination theory for recovery — B4.** Murphy–Mount–Gable (2001) and Cohen-Steiner–de Verdière–Yvinec (2002): midpoint refinement of segments and facets terminates when the local feature size is bounded below; tonight's tiling acceptance and fixed-point passes are the practical form. Alpha: a stated, checkable reason recovery ends, and a Steiner-count bound proportional to facet area over the square of the local feature size that becomes the budget formula in B3. Falsifier: the corpus bodies' Steiner counts stay under the formula's bound.
 4. **Simulation of simplicity for order-canonical meshes — B12.** Edelsbrunner–Mücke (1990): resolve degeneracies by a symbolic perturbation keyed on a canonical *geometric* order (lexicographic coordinates) instead of insertion index, so identical point sets in any order tie-break identically. Alpha: R7 collapses to "identical geometry, identical mesh"; the g3 slot-swap invariant returns. Kill: if the exact audit or the kernel's cavity logic cannot take the keyed perturbation in a week, keep R7.
 5. **Sliver exudation and radius-edge refinement — B2.** Cheng–Dey–Edelsbrunner–Facello–Teng (2000) and Shewchuk's Delaunay refinement with protected constraints: `fs_mesh::exude` and `refine` already implement the mechanics; the plan makes them mandatory after carve with a dihedral floor. Falsifier: a forced 1° sliver refuses.
-6. **Anytime-valid (e-process) acceptance for replay and falsifier lanes — B7.** Ramdas–Grünwald–Vovk–Shafer (2020–23): the determinism and hostile-twin lanes accumulate evidence across runs and hosts with an e-value, so "the twin flips the verdict" and "two ISAs agree" are sequential tests that never need a fixed sample size and never inflate error under optional stopping. The substrate already ships e-processes. Falsifier: a deliberately injected 1-in-20 nondeterministic run drives the e-value below the threshold within the stated number of replays.
+6. **Exact replay and statistical experiments have different gates — B7.** A mismatch directly fails a declared bitwise replay claim. Sampled agreement is reported only for the executed inputs, hosts and schedules. Use e-processes for stochastic design comparisons with an explicit null, sampling model and error allocation; neither sampled agreement nor an e-value proves universal cross-ISA determinism, and no finite replay count guarantees catching a random 1-in-20 fault.
 7. **Certified cut quadrature by interval root isolation — D2.** Saye (2015) dimension reduction with roots enclosed by `fs_ivl::newton_roots_bounded` (Krawczyk / Hansen–Sengupta interval Newton): the geometric quadrature error is an enclosure, not an estimate, so the cut-cell term of the marquee certificate is rigorous. Falsifier: sphere-volume enclosure tightens with level; a wrong root box is caught.
 8. **Ghost-penalty stabilization — D2/D3.** Burman (2010), Burman–Hansbo (2012): condition-number control on cut cells independent of how the interface cuts them; without it the 3-D marquee's solver counts explode. Falsifier: the condition number stays bounded across a sweep of interface positions on one cell.
 9. **Topological derivative with Sobolev-smoothed descent — D1.** Sokołowski–Żochowski (1999), Allaire–Jouve–Toader (2004) level-set method; `fs_adjoint::sobolev_smooth` exists. Falsifier: the adjoint-FD gate per iteration; monotone compliance decrease on the cantilever.
@@ -78,7 +228,7 @@ An outsider with the repository, the constellation at pins, and one Mac or Linux
 5. Find `thermal.conduction-solve` at L3 in the maturity registry citing that lane's receipt (B10) and nothing else at L3 without a receipt (A2).
 6. Run `frankensim study` on the tracked marquee project and get a topology-optimized design with a composed certificate and a Goodhart rung-climb delta — D1–D3.
 7. Read a README whose every quantitative statement is generated from or checked against `doc-facts-inventory.json`, whose quickstart runs the heatsink end to end, and whose capability table matches the registry — A5.
-8. Open `br ready` and find ≥ 10 items, every one on a journey path; find no in_progress bead older than 7 days without a live claim — E2.
+8. Find each unfinished journey requirement on an actionable or explicitly blocked/deferred bead with a real prerequisite and owner boundary — E2. The number of ready beads is not a product acceptance criterion.
 9. Find §14.1 either met or re-baselined with dated receipts on the same page — F1, F2.
 10. Find every shipped surface (Wright Flyer, instruments, Apple app, website, Euler cinematic) with a done-line and a receipt, or a dated park — H1–H5.
 

@@ -1,6 +1,176 @@
-# FrankenSim Reality Check — 2026-09-01
+# FrankenSim Reality Check — refreshed 2026-09-04
 
-HEAD `b46da547`. Evidence gathered by twelve read-only investigation lanes plus one executed compile/test run on the yto verification host. Code is the ground truth; the five plan documents (880 KB) and the README are the measuring stick.
+Current source snapshot: `34f9fc0a8d2dc1e03b5d215db13aae76436d889a` on `main`.
+This refresh supersedes the September 1 assessment below. It preserves that
+assessment as dated history, not as current evidence. No product source was
+changed by this refresh.
+
+While the audit was finishing, another process committed intermediate versions
+of these documents and advanced shared `main` to `aafc0d35` (including unrelated
+G1 walking changes). The CLI, marquee and UQ files cited in the concrete
+findings are unchanged between the inspected revision and that commit. Existing
+staged/unstaged peer changes were preserved; this audit did not stage or commit.
+
+## Current answer
+
+**FrankenSim is not finished and does not yet deliver the full continuum promised
+by its plans. It does have substantial real numerical software and a working,
+bounded cooling product path. The immediate defect is that several tasks were
+closed after only a subset of their implementation or proof was delivered.**
+
+The September 1 claim that no user-visible cooling answer exists is obsolete.
+The retained September 3 full-lane receipt records seven executed stages and
+66 checks with zero failures. Source now implements retained report/package
+exports and comparison. The result still has Estimated authority; running a
+pipeline is different from bounding its physical prediction error. The study
+CLI remains unavailable, despite a real scalar thermal optimization library.
+
+The recommended sequence is to complete that study producer, repair actual
+adaptive convergence, connect uncertainty propagation to cooling solves, and
+build a justified QoI error bound. Optional mathematical and domain ambitions
+remain visible behind the owner's existing deferrals. More schemas or success
+receipts do not substitute for those producers.
+
+## Scope and evidence discipline
+
+The actual `AGENTS.md` (1,035 lines) and `README.md` (1,578 lines) were read in
+full. The core plan, addendum, music plan, Apple plan, existing assessment and
+bridge plan were read; the Wright Flyer and new-domain plans were examined by
+their architecture, goal, validation, roadmap and acceptance sections. Source
+inspection followed the CLI, conduction/QoI, marquee and UQ paths in depth and
+sampled the wider architecture through implementation entry points and explicit
+contract boundaries. This is a comprehensive program assessment, **not a claim
+to have line-audited every source file, every domain-plan equation, or all 3,363
+existing issues**. Bead searches included complete available descriptions,
+acceptance text, closed and deferred records; a textual match is coverage
+evidence, not implementation proof.
+
+Evidence labels used here:
+
+- **Current source:** inspected at the source snapshot above.
+- **Retained execution:** a recorded run at its own stated revision; not rerun
+  at the current HEAD.
+- **Executed now:** commands actually run during this assessment, with their
+  limited meaning stated below.
+- **Unverified:** neither current execution nor an adequate retained result was
+  established; this is not a failure result.
+
+## What works, and what remains
+
+| Goal or program | Current finding | Remaining boundary / existing coverage |
+|---|---|---|
+| Workspace and architecture | 183 tracked `fs-*` directories; 163 root-listed native members; 20 outside the root member list; 182 top-level contracts; 873 tracked Rust files under crate tests | README's 180/162/180/867 block is stale; `fs-scene` lacks a contract. q61wp.4 and new q61wp.65. These are source inventory counts, not test totals. |
+| Runtime, deterministic numerics and sparse math | Real libraries with typed execution, reductions, intervals, sparse formats, RNG, solvers and adjoints | Universal cancellation timing, cross-ISA equality and full-suite health are not established by library presence. Per-crate contracts and current runtime evidence control. |
+| Performance | Owner rebaselined P0; measurement/rebaseline tasks .22/.28/.56 are closed | Original ambitious bars are stretch targets, not newly met benchmarks. Autotune consumer work remains `frankensim-yqug`; do not revive the superseded P0 decision. |
+| Geometry and meshing | Real chart abstractions, import quarantine, exact-predicate mesh audits, facet recovery, refined quality checks, STL and strict faceted STEP paths | Sampled chart agreement is not global watertightness; generic CAD assemblies/trimmed geometry and robust recovery of arbitrary bodies remain incomplete. q61wp.46/.51–.53 and geometry owners. |
+| Cooling CLI | All seven stages exist; real material/contact/convection/conduction/QoI/report paths; sealed export and compare | Retained reference path is Estimated/Indeterminate; no general certified engineering decision. q61wp.11 and f85xj.6.7. |
+| Cooling adaptation | Uniform three-rung ladder and optional initial constrained refinement exist | `adaptive` emits convergence after one solve without a goal-error stopping test. q61wp.44 reopened. |
+| Cooling UQ | Library propagation-plan machinery exists | Product script invokes library tests only; no real sampled cooling/ledger/report/checker chain. f85xj.6.7 reopened. |
+| Guaranteed thermal QoI error | Grid-ladder estimate and interval rendering exist | No product equilibrated-flux producer or justified 3-D maximum transfer. q61wp.11 reopened; general goal-bound work sj31i.25 already open. |
+| Marquee library | Default scalar Poisson CutFEM with projected hole radii, Armijo descent, Estimated DWR, replay | Fixed-center radius optimization is a bounded thermal study, not the promised elasticity/free-boundary topology study. q61wp.16 reopened. |
+| Study product | Parser/schema/example and a typed unavailable response exist | `mod study` is disabled; the draft producer is not compiled. q61wp.20 remains in progress. A prior execution comment records 34 API errors when wired; this audit did not reproduce that build. |
+| Marquee independent evidence | FD, replay, area and sign-mutation tests are useful | mq_007 compares different PDEs only through a broad range; mq_009 does not change the load. q61wp.17 reopened. |
+| FEEC and structural physics | Exact-sequence/numerical kernels; real 2-D CutFEM elasticity and fixed-mesh 3-D linear solid functionality | 3-D CutFEM quadrature/octree/ghost-penalty path remains incomplete; high-order vector PDE and nonlinear structural claims remain scoped. q61wp.18/.19. |
+| Fluids and multiphysics | D2Q9/D3Q19 LBM, reduced airflow/conjugate thermal path, 2-D flux solver, coupling primitives | No general 3-D scalable Navier–Stokes/FSI product; current flux contract names dense-LU fixture scope. q61wp.34/.35/.49. |
+| IGA, turbulence, compressible flow, FMM-VPM | Existing narrow kernels remain useful | Broader v1 promises explicitly retired by owner; q61wp.40–.43 stay deferred. No silent reactivation. |
+| Optimization and UQ breadth | Real optimizer library, POD and inference components | A callable optimizer is not the end-to-end design product. Full neural operators/DEIM/balanced truncation/Koopman scope remains deferred on restored 7tv.8. |
+| SOS | Supplied-certificate checking and quadratic construction | General SOS/moment/SDP search and nonlinear attraction regions are staged, per fs-sos CONTRACT; no full solver claim. |
+| Rendering and visualization | Real spectral tracer, streamlines, grid contours and field visualization kernels | No universal ray-rate or 4K-attainment claim. Full DVR/LIC/glyphs/Morse–Smale scope remains deferred on restored qfx.4. |
+| FrankenScript and planning | Parser/admission, identities, cost/discrepancy models and ledger primitives | General execution and demonstrated study-level planner economics remain incomplete. q61wp.38; source cost estimates are not worst-case guarantees. |
+| Evidence and validation | Maturity registry: L1=3, L2=11, L3=1, L4=0, L5=0; real colour/packaging machinery | L3 is the cooling execution claim. External corpus registration, package integrity and a numerical bound do not independently establish experimental validity or a supported product. |
+| Wright Flyer | Existing reduced physics/browser implementation and detailed V/H-case separation | No new device-performance or deployment-match proof in this audit. q61wp.29 retains V-14/device and wake/deployment work; do not call historical flight fitting independent validation. |
+| Musical physics | 54 registry rows: 23 green, 30 ungated, 1 refused; all 54 `live_default=no`; one row references a budget artifact | Seven listening artifacts exist; human adjudication and product exposure remain separate .24/.30 work. No listening or audio playback performed here. |
+| Apple app | Real native studio and Rust bridge; recent run-control and text-size fixes landed | Full three-form-factor runtime/parity proof is not established here; .32/.64 remain in progress. Historical “never launched” language below is not a current claim. |
+| Euler cinematic/campaign | Real reduced trajectory and rendering/campaign code | Physical calibration and full cinematic delivery remain separately scoped; .31 and the Euler roots. No new frame or physical prediction measured here. |
+| Website | Live homepage reachable during this audit | It still advertises stronger proof, gradient, determinism and merge-gate claims than current evidence supports. .33 needs claim correction as well as a bundle refresh. |
+| New domains and theorem portfolio | Significant primitives, schemas and partial domain kernels | The E0–E8 and machine/theorem end states remain broader than delivered runtime. Existing deferred roots preserve them; no theorem or whole-machine validation inferred from an admitted schema. |
+
+## Concrete completion defects
+
+1. **False adaptive terminal.** In `crates/fs-cli/src/solve.rs`, the loop at
+   `ladder_requested` breaks immediately for `adaptive` and chooses
+   `fidelity-adaptive-converged`. Initial mesh quality is checked, but no
+   goal-oriented convergence condition is evaluated. The earlier closure's
+   quality work is real; its claimed adaptation completion is not.
+2. **Wrong independent oracle.** `mq_007_falsifier_cross_representation_solid`
+   solves plane-stress elasticity while `PlateWithHoles::compliance` solves
+   scalar Poisson. Each result merely has to lie in `[1e-4, 1.0]`; their
+   difference is never tested. This cannot validate the claimed comparison.
+3. **UQ test substituted for a product.** `scripts/e2e/cooling_uq.sh` dispatches
+   `cargo test -p fs-uq --test product_plan` for run, negative and replay modes.
+   Its check/self-test modes print success without preflight checks. No actual
+   cooling binary, sample solve, ledger, export or checker is invoked.
+4. **Bound formatting substituted for bound construction.** The q61wp.11
+   closure describes interval handling, but the requested flux reconstruction
+   is absent. The live QoI path still explicitly requires Estimated colour.
+   A 3-D point maximum additionally needs mathematics beyond an energy bound;
+   the revised bridge/bead specifies that obligation.
+5. **Smoke optimization substituted for full topology.** The delivered
+   `run_study` varies radii of fixed-center holes for scalar thermal compliance.
+   Its own contract acknowledges this. It does not close the original
+   free-boundary elasticity topology task or provide a cancellable CLI producer.
+6. **Docs substituted for current inventory.** The README contradicts its own
+   command section and misses three current crate directories and one absent
+   contract. Existing generators/checks should reconcile it; no new analyzer
+   is needed.
+
+## Would finishing the open tasks finish the vision?
+
+**No.** Before this refresh, the active queue omitted required residual work
+because six tasks were closed prematurely. Two other broad capabilities were
+closed on deliberately smaller v0 implementations, leaving their deferred
+remainder implicit. Even the corrected active queue does not include the
+owner-retired/deferred physics and theorem portfolio, and empirical validation
+depends on independent data, appropriate experiments and successful execution.
+
+The genuinely new uncovered artifact found here is the `fs-scene` contract.
+The other principal gaps already have identifiers and have been restored there:
+q61wp.4/.11/.16/.17/.44 and f85xj.6.7 reopened; q61wp.65 created; 7tv.8 and
+qfx.4 restored as deferred residual scope. General verified functional work was
+already covered by sj31i.25, so no duplicate theorem ticket was created.
+Coverage is not completeness: the wider goal matrix retains explicit staged,
+deferred and unverified states instead of claiming every line is implemented.
+
+## Verification in this refresh
+
+| Check | Result and limit |
+|---|---|
+| `dsr repos info frankensim` | Registry inspected successfully. Ten configured checks include constellation, Cargo gates and Apple quality. |
+| `dsr quality --tool frankensim --dry-run` | PLANNED 10 checks, executed 0; exit 2. This is not a test failure or a pass. No full DSR quality run was launched. |
+| `sbh check --need 20G` | Passed at approximately 303 GB free. This does not resolve remote load or dependency pinning. |
+| `scripts/ci/checkout_constellation.sh --verify-only` | Completed with exit 1 and refused all seven off-pin siblings. Separate ancestry checks classify all seven heads as descendants of their pins; no divergence was found. At final inspection six siblings were clean and FrankenSQLite had a modified test plus untracked files. No sibling was changed by this audit. Exact heads are recorded below. |
+| Existing remote census | Inspected `/data/projects/sj-20260901/census.log` on yto. It had reached tests and was still running `cbc_fallible_storage`; no completed aggregate result. Remote checkout was `c22bfa19` with changes/conflicts. It is not current-HEAD proof. |
+| Existing remote release binary: `--json validate examples/heatsink-fan/heatsink-fan.fsim` | Executed now, exit 0; schema v4, zero findings, explicit `structural-project-admission`. Binary dated September 4 on that older/dirty checkout; no current-source or physical-solvability claim. |
+| `bash scripts/e2e/cooling_uq.sh --check` | Exit 0 with a fixed success message, confirming that the current check mode performs no checks. `bash -n` also passed syntax only. |
+| `spine-e2e-summary.json` | Retained September 3 execution at `51acb4b0`: 66 checks, 0 failures, 7 stages. Its own no-claim records Estimated/Indeterminate with eight NO-DATA terms. |
+| `suite-receipt.json` | Historical August 1 dirty-tree run at `88b18883`: 7,621 passed, 95 failed, 38 ignored. Neither those failures nor the older July 30 count are presented as current failures. |
+| Public website | [Live homepage](https://frankensim.org/) fetched; public claims reviewed. No deployment, browser interaction or wasm execution performed. |
+
+Constellation observations (full heads, not a proposed rollback):
+
+| Sibling | Expected pin | Actual HEAD |
+|---|---|---|
+| asupersync | `03a0a298d07f565c56b3d80ad85cf2bbc69ad3c2` | `276ed7e336e55f7d4061d29ea7f788f31f6799a4` |
+| franken_networkx | `ab73033517f47250ac9477148fc055f148e838b0` | `1036e7b0f7ace1ff8e8db45a4cd33235173acab3` |
+| franken_numpy | `9b6b5828317dbeda36a6a9e53c8fa754527f0d0c` | `1629b38e88d203bc20e639397c69f78e544e3fb9` |
+| frankenpandas | `38a4b26fe652d7a7783d7f8f5a0961cf19c9c1a0` | `2fcd31a974585f477b650333c57b2c637ba9987e` |
+| frankenscipy | `a75ad6ed2e9f72e72b8d393fd92805909958630b` | `9d22c5b464e713dd8a3e3c57012a9400c8d557a8` |
+| frankensqlite | `d5c68ea3ab4a938e4d6b38fdfbba86872c65e82f` | `68e20bb5aed3322de7abfed6daab25ff5d3dcbb6` |
+| frankentorch | `74df606bd5f1440d109deea115a0ab1bdf4cfd1b` | `d7514b1254a369fc9bf720aaf03dce8c30f7109b` |
+
+The full implementation/test plan, three ambition passes and five refinement
+passes are maintained in the existing
+[`COMPREHENSIVE_BRIDGE_PLAN_FOR_FRANKENSIM.md`](../COMPREHENSIVE_BRIDGE_PLAN_FOR_FRANKENSIM.md).
+Product implementation remains future work on those tasks; this assessment
+does not claim to have completed them.
+
+---
+
+# Historical assessment — 2026-09-01 (superseded)
+
+Historical HEAD `b46da547`. The original assessment used twelve investigation
+lanes and one executed compile/test run on yto. All present-tense statements
+below refer to that snapshot, not September 4.
 
 ---
 
