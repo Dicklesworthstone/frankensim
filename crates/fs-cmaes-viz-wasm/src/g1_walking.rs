@@ -192,21 +192,6 @@ const HEADING_SINE_SCALE: f64 = 0.35;
 const UNCOMPLETED_STEP_PENALTY: f64 = 1_000.0;
 const SHAPING_SCORE_LIMIT: f64 = 400.0;
 const SHAPING_SCORE_SCALE: f64 = 200.0;
-
-// Walking shaping weights.
-//
-// Measured at the curriculum seed, the pre-v069 weights spent 79% of the
-// objective on contact-schedule matching and 7.8% on speed, with no forward
-// progress reward at all -- only a backward penalty. A 300-generation study
-// confirmed the consequence: the objective improved 1.32 -> -11.94 while the
-// distance walked FELL from 0.329 m to 0.260 m. The search was correct; it was
-// being asked to keep time, not to travel.
-const WALK_SPEED_WEIGHT: f64 = 60.0;
-const WALK_CONTACT_WEIGHT: f64 = 60.0;
-/// Reward for covering the commanded distance, capped so a forward dive that
-/// overshoots cannot buy more credit than arriving does.
-const WALK_PROGRESS_REWARD: f64 = 120.0;
-const WALK_PROGRESS_CAP: f64 = 1.25;
 // Per-step survival bonus (cmaes-pvz, v068): a small reward per survived step
 // inside the same objective, so the optimizer cannot game a single rollup by
 // collapsing early. Bounded to ~half the full horizon by design
@@ -1421,12 +1406,10 @@ impl G1WalkingEvaluator {
                 // (SURVIVAL_BONUS_PER_STEP * completed_steps) makes longer
                 // survival visibly cheaper, so a slow stable walk is preferred
                 // to a fast collapse.
-                WALK_SPEED_WEIGHT * speed_tracking_error
-                    - WALK_PROGRESS_REWARD
-                        * (distance_m / target_distance_m).clamp(0.0, WALK_PROGRESS_CAP)
+                20.0 * speed_tracking_error
                     + 20.0 * normalized_stance_slip
                     + 12.0 * posture_integral / completed_duration_s
-                    + WALK_CONTACT_WEIGHT * normalized_contact_mismatch
+                    + 180.0 * normalized_contact_mismatch
                     + 100.0 * normalized_clearance_error
                     + 12.0 * lateral_error_integral / completed_duration_s
                     + 10.0 * heading_error_integral / completed_duration_s
