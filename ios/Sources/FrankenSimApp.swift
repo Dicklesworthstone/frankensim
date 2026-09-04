@@ -22,6 +22,33 @@ struct FrankenSimApp: App {
                 }
                 .keyboardShortcut("r", modifiers: .command)
             }
+            SimulationTextSizeCommands()
+        }
+    }
+}
+
+private struct SimulationTextSizeCommands: Commands {
+    @AppStorage(ForgeTheme.textScaleStorageKey) private var textScale = ForgeTheme.defaultTextScale
+
+    var body: some Commands {
+        CommandMenu("Text Size") {
+            Button("Larger Text") {
+                textScale = ForgeTheme.adjustedTextScale(from: textScale, steps: 1)
+            }
+            .keyboardShortcut("+", modifiers: .command)
+            .disabled(ForgeTheme.normalizedTextScale(textScale) >= ForgeTheme.maximumTextScale)
+
+            Button("Smaller Text") {
+                textScale = ForgeTheme.adjustedTextScale(from: textScale, steps: -1)
+            }
+            .keyboardShortcut("-", modifiers: .command)
+            .disabled(ForgeTheme.normalizedTextScale(textScale) <= ForgeTheme.minimumTextScale)
+
+            Button("Actual Size") {
+                textScale = ForgeTheme.defaultTextScale
+            }
+            .keyboardShortcut("0", modifiers: .command)
+            .disabled(ForgeTheme.normalizedTextScale(textScale) == ForgeTheme.defaultTextScale)
         }
     }
 }

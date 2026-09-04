@@ -9,6 +9,12 @@ enum ForgeAppearance: String {
 }
 
 enum ForgeTheme {
+    static let textScaleStorageKey = "frankensim.textScale"
+    static let defaultTextScale = 1.0
+    static let minimumTextScale = 0.8
+    static let maximumTextScale = 1.5
+    static let textScaleStep = 0.1
+
     static let background = adaptive(dark: UIColor(red: 0.012, green: 0.024, blue: 0.032, alpha: 1), light: UIColor(red: 0.93, green: 0.96, blue: 0.972, alpha: 1))
     static let panel = adaptive(dark: UIColor(red: 0.025, green: 0.050, blue: 0.062, alpha: 1), light: UIColor(red: 0.985, green: 0.995, blue: 1, alpha: 1))
     static let raised = adaptive(dark: UIColor(red: 0.038, green: 0.073, blue: 0.086, alpha: 1), light: UIColor(red: 0.84, green: 0.91, blue: 0.935, alpha: 1))
@@ -36,11 +42,40 @@ enum ForgeTheme {
     }
 
     static func size(_ base: CGFloat) -> CGFloat {
+        let textScale = CGFloat(storedTextScale)
 #if targetEnvironment(macCatalyst)
-        base * 1.22
+        return base * 1.22 * textScale
 #else
-        UIFontMetrics(forTextStyle: .body).scaledValue(for: base)
+        return UIFontMetrics(forTextStyle: .body).scaledValue(for: base) * textScale
 #endif
+    }
+
+    static var storedTextScale: Double {
+        let defaults = UserDefaults.standard
+        guard defaults.object(forKey: textScaleStorageKey) != nil else { return defaultTextScale }
+        return normalizedTextScale(defaults.double(forKey: textScaleStorageKey))
+    }
+
+    static func normalizedTextScale(_ candidate: Double) -> Double {
+        guard candidate.isFinite else { return defaultTextScale }
+        let clamped = min(max(candidate, minimumTextScale), maximumTextScale)
+        return (clamped / textScaleStep).rounded() * textScaleStep
+    }
+
+    static func adjustedTextScale(from current: Double, steps: Int) -> Double {
+        normalizedTextScale(current + Double(steps) * textScaleStep)
+    }
+
+    static func dynamicTypeSize(for scale: Double) -> DynamicTypeSize {
+        switch normalizedTextScale(scale) {
+        case ..<0.9: return .small
+        case ..<1.0: return .medium
+        case ..<1.1: return .large
+        case ..<1.2: return .xLarge
+        case ..<1.3: return .xxLarge
+        case ..<1.4: return .xxxLarge
+        default: return .accessibility1
+        }
     }
 }
 

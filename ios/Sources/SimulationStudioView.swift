@@ -2,6 +2,7 @@ import SwiftUI
 
 struct SimulationStudioView: View {
     @AppStorage(ForgeAppearance.storageKey) private var appearance = ForgeAppearance.dark.rawValue
+    @AppStorage(ForgeTheme.textScaleStorageKey) private var textScale = ForgeTheme.defaultTextScale
     @StateObject private var model = SimulationStudioModel()
     @State private var search = ""
     @State private var showsAtlas = false
@@ -32,6 +33,7 @@ struct SimulationStudioView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .environment(\.dynamicTypeSize, ForgeTheme.dynamicTypeSize(for: textScale))
         .background(ForgeTheme.background.ignoresSafeArea())
         .preferredColorScheme((ForgeAppearance(rawValue: appearance) ?? .dark).colorScheme)
         .sheet(isPresented: $showsAtlas) {

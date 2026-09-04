@@ -253,7 +253,7 @@ struct NativeSimulationCanvas: View {
             let radius = CGFloat(26 + ring * 22)
             context.stroke(Path(ellipseIn: CGRect(x: center.x - radius, y: center.y - radius, width: radius * 2, height: radius * 2)), with: .color(accent.opacity(0.10 + Double(ring) * 0.025)), lineWidth: 1)
         }
-        context.draw(Text("READY TO RUN").font(.system(size: 13, weight: .bold, design: .monospaced)).foregroundColor(accent), at: center)
+        context.draw(Text("READY TO RUN").font(.system(size: ForgeTheme.size(13), weight: .bold, design: .monospaced)).foregroundColor(accent), at: center)
     }
 
     private func drawNormalizedPath(_ points: [(Double, Double)], context: inout GraphicsContext, size: CGSize, glow: Bool) {
