@@ -1801,6 +1801,8 @@ dependencies = [
  "fs-render",
  "fs-rep-frep",
  "fs-solid",
+ "fs-solver",
+ "fs-sparse",
 ]
 
 [[package]]
