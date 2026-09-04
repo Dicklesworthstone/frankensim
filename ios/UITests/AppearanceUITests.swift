@@ -44,9 +44,15 @@ final class FrankenSimAppearanceUITests: XCTestCase {
         XCTAssertFalse(app.otherElements["Rendered native simulation result"].exists)
 
         let run = app.buttons["compact-run-button"]
-        XCTAssertTrue(run.exists)
+        XCTAssertTrue(run.waitForExistence(timeout: 5))
+        XCTAssertTrue(run.isHittable)
+        XCTAssertEqual(run.label, "Run Lorenz attractor")
+        XCTAssertEqual(run.value as? String, "Ready")
         run.tap()
         XCTAssertTrue(app.otherElements["Rendered native simulation result"].waitForExistence(timeout: 12))
+        XCTAssertEqual(run.label, "Run Lorenz attractor")
+        XCTAssertEqual(run.value as? String, "Completed")
+        XCTAssertTrue(run.isHittable)
         keepScreenshot(of: app, named: "Phone studio after explicit run")
 
         chooser.tap()

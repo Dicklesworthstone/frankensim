@@ -304,6 +304,10 @@ struct SimulationStudioView: View {
                     .font(.system(size: ForgeTheme.size(9), weight: .bold, design: .monospaced))
                     .kerning(1.1)
                     .foregroundStyle(ForgeTheme.secondary)
+                Text(compactRunStatus)
+                    .font(.system(size: ForgeTheme.size(9), weight: .bold, design: .monospaced))
+                    .kerning(0.8)
+                    .foregroundStyle(model.isRunning ? ForgeTheme.amber : accent)
                 Picker("Compute budget", selection: $model.quality) {
                     Text("Quick").tag(0.12)
                     Text("Balanced").tag(0.55)
@@ -317,16 +321,26 @@ struct SimulationStudioView: View {
                 Button {
                     model.isRunning ? model.cancel() : model.run()
                 } label: {
-                    Label(
-                        model.isRunning ? "Stop" : "Run \(model.selection.name)",
-                        systemImage: model.isRunning ? "stop.fill" : "bolt.fill"
-                    )
+                    HStack(spacing: 8) {
+                        Image(systemName: model.isRunning ? "stop.fill" : "bolt.fill")
+                        Text(model.isRunning ? "Stop simulation" : "Run \(model.selection.name)")
+                    }
                     .lineLimit(1)
                     .minimumScaleFactor(0.72)
                     .frame(maxWidth: .infinity)
+                    .transaction { transaction in
+                        transaction.disablesAnimations = true
+                    }
                 }
                 .buttonStyle(PrimaryForgeButtonStyle(tint: model.isRunning ? ForgeTheme.coral : accent))
                 .accessibilityIdentifier("compact-run-button")
+                .accessibilityLabel(model.isRunning ? "Stop simulation" : "Run \(model.selection.name)")
+                .accessibilityValue(compactRunStatus.capitalized)
+                .accessibilityHint(
+                    model.isRunning
+                        ? "Stops the current on-device simulation"
+                        : "Runs the selected simulation on this device"
+                )
 
                 Button { model.randomizeSeed() } label: {
                     Image(systemName: "dice")
@@ -345,7 +359,12 @@ struct SimulationStudioView: View {
         .frame(maxWidth: .infinity)
         .background(.ultraThinMaterial)
         .overlay(alignment: .top) { Rectangle().fill(ForgeTheme.stroke).frame(height: 1) }
-        .accessibilityIdentifier("compact-run-dock")
+        .accessibilityElement(children: .contain)
+    }
+
+    private var compactRunStatus: String {
+        if model.isRunning { return "running" }
+        return model.result == nil ? "ready" : "completed"
     }
 
     private var experimentHeader: some View {
