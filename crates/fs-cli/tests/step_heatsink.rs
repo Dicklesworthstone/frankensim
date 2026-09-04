@@ -50,38 +50,33 @@ fn scratch(tag: &str) -> PathBuf {
     dir
 }
 
-fn extract_temperature_max(json_str: &str) -> Option<f64> {
-    // Parse the JSON output for "temperature-max" or find "value":<float>
-    for line in json_str.lines() {
-        if line.contains("\"name\":\"temperature-max\"") || line.contains("\"temperature-max\"") {
-            if let Some(pos) = line.find("\"value\":") {
-                let rest = &line[pos + 8..];
-                let num_str: String = rest
-                    .chars()
-                    .take_while(|c| {
-                        c.is_ascii_digit() || *c == '.' || *c == '-' || *c == 'e' || *c == 'E'
-                    })
-                    .collect();
-                if let Ok(v) = num_str.parse::<f64>() {
-                    return Some(v);
-                }
-            }
-        }
-    }
-    // Fallback: search anywhere for `"value":` near temperature
-    if let Some(pos) = json_str.find("\"value\":") {
-        let rest = &json_str[pos + 8..];
-        let num_str: String = rest
-            .chars()
-            .take_while(|c| {
-                c.is_ascii_digit() || *c == '.' || *c == '-' || *c == 'e' || *c == 'E' || *c == '+'
-            })
-            .collect();
-        if let Ok(v) = num_str.parse::<f64>() {
-            return Some(v);
-        }
-    }
-    None
+/// The sealed temperature maximum of a completed `run`, read from the
+/// retained report twin.
+///
+/// The run verb's stdout is a run SUMMARY — run id, stage count, verdict,
+/// and the paths it exported — and carries no QoI array; the QoIs live in
+/// the report JSON the run sealed, whose path that summary names. Reading
+/// the twin also means the parity number below is the retained value, not
+/// something re-derived from console text.
+fn temperature_max_of(run_stdout: &str) -> f64 {
+    let path = run_stdout
+        .split("\"report_json\":\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .expect("the run result names its report twin");
+    let text = std::fs::read_to_string(path).expect("retained report twin is readable");
+    let entry = text
+        .split("\"name\": \"temperature-max\"")
+        .nth(1)
+        .expect("the report carries the temperature-max QoI");
+    entry
+        .split("\"value\":")
+        .nth(1)
+        .and_then(|rest| rest.split(',').next())
+        .expect("the QoI entry carries a value")
+        .trim()
+        .parse::<f64>()
+        .expect("the QoI value parses")
 }
 
 #[test]
@@ -146,8 +141,7 @@ fn step_heatsink_001_qoi_parity_with_stl_across_seven_stages() {
     );
     assert!(run_stl.stdout.contains("\"stages_completed\":7"));
     assert!(run_stl.stdout.contains("\"status\":\"completed\""));
-    let qoi_stl =
-        extract_temperature_max(&run_stl.stdout).expect("temperature-max in STL run output");
+    let qoi_stl = temperature_max_of(&run_stl.stdout);
 
     // 3. Run STEP pipeline
     let dir_step = scratch("step-run");
@@ -193,8 +187,7 @@ fn step_heatsink_001_qoi_parity_with_stl_across_seven_stages() {
     );
     assert!(run_step.stdout.contains("\"stages_completed\":7"));
     assert!(run_step.stdout.contains("\"status\":\"completed\""));
-    let qoi_step =
-        extract_temperature_max(&run_step.stdout).expect("temperature-max in STEP run output");
+    let qoi_step = temperature_max_of(&run_step.stdout);
 
     // 4. Verify QoI parity: within discretization term
     let rel_diff = ((qoi_step - qoi_stl) / qoi_stl).abs();
