@@ -432,6 +432,12 @@
       "reason": "content-hash domain separator for report identity"
     },
     {
+      "constant": "STUDY_RUN_RECEIPT_SCHEMA",
+      "location": "crates/fs-cli/src/study.rs",
+      "reason_class": "internal-receipt",
+      "reason": "normalized thermal study checkpoint retained in the ledger; resume and export require the same study driver identity; no third-party producer or cross-version migration promise"
+    },
+    {
       "constant": "CROSSWALK_VERSION",
       "location": "crates/fs-crosswalk/src/lib.rs",
       "reason_class": "internal-wire",

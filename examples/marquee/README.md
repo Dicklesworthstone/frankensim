@@ -1,94 +1,69 @@
-# Marquee 2D Topology Optimization Example (`bracket-2d.fsim`)
+# Thermal cooling-hole radius study
 
-This directory contains the canonical tracked example for FrankenSim's **Marquee 2D Topology Optimization** pipeline (Journey B, bead `frankensim-rc-root-q61wp.20`).
+`thermal-2d.fsim` runs normalized scalar Poisson physics through the CLI,
+optimizer, ledger, report and evidence package. It solves `-laplacian(u) = 1`
+on the unit square with two circular holes, with `u = 0` on every boundary.
+The objective is dimensionless thermal compliance, the integral of `u` over
+the material. Projected gradient steps adjust hole radii at fixed centers and
+material area, using the existing bounded Armijo line search.
 
-The study defines a 2D elastic plate subject to fixed clamping on the left boundary and traction on the right boundary. The optimizer adjusts hole radii using projected gradient descent with Armijo backtracking line search while strictly preserving the material volume budget.
+`bracket-2d.fsim` records the proposed elasticity study. Its physics is still
+unimplemented; it is not an executable thermal example or evidence that
+elasticity/topology optimization works.
 
----
+With a built `frankensim` binary:
 
-## Section-by-Section Anatomy
-
-Every `.fsim` study document adheres strictly to the **Five Explicits** and the frozen schema specification (`STUDY_FSIM_VERSION = 1`):
-
-### 1. Root & Version (`:version 1`)
-Defines the schema version envelope. Admitted documents must match `STUDY_FSIM_VERSION` (currently `1`).
-
-### 2. `metadata`
-Carries user-facing context, intended decision, decision gate (`scoping-estimate`, `design-selection`, `compliance-signoff`), and consequence class (`advisory`, `reliability`, `safety-critical`).
-
-### 3. `versions`
-Explicit engine and schema versions preventing silent semantic drift across toolchain upgrades.
-
-### 4. `seeds`
-Counter-based pseudo-random generator seed (`:rng 1337`). Ensures bit-level reproducibility of all stochastic or initial operations on the same ISA.
-
-### 5. `budgets`
-Declares execution budgets:
-- `:wall-time 60 s`: Maximum execution wall clock time.
-- `:memory 1073741824 B`: Memory consumption ceiling.
-- `:max-iterations 8`: Maximum optimization iterations permitted.
-
-### 6. `capabilities`
-Names the required execution capabilities:
-- `"optimization.marquee-topopt"`: 2D topology optimization driver.
-- `"geometry.sdf"`: Signed distance field representations.
-- `"physics.cutfem"`: Unfitted CutFEM elasticity solver.
-
-### 7. `units`
-Declares the units doctrine (`:system "SI"`). Omission of declared units triggers an immediate admission refusal (`project-undeclared-units`).
-
-### 8. `domain`
-Specifies the geometric domain:
-- `:type sdf-plate-with-holes`: Plate domain with circular voids.
-- `:bounds ((0.0 0.0) (1.0 1.0))`: Bounding box of the unit square $[0, 1]^2$.
-- `:initial-holes`: Centers and initial radii of voids in the plate.
-
-### 9. `physics`
-Discretization parameters for CutFEM elasticity:
-- `:type elasticity-2d`: 2D plane stress/strain elasticity.
-- `:mesh-level 4`: Quadtree refinement level for background grid cells.
-
-### 10. `scenario`
-Supports and external loads:
-- `:fixed-boundary left`: Clamped Dirichlet boundary condition along $x = 0$.
-- `:load-region right`: Traction load along $x = 1$. Non-boundary load declarations trigger refusal (`study-load-non-boundary`).
-
-### 11. `objective`
-Optimization goal:
-- `:type compliance`: Structural compliance functional $J(u) = \int_{\Gamma_N} f \cdot u \, ds$.
-- `:sense minimize`: Minimization objective.
-- `:unit "J"`: Energy units $[M \cdot L^2 \cdot T^{-2}]$. Supplying incompatible units (e.g. `"W"` or `"m"`) triggers refusal (`study-objective-dimension-mismatch`).
-
-### 12. `constraints`
-Design constraints:
-- `:volume-fraction 0.853`: Target solid volume fraction. Values outside $(0, 1)$ trigger refusal (`study-volume-fraction-out-of-bounds`).
-
-### 13. `optimizer`
-Hyperparameters for the optimization loop:
-- `:type projected-gradient`: Gradient projection onto the volume equality constraint.
-- `:step-size 1.0`: Initial gradient descent step size.
-- `:r-min 0.08`, `:r-max 0.20`: Lower and upper bounds on hole radii.
-- `:steps 8`: Number of optimization steps.
-
----
-
-## Running the Study
-
-Run the study end-to-end using the `frankensim study` CLI verb:
-
-```bash
-cargo run -p fs-cli --bin frankensim -- study examples/marquee/bracket-2d.fsim ledger.db
+```sh
+frankensim --json study examples/marquee/thermal-2d.fsim study.db
+frankensim --json report study-<receipt-hash> study.db
+frankensim --json package study-<receipt-hash> study.db
 ```
 
-### Running with a Budget Limit
+The study result supplies the full `study-<receipt-hash>` ID. Reports and
+packages are exported next to the ledger; an existing file with different
+bytes is refused rather than overwritten. The report contains actual accepted
+compliance values, convergence SVG, DWR/algebraic estimates and final area.
 
-To run with an iteration budget (e.g., stopping after 2 iterations):
+For a short invocation followed by continuation:
 
-```bash
-cargo run -p fs-cli --bin frankensim -- study examples/marquee/bracket-2d.fsim ledger.db --budget 2
+```sh
+frankensim --json study examples/marquee/thermal-2d.fsim study.db --budget 2
+# Exit 6 is an explicit partial. Use the returned receipt ID:
+frankensim --json study --resume study-<receipt-hash> study.db
 ```
 
-When an iteration budget is exhausted mid-loop:
-1. The process exits with exit code `6` (`exit::BUDGET`).
-2. The last certified iterate is durable and retained.
-3. The run receipt and report mark status as `"budget-exhausted"` with complete lineage.
+Resume verifies and replays the saved prefix before continuing. It retains the
+original wall and total-iteration budgets, and charges replay time as well.
+The invocation cap limits new steps; it does not raise the study's grant.
+
+Every section in the example has a concrete meaning:
+
+| Section | Meaning |
+| --- | --- |
+| root/version | Study syntax version 1; executable input must preserve its complete canonical declaration. Whitespace/comments may differ. |
+| metadata | Advisory scoping context; this estimated study cannot make a signoff decision. |
+| versions | Declared schema. The running driver separately retains its crate version and embedded constellation-lock digest. These are provenance, not authenticated source identity. |
+| seeds | Explicit root seed, retained in operations. The radius algorithm itself does not sample randomness. |
+| budgets | Wall seconds, memory admission value and maximum total iterations. Memory is not a measured RSS ceiling. |
+| capabilities | Explicit thermal-radius optimization, SDF geometry and CutFEM capabilities. |
+| units | `normalized`; this problem does not claim a dimensional physical calibration. |
+| domain | Unit square and strictly interior, disjoint circular holes. |
+| physics | `thermal-poisson-2d-normalized`, with a fixed background quadtree level. |
+| scenario | Unit source throughout the material, zero temperature on all boundaries. |
+| objective | Minimize normalized compliance in unit `1`; joules or watts are refused. |
+| constraints | Material-area equality in `(0,1)`, feasible under the declared radius bounds. |
+| optimizer | Projected gradient, initial step size, radius bounds, iteration count. |
+
+The supported execution envelope is at most mesh level 5, 32 holes and 256
+iterations, with a memory admission value of at least 128 MiB. Cancellation and
+wall enforcement occur between bounded iterations, not inside individual
+CutFEM solves. No operating-system signal handler is installed by the CLI.
+
+Outputs are **Estimated**. The package checker verifies structural integrity;
+it does not establish a guaranteed discretization bound, physical validation,
+KKT conditions or global optimality. This is fixed-center radius optimization,
+not free-boundary topology or elasticity. The retained geometry consists of
+exact circle/plate parameters rather than a sampled SDF grid.
+
+The existing `scripts/e2e/marquee_01.sh` lane is being wired to this executable
+slice; use its recorded runtime result, not its file presence, as evidence.
