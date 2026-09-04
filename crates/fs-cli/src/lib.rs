@@ -220,8 +220,31 @@ pub fn run(args: impl IntoIterator<Item = String>) -> CommandOutput {
             right,
             ledger,
         } => compare::compare_path(&left, &right, ledger.as_deref(), mode),
-        Command::Study { .. } => {
-            unimplemented!("study command is currently in development by sibling agent")
+        // `study` parses but its producer is not shipped: crates/fs-cli/src/study.rs
+        // is a draft written against fs-opt / fs-marquee / fs-ledger APIs that do
+        // not exist (34 compile errors), so it is excluded from the build and this
+        // arm cannot call it. It refuses with the stage-unavailable code every other
+        // unshipped verb has used rather than panicking: a panic in the product CLI
+        // is the failure mode the reality check named, and a CLI-shaped mock is not
+        // substituted for an integrated workflow.
+        Command::Study { study, .. } => {
+            let subject = study.to_string_lossy().into_owned();
+            let diagnostic = Diagnostic::new(
+                "study",
+                "cli-stage-unavailable",
+                "`study` is reserved but cannot execute: its producer (crates/fs-cli/src/study.rs) \
+                 does not compile against the current fs-opt, fs-marquee and fs-ledger surfaces and \
+                 is excluded from the build",
+                "complete `frankensim-rc-root-q61wp.20`; do not substitute a skeleton study run or \
+                 placeholder artifact",
+            )
+            .with_subject(subject.clone());
+            refusal(
+                mode,
+                exit::UNAVAILABLE,
+                &diagnostic,
+                Some(("study", "unavailable", &subject, None, 0)),
+            )
         }
     }
 }
