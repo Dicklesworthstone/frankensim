@@ -33,6 +33,29 @@ final class FrankenSimAppearanceUITests: XCTestCase {
         XCTAssertEqual(relaunchedToggle.label, "Switch to dark mode")
     }
 
+    func testPhoneStudioExposesAnExplicitRunAndTheFullCatalog() throws {
+        let app = XCUIApplication()
+        app.launchEnvironment["FSIM_INITIAL_EXPERIMENT"] = "13"
+        app.launch()
+
+        let chooser = app.buttons["compact-kernel-chooser"]
+        XCTAssertTrue(chooser.waitForExistence(timeout: 12))
+        XCTAssertTrue(app.otherElements["Simulation canvas ready"].exists)
+        XCTAssertFalse(app.otherElements["Rendered native simulation result"].exists)
+
+        let run = app.buttons["compact-run-button"]
+        XCTAssertTrue(run.exists)
+        run.tap()
+        XCTAssertTrue(app.otherElements["Rendered native simulation result"].waitForExistence(timeout: 12))
+        keepScreenshot(of: app, named: "Phone studio after explicit run")
+
+        chooser.tap()
+        XCTAssertTrue(app.navigationBars["Choose a simulation"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Heat diffusion"].exists)
+        XCTAssertTrue(app.searchFields.firstMatch.exists)
+        keepScreenshot(of: app, named: "Phone simulation catalog")
+    }
+
     private func keepScreenshot(of app: XCUIApplication, named name: String) {
         let attachment = XCTAttachment(screenshot: app.screenshot())
         attachment.name = name

@@ -13,6 +13,7 @@
 		3A2681A2C915C69FAAE9542F /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = E0738C400C44D75353C6A0B4 /* PrivacyInfo.xcprivacy */; };
 		59C06FDF3A9EBB3F6A79074D /* SimulationRunSnapshot.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0180E2E2721B6E3CE63ED8EB /* SimulationRunSnapshot.swift */; };
 		76FC283CD4FBE49A00167862 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 22D387A5C6AB09E211C8BBEC /* Theme.swift */; };
+		8C974B8A61575BAB29DAF704 /* AppearanceUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F7C408D7ED3AD44745812456 /* AppearanceUITests.swift */; };
 		9DA80FE34DAAA771545C3335 /* SimulationCatalogTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D8913908732FDA5F01465327 /* SimulationCatalogTests.swift */; };
 		A20280DA0CD7942D63D33CA9 /* FrankenSimCore.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 920497C01CE1D6C07D6E436A /* FrankenSimCore.xcframework */; };
 		C3A1CAAC40A3E346A42EF437 /* FrankenSimApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1D293681E99572CC9355037 /* FrankenSimApp.swift */; };
@@ -29,12 +30,20 @@
 			remoteGlobalIDString = 2CCDEC9EC02F73871B5D4D6F;
 			remoteInfo = FrankenSim;
 		};
+		EA762985F2E3169C92DF28A6 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = DBB0351A87A6111D6AA060FB /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 2CCDEC9EC02F73871B5D4D6F;
+			remoteInfo = FrankenSim;
+		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
 		0180E2E2721B6E3CE63ED8EB /* SimulationRunSnapshot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SimulationRunSnapshot.swift; sourceTree = "<group>"; };
 		0AF6BEEC0CA5930B9F4B07D8 /* SimulationCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SimulationCatalog.swift; sourceTree = "<group>"; };
 		22D387A5C6AB09E211C8BBEC /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
+		2A522F274286D879C70974FF /* FrankenSimUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = FrankenSimUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		6A4D21ED33B7B43D580AD132 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		7231006CD53988408E23DE2C /* SimulationEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SimulationEngine.swift; sourceTree = "<group>"; };
 		789F9037B3EA574C4DDD8996 /* VisualizationViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VisualizationViews.swift; sourceTree = "<group>"; };
@@ -46,6 +55,7 @@
 		E0738C400C44D75353C6A0B4 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		ED46DC059970BC4FC577A4F1 /* FrankenSimTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = FrankenSimTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		EEDD479F1A66CD3F769BCCD6 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		F7C408D7ED3AD44745812456 /* AppearanceUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppearanceUITests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -98,6 +108,7 @@
 				6A4D21ED33B7B43D580AD132 /* Assets.xcassets */,
 				6B20BF2E8D269F39ABE9864D /* Sources */,
 				96DCA6BF2C59222F4CA29323 /* Tests */,
+				FABB2AD272E901B79E4B3710 /* UITests */,
 				CE5238306F942407570C316E /* Frameworks */,
 				C478F22B3C7AEED4D04EAA59 /* Products */,
 			);
@@ -108,6 +119,7 @@
 			children = (
 				93BE409EA3FE55B7D067C04E /* FrankenSim.app */,
 				ED46DC059970BC4FC577A4F1 /* FrankenSimTests.xctest */,
+				2A522F274286D879C70974FF /* FrankenSimUITests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -118,6 +130,14 @@
 				920497C01CE1D6C07D6E436A /* FrankenSimCore.xcframework */,
 			);
 			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		FABB2AD272E901B79E4B3710 /* UITests */ = {
+			isa = PBXGroup;
+			children = (
+				F7C408D7ED3AD44745812456 /* AppearanceUITests.swift */,
+			);
+			path = UITests;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -161,6 +181,24 @@
 			productReference = ED46DC059970BC4FC577A4F1 /* FrankenSimTests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
 		};
+		C1DE203504B052A69D29108D /* FrankenSimUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 14A8D4E553CCCA675D124C81 /* Build configuration list for PBXNativeTarget "FrankenSimUITests" */;
+			buildPhases = (
+				102827325773B4C049CE6D76 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				FBDB0AA24F3E851EC79BCF76 /* PBXTargetDependency */,
+			);
+			name = FrankenSimUITests;
+			packageProductDependencies = (
+			);
+			productName = FrankenSimUITests;
+			productReference = 2A522F274286D879C70974FF /* FrankenSimUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -177,6 +215,11 @@
 					9E4A85AD09FCA71E08C0505E = {
 						DevelopmentTeam = AU8V2Z6NKY;
 						ProvisioningStyle = Automatic;
+					};
+					C1DE203504B052A69D29108D = {
+						DevelopmentTeam = AU8V2Z6NKY;
+						ProvisioningStyle = Automatic;
+						TestTargetID = 2CCDEC9EC02F73871B5D4D6F;
 					};
 				};
 			};
@@ -196,6 +239,7 @@
 			targets = (
 				2CCDEC9EC02F73871B5D4D6F /* FrankenSim */,
 				9E4A85AD09FCA71E08C0505E /* FrankenSimTests */,
+				C1DE203504B052A69D29108D /* FrankenSimUITests */,
 			);
 		};
 /* End PBXProject section */
@@ -221,6 +265,14 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		102827325773B4C049CE6D76 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				8C974B8A61575BAB29DAF704 /* AppearanceUITests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		A08E34101950BD647F6081C8 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -242,6 +294,11 @@
 			isa = PBXTargetDependency;
 			target = 2CCDEC9EC02F73871B5D4D6F /* FrankenSim */;
 			targetProxy = 08F02265F200D3B4B902556B /* PBXContainerItemProxy */;
+		};
+		FBDB0AA24F3E851EC79BCF76 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 2CCDEC9EC02F73871B5D4D6F /* FrankenSim */;
+			targetProxy = EA762985F2E3169C92DF28A6 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -336,6 +393,23 @@
 				SUPPORTS_MACCATALYST = YES;
 				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
 				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		2519FD5396D152F78DAF3C65 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.frankensim.FrankenSimUITests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = FrankenSim;
 			};
 			name = Release;
 		};
@@ -467,6 +541,23 @@
 			};
 			name = Debug;
 		};
+		D4591CC4BB31B04578EE44F2 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.frankensim.FrankenSimUITests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = FrankenSim;
+			};
+			name = Debug;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -475,6 +566,15 @@
 			buildConfigurations = (
 				CC441806799D4EE712C00322 /* Debug */,
 				21F71EE278098EC755602FAE /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		14A8D4E553CCCA675D124C81 /* Build configuration list for PBXNativeTarget "FrankenSimUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				D4591CC4BB31B04578EE44F2 /* Debug */,
+				2519FD5396D152F78DAF3C65 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;

@@ -529,10 +529,12 @@ final class SimulationStudioModel: ObservableObject {
     func select(_ experiment: SimulationExperiment) {
         guard selection.id != experiment.id else { return }
         runTask?.cancel()
+        pcmPlayback?.stopAndDrain()
+        activeRunID = nil
+        isRunning = false
         selection = experiment
         result = nil
         errorMessage = nil
-        run()
     }
 
     func run() {
@@ -586,7 +588,8 @@ final class SimulationStudioModel: ObservableObject {
 
     func randomizeSeed() {
         seed = UInt32.random(in: UInt32.min...UInt32.max)
-        run()
+        result = nil
+        errorMessage = nil
     }
 
     func cancel() {

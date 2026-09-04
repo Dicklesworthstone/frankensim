@@ -41,7 +41,7 @@ struct SimulationStudioView: View {
         .sheet(isPresented: $showsCatalogSheet) {
             NavigationStack {
                 catalogSidebar
-                    .navigationTitle("Kernel catalog")
+                    .navigationTitle("Choose a simulation")
                     .toolbar {
                         ToolbarItem(placement: .confirmationAction) {
                             Button("Done") { showsCatalogSheet = false }
@@ -49,9 +49,6 @@ struct SimulationStudioView: View {
                     }
             }
             .presentationDetents([.large])
-        }
-        .onAppear {
-            if model.result == nil && !model.isRunning { model.run() }
         }
         .onChange(of: scenePhase) { _, phase in
             if phase != .active, model.isRunning { model.cancel() }
@@ -182,9 +179,9 @@ struct SimulationStudioView: View {
     private func compactStudio(size: CGSize) -> some View {
         ScrollView {
             VStack(spacing: 14) {
-                experimentHeader
+                compactKernelChooser
                 NativeSimulationCanvas(result: model.result, accent: accent, isRunning: model.isRunning)
-                    .frame(height: min(440, max(286, size.height * 0.43)))
+                    .frame(height: min(360, max(232, size.height * 0.31)))
                 if size.width >= 700 {
                     HStack(alignment: .top, spacing: 14) {
                         VStack(spacing: 14) {
@@ -195,18 +192,24 @@ struct SimulationStudioView: View {
                         evidenceCard
                     }
                 } else {
-                    controls
                     if let error = model.errorMessage { errorCard(error) }
                     resultSummary
                     evidenceCard
+                    kernelDetails
                 }
             }
             .frame(maxWidth: 820)
             .padding(.horizontal, 14)
             .padding(.vertical, 12)
+            .padding(.bottom, size.width < 700 ? 8 : 0)
             .frame(maxWidth: .infinity)
         }
         .scrollIndicators(.hidden)
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if size.width < 700 {
+                compactRunDock
+            }
+        }
     }
 
     private func wideStudio(size: CGSize) -> some View {
@@ -232,6 +235,115 @@ struct SimulationStudioView: View {
     }
 
     private var accent: Color { ForgeTheme.accent(model.selection.accent) }
+
+    private var compactKernelChooser: some View {
+        Button { showsCatalogSheet = true } label: {
+            HStack(spacing: 13) {
+                Image(systemName: model.selection.symbol)
+                    .font(.system(size: ForgeTheme.size(22), weight: .semibold))
+                    .foregroundStyle(accent)
+                    .frame(width: 44, height: 44)
+                    .background(accent.opacity(0.11), in: RoundedRectangle(cornerRadius: 13))
+
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 7) {
+                        Text(model.selection.tier.eyebrow)
+                        Text(model.selection.kernel)
+                            .foregroundStyle(ForgeTheme.secondary)
+                    }
+                    .font(.system(size: ForgeTheme.size(9.5), weight: .bold, design: .monospaced))
+                    .kerning(1)
+                    .foregroundStyle(accent)
+
+                    Text(model.selection.name)
+                        .font(.system(size: ForgeTheme.size(20), weight: .bold, design: .rounded))
+                        .foregroundStyle(ForgeTheme.text)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.72)
+
+                    Text(model.selection.subtitle)
+                        .font(.system(size: ForgeTheme.size(12), design: .rounded))
+                        .foregroundStyle(ForgeTheme.secondary)
+                        .lineLimit(1)
+                }
+
+                Spacer(minLength: 4)
+
+                VStack(alignment: .trailing, spacing: 6) {
+                    Text(model.selection.evidence.rawValue)
+                        .font(.system(size: ForgeTheme.size(9), weight: .bold, design: .rounded))
+                        .foregroundStyle(evidenceColor)
+                    HStack(spacing: 4) {
+                        Text("All 44")
+                        Image(systemName: "chevron.right")
+                    }
+                    .font(.system(size: ForgeTheme.size(10.5), weight: .semibold, design: .rounded))
+                    .foregroundStyle(accent)
+                }
+            }
+            .padding(14)
+            .background(ForgeTheme.panel.opacity(0.94), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .stroke(accent.opacity(0.38), lineWidth: 1)
+            }
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("compact-kernel-chooser")
+        .accessibilityLabel("Choose a simulation. Current selection: \(model.selection.name)")
+        .accessibilityHint("Opens all 44 on-device experiments")
+    }
+
+    private var compactRunDock: some View {
+        VStack(spacing: 9) {
+            HStack(spacing: 10) {
+                Text("COMPUTE")
+                    .font(.system(size: ForgeTheme.size(9), weight: .bold, design: .monospaced))
+                    .kerning(1.1)
+                    .foregroundStyle(ForgeTheme.secondary)
+                Picker("Compute budget", selection: $model.quality) {
+                    Text("Quick").tag(0.12)
+                    Text("Balanced").tag(0.55)
+                    Text("Deep").tag(0.92)
+                }
+                .pickerStyle(.segmented)
+                .disabled(model.isRunning)
+            }
+
+            HStack(spacing: 10) {
+                Button {
+                    model.isRunning ? model.cancel() : model.run()
+                } label: {
+                    Label(
+                        model.isRunning ? "Stop" : "Run \(model.selection.name)",
+                        systemImage: model.isRunning ? "stop.fill" : "bolt.fill"
+                    )
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.72)
+                    .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(PrimaryForgeButtonStyle(tint: model.isRunning ? ForgeTheme.coral : accent))
+                .accessibilityIdentifier("compact-run-button")
+
+                Button { model.randomizeSeed() } label: {
+                    Image(systemName: "dice")
+                        .frame(width: 44, height: 44)
+                }
+                .buttonStyle(SecondaryForgeButtonStyle(tint: ForgeTheme.cyan))
+                .disabled(model.isRunning)
+                .accessibilityIdentifier("compact-seed-button")
+                .accessibilityLabel("Choose a new seed")
+                .accessibilityHint("Clears the current result without starting a run")
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.top, 10)
+        .padding(.bottom, 8)
+        .frame(maxWidth: .infinity)
+        .background(.ultraThinMaterial)
+        .overlay(alignment: .top) { Rectangle().fill(ForgeTheme.stroke).frame(height: 1) }
+        .accessibilityIdentifier("compact-run-dock")
+    }
 
     private var experimentHeader: some View {
         HStack(alignment: .top, spacing: 13) {
@@ -432,10 +544,14 @@ private struct CatalogRow: View {
                 Text(experiment.name)
                     .font(.system(size: ForgeTheme.size(13.5), weight: .semibold, design: .rounded))
                     .foregroundStyle(ForgeTheme.text)
-                    .lineLimit(1)
+                    .lineLimit(2)
                 Text(experiment.subtitle)
                     .font(.system(size: ForgeTheme.size(10.5), design: .rounded))
                     .foregroundStyle(ForgeTheme.secondary)
+                    .lineLimit(2)
+                Text("\(experiment.kernel) · \(experiment.evidence.rawValue)")
+                    .font(.system(size: ForgeTheme.size(8.5), weight: .semibold, design: .monospaced))
+                    .foregroundStyle(ForgeTheme.accent(experiment.accent))
                     .lineLimit(1)
             }
             Spacer(minLength: 2)

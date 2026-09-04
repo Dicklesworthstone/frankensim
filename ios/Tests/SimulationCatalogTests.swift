@@ -18,6 +18,18 @@ final class SimulationCatalogTests: XCTestCase {
         XCTAssertTrue(SimulationCatalog.all.allSatisfy { !$0.noClaim.isEmpty && !$0.kernel.isEmpty })
     }
 
+    @MainActor
+    func testSelectingAnExperimentWaitsForAnExplicitRun() throws {
+        let model = SimulationStudioModel()
+        let experiment = try XCTUnwrap(SimulationCatalog.all.first { $0.id == 17 })
+
+        model.select(experiment)
+
+        XCTAssertEqual(model.selection.id, experiment.id)
+        XCTAssertNil(model.result)
+        XCTAssertFalse(model.isRunning)
+    }
+
     func testNativeImagePacketHasTheSixValueABIHeader() {
         let header = runAndCopyHeader(id: 17)
 

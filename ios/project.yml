@@ -21,9 +21,11 @@ schemes:
       targets:
         FrankenSim: all
         FrankenSimTests: [test]
+        FrankenSimUITests: [test]
     test:
       targets:
         - FrankenSimTests
+        - FrankenSimUITests
 
 targets:
   FrankenSim:
@@ -71,3 +73,13 @@ targets:
       - target: FrankenSim
       - framework: FrankenSimCore.xcframework
         embed: false
+  FrankenSimUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: true
+    sources:
+      - UITests
+    dependencies:
+      - target: FrankenSim

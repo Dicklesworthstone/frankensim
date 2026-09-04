@@ -35,6 +35,20 @@
                ReferencedContainer = "container:FrankenSim.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "NO"
+            buildForProfiling = "NO"
+            buildForArchiving = "NO"
+            buildForAnalyzing = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "C1DE203504B052A69D29108D"
+               BuildableName = "FrankenSimUITests.xctest"
+               BlueprintName = "FrankenSimUITests"
+               ReferencedContainer = "container:FrankenSim.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
       </BuildActionEntries>
    </BuildAction>
    <TestAction
@@ -61,6 +75,17 @@
                BlueprintIdentifier = "9E4A85AD09FCA71E08C0505E"
                BuildableName = "FrankenSimTests.xctest"
                BlueprintName = "FrankenSimTests"
+               ReferencedContainer = "container:FrankenSim.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
+         <TestableReference
+            skipped = "NO"
+            parallelizable = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "C1DE203504B052A69D29108D"
+               BuildableName = "FrankenSimUITests.xctest"
+               BlueprintName = "FrankenSimUITests"
                ReferencedContainer = "container:FrankenSim.xcodeproj">
             </BuildableReference>
          </TestableReference>
