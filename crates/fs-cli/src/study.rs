@@ -543,6 +543,19 @@ fn persist(
     );
     let mut table = String::new();
     let mut points = String::new();
+    let mut holes = String::new();
+    for (center, radius) in report.design.centers.iter().zip(&report.design.radii) {
+        let _ = write!(
+            holes,
+            "<circle cx=\"{}\" cy=\"{}\" r=\"{}\" fill=\"white\"/>",
+            center[0],
+            1.0 - center[1],
+            radius
+        );
+    }
+    let geometry_svg = format!(
+        "<figure><svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"-0.02 -0.02 1.04 1.04\" width=\"320\" role=\"img\" aria-label=\"Final accepted cooling-hole geometry\"><rect width=\"1\" height=\"1\" fill=\"#2563eb\"/>{holes}</svg><figcaption>Accepted geometry in normalized coordinates; white circles are cooling holes.</figcaption></figure>"
+    );
     let scale = report
         .iterations
         .first()
@@ -565,7 +578,7 @@ fn persist(
         );
     }
     let html = format!(
-        "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>Thermal radius study</title><body><h1>Normalized thermal radius study</h1><p>Status: {status}. {n}/{} iterations. Estimated.</p><p>{NO_CLAIM}</p><p>Accepted compliance: {final_compliance}; material area: {:.8}; target: {:.8}.</p><svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 600 200\" role=\"img\" aria-label=\"Accepted normalized compliance by iteration\"><polyline fill=\"none\" stroke=\"#2563eb\" points=\"{points}\"/></svg><table><tr><th>Iteration</th><th>Accepted compliance</th><th>DWR estimate</th><th>Algebraic estimate</th><th>Backtracks</th><th>Authority</th></tr>{table}</table><p>Trace: {}</p></body></html>",
+        "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>Thermal radius study</title><body><h1>Normalized thermal radius study</h1><p>Status: {status}. {n}/{} iterations. Estimated.</p><p>{NO_CLAIM}</p><p>Accepted compliance: {final_compliance}; material area: {:.8}; target: {:.8}.</p>{geometry_svg}<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 600 200\" role=\"img\" aria-label=\"Accepted normalized compliance by iteration\"><polyline fill=\"none\" stroke=\"#2563eb\" points=\"{points}\"/></svg><table><tr><th>Iteration</th><th>Accepted compliance</th><th>DWR estimate</th><th>Algebraic estimate</th><th>Backtracks</th><th>Authority</th></tr>{table}</table><p>Trace: {}</p></body></html>",
         a.config.steps,
         report.design.area(),
         a.config.area_target,
@@ -991,6 +1004,7 @@ mod tests {
         let html_path = report_json.str_field("report_html").unwrap();
         let html = std::fs::read_to_string(html_path).unwrap();
         assert!(html.contains("<polyline") && html.contains("DWR estimate"));
+        assert_eq!(html.matches("<circle ").count(), 2);
         let exported = cli(&["--json", "package", pointer, db.to_str().unwrap()]);
         assert_eq!(exported.exit_code, exit::SUCCESS, "{}", exported.stderr);
         let exported_json = value(&exported);
