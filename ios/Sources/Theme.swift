@@ -66,16 +66,14 @@ enum ForgeTheme {
         normalizedTextScale(current + Double(steps) * textScaleStep)
     }
 
-    static func dynamicTypeSize(for scale: Double) -> DynamicTypeSize {
-        switch normalizedTextScale(scale) {
-        case ..<0.9: return .small
-        case ..<1.0: return .medium
-        case ..<1.1: return .large
-        case ..<1.2: return .xLarge
-        case ..<1.3: return .xxLarge
-        case ..<1.4: return .xxxLarge
-        default: return .accessibility1
-        }
+    static func dynamicTypeSize(from systemSize: DynamicTypeSize, for scale: Double) -> DynamicTypeSize {
+        let sizes: [DynamicTypeSize] = [
+            .xSmall, .small, .medium, .large, .xLarge, .xxLarge, .xxxLarge,
+            .accessibility1, .accessibility2, .accessibility3, .accessibility4, .accessibility5,
+        ]
+        guard let systemIndex = sizes.firstIndex(of: systemSize) else { return systemSize }
+        let steps = Int(((normalizedTextScale(scale) - defaultTextScale) / textScaleStep).rounded())
+        return sizes[min(max(systemIndex + steps, 0), sizes.count - 1)]
     }
 }
 
