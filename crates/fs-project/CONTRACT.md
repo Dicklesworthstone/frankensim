@@ -43,6 +43,15 @@ bindings; it runs no solves and admits no scenarios itself.
 
 ## Public types and semantics
 
+- `study::parse_study_strict` admits executable study declarations only when
+  their parsed AST equals the complete canonical spelling of the recognized
+  `StudySpec`. Whitespace and comments may vary; ignored, defaulted, repeated,
+  reordered or unsupported fields return `study-noncanonical-declaration`.
+  This prevents the legacy draft readers from silently changing execution
+  intent. It does not replace the subsequent model/geometry/budget admission
+  in `fs-cli`. Normalized scalar thermal compliance requires dimensionless
+  unit `1`; elasticity compliance keeps its energy-dimension check. The existing
+  permissive study readers remain available for inspecting drafts.
 - `ProjectSpec` carries every section of the cooling vertical's contract:
   `Metadata` (name, created, context of use, intended decision,
   `DecisionGate`, `ConsequenceClass`), the Five
