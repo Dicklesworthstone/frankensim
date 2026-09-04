@@ -16,8 +16,35 @@ fn args(values: &[&str]) -> Vec<String> {
     values.iter().map(|value| (*value).to_string()).collect()
 }
 
+/// Every artifact the ledger retained as a visible op's output.
+///
+/// The ledger exposes no "all artifacts" reader by design — artifacts are
+/// reachable through the ops that produced them — so this walks the visible
+/// op ids and their outgoing artifact edges, the same idiom the solve
+/// batteries use.
+fn retained_artifacts(ledger: &Ledger) -> Vec<Vec<u8>> {
+    let mut ids = ledger
+        .visible_op_ids(fs_ledger::MAIN_BRANCH, None)
+        .expect("visible ops");
+    ids.sort_unstable();
+    let mut out = Vec::new();
+    for id in ids {
+        let edges = ledger.op_artifact_edges_bounded(id, 64).expect("edges");
+        for edge in &edges.edges {
+            if edge.role != fs_ledger::EdgeRole::Out {
+                continue;
+            }
+            if let Some(bytes) = ledger.get_artifact(&edge.artifact).expect("artifact read") {
+                out.push(bytes);
+            }
+        }
+    }
+    out
+}
+
 fn scratch(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("fs-cli-step-heatsink-{tag}-{}", std::process::id()));
+    let dir =
+        std::env::temp_dir().join(format!("fs-cli-step-heatsink-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch directory");
     dir
@@ -31,7 +58,9 @@ fn extract_temperature_max(json_str: &str) -> Option<f64> {
                 let rest = &line[pos + 8..];
                 let num_str: String = rest
                     .chars()
-                    .take_while(|c| c.is_ascii_digit() || *c == '.' || *c == '-' || *c == 'e' || *c == 'E')
+                    .take_while(|c| {
+                        c.is_ascii_digit() || *c == '.' || *c == '-' || *c == 'e' || *c == 'E'
+                    })
                     .collect();
                 if let Ok(v) = num_str.parse::<f64>() {
                     return Some(v);
@@ -44,7 +73,9 @@ fn extract_temperature_max(json_str: &str) -> Option<f64> {
         let rest = &json_str[pos + 8..];
         let num_str: String = rest
             .chars()
-            .take_while(|c| c.is_ascii_digit() || *c == '.' || *c == '-' || *c == 'e' || *c == 'E' || *c == '+')
+            .take_while(|c| {
+                c.is_ascii_digit() || *c == '.' || *c == '-' || *c == 'e' || *c == 'E' || *c == '+'
+            })
             .collect();
         if let Ok(v) = num_str.parse::<f64>() {
             return Some(v);
@@ -68,7 +99,12 @@ fn step_heatsink_001_qoi_parity_with_stl_across_seven_stages() {
         "validate",
         fsim_step.to_string_lossy().as_ref(),
     ]));
-    assert_eq!(validated.exit_code, exit::SUCCESS, "validate stderr: {}", validated.stderr);
+    assert_eq!(
+        validated.exit_code,
+        exit::SUCCESS,
+        "validate stderr: {}",
+        validated.stderr
+    );
     assert!(validated.stdout.contains("\"status\":\"ok\""));
     assert!(validated.stdout.contains("\"finding_count\":0"));
 
@@ -86,7 +122,12 @@ fn step_heatsink_001_qoi_parity_with_stl_across_seven_stages() {
         "--max-hole-edges",
         "0",
     ]));
-    assert_eq!(import_stl.exit_code, exit::SUCCESS, "stl import stderr: {}", import_stl.stderr);
+    assert_eq!(
+        import_stl.exit_code,
+        exit::SUCCESS,
+        "stl import stderr: {}",
+        import_stl.stderr
+    );
 
     let run_stl = run(args(&[
         "--json",
@@ -96,10 +137,17 @@ fn step_heatsink_001_qoi_parity_with_stl_across_seven_stages() {
         "--materials",
         pack.to_string_lossy().as_ref(),
     ]));
-    assert_eq!(run_stl.exit_code, exit::SUCCESS, "stl run stdout: {} / stderr: {}", run_stl.stdout, run_stl.stderr);
+    assert_eq!(
+        run_stl.exit_code,
+        exit::SUCCESS,
+        "stl run stdout: {} / stderr: {}",
+        run_stl.stdout,
+        run_stl.stderr
+    );
     assert!(run_stl.stdout.contains("\"stages_completed\":7"));
     assert!(run_stl.stdout.contains("\"status\":\"completed\""));
-    let qoi_stl = extract_temperature_max(&run_stl.stdout).expect("temperature-max in STL run output");
+    let qoi_stl =
+        extract_temperature_max(&run_stl.stdout).expect("temperature-max in STL run output");
 
     // 3. Run STEP pipeline
     let dir_step = scratch("step-run");
@@ -117,7 +165,12 @@ fn step_heatsink_001_qoi_parity_with_stl_across_seven_stages() {
         "--target-h",
         "0.005",
     ]));
-    assert_eq!(import_step.exit_code, exit::SUCCESS, "step import stderr: {}", import_step.stderr);
+    assert_eq!(
+        import_step.exit_code,
+        exit::SUCCESS,
+        "step import stderr: {}",
+        import_step.stderr
+    );
 
     // Verify import receipt in STEP ledger
     let ledger = Ledger::open(ledger_step.to_str().unwrap()).expect("open step ledger");
@@ -131,10 +184,17 @@ fn step_heatsink_001_qoi_parity_with_stl_across_seven_stages() {
         "--materials",
         pack.to_string_lossy().as_ref(),
     ]));
-    assert_eq!(run_step.exit_code, exit::SUCCESS, "step run stdout: {} / stderr: {}", run_step.stdout, run_step.stderr);
+    assert_eq!(
+        run_step.exit_code,
+        exit::SUCCESS,
+        "step run stdout: {} / stderr: {}",
+        run_step.stdout,
+        run_step.stderr
+    );
     assert!(run_step.stdout.contains("\"stages_completed\":7"));
     assert!(run_step.stdout.contains("\"status\":\"completed\""));
-    let qoi_step = extract_temperature_max(&run_step.stdout).expect("temperature-max in STEP run output");
+    let qoi_step =
+        extract_temperature_max(&run_step.stdout).expect("temperature-max in STEP run output");
 
     // 4. Verify QoI parity: within discretization term
     let rel_diff = ((qoi_step - qoi_stl) / qoi_stl).abs();
@@ -165,12 +225,16 @@ fn step_heatsink_002_import_receipt_records_step_entities_and_mesh_counts() {
         "--target-h",
         "0.005",
     ]));
-    assert_eq!(imported.exit_code, exit::SUCCESS, "import failed: {}", imported.stderr);
+    assert_eq!(
+        imported.exit_code,
+        exit::SUCCESS,
+        "import failed: {}",
+        imported.stderr
+    );
 
     let ledger = Ledger::open(ledger_path.to_str().unwrap()).expect("open ledger");
-    let all_artifacts = ledger.all_artifacts().expect("read artifacts");
     let mut found_receipt = false;
-    for (_hash, bytes) in all_artifacts {
+    for bytes in retained_artifacts(&ledger) {
         if let Ok(text) = String::from_utf8(bytes) {
             if text.contains("frankensim.cli.faceted-step-import-receipt.v1") {
                 found_receipt = true;
@@ -181,7 +245,10 @@ fn step_heatsink_002_import_receipt_records_step_entities_and_mesh_counts() {
             }
         }
     }
-    assert!(found_receipt, "faceted-step-import-receipt not found in ledger artifacts");
+    assert!(
+        found_receipt,
+        "faceted-step-import-receipt not found in ledger artifacts"
+    );
 }
 
 #[test]
@@ -201,12 +268,10 @@ fn step_heatsink_003_missing_face_refuses_at_import_with_defect_diagnostics() {
     let fp = parsed.receipt().source_fingerprint();
 
     // Create a project matching the new source fingerprint
-    let fsim_content = std::fs::read_to_string(root.join("examples/heatsink-fan/heatsink-fan-step.fsim"))
-        .expect("read fsim");
-    let bad_fsim_content = fsim_content.replace(
-        "2ad6dfc2e3e7ff92",
-        &format!("{:016x}", fp),
-    );
+    let fsim_content =
+        std::fs::read_to_string(root.join("examples/heatsink-fan/heatsink-fan-step.fsim"))
+            .expect("read fsim");
+    let bad_fsim_content = fsim_content.replace("2ad6dfc2e3e7ff92", &format!("{:016x}", fp));
     let bad_fsim_path = dir.join("heatsink-open.fsim");
     std::fs::write(&bad_fsim_path, bad_fsim_content).expect("write bad fsim");
 
@@ -234,7 +299,8 @@ fn step_heatsink_003_missing_face_refuses_at_import_with_defect_diagnostics() {
         imported.stderr
     );
     assert!(
-        imported.stderr.contains("cli-import-step-tessellation") || imported.stderr.contains("boundary"),
+        imported.stderr.contains("cli-import-step-tessellation")
+            || imported.stderr.contains("boundary"),
         "stderr should name the tessellation defect / boundary edges: {}",
         imported.stderr
     );
@@ -249,10 +315,7 @@ fn step_heatsink_004_millimetre_unit_refuses_at_conduction() {
 
     // Modify the assignment in the project to declare length-unit "mm"
     let fsim_content = std::fs::read_to_string(&fsim_step).expect("read fsim");
-    let mm_fsim_content = fsim_content.replace(
-        ":length-unit \"m\"",
-        ":length-unit \"mm\"",
-    );
+    let mm_fsim_content = fsim_content.replace(":length-unit \"m\"", ":length-unit \"mm\"");
     let dir = scratch("unit-mismatch");
     let mm_fsim_path = dir.join("heatsink-mm.fsim");
     std::fs::write(&mm_fsim_path, mm_fsim_content).expect("write mm fsim");
@@ -272,7 +335,12 @@ fn step_heatsink_004_millimetre_unit_refuses_at_conduction() {
         "--target-h",
         "5.0",
     ]));
-    assert_eq!(imported.exit_code, exit::SUCCESS, "import with mm succeeds: {}", imported.stderr);
+    assert_eq!(
+        imported.exit_code,
+        exit::SUCCESS,
+        "import with mm succeeds: {}",
+        imported.stderr
+    );
 
     // Now run solve / conduction
     let run_res = run(args(&[
