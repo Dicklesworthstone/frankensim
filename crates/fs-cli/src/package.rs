@@ -105,6 +105,9 @@ pub(crate) fn export_package(
 /// Execute the `package` verb.
 #[must_use]
 pub fn package_path(run_id: &str, ledger_path: Option<&Path>, mode: OutputMode) -> CommandOutput {
+    if run_id.starts_with("study-") {
+        return crate::study::export("package", run_id, ledger_path, mode);
+    }
     let export = match export_package("package", run_id, ledger_path, mode) {
         Ok(export) => export,
         Err(output) => return output,

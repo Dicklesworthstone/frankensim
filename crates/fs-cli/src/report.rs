@@ -624,6 +624,9 @@ pub(crate) fn export_report(
 /// Execute the `report` verb.
 #[must_use]
 pub fn report_path(run_id: &str, ledger_path: Option<&Path>, mode: OutputMode) -> CommandOutput {
+    if run_id.starts_with("study-") {
+        return crate::study::export("report", run_id, ledger_path, mode);
+    }
     let export = match export_report("report", run_id, ledger_path, mode) {
         Ok(export) => export,
         Err(output) => return output,

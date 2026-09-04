@@ -10,8 +10,8 @@
 #![cfg(feature = "marquee")]
 
 use fs_marquee::study::{
-    AREA_PROJECTION_TOLERANCE, MAX_ARMIJO_BACKTRACKS, PlateWithHoles, StudyConfig,
-    armijo_next_design, run_study, solve_and_grade,
+    AREA_PROJECTION_TOLERANCE, MAX_ARMIJO_BACKTRACKS, PlateWithHoles, StudyConfig, StudyRunner,
+    ThermalSource, armijo_next_design, run_study, solve_and_grade, solve_and_grade_with_source,
 };
 
 fn verdict(case: &str, detail: &str) {
@@ -224,7 +224,7 @@ fn mq_001d_refuses_extreme_projection_ratios() {
             ..smoke_config()
         };
         assert!(
-            std::panic::catch_unwind(|| run_study(two_hole_plate(), &config)).is_err(),
+            run_study(two_hole_plate(), &config).is_err(),
             "ratio {r_max} / {r_min} must be refused before projection"
         );
     }
@@ -237,7 +237,7 @@ fn mq_001e_refuses_overlapping_or_boundary_clipped_holes() {
         radii: vec![0.1, 0.1],
     };
     assert!(
-        std::panic::catch_unwind(|| run_study(overlap, &smoke_config())).is_err(),
+        run_study(overlap, &smoke_config()).is_err(),
         "overlapping disks must be refused before summed-area optimization"
     );
 
@@ -246,7 +246,7 @@ fn mq_001e_refuses_overlapping_or_boundary_clipped_holes() {
         radii: vec![0.1, 0.1],
     };
     assert!(
-        std::panic::catch_unwind(|| run_study(boundary_clipped, &smoke_config())).is_err(),
+        run_study(boundary_clipped, &smoke_config()).is_err(),
         "boundary-clipped disks must be refused before summed-area optimization"
     );
 }
@@ -732,78 +732,149 @@ fn mq_006_falsifier_rung_climb() {
     );
 }
 
-/// Falsifier 2: Cross-code / cross-representation.
-/// Solve body-fitted P1 linear elasticity in `fs-solid` on a triangulated mesh
-/// with circular holes removed, validating physical compliance against CutFEM.
+/// Independent scalar P1 assembly on straight triangles. Hole boundary nodes
+/// are fitted to the declared circles; chord error is exposed by refinement.
+/// The source and compliance weight are the same, and ALL boundary nodes have
+/// homogeneous Dirichlet data, including the hole rims.
+fn body_fitted_poisson_compliance(design: &PlateWithHoles, n: usize, source: f64) -> f64 {
+    use fs_solver::{CgState, CsrOp, LinearOp};
+    use fs_sparse::{Coo, precond::IdentityPrecond};
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let mut mesh = body_fitted_mesh_for_plate(design, n);
+    let mut edges = BTreeMap::<(usize, usize), usize>::new();
+    for triangle in &mesh.elems {
+        for (a, b) in [
+            (triangle[0], triangle[1]),
+            (triangle[1], triangle[2]),
+            (triangle[2], triangle[0]),
+        ] {
+            *edges.entry((a.min(b), a.max(b))).or_default() += 1;
+        }
+    }
+    let mut boundary = BTreeSet::new();
+    for (&(a, b), &count) in &edges {
+        assert!(count == 1 || count == 2, "manifold triangulation");
+        if count == 1 {
+            boundary.insert(a);
+            boundary.insert(b);
+        }
+    }
+    for &index in &boundary {
+        let p = &mut mesh.nodes[index];
+        if p[0] == 0.0 || p[0] == 1.0 || p[1] == 0.0 || p[1] == 1.0 {
+            continue;
+        }
+        let (center, radius) = design
+            .centers
+            .iter()
+            .zip(&design.radii)
+            .min_by(|(a, ra), (b, rb)| {
+                let da = ((p[0] - a[0]).hypot(p[1] - a[1]) - **ra).abs();
+                let db = ((p[0] - b[0]).hypot(p[1] - b[1]) - **rb).abs();
+                da.total_cmp(&db)
+            })
+            .expect("hole rim");
+        let delta = [p[0] - center[0], p[1] - center[1]];
+        let length = delta[0].hypot(delta[1]);
+        assert!(length > 0.0);
+        *p = [
+            center[0] + radius * delta[0] / length,
+            center[1] + radius * delta[1] / length,
+        ];
+    }
+    let count = mesh.nodes.len();
+    let mut matrix = Coo::new(count, count);
+    let mut rhs = vec![0.0; count];
+    for triangle in &mesh.elems {
+        let [a, b, c] = [
+            mesh.nodes[triangle[0]],
+            mesh.nodes[triangle[1]],
+            mesh.nodes[triangle[2]],
+        ];
+        let twice_area = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+        assert!(
+            twice_area > 1e-14,
+            "circle fitting must preserve triangle orientation"
+        );
+        let area = 0.5 * twice_area;
+        let gradients = [
+            [b[1] - c[1], c[0] - b[0]],
+            [c[1] - a[1], a[0] - c[0]],
+            [a[1] - b[1], b[0] - a[0]],
+        ];
+        for i in 0..3 {
+            if boundary.contains(&triangle[i]) {
+                continue;
+            }
+            rhs[triangle[i]] += source * area / 3.0;
+            for j in 0..3 {
+                if !boundary.contains(&triangle[j]) {
+                    let dot = gradients[i][0] * gradients[j][0] + gradients[i][1] * gradients[j][1];
+                    matrix.push(triangle[i], triangle[j], dot / (2.0 * twice_area));
+                }
+            }
+        }
+    }
+    for &node in &boundary {
+        matrix.push(node, node, 1.0);
+    }
+    let op = CsrOp::symmetric(matrix.assemble());
+    let mut state = CgState::new(&op, &IdentityPrecond, &rhs);
+    state.run(&op, &IdentityPrecond, 1e-12, 20_000);
+    let mut ax = vec![0.0; count];
+    op.apply(&state.x, &mut ax);
+    let residual = ax
+        .iter()
+        .zip(&rhs)
+        .map(|(a, b)| (a - b) * (a - b))
+        .sum::<f64>()
+        .sqrt();
+    let rhs_norm = rhs.iter().map(|v| v * v).sum::<f64>().sqrt();
+    assert!(
+        residual <= 1e-9 * rhs_norm,
+        "independently recomputed P1 residual {residual}/{rhs_norm}"
+    );
+    rhs.iter().zip(&state.x).map(|(load, u)| load * u).sum()
+}
+
+/// Falsifier 2: compare the same scalar PDE and functional on the FINAL
+/// accepted geometry through independent unfitted-Q1 and body-fitted-P1 assembly.
 #[test]
 fn mq_007_falsifier_cross_representation_solid() {
-    use fs_solid::linear::{Formulation, LinearProblem, PlaneKind};
-    use fs_solid::mesh2::Patch;
-
-    let design = two_hole_plate();
-    let mesh = body_fitted_mesh_for_plate(&design, 16);
-    assert!(!mesh.nodes.is_empty() && !mesh.elems.is_empty());
-
-    let body = |_: f64, _: f64| [1.0, 0.0];
-    let zero = |_: f64, _: f64| [0.0, 0.0];
-    let problem = LinearProblem {
-        mesh: &mesh,
-        youngs: 1.0,
-        poisson: 0.0,
-        plane: PlaneKind::Stress,
-        formulation: Formulation::Standard,
-        body_force: Some(&body),
-        dirichlet: vec![
-            (Patch::Left, &zero as _),
-            (Patch::Right, &zero as _),
-            (Patch::Bottom, &zero as _),
-            (Patch::Top, &zero as _),
-        ],
-        traction: vec![],
-        symmetry: vec![],
-    };
-    let u = problem.solve().expect("body-fitted solid solve");
-    assert_eq!(u.len(), mesh.nodes.len());
-
-    let mut solid_compliance = 0.0f64;
-    for conn in &mesh.elems {
-        let p0 = mesh.nodes[conn[0]];
-        let p1 = mesh.nodes[conn[1]];
-        let p2 = mesh.nodes[conn[2]];
-        let area = 0.5 * (p1[0].mul_add(p2[1] - p0[1], -(p1[1] - p0[1]) * (p2[0] - p0[0]))).abs();
-        let u_mean = [
-            (u[conn[0]][0] + u[conn[1]][0] + u[conn[2]][0]) / 3.0,
-            (u[conn[0]][1] + u[conn[1]][1] + u[conn[2]][1]) / 3.0,
-        ];
-        solid_compliance += area * (body(0.0, 0.0)[0] * u_mean[0] + body(0.0, 0.0)[1] * u_mean[1]);
-    }
-
-    assert!(
-        solid_compliance.is_finite() && solid_compliance > 0.0,
-        "body-fitted solid compliance must be positive and finite: {solid_compliance}"
+    let report = run_study(two_hole_plate(), &smoke_config()).expect("optimized design");
+    let design = &report.design;
+    let p1_coarse = body_fitted_poisson_compliance(design, 32, 1.0);
+    let p1_fine = body_fitted_poisson_compliance(design, 64, 1.0);
+    let q1_coarse = design.compliance(4).expect("coarse CutFEM scalar solve");
+    let q1_fine = design.compliance(5).expect("fine CutFEM scalar solve");
+    // Four times the sum of observed refinement changes, with a 0.1% floor.
+    // This is a numerical consistency band, not a guaranteed continuum bound.
+    // The 25% ceiling prevents a broken oracle from manufacturing a wide pass.
+    let band = (4.0 * ((p1_fine - p1_coarse).abs() + (q1_fine - q1_coarse).abs()))
+        .max(0.001 * p1_fine.abs());
+    let discrepancy = (p1_fine - q1_fine).abs();
+    println!(
+        "{{\"suite\":\"fs-marquee/study\",\"case\":\"mq-007\",\"pde\":\"scalar-poisson-unit-source-all-boundaries-zero\",\"geometry_trace\":\"{}\",\"p1_32\":{p1_coarse:.17e},\"p1_64\":{p1_fine:.17e},\"q1_4\":{q1_coarse:.17e},\"q1_5\":{q1_fine:.17e},\"discrepancy\":{discrepancy:.17e},\"band\":{band:.17e}}}",
+        report.trace_hash
     );
-
-    // Cross-check order of magnitude with CutFEM compliance under unit body load
-    let cutfem_compliance = design.compliance(4).expect("cutfem solve");
+    assert!(p1_fine > 0.0 && q1_fine > 0.0 && band < 0.25 * p1_fine);
     assert!(
-        cutfem_compliance.is_finite() && cutfem_compliance > 0.0,
-        "cutfem compliance must be positive: {cutfem_compliance}"
+        discrepancy <= band,
+        "matched scalar discretizations disagree: {discrepancy} > {band}"
     );
-
-    // Both independent codes and representations yield non-zero physical compliance
-    // in the same characteristic physical bracket [1e-4, 1.0].
+    let mutated = body_fitted_poisson_compliance(design, 64, 2.0);
     assert!(
-        solid_compliance >= 1e-4 && solid_compliance <= 1.0,
-        "solid compliance in physical bracket: {solid_compliance}"
+        (1e-4..1.0).contains(&mutated),
+        "mutation remains inside the former vacuous gate"
     );
     assert!(
-        cutfem_compliance >= 1e-4 && cutfem_compliance <= 1.0,
-        "cutfem compliance in physical bracket: {cutfem_compliance}"
+        (mutated - q1_fine).abs() > band,
+        "one-sided doubled source must fail agreement"
     );
-
     verdict(
         "mq-007",
-        "cross-code / cross-representation: body-fitted P1 triangular solve in fs-solid plane stress validates compliance against CutFEM",
+        "matched scalar Poisson on final accepted geometry; independent P1/Q1 assembly agrees within observed refinement band and rejects doubled-source mutation; no experimental validation",
     );
 }
 
@@ -875,8 +946,8 @@ fn mq_008_falsifier_adjoint_fd_gate_at_stages() {
 }
 
 /// Falsifier 4: Objective sensitivity twin.
-/// Moving volume fraction or perturbing initial hole geometry produces distinct
-/// optimal designs tracking the respective objectives and constraints.
+/// Changing a load, volume constraint or initial geometry produces distinct
+/// accepted designs. This does not establish global optimality.
 #[test]
 fn mq_009_falsifier_objective_sensitivity_twin() {
     let base_config = smoke_config();
@@ -923,9 +994,90 @@ fn mq_009_falsifier_objective_sensitivity_twin() {
         "geometry twin radii differ: {radii_diff:.4e}"
     );
 
+    // Twin 3 changes the actual PDE load while preserving the initial design,
+    // area constraint and optimizer. The objective uses the same load as the
+    // state equation; a metadata-only source change cannot pass this gate.
+    let source = ThermalSource {
+        constant: 1.0,
+        x_slope: 2.0,
+        y_slope: 0.0,
+    };
+    let mut load_twin = StudyRunner::new_with_source(two_hole_plate(), base_config.clone(), source)
+        .expect("admitted spatial source");
+    let unit_initial =
+        StudyRunner::new(two_hole_plate(), base_config.clone()).expect("admitted unit source");
+    assert_eq!(load_twin.design(), unit_initial.design());
+    assert_ne!(
+        load_twin.report().trace_hash,
+        unit_initial.report().trace_hash
+    );
+    while load_twin.advance().expect("spatial-load transition") {}
+    let load_report = load_twin.report();
+    let load_radii_diff: f64 = report_base
+        .design
+        .radii
+        .iter()
+        .zip(&load_report.design.radii)
+        .map(|(a, b)| (a - b).abs())
+        .sum();
+    assert!(
+        load_radii_diff > 1e-4,
+        "changing the physical load must change accepted radii: {load_radii_diff:e}"
+    );
+    assert!(
+        (load_report.design.area() - base_config.area_target).abs() <= AREA_PROJECTION_TOLERANCE
+    );
+
+    // A separate linearity identity catches forgetting to change the
+    // compliance weight when changing the state-equation source: J(2f)=4J(f).
+    let design = unit_initial.design();
+    let unit_j = solve_and_grade(design, base_config.level)
+        .expect("unit-source solve")
+        .0;
+    let double_j = solve_and_grade_with_source(
+        design,
+        base_config.level,
+        ThermalSource {
+            constant: 2.0,
+            x_slope: 0.0,
+            y_slope: 0.0,
+        },
+    )
+    .expect("doubled-source solve")
+    .0;
+    assert!(
+        (double_j - 4.0 * unit_j).abs() <= 1e-8 * unit_j,
+        "state and objective must both use the source: {double_j} vs {}",
+        4.0 * unit_j
+    );
+    for invalid in [
+        ThermalSource {
+            constant: 0.0,
+            x_slope: 0.0,
+            y_slope: 0.0,
+        },
+        ThermalSource {
+            constant: 1.0,
+            x_slope: -2.0,
+            y_slope: 0.0,
+        },
+        ThermalSource {
+            constant: f64::INFINITY,
+            x_slope: 0.0,
+            y_slope: 0.0,
+        },
+    ] {
+        assert!(
+            StudyRunner::new_with_source(two_hole_plate(), base_config.clone(), invalid).is_err()
+        );
+    }
+    println!(
+        "{{\"case\":\"mq-009-load-twin\",\"radii_l1_change\":{load_radii_diff:.17e},\"unit_compliance\":{unit_j:.17e},\"double_source_compliance\":{double_j:.17e}}}"
+    );
+
     verdict(
         "mq-009",
-        "objective sensitivity twin: volume-fraction and geometry perturbation twins yield distinct optimal designs tracking objectives",
+        "physical-load, volume-fraction and geometry twins yield distinct accepted designs; source scaling obeys quadratic compliance identity",
     );
 }
 

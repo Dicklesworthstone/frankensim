@@ -15,7 +15,7 @@ mod json_read;
 mod package;
 mod report;
 mod solve;
-// mod study;
+mod study;
 
 use std::ffi::OsString;
 use std::fmt::Write as _;
@@ -70,7 +70,7 @@ const DIAGNOSTIC_SCHEMA: &str = "frankensim.cli.diagnostic.v1";
 const VALIDATION_AUTHORITY: &str = "structural-project-admission";
 const VALIDATION_NO_CLAIM: &str =
     "does not prove artifact existence, capability availability, solvability, or physical validity";
-const USAGE: &str = "frankensim [--json] validate <project.fsim|project.json> | import <project> <source> <ledger.db> --unit <unit> (--max-hole-edges <n> | --step-root <id> --target-h <spacing>) | solve <project> <ledger.db> [--materials <pack>]... [--interfaces <pack>]... | solve --resume <run-id> <ledger.db> | report <run-id> [<ledger.db>] | package <run-id> [<ledger.db>] | run <project> <ledger.db> [--materials <pack>]... [--interfaces <pack>]... | compare <left-run> <right-run> [<ledger.db>] | study <study.fsim> <ledger.db> [--budget <N>] | cinematic <mode> <config.fscine> <trajectory-source> [cinematic options] (verify/mux require --trajectory <artifact>; other cinematic modes also allow --run-reduced)";
+const USAGE: &str = "frankensim [--json] validate <project.fsim|project.json> | import <project> <source> <ledger.db> --unit <unit> (--max-hole-edges <n> | --step-root <id> --target-h <spacing>) | solve <project> <ledger.db> [--materials <pack>]... [--interfaces <pack>]... | solve --resume <run-id> <ledger.db> | report <run-id> [<ledger.db>] | package <run-id> [<ledger.db>] | run <project> <ledger.db> [--materials <pack>]... [--interfaces <pack>]... | compare <left-run> <right-run> [<ledger.db>] | study <study.fsim|study.json> <ledger.db> [--budget <N>] | study --resume <study-id> <ledger.db> [--budget <N>] | cinematic <mode> <config.fscine> <trajectory-source> [cinematic options] (verify/mux require --trajectory <artifact>; other cinematic modes also allow --run-reduced)";
 
 /// Captured command output. Final result records are on stdout; diagnostics
 /// are on stderr.
@@ -127,6 +127,11 @@ enum Command {
     },
     Study {
         study: PathBuf,
+        ledger: PathBuf,
+        budget: Option<String>,
+    },
+    StudyResume {
+        run: String,
         ledger: PathBuf,
         budget: Option<String>,
     },
@@ -220,32 +225,16 @@ pub fn run(args: impl IntoIterator<Item = String>) -> CommandOutput {
             right,
             ledger,
         } => compare::compare_path(&left, &right, ledger.as_deref(), mode),
-        // `study` parses but its producer is not shipped: crates/fs-cli/src/study.rs
-        // is a draft written against fs-opt / fs-marquee / fs-ledger APIs that do
-        // not exist (34 compile errors), so it is excluded from the build and this
-        // arm cannot call it. It refuses with the stage-unavailable code every other
-        // unshipped verb has used rather than panicking: a panic in the product CLI
-        // is the failure mode the reality check named, and a CLI-shaped mock is not
-        // substituted for an integrated workflow.
-        Command::Study { study, .. } => {
-            let subject = study.to_string_lossy().into_owned();
-            let diagnostic = Diagnostic::new(
-                "study",
-                "cli-stage-unavailable",
-                "`study` is reserved but cannot execute: its producer (crates/fs-cli/src/study.rs) \
-                 does not compile against the current fs-opt, fs-marquee and fs-ledger surfaces and \
-                 is excluded from the build",
-                "complete `frankensim-rc-root-q61wp.20`; do not substitute a skeleton study run or \
-                 placeholder artifact",
-            )
-            .with_subject(subject.clone());
-            refusal(
-                mode,
-                exit::UNAVAILABLE,
-                &diagnostic,
-                Some(("study", "unavailable", &subject, None, 0)),
-            )
-        }
+        Command::Study {
+            study,
+            ledger,
+            budget,
+        } => study::study_path(&study, &ledger, budget.as_deref(), mode),
+        Command::StudyResume {
+            run,
+            ledger,
+            budget,
+        } => study::resume_path(&run, &ledger, budget.as_deref(), mode),
     }
 }
 
@@ -409,6 +398,16 @@ fn parse_args(
                 left: left.clone(),
                 right: right.clone(),
                 ledger: Some(PathBuf::from(ledger)),
+            }
+        }
+        [verb, flag, run, ledger, rest @ ..]
+            if verb == "study" && flag == "--resume" && is_operand(run) && is_operand(ledger) =>
+        {
+            let budget = parse_study_budget_args(rest).map_err(|diagnostic| (mode, diagnostic))?;
+            Command::StudyResume {
+                run: run.clone(),
+                ledger: PathBuf::from(ledger),
+                budget,
             }
         }
         [verb, study, ledger, rest @ ..]

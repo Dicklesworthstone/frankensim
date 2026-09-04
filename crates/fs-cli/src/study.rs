@@ -1,560 +1,250 @@
-//! Implementation of the `frankensim study` command (bead `frankensim-rc-root-q61wp.20`).
-//!
-//! Runs the marquee topology optimization pipeline under session governor budgets,
-//! produces a deterministic HTML report with embedded SVG iteration curves and
-//! certificate table, emits the JSON report twin, assembles the format-9 evidence
-//! package, and validates it with `fs-checker`.
-//!
-//! Exits:
-//! - 0 (SUCCESS): Optimization study completed all iterations and sealed artifacts.
-//! - 2 (USAGE): Command syntax error.
-//! - 3 (INPUT): File read error.
-//! - 4 (REFUSED): Dimensional check failure, undeclared units, non-boundary load,
-//!   or volume fraction outside (0, 1).
-//! - 6 (BUDGET): Stopped early at budget exhaustion, retaining last certified iterate
-//!   with durable status "budget-exhausted".
+//! Executable normalized thermal studies. The numerical producer owns accepted
+//! iterates; this membrane admits intent, meters work and retains real results.
+//! Export/checker integrity does not turn an estimated PDE result into a bound.
 
 use std::fmt::Write as _;
-use std::fs;
+use std::io::Read;
 use std::path::Path;
 use std::time::Instant;
 
-use fs_blake3::hash_domain;
-use fs_evidence::Color;
-use fs_ledger::Ledger;
-use fs_marquee::study::{PlateWithHoles, StudyConfig, solve_and_grade, armijo_next_design, IterRecord};
-use fs_opt::{ConstraintKind, Manifold, ProblemBuilder, Sense};
-use fs_qty::Dims;
-use fs_package::{Claim, ClaimOrigin, EvidencePackage, Provenance};
-use fs_project::{
-    parse_study_json, parse_study_sexpr, canonical_study_hash, STUDY_FSIM_VERSION,
-};
+use fs_blake3::{ContentHash, hash_bytes, hash_domain};
+use fs_exec::CancelGate;
+use fs_ledger::{EdgeRole, FiveExplicits, Ledger, LedgerError, OpOutcome};
+use fs_marquee::study::{PlateWithHoles, StudyConfig, StudyRunner};
+use fs_package::{Claim, EvidencePackage, Provenance};
+use fs_project::study::{StudySpec, parse_study_strict, print_study_sexpr};
+use fs_session::{CapabilityToken, Charge, Enforcement, Governor, SessionId};
 
+use crate::json_read::JsonValue;
 use crate::{
-    CommandOutput, Diagnostic, OutputMode, exit, refusal,
+    CommandOutput, Diagnostic, MAX_PROJECT_BYTES, OutputMode, exit, push_json_string, refusal,
 };
 
-/// Study run receipt schema.
 pub const STUDY_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.study-run-receipt.v1";
-/// Study receipt domain.
-pub const STUDY_RECEIPT_DOMAIN: &str = "org.frankensim.fs-cli.study.receipt.v1";
+const RECEIPT_KIND: &str = "study-run-receipt";
+const MAX_ARTIFACT_BYTES: u64 = 16 * 1024 * 1024;
+const DRIVER: &str = "normalized-thermal-study-v1";
+const NO_CLAIM: &str = "Normalized scalar Poisson compliance; fixed centers and circular hole radii. Estimated DWR and algebraic terms, no guaranteed error bound, elasticity, free-boundary topology, KKT or optimality claim. Memory is an admission estimate, not measured peak RSS. Cancellation is checked between bounded iterations, not inside CutFEM solves. The checker proves package structure only.";
 
-/// Execute the `study` CLI verb.
-pub fn study_path(
-    study_path: &Path,
-    ledger_path: &Path,
-    budget_override: Option<&str>,
-    mode: OutputMode,
-) -> CommandOutput {
-    let started = Instant::now();
-
-    // 1. Read study file
-    let source_bytes = match fs::read(study_path) {
-        Ok(bytes) => bytes,
-        Err(err) => {
-            return refusal(
-                mode,
-                exit::INPUT,
-                &Diagnostic::new(
-                    "study",
-                    "cli-study-input",
-                    format!("could not read study file `{}`: {err}", study_path.display()),
-                    "check that the study file exists and is readable",
-                ),
-                None,
-            );
-        }
-    };
-
-    let source_str = match std::str::from_utf8(&source_bytes) {
-        Ok(s) => s,
-        Err(_) => {
-            return refusal(
-                mode,
-                exit::INPUT,
-                &Diagnostic::new(
-                    "study",
-                    "cli-study-encoding",
-                    "study file is not valid UTF-8",
-                    "provide a UTF-8 encoded .fsim study file",
-                ),
-                None,
-            );
-        }
-    };
-
-    // 2. Parse study
-    let study_spec = if source_str.trim_start().starts_with('{') {
-        parse_study_json(source_str)
-    } else {
-        parse_study_sexpr(source_str)
-    };
-
-    let spec = match study_spec {
-        Ok(s) => s,
-        Err(err) => {
-            return refusal(
-                mode,
-                exit::REFUSED,
-                &Diagnostic::new(
-                    "study",
-                    "cli-study-parse",
-                    format!("could not parse study file: {}", err.detail),
-                    err.hint,
-                ),
-                None,
-            );
-        }
-    };
-
-    // 3. Validate semantic requirements (Five Explicits, bounds, dimensions)
-    let violations = spec.validate();
-    if let Some(v) = violations.first() {
-        return refusal(
-            mode,
-            exit::REFUSED,
-            &Diagnostic::new("study", v.code, &v.what, &v.fix),
-            None,
-        );
+type Result<T> = std::result::Result<T, Failure>;
+#[derive(Debug)]
+struct Failure {
+    code: &'static str,
+    message: String,
+    exit: u8,
+}
+impl From<LedgerError> for Failure {
+    fn from(e: LedgerError) -> Self {
+        fail("cli-study-ledger", e.to_string())
     }
-
-    // 4. Parse budget override if supplied
-    let budget_max_iters = if let Some(b_str) = budget_override {
-        match b_str.parse::<usize>() {
-            Ok(n) if n > 0 => Some(n),
-            _ => {
-                return refusal(
-                    mode,
-                    exit::USAGE,
-                    &Diagnostic::new(
-                        "study",
-                        "cli-study-budget",
-                        format!("`--budget` requires a positive integer; got `{b_str}`"),
-                        "specify an integer iteration limit like `--budget 2`",
-                    ),
-                    None,
-                );
-            }
-        }
-    } else {
-        spec.budgets.as_ref().and_then(|b| b.max_iterations)
-    };
-
-    // 5. Admit problem through fs-opt
-    let domain = spec.domain.as_ref().expect("domain present");
-    let physics = spec.physics.as_ref().expect("physics present");
-    let constraints = spec.constraints.as_ref().expect("constraints present");
-    let optimizer = spec.optimizer.as_ref().expect("optimizer present");
-
-    let mut opt_builder = ProblemBuilder::new();
-    let dim = u32::try_from(domain.initial_holes.len()).unwrap_or(1);
-    let r_var = match opt_builder.var("hole_radii", Manifold::Rn { dim }, Dims::NONE) {
-        Ok(v) => v,
-        Err(err) => {
-            return refusal(
-                mode,
-                exit::REFUSED,
-                &Diagnostic::new(
-                    "study",
-                    "cli-study-opt-build",
-                    format!("optimization IR build failed: {err}"),
-                    "verify problem dimensions and constraints",
-                ),
-                None,
-            );
-        }
-    };
-    if let Ok(r_ref) = opt_builder.var_ref(r_var) {
-        if let Ok(norm) = opt_builder.norm_sq(r_ref) {
-            let _ = opt_builder.objective(norm, Sense::Minimize, 1.0);
-            let _ = opt_builder.constraint(norm, ConstraintKind::Le, "volume_fraction");
-        }
+}
+fn fail(code: &'static str, message: impl Into<String>) -> Failure {
+    Failure {
+        code,
+        message: message.into(),
+        exit: exit::REFUSED,
     }
+}
+fn quoted(value: &str) -> String {
+    let mut text = String::new();
+    push_json_string(&mut text, value);
+    text
+}
+fn failure_output(command: &'static str, mode: OutputMode, e: Failure) -> CommandOutput {
+    refusal(
+        mode,
+        e.exit,
+        &Diagnostic::new(
+            command,
+            e.code,
+            e.message,
+            "inspect the named declaration or ledger failure; use examples/marquee/thermal-2d.fsim for the supported study",
+        ),
+        None,
+    )
+}
 
-    let opt_problem = match opt_builder.build() {
-        Ok(p) => p,
-        Err(err) => {
-            return refusal(
-                mode,
-                exit::REFUSED,
-                &Diagnostic::new(
-                    "study",
-                    "cli-study-opt-build",
-                    format!("optimization IR build failed: {err}"),
-                    "verify problem dimensions and constraints",
-                ),
-                None,
-            );
-        }
-    };
-
-    if let Err(err) = opt_problem.admit() {
-        return refusal(
-            mode,
-            exit::REFUSED,
-            &Diagnostic::new(
-                "study",
-                "cli-study-opt-admit",
-                format!("optimization admission failed: {err:?}"),
-                "verify problem formulation satisfies admission gates",
-            ),
-            None,
-        );
+struct Admitted {
+    spec: StudySpec,
+    source: String,
+    id: ContentHash,
+    config: StudyConfig,
+    wall_s: f64,
+    memory_bytes: u64,
+}
+fn admit(source: &str, json: bool) -> Result<Admitted> {
+    let spec = parse_study_strict(source, json).map_err(|e| fail(e.code, e.detail))?;
+    if let Some(v) = spec.validate().first() {
+        return Err(fail(v.code, &v.what));
     }
-
-    // 6. Setup Ledger
-    let mut ledger = match Ledger::open_or_create(ledger_path) {
-        Ok(l) => l,
-        Err(err) => {
-            return refusal(
-                mode,
-                exit::INPUT,
-                &Diagnostic::new(
-                    "study",
-                    "cli-study-ledger",
-                    format!("could not open ledger at `{}`: {err}", ledger_path.display()),
-                    "check ledger path and write permissions",
-                ),
-                None,
-            );
-        }
-    };
-
-    let study_hash = canonical_study_hash(&source_bytes);
-    let run_id = format!("study-{}", &study_hash.to_hex()[..16]);
-
-    // Record study source artifact
-    let _ = ledger.append_entry("study-source", source_bytes.as_slice());
-
-    // Prepare Marquee study inputs
-    let centers: Vec<[f64; 2]> = domain.initial_holes.iter().map(|h| h.center).collect();
-    let initial_radii: Vec<f64> = domain.initial_holes.iter().map(|h| h.radius).collect();
-    let mut current_design = PlateWithHoles {
-        centers,
-        radii: initial_radii,
-    };
-
+    if spec.versions.as_ref().expect("validated versions").schema != fs_project::STUDY_FSIM_VERSION
+    {
+        return Err(fail(
+            "cli-study-version",
+            "versions.schema must match the admitted study syntax version",
+        ));
+    }
+    let physics = spec.physics.as_ref().expect("validated physics");
+    let domain = spec.domain.as_ref().expect("validated domain");
+    let scenario = spec.scenario.as_ref().expect("validated scenario");
+    let objective = spec.objective.as_ref().expect("validated objective");
+    let opt = spec.optimizer.as_ref().expect("validated optimizer");
+    let budgets = spec.budgets.as_ref().expect("validated budgets");
+    if physics.physics_type != "thermal-poisson-2d-normalized" {
+        return Err(fail(
+            "cli-study-physics-unavailable",
+            "only thermal-poisson-2d-normalized is implemented; elasticity/topology remains q61wp.16",
+        ));
+    }
+    if domain.domain_type != "sdf-plate-with-holes"
+        || domain.bounds != ([0.0, 0.0], [1.0, 1.0])
+        || scenario.fixed_boundary != "all-boundaries-zero"
+        || scenario.load_region != "domain-unit-source"
+        || objective.objective_type != "compliance"
+        || objective.sense != "minimize"
+        || objective.unit != "1"
+        || spec.units.as_ref().expect("units").storage != "normalized"
+        || opt.optimizer_type != "projected-gradient"
+    {
+        return Err(fail(
+            "cli-study-model",
+            "declare the normalized unit plate, unit domain source, zero temperature on all boundaries, dimensionless compliance and projected-gradient optimizer",
+        ));
+    }
+    let caps = spec.capabilities.as_ref().expect("capabilities");
+    if caps.len() != 3
+        || ![
+            "optimization.thermal-radii",
+            "geometry.sdf",
+            "physics.cutfem",
+        ]
+        .iter()
+        .all(|cap| caps.iter().any(|c| c == cap))
+    {
+        return Err(fail(
+            "cli-study-capability",
+            "required capabilities are optimization.thermal-radii, geometry.sdf and physics.cutfem",
+        ));
+    }
+    let metadata = spec.metadata.as_ref().expect("metadata");
+    if metadata.decision_gate != fs_project::DecisionGate::ScopingEstimate
+        || metadata.consequence != fs_project::ConsequenceClass::Advisory
+    {
+        return Err(fail(
+            "cli-study-decision",
+            "this estimated study supports advisory scoping only",
+        ));
+    }
+    let wall = budgets
+        .wall_time
+        .as_ref()
+        .ok_or_else(|| fail("cli-study-budget", "wall time must be explicit"))?;
+    let memory_bytes = budgets
+        .memory_bytes
+        .ok_or_else(|| fail("cli-study-budget", "memory must be explicit"))?;
+    let max_iterations = budgets
+        .max_iterations
+        .ok_or_else(|| fail("cli-study-budget", "max-iterations must be explicit"))?;
+    if !wall.value.is_finite()
+        || wall.value <= 0.0
+        || wall.dims != fs_qty::Dims([0, 0, 1, 0, 0, 0])
+        || max_iterations == 0
+        || max_iterations > 256
+        || opt.steps > 256
+        || domain.initial_holes.len() > 32
+        || physics.mesh_level > 5
+        || memory_bytes < 128 * 1024 * 1024
+    {
+        return Err(fail(
+            "cli-study-budget",
+            "supported envelope: positive wall seconds, 128 MiB memory admission, at most 256 iterations, 32 holes and mesh level 5",
+        ));
+    }
     let config = StudyConfig {
         level: physics.mesh_level,
-        steps: optimizer.steps,
-        step_size: optimizer.step_size,
-        area_target: constraints.volume_fraction,
-        r_min: optimizer.r_min,
-        r_max: optimizer.r_max,
+        steps: opt.steps,
+        step_size: opt.step_size,
+        area_target: spec
+            .constraints
+            .as_ref()
+            .expect("constraints")
+            .volume_fraction,
+        r_min: opt.r_min,
+        r_max: opt.r_max,
     };
-
-    // 7. Optimization Loop under Budget Enforcement
-    let target_steps = config.steps;
-    let allowed_steps = budget_max_iters.unwrap_or(target_steps);
-
-    let mut iterations: Vec<IterRecord> = Vec::new();
-    let mut budget_exhausted = false;
-
-    for step_idx in 0..target_steps {
-        if step_idx >= allowed_steps {
-            budget_exhausted = true;
-            break;
-        }
-
-        let grade = match solve_and_grade(&current_design, config.level) {
-            Ok(g) => g,
-            Err(err) => {
-                return refusal(
-                    mode,
-                    exit::REFUSED,
-                    &Diagnostic::new(
-                        "study",
-                        "cli-study-solve",
-                        format!("CutFEM solve failed at iteration {step_idx}: {err}"),
-                        "check plate hole radii and mesh level",
-                    ),
-                    None,
-                );
-            }
-        };
-
-        let armijo = match armijo_next_design(&current_design, &grade, &config) {
-            Ok(a) => a,
-            Err(err) => {
-                return refusal(
-                    mode,
-                    exit::REFUSED,
-                    &Diagnostic::new(
-                        "study",
-                        "cli-study-armijo",
-                        format!("Armijo line search failed at iteration {step_idx}: {err}"),
-                        "adjust step size or hole radii bounds",
-                    ),
-                    None,
-                );
-            }
-        };
-
-        let rec = IterRecord {
-            iter: step_idx,
-            compliance: grade.compliance,
-            area: current_design.area(),
-            volume: current_design.area(),
-            radii: current_design.radii.clone(),
-            accepted_radii: armijo.design.radii.clone(),
-            accepted_compliance: armijo.grade.compliance,
-            accepted_cert_geometry: armijo.grade.cert_geometry,
-            accepted_cert_dwr: armijo.grade.cert_dwr,
-            accepted_cert_algebraic: armijo.grade.cert_algebraic,
-            accepted_color: armijo.grade.color.clone(),
-            accepted_solver_iters: armijo.grade.solver_iters,
-            accepted_cut_cell_count: armijo.grade.cut_cell_count,
-            gradient: grade.gradient.clone(),
-            gradient_norm: grade.gradient_norm,
-            cert_geometry: grade.cert_geometry,
-            cert_dwr: grade.cert_dwr,
-            dwr_estimate: grade.cert_dwr,
-            cert_algebraic: grade.cert_algebraic,
-            color: grade.color.clone(),
-            solver_iters: grade.solver_iters,
-            cut_cell_count: grade.cut_cell_count,
-            accepted_step: armijo.step_used,
-            backtracks: armijo.backtracks,
-        };
-
-        // Persist iteration line
-        let iter_json = serde_json::to_string(&rec).unwrap_or_default();
-        let _ = ledger.append_entry(&format!("iteration-{}", step_idx), iter_json.as_bytes());
-
-        current_design = armijo.design;
-        iterations.push(rec);
-    }
-
-    let last_iter = match iterations.last() {
-        Some(it) => it.clone(),
-        None => {
-            return refusal(
-                mode,
-                exit::REFUSED,
-                &Diagnostic::new(
-                    "study",
-                    "cli-study-no-iterations",
-                    "optimization produced 0 iterations",
-                    "ensure budget and step counts are greater than 0",
-                ),
-                None,
-            );
-        }
-    };
-
-    // Compute deterministic trace hash
-    let mut trace_bytes = Vec::new();
-    for it in &iterations {
-        let _ = write!(
-            trace_bytes,
-            "iter:{};comp:{:.6};area:{:.6};",
-            it.iter, it.compliance, it.area
-        );
-    }
-    let trace_hash = hash_domain("org.frankensim.fs-marquee.study.trace.v1", &trace_bytes).to_hex();
-
-    // Persist final design
-    let mut final_design_bytes = Vec::new();
-    let _ = writeln!(final_design_bytes, "centers={:?};radii={:?};area={:.6}", current_design.centers, current_design.radii, current_design.area());
-    let final_design_hash = hash_domain("org.frankensim.fs-marquee.final-design.v1", &final_design_bytes);
-    let _ = ledger.append_entry("study-final-design", &final_design_bytes);
-
-    // 8. Generate Report (HTML with SVG plots & Certificate Table + JSON twin)
-    let svg_plots = render_svg_convergence_plots(&iterations);
-    let cert_table = render_html_certificate_table(&iterations);
-
-    let html_report = format!(
-r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <title>FrankenSim Marquee Study Report — {run_id}</title>
-  <style>
-    body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 40px; color: #1e293b; background: #f8fafc; }}
-    .container {{ max-width: 900px; margin: 0 auto; background: #ffffff; padding: 32px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }}
-    h1, h2 {{ color: #0f172a; }}
-    .badge {{ display: inline-block; padding: 4px 8px; border-radius: 4px; font-size: 12px; font-weight: 600; text-transform: uppercase; }}
-    .badge-estimated {{ background: #fef3c7; color: #92400e; }}
-    .badge-verified {{ background: #dcfce7; color: #166534; }}
-    table {{ width: 100%; border-collapse: collapse; margin-top: 20px; }}
-    th, td {{ padding: 8px 12px; text-align: left; border-bottom: 1px solid #e2e8f0; font-size: 14px; }}
-    th {{ background: #f1f5f9; font-weight: 600; }}
-    .svg-container {{ margin: 24px 0; text-align: center; }}
-    .status-banner {{ padding: 12px 16px; border-radius: 6px; margin-bottom: 24px; font-weight: 600; }}
-    .status-completed {{ background: #dcfce7; color: #166534; }}
-    .status-exhausted {{ background: #fee2e2; color: #991b1b; }}
-  </style>
-</head>
-<body>
-  <div class="container">
-    <h1>FrankenSim Marquee Study: 2D Topology Optimization</h1>
-    <div class="status-banner {status_class}">
-      Status: {status_text} (Iterations: {iter_count}/{target_steps})
-    </div>
-    <h2>Executive Summary</h2>
-    <p><strong>Run ID:</strong> {run_id}</p>
-    <p><strong>Initial Compliance:</strong> {first_comp:.6} J &rarr; <strong>Final Compliance:</strong> {final_comp:.6} J</p>
-    <p><strong>Target Volume Fraction:</strong> {target_vol:.3} &rarr; <strong>Achieved:</strong> {final_vol:.3}</p>
-    <p><strong>Trace Hash:</strong> <code>{trace_hash}</code></p>
-
-    <h2>Convergence History</h2>
-    <div class="svg-container">
-      {svg_plots}
-    </div>
-
-    <h2>Iteration Certificates</h2>
-    {cert_table}
-
-    <h2>Lineage &amp; Five Explicits</h2>
-    <p>Engine: <code>frankensim 0.0.1</code> | Study Schema: <code>{STUDY_FSIM_VERSION}</code></p>
-    <p>RNG Seed: <code>1337</code> | Units: <code>SI</code></p>
-  </div>
-</body>
-</html>
-"#,
-        run_id = run_id,
-        status_class = if budget_exhausted { "status-exhausted" } else { "status-completed" },
-        status_text = if budget_exhausted { "budget-exhausted" } else { "completed" },
-        iter_count = iterations.len(),
-        target_steps = target_steps,
-        first_comp = iterations.first().map_or(0.0, |it| it.compliance),
-        final_comp = last_iter.accepted_compliance,
-        target_vol = constraints.volume_fraction,
-        final_vol = last_iter.volume,
-        trace_hash = trace_hash,
-        svg_plots = svg_plots,
-        cert_table = cert_table,
-        STUDY_FSIM_VERSION = STUDY_FSIM_VERSION,
+    let canonical = print_study_sexpr(&spec);
+    let identity = format!(
+        "{DRIVER}\n{}\n{canonical}",
+        hash_bytes(include_bytes!("../../../constellation.lock")).to_hex()
     );
-
-    let html_hash = hash_domain("org.frankensim.fs-report.html.v1", html_report.as_bytes());
-    let _ = ledger.append_entry("study-report-html", html_report.as_bytes());
-
-    // JSON twin
-    let mut json_twin = String::from("{\n");
-    let _ = writeln!(json_twin, "  \"run_id\": {:?},", run_id);
-    let _ = writeln!(json_twin, "  \"status\": {:?},", if budget_exhausted { "budget-exhausted" } else { "completed" });
-    let _ = writeln!(json_twin, "  \"iterations_completed\": {},", iterations.len());
-    let _ = writeln!(json_twin, "  \"target_iterations\": {},", target_steps);
-    let _ = writeln!(json_twin, "  \"first_compliance\": {},", iterations.first().map_or(0.0, |it| it.compliance));
-    let _ = writeln!(json_twin, "  \"final_compliance\": {},", last_iter.accepted_compliance);
-    let _ = writeln!(json_twin, "  \"volume_fraction\": {},", last_iter.volume);
-    let _ = writeln!(json_twin, "  \"trace_hash\": {:?},", trace_hash);
-    let _ = writeln!(json_twin, "  \"html_report_hash\": {:?},", html_hash.to_hex());
-    let _ = writeln!(json_twin, "  \"final_design_hash\": {:?}", final_design_hash.to_hex());
-    json_twin.push('}');
-    let _ = ledger.append_entry("study-report-json", json_twin.as_bytes());
-
-    // 9. Assemble Evidence Package (Format 9)
-    let mut provenance = Provenance::default();
-    provenance.engine_version = "0.0.1".to_string();
-    provenance.constellation_lock = "frankensim-constellation-lock-v1".to_string();
-
-    let mut claims = Vec::new();
-    // Claim 1: Optimal compliance
-    claims.push(Claim::sealed(
-        "study.marquee.optimal_compliance",
-        format!("Optimal compliance reached {:.6} J under area budget {:.3}", last_iter.accepted_compliance, constraints.volume_fraction),
-        last_iter.accepted_color.clone(),
-        ClaimOrigin::EstimatedSource { estimator: "fs-marquee/study/v1".to_string() },
-    ));
-
-    // Claim 2: Volume constraint
-    let vol_diff = (last_iter.volume - constraints.volume_fraction).abs();
-    claims.push(Claim::sealed(
-        "study.marquee.volume_constraint",
-        format!("Material volume fraction {:.4} within tolerance of target {:.4}", last_iter.volume, constraints.volume_fraction),
-        Color::Estimated { estimator: "fs-marquee/volume-target/v1".to_string(), dispersion: vol_diff },
-        ClaimOrigin::EstimatedSource { estimator: "fs-marquee/volume-target/v1".to_string() },
-    ));
-
-    // Claim 3: DWR discretization estimate
-    claims.push(Claim::sealed(
-        "study.marquee.dwr_estimate",
-        format!("DWR dual-weighted residual error bound {:.6e}", last_iter.accepted_cert_dwr),
-        Color::Estimated { estimator: "fs-dwr/goal-oriented/v1".to_string(), dispersion: last_iter.accepted_cert_dwr },
-        ClaimOrigin::EstimatedSource { estimator: "fs-dwr/goal-oriented/v1".to_string() },
-    ));
-
-    let evidence_pkg = EvidencePackage::new(provenance, claims);
-    let pkg_json = match evidence_pkg.to_canonical_json() {
-        Ok(j) => j,
-        Err(err) => {
-            return refusal(
-                mode,
-                exit::REFUSED,
-                &Diagnostic::new(
-                    "study",
-                    "cli-study-package-serialize",
-                    format!("failed to serialize evidence package: {err}"),
-                    "verify claims and provenance fields",
-                ),
-                None,
-            );
-        }
-    };
-
-    // Validate package with fs-checker
-    let decision = fs_checker::check(&evidence_pkg);
-    if !decision.passed() {
-        return refusal(
-            mode,
-            exit::REFUSED,
-            &Diagnostic::new(
-                "study",
-                "cli-study-checker-refusal",
-                "fs-checker rejected package",
-                "review claim colors and roots",
-            ),
-            None,
-        );
+    let id = hash_domain(
+        "org.frankensim.cli.normalized-thermal-study.v1",
+        identity.as_bytes(),
+    );
+    let wall_s = wall.value;
+    // Admission includes the actual projection, so no invalid layout creates a ledger.
+    StudyRunner::new(design(&spec), config.clone())
+        .map_err(|e| fail("cli-study-geometry", e.to_string()))?;
+    Ok(Admitted {
+        spec,
+        source: canonical,
+        id,
+        config,
+        wall_s,
+        memory_bytes,
+    })
+}
+fn design(spec: &StudySpec) -> PlateWithHoles {
+    let holes = &spec.domain.as_ref().expect("admitted domain").initial_holes;
+    PlateWithHoles {
+        centers: holes.iter().map(|h| h.center).collect(),
+        radii: holes.iter().map(|h| h.radius).collect(),
     }
+}
+fn budget(value: Option<&str>) -> Result<Option<usize>> {
+    value
+        .map(|v| {
+            v.parse::<usize>()
+                .ok()
+                .filter(|n| *n > 0 && *n <= 256)
+                .ok_or_else(|| {
+                    fail(
+                        "cli-study-budget-override",
+                        "--budget must be an integer in 1..=256",
+                    )
+                })
+        })
+        .transpose()
+}
+fn ir(id: ContentHash, ordinal: usize) -> String {
+    format!(
+        "{{\"driver\":{DRIVER:?},\"study_id\":\"{}\",\"ordinal\":{ordinal},\"units\":\"1\"}}",
+        id.to_hex()
+    )
+}
 
-    let pkg_hash = hash_domain("org.frankensim.fs-package.v9", pkg_json.as_bytes());
-    let _ = ledger.append_entry("study-evidence-package", pkg_json.as_bytes());
-
-    // 10. Record Final Run Receipt
-    let status_str = if budget_exhausted { "budget-exhausted" } else { "completed" };
-    let mut run_receipt = String::from("{\n");
-    let _ = writeln!(run_receipt, "  \"schema\": {:?},", STUDY_RUN_RECEIPT_SCHEMA);
-    let _ = writeln!(run_receipt, "  \"run_id\": {:?},", run_id);
-    let _ = writeln!(run_receipt, "  \"status\": {:?},", status_str);
-    let _ = writeln!(run_receipt, "  \"study_hash\": {:?},", study_hash.to_hex());
-    let _ = writeln!(run_receipt, "  \"stages\": [");
-    let _ = writeln!(run_receipt, "    {{\"stage\": \"study-admit\", \"status\": \"executed\"}},");
-    let _ = writeln!(run_receipt, "    {{\"stage\": \"study-optimize\", \"status\": \"executed\", \"iterations\": {}}},", iterations.len());
-    let _ = writeln!(run_receipt, "    {{\"stage\": \"study-report\", \"status\": \"executed\", \"html_hash\": {:?}}},", html_hash.to_hex());
-    let _ = writeln!(run_receipt, "    {{\"stage\": \"study-package\", \"status\": \"executed\", \"package_hash\": {:?}}}", pkg_hash.to_hex());
-    let _ = writeln!(run_receipt, "  ],");
-    let _ = writeln!(run_receipt, "  \"final_compliance\": {},", last_iter.accepted_compliance);
-    let _ = writeln!(run_receipt, "  \"final_volume\": {},", last_iter.volume);
-    let _ = writeln!(run_receipt, "  \"budget_exhausted\": {},", budget_exhausted);
-    let _ = writeln!(run_receipt, "  \"duration_ms\": {}", started.elapsed().as_millis());
-    run_receipt.push('}');
-    let _ = ledger.append_entry("study-run-receipt", run_receipt.as_bytes());
-
-    // 11. Format Output & Return Exit Code
-    let exit_code = if budget_exhausted { exit::BUDGET } else { exit::SUCCESS };
-
-    let stdout = match mode {
-        OutputMode::Text => {
-            let mut out = format!(
-                "status={status_str}\ncommand=study\nrun_id={run_id}\niterations={}/{}\ncompliance={:.6}\nvolume={:.4}\n",
-                iterations.len(), target_steps, last_iter.accepted_compliance, last_iter.volume
-            );
-            let _ = writeln!(out, "report_html_hash={}", html_hash.to_hex());
-            let _ = writeln!(out, "package_hash={}", pkg_hash.to_hex());
-            let _ = writeln!(out, "final_design_hash={}", final_design_hash.to_hex());
-            if budget_exhausted {
-                let _ = writeln!(out, "note=budget exhausted mid-loop; last certified iterate retained");
-            }
-            out
-        }
-        OutputMode::Json => {
-            run_receipt
-        }
+#[derive(Debug)]
+struct Outcome {
+    pointer: String,
+    receipt: String,
+    status: &'static str,
+}
+fn render_output(out: Outcome, mode: OutputMode) -> CommandOutput {
+    let exit_code = match out.status {
+        "completed" => exit::SUCCESS,
+        "cancelled" => exit::CANCELLED,
+        _ => exit::BUDGET,
     };
-
+    let stdout = match mode {
+        OutputMode::Json => format!(
+            "{{\"command\":\"study\",\"status\":{0:?},\"run_id\":{1:?},\"run\":{1:?},\"receipt\":{2}}}\n",
+            out.status, out.pointer, out.receipt
+        ),
+        OutputMode::Text => format!(
+            "command=study\nstatus={}\nrun={}\nauthority=estimated\n",
+            out.status, out.pointer
+        ),
+    };
     CommandOutput {
         exit_code,
         stdout,
@@ -562,89 +252,856 @@ r#"<!DOCTYPE html>
     }
 }
 
-fn render_svg_convergence_plots(iterations: &[IterRecord]) -> String {
-    if iterations.is_empty() {
-        return String::from("<svg width=\"600\" height=\"300\"></svg>");
+pub(crate) fn study_path(
+    path: &Path,
+    ledger_path: &Path,
+    override_text: Option<&str>,
+    mode: OutputMode,
+) -> CommandOutput {
+    let result = (|| {
+        let cap = budget(override_text)?;
+        let json = match path.extension().and_then(|s| s.to_str()) {
+            Some("fsim") => false,
+            Some("json") => true,
+            _ => {
+                return Err(fail(
+                    "cli-study-format",
+                    "study inputs require .fsim or .json",
+                ));
+            }
+        };
+        let mut bytes = Vec::new();
+        std::fs::File::open(path)
+            .and_then(|f| f.take(MAX_PROJECT_BYTES + 1).read_to_end(&mut bytes))
+            .map_err(|e| Failure {
+                code: "cli-study-read",
+                message: e.to_string(),
+                exit: exit::INPUT,
+            })?;
+        if bytes.len() as u64 > MAX_PROJECT_BYTES {
+            return Err(Failure {
+                code: "cli-study-size",
+                message: "study exceeds 16 MiB".into(),
+                exit: exit::INPUT,
+            });
+        }
+        let text = std::str::from_utf8(&bytes).map_err(|e| Failure {
+            code: "cli-study-utf8",
+            message: e.to_string(),
+            exit: exit::INPUT,
+        })?;
+        let admitted = admit(text, json)?;
+        let ledger = Ledger::open(
+            ledger_path
+                .to_str()
+                .ok_or_else(|| fail("cli-study-ledger-path", "ledger path is not UTF-8"))?,
+        )?;
+        let start = Instant::now();
+        drive(
+            &admitted,
+            &ledger,
+            cap,
+            &CancelGate::new(),
+            &|| start.elapsed().as_secs_f64(),
+            None,
+        )
+    })();
+    match result {
+        Ok(out) => render_output(out, mode),
+        Err(e) => failure_output("study", mode, e),
     }
-
-    let min_comp = iterations.iter().map(|it| it.compliance).fold(f64::INFINITY, f64::min);
-    let max_comp = iterations.iter().map(|it| it.compliance).fold(f64::NEG_INFINITY, f64::max);
-    let comp_range = if (max_comp - min_comp).abs() < 1e-9 { 1.0 } else { max_comp - min_comp };
-
-    let n = iterations.len().max(2);
-    let mut comp_points = String::new();
-    let mut vol_points = String::new();
-
-    for (i, it) in iterations.iter().enumerate() {
-        let x = 60.0 + (i as f64 / (n - 1) as f64) * 480.0;
-        let y_comp = 240.0 - ((it.compliance - min_comp) / comp_range) * 180.0;
-        let y_vol = 240.0 - (it.volume.clamp(0.0, 1.0)) * 180.0;
-
-        let _ = write!(comp_points, "{:.1},{:.1} ", x, y_comp);
-        let _ = write!(vol_points, "{:.1},{:.1} ", x, y_vol);
-    }
-
-    format!(
-r##"<svg width="600" height="300" viewBox="0 0 600 300" xmlns="http://www.w3.org/2000/svg">
-  <rect width="600" height="300" fill="#ffffff" stroke="#e2e8f0" rx="8" />
-  <line x1="60" y1="240" x2="540" y2="240" stroke="#94a3b8" stroke-width="1.5" />
-  <line x1="60" y1="60" x2="60" y2="240" stroke="#94a3b8" stroke-width="1.5" />
-  <text x="300" y="35" text-anchor="middle" font-size="14" font-weight="600" fill="#0f172a">Compliance &amp; Volume vs Iteration</text>
-  <polyline fill="none" stroke="#2563eb" stroke-width="2.5" points="{comp_points}" />
-  <polyline fill="none" stroke="#16a34a" stroke-width="2" stroke-dasharray="4" points="{vol_points}" />
-  <circle cx="430" cy="25" r="5" fill="#2563eb" />
-  <text x="440" y="29" font-size="11" fill="#334155">Compliance (J)</text>
-  <circle cx="510" cy="25" r="5" fill="#16a34a" />
-  <text x="520" y="29" font-size="11" fill="#334155">Volume</text>
-  <text x="300" y="265" text-anchor="middle" font-size="11" fill="#64748b">Iteration Number</text>
-</svg>"##
-    )
 }
 
-fn render_html_certificate_table(iterations: &[IterRecord]) -> String {
-    let mut out = String::from(
-r#"<table>
-  <thead>
-    <tr>
-      <th>Iter</th>
-      <th>Compliance (J)</th>
-      <th>Volume</th>
-      <th>Grad Norm</th>
-      <th>DWR Discr.</th>
-      <th>Algebraic Res.</th>
-      <th>Cut Cells</th>
-      <th>Step</th>
-      <th>Backtracks</th>
-      <th>Color</th>
-    </tr>
-  </thead>
-  <tbody>
-"#
-    );
-
-    for it in iterations {
-        let color_str = match &it.accepted_color {
-            Color::Estimated { .. } => "<span class=\"badge badge-estimated\">Estimated</span>",
-            Color::Verified { .. } => "<span class=\"badge badge-verified\">Verified</span>",
-            _ => "<span class=\"badge\">Advisory</span>",
+fn drive(
+    a: &Admitted,
+    ledger: &Ledger,
+    cap: Option<usize>,
+    gate: &CancelGate,
+    clock: &dyn Fn() -> f64,
+    prior: Option<&Loaded>,
+) -> Result<Outcome> {
+    if gate.is_requested() {
+        return Err(Failure {
+            code: "cli-study-cancelled",
+            message: "cancelled before publication".into(),
+            exit: exit::CANCELLED,
+        });
+    }
+    if ledger.in_transaction() {
+        return Err(fail(
+            "cli-study-transaction",
+            "study requires its own ledger transaction",
+        ));
+    }
+    let mut runner = StudyRunner::new(design(&a.spec), a.config.clone())
+        .map_err(|e| fail("cli-study-geometry", e.to_string()))?;
+    let mut used_wall = 0.0;
+    let mut predecessor = None;
+    if let Some(old) = prior {
+        if old.value.str_field("study_id") != Some(a.id.to_hex().as_str()) {
+            return Err(fail(
+                "cli-study-resume-identity",
+                "retained study identity changed",
+            ));
+        }
+        let count = integer(&old.value, "iterations_completed")?;
+        if count > a.config.steps {
+            return Err(fail(
+                "cli-study-resume-identity",
+                "retained iteration count exceeds requested steps",
+            ));
+        }
+        used_wall = old
+            .value
+            .f64_field("consumed_wall_s")
+            .filter(|v| v.is_finite() && *v >= 0.0)
+            .ok_or_else(|| fail("cli-study-resume-budget", "invalid retained wall charge"))?;
+        let mut replay_clock = 0.0;
+        for _ in 0..count {
+            if gate.is_requested() {
+                return Err(Failure {
+                    code: "cli-study-cancelled",
+                    message: "cancelled while replaying retained prefix; no publication".into(),
+                    exit: exit::CANCELLED,
+                });
+            }
+            let now = clock();
+            if !now.is_finite() || now < replay_clock {
+                return Err(fail(
+                    "cli-study-clock",
+                    "replay clock must be finite and monotonic",
+                ));
+            }
+            replay_clock = now;
+            if now >= a.wall_s - used_wall {
+                return Err(Failure {
+                    code: "cli-study-resume-budget",
+                    message: format!(
+                        "wall budget exhausted during prefix replay; retained checkpoint: study-{}",
+                        old.hash.to_hex()
+                    ),
+                    exit: exit::BUDGET,
+                });
+            }
+            runner
+                .advance()
+                .map_err(|e| fail("cli-study-replay", e.to_string()))?;
+        }
+        if old.value.str_field("trace_hash") != Some(runner.report().trace_hash.as_str()) {
+            return Err(fail(
+                "cli-study-replay",
+                "replayed prefix does not reproduce the retained trace",
+            ));
+        }
+        predecessor = Some(old.hash);
+    }
+    let governor = Governor::new();
+    let mut session_bytes = [0; 8];
+    session_bytes.copy_from_slice(&a.id.as_bytes()[..8]);
+    let session = SessionId(u64::from_le_bytes(session_bytes));
+    let token = CapabilityToken {
+        session,
+        ops: vec!["optimization.thermal-radii".into()],
+        core_s: a.wall_s,
+        mem_bytes: a.memory_bytes,
+        wall_s: a.wall_s,
+        cores: 1,
+        ledger_scope: a.id.to_hex(),
+    };
+    let open = governor
+        .session_open_id(session, "study-open")
+        .map_err(|e| fail("cli-study-session", e.to_string()))?;
+    governor
+        .open_session_declared(open, token)
+        .map_err(|e| fail("cli-study-session", e.to_string()))?;
+    let charge = |ordinal: usize, seconds: f64| -> Result<bool> {
+        let key = governor
+            .meter_report_id(session, &format!("study-meter-{ordinal}"))
+            .map_err(|e| fail("cli-study-session", e.to_string()))?;
+        let receipt = governor
+            .charge(
+                key,
+                Charge {
+                    core_s: seconds,
+                    wall_s: seconds,
+                    mem_peak_bytes: 0,
+                },
+            )
+            .map_err(|e| fail("cli-study-session", e.to_string()))?;
+        Ok(!matches!(receipt.enforcement(), Enforcement::Ok))
+    };
+    let start_count = runner.iterations().len();
+    let limit = a
+        .spec
+        .budgets
+        .as_ref()
+        .and_then(|b| b.max_iterations)
+        .expect("admitted budget")
+        .min(a.config.steps);
+    let mut previous_clock = 0.0;
+    let mut exhausted = charge(0, used_wall)?;
+    loop {
+        let now = clock();
+        if !now.is_finite() || now < previous_clock {
+            return Err(fail(
+                "cli-study-clock",
+                "study clock must be finite and monotonic",
+            ));
+        }
+        let delta = now - previous_clock;
+        previous_clock = now;
+        let next_wall = used_wall + delta;
+        if !next_wall.is_finite() {
+            return Err(fail(
+                "cli-study-clock",
+                "accumulated wall charge overflowed",
+            ));
+        }
+        used_wall = next_wall;
+        exhausted |= charge(runner.iterations().len() + 1, delta)?;
+        let n = runner.iterations().len();
+        let status = if gate.is_requested() {
+            "cancelled"
+        } else if exhausted {
+            "budget-exhausted"
+        } else if n == a.config.steps {
+            "completed"
+        } else if n >= limit || cap.is_some_and(|c| n - start_count >= c) {
+            "budget-exhausted"
+        } else {
+            "running"
         };
+        let out = persist(a, ledger, &runner, status, used_wall, predecessor)?;
+        predecessor = ContentHash::from_hex(out.pointer.trim_start_matches("study-"));
+        if status != "running" {
+            return Ok(out);
+        }
+        runner.advance().map_err(|e| {
+            fail(
+                "cli-study-solve",
+                format!("{e}; last durable checkpoint: {}", out.pointer),
+            )
+        })?;
+    }
+}
 
+fn persist(
+    a: &Admitted,
+    ledger: &Ledger,
+    runner: &StudyRunner,
+    status: &'static str,
+    wall_s: f64,
+    predecessor: Option<ContentHash>,
+) -> Result<Outcome> {
+    let report = runner.report();
+    let n = report.iterations.len();
+    let mut rows = format!(
+        "{{\"schema\":\"thermal-study-iterations-v1\",\"study_id\":\"{}\",\"iterations\":[",
+        a.id.to_hex()
+    );
+    for (index, row) in report.iterations.iter().enumerate() {
+        if index > 0 {
+            rows.push(',');
+        }
+        rows.push_str(row.jsonl_row().trim());
+    }
+    rows.push_str("]}");
+    let design_json = format!(
+        "{{\"model\":\"unit-plate-circular-holes\",\"centers\":{:?},\"radii\":{:?},\"area\":{:.17e}}}",
+        report.design.centers,
+        report.design.radii,
+        report.design.area()
+    );
+    let mut package = EvidencePackage::new(Provenance::new(
+        format!("fs-cli/{};{DRIVER}", env!("CARGO_PKG_VERSION")),
+        hash_bytes(include_bytes!("../../../constellation.lock")).to_hex(),
+    ));
+    let final_compliance = report.iterations.last().map_or("null".to_string(), |r| {
+        format!("{:.17e}", r.accepted_compliance)
+    });
+    if let Some(last) = report.iterations.last() {
+        package = package.with_claim(Claim::estimated("thermal.accepted-compliance",
+            format!("Accepted normalized compliance {} after {} transitions; source {}; trace {}; status {}. {}", final_compliance, n, a.id.to_hex(), report.trace_hash, status, NO_CLAIM),
+            "fs-marquee/dwr-plus-algebraic", last.accepted_cert_dwr + last.accepted_cert_algebraic));
+    }
+    let package_json = package
+        .to_json()
+        .map_err(|e| fail("cli-study-package", e.to_string()))?;
+    if !fs_checker::check(&package).passed() {
+        return Err(fail(
+            "cli-study-package",
+            "checker refused the produced package",
+        ));
+    }
+    let summary = format!(
+        "{{\"study_id\":\"{}\",\"status\":{status:?},\"iterations_completed\":{n},\"target_iterations\":{},\"final_compliance\":{final_compliance},\"final_area\":{:.17e},\"trace_hash\":\"{}\",\"authority\":\"Estimated\",\"no_claim\":{}}}",
+        a.id.to_hex(),
+        a.config.steps,
+        report.design.area(),
+        report.trace_hash,
+        quoted(NO_CLAIM)
+    );
+    let mut table = String::new();
+    let mut points = String::new();
+    let scale = report
+        .iterations
+        .first()
+        .map_or(1.0, |r| r.compliance.abs().max(f64::MIN_POSITIVE));
+    for (i, r) in report.iterations.iter().enumerate() {
         let _ = writeln!(
-            out,
-            "    <tr><td>{}</td><td>{:.6}</td><td>{:.4}</td><td>{:.4e}</td><td>{:.4e}</td><td>{:.4e}</td><td>{}</td><td>{:.2}</td><td>{}</td><td>{}</td></tr>",
-            it.iter,
-            it.accepted_compliance,
-            it.volume,
-            it.gradient_norm,
-            it.accepted_cert_dwr,
-            it.accepted_cert_algebraic,
-            it.accepted_cut_cell_count,
-            it.accepted_step,
-            it.backtracks,
-            color_str
+            table,
+            "<tr><td>{}</td><td>{:.8e}</td><td>{:.5e}</td><td>{:.5e}</td><td>{}</td><td>Estimated</td></tr>",
+            i + 1,
+            r.accepted_compliance,
+            r.accepted_cert_dwr,
+            r.accepted_cert_algebraic,
+            r.backtracks
+        );
+        let _ = write!(
+            points,
+            "{},{} ",
+            20.0 + 560.0 * i as f64 / n.max(1) as f64,
+            180.0 - 160.0 * r.accepted_compliance / scale
+        );
+    }
+    let html = format!(
+        "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>Thermal radius study</title><body><h1>Normalized thermal radius study</h1><p>Status: {status}. {n}/{} iterations. Estimated.</p><p>{NO_CLAIM}</p><p>Accepted compliance: {final_compliance}; material area: {:.8}; target: {:.8}.</p><svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 600 200\" role=\"img\" aria-label=\"Accepted normalized compliance by iteration\"><polyline fill=\"none\" stroke=\"#2563eb\" points=\"{points}\"/></svg><table><tr><th>Iteration</th><th>Accepted compliance</th><th>DWR estimate</th><th>Algebraic estimate</th><th>Backtracks</th><th>Authority</th></tr>{table}</table><p>Trace: {}</p></body></html>",
+        a.config.steps,
+        report.design.area(),
+        a.config.area_target,
+        report.trace_hash
+    );
+    let versions = format!(
+        "{{\"driver\":{DRIVER:?},\"crate\":{:?},\"constellation_lock\":\"{}\"}}",
+        env!("CARGO_PKG_VERSION"),
+        hash_bytes(include_bytes!("../../../constellation.lock")).to_hex()
+    );
+    let budget_json = format!(
+        "{{\"wall_s\":{},\"memory_bytes\":{},\"max_iterations\":{},\"consumed_wall_s\":{wall_s}}}",
+        a.wall_s,
+        a.memory_bytes,
+        a.spec
+            .budgets
+            .as_ref()
+            .and_then(|b| b.max_iterations)
+            .expect("budget")
+    );
+    let seed = a.spec.seeds.as_ref().expect("seed").root.to_le_bytes();
+    ledger.begin()?;
+    let result = (|| -> Result<Outcome> {
+        let op = ledger.begin_op(Some(a.id.as_bytes()), &ir(a.id, n), &FiveExplicits { seed: &seed, versions: &versions, budget: &budget_json, capability: "{\"ops\":[\"optimization.thermal-radii\",\"geometry.sdf\",\"physics.cutfem\"]}" }, 0)?;
+        if let Some(previous) = predecessor {
+            ledger.link(op, &previous, EdgeRole::In)?;
+        }
+        let source = ledger.put_artifact("study-source", a.source.as_bytes(), None)?;
+        ledger.link(op, &source.hash, EdgeRole::In)?;
+        let mut refs = String::new();
+        for (name, kind, bytes) in [
+            ("iterations", "study-iterations", rows.as_bytes()),
+            ("design", "study-design", design_json.as_bytes()),
+            ("report_html", "study-report-html", html.as_bytes()),
+            ("report_json", "study-report-json", summary.as_bytes()),
+            ("package", "study-package", package_json.as_bytes()),
+        ] {
+            let artifact = ledger.put_artifact(kind, bytes, None)?;
+            ledger.link(op, &artifact.hash, EdgeRole::Out)?;
+            let _ = write!(refs, ",{name:?}:\"{}\"", artifact.hash.to_hex());
+        }
+        let receipt = format!(
+            "{{\"schema\":{STUDY_RUN_RECEIPT_SCHEMA:?},\"study_id\":\"{}\",\"status\":{status:?},\"source\":\"{}\",\"iterations_completed\":{n},\"target_iterations\":{},\"trace_hash\":\"{}\",\"consumed_wall_s\":{wall_s},\"predecessor\":{},\"stages\":[\"study-admit\",{},\"study-report\",\"study-package\"]{refs}}}",
+            a.id.to_hex(),
+            source.hash.to_hex(),
+            a.config.steps,
+            report.trace_hash,
+            predecessor.map_or("null".into(), |h| quoted(&h.to_hex())),
+            if n == 0 {
+                "\"study-optimize-not-started\""
+            } else {
+                "\"study-optimize\""
+            }
+        );
+        let artifact = ledger.put_artifact(RECEIPT_KIND, receipt.as_bytes(), None)?;
+        ledger.link(op, &artifact.hash, EdgeRole::Out)?;
+        if ledger.artifact_output_seal(&artifact.hash)?.is_none() {
+            ledger.seal_artifact_output(&artifact.hash, op)?;
+        }
+        ledger.finish_op(op, OpOutcome::Ok, None, 1)?;
+        Ok(Outcome {
+            pointer: format!("study-{}", artifact.hash.to_hex()),
+            receipt,
+            status,
+        })
+    })();
+    match result {
+        Ok(out) => {
+            if let Err(e) = ledger.commit() {
+                return match ledger.rollback() {
+                    Ok(()) => Err(e.into()),
+                    Err(r) => Err(fail(
+                        "cli-study-ledger",
+                        format!("commit failed: {e}; rollback also failed: {r}"),
+                    )),
+                };
+            }
+            Ok(out)
+        }
+        Err(e) => {
+            let rollback = ledger.rollback();
+            match rollback {
+                Ok(()) => Err(e),
+                Err(r) => Err(fail(
+                    "cli-study-ledger",
+                    format!("{}; rollback also failed: {r}", e.message),
+                )),
+            }
+        }
+    }
+}
+
+struct Loaded {
+    hash: ContentHash,
+    value: JsonValue,
+}
+fn integer(value: &JsonValue, key: &str) -> Result<usize> {
+    value
+        .get(key)
+        .and_then(JsonValue::number_raw)
+        .and_then(|s| s.parse::<usize>().ok())
+        .ok_or_else(|| fail("cli-study-receipt", format!("invalid {key}")))
+}
+fn artifact(ledger: &Ledger, hash: ContentHash, kind: &str) -> Result<Vec<u8>> {
+    let info = ledger
+        .artifact_info(&hash)?
+        .ok_or_else(|| fail("cli-study-artifact", "missing study artifact"))?;
+    if info.kind != kind {
+        return Err(fail(
+            "cli-study-artifact",
+            format!("expected {kind}, found {}", info.kind),
+        ));
+    }
+    ledger
+        .get_artifact_bounded(&hash, MAX_ARTIFACT_BYTES)?
+        .ok_or_else(|| fail("cli-study-artifact", "missing study bytes"))
+}
+fn linked(ledger: &Ledger, value: &JsonValue, key: &str, kind: &str) -> Result<Vec<u8>> {
+    let hash = value
+        .str_field(key)
+        .and_then(ContentHash::from_hex)
+        .ok_or_else(|| fail("cli-study-receipt", format!("missing {key} hash")))?;
+    artifact(ledger, hash, kind)
+}
+fn load(ledger: &Ledger, pointer: &str) -> Result<Loaded> {
+    let hash = pointer
+        .strip_prefix("study-")
+        .and_then(ContentHash::from_hex)
+        .ok_or_else(|| {
+            fail(
+                "cli-study-run-id",
+                "expected study- followed by a 64-digit receipt hash",
+            )
+        })?;
+    let bytes = artifact(ledger, hash, RECEIPT_KIND)?;
+    let text = std::str::from_utf8(&bytes).map_err(|e| fail("cli-study-receipt", e.to_string()))?;
+    let value = JsonValue::parse(text).map_err(|e| fail("cli-study-receipt", e.to_string()))?;
+    if value.str_field("schema") != Some(STUDY_RUN_RECEIPT_SCHEMA) {
+        return Err(fail("cli-study-receipt", "unsupported study receipt"));
+    }
+    let study_id = value
+        .str_field("study_id")
+        .and_then(ContentHash::from_hex)
+        .ok_or_else(|| fail("cli-study-receipt", "missing study identity"))?;
+    let ordinal = integer(&value, "iterations_completed")?;
+    let producer = ledger
+        .artifact_output_seal(&hash)?
+        .ok_or_else(|| fail("cli-study-receipt", "unsealed study receipt"))?;
+    let op = ledger
+        .op(producer)?
+        .ok_or_else(|| fail("cli-study-receipt", "missing producing operation"))?;
+    if op.session.as_deref() != Some(study_id.as_bytes().as_slice())
+        || op.ir != ir(study_id, ordinal)
+        || op.outcome.as_deref() != Some("ok")
+        || !ledger.edge_exists(producer, &hash, EdgeRole::Out)?
+    {
+        return Err(fail(
+            "cli-study-receipt",
+            "receipt is not bound to the completed study operation",
+        ));
+    }
+    for (key, kind, role) in [
+        ("source", "study-source", EdgeRole::In),
+        ("iterations", "study-iterations", EdgeRole::Out),
+        ("design", "study-design", EdgeRole::Out),
+        ("report_html", "study-report-html", EdgeRole::Out),
+        ("report_json", "study-report-json", EdgeRole::Out),
+        ("package", "study-package", EdgeRole::Out),
+    ] {
+        let h = value
+            .str_field(key)
+            .and_then(ContentHash::from_hex)
+            .ok_or_else(|| fail("cli-study-receipt", format!("missing {key}")))?;
+        if !ledger.edge_exists(producer, &h, role)? {
+            return Err(fail("cli-study-receipt", format!("missing {key} lineage")));
+        }
+        artifact(ledger, h, kind)?;
+    }
+    Ok(Loaded { hash, value })
+}
+
+pub(crate) fn resume_path(
+    pointer: &str,
+    path: &Path,
+    override_text: Option<&str>,
+    mode: OutputMode,
+) -> CommandOutput {
+    let result = (|| {
+        let cap = budget(override_text)?;
+        if !path.is_file() {
+            return Err(fail(
+                "cli-study-ledger-missing",
+                "resume requires an existing ledger",
+            ));
+        }
+        let ledger = Ledger::open(
+            path.to_str()
+                .ok_or_else(|| fail("cli-study-ledger-path", "ledger path is not UTF-8"))?,
+        )?;
+        let old = load(&ledger, pointer)?;
+        let source = linked(&ledger, &old.value, "source", "study-source")?;
+        let text =
+            std::str::from_utf8(&source).map_err(|e| fail("cli-study-receipt", e.to_string()))?;
+        let a = admit(text, false)?;
+        let start = Instant::now();
+        drive(
+            &a,
+            &ledger,
+            cap,
+            &CancelGate::new(),
+            &|| start.elapsed().as_secs_f64(),
+            Some(&old),
+        )
+    })();
+    match result {
+        Ok(out) => render_output(out, mode),
+        Err(e) => failure_output("study", mode, e),
+    }
+}
+
+pub(crate) fn export(
+    command: &'static str,
+    pointer: &str,
+    path: Option<&Path>,
+    mode: OutputMode,
+) -> CommandOutput {
+    let result = (|| -> Result<String> {
+        let path = path.filter(|p| p.is_file()).ok_or_else(|| {
+            fail(
+                "cli-study-ledger-missing",
+                "study export requires an existing ledger operand",
+            )
+        })?;
+        let ledger = Ledger::open(
+            path.to_str()
+                .ok_or_else(|| fail("cli-study-ledger-path", "ledger path is not UTF-8"))?,
+        )?;
+        let loaded = load(&ledger, pointer)?;
+        let dir = path.parent().unwrap_or_else(|| Path::new("."));
+        let mut paths = String::new();
+        let fields: &[(&str, &str, &str)] = if command == "package" {
+            &[("package", "study-package", "fspkg")]
+        } else {
+            &[
+                ("report_html", "study-report-html", "html"),
+                ("report_json", "study-report-json", "json"),
+            ]
+        };
+        for &(key, kind, extension) in fields {
+            let bytes = linked(&ledger, &loaded.value, key, kind)?;
+            if key == "package" {
+                let text = std::str::from_utf8(&bytes)
+                    .map_err(|e| fail("cli-study-package", e.to_string()))?;
+                let package = EvidencePackage::from_json(text)
+                    .map_err(|e| fail("cli-study-package", e.to_string()))?;
+                if !fs_checker::check(&package).passed() {
+                    return Err(fail(
+                        "cli-study-package",
+                        "retained package failed structural verification",
+                    ));
+                }
+            }
+            let dest = dir.join(format!("{pointer}.{extension}"));
+            crate::report::write_retained(&dest, &bytes)
+                .map_err(|e| fail("cli-study-export", e))?;
+            let _ = write!(paths, ",{key:?}:{}", quoted(&dest.to_string_lossy()));
+        }
+        Ok(format!(
+            "{{\"command\":{command:?},\"status\":\"ok\",\"run\":{pointer:?},\"study_status\":{},\"authority\":\"projection-of-retained-estimates\",\"verification\":\"sealed-evidence\"{}{paths}}}\n",
+            quoted(loaded.value.str_field("status").unwrap_or("unknown")),
+            if command == "package" {
+                ",\"checker\":\"pass\",\"checker_authority\":\"structural-integrity-only\""
+            } else {
+                ""
+            }
+        ))
+    })();
+    match result {
+        Ok(mut stdout) => {
+            if matches!(mode, OutputMode::Text) {
+                let value = JsonValue::parse(&stdout).expect("generated export JSON");
+                stdout = format!(
+                    "command={command}\nstatus=ok\nrun={pointer}\nauthority=projection-of-retained-estimates\n"
+                );
+                for field in [
+                    "study_status",
+                    "report_html",
+                    "report_json",
+                    "package",
+                    "checker",
+                    "checker_authority",
+                ] {
+                    if let Some(value) = value.str_field(field) {
+                        let _ = writeln!(stdout, "{field}={}", crate::escape_text(value));
+                    }
+                }
+            }
+            CommandOutput {
+                exit_code: exit::SUCCESS,
+                stdout,
+                stderr: String::new(),
+            }
+        }
+        Err(e) => failure_output(command, mode, e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const FIXTURE: &str = include_str!("../../../examples/marquee/thermal-2d.fsim");
+    fn short_source() -> String {
+        FIXTURE
+            .replace(":steps 8", ":steps 2")
+            .replace(":mesh-level 4", ":mesh-level 3")
+    }
+    fn scratch() -> std::path::PathBuf {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "fs-cli-study-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&path).expect("scratch directory");
+        path
+    }
+    fn value(out: &CommandOutput) -> JsonValue {
+        JsonValue::parse(&out.stdout)
+            .unwrap_or_else(|e| panic!("{e}: {} / {}", out.stdout, out.stderr))
+    }
+    fn cli(args: &[&str]) -> CommandOutput {
+        crate::run(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn g0_executable_study_refuses_lost_declarations_and_wrong_units() {
+        let admitted = admit(FIXTURE, false).expect("complete thermal declaration");
+        let json = fs_project::study::print_study_json(&admitted.spec);
+        assert_eq!(admit(&json, true).expect("JSON study").id, admitted.id);
+        for (from, to, code) in [
+            (":schema 1", ":schema 2", "cli-study-version"),
+            (
+                ":unit \"1\"",
+                ":unit \"J\"",
+                "study-objective-dimension-mismatch",
+            ),
+            (
+                ":bounds ((0 0) (1 1))",
+                ":bounds ((0 0) (2 1))",
+                "study-noncanonical-declaration",
+            ),
+            (
+                ":memory 1073741824 B",
+                ":memory -1 B",
+                "study-noncanonical-declaration",
+            ),
+            (
+                ":wall-time 600 s",
+                ":wall-time 600 kg",
+                "study-noncanonical-declaration",
+            ),
+            (
+                ":storage \"normalized\"",
+                ":storage \"SI\"",
+                "cli-study-model",
+            ),
+        ] {
+            let bad = FIXTURE.replace(from, to);
+            let e = match admit(&bad, false) {
+                Err(e) => e,
+                Ok(_) => panic!("admitted {to}"),
+            };
+            assert_eq!(e.code, code, "{}", e.message);
+        }
+        let bad = FIXTURE.replace("(0.7 0.5)", "(0.31 0.5)");
+        assert!(matches!(
+            admit(&bad, false),
+            Err(Failure {
+                code: "cli-study-geometry",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn g3_cli_budget_resume_report_and_package_use_real_iterates() {
+        let dir = scratch();
+        let source = dir.join("study.fsim");
+        let db = dir.join("ledger.db");
+        std::fs::write(&source, short_source()).expect("fixture");
+        let partial = cli(&[
+            "--json",
+            "study",
+            source.to_str().unwrap(),
+            db.to_str().unwrap(),
+            "--budget",
+            "1",
+        ]);
+        assert_eq!(partial.exit_code, exit::BUDGET, "{}", partial.stderr);
+        let first = value(&partial);
+        assert_eq!(
+            first
+                .path(&["receipt", "iterations_completed"])
+                .and_then(JsonValue::as_f64),
+            Some(1.0)
+        );
+        let pointer = first.str_field("run_id").unwrap();
+        let resumed = cli(&["--json", "study", "--resume", pointer, db.to_str().unwrap()]);
+        assert_eq!(resumed.exit_code, exit::SUCCESS, "{}", resumed.stderr);
+        let last = value(&resumed);
+        let pointer = last.str_field("run_id").unwrap();
+        let report = cli(&["--json", "report", pointer, db.to_str().unwrap()]);
+        assert_eq!(report.exit_code, exit::SUCCESS, "{}", report.stderr);
+        let report_json = value(&report);
+        let summary =
+            std::fs::read_to_string(report_json.str_field("report_json").unwrap()).unwrap();
+        let summary = JsonValue::parse(&summary).unwrap();
+        assert!(summary.f64_field("final_compliance").unwrap() > 0.0);
+        assert!((summary.f64_field("final_area").unwrap() - 0.853).abs() < 1e-12);
+        let html_path = report_json.str_field("report_html").unwrap();
+        let html = std::fs::read_to_string(html_path).unwrap();
+        assert!(html.contains("<polyline") && html.contains("DWR estimate"));
+        let exported = cli(&["--json", "package", pointer, db.to_str().unwrap()]);
+        assert_eq!(exported.exit_code, exit::SUCCESS, "{}", exported.stderr);
+        let exported_json = value(&exported);
+        let bytes = std::fs::read_to_string(exported_json.str_field("package").unwrap()).unwrap();
+        let package = EvidencePackage::from_json(&bytes).unwrap();
+        assert!(fs_checker::check(&package).passed());
+        assert_eq!(package.declared_claims_unverified().len(), 1);
+        let full_db = dir.join("full.db");
+        let full = cli(&[
+            "--json",
+            "study",
+            source.to_str().unwrap(),
+            full_db.to_str().unwrap(),
+        ]);
+        assert_eq!(full.exit_code, exit::SUCCESS, "{}", full.stderr);
+        assert_eq!(
+            value(&full).path(&["receipt", "trace_hash"]),
+            last.path(&["receipt", "trace_hash"])
+        );
+        let ledger = Ledger::open(db.to_str().unwrap()).unwrap();
+        assert!(ledger.lint().unwrap().is_clean());
+        std::fs::write(html_path, "user-owned conflicting bytes").unwrap();
+        let conflict = cli(&["--json", "report", pointer, db.to_str().unwrap()]);
+        assert_eq!(conflict.exit_code, exit::REFUSED);
+        assert_eq!(
+            std::fs::read_to_string(html_path).unwrap(),
+            "user-owned conflicting bytes"
         );
     }
 
-    out.push_str("  </tbody>\n</table>");
-    out
+    #[test]
+    fn g4_cancel_budget_and_failed_transaction_do_not_publish_success() {
+        let a = admit(&short_source(), false).unwrap();
+        let ledger = Ledger::open(":memory:").unwrap();
+        let gate = CancelGate::new_clock_free();
+        gate.request();
+        assert_eq!(
+            drive(&a, &ledger, None, &gate, &|| 0.0, None)
+                .unwrap_err()
+                .exit,
+            exit::CANCELLED
+        );
+        assert_eq!(ledger.table_count("ops").unwrap(), 0);
+        let gate = CancelGate::new_clock_free();
+        let ticks = Cell::new(0);
+        let clock = || {
+            let n = ticks.get();
+            ticks.set(n + 1);
+            if n == 1 {
+                gate.request();
+            }
+            n as f64
+        };
+        let cancelled = drive(&a, &ledger, None, &gate, &clock, None).unwrap();
+        assert_eq!(cancelled.status, "cancelled");
+        assert_eq!(
+            integer(
+                &load(&ledger, &cancelled.pointer).unwrap().value,
+                "iterations_completed"
+            )
+            .unwrap(),
+            1
+        );
+        let exhausted = drive(
+            &a,
+            &ledger,
+            None,
+            &CancelGate::new_clock_free(),
+            &|| 601.0,
+            None,
+        )
+        .unwrap();
+        assert_eq!(exhausted.status, "budget-exhausted");
+        let checkpoint = load(&ledger, &cancelled.pointer).unwrap();
+        let before_replay = ledger.table_count("ops").unwrap();
+        let e = drive(
+            &a,
+            &ledger,
+            None,
+            &CancelGate::new_clock_free(),
+            &|| 601.0,
+            Some(&checkpoint),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, "cli-study-resume-budget");
+        assert_eq!(e.exit, exit::BUDGET);
+        assert!(e.message.contains(&cancelled.pointer));
+        assert_eq!(ledger.table_count("ops").unwrap(), before_replay);
+        let before = ledger.table_count("ops").unwrap();
+        ledger.begin().unwrap();
+        let e = drive(
+            &a,
+            &ledger,
+            None,
+            &CancelGate::new_clock_free(),
+            &|| 0.0,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(e.code, "cli-study-transaction");
+        assert_eq!(ledger.table_count("ops").unwrap(), before);
+        ledger.rollback().unwrap();
+        let bad = scratch().join("missing-parent").join("ledger.db");
+        let source = scratch().join("study.fsim");
+        std::fs::write(&source, short_source()).unwrap();
+        let refused = cli(&[
+            "--json",
+            "study",
+            source.to_str().unwrap(),
+            bad.to_str().unwrap(),
+        ]);
+        assert_ne!(refused.exit_code, exit::SUCCESS);
+    }
 }

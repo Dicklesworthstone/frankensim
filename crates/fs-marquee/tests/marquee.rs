@@ -72,7 +72,7 @@ fn marquee_runner_rejects_invalid_inputs_before_solver() {
         r_max: 0.2,
     };
 
-    assert!(std::panic::catch_unwind(|| run_study(design, &config)).is_err());
+    assert!(run_study(design, &config).is_err());
 }
 
 #[cfg(feature = "marquee")]

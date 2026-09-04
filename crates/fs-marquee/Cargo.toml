@@ -27,6 +27,8 @@ fs-geom = { path = "../fs-geom" }
 fs-render = { path = "../fs-render", features = ["chart-backends"] }
 fs-rep-frep = { path = "../fs-rep-frep" }
 fs-solid = { path = "../fs-solid" }
+fs-solver = { path = "../fs-solver" }
+fs-sparse = { path = "../fs-sparse" }
 
 [features]
 # The smoke-tier runner is the shipped P2 admission path.  Consumers may opt

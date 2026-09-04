@@ -30,6 +30,50 @@ const MAX_RADIUS_RATIO: f64 = 1_048_576.0;
 /// Largest permitted material-area residual after radius projection.
 pub const AREA_PROJECTION_TOLERANCE: f64 = 1e-12;
 
+/// Declared affine heat source on the normalized unit plate:
+/// `f(x,y) = constant + x_slope*x + y_slope*y`.
+/// The same source weights compliance and enters the state/adjoint solve.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ThermalSource {
+    /// Spatially uniform part.
+    pub constant: f64,
+    /// Source change across the unit x extent.
+    pub x_slope: f64,
+    /// Source change across the unit y extent.
+    pub y_slope: f64,
+}
+
+impl ThermalSource {
+    /// The original normalized unit-source problem.
+    pub const UNIT: Self = Self {
+        constant: 1.0,
+        x_slope: 0.0,
+        y_slope: 0.0,
+    };
+
+    fn value(self, x: f64, y: f64) -> f64 {
+        self.constant + self.x_slope * x + self.y_slope * y
+    }
+
+    fn validate(self) -> Result<(), fs_cutfem::CutFemError> {
+        let corners = [
+            self.value(0.0, 0.0),
+            self.value(1.0, 0.0),
+            self.value(0.0, 1.0),
+            self.value(1.0, 1.0),
+        ];
+        if [self.constant, self.x_slope, self.y_slope]
+            .iter()
+            .any(|v| !v.is_finite())
+            || corners.iter().any(|v| !v.is_finite() || *v < 0.0)
+            || corners.iter().all(|v| *v == 0.0)
+        {
+            return Err(fs_cutfem::CutFemError::InvalidFemInput { what: "affine thermal source must be finite, nonnegative on the unit plate and not identically zero".into() });
+        }
+        Ok(())
+    }
+}
+
 /// The design: a unit plate minus k circular cooling holes
 /// (φ < 0 inside the material). EXACT geometry: circles.
 #[derive(Debug, Clone, PartialEq)]
@@ -62,17 +106,28 @@ impl PlateWithHoles {
     }
 }
 
-fn validate_study_input(design: &PlateWithHoles, config: &StudyConfig) {
-    assert!(
+fn validate_study_input(
+    design: &PlateWithHoles,
+    config: &StudyConfig,
+) -> Result<(), fs_cutfem::CutFemError> {
+    macro_rules! require {
+        ($condition:expr, $message:literal) => {
+            if !$condition {
+                return Err(fs_cutfem::CutFemError::InvalidFemInput {
+                    what: $message.to_string(),
+                });
+            }
+        };
+    }
+    require!(
         !design.radii.is_empty(),
         "marquee study needs at least one hole"
     );
-    assert_eq!(
-        design.centers.len(),
-        design.radii.len(),
+    require!(
+        design.centers.len() == design.radii.len(),
         "hole centers and radii must have matching lengths"
     );
-    assert!(
+    require!(
         design
             .centers
             .iter()
@@ -80,19 +135,19 @@ fn validate_study_input(design: &PlateWithHoles, config: &StudyConfig) {
             .all(|v| v.is_finite() && *v >= 0.0 && *v <= 1.0),
         "hole centers must be finite coordinates in the unit plate"
     );
-    assert!(
+    require!(
         design.radii.iter().all(|r| r.is_finite() && *r > 0.0),
         "hole radii must be positive and finite"
     );
-    assert!(
+    require!(
         config.step_size.is_finite() && config.step_size >= 0.0,
         "step size must be finite and nonnegative"
     );
-    assert!(
+    require!(
         config.area_target.is_finite() && config.area_target > 0.0 && config.area_target < 1.0,
         "area target must be finite and inside (0, 1)"
     );
-    assert!(
+    require!(
         config.r_min.is_finite()
             && config.r_max.is_finite()
             && config.r_min > 0.0
@@ -100,19 +155,27 @@ fn validate_study_input(design: &PlateWithHoles, config: &StudyConfig) {
         "radius bounds must be finite and satisfy 0 < r_min <= r_max"
     );
     let ratio = config.r_max / config.r_min;
-    assert!(
+    require!(
         ratio.is_finite() && ratio <= MAX_RADIUS_RATIO,
-        "radius ratio must be finite and no larger than {MAX_RADIUS_RATIO} for deterministic projection"
+        "radius ratio exceeds the deterministic projection envelope"
     );
-    validate_hole_geometry(design);
+    require!(
+        hole_geometry_is_valid(design),
+        "holes must be strictly interior and pairwise disjoint"
+    );
     #[allow(clippy::cast_precision_loss)]
     let count = design.radii.len() as f64;
     let target_hole = (1.0 - config.area_target) / std::f64::consts::PI;
-    assert!(
+    require!(
         target_hole >= count * config.r_min * config.r_min
             && target_hole <= count * config.r_max * config.r_max,
         "area target is infeasible for the number of holes and radius bounds"
     );
+    require!(
+        config.level > 0 && config.level <= 12,
+        "mesh level must lie in 1..=12"
+    );
+    Ok(())
 }
 
 /// Require the disk layout assumed by the summed-disc area and CutSdf model.
@@ -144,13 +207,6 @@ fn hole_geometry_is_valid(design: &PlateWithHoles) -> bool {
         }
     }
     true
-}
-
-fn validate_hole_geometry(design: &PlateWithHoles) {
-    assert!(
-        hole_geometry_is_valid(design),
-        "holes must be strictly interior and pairwise disjoint"
-    );
 }
 
 /// Refuse a projected layout whose fixed-ratio projection is not a valid disk
@@ -414,9 +470,19 @@ pub fn solve_and_grade(
     design: &PlateWithHoles,
     level: u32,
 ) -> Result<(f64, Vec<f64>, [f64; 3], usize, usize), fs_cutfem::CutFemError> {
+    solve_and_grade_with_source(design, level, ThermalSource::UNIT)
+}
+
+/// Solve and grade the declared affine-source scalar problem.
+pub fn solve_and_grade_with_source(
+    design: &PlateWithHoles,
+    level: u32,
+    source: ThermalSource,
+) -> Result<(f64, Vec<f64>, [f64; 3], usize, usize), fs_cutfem::CutFemError> {
+    source.validate()?;
     let grid = Quadtree::uniform(level);
     let params = fem_params(level);
-    let f = |_x: f64, _y: f64| 1.0;
+    let f = |x: f64, y: f64| source.value(x, y);
     let g = |_x: f64, _y: f64| 0.0;
     let space = Space::build(&grid, design, params)?;
     let sol = space.solve(&f, &g)?;
@@ -427,11 +493,11 @@ pub fn solve_and_grade(
     // DWR discretization estimate for THIS goal (estimated color: DWR
     // constants are not guaranteed — the lmp4.4 rule).
     let dwr = estimate(&grid, design, params, &f, &g, &goal)?;
-    // Self-adjoint shape gradient: dJ/dr_k = ∮_{Γ_k} (∂u/∂n)² dΓ.
+    // Self-adjoint shape gradient: dJ/dr_k = −∮_{Γ_k} (∂u/∂n)² dΓ.
     // For compliance J(u) = ∫ f·u over Ω with homogeneous Dirichlet data
     // on the hole boundaries Γ_k, enlarging a hole removes material from Ω
     // where u > 0, so the boundary moves opposite to the outward domain
-    // normal n_Ω. The shape derivative enters positive (mq-004).
+    // normal n_Ω. Thus the radius derivative is negative (mq-004).
     // Midpoint quadrature.
     let mut grads = Vec::with_capacity(design.radii.len());
     let samples = 64usize;
@@ -474,6 +540,11 @@ pub fn solve_and_grade(
                     .to_string(),
             })?;
     let cert = [0.0, dwr.eta_abs, euclidean_rel_residual * j.abs().max(1.0)];
+    if !j.is_finite() || grads.iter().chain(cert.iter()).any(|v| !v.is_finite()) {
+        return Err(fs_cutfem::CutFemError::InvalidFemInput {
+            what: "thermal solve produced non-finite objective, gradient or error estimate".into(),
+        });
+    }
     Ok((j, grads, cert, sol.iters, space.cut_rules().len()))
 }
 
@@ -492,6 +563,28 @@ pub fn armijo_next_design(
     current_cert: [f64; 3],
     current_solver_iters: usize,
     current_cut_cell_count: usize,
+) -> Result<(PlateWithHoles, f64, f64, usize, [f64; 3], usize, usize), fs_cutfem::CutFemError> {
+    armijo_with_source(
+        design,
+        config,
+        current_objective,
+        gradient,
+        current_cert,
+        current_solver_iters,
+        current_cut_cell_count,
+        ThermalSource::UNIT,
+    )
+}
+
+fn armijo_with_source(
+    design: &PlateWithHoles,
+    config: &StudyConfig,
+    current_objective: f64,
+    gradient: &[f64],
+    current_cert: [f64; 3],
+    current_solver_iters: usize,
+    current_cut_cell_count: usize,
+    source: ThermalSource,
 ) -> Result<(PlateWithHoles, f64, f64, usize, [f64; 3], usize, usize), fs_cutfem::CutFemError> {
     if config.step_size == 0.0 {
         return Ok((
@@ -535,7 +628,7 @@ pub fn armijo_next_design(
             candidate_cert,
             candidate_solver_iters,
             candidate_cut_cell_count,
-        ) = solve_and_grade(&candidate, config.level)?;
+        ) = solve_and_grade_with_source(&candidate, config.level, source)?;
         if candidate_objective
             <= current_objective + ARMIJO_SUFFICIENT_DECREASE * directional_derivative
         {
@@ -590,15 +683,73 @@ fn certificate_color(cert: [f64; 3]) -> Color {
 /// # Errors
 /// CutFEM build/solve teaching errors.
 pub fn run_study(
-    mut design: PlateWithHoles,
+    design: PlateWithHoles,
     config: &StudyConfig,
 ) -> Result<StudyReport, fs_cutfem::CutFemError> {
-    validate_study_input(&design, config);
-    project_radii_to_area(&mut design.radii, config);
-    ensure_projected_hole_geometry(&design)?;
-    let mut iterations = Vec::with_capacity(config.steps);
-    for iter in 0..config.steps {
-        let (j, grads, cert, iters, cut_cell_count) = solve_and_grade(&design, config.level)?;
+    let mut runner = StudyRunner::new(design, config.clone())?;
+    while runner.advance()? {}
+    Ok(runner.report())
+}
+
+/// Incremental thermal radius optimizer. An unsuccessful step leaves the
+/// accepted design and trace unchanged. Callers can meter, persist, or stop
+/// between steps; a step includes at most nine bounded line-search solves.
+#[derive(Debug, Clone)]
+pub struct StudyRunner {
+    design: PlateWithHoles,
+    config: StudyConfig,
+    iterations: Vec<IterRecord>,
+    source: ThermalSource,
+}
+
+impl StudyRunner {
+    /// Admit the geometry and project it onto the requested area before any solve.
+    pub fn new(
+        design: PlateWithHoles,
+        config: StudyConfig,
+    ) -> Result<Self, fs_cutfem::CutFemError> {
+        Self::new_with_source(design, config, ThermalSource::UNIT)
+    }
+
+    /// Admit a study with an explicit spatial heat load. Every line-search
+    /// trial uses this same load; it is also bound into the replay identity.
+    pub fn new_with_source(
+        mut design: PlateWithHoles,
+        config: StudyConfig,
+        source: ThermalSource,
+    ) -> Result<Self, fs_cutfem::CutFemError> {
+        source.validate()?;
+        validate_study_input(&design, &config)?;
+        project_radii_to_area(&mut design.radii, &config);
+        ensure_projected_hole_geometry(&design)?;
+        Ok(Self {
+            design,
+            config,
+            iterations: Vec::new(),
+            source,
+        })
+    }
+
+    /// The currently accepted geometry, including initial area projection.
+    pub fn design(&self) -> &PlateWithHoles {
+        &self.design
+    }
+
+    /// Accepted transition records, in execution order.
+    pub fn iterations(&self) -> &[IterRecord] {
+        &self.iterations
+    }
+
+    /// Advance once, or return false once the declared iteration count is reached.
+    pub fn advance(&mut self) -> Result<bool, fs_cutfem::CutFemError> {
+        let iter = self.iterations.len();
+        if iter == self.config.steps {
+            return Ok(false);
+        }
+        let design = &self.design;
+        let config = &self.config;
+        let (j, grads, cert, iters, cut_cell_count) =
+            solve_and_grade_with_source(design, config.level, self.source)?;
         let (
             next_design,
             accepted_compliance,
@@ -607,7 +758,16 @@ pub fn run_study(
             accepted_cert,
             accepted_solver_iters,
             accepted_cut_cell_count,
-        ) = armijo_next_design(&design, config, j, &grads, cert, iters, cut_cell_count)?;
+        ) = armijo_with_source(
+            design,
+            config,
+            j,
+            &grads,
+            cert,
+            iters,
+            cut_cell_count,
+            self.source,
+        )?;
         let color = certificate_color(cert);
         let accepted_color = certificate_color(accepted_cert);
         let gradient_norm = grads
@@ -615,7 +775,7 @@ pub fn run_study(
             .map(|gradient| gradient * gradient)
             .sum::<f64>()
             .sqrt();
-        iterations.push(IterRecord {
+        self.iterations.push(IterRecord {
             iter,
             compliance: j,
             area: design.area(),
@@ -641,14 +801,27 @@ pub fn run_study(
             accepted_step,
             backtracks,
         });
-        design = next_design;
+        self.design = next_design;
+        Ok(true)
     }
-    let trace_hash = canonical_trace_hash(&iterations, &design, config);
-    Ok(StudyReport {
-        iterations,
-        design,
-        trace_hash,
-    })
+
+    /// Snapshot the exact accepted trace. No solve or area re-projection occurs.
+    pub fn report(&self) -> StudyReport {
+        let mut trace_hash = canonical_trace_hash(&self.iterations, &self.design, &self.config);
+        if self.source != ThermalSource::UNIT {
+            let mut bytes = b"fs-marquee-affine-source-trace-v1\0".to_vec();
+            bytes.extend_from_slice(trace_hash.as_bytes());
+            append_f64(&mut bytes, self.source.constant);
+            append_f64(&mut bytes, self.source.x_slope);
+            append_f64(&mut bytes, self.source.y_slope);
+            trace_hash = hash_bytes(&bytes).to_hex();
+        }
+        StudyReport {
+            trace_hash,
+            iterations: self.iterations.clone(),
+            design: self.design.clone(),
+        }
+    }
 }
 
 fn append_usize(bytes: &mut Vec<u8>, value: usize) {

@@ -346,7 +346,10 @@ impl StudySpec {
                 if physics.mesh_level < 1 || physics.mesh_level > 12 {
                     violations.push(violation(
                         "study-invalid-mesh-level",
-                        format!("physics mesh level {} is outside [1, 12]", physics.mesh_level),
+                        format!(
+                            "physics mesh level {} is outside [1, 12]",
+                            physics.mesh_level
+                        ),
                         "choose a background grid refinement level between 1 and 12",
                     ));
                 }
@@ -364,11 +367,23 @@ impl StudySpec {
             }
             Some(scenario) => {
                 let valid_boundaries = [
-                    "left", "right", "top", "bottom",
-                    "boundary/left", "boundary/right", "boundary/top", "boundary/bottom",
+                    "left",
+                    "right",
+                    "top",
+                    "bottom",
+                    "boundary/left",
+                    "boundary/right",
+                    "boundary/top",
+                    "boundary/bottom",
                 ];
                 let load_region = scenario.load_region.trim().to_ascii_lowercase();
-                if !valid_boundaries.contains(&load_region.as_str()) {
+                let normalized_thermal = self
+                    .physics
+                    .as_ref()
+                    .is_some_and(|p| p.physics_type == "thermal-poisson-2d-normalized");
+                if !(valid_boundaries.contains(&load_region.as_str())
+                    || normalized_thermal && load_region == "domain-unit-source")
+                {
                     violations.push(violation(
                         "study-load-non-boundary",
                         format!(
@@ -392,20 +407,33 @@ impl StudySpec {
             }
             Some(objective) => {
                 // Compliance functional J(u) = ∫ f·u represents energy/work with dimensions [m^2 kg s^-2].
-                let energy_dims = Dims([2, 1, -2, 0, 0, 0]);
-                let test_qty_str = format!("1.0 {}", objective.unit.trim());
+                let normalized_thermal = self
+                    .physics
+                    .as_ref()
+                    .is_some_and(|p| p.physics_type == "thermal-poisson-2d-normalized");
+                let energy_dims = if normalized_thermal {
+                    Dims::NONE
+                } else {
+                    Dims([2, 1, -2, 0, 0, 0])
+                };
+                let test_qty_str = if normalized_thermal && objective.unit == "1" {
+                    "1.0".to_string()
+                } else {
+                    format!("1.0 {}", objective.unit.trim())
+                };
                 match fs_qty::parse::parse_qty(&test_qty_str) {
                     Ok(qty) => {
                         if qty.dims != energy_dims {
                             violations.push(violation(
                                 "study-objective-dimension-mismatch",
                                 format!(
-                                    "objective `{}` requires energy dimensions [m^2 kg s^-2] (unit J or N*m); got `{}` with dimensions {}",
+                                    "objective `{}` requires dimensions {}; got `{}` with dimensions {}",
                                     objective.objective_type,
+                                    energy_dims.unit_string(),
                                     objective.unit,
                                     qty.dims.unit_string()
                                 ),
-                                "declare the compliance objective in energy units such as `J` or `N*m`",
+                                "declare normalized thermal compliance in unit `1`, or elasticity compliance in `J`",
                             ));
                         }
                     }
@@ -433,7 +461,10 @@ impl StudySpec {
                 ));
             }
             Some(constraints) => {
-                if constraints.volume_fraction <= 0.0 || constraints.volume_fraction >= 1.0 || !constraints.volume_fraction.is_finite() {
+                if constraints.volume_fraction <= 0.0
+                    || constraints.volume_fraction >= 1.0
+                    || !constraints.volume_fraction.is_finite()
+                {
                     violations.push(violation(
                         "study-volume-fraction-out-of-bounds",
                         format!(
@@ -459,14 +490,24 @@ impl StudySpec {
                 if opt.step_size <= 0.0 || !opt.step_size.is_finite() {
                     violations.push(violation(
                         "study-invalid-step-size",
-                        format!("optimizer step size {} is not positive finite", opt.step_size),
+                        format!(
+                            "optimizer step size {} is not positive finite",
+                            opt.step_size
+                        ),
                         "set a positive finite gradient step size",
                     ));
                 }
-                if opt.r_min <= 0.0 || opt.r_min > opt.r_max || !opt.r_min.is_finite() || !opt.r_max.is_finite() {
+                if opt.r_min <= 0.0
+                    || opt.r_min > opt.r_max
+                    || !opt.r_min.is_finite()
+                    || !opt.r_max.is_finite()
+                {
                     violations.push(violation(
                         "study-invalid-radius-bounds",
-                        format!("radius bounds [{}, {}] violate 0 < r_min <= r_max", opt.r_min, opt.r_max),
+                        format!(
+                            "radius bounds [{}, {}] violate 0 < r_min <= r_max",
+                            opt.r_min, opt.r_max
+                        ),
                         "set valid positive radius bounds with r_min <= r_max",
                     ));
                 }
@@ -496,16 +537,24 @@ pub fn print_study_sexpr(study: &StudySpec) -> String {
         let _ = writeln!(out, "    :created {:?}", m.created);
         let _ = writeln!(out, "    :context-of-use {:?}", m.context_of_use);
         let _ = writeln!(out, "    :intended-decision {:?}", m.intended_decision);
-        let _ = writeln!(out, "    :decision-gate {}", match m.decision_gate {
-            DecisionGate::ScopingEstimate => "scoping-estimate",
-            DecisionGate::DesignSelection => "design-selection",
-            DecisionGate::ComplianceSignoff => "compliance-signoff",
-        });
-        let _ = writeln!(out, "    :consequence {})", match m.consequence {
-            ConsequenceClass::Advisory => "advisory",
-            ConsequenceClass::Reliability => "reliability",
-            ConsequenceClass::SafetyCritical => "safety-critical",
-        });
+        let _ = writeln!(
+            out,
+            "    :decision-gate {}",
+            match m.decision_gate {
+                DecisionGate::ScopingEstimate => "scoping-estimate",
+                DecisionGate::DesignSelection => "design-selection",
+                DecisionGate::ComplianceSignoff => "compliance-signoff",
+            }
+        );
+        let _ = writeln!(
+            out,
+            "    :consequence {})",
+            match m.consequence {
+                ConsequenceClass::Advisory => "advisory",
+                ConsequenceClass::Reliability => "reliability",
+                ConsequenceClass::SafetyCritical => "safety-critical",
+            }
+        );
     }
 
     if let Some(v) = &study.versions {
@@ -549,10 +598,18 @@ pub fn print_study_sexpr(study: &StudySpec) -> String {
     if let Some(d) = &study.domain {
         let _ = writeln!(out, "  (domain");
         let _ = writeln!(out, "    :type {}", d.domain_type);
-        let _ = writeln!(out, "    :bounds (({} {}) ({} {}))", d.bounds.0[0], d.bounds.0[1], d.bounds.1[0], d.bounds.1[1]);
+        let _ = writeln!(
+            out,
+            "    :bounds (({} {}) ({} {}))",
+            d.bounds.0[0], d.bounds.0[1], d.bounds.1[0], d.bounds.1[1]
+        );
         let _ = writeln!(out, "    :initial-holes (");
         for hole in &d.initial_holes {
-            let _ = writeln!(out, "      (hole :center ({} {}) :radius {})", hole.center[0], hole.center[1], hole.radius);
+            let _ = writeln!(
+                out,
+                "      (hole :center ({} {}) :radius {})",
+                hole.center[0], hole.center[1], hole.radius
+            );
         }
         let _ = writeln!(out, "    ))");
     }
@@ -637,6 +694,36 @@ pub fn parse_study_json(source: &str) -> Result<StudySpec, crate::ProjectError> 
     parse_study_node(&node)
 }
 
+/// Parse an executable study without silently dropping fields or applying
+/// undeclared defaults. Whitespace and comments are immaterial; the declared
+/// AST must equal the complete canonical spelling of the recognized study.
+/// The legacy permissive readers remain useful for inspecting draft studies.
+pub fn parse_study_strict(source: &str, json: bool) -> Result<StudySpec, crate::ProjectError> {
+    let parse_error = |e: fs_ir::IrError| crate::ProjectError {
+        code: "study-strict-syntax",
+        detail: e.to_string(),
+        hint: "use the complete canonical study spelling".to_string(),
+    };
+    let node = if json {
+        fs_ir::json::parse(source)
+    } else {
+        fs_ir::sexpr::parse(source)
+    }
+    .map_err(parse_error)?;
+    let spec = parse_study_node(&node)?;
+    let canonical = fs_ir::sexpr::parse(&print_study_sexpr(&spec)).map_err(parse_error)?;
+    if fs_ir::sexpr::print(&node).map_err(parse_error)?
+        != fs_ir::sexpr::print(&canonical).map_err(parse_error)?
+    {
+        return Err(crate::ProjectError {
+            code: "study-noncanonical-declaration",
+            detail: "study contains an unsupported, defaulted, repeated, reordered or noncanonical field; execution would not preserve the complete declaration".to_string(),
+            hint: "use examples/marquee/thermal-2d.fsim; spell every execution field explicitly and retain its order".to_string(),
+        });
+    }
+    Ok(spec)
+}
+
 fn parse_study_node(root: &Node) -> Result<StudySpec, crate::ProjectError> {
     let NodeKind::List(items) = &root.kind else {
         return Err(crate::ProjectError {
@@ -680,7 +767,9 @@ fn parse_study_node(root: &Node) -> Result<StudySpec, crate::ProjectError> {
     if version != STUDY_FSIM_VERSION {
         return Err(crate::ProjectError {
             code: "study-unsupported-version",
-            detail: format!("study declares version {version}; this reader admits only {STUDY_FSIM_VERSION}"),
+            detail: format!(
+                "study declares version {version}; this reader admits only {STUDY_FSIM_VERSION}"
+            ),
             hint: "use version 1".to_string(),
         });
     }
@@ -716,7 +805,9 @@ fn parse_study_node(root: &Node) -> Result<StudySpec, crate::ProjectError> {
                                 ("name", NodeKind::Str(s)) => name = s.clone(),
                                 ("created", NodeKind::Str(s)) => created = s.clone(),
                                 ("context-of-use", NodeKind::Str(s)) => context_of_use = s.clone(),
-                                ("intended-decision", NodeKind::Str(s)) => intended_decision = s.clone(),
+                                ("intended-decision", NodeKind::Str(s)) => {
+                                    intended_decision = s.clone()
+                                }
                                 ("decision-gate", NodeKind::Symbol(s)) => {
                                     if s == "design-selection" {
                                         decision_gate = DecisionGate::DesignSelection;
@@ -802,10 +893,14 @@ fn parse_study_node(root: &Node) -> Result<StudySpec, crate::ProjectError> {
                         if let Some(val_node) = section_items.get(idx + 1) {
                             match (k.as_str(), &val_node.kind) {
                                 ("wall-time", NodeKind::Int(i)) => {
-                                    wall_time = Some(QtyAny::new(*i as f64, fs_qty::Dims([0, 0, 1, 0, 0, 0])));
+                                    wall_time = Some(QtyAny::new(
+                                        *i as f64,
+                                        fs_qty::Dims([0, 0, 1, 0, 0, 0]),
+                                    ));
                                 }
                                 ("wall-time", NodeKind::Float(f)) => {
-                                    wall_time = Some(QtyAny::new(*f, fs_qty::Dims([0, 0, 1, 0, 0, 0])));
+                                    wall_time =
+                                        Some(QtyAny::new(*f, fs_qty::Dims([0, 0, 1, 0, 0, 0])));
                                 }
                                 ("memory", NodeKind::Int(i)) => {
                                     memory_bytes = Some(*i as u64);
@@ -855,7 +950,10 @@ fn parse_study_node(root: &Node) -> Result<StudySpec, crate::ProjectError> {
                     }
                     idx += 1;
                 }
-                spec.units = Some(UnitsDoctrine { storage: storage.clone(), display: storage });
+                spec.units = Some(UnitsDoctrine {
+                    storage: storage.clone(),
+                    display: storage,
+                });
             }
             "domain" => {
                 let mut domain_type = "sdf-plate-with-holes".to_string();
@@ -875,19 +973,26 @@ fn parse_study_node(root: &Node) -> Result<StudySpec, crate::ProjectError> {
                                             let mut radius = 0.1;
                                             let mut h_idx = 0;
                                             while h_idx < h_fields.len() {
-                                                if let NodeKind::Keyword(hk) = &h_fields[h_idx].kind {
+                                                if let NodeKind::Keyword(hk) = &h_fields[h_idx].kind
+                                                {
                                                     if let Some(h_val) = h_fields.get(h_idx + 1) {
                                                         if hk == "center" {
-                                                            if let NodeKind::List(coords) = &h_val.kind {
+                                                            if let NodeKind::List(coords) =
+                                                                &h_val.kind
+                                                            {
                                                                 if coords.len() >= 2 {
                                                                     let x = match coords[0].kind {
                                                                         NodeKind::Float(f) => f,
-                                                                        NodeKind::Int(i) => i as f64,
+                                                                        NodeKind::Int(i) => {
+                                                                            i as f64
+                                                                        }
                                                                         _ => 0.0,
                                                                     };
                                                                     let y = match coords[1].kind {
                                                                         NodeKind::Float(f) => f,
-                                                                        NodeKind::Int(i) => i as f64,
+                                                                        NodeKind::Int(i) => {
+                                                                            i as f64
+                                                                        }
                                                                         _ => 0.0,
                                                                     };
                                                                     center = [x, y];
@@ -958,7 +1063,9 @@ fn parse_study_node(root: &Node) -> Result<StudySpec, crate::ProjectError> {
                         if let Some(val_node) = section_items.get(idx + 1) {
                             match (k.as_str(), &val_node.kind) {
                                 ("fixed-boundary", NodeKind::Str(s)) => fixed_boundary = s.clone(),
-                                ("fixed-boundary", NodeKind::Symbol(s)) => fixed_boundary = s.clone(),
+                                ("fixed-boundary", NodeKind::Symbol(s)) => {
+                                    fixed_boundary = s.clone()
+                                }
                                 ("load-region", NodeKind::Str(s)) => load_region = s.clone(),
                                 ("load-region", NodeKind::Symbol(s)) => load_region = s.clone(),
                                 _ => {}

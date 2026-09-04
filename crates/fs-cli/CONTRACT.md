@@ -266,15 +266,17 @@ rung); slivers between 1° and 5° solve and are disclosed. The Steiner cap
 derives from the declared memory budget with the fixture default as a floor,
 so identical inputs at the fixture budget mesh identically.
 
-**The uniform h-ladder** (receipt block `ladder`, driver version 12). When the
+**The uniform h-ladder** (receipt block `ladder`, driver version 13). When the
 project declares `solver.fidelity = "ladder"`, the stage solves the audited base
 and then up to two further rungs, each one uniform 1→8 refinement of the
 labeled complex (fs-mesh CONTRACT item 16: walls split in place with their
 parent facet, labels replicated, volume preserved), taken while the next rung
 still fits the declared memory budget (`memory_bytes / 256` tets) and the
 project declares no interface pairs (they bind to base faces: `stop` says so).
-Every other fidelity solves the base once and the block says
-`"stop":"fidelity-single-rung"`. The block carries one row per rung (tets,
+Other fidelities solve the base once. Adaptive fidelity reports
+`"stop":"fidelity-adaptive-goal-not-evaluated"`: geometric quality refinement
+has not evaluated the requested goal-error criterion. Other single-rung paths
+report `"stop":"fidelity-single-rung"`. The block carries one row per rung (tets,
 vertices, `h_m = (volume/tets)^(1/3)`, min dihedral, the QoI stage's functional
 `t_max_k` — the nodal maximum over the ThermalLimit region — nonlinear and
 Krylov iterations, final residual) and a `richardson` estimate over the last
@@ -404,6 +406,42 @@ complete attestation does resume re-charge recorded consumption, so the budget
 continues instead of resetting.
 
 ## Output and exit contract
+
+### Normalized thermal study
+
+`study <study.fsim|study.json> <ledger.db> [--budget N]` executes the existing
+scalar Poisson/CutFEM radius optimizer. The canonical example is
+`examples/marquee/thermal-2d.fsim`: unit source, zero temperature on all outer
+and hole boundaries, unit square, dimensionless compliance, fixed hole
+centers and area equality. The executable reader rejects fields that do not
+survive canonical recognition, including ignored geometry or unit declarations.
+Elasticity and free-boundary topology remain unimplemented under q61wp.16.
+
+Every accepted transition retains the source, iteration log, exact parametric
+geometry, SVG/HTML report, JSON summary and format-9 package in one ledger
+transaction. A `study-<receipt-hash>` run ID names that immutable checkpoint.
+`report` and `package` accept this ID plus its ledger and export retained bytes
+after checking their hashes, kinds and producing-operation lineage. Package
+export re-runs the structural checker. A partial study report remains visibly
+partial and Estimated; neither a checker pass nor iteration exhaustion proves
+an optimum or a guaranteed PDE error bound.
+
+`study --resume <study-id> <ledger.db> [--budget N]` replays the retained prefix
+and requires the same trace before advancing. It recharges prior wall use and
+also meters replay; it does not reset the original budgets. `--budget N` caps
+new iterations in this invocation, while the declared total iteration limit
+continues across resume. Replay checks remaining wall time between solves and
+refuses with the retained checkpoint if it cannot reconstruct the prefix within
+budget. Successful resume charges replay time; an aborted replay publishes no
+new checkpoint, so its failed-attempt cost is not durably accumulated.
+Wall/core time uses the session governor. The current
+memory envelope is admission-only (at least 128 MiB, mesh level at most 5,
+at most 32 holes and 256 steps), with no measured RSS enforcement. Cancellation
+is polled between bounded transitions through the internal gate seam; the
+binary has no OS signal handler. Pre-cancellation publishes no operation.
+Budget exhaustion exits 6, cancellation exits 130, and ledger/export failures
+cannot report success. A geometry artifact is the exact circle/plate
+parameterization, not a sampled SDF grid. Full .20 acceptance remains open.
 
 - stdout carries final result records only;
 - stderr carries diagnostics and, for solve in JSON mode, one

@@ -108,8 +108,10 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// accepting any coplanar tiling and iterating to a fixed point: identical
 /// inputs now volumetricize to a different (and, for finned bodies, an
 /// existing rather than refused) tet complex, so a v10 conduction
-/// checkpoint must not resume into it.
-pub const SOLVE_DRIVER_VERSION: u32 = 12;
+/// checkpoint must not resume into it. Version 12 adds the uniform h-ladder.
+/// Version 13 removes the unevaluated adaptive-convergence claim; old receipts
+/// carrying that claim must not share a resumable run identity with this driver.
+pub const SOLVE_DRIVER_VERSION: u32 = 13;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";
@@ -5374,7 +5376,9 @@ fn conduction_receipt(
                     .as_ref()
                     .is_some_and(|solver| solver.fidelity == SOLVER_FIDELITY_ADAPTIVE)
                 {
-                    "fidelity-adaptive-converged"
+                    // Geometric quality refinement is not a goal-error test.
+                    // Keep the solved estimate, with the missing criterion explicit.
+                    "fidelity-adaptive-goal-not-evaluated"
                 } else {
                     "fidelity-single-rung"
                 };

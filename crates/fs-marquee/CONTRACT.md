@@ -19,7 +19,11 @@ no-claim boundary.
 - `scope_summary()`: static diagnostic text for agents, ledgers, and reports.
 - `VERSION`: crate version for provenance stamping.
 - With `marquee`: `study::{PlateWithHoles, StudyConfig, StudyReport,
-  IterRecord, run_study}`. The runner performs a deterministic projected
+  IterRecord, StudyRunner, ThermalSource, run_study, solve_and_grade_with_source}`.
+  `ThermalSource` declares a finite affine load, nonnegative on the unit plate
+  and not identically zero. `StudyRunner::new_with_source` uses it in the state,
+  compliance, DWR goal and every line-search trial, and binds it into the trace.
+  The runner performs a deterministic projected
   radius optimization over circular cooling holes, records per-iteration
   compliance/certificate fields, and returns a replay hash for the smoke trace.
 
@@ -50,8 +54,8 @@ in-process CutFEM solves and does not mutate ledgers or the filesystem.
 ## Error model
 
 Default status queries are infallible. With `marquee`, invalid study inputs
-panic during admission before solver work starts. Valid study runs return
-`fs_cutfem::CutFemError` for CutFEM build/solve failures. Shape-gradient
+return `fs_cutfem::CutFemError::InvalidFemInput` before solver work starts.
+Study runs return `fs_cutfem::CutFemError` for build/solve failures. Shape-gradient
 boundary probes read the solved field only through the canonical
 fail-closed `Space::sample_scalar` (bead ay40): missing or non-finite
 active nodal evidence surfaces as `InvalidFemInput` instead of a
@@ -68,9 +72,14 @@ inputs and code, but it is not yet a cross-ISA golden-proofed lane.
 
 ## Cancellation behavior
 
-The default smoke runner is synchronous and currently has no explicit `Cx`
-cancellation polling; production runner cancellation remains a no-claim
-boundary.
+The synchronous `StudyRunner` admits and projects once, then `advance` performs
+one accepted transition without mutating its previous state on a solver error.
+`design`, `iterations`, and `report` expose the retained state. The batch
+`run_study` delegates to this same runner. A caller can stop, meter or persist
+between transitions; each transition has one current-design solve and at most
+nine line-search solves (each grade also runs its DWR estimator). There is no
+explicit `Cx` polling inside a transition, so intra-solve cancellation latency
+remains a no-claim boundary.
 
 ## Unsafe boundary
 
@@ -88,14 +97,17 @@ feature-derived status, and the explicit nightly-golden no-claim boundary. With
 `marquee`, tests also check that invalid runner inputs are rejected before
 solver work starts, and execute the six marquee falsifiers:
 1. `mq_006_falsifier_rung_climb`: Rung climb on the final optimized design at
-   level 5 vs level 4 within certified DWR error band.
+   level 5 vs level 4 against an estimated DWR error band.
 2. `mq_007_falsifier_cross_representation_solid`: Cross-code body-fitted P1
-   triangular linear elasticity in `fs-solid` validates physical compliance
-   against CutFEM.
+   scalar Poisson assembly checks CutFEM scalar compliance on the final accepted
+   geometry with the same load and boundary data. The acceptance band uses
+   measured refinement differences, capped at 25% of P1 compliance; a doubled
+   one-sided source must fail. This is numerical consistency, not physical validation.
 3. `mq_008_falsifier_adjoint_fd_gate_at_stages`: Informative-direction FD gate
    passes at iterates 1, N/2, and N, and rejects sign-flipped adjoint.
-4. `mq_009_falsifier_objective_sensitivity_twin`: Volume fraction and geometric
-   perturbation twins track respective objectives.
+4. `mq_009_falsifier_objective_sensitivity_twin`: Physical-load, volume fraction
+   and geometry twins change accepted designs. Doubling the state and objective
+   source must quadruple compliance on a fixed geometry.
 5. `mq_010_falsifier_replay_and_checkpoint_resume`: Replays bit-exact from seed
    and N/2 checkpoint resumes to identical endpoint.
 6. `mq_011_falsifier_mutation_proof_monotonicity`: Sign-flipped ascent fails
