@@ -32,7 +32,10 @@ The six closed tasks above with incomplete acceptance (`q61wp.4`, `.11`, `.16`,
 duplicate implementation tickets. `q61wp.20` stays with its current lane.
 The missing `fs-scene/CONTRACT.md` is a separate bounded contract omission:
 document the existing primitive scene behavior and its limits; do not redesign
-the crate. Frontier work remains parked under the owner's existing decision.
+the crate (`q61wp.65`, blocking the complete-inventory close of `.4`). Frontier
+work remains parked under the owner's existing decision. Flux-bound development
+does not require adaptive-mesh completion: `.11` relates to `.44` and
+`sj31i.25`, but can build and test on a fixed admissible mesh independently.
 
 ### Acceptance at the actual mathematical boundary
 
