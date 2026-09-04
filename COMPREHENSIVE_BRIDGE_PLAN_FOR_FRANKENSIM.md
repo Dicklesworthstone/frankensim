@@ -120,6 +120,42 @@ consumer path. Retain input identity, observed value, tolerance, terminal
 reason and artifact location sufficient to diagnose a failure. No new audit
 framework, success-count quota, or fabricated completion receipt is required.
 
+### Completed refinement passes — 2026-09-04
+
+1. **Ownership/dependencies:** reused the six original incomplete tasks; created
+   only `.65` for the missing scene contract. Changed `.11 → .44` from a block
+   to a relation because flux verification can start on a fixed mesh; related
+   `.11` to existing `sj31i.25`; made `.4` depend on `.65` for a complete-contract
+   claim. Existing implementation assignees were preserved.
+2. **Mathematical acceptance:** updated the acceptance fields as well as the
+   descriptions, so the exact-QoI, nonlinear residual, feasible optimization
+   baseline and real adaptive stopping requirements cannot be overridden by
+   the earlier text. A first linear/averaged rung does not silently close the
+   broader promised maximum/nonlinear scope.
+3. **Tests and product wiring:** specified matched-PDE discrepancy/mutation
+   checks, an actual load twin, distinct UQ script modes using real cooling
+   solves, and CLI ledger/export failure propagation. Existing unit tests
+   remain; library success alone cannot close an end-to-end requirement.
+4. **Scope and authority:** named the scalar study as a partial thermal mode,
+   required partial terminals to preserve their actual evidence colour, updated
+   the schema-v4 truth task, and preserved optional visualization/surrogate
+   residuals as deferred. Added the public claim correction to the existing
+   website task. No original feature was deleted or declared complete by scope
+   reduction.
+5. **Final consistency:** re-read the changed statuses/acceptance and checked
+   ready/dependency views; found no further change needed within this audited
+   task set. `bv --robot-insights --label reality-check-2026-09` and
+   `bv --robot-triage` exited 0, with cycles computed and none found in their
+   analyzed views. The latter graph had 2,175 nodes and 3,247 edges (data hash
+   `7f58f7fc2f050236`). `br ready --limit 0 --json` returned 128 tasks; its
+   actionable semantics differ from bv's 305, so those counts are not mixed.
+
+Final full tracker snapshot: 3,364 issues = 1,353 closed + 724 open + 1,185
+deferred + 53 in progress + 49 blocked. This is bookkeeping, not a completion
+percentage. Phase 1 assessment, Phase 2 bridge, Phase 3a restoration/creation,
+three ambition revisions, bead regeneration and five refinement passes have
+been performed. Implementation remains on the explicit open/deferred tasks.
+
 ## 0. How to read this plan
 
 - **Item IDs** are stable (`A1`, `B4`, …). A bead that implements an item names it. Existing steering beads are cited as `q61wp.N`.

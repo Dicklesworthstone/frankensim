@@ -5,6 +5,12 @@ This refresh supersedes the September 1 assessment below. It preserves that
 assessment as dated history, not as current evidence. No product source was
 changed by this refresh.
 
+While the audit was finishing, another process committed intermediate versions
+of these documents and advanced shared `main` to `aafc0d35` (including unrelated
+G1 walking changes). The CLI, marquee and UQ files cited in the concrete
+findings are unchanged between the inspected revision and that commit. Existing
+staged/unstaged peer changes were preserved; this audit did not stage or commit.
+
 ## Current answer
 
 **FrankenSim is not finished and does not yet deliver the full continuum promised
@@ -132,13 +138,25 @@ deferred and unverified states instead of claiming every line is implemented.
 | `dsr repos info frankensim` | Registry inspected successfully. Ten configured checks include constellation, Cargo gates and Apple quality. |
 | `dsr quality --tool frankensim --dry-run` | PLANNED 10 checks, executed 0; exit 2. This is not a test failure or a pass. No full DSR quality run was launched. |
 | `sbh check --need 20G` | Passed at approximately 303 GB free. This does not resolve remote load or dependency pinning. |
-| `scripts/ci/checkout_constellation.sh --verify-only` | Reported asupersync expected `03a0a298d07f565c56b3d80ad85cf2bbc69ad3c2`, actual `276ed7e336e55f7d4061d29ea7f788f31f6799a4`. Separate `merge-base --is-ancestor` returned 0 and sibling status was clean: a stale lock/forward movement, not evidence of divergence. No sibling was changed. |
+| `scripts/ci/checkout_constellation.sh --verify-only` | Completed with exit 1 and refused all seven off-pin siblings. Separate ancestry checks classify all seven heads as descendants of their pins; no divergence was found. At final inspection six siblings were clean and FrankenSQLite had a modified test plus untracked files. No sibling was changed by this audit. Exact heads are recorded below. |
 | Existing remote census | Inspected `/data/projects/sj-20260901/census.log` on yto. It had reached tests and was still running `cbc_fallible_storage`; no completed aggregate result. Remote checkout was `c22bfa19` with changes/conflicts. It is not current-HEAD proof. |
 | Existing remote release binary: `--json validate examples/heatsink-fan/heatsink-fan.fsim` | Executed now, exit 0; schema v4, zero findings, explicit `structural-project-admission`. Binary dated September 4 on that older/dirty checkout; no current-source or physical-solvability claim. |
 | `bash scripts/e2e/cooling_uq.sh --check` | Exit 0 with a fixed success message, confirming that the current check mode performs no checks. `bash -n` also passed syntax only. |
 | `spine-e2e-summary.json` | Retained September 3 execution at `51acb4b0`: 66 checks, 0 failures, 7 stages. Its own no-claim records Estimated/Indeterminate with eight NO-DATA terms. |
 | `suite-receipt.json` | Historical August 1 dirty-tree run at `88b18883`: 7,621 passed, 95 failed, 38 ignored. Neither those failures nor the older July 30 count are presented as current failures. |
 | Public website | [Live homepage](https://frankensim.org/) fetched; public claims reviewed. No deployment, browser interaction or wasm execution performed. |
+
+Constellation observations (full heads, not a proposed rollback):
+
+| Sibling | Expected pin | Actual HEAD |
+|---|---|---|
+| asupersync | `03a0a298d07f565c56b3d80ad85cf2bbc69ad3c2` | `276ed7e336e55f7d4061d29ea7f788f31f6799a4` |
+| franken_networkx | `ab73033517f47250ac9477148fc055f148e838b0` | `1036e7b0f7ace1ff8e8db45a4cd33235173acab3` |
+| franken_numpy | `9b6b5828317dbeda36a6a9e53c8fa754527f0d0c` | `1629b38e88d203bc20e639397c69f78e544e3fb9` |
+| frankenpandas | `38a4b26fe652d7a7783d7f8f5a0961cf19c9c1a0` | `2fcd31a974585f477b650333c57b2c637ba9987e` |
+| frankenscipy | `a75ad6ed2e9f72e72b8d393fd92805909958630b` | `9d22c5b464e713dd8a3e3c57012a9400c8d557a8` |
+| frankensqlite | `d5c68ea3ab4a938e4d6b38fdfbba86872c65e82f` | `68e20bb5aed3322de7abfed6daab25ff5d3dcbb6` |
+| frankentorch | `74df606bd5f1440d109deea115a0ab1bdf4cfd1b` | `d7514b1254a369fc9bf720aaf03dce8c30f7109b` |
 
 The full implementation/test plan, three ambition passes and five refinement
 passes are maintained in the existing
