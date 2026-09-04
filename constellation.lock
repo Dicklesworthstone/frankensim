@@ -2,7 +2,7 @@
   "schema": "frankensim-constellation-lock-v2",
   "identity_domain": "org.frankensim.xtask.constellation-lock.v1",
   "identity_version": 1,
-  "lock_hash": "4a7ffa243c0cf006",
+  "lock_hash": "0730b0a5295eeab7",
   "note": "lock_hash covers (lib, version, git_head) only — paths are per-machine; remote is transport for bootstrap-constellation (content identity is the git head)",
   "libraries": [
     {"lib": "asupersync", "version": "0.4.10", "git_head": "03a0a298d07f565c56b3d80ad85cf2bbc69ad3c2", "remote": "https://github.com/Dicklesworthstone/asupersync.git", "path": "/Users/jemanuel/projects/asupersync"},
@@ -11,6 +11,6 @@
     {"lib": "frankenpandas", "version": "0.2.0", "git_head": "38a4b26fe652d7a7783d7f8f5a0961cf19c9c1a0", "remote": "https://github.com/Dicklesworthstone/frankenpandas.git", "path": "/Users/jemanuel/projects/frankenpandas"},
     {"lib": "frankenscipy", "version": "0.1.0", "git_head": "a75ad6ed2e9f72e72b8d393fd92805909958630b", "remote": "https://github.com/Dicklesworthstone/frankenscipy.git", "path": "/Users/jemanuel/projects/frankenscipy"},
     {"lib": "frankensqlite", "version": "unversioned-workspace", "git_head": "d5c68ea3ab4a938e4d6b38fdfbba86872c65e82f", "remote": "https://github.com/Dicklesworthstone/frankensqlite.git", "path": "/Users/jemanuel/projects/frankensqlite"},
-    {"lib": "frankentorch", "version": "0.1.0", "git_head": "9627f39cea7462b8f6d55bed5009c271ec6c736b", "remote": "https://github.com/Dicklesworthstone/frankentorch.git", "path": "/Users/jemanuel/projects/frankentorch"}
+    {"lib": "frankentorch", "version": "0.1.0", "git_head": "74df606bd5f1440d109deea115a0ab1bdf4cfd1b", "remote": "https://github.com/Dicklesworthstone/frankentorch.git", "path": "/Users/jemanuel/projects/frankentorch"}
   ]
 }
