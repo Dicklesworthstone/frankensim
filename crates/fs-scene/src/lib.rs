@@ -503,45 +503,13 @@ impl StaticScene {
         worst
     }
 
-    /// Largest overlap depth over every pair, ignoring skins. Reported by
-    /// rollouts that want to publish how close they came even when nothing
-    /// was violated.
-    #[must_use]
-    pub fn maximum_sphere_overlap(&self, colliders: &[([f64; 3], f64)]) -> f64 {
-        let mut deepest = 0.0_f64;
-        for entry in &self.entries {
-            for (center, radius) in colliders {
-                let depth = entry.body.sphere_overlap_depth(center, *radius);
-                if depth > deepest {
-                    deepest = depth;
-                }
-            }
-        }
-        deepest
-    }
-
     /// The scene with per-body constants hoisted, for a hot scan loop.
     #[must_use]
     pub fn prepare(&self) -> Vec<PreparedBody> {
         self.entries.iter().map(PreparedBody::new).collect()
     }
 
-    /// Convex support maps for the bounded bodies, paired with their index,
-    /// for callers that test non-spherical colliders through `fs-query`.
-    #[must_use]
-    pub fn convex_bodies(&self) -> Vec<(usize, ConvexOrientedBox)> {
-        self.entries
-            .iter()
-            .enumerate()
-            .filter_map(|(index, entry)| {
-                entry.body.convex_support_map().map(|shape| (index, shape))
-            })
-            .collect()
-    }
 }
-
-/// A convex collider's support map, for symmetry with [`StaticScene`] users.
-pub use fs_query::ConvexSupportMap as SceneSupportMap;
 
 #[cfg(test)]
 mod tests {
