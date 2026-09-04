@@ -199,9 +199,9 @@ or a critical sibling becoming unavailable. Convenience, new upstream features,
 and version freshness are not merely discouraged — they are unrepresentable in
 the type, so they cannot be argued into an emergency.
 
-### Current state: three trains run; the third advanced six of seven pins
+### Current state: four trains run; all seven pins are current
 
-The protocol has now been exercised twice end to end against live pins. Neither
+The protocol has now been exercised end to end against live pins three times, and the fourth train settled the sibling the third had to hold. Neither
 was a synthetic drill, and both transcripts are pinned as executable tests so
 their verdicts cannot quietly change.
 
@@ -311,6 +311,38 @@ Two boundaries this train exposed and fixed:
   frankentorch at its recorded pin; the Mac's frankentorch checkout is
   therefore the one remaining off-pin sibling, visible as `stale-lock` in
   the drift gate until bead frankensim-r55qa resolves it.
+
+**Train 4 (2026-09-04) — the held sibling advanced, and what holding cost.**
+frankentorch moved from `9627f39c` to `74df606b`; the other six heads are
+unchanged and the lock hash went `4a7ffa243c0cf006` → `0730b0a5295eeab7`.
+The advance was forced by a cost train 3 did not price. Cargo records a PATH
+dependency's version as found on disk, so holding the pin left the
+workstation checkout (kernel-cpu `0.1.1`) and the Linux verification clone
+(`0.1.0`) disagreeing, and one shared `Cargo.lock` cannot satisfy `--locked`
+on both machines at once. Whichever machine ran cargo last rewrote the line
+and broke the other; it flipped four times in two days. Retreating the
+workstation was refused by this document's own guardrail — the pin was 619
+commits behind and pins never move backwards — so both checkouts were
+aligned forward and the pin followed them.
+
+The evidence discipline here is worth stating because the surface test still
+cannot run under the pinned nightly. What was verified is what the advance
+actually touches, not a substitute claim: nothing in frankensim compiles
+this sibling (it enters only as an OPTIONAL dependency of `fs-ad`, off in
+the default feature set), `cargo metadata --locked` resolves at the new
+head, and on the verification host `check-constellation` reports OK with
+all sibling trees clean while `check-constellation-drift` reports all seven
+on-pin. A pin advance whose sibling is never built is a bookkeeping change,
+and it is recorded as one rather than dressed as a compatibility result.
+
+One property of the drift gate this exposed, sound but easy to misread: its
+`no-data` verdict is only reachable when HEAD already differs from the pin
+(`pin_relation` returns `OnPin` on equality before any ancestry test), and
+`no-data` is not charged as a violation. So `check-constellation-drift`
+alone reporting `policy OK` does not establish that every sibling is
+on-pin — a shallow or grafted clone reports `no-data` for a genuinely
+off-pin sibling. Equality is `check-constellation`'s job, and it does fire:
+measured exit 1 against exactly this case before the re-lock.
 
 ## Archival, escrow, and retention
 
