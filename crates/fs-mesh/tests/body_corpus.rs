@@ -329,12 +329,12 @@ fn vented_enclosure() -> (Vec<[f64; 3]>, Vec<[u32; 3]>, f64, [f64; 3]) {
     };
     let mut b = Builder::new();
     let grid_face = |b: &mut Builder,
-                         axis: usize,
-                         fixed: f64,
-                         outward: [f64; 3],
-                         us: &[f64],
-                         vs: &[f64],
-                         skip_vent: bool| {
+                     axis: usize,
+                     fixed: f64,
+                     outward: [f64; 3],
+                     us: &[f64],
+                     vs: &[f64],
+                     skip_vent: bool| {
         for wu in us.windows(2) {
             for wv in vs.windows(2) {
                 if skip_vent

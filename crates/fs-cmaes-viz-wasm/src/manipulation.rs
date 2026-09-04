@@ -1786,20 +1786,34 @@ fn link_envelope(
 }
 
 /// Convex envelope for a keep-out box yawed about the world +Z axis.
+/// Convex envelope for a caller-declared keep-out box.
+///
+/// The box-to-support-map conversion lives in fs-scene, so this experiment and
+/// the walking experiment describe the same geometry the same way rather than
+/// each carrying a private copy of the axis construction.
 fn yawed_box_envelope(obstacle: ObstacleBox) -> Result<CollisionEnvelope, ManipulationError> {
-    let (sin_yaw, cos_yaw) = obstacle.yaw_rad.sin_cos();
-    let axis_x = Vec3::new(cos_yaw, sin_yaw, 0.0);
-    let axis_y = Vec3::new(-sin_yaw, cos_yaw, 0.0);
-    let axis_z = Vec3::new(0.0, 0.0, 1.0);
-    let shape = ConvexOrientedBox::new(
-        point3(obstacle.center_m),
-        [geom_vec(axis_x), geom_vec(axis_y), geom_vec(axis_z)],
-        geom_vec(obstacle.half_extents_m),
-    )?;
+    let body = fs_scene::SceneBody::Box {
+        center_m: [
+            obstacle.center_m.x,
+            obstacle.center_m.y,
+            obstacle.center_m.z,
+        ],
+        half_extents_m: [
+            obstacle.half_extents_m.x,
+            obstacle.half_extents_m.y,
+            obstacle.half_extents_m.z,
+        ],
+        yaw_rad: obstacle.yaw_rad,
+    };
+    let shape = body
+        .convex_support_map()
+        .ok_or(ManipulationError::InvalidConfig {
+            field: "declared obstacle geometry",
+        })?;
     Ok(CollisionEnvelope {
         shape,
         center_world: obstacle.center_m,
-        bounding_radius_m: vec_norm(obstacle.half_extents_m),
+        bounding_radius_m: body.bounding_radius_m().unwrap_or(0.0),
     })
 }
 

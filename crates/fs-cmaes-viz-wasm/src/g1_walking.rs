@@ -517,39 +517,6 @@ pub struct ObstacleBox {
 /// box: positive = the sphere surface is inside the solid. Exact for the
 /// sphere-vs-box distance; the returned depth also counts center-inside
 /// cases (r + nearest-face distance).
-/// Same test as [`sphere_box_penetration`], with the box's yaw trig supplied
-/// by the caller so a loop over many spheres against one box computes it once.
-#[allow(clippy::inline_always)]
-#[inline(always)]
-fn sphere_box_penetration_prerotated(
-    p: &[f64; 3],
-    r: f64,
-    center_m: &[f64; 3],
-    half: &[f64; 3],
-    cos_yaw: f64,
-    sin_yaw: f64,
-) -> f64 {
-    let dx = p[0] - center_m[0];
-    let dy = p[1] - center_m[1];
-    let dz = p[2] - center_m[2];
-    let lx = cos_yaw * dx + sin_yaw * dy;
-    let ly = -sin_yaw * dx + cos_yaw * dy;
-    let lz = dz;
-    let qx = lx.clamp(-half[0], half[0]);
-    let qy = ly.clamp(-half[1], half[1]);
-    let qz = lz.clamp(-half[2], half[2]);
-    let ddx = lx - qx;
-    let ddy = ly - qy;
-    let ddz = lz - qz;
-    let outside_sq = ddx * ddx + ddy * ddy + ddz * ddz;
-    if outside_sq > 0.0 {
-        (r - outside_sq.sqrt()).max(0.0)
-    } else {
-        let face = (half[0] - lx.abs()).min((half[1] - ly.abs()).min(half[2] - lz.abs()));
-        r + face
-    }
-}
-
 pub fn sphere_box_penetration(
     p: &[f64; 3],
     r: f64,
@@ -585,18 +552,6 @@ pub fn sphere_box_penetration(
 /// Links whose spheres are the walking contact set. They are expected to
 /// touch support surfaces, so only keep-out bodies apply to them.
 const CONTACT_COLLIDER_LINKS: [usize; 4] = [5, 6, 11, 12];
-
-/// Tiny helper so the guard can ask "is there an environment at all?" without
-/// re-summing two scenes each step.
-struct ScenePresence {
-    len: usize,
-}
-
-impl ScenePresence {
-    const fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-}
 
 /// Body collision spheres: (link index, conservative radius) — one sphere
 /// at each link origin, radii chosen to conservatively cover the catalog
@@ -1003,8 +958,13 @@ impl G1WalkingEvaluator {
         // The static environment this rollout moves through. Built once from
         // the admitted config; every per-step query is an fs-scene call.
         let (keep_out_scene, support_scene) = self.static_scenes()?;
-        let scene_len = keep_out_scene.len() + support_scene.len();
-        let scene = ScenePresence { len: scene_len };
+        // Per-body constants (yaw trig, bounding radius) are hoisted once per
+        // rollout. Recomputing them per (body, collider) pair costs a sin/cos
+        // for every one of the ~1,400 pairs a furnished room produces, every
+        // step.
+        let mut prepared_bodies = keep_out_scene.prepare();
+        prepared_bodies.extend(support_scene.prepare());
+
         'rollout: for step in 0..self.step_count {
             let time_s = step as f64 * self.config.step_s;
             let work_before = actuator_work_j;
@@ -1286,7 +1246,7 @@ impl G1WalkingEvaluator {
             // configured obstacle. First penetration beyond the skin depth
             // terminates the rollout — the body physically cannot pass
             // through solid geometry.
-            if !scene.is_empty() {
+            if !prepared_bodies.is_empty() {
                 // Collider centres are read once per step. The geometry itself
                 // is fs-scene's: this experiment owns no collision mathematics.
                 let mut colliders = [([0.0_f64; 3], 0.0_f64); BODY_COLLIDER_SPHERES.len()];
@@ -1301,20 +1261,24 @@ impl G1WalkingEvaluator {
                 // the instant a smaller one first crosses the skin, and the
                 // number this receipt publishes is "how far in did we get
                 // before noticing", which is a no-tunnelling claim.
-                'obstacle_check: for entry in keep_out_scene
-                    .entries()
-                    .iter()
-                    .chain(support_scene.entries().iter())
-                {
+                'obstacle_check: for entry in &prepared_bodies {
                     // Feet rest on support surfaces by design; the compliant
                     // patch model owns that contact. Only keep-out bodies
                     // apply to them.
                     let contact_exempt = entry.role == BodyRole::Support;
                     for (slot, (center, radius)) in colliders.iter().enumerate() {
-                        if contact_exempt && CONTACT_COLLIDER_LINKS.contains(&BODY_COLLIDER_SPHERES[slot].0) {
+                        if contact_exempt
+                            && CONTACT_COLLIDER_LINKS.contains(&BODY_COLLIDER_SPHERES[slot].0)
+                        {
                             continue;
                         }
-                        let depth = entry.body.sphere_overlap_depth(center, *radius);
+                        // Conservative reject: never discards a pair that
+                        // could breach, so the scan order and the published
+                        // penetration are unchanged.
+                        if !entry.may_breach(center, *radius) {
+                            continue;
+                        }
+                        let depth = entry.sphere_overlap_depth(center, *radius);
                         if depth > maximum_body_penetration_m {
                             maximum_body_penetration_m = depth;
                         }

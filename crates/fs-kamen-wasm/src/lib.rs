@@ -1,9 +1,9 @@
 //! Browser boundary for the source-dimensioned US 5,701,965 tri-wheel states.
 //!
 //! Table 1 owns the nominal dimensions and Figures 39--42 own the discrete
-//! teaching poses. Generic rigid transforms and horizontal-support gap checks
-//! remain owned by `fs-mbd`; this crate performs source mapping and envelope
-//! serialization only.
+//! teaching poses. Generic rigid transforms plus horizontal-support and
+//! finite-riser gap checks remain owned by `fs-mbd`; this crate performs
+//! source mapping and envelope serialization only.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -23,11 +23,11 @@ const CLUSTER_RADIUS_M: f64 = 5.581 * INCH_M;
 const ADJACENT_WHEEL_CENTRE_DISTANCE_M: f64 = 9.667 * INCH_M;
 const STAIR_TREAD_M: f64 = 10.9 * INCH_M;
 const STAIR_RISE_M: f64 = 6.85 * INCH_M;
-const RISER_TO_LOWER_CONTACT_M: f64 = 3.011 * INCH_M;
+const RISER_TO_UPPER_CONTACT_M: f64 = 3.011 * INCH_M;
 const WHEEL_RADIUS_M: f64 = 3.81 * INCH_M;
 const CONTACT_TOLERANCE_M: f64 = 1.0e-8;
 const GENERIC_OWNER: &str = "fs-mbd::tri_wheel_cluster::step_tri_wheel_stair_contact";
-const MODEL_BOUNDARY: &str = "rigid-planar-three-equal-wheels-horizontal-tread-contact-no-force-friction-compliance-impact-or-riser-side-contact";
+const MODEL_BOUNDARY: &str = "rigid-planar-three-equal-wheels-horizontal-support-and-finite-riser-clearance-no-force-friction-compliance-impact-motor-controller-or-sensor";
 const SOURCE_RECEIPT: &str = "us-5701965-table-1-figures-39-through-42";
 
 #[derive(Clone, Copy)]
@@ -55,7 +55,7 @@ fn source_start_rotation_rad() -> f64 {
 fn source_pose(state_index: u8) -> Option<SourcePose> {
     let start_rotation = source_start_rotation_rad();
     let wheel_a_angle = -PI / 2.0 + start_rotation;
-    let start_axle_x = -RISER_TO_LOWER_CONTACT_M - CLUSTER_RADIUS_M * wheel_a_angle.cos();
+    let start_axle_x = -WHEEL_RADIUS_M - CLUSTER_RADIUS_M * wheel_a_angle.cos();
     let start_axle_y = WHEEL_RADIUS_M - CLUSTER_RADIUS_M * wheel_a_angle.sin();
     let start_pitch = wheel_a_angle + (TAU - 2.814) - PI / 2.0;
 
@@ -65,7 +65,7 @@ fn source_pose(state_index: u8) -> Option<SourcePose> {
     let climb_rotation = start_rotation - 2.0 * PI / 3.0;
     let climb_wheel_b_angle = PI / 6.0 + climb_rotation;
     let climb_axle_x =
-        STAIR_TREAD_M - RISER_TO_LOWER_CONTACT_M - CLUSTER_RADIUS_M * climb_wheel_b_angle.cos();
+        STAIR_TREAD_M - WHEEL_RADIUS_M - CLUSTER_RADIUS_M * climb_wheel_b_angle.cos();
     let climb_axle_y = STAIR_RISE_M + WHEEL_RADIUS_M - CLUSTER_RADIUS_M * climb_wheel_b_angle.sin();
     let climb_pitch = climb_wheel_b_angle + (TAU - 2.814) - PI / 2.0;
 
@@ -140,6 +140,11 @@ fn contact_error_json(error: TriWheelStairError) -> String {
             "the rigid wheel geometry penetrates a horizontal support",
             "Correct the source-pose transform before rendering",
         ),
+        TriWheelStairError::PenetratingRiser { .. } => refusal_json(
+            "riser-penetration",
+            "the rigid wheel geometry intersects a finite vertical stair riser",
+            "Correct the Table 1 r/z pose mapping before rendering",
+        ),
         TriWheelStairError::Unsupported { .. } => refusal_json(
             "unsupported-pose",
             "no wheel touches a horizontal support in the selected state",
@@ -176,6 +181,12 @@ pub fn kamen_cluster_step(state_index: u8) -> String {
     };
 
     let mut output = String::with_capacity(1_800);
+    let riser_clearance_json = result.signed_riser_clearances_m.map(|value| {
+        value.map_or_else(|| "null".to_owned(), |clearance_m| clearance_m.to_string())
+    });
+    let minimum_riser_clearance_json = result
+        .minimum_riser_clearance_m
+        .map_or_else(|| "null".to_owned(), |clearance_m| clearance_m.to_string());
     let _ = write!(
         output,
         "{{\"ok\":{{\
@@ -190,7 +201,7 @@ pub fn kamen_cluster_step(state_index: u8) -> String {
          \"wheel_radius_m\":{},\
          \"stair_rise_m\":{},\
          \"stair_tread_m\":{},\
-         \"riser_to_lower_contact_m\":{},\
+         \"riser_to_upper_contact_m\":{},\
          \"axle_x_m\":{},\
          \"axle_y_m\":{},\
          \"carrier_rotation_rad\":{},\
@@ -200,7 +211,11 @@ pub fn kamen_cluster_step(state_index: u8) -> String {
          \"signed_vertical_gaps_m\":[{},{},{}],\
          \"contact_mask\":[{},{},{}],\
          \"contact_count\":{},\
-         \"minimum_gap_m\":{}\
+         \"minimum_gap_m\":{},\
+         \"signed_riser_clearances_m\":[{},{},{}],\
+         \"riser_contact_mask\":[{},{},{}],\
+         \"riser_contact_count\":{},\
+         \"minimum_riser_clearance_m\":{}\
          }}}}",
         GENERIC_OWNER,
         MODEL_BOUNDARY,
@@ -213,7 +228,7 @@ pub fn kamen_cluster_step(state_index: u8) -> String {
         WHEEL_RADIUS_M,
         STAIR_RISE_M,
         STAIR_TREAD_M,
-        RISER_TO_LOWER_CONTACT_M,
+        RISER_TO_UPPER_CONTACT_M,
         pose.axle_x_m,
         pose.axle_y_m,
         pose.carrier_rotation_rad,
@@ -233,6 +248,14 @@ pub fn kamen_cluster_step(state_index: u8) -> String {
         result.contact_mask[2],
         result.contact_count,
         result.minimum_gap_m,
+        riser_clearance_json[0],
+        riser_clearance_json[1],
+        riser_clearance_json[2],
+        result.riser_contact_mask[0],
+        result.riser_contact_mask[1],
+        result.riser_contact_mask[2],
+        result.riser_contact_count,
+        minimum_riser_clearance_json,
     );
     output
 }
@@ -254,10 +277,13 @@ mod tests {
         let start = kamen_cluster_step(2);
         assert!(start.contains("\"source_figure\":\"figure-39b\""));
         assert!(start.contains("\"contact_mask\":[true,true,false]"));
+        assert!(start.contains("\"riser_contact_mask\":[true,false,false]"));
+        assert!(start.contains("\"riser_contact_count\":1"));
 
         let climb = kamen_cluster_step(4);
         assert!(climb.contains("\"source_figure\":\"figure-42c\""));
         assert!(climb.contains("\"contact_mask\":[false,true,true]"));
+        assert!(climb.contains("\"riser_contact_mask\":[false,true,false]"));
     }
 
     #[test]
