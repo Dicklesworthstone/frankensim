@@ -2616,21 +2616,16 @@ mod schema_two_tests {
         assert_arm_packet_ok(&clear, ARM_PACKET_KIND_EVALUATION);
         assert_eq!(clear[20], 1.0, "the undeclared baseline places the object");
 
-        // The work surface under the object's start station: a 240 mm pad
-        // 90 mm thick, whose top face is the admitted support height. A pad
-        // rather than the whole counter, because this test is about what the
-        // role MEANS; declaring the full tabletop the browser draws is a
-        // separate, unfinished question -- the curriculum policies sweep their
-        // mid-arm links through three bands of it.
+        // The counter the browser actually ships: a 0.90 x 0.90 m top, 90 mm
+        // thick, centred 0.80 m out along -x with its top face at the admitted
+        // support height. Sized against this owner -- the original 1.40 x 1.65 m
+        // slab, whose near edge sat 150 mm from the arm's own base axis, refused
+        // all three tasks because the arm's link envelopes must sweep through
+        // where it was drawn.
         let support_height_m = admission[30];
-        let station = fs_ga::Vec3::new(admission[24], admission[25], admission[26]);
         let counter = |role, lift_m: f64| ObstacleBox {
-            center_m: fs_ga::Vec3::new(
-                station.x,
-                station.y,
-                support_height_m - 0.045 + lift_m,
-            ),
-            half_extents_m: fs_ga::Vec3::new(0.12, 0.12, 0.045),
+            center_m: fs_ga::Vec3::new(-0.8, 0.0, support_height_m - 0.045 + lift_m),
+            half_extents_m: fs_ga::Vec3::new(0.45, 0.45, 0.045),
             yaw_rad: 0.0,
             role,
         };
