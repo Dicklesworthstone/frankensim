@@ -755,17 +755,15 @@ fn g3_conduction_interface_undeclared_names_slots_regions_and_candidates() {
                 ids["solid-b"].token()
             }
         };
+        // The refusal must name BOTH coincident slots with the region that
+        // owns each, in the candidate's own order. Matched against the
+        // diagnostic's actual wording ("... slots A (region ...) and B
+        // (region ...) ..."), which the fs-cli solve battery also parses.
         assert!(
             violation.what.contains(&format!(
-                "slot {} (region {})",
+                "slots {} (region {}) and {} (region {})",
                 candidate.side_a,
-                region_for_slot(candidate.side_a)
-            )),
-            "{violation:?}"
-        );
-        assert!(
-            violation.what.contains(&format!(
-                "slot {} (region {})",
+                region_for_slot(candidate.side_a),
                 candidate.side_b,
                 region_for_slot(candidate.side_b)
             )),
