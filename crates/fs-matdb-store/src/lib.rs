@@ -8,8 +8,8 @@
 //! SQL tables answer the discovery questions (which materials carry a
 //! property, which properties a material carries, what is valid at a
 //! given ambient point), while every actual property EVALUATION
-//! decodes the stored pack bytes through
-//! `NormalizedPack::from_bytes_verified` (hash checked first) and
+//! decodes the stored pack bytes through the exact family's existing
+//! hash-verified decoder and
 //! delegates to the in-memory `ClaimSet::query` — the SAME evaluator,
 //! receipts, and refusals as direct pack use. Parity with the
 //! in-memory layer therefore holds by construction: there is exactly
@@ -17,7 +17,7 @@
 //! only misdirect discovery, which `verify_index` detects).
 //!
 //! STALENESS FAILS CLOSED: `seal_corpus` records a domain-separated
-//! BLAKE3 digest folded over every pack's content hash in canonical
+//! BLAKE3 digest folded over every pack's content hash and family in canonical
 //! pack-id order. Every discovery/evaluation entry point recomputes
 //! the digest from the stored packs and REFUSES
 //! (`StoreError::CorpusChanged`) when it disagrees with the seal —
@@ -33,18 +33,245 @@
 //! bitwise-identical rebuild (G5) are asserted in the tests.
 
 use fs_blake3::{ContentHash, DomainHasher};
-use fs_matdb::{MatDbError, MaterialAnswer, NormalizedPack, QueryPoint, SelectionPolicy};
+use fs_matdb::{
+    ClaimSet, MatDbError, MaterialAnswer, NormalizedInterfacePack, NormalizedMaterialCardPack,
+    NormalizedModelPack, NormalizedPack, NormalizedSpeciesPack, PackError, QueryPoint,
+    SelectionPolicy,
+};
 use fsqlite::{AsyncConnection, FrankenError, Row, SqliteValue};
 
 /// Domain string for the corpus-staleness digest.
-const CORPUS_DIGEST_DOMAIN: &str = "org.frankensim.fs-matdb-store.corpus.v1";
+const CORPUS_DIGEST_DOMAIN: &str = "org.frankensim.fs-matdb-store.corpus.v2";
 
 /// Store schema version recorded in `PRAGMA user_version`.
-pub const STORE_SCHEMA_VERSION: i64 = 1;
+pub const STORE_SCHEMA_VERSION: i64 = 2;
+
+/// Canonical pack family. Each family retains its own L1 wire version and decoder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackKind {
+    /// Unbound property claims and their observations/statistics.
+    Properties,
+    /// Claims bound to a named material state.
+    MaterialCard,
+    /// Claims bound to two ordered surfaces and their environment/history.
+    Interface,
+    /// Constitutive model cards, without executable laws.
+    Model,
+    /// Thermochemical species association.
+    Species,
+}
+
+impl PackKind {
+    /// Stable store discriminator; wire schemas remain owned by `fs-matdb`.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Properties => "properties",
+            Self::MaterialCard => "material-card",
+            Self::Interface => "interface",
+            Self::Model => "model",
+            Self::Species => "species",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self, StoreError> {
+        match value {
+            "properties" => Ok(Self::Properties),
+            "material-card" => Ok(Self::MaterialCard),
+            "interface" => Ok(Self::Interface),
+            "model" => Ok(Self::Model),
+            "species" => Ok(Self::Species),
+            _ => Err(StoreError::Malformed {
+                context: "packs.kind",
+            }),
+        }
+    }
+}
+
+/// An admitted canonical artifact. This enum dispatches to existing codecs;
+/// it introduces no property codec, law evaluator, or inferred material binding.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CatalogPack {
+    /// Unbound property pack.
+    Properties(NormalizedPack),
+    /// Named material-state pack.
+    MaterialCard(NormalizedMaterialCardPack),
+    /// Ordered interface pack.
+    Interface(NormalizedInterfacePack),
+    /// Constitutive model pack.
+    Model(NormalizedModelPack),
+    /// Species association pack.
+    Species(NormalizedSpeciesPack),
+}
+
+impl CatalogPack {
+    /// Decode using the exact family's hash-verified, version-checked L1 codec.
+    ///
+    /// # Errors
+    /// The family's original decoding/admission error, including hash, version,
+    /// and noncanonical representation refusals.
+    pub fn from_bytes_verified(
+        kind: PackKind,
+        expected: ContentHash,
+        bytes: &[u8],
+    ) -> Result<Self, PackError> {
+        match kind {
+            PackKind::Properties => {
+                NormalizedPack::from_bytes_verified(expected, bytes).map(Self::Properties)
+            }
+            PackKind::MaterialCard => {
+                NormalizedMaterialCardPack::from_bytes_verified(expected, bytes)
+                    .map(Self::MaterialCard)
+            }
+            PackKind::Interface => {
+                NormalizedInterfacePack::from_bytes_verified(expected, bytes).map(Self::Interface)
+            }
+            PackKind::Model => {
+                NormalizedModelPack::from_bytes_verified(expected, bytes).map(Self::Model)
+            }
+            PackKind::Species => {
+                NormalizedSpeciesPack::from_bytes_verified(expected, bytes).map(Self::Species)
+            }
+        }
+    }
+
+    /// Exact artifact family.
+    #[must_use]
+    pub const fn kind(&self) -> PackKind {
+        match self {
+            Self::Properties(_) => PackKind::Properties,
+            Self::MaterialCard(_) => PackKind::MaterialCard,
+            Self::Interface(_) => PackKind::Interface,
+            Self::Model(_) => PackKind::Model,
+            Self::Species(_) => PackKind::Species,
+        }
+    }
+
+    /// Source-assigned pack id. Names never substitute for content identities.
+    #[must_use]
+    pub fn pack_id(&self) -> &str {
+        match self {
+            Self::Properties(p) => p.pack_id(),
+            Self::MaterialCard(p) => p.pack_id(),
+            Self::Interface(p) => p.pack_id(),
+            Self::Model(p) => p.pack_id(),
+            Self::Species(p) => p.pack_id(),
+        }
+    }
+
+    /// Unmodified canonical artifact bytes, including the family's wire version.
+    #[must_use]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        match self {
+            Self::Properties(p) => p.to_bytes(),
+            Self::MaterialCard(p) => p.to_bytes(),
+            Self::Interface(p) => p.to_bytes(),
+            Self::Model(p) => p.to_bytes(),
+            Self::Species(p) => p.to_bytes(),
+        }
+    }
+
+    /// Domain-separated whole-artifact identity, not its nested card/claim id.
+    #[must_use]
+    pub fn content_hash(&self) -> ContentHash {
+        match self {
+            Self::Properties(p) => p.content_hash(),
+            Self::MaterialCard(p) => p.content_hash(),
+            Self::Interface(p) => p.content_hash(),
+            Self::Model(p) => p.content_hash(),
+            Self::Species(p) => p.content_hash(),
+        }
+    }
+
+    /// The unchanged property/statistics payload when this family has one.
+    /// Model parameters and species metadata are deliberately not scalar claims.
+    #[must_use]
+    pub fn claims_pack(&self) -> Option<&NormalizedPack> {
+        match self {
+            Self::Properties(p) => Some(p),
+            Self::MaterialCard(p) => Some(p.claims_pack()),
+            Self::Interface(p) => Some(p.claims_pack()),
+            Self::Model(_) | Self::Species(_) => None,
+        }
+    }
+
+    fn prepare(&self) -> PreparedPack<'_> {
+        let (compiler, redistribution) = match self {
+            Self::Properties(p) => (p.compiler(), p.redistribution_terms()),
+            Self::MaterialCard(p) => (p.compiler(), p.redistribution_terms()),
+            Self::Interface(p) => (p.compiler(), p.redistribution_terms()),
+            Self::Model(p) => (p.compiler(), p.redistribution_terms()),
+            Self::Species(p) => (p.compiler(), p.redistribution_terms()),
+        };
+        PreparedPack {
+            pack_id: self.pack_id(),
+            kind: self.kind(),
+            hash: self.content_hash(),
+            bytes: self.to_bytes(),
+            compiler,
+            redistribution,
+            claims: self.claims_pack().map(NormalizedPack::claims),
+        }
+    }
+}
+
+struct PreparedPack<'a> {
+    pack_id: &'a str,
+    kind: PackKind,
+    hash: ContentHash,
+    bytes: Vec<u8>,
+    compiler: &'a str,
+    redistribution: &'a str,
+    claims: Option<&'a ClaimSet>,
+}
+
+/// Discovery identity for one canonical artifact.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackRow {
+    /// Source-assigned name in the store's unique pack-id namespace.
+    pub pack_id: String,
+    /// Exact canonical family.
+    pub kind: PackKind,
+    /// Whole-artifact identity to pin in a scenario or bundle binding.
+    pub content_hash: ContentHash,
+}
 
 /// Typed store errors with stable `FS-MATDB-STORE-*` codes.
 #[derive(Debug)]
 pub enum StoreError {
+    /// A failed transaction could not complete its rollback.
+    Rollback {
+        /// The original operation or commit failure.
+        operation: Box<StoreError>,
+        /// The subsequent rollback failure.
+        error: FrankenError,
+    },
+    /// Opening must never silently downgrade a newer store schema.
+    UnsupportedSchema {
+        /// Version found in the store header.
+        version: i64,
+    },
+    /// A content-pinned dependency is absent.
+    UnknownContent {
+        /// Requested whole-artifact identity.
+        content_hash: ContentHash,
+    },
+    /// The caller requested a different family from the stored artifact.
+    WrongPackKind {
+        /// Stored pack name.
+        pack_id: String,
+        /// Family requested by the caller.
+        expected: PackKind,
+        /// Family recorded by the store.
+        actual: PackKind,
+    },
+    /// The family is data about models/species, not a property ClaimSet.
+    NoPropertyClaims {
+        /// Stored pack name.
+        pack_id: String,
+        /// Family without a property claim payload.
+        kind: PackKind,
+    },
     /// Underlying FrankenSQLite failure.
     Sql {
         /// What was being done.
@@ -110,6 +337,31 @@ pub enum StoreError {
 impl core::fmt::Display for StoreError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            StoreError::Rollback { operation, error } => write!(
+                f,
+                "FS-MATDB-STORE-ROLLBACK: {operation}; rollback failed: {error:?}"
+            ),
+            StoreError::UnsupportedSchema { version } => {
+                write!(f, "FS-MATDB-STORE-SCHEMA: unsupported version {version}")
+            }
+            StoreError::UnknownContent { content_hash } => {
+                write!(f, "FS-MATDB-STORE-UNKNOWN-CONTENT: {content_hash}")
+            }
+            StoreError::WrongPackKind {
+                pack_id,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "FS-MATDB-STORE-PACK-KIND: {pack_id}: expected {} but found {}",
+                expected.as_str(),
+                actual.as_str()
+            ),
+            StoreError::NoPropertyClaims { pack_id, kind } => write!(
+                f,
+                "FS-MATDB-STORE-NO-PROPERTY-CLAIMS: {pack_id} ({})",
+                kind.as_str()
+            ),
             StoreError::Sql { context, error } => {
                 write!(f, "FS-MATDB-STORE-SQL: {context}: {error:?}")
             }
@@ -165,6 +417,8 @@ fn sql_err(context: &'static str) -> impl FnOnce(FrankenError) -> StoreError {
 pub struct PropertyRow {
     /// Owning pack id.
     pub pack_id: String,
+    /// Distinguishes bulk/named-material claims from ordered-interface claims.
+    pub pack_kind: PackKind,
     /// Property name.
     pub property: String,
     /// Scalar value (SI) for scalar claims; `None` for curves.
@@ -194,6 +448,7 @@ pub struct MaterialStore {
 const DDL: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS packs(
         pack_id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL DEFAULT 'properties',
         content_hash BLOB NOT NULL,
         bytes BLOB NOT NULL,
         compiler TEXT NOT NULL,
@@ -231,15 +486,47 @@ impl MaterialStore {
     /// apply the schema.
     ///
     /// # Errors
-    /// [`StoreError::Sql`] on driver failures.
+    /// Unsupported schema versions, malformed headers, or transactional SQL
+    /// failures during creation/migration.
     pub fn open(path: &str) -> Result<Self, StoreError> {
         let conn = AsyncConnection::open_sync(path).map_err(sql_err("open"))?;
-        for ddl in DDL {
-            conn.execute_sync(ddl).map_err(sql_err("schema ddl"))?;
+        let rows = conn
+            .query_sync("PRAGMA user_version")
+            .map_err(sql_err("read schema version"))?;
+        let version = match rows.first().and_then(|row| row.get(0)) {
+            Some(SqliteValue::Integer(version)) => *version,
+            _ => {
+                return Err(StoreError::Malformed {
+                    context: "schema version",
+                });
+            }
+        };
+        if !(0..=STORE_SCHEMA_VERSION).contains(&version) {
+            return Err(StoreError::UnsupportedSchema { version });
         }
-        conn.execute_sync(&format!("PRAGMA user_version = {STORE_SCHEMA_VERSION}"))
-            .map_err(sql_err("schema version"))?;
-        Ok(MaterialStore { conn })
+        let store = MaterialStore { conn };
+        store.transaction(|| {
+            for ddl in DDL {
+                store
+                    .conn
+                    .execute_sync(ddl)
+                    .map_err(sql_err("schema ddl"))?;
+            }
+            if version == 1 {
+                store
+                    .conn
+                    .execute_sync(
+                        "ALTER TABLE packs ADD COLUMN kind TEXT NOT NULL DEFAULT 'properties'",
+                    )
+                    .map_err(sql_err("migrate pack families"))?;
+            }
+            store
+                .conn
+                .execute_sync(&format!("PRAGMA user_version = {STORE_SCHEMA_VERSION}"))
+                .map_err(sql_err("schema version"))?;
+            Ok(())
+        })?;
+        Ok(store)
     }
 
     /// Ingest one verified pack: canonical bytes plus derived index
@@ -250,77 +537,121 @@ impl MaterialStore {
     /// [`StoreError`] on duplicates, inadmissible metadata, or driver
     /// failures.
     pub fn ingest_pack(&self, pack: &NormalizedPack) -> Result<(), StoreError> {
-        let pack_id = pack.pack_id().to_string();
-        if pack.redistribution_terms().trim().is_empty() {
-            return Err(StoreError::Inadmissible {
-                pack_id,
-                what: "empty redistribution terms",
-            });
-        }
-        // Admission PRE-PASS before any row is written (review finding:
-        // a mid-ingest refusal must not leave a committed partial pack).
-        for (_claim_id, claim) in pack.claims().claims_ordered() {
-            if claim.provenance.license.trim().is_empty() {
-                return Err(StoreError::Inadmissible {
-                    pack_id,
-                    what: "claim with empty license",
-                });
-            }
-        }
-        let existing = self
-            .conn
-            .query_with_params_sync(
-                "SELECT 1 FROM packs WHERE pack_id = ?1",
-                &[text_param(&pack_id)],
-            )
-            .map_err(sql_err("duplicate probe"))?;
-        if !existing.is_empty() {
-            return Err(StoreError::DuplicatePack { pack_id });
-        }
-        let bytes = pack.to_bytes();
-        let hash = pack.content_hash();
-        // Transactional ingest: any failure below rolls the whole pack
-        // back, so retries never hit DuplicatePack on a half-ingested
-        // id and the index can never be partially populated.
-        self.conn
-            .execute_sync("BEGIN IMMEDIATE")
-            .map_err(sql_err("begin ingest"))?;
-        let result = self.ingest_rows(&pack_id, pack, &bytes, hash);
-        match &result {
-            Ok(()) => {
-                self.conn
-                    .execute_sync("COMMIT")
-                    .map_err(sql_err("commit ingest"))?;
-            }
-            Err(_) => {
-                let _ = self.conn.execute_sync("ROLLBACK");
-            }
-        }
-        result
+        self.ingest_prepared(&[PreparedPack {
+            pack_id: pack.pack_id(),
+            kind: PackKind::Properties,
+            hash: pack.content_hash(),
+            bytes: pack.to_bytes(),
+            compiler: pack.compiler(),
+            redistribution: pack.redistribution_terms(),
+            claims: Some(pack.claims()),
+        }])
     }
 
-    fn ingest_rows(
+    /// Ingest related artifacts atomically, preserving exact canonical bytes.
+    /// An empty bundle is a no-op. Pack names remain globally unique; relations
+    /// are the caller's exact content pins and the identities inside each pack,
+    /// never guessed from similar names. Sealing remains an explicit later step.
+    ///
+    /// # Errors
+    /// Duplicate ids, admission errors, or SQL errors leave the entire bundle
+    /// uncommitted, including packs inserted before the failing member.
+    pub fn ingest_bundle(&self, packs: &[CatalogPack]) -> Result<(), StoreError> {
+        let prepared: Vec<_> = packs.iter().map(CatalogPack::prepare).collect();
+        self.ingest_prepared(&prepared)
+    }
+
+    fn ingest_prepared(&self, packs: &[PreparedPack<'_>]) -> Result<(), StoreError> {
+        if packs.is_empty() {
+            return Ok(());
+        }
+        let mut ids = std::collections::BTreeSet::new();
+        for pack in packs {
+            if !ids.insert(pack.pack_id) {
+                return Err(StoreError::DuplicatePack {
+                    pack_id: pack.pack_id.to_owned(),
+                });
+            }
+            if pack.redistribution.trim().is_empty() {
+                return Err(StoreError::Inadmissible {
+                    pack_id: pack.pack_id.to_owned(),
+                    what: "empty redistribution terms",
+                });
+            }
+            if let Some(claims) = pack.claims {
+                for (_, claim) in claims.claims_ordered() {
+                    if claim.provenance.license.trim().is_empty() {
+                        return Err(StoreError::Inadmissible {
+                            pack_id: pack.pack_id.to_owned(),
+                            what: "claim with empty license",
+                        });
+                    }
+                }
+            }
+        }
+        self.transaction(|| {
+            for pack in packs {
+                let existing = self
+                    .conn
+                    .query_with_params_sync(
+                        "SELECT 1 FROM packs WHERE pack_id = ?1",
+                        &[text_param(pack.pack_id)],
+                    )
+                    .map_err(sql_err("duplicate probe"))?;
+                if !existing.is_empty() {
+                    return Err(StoreError::DuplicatePack {
+                        pack_id: pack.pack_id.to_owned(),
+                    });
+                }
+                self.ingest_rows(pack)?;
+            }
+            Ok(())
+        })
+    }
+
+    fn transaction<T>(
         &self,
-        pack_id: &str,
-        pack: &NormalizedPack,
-        bytes: &[u8],
-        hash: ContentHash,
-    ) -> Result<(), StoreError> {
+        work: impl FnOnce() -> Result<T, StoreError>,
+    ) -> Result<T, StoreError> {
+        self.conn
+            .execute_sync("BEGIN IMMEDIATE")
+            .map_err(sql_err("begin transaction"))?;
+        let result = work().and_then(|value| {
+            self.conn
+                .execute_sync("COMMIT")
+                .map_err(sql_err("commit transaction"))?;
+            Ok(value)
+        });
+        match result {
+            Ok(value) => Ok(value),
+            Err(operation) => match self.conn.execute_sync("ROLLBACK") {
+                Ok(_) => Err(operation),
+                Err(error) => Err(StoreError::Rollback {
+                    operation: Box::new(operation),
+                    error,
+                }),
+            },
+        }
+    }
+
+    fn ingest_rows(&self, pack: &PreparedPack<'_>) -> Result<(), StoreError> {
+        let pack_id = pack.pack_id;
         self.conn
             .execute_with_params_sync(
-                "INSERT INTO packs(pack_id, content_hash, bytes, compiler, redistribution) \
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO packs(pack_id, content_hash, bytes, compiler, redistribution, kind) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 &[
                     text_param(pack_id),
-                    blob_param(hash.as_bytes()),
-                    blob_param(bytes),
-                    text_param(pack.compiler()),
-                    text_param(pack.redistribution_terms()),
+                    blob_param(pack.hash.as_bytes()),
+                    blob_param(&pack.bytes),
+                    text_param(pack.compiler),
+                    text_param(pack.redistribution),
+                    text_param(pack.kind.as_str()),
                 ],
             )
             .map_err(sql_err("insert pack"))?;
         // Derived index rows, in the ClaimSet's canonical order.
-        for (claim_id, claim) in pack.claims().claims_ordered() {
+        for (claim_id, claim) in pack.claims.into_iter().flat_map(ClaimSet::claims_ordered) {
             let (kind, scalar_value) = match &claim.value {
                 fs_matdb::PropertyValue::Scalar { value, .. } => ("scalar", Some(*value)),
                 fs_matdb::PropertyValue::Curve { .. } => ("curve", None),
@@ -363,7 +694,7 @@ impl MaterialStore {
     fn live_digest(&self) -> Result<(ContentHash, i64), StoreError> {
         let rows = self
             .conn
-            .query_sync("SELECT pack_id, content_hash FROM packs ORDER BY pack_id")
+            .query_sync("SELECT pack_id, content_hash, kind FROM packs ORDER BY pack_id")
             .map_err(sql_err("digest scan"))?;
         let mut hasher = DomainHasher::new(CORPUS_DIGEST_DOMAIN);
         for row in &rows {
@@ -373,6 +704,10 @@ impl MaterialStore {
             hasher.update(id.as_bytes());
             hasher.update(&(hash.len() as u64).to_le_bytes());
             hasher.update(&hash);
+            let kind = row_text(row, 2, "packs.kind")?;
+            PackKind::parse(&kind)?;
+            hasher.update(&(kind.len() as u64).to_le_bytes());
+            hasher.update(kind.as_bytes());
         }
         Ok((
             hasher.finalize(),
@@ -430,8 +765,9 @@ impl MaterialStore {
         let rows = self
             .conn
             .query_with_params_sync(
-                "SELECT pack_id, property, scalar_value, kind, observation_backed \
-                 FROM claims WHERE pack_id = ?1 ORDER BY property",
+                "SELECT c.pack_id, c.property, c.scalar_value, c.kind, c.observation_backed, p.kind \
+                 FROM claims c JOIN packs p ON p.pack_id = c.pack_id \
+                 WHERE c.pack_id = ?1 ORDER BY c.property, c.claim_hash",
                 &[text_param(pack_id)],
             )
             .map_err(sql_err("properties_of"))?;
@@ -467,17 +803,19 @@ impl MaterialStore {
             None => self
                 .conn
                 .query_with_params_sync(
-                    "SELECT pack_id, property, scalar_value, kind, observation_backed \
-                     FROM claims WHERE property = ?1 ORDER BY pack_id",
+                    "SELECT c.pack_id, c.property, c.scalar_value, c.kind, c.observation_backed, p.kind \
+                     FROM claims c JOIN packs p ON p.pack_id = c.pack_id \
+                     WHERE c.property = ?1 ORDER BY c.pack_id, c.claim_hash",
                     &[text_param(property)],
                 )
                 .map_err(sql_err("materials_with"))?,
             Some((lo, hi)) => self
                 .conn
                 .query_with_params_sync(
-                    "SELECT pack_id, property, scalar_value, kind, observation_backed \
-                     FROM claims WHERE property = ?1 AND scalar_value IS NOT NULL \
-                     AND scalar_value >= ?2 AND scalar_value <= ?3 ORDER BY pack_id",
+                    "SELECT c.pack_id, c.property, c.scalar_value, c.kind, c.observation_backed, p.kind \
+                     FROM claims c JOIN packs p ON p.pack_id = c.pack_id \
+                     WHERE c.property = ?1 AND c.scalar_value IS NOT NULL \
+                     AND c.scalar_value >= ?2 AND c.scalar_value <= ?3 ORDER BY c.pack_id, c.claim_hash",
                     &[
                         text_param(property),
                         SqliteValue::Float(lo),
@@ -525,12 +863,13 @@ impl MaterialStore {
         let rows = self
             .conn
             .query_with_params_sync(
-                "SELECT c.pack_id, c.property, c.scalar_value, c.kind, c.observation_backed \
-                 FROM claims c WHERE c.property = ?1 AND NOT EXISTS (\
+                "SELECT c.pack_id, c.property, c.scalar_value, c.kind, c.observation_backed, p.kind \
+                 FROM claims c JOIN packs p ON p.pack_id = c.pack_id \
+                 WHERE c.property = ?1 AND NOT EXISTS (\
                     SELECT 1 FROM validity v WHERE v.pack_id = c.pack_id \
                     AND v.claim_hash = c.claim_hash AND v.axis = ?2 \
                     AND (v.lo > ?3 OR v.hi < ?3)\
-                 ) ORDER BY c.pack_id",
+                 ) ORDER BY c.pack_id, c.claim_hash",
                 &[
                     text_param(property),
                     text_param(axis),
@@ -552,17 +891,101 @@ impl MaterialStore {
     /// [`StoreError::PackCorrupt`].
     pub fn load_pack(&self, pack_id: &str) -> Result<NormalizedPack, StoreError> {
         self.require_sealed()?;
-        self.load_pack_unchecked(pack_id)
+        let pack = self.load_catalog_pack_unchecked(pack_id)?;
+        match pack {
+            CatalogPack::Properties(pack) => Ok(pack),
+            other => Err(StoreError::WrongPackKind {
+                pack_id: pack_id.to_owned(),
+                expected: PackKind::Properties,
+                actual: other.kind(),
+            }),
+        }
+    }
+
+    /// Discover artifact families and whole-pack identities in stable name order.
+    /// Model/species packs are included without converting their data to claims.
+    ///
+    /// # Errors
+    /// Staleness, malformed metadata, or SQL failures.
+    pub fn packs(&self, kind: Option<PackKind>) -> Result<Vec<PackRow>, StoreError> {
+        self.require_sealed()?;
+        let rows = if let Some(kind) = kind {
+            self.conn.query_with_params_sync(
+                "SELECT pack_id, kind, content_hash FROM packs WHERE kind = ?1 ORDER BY pack_id",
+                &[text_param(kind.as_str())],
+            )
+        } else {
+            self.conn
+                .query_sync("SELECT pack_id, kind, content_hash FROM packs ORDER BY pack_id")
+        }
+        .map_err(sql_err("discover packs"))?;
+        rows.iter()
+            .map(|row| {
+                Ok(PackRow {
+                    pack_id: row_text(row, 0, "packs.pack_id")?,
+                    kind: PackKind::parse(&row_text(row, 1, "packs.kind")?)?,
+                    content_hash: ContentHash::from_slice(&row_blob(row, 2, "packs.content_hash")?)
+                        .ok_or(StoreError::Malformed {
+                            context: "packs.content_hash length",
+                        })?,
+                })
+            })
+            .collect()
+    }
+
+    /// Load an artifact through its existing family-specific canonical decoder.
+    ///
+    /// # Errors
+    /// Staleness, unknown id, or canonical decode refusal.
+    pub fn load_catalog_pack(&self, pack_id: &str) -> Result<CatalogPack, StoreError> {
+        self.require_sealed()?;
+        self.load_catalog_pack_unchecked(pack_id)
+    }
+
+    /// Resolve an exact whole-artifact dependency. A scenario pins the family
+    /// and content hash, so a similarly named pack cannot satisfy the binding.
+    ///
+    /// # Errors
+    /// Staleness, absent content, wrong family, or canonical decode refusal.
+    pub fn load_by_hash(
+        &self,
+        kind: PackKind,
+        content_hash: ContentHash,
+    ) -> Result<CatalogPack, StoreError> {
+        self.require_sealed()?;
+        let rows = self
+            .conn
+            .query_with_params_sync(
+                "SELECT pack_id FROM packs WHERE content_hash = ?1 ORDER BY pack_id",
+                &[blob_param(content_hash.as_bytes())],
+            )
+            .map_err(sql_err("resolve content pin"))?;
+        let Some(row) = rows.first() else {
+            return Err(StoreError::UnknownContent { content_hash });
+        };
+        let pack_id = row_text(row, 0, "packs.pack_id")?;
+        let pack = self.load_catalog_pack_unchecked(&pack_id)?;
+        if pack.kind() != kind {
+            return Err(StoreError::WrongPackKind {
+                pack_id,
+                expected: kind,
+                actual: pack.kind(),
+            });
+        }
+        if pack.content_hash() != content_hash {
+            return Err(StoreError::PackCorrupt { pack_id });
+        }
+        Ok(pack)
     }
 
     /// The gate-free decode used internally after a caller has already
     /// paid `require_sealed` (and by `verify_index`, which must work on
     /// a DRIFTED store precisely because its job is investigating one).
-    fn load_pack_unchecked(&self, pack_id: &str) -> Result<NormalizedPack, StoreError> {
+    fn load_catalog_pack_unchecked(&self, pack_id: &str) -> Result<CatalogPack, StoreError> {
         let rows = self
             .conn
             .query_with_params_sync(
-                "SELECT content_hash, bytes FROM packs WHERE pack_id = ?1",
+                "SELECT content_hash, bytes, kind FROM packs WHERE pack_id = ?1",
                 &[text_param(pack_id)],
             )
             .map_err(sql_err("load pack"))?;
@@ -576,9 +999,18 @@ impl MaterialStore {
         let expected = ContentHash::from_slice(&hash_bytes).ok_or(StoreError::Malformed {
             context: "packs.content_hash length",
         })?;
-        NormalizedPack::from_bytes_verified(expected, &bytes).map_err(|_| StoreError::PackCorrupt {
-            pack_id: pack_id.to_string(),
-        })
+        let kind = PackKind::parse(&row_text(row, 2, "packs.kind")?)?;
+        let pack = CatalogPack::from_bytes_verified(kind, expected, &bytes).map_err(|_| {
+            StoreError::PackCorrupt {
+                pack_id: pack_id.to_string(),
+            }
+        })?;
+        if pack.pack_id() != pack_id {
+            return Err(StoreError::PackCorrupt {
+                pack_id: pack_id.to_owned(),
+            });
+        }
+        Ok(pack)
     }
 
     /// AUTHORITATIVE evaluation: decode the hash-verified pack and
@@ -598,9 +1030,16 @@ impl MaterialStore {
         policy: SelectionPolicy,
     ) -> Result<MaterialAnswer, StoreError> {
         self.require_sealed()?;
-        let pack = self.load_pack_unchecked(pack_id)?;
-        let answer = pack.claims().query(property, point, policy)?;
-        pack.claims().verify_receipt(&answer.receipt)?;
+        let pack = self.load_catalog_pack_unchecked(pack_id)?;
+        let claims = pack
+            .claims_pack()
+            .ok_or_else(|| StoreError::NoPropertyClaims {
+                pack_id: pack_id.to_owned(),
+                kind: pack.kind(),
+            })?
+            .claims();
+        let answer = claims.query(property, point, policy)?;
+        claims.verify_receipt(&answer.receipt)?;
         Ok(answer)
     }
 
@@ -611,7 +1050,8 @@ impl MaterialStore {
     /// # Errors
     /// [`StoreError::IndexMismatch`] naming the first disagreement.
     pub fn verify_index(&self, pack_id: &str) -> Result<(), StoreError> {
-        let pack = self.load_pack_unchecked(pack_id)?;
+        let pack = self.load_catalog_pack_unchecked(pack_id)?;
+        let claims = pack.claims_pack().map(NormalizedPack::claims);
         let index_rows = self
             .conn
             .query_with_params_sync(
@@ -620,9 +1060,9 @@ impl MaterialStore {
                 &[text_param(pack_id)],
             )
             .map_err(sql_err("verify_index scan"))?;
-        let mut derived: Vec<(String, String, Option<f64>, Vec<u8>)> = pack
-            .claims()
-            .claims_ordered()
+        let mut derived: Vec<(String, String, Option<f64>, Vec<u8>)> = claims
+            .into_iter()
+            .flat_map(ClaimSet::claims_ordered)
             .map(|(claim_id, claim)| {
                 let (kind, value) = match &claim.value {
                     fs_matdb::PropertyValue::Scalar { value, .. } => {
@@ -685,13 +1125,17 @@ impl MaterialStore {
                 });
             }
         }
-        self.verify_validity_rows(pack_id, &pack)
+        self.verify_validity_rows(pack_id, claims)
     }
 
     /// Validity-table arm of [`Self::verify_index`] (review finding:
     /// `valid_at` is DRIVEN by this table, so the tamper detector must
     /// cover it too).
-    fn verify_validity_rows(&self, pack_id: &str, pack: &NormalizedPack) -> Result<(), StoreError> {
+    fn verify_validity_rows(
+        &self,
+        pack_id: &str,
+        claims: Option<&ClaimSet>,
+    ) -> Result<(), StoreError> {
         let stored_validity = self
             .conn
             .query_with_params_sync(
@@ -700,7 +1144,7 @@ impl MaterialStore {
             )
             .map_err(sql_err("verify_index validity scan"))?;
         let mut derived_validity: Vec<(String, String, f64, f64)> = Vec::new();
-        for (claim_id, claim) in pack.claims().claims_ordered() {
+        for (claim_id, claim) in claims.into_iter().flat_map(ClaimSet::claims_ordered) {
             for (axis, (lo, hi)) in claim.validity.bounds() {
                 derived_validity.push((hex(claim_id.0.as_bytes()), axis.clone(), *lo, *hi));
             }
@@ -746,13 +1190,22 @@ impl MaterialStore {
     }
 
     /// Canonical dump of the derived tables (for the bitwise-rebuild
-    /// determinism proof): every claims + validity row rendered in a
+    /// determinism proof): every pack, claim, and validity row rendered in a
     /// fixed order and format.
     ///
     /// # Errors
     /// Driver failures.
     pub fn canonical_dump(&self) -> Result<String, StoreError> {
         let mut out = String::new();
+        let rows = self.conn.query_sync(
+            "SELECT pack_id, kind, lower(hex(content_hash)), compiler, redistribution FROM packs ORDER BY pack_id"
+        ).map_err(sql_err("dump packs"))?;
+        for row in &rows {
+            for i in 0..5 {
+                push_field(&mut out, &render_value(row.get(i)));
+            }
+            out.push('\n');
+        }
         let rows = self
             .conn
             .query_sync(
@@ -853,6 +1306,7 @@ fn property_row(row: &Row) -> Result<PropertyRow, StoreError> {
     };
     Ok(PropertyRow {
         pack_id: row_text(row, 0, "claims.pack_id")?,
+        pack_kind: PackKind::parse(&row_text(row, 5, "packs.kind")?)?,
         property: row_text(row, 1, "claims.property")?,
         scalar_value,
         kind: row_text(row, 3, "claims.kind")?,

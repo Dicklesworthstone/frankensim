@@ -9,20 +9,23 @@ use std::fmt;
 
 use fs_blake3::{ContentHash, hash_domain};
 use fs_evidence::ValidityDomain;
-use fs_qty::Dims;
+use fs_qty::{Dims, QuantitySpec, QUANTITY_SPEC_ENCODED_LEN};
 
 use crate::{
     ClaimId, ClaimSet, InterpolationPolicy, MatDbError, ObservationDataset, ObservationId,
     PropertyClaim, PropertyKey, PropertyValue, Provenance, UncertaintyModel,
 };
 
-/// Current normalized material-pack wire schema.
+/// Frozen dimension-only normalized material-pack wire schema.
 pub const MATDB_PACK_SCHEMA_VERSION: u32 = 1;
+/// Typed property schemas. V1 bytes continue through the unchanged v1 layout.
+pub const MATDB_TYPED_PACK_SCHEMA_VERSION: u32 = 2;
 /// Canonical coherent-SI target basis and its explicit six-base order.
 pub const MATDB_PACK_TARGET_BASIS: &str = "SI-six-base[m,kg,s,K,A,mol]";
 
 const MAGIC: &[u8; 8] = b"FSMATPK\0";
 const PACK_HASH_DOMAIN: &str = "org.frankensim.fs-matdb.normalized-pack.v1";
+const TYPED_PACK_HASH_DOMAIN: &str = "org.frankensim.fs-matdb.normalized-pack.v2";
 const MAX_PACK_BYTES: usize = 256 * 1024 * 1024;
 const MAX_STRING_BYTES: usize = 1_048_576;
 const MAX_OBSERVATIONS: usize = 100_000;
@@ -527,6 +530,17 @@ impl NormalizedPack {
         &self.claims
     }
 
+    /// Lowest schema capable of preserving this pack. A v1 pack is never
+    /// silently reinterpreted as having quantity kinds.
+    #[must_use]
+    pub fn schema_version(&self) -> u32 {
+        if self.claims.claims_ordered().any(|(_, claim)| claim.key.quantity().semantic_type().is_some()) {
+            MATDB_TYPED_PACK_SCHEMA_VERSION
+        } else {
+            MATDB_PACK_SCHEMA_VERSION
+        }
+    }
+
     /// Canonically ordered joint-statistics blocks.
     #[must_use]
     pub fn joint_statistics(&self) -> &[JointStatistics] {
@@ -544,7 +558,8 @@ impl NormalizedPack {
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut writer = Writer::default();
         writer.bytes.extend_from_slice(MAGIC);
-        writer.u32(MATDB_PACK_SCHEMA_VERSION);
+        let version = self.schema_version();
+        writer.u32(version);
         writer.string(&self.pack_id);
         writer.string(&self.compiler);
         writer.hash(self.source_artifact);
@@ -565,7 +580,7 @@ impl NormalizedPack {
         writer.count(claims.len());
         for (id, claim) in claims {
             writer.hash(id.0);
-            encode_claim(&mut writer, claim);
+            encode_claim(&mut writer, claim, version);
         }
 
         writer.count(self.joint_statistics.len());
@@ -604,7 +619,7 @@ impl NormalizedPack {
     /// Domain-separated identity of the canonical pack bytes.
     #[must_use]
     pub fn content_hash(&self) -> ContentHash {
-        hash_domain(PACK_HASH_DOMAIN, &self.to_bytes())
+        hash_domain(pack_hash_domain(self.schema_version()), &self.to_bytes())
     }
 
     /// Verify an externally pinned artifact identity before decoding.
@@ -616,7 +631,8 @@ impl NormalizedPack {
         if bytes.len() > MAX_PACK_BYTES {
             return Err(limit("pack_bytes", MAX_PACK_BYTES, bytes.len()));
         }
-        let actual = hash_domain(PACK_HASH_DOMAIN, bytes);
+        let version = bytes.get(8..12).and_then(|raw| raw.try_into().ok()).map(u32::from_le_bytes).unwrap_or(0);
+        let actual = hash_domain(pack_hash_domain(version), bytes);
         if actual != expected {
             return Err(PackError::IdentityMismatch {
                 kind: "pack",
@@ -636,9 +652,9 @@ impl NormalizedPack {
         let mut reader = Reader::new(bytes);
         reader.expect(MAGIC, "normalized pack magic")?;
         let version = reader.u32()?;
-        if version != MATDB_PACK_SCHEMA_VERSION {
+        if version != MATDB_PACK_SCHEMA_VERSION && version != MATDB_TYPED_PACK_SCHEMA_VERSION {
             return Err(reader.malformed(format!(
-                "unsupported schema version {version}; expected {MATDB_PACK_SCHEMA_VERSION}"
+                "unsupported schema version {version}; expected 1 (dimension-only) or 2 (typed properties)"
             )));
         }
         let pack_id = reader.string()?;
@@ -664,7 +680,7 @@ impl NormalizedPack {
         let claim_count = reader.count("claims", MAX_CLAIMS)?;
         for _ in 0..claim_count {
             let expected = reader.hash()?;
-            let claim = decode_claim(&mut reader)?;
+            let claim = decode_claim(&mut reader, version)?;
             let actual = claims.insert_claim(claim)?.0;
             if actual != expected {
                 return Err(PackError::IdentityMismatch {
@@ -751,6 +767,10 @@ impl NormalizedPack {
         }
         Ok(pack)
     }
+}
+
+fn pack_hash_domain(version: u32) -> &'static str {
+    if version == MATDB_TYPED_PACK_SCHEMA_VERSION { TYPED_PACK_HASH_DOMAIN } else { PACK_HASH_DOMAIN }
 }
 
 fn invalid(field: &'static str, detail: impl Into<String>) -> PackError {
@@ -2030,9 +2050,12 @@ fn decode_observation(reader: &mut Reader<'_>) -> Result<ObservationDataset, Pac
     })
 }
 
-fn encode_claim(writer: &mut Writer, claim: &PropertyClaim) {
+fn encode_claim(writer: &mut Writer, claim: &PropertyClaim, version: u32) {
     writer.string(claim.key.name());
     writer.dims(claim.key.dims());
+    if version == MATDB_TYPED_PACK_SCHEMA_VERSION {
+        writer.bytes.extend_from_slice(&claim.key.quantity().canonical_bytes());
+    }
     match &claim.value {
         PropertyValue::Scalar { value, dims } => {
             writer.u8(0);
@@ -2093,9 +2116,20 @@ fn encode_claim(writer: &mut Writer, claim: &PropertyClaim) {
     encode_provenance(writer, &claim.provenance);
 }
 
-fn decode_claim(reader: &mut Reader<'_>) -> Result<PropertyClaim, PackError> {
+fn decode_claim(reader: &mut Reader<'_>, version: u32) -> Result<PropertyClaim, PackError> {
     let name = reader.string()?;
     let key_dims = reader.dims()?;
+    let quantity = if version == MATDB_TYPED_PACK_SCHEMA_VERSION {
+        let raw = reader.take(QUANTITY_SPEC_ENCODED_LEN)?;
+        let quantity = QuantitySpec::from_canonical_bytes(raw)
+            .map_err(|error| reader.malformed(format!("property quantity: {error}")))?;
+        if quantity.dims() != key_dims {
+            return Err(reader.malformed("property quantity dimensions disagree with key dimensions"));
+        }
+        quantity
+    } else {
+        QuantitySpec::dimensional(key_dims)
+    };
     let value = match reader.u8()? {
         0 => PropertyValue::Scalar {
             value: reader.f64()?,
@@ -2169,7 +2203,7 @@ fn decode_claim(reader: &mut Reader<'_>) -> Result<PropertyClaim, PackError> {
         observations.push(ObservationId(reader.hash()?));
     }
     Ok(PropertyClaim {
-        key: PropertyKey::new(name, key_dims),
+        key: PropertyKey::with_quantity(name, quantity),
         value,
         validity,
         uncertainty,

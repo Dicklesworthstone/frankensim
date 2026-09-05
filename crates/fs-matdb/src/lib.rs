@@ -28,7 +28,7 @@ use std::fmt;
 
 use fs_blake3::{ContentHash, hash_domain};
 use fs_evidence::ValidityDomain;
-use fs_qty::Dims;
+use fs_qty::{Dims, QuantitySpec};
 
 mod cards;
 mod contact_pack;
@@ -62,7 +62,7 @@ pub use model_pack::{
 pub use pack::{
     CorrelationUnknownReason, JOINT_USAGE_RECEIPT_IDENTITY_DOMAIN,
     JOINT_USAGE_RECEIPT_SCHEMA_VERSION, JointAnswer, JointCorrelation, JointStatistics,
-    JointUsageReceipt, MATDB_PACK_SCHEMA_VERSION, MATDB_PACK_TARGET_BASIS, NormalizationReceipt,
+    JointUsageReceipt, MATDB_PACK_SCHEMA_VERSION, MATDB_TYPED_PACK_SCHEMA_VERSION, MATDB_PACK_TARGET_BASIS, NormalizationReceipt,
     NormalizationTarget, NormalizedPack, PackError, StatisticComponent, StatisticMember,
     ValidityBoundSide,
 };
@@ -106,6 +106,22 @@ pub enum MatDbError {
         expected: Dims,
         /// The offered value's dimensions.
         found: Dims,
+    },
+    /// A same-dimension property has a different meaning or convention.
+    QuantityMismatch {
+        /// Property whose schema disagrees.
+        property: String,
+        /// Required exact descriptor; dimension-only is not a wildcard.
+        expected: QuantitySpec,
+        /// Descriptor actually registered or supplied.
+        found: QuantitySpec,
+    },
+    /// A typed nominal value violates its kind's scalar domain or form policy.
+    InvalidQuantityValue {
+        /// Property being admitted.
+        property: String,
+        /// Scalar admission refusal from the shared quantity owner.
+        error: fs_qty::semantic::SemanticError,
     },
     /// The provenance record has an empty license field. License is
     /// LOAD-BEARING: unlicensed data cannot enter the store.
@@ -299,6 +315,11 @@ impl fmt::Display for MatDbError {
                  {expected:?}",
                 key.name()
             ),
+            MatDbError::InvalidQuantityValue { property, error } => write!(f, "property '{property}': {error}"),
+            MatDbError::QuantityMismatch { property, expected, found } => write!(
+                f,
+                "property '{property}': quantity {found:?} disagrees with required {expected:?}; convert explicitly before querying"
+            ),
             MatDbError::MissingLicense { source } => write!(
                 f,
                 "provenance for '{source}' has no license: unlicensed data cannot enter the store"
@@ -441,7 +462,7 @@ impl std::error::Error for MatDbError {}
 #[derive(Debug, Clone, PartialEq)]
 pub struct PropertyKey {
     name: String,
-    dims: Dims,
+    quantity: QuantitySpec,
 }
 
 impl PropertyKey {
@@ -450,8 +471,21 @@ impl PropertyKey {
     pub fn new(name: impl Into<String>, dims: Dims) -> PropertyKey {
         PropertyKey {
             name: name.into(),
-            dims,
+            quantity: QuantitySpec::dimensional(dims),
         }
+    }
+
+    /// A property with an exact quantity kind and convention, or an explicit
+    /// dimension-only descriptor. No conversion or source-kind inference occurs.
+    #[must_use]
+    pub fn with_quantity(name: impl Into<String>, quantity: QuantitySpec) -> Self {
+        Self { name: name.into(), quantity }
+    }
+
+    /// Exact quantity schema. A dimension-only declaration is not a wildcard.
+    #[must_use]
+    pub const fn quantity(&self) -> QuantitySpec {
+        self.quantity
     }
 
     /// The property name.
@@ -463,7 +497,7 @@ impl PropertyKey {
     /// The registered dimensions.
     #[must_use]
     pub fn dims(&self) -> Dims {
-        self.dims
+        self.quantity.dims()
     }
 }
 
@@ -747,7 +781,7 @@ impl PropertyClaim {
             payload.extend_from_slice(part);
         };
         push(self.key.name.as_bytes());
-        push(&dims_bytes(self.key.dims));
+        push(&dims_bytes(self.key.dims()));
         match &self.value {
             PropertyValue::Scalar { value, dims } => {
                 push(b"scalar");
@@ -807,7 +841,13 @@ impl PropertyClaim {
         if let Some(artifact) = &self.provenance.artifact {
             push(&artifact.0);
         }
-        hash_domain(CLAIM_HASH_DOMAIN, &payload)
+        if self.key.quantity().semantic_type().is_some() {
+            push(&self.key.quantity().canonical_bytes());
+            hash_domain("org.frankensim.fs-matdb.property-claim.v2", &payload)
+        } else {
+            // Frozen dimension-only claims retain their exact v1 identity.
+            hash_domain(CLAIM_HASH_DOMAIN, &payload)
+        }
     }
 }
 
@@ -829,7 +869,7 @@ pub(crate) fn dims_bytes(dims: Dims) -> Vec<u8> {
 pub struct ClaimSet {
     observations: BTreeMap<ObservationId, ObservationDataset>,
     claims: BTreeMap<ClaimId, PropertyClaim>,
-    key_dims: BTreeMap<String, Dims>,
+    key_specs: BTreeMap<String, QuantitySpec>,
     by_key: BTreeMap<String, Vec<ClaimId>>,
 }
 
@@ -880,13 +920,35 @@ impl ClaimSet {
                 found,
             });
         }
-        if let Some(&registered) = self.key_dims.get(claim.key.name())
-            && registered != claim.key.dims()
+        if let Some(semantic_type) = claim.key.quantity().semantic_type() {
+            let validate = |value| {
+                fs_qty::semantic::SemanticQty::new(fs_qty::QtyAny::new(value, found), semantic_type)
+                    .map(|_| ())
+                    .map_err(|error| MatDbError::InvalidQuantityValue {
+                        property: claim.key.name().to_owned(), error,
+                    })
+            };
+            match &claim.value {
+                PropertyValue::Scalar { value, .. } => validate(*value)?,
+                PropertyValue::Curve { knots, .. } => {
+                    for &(_, value) in knots { validate(value)?; }
+                }
+            }
+        }
+        if let Some(&registered) = self.key_specs.get(claim.key.name())
+            && registered.dims() != claim.key.dims()
         {
             return Err(MatDbError::DimsMismatch {
                 key: claim.key.clone(),
-                expected: registered,
+                expected: registered.dims(),
                 found,
+            });
+        }
+        if let Some(&expected) = self.key_specs.get(claim.key.name())
+            && expected != claim.key.quantity()
+        {
+            return Err(MatDbError::QuantityMismatch {
+                property: claim.key.name().to_owned(), expected, found: claim.key.quantity(),
             });
         }
         for observation in &claim.observations {
@@ -897,8 +959,8 @@ impl ClaimSet {
             }
         }
         let id = ClaimId(claim.content_hash());
-        self.key_dims
-            .insert(claim.key.name().to_string(), claim.key.dims());
+        self.key_specs
+            .insert(claim.key.name().to_string(), claim.key.quantity());
         let name = claim.key.name().to_string();
         if let std::collections::btree_map::Entry::Vacant(slot) = self.claims.entry(id) {
             slot.insert(claim);
@@ -935,7 +997,13 @@ impl ClaimSet {
     /// The dims registered for a property name, if any claim used it.
     #[must_use]
     pub fn registered_dims(&self, name: &str) -> Option<Dims> {
-        self.key_dims.get(name).copied()
+        self.registered_quantity(name).map(QuantitySpec::dims)
+    }
+
+    /// Exact schema registered for a property; no kind is inferred from its name.
+    #[must_use]
+    pub fn registered_quantity(&self, name: &str) -> Option<QuantitySpec> {
+        self.key_specs.get(name).copied()
     }
 
     /// Number of stored claims.

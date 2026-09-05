@@ -77,6 +77,55 @@ pub enum CompositionBasis {
     VolumeFraction,
 }
 
+/// Frequency convention; both have inverse-time dimensions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FrequencyConvention {
+    /// Cycles per second (Hz).
+    Cyclic,
+    /// Radians per second; one cycle is `2*pi` radians.
+    Angular,
+}
+
+/// Denominator of a moisture measurement. Relative humidity is a vapor
+/// pressure ratio, not either solid/liquid mass ratio.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MoistureBasis {
+    /// Water mass divided by dry specimen mass; may exceed one.
+    DryMass,
+    /// Water mass divided by total wet specimen mass.
+    WetMass,
+    /// Water-vapor partial pressure divided by saturation pressure.
+    RelativeHumidity,
+}
+
+/// Named empirical hardness scale. This does not supply the test's indenter,
+/// applied load, dwell time, specimen preparation, or method revision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HardnessScale {
+    /// Rockwell C scale reading.
+    RockwellC,
+    /// Vickers hardness number.
+    Vickers,
+    /// Brinell hardness number.
+    Brinell,
+    /// Shore A durometer reading.
+    ShoreA,
+    /// Shore D durometer reading.
+    ShoreD,
+}
+
+/// Definition of a spatial attenuation coefficient. Decibels use the
+/// equivalent `20 log10` amplitude / `10 log10` power convention.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AttenuationConvention {
+    /// Amplitude obeys `A(x) = A(0) exp(-alpha*x)`.
+    AmplitudeNepersPerMetre,
+    /// Power obeys `P(x) = P(0) exp(-alpha*x)`.
+    PowerNepersPerMetre,
+    /// Level loss in dB per metre.
+    DecibelsPerMetre,
+}
+
 /// Physical meaning carried in addition to a dimension vector.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum QuantityKind {
@@ -123,6 +172,18 @@ pub enum QuantityKind {
     AcousticPressure,
     /// Physical acoustic power.
     AcousticPower,
+    /// Oscillation frequency with an explicit cycle/radian convention.
+    Frequency(FrequencyConvention),
+    /// Moisture content or relative humidity in the named basis.
+    Moisture(MoistureBasis),
+    /// Empirical scale reading, never an unlabelled ratio or pressure.
+    Hardness(HardnessScale),
+    /// Spatial amplitude/power/level loss with an explicit definition.
+    Attenuation(AttenuationConvention),
+    /// Thermal conductivity, often written `k`, in W/(m K).
+    ThermalConductivity,
+    /// Dimensionless imaginary refractive-index coefficient, often `k`.
+    OpticalExtinctionCoefficient,
 }
 
 impl QuantityKind {
@@ -131,8 +192,11 @@ impl QuantityKind {
     pub const fn expected_dims(self) -> Dims {
         match self {
             Self::AbsoluteTemperature | Self::TemperatureDifference => TEMPERATURE_DIMS,
-            Self::Angle(_) | Self::Strain { .. } | Self::Composition(_) => Dims::NONE,
-            Self::AngularVelocity(_) => ANGULAR_VELOCITY_DIMS,
+            Self::Angle(_) | Self::Strain { .. } | Self::Composition(_)
+            | Self::Moisture(_) | Self::Hardness(_) | Self::OpticalExtinctionCoefficient => Dims::NONE,
+            Self::AngularVelocity(_) | Self::Frequency(_) => ANGULAR_VELOCITY_DIMS,
+            Self::Attenuation(_) => Dims([-1, 0, 0, 0, 0, 0]),
+            Self::ThermalConductivity => Dims([1, 1, -3, -1, 0, 0]),
             Self::Torque | Self::Energy => ENERGY_DIMS,
             Self::Pressure | Self::Stress | Self::AcousticPressure => PRESSURE_DIMS,
             Self::Mass => MASS_DIMS,
@@ -181,7 +245,13 @@ impl QuantityKind {
             | Self::AmountConcentration
             | Self::Entropy
             | Self::HeatCapacity
-            | Self::AcousticPower => STATIC_FORM,
+            | Self::AcousticPower
+            | Self::Frequency(_)
+            | Self::Moisture(_)
+            | Self::Hardness(_)
+            | Self::Attenuation(_)
+            | Self::ThermalConductivity
+            | Self::OpticalExtinctionCoefficient => STATIC_FORM,
         }
     }
 }
@@ -247,6 +317,10 @@ impl SemanticType {
 
 /// Version byte of the canonical [`QuantitySpec`] identity encoding.
 pub const QUANTITY_SPEC_ENCODING_VERSION: u8 = 1;
+
+/// Additive material conventions use v2 tokens. Existing descriptors retain
+/// their exact v1 bytes; v2 cannot re-encode an old kind under a new alias.
+pub const MATERIAL_QUANTITY_SPEC_ENCODING_VERSION: u8 = 2;
 
 /// Exact byte length of the canonical [`QuantitySpec`] identity encoding.
 pub const QUANTITY_SPEC_ENCODED_LEN: usize = 12;
@@ -323,7 +397,7 @@ impl QuantitySpec {
             }
         };
         [
-            QUANTITY_SPEC_ENCODING_VERSION,
+            if kind >= 20 { MATERIAL_QUANTITY_SPEC_ENCODING_VERSION } else { QUANTITY_SPEC_ENCODING_VERSION },
             dims[0].to_le_bytes()[0],
             dims[1].to_le_bytes()[0],
             dims[2].to_le_bytes()[0],
@@ -350,7 +424,12 @@ impl QuantitySpec {
                 actual: bytes.len(),
             });
         }
-        if bytes[0] != QUANTITY_SPEC_ENCODING_VERSION {
+        let expected_version = if bytes[7] == 1 && (20..=25).contains(&bytes[8]) {
+            MATERIAL_QUANTITY_SPEC_ENCODING_VERSION
+        } else {
+            QUANTITY_SPEC_ENCODING_VERSION
+        };
+        if bytes[0] != expected_version {
             return Err(QuantitySpecDecodeError::Version { actual: bytes[0] });
         }
         let dims = Dims([
@@ -538,6 +617,29 @@ const fn encode_quantity_kind(kind: QuantityKind) -> (u8, u8, u8) {
         QuantityKind::HeatCapacity => (17, 0, 0),
         QuantityKind::AcousticPressure => (18, 0, 0),
         QuantityKind::AcousticPower => (19, 0, 0),
+        QuantityKind::Frequency(convention) => (20, match convention {
+            FrequencyConvention::Cyclic => 1,
+            FrequencyConvention::Angular => 2,
+        }, 0),
+        QuantityKind::Moisture(basis) => (21, match basis {
+            MoistureBasis::DryMass => 1,
+            MoistureBasis::WetMass => 2,
+            MoistureBasis::RelativeHumidity => 3,
+        }, 0),
+        QuantityKind::Hardness(scale) => (22, match scale {
+            HardnessScale::RockwellC => 1,
+            HardnessScale::Vickers => 2,
+            HardnessScale::Brinell => 3,
+            HardnessScale::ShoreA => 4,
+            HardnessScale::ShoreD => 5,
+        }, 0),
+        QuantityKind::Attenuation(convention) => (23, match convention {
+            AttenuationConvention::AmplitudeNepersPerMetre => 1,
+            AttenuationConvention::PowerNepersPerMetre => 2,
+            AttenuationConvention::DecibelsPerMetre => 3,
+        }, 0),
+        QuantityKind::ThermalConductivity => (24, 0, 0),
+        QuantityKind::OpticalExtinctionCoefficient => (25, 0, 0),
     }
 }
 
@@ -597,6 +699,21 @@ const fn decode_quantity_kind(kind: u8, parameter_a: u8, parameter_b: u8) -> Opt
         (17, 0, 0) => Some(QuantityKind::HeatCapacity),
         (18, 0, 0) => Some(QuantityKind::AcousticPressure),
         (19, 0, 0) => Some(QuantityKind::AcousticPower),
+        (20, 1, 0) => Some(QuantityKind::Frequency(FrequencyConvention::Cyclic)),
+        (20, 2, 0) => Some(QuantityKind::Frequency(FrequencyConvention::Angular)),
+        (21, 1, 0) => Some(QuantityKind::Moisture(MoistureBasis::DryMass)),
+        (21, 2, 0) => Some(QuantityKind::Moisture(MoistureBasis::WetMass)),
+        (21, 3, 0) => Some(QuantityKind::Moisture(MoistureBasis::RelativeHumidity)),
+        (22, 1, 0) => Some(QuantityKind::Hardness(HardnessScale::RockwellC)),
+        (22, 2, 0) => Some(QuantityKind::Hardness(HardnessScale::Vickers)),
+        (22, 3, 0) => Some(QuantityKind::Hardness(HardnessScale::Brinell)),
+        (22, 4, 0) => Some(QuantityKind::Hardness(HardnessScale::ShoreA)),
+        (22, 5, 0) => Some(QuantityKind::Hardness(HardnessScale::ShoreD)),
+        (23, 1, 0) => Some(QuantityKind::Attenuation(AttenuationConvention::AmplitudeNepersPerMetre)),
+        (23, 2, 0) => Some(QuantityKind::Attenuation(AttenuationConvention::PowerNepersPerMetre)),
+        (23, 3, 0) => Some(QuantityKind::Attenuation(AttenuationConvention::DecibelsPerMetre)),
+        (24, 0, 0) => Some(QuantityKind::ThermalConductivity),
+        (25, 0, 0) => Some(QuantityKind::OpticalExtinctionCoefficient),
         _ => None,
     }
 }
@@ -928,6 +1045,8 @@ fn validate_scalar(
         | QuantityKind::Amount
         | QuantityKind::MassConcentration
         | QuantityKind::AmountConcentration
+        | QuantityKind::Frequency(_)
+        | QuantityKind::Moisture(MoistureBasis::DryMass)
             if value < 0.0 =>
         {
             Err(invalid_value(
@@ -943,7 +1062,9 @@ fn validate_scalar(
             value,
             ValueRequirement::FinitePositive,
         )),
-        QuantityKind::Composition(_) if !(0.0..=1.0).contains(&value) => Err(invalid_value(
+        QuantityKind::Composition(_)
+        | QuantityKind::Moisture(MoistureBasis::WetMass | MoistureBasis::RelativeHumidity)
+            if !(0.0..=1.0).contains(&value) => Err(invalid_value(
             operation,
             semantic_type,
             value,
@@ -981,6 +1102,36 @@ fn require_type(
             target,
         })
     }
+}
+
+/// Convert an oscillation frequency between Hz and rad/s. Angular velocity
+/// (including mechanical/electrical domain) is a different quantity kind and
+/// must not pass this boundary merely because its dimensions match.
+pub fn convert_frequency(
+    source: SemanticQty,
+    target: FrequencyConvention,
+) -> Result<SemanticQty, SemanticError> {
+    let operation = "convert cyclic/angular frequency";
+    let QuantityKind::Frequency(convention) = source.semantic_type().kind() else {
+        return Err(SemanticError::KindMismatch {
+            operation,
+            source: source.semantic_type(),
+            target: kind_type(QuantityKind::Frequency(target), ValueForm::Static),
+        });
+    };
+    let value = if convention == target {
+        source.value()
+    } else if target == FrequencyConvention::Angular {
+        source.value() * core::f64::consts::TAU
+    } else {
+        source.value() / core::f64::consts::TAU
+    };
+    // A positive oscillation cannot become a zero-frequency state through
+    // underflow; this is the same representability rule as mass conversion.
+    if source.value() > 0.0 && value == 0.0 {
+        return Err(invalid_value(operation, kind_type(QuantityKind::Frequency(target), ValueForm::Static), value, ValueRequirement::FinitePositive));
+    }
+    semantic_value(value, kind_type(QuantityKind::Frequency(target), ValueForm::Static), operation)
 }
 
 fn require_point_form(
@@ -2018,6 +2169,60 @@ impl AcousticLevel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn g0_material_quantity_tokens_preserve_conventions_and_frozen_versions() {
+        let kinds = [
+            QuantityKind::Frequency(FrequencyConvention::Cyclic),
+            QuantityKind::Frequency(FrequencyConvention::Angular),
+            QuantityKind::Moisture(MoistureBasis::DryMass),
+            QuantityKind::Moisture(MoistureBasis::WetMass),
+            QuantityKind::Moisture(MoistureBasis::RelativeHumidity),
+            QuantityKind::Hardness(HardnessScale::RockwellC),
+            QuantityKind::Hardness(HardnessScale::Vickers),
+            QuantityKind::Hardness(HardnessScale::Brinell),
+            QuantityKind::Hardness(HardnessScale::ShoreA),
+            QuantityKind::Hardness(HardnessScale::ShoreD),
+            QuantityKind::Attenuation(AttenuationConvention::AmplitudeNepersPerMetre),
+            QuantityKind::Attenuation(AttenuationConvention::PowerNepersPerMetre),
+            QuantityKind::Attenuation(AttenuationConvention::DecibelsPerMetre),
+            QuantityKind::ThermalConductivity,
+            QuantityKind::OpticalExtinctionCoefficient,
+        ];
+        let mut tokens = std::collections::BTreeSet::new();
+        for kind in kinds {
+            let spec = QuantitySpec::semantic(kind_type(kind, ValueForm::Static));
+            let bytes = spec.canonical_bytes();
+            assert_eq!(bytes[0], 2);
+            assert!(tokens.insert(bytes));
+            assert_eq!(QuantitySpec::from_canonical_bytes(&bytes), Ok(spec));
+            let mut legacy = bytes;
+            legacy[0] = 1;
+            assert!(QuantitySpec::from_canonical_bytes(&legacy).is_err());
+            assert!(quantity_result(1.0, kind, ValueForm::Rms).is_err());
+            assert!(!kind.admits_phasor());
+        }
+        let temperature = QuantitySpec::semantic(kind_type(QuantityKind::AbsoluteTemperature, ValueForm::Static));
+        assert_eq!(temperature.canonical_bytes(), [1, 0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1]);
+        let mut alias = temperature.canonical_bytes();
+        alias[0] = 2;
+        assert!(QuantitySpec::from_canonical_bytes(&alias).is_err());
+        assert!(quantity_result(1.5, QuantityKind::Moisture(MoistureBasis::DryMass), ValueForm::Static).is_ok());
+        for basis in [MoistureBasis::WetMass, MoistureBasis::RelativeHumidity] {
+            assert!(quantity_result(1.5, QuantityKind::Moisture(basis), ValueForm::Static).is_err());
+        }
+    }
+
+    #[test]
+    fn g3_frequency_conversion_requires_explicit_kind_and_preserves_physical_rate() {
+        let hz = quantity(50.0, QuantityKind::Frequency(FrequencyConvention::Cyclic), ValueForm::Static);
+        let radians = convert_frequency(hz, FrequencyConvention::Angular).expect("explicit conversion");
+        assert_close(radians.value(), 100.0 * core::f64::consts::PI);
+        assert_close(convert_frequency(radians, FrequencyConvention::Cyclic).unwrap().value(), hz.value());
+        assert!(convert_frequency(quantity(50.0, QuantityKind::AngularVelocity(AngleDomain::Mechanical), ValueForm::Static), FrequencyConvention::Cyclic).is_err());
+        assert!(convert_frequency(quantity(f64::MAX, hz.semantic_type().kind(), ValueForm::Static), FrequencyConvention::Angular).is_err());
+        assert!(convert_frequency(quantity(f64::from_bits(1), radians.semantic_type().kind(), ValueForm::Static), FrequencyConvention::Cyclic).is_err());
+    }
 
     fn assert_close(actual: f64, expected: f64) {
         let scale = actual.abs().max(expected.abs()).max(1.0);

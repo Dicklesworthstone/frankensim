@@ -26,10 +26,10 @@ use fs_evidence::{
     Evidence, ModelEvidence, NumericalCertificate, ProvenanceHash, SensitivitySummary,
     StatisticalCertificate,
 };
-use fs_qty::Dims;
+use fs_qty::{Dims, QuantitySpec};
 
 use crate::{
-    ClaimId, ClaimSet, InterpolationPolicy, MatDbError, PropertyClaim, PropertyValue,
+    ClaimId, ClaimSet, InterpolationPolicy, MatDbError, PropertyClaim, PropertyKey, PropertyValue,
     UncertaintyModel,
 };
 
@@ -375,6 +375,8 @@ pub struct PropertySample {
     pub value: f64,
     /// The value's dimensions.
     pub dims: Dims,
+    /// Exact kind/convention of the selected claim, retained with its value.
+    pub quantity: QuantitySpec,
     /// The stated uncertainty model it inherits from its claim.
     pub uncertainty: UncertaintyModel,
 }
@@ -1201,7 +1203,58 @@ impl ClaimSet {
         point: &QueryPoint,
         policy: SelectionPolicy,
     ) -> Result<MaterialAnswer, MatDbError> {
+        self.require_dimension_only_property(property)?;
         self.query_selected(property, point, ClaimSelection::Policy(policy))
+    }
+
+    /// Query an exact property schema. Dimensions alone cannot satisfy a
+    /// semantic request. Convert source values explicitly before insertion.
+    /// The returned sample retains the schema; the receipt's selected claim
+    /// identity binds it and replay checks that identity against this set.
+    pub fn query_typed(
+        &self,
+        property: &PropertyKey,
+        point: &QueryPoint,
+        policy: SelectionPolicy,
+    ) -> Result<MaterialAnswer, MatDbError> {
+        self.require_quantity(property)?;
+        self.query_selected(property.name(), point, ClaimSelection::Policy(policy))
+    }
+
+    /// Explicitly pinned counterpart of [`Self::query_typed`]. A pin cannot
+    /// bypass the quantity check or the claim's validity domain.
+    pub fn query_pinned_typed(
+        &self,
+        property: &PropertyKey,
+        point: &QueryPoint,
+        pinned: ClaimId,
+    ) -> Result<MaterialAnswer, MatDbError> {
+        self.require_quantity(property)?;
+        self.query_selected(property.name(), point, ClaimSelection::Pinned(pinned))
+    }
+
+    fn require_quantity(&self, property: &PropertyKey) -> Result<(), MatDbError> {
+        let found = self.registered_quantity(property.name()).ok_or_else(|| MatDbError::UnknownProperty {
+            property: property.name().to_owned(),
+        })?;
+        if found != property.quantity() {
+            return Err(MatDbError::QuantityMismatch {
+                property: property.name().to_owned(), expected: property.quantity(), found,
+            });
+        }
+        Ok(())
+    }
+
+    fn require_dimension_only_property(&self, property: &str) -> Result<(), MatDbError> {
+        if let Some(found) = self.registered_quantity(property)
+            && found.semantic_type().is_some()
+        {
+            return Err(MatDbError::QuantityMismatch {
+                property: property.to_owned(),
+                expected: QuantitySpec::dimensional(found.dims()), found,
+            });
+        }
+        Ok(())
     }
 
     /// Answer a property query with selection pinned to one exact claim
@@ -1224,6 +1277,7 @@ impl ClaimSet {
         point: &QueryPoint,
         pinned: ClaimId,
     ) -> Result<MaterialAnswer, MatDbError> {
+        self.require_dimension_only_property(property)?;
         self.query_selected(property, point, ClaimSelection::Pinned(pinned))
     }
 
@@ -1304,6 +1358,7 @@ impl ClaimSet {
             value: PropertySample {
                 value,
                 dims: claim.value.dims(),
+                quantity: claim.key.quantity(),
                 uncertainty: claim.uncertainty.clone(),
             },
             qoi: value,
