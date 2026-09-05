@@ -426,7 +426,8 @@ export re-runs the structural checker. A partial study report remains visibly
 partial and Estimated; neither a checker pass nor iteration exhaustion proves
 an optimum or a guaranteed PDE error bound.
 
-`study --resume <study-id> <ledger.db> [--budget N]` replays the retained prefix
+`study --resume <study-run-id> <ledger.db> [--budget N]` uses the returned
+`run_id` (`study-<receipt-hash>`), not the stable `receipt.study_id`, and replays the retained prefix
 and requires the same trace before advancing. It recharges prior wall use and
 also meters replay; it does not reset the original budgets. `--budget N` caps
 new iterations in this invocation, while the declared total iteration limit

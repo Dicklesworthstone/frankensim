@@ -9,8 +9,8 @@
 [![Status](https://img.shields.io/badge/status-active%20Rust%20workspace-2ea44f)](#implemented-workspace)
 [![Rust](https://img.shields.io/badge/rust-nightly%202024-b7410e)](rust-toolchain.toml)
 [![Crates](https://img.shields.io/badge/workspace-163%20native%20fs--%2A%20crates-0969da)](#implemented-workspace)
-[![Contracts](https://img.shields.io/badge/contracts-182%20of%20183%20tracked%20crates-8250df)](#contracts-and-verification)
-[![Tests](https://img.shields.io/badge/tests-878%20tracked%20integration%20test%20files-1f883d)](#contracts-and-verification)
+[![Contracts](https://img.shields.io/badge/contracts-183%20of%20183%20tracked%20crates-8250df)](#contracts-and-verification)
+[![Tests](https://img.shields.io/badge/tests-880%20tracked%20integration%20test%20files-1f883d)](#contracts-and-verification)
 [![License](https://img.shields.io/badge/license-MIT%20%2B%20AI%20rider-yellow)](LICENSE)
 
 </div>
@@ -40,8 +40,8 @@ edge is valid.
 | Native workspace `fs-*` crates | 163 |
 | Standalone `fs-*` workspaces | 20 (`fs-cmaes-viz-wasm`, `fs-crump-wasm`, `fs-daimler-wasm`, `fs-davinci-wasm`, `fs-demo-physics-wasm`, `fs-edison-wasm`, `fs-flyer-wasm`, `fs-g1-train`, `fs-goddard-wasm`, `fs-heatmap-wasm`, `fs-howe-wasm`, `fs-kamen-wasm`, `fs-lenia-wasm`, `fs-otis-wasm`, `fs-otto-wasm`, `fs-roomba-wasm`, `fs-salisbury-wasm`, `fs-tesla-wasm`, `fs-versatran-wasm`, `fs-wasm`) |
 | Tracked `fs-*` crate directories | 183 |
-| Tracked `CONTRACT.md` files | 182 of 183 |
-| Tracked crate integration-test files | 878 |
+| Tracked `CONTRACT.md` files | 183 of 183 |
+| Tracked crate integration-test files | 880 |
 | `fs-*` layer inventory | `UTIL=15`, `L0=7`, `L1=14`, `L2=22`, `L3=41`, `L4=33`, `L5=4`, `L6=46`, `TOOL=1` |
 <!-- END GENERATED FRANKENSIM DOC FACTS -->
 
@@ -60,7 +60,7 @@ workspace: no general CAD/CAE application or crates.io release is claimed.
 | Area | Current implementation |
 |------|------------------------|
 | Workspace | Rust 2024 nightly Cargo workspace with 163 native `fs-*` workspace crates plus `xtask`; 20 nested workspaces are listed above |
-| Contracts | The committed inventory contains 182 contracts for 183 crates; the new `fs-scene/CONTRACT.md` is awaiting inclusion in the committed inventory |
+| Contracts | The committed inventory contains 183 contracts for 183 crates; contract presence does not establish implementation completeness or passing conformance |
 | Runtime substrate | Capability probing, SIMD facades, aligned arenas, two-lane execution, cancellation contexts, tile pools, tuner and race scaffolding |
 | Numerics | Deterministic elementary math, dense/sparse linear algebra, FFT/DCT, interval/affine/Taylor arithmetic, Chebyshev collocation, random/QMC streams, AD/adjoint infrastructure, e-process inference |
 | Geometry | Region/chart abstraction, SDF, mesh and F-rep charts, representation conversion hooks, transformations, tet meshing, remeshing, quality audits |
@@ -68,7 +68,7 @@ workspace: no general CAD/CAE application or crates.io release is claimed.
 | Evidence and ledger | L2 evidence-colour and evidence-packaging capabilities; `fs-vvreg` now has a fail-closed validation-corpus schema with 20 Level-A thermal definitions/targets (including the forced-air heatsink NTU anchor at the retained operating point), five thermal Level-B cross-code cases, and four retained Level-C published-experiment records (Martin–Moyce plus three further digitized curves), while the FrankenSQLite-backed design ledger remains registered at L1 with known suite failures open |
 | Euler-disc flagship contract and bounded campaign | `fs-euler-disc-e2e` freezes an exact Context of Use, nine claim kinds, a 15-role owner/schema-routing matrix, evidence minima, binding no-claims, permutation-invariant prerequisite assessment, and a literal-digest structural self-consistency checker. Its deterministic JSONL campaign now adds twelve profile-native reduced closed trajectories, 2/4/8/16/32 s censor-aware continuation, bounded interior contact-event scanning plus bracketed terminal events, five-rung timestep/ranking diagnostics, and a typed physical-calibration NO-DATA record. The ranking refinement compares matched 1 mm outer fillets and derives the ring's equal-mass density from resolved chart volume. Separately, Estimate-only finite-patch normal, partial-slip, rolling, exterior-air, thin-gap gas-film, and reduced-base adapters compose atomically for restartable smooth-contact prefixes. The campaign is still a reduced numerical model, not experimental or video validation, calibrated physics, or a spin-time prediction |
 | Policy tooling | `xtask` checks for layer direction, Franken-only runtime dependencies, contracts, unsafe capsules, and constellation lock verification |
-| Tests | 878 Rust files under crate `tests/` directories in the committed inventory, in addition to inline unit tests; this count does not imply that every test is green |
+| Tests | 880 Rust files under crate `tests/` directories in the committed inventory, in addition to inline unit tests; this count does not imply that every test is green |
 
 ### Bounded Euler-disc campaign
 
@@ -316,9 +316,9 @@ capability is at L3 until a retained lane receipt backs it.
 |---------|---------|
 | `cargo run -p fs-cli --bin frankensim -- validate <project.fsim>` | Parse a canonical `fs-project` file, report all structural findings, and emit its canonical hash |
 | `frankensim [--json] study <study.fsim\|study.json> <ledger.db> [--budget N]` | Run the normalized scalar thermal radius study; retain accepted iterates, final geometry, SVG report and Estimated package. Unsupported physics, wrong units, invalid geometry and missing budgets refuse before creating a ledger |
-| `frankensim [--json] study --resume <study-id> <ledger.db> [--budget N]` | Replay the retained prefix and continue with its original wall/iteration budget; budget exhaustion and cancellation remain explicit partial outcomes |
-| `frankensim [--json] report <study-id> <ledger.db>` | Export the retained HTML/SVG and JSON study report, preserving conflicting destination files |
-| `frankensim [--json] package <study-id> <ledger.db>` | Re-check and export the retained package; structural verification does not upgrade its Estimated numerical claims |
+| `frankensim [--json] study --resume <study-run-id> <ledger.db> [--budget N]` | Replay the retained prefix using the returned `run_id` (`study-<receipt-hash>`) and continue with its original wall/iteration budget; budget exhaustion and cancellation remain explicit partial outcomes |
+| `frankensim [--json] report <study-run-id> <ledger.db>` | Export the retained HTML/SVG and JSON study report, preserving conflicting destination files |
+| `frankensim [--json] package <study-run-id> <ledger.db>` | Re-check and export the retained package; structural verification does not upgrade its Estimated numerical claims |
 | `cargo run --manifest-path tools/bootstrap/Cargo.toml` | From a fresh checkout, materialize and verify the pinned sibling constellation before the root workspace resolves |
 | `cargo test --workspace` | Build the workspace and run crate-level unit, integration, and conformance tests |
 | `cargo fmt --check` | Check formatting under the pinned nightly toolchain |
@@ -1359,9 +1359,8 @@ Different readers should start in different places.
 
 ## Contracts and Verification
 
-The committed inventory contains 182 `CONTRACT.md` files for 183 `fs-*` crate
-directories. The `fs-scene` contract has been added to the working tree; its
-inventory inclusion remains part of landing that file.
+The committed inventory contains 183 `CONTRACT.md` files for 183 `fs-*` crate
+directories, including the scene query contract.
 The contract count is meant to be checkable, not aspirational.
 
 Existing contracts use these required sections:
