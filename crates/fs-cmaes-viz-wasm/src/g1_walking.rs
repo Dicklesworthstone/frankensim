@@ -214,7 +214,13 @@ const WALK_CONTACT_WEIGHT: f64 = 60.0;
 /// LOSES: 0.61 m at generation 410 against 0.66 m by generation 192 for this
 /// value. A weight tuned without the obstacles does not transfer to a search
 /// that has them, so this stays at the value measured where it actually runs.
-/// Re-tuning belongs in a sweep that declares the same roster the page does.
+/// Re-tuned in exactly that sweep (zz_g1_shipped_roster_study, which carries
+/// the 48 bodies the browser declares), and 120 held: at generation 320,
+/// 120 -> 0.673 m, 160 -> 0.682 m, 200 -> 0.588 m, and 120 is far ahead earlier
+/// (0.681 m by generation 128 against 0.467 m for 160). The roster study also
+/// reproduces the shipped regression the bare sweep hid — 200 loses 13% here,
+/// matching what the browser measured — which is the evidence that it is the
+/// harness to trust for this weight.
 const WALK_PROGRESS_REWARD: f64 = 120.0;
 const WALK_PROGRESS_CAP: f64 = 1.25;
 // Per-step survival bonus (cmaes-pvz, v068): a small reward per survived step
