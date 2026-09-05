@@ -54,6 +54,100 @@ fn room() -> QueryPoint {
 }
 
 #[test]
+fn g0_typed_axis_queries_and_receipts_preserve_equal_dimension_conventions() {
+    use fs_qty::{
+        QuantitySpec,
+        semantic::{FrequencyConvention as F, QuantityKind as K, SemanticType, ValueForm},
+    };
+    let spec = |kind| QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static));
+    for (axis, actual, wrong, coordinate) in [
+        (
+            "frequency",
+            K::Frequency(F::Cyclic),
+            K::Frequency(F::Angular),
+            50.0,
+        ),
+        ("T", K::AbsoluteTemperature, K::TemperatureDifference, 300.0),
+    ] {
+        let mut claim = density(
+            2700.0,
+            "synthetic typed-axis fixture",
+            UncertaintyModel::Unstated,
+        );
+        claim.validity = ValidityDomain::unconstrained().with_quantity(
+            axis,
+            spec(actual),
+            coordinate,
+            coordinate,
+        );
+        let mut wrong_claim = claim.clone();
+        wrong_claim.validity = ValidityDomain::unconstrained().with_quantity(
+            axis,
+            spec(wrong),
+            coordinate,
+            coordinate,
+        );
+        assert_ne!(claim.content_hash(), wrong_claim.content_hash());
+        let mut claims = ClaimSet::new();
+        let id = claims.insert_claim(claim).unwrap();
+        let point = QueryPoint::new()
+            .with_quantity(axis, spec(actual), coordinate)
+            .unwrap();
+        let answer = claims
+            .query("density", &point, SelectionPolicy::SingleClaimOnly)
+            .unwrap();
+        assert_eq!(point.clone().with(axis, coordinate).unwrap(), point);
+        assert_eq!(answer.evidence.value.value, 2700.0);
+        assert_eq!(answer.receipt.schema_version, 3);
+        let bytes = answer.receipt.to_bytes().unwrap();
+        let receipt =
+            PropertyUsageReceipt::from_bytes_verified(&bytes, answer.receipt.content_hash())
+                .unwrap();
+        assert_eq!(receipt.to_bytes().unwrap(), bytes);
+        claims.verify_receipt(&receipt).unwrap();
+        claims
+            .verify_receipt(&claims.query_pinned("density", &point, id).unwrap().receipt)
+            .unwrap();
+        for wrong_point in [
+            QueryPoint::new().with(axis, coordinate).unwrap(),
+            QueryPoint::new()
+                .with_quantity(axis, spec(wrong), coordinate)
+                .unwrap(),
+            QueryPoint::new()
+                .with_quantity(
+                    axis,
+                    QuantitySpec::dimensional(actual.expected_dims()),
+                    coordinate,
+                )
+                .unwrap(),
+        ] {
+            assert!(matches!(
+                claims.query("density", &wrong_point, SelectionPolicy::SingleClaimOnly),
+                Err(MatDbError::AxisQuantityMismatch { .. })
+            ));
+            assert!(claims.query_pinned("density", &wrong_point, id).is_err());
+        }
+        let mut tampered = receipt.clone();
+        tampered.axis_quantities.insert(axis.into(), spec(wrong));
+        assert_ne!(tampered.content_hash(), receipt.content_hash());
+        assert!(claims.verify_receipt(&tampered).is_err());
+        tampered = receipt.clone();
+        tampered.schema_version = 2;
+        assert!(tampered.to_bytes().is_err());
+        tampered = receipt.clone();
+        tampered.axis_quantities.clear();
+        assert!(tampered.to_bytes().is_err());
+        let outside = QueryPoint::new()
+            .with_quantity(axis, spec(actual), coordinate + 1.0)
+            .unwrap();
+        assert!(matches!(
+            claims.query("density", &outside, SelectionPolicy::SingleClaimOnly),
+            Err(MatDbError::NoClaimInDomain { .. })
+        ));
+    }
+}
+
+#[test]
 fn g0_material_quantity_queries_refuse_equal_dimension_convention_mismatches() {
     use fs_qty::{
         QuantitySpec,

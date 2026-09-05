@@ -465,6 +465,12 @@ fn validate_model(model: &ConstitutiveModelCard) -> Result<(), PackError> {
         require_text("model.parameter.name", name)?;
         require_portable_f64("model.parameter.value", parameter.value)?;
     }
+    if model.validity.has_typed_axes() {
+        return Err(invalid(
+            "model.validity",
+            "typed axes are not representable in model-pack v1",
+        ));
+    }
     if model.validity.bounds().len() > MAX_VALIDITY_AXES_PER_MODEL {
         return Err(limit(
             "model_validity_axes",

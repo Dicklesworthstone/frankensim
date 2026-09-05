@@ -243,16 +243,28 @@ name-only joint query continues to refuse semantic properties.
 
 Typed claims use the `property-claim.v2` identity domain. Dimension-only claim
 ids and the frozen normalized-pack v1 byte grammar remain unchanged. A pack
-containing typed properties uses normalized-pack v2, including one complete
+containing typed properties and no typed axes uses normalized-pack v2, including one complete
 12-byte quantity descriptor after each claim's key dimensions. Both decoders
 re-admit and reproduce exact canonical bytes; editing a version byte is not a
 migration. The v2 pack identity uses `normalized-pack.v2`. Material/interface
 card wrappers retain and bind the nested pack version and transitive claim
 identities through their existing layouts.
 
-This tranche types property values, not validity axes: `ValidityDomain` and
-`QueryPoint` still carry legacy names and numbers. Axis quantity schemas and
-hardness apparatus context remain MR09 work.
+`ValidityDomain::with_quantity` and `QueryPoint::with_quantity` retain exact
+axis descriptors in the existing shared carriers. Membership checks both
+bounds and conventions; untyped is not a wildcard. Numeric-only membership
+refuses typed domains. Intersections preserve compatible descriptors and
+become empty for a shared axis with incompatible declarations. Invalid typed
+scalar endpoints refuse admission. Curve abscissa dimensions must agree with
+the typed domain. These remain explicitly declared boxes, not inferred joint
+support from independent observations. Hardness apparatus and general tensor
+transformation context remain MR09 work.
+Typed axes use claim/normalized-pack v3, property-use receipt v3 (distinct
+`FSMATU3` wire header), and joint receipt v2. Every axis descriptor is bound
+into identity and replay; v1/v2 normalized packs and v2 property receipts
+retain their old bytes and schema refusals. Material/interface wrappers carry
+the nested v3 pack. Frozen constitutive-model packs explicitly refuse typed
+axes; structural model hashes still distinguish such declarations.
 No existing seed silently gains kinds, no source
 spelling is reinterpreted, and a quantity tag adds no empirical validation or
 authority to a source claim.
@@ -270,6 +282,13 @@ component scales. Source-envelope v2 binds all mappings and quantity tokens;
 existing source hashes, citations and normalization receipts retain provenance.
 The v1 compiler fixture and runtime decoders remain frozen. Axis-name aliases
 do not establish semantic axis types or additional measured support.
+Manifest v3 adds `axis <source> <target> <kind|dimensional>` declarations.
+It normalizes curve abscissae and validity endpoints through the same declared
+convention, including Hz/rad/s conversion and absolute/difference temperature
+offset handling. Axis schemas are retained in normalized-pack v3, with source
+envelope/compiler v3 identities. Undeclared axes remain explicitly legacy;
+v2 rejects the extra declaration field. The NASA TN D-6448 seed explicitly
+declares absolute-temperature support at 300 K, with no extension to 301 K.
 
 - APPEND-ONLY: no API removes or mutates a stored claim or observation.
   Same content re-inserts idempotently under the same id; different
@@ -951,10 +970,10 @@ migration equivalence lives in fs-dcontact's battery.
   does not turn source-stated confidence levels into a joint confidence region.
   Coverage influence records retain common directional dependency without
   claiming covariance; cross-layer coverage correlation is refused in v1.
-- `ValidityDomain` does not yet retain axis dimensions. A validity-bound
-  normalization target proves that the claim/axis/endpoint exists, but its
-  six-base dimensions remain compiler-supplied provenance until the shared
-  validity schema grows a typed axis registry.
+- Legacy untyped validity axes retain compiler-supplied dimensions. Typed
+  axes additionally require validity-bound normalization dimensions to match
+  the domain's exact descriptor. A transform receipt alone supplies no joint
+  support or empirical authority.
 - A pack may contain already-normalized SI values with no transform receipt;
   the L1 codec therefore proves every present receipt is linked, not that the
   receipt set exhausts every numeric field. Source-format policy owns that

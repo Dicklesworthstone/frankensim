@@ -35,8 +35,8 @@ homogenization, the P2 milestone.
   containing semantic requirements use identity domain v2 and bind every
   requirement's canonical quantity token; all-dimensional bundles retain the
   exact v1 preimage. Named convenience resolvers still declare their existing
-  dimensional requirements; this does not infer kinds from property names or
-  introduce typed query axes.
+  dimensional property requirements; axis descriptors travel exactly as
+  declared by the caller, without inference from names.
 - `resolve_isotropic_elastic_state_point` requests only density, Young's
   modulus, and Poisson ratio for linear vibration/elasticity. The distinct
   `resolve_isotropic_solid_state_point` additionally requires yield stress for
@@ -51,9 +51,14 @@ homogenization, the P2 milestone.
   single thermal relaxation mode approximation. Thermal conductivity may be
   explicitly dimensional (legacy data) or the exact static ThermalConductivity
   schema; a semantic claim of any other kind/form refuses. The NASA TN D-6448
-  seed's v2 manifest declares its source-to-runtime names and thermal kind.
+  seed's v3 manifest declares its source-to-runtime names, thermal kind and
+  absolute-temperature axis. Typed T coordinates must be absolute temperature;
+  a temperature difference cannot supply the Zener law's reference temperature.
   The compiler-to-state integration test uses that actual source at 300 K,
   retaining its Unstated uncertainty and point-only temperature validity.
+  Resolved material/interface bundles expose `axis_quantities()` from their
+  member receipts. Existing bundle hashes transitively bind every descriptor
+  through these receipt identities without duplicating the quantity system.
   This is not an anisotropic law or a
   resolved thermomechanical energy balance. Its synthetic temperature curves
   and independent Zener checks establish numerical behavior, not experimental

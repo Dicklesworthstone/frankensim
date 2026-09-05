@@ -410,6 +410,148 @@ fn g3_typed_pack_preserves_quantity_identity_and_refuses_version_reinterpretatio
 }
 
 #[test]
+fn g3_typed_axis_pack_roundtrips_material_interface_and_joint_queries() {
+    use fs_matdb::{MatDbError, QueryPoint, SelectionPolicy};
+    use fs_qty::{
+        QuantitySpec,
+        semantic::{FrequencyConvention as F, QuantityKind as K, SemanticType, ValueForm},
+    };
+    let cyclic = QuantitySpec::semantic(SemanticType::new(
+        K::Frequency(F::Cyclic),
+        ValueForm::Static,
+    ));
+    let angular = QuantitySpec::semantic(SemanticType::new(
+        K::Frequency(F::Angular),
+        ValueForm::Static,
+    ));
+    let (original, observation, _) = sample_claims();
+    let mut claims = ClaimSet::new();
+    claims
+        .register_observation(original.observation(observation).unwrap().clone())
+        .unwrap();
+    let mut claim = original.claims_for("density")[0].1.clone();
+    claim.validity = ValidityDomain::unconstrained().with_quantity("frequency", cyclic, 40.0, 60.0);
+    let second = PropertyClaim {
+        key: PropertyKey::new("young_modulus", Dims([-1, 1, -2, 0, 0, 0])),
+        value: PropertyValue::Scalar {
+            value: 210.0e9,
+            dims: Dims([-1, 1, -2, 0, 0, 0]),
+        },
+        validity: claim.validity.clone(),
+        uncertainty: UncertaintyModel::Unstated,
+        interpolation: InterpolationPolicy::ConstantWithinValidity,
+        observations: vec![observation],
+        provenance: provenance(),
+    };
+    let id = claims.insert_claim(claim).unwrap();
+    claims.insert_claim(second).unwrap();
+    let pack = NormalizedPack::new(
+        "typed-axis-fixture",
+        "fixture-v3",
+        hash_domain(SOURCE_DOMAIN, b"synthetic axes"),
+        "synthetic fixture only",
+        claims,
+        vec![],
+        vec![],
+    )
+    .unwrap();
+    assert_eq!(pack.schema_version(), 3);
+    let bytes = pack.to_bytes();
+    let decoded = NormalizedPack::from_bytes_verified(pack.content_hash(), &bytes).unwrap();
+    assert_eq!(decoded.to_bytes(), bytes);
+    assert_eq!(
+        decoded
+            .claims()
+            .claim(id)
+            .unwrap()
+            .validity
+            .axis_quantities()
+            .get("frequency"),
+        Some(&cyclic)
+    );
+    let state = fs_matdb::MaterialStateId {
+        chemistry: "fixture".into(),
+        phase: "fixture".into(),
+        process: "fixture".into(),
+        revision: 0,
+    };
+    let material =
+        fs_matdb::NormalizedMaterialCardPack::new(state.clone(), decoded.clone()).unwrap();
+    let material = fs_matdb::NormalizedMaterialCardPack::from_bytes_verified(
+        material.content_hash(),
+        &material.to_bytes(),
+    )
+    .unwrap();
+    let surface = fs_matdb::SurfaceSpec {
+        material: state,
+        texture_frame: "fixture".into(),
+    };
+    let interface = fs_matdb::NormalizedInterfacePack::new(
+        surface.clone(),
+        surface,
+        fs_matdb::SystemContext {
+            medium: "fixture".into(),
+            third_body: None,
+            environment: "fixture".into(),
+            history: "fixture".into(),
+        },
+        decoded.clone(),
+    )
+    .unwrap();
+    let interface = fs_matdb::NormalizedInterfacePack::from_bytes_verified(
+        interface.content_hash(),
+        &interface.to_bytes(),
+    )
+    .unwrap();
+    let point = QueryPoint::new()
+        .with_quantity("frequency", cyclic, 50.0)
+        .unwrap();
+    let wrong = QueryPoint::new()
+        .with_quantity("frequency", angular, 50.0)
+        .unwrap();
+    for claims in [material.card().claims(), interface.card().claims()] {
+        let answer = claims
+            .query("density", &point, SelectionPolicy::SingleClaimOnly)
+            .unwrap();
+        assert_eq!(answer.evidence.value.value, 7850.0);
+        claims.verify_receipt(&answer.receipt).unwrap();
+        assert!(matches!(
+            claims.query("density", &wrong, SelectionPolicy::SingleClaimOnly),
+            Err(MatDbError::AxisQuantityMismatch { .. })
+        ));
+    }
+    let joint = decoded
+        .query_joint(
+            &["density", "young_modulus"],
+            &point,
+            SelectionPolicy::SingleClaimOnly,
+        )
+        .unwrap();
+    assert_eq!(joint.receipt.schema_version, 2);
+    decoded.verify_joint_receipt(&joint.receipt).unwrap();
+    let mut tampered = joint.receipt.clone();
+    tampered.axis_quantities.insert("frequency".into(), angular);
+    assert_ne!(tampered.content_hash(), joint.receipt.content_hash());
+    assert!(decoded.verify_joint_receipt(&tampered).is_err());
+    tampered = joint.receipt.clone();
+    tampered.axis_quantities.insert("orphan".into(), cyclic);
+    assert!(decoded.verify_joint_receipt(&tampered).is_err());
+    for version in [1_u32, 2] {
+        let mut downgraded = bytes.clone();
+        downgraded[8..12].copy_from_slice(&version.to_le_bytes());
+        assert!(NormalizedPack::from_bytes(&downgraded).is_err());
+    }
+    let mut relabelled = bytes;
+    let token = cyclic.canonical_bytes();
+    let position = relabelled
+        .windows(token.len())
+        .position(|window| window == token)
+        .unwrap();
+    relabelled[position..position + token.len()].copy_from_slice(&angular.canonical_bytes());
+    assert!(NormalizedPack::from_bytes(&relabelled).is_err());
+}
+
+#[test]
 fn construction_and_decoding_canonicalize_permutable_collections() {
     let first = sample_pack();
     let (claims, observation, members) = sample_claims();

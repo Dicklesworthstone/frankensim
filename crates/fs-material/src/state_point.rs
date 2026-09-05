@@ -325,6 +325,13 @@ impl ResolvedInterfaceStatePoint {
         &self.query_point
     }
 
+    /// Exact axis descriptors retained by every member receipt and transitively
+    /// bound into this bundle's identity. The bundle always has a member.
+    #[must_use]
+    pub fn axis_quantities(&self) -> &std::collections::BTreeMap<String, QuantitySpec> {
+        &self.properties[0].answer.receipt.axis_quantities
+    }
+
     /// Look up one state coordinate by exact axis name.
     #[must_use]
     pub fn state_coordinate(&self, axis: &str) -> Option<f64> {
@@ -374,6 +381,12 @@ impl ResolvedMaterialStatePoint {
     #[must_use]
     pub fn query_point(&self) -> &[(String, f64)] {
         &self.query_point
+    }
+
+    /// Exact coordinate conventions, shared by all member receipts.
+    #[must_use]
+    pub fn axis_quantities(&self) -> &std::collections::BTreeMap<String, QuantitySpec> {
+        &self.properties[0].answer.receipt.axis_quantities
     }
 
     /// Canonically ordered resolved properties.
@@ -672,6 +685,19 @@ pub fn resolve_isotropic_thermoelastic_state_point(
     point: &QueryPoint,
     selection: MaterialPropertySelection,
 ) -> Result<IsotropicThermoelasticStatePoint, MaterialStatePointError> {
+    let absolute = QuantitySpec::semantic(SemanticType::new(
+        QuantityKind::AbsoluteTemperature,
+        ValueForm::Static,
+    ));
+    if point
+        .axis_quantities()
+        .get("T")
+        .is_some_and(|quantity| *quantity != absolute)
+    {
+        return Err(MaterialStatePointError::InvalidDerived {
+            quantity: "thermoelastic absolute-temperature axis convention",
+        });
+    }
     let temperature = point.axes().get("T").copied().filter(|t| *t > 0.0).ok_or(
         MaterialStatePointError::InvalidDerived {
             quantity: "thermoelastic positive absolute T coordinate",
@@ -1932,7 +1958,20 @@ mod tests {
                 if property == SPECIFIC_HEAT_CAPACITY_PROPERTY
         ));
         let card = thermoelastic_card();
-        for query in [QueryPoint::new(), point(0.0)] {
+        for query in [
+            QueryPoint::new(),
+            point(0.0),
+            QueryPoint::new()
+                .with_quantity(
+                    "T",
+                    QuantitySpec::semantic(SemanticType::new(
+                        QuantityKind::TemperatureDifference,
+                        ValueForm::Static,
+                    )),
+                    300.0,
+                )
+                .unwrap(),
+        ] {
             assert!(matches!(
                 resolve_isotropic_thermoelastic_state_point(
                     &card,

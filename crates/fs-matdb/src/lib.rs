@@ -63,8 +63,9 @@ pub use pack::{
     CorrelationUnknownReason, JOINT_USAGE_RECEIPT_IDENTITY_DOMAIN,
     JOINT_USAGE_RECEIPT_SCHEMA_VERSION, JointAnswer, JointCorrelation, JointStatistics,
     JointUsageReceipt, MATDB_PACK_SCHEMA_VERSION, MATDB_PACK_TARGET_BASIS,
-    MATDB_TYPED_PACK_SCHEMA_VERSION, NormalizationReceipt, NormalizationTarget, NormalizedPack,
-    PackError, StatisticComponent, StatisticMember, ValidityBoundSide,
+    MATDB_TYPED_AXIS_PACK_SCHEMA_VERSION, MATDB_TYPED_PACK_SCHEMA_VERSION, NormalizationReceipt,
+    NormalizationTarget, NormalizedPack, PackError, StatisticComponent, StatisticMember,
+    ValidityBoundSide,
 };
 pub use pcb::{
     CopperCoverage, PCB_HOMOGENIZATION_IDENTITY_DOMAIN, PCB_HOMOGENIZATION_SCHEMA_VERSION,
@@ -81,6 +82,8 @@ pub use query::{
     PROPERTY_USAGE_RECEIPT_IDENTITY_SCHEMA_DECLARATION, PROPERTY_USAGE_RECEIPT_IDENTITY_VERSION,
     PROPERTY_USAGE_RECEIPT_SCHEMA_VERSION, PropertySample, PropertyUsageReceipt,
     PropertyUsageReceiptError, QueryPoint, SelectionPolicy,
+    TYPED_AXIS_PROPERTY_USAGE_RECEIPT_IDENTITY_DOMAIN,
+    TYPED_AXIS_PROPERTY_USAGE_RECEIPT_IDENTITY_VERSION,
 };
 pub use species_pack::{
     NormalizedSpeciesPack, SPECIES_MOLAR_MASS_DIMS, SPECIES_PACK_SCHEMA_VERSION,
@@ -115,6 +118,17 @@ pub enum MatDbError {
         expected: QuantitySpec,
         /// Descriptor actually registered or supplied.
         found: QuantitySpec,
+    },
+    /// A coordinate's declared convention disagrees with a validity axis.
+    AxisQuantityMismatch {
+        /// Property being queried.
+        property: String,
+        /// Coordinate being compared.
+        axis: String,
+        /// Claim declaration; `None` means legacy untyped.
+        expected: Option<QuantitySpec>,
+        /// Caller declaration; `None` means legacy untyped.
+        found: Option<QuantitySpec>,
     },
     /// A typed nominal value violates its kind's scalar domain or form policy.
     InvalidQuantityValue {
@@ -325,6 +339,15 @@ impl fmt::Display for MatDbError {
             } => write!(
                 f,
                 "property '{property}': quantity {found:?} disagrees with required {expected:?}; convert explicitly before querying"
+            ),
+            MatDbError::AxisQuantityMismatch {
+                property,
+                axis,
+                expected,
+                found,
+            } => write!(
+                f,
+                "property '{property}' axis '{axis}': coordinate quantity {found:?} disagrees with required {expected:?}; convert explicitly before querying"
             ),
             MatDbError::MissingLicense { source } => write!(
                 f,
@@ -848,7 +871,15 @@ impl PropertyClaim {
         if let Some(artifact) = &self.provenance.artifact {
             push(&artifact.0);
         }
-        if self.key.quantity().semantic_type().is_some() {
+        if self.validity.has_typed_axes() {
+            push(&self.key.quantity().canonical_bytes());
+            push(&(self.validity.axis_quantities().len() as u64).to_le_bytes());
+            for (axis, quantity) in self.validity.axis_quantities() {
+                push(axis.as_bytes());
+                push(&quantity.canonical_bytes());
+            }
+            hash_domain("org.frankensim.fs-matdb.property-claim.v3", &payload)
+        } else if self.key.quantity().semantic_type().is_some() {
             push(&self.key.quantity().canonical_bytes());
             hash_domain("org.frankensim.fs-matdb.property-claim.v2", &payload)
         } else {
@@ -918,6 +949,26 @@ impl ClaimSet {
             if lo.is_nan() || hi.is_nan() {
                 return Err(MatDbError::UnusableValidity { axis: axis.clone() });
             }
+        }
+        if claim.validity.has_typed_axes() && claim.validity.is_empty() {
+            return Err(MatDbError::UnusableValidity {
+                axis: "typed validity domain".into(),
+            });
+        }
+        if let PropertyValue::Curve {
+            abscissa,
+            abscissa_dims,
+            ..
+        } = &claim.value
+            && let Some(quantity) = claim.validity.axis_quantities().get(abscissa)
+            && quantity.dims() != *abscissa_dims
+        {
+            return Err(MatDbError::AxisQuantityMismatch {
+                property: claim.key.name().to_owned(),
+                axis: abscissa.clone(),
+                expected: Some(*quantity),
+                found: Some(QuantitySpec::dimensional(*abscissa_dims)),
+            });
         }
         let found = claim.value.dims();
         if found != claim.key.dims() {

@@ -246,7 +246,16 @@ impl ConstitutiveModelCard {
         if let Some(artifact) = &self.provenance.artifact {
             push(&artifact.0);
         }
-        hash_domain(MODEL_HASH_DOMAIN, &payload)
+        if self.validity.has_typed_axes() {
+            push(&(self.validity.axis_quantities().len() as u64).to_le_bytes());
+            for (axis, quantity) in self.validity.axis_quantities() {
+                push(axis.as_bytes());
+                push(&quantity.canonical_bytes());
+            }
+            hash_domain("org.frankensim.fs-matdb.constitutive-model.v2", &payload)
+        } else {
+            hash_domain(MODEL_HASH_DOMAIN, &payload)
+        }
     }
 }
 

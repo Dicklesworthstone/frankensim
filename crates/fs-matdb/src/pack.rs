@@ -20,6 +20,8 @@ use crate::{
 pub const MATDB_PACK_SCHEMA_VERSION: u32 = 1;
 /// Typed property schemas. V1 bytes continue through the unchanged v1 layout.
 pub const MATDB_TYPED_PACK_SCHEMA_VERSION: u32 = 2;
+/// Typed property and validity-axis descriptors; v1/v2 remain frozen.
+pub const MATDB_TYPED_AXIS_PACK_SCHEMA_VERSION: u32 = 3;
 /// Canonical coherent-SI target basis and its explicit six-base order.
 pub const MATDB_PACK_TARGET_BASIS: &str = "SI-six-base[m,kg,s,K,A,mol]";
 
@@ -537,6 +539,13 @@ impl NormalizedPack {
         if self
             .claims
             .claims_ordered()
+            .any(|(_, claim)| claim.validity.has_typed_axes())
+        {
+            return MATDB_TYPED_AXIS_PACK_SCHEMA_VERSION;
+        }
+        if self
+            .claims
+            .claims_ordered()
             .any(|(_, claim)| claim.key.quantity().semantic_type().is_some())
         {
             MATDB_TYPED_PACK_SCHEMA_VERSION
@@ -660,9 +669,9 @@ impl NormalizedPack {
         let mut reader = Reader::new(bytes);
         reader.expect(MAGIC, "normalized pack magic")?;
         let version = reader.u32()?;
-        if version != MATDB_PACK_SCHEMA_VERSION && version != MATDB_TYPED_PACK_SCHEMA_VERSION {
+        if !(MATDB_PACK_SCHEMA_VERSION..=MATDB_TYPED_AXIS_PACK_SCHEMA_VERSION).contains(&version) {
             return Err(reader.malformed(format!(
-                "unsupported schema version {version}; expected 1 (dimension-only) or 2 (typed properties)"
+                "unsupported schema version {version}; expected 1, 2, or 3 (typed axes)"
             )));
         }
         let pack_id = reader.string()?;
@@ -778,7 +787,9 @@ impl NormalizedPack {
 }
 
 fn pack_hash_domain(version: u32) -> &'static str {
-    if version == MATDB_TYPED_PACK_SCHEMA_VERSION {
+    if version == MATDB_TYPED_AXIS_PACK_SCHEMA_VERSION {
+        "org.frankensim.fs-matdb.normalized-pack.v3"
+    } else if version == MATDB_TYPED_PACK_SCHEMA_VERSION {
         TYPED_PACK_HASH_DOMAIN
     } else {
         PACK_HASH_DOMAIN
@@ -1658,9 +1669,13 @@ fn normalization_target_dims(
                     ),
                 ));
             }
-            // ValidityDomain currently stores values but not axis dimensions;
-            // the compiler receipt is the sole dimension authority here.
-            Ok(None)
+            // Legacy axes retain their receipt-declared dimensions. Typed
+            // axes additionally cross-check those receipts against the domain.
+            Ok(claim
+                .validity
+                .axis_quantities()
+                .get(axis)
+                .map(|quantity| quantity.dims()))
         }
         NormalizationTarget::JointCovariance {
             observation,
@@ -2065,7 +2080,7 @@ fn decode_observation(reader: &mut Reader<'_>) -> Result<ObservationDataset, Pac
 fn encode_claim(writer: &mut Writer, claim: &PropertyClaim, version: u32) {
     writer.string(claim.key.name());
     writer.dims(claim.key.dims());
-    if version == MATDB_TYPED_PACK_SCHEMA_VERSION {
+    if version >= MATDB_TYPED_PACK_SCHEMA_VERSION {
         writer
             .bytes
             .extend_from_slice(&claim.key.quantity().canonical_bytes());
@@ -2098,6 +2113,15 @@ fn encode_claim(writer: &mut Writer, claim: &PropertyClaim, version: u32) {
         writer.string(axis);
         writer.f64(lo);
         writer.f64(hi);
+        if version == MATDB_TYPED_AXIS_PACK_SCHEMA_VERSION {
+            match claim.validity.axis_quantities().get(axis) {
+                Some(quantity) => {
+                    writer.u8(1);
+                    writer.bytes.extend_from_slice(&quantity.canonical_bytes());
+                }
+                None => writer.u8(0),
+            }
+        }
     }
     match claim.uncertainty {
         UncertaintyModel::Unstated => writer.u8(0),
@@ -2133,7 +2157,7 @@ fn encode_claim(writer: &mut Writer, claim: &PropertyClaim, version: u32) {
 fn decode_claim(reader: &mut Reader<'_>, version: u32) -> Result<PropertyClaim, PackError> {
     let name = reader.string()?;
     let key_dims = reader.dims()?;
-    let quantity = if version == MATDB_TYPED_PACK_SCHEMA_VERSION {
+    let quantity = if version >= MATDB_TYPED_PACK_SCHEMA_VERSION {
         let raw = reader.take(QUANTITY_SPEC_ENCODED_LEN)?;
         let quantity = QuantitySpec::from_canonical_bytes(raw)
             .map_err(|error| reader.malformed(format!("property quantity: {error}")))?;
@@ -2188,7 +2212,20 @@ fn decode_claim(reader: &mut Reader<'_>, version: u32) -> Result<PropertyClaim, 
         let lo = reader.f64()?;
         let hi = reader.f64()?;
         previous_axis = Some(axis.clone());
-        validity = validity.with(axis, lo, hi);
+        validity = if version == MATDB_TYPED_AXIS_PACK_SCHEMA_VERSION {
+            match reader.u8()? {
+                0 => validity.with(axis, lo, hi),
+                1 => {
+                    let raw = reader.take(QUANTITY_SPEC_ENCODED_LEN)?;
+                    let quantity = QuantitySpec::from_canonical_bytes(raw)
+                        .map_err(|error| reader.malformed(format!("axis quantity: {error}")))?;
+                    validity.with_quantity(axis, quantity, lo, hi)
+                }
+                tag => return Err(reader.malformed(format!("unknown axis quantity tag {tag}"))),
+            }
+        } else {
+            validity.with(axis, lo, hi)
+        };
     }
     let uncertainty = match reader.u8()? {
         0 => UncertaintyModel::Unstated,
@@ -2311,6 +2348,8 @@ pub struct JointUsageReceipt {
     pub properties: Vec<String>,
     /// The exact query point, axis-sorted as spelled by [`QueryPoint`].
     pub query_point: Vec<(String, f64)>,
+    /// Typed coordinate descriptors, requiring receipt schema v2.
+    pub axis_quantities: BTreeMap<String, QuantitySpec>,
     /// Selection policy tag shared by every member query.
     pub policy: &'static str,
     /// Selected claim per property, aligned with `properties`.
@@ -2380,6 +2419,17 @@ impl JointUsageReceipt {
             }
         }
         writer.u32(self.evaluator_version);
+        if self.schema_version == 2 || !self.axis_quantities.is_empty() {
+            writer.count(self.axis_quantities.len());
+            for (axis, quantity) in &self.axis_quantities {
+                writer.string(axis);
+                writer.bytes.extend_from_slice(&quantity.canonical_bytes());
+            }
+            return hash_domain(
+                "org.frankensim.fs-matdb.joint-usage-receipt.v2",
+                &writer.bytes,
+            );
+        }
         hash_domain(JOINT_USAGE_RECEIPT_IDENTITY_DOMAIN, &writer.bytes)
     }
 }
@@ -2468,7 +2518,11 @@ impl NormalizedPack {
 
         let correlation = self.joint_correlation(&members, &selected);
         let receipt = JointUsageReceipt {
-            schema_version: JOINT_USAGE_RECEIPT_SCHEMA_VERSION,
+            schema_version: if point.axis_quantities().is_empty() {
+                JOINT_USAGE_RECEIPT_SCHEMA_VERSION
+            } else {
+                2
+            },
             pack: self.content_hash(),
             properties: properties.iter().map(|p| p.name().to_owned()).collect(),
             query_point: point
@@ -2476,6 +2530,7 @@ impl NormalizedPack {
                 .iter()
                 .map(|(axis, &value)| (axis.clone(), value))
                 .collect(),
+            axis_quantities: point.axis_quantities().clone(),
             policy: policy.tag(),
             selected,
             member_receipts,
@@ -2573,10 +2628,15 @@ impl NormalizedPack {
     /// (including a receipt minted against another pack); the replay's own
     /// refusals otherwise.
     pub fn verify_joint_receipt(&self, receipt: &JointUsageReceipt) -> Result<(), MatDbError> {
-        if receipt.schema_version != JOINT_USAGE_RECEIPT_SCHEMA_VERSION {
+        let current = if receipt.axis_quantities.is_empty() {
+            JOINT_USAGE_RECEIPT_SCHEMA_VERSION
+        } else {
+            2
+        };
+        if receipt.schema_version != current {
             return Err(MatDbError::ReceiptSchemaVersionDrift {
                 receipt: receipt.schema_version,
-                current: JOINT_USAGE_RECEIPT_SCHEMA_VERSION,
+                current,
             });
         }
         if receipt.evaluator_version != crate::MATDB_EVALUATOR_VERSION {
@@ -2591,7 +2651,10 @@ impl NormalizedPack {
         let policy = crate::SelectionPolicy::from_tag(receipt.policy)?;
         let mut point = crate::QueryPoint::new();
         for (axis, value) in &receipt.query_point {
-            point = point.with(axis.clone(), *value)?;
+            point = match receipt.axis_quantities.get(axis) {
+                Some(quantity) => point.with_quantity(axis, *quantity, *value)?,
+                None => point.with(axis, *value)?,
+            };
         }
         // Schemas are recovered only from this exact content-pinned pack;
         // the comparisons below still bind every selected claim and receipt.
@@ -2610,6 +2673,14 @@ impl NormalizedPack {
         let replayed = self.query_joint_typed(&properties, &point, policy)?;
         let fresh = &replayed.receipt;
         for (field, matches) in [
+            (
+                "schema-version",
+                fresh.schema_version == receipt.schema_version,
+            ),
+            (
+                "axis-quantities",
+                fresh.axis_quantities == receipt.axis_quantities,
+            ),
             ("selected", fresh.selected == receipt.selected),
             (
                 "member_receipts",
