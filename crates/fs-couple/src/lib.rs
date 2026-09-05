@@ -53,6 +53,7 @@ pub mod render;
 pub mod selector;
 pub mod speaker;
 pub mod stribeck_friction;
+pub mod string_specimen;
 pub mod thin_plate;
 pub mod tract;
 // TOMBSTONE-3ez8g.13.5: dead module, deny new consumers (see its header).
