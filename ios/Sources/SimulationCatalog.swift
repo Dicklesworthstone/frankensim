@@ -93,17 +93,35 @@ enum SimulationCatalog {
 
     static let initial = all.first { $0.id == 13 } ?? all[0]
 
-    static func grouped(query: String) -> [(ExperimentTier, [SimulationExperiment])] {
+    static func filtered(query: String, tier selectedTier: ExperimentTier? = nil) -> [SimulationExperiment] {
         let needle = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        return all.filter { experiment in
+            (selectedTier == nil || experiment.tier == selectedTier) &&
+                (needle.isEmpty || searchableText(for: experiment).localizedCaseInsensitiveContains(needle))
+        }
+    }
+
+    static func grouped(
+        query: String,
+        tier selectedTier: ExperimentTier? = nil
+    ) -> [(ExperimentTier, [SimulationExperiment])] {
+        let matches = filtered(query: query, tier: selectedTier)
         return ExperimentTier.allCases.compactMap { tier in
-            let entries = all.filter { experiment in
-                experiment.tier == tier && (needle.isEmpty ||
-                    experiment.name.localizedCaseInsensitiveContains(needle) ||
-                    experiment.subtitle.localizedCaseInsensitiveContains(needle) ||
-                    experiment.kernel.localizedCaseInsensitiveContains(needle))
-            }
+            let entries = matches.filter { $0.tier == tier }
             return entries.isEmpty ? nil : (tier, entries)
         }
+    }
+
+    private static func searchableText(for experiment: SimulationExperiment) -> String {
+        [
+            experiment.name,
+            experiment.subtitle,
+            experiment.explanation,
+            experiment.kernel,
+            experiment.evidence.rawValue,
+            experiment.tier.rawValue,
+            experiment.tier.eyebrow,
+        ].joined(separator: " ")
     }
 
     private static func item(_ id: UInt32, _ name: String, _ subtitle: String, _ explanation: String, _ tier: ExperimentTier, _ symbol: String, _ accent: AccentFamily, _ evidence: EvidenceLabel, _ noClaim: String, _ kernel: String) -> SimulationExperiment {

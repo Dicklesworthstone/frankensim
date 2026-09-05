@@ -18,6 +18,26 @@ final class SimulationCatalogTests: XCTestCase {
         XCTAssertTrue(SimulationCatalog.all.allSatisfy { !$0.noClaim.isEmpty && !$0.kernel.isEmpty })
     }
 
+    func testCatalogFiltersExposeEveryTierWithoutDroppingEntries() {
+        let filteredInventory = ExperimentTier.allCases.flatMap { tier in
+            SimulationCatalog.filtered(query: "", tier: tier)
+        }
+
+        XCTAssertEqual(filteredInventory.count, SimulationCatalog.all.count)
+        XCTAssertEqual(Set(filteredInventory.map(\.id)), Set(SimulationCatalog.all.map(\.id)))
+        XCTAssertEqual(SimulationCatalog.filtered(query: "", tier: .flagships).map(\.id), [40, 41, 42])
+    }
+
+    func testCatalogSearchCoversMethodsEvidenceAndExplanations() {
+        XCTAssertEqual(SimulationCatalog.filtered(query: "fs-couple").map(\.id), [43])
+        XCTAssertEqual(SimulationCatalog.filtered(query: "Verified bound").map(\.id), [3, 9, 17, 29])
+        XCTAssertTrue(SimulationCatalog.filtered(query: "buoyant smoke").contains { $0.id == 15 })
+        let tierSearch = SimulationCatalog.filtered(query: "Tier III")
+        XCTAssertEqual(tierSearch.count, 10)
+        XCTAssertTrue(tierSearch.allSatisfy { $0.tier == .deep })
+        XCTAssertTrue(SimulationCatalog.filtered(query: "does not exist").isEmpty)
+    }
+
     @MainActor
     func testSelectingAnExperimentWaitsForAnExplicitRun() throws {
         let model = SimulationStudioModel()

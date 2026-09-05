@@ -56,10 +56,55 @@ final class FrankenSimAppearanceUITests: XCTestCase {
         keepScreenshot(of: app, named: "Phone studio after explicit run")
 
         chooser.tap()
-        XCTAssertTrue(app.navigationBars["Choose a simulation"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.otherElements["compact-simulation-catalog"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.textFields["catalog-search-field"].exists)
+        XCTAssertEqual(app.staticTexts["catalog-result-count"].label, "44 of 44 on-device kernels")
+        XCTAssertTrue(app.buttons["catalog-scope-all"].exists)
+        XCTAssertTrue(app.buttons["catalog-scope-Foundations"].exists)
+        XCTAssertTrue(app.buttons["catalog-scope-Frontier"].exists)
+        XCTAssertTrue(app.buttons["catalog-scope-Deep Kernel"].exists)
+        XCTAssertTrue(app.buttons["catalog-scope-Campaigns"].exists)
+        XCTAssertTrue(app.buttons["catalog-scope-Flagships"].exists)
+        XCTAssertTrue(app.buttons["catalog-theory-atlas"].exists)
         XCTAssertTrue(app.staticTexts["Heat diffusion"].exists)
-        XCTAssertTrue(app.searchFields.firstMatch.exists)
         keepScreenshot(of: app, named: "Phone simulation catalog")
+
+        app.buttons["catalog-theory-atlas"].tap()
+        XCTAssertTrue(app.navigationBars["Theory Atlas"].waitForExistence(timeout: 5))
+    }
+
+    func testPhoneCatalogSearchAndTierScopesRevealTheFullInventory() throws {
+        let app = XCUIApplication()
+        app.launchEnvironment["FSIM_SHOW_CATALOG"] = "1"
+        app.launch()
+
+        let catalog = app.otherElements["compact-simulation-catalog"]
+        XCTAssertTrue(catalog.waitForExistence(timeout: 12))
+
+        let search = app.textFields["catalog-search-field"]
+        XCTAssertTrue(search.exists)
+        search.tap()
+        search.typeText("reed")
+        XCTAssertTrue(app.staticTexts["Reed bore"].waitForExistence(timeout: 5))
+        XCTAssertEqual(app.staticTexts["catalog-result-count"].label, "1 of 44 on-device kernels")
+
+        app.buttons["catalog-clear-search"].tap()
+        let scopes = app.scrollViews["catalog-tier-scopes"]
+        let flagships = app.buttons["catalog-scope-Flagships"]
+        if !flagships.isHittable { scopes.swipeLeft() }
+        XCTAssertTrue(flagships.isHittable)
+        flagships.tap()
+        XCTAssertEqual(app.staticTexts["catalog-result-count"].label, "3 of 44 on-device kernels")
+        XCTAssertTrue(app.staticTexts["Ornithoid aircraft"].exists)
+        XCTAssertTrue(app.staticTexts["Laminar vessel"].exists)
+        XCTAssertTrue(app.staticTexts["Seismic frame"].exists)
+        XCTAssertFalse(app.staticTexts["Heat diffusion"].exists)
+
+        let all = app.buttons["catalog-scope-all"]
+        if !all.isHittable { scopes.swipeRight() }
+        XCTAssertTrue(all.isHittable)
+        all.tap()
+        XCTAssertEqual(app.staticTexts["catalog-result-count"].label, "44 of 44 on-device kernels")
     }
 
     func testPhoneAnimatedResultExposesPlaybackAndFrameInspection() throws {

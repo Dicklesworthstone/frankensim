@@ -6,7 +6,9 @@ struct SimulationStudioView: View {
     @AppStorage(ForgeTheme.textScaleStorageKey) private var textScale = ForgeTheme.defaultTextScale
     @StateObject private var model = SimulationStudioModel()
     @State private var search = ""
+    @State private var catalogTier: ExperimentTier?
     @State private var showsAtlas = false
+    @State private var showsCatalogAtlas = false
     @State private var showsCatalogSheet = false
     @State private var preferredColumn = NavigationSplitViewColumn.detail
     @State private var resultPlayback = ResultPlaybackState(frameCount: 1, reduceMotion: true)
@@ -44,16 +46,9 @@ struct SimulationStudioView: View {
                 .presentationDetents([.large])
         }
         .sheet(isPresented: $showsCatalogSheet) {
-            NavigationStack {
-                catalogSidebar
-                    .navigationTitle("Choose a simulation")
-                    .toolbar {
-                        ToolbarItem(placement: .confirmationAction) {
-                            Button("Done") { showsCatalogSheet = false }
-                        }
-                    }
-            }
+            compactCatalog
             .presentationDetents([.large])
+            .presentationDragIndicator(.visible)
         }
         .onChange(of: scenePhase) { _, phase in
             if phase != .active, model.isRunning { model.cancel() }
@@ -144,6 +139,217 @@ struct SimulationStudioView: View {
             .buttonStyle(SecondaryForgeButtonStyle(tint: ForgeTheme.emerald))
             .padding(12)
             .background(.ultraThinMaterial)
+        }
+    }
+
+    private var compactCatalog: some View {
+        ZStack {
+            ForgeBackground()
+            VStack(spacing: 0) {
+                compactCatalogHeader
+                Divider().overlay(ForgeTheme.stroke)
+                compactCatalogScopes
+                compactCatalogList
+                compactCatalogFooter
+            }
+        }
+        .accessibilityIdentifier("compact-simulation-catalog")
+        .sheet(isPresented: $showsCatalogAtlas) {
+            EpistemicAtlasView()
+                .presentationDetents([.large])
+        }
+    }
+
+    private var compactCatalogHeader: some View {
+        VStack(spacing: 12) {
+            HStack(alignment: .center, spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Simulation catalog")
+                        .font(.system(size: ForgeTheme.size(22), weight: .bold, design: .rounded))
+                        .foregroundStyle(ForgeTheme.text)
+                    Text("\(compactCatalogMatchCount) of \(SimulationCatalog.all.count) on-device kernels")
+                        .font(.system(size: ForgeTheme.size(10.5), weight: .semibold, design: .monospaced))
+                        .foregroundStyle(ForgeTheme.secondary)
+                        .accessibilityIdentifier("catalog-result-count")
+                }
+                Spacer(minLength: 8)
+                Button("Done") { showsCatalogSheet = false }
+                    .font(.system(size: ForgeTheme.size(14), weight: .bold, design: .rounded))
+                    .buttonStyle(.bordered)
+                    .buttonBorderShape(.capsule)
+                    .tint(ForgeTheme.emerald)
+                    .accessibilityIdentifier("catalog-done-button")
+            }
+
+            HStack(spacing: 9) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundStyle(ForgeTheme.secondary)
+                TextField("Search kernel, method, evidence, or study", text: $search)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .submitLabel(.search)
+                    .foregroundStyle(ForgeTheme.text)
+                    .accessibilityIdentifier("catalog-search-field")
+                if !search.isEmpty {
+                    Button {
+                        search = ""
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(ForgeTheme.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Clear catalog search")
+                    .accessibilityIdentifier("catalog-clear-search")
+                }
+            }
+            .font(.system(size: ForgeTheme.size(14), design: .rounded))
+            .padding(.horizontal, 13)
+            .frame(minHeight: 46)
+            .background(ForgeTheme.panel.opacity(0.96), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 15, style: .continuous)
+                    .stroke(ForgeTheme.stroke, lineWidth: 1)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 14)
+        .padding(.bottom, 12)
+    }
+
+    private var compactCatalogScopes: some View {
+        ScrollView(.horizontal) {
+            HStack(spacing: 8) {
+                catalogScopeButton(title: "All", count: SimulationCatalog.all.count, tier: nil)
+                ForEach(ExperimentTier.allCases) { tier in
+                    catalogScopeButton(
+                        title: tier.rawValue,
+                        count: SimulationCatalog.all.filter { $0.tier == tier }.count,
+                        tier: tier
+                    )
+                }
+            }
+            .padding(.horizontal, 16)
+        }
+        .scrollIndicators(.hidden)
+        .padding(.vertical, 10)
+        .accessibilityIdentifier("catalog-tier-scopes")
+    }
+
+    private var compactCatalogList: some View {
+        List {
+            let groups = SimulationCatalog.grouped(query: search, tier: catalogTier)
+            if groups.isEmpty {
+                ContentUnavailableView {
+                    Label("No simulations found", systemImage: "magnifyingglass")
+                } description: {
+                    Text("Try another term or show all five catalog tiers.")
+                } actions: {
+                    Button("Clear filters") {
+                        search = ""
+                        catalogTier = nil
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(ForgeTheme.emerald)
+                    .accessibilityIdentifier("catalog-clear-filters")
+                }
+                .listRowBackground(Color.clear)
+                .listRowSeparator(.hidden)
+            } else {
+                ForEach(groups, id: \.0) { tier, entries in
+                    Section {
+                        ForEach(entries) { experiment in
+                            Button {
+                                selectExperiment(experiment)
+                            } label: {
+                                CatalogRow(
+                                    experiment: experiment,
+                                    selected: experiment.id == model.selection.id
+                                )
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("catalog-experiment-\(experiment.id)")
+                            .accessibilityHint("Selects this simulation and returns to the studio")
+                            .listRowBackground(Color.clear)
+                        }
+                    } header: {
+                        HStack {
+                            Text(tier.eyebrow)
+                            Text(tier.rawValue)
+                            Spacer()
+                            Text("\(entries.count)")
+                        }
+                        .font(.system(size: ForgeTheme.size(9.5), weight: .bold, design: .monospaced))
+                        .foregroundStyle(ForgeTheme.secondary)
+                    }
+                }
+            }
+        }
+        .scrollContentBackground(.hidden)
+        .listStyle(.plain)
+    }
+
+    private var compactCatalogFooter: some View {
+        Button { showsCatalogAtlas = true } label: {
+            HStack(spacing: 10) {
+                Image(systemName: "books.vertical")
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Theory Atlas")
+                        .font(.system(size: ForgeTheme.size(13), weight: .bold, design: .rounded))
+                    Text("Evidence colors, layers, and the Five Explicits")
+                        .font(.system(size: ForgeTheme.size(10.5), design: .rounded))
+                }
+                Spacer()
+                Image(systemName: "chevron.right")
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .buttonStyle(SecondaryForgeButtonStyle(tint: ForgeTheme.emerald))
+        .accessibilityIdentifier("catalog-theory-atlas")
+        .padding(.horizontal, 14)
+        .padding(.vertical, 9)
+        .background(.ultraThinMaterial)
+        .overlay(alignment: .top) { Rectangle().fill(ForgeTheme.stroke).frame(height: 1) }
+    }
+
+    private var compactCatalogMatchCount: Int {
+        SimulationCatalog.filtered(query: search, tier: catalogTier).count
+    }
+
+    private func catalogScopeButton(
+        title: String,
+        count: Int,
+        tier: ExperimentTier?
+    ) -> some View {
+        let isSelected = catalogTier == tier
+        return Button {
+            catalogTier = tier
+        } label: {
+            HStack(spacing: 6) {
+                Text(title)
+                Text("\(count)")
+                    .font(.system(size: ForgeTheme.size(9), weight: .bold, design: .monospaced))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background((isSelected ? Color.black : ForgeTheme.secondary).opacity(0.12), in: Capsule())
+            }
+            .font(.system(size: ForgeTheme.size(11.5), weight: .bold, design: .rounded))
+            .foregroundStyle(isSelected ? Color.black : ForgeTheme.text)
+            .padding(.horizontal, 12)
+            .frame(minHeight: 36)
+            .background(isSelected ? ForgeTheme.emerald : ForgeTheme.panel, in: Capsule())
+            .overlay(Capsule().stroke(isSelected ? ForgeTheme.emerald : ForgeTheme.stroke, lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier(tier.map { "catalog-scope-\($0.rawValue)" } ?? "catalog-scope-all")
+        .accessibilityLabel("\(title), \(count) simulations")
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
+    }
+
+    private func selectExperiment(_ experiment: SimulationExperiment) {
+        model.select(experiment)
+        preferredColumn = .detail
+        if horizontalSizeClass == .compact {
+            showsCatalogSheet = false
         }
     }
 
