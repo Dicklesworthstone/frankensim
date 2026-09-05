@@ -2,7 +2,10 @@
 //! Synthetic material data check the implementation, not measured wire fidelity.
 
 use fs_couple::acoustic_realize::{realize_assembly, string_mode_omega};
-use fs_couple::string_specimen::with_uniform_circular_material_state;
+use fs_couple::string_specimen::{
+    StringPrestress, with_uniform_circular_material_and_prestress,
+    with_uniform_circular_material_state,
+};
 use fs_evidence::ValidityDomain;
 use fs_matdb::{
     ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId, PropertyClaim, PropertyKey,
@@ -284,5 +287,180 @@ fn g0_binding_refuses_missing_wrong_dimension_and_unrepresentable_inputs() {
         )
         .is_err()
     );
+    assert_eq!(original, template());
+}
+
+#[test]
+fn g1_prestress_prescriptions_preserve_material_authority_and_solve_beam_tension() {
+    let material = elastic("same-specimen", 1000.0, 2.0e9);
+    let fixed = with_uniform_circular_material_state(template(), 0.0005, &material).unwrap();
+    let extension = StringPrestress::FixedExtension {
+        stress_free_length_m: 0.498,
+        linear_strain_limit: 0.005,
+    };
+    let extended = with_uniform_circular_material_and_prestress(
+        PrestressedString {
+            tension_n: f64::NAN,
+            ..template()
+        },
+        0.0005,
+        &material,
+        extension,
+    )
+    .unwrap();
+    let area = core::f64::consts::PI * 0.001_f64.powi(2) / 4.0;
+    close(extended.string().tension_n, 2.0e9 * area * 0.002 / 0.498);
+    assert_eq!(extended.prestress(), extension);
+    assert_eq!(extended.material(), &material);
+    assert_eq!(extended.specimen_identity(), fixed.specimen_identity());
+    assert_eq!(extended.mass_kg().to_bits(), fixed.mass_kg().to_bits());
+    assert_eq!(extended.string().rayleigh, fixed.string().rayleigh);
+    assert_ne!(
+        extended.string().tension_n.to_bits(),
+        fixed.string().tension_n.to_bits()
+    );
+
+    let target = StringPrestress::TargetFundamentalHz(160.0);
+    let tuned = with_uniform_circular_material_and_prestress(template(), 0.0005, &material, target)
+        .unwrap();
+    let moment = core::f64::consts::PI * 0.001_f64.powi(4) / 64.0;
+    let expected_tension = 4.0 * 1000.0 * area * 0.5_f64.powi(2) * 160.0_f64.powi(2)
+        - core::f64::consts::PI.powi(2) * 2.0e9 * moment / 0.5_f64.powi(2);
+    close(tuned.string().tension_n, expected_tension);
+    close(
+        string_mode_omega(tuned.string(), 1) / core::f64::consts::TAU,
+        160.0,
+    );
+    assert_eq!(tuned.prestress(), target);
+    assert_eq!(tuned.specimen_identity(), fixed.specimen_identity());
+    assert_eq!(fixed.prestress(), StringPrestress::FixedTension(20.0));
+}
+
+#[test]
+fn g3_constraint_choice_changes_material_swap_pressure_response() {
+    let extension = StringPrestress::FixedExtension {
+        stress_free_length_m: 0.498,
+        linear_strain_limit: 0.005,
+    };
+    let compliant = with_uniform_circular_material_and_prestress(
+        template(),
+        0.0005,
+        &elastic("compliant", 1000.0, 2.0e9),
+        extension,
+    )
+    .unwrap();
+    let stiff = with_uniform_circular_material_and_prestress(
+        template(),
+        0.0005,
+        &elastic("stiff", 1000.0, 8.0e9),
+        extension,
+    )
+    .unwrap();
+    close(stiff.string().tension_n / compliant.string().tension_n, 4.0);
+    let compliant_hz = measured_hz(&pressure(compliant.string()));
+    let stiff_hz = measured_hz(&pressure(stiff.string()));
+    assert!(
+        (stiff_hz / compliant_hz - 2.0).abs() < 0.015,
+        "fixed extension and E x4 must double small-amplitude pitch: {compliant_hz}, {stiff_hz}"
+    );
+
+    let target = StringPrestress::TargetFundamentalHz(160.0);
+    let light = with_uniform_circular_material_and_prestress(
+        template(),
+        0.0005,
+        &elastic("light-tuned", 1000.0, 2.0e9),
+        target,
+    )
+    .unwrap();
+    let heavy = with_uniform_circular_material_and_prestress(
+        template(),
+        0.0005,
+        &elastic("heavy-tuned", 4000.0, 2.0e9),
+        target,
+    )
+    .unwrap();
+    assert!(heavy.string().tension_n > 4.0 * light.string().tension_n);
+    let light_hz = measured_hz(&pressure(light.string()));
+    let heavy_hz = measured_hz(&pressure(heavy.string()));
+    for actual in [light_hz, heavy_hz] {
+        assert!(
+            (actual / 160.0 - 1.0).abs() < 0.01,
+            "target pressure pitch: {actual}"
+        );
+    }
+    eprintln!(
+        "G3 fixed extension E x4: {compliant_hz:.6} -> {stiff_hz:.6} Hz; target pitch density x4: {light_hz:.6} -> {heavy_hz:.6} Hz"
+    );
+}
+
+#[test]
+fn g0_prestress_refuses_slack_overstrain_invalid_targets_and_moving_end_mismatch() {
+    let material = elastic("valid", 1000.0, 2.0e9);
+    let original = template();
+    let bind = |prestress| {
+        with_uniform_circular_material_and_prestress(original, 0.0005, &material, prestress)
+    };
+    for invalid in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        assert!(bind(StringPrestress::FixedTension(invalid)).is_err());
+        assert!(bind(StringPrestress::TargetFundamentalHz(invalid)).is_err());
+        assert!(
+            bind(StringPrestress::FixedExtension {
+                stress_free_length_m: invalid,
+                linear_strain_limit: 0.005,
+            })
+            .is_err()
+        );
+        assert!(
+            bind(StringPrestress::FixedExtension {
+                stress_free_length_m: 0.498,
+                linear_strain_limit: invalid,
+            })
+            .is_err()
+        );
+    }
+    for stress_free_length_m in [0.5, 0.6, f64::MIN_POSITIVE] {
+        assert!(
+            bind(StringPrestress::FixedExtension {
+                stress_free_length_m,
+                linear_strain_limit: 0.005,
+            })
+            .is_err()
+        );
+    }
+    assert!(
+        bind(StringPrestress::FixedExtension {
+            stress_free_length_m: 0.498,
+            linear_strain_limit: 0.001,
+        })
+        .is_err()
+    );
+    for hz in [1.0e-10, f64::MAX] {
+        assert!(bind(StringPrestress::TargetFundamentalHz(hz)).is_err());
+    }
+    let moving = PrestressedString {
+        moving_end: true,
+        ..original
+    };
+    assert!(
+        with_uniform_circular_material_and_prestress(
+            moving,
+            0.0005,
+            &material,
+            StringPrestress::FixedTension(20.0),
+        )
+        .is_ok()
+    );
+    for prestress in [
+        StringPrestress::TargetFundamentalHz(160.0),
+        StringPrestress::FixedExtension {
+            stress_free_length_m: 0.498,
+            linear_strain_limit: 0.005,
+        },
+    ] {
+        assert!(
+            with_uniform_circular_material_and_prestress(moving, 0.0005, &material, prestress,)
+                .is_err()
+        );
+    }
     assert_eq!(original, template());
 }

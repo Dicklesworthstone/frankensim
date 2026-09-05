@@ -367,17 +367,28 @@ material state remain available in `ResolvedStringSpecimen`; its specimen hash
 binds geometry and material resolution, excluding mechanical loading and solver
 options. It is not the complete scenario identity.
 
-Rebinding holds the template's geometry and tension fixed and preserves declared
-losses, supports, and modal budget. It does not solve fixed mass, imposed extension,
-tuned pitch, thermal expansion, yielding, anisotropy, or melting. Diameter supplies
-the existing compact strip-radiator width, without a new claim of accurate
+The original binding holds the template's geometry and tension fixed.
+`with_uniform_circular_material_and_prestress` additionally takes an explicit
+`StringPrestress`: fixed tension, fixed extension from a stress-free length, or
+target primary undamped fundamental frequency. Fixed extension computes `T=EA*strain`
+and enforces the caller's declared linear strain limit; that assumption is not a
+measured yield boundary. Target frequency inverts the existing pinned-pinned
+Euler–Bernoulli dispersion relation, including EI. Slack/compressive solutions and
+extension/target prescriptions on the moving-end basis refuse. The prescription
+remains separate from the material receipts, available through `prestress()`.
+All policies preserve declared losses, supports, and modal budget. Current geometry
+and density are inputs; fixed mass, thermal expansion, transverse contraction,
+yielding, anisotropy, or melting are not solved. Target pitch describes an undamped
+linear eigenfrequency, not a damped or finite-amplitude pressure frequency. Diameter
+supplies the existing compact strip-radiator width, without a new claim of accurate
 circular-wire radiation. Admission refuses missing/wrong-dimension properties,
 invalid mechanical inputs, and nonfinite/zero derived products before publication.
 The finite scalar calculation is deterministic; no runtime dependency or inner-loop
 database access is added. `tests/string_specimen.rs` checks G0 admission, G1 mass,
 EA/EI and beam modes, and G3 geometric/material scaling plus pressure-measured pitch
-through the actual acoustic realizer. Synthetic data establish numerical behavior,
-not physical validation of a measured material.
+through the actual acoustic realizer. G1/G3 cases also cover extension-derived
+tension and material changes under explicit extension/target-frequency constraints.
+Synthetic data check numerical behavior, not physical validation of a measured material.
 
 ### `acoustic_realize` / `pcm_wav`
 
