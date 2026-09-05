@@ -881,6 +881,7 @@ fn steel_panel() -> ThinPlate {
         nu12: 0.3,
         g12_pa: 200e9 / (2.0 * 1.3),
         damping_ratio: 0.02,
+        thermoelastic: None,
         n_modes: 2,
         geometric_nonlinearity: false,
         pretension_n_m: 0.0,

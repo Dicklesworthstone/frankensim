@@ -9,13 +9,14 @@
 use crate::acoustic_realize::AcousticRealizeError;
 use fs_material::elastic::OrthotropicElastic;
 use fs_material::gas::GasState;
-use fs_material::visco::RayleighDamping;
+use fs_material::state_point::IsotropicThermoelasticStatePoint;
+use fs_material::visco::{RayleighDamping, ThermoelasticZener};
 use fs_math::c64::C64;
 use fs_math::det;
 use fs_plate::{
     AssemblyOptions, EdgeSupport, PlateError, PlateMesh, PlateSection, assemble, modes,
 };
-use fs_scenario::{RadiatingPlate, ThinPlate};
+use fs_scenario::{IsotropicPlateThermal, RadiatingPlate, ThinPlate};
 use fs_vfit::FitOptions;
 use fs_vfit::discretize::{DigitalFilter, DigitalFilterState, realize_tabulated_impedance};
 
@@ -146,6 +147,7 @@ impl VkBody {
     }
 
     fn from_plate_ports(plate: ThinPlate, with_area: bool) -> Result<Self, AcousticRealizeError> {
+        admitted_thermoelastic(&plate)?;
         let isotropic = (plate.e1_pa - plate.e2_pa).abs() <= 1.0e-6 * plate.e1_pa.abs();
         if isotropic && !plate.clamped {
             Self::from_ss_sine(plate, with_area)
@@ -175,12 +177,7 @@ impl VkBody {
             &stress,
         )
         .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
-        let zetas = vk_zetas(
-            plate.density_kg_m3,
-            plate.thickness_m,
-            plate.damping_ratio,
-            &model.storage.omegas,
-        );
+        let zetas = vk_zetas(plate, &model.storage.omegas)?;
         let mut areas = Vec::with_capacity(disp.len());
         let mut drive = Vec::with_capacity(disp.len());
         let norm = (2.0
@@ -312,12 +309,7 @@ impl VkBody {
                 bilinear_sample(&mode.w, nx, ny, plate.length_m, plate.width_m, sx, sy) * scale,
             );
         }
-        let zetas = vk_zetas(
-            plate.density_kg_m3,
-            plate.thickness_m,
-            plate.damping_ratio,
-            &vk.storage.omegas,
-        );
+        let zetas = vk_zetas(plate, &vk.storage.omegas)?;
         finish_vk(vk.storage, &zetas, &drive, areas, with_area)
     }
 
@@ -357,14 +349,14 @@ impl VkBody {
     }
 }
 
-fn vk_zetas(density: f64, thickness: f64, damping_ratio: f64, omegas: &[f64]) -> Vec<f64> {
-    let mut zetas = vec![damping_ratio; omegas.len()];
-    if let Ok(te) = thermoelastic_for_density(density, 293.15) {
+fn vk_zetas(plate: ThinPlate, omegas: &[f64]) -> Result<Vec<f64>, AcousticRealizeError> {
+    let mut zetas = vec![plate.damping_ratio; omegas.len()];
+    if let Some(te) = admitted_thermoelastic(&plate)? {
         for (z, &w) in zetas.iter_mut().zip(omegas) {
-            *z += fs_material::visco::loss_factor_to_zeta(te.loss_factor(w, thickness));
+            *z += thermoelastic_zeta(te, w, plate.thickness_m)?;
         }
     }
-    zetas
+    Ok(zetas)
 }
 
 fn finish_vk(
@@ -558,6 +550,7 @@ impl PlateBank {
 /// Section, mesh, or modal-window refusals.
 #[allow(clippy::too_many_lines)] // one coherent certification stage
 pub fn certified_radiators(plate: ThinPlate) -> Result<Vec<CompactBody>, AcousticRealizeError> {
+    let thermoelastic = admitted_thermoelastic(&plate)?;
     if plate.n_modes == 0 {
         return Err(AcousticRealizeError::InvalidDescription {
             what: "thin plate needs at least one mode",
@@ -655,11 +648,9 @@ pub fn certified_radiators(plate: ThinPlate) -> Result<Vec<CompactBody>, Acousti
             }
         }
     }
-    if let Ok(te) = thermoelastic_for_density(plate.density_kg_m3, 293.15) {
+    if let Some(te) = thermoelastic {
         for body in &mut out {
-            body.zeta += fs_material::visco::loss_factor_to_zeta(
-                te.loss_factor(body.omega, plate.thickness_m),
-            );
+            body.zeta += thermoelastic_zeta(te, body.omega, plate.thickness_m)?;
         }
     }
     if out.is_empty() {
@@ -670,15 +661,98 @@ pub fn certified_radiators(plate: ThinPlate) -> Result<Vec<CompactBody>, Acousti
     Ok(out)
 }
 
-fn thermoelastic_for_density(
-    density: f64,
-    t0: f64,
-) -> Result<fs_material::visco::ThermoelasticZener, fs_material::visco::ViscoError> {
-    if density > 5_000.0 {
-        fs_material::visco::ThermoelasticZener::structural_steel(t0)
-    } else {
-        fs_material::visco::ThermoelasticZener::aluminum(t0)
+/// Bind one resolved isotropic material state to an isotropic plate description.
+/// All elastic and thermal inputs move together; geometry and excitation remain
+/// caller-owned. An orthotropic description refuses instead of losing anisotropy.
+pub fn with_isotropic_thermoelastic_state(
+    mut plate: ThinPlate,
+    state: &IsotropicThermoelasticStatePoint,
+) -> Result<ThinPlate, AcousticRealizeError> {
+    require_isotropic_thermoelastic(&plate)?;
+    let law = state.law();
+    plate.density_kg_m3 = law.rho;
+    plate.e1_pa = law.e;
+    plate.e2_pa = law.e;
+    plate.nu12 = state.poisson_ratio();
+    plate.g12_pa = law.e / (2.0 * (1.0 + plate.nu12));
+    plate.thermoelastic = Some(IsotropicPlateThermal {
+        temperature_k: law.t0,
+        linear_expansion_per_k: law.alpha_t,
+        specific_heat_j_kg_k: law.cp,
+        conductivity_w_m_k: law.conductivity,
+        state_identity: Some(state.resolved().identity()),
+    });
+    admitted_thermoelastic(&plate)?;
+    Ok(plate)
+}
+
+fn require_isotropic_thermoelastic(plate: &ThinPlate) -> Result<(), AcousticRealizeError> {
+    let g_iso = plate.e1_pa / (2.0 * (1.0 + plate.nu12));
+    if !(plate.e1_pa > 0.0
+        && plate.e1_pa.is_finite()
+        && plate.nu12 > -1.0
+        && plate.nu12 < 0.5
+        && (plate.e2_pa / plate.e1_pa - 1.0).abs() <= 1.0e-6
+        && (plate.g12_pa / g_iso - 1.0).abs() <= 1.0e-6)
+    {
+        return Err(AcousticRealizeError::InvalidDescription {
+            what: "isotropic thermoelastic loss requires isotropic E, nu and G; anisotropic loss is unavailable",
+        });
     }
+    Ok(())
+}
+
+fn admitted_thermoelastic(
+    plate: &ThinPlate,
+) -> Result<Option<ThermoelasticZener>, AcousticRealizeError> {
+    let Some(thermal) = plate.thermoelastic else {
+        return Ok(None);
+    };
+    require_isotropic_thermoelastic(plate)?;
+    if !thermal.linear_expansion_per_k.is_finite()
+        || [
+            plate.density_kg_m3,
+            plate.thickness_m,
+            thermal.temperature_k,
+            thermal.specific_heat_j_kg_k,
+            thermal.conductivity_w_m_k,
+        ]
+        .iter()
+        .any(|v| !v.is_finite() || *v <= 0.0)
+    {
+        return Err(AcousticRealizeError::InvalidDescription {
+            what: "thermoelastic loss requires finite expansion and positive finite rho, thickness, T, cp and conductivity",
+        });
+    }
+    let law = ThermoelasticZener {
+        e: plate.e1_pa,
+        alpha_t: thermal.linear_expansion_per_k,
+        t0: thermal.temperature_k,
+        rho: plate.density_kg_m3,
+        cp: thermal.specific_heat_j_kg_k,
+        conductivity: thermal.conductivity_w_m_k,
+    };
+    let tau = law.relaxation_time(plate.thickness_m);
+    if !(law.relaxation_strength().is_finite() && tau > 0.0 && tau.is_finite()) {
+        return Err(AcousticRealizeError::InvalidDescription {
+            what: "thermoelastic relaxation strength or time is unrepresentable",
+        });
+    }
+    Ok(Some(law))
+}
+
+fn thermoelastic_zeta(
+    law: ThermoelasticZener,
+    omega: f64,
+    thickness: f64,
+) -> Result<f64, AcousticRealizeError> {
+    let eta = law.loss_factor(omega, thickness);
+    if !(eta >= 0.0 && eta.is_finite()) {
+        return Err(AcousticRealizeError::InvalidDescription {
+            what: "thermoelastic modal loss is unrepresentable",
+        });
+    }
+    Ok(fs_material::visco::loss_factor_to_zeta(eta))
 }
 
 /// Rayleigh-integral baffled-piston face impedance `Z = p/v` under
@@ -810,6 +884,7 @@ mod tests {
             nu12: 0.3,
             g12_pa: 200e9 / (2.0 * 1.3),
             damping_ratio: 0.01,
+            thermoelastic: None,
             n_modes: 2,
             geometric_nonlinearity: false,
             pretension_n_m: 0.0,
@@ -841,6 +916,7 @@ mod tests {
             nu12: 0.3,
             g12_pa: 200e9 / (2.0 * 1.3),
             damping_ratio: 0.01,
+            thermoelastic: None,
             n_modes: 1,
             geometric_nonlinearity: false,
             pretension_n_m: 0.0,
@@ -885,6 +961,7 @@ mod tests {
             nu12: 0.3,
             g12_pa: 200e9 / (2.0 * 1.3),
             damping_ratio: 0.01,
+            thermoelastic: None,
             n_modes: 1,
             geometric_nonlinearity: true,
             pretension_n_m: 0.0,

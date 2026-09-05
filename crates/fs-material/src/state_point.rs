@@ -43,6 +43,14 @@ pub const LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY: &str =
     "linear_thermal_expansion_coefficient";
 /// Dimensions of an inverse thermodynamic-temperature interval [1/K].
 pub const INVERSE_TEMPERATURE_DIMS: Dims = Dims([0, 0, 0, -1, 0, 0]);
+/// Canonical specific heat at constant pressure [J/(kg K)].
+pub const SPECIFIC_HEAT_CAPACITY_PROPERTY: &str = "specific_heat_capacity";
+/// Canonical isotropic thermal conductivity [W/(m K)].
+pub const THERMAL_CONDUCTIVITY_PROPERTY: &str = "thermal_conductivity";
+/// Dimensions of specific heat [J/(kg K)].
+pub const SPECIFIC_HEAT_CAPACITY_DIMS: Dims = Dims([2, 0, -2, -1, 0, 0]);
+/// Dimensions of thermal conductivity [W/(m K)].
+pub const THERMAL_CONDUCTIVITY_DIMS: Dims = Dims([1, 1, -3, -1, 0, 0]);
 /// Canonical orthotropic Young's-modulus keys along material axes 1, 2, 3.
 pub const ORTHOTROPIC_YOUNG_MODULUS_PROPERTIES: [&str; 3] =
     ["young_modulus_1", "young_modulus_2", "young_modulus_3"];
@@ -593,6 +601,118 @@ pub fn resolve_isotropic_thermal_expansion_state_point(
     Ok(IsotropicThermalExpansionStatePoint {
         resolved,
         linear_coefficient_per_k,
+    })
+}
+
+/// One complete material state for the isotropic Zener loss approximation.
+///
+/// Property receipts retain their original uncertainty. The loss model is
+/// an estimate for a homogeneous thin beam/plate with one through-thickness
+/// thermal relaxation mode, not an anisotropic or resolved heat-flow model.
+#[derive(Clone, Debug)]
+pub struct IsotropicThermoelasticStatePoint {
+    resolved: ResolvedMaterialStatePoint,
+    law: crate::visco::ThermoelasticZener,
+    poisson_ratio: f64,
+}
+
+impl IsotropicThermoelasticStatePoint {
+    /// All six property-use receipts at the same explicit state point.
+    #[must_use]
+    pub const fn resolved(&self) -> &ResolvedMaterialStatePoint {
+        &self.resolved
+    }
+
+    /// Estimated loss law populated only from the admitted property bundle.
+    #[must_use]
+    pub const fn law(&self) -> crate::visco::ThermoelasticZener {
+        self.law
+    }
+
+    /// Isotropic Poisson ratio used by the consuming plate's elastic operator.
+    #[must_use]
+    pub const fn poisson_ratio(&self) -> f64 {
+        self.poisson_ratio
+    }
+}
+
+/// Resolve elasticity and thermal properties together at absolute `T` [K].
+///
+/// The caller explicitly selects the isotropic approximation. Missing data,
+/// ambiguous claims, wrong dimensions, and out-of-domain states refuse through
+/// the existing material query; density never selects a representative metal.
+pub fn resolve_isotropic_thermoelastic_state_point(
+    card: &MaterialCard,
+    point: &QueryPoint,
+    selection: MaterialPropertySelection,
+) -> Result<IsotropicThermoelasticStatePoint, MaterialStatePointError> {
+    let temperature = point.axes().get("T").copied().filter(|t| *t > 0.0).ok_or(
+        MaterialStatePointError::InvalidDerived {
+            quantity: "thermoelastic positive absolute T coordinate",
+        },
+    )?;
+    let requirements = [
+        (
+            DENSITY_PROPERTY,
+            Density::DIMS,
+            ScalarAdmissibility::StrictlyPositive,
+        ),
+        (
+            YOUNG_MODULUS_PROPERTY,
+            Pressure::DIMS,
+            ScalarAdmissibility::StrictlyPositive,
+        ),
+        (
+            POISSON_RATIO_PROPERTY,
+            Dims::NONE,
+            ScalarAdmissibility::OpenInterval {
+                lower: -1.0,
+                upper: 0.5,
+            },
+        ),
+        (
+            LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY,
+            INVERSE_TEMPERATURE_DIMS,
+            ScalarAdmissibility::Finite,
+        ),
+        (
+            SPECIFIC_HEAT_CAPACITY_PROPERTY,
+            SPECIFIC_HEAT_CAPACITY_DIMS,
+            ScalarAdmissibility::StrictlyPositive,
+        ),
+        (
+            THERMAL_CONDUCTIVITY_PROPERTY,
+            THERMAL_CONDUCTIVITY_DIMS,
+            ScalarAdmissibility::StrictlyPositive,
+        ),
+    ]
+    .into_iter()
+    .map(|(name, dims, domain)| ScalarPropertyRequirement::try_new(name, dims, domain))
+    .collect::<Result<Vec<_>, _>>()?;
+    let resolved = resolve_material_state_point(card, point, &requirements, selection)?;
+    let value = |name: &str| {
+        resolved
+            .property(name)
+            .expect("canonical thermoelastic requirement was resolved")
+            .value_si()
+    };
+    let law = crate::visco::ThermoelasticZener {
+        e: value(YOUNG_MODULUS_PROPERTY),
+        rho: value(DENSITY_PROPERTY),
+        alpha_t: value(LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY),
+        cp: value(SPECIFIC_HEAT_CAPACITY_PROPERTY),
+        conductivity: value(THERMAL_CONDUCTIVITY_PROPERTY),
+        t0: temperature,
+    };
+    if !law.relaxation_strength().is_finite() {
+        return Err(MaterialStatePointError::InvalidDerived {
+            quantity: "thermoelastic relaxation strength",
+        });
+    }
+    Ok(IsotropicThermoelasticStatePoint {
+        poisson_ratio: value(POISSON_RATIO_PROPERTY),
+        resolved,
+        law,
     })
 }
 

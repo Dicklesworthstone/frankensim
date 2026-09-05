@@ -253,6 +253,24 @@ pub struct ContactTexture {
     pub tangent_stiffness_n_m: f64,
 }
 
+/// Explicit thermal inputs for the isotropic Zener thin-plate approximation.
+/// Elasticity and density come from the same [`ThinPlate`]. Values are at the
+/// stated specimen temperature, which need not equal the ambient gas temperature.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct IsotropicPlateThermal {
+    /// Absolute specimen temperature [K].
+    pub temperature_k: f64,
+    /// Instantaneous linear thermal expansion [1/K].
+    pub linear_expansion_per_k: f64,
+    /// Specific heat at constant pressure [J/(kg K)].
+    pub specific_heat_j_kg_k: f64,
+    /// Isotropic conductivity [W/(m K)].
+    pub conductivity_w_m_k: f64,
+    /// Optional resolved material-state identity. A citation is not authority;
+    /// raw caller-authored values without a resolved bundle remain unvalidated.
+    pub state_identity: Option<fs_blake3::ContentHash>,
+}
+
 /// A thin orthotropic plate (a panel, a soundboard, a bulkhead).
 ///
 /// Modes are not data. Realization asks `fs-plate` + `fs-modal` for
@@ -277,6 +295,11 @@ pub struct ThinPlate {
     pub g12_pa: f64,
     /// Viscous modal damping ratio.
     pub damping_ratio: f64,
+    /// Explicit isotropic thermoelastic loss. `None` means this loss is
+    /// unavailable/unclaimed, not zero physical loss. An orthotropic plate
+    /// cannot use this scalar law. Do not add it when thermal transport is
+    /// already resolved or the authored damping already includes this loss.
+    pub thermoelastic: Option<IsotropicPlateThermal>,
     /// How many certified modes to keep.
     pub n_modes: usize,
     /// If true the plate is a von Karman modal pHS (`fs-nlmodal`),
