@@ -18,6 +18,10 @@
 //! grammar plus exactly one `surface_a`, `surface_b`, and `context` record.
 //! Every numeric token has a separate explicit unit field; confidence and
 //! correlation use the exact basis 1.
+//! Manifest v2 additionally admits explicit `property <source> <target>
+//! <kind|dimensional>` and `axis <source> <target>` records. These map names
+//! without changing the source grammar. Quantity kinds apply to values;
+//! axis aliases do not claim typed validity axes. V1 output stays frozen.
 //! A kinetics-v1 source declares exactly one explicitly first-order reaction
 //! plus `pre_exponential` and `activation_temperature`, representing only the
 //! immutable coefficient schema `k(T) = A exp(-T_a / T)` with `A` in `s^-1`
@@ -48,12 +52,15 @@ use fs_matdb::{
     SpeciesNormalizationTarget, StatisticMember, SurfaceSpec, SystemContext, UncertaintyModel,
     ValidityBoundSide,
 };
-use fs_qty::Dims;
 use fs_qty::chemistry::{ReactionId, SpeciesId};
 use fs_qty::parse::{ParseBudget, parse_qty_with_budget};
+use fs_qty::semantic::{FrequencyConvention, QuantityKind, SemanticType, ValueForm};
+use fs_qty::{Dims, QuantitySpec};
 
 const COMPILER_ID: &str = "frankensim-matdb-pack-compiler-v1";
 const INTERFACE_COMPILER_ID: &str = "frankensim-matdb-interface-pack-compiler-v1";
+const MAPPED_COMPILER_ID: &str = "frankensim-matdb-pack-compiler-v2";
+const MAPPED_INTERFACE_COMPILER_ID: &str = "frankensim-matdb-interface-pack-compiler-v2";
 const NASA9_COMPILER_ID: &str = "frankensim-matdb-nasa9-model-pack-compiler-v1";
 const KINETICS_COMPILER_ID: &str = "frankensim-matdb-kinetics-model-pack-compiler-v1";
 const SPECIES_COMPILER_ID: &str = "frankensim-matdb-species-pack-compiler-v1";
@@ -62,8 +69,9 @@ const SPECIES_COMPILER_ID: &str = "frankensim-matdb-species-pack-compiler-v1";
 /// Bump this whenever parsing, admission, normalization, or provenance
 /// semantics can change the canonical compiler fixture.
 #[allow(dead_code)] // consumed textually by `xtask check-goldens`
-pub const MATDB_PACK_COMPILER_SEMANTICS_VERSION: u32 = 4;
+pub const MATDB_PACK_COMPILER_SEMANTICS_VERSION: u32 = 5;
 const MANIFEST_HEADER: &str = "frankensim.matdb-manifest.v1";
+const MAPPED_MANIFEST_HEADER: &str = "frankensim.matdb-manifest.v2";
 const SOURCE_HEADER: &str = "frankensim.matdb-source.v1";
 const NASA9_SOURCE_HEADER: &str = "frankensim.nasa9-source.v1";
 const KINETICS_SOURCE_HEADER: &str = "frankensim.kinetics-source.v1";
@@ -359,11 +367,20 @@ impl SourceProfile {
 
 #[derive(Debug)]
 struct Manifest {
+    version: u32,
     pack_id: String,
     redistribution_terms: String,
     citation: String,
     license: String,
     sources: Vec<SourceSpec>,
+    properties: BTreeMap<String, (String, Option<QuantityKind>)>,
+    axes: BTreeMap<String, String>,
+}
+
+impl Manifest {
+    fn axis<'a>(&'a self, source: &'a str) -> &'a str {
+        self.axes.get(source).map_or(source, String::as_str)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -790,18 +807,24 @@ fn parse_manifest(text: &str) -> Result<Manifest, CompileError> {
         ));
     }
     let mut lines = text.lines();
-    if lines.next() != Some(MANIFEST_HEADER) {
-        return Err(CompileError::new(
-            "unsupported_manifest_schema",
-            "manifest",
-            format!("first line must be {MANIFEST_HEADER:?}"),
-        ));
-    }
+    let version = match lines.next() {
+        Some(MANIFEST_HEADER) => 1,
+        Some(MAPPED_MANIFEST_HEADER) => 2,
+        _ => {
+            return Err(CompileError::new(
+                "unsupported_manifest_schema",
+                "manifest",
+                format!("first line must be {MANIFEST_HEADER:?} or {MAPPED_MANIFEST_HEADER:?}"),
+            ));
+        }
+    };
     let mut pack_id = None;
     let mut redistribution_terms = None;
     let mut citation = None;
     let mut license = None;
     let mut sources = Vec::new();
+    let mut properties = BTreeMap::new();
+    let mut axes = BTreeMap::new();
     for (offset, line) in lines.enumerate() {
         let line_number = offset + 2;
         if line.len() > MAX_LINE_BYTES {
@@ -820,6 +843,46 @@ fn parse_manifest(text: &str) -> Result<Manifest, CompileError> {
         }
         let fields: Vec<&str> = line.split('\t').collect();
         match fields.first().copied() {
+            Some("property") if version == 2 => {
+                require_field_count(&fields, 4, "manifest", line_number)?;
+                let source = require_identifier(fields[1], "source property", "manifest")?;
+                let target = require_identifier(fields[2], "target property", "manifest")?;
+                let kind = match fields[3] {
+                    "dimensional" => None,
+                    "absolute-temperature" => Some(QuantityKind::AbsoluteTemperature),
+                    "temperature-difference" => Some(QuantityKind::TemperatureDifference),
+                    "energy" => Some(QuantityKind::Energy),
+                    "torque" => Some(QuantityKind::Torque),
+                    name => Some(
+                        QuantityKind::from_material_convention_name(name).ok_or_else(|| {
+                            CompileError::new(
+                                "unknown_quantity_kind",
+                                "manifest",
+                                format!("unsupported quantity kind {name:?}"),
+                            )
+                        })?,
+                    ),
+                };
+                if properties.insert(source, (target, kind)).is_some() {
+                    return Err(CompileError::new(
+                        "duplicate_property_mapping",
+                        "manifest",
+                        "one source property may be mapped only once",
+                    ));
+                }
+            }
+            Some("axis") if version == 2 => {
+                require_field_count(&fields, 3, "manifest", line_number)?;
+                let source = require_identifier(fields[1], "source axis", "manifest")?;
+                let target = require_identifier(fields[2], "target axis", "manifest")?;
+                if axes.insert(source, target).is_some() {
+                    return Err(CompileError::new(
+                        "duplicate_axis_mapping",
+                        "manifest",
+                        "one source axis may be mapped only once",
+                    ));
+                }
+            }
             Some("pack_id") => {
                 require_field_count(&fields, 2, "manifest", line_number)?;
                 set_once(
@@ -919,6 +982,9 @@ fn parse_manifest(text: &str) -> Result<Manifest, CompileError> {
         }
     }
     Ok(Manifest {
+        version,
+        properties,
+        axes,
         pack_id: pack_id.ok_or_else(|| {
             CompileError::new("missing_pack_id", "manifest", "pack_id record is required")
         })?,
@@ -962,6 +1028,15 @@ fn source_profile(manifest: &Manifest) -> Result<SourceProfile, CompileError> {
                 ),
             ));
         }
+    }
+    if manifest.version == 2
+        && !matches!(first.profile.as_str(), MATERIAL_PROFILE | INTERFACE_PROFILE)
+    {
+        return Err(CompileError::new(
+            "unsupported_manifest_profile",
+            "manifest",
+            "v2 mappings apply only to material and interface sources",
+        ));
     }
     match first.profile.as_str() {
         MATERIAL_PROFILE => Ok(SourceProfile::Material),
@@ -2487,6 +2562,56 @@ fn parse_linear_quantity(
     })
 }
 
+fn parse_declared_quantity(
+    number: &str,
+    unit: &str,
+    kind: Option<QuantityKind>,
+    subject: &str,
+) -> Result<ParsedQuantity, CompileError> {
+    if kind == Some(QuantityKind::TemperatureDifference) {
+        return parse_linear_quantity(number, unit, subject);
+    }
+    let mut quantity = parse_quantity(number, unit, subject)?;
+    if let Some(QuantityKind::Frequency(target)) = kind {
+        // Frequency meaning comes from this closed source-unit convention,
+        // never from inverse-time dimensions alone.
+        let source = match unit {
+            "Hz" | "kHz" | "MHz" | "GHz" | "1/s" | "s^-1" => FrequencyConvention::Cyclic,
+            "rad/s" => FrequencyConvention::Angular,
+            _ => {
+                return Err(CompileError::new(
+                    "frequency_unit_convention",
+                    subject,
+                    "frequency values require Hz, kHz, MHz, GHz, 1/s, s^-1, or rad/s",
+                ));
+            }
+        };
+        let scale = fs_qty::semantic::SemanticQty::new(
+            fs_qty::QtyAny::new(quantity.scale, quantity.dims),
+            SemanticType::new(QuantityKind::Frequency(source), ValueForm::Static),
+        )
+        .map_err(|error| {
+            CompileError::new("frequency_conversion_refused", subject, error.to_string())
+        })?;
+        quantity.scale = fs_qty::semantic::convert_frequency(scale, target)
+            .map_err(|error| {
+                CompileError::new("frequency_conversion_refused", subject, error.to_string())
+            })?
+            .quantity()
+            .value;
+        let source_value = parse_source_f64(number, "frequency", subject)?;
+        quantity.value = positive_zero(source_value * quantity.scale);
+        if !quantity.value.is_finite() || (source_value != 0.0 && quantity.value == 0.0) {
+            return Err(CompileError::new(
+                "frequency_conversion_refused",
+                subject,
+                "frequency normalization overflowed or underflowed",
+            ));
+        }
+    }
+    Ok(quantity)
+}
+
 fn source_literal_hash(number: &str, unit: &str) -> ContentHash {
     let mut bytes = Vec::new();
     push_part(&mut bytes, number.as_bytes());
@@ -3545,7 +3670,11 @@ fn compile_manifest(manifest_path: &Path) -> Result<CompileOutput, CompileError>
         parse_manifest(manifest_text).map_err(|error| error.with_input_hash(manifest_snapshot))?;
     let profile =
         source_profile(&manifest).map_err(|error| error.with_input_hash(manifest_snapshot))?;
-    let compiler_id = profile.compiler_id();
+    let compiler_id = match (manifest.version, profile) {
+        (2, SourceProfile::Material) => MAPPED_COMPILER_ID,
+        (2, SourceProfile::Interface) => MAPPED_INTERFACE_COMPILER_ID,
+        _ => profile.compiler_id(),
+    };
     let sources = load_sources(manifest_path, &manifest).map_err(|error| {
         error
             .with_compiler_id(compiler_id)
@@ -3571,6 +3700,7 @@ fn compile_manifest(manifest_path: &Path) -> Result<CompileOutput, CompileError>
     for source in &sources {
         if let Err(error) = parse_source(source, &mut raw, profile) {
             return Err(error
+                .with_compiler_id(compiler_id)
                 .with_input_hash(source_artifact)
                 .with_prior_decisions(std::mem::take(&mut raw.decisions)));
         }
@@ -3578,6 +3708,7 @@ fn compile_manifest(manifest_path: &Path) -> Result<CompileOutput, CompileError>
     let mut decisions = std::mem::take(&mut raw.decisions);
     let result = (|| -> Result<CompileOutput, CompileError> {
         validate_raw_references(&raw)?;
+        validate_name_mappings(&manifest, &raw)?;
         preflight_provenance_budget(&manifest, &raw)?;
         preflight_normalization_budget(&raw)?;
 
@@ -3632,10 +3763,16 @@ fn compile_manifest(manifest_path: &Path) -> Result<CompileOutput, CompileError>
         for (local_id, raw_claim) in &raw.claims {
             debug_assert_eq!(local_id, &raw_claim.id);
             let frame = raw.frames.get(local_id);
-            let (value, parsed_components) = compile_value(raw_claim)?;
+            let mapping = manifest.properties.get(&raw_claim.property);
+            let kind = mapping.and_then(|(_, kind)| *kind);
+            let (mut value, parsed_components) = compile_value(raw_claim, kind)?;
             let value_dims = value.dims();
-            let (validity, validity_receipts) =
-                compile_validity(local_id, raw.validities.get(local_id), &mut validity_dims)?;
+            let (validity, validity_receipts) = compile_validity(
+                local_id,
+                raw.validities.get(local_id),
+                &mut validity_dims,
+                &manifest,
+            )?;
             if let PropertyValue::Curve {
                 abscissa,
                 abscissa_dims,
@@ -3666,6 +3803,9 @@ fn compile_manifest(manifest_path: &Path) -> Result<CompileOutput, CompileError>
                     ));
                 }
             }
+            if let PropertyValue::Curve { abscissa, .. } = &mut value {
+                *abscissa = manifest.axis(abscissa).to_owned();
+            }
             let raw_uncertainty = raw.uncertainties.get(local_id).ok_or_else(|| {
                 CompileError::new(
                     "missing_uncertainty",
@@ -3674,7 +3814,7 @@ fn compile_manifest(manifest_path: &Path) -> Result<CompileOutput, CompileError>
                 )
             })?;
             let (uncertainty, uncertainty_quantity) =
-                compile_uncertainty(local_id, raw_uncertainty, value_dims)?;
+                compile_uncertainty(local_id, raw_uncertainty, value_dims, kind)?;
             let mut observations = raw_claim
                 .observations
                 .iter()
@@ -3693,7 +3833,12 @@ fn compile_manifest(manifest_path: &Path) -> Result<CompileOutput, CompileError>
                 observations.iter().copied().collect();
             let id = claims
                 .insert_claim(PropertyClaim {
-                    key: PropertyKey::new(raw_claim.property.clone(), value_dims),
+                    key: PropertyKey::with_quantity(
+                        mapping.map_or(raw_claim.property.as_str(), |(name, _)| name.as_str()),
+                        kind.map_or(QuantitySpec::dimensional(value_dims), |kind| {
+                            QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static))
+                        }),
+                    ),
                     value,
                     validity,
                     uncertainty,
@@ -3768,6 +3913,7 @@ fn compile_manifest(manifest_path: &Path) -> Result<CompileOutput, CompileError>
                             "compiled validity receipt lost its admitted source record",
                         )
                     })?;
+                let axis = manifest.axis(&axis).to_owned();
                 normalizations.push(quantity_receipt(
                     NormalizationTarget::ValidityBound {
                         claim: id,
@@ -3805,6 +3951,26 @@ fn compile_manifest(manifest_path: &Path) -> Result<CompileOutput, CompileError>
                     "frame_pair_retained",
                     "paired source and target frames retained as normalization metadata",
                     Some(frame.source_hash),
+                ));
+            }
+        }
+
+        if manifest.version == 2 {
+            for (source, (target, kind)) in &manifest.properties {
+                decisions.push(Decision::admit(
+                    format!("mapping:property:{source}"),
+                    "property_schema_normalized",
+                    format!(
+                        "source property {source:?} maps to {target:?} with declared kind {kind:?}"
+                    ),
+                    Some(source_artifact),
+                ));
+            }
+            for (source, target) in &manifest.axes {
+                decisions.push(Decision::admit(
+                    format!("mapping:axis:{source}"), "axis_name_normalized",
+                    format!("source axis {source:?} maps to {target:?}; values retain explicit SI normalization"),
+                    Some(source_artifact),
                 ));
             }
         }
@@ -3949,6 +4115,14 @@ fn compile_manifest(manifest_path: &Path) -> Result<CompileOutput, CompileError>
 
 fn source_envelope_hash(manifest: &Manifest, sources: &[LoadedSource]) -> ContentHash {
     let mut payload = Vec::new();
+    if manifest.version == 2 {
+        push_part(&mut payload, &(sources.len() as u64).to_le_bytes());
+        push_part(
+            &mut payload,
+            &(manifest.properties.len() as u64).to_le_bytes(),
+        );
+        push_part(&mut payload, &(manifest.axes.len() as u64).to_le_bytes());
+    }
     for part in [
         manifest.pack_id.as_bytes(),
         manifest.redistribution_terms.as_bytes(),
@@ -3962,7 +4136,83 @@ fn source_envelope_hash(manifest: &Manifest, sources: &[LoadedSource]) -> Conten
         push_part(&mut payload, source.spec.profile.as_bytes());
         push_part(&mut payload, &source.bytes);
     }
-    hash_domain(SOURCE_ENVELOPE_DOMAIN, &payload)
+    if manifest.version == 2 {
+        for (source, (target, kind)) in &manifest.properties {
+            push_part(&mut payload, source.as_bytes());
+            push_part(&mut payload, target.as_bytes());
+            match kind {
+                Some(kind) => push_part(
+                    &mut payload,
+                    &QuantitySpec::semantic(SemanticType::new(*kind, ValueForm::Static))
+                        .canonical_bytes(),
+                ),
+                None => push_part(&mut payload, b"dimensional"),
+            }
+        }
+        for (source, target) in &manifest.axes {
+            push_part(&mut payload, source.as_bytes());
+            push_part(&mut payload, target.as_bytes());
+        }
+        hash_domain(
+            "org.frankensim.xtask.matdb-pack.source-envelope.v2",
+            &payload,
+        )
+    } else {
+        hash_domain(SOURCE_ENVELOPE_DOMAIN, &payload)
+    }
+}
+
+fn validate_name_mappings(manifest: &Manifest, raw: &RawDatabase) -> Result<(), CompileError> {
+    let properties: BTreeSet<&str> = raw
+        .claims
+        .values()
+        .map(|claim| claim.property.as_str())
+        .collect();
+    let axes: BTreeSet<&str> = raw
+        .validities
+        .values()
+        .flat_map(|axes| axes.keys().map(String::as_str))
+        .collect();
+    for (label, names, mappings) in [
+        (
+            "property",
+            &properties,
+            manifest
+                .properties
+                .iter()
+                .map(|(source, (target, _))| (source.as_str(), target.as_str()))
+                .collect::<BTreeMap<_, _>>(),
+        ),
+        (
+            "axis",
+            &axes,
+            manifest
+                .axes
+                .iter()
+                .map(|(source, target)| (source.as_str(), target.as_str()))
+                .collect(),
+        ),
+    ] {
+        if let Some(source) = mappings.keys().find(|source| !names.contains(**source)) {
+            return Err(CompileError::new(
+                "unused_name_mapping",
+                format!("mapping:{label}:{source}"),
+                "mapping must reference a declared source name",
+            ));
+        }
+        let mut targets = BTreeSet::new();
+        for source in names {
+            let target = mappings.get(source).copied().unwrap_or(source);
+            if !targets.insert(target) {
+                return Err(CompileError::new(
+                    "normalization_name_collision",
+                    format!("mapping:{label}:{target}"),
+                    "distinct source names may not collapse into one runtime name",
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn provenance_for(manifest: &Manifest, source_id: &str, source_hash: ContentHash) -> Provenance {
@@ -4153,6 +4403,7 @@ fn preflight_normalization_budget(raw: &RawDatabase) -> Result<(), CompileError>
 
 fn compile_value(
     claim: &RawClaim,
+    kind: Option<QuantityKind>,
 ) -> Result<(PropertyValue, Vec<(LocalComponent, ParsedQuantity)>), CompileError> {
     let subject = format!("claim:{}", claim.id);
     match &claim.value {
@@ -4164,7 +4415,8 @@ fn compile_value(
                     "scalar claims admit only constant or tabulated interpolation",
                 ));
             }
-            let quantity = parse_quantity(number, unit, &format!("{subject}:value"))?;
+            let quantity =
+                parse_declared_quantity(number, unit, kind, &format!("{subject}:value"))?;
             Ok((
                 PropertyValue::Scalar {
                     value: quantity.value,
@@ -4200,8 +4452,12 @@ fn compile_value(
                 })?;
                 let parsed_x =
                     parse_quantity(x, abscissa_unit, &format!("{subject}:curve:x:{index}"))?;
-                let parsed_y =
-                    parse_quantity(y, ordinate_unit, &format!("{subject}:curve:y:{index}"))?;
+                let parsed_y = parse_declared_quantity(
+                    y,
+                    ordinate_unit,
+                    kind,
+                    &format!("{subject}:curve:y:{index}"),
+                )?;
                 if let Some(expected) = abscissa_dims {
                     if expected != parsed_x.dims {
                         return Err(CompileError::new(
@@ -4266,6 +4522,7 @@ fn compile_validity(
     claim_id: &str,
     axes: Option<&BTreeMap<String, RawValidity>>,
     global_dims: &mut BTreeMap<String, Dims>,
+    manifest: &Manifest,
 ) -> Result<
     (
         ValidityDomain,
@@ -4301,7 +4558,7 @@ fn compile_validity(
                 "normalized lower endpoint exceeds upper endpoint",
             ));
         }
-        if let Some(previous) = global_dims.insert(axis.clone(), lower.dims)
+        if let Some(previous) = global_dims.insert(manifest.axis(axis).to_owned(), lower.dims)
             && previous != lower.dims
         {
             return Err(CompileError::new(
@@ -4310,7 +4567,7 @@ fn compile_validity(
                 "one named validity axis has contradictory dimensions across claims",
             ));
         }
-        domain = domain.with(axis.clone(), lower.value, upper.value);
+        domain = domain.with(manifest.axis(axis), lower.value, upper.value);
         receipts.push((axis.clone(), lower, upper));
     }
     Ok((domain, receipts))
@@ -4320,6 +4577,7 @@ fn compile_uncertainty(
     claim_id: &str,
     raw: &RawUncertainty,
     value_dims: Dims,
+    kind: Option<QuantityKind>,
 ) -> Result<(UncertaintyModel, Option<ParsedQuantity>), CompileError> {
     let subject = format!("claim:{claim_id}:uncertainty");
     match &raw.kind {
@@ -4330,7 +4588,11 @@ fn compile_uncertainty(
             confidence,
             confidence_unit,
         } => {
-            let quantity = parse_linear_quantity(number, unit, &subject)?;
+            let quantity = if matches!(kind, Some(QuantityKind::Frequency(_))) {
+                parse_declared_quantity(number, unit, kind, &subject)?
+            } else {
+                parse_linear_quantity(number, unit, &subject)?
+            };
             if quantity.dims != value_dims {
                 return Err(CompileError::new(
                     "uncertainty_dims_mismatch",
@@ -4996,6 +5258,276 @@ mod tests {
         fs::write(&manifest_path, manifest_text).expect("manifest fixture");
         fs::write(&source_path, source_text).expect("source fixture");
         (manifest_path, directory)
+    }
+
+    fn mapped_manifest(records: &str) -> String {
+        manifest(MATERIAL_PROFILE, true).replacen(MANIFEST_HEADER, MAPPED_MANIFEST_HEADER, 1)
+            + records
+    }
+
+    #[test]
+    fn g3_manifest_v2_renames_curves_and_receipts_without_reinterpreting_v1() {
+        let (old_path, _) = write_fixture(&manifest(MATERIAL_PROFILE, true), SOURCE);
+        let old = compile_manifest(&old_path).unwrap();
+        let (path, _) = write_fixture(
+            &mapped_manifest(
+                "axis\ttemperature\tT\nproperty\tdensity\tbulk_density\tdimensional\n",
+            ),
+            SOURCE,
+        );
+        let output = compile_manifest(&path).unwrap();
+        let pack = output.pack.material();
+        let point = fs_matdb::QueryPoint::new().with("T", 323.15).unwrap();
+        let answer = pack
+            .claims()
+            .query(
+                "young_modulus",
+                &point,
+                fs_matdb::SelectionPolicy::SingleClaimOnly,
+            )
+            .unwrap();
+        let old_answer = old
+            .pack
+            .material()
+            .claims()
+            .query(
+                "young_modulus",
+                &fs_matdb::QueryPoint::new()
+                    .with("temperature", 323.15)
+                    .unwrap(),
+                fs_matdb::SelectionPolicy::SingleClaimOnly,
+            )
+            .unwrap();
+        assert_eq!(answer.evidence.value, old_answer.evidence.value);
+        assert_ne!(pack.source_artifact(), old.pack.source_artifact());
+        assert_ne!(answer.receipt.selected, old_answer.receipt.selected);
+        assert_eq!(pack.compiler(), MAPPED_COMPILER_ID);
+        assert!(pack.claims().claims_for("density").is_empty());
+        assert_eq!(pack.claims().claims_for("bulk_density").len(), 1);
+        let receipts: Vec<_> = pack.normalizations().iter().filter(|receipt| matches!(receipt.target(), NormalizationTarget::ValidityBound { axis, .. } if axis == "T")).collect();
+        assert_eq!(receipts.len(), 4);
+        assert!(
+            receipts
+                .iter()
+                .all(|receipt| receipt.source_basis() == "degC" && receipt.offset() == 273.15)
+        );
+        pack.claims().verify_receipt(&answer.receipt).unwrap();
+        assert_eq!(old.bytes.len(), MATDB_PACK_FIXTURE_V1_BYTES_GOLDEN);
+        assert_eq!(
+            old.pack.content_hash().to_string(),
+            MATDB_PACK_FIXTURE_V1_CONTENT_HASH_GOLDEN
+        );
+        for records in [
+            "axis\tmissing\tT\n",
+            "property\tyoung_modulus\tdensity\tdimensional\n",
+            "axis\ttemperature\tT\naxis\ttemperature\tother\n",
+        ] {
+            let (path, _) = write_fixture(&mapped_manifest(records), SOURCE);
+            assert!(
+                compile_manifest(&path).is_err(),
+                "mapping must refuse: {records}"
+            );
+        }
+        let v1_with_mapping = manifest(MATERIAL_PROFILE, true) + "axis\ttemperature\tT\n";
+        assert_eq!(
+            parse_manifest(&v1_with_mapping).unwrap_err().code,
+            "unknown_manifest_record"
+        );
+    }
+
+    #[test]
+    fn g0_manifest_v2_distinguishes_absolute_temperature_and_interval_width() {
+        let source = concat!(
+            "frankensim.matdb-source.v1\n",
+            "observation\ttest\tsynthetic\ttemperature convention test\tno empirical claim\n",
+            "scalar\tabs\ttest\tabs\t10\tdegC\tconstant\n",
+            "uncertainty\tabs\tabsolute\t2\tdegC\t0.95\t1\n",
+            "scalar\tdelta\ttest\tdelta\t10\tdegC\tconstant\n",
+            "uncertainty\tdelta\tunstated\t-\t-\t-\t-\n",
+        );
+        let (path, _) = write_fixture(
+            &mapped_manifest(
+                "property\tabs\tabs\tabsolute-temperature\nproperty\tdelta\tdelta\ttemperature-difference\n",
+            ),
+            source,
+        );
+        let output = compile_manifest(&path).unwrap();
+        let pack = output.pack.material();
+        for (name, kind, expected) in [
+            ("abs", QuantityKind::AbsoluteTemperature, 283.15),
+            ("delta", QuantityKind::TemperatureDifference, 10.0),
+        ] {
+            let key = PropertyKey::with_quantity(
+                name,
+                QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static)),
+            );
+            let answer = pack
+                .claims()
+                .query_typed(
+                    &key,
+                    &fs_matdb::QueryPoint::new(),
+                    fs_matdb::SelectionPolicy::SingleClaimOnly,
+                )
+                .unwrap();
+            assert_eq!(answer.evidence.value.value, expected);
+            if name == "abs" {
+                assert_eq!(
+                    answer.evidence.value.uncertainty,
+                    UncertaintyModel::HalfWidth {
+                        half_width: 2.0,
+                        confidence: 0.95
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn g3_manifest_v2_frequency_conversion_scales_values_uncertainty_and_covariance() {
+        let source = concat!(
+            "frankensim.matdb-source.v1\n",
+            "observation\ttest\tsynthetic\tfrequency convention test\tno empirical claim\n",
+            "scalar\tf\ttest\tf\t2\tHz\tconstant\n",
+            "uncertainty\tf\tabsolute\t0.1\tHz\t0.95\t1\n",
+            "scalar\tg\ttest\tg\t3\trad/s\tconstant\n",
+            "uncertainty\tg\tabsolute\t0.2\trad/s\t0.95\t1\n",
+            "joint\ttest\tfg\tf:scalar,g:scalar\t0.01,0.002,0.04\t-\t-\n",
+        );
+        let (path, _) = write_fixture(
+            &mapped_manifest(
+                "property\tf\tf\tangular-frequency\nproperty\tg\tg\tangular-frequency\n",
+            ),
+            source,
+        );
+        let output = compile_manifest(&path).unwrap();
+        let pack = NormalizedPack::from_bytes(&output.bytes).unwrap();
+        let spec = QuantitySpec::semantic(SemanticType::new(
+            QuantityKind::Frequency(FrequencyConvention::Angular),
+            ValueForm::Static,
+        ));
+        let answer = pack
+            .query_joint_typed(
+                &[
+                    PropertyKey::with_quantity("f", spec),
+                    PropertyKey::with_quantity("g", spec),
+                ],
+                &fs_matdb::QueryPoint::new(),
+                fs_matdb::SelectionPolicy::SingleClaimOnly,
+            )
+            .unwrap();
+        let tau = core::f64::consts::TAU;
+        assert!((answer.members[0].evidence.value.value - 2.0 * tau).abs() < 1e-14);
+        assert_eq!(answer.members[1].evidence.value.value, 3.0);
+        assert!(
+            matches!(answer.members[0].evidence.value.uncertainty, UncertaintyModel::HalfWidth { half_width, .. } if (half_width - 0.1 * tau).abs() < 1e-14)
+        );
+        let fs_matdb::JointCorrelation::Covariance { covariance, .. } = &answer.receipt.correlation
+        else {
+            panic!("declared joint covariance must survive conversion");
+        };
+        for (found, expected) in covariance.iter().zip([0.01 * tau * tau, 0.002 * tau, 0.04]) {
+            assert!((found - expected).abs() < 1e-14);
+        }
+        pack.verify_joint_receipt(&answer.receipt).unwrap();
+        let uncertainty = pack.normalizations().iter().find(|receipt| matches!(receipt.target(), NormalizationTarget::ClaimUncertainty { claim } if *claim == answer.receipt.selected[0])).unwrap();
+        assert_eq!(uncertainty.source_basis(), "Hz");
+        assert_eq!(uncertainty.scale(), tau);
+        // An equivalent source-unit expression yields the same physical
+        // answer but retains a different source-literal provenance.
+        let alternate = source
+            .replace("\tf\t2\tHz\t", "\tf\t0.002\tkHz\t")
+            .replace("\tf\tabsolute\t0.1\tHz\t", "\tf\tabsolute\t0.0001\tkHz\t")
+            .replace("\t0.01,0.002,0.04\t", "\t0.00000001,0.000002,0.04\t");
+        let (other_path, _) = write_fixture(
+            &mapped_manifest(
+                "property\tf\tf\tangular-frequency\nproperty\tg\tg\tangular-frequency\n",
+            ),
+            &alternate,
+        );
+        let other = compile_manifest(&other_path).unwrap();
+        let other_answer = other
+            .pack
+            .material()
+            .claims()
+            .query_typed(
+                &PropertyKey::with_quantity("f", spec),
+                &fs_matdb::QueryPoint::new(),
+                fs_matdb::SelectionPolicy::SingleClaimOnly,
+            )
+            .unwrap();
+        assert!(
+            (other_answer.evidence.value.value - answer.members[0].evidence.value.value).abs()
+                < 1e-14
+        );
+        assert_ne!(other.pack.source_artifact(), pack.source_artifact());
+        let (malformed_path, _) = write_fixture(
+            &mapped_manifest("property\tf\tf\tangular-frequency\n"),
+            &source.replace("\t-\t-\n", "\t-\t1\n"),
+        );
+        let refusal = compile_manifest(&malformed_path).unwrap_err();
+        assert_eq!(refusal.code, "invalid_correlation_unit");
+        assert_eq!(refusal.compiler_id, MAPPED_COMPILER_ID);
+    }
+
+    #[test]
+    fn g1_nasa_seed_compiles_into_the_actual_thermoelastic_state_resolver() {
+        use fs_material::state_point::{
+            MaterialPropertySelection, resolve_isotropic_thermoelastic_state_point,
+        };
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../data/matdb/seed-v1/aluminum-2024-t3-nasa-tn-d6448/manifest.tsv");
+        let compiled = compile_manifest(&path).unwrap();
+        let pack = NormalizedPack::from_bytes(&compiled.bytes).unwrap();
+        let card = fs_matdb::MaterialCard::assemble(
+            MaterialStateId {
+                chemistry: "aluminum-2024".to_owned(),
+                phase: "solid".to_owned(),
+                process: "T3; NASA TN D-6448".to_owned(),
+                revision: 0,
+            },
+            pack.claims().clone(),
+            Vec::new(),
+        )
+        .unwrap();
+        let point = fs_matdb::QueryPoint::new().with("T", 300.0).unwrap();
+        let state = resolve_isotropic_thermoelastic_state_point(
+            &card,
+            &point,
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .unwrap();
+        let law = state.law();
+        assert_eq!(
+            (law.rho, law.e, law.cp, law.conductivity, law.t0),
+            (2705.0, 72_400_000_000.0, 840.0, 126.0, 300.0)
+        );
+        assert!((law.alpha_t - 23e-6).abs() < 1e-18);
+        assert_eq!(state.poisson_ratio(), 0.33);
+        assert_eq!(state.resolved().properties().len(), 6);
+        for property in state.resolved().properties() {
+            assert_eq!(
+                property.answer().evidence.value.uncertainty,
+                UncertaintyModel::Unstated
+            );
+            card.claims()
+                .verify_receipt(&property.answer().receipt)
+                .unwrap();
+        }
+        assert!(
+            resolve_isotropic_thermoelastic_state_point(
+                &card,
+                &fs_matdb::QueryPoint::new().with("T", 301.0).unwrap(),
+                MaterialPropertySelection::SingleClaimOnly
+            )
+            .is_err()
+        );
+        let omega = 1000.0;
+        let thickness: f64 = 0.002;
+        let relaxation_time =
+            thickness.powi(2) * 2705.0 * 840.0 / (core::f64::consts::PI.powi(2) * 126.0);
+        let x = omega * relaxation_time;
+        let expected = 72.4e9 * (23e-6_f64).powi(2) * 300.0 / (2705.0 * 840.0) * x / (1.0 + x * x);
+        assert!((law.loss_factor(omega, thickness) / expected - 1.0).abs() < 1e-12);
     }
 
     #[test]
@@ -5756,6 +6288,9 @@ mod tests {
     #[test]
     fn repeated_provenance_budget_refuses_before_claim_set_allocations() {
         let manifest = Manifest {
+            version: 1,
+            properties: BTreeMap::new(),
+            axes: BTreeMap::new(),
             pack_id: "fixture".to_string(),
             redistribution_terms: "permitted".to_string(),
             citation: "x".repeat(1_048_000),

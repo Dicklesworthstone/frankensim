@@ -4886,6 +4886,7 @@ dependencies = [
  "fs-evidence",
  "fs-govern",
  "fs-matdb",
+ "fs-material",
  "fs-obs",
  "fs-qty",
  "fs-tropical",

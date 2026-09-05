@@ -18,5 +18,8 @@ fs-qty = { path = "../crates/fs-qty" }
 fs-tropical = { path = "../crates/fs-tropical" }
 fs-vvreg = { path = "../crates/fs-vvreg" }
 
+[dev-dependencies]
+fs-material = { path = "../crates/fs-material" }
+
 [lints]
 workspace = true

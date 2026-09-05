@@ -251,11 +251,25 @@ card wrappers retain and bind the nested pack version and transitive claim
 identities through their existing layouts.
 
 This tranche types property values, not validity axes: `ValidityDomain` and
-`QueryPoint` still carry legacy names and numbers. Source TSV normalization,
-axis quantity schemas and hardness apparatus context remain MR09 work.
+`QueryPoint` still carry legacy names and numbers. Axis quantity schemas and
+hardness apparatus context remain MR09 work.
 No existing seed silently gains kinds, no source
 spelling is reinterpreted, and a quantity tag adds no empirical validation or
 authority to a source claim.
+
+The offline compiler now admits a v2 manifest for material/interface sources:
+`property <source> <target> <kind|dimensional>` and `axis <source> <target>`
+are explicit tab-separated declarations. Undeclared names retain their source
+spelling; unused mappings, duplicate declarations and collisions with mapped
+or unmapped names refuse. Curve abscissae, validity bounds and normalization
+receipt targets are renamed together. Quantity kinds are static value schemas;
+temperature differences use linear scaling, absolute temperatures retain the
+offset, and declared frequency values/absolute uncertainties explicitly convert
+between the supported Hz-family and rad/s units. Covariances use the same
+component scales. Source-envelope v2 binds all mappings and quantity tokens;
+existing source hashes, citations and normalization receipts retain provenance.
+The v1 compiler fixture and runtime decoders remain frozen. Axis-name aliases
+do not establish semantic axis types or additional measured support.
 
 - APPEND-ONLY: no API removes or mutates a stored claim or observation.
   Same content re-inserts idempotently under the same id; different

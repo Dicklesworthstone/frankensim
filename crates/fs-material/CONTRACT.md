@@ -48,7 +48,13 @@ homogenization, the P2 milestone.
   property-use receipts and their original uncertainty and supplies the existing
   Zener law. Missing properties and out-of-domain states refuse; no density or
   chemistry-name preset is selected. This is the homogeneous isotropic,
-  single thermal relaxation mode approximation, not an anisotropic law or a
+  single thermal relaxation mode approximation. Thermal conductivity may be
+  explicitly dimensional (legacy data) or the exact static ThermalConductivity
+  schema; a semantic claim of any other kind/form refuses. The NASA TN D-6448
+  seed's v2 manifest declares its source-to-runtime names and thermal kind.
+  The compiler-to-state integration test uses that actual source at 300 K,
+  retaining its Unstated uncertainty and point-only temperature validity.
+  This is not an anisotropic law or a
   resolved thermomechanical energy balance. Its synthetic temperature curves
   and independent Zener checks establish numerical behavior, not experimental
   validation.

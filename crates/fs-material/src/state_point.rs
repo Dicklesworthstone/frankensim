@@ -16,6 +16,7 @@ use fs_matdb::{
     ClaimId, ClaimSet, InterfaceSystemCard, MatDbError, MaterialAnswer, MaterialCard,
     MaterialStateId, PropertyKey, PropertyUsageReceiptError, QueryPoint, SelectionPolicy,
 };
+use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 use fs_qty::{Density, Dims, Pressure, QuantitySpec};
 
 use crate::elastic::OrthotropicElastic;
@@ -712,7 +713,28 @@ pub fn resolve_isotropic_thermoelastic_state_point(
         ),
     ]
     .into_iter()
-    .map(|(name, dims, domain)| ScalarPropertyRequirement::try_new(name, dims, domain))
+    .map(|(name, dims, domain)| {
+        // Legacy packs explicitly lack quantity kinds. When a conductivity
+        // claim declares one, require the law's exact static thermal schema;
+        // never adopt an arbitrary schema offered by the source.
+        if name == THERMAL_CONDUCTIVITY_PROPERTY
+            && card
+                .claims()
+                .registered_quantity(name)
+                .is_some_and(|quantity| quantity.semantic_type().is_some())
+        {
+            ScalarPropertyRequirement::try_with_quantity(
+                name,
+                QuantitySpec::semantic(SemanticType::new(
+                    QuantityKind::ThermalConductivity,
+                    ValueForm::Static,
+                )),
+                domain,
+            )
+        } else {
+            ScalarPropertyRequirement::try_new(name, dims, domain)
+        }
+    })
     .collect::<Result<Vec<_>, _>>()?;
     let resolved = resolve_material_state_point(card, point, &requirements, selection)?;
     let value = |name: &str| {
@@ -1711,7 +1733,7 @@ mod tests {
 
     #[test]
     fn g0_semantic_material_and_interface_requirements_preserve_kinds_and_pins() {
-        use fs_qty::{FrequencyConvention, QuantityKind, SemanticType, ValueForm};
+        use fs_qty::semantic::FrequencyConvention;
 
         let cyclic = QuantitySpec::semantic(SemanticType::new(
             QuantityKind::Frequency(FrequencyConvention::Cyclic),

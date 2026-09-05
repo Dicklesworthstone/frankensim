@@ -13,7 +13,8 @@ use fs_matdb::{
     PropertyClaim, PropertyKey, PropertyValue, Provenance, QueryPoint, SelectionPolicy,
     StatisticMember, UncertaintyModel,
 };
-use fs_qty::{Dims, QuantityKind, QuantitySpec, SemanticType, ValueForm};
+use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
+use fs_qty::{Dims, QuantitySpec};
 
 const CONDUCTIVITY_DIMS: Dims = Dims([1, 1, -3, -1, 0, 0]);
 const DENSITY_DIMS: Dims = Dims([-3, 1, 0, 0, 0, 0]);
