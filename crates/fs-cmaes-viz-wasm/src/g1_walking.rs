@@ -207,11 +207,18 @@ const WALK_CONTACT_WEIGHT: f64 = 60.0;
 /// overshoots cannot buy more credit than arriving does.
 ///
 /// Swept against DISTANCE rather than the objective, which is the only honest
-/// way to tune a weight that decides what distance is worth. At 200 generations
-/// from the same seed: 120 -> 0.700 m, 200 -> 0.736 m, 300 -> 0.734 m. 300 buys
-/// nothing more and slides 22% further per metre travelled (9.77 vs 8.02), so
-/// 200 is where the gait stops improving and starts skidding.
-const WALK_PROGRESS_REWARD: f64 = 200.0;
+/// way to tune a weight that decides what distance is worth. With NO obstacles
+/// declared, at 200 generations from the same seat: 120 -> 0.700 m,
+/// 200 -> 0.736 m, 300 -> 0.734 m while sliding 22% further per metre.
+///
+/// 200 was shipped on that evidence and reverted, because the sweep was run in
+/// a configuration the site does not use. The browser declares 48 house
+/// keep-out boxes, and measured there the reward that wins the bare sweep
+/// LOSES: 0.61 m at generation 410 against 0.66 m by generation 192 for this
+/// value. A weight tuned without the obstacles does not transfer to a search
+/// that has them, so this stays at the value measured where it actually runs.
+/// Re-tuning belongs in a sweep that declares the same roster the page does.
+const WALK_PROGRESS_REWARD: f64 = 120.0;
 const WALK_PROGRESS_CAP: f64 = 1.25;
 // Per-step survival bonus (cmaes-pvz, v068): a small reward per survived step
 // inside the same objective, so the optimizer cannot game a single rollup by
