@@ -1597,6 +1597,16 @@ fn push_validity_domain(output: &mut Vec<u8>, label: &str, regime: &fs_evidence:
         push_identity_f64(output, &format!("{label}.{index}.lo"), *lo);
         push_identity_f64(output, &format!("{label}.{index}.hi"), *hi);
     }
+    if regime.has_typed_axes() {
+        push_identity_u64(output, &format!("{label}.typed-axis-version"), 3);
+        for (axis, quantity) in regime.axis_quantities() {
+            push_identity_field(
+                output,
+                &format!("{label}.quantity.{axis}"),
+                &quantity.canonical_bytes(),
+            );
+        }
+    }
 }
 
 fn push_color(output: &mut Vec<u8>, label: &str, color: &Color) {

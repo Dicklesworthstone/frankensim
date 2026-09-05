@@ -334,6 +334,11 @@ pub struct ProductOutputAudit {
 /// Structural input error for a final-output audit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OutputAuditError {
+    /// This audit's dimensionless numeric operating points cannot carry typed axes.
+    UnsupportedTypedAxes {
+        /// Model card requiring a typed operating-point adapter.
+        card: String,
+    },
     /// At least one operating point is required.
     NoOperatingPoints,
     /// An identity is empty or contains surrounding whitespace.
@@ -377,6 +382,10 @@ impl core::fmt::Display for OutputAuditError {
             Self::NoOperatingPoints => {
                 write!(f, "output audit requires at least one operating point")
             }
+            Self::UnsupportedTypedAxes { card } => write!(
+                f,
+                "model card {card:?} requires typed operating points; this audit profile cannot represent them"
+            ),
             Self::InvalidIdentity { field, value } => {
                 write!(f, "invalid {field} identity {value:?}")
             }
@@ -641,6 +650,11 @@ fn unique_cards(
 ) -> Result<BTreeMap<String, &RegimeAuditCard>, OutputAuditError> {
     let mut cards = BTreeMap::new();
     for card in registry {
+        if card.validity.has_typed_axes() {
+            return Err(OutputAuditError::UnsupportedTypedAxes {
+                card: card.name.clone(),
+            });
+        }
         validate_identity("model-card", &card.name)?;
         validate_identity("model-card-version", &card.version)?;
         for axis in card.validity.bounds().keys() {
@@ -878,6 +892,9 @@ fn json_f64(value: f64) -> String {
 }
 
 fn color_payload_json(color: &Color) -> String {
+    if matches!(color, Color::Validated { regime, .. } if regime.has_typed_axes()) {
+        return color.payload_json();
+    }
     match color {
         Color::Verified { lo, hi } => {
             format!("{{\"interval\":[{},{}]}}", json_f64(*lo), json_f64(*hi))

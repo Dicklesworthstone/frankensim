@@ -1026,6 +1026,15 @@ impl Claim {
             }
             Color::Validated { regime, dataset } => {
                 out.push_str("validated|");
+                if regime.has_typed_axes() {
+                    // Diagnostic hashes must retain even unsupported declarations.
+                    // Portable package admission refuses this v3 color payload.
+                    push_atom(&mut out, "typed-axis-v3");
+                    for byte in self.color.canonical_bytes() {
+                        let _ = write!(out, "{byte:02x}");
+                    }
+                    out.push('|');
+                }
                 for (k, (lo, hi)) in regime.bounds() {
                     push_atom(&mut out, k);
                     let _ = write!(out, "{}|{}|", lo.to_bits(), hi.to_bits());
@@ -2291,6 +2300,7 @@ fn colors_bitwise_equal(left: &Color, right: &Color) -> bool {
             Color::Validated { regime, dataset },
         ) => {
             left_dataset == dataset
+                && left_regime.axis_quantities() == regime.axis_quantities()
                 && left_regime.bounds().len() == regime.bounds().len()
                 && left_regime.bounds().iter().zip(regime.bounds()).all(
                     |((left_axis, (left_lo, left_hi)), (axis, (lo, hi)))| {
@@ -2387,6 +2397,13 @@ fn add_color_transport(
     match color {
         Color::Verified { .. } => {}
         Color::Validated { regime, dataset } => {
+            if regime.has_typed_axes() {
+                return Err(PackageError::InvalidIdentity {
+                    claim: None,
+                    field: "color.regime",
+                    reason: "typed axes are not representable in the frozen package profile",
+                });
+            }
             check_transport_count("validated regime axes", regime.bounds().len())?;
             add_transport_nodes(nodes, regime.bounds().len().saturating_mul(3))?;
             add_transport_text(bytes, &format!("claims[{index}].dataset"), dataset)?;

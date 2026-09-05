@@ -709,6 +709,7 @@ fn push_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
 
 fn valid_anchor_identity(anchor: &Anchor) -> Option<String> {
     if color_leaf_identity_reason(&anchor.dataset).is_some()
+        || anchor.regime.has_typed_axes()
         || anchor.regime.bounds().is_empty()
         || anchor.regime.bounds().len() > MAX_ANCHOR_AXES
         || anchor.regime.bounds().iter().any(|(axis, &(lo, hi))| {

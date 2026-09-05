@@ -508,6 +508,12 @@ impl LossElement {
     /// Returns a structured [`AirflowError`] when the projected identity or
     /// any validity bound cannot support deterministic product admission.
     pub fn with_regime_validity(mut self, validity: ValidityDomain) -> Result<Self, AirflowError> {
+        if validity.has_typed_axes() {
+            return Err(AirflowError::InvalidLossRegimeIdentity {
+                element: self.name,
+                field: "typed validity axes require a typed operating-point adapter",
+            });
+        }
         let card_name = format!("airflow.loss.{}", self.name);
         if card_name.trim() != card_name {
             return Err(AirflowError::InvalidLossRegimeIdentity {

@@ -1028,6 +1028,12 @@ pub enum EvidenceAuthorityDeclaration {
 fn preflight_validity_domain_canonical_bytes(
     regime: &ValidityDomain,
 ) -> Result<usize, ContractError> {
+    if regime.has_typed_axes() {
+        return Err(ContractError::new(
+            "EulerProtocolUnsupportedTypedAxes",
+            "typed validity axes are not representable in the frozen protocol profile",
+        ));
+    }
     if regime.bounds().len() > MAX_VALIDITY_DOMAIN_AXES {
         return Err(ContractError::new(
             "EulerProtocolValidityDomainCardinality",
