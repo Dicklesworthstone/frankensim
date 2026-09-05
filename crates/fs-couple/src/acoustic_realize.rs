@@ -1004,8 +1004,41 @@ fn assemble_kc(
 fn mode_zeta(
     string: PrestressedString,
     omega: f64,
+    wave_number: f64,
     gas: &GasState,
 ) -> Result<f64, AcousticRealizeError> {
+    let material_bending = string
+        .kelvin_voigt_bending
+        .map(|law| {
+            let (lo, hi) = law.omega_band_rad_s;
+            if string.rayleigh.is_some()
+                || string.damping_ratio != 0.0
+                || !law.viscous_stiffness_n_m2_s.is_finite()
+                || law.viscous_stiffness_n_m2_s < 0.0
+                || !(lo.is_finite() && hi.is_finite() && lo >= 0.0 && hi >= lo)
+                || !(omega.is_finite() && omega > 0.0 && omega >= lo && omega <= hi)
+            {
+                return Err(AcousticRealizeError::InvalidDescription {
+                    what: "Kelvin-Voigt bending needs nonnegative viscosity, an admitted modal frequency, and no authored internal/Rayleigh loss",
+                });
+            }
+            // Galerkin projection of (eta I y_xxt)_xx gives c_k = eta I k^4.
+            // With mu q_tt + c_k q_t + (T k² + EI k⁴) q = 0,
+            // zeta_k = c_k/(2 mu omega_k). Tension energy is lossless: using
+            // eta*omega/(2E) here would omit the bending-energy dilution.
+            // Sakthivel et al. (2023), https://arxiv.org/abs/2301.07931.
+            let zeta = 0.5 * law.viscous_stiffness_n_m2_s
+                * wave_number.powi(4)
+                / string.lin_density_kg_m
+                / omega;
+            if !zeta.is_finite() || zeta < 0.0 {
+                return Err(AcousticRealizeError::InvalidDescription {
+                    what: "Kelvin-Voigt bending damping is unrepresentable",
+                });
+            }
+            Ok(zeta)
+        })
+        .transpose()?;
     if let Some(RayleighParams {
         alpha_per_s,
         beta_s,
@@ -1031,6 +1064,9 @@ fn mode_zeta(
         return Err(AcousticRealizeError::InvalidDescription {
             what: "cylinder air damping ratio is unrepresentable",
         });
+    }
+    if let Some(bending) = material_bending {
+        return Ok(bending + stokes);
     }
     // This legacy bending coefficient is a heuristic pending material-loss
     // resolution under MR03; it is not source-backed constitutive data.
@@ -1087,7 +1123,8 @@ fn realize_dirac_join(
     let zetas: Vec<f64> = (0..n_s)
         .map(|k| {
             let omega = moving_end_omega(string, k);
-            mode_zeta(string, omega, gas)
+            let wave_number = (k as f64 + 0.5) * core::f64::consts::PI / string.length_m;
+            mode_zeta(string, omega, wave_number, gas)
         })
         .collect::<Result<Vec<_>, _>>()?;
     let obs_stations: Vec<f64> = obstacles
@@ -1772,7 +1809,7 @@ fn linear_string_member(
         );
         modes.push(ModalAcousticMode {
             angular_frequency_rad_s: omega,
-            damping_ratio: mode_zeta(string, omega, gas)?,
+            damping_ratio: mode_zeta(string, omega, k as f64 * pi / string.length_m, gas)?,
             pressure_per_modal_velocity: C64::new(0.0, h_im),
         });
         states.push(ModalAcousticState {
@@ -1933,7 +1970,11 @@ fn kc_string_member(
     let zetas: Result<Vec<f64>, _> = storage
         .omegas
         .iter()
-        .map(|&w| mode_zeta(string, w, gas))
+        .enumerate()
+        .map(|(k, &w)| {
+            let wave_number = (k + 1) as f64 * core::f64::consts::PI / string.length_m;
+            mode_zeta(string, w, wave_number, gas)
+        })
         .collect();
     let zetas = zetas?;
     let mass_scale = det::sqrt(string.lin_density_kg_m * string.length_m / 2.0);

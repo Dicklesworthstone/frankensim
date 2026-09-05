@@ -43,6 +43,7 @@ fn nylon_like(tension_n: f64, lin_density_kg_m: f64) -> PrestressedString {
         damping_ratio: 0.004,
         rayleigh: None,
         bending_stiffness_n_m2: 0.0,
+        kelvin_voigt_bending: None,
         polarization_detune: 0.0,
         moving_end: false,
     }

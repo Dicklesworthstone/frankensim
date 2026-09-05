@@ -386,7 +386,7 @@ width. Geometry and prestress constraints are independent and both remain
 available on the result, separate from material authority. The specimen hash
 binds resolved geometry, not the authored comparison policy.
 
-All policies preserve declared losses, supports, and modal budget. These compare
+All policies preserve the selected loss law, supports, and modal budget. These compare
 specimens at resolved states; thermal evolution, transverse contraction,
 yielding, anisotropy, or melting are not solved. Target pitch describes an undamped
 linear eigenfrequency, not a damped or finite-amplitude pressure frequency. Diameter
@@ -396,13 +396,44 @@ dimension-only quantity schemas; equal-dimension semantic kinds or waveform
 forms cannot be erased when lowering to the solver. Admission refuses missing
 or quantity-schema-mismatched properties,
 invalid mechanical inputs, and nonfinite/zero derived products before publication.
-The finite scalar calculation is deterministic; no runtime dependency or inner-loop
-database access is added. `tests/string_specimen.rs` checks G0 admission, G1 mass,
+The finite scalar calculation is deterministic; no inner-loop database access is
+added. `tests/string_specimen.rs` checks G0 admission, G1 mass,
 EA/EI and beam modes, and G3 geometric/material scaling plus pressure-measured pitch
 through the actual acoustic realizer. G1/G3 cases also cover extension-derived
 tension and material changes under explicit extension/target-frequency constraints,
 plus fixed-mass diameter/stiffness changes and their bending-sensitive pressure pitch.
 Synthetic data check numerical behavior, not physical validation of a measured material.
+
+`ResolvedStringSpecimen::with_kelvin_voigt_bending_loss` selects a constant
+Kelvin–Voigt bending law using the retained `kelvin_voigt_bending_viscosity`
+property [Pa s]. Density, Young's modulus and viscosity must be dimension-only
+validity-wide scalar constants; sampled curves are not promoted to a broadband
+law. The viscosity must declare an `omega` domain [rad/s], intersected with any
+frequency restrictions on density and modulus. Other state coordinates stay at
+their admitted query point. The descriptor carries `eta I`, the intersected band,
+and the material bundle identity. Rebinding an already viscous specimen recomputes
+all three from the new geometry and material. No source uncertainty is improved.
+
+The shared linear/Kirchhoff–Carrier/moving-end modal path projects
+`mu y_tt - T y_xx + EI y_xxxx + eta I y_xxxxt = 0`, giving
+`zeta_k = eta I k^4/(2 mu omega_k)`. Thus tension contributes stiffness but no
+viscous loss. This is the constant-coefficient Kelvin–Voigt term in
+[Sakthivel et al. (2023)](https://arxiv.org/abs/2301.07931), with tension added
+and projected onto the existing sine/cosine bases. The explicit law excludes
+the legacy bending heuristic and authored internal floor; simultaneous Rayleigh
+or nonzero authored damping refuses. Air resistance is still added separately.
+Every retained reference frequency, including the secondary polarization, must
+lie in the descriptor band. G1 checks `eta I` and rebinding; G3 checks actual
+pressure decay against an independent diameter-form expression in all three
+solver paths, including zero-viscosity air-only decay. G0 covers unavailable
+data, wrong quantities, sampled frequency curves, duplicate losses and out-of-band modes.
+
+This rung models linear bending strain-rate loss only. It does not supply axial
+viscosity, general Prony spectra, amplitude-dependent loss, time-evolving material
+state, thermoelastic/joint/radiation dissipation, or measured material validation.
+The modal applicability check concerns reference frequencies; nonlinear
+frequency shifts and generated harmonics are not an in-band certificate. The
+existing moving-end cosine approximation and compact observer remain unchanged.
 
 ### `acoustic_realize` / `pcm_wav`
 
@@ -443,9 +474,12 @@ clarinet is one filling of those objects.
   diameter. The approximation retains a constant low-frequency continuation;
   added mass, end effects, confinement, rarefaction, turbulence and nonlinear
   fluid drag remain unclaimed. Explicit Rayleigh damping still replaces the
-  complete loss sum. The existing `2e-7*omega` bending addend remains a heuristic;
-  the fitted internal floor is caller-authored. Neither is a material measurement,
-  and replacing these assumptions remains MR03 work. G1/G3 tests check the resistance formula and
+  complete loss sum when no material bending law is selected. The explicit
+  Kelvin–Voigt path above instead combines only bending viscosity and air drag.
+  Without that descriptor the existing `2e-7*omega` bending addend remains a
+  heuristic and the fitted internal floor is caller-authored. Neither is a material
+  measurement. General loss-spectrum integration remains MR03 work.
+  G1/G3 tests check the resistance formula and
   pressure ring-down under changed gas pressure. A second
   polarization at `1+detune` is a second member on the same clock
   and shares every plate (it is not an independent unused body).

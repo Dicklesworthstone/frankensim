@@ -3,8 +3,9 @@
 
 use fs_couple::acoustic_realize::{realize_assembly, string_mode_omega};
 use fs_couple::string_specimen::{
-    StringGeometryConstraint, StringPrestress, with_uniform_circular_material_and_constraints,
-    with_uniform_circular_material_and_prestress, with_uniform_circular_material_state,
+    KELVIN_VOIGT_BENDING_VISCOSITY_PROPERTY, StringGeometryConstraint, StringPrestress,
+    with_uniform_circular_material_and_constraints, with_uniform_circular_material_and_prestress,
+    with_uniform_circular_material_state,
 };
 use fs_evidence::ValidityDomain;
 use fs_matdb::{
@@ -16,7 +17,7 @@ use fs_material::state_point::{
     ScalarPropertyRequirement, resolve_material_state_point,
 };
 use fs_qty::{
-    Density, Dims, Pressure, QuantitySpec,
+    Density, Dims, DynViscosity, Pressure, QuantitySpec,
     semantic::{QuantityKind, SemanticType, ValueForm},
 };
 use fs_scenario::{
@@ -35,19 +36,48 @@ fn state_with_quantities(
     name: &str,
     properties: &[(&str, QuantitySpec, f64)],
 ) -> ResolvedMaterialStatePoint {
+    state_with_domain(
+        name,
+        properties,
+        ValidityDomain::unconstrained().with("T", 290.0, 300.0),
+        QueryPoint::new().with("T", 293.15).unwrap(),
+        None,
+    )
+}
+
+fn state_with_domain(
+    name: &str,
+    properties: &[(&str, QuantitySpec, f64)],
+    validity: ValidityDomain,
+    point: QueryPoint,
+    curve_property: Option<&str>,
+) -> ResolvedMaterialStatePoint {
     let mut claims = ClaimSet::new();
     let mut requirements = Vec::new();
     for &(key, quantity, value) in properties {
         claims
             .insert_claim(PropertyClaim {
                 key: PropertyKey::with_quantity(key, quantity),
-                value: PropertyValue::Scalar {
-                    value,
-                    dims: quantity.dims(),
+                value: if curve_property == Some(key) {
+                    PropertyValue::Curve {
+                        abscissa: "omega".into(),
+                        abscissa_dims: Dims([0, 0, -1, 0, 0, 0]),
+                        knots: vec![(1.0, value), (20_000.0, 2.0 * value)],
+                        dims: quantity.dims(),
+                    }
+                } else {
+                    PropertyValue::Scalar {
+                        value,
+                        dims: quantity.dims(),
+                    }
                 },
-                validity: ValidityDomain::unconstrained().with("T", 290.0, 300.0),
+                validity: validity.clone(),
                 uncertainty: UncertaintyModel::Unstated,
-                interpolation: InterpolationPolicy::ConstantWithinValidity,
+                interpolation: if curve_property == Some(key) {
+                    InterpolationPolicy::LinearInside
+                } else {
+                    InterpolationPolicy::ConstantWithinValidity
+                },
                 observations: vec![],
                 provenance: Provenance {
                     source: "synthetic uniform string".into(),
@@ -78,7 +108,7 @@ fn state_with_quantities(
     .unwrap();
     resolve_material_state_point(
         &card,
-        &QueryPoint::new().with("T", 293.15).unwrap(),
+        &point,
         &requirements,
         MaterialPropertySelection::SingleClaimOnly,
     )
@@ -103,6 +133,7 @@ fn template() -> PrestressedString {
         lin_density_kg_m: 1.0,
         axial_stiffness_n: 1.0,
         bending_stiffness_n_m2: 1.0,
+        kelvin_voigt_bending: None,
         width_m: 1.0,
         n_modes: 1,
         damping_ratio: 0.0,
@@ -322,7 +353,11 @@ fn g3_fixed_mass_material_swap_reaches_pressure_with_bending_change() {
 }
 
 fn pressure(string: PrestressedString) -> Vec<f64> {
-    realize_assembly(&AcousticAssembly {
+    realize_assembly(&assembly(string)).unwrap().pressure_pa
+}
+
+fn assembly(string: PrestressedString) -> AcousticAssembly {
+    AcousticAssembly {
         ambient: AmbientGas::sea_level(),
         string: Some(string),
         duct: None,
@@ -342,9 +377,7 @@ fn pressure(string: PrestressedString) -> Vec<f64> {
         listener: Listener { distance_m: 1.0 },
         sample_rate_hz: 8000,
         duration_s: 0.12,
-    })
-    .unwrap()
-    .pressure_pa
+    }
 }
 
 fn measured_hz(pressure: &[f64]) -> f64 {
@@ -360,6 +393,307 @@ fn measured_hz(pressure: &[f64]) -> f64 {
         "a live decaying pressure wave is required"
     );
     8000.0 * (crossings.len() - 1) as f64 / (crossings.last().unwrap() - crossings[0])
+}
+
+fn viscous_material(
+    eta: f64,
+    quantity: QuantitySpec,
+    band: (f64, f64),
+) -> ResolvedMaterialStatePoint {
+    state_with_domain(
+        "synthetic Kelvin-Voigt solid",
+        &[
+            ("density", QuantitySpec::dimensional(Density::DIMS), 1000.0),
+            (
+                "young_modulus",
+                QuantitySpec::dimensional(Pressure::DIMS),
+                2.0e9,
+            ),
+            (KELVIN_VOIGT_BENDING_VISCOSITY_PROPERTY, quantity, eta),
+        ],
+        ValidityDomain::unconstrained()
+            .with("T", 290.0, 300.0)
+            .with("omega", band.0, band.1),
+        QueryPoint::new()
+            .with("T", 293.15)
+            .unwrap()
+            .with("omega", band.0)
+            .unwrap(),
+        None,
+    )
+}
+
+fn loss_template() -> PrestressedString {
+    PrestressedString {
+        rayleigh: None,
+        ..template()
+    }
+}
+
+#[test]
+fn g1_material_bending_viscosity_follows_geometry_and_retains_sources() {
+    let material = viscous_material(
+        3.0e7,
+        QuantitySpec::dimensional(DynViscosity::DIMS),
+        (1.0, 20_000.0),
+    );
+    let specimen = with_uniform_circular_material_state(loss_template(), 0.0005, &material)
+        .unwrap()
+        .with_kelvin_voigt_bending_loss()
+        .unwrap();
+    let loss = specimen.string().kelvin_voigt_bending.unwrap();
+    close(
+        loss.viscous_stiffness_n_m2_s,
+        3.0e7 * core::f64::consts::PI * 0.001_f64.powi(4) / 64.0,
+    );
+    assert_eq!(loss.material_state_identity, Some(material.identity()));
+    assert_eq!(specimen.material(), &material);
+    assert!(
+        !specimen
+            .material()
+            .property(KELVIN_VOIGT_BENDING_VISCOSITY_PROPERTY)
+            .unwrap()
+            .answer()
+            .receipt
+            .observation_backed
+    );
+    let replacement = viscous_material(
+        6.0e7,
+        QuantitySpec::dimensional(DynViscosity::DIMS),
+        (1.0, 30_000.0),
+    );
+    let rebound =
+        with_uniform_circular_material_state(specimen.string(), 0.001, &replacement).unwrap();
+    let new_loss = rebound.string().kelvin_voigt_bending.unwrap();
+    close(
+        new_loss.viscous_stiffness_n_m2_s / loss.viscous_stiffness_n_m2_s,
+        32.0,
+    );
+    assert_eq!(
+        new_loss.material_state_identity,
+        Some(replacement.identity())
+    );
+    assert_eq!(new_loss.omega_band_rad_s.0.to_bits(), 1.0_f64.to_bits());
+    assert_eq!(
+        new_loss.omega_band_rad_s.1.to_bits(),
+        30_000.0_f64.to_bits()
+    );
+    assert_ne!(rebound.specimen_identity(), specimen.specimen_identity());
+    assert!(
+        with_uniform_circular_material_state(
+            specimen.string(),
+            0.001,
+            &elastic("missing viscosity", 1000.0, 2.0e9)
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn g3_material_viscosity_changes_pressure_decay_without_changing_elastic_modes() {
+    let pi = core::f64::consts::PI;
+    // The same material loss enters linear, nonlinear KC, and moving-end modes.
+    for (nonlinear, moving_end) in [(false, false), (true, false), (true, true)] {
+        let mut decays = Vec::new();
+        let mut reference_frequency = None;
+        for eta in [0.0, 3.0e7, 1.2e8] {
+            let material = viscous_material(
+                eta,
+                QuantitySpec::dimensional(DynViscosity::DIMS),
+                (1.0, 20_000.0),
+            );
+            let specimen = with_uniform_circular_material_state(loss_template(), 0.0005, &material)
+                .unwrap()
+                .with_kelvin_voigt_bending_loss()
+                .unwrap();
+            let mut string = specimen.string();
+            string.moving_end = moving_end;
+            if !nonlinear {
+                string.axial_stiffness_n = 0.0;
+            }
+            let wave_number = if moving_end { 0.5 } else { 1.0 } * pi / string.length_m;
+            let omega = ((string.tension_n * wave_number.powi(2)
+                + string.bending_stiffness_n_m2 * wave_number.powi(4))
+                / string.lin_density_kg_m)
+                .sqrt();
+            if let Some(first) = reference_frequency {
+                assert_eq!(omega.to_bits(), first);
+            }
+            reference_frequency = Some(omega.to_bits());
+            let mut scene = assembly(string);
+            scene.sample_rate_hz = 16_000;
+            scene.duration_s = 0.4;
+            let output = realize_assembly(&scene).unwrap();
+            assert!(output.pressure_pa.iter().all(|p| p.is_finite()));
+            // Independent diameter-form projection: I/A = d²/16. The static
+            // tensile energy must not be counted as dissipative bending energy.
+            let bending_decay =
+                eta * string.width_m.powi(2) * wave_number.powi(4) / (32.0 * 1000.0);
+            let gas = output.gas;
+            let resistance = 2.0 * pi * gas.dynamic_viscosity
+                + 2.0
+                    * pi
+                    * string.width_m
+                    * (gas.dynamic_viscosity * gas.density * omega / 2.0).sqrt();
+            let expected = bending_decay + resistance / (2.0 * string.lin_density_kg_m);
+            let peaks: Vec<_> = output
+                .pressure_pa
+                .windows(3)
+                .enumerate()
+                .filter(|(i, p)| {
+                    (800..5600).contains(i) && p[1] > 0.0 && p[1] > p[0] && p[1] >= p[2]
+                })
+                .map(|(i, p)| ((i + 1) as f64 / 16_000.0, p[1]))
+                .collect();
+            assert!(peaks.len() > 20, "live pressure oscillation required");
+            let (t0, p0) = peaks[0];
+            let (t1, p1) = *peaks.last().unwrap();
+            let measured = (p0 / p1).ln() / (t1 - t0);
+            assert!(
+                (measured / expected - 1.0).abs() < 0.02,
+                "nonlinear={nonlinear}, moving={moving_end}, eta={eta}: {measured} vs {expected} /s"
+            );
+            decays.push(measured);
+        }
+        let ratio = (decays[2] - decays[0]) / (decays[1] - decays[0]);
+        assert!(
+            (ratio - 4.0).abs() < 0.12,
+            "material-only decay ratio {ratio}"
+        );
+        eprintln!(
+            "G3 Kelvin-Voigt viscosity 0, 3e7, 1.2e8 Pa s; nonlinear={nonlinear}, moving={moving_end}: {decays:?} /s"
+        );
+    }
+}
+
+#[test]
+fn g0_material_bending_loss_refuses_missing_data_aliases_and_duplicate_losses() {
+    let bind = |material: &ResolvedMaterialStatePoint| {
+        with_uniform_circular_material_state(loss_template(), 0.0005, material)
+            .unwrap()
+            .with_kelvin_voigt_bending_loss()
+    };
+    assert!(bind(&elastic("missing", 1000.0, 2.0e9)).is_err());
+    assert!(
+        bind(&state(
+            "no band",
+            &[
+                ("density", Density::DIMS, 1000.0),
+                ("young_modulus", Pressure::DIMS, 2.0e9),
+                (
+                    KELVIN_VOIGT_BENDING_VISCOSITY_PROPERTY,
+                    DynViscosity::DIMS,
+                    3.0e7
+                )
+            ]
+        ))
+        .is_err()
+    );
+    for (eta, quantity) in [
+        (-1.0, QuantitySpec::dimensional(DynViscosity::DIMS)),
+        (3.0e7, QuantitySpec::dimensional(Pressure::DIMS)),
+    ] {
+        assert!(bind(&viscous_material(eta, quantity, (1.0, 20_000.0))).is_err());
+    }
+    let material = viscous_material(
+        3.0e7,
+        QuantitySpec::dimensional(DynViscosity::DIMS),
+        (1.0, 20_000.0),
+    );
+    assert!(
+        with_uniform_circular_material_state(template(), 0.0005, &material)
+            .unwrap()
+            .with_kelvin_voigt_bending_loss()
+            .is_err()
+    );
+    let specimen = bind(&material).unwrap();
+    let mut duplicate = specimen.string();
+    duplicate.damping_ratio = 0.01;
+    assert!(realize_assembly(&assembly(duplicate)).is_err());
+    duplicate = specimen.string();
+    duplicate.rayleigh = template().rayleigh;
+    assert!(realize_assembly(&assembly(duplicate)).is_err());
+}
+
+#[test]
+fn g0_material_bending_loss_does_not_freeze_a_sampled_frequency_curve() {
+    for key in [
+        "density",
+        "young_modulus",
+        KELVIN_VOIGT_BENDING_VISCOSITY_PROPERTY,
+    ] {
+        let material = state_with_domain(
+            "frequency-dependent synthetic solid",
+            &[
+                ("density", QuantitySpec::dimensional(Density::DIMS), 1000.0),
+                (
+                    "young_modulus",
+                    QuantitySpec::dimensional(Pressure::DIMS),
+                    2.0e9,
+                ),
+                (
+                    KELVIN_VOIGT_BENDING_VISCOSITY_PROPERTY,
+                    QuantitySpec::dimensional(DynViscosity::DIMS),
+                    3.0e7,
+                ),
+            ],
+            ValidityDomain::unconstrained().with("omega", 1.0, 20_000.0),
+            QueryPoint::new().with("omega", 1000.0).unwrap(),
+            Some(key),
+        );
+        assert!(matches!(
+            material.property(key).unwrap().answer().receipt.decision,
+            fs_matdb::EvaluationDecision::LinearInside { .. }
+        ));
+        let sampled =
+            with_uniform_circular_material_state(loss_template(), 0.0005, &material).unwrap();
+        let error = sampled.with_kelvin_voigt_bending_loss().unwrap_err();
+        assert!(
+            error.to_string().contains("validity-wide scalar constants"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn g0_material_bending_loss_checks_every_retained_frequency_and_polarization() {
+    let omega = string_mode_omega(
+        with_uniform_circular_material_state(
+            loss_template(),
+            0.0005,
+            &elastic("base", 1000.0, 2.0e9),
+        )
+        .unwrap()
+        .string(),
+        1,
+    );
+    let material = viscous_material(
+        3.0e7,
+        QuantitySpec::dimensional(DynViscosity::DIMS),
+        (omega * 0.9, omega * 1.1),
+    );
+    let string = with_uniform_circular_material_state(loss_template(), 0.0005, &material)
+        .unwrap()
+        .with_kelvin_voigt_bending_loss()
+        .unwrap()
+        .string();
+    assert!(realize_assembly(&assembly(string)).is_ok());
+    for modified in [
+        PrestressedString {
+            n_modes: 2,
+            ..string
+        },
+        PrestressedString {
+            polarization_detune: 0.5,
+            ..string
+        },
+        PrestressedString {
+            moving_end: true,
+            ..string
+        },
+    ] {
+        assert!(realize_assembly(&assembly(modified)).is_err());
+    }
 }
 
 #[test]

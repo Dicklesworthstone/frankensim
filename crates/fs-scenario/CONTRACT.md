@@ -43,6 +43,14 @@ flagships.
   state identity is a citation, not an authority upgrade. A guitar or clarinet is a
   filled assembly, not a crate and not a type. Realization lives
   in `fs-couple`.
+  `PrestressedString::kelvin_voigt_bending` optionally carries a
+  `KelvinVoigtBending` descriptor: viscous flexural stiffness `eta I` [N m² s],
+  an angular-frequency applicability band, and an optional material-state citation.
+  It selects bending strain-rate dissipation instead of the legacy internal and
+  bending approximations, retaining separate air drag; authored Rayleigh or
+  nonzero internal damping alongside it refuses during realization. This remains
+  data only. Material resolution, band admission and modal projection live in
+  `fs-couple`; no instrument-specific or second viscoelastic solver is introduced.
 - `signal::TimeSignal` — `Constant`, `Ramp` (finite strict interval, clamped;
   stable convex interpolation; the vessel tilt
   `(ramp 0deg 65deg 3s)`), `Table` (strictly increasing times + declared

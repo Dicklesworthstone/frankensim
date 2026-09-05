@@ -45,13 +45,18 @@ pub struct PrestressedString {
     pub width_m: f64,
     /// Retained sine modes.
     pub n_modes: usize,
-    /// Viscous modal damping ratio used when [`Self::rayleigh`] is `None`.
+    /// Authored loss at the fundamental, used by the legacy Prony approximation
+    /// when Rayleigh and Kelvin–Voigt bending are absent.
     pub damping_ratio: f64,
     /// Optional Rayleigh `ζ(ω) = α/(2ω) + βω/2` (air + internal).
     pub rayleigh: Option<RayleighParams>,
     /// Bending stiffness `E I` [N m²]. Zero is the ideal flexible string.
     /// Nonzero gives Fletcher inharmonicity `ω_n = n ω_1 √(1 + B n²)`.
     pub bending_stiffness_n_m2: f64,
+    /// Explicit viscous bending law, replacing legacy internal/bending loss.
+    /// Requires zero `damping_ratio` and no Rayleigh override. Air drag remains
+    /// separate. `None` retains the authored legacy loss path.
+    pub kelvin_voigt_bending: Option<KelvinVoigtBending>,
     /// Second-polarization fractional detune. Zero keeps one polarization.
     /// A few 10⁻³ is a typical bridge-rocking split and produces beating.
     pub polarization_detune: f64,
@@ -59,6 +64,21 @@ pub struct PrestressedString {
     /// Dirac-joins the waveguide to any plate/cavity. False is
     /// fixed-fixed sines with a one-way bridge force.
     pub moving_end: bool,
+}
+
+/// Uniform Kelvin–Voigt bending: moment `M = EI curvature + eta I curvature_dot`.
+/// This is a small-strain, constant-coefficient law at a fixed material state;
+/// it supplies neither axial viscosity nor thermoelastic/radiation/joint loss.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct KelvinVoigtBending {
+    /// Viscous flexural stiffness `eta I` [N m² s], finite and nonnegative.
+    pub viscous_stiffness_n_m2_s: f64,
+    /// Declared applicability of the constant coefficients [rad/s]. Every
+    /// retained reference mode, including a detuned polarization, must fit.
+    /// This is an applicability band, not a numerical error bound.
+    pub omega_band_rad_s: (f64, f64),
+    /// Citation of the resolved material bundle, never an authority upgrade.
+    pub material_state_identity: Option<fs_blake3::ContentHash>,
 }
 
 /// Rayleigh damping coefficients for a modal family.

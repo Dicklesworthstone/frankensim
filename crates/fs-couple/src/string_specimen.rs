@@ -10,13 +10,19 @@
 //! These are independent specimen comparisons, not thermal evolution.
 
 use fs_blake3::{ContentHash, DomainHasher};
+use fs_matdb::EvaluationDecision;
 use fs_material::state_point::{
     DENSITY_PROPERTY, ResolvedMaterialStatePoint, YOUNG_MODULUS_PROPERTY,
 };
-use fs_qty::{Density, Dims, Pressure, QuantitySpec};
+use fs_qty::{Density, Dims, DynViscosity, Pressure, QuantitySpec};
 use fs_scenario::PrestressedString;
+use fs_scenario::acoustic::KelvinVoigtBending;
 
 use crate::acoustic_realize::AcousticRealizeError;
+
+/// Solid bending-viscosity parameter of `sigma = E epsilon + eta epsilon_dot`
+/// [Pa s]. This is not fluid shear viscosity or a dimensionless loss factor.
+pub const KELVIN_VOIGT_BENDING_VISCOSITY_PROPERTY: &str = "kelvin_voigt_bending_viscosity";
 
 /// Cross-section constraint at the template's current loaded length.
 /// Independent of material claims and the mechanical prestress prescription.
@@ -113,6 +119,92 @@ impl ResolvedStringSpecimen {
     #[must_use]
     pub const fn specimen_identity(&self) -> ContentHash {
         self.specimen_identity
+    }
+
+    /// Activate material-resolved Kelvin–Voigt bending loss on this specimen.
+    ///
+    /// Requires a nonnegative dimension-only `kelvin_voigt_bending_viscosity`
+    /// [Pa s] and an explicit `omega` validity interval [rad/s] in its retained
+    /// material claim. Density, E and viscosity must all be validity-wide scalar
+    /// constants; a sampled curve cannot silently become a broadband law.
+    /// Their frequency domains intersect. Other coordinates (T, moisture, etc.)
+    /// stay at the already admitted state point; no thermal evolution is implied.
+    /// The source uncertainty/observation status is retained without promotion.
+    ///
+    /// This law replaces authored internal and heuristic bending loss, so the
+    /// template must have no Rayleigh override and zero `damping_ratio`. Air
+    /// drag remains independent. Only bending strain-rate dissipation is modeled;
+    /// nonlinear axial viscosity and amplitude-dependent loss are not supplied.
+    ///
+    /// # Errors
+    /// Missing/mismatched data, nonconstant claims, missing/empty frequency
+    /// applicability, duplicate loss prescriptions, and overflow refuse. The
+    /// realizer also checks every actual retained reference-mode frequency.
+    pub fn with_kelvin_voigt_bending_loss(mut self) -> Result<Self, AcousticRealizeError> {
+        let refuse = |what| AcousticRealizeError::InvalidDescription { what };
+        if self.string.rayleigh.is_some() || self.string.damping_ratio != 0.0 {
+            return Err(refuse(
+                "material bending loss cannot be combined with authored internal/Rayleigh loss",
+            ));
+        }
+        let property = self
+            .material
+            .property(KELVIN_VOIGT_BENDING_VISCOSITY_PROPERTY)
+            .ok_or_else(|| refuse("material bending loss needs kelvin_voigt_bending_viscosity"))?;
+        let eta = property.value_si();
+        if property.requirement().quantity() != QuantitySpec::dimensional(DynViscosity::DIMS)
+            || !eta.is_finite()
+            || eta < 0.0
+        {
+            return Err(refuse(
+                "bending viscosity must be a nonnegative dimension-only scalar in Pa s",
+            ));
+        }
+        let mut band = property
+            .answer()
+            .evidence
+            .model
+            .validity
+            .bound("omega")
+            .ok_or_else(|| {
+                refuse("material bending viscosity needs an explicit omega validity band in rad/s")
+            })?;
+        for key in [
+            DENSITY_PROPERTY,
+            YOUNG_MODULUS_PROPERTY,
+            KELVIN_VOIGT_BENDING_VISCOSITY_PROPERTY,
+        ] {
+            let answer = self
+                .material
+                .property(key)
+                .ok_or_else(|| {
+                    refuse("material bending loss needs density, modulus and viscosity")
+                })?
+                .answer();
+            if answer.receipt.decision != EvaluationDecision::ConstantWithinValidity {
+                return Err(refuse(
+                    "Kelvin-Voigt string coefficients must be validity-wide scalar constants",
+                ));
+            }
+            if let Some((lo, hi)) = answer.evidence.model.validity.bound("omega") {
+                band = (band.0.max(lo), band.1.min(hi));
+            }
+        }
+        let viscous_stiffness_n_m2_s = eta * self.second_moment_m4;
+        if !(band.0.is_finite() && band.1.is_finite() && band.0 >= 0.0 && band.1 >= band.0)
+            || !viscous_stiffness_n_m2_s.is_finite()
+            || (eta > 0.0 && viscous_stiffness_n_m2_s == 0.0)
+        {
+            return Err(refuse(
+                "material bending-loss band or derived viscous stiffness is invalid",
+            ));
+        }
+        self.string.kelvin_voigt_bending = Some(KelvinVoigtBending {
+            viscous_stiffness_n_m2_s,
+            omega_band_rad_s: band,
+            material_state_identity: Some(self.material.identity()),
+        });
+        Ok(self)
     }
 }
 
@@ -270,7 +362,7 @@ pub fn with_uniform_circular_material_and_constraints(
     identity.update(state.identity().as_bytes());
     identity.update(&string.length_m.to_bits().to_le_bytes());
     identity.update(&radius_m.to_bits().to_le_bytes());
-    Ok(ResolvedStringSpecimen {
+    let resolved = ResolvedStringSpecimen {
         string,
         geometry_constraint,
         prestress,
@@ -279,7 +371,15 @@ pub fn with_uniform_circular_material_and_constraints(
         second_moment_m4,
         mass_kg,
         specimen_identity: identity.finalize(),
-    })
+    };
+    // A template may come from a previously resolved specimen. Preserve the
+    // selected law, but derive eta I and its citation from the NEW material and
+    // geometry rather than carrying a stale mechanical coefficient forward.
+    if string.kelvin_voigt_bending.is_some() {
+        resolved.with_kelvin_voigt_bending_loss()
+    } else {
+        Ok(resolved)
+    }
 }
 
 fn resolve_prestress(

@@ -1037,6 +1037,7 @@ mod gesture_tests {
             damping_ratio: 1.0e-3,
             rayleigh: None,
             bending_stiffness_n_m2: 0.0,
+            kelvin_voigt_bending: None,
             polarization_detune: 0.0,
             moving_end: false,
         };
