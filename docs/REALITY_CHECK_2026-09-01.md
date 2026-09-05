@@ -1,5 +1,55 @@
 # FrankenSim Reality Check — refreshed 2026-09-04
 
+## Implementation follow-through — September 4, focused verification in progress
+
+The user subsequently authorized implementation. The dated audit below describes
+the pre-implementation snapshot; its absent/defective source paths are not all
+still absent in the working tree. Current implementation work has delivered:
+
+- **Study producer (.20):** enabled dispatch and a real normalized scalar
+  Poisson radius-study driver, strict declaration admission, accepted-iterate
+  ledger checkpoints, original-budget resume, final geometry, HTML/SVG report
+  and structurally checked Estimated package. Full elasticity/free-boundary
+  topology remains .16; this scalar slice does not close that dependency.
+- **Numerical comparison (.17):** matched-PDE P1/Q1 comparison on the accepted
+  geometry and a real affine-source sensitivity twin. A geometry-only diagnostic
+  exposed inverted triangles in the first oracle mesh; conforming radial layers
+  now replace that construction. Rust PDE agreement and mutations still require
+  execution, with the numerical acceptance band unchanged.
+- **UQ prerequisite (f85xj.6.7):** the existing sampler previously ignored
+  correlations and method selection and promoted empirical percentiles to
+  Verified. The repair implements explicitly joint Gaussian sampling, requires
+  declared dependence, refuses unimplemented methods and non-probabilistic
+  input kinds, and retains Estimated authority. All 10 focused sampler tests
+  passed on Linux, including analytic correlated-Gaussian and singular cases,
+  with matching local/worker source hashes. The existing HTML/JSON report
+  consumer now preserves refusal/status/authority, emits valid optional JSON
+  numbers, and labels empirical statistics; its runtime check is pending.
+  Real project-to-Cooling
+  propagation, statistical stopping, budgets and resume remain unfinished.
+- **Truthfulness:** adaptive solves no longer label an unevaluated goal as
+  converged; the unfinished Cooling UQ script returns unavailable instead of a
+  product pass. The missing scene contract and README/schema inventories are
+  present. Existing generator/check integration remains pending.
+
+The first combined run, retained in
+`/tmp/greenosprey-study-combined-20260905.log`, ran 37 CLI library tests:
+35 passed and two new study tests failed because package provenance contained
+a forbidden semicolon. That production defect is corrected; the replacement
+build is retained in `/tmp/greenosprey-study-current-targets-20260905.log`.
+Its independently executed UQ target passed 10/10 in 0.86 seconds, retained in
+`/tmp/greenosprey-uq-runtime-20260905.log`; other targets remain pending.
+These are unlocked remote diagnostics against live siblings, not complete
+constellation, DSR quality, release, physical-validation or complete-Bead proof.
+Earlier attempts encountered a stale lock, a remote timeout, one corrected CLI
+test-helper type error, and a transient FrankenSQLite missing-function error.
+Formatting, script syntax, the five UQ unavailable modes, and the stated
+geometry diagnostic passed.
+Another process committed portions of this work through `8bb2a7af`; this agent
+did not stage or commit, and preserved the shared index and peer changes.
+
+## Pre-implementation audit snapshot
+
 Current source snapshot: `34f9fc0a8d2dc1e03b5d215db13aae76436d889a` on `main`.
 This refresh supersedes the September 1 assessment below. It preserves that
 assessment as dated history, not as current evidence. No product source was
