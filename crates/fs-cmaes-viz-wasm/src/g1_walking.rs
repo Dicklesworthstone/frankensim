@@ -205,7 +205,13 @@ const WALK_SPEED_WEIGHT: f64 = 60.0;
 const WALK_CONTACT_WEIGHT: f64 = 60.0;
 /// Reward for covering the commanded distance, capped so a forward dive that
 /// overshoots cannot buy more credit than arriving does.
-const WALK_PROGRESS_REWARD: f64 = 120.0;
+///
+/// Swept against DISTANCE rather than the objective, which is the only honest
+/// way to tune a weight that decides what distance is worth. At 200 generations
+/// from the same seed: 120 -> 0.700 m, 200 -> 0.736 m, 300 -> 0.734 m. 300 buys
+/// nothing more and slides 22% further per metre travelled (9.77 vs 8.02), so
+/// 200 is where the gait stops improving and starts skidding.
+const WALK_PROGRESS_REWARD: f64 = 200.0;
 const WALK_PROGRESS_CAP: f64 = 1.25;
 // Per-step survival bonus (cmaes-pvz, v068): a small reward per survived step
 // inside the same objective, so the optimizer cannot game a single rollup by
