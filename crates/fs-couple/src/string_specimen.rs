@@ -5,17 +5,30 @@
 //! Length and radius describe the specimen at the resolved material state.
 //! Tension, support motion, modal budget, and declared losses remain mechanical
 //! inputs. Rebinding can hold tension or axial extension fixed, or solve the
-//! tension for a declared undamped fundamental. Geometry is the current loaded
-//! geometry; no thermal evolution or fixed-mass comparison is implied.
+//! tension for a declared undamped fundamental. At fixed loaded length, the
+//! cross-section can hold radius or total mass fixed during material comparison.
+//! These are independent specimen comparisons, not thermal evolution.
 
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_material::state_point::{
     DENSITY_PROPERTY, ResolvedMaterialStatePoint, YOUNG_MODULUS_PROPERTY,
 };
-use fs_qty::{Density, Dims, Pressure};
+use fs_qty::{Density, Dims, Pressure, QuantitySpec};
 use fs_scenario::PrestressedString;
 
 use crate::acoustic_realize::AcousticRealizeError;
+
+/// Cross-section constraint at the template's current loaded length.
+/// Independent of material claims and the mechanical prestress prescription.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum StringGeometryConstraint {
+    /// Keep the current circular radius [m] fixed when replacing material.
+    FixedRadius(f64),
+    /// Keep total specimen mass [kg] fixed; derive `r = sqrt(m / (rho L pi))`.
+    /// This compares uniform specimens at their resolved material states. It
+    /// does not transport mass, strain, or history between evolving states.
+    FixedMass(f64),
+}
 
 /// Mechanical prestress prescribed independently of material-card authority.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -43,6 +56,7 @@ pub enum StringPrestress {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResolvedStringSpecimen {
     string: PrestressedString,
+    geometry_constraint: StringGeometryConstraint,
     prestress: StringPrestress,
     material: ResolvedMaterialStatePoint,
     area_m2: f64,
@@ -56,6 +70,12 @@ impl ResolvedStringSpecimen {
     #[must_use]
     pub const fn string(&self) -> PrestressedString {
         self.string
+    }
+
+    /// Authored cross-section constraint, separate from material-card authority.
+    #[must_use]
+    pub const fn geometry_constraint(&self) -> StringGeometryConstraint {
+        self.geometry_constraint
     }
 
     /// Original mechanical prescription, separate from resolved material claims.
@@ -114,7 +134,7 @@ impl ResolvedStringSpecimen {
 /// No plasticity, anisotropy, or melting is claimed.
 ///
 /// # Errors
-/// Missing or dimensionally wrong required properties, nonpositive/nonfinite
+/// Missing or quantity-schema-mismatched properties, nonpositive/nonfinite
 /// geometry/material values, invalid mechanical inputs, or unrepresentable
 /// derived quantities refuse before publishing a specimen.
 pub fn with_uniform_circular_material_state(
@@ -153,18 +173,44 @@ pub fn with_uniform_circular_material_state(
 /// unrepresentable tension, strain beyond its declared limit, and extension or
 /// pitch prescriptions with the realizer's moving-end basis.
 pub fn with_uniform_circular_material_and_prestress(
-    mut string: PrestressedString,
+    string: PrestressedString,
     radius_m: f64,
+    state: &ResolvedMaterialStatePoint,
+    prestress: StringPrestress,
+) -> Result<ResolvedStringSpecimen, AcousticRealizeError> {
+    with_uniform_circular_material_and_constraints(
+        string,
+        StringGeometryConstraint::FixedRadius(radius_m),
+        state,
+        prestress,
+    )
+}
+
+/// Resolve independent cross-section and prestress constraints through the same
+/// material binding. The template always supplies the current loaded length.
+///
+/// Fixed radius changes mass when density changes. Fixed mass changes radius,
+/// axial/bending stiffness and observer width coherently; linear density remains
+/// `m/L` to floating-point roundoff. All prestress policies apply to the resulting
+/// geometry. No conservation across time, transverse contraction, or thermal
+/// stress is inferred. The authored constraint is retained separately from the
+/// material receipts; specimen identity binds the resolved radius, not the choice
+/// of constraint that produced it.
+///
+/// # Errors
+/// In addition to the fixed-radius binding's refusals, rejects nonpositive or
+/// nonfinite mass and any unrepresentable derived circular geometry.
+pub fn with_uniform_circular_material_and_constraints(
+    mut string: PrestressedString,
+    geometry_constraint: StringGeometryConstraint,
     state: &ResolvedMaterialStatePoint,
     prestress: StringPrestress,
 ) -> Result<ResolvedStringSpecimen, AcousticRealizeError> {
     let refuse = |what| AcousticRealizeError::InvalidDescription { what };
     let positive = |v: f64| v.is_finite() && v > 0.0;
     let nonnegative = |v: f64| v.is_finite() && v >= 0.0;
-    if !positive(string.length_m) || !positive(radius_m) {
-        return Err(refuse(
-            "circular string length and radius must be finite and positive",
-        ));
+    if !positive(string.length_m) {
+        return Err(refuse("circular string length must be finite and positive"));
     }
     if string.n_modes == 0
         || !nonnegative(string.damping_ratio)
@@ -179,6 +225,22 @@ pub fn with_uniform_circular_material_and_prestress(
     }
     let density = required_positive(state, DENSITY_PROPERTY, Density::DIMS)?;
     let young = required_positive(state, YOUNG_MODULUS_PROPERTY, Pressure::DIMS)?;
+    let radius_m = match geometry_constraint {
+        StringGeometryConstraint::FixedRadius(radius_m) => radius_m,
+        StringGeometryConstraint::FixedMass(mass_kg) => {
+            if !positive(mass_kg) {
+                return Err(refuse("circular string mass must be finite and positive"));
+            }
+            // Avoid forming rho*L, which can overflow before a representable
+            // cross-section is obtained. Final geometry/products are checked below.
+            (mass_kg / string.length_m / density / core::f64::consts::PI).sqrt()
+        }
+    };
+    if !positive(radius_m) {
+        return Err(refuse(
+            "circular string constraint must resolve to finite positive radius",
+        ));
+    }
     let radius_squared = radius_m * radius_m;
     let area_m2 = core::f64::consts::PI * radius_squared;
     let second_moment_m4 = area_m2 * (0.25 * radius_squared);
@@ -210,6 +272,7 @@ pub fn with_uniform_circular_material_and_prestress(
     identity.update(&radius_m.to_bits().to_le_bytes());
     Ok(ResolvedStringSpecimen {
         string,
+        geometry_constraint,
         prestress,
         material: state.clone(),
         area_m2,
@@ -278,9 +341,12 @@ fn required_positive(
         });
     };
     let value = property.value_si();
-    if property.requirement().dims() != dims || !value.is_finite() || value <= 0.0 {
+    if property.requirement().quantity() != QuantitySpec::dimensional(dims)
+        || !value.is_finite()
+        || value <= 0.0
+    {
         return Err(AcousticRealizeError::InvalidDescription {
-            what: "circular string density and Young's modulus must be positive SI quantities",
+            what: "circular string density and Young's modulus require positive dimension-only SI quantities; semantic kinds and value forms cannot be erased",
         });
     }
     Ok(value)

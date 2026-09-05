@@ -1,4 +1,4 @@
-//! Free-field absorption on a compact observer path.
+//! Gas-related losses: cylinder motion and free-field observer absorption.
 //!
 //! `H(ω) = exp(−α(ω) r)` with ISO 9613-1 when the `(T, p, humidity)`
 //! window admits it. Humidity is an explicit `[0, 1]` argument.
@@ -10,6 +10,48 @@ use fs_fft::{C64 as FftC64, Fft};
 use fs_material::gas::GasState;
 use fs_material::iso9613::iso9613_absorption;
 use fs_math::det;
+
+/// Mechanical resistance per unit length [N s/m²] of a slender circular
+/// cylinder oscillating transversely in stationary gas.
+///
+/// Uses `R = 2 pi mu (1 + r sqrt(2 rho omega / mu))`, the small-amplitude
+/// boundary-layer approximation in Desvages (2018), section 3.2.2, equations
+/// 3.8 and 3.12: <https://hdl.handle.net/1842/31273>.
+/// Here `mu` is dynamic viscosity [Pa s], not kinematic viscosity [m²/s].
+/// For linear mass density `m_l`, modal damping is `zeta = R/(2 m_l omega)`.
+///
+/// This is an estimate for a long cylinder, including the model's constant
+/// low-frequency continuation. It does not solve end effects, fluid added mass,
+/// turbulence, confinement, rarefied gas, or large-amplitude motion. Applying it
+/// to a nonlinear oscillator retains a linear, modal loss approximation.
+///
+/// # Errors
+/// Refuses nonpositive/nonfinite radius [m], frequency [rad/s], gas viscosity
+/// or density, and unrepresentable derived resistance.
+pub fn oscillating_cylinder_air_resistance_per_length(
+    radius_m: f64,
+    omega_rad_s: f64,
+    gas: &GasState,
+) -> Result<f64, crate::acoustic_realize::AcousticRealizeError> {
+    use crate::acoustic_realize::AcousticRealizeError;
+    if [radius_m, omega_rad_s, gas.dynamic_viscosity, gas.density]
+        .iter()
+        .any(|x| !x.is_finite() || *x <= 0.0)
+    {
+        return Err(AcousticRealizeError::InvalidDescription {
+            what: "cylinder air resistance needs positive finite radius, angular frequency, viscosity and gas density",
+        });
+    }
+    let resistance = core::f64::consts::TAU
+        * gas.dynamic_viscosity
+        * (1.0 + radius_m * det::sqrt(2.0 * gas.density * omega_rad_s / gas.dynamic_viscosity));
+    if !resistance.is_finite() || resistance <= 0.0 {
+        return Err(AcousticRealizeError::InvalidDescription {
+            what: "cylinder air resistance is unrepresentable",
+        });
+    }
+    Ok(resistance)
+}
 
 /// Apply atmospheric absorption to a finished pressure history.
 ///

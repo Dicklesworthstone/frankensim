@@ -3,8 +3,8 @@
 
 use fs_couple::acoustic_realize::{realize_assembly, string_mode_omega};
 use fs_couple::string_specimen::{
-    StringPrestress, with_uniform_circular_material_and_prestress,
-    with_uniform_circular_material_state,
+    StringGeometryConstraint, StringPrestress, with_uniform_circular_material_and_constraints,
+    with_uniform_circular_material_and_prestress, with_uniform_circular_material_state,
 };
 use fs_evidence::ValidityDomain;
 use fs_matdb::{
@@ -15,19 +15,36 @@ use fs_material::state_point::{
     MaterialPropertySelection, ResolvedMaterialStatePoint, ScalarAdmissibility,
     ScalarPropertyRequirement, resolve_material_state_point,
 };
-use fs_qty::{Density, Dims, Pressure};
+use fs_qty::{
+    Density, Dims, Pressure, QuantitySpec,
+    semantic::{QuantityKind, SemanticType, ValueForm},
+};
 use fs_scenario::{
     AcousticAssembly, AmbientGas, Listener, Pluck, PrestressedString, RayleighParams,
 };
 
 fn state(name: &str, properties: &[(&str, Dims, f64)]) -> ResolvedMaterialStatePoint {
+    let quantities: Vec<_> = properties
+        .iter()
+        .map(|&(key, dims, value)| (key, QuantitySpec::dimensional(dims), value))
+        .collect();
+    state_with_quantities(name, &quantities)
+}
+
+fn state_with_quantities(
+    name: &str,
+    properties: &[(&str, QuantitySpec, f64)],
+) -> ResolvedMaterialStatePoint {
     let mut claims = ClaimSet::new();
     let mut requirements = Vec::new();
-    for &(key, dims, value) in properties {
+    for &(key, quantity, value) in properties {
         claims
             .insert_claim(PropertyClaim {
-                key: PropertyKey::new(key, dims),
-                value: PropertyValue::Scalar { value, dims },
+                key: PropertyKey::with_quantity(key, quantity),
+                value: PropertyValue::Scalar {
+                    value,
+                    dims: quantity.dims(),
+                },
                 validity: ValidityDomain::unconstrained().with("T", 290.0, 300.0),
                 uncertainty: UncertaintyModel::Unstated,
                 interpolation: InterpolationPolicy::ConstantWithinValidity,
@@ -40,7 +57,12 @@ fn state(name: &str, properties: &[(&str, Dims, f64)]) -> ResolvedMaterialStateP
             })
             .unwrap();
         requirements.push(
-            ScalarPropertyRequirement::try_new(key, dims, ScalarAdmissibility::Finite).unwrap(),
+            ScalarPropertyRequirement::try_with_quantity(
+                key,
+                quantity,
+                ScalarAdmissibility::Finite,
+            )
+            .unwrap(),
         );
     }
     let card = MaterialCard::assemble(
@@ -177,6 +199,128 @@ fn g3_geometric_scaling_and_material_replacement_move_all_derived_inputs() {
     assert_ne!(same_values.specimen_identity(), first.specimen_identity());
 }
 
+#[test]
+fn g1_fixed_mass_derives_geometry_stiffness_and_independent_prestress() {
+    let mass = 0.001;
+    let length = template().length_m;
+    let young = 200.0e9;
+    let constraint = StringGeometryConstraint::FixedMass(mass);
+    for density in [1000.0, 4000.0] {
+        let material = elastic("fixed-mass", density, young);
+        for prestress in [
+            StringPrestress::FixedTension(20.0),
+            StringPrestress::FixedExtension {
+                stress_free_length_m: 0.498,
+                linear_strain_limit: 0.005,
+            },
+            StringPrestress::TargetFundamentalHz(160.0),
+        ] {
+            let specimen = with_uniform_circular_material_and_constraints(
+                template(),
+                constraint,
+                &material,
+                prestress,
+            )
+            .unwrap();
+            let string = specimen.string();
+            let area = mass / (density * length);
+            let moment = area.powi(2) / (4.0 * core::f64::consts::PI);
+            close(specimen.mass_kg(), mass);
+            close(specimen.area_m2(), area);
+            close(specimen.second_moment_m4(), moment);
+            close(string.lin_density_kg_m, mass / length);
+            close(string.axial_stiffness_n, young * area);
+            close(string.bending_stiffness_n_m2, young * moment);
+            close(string.width_m, (4.0 * area / core::f64::consts::PI).sqrt());
+            let expected_tension = match prestress {
+                StringPrestress::FixedTension(force) => force,
+                StringPrestress::FixedExtension {
+                    stress_free_length_m,
+                    ..
+                } => young * area * (length / stress_free_length_m - 1.0),
+                StringPrestress::TargetFundamentalHz(hz) => {
+                    4.0 * mass * length * hz.powi(2)
+                        - young * moment * (core::f64::consts::PI / length).powi(2)
+                }
+            };
+            close(string.tension_n, expected_tension);
+            assert_eq!(specimen.geometry_constraint(), constraint);
+            assert_eq!(specimen.prestress(), prestress);
+            assert_eq!(specimen.material(), &material);
+            assert_eq!(string.rayleigh, template().rayleigh);
+            let same_geometry = with_uniform_circular_material_and_prestress(
+                template(),
+                string.width_m / 2.0,
+                &material,
+                prestress,
+            )
+            .unwrap();
+            assert_eq!(same_geometry.string(), string);
+            assert_eq!(
+                same_geometry.specimen_identity(),
+                specimen.specimen_identity()
+            );
+            assert_ne!(same_geometry.geometry_constraint(), constraint);
+        }
+    }
+}
+
+#[test]
+fn g3_fixed_mass_material_swap_reaches_pressure_with_bending_change() {
+    let bind = |density| {
+        with_uniform_circular_material_and_constraints(
+            template(),
+            StringGeometryConstraint::FixedMass(0.001),
+            &elastic("fixed-mass-pressure", density, 200.0e9),
+            StringPrestress::FixedTension(20.0),
+        )
+        .unwrap()
+    };
+    let light = bind(1000.0);
+    let heavy = bind(4000.0);
+    close(heavy.mass_kg(), light.mass_kg());
+    close(heavy.string().width_m / light.string().width_m, 0.5);
+    close(
+        heavy.string().axial_stiffness_n / light.string().axial_stiffness_n,
+        0.25,
+    );
+    close(
+        heavy.string().bending_stiffness_n_m2 / light.string().bending_stiffness_n_m2,
+        1.0 / 16.0,
+    );
+    let mut pitches = Vec::new();
+    for (specimen, density) in [(&light, 1000.0_f64), (&heavy, 4000.0_f64)] {
+        // Eliminate A and I independently: f_n² = n² T/(4mL)
+        // + n⁴ E pi m/(16 rho² L⁵). Fixed mass preserves only the tension term.
+        let frequency = |n: f64| {
+            (n.powi(2) * 20.0 / (4.0 * 0.001 * 0.5)
+                + n.powi(4) * 200.0e9 * core::f64::consts::PI * 0.001
+                    / (16.0 * density.powi(2) * 0.5_f64.powi(5)))
+            .sqrt()
+        };
+        for n in 1..=4 {
+            close(
+                string_mode_omega(specimen.string(), n) / core::f64::consts::TAU,
+                frequency(n as f64),
+            );
+        }
+        let waveform = pressure(specimen.string());
+        assert!(waveform.iter().all(|p| p.is_finite()));
+        assert_eq!(waveform, pressure(specimen.string()));
+        let measured = measured_hz(&waveform);
+        assert!((measured / frequency(1.0) - 1.0).abs() < 0.01);
+        pitches.push(measured);
+    }
+    assert!(
+        pitches[0] > 1.04 * pitches[1],
+        "bending must change pitch at fixed mass"
+    );
+    eprintln!(
+        "G3 fixed mass, density x4: pressure pitch {:.6} -> {:.6} Hz",
+        pitches[0], pitches[1]
+    );
+}
+
 fn pressure(string: PrestressedString) -> Vec<f64> {
     realize_assembly(&AcousticAssembly {
         ambient: AmbientGas::sea_level(),
@@ -288,6 +432,99 @@ fn g0_binding_refuses_missing_wrong_dimension_and_unrepresentable_inputs() {
         .is_err()
     );
     assert_eq!(original, template());
+}
+
+#[test]
+fn g0_binding_preserves_quantity_kinds_and_value_forms_at_the_solver_boundary() {
+    let density = QuantitySpec::dimensional(Density::DIMS);
+    let modulus = QuantitySpec::dimensional(Pressure::DIMS);
+    for (property, quantity) in [
+        (
+            "density",
+            QuantitySpec::semantic(SemanticType::new(
+                QuantityKind::MassConcentration,
+                ValueForm::Static,
+            )),
+        ),
+        (
+            "young_modulus",
+            QuantitySpec::semantic(SemanticType::new(
+                QuantityKind::AcousticPressure,
+                ValueForm::Rms,
+            )),
+        ),
+    ] {
+        let mut properties = [
+            ("density", density, 1000.0),
+            ("young_modulus", modulus, 2.0e9),
+        ];
+        let entry = properties.iter_mut().find(|p| p.0 == property).unwrap();
+        assert_eq!(entry.1.dims(), quantity.dims());
+        entry.1 = quantity;
+        let material = state_with_quantities("explicit-semantic-alias", &properties);
+        assert_eq!(
+            material
+                .property(property)
+                .unwrap()
+                .requirement()
+                .quantity(),
+            quantity
+        );
+        assert!(with_uniform_circular_material_state(template(), 0.0005, &material).is_err());
+        assert!(
+            with_uniform_circular_material_and_constraints(
+                template(),
+                StringGeometryConstraint::FixedMass(0.001),
+                &material,
+                StringPrestress::FixedTension(20.0),
+            )
+            .is_err()
+        );
+    }
+}
+
+#[test]
+fn g0_fixed_mass_refuses_invalid_and_unrepresentable_geometry() {
+    let material = elastic("mass-admission", 1000.0, 2.0e9);
+    for mass in [
+        0.0,
+        -1.0,
+        f64::NAN,
+        f64::INFINITY,
+        f64::MAX,
+        f64::MIN_POSITIVE,
+    ] {
+        assert!(
+            with_uniform_circular_material_and_constraints(
+                template(),
+                StringGeometryConstraint::FixedMass(mass),
+                &material,
+                StringPrestress::FixedTension(20.0),
+            )
+            .is_err()
+        );
+    }
+    for length in [
+        0.0,
+        -1.0,
+        f64::NAN,
+        f64::INFINITY,
+        f64::MAX,
+        f64::MIN_POSITIVE,
+    ] {
+        assert!(
+            with_uniform_circular_material_and_constraints(
+                PrestressedString {
+                    length_m: length,
+                    ..template()
+                },
+                StringGeometryConstraint::FixedMass(0.001),
+                &material,
+                StringPrestress::FixedTension(20.0),
+            )
+            .is_err()
+        );
+    }
 }
 
 #[test]

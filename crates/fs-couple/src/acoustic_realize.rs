@@ -1018,14 +1018,22 @@ fn mode_zeta(
         })?;
         return Ok(r.zeta_at(omega));
     }
-    // Stokes air drag on a cylinder of radius ≈ width/2, plus the
-    // caller-authored internal floor, plus a stiffness-proportional
-    // term from bending (Valette–Cuesta / Chaigne class).
-    let radius = 0.5 * string.width_m;
-    let stokes = core::f64::consts::PI
-        * radius
-        * det::sqrt(2.0 * gas.dynamic_viscosity * gas.density / omega.max(1.0))
-        / (2.0 * string.lin_density_kg_m * det::sqrt(omega.max(1.0)));
+    // The compact string path interprets width as circular diameter for air
+    // drag. R [N s/m²] / (2 mu_linear omega) is dimensionless. Material
+    // bindings derive this diameter and mu_linear from the same cross-section.
+    let resistance = crate::air_path::oscillating_cylinder_air_resistance_per_length(
+        0.5 * string.width_m,
+        omega,
+        gas,
+    )?;
+    let stokes = 0.5 * resistance / string.lin_density_kg_m / omega;
+    if !stokes.is_finite() {
+        return Err(AcousticRealizeError::InvalidDescription {
+            what: "cylinder air damping ratio is unrepresentable",
+        });
+    }
+    // This legacy bending coefficient is a heuristic pending material-loss
+    // resolution under MR03; it is not source-backed constitutive data.
     let bend = if string.bending_stiffness_n_m2 > 0.0 {
         2.0e-7 * omega
     } else {

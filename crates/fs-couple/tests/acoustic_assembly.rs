@@ -122,6 +122,109 @@ fn peak_abs(x: &[f64]) -> f64 {
 }
 
 #[test]
+fn g1_cylinder_air_resistance_matches_independent_frequency_form_and_scaling() {
+    use fs_couple::air_path::oscillating_cylinder_air_resistance_per_length as resistance;
+    use fs_material::gas::{GasSpec, GasState};
+
+    let gas = GasState::try_new(&GasSpec::dry_air_ussa1976(), 288.15, 101_325.0).unwrap();
+    let pi = core::f64::consts::PI;
+    let constant = 2.0 * pi * gas.dynamic_viscosity;
+    for diameter in [0.0002, 0.001, 0.004] {
+        for frequency in [50.0, 200.0, 2000.0] {
+            // R = 2 pi mu + 2 pi d sqrt(pi mu rho f), N s/m².
+            let expected = constant
+                + 2.0
+                    * pi
+                    * diameter
+                    * (pi * gas.dynamic_viscosity * gas.density * frequency).sqrt();
+            let omega = 2.0 * pi * frequency;
+            let actual = resistance(diameter / 2.0, omega, &gas).unwrap();
+            assert!((actual / expected - 1.0).abs() < 1.0e-13);
+            let faster = resistance(diameter / 2.0, 4.0 * omega, &gas).unwrap();
+            assert!(((faster - constant) / (actual - constant) - 2.0).abs() < 1.0e-13);
+        }
+    }
+    for invalid in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        assert!(resistance(invalid, 1000.0, &gas).is_err());
+        assert!(resistance(0.001, invalid, &gas).is_err());
+        let mut bad_gas = gas;
+        bad_gas.dynamic_viscosity = invalid;
+        assert!(resistance(0.001, 1000.0, &bad_gas).is_err());
+        bad_gas = gas;
+        bad_gas.density = invalid;
+        assert!(resistance(0.001, 1000.0, &bad_gas).is_err());
+    }
+    assert!(resistance(f64::MAX, f64::MAX, &gas).is_err());
+}
+
+#[test]
+fn g3_gas_pressure_controls_actual_string_decay_in_both_solver_paths() {
+    let pi = core::f64::consts::PI;
+    for axial_stiffness in [0.0, 50.0] {
+        let mut decays = Vec::new();
+        for pressure_pa in [101_325.0, 25_331.25] {
+            let string = PrestressedString {
+                length_m: 0.5,
+                width_m: 0.0005,
+                n_modes: 1,
+                damping_ratio: 0.0,
+                axial_stiffness_n: axial_stiffness,
+                ..nylon_like(8.0, 0.0002)
+            };
+            let assembly = AcousticAssembly {
+                string: Some(string),
+                pluck: Some(Pluck {
+                    station_frac: 0.5,
+                    height_m: 1.0e-6,
+                }),
+                ambient: AmbientGas {
+                    pressure_pa,
+                    ..AmbientGas::sea_level()
+                },
+                duration_s: 0.4,
+                sample_rate_hz: 16_000,
+                ..empty_base()
+            };
+            let output = realize_assembly(&assembly).expect("air-damped string");
+            assert!(output.pressure_pa.iter().all(|p| p.is_finite()));
+            let frequency =
+                (string.tension_n / string.lin_density_kg_m).sqrt() / (2.0 * string.length_m);
+            let gas = output.gas;
+            let resistance = 2.0 * pi * gas.dynamic_viscosity
+                + 2.0
+                    * pi
+                    * string.width_m
+                    * (pi * gas.dynamic_viscosity * gas.density * frequency).sqrt();
+            let expected_decay = resistance / (2.0 * string.lin_density_kg_m);
+            // Positive peaks far from the FFT observation window edges.
+            let peaks: Vec<_> = output
+                .pressure_pa
+                .windows(3)
+                .enumerate()
+                .filter(|(i, p)| {
+                    (800..5600).contains(i) && p[1] > 0.0 && p[1] > p[0] && p[1] >= p[2]
+                })
+                .map(|(i, p)| ((i + 1) as f64 / 16_000.0, p[1]))
+                .collect();
+            assert!(peaks.len() > 40, "requires live ringing pressure");
+            let (t0, p0) = peaks[0];
+            let (t1, p1) = *peaks.last().unwrap();
+            let measured = (p0 / p1).ln() / (t1 - t0);
+            assert!(
+                (measured / expected_decay - 1.0).abs() < 0.02,
+                "EA={axial_stiffness}, p={pressure_pa}: decay {measured} vs {expected_decay} /s"
+            );
+            decays.push(measured);
+        }
+        assert!(decays[0] > 1.5 * decays[1]);
+        eprintln!(
+            "G3 air pressure /4, EA={axial_stiffness}: pressure decay {:.6} -> {:.6} /s",
+            decays[0], decays[1]
+        );
+    }
+}
+
+#[test]
 fn plucked_string_fundamental_moves_with_mu_and_tension() {
     let base = realize_assembly(&plucked(80.0, 0.006, 0.003)).expect("base");
     let heavy = realize_assembly(&plucked(80.0, 0.012, 0.003)).expect("heavy");

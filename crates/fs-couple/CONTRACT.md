@@ -376,18 +376,32 @@ measured yield boundary. Target frequency inverts the existing pinned-pinned
 Euler–Bernoulli dispersion relation, including EI. Slack/compressive solutions and
 extension/target prescriptions on the moving-end basis refuse. The prescription
 remains separate from the material receipts, available through `prestress()`.
-All policies preserve declared losses, supports, and modal budget. Current geometry
-and density are inputs; fixed mass, thermal expansion, transverse contraction,
+
+`with_uniform_circular_material_and_constraints` also accepts a
+`StringGeometryConstraint`: fixed radius or fixed total mass at the template's
+current loaded length. Fixed mass derives `r=sqrt(m/(rho L pi))` and then uses
+the same geometry-to-mass/stiffness lowering. Thus a density change preserves
+linear density to floating-point roundoff while changing EA, EI and observer
+width. Geometry and prestress constraints are independent and both remain
+available on the result, separate from material authority. The specimen hash
+binds resolved geometry, not the authored comparison policy.
+
+All policies preserve declared losses, supports, and modal budget. These compare
+specimens at resolved states; thermal evolution, transverse contraction,
 yielding, anisotropy, or melting are not solved. Target pitch describes an undamped
 linear eigenfrequency, not a damped or finite-amplitude pressure frequency. Diameter
 supplies the existing compact strip-radiator width, without a new claim of accurate
-circular-wire radiation. Admission refuses missing/wrong-dimension properties,
+circular-wire radiation. The density and modulus requirements use exact
+dimension-only quantity schemas; equal-dimension semantic kinds or waveform
+forms cannot be erased when lowering to the solver. Admission refuses missing
+or quantity-schema-mismatched properties,
 invalid mechanical inputs, and nonfinite/zero derived products before publication.
 The finite scalar calculation is deterministic; no runtime dependency or inner-loop
 database access is added. `tests/string_specimen.rs` checks G0 admission, G1 mass,
 EA/EI and beam modes, and G3 geometric/material scaling plus pressure-measured pitch
 through the actual acoustic realizer. G1/G3 cases also cover extension-derived
-tension and material changes under explicit extension/target-frequency constraints.
+tension and material changes under explicit extension/target-frequency constraints,
+plus fixed-mass diameter/stiffness changes and their bending-sensitive pressure pitch.
 Synthetic data check numerical behavior, not physical validation of a measured material.
 
 ### `acoustic_realize` / `pcm_wav`
@@ -421,7 +435,18 @@ clarinet is one filling of those objects.
   modes have vanishing monopole area and radiate as compact dipoles
   `p ∝ ρ Π̈ / (4 π r c)` with `Π = w ∫ φ (x−L/2) dx`. Fletcher
   inharmonicity `ω_n = n ω_1 √(1+B n²)` when `EI > 0`. Stokes air
-  drag from `GasState` plus the authored internal floor. A second
+  drag from `GasState` plus the authored internal floor. The reusable
+  `air_path::oscillating_cylinder_air_resistance_per_length` computes the
+  Desvages (2018) section 3.2.2 cylinder resistance approximation
+  `R=2 pi mu (1+r sqrt(2 rho omega/mu))` [N s/m²]; both string paths use
+  dimensionless `zeta=R/(2 mu_linear omega)`. Width is interpreted as circular
+  diameter. The approximation retains a constant low-frequency continuation;
+  added mass, end effects, confinement, rarefaction, turbulence and nonlinear
+  fluid drag remain unclaimed. Explicit Rayleigh damping still replaces the
+  complete loss sum. The existing `2e-7*omega` bending addend remains a heuristic;
+  the fitted internal floor is caller-authored. Neither is a material measurement,
+  and replacing these assumptions remains MR03 work. G1/G3 tests check the resistance formula and
+  pressure ring-down under changed gas pressure. A second
   polarization at `1+detune` is a second member on the same clock
   and shares every plate (it is not an independent unused body).
 - String path, `EA > 0`: `fs-nlmodal::kirchhoff_carrier_string`
