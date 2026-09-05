@@ -471,6 +471,7 @@ impl StatisticalCertificate {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ValidityDomain {
     bounds: BTreeMap<String, (f64, f64)>,
+    axis_quantities: BTreeMap<String, fs_qty::QuantitySpec>,
 }
 
 impl ValidityDomain {
@@ -486,12 +487,55 @@ impl ValidityDomain {
         &self.bounds
     }
 
-    /// Constrain one parameter to `[lo, hi]`. Reversed finite endpoints
-    /// normalize; a NaN endpoint is preserved as an unusable domain.
+    /// Constrain one parameter to `[lo, hi]`, retaining any existing axis
+    /// descriptor. Reversed finite endpoints normalize; NaN stays unusable.
     #[must_use]
     pub fn with(mut self, param: impl Into<String>, lo: f64, hi: f64) -> Self {
-        self.bounds.insert(param.into(), ordered_bounds(lo, hi));
+        let param = param.into();
+        self.bounds.insert(param, ordered_bounds(lo, hi));
         self
+    }
+
+    /// Replace one axis with an explicitly typed interval in the quantity's
+    /// canonical convention. Invalid scalar endpoints make the domain unusable.
+    /// This declares support for the whole box; it does not infer joint support
+    /// from independent measurements.
+    #[must_use]
+    pub fn with_quantity(
+        mut self,
+        param: impl Into<String>,
+        quantity: fs_qty::QuantitySpec,
+        lo: f64,
+        hi: f64,
+    ) -> Self {
+        let param = param.into();
+        self.bounds.insert(param.clone(), ordered_bounds(lo, hi));
+        self.axis_quantities.insert(param, quantity);
+        self
+    }
+
+    /// Exact descriptors for explicitly typed axes. Absence means legacy
+    /// untyped, not dimensionless and not a wildcard.
+    #[must_use]
+    pub fn axis_quantities(&self) -> &BTreeMap<String, fs_qty::QuantitySpec> {
+        &self.axis_quantities
+    }
+
+    /// Whether a legacy bounds-only transport would discard axis meaning.
+    #[must_use]
+    pub fn has_typed_axes(&self) -> bool {
+        !self.axis_quantities.is_empty()
+    }
+
+    /// First constrained axis whose coordinate declaration is incompatible.
+    #[must_use]
+    pub fn axis_quantity_mismatch(
+        &self,
+        quantities: &BTreeMap<String, fs_qty::QuantitySpec>,
+    ) -> Option<&str> {
+        self.bounds.keys().find_map(|axis| {
+            (self.axis_quantities.get(axis) != quantities.get(axis)).then_some(axis.as_str())
+        })
     }
 
     /// Constraint bounds for a parameter, if any.
@@ -503,6 +547,24 @@ impl ValidityDomain {
     /// True when the point satisfies every constraint.
     #[must_use]
     pub fn contains(&self, point: &BTreeMap<String, f64>) -> bool {
+        !self.has_typed_axes() && self.contains_coordinates(point)
+    }
+
+    /// Membership requires both numerical support and exact axis descriptors;
+    /// conversion belongs to an explicit adapter before this call.
+    #[must_use]
+    pub fn contains_typed(
+        &self,
+        point: &BTreeMap<String, f64>,
+        quantities: &BTreeMap<String, fs_qty::QuantitySpec>,
+    ) -> bool {
+        self.axis_quantity_mismatch(quantities).is_none() && self.contains_coordinates(point)
+    }
+
+    fn contains_coordinates(&self, point: &BTreeMap<String, f64>) -> bool {
+        if self.is_empty() {
+            return false;
+        }
         self.bounds.iter().all(|(k, &(lo, hi))| {
             lo.is_finite()
                 && hi.is_finite()
@@ -518,7 +580,20 @@ impl ValidityDomain {
     #[must_use]
     pub fn intersect(&self, other: &Self) -> Self {
         let mut out = self.bounds.clone();
+        let mut axis_quantities = self.axis_quantities.clone();
         for (k, &(lo2, hi2)) in &other.bounds {
+            if self.bounds.contains_key(k)
+                && self.axis_quantities.get(k) != other.axis_quantities.get(k)
+            {
+                // The empty interval is symmetric and cannot be queried or
+                // admitted as a usable domain. No convention wins a conflict.
+                out.insert(k.clone(), (1.0, 0.0));
+                axis_quantities.remove(k);
+                continue;
+            }
+            if let Some(quantity) = other.axis_quantities.get(k) {
+                axis_quantities.insert(k.clone(), *quantity);
+            }
             out.entry(k.clone())
                 .and_modify(|(lo, hi)| {
                     if lo.is_nan() || hi.is_nan() || lo2.is_nan() || hi2.is_nan() {
@@ -531,15 +606,31 @@ impl ValidityDomain {
                 })
                 .or_insert((lo2, hi2));
         }
-        ValidityDomain { bounds: out }
+        ValidityDomain {
+            bounds: out,
+            axis_quantities,
+        }
     }
 
     /// True when some parameter's interval is empty or unusable.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.bounds
-            .values()
-            .any(|&(lo, hi)| !lo.is_finite() || !hi.is_finite() || lo > hi)
+        self.bounds.iter().any(|(axis, &(lo, hi))| {
+            !lo.is_finite()
+                || !hi.is_finite()
+                || lo > hi
+                || self.axis_quantities.get(axis).is_some_and(|quantity| {
+                    quantity.semantic_type().is_some_and(|semantic| {
+                        [lo, hi].into_iter().any(|value| {
+                            fs_qty::semantic::SemanticQty::new(
+                                fs_qty::QtyAny::new(value, quantity.dims()),
+                                semantic,
+                            )
+                            .is_err()
+                        })
+                    })
+                })
+        })
     }
 
     /// Constrained parameter names, sorted (BTreeMap order — deterministic
@@ -555,7 +646,23 @@ impl ValidityDomain {
             if i > 0 {
                 s.push(',');
             }
-            let _ = write!(s, "{}:[{},{}]", json_string(k), fmt_f64(*lo), fmt_f64(*hi));
+            if let Some(quantity) = self.axis_quantities.get(k) {
+                let token = quantity
+                    .canonical_bytes()
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>();
+                let _ = write!(
+                    s,
+                    "{}:{{\"bounds\":[{},{}],\"quantity\":\"{}\"}}",
+                    json_string(k),
+                    fmt_f64(*lo),
+                    fmt_f64(*hi),
+                    token
+                );
+            } else {
+                let _ = write!(s, "{}:[{},{}]", json_string(k), fmt_f64(*lo), fmt_f64(*hi));
+            }
         }
         s.push('}');
         s
@@ -1556,6 +1663,72 @@ mod tests {
         assert!(row.contains("\"non-finite:inf\""), "{row}");
         assert!(row.contains("\"non-finite:NaN\""), "{row}");
         assert!(!row.chars().any(|ch| u32::from(ch) < 0x20), "{row:?}");
+    }
+
+    #[test]
+    fn g0_typed_validity_axes_preserve_meaning_and_refuse_legacy_membership() {
+        use fs_qty::{
+            QuantitySpec,
+            semantic::{FrequencyConvention, QuantityKind, SemanticType, ValueForm},
+        };
+        let spec = |convention| {
+            QuantitySpec::semantic(SemanticType::new(
+                QuantityKind::Frequency(convention),
+                ValueForm::Static,
+            ))
+        };
+        let cyclic = spec(FrequencyConvention::Cyclic);
+        let angular = spec(FrequencyConvention::Angular);
+        let domain = ValidityDomain::unconstrained().with_quantity("frequency", cyclic, 40.0, 60.0);
+        let point = BTreeMap::from([("frequency".to_string(), 50.0)]);
+        let quantities = BTreeMap::from([("frequency".to_string(), cyclic)]);
+        assert!(!domain.contains(&point));
+        assert!(domain.contains_typed(&point, &quantities));
+        assert!(!domain.contains_typed(
+            &point,
+            &BTreeMap::from([("frequency".to_string(), angular)])
+        ));
+        assert!(
+            !ValidityDomain::unconstrained()
+                .with("frequency", 40.0, 60.0)
+                .contains_typed(&point, &quantities)
+        );
+        let tighter =
+            ValidityDomain::unconstrained().with_quantity("frequency", cyclic, 45.0, 55.0);
+        assert_eq!(domain.clone().with("frequency", 45.0, 55.0), tighter);
+        assert_eq!(domain.intersect(&tighter), tighter);
+        assert_eq!(tighter.intersect(&domain), tighter);
+        let mismatch =
+            ValidityDomain::unconstrained().with_quantity("frequency", angular, 40.0, 60.0);
+        assert!(domain.intersect(&mismatch).is_empty());
+        assert_eq!(domain.intersect(&mismatch), mismatch.intersect(&domain));
+        assert!(
+            domain
+                .intersect(&ValidityDomain::unconstrained())
+                .contains_typed(&point, &quantities)
+        );
+        assert!(
+            ValidityDomain::unconstrained()
+                .with_quantity("frequency", cyclic, -1.0, 60.0)
+                .is_empty()
+        );
+        assert!(domain.to_json().contains("\"quantity\""));
+        assert_ne!(domain.to_json(), mismatch.to_json());
+        let color = Color::Validated {
+            regime: domain.clone(),
+            dataset: "synthetic-fixture".into(),
+        };
+        assert!(validate_color_payload(&color).is_err());
+        let wrong_color = Color::Validated {
+            regime: mismatch,
+            dataset: "synthetic-fixture".into(),
+        };
+        assert_ne!(color.canonical_bytes(), wrong_color.canonical_bytes());
+        assert!(regime_demotion(&color, &point).is_some());
+        assert!(
+            identify_validity_domain_v1(domain, EvidenceIdentityLimits::default(), || false)
+                .is_err()
+        );
     }
 
     #[test]

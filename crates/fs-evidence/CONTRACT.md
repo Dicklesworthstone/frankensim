@@ -10,8 +10,8 @@ evidence the system can produce beautifully certified WRONG answers (mesh
 error 0.7%, closure discrepancy 10%) — being able to SAY that is the
 product. Layer: UTIL (usable by every layer; the bead label said L6, but
 the bead scope explicitly demands a low-layer home — this is it). Depends
-on fs-blake3 for typed canonical identities and fs-obs for deterministic
-telemetry/legacy correlation.
+on fs-blake3 for typed canonical identities, fs-obs for deterministic
+telemetry/legacy correlation, and fs-qty for shared axis descriptors.
 
 ## Public types and semantics
 - `cinematic::CinematicDeliverableContract::euler_disc_v1()` freezes the first
@@ -130,6 +130,17 @@ telemetry/legacy correlation.
   in_domain }`; `ValidityDomain` — named-parameter boxes with
   intersection/containment; `SensitivitySummary` — d(qoi)/d(param)
   headlines, merged by magnitude.
+  `ValidityDomain::with_quantity` retains `fs_qty::QuantitySpec` per declared
+  axis. `contains_typed` requires exact descriptors; legacy `contains` refuses
+  typed domains. Intersection preserves compatible declarations and returns
+  an empty domain for incompatible shared axes. Typed scalar endpoints must
+  satisfy their quantity's domain/form. This box carrier never constructs
+  joint measurement support from separate one-dimensional measurements.
+  Frozen validity identity v1 and validated-color v2 admission explicitly
+  refuse typed axes. Diagnostic color bytes/JSON retain them under a v3
+  representation; numeric regime demotion cannot admit typed coordinates.
+  The G0 typed-validity test covers positive membership, equal-dimension
+  mismatch, intersection, JSON retention, and frozen-profile refusals.
 - `Evidence::combine(op, a, b, value)` — Add/Sub/Mul/Min/Max on the QoI
   with certificates composed conservatively and provenance chained
   (`ProvenanceHash::chain`, order-sensitive, FNV until the ledger hash).

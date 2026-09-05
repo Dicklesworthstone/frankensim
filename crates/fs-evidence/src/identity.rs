@@ -2868,6 +2868,12 @@ where
     for (axis_index, (axis, (lo, hi))) in domain.bounds().iter().enumerate() {
         poll_identity_cancellation(cancellation)?;
         let axis_index = bounded_len(axis_index)?;
+        if domain.axis_quantities().contains_key(axis) {
+            return Err(ValidityDomainIdentityError::InvalidBounds {
+                axis_index,
+                reason: "typed axes are not representable in validity identity v1",
+            });
+        }
         if !lo.is_finite() || !hi.is_finite() {
             return Err(ValidityDomainIdentityError::InvalidBounds {
                 axis_index,

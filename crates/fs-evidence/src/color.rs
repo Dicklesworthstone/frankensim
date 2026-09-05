@@ -325,6 +325,12 @@ pub fn validate_color_payload(color: &Color) -> Result<(), ColorPayloadError> {
             }
         }
         Color::Validated { regime, dataset } => {
+            if regime.has_typed_axes() {
+                return Err(ColorPayloadError::InvalidValidatedRegime {
+                    axis: String::new(),
+                    reason: "typed axes are not representable in the validated color v2 profile",
+                });
+            }
             if let Some(reason) = color_identity_reason(dataset) {
                 return Err(ColorPayloadError::InvalidIdentity {
                     field: "dataset",
@@ -409,6 +415,14 @@ fn compact_malformed_color_identity(label: &str, color: &Color) -> String {
                 hasher.update(&lo.to_bits().to_le_bytes());
                 hasher.update(&hi.to_bits().to_le_bytes());
             }
+            if regime.has_typed_axes() {
+                hasher.update(b"typed-axis-v3");
+                for (axis, quantity) in regime.axis_quantities() {
+                    hasher.update(&(axis.len() as u64).to_le_bytes());
+                    hasher.update(axis.as_bytes());
+                    hasher.update(&quantity.canonical_bytes());
+                }
+            }
         }
         Color::Estimated {
             estimator,
@@ -469,6 +483,13 @@ impl Color {
                 format!("{{\"interval\":[{},{}]}}", json_f64(*lo), json_f64(*hi))
             }
             Color::Validated { regime, dataset } => {
+                if regime.has_typed_axes() {
+                    return format!(
+                        "{{\"schema_version\":3,\"dataset\":{},\"regime\":{}}}",
+                        json_string(dataset),
+                        regime.to_json()
+                    );
+                }
                 use core::fmt::Write as _;
                 let mut axes = String::new();
                 for (k, (lo, hi)) in regime.bounds() {
@@ -515,7 +536,8 @@ impl Color {
         const ESTIMATED: u8 = 2;
 
         let mut out = Vec::new();
-        out.push(VERSION);
+        let typed = matches!(self, Color::Validated { regime, .. } if regime.has_typed_axes());
+        out.push(if typed { 3 } else { VERSION });
         match self {
             Color::Verified { lo, hi } => {
                 out.push(VERIFIED);
@@ -530,6 +552,13 @@ impl Color {
                     push_canonical_field(&mut out, axis.as_bytes());
                     push_canonical_field(&mut out, &lo.to_bits().to_le_bytes());
                     push_canonical_field(&mut out, &hi.to_bits().to_le_bytes());
+                }
+                if typed {
+                    push_canonical_len(&mut out, regime.axis_quantities().len());
+                    for (axis, quantity) in regime.axis_quantities() {
+                        push_canonical_field(&mut out, axis.as_bytes());
+                        push_canonical_field(&mut out, &quantity.canonical_bytes());
+                    }
                 }
             }
             Color::Estimated {
@@ -970,6 +999,13 @@ pub fn regime_demotion(color: &Color, state: &BTreeMap<String, f64>) -> Option<D
         });
     }
     for (axis, &(lo, hi)) in regime.bounds() {
+        if regime.axis_quantities().contains_key(axis) {
+            return Some(Demotion {
+                dataset: dataset.clone(),
+                axis: axis.clone(),
+                value: f64::NAN,
+            });
+        }
         let Some(&v) = state.get(axis) else {
             return Some(Demotion {
                 dataset: dataset.clone(),
