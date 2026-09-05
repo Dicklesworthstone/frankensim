@@ -184,6 +184,8 @@ pub enum PhsError {
         /// What disagreed.
         what: &'static str,
     },
+    /// A Maxwell memory branch has invalid or unrepresentable coefficients.
+    RelaxationParameters,
     /// The implicit step's Newton iteration exhausted its budget.
     NewtonStalled {
         /// Residual norm at exhaustion.
@@ -201,6 +203,10 @@ impl core::fmt::Display for PhsError {
             PhsError::NotSymmetric { what } => write!(f, "{what} violates its symmetry class"),
             PhsError::NotPsd { what } => write!(f, "{what} is not positive semidefinite"),
             PhsError::Dimension { what } => write!(f, "dimension mismatch: {what}"),
+            PhsError::RelaxationParameters => write!(
+                f,
+                "relaxation needs finite nonzero strain coupling, positive stiffness, and a representable positive relaxation rate"
+            ),
             PhsError::NewtonStalled { residual } => {
                 write!(
                     f,
@@ -275,7 +281,126 @@ pub struct PortHamiltonian {
     storage: Box<dyn Storage>,
 }
 
+/// One Maxwell relaxation arm acting on `strain = projection dot x`.
+/// The caller supplies compatible units: `stiffness * strain²` is energy [J].
+#[derive(Debug, Clone)]
+pub struct RelaxationBranch {
+    /// Linear strain map on the original system state, in its original order.
+    pub projection: Vec<f64>,
+    /// Positive relaxing stiffness, not the equilibrium stiffness already in H.
+    pub stiffness: f64,
+    /// Positive relaxation time [s].
+    pub relaxation_time_s: f64,
+}
+
+struct RelaxationStorage {
+    base: Box<dyn Storage>,
+    base_dim: usize,
+    couplings: Vec<Vec<f64>>,
+}
+
+impl Storage for RelaxationStorage {
+    fn hamiltonian(&self, x: &[f64]) -> f64 {
+        let mut h = self.base.hamiltonian(&x[..self.base_dim]);
+        for (k, b) in self.couplings.iter().enumerate() {
+            let strain: f64 = b.iter().zip(x).map(|(b, x)| b * x).sum();
+            h += 0.5 * (strain - x[self.base_dim + k]).powi(2);
+        }
+        h
+    }
+
+    fn gradient(&self, x: &[f64], out: &mut [f64]) {
+        self.base
+            .gradient(&x[..self.base_dim], &mut out[..self.base_dim]);
+        for (k, b) in self.couplings.iter().enumerate() {
+            let strain: f64 = b.iter().zip(x).map(|(b, x)| b * x).sum();
+            let effort = strain - x[self.base_dim + k];
+            for (o, b) in out[..self.base_dim].iter_mut().zip(b) {
+                *o += b * effort;
+            }
+            out[self.base_dim + k] = -effort;
+        }
+    }
+}
+
 impl PortHamiltonian {
+    /// Append Maxwell memory to an admitted system without changing its ports.
+    ///
+    /// `H_new = H_base + sum (sqrt(k) b.x - z)²/2`, `R_zz = 1/tau`.
+    /// Thus `z_dot = (sqrt(k) b.x - z)/tau`, and each arm dissipates
+    /// `(sqrt(k) b.x - z)²/tau`. The base H must include only equilibrium
+    /// stiffness for these arms. This is the internal-strain formulation, with
+    /// `z = sqrt(k) strain_viscous` in energy-normalized coordinates.
+    /// Original state entries stay first; one z per arm follows in input order.
+    /// Initialize a fully relaxed arm to `sqrt(k) b.x`, or explicitly supply
+    /// its history. Zero z means zero prior viscous strain, not a relaxed pluck.
+    /// Existing stepping, energy accounting and interconnections apply unchanged.
+    ///
+    /// # Errors
+    /// Refuses incompatible dimensions, nonfinite/zero coefficients, and
+    /// unrepresentable matrices or relaxation rates. No constitutive data,
+    /// applicability domain or material authority is inferred here (L2).
+    pub fn with_relaxation_branches(
+        self,
+        branches: Vec<RelaxationBranch>,
+    ) -> Result<Self, PhsError> {
+        if branches.is_empty() {
+            return Ok(self);
+        }
+        let error = || PhsError::Dimension {
+            what: "relaxation branch state dimensions",
+        };
+        let dim = self.n.checked_add(branches.len()).ok_or_else(error)?;
+        let square = dim.checked_mul(dim).ok_or_else(error)?;
+        let ports = dim.checked_mul(self.m).ok_or_else(error)?;
+        let mut couplings = Vec::with_capacity(branches.len());
+        let mut rates = Vec::with_capacity(branches.len());
+        for branch in &branches {
+            if branch.projection.len() != self.n {
+                return Err(error());
+            }
+            if !branch.stiffness.is_finite()
+                || branch.stiffness <= 0.0
+                || !branch.relaxation_time_s.is_finite()
+                || branch.relaxation_time_s <= 0.0
+            {
+                return Err(PhsError::RelaxationParameters);
+            }
+            let scale = det::sqrt(branch.stiffness);
+            let b: Vec<f64> = branch.projection.iter().map(|b| b * scale).collect();
+            let rate = 1.0 / branch.relaxation_time_s;
+            if b.iter().any(|v| !v.is_finite())
+                || !b.iter().any(|v| *v != 0.0)
+                || !rate.is_finite()
+                || rate <= 0.0
+            {
+                return Err(PhsError::RelaxationParameters);
+            }
+            couplings.push(b);
+            rates.push(rate);
+        }
+        let mut j = vec![0.0; square];
+        let mut r = vec![0.0; square];
+        let mut g = vec![0.0; ports];
+        for row in 0..self.n {
+            j[row * dim..row * dim + self.n]
+                .copy_from_slice(&self.j[row * self.n..(row + 1) * self.n]);
+            r[row * dim..row * dim + self.n]
+                .copy_from_slice(&self.r[row * self.n..(row + 1) * self.n]);
+            g[row * self.m..(row + 1) * self.m]
+                .copy_from_slice(&self.g[row * self.m..(row + 1) * self.m]);
+        }
+        for (k, rate) in rates.into_iter().enumerate() {
+            r[(self.n + k) * dim + self.n + k] = rate;
+        }
+        let storage = RelaxationStorage {
+            base: self.storage,
+            base_dim: self.n,
+            couplings,
+        };
+        Self::new(dim, self.m, j, r, g, Box::new(storage))
+    }
+
     /// Admit a system: `J` (`n x n`, skew), `R` (`n x n`, symmetric
     /// PSD), `G` (`n x m`), all row-major.
     ///

@@ -24,6 +24,109 @@ fn max_abs(v: &[f64]) -> f64 {
     v.iter().fold(0.0f64, |a, &x| a.max(x.abs()))
 }
 
+fn relaxing_strain_port() -> PortHamiltonian {
+    // Unit-volume specimen: imposed strain rate is the input, stress the output.
+    PortHamiltonian::new(
+        1,
+        1,
+        vec![0.0],
+        vec![0.0],
+        vec![1.0],
+        Box::new(QuadraticStorage::new(vec![3.0], 1).unwrap()),
+    )
+    .unwrap()
+    .with_relaxation_branches(vec![
+        fs_phs::RelaxationBranch {
+            projection: vec![1.0],
+            stiffness: 4.0,
+            relaxation_time_s: 0.1,
+        },
+        fs_phs::RelaxationBranch {
+            projection: vec![1.0],
+            stiffness: 9.0,
+            relaxation_time_s: 0.4,
+        },
+    ])
+    .unwrap()
+}
+
+#[test]
+fn g1_relaxation_memory_matches_exponentials_and_physical_dissipation() {
+    let sys = relaxing_strain_port();
+    assert_eq!((sys.state_dim(), sys.port_dim()), (3, 1));
+    let exact_stress = 0.2 * (3.0 + 4.0 * (-2.0_f64).exp() + 9.0 * (-0.5_f64).exp());
+    let mut errors = Vec::new();
+    for count in [100, 200] {
+        // An instantaneous strain step: no prior viscous strain in either arm.
+        let mut x = vec![0.2, 0.0, 0.0];
+        let h0 = sys.hamiltonian(&x);
+        let dt = 0.2 / f64::from(count);
+        let mut lost = 0.0;
+        for _ in 0..count {
+            let rec = step(&sys, &x, &[0.0], dt).unwrap();
+            assert!(rec.dissipated >= 0.0);
+            assert!(rec.balance_residual().abs() < 1.0e-12);
+            lost += rec.dissipated;
+            x = rec.x;
+        }
+        assert!((x[0] - 0.2).abs() < 1.0e-12);
+        errors.push((sys.output(&x)[0] - exact_stress).abs());
+        // Independent integral of sum k*epsilon^2*exp(-2t/tau)/tau.
+        let exact_loss = 0.5
+            * 0.2_f64.powi(2)
+            * (4.0 * (1.0 - (-4.0_f64).exp()) + 9.0 * (1.0 - (-1.0_f64).exp()));
+        assert!((lost / exact_loss - 1.0).abs() < 2.0e-5);
+        assert!((h0 - sys.hamiltonian(&x) - lost).abs() < 1.0e-11);
+    }
+    assert!((3.8..4.2).contains(&(errors[0] / errors[1])), "{errors:?}");
+    // A fully relaxed held strain has zero branch stress and no subsequent creep.
+    let x = [0.2, 2.0 * 0.2, 3.0 * 0.2];
+    assert!((sys.output(&x)[0] - 0.6).abs() < 1.0e-14);
+    let rec = step(&sys, &x, &[0.0], 0.01).unwrap();
+    assert!(rec.x.iter().zip(x).all(|(a, b)| (a - b).abs() < 1.0e-14));
+}
+
+#[test]
+fn g1_relaxation_memory_matches_hereditary_ramp_and_port_work() {
+    let sys = relaxing_strain_port();
+    let mut x = vec![0.0; 3];
+    let mut supplied = 0.0;
+    let mut dissipated = 0.0;
+    for _ in 0..400 {
+        let rec = step(&sys, &x, &[0.5], 0.001).unwrap();
+        supplied += rec.supplied;
+        dissipated += rec.dissipated;
+        x = rec.x;
+    }
+    // Convolution of constant strain rate with E_inf + sum E_j exp(-t/tau_j).
+    let stress = 3.0 * 0.2
+        + 0.5 * (4.0 * 0.1 * (1.0 - (-4.0_f64).exp()) + 9.0 * 0.4 * (1.0 - (-1.0_f64).exp()));
+    assert!((sys.output(&x)[0] / stress - 1.0).abs() < 1.0e-6);
+    assert!((supplied - dissipated - sys.hamiltonian(&x)).abs() < 1.0e-11);
+}
+
+#[test]
+fn g0_relaxation_memory_refuses_invalid_branches() {
+    for (projection, stiffness, tau) in [
+        (vec![], 1.0, 1.0),
+        (vec![0.0; 3], 1.0, 1.0),
+        (vec![1.0; 3], -1.0, 1.0),
+        (vec![1.0; 3], 1.0, 0.0),
+        (vec![1.0; 3], 1.0, f64::from_bits(1)),
+        (vec![f64::NAN; 3], 1.0, 1.0),
+    ] {
+        assert!(
+            relaxing_strain_port()
+                .with_relaxation_branches(vec![fs_phs::RelaxationBranch {
+                    projection,
+                    stiffness,
+                    relaxation_time_s: tau
+                }])
+                .is_err()
+        );
+    }
+}
+
 #[test]
 fn admission_rejects_broken_structure() {
     let storage = || Box::new(QuadraticStorage::new(vec![1.0, 0.0, 0.0, 1.0], 2).expect("q"));

@@ -19,6 +19,18 @@ stepping, and Galerkin reduction preserves the structure.
   (Jacobi eigenvalue check), dimensions; refusal, never repair.
   `from_raw_parts` bypasses admission for trusted callers and mutation
   batteries — the supply-rate audit is what catches violated trust.
+- `with_relaxation_branches` appends Maxwell internal strains to any admitted
+  storage/port system. Original states and ports retain their order; each arm
+  appends `z = sqrt(k) epsilon_viscous`, adds `(sqrt(k) b.x-z)^2/2` to H,
+  and adds `1/tau` to R. Thus `z_dot=(sqrt(k) b.x-z)/tau`; arm dissipation
+  is `(sqrt(k) b.x-z)^2/tau`, and the existing base H contains equilibrium
+  stiffness. Coefficients must be finite, stiffness and relaxation rate positive,
+  and the strain projection nonzero. The caller supplies loading history:
+  zero z denotes unrelaxed internal strain; fully relaxed z is `sqrt(k) b.x`.
+  G1 tests check two-arm exponential stress, analytical dissipated energy,
+  second-order convergence, and the hereditary ramp integral through the actual
+  stress port. The same step and interconnection machinery applies. No material
+  identification, frequency-domain validity or thermal evolution is inferred.
 - `discrete_gradient` — the PINNED Gonzalez midpoint formula (order
   2): satisfies `dg . (b - a) = H(b) - H(a)` identically.
 - `step` — implicit discrete-gradient step (approximate-Newton with
