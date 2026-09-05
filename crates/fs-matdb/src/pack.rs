@@ -2412,13 +2412,41 @@ impl NormalizedPack {
         point: &crate::QueryPoint,
         policy: crate::SelectionPolicy,
     ) -> Result<JointAnswer, MatDbError> {
+        let keys: Vec<PropertyKey> = properties
+            .iter()
+            .map(|property| {
+                PropertyKey::new(
+                    *property,
+                    self.claims
+                        .registered_quantity(property)
+                        .map_or(Dims::NONE, QuantitySpec::dims),
+                )
+            })
+            .collect();
+        self.query_joint_typed(&keys, point, policy)
+    }
+
+    /// Resolve exact quantity schemas together, preserving the admitted
+    /// covariance in request order. Kind/form mismatches refuse the entire
+    /// query. A dimension-only key is not a wildcard for a semantic claim.
+    /// The existing receipt binds these schemas through selected claim ids
+    /// and member receipts; it does not independently attest caller intent.
+    pub fn query_joint_typed(
+        &self,
+        properties: &[PropertyKey],
+        point: &crate::QueryPoint,
+        policy: crate::SelectionPolicy,
+    ) -> Result<JointAnswer, MatDbError> {
         if properties.len() < 2 {
             return Err(MatDbError::UnsupportedEvaluation {
                 reason: "a joint query needs at least two properties; use `query` for one",
             });
         }
         for (index, property) in properties.iter().enumerate() {
-            if properties[..index].contains(property) {
+            if properties[..index]
+                .iter()
+                .any(|prior| prior.name() == property.name())
+            {
                 return Err(MatDbError::UnsupportedEvaluation {
                     reason: "a joint query's properties must be distinct",
                 });
@@ -2427,7 +2455,7 @@ impl NormalizedPack {
 
         let mut members = Vec::with_capacity(properties.len());
         for property in properties {
-            members.push(self.claims.query(property, point, policy)?);
+            members.push(self.claims.query_typed(property, point, policy)?);
         }
         let selected: Vec<ClaimId> = members
             .iter()
@@ -2442,7 +2470,7 @@ impl NormalizedPack {
         let receipt = JointUsageReceipt {
             schema_version: JOINT_USAGE_RECEIPT_SCHEMA_VERSION,
             pack: self.content_hash(),
-            properties: properties.iter().map(|p| (*p).to_string()).collect(),
+            properties: properties.iter().map(|p| p.name().to_owned()).collect(),
             query_point: point
                 .axes()
                 .iter()
@@ -2565,8 +2593,21 @@ impl NormalizedPack {
         for (axis, value) in &receipt.query_point {
             point = point.with(axis.clone(), *value)?;
         }
-        let properties: Vec<&str> = receipt.properties.iter().map(String::as_str).collect();
-        let replayed = self.query_joint(&properties, &point, policy)?;
+        // Schemas are recovered only from this exact content-pinned pack;
+        // the comparisons below still bind every selected claim and receipt.
+        let properties = receipt
+            .properties
+            .iter()
+            .map(|name| {
+                let quantity = self.claims.registered_quantity(name).ok_or_else(|| {
+                    MatDbError::UnknownProperty {
+                        property: name.clone(),
+                    }
+                })?;
+                Ok(PropertyKey::with_quantity(name, quantity))
+            })
+            .collect::<Result<Vec<_>, MatDbError>>()?;
+        let replayed = self.query_joint_typed(&properties, &point, policy)?;
         let fresh = &replayed.receipt;
         for (field, matches) in [
             ("selected", fresh.selected == receipt.selected),

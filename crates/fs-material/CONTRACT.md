@@ -28,6 +28,15 @@ homogenization, the P2 milestone.
   card, state point, selected values, consumer domains, and receipts into one
   identity. It never infers properties from chemistry names or substitutes a
   representative material.
+  `ScalarPropertyRequirement::try_with_quantity` carries an exact `QuantitySpec`
+  through both bulk and interface queries, including caller-pinned selection.
+  The answer retains the same quantity kind and value form. Dimension-only
+  requirements remain explicit and cannot consume semantic claims. Bundles
+  containing semantic requirements use identity domain v2 and bind every
+  requirement's canonical quantity token; all-dimensional bundles retain the
+  exact v1 preimage. Named convenience resolvers still declare their existing
+  dimensional requirements; this does not infer kinds from property names or
+  introduce typed query axes.
 - `resolve_isotropic_elastic_state_point` requests only density, Young's
   modulus, and Poisson ratio for linear vibration/elasticity. The distinct
   `resolve_isotropic_solid_state_point` additionally requires yield stress for

@@ -2,7 +2,7 @@
 //!
 //! This module is the shared bridge from immutable [`fs_matdb::MaterialCard`]
 //! data to executable physics.  A consumer declares exactly which scalar
-//! properties it needs, their dimensions, and their admissible numerical
+//! properties it needs, their quantity schemas, and their admissible numerical
 //! domains.  Resolution evaluates every property at the same caller-supplied
 //! condition point, retains every usage receipt, and publishes one bundle
 //! identity.  No material name implies a property and no missing datum is
@@ -14,9 +14,9 @@ use std::collections::BTreeSet;
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_matdb::{
     ClaimId, ClaimSet, InterfaceSystemCard, MatDbError, MaterialAnswer, MaterialCard,
-    MaterialStateId, PropertyUsageReceiptError, QueryPoint, SelectionPolicy,
+    MaterialStateId, PropertyKey, PropertyUsageReceiptError, QueryPoint, SelectionPolicy,
 };
-use fs_qty::{Density, Dims, Pressure};
+use fs_qty::{Density, Dims, Pressure, QuantitySpec};
 
 use crate::elastic::OrthotropicElastic;
 
@@ -25,6 +25,12 @@ pub const MATERIAL_STATE_POINT_IDENTITY_DOMAIN: &str = "org.frankensim.fs-materi
 /// Identity domain for a complete resolved ordered-interface property bundle.
 pub const INTERFACE_STATE_POINT_IDENTITY_DOMAIN: &str =
     "org.frankensim.fs-material.interface-state-point.v1";
+/// Identity domain for material bundles with semantic property requirements.
+pub const TYPED_MATERIAL_STATE_POINT_IDENTITY_DOMAIN: &str =
+    "org.frankensim.fs-material.state-point.v2";
+/// Identity domain for interface bundles with semantic property requirements.
+pub const TYPED_INTERFACE_STATE_POINT_IDENTITY_DOMAIN: &str =
+    "org.frankensim.fs-material.interface-state-point.v2";
 /// Maximum scalar requirements admitted by one bounded resolution.
 pub const MAX_MATERIAL_STATE_PROPERTIES: usize = 64;
 /// Maximum UTF-8 bytes in one required property name.
@@ -167,7 +173,7 @@ impl ScalarAdmissibility {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ScalarPropertyRequirement {
     name: String,
-    dims: Dims,
+    quantity: QuantitySpec,
     admissibility: ScalarAdmissibility,
 }
 
@@ -176,6 +182,17 @@ impl ScalarPropertyRequirement {
     pub fn try_new(
         name: impl Into<String>,
         dims: Dims,
+        admissibility: ScalarAdmissibility,
+    ) -> Result<Self, MaterialStatePointError> {
+        Self::try_with_quantity(name, QuantitySpec::dimensional(dims), admissibility)
+    }
+
+    /// Require the exact dimensions, quantity kind and value form. A
+    /// dimension-only requirement is explicit missing-kind information,
+    /// never permission to erase a semantic claim's convention.
+    pub fn try_with_quantity(
+        name: impl Into<String>,
+        quantity: QuantitySpec,
         admissibility: ScalarAdmissibility,
     ) -> Result<Self, MaterialStatePointError> {
         let name = name.into();
@@ -193,7 +210,7 @@ impl ScalarPropertyRequirement {
         }
         Ok(Self {
             name,
-            dims,
+            quantity,
             admissibility,
         })
     }
@@ -207,7 +224,13 @@ impl ScalarPropertyRequirement {
     /// Dimensions required by the consuming physics operator.
     #[must_use]
     pub const fn dims(&self) -> Dims {
-        self.dims
+        self.quantity.dims()
+    }
+
+    /// Exact quantity schema required by the consuming operator.
+    #[must_use]
+    pub const fn quantity(&self) -> QuantitySpec {
+        self.quantity
     }
 
     /// Numerical domain required by the consuming physics operator.
@@ -392,6 +415,7 @@ pub fn resolve_material_state_point(
     let card_identity = card.content_hash();
     let identity = resolved_identity(
         MATERIAL_STATE_POINT_IDENTITY_DOMAIN,
+        TYPED_MATERIAL_STATE_POINT_IDENTITY_DOMAIN,
         card_identity,
         &query_point,
         &properties,
@@ -423,6 +447,7 @@ pub fn resolve_interface_state_point(
     let card_identity = card.content_hash();
     let identity = resolved_identity(
         INTERFACE_STATE_POINT_IDENTITY_DOMAIN,
+        TYPED_INTERFACE_STATE_POINT_IDENTITY_DOMAIN,
         card_identity,
         &query_point,
         &properties,
@@ -483,33 +508,33 @@ fn resolve_scalar_property_set(
 
     let mut properties = Vec::with_capacity(requirements.len());
     for (index, requirement) in requirements.into_iter().enumerate() {
+        let key = PropertyKey::with_quantity(&requirement.name, requirement.quantity);
         let answer = match selection {
             MaterialPropertySelection::SingleClaimOnly => {
-                claims.query(&requirement.name, point, SelectionPolicy::SingleClaimOnly)
+                claims.query_typed(&key, point, SelectionPolicy::SingleClaimOnly)
             }
-            MaterialPropertySelection::PreferObservationBacked => claims.query(
-                &requirement.name,
-                point,
-                SelectionPolicy::PreferObservationBacked,
-            ),
-            MaterialPropertySelection::PinnedByProperty(_) => claims.query_pinned(
-                &requirement.name,
+            MaterialPropertySelection::PreferObservationBacked => {
+                claims.query_typed(&key, point, SelectionPolicy::PreferObservationBacked)
+            }
+            MaterialPropertySelection::PinnedByProperty(_) => claims.query_pinned_typed(
+                &key,
                 point,
                 pins.as_ref().expect("pin plan was admitted")[index].1,
             ),
         }
-        .map_err(|source| MaterialStatePointError::Query {
-            property: requirement.name.clone(),
-            source,
+        .map_err(|source| match source {
+            MatDbError::QuantityMismatch {
+                expected, found, ..
+            } if expected.dims() != found.dims() => MaterialStatePointError::DimensionMismatch {
+                property: requirement.name.clone(),
+                expected: expected.dims(),
+                found: found.dims(),
+            },
+            source => MaterialStatePointError::Query {
+                property: requirement.name.clone(),
+                source,
+            },
         })?;
-        let found = answer.evidence.value.dims;
-        if found != requirement.dims {
-            return Err(MaterialStatePointError::DimensionMismatch {
-                property: requirement.name,
-                expected: requirement.dims,
-                found,
-            });
-        }
         let value = answer.evidence.value.value;
         if !requirement.admissibility.admits(value) {
             return Err(MaterialStatePointError::OutsideConsumerDomain {
@@ -1453,11 +1478,15 @@ pub struct ResolvedReducedModulus {
 
 fn resolved_identity(
     domain: &'static str,
+    typed_domain: &'static str,
     card_identity: ContentHash,
     query_point: &[(String, f64)],
     properties: &[ResolvedScalarProperty],
 ) -> ContentHash {
-    let mut hasher = DomainHasher::new(domain);
+    let typed = properties
+        .iter()
+        .any(|property| property.requirement.quantity.semantic_type().is_some());
+    let mut hasher = DomainHasher::new(if typed { typed_domain } else { domain });
     hasher.update(card_identity.as_bytes());
     hasher.update(&(query_point.len() as u64).to_le_bytes());
     for (axis, value) in query_point {
@@ -1469,8 +1498,13 @@ fn resolved_identity(
     for property in properties {
         hasher.update(&(property.requirement.name.len() as u64).to_le_bytes());
         hasher.update(property.requirement.name.as_bytes());
-        for exponent in property.requirement.dims.0 {
-            hasher.update(&exponent.to_le_bytes());
+        if typed {
+            hasher.update(&property.requirement.quantity.canonical_bytes());
+        } else {
+            // Preserve the exact v1 preimage for dimension-only bundles.
+            for exponent in property.requirement.dims().0 {
+                hasher.update(&exponent.to_le_bytes());
+            }
         }
         property.requirement.admissibility.encode(&mut hasher);
         hasher.update(&property.value_si().to_bits().to_le_bytes());
@@ -1673,6 +1707,134 @@ mod tests {
         QueryPoint::new()
             .with("T", temperature_k)
             .expect("finite temperature")
+    }
+
+    #[test]
+    fn g0_semantic_material_and_interface_requirements_preserve_kinds_and_pins() {
+        use fs_qty::{FrequencyConvention, QuantityKind, SemanticType, ValueForm};
+
+        let cyclic = QuantitySpec::semantic(SemanticType::new(
+            QuantityKind::Frequency(FrequencyConvention::Cyclic),
+            ValueForm::Static,
+        ));
+        let angular = QuantitySpec::semantic(SemanticType::new(
+            QuantityKind::Frequency(FrequencyConvention::Angular),
+            ValueForm::Static,
+        ));
+        let mut frequency = claim(
+            "frequency",
+            cyclic.dims(),
+            vec![(250.0, 40.0), (600.0, 60.0)],
+            600.0,
+        );
+        frequency.key = PropertyKey::with_quantity("frequency", cyclic);
+        let mut claims = ClaimSet::new();
+        let pin = claims.insert_claim(frequency).unwrap();
+        let interface_base = interface_card("synthetic semantic query test");
+        let material = MaterialCard::assemble(
+            interface_base.surface_a().material.clone(),
+            claims.clone(),
+            Vec::new(),
+        )
+        .unwrap();
+        let interface = InterfaceSystemCard::assemble(
+            interface_base.surface_a().clone(),
+            interface_base.surface_b().clone(),
+            interface_base.context().clone(),
+            claims,
+            Vec::new(),
+        )
+        .unwrap();
+        let requirement = |quantity| {
+            ScalarPropertyRequirement::try_with_quantity(
+                "frequency",
+                quantity,
+                ScalarAdmissibility::StrictlyPositive,
+            )
+            .unwrap()
+        };
+
+        for selection in [
+            MaterialPropertySelection::SingleClaimOnly,
+            MaterialPropertySelection::PreferObservationBacked,
+            MaterialPropertySelection::PinnedByProperty(vec![("frequency".to_owned(), pin)]),
+        ] {
+            let requirements = [requirement(cyclic)];
+            let bulk = resolve_material_state_point(
+                &material,
+                &point(425.0),
+                &requirements,
+                selection.clone(),
+            )
+            .unwrap();
+            let surface = resolve_interface_state_point(
+                &interface,
+                &point(425.0),
+                &requirements,
+                selection.clone(),
+            )
+            .unwrap();
+            for property in [
+                bulk.property("frequency").unwrap(),
+                surface.property("frequency").unwrap(),
+            ] {
+                assert_eq!(property.value_si().to_bits(), 50.0_f64.to_bits());
+                assert_eq!(property.requirement().quantity(), cyclic);
+                assert_eq!(property.answer().evidence.value.quantity, cyclic);
+                assert_eq!(property.answer().receipt.selected, pin);
+                material
+                    .claims()
+                    .verify_receipt(&property.answer().receipt)
+                    .unwrap();
+            }
+            assert_ne!(bulk.identity(), surface.identity());
+            // Same dimensions, different meanings; a valid claim pin cannot
+            // override the consumer's exact schema on either query path.
+            for wrong in [angular, QuantitySpec::dimensional(cyclic.dims())] {
+                let requirements = [requirement(wrong)];
+                for result in [
+                    resolve_material_state_point(
+                        &material,
+                        &point(425.0),
+                        &requirements,
+                        selection.clone(),
+                    )
+                    .map(|_| ()),
+                    resolve_interface_state_point(
+                        &interface,
+                        &point(425.0),
+                        &requirements,
+                        selection.clone(),
+                    )
+                    .map(|_| ()),
+                ] {
+                    assert!(matches!(result, Err(MaterialStatePointError::Query {
+                        source: MatDbError::QuantityMismatch { expected, found, .. }, ..
+                    }) if expected == wrong && found == cyclic));
+                }
+            }
+        }
+        assert!(matches!(
+            resolve_material_state_point(
+                &material,
+                &point(700.0),
+                &[requirement(cyclic)],
+                MaterialPropertySelection::SingleClaimOnly
+            ),
+            Err(MaterialStatePointError::Query {
+                source: MatDbError::NoClaimInDomain { .. },
+                ..
+            })
+        ));
+        assert!(matches!(
+            resolve_material_state_point(
+                &material,
+                &point(425.0),
+                &[requirement(QuantitySpec::dimensional(Dims::NONE))],
+                MaterialPropertySelection::SingleClaimOnly
+            ),
+            Err(MaterialStatePointError::DimensionMismatch { .. })
+        ));
     }
 
     fn thermoelastic_card() -> MaterialCard {

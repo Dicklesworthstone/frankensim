@@ -234,6 +234,12 @@ silently consume a new semantic property. The portable usage receipt retains
 its v2 layout: its selected claim id binds the exact property descriptor, and
 `verify_receipt` replays against that claim set. The receipt alone does not
 prove who requested the type, nor does it carry a standalone claim body.
+`NormalizedPack::query_joint_typed` applies the same exact-schema check to
+every member before returning a joint answer. It preserves covariance in
+request order, including mixed dimensional/semantic packs. Joint receipts
+retain their existing v1 layout: replay recovers schemas from the exact pinned
+pack and checks the selected claim ids and individual receipt hashes. The
+name-only joint query continues to refuse semantic properties.
 
 Typed claims use the `property-claim.v2` identity domain. Dimension-only claim
 ids and the frozen normalized-pack v1 byte grammar remain unchanged. A pack
@@ -246,8 +252,8 @@ identities through their existing layouts.
 
 This tranche types property values, not validity axes: `ValidityDomain` and
 `QueryPoint` still carry legacy names and numbers. Source TSV normalization,
-axis quantity schemas, hardness apparatus context, and joint typed-property
-queries remain MR09 work. No existing seed silently gains kinds, no source
+axis quantity schemas and hardness apparatus context remain MR09 work.
+No existing seed silently gains kinds, no source
 spelling is reinterpreted, and a quantity tag adds no empirical validation or
 authority to a source claim.
 

@@ -13,7 +13,7 @@ use fs_matdb::{
     PropertyClaim, PropertyKey, PropertyValue, Provenance, QueryPoint, SelectionPolicy,
     StatisticMember, UncertaintyModel,
 };
-use fs_qty::Dims;
+use fs_qty::{Dims, QuantityKind, QuantitySpec, SemanticType, ValueForm};
 
 const CONDUCTIVITY_DIMS: Dims = Dims([1, 1, -3, -1, 0, 0]);
 const DENSITY_DIMS: Dims = Dims([-3, 1, 0, 0, 0, 0]);
@@ -59,6 +59,10 @@ fn room() -> QueryPoint {
 /// 2x2 covariance block: var(k) = 0.04, var(rho) = 225.0, cov = 1.2
 /// (correlation 0.4).
 fn correlated_pack() -> NormalizedPack {
+    correlated_pack_with_conductivity(PropertyKey::new("thermal-conductivity", CONDUCTIVITY_DIMS))
+}
+
+fn correlated_pack_with_conductivity(key: PropertyKey) -> NormalizedPack {
     let mut claims = ClaimSet::new();
     let observation = claims
         .register_observation(ObservationDataset {
@@ -72,6 +76,7 @@ fn correlated_pack() -> NormalizedPack {
     let mut conductivity = scalar_claim("thermal-conductivity", CONDUCTIVITY_DIMS, 167.0, {
         stated(0.2)
     });
+    conductivity.key = key;
     conductivity.observations.push(observation);
     let mut density = scalar_claim("density", DENSITY_DIMS, 2699.0, stated(15.0));
     density.observations.push(observation);
@@ -101,6 +106,84 @@ fn correlated_pack() -> NormalizedPack {
         Vec::new(),
     )
     .expect("pack admits")
+}
+
+#[test]
+fn typed_joint_query_keeps_covariance_order_and_replays_from_portable_pack() {
+    let thermal = PropertyKey::with_quantity(
+        "thermal-conductivity",
+        QuantitySpec::semantic(SemanticType::new(
+            QuantityKind::ThermalConductivity,
+            ValueForm::Static,
+        )),
+    );
+    let original = correlated_pack_with_conductivity(thermal.clone());
+    let pack = NormalizedPack::from_bytes(&original.to_bytes()).unwrap();
+    let density = PropertyKey::new("density", DENSITY_DIMS);
+    for (keys, values, covariance) in [
+        (
+            [thermal.clone(), density.clone()],
+            [167.0, 2699.0],
+            vec![0.04, 1.2, 225.0],
+        ),
+        (
+            [density.clone(), thermal.clone()],
+            [2699.0, 167.0],
+            vec![225.0, 1.2, 0.04],
+        ),
+    ] {
+        let answer = pack
+            .query_joint_typed(&keys, &room(), SelectionPolicy::SingleClaimOnly)
+            .unwrap();
+        for (index, member) in answer.members.iter().enumerate() {
+            assert_eq!(member.evidence.value.value, values[index]);
+            assert_eq!(member.evidence.value.quantity, keys[index].quantity());
+            pack.claims().verify_receipt(&member.receipt).unwrap();
+        }
+        assert!(
+            matches!(&answer.receipt.correlation, JointCorrelation::Covariance { covariance: found, .. } if *found == covariance)
+        );
+        pack.verify_joint_receipt(&answer.receipt).unwrap();
+        let mut tampered = answer.receipt.clone();
+        tampered.selected.swap(0, 1);
+        assert!(matches!(
+            pack.verify_joint_receipt(&tampered),
+            Err(MatDbError::ReceiptMismatch { field: "selected" })
+        ));
+        assert_ne!(tampered.content_hash(), answer.receipt.content_hash());
+    }
+    // Legacy requests cannot erase the new kind, even in a mixed pack.
+    assert!(matches!(
+        pack.query_joint(
+            &["thermal-conductivity", "density"],
+            &room(),
+            SelectionPolicy::SingleClaimOnly
+        ),
+        Err(MatDbError::QuantityMismatch { .. })
+    ));
+    let wrong_form = PropertyKey::with_quantity(
+        "thermal-conductivity",
+        QuantitySpec::semantic(SemanticType::new(
+            QuantityKind::ThermalConductivity,
+            ValueForm::Rms,
+        )),
+    );
+    assert!(matches!(
+        pack.query_joint_typed(
+            &[wrong_form.clone(), density],
+            &room(),
+            SelectionPolicy::SingleClaimOnly
+        ),
+        Err(MatDbError::QuantityMismatch { .. })
+    ));
+    assert!(matches!(
+        pack.query_joint_typed(
+            &[thermal, wrong_form],
+            &room(),
+            SelectionPolicy::SingleClaimOnly
+        ),
+        Err(MatDbError::UnsupportedEvaluation { .. })
+    ));
 }
 
 #[test]
