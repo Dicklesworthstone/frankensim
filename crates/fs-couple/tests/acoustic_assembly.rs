@@ -44,6 +44,7 @@ fn nylon_like(tension_n: f64, lin_density_kg_m: f64) -> PrestressedString {
         rayleigh: None,
         bending_stiffness_n_m2: 0.0,
         kelvin_voigt_bending: None,
+        relaxation_bending: None,
         polarization_detune: 0.0,
         moving_end: false,
     }
@@ -120,6 +121,146 @@ fn dominant_period_samples(x: &[f64], min_lag: usize, max_lag: usize) -> usize {
 
 fn peak_abs(x: &[f64]) -> f64 {
     x.iter().fold(0.0_f64, |m, &v| m.max(v.abs()))
+}
+
+#[test]
+fn g1_string_observer_matches_damped_acceleration_in_pascals() {
+    let mut assembly = plucked(20.0, 0.006, 0.003);
+    let string = assembly.string.as_mut().unwrap();
+    string.n_modes = 1;
+    string.rayleigh = Some(fs_scenario::RayleighParams {
+        alpha_per_s: 120.0,
+        beta_s: 0.0,
+    });
+    assembly.duration_s = 2.0 / f64::from(assembly.sample_rate_hz);
+    // Two samples bypass the unrelated block atmospheric absorption operator.
+    let string = assembly.string.unwrap();
+    let pluck = assembly.pluck.unwrap();
+    let output = realize_assembly(&assembly).unwrap();
+    let omega = core::f64::consts::PI / string.length_m
+        * (string.tension_n / string.lin_density_kg_m).sqrt();
+    let decay: f64 = 60.0;
+    let wd = (omega * omega - decay * decay).sqrt();
+    let q0 = 2.0 * pluck.height_m * (core::f64::consts::PI * pluck.station_frac).sin()
+        / (core::f64::consts::PI.powi(2) * pluck.station_frac * (1.0 - pluck.station_frac));
+    let area = string.width_m * 2.0 * string.length_m / core::f64::consts::PI;
+    for (i, &pressure) in output.pressure_pa.iter().enumerate() {
+        let t = (i + 1) as f64 / f64::from(assembly.sample_rate_hz);
+        // Second derivative of the exact damped displacement with v(0)=0.
+        let acceleration = -q0
+            * omega
+            * omega
+            * (-decay * t).exp()
+            * ((wd * t).cos() - decay / wd * (wd * t).sin());
+        let expected = output.gas.density * area * acceleration
+            / (4.0 * core::f64::consts::PI * assembly.listener.distance_m);
+        assert!(
+            pressure < 0.0,
+            "positive pluck initially accelerates inward"
+        );
+        assert!(
+            (pressure / expected - 1.0).abs() < 1.0e-11,
+            "pressure {pressure} vs analytic {expected} Pa"
+        );
+    }
+}
+
+#[test]
+fn g1_string_observer_even_mode_has_signed_jerk_and_refines() {
+    let mut errors = Vec::new();
+    for rate in [4_000, 8_000, 16_000] {
+        let mut assembly = plucked(20.0, 0.006, 0.003);
+        let string = assembly.string.as_mut().unwrap();
+        string.n_modes = 1;
+        string.rayleigh = Some(fs_scenario::RayleighParams {
+            alpha_per_s: 0.0,
+            beta_s: 0.0,
+        });
+        assembly.sample_rate_hz = rate;
+        assembly.duration_s = 2.0 / f64::from(rate);
+        let odd = realize_assembly(&assembly).unwrap();
+        assembly.string.as_mut().unwrap().n_modes = 2;
+        let both = realize_assembly(&assembly).unwrap();
+        let string = assembly.string.unwrap();
+        let pluck = assembly.pluck.unwrap();
+        let k = core::f64::consts::TAU / string.length_m;
+        let omega = k * (string.tension_n / string.lin_density_kg_m).sqrt();
+        let q0 = 2.0 * pluck.height_m * (core::f64::consts::TAU * pluck.station_frac).sin()
+            / (core::f64::consts::TAU.powi(2) * pluck.station_frac * (1.0 - pluck.station_frac));
+        let moment = -string.width_m * string.length_m.powi(2) / core::f64::consts::TAU;
+        let factor = both.gas.density * moment
+            / (4.0 * core::f64::consts::PI * assembly.listener.distance_m * both.gas.sound_speed);
+        let dt = 1.0 / f64::from(rate);
+        for i in 0..2 {
+            let t = (i + 1) as f64 * dt;
+            let expected =
+                factor * q0 * omega.powi(2) * ((omega * (t - dt)).cos() - (omega * t).cos()) / dt;
+            let actual = both.pressure_pa[i] - odd.pressure_pa[i];
+            assert!(
+                actual < 0.0,
+                "signed even-mode moment must survive observation"
+            );
+            assert!(
+                (actual / expected - 1.0).abs() < 1.0e-9,
+                "even pressure {actual} vs {expected} Pa at {rate} Hz"
+            );
+        }
+        // Compare the first backward difference to continuous jerk at its
+        // midpoint, where the difference has second-order truncation error.
+        let continuous = factor * q0 * omega.powi(3) * (omega * dt / 2.0).sin();
+        errors.push(((both.pressure_pa[0] - odd.pressure_pa[0]) / continuous - 1.0).abs());
+    }
+    assert!(
+        errors[0] > 3.9 * errors[1] && errors[1] > 3.9 * errors[2],
+        "{errors:?}"
+    );
+}
+
+#[test]
+fn g1_string_observer_nonlinear_pressure_includes_stretching_force() {
+    let mut errors = Vec::new();
+    for rate in [16_000, 32_000, 64_000] {
+        let mut assembly = plucked(20.0, 0.006, 0.01);
+        let string = assembly.string.as_mut().unwrap();
+        string.n_modes = 1;
+        string.axial_stiffness_n = 100_000.0;
+        string.rayleigh = Some(fs_scenario::RayleighParams {
+            alpha_per_s: 0.0,
+            beta_s: 0.0,
+        });
+        assembly.sample_rate_hz = rate;
+        assembly.duration_s = 2.0 / f64::from(rate);
+        let output = realize_assembly(&assembly).unwrap();
+        let string = assembly.string.unwrap();
+        let pluck = assembly.pluck.unwrap();
+        let pi = core::f64::consts::PI;
+        let k = pi / string.length_m;
+        let q0 = 2.0 * pluck.height_m * (pi * pluck.station_frac).sin()
+            / (pi.powi(2) * pluck.station_frac * (1.0 - pluck.station_frac));
+        // Direct continuum tension increment EA/(2L) integral(y_x² dx).
+        let extra_tension = string.axial_stiffness_n * k.powi(2) * q0.powi(2) / 4.0;
+        assert!(
+            extra_tension > string.tension_n,
+            "nonlinear-force falsifier must be strong"
+        );
+        let acceleration0 =
+            -(string.tension_n + extra_tension) * k.powi(2) * q0 / string.lin_density_kg_m;
+        let expected0 = output.gas.density * string.width_m * 2.0 / k * acceleration0
+            / (4.0 * pi * assembly.listener.distance_m);
+        let actual = output.pressure_pa[0];
+        assert!(actual < 0.0);
+        let error = (actual / expected0 - 1.0).abs();
+        assert!(
+            error < 0.005,
+            "nonlinear pressure {actual} vs initial limit {expected0} Pa"
+        );
+        errors.push(error);
+    }
+    // v(0)=0 and zero damping give a quadratic approach to the initial value.
+    assert!(
+        errors[0] > 3.8 * errors[1] && errors[1] > 3.8 * errors[2],
+        "{errors:?}"
+    );
 }
 
 #[test]
@@ -872,6 +1013,57 @@ fn soundboard_adds_body_radiation() {
         peak_abs(&b.pressure_pa) > peak_abs(&a.pressure_pa) * 1.05,
         "a driven soundboard must add observer pressure"
     );
+}
+
+#[test]
+fn g3_sls_memory_composes_with_body_ports_and_contact() {
+    for moving_end in [false, true] {
+        let mut scene = plucked(80.0, 0.006, 0.003);
+        let string = scene.string.as_mut().unwrap();
+        string.n_modes = 2;
+        string.axial_stiffness_n = 4.0e4;
+        string.bending_stiffness_n_m2 = 0.01;
+        string.damping_ratio = 0.0;
+        string.moving_end = moving_end;
+        string.relaxation_bending = Some(fs_scenario::acoustic::StandardLinearSolidBending {
+            relaxing_stiffness_n_m2: 0.05,
+            relaxation_time_s: 0.002,
+            omega_band_rad_s: (1.0, 20_000.0),
+            material_state_identity: None, // synthetic authored mechanics, no source claim
+        });
+        scene.duration_s = 0.04;
+        scene.sample_rate_hz = 16_000;
+        scene.soundboard = Some(RadiatingPlate {
+            area_m2: 0.12,
+            mass_kg: 0.18,
+            frequency_hz: 110.0,
+            damping_ratio: 0.03,
+        });
+        let body = realize_assembly(&scene).unwrap();
+        scene.obstacles = vec![UnilateralObstacle {
+            stations: vec![0.3],
+            gaps_m: vec![0.0005],
+            stiffness: 5.0e5,
+            alpha: 2.0,
+            mu_kinetic: if moving_end { 0.0 } else { 0.1 },
+            internal_loss: 0.8,
+            provenance: "synthetic SLS contact".into(),
+        }];
+        let contact = realize_assembly(&scene).unwrap();
+        assert_eq!(
+            contact.pressure_pa,
+            realize_assembly(&scene).unwrap().pressure_pa
+        );
+        let difference =
+            |a: &[f64], b: &[f64]| a.iter().zip(b).map(|(a, b)| (a - b).abs()).sum::<f64>();
+        assert!(difference(&contact.pressure_pa, &body.pressure_pa) > 1.0e-8);
+        scene.soundboard = None;
+        let bare = realize_assembly(&scene).unwrap();
+        assert!(
+            difference(&contact.pressure_pa, &bare.pressure_pa) > 1.0e-8,
+            "appended memory states must not displace the body's observed momentum"
+        );
+    }
 }
 
 #[test]

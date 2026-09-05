@@ -31,7 +31,7 @@ impl AmbientGas {
 }
 
 /// Prestressed taut string (Kirchhoff–Carrier / modal).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PrestressedString {
     /// Speaking length [m].
     pub length_m: f64,
@@ -57,6 +57,10 @@ pub struct PrestressedString {
     /// Requires zero `damping_ratio` and no Rayleigh override. Air drag remains
     /// separate. `None` retains the authored legacy loss path.
     pub kelvin_voigt_bending: Option<KelvinVoigtBending>,
+    /// Causal Prony bending. `bending_stiffness_n_m2` is the
+    /// equilibrium EI; the relaxing increment below is additional storage.
+    /// Exclusive with Kelvin–Voigt, Rayleigh and authored internal loss.
+    pub relaxation_bending: Option<PronyBending>,
     /// Second-polarization fractional detune. Zero keeps one polarization.
     /// A few 10⁻³ is a typical bridge-rocking split and produces beating.
     pub polarization_detune: f64,
@@ -79,6 +83,43 @@ pub struct KelvinVoigtBending {
     pub omega_band_rad_s: (f64, f64),
     /// Citation of the resolved material bundle, never an authority upgrade.
     pub material_state_identity: Option<fs_blake3::ContentHash>,
+}
+
+/// Maxwell bending arms in parallel with the string's equilibrium EI.
+/// Applies at a fixed material state; axial relaxation is not modeled.
+/// Plucked initial states are held long enough to be fully relaxed before
+/// release. Finite-rate loading histories need explicit driving instead.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PronyBending {
+    /// Arms in declaration order. Empty means explicitly elastic bending.
+    pub branches: Vec<BendingRelaxationBranch>,
+    /// Applicability [rad/s]; both relaxed and instantaneous reference-mode
+    /// frequencies must fit. Not a certificate for nonlinear harmonics.
+    pub omega_band_rad_s: (f64, f64),
+    /// Citation of the resolved bundle, not an upgrade of material authority.
+    pub material_state_identity: Option<fs_blake3::ContentHash>,
+    /// Explicit modulus/time property names for each arm, in the same order.
+    /// Required for source rebinding; absent on authored mechanical spectra.
+    /// These selectors alone do not authenticate coefficients or their source.
+    pub source_properties: Option<Vec<BendingRelaxationProperties>>,
+}
+
+/// One Maxwell arm in a flexural relaxation spectrum.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BendingRelaxationBranch {
+    /// Additional instantaneous flexural stiffness `delta E I` [N m²], >= 0.
+    pub relaxing_stiffness_n_m2: f64,
+    /// Relaxation time [s], strictly positive.
+    pub relaxation_time_s: f64,
+}
+
+/// Source-property selectors for one bending arm; no values are inferred.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BendingRelaxationProperties {
+    /// Nonnegative relaxing modulus [Pa].
+    pub modulus: String,
+    /// Positive time constant [s].
+    pub relaxation_time: String,
 }
 
 /// Rayleigh damping coefficients for a modal family.

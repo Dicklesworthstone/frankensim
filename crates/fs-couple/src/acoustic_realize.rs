@@ -127,6 +127,9 @@ pub fn realize_assembly(
         });
     }
     let gas = gas_state(assembly.ambient)?;
+    if let Some(string) = assembly.string.filter(|s| s.relaxation_bending.is_some()) {
+        validate_relaxation_modes(string, assembly.sample_rate_hz)?;
+    }
     let n = sample_count(assembly.sample_rate_hz, assembly.duration_s)?;
     let mut pressure_pa = vec![0.0; n];
     let mut bodies = plate_bank(assembly.soundboard, &assembly.body_modes, assembly.plate)?;
@@ -326,7 +329,7 @@ fn realize_coupled_ode(
     };
     let mut x_body = vec![0.0; body.state_dim()];
     let mut out = vec![0.0; n];
-    if string.axial_stiffness_n > 0.0 {
+    if string.axial_stiffness_n > 0.0 || string.relaxation_bending.is_some() {
         let mut members = vec![kc_string_member(
             string,
             assembly.pluck,
@@ -650,7 +653,7 @@ fn realize_coupled(
     )
     .map_err(map_drive)?;
     let mut texture = TextureDrive::try_new(assembly.contact_texture)?;
-    if string.axial_stiffness_n > 0.0 {
+    if string.axial_stiffness_n > 0.0 || string.relaxation_bending.is_some() {
         return realize_coupled_kc(assembly, gas, plates, n, fitted, zc, area, &mut texture);
     }
     let mass_scale = det::sqrt(string.lin_density_kg_m * string.length_m / 2.0);
@@ -952,32 +955,72 @@ pub fn string_mode_omega(string: PrestressedString, k: usize) -> f64 {
     )
 }
 
-/// Compact observer transfer `Im H` for sine mode `k` (1-based).
-///
-/// Odd modes are free-space monopoles (`p ∝ ρ A ÿ / 4π r`). Even
-/// modes have vanishing monopole area; they radiate as compact
-/// dipoles (`p ∝ ρ Π̈ / 4π r c`). Both are the same Green's-function
-/// family — not a BEM field and not a 3-D jet.
-#[allow(clippy::too_many_arguments)] // one coherent field record
-fn string_mode_h_im(
-    string: PrestressedString,
-    k: usize,
-    omega: f64,
-    mass_scale: f64,
-    radiation_scale: f64,
-    rho: f64,
-    sound_speed: f64,
-    listener_m: f64,
-) -> f64 {
-    let kf = k as f64;
-    let pi = core::f64::consts::PI;
-    if k % 2 == 1 {
-        let area = string.width_m * 2.0 * string.length_m / (kf * pi);
-        radiation_scale * omega * rho * area / (4.0 * pi * listener_m * mass_scale)
-    } else {
-        // ∫_0^L sin(kπx/L) (x − L/2) dx = −L²/(kπ) for even k.
-        let moment = string.width_m * string.length_m * string.length_m / (kf * pi);
-        radiation_scale * omega * rho * moment / (4.0 * pi * listener_m * sound_speed * mass_scale)
+/// Compact strip observer from actual modal accelerations, not `-omega² q`.
+/// Expanding distributed retarded monopoles gives
+/// `p = rho/(4 pi r) [integral(w a dx) + integral(w (x-L/2) jerk dx)/c]`.
+/// See Wood, Euphonics 11.7.1, eq. (6):
+/// <https://euphonics.org/11-7-1-compact-sound-sources-monopoles-dipoles-quadrupoles/>.
+/// The first moment assumes an observer on the positive string axis; the
+/// scenario has no directional listener. This remains a compact strip model,
+/// not the radiation solution for a cylindrical wire. Common propagation
+/// delay is omitted. Jerk uses backward differences of accepted accelerations
+/// (first-order); instantaneous release impulses are not reconstructed.
+struct StringObserver {
+    weights: Vec<(f64, f64)>,
+    previous_acceleration: Option<Vec<f64>>,
+}
+
+impl StringObserver {
+    fn new(string: PrestressedString, gas: &GasState, range: f64, scale: f64) -> Self {
+        let pi = core::f64::consts::PI;
+        let mass_scale = det::sqrt(string.lin_density_kg_m * string.length_m / 2.0);
+        let factor = scale * gas.density * string.width_m / (4.0 * pi * range * mass_scale);
+        let weights = (1..=string.n_modes)
+            .map(|k| {
+                let kpi = k as f64 * pi;
+                if k % 2 == 1 {
+                    (factor * 2.0 * string.length_m / kpi, 0.0)
+                } else {
+                    // Signed first moment of the sine about the string midpoint.
+                    (
+                        0.0,
+                        -factor * string.length_m.powi(2) / (kpi * gas.sound_speed),
+                    )
+                }
+            })
+            .collect();
+        Self {
+            weights,
+            previous_acceleration: None,
+        }
+    }
+
+    fn observe(
+        &mut self,
+        acceleration: Vec<f64>,
+        initial_acceleration: Option<Vec<f64>>,
+        dt: f64,
+    ) -> Result<f64, AcousticRealizeError> {
+        let previous = self
+            .previous_acceleration
+            .as_ref()
+            .or(initial_acceleration.as_ref())
+            .expect("first step supplies its initial acceleration");
+        let pressure: f64 = self
+            .weights
+            .iter()
+            .zip(&acceleration)
+            .zip(previous)
+            .map(|((&(area, moment), &a), &before)| area * a + moment * ((a - before) / dt))
+            .sum();
+        let limit = ModalAcousticTimeBudget::audible_reference().maximum_abs_pressure_pa;
+        if !pressure.is_finite() || pressure.abs() > limit {
+            return Err(AcousticRealizeError::InvalidDescription {
+                what: "compact string observer pressure is nonfinite or exceeds its pressure budget",
+            });
+        }
+        self.previous_acceleration = Some(acceleration);
+        Ok(pressure)
     }
 }
 
@@ -1007,6 +1050,15 @@ fn mode_zeta(
     wave_number: f64,
     gas: &GasState,
 ) -> Result<f64, AcousticRealizeError> {
+    if string.relaxation_bending.is_some()
+        && (string.kelvin_voigt_bending.is_some()
+            || string.rayleigh.is_some()
+            || string.damping_ratio != 0.0)
+    {
+        return Err(AcousticRealizeError::InvalidDescription {
+            what: "relaxation bending cannot be combined with other internal/Rayleigh losses",
+        });
+    }
     let material_bending = string
         .kelvin_voigt_bending
         .map(|law| {
@@ -1068,6 +1120,10 @@ fn mode_zeta(
     if let Some(bending) = material_bending {
         return Ok(bending + stokes);
     }
+    if string.relaxation_bending.is_some() {
+        // The memory arms supply their own storage and dissipation in pHS.
+        return Ok(stokes);
+    }
     // This legacy bending coefficient is a heuristic pending material-loss
     // resolution under MR03; it is not source-backed constitutive data.
     let bend = if string.bending_stiffness_n_m2 > 0.0 {
@@ -1090,6 +1146,127 @@ fn prony_internal_zeta(string: PrestressedString, omega: f64) -> f64 {
     let eta0 = (2.0 * z0).min(0.99);
     GeneralizedMaxwell::matching_loss(1.0, omega1.max(1.0), eta0)
         .map_or(z0, |gm| 0.5 * gm.loss_factor(omega))
+}
+
+fn relaxing_mode_stiffness(string: PrestressedString, k: usize) -> f64 {
+    let order = k as f64 + if string.moving_end { 0.5 } else { 1.0 };
+    let wave_number = order * core::f64::consts::PI / string.length_m;
+    string
+        .relaxation_bending
+        .map_or(0.0, |law| law.relaxing_stiffness_n_m2)
+        * wave_number.powi(4)
+        / string.lin_density_kg_m
+}
+
+fn validate_relaxation_modes(
+    string: PrestressedString,
+    sample_rate: u32,
+) -> Result<(), AcousticRealizeError> {
+    let law = string.relaxation_bending.expect("selected relaxation law");
+    let refuse = || AcousticRealizeError::InvalidDescription {
+        what: "relaxation bending needs finite coefficients, exclusive losses, and admitted relaxed/instantaneous modal frequencies below Nyquist",
+    };
+    let (lo, hi) = law.omega_band_rad_s;
+    if !(law.relaxing_stiffness_n_m2.is_finite()
+        && law.relaxing_stiffness_n_m2 >= 0.0
+        && law.relaxation_time_s.is_finite()
+        && law.relaxation_time_s > 0.0
+        && lo.is_finite()
+        && hi.is_finite()
+        && lo >= 0.0
+        && hi >= lo)
+        || string.kelvin_voigt_bending.is_some()
+        || string.rayleigh.is_some()
+        || string.damping_ratio != 0.0
+    {
+        return Err(refuse());
+    }
+    if string.moving_end && string.polarization_detune != 0.0 {
+        return Err(AcousticRealizeError::InvalidDescription {
+            what: "moving-end relaxation does not support a second polarization",
+        });
+    }
+    // The fixed sample clock uses the midpoint discrete gradient. For an
+    // isolated pole, h <= 0.1 keeps both phase-rate and relaxation-rate error
+    // below 0.1%; Nyquist alone admits severely warped/stiff transients.
+    // This reference check is not a bound on nonlinear or coupled spectra.
+    let reference_rate_limit = 0.1 * f64::from(sample_rate);
+    if law.relaxing_stiffness_n_m2 > 0.0 && 1.0 / law.relaxation_time_s > reference_rate_limit {
+        return Err(AcousticRealizeError::InvalidDescription {
+            what: "sample rate does not resolve bending relaxation: require dt/tau <= 0.1; increase sample rate",
+        });
+    }
+    let guard = ModalAcousticTimeBudget::audible_reference().nyquist_guard_fraction
+        * core::f64::consts::PI
+        * f64::from(sample_rate);
+    let mut member = string;
+    for polarization in 0..=usize::from(string.polarization_detune > 0.0) {
+        if polarization == 1 {
+            member.tension_n *= (1.0 + string.polarization_detune).powi(2);
+        }
+        for k in 0..string.n_modes {
+            let relaxed = if string.moving_end {
+                moving_end_omega(member, k)
+            } else {
+                string_mode_omega(member, k + 1)
+            };
+            let increment = relaxing_mode_stiffness(member, k);
+            let instant = det::sqrt(relaxed * relaxed + increment);
+            if !(relaxed.is_finite()
+                && relaxed > 0.0
+                && relaxed >= lo
+                && increment.is_finite()
+                && increment >= 0.0
+                && instant.is_finite()
+                && instant <= hi
+                && instant <= guard)
+            {
+                return Err(refuse());
+            }
+            if instant > reference_rate_limit {
+                return Err(AcousticRealizeError::InvalidDescription {
+                    what: "sample rate does not resolve bending reference phase: require dt*omega_instant <= 0.1; increase sample rate",
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn with_bending_relaxation(
+    string: PrestressedString,
+    sys: fs_phs::PortHamiltonian,
+) -> Result<fs_phs::PortHamiltonian, AcousticRealizeError> {
+    let Some(law) = string
+        .relaxation_bending
+        .filter(|law| law.relaxing_stiffness_n_m2 > 0.0)
+    else {
+        return Ok(sys);
+    };
+    let branches = (0..string.n_modes)
+        .map(|k| {
+            let mut projection = vec![0.0; sys.state_dim()];
+            projection[2 * k] = 1.0;
+            fs_phs::RelaxationBranch {
+                projection,
+                stiffness: relaxing_mode_stiffness(string, k),
+                relaxation_time_s: law.relaxation_time_s,
+            }
+        })
+        .collect();
+    sys.with_relaxation_branches(branches)
+        .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))
+}
+
+fn initialize_relaxed_bending(string: PrestressedString, x: &mut [f64]) {
+    if string
+        .relaxation_bending
+        .is_some_and(|law| law.relaxing_stiffness_n_m2 > 0.0)
+    {
+        for k in 0..string.n_modes {
+            x[2 * string.n_modes + k] = det::sqrt(relaxing_mode_stiffness(string, k)) * x[2 * k];
+        }
+    }
 }
 
 /// Two-way Dirac realize: moving-end waveguide ⊕ plate ⊕ optional
@@ -1241,6 +1418,7 @@ fn realize_dirac_join(
             x[2 * k] = free_fixed_pluck_modal(pluck, string, k);
         }
     }
+    initialize_relaxed_bending(string, &mut x);
     let dt = 1.0 / f64::from(sample_rate_hz);
     let mut texture = TextureDrive::try_new(texture)?;
     let mut out = Vec::with_capacity(n);
@@ -1349,7 +1527,7 @@ fn moving_end_string_phs(
             col += 1;
         }
     }
-    if string.axial_stiffness_n > 0.0 {
+    let base = if string.axial_stiffness_n > 0.0 {
         let mut storage = kirchhoff_carrier_moving_end(
             &KcStringParams {
                 length: string.length_m,
@@ -1377,7 +1555,8 @@ fn moving_end_string_phs(
         let refs: Vec<&[f64]> = drives.iter().map(Vec::as_slice).collect();
         modal_bank_ports(&omegas, zetas, &refs)
             .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))
-    }
+    }?;
+    with_bending_relaxation(string, base)
 }
 
 #[allow(clippy::too_many_arguments)] // one coherent solver probe
@@ -1622,7 +1801,7 @@ fn realize_string(
     } else {
         None
     };
-    if string.axial_stiffness_n > 0.0 {
+    if string.axial_stiffness_n > 0.0 || string.relaxation_bending.is_some() {
         realize_kc_string(
             string,
             pluck,
@@ -1778,6 +1957,7 @@ fn realize_linear_string(
 struct LinearMember {
     model: ModalAcousticTimeModel,
     phi_bow: Vec<f64>,
+    observer: StringObserver,
 }
 
 fn linear_string_member(
@@ -1797,20 +1977,11 @@ fn linear_string_member(
     for k in 1..=string.n_modes {
         let omega = string_mode_omega(string, k);
         let q_phys = pluck.map_or(0.0, |p| triangular_pluck_modal(p, k));
-        let h_im = string_mode_h_im(
-            string,
-            k,
-            omega,
-            mass_scale,
-            radiation_scale,
-            gas.density,
-            gas.sound_speed,
-            listener_m,
-        );
         modes.push(ModalAcousticMode {
             angular_frequency_rad_s: omega,
             damping_ratio: mode_zeta(string, omega, k as f64 * pi / string.length_m, gas)?,
-            pressure_per_modal_velocity: C64::new(0.0, h_im),
+            // The time-domain observer below includes actual applied forces.
+            pressure_per_modal_velocity: C64::ZERO,
         });
         states.push(ModalAcousticState {
             displacement_m_sqrt_kg: mass_scale * q_phys,
@@ -1829,7 +2000,25 @@ fn linear_string_member(
     model
         .restore_states(&states)
         .map_err(AcousticRealizeError::Modal)?;
-    Ok(LinearMember { model, phi_bow })
+    Ok(LinearMember {
+        model,
+        phi_bow,
+        observer: StringObserver::new(string, gas, listener_m, radiation_scale),
+    })
+}
+
+fn linear_accelerations(model: &ModalAcousticTimeModel, force: &[f64]) -> Vec<f64> {
+    model
+        .modes()
+        .iter()
+        .zip(model.states())
+        .zip(force)
+        .map(|((mode, state), &f)| {
+            let omega = mode.angular_frequency_rad_s;
+            f - omega * omega * state.displacement_m_sqrt_kg
+                - 2.0 * mode.damping_ratio * omega * state.velocity_m_sqrt_kg_per_s
+        })
+        .collect()
 }
 
 fn step_linear_member(
@@ -1872,11 +2061,26 @@ fn step_linear_member(
             *f += c;
         }
     }
-    let frame = member
+    advance_linear_member(member, &force, dt)
+}
+
+fn advance_linear_member(
+    member: &mut LinearMember,
+    force: &[f64],
+    dt: f64,
+) -> Result<f64, AcousticRealizeError> {
+    let initial = member
+        .observer
+        .previous_acceleration
+        .is_none()
+        .then(|| linear_accelerations(&member.model, force));
+    member
         .model
-        .step(&force)
+        .step(force)
         .map_err(AcousticRealizeError::Modal)?;
-    Ok(frame.observer_pressure_pa)
+    member
+        .observer
+        .observe(linear_accelerations(&member.model, force), initial, dt)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1939,8 +2143,7 @@ fn realize_kc_string(
 struct KcMember {
     sys: fs_phs::PortHamiltonian,
     x: Vec<f64>,
-    radiation_scale: f64,
-    listener_m: f64,
+    observer: StringObserver,
 }
 
 fn kc_string_member(
@@ -1978,19 +2181,44 @@ fn kc_string_member(
         .collect();
     let zetas = zetas?;
     let mass_scale = det::sqrt(string.lin_density_kg_m * string.length_m / 2.0);
-    let sys = assemble_kc(string, storage, &zetas, obstacles)?;
-    let mut x = vec![0.0; 2 * string.n_modes];
+    let sys = with_bending_relaxation(string, assemble_kc(string, storage, &zetas, obstacles)?)?;
+    let mut x = vec![0.0; sys.state_dim()];
     if let Some(pluck) = pluck {
         for k in 1..=string.n_modes {
             x[2 * (k - 1)] = mass_scale * triangular_pluck_modal(pluck, k);
         }
     }
+    initialize_relaxed_bending(string, &mut x);
     Ok(KcMember {
         sys,
         x,
-        radiation_scale,
-        listener_m,
+        observer: StringObserver::new(string, gas, listener_m, radiation_scale),
     })
+}
+
+/// Momentum rows of `(J-R) grad H + G u` are accelerations in the
+/// mass-normalized string basis. Read the admitted structure and storage so
+/// nonlinear elasticity and conservative contact reach the same observer.
+fn kc_accelerations(sys: &fs_phs::PortHamiltonian, x: &[f64], u: &[f64]) -> Vec<f64> {
+    let effort = sys.effort(x);
+    let (j, r, g) = sys.structure();
+    let n = sys.state_dim();
+    let m = sys.port_dim();
+    (0..m)
+        .map(|k| {
+            let row = 2 * k + 1;
+            let internal: f64 = effort
+                .iter()
+                .enumerate()
+                .map(|(col, e)| (j[row * n + col] - r[row * n + col]) * e)
+                .sum();
+            internal
+                + u.iter()
+                    .enumerate()
+                    .map(|(col, f)| g[row * m + col] * f)
+                    .sum::<f64>()
+        })
+        .collect()
 }
 
 fn step_kc_member(
@@ -1999,7 +2227,7 @@ fn step_kc_member(
     texture: &mut TextureDrive,
     obstacles: &[UnilateralObstacle],
     string: PrestressedString,
-    gas: &GasState,
+    _gas: &GasState,
     dt: f64,
 ) -> Result<(f64, Vec<f64>), AcousticRealizeError> {
     let mass_scale = det::sqrt(string.lin_density_kg_m * string.length_m / 2.0);
@@ -2025,40 +2253,35 @@ fn step_kc_member(
         }
     }
     if obstacles.iter().any(|o| o.mu_kinetic > 0.0) {
-        let extra = modal_friction_forces(string, obstacles, &member.x)
+        let extra = modal_friction_forces(string, obstacles, &member.x[..2 * string.n_modes])
             .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
         for (uk, fk) in u.iter_mut().zip(extra) {
             *uk += fk;
         }
     }
     if obstacles.iter().any(|o| o.internal_loss > 0.0) {
-        let extra = modal_hunt_crossley_forces(string, obstacles, &member.x)
+        let extra = modal_hunt_crossley_forces(string, obstacles, &member.x[..2 * string.n_modes])
             .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
         for (uk, fk) in u.iter_mut().zip(extra) {
             *uk += fk;
         }
     }
+    let initial = member
+        .observer
+        .previous_acceleration
+        .is_none()
+        .then(|| kc_accelerations(&member.sys, &member.x, &u));
     let rec = step(&member.sys, &member.x, &u, dt)
         .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
+    let p = member
+        .observer
+        .observe(kc_accelerations(&member.sys, &rec.x, &u), initial, dt)?;
     member.x = rec.x;
-    let mut p = 0.0;
     let mut q_phys = vec![0.0; string.n_modes];
     #[allow(clippy::needless_range_loop)] // the modal index spans state and outputs
     for k in 0..string.n_modes {
         let q = member.x[2 * k];
         q_phys[k] = q / mass_scale;
-        let omega = string_mode_omega(string, k + 1);
-        let h_im = string_mode_h_im(
-            string,
-            k + 1,
-            omega,
-            mass_scale,
-            member.radiation_scale,
-            gas.density,
-            gas.sound_speed,
-            member.listener_m,
-        );
-        p += h_im * omega * q;
     }
     Ok((p, q_phys))
 }
@@ -2784,6 +3007,51 @@ fn refuse_open_nyquist(
 fn add_in_place(acc: &mut [f64], addend: &[f64]) {
     for (a, b) in acc.iter_mut().zip(addend) {
         *a += *b;
+    }
+}
+
+#[cfg(test)]
+mod string_observer_tests {
+    use super::*;
+
+    #[test]
+    fn g1_string_observer_held_static_load_is_silent() {
+        let string = PrestressedString {
+            length_m: 0.5,
+            tension_n: 20.0,
+            lin_density_kg_m: 0.006,
+            axial_stiffness_n: 0.0,
+            width_m: 0.001,
+            n_modes: 2,
+            damping_ratio: 0.0,
+            rayleigh: Some(RayleighParams {
+                alpha_per_s: 2.0,
+                beta_s: 0.0,
+            }),
+            bending_stiffness_n_m2: 0.0,
+            kelvin_voigt_bending: None,
+            relaxation_bending: None,
+            polarization_detune: 0.0,
+            moving_end: false,
+        };
+        let gas = gas_state(AmbientGas::sea_level()).unwrap();
+        let mut member = linear_string_member(string, None, None, &gas, 1.0, 8_000, 1.0).unwrap();
+        let force = [1.0, 2.0];
+        member.model.initialize_static_equilibrium(&force).unwrap();
+        assert!(
+            member
+                .model
+                .states()
+                .iter()
+                .all(|s| s.displacement_m_sqrt_kg > 0.0)
+        );
+        for _ in 0..8 {
+            let pressure = advance_linear_member(&mut member, &force, 1.0 / 8_000.0).unwrap();
+            assert!(
+                pressure.abs() < 1.0e-12,
+                "stationary loaded string radiated {pressure} Pa"
+            );
+        }
     }
 }
 

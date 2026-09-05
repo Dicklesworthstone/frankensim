@@ -435,6 +435,40 @@ The modal applicability check concerns reference frequencies; nonlinear
 frequency shifts and generated harmonics are not an in-band certificate. The
 existing moving-end cosine approximation and compact observer remain unchanged.
 
+`with_standard_linear_solid_bending_loss` binds one causal Maxwell bending arm
+from `equilibrium_young_modulus` [Pa], `relaxing_bending_modulus` [Pa] and
+`bending_relaxation_time` [s]. The explicit equilibrium modulus must equal the
+Young's modulus used to derive EA/EI; a sampled dynamic modulus cannot silently
+be treated as an equilibrium value. All five coefficients, including density,
+must be dimension-only validity-wide constants. The relaxation-time claim must
+declare an `omega` band, intersected with all other coefficient bands. Geometry
+rebinding recomputes delta EI and replaces the source identity and time constant.
+These are resolved inputs, not measured-material validation.
+
+Each mass-normalized modal coordinate receives a generic `fs-phs` relaxation arm
+with `a = delta EI k^4/mu`: `q'' + c q' + omega0^2 q + a(q-v)=force`,
+`v'=(q-v)/tau`. This is the internal-strain standard-linear-solid formulation
+described in [Bleyer's viscoelasticity tutorial](https://bleyerj.github.io/comet-fenicsx/tours/nonlinear_problems/linear_viscoelasticity_jax/linear_viscoelasticity_jax.html),
+projected onto the existing beam modes. Nonlinear axial storage, contact ports,
+body joins and pressure observation use the same augmented pHS state. A held
+pluck initializes `v=q`, representing full relaxation before release. The
+material arm produces storage dispersion and dissipation together; no PCM decay
+envelope or substitute modal damping ratio implements it.
+
+Admission checks both relaxed and instantaneous reference frequencies against
+the material band and Nyquist guard, including fixed-end detuned polarizations.
+Moving-end secondary polarization refuses on this path. Kelvin–Voigt, Rayleigh
+and nonzero authored internal loss cannot be combined with the SLS descriptor;
+air drag remains separate at the relaxed reference frequency. G0/G1 tests cover
+sample-clock admission (`dt/tau <= 0.1` for a nonzero arm and
+`dt*omega_instant <= 0.1`, otherwise increase sample rate),
+source/quantity/band refusals, geometry rebinding and actual pressure pitch/decay
+against independent characteristic-polynomial roots in fixed linear, nonlinear
+and moving-end realizations. This is one bending arm at a fixed state, not
+arbitrary sourced spectra, axial creep, evolving temperature, phase change,
+or an in-band certificate for nonlinear harmonics. The generic pHS primitive
+supports multiple arms; this string descriptor intentionally declares one.
+
 ### `acoustic_realize` / `pcm_wav`
 
 `realize_assembly` turns an `fs_scenario::AcousticAssembly` into observer
@@ -461,10 +495,26 @@ clarinet is one filling of those objects.
   ISO absorption remains the sole
   bulk absorption inside its window; no extra classical term is added.
 - String path, `EA = 0`: triangular-pluck (or bow) modal ICs marched by
-  `ModalAcousticTimeModel`, compact transfer
-  `H = i ω ρ A_odd / (4 π r √(μ L / 2))` for odd sine modes. Even
-  modes have vanishing monopole area and radiate as compact dipoles
-  `p ∝ ρ Π̈ / (4 π r c)` with `Π = w ∫ φ (x−L/2) dx`. Fletcher
+  `ModalAcousticTimeModel`. The shared fixed-end string observer reads actual
+  acceleration: odd modes give `p = rho A_odd q_ddot / (4 pi r)` in physical
+  displacement coordinates. Even modes have zero monopole area and signed
+  moment `M_even = -w L²/(n pi)`, giving `rho M_even q_dddot/(4 pi r c)`.
+  This follows the spatial expansion of distributed retarded monopoles
+  ([Wood, eq. 6](https://euphonics.org/11-7-1-compact-sound-sources-monopoles-dipoles-quadrupoles/)).
+  Linear acceleration includes held forcing and viscous loss; nonlinear
+  acceleration uses the admitted pHS storage and `(J-R) grad H + G u`, so
+  stretching, conservative contact, and applied forces reach emitted pressure.
+  Jerk is a backward difference of accepted accelerations: first-order at the
+  reported endpoint, second-order at the interval midpoint for smooth motion.
+  The initial acceleration is evaluated from the initial state and first held
+  force; no zero-history startup spike or ideal release impulse is synthesized.
+  The observer retains the linear path's 1e7 Pa pressure ceiling.
+  This is an uncoupled compact strip approximation with the even-mode observer
+  on the positive string axis. Common propagation delay, angular listener
+  geometry, cylindrical-wire radiation, resolved impact impulses, and radiation
+  back-reaction are not supplied by this observer. G1 tests check signed SI
+  pressure against a damped oscillator, even-mode jerk and refinement, nonlinear
+  stretching-force pressure, and silence under a held static load. Fletcher
   inharmonicity `ω_n = n ω_1 √(1+B n²)` when `EI > 0`. Stokes air
   drag from `GasState` plus the authored internal floor. The reusable
   `air_path::oscillating_cylinder_air_resistance_per_length` computes the

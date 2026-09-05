@@ -14,15 +14,22 @@ use fs_matdb::EvaluationDecision;
 use fs_material::state_point::{
     DENSITY_PROPERTY, ResolvedMaterialStatePoint, YOUNG_MODULUS_PROPERTY,
 };
-use fs_qty::{Density, Dims, DynViscosity, Pressure, QuantitySpec};
+use fs_qty::{Density, Dims, DynViscosity, Pressure, QuantitySpec, Time};
 use fs_scenario::PrestressedString;
-use fs_scenario::acoustic::KelvinVoigtBending;
+use fs_scenario::acoustic::{KelvinVoigtBending, StandardLinearSolidBending};
 
 use crate::acoustic_realize::AcousticRealizeError;
 
 /// Solid bending-viscosity parameter of `sigma = E epsilon + eta epsilon_dot`
 /// [Pa s]. This is not fluid shear viscosity or a dimensionless loss factor.
 pub const KELVIN_VOIGT_BENDING_VISCOSITY_PROPERTY: &str = "kelvin_voigt_bending_viscosity";
+
+/// Explicit long-time modulus [Pa] confirming the elastic binding's E.
+pub const EQUILIBRIUM_YOUNG_MODULUS_PROPERTY: &str = "equilibrium_young_modulus";
+/// Positive/zero modulus increment [Pa] of a single Maxwell bending arm.
+pub const RELAXING_BENDING_MODULUS_PROPERTY: &str = "relaxing_bending_modulus";
+/// Time constant [s] of that Maxwell bending arm.
+pub const BENDING_RELAXATION_TIME_PROPERTY: &str = "bending_relaxation_time";
 
 /// Cross-section constraint at the template's current loaded length.
 /// Independent of material claims and the mechanical prestress prescription.
@@ -142,7 +149,10 @@ impl ResolvedStringSpecimen {
     /// realizer also checks every actual retained reference-mode frequency.
     pub fn with_kelvin_voigt_bending_loss(mut self) -> Result<Self, AcousticRealizeError> {
         let refuse = |what| AcousticRealizeError::InvalidDescription { what };
-        if self.string.rayleigh.is_some() || self.string.damping_ratio != 0.0 {
+        if self.string.rayleigh.is_some()
+            || self.string.damping_ratio != 0.0
+            || self.string.relaxation_bending.is_some()
+        {
             return Err(refuse(
                 "material bending loss cannot be combined with authored internal/Rayleigh loss",
             ));
@@ -201,6 +211,103 @@ impl ResolvedStringSpecimen {
         }
         self.string.kelvin_voigt_bending = Some(KelvinVoigtBending {
             viscous_stiffness_n_m2_s,
+            omega_band_rad_s: band,
+            material_state_identity: Some(self.material.identity()),
+        });
+        Ok(self)
+    }
+
+    /// Bind a sourced standard-linear-solid bending law at this material state.
+    /// Requires dimension-only scalar `equilibrium_young_modulus` [Pa],
+    /// `relaxing_bending_modulus` [Pa] and `bending_relaxation_time` [s].
+    /// Equilibrium E must equal the original `young_modulus` claim: a measured
+    /// storage modulus at an arbitrary frequency cannot silently become E_inf.
+    /// All coefficients and density must be validity-wide constants. The
+    /// relaxation-time claim supplies an explicit omega band, intersected with
+    /// every coefficient's band. Source receipts and uncertainty are retained.
+    ///
+    /// The same equilibrium EA/EI and prestress remain; only bending has memory.
+    /// Plucks are initialized after full relaxation at their held shape. No
+    /// axial creep, thermal evolution, or amplitude-dependent law is supplied.
+    ///
+    /// # Errors
+    /// Refuses missing/ambiguous coefficients, sampled curves, incompatible
+    /// quantities, duplicate loss laws and unrepresentable geometry products.
+    pub fn with_standard_linear_solid_bending_loss(mut self) -> Result<Self, AcousticRealizeError> {
+        let refuse = |what| AcousticRealizeError::InvalidDescription { what };
+        if self.string.rayleigh.is_some()
+            || self.string.damping_ratio != 0.0
+            || self.string.kelvin_voigt_bending.is_some()
+        {
+            return Err(refuse(
+                "relaxation bending cannot be combined with other internal/Rayleigh losses",
+            ));
+        }
+        let equilibrium = required_positive(
+            &self.material,
+            EQUILIBRIUM_YOUNG_MODULUS_PROPERTY,
+            Pressure::DIMS,
+        )?;
+        let young = required_positive(&self.material, YOUNG_MODULUS_PROPERTY, Pressure::DIMS)?;
+        if equilibrium.to_bits() != young.to_bits() {
+            return Err(refuse(
+                "relaxation bending needs the elastic binding to use the explicit equilibrium modulus",
+            ));
+        }
+        let tau = required_positive(&self.material, BENDING_RELAXATION_TIME_PROPERTY, Time::DIMS)?;
+        let increment = self
+            .material
+            .property(RELAXING_BENDING_MODULUS_PROPERTY)
+            .ok_or_else(|| refuse("relaxation bending needs relaxing_bending_modulus"))?;
+        let delta = increment.value_si();
+        if increment.requirement().quantity() != QuantitySpec::dimensional(Pressure::DIMS)
+            || !delta.is_finite()
+            || delta < 0.0
+        {
+            return Err(refuse(
+                "relaxing bending modulus must be a nonnegative dimension-only scalar in Pa",
+            ));
+        }
+        let mut band = self
+            .material
+            .property(BENDING_RELAXATION_TIME_PROPERTY)
+            .and_then(|p| p.answer().evidence.model.validity.bound("omega"))
+            .ok_or_else(|| {
+                refuse("relaxation bending needs an explicit omega applicability band")
+            })?;
+        for key in [
+            DENSITY_PROPERTY,
+            YOUNG_MODULUS_PROPERTY,
+            EQUILIBRIUM_YOUNG_MODULUS_PROPERTY,
+            RELAXING_BENDING_MODULUS_PROPERTY,
+            BENDING_RELAXATION_TIME_PROPERTY,
+        ] {
+            let answer = self
+                .material
+                .property(key)
+                .ok_or_else(|| refuse("relaxation bending needs all five material coefficients"))?
+                .answer();
+            if answer.receipt.decision != EvaluationDecision::ConstantWithinValidity {
+                return Err(refuse(
+                    "relaxation bending coefficients must be validity-wide scalar constants",
+                ));
+            }
+            if let Some((lo, hi)) = answer.evidence.model.validity.bound("omega") {
+                band = (band.0.max(lo), band.1.min(hi));
+            }
+        }
+        let stiffness = delta * self.second_moment_m4;
+        if !stiffness.is_finite()
+            || (delta > 0.0 && stiffness == 0.0)
+            || !(band.0.is_finite() && band.1.is_finite() && band.0 >= 0.0 && band.1 >= band.0)
+        {
+            return Err(refuse(
+                "relaxation bending stiffness or frequency band is unrepresentable",
+            ));
+        }
+        self.string.relaxation_bending = Some(StandardLinearSolidBending {
+            relaxing_stiffness_n_m2: stiffness,
+            relaxation_time_s: tau,
             omega_band_rad_s: band,
             material_state_identity: Some(self.material.identity()),
         });
@@ -373,10 +480,12 @@ pub fn with_uniform_circular_material_and_constraints(
         specimen_identity: identity.finalize(),
     };
     // A template may come from a previously resolved specimen. Preserve the
-    // selected law, but derive eta I and its citation from the NEW material and
+    // selected law, but derive its coefficients and citation from the NEW material and
     // geometry rather than carrying a stale mechanical coefficient forward.
     if string.kelvin_voigt_bending.is_some() {
         resolved.with_kelvin_voigt_bending_loss()
+    } else if string.relaxation_bending.is_some() {
+        resolved.with_standard_linear_solid_bending_loss()
     } else {
         Ok(resolved)
     }
@@ -437,7 +546,7 @@ fn required_positive(
 ) -> Result<f64, AcousticRealizeError> {
     let Some(property) = state.property(key) else {
         return Err(AcousticRealizeError::InvalidDescription {
-            what: "circular string material needs density and Young's modulus",
+            what: "circular string material is missing a required positive coefficient",
         });
     };
     let value = property.value_si();
@@ -446,7 +555,7 @@ fn required_positive(
         || value <= 0.0
     {
         return Err(AcousticRealizeError::InvalidDescription {
-            what: "circular string density and Young's modulus require positive dimension-only SI quantities; semantic kinds and value forms cannot be erased",
+            what: "circular string coefficients require positive dimension-only SI quantities; semantic kinds and value forms cannot be erased",
         });
     }
     Ok(value)

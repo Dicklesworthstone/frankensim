@@ -51,6 +51,13 @@ flagships.
   nonzero internal damping alongside it refuses during realization. This remains
   data only. Material resolution, band admission and modal projection live in
   `fs-couple`; no instrument-specific or second viscoelastic solver is introduced.
+  `PrestressedString::relaxation_bending` instead declares a
+  `StandardLinearSolidBending`: equilibrium EI remains on the string, with an
+  additional relaxing EI, positive relaxation time, frequency band and optional
+  source identity. It selects causal bending memory, excludes other authored
+  material loss laws, and retains separate air drag. The first realizer assumes
+  a fully relaxed held pluck and fixed material state; axial relaxation and
+  arbitrary pre-release loading histories are not represented by this descriptor.
 - `signal::TimeSignal` — `Constant`, `Ramp` (finite strict interval, clamped;
   stable convex interpolation; the vessel tilt
   `(ramp 0deg 65deg 3s)`), `Table` (strictly increasing times + declared
