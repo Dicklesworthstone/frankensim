@@ -1413,7 +1413,7 @@ fn parse_quantity_kind(node: &Node, path: &str) -> Result<QuantityKind, MachineG
         "heat-capacity" => Some(QuantityKind::HeatCapacity),
         "acoustic-pressure" => Some(QuantityKind::AcousticPressure),
         "acoustic-power" => Some(QuantityKind::AcousticPower),
-        _ => None,
+        _ => QuantityKind::from_material_convention_name(head),
     };
     if let Some(kind) = simple {
         require_arity(node, args, 0, path)?;
@@ -3172,6 +3172,15 @@ fn write_quantity_kind(kind: QuantityKind) -> Node {
         QuantityKind::HeatCapacity => form("heat-capacity", Vec::new()),
         QuantityKind::AcousticPressure => form("acoustic-pressure", Vec::new()),
         QuantityKind::AcousticPower => form("acoustic-power", Vec::new()),
+        QuantityKind::Frequency(_)
+        | QuantityKind::Moisture(_)
+        | QuantityKind::Hardness(_)
+        | QuantityKind::Attenuation(_)
+        | QuantityKind::ThermalConductivity
+        | QuantityKind::OpticalExtinctionCoefficient => form(
+            kind.material_convention_name().unwrap_or_default(),
+            Vec::new(),
+        ),
     }
 }
 

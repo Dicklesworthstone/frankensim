@@ -4858,6 +4858,14 @@ fn terminal_quantity_canonical_len(quantity: TerminalQuantitySpec) -> usize {
                 | super::QuantityKind::AngularVelocity(_)
                 | super::QuantityKind::Composition(_) => 2,
                 super::QuantityKind::Strain { .. } => 3,
+                super::QuantityKind::Frequency(_)
+                | super::QuantityKind::Moisture(_)
+                | super::QuantityKind::Hardness(_)
+                | super::QuantityKind::Attenuation(_)
+                | super::QuantityKind::ThermalConductivity
+                | super::QuantityKind::OpticalExtinctionCoefficient => {
+                    1 + fs_qty::QUANTITY_SPEC_ENCODED_LEN
+                }
                 super::QuantityKind::AbsoluteTemperature
                 | super::QuantityKind::TemperatureDifference
                 | super::QuantityKind::Torque
@@ -9787,6 +9795,10 @@ mod internal_tests {
             )),
             TerminalQuantitySpec::Semantic(SemanticType::new(
                 QuantityKind::AcousticPower,
+                ValueForm::Static,
+            )),
+            TerminalQuantitySpec::Semantic(SemanticType::new(
+                QuantityKind::Frequency(fs_qty::semantic::FrequencyConvention::Cyclic),
                 ValueForm::Static,
             )),
         ];

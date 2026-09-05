@@ -761,6 +761,53 @@ fn sys_011_transport_round_trips_and_preserves_identity() {
 }
 
 #[test]
+fn g3_material_quantity_conventions_survive_system_transport() {
+    use fs_qty::semantic::{
+        AttenuationConvention, FrequencyConvention, HardnessScale, MoistureBasis,
+    };
+    for kind in [
+        QuantityKind::Frequency(FrequencyConvention::Cyclic),
+        QuantityKind::Frequency(FrequencyConvention::Angular),
+        QuantityKind::Hardness(HardnessScale::RockwellC),
+        QuantityKind::Moisture(MoistureBasis::DryMass),
+        QuantityKind::Attenuation(AttenuationConvention::DecibelsPerMetre),
+        QuantityKind::ThermalConductivity,
+        QuantityKind::OpticalExtinctionCoefficient,
+    ] {
+        let mut system = SystemDef::new();
+        let value = system
+            .declare_field(field(
+                "material",
+                0,
+                1,
+                FieldQuantity::Semantic(SemanticType::new(kind, ValueForm::Static)),
+                ("material-basis", "lab", "clk-main"),
+                0,
+            ))
+            .unwrap();
+        system
+            .add_equation(BlockEquation {
+                name: "material equation".to_string(),
+                target: value,
+                rhs: SystemExpr::FieldRef(value),
+            })
+            .unwrap();
+        let admitted = system.admit().unwrap();
+        let text = fs_opdsl::system::transport::to_text(&admitted).unwrap();
+        assert!(text.contains(kind.material_convention_name().unwrap()));
+        let decoded = fs_opdsl::system::transport::from_text(&text)
+            .unwrap()
+            .admit()
+            .unwrap();
+        assert_eq!(admitted.identity(), decoded.identity());
+        assert_eq!(
+            fs_opdsl::system::transport::to_text(&decoded).unwrap(),
+            text
+        );
+    }
+}
+
+#[test]
 fn sys_012_transport_refuses_other_versions_and_malformed_lines() {
     let versioned = "fs-opdsl-system-transport-v1\nversion\t2\nconvention\treal-only\n";
     let refusal = fs_opdsl::system::transport::from_text(versioned);

@@ -428,6 +428,40 @@ fn g0_semantic_mutation_moves_identity_and_full_u64_versions_round_trip() {
 }
 
 #[test]
+fn g3_material_quantity_conventions_round_trip_machine_graphs() {
+    use fs_qty::semantic::{
+        AttenuationConvention, FrequencyConvention, HardnessScale, MoistureBasis, QuantityKind,
+    };
+    let mut identities = std::collections::BTreeSet::new();
+    for kind in [
+        QuantityKind::Frequency(FrequencyConvention::Cyclic),
+        QuantityKind::Frequency(FrequencyConvention::Angular),
+        QuantityKind::Moisture(MoistureBasis::DryMass),
+        QuantityKind::Hardness(HardnessScale::RockwellC),
+        QuantityKind::Attenuation(AttenuationConvention::DecibelsPerMetre),
+        QuantityKind::ThermalConductivity,
+        QuantityKind::OpticalExtinctionCoefficient,
+    ] {
+        let declaration = format!(
+            "(semantic ({}) static)",
+            kind.material_convention_name().unwrap()
+        );
+        let source = behavior_graph_source(61).replace("(dims 0 0 0 0 0 0)", &declaration);
+        let admitted = admit_machine_graph_ast_v1(&sexpr::parse(&source).unwrap()).unwrap();
+        assert!(identities.insert(*admitted.identity().as_bytes()));
+        let program = write_machine_graph_program_v1(&admitted).unwrap();
+        let text = program.print_sexpr_checked().unwrap();
+        assert!(text.contains(&declaration));
+        let decoded = VersionedProgram::parse_sexpr(&text).unwrap();
+        let replayed = parse_machine_graph_program_v1(&decoded)
+            .unwrap()
+            .admit()
+            .unwrap();
+        assert_eq!(admitted.identity(), replayed.identity());
+    }
+}
+
+#[test]
 fn g0_codec_refusals_retain_rule_span_path_and_hint() {
     let source = valid_source("1");
     let uppercase = source.replacen(

@@ -276,6 +276,10 @@ fn qty_006_exponent_and_nonfinite_boundaries_are_total() {
 }
 
 fn all_semantic_kinds() -> Vec<QuantityKind> {
+    use fs_qty::semantic::{
+        AttenuationConvention as A, FrequencyConvention as F, HardnessScale as H,
+        MoistureBasis as M,
+    };
     vec![
         QuantityKind::AbsoluteTemperature,
         QuantityKind::TemperatureDifference,
@@ -315,6 +319,21 @@ fn all_semantic_kinds() -> Vec<QuantityKind> {
         QuantityKind::HeatCapacity,
         QuantityKind::AcousticPressure,
         QuantityKind::AcousticPower,
+        QuantityKind::Frequency(F::Cyclic),
+        QuantityKind::Frequency(F::Angular),
+        QuantityKind::Moisture(M::DryMass),
+        QuantityKind::Moisture(M::WetMass),
+        QuantityKind::Moisture(M::RelativeHumidity),
+        QuantityKind::Hardness(H::RockwellC),
+        QuantityKind::Hardness(H::Vickers),
+        QuantityKind::Hardness(H::Brinell),
+        QuantityKind::Hardness(H::ShoreA),
+        QuantityKind::Hardness(H::ShoreD),
+        QuantityKind::Attenuation(A::AmplitudeNepersPerMetre),
+        QuantityKind::Attenuation(A::PowerNepersPerMetre),
+        QuantityKind::Attenuation(A::DecibelsPerMetre),
+        QuantityKind::ThermalConductivity,
+        QuantityKind::OpticalExtinctionCoefficient,
     ]
 }
 
@@ -338,7 +357,13 @@ const fn expected_waveform_kind(kind: QuantityKind) -> bool {
         | QuantityKind::AmountConcentration
         | QuantityKind::Entropy
         | QuantityKind::HeatCapacity
-        | QuantityKind::AcousticPower => false,
+        | QuantityKind::AcousticPower
+        | QuantityKind::Frequency(_)
+        | QuantityKind::Moisture(_)
+        | QuantityKind::Hardness(_)
+        | QuantityKind::Attenuation(_)
+        | QuantityKind::ThermalConductivity
+        | QuantityKind::OpticalExtinctionCoefficient => false,
     }
 }
 

@@ -254,6 +254,162 @@ fn normalized_pack_round_trips_exact_bytes_and_semantics() {
 }
 
 #[test]
+fn g3_typed_pack_preserves_quantity_identity_and_refuses_version_reinterpretation() {
+    use fs_matdb::{MATDB_TYPED_PACK_SCHEMA_VERSION, MatDbError, QueryPoint, SelectionPolicy};
+    use fs_qty::{
+        QuantitySpec,
+        semantic::{FrequencyConvention, QuantityKind, SemanticType, ValueForm},
+    };
+    let kind = QuantityKind::Frequency(FrequencyConvention::Cyclic);
+    let quantity = QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static));
+    let key = PropertyKey::with_quantity("reference_frequency", quantity);
+    let mut claims = ClaimSet::new();
+    let observation = claims
+        .register_observation(ObservationDataset {
+            specimen: "synthetic frequency fixture".to_string(),
+            method: "authored codec roundtrip case".to_string(),
+            artifact: hash_domain(SOURCE_DOMAIN, b"synthetic observation: 50 Hz"),
+            caveats: "synthetic fixture; no physical measurement or validation".to_string(),
+            provenance: provenance(),
+        })
+        .unwrap();
+    let id = claims
+        .insert_claim(PropertyClaim {
+            key: key.clone(),
+            value: PropertyValue::Scalar {
+                value: 50.0,
+                dims: kind.expected_dims(),
+            },
+            validity: ValidityDomain::unconstrained(),
+            uncertainty: UncertaintyModel::Unstated,
+            interpolation: InterpolationPolicy::TabulatedOnly,
+            observations: vec![observation],
+            provenance: provenance(),
+        })
+        .unwrap();
+    let pack = NormalizedPack::new(
+        "frequency-fixture",
+        "typed-compiler-v2",
+        hash_domain(SOURCE_DOMAIN, b"50 Hz"),
+        "synthetic fixture permitted",
+        claims,
+        Vec::new(),
+        vec![NormalizationReceipt::new(
+            NormalizationTarget::ClaimValue(StatisticMember::scalar(id)),
+            hash_domain(SOURCE_DOMAIN, b"50 Hz"),
+            kind.expected_dims(),
+            1.0,
+            0.0,
+            "Hz",
+            MATDB_PACK_TARGET_BASIS,
+            None,
+            None,
+        )],
+    )
+    .unwrap();
+    assert_eq!(pack.schema_version(), MATDB_TYPED_PACK_SCHEMA_VERSION);
+    let bytes = pack.to_bytes();
+    assert_eq!(&bytes[8..12], &2_u32.to_le_bytes());
+    let decoded = NormalizedPack::from_bytes_verified(pack.content_hash(), &bytes).unwrap();
+    assert_eq!(decoded.to_bytes(), bytes);
+    assert_eq!(decoded.claims().claim(id).unwrap().key.quantity(), quantity);
+    assert_eq!(decoded.normalizations()[0].source_basis(), "Hz");
+    let point = QueryPoint::new();
+    let answer = decoded
+        .claims()
+        .query_typed(&key, &point, SelectionPolicy::SingleClaimOnly)
+        .unwrap();
+    assert_eq!(answer.evidence.value.value.to_bits(), 50.0_f64.to_bits());
+    decoded.claims().verify_receipt(&answer.receipt).unwrap();
+    let state = fs_matdb::MaterialStateId {
+        chemistry: "synthetic quantity fixture".to_string(),
+        phase: "test-only".to_string(),
+        process: "declared fixture".to_string(),
+        revision: 0,
+    };
+    let material =
+        fs_matdb::NormalizedMaterialCardPack::new(state.clone(), decoded.clone()).unwrap();
+    let material = fs_matdb::NormalizedMaterialCardPack::from_bytes_verified(
+        material.content_hash(),
+        &material.to_bytes(),
+    )
+    .unwrap();
+    let material_answer = material
+        .card()
+        .claims()
+        .query_typed(&key, &point, SelectionPolicy::SingleClaimOnly)
+        .unwrap();
+    assert_eq!(material_answer.evidence.value.quantity, quantity);
+    material
+        .card()
+        .claims()
+        .verify_receipt(&material_answer.receipt)
+        .unwrap();
+    let surface = fs_matdb::SurfaceSpec {
+        material: state,
+        texture_frame: "declared fixture frame".to_string(),
+    };
+    let interface = fs_matdb::NormalizedInterfacePack::new(
+        surface.clone(),
+        surface,
+        fs_matdb::SystemContext {
+            medium: "synthetic interface medium".to_string(),
+            third_body: None,
+            environment: "synthetic environment".to_string(),
+            history: "synthetic frequency response".to_string(),
+        },
+        decoded.clone(),
+    )
+    .unwrap();
+    let interface = fs_matdb::NormalizedInterfacePack::from_bytes_verified(
+        interface.content_hash(),
+        &interface.to_bytes(),
+    )
+    .unwrap();
+    let interface_answer = interface
+        .card()
+        .claims()
+        .query_typed(&key, &point, SelectionPolicy::SingleClaimOnly)
+        .unwrap();
+    assert_eq!(interface_answer.evidence.value.quantity, quantity);
+    interface
+        .card()
+        .claims()
+        .verify_receipt(&interface_answer.receipt)
+        .unwrap();
+    let wrong = PropertyKey::with_quantity(
+        key.name(),
+        QuantitySpec::semantic(SemanticType::new(
+            QuantityKind::Frequency(FrequencyConvention::Angular),
+            ValueForm::Static,
+        )),
+    );
+    assert!(matches!(
+        decoded
+            .claims()
+            .query_typed(&wrong, &point, SelectionPolicy::SingleClaimOnly),
+        Err(MatDbError::QuantityMismatch { .. })
+    ));
+    let mut downgraded = bytes.clone();
+    downgraded[8..12].copy_from_slice(&1_u32.to_le_bytes());
+    assert!(NormalizedPack::from_bytes(&downgraded).is_err());
+    let mut relabelled = bytes;
+    let token = quantity.canonical_bytes();
+    let position = relabelled
+        .windows(token.len())
+        .position(|window| window == token)
+        .unwrap();
+    relabelled[position + 9] = 2; // cyclic -> angular, without changing value or claim id
+    assert!(NormalizedPack::from_bytes(&relabelled).is_err());
+
+    let legacy = sample_pack();
+    assert_eq!(legacy.schema_version(), 1);
+    let mut upgraded = legacy.to_bytes();
+    upgraded[8..12].copy_from_slice(&2_u32.to_le_bytes());
+    assert!(NormalizedPack::from_bytes(&upgraded).is_err());
+}
+
+#[test]
 fn construction_and_decoding_canonicalize_permutable_collections() {
     let first = sample_pack();
     let (claims, observation, members) = sample_claims();

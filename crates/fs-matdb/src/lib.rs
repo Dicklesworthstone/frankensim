@@ -62,9 +62,9 @@ pub use model_pack::{
 pub use pack::{
     CorrelationUnknownReason, JOINT_USAGE_RECEIPT_IDENTITY_DOMAIN,
     JOINT_USAGE_RECEIPT_SCHEMA_VERSION, JointAnswer, JointCorrelation, JointStatistics,
-    JointUsageReceipt, MATDB_PACK_SCHEMA_VERSION, MATDB_TYPED_PACK_SCHEMA_VERSION, MATDB_PACK_TARGET_BASIS, NormalizationReceipt,
-    NormalizationTarget, NormalizedPack, PackError, StatisticComponent, StatisticMember,
-    ValidityBoundSide,
+    JointUsageReceipt, MATDB_PACK_SCHEMA_VERSION, MATDB_PACK_TARGET_BASIS,
+    MATDB_TYPED_PACK_SCHEMA_VERSION, NormalizationReceipt, NormalizationTarget, NormalizedPack,
+    PackError, StatisticComponent, StatisticMember, ValidityBoundSide,
 };
 pub use pcb::{
     CopperCoverage, PCB_HOMOGENIZATION_IDENTITY_DOMAIN, PCB_HOMOGENIZATION_SCHEMA_VERSION,
@@ -315,8 +315,14 @@ impl fmt::Display for MatDbError {
                  {expected:?}",
                 key.name()
             ),
-            MatDbError::InvalidQuantityValue { property, error } => write!(f, "property '{property}': {error}"),
-            MatDbError::QuantityMismatch { property, expected, found } => write!(
+            MatDbError::InvalidQuantityValue { property, error } => {
+                write!(f, "property '{property}': {error}")
+            }
+            MatDbError::QuantityMismatch {
+                property,
+                expected,
+                found,
+            } => write!(
                 f,
                 "property '{property}': quantity {found:?} disagrees with required {expected:?}; convert explicitly before querying"
             ),
@@ -450,15 +456,13 @@ impl fmt::Display for MatDbError {
 
 impl std::error::Error for MatDbError {}
 
-/// A property key: the NAME of a material property plus its registered
-/// dimensions. The registry is the dims-check authority at insertion —
-/// a claim whose value dims disagree with its key refuses.
+/// A property name plus its exact quantity schema. The registry checks both
+/// dimensions and semantic kinds at insertion.
 ///
 /// The name is free-form (the initial vocabulary in the bead is
-/// expressible without a closed enum), but the (name, dims) pair is the
-/// identity: `density` with mass/volume dims and `density` with any
-/// other dims are DIFFERENT keys, and a [`ClaimSet`] refuses to register
-/// the same name twice with different dims.
+/// expressible without a closed enum). A [`ClaimSet`] refuses to register the
+/// same name with different dimensions, kinds, or conventions. [`Self::new`]
+/// explicitly declares no kind; it is not a wildcard for typed properties.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PropertyKey {
     name: String,
@@ -479,7 +483,10 @@ impl PropertyKey {
     /// dimension-only descriptor. No conversion or source-kind inference occurs.
     #[must_use]
     pub fn with_quantity(name: impl Into<String>, quantity: QuantitySpec) -> Self {
-        Self { name: name.into(), quantity }
+        Self {
+            name: name.into(),
+            quantity,
+        }
     }
 
     /// Exact quantity schema. A dimension-only declaration is not a wildcard.
@@ -925,13 +932,16 @@ impl ClaimSet {
                 fs_qty::semantic::SemanticQty::new(fs_qty::QtyAny::new(value, found), semantic_type)
                     .map(|_| ())
                     .map_err(|error| MatDbError::InvalidQuantityValue {
-                        property: claim.key.name().to_owned(), error,
+                        property: claim.key.name().to_owned(),
+                        error,
                     })
             };
             match &claim.value {
                 PropertyValue::Scalar { value, .. } => validate(*value)?,
                 PropertyValue::Curve { knots, .. } => {
-                    for &(_, value) in knots { validate(value)?; }
+                    for &(_, value) in knots {
+                        validate(value)?;
+                    }
                 }
             }
         }
@@ -948,7 +958,9 @@ impl ClaimSet {
             && expected != claim.key.quantity()
         {
             return Err(MatDbError::QuantityMismatch {
-                property: claim.key.name().to_owned(), expected, found: claim.key.quantity(),
+                property: claim.key.name().to_owned(),
+                expected,
+                found: claim.key.quantity(),
             });
         }
         for observation in &claim.observations {

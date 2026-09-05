@@ -1723,7 +1723,8 @@ fn validate_contract(
     context: &'static str,
 ) -> Result<(), PayloadError> {
     if let QuantityContract::Semantic(semantic) = contract
-        && !semantic.kind().admits_scalar_form(semantic.form())
+        && (!semantic.kind().admits_scalar_form(semantic.form())
+            || semantic.kind().material_convention_name().is_some())
     {
         return Err(PayloadError::InvalidSemanticContract { context, semantic });
     }
@@ -2738,6 +2739,19 @@ fn write_quantity_kind(
         QuantityKind::HeatCapacity => put_u8(out, 16)?,
         QuantityKind::AcousticPressure => put_u8(out, 17)?,
         QuantityKind::AcousticPower => put_u8(out, 18)?,
+        QuantityKind::Frequency(_)
+        | QuantityKind::Moisture(_)
+        | QuantityKind::Hardness(_)
+        | QuantityKind::Attenuation(_)
+        | QuantityKind::ThermalConductivity
+        | QuantityKind::OpticalExtinctionCoefficient => {
+            // This closed v1 payload has no material-convention extension.
+            // Refuse until its own versioned migration exists; never erase kind.
+            return Err(PayloadError::InvalidSemanticContract {
+                context: "v1 payload encoding requires a material-convention schema migration",
+                semantic: SemanticType::new(kind, ValueForm::Static),
+            });
+        }
     }
     Ok(())
 }

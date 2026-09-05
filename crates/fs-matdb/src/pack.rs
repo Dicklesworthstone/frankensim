@@ -9,7 +9,7 @@ use std::fmt;
 
 use fs_blake3::{ContentHash, hash_domain};
 use fs_evidence::ValidityDomain;
-use fs_qty::{Dims, QuantitySpec, QUANTITY_SPEC_ENCODED_LEN};
+use fs_qty::{Dims, QUANTITY_SPEC_ENCODED_LEN, QuantitySpec};
 
 use crate::{
     ClaimId, ClaimSet, InterpolationPolicy, MatDbError, ObservationDataset, ObservationId,
@@ -534,7 +534,11 @@ impl NormalizedPack {
     /// silently reinterpreted as having quantity kinds.
     #[must_use]
     pub fn schema_version(&self) -> u32 {
-        if self.claims.claims_ordered().any(|(_, claim)| claim.key.quantity().semantic_type().is_some()) {
+        if self
+            .claims
+            .claims_ordered()
+            .any(|(_, claim)| claim.key.quantity().semantic_type().is_some())
+        {
             MATDB_TYPED_PACK_SCHEMA_VERSION
         } else {
             MATDB_PACK_SCHEMA_VERSION
@@ -631,7 +635,11 @@ impl NormalizedPack {
         if bytes.len() > MAX_PACK_BYTES {
             return Err(limit("pack_bytes", MAX_PACK_BYTES, bytes.len()));
         }
-        let version = bytes.get(8..12).and_then(|raw| raw.try_into().ok()).map(u32::from_le_bytes).unwrap_or(0);
+        let version = bytes
+            .get(8..12)
+            .and_then(|raw| raw.try_into().ok())
+            .map(u32::from_le_bytes)
+            .unwrap_or(0);
         let actual = hash_domain(pack_hash_domain(version), bytes);
         if actual != expected {
             return Err(PackError::IdentityMismatch {
@@ -770,7 +778,11 @@ impl NormalizedPack {
 }
 
 fn pack_hash_domain(version: u32) -> &'static str {
-    if version == MATDB_TYPED_PACK_SCHEMA_VERSION { TYPED_PACK_HASH_DOMAIN } else { PACK_HASH_DOMAIN }
+    if version == MATDB_TYPED_PACK_SCHEMA_VERSION {
+        TYPED_PACK_HASH_DOMAIN
+    } else {
+        PACK_HASH_DOMAIN
+    }
 }
 
 fn invalid(field: &'static str, detail: impl Into<String>) -> PackError {
@@ -2054,7 +2066,9 @@ fn encode_claim(writer: &mut Writer, claim: &PropertyClaim, version: u32) {
     writer.string(claim.key.name());
     writer.dims(claim.key.dims());
     if version == MATDB_TYPED_PACK_SCHEMA_VERSION {
-        writer.bytes.extend_from_slice(&claim.key.quantity().canonical_bytes());
+        writer
+            .bytes
+            .extend_from_slice(&claim.key.quantity().canonical_bytes());
     }
     match &claim.value {
         PropertyValue::Scalar { value, dims } => {
@@ -2124,7 +2138,9 @@ fn decode_claim(reader: &mut Reader<'_>, version: u32) -> Result<PropertyClaim, 
         let quantity = QuantitySpec::from_canonical_bytes(raw)
             .map_err(|error| reader.malformed(format!("property quantity: {error}")))?;
         if quantity.dims() != key_dims {
-            return Err(reader.malformed("property quantity dimensions disagree with key dimensions"));
+            return Err(
+                reader.malformed("property quantity dimensions disagree with key dimensions")
+            );
         }
         quantity
     } else {

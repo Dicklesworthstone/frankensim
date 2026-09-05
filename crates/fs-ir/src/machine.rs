@@ -3657,6 +3657,18 @@ fn push_quantity_kind<O: MachineCanonicalBytes + ?Sized>(out: &mut O, kind: Quan
         QuantityKind::HeatCapacity => out.push(17),
         QuantityKind::AcousticPressure => out.push(18),
         QuantityKind::AcousticPower => out.push(19),
+        QuantityKind::Frequency(_)
+        | QuantityKind::Moisture(_)
+        | QuantityKind::Hardness(_)
+        | QuantityKind::Attenuation(_)
+        | QuantityKind::ThermalConductivity
+        | QuantityKind::OpticalExtinctionCoefficient => {
+            out.push(20);
+            out.extend_from_slice(
+                &fs_qty::QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static))
+                    .canonical_bytes(),
+            );
+        }
     }
 }
 

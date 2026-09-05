@@ -307,6 +307,34 @@ fn g0_every_closed_semantic_kind_survives_the_codec() {
 }
 
 #[test]
+fn g0_v1_payload_refuses_material_conventions_before_infallible_encoding() {
+    use fs_qty::semantic::{
+        AttenuationConvention, FrequencyConvention, HardnessScale, MoistureBasis,
+    };
+    for kind in [
+        QuantityKind::Frequency(FrequencyConvention::Cyclic),
+        QuantityKind::Frequency(FrequencyConvention::Angular),
+        QuantityKind::Hardness(HardnessScale::RockwellC),
+        QuantityKind::Moisture(MoistureBasis::DryMass),
+        QuantityKind::Attenuation(AttenuationConvention::DecibelsPerMetre),
+        QuantityKind::ThermalConductivity,
+        QuantityKind::OpticalExtinctionCoefficient,
+    ] {
+        let semantic = SemanticType::new(kind, ValueForm::Static);
+        assert!(matches!(
+            PayloadMeta::new(
+                QuantityContract::Semantic(semantic),
+                id("basis/material"),
+                FrameId(7),
+                OrientationParity::Even,
+                ReferenceSemantics::Continuous
+            ),
+            Err(PayloadError::InvalidSemanticContract { .. })
+        ));
+    }
+}
+
+#[test]
 fn phasors_require_one_semantic_kind_and_peak_or_rms_convention() {
     for (form, amplitude) in [
         (ValueForm::Peak, PhasorAmplitude::Peak),

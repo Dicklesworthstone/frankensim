@@ -1687,6 +1687,15 @@ pub mod transport {
             QuantityKind::HeatCapacity => "heat-capacity".to_string(),
             QuantityKind::AcousticPressure => "acoustic-pressure".to_string(),
             QuantityKind::AcousticPower => "acoustic-power".to_string(),
+            QuantityKind::Frequency(_)
+            | QuantityKind::Moisture(_)
+            | QuantityKind::Hardness(_)
+            | QuantityKind::Attenuation(_)
+            | QuantityKind::ThermalConductivity
+            | QuantityKind::OpticalExtinctionCoefficient => kind
+                .material_convention_name()
+                .unwrap_or_default()
+                .to_string(),
         }
     }
 
@@ -1997,7 +2006,9 @@ pub mod transport {
             "acoustic-pressure" => QuantityKind::AcousticPressure,
             "acoustic-power" => QuantityKind::AcousticPower,
             other => {
-                if let Some(domain) = other.strip_prefix("angle:") {
+                if let Some(kind) = QuantityKind::from_material_convention_name(other) {
+                    kind
+                } else if let Some(domain) = other.strip_prefix("angle:") {
                     QuantityKind::Angle(parse_angle_domain(domain, line)?)
                 } else if let Some(domain) = other.strip_prefix("angular-velocity:") {
                     QuantityKind::AngularVelocity(parse_angle_domain(domain, line)?)

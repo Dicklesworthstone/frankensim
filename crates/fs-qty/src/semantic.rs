@@ -94,7 +94,8 @@ pub enum MoistureBasis {
     DryMass,
     /// Water mass divided by total wet specimen mass.
     WetMass,
-    /// Water-vapor partial pressure divided by saturation pressure.
+    /// Water-vapor partial pressure divided by saturation pressure; can exceed
+    /// one in a supersaturated state. A model may impose a narrower domain.
     RelativeHumidity,
 }
 
@@ -187,13 +188,72 @@ pub enum QuantityKind {
 }
 
 impl QuantityKind {
+    /// Stable names for the additive material conventions. Older kind
+    /// grammars keep their existing spellings and return `None` here.
+    #[must_use]
+    pub const fn material_convention_name(self) -> Option<&'static str> {
+        Some(match self {
+            Self::Frequency(FrequencyConvention::Cyclic) => "cyclic-frequency",
+            Self::Frequency(FrequencyConvention::Angular) => "angular-frequency",
+            Self::Moisture(MoistureBasis::DryMass) => "moisture-dry-mass",
+            Self::Moisture(MoistureBasis::WetMass) => "moisture-wet-mass",
+            Self::Moisture(MoistureBasis::RelativeHumidity) => "relative-humidity",
+            Self::Hardness(HardnessScale::RockwellC) => "hardness-rockwell-c",
+            Self::Hardness(HardnessScale::Vickers) => "hardness-vickers",
+            Self::Hardness(HardnessScale::Brinell) => "hardness-brinell",
+            Self::Hardness(HardnessScale::ShoreA) => "hardness-shore-a",
+            Self::Hardness(HardnessScale::ShoreD) => "hardness-shore-d",
+            Self::Attenuation(AttenuationConvention::AmplitudeNepersPerMetre) => {
+                "attenuation-amplitude-np-per-m"
+            }
+            Self::Attenuation(AttenuationConvention::PowerNepersPerMetre) => {
+                "attenuation-power-np-per-m"
+            }
+            Self::Attenuation(AttenuationConvention::DecibelsPerMetre) => "attenuation-db-per-m",
+            Self::ThermalConductivity => "thermal-conductivity",
+            Self::OpticalExtinctionCoefficient => "optical-extinction-coefficient",
+            _ => return None,
+        })
+    }
+
+    /// Parse only the named material extension; unknown names refuse.
+    #[must_use]
+    pub fn from_material_convention_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "cyclic-frequency" => Self::Frequency(FrequencyConvention::Cyclic),
+            "angular-frequency" => Self::Frequency(FrequencyConvention::Angular),
+            "moisture-dry-mass" => Self::Moisture(MoistureBasis::DryMass),
+            "moisture-wet-mass" => Self::Moisture(MoistureBasis::WetMass),
+            "relative-humidity" => Self::Moisture(MoistureBasis::RelativeHumidity),
+            "hardness-rockwell-c" => Self::Hardness(HardnessScale::RockwellC),
+            "hardness-vickers" => Self::Hardness(HardnessScale::Vickers),
+            "hardness-brinell" => Self::Hardness(HardnessScale::Brinell),
+            "hardness-shore-a" => Self::Hardness(HardnessScale::ShoreA),
+            "hardness-shore-d" => Self::Hardness(HardnessScale::ShoreD),
+            "attenuation-amplitude-np-per-m" => {
+                Self::Attenuation(AttenuationConvention::AmplitudeNepersPerMetre)
+            }
+            "attenuation-power-np-per-m" => {
+                Self::Attenuation(AttenuationConvention::PowerNepersPerMetre)
+            }
+            "attenuation-db-per-m" => Self::Attenuation(AttenuationConvention::DecibelsPerMetre),
+            "thermal-conductivity" => Self::ThermalConductivity,
+            "optical-extinction-coefficient" => Self::OpticalExtinctionCoefficient,
+            _ => return None,
+        })
+    }
+
     /// Required six-base dimension vector for this semantic kind.
     #[must_use]
     pub const fn expected_dims(self) -> Dims {
         match self {
             Self::AbsoluteTemperature | Self::TemperatureDifference => TEMPERATURE_DIMS,
-            Self::Angle(_) | Self::Strain { .. } | Self::Composition(_)
-            | Self::Moisture(_) | Self::Hardness(_) | Self::OpticalExtinctionCoefficient => Dims::NONE,
+            Self::Angle(_)
+            | Self::Strain { .. }
+            | Self::Composition(_)
+            | Self::Moisture(_)
+            | Self::Hardness(_)
+            | Self::OpticalExtinctionCoefficient => Dims::NONE,
             Self::AngularVelocity(_) | Self::Frequency(_) => ANGULAR_VELOCITY_DIMS,
             Self::Attenuation(_) => Dims([-1, 0, 0, 0, 0, 0]),
             Self::ThermalConductivity => Dims([1, 1, -3, -1, 0, 0]),
@@ -315,7 +375,7 @@ impl SemanticType {
     }
 }
 
-/// Version byte of the canonical [`QuantitySpec`] identity encoding.
+/// Frozen version byte for the original [`QuantitySpec`] descriptors.
 pub const QUANTITY_SPEC_ENCODING_VERSION: u8 = 1;
 
 /// Additive material conventions use v2 tokens. Existing descriptors retain
@@ -397,7 +457,11 @@ impl QuantitySpec {
             }
         };
         [
-            if kind >= 20 { MATERIAL_QUANTITY_SPEC_ENCODING_VERSION } else { QUANTITY_SPEC_ENCODING_VERSION },
+            if kind >= 20 {
+                MATERIAL_QUANTITY_SPEC_ENCODING_VERSION
+            } else {
+                QUANTITY_SPEC_ENCODING_VERSION
+            },
             dims[0].to_le_bytes()[0],
             dims[1].to_le_bytes()[0],
             dims[2].to_le_bytes()[0],
@@ -544,7 +608,7 @@ impl fmt::Display for QuantitySpecDecodeError {
             ),
             Self::Version { actual } => write!(
                 f,
-                "quantity-spec encoding version {actual} is unsupported; expected {QUANTITY_SPEC_ENCODING_VERSION}"
+                "quantity-spec version {actual} does not match its kind: original descriptors require v1, material conventions require v2"
             ),
             Self::Variant { actual } => {
                 write!(f, "quantity-spec variant tag {actual} is unknown")
@@ -617,27 +681,43 @@ const fn encode_quantity_kind(kind: QuantityKind) -> (u8, u8, u8) {
         QuantityKind::HeatCapacity => (17, 0, 0),
         QuantityKind::AcousticPressure => (18, 0, 0),
         QuantityKind::AcousticPower => (19, 0, 0),
-        QuantityKind::Frequency(convention) => (20, match convention {
-            FrequencyConvention::Cyclic => 1,
-            FrequencyConvention::Angular => 2,
-        }, 0),
-        QuantityKind::Moisture(basis) => (21, match basis {
-            MoistureBasis::DryMass => 1,
-            MoistureBasis::WetMass => 2,
-            MoistureBasis::RelativeHumidity => 3,
-        }, 0),
-        QuantityKind::Hardness(scale) => (22, match scale {
-            HardnessScale::RockwellC => 1,
-            HardnessScale::Vickers => 2,
-            HardnessScale::Brinell => 3,
-            HardnessScale::ShoreA => 4,
-            HardnessScale::ShoreD => 5,
-        }, 0),
-        QuantityKind::Attenuation(convention) => (23, match convention {
-            AttenuationConvention::AmplitudeNepersPerMetre => 1,
-            AttenuationConvention::PowerNepersPerMetre => 2,
-            AttenuationConvention::DecibelsPerMetre => 3,
-        }, 0),
+        QuantityKind::Frequency(convention) => (
+            20,
+            match convention {
+                FrequencyConvention::Cyclic => 1,
+                FrequencyConvention::Angular => 2,
+            },
+            0,
+        ),
+        QuantityKind::Moisture(basis) => (
+            21,
+            match basis {
+                MoistureBasis::DryMass => 1,
+                MoistureBasis::WetMass => 2,
+                MoistureBasis::RelativeHumidity => 3,
+            },
+            0,
+        ),
+        QuantityKind::Hardness(scale) => (
+            22,
+            match scale {
+                HardnessScale::RockwellC => 1,
+                HardnessScale::Vickers => 2,
+                HardnessScale::Brinell => 3,
+                HardnessScale::ShoreA => 4,
+                HardnessScale::ShoreD => 5,
+            },
+            0,
+        ),
+        QuantityKind::Attenuation(convention) => (
+            23,
+            match convention {
+                AttenuationConvention::AmplitudeNepersPerMetre => 1,
+                AttenuationConvention::PowerNepersPerMetre => 2,
+                AttenuationConvention::DecibelsPerMetre => 3,
+            },
+            0,
+        ),
         QuantityKind::ThermalConductivity => (24, 0, 0),
         QuantityKind::OpticalExtinctionCoefficient => (25, 0, 0),
     }
@@ -709,9 +789,15 @@ const fn decode_quantity_kind(kind: u8, parameter_a: u8, parameter_b: u8) -> Opt
         (22, 3, 0) => Some(QuantityKind::Hardness(HardnessScale::Brinell)),
         (22, 4, 0) => Some(QuantityKind::Hardness(HardnessScale::ShoreA)),
         (22, 5, 0) => Some(QuantityKind::Hardness(HardnessScale::ShoreD)),
-        (23, 1, 0) => Some(QuantityKind::Attenuation(AttenuationConvention::AmplitudeNepersPerMetre)),
-        (23, 2, 0) => Some(QuantityKind::Attenuation(AttenuationConvention::PowerNepersPerMetre)),
-        (23, 3, 0) => Some(QuantityKind::Attenuation(AttenuationConvention::DecibelsPerMetre)),
+        (23, 1, 0) => Some(QuantityKind::Attenuation(
+            AttenuationConvention::AmplitudeNepersPerMetre,
+        )),
+        (23, 2, 0) => Some(QuantityKind::Attenuation(
+            AttenuationConvention::PowerNepersPerMetre,
+        )),
+        (23, 3, 0) => Some(QuantityKind::Attenuation(
+            AttenuationConvention::DecibelsPerMetre,
+        )),
         (24, 0, 0) => Some(QuantityKind::ThermalConductivity),
         (25, 0, 0) => Some(QuantityKind::OpticalExtinctionCoefficient),
         _ => None,
@@ -1046,7 +1132,7 @@ fn validate_scalar(
         | QuantityKind::MassConcentration
         | QuantityKind::AmountConcentration
         | QuantityKind::Frequency(_)
-        | QuantityKind::Moisture(MoistureBasis::DryMass)
+        | QuantityKind::Moisture(MoistureBasis::DryMass | MoistureBasis::RelativeHumidity)
             if value < 0.0 =>
         {
             Err(invalid_value(
@@ -1062,14 +1148,16 @@ fn validate_scalar(
             value,
             ValueRequirement::FinitePositive,
         )),
-        QuantityKind::Composition(_)
-        | QuantityKind::Moisture(MoistureBasis::WetMass | MoistureBasis::RelativeHumidity)
-            if !(0.0..=1.0).contains(&value) => Err(invalid_value(
-            operation,
-            semantic_type,
-            value,
-            ValueRequirement::UnitFraction,
-        )),
+        QuantityKind::Composition(_) | QuantityKind::Moisture(MoistureBasis::WetMass)
+            if !(0.0..=1.0).contains(&value) =>
+        {
+            Err(invalid_value(
+                operation,
+                semantic_type,
+                value,
+                ValueRequirement::UnitFraction,
+            ))
+        }
         _ => Ok(()),
     }
 }
@@ -1129,9 +1217,18 @@ pub fn convert_frequency(
     // A positive oscillation cannot become a zero-frequency state through
     // underflow; this is the same representability rule as mass conversion.
     if source.value() > 0.0 && value == 0.0 {
-        return Err(invalid_value(operation, kind_type(QuantityKind::Frequency(target), ValueForm::Static), value, ValueRequirement::FinitePositive));
+        return Err(invalid_value(
+            operation,
+            kind_type(QuantityKind::Frequency(target), ValueForm::Static),
+            value,
+            ValueRequirement::FinitePositive,
+        ));
     }
-    semantic_value(value, kind_type(QuantityKind::Frequency(target), ValueForm::Static), operation)
+    semantic_value(
+        value,
+        kind_type(QuantityKind::Frequency(target), ValueForm::Static),
+        operation,
+    )
 }
 
 fn require_point_form(
@@ -2193,6 +2290,12 @@ mod tests {
         for kind in kinds {
             let spec = QuantitySpec::semantic(kind_type(kind, ValueForm::Static));
             let bytes = spec.canonical_bytes();
+            assert_eq!(
+                QuantityKind::from_material_convention_name(
+                    kind.material_convention_name().unwrap()
+                ),
+                Some(kind)
+            );
             assert_eq!(bytes[0], 2);
             assert!(tokens.insert(bytes));
             assert_eq!(QuantitySpec::from_canonical_bytes(&bytes), Ok(spec));
@@ -2202,26 +2305,88 @@ mod tests {
             assert!(quantity_result(1.0, kind, ValueForm::Rms).is_err());
             assert!(!kind.admits_phasor());
         }
-        let temperature = QuantitySpec::semantic(kind_type(QuantityKind::AbsoluteTemperature, ValueForm::Static));
-        assert_eq!(temperature.canonical_bytes(), [1, 0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1]);
+        let temperature = QuantitySpec::semantic(kind_type(
+            QuantityKind::AbsoluteTemperature,
+            ValueForm::Static,
+        ));
+        assert_eq!(
+            temperature.canonical_bytes(),
+            [1, 0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1]
+        );
         let mut alias = temperature.canonical_bytes();
         alias[0] = 2;
         assert!(QuantitySpec::from_canonical_bytes(&alias).is_err());
-        assert!(quantity_result(1.5, QuantityKind::Moisture(MoistureBasis::DryMass), ValueForm::Static).is_ok());
-        for basis in [MoistureBasis::WetMass, MoistureBasis::RelativeHumidity] {
-            assert!(quantity_result(1.5, QuantityKind::Moisture(basis), ValueForm::Static).is_err());
-        }
+        assert!(
+            quantity_result(
+                1.5,
+                QuantityKind::Moisture(MoistureBasis::DryMass),
+                ValueForm::Static
+            )
+            .is_ok()
+        );
+        assert!(
+            quantity_result(
+                1.5,
+                QuantityKind::Moisture(MoistureBasis::WetMass),
+                ValueForm::Static
+            )
+            .is_err()
+        );
+        assert!(
+            quantity_result(
+                1.5,
+                QuantityKind::Moisture(MoistureBasis::RelativeHumidity),
+                ValueForm::Static
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn g3_frequency_conversion_requires_explicit_kind_and_preserves_physical_rate() {
-        let hz = quantity(50.0, QuantityKind::Frequency(FrequencyConvention::Cyclic), ValueForm::Static);
-        let radians = convert_frequency(hz, FrequencyConvention::Angular).expect("explicit conversion");
+        let hz = quantity(
+            50.0,
+            QuantityKind::Frequency(FrequencyConvention::Cyclic),
+            ValueForm::Static,
+        );
+        let radians =
+            convert_frequency(hz, FrequencyConvention::Angular).expect("explicit conversion");
         assert_close(radians.value(), 100.0 * core::f64::consts::PI);
-        assert_close(convert_frequency(radians, FrequencyConvention::Cyclic).unwrap().value(), hz.value());
-        assert!(convert_frequency(quantity(50.0, QuantityKind::AngularVelocity(AngleDomain::Mechanical), ValueForm::Static), FrequencyConvention::Cyclic).is_err());
-        assert!(convert_frequency(quantity(f64::MAX, hz.semantic_type().kind(), ValueForm::Static), FrequencyConvention::Angular).is_err());
-        assert!(convert_frequency(quantity(f64::from_bits(1), radians.semantic_type().kind(), ValueForm::Static), FrequencyConvention::Cyclic).is_err());
+        assert_close(
+            convert_frequency(radians, FrequencyConvention::Cyclic)
+                .unwrap()
+                .value(),
+            hz.value(),
+        );
+        assert!(
+            convert_frequency(
+                quantity(
+                    50.0,
+                    QuantityKind::AngularVelocity(AngleDomain::Mechanical),
+                    ValueForm::Static
+                ),
+                FrequencyConvention::Cyclic
+            )
+            .is_err()
+        );
+        assert!(
+            convert_frequency(
+                quantity(f64::MAX, hz.semantic_type().kind(), ValueForm::Static),
+                FrequencyConvention::Angular
+            )
+            .is_err()
+        );
+        assert!(
+            convert_frequency(
+                quantity(
+                    f64::from_bits(1),
+                    radians.semantic_type().kind(),
+                    ValueForm::Static
+                ),
+                FrequencyConvention::Cyclic
+            )
+            .is_err()
+        );
     }
 
     fn assert_close(actual: f64, expected: f64) {

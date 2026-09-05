@@ -53,6 +53,141 @@ fn room() -> QueryPoint {
     QueryPoint::new().with("T", 293.15).expect("finite point")
 }
 
+#[test]
+fn g0_material_quantity_queries_refuse_equal_dimension_convention_mismatches() {
+    use fs_qty::{
+        QuantitySpec,
+        semantic::{
+            AttenuationConvention as A, FrequencyConvention as F, HardnessScale as H,
+            MoistureBasis as M, QuantityKind as K, SemanticType, StrainBasis, StrainComponent,
+            ValueForm,
+        },
+    };
+    let pairs = [
+        (K::AbsoluteTemperature, K::TemperatureDifference),
+        (K::Frequency(F::Cyclic), K::Frequency(F::Angular)),
+        (K::Energy, K::Torque),
+        (K::Hardness(H::RockwellC), K::Hardness(H::Vickers)),
+        (K::Moisture(M::DryMass), K::Moisture(M::WetMass)),
+        (K::Moisture(M::RelativeHumidity), K::Moisture(M::WetMass)),
+        (
+            K::Attenuation(A::AmplitudeNepersPerMetre),
+            K::Attenuation(A::PowerNepersPerMetre),
+        ),
+        (
+            K::Attenuation(A::AmplitudeNepersPerMetre),
+            K::Attenuation(A::DecibelsPerMetre),
+        ),
+        (
+            K::Strain {
+                basis: StrainBasis::Tensor,
+                component: StrainComponent::Shear,
+            },
+            K::Strain {
+                basis: StrainBasis::Engineering,
+                component: StrainComponent::Shear,
+            },
+        ),
+        (K::OpticalExtinctionCoefficient, K::ThermalConductivity),
+    ];
+    for (actual, wrong) in pairs {
+        let spec = |kind| QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static));
+        let key = PropertyKey::with_quantity("quantity-fixture", spec(actual));
+        let mut claim = density(
+            1.0,
+            "explicit synthetic convention test",
+            UncertaintyModel::Unstated,
+        );
+        claim.key = key.clone();
+        claim.value = PropertyValue::Scalar {
+            value: 1.0,
+            dims: actual.expected_dims(),
+        };
+        let mut set = ClaimSet::new();
+        let id = set.insert_claim(claim.clone()).unwrap();
+        let wrong_key = PropertyKey::with_quantity(key.name(), spec(wrong));
+        assert!(matches!(
+            set.query_typed(&wrong_key, &room(), SelectionPolicy::SingleClaimOnly),
+            Err(MatDbError::QuantityMismatch { .. })
+        ));
+        assert!(matches!(
+            set.query_pinned_typed(&wrong_key, &room(), id),
+            Err(MatDbError::QuantityMismatch { .. })
+        ));
+        assert!(matches!(
+            set.query(key.name(), &room(), SelectionPolicy::SingleClaimOnly),
+            Err(MatDbError::QuantityMismatch { .. })
+        ));
+        assert!(matches!(
+            set.query_pinned(key.name(), &room(), id),
+            Err(MatDbError::QuantityMismatch { .. })
+        ));
+        let answer = set
+            .query_typed(&key, &room(), SelectionPolicy::SingleClaimOnly)
+            .unwrap();
+        assert_eq!(answer.evidence.value.quantity, spec(actual));
+        assert_eq!(answer.evidence.value.value, 1.0);
+        let decoded =
+            PropertyUsageReceipt::from_bytes(&answer.receipt.to_bytes().unwrap()).unwrap();
+        set.verify_receipt(&decoded).unwrap();
+        assert_eq!(decoded.selected, id);
+
+        let mut conflicting = claim.clone();
+        conflicting.key = wrong_key;
+        conflicting.value = PropertyValue::Scalar {
+            value: 1.0,
+            dims: wrong.expected_dims(),
+        };
+        assert!(set.insert_claim(conflicting.clone()).is_err());
+        assert_eq!(set.claim_count(), 1, "refusal is transactional");
+        let mut other = ClaimSet::new();
+        let other_id = other.insert_claim(conflicting).unwrap();
+        assert_ne!(id, other_id, "kind changes claim and receipt identity");
+        assert!(other.verify_receipt(&decoded).is_err());
+
+        claim.key = PropertyKey::new(key.name(), actual.expected_dims());
+        let mut legacy = ClaimSet::new();
+        legacy.insert_claim(claim).unwrap();
+        assert!(matches!(
+            legacy.query_typed(&key, &room(), SelectionPolicy::SingleClaimOnly),
+            Err(MatDbError::QuantityMismatch { .. })
+        ));
+    }
+}
+
+#[test]
+fn g0_typed_property_admission_uses_shared_scalar_domain_and_form_rules() {
+    use fs_qty::{
+        QuantitySpec,
+        semantic::{MoistureBasis, QuantityKind, SemanticType, ValueForm},
+    };
+    for (kind, form, value) in [
+        (QuantityKind::AbsoluteTemperature, ValueForm::Static, -1.0),
+        (QuantityKind::AbsoluteTemperature, ValueForm::Rms, 300.0),
+        (
+            QuantityKind::Moisture(MoistureBasis::WetMass),
+            ValueForm::Static,
+            1.5,
+        ),
+    ] {
+        let mut claim = density(value, "synthetic invalid value", UncertaintyModel::Unstated);
+        claim.key = PropertyKey::with_quantity(
+            "typed",
+            QuantitySpec::semantic(SemanticType::new(kind, form)),
+        );
+        claim.value = PropertyValue::Scalar {
+            value,
+            dims: kind.expected_dims(),
+        };
+        let mut set = ClaimSet::new();
+        assert!(matches!(
+            set.insert_claim(claim),
+            Err(MatDbError::InvalidQuantityValue { .. })
+        ));
+        assert_eq!(set.claim_count(), 0);
+    }
+}
+
 fn portable_receipt_fixture() -> (ClaimSet, PropertyUsageReceipt) {
     let mut set = ClaimSet::new();
     let observation = set

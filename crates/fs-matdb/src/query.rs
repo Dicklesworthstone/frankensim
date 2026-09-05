@@ -371,7 +371,7 @@ impl EvaluationDecision {
 /// The evaluated sample a query returns (inside `Evidence<_>`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct PropertySample {
-    /// The evaluated SI value.
+    /// The evaluated value in the declared quantity's canonical convention.
     pub value: f64,
     /// The value's dimensions.
     pub dims: Dims,
@@ -1234,12 +1234,16 @@ impl ClaimSet {
     }
 
     fn require_quantity(&self, property: &PropertyKey) -> Result<(), MatDbError> {
-        let found = self.registered_quantity(property.name()).ok_or_else(|| MatDbError::UnknownProperty {
-            property: property.name().to_owned(),
+        let found = self.registered_quantity(property.name()).ok_or_else(|| {
+            MatDbError::UnknownProperty {
+                property: property.name().to_owned(),
+            }
         })?;
         if found != property.quantity() {
             return Err(MatDbError::QuantityMismatch {
-                property: property.name().to_owned(), expected: property.quantity(), found,
+                property: property.name().to_owned(),
+                expected: property.quantity(),
+                found,
             });
         }
         Ok(())
@@ -1251,7 +1255,8 @@ impl ClaimSet {
         {
             return Err(MatDbError::QuantityMismatch {
                 property: property.to_owned(),
-                expected: QuantitySpec::dimensional(found.dims()), found,
+                expected: QuantitySpec::dimensional(found.dims()),
+                found,
             });
         }
         Ok(())

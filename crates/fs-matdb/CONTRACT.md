@@ -223,6 +223,34 @@ persistence.
 
 ## Invariants
 
+MR09 property-value quantity support uses `fs_qty::QuantitySpec` directly.
+`PropertyKey::with_quantity` and `ClaimSet::{query_typed,query_pinned_typed}`
+require exact kinds/forms as well as dimensions. Same-name registrations with
+different descriptors refuse transactionally. Nominal scalars and curve
+ordinates pass the shared `SemanticQty` scalar-domain and form checks.
+`PropertySample::quantity` retains the admitted descriptor. Name-only query
+methods refuse typed claims, so an existing dimension-only caller cannot
+silently consume a new semantic property. The portable usage receipt retains
+its v2 layout: its selected claim id binds the exact property descriptor, and
+`verify_receipt` replays against that claim set. The receipt alone does not
+prove who requested the type, nor does it carry a standalone claim body.
+
+Typed claims use the `property-claim.v2` identity domain. Dimension-only claim
+ids and the frozen normalized-pack v1 byte grammar remain unchanged. A pack
+containing typed properties uses normalized-pack v2, including one complete
+12-byte quantity descriptor after each claim's key dimensions. Both decoders
+re-admit and reproduce exact canonical bytes; editing a version byte is not a
+migration. The v2 pack identity uses `normalized-pack.v2`. Material/interface
+card wrappers retain and bind the nested pack version and transitive claim
+identities through their existing layouts.
+
+This tranche types property values, not validity axes: `ValidityDomain` and
+`QueryPoint` still carry legacy names and numbers. Source TSV normalization,
+axis quantity schemas, hardness apparatus context, and joint typed-property
+queries remain MR09 work. No existing seed silently gains kinds, no source
+spelling is reinterpreted, and a quantity tag adds no empirical validation or
+authority to a source claim.
+
 - APPEND-ONLY: no API removes or mutates a stored claim or observation.
   Same content re-inserts idempotently under the same id; different
   content for the same key coexists under a distinct id.

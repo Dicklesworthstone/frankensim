@@ -71,6 +71,15 @@ Appendix B). Layer: UTIL; its only production dependency is the Franken-only
   changes, and sinusoidal peak/RMS factors explicit. Whole-vector
   `Composition`, paired `PhasorQty`, and referenced `AcousticLevel` prevent
   convention fragments from drifting independently.
+- Material quantity kinds additionally distinguish cyclic/angular frequency,
+  dry-mass/wet-mass moisture and relative humidity, five named hardness scales,
+  amplitude-neper/power-neper/decibel spatial attenuation, thermal conductivity,
+  and optical extinction coefficient. These are static descriptors; waveform
+  and phasor forms refuse. `convert_frequency` explicitly applies `2*pi` and
+  refuses overflow or positive-to-zero underflow. Hardness tags do not supply
+  indenter/load/dwell/method metadata or authorize cross-scale conversion.
+  Attenuation and optical tags do not assert passivity or a sign convention for
+  the complex time harmonic exponential. Source provenance remains external.
 - `QuantitySpec` (also available as `semantic::QuantitySpec`) is the reusable
   scalar-schema identity descriptor:
   either explicit six-base dimensions with no kind claim, or one exact
@@ -131,6 +140,12 @@ Appendix B). Layer: UTIL; its only production dependency is the Franken-only
   are exact, unused bytes are zero, and semantic dimensions are canonicalized
   from the kind. Unknown future versions and tags refuse instead of falling
   back to dimension-only semantics.
+- Existing quantity-spec tokens retain their exact v1 bytes and decoder rules.
+  New material-kind tags 20–25 use the same 12-byte layout under version 2.
+  A v1 token containing a new kind refuses, as does a v2 alias of an old kind.
+  Thus old content identities do not move and old descriptors gain no new
+  meaning from the extension. Legacy consumers must explicitly support the
+  new kinds or refuse them; the scenario payload v1 writer currently refuses.
 - Positive scalar mass/amount and concentration-basis conversions never retain
   a rounded zero. If the exact positive result is below the representable f64
   domain, the conversion returns a typed representability refusal; a true zero

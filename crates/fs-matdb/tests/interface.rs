@@ -78,6 +78,61 @@ fn dry_system(a: SurfaceSpec, b: SurfaceSpec, history: &str) -> InterfaceSystemC
 }
 
 #[test]
+fn g0_interface_property_queries_retain_tensor_shear_convention() {
+    use fs_matdb::{QueryPoint, SelectionPolicy};
+    use fs_qty::{
+        QuantitySpec,
+        semantic::{QuantityKind, SemanticType, StrainBasis, StrainComponent, ValueForm},
+    };
+    let spec = |basis| {
+        QuantitySpec::semantic(SemanticType::new(
+            QuantityKind::Strain {
+                basis,
+                component: StrainComponent::Shear,
+            },
+            ValueForm::Static,
+        ))
+    };
+    let key = PropertyKey::with_quantity("interface_shear_strain", spec(StrainBasis::Tensor));
+    let mut claims = ClaimSet::new();
+    claims
+        .insert_claim(PropertyClaim {
+            key: key.clone(),
+            value: PropertyValue::Scalar {
+                value: 0.01,
+                dims: Dims::NONE,
+            },
+            validity: ValidityDomain::unconstrained(),
+            uncertainty: UncertaintyModel::Unstated,
+            interpolation: InterpolationPolicy::TabulatedOnly,
+            observations: Vec::new(),
+            provenance: provenance(),
+        })
+        .unwrap();
+    let card = InterfaceSystemCard::assemble(
+        steel(),
+        ptfe(),
+        dry_air("synthetic shear fixture"),
+        claims,
+        Vec::new(),
+    )
+    .unwrap();
+    let point = QueryPoint::new();
+    let wrong = PropertyKey::with_quantity(key.name(), spec(StrainBasis::Engineering));
+    assert!(matches!(
+        card.claims()
+            .query_typed(&wrong, &point, SelectionPolicy::SingleClaimOnly),
+        Err(MatDbError::QuantityMismatch { .. })
+    ));
+    let answer = card
+        .claims()
+        .query_typed(&key, &point, SelectionPolicy::SingleClaimOnly)
+        .unwrap();
+    assert_eq!(answer.evidence.value.quantity, key.quantity());
+    card.claims().verify_receipt(&answer.receipt).unwrap();
+}
+
+#[test]
 fn interface_systems_are_ordered_and_history_bearing() {
     let steel_on_ptfe = dry_system(steel(), ptfe(), "run-in-1000-cycles");
     let ptfe_on_steel = dry_system(ptfe(), steel(), "run-in-1000-cycles");
