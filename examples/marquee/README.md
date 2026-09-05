@@ -65,5 +65,10 @@ KKT conditions or global optimality. This is fixed-center radius optimization,
 not free-boundary topology or elasticity. The retained geometry consists of
 exact circle/plate parameters rather than a sampled SDF grid.
 
-The existing `scripts/e2e/marquee_01.sh` lane is being wired to this executable
-slice; use its recorded runtime result, not its file presence, as evidence.
+The existing `scripts/e2e/marquee_01.sh` lane invokes the actual executable for
+this slice. Its September 4 Linux development-build run passed eight checks:
+full study, retained SVG report, checked package export, partial budget,
+identical resumed trace, and wrong-unit/load/area refusals before database
+creation. The [implementation evidence](../../docs/REALITY_CHECK_2026-09-01.md)
+records the binary, source scope and artifacts. Release/DSR and full flagship
+acceptance remain open.

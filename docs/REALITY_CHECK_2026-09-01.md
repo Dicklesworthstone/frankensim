@@ -1,6 +1,6 @@
 # FrankenSim Reality Check — refreshed 2026-09-04
 
-## Implementation follow-through — September 4, focused verification in progress
+## Implementation follow-through — September 4, focused checks passed
 
 The user subsequently authorized implementation. The dated audit below describes
 the pre-implementation snapshot; its absent/defective source paths are not all
@@ -9,13 +9,18 @@ still absent in the working tree. Current implementation work has delivered:
 - **Study producer (.20):** enabled dispatch and a real normalized scalar
   Poisson radius-study driver, strict declaration admission, accepted-iterate
   ledger checkpoints, original-budget resume, final geometry, HTML/SVG report
-  and structurally checked Estimated package. Full elasticity/free-boundary
+  and structurally checked Estimated package. The actual binary completed the
+  eight-iteration fixture, exported its retained artifacts, and reproduced the
+  same trace after a two-iteration budget stop and resume. Full elasticity/free-boundary
   topology remains .16; this scalar slice does not close that dependency.
 - **Numerical comparison (.17):** matched-PDE P1/Q1 comparison on the accepted
   geometry and a real affine-source sensitivity twin. A geometry-only diagnostic
   exposed inverted triangles in the first oracle mesh; conforming radial layers
-  now replace that construction. Rust PDE agreement and mutations still require
-  execution, with the numerical acceptance band unchanged.
+  now replace that construction. The Rust comparison passed with a discrepancy
+  of 0.00006605305 (about 0.9% of refined P1 compliance), below the unchanged
+  0.001363943 observed-refinement band. The actual doubled-source mutation was
+  rejected. All 19 numerical study tests passed, including real load sensitivity,
+  source scaling, adjoint checks and checkpoint replay.
 - **UQ prerequisite (f85xj.6.7):** the existing sampler previously ignored
   correlations and method selection and promoted empirical percentiles to
   Verified. The repair implements explicitly joint Gaussian sampling, requires
@@ -24,28 +29,57 @@ still absent in the working tree. Current implementation work has delivered:
   passed on Linux, including analytic correlated-Gaussian and singular cases,
   with matching local/worker source hashes. The existing HTML/JSON report
   consumer now preserves refusal/status/authority, emits valid optional JSON
-  numbers, and labels empirical statistics; its runtime check is pending.
-  Real project-to-Cooling
+  numbers, and labels empirical statistics. All four engineering-report tests
+  passed; an independent JSON reader verified both actual complete/refused
+  outputs, including null statistics, escaping and result identity. Real project-to-Cooling
   propagation, statistical stopping, budgets and resume remain unfinished.
 - **Truthfulness:** adaptive solves no longer label an unevaluated goal as
   converged; the unfinished Cooling UQ script returns unavailable instead of a
   product pass. The missing scene contract and README/schema inventories are
   present. Existing generator/check integration remains pending.
 
-The first combined run, retained in
-`/tmp/greenosprey-study-combined-20260905.log`, ran 37 CLI library tests:
-35 passed and two new study tests failed because package provenance contained
-a forbidden semicolon. That production defect is corrected; the replacement
-build is retained in `/tmp/greenosprey-study-current-targets-20260905.log`.
-Its independently executed UQ target passed 10/10 in 0.86 seconds, retained in
-`/tmp/greenosprey-uq-runtime-20260905.log`; other targets remain pending.
-These are unlocked remote diagnostics against live siblings, not complete
+The corrected remote build succeeded in 53m13s. Actual execution then passed
+**112 targeted tests, zero failures and zero ignored**, plus **eight actual-binary
+E2E checks**. The other 53 tests in `fs-cli/tests/solve.rs` were intentionally
+filtered; only its changed driver-identity regression is included. The test
+total also includes 37 CLI library, 25 CLI integration, 7 project study,
+2 project library, 2 marquee library and 5 marquee integration cases, in
+addition to the numerical/UQ/report cases above. Existing seven-stage Cooling
+and heatsink/fan CLI workflows passed.
+
+Evidence retained for this run:
+
+- Build: `/tmp/greenosprey-study-current-targets-20260905.log`.
+- Tests: `/tmp/greenosprey-study-runtime-20260905.log` and
+  `/tmp/greenosprey-uq-runtime-20260905.log`.
+- Actual binary E2E: `/tmp/greenosprey-study-e2e-20260905.log`; worker artifacts
+  `/tmp/greenosprey-thermal-e2e-20260905/run.KGgqEA`, copied locally to
+  `/tmp/greenosprey-thermal-e2e-local-20260905`.
+- Binary SHA-256: `ace5b46273b0ec5a98557f5c51950788f541517a0f9c31c4a291cc3ac75eb84e`.
+- Full and resumed trace: `c69dc6f4690341223e5be5368e3aa574a67b2982845427b711ad60e25bebb001`.
+  Final normalized compliance is 0.006992840881080497 and material area is
+  0.853. The report, geometry, iteration and package roots match after resume.
+
+Nineteen scoped source/fixture/configuration files matched between local and
+worker checkouts and remained unchanged during verification. These are unlocked
+Linux development-build diagnostics against live siblings, not complete
 constellation, DSR quality, release, physical-validation or complete-Bead proof.
+`dsr quality --tool frankensim --dry-run` exited 2: ten checks planned, none
+executed (`/tmp/greenosprey-dsr-final-dry-run-20260905.log`). The final
+`scripts/ci/checkout_constellation.sh --verify-only` refused Asupersync:
+expected `03a0a298d07f565c56b3d80ad85cf2bbc69ad3c2`, observed
+`102a204b86447e6df35950fb32a3914553528615`. A direct ancestry/cleanliness check
+confirmed a clean 69-commit fast-forward, so this is a stale lock, not a reason
+to roll back the sibling. After that decisive refusal, the remaining preflight
+scan was stopped while inspecting FrankenNetworkx; it is not an all-sibling
+completion result (`/tmp/greenosprey-constellation-final-20260905.log`).
+The first runtime attempt exposed a forbidden semicolon in package provenance;
+the production separator was fixed and the formerly failing tests now pass.
 Earlier attempts encountered a stale lock, a remote timeout, one corrected CLI
 test-helper type error, and a transient FrankenSQLite missing-function error.
 Formatting, script syntax, the five UQ unavailable modes, and the stated
 geometry diagnostic passed.
-Another process committed portions of this work through `8bb2a7af`; this agent
+Another process committed portions of this work through `c7607081`; this agent
 did not stage or commit, and preserved the shared index and peer changes.
 
 ## Pre-implementation audit snapshot

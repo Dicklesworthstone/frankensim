@@ -104,6 +104,10 @@ The implementation plan expands that existing service rather than adding another
 | `fs-couple/src/thin_plate.rs::thermoelastic_for_density` | Chooses steel above a density threshold, aluminum otherwise; fixed reference temperature | Resolve actual expansion, heat capacity, conductivity, modulus, and state |
 | `fs-couple/src/acoustic_realize.rs::gas_state` | Checks RH but constructs dry-air gas | Consume the existing moist-air constructor and carry the same gas state throughout |
 | `fs-couple/src/acoustic_realize.rs::mode_zeta` | Authored frequency damping and Prony anchoring remain | Resolve physical loss mechanisms with explicit ownership |
+| `fs-couple/src/reed_bore.rs` and `bowed_string.rs` | Effective reed length/damping and free per-mode string damping remain | Resolve specimen/exciter/interface physics; label retained research inputs |
+| `reed_bore.rs::step_massive_reed` / `reed_flow_mismatch` | Characteristic-line flow still uses a static pressure-controlled aperture before advancing the massive reed | Close actual opening and swept-face flow into the dynamic junction; reuse the moving-aperture semantics already present in the ODE path |
+| `fs-couple/src/render.rs` and `flue_loop.rs` | Internal bore/launched-wave pressure is emitted as observer pressure; the reed force-dipole term also contains an extra density factor | Separate internal diagnostics from physically propagated microphone pressure and check dimensions |
+| `thin_plate.rs::certified_radiators` | Modal mass is guessed from drive amplitude; signed modal area is replaced by an absolute value/floor | Preserve mass normalization, signed force/radiation ports, and quadrature under mode rescaling |
 | `fs-euler-disc-e2e/src/cinematic_fixture.rs` | Builds a one-temperature material card from caller scalars | Add canonical catalog/card bindings to the real runnable path |
 | `cinematic_fixture.rs::build_fixture_production_mechanics` | Orthotropic contact and unequal material query points refuse | Add admitted anisotropic response and local-state interface evaluation |
 | `cinematic_fixture.rs::prepare_fixture_disc_acoustics` | Current residual lane refuses admitted in-band structural modes | Wire actual modal plus residual radiation without double counting |
@@ -329,8 +333,10 @@ Retry must not debit a source twice or duplicate an emitted sound block.
 
 ### 5.2 Energy and entropy
 
-Track kinetic, elastic/internal-memory, thermal, phase, field, surface, and potential energy
+Track kinetic, elastic/internal-memory, thermodynamic, field, surface, and potential energy
 only where represented by the active model and with explicit reference conventions.
+Sensible and latent components are subaccounts of one thermodynamic potential;
+their sum must equal that potential, and neither is added again to the global total.
 Internal transfers cancel when the accounting boundary encloses both participants.
 External work, heat, radiation, mass/species transport, and control input remain explicit.
 Numerical dissipation has its own account; it is not material damping or physical heating.
@@ -393,6 +399,20 @@ A broken string's segments retain momentum; they do not vanish when a solver swi
 Droplets and disconnected components preserve mass/species and lineage.
 Resolidification needs stress-free reference/locking conventions and shrinkage behavior.
 
+The first handoff is concrete: body-fitted tetrahedral solid/thermal state enters
+the existing sparse 3-D Cartesian `fs-lbm::d3q19::freesurface3::FreeSurface3` lane.
+MR19 first stores the extensive integral of specific enthalpy over reference mass,
+`integral(rho0 * h dV0)`, with conduction transformed by the deformation Jacobian.
+Its initial stationary domain fixes that Jacobian; MR29 supplies moving-domain transport.
+The fluid target transports cell mass and `mass * h` using the same face mass flux,
+with a low-Mach pressure constraint including phase-density volume sources.
+Local phase relations initially use a stated reference pressure and bounded composition.
+Total-energy accounting converts `h` to internal energy with the declared `p/rho`
+reference/work convention; it must never silently equate enthalpy and internal energy.
+Open-boundary enthalpy transport and pressure work must not duplicate each other.
+Remap owns geometric overlap integrals and moments; constitutive laws own material-frame
+plastic/damage history transport. Existing scalar overlap remap is only a building block.
+
 ### 5.5 Acoustics and rendering after state changes
 
 Recompute or update structural response when geometry, pre-stress, or material changes.
@@ -437,6 +457,21 @@ One steel's hardness or strength cannot fill another grade's missing property.
 The examples identify acquisition targets, not assertions of data completeness.
 Existing packs must be reused and their condition-specific limitations retained.
 No fixed number of tranches is a scientific acceptance criterion.
+
+Coverage retains all thirteen existing taxonomy families: elasticity; strength/plasticity/
+failure; thermodynamics/heat; liquid/extreme states; fluid interaction/moisture/diffusion;
+acoustics; electrical; magnetic; optical; tribological/surface; chemical degradation;
+process/microstructure; and uncertainty/basis metadata.
+This includes measured tension/compression/shear response, ductility, scale-typed hardness,
+creep/fatigue/fracture, dielectric and semiconductor behavior, magnetic history,
+pressure-dependent phase/EOS data, vaporization, permeability, and reaction kinetics.
+The initial 76 tasks implement bounded consumers and their data needs; they do not declare
+this open-ended corpus complete after the first two metal bundles.
+The existing seed-dataset owner continues condition-specific acquisition for every named
+target above and further machine/device consumers. Extreme shock/plasma/combustion,
+semiconductor, superconducting, and other research regimes retain their existing domain
+gates and explicit capability gaps until their actual solvers and sources are delivered.
+No schema field, isolated property row, or blanket material label unlocks those regimes.
 
 ### 6.2 Source policy
 
@@ -545,11 +580,14 @@ Priority: 1. Ambition: [S].
 Depends on: none.
 Existing anchor: `frankensim-music-v8-root-3ez8g.3.5` (closed kernel; reuse).
 Files: `fs-couple/src/acoustic_realize.rs`, existing assembly tests and contract.
-Outcome: humidity affects the same density, sound speed, impedance, and transport
-used by excitation, ducts, and outgoing acoustic propagation.
+Outcome: excitation, ducts, and outgoing acoustic propagation consume one admitted
+humid-gas state, including its density, sound speed, impedance, and transport approximations.
 Replace the dry-air constructor at the assembly seam with the existing admitted
 `GasState::try_new_moist_air` path; do not reimplement the mixture equations.
 Keep each constructor's temperature and vapor-fraction restrictions visible.
+The current nonzero-RH constructor admits 253.15–323.15 K and water mole fraction
+at most 0.15. Its viscosity and thermal conductivity remain dry-air fits; wiring
+this constructor does not establish accurate mixture transport. MR33 owns that extension.
 Do not add Stokes–Kirchhoff absorption on top of ISO absorption if already included.
 Test the dry limit, a supported humid point, invalid RH, and unsupported temperature.
 Check derived duct resonance/impedance against independently computed mixture quantities.
@@ -594,6 +632,7 @@ G1: compare an admitted Prony response to direct convolution and measured ring-d
 G3: change only the loss law and distinguish decay from stiffness-induced frequency shifts.
 Test out-of-band query, missing source parameters, and unsupported amplitude.
 Acceptance: a real string/plate assembly exposes each active physical loss source.
+MR68/MR76 extend the same rule to reed excitation and bowed-string interface dynamics.
 
 ### MR04 — Compile coherent specimens from geometry and material cards
 
@@ -640,13 +679,16 @@ Priority: 1. Ambition: [S/F].
 Depends on: MR05.
 Existing anchor: `frankensim-ext-couple-cosim-lanes-pelj`.
 Files: existing coupling energy accounts and domain source adapters.
-Outcome: friction, viscoelasticity, radiation, Joule heat, and phase energy
-have explicit ownership and cannot be silently debited or credited twice.
+Outcome: common account algebra and an existing mechanical/contact/thermal consumer
+have explicit ownership and cannot silently debit or credit the same transfer twice.
 Use the extension charter's energy/entropy conventions and current receipt carriers.
 Separate physical dissipation from numerical stabilization and observation-only radiation.
 Track stored internal-variable energy when a model includes it.
 Do not enforce conservation by an arbitrary post-step energy renormalization.
 Use actual boundary work and temperatures for source/reservoir exchange.
+Domain adapters remain with their implementations: radiation in MR35/MR56,
+phase transport in MR25/MR29, Joule heat in MR43, and chemistry in MR47.
+Each adapter repeats the duplicate-debit/credit mutation for its actual physical transfer.
 G1: two-body friction heat partition, damped oscillator, and driven thermal reservoir.
 G3: enclosing both transfer participants cancels their internal exchange.
 Mutation tests duplicate a thermal credit and omit a mechanical debit; both must fail.
@@ -723,7 +765,9 @@ Do not create a full Cartesian grid of invented observations from sparse measure
 G0: rotations and reciprocal symmetry under independently evaluated tensor formulas.
 G3: equivalent unit/basis representations yield consistent consumer responses.
 Reject unsupported support holes, nonfinite entries, and incompatible tensor conventions.
-Acceptance: an oriented wood/crystal consumer resolves a source-backed tensor response.
+Acceptance: tensor evaluation reaches an existing law adapter using a retained analytical
+fixture and any independently sourced supported tensor slice. Complete wood/crystal bundles
+belong to MR16; MR10 does not depend implicitly on that downstream acquisition.
 
 ### MR11 — Resolve derived property relations consistently
 
@@ -770,7 +814,10 @@ Depends on: MR04, MR09, MR12.
 Existing anchor: `frankensim-oecdy` successor and `frankensim-ext-matdb-seed-dataset-1sxe`.
 Files: `fs-matdb-store`, scenario admission, CLI material-selection surface.
 Outcome: users can ask which named material conditions support a declared simulation.
-Intersect the complete requirements over intended state points or state trajectories.
+Intersect requirements over a caller-declared conservative state envelope before solving.
+An unknown future trajectory is not an available preflight input.
+Distinguish envelope-complete admission from conditional local-state admission.
+Trial-step queries locate the first domain exit and rollback/escalate through MR05/MR24.
 Include model availability, interface counter-material, and curve support in discovery.
 Return complete, partial, and unavailable candidates with named missing requirements.
 Range discovery over curves must inspect their admitted domain, not just first-knot values.
@@ -796,7 +843,9 @@ Use exact source terms and uncertainty conventions; no fabricated missing rows.
 G0/G3: compile sources, normalize units, and query all required operating states.
 Run dimensional/thermodynamic consistency checks without upgrading measurements to exactness.
 Report remaining source gaps explicitly; a data-refusal finding does not unblock melting.
-Acceptance: the declared consumer bundle is complete or its dependent journey remains blocked.
+Acceptance: one exact lead condition, pressure/temperature interval, surface system,
+and observer band passes every required query. This delivery stays open/blocked on gaps;
+a source-investigation absence result may be recorded separately but cannot close MR14.
 
 ### MR15 — Complete ordinary metal substitution bundles
 
@@ -813,7 +862,8 @@ Do not convert typical strength into a design allowable or fill gold from copper
 Use MR13's gap report to select the smallest useful next acquisition tranche.
 G0: source-condition mismatch and unsupported axis queries refuse.
 G3: compile/store/direct-query agreement for every delivered bundle.
-Acceptance: at least two materially distinct metal configurations run the same solid-state path;
+Acceptance: at least two materially distinct metal bundles satisfy the same declared
+material resolver requirements. Full trajectory execution belongs to MR49/MR50;
 additional named materials retain explicit coverage gaps until their bundles are delivered.
 
 ### MR16 — Complete oriented wood, crystal, and soft-contact bundles
@@ -831,7 +881,9 @@ Preserve documented ebony and other source dead ends until new compatible eviden
 Separate small-strain elastic, viscoelastic, indentation, and nonlinear contact measurements.
 G0/G3: orientation/units/moisture transformations and unsupported property refusal.
 Validate cross-property consistency without averaging incompatible specimen populations.
-Acceptance: one oriented solid and one compliant-contact consumer obtain complete admitted inputs.
+Acceptance: one oriented solid and one compliant-contact requirement set obtains
+complete resolver-level inputs. Their physical integration belongs to MR32/MR37;
+this acquisition task does not implicitly depend on those downstream consumers.
 
 ### MR17 — Acquire stateful interface and surface data
 
@@ -854,10 +906,10 @@ Acceptance: an existing contact consumer evaluates an ordered interface pack end
 
 Group: B — Material data and discovery.
 Priority: 2. Ambition: [S].
-Depends on: MR12, MR13, MR14, MR15, MR16, MR17.
+Depends on: MR12, MR13.
 Existing anchor: `frankensim-oecdy` documented compiler/store E2E residual.
 Files: existing xtask material-pack tests and one existing-style e2e script.
-Outcome: acquired source data reaches real physical queries without hand-entered substitutions.
+Outcome: an existing complete source bundle reaches real physical queries without hand-entered substitutions.
 Compile selected source manifests using the actual pack compiler.
 Ingest supported family sets into a disposable task-owned database.
 Query through MR13 and execute representative material resolvers.
@@ -865,7 +917,9 @@ Compare exact receipts and values to direct compiled-pack evaluation.
 Use per-stage source IDs, normalized units, selected claim, query point, and refusal in logs.
 G4: interruption and a deliberately malformed linked pack leave the accepted corpus intact.
 G5: deterministic rebuild from the same selected sources.
-Acceptance: this is one corpus-to-consumer test, not a new general test framework.
+Acceptance: one existing complete body/interface bundle passes this corpus-to-consumer test.
+MR14–MR17 extend its fixture matrix as their bundles arrive; unrelated acquisition must
+not delay the first compiler/store/query integration. Do not build a new general framework.
 
 ### MR19 — Add spatial nonlinear total-enthalpy transport
 
@@ -876,7 +930,9 @@ Existing anchor: `frankensim-ext-thermal-domain-je8y`.
 Files: `fs-conduction/src/transient.rs`, `lumped.rs` patterns, `fs-material::phase`, thermal tests.
 Outcome: spatial temperature/phase fields evolve with temperature-dependent material response.
 Extend existing fs-conduction storage/transport; do not create a parallel thermal solver.
-Use primary total enthalpy with explicit mass/volume/reference convention and nonlinear k.
+Store `integral(rho0 * h dV0)` and derive T/phase fraction from specific h, with nonlinear k.
+Write the reference-coordinate weak form, flux signs, and Jacobian convention explicitly.
+Begin on a stationary domain; moving mass/advection and pressure-work composition belong to MR29.
 Retain latent plateaus as an enthalpy relation; separately label any apparent-cp regularization.
 Include energetic internal-variable changes or explicitly freeze them in the admitted model.
 Specify boundary conditions, nonlinear residual/tangent, and accepted-step energy balance.
@@ -907,7 +963,7 @@ Acceptance: unequal initial body temperatures evolve through the real coupled in
 
 Group: C — Thermal and mechanical evolution.
 Priority: 1. Ambition: [F].
-Depends on: MR04, MR19.
+Depends on: MR04, MR10, MR19.
 Existing anchor: thermal-domain owner and existing `fs-solid::linear3` thermal strain.
 Files: `fs-solid` existing thermal eigenstrain/assembly, material adapters, coupling tests.
 Outcome: temperature gradients and support constraints produce actual strain and stress.
@@ -919,13 +975,14 @@ Represent fixed-end and force-controlled string/support boundaries distinctly.
 G1: free expansion, constrained thermal stress, and a thermal-gradient bending fixture.
 G3: rotate an orthotropic frame and geometry together; the physical result transforms coherently.
 Test inversion/domain exit and return a named finite-deformation escalation requirement.
-Acceptance: changed geometry/pre-stress is passed to contact and vibration consumers.
+Acceptance: emit compatible deformation/pre-stress state suitable for the existing
+contact/vibration adapters; their full thermal recoupling is exercised downstream.
 
 ### MR22 — Add temperature/history-dependent creep and plastic softening
 
 Group: C — Thermal and mechanical evolution.
 Priority: 2. Ambition: [F].
-Depends on: MR05, MR06, MR19, MR21.
+Depends on: MR05, MR06, MR19, MR21, MR58.
 Existing anchor: `frankensim-ext-solid-life-ladder-gahl`.
 Files: `fs-material` law nodes and `fs-solid` existing nonlinear update paths.
 Outcome: a heated loaded member relaxes, yields, and sags before complete melting.
@@ -987,7 +1044,8 @@ Represent pressure/composition dependence explicitly or restrict the initial cas
 Keep equilibrium and kinetic phase laws separate; no hidden nucleation/supercooling claims.
 G0: fraction conversion, endpoints, positivity/admissibility, and latent-heat consistency.
 G1: a stationary mushy-region response with independent balance calculation.
-Acceptance: mixed phase supplies actual transport/stress closure to a coupled solver.
+Acceptance: mixed phase supplies transport/stress closure to a stationary thermal/solid
+coupon using MR19/MR22; full free-surface evolution belongs to MR29 and is not an implicit prerequisite.
 
 ### MR26 — Implement capillary and wetting boundary forces
 
@@ -1002,24 +1060,28 @@ Wetting requires named liquid, solid, gas, temperature, and contact-line assumpt
 Treat contact-angle hysteresis and dynamic contact-line regularization as model closures.
 If thermocapillary gradients are supported, include tangential surface-tension stresses.
 Do not claim arbitrary contact-line physics from an imposed equilibrium angle.
-G1: Laplace pressure, capillary wave/oscillation limit, and sessile-drop equilibrium.
-Measure spurious currents and spatial convergence; a stable picture alone does not pass.
-Acceptance: capillary forces enter momentum and surface energy accounting coherently.
+G1: static curvature/traction, Laplace pressure, and sessile-drop equilibrium.
+Dynamic oscillation and spurious-current tests belong to MR27, which consumes this operator.
+Acceptance: the boundary operator returns consistent momentum and surface-energy transfers.
 
 ### MR27 — Evolve a conservative incompressible free surface
 
 Group: D — Phase transitions and free surfaces.
 Priority: 2. Ambition: [F].
 Depends on: MR06, MR26.
-Existing anchor: moving-boundary fluids, existing `fs-flux`/`fs-lbm` domain owners.
-Files: existing fluid solver/field/geometry machinery and bounded free-surface tests.
+Existing anchor: existing `fs-lbm` free-surface owner and capillary domain owner.
+Files: `fs-lbm/src/d3q19/freesurface3.rs`, physical-unit adapters, free-surface tests.
 Outcome: liquid moves, slumps, separates, or coalesces as a computed fluid state.
-Choose a concrete existing-solver extension with explicit velocity/pressure/interface coupling.
+Extend the existing sparse 3-D `FreeSurface3` mass-exchange and interface-conversion path.
 Implement conservation and free-surface traction; do not build another standalone fluid engine.
-State the initial density/viscosity and low-Mach assumptions.
-Phase volume sources are supplied explicitly by MR25 when the two phases differ in density.
+Admit physical dx/dt, density, viscosity, gravity, surface tension, and Mach/resolution limits.
+This task is the pure-liquid stationary-wall rung; current tile-granular permanent walls
+do not supply moving-solid or phase-change boundaries. MR69 adds those boundaries.
+Thermal/non-Newtonian mixture transport and phase-volume sources belong to MR29.
+Artificial lattice compressibility cannot set the physical acoustic propagation speed.
 Preserve owner-deferred compressible/turbulence scope; it is unnecessary for the first melt case.
 G1/G2: hydrostatics, gravity-driven flow, capillary equilibrium, and a sourced dam-break/drop case.
+Measure capillary oscillation/wave convergence and spurious currents, not visual stability alone.
 G3: refine mass and momentum error and identify numerical surface diffusion.
 Acceptance: geometry is reconstructed from solved phase/volume fields and conserves mass.
 
@@ -1027,25 +1089,33 @@ Acceptance: geometry is reconstructed from solved phase/volume fields and conser
 
 Group: D — Phase transitions and free surfaces.
 Priority: 2. Ambition: [F].
-Depends on: MR05, MR08, MR25.
+Depends on: MR05, MR08, MR25, MR27.
 Existing anchor: `frankensim-ext-adaptivity-remap-u7ay`.
 Files: existing remap/field/mesh adapters and coupling state transport.
 Outcome: remeshing or solid-to-fluid handoff preserves the modeled physical state.
-Transfer mass, species, linear/angular momentum, total energy, and internal variables.
-Specify reference frames, reference volumes, constraints, and treatment of newly created cells.
-Retain unresolved transfer error and applicable positivity/admissibility conditions.
+Start with the tetrahedral/quadrature solid to MR27 Cartesian free-surface handoff.
+Existing `fs-mesh::conservative_cell_remap` moves one scalar over caller-supplied overlaps;
+it does not build intersections or preserve angular momentum, history, or mechanical energy.
+Construct overlap geometry and moments; transfer extensive mass/species and thermal energy.
+Reconstruct momentum with linear/angular moment constraints and account for pressure projection work.
+Transport plastic strain, hardening, and damage by law-owned material-frame rules;
+these are not conserved scalar densities. State newly occupied-cell and phase conventions.
+Account separately for kinetic, elastic, thermodynamic, and surface-energy changes.
+Projection loss is numerical error, not invented physical heat.
+Refine or refuse when positivity and conservation constraints cannot jointly be satisfied.
 Track split/merge lineage for disconnected components using existing artifact conventions.
 Never erase elastic energy or zero velocities when a body stops being rigid.
 G1: analytic translating/rotating body remap and enthalpy-bearing split/merge integrals.
 G3: representation round trips with independently calculated conserved moments.
 G4: failed transfer commits neither geometry nor material history.
-Acceptance: an actual solver handoff consumes the transfer, beyond standalone array tests.
+Acceptance: a translating/spinning heated specimen transfers to MR27 and advances one
+accepted solver step with independently checked integrals/moments and refusal boundaries.
 
 ### MR29 — Couple heated deformable solids to evolving melt
 
 Group: D — Phase transitions and free surfaces.
 Priority: 2. Ambition: [F].
-Depends on: MR07, MR20, MR24, MR25, MR27, MR28.
+Depends on: MR07, MR20, MR24, MR25, MR27, MR28, MR69.
 Existing anchor: thermal-domain and coupled-runtime owners.
 Files: `fs-couple`, existing thermal/solid/fluid public adapters, phase conformance cases.
 Outcome: a heated loaded specimen continues through partial melting and liquid motion.
@@ -1068,12 +1138,13 @@ Files: phase/history laws and existing solid/fluid/thermochemical adapters.
 Outcome: cooling can restore load-bearing solid with a stated reference state;
 wood/polymer regimes do not follow an invented metal melting rule.
 Specify solid-locking strain, shrinkage, residual stress, and trapped-phase assumptions.
-For an initial non-melting material, implement one sourced softening or decomposition law.
-Keep decomposition mass/species/energy products explicit and preserve unmodeled products as gaps.
+Route non-melting chemistry through the law owned by MR47 when available; otherwise
+return the exact unavailable transition. Do not implement a competing decomposition law here.
 Do not implement combustion merely by changing optical color or deleting mass.
 G1: freeze/melt energy cycle and a constrained shrinkage reference.
 G0: phase/mass/species bookkeeping and invalid transition/model selection.
-Acceptance: one real cooling case and one distinct non-metal transition exercise the laws.
+Acceptance: one real cooling case exercises locking/shrinkage, and a non-metal request
+selects its admitted distinct transition or refuses instead of applying metal fusion.
 
 ### MR31 — Derive pre-stressed strings and coupled supports from specimens
 
@@ -1119,6 +1190,9 @@ Files: `fs-duct`, `fs-couple` duct/wall/exciter adapters, scenario region bindin
 Outcome: gas and wall material/environment changes reach the same duct calculation.
 Admit separate excitation gas, interior gas, and exterior observation environment where supported.
 Use real regional state for density/speed/viscosity/thermal losses and impedance.
+Replace MR01's dry-air transport fits with an admitted composition-dependent transport
+closure where moist-mixture loss accuracy is claimed; retain its source/domain/error bounds.
+Test mixture viscosity and thermal conductivity independently of density and sound speed.
 Couple wall compliance when modeled; otherwise state the rigid-wall limit and its error question.
 No note-dependent speed-of-sound tuning or material-name filter selection is allowed.
 G1: closed/open duct limits, thermoviscous attenuation, and compliant-wall perturbation.
@@ -1130,7 +1204,7 @@ Acceptance: one geometry-defined duct runs without instrument-name dispatch.
 
 Group: E — Generic sound-producing systems.
 Priority: 2. Ambition: [F].
-Depends on: MR08, MR21, MR22, MR31.
+Depends on: MR08, MR21, MR31.
 Existing anchor: modal/reduction and conservative-remap owners.
 Files: `fs-modal`, `fs-couple` modal-time adapters, existing structural reduction tests.
 Outcome: changing stiffness, pre-stress, geometry, or supports updates modes and state coherently.
@@ -1154,6 +1228,14 @@ Outcome: a soft/thin disc can radiate in-band structural modes and complementary
 Remove the cinematic selection restriction by composing actual supported source subspaces.
 Use existing solver-neutral radiation tables; avoid a fs-couple→fs-bem dependency cycle.
 Define the modal/residual split and check that no forcing or radiation component is counted twice.
+Repair the compact plate adapter's normalization before treating harvested eigenpairs
+as physical radiators: use modal mass and signed force/area integrals from the same
+mode normalization and quadrature. `1/abs(phi_drive)` is not a modal mass;
+absolute values or positive area floors must not turn cancelling modes into monopoles.
+Keep physical aperture geometry separate from signed modal radiation overlap so a
+negative overlap cannot become a negative geometric area or an invalid piston radius.
+G0/G3: rescaling or reversing a mode with its coordinate/ports transformed consistently
+preserves physical force, displacement, power, and microphone pressure; test area cancellation.
 Keep failed held-out radiation fits unavailable; do not hide them with a resonator preset.
 Where two-way loading is absent, quantify or explicitly bound the approximation's domain.
 G1: single-mode radiation and analytical low-frequency source limits.
@@ -1164,7 +1246,7 @@ Acceptance: a physically resonant disc no longer refuses solely for having in-ba
 
 Group: E — Generic sound-producing systems.
 Priority: 2. Ambition: [S/F].
-Depends on: MR05, MR31, MR32, MR33.
+Depends on: MR04, MR05.
 Existing anchor: existing music gesture/render contracts.
 Files: `fs-scenario/src/gesture.rs`, `fs-couple/src/render.rs`, common control adapters.
 Outcome: declared fret/bow/pluck/support/valve gestures actually reach physical runtime controls.
@@ -1262,22 +1344,38 @@ G3: compare extracted vertices/normals and landmarks against the solved field.
 Test time interpolation/exposure without creating physically nonexistent geometry at topology changes.
 Acceptance: a spatially bending plate's pixels and acoustic boundary describe the same shape.
 
-### MR42 — Synchronize pressure, radiance, and sensor observations
+### MR42 — Derive microphone pressure and synchronize physical observations
 
 Group: F — Interfaces and physical observations.
 Priority: 2. Ambition: [S/F].
-Depends on: MR05, MR35, MR36, MR41.
+Depends on: MR05, MR35, MR40.
 Existing anchor: existing coupling PCM/WAV and cinematic render owners.
-Files: shared accepted-time observation adapters, audio resampling and frame output paths.
+Files: shared accepted-time observation adapters, `fs-couple::{render,flue_loop,driving_point}`,
+solver-neutral radiation transfers, audio resampling and frame output paths.
 Outcome: video and audio observe the same physical trajectory with declared sensor models.
+Repair the current reed `p_bore` and flute `p_plus` observer shortcuts. Keep local
+pressure/wave diagnostics distinct from external microphone pressure, even though both use Pa.
+Derive exterior sound from actual mouth, outlet, tone-hole, and applicable wall/source
+motion through admitted radiation transfers, with coherent source phases and loading ownership.
+Use existing solver-neutral transfer boundaries; do not introduce a couple-to-bem cycle.
+Check the reed force-dipole source's dimensions: a force derivative already in N/s
+must not acquire an extra gas-density factor. Account for source enclosure and directivity.
 Retain pressure in Pa before an explicit PCM scale; never peak-normalize each material take.
 Specify microphone location/direction, propagation delay, sample rate, and antialiasing.
 Specify camera exposure interval and radiance/display conversion independently.
 Keep artistic soundtrack/taper/chirp paths outside the predictive observation mode.
 Unsupported source tails stop or remain marked incomplete rather than being extrapolated musically.
 G1: known moving/impulsive source timing and amplitude through observation/resampling.
+G1/G3: a sealed rigid duct with an enclosed excitation can retain internal pressure
+without emitting external sound; an admitted open compact source has the predicted
+far-field spreading/delay and directional response. Check radiation power without double debit.
 G3: render block/frame partition changes preserve physical timestamps.
-Acceptance: a material/thermal change appears at physically consistent times in both outputs.
+The common observation clock is independent of musical gesture implementation;
+MR36 supplies an optional event adapter when that journey is assembled.
+Acceptance: microphone pressure is produced by actual source-to-observer physics,
+and a material change appears at physically consistent times in both outputs.
+MR41/MR70 plug in evolving geometry/temperature through this same observation boundary;
+the clock implementation does not wait for their full deformation pipeline.
 
 ### MR43 — Couple electrical transport and heating to material state
 
@@ -1317,11 +1415,11 @@ The existing domain prerequisite must be implemented before this coupling task i
 
 Group: G — Broader physical material response.
 Priority: 3. Ambition: [F].
-Depends on: MR06, MR10, MR21, MR43, MR44.
+Depends on: MR59, MR60, MR61.
 Existing anchor: `frankensim-ext-active-materials-wccu`.
 Files: existing constitutive graph coupled blocks, solid/EM/circuit/thermal adapters.
 Outcome: piezoelectric, magnetostrictive, and thermoelectric effects connect physical domains.
-Implement separable sub-deliveries under the same owner, each with a real consumer.
+Integrate the separate MR59/MR60/MR61 deliveries, each with a real consumer.
 Declare independent thermodynamic variables, tensor frames, and open/short-circuit conventions.
 Check stability/reciprocity for the complete coupled block, including reversible skew terms.
 Thermoelectric heat includes the declared Seebeck/Peltier/Thomson convention.
@@ -1350,11 +1448,13 @@ Acceptance: a wood/cane geometry changes dimension and modal response under a hu
 
 Group: G — Broader physical material response.
 Priority: 3. Ambition: [F].
-Depends on: MR06, MR09, MR19, MR39, MR43.
+Depends on: MR06, MR09, MR19, MR39.
 Existing anchor: `frankensim-ext-gas-chemistry-ladder-paqh`, solid-life and thermochem owners.
 Files: thermochemical closures, surface/history laws, coupled species/energy transport.
 Outcome: oxidation, corrosion, or decomposition changes composition/geometry and relevant properties.
 Implement one bounded sourced mechanism first, with explicit environment and reaction products.
+Begin with neutral oxidation or decomposition; electrochemical mechanisms additionally require
+the actual electrolyte/potential/kinetic solver and MR43, not merely a chemical property table.
 Retain element/charge conservation, reaction/transport limits, and reference enthalpy conventions.
 Galvanic corrosion requires electrolyte/geometry/potential kinetics, not a bulk corrosion score.
 Oxide thickness affects heat/contact/optics only through independently admitted laws.
@@ -1384,7 +1484,7 @@ Acceptance: a user can run two materially different objects through one paramete
 
 Group: H — Integrated journeys and qualification.
 Priority: 1. Ambition: [F].
-Depends on: MR15, MR17, MR35, MR37, MR38, MR42, MR48.
+Depends on: MR15, MR17, MR35, MR37, MR38, MR42, MR48, MR57, MR65.
 Existing anchor: Euler scientific/cinematic programs and their current trajectory owner.
 Files: existing Euler scenario fixtures, production adapters, e2e script/tests.
 Outcome: supported metal/wood/crystal disc/base swaps change solved motion, pressure, and radiance.
@@ -1401,7 +1501,7 @@ No new scientific Euler claim is promoted solely by a rendered video.
 
 Group: H — Integrated journeys and qualification.
 Priority: 1. Ambition: [F].
-Depends on: MR15, MR16, MR31, MR32, MR33, MR36, MR42, MR48.
+Depends on: MR66, MR67.
 Existing anchor: generic acoustic owner and existing music program successors.
 Files: geometry/material/gesture fixtures and existing music render e2e lane.
 Outcome: users hear physics change under material, dimension, support, force, and gas-state edits.
@@ -1418,7 +1518,7 @@ Listening approval remains distinct from physical/numerical validation.
 
 Group: H — Integrated journeys and qualification.
 Priority: 2. Ambition: [F].
-Depends on: MR14, MR29, MR34, MR40, MR41, MR42, MR48, MR49, MR50.
+Depends on: MR71, MR72.
 Existing anchor: thermal-domain, remap, Euler, and generic acoustic owners.
 Files: existing e2e scenario lanes plus bounded generic heated-member and melt cases.
 Outcome: a lead disc and lead string soften, deform, partly melt, and continue physically.
@@ -1428,10 +1528,13 @@ Stress release, droplet separation, and loss of tension are computed outcomes.
 No temperature-triggered animation, prerecorded sound, or disappearing mass is allowed.
 G1/G3: Stefan balance, mass/momentum/energy closure, mesh/time refinement, and state transfer.
 G2: independent supported experiments bound claims; unavailable liquid acoustics stays explicit.
-Acceptance: both journeys use the same thermal/phase/transfer operators and actual emitted sources.
+Acceptance: compare both completed journeys' integration contracts and reuse the same
+thermal/phase/transfer operators and actual emitted sources; do not add a second solver.
+Use one precisely supported lead configuration per journey; do not wait for every
+ordinary wood/crystal/duct substitution in MR49/MR50 before testing the lead transition.
 If a required source/model is absent, the complete melting journey remains open.
 
-### MR52 — Calibrate constitutive inputs and assess independent observations
+### MR52 — Calibrate coupon/interface laws with independent observations
 
 Group: H — Integrated journeys and qualification.
 Priority: 2. Ambition: [S/F].
@@ -1440,20 +1543,20 @@ Existing anchor: existing material-identifiability, V&V, and Euler experiment ow
 Files: current calibration/UQ/V&V interfaces and bounded experiment fixtures.
 Outcome: physical prediction quality is assessed independently of fitted inputs.
 Calibrate coupon/interface laws using source/specimen-matched experiments.
-Freeze parameters before holdout disc/string/duct comparisons.
-Measure multiple observables: temperature/front/shape, force/motion, impedance/pressure, radiance.
-Use pressure/mass/radius/ring/support sweeps to distinguish Euler loss mechanisms.
-Do not use one stopping time or chirp exponent to identify several confounded dissipation laws.
+Use one existing coupon/interface physical consumer and independent observations first.
+Freeze parameters before downstream object comparisons in MR73/MR74.
+Measure multiple observables available to that consumer, not merely a single fitted scalar.
 Preserve uncertainty, covariance, alignment, metrology, and model-form discrepancy.
 Acceptance tolerances are preregistered from measurement uncertainty and intended use.
 G2: held-out assessment reports intervals and no-data outcomes without automatic validation promotion.
-Acceptance: at least one calibration/holdout pair is executed through the real consumer model.
+Acceptance: at least one calibration/holdout pair is executed through the existing
+coupon/interface consumer model; whole-object validation belongs to MR73/MR74.
 
-### MR53 — Qualify integrated runtime cost, determinism, and recovery
+### MR53 — Qualify ordinary journeys' runtime cost, determinism, and recovery
 
 Group: H — Integrated journeys and qualification.
 Priority: 2. Ambition: [S/F].
-Depends on: MR49, MR50, MR51, MR52.
+Depends on: MR49, MR50, MR73.
 Existing anchor: existing DSR/runtime/performance and music budget owners.
 Files: existing e2e scripts, runtime budget adapters, scoped contracts.
 Outcome: integrated physical runs have measured cost and recover correctly under interruption.
@@ -1461,28 +1564,394 @@ Profile actual coupled journeys before selecting a new optimization or accelerat
 Use multirate stepping only with conservative exchange and observable-error accounting.
 Measure same-ISA/thread-count determinism and record cross-ISA differences separately.
 Exercise cancellation, budget exhaustion, resume, failed model fit, and failed material query.
+G4/G5: interruption/recovery and same-ISA/thread-count replay run through the ordinary product lanes.
 Logs need source/state/model IDs, physical time, error norms, iterations, and stop reason.
 Do not build a second general harness; extend the existing product lanes.
 Run narrow RCH probes while iterating and one coherent DSR quality gate at delivery.
 Acceptance: retained runtime receipts describe the tested domain and unresolved limitations.
 No real-time performance claim is made until its actual machine/workload band passes.
+This milestone qualifies ordinary disc/string/duct delivery without waiting for melting;
+MR75 applies the same existing lanes to the later phase-changing journeys.
 
 ### MR54 — Extend failure, fatigue, and long-term material response by consumer need
 
 Group: G — Broader physical material response.
 Priority: 3. Ambition: [F].
-Depends on: MR09, MR10, MR22, MR28, MR39.
+Depends on: MR62, MR63, MR64.
 Existing anchor: `frankensim-ext-solid-life-ladder-gahl` and seed dataset owner.
 Files: existing material/solid damage and history laws; source tranches and component tests.
 Outcome: common machine materials can accumulate damage, crack, wear, and lose functionality.
-Deliver bounded law/component slices: cyclic plasticity, fatigue, crack growth, brittle fracture,
-creep-fatigue, and environmental damage only when the selected model/data supports them.
+Integrate the bounded MR62/MR63/MR64 law/component slices: cyclic response, fatigue,
+fracture, and environmental interactions only where the selected model/data supports them.
 Retain test method, load spectrum, mean stress, rate, temperature, process, and specimen population.
 Strength/hardness/ductility observations parameterize appropriate laws; they are not interchangeable.
 Regularize softening/fracture with a stated length/energy scale to avoid mesh-dependent failure.
 G1/G2: coupon law reference, fracture-energy balance, and held-out component observations.
 G3: mesh/objectivity and transferred-history checks across damage evolution.
 Acceptance: each added family changes an actual component outcome; catalog rows alone do not close it.
+
+### MR55 — Compute fluid/impact acoustic sources through phase changes
+
+Group: E — Generic sound-producing systems.
+Priority: 2. Ambition: [F].
+Depends on: MR06, MR27, MR29, MR35.
+Existing anchor: `frankensim-ext-acoustics-core-0ja4`, existing fs-aeroac and radiation owners.
+Files: existing fluid source extraction, solver-neutral acoustic transfer, coupling adapters.
+Outcome: liquid motion, contact, and changing boundaries produce pressure through physical sources.
+Implement a bounded low-Mach source/propagation formulation with declared compactness/bandwidth.
+Use solved traction, interface velocity/acceleration, and applicable volume sources.
+Treat incompressible pressure as a source input, not automatically far-field acoustic pressure.
+Artificial lattice compressibility must not set physical sound speed or microphone pressure.
+Separate acoustic perturbations from hydrodynamic near-field pressure at the observer.
+Include bubbles/cavitation only if their explicit physics is available; otherwise restrict/refuse.
+G1: analytical compact source and moving-boundary acoustic limits.
+G2: a controlled liquid/impact sound case with independent source and microphone measurements.
+Acceptance: a melt journey emits computed physical pressure without prerecorded or authored effects.
+
+### MR56 — Close reciprocal structural/acoustic loading
+
+Group: E — Generic sound-producing systems.
+Priority: 2. Ambition: [F].
+Depends on: MR06, MR07, MR35.
+Existing anchor: `frankensim-ext-acoustics-core-0ja4`.
+Files: existing structural/acoustic impedance ports, time-domain realizations, coupling tests.
+Outcome: acoustic loading can affect motion when one-way radiation is insufficient.
+Assemble work-conjugate surface velocity/traction and pressure/volume-flow transfer.
+Preserve reciprocity and boundary orientation through nonmatching traces where supported.
+Use passive fitted radiation only inside its tested bandwidth and approximation tolerance.
+Combine radiation reaction with source observation without duplicate energy debit.
+G1: coupled oscillator/radiator and a mass-loading limit against an independent solution.
+G3: refine transfer/fitting bandwidth and recover the negligible-loading limit.
+G4: nonconvergent load exchange rolls back through the common runtime.
+Acceptance: physical structure and acoustic field close an energy exchange window together.
+
+### MR57 — Couple geometry-derived exterior and gap-fluid forces
+
+Group: F — Interfaces and physical observations.
+Priority: 2. Ambition: [F].
+Depends on: MR05, MR06, MR17, MR38.
+Existing anchor: `frankensim-b8bxd.8`, existing `fs-flux::gas_film` and lubrication owners.
+Files: existing gas-film/exterior-fluid adapters and Euler production geometry coupling.
+Outcome: air or liquid interaction follows actual gap and external geometry over admitted regimes.
+Drive the existing gap solver with evolving geometry, gas/liquid state, and boundary conditions.
+Compose disjoint force contributions or use a justified overlap/matching formulation.
+Do not add a full exterior drag law and an overlapping thin-gap law without reconciliation.
+State Reynolds/Mach/Knudsen/aspect-ratio and lubrication assumptions where relevant.
+High rarefaction, compressibility, or turbulence requires the existing gated successor or refusal.
+G1: squeeze-film/Couette limits and an exterior-flow reference in a disjoint region.
+G3: pressure/gap/viscosity sweeps and controlled transition between admitted models.
+Acceptance: production mechanics receives computed force/work from the actual evolving gap.
+
+### MR58 — Implement bounded 3-D finite-deformation dynamics
+
+Group: C — Thermal and mechanical evolution.
+Priority: 2. Ambition: [F].
+Depends on: MR04, MR05, MR06, MR21.
+Existing anchor: `frankensim-ext-solid-life-ladder-gahl`, existing fs-solid domain owner.
+Files: `fs-solid` 3-D weak-form/time integration, existing material tangents and solver APIs.
+Outcome: a hot sagging member is solved beyond the current small-strain linear3 limitation.
+Implement a total-Lagrangian or explicitly equivalent finite-deformation weak form.
+Use work-conjugate stress/strain measures, consistent tangent, mass, boundary traction, and inertia.
+Include thermal reference strain through the declared multiplicative/additive law convention.
+Admit compressible baseline first; nearly incompressible lead requires a mixed/stabilized
+displacement-pressure formulation with demonstrated locking/inf-sup or stabilization behavior.
+G1: finite stretch, large rotation without strain, and bending/sagging reference problems.
+G0: objectivity, tangent consistency, inversion refusal, and work/energy balance.
+Acceptance: a real 3-D solid advances finite deformation; an updated display mesh is insufficient.
+
+### MR59 — Implement a sourced piezoelectric component
+
+Group: G — Broader physical material response.
+Priority: 3. Ambition: [F].
+Depends on: MR06, MR10, MR21, MR43.
+Existing anchor: `frankensim-ext-active-materials-wccu`.
+Files: coupled material blocks and existing electrostatic/solid operators.
+Outcome: stress and voltage exchange energy through a material's piezoelectric tensor.
+Supply the dielectric electrostatic weak form through shared potential/field primitives;
+MR43's Ohmic conduction equation alone is not a dielectric electrostatic solver.
+Define independent field variables and short/open-circuit material conventions explicitly.
+Require sourced tensor frames, units, validity, and coupled stability conditions.
+Compose above the solid/electrical owners without a peer dependency cycle.
+G1: direct/converse one-dimensional transducer and open/short stiffness limits.
+G3: simultaneous specimen/tensor rotation and reciprocal work exchange.
+Acceptance: a sensor/actuator fixture uses computed electromechanical response.
+
+### MR60 — Implement magnetostrictive strain and emitted vibration
+
+Group: G — Broader physical material response.
+Priority: 3. Ambition: [F].
+Depends on: MR06, MR10, MR21, MR44, MR56.
+Existing anchor: `frankensim-ext-active-materials-wccu`.
+Files: magnetic/solid coupled law adapters and structural/acoustic observation ports.
+Outcome: magnetic excitation creates mechanical strain and sound through the same material state.
+Retain magnetization history, temperature, crystal/texture frame, and stress conventions.
+Derive reversible coupling and dissipative terms under one declared thermodynamic model.
+Do not supply a transformer-hum oscillator or infer strain from a grade name.
+G1: source-backed magnetostriction curve and small-deformation limiting response.
+G3: field/stress/temperature sweeps with consistent energy exchange.
+Acceptance: a coil/core fixture produces computed structural motion and microphone pressure.
+
+### MR61 — Implement thermoelectric transport with complete heat accounting
+
+Group: G — Broader physical material response.
+Priority: 3. Ambition: [F].
+Depends on: MR06, MR07, MR09, MR19, MR43.
+Existing anchor: `frankensim-ext-active-materials-wccu`.
+Files: thermal/electrical coupled material blocks and current transport operators.
+Outcome: temperature gradients and current exchange electrical work and heat physically.
+Resolve conductivity, thermal conductivity, Seebeck and applicable temperature dependence.
+State Kelvin/Onsager conventions, magnetic parity, and Peltier/Thomson boundary terms.
+Avoid adding scalar Joule heat as if it accounted for every thermoelectric transfer.
+G1: a two-material thermocouple and powered junction heat-balance reference.
+G3: reverse current/temperature gradient and verify the corresponding reversible terms.
+Acceptance: measured voltage or heating follows a computed coupled transport solution.
+
+### MR62 — Implement cyclic response and a bounded fatigue consumer
+
+Group: G — Broader physical material response.
+Priority: 3. Ambition: [F].
+Depends on: MR09, MR22.
+Existing anchor: `frankensim-ext-solid-life-ladder-gahl`.
+Files: existing material history laws and component load-history consumers.
+Outcome: repeated loading changes material response and supports a scoped fatigue estimate.
+Add sourced mixed hardening/Bauschinger behavior where required and declare the history state.
+Implement one bounded S-N/strain-life accumulation method with mean-stress convention.
+A fatigue damage scalar is a model estimate, not a universal remaining-life prediction.
+G0/G1: cyclic loop/tangent/dissipation and hand-counted load-cycle reference.
+G2: held-out coupon/load spectrum for the named material/process/population.
+Acceptance: a repeatedly loaded component accumulates physical/model state with honest uncertainty.
+
+### MR63 — Implement regularized fracture and post-failure transfer
+
+Group: G — Broader physical material response.
+Priority: 3. Ambition: [F].
+Depends on: MR10, MR22, MR28, MR58.
+Existing anchor: `frankensim-ext-solid-life-ladder-gahl`.
+Files: fs-solid damage/cohesive or phase-field operators, geometry/contact transfer.
+Outcome: brittle/ductile failure changes topology and load paths without deleting physical state.
+Select one concrete regularized fracture formulation with a source-backed energy/length scale.
+State tensile/compressive split, irreversibility, contact-after-fracture, and mesh requirements.
+Retain fracture-surface energy and transferred fragment momentum/history.
+G1: fracture-energy and crack-growth reference with mesh/length-scale refinement.
+G3: rotation and split-component transfer preserve physical integrals.
+Acceptance: a failed specimen continues as separated/contacting physical components.
+
+### MR64 — Couple wear and environmental damage to component life
+
+Group: G — Broader physical material response.
+Priority: 3. Ambition: [F].
+Depends on: MR17, MR22, MR28, MR39, MR47, MR62.
+Existing anchor: solid-life and dry-tribology owners.
+Files: existing surface/history laws, contact geometry evolution, component tests.
+Outcome: wear/corrosion/creep-fatigue interactions alter actual component geometry and response.
+Implement one sourced bounded interaction at a time with load/environment/process provenance.
+Preserve correlation between competing damage mechanisms; do not assume independent life risks.
+Update contact/heat/optics only through the evolving shared surface/state adapters.
+G1: bounded wear-depth or corrosion-loss reference and its conserved material accounting.
+G2: independent component holdout under the declared environment and load spectrum.
+Acceptance: a physical component outcome changes and the claimed population/domain remains explicit.
+
+### MR65 — Deliver an early catalog-driven metal-disc slice
+
+Group: H — Integrated journeys and qualification.
+Priority: 1. Ambition: [S/F].
+Depends on: MR04, MR12, MR13, MR15, MR17, MR18, MR35, MR48.
+Existing anchor: current Euler cylindrical/isotropic production path and material-store owner.
+Files: existing cinematic material/contact adapters and one bounded e2e fixture.
+Outcome: two supported metal cylinders run from catalog bindings before full anisotropy or melting.
+Use actual ordered interface binding, mass/inertia, physical radiation, and same-card optics.
+Retain the current accepted-time observation adapter and its bounded static geometry;
+MR42 later extends that shared clock to evolving geometry. Do not introduce another clock.
+Keep geometry/support/initial-energy comparison policy explicit and pressure in physical units.
+Restrict the first case to currently admitted isothermal solid/geometry/gas regimes.
+G1/G3: independent mass/inertia/modal checks and a one-binding metal swap through the real entry.
+Acceptance: two distinct complete catalog bundles produce motion, pressure, and frames;
+the advanced MR49 matrix stays open without blocking this useful delivery.
+
+### MR66 — Deliver the fretted and bowed string material-swap journey
+
+Group: H — Integrated journeys and qualification.
+Priority: 1. Ambition: [F].
+Depends on: MR15, MR16, MR31, MR32, MR36, MR42, MR48, MR76.
+Existing anchor: generic string/contact/radiation owners and current music e2e lane.
+Files: existing geometry/material/gesture fixtures and music render tests.
+Outcome: material, radius, support, pick/finger/bow force, and temperature alter solved string sound.
+Use actual finite excitation/contact with reciprocal support/body loading in its admitted regime.
+Keep fixed-end, fixed-force, and explicitly retuned initialization as separate comparisons.
+Preserve sympathetic unplayed strings/body state; no per-note damping or gain normalization.
+G1/G3: tension/EA/EI, fretting pressure, frictional work, pitch, and decay against independent limits.
+Acceptance: one plucked/fretted and one bounded bowed case run through shared physical mechanisms.
+No duct feature or melting solver is required for this ordinary-state delivery.
+
+### MR67 — Deliver the reed/jet duct material-and-environment journey
+
+Group: H — Integrated journeys and qualification.
+Priority: 1. Ambition: [F].
+Depends on: MR01, MR16, MR33, MR36, MR42, MR48, MR68.
+Existing anchor: fs-duct/fs-aeroac owners and current geometry extraction/music consumers.
+Files: existing duct/reed/jet geometry and excitation fixtures, music e2e lane.
+Outcome: bore/wall/exciter geometry, material, pressure, temperature, and humidity drive actual response.
+Use regional gas state and physical aperture/boundary conditions; reed and jet are distinct exciters.
+Keep flow-source closure and its validity explicit; no note-dependent sound-speed retuning.
+Exercise the rigid-wall limit where changing wall metal should have little effect.
+G1/G3: duct impedance and source power limits, environment sweeps, wall/reed material sensitivity.
+Exercise MR68's dynamic opening-to-flow feedback and MR42's exterior radiation in the
+real entry path. Internal bore pressure or a launched wave is not the microphone output.
+Acceptance: supported reed-driven and jet-driven descriptions emit external microphone
+pressure through one generic stack, with source motion and propagation independently checked.
+Unsupported branching or flow regimes retain explicit current extraction/domain refusals.
+
+### MR68 — Resolve reed excitation from specimen geometry and material
+
+Group: E — Generic sound-producing systems.
+Priority: 1. Ambition: [F].
+Depends on: MR03, MR04, MR16, MR17.
+Existing anchor: existing reed coupling, fs-aeroac, and fs-dcontact owners.
+Files: `fs-couple/src/reed_bore.rs`, shared exciter/material adapters.
+Outcome: exciter response changes for physical reasons under geometry/material/interface edits.
+Replace hidden effective reed face length `0.025` m and damping ratio `0.35` with
+geometry-derived/source-backed response or explicitly identified research-model inputs.
+Resolve reed thickness/profile, support, effective mass/stiffness, loss, and contact closure.
+In the characteristic-line path, solve actual reed opening and swept-face volume flow
+with the pressure/structure junction at consistent time levels. Advancing reed motion
+after a massless aperture solve does not close this feedback. Reuse the existing ODE
+path's physical moving-aperture semantics rather than adding another named reed model.
+Retain work balance among pressure, aperture flow, face motion, storage, loss, and contact.
+Audit active reed/jet assembly for other hidden predictive constants using direct source reads.
+G1/G3: cantilever reed limits, dissipation/work balance, pressure/geometry sweeps, missing data refusal.
+Test equal static compliance/closing pressure with distinct reed masses near resonance:
+the dynamic driving-point response and applicable oscillation onset must change.
+Acceptance: changing reed geometry/material changes actual aperture/face flow and the
+coupled bore response, not only an independently animated reed displacement.
+
+### MR69 — Move deformable solid boundaries through the free-surface grid
+
+Group: D — Phase transitions and free surfaces.
+Priority: 2. Ambition: [F].
+Depends on: MR05, MR08, MR27, MR28, MR58.
+Existing anchor: existing fs-lbm free-surface and geometry/remap owners.
+Files: `fs-lbm::d3q19::freesurface3`, moving-boundary adapters, coupling tests.
+Outcome: deforming or melting solids can occupy/vacate fluid cells without artificial sources.
+Replace the needed permanent tile-wall assumption through a bounded moving-boundary extension.
+Use actual cut/overlap geometry and momentum exchange; initialize newly uncovered populations
+from conserved transferred state, not arbitrary equilibrium defaults that erase momentum.
+Return equal/opposite boundary force/work and accepted geometry epochs to the solid owner.
+Carry interface volume changes explicitly; MR29 adds thermodynamic phase-mass exchange.
+G1: translating piston and moving submerged body with independently checked force/volume/work.
+G3/G4: grid translation/refinement and failed boundary conversion preserve accepted mass/state.
+Acceptance: a moving deformable solid and free surface advance together with balanced exchange.
+
+### MR70 — Deliver heated-solid recoupling before any phase change
+
+Group: H — Integrated journeys and qualification.
+Priority: 1. Ambition: [F].
+Depends on: MR20, MR21, MR31, MR34, MR40, MR41, MR42, MR48.
+Existing anchor: existing thermal, Euler, and generic structural-acoustic consumers.
+Files: bounded heated disc/plate and fixed-end string e2e fixtures.
+Outcome: finite heating changes stress/shape/tension, sound, and appearance while still solid.
+Use source-backed sub-solidus temperature intervals and declared boundary reservoirs.
+Distinguish free expansion from constrained thermal stress and uniform from gradient heating.
+Use physical force/release excitation; finger/tissue acquisition is not a prerequisite.
+G1/G3: energy uptake, thermal strain/prestress, modal response, and synchronized observations.
+Acceptance: both a solid disc/member and a string change through the shared thermal-state pipeline.
+Do not postpone this rung until liquid properties and topology transfer are available.
+
+### MR71 — Deliver the lead-disc partial-melt journey
+
+Group: H — Integrated journeys and qualification.
+Priority: 2. Ambition: [F].
+Depends on: MR14, MR29, MR40, MR41, MR42, MR48, MR55, MR56, MR70.
+Existing anchor: Euler flagship and generic thermal/solid/fluid owners.
+Files: current Euler e2e path and one exact lead/support/environment fixture.
+Outcome: a moving heated lead specimen deforms and partly melts without losing physical state.
+Reuse MR29's coupled fields, MR28's transfer, and solved boundaries for contact/audio/render.
+Admit exact lead purity/process, substrate wetting, observer band, and low-Mach model domain.
+G1/G3: independent energy/mass/momentum balances, front/deformation refinement, source timing.
+G4: interruption at first topology change resumes the same accepted physical history.
+Acceptance: computed liquid motion and actual emitted pressure/radiance continue after melting onset.
+A refusal or attractive animation alone cannot close this delivery.
+
+### MR72 — Deliver the lead-string softening and partial-melt journey
+
+Group: H — Integrated journeys and qualification.
+Priority: 2. Ambition: [F].
+Depends on: MR14, MR22, MR29, MR31, MR34, MR40, MR41, MR42, MR48, MR55, MR56, MR70.
+Existing anchor: generic structural/contact/acoustic and phase-transfer owners.
+Files: heated-member e2e path and one exact lead string/support fixture.
+Outcome: heating a lead string changes tension/sag and can release moving melt/segments.
+Use explicit physical force/release excitation; full fretting/tissue and duct journeys are independent.
+Initialize the first case as MR58's slender tetrahedral solid, including its actual
+reference geometry, equilibrium/prestress, inertia, thermal state, and constitutive history.
+Keep this volume state authoritative through softening and phase transfer. Optional
+reduced vibration/observation states derive from it and retire before their assumptions fail.
+MR28 must receive solved volume state; extruding an aggregate `PrestressedString`
+at melting onset cannot reconstruct its missing stress, thermal, or plastic history.
+Preserve released elastic energy, segment momentum, remaining support forces, and thermal state.
+G1/G3: constrained expansion/creep, load-bearing loss, transfer integrals, and observation timing.
+Check the initialized solid against the admitted slender-string equilibrium/vibration limit
+and compare conserved quantities before any reduced observation and before phase handoff.
+Acceptance: the heated slender solid continues into deformable/free-surface motion
+through actual operators without inventing a three-dimensional state at transition time.
+Resolved fluid sources may be quiet; do not force an audible effect to advertise a transition.
+
+### MR73 — Assess ordinary object predictions against held-out measurements
+
+Group: H — Integrated journeys and qualification.
+Priority: 2. Ambition: [S/F].
+Depends on: MR49, MR50, MR52.
+Existing anchor: existing V&V, material identifiability, and Euler experiment owners.
+Files: existing disc/string/duct measurement fixtures and V&V comparison paths.
+Outcome: material-driven object predictions are assessed independently of their calibration.
+Freeze MR52 parameters; preserve measurement uncertainty, covariance, alignment, and model discrepancy.
+Use pressure/mass/radius/ring/support sweeps to distinguish Euler loss mechanisms.
+Do not identify several confounded laws from one spin-stop time or chirp exponent.
+Assess force/motion, impedance/pressure, and applicable optical observations with declared tolerances.
+G2: held-out observations for each ordinary journey; retain exact no-data boundaries.
+Acceptance: executed comparisons state what is validated and what still lacks experimental support.
+
+### MR74 — Assess heating and melting against held-out measurements
+
+Group: H — Integrated journeys and qualification.
+Priority: 2. Ambition: [F].
+Depends on: MR51, MR52.
+Existing anchor: thermal/phase V&V owners and current experiment ingestion.
+Files: existing thermal/melt experiment fixtures and V&V comparison paths.
+Outcome: thermal-front, deformation, liquid motion, and acoustic predictions have independent assessment.
+Separate material/capillary calibration from the lead-disc/string observations used for validation.
+Declare metrology, uncertainty, environment, and sensor/observer geometry before comparisons.
+G2: compare independent temperature/front/shape/force and available microphone/radiance measurements.
+Missing observations remain named validation gaps; simulated references prove numerics only.
+Acceptance: measured holdouts bound the claimed operating domain and unresolved model discrepancies.
+
+### MR75 — Qualify phase-changing runtime cost, determinism, and recovery
+
+Group: H — Integrated journeys and qualification.
+Priority: 2. Ambition: [F].
+Depends on: MR51, MR74.
+Existing anchor: existing DSR/runtime/performance and phase-coupling owners.
+Files: existing phase-changing e2e scripts and budget/recovery tests.
+Outcome: real melting journeys have measured cost and recover through model/topology transitions.
+Apply the MR53 verification method through the existing lanes; do not build another harness.
+Measure transfer/nonlinear/coupling error, runtime/memory, same-ISA determinism, and failed admission.
+G4/G5: cancel/resume during latent plateau, moving-boundary transfer, and source observation.
+Keep source/state/model IDs, physical time, error norms, iterations, and actionable stop reasons.
+Acceptance: retained runtime results identify tested machine/workload/domain and remaining limits.
+Ordinary-journey qualification remains independently deliverable in MR53.
+
+### MR76 — Resolve bowed-string friction and losses from shared material state
+
+Group: E — Generic sound-producing systems.
+Priority: 1. Ambition: [F].
+Depends on: MR03, MR17, MR31.
+Existing anchor: existing bowed-string coupling and fs-tribo interface owners.
+Files: `fs-couple/src/bowed_string.rs`, shared string-loss and friction adapters.
+Outcome: bow finish/load/speed and string material change the physical frictional excitation.
+Resolve ordered bow/string interface state, normal load, relative velocity, and history.
+Replace predictive free per-mode damping with MR03's admitted material/air/joint losses.
+Retain research overrides as explicitly identified inputs with no source-backed claim promotion.
+G1/G3: frictional power, stick/slip limits, speed/load/material sweeps, and absent-interface refusal.
+Acceptance: a bounded bowed-string run uses source-backed excitation/loss bindings without
+per-note output tuning; this delivery does not depend on unrelated duct excitation work.
 
 ## 9. Milestones, evidence, and costs
 
@@ -1492,12 +1961,12 @@ Acceptance: each added family changes an actual component outcome; catalog rows 
 |---|---|---|
 | A | MR01–MR08 | Correct environment/material response with coherent runtime state |
 | B | MR09–MR18 | Queryable, source-backed bundles usable by physical consumers |
-| C | MR19–MR24 | Spatial heating, stress, creep, and validity-aware evolution |
-| D | MR25–MR30 | Computed melting/free surface and conservative state transitions |
-| E | MR31–MR36 | Generic contact-excited and gas-excited sound production |
-| F | MR37–MR42 | General contact and matching physical observations |
-| G | MR43–MR47, MR54 | Electrical, magnetic, active, moisture, chemical, and life effects |
-| H | MR48–MR53 | Runnable declarative journeys and measured qualification |
+| C | MR19–MR24, MR58 | Spatial heating, finite deformation, creep, and validity-aware evolution |
+| D | MR25–MR30, MR69 | Computed melting/free surface and conservative state transitions |
+| E | MR31–MR36, MR55–MR56, MR68, MR76 | Generic contact/fluid-excited sound and reciprocal loading |
+| F | MR37–MR42, MR57 | General contact/fluid interactions and matching physical observations |
+| G | MR43–MR47, MR54, MR59–MR64 | Electrical, magnetic, active, moisture, chemical, and life effects |
+| H | MR48–MR53, MR65–MR67, MR70–MR75 | Runnable declarative journeys and measured qualification |
 
 The groups organize work; they must not serialize independent tasks unnecessarily.
 MR01, MR02, MR04, MR09, and MR12 can start without waiting for melting research.
@@ -1563,6 +2032,8 @@ The initial research consulted these primary sources on 2026-09-04/05 UTC.
 | [Bilbao, Torin, Chatziioannou, collisions](https://arxiv.org/abs/1405.2589) | Energy-based collision treatment is reusable across strings, reeds, and striking interactions |
 | [Thorne et al., Euler-disc investigation](https://arxiv.org/html/2603.14520v1) | Different loss mechanisms require controlled physical sweeps; fitted scaling is not a universal law |
 | [NASA thermodynamic species coefficients](https://ntrs.nasa.gov/citations/20020085330) | Reuse existing species/reference-state conventions and source-normalization paths |
+| [Silva et al., coupled reed and bore dynamics](https://arxiv.org/abs/0705.2803) | Reed motion must modulate bore flow; dynamic compliance can alter the coupled onset and response |
+| [Woodhouse, wind-instrument radiation](https://euphonics.org/11-7-interlude-how-do-wind-instruments-make-sound/) | Exterior sound depends on outlet/tone-hole source flow and relative phase, not a copy of local bore pressure |
 
 The Euler paper's rolling/air distinction depends on regime and experimental controls.
 Its suggested adhesion mechanism is not adopted as a proven universal interface law.
@@ -1571,7 +2042,7 @@ The collision literature supports numerical energy methods, not a universal tiss
 
 ## 11. Fresh-eyes review and integration record
 
-The review requirement is four plan passes, followed by bounded Bead refinement passes.
+The initial review used four plan passes, followed by bounded Bead refinement passes.
 Each pass asks the owner's exact question: once again check for blunders, mistakes,
 errors, oversights, omissions, problems, misconceptions, and bugs, thoroughly.
 Reviews must revise actual defects; repeated statements of confidence do not count.
@@ -1586,40 +2057,205 @@ Preserved generic acoustic owners and excluded instrument-name dispatch.
 
 ### Review pass 2 — Physics and state-transition audit
 
-Pending review of the complete task graph.
-Must specifically inspect latent heat, density/volume, stress release, phase fractions,
-energy/entropy ports, radiation loss duplication, damping assumptions, and observation timing.
+Completed on the complete first task catalog.
+Added explicit missing fluid acoustic-source, reciprocal acoustic-loading, gap-fluid,
+and 3-D finite-deformation implementations; the journeys could not assume these existed.
+Separated active-material and damage portfolios into concrete component/law deliveries.
+Removed implicit data/consumer acceptance cycles and the observation-clock dependency
+on all musical gesture work. Lead melting no longer waits for the full ordinary swap matrix.
 
 ### Review pass 3 — Independent implementability and integration review
 
-Pending independent reading of the full plan and a standalone obscure task.
-Must inspect actual source owners, missing dependencies, complete inputs/outputs,
-and whether either flagship could pass through a hidden hand-tuned shortcut.
+Completed by an independent architecture/physics reviewer and a separate-model reviewer.
+Their source checks exposed the existing FreeSurface3 backend and its stationary-wall limit,
+the scalar-only remap seam, hidden reed/bow inputs, and the enthalpy/pressure-work ambiguity.
+Revised MR19/MR27/MR28/MR29 and added moving-boundary and exciter tasks accordingly.
+Specified the tetrahedral-to-Cartesian handoff and law-owned history transport.
+Changed MR14 so absent lead data cannot satisfy the melting prerequisite.
+Separated declared-envelope discovery from trial-step validity detection.
 
 ### Review pass 4 — Dependency and scope review
 
-Pending after review revisions.
-Must inspect the DAG, existing owner/deferred overlaps, five architectural rationales,
-and whether the final revision introduces only bounded clarifications rather than a redesign.
+Completed over all 76 task descriptions before conversion.
+Separated early catalog delivery, fretted/bowed strings, reed/jet ducts, heated solids,
+lead-disc melt, lead-string melt, and ordinary versus phase-changing qualification.
+Removed scheduler/clock prerequisites on unrelated musical or deformation implementations.
+Moved capillary dynamics testing downstream of the static boundary operator.
+Kept source acquisition, resolver acceptance, and downstream runtime acceptance distinct.
+Reviewed the five central rationales against current owners and preserved deferred portfolios.
+The final pass changed prerequisites and bounded acceptance details, not the architecture.
+
+### Review pass 5 — Production causality and transition prerequisites
+
+Completed on the owner's renewed fresh-eyes request, using a bounded independent
+source review and direct checks of the affected production adapters.
+Clarified MR01/MR33: the existing humid-gas constructor changes thermodynamics but
+retains dry-air viscosity/conductivity fits; it does not prove mixture transport accuracy.
+Strengthened MR68/MR67: massive-reed motion must close into actual aperture/face flow.
+Expanded MR42's existing observation scope to repair internal-pressure substitution,
+the dimensionally incorrect force-dipole factor, and missing exterior radiation transfer.
+Added modal mass/port normalization and signed radiation-overlap checks to MR35.
+Made the first MR72 lead string a slender volume solid from initialization, eliminating
+an otherwise unspecified reconstruction of three-dimensional history at melting onset.
+The 76 task IDs and their blocking prerequisites remain unchanged: these repairs belong
+inside existing deliveries, and MR58 already precedes MR72 through its phase-transfer chain.
+After revision, all 76 task bodies, titles, acceptance fields, 252 blocking edges,
+and 84 parent-child edges matched the live Beads. `br` and computed `bv` cycle
+analysis reported no cycles; the final Beads export/status checks were healthy.
 
 ### Existing-task instruction reconciliation
 
-`frankensim-rc-root-q61wp.37` currently proposes an `fs-instrument` extraction.
-The newest owner instruction requires generic physical mechanisms; its destination
-must be revised to mechanism-owned decomposition with no functionality loss.
+`frankensim-rc-root-q61wp.37` previously proposed an `fs-instrument` extraction.
+Its title and description now require mechanism-owned decomposition with no
+functionality loss, following the newest owner instruction. Historical notes remain
+with an explicit comment superseding the older instrument-crate falsifier.
 `frankensim-h7xu5.7` permits artistic extrapolation/chirps in its earlier cinematic scope.
 Those are excluded from the new predictive lane; current in-progress work is not overwritten.
 `frankensim-h7xu5.7.8` retains an old fs-acoustics description despite newer real radiation code.
-Add precise scope reconciliation without claiming its current owner completed this new program.
+A scope-reconciliation comment now identifies the real current source and successor
+deliveries without claiming its current owner completed this new program.
+
+### Bead refinement passes
+
+1. Coverage: checked all 76 plan entries against the 76 created task bodies and acceptance fields;
+   all thirteen material-taxonomy families remain in the program's continuing scope.
+2. Standalone readability: read the lead-data, conservative-transfer, and electrothermal
+   Beads as independent tasks, including their physical assumptions and exact dependencies.
+3. Dependencies: checked every one of the 252 actual blocking edges against the plan,
+   plus all task/group parents. No missing or unintended prerequisite was found.
+4. Existing ownership: verified 33 related links, reconciled the old instrument/audio
+   instructions, and confirmed closed antecedents, deferred portfolios, and assignments stayed intact.
+5. Tests and closure: clarified the mixture-law coupon acceptance so it does not implicitly
+   wait for full melt integration; added explicit G4/G5 labels to ordinary runtime qualification.
+6. Final graph/readiness: `br` and `bv` agreed on the five ready implementation tasks;
+   cycle and orphan analysis found none, and the final mapping/whitespace checks passed.
+
+These are bounded reviews of the requested plan and Beads, not new repository tooling.
+The final refinement changed acceptance wording and test labels without changing the architecture.
 
 ## 12. Beads conversion and handoff
 
-Pending conversion after plan review.
+Created root epic: `frankensim-material-reality-ui2if`.
+The program contains eight group epics and 76 implementation/integration tasks
+(85 new Beads including the root), labeled `material-reality-2026`.
+Each task includes its physical context, precise prerequisite IDs, acceptance,
+focused tests, useful logging, and shared operating rules inside the Bead itself.
 Use only `br` for creation, updates, comments, and dependency mutations.
 Use typed parent-child hierarchy and explicit prerequisite `blocks` edges.
 Use `bv --robot-*` for diagnosis; never invoke its TUI.
 Keep closed antecedents closed and retain assignments on existing active work.
 Do not create branches, worktrees, scratch clones, commits, or pushes for this task.
 
-The final handoff will record the root/group/task IDs, reused owner links,
-cycle-check outcome, ready implementation entries, and verification limitations.
+Group epics are `frankensim-material-reality-ui2if.1` through `.8`, corresponding
+to A through H in the delivery table. They organize scope; the task-level
+blocking edges determine implementation readiness.
+
+| Plan task | Bead ID |
+|---|---|
+| MR01 | `frankensim-material-reality-ui2if.1.1` |
+| MR02 | `frankensim-material-reality-ui2if.1.2` |
+| MR03 | `frankensim-material-reality-ui2if.1.3` |
+| MR04 | `frankensim-material-reality-ui2if.1.4` |
+| MR05 | `frankensim-material-reality-ui2if.1.5` |
+| MR06 | `frankensim-material-reality-ui2if.1.6` |
+| MR07 | `frankensim-material-reality-ui2if.1.7` |
+| MR08 | `frankensim-material-reality-ui2if.1.8` |
+| MR09 | `frankensim-material-reality-ui2if.2.1` |
+| MR10 | `frankensim-material-reality-ui2if.2.2` |
+| MR11 | `frankensim-material-reality-ui2if.2.3` |
+| MR12 | `frankensim-material-reality-ui2if.2.4` |
+| MR13 | `frankensim-material-reality-ui2if.2.5` |
+| MR14 | `frankensim-material-reality-ui2if.2.6` |
+| MR15 | `frankensim-material-reality-ui2if.2.7` |
+| MR16 | `frankensim-material-reality-ui2if.2.8` |
+| MR17 | `frankensim-material-reality-ui2if.2.9` |
+| MR18 | `frankensim-material-reality-ui2if.2.10` |
+| MR19 | `frankensim-material-reality-ui2if.3.1` |
+| MR20 | `frankensim-material-reality-ui2if.3.2` |
+| MR21 | `frankensim-material-reality-ui2if.3.3` |
+| MR22 | `frankensim-material-reality-ui2if.3.4` |
+| MR23 | `frankensim-material-reality-ui2if.3.5` |
+| MR24 | `frankensim-material-reality-ui2if.3.6` |
+| MR25 | `frankensim-material-reality-ui2if.4.1` |
+| MR26 | `frankensim-material-reality-ui2if.4.2` |
+| MR27 | `frankensim-material-reality-ui2if.4.3` |
+| MR28 | `frankensim-material-reality-ui2if.4.4` |
+| MR29 | `frankensim-material-reality-ui2if.4.5` |
+| MR30 | `frankensim-material-reality-ui2if.4.6` |
+| MR31 | `frankensim-material-reality-ui2if.5.1` |
+| MR32 | `frankensim-material-reality-ui2if.5.2` |
+| MR33 | `frankensim-material-reality-ui2if.5.3` |
+| MR34 | `frankensim-material-reality-ui2if.5.4` |
+| MR35 | `frankensim-material-reality-ui2if.5.5` |
+| MR36 | `frankensim-material-reality-ui2if.5.6` |
+| MR37 | `frankensim-material-reality-ui2if.6.1` |
+| MR38 | `frankensim-material-reality-ui2if.6.2` |
+| MR39 | `frankensim-material-reality-ui2if.6.3` |
+| MR40 | `frankensim-material-reality-ui2if.6.4` |
+| MR41 | `frankensim-material-reality-ui2if.6.5` |
+| MR42 | `frankensim-material-reality-ui2if.6.6` |
+| MR43 | `frankensim-material-reality-ui2if.7.1` |
+| MR44 | `frankensim-material-reality-ui2if.7.2` |
+| MR45 | `frankensim-material-reality-ui2if.7.3` |
+| MR46 | `frankensim-material-reality-ui2if.7.4` |
+| MR47 | `frankensim-material-reality-ui2if.7.5` |
+| MR48 | `frankensim-material-reality-ui2if.8.1` |
+| MR49 | `frankensim-material-reality-ui2if.8.2` |
+| MR50 | `frankensim-material-reality-ui2if.8.3` |
+| MR51 | `frankensim-material-reality-ui2if.8.4` |
+| MR52 | `frankensim-material-reality-ui2if.8.5` |
+| MR53 | `frankensim-material-reality-ui2if.8.6` |
+| MR54 | `frankensim-material-reality-ui2if.7.6` |
+| MR55 | `frankensim-material-reality-ui2if.5.7` |
+| MR56 | `frankensim-material-reality-ui2if.5.8` |
+| MR57 | `frankensim-material-reality-ui2if.6.7` |
+| MR58 | `frankensim-material-reality-ui2if.3.7` |
+| MR59 | `frankensim-material-reality-ui2if.7.7` |
+| MR60 | `frankensim-material-reality-ui2if.7.8` |
+| MR61 | `frankensim-material-reality-ui2if.7.9` |
+| MR62 | `frankensim-material-reality-ui2if.7.10` |
+| MR63 | `frankensim-material-reality-ui2if.7.11` |
+| MR64 | `frankensim-material-reality-ui2if.7.12` |
+| MR65 | `frankensim-material-reality-ui2if.8.7` |
+| MR66 | `frankensim-material-reality-ui2if.8.8` |
+| MR67 | `frankensim-material-reality-ui2if.8.9` |
+| MR68 | `frankensim-material-reality-ui2if.5.9` |
+| MR69 | `frankensim-material-reality-ui2if.4.7` |
+| MR70 | `frankensim-material-reality-ui2if.8.10` |
+| MR71 | `frankensim-material-reality-ui2if.8.11` |
+| MR72 | `frankensim-material-reality-ui2if.8.12` |
+| MR73 | `frankensim-material-reality-ui2if.8.13` |
+| MR74 | `frankensim-material-reality-ui2if.8.14` |
+| MR75 | `frankensim-material-reality-ui2if.8.15` |
+| MR76 | `frankensim-material-reality-ui2if.5.10` |
+
+The final graph has 252 blocking prerequisites, 84 hierarchy edges, and 33 related
+links to existing owners. `br dep cycles --json --no-auto-import` passed with zero cycles.
+`bv --robot-triage`, `bv --robot-plan`, and `bv --robot-insights`, each scoped with
+`--label material-reality-2026`, completed. The insights run computed cycle analysis
+and reported no cycles or orphans. Its scope also includes related existing issues;
+its aggregate counts and velocity/health scores are not implementation completion evidence.
+
+The exact new-program ready list is obtained with:
+
+```bash
+br ready --label material-reality-2026 --type task --json
+```
+
+It contains MR01 (moist gas), MR02 (correct plate damping), MR04 (coherent specimens),
+MR09 (property semantics), and MR12 (complete pack-family storage).
+MR01/MR02 are direct correctness fixes; MR04/MR09/MR12 unlock broader composition.
+The `bv` ranking highlights MR09 and MR04; its generic effort/risk scores are not
+scientific feasibility findings or a schedule commitment.
+
+At initial conversion, `br sync --flush-only --json --no-auto-import` exported
+successfully with no errors and all new implementation Beads were open.
+During review pass 5, MR01 was claimed by GreenOsprey; that assignment is preserved
+and its existing acoustic-source reservations exclude parallel edits to those files.
+This delivery is the reviewed plan and task graph.
+No Rust implementation, numerical run, experimental validation, playback, or DSR/Cargo
+build was performed for this documentation/Beads task.
+The shared Agent Mail service reported a failed full-integrity health state.
+Initial conversion made no reservation claim. The subsequent review successfully
+registered YellowWillow and reserved this plan; acoustic source conflicts were respected.
+No shared-service repair or index manipulation was performed.
