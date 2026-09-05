@@ -513,7 +513,7 @@ fn persist(
         report.design.area()
     );
     let mut package = EvidencePackage::new(Provenance::new(
-        format!("fs-cli/{};{DRIVER}", env!("CARGO_PKG_VERSION")),
+        format!("fs-cli/{}+{DRIVER}", env!("CARGO_PKG_VERSION")),
         hash_bytes(include_bytes!("../../../constellation.lock")).to_hex(),
     ));
     let final_compliance = report.iterations.last().map_or("null".to_string(), |r| {
@@ -527,10 +527,14 @@ fn persist(
     let package_json = package
         .to_json()
         .map_err(|e| fail("cli-study-package", e.to_string()))?;
-    if !fs_checker::check(&package).passed() {
+    let checked = fs_checker::check(&package);
+    if !checked.passed() {
         return Err(fail(
             "cli-study-package",
-            "checker refused the produced package",
+            format!(
+                "checker refused the produced package: {:?}",
+                checked.findings()
+            ),
         ));
     }
     let summary = format!(
