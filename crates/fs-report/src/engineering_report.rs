@@ -16,7 +16,7 @@
 use fs_blake3::{ContentHash, hash_domain};
 use fs_evidence::Color;
 use fs_ladder::ConvergenceResult;
-use fs_uq::UqResult;
+use fs_uq::{UqResult, UqStatus};
 use std::fmt::Write as _;
 
 /// Item in the QoI and Error Budget table.
@@ -499,24 +499,49 @@ impl EngineeringReport {
         // 4. Parameter / BC Uncertainty Section
         if let Some(uq) = &self.uncertainty {
             html.push_str("<h2>4. Parameter &amp; Boundary Condition Uncertainty</h2>\n");
+            let color = match &uq.evidence_color {
+                Color::Verified { .. } => "Verified",
+                Color::Validated { .. } => "Validated",
+                Color::Estimated { .. } => "Estimated",
+            };
             let _ = write!(
                 html,
-                "<p><strong>Propagation Method:</strong> {:?} | <strong>Samples Evaluated:</strong> {} | <strong>Sampling Error:</strong> ±{:.4}</p>\n",
-                uq.method_used, uq.samples_evaluated, uq.sampling_error
+                "<p><strong>Propagation Method:</strong> {:?} | <strong>Status:</strong> {} | <strong>Samples Evaluated:</strong> {} | <strong>Evidence:</strong> {color}</p>\n",
+                uq.method_used,
+                uq.status.label(),
+                uq.samples_evaluated
             );
-            if let (Some(m), Some(s)) = (uq.mean, uq.std_dev) {
-                let _ = write!(
+            if let Some(reason) = &uq.rejection_reason {
+                let _ = writeln!(
                     html,
-                    "<p><strong>Distribution:</strong> Mean = {:.4}, StdDev = {:.4}, Range = [{:.4}, {:.4}]</p>\n",
-                    m, s, uq.interval_bounds[0], uq.interval_bounds[1]
+                    "<p><strong>Reason:</strong> {}</p>",
+                    escape_html(reason)
                 );
             }
-            if let Some(p_comp) = uq.probability_of_compliance {
+            if uq.status == UqStatus::Complete {
+                html.push_str("<p>Empirical sample statistics; no confidence interval or physical-validation claim.</p>\n");
                 let _ = write!(
                     html,
-                    "<p><strong>Probability of Compliance:</strong> <strong>{:.2}%</strong></p>\n",
-                    p_comp * 100.0
+                    "<p><strong>Estimated standard error of the sample mean:</strong> {}</p>\n",
+                    html_num(uq.sampling_error)
                 );
+                if let (Some(m), Some(s)) = (uq.mean, uq.std_dev) {
+                    let _ = write!(
+                        html,
+                        "<p><strong>Sample statistics:</strong> Mean = {}, StdDev = {}, Observed range = [{}, {}]</p>\n",
+                        html_num(m),
+                        html_num(s),
+                        html_num(uq.interval_bounds[0]),
+                        html_num(uq.interval_bounds[1])
+                    );
+                }
+                if let Some(p_comp) = uq.probability_of_compliance {
+                    let _ = write!(
+                        html,
+                        "<p><strong>Empirical compliance frequency:</strong> <strong>{:.2}%</strong></p>\n",
+                        p_comp * 100.0
+                    );
+                }
             }
         }
 
@@ -872,13 +897,58 @@ impl EngineeringReport {
             );
             let _ = write!(json, "    \"method\": \"{:?}\",\n", uq.method_used);
             let _ = write!(json, "    \"samples\": {},\n", uq.samples_evaluated);
-            let _ = write!(json, "    \"mean\": {:?},\n", uq.mean);
-            let _ = write!(json, "    \"std_dev\": {:?},\n", uq.std_dev);
+            let _ = write!(json, "    \"status\": \"{}\",\n", uq.status.label());
+            let color = match &uq.evidence_color {
+                Color::Verified { .. } => "Verified",
+                Color::Validated { .. } => "Validated",
+                Color::Estimated { .. } => "Estimated",
+            };
+            let _ = write!(json, "    \"evidence_color\": \"{color}\",\n");
             let _ = write!(
                 json,
-                "    \"p_compliance\": {:?}\n",
-                uq.probability_of_compliance
+                "    \"result_root\": \"{}\",\n",
+                uq.content_hash().to_hex()
             );
+            let _ = write!(
+                json,
+                "    \"rejection_reason\": {},\n",
+                uq.rejection_reason
+                    .as_deref()
+                    .map_or_else(|| "null".to_string(), |r| format!("\"{}\"", escape_json(r)))
+            );
+            // Unavailable/refused magnitudes are null; retain full f64 precision
+            // for these empirical values instead of Rust Option debug text.
+            let optional = |value: Option<f64>| {
+                value
+                    .filter(|x| uq.status == UqStatus::Complete && x.is_finite())
+                    .map_or_else(|| "null".to_string(), |x| x.to_string())
+            };
+            let _ = write!(json, "    \"mean\": {},\n", optional(uq.mean));
+            let _ = write!(json, "    \"std_dev\": {},\n", optional(uq.std_dev));
+            let _ = write!(
+                json,
+                "    \"sampling_standard_error\": {},\n",
+                optional(Some(uq.sampling_error))
+            );
+            let _ = write!(
+                json,
+                "    \"observed_range\": {},\n",
+                if uq.status == UqStatus::Complete {
+                    format!(
+                        "[{}, {}]",
+                        optional(Some(uq.interval_bounds[0])),
+                        optional(Some(uq.interval_bounds[1]))
+                    )
+                } else {
+                    "null".to_string()
+                }
+            );
+            let _ = write!(
+                json,
+                "    \"p_compliance\": {},\n",
+                optional(uq.probability_of_compliance)
+            );
+            json.push_str("    \"probability_semantics\": \"empirical-frequency; no confidence or model-error bound\"\n");
             json.push_str("  },\n");
         }
 

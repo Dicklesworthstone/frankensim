@@ -164,3 +164,36 @@ fn test_engineering_report_escaping() {
     assert!(html.contains("&lt;b&gt;bold&lt;/b&gt;"));
     assert!(html.contains("&amp;"));
 }
+
+#[test]
+fn g0_uq_report_preserves_refusals_and_empirical_authority() {
+    let plan = UqPlan::new("constant", PropagationMethod::MonteCarlo, 2)
+        .with_parameter(ParameterUncertainty::gaussian("a", 0.0, 1.0, "1"))
+        .with_compliance_threshold(3.0);
+    let result = UqPropagator::run(&plan, |_| 2.0);
+    let report = EngineeringReport::new("uq-complete", "UQ").with_uncertainty(result);
+    let html = report.render_html();
+    assert!(html.contains("Empirical compliance frequency"));
+    assert!(html.contains("Observed range") && html.contains("Estimated"));
+    assert!(!html.contains("Probability of Compliance"));
+    let json = report.render_json();
+    assert!(json.contains("\"mean\": 2,") && json.contains("\"p_compliance\": 1,"));
+    assert!(!json.contains("Some(") && !json.contains("None"));
+    // Retain the actual rendered twin for an independent JSON-reader check.
+    println!("uq-report-json-begin\n{json}\nuq-report-json-end");
+
+    let mut unsupported = plan;
+    unsupported.method = PropagationMethod::QuasiMonteCarlo;
+    let mut result = UqPropagator::run(&unsupported, |_| panic!("unsupported model call"));
+    result.rejection_reason = Some("missing <joint> & \"measure\"\nrequest declaration".into());
+    let report = EngineeringReport::new("uq-refused", "UQ").with_uncertainty(result);
+    let html = report.render_html();
+    assert!(html.contains("refused") && html.contains("missing &lt;joint&gt; &amp;"));
+    assert!(!html.contains("Empirical compliance frequency"));
+    assert!(!html.contains("Sample statistics:"));
+    let json = report.render_json();
+    assert!(json.contains("\"mean\": null") && json.contains("\"p_compliance\": null"));
+    assert!(json.contains("\"observed_range\": null"));
+    assert!(!json.contains("Some(") && !json.contains("None"));
+    println!("uq-report-json-begin\n{json}\nuq-report-json-end");
+}

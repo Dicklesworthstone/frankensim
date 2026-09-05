@@ -134,6 +134,15 @@ render determinism, and caller-order row rendering.
 
 ## No-claim boundaries
 
+- The engineering report's UQ section preserves producer status, evidence color,
+  refusal reason and result identity. Completed sampling is displayed as
+  empirical statistics, observed range and empirical compliance frequency;
+  standard error is not presented as a confidence interval. Refused or partial
+  outcomes do not display final statistics. The JSON twin uses finite numbers
+  or `null`, never Rust `Some(...)`/`None`, and retains these semantic labels.
+  Rendering neither executes Cooling propagation nor upgrades numerical or
+  physical authority. `tests/engineering_report.rs` covers complete and refused
+  UQ projections and escaping of refusal text.
 - v0 is the notebook DATA MODEL + deterministic Markdown render + content hash +
   the reproducing IR, and a scalar-feature semantic diff. The fuller deliverable
   — FrankenPandas frames over the Design Ledger, HTML with embedded data tables
