@@ -577,6 +577,290 @@ fn construction_and_decoding_canonicalize_permutable_collections() {
 }
 
 #[test]
+fn g3_hardness_tests_select_exact_apparatus_through_material_interface_and_joint_replay() {
+    use fs_matdb::{
+        HardnessLoadStep, HardnessTestContext, MatDbError, QueryPoint, SelectionPolicy,
+    };
+    use fs_qty::{
+        QtyAny, QuantitySpec,
+        semantic::{HardnessScale, QuantityKind, SemanticType, ValueForm},
+    };
+    let scale = QuantitySpec::semantic(SemanticType::new(
+        QuantityKind::Hardness(HardnessScale::Vickers),
+        ValueForm::Static,
+    ));
+    let temperature = QuantitySpec::semantic(SemanticType::new(
+        QuantityKind::AbsoluteTemperature,
+        ValueForm::Static,
+    ));
+    let force = |v| QtyAny::new(v, Dims([1, 1, -2, 0, 0, 0]));
+    let time = |v| QtyAny::new(v, Dims([0, 0, 1, 0, 0, 0]));
+    let (source, observation, _) = sample_claims();
+    let mut claims = ClaimSet::new();
+    claims
+        .register_observation(source.observation(observation).unwrap().clone())
+        .unwrap();
+    let mut other_specimen = source.observation(observation).unwrap().clone();
+    other_specimen.specimen = "different synthetic specimen/process".into();
+    let other_observation = claims.register_observation(other_specimen).unwrap();
+    let context = |indenter: &str, load, dwell, protocol: &str, observation| {
+        HardnessTestContext::new(
+            indenter,
+            vec![HardnessLoadStep::new(force(load), time(dwell)).unwrap()],
+            protocol,
+            observation,
+        )
+        .unwrap()
+    };
+    let requested = context(
+        "synthetic diamond pyramid geometry A",
+        20.0,
+        10.0,
+        "synthetic protocol revision 1",
+        observation,
+    );
+    let bare_key = PropertyKey::with_quantity("hardness", scale);
+    let key = bare_key
+        .clone()
+        .with_hardness_test(requested.clone())
+        .unwrap();
+    let domain = ValidityDomain::unconstrained().with_quantity("T", temperature, 300.0, 300.0);
+    let claim = PropertyClaim {
+        key: key.clone(),
+        value: PropertyValue::Scalar {
+            value: 210.0,
+            dims: Dims::NONE,
+        },
+        validity: domain.clone(),
+        uncertainty: UncertaintyModel::Unstated,
+        interpolation: InterpolationPolicy::ConstantWithinValidity,
+        observations: vec![observation],
+        provenance: provenance(),
+    };
+    let mut unlinked = claim.clone();
+    unlinked.observations.clear();
+    let before = claims.clone();
+    assert!(matches!(
+        claims.insert_claim(unlinked),
+        Err(MatDbError::InvalidHardnessContext { .. })
+    ));
+    assert_eq!(claims, before);
+    let selected = claims.insert_claim(claim.clone()).unwrap();
+    let alternatives = [
+        context(
+            "synthetic diamond pyramid geometry B",
+            20.0,
+            10.0,
+            "synthetic protocol revision 1",
+            observation,
+        ),
+        context(
+            "synthetic diamond pyramid geometry A",
+            40.0,
+            10.0,
+            "synthetic protocol revision 1",
+            observation,
+        ),
+        context(
+            "synthetic diamond pyramid geometry A",
+            20.0,
+            15.0,
+            "synthetic protocol revision 1",
+            observation,
+        ),
+        context(
+            "synthetic diamond pyramid geometry A",
+            20.0,
+            10.0,
+            "synthetic protocol revision 2",
+            observation,
+        ),
+        context(
+            "synthetic diamond pyramid geometry A",
+            20.0,
+            10.0,
+            "synthetic protocol revision 1",
+            other_observation,
+        ),
+        HardnessTestContext::new(
+            requested.indenter(),
+            vec![
+                HardnessLoadStep::new(force(2.0), time(5.0)).unwrap(),
+                requested.loading()[0].clone(),
+            ],
+            requested.protocol(),
+            observation,
+        )
+        .unwrap(),
+    ];
+    let mut alternate_ids = Vec::new();
+    for test in &alternatives {
+        let mut different = claim.clone();
+        different.key = bare_key.clone().with_hardness_test(test.clone()).unwrap();
+        different.observations = vec![test.observation()];
+        let id = claims.insert_claim(different).unwrap();
+        assert_ne!(id, selected);
+        assert!(!alternate_ids.contains(&id));
+        alternate_ids.push(id);
+    }
+    // Incomplete old data remains representable, but never supplies the
+    // conditions omitted by its source or by a caller.
+    let mut legacy = claim.clone();
+    legacy.key = bare_key.clone();
+    claims.insert_claim(legacy).unwrap();
+    let mut density = source.claims_for("density")[0].1.clone();
+    density.validity = domain;
+    let density_key = density.key.clone();
+    claims.insert_claim(density).unwrap();
+    let pack = NormalizedPack::new(
+        "synthetic-hardness",
+        "fixture-v4",
+        hash_domain(SOURCE_DOMAIN, b"synthetic hardness only"),
+        "synthetic fixture only",
+        claims,
+        vec![],
+        vec![],
+    )
+    .unwrap();
+    assert_eq!(
+        pack.schema_version(),
+        fs_matdb::MATDB_HARDNESS_PACK_SCHEMA_VERSION
+    );
+    let bytes = pack.to_bytes();
+    let pack = NormalizedPack::from_bytes_verified(pack.content_hash(), &bytes).unwrap();
+    assert_eq!(pack.to_bytes(), bytes);
+    assert_eq!(pack.claims().claim(selected).unwrap().key, key);
+    let state = fs_matdb::MaterialStateId {
+        chemistry: "fixture".into(),
+        phase: "fixture".into(),
+        process: "fixture".into(),
+        revision: 0,
+    };
+    let material = fs_matdb::NormalizedMaterialCardPack::new(state.clone(), pack.clone()).unwrap();
+    let material = fs_matdb::NormalizedMaterialCardPack::from_bytes_verified(
+        material.content_hash(),
+        &material.to_bytes(),
+    )
+    .unwrap();
+    let surface = fs_matdb::SurfaceSpec {
+        material: state,
+        texture_frame: "fixture".into(),
+    };
+    let interface = fs_matdb::NormalizedInterfacePack::new(
+        surface.clone(),
+        surface,
+        fs_matdb::SystemContext {
+            medium: "fixture".into(),
+            third_body: None,
+            environment: "fixture".into(),
+            history: "fixture".into(),
+        },
+        pack.clone(),
+    )
+    .unwrap();
+    let interface = fs_matdb::NormalizedInterfacePack::from_bytes_verified(
+        interface.content_hash(),
+        &interface.to_bytes(),
+    )
+    .unwrap();
+    let point = QueryPoint::new()
+        .with_quantity("T", temperature, 300.0)
+        .unwrap();
+    let absent = bare_key
+        .clone()
+        .with_hardness_test(context(
+            requested.indenter(),
+            21.0,
+            10.0,
+            requested.protocol(),
+            observation,
+        ))
+        .unwrap();
+    for claims in [material.card().claims(), interface.card().claims()] {
+        for policy in [
+            SelectionPolicy::SingleClaimOnly,
+            SelectionPolicy::PreferObservationBacked,
+        ] {
+            let answer = claims.query_typed(&key, &point, policy).unwrap();
+            assert_eq!(answer.evidence.value.value, 210.0);
+            assert_eq!(answer.receipt.selected, selected);
+            assert_eq!(answer.receipt.in_domain, vec![selected]);
+            assert_eq!(answer.receipt.considered.len(), 8);
+            let receipt = fs_matdb::PropertyUsageReceipt::from_bytes_verified(
+                &answer.receipt.to_bytes().unwrap(),
+                answer.receipt.content_hash(),
+            )
+            .unwrap();
+            claims.verify_receipt(&receipt).unwrap();
+            assert!(matches!(
+                claims.query_typed(&bare_key, &point, policy),
+                Err(MatDbError::MissingHardnessContext { .. })
+            ));
+            assert!(matches!(
+                claims.query_typed(&absent, &point, policy),
+                Err(MatDbError::HardnessContextMismatch { .. })
+            ));
+            let mut changed = receipt.clone();
+            changed.selected = alternate_ids[0];
+            assert!(claims.verify_receipt(&changed).is_err());
+        }
+        assert!(claims.query_pinned_typed(&key, &point, selected).is_ok());
+        assert!(
+            claims
+                .query_pinned_typed(&key, &point, alternate_ids[0])
+                .is_err()
+        );
+        assert!(
+            claims
+                .query_pinned_typed(&bare_key, &point, selected)
+                .is_err()
+        );
+        for (test, id) in alternatives.iter().zip(&alternate_ids) {
+            let different = bare_key.clone().with_hardness_test(test.clone()).unwrap();
+            assert_eq!(
+                claims
+                    .query_typed(&different, &point, SelectionPolicy::SingleClaimOnly)
+                    .unwrap()
+                    .receipt
+                    .selected,
+                *id
+            );
+        }
+        let outside = QueryPoint::new()
+            .with_quantity("T", temperature, 301.0)
+            .unwrap();
+        assert!(
+            claims
+                .query_typed(&key, &outside, SelectionPolicy::SingleClaimOnly)
+                .is_err()
+        );
+    }
+    let joint = pack
+        .query_joint_typed(
+            &[key, density_key],
+            &point,
+            SelectionPolicy::SingleClaimOnly,
+        )
+        .unwrap();
+    pack.verify_joint_receipt(&joint.receipt).unwrap();
+    let mut tampered = joint.receipt.clone();
+    tampered.selected[0] = alternate_ids[0];
+    assert!(pack.verify_joint_receipt(&tampered).is_err());
+    for version in [1_u32, 2, 3] {
+        let mut relabelled = bytes.clone();
+        relabelled[8..12].copy_from_slice(&version.to_le_bytes());
+        assert!(NormalizedPack::from_bytes(&relabelled).is_err());
+    }
+    let mut changed = bytes;
+    let position = changed
+        .windows(requested.indenter().len())
+        .position(|w| w == requested.indenter().as_bytes())
+        .unwrap();
+    changed[position] = b'X';
+    assert!(NormalizedPack::from_bytes(&changed).is_err());
+}
+
+#[test]
 fn joint_blocks_name_curve_components_and_allow_disjoint_groups() {
     let (claims, observation, _) = sample_claims();
     let density = claims.claims_for("density")[0].0;

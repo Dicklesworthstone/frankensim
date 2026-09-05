@@ -1339,7 +1339,7 @@ impl ClaimSet {
         policy: SelectionPolicy,
     ) -> Result<MaterialAnswer, MatDbError> {
         self.require_dimension_only_property(property)?;
-        self.query_selected(property, point, ClaimSelection::Policy(policy))
+        self.query_selected(property, None, point, ClaimSelection::Policy(policy))
     }
 
     /// Query an exact property schema. Dimensions alone cannot satisfy a
@@ -1353,7 +1353,12 @@ impl ClaimSet {
         policy: SelectionPolicy,
     ) -> Result<MaterialAnswer, MatDbError> {
         self.require_quantity(property)?;
-        self.query_selected(property.name(), point, ClaimSelection::Policy(policy))
+        self.query_selected(
+            property.name(),
+            property.hardness_test(),
+            point,
+            ClaimSelection::Policy(policy),
+        )
     }
 
     /// Explicitly pinned counterpart of [`Self::query_typed`]. A pin cannot
@@ -1365,7 +1370,12 @@ impl ClaimSet {
         pinned: ClaimId,
     ) -> Result<MaterialAnswer, MatDbError> {
         self.require_quantity(property)?;
-        self.query_selected(property.name(), point, ClaimSelection::Pinned(pinned))
+        self.query_selected(
+            property.name(),
+            property.hardness_test(),
+            point,
+            ClaimSelection::Pinned(pinned),
+        )
     }
 
     fn require_quantity(&self, property: &PropertyKey) -> Result<(), MatDbError> {
@@ -1418,12 +1428,13 @@ impl ClaimSet {
         pinned: ClaimId,
     ) -> Result<MaterialAnswer, MatDbError> {
         self.require_dimension_only_property(property)?;
-        self.query_selected(property, point, ClaimSelection::Pinned(pinned))
+        self.query_selected(property, None, point, ClaimSelection::Pinned(pinned))
     }
 
     fn query_selected(
         &self,
         property: &str,
+        hardness_test: Option<&crate::HardnessTestContext>,
         point: &QueryPoint,
         selection: ClaimSelection,
     ) -> Result<MaterialAnswer, MatDbError> {
@@ -1434,8 +1445,22 @@ impl ClaimSet {
             });
         }
         let considered: Vec<ClaimId> = considered_pairs.iter().map(|(id, _)| *id).collect();
+        if considered_pairs[0].1.key.is_hardness() && hardness_test.is_none() {
+            return Err(MatDbError::MissingHardnessContext {
+                property: property.to_owned(),
+            });
+        }
+        if !considered_pairs
+            .iter()
+            .any(|(_, claim)| claim.key.hardness_test() == hardness_test)
+        {
+            return Err(MatDbError::HardnessContextMismatch {
+                property: property.to_owned(),
+            });
+        }
         let in_domain_pairs: Vec<_> = considered_pairs
             .iter()
+            .filter(|(_, claim)| claim.key.hardness_test() == hardness_test)
             .filter(|(_, claim)| {
                 claim
                     .validity
@@ -1446,6 +1471,7 @@ impl ClaimSet {
         if in_domain_pairs.is_empty() {
             if let Some((claim, axis)) = considered_pairs
                 .iter()
+                .filter(|(_, claim)| claim.key.hardness_test() == hardness_test)
                 .find_map(|(_, claim)| claim_axis_mismatch(claim, point).map(|axis| (*claim, axis)))
             {
                 return Err(MatDbError::AxisQuantityMismatch {
@@ -1592,7 +1618,13 @@ impl ClaimSet {
                 None => point.with(axis, *value)?,
             };
         }
-        let replayed = self.query_selected(&receipt.property, &point, selection)?;
+        // The selected content identity binds the exact measurement context,
+        // just as it binds the quantity schema. Caller intent still requires
+        // comparing the requested key/pin externally to this selected claim.
+        let hardness_test = self
+            .claim(receipt.selected)
+            .and_then(|claim| claim.key.hardness_test());
+        let replayed = self.query_selected(&receipt.property, hardness_test, &point, selection)?;
         let fresh = &replayed.receipt;
         for (field, matches) in [
             (

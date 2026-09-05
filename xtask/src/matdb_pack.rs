@@ -65,6 +65,8 @@ const MAPPED_COMPILER_ID: &str = "frankensim-matdb-pack-compiler-v2";
 const MAPPED_INTERFACE_COMPILER_ID: &str = "frankensim-matdb-interface-pack-compiler-v2";
 const TYPED_AXIS_COMPILER_ID: &str = "frankensim-matdb-pack-compiler-v3";
 const TYPED_AXIS_INTERFACE_COMPILER_ID: &str = "frankensim-matdb-interface-pack-compiler-v3";
+const HARDNESS_COMPILER_ID: &str = "frankensim-matdb-pack-compiler-v4";
+const HARDNESS_INTERFACE_COMPILER_ID: &str = "frankensim-matdb-interface-pack-compiler-v4";
 const NASA9_COMPILER_ID: &str = "frankensim-matdb-nasa9-model-pack-compiler-v1";
 const KINETICS_COMPILER_ID: &str = "frankensim-matdb-kinetics-model-pack-compiler-v1";
 const SPECIES_COMPILER_ID: &str = "frankensim-matdb-species-pack-compiler-v1";
@@ -73,10 +75,11 @@ const SPECIES_COMPILER_ID: &str = "frankensim-matdb-species-pack-compiler-v1";
 /// Bump this whenever parsing, admission, normalization, or provenance
 /// semantics can change the canonical compiler fixture.
 #[allow(dead_code)] // consumed textually by `xtask check-goldens`
-pub const MATDB_PACK_COMPILER_SEMANTICS_VERSION: u32 = 6;
+pub const MATDB_PACK_COMPILER_SEMANTICS_VERSION: u32 = 7;
 const MANIFEST_HEADER: &str = "frankensim.matdb-manifest.v1";
 const MAPPED_MANIFEST_HEADER: &str = "frankensim.matdb-manifest.v2";
 const TYPED_AXIS_MANIFEST_HEADER: &str = "frankensim.matdb-manifest.v3";
+const HARDNESS_MANIFEST_HEADER: &str = "frankensim.matdb-manifest.v4";
 const SOURCE_HEADER: &str = "frankensim.matdb-source.v1";
 const NASA9_SOURCE_HEADER: &str = "frankensim.nasa9-source.v1";
 const KINETICS_SOURCE_HEADER: &str = "frankensim.kinetics-source.v1";
@@ -381,6 +384,16 @@ struct Manifest {
     properties: BTreeMap<String, (String, Option<QuantityKind>)>,
     axes: BTreeMap<String, String>,
     axis_kinds: BTreeMap<String, Option<QuantityKind>>,
+    hardness_tests: BTreeMap<String, HardnessSourceTest>,
+}
+
+#[derive(Debug)]
+struct HardnessSourceTest {
+    observation: String,
+    indenter: String,
+    protocol: String,
+    // Source-spelled force, unit, dwell and unit; order is physical history.
+    holds: Vec<[String; 4]>,
 }
 
 impl Manifest {
@@ -817,12 +830,13 @@ fn parse_manifest(text: &str) -> Result<Manifest, CompileError> {
         Some(MANIFEST_HEADER) => 1,
         Some(MAPPED_MANIFEST_HEADER) => 2,
         Some(TYPED_AXIS_MANIFEST_HEADER) => 3,
+        Some(HARDNESS_MANIFEST_HEADER) => 4,
         _ => {
             return Err(CompileError::new(
                 "unsupported_manifest_schema",
                 "manifest",
                 format!(
-                    "first line must be {MANIFEST_HEADER:?}, {MAPPED_MANIFEST_HEADER:?}, or {TYPED_AXIS_MANIFEST_HEADER:?}"
+                    "first line must be {MANIFEST_HEADER:?}, {MAPPED_MANIFEST_HEADER:?}, {TYPED_AXIS_MANIFEST_HEADER:?}, or {HARDNESS_MANIFEST_HEADER:?}"
                 ),
             ));
         }
@@ -835,6 +849,7 @@ fn parse_manifest(text: &str) -> Result<Manifest, CompileError> {
     let mut properties = BTreeMap::new();
     let mut axes = BTreeMap::new();
     let mut axis_kinds = BTreeMap::new();
+    let mut hardness_tests: BTreeMap<String, HardnessSourceTest> = BTreeMap::new();
     for (offset, line) in lines.enumerate() {
         let line_number = offset + 2;
         if line.len() > MAX_LINE_BYTES {
@@ -853,6 +868,46 @@ fn parse_manifest(text: &str) -> Result<Manifest, CompileError> {
         }
         let fields: Vec<&str> = line.split('\t').collect();
         match fields.first().copied() {
+            Some("hardness-test") if version >= 4 => {
+                require_field_count(&fields, 5, "manifest", line_number)?;
+                let claim = require_identifier(fields[1], "hardness claim", "manifest")?;
+                let test = HardnessSourceTest {
+                    observation: require_identifier(fields[2], "hardness observation", "manifest")?,
+                    indenter: require_text(fields[3], "hardness indenter", "manifest")?,
+                    protocol: require_text(fields[4], "hardness protocol", "manifest")?,
+                    holds: Vec::new(),
+                };
+                if hardness_tests.insert(claim, test).is_some() {
+                    return Err(CompileError::new(
+                        "duplicate_hardness_test",
+                        "manifest",
+                        "one claim may declare only one hardness test",
+                    ));
+                }
+            }
+            Some("hardness-hold") if version >= 4 => {
+                require_field_count(&fields, 6, "manifest", line_number)?;
+                let test = hardness_tests.get_mut(fields[1]).ok_or_else(|| {
+                    CompileError::new(
+                        "unknown_hardness_test",
+                        "manifest",
+                        "declare hardness-test before its ordered holds",
+                    )
+                })?;
+                if test.holds.len() == 64 {
+                    return Err(CompileError::new(
+                        "resource_limit",
+                        "hardness-hold",
+                        "at most 64 force/dwell holds are admitted",
+                    ));
+                }
+                test.holds.push([
+                    fields[2].into(),
+                    fields[3].into(),
+                    fields[4].into(),
+                    fields[5].into(),
+                ]);
+            }
             Some("property") if version >= 2 => {
                 require_field_count(&fields, 4, "manifest", line_number)?;
                 let source = require_identifier(fields[1], "source property", "manifest")?;
@@ -869,13 +924,13 @@ fn parse_manifest(text: &str) -> Result<Manifest, CompileError> {
             Some("axis") if version >= 2 => {
                 require_field_count(
                     &fields,
-                    if version == 3 { 4 } else { 3 },
+                    if version >= 3 { 4 } else { 3 },
                     "manifest",
                     line_number,
                 )?;
                 let source = require_identifier(fields[1], "source axis", "manifest")?;
                 let target = require_identifier(fields[2], "target axis", "manifest")?;
-                if version == 3 {
+                if version >= 3 {
                     axis_kinds.insert(source.clone(), manifest_quantity_kind(fields[3])?);
                 }
                 if axes.insert(source, target).is_some() {
@@ -1010,6 +1065,7 @@ fn parse_manifest(text: &str) -> Result<Manifest, CompileError> {
         })?,
         sources,
         axis_kinds,
+        hardness_tests,
     })
 }
 
@@ -1058,7 +1114,7 @@ fn source_profile(manifest: &Manifest) -> Result<SourceProfile, CompileError> {
         return Err(CompileError::new(
             "unsupported_manifest_profile",
             "manifest",
-            "v2/v3 mappings apply only to material and interface sources",
+            "v2/v3/v4 declarations apply only to material and interface sources",
         ));
     }
     match first.profile.as_str() {
@@ -3694,6 +3750,8 @@ fn compile_manifest(manifest_path: &Path) -> Result<CompileOutput, CompileError>
     let profile =
         source_profile(&manifest).map_err(|error| error.with_input_hash(manifest_snapshot))?;
     let compiler_id = match (manifest.version, profile) {
+        (4, SourceProfile::Material) => HARDNESS_COMPILER_ID,
+        (4, SourceProfile::Interface) => HARDNESS_INTERFACE_COMPILER_ID,
         (3, SourceProfile::Material) => TYPED_AXIS_COMPILER_ID,
         (3, SourceProfile::Interface) => TYPED_AXIS_INTERFACE_COMPILER_ID,
         (2, SourceProfile::Material) => MAPPED_COMPILER_ID,
@@ -3857,14 +3915,55 @@ fn compile_manifest(manifest_path: &Path) -> Result<CompileOutput, CompileError>
             observations.sort_unstable();
             let component_observations: BTreeSet<ObservationId> =
                 observations.iter().copied().collect();
+            let mut key = PropertyKey::with_quantity(
+                mapping.map_or(raw_claim.property.as_str(), |(name, _)| name.as_str()),
+                kind.map_or(QuantitySpec::dimensional(value_dims), |kind| {
+                    QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static))
+                }),
+            );
+            if let Some(test) = manifest.hardness_tests.get(local_id) {
+                let subject = format!("claim:{local_id}:hardness-test");
+                let observation =
+                    observation_ids
+                        .get(&test.observation)
+                        .copied()
+                        .ok_or_else(|| {
+                            CompileError::new(
+                                "unknown_observation",
+                                &subject,
+                                "hardness test observation is not registered",
+                            )
+                        })?;
+                let mut holds = Vec::with_capacity(test.holds.len());
+                for [force, force_unit, dwell, dwell_unit] in &test.holds {
+                    let force = parse_linear_quantity(force, force_unit, &subject)?;
+                    let dwell = parse_linear_quantity(dwell, dwell_unit, &subject)?;
+                    holds.push(
+                        fs_matdb::HardnessLoadStep::new(
+                            fs_qty::QtyAny::new(force.value, force.dims),
+                            fs_qty::QtyAny::new(dwell.value, dwell.dims),
+                        )
+                        .map_err(|error| {
+                            CompileError::new("invalid_hardness_test", &subject, error.to_string())
+                        })?,
+                    );
+                }
+                let context = fs_matdb::HardnessTestContext::new(
+                    &test.indenter,
+                    holds,
+                    &test.protocol,
+                    observation,
+                )
+                .map_err(|error| {
+                    CompileError::new("invalid_hardness_test", &subject, error.to_string())
+                })?;
+                key = key.with_hardness_test(context).map_err(|error| {
+                    CompileError::new("invalid_hardness_test", &subject, error.to_string())
+                })?;
+            }
             let id = claims
                 .insert_claim(PropertyClaim {
-                    key: PropertyKey::with_quantity(
-                        mapping.map_or(raw_claim.property.as_str(), |(name, _)| name.as_str()),
-                        kind.map_or(QuantitySpec::dimensional(value_dims), |kind| {
-                            QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static))
-                        }),
-                    ),
+                    key,
                     value,
                     validity,
                     uncertainty,
@@ -4178,7 +4277,7 @@ fn source_envelope_hash(manifest: &Manifest, sources: &[LoadedSource]) -> Conten
         for (source, target) in &manifest.axes {
             push_part(&mut payload, source.as_bytes());
             push_part(&mut payload, target.as_bytes());
-            if manifest.version == 3 {
+            if manifest.version >= 3 {
                 match manifest.axis_kinds[source] {
                     Some(kind) => push_part(
                         &mut payload,
@@ -4189,8 +4288,27 @@ fn source_envelope_hash(manifest: &Manifest, sources: &[LoadedSource]) -> Conten
                 }
             }
         }
+        if manifest.version >= 4 {
+            push_part(
+                &mut payload,
+                &(manifest.hardness_tests.len() as u64).to_le_bytes(),
+            );
+            for (claim, test) in &manifest.hardness_tests {
+                for text in [claim, &test.observation, &test.indenter, &test.protocol] {
+                    push_part(&mut payload, text.as_bytes());
+                }
+                push_part(&mut payload, &(test.holds.len() as u64).to_le_bytes());
+                for hold in &test.holds {
+                    for text in hold {
+                        push_part(&mut payload, text.as_bytes());
+                    }
+                }
+            }
+        }
         hash_domain(
-            if manifest.version == 3 {
+            if manifest.version >= 4 {
+                "org.frankensim.xtask.matdb-pack.source-envelope.v4"
+            } else if manifest.version == 3 {
                 "org.frankensim.xtask.matdb-pack.source-envelope.v3"
             } else {
                 "org.frankensim.xtask.matdb-pack.source-envelope.v2"
@@ -4203,6 +4321,15 @@ fn source_envelope_hash(manifest: &Manifest, sources: &[LoadedSource]) -> Conten
 }
 
 fn validate_name_mappings(manifest: &Manifest, raw: &RawDatabase) -> Result<(), CompileError> {
+    for claim in manifest.hardness_tests.keys() {
+        if !raw.claims.contains_key(claim) {
+            return Err(CompileError::new(
+                "unused_hardness_test",
+                format!("claim:{claim}"),
+                "hardness test must refer to an imported claim",
+            ));
+        }
+    }
     let properties: BTreeSet<&str> = raw
         .claims
         .values()
@@ -5320,6 +5447,106 @@ mod tests {
     fn mapped_manifest(records: &str) -> String {
         manifest(MATERIAL_PROFILE, true).replacen(MANIFEST_HEADER, MAPPED_MANIFEST_HEADER, 1)
             + records
+    }
+
+    #[test]
+    fn g3_manifest_v4_imports_hardness_test_history_without_conflating_loads() {
+        let source = concat!(
+            "frankensim.matdb-source.v1\n",
+            "observation\ttest\tsynthetic specimen\tsynthetic hardness apparatus\tno empirical claim\n",
+            "scalar\th1\ttest\thardness\t210\t1\tconstant\n",
+            "uncertainty\th1\tunstated\t-\t-\t-\t-\n",
+            "scalar\th2\ttest\thardness\t220\t1\tconstant\n",
+            "uncertainty\th2\tunstated\t-\t-\t-\t-\n",
+        );
+        let manifest = mapped_manifest(concat!(
+            "property\thardness\thardness\thardness-vickers\n",
+            "hardness-test\th1\ttest\tsynthetic diamond pyramid geometry A\tsynthetic protocol revision 1\n",
+            "hardness-hold\th1\t2\tN\t5\ts\n",
+            "hardness-hold\th1\t20\tN\t10\ts\n",
+            "hardness-test\th2\ttest\tsynthetic diamond pyramid geometry A\tsynthetic protocol revision 1\n",
+            "hardness-hold\th2\t40\tN\t10\ts\n",
+        )).replacen(MAPPED_MANIFEST_HEADER, HARDNESS_MANIFEST_HEADER, 1);
+        let (path, _) = write_fixture(&manifest, source);
+        let output = compile_manifest(&path).unwrap();
+        let pack = NormalizedPack::from_bytes(&output.bytes).unwrap();
+        assert_eq!(pack.schema_version(), 4);
+        assert_eq!(pack.compiler(), HARDNESS_COMPILER_ID);
+        let claim = pack
+            .claims()
+            .claims_for("hardness")
+            .into_iter()
+            .find(|(_, claim)| claim.key.hardness_test().unwrap().loading().len() == 2)
+            .unwrap()
+            .1;
+        let key = claim.key.clone();
+        let context = key.hardness_test().unwrap();
+        assert_eq!(context.indenter(), "synthetic diamond pyramid geometry A");
+        assert_eq!(context.protocol(), "synthetic protocol revision 1");
+        assert_eq!(context.loading()[0].force_newtons(), 2.0);
+        assert_eq!(context.loading()[0].dwell_seconds(), 5.0);
+        assert_eq!(context.loading()[1].force_newtons(), 20.0);
+        assert_eq!(context.loading()[1].dwell_seconds(), 10.0);
+        assert_eq!(
+            pack.claims()
+                .observation(context.observation())
+                .unwrap()
+                .specimen,
+            "synthetic specimen"
+        );
+        let point = fs_matdb::QueryPoint::new();
+        let answer = pack
+            .claims()
+            .query_typed(&key, &point, fs_matdb::SelectionPolicy::SingleClaimOnly)
+            .unwrap();
+        assert_eq!(answer.evidence.value.value, 210.0);
+        pack.claims().verify_receipt(&answer.receipt).unwrap();
+        let equivalent = manifest.replace("20\tN\t10\ts", "0.02\tkN\t10000\tms");
+        let (path, _) = write_fixture(&equivalent, source);
+        let converted = compile_manifest(&path).unwrap();
+        let converted = NormalizedPack::from_bytes(&converted.bytes).unwrap();
+        let equivalent_answer = converted
+            .claims()
+            .query_typed(&key, &point, fs_matdb::SelectionPolicy::SingleClaimOnly)
+            .unwrap();
+        assert_eq!(equivalent_answer.receipt.selected, answer.receipt.selected);
+        assert_eq!(equivalent_answer.evidence.value.value, 210.0);
+        assert_ne!(
+            converted.content_hash(),
+            pack.content_hash(),
+            "source-spelled units remain bound in the source envelope"
+        );
+        for (changed, code) in [
+            (
+                manifest.replace(HARDNESS_MANIFEST_HEADER, TYPED_AXIS_MANIFEST_HEADER),
+                "unknown_manifest_record",
+            ),
+            (
+                manifest
+                    .replace("hardness-test\th1", "hardness-test\tabsent")
+                    .replace("hardness-hold\th1", "hardness-hold\tabsent"),
+                "unused_hardness_test",
+            ),
+            (
+                manifest.replace("20\tN\t10\ts", "20\tkg\t10\ts"),
+                "invalid_hardness_test",
+            ),
+            (
+                manifest.replace("hardness-hold\th2\t40\tN\t10\ts\n", ""),
+                "invalid_hardness_test",
+            ),
+            (
+                manifest.replace("hardness-test\th1\ttest", "hardness-test\th1\tunknown"),
+                "unknown_observation",
+            ),
+            (
+                manifest.clone() + "hardness-test\th1\ttest\tduplicate\tduplicate\n",
+                "duplicate_hardness_test",
+            ),
+        ] {
+            let (path, _) = write_fixture(&changed, source);
+            assert_eq!(compile_manifest(&path).unwrap_err().code, code);
+        }
     }
 
     #[test]
@@ -6480,6 +6707,7 @@ mod tests {
             properties: BTreeMap::new(),
             axes: BTreeMap::new(),
             axis_kinds: BTreeMap::new(),
+            hardness_tests: BTreeMap::new(),
             pack_id: "fixture".to_string(),
             redistribution_terms: "permitted".to_string(),
             citation: "x".repeat(1_048_000),

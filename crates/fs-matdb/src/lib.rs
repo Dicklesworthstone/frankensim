@@ -32,6 +32,7 @@ use fs_qty::{Dims, QuantitySpec};
 
 mod cards;
 mod contact_pack;
+mod hardness;
 mod interface;
 mod interface_pack;
 mod material_pack;
@@ -48,6 +49,7 @@ pub use cards::{
     LawParameter, MATDB_SCHEMA_VERSION, MaterialCard, MaterialStateId,
 };
 pub use contact_pack::{ContactLawCard, ContactPackError, ContactReceipt};
+pub use hardness::{HardnessLoadStep, HardnessTestContext};
 pub use interface::{InterfaceSystemCard, SurfaceSpec, SystemContext};
 pub use interface_pack::{
     INTERFACE_PACK_SCHEMA_VERSION, INTERFACE_PACK_TARGET_BASIS, NormalizedInterfacePack,
@@ -62,10 +64,10 @@ pub use model_pack::{
 pub use pack::{
     CorrelationUnknownReason, JOINT_USAGE_RECEIPT_IDENTITY_DOMAIN,
     JOINT_USAGE_RECEIPT_SCHEMA_VERSION, JointAnswer, JointCorrelation, JointStatistics,
-    JointUsageReceipt, MATDB_PACK_SCHEMA_VERSION, MATDB_PACK_TARGET_BASIS,
-    MATDB_TYPED_AXIS_PACK_SCHEMA_VERSION, MATDB_TYPED_PACK_SCHEMA_VERSION, NormalizationReceipt,
-    NormalizationTarget, NormalizedPack, PackError, StatisticComponent, StatisticMember,
-    ValidityBoundSide,
+    JointUsageReceipt, MATDB_HARDNESS_PACK_SCHEMA_VERSION, MATDB_PACK_SCHEMA_VERSION,
+    MATDB_PACK_TARGET_BASIS, MATDB_TYPED_AXIS_PACK_SCHEMA_VERSION, MATDB_TYPED_PACK_SCHEMA_VERSION,
+    NormalizationReceipt, NormalizationTarget, NormalizedPack, PackError, StatisticComponent,
+    StatisticMember, ValidityBoundSide,
 };
 pub use pcb::{
     CopperCoverage, PCB_HOMOGENIZATION_IDENTITY_DOMAIN, PCB_HOMOGENIZATION_SCHEMA_VERSION,
@@ -100,6 +102,21 @@ const OBSERVATION_HASH_DOMAIN: &str = "org.frankensim.fs-matdb.observation-datas
 /// typed: refusals teach, and nothing inserts partially.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MatDbError {
+    /// An incomplete or dimensionally invalid source-declared hardness test.
+    InvalidHardnessContext {
+        /// Required repair at the source or caller boundary.
+        reason: &'static str,
+    },
+    /// A hardness query must name the complete test, not only its scale.
+    MissingHardnessContext {
+        /// Requested property.
+        property: String,
+    },
+    /// No claim for this property declares the requested apparatus/test.
+    HardnessContextMismatch {
+        /// Requested property.
+        property: String,
+    },
     /// A claim's value dimensions disagree with its key's registered
     /// dimensions.
     DimsMismatch {
@@ -329,6 +346,17 @@ impl fmt::Display for MatDbError {
                  {expected:?}",
                 key.name()
             ),
+            MatDbError::InvalidHardnessContext { reason } => {
+                write!(f, "invalid hardness test: {reason}")
+            }
+            MatDbError::MissingHardnessContext { property } => write!(
+                f,
+                "hardness property '{property}' requires an indenter, loading history, protocol and observation context"
+            ),
+            MatDbError::HardnessContextMismatch { property } => write!(
+                f,
+                "hardness property '{property}' has no claim matching the requested test context"
+            ),
             MatDbError::InvalidQuantityValue { property, error } => {
                 write!(f, "property '{property}': {error}")
             }
@@ -490,6 +518,7 @@ impl std::error::Error for MatDbError {}
 pub struct PropertyKey {
     name: String,
     quantity: QuantitySpec,
+    hardness_test: Option<Box<HardnessTestContext>>,
 }
 
 impl PropertyKey {
@@ -499,6 +528,7 @@ impl PropertyKey {
         PropertyKey {
             name: name.into(),
             quantity: QuantitySpec::dimensional(dims),
+            hardness_test: None,
         }
     }
 
@@ -509,7 +539,32 @@ impl PropertyKey {
         Self {
             name: name.into(),
             quantity,
+            hardness_test: None,
         }
+    }
+
+    /// Bind the exact test conditions to an explicitly declared hardness scale.
+    /// The same property name may retain several incompatible measured tests.
+    pub fn with_hardness_test(mut self, context: HardnessTestContext) -> Result<Self, MatDbError> {
+        if !self.is_hardness() {
+            return Err(MatDbError::InvalidHardnessContext {
+                reason: "test context requires an explicit hardness quantity kind",
+            });
+        }
+        self.hardness_test = Some(Box::new(context));
+        Ok(self)
+    }
+
+    /// Exact apparatus/protocol/specimen requirement, if explicitly declared.
+    #[must_use]
+    pub fn hardness_test(&self) -> Option<&HardnessTestContext> {
+        self.hardness_test.as_deref()
+    }
+
+    pub(crate) fn is_hardness(&self) -> bool {
+        self.quantity.semantic_type().is_some_and(|semantic| {
+            matches!(semantic.kind(), fs_qty::semantic::QuantityKind::Hardness(_))
+        })
     }
 
     /// Exact quantity schema. A dimension-only declaration is not a wildcard.
@@ -871,14 +926,19 @@ impl PropertyClaim {
         if let Some(artifact) = &self.provenance.artifact {
             push(&artifact.0);
         }
-        if self.validity.has_typed_axes() {
+        if self.validity.has_typed_axes() || self.key.hardness_test().is_some() {
             push(&self.key.quantity().canonical_bytes());
             push(&(self.validity.axis_quantities().len() as u64).to_le_bytes());
             for (axis, quantity) in self.validity.axis_quantities() {
                 push(axis.as_bytes());
                 push(&quantity.canonical_bytes());
             }
-            hash_domain("org.frankensim.fs-matdb.property-claim.v3", &payload)
+            if let Some(context) = self.key.hardness_test() {
+                push(&context.canonical_bytes());
+                hash_domain("org.frankensim.fs-matdb.property-claim.v4", &payload)
+            } else {
+                hash_domain("org.frankensim.fs-matdb.property-claim.v3", &payload)
+            }
         } else if self.key.quantity().semantic_type().is_some() {
             push(&self.key.quantity().canonical_bytes());
             hash_domain("org.frankensim.fs-matdb.property-claim.v2", &payload)
@@ -1018,6 +1078,18 @@ impl ClaimSet {
             if !self.observations.contains_key(observation) {
                 return Err(MatDbError::UnknownObservation {
                     observation: *observation,
+                });
+            }
+        }
+        if let Some(context) = claim.key.hardness_test() {
+            let observation = self.observation(context.observation()).filter(|dataset| {
+                claim.observations.contains(&context.observation())
+                    && !dataset.specimen.trim().is_empty()
+                    && !dataset.method.trim().is_empty()
+            });
+            if observation.is_none() {
+                return Err(MatDbError::InvalidHardnessContext {
+                    reason: "hardness test must reference a linked observation with specimen and method",
                 });
             }
         }

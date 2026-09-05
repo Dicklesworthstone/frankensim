@@ -37,6 +37,13 @@ homogenization, the P2 milestone.
   exact v1 preimage. Named convenience resolvers still declare their existing
   dimensional property requirements; axis descriptors travel exactly as
   declared by the caller, without inference from names.
+  `ScalarPropertyRequirement::try_with_key` also retains the existing matdb
+  hardness test context. Both material and interface resolution forward it
+  under all three selection policies; a claim pin cannot fill in an omitted
+  apparatus/protocol/specimen requirement. The resolved requirement exposes
+  that context, and selected claim/usage-receipt identities bind it into the
+  existing bundle identity. The focused synthetic G0 regression proves this
+  adapter behavior, not measured hardness accuracy or standards compliance.
 - `resolve_isotropic_elastic_state_point` requests only density, Young's
   modulus, and Poisson ratio for linear vibration/elasticity. The distinct
   `resolve_isotropic_solid_state_point` additionally requires yield stress for

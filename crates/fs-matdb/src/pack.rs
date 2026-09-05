@@ -22,6 +22,8 @@ pub const MATDB_PACK_SCHEMA_VERSION: u32 = 1;
 pub const MATDB_TYPED_PACK_SCHEMA_VERSION: u32 = 2;
 /// Typed property and validity-axis descriptors; v1/v2 remain frozen.
 pub const MATDB_TYPED_AXIS_PACK_SCHEMA_VERSION: u32 = 3;
+/// Exact hardness apparatus/loading/protocol and observation selectors.
+pub const MATDB_HARDNESS_PACK_SCHEMA_VERSION: u32 = 4;
 /// Canonical coherent-SI target basis and its explicit six-base order.
 pub const MATDB_PACK_TARGET_BASIS: &str = "SI-six-base[m,kg,s,K,A,mol]";
 
@@ -539,6 +541,13 @@ impl NormalizedPack {
         if self
             .claims
             .claims_ordered()
+            .any(|(_, claim)| claim.key.hardness_test().is_some())
+        {
+            return MATDB_HARDNESS_PACK_SCHEMA_VERSION;
+        }
+        if self
+            .claims
+            .claims_ordered()
             .any(|(_, claim)| claim.validity.has_typed_axes())
         {
             return MATDB_TYPED_AXIS_PACK_SCHEMA_VERSION;
@@ -669,9 +678,9 @@ impl NormalizedPack {
         let mut reader = Reader::new(bytes);
         reader.expect(MAGIC, "normalized pack magic")?;
         let version = reader.u32()?;
-        if !(MATDB_PACK_SCHEMA_VERSION..=MATDB_TYPED_AXIS_PACK_SCHEMA_VERSION).contains(&version) {
+        if !(MATDB_PACK_SCHEMA_VERSION..=MATDB_HARDNESS_PACK_SCHEMA_VERSION).contains(&version) {
             return Err(reader.malformed(format!(
-                "unsupported schema version {version}; expected 1, 2, or 3 (typed axes)"
+                "unsupported schema version {version}; expected 1, 2, 3 (typed axes), or 4 (hardness test)"
             )));
         }
         let pack_id = reader.string()?;
@@ -787,7 +796,9 @@ impl NormalizedPack {
 }
 
 fn pack_hash_domain(version: u32) -> &'static str {
-    if version == MATDB_TYPED_AXIS_PACK_SCHEMA_VERSION {
+    if version == MATDB_HARDNESS_PACK_SCHEMA_VERSION {
+        "org.frankensim.fs-matdb.normalized-pack.v4"
+    } else if version == MATDB_TYPED_AXIS_PACK_SCHEMA_VERSION {
         "org.frankensim.fs-matdb.normalized-pack.v3"
     } else if version == MATDB_TYPED_PACK_SCHEMA_VERSION {
         TYPED_PACK_HASH_DOMAIN
@@ -2085,6 +2096,22 @@ fn encode_claim(writer: &mut Writer, claim: &PropertyClaim, version: u32) {
             .bytes
             .extend_from_slice(&claim.key.quantity().canonical_bytes());
     }
+    if version >= MATDB_HARDNESS_PACK_SCHEMA_VERSION {
+        match claim.key.hardness_test() {
+            None => writer.u8(0),
+            Some(context) => {
+                writer.u8(1);
+                writer.string(context.indenter());
+                writer.string(context.protocol());
+                writer.hash(context.observation().0);
+                writer.count(context.loading().len());
+                for step in context.loading() {
+                    writer.f64(step.force_newtons());
+                    writer.f64(step.dwell_seconds());
+                }
+            }
+        }
+    }
     match &claim.value {
         PropertyValue::Scalar { value, dims } => {
             writer.u8(0);
@@ -2113,7 +2140,7 @@ fn encode_claim(writer: &mut Writer, claim: &PropertyClaim, version: u32) {
         writer.string(axis);
         writer.f64(lo);
         writer.f64(hi);
-        if version == MATDB_TYPED_AXIS_PACK_SCHEMA_VERSION {
+        if version >= MATDB_TYPED_AXIS_PACK_SCHEMA_VERSION {
             match claim.validity.axis_quantities().get(axis) {
                 Some(quantity) => {
                     writer.u8(1);
@@ -2170,6 +2197,33 @@ fn decode_claim(reader: &mut Reader<'_>, version: u32) -> Result<PropertyClaim, 
     } else {
         QuantitySpec::dimensional(key_dims)
     };
+    let mut key = PropertyKey::with_quantity(name, quantity);
+    if version >= MATDB_HARDNESS_PACK_SCHEMA_VERSION {
+        match reader.u8()? {
+            0 => {}
+            1 => {
+                let indenter = reader.string()?;
+                let protocol = reader.string()?;
+                let observation = ObservationId(reader.hash()?);
+                let count = reader.count("hardness_load_steps", 64)?;
+                reader.require_items(count, 16, "hardness load steps")?;
+                let mut loading = Vec::with_capacity(count);
+                for _ in 0..count {
+                    loading.push(crate::HardnessLoadStep::new(
+                        fs_qty::QtyAny::new(reader.f64()?, Dims([1, 1, -2, 0, 0, 0])),
+                        fs_qty::QtyAny::new(reader.f64()?, Dims([0, 0, 1, 0, 0, 0])),
+                    )?);
+                }
+                key = key.with_hardness_test(crate::HardnessTestContext::new(
+                    indenter,
+                    loading,
+                    protocol,
+                    observation,
+                )?)?;
+            }
+            tag => return Err(reader.malformed(format!("unknown hardness test tag {tag}"))),
+        }
+    }
     let value = match reader.u8()? {
         0 => PropertyValue::Scalar {
             value: reader.f64()?,
@@ -2212,7 +2266,7 @@ fn decode_claim(reader: &mut Reader<'_>, version: u32) -> Result<PropertyClaim, 
         let lo = reader.f64()?;
         let hi = reader.f64()?;
         previous_axis = Some(axis.clone());
-        validity = if version == MATDB_TYPED_AXIS_PACK_SCHEMA_VERSION {
+        validity = if version >= MATDB_TYPED_AXIS_PACK_SCHEMA_VERSION {
             match reader.u8()? {
                 0 => validity.with(axis, lo, hi),
                 1 => {
@@ -2256,7 +2310,7 @@ fn decode_claim(reader: &mut Reader<'_>, version: u32) -> Result<PropertyClaim, 
         observations.push(ObservationId(reader.hash()?));
     }
     Ok(PropertyClaim {
-        key: PropertyKey::with_quantity(name, quantity),
+        key,
         value,
         validity,
         uncertainty,
@@ -2661,13 +2715,15 @@ impl NormalizedPack {
         let properties = receipt
             .properties
             .iter()
-            .map(|name| {
-                let quantity = self.claims.registered_quantity(name).ok_or_else(|| {
-                    MatDbError::UnknownProperty {
-                        property: name.clone(),
-                    }
-                })?;
-                Ok(PropertyKey::with_quantity(name, quantity))
+            .enumerate()
+            .map(|(index, name)| {
+                let claim = receipt
+                    .selected
+                    .get(index)
+                    .and_then(|id| self.claims.claim(*id))
+                    .filter(|claim| claim.key.name() == name)
+                    .ok_or(MatDbError::ReceiptMismatch { field: "selected" })?;
+                Ok(claim.key.clone())
             })
             .collect::<Result<Vec<_>, MatDbError>>()?;
         let replayed = self.query_joint_typed(&properties, &point, policy)?;

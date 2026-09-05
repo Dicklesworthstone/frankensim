@@ -257,8 +257,8 @@ refuses typed domains. Intersections preserve compatible descriptors and
 become empty for a shared axis with incompatible declarations. Invalid typed
 scalar endpoints refuse admission. Curve abscissa dimensions must agree with
 the typed domain. These remain explicitly declared boxes, not inferred joint
-support from independent observations. Hardness apparatus and general tensor
-transformation context remain MR09 work.
+support from independent observations. General tensor transformation context
+and actual multiaxis support domains remain MR09 work.
 Typed axes use claim/normalized-pack v3, property-use receipt v3 (distinct
 `FSMATU3` wire header), and joint receipt v2. Every axis descriptor is bound
 into identity and replay; v1/v2 normalized packs and v2 property receipts
@@ -268,6 +268,45 @@ axes; structural model hashes still distinguish such declarations.
 No existing seed silently gains kinds, no source
 spelling is reinterpreted, and a quantity tag adds no empirical validation or
 authority to a source claim.
+
+Hardness queries require a `PropertyKey::with_hardness_test` selector in addition
+to the explicit scale. `HardnessTestContext` retains the source-declared
+indenter geometry/material specification, ordered force/dwell holds, procedure
+and revision, and an existing `ObservationId`. That observation binds specimen,
+process, method, raw artifact, caveats and licensed provenance; insertion
+requires it to be linked by the claim and to have nonblank specimen and method.
+Forces are finite positive SI newtons, dwell times are finite nonnegative SI
+seconds, and at most 64 ordered holds are admitted. No load or dwell is inferred
+from a scale name. Ramps and compliance remain in the named protocol; this
+carrier does not model instrument dynamics or certify standards compliance.
+
+Claims with the same scale but different tests coexist. Ordinary, preferred,
+pinned, material, interface and joint typed queries require the exact context;
+a pin cannot bypass it. Incomplete legacy typed hardness data retains its old storage
+identity, but a scale-only query refuses with `MissingHardnessContext`. An exact
+context absent from the store returns `HardnessContextMismatch`. Existing
+property/joint receipts bind the context transitively through selected claim
+identities; replay recovers the complete selected key. Verifiers must still
+compare caller intent with that key or pin, as with quantity schemas.
+
+Context-bearing claims and normalized packs use v4 identity domains. Pack v4
+adds a bounded optional context after each property's quantity descriptor and
+retains v3 typed-axis fields. Older pack versions retain their canonical bytes;
+changing a version tag is not migration. G0/G3 cases cover invalid dimensions,
+nonfinite/missing conditions, transactional observation linkage, distinct
+indenter/load/dwell/protocol/specimen selection, material/interface round trips,
+joint replay and tamper/downgrade refusal. Fixtures are synthetic and establish
+software behavior, not experimentally validated hardness or scale conversion.
+
+Manifest v4 extends v3 for material/interface imports with tab-separated
+`hardness-test <claim> <observation> <indenter> <protocol>` followed by ordered
+`hardness-hold <claim> <force> <unit> <dwell> <unit>` rows. Claims and observations
+use source-local IDs. Each test must be used and have one to 64 holds; duplicate
+tests, unknown observations, missing holds and dimensional mismatches refuse.
+The existing source adapter normalizes force/time to SI; source-envelope v4
+binds every declaration and source-spelled unit. Equivalent N/kN and s/ms inputs
+can select the same physical claim while retaining distinct source envelopes.
+V1/v2/v3 manifests do not acquire these declarations implicitly.
 
 The offline compiler now admits a v2 manifest for material/interface sources:
 `property <source> <target> <kind|dimensional>` and `axis <source> <target>`

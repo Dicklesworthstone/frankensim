@@ -175,6 +175,7 @@ impl ScalarAdmissibility {
 pub struct ScalarPropertyRequirement {
     name: String,
     quantity: QuantitySpec,
+    hardness_test: Option<Box<fs_matdb::HardnessTestContext>>,
     admissibility: ScalarAdmissibility,
 }
 
@@ -212,8 +213,26 @@ impl ScalarPropertyRequirement {
         Ok(Self {
             name,
             quantity,
+            hardness_test: None,
             admissibility,
         })
+    }
+
+    /// Require the complete material property key, including a source-declared
+    /// hardness test when present. The existing key remains the context owner.
+    pub fn try_with_key(
+        key: &PropertyKey,
+        admissibility: ScalarAdmissibility,
+    ) -> Result<Self, MaterialStatePointError> {
+        let mut requirement = Self::try_with_quantity(key.name(), key.quantity(), admissibility)?;
+        requirement.hardness_test = key.hardness_test().cloned().map(Box::new);
+        Ok(requirement)
+    }
+
+    /// Exact apparatus/protocol/specimen context requested by the operator.
+    #[must_use]
+    pub fn hardness_test(&self) -> Option<&fs_matdb::HardnessTestContext> {
+        self.hardness_test.as_deref()
     }
 
     /// Exact property key queried from the material card.
@@ -522,7 +541,15 @@ fn resolve_scalar_property_set(
 
     let mut properties = Vec::with_capacity(requirements.len());
     for (index, requirement) in requirements.into_iter().enumerate() {
-        let key = PropertyKey::with_quantity(&requirement.name, requirement.quantity);
+        let mut key = PropertyKey::with_quantity(&requirement.name, requirement.quantity);
+        if let Some(context) = requirement.hardness_test() {
+            key = key.with_hardness_test(context.clone()).map_err(|source| {
+                MaterialStatePointError::Query {
+                    property: requirement.name.clone(),
+                    source,
+                }
+            })?;
+        }
         let answer = match selection {
             MaterialPropertySelection::SingleClaimOnly => {
                 claims.query_typed(&key, point, SelectionPolicy::SingleClaimOnly)
@@ -1755,6 +1782,132 @@ mod tests {
         QueryPoint::new()
             .with("T", temperature_k)
             .expect("finite temperature")
+    }
+
+    #[test]
+    fn g0_hardness_state_requirements_preserve_test_context_for_every_selection_path() {
+        use fs_matdb::{HardnessLoadStep, HardnessTestContext, ObservationDataset};
+        use fs_qty::{QtyAny, semantic::HardnessScale};
+        let scale = QuantitySpec::semantic(SemanticType::new(
+            QuantityKind::Hardness(HardnessScale::Vickers),
+            ValueForm::Static,
+        ));
+        let mut property = claim(
+            "hardness",
+            Dims::NONE,
+            vec![(250.0, 210.0), (600.0, 210.0)],
+            600.0,
+        );
+        let mut claims = ClaimSet::new();
+        let observation = claims
+            .register_observation(ObservationDataset {
+                specimen: "synthetic specimen".into(),
+                method: "synthetic hardness test".into(),
+                artifact: fs_blake3::hash_domain("fixture", b"synthetic hardness"),
+                caveats: "no empirical claim".into(),
+                provenance: property.provenance.clone(),
+            })
+            .unwrap();
+        let key = PropertyKey::with_quantity("hardness", scale)
+            .with_hardness_test(
+                HardnessTestContext::new(
+                    "synthetic diamond pyramid geometry A",
+                    vec![
+                        HardnessLoadStep::new(
+                            QtyAny::new(20.0, Dims([1, 1, -2, 0, 0, 0])),
+                            QtyAny::new(10.0, Dims([0, 0, 1, 0, 0, 0])),
+                        )
+                        .unwrap(),
+                    ],
+                    "synthetic protocol revision 1",
+                    observation,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        property.key = key.clone();
+        property.observations = vec![observation];
+        let pin = claims.insert_claim(property).unwrap();
+        let interface_base = interface_card("synthetic hardness requirement");
+        let material = MaterialCard::assemble(
+            interface_base.surface_a().material.clone(),
+            claims.clone(),
+            vec![],
+        )
+        .unwrap();
+        let interface = InterfaceSystemCard::assemble(
+            interface_base.surface_a().clone(),
+            interface_base.surface_b().clone(),
+            interface_base.context().clone(),
+            claims,
+            vec![],
+        )
+        .unwrap();
+        let exact =
+            ScalarPropertyRequirement::try_with_key(&key, ScalarAdmissibility::StrictlyPositive)
+                .unwrap();
+        let bare = ScalarPropertyRequirement::try_with_quantity(
+            "hardness",
+            scale,
+            ScalarAdmissibility::StrictlyPositive,
+        )
+        .unwrap();
+        for selection in [
+            MaterialPropertySelection::SingleClaimOnly,
+            MaterialPropertySelection::PreferObservationBacked,
+            MaterialPropertySelection::PinnedByProperty(vec![("hardness".into(), pin)]),
+        ] {
+            let bulk = resolve_material_state_point(
+                &material,
+                &point(300.0),
+                &[exact.clone()],
+                selection.clone(),
+            )
+            .unwrap();
+            let surface = resolve_interface_state_point(
+                &interface,
+                &point(300.0),
+                &[exact.clone()],
+                selection.clone(),
+            )
+            .unwrap();
+            for value in [
+                bulk.property("hardness").unwrap(),
+                surface.property("hardness").unwrap(),
+            ] {
+                assert_eq!(value.value_si(), 210.0);
+                assert_eq!(value.requirement().hardness_test(), key.hardness_test());
+                assert_eq!(value.answer().receipt.selected, pin);
+                material
+                    .claims()
+                    .verify_receipt(&value.answer().receipt)
+                    .unwrap();
+            }
+            for result in [
+                resolve_material_state_point(
+                    &material,
+                    &point(300.0),
+                    &[bare.clone()],
+                    selection.clone(),
+                )
+                .map(|_| ()),
+                resolve_interface_state_point(
+                    &interface,
+                    &point(300.0),
+                    &[bare.clone()],
+                    selection.clone(),
+                )
+                .map(|_| ()),
+            ] {
+                assert!(matches!(
+                    result,
+                    Err(MaterialStatePointError::Query {
+                        source: MatDbError::MissingHardnessContext { .. },
+                        ..
+                    })
+                ));
+            }
+        }
     }
 
     #[test]

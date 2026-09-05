@@ -186,18 +186,53 @@ fn g0_material_quantity_queries_refuse_equal_dimension_convention_mismatches() {
     ];
     for (actual, wrong) in pairs {
         let spec = |kind| QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static));
-        let key = PropertyKey::with_quantity("quantity-fixture", spec(actual));
+        let mut key = PropertyKey::with_quantity("quantity-fixture", spec(actual));
+        let mut set = ClaimSet::new();
+        let observation = if matches!(actual, K::Hardness(_)) {
+            let dataset = ObservationDataset {
+                specimen: "synthetic convention specimen".into(),
+                method: "synthetic hardness apparatus".into(),
+                artifact: hash_domain("fixture", b"synthetic convention observation"),
+                caveats: "no empirical claim".into(),
+                provenance: provenance("explicit synthetic convention test"),
+            };
+            let id = set.register_observation(dataset.clone()).unwrap();
+            key = key
+                .with_hardness_test(
+                    fs_matdb::HardnessTestContext::new(
+                        "synthetic indenter geometry A",
+                        vec![
+                            fs_matdb::HardnessLoadStep::new(
+                                fs_qty::QtyAny::new(20.0, Dims([1, 1, -2, 0, 0, 0])),
+                                fs_qty::QtyAny::new(10.0, Dims([0, 0, 1, 0, 0, 0])),
+                            )
+                            .unwrap(),
+                        ],
+                        "synthetic protocol revision 1",
+                        id,
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+            Some(dataset)
+        } else {
+            None
+        };
         let mut claim = density(
             1.0,
             "explicit synthetic convention test",
             UncertaintyModel::Unstated,
         );
         claim.key = key.clone();
+        claim.observations = key
+            .hardness_test()
+            .map(|context| context.observation())
+            .into_iter()
+            .collect();
         claim.value = PropertyValue::Scalar {
             value: 1.0,
             dims: actual.expected_dims(),
         };
-        let mut set = ClaimSet::new();
         let id = set.insert_claim(claim.clone()).unwrap();
         let wrong_key = PropertyKey::with_quantity(key.name(), spec(wrong));
         assert!(matches!(
@@ -235,12 +270,18 @@ fn g0_material_quantity_queries_refuse_equal_dimension_convention_mismatches() {
         assert!(set.insert_claim(conflicting.clone()).is_err());
         assert_eq!(set.claim_count(), 1, "refusal is transactional");
         let mut other = ClaimSet::new();
+        if let Some(dataset) = &observation {
+            other.register_observation(dataset.clone()).unwrap();
+        }
         let other_id = other.insert_claim(conflicting).unwrap();
         assert_ne!(id, other_id, "kind changes claim and receipt identity");
         assert!(other.verify_receipt(&decoded).is_err());
 
         claim.key = PropertyKey::new(key.name(), actual.expected_dims());
         let mut legacy = ClaimSet::new();
+        if let Some(dataset) = &observation {
+            legacy.register_observation(dataset.clone()).unwrap();
+        }
         legacy.insert_claim(claim).unwrap();
         assert!(matches!(
             legacy.query_typed(&key, &room(), SelectionPolicy::SingleClaimOnly),
