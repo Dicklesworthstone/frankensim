@@ -366,6 +366,18 @@ waveguide (`fs-nlmodal::prestressed_beam_omega` / Kirchhoff–Carrier), a
 There is no instrument crate and no instrument algebra. A guitar or
 clarinet is one filling of those objects.
 
+- Ambient state comes from `GasState::try_new_moist_air(T, p, RH)` once,
+  before realization. Excitation, duct impedance/resonance, radiation loads,
+  and observer absorption share that state. RH=0 uses the original dry-air
+  constructor bit for bit; RH>0 requires 253.15–323.15 K and water mole
+  fraction at most 0.15, with model-domain failures returned as `Ambient`
+  errors. Invalid RH refuses admission. This is an estimated ideal mixture:
+  viscosity and conductivity retain the dry-air fits, the saturation
+  enhancement factor is omitted, and no exact humid-medium prediction or
+  experimental validation is claimed. G0/G3 assembly tests check the dry
+  boundary, refusals, independent mixture density/speed/impedance, deterministic
+  pressure, and waveform-derived duct pitch. ISO absorption remains the sole
+  bulk absorption inside its window; no extra classical term is added.
 - String path, `EA = 0`: triangular-pluck (or bow) modal ICs marched by
   `ModalAcousticTimeModel`, compact transfer
   `H = i ω ρ A_odd / (4 π r √(μ L / 2))` for odd sine modes. Even

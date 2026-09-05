@@ -20,7 +20,7 @@ use crate::unilateral_contact::{
 const SECTION_BUDGET: f64 = 8.0;
 
 use fs_duct::{Duct, DuctError, HoleState, MAX_RADIATION_KA, Segment, Termination};
-use fs_material::gas::{GasSpec, GasState};
+use fs_material::gas::GasState;
 use fs_material::visco::{GeneralizedMaxwell, RayleighDamping};
 use fs_math::c64::C64;
 use fs_math::det;
@@ -901,10 +901,10 @@ fn gas_state(ambient: AmbientGas) -> Result<GasState, AcousticRealizeError> {
             what: "relative humidity must be an explicit fraction in [0, 1]",
         });
     }
-    GasState::try_new(
-        &GasSpec::dry_air_ussa1976(),
+    GasState::try_new_moist_air(
         ambient.temperature_k,
         ambient.pressure_pa,
+        ambient.relative_humidity,
     )
     .map_err(|e| AcousticRealizeError::Ambient(e.to_string()))
 }

@@ -3,7 +3,9 @@
 //! waveguide, a Bernoulli aperture, a frictional contact, a modal
 //! radiator, and a viscothermal duct filled in together.
 
-/// First-principles dry air (USSA 1976 constants live in fs-material).
+/// Ideal dry-air/water-vapor mixture (constitutive models live in fs-material).
+/// Humid realization requires 253.15–323.15 K and vapor mole fraction ≤ 0.15;
+/// RH=0 retains the dry-air model's wider temperature window.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AmbientGas {
     /// Static temperature [K].
@@ -11,7 +13,8 @@ pub struct AmbientGas {
     /// Static pressure [Pa].
     pub pressure_pa: f64,
     /// Relative humidity as a fraction in `[0, 1]`. Explicit: never a
-    /// hidden scenario default. ISO 9613-1 uses this; `0` is dry air.
+    /// hidden scenario default. Sets the gas mixture and ISO 9613-1
+    /// absorption; `0` is dry air.
     pub relative_humidity: f64,
 }
 
@@ -343,7 +346,7 @@ pub struct RadiatingPlate {
 /// refused at realization, not here — this type is data.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AcousticAssembly {
-    /// Ambient gas (T, p). Composition is dry air in v1.
+    /// Ambient gas (T, p, RH), shared by excitation, propagation, and radiation.
     pub ambient: AmbientGas,
     /// Optional prestressed string.
     pub string: Option<PrestressedString>,

@@ -172,6 +172,129 @@ fn duct_period_tracks_sound_speed_from_ambient_temperature() {
     );
 }
 
+/// Independent ideal-mixture arithmetic, using the source constants documented
+/// in fs-material's gas contract and the platform exponential, not GasState.
+fn moist_air_reference(temperature_k: f64, pressure_pa: f64, rh: f64) -> (f64, f64, f64) {
+    let t = temperature_k - 273.15;
+    let x = rh * 611.21 * ((18.678 - t / 234.5) * t / (257.14 + t)).exp() / pressure_pa;
+    let molar_mass = (1.0 - x) * 28.9644e-3 + x * 18.01528e-3;
+    let cv_molar = (1.0 - x) * 8.31432 / 0.4 + x * 8.31432 / 0.3291;
+    let gamma = (cv_molar + 8.31432) / cv_molar;
+    let rho = pressure_pa * molar_mass / (8.31432 * temperature_k);
+    let c = (gamma * 8.31432 * temperature_k / molar_mass).sqrt();
+    (x, rho, c)
+}
+
+#[test]
+fn g0_assembly_moist_air_state_preserves_the_dry_limit() {
+    use fs_material::gas::{GasSpec, GasState};
+
+    let mut assembly = plucked(80.0, 0.006, 0.003);
+    assembly.duration_s = 0.005;
+    // RH=0 retains the old dry constructor, including its wider T window.
+    for temperature in [288.15, 310.15, 330.0] {
+        assembly.ambient.temperature_k = temperature;
+        assembly.ambient.relative_humidity = 0.0;
+        let dry = realize_assembly(&assembly).expect("dry assembly");
+        let reference = GasState::try_new(&GasSpec::dry_air_ussa1976(), temperature, 101_325.0)
+            .expect("original dry constructor");
+        assert_eq!(dry.gas, reference);
+        assert_eq!(dry.gas.water_mole_fraction.to_bits(), 0.0_f64.to_bits());
+    }
+
+    assembly.ambient.temperature_k = 310.15;
+    assembly.ambient.relative_humidity = 1.0;
+    let wet = realize_assembly(&assembly).expect("supported humid assembly");
+    let (x, rho, c) = moist_air_reference(310.15, 101_325.0, 1.0);
+    for (actual, expected) in [
+        (wet.gas.water_mole_fraction, x),
+        (wet.gas.density, rho),
+        (wet.gas.sound_speed, c),
+        (wet.gas.characteristic_impedance, rho * c),
+    ] {
+        assert!(
+            (actual / expected - 1.0).abs() < 1e-12,
+            "{actual} vs {expected}"
+        );
+    }
+    let repeat = realize_assembly(&assembly).expect("deterministic humid repeat");
+    assert_eq!(wet.gas, repeat.gas);
+    assert!(
+        wet.pressure_pa
+            .iter()
+            .zip(&repeat.pressure_pa)
+            .all(|(a, b)| a.to_bits() == b.to_bits())
+    );
+}
+
+#[test]
+fn g0_assembly_moist_air_refuses_unsupported_states() {
+    let mut assembly = plucked(80.0, 0.006, 0.003);
+    for rh in [-0.1, 1.1, f64::NAN, f64::INFINITY] {
+        assembly.ambient.relative_humidity = rh;
+        assert!(matches!(
+            realize_assembly(&assembly),
+            Err(AcousticRealizeError::InvalidDescription { what })
+                if what.contains("relative humidity")
+        ));
+    }
+    assembly.ambient.relative_humidity = 0.5;
+    for temperature in [250.0, 330.0] {
+        assembly.ambient.temperature_k = temperature;
+        assert!(matches!(
+            realize_assembly(&assembly),
+            Err(AcousticRealizeError::Ambient(what)) if what.contains("Buck-1996")
+        ));
+    }
+    assembly.ambient.temperature_k = 323.15;
+    assembly.ambient.pressure_pa = 10_000.0;
+    assembly.ambient.relative_humidity = 1.0;
+    assert!(matches!(
+        realize_assembly(&assembly),
+        Err(AcousticRealizeError::Ambient(what)) if what.contains("0.15 ceiling")
+    ));
+}
+
+#[test]
+fn g3_assembly_moist_air_moves_the_duct_resonance() {
+    let mut dry = closed_duct(310.15);
+    let duct = dry.duct.as_mut().expect("duct");
+    duct.segments = vec![CylinderSegment {
+        radius_m: 0.0075,
+        outlet_radius_m: 0.0075,
+        length_m: 0.5,
+    }];
+    duct.termination = WaveguideEnd::UnflangedOpen;
+    dry.blow.as_mut().expect("pulse").duration_s = 0.005;
+    dry.duration_s = 0.25;
+    let mut wet = dry.clone();
+    wet.ambient.relative_humidity = 1.0;
+    let a = realize_assembly(&dry).expect("dry duct ringdown");
+    let b = realize_assembly(&wet).expect("humid duct ringdown");
+    // Measure the actual pressure clock after the drive and early transients.
+    // A change solely in the final zero-phase absorption cannot supply this
+    // predicted frequency shift. Avoid the finite FFT block's end transient.
+    let frequency = |p: &[f64]| 8_000.0 / zero_cross_period(&p[800..1800]);
+    let f_dry = frequency(&a.pressure_pa);
+    let f_wet = frequency(&b.pressure_pa);
+    let (_, _, c_dry) = moist_air_reference(310.15, 101_325.0, 0.0);
+    let (_, _, c_wet) = moist_air_reference(310.15, 101_325.0, 1.0);
+    // Quarter-wave scale with the documented unflanged end correction;
+    // viscothermal and discrete-time dispersion remain model error here.
+    let ideal_dry = c_dry / (4.0 * (0.5 + 0.6133 * 0.0075));
+    assert!(
+        (f_dry / ideal_dry - 1.0).abs() < 0.05,
+        "{f_dry} vs {ideal_dry}"
+    );
+    let shift_cents = 1200.0 * (f_wet / f_dry).log2();
+    let predicted_cents = 1200.0 * (c_wet / c_dry).log2();
+    assert!(
+        (shift_cents - predicted_cents).abs() < 3.0,
+        "waveform shift {shift_cents} cents vs independent mixture {predicted_cents} cents \
+         (dry {f_dry} Hz, humid {f_wet} Hz)"
+    );
+}
+
 #[test]
 fn pcm16_wav_is_deterministic_and_not_peak_normalized() {
     let realized = realize_assembly(&plucked(80.0, 0.006, 0.003)).expect("pluck");
