@@ -913,7 +913,7 @@ mod tests {
             .unwrap_or_else(|e| panic!("{e}: {} / {}", out.stdout, out.stderr))
     }
     fn cli(args: &[&str]) -> CommandOutput {
-        crate::run(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+        crate::run(args.iter().map(|s| s.to_string()))
     }
 
     #[test]
