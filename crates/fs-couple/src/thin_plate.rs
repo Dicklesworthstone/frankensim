@@ -872,6 +872,123 @@ fn map_plate(_err: PlateError) -> AcousticRealizeError {
 mod tests {
     use super::*;
 
+    fn thermal_plate() -> ThinPlate {
+        ThinPlate {
+            length_m: 0.20,
+            width_m: 0.15,
+            thickness_m: 0.002,
+            density_kg_m3: 4999.0,
+            e1_pa: 70e9,
+            e2_pa: 70e9,
+            nu12: 0.3,
+            g12_pa: 70e9 / 2.6,
+            damping_ratio: 0.0,
+            thermoelastic: Some(IsotropicPlateThermal {
+                temperature_k: 300.0,
+                linear_expansion_per_k: 20e-6,
+                specific_heat_j_kg_k: 600.0,
+                conductivity_w_m_k: 100.0,
+                state_identity: None, // authored numerical fixture, not measured material data
+            }),
+            n_modes: 1,
+            geometric_nonlinearity: false,
+            pretension_n_m: 0.0,
+            clamped: false,
+        }
+    }
+
+    fn independent_zener_zeta(plate: ThinPlate, omega: f64) -> f64 {
+        let t = plate.thermoelastic.expect("explicit thermal inputs");
+        let heat_per_volume = plate.density_kg_m3 * t.specific_heat_j_kg_k;
+        let tau = plate.thickness_m.powi(2) * heat_per_volume
+            / (core::f64::consts::PI.powi(2) * t.conductivity_w_m_k);
+        let delta =
+            plate.e1_pa * t.linear_expansion_per_k.powi(2) * t.temperature_k / heat_per_volume;
+        0.5 * delta * omega * tau / (1.0 + (omega * tau).powi(2))
+    }
+
+    #[test]
+    fn g1_thermoelastic_loss_reaches_linear_and_nonlinear_plate_operators() {
+        let base = thermal_plate();
+        let mut expansion_twin = base;
+        expansion_twin
+            .thermoelastic
+            .as_mut()
+            .unwrap()
+            .linear_expansion_per_k *= 2.0;
+        let mut density_twin = base;
+        density_twin.density_kg_m3 = 5001.0;
+        let mut hot = base;
+        hot.thermoelastic.as_mut().unwrap().temperature_k = 450.0;
+        let mut losses = Vec::new();
+        for plate in [base, expansion_twin, density_twin, hot] {
+            let body = certified_radiators(plate).expect("linear plate").remove(0);
+            let expected = independent_zener_zeta(plate, body.omega);
+            assert!((body.zeta / expected - 1.0).abs() < 1e-12);
+            let vk = VkBody::from_plate(plate).expect("nonlinear plate");
+            // Read the assembled pHS, not the helper that manufactured its zeta.
+            // The infinitesimal tangent removes the von Karman quartic term.
+            let q = 1e-12;
+            let omega = (vk.sys.effort(&[q, 0.0])[0] / q).sqrt();
+            let (_, r, _) = vk.sys.structure();
+            let nonlinear_zeta = r[3] / (2.0 * omega);
+            let expected = independent_zener_zeta(plate, omega);
+            assert!((nonlinear_zeta / expected - 1.0).abs() < 1e-10);
+            let x = [0.0, 1e-4];
+            let step = fs_phs::step(&vk.sys, &x, &[0.0], 1e-5).expect("damped step");
+            assert!(vk.sys.hamiltonian(&step.x) < vk.sys.hamiltonian(&x));
+            losses.push((body.zeta, nonlinear_zeta));
+        }
+        for column in [0, 1] {
+            let loss = |i: usize| {
+                if column == 0 {
+                    losses[i].0
+                } else {
+                    losses[i].1
+                }
+            };
+            assert!(
+                (loss(1) / loss(0) - 4.0).abs() < 1e-10,
+                "equal density must not erase different expansion coefficients"
+            );
+            assert!(
+                (loss(2) / loss(0) - 1.0).abs() < 0.005,
+                "crossing 5000 kg/m3 must not switch material laws"
+            );
+            assert!(
+                (loss(3) / loss(0) - 1.5).abs() < 1e-10,
+                "specimen temperature must reach both damping operators"
+            );
+        }
+    }
+
+    #[test]
+    fn g0_thermoelastic_loss_is_explicit_and_refuses_anisotropy_or_bad_inputs() {
+        let mut missing = thermal_plate();
+        missing.thermoelastic = None;
+        assert_eq!(certified_radiators(missing).unwrap()[0].zeta, 0.0);
+        let vk = VkBody::from_plate(missing).expect("unclaimed thermal loss");
+        assert!(vk.sys.structure().1.iter().all(|value| *value == 0.0));
+        for defect in 0..5 {
+            let mut invalid = thermal_plate();
+            match defect {
+                0 => invalid.e2_pa *= 0.8,
+                1 => invalid.g12_pa *= 0.8, // E1 == E2 does not establish isotropy
+                2 => invalid.thermoelastic.as_mut().unwrap().conductivity_w_m_k = 0.0,
+                3 => invalid.thermoelastic.as_mut().unwrap().temperature_k = f64::NAN,
+                _ => invalid.thermoelastic.as_mut().unwrap().specific_heat_j_kg_k = -1.0,
+            }
+            assert!(matches!(
+                certified_radiators(invalid),
+                Err(AcousticRealizeError::InvalidDescription { .. })
+            ));
+            assert!(matches!(
+                VkBody::from_plate(invalid),
+                Err(AcousticRealizeError::InvalidDescription { .. })
+            ));
+        }
+    }
+
     #[test]
     fn simply_supported_first_mode_is_near_the_analytic_value() {
         let plate = ThinPlate {

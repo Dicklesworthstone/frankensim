@@ -1675,6 +1675,102 @@ mod tests {
             .expect("finite temperature")
     }
 
+    fn thermoelastic_card() -> MaterialCard {
+        let base = solid_card(
+            "synthetic-thermoelastic",
+            [5000.0, 5000.0],
+            [70e9, 70e9],
+            [0.3, 0.3],
+            [1e8, 1e8],
+        );
+        let mut claims = base.claims().clone();
+        for (name, dims, low, high) in [
+            (
+                SPECIFIC_HEAT_CAPACITY_PROPERTY,
+                SPECIFIC_HEAT_CAPACITY_DIMS,
+                500.0,
+                700.0,
+            ),
+            (
+                THERMAL_CONDUCTIVITY_PROPERTY,
+                THERMAL_CONDUCTIVITY_DIMS,
+                80.0,
+                40.0,
+            ),
+        ] {
+            claims
+                .insert_claim(claim(name, dims, vec![(250.0, low), (600.0, high)], 600.0))
+                .expect("thermal curve");
+        }
+        MaterialCard::assemble(base.id().clone(), claims, Vec::new()).expect("thermal card")
+    }
+
+    #[test]
+    fn g1_thermoelastic_state_point_resolves_temperature_dependent_properties() {
+        let card = thermoelastic_card();
+        let resolve = |t| {
+            resolve_isotropic_thermoelastic_state_point(
+                &card,
+                &point(t),
+                MaterialPropertySelection::SingleClaimOnly,
+            )
+            .expect("complete isotropic thermal state")
+        };
+        let middle = resolve(425.0);
+        let law = middle.law();
+        assert_eq!(middle.resolved().properties().len(), 6);
+        assert_eq!(middle.resolved().card_identity(), card.content_hash());
+        assert_eq!(law.cp, 600.0);
+        assert_eq!(law.conductivity, 60.0);
+        assert_eq!(law.alpha_t.to_bits(), 17.0e-6_f64.to_bits());
+        assert_eq!(law.t0, 425.0);
+        assert_eq!(law.rho, 5000.0);
+        assert_eq!(law.e, 70e9);
+        assert_eq!(middle.poisson_ratio(), 0.3);
+        let low = resolve(250.0);
+        let high = resolve(600.0);
+        assert_ne!(low.resolved().identity(), high.resolved().identity());
+        assert!(high.law().loss_factor(1000.0, 0.002) > low.law().loss_factor(1000.0, 0.002));
+        // Independent single-thermal-mode Zener expression at the midpoint.
+        let tau = 0.002_f64.powi(2) * 5000.0 * 600.0 / (core::f64::consts::PI.powi(2) * 60.0);
+        let expected = 70e9 * (17e-6_f64).powi(2) * 425.0 / (5000.0 * 600.0) * (1000.0 * tau)
+            / (1.0 + (1000.0 * tau).powi(2));
+        assert!((law.loss_factor(1000.0, 0.002) / expected - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn g0_thermoelastic_state_point_requires_complete_data_and_temperature() {
+        let bare = solid_card("incomplete", [5000.0; 2], [70e9; 2], [0.3; 2], [1e8; 2]);
+        assert!(matches!(
+            resolve_isotropic_thermoelastic_state_point(&bare, &point(300.0),
+                MaterialPropertySelection::SingleClaimOnly),
+            Err(MaterialStatePointError::Query { property, .. })
+                if property == SPECIFIC_HEAT_CAPACITY_PROPERTY
+        ));
+        let card = thermoelastic_card();
+        for query in [QueryPoint::new(), point(0.0)] {
+            assert!(matches!(
+                resolve_isotropic_thermoelastic_state_point(
+                    &card,
+                    &query,
+                    MaterialPropertySelection::SingleClaimOnly
+                ),
+                Err(MaterialStatePointError::InvalidDerived { .. })
+            ));
+        }
+        assert!(matches!(
+            resolve_isotropic_thermoelastic_state_point(
+                &card,
+                &point(700.0),
+                MaterialPropertySelection::SingleClaimOnly
+            ),
+            Err(MaterialStatePointError::Query {
+                source: MatDbError::NoClaimInDomain { .. },
+                ..
+            })
+        ));
+    }
+
     fn optical_card(upper_temperature_k: f64) -> MaterialCard {
         let mut claims = ClaimSet::new();
         for (index, name) in VISIBLE_COMPLEX_IOR_ETA_PROPERTIES.iter().enumerate() {

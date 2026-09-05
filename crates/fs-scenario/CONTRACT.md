@@ -36,7 +36,11 @@ flagships.
   `HelmholtzCavity`, `AcousticAssembly`). `AmbientGas` carries an
   explicit relative humidity in `[0, 1]`. `UnilateralObstacle`
   carries Hunt–Crossley `χ`. `ThinPlate` carries in-plane
-  pretension and a clamped-edge flag. A guitar or clarinet is a
+  pretension and a clamped-edge flag. Its optional `IsotropicPlateThermal`
+  supplies specimen temperature, expansion, specific heat, and conductivity
+  for a declared Zener approximation. Absence means unavailable/unclaimed
+  thermoelastic loss; it never selects a metal from density. A retained material
+  state identity is a citation, not an authority upgrade. A guitar or clarinet is a
   filled assembly, not a crate and not a type. Realization lives
   in `fs-couple`.
 - `signal::TimeSignal` — `Constant`, `Ramp` (finite strict interval, clamped;

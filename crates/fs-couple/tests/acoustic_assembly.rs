@@ -279,15 +279,28 @@ fn g3_assembly_moist_air_moves_the_duct_resonance() {
     let f_wet = frequency(&b.pressure_pa);
     let (_, _, c_dry) = moist_air_reference(310.15, 101_325.0, 0.0);
     let (_, _, c_wet) = moist_air_reference(310.15, 101_325.0, 1.0);
-    // Quarter-wave scale with the documented unflanged end correction;
-    // viscothermal and discrete-time dispersion remain model error here.
+    // The existing eight-cell Cauer ladder has a first-order boundary error:
+    // its inviscid lowest omega is 2*c*N/L * sin(pi/(4*N+2)), from the
+    // tridiagonal LC eigenproblem (diagonal 1,2,...,2; off-diagonal -1).
+    // Apply that independently derived spatial factor to the leading-order
+    // mouth-corrected quarter wave. This is not a 5% continuum-accuracy claim;
+    // the remaining band covers viscothermal and discrete-time dispersion.
     let ideal_dry = c_dry / (4.0 * (0.5 + 0.6133 * 0.0075));
-    assert!(
-        (f_dry / ideal_dry - 1.0).abs() < 0.05,
-        "{f_dry} vs {ideal_dry}"
-    );
+    let cells = 8.0;
+    let spatial_factor =
+        4.0 * cells / core::f64::consts::PI * (core::f64::consts::PI / (4.0 * cells + 2.0)).sin();
+    let discrete_dry = ideal_dry * spatial_factor;
     let shift_cents = 1200.0 * (f_wet / f_dry).log2();
     let predicted_cents = 1200.0 * (c_wet / c_dry).log2();
+    eprintln!(
+        "dry={f_dry} Hz humid={f_wet} Hz continuum={ideal_dry} Hz \
+         LC-reference={discrete_dry} Hz shift={shift_cents} cents \
+         mixture-reference={predicted_cents} cents"
+    );
+    assert!(
+        (f_dry / discrete_dry - 1.0).abs() < 0.05,
+        "{f_dry} vs {discrete_dry} (continuum {ideal_dry})"
+    );
     assert!(
         (shift_cents - predicted_cents).abs() < 3.0,
         "waveform shift {shift_cents} cents vs independent mixture {predicted_cents} cents \
@@ -886,6 +899,98 @@ fn steel_panel() -> ThinPlate {
         geometric_nonlinearity: false,
         pretension_n_m: 0.0,
         clamped: false,
+    }
+}
+
+#[test]
+fn g1_resolved_thermoelastic_material_reaches_both_assembly_plate_paths() {
+    use fs_couple::thin_plate::with_isotropic_thermoelastic_state;
+    use fs_evidence::ValidityDomain;
+    use fs_matdb::{
+        ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId, PropertyClaim, PropertyKey,
+        PropertyValue, Provenance, QueryPoint, UncertaintyModel,
+    };
+    use fs_material::state_point::{
+        INVERSE_TEMPERATURE_DIMS, LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY,
+        MaterialPropertySelection, SPECIFIC_HEAT_CAPACITY_DIMS, THERMAL_CONDUCTIVITY_DIMS,
+        resolve_isotropic_thermoelastic_state_point,
+    };
+    use fs_qty::{Density, Dims, Pressure};
+
+    // NASA TN D-6448 p.15, as transcribed in seed-v1's aluminum-2024-T3
+    // property set. This is a constitutive-input integration fixture, not a
+    // fresh experiment or a test of the offline pack importer. Its source's
+    // unstated uncertainty and single 300 K state are preserved.
+    let mut claims = ClaimSet::new();
+    for (name, dims, value) in [
+        ("density", Density::DIMS, 2705.0),
+        ("young_modulus", Pressure::DIMS, 72_400e6),
+        ("poisson_ratio", Dims::NONE, 0.33),
+        (
+            LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY,
+            INVERSE_TEMPERATURE_DIMS,
+            23e-6,
+        ),
+        ("specific_heat_capacity", SPECIFIC_HEAT_CAPACITY_DIMS, 840.0),
+        ("thermal_conductivity", THERMAL_CONDUCTIVITY_DIMS, 126.0),
+    ] {
+        claims
+            .insert_claim(PropertyClaim {
+                key: PropertyKey::new(name, dims),
+                value: PropertyValue::Scalar { value, dims },
+                validity: ValidityDomain::unconstrained().with("T", 300.0, 300.0),
+                uncertainty: UncertaintyModel::Unstated,
+                interpolation: InterpolationPolicy::ConstantWithinValidity,
+                provenance: Provenance {
+                    source: "NASA TN D-6448 p.15, seed-v1/aluminum-2024-t3-nasa-tn-d6448".into(),
+                    license: "US-Government-Public-Domain".into(),
+                    artifact: None,
+                },
+                observations: Vec::new(),
+            })
+            .expect("source property");
+    }
+    let card = MaterialCard::assemble(
+        MaterialStateId {
+            chemistry: "aluminum-2024".into(),
+            phase: "solid".into(),
+            process: "T3 panel, NASA TN D-6448 property set".into(),
+            revision: 0,
+        },
+        claims,
+        Vec::new(),
+    )
+    .expect("card");
+    let state = resolve_isotropic_thermoelastic_state_point(
+        &card,
+        &QueryPoint::new().with("T", 300.0).unwrap(),
+        MaterialPropertySelection::SingleClaimOnly,
+    )
+    .expect("six properties at one temperature");
+    let mut description = steel_panel();
+    description.n_modes = 1;
+    description.damping_ratio = 0.0;
+    let plate = with_isotropic_thermoelastic_state(description, &state).expect("bind state");
+    assert_eq!(plate.density_kg_m3, 2705.0);
+    assert_eq!(plate.e1_pa, 72_400e6);
+    assert_eq!(
+        plate.thermoelastic.unwrap().state_identity,
+        Some(state.resolved().identity())
+    );
+    let mut anisotropic = description;
+    anisotropic.e2_pa *= 0.5;
+    assert!(with_isotropic_thermoelastic_state(anisotropic, &state).is_err());
+    for nonlinear in [false, true] {
+        let mut assembly = plucked(80.0, 0.006, 0.003);
+        assembly.duration_s = 0.005;
+        assembly.plate = Some(ThinPlate {
+            geometric_nonlinearity: nonlinear,
+            ..plate
+        });
+        let result = realize_assembly(&assembly).expect("material-driven assembly");
+        assert_eq!(result.pressure_pa.len(), 40);
+        assert!(result.pressure_pa.iter().all(|p| p.is_finite()));
+        assert!(peak_abs(&result.pressure_pa) > 0.0);
     }
 }
 

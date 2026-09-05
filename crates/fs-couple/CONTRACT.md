@@ -356,6 +356,29 @@ The runtime owns visible per-filter state, superposes in fixed input order, and 
 whole samples transactionally. EstimateOnly covers the fixed reference before `1/r`;
 moving-source, FW-H, near-field, feedback, room, head, and passivity remain unclaimed.
 
+### `string_specimen`
+
+`with_uniform_circular_material_state` lowers one homogeneous isotropic circular
+specimen to the existing `PrestressedString` realizer. It consumes the shared
+`ResolvedMaterialStatePoint` API, requiring only positive SI density and Young's
+modulus. Area, area second moment, linear density, mass, EA, EI, and diameter
+follow from the same radius and length. All source receipts and the complete
+material state remain available in `ResolvedStringSpecimen`; its specimen hash
+binds geometry and material resolution, excluding mechanical loading and solver
+options. It is not the complete scenario identity.
+
+Rebinding holds the template's geometry and tension fixed and preserves declared
+losses, supports, and modal budget. It does not solve fixed mass, imposed extension,
+tuned pitch, thermal expansion, yielding, anisotropy, or melting. Diameter supplies
+the existing compact strip-radiator width, without a new claim of accurate
+circular-wire radiation. Admission refuses missing/wrong-dimension properties,
+invalid mechanical inputs, and nonfinite/zero derived products before publication.
+The finite scalar calculation is deterministic; no runtime dependency or inner-loop
+database access is added. `tests/string_specimen.rs` checks G0 admission, G1 mass,
+EA/EI and beam modes, and G3 geometric/material scaling plus pressure-measured pitch
+through the actual acoustic realizer. Synthetic data establish numerical behavior,
+not physical validation of a measured material.
+
 ### `acoustic_realize` / `pcm_wav`
 
 `realize_assembly` turns an `fs_scenario::AcousticAssembly` into observer
@@ -376,7 +399,10 @@ clarinet is one filling of those objects.
   enhancement factor is omitted, and no exact humid-medium prediction or
   experimental validation is claimed. G0/G3 assembly tests check the dry
   boundary, refusals, independent mixture density/speed/impedance, deterministic
-  pressure, and waveform-derived duct pitch. ISO absorption remains the sole
+  pressure, and waveform-derived duct pitch. The fixed eight-cell Cauer duct
+  retains its first-order spatial boundary error; the pitch check uses its
+  analytic LC frequency scale and does not establish 5% continuum accuracy.
+  ISO absorption remains the sole
   bulk absorption inside its window; no extra classical term is added.
 - String path, `EA = 0`: triangular-pluck (or bow) modal ICs marched by
   `ModalAcousticTimeModel`, compact transfer
@@ -431,7 +457,21 @@ clarinet is one filling of those objects.
   flanged mouth uses the Rayleigh piston and is not.
 - Plate damping: a single authored viscous ratio is the two-point
   Rayleigh fit (`fs-material::visco`) through that ratio at ω₀ and
-  4ω₀ so higher certified modes sit on the stiffness limb. Radiation
+  4ω₀ so higher certified modes sit on the stiffness limb. Both linear and
+  von Karman banks add Zener thermoelastic loss only from explicit specimen
+  inputs. `with_isotropic_thermoelastic_state` binds a resolved six-property
+  bundle to the plate, moving elasticity, density, thermal properties, and
+  temperature together and retaining its state identity. There is no
+  density-threshold material guess or fixed-temperature substitute. Missing
+  thermal inputs leave that loss unavailable/unclaimed; requesting the scalar
+  law on an orthotropic plate refuses (including a mismatched shear modulus
+  when E1=E2). The law estimates the first through-thickness thermal relaxation
+  mode of a homogeneous isotropic thin beam/plate; it does not solve a thermal
+  field or establish an anisotropic loss law. Callers must exclude this addend
+  when authored damping or resolved thermal transport already includes it.
+  G0/G1 tests inspect both assembled damping operators against independent
+  Zener arithmetic, vary equal-density specimens and temperature, and cross
+  the former density threshold without switching laws. Radiation
   reaction on linear compact radiators is the Rayleigh-integral
   baffled-piston face impedance (same half-space kernel as `fs-bem`,
   written in-tree so couple does not depend on bem) fitted and

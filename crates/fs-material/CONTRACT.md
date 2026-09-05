@@ -33,6 +33,16 @@ homogenization, the P2 milestone.
   `resolve_isotropic_solid_state_point` additionally requires yield stress for
   contact/plastic admission; consumers do not need to fabricate an unrelated
   yield datum merely to compute modes.
+  `resolve_isotropic_thermoelastic_state_point` atomically resolves density,
+  Young's modulus, Poisson ratio, linear expansion, specific heat, and thermal
+  conductivity at an explicit positive `T` in kelvin. It retains all six
+  property-use receipts and their original uncertainty and supplies the existing
+  Zener law. Missing properties and out-of-domain states refuse; no density or
+  chemistry-name preset is selected. This is the homogeneous isotropic,
+  single thermal relaxation mode approximation, not an anisotropic law or a
+  resolved thermomechanical energy balance. Its synthetic temperature curves
+  and independent Zener checks establish numerical behavior, not experimental
+  validation.
   `resolve_isotropic_thermal_expansion_state_point` independently resolves the
   instantaneous isotropic linear expansion coefficient, including its exact
   state-point validity and property-use receipt. Negative expansion is
