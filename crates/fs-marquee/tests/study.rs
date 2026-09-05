@@ -596,98 +596,86 @@ fn mq_005_sphere_traced_render_no_meshing() {
 }
 
 fn body_fitted_mesh_for_plate(design: &PlateWithHoles, n: usize) -> fs_solid::mesh2::Mesh2 {
-    use fs_solid::mesh2::{Mesh2, Patch};
-    use std::collections::{BTreeMap, BTreeSet};
+    use fs_solid::mesh2::Mesh2;
+    use std::collections::BTreeMap;
 
-    let mut node_grid = Vec::with_capacity((n + 1) * (n + 1));
-    for j in 0..=n {
-        let y = j as f64 / n as f64;
-        for i in 0..=n {
-            let x = i as f64 / n as f64;
-            node_grid.push([x, y]);
-        }
-    }
-
+    // Fixture-specific conforming mesh: partition the plate in the gap between
+    // its two holes, then interpolate radial layers from each circle to its
+    // enclosing rectangle. Unlike snapping a stair-step grid, this creates no
+    // triangles on the wrong side of the hole boundary.
+    assert_eq!(design.centers.len(), 2);
+    assert_eq!(design.radii.len(), 2);
+    assert!(n >= 2 && n.is_power_of_two());
+    let gap_left = design.centers[0][0] + design.radii[0];
+    let gap_right = design.centers[1][0] - design.radii[1];
+    assert!(gap_left < gap_right);
+    let split = 0.5 * (gap_left + gap_right);
+    let mut nodes = Vec::new();
     let mut elems = Vec::new();
-    let mut used_nodes = BTreeSet::new();
-    for j in 0..n {
-        let cy = (j as f64 + 0.5) / n as f64;
-        for i in 0..n {
-            let cx = (i as f64 + 0.5) / n as f64;
-            let in_hole = design.centers.iter().zip(&design.radii).any(|(c, r)| {
-                let dx = cx - c[0];
-                let dy = cy - c[1];
-                dx.mul_add(dx, dy * dy) < r * r
-            });
-            if in_hole {
-                continue;
+    let mut shared = BTreeMap::new();
+    let sectors = 4 * n;
+    let rings = n / 2;
+    for hole in 0..2 {
+        let (left, right) = if hole == 0 {
+            (0.0, split)
+        } else {
+            (split, 1.0)
+        };
+        let center = design.centers[hole];
+        let radius = design.radii[hole];
+        assert!(
+            radius
+                < (center[0] - left)
+                    .min(right - center[0])
+                    .min(center[1])
+                    .min(1.0 - center[1])
+        );
+        let mut indices = vec![vec![0; sectors]; rings + 1];
+        for (ring, row) in indices.iter_mut().enumerate() {
+            let alpha = ring as f64 / rings as f64;
+            for (sector, index) in row.iter_mut().enumerate() {
+                let t = (sector % n) as f64 / n as f64;
+                let outer = match sector / n {
+                    0 => [left + (right - left) * t, 0.0],
+                    1 => [right, t],
+                    2 => [right - (right - left) * t, 1.0],
+                    _ => [left, 1.0 - t],
+                };
+                let delta = [outer[0] - center[0], outer[1] - center[1]];
+                let length = delta[0].hypot(delta[1]);
+                let radial = radius / length + alpha * (1.0 - radius / length);
+                let p = if ring == rings {
+                    outer
+                } else {
+                    [center[0] + radial * delta[0], center[1] + radial * delta[1]]
+                };
+                *index = *shared
+                    .entry((p[0].to_bits(), p[1].to_bits()))
+                    .or_insert_with(|| {
+                        nodes.push(p);
+                        nodes.len() - 1
+                    });
             }
-            let n00 = j * (n + 1) + i;
-            let n10 = j * (n + 1) + (i + 1);
-            let n11 = (j + 1) * (n + 1) + (i + 1);
-            let n01 = (j + 1) * (n + 1) + i;
-
-            elems.push(vec![n00, n10, n11]);
-            elems.push(vec![n00, n11, n01]);
-            used_nodes.insert(n00);
-            used_nodes.insert(n10);
-            used_nodes.insert(n11);
-            used_nodes.insert(n01);
         }
-    }
-
-    let mut old_to_new = BTreeMap::new();
-    let mut nodes = Vec::with_capacity(used_nodes.len());
-    for &old_idx in &used_nodes {
-        let new_idx = nodes.len();
-        old_to_new.insert(old_idx, new_idx);
-        nodes.push(node_grid[old_idx]);
-    }
-
-    let remapped_elems: Vec<Vec<usize>> = elems
-        .into_iter()
-        .map(|el| el.into_iter().map(|idx| old_to_new[&idx]).collect())
-        .collect();
-
-    let mut left_edges = Vec::new();
-    let mut right_edges = Vec::new();
-    let mut bottom_edges = Vec::new();
-    let mut top_edges = Vec::new();
-
-    for j in 0..n {
-        let n0 = j * (n + 1);
-        let n1 = (j + 1) * (n + 1);
-        if let (Some(&u0), Some(&u1)) = (old_to_new.get(&n0), old_to_new.get(&n1)) {
-            left_edges.push((u0, u1));
-        }
-        let nr0 = j * (n + 1) + n;
-        let nr1 = (j + 1) * (n + 1) + n;
-        if let (Some(&u0), Some(&u1)) = (old_to_new.get(&nr0), old_to_new.get(&nr1)) {
-            right_edges.push((u0, u1));
-        }
-    }
-    for i in 0..n {
-        let nb0 = i;
-        let nb1 = i + 1;
-        if let (Some(&u0), Some(&u1)) = (old_to_new.get(&nb0), old_to_new.get(&nb1)) {
-            bottom_edges.push((u0, u1));
-        }
-        let nt0 = n * (n + 1) + i;
-        let nt1 = n * (n + 1) + (i + 1);
-        if let (Some(&u0), Some(&u1)) = (old_to_new.get(&nt0), old_to_new.get(&nt1)) {
-            top_edges.push((u0, u1));
+        for ring in 0..rings {
+            for sector in 0..sectors {
+                let next = (sector + 1) % sectors;
+                let [a, b, c, d] = [
+                    indices[ring][sector],
+                    indices[ring + 1][sector],
+                    indices[ring + 1][next],
+                    indices[ring][next],
+                ];
+                elems.push(vec![a, b, c]);
+                elems.push(vec![a, c, d]);
+            }
         }
     }
 
     Mesh2 {
         nodes,
-        elems: remapped_elems,
-        patches: vec![
-            (Patch::Left, left_edges),
-            (Patch::Right, right_edges),
-            (Patch::Bottom, bottom_edges),
-            (Patch::Top, top_edges),
-        ],
+        elems,
+        patches: Vec::new(), // Scalar oracle derives the complete boundary from edges.
     }
 }
 
@@ -741,7 +729,7 @@ fn body_fitted_poisson_compliance(design: &PlateWithHoles, n: usize, source: f64
     use fs_sparse::{Coo, precond::IdentityPrecond};
     use std::collections::{BTreeMap, BTreeSet};
 
-    let mut mesh = body_fitted_mesh_for_plate(design, n);
+    let mesh = body_fitted_mesh_for_plate(design, n);
     let mut edges = BTreeMap::<(usize, usize), usize>::new();
     for triangle in &mesh.elems {
         for (a, b) in [
@@ -761,27 +749,17 @@ fn body_fitted_poisson_compliance(design: &PlateWithHoles, n: usize, source: f64
         }
     }
     for &index in &boundary {
-        let p = &mut mesh.nodes[index];
-        if p[0] == 0.0 || p[0] == 1.0 || p[1] == 0.0 || p[1] == 1.0 {
-            continue;
-        }
-        let (center, radius) = design
+        let p = mesh.nodes[index];
+        let outer = p[0] == 0.0 || p[0] == 1.0 || p[1] == 0.0 || p[1] == 1.0;
+        let hole = design
             .centers
             .iter()
             .zip(&design.radii)
-            .min_by(|(a, ra), (b, rb)| {
-                let da = ((p[0] - a[0]).hypot(p[1] - a[1]) - **ra).abs();
-                let db = ((p[0] - b[0]).hypot(p[1] - b[1]) - **rb).abs();
-                da.total_cmp(&db)
-            })
-            .expect("hole rim");
-        let delta = [p[0] - center[0], p[1] - center[1]];
-        let length = delta[0].hypot(delta[1]);
-        assert!(length > 0.0);
-        *p = [
-            center[0] + radius * delta[0] / length,
-            center[1] + radius * delta[1] / length,
-        ];
+            .any(|(c, r)| ((p[0] - c[0]).hypot(p[1] - c[1]) - r).abs() < 1e-12);
+        assert!(
+            outer || hole,
+            "internal partition must not become a Dirichlet boundary"
+        );
     }
     let count = mesh.nodes.len();
     let mut matrix = Coo::new(count, count);
