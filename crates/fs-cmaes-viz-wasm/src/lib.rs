@@ -34,7 +34,9 @@ use fs_dfo::{
     CmaAdmission, CmaAsk, CmaComplexityOrder, CmaConfig, CmaFamily, CmaFamilyError, CmaOptimizer,
     CmaShapeSnapshot, CmaSnapshot, admit_cma,
 };
-use fs_mbd::robot_models::G1_POLICY_DIMENSION;
+use fs_mbd::robot_models::{
+    G1_MODEL_ACTUATORS, G1_POLICY_ACTUATORS, G1_POLICY_DIMENSION, G1_POLICY_FEATURES_PER_ACTUATOR,
+};
 
 #[cfg(feature = "g1-learned")]
 pub mod g1_learned;
@@ -42,9 +44,10 @@ pub mod g1_walking;
 pub mod manipulation;
 
 use g1_walking::{
-    G1_LINK_COUNT, G1_LINK_POSE_WORDS, G1_PUSH_END_S, G1_PUSH_PEAK_FORCE_N, G1_PUSH_START_S,
-    G1_TERRAIN_AMPLITUDE_M, G1_TERRAIN_WAVENUMBER_RAD_PER_M, G1Challenge, G1Task, G1TraceSample,
-    G1WalkingConfig, G1WalkingError, G1WalkingEvaluator, G1WalkingReceipt,
+    ARM_SWING_GATE_END_S, ARM_SWING_GATE_START_S, G1_LINK_COUNT, G1_LINK_POSE_WORDS, G1_PUSH_END_S,
+    G1_PUSH_PEAK_FORCE_N, G1_PUSH_START_S, G1_TERRAIN_AMPLITUDE_M, G1_TERRAIN_WAVENUMBER_RAD_PER_M,
+    G1Challenge, G1Task, G1TraceSample, G1WalkingConfig, G1WalkingError, G1WalkingEvaluator,
+    G1WalkingReceipt, g1_walking_curriculum_indices,
 };
 use manipulation::{
     ARM_JOINT_COUNT, ARM_LINK_COUNT, ARM_LINK_POSE_WORDS, ARM_POLICY_DIMENSION, ARM_POLICY_KNOTS,
@@ -55,7 +58,13 @@ use manipulation::{
 };
 
 /// Kernel identity returned by the browser capability probe.
-pub const KERNEL_VERSION: &str = "fs-cmaes-viz-wasm 0.6.21";
+pub const KERNEL_VERSION: &str = "fs-cmaes-viz-wasm 0.6.22";
+/// Commit of the clean owner source tree, supplied by the artifact build.
+/// Unbound development builds cannot satisfy browser artifact admission.
+pub const SOURCE_REVISION: &str = match option_env!("FSCMAES_SOURCE_REVISION") {
+    Some(revision) => revision,
+    None => "unbound",
+};
 /// Exact binary64 word identifying schema-2 packets (`"CMA2"`).
 pub const PACKET_MAGIC: u32 = 0x434d_4132;
 /// Packed ask/tell ABI schema.
@@ -86,11 +95,10 @@ pub const SCALABLE_DIMENSION_LIMIT: usize = 100_000;
 pub const G1_PACKET_MAGIC: u32 = 0x4731_5737;
 /// Packed G1 objective/trace ABI schema.
 ///
-/// Schema 8 makes the walking config self-describing: eleven fixed words
-/// followed by a keep-out box count and seven words per box. The receipt
-/// gains the maximum body penetration the guard measured, so the browser can
-/// report the number the kernel already computed instead of re-deriving it.
-pub const G1_PACKET_SCHEMA_VERSION: u32 = 8;
+/// Schema 9 extends admission with physical/learned/reflex actuator counts,
+/// the exact curriculum indices, and fixed arm-swing gate times. Config still
+/// has twelve fixed words followed by eight words per keep-out box.
+pub const G1_PACKET_SCHEMA_VERSION: u32 = 9;
 /// Input packet containing fixed walking-experiment controls.
 pub const G1_PACKET_KIND_CONFIG: u32 = 0;
 /// Output packet describing an admitted evaluator.
@@ -106,8 +114,8 @@ pub const G1_PACKET_KIND_POPULATION: u32 = 4;
 pub const ARM_PACKET_MAGIC: u32 = 0x4152_4d31;
 /// Packed household-manipulation objective/trace ABI schema.
 ///
-/// Schema 3 (0.6.14) makes the config packet self-describing: twelve fixed
-/// words followed by seven per caller-declared keep-out box. The three added
+/// Schema 4 makes the config packet self-describing: twelve fixed
+/// words followed by eight per caller-declared keep-out box. The three added
 /// fixed words are an object-mass override and the two Coulomb coefficients;
 /// all default to zero, which selects the owner's preset values and
 /// reproduces the schema-2 receipts exactly.
@@ -135,7 +143,7 @@ const G1_CONFIG_FIXED_WORDS: usize = 12;
 const G1_OBSTACLE_WORDS: usize = 8;
 /// Largest caller-declared keep-out roster the walking owner admits.
 pub const G1_MAX_OBSTACLES: usize = 64;
-const G1_ADMISSION_WORDS: usize = 21;
+const G1_ADMISSION_WORDS: usize = 136;
 const G1_RECEIPT_WORDS: usize = 29;
 const G1_REFUSAL_WORDS: usize = 7;
 const G1_TRACE_SAMPLE_WORDS: usize = 3 + G1_LINK_COUNT * G1_LINK_POSE_WORDS;
@@ -521,7 +529,18 @@ impl PackedG1WalkingEvaluator {
             G1_PUSH_START_S,
             G1_PUSH_END_S,
             G1_PUSH_PEAK_FORCE_N,
+            G1_MODEL_ACTUATORS as f64,
+            G1_POLICY_ACTUATORS as f64,
+            (G1_MODEL_ACTUATORS - G1_POLICY_ACTUATORS) as f64,
+            G1_POLICY_FEATURES_PER_ACTUATOR as f64,
+            8.0,
+            15.0,
+            30.0,
+            60.0,
+            ARM_SWING_GATE_START_S,
+            ARM_SWING_GATE_END_S,
         ]);
+        packet.extend(g1_walking_curriculum_indices().map(|index| index as f64));
         debug_assert_eq!(packet.len(), G1_ADMISSION_WORDS);
         packet
     }
@@ -1709,6 +1728,13 @@ mod schema_two_wasm {
     pub fn cmaes_viz_kernel_version() -> String {
         super::KERNEL_VERSION.to_string()
     }
+
+    /// Source identity supplied by the clean, versioned artifact build.
+    #[wasm_bindgen]
+    #[must_use]
+    pub fn cmaes_viz_source_revision() -> String {
+        super::SOURCE_REVISION.to_string()
+    }
 }
 
 #[cfg(test)]
@@ -2245,6 +2271,25 @@ mod schema_two_tests {
         assert_eq!(admission[6], G1_LINK_COUNT as f64);
         assert_eq!(admission[7], G1_LINK_POSE_WORDS as f64);
         assert_eq!(admission[8], G1_TRACE_SAMPLE_WORDS as f64);
+        assert_eq!(admission.len(), 136);
+        assert_eq!(
+            &admission[21..29],
+            &[29.0, 15.0, 14.0, 336.0, 8.0, 15.0, 30.0, 60.0]
+        );
+        assert_eq!(admission[29], 1.0 / 3.1);
+        assert_eq!(admission[30], 3.0 / 3.1);
+        for actuator in 0..15 {
+            let row = (actuator * 336) as f64;
+            assert_eq!(admission[31 + actuator], row);
+            assert_eq!(
+                &admission[46 + 2 * actuator..48 + 2 * actuator],
+                &[row + 1.0, row + 2.0]
+            );
+            assert_eq!(
+                &admission[76 + 4 * actuator..80 + 4 * actuator],
+                &[row + 248.0, row + 256.0, row + 272.0, row + 280.0]
+            );
+        }
 
         let parameters = vec![0.0; G1_POLICY_DIMENSION];
         let evaluation = evaluator.evaluate_packet(&parameters);
@@ -2263,6 +2308,21 @@ mod schema_two_tests {
         );
         assert_eq!(trace[G1_RECEIPT_WORDS + 2], 1.0);
         assert_eq!(trace[G1_RECEIPT_WORDS + 3], 1.0);
+        let native = G1WalkingEvaluator::new(
+            parse_g1_config(&g1_config_packet(0.10, 3)).expect("valid config"),
+        )
+        .expect("owner evaluator")
+        .trace(&parameters)
+        .expect("owner trace");
+        assert_eq!(sample_count, native.trace.len());
+        for (sample_index, sample) in native.trace.iter().enumerate() {
+            let start = G1_RECEIPT_WORDS + 1 + sample_index * G1_TRACE_SAMPLE_WORDS;
+            assert_eq!(trace[start], sample.time_s);
+            for (link, pose) in sample.link_pose.iter().enumerate() {
+                let pose_start = start + 3 + link * 7;
+                assert_eq!(&trace[pose_start..pose_start + 7], pose);
+            }
+        }
     }
 
     #[test]
@@ -2457,7 +2517,10 @@ mod schema_two_tests {
             f64::from(crate::g1_walking::G1TerminationReason::BodyObstacle as u32),
             "an empty roster cannot terminate on an obstacle"
         );
-        assert_eq!(clear_receipt[28], 0.0, "no roster means no measured penetration");
+        assert_eq!(
+            clear_receipt[28], 0.0,
+            "no roster means no measured penetration"
+        );
 
         // A wall straddling the start pose on the walking axis: the body
         // spheres are inside it from the first step.
@@ -2561,8 +2624,7 @@ mod schema_two_tests {
             ManipulationTask::LivingRoomRemote,
             ManipulationTask::BackyardTrowel,
         ] {
-            let packed =
-                PackedManipulationEvaluator::new(&arm_config_packet(task, 6.0, 3));
+            let packed = PackedManipulationEvaluator::new(&arm_config_packet(task, 6.0, 3));
             let admission = packed.receipt_packet();
             assert_arm_packet_ok(&admission, ARM_PACKET_KIND_ADMISSION);
             assert_eq!(admission.len(), ARM_ADMISSION_WORDS);
@@ -2589,7 +2651,10 @@ mod schema_two_tests {
             );
             assert_eq!(packed_receipt[10], direct_receipt.collision_risk_integral);
             assert_eq!(packed_receipt[17], direct_receipt.peak_grip_force_n);
-            assert_eq!(packed_receipt[20], f64::from(u8::from(direct_receipt.placed)));
+            assert_eq!(
+                packed_receipt[20],
+                f64::from(u8::from(direct_receipt.placed))
+            );
         }
     }
 
@@ -2711,14 +2776,20 @@ mod schema_two_tests {
             &[blocker],
         ));
         let blocked_admission = blocked.receipt_packet();
-        assert_eq!(blocked_admission[39], 1.0, "admission echoes the roster size");
+        assert_eq!(
+            blocked_admission[39], 1.0,
+            "admission echoes the roster size"
+        );
         let blocked_receipt = blocked.evaluate_packet(&mean);
         assert_arm_packet_ok(&blocked_receipt, ARM_PACKET_KIND_EVALUATION);
         assert!(
             blocked_receipt[10] > 0.0,
             "a box on the path must accrue collision risk"
         );
-        assert_eq!(blocked_receipt[20], 0.0, "a blocked rollout cannot be placed");
+        assert_eq!(
+            blocked_receipt[20], 0.0,
+            "a blocked rollout cannot be placed"
+        );
 
         // The same box, 1.5 m away in +x, is outside every link envelope.
         let distant = ObstacleBox {
@@ -2766,7 +2837,10 @@ mod schema_two_tests {
             &[],
         ));
         let heavy_admission = heavy.receipt_packet();
-        assert_eq!(heavy_admission[19], 2.0, "admission reports the effective mass");
+        assert_eq!(
+            heavy_admission[19], 2.0,
+            "admission reports the effective mass"
+        );
         assert!((preset_mass - 2.0).abs() > 1.0);
         let heavy_receipt = heavy.evaluate_packet(&mean);
         assert_ne!(

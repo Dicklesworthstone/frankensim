@@ -1,6 +1,6 @@
 # CONTRACT: fs-cmaes-viz-wasm
 
-Status: **CMA schema 2 + G1 schema 8 + ARM schema 3 — live surfaces.** Stateful
+Status: **CMA schema 2 + G1 schema 9 + ARM schema 4 — source interfaces.** Stateful
 packed browser boundary over the production CMA-family owner in `fs-dfo` and
 the owner-composed G1 walking and KUKA household-manipulation experiments. This
 crate owns validation, admission, numeric packet transport, browser-specific
@@ -192,7 +192,8 @@ On wasm32, wasm-bindgen exports:
 | `evaluator.evaluate(policy)` | 128 policy words | decomposed scalar objective receipt |
 | `evaluator.evaluate_population(policies)` | up to 64 row-major policies | one objective per candidate in one boundary call |
 | `evaluator.trace(policy)` | 128 policy words | receipt plus object and source-ordered link poses |
-| `cmaes_viz_kernel_version()` | no arguments | `"fs-cmaes-viz-wasm 0.6.13"` |
+| `cmaes_viz_kernel_version()` | no arguments | `"fs-cmaes-viz-wasm 0.6.22"` |
+| `cmaes_viz_source_revision()` | no arguments | build's `FSCMAES_SOURCE_REVISION`, or `"unbound"` for development |
 
 There is no JSON hot path and no schema-1 compatibility shim.
 
@@ -314,17 +315,17 @@ wasm boundary.
 
 ## G1 walking packets
 
-G1 packets use magic `0x47315737` (`"G1W7"`) and schema 8. The common output
+G1 packets use magic `0x47315737` (`"G1W7"`) and schema 9. The common output
 prefix is `magic, schema, status, kind, total_words`. Kinds are configuration 0,
 admission 1, evaluation 2, trace 3, and population 4.
 
 Configuration is variable length: eleven fixed words, a keep-out box
-count, then seven words per box.
+count, then eight words per box.
 
-`magic, schema, kind=0, total_words=12+7n, step_s, duration_s,
+`magic, schema, kind=0, total_words=12+8n, step_s, duration_s,
 target_forward_speed_m_per_s, gait_frequency_hz, trace_stride, task,
 challenge, obstacle_count=n`, then `n` groups of
-`center_xyz_m, half_extents_xyz_m, yaw_rad`.
+`center_xyz_m, half_extents_xyz_m, yaw_rad, body_role` (0 keep-out, 1 support).
 
 `total_words` is self-describing and must equal the packet length. Boxes
 are capped at 64, must be finite, and must have strictly positive half
@@ -362,7 +363,24 @@ Admission appends:
 `policy_dimension=5040, link_count=30, pose_words=7, trace_sample_words=213,
 step_s, duration_s, target_speed, gait_frequency, trace_stride, task,
 challenge, terrain_amplitude_m, terrain_wavenumber_rad_per_m, push_start_s,
-push_end_s, push_peak_force_n`.
+push_end_s, push_peak_force_n, physical_actuators=29, learned_rows=15,
+reflex_actuators=14, features_per_row=336, phase_basis_count=8,
+bias_count=15, phase_count=30, feedback_count=60,
+arm_swing_gate_start_s=1/3.1, arm_swing_gate_end_s=3/3.1,
+curriculum_indices[105]`.
+
+Admission has 136 words including its five-word header. The indices come
+from the actual initializer: first `336*r` for rows r=0..14, then
+`336*r+[1,2]`, then `336*r+[248,256,272,280]`. The learned rows follow source
+joint indices 0..14; the reflex joints are source indices 15..28. Pose order
+is the pelvis followed by the 29 source-actuated links. The shoulder/elbow
+swing multiplier is clamped cubic smoothstep between the two fixed physical
+times. Gait frequency changes the phase signal, not those gate times.
+
+Source identity is deliberately `unbound` unless the artifact build supplies
+`FSCMAES_SOURCE_REVISION`. A release consumer must compare the revision and
+packet schemas with its reviewed manifest and hash the actual JavaScript and
+WASM bytes before execution; a version string alone is not build provenance.
 
 Evaluation appends:
 
@@ -373,7 +391,7 @@ contact_schedule_mismatch_integral, swing_clearance_error_integral,
 single_support_s, double_support_s, flight_s, push_impulse_n_s,
 recovery_time_s, minimum_base_height_m,
 maximum_tilt_sine, maximum_abs_terrain_height_m, completed_steps,
-termination_reason`.
+termination_reason, maximum_body_penetration_m`.
 
 `recovery_time_s` is elapsed time after the push until the disclosed tilt,
 angular-speed, and height bands are all regained. If recovery never occurs, it
@@ -399,16 +417,17 @@ NaN detail word.
 
 ## Household-arm packets
 
-Arm packets use magic `0x41524d31` (`"ARM1"`) and schema 3. The common output
+Arm packets use magic `0x41524d31` (`"ARM1"`) and schema 4. The common output
 prefix is `magic, schema, status, kind, total_words`. Kinds are configuration 0,
 admission 1, evaluation 2, trace 3, and population 4.
 
-Configuration is variable length: twelve fixed words followed by seven words
+Configuration is variable length: twelve fixed words followed by eight words
 per caller-declared keep-out box.
 
-`magic, schema, kind=0, total_words=12+7n, step_s, duration_s, trace_stride,
+`magic, schema, kind=0, total_words=12+8n, step_s, duration_s, trace_stride,
 task, object_mass_kg, static_mu, kinetic_mu, obstacle_count=n`, then `n`
-groups of `center_xyz_m, half_extents_xyz_m, yaw_rad`.
+groups of `center_xyz_m, half_extents_xyz_m, yaw_rad, body_role` (0 keep-out,
+1 support).
 
 `total_words` is self-describing and must equal the packet length; a
 disagreement is a malformed packet, not a clamp. Task IDs are 0 kitchen mug,
