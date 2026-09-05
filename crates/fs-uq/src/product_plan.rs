@@ -2,14 +2,12 @@
 //!
 //! Bead: `frankensim-extreal-program-f85xj.6.7`
 //!
-//! Provides typed uncertainty characterization (aleatory distributions, epistemic intervals,
-//! statistical confidence bands, unstated uncertainty), PSD correlation validation,
-//! deterministic Philox/Sobol sampling plans, honest budget truncation, and conservative
-//! error budget output.
+//! Runs bounded Philox Monte Carlo for declared probability measures, including
+//! correlated Gaussian inputs. Other method/kind declarations refuse before
+//! evaluating the model. Empirical statistics never mint Verified evidence.
 
 use fs_blake3::{ContentHash, hash_domain};
 use fs_evidence::Color;
-use std::fmt::Write as _;
 
 /// Classification of uncertainty for a physical parameter or boundary condition.
 #[derive(Debug, Clone, PartialEq)]
@@ -124,9 +122,15 @@ impl ParameterUncertainty {
 pub enum CorrelationModel {
     /// Mutually independent marginals.
     Independent,
-    /// Explicit correlation matrix (must be symmetric and positive semi-definite).
+    /// Correlations without a declared joint distribution. Sampling refuses:
+    /// Gaussian marginals alone do not imply a jointly Gaussian law.
     Correlated {
         /// Normalized symmetric correlation matrix.
+        matrix: Vec<Vec<f64>>,
+    },
+    /// Explicit multivariate Gaussian joint law with Gaussian marginals.
+    JointGaussian {
+        /// Correlation matrix in parameter declaration order; numerically PSD.
         matrix: Vec<Vec<f64>>,
     },
     /// Unknown correlation across parameters (forbids joint probability propagation).
@@ -194,7 +198,8 @@ pub struct UqPlan {
 }
 
 impl UqPlan {
-    /// Create a new UQ plan for a target QoI.
+    /// Create a new UQ plan for a target QoI. Multivariate dependence must be
+    /// declared explicitly; constructing a plan does not assume independence.
     #[must_use]
     pub fn new(
         target_qoi: impl Into<String>,
@@ -205,7 +210,7 @@ impl UqPlan {
             target_qoi: target_qoi.into(),
             compliance_threshold: None,
             parameters: Vec::new(),
-            correlation: CorrelationModel::Independent,
+            correlation: CorrelationModel::Unknown,
             method,
             budget_max_samples: max_samples,
             seed: 0x0517,
@@ -267,21 +272,13 @@ impl UqResult {
     /// Generate a deterministic BLAKE3 digest of the uncertainty evidence.
     #[must_use]
     pub fn content_hash(&self) -> ContentHash {
-        let mut text = String::with_capacity(1024);
-        let _ = write!(
-            text,
-            "qoi={};method={:?};samples={};mean={:?};std={:?};bounds=[{:.6},{:.6}];p_comp={:?};status={}",
-            self.qoi_name,
-            self.method_used,
-            self.samples_evaluated,
-            self.mean,
-            self.std_dev,
-            self.interval_bounds[0],
-            self.interval_bounds[1],
-            self.probability_of_compliance,
-            self.status.label()
-        );
-        hash_domain("org.frankensim.uq.result.v1", text.as_bytes())
+        // All result fields, including authority and refusal, participate. Debug
+        // formatting escapes strings and preserves round-trippable f64 values;
+        // the old six-decimal range omitted statistically meaningful changes.
+        hash_domain(
+            "org.frankensim.uq.result.v2",
+            format!("{self:?}").as_bytes(),
+        )
     }
 }
 
@@ -291,180 +288,73 @@ pub struct UqPropagator;
 impl UqPropagator {
     /// Execute uncertainty propagation with an evaluation closure.
     pub fn run<F: Fn(&[f64]) -> f64>(plan: &UqPlan, evaluator: F) -> UqResult {
-        // 1. Validate inputs
-        if plan.parameters.is_empty() {
-            return UqResult {
-                qoi_name: plan.target_qoi.clone(),
-                method_used: plan.method,
-                samples_evaluated: 0,
-                mean: None,
-                std_dev: None,
-                percentiles: None,
-                interval_bounds: [0.0, 0.0],
-                probability_of_compliance: None,
-                sampling_error: 0.0,
-                evidence_color: Color::Estimated {
-                    estimator: "zero-parameters".to_string(),
-                    dispersion: 0.0,
-                },
-                status: UqStatus::Refused,
-                rejection_reason: Some("plan has zero uncertain parameters".to_string()),
-            };
-        }
-
-        // Check correlation consistency
-        if let CorrelationModel::Correlated { matrix } = &plan.correlation {
-            let dim = plan.parameters.len();
-            if matrix.len() != dim || matrix.iter().any(|row| row.len() != dim) {
-                return UqResult {
-                    qoi_name: plan.target_qoi.clone(),
-                    method_used: plan.method,
-                    samples_evaluated: 0,
-                    mean: None,
-                    std_dev: None,
-                    percentiles: None,
-                    interval_bounds: [0.0, 0.0],
-                    probability_of_compliance: None,
-                    sampling_error: 0.0,
-                    evidence_color: Color::Estimated {
-                        estimator: "matrix-dim-mismatch".to_string(),
-                        dispersion: 0.0,
-                    },
-                    status: UqStatus::Refused,
-                    rejection_reason: Some(format!(
-                        "correlation matrix dimension {} != parameter count {dim}",
-                        matrix.len()
-                    )),
-                };
-            }
-            // Check diagonal is 1.0 and symmetric
-            for i in 0..dim {
-                if (matrix[i][i] - 1.0).abs() > 1e-6 {
-                    return UqResult {
-                        qoi_name: plan.target_qoi.clone(),
-                        method_used: plan.method,
-                        samples_evaluated: 0,
-                        mean: None,
-                        std_dev: None,
-                        percentiles: None,
-                        interval_bounds: [0.0, 0.0],
-                        probability_of_compliance: None,
-                        sampling_error: 0.0,
-                        evidence_color: Color::Estimated {
-                            estimator: "non-unit-diagonal".to_string(),
-                            dispersion: 0.0,
-                        },
-                        status: UqStatus::Refused,
-                        rejection_reason: Some(format!(
-                            "correlation matrix diagonal at {i} != 1.0"
-                        )),
-                    };
-                }
-                for j in 0..dim {
-                    if (matrix[i][j] - matrix[j][i]).abs() > 1e-6 {
-                        return UqResult {
-                            qoi_name: plan.target_qoi.clone(),
-                            method_used: plan.method,
-                            samples_evaluated: 0,
-                            mean: None,
-                            std_dev: None,
-                            percentiles: None,
-                            interval_bounds: [0.0, 0.0],
-                            probability_of_compliance: None,
-                            sampling_error: 0.0,
-                            evidence_color: Color::Estimated {
-                                estimator: "asymmetric-matrix".to_string(),
-                                dispersion: 0.0,
-                            },
-                            status: UqStatus::Refused,
-                            rejection_reason: Some(format!(
-                                "correlation matrix is asymmetric at ({i}, {j})"
-                            )),
-                        };
-                    }
-                }
-            }
-        }
-
-        // Unknown correlation across multiple uncertain variables refuses joint probabilistic propagation
-        if plan.correlation == CorrelationModel::Unknown && plan.parameters.len() > 1 {
-            return UqResult {
-                qoi_name: plan.target_qoi.clone(),
-                method_used: plan.method,
-                samples_evaluated: 0,
-                mean: None,
-                std_dev: None,
-                percentiles: None,
-                interval_bounds: [0.0, 0.0],
-                probability_of_compliance: None,
-                sampling_error: 0.0,
-                evidence_color: Color::Estimated {
-                    estimator: "unknown-correlation".to_string(),
-                    dispersion: 0.0,
-                },
-                status: UqStatus::Refused,
-                rejection_reason: Some(
-                    "unknown correlation across interdependent parameters refuses joint probabilistic propagation"
-                        .to_string(),
-                ),
-            };
-        }
+        let factor = match admit_plan(plan) {
+            Ok(factor) => factor,
+            Err(reason) => return refused(plan, reason, 0),
+        };
 
         // 2. Sample Generation
-        let n_samples = plan.budget_max_samples.max(1);
+        let n_samples = plan.budget_max_samples;
         let mut qoi_values = Vec::with_capacity(n_samples);
         let dim = plan.parameters.len();
 
-        let key = fs_rand::StreamKey {
-            seed: plan.seed,
-            kernel: 0x0517,
-            tile: 0,
-        };
-        let mut stream = key.stream();
-
-        for _ in 0..n_samples {
+        for sample_index in 0..n_samples {
+            let mut stream = fs_rand::StreamKey {
+                seed: plan.seed,
+                kernel: 0x0517,
+                tile: sample_index as u32,
+            }
+            .stream();
+            let normals: Vec<f64> = if factor.is_some() {
+                (0..dim).map(|_| stream.next_normal()).collect()
+            } else {
+                Vec::new()
+            };
             let mut sample_params = Vec::with_capacity(dim);
-            for p in &plan.parameters {
+            for (i, p) in plan.parameters.iter().enumerate() {
                 let val = match &p.kind {
                     UncertaintyKind::AleatoryGaussian { mean, std_dev } => {
-                        let z = stream.next_normal();
+                        let z = factor.as_ref().map_or_else(
+                            || stream.next_normal(),
+                            |l| (0..=i).map(|j| l[i][j] * normals[j]).sum(),
+                        );
                         mean + std_dev * z
                     }
                     UncertaintyKind::AleatoryUniform { lo, hi } => {
                         let u = stream.next_f64();
-                        lo + (hi - lo) * u
+                        (1.0 - u) * lo + u * hi
                     }
-                    UncertaintyKind::EpistemicInterval { lo, hi } => {
-                        let u = stream.next_f64();
-                        lo + (hi - lo) * u
-                    }
-                    UncertaintyKind::StatisticalConfidence {
-                        estimate,
-                        half_width,
-                        ..
-                    } => {
-                        let u = stream.next_f64();
-                        estimate - half_width + 2.0 * half_width * u
-                    }
-                    UncertaintyKind::Unstated => 0.0,
+                    _ => unreachable!("admission requires an implemented probability measure"),
                 };
+                if !val.is_finite() {
+                    return refused(plan, "sampled parameter overflowed", sample_index);
+                }
                 sample_params.push(val);
             }
             let qoi_val = evaluator(&sample_params);
+            if !qoi_val.is_finite() {
+                return refused(plan, "model returned a non-finite QoI", sample_index + 1);
+            }
             qoi_values.push(qoi_val);
         }
 
         // 3. Compute statistics
-        let sum: f64 = qoi_values.iter().sum();
-        let mean = sum / (n_samples as f64);
-
-        let variance = if n_samples > 1 {
-            let ss: f64 = qoi_values.iter().map(|&x| (x - mean).powi(2)).sum();
-            ss / ((n_samples - 1) as f64)
-        } else {
-            0.0
-        };
-        let std_dev = variance.sqrt();
+        // Normalize before summation/differencing: finite constant outputs near
+        // f64::MAX must not overflow into a spurious successful statistic.
+        let scale = qoi_values.iter().fold(0.0_f64, |s, x| s.max(x.abs()));
+        let divisor = if scale == 0.0 { 1.0 } else { scale };
+        let normalized_mean =
+            qoi_values.iter().map(|x| x / divisor).sum::<f64>() / n_samples as f64;
+        let mean = normalized_mean * scale;
+        let variance = qoi_values
+            .iter()
+            .map(|x| (x / divisor - normalized_mean).powi(2))
+            .sum::<f64>()
+            / (n_samples - 1) as f64;
+        let std_dev = variance.sqrt() * scale;
+        if !mean.is_finite() || !std_dev.is_finite() {
+            return refused(plan, "QoI statistics exceed finite f64 range", n_samples);
+        }
         let mut sorted = qoi_values.clone();
         sorted.sort_by(|a, b| a.total_cmp(b));
 
@@ -495,13 +385,9 @@ impl UqPropagator {
 
         let sampling_error = std_dev / (n_samples as f64).sqrt();
 
-        let evidence_color = if all_have_prob && n_samples >= 100 {
-            Color::Verified { lo: p05, hi: p95 }
-        } else {
-            Color::Estimated {
-                estimator: "monte-carlo-sampling".to_string(),
-                dispersion: sampling_error.max(0.01),
-            }
+        let evidence_color = Color::Estimated {
+            estimator: "empirical-monte-carlo; no confidence or model-error bound".to_string(),
+            dispersion: sampling_error,
         };
 
         UqResult {
@@ -519,4 +405,120 @@ impl UqPropagator {
             rejection_reason: None,
         }
     }
+}
+
+fn refused(plan: &UqPlan, reason: impl Into<String>, evaluated: usize) -> UqResult {
+    UqResult {
+        qoi_name: plan.target_qoi.clone(),
+        method_used: plan.method,
+        samples_evaluated: evaluated,
+        mean: None,
+        std_dev: None,
+        percentiles: None,
+        interval_bounds: [0.0, 0.0],
+        probability_of_compliance: None,
+        sampling_error: 0.0,
+        evidence_color: Color::Estimated {
+            estimator: "refused; no uncertainty result".into(),
+            dispersion: 0.0,
+        },
+        status: UqStatus::Refused,
+        rejection_reason: Some(reason.into()),
+    }
+}
+
+/// Returns a numerical PSD factor for an explicitly joint Gaussian model.
+/// Correlation alone does not specify a non-Gaussian copula, so those models
+/// refuse. This is floating-point admission, not an interval PSD certificate.
+fn admit_plan(plan: &UqPlan) -> Result<Option<Vec<Vec<f64>>>, &'static str> {
+    let dim = plan.parameters.len();
+    if dim == 0 || dim > 256 || !(2..=1_000_000).contains(&plan.budget_max_samples) {
+        return Err("supported envelope: 1..=256 parameters and 2..=1000000 samples");
+    }
+    if plan.method != PropagationMethod::MonteCarlo {
+        return Err(
+            "this driver implements MonteCarlo only; use an admitted method-specific producer",
+        );
+    }
+    if plan.target_qoi.is_empty() || plan.compliance_threshold.is_some_and(|x| !x.is_finite()) {
+        return Err("QoI name and finite compliance threshold are required");
+    }
+    let mut names = std::collections::BTreeSet::new();
+    for p in &plan.parameters {
+        if p.name.is_empty() || p.unit.is_empty() || !names.insert(&p.name) {
+            return Err("parameters require distinct nonempty names and explicit units");
+        }
+        match p.kind {
+            UncertaintyKind::AleatoryGaussian { mean, std_dev }
+                if mean.is_finite() && std_dev.is_finite() && std_dev >= 0.0 => {}
+            UncertaintyKind::AleatoryUniform { lo, hi }
+                if lo.is_finite() && hi.is_finite() && lo <= hi => {}
+            _ => {
+                return Err(
+                    "declare a finite Gaussian or uniform probability measure; bands and unstated inputs are not distributions",
+                );
+            }
+        }
+    }
+    let random_dimensions = plan
+        .parameters
+        .iter()
+        .filter(|p| match p.kind {
+            UncertaintyKind::AleatoryGaussian { std_dev, .. } => std_dev > 0.0,
+            UncertaintyKind::AleatoryUniform { lo, hi } => lo < hi,
+            _ => false,
+        })
+        .count();
+    let matrix = match &plan.correlation {
+        CorrelationModel::Unknown if random_dimensions > 1 => {
+            return Err(
+                "joint probability requires explicit dependence; independence is not a default",
+            );
+        }
+        CorrelationModel::Unknown | CorrelationModel::Independent => return Ok(None),
+        CorrelationModel::Correlated { .. } => {
+            return Err(
+                "correlations alone do not specify a joint measure; declare JointGaussian or an implemented copula",
+            );
+        }
+        CorrelationModel::JointGaussian { matrix } => matrix,
+    };
+    if plan
+        .parameters
+        .iter()
+        .any(|p| !matches!(p.kind, UncertaintyKind::AleatoryGaussian { .. }))
+    {
+        return Err(
+            "correlated sampling requires joint Gaussian marginals; a correlation matrix does not specify a general copula",
+        );
+    }
+    if matrix.len() != dim || matrix.iter().any(|r| r.len() != dim) {
+        return Err("correlation matrix dimensions must match parameter declaration order");
+    }
+    for i in 0..dim {
+        for j in 0..dim {
+            let x = matrix[i][j];
+            if !x.is_finite() || x.abs() > 1.0 || x != matrix[j][i] || (i == j && x != 1.0) {
+                return Err("correlation must be finite, symmetric, in [-1,1], with unit diagonal");
+            }
+        }
+    }
+    let tolerance = 64.0 * f64::EPSILON * dim as f64;
+    let mut l = vec![vec![0.0; dim]; dim];
+    for i in 0..dim {
+        for j in 0..=i {
+            let residual = matrix[i][j] - (0..j).map(|k| l[i][k] * l[j][k]).sum::<f64>();
+            if i == j {
+                if residual < -tolerance {
+                    return Err("correlation matrix is not positive semidefinite");
+                }
+                l[i][j] = residual.max(0.0).sqrt();
+            } else if l[j][j] > 0.0 {
+                l[i][j] = residual / l[j][j];
+            } else if residual.abs() > tolerance {
+                return Err("correlation matrix has an inconsistent singular pivot");
+            }
+        }
+    }
+    Ok(Some(l))
 }

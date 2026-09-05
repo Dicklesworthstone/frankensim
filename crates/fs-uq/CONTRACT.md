@@ -128,6 +128,33 @@ structured errors rather than panicking.
 
 ## No-claim boundaries
 
+- `product_plan::UqPropagator` currently executes only fixed-count Philox Monte
+  Carlo with 1..=256 parameters and 2..=1,000,000 samples. Independent Gaussian
+  and uniform marginals require explicit independence when more than one input
+  has nonzero uncertainty; the default dependence is Unknown. Deterministic
+  inputs do not create a dependence requirement. `JointGaussian` explicitly
+  declares the joint law; Gaussian marginals plus a generic `Correlated` matrix
+  do not suffice and refuse. The joint law is sampled through a numerical PSD
+  Cholesky factor, including consistent singular
+  pivots (roundoff tolerance `64*EPSILON*dimension`). Finite symmetry, unit
+  diagonal and correlation range are checked before sampling. This numerical
+  factorization is not a certified PSD proof or authority for a general copula.
+  Parameters follow declaration order; each logical sample uses Philox kernel
+  `0x0517`, tile equal to the sample index. This replaces the earlier single
+  sequential stream, so old product-plan sample sequences are not preserved.
+  Result hashes use the `org.frankensim.uq.result.v2` domain and include every
+  result field without the former six-decimal truncation of observed ranges.
+- Product-plan QMC/PCE/MLMC/epistemic bounding, confidence-band sampling,
+  unstated inputs and non-Gaussian correlated models refuse before model calls.
+  A confidence half-width is not a probability measure. Units are required
+  labels; dimensional compatibility and physical applicability remain caller
+  obligations. Non-finite model values stop with an explicit refusal and the
+  actual evaluation count. Empirical ranges, percentiles, compliance frequency
+  and mean standard error are always Estimated; none is a guaranteed interval,
+  anytime confidence sequence, PDE error bound or model validation. There is
+  no cancellation/resume or Cooling project driver in this API yet.
+  `tests/product_plan.rs` checks analytic correlated-Gaussian variance,
+  singular dependence, pre-callback refusals, finite statistics, and authority.
 - Slice-1 scope. The bead's split lanes: seismic machinery
   (Kanai–Tajimi spectra via fs-scenario, response-spectrum CQC fast
   path, IDA fragility curves — needs fs-solid-advanced), e-process
