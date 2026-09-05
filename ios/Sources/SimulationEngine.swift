@@ -14,6 +14,9 @@ enum ResultShape: UInt32, Sendable {
 }
 
 struct SimulationResult: Sendable {
+    /// Presentation identity is intentionally separate from the deterministic
+    /// experiment/seed identity so a repeated run restarts its native playback.
+    let presentationID = UUID()
     let experimentID: UInt32
     let shape: ResultShape
     let width: Int
@@ -43,6 +46,84 @@ struct SimulationResult: Sendable {
         case .campaign: "\(values.count) evidence values"
         case .pcm: "\(width) mono PCM frames @ \(frames) Hz"
         }
+    }
+}
+
+/// Deterministic, device-independent state for inspecting native multi-frame
+/// fields. The SwiftUI timeline supplies dates; this value owns every playback
+/// transition so pause, seek, rate changes, Reduce Motion, and replay remain
+/// testable without a display or Simulator.
+struct ResultPlaybackState: Equatable {
+    static let framesPerSecond = 9.0
+    static let availableRates = [0.5, 1.0, 2.0]
+
+    let frameCount: Int
+    private(set) var anchorFrame: Int
+    private(set) var isPlaying: Bool
+    private(set) var rate: Double
+    private(set) var anchorDate: Date
+
+    init(
+        frameCount: Int,
+        reduceMotion: Bool = false,
+        date: Date = .now
+    ) {
+        self.frameCount = max(1, frameCount)
+        anchorFrame = reduceMotion ? max(0, frameCount - 1) : 0
+        isPlaying = frameCount > 1 && !reduceMotion
+        rate = 1
+        anchorDate = date
+    }
+
+    var minimumInterval: TimeInterval {
+        1 / (Self.framesPerSecond * rate)
+    }
+
+    func displayedFrame(at date: Date) -> Int {
+        guard isPlaying, frameCount > 1 else { return anchorFrame }
+        let elapsed = max(0, date.timeIntervalSince(anchorDate))
+        let cycleSeconds = Double(frameCount) / (Self.framesPerSecond * rate)
+        let elapsedWithinCycle = elapsed.truncatingRemainder(dividingBy: cycleSeconds)
+        let advanced = Int(elapsedWithinCycle * Self.framesPerSecond * rate)
+        return (anchorFrame + advanced) % frameCount
+    }
+
+    mutating func toggle(at date: Date = .now, reduceMotion: Bool) {
+        if isPlaying {
+            pause(at: date)
+        } else if !reduceMotion, frameCount > 1 {
+            anchorDate = date
+            isPlaying = true
+        }
+    }
+
+    mutating func pause(at date: Date = .now) {
+        anchorFrame = displayedFrame(at: date)
+        anchorDate = date
+        isPlaying = false
+    }
+
+    mutating func restart(at date: Date = .now, reduceMotion: Bool) {
+        anchorFrame = 0
+        anchorDate = date
+        isPlaying = frameCount > 1 && !reduceMotion
+    }
+
+    mutating func seek(to frame: Int, at date: Date = .now) {
+        anchorFrame = min(max(0, frame), frameCount - 1)
+        anchorDate = date
+    }
+
+    mutating func setRate(_ newRate: Double, at date: Date = .now) {
+        guard Self.availableRates.contains(newRate) else { return }
+        anchorFrame = displayedFrame(at: date)
+        anchorDate = date
+        rate = newRate
+    }
+
+    mutating func honorReduceMotion(_ enabled: Bool, at date: Date = .now) {
+        guard enabled else { return }
+        pause(at: date)
     }
 }
 

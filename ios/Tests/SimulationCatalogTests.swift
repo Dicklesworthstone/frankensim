@@ -240,6 +240,49 @@ final class SimulationCatalogTests: XCTestCase {
         }
     }
 
+    func testResultPlaybackAdvancesLoopsAndPausesOnAnExactFrame() {
+        let start = Date(timeIntervalSinceReferenceDate: 100)
+        var playback = ResultPlaybackState(frameCount: 5, date: start)
+
+        XCTAssertTrue(playback.isPlaying)
+        XCTAssertEqual(playback.displayedFrame(at: start), 0)
+        XCTAssertEqual(playback.displayedFrame(at: start.addingTimeInterval(0.25)), 2)
+        XCTAssertEqual(playback.displayedFrame(at: start.addingTimeInterval(1)), 4)
+
+        playback.pause(at: start.addingTimeInterval(0.25))
+        XCTAssertFalse(playback.isPlaying)
+        XCTAssertEqual(playback.displayedFrame(at: start.addingTimeInterval(30)), 2)
+    }
+
+    func testResultPlaybackSeekRestartRateAndReduceMotionTransitions() {
+        let start = Date(timeIntervalSinceReferenceDate: 200)
+        var playback = ResultPlaybackState(frameCount: 6, reduceMotion: true, date: start)
+
+        XCTAssertFalse(playback.isPlaying)
+        XCTAssertEqual(playback.displayedFrame(at: start), 5)
+
+        playback.seek(to: 99, at: start)
+        XCTAssertEqual(playback.displayedFrame(at: start), 5)
+        playback.seek(to: 2, at: start)
+        XCTAssertEqual(playback.displayedFrame(at: start), 2)
+
+        playback.toggle(at: start, reduceMotion: true)
+        XCTAssertFalse(playback.isPlaying)
+        playback.restart(at: start, reduceMotion: false)
+        XCTAssertTrue(playback.isPlaying)
+        XCTAssertEqual(playback.displayedFrame(at: start), 0)
+
+        playback.setRate(2, at: start)
+        XCTAssertEqual(playback.rate, 2)
+        XCTAssertEqual(playback.displayedFrame(at: start.addingTimeInterval(0.25)), 4)
+        playback.setRate(3, at: start.addingTimeInterval(0.25))
+        XCTAssertEqual(playback.rate, 2, "unsupported presentation rates must not be admitted")
+
+        playback.honorReduceMotion(true, at: start.addingTimeInterval(0.25))
+        XCTAssertFalse(playback.isPlaying)
+        XCTAssertEqual(playback.displayedFrame(at: start.addingTimeInterval(10)), 4)
+    }
+
     private func runAndCopyHeader(id: UInt32) -> [Double] {
         let reported = frankensim_apple_run(id, 0, 0x5EED)
         XCTAssertEqual(frankensim_apple_last_error(), 0)

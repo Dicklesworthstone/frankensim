@@ -9,8 +9,10 @@ struct SimulationStudioView: View {
     @State private var showsAtlas = false
     @State private var showsCatalogSheet = false
     @State private var preferredColumn = NavigationSplitViewColumn.detail
+    @State private var resultPlayback = ResultPlaybackState(frameCount: 1, reduceMotion: true)
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     init() {
 #if DEBUG
@@ -55,6 +57,12 @@ struct SimulationStudioView: View {
         }
         .onChange(of: scenePhase) { _, phase in
             if phase != .active, model.isRunning { model.cancel() }
+        }
+        .onChange(of: model.result?.presentationID) { _, _ in
+            resetResultPlayback()
+        }
+        .onChange(of: reduceMotion) { _, enabled in
+            resultPlayback.honorReduceMotion(enabled)
         }
         .onReceive(NotificationCenter.default.publisher(for: .runSimulation)) { _ in
             if !model.isRunning { model.run() }
@@ -183,8 +191,7 @@ struct SimulationStudioView: View {
         ScrollView {
             VStack(spacing: 14) {
                 compactKernelChooser
-                NativeSimulationCanvas(result: model.result, accent: accent, isRunning: model.isRunning)
-                    .frame(height: min(360, max(232, size.height * 0.31)))
+                simulationSurface(canvasHeight: min(360, max(232, size.height * 0.31)))
                 if size.width >= 700 {
                     HStack(alignment: .top, spacing: 14) {
                         VStack(spacing: 14) {
@@ -219,7 +226,7 @@ struct SimulationStudioView: View {
         HStack(alignment: .top, spacing: 16) {
             VStack(spacing: 14) {
                 experimentHeader
-                NativeSimulationCanvas(result: model.result, accent: accent, isRunning: model.isRunning)
+                simulationSurface(canvasHeight: nil)
                 controls
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -238,6 +245,159 @@ struct SimulationStudioView: View {
     }
 
     private var accent: Color { ForgeTheme.accent(model.selection.accent) }
+
+    private var supportsResultPlayback: Bool {
+        model.result?.shape == .gridFrames && (model.result?.frames ?? 0) > 1
+    }
+
+    private func simulationSurface(canvasHeight: CGFloat?) -> some View {
+        TimelineView(
+            .animation(
+                minimumInterval: resultPlayback.minimumInterval,
+                paused: !supportsResultPlayback || !resultPlayback.isPlaying || reduceMotion
+            )
+        ) { timeline in
+            VStack(spacing: 10) {
+                NativeSimulationCanvas(
+                    result: model.result,
+                    accent: accent,
+                    isRunning: model.isRunning,
+                    frameOverride: supportsResultPlayback
+                        ? resultPlayback.displayedFrame(at: timeline.date)
+                        : nil
+                )
+                .frame(height: canvasHeight)
+                .frame(maxHeight: canvasHeight == nil ? .infinity : nil)
+
+                if let result = model.result,
+                   result.shape == .gridFrames,
+                   result.frames > 1
+                {
+                    resultPlaybackControls(for: result, date: timeline.date)
+                }
+            }
+            .frame(maxHeight: canvasHeight == nil ? .infinity : nil)
+        }
+    }
+
+    private func resultPlaybackControls(for result: SimulationResult, date: Date) -> some View {
+        let frame = resultPlayback.displayedFrame(at: date)
+        return VStack(spacing: 9) {
+            HStack(spacing: 10) {
+                panelLabel("RESULT PLAYBACK")
+                Spacer(minLength: 6)
+                Text("FRAME \(frame + 1) / \(result.frames)")
+                    .font(.system(size: ForgeTheme.size(9.5), weight: .bold, design: .monospaced))
+                    .foregroundStyle(accent)
+                    .contentTransition(.numericText())
+
+                Menu {
+                    ForEach(ResultPlaybackState.availableRates, id: \.self) { rate in
+                        Button {
+                            resultPlayback.setRate(rate)
+                        } label: {
+                            if resultPlayback.rate == rate {
+                                Label(playbackRateLabel(rate), systemImage: "checkmark")
+                            } else {
+                                Text(playbackRateLabel(rate))
+                            }
+                        }
+                    }
+                } label: {
+                    Label(playbackRateLabel(resultPlayback.rate), systemImage: "speedometer")
+                        .font(.system(size: ForgeTheme.size(11), weight: .semibold, design: .rounded))
+                }
+                .accessibilityIdentifier("result-playback-speed")
+                .accessibilityLabel("Playback speed")
+                .accessibilityValue(playbackRateLabel(resultPlayback.rate))
+            }
+
+            HStack(spacing: 9) {
+                Button {
+                    resultPlayback.restart(reduceMotion: reduceMotion)
+                } label: {
+                    Image(systemName: "backward.end.fill")
+                        .frame(width: 28, height: 28)
+                }
+                .buttonStyle(.bordered)
+                .tint(accent)
+                .accessibilityIdentifier("result-playback-restart")
+                .accessibilityLabel("Restart result playback")
+
+                Button {
+                    resultPlayback.toggle(reduceMotion: reduceMotion)
+                } label: {
+                    Label(
+                        resultPlayback.isPlaying ? "Pause" : "Play",
+                        systemImage: resultPlayback.isPlaying ? "pause.fill" : "play.fill"
+                    )
+                    .frame(minWidth: 54)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(accent)
+                .disabled(reduceMotion)
+                .accessibilityIdentifier("result-playback-toggle")
+                .accessibilityLabel(
+                    resultPlayback.isPlaying ? "Pause result playback" : "Play result playback"
+                )
+                .accessibilityHint(
+                    reduceMotion
+                        ? "Reduce Motion is on; use the frame slider to inspect the result"
+                        : "Plays or pauses the computed result frames"
+                )
+
+                Slider(
+                    value: Binding(
+                        get: { Double(resultPlayback.displayedFrame(at: date)) },
+                        set: { resultPlayback.seek(to: Int($0.rounded())) }
+                    ),
+                    in: 0...Double(result.frames - 1),
+                    step: 1,
+                    onEditingChanged: { editing in
+                        if editing { resultPlayback.pause() }
+                    }
+                )
+                .tint(accent)
+                .accessibilityIdentifier("result-playback-slider")
+                .accessibilityLabel("Result frame")
+                .accessibilityValue("Frame \(frame + 1) of \(result.frames)")
+            }
+
+            if reduceMotion {
+                Text("Reduce Motion is on · scrub the frames manually")
+                    .font(.system(size: ForgeTheme.size(10.5), design: .rounded))
+                    .foregroundStyle(ForgeTheme.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .padding(12)
+        .background(ForgeTheme.panel.opacity(0.94), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(accent.opacity(0.36), lineWidth: 1)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("result-playback-controls")
+    }
+
+    private func playbackRateLabel(_ rate: Double) -> String {
+        rate == rate.rounded()
+            ? "\(Int(rate))×"
+            : String(format: "%.1f×", rate)
+    }
+
+    private func resetResultPlayback() {
+        guard let result = model.result,
+              result.shape == .gridFrames,
+              result.frames > 1 else {
+            resultPlayback = ResultPlaybackState(frameCount: 1, reduceMotion: true)
+            return
+        }
+        resultPlayback = ResultPlaybackState(
+            frameCount: result.frames,
+            reduceMotion: reduceMotion
+        )
+    }
 
     private var compactKernelChooser: some View {
         Button { showsCatalogSheet = true } label: {

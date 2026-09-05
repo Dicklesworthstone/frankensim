@@ -4,7 +4,20 @@ struct NativeSimulationCanvas: View {
     let result: SimulationResult?
     let accent: Color
     let isRunning: Bool
+    var frameOverride: Int?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    init(
+        result: SimulationResult?,
+        accent: Color,
+        isRunning: Bool,
+        frameOverride: Int? = nil
+    ) {
+        self.result = result
+        self.accent = accent
+        self.isRunning = isRunning
+        self.frameOverride = frameOverride
+    }
 
     var body: some View {
         TimelineView(.animation(minimumInterval: reduceMotion ? 1 : 1 / 24, paused: result == nil || reduceMotion)) { timeline in
@@ -12,7 +25,7 @@ struct NativeSimulationCanvas: View {
                 context.fill(Path(CGRect(origin: .zero, size: size)), with: .color(ForgeTheme.background))
                 drawGrid(in: &context, size: size)
                 if let result {
-                    let frame = displayedFrame(for: result, date: timeline.date)
+                    let frame = frameOverride ?? displayedFrame(for: result, date: timeline.date)
                     switch result.shape {
                     case .grid, .gridFrames:
                         drawField(result, frame: frame, context: &context, size: size)

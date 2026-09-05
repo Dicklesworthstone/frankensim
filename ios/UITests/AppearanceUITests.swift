@@ -62,6 +62,33 @@ final class FrankenSimAppearanceUITests: XCTestCase {
         keepScreenshot(of: app, named: "Phone simulation catalog")
     }
 
+    func testPhoneAnimatedResultExposesPlaybackAndFrameInspection() throws {
+        let app = XCUIApplication()
+        app.launchEnvironment["FSIM_INITIAL_EXPERIMENT"] = "0"
+        app.launchEnvironment["FSIM_INITIAL_QUALITY"] = "0.12"
+        app.launch()
+
+        let run = app.buttons["compact-run-button"]
+        XCTAssertTrue(run.waitForExistence(timeout: 12))
+        run.tap()
+
+        let playback = app.otherElements["result-playback-controls"]
+        XCTAssertTrue(playback.waitForExistence(timeout: 12))
+        XCTAssertTrue(app.sliders["result-playback-slider"].exists)
+        XCTAssertTrue(app.buttons["result-playback-restart"].exists)
+        XCTAssertTrue(app.buttons["result-playback-speed"].exists)
+
+        let toggle = app.buttons["result-playback-toggle"]
+        XCTAssertTrue(toggle.exists)
+        if toggle.isEnabled {
+            XCTAssertEqual(toggle.label, "Pause result playback")
+            toggle.tap()
+            XCTAssertEqual(toggle.label, "Play result playback")
+        }
+
+        keepScreenshot(of: app, named: "Phone result playback controls")
+    }
+
     private func keepScreenshot(of app: XCUIApplication, named name: String) {
         let attachment = XCTAttachment(screenshot: app.screenshot())
         attachment.name = name
