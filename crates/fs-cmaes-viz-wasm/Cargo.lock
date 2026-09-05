@@ -533,7 +533,7 @@ version = "0.0.1"
 
 [[package]]
 name = "fs-cmaes-viz-wasm"
-version = "0.6.19"
+version = "0.6.20"
 dependencies = [
  "asupersync",
  "fs-alloc",
