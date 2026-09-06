@@ -77,24 +77,38 @@ impl ElasticTensorComponent {
                 reason: "elastic component indices must lie in 0..6",
             });
         }
-        Ok(Self { basis, symmetry, source_tensor, row, column })
+        Ok(Self {
+            basis,
+            symmetry,
+            source_tensor,
+            row,
+            column,
+        })
     }
 
     /// Source basis shared by every coefficient of the complete tensor.
     #[must_use]
-    pub const fn basis(self) -> ElasticTensorBasis { self.basis }
+    pub const fn basis(self) -> ElasticTensorBasis {
+        self.basis
+    }
 
     /// Declared symmetry class, not a numerical certificate.
     #[must_use]
-    pub const fn symmetry(self) -> ElasticTensorSymmetry { self.symmetry }
+    pub const fn symmetry(self) -> ElasticTensorSymmetry {
+        self.symmetry
+    }
 
     /// Source-declared tensor group; independent of each coefficient's claim id.
     #[must_use]
-    pub const fn source_tensor(self) -> ContentHash { self.source_tensor }
+    pub const fn source_tensor(self) -> ContentHash {
+        self.source_tensor
+    }
 
     /// Zero-based matrix row and column in the declared order.
     #[must_use]
-    pub const fn indices(self) -> (usize, usize) { (self.row as usize, self.column as usize) }
+    pub const fn indices(self) -> (usize, usize) {
+        (self.row as usize, self.column as usize)
+    }
 
     /// Canonical descriptor bytes. The enclosing claim/pack owns versioning.
     #[must_use]
@@ -109,7 +123,9 @@ impl ElasticTensorComponent {
             ElasticTensorOrder::XxYyZzXyYzZx => 0,
             ElasticTensorOrder::XxYyZzYzZxXy => 1,
         };
-        bytes[2] = match self.symmetry { ElasticTensorSymmetry::MajorMinor => 0 };
+        bytes[2] = match self.symmetry {
+            ElasticTensorSymmetry::MajorMinor => 0,
+        };
         bytes[3] = self.row;
         bytes[4] = self.column;
         bytes[5..37].copy_from_slice(self.basis.frame.as_bytes());
@@ -122,7 +138,9 @@ impl ElasticTensorComponent {
         let invalid = || MatDbError::InvalidTensorContext {
             reason: "invalid elastic component descriptor length or convention tag",
         };
-        if bytes.len() != Self::ENCODED_LEN { return Err(invalid()); }
+        if bytes.len() != Self::ENCODED_LEN {
+            return Err(invalid());
+        }
         let notation = match bytes[0] {
             0 => ElasticTensorNotation::Tensor,
             1 => ElasticTensorNotation::Engineering,
@@ -140,12 +158,14 @@ impl ElasticTensorComponent {
         };
         Self::new(
             ElasticTensorBasis {
-                notation, order,
+                notation,
+                order,
                 frame: ContentHash(bytes[5..37].try_into().map_err(|_| invalid())?),
             },
             symmetry,
             ContentHash(bytes[37..].try_into().map_err(|_| invalid())?),
-            bytes[3], bytes[4],
+            bytes[3],
+            bytes[4],
         )
     }
 }

@@ -1448,10 +1448,16 @@ impl ClaimSet {
         let hardness_test = context_key.and_then(PropertyKey::hardness_test);
         let elastic_component = context_key.and_then(PropertyKey::elastic_component);
         if (elastic_component.is_none()
-            && considered_pairs.iter().any(|(_, claim)| claim.key.elastic_component().is_some()))
-            || !considered_pairs.iter().any(|(_, claim)| claim.key.elastic_component() == elastic_component)
+            && considered_pairs
+                .iter()
+                .any(|(_, claim)| claim.key.elastic_component().is_some()))
+            || !considered_pairs
+                .iter()
+                .any(|(_, claim)| claim.key.elastic_component() == elastic_component)
         {
-            return Err(MatDbError::TensorContextMismatch { property: property.to_owned() });
+            return Err(MatDbError::TensorContextMismatch {
+                property: property.to_owned(),
+            });
         }
         if considered_pairs[0].1.key.is_hardness() && hardness_test.is_none() {
             return Err(MatDbError::MissingHardnessContext {
@@ -1631,9 +1637,7 @@ impl ClaimSet {
         // The selected content identity binds the exact measurement context,
         // just as it binds the quantity schema. Caller intent still requires
         // comparing the requested key/pin externally to this selected claim.
-        let context_key = self
-            .claim(receipt.selected)
-            .map(|claim| &claim.key);
+        let context_key = self.claim(receipt.selected).map(|claim| &claim.key);
         let replayed = self.query_selected(&receipt.property, context_key, &point, selection)?;
         let fresh = &replayed.receipt;
         for (field, matches) in [

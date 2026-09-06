@@ -72,6 +72,8 @@ const HARDNESS_COMPILER_ID: &str = "frankensim-matdb-pack-compiler-v4";
 const HARDNESS_INTERFACE_COMPILER_ID: &str = "frankensim-matdb-interface-pack-compiler-v4";
 const SAMPLE_COMPILER_ID: &str = "frankensim-matdb-pack-compiler-v5";
 const SAMPLE_INTERFACE_COMPILER_ID: &str = "frankensim-matdb-interface-pack-compiler-v5";
+const TENSOR_COMPILER_ID: &str = "frankensim-matdb-pack-compiler-v6";
+const TENSOR_INTERFACE_COMPILER_ID: &str = "frankensim-matdb-interface-pack-compiler-v6";
 const NASA9_COMPILER_ID: &str = "frankensim-matdb-nasa9-model-pack-compiler-v1";
 const KINETICS_COMPILER_ID: &str = "frankensim-matdb-kinetics-model-pack-compiler-v1";
 const SPECIES_COMPILER_ID: &str = "frankensim-matdb-species-pack-compiler-v1";
@@ -80,12 +82,13 @@ const SPECIES_COMPILER_ID: &str = "frankensim-matdb-species-pack-compiler-v1";
 /// Bump this whenever parsing, admission, normalization, or provenance
 /// semantics can change the canonical compiler fixture.
 #[allow(dead_code)] // consumed textually by `xtask check-goldens`
-pub const MATDB_PACK_COMPILER_SEMANTICS_VERSION: u32 = 8;
+pub const MATDB_PACK_COMPILER_SEMANTICS_VERSION: u32 = 9;
 const MANIFEST_HEADER: &str = "frankensim.matdb-manifest.v1";
 const MAPPED_MANIFEST_HEADER: &str = "frankensim.matdb-manifest.v2";
 const TYPED_AXIS_MANIFEST_HEADER: &str = "frankensim.matdb-manifest.v3";
 const HARDNESS_MANIFEST_HEADER: &str = "frankensim.matdb-manifest.v4";
 const SAMPLE_MANIFEST_HEADER: &str = "frankensim.matdb-manifest.v5";
+const TENSOR_MANIFEST_HEADER: &str = "frankensim.matdb-manifest.v6";
 const SOURCE_HEADER: &str = "frankensim.matdb-source.v1";
 const SAMPLE_SOURCE_HEADER: &str = "frankensim.matdb-source.v2";
 const NASA9_SOURCE_HEADER: &str = "frankensim.nasa9-source.v1";
@@ -392,6 +395,7 @@ struct Manifest {
     axes: BTreeMap<String, String>,
     axis_kinds: BTreeMap<String, Option<QuantityKind>>,
     hardness_tests: BTreeMap<String, HardnessSourceTest>,
+    elastic_components: BTreeMap<String, fs_matdb::ElasticTensorComponent>,
 }
 
 #[derive(Debug)]
@@ -840,12 +844,13 @@ fn parse_manifest(text: &str) -> Result<Manifest, CompileError> {
         Some(TYPED_AXIS_MANIFEST_HEADER) => 3,
         Some(HARDNESS_MANIFEST_HEADER) => 4,
         Some(SAMPLE_MANIFEST_HEADER) => 5,
+        Some(TENSOR_MANIFEST_HEADER) => 6,
         _ => {
             return Err(CompileError::new(
                 "unsupported_manifest_schema",
                 "manifest",
                 format!(
-                    "first line must be {MANIFEST_HEADER:?}, {MAPPED_MANIFEST_HEADER:?}, {TYPED_AXIS_MANIFEST_HEADER:?}, {HARDNESS_MANIFEST_HEADER:?}, or {SAMPLE_MANIFEST_HEADER:?}"
+                    "first line must be {MANIFEST_HEADER:?}, {MAPPED_MANIFEST_HEADER:?}, {TYPED_AXIS_MANIFEST_HEADER:?}, {HARDNESS_MANIFEST_HEADER:?}, {SAMPLE_MANIFEST_HEADER:?}, or {TENSOR_MANIFEST_HEADER:?}"
                 ),
             ));
         }
@@ -859,6 +864,7 @@ fn parse_manifest(text: &str) -> Result<Manifest, CompileError> {
     let mut axes = BTreeMap::new();
     let mut axis_kinds = BTreeMap::new();
     let mut hardness_tests: BTreeMap<String, HardnessSourceTest> = BTreeMap::new();
+    let mut elastic_components = BTreeMap::new();
     for (offset, line) in lines.enumerate() {
         let line_number = offset + 2;
         if line.len() > MAX_LINE_BYTES {
@@ -877,6 +883,18 @@ fn parse_manifest(text: &str) -> Result<Manifest, CompileError> {
         }
         let fields: Vec<&str> = line.split('\t').collect();
         match fields.first().copied() {
+            Some("elastic-component") if version >= 6 => {
+                require_field_count(&fields, 9, "manifest", line_number)?;
+                let claim = require_identifier(fields[1], "elastic claim", "manifest")?;
+                let component = parse_elastic_component(&fields)?;
+                if elastic_components.insert(claim, component).is_some() {
+                    return Err(CompileError::new(
+                        "duplicate_elastic_component",
+                        "manifest",
+                        "one claim may declare only one elastic component",
+                    ));
+                }
+            }
             Some("hardness-test") if version >= 4 => {
                 require_field_count(&fields, 5, "manifest", line_number)?;
                 let claim = require_identifier(fields[1], "hardness claim", "manifest")?;
@@ -1075,7 +1093,50 @@ fn parse_manifest(text: &str) -> Result<Manifest, CompileError> {
         sources,
         axis_kinds,
         hardness_tests,
+        elastic_components,
     })
+}
+
+fn parse_elastic_component(
+    fields: &[&str],
+) -> Result<fs_matdb::ElasticTensorComponent, CompileError> {
+    use fs_matdb::{
+        ElasticTensorBasis, ElasticTensorComponent, ElasticTensorNotation, ElasticTensorOrder,
+        ElasticTensorSymmetry,
+    };
+    let invalid = || {
+        CompileError::new(
+            "invalid_elastic_component",
+            "manifest",
+            "expected claim, tensor|engineering|mandel, xx-yy-zz-xy-yz-zx|xx-yy-zz-yz-zx-xy, major-minor, frame hash, tensor hash, row and column in 0..6",
+        )
+    };
+    let notation = match fields[2] {
+        "tensor" => ElasticTensorNotation::Tensor,
+        "engineering" => ElasticTensorNotation::Engineering,
+        "mandel" => ElasticTensorNotation::Mandel,
+        _ => return Err(invalid()),
+    };
+    let order = match fields[3] {
+        "xx-yy-zz-xy-yz-zx" => ElasticTensorOrder::XxYyZzXyYzZx,
+        "xx-yy-zz-yz-zx-xy" => ElasticTensorOrder::XxYyZzYzZxXy,
+        _ => return Err(invalid()),
+    };
+    if fields[4] != "major-minor" {
+        return Err(invalid());
+    }
+    ElasticTensorComponent::new(
+        ElasticTensorBasis {
+            notation,
+            order,
+            frame: ContentHash::from_hex(fields[5]).ok_or_else(invalid)?,
+        },
+        ElasticTensorSymmetry::MajorMinor,
+        ContentHash::from_hex(fields[6]).ok_or_else(invalid)?,
+        fields[7].parse().map_err(|_| invalid())?,
+        fields[8].parse().map_err(|_| invalid())?,
+    )
+    .map_err(|error| CompileError::new("invalid_elastic_component", "manifest", error.to_string()))
 }
 
 fn manifest_quantity_kind(name: &str) -> Result<Option<QuantityKind>, CompileError> {
@@ -3828,6 +3889,8 @@ fn compile_manifest(manifest_path: &Path) -> Result<CompileOutput, CompileError>
     let profile =
         source_profile(&manifest).map_err(|error| error.with_input_hash(manifest_snapshot))?;
     let compiler_id = match (manifest.version, profile) {
+        (6, SourceProfile::Material) => TENSOR_COMPILER_ID,
+        (6, SourceProfile::Interface) => TENSOR_INTERFACE_COMPILER_ID,
         (5, SourceProfile::Material) => SAMPLE_COMPILER_ID,
         (5, SourceProfile::Interface) => SAMPLE_INTERFACE_COMPILER_ID,
         (4, SourceProfile::Material) => HARDNESS_COMPILER_ID,
@@ -4039,6 +4102,15 @@ fn compile_manifest(manifest_path: &Path) -> Result<CompileOutput, CompileError>
                 })?;
                 key = key.with_hardness_test(context).map_err(|error| {
                     CompileError::new("invalid_hardness_test", &subject, error.to_string())
+                })?;
+            }
+            if let Some(component) = manifest.elastic_components.get(local_id) {
+                key = key.with_elastic_component(*component).map_err(|error| {
+                    CompileError::new(
+                        "invalid_elastic_component",
+                        format!("claim:{local_id}"),
+                        error.to_string(),
+                    )
                 })?;
             }
             let id = claims
@@ -4385,8 +4457,20 @@ fn source_envelope_hash(manifest: &Manifest, sources: &[LoadedSource]) -> Conten
                 }
             }
         }
+        if manifest.version >= 6 {
+            push_part(
+                &mut payload,
+                &(manifest.elastic_components.len() as u64).to_le_bytes(),
+            );
+            for (claim, component) in &manifest.elastic_components {
+                push_part(&mut payload, claim.as_bytes());
+                push_part(&mut payload, &component.canonical_bytes());
+            }
+        }
         hash_domain(
-            if manifest.version >= 5 {
+            if manifest.version >= 6 {
+                "org.frankensim.xtask.matdb-pack.source-envelope.v6"
+            } else if manifest.version >= 5 {
                 "org.frankensim.xtask.matdb-pack.source-envelope.v5"
             } else if manifest.version == 4 {
                 "org.frankensim.xtask.matdb-pack.source-envelope.v4"
@@ -4403,6 +4487,15 @@ fn source_envelope_hash(manifest: &Manifest, sources: &[LoadedSource]) -> Conten
 }
 
 fn validate_name_mappings(manifest: &Manifest, raw: &RawDatabase) -> Result<(), CompileError> {
+    for claim in manifest.elastic_components.keys() {
+        if !raw.claims.contains_key(claim) {
+            return Err(CompileError::new(
+                "unused_elastic_component",
+                format!("claim:{claim}"),
+                "elastic component must refer to an imported claim",
+            ));
+        }
+    }
     for claim in manifest.hardness_tests.keys() {
         if !raw.claims.contains_key(claim) {
             return Err(CompileError::new(
@@ -5571,6 +5664,366 @@ mod tests {
     fn sample_manifest(profile: &str) -> String {
         manifest(profile, true).replacen(MANIFEST_HEADER, SAMPLE_MANIFEST_HEADER, 1)
             + "axis\ttemperature\tT\tabsolute-temperature\naxis\tfrequency\tf\tcyclic-frequency\n"
+    }
+
+    fn elastic_fixture(profile: &str, unit: &str) -> (String, String, [[PropertyKey; 6]; 6]) {
+        use fs_matdb::{
+            ElasticTensorBasis, ElasticTensorComponent, ElasticTensorNotation, ElasticTensorOrder,
+            ElasticTensorSymmetry,
+        };
+        let basis = ElasticTensorBasis {
+            notation: ElasticTensorNotation::Engineering,
+            order: ElasticTensorOrder::XxYyZzXyYzZx,
+            frame: ContentHash([1; 32]),
+        };
+        let keys = core::array::from_fn(|i| {
+            core::array::from_fn(|j| {
+                PropertyKey::new(format!("c{i}{j}"), fs_qty::Pressure::DIMS)
+                    .with_elastic_component(
+                        ElasticTensorComponent::new(
+                            basis,
+                            ElasticTensorSymmetry::MajorMinor,
+                            ContentHash([2; 32]),
+                            i as u8,
+                            j as u8,
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap()
+            })
+        });
+        let mut manifest =
+            manifest(profile, true).replacen(MANIFEST_HEADER, TENSOR_MANIFEST_HEADER, 1)
+                + "axis\tT\tT\tabsolute-temperature\n";
+        let mut source = concat!("frankensim.matdb-source.v1\n",
+            "observation\ttest\tsynthetic specimen\tsynthetic elastic table\tno empirical or correlation claim\n",
+            "scalar\trho\ttest\tdensity\t6\tkg/m3\tconstant\n",
+            "uncertainty\trho\tunstated\t-\t-\t-\t-\n",
+            "validity\trho\tT\t300\t300\tK\n").to_owned();
+        for i in 0..6 {
+            for j in 0..6 {
+                let value = if i == j { 100 + i as i32 } else { -1 };
+                let value = if unit == "Pa" { value * 1000 } else { value };
+                manifest.push_str(&format!("elastic-component\tc{i}{j}\tengineering\txx-yy-zz-xy-yz-zx\tmajor-minor\t{}\t{}\t{i}\t{j}\n",
+                    basis.frame.to_hex(), ContentHash([2; 32]).to_hex()));
+                source.push_str(&format!(
+                    "scalar\tc{i}{j}\ttest\tc{i}{j}\t{value}\t{unit}\tconstant\n\
+                    uncertainty\tc{i}{j}\tunstated\t-\t-\t-\t-\n\
+                    validity\tc{i}{j}\tT\t300\t300\tK\n"
+                ));
+            }
+        }
+        if profile == INTERFACE_PROFILE {
+            source.push_str(concat!(
+                "surface_a\tsynthetic-a\tsolid\tfixture\t0\tframe-a\n",
+                "surface_b\tsynthetic-b\tsolid\tfixture\t0\tframe-b\n",
+                "context\tdry\t-\tsynthetic environment\tsynthetic history\n"
+            ));
+        }
+        (manifest, source, keys)
+    }
+
+    #[test]
+    fn g3_elastic_source_context_reaches_portable_cards_and_complete_state_resolution() {
+        use fs_matdb::{NormalizedMaterialCardPack, QueryPoint};
+        use fs_material::state_point::{
+            MaterialPropertySelection, ScalarAdmissibility, ScalarPropertyRequirement,
+            resolve_elastic_tensor_state_point, resolve_interface_state_point,
+        };
+        let point = QueryPoint::new()
+            .with_quantity(
+                "T",
+                QuantitySpec::semantic(SemanticType::new(
+                    QuantityKind::AbsoluteTemperature,
+                    ValueForm::Static,
+                )),
+                300.0,
+            )
+            .unwrap();
+        for profile in [MATERIAL_PROFILE, INTERFACE_PROFILE] {
+            let mut source_ids = BTreeSet::new();
+            for unit in ["Pa", "kPa"] {
+                let (manifest, source, keys) = elastic_fixture(profile, unit);
+                let (path, _) = write_fixture(&manifest, &source);
+                let output = compile_manifest(&path).unwrap();
+                let interface = (profile == INTERFACE_PROFILE)
+                    .then(|| NormalizedInterfacePack::from_bytes(&output.bytes).unwrap());
+                let pack = match &interface {
+                    Some(interface) => {
+                        assert_eq!(interface.compiler(), TENSOR_INTERFACE_COMPILER_ID);
+                        interface.claims_pack().clone()
+                    }
+                    None => {
+                        let pack = NormalizedPack::from_bytes(&output.bytes).unwrap();
+                        assert_eq!(pack.compiler(), TENSOR_COMPILER_ID);
+                        pack
+                    }
+                };
+                assert_eq!(pack.schema_version(), 5);
+                assert!(
+                    source_ids.insert(pack.source_artifact()),
+                    "source unit provenance remains distinct"
+                );
+                let material = NormalizedMaterialCardPack::new(
+                    MaterialStateId {
+                        chemistry: "synthetic".into(),
+                        phase: "solid".into(),
+                        process: "elastic test".into(),
+                        revision: 0,
+                    },
+                    pack.clone(),
+                )
+                .unwrap();
+                let material = NormalizedMaterialCardPack::from_bytes_verified(
+                    material.content_hash(),
+                    &material.to_bytes(),
+                )
+                .unwrap();
+                let pins = pack
+                    .claims()
+                    .claims_ordered()
+                    .map(|(id, claim)| (claim.key.name().to_owned(), id))
+                    .collect();
+                for selection in [
+                    MaterialPropertySelection::SingleClaimOnly,
+                    MaterialPropertySelection::PreferObservationBacked,
+                    MaterialPropertySelection::PinnedByProperty(pins),
+                ] {
+                    let state = resolve_elastic_tensor_state_point(
+                        material.card(),
+                        &point,
+                        &keys,
+                        selection.clone(),
+                    )
+                    .unwrap();
+                    assert_eq!(state.resolved().properties().len(), 37);
+                    assert_eq!(state.density_kg_m3(), 6.0);
+                    assert_eq!(state.source_tensor_identity(), ContentHash([2; 32]));
+                    for i in 0..6 {
+                        for j in 0..6 {
+                            let expected = if i == j {
+                                (100 + i) as f64 * 1000.0
+                            } else {
+                                -1000.0
+                            };
+                            assert_eq!(state.stiffness_pa()[i][j], expected);
+                            let property = state.resolved().property(keys[i][j].name()).unwrap();
+                            assert_eq!(
+                                property.requirement().elastic_component(),
+                                keys[i][j].elastic_component()
+                            );
+                        }
+                    }
+                    for property in state.resolved().properties() {
+                        pack.claims()
+                            .verify_receipt(&property.answer().receipt)
+                            .unwrap();
+                    }
+                    if let Some(interface) = &interface {
+                        let mut requirements: Vec<_> = keys
+                            .iter()
+                            .flatten()
+                            .map(|key| {
+                                ScalarPropertyRequirement::try_with_key(
+                                    key,
+                                    ScalarAdmissibility::Finite,
+                                )
+                                .unwrap()
+                            })
+                            .collect();
+                        requirements.push(
+                            ScalarPropertyRequirement::try_new(
+                                "density",
+                                fs_qty::Density::DIMS,
+                                ScalarAdmissibility::StrictlyPositive,
+                            )
+                            .unwrap(),
+                        );
+                        let resolved = resolve_interface_state_point(
+                            interface.card(),
+                            &point,
+                            &requirements,
+                            selection,
+                        )
+                        .unwrap();
+                        assert_eq!(resolved.properties().len(), 37);
+                        assert_eq!(
+                            resolved
+                                .property("c03")
+                                .unwrap()
+                                .requirement()
+                                .elastic_component(),
+                            keys[0][3].elastic_component()
+                        );
+                    }
+                }
+                let mut wrong = keys.clone();
+                wrong[0][3] = PropertyKey::new("c03", fs_qty::Pressure::DIMS);
+                assert!(
+                    resolve_elastic_tensor_state_point(
+                        material.card(),
+                        &point,
+                        &wrong,
+                        MaterialPropertySelection::SingleClaimOnly
+                    )
+                    .is_err()
+                );
+                let original = keys[0][0].elastic_component().unwrap();
+                for (basis, source_tensor) in [
+                    (
+                        fs_matdb::ElasticTensorBasis {
+                            frame: ContentHash([7; 32]),
+                            ..original.basis()
+                        },
+                        original.source_tensor(),
+                    ),
+                    (original.basis(), ContentHash([7; 32])),
+                    (
+                        fs_matdb::ElasticTensorBasis {
+                            notation: fs_matdb::ElasticTensorNotation::Tensor,
+                            ..original.basis()
+                        },
+                        original.source_tensor(),
+                    ),
+                ] {
+                    let mut mixed = keys.clone();
+                    mixed[0][0] = PropertyKey::new("c00", fs_qty::Pressure::DIMS)
+                        .with_elastic_component(
+                            fs_matdb::ElasticTensorComponent::new(
+                                basis,
+                                original.symmetry(),
+                                source_tensor,
+                                0,
+                                0,
+                            )
+                            .unwrap(),
+                        )
+                        .unwrap();
+                    assert!(
+                        resolve_elastic_tensor_state_point(
+                            material.card(),
+                            &point,
+                            &mixed,
+                            MaterialPropertySelection::SingleClaimOnly
+                        )
+                        .is_err()
+                    );
+                }
+                let mut wrong = keys.clone();
+                wrong[0].swap(3, 4);
+                assert!(
+                    resolve_elastic_tensor_state_point(
+                        material.card(),
+                        &point,
+                        &wrong,
+                        MaterialPropertySelection::SingleClaimOnly
+                    )
+                    .is_err()
+                );
+                assert!(
+                    resolve_elastic_tensor_state_point(
+                        material.card(),
+                        &point.clone().with("T", 301.0).unwrap(),
+                        &keys,
+                        MaterialPropertySelection::SingleClaimOnly
+                    )
+                    .is_err()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn g0_elastic_source_refuses_unknown_conventions_and_incomplete_tensor_queries() {
+        use fs_material::state_point::{
+            MaterialPropertySelection, resolve_elastic_tensor_state_point,
+        };
+        let (manifest, source, keys) = elastic_fixture(MATERIAL_PROFILE, "Pa");
+        for malformed in [
+            manifest.replacen("\tengineering\t", "\tunknown\t", 1),
+            manifest.replacen("\tmajor-minor\t", "\tunknown\t", 1),
+            manifest.replacen("\t0\t0\n", "\t6\t0\n", 1),
+            manifest.replacen(
+                &ContentHash([1; 32]).to_hex(),
+                &ContentHash([0; 32]).to_hex(),
+                1,
+            ),
+            manifest.replacen(TENSOR_MANIFEST_HEADER, SAMPLE_MANIFEST_HEADER, 1),
+        ] {
+            assert!(parse_manifest(&malformed).is_err());
+        }
+        let (path, _) = write_fixture(
+            &manifest,
+            &source.replace("\tc00\t100000\tPa", "\tc00\t100000\tkg/m3"),
+        );
+        assert_eq!(
+            compile_manifest(&path).unwrap_err().code,
+            "invalid_elastic_component"
+        );
+        let (path, _) = write_fixture(
+            &(manifest.clone()
+                + &manifest
+                    .lines()
+                    .find(|line| line.starts_with("elastic-component\tc00\t"))
+                    .unwrap()
+                    .to_owned()
+                + "\n"),
+            &source,
+        );
+        assert_eq!(
+            compile_manifest(&path).unwrap_err().code,
+            "duplicate_elastic_component"
+        );
+        // A partial source table is useful data, but cannot become a complete law.
+        let partial_manifest = manifest
+            .lines()
+            .filter(|line| !line.starts_with("elastic-component\tc00\t"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        let partial_source = source
+            .lines()
+            .filter(|line| {
+                !line.starts_with("scalar\tc00\t")
+                    && !line.starts_with("uncertainty\tc00\t")
+                    && !line.starts_with("validity\tc00\t")
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        let (path, _) = write_fixture(&partial_manifest, &partial_source);
+        let output = compile_manifest(&path).unwrap();
+        let pack = NormalizedPack::from_bytes(&output.bytes).unwrap();
+        let card = fs_matdb::MaterialCard::assemble(
+            MaterialStateId {
+                chemistry: "synthetic".into(),
+                phase: "solid".into(),
+                process: "partial".into(),
+                revision: 0,
+            },
+            pack.claims().clone(),
+            Vec::new(),
+        )
+        .unwrap();
+        let point = fs_matdb::QueryPoint::new()
+            .with_quantity(
+                "T",
+                QuantitySpec::semantic(SemanticType::new(
+                    QuantityKind::AbsoluteTemperature,
+                    ValueForm::Static,
+                )),
+                300.0,
+            )
+            .unwrap();
+        assert!(
+            resolve_elastic_tensor_state_point(
+                &card,
+                &point,
+                &keys,
+                MaterialPropertySelection::SingleClaimOnly
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -7120,6 +7573,7 @@ mod tests {
             axes: BTreeMap::new(),
             axis_kinds: BTreeMap::new(),
             hardness_tests: BTreeMap::new(),
+            elastic_components: BTreeMap::new(),
             pack_id: "fixture".to_string(),
             redistribution_terms: "permitted".to_string(),
             citation: "x".repeat(1_048_000),

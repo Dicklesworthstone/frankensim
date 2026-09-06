@@ -335,7 +335,46 @@ covariance, or uncertainty between samples. Existing `NoClaimInDomain`,
 G0/G3 compiler tests exercise sparse holes, exact material/interface solver
 queries and replay, malformed tuples, semantic mismatches, and equivalent
 Celsius/kelvin and Hz/kHz input. Their fixtures are synthetic software proof;
-continuous nonrectangular domains and full tensor payloads remain unimplemented.
+continuous nonrectangular domains remain unimplemented. The following elastic
+coefficient path carries full nominal matrices through these existing claims.
+
+`ElasticTensorComponent` attaches a fixed, bounded descriptor to a
+`PropertyKey`: source-frame identity, explicit tensor/engineering/Mandel shear
+notation, one of two documented component orders, `MajorMinor` elastic symmetry,
+source-tensor identity, and zero-based row/column in `0..6`. The two identities
+must be nonzero. Coefficients use pressure dimensions with no competing scalar
+quantity kind; negative off-diagonal values remain admissible. The source-tensor
+identity groups declarations, not measurements or a certified covariance block.
+Individual coefficients retain ordinary scalar/curve support, uncertainty,
+observation links and provenance. Declared symmetry and complete-law stability
+must still be checked by the numerical consumer.
+
+Context-free and mismatched-context queries refuse, including pinned queries.
+Exact typed queries and replay bind the descriptor through selected claim v5
+identities. Normalized-pack v5 (`normalized-pack.v5`) carries one optional
+69-byte descriptor after each hardness-context field. Unknown convention tags,
+bad indices/identities, malformed lengths and altered claim identities refuse.
+Existing v1–v4 claim/pack encodings remain unchanged, and material/interface
+wrappers preserve the complete nested pack. No frame rotation occurs in L1.
+
+Manifest v6 adds a tab-separated source declaration:
+`elastic-component <claim> <tensor|engineering|mandel>
+<xx-yy-zz-xy-yz-zx|xx-yy-zz-yz-zx-xy> <major-minor> <frame-hash>
+<source-tensor-hash> <row> <column>`. Hashes are complete 64-digit hex identities;
+indices are zero based. Duplicate, unused or malformed declarations refuse.
+Ordinary source value/uncertainty unit normalization is retained. Compiler and
+source-envelope identities use v6; the normalized artifact chooses its lowest
+capable schema (v5 for elastic context). Older manifests never accept the new
+record. Partial coefficient tables may be retained as data, but the solver-facing
+resolver requires all 36 explicit entries plus density at one supported point.
+
+G0/G3 tests exercise source import in Pa/kPa, material/interface transport, all
+selection policies, exact-context replay, context tampering, missing components
+and unsupported points. The `fs-solid` test then uses the portable material card
+in an actual P1 tet assembly and checks forces/energy against direct contraction.
+These are synthetic software checks. Full rotated uncertainty/covariance
+propagation, arbitrary coupled tensor laws, and second-order tensor payloads are
+still absent; no observed material or calibrated frame is invented.
 
 The offline compiler now admits a v2 manifest for material/interface sources:
 `property <source> <target> <kind|dimensional>` and `axis <source> <target>`
@@ -1021,9 +1060,10 @@ migration equivalence lives in fs-dcontact's battery.
   the covariance correctly (e.g. correlated draws) is e06.7's authority,
   and the block's numbers remain pack-admitted data, not a certified
   enclosure.
-- Frame names in normalization receipts record provenance only. Scalar/curve
-  payloads do not carry tensor components, rotation matrices, or a claim that
-  a frame conversion was physically valid.
+- Frame names in normalization receipts record provenance only. Explicit
+  `ElasticTensorComponent` keys separately retain elastic coordinates; neither
+  those declarations nor scalar normalization receipts certify frame calibration
+  or perform a tensor rotation. That numerical admission belongs to the consumer.
 - PCB HOMOGENIZATION IS A LAMINATE FIRST RUNG, not a resolved board model.
   Copper coverage is an area fraction over the declared representative feature
   scale; trace hot spots, copper islands, plane splits, spreading resistance,

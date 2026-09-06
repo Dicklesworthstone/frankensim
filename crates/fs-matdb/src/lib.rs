@@ -43,8 +43,10 @@ mod query;
 mod species_pack;
 mod tensor;
 
-pub use tensor::{ElasticTensorBasis, ElasticTensorComponent, ElasticTensorNotation,
-    ElasticTensorOrder, ElasticTensorSymmetry};
+pub use tensor::{
+    ElasticTensorBasis, ElasticTensorComponent, ElasticTensorNotation, ElasticTensorOrder,
+    ElasticTensorSymmetry,
+};
 
 pub use cards::{
     CANONICAL_PARAMETER_BLOCK_IDENTITY_DOMAIN,
@@ -69,10 +71,10 @@ pub use pack::{
     CorrelationUnknownReason, JOINT_USAGE_RECEIPT_IDENTITY_DOMAIN,
     JOINT_USAGE_RECEIPT_SCHEMA_VERSION, JointAnswer, JointCorrelation, JointStatistics,
     JointUsageReceipt, MATDB_HARDNESS_PACK_SCHEMA_VERSION, MATDB_PACK_SCHEMA_VERSION,
-    MATDB_TENSOR_PACK_SCHEMA_VERSION,
-    MATDB_PACK_TARGET_BASIS, MATDB_TYPED_AXIS_PACK_SCHEMA_VERSION, MATDB_TYPED_PACK_SCHEMA_VERSION,
-    NormalizationReceipt, NormalizationTarget, NormalizedPack, PackError, StatisticComponent,
-    StatisticMember, ValidityBoundSide,
+    MATDB_PACK_TARGET_BASIS, MATDB_TENSOR_PACK_SCHEMA_VERSION,
+    MATDB_TYPED_AXIS_PACK_SCHEMA_VERSION, MATDB_TYPED_PACK_SCHEMA_VERSION, NormalizationReceipt,
+    NormalizationTarget, NormalizedPack, PackError, StatisticComponent, StatisticMember,
+    ValidityBoundSide,
 };
 pub use pcb::{
     CopperCoverage, PCB_HOMOGENIZATION_IDENTITY_DOMAIN, PCB_HOMOGENIZATION_SCHEMA_VERSION,
@@ -351,9 +353,13 @@ impl fmt::Display for MatDbError {
     #[allow(clippy::too_many_lines)] // one arm per refusal: the exhaustive catalog is the point
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            MatDbError::InvalidTensorContext { reason } => write!(f, "invalid tensor context: {reason}"),
-            MatDbError::TensorContextMismatch { property } => write!(f,
-                "property '{property}' requires a matching elastic tensor frame, convention, source identity and component"),
+            MatDbError::InvalidTensorContext { reason } => {
+                write!(f, "invalid tensor context: {reason}")
+            }
+            MatDbError::TensorContextMismatch { property } => write!(
+                f,
+                "property '{property}' requires a matching elastic tensor frame, convention, source identity and component"
+            ),
             MatDbError::DimsMismatch {
                 key,
                 expected,
@@ -585,7 +591,10 @@ impl PropertyKey {
     /// Bind a stiffness coefficient to its complete source tensor coordinates.
     /// The tensor descriptor supplies meaning; the scalar must have pressure
     /// dimensions and no competing scalar quantity kind.
-    pub fn with_elastic_component(mut self, component: ElasticTensorComponent) -> Result<Self, MatDbError> {
+    pub fn with_elastic_component(
+        mut self,
+        component: ElasticTensorComponent,
+    ) -> Result<Self, MatDbError> {
         if self.quantity != QuantitySpec::dimensional(fs_qty::Pressure::DIMS) {
             return Err(MatDbError::InvalidTensorContext {
                 reason: "elastic coefficients require dimensional pressure values",
@@ -966,8 +975,10 @@ impl PropertyClaim {
         if let Some(artifact) = &self.provenance.artifact {
             push(&artifact.0);
         }
-        if self.validity.has_typed_axes() || self.key.hardness_test().is_some()
-            || self.key.elastic_component().is_some() {
+        if self.validity.has_typed_axes()
+            || self.key.hardness_test().is_some()
+            || self.key.elastic_component().is_some()
+        {
             push(&self.key.quantity().canonical_bytes());
             push(&(self.validity.axis_quantities().len() as u64).to_le_bytes());
             for (axis, quantity) in self.validity.axis_quantities() {

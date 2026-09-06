@@ -540,7 +540,11 @@ impl NormalizedPack {
     /// silently reinterpreted as having quantity kinds.
     #[must_use]
     pub fn schema_version(&self) -> u32 {
-        if self.claims.claims_ordered().any(|(_, claim)| claim.key.elastic_component().is_some()) {
+        if self
+            .claims
+            .claims_ordered()
+            .any(|(_, claim)| claim.key.elastic_component().is_some())
+        {
             return MATDB_TENSOR_PACK_SCHEMA_VERSION;
         }
         if self
@@ -685,7 +689,7 @@ impl NormalizedPack {
         let version = reader.u32()?;
         if !(MATDB_PACK_SCHEMA_VERSION..=MATDB_TENSOR_PACK_SCHEMA_VERSION).contains(&version) {
             return Err(reader.malformed(format!(
-                "unsupported schema version {version}; expected 1, 2, 3 (typed axes), or 4 (hardness test)"
+                "unsupported schema version {version}; expected 1, 2, 3 (typed axes), 4 (hardness test), or 5 (elastic tensor context)"
             )));
         }
         let pack_id = reader.string()?;
@@ -2242,13 +2246,13 @@ fn decode_claim(reader: &mut Reader<'_>, version: u32) -> Result<PropertyClaim, 
     }
     if version >= MATDB_TENSOR_PACK_SCHEMA_VERSION {
         match reader.u8()? {
-            0 => {},
+            0 => {}
             1 => {
                 let component = crate::ElasticTensorComponent::from_canonical_bytes(
                     reader.take(crate::ElasticTensorComponent::ENCODED_LEN)?,
                 )?;
                 key = key.with_elastic_component(component)?;
-            },
+            }
             tag => return Err(reader.malformed(format!("unknown elastic component tag {tag}"))),
         }
     }

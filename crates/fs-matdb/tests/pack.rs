@@ -577,6 +577,185 @@ fn construction_and_decoding_canonicalize_permutable_collections() {
 }
 
 #[test]
+fn g3_elastic_components_preserve_context_through_pack_query_and_replay() {
+    use fs_blake3::ContentHash;
+    use fs_matdb::{
+        ElasticTensorBasis, ElasticTensorComponent, ElasticTensorNotation, ElasticTensorOrder,
+        ElasticTensorSymmetry, MatDbError, QueryPoint, SelectionPolicy,
+    };
+    let basis = ElasticTensorBasis {
+        notation: ElasticTensorNotation::Engineering,
+        order: ElasticTensorOrder::XxYyZzXyYzZx,
+        frame: ContentHash([1; 32]),
+    };
+    let descriptor = |basis, tensor, row, column| {
+        ElasticTensorComponent::new(
+            basis,
+            ElasticTensorSymmetry::MajorMinor,
+            ContentHash([tensor; 32]),
+            row,
+            column,
+        )
+        .unwrap()
+    };
+    let base = descriptor(basis, 2, 0, 3);
+    let contexts = [
+        base,
+        descriptor(
+            ElasticTensorBasis {
+                frame: ContentHash([3; 32]),
+                ..basis
+            },
+            2,
+            0,
+            3,
+        ),
+        descriptor(
+            ElasticTensorBasis {
+                notation: ElasticTensorNotation::Tensor,
+                ..basis
+            },
+            2,
+            0,
+            3,
+        ),
+        descriptor(
+            ElasticTensorBasis {
+                order: ElasticTensorOrder::XxYyZzYzZxXy,
+                ..basis
+            },
+            2,
+            0,
+            3,
+        ),
+        descriptor(basis, 3, 0, 3),
+        descriptor(basis, 2, 0, 4),
+    ];
+    let bare = PropertyKey::new("coupling", fs_qty::Pressure::DIMS);
+    assert!(
+        PropertyKey::new("bad", Dims::NONE)
+            .with_elastic_component(base)
+            .is_err()
+    );
+    let mut claims = ClaimSet::new();
+    let observation = claims
+        .register_observation(ObservationDataset {
+            specimen: "synthetic tensor specimen".into(),
+            method: "synthetic software fixture".into(),
+            artifact: ContentHash([8; 32]),
+            caveats: "no empirical or calibration claim".into(),
+            provenance: provenance(),
+        })
+        .unwrap();
+    let mut keys = Vec::new();
+    let mut ids = std::collections::BTreeSet::new();
+    for context in contexts {
+        let key = bare.clone().with_elastic_component(context).unwrap();
+        let id = claims
+            .insert_claim(PropertyClaim {
+                key: key.clone(),
+                value: PropertyValue::Scalar {
+                    value: -4.0,
+                    dims: key.dims(),
+                },
+                validity: ValidityDomain::unconstrained().with("T", 300.0, 300.0),
+                uncertainty: UncertaintyModel::Unstated,
+                interpolation: InterpolationPolicy::TabulatedOnly,
+                observations: vec![observation],
+                provenance: provenance(),
+            })
+            .unwrap();
+        assert!(
+            ids.insert(id),
+            "every context field binds the coefficient identity"
+        );
+        keys.push((key, id));
+    }
+    let pack = NormalizedPack::new(
+        "synthetic-tensor",
+        "fixture-v5",
+        ContentHash([4; 32]),
+        "synthetic redistribution permitted",
+        claims,
+        Vec::new(),
+        Vec::new(),
+    )
+    .unwrap();
+    assert_eq!(pack.schema_version(), 5);
+    let bytes = pack.to_bytes();
+    let decoded = NormalizedPack::from_bytes_verified(pack.content_hash(), &bytes).unwrap();
+    assert_eq!(decoded.to_bytes(), bytes);
+    let point = QueryPoint::new().with("T", 300.0).unwrap();
+    assert!(matches!(
+        decoded
+            .claims()
+            .query("coupling", &point, SelectionPolicy::SingleClaimOnly),
+        Err(MatDbError::TensorContextMismatch { .. })
+    ));
+    assert!(
+        decoded
+            .claims()
+            .query_typed(&bare, &point, SelectionPolicy::SingleClaimOnly)
+            .is_err()
+    );
+    for (key, id) in &keys {
+        for answer in [
+            decoded
+                .claims()
+                .query_typed(key, &point, SelectionPolicy::SingleClaimOnly)
+                .unwrap(),
+            decoded
+                .claims()
+                .query_pinned_typed(key, &point, *id)
+                .unwrap(),
+        ] {
+            assert_eq!(answer.receipt.selected, *id);
+            assert_eq!(answer.evidence.value.value, -4.0);
+            assert_eq!(
+                decoded.claims().claim(*id).unwrap().key.elastic_component(),
+                key.elastic_component()
+            );
+            decoded.claims().verify_receipt(&answer.receipt).unwrap();
+        }
+    }
+    assert!(
+        decoded
+            .claims()
+            .query_pinned_typed(&keys[0].0, &point, keys[1].1)
+            .is_err()
+    );
+    assert!(
+        decoded
+            .claims()
+            .query_typed(
+                &keys[0].0,
+                &QueryPoint::new().with("T", 301.0).unwrap(),
+                SelectionPolicy::SingleClaimOnly
+            )
+            .is_err()
+    );
+    let mut downgraded = bytes.clone();
+    downgraded[8..12].copy_from_slice(&4u32.to_le_bytes());
+    assert!(NormalizedPack::from_bytes(&downgraded).is_err());
+    let encoded = base.canonical_bytes();
+    let offset = bytes
+        .windows(encoded.len())
+        .position(|part| part == encoded)
+        .unwrap();
+    let mut tampered = bytes.clone();
+    tampered[offset + 5] ^= 1;
+    assert!(NormalizedPack::from_bytes(&tampered).is_err());
+    for (index, value) in [(0, 3), (1, 2), (2, 1), (3, 6), (4, 6)] {
+        let mut malformed = encoded;
+        malformed[index] = value;
+        assert!(ElasticTensorComponent::from_canonical_bytes(&malformed).is_err());
+    }
+    let mut zero_frame = encoded;
+    zero_frame[5..37].fill(0);
+    assert!(ElasticTensorComponent::from_canonical_bytes(&zero_frame).is_err());
+}
+
+#[test]
 fn g3_hardness_tests_select_exact_apparatus_through_material_interface_and_joint_replay() {
     use fs_matdb::{
         HardnessLoadStep, HardnessTestContext, MatDbError, QueryPoint, SelectionPolicy,
