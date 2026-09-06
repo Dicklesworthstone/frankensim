@@ -23,16 +23,22 @@ use fs_vfit::discretize::{DigitalFilter, DigitalFilterState, realize_tabulated_i
 /// One driven compact radiator harvested from a certified plate mode.
 #[derive(Debug, Clone)]
 pub struct CompactBody {
-    /// Radiating monopole area [m²] (`∫ φ dA`).
+    /// Signed modal monopole area [m²] (`∫ φ dA`). Zero is silent
+    /// in this compact monopole approximation, not in all radiation models.
     pub area_m2: f64,
-    /// Modal mass [kg] (1 for a mass-normalized mode).
+    /// Modal mass [kg] (`φᵀ M φ`), in the same basis as both ports.
     pub mass_kg: f64,
+    /// Signed projection of the unit-total-force drive footprint onto φ.
+    /// One for a caller-authored lumped radiator.
+    pub drive_participation: f64,
     /// Angular frequency [rad/s].
     pub omega: f64,
     /// Viscous damping ratio.
     pub zeta: f64,
     y: f64,
     v: f64,
+    // Physical face area, independent of modal normalization and cancellation.
+    piston_area_m2: f64,
     rad: Option<(DigitalFilter, DigitalFilterState)>,
 }
 
@@ -54,10 +60,12 @@ impl CompactBody {
         Ok(Self {
             area_m2: spec.area_m2,
             mass_kg: spec.mass_kg,
+            drive_participation: 1.0,
             omega: core::f64::consts::TAU * spec.frequency_hz,
             zeta: spec.damping_ratio,
             y: 0.0,
             v: 0.0,
+            piston_area_m2: spec.area_m2,
             rad: None,
         })
     }
@@ -70,7 +78,10 @@ impl CompactBody {
     /// instability as benign decay).
     pub fn drive(&mut self, force_n: f64, dt: f64) -> Result<f64, AcousticRealizeError> {
         let f_rad = if let Some((filter, state)) = self.rad.as_mut() {
-            match filter.step(state, self.v) {
+            // p = Z_face * mean surface velocity, Q = area_modal * q_dot.
+            // Generalized reaction is -area_modal * p, preserving work and
+            // eigenvector scaling even for negative or nearly cancelling modes.
+            match filter.step(state, self.v * self.area_m2 / self.piston_area_m2) {
                 Ok(p_face) => -p_face * self.area_m2,
                 Err(e) => return Err(AcousticRealizeError::Nonlinear(e.to_string())),
             }
@@ -90,6 +101,11 @@ impl CompactBody {
     pub fn radiate(&self, acc: f64, rho: f64, listener_m: f64) -> f64 {
         // Baffled half-space (same piston as the self-load), not free-space.
         rho * self.area_m2 * acc / (2.0 * core::f64::consts::PI * listener_m)
+    }
+
+    /// Observe an acceleration in the pHS mass-normalized coordinate.
+    pub(crate) fn radiate_mass_normalized(&self, acc: f64, rho: f64, listener_m: f64) -> f64 {
+        self.radiate(acc / self.mass_kg.sqrt(), rho, listener_m)
     }
 
     /// Volume velocity of the monopole [m³/s].
@@ -114,10 +130,10 @@ impl CompactBody {
     }
 
     fn attach_piston_load(&mut self, gas: &GasState, sample_rate_hz: u32) {
-        if self.rad.is_some() {
+        if self.rad.is_some() || self.area_m2 == 0.0 {
             return;
         }
-        let radius = (self.area_m2 / core::f64::consts::PI).sqrt();
+        let radius = (self.piston_area_m2 / core::f64::consts::PI).sqrt();
         if let Some(filter) = piston_radiation_filter(radius, gas, sample_rate_hz) {
             let state = filter.zero_state();
             self.rad = Some((filter, state));
@@ -480,7 +496,9 @@ impl PlateBank {
         let mut p = 0.0;
         for body in &mut self.linear {
             let f_cav = p_cav * body.area_m2;
-            p += body.drive_and_radiate(force_n + f_cav, dt, rho, listener_m)?;
+            p += body.drive_and_radiate(
+                force_n * body.drive_participation + f_cav, dt, rho, listener_m,
+            )?;
         }
         if let Some(vk) = &mut self.vk {
             let a_vk: f64 = vk.areas.iter().sum();
@@ -595,45 +613,14 @@ pub fn certified_radiators(plate: ThinPlate) -> Result<Vec<CompactBody>, Acousti
         });
     }
     let n_keep = plate.n_modes.min(report.modes.len());
-    let nn = mesh.node_count();
-    let nodal_area = plate.length_m * plate.width_m / nn as f64;
+    let projection = PlateProjection::new(&mesh, plate.length_m / nx as f64);
     let mut out = Vec::with_capacity(n_keep);
     for pair in report.modes.iter().take(n_keep) {
         let omega = pair.lambda.max(0.0).sqrt();
         if !(omega > 0.0) {
             continue;
         }
-        let mut monopole = 0.0;
-        let mut drive = 0.0;
-        let mut drive_w = 0.0;
-        let mid_y = 0.5 * plate.width_m;
-        for (inode, &(x, y)) in mesh.nodes.iter().enumerate() {
-            let Some(reduced) = model.dof_map[3 * inode] else {
-                continue;
-            };
-            let phi = pair.phi.get(reduced).copied().unwrap_or(0.0);
-            monopole += phi * nodal_area;
-            if x <= plate.length_m / (nx as f64).max(1.0) {
-                let w = 1.0 / (1.0 + (y - mid_y).abs());
-                drive += phi * w;
-                drive_w += w;
-            }
-        }
-        let phi_drive = if drive_w > 0.0 { drive / drive_w } else { 1.0 };
-        let mass = if phi_drive.abs() > 1.0e-12 {
-            1.0 / phi_drive.abs()
-        } else {
-            1.0
-        };
-        out.push(CompactBody {
-            area_m2: monopole.abs().max(1.0e-8),
-            mass_kg: mass,
-            omega,
-            zeta: plate.damping_ratio,
-            y: 0.0,
-            v: 0.0,
-            rad: None,
-        });
+        out.push(projection.mode(&model, &pair.phi, omega, plate.damping_ratio)?);
     }
     if out.len() >= 2 {
         let w0 = out[0].omega;
@@ -659,6 +646,71 @@ pub fn certified_radiators(plate: ThinPlate) -> Result<Vec<CompactBody>, Acousti
         });
     }
     Ok(out)
+}
+
+// P1 surface quadrature on the DKT nodal displacement trace. The production
+// rectangle's first cell strip is an explicit uniform traction footprint;
+// its integral is one unit of total bridge force. This does not reconstruct
+// a higher-order DKT displacement field or a finite-wavelength radiator.
+struct PlateProjection {
+    nodal_area: Vec<f64>,
+    unit_force: Vec<f64>,
+    area: f64,
+}
+
+impl PlateProjection {
+    fn new(mesh: &PlateMesh, drive_strip_width: f64) -> Self {
+        let mut nodal_area = vec![0.0; mesh.node_count()];
+        let mut unit_force = vec![0.0; mesh.node_count()];
+        let mut drive_area = 0.0;
+        for &[i, j, k] in &mesh.tris {
+            let (a, b, c) = (mesh.nodes[i], mesh.nodes[j], mesh.nodes[k]);
+            let area = 0.5 * ((b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0));
+            // Strip boundary follows element edges on the generated rectangle.
+            let driven = (a.0 + b.0 + c.0) / 3.0 < drive_strip_width;
+            for node in [i, j, k] {
+                nodal_area[node] += area / 3.0;
+                if driven { unit_force[node] += area / 3.0; }
+            }
+            if driven { drive_area += area; }
+        }
+        for weight in &mut unit_force { *weight /= drive_area; }
+        let area = nodal_area.iter().sum();
+        Self { nodal_area, unit_force, area }
+    }
+
+    fn mode(
+        &self,
+        model: &fs_plate::PlateModel,
+        phi: &[f64],
+        omega: f64,
+        zeta: f64,
+    ) -> Result<CompactBody, AcousticRealizeError> {
+        let refuse = || AcousticRealizeError::InvalidDescription {
+            what: "plate mode needs finite ports and a positive finite mass in the same basis",
+        };
+        if phi.len() != model.free || phi.iter().any(|v| !v.is_finite()) {
+            return Err(refuse());
+        }
+        let mut m_phi = vec![0.0; phi.len()];
+        model.m.spmv(phi, &mut m_phi);
+        let mass: f64 = phi.iter().zip(m_phi).map(|(p, m)| p * m).sum();
+        let (mut area, mut drive) = (0.0, 0.0);
+        for node in 0..self.nodal_area.len() {
+            if let Some(r) = model.dof_map[3 * node] {
+                area += self.nodal_area[node] * phi[r];
+                drive += self.unit_force[node] * phi[r];
+            }
+        }
+        if !(mass > 0.0 && mass.is_finite() && area.is_finite() && drive.is_finite()
+            && self.area > 0.0 && self.area.is_finite()) {
+            return Err(refuse());
+        }
+        Ok(CompactBody {
+            area_m2: area, mass_kg: mass, drive_participation: drive, omega, zeta,
+            y: 0.0, v: 0.0, piston_area_m2: self.area, rad: None,
+        })
+    }
 }
 
 /// Bind one resolved isotropic material state to an isotropic plate description.
