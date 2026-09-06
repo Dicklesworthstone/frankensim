@@ -41,7 +41,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
-use fs_cmaes_viz_wasm::g1_learned::TransformerG1Policy;
+use fs_cmaes_viz_wasm::g1_learned::{dump_gait_transformer, TransformerG1Policy};
 use fs_cmaes_viz_wasm::g1_walking::{
     EpisodeTrace, G1Challenge, G1Task, G1WalkingConfig, G1WalkingEvaluator,
 };
@@ -51,8 +51,6 @@ use fs_g1_train::transformer::{Config, GaitTransformer};
 
 const OBS_DIMS: usize = 42;
 const ACT_DIMS: usize = 15;
-const WEIGHTS_MAGIC: &[u8; 4] = b"FSGT";
-const LAYOUT_VERSION: u32 = 1;
 const MODEL_SEED: u64 = 0x5EA4_2026_0905_C1A5;
 
 /// Which parameters the search is allowed to move.
@@ -199,60 +197,6 @@ fn build_evaluators(challenges: &[G1Challenge], duration_s: f64) -> Vec<G1Walkin
             .expect("evaluator builds")
         })
         .collect()
-}
-
-/// Serialise the searched model in the FSGT layout the browser loader reads, so
-/// a run leaves a file rather than a console number that dies with the process.
-fn dump_weights(model: &GaitTransformer) -> Vec<u8> {
-    let cfg = &model.cfg;
-    let mut out = Vec::new();
-    out.extend_from_slice(WEIGHTS_MAGIC);
-    out.extend_from_slice(&LAYOUT_VERSION.to_le_bytes());
-    for dim in [
-        cfg.d_model,
-        cfg.n_heads,
-        cfg.head_dim,
-        cfg.n_kv_heads,
-        cfg.kv_dim,
-        cfg.n_layers,
-        cfg.mlp_hidden,
-        cfg.context,
-        cfg.n_inputs,
-        cfg.n_outputs,
-    ] {
-        out.extend_from_slice(&(dim as u32).to_le_bytes());
-    }
-    // Observations reach the policy already flattened by the walking owner, so
-    // this model carries an identity normalisation rather than fitted stats.
-    let identity_mean = vec![0.0f32; cfg.n_inputs];
-    let identity_var = vec![1.0f32; cfg.n_inputs];
-    let mut arrays: Vec<&[f32]> = Vec::new();
-    arrays.push(&model.embed.params[..]);
-    for layer in &model.layers {
-        arrays.push(&layer.wq.weights);
-        arrays.push(&layer.wk.weights);
-        arrays.push(&layer.wv.weights);
-        arrays.push(&layer.wo.weights);
-        arrays.push(&layer.w_gate.weights);
-        arrays.push(&layer.w_up.weights);
-        arrays.push(&layer.w_down.weights);
-        arrays.push(&layer.norm1.params);
-        arrays.push(&layer.norm2.params);
-    }
-    arrays.push(&model.final_norm.params);
-    arrays.push(&model.policy_head.params);
-    arrays.push(&model.value_w.params);
-    arrays.push(&model.value_b.params);
-    arrays.push(&identity_mean);
-    arrays.push(&identity_var);
-    out.extend_from_slice(&(arrays.len() as u32).to_le_bytes());
-    for arr in arrays {
-        out.extend_from_slice(&(arr.len() as u32).to_le_bytes());
-        for value in arr {
-            out.extend_from_slice(&value.to_le_bytes());
-        }
-    }
-    out
 }
 
 fn main() {
@@ -435,7 +379,7 @@ fn main() {
     // named for a trained policy that is worse than the thing it started from
     // is worse than no file.
     if final_obj < base_obj {
-        let bytes = dump_weights(&final_policy.model);
+        let bytes = dump_gait_transformer(&final_policy.model);
         let out_dir =
             std::env::var("OUT_DIR_G1").unwrap_or_else(|_| "target/g1-residual".to_string());
         std::fs::create_dir_all(&out_dir).expect("create output dir");

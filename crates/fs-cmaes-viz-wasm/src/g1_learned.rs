@@ -294,6 +294,12 @@ pub struct G1TransformerTrainer {
     sigma: f64,
     seed: u64,
     since_improvement: usize,
+    /// Whether any candidate in the generation currently being evaluated beat
+    /// the incumbent. Kept separate from `since_improvement`: deriving
+    /// "improved" from that counter being zero is true on the first generation
+    /// by construction, which silently pinned it at zero and meant the stall
+    /// limit — and therefore every IPOP restart — could never be reached.
+    improved_this_generation: bool,
     stall_limit: usize,
     generation: u64,
 }
@@ -358,6 +364,7 @@ impl G1TransformerTrainer {
             sigma,
             seed,
             since_improvement: 0,
+            improved_this_generation: false,
             stall_limit: 25,
             generation: 0,
         };
@@ -390,6 +397,16 @@ impl G1TransformerTrainer {
         .ok();
         self.pending = None;
         self.since_improvement = 0;
+        self.improved_this_generation = false;
+    }
+
+    /// Generations since the incumbent last improved. Test-only: the stall
+    /// counter drives every restart, and a counter pinned at zero looks
+    /// identical from outside to a search that simply keeps improving.
+    #[cfg(test)]
+    #[must_use]
+    pub const fn since_improvement(&self) -> usize {
+        self.since_improvement
     }
 
     /// Mean objective, mean distance, and worst completed-step count over every
@@ -462,7 +479,7 @@ impl G1TransformerTrainer {
             self.best_objective = objective;
             self.best_distance = distance;
             self.best.copy_from_slice(&candidate);
-            self.since_improvement = 0;
+            self.improved_this_generation = true;
         }
 
         let complete = self
@@ -474,7 +491,7 @@ impl G1TransformerTrainer {
         }
 
         let batch = self.pending.take().expect("pending generation");
-        let improved = self.since_improvement == 0;
+        let improved = std::mem::take(&mut self.improved_this_generation);
         let told = self
             .optimizer
             .as_mut()
@@ -567,6 +584,50 @@ mod trainer_tests {
         assert!(
             (baseline_distance - 0.308_372_115_535_312_35).abs() < 1e-9,
             "baseline distance drifted: {baseline_distance}"
+        );
+    }
+
+    /// The stall counter must actually count. It drives every IPOP restart,
+    /// and the first version derived "did this generation improve?" from
+    /// `since_improvement == 0`, which is true on the first generation by
+    /// construction: the counter reset itself forever, no restart could ever
+    /// fire, and from outside that is indistinguishable from a search that
+    /// simply keeps improving.
+    #[test]
+    fn stall_counter_advances_when_a_generation_does_not_improve() {
+        let mut trainer = G1TransformerTrainer::new(0, 1.5, 0.002, 7);
+        let population = trainer.progress()[8] as usize;
+        assert!(population > 1, "population must cover a real generation");
+
+        let mut generations_checked = 0;
+        for _ in 0..4 {
+            let before = trainer.progress()[3];
+            let mut closed = false;
+            for _ in 0..population {
+                if trainer.pump()[0] == TRAINER_STATUS_GENERATION {
+                    closed = true;
+                    break;
+                }
+            }
+            assert!(closed, "a full generation should close within its population");
+            let after = trainer.progress()[3];
+            if after < before {
+                assert_eq!(
+                    trainer.since_improvement(),
+                    0,
+                    "an improving generation must reset the stall counter"
+                );
+            } else {
+                assert!(
+                    trainer.since_improvement() > 0,
+                    "a generation that did not improve must advance the stall counter"
+                );
+                generations_checked += 1;
+            }
+        }
+        assert!(
+            generations_checked > 0,
+            "no non-improving generation occurred, so the counter was never exercised"
         );
     }
 
