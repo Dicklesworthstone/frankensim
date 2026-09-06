@@ -134,7 +134,7 @@ fn g1_string_observer_matches_damped_acceleration_in_pascals() {
     });
     assembly.duration_s = 2.0 / f64::from(assembly.sample_rate_hz);
     // Two samples bypass the unrelated block atmospheric absorption operator.
-    let string = assembly.string.unwrap();
+    let string = assembly.string.as_ref().unwrap();
     let pluck = assembly.pluck.unwrap();
     let output = realize_assembly(&assembly).unwrap();
     let omega = core::f64::consts::PI / string.length_m
@@ -181,7 +181,7 @@ fn g1_string_observer_even_mode_has_signed_jerk_and_refines() {
         let odd = realize_assembly(&assembly).unwrap();
         assembly.string.as_mut().unwrap().n_modes = 2;
         let both = realize_assembly(&assembly).unwrap();
-        let string = assembly.string.unwrap();
+        let string = assembly.string.as_ref().unwrap();
         let pluck = assembly.pluck.unwrap();
         let k = core::f64::consts::TAU / string.length_m;
         let omega = k * (string.tension_n / string.lin_density_kg_m).sqrt();
@@ -231,7 +231,7 @@ fn g1_string_observer_nonlinear_pressure_includes_stretching_force() {
         assembly.sample_rate_hz = rate;
         assembly.duration_s = 2.0 / f64::from(rate);
         let output = realize_assembly(&assembly).unwrap();
-        let string = assembly.string.unwrap();
+        let string = assembly.string.as_ref().unwrap();
         let pluck = assembly.pluck.unwrap();
         let pi = core::f64::consts::PI;
         let k = pi / string.length_m;
@@ -314,7 +314,7 @@ fn g3_gas_pressure_controls_actual_string_decay_in_both_solver_paths() {
                 ..nylon_like(8.0, 0.0002)
             };
             let assembly = AcousticAssembly {
-                string: Some(string),
+                string: Some(string.clone()),
                 pluck: Some(Pluck {
                     station_frac: 0.5,
                     height_m: 1.0e-6,
@@ -1016,7 +1016,7 @@ fn soundboard_adds_body_radiation() {
 }
 
 #[test]
-fn g3_sls_memory_composes_with_body_ports_and_contact() {
+fn g3_prony_memory_composes_with_body_ports_and_contact() {
     for moving_end in [false, true] {
         let mut scene = plucked(80.0, 0.006, 0.003);
         let string = scene.string.as_mut().unwrap();
@@ -1025,11 +1025,24 @@ fn g3_sls_memory_composes_with_body_ports_and_contact() {
         string.bending_stiffness_n_m2 = 0.01;
         string.damping_ratio = 0.0;
         string.moving_end = moving_end;
-        string.relaxation_bending = Some(fs_scenario::acoustic::StandardLinearSolidBending {
-            relaxing_stiffness_n_m2: 0.05,
-            relaxation_time_s: 0.002,
+        string.relaxation_bending = Some(fs_scenario::acoustic::PronyBending {
+            branches: vec![
+                fs_scenario::acoustic::BendingRelaxationBranch {
+                    relaxing_stiffness_n_m2: 0.02,
+                    relaxation_time_s: 0.002,
+                },
+                fs_scenario::acoustic::BendingRelaxationBranch {
+                    relaxing_stiffness_n_m2: 0.0,
+                    relaxation_time_s: 1.0e-9,
+                },
+                fs_scenario::acoustic::BendingRelaxationBranch {
+                    relaxing_stiffness_n_m2: 0.03,
+                    relaxation_time_s: 0.01,
+                },
+            ],
             omega_band_rad_s: (1.0, 20_000.0),
             material_state_identity: None, // synthetic authored mechanics, no source claim
+            source_properties: None,
         });
         scene.duration_s = 0.04;
         scene.sample_rate_hz = 16_000;
@@ -1047,7 +1060,7 @@ fn g3_sls_memory_composes_with_body_ports_and_contact() {
             alpha: 2.0,
             mu_kinetic: if moving_end { 0.0 } else { 0.1 },
             internal_loss: 0.8,
-            provenance: "synthetic SLS contact".into(),
+            provenance: "synthetic Prony contact".into(),
         }];
         let contact = realize_assembly(&scene).unwrap();
         assert_eq!(
@@ -1089,13 +1102,13 @@ fn bow_stroke_is_a_live_excitation() {
 fn bending_stiffness_makes_partials_inharmonic() {
     let mut flex = nylon_like(80.0, 0.006);
     flex.n_modes = 4;
-    let mut stiff = flex;
+    let mut stiff = flex.clone();
     // Wound-string stand-in: E=200 GPa, r=0.6 mm → I=π r^4/4.
     // B = π² EI/(T L²) is then large enough that f2/f1 is obviously > 2.
     let r: f64 = 6.0e-4;
     stiff.bending_stiffness_n_m2 = 2.0e11 * core::f64::consts::PI * r.powi(4) / 4.0;
-    let r12_flex = string_mode_omega(flex, 2) / string_mode_omega(flex, 1);
-    let r12_stiff = string_mode_omega(stiff, 2) / string_mode_omega(stiff, 1);
+    let r12_flex = string_mode_omega(&flex, 2) / string_mode_omega(&flex, 1);
+    let r12_stiff = string_mode_omega(&stiff, 2) / string_mode_omega(&stiff, 1);
     assert!((r12_flex - 2.0).abs() < 1.0e-12);
     assert!(
         r12_stiff > 2.01,

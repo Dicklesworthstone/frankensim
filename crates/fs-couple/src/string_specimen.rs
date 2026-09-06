@@ -16,7 +16,9 @@ use fs_material::state_point::{
 };
 use fs_qty::{Density, Dims, DynViscosity, Pressure, QuantitySpec, Time};
 use fs_scenario::PrestressedString;
-use fs_scenario::acoustic::{BendingRelaxationBranch, BendingRelaxationProperties, KelvinVoigtBending, PronyBending};
+use fs_scenario::acoustic::{
+    BendingRelaxationBranch, BendingRelaxationProperties, KelvinVoigtBending, PronyBending,
+};
 
 use crate::acoustic_realize::AcousticRealizeError;
 
@@ -249,7 +251,10 @@ impl ResolvedStringSpecimen {
     /// # Errors
     /// Missing/invalid coefficients, repeated source pairs, conflicting loss
     /// laws, sampled curves, incompatible bands or unrepresentable stiffness.
-    pub fn with_prony_bending_loss(mut self, properties: &[BendingRelaxationProperties]) -> Result<Self, AcousticRealizeError> {
+    pub fn with_prony_bending_loss(
+        mut self,
+        properties: &[BendingRelaxationProperties],
+    ) -> Result<Self, AcousticRealizeError> {
         let refuse = |what| AcousticRealizeError::InvalidDescription { what };
         if self.string.rayleigh.is_some()
             || self.string.damping_ratio != 0.0
@@ -276,22 +281,33 @@ impl ResolvedStringSpecimen {
             YOUNG_MODULUS_PROPERTY,
             EQUILIBRIUM_YOUNG_MODULUS_PROPERTY,
         ];
-        let mut band = None;
+        let mut band = if properties.is_empty() {
+            Some(required_omega_band(
+                &self.material,
+                EQUILIBRIUM_YOUNG_MODULUS_PROPERTY,
+            )?)
+        } else {
+            None
+        };
         for (i, pair) in properties.iter().enumerate() {
             if properties[..i].contains(pair) {
                 return Err(refuse("relaxation spectrum repeats a source-property pair"));
             }
             let tau = required_positive(&self.material, &pair.relaxation_time, Time::DIMS)?;
-            let increment = self.material.property(&pair.modulus)
+            let increment = self
+                .material
+                .property(&pair.modulus)
                 .ok_or_else(|| refuse("relaxation spectrum is missing a selected modulus"))?;
             let delta = increment.value_si();
             if increment.requirement().quantity() != QuantitySpec::dimensional(Pressure::DIMS)
-                || !delta.is_finite() || delta < 0.0 {
-                return Err(refuse("relaxing bending modulus must be a nonnegative dimension-only scalar in Pa"));
+                || !delta.is_finite()
+                || delta < 0.0
+            {
+                return Err(refuse(
+                    "relaxing bending modulus must be a nonnegative dimension-only scalar in Pa",
+                ));
             }
-            let domain = self.material.property(&pair.relaxation_time).unwrap()
-                .answer().evidence.model.validity.bound("omega")
-                .ok_or_else(|| refuse("each relaxation time needs an explicit omega applicability band"))?;
+            let domain = required_omega_band(&self.material, &pair.relaxation_time)?;
             band = Some(intersect_band(band, domain));
             terms.push((delta, tau));
             keys.extend([pair.modulus.as_str(), pair.relaxation_time.as_str()]);
@@ -300,7 +316,9 @@ impl ResolvedStringSpecimen {
             let answer = self
                 .material
                 .property(key)
-                .ok_or_else(|| refuse("relaxation bending needs every selected material coefficient"))?
+                .ok_or_else(|| {
+                    refuse("relaxation bending needs every selected material coefficient")
+                })?
                 .answer();
             if answer.receipt.decision != EvaluationDecision::ConstantWithinValidity {
                 return Err(refuse(
@@ -311,19 +329,30 @@ impl ResolvedStringSpecimen {
                 band = Some(intersect_band(band, (lo, hi)));
             }
         }
-        let band = band.ok_or_else(|| refuse("relaxation bending needs an explicit omega applicability band"))?;
+        let band = band.ok_or_else(|| {
+            refuse("relaxation bending needs an explicit omega applicability band")
+        })?;
         if !(band.0.is_finite() && band.1.is_finite() && band.0 >= 0.0 && band.1 >= band.0) {
-            return Err(refuse("relaxation bending frequency bands do not intersect"));
+            return Err(refuse(
+                "relaxation bending frequency bands do not intersect",
+            ));
         }
         let model = fs_material::visco::GeneralizedMaxwell::new(equilibrium, terms)
             .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
-        let branches = model.terms.iter().map(|&(delta, tau)| {
-            let stiffness = delta * self.second_moment_m4;
-            if !stiffness.is_finite() || (delta > 0.0 && stiffness == 0.0) {
-                return Err(refuse("relaxation bending stiffness is unrepresentable"));
-            }
-            Ok(BendingRelaxationBranch { relaxing_stiffness_n_m2: stiffness, relaxation_time_s: tau })
-        }).collect::<Result<Vec<_>, _>>()?;
+        let branches = model
+            .terms
+            .iter()
+            .map(|&(delta, tau)| {
+                let stiffness = delta * self.second_moment_m4;
+                if !stiffness.is_finite() || (delta > 0.0 && stiffness == 0.0) {
+                    return Err(refuse("relaxation bending stiffness is unrepresentable"));
+                }
+                Ok(BendingRelaxationBranch {
+                    relaxing_stiffness_n_m2: stiffness,
+                    relaxation_time_s: tau,
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         self.string.relaxation_bending = Some(PronyBending {
             branches,
             omega_band_rad_s: band,
@@ -361,12 +390,7 @@ pub fn with_uniform_circular_material_state(
     state: &ResolvedMaterialStatePoint,
 ) -> Result<ResolvedStringSpecimen, AcousticRealizeError> {
     let prestress = StringPrestress::FixedTension(string.tension_n);
-    with_uniform_circular_material_and_prestress(
-        string,
-        radius_m,
-        state,
-        prestress,
-    )
+    with_uniform_circular_material_and_prestress(string, radius_m, state, prestress)
 }
 
 /// Bind current circular geometry and material, then resolve one mechanical
@@ -505,10 +529,13 @@ pub fn with_uniform_circular_material_and_constraints(
     if resolved.string.kelvin_voigt_bending.is_some() {
         resolved.with_kelvin_voigt_bending_loss()
     } else if let Some(law) = &resolved.string.relaxation_bending {
-        let properties = law.source_properties.clone().ok_or_else(|| refuse(
-            "rebinding a relaxation spectrum requires explicit source-property pairs"))?;
+        let properties = law.source_properties.clone().ok_or_else(|| {
+            refuse("rebinding a relaxation spectrum requires explicit source-property pairs")
+        })?;
         if properties.len() != law.branches.len() {
-            return Err(refuse("relaxation branches and source-property pairs disagree"));
+            return Err(refuse(
+                "relaxation branches and source-property pairs disagree",
+            ));
         }
         resolved.with_prony_bending_loss(&properties)
     } else {
@@ -566,6 +593,18 @@ fn resolve_prestress(
 
 fn intersect_band(band: Option<(f64, f64)>, next: (f64, f64)) -> (f64, f64) {
     band.map_or(next, |old| (old.0.max(next.0), old.1.min(next.1)))
+}
+
+fn required_omega_band(
+    state: &ResolvedMaterialStatePoint,
+    key: &str,
+) -> Result<(f64, f64), AcousticRealizeError> {
+    state
+        .property(key)
+        .and_then(|property| property.answer().evidence.model.validity.bound("omega"))
+        .ok_or(AcousticRealizeError::InvalidDescription {
+            what: "selected relaxation coefficient needs an explicit omega applicability band",
+        })
 }
 
 fn required_positive(

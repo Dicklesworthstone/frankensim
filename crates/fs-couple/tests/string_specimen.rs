@@ -21,6 +21,7 @@ use fs_qty::{
     Density, Dims, DynViscosity, Pressure, QuantitySpec, Time,
     semantic::{QuantityKind, SemanticType, ValueForm},
 };
+use fs_scenario::acoustic::BendingRelaxationProperties;
 use fs_scenario::{
     AcousticAssembly, AmbientGas, Listener, Pluck, PrestressedString, RayleighParams,
 };
@@ -53,6 +54,22 @@ fn state_with_domain(
     point: QueryPoint,
     curve_property: Option<&str>,
 ) -> ResolvedMaterialStatePoint {
+    state_with_property_domains(
+        name,
+        properties,
+        |_| validity.clone(),
+        point,
+        curve_property,
+    )
+}
+
+fn state_with_property_domains(
+    name: &str,
+    properties: &[(&str, QuantitySpec, f64)],
+    validity: impl Fn(&str) -> ValidityDomain,
+    point: QueryPoint,
+    curve_property: Option<&str>,
+) -> ResolvedMaterialStatePoint {
     let mut claims = ClaimSet::new();
     let mut requirements = Vec::new();
     for &(key, quantity, value) in properties {
@@ -72,7 +89,7 @@ fn state_with_domain(
                         dims: quantity.dims(),
                     }
                 },
-                validity: validity.clone(),
+                validity: validity(key),
                 uncertainty: UncertaintyModel::Unstated,
                 interpolation: if curve_property == Some(key) {
                     InterpolationPolicy::LinearInside
@@ -176,7 +193,7 @@ fn g1_circular_mass_and_stiffness_match_diameter_formulas_and_beam_modes() {
     for n in 1..=4 {
         let k = f64::from(n) * core::f64::consts::PI / 0.5;
         let omega = ((20.0 * k.powi(2) + 200.0e9 * moment * k.powi(4)) / (7800.0 * area)).sqrt();
-        close(string_mode_omega(string, n as usize), omega);
+        close(string_mode_omega(&string, n as usize), omega);
     }
 }
 
@@ -333,7 +350,7 @@ fn g3_fixed_mass_material_swap_reaches_pressure_with_bending_change() {
         };
         for n in 1..=4 {
             close(
-                string_mode_omega(specimen.string(), n) / core::f64::consts::TAU,
+                string_mode_omega(&specimen.string(), n) / core::f64::consts::TAU,
                 frequency(n as f64),
             );
         }
@@ -469,6 +486,377 @@ fn relaxing_material(
     )
 }
 
+fn prony_material(
+    terms: &[(f64, f64)],
+    curve: Option<&str>,
+) -> (ResolvedMaterialStatePoint, Vec<BendingRelaxationProperties>) {
+    let pairs: Vec<_> = (0..terms.len())
+        .map(|j| BendingRelaxationProperties {
+            modulus: format!("relaxing_bending_modulus_{j}"),
+            relaxation_time: format!("bending_relaxation_time_{j}"),
+        })
+        .collect();
+    let mut properties = vec![
+        ("density", QuantitySpec::dimensional(Density::DIMS), 1000.0),
+        (
+            "young_modulus",
+            QuantitySpec::dimensional(Pressure::DIMS),
+            2.0e9,
+        ),
+        (
+            EQUILIBRIUM_YOUNG_MODULUS_PROPERTY,
+            QuantitySpec::dimensional(Pressure::DIMS),
+            2.0e9,
+        ),
+    ];
+    for (pair, &(delta, tau)) in pairs.iter().zip(terms) {
+        properties.push((
+            pair.modulus.as_str(),
+            QuantitySpec::dimensional(Pressure::DIMS),
+            delta,
+        ));
+        properties.push((
+            pair.relaxation_time.as_str(),
+            QuantitySpec::dimensional(Time::DIMS),
+            tau,
+        ));
+    }
+    let material = state_with_domain(
+        "synthetic Prony spectrum",
+        &properties,
+        ValidityDomain::unconstrained().with("omega", 1.0, 20_000.0),
+        QueryPoint::new().with("omega", 1.0).unwrap(),
+        curve,
+    );
+    (material, pairs)
+}
+
+#[test]
+fn g1_prony_material_binding_rebinds_every_selected_branch() {
+    let terms = [(1.0e10, 0.005), (0.0, 1.0e-9), (5.0e9, 0.02)];
+    let (material, pairs) = prony_material(&terms, None);
+    let specimen = with_uniform_circular_material_state(loss_template(), 0.002, &material)
+        .unwrap()
+        .with_prony_bending_loss(&pairs)
+        .unwrap();
+    let string = specimen.string();
+    let law = string.relaxation_bending.as_ref().unwrap();
+    assert_eq!(law.source_properties.as_ref(), Some(&pairs));
+    assert_eq!(law.material_state_identity, Some(material.identity()));
+    assert_eq!(specimen.material(), &material);
+    assert_eq!(law.branches.len(), 3);
+    for (branch, &(delta, tau)) in law.branches.iter().zip(&terms) {
+        if delta == 0.0 {
+            assert_eq!(branch.relaxing_stiffness_n_m2.to_bits(), 0.0_f64.to_bits());
+        } else {
+            close(
+                branch.relaxing_stiffness_n_m2,
+                delta * core::f64::consts::PI * 0.004_f64.powi(4) / 64.0,
+            );
+        }
+        close(branch.relaxation_time_s, tau);
+    }
+    let replacement_terms: Vec<_> = terms.iter().map(|&(e, t)| (2.0 * e, 3.0 * t)).collect();
+    let (replacement, _) = prony_material(&replacement_terms, None);
+    let rebound =
+        with_uniform_circular_material_state(string.clone(), 0.004, &replacement).unwrap();
+    let rebound_string = rebound.string();
+    let next = rebound_string.relaxation_bending.as_ref().unwrap();
+    for (before, after) in law.branches.iter().zip(&next.branches) {
+        if before.relaxing_stiffness_n_m2 == 0.0 {
+            assert_eq!(after.relaxing_stiffness_n_m2.to_bits(), 0.0_f64.to_bits());
+        } else {
+            close(
+                after.relaxing_stiffness_n_m2,
+                32.0 * before.relaxing_stiffness_n_m2,
+            );
+        }
+        close(after.relaxation_time_s, 3.0 * before.relaxation_time_s);
+    }
+    assert_eq!(next.material_state_identity, Some(replacement.identity()));
+    assert_eq!(next.source_properties.as_ref(), Some(&pairs));
+    for selectors in [None, Some(vec![])] {
+        let mut authored = string.clone();
+        authored
+            .relaxation_bending
+            .as_mut()
+            .unwrap()
+            .source_properties = selectors;
+        assert!(with_uniform_circular_material_state(authored, 0.004, &replacement).is_err());
+    }
+    let (missing_later_branch, _) = prony_material(&terms[..2], None);
+    assert!(with_uniform_circular_material_state(string, 0.002, &missing_later_branch).is_err());
+}
+
+#[test]
+fn g0_prony_material_refuses_bad_later_sources_and_duplicate_pairs() {
+    let terms = [(1.0e10, 0.005), (5.0e9, 0.02)];
+    let (material, pairs) = prony_material(&terms, None);
+    let base = with_uniform_circular_material_state(loss_template(), 0.002, &material).unwrap();
+    assert!(
+        base.clone()
+            .with_prony_bending_loss(&[pairs[0].clone(), pairs[0].clone()])
+            .is_err()
+    );
+    let mut missing = pairs.clone();
+    missing[1].relaxation_time = "absent_time".into();
+    assert!(base.clone().with_prony_bending_loss(&missing).is_err());
+    missing[1] = pairs[1].clone();
+    missing[1].modulus = "absent_modulus".into();
+    assert!(base.with_prony_bending_loss(&missing).is_err());
+    for key in [&pairs[1].modulus, &pairs[1].relaxation_time] {
+        let (curve, _) = prony_material(&terms, Some(key));
+        assert!(
+            with_uniform_circular_material_state(loss_template(), 0.002, &curve)
+                .unwrap()
+                .with_prony_bending_loss(&pairs)
+                .is_err()
+        );
+    }
+    let (empty, _) = prony_material(&[], None);
+    let elastic = with_uniform_circular_material_state(loss_template(), 0.002, &empty)
+        .unwrap()
+        .with_prony_bending_loss(&[])
+        .unwrap();
+    let (zero, pair) = prony_material(&[(0.0, 1.0e-9)], None);
+    let zero = with_uniform_circular_material_state(loss_template(), 0.002, &zero)
+        .unwrap()
+        .with_prony_bending_loss(&pair)
+        .unwrap();
+    assert_eq!(
+        pressure(elastic.string()),
+        pressure(zero.string()),
+        "zero branches add no memory state or loss"
+    );
+}
+
+#[test]
+fn g0_prony_binding_intersects_all_sources_and_requires_declared_time_bands() {
+    let properties = [
+        ("density", QuantitySpec::dimensional(Density::DIMS), 1000.0),
+        (
+            "young_modulus",
+            QuantitySpec::dimensional(Pressure::DIMS),
+            2.0e9,
+        ),
+        (
+            EQUILIBRIUM_YOUNG_MODULUS_PROPERTY,
+            QuantitySpec::dimensional(Pressure::DIMS),
+            2.0e9,
+        ),
+        ("delta_a", QuantitySpec::dimensional(Pressure::DIMS), 1.0e10),
+        ("tau_a", QuantitySpec::dimensional(Time::DIMS), 0.005),
+        ("delta_b", QuantitySpec::dimensional(Pressure::DIMS), 5.0e9),
+        ("tau_b", QuantitySpec::dimensional(Time::DIMS), 0.02),
+    ];
+    let pairs = [
+        BendingRelaxationProperties {
+            modulus: "delta_a".into(),
+            relaxation_time: "tau_a".into(),
+        },
+        BendingRelaxationProperties {
+            modulus: "delta_b".into(),
+            relaxation_time: "tau_b".into(),
+        },
+    ];
+    for omitted in [
+        None,
+        Some("tau_b"),
+        Some(EQUILIBRIUM_YOUNG_MODULUS_PROPERTY),
+    ] {
+        let material = state_with_property_domains(
+            "individual Prony domains",
+            &properties,
+            |key| {
+                if Some(key) == omitted {
+                    return ValidityDomain::unconstrained();
+                }
+                let (lo, hi) = match key {
+                    "density" => (200.0, 800.0),
+                    "delta_b" => (100.0, 900.0),
+                    "tau_b" => (50.0, 1000.0),
+                    _ => (1.0, 1200.0),
+                };
+                ValidityDomain::unconstrained().with("omega", lo, hi)
+            },
+            QueryPoint::new().with("omega", 250.0).unwrap(),
+            None,
+        );
+        let base = with_uniform_circular_material_state(loss_template(), 0.002, &material).unwrap();
+        let bound = base.clone().with_prony_bending_loss(&pairs);
+        if omitted == Some("tau_b") {
+            assert!(bound.is_err(), "the second arm needs its own band");
+        } else {
+            assert_eq!(
+                bound
+                    .unwrap()
+                    .string()
+                    .relaxation_bending
+                    .unwrap()
+                    .omega_band_rad_s,
+                (200.0, 800.0)
+            );
+        }
+        if omitted == Some(EQUILIBRIUM_YOUNG_MODULUS_PROPERTY) {
+            assert!(
+                base.with_prony_bending_loss(&[]).is_err(),
+                "empty spectrum cannot borrow a density-only band"
+            );
+        }
+    }
+}
+
+#[test]
+fn g0_prony_admission_checks_total_stiffness_and_each_active_rate() {
+    let (material, pairs) = prony_material(&[(1.0e10, 0.005); 3], None);
+    let mut string = with_uniform_circular_material_state(loss_template(), 0.002, &material)
+        .unwrap()
+        .with_prony_bending_loss(&pairs)
+        .unwrap()
+        .string();
+    let w = string_mode_omega(&string, 1);
+    string.relaxation_bending.as_mut().unwrap().omega_band_rad_s = (0.9 * w, 1.2 * w);
+    assert!(
+        realize_assembly(&assembly(string.clone())).is_err(),
+        "sum exceeds band"
+    );
+    let mut single = string.clone();
+    single
+        .relaxation_bending
+        .as_mut()
+        .unwrap()
+        .branches
+        .truncate(1);
+    assert!(
+        realize_assembly(&assembly(single)).is_ok(),
+        "each branch alone fits"
+    );
+    let law = string.relaxation_bending.as_mut().unwrap();
+    law.omega_band_rad_s = (1.0, 20_000.0);
+    law.branches[2].relaxation_time_s = 1.0e-9;
+    assert!(
+        realize_assembly(&assembly(string.clone()))
+            .unwrap_err()
+            .to_string()
+            .contains("dt/tau")
+    );
+    string.relaxation_bending.as_mut().unwrap().branches[2].relaxing_stiffness_n_m2 = 0.0;
+    assert!(
+        realize_assembly(&assembly(string)).is_ok(),
+        "zero stiffness has no active pole"
+    );
+}
+
+#[test]
+fn g1_prony_pressure_converges_to_independent_hereditary_dynamics() {
+    let terms = [(1.0e10, 0.005), (5.0e9, 0.02)];
+    let (material, pairs) = prony_material(&terms, None);
+    let mut string = with_uniform_circular_material_state(loss_template(), 0.002, &material)
+        .unwrap()
+        .with_prony_bending_loss(&pairs)
+        .unwrap()
+        .string();
+    string.axial_stiffness_n = 0.0;
+    let mut errors = Vec::new();
+    for rate in [8_000, 16_000] {
+        let mut scene = assembly(string.clone());
+        scene.duration_s = 0.12;
+        scene.sample_rate_hz = rate;
+        let output = realize_assembly(&scene).unwrap();
+        // Independent physical displacement + hereditary strain coordinates,
+        // integrated by RK4; no pHS structure, memory scaling or stepper reused.
+        let pi = core::f64::consts::PI;
+        let k = pi / string.length_m;
+        let bend_factor = string.width_m.powi(2) * k.powi(4) / (16.0 * 1000.0);
+        let w2 = string.tension_n * k * k / string.lin_density_kg_m + 2.0e9 * bend_factor;
+        let a = [terms[0].0 * bend_factor, terms[1].0 * bend_factor];
+        let gas = output.gas;
+        let drag = (2.0 * pi * gas.dynamic_viscosity
+            + 2.0
+                * pi
+                * string.width_m
+                * (gas.dynamic_viscosity * gas.density * w2.sqrt() / 2.0).sqrt())
+            / string.lin_density_kg_m;
+        let rhs = |x: [f64; 4]| {
+            [
+                x[1],
+                -w2 * x[0] - drag * x[1] - a[0] * (x[0] - x[2]) - a[1] * (x[0] - x[3]),
+                (x[0] - x[2]) / terms[0].1,
+                (x[0] - x[3]) / terms[1].1,
+            ]
+        };
+        let q0 = 8.0 * scene.pluck.unwrap().height_m / pi.powi(2);
+        let mut x = [q0, 0.0, q0, q0]; // held until fully relaxed
+        let h = 1.0 / (f64::from(rate) * 16.0);
+        let weight = gas.density * string.width_m * string.length_m
+            / (2.0 * pi.powi(2) * scene.listener.distance_m);
+        let mut reference = Vec::with_capacity(output.pressure_pa.len());
+        for _ in &output.pressure_pa {
+            for _ in 0..16 {
+                let k1 = rhs(x);
+                let k2 = rhs(core::array::from_fn(|i| x[i] + 0.5 * h * k1[i]));
+                let k3 = rhs(core::array::from_fn(|i| x[i] + 0.5 * h * k2[i]));
+                let k4 = rhs(core::array::from_fn(|i| x[i] + h * k3[i]));
+                x = core::array::from_fn(|i| {
+                    x[i] + h * (k1[i] + 2.0 * k2[i] + 2.0 * k3[i] + k4[i]) / 6.0
+                });
+            }
+            reference.push(weight * rhs(x)[1]);
+        }
+        // The shared propagation operator is outside this constitutive check;
+        // apply it to both histories, after independent mechanical integration.
+        fs_couple::air_path::absorb_pressure_history(
+            &mut reference,
+            1.0 / f64::from(rate),
+            scene.listener.distance_m,
+            &gas,
+            scene.ambient.relative_humidity,
+        );
+        let (mut error, mut norm) = (0.0, 0.0);
+        for (pressure, expected) in output.pressure_pa.iter().zip(reference) {
+            error += (pressure - expected).powi(2);
+            norm += expected.powi(2);
+        }
+        errors.push((error / norm).sqrt());
+    }
+    assert!(errors[1] < 5.0e-4, "pressure error {errors:?}");
+    assert!(
+        errors[1] < 0.3 * errors[0],
+        "second-order refinement {errors:?}"
+    );
+    eprintln!("G1 Prony relative RMS pressure error at 8/16 kHz: {errors:?}");
+}
+
+#[test]
+fn g3_prony_branch_permutation_and_equivalent_splitting_preserve_pressure() {
+    let run = |terms: &[(f64, f64)]| {
+        let (material, pairs) = prony_material(terms, None);
+        let mut string = with_uniform_circular_material_state(loss_template(), 0.002, &material)
+            .unwrap()
+            .with_prony_bending_loss(&pairs)
+            .unwrap()
+            .string();
+        string.polarization_detune = 0.01;
+        pressure(string)
+    };
+    let base = run(&[(1.0e10, 0.005), (5.0e9, 0.02)]);
+    for equivalent in [
+        run(&[(5.0e9, 0.02), (1.0e10, 0.005)]),
+        run(&[(4.0e9, 0.005), (0.0, 1.0e-9), (5.0e9, 0.02), (6.0e9, 0.005)]),
+    ] {
+        let error: f64 = base
+            .iter()
+            .zip(&equivalent)
+            .map(|(a, b)| (a - b).powi(2))
+            .sum();
+        let norm: f64 = base.iter().map(|a| a * a).sum();
+        assert!(
+            (error / norm).sqrt() < 1.0e-7,
+            "equivalent spectra changed pressure"
+        );
+    }
+}
+
 #[test]
 fn g1_sls_material_binding_recomputes_geometry_and_preserves_sources() {
     let material = relaxing_material(1.0e10, 0.005, (1.0, 20_000.0), None);
@@ -478,10 +866,10 @@ fn g1_sls_material_binding_recomputes_geometry_and_preserves_sources() {
         .unwrap();
     let law = specimen.string().relaxation_bending.unwrap();
     close(
-        law.relaxing_stiffness_n_m2,
+        law.branches[0].relaxing_stiffness_n_m2,
         1.0e10 * core::f64::consts::PI * 0.004_f64.powi(4) / 64.0,
     );
-    close(law.relaxation_time_s, 0.005);
+    close(law.branches[0].relaxation_time_s, 0.005);
     assert_eq!(law.material_state_identity, Some(material.identity()));
     assert_eq!(specimen.material(), &material);
     assert!(
@@ -497,10 +885,10 @@ fn g1_sls_material_binding_recomputes_geometry_and_preserves_sources() {
         with_uniform_circular_material_state(specimen.string(), 0.004, &replacement).unwrap();
     let new_law = rebound.string().relaxation_bending.unwrap();
     close(
-        new_law.relaxing_stiffness_n_m2 / law.relaxing_stiffness_n_m2,
+        new_law.branches[0].relaxing_stiffness_n_m2 / law.branches[0].relaxing_stiffness_n_m2,
         32.0,
     );
-    close(new_law.relaxation_time_s, 0.01);
+    close(new_law.branches[0].relaxation_time_s, 0.01);
     assert_eq!(
         new_law.material_state_identity,
         Some(replacement.identity())
@@ -606,8 +994,8 @@ fn g0_sls_realization_checks_instantaneous_band_nyquist_and_polarizations() {
         .with_standard_linear_solid_bending_loss()
         .unwrap()
         .string();
-    let w = string_mode_omega(string, 1);
-    let mut narrow = string;
+    let w = string_mode_omega(&string, 1);
+    let mut narrow = string.clone();
     narrow
         .relaxation_bending
         .as_mut()
@@ -618,17 +1006,17 @@ fn g0_sls_realization_checks_instantaneous_band_nyquist_and_polarizations() {
         realize_assembly(&assembly(narrow)).is_err(),
         "instantaneous stiffness exceeds admitted band"
     );
-    let mut valid = string;
+    let mut valid = string.clone();
     valid.relaxation_bending.as_mut().unwrap().omega_band_rad_s = (0.9 * w, 1.2 * w);
-    assert!(realize_assembly(&assembly(valid)).is_ok());
+    assert!(realize_assembly(&assembly(valid.clone())).is_ok());
     for modified in [
         PrestressedString {
             n_modes: 2,
-            ..valid
+            ..valid.clone()
         },
         PrestressedString {
             polarization_detune: 0.5,
-            ..valid
+            ..valid.clone()
         },
         PrestressedString {
             moving_end: true,
@@ -637,17 +1025,13 @@ fn g0_sls_realization_checks_instantaneous_band_nyquist_and_polarizations() {
         PrestressedString {
             moving_end: true,
             polarization_detune: 0.01,
-            ..string
+            ..string.clone()
         },
     ] {
         assert!(realize_assembly(&assembly(modified)).is_err());
     }
-    let mut too_stiff = string;
-    too_stiff
-        .relaxation_bending
-        .as_mut()
-        .unwrap()
-        .relaxing_stiffness_n_m2 *= 1.0e6;
+    let mut too_stiff = string.clone();
+    too_stiff.relaxation_bending.as_mut().unwrap().branches[0].relaxing_stiffness_n_m2 *= 1.0e6;
     too_stiff
         .relaxation_bending
         .as_mut()
@@ -658,8 +1042,8 @@ fn g0_sls_realization_checks_instantaneous_band_nyquist_and_polarizations() {
         realize_assembly(&assembly(too_stiff)).is_err(),
         "material band cannot license aliased modes"
     );
-    let mut fast = string;
-    fast.relaxation_bending.as_mut().unwrap().relaxation_time_s = 1.0e-6;
+    let mut fast = string.clone();
+    fast.relaxation_bending.as_mut().unwrap().branches[0].relaxation_time_s = 1.0e-6;
     assert!(
         realize_assembly(&assembly(fast))
             .unwrap_err()
@@ -675,6 +1059,7 @@ fn g0_sls_realization_checks_instantaneous_band_nyquist_and_polarizations() {
         .relaxation_bending
         .as_mut()
         .unwrap()
+        .branches[0]
         .relaxation_time_s = 0.05;
     assert!(
         realize_assembly(&coarse)
@@ -700,7 +1085,7 @@ fn g1_sls_pressure_pitch_and_decay_match_independent_characteristic_roots() {
             if !nonlinear {
                 string.axial_stiffness_n = 0.0;
             }
-            let mut scene = assembly(string);
+            let mut scene = assembly(string.clone());
             scene.sample_rate_hz = 16_000;
             scene.duration_s = 0.4;
             let output = realize_assembly(&scene).unwrap();
@@ -858,7 +1243,7 @@ fn g3_material_viscosity_changes_pressure_decay_without_changing_elastic_modes()
                 assert_eq!(omega.to_bits(), first);
             }
             reference_frequency = Some(omega.to_bits());
-            let mut scene = assembly(string);
+            let mut scene = assembly(string.clone());
             scene.sample_rate_hz = 16_000;
             scene.duration_s = 0.4;
             let output = realize_assembly(&scene).unwrap();
@@ -996,7 +1381,7 @@ fn g0_material_bending_loss_does_not_freeze_a_sampled_frequency_curve() {
 #[test]
 fn g0_material_bending_loss_checks_every_retained_frequency_and_polarization() {
     let omega = string_mode_omega(
-        with_uniform_circular_material_state(
+        &with_uniform_circular_material_state(
             loss_template(),
             0.0005,
             &elastic("base", 1000.0, 2.0e9),
@@ -1015,15 +1400,15 @@ fn g0_material_bending_loss_checks_every_retained_frequency_and_polarization() {
         .with_kelvin_voigt_bending_loss()
         .unwrap()
         .string();
-    assert!(realize_assembly(&assembly(string)).is_ok());
+    assert!(realize_assembly(&assembly(string.clone())).is_ok());
     for modified in [
         PrestressedString {
             n_modes: 2,
-            ..string
+            ..string.clone()
         },
         PrestressedString {
             polarization_detune: 0.5,
-            ..string
+            ..string.clone()
         },
         PrestressedString {
             moving_end: true,
@@ -1096,7 +1481,7 @@ fn g0_binding_refuses_missing_wrong_dimension_and_unrepresentable_inputs() {
         with_uniform_circular_material_state(
             PrestressedString {
                 tension_n: f64::INFINITY,
-                ..original
+                ..original.clone()
             },
             0.0005,
             &material,
@@ -1237,7 +1622,7 @@ fn g1_prestress_prescriptions_preserve_material_authority_and_solve_beam_tension
         - core::f64::consts::PI.powi(2) * 2.0e9 * moment / 0.5_f64.powi(2);
     close(tuned.string().tension_n, expected_tension);
     close(
-        string_mode_omega(tuned.string(), 1) / core::f64::consts::TAU,
+        string_mode_omega(&tuned.string(), 1) / core::f64::consts::TAU,
         160.0,
     );
     assert_eq!(tuned.prestress(), target);
@@ -1307,7 +1692,7 @@ fn g0_prestress_refuses_slack_overstrain_invalid_targets_and_moving_end_mismatch
     let material = elastic("valid", 1000.0, 2.0e9);
     let original = template();
     let bind = |prestress| {
-        with_uniform_circular_material_and_prestress(original, 0.0005, &material, prestress)
+        with_uniform_circular_material_and_prestress(original.clone(), 0.0005, &material, prestress)
     };
     for invalid in [0.0, -1.0, f64::NAN, f64::INFINITY] {
         assert!(bind(StringPrestress::FixedTension(invalid)).is_err());
@@ -1348,11 +1733,11 @@ fn g0_prestress_refuses_slack_overstrain_invalid_targets_and_moving_end_mismatch
     }
     let moving = PrestressedString {
         moving_end: true,
-        ..original
+        ..original.clone()
     };
     assert!(
         with_uniform_circular_material_and_prestress(
-            moving,
+            moving.clone(),
             0.0005,
             &material,
             StringPrestress::FixedTension(20.0),
@@ -1367,8 +1752,13 @@ fn g0_prestress_refuses_slack_overstrain_invalid_targets_and_moving_end_mismatch
         },
     ] {
         assert!(
-            with_uniform_circular_material_and_prestress(moving, 0.0005, &material, prestress,)
-                .is_err()
+            with_uniform_circular_material_and_prestress(
+                moving.clone(),
+                0.0005,
+                &material,
+                prestress,
+            )
+            .is_err()
         );
     }
     assert_eq!(original, template());

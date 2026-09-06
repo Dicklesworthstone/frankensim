@@ -52,9 +52,12 @@ flagships.
   data only. Material resolution, band admission and modal projection live in
   `fs-couple`; no instrument-specific or second viscoelastic solver is introduced.
   `PrestressedString::relaxation_bending` instead declares a
-  `StandardLinearSolidBending`: equilibrium EI remains on the string, with an
-  additional relaxing EI, positive relaxation time, frequency band and optional
-  source identity. It selects causal bending memory, excludes other authored
+  `PronyBending`: equilibrium EI remains on the string, with an owned spectrum
+  of nonnegative relaxing EI / positive relaxation-time branches, a frequency
+  band, optional source identity and explicit source-property pairs for rebinding.
+  Empty and zero-strength spectra are elastic. `PrestressedString` is cloneable
+  and borrowed by the realizer; it is no longer `Copy`. The spectrum selects
+  causal bending memory, excludes other authored
   material loss laws, and retains separate air drag. The first realizer assumes
   a fully relaxed held pluck and fixed material state; axial relaxation and
   arbitrary pre-release loading histories are not represented by this descriptor.

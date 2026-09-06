@@ -428,46 +428,58 @@ pressure decay against an independent diameter-form expression in all three
 solver paths, including zero-viscosity air-only decay. G0 covers unavailable
 data, wrong quantities, sampled frequency curves, duplicate losses and out-of-band modes.
 
-This rung models linear bending strain-rate loss only. It does not supply axial
-viscosity, general Prony spectra, amplitude-dependent loss, time-evolving material
+This Kelvin–Voigt choice models linear bending strain-rate loss only. It does not supply axial
+viscosity, material memory, amplitude-dependent loss, time-evolving material
 state, thermoelastic/joint/radiation dissipation, or measured material validation.
 The modal applicability check concerns reference frequencies; nonlinear
 frequency shifts and generated harmonics are not an in-band certificate. The
 existing moving-end cosine approximation and compact observer remain unchanged.
 
-`with_standard_linear_solid_bending_loss` binds one causal Maxwell bending arm
-from `equilibrium_young_modulus` [Pa], `relaxing_bending_modulus` [Pa] and
-`bending_relaxation_time` [s]. The explicit equilibrium modulus must equal the
+`with_prony_bending_loss` binds a causal generalized Maxwell bending spectrum
+from explicit modulus [Pa] / relaxation-time [s] property pairs and
+`equilibrium_young_modulus` [Pa]. `with_standard_linear_solid_bending_loss`
+selects the single `relaxing_bending_modulus` / `bending_relaxation_time` pair
+through that same binding. The explicit equilibrium modulus must equal the
 Young's modulus used to derive EA/EI; a sampled dynamic modulus cannot silently
-be treated as an equilibrium value. All five coefficients, including density,
-must be dimension-only validity-wide constants. The relaxation-time claim must
-declare an `omega` band, intersected with all other coefficient bands. Geometry
-rebinding recomputes delta EI and replaces the source identity and time constant.
+be treated as an equilibrium value. All selected coefficients, including density,
+must be dimension-only validity-wide constants. Every relaxation-time claim must
+declare an `omega` band, intersected with all other coefficient bands. An empty
+spectrum is explicitly elastic and requires an equilibrium-modulus band. Geometry
+or material rebinding resolves every retained source pair again, recomputing
+each delta EI and replacing the source identity and time constants. Missing or
+mismatched selectors refuse rebinding; duplicate source pairs refuse binding.
 These are resolved inputs, not measured-material validation.
 
-Each mass-normalized modal coordinate receives a generic `fs-phs` relaxation arm
-with `a = delta EI k^4/mu`: `q'' + c q' + omega0^2 q + a(q-v)=force`,
-`v'=(q-v)/tau`. This is the internal-strain standard-linear-solid formulation
+Each mass-normalized modal coordinate receives generic `fs-phs` relaxation arms
+with `a_j = delta EI_j k^4/mu`: `q'' + c q' + omega0^2 q + sum_j a_j(q-v_j)=force`,
+`v_j'=(q-v_j)/tau_j`. This is the internal-strain generalized Maxwell formulation
 described in [Bleyer's viscoelasticity tutorial](https://bleyerj.github.io/comet-fenicsx/tours/nonlinear_problems/linear_viscoelasticity_jax/linear_viscoelasticity_jax.html),
 projected onto the existing beam modes. Nonlinear axial storage, contact ports,
 body joins and pressure observation use the same augmented pHS state. A held
-pluck initializes `v=q`, representing full relaxation before release. The
-material arm produces storage dispersion and dissipation together; no PCM decay
+pluck initializes every `v_j=q`, representing full relaxation before release.
+Positive-strength branches add memory states in branch-major, mode-major order;
+zero-strength branches retain source selection but add no state or active pole.
+The owned spectrum is borrowed throughout the audio loop. These
+material arms produce storage dispersion and dissipation together; no PCM decay
 envelope or substitute modal damping ratio implements it.
 
 Admission checks both relaxed and instantaneous reference frequencies against
-the material band and Nyquist guard, including fixed-end detuned polarizations.
+the material band and Nyquist guard, using the sum of all branch stiffnesses
+and including fixed-end detuned polarizations.
 Moving-end secondary polarization refuses on this path. Kelvin–Voigt, Rayleigh
-and nonzero authored internal loss cannot be combined with the SLS descriptor;
+and nonzero authored internal loss cannot be combined with the Prony descriptor;
 air drag remains separate at the relaxed reference frequency. G0/G1 tests cover
-sample-clock admission (`dt/tau <= 0.1` for a nonzero arm and
+sample-clock admission (`dt/tau_j <= 0.1` for every nonzero arm and
 `dt*omega_instant <= 0.1`, otherwise increase sample rate),
 source/quantity/band refusals, geometry rebinding and actual pressure pitch/decay
 against independent characteristic-polynomial roots in fixed linear, nonlinear
-and moving-end realizations. This is one bending arm at a fixed state, not
-arbitrary sourced spectra, axial creep, evolving temperature, phase change,
-or an in-band certificate for nonlinear harmonics. The generic pHS primitive
-supports multiple arms; this string descriptor intentionally declares one.
+and moving-end realizations. Multi-arm G1 pressure is compared with independently
+integrated hereditary-strain dynamics and checked for second-order refinement;
+G3 checks equivalent branch splitting/permutation, zero-arm omission, detuned
+polarizations, and body/contact composition in fixed and moving-end paths.
+This remains linear bending memory at a fixed state. No measured spectrum fit,
+axial creep, evolving temperature, phase change, arbitrary pre-release loading,
+or in-band certificate for nonlinear harmonics is supplied.
 
 ### `acoustic_realize` / `pcm_wav`
 

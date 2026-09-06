@@ -127,14 +127,18 @@ pub fn realize_assembly(
         });
     }
     let gas = gas_state(assembly.ambient)?;
-    if let Some(string) = assembly.string.filter(|s| s.relaxation_bending.is_some()) {
+    if let Some(string) = assembly
+        .string
+        .as_ref()
+        .filter(|s| s.relaxation_bending.is_some())
+    {
         validate_relaxation_modes(string, assembly.sample_rate_hz)?;
     }
     let n = sample_count(assembly.sample_rate_hz, assembly.duration_s)?;
     let mut pressure_pa = vec![0.0; n];
     let mut bodies = plate_bank(assembly.soundboard, &assembly.body_modes, assembly.plate)?;
     bodies.attach_radiation_loads(&gas, assembly.sample_rate_hz);
-    let dirac_base = assembly.string.is_some_and(|s| s.moving_end);
+    let dirac_base = assembly.string.as_ref().is_some_and(|s| s.moving_end);
     let dirac_string_only = dirac_base && assembly.duct.is_none();
     let dirac_string_duct = dirac_base
         && assembly.duct.is_some()
@@ -149,7 +153,7 @@ pub fn realize_assembly(
         bodies.attach_cavity(cavity, &gas)?;
     }
     if dirac_string_duct {
-        let string = assembly.string.expect("checked");
+        let string = assembly.string.as_ref().expect("checked");
         if assembly.pluck.is_none() && assembly.bow.is_none() {
             return Err(AcousticRealizeError::InvalidDescription {
                 what: "a string member requires a pluck or a bow",
@@ -185,7 +189,7 @@ pub fn realize_assembly(
         }
         return realize_coupled(assembly, &gas, &mut bodies, n);
     }
-    if let Some(string) = assembly.string {
+    if let Some(string) = &assembly.string {
         if assembly.pluck.is_none() && assembly.bow.is_none() {
             return Err(AcousticRealizeError::InvalidDescription {
                 what: "a string member requires a pluck or a bow",
@@ -272,7 +276,8 @@ fn realize_coupled_ode(
     plates: &mut PlateBank,
     n: usize,
 ) -> Result<RealizedAssembly, AcousticRealizeError> {
-    let string = assembly.string.expect("checked");
+    let string = assembly.string.as_ref().expect("checked");
+    let twin = secondary_string(string, (1.0 + string.polarization_detune).powi(2));
     let duct = assembly.duct.as_ref().expect("checked");
     if assembly.pluck.is_none() && assembly.bow.is_none() {
         return Err(AcousticRealizeError::InvalidDescription {
@@ -340,12 +345,8 @@ fn realize_coupled_ode(
             1.0,
         )?];
         if string.polarization_detune > 0.0 {
-            let mut twin = string;
-            twin.polarization_detune = 0.0;
-            twin.tension_n *=
-                (1.0 + string.polarization_detune) * (1.0 + string.polarization_detune);
             members.push(kc_string_member(
-                twin,
+                &twin,
                 assembly.pluck,
                 assembly.bow,
                 &assembly.obstacles,
@@ -359,15 +360,7 @@ fn realize_coupled_ode(
             let mut p_string = 0.0;
             let mut fb = 0.0;
             for (idx, member) in members.iter_mut().enumerate() {
-                let member_string = if idx == 0 {
-                    string
-                } else {
-                    let mut twin = string;
-                    twin.polarization_detune = 0.0;
-                    twin.tension_n *=
-                        (1.0 + string.polarization_detune) * (1.0 + string.polarization_detune);
-                    twin
-                };
+                let member_string = if idx == 0 { string } else { &twin };
                 let (p_m, q_phys) = step_kc_member(
                     member,
                     assembly.bow,
@@ -408,11 +401,8 @@ fn realize_coupled_ode(
         1.0,
     )?];
     if string.polarization_detune > 0.0 {
-        let mut twin = string;
-        twin.polarization_detune = 0.0;
-        twin.tension_n *= (1.0 + string.polarization_detune) * (1.0 + string.polarization_detune);
         members.push(linear_string_member(
-            twin,
+            &twin,
             assembly.pluck,
             assembly.bow,
             gas,
@@ -426,15 +416,7 @@ fn realize_coupled_ode(
         let mut p_string = 0.0;
         let mut fb = 0.0;
         for (idx, member) in members.iter_mut().enumerate() {
-            let member_string = if idx == 0 {
-                string
-            } else {
-                let mut twin = string;
-                twin.polarization_detune = 0.0;
-                twin.tension_n *=
-                    (1.0 + string.polarization_detune) * (1.0 + string.polarization_detune);
-                twin
-            };
+            let member_string = if idx == 0 { string } else { &twin };
             p_string += step_linear_member(
                 member,
                 assembly.bow,
@@ -611,7 +593,8 @@ fn realize_coupled(
 ) -> Result<RealizedAssembly, AcousticRealizeError> {
     use crate::driving_point::characteristic_line;
     use crate::reed_bore::solve_reed_wave;
-    let string = assembly.string.expect("checked");
+    let string = assembly.string.as_ref().expect("checked");
+    let twin = secondary_string(string, (1.0 + string.polarization_detune).powi(2));
     let duct = assembly.duct.as_ref().expect("checked");
     if assembly.pluck.is_none() && assembly.bow.is_none() {
         return Err(AcousticRealizeError::InvalidDescription {
@@ -667,11 +650,8 @@ fn realize_coupled(
         1.0,
     )?];
     if string.polarization_detune > 0.0 {
-        let mut twin = string;
-        twin.polarization_detune = 0.0;
-        twin.tension_n *= (1.0 + string.polarization_detune) * (1.0 + string.polarization_detune);
         members.push(linear_string_member(
-            twin,
+            &twin,
             assembly.pluck,
             assembly.bow,
             gas,
@@ -687,15 +667,7 @@ fn realize_coupled(
         let mut p_string = 0.0;
         let mut fb = 0.0;
         for (idx, member) in members.iter_mut().enumerate() {
-            let member_string = if idx == 0 {
-                string
-            } else {
-                let mut twin = string;
-                twin.polarization_detune = 0.0;
-                twin.tension_n *=
-                    (1.0 + string.polarization_detune) * (1.0 + string.polarization_detune);
-                twin
-            };
+            let member_string = if idx == 0 { string } else { &twin };
             p_string += step_linear_member(
                 member,
                 assembly.bow,
@@ -769,7 +741,8 @@ fn realize_coupled_kc(
     texture: &mut TextureDrive,
 ) -> Result<RealizedAssembly, AcousticRealizeError> {
     use crate::reed_bore::solve_reed_wave;
-    let string = assembly.string.expect("checked");
+    let string = assembly.string.as_ref().expect("checked");
+    let twin = secondary_string(string, (1.0 + string.polarization_detune).powi(2));
     let listener_m = assembly.listener.distance_m;
     let mut members = vec![kc_string_member(
         string,
@@ -781,11 +754,8 @@ fn realize_coupled_kc(
         1.0,
     )?];
     if string.polarization_detune > 0.0 {
-        let mut twin = string;
-        twin.polarization_detune = 0.0;
-        twin.tension_n *= (1.0 + string.polarization_detune) * (1.0 + string.polarization_detune);
         members.push(kc_string_member(
-            twin,
+            &twin,
             assembly.pluck,
             assembly.bow,
             &assembly.obstacles,
@@ -802,15 +772,7 @@ fn realize_coupled_kc(
         let mut p_string = 0.0;
         let mut fb = 0.0;
         for (idx, member) in members.iter_mut().enumerate() {
-            let member_string = if idx == 0 {
-                string
-            } else {
-                let mut twin = string;
-                twin.polarization_detune = 0.0;
-                twin.tension_n *=
-                    (1.0 + string.polarization_detune) * (1.0 + string.polarization_detune);
-                twin
-            };
+            let member_string = if idx == 0 { string } else { &twin };
             let (p_m, q_phys) = step_kc_member(
                 member,
                 assembly.bow,
@@ -945,7 +907,7 @@ fn sample_count(rate_hz: u32, duration_s: f64) -> Result<usize, AcousticRealizeE
 
 /// Prestressed Euler–Bernoulli frequency of sine mode `k` (1-based).
 #[must_use]
-pub fn string_mode_omega(string: PrestressedString, k: usize) -> f64 {
+pub fn string_mode_omega(string: &PrestressedString, k: usize) -> f64 {
     prestressed_beam_omega(
         string.length_m,
         string.tension_n,
@@ -971,7 +933,7 @@ struct StringObserver {
 }
 
 impl StringObserver {
-    fn new(string: PrestressedString, gas: &GasState, range: f64, scale: f64) -> Self {
+    fn new(string: &PrestressedString, gas: &GasState, range: f64, scale: f64) -> Self {
         let pi = core::f64::consts::PI;
         let mass_scale = det::sqrt(string.lin_density_kg_m * string.length_m / 2.0);
         let factor = scale * gas.density * string.width_m / (4.0 * pi * range * mass_scale);
@@ -1025,7 +987,7 @@ impl StringObserver {
 }
 
 fn assemble_kc(
-    string: PrestressedString,
+    string: &PrestressedString,
     storage: fs_nlmodal::SosModalStorage,
     zetas: &[f64],
     obstacles: &[UnilateralObstacle],
@@ -1045,7 +1007,7 @@ fn assemble_kc(
 }
 
 fn mode_zeta(
-    string: PrestressedString,
+    string: &PrestressedString,
     omega: f64,
     wave_number: f64,
     gas: &GasState,
@@ -1137,7 +1099,7 @@ fn mode_zeta(
 
 /// Authored `ζ` at the fundamental becomes one Prony branch; higher
 /// modes see `η(ω)/2` from that branch, not a constant ratio.
-fn prony_internal_zeta(string: PrestressedString, omega: f64) -> f64 {
+fn prony_internal_zeta(string: &PrestressedString, omega: f64) -> f64 {
     let z0 = string.damping_ratio;
     if !(z0 > 0.0 && z0 < 0.49) {
         return z0.max(0.0);
@@ -1148,30 +1110,30 @@ fn prony_internal_zeta(string: PrestressedString, omega: f64) -> f64 {
         .map_or(z0, |gm| 0.5 * gm.loss_factor(omega))
 }
 
-fn relaxing_mode_stiffness(string: PrestressedString, k: usize) -> f64 {
+fn relaxing_mode_stiffness(string: &PrestressedString, stiffness_n_m2: f64, k: usize) -> f64 {
     let order = k as f64 + if string.moving_end { 0.5 } else { 1.0 };
     let wave_number = order * core::f64::consts::PI / string.length_m;
-    string
-        .relaxation_bending
-        .map_or(0.0, |law| law.relaxing_stiffness_n_m2)
-        * wave_number.powi(4)
-        / string.lin_density_kg_m
+    stiffness_n_m2 * wave_number.powi(4) / string.lin_density_kg_m
 }
 
 fn validate_relaxation_modes(
-    string: PrestressedString,
+    string: &PrestressedString,
     sample_rate: u32,
 ) -> Result<(), AcousticRealizeError> {
-    let law = string.relaxation_bending.expect("selected relaxation law");
+    let law = string
+        .relaxation_bending
+        .as_ref()
+        .expect("selected relaxation law");
     let refuse = || AcousticRealizeError::InvalidDescription {
         what: "relaxation bending needs finite coefficients, exclusive losses, and admitted relaxed/instantaneous modal frequencies below Nyquist",
     };
     let (lo, hi) = law.omega_band_rad_s;
-    if !(law.relaxing_stiffness_n_m2.is_finite()
-        && law.relaxing_stiffness_n_m2 >= 0.0
-        && law.relaxation_time_s.is_finite()
-        && law.relaxation_time_s > 0.0
-        && lo.is_finite()
+    if !(law.branches.iter().all(|branch| {
+        branch.relaxing_stiffness_n_m2.is_finite()
+            && branch.relaxing_stiffness_n_m2 >= 0.0
+            && branch.relaxation_time_s.is_finite()
+            && branch.relaxation_time_s > 0.0
+    }) && lo.is_finite()
         && hi.is_finite()
         && lo >= 0.0
         && hi >= lo)
@@ -1191,7 +1153,10 @@ fn validate_relaxation_modes(
     // below 0.1%; Nyquist alone admits severely warped/stiff transients.
     // This reference check is not a bound on nonlinear or coupled spectra.
     let reference_rate_limit = 0.1 * f64::from(sample_rate);
-    if law.relaxing_stiffness_n_m2 > 0.0 && 1.0 / law.relaxation_time_s > reference_rate_limit {
+    if law.branches.iter().any(|branch| {
+        branch.relaxing_stiffness_n_m2 > 0.0
+            && 1.0 / branch.relaxation_time_s > reference_rate_limit
+    }) {
         return Err(AcousticRealizeError::InvalidDescription {
             what: "sample rate does not resolve bending relaxation: require dt/tau <= 0.1; increase sample rate",
         });
@@ -1199,18 +1164,19 @@ fn validate_relaxation_modes(
     let guard = ModalAcousticTimeBudget::audible_reference().nyquist_guard_fraction
         * core::f64::consts::PI
         * f64::from(sample_rate);
-    let mut member = string;
+    let mut member = string.clone();
+    let total_stiffness = law.branches.iter().map(|b| b.relaxing_stiffness_n_m2).sum();
     for polarization in 0..=usize::from(string.polarization_detune > 0.0) {
         if polarization == 1 {
             member.tension_n *= (1.0 + string.polarization_detune).powi(2);
         }
         for k in 0..string.n_modes {
             let relaxed = if string.moving_end {
-                moving_end_omega(member, k)
+                moving_end_omega(&member, k)
             } else {
-                string_mode_omega(member, k + 1)
+                string_mode_omega(&member, k + 1)
             };
-            let increment = relaxing_mode_stiffness(member, k);
+            let increment = relaxing_mode_stiffness(&member, total_stiffness, k);
             let instant = det::sqrt(relaxed * relaxed + increment);
             if !(relaxed.is_finite()
                 && relaxed > 0.0
@@ -1234,39 +1200,58 @@ fn validate_relaxation_modes(
 }
 
 fn with_bending_relaxation(
-    string: PrestressedString,
+    string: &PrestressedString,
     sys: fs_phs::PortHamiltonian,
 ) -> Result<fs_phs::PortHamiltonian, AcousticRealizeError> {
-    let Some(law) = string
-        .relaxation_bending
-        .filter(|law| law.relaxing_stiffness_n_m2 > 0.0)
-    else {
+    let Some(law) = &string.relaxation_bending else {
         return Ok(sys);
     };
-    let branches = (0..string.n_modes)
-        .map(|k| {
+    let mut branches = Vec::new();
+    // Branch-major, then mode-major: the initializer uses this same order.
+    for branch in law
+        .branches
+        .iter()
+        .filter(|b| b.relaxing_stiffness_n_m2 > 0.0)
+    {
+        for k in 0..string.n_modes {
             let mut projection = vec![0.0; sys.state_dim()];
             projection[2 * k] = 1.0;
-            fs_phs::RelaxationBranch {
+            branches.push(fs_phs::RelaxationBranch {
                 projection,
-                stiffness: relaxing_mode_stiffness(string, k),
-                relaxation_time_s: law.relaxation_time_s,
-            }
-        })
-        .collect();
+                stiffness: relaxing_mode_stiffness(string, branch.relaxing_stiffness_n_m2, k),
+                relaxation_time_s: branch.relaxation_time_s,
+            });
+        }
+    }
     sys.with_relaxation_branches(branches)
         .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))
 }
 
-fn initialize_relaxed_bending(string: PrestressedString, x: &mut [f64]) {
-    if string
-        .relaxation_bending
-        .is_some_and(|law| law.relaxing_stiffness_n_m2 > 0.0)
+fn initialize_relaxed_bending(string: &PrestressedString, x: &mut [f64]) {
+    let Some(law) = &string.relaxation_bending else {
+        return;
+    };
+    for (j, branch) in law
+        .branches
+        .iter()
+        .filter(|b| b.relaxing_stiffness_n_m2 > 0.0)
+        .enumerate()
     {
         for k in 0..string.n_modes {
-            x[2 * string.n_modes + k] = det::sqrt(relaxing_mode_stiffness(string, k)) * x[2 * k];
+            x[(2 + j) * string.n_modes + k] = det::sqrt(relaxing_mode_stiffness(
+                string,
+                branch.relaxing_stiffness_n_m2,
+                k,
+            )) * x[2 * k];
         }
     }
+}
+
+fn secondary_string(string: &PrestressedString, tension_scale: f64) -> PrestressedString {
+    let mut twin = string.clone();
+    twin.polarization_detune = 0.0;
+    twin.tension_n *= tension_scale;
+    twin
 }
 
 /// Two-way Dirac realize: moving-end waveguide ⊕ plate ⊕ optional
@@ -1279,7 +1264,7 @@ fn initialize_relaxed_bending(string: PrestressedString, x: &mut [f64]) {
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_lines)] // one coherent realization
 fn realize_dirac_join(
-    string: PrestressedString,
+    string: &PrestressedString,
     pluck: Option<Pluck>,
     bow: Option<BowStroke>,
     obstacles: &[UnilateralObstacle],
@@ -1505,7 +1490,7 @@ fn realize_dirac_join(
 }
 
 fn moving_end_string_phs(
-    string: PrestressedString,
+    string: &PrestressedString,
     zetas: &[f64],
     bow: Option<BowStroke>,
     obs_stations: &[f64],
@@ -1565,7 +1550,7 @@ fn leftover_u(
     sys: &fs_phs::DescriptorPortHamiltonian,
     x: &[f64],
     n_s: usize,
-    string: PrestressedString,
+    string: &PrestressedString,
     bow: Option<BowStroke>,
     obstacles: &[UnilateralObstacle],
     reed: Option<BeatingReed>,
@@ -1626,7 +1611,7 @@ fn leftover_u_ode(
     sys: &fs_phs::PortHamiltonian,
     x: &[f64],
     n_s: usize,
-    string: PrestressedString,
+    string: &PrestressedString,
     bow: Option<BowStroke>,
     obstacles: &[UnilateralObstacle],
     reed: Option<BeatingReed>,
@@ -1685,7 +1670,7 @@ fn leftover_u_ode(
     Ok(u)
 }
 
-fn moving_end_opening(string: PrestressedString, x: &[f64], n_s: usize, station: f64) -> f64 {
+fn moving_end_opening(string: &PrestressedString, x: &[f64], n_s: usize, station: f64) -> f64 {
     let phi0 = det::sqrt(2.0 / (string.lin_density_kg_m * string.length_m));
     let mut y = 0.0;
     for k in 0..n_s {
@@ -1696,7 +1681,7 @@ fn moving_end_opening(string: PrestressedString, x: &[f64], n_s: usize, station:
     y
 }
 
-fn moving_end_omega(string: PrestressedString, k_zero: usize) -> f64 {
+fn moving_end_omega(string: &PrestressedString, k_zero: usize) -> f64 {
     let n = k_zero as f64 + 0.5;
     let wave = det::sqrt(string.tension_n / string.lin_density_kg_m);
     let omega = n * core::f64::consts::PI * wave / string.length_m;
@@ -1708,7 +1693,7 @@ fn moving_end_omega(string: PrestressedString, k_zero: usize) -> f64 {
     omega * det::sqrt(1.0 + inharm * n * n)
 }
 
-fn free_fixed_pluck_modal(pluck: Pluck, string: PrestressedString, k_zero: usize) -> f64 {
+fn free_fixed_pluck_modal(pluck: Pluck, string: &PrestressedString, k_zero: usize) -> f64 {
     let l = string.length_m;
     let s = pluck.station_frac * l;
     let h = pluck.height_m;
@@ -1784,7 +1769,7 @@ fn helmholtz_flow_cavity(
 #[allow(clippy::too_many_arguments)] // one coherent realization record
 #[allow(clippy::needless_range_loop)] // modal index spans state and shape arrays
 fn realize_string(
-    string: PrestressedString,
+    string: &PrestressedString,
     pluck: Option<Pluck>,
     bow: Option<BowStroke>,
     texture: Option<ContactTexture>,
@@ -1833,7 +1818,7 @@ fn realize_string(
 }
 
 fn validate_string(
-    string: PrestressedString,
+    string: &PrestressedString,
     pluck: Option<Pluck>,
     bow: Option<BowStroke>,
 ) -> Result<(), AcousticRealizeError> {
@@ -1882,7 +1867,7 @@ fn validate_string(
 
 #[allow(clippy::too_many_arguments)]
 fn realize_linear_string(
-    string: PrestressedString,
+    string: &PrestressedString,
     pluck: Option<Pluck>,
     bow: Option<BowStroke>,
     texture: Option<ContactTexture>,
@@ -1894,6 +1879,7 @@ fn realize_linear_string(
     n: usize,
     twin_tension: Option<f64>,
 ) -> Result<Vec<f64>, AcousticRealizeError> {
+    let twin = secondary_string(string, twin_tension.unwrap_or(1.0));
     let mut texture = TextureDrive::try_new(texture)?;
     let mut members = vec![linear_string_member(
         string,
@@ -1904,12 +1890,9 @@ fn realize_linear_string(
         sample_rate_hz,
         1.0,
     )?];
-    if let Some(scale) = twin_tension {
-        let mut twin = string;
-        twin.polarization_detune = 0.0;
-        twin.tension_n *= scale;
+    if twin_tension.is_some() {
         members.push(linear_string_member(
-            twin,
+            &twin,
             pluck,
             bow,
             gas,
@@ -1925,16 +1908,7 @@ fn realize_linear_string(
         let mut p = 0.0;
         let mut fb = 0.0;
         for (idx, member) in members.iter_mut().enumerate() {
-            let member_string = if idx == 0 {
-                string
-            } else {
-                let mut twin = string;
-                twin.polarization_detune = 0.0;
-                if let Some(scale) = twin_tension {
-                    twin.tension_n *= scale;
-                }
-                twin
-            };
+            let member_string = if idx == 0 { string } else { &twin };
             p += step_linear_member(member, bow, &mut texture, obstacles, member_string, dt)?;
             if !plates.is_empty() {
                 let q_phys: Vec<f64> = member
@@ -1961,7 +1935,7 @@ struct LinearMember {
 }
 
 fn linear_string_member(
-    string: PrestressedString,
+    string: &PrestressedString,
     pluck: Option<Pluck>,
     bow: Option<BowStroke>,
     gas: &GasState,
@@ -2026,7 +2000,7 @@ fn step_linear_member(
     bow: Option<BowStroke>,
     texture: &mut TextureDrive,
     obstacles: &[UnilateralObstacle],
-    string: PrestressedString,
+    string: &PrestressedString,
     dt: f64,
 ) -> Result<f64, AcousticRealizeError> {
     let mut force = vec![0.0; string.n_modes];
@@ -2085,7 +2059,7 @@ fn advance_linear_member(
 
 #[allow(clippy::too_many_arguments)]
 fn realize_kc_string(
-    string: PrestressedString,
+    string: &PrestressedString,
     pluck: Option<Pluck>,
     bow: Option<BowStroke>,
     texture: Option<ContactTexture>,
@@ -2097,16 +2071,14 @@ fn realize_kc_string(
     n: usize,
     twin_tension: Option<f64>,
 ) -> Result<Vec<f64>, AcousticRealizeError> {
+    let twin = secondary_string(string, twin_tension.unwrap_or(1.0));
     let mut texture = TextureDrive::try_new(texture)?;
     let mut members = vec![kc_string_member(
         string, pluck, bow, obstacles, gas, listener_m, 1.0,
     )?];
-    if let Some(scale) = twin_tension {
-        let mut twin = string;
-        twin.polarization_detune = 0.0;
-        twin.tension_n *= scale;
+    if twin_tension.is_some() {
         members.push(kc_string_member(
-            twin, pluck, bow, obstacles, gas, listener_m, 0.85,
+            &twin, pluck, bow, obstacles, gas, listener_m, 0.85,
         )?);
     }
     let dt = 1.0 / f64::from(sample_rate_hz);
@@ -2115,16 +2087,7 @@ fn realize_kc_string(
         let mut p = 0.0;
         let mut fb = 0.0;
         for (idx, member) in members.iter_mut().enumerate() {
-            let member_string = if idx == 0 {
-                string
-            } else {
-                let mut twin = string;
-                twin.polarization_detune = 0.0;
-                if let Some(scale) = twin_tension {
-                    twin.tension_n *= scale;
-                }
-                twin
-            };
+            let member_string = if idx == 0 { string } else { &twin };
             let (p_m, q_phys) =
                 step_kc_member(member, bow, &mut texture, obstacles, member_string, gas, dt)?;
             p += p_m;
@@ -2147,7 +2110,7 @@ struct KcMember {
 }
 
 fn kc_string_member(
-    string: PrestressedString,
+    string: &PrestressedString,
     pluck: Option<Pluck>,
     _bow: Option<BowStroke>,
     obstacles: &[UnilateralObstacle],
@@ -2226,7 +2189,7 @@ fn step_kc_member(
     bow: Option<BowStroke>,
     texture: &mut TextureDrive,
     obstacles: &[UnilateralObstacle],
-    string: PrestressedString,
+    string: &PrestressedString,
     _gas: &GasState,
     dt: f64,
 ) -> Result<(f64, Vec<f64>), AcousticRealizeError> {
@@ -2430,7 +2393,7 @@ fn plate_bank(
     Ok(out)
 }
 
-fn bridge_force(string: PrestressedString, q_phys: &[f64]) -> f64 {
+fn bridge_force(string: &PrestressedString, q_phys: &[f64]) -> f64 {
     let pi = core::f64::consts::PI;
     let mut slope = 0.0;
     let mut stretch = 0.0;
@@ -3035,7 +2998,7 @@ mod string_observer_tests {
             moving_end: false,
         };
         let gas = gas_state(AmbientGas::sea_level()).unwrap();
-        let mut member = linear_string_member(string, None, None, &gas, 1.0, 8_000, 1.0).unwrap();
+        let mut member = linear_string_member(&string, None, None, &gas, 1.0, 8_000, 1.0).unwrap();
         let force = [1.0, 2.0];
         member.model.initialize_static_equilibrium(&force).unwrap();
         assert!(
