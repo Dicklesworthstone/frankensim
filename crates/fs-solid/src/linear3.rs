@@ -30,12 +30,15 @@ use crate::linear::Jacobi;
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::Cx;
 use fs_material::OrthotropicElastic;
-pub use fs_material::state_point::{ElasticTensorBasis, ElasticTensorNotation, ElasticTensorOrder};
 use fs_material::state_point::{
-    ElasticTensorStatePoint, IntegratedIsotropicThermalExpansion, IsotropicElasticStatePoint,
-    IsotropicSolidStatePoint, OrthotropicElasticStatePoint,
+    CorrelationUnknownReason, ElasticTensorStatePoint, IntegratedIsotropicThermalExpansion,
+    IsotropicElasticStatePoint, IsotropicSolidStatePoint, JointCorrelation,
+    JointStrainTensorStatePoint, OrthotropicElasticStatePoint, StrainTensorStatePoint,
 };
-pub use fs_material::tensor::{StrainTensorBasis, StrainTensorNotation};
+pub use fs_material::state_point::{ElasticTensorBasis, ElasticTensorNotation, ElasticTensorOrder};
+pub use fs_material::tensor::{
+    StrainTensorBasis, StrainTensorNotation, StressTensorBasis, StressTensorNotation,
+};
 use fs_solver::krylov::CgState;
 use fs_solver::op::{CsrOp, LinearOp};
 use fs_sparse::{Coo, Csr};
@@ -516,7 +519,216 @@ impl ThermalStrainTransformReceipt {
     }
 }
 
+/// Conditional second moments in the target frame, with source correlation
+/// retained. Stiffness, frame rotation and temperatures are treated as fixed;
+/// covariance alone does not bound realizations inside the material domain.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ThermalStrainUncertainty {
+    Covariance {
+        /// Dimensionless squared; target Mandel strain coordinate order.
+        strain_mandel: [[f64; 6]; 6],
+        /// Pa squared; covariance of C * epsilon_free in target Mandel order.
+        free_stress_mandel_pa2: [[f64; 6]; 6],
+    },
+    Unknown {
+        reason: CorrelationUnknownReason,
+    },
+}
+
+/// An executable nominal thermal state and its conditional strain/stress
+/// covariance. This is a linear second-moment transform, not a confidence band
+/// or a claim of independently measured, calibrated material behavior.
+#[derive(Debug, Clone, PartialEq)]
+pub struct JointThermalStrainTransformReceipt {
+    nominal: ThermalStrainTransformReceipt,
+    uncertainty: ThermalStrainUncertainty,
+    source_joint_identity: ContentHash,
+    identity: ContentHash,
+}
+
+impl JointThermalStrainTransformReceipt {
+    #[must_use]
+    pub const fn nominal(&self) -> &ThermalStrainTransformReceipt {
+        &self.nominal
+    }
+    #[must_use]
+    pub const fn uncertainty(&self) -> &ThermalStrainUncertainty {
+        &self.uncertainty
+    }
+    #[must_use]
+    pub const fn source_joint_identity(&self) -> ContentHash {
+        self.source_joint_identity
+    }
+    #[must_use]
+    pub const fn identity(&self) -> ContentHash {
+        self.identity
+    }
+}
+
+// Fixed 6x6 tile, no unbounded allocation or iteration. Source covariance has
+// already been admitted by fs-matdb. Pairwise publication retains exact output
+// symmetry; no eigenvalue clipping or independence assumption repairs input.
+fn transform_covariance6(
+    map: &[[f64; 6]; 6],
+    source: &[[f64; 6]; 6],
+) -> Result<[[f64; 6]; 6], TetElasticError> {
+    let mut left = [[0.0; 6]; 6];
+    for i in 0..6 {
+        for j in 0..6 {
+            for k in 0..6 {
+                left[i][j] = map[i][k].mul_add(source[k][j], left[i][j]);
+            }
+        }
+    }
+    let mut output = [[0.0; 6]; 6];
+    for i in 0..6 {
+        for j in i..6 {
+            let mut value = 0.0;
+            for k in 0..6 {
+                value = left[i][k].mul_add(map[j][k], value);
+            }
+            if !value.is_finite() || (i == j && value < 0.0) {
+                return Err(TetElasticError::InvalidThermalStrain {
+                    what: "covariance transform is nonfinite or has a negative variance",
+                });
+            }
+            output[i][j] = value;
+            output[j][i] = value;
+        }
+    }
+    if source.iter().flatten().any(|v| *v != 0.0) && output.iter().flatten().all(|v| *v == 0.0) {
+        return Err(TetElasticError::InvalidThermalStrain {
+            what: "covariance transform loses the complete nonzero covariance",
+        });
+    }
+    Ok(output)
+}
+
 impl TetThermalStrainState {
+    /// Propagate source joint strain statistics through a fixed proper rotation
+    /// and fixed admitted stiffness. This computes A Sigma A^T, preserving all
+    /// correlations. Unknown source correlation remains unknown. Upstream must
+    /// still declare/admit the integrated stress-free temperature path.
+    pub fn try_from_joint_strain(
+        elastic: &ElasticTensorTransformReceipt,
+        strain: &JointStrainTensorStatePoint,
+        temperature_k: f64,
+        reference_temperature_k: f64,
+        source_to_target: [[f64; 3]; 3],
+        maximum_absolute_mandel_strain: f64,
+    ) -> Result<JointThermalStrainTransformReceipt, TetElasticError> {
+        let nominal = Self::try_from_resolved_strain(
+            elastic,
+            strain.nominal(),
+            temperature_k,
+            reference_temperature_k,
+            source_to_target,
+            maximum_absolute_mandel_strain,
+        )?;
+        let uncertainty = match &strain.joint_receipt().correlation {
+            JointCorrelation::Unknown { reason } => {
+                ThermalStrainUncertainty::Unknown { reason: *reason }
+            }
+            JointCorrelation::Covariance { covariance, .. } => {
+                let source = core::array::from_fn(|i| {
+                    core::array::from_fn(|j| {
+                        let hi = i.max(j);
+                        let lo = i.min(j);
+                        covariance[hi * (hi + 1) / 2 + lo]
+                    })
+                });
+                let basis = strain.nominal().basis();
+                let order = match basis.order {
+                    ElasticTensorOrder::XxYyZzXyYzZx => [0, 1, 2, 3, 4, 5],
+                    ElasticTensorOrder::XxYyZzYzZxXy => [0, 1, 2, 5, 3, 4],
+                };
+                let shear = match basis.notation {
+                    StrainTensorNotation::Tensor => core::f64::consts::SQRT_2,
+                    StrainTensorNotation::Engineering => core::f64::consts::FRAC_1_SQRT_2,
+                    StrainTensorNotation::Mandel => 1.0,
+                };
+                let rotation =
+                    if source_to_target == [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]] {
+                        core::array::from_fn(|i| {
+                            core::array::from_fn(|j| if i == j { 1.0 } else { 0.0 })
+                        })
+                    } else {
+                        mandel_rotation(source_to_target)
+                    };
+                let mut map = [[0.0; 6]; 6];
+                for row in 0..6 {
+                    for column in 0..6 {
+                        map[row][order[column]] =
+                            rotation[row][column] * if column < 3 { 1.0 } else { shear };
+                    }
+                }
+                let strain_mandel = transform_covariance6(&map, &source)?;
+                let free_stress_mandel_pa2 = transform_covariance6(
+                    elastic.material().stiffness_mandel_pa(),
+                    &strain_mandel,
+                )?;
+                ThermalStrainUncertainty::Covariance {
+                    strain_mandel,
+                    free_stress_mandel_pa2,
+                }
+            }
+        };
+        let source_joint_identity = strain.identity();
+        let mut identity =
+            DomainHasher::new("org.frankensim.fs-solid.joint-thermal-strain-transform.v1");
+        identity.update(nominal.state().identity().as_bytes());
+        identity.update(source_joint_identity.as_bytes());
+        match &uncertainty {
+            ThermalStrainUncertainty::Unknown { reason } => {
+                identity.update(&[0]);
+                identity.update(reason.tag().as_bytes());
+            }
+            ThermalStrainUncertainty::Covariance {
+                strain_mandel,
+                free_stress_mandel_pa2,
+            } => {
+                identity.update(&[1]);
+                for value in strain_mandel
+                    .iter()
+                    .flatten()
+                    .chain(free_stress_mandel_pa2.iter().flatten())
+                {
+                    identity.update(&value.to_bits().to_le_bytes());
+                }
+            }
+        }
+        Ok(JointThermalStrainTransformReceipt {
+            nominal,
+            uncertainty,
+            source_joint_identity,
+            identity: identity.finalize(),
+        })
+    }
+
+    /// Use all six source-backed strain components and bind their selected
+    /// claims/query point to the thermal state. The caller declares these to be
+    /// stress-free strain already integrated over the supplied temperature path;
+    /// point support alone does not establish that integration or path support.
+    pub fn try_from_resolved_strain(
+        elastic: &ElasticTensorTransformReceipt,
+        strain: &StrainTensorStatePoint,
+        temperature_k: f64,
+        reference_temperature_k: f64,
+        source_to_target: [[f64; 3]; 3],
+        maximum_absolute_mandel_strain: f64,
+    ) -> Result<ThermalStrainTransformReceipt, TetElasticError> {
+        Self::try_from_oriented_strain(
+            elastic,
+            temperature_k,
+            reference_temperature_k,
+            *strain.strain(),
+            strain.basis(),
+            source_to_target,
+            strain.resolved().identity(),
+            maximum_absolute_mandel_strain,
+        )
+    }
+
     /// Rotate an upstream-integrated symmetric strain into the elastic frame.
     ///
     /// This applies the SECOND-order law `epsilon' = Q epsilon Q^T`.
@@ -898,6 +1110,7 @@ pub struct TetThermalDisplacementSolution {
     /// Identity binding thermal load, solve controls, and result.
     identity: ContentHash,
     reference_geometry_identity: ContentHash,
+    response_input_identity: ContentHash,
 }
 
 impl TetThermalDisplacementSolution {
@@ -920,6 +1133,204 @@ impl TetThermalDisplacementSolution {
     }
 
     /// Complete solution identity.
+    #[must_use]
+    pub const fn identity(&self) -> ContentHash {
+        self.identity
+    }
+}
+
+/// Constant P1 element response in the reference mesh's Mandel coordinates.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TetElementThermalStress {
+    elastic_strain_mandel: [f64; 6],
+    stress_mandel_pa: [f64; 6],
+    elastic_energy_j: f64,
+}
+
+impl TetElementThermalStress {
+    /// Compatible total strain minus the integrated stress-free strain.
+    #[must_use]
+    pub const fn elastic_strain_mandel(&self) -> &[f64; 6] {
+        &self.elastic_strain_mandel
+    }
+    /// Actual `C * (B u - epsilon_free)`, not the equivalent thermal-load stress.
+    #[must_use]
+    pub const fn stress_mandel_pa(&self) -> &[f64; 6] {
+        &self.stress_mandel_pa
+    }
+    #[must_use]
+    pub const fn elastic_energy_j(&self) -> f64 {
+        self.elastic_energy_j
+    }
+}
+
+/// Physical stress and nodal equilibrium of an accepted thermal solution.
+/// The caller declares the mesh frame; this is not a calibrated frame claim.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TetThermalStressReport {
+    elements: Vec<TetElementThermalStress>,
+    nodal_internal_force_n: Vec<[f64; 3]>,
+    elastic_energy_j: f64,
+    mesh_frame: ContentHash,
+    solution_identity: ContentHash,
+    identity: ContentHash,
+}
+
+impl TetThermalStressReport {
+    #[must_use]
+    pub fn elements(&self) -> &[TetElementThermalStress] {
+        &self.elements
+    }
+    /// `integral B^T sigma dV`: support forces on fixed DOFs, equilibrium
+    /// residual on free DOFs. No residual entries are forcibly zeroed.
+    #[must_use]
+    pub fn nodal_internal_force_n(&self) -> &[[f64; 3]] {
+        &self.nodal_internal_force_n
+    }
+    #[must_use]
+    pub const fn elastic_energy_j(&self) -> f64 {
+        self.elastic_energy_j
+    }
+    #[must_use]
+    pub const fn mesh_frame(&self) -> ContentHash {
+        self.mesh_frame
+    }
+    #[must_use]
+    pub const fn solution_identity(&self) -> ContentHash {
+        self.solution_identity
+    }
+    #[must_use]
+    pub const fn identity(&self) -> ContentHash {
+        self.identity
+    }
+
+    /// Express an element's actual stress as `Q sigma Q^T`. Tensor and
+    /// engineering output use identical physical shear values, distinct from
+    /// engineering strain. The fixed 6x6 calculation has bounded work.
+    pub fn stress_in_frame(
+        &self,
+        element: usize,
+        target_basis: StressTensorBasis,
+        mesh_to_target: [[f64; 3]; 3],
+    ) -> Result<StressTensorTransformReceipt, TetElasticError> {
+        let source = self
+            .elements
+            .get(element)
+            .ok_or(TetElasticError::InvalidStressObservation {
+                what: "stress element index is outside the recovered field",
+            })?
+            .stress_mandel_pa;
+        if target_basis.frame == ContentHash([0; 32]) {
+            return Err(TetElasticError::InvalidStressObservation {
+                what: "target stress frame must not be zero",
+            });
+        }
+        validate_rotation(mesh_to_target)?;
+        let identity_rotation =
+            mesh_to_target == [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        if target_basis.frame == self.mesh_frame && !identity_rotation {
+            return Err(TetElasticError::InvalidStressObservation {
+                what: "a stress frame mapped to itself requires identity rotation",
+            });
+        }
+        let rotated = if identity_rotation {
+            source
+        } else {
+            let map = mandel_rotation(mesh_to_target);
+            core::array::from_fn(|i| (0..6).fold(0.0, |sum, j| map[i][j].mul_add(source[j], sum)))
+        };
+        let order = match target_basis.order {
+            ElasticTensorOrder::XxYyZzXyYzZx => [0, 1, 2, 3, 4, 5],
+            ElasticTensorOrder::XxYyZzYzZxXy => [0, 1, 2, 4, 5, 3],
+        };
+        let shear = match target_basis.notation {
+            StressTensorNotation::Tensor | StressTensorNotation::Engineering => {
+                core::f64::consts::FRAC_1_SQRT_2
+            }
+            StressTensorNotation::Mandel => 1.0,
+        };
+        let stress_pa: [f64; 6] =
+            core::array::from_fn(|i| rotated[order[i]] * if i < 3 { 1.0 } else { shear });
+        if stress_pa.iter().any(|v| !v.is_finite())
+            || (source.iter().any(|v| *v != 0.0) && stress_pa.iter().all(|v| *v == 0.0))
+        {
+            return Err(TetElasticError::InvalidStressObservation {
+                what: "stress rotation is nonfinite or loses the complete nonzero stress",
+            });
+        }
+        let mut identity = DomainHasher::new("org.frankensim.fs-solid.stress-frame-transform.v1");
+        identity.update(self.identity.as_bytes());
+        hash_usize(&mut identity, element)?;
+        identity.update(target_basis.frame.as_bytes());
+        identity.update(&[
+            match target_basis.notation {
+                StressTensorNotation::Tensor => 0,
+                StressTensorNotation::Engineering => 1,
+                StressTensorNotation::Mandel => 2,
+            },
+            match target_basis.order {
+                ElasticTensorOrder::XxYyZzXyYzZx => 0,
+                ElasticTensorOrder::XxYyZzYzZxXy => 1,
+            },
+        ]);
+        for value in mesh_to_target.iter().flatten().chain(stress_pa.iter()) {
+            identity.update(&value.to_bits().to_le_bytes());
+        }
+        Ok(StressTensorTransformReceipt {
+            source_report_identity: self.identity,
+            element,
+            source_frame: self.mesh_frame,
+            source_stress_mandel_pa: source,
+            target_basis,
+            source_to_target: mesh_to_target,
+            stress_pa,
+            identity: identity.finalize(),
+        })
+    }
+}
+
+/// Exact source stress, output coordinates and the second-order transform.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StressTensorTransformReceipt {
+    source_report_identity: ContentHash,
+    element: usize,
+    source_frame: ContentHash,
+    source_stress_mandel_pa: [f64; 6],
+    target_basis: StressTensorBasis,
+    source_to_target: [[f64; 3]; 3],
+    stress_pa: [f64; 6],
+    identity: ContentHash,
+}
+
+impl StressTensorTransformReceipt {
+    #[must_use]
+    pub const fn source_report_identity(&self) -> ContentHash {
+        self.source_report_identity
+    }
+    #[must_use]
+    pub const fn element(&self) -> usize {
+        self.element
+    }
+    #[must_use]
+    pub const fn source_frame(&self) -> ContentHash {
+        self.source_frame
+    }
+    #[must_use]
+    pub const fn source_stress_mandel_pa(&self) -> &[f64; 6] {
+        &self.source_stress_mandel_pa
+    }
+    #[must_use]
+    pub const fn target_basis(&self) -> StressTensorBasis {
+        self.target_basis
+    }
+    #[must_use]
+    pub const fn source_to_target(&self) -> &[[f64; 3]; 3] {
+        &self.source_to_target
+    }
+    #[must_use]
+    pub const fn stress_pa(&self) -> &[f64; 6] {
+        &self.stress_pa
+    }
     #[must_use]
     pub const fn identity(&self) -> ContentHash {
         self.identity
@@ -1028,6 +1439,10 @@ pub enum TetElasticError {
     },
     /// Expansion path and elastic tangent were resolved at different state points.
     ThermalElasticStatePointMismatch,
+    /// Stress recovery controls, transformed values or applicability failed.
+    InvalidStressObservation { what: &'static str },
+    /// Recovery was requested with a different mesh/material/thermal/load state.
+    StressRecoveryInputMismatch,
     /// Finite inputs produced a non-finite stress or nodal force.
     NonFiniteThermalLoad {
         /// Zero-based tetrahedron index.
@@ -1142,6 +1557,11 @@ impl core::fmt::Display for TetElasticError {
             Self::ThermalElasticStatePointMismatch => write!(
                 f,
                 "FS-SOLID-TET-THERMAL-ELASTIC-POINT: expansion and elasticity resolve different state points"
+            ),
+            Self::InvalidStressObservation { what } => write!(f, "FS-SOLID-TET-STRESS: {what}"),
+            Self::StressRecoveryInputMismatch => write!(
+                f,
+                "FS-SOLID-TET-STRESS-INPUT: solution belongs to different physical inputs"
             ),
             Self::NonFiniteThermalLoad { element, local_dof } => write!(
                 f,
@@ -1476,6 +1896,152 @@ impl TetLinearElasticProblem<'_> {
             true_relative_residual,
             identity: identity.finalize(),
             reference_geometry_identity: tet_geometry_identity(self.nodes_m, self.tetrahedra)?,
+            response_input_identity: self.thermal_response_input_identity(load.identity, cx)?,
+        })
+    }
+
+    // A caller-supplied material identity alone cannot detect changed numerical
+    // stiffness. Retain the actual law consumed by the solve, without changing
+    // the existing v1 thermal-load or displacement identity formats.
+    fn thermal_response_input_identity(
+        &self,
+        load_identity: ContentHash,
+        cx: &Cx<'_>,
+    ) -> Result<ContentHash, TetElasticError> {
+        let mut identity = DomainHasher::new("org.frankensim.fs-solid.thermal-response-input.v1");
+        identity.update(load_identity.as_bytes());
+        for element in 0..self.tetrahedra.len() {
+            cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
+            let material = self.materials.at(element);
+            identity.update(&material.density_kg_m3.to_bits().to_le_bytes());
+            for value in material.stiffness_mandel_pa.iter().flatten() {
+                identity.update(&value.to_bits().to_le_bytes());
+            }
+        }
+        Ok(identity.finalize())
+    }
+
+    /// Recover actual small-strain Cauchy stress, stored elastic energy and
+    /// nodal internal force from an accepted thermal solve. The caller names the
+    /// mesh coordinate frame and bounds both total and elastic Mandel strain.
+    /// No extrapolation to yield, finite strain or a confidence bound is implied.
+    /// Cancellation is polled before allocation and at every element; refusal
+    /// never publishes a partial field. The mesh/material/thermal/constraint
+    /// input must match the solved state, including the actual stiffness bits.
+    pub fn recover_thermal_stress(
+        &self,
+        solution: &TetThermalDisplacementSolution,
+        thermal_strains: TetThermalStrainField<'_>,
+        mesh_frame: ContentHash,
+        maximum_absolute_mandel_strain: f64,
+        cx: &Cx<'_>,
+    ) -> Result<TetThermalStressReport, TetElasticError> {
+        cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
+        if mesh_frame == ContentHash([0; 32])
+            || !(maximum_absolute_mandel_strain.is_finite() && maximum_absolute_mandel_strain > 0.0)
+        {
+            return Err(TetElasticError::InvalidStressObservation {
+                what: "mesh frame must be nonzero and strain ceiling must be finite and positive",
+            });
+        }
+        let load = self.assemble_thermal_load(thermal_strains, cx)?;
+        let inputs = self.thermal_response_input_identity(load.identity, cx)?;
+        if inputs != solution.response_input_identity
+            || solution.displacement_m.len() != self.nodes_m.len()
+        {
+            return Err(TetElasticError::StressRecoveryInputMismatch);
+        }
+        let mut elements = Vec::with_capacity(self.tetrahedra.len());
+        let mut nodal_internal_force_n = vec![[0.0; 3]; self.nodes_m.len()];
+        let mut elastic_energy_j = 0.0;
+        let mut identity = DomainHasher::new("org.frankensim.fs-solid.thermal-stress-recovery.v1");
+        identity.update(inputs.as_bytes());
+        identity.update(solution.identity.as_bytes());
+        identity.update(mesh_frame.as_bytes());
+        identity.update(&maximum_absolute_mandel_strain.to_bits().to_le_bytes());
+        for (element, tet) in self.tetrahedra.iter().enumerate() {
+            cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
+            let geometry = TetGeometry::try_new(
+                element,
+                tet.map(|node| self.nodes_m[node]),
+                self.budget.minimum_scaled_jacobian,
+            )?;
+            let b = strain_displacement_matrix(&geometry);
+            let total: [f64; 6] = core::array::from_fn(|i| {
+                (0..12).fold(0.0, |sum, d| {
+                    b[i][d].mul_add(solution.displacement_m[tet[d / 3]][d % 3], sum)
+                })
+            });
+            let elastic_strain_mandel: [f64; 6] = core::array::from_fn(|i| {
+                total[i] - thermal_strains.at(element).free_strain_mandel[i]
+            });
+            if total
+                .iter()
+                .chain(&elastic_strain_mandel)
+                .any(|v| !v.is_finite() || v.abs() > maximum_absolute_mandel_strain)
+            {
+                return Err(TetElasticError::InvalidStressObservation {
+                    what: "recovered total or elastic strain exceeds the admitted finite small-strain ceiling",
+                });
+            }
+            let material = self.materials.at(element);
+            let stress_mandel_pa: [f64; 6] = core::array::from_fn(|i| {
+                (0..6).fold(0.0, |sum, j| {
+                    material.stiffness_mandel_pa[i][j].mul_add(elastic_strain_mandel[j], sum)
+                })
+            });
+            let energy = (0..6).fold(0.0, |sum, i| {
+                elastic_strain_mandel[i].mul_add(stress_mandel_pa[i], sum)
+            }) * (0.5 * geometry.volume);
+            elastic_energy_j += energy;
+            if stress_mandel_pa.iter().any(|v| !v.is_finite())
+                || !elastic_energy_j.is_finite()
+                || !energy.is_finite()
+                || energy < 0.0
+            {
+                return Err(TetElasticError::InvalidStressObservation {
+                    what: "recovered stress or stored elastic energy is nonfinite or energy is negative",
+                });
+            }
+            for d in 0..12 {
+                let force = (0..6).fold(0.0, |sum, i| b[i][d].mul_add(stress_mandel_pa[i], sum))
+                    * geometry.volume;
+                let accumulated = &mut nodal_internal_force_n[tet[d / 3]][d % 3];
+                *accumulated += force;
+                if !accumulated.is_finite() {
+                    return Err(TetElasticError::InvalidStressObservation {
+                        what: "recovered nodal internal force is nonfinite",
+                    });
+                }
+            }
+            for value in elastic_strain_mandel
+                .iter()
+                .chain(&stress_mandel_pa)
+                .chain(core::iter::once(&energy))
+            {
+                identity.update(&value.to_bits().to_le_bytes());
+            }
+            elements.push(TetElementThermalStress {
+                elastic_strain_mandel,
+                stress_mandel_pa,
+                elastic_energy_j: energy,
+            });
+        }
+        for value in nodal_internal_force_n
+            .iter()
+            .flatten()
+            .chain(core::iter::once(&elastic_energy_j))
+        {
+            identity.update(&value.to_bits().to_le_bytes());
+        }
+        cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
+        Ok(TetThermalStressReport {
+            elements,
+            nodal_internal_force_n,
+            elastic_energy_j,
+            mesh_frame,
+            solution_identity: solution.identity,
+            identity: identity.finalize(),
         })
     }
 
@@ -2256,6 +2822,441 @@ mod tests {
         );
     }
 
+    fn portable_strain_pack(
+        basis: StrainTensorBasis,
+        strain: [f64; 6],
+        uncertainty: fs_matdb::UncertaintyModel,
+        covariance: Option<([[f64; 6]; 6], usize)>,
+    ) -> (
+        fs_matdb::NormalizedMaterialCardPack,
+        [fs_matdb::PropertyKey; 6],
+    ) {
+        use fs_matdb::{
+            ClaimSet, InterpolationPolicy, MaterialStateId, NormalizedMaterialCardPack,
+            NormalizedPack, ObservationDataset, PropertyClaim, PropertyKey, PropertyValue,
+            Provenance, StrainTensorComponent,
+        };
+        let mut claims = ClaimSet::new();
+        let provenance = Provenance {
+            source: "synthetic integrated strain".into(),
+            license: "synthetic test data".into(),
+            artifact: Some(ContentHash([5; 32])),
+        };
+        let observation = claims
+            .register_observation(ObservationDataset {
+                specimen: "synthetic".into(),
+                method: "analytic free strain fixture".into(),
+                artifact: ContentHash([5; 32]),
+                caveats: "no empirical or path-integration claim".into(),
+                provenance: provenance.clone(),
+            })
+            .unwrap();
+        let mut claim_indices = Vec::new();
+        let keys = core::array::from_fn(|index| {
+            let key = PropertyKey::new("strain", fs_qty::Dims::NONE)
+                .with_strain_component(
+                    StrainTensorComponent::new(basis, ContentHash([4; 32]), index as u8).unwrap(),
+                )
+                .unwrap();
+            let id = claims
+                .insert_claim(PropertyClaim {
+                    key: key.clone(),
+                    value: PropertyValue::Scalar {
+                        value: strain[index],
+                        dims: fs_qty::Dims::NONE,
+                    },
+                    validity: fs_evidence::ValidityDomain::unconstrained()
+                        .with("T", 400.0, 400.0)
+                        .with("Tref", 293.15, 293.15),
+                    uncertainty: uncertainty.clone(),
+                    interpolation: InterpolationPolicy::TabulatedOnly,
+                    observations: vec![observation],
+                    provenance: provenance.clone(),
+                })
+                .unwrap();
+            claim_indices.push((id, index));
+            key
+        });
+        let mut blocks = Vec::new();
+        if let Some((covariance, count)) = covariance {
+            claim_indices.truncate(count);
+            claim_indices.sort_by_key(|(id, _)| *id);
+            let mut packed = Vec::new();
+            for (row, (_, source_i)) in claim_indices.iter().enumerate() {
+                for (_, source_j) in &claim_indices[..=row] {
+                    packed.push(covariance[*source_i][*source_j]);
+                }
+            }
+            blocks.push(fs_matdb::JointStatistics::new(
+                observation,
+                "synthetic correlated strains",
+                claim_indices
+                    .iter()
+                    .map(|(id, _)| fs_matdb::StatisticMember::scalar(*id))
+                    .collect(),
+                packed,
+                None,
+            ));
+        }
+        let pack = NormalizedMaterialCardPack::new(
+            MaterialStateId {
+                chemistry: "synthetic".into(),
+                phase: "solid".into(),
+                process: "integrated strain fixture".into(),
+                revision: 0,
+            },
+            NormalizedPack::new(
+                "synthetic-strain",
+                "fixture-v6",
+                ContentHash([5; 32]),
+                "synthetic redistribution permitted",
+                claims,
+                blocks,
+                Vec::new(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let portable =
+            NormalizedMaterialCardPack::from_bytes_verified(pack.content_hash(), &pack.to_bytes())
+                .unwrap();
+        (portable, keys)
+    }
+
+    fn portable_strain_state(basis: StrainTensorBasis, strain: [f64; 6]) -> StrainTensorStatePoint {
+        use fs_matdb::{QueryPoint, UncertaintyModel};
+        use fs_material::state_point::{
+            MaterialPropertySelection, resolve_strain_tensor_state_point,
+        };
+        let (portable, keys) =
+            portable_strain_pack(basis, strain, UncertaintyModel::Unstated, None);
+        let point = QueryPoint::new()
+            .with("T", 400.0)
+            .unwrap()
+            .with("Tref", 293.15)
+            .unwrap();
+        let state = resolve_strain_tensor_state_point(
+            portable.card(),
+            &point,
+            &keys,
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .unwrap();
+        assert_eq!(state.strain(), &strain);
+        assert_eq!(state.basis(), basis);
+        assert_eq!(state.resolved().properties().len(), 6);
+        state
+    }
+
+    #[test]
+    fn g3_joint_strain_covariance_matches_correlated_ensemble_and_thermal_forces() {
+        use fs_matdb::{QueryPoint, SelectionPolicy, UncertaintyModel};
+        use fs_material::state_point::resolve_joint_strain_tensor_state_point;
+        let q = fs_material::tensor::rotation([2.0 / 3.0, 2.0 / 3.0, 1.0 / 3.0], 0.73);
+        let elastic = TetElasticMaterial::try_new_oriented_tensor(
+            6.0,
+            coupled_engineering_stiffness(),
+            ElasticTensorBasis {
+                notation: ElasticTensorNotation::Engineering,
+                order: ElasticTensorOrder::XxYyZzXyYzZx,
+                frame: ContentHash([1; 32]),
+            },
+            ContentHash([2; 32]),
+            q,
+            ContentHash([3; 32]),
+        )
+        .unwrap();
+        let mean = [0.01, -0.004, 0.002, 0.003, -0.001, 0.002];
+        let factors = [
+            [1.0, 0.5, -0.25, 0.125, 0.0, 0.25],
+            [-0.25, 0.25, 1.0, -0.25, 0.5, 0.0],
+            [0.0, 0.0, 0.5, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.5, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0, 0.5, 0.0],
+            [0.0, 0.0, 0.0, 0.0, 0.0, 0.5],
+        ];
+        let scale = 1.0 / 4096.0;
+        let nodes = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ];
+        let tets = [[0, 1, 2, 3]];
+        let problem = reference_problem(&nodes, &tets, elastic.material(), &[0, 1, 2, 4, 5, 8]);
+        let point = QueryPoint::new()
+            .with("T", 400.0)
+            .unwrap()
+            .with("Tref", 293.15)
+            .unwrap();
+        // Twelve equally likely atoms: +/-sqrt(6) times each physical tensor
+        // factor. This has full-rank covariance L L^T; no sampling or covariance
+        // transform under test is used to construct the reference ensemble.
+        let mut strain_atoms = Vec::new();
+        let mut force_atoms = Vec::new();
+        for factor in factors {
+            for sign in [-1.0, 1.0] {
+                let physical =
+                    core::array::from_fn(|i| mean[i] + sign * 6.0_f64.sqrt() * scale * factor[i]);
+                let rotated = fs_material::tensor::rotate(&physical, &q);
+                let mandel = core::array::from_fn(|i| {
+                    rotated[i]
+                        * if i < 3 {
+                            1.0
+                        } else {
+                            core::f64::consts::SQRT_2
+                        }
+                });
+                let state = TetThermalStrainState::try_new(
+                    400.0,
+                    293.15,
+                    mandel,
+                    elastic.material().material_state_identity,
+                    ContentHash([7; 32]),
+                    0.05,
+                )
+                .unwrap();
+                strain_atoms.push(mandel);
+                force_atoms.push(
+                    with_cx(|cx| {
+                        problem.assemble_thermal_load(TetThermalStrainField::Uniform(&state), cx)
+                    })
+                    .unwrap()
+                    .full_equivalent_force_n,
+                );
+            }
+        }
+        assert_eq!(strain_atoms.len(), 12);
+        assert_eq!(force_atoms.len(), 12);
+        let atom_covariance = |samples: &[Vec<f64>], i: usize, j: usize| {
+            let count = samples.len() as f64;
+            let mi = samples.iter().map(|v| v[i]).sum::<f64>() / count;
+            let mj = samples.iter().map(|v| v[j]).sum::<f64>() / count;
+            samples
+                .iter()
+                .map(|v| (v[i] - mi) * (v[j] - mj))
+                .sum::<f64>()
+                / count
+        };
+        let strain_atoms: Vec<_> = strain_atoms.iter().map(|v| v.to_vec()).collect();
+        let gradients = [[-1.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        let mut force_map = [[0.0; 6]; 12];
+        for (node, [x, y, z]) in gradients.into_iter().enumerate() {
+            let h = core::f64::consts::FRAC_1_SQRT_2;
+            force_map[3 * node] = [x / 6.0, 0.0, 0.0, y * h / 6.0, 0.0, z * h / 6.0];
+            force_map[3 * node + 1] = [0.0, y / 6.0, 0.0, x * h / 6.0, z * h / 6.0, 0.0];
+            force_map[3 * node + 2] = [0.0, 0.0, z / 6.0, 0.0, y * h / 6.0, x * h / 6.0];
+        }
+        let mut identities = BTreeSet::new();
+        for notation in [
+            StrainTensorNotation::Tensor,
+            StrainTensorNotation::Engineering,
+            StrainTensorNotation::Mandel,
+        ] {
+            for order in [
+                ElasticTensorOrder::XxYyZzXyYzZx,
+                ElasticTensorOrder::XxYyZzYzZxXy,
+            ] {
+                let indices = if order == ElasticTensorOrder::XxYyZzXyYzZx {
+                    [0, 1, 2, 3, 4, 5]
+                } else {
+                    [0, 1, 2, 4, 5, 3]
+                };
+                let shear = match notation {
+                    StrainTensorNotation::Tensor => 1.0,
+                    StrainTensorNotation::Engineering => 2.0,
+                    StrainTensorNotation::Mandel => core::f64::consts::SQRT_2,
+                };
+                let multipliers: [f64; 6] =
+                    core::array::from_fn(|i| if i < 3 { 1.0 } else { shear });
+                let input = core::array::from_fn(|i| mean[indices[i]] * multipliers[i]);
+                let covariance = core::array::from_fn(|i| {
+                    core::array::from_fn(|j| {
+                        factors
+                            .iter()
+                            .map(|l| l[indices[i]] * l[indices[j]])
+                            .sum::<f64>()
+                            * scale
+                            * scale
+                            * multipliers[i]
+                            * multipliers[j]
+                    })
+                });
+                let basis = StrainTensorBasis {
+                    notation,
+                    order,
+                    frame: ContentHash([1; 32]),
+                };
+                let (pack, keys) = portable_strain_pack(
+                    basis,
+                    input,
+                    UncertaintyModel::HalfWidth {
+                        half_width: 0.001,
+                        confidence: 0.95,
+                    },
+                    Some((covariance, 6)),
+                );
+                for policy in [
+                    SelectionPolicy::SingleClaimOnly,
+                    SelectionPolicy::PreferObservationBacked,
+                ] {
+                    let state =
+                        resolve_joint_strain_tensor_state_point(&pack, &point, &keys, policy)
+                            .unwrap();
+                    pack.claims_pack()
+                        .verify_joint_receipt(state.joint_receipt())
+                        .unwrap();
+                    let result = TetThermalStrainState::try_from_joint_strain(
+                        &elastic, &state, 400.0, 293.15, q, 0.05,
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        result,
+                        TetThermalStrainState::try_from_joint_strain(
+                            &elastic, &state, 400.0, 293.15, q, 0.05
+                        )
+                        .unwrap()
+                    );
+                    assert_eq!(result.source_joint_identity(), state.identity());
+                    assert!(identities.insert(result.identity()));
+                    let ThermalStrainUncertainty::Covariance {
+                        strain_mandel,
+                        free_stress_mandel_pa2,
+                    } = result.uncertainty()
+                    else {
+                        panic!("admitted full covariance must survive")
+                    };
+                    for i in 0..6 {
+                        for j in 0..6 {
+                            let expected = atom_covariance(&strain_atoms, i, j);
+                            assert!(
+                                (strain_mandel[i][j] - expected).abs() < 1.0e-18,
+                                "{notation:?}/{order:?} ({i},{j})"
+                            );
+                            assert_eq!(
+                                strain_mandel[i][j].to_bits(),
+                                strain_mandel[j][i].to_bits()
+                            );
+                        }
+                    }
+                    for i in 0..12 {
+                        for j in 0..12 {
+                            let mut actual = 0.0;
+                            for a in 0..6 {
+                                for b in 0..6 {
+                                    actual += force_map[i][a]
+                                        * free_stress_mandel_pa2[a][b]
+                                        * force_map[j][b];
+                                }
+                            }
+                            let expected = atom_covariance(&force_atoms, i, j);
+                            assert!(
+                                (actual - expected).abs() < 1.0e-14,
+                                "nodal covariance ({i},{j}): {actual} != {expected}"
+                            );
+                        }
+                    }
+                    let mut tampered = state.joint_receipt().clone();
+                    if let JointCorrelation::Covariance { covariance, .. } =
+                        &mut tampered.correlation
+                    {
+                        covariance[0] *= 2.0;
+                    }
+                    assert!(pack.claims_pack().verify_joint_receipt(&tampered).is_err());
+                }
+            }
+        }
+        assert_eq!(identities.len(), 12);
+    }
+
+    #[test]
+    fn g0_joint_strain_preserves_unknown_correlation_and_refuses_numeric_loss() {
+        use fs_matdb::{QueryPoint, SelectionPolicy, UncertaintyModel};
+        use fs_material::state_point::resolve_joint_strain_tensor_state_point;
+        let basis = StrainTensorBasis {
+            notation: StrainTensorNotation::Mandel,
+            order: ElasticTensorOrder::XxYyZzXyYzZx,
+            frame: ContentHash([1; 32]),
+        };
+        let q = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        let elastic = TetElasticMaterial::try_new_oriented_tensor(
+            6.0,
+            coupled_engineering_stiffness(),
+            ElasticTensorBasis {
+                notation: ElasticTensorNotation::Engineering,
+                order: basis.order,
+                frame: basis.frame,
+            },
+            ContentHash([2; 32]),
+            q,
+            ContentHash([3; 32]),
+        )
+        .unwrap();
+        let point = QueryPoint::new()
+            .with("T", 400.0)
+            .unwrap()
+            .with("Tref", 293.15)
+            .unwrap();
+        let covariance =
+            core::array::from_fn(|i| core::array::from_fn(|j| if i == j { 1.0e-6 } else { 0.0 }));
+        let stated = UncertaintyModel::HalfWidth {
+            half_width: 0.001,
+            confidence: 0.95,
+        };
+        for (uncertainty, block, reason) in [
+            (stated.clone(), None, CorrelationUnknownReason::NoBlock),
+            (
+                stated,
+                Some((covariance, 5)),
+                CorrelationUnknownReason::PartialMembership,
+            ),
+            (
+                UncertaintyModel::Unstated,
+                Some((covariance, 6)),
+                CorrelationUnknownReason::UnstatedMarginal,
+            ),
+        ] {
+            let (pack, keys) = portable_strain_pack(basis, [0.01; 6], uncertainty, block);
+            let state = resolve_joint_strain_tensor_state_point(
+                &pack,
+                &point,
+                &keys,
+                SelectionPolicy::SingleClaimOnly,
+            )
+            .unwrap();
+            let result = TetThermalStrainState::try_from_joint_strain(
+                &elastic, &state, 400.0, 293.15, q, 0.05,
+            )
+            .unwrap();
+            assert_eq!(
+                result.uncertainty(),
+                &ThermalStrainUncertainty::Unknown { reason }
+            );
+            assert_eq!(
+                result.nominal(),
+                &TetThermalStrainState::try_from_resolved_strain(
+                    &elastic,
+                    state.nominal(),
+                    400.0,
+                    293.15,
+                    q,
+                    0.05
+                )
+                .unwrap()
+            );
+        }
+        let identity =
+            core::array::from_fn(|i| core::array::from_fn(|j| if i == j { 1.0 } else { 0.0 }));
+        assert_eq!(
+            transform_covariance6(&identity, &[[0.0; 6]; 6]).unwrap(),
+            [[0.0; 6]; 6]
+        );
+        for scale in [f64::MAX, 1.0e-200] {
+            let map = identity.map(|row| row.map(|v| v * scale));
+            assert!(transform_covariance6(&map, &identity).is_err());
+        }
+    }
+
     #[test]
     fn g1_g3_oriented_strain_conventions_drive_anisotropic_thermal_expansion() {
         let q = fs_material::tensor::rotation([2.0 / 3.0, 2.0 / 3.0, 1.0 / 3.0], 0.73);
@@ -2411,7 +3412,22 @@ mod tests {
                     identities.insert(receipt.state().identity()),
                     "source convention stays identity-bearing"
                 );
-                let field = TetThermalStrainField::Uniform(receipt.state());
+                let resolved = portable_strain_state(basis, input);
+                let sourced = TetThermalStrainState::try_from_resolved_strain(
+                    &elastic, &resolved, 400.0, 293.15, q, 0.05,
+                )
+                .unwrap();
+                assert_eq!(sourced.source_free_strain(), receipt.source_free_strain());
+                assert_eq!(
+                    sourced.state().free_strain_mandel(),
+                    receipt.state().free_strain_mandel()
+                );
+                assert_eq!(
+                    sourced.state().thermal_law_identity(),
+                    resolved.resolved().identity()
+                );
+                assert_ne!(sourced.state().identity(), receipt.state().identity());
+                let field = TetThermalStrainField::Uniform(sourced.state());
                 let load = with_cx(|cx| problem.assemble_thermal_load(field, cx)).unwrap();
                 for (node, gradient) in gradients.iter().enumerate() {
                     for component in 0..3 {
@@ -2731,6 +3747,30 @@ mod tests {
             }
         }
         assert!(solution.true_relative_residual() < 1.0e-12);
+        let stress = with_cx(|cx| {
+            problem.recover_thermal_stress(
+                &solution,
+                TetThermalStrainField::Uniform(&thermal),
+                ContentHash([0x51; 32]),
+                0.05,
+                cx,
+            )
+        })
+        .unwrap();
+        assert!(
+            stress.elements()[0]
+                .stress_mandel_pa()
+                .iter()
+                .all(|v| v.abs() < 1.0e-11)
+        );
+        assert!(
+            stress
+                .nodal_internal_force_n()
+                .iter()
+                .flatten()
+                .all(|v| v.abs() < 1.0e-11)
+        );
+        assert!(stress.elastic_energy_j() < 1.0e-24);
         let deformed = with_cx(|cx| problem.update_geometry_from_displacement(&solution, 0.1, cx))
             .expect("non-inverting fixed-topology update");
         for (node, point) in deformed.nodes_m().iter().enumerate() {
@@ -2762,6 +3802,343 @@ mod tests {
                 constrained_rank: 0,
             })
         ));
+    }
+
+    #[test]
+    fn g1_g3_thermal_stress_reports_constraints_materials_reactions_and_frames() {
+        let nodes = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [2.0, 0.0, 0.0],
+            [3.0, 0.0, 0.0],
+            [2.0, 1.0, 0.0],
+            [2.0, 0.0, 1.0],
+        ];
+        let tets = [[0, 1, 2, 3], [4, 5, 6, 7]];
+        let materials = [material(1200.0, 6.0), material(2400.0, 3.0)];
+        let alphas = [0.01, 0.02];
+        let thermal: Vec<_> = materials
+            .iter()
+            .zip(alphas)
+            .map(|(mat, a)| {
+                TetThermalStrainState::try_new(
+                    400.0,
+                    293.15,
+                    [a, a, a, 0.0, 0.0, 0.0],
+                    mat.material_state_identity,
+                    ContentHash([0x41; 32]),
+                    0.05,
+                )
+                .unwrap()
+            })
+            .collect();
+        // Two supported bodies; only x displacement of each x-axis vertex is
+        // free. Analytically sigma_xx=0, sigma_yy=sigma_zz=-E alpha/(1-nu),
+        // and epsilon_xx=(1+nu)/(1-nu) alpha. Each volume is 1/6 m^3.
+        let fixed: Vec<_> = (0..24).filter(|i| ![3, 15].contains(i)).collect();
+        let problem = TetLinearElasticProblem {
+            nodes_m: &nodes,
+            tetrahedra: &tets,
+            materials: TetMaterialField::PerElement(&materials),
+            fixed_dofs: &fixed,
+            budget: TetAssemblyBudget::standard(),
+        };
+        let solution = with_cx(|cx| {
+            problem.solve_thermal_displacement(
+                TetThermalStrainField::PerElement(&thermal),
+                TetStaticSolveConfig::default(),
+                cx,
+            )
+        })
+        .unwrap();
+        let frame = ContentHash([0x51; 32]);
+        let report = with_cx(|cx| {
+            problem.recover_thermal_stress(
+                &solution,
+                TetThermalStrainField::PerElement(&thermal),
+                frame,
+                0.05,
+                cx,
+            )
+        })
+        .unwrap();
+        assert_eq!(
+            report,
+            with_cx(|cx| problem.recover_thermal_stress(
+                &solution,
+                TetThermalStrainField::PerElement(&thermal),
+                frame,
+                0.05,
+                cx,
+            ))
+            .unwrap()
+        );
+        assert_eq!(report.solution_identity(), solution.identity());
+        assert_eq!(report.mesh_frame(), frame);
+        assert_eq!(report.elements().len(), 2);
+        let mut expected_energy = 0.0;
+        let q = fs_material::tensor::rotation([2.0 / 3.0, 2.0 / 3.0, 1.0 / 3.0], 0.73);
+        let mut identities = BTreeSet::new();
+        for element in 0..2 {
+            let e = [1200.0, 2400.0][element];
+            let a = alphas[element];
+            let s = -e * a / 0.75;
+            let expected_stress = [0.0, s, s, 0.0, 0.0, 0.0];
+            let expected_elastic = [2.0 * a / 3.0, -a, -a, 0.0, 0.0, 0.0];
+            assert!(
+                (solution.displacement_m()[4 * element + 1][0] - 5.0 * a / 3.0).abs() < 1.0e-13
+            );
+            for i in 0..6 {
+                assert!(
+                    (report.elements()[element].stress_mandel_pa()[i] - expected_stress[i]).abs()
+                        < 1.0e-10
+                );
+                assert!(
+                    (report.elements()[element].elastic_strain_mandel()[i] - expected_elastic[i])
+                        .abs()
+                        < 1.0e-13
+                );
+            }
+            let energy = -a * s / 6.0;
+            expected_energy += energy;
+            assert!((report.elements()[element].elastic_energy_j() - energy).abs() < 1.0e-13);
+            let expected_forces = [
+                [0.0, -s / 6.0, -s / 6.0],
+                [0.0; 3],
+                [0.0, s / 6.0, 0.0],
+                [0.0, 0.0, s / 6.0],
+            ];
+            for node in 0..4 {
+                for d in 0..3 {
+                    assert!(
+                        (report.nodal_internal_force_n()[4 * element + node][d]
+                            - expected_forces[node][d])
+                            .abs()
+                            < 1.0e-11
+                    );
+                }
+            }
+            // Independent physical 3x3 tensor rotation, without Mandel-map code.
+            let rotated = fs_material::tensor::rotate(&expected_stress, &q);
+            let rotated_strain = fs_material::tensor::rotate(&expected_elastic, &q);
+            for notation in [
+                StressTensorNotation::Tensor,
+                StressTensorNotation::Engineering,
+                StressTensorNotation::Mandel,
+            ] {
+                for order in [
+                    ElasticTensorOrder::XxYyZzXyYzZx,
+                    ElasticTensorOrder::XxYyZzYzZxXy,
+                ] {
+                    let target = StressTensorBasis {
+                        notation,
+                        order,
+                        frame: ContentHash([0x52; 32]),
+                    };
+                    let receipt = report.stress_in_frame(element, target, q).unwrap();
+                    assert_eq!(receipt, report.stress_in_frame(element, target, q).unwrap());
+                    assert_eq!(receipt.source_report_identity(), report.identity());
+                    assert_eq!(receipt.source_frame(), frame);
+                    assert_eq!(receipt.element(), element);
+                    assert_eq!(receipt.target_basis(), target);
+                    assert_eq!(receipt.source_to_target(), &q);
+                    assert_eq!(
+                        receipt.source_stress_mandel_pa(),
+                        report.elements()[element].stress_mandel_pa()
+                    );
+                    assert!(identities.insert(receipt.identity()));
+                    let indices = if order == ElasticTensorOrder::XxYyZzXyYzZx {
+                        [0, 1, 2, 3, 4, 5]
+                    } else {
+                        [0, 1, 2, 4, 5, 3]
+                    };
+                    let stress_shear = if notation == StressTensorNotation::Mandel {
+                        core::f64::consts::SQRT_2
+                    } else {
+                        1.0
+                    };
+                    let strain_shear = if notation == StressTensorNotation::Mandel {
+                        core::f64::consts::SQRT_2
+                    } else {
+                        2.0
+                    };
+                    let mut work_density = 0.0;
+                    for i in 0..6 {
+                        let expected = rotated[indices[i]] * if i < 3 { 1.0 } else { stress_shear };
+                        assert!(
+                            (receipt.stress_pa()[i] - expected).abs() < 1.0e-10,
+                            "{notation:?}/{order:?} {i}"
+                        );
+                        work_density += receipt.stress_pa()[i]
+                            * rotated_strain[indices[i]]
+                            * if i < 3 { 1.0 } else { strain_shear };
+                    }
+                    assert!((0.5 * work_density / 6.0 - energy).abs() < 1.0e-12);
+                }
+            }
+        }
+        assert_eq!(identities.len(), 12);
+        assert!((report.elastic_energy_j() - expected_energy).abs() < 1.0e-13);
+    }
+
+    #[test]
+    fn g0_g4_thermal_stress_refuses_stale_inputs_bounds_frames_and_cancellation() {
+        let nodes = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ];
+        let tets = [[0, 1, 2, 3]];
+        let mat = material(1200.0, 6.0);
+        let fixed = [0, 1, 2, 4, 5, 8];
+        let problem = reference_problem(&nodes, &tets, &mat, &fixed);
+        let thermal = TetThermalStrainState::try_new(
+            400.0,
+            293.15,
+            [0.01, 0.01, 0.01, 0.0, 0.0, 0.0],
+            mat.material_state_identity,
+            ContentHash([0x41; 32]),
+            0.05,
+        )
+        .unwrap();
+        let field = TetThermalStrainField::Uniform(&thermal);
+        let solution = with_cx(|cx| {
+            problem.solve_thermal_displacement(field, TetStaticSolveConfig::default(), cx)
+        })
+        .unwrap();
+        let frame = ContentHash([0x51; 32]);
+        let changed_mat = material(2400.0, 6.0);
+        assert_eq!(
+            mat.material_state_identity,
+            changed_mat.material_state_identity
+        );
+        let changed = reference_problem(&nodes, &tets, &changed_mat, &fixed);
+        // The old load identity alone cannot distinguish this reused material ID.
+        assert_eq!(
+            with_cx(|cx| problem.assemble_thermal_load(field, cx))
+                .unwrap()
+                .identity,
+            with_cx(|cx| changed.assemble_thermal_load(field, cx))
+                .unwrap()
+                .identity
+        );
+        assert!(matches!(
+            with_cx(|cx| changed.recover_thermal_stress(&solution, field, frame, 0.05, cx)),
+            Err(TetElasticError::StressRecoveryInputMismatch)
+        ));
+        let hotter = TetThermalStrainState::try_new(
+            410.0,
+            293.15,
+            [0.011, 0.011, 0.011, 0.0, 0.0, 0.0],
+            mat.material_state_identity,
+            ContentHash([0x41; 32]),
+            0.05,
+        )
+        .unwrap();
+        assert!(matches!(
+            with_cx(|cx| problem.recover_thermal_stress(
+                &solution,
+                TetThermalStrainField::Uniform(&hotter),
+                frame,
+                0.05,
+                cx
+            )),
+            Err(TetElasticError::StressRecoveryInputMismatch)
+        ));
+        let changed_constraints = reference_problem(&nodes, &tets, &mat, &[0, 1, 2, 4, 5, 6, 8]);
+        assert!(matches!(
+            with_cx(
+                |cx| changed_constraints.recover_thermal_stress(&solution, field, frame, 0.05, cx)
+            ),
+            Err(TetElasticError::StressRecoveryInputMismatch)
+        ));
+        for bound in [0.0, f64::NAN, f64::INFINITY, 0.001] {
+            assert!(matches!(
+                with_cx(|cx| problem.recover_thermal_stress(&solution, field, frame, bound, cx)),
+                Err(TetElasticError::InvalidStressObservation { .. })
+            ));
+        }
+        assert!(matches!(
+            with_cx(|cx| problem.recover_thermal_stress(
+                &solution,
+                field,
+                ContentHash([0; 32]),
+                0.05,
+                cx
+            )),
+            Err(TetElasticError::InvalidStressObservation { .. })
+        ));
+        let report =
+            with_cx(|cx| problem.recover_thermal_stress(&solution, field, frame, 0.05, cx))
+                .unwrap();
+        let identity_q = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        let target = StressTensorBasis {
+            notation: StressTensorNotation::Mandel,
+            order: ElasticTensorOrder::XxYyZzXyYzZx,
+            frame,
+        };
+        assert_eq!(
+            report
+                .stress_in_frame(0, target, identity_q)
+                .unwrap()
+                .stress_pa(),
+            report.elements()[0].stress_mandel_pa()
+        );
+        assert!(matches!(
+            report.stress_in_frame(1, target, identity_q),
+            Err(TetElasticError::InvalidStressObservation { .. })
+        ));
+        assert!(
+            report
+                .stress_in_frame(
+                    0,
+                    StressTensorBasis {
+                        frame: ContentHash([0; 32]),
+                        ..target
+                    },
+                    identity_q
+                )
+                .is_err()
+        );
+        let q = fs_material::tensor::rotation([0.0, 0.0, 1.0], 0.25);
+        assert!(matches!(
+            report.stress_in_frame(0, target, q),
+            Err(TetElasticError::InvalidStressObservation { .. })
+        ));
+        assert!(report.stress_in_frame(0, target, [[0.0; 3]; 3]).is_err());
+        assert!(
+            report
+                .stress_in_frame(
+                    0,
+                    target,
+                    [[-1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+                )
+                .is_err()
+        );
+        let gate = CancelGate::new();
+        gate.request();
+        let pool = ArenaPool::new(ArenaConfig::default());
+        pool.scope(|arena| {
+            let cx = Cx::new(
+                &gate,
+                arena,
+                StreamKey {
+                    seed: 1,
+                    kernel_id: 3,
+                    tile: 0,
+                    iteration: 0,
+                },
+                Budget::INFINITE,
+                ExecMode::Deterministic,
+            );
+            assert!(matches!(
+                problem.recover_thermal_stress(&solution, field, frame, 0.05, &cx),
+                Err(TetElasticError::Cancelled)
+            ));
+        });
     }
 
     #[test]
