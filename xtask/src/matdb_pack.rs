@@ -24,6 +24,9 @@
 //! axis aliases do not claim typed validity axes. V1 output stays frozen.
 //! Manifest v3 adds an explicit kind to each declared axis. Curve coordinates
 //! and validity endpoints share its conversion and retain it in pack v3.
+//! Manifest v5 permits source v2 `sample` rows: a scalar observation plus two
+//! or more complete coordinates. Each row lowers to an existing tabulated
+//! scalar claim with exact point validity; sparse rows never imply a grid.
 //! A kinetics-v1 source declares exactly one explicitly first-order reaction
 //! plus `pre_exponential` and `activation_temperature`, representing only the
 //! immutable coefficient schema `k(T) = A exp(-T_a / T)` with `A` in `s^-1`
@@ -67,6 +70,8 @@ const TYPED_AXIS_COMPILER_ID: &str = "frankensim-matdb-pack-compiler-v3";
 const TYPED_AXIS_INTERFACE_COMPILER_ID: &str = "frankensim-matdb-interface-pack-compiler-v3";
 const HARDNESS_COMPILER_ID: &str = "frankensim-matdb-pack-compiler-v4";
 const HARDNESS_INTERFACE_COMPILER_ID: &str = "frankensim-matdb-interface-pack-compiler-v4";
+const SAMPLE_COMPILER_ID: &str = "frankensim-matdb-pack-compiler-v5";
+const SAMPLE_INTERFACE_COMPILER_ID: &str = "frankensim-matdb-interface-pack-compiler-v5";
 const NASA9_COMPILER_ID: &str = "frankensim-matdb-nasa9-model-pack-compiler-v1";
 const KINETICS_COMPILER_ID: &str = "frankensim-matdb-kinetics-model-pack-compiler-v1";
 const SPECIES_COMPILER_ID: &str = "frankensim-matdb-species-pack-compiler-v1";
@@ -75,12 +80,14 @@ const SPECIES_COMPILER_ID: &str = "frankensim-matdb-species-pack-compiler-v1";
 /// Bump this whenever parsing, admission, normalization, or provenance
 /// semantics can change the canonical compiler fixture.
 #[allow(dead_code)] // consumed textually by `xtask check-goldens`
-pub const MATDB_PACK_COMPILER_SEMANTICS_VERSION: u32 = 7;
+pub const MATDB_PACK_COMPILER_SEMANTICS_VERSION: u32 = 8;
 const MANIFEST_HEADER: &str = "frankensim.matdb-manifest.v1";
 const MAPPED_MANIFEST_HEADER: &str = "frankensim.matdb-manifest.v2";
 const TYPED_AXIS_MANIFEST_HEADER: &str = "frankensim.matdb-manifest.v3";
 const HARDNESS_MANIFEST_HEADER: &str = "frankensim.matdb-manifest.v4";
+const SAMPLE_MANIFEST_HEADER: &str = "frankensim.matdb-manifest.v5";
 const SOURCE_HEADER: &str = "frankensim.matdb-source.v1";
+const SAMPLE_SOURCE_HEADER: &str = "frankensim.matdb-source.v2";
 const NASA9_SOURCE_HEADER: &str = "frankensim.nasa9-source.v1";
 const KINETICS_SOURCE_HEADER: &str = "frankensim.kinetics-source.v1";
 const SPECIES_SOURCE_HEADER: &str = "frankensim.species-source.v1";
@@ -526,6 +533,7 @@ struct RawSystemContext {
 struct RawDatabase {
     observations: BTreeMap<String, RawObservation>,
     claims: BTreeMap<String, RawClaim>,
+    sample_axes: BTreeMap<String, BTreeSet<String>>,
     uncertainties: BTreeMap<String, RawUncertainty>,
     validities: BTreeMap<String, BTreeMap<String, RawValidity>>,
     frames: BTreeMap<String, RawFrame>,
@@ -831,12 +839,13 @@ fn parse_manifest(text: &str) -> Result<Manifest, CompileError> {
         Some(MAPPED_MANIFEST_HEADER) => 2,
         Some(TYPED_AXIS_MANIFEST_HEADER) => 3,
         Some(HARDNESS_MANIFEST_HEADER) => 4,
+        Some(SAMPLE_MANIFEST_HEADER) => 5,
         _ => {
             return Err(CompileError::new(
                 "unsupported_manifest_schema",
                 "manifest",
                 format!(
-                    "first line must be {MANIFEST_HEADER:?}, {MAPPED_MANIFEST_HEADER:?}, {TYPED_AXIS_MANIFEST_HEADER:?}, or {HARDNESS_MANIFEST_HEADER:?}"
+                    "first line must be {MANIFEST_HEADER:?}, {MAPPED_MANIFEST_HEADER:?}, {TYPED_AXIS_MANIFEST_HEADER:?}, {HARDNESS_MANIFEST_HEADER:?}, or {SAMPLE_MANIFEST_HEADER:?}"
                 ),
             ));
         }
@@ -1450,6 +1459,7 @@ fn parse_source(
     source: &LoadedSource,
     raw: &mut RawDatabase,
     profile: SourceProfile,
+    manifest: &Manifest,
 ) -> Result<(), CompileError> {
     if source.text.as_bytes().contains(&0) {
         return Err(CompileError::new(
@@ -1459,11 +1469,13 @@ fn parse_source(
         ));
     }
     let mut lines = source.text.lines();
-    if lines.next() != Some(SOURCE_HEADER) {
+    let header = lines.next();
+    let sample_source = header == Some(SAMPLE_SOURCE_HEADER) && manifest.version >= 5;
+    if header != Some(SOURCE_HEADER) && !sample_source {
         return Err(CompileError::new(
             "unsupported_source_schema",
             format!("source:{}", source.spec.id),
-            format!("first line must be {SOURCE_HEADER:?}"),
+            format!("expected {SOURCE_HEADER:?}; {SAMPLE_SOURCE_HEADER:?} requires manifest v5"),
         ));
     }
     for (offset, line) in lines.enumerate() {
@@ -1609,6 +1621,56 @@ fn parse_source(
                     record_hash,
                 };
                 insert_claim(raw, id, claim)?;
+            }
+            Some("sample") if sample_source => {
+                // Six leading fields followed by complete (axis, value, unit)
+                // triples. Bound before allocating support or normalizations.
+                if fields.len() < 12 || fields.len() > 6 + 3 * 64 || (fields.len() - 6) % 3 != 0 {
+                    return Err(CompileError::new(
+                        "invalid_sample", &subject,
+                        "sample requires id, observations, property, value, unit and 2..64 axis/value/unit triples",
+                    ));
+                }
+                let id = require_identifier(fields[1], "claim id", &subject)?;
+                let mut coordinates = BTreeMap::new();
+                for triple in fields[6..].chunks_exact(3) {
+                    let axis = require_identifier(triple[0], "sample axis", &subject)?;
+                    if !manifest.axis_kinds.contains_key(&axis) {
+                        return Err(CompileError::new(
+                            "undeclared_sample_axis", &subject,
+                            format!("sample axis {axis:?} requires an explicit manifest axis kind"),
+                        ));
+                    }
+                    let coordinate = require_number_token(triple[1], "sample coordinate", &subject)?;
+                    let validity = RawValidity {
+                        axis: axis.clone(), lower: coordinate.clone(), upper: coordinate,
+                        unit: require_unit(triple[2], "sample coordinate unit", &subject)?,
+                        source_hash: record_hash,
+                    };
+                    if coordinates.insert(axis, validity).is_some() {
+                        return Err(CompileError::new(
+                            "duplicate_sample_axis", &subject, "sample axes must be unique",
+                        ));
+                    }
+                }
+                let claim = RawClaim {
+                    id: id.clone(),
+                    observations: parse_identifier_list(fields[2], "observation references", &subject)?,
+                    property: require_identifier(fields[3], "property", &subject)?,
+                    value: RawClaimValue::Scalar {
+                        number: require_number_token(fields[4], "sample value", &subject)?,
+                        unit: require_unit(fields[5], "sample unit", &subject)?,
+                    },
+                    interpolation: InterpolationPolicy::TabulatedOnly,
+                    source_id: source.spec.id.clone(), source_hash: source.hash, record_hash,
+                };
+                insert_claim(raw, id.clone(), claim)?;
+                raw.sample_axes.insert(id.clone(), coordinates.keys().cloned().collect());
+                if raw.validities.insert(id, coordinates).is_some() {
+                    return Err(CompileError::new(
+                        "invalid_sample", &subject, "sample coordinates replace no existing validity declaration",
+                    ));
+                }
             }
             Some("curve") => {
                 require_field_count(&fields, 9, &source.spec.id, line_number)?;
@@ -3750,6 +3812,8 @@ fn compile_manifest(manifest_path: &Path) -> Result<CompileOutput, CompileError>
     let profile =
         source_profile(&manifest).map_err(|error| error.with_input_hash(manifest_snapshot))?;
     let compiler_id = match (manifest.version, profile) {
+        (5, SourceProfile::Material) => SAMPLE_COMPILER_ID,
+        (5, SourceProfile::Interface) => SAMPLE_INTERFACE_COMPILER_ID,
         (4, SourceProfile::Material) => HARDNESS_COMPILER_ID,
         (4, SourceProfile::Interface) => HARDNESS_INTERFACE_COMPILER_ID,
         (3, SourceProfile::Material) => TYPED_AXIS_COMPILER_ID,
@@ -3781,7 +3845,7 @@ fn compile_manifest(manifest_path: &Path) -> Result<CompileOutput, CompileError>
     }
     let mut raw = RawDatabase::default();
     for source in &sources {
-        if let Err(error) = parse_source(source, &mut raw, profile) {
+        if let Err(error) = parse_source(source, &mut raw, profile, &manifest) {
             return Err(error
                 .with_compiler_id(compiler_id)
                 .with_input_hash(source_artifact)
@@ -4306,7 +4370,9 @@ fn source_envelope_hash(manifest: &Manifest, sources: &[LoadedSource]) -> Conten
             }
         }
         hash_domain(
-            if manifest.version >= 4 {
+            if manifest.version >= 5 {
+                "org.frankensim.xtask.matdb-pack.source-envelope.v5"
+            } else if manifest.version == 4 {
                 "org.frankensim.xtask.matdb-pack.source-envelope.v4"
             } else if manifest.version == 3 {
                 "org.frankensim.xtask.matdb-pack.source-envelope.v3"
@@ -4404,6 +4470,28 @@ fn validate_raw_references(raw: &RawDatabase) -> Result<(), CompileError> {
             "sources",
             "material pack must contain at least one scalar or curve claim",
         ));
+    }
+    // A sparse table has one complete tuple schema. An ordinary, unconstrained
+    // scalar sharing its property would otherwise fill every unmeasured hole.
+    let mut sample_properties = BTreeMap::new();
+    for (id, axes) in &raw.sample_axes {
+        let property = &raw.claims[id].property;
+        if sample_properties.insert(property, axes).is_some_and(|previous| previous != axes)
+            || raw.validities[id].keys().ne(axes.iter())
+        {
+            return Err(CompileError::new(
+                "inconsistent_sample_axes", format!("claim:{id}"),
+                "each sample of one property must declare the same complete coordinate tuple and no additional validity axes",
+            ));
+        }
+    }
+    for (id, claim) in &raw.claims {
+        if sample_properties.contains_key(&claim.property) && !raw.sample_axes.contains_key(id) {
+            return Err(CompileError::new(
+                "mixed_sample_support", format!("claim:{id}"),
+                "a sampled property cannot also declare scalar/curve support in the same import",
+            ));
+        }
     }
     for claim in raw.uncertainties.keys() {
         if !raw.claims.contains_key(claim) {
