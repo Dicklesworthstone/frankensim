@@ -13,7 +13,7 @@ use fs_scenario::{PrestressedString, UnilateralObstacle};
 /// # Errors
 /// Station/gap mismatch or dcontact admission.
 pub fn span_obstacle(
-    string: PrestressedString,
+    string: &PrestressedString,
     spec: &UnilateralObstacle,
 ) -> Result<Obstacle, DContactError> {
     if spec.stations.len() != spec.gaps_m.len() || spec.stations.is_empty() {
@@ -80,7 +80,7 @@ pub fn slit_contact_force(obstacle: &Obstacle, opening_m: f64) -> Result<f64, DC
 /// # Errors
 /// Storage shape.
 pub fn modal_contact_forces(
-    string: PrestressedString,
+    string: &PrestressedString,
     obstacles: &[UnilateralObstacle],
     x: &[f64],
 ) -> Result<Vec<f64>, DContactError> {
@@ -149,7 +149,7 @@ pub fn modal_contact_forces(
 /// Obstacle shape or dcontact admission.
 pub fn wrap_modal_contact(
     inner: Box<dyn Storage>,
-    string: PrestressedString,
+    string: &PrestressedString,
     obstacles: &[UnilateralObstacle],
 ) -> Result<Box<dyn Storage>, DContactError> {
     if obstacles.is_empty() {
@@ -167,7 +167,7 @@ pub fn wrap_modal_contact(
 /// # Errors
 /// None today; `Result` matches [`modal_contact_forces`].
 pub fn modal_friction_forces(
-    string: PrestressedString,
+    string: &PrestressedString,
     obstacles: &[UnilateralObstacle],
     x: &[f64],
 ) -> Result<Vec<f64>, DContactError> {
@@ -215,7 +215,7 @@ pub fn modal_friction_forces(
 /// # Errors
 /// Obstacle shape or dcontact admission.
 pub fn modal_hunt_crossley_forces(
-    string: PrestressedString,
+    string: &PrestressedString,
     obstacles: &[UnilateralObstacle],
     x: &[f64],
 ) -> Result<Vec<f64>, DContactError> {
