@@ -1,4 +1,4 @@
-//! Source-declared elastic tensor coordinates. Numerical rotation belongs to
+//! Declared elastic, strain and stress tensor coordinates. Numerical rotation belongs to
 //! the constitutive/operator layer; this module only preserves meaning.
 
 use fs_blake3::ContentHash;
@@ -59,6 +59,130 @@ pub struct StrainTensorBasis {
     pub order: ElasticTensorOrder,
     /// Nonzero source-frame identity, validated by the numerical consumer.
     pub frame: ContentHash,
+}
+
+/// Coordinates of a symmetric small-strain Cauchy stress tensor [Pa].
+/// Engineering stress stores physical shear; only engineering STRAIN doubles it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StressTensorNotation {
+    /// Physical off-diagonal stress `sigma_ij`, stored once.
+    Tensor,
+    /// Physical shear stress conjugate to engineering strain `2 epsilon_ij`.
+    Engineering,
+    /// `sqrt(2) sigma_ij`, conjugate to Mandel strain.
+    Mandel,
+}
+
+/// Explicit coordinates for six symmetric stress components. This does not
+/// describe first/second Piola stress or provide a finite-deformation mapping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StressTensorBasis {
+    pub notation: StressTensorNotation,
+    pub order: ElasticTensorOrder,
+    /// Nonzero coordinate-frame identity, checked by the numerical consumer.
+    pub frame: ContentHash,
+}
+
+/// One of six explicitly supplied symmetric strain coordinates. The source
+/// tensor identity groups components; it does not establish their correlation
+/// or identify a thermal expansion coefficient or temperature integration law.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StrainTensorComponent {
+    basis: StrainTensorBasis,
+    source_tensor: ContentHash,
+    index: u8,
+}
+
+impl StrainTensorComponent {
+    /// Three convention/index bytes and two complete identities.
+    pub const ENCODED_LEN: usize = 67;
+
+    pub fn new(
+        basis: StrainTensorBasis,
+        source_tensor: ContentHash,
+        index: u8,
+    ) -> Result<Self, MatDbError> {
+        if basis.frame == ContentHash([0; 32]) || source_tensor == ContentHash([0; 32]) {
+            return Err(MatDbError::InvalidTensorContext {
+                reason: "strain frame and source tensor identities must be nonzero",
+            });
+        }
+        if index >= 6 {
+            return Err(MatDbError::InvalidTensorContext {
+                reason: "strain component index must lie in 0..6",
+            });
+        }
+        Ok(Self {
+            basis,
+            source_tensor,
+            index,
+        })
+    }
+
+    #[must_use]
+    pub const fn basis(self) -> StrainTensorBasis {
+        self.basis
+    }
+
+    #[must_use]
+    pub const fn source_tensor(self) -> ContentHash {
+        self.source_tensor
+    }
+
+    /// Coordinate position in the explicitly declared order.
+    #[must_use]
+    pub const fn index(self) -> usize {
+        self.index as usize
+    }
+
+    /// Symmetry is implicit in the six-coordinate type. The enclosing format
+    /// owns versioning; the frozen descriptor retains exact conventions.
+    #[must_use]
+    pub fn canonical_bytes(self) -> [u8; Self::ENCODED_LEN] {
+        let mut bytes = [0; Self::ENCODED_LEN];
+        bytes[0] = match self.basis.notation {
+            StrainTensorNotation::Tensor => 0,
+            StrainTensorNotation::Engineering => 1,
+            StrainTensorNotation::Mandel => 2,
+        };
+        bytes[1] = match self.basis.order {
+            ElasticTensorOrder::XxYyZzXyYzZx => 0,
+            ElasticTensorOrder::XxYyZzYzZxXy => 1,
+        };
+        bytes[2] = self.index;
+        bytes[3..35].copy_from_slice(self.basis.frame.as_bytes());
+        bytes[35..].copy_from_slice(self.source_tensor.as_bytes());
+        bytes
+    }
+
+    pub fn from_canonical_bytes(bytes: &[u8]) -> Result<Self, MatDbError> {
+        let invalid = || MatDbError::InvalidTensorContext {
+            reason: "invalid strain component descriptor length or convention tag",
+        };
+        if bytes.len() != Self::ENCODED_LEN {
+            return Err(invalid());
+        }
+        let notation = match bytes[0] {
+            0 => StrainTensorNotation::Tensor,
+            1 => StrainTensorNotation::Engineering,
+            2 => StrainTensorNotation::Mandel,
+            _ => return Err(invalid()),
+        };
+        let order = match bytes[1] {
+            0 => ElasticTensorOrder::XxYyZzXyYzZx,
+            1 => ElasticTensorOrder::XxYyZzYzZxXy,
+            _ => return Err(invalid()),
+        };
+        Self::new(
+            StrainTensorBasis {
+                notation,
+                order,
+                frame: ContentHash(bytes[3..35].try_into().map_err(|_| invalid())?),
+            },
+            ContentHash(bytes[35..].try_into().map_err(|_| invalid())?),
+            bytes[2],
+        )
+    }
 }
 
 /// Declared symmetry of the complete law, checked numerically by its consumer.

@@ -45,7 +45,8 @@ mod tensor;
 
 pub use tensor::{
     ElasticTensorBasis, ElasticTensorComponent, ElasticTensorNotation, ElasticTensorOrder,
-    ElasticTensorSymmetry, StrainTensorBasis, StrainTensorNotation,
+    ElasticTensorSymmetry, StrainTensorBasis, StrainTensorComponent, StrainTensorNotation,
+    StressTensorBasis, StressTensorNotation,
 };
 
 pub use cards::{
@@ -71,7 +72,7 @@ pub use pack::{
     CorrelationUnknownReason, JOINT_USAGE_RECEIPT_IDENTITY_DOMAIN,
     JOINT_USAGE_RECEIPT_SCHEMA_VERSION, JointAnswer, JointCorrelation, JointStatistics,
     JointUsageReceipt, MATDB_HARDNESS_PACK_SCHEMA_VERSION, MATDB_PACK_SCHEMA_VERSION,
-    MATDB_PACK_TARGET_BASIS, MATDB_TENSOR_PACK_SCHEMA_VERSION,
+    MATDB_PACK_TARGET_BASIS, MATDB_STRAIN_PACK_SCHEMA_VERSION, MATDB_TENSOR_PACK_SCHEMA_VERSION,
     MATDB_TYPED_AXIS_PACK_SCHEMA_VERSION, MATDB_TYPED_PACK_SCHEMA_VERSION, NormalizationReceipt,
     NormalizationTarget, NormalizedPack, PackError, StatisticComponent, StatisticMember,
     ValidityBoundSide,
@@ -358,7 +359,7 @@ impl fmt::Display for MatDbError {
             }
             MatDbError::TensorContextMismatch { property } => write!(
                 f,
-                "property '{property}' requires a matching elastic tensor frame, convention, source identity and component"
+                "property '{property}' requires a matching tensor frame, convention, source identity and component"
             ),
             MatDbError::DimsMismatch {
                 key,
@@ -544,6 +545,7 @@ pub struct PropertyKey {
     quantity: QuantitySpec,
     hardness_test: Option<Box<HardnessTestContext>>,
     elastic_component: Option<ElasticTensorComponent>,
+    strain_component: Option<StrainTensorComponent>,
 }
 
 impl PropertyKey {
@@ -555,6 +557,7 @@ impl PropertyKey {
             quantity: QuantitySpec::dimensional(dims),
             hardness_test: None,
             elastic_component: None,
+            strain_component: None,
         }
     }
 
@@ -567,6 +570,7 @@ impl PropertyKey {
             quantity,
             hardness_test: None,
             elastic_component: None,
+            strain_component: None,
         }
     }
 
@@ -608,6 +612,27 @@ impl PropertyKey {
     #[must_use]
     pub const fn elastic_component(&self) -> Option<ElasticTensorComponent> {
         self.elastic_component
+    }
+
+    /// Bind a dimensionless symmetric strain coordinate. A thermal expansion
+    /// coefficient [1/K] or another semantic dimensionless kind cannot enter
+    /// this path as strain. Absence of this descriptor is never a wildcard.
+    pub fn with_strain_component(
+        mut self,
+        component: StrainTensorComponent,
+    ) -> Result<Self, MatDbError> {
+        if self.quantity != QuantitySpec::dimensional(Dims([0; 6])) {
+            return Err(MatDbError::InvalidTensorContext {
+                reason: "strain components require dimensional dimensionless values",
+            });
+        }
+        self.strain_component = Some(component);
+        Ok(self)
+    }
+
+    #[must_use]
+    pub const fn strain_component(&self) -> Option<StrainTensorComponent> {
+        self.strain_component
     }
 
     pub(crate) fn is_hardness(&self) -> bool {
@@ -978,6 +1003,7 @@ impl PropertyClaim {
         if self.validity.has_typed_axes()
             || self.key.hardness_test().is_some()
             || self.key.elastic_component().is_some()
+            || self.key.strain_component().is_some()
         {
             push(&self.key.quantity().canonical_bytes());
             push(&(self.validity.axis_quantities().len() as u64).to_le_bytes());
@@ -985,7 +1011,10 @@ impl PropertyClaim {
                 push(axis.as_bytes());
                 push(&quantity.canonical_bytes());
             }
-            if let Some(component) = self.key.elastic_component() {
+            if let Some(component) = self.key.strain_component() {
+                push(&component.canonical_bytes());
+                hash_domain("org.frankensim.fs-matdb.property-claim.v6", &payload)
+            } else if let Some(component) = self.key.elastic_component() {
                 push(&component.canonical_bytes());
                 hash_domain("org.frankensim.fs-matdb.property-claim.v5", &payload)
             } else if let Some(context) = self.key.hardness_test() {

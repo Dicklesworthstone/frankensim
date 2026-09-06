@@ -1447,6 +1447,19 @@ impl ClaimSet {
         let considered: Vec<ClaimId> = considered_pairs.iter().map(|(id, _)| *id).collect();
         let hardness_test = context_key.and_then(PropertyKey::hardness_test);
         let elastic_component = context_key.and_then(PropertyKey::elastic_component);
+        let strain_component = context_key.and_then(PropertyKey::strain_component);
+        if (strain_component.is_none()
+            && considered_pairs
+                .iter()
+                .any(|(_, claim)| claim.key.strain_component().is_some()))
+            || !considered_pairs
+                .iter()
+                .any(|(_, claim)| claim.key.strain_component() == strain_component)
+        {
+            return Err(MatDbError::TensorContextMismatch {
+                property: property.to_owned(),
+            });
+        }
         if (elastic_component.is_none()
             && considered_pairs
                 .iter()
@@ -1476,6 +1489,7 @@ impl ClaimSet {
             .iter()
             .filter(|(_, claim)| claim.key.hardness_test() == hardness_test)
             .filter(|(_, claim)| claim.key.elastic_component() == elastic_component)
+            .filter(|(_, claim)| claim.key.strain_component() == strain_component)
             .filter(|(_, claim)| {
                 claim
                     .validity
@@ -1488,6 +1502,7 @@ impl ClaimSet {
                 .iter()
                 .filter(|(_, claim)| claim.key.hardness_test() == hardness_test)
                 .filter(|(_, claim)| claim.key.elastic_component() == elastic_component)
+                .filter(|(_, claim)| claim.key.strain_component() == strain_component)
                 .find_map(|(_, claim)| claim_axis_mismatch(claim, point).map(|axis| (*claim, axis)))
             {
                 return Err(MatDbError::AxisQuantityMismatch {

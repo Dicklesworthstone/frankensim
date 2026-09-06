@@ -102,6 +102,179 @@ fn sample_claims() -> (ClaimSet, ObservationId, Vec<StatisticMember>) {
     (claims, observation, members)
 }
 
+#[test]
+fn g3_strain_context_pack_queries_and_receipts_preserve_all_coordinates() {
+    use fs_blake3::ContentHash;
+    use fs_matdb::{
+        ElasticTensorOrder, MatDbError, QueryPoint, SelectionPolicy, StrainTensorBasis,
+        StrainTensorComponent, StrainTensorNotation,
+    };
+    let basis = StrainTensorBasis {
+        notation: StrainTensorNotation::Engineering,
+        order: ElasticTensorOrder::XxYyZzXyYzZx,
+        frame: ContentHash([1; 32]),
+    };
+    let component = StrainTensorComponent::new(basis, ContentHash([2; 32]), 3).unwrap();
+    let contexts = [
+        component,
+        StrainTensorComponent::new(
+            StrainTensorBasis {
+                notation: StrainTensorNotation::Tensor,
+                ..basis
+            },
+            ContentHash([2; 32]),
+            3,
+        )
+        .unwrap(),
+        StrainTensorComponent::new(
+            StrainTensorBasis {
+                order: ElasticTensorOrder::XxYyZzYzZxXy,
+                ..basis
+            },
+            ContentHash([2; 32]),
+            3,
+        )
+        .unwrap(),
+        StrainTensorComponent::new(
+            StrainTensorBasis {
+                frame: ContentHash([3; 32]),
+                ..basis
+            },
+            ContentHash([2; 32]),
+            3,
+        )
+        .unwrap(),
+        StrainTensorComponent::new(basis, ContentHash([3; 32]), 3).unwrap(),
+        StrainTensorComponent::new(basis, ContentHash([2; 32]), 4).unwrap(),
+    ];
+    assert!(StrainTensorComponent::new(basis, ContentHash([0; 32]), 0).is_err());
+    assert!(StrainTensorComponent::new(basis, ContentHash([2; 32]), 6).is_err());
+    assert!(
+        StrainTensorComponent::new(
+            StrainTensorBasis {
+                frame: ContentHash([0; 32]),
+                ..basis
+            },
+            ContentHash([2; 32]),
+            0
+        )
+        .is_err()
+    );
+    for dims in [fs_qty::Pressure::DIMS, Dims([0, 0, 0, -1, 0, 0])] {
+        assert!(
+            PropertyKey::new("bad", dims)
+                .with_strain_component(component)
+                .is_err()
+        );
+    }
+    let (mut claims, observation, _) = sample_claims();
+    let bare = PropertyKey::new("strain", Dims::NONE);
+    let mut keys = Vec::new();
+    let mut ids = std::collections::BTreeSet::new();
+    for context in contexts {
+        assert_eq!(
+            StrainTensorComponent::from_canonical_bytes(&context.canonical_bytes()).unwrap(),
+            context
+        );
+        let key = bare.clone().with_strain_component(context).unwrap();
+        let id = claims
+            .insert_claim(PropertyClaim {
+                key: key.clone(),
+                value: PropertyValue::Scalar {
+                    value: -0.004,
+                    dims: Dims::NONE,
+                },
+                validity: ValidityDomain::unconstrained().with("T", 300.0, 300.0),
+                uncertainty: UncertaintyModel::Unstated,
+                interpolation: InterpolationPolicy::TabulatedOnly,
+                observations: vec![observation],
+                provenance: provenance(),
+            })
+            .unwrap();
+        assert!(ids.insert(id), "each source context field changes identity");
+        keys.push((key, id));
+    }
+    let pack = NormalizedPack::new(
+        "synthetic-strain",
+        "fixture-v6",
+        ContentHash([4; 32]),
+        "synthetic redistribution permitted",
+        claims,
+        Vec::new(),
+        Vec::new(),
+    )
+    .unwrap();
+    assert_eq!(pack.schema_version(), 6);
+    let bytes = pack.to_bytes();
+    let decoded = NormalizedPack::from_bytes_verified(pack.content_hash(), &bytes).unwrap();
+    assert_eq!(decoded.to_bytes(), bytes);
+    let point = QueryPoint::new().with("T", 300.0).unwrap();
+    assert!(matches!(
+        decoded
+            .claims()
+            .query("strain", &point, SelectionPolicy::SingleClaimOnly),
+        Err(MatDbError::TensorContextMismatch { .. })
+    ));
+    assert!(matches!(
+        decoded
+            .claims()
+            .query_typed(&bare, &point, SelectionPolicy::SingleClaimOnly),
+        Err(MatDbError::TensorContextMismatch { .. })
+    ));
+    for (key, id) in &keys {
+        for answer in [
+            decoded
+                .claims()
+                .query_typed(key, &point, SelectionPolicy::SingleClaimOnly)
+                .unwrap(),
+            decoded
+                .claims()
+                .query_pinned_typed(key, &point, *id)
+                .unwrap(),
+        ] {
+            assert_eq!(answer.evidence.value.value, -0.004);
+            assert_eq!(answer.receipt.selected, *id);
+            assert_eq!(
+                decoded.claims().claim(*id).unwrap().key.strain_component(),
+                key.strain_component()
+            );
+            decoded.claims().verify_receipt(&answer.receipt).unwrap();
+        }
+    }
+    assert!(
+        decoded
+            .claims()
+            .query_pinned_typed(&keys[0].0, &point, keys[1].1)
+            .is_err()
+    );
+    assert!(
+        decoded
+            .claims()
+            .query_typed(
+                &keys[0].0,
+                &QueryPoint::new().with("T", 301.0).unwrap(),
+                SelectionPolicy::SingleClaimOnly
+            )
+            .is_err()
+    );
+    let encoded = component.canonical_bytes();
+    let offset = bytes
+        .windows(encoded.len())
+        .position(|part| part == encoded)
+        .unwrap();
+    for (index, value) in [(0, 255), (1, 255), (2, 6), (3, 9)] {
+        let mut tampered = bytes.clone();
+        tampered[offset + index] = value;
+        assert!(NormalizedPack::from_bytes(&tampered).is_err());
+    }
+    for version in 1u32..=5 {
+        let mut downgraded = bytes.clone();
+        downgraded[8..12].copy_from_slice(&version.to_le_bytes());
+        assert!(NormalizedPack::from_bytes(&downgraded).is_err());
+    }
+    assert!(StrainTensorComponent::from_canonical_bytes(&encoded[..66]).is_err());
+}
+
 fn sample_pack() -> NormalizedPack {
     let (claims, observation, members) = sample_claims();
     let density = claims.claims_for("density")[0].0;

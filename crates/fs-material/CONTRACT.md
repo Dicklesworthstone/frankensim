@@ -102,6 +102,24 @@ homogenization, the P2 milestone.
   `fs-solid::linear3::TetElasticMaterial::from_resolved_elastic_tensor`.
   Marginal uncertainties remain upstream; this adapter does not assume
   independence or produce a certified rotated uncertainty bound.
+  `resolve_strain_tensor_state_point` resolves all six explicit symmetric strain
+  coordinates through the same scalar requirement/selection path. Exact keys
+  must share notation, order, frame and source tensor identity and address each
+  position once. Negative and zero strain components are admitted; missing
+  components never imply zero. `StrainTensorStatePoint` retains the six nominal
+  values and all selected evidence at the query point. The solid thermal adapter
+  can consume this bundle with a caller-declared integrated stress-free strain
+  interpretation. Neither point support nor a source tensor name proves that
+  temperature integration was performed or that a complete path is supported.
+  `resolve_joint_strain_tensor_state_point` binds that nominal state to the
+  existing joint query on the same `NormalizedMaterialCardPack`, component
+  requirements, physical point and selection policy. It compares all member
+  receipts and retains the source joint receipt, including covariance in source
+  component order or the exact unknown-correlation reason. Its private
+  `JointStrainTensorStatePoint` fields prevent injection of an unrelated matrix.
+  Domain `joint-strain-state-point.v1` binds nominal state and joint receipt.
+  The existing single-claim and observation-backed joint policies are supported;
+  this adapter adds no pinned joint policy or marginal-width-to-variance inference.
   The two-material reduced modulus on the contact-capable isotropic rung uses
   the standard ordered Hertz half-space compliance and binds both resolved
   state identities. Out-of-range temperature or phase-dependent data refuse
@@ -146,6 +164,11 @@ homogenization, the P2 milestone.
   attached and `in_domain` FLAGGING calibration-domain exit.
 - `tensor`: Voigt helpers (deviator, contraction with shear doubling,
   von Mises, Rodrigues rotations) used by the objectivity gates.
+  Shared `StressTensorBasis` / `StressTensorNotation` descriptors distinguish
+  physical/engineering stress shear (both `sigma_ij`) from Mandel stress shear.
+  They are re-exported from fs-matdb for fs-solid's recovered thermal-stress
+  outputs; they do not reuse engineering-strain factor two or imply Piola stress,
+  source-pack stress transport or material/frame calibration.
 
 ### `gas` — first-principles ambient gas state (zdmm1 slice 1)
 
