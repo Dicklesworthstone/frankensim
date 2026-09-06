@@ -2578,7 +2578,7 @@ mod tests {
         let basis = receipt.source_basis();
         let keys: [[PropertyKey; 6]; 6] = core::array::from_fn(|i| {
             core::array::from_fn(|j| {
-                PropertyKey::new(format!("c{i}{j}"), fs_qty::Pressure::DIMS)
+                PropertyKey::new("stiffness", fs_qty::Pressure::DIMS)
                     .with_elastic_component(
                         ElasticTensorComponent::new(
                             basis,
@@ -2661,6 +2661,53 @@ mod tests {
         )
         .unwrap();
         assert_eq!(state.resolved().properties().len(), 37);
+        assert!(state.resolved().property("stiffness").is_none());
+        for (index, key) in keys.iter().flatten().enumerate() {
+            assert_eq!(
+                state.resolved().property_by_key(key).unwrap().value_si(),
+                coefficients[index / 6][index % 6]
+            );
+        }
+        let mut pins: Vec<_> = state
+            .resolved()
+            .properties()
+            .iter()
+            .map(|property| {
+                (
+                    property.requirement().name().to_owned(),
+                    property.answer().receipt.selected,
+                )
+            })
+            .collect();
+        pins.reverse();
+        let pinned = resolve_elastic_tensor_state_point(
+            portable.card(),
+            &QueryPoint::new().with("T", 300.0).unwrap(),
+            &keys,
+            MaterialPropertySelection::PinnedByProperty(pins.clone()),
+        )
+        .unwrap();
+        assert_eq!(pinned.stiffness_pa(), &coefficients);
+        let stiffness_pin = pins
+            .iter()
+            .position(|(name, _)| name == "stiffness")
+            .unwrap();
+        let another = pins
+            .iter()
+            .enumerate()
+            .find(|(index, (name, _))| *index != stiffness_pin && name == "stiffness")
+            .unwrap()
+            .0;
+        pins[another].1 = pins[stiffness_pin].1;
+        assert!(matches!(
+            resolve_elastic_tensor_state_point(
+                portable.card(),
+                &QueryPoint::new().with("T", 300.0).unwrap(),
+                &keys,
+                MaterialPropertySelection::PinnedByProperty(pins),
+            ),
+            Err(fs_material::state_point::MaterialStatePointError::InvalidSelectionPlan)
+        ));
         let from_card =
             TetElasticMaterial::from_resolved_elastic_tensor(&state, ContentHash([2; 32]), q)
                 .unwrap();

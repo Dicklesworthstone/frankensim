@@ -9,7 +9,6 @@
 //! replaced by a representative preset.
 
 use core::fmt;
-use std::collections::BTreeSet;
 
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_matdb::{
@@ -249,6 +248,13 @@ impl ScalarPropertyRequirement {
         self.elastic_component
     }
 
+    fn matches_key(&self, key: &PropertyKey) -> bool {
+        self.name == key.name()
+            && self.quantity == key.quantity()
+            && self.hardness_test() == key.hardness_test()
+            && self.elastic_component == key.elastic_component()
+    }
+
     /// Exact property key queried from the material card.
     #[must_use]
     pub fn name(&self) -> &str {
@@ -284,6 +290,8 @@ pub enum MaterialPropertySelection {
     /// Use one caller-pinned immutable claim identity for every named property.
     /// The plan must cover the requirement set exactly; omissions and foreign
     /// property names refuse before any result is published.
+    /// Repeated names require distinct claims whose complete keys match the
+    /// corresponding tensor coefficients or test contexts.
     PinnedByProperty(Vec<(String, ClaimId)>),
 }
 
@@ -380,13 +388,18 @@ impl ResolvedInterfaceStatePoint {
         &self.properties
     }
 
-    /// Fetch one resolved property by its exact card key.
+    /// Fetch a uniquely named property; ambiguous names return `None`.
     #[must_use]
     pub fn property(&self, name: &str) -> Option<&ResolvedScalarProperty> {
+        unique_named_property(&self.properties, name)
+    }
+
+    /// Fetch one resolved property by its complete quantity and source context.
+    #[must_use]
+    pub fn property_by_key(&self, key: &PropertyKey) -> Option<&ResolvedScalarProperty> {
         self.properties
-            .binary_search_by(|property| property.requirement.name.as_str().cmp(name))
-            .ok()
-            .map(|index| &self.properties[index])
+            .iter()
+            .find(|p| p.requirement.matches_key(key))
     }
 
     /// Identity binding the complete card, state point, requirements, values,
@@ -434,20 +447,44 @@ impl ResolvedMaterialStatePoint {
         self.identity
     }
 
-    /// Fetch one resolved property by its canonical key.
+    /// Fetch a uniquely named property; ambiguous names return `None`.
     #[must_use]
     pub fn property(&self, name: &str) -> Option<&ResolvedScalarProperty> {
+        unique_named_property(&self.properties, name)
+    }
+
+    /// Fetch one resolved property by its complete quantity and source context.
+    #[must_use]
+    pub fn property_by_key(&self, key: &PropertyKey) -> Option<&ResolvedScalarProperty> {
         self.properties
-            .binary_search_by(|property| property.requirement.name.as_str().cmp(name))
-            .ok()
-            .map(|index| &self.properties[index])
+            .iter()
+            .find(|p| p.requirement.matches_key(key))
+    }
+}
+
+fn unique_named_property<'a>(
+    properties: &'a [ResolvedScalarProperty],
+    name: &str,
+) -> Option<&'a ResolvedScalarProperty> {
+    let index = properties.partition_point(|p| p.requirement.name.as_str() < name);
+    let property = properties
+        .get(index)
+        .filter(|p| p.requirement.name == name)?;
+    if properties
+        .get(index + 1)
+        .is_some_and(|p| p.requirement.name == name)
+    {
+        None
+    } else {
+        Some(property)
     }
 }
 
 /// Resolve a bounded set of scalar properties from one immutable material card.
 ///
 /// Every property is evaluated at the same `point`. Requirements are
-/// canonicalized by name, so caller ordering cannot move the bundle identity.
+/// canonicalized by name and selected claim, so caller ordering cannot move
+/// the bundle identity, including for distinct same-name tensor coefficients.
 /// Missing, ambiguous, out-of-domain, dimensionally wrong, or numerically
 /// inadmissible properties refuse the complete bundle; no partial state is
 /// published.
@@ -523,55 +560,68 @@ fn resolve_scalar_property_set(
             maximum: MAX_MATERIAL_STATE_PROPERTIES,
         });
     }
-    let mut requirements = requirements.to_vec();
-    requirements.sort_by(|left, right| left.name.cmp(&right.name));
-    let mut names = BTreeSet::new();
-    for requirement in &requirements {
-        if !names.insert(requirement.name.clone()) {
+    let mut queries = Vec::with_capacity(requirements.len());
+    for requirement in requirements {
+        let mut key = PropertyKey::with_quantity(&requirement.name, requirement.quantity);
+        let context_error = |source| MaterialStatePointError::Query {
+            property: requirement.name.clone(),
+            source,
+        };
+        if let Some(context) = requirement.hardness_test() {
+            key = key
+                .with_hardness_test(context.clone())
+                .map_err(context_error)?;
+        }
+        if let Some(component) = requirement.elastic_component() {
+            key = key
+                .with_elastic_component(component)
+                .map_err(context_error)?;
+        }
+        if queries.iter().any(|(_, prior)| *prior == key) {
             return Err(MaterialStatePointError::DuplicateRequirement {
                 property: requirement.name.clone(),
             });
         }
+        queries.push((requirement.clone(), key));
     }
+    queries.sort_by(|(left, _), (right, _)| left.name.cmp(&right.name));
 
     let pins = match selection {
         MaterialPropertySelection::SingleClaimOnly
         | MaterialPropertySelection::PreferObservationBacked => None,
         MaterialPropertySelection::PinnedByProperty(offered) => {
-            let mut pins = offered.clone();
-            pins.sort_by(|left, right| left.0.cmp(&right.0));
-            if pins.len() != requirements.len()
-                || pins.windows(2).any(|pair| pair[0].0 == pair[1].0)
-                || pins
-                    .iter()
-                    .zip(&requirements)
-                    .any(|((name, _), requirement)| name != &requirement.name)
-            {
+            if offered.len() != queries.len() {
                 return Err(MaterialStatePointError::InvalidSelectionPlan);
+            }
+            let mut used = vec![false; offered.len()];
+            let mut pins = Vec::with_capacity(queries.len());
+            for (requirement, key) in &queries {
+                let repeated_name = queries
+                    .iter()
+                    .filter(|(other, _)| other.name == requirement.name)
+                    .count()
+                    > 1;
+                let mut matches = offered.iter().enumerate().filter(|(index, (name, id))| {
+                    !used[*index]
+                        && *name == requirement.name
+                        && (!repeated_name
+                            || claims.claim(*id).is_some_and(|claim| claim.key == *key))
+                });
+                let Some((index, (_, claim))) = matches.next() else {
+                    return Err(MaterialStatePointError::InvalidSelectionPlan);
+                };
+                if matches.next().is_some() {
+                    return Err(MaterialStatePointError::InvalidSelectionPlan);
+                }
+                used[index] = true;
+                pins.push(*claim);
             }
             Some(pins)
         }
     };
 
     let mut properties = Vec::with_capacity(requirements.len());
-    for (index, requirement) in requirements.into_iter().enumerate() {
-        let mut key = PropertyKey::with_quantity(&requirement.name, requirement.quantity);
-        if let Some(context) = requirement.hardness_test() {
-            key = key.with_hardness_test(context.clone()).map_err(|source| {
-                MaterialStatePointError::Query {
-                    property: requirement.name.clone(),
-                    source,
-                }
-            })?;
-        }
-        if let Some(component) = requirement.elastic_component() {
-            key = key.with_elastic_component(component).map_err(|source| {
-                MaterialStatePointError::Query {
-                    property: requirement.name.clone(),
-                    source,
-                }
-            })?;
-        }
+    for (index, (requirement, key)) in queries.into_iter().enumerate() {
         let answer = match selection {
             MaterialPropertySelection::SingleClaimOnly => {
                 claims.query_typed(&key, point, SelectionPolicy::SingleClaimOnly)
@@ -582,7 +632,7 @@ fn resolve_scalar_property_set(
             MaterialPropertySelection::PinnedByProperty(_) => claims.query_pinned_typed(
                 &key,
                 point,
-                pins.as_ref().expect("pin plan was admitted")[index].1,
+                pins.as_ref().expect("pin plan was admitted")[index],
             ),
         }
         .map_err(|source| match source {
@@ -618,6 +668,17 @@ fn resolve_scalar_property_set(
             answer,
         });
     }
+    properties.sort_by(|left, right| {
+        left.requirement
+            .name
+            .cmp(&right.requirement.name)
+            .then_with(|| {
+                left.answer
+                    .receipt
+                    .selected
+                    .cmp(&right.answer.receipt.selected)
+            })
+    });
 
     let query_point = point
         .axes()
@@ -1208,7 +1269,7 @@ pub fn resolve_elastic_tensor_state_point(
     let stiffness_pa = core::array::from_fn(|row| {
         core::array::from_fn(|column| {
             resolved
-                .property(components[row][column].name())
+                .property_by_key(&components[row][column])
                 .expect("all elastic coefficient requirements were resolved")
                 .value_si()
         })
