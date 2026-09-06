@@ -413,6 +413,14 @@ impl G1TransformerTrainer {
     /// configured challenge. Averaging rather than taking the best stops a
     /// candidate buying a flat-ground win with a terrain collapse.
     fn score(&mut self, head: &[f64]) -> (f64, f64, usize) {
+        // zip truncates to the shorter side, so a length mismatch would leave
+        // part of the head at its previous values and silently score a policy
+        // nobody asked for. Every caller passes a full-width vector.
+        debug_assert_eq!(
+            head.len(),
+            self.policy.model.policy_head.params.len(),
+            "head width must match the policy head"
+        );
         for (slot, value) in self.policy.model.policy_head.params.iter_mut().zip(head) {
             *slot = *value as f32;
         }
