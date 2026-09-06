@@ -168,8 +168,9 @@ impl VkBody {
     }
 
     fn from_plate_ports(plate: ThinPlate, with_area: bool) -> Result<Self, AcousticRealizeError> {
+        plane_stress_section(plate)?;
         admitted_thermoelastic(&plate)?;
-        let isotropic = (plate.e1_pa - plate.e2_pa).abs() <= 1.0e-6 * plate.e1_pa.abs();
+        let isotropic = has_isotropic_elasticity(&plate);
         if isotropic && !plate.clamped {
             Self::from_ss_sine(plate, with_area)
         } else {
@@ -724,26 +725,27 @@ impl PlateProjection {
 }
 
 fn plane_stress_section(plate: ThinPlate) -> Result<PlateSection, AcousticRealizeError> {
-    PlateSection::orthotropic_plane_stress(
+    PlateSection::orthotropic_plane_stress_at_angle(
         plate.e1_pa,
         plate.e2_pa,
         plate.nu12,
         plate.g12_pa,
         plate.thickness_m,
         plate.density_kg_m3,
+        plate.material_angle_rad,
     )
     .map_err(map_plate)
 }
 
-/// Elastic approximation and mapping from material axes to the rectangle.
-/// These are uniform principal-axis alignments, not an arbitrary orientation field.
+/// Elastic approximation and mapping from card axes to section material axes.
+/// `ThinPlate::material_angle_rad` then rotates that section in the rectangle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PlateMaterialModel {
     /// Isotropic density, Young's modulus and Poisson ratio; derive G.
     Isotropic,
-    /// Material axes 1,2 along the rectangle's x,y axes; axis 3 is normal.
+    /// Card axes 1,2 map to section axes 1,2; axis 3 is normal.
     Orthotropic12,
-    /// Material axis 2 along x and axis 1 along y; apply Poisson reciprocity.
+    /// Exchange card axes 1,2 in the section; apply Poisson reciprocity.
     Orthotropic21,
 }
 
@@ -798,7 +800,7 @@ impl ResolvedPlateSpecimen {
         self.mass_kg
     }
 
-    /// Material, resolved geometry and principal-axis model identity. Excludes
+    /// Material, resolved geometry, axis mapping and angle identity. Excludes
     /// supports, loading, damping and solver controls; not a complete scenario hash.
     #[must_use]
     pub const fn specimen_identity(&self) -> ContentHash {
@@ -814,8 +816,9 @@ impl ResolvedPlateSpecimen {
 /// No out-of-plane or unrelated optical/thermal properties are required.
 /// Values describe one frozen material state; no history or mass is transferred
 /// between specimens. Geometry, supports, pretension and authored damping remain
-/// separate from material claims. Only principal-axis linear orthotropic bending
-/// is supported: the existing nonlinear membrane approximation is isotropic.
+/// separate from material claims. The template's uniform material angle is
+/// retained. Only linear orthotropic bending is supported: the existing
+/// nonlinear membrane approximation is isotropic.
 ///
 /// # Errors
 /// Missing/mismatched quantities, invalid geometry/model or unrepresentable
@@ -863,14 +866,19 @@ pub fn with_uniform_plate_material_state(
     if !mass_kg.is_finite() || mass_kg <= 0.0 {
         return Err(refuse("plate mass overflows or underflows"));
     }
-    let mut identity = DomainHasher::new("org.frankensim.fs-couple.uniform-plate-specimen.v1");
+    let mut identity = DomainHasher::new("org.frankensim.fs-couple.uniform-plate-specimen.v2");
     identity.update(state.identity().as_bytes());
     identity.update(&[match model {
         PlateMaterialModel::Isotropic => 0,
         PlateMaterialModel::Orthotropic12 => 1,
         PlateMaterialModel::Orthotropic21 => 2,
     }]);
-    for value in [plate.length_m, plate.width_m, plate.thickness_m] {
+    for value in [
+        plate.length_m,
+        plate.width_m,
+        plate.thickness_m,
+        plate.material_angle_rad,
+    ] {
         identity.update(&value.to_bits().to_le_bytes());
     }
     Ok(ResolvedPlateSpecimen {
@@ -974,19 +982,22 @@ pub fn with_isotropic_thermoelastic_state(
 }
 
 fn require_isotropic_thermoelastic(plate: &ThinPlate) -> Result<(), AcousticRealizeError> {
-    let g_iso = plate.e1_pa / (2.0 * (1.0 + plate.nu12));
-    if !(plate.e1_pa > 0.0
-        && plate.e1_pa.is_finite()
-        && plate.nu12 > -1.0
-        && plate.nu12 < 0.5
-        && (plate.e2_pa / plate.e1_pa - 1.0).abs() <= 1.0e-6
-        && (plate.g12_pa / g_iso - 1.0).abs() <= 1.0e-6)
-    {
+    if !has_isotropic_elasticity(plate) {
         return Err(AcousticRealizeError::InvalidDescription {
             what: "isotropic thermoelastic loss requires isotropic E, nu and G; anisotropic loss is unavailable",
         });
     }
     Ok(())
+}
+
+fn has_isotropic_elasticity(plate: &ThinPlate) -> bool {
+    let g_iso = plate.e1_pa / (2.0 * (1.0 + plate.nu12));
+    plate.e1_pa > 0.0
+        && plate.e1_pa.is_finite()
+        && plate.nu12 > -1.0
+        && plate.nu12 < 0.5
+        && (plate.e2_pa / plate.e1_pa - 1.0).abs() <= 1.0e-6
+        && (plate.g12_pa / g_iso - 1.0).abs() <= 1.0e-6
 }
 
 fn admitted_thermoelastic(
@@ -1143,10 +1154,16 @@ fn piston_radiation_filter(
 }
 
 fn ss_omega11(section: &PlateSection, a: f64, b: f64) -> f64 {
-    let pi = core::f64::consts::PI;
-    let d = section.d[0].abs().max(1.0e-18);
-    let rho_h = (section.density * section.thickness).max(1.0e-18);
-    pi * pi * (1.0 / (a * a) + 1.0 / (b * b)) * (d / rho_h).sqrt()
+    // Sine (1,1) Rayleigh quotient sets a search scale, not a certified
+    // eigenvalue. D16/D26 cross integrals vanish for this trial function,
+    // but they remain in the actual FE pencil. It is exact only for an
+    // aligned, simply supported continuum without prestress/rotary inertia.
+    let kx = core::f64::consts::PI / a;
+    let ky = core::f64::consts::PI / b;
+    let d = &section.d;
+    ((d[0] * kx.powi(4) + 2.0 * (d[1] + 2.0 * d[8]) * kx.powi(2) * ky.powi(2) + d[4] * ky.powi(4))
+        / (section.density * section.thickness))
+        .sqrt()
 }
 
 fn map_plate(_err: PlateError) -> AcousticRealizeError {
@@ -1290,6 +1307,7 @@ mod tests {
             e2_pa: 70e9,
             nu12: 0.3,
             g12_pa: 70e9 / 2.6,
+            material_angle_rad: 0.0,
             damping_ratio: 0.0,
             thermoelastic: Some(IsotropicPlateThermal {
                 temperature_k: 300.0,
@@ -1398,6 +1416,27 @@ mod tests {
     }
 
     #[test]
+    fn g1_shear_anisotropy_reaches_nonlinear_bending_and_bad_angles_refuse() {
+        let mut plate = thermal_plate();
+        plate.thermoelastic = None;
+        let isotropic = VkBody::from_plate(plate).unwrap();
+        let q = 1e-12;
+        let iso_omega2 = isotropic.sys.effort(&[q, 0.0])[0] / q;
+        plate.g12_pa *= 0.5;
+        let anisotropic = VkBody::from_plate(plate).unwrap();
+        let aniso_omega2 = anisotropic.sys.effort(&[q, 0.0])[0] / q;
+        assert!(
+            aniso_omega2 < 0.98 * iso_omega2,
+            "shear anisotropy must lower the actual bending tangent even when E1 == E2"
+        );
+        for angle in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            plate.material_angle_rad = angle;
+            assert!(certified_radiators(plate).is_err());
+            assert!(VkBody::from_plate(plate).is_err());
+        }
+    }
+
+    #[test]
     fn simply_supported_first_mode_is_near_the_analytic_value() {
         let plate = ThinPlate {
             length_m: 0.20,
@@ -1408,6 +1447,7 @@ mod tests {
             e2_pa: 200e9,
             nu12: 0.3,
             g12_pa: 200e9 / (2.0 * 1.3),
+            material_angle_rad: 0.0,
             damping_ratio: 0.01,
             thermoelastic: None,
             n_modes: 2,
@@ -1440,6 +1480,7 @@ mod tests {
             e2_pa: 200e9,
             nu12: 0.3,
             g12_pa: 200e9 / (2.0 * 1.3),
+            material_angle_rad: 0.0,
             damping_ratio: 0.01,
             thermoelastic: None,
             n_modes: 1,
@@ -1485,6 +1526,7 @@ mod tests {
             e2_pa: 200e9,
             nu12: 0.3,
             g12_pa: 200e9 / (2.0 * 1.3),
+            material_angle_rad: 0.0,
             damping_ratio: 0.01,
             thermoelastic: None,
             n_modes: 1,

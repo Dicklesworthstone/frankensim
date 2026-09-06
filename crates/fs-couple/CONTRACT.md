@@ -591,9 +591,12 @@ clarinet is one filling of those objects.
   the same `ResolvedMaterialStatePoint` carrier as the circular-string and
   disc adapters. Isotropic elasticity requires rho/E/nu; principal-axis
   orthotropic plane stress requires rho/E1/E2/nu12/G12. It retains every original
-  property receipt and checks exact scalar quantity schemas. The aligned and
-  exchanged material-axis models map onto fixed rectangle coordinates, with
-  reciprocal nu21 on exchange. No out-of-plane constants are invented in either
+  property receipt and checks exact scalar quantity schemas. Card axes map to
+  section material axes, with reciprocal nu21 on exchange. The explicit
+  `ThinPlate::material_angle_rad` rotates that uniform section counterclockwise
+  from rectangle x, including D16/D26 bending/twisting coupling. Geometry,
+  supports and forcing remain fixed. The angle participates in the v2 specimen
+  identity. No out-of-plane constants are invented in either
   linear or FE-sampled acoustic plate construction. A fixed-thickness or
   fixed-mass prescription derives thickness and mass coherently; geometry and
   material/model identity are retained separately from supports, pretension,
@@ -601,11 +604,17 @@ clarinet is one filling of those objects.
   not a conservative thermal evolution. Stale thermoelastic addends refuse on
   elastic rebinding. The source-bound orthotropic adapter also refuses geometric
   nonlinearity: the existing sampled nonlinear plate's isotropic membrane
-  approximation is not a resolved orthotropic membrane law. Arbitrary grain
-  angles, regional fields, anisotropic thermal loss and phase changes remain
-  unavailable here. G0/G1/G3 cover receipts, reciprocity, fixed-mass geometry,
+  approximation is not a resolved orthotropic membrane law. Regional fields,
+  anisotropic thermal loss and phase changes remain unavailable here. The raw
+  nonlinear path checks E, nu and G before selecting isotropic sine modes.
+  Its rotated FE bending still uses the documented isotropic membrane
+  approximation. The modal search uses a sine trial Rayleigh quotient;
+  it is not an exact off-axis frequency or a completeness certificate.
+  G0/G1/G3 cover receipts, reciprocity, fixed-mass geometry,
   semantic aliases, model boundaries and real pressure changes from material
-  and axis swaps, with eigenfrequencies checked against Navier theory.
+  and axis swaps, with aligned eigenfrequencies checked against Navier theory.
+  An arbitrary angle changes actual assembly pressure; a quarter-turn recovers
+  the pressure and eigenfrequency of reciprocal axis exchange.
 - Linear plate projection: the eigenvector, its modal mass `phi^T M phi`,
   signed radiating area `integral(phi dA)`, and signed bridge-force projection
   remain in one basis. Surface integrals use triangle-area P1 nodal quadrature;

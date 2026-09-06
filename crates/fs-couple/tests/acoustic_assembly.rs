@@ -1202,6 +1202,7 @@ fn steel_panel() -> ThinPlate {
         e2_pa: 200e9,
         nu12: 0.3,
         g12_pa: 200e9 / (2.0 * 1.3),
+        material_angle_rad: 0.0,
         damping_ratio: 0.02,
         thermoelastic: None,
         n_modes: 2,
@@ -1610,6 +1611,75 @@ mod material_plate_tests {
             ),
         ]);
         assert!(bind(template(), &alias, Model::Isotropic, thickness).is_err());
+    }
+
+    #[test]
+    fn g3_uniform_grain_angle_changes_pressure_and_recovers_axis_exchange() {
+        let material = orthotropic(450.0, 1.0);
+        let mut frequencies = Vec::new();
+        let mut pressures = Vec::new();
+        let mut identities = Vec::new();
+        for (angle, model) in [
+            (0.0, Model::Orthotropic12),
+            (0.37, Model::Orthotropic12),
+            (core::f64::consts::FRAC_PI_2, Model::Orthotropic12),
+            (0.0, Model::Orthotropic21),
+        ] {
+            let specimen = bind(
+                ThinPlate {
+                    material_angle_rad: angle,
+                    ..template()
+                },
+                &material,
+                model,
+                Thickness::FixedThickness(0.003),
+            )
+            .unwrap();
+            assert_eq!(specimen.material(), &material);
+            assert_eq!(specimen.plate().material_angle_rad, angle);
+            identities.push(specimen.specimen_identity());
+            frequencies.push(certified_radiators(specimen.plate()).unwrap()[0].omega);
+            let mut assembly = plucked(20.0, 0.006, 1e-5);
+            assembly.duration_s = 0.02;
+            assembly.plate = Some(specimen.plate());
+            pressures.push(realize_assembly(&assembly).unwrap().pressure_pa);
+        }
+        assert_ne!(identities[0], identities[1]);
+        assert!((frequencies[1] / frequencies[0] - 1.0).abs() > 0.01);
+        assert!((frequencies[2] / frequencies[3] - 1.0).abs() < 1e-9);
+        let rotated_delta: Vec<_> = pressures[0]
+            .iter()
+            .zip(&pressures[1])
+            .map(|(a, b)| a - b)
+            .collect();
+        assert!(
+            peak_abs(&rotated_delta) > 1e-7,
+            "orientation reaches physical pressure"
+        );
+        let equivalent_delta: Vec<_> = pressures[2]
+            .iter()
+            .zip(&pressures[3])
+            .map(|(a, b)| a - b)
+            .collect();
+        assert!(
+            peak_abs(&equivalent_delta) < 1e-8 * peak_abs(&pressures[3]),
+            "90-degree rotation equals reciprocal axis exchange"
+        );
+        for angle in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(
+                bind(
+                    ThinPlate {
+                        material_angle_rad: angle,
+                        ..template()
+                    },
+                    &material,
+                    Model::Orthotropic12,
+                    Thickness::FixedThickness(0.003)
+                )
+                .is_err()
+            );
+        }
+        eprintln!("G3 bound plate 0/0.37/pi/2/exchanged omega: {frequencies:?} rad/s");
     }
 
     #[test]

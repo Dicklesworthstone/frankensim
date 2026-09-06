@@ -346,14 +346,18 @@ pub struct ThinPlate {
     pub thickness_m: f64,
     /// Density [kg/m³].
     pub density_kg_m3: f64,
-    /// Young's modulus along local x [Pa], a principal material axis.
+    /// Young's modulus along section material axis 1 [Pa].
     pub e1_pa: f64,
-    /// Young's modulus along local y [Pa], the other in-plane principal axis.
+    /// Young's modulus along section material axis 2 [Pa].
     pub e2_pa: f64,
-    /// Poisson ratio νxy in the rectangle's frame (transverse y strain under x load).
+    /// Poisson ratio ν12 (transverse axis-2 strain under axis-1 load).
     pub nu12: f64,
-    /// In-plane shear modulus Gxy [Pa]. Off-axis normal/shear coupling is not represented.
+    /// In-plane shear modulus G12 in the material frame [Pa].
     pub g12_pa: f64,
+    /// Uniform angle [rad], counterclockwise from rectangle x to section
+    /// material axis 1. Zero aligns material and rectangle axes. The full
+    /// bending stiffness is rotated; supports and excitation stay in place.
+    pub material_angle_rad: f64,
     /// Viscous modal damping ratio.
     pub damping_ratio: f64,
     /// Explicit isotropic thermoelastic loss. `None` means this loss is

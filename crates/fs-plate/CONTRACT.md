@@ -31,6 +31,16 @@ Bead frankensim-fsim-plates-shells-kj3s0 (musical-acoustics program).
   admissible synthetic nu12 > 1/2. The constitutive reduction follows
   [Roylance, Laminated Composite Plates](https://web.mit.edu/course/3/3.11/www/modules/laminates.pdf),
   equation (4) and through-thickness moment integration.
+- `PlateSection::orthotropic_plane_stress_at_angle` rotates a uniform material
+  section counterclockwise from mesh x toward y using the energy-conjugate
+  engineering-curvature transform `D_mesh = T^T D_material T`. The full D16/D26
+  bending/twisting terms reach the existing DKT assembly. Zero angle preserves
+  the aligned section exactly; isotropic constants are angle-independent.
+  Angles must be finite radians. G1 compares a rotated section and an irregular
+  DKT element to independent Hessian projection/compliance energy; G3 checks
+  half-turn periodicity, isotropic invariance and reciprocal quarter-turn
+  equivalence. This is a homogeneous single-layer model, without laminate
+  extension/bending coupling or spatially varying grain.
 - `PlateMesh::{rectangle, rectangle_boundary, from_unstructured, structured_equivalent, boundary_nodes, boundary_edges, total_area}` —
   structured and unstructured right-triangle and general 2D triangular meshes;
   `from_unstructured` validates quality, coordinate finiteness, connectivity, and positive

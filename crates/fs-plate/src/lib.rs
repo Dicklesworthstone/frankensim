@@ -211,6 +211,63 @@ impl PlateSection {
         })
     }
 
+    /// Uniform orthotropic plane stress with material axis 1 at `angle_rad`
+    /// counterclockwise from mesh x toward y. The constants remain in the
+    /// material frame. This introduces bending/twisting coupling, including
+    /// D16 and D26; it does not rotate the geometry, loads or supports.
+    ///
+    /// Engineering curvatures transform as `k_material = T k_mesh`, hence
+    /// conservation of strain energy gives `D_mesh = Tᵀ D_material T`.
+    /// The factors of two in T follow Roylance's strain transformation (8),
+    /// with the same convention as this crate's DKT curvature operator.
+    ///
+    /// # Errors
+    /// As for [`Self::orthotropic_plane_stress`], plus nonfinite angles or
+    /// unrepresentable rotated stiffness. Spatially varying grain is not modeled.
+    pub fn orthotropic_plane_stress_at_angle(
+        e1: f64,
+        e2: f64,
+        nu12: f64,
+        g12: f64,
+        thickness: f64,
+        density: f64,
+        angle_rad: f64,
+    ) -> Result<PlateSection, PlateError> {
+        let mut section = Self::orthotropic_plane_stress(e1, e2, nu12, g12, thickness, density)?;
+        if !angle_rad.is_finite() {
+            return Err(PlateError::BadSection {
+                what: "material angle must be finite radians",
+            });
+        }
+        // Preserve the aligned path exactly; an isotropic material has no grain.
+        if angle_rad == 0.0 || (e1 == e2 && g12 == e1 / (2.0 * (1.0 + nu12))) {
+            return Ok(section);
+        }
+        let (s, c) = angle_rad.sin_cos();
+        let (cc, ss, cs) = (c * c, s * s, c * s);
+        let t = [[cc, ss, cs], [ss, cc, -cs], [-2.0 * cs, 2.0 * cs, cc - ss]];
+        let mut d = [0.0; 9];
+        for i in 0..3 {
+            for j in i..3 {
+                let mut value = 0.0;
+                for a in 0..3 {
+                    for b in 0..3 {
+                        value += t[a][i] * section.d[3 * a + b] * t[b][j];
+                    }
+                }
+                d[3 * i + j] = value;
+                d[3 * j + i] = value;
+            }
+        }
+        if d.iter().any(|v| !v.is_finite()) || [d[0], d[4], d[8]].iter().any(|v| *v <= 0.0) {
+            return Err(PlateError::BadSection {
+                what: "rotated bending stiffness overflows or underflows",
+            });
+        }
+        section.d = d;
+        Ok(section)
+    }
+
     /// Dimensioned front door for [`PlateSection::orthotropic`]: thickness
     /// and density arrive as `fs_qty` quantities (coherent SI), so a
     /// caller cannot pass a millimetre thickness or a g/cm³ density
@@ -1286,6 +1343,96 @@ mod tests {
         assert!(
             PlateSection::orthotropic_plane_stress(e1, e2, nu, g, f64::MIN_POSITIVE, rho).is_err()
         );
+    }
+
+    #[test]
+    fn g1_grain_rotation_preserves_tensor_energy_and_dkt_curvature() {
+        let (e1, e2, nu, g, h, rho) = (12e9, 0.9e9, 1.2, 0.75e9, 0.003, 450.0);
+        let angle: f64 = 0.37;
+        let sec =
+            PlateSection::orthotropic_plane_stress_at_angle(e1, e2, nu, g, h, rho, angle).unwrap();
+        assert!(
+            sec.d[2].abs() > 1.0 && sec.d[5].abs() > 1.0,
+            "bending/twisting coupling survives"
+        );
+        let x = [0.1, 1.3, 0.4];
+        let y = [-0.2, 0.1, 0.9];
+        let (ke, twice_area) = dkt_stiffness(&x, &y, &sec.d, 0).unwrap();
+        // Independent 2-D Hessian projection onto the actual grain directions;
+        // solve the principal compliance directly rather than rotating D again.
+        let u = [angle.cos(), angle.sin()];
+        let v = [-angle.sin(), angle.cos()];
+        for [xx, yy, xy] in [[1.1, -0.4, 0.7], [0.0, 0.0, 1.0], [-0.2, 0.8, -0.3]] {
+            let project = |a: [f64; 2], b: [f64; 2]| {
+                a[0] * (xx * b[0] + xy * b[1]) + a[1] * (xy * b[0] + yy * b[1])
+            };
+            let (k1, k2, k12) = (project(u, u), project(v, v), 2.0 * project(u, v));
+            let determinant = 1.0 / (e1 * e2) - (nu / e1).powi(2);
+            let s1 = (k1 / e2 + nu / e1 * k2) / determinant;
+            let s2 = (nu / e1 * k1 + k2 / e1) / determinant;
+            let expected = (k1 * s1 + k2 * s2 + g * k12.powi(2)) * h.powi(3) / 12.0;
+            let kappa = [xx, yy, 2.0 * xy];
+            let mut energy = 0.0;
+            for i in 0..3 {
+                for j in 0..3 {
+                    energy += kappa[i] * sec.d[3 * i + j] * kappa[j];
+                }
+            }
+            assert!((energy / expected - 1.0).abs() < 1e-13);
+            let mut dofs = [0.0; 9];
+            for i in 0..3 {
+                dofs[3 * i] = 0.5 * xx * x[i].powi(2) + xy * x[i] * y[i] + 0.5 * yy * y[i].powi(2);
+                dofs[3 * i + 1] = xx * x[i] + xy * y[i];
+                dofs[3 * i + 2] = xy * x[i] + yy * y[i];
+            }
+            let mut fe_energy = 0.0;
+            for i in 0..9 {
+                for j in 0..9 {
+                    fe_energy += dofs[i] * ke[9 * i + j] * dofs[j];
+                }
+            }
+            assert!((fe_energy / (0.5 * twice_area * expected) - 1.0).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn g3_grain_rotation_is_periodic_and_recovers_aligned_and_isotropic_sections() {
+        let (e1, e2, nu, g, h, rho) = (12e9, 0.9e9, 1.2, 0.75e9, 0.003, 450.0);
+        let at = |angle| {
+            PlateSection::orthotropic_plane_stress_at_angle(e1, e2, nu, g, h, rho, angle).unwrap()
+        };
+        let aligned = PlateSection::orthotropic_plane_stress(e1, e2, nu, g, h, rho).unwrap();
+        assert_eq!(at(0.0).d.map(f64::to_bits), aligned.d.map(f64::to_bits));
+        let swapped =
+            PlateSection::orthotropic_plane_stress(e2, e1, nu * e2 / e1, g, h, rho).unwrap();
+        for (a, b) in [
+            (at(core::f64::consts::FRAC_PI_2), swapped),
+            (at(0.37), at(0.37 + core::f64::consts::PI)),
+        ] {
+            for i in 0..9 {
+                assert!((a.d[i] - b.d[i]).abs() < 1e-13 * aligned.d[0]);
+            }
+        }
+        let iso = PlateSection::isotropic(70e9, 0.3, h, rho).unwrap();
+        for angle in [-0.72, 0.37, core::f64::consts::FRAC_PI_2] {
+            let rotated = PlateSection::orthotropic_plane_stress_at_angle(
+                70e9,
+                70e9,
+                0.3,
+                70e9 / 2.6,
+                h,
+                rho,
+                angle,
+            )
+            .unwrap();
+            assert_eq!(rotated.d.map(f64::to_bits), iso.d.map(f64::to_bits));
+        }
+        for angle in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(
+                PlateSection::orthotropic_plane_stress_at_angle(e1, e2, nu, g, h, rho, angle)
+                    .is_err()
+            );
+        }
     }
 
     #[test]
