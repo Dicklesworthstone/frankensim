@@ -45,7 +45,7 @@ mod tensor;
 
 pub use tensor::{
     ElasticTensorBasis, ElasticTensorComponent, ElasticTensorNotation, ElasticTensorOrder,
-    ElasticTensorSymmetry,
+    ElasticTensorSymmetry, StrainTensorBasis, StrainTensorNotation,
 };
 
 pub use cards::{

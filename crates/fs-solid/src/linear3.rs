@@ -35,6 +35,7 @@ use fs_material::state_point::{
     ElasticTensorStatePoint, IntegratedIsotropicThermalExpansion, IsotropicElasticStatePoint,
     IsotropicSolidStatePoint, OrthotropicElasticStatePoint,
 };
+pub use fs_material::tensor::{StrainTensorBasis, StrainTensorNotation};
 use fs_solver::krylov::CgState;
 use fs_solver::op::{CsrOp, LinearOp};
 use fs_sparse::{Coo, Csr};
@@ -469,7 +470,165 @@ pub struct TetThermalStrainState {
     identity: ContentHash,
 }
 
+/// A second-order thermal strain transform and its directly executable state.
+/// The input is already integrated over the temperature path. This receipt
+/// retains nominal values and frame declarations, not calibrated orientation
+/// or propagated uncertainty, and currently has no portable byte codec.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ThermalStrainTransformReceipt {
+    source_free_strain: [f64; 6],
+    source_basis: StrainTensorBasis,
+    target_frame: ContentHash,
+    source_to_target: [[f64; 3]; 3],
+    state: TetThermalStrainState,
+}
+
+impl ThermalStrainTransformReceipt {
+    /// Source values in the declared coordinate order and shear convention.
+    #[must_use]
+    pub const fn source_free_strain(&self) -> &[f64; 6] {
+        &self.source_free_strain
+    }
+
+    /// Symmetric strain coordinates and source-frame identity.
+    #[must_use]
+    pub const fn source_basis(&self) -> StrainTensorBasis {
+        self.source_basis
+    }
+
+    /// The admitted elastic material's target frame.
+    #[must_use]
+    pub const fn target_frame(&self) -> ContentHash {
+        self.target_frame
+    }
+
+    /// Proper rotation: columns are source axes expressed in the target frame.
+    #[must_use]
+    pub const fn source_to_target(&self) -> &[[f64; 3]; 3] {
+        &self.source_to_target
+    }
+
+    /// Target-frame strain accepted directly by the tet thermal operator.
+    /// Its identity binds this complete transform and both physical states.
+    #[must_use]
+    pub const fn state(&self) -> &TetThermalStrainState {
+        &self.state
+    }
+}
+
 impl TetThermalStrainState {
+    /// Rotate an upstream-integrated symmetric strain into the elastic frame.
+    ///
+    /// This applies the SECOND-order law `epsilon' = Q epsilon Q^T`.
+    /// Engineering inputs double only the strain shear coordinates. The
+    /// admitted elastic receipt supplies the target frame and material identity;
+    /// no caller-provided target label can detach the strain from that material.
+    /// `maximum_absolute_mandel_strain` bounds the TARGET Mandel components.
+    /// Temperatures and `thermal_law_identity` describe the supplied integrated
+    /// path; the upstream law must integrate expansion coefficients and admit
+    /// the path against its support. This adapter does not check that support.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_from_oriented_strain(
+        elastic: &ElasticTensorTransformReceipt,
+        temperature_k: f64,
+        reference_temperature_k: f64,
+        source_free_strain: [f64; 6],
+        source_basis: StrainTensorBasis,
+        source_to_target: [[f64; 3]; 3],
+        thermal_law_identity: ContentHash,
+        maximum_absolute_mandel_strain: f64,
+    ) -> Result<ThermalStrainTransformReceipt, TetElasticError> {
+        validate_rotation(source_to_target)?;
+        let identity_rotation = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        if source_basis.frame == ContentHash([0; 32]) {
+            return Err(TetElasticError::InvalidThermalStrain {
+                what: "source strain frame identity must be nonzero",
+            });
+        }
+        if source_basis.frame == elastic.target_frame() && source_to_target != identity_rotation {
+            return Err(TetElasticError::InvalidThermalStrain {
+                what: "a strain frame mapped to itself requires the identity rotation",
+            });
+        }
+        if source_free_strain.iter().any(|value| !value.is_finite()) {
+            return Err(TetElasticError::InvalidThermalStrain {
+                what: "source_free_strain must be finite",
+            });
+        }
+        let order = match source_basis.order {
+            ElasticTensorOrder::XxYyZzXyYzZx => [0, 1, 2, 3, 4, 5],
+            ElasticTensorOrder::XxYyZzYzZxXy => [0, 1, 2, 5, 3, 4],
+        };
+        let shear_scale = match source_basis.notation {
+            StrainTensorNotation::Tensor => core::f64::consts::SQRT_2,
+            StrainTensorNotation::Engineering => core::f64::consts::FRAC_1_SQRT_2,
+            StrainTensorNotation::Mandel => 1.0,
+        };
+        let source_mandel: [f64; 6] = core::array::from_fn(|index| {
+            source_free_strain[order[index]] * if index < 3 { 1.0 } else { shear_scale }
+        });
+        if source_mandel.iter().any(|value| !value.is_finite()) {
+            return Err(TetElasticError::InvalidThermalStrain {
+                what: "strain shear conversion overflows",
+            });
+        }
+        let target_mandel = if source_to_target == identity_rotation {
+            source_mandel
+        } else {
+            let transform = mandel_rotation(source_to_target);
+            core::array::from_fn(|row| {
+                (0..6).fold(0.0, |sum, column| {
+                    transform[row][column].mul_add(source_mandel[column], sum)
+                })
+            })
+        };
+        if source_mandel.iter().any(|value| *value != 0.0)
+            && target_mandel.iter().all(|value| *value == 0.0)
+        {
+            return Err(TetElasticError::InvalidThermalStrain {
+                what: "strain rotation underflows the complete nonzero tensor",
+            });
+        }
+        let mut state = Self::try_new(
+            temperature_k,
+            reference_temperature_k,
+            target_mandel,
+            elastic.material().material_state_identity,
+            thermal_law_identity,
+            maximum_absolute_mandel_strain,
+        )?;
+        let mut identity =
+            DomainHasher::new("org.frankensim.fs-solid.thermal-strain-frame-transform.v1");
+        // The ordinary state identity already binds temperatures, upstream law,
+        // exact elastic state, all target values and the target validity bound.
+        identity.update(state.identity().as_bytes());
+        identity.update(source_basis.frame.as_bytes());
+        identity.update(elastic.target_frame().as_bytes());
+        identity.update(&[match source_basis.notation {
+            StrainTensorNotation::Tensor => 0,
+            StrainTensorNotation::Engineering => 1,
+            StrainTensorNotation::Mandel => 2,
+        }]);
+        identity.update(&[match source_basis.order {
+            ElasticTensorOrder::XxYyZzXyYzZx => 0,
+            ElasticTensorOrder::XxYyZzYzZxXy => 1,
+        }]);
+        for value in source_free_strain
+            .iter()
+            .chain(source_to_target.iter().flatten())
+        {
+            identity.update(&value.to_bits().to_le_bytes());
+        }
+        state.identity = identity.finalize();
+        Ok(ThermalStrainTransformReceipt {
+            source_free_strain,
+            source_basis,
+            target_frame: elastic.target_frame(),
+            source_to_target,
+            state,
+        })
+    }
+
     /// Admit an upstream-integrated thermal strain tensor and its validity bound.
     pub fn try_new(
         temperature_k: f64,
@@ -2095,6 +2254,353 @@ mod tests {
             (actual - expected).abs() < 1.0e-13,
             "{actual} != {expected}"
         );
+    }
+
+    #[test]
+    fn g1_g3_oriented_strain_conventions_drive_anisotropic_thermal_expansion() {
+        let q = fs_material::tensor::rotation([2.0 / 3.0, 2.0 / 3.0, 1.0 / 3.0], 0.73);
+        let elastic = TetElasticMaterial::try_new_oriented_tensor(
+            6.0,
+            coupled_engineering_stiffness(),
+            ElasticTensorBasis {
+                notation: ElasticTensorNotation::Engineering,
+                order: ElasticTensorOrder::XxYyZzXyYzZx,
+                frame: ContentHash([1; 32]),
+            },
+            ContentHash([2; 32]),
+            q,
+            ContentHash([3; 32]),
+        )
+        .unwrap();
+        let source = [
+            [0.010, 0.003, 0.002],
+            [0.003, -0.004, -0.001],
+            [0.002, -0.001, 0.002],
+        ];
+        // Independent second-order oracle, with no six-vector transform.
+        let mut target = [[0.0; 3]; 3];
+        for i in 0..3 {
+            for j in 0..3 {
+                for p in 0..3 {
+                    for r in 0..3 {
+                        target[i][j] += q[i][p] * source[p][r] * q[j][r];
+                    }
+                }
+            }
+        }
+        let expected_mandel = [
+            target[0][0],
+            target[1][1],
+            target[2][2],
+            core::f64::consts::SQRT_2 * target[0][1],
+            core::f64::consts::SQRT_2 * target[1][2],
+            core::f64::consts::SQRT_2 * target[2][0],
+        ];
+        let source_norm2: f64 = source.iter().flatten().map(|v| v * v).sum();
+        let source_trace = source[0][0] + source[1][1] + source[2][2];
+        let nodes = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ];
+        let tets = [[0, 1, 2, 3]];
+        let problem = reference_problem(&nodes, &tets, elastic.material(), &[0, 1, 2, 4, 5, 8]);
+        // A skew displacement gradient removes exactly the constrained rigid
+        // rotation while preserving sym(grad u) = the independent target strain.
+        let expected_displacement = [
+            [0.0; 3],
+            [target[0][0], 0.0, 0.0],
+            [2.0 * target[0][1], target[1][1], 0.0],
+            [2.0 * target[0][2], 2.0 * target[1][2], target[2][2]],
+        ];
+        let c = four_index_rotated_stiffness(q);
+        let mut stress = [[0.0; 3]; 3];
+        for i in 0..3 {
+            for j in 0..3 {
+                for k in 0..3 {
+                    for l in 0..3 {
+                        stress[i][j] += c[i][j][k][l] * target[k][l];
+                    }
+                }
+            }
+        }
+        let gradients = [[-1.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        let mut identities = BTreeSet::new();
+        for notation in [
+            StrainTensorNotation::Tensor,
+            StrainTensorNotation::Engineering,
+            StrainTensorNotation::Mandel,
+        ] {
+            let shear_scale = match notation {
+                StrainTensorNotation::Tensor => 1.0,
+                StrainTensorNotation::Engineering => 2.0,
+                StrainTensorNotation::Mandel => core::f64::consts::SQRT_2,
+            };
+            let canonical = [
+                source[0][0],
+                source[1][1],
+                source[2][2],
+                source[0][1] * shear_scale,
+                source[1][2] * shear_scale,
+                source[2][0] * shear_scale,
+            ];
+            for order in [
+                ElasticTensorOrder::XxYyZzXyYzZx,
+                ElasticTensorOrder::XxYyZzYzZxXy,
+            ] {
+                let input = match order {
+                    ElasticTensorOrder::XxYyZzXyYzZx => canonical,
+                    ElasticTensorOrder::XxYyZzYzZxXy => [
+                        canonical[0],
+                        canonical[1],
+                        canonical[2],
+                        canonical[4],
+                        canonical[5],
+                        canonical[3],
+                    ],
+                };
+                let basis = StrainTensorBasis {
+                    notation,
+                    order,
+                    frame: ContentHash([1; 32]),
+                };
+                let receipt = TetThermalStrainState::try_from_oriented_strain(
+                    &elastic,
+                    400.0,
+                    293.15,
+                    input,
+                    basis,
+                    q,
+                    ContentHash([0x41; 32]),
+                    0.05,
+                )
+                .unwrap();
+                assert_eq!(receipt.source_free_strain(), &input);
+                assert_eq!(receipt.source_basis(), basis);
+                assert_eq!(receipt.target_frame(), elastic.target_frame());
+                assert_eq!(receipt.source_to_target(), &q);
+                assert_eq!(
+                    receipt.state().thermal_law_identity(),
+                    ContentHash([0x41; 32])
+                );
+                let actual = receipt.state().free_strain_mandel();
+                for (actual, expected) in actual.iter().zip(expected_mandel) {
+                    assert!(
+                        (actual - expected).abs() < 1.0e-16,
+                        "{notation:?}/{order:?}: {actual} != {expected}"
+                    );
+                }
+                assert!((actual[..3].iter().sum::<f64>() - source_trace).abs() < 1.0e-16);
+                assert!((actual.iter().map(|v| v * v).sum::<f64>() - source_norm2).abs() < 1.0e-18);
+                assert_eq!(
+                    receipt,
+                    TetThermalStrainState::try_from_oriented_strain(
+                        &elastic,
+                        400.0,
+                        293.15,
+                        input,
+                        basis,
+                        q,
+                        ContentHash([0x41; 32]),
+                        0.05,
+                    )
+                    .unwrap()
+                );
+                assert!(
+                    identities.insert(receipt.state().identity()),
+                    "source convention stays identity-bearing"
+                );
+                let field = TetThermalStrainField::Uniform(receipt.state());
+                let load = with_cx(|cx| problem.assemble_thermal_load(field, cx)).unwrap();
+                for (node, gradient) in gradients.iter().enumerate() {
+                    for component in 0..3 {
+                        let expected = (0..3)
+                            .map(|j| stress[component][j] * gradient[j])
+                            .sum::<f64>()
+                            / 6.0;
+                        assert!(
+                            (load.full_equivalent_force_n[3 * node + component] - expected).abs()
+                                < 2.0e-14
+                        );
+                    }
+                }
+                let solution = with_cx(|cx| {
+                    problem.solve_thermal_displacement(field, TetStaticSolveConfig::default(), cx)
+                })
+                .unwrap();
+                assert!(solution.true_relative_residual() < 1.0e-12);
+                let updated =
+                    with_cx(|cx| problem.update_geometry_from_displacement(&solution, 0.1, cx))
+                        .unwrap();
+                for node in 0..4 {
+                    for component in 0..3 {
+                        assert!(
+                            (solution.displacement_m()[node][component]
+                                - expected_displacement[node][component])
+                                .abs()
+                                < 1.0e-12
+                        );
+                        assert!(
+                            (updated.nodes_m()[node][component]
+                                - nodes[node][component]
+                                - expected_displacement[node][component])
+                                .abs()
+                                < 1.0e-12
+                        );
+                    }
+                }
+                assert_eq!(updated.tetrahedra(), &tets);
+            }
+        }
+        assert_eq!(identities.len(), 6);
+    }
+
+    #[test]
+    fn g0_oriented_thermal_strain_refuses_bad_frames_and_lost_values() {
+        let identity = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        let elastic = TetElasticMaterial::try_new_oriented_tensor(
+            6.0,
+            coupled_engineering_stiffness(),
+            ElasticTensorBasis {
+                notation: ElasticTensorNotation::Engineering,
+                order: ElasticTensorOrder::XxYyZzXyYzZx,
+                frame: ContentHash([1; 32]),
+            },
+            ContentHash([2; 32]),
+            identity,
+            ContentHash([3; 32]),
+        )
+        .unwrap();
+        let basis = StrainTensorBasis {
+            notation: StrainTensorNotation::Mandel,
+            order: ElasticTensorOrder::XxYyZzXyYzZx,
+            frame: ContentHash([1; 32]),
+        };
+        let make = |input, basis, q, limit| {
+            TetThermalStrainState::try_from_oriented_strain(
+                &elastic,
+                400.0,
+                293.15,
+                input,
+                basis,
+                q,
+                ContentHash([0x41; 32]),
+                limit,
+            )
+        };
+        let input = [0.01, -0.003, 0.002, -0.001, 0.005, 0.007];
+        assert_eq!(
+            make(input, basis, identity, 0.01)
+                .unwrap()
+                .state()
+                .free_strain_mandel()
+                .map(f64::to_bits),
+            input.map(f64::to_bits)
+        );
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut values = input;
+            values[4] = bad;
+            assert!(matches!(
+                make(values, basis, identity, 0.05),
+                Err(TetElasticError::InvalidThermalStrain { .. })
+            ));
+        }
+        assert!(matches!(
+            make(
+                input,
+                StrainTensorBasis {
+                    frame: ContentHash([0; 32]),
+                    ..basis
+                },
+                identity,
+                0.05
+            ),
+            Err(TetElasticError::InvalidThermalStrain { .. })
+        ));
+        for q in [
+            [[-1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            [[1.0, 0.1, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            [[f64::NAN, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        ] {
+            assert!(matches!(
+                make(input, basis, q, 0.05),
+                Err(TetElasticError::InvalidMaterial { .. })
+            ));
+        }
+        let q = [[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]];
+        assert!(matches!(
+            make(
+                input,
+                StrainTensorBasis {
+                    frame: elastic.target_frame(),
+                    ..basis
+                },
+                q,
+                0.05
+            ),
+            Err(TetElasticError::InvalidThermalStrain { .. })
+        ));
+        for limit in [0.005, 0.0, f64::INFINITY] {
+            assert!(matches!(
+                make(input, basis, identity, limit),
+                Err(TetElasticError::InvalidThermalStrain { .. })
+            ));
+        }
+        let mut overflowing = input;
+        overflowing[3] = f64::MAX;
+        assert!(matches!(
+            make(
+                overflowing,
+                StrainTensorBasis {
+                    notation: StrainTensorNotation::Tensor,
+                    ..basis
+                },
+                identity,
+                f64::MAX
+            ),
+            Err(TetElasticError::InvalidThermalStrain { .. })
+        ));
+        // Rank-one strain along an equally inclined axis has all six Mandel
+        // coefficients below half a minimum subnormal: refuse an invented zero.
+        let a = 1.0 / 3.0_f64.sqrt();
+        let b = 1.0 / 2.0_f64.sqrt();
+        let c = 1.0 / 6.0_f64.sqrt();
+        let inclined = [[a, -b, -c], [a, b, -c], [a, 0.0, 2.0 * c]];
+        let tiny = [f64::from_bits(1), 0.0, 0.0, 0.0, 0.0, 0.0];
+        assert!(matches!(
+            make(tiny, basis, inclined, 0.05),
+            Err(TetElasticError::InvalidThermalStrain {
+                what: "strain rotation underflows the complete nonzero tensor"
+            })
+        ));
+        assert_eq!(
+            make(tiny, basis, identity, 0.05)
+                .unwrap()
+                .state()
+                .free_strain_mandel()
+                .map(f64::to_bits),
+            tiny.map(f64::to_bits)
+        );
+        // Even zero expansion cannot discard the declared frame transform.
+        let zero = make([0.0; 6], basis, identity, 0.05).unwrap();
+        let rotated_zero = make([0.0; 6], basis, q, 0.05).unwrap();
+        assert_eq!(
+            zero.state().free_strain_mandel(),
+            rotated_zero.state().free_strain_mandel()
+        );
+        assert_ne!(zero.state().identity(), rotated_zero.state().identity());
+        let relabelled = make(
+            [0.0; 6],
+            StrainTensorBasis {
+                frame: ContentHash([9; 32]),
+                ..basis
+            },
+            identity,
+            0.05,
+        )
+        .unwrap();
+        assert_ne!(zero.state().identity(), relabelled.state().identity());
     }
 
     #[test]

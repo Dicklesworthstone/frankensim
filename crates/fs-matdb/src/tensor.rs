@@ -36,6 +36,31 @@ pub struct ElasticTensorBasis {
     pub frame: ContentHash,
 }
 
+/// Shear coordinates of a symmetric infinitesimal STRAIN tensor.
+/// These are not stress-vector or fourth-order stiffness conventions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StrainTensorNotation {
+    /// Store the physical off-diagonal strain `epsilon_ij` once.
+    Tensor,
+    /// Store engineering shear strain `2 epsilon_ij`.
+    Engineering,
+    /// Store `sqrt(2) epsilon_ij`; Euclidean norm equals Frobenius norm.
+    Mandel,
+}
+
+/// Coordinates of a symmetric second-order strain tensor. Its six entries
+/// declare symmetry by construction; no displacement gradient, antisymmetric
+/// part or coefficient of thermal expansion is inferred from this descriptor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StrainTensorBasis {
+    /// Strain-specific shear scaling.
+    pub notation: StrainTensorNotation,
+    /// Same six symmetric coordinate positions used by elastic rows/columns.
+    pub order: ElasticTensorOrder,
+    /// Nonzero source-frame identity, validated by the numerical consumer.
+    pub frame: ContentHash,
+}
+
 /// Declared symmetry of the complete law, checked numerically by its consumer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ElasticTensorSymmetry {

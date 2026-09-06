@@ -86,6 +86,32 @@ updated fixed-topology chart.
 No material name, constant-alpha assumption, or Euler-disc geometry appears in
 this layer.
 
+`TetThermalStrainState::try_from_oriented_strain` connects a source-frame
+symmetric strain to that same thermal operator. `StrainTensorBasis` declares
+physical tensor shear, engineering strain shear (`2 epsilon_ij`), or Mandel
+shear and either existing six-component order. These are strain conventions,
+not stress-vector or elastic-matrix scaling. The numerical transform is the
+second-order law `epsilon' = Q epsilon Q^T`. The admitted
+`ElasticTensorTransformReceipt` supplies the target frame and elastic-state
+identity; a source frame mapped to itself requires identity rotation. Identity
+rotation preserves normalized Mandel bits. Nonfinite input, improper rotation,
+shear overflow, complete nonzero-to-zero rotation underflow, and target strains
+outside the declared Mandel component ceiling refuse.
+
+`ThermalStrainTransformReceipt` retains the source six-vector, basis, both
+frames, rotation and executable thermal state. State identity domain
+`org.frankensim.fs-solid.thermal-strain-frame-transform.v1` binds the ordinary
+thermal-state identity (temperatures, law, elastic state, target strain and
+validity ceiling) plus the source vector and complete transform. The existing
+constructor's identity preimage is unchanged. G1/G3 compares all six source
+conventions against independent second-order rotation, trace/Frobenius
+invariance, and four-index elastic stress contraction; actual thermal loads,
+constrained displacement and fixed-topology geometry reproduce affine
+anisotropic expansion. This is nominal, synthetic numerical evidence. The
+upstream law must supply the integrated strain and admit its temperature path;
+no coefficient integration, second-order source-pack transport, frame
+calibration, portable transform codec or uncertainty propagation is added here.
+
 ## Public types and semantics
 
 - `Mesh2` / `Patch`: structured body-fitted meshes — P1 triangles, Q1

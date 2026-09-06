@@ -376,6 +376,15 @@ These are synthetic software checks. Full rotated uncertainty/covariance
 propagation, arbitrary coupled tensor laws, and second-order tensor payloads are
 still absent; no observed material or calibrated frame is invented.
 
+`StrainTensorBasis` / `StrainTensorNotation` declare symmetric second-order
+strain coordinates for numerical consumers. Physical tensor shear,
+engineering strain shear (`2 epsilon_ij`) and Mandel shear are distinct from
+elastic-matrix conventions; component ordering reuses the existing six-position
+order. `fs-material::tensor` re-exports these descriptors, and `fs-solid` uses
+them for the second-order thermal-strain transform feeding its tet operator.
+These descriptors do not yet attach to property keys or change any claim/pack
+encoding. Second-order source-pack transport remains absent.
+
 The offline compiler now admits a v2 manifest for material/interface sources:
 `property <source> <target> <kind|dimensional>` and `axis <source> <target>`
 are explicit tab-separated declarations. Undeclared names retain their source
