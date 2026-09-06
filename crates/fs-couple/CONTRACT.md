@@ -386,6 +386,27 @@ width. Geometry and prestress constraints are independent and both remain
 available on the result, separate from material authority. The specimen hash
 binds resolved geometry, not the authored comparison policy.
 
+`with_uniform_circular_thermal_extension` consumes the existing
+`IntegratedIsotropicThermalExpansion` and current elastic resolution from the
+same exact card, query coordinates and axis conventions. It computes the
+small-strain eigenstrain relation `T = EA * ((L-L_ref)/L_ref - integral(alpha dT))`,
+using one reference configuration, as in
+[MIT 16.20, section 3.7](https://web.mit.edu/16.20/homepage/3_Constitutive/Constitutive_files/module_3_no_solutions.pdf).
+The current geometry/mass constraint remains explicit; both elastic and expansion
+receipts survive in the result. `FixedThermalExtension` records the mechanical
+prescription, while `thermal_expansion()` distinguishes the sourced path from
+raw authored eigenstrain. A subsequent ordinary binding requires the thermal
+path to be supplied again; it cannot silently retain old thermal evidence.
+Total, thermal and positive elastic strains must stay within the authored limit.
+Slack, compression and domain exit refuse; no buckling solver is implied.
+Fixed tension remains a separate force-controlled prescription. G1/G3 check a
+piecewise-linear expansion curve across temperature knots, heating/cooling force
+changes, mass and receipt retention, and pitch from the real pressure solver.
+G0 checks current-state/source mismatch, invalid reference length, unsupported
+moving supports and strain-domain refusals. This initializes independent uniform
+specimens; it does not evolve temperature, exchange heat, transport strain or
+solve lateral contraction during playback.
+
 All policies preserve the selected loss law, supports, and modal budget. These compare
 specimens at resolved states; thermal evolution, transverse contraction,
 yielding, anisotropy, or melting are not solved. Target pitch describes an undamped

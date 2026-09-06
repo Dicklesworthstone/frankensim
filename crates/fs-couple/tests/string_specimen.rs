@@ -7,6 +7,7 @@ use fs_couple::string_specimen::{
     KELVIN_VOIGT_BENDING_VISCOSITY_PROPERTY, RELAXING_BENDING_MODULUS_PROPERTY,
     StringGeometryConstraint, StringPrestress, with_uniform_circular_material_and_constraints,
     with_uniform_circular_material_and_prestress, with_uniform_circular_material_state,
+    with_uniform_circular_thermal_extension,
 };
 use fs_evidence::ValidityDomain;
 use fs_matdb::{
@@ -14,8 +15,10 @@ use fs_matdb::{
     PropertyValue, Provenance, QueryPoint, UncertaintyModel,
 };
 use fs_material::state_point::{
-    MaterialPropertySelection, ResolvedMaterialStatePoint, ScalarAdmissibility,
-    ScalarPropertyRequirement, resolve_material_state_point,
+    INVERSE_TEMPERATURE_DIMS, IntegratedIsotropicThermalExpansion,
+    LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY, MaterialPropertySelection,
+    ResolvedMaterialStatePoint, ScalarAdmissibility, ScalarPropertyRequirement,
+    integrate_isotropic_thermal_expansion, resolve_material_state_point,
 };
 use fs_qty::{
     Density, Dims, DynViscosity, Pressure, QuantitySpec, Time,
@@ -143,6 +146,247 @@ fn elastic(name: &str, rho: f64, young: f64) -> ResolvedMaterialStatePoint {
     )
 }
 
+fn thermal_state(
+    temperature_k: f64,
+) -> (
+    ResolvedMaterialStatePoint,
+    IntegratedIsotropicThermalExpansion,
+) {
+    let mut claims = ClaimSet::new();
+    for (key, dims, value) in [
+        (
+            "density",
+            Density::DIMS,
+            PropertyValue::Scalar {
+                value: 7800.0,
+                dims: Density::DIMS,
+            },
+        ),
+        (
+            "young_modulus",
+            Pressure::DIMS,
+            PropertyValue::Scalar {
+                value: 200e9,
+                dims: Pressure::DIMS,
+            },
+        ),
+        (
+            LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY,
+            INVERSE_TEMPERATURE_DIMS,
+            PropertyValue::Curve {
+                abscissa: "T".into(),
+                abscissa_dims: Dims([0, 0, 0, 1, 0, 0]),
+                knots: vec![
+                    (250.0, 5e-6),
+                    (300.0, 10e-6),
+                    (350.0, 20e-6),
+                    (400.0, 30e-6),
+                    (450.0, 40e-6),
+                ],
+                dims: INVERSE_TEMPERATURE_DIMS,
+            },
+        ),
+    ] {
+        let interpolation = if matches!(&value, PropertyValue::Curve { .. }) {
+            InterpolationPolicy::LinearInside
+        } else {
+            InterpolationPolicy::ConstantWithinValidity
+        };
+        claims
+            .insert_claim(PropertyClaim {
+                key: PropertyKey::new(key, dims),
+                value,
+                validity: ValidityDomain::unconstrained().with("T", 250.0, 450.0),
+                uncertainty: UncertaintyModel::Unstated,
+                interpolation,
+                observations: vec![],
+                provenance: Provenance {
+                    source: "synthetic thermal string".into(),
+                    license: "CC0-1.0".into(),
+                    artifact: None,
+                },
+            })
+            .unwrap();
+    }
+    let card = MaterialCard::assemble(
+        MaterialStateId {
+            chemistry: "synthetic thermal wire".into(),
+            phase: "solid".into(),
+            process: "synthetic".into(),
+            revision: 0,
+        },
+        claims,
+        vec![],
+    )
+    .unwrap();
+    let point = QueryPoint::new().with("T", temperature_k).unwrap();
+    let requirements = [
+        ScalarPropertyRequirement::try_new(
+            "density",
+            Density::DIMS,
+            ScalarAdmissibility::StrictlyPositive,
+        )
+        .unwrap(),
+        ScalarPropertyRequirement::try_new(
+            "young_modulus",
+            Pressure::DIMS,
+            ScalarAdmissibility::StrictlyPositive,
+        )
+        .unwrap(),
+    ];
+    let state = resolve_material_state_point(
+        &card,
+        &point,
+        &requirements,
+        MaterialPropertySelection::SingleClaimOnly,
+    )
+    .unwrap();
+    let expansion = integrate_isotropic_thermal_expansion(
+        &card,
+        &QueryPoint::new().with("T", 300.0).unwrap(),
+        &point,
+        MaterialPropertySelection::SingleClaimOnly,
+    )
+    .unwrap();
+    (state, expansion)
+}
+
+#[test]
+fn g1_thermal_eigenstrain_changes_fixed_support_tension_with_retained_receipts() {
+    let mut tensions = Vec::new();
+    for (temperature, thermal_strain) in [(300.0, 0.0), (400.0, 0.002), (250.0, -0.000375)] {
+        let (state, expansion) = thermal_state(temperature);
+        let specimen = with_uniform_circular_thermal_extension(
+            PrestressedString {
+                length_m: 0.502,
+                ..template()
+            },
+            StringGeometryConstraint::FixedMass(0.001),
+            &state,
+            &expansion,
+            0.5,
+            0.01,
+        )
+        .unwrap();
+        assert_eq!(specimen.material(), &state);
+        assert_eq!(specimen.thermal_expansion(), Some(&expansion));
+        assert_eq!(
+            specimen.material().properties().len(),
+            2,
+            "no unrelated property requirements"
+        );
+        close(specimen.mass_kg(), 0.001);
+        let area = 0.001 / (7800.0 * 0.502);
+        let expected = 200e9 * area * ((0.502 - 0.5) / 0.5 - thermal_strain);
+        close(specimen.string().tension_n, expected);
+        tensions.push(expected);
+        let force_controlled = with_uniform_circular_material_and_constraints(
+            specimen.string(),
+            StringGeometryConstraint::FixedMass(0.001),
+            &state,
+            StringPrestress::FixedTension(20.0),
+        )
+        .unwrap();
+        close(force_controlled.string().tension_n, 20.0);
+        assert!(force_controlled.thermal_expansion().is_none());
+    }
+    assert!(tensions[1] < tensions[0] && tensions[2] > tensions[0]);
+}
+
+#[test]
+fn g3_thermal_expansion_changes_actual_plucked_pressure_pitch() {
+    let mut pitches = Vec::new();
+    for temperature in [300.0, 400.0] {
+        let (state, expansion) = thermal_state(temperature);
+        let specimen = with_uniform_circular_thermal_extension(
+            PrestressedString {
+                length_m: 0.502,
+                ..template()
+            },
+            StringGeometryConstraint::FixedMass(0.001),
+            &state,
+            &expansion,
+            0.5,
+            0.01,
+        )
+        .unwrap();
+        let string = specimen.string();
+        let expected = string_mode_omega(&string, 1) / core::f64::consts::TAU;
+        let pitch = measured_hz(&pressure(string));
+        assert!(
+            (pitch / expected - 1.0).abs() < 0.01,
+            "physical pressure pitch {pitch} vs mode {expected}"
+        );
+        pitches.push(pitch);
+    }
+    assert!(
+        (pitches[1] / pitches[0] - 0.5_f64.sqrt()).abs() < 0.01,
+        "heating reduces elastic prestress: {pitches:?}"
+    );
+    eprintln!("G3 thermal string 300/400 K pressure pitches: {pitches:?} Hz");
+}
+
+#[test]
+fn g0_thermal_string_refuses_mismatched_state_slack_and_excess_strain() {
+    let (hot, expansion) = thermal_state(400.0);
+    let (cold, _) = thermal_state(300.0);
+    let other = state_with_domain(
+        "another wire",
+        &[
+            ("density", QuantitySpec::dimensional(Density::DIMS), 7800.0),
+            (
+                "young_modulus",
+                QuantitySpec::dimensional(Pressure::DIMS),
+                200e9,
+            ),
+        ],
+        ValidityDomain::unconstrained().with("T", 250.0, 450.0),
+        QueryPoint::new().with("T", 400.0).unwrap(),
+        None,
+    );
+    let string = PrestressedString {
+        length_m: 0.502,
+        ..template()
+    };
+    for state in [&cold, &other] {
+        assert!(
+            with_uniform_circular_thermal_extension(
+                string.clone(),
+                StringGeometryConstraint::FixedMass(0.001),
+                state,
+                &expansion,
+                0.5,
+                0.01
+            )
+            .is_err()
+        );
+    }
+    for (length, reference, limit, moving) in [
+        (0.5005, 0.5, 0.01, false), // expansion exceeds initial stretch: compression
+        (0.51, 0.5, 0.01, false),   // total reference strain too large
+        (0.502, 0.5, 0.001, false), // thermal strain too large
+        (0.502, 0.0, 0.01, false),
+        (0.502, 0.5, f64::NAN, false),
+        (0.502, 0.5, 0.01, true),
+    ] {
+        assert!(
+            with_uniform_circular_thermal_extension(
+                PrestressedString {
+                    length_m: length,
+                    moving_end: moving,
+                    ..string.clone()
+                },
+                StringGeometryConstraint::FixedMass(0.001),
+                &hot,
+                &expansion,
+                reference,
+                limit
+            )
+            .is_err()
+        );
+    }
+}
+
 fn template() -> PrestressedString {
     PrestressedString {
         length_m: 0.5,
@@ -263,6 +507,11 @@ fn g1_fixed_mass_derives_geometry_stiffness_and_independent_prestress() {
                 stress_free_length_m: 0.498,
                 linear_strain_limit: 0.005,
             },
+            StringPrestress::FixedThermalExtension {
+                reference_stress_free_length_m: 0.498,
+                free_thermal_strain: 0.001,
+                linear_strain_limit: 0.005,
+            },
             StringPrestress::TargetFundamentalHz(160.0),
         ] {
             let specimen = with_uniform_circular_material_and_constraints(
@@ -288,6 +537,15 @@ fn g1_fixed_mass_derives_geometry_stiffness_and_independent_prestress() {
                     stress_free_length_m,
                     ..
                 } => young * area * (length / stress_free_length_m - 1.0),
+                StringPrestress::FixedThermalExtension {
+                    reference_stress_free_length_m,
+                    free_thermal_strain,
+                    ..
+                } => {
+                    young
+                        * area
+                        * (length / reference_stress_free_length_m - 1.0 - free_thermal_strain)
+                }
                 StringPrestress::TargetFundamentalHz(hz) => {
                     4.0 * mass * length * hz.powi(2)
                         - young * moment * (core::f64::consts::PI / length).powi(2)
