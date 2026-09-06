@@ -1060,6 +1060,13 @@ migration equivalence lives in fs-dcontact's battery.
   the covariance correctly (e.g. correlated draws) is e06.7's authority,
   and the block's numbers remain pack-admitted data, not a certified
   enclosure.
+  `query_joint_typed` distinguishes complete keys: different tensor coefficients
+  or test contexts may share a property name. Repeated complete keys refuse.
+  Receipt replay recovers those contexts from selected content-pinned claims;
+  swapping same-name coefficients without their receipts/covariance refuses.
+  G3 `g3_same_name_tensor_components_retain_joint_covariance_and_replay` checks
+  both request orders after portable pack decode, duplicate refusal, and unknown
+  correlation when no measured joint block exists. This does not rotate covariance.
 - Frame names in normalization receipts record provenance only. Explicit
   `ElasticTensorComponent` keys separately retain elastic coordinates; neither
   those declarations nor scalar normalization receipts certify frame calibration

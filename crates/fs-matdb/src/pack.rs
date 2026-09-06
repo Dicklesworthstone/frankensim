@@ -2565,6 +2565,8 @@ impl NormalizedPack {
     /// Resolve exact quantity schemas together, preserving the admitted
     /// covariance in request order. Kind/form mismatches refuse the entire
     /// query. A dimension-only key is not a wildcard for a semantic claim.
+    /// Distinct tensor components or test contexts may share a property name;
+    /// duplicate complete keys refuse, so no selected claim is counted twice.
     /// The existing receipt binds these schemas through selected claim ids
     /// and member receipts; it does not independently attest caller intent.
     pub fn query_joint_typed(
@@ -2579,12 +2581,9 @@ impl NormalizedPack {
             });
         }
         for (index, property) in properties.iter().enumerate() {
-            if properties[..index]
-                .iter()
-                .any(|prior| prior.name() == property.name())
-            {
+            if properties[..index].contains(property) {
                 return Err(MatDbError::UnsupportedEvaluation {
-                    reason: "a joint query's properties must be distinct",
+                    reason: "a joint query's complete property keys must be distinct",
                 });
             }
         }

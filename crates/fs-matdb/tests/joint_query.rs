@@ -8,10 +8,11 @@
 use fs_blake3::hash_bytes;
 use fs_evidence::ValidityDomain;
 use fs_matdb::{
-    ClaimSet, CorrelationUnknownReason, InterpolationPolicy, JOINT_USAGE_RECEIPT_SCHEMA_VERSION,
-    JointCorrelation, JointStatistics, MatDbError, NormalizedPack, ObservationDataset,
-    PropertyClaim, PropertyKey, PropertyValue, Provenance, QueryPoint, SelectionPolicy,
-    StatisticMember, UncertaintyModel,
+    ClaimSet, CorrelationUnknownReason, ElasticTensorBasis, ElasticTensorComponent,
+    ElasticTensorNotation, ElasticTensorOrder, ElasticTensorSymmetry, InterpolationPolicy,
+    JOINT_USAGE_RECEIPT_SCHEMA_VERSION, JointCorrelation, JointStatistics, MatDbError,
+    NormalizedPack, ObservationDataset, PropertyClaim, PropertyKey, PropertyValue, Provenance,
+    QueryPoint, SelectionPolicy, StatisticMember, UncertaintyModel,
 };
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 use fs_qty::{Dims, QuantitySpec};
@@ -183,8 +184,143 @@ fn typed_joint_query_keeps_covariance_order_and_replays_from_portable_pack() {
             &room(),
             SelectionPolicy::SingleClaimOnly
         ),
+        Err(MatDbError::QuantityMismatch { .. })
+    ));
+}
+
+#[test]
+fn g3_same_name_tensor_components_retain_joint_covariance_and_replay() {
+    let dims = Dims([-1, 1, -2, 0, 0, 0]);
+    let basis = ElasticTensorBasis {
+        notation: ElasticTensorNotation::Engineering,
+        order: ElasticTensorOrder::XxYyZzXyYzZx,
+        frame: hash_bytes(b"synthetic coupon frame"),
+    };
+    let tensor = hash_bytes(b"synthetic elasticity characterization");
+    let keys = [0, 1].map(|column| {
+        PropertyKey::new("stiffness", dims)
+            .with_elastic_component(
+                ElasticTensorComponent::new(
+                    basis,
+                    ElasticTensorSymmetry::MajorMinor,
+                    tensor,
+                    0,
+                    column,
+                )
+                .unwrap(),
+            )
+            .unwrap()
+    });
+    let mut claims = ClaimSet::new();
+    let observation = claims
+        .register_observation(ObservationDataset {
+            specimen: "synthetic elastic coupon".into(),
+            method: "synthetic joint coefficient fixture".into(),
+            artifact: hash_bytes(b"synthetic C00 C01 observations"),
+            caveats: "tests data transport only; not measured material data".into(),
+            provenance: provenance("synthetic tensor fixture"),
+        })
+        .unwrap();
+    let ids: [_; 2] = core::array::from_fn(|index| {
+        let mut claim = scalar_claim("stiffness", dims, [120.0, -20.0][index], stated(2.0));
+        claim.key = keys[index].clone();
+        claim.observations.push(observation);
+        claims.insert_claim(claim).unwrap()
+    });
+    let mut members = ids.map(StatisticMember::scalar).to_vec();
+    members.sort();
+    let covariance = if members[0].claim() == ids[0] {
+        vec![4.0, -1.5, 9.0]
+    } else {
+        vec![9.0, -1.5, 4.0]
+    };
+    let pack = NormalizedPack::new(
+        "synthetic tensor joint pack",
+        "test-compiler",
+        hash_bytes(b"synthetic tensor source"),
+        "internal test data",
+        claims.clone(),
+        vec![JointStatistics::new(
+            observation,
+            "elastic-coefficients",
+            members,
+            covariance,
+            None,
+        )],
+        Vec::new(),
+    )
+    .unwrap();
+    let pack = NormalizedPack::from_bytes(&pack.to_bytes()).unwrap();
+    for (request, values, covariance) in [
+        (keys.clone(), [120.0, -20.0], vec![4.0, -1.5, 9.0]),
+        (
+            [keys[1].clone(), keys[0].clone()],
+            [-20.0, 120.0],
+            vec![9.0, -1.5, 4.0],
+        ),
+    ] {
+        let answer = pack
+            .query_joint_typed(&request, &room(), SelectionPolicy::SingleClaimOnly)
+            .unwrap();
+        assert_eq!(answer.receipt.properties, ["stiffness", "stiffness"]);
+        for (member, expected) in answer.members.iter().zip(values) {
+            assert_eq!(member.evidence.value.value, expected);
+            pack.claims().verify_receipt(&member.receipt).unwrap();
+        }
+        assert!(matches!(
+            &answer.receipt.correlation,
+            JointCorrelation::Covariance { covariance: actual, .. } if *actual == covariance
+        ));
+        pack.verify_joint_receipt(&answer.receipt).unwrap();
+        let mut tampered = answer.receipt.clone();
+        tampered.selected.swap(0, 1);
+        assert_ne!(tampered.content_hash(), answer.receipt.content_hash());
+        assert!(matches!(
+            pack.verify_joint_receipt(&tampered),
+            Err(MatDbError::ReceiptMismatch {
+                field: "member_receipts"
+            })
+        ));
+        let mut duplicate = answer.receipt;
+        duplicate.selected[1] = duplicate.selected[0];
+        assert!(pack.verify_joint_receipt(&duplicate).is_err());
+    }
+    assert!(matches!(
+        pack.query_joint_typed(
+            &[keys[0].clone(), keys[0].clone()],
+            &room(),
+            SelectionPolicy::SingleClaimOnly
+        ),
         Err(MatDbError::UnsupportedEvaluation { .. })
     ));
+    assert!(matches!(
+        pack.query_joint(
+            &["stiffness", "stiffness"],
+            &room(),
+            SelectionPolicy::SingleClaimOnly
+        ),
+        Err(MatDbError::UnsupportedEvaluation { .. })
+    ));
+    let no_block = NormalizedPack::new(
+        "synthetic tensor without joint observations",
+        "test-compiler",
+        hash_bytes(b"synthetic marginal-only tensor source"),
+        "internal test data",
+        claims,
+        Vec::new(),
+        Vec::new(),
+    )
+    .unwrap();
+    let answer = no_block
+        .query_joint_typed(&keys, &room(), SelectionPolicy::SingleClaimOnly)
+        .unwrap();
+    assert!(matches!(
+        answer.receipt.correlation,
+        JointCorrelation::Unknown {
+            reason: CorrelationUnknownReason::NoBlock
+        }
+    ));
+    no_block.verify_joint_receipt(&answer.receipt).unwrap();
 }
 
 #[test]
