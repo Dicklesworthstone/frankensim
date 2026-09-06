@@ -149,6 +149,34 @@ impl PlateSection {
         thickness: f64,
         density: f64,
     ) -> Result<PlateSection, PlateError> {
+        Self::orthotropic_plane_stress(law.e[0], law.e[1], law.nu[0], law.g[0], thickness, density)
+    }
+
+    /// Principal-axis plane-stress section from the four in-plane constants.
+    /// No out-of-plane modulus or Poisson ratio is inferred. Reciprocity gives
+    /// `nu21 = nu12 E2/E1`; admissibility requires `1 - nu12 nu21 > 0`, not
+    /// the isotropic bound `nu12 < 1/2`. Integrating the reduced stiffness
+    /// through a homogeneous thickness gives `D = Q h³/12`.
+    /// See Roylance, *Laminated Composite Plates*, plane-stress compliance
+    /// (4) and through-thickness moment integration:
+    /// <https://web.mit.edu/course/3/3.11/www/modules/laminates.pdf>.
+    ///
+    /// # Errors
+    /// Nonfinite/nonpositive moduli or geometry, indefinite reduced compliance,
+    /// or unrepresentable bending stiffness refuse with [`PlateError::BadSection`].
+    pub fn orthotropic_plane_stress(
+        e1: f64,
+        e2: f64,
+        nu12: f64,
+        g12: f64,
+        thickness: f64,
+        density: f64,
+    ) -> Result<PlateSection, PlateError> {
+        if [e1, e2, g12].iter().any(|v| !v.is_finite() || *v <= 0.0) || !nu12.is_finite() {
+            return Err(PlateError::BadSection {
+                what: "in-plane elastic constants must be finite with positive moduli",
+            });
+        }
         if !(thickness > 0.0 && thickness.is_finite()) {
             return Err(PlateError::BadSection {
                 what: "thickness must be positive and finite",
@@ -159,10 +187,6 @@ impl PlateSection {
                 what: "density must be positive and finite",
             });
         }
-        let e1 = law.e[0];
-        let e2 = law.e[1];
-        let nu12 = law.nu[0];
-        let g12 = law.g[0];
         let nu21 = nu12 * e2 / e1;
         let denom = 1.0 - nu12 * nu21;
         if !denom.is_finite() || denom <= 0.0 {
@@ -175,6 +199,11 @@ impl PlateSection {
         let d22 = e2 * h3 / denom;
         let d12 = nu12 * e2 * h3 / denom;
         let d33 = g12 * h3;
+        if [d11, d22, d33].iter().any(|v| !v.is_finite() || *v <= 0.0) || !d12.is_finite() {
+            return Err(PlateError::BadSection {
+                what: "bending stiffness overflows or underflows",
+            });
+        }
         Ok(PlateSection {
             d: [d11, d12, 0.0, d12, d22, 0.0, 0.0, 0.0, d33],
             thickness,

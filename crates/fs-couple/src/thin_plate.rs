@@ -7,15 +7,20 @@
 //! `fs-vfit`, not a named instrument radiator.
 
 use crate::acoustic_realize::AcousticRealizeError;
-use fs_material::elastic::OrthotropicElastic;
+use fs_blake3::{ContentHash, DomainHasher};
 use fs_material::gas::GasState;
-use fs_material::state_point::IsotropicThermoelasticStatePoint;
+use fs_material::state_point::{
+    DENSITY_PROPERTY, IsotropicThermoelasticStatePoint, ORTHOTROPIC_POISSON_RATIO_PROPERTIES,
+    ORTHOTROPIC_SHEAR_MODULUS_PROPERTIES, ORTHOTROPIC_YOUNG_MODULUS_PROPERTIES,
+    POISSON_RATIO_PROPERTY, ResolvedMaterialStatePoint, YOUNG_MODULUS_PROPERTY,
+};
 use fs_material::visco::{RayleighDamping, ThermoelasticZener};
 use fs_math::c64::C64;
 use fs_math::det;
 use fs_plate::{
     AssemblyOptions, EdgeSupport, PlateError, PlateMesh, PlateSection, assemble, modes,
 };
+use fs_qty::{Density, Dims, Pressure, QuantitySpec};
 use fs_scenario::{IsotropicPlateThermal, RadiatingPlate, ThinPlate};
 use fs_vfit::FitOptions;
 use fs_vfit::discretize::{DigitalFilter, DigitalFilterState, realize_tabulated_impedance};
@@ -222,17 +227,7 @@ impl VkBody {
                 what: "thin plate needs at least one mode",
             });
         }
-        let law = OrthotropicElastic::new(
-            [plate.e1_pa, plate.e2_pa, plate.e2_pa],
-            [plate.nu12, plate.nu12, plate.nu12],
-            [plate.g12_pa, plate.g12_pa, plate.g12_pa],
-            1.0,
-        )
-        .map_err(|_| AcousticRealizeError::InvalidDescription {
-            what: "plate elastic constants refused",
-        })?;
-        let section = PlateSection::orthotropic(&law, plate.thickness_m, plate.density_kg_m3)
-            .map_err(map_plate)?;
+        let section = plane_stress_section(plate)?;
         let (nx_c, ny_c) = (8, 8);
         let mesh = PlateMesh::rectangle(plate.length_m, plate.width_m, nx_c, ny_c);
         let boundary = PlateMesh::rectangle_boundary(nx_c, ny_c);
@@ -577,17 +572,7 @@ pub fn certified_radiators(plate: ThinPlate) -> Result<Vec<CompactBody>, Acousti
             what: "thin plate needs at least one mode",
         });
     }
-    let law = OrthotropicElastic::new(
-        [plate.e1_pa, plate.e2_pa, plate.e2_pa],
-        [plate.nu12, plate.nu12, plate.nu12],
-        [plate.g12_pa, plate.g12_pa, plate.g12_pa],
-        1.0,
-    )
-    .map_err(|_| AcousticRealizeError::InvalidDescription {
-        what: "plate elastic constants refused",
-    })?;
-    let section = PlateSection::orthotropic(&law, plate.thickness_m, plate.density_kg_m3)
-        .map_err(map_plate)?;
+    let section = plane_stress_section(plate)?;
     let (nx, ny) = (5, 4);
     let mesh = PlateMesh::rectangle(plate.length_m, plate.width_m, nx, ny);
     let boundary = PlateMesh::rectangle_boundary(nx, ny);
@@ -736,6 +721,220 @@ impl PlateProjection {
             rad: None,
         })
     }
+}
+
+fn plane_stress_section(plate: ThinPlate) -> Result<PlateSection, AcousticRealizeError> {
+    PlateSection::orthotropic_plane_stress(
+        plate.e1_pa,
+        plate.e2_pa,
+        plate.nu12,
+        plate.g12_pa,
+        plate.thickness_m,
+        plate.density_kg_m3,
+    )
+    .map_err(map_plate)
+}
+
+/// Elastic approximation and mapping from material axes to the rectangle.
+/// These are uniform principal-axis alignments, not an arbitrary orientation field.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlateMaterialModel {
+    /// Isotropic density, Young's modulus and Poisson ratio; derive G.
+    Isotropic,
+    /// Material axes 1,2 along the rectangle's x,y axes; axis 3 is normal.
+    Orthotropic12,
+    /// Material axis 2 along x and axis 1 along y; apply Poisson reciprocity.
+    Orthotropic21,
+}
+
+/// Independent thickness prescription for material comparison at fixed x,y size.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PlateThicknessConstraint {
+    /// Current thickness [m] is fixed; mass changes with density.
+    FixedThickness(f64),
+    /// Total mass [kg] is fixed; derive thickness as `m/(rho L W)`.
+    FixedMass(f64),
+}
+
+/// Uniform material-bound plate with the original property-use receipts.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResolvedPlateSpecimen {
+    plate: ThinPlate,
+    material: ResolvedMaterialStatePoint,
+    model: PlateMaterialModel,
+    thickness_constraint: PlateThicknessConstraint,
+    mass_kg: f64,
+    identity: ContentHash,
+}
+
+impl ResolvedPlateSpecimen {
+    /// Description consumed by the existing acoustic assembly and plate operators.
+    #[must_use]
+    pub const fn plate(&self) -> ThinPlate {
+        self.plate
+    }
+
+    /// Exact material resolution, without promoting source uncertainty or authority.
+    #[must_use]
+    pub const fn material(&self) -> &ResolvedMaterialStatePoint {
+        &self.material
+    }
+
+    /// Authored elastic approximation and uniform material-axis mapping.
+    #[must_use]
+    pub const fn model(&self) -> PlateMaterialModel {
+        self.model
+    }
+
+    /// Authored thickness/mass prescription, separate from material authority.
+    #[must_use]
+    pub const fn thickness_constraint(&self) -> PlateThicknessConstraint {
+        self.thickness_constraint
+    }
+
+    /// Uniform specimen mass [kg].
+    #[must_use]
+    pub const fn mass_kg(&self) -> f64 {
+        self.mass_kg
+    }
+
+    /// Material, resolved geometry and principal-axis model identity. Excludes
+    /// supports, loading, damping and solver controls; not a complete scenario hash.
+    #[must_use]
+    pub const fn specimen_identity(&self) -> ContentHash {
+        self.identity
+    }
+}
+
+/// Bind uniform plate geometry to the shared requirement-driven material API.
+///
+/// Isotropic binding needs `density`, `young_modulus`, `poisson_ratio`.
+/// Orthotropic binding needs `density`, `young_modulus_{1,2}`,
+/// `poisson_ratio_12`, `shear_modulus_12`, in the material's principal frame.
+/// No out-of-plane or unrelated optical/thermal properties are required.
+/// Values describe one frozen material state; no history or mass is transferred
+/// between specimens. Geometry, supports, pretension and authored damping remain
+/// separate from material claims. Only principal-axis linear orthotropic bending
+/// is supported: the existing nonlinear membrane approximation is isotropic.
+///
+/// # Errors
+/// Missing/mismatched quantities, invalid geometry/model or unrepresentable
+/// stiffness/mass refuse. A template with thermoelastic loss refuses: use a
+/// freshly resolved thermoelastic bundle instead of retaining stale coefficients.
+pub fn with_uniform_plate_material_state(
+    mut plate: ThinPlate,
+    state: &ResolvedMaterialStatePoint,
+    model: PlateMaterialModel,
+    thickness_constraint: PlateThicknessConstraint,
+) -> Result<ResolvedPlateSpecimen, AcousticRealizeError> {
+    let refuse = |what| AcousticRealizeError::InvalidDescription { what };
+    if plate.thermoelastic.is_some() {
+        return Err(refuse(
+            "elastic plate rebind requires a fresh thermal-loss binding",
+        ));
+    }
+    if plate.geometric_nonlinearity && model != PlateMaterialModel::Isotropic {
+        return Err(refuse(
+            "material-bound nonlinear orthotropic membrane response is unavailable",
+        ));
+    }
+    if [plate.length_m, plate.width_m]
+        .iter()
+        .any(|v| !v.is_finite() || *v <= 0.0)
+        || plate.n_modes == 0
+        || [plate.damping_ratio, plate.pretension_n_m]
+            .iter()
+            .any(|v| !v.is_finite() || *v < 0.0)
+    {
+        return Err(refuse(
+            "plate geometry, modal budget or mechanical inputs are invalid",
+        ));
+    }
+    plate.density_kg_m3 = plate_property(state, DENSITY_PROPERTY, Density::DIMS)?;
+    let (e1, e2, nu12, g12) = match model {
+        PlateMaterialModel::Isotropic => {
+            let e = plate_property(state, YOUNG_MODULUS_PROPERTY, Pressure::DIMS)?;
+            let nu = plate_property(state, POISSON_RATIO_PROPERTY, Dims::NONE)?;
+            if !(nu > -1.0 && nu < 0.5) {
+                return Err(refuse("isotropic plate Poisson ratio must be in (-1, 0.5)"));
+            }
+            (e, e, nu, e / (2.0 * (1.0 + nu)))
+        }
+        PlateMaterialModel::Orthotropic12 | PlateMaterialModel::Orthotropic21 => {
+            let e1 = plate_property(
+                state,
+                ORTHOTROPIC_YOUNG_MODULUS_PROPERTIES[0],
+                Pressure::DIMS,
+            )?;
+            let e2 = plate_property(
+                state,
+                ORTHOTROPIC_YOUNG_MODULUS_PROPERTIES[1],
+                Pressure::DIMS,
+            )?;
+            let nu = plate_property(state, ORTHOTROPIC_POISSON_RATIO_PROPERTIES[0], Dims::NONE)?;
+            let g = plate_property(
+                state,
+                ORTHOTROPIC_SHEAR_MODULUS_PROPERTIES[0],
+                Pressure::DIMS,
+            )?;
+            if model == PlateMaterialModel::Orthotropic21 {
+                (e2, e1, nu * e2 / e1, g)
+            } else {
+                (e1, e2, nu, g)
+            }
+        }
+    };
+    plate.e1_pa = e1;
+    plate.e2_pa = e2;
+    plate.nu12 = nu12;
+    plate.g12_pa = g12;
+    plate.thickness_m = match thickness_constraint {
+        PlateThicknessConstraint::FixedThickness(h) => h,
+        PlateThicknessConstraint::FixedMass(m) => {
+            m / plate.length_m / plate.width_m / plate.density_kg_m3
+        }
+    };
+    plane_stress_section(plate)?;
+    let mass_kg = plate.density_kg_m3 * plate.thickness_m * plate.length_m * plate.width_m;
+    if !mass_kg.is_finite() || mass_kg <= 0.0 {
+        return Err(refuse("plate mass overflows or underflows"));
+    }
+    let mut identity = DomainHasher::new("org.frankensim.fs-couple.uniform-plate-specimen.v1");
+    identity.update(state.identity().as_bytes());
+    identity.update(&[match model {
+        PlateMaterialModel::Isotropic => 0,
+        PlateMaterialModel::Orthotropic12 => 1,
+        PlateMaterialModel::Orthotropic21 => 2,
+    }]);
+    for value in [plate.length_m, plate.width_m, plate.thickness_m] {
+        identity.update(&value.to_bits().to_le_bytes());
+    }
+    Ok(ResolvedPlateSpecimen {
+        plate,
+        material: state.clone(),
+        model,
+        thickness_constraint,
+        mass_kg,
+        identity: identity.finalize(),
+    })
+}
+
+fn plate_property(
+    state: &ResolvedMaterialStatePoint,
+    key: &str,
+    dims: Dims,
+) -> Result<f64, AcousticRealizeError> {
+    let p = state
+        .property(key)
+        .ok_or(AcousticRealizeError::InvalidDescription {
+            what: "plate material is missing a required in-plane property",
+        })?;
+    if p.requirement().quantity() != QuantitySpec::dimensional(dims) || !p.value_si().is_finite() {
+        return Err(AcousticRealizeError::InvalidDescription {
+            what: "plate properties require finite dimension-only SI scalars; semantic aliases cannot be erased",
+        });
+    }
+    Ok(p.value_si())
 }
 
 /// Bind one resolved isotropic material state to an isotropic plate description.
