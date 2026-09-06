@@ -21,6 +21,16 @@ Bead frankensim-fsim-plates-shells-kj3s0 (musical-acoustics program).
   D22 = 2.04378, D12 = 0.715322, D33 = 1.6875 exactly). ν stays a bare
   ratio (dimensionless); the elastic law keeps fs-material's raw-Pa
   contract.
+- `PlateSection::orthotropic_plane_stress` consumes only E1, E2, nu12 and
+  G12 plus thickness/density. It uses reciprocal nu21 = nu12 E2/E1 and
+  requires positive reduced compliance, not an isotropic Poisson bound.
+  No out-of-plane constants are synthesized. `orthotropic` delegates to
+  the same calculation; nonfinite inputs and unrepresentable bending
+  stiffness refuse. G1 compares the reduced stiffness to an independent
+  2-by-2 compliance inversion and exchanges principal axes, including an
+  admissible synthetic nu12 > 1/2. The constitutive reduction follows
+  [Roylance, Laminated Composite Plates](https://web.mit.edu/course/3/3.11/www/modules/laminates.pdf),
+  equation (4) and through-thickness moment integration.
 - `PlateMesh::{rectangle, rectangle_boundary, from_unstructured, structured_equivalent, boundary_nodes, boundary_edges, total_area}` —
   structured and unstructured right-triangle and general 2D triangular meshes;
   `from_unstructured` validates quality, coordinate finiteness, connectivity, and positive

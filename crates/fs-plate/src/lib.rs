@@ -1259,6 +1259,36 @@ mod tests {
     }
 
     #[test]
+    fn g1_plane_stress_section_needs_only_in_plane_constants() {
+        // A synthetic, admissible plane with nu12 > 1/2. Duplicating nu12
+        // into all three 3-D Poisson ratios would invent an indefinite solid.
+        let (e1, e2, nu, g, h, rho) = (12.0e9, 0.9e9, 1.2, 0.75e9, 0.003, 450.0);
+        let section = PlateSection::orthotropic_plane_stress(e1, e2, nu, g, h, rho).unwrap();
+        let compliance = [1.0 / e1, -nu / e1, 1.0 / e2];
+        let determinant = compliance[0] * compliance[2] - compliance[1].powi(2);
+        let factor = h.powi(3) / (12.0 * determinant);
+        for (got, expected) in [
+            (section.d[0], factor * compliance[2]),
+            (section.d[1], -factor * compliance[1]),
+            (section.d[4], factor * compliance[0]),
+            (section.d[8], g * h.powi(3) / 12.0),
+        ] {
+            assert!((got / expected - 1.0).abs() < 1.0e-14);
+        }
+        let swapped =
+            PlateSection::orthotropic_plane_stress(e2, e1, nu * e2 / e1, g, h, rho).unwrap();
+        assert!((swapped.d[0] / section.d[4] - 1.0).abs() < 1.0e-14);
+        assert!((swapped.d[1] / section.d[1] - 1.0).abs() < 1.0e-14);
+        assert!((swapped.d[4] / section.d[0] - 1.0).abs() < 1.0e-14);
+        assert!(PlateSection::orthotropic_plane_stress(e1, e2, 4.0, g, h, rho).is_err());
+        assert!(PlateSection::orthotropic_plane_stress(e1, e2, nu, -g, h, rho).is_err());
+        assert!(PlateSection::orthotropic_plane_stress(e1, e2, f64::NAN, g, h, rho).is_err());
+        assert!(
+            PlateSection::orthotropic_plane_stress(e1, e2, nu, g, f64::MIN_POSITIVE, rho).is_err()
+        );
+    }
+
+    #[test]
     fn drumhead_prestress_limit_matches_membrane() {
         // K_G-dominated: near-zero D, tension T. Continuum membrane:
         // ω_mn = π√((m/a)² + (n/b)²)·√(T/ρh).

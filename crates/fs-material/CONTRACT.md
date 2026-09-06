@@ -85,6 +85,17 @@ homogenization, the P2 milestone.
   constants and refuses a non-positive-definite compliance. Spatial material
   orientation remains an independently identity-bound field owned by the
   geometry/solid consumer; no chemistry name implies isotropy or a grain axis.
+  `resolve_elastic_tensor_state_point` resolves density and all 36 explicitly
+  addressed coefficients from one card at one supported point. The requested
+  keys must share a source tensor identity, basis/frame, notation, order and
+  symmetry, and address each cell exactly; missing entries and implicit zeros
+  refuse. The existing scalar requirements carry the complete descriptor through
+  all bulk/interface selection policies and retain each usage receipt.
+  `ElasticTensorStatePoint` exposes the nominal source matrix and its evidence
+  bundle. Full-law symmetry/stability and spatial rotation are admitted by
+  `fs-solid::linear3::TetElasticMaterial::from_resolved_elastic_tensor`.
+  Marginal uncertainties remain upstream; this adapter does not assume
+  independence or produce a certified rotated uncertainty bound.
   The two-material reduced modulus on the contact-capable isotropic rung uses
   the standard ordered Hertz half-space compliance and binds both resolved
   state identities. Out-of-range temperature or phase-dependent data refuse

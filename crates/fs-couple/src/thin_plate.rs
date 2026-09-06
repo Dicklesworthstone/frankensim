@@ -851,12 +851,51 @@ pub fn with_uniform_plate_material_state(
         ));
     }
     plate.density_kg_m3 = plate_property(state, DENSITY_PROPERTY, Density::DIMS)?;
+    bind_plate_elasticity(&mut plate, state, model)?;
+    plate.thickness_m = match thickness_constraint {
+        PlateThicknessConstraint::FixedThickness(h) => h,
+        PlateThicknessConstraint::FixedMass(m) => {
+            m / plate.length_m / plate.width_m / plate.density_kg_m3
+        }
+    };
+    plane_stress_section(plate)?;
+    let mass_kg = plate.density_kg_m3 * plate.thickness_m * plate.length_m * plate.width_m;
+    if !mass_kg.is_finite() || mass_kg <= 0.0 {
+        return Err(refuse("plate mass overflows or underflows"));
+    }
+    let mut identity = DomainHasher::new("org.frankensim.fs-couple.uniform-plate-specimen.v1");
+    identity.update(state.identity().as_bytes());
+    identity.update(&[match model {
+        PlateMaterialModel::Isotropic => 0,
+        PlateMaterialModel::Orthotropic12 => 1,
+        PlateMaterialModel::Orthotropic21 => 2,
+    }]);
+    for value in [plate.length_m, plate.width_m, plate.thickness_m] {
+        identity.update(&value.to_bits().to_le_bytes());
+    }
+    Ok(ResolvedPlateSpecimen {
+        plate,
+        material: state.clone(),
+        model,
+        thickness_constraint,
+        mass_kg,
+        identity: identity.finalize(),
+    })
+}
+
+fn bind_plate_elasticity(
+    plate: &mut ThinPlate,
+    state: &ResolvedMaterialStatePoint,
+    model: PlateMaterialModel,
+) -> Result<(), AcousticRealizeError> {
     let (e1, e2, nu12, g12) = match model {
         PlateMaterialModel::Isotropic => {
             let e = plate_property(state, YOUNG_MODULUS_PROPERTY, Pressure::DIMS)?;
             let nu = plate_property(state, POISSON_RATIO_PROPERTY, Dims::NONE)?;
             if !(nu > -1.0 && nu < 0.5) {
-                return Err(refuse("isotropic plate Poisson ratio must be in (-1, 0.5)"));
+                return Err(AcousticRealizeError::InvalidDescription {
+                    what: "isotropic plate Poisson ratio must be in (-1, 0.5)",
+                });
             }
             (e, e, nu, e / (2.0 * (1.0 + nu)))
         }
@@ -888,35 +927,7 @@ pub fn with_uniform_plate_material_state(
     plate.e2_pa = e2;
     plate.nu12 = nu12;
     plate.g12_pa = g12;
-    plate.thickness_m = match thickness_constraint {
-        PlateThicknessConstraint::FixedThickness(h) => h,
-        PlateThicknessConstraint::FixedMass(m) => {
-            m / plate.length_m / plate.width_m / plate.density_kg_m3
-        }
-    };
-    plane_stress_section(plate)?;
-    let mass_kg = plate.density_kg_m3 * plate.thickness_m * plate.length_m * plate.width_m;
-    if !mass_kg.is_finite() || mass_kg <= 0.0 {
-        return Err(refuse("plate mass overflows or underflows"));
-    }
-    let mut identity = DomainHasher::new("org.frankensim.fs-couple.uniform-plate-specimen.v1");
-    identity.update(state.identity().as_bytes());
-    identity.update(&[match model {
-        PlateMaterialModel::Isotropic => 0,
-        PlateMaterialModel::Orthotropic12 => 1,
-        PlateMaterialModel::Orthotropic21 => 2,
-    }]);
-    for value in [plate.length_m, plate.width_m, plate.thickness_m] {
-        identity.update(&value.to_bits().to_le_bytes());
-    }
-    Ok(ResolvedPlateSpecimen {
-        plate,
-        material: state.clone(),
-        model,
-        thickness_constraint,
-        mass_kg,
-        identity: identity.finalize(),
-    })
+    Ok(())
 }
 
 fn plate_property(

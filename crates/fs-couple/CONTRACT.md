@@ -587,6 +587,25 @@ clarinet is one filling of those objects.
   type. There is no one-pole `TravelingWaveLine` fallback on those
   paths. Unflanged-open Nyquist `ka > 1` is refused; a
   flanged mouth uses the Rayleigh piston and is not.
+- Uniform plate material binding: `with_uniform_plate_material_state` consumes
+  the same `ResolvedMaterialStatePoint` carrier as the circular-string and
+  disc adapters. Isotropic elasticity requires rho/E/nu; principal-axis
+  orthotropic plane stress requires rho/E1/E2/nu12/G12. It retains every original
+  property receipt and checks exact scalar quantity schemas. The aligned and
+  exchanged material-axis models map onto fixed rectangle coordinates, with
+  reciprocal nu21 on exchange. No out-of-plane constants are invented in either
+  linear or FE-sampled acoustic plate construction. A fixed-thickness or
+  fixed-mass prescription derives thickness and mass coherently; geometry and
+  material/model identity are retained separately from supports, pretension,
+  authored damping and solver controls. These are independent frozen specimens,
+  not a conservative thermal evolution. Stale thermoelastic addends refuse on
+  elastic rebinding. The source-bound orthotropic adapter also refuses geometric
+  nonlinearity: the existing sampled nonlinear plate's isotropic membrane
+  approximation is not a resolved orthotropic membrane law. Arbitrary grain
+  angles, regional fields, anisotropic thermal loss and phase changes remain
+  unavailable here. G0/G1/G3 cover receipts, reciprocity, fixed-mass geometry,
+  semantic aliases, model boundaries and real pressure changes from material
+  and axis swaps, with eigenfrequencies checked against Navier theory.
 - Linear plate projection: the eigenvector, its modal mass `phi^T M phi`,
   signed radiating area `integral(phi dA)`, and signed bridge-force projection
   remain in one basis. Surface integrals use triangle-area P1 nodal quadrature;

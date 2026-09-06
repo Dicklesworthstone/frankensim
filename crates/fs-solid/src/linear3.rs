@@ -30,11 +30,11 @@ use crate::linear::Jacobi;
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::Cx;
 use fs_material::OrthotropicElastic;
-use fs_material::state_point::{
-    IntegratedIsotropicThermalExpansion, IsotropicElasticStatePoint, IsotropicSolidStatePoint,
-    OrthotropicElasticStatePoint, ElasticTensorStatePoint,
-};
 pub use fs_material::state_point::{ElasticTensorBasis, ElasticTensorNotation, ElasticTensorOrder};
+use fs_material::state_point::{
+    ElasticTensorStatePoint, IntegratedIsotropicThermalExpansion, IsotropicElasticStatePoint,
+    IsotropicSolidStatePoint, OrthotropicElasticStatePoint,
+};
 use fs_solver::krylov::CgState;
 use fs_solver::op::{CsrOp, LinearOp};
 use fs_sparse::{Coo, Csr};
@@ -283,8 +283,12 @@ impl TetElasticMaterial {
         source_to_target: [[f64; 3]; 3],
     ) -> Result<ElasticTensorTransformReceipt, TetElasticError> {
         Self::try_new_oriented_tensor(
-            state.density_kg_m3(), *state.stiffness_pa(), state.basis(),
-            target_frame, source_to_target, state.resolved().identity(),
+            state.density_kg_m3(),
+            *state.stiffness_pa(),
+            state.basis(),
+            target_frame,
+            source_to_target,
+            state.resolved().identity(),
         )
     }
 
@@ -2536,6 +2540,14 @@ mod tests {
 
     #[test]
     fn g1_full_tensor_drives_tet_forces_and_energy_in_the_target_frame() {
+        use fs_matdb::{
+            ClaimSet, ElasticTensorComponent, ElasticTensorSymmetry, InterpolationPolicy,
+            MaterialStateId, NormalizedMaterialCardPack, NormalizedPack, PropertyClaim,
+            PropertyKey, PropertyValue, Provenance, QueryPoint, UncertaintyModel,
+        };
+        use fs_material::state_point::{
+            MaterialPropertySelection, resolve_elastic_tensor_state_point,
+        };
         let q = fs_material::tensor::rotation([2.0 / 3.0, 2.0 / 3.0, 1.0 / 3.0], 0.73);
         let receipt = TetElasticMaterial::try_new_oriented_tensor(
             6.0,
@@ -2561,6 +2573,109 @@ mod tests {
             with_cx(|cx| reference_problem(&nodes, &tets, receipt.material(), &[]).assemble(cx))
                 .unwrap();
         assert_eq!(assembly.total_mass_kg, 1.0);
+        // Independently exercise the portable-card -> 37 selected receipts ->
+        // complete tensor admission -> same numerical element path.
+        let basis = receipt.source_basis();
+        let keys: [[PropertyKey; 6]; 6] = core::array::from_fn(|i| {
+            core::array::from_fn(|j| {
+                PropertyKey::new(format!("c{i}{j}"), fs_qty::Pressure::DIMS)
+                    .with_elastic_component(
+                        ElasticTensorComponent::new(
+                            basis,
+                            ElasticTensorSymmetry::MajorMinor,
+                            ContentHash([4; 32]),
+                            i as u8,
+                            j as u8,
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap()
+            })
+        });
+        let mut claims = ClaimSet::new();
+        let provenance = Provenance {
+            source: "synthetic full-tensor software fixture".into(),
+            license: "synthetic test data".into(),
+            artifact: Some(ContentHash([5; 32])),
+        };
+        let observation = claims
+            .register_observation(fs_matdb::ObservationDataset {
+                specimen: "synthetic tensor specimen".into(),
+                method: "synthetic software fixture".into(),
+                artifact: ContentHash([5; 32]),
+                caveats: "no empirical or calibration claim".into(),
+                provenance: provenance.clone(),
+            })
+            .unwrap();
+        let coefficients = coupled_engineering_stiffness();
+        let mut values: Vec<_> = keys
+            .iter()
+            .flatten()
+            .enumerate()
+            .map(|(i, key)| (key.clone(), coefficients[i / 6][i % 6]))
+            .collect();
+        values.push((PropertyKey::new("density", fs_qty::Density::DIMS), 6.0));
+        for (key, value) in values {
+            claims
+                .insert_claim(PropertyClaim {
+                    value: PropertyValue::Scalar {
+                        value,
+                        dims: key.dims(),
+                    },
+                    key,
+                    validity: fs_evidence::ValidityDomain::unconstrained().with("T", 300.0, 300.0),
+                    uncertainty: UncertaintyModel::Unstated,
+                    interpolation: InterpolationPolicy::TabulatedOnly,
+                    observations: vec![observation],
+                    provenance: provenance.clone(),
+                })
+                .unwrap();
+        }
+        let pack = NormalizedMaterialCardPack::new(
+            MaterialStateId {
+                chemistry: "synthetic".into(),
+                phase: "solid".into(),
+                process: "numerical fixture".into(),
+                revision: 0,
+            },
+            NormalizedPack::new(
+                "synthetic",
+                "fixture-v5",
+                ContentHash([5; 32]),
+                "synthetic redistribution permitted",
+                claims,
+                Vec::new(),
+                Vec::new(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let portable =
+            NormalizedMaterialCardPack::from_bytes_verified(pack.content_hash(), &pack.to_bytes())
+                .unwrap();
+        let state = resolve_elastic_tensor_state_point(
+            portable.card(),
+            &QueryPoint::new().with("T", 300.0).unwrap(),
+            &keys,
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .unwrap();
+        assert_eq!(state.resolved().properties().len(), 37);
+        let from_card =
+            TetElasticMaterial::from_resolved_elastic_tensor(&state, ContentHash([2; 32]), q)
+                .unwrap();
+        assert_eq!(
+            from_card.source_material_identity(),
+            state.resolved().identity()
+        );
+        let card_assembly =
+            with_cx(|cx| reference_problem(&nodes, &tets, from_card.material(), &[]).assemble(cx))
+                .unwrap();
+        assert_eq!(
+            card_assembly.stiffness.to_dense(),
+            assembly.stiffness.to_dense()
+        );
+        assert_eq!(card_assembly.total_mass_kg, assembly.total_mass_kg);
         let epsilon = [
             [0.001, 0.0002, -0.0003],
             [0.0002, -0.0008, 0.0004],

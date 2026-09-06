@@ -1382,6 +1382,301 @@ fn certified_plate_radiates_without_named_hertz() {
     );
 }
 
+mod material_plate_tests {
+    use super::*;
+    use fs_couple::thin_plate::{
+        PlateMaterialModel as Model, PlateThicknessConstraint as Thickness, certified_radiators,
+        with_uniform_plate_material_state as bind,
+    };
+    use fs_evidence::ValidityDomain;
+    use fs_matdb::{
+        ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId, PropertyClaim, PropertyKey,
+        PropertyValue, Provenance, QueryPoint, UncertaintyModel,
+    };
+    use fs_material::state_point::{
+        MaterialPropertySelection, ResolvedMaterialStatePoint, ScalarAdmissibility,
+        ScalarPropertyRequirement, resolve_material_state_point,
+    };
+    use fs_qty::semantic::{CompositionBasis, QuantityKind, SemanticType, ValueForm};
+    use fs_qty::{Density, Dims, Pressure, QuantitySpec};
+
+    fn state(properties: &[(&str, QuantitySpec, f64)]) -> ResolvedMaterialStatePoint {
+        let mut claims = ClaimSet::new();
+        let mut requirements = Vec::new();
+        for &(key, quantity, value) in properties {
+            claims
+                .insert_claim(PropertyClaim {
+                    key: PropertyKey::with_quantity(key, quantity),
+                    value: PropertyValue::Scalar {
+                        value,
+                        dims: quantity.dims(),
+                    },
+                    validity: ValidityDomain::unconstrained().with("T", 293.15, 293.15),
+                    interpolation: InterpolationPolicy::ConstantWithinValidity,
+                    uncertainty: UncertaintyModel::Unstated,
+                    provenance: Provenance {
+                        source: "synthetic plane-stress implementation fixture".into(),
+                        license: "CC0-1.0".into(),
+                        artifact: None,
+                    },
+                    observations: vec![],
+                })
+                .unwrap();
+            requirements.push(
+                ScalarPropertyRequirement::try_with_quantity(
+                    key,
+                    quantity,
+                    ScalarAdmissibility::Finite,
+                )
+                .unwrap(),
+            );
+        }
+        let card = MaterialCard::assemble(
+            MaterialStateId {
+                chemistry: "synthetic-plate".into(),
+                phase: "solid".into(),
+                process: "principal-axis specimen".into(),
+                revision: 0,
+            },
+            claims,
+            vec![],
+        )
+        .unwrap();
+        resolve_material_state_point(
+            &card,
+            &QueryPoint::new().with("T", 293.15).unwrap(),
+            &requirements,
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .unwrap()
+    }
+
+    fn orthotropic(rho: f64, stiffness_scale: f64) -> ResolvedMaterialStatePoint {
+        let pressure = QuantitySpec::dimensional(Pressure::DIMS);
+        state(&[
+            ("density", QuantitySpec::dimensional(Density::DIMS), rho),
+            ("young_modulus_1", pressure, 12e9 * stiffness_scale),
+            ("young_modulus_2", pressure, 0.9e9 * stiffness_scale),
+            (
+                "poisson_ratio_12",
+                QuantitySpec::dimensional(Dims::NONE),
+                1.2,
+            ),
+            ("shear_modulus_12", pressure, 0.75e9 * stiffness_scale),
+        ])
+    }
+
+    fn template() -> ThinPlate {
+        ThinPlate {
+            length_m: 0.6,
+            width_m: 0.35,
+            n_modes: 1,
+            damping_ratio: 0.002,
+            ..steel_panel()
+        }
+    }
+
+    #[test]
+    fn g1_plate_binding_keeps_receipts_axes_and_mass_constraint_coherent() {
+        let material = orthotropic(450.0, 1.0);
+        let a = bind(
+            template(),
+            &material,
+            Model::Orthotropic12,
+            Thickness::FixedThickness(0.003),
+        )
+        .unwrap();
+        let b = bind(
+            template(),
+            &material,
+            Model::Orthotropic21,
+            Thickness::FixedThickness(0.003),
+        )
+        .unwrap();
+        assert_eq!(a.material(), &material);
+        assert_eq!(
+            a.material().properties().len(),
+            5,
+            "no invented out-of-plane inputs"
+        );
+        assert_eq!(a.model(), Model::Orthotropic12);
+        assert_eq!(b.model(), Model::Orthotropic21);
+        let expected_mass = 450.0 * 0.6 * 0.35 * 0.003;
+        assert!((a.mass_kg() / expected_mass - 1.0).abs() < 1e-14);
+        assert_eq!(a.plate().e1_pa.to_bits(), b.plate().e2_pa.to_bits());
+        assert_eq!(a.plate().e2_pa.to_bits(), b.plate().e1_pa.to_bits());
+        assert!((b.plate().nu12 - 0.09).abs() < 1e-14);
+        assert_eq!(a.plate().g12_pa.to_bits(), b.plate().g12_pa.to_bits());
+        assert_ne!(a.specimen_identity(), b.specimen_identity());
+        let dense = orthotropic(1800.0, 1.0);
+        let same_mass = bind(
+            a.plate(),
+            &dense,
+            Model::Orthotropic12,
+            Thickness::FixedMass(expected_mass),
+        )
+        .unwrap();
+        assert_eq!(
+            same_mass.thickness_constraint(),
+            Thickness::FixedMass(expected_mass)
+        );
+        assert!((same_mass.mass_kg() / expected_mass - 1.0).abs() < 1e-14);
+        assert!((same_mass.plate().thickness_m / 0.003 - 0.25).abs() < 1e-14);
+        assert_ne!(a.specimen_identity(), same_mass.specimen_identity());
+        let equivalent = bind(
+            a.plate(),
+            &dense,
+            Model::Orthotropic12,
+            Thickness::FixedThickness(same_mass.plate().thickness_m),
+        )
+        .unwrap();
+        assert_eq!(
+            same_mass.specimen_identity(),
+            equivalent.specimen_identity()
+        );
+
+        let isotropic = state(&[
+            ("density", QuantitySpec::dimensional(Density::DIMS), 2700.0),
+            (
+                "young_modulus",
+                QuantitySpec::dimensional(Pressure::DIMS),
+                70e9,
+            ),
+            ("poisson_ratio", QuantitySpec::dimensional(Dims::NONE), 0.25),
+        ]);
+        let iso = bind(
+            template(),
+            &isotropic,
+            Model::Isotropic,
+            Thickness::FixedThickness(0.002),
+        )
+        .unwrap();
+        assert_eq!(iso.plate().e1_pa.to_bits(), 70e9_f64.to_bits());
+        assert_eq!(iso.plate().e2_pa.to_bits(), 70e9_f64.to_bits());
+        assert_eq!(iso.plate().g12_pa.to_bits(), 28e9_f64.to_bits());
+        assert_eq!(iso.plate().density_kg_m3.to_bits(), 2700.0_f64.to_bits());
+    }
+
+    #[test]
+    fn g0_plate_binding_refuses_stale_thermal_loss_unsupported_models_and_aliases() {
+        let material = orthotropic(450.0, 1.0);
+        let thickness = Thickness::FixedThickness(0.003);
+        for defect in 0..4 {
+            let mut plate = template();
+            match defect {
+                0 => plate.geometric_nonlinearity = true,
+                1 => plate.length_m = 0.0,
+                2 => plate.n_modes = 0,
+                _ => {
+                    plate.thermoelastic = Some(fs_scenario::IsotropicPlateThermal {
+                        temperature_k: 293.15,
+                        linear_expansion_per_k: 1e-5,
+                        specific_heat_j_kg_k: 500.0,
+                        conductivity_w_m_k: 100.0,
+                        state_identity: Some(material.identity()),
+                    })
+                }
+            }
+            assert!(bind(plate, &material, Model::Orthotropic12, thickness).is_err());
+        }
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::MIN_POSITIVE] {
+            assert!(
+                bind(
+                    template(),
+                    &material,
+                    Model::Orthotropic12,
+                    Thickness::FixedMass(bad)
+                )
+                .is_err()
+            );
+        }
+        assert!(bind(template(), &material, Model::Isotropic, thickness).is_err());
+        let bad_density = orthotropic(-450.0, 1.0);
+        assert!(bind(template(), &bad_density, Model::Orthotropic12, thickness).is_err());
+        let alias = state(&[
+            ("density", QuantitySpec::dimensional(Density::DIMS), 450.0),
+            (
+                "young_modulus",
+                QuantitySpec::dimensional(Pressure::DIMS),
+                12e9,
+            ),
+            (
+                "poisson_ratio",
+                QuantitySpec::semantic(SemanticType::new(
+                    QuantityKind::Composition(CompositionBasis::MassFraction),
+                    ValueForm::Static,
+                )),
+                0.3,
+            ),
+        ]);
+        assert!(bind(template(), &alias, Model::Isotropic, thickness).is_err());
+    }
+
+    #[test]
+    fn g3_plate_material_and_grain_changes_reach_the_actual_pressure() {
+        let material = orthotropic(450.0, 1.0);
+        let stiffer = orthotropic(450.0, 4.0);
+        let denser = orthotropic(1800.0, 1.0);
+        let mut frequencies = Vec::new();
+        let mut pressures = Vec::new();
+        let h = Thickness::FixedThickness(0.003);
+        for (state, model, thickness) in [
+            (&material, Model::Orthotropic12, h),
+            (&material, Model::Orthotropic21, h),
+            (&stiffer, Model::Orthotropic12, h),
+            (
+                &denser,
+                Model::Orthotropic12,
+                Thickness::FixedMass(450.0 * 0.6 * 0.35 * 0.003),
+            ),
+        ] {
+            let specimen = bind(template(), state, model, thickness).unwrap();
+            let plate = specimen.plate();
+            let omega = certified_radiators(plate).unwrap()[0].omega;
+            // Independent Navier (1,1) frequency, in the rectangle's frame.
+            let h3 = plate.thickness_m.powi(3) / 12.0;
+            let denom = 1.0 - plate.nu12.powi(2) * plate.e2_pa / plate.e1_pa;
+            let (kx, ky) = (
+                core::f64::consts::PI / plate.length_m,
+                core::f64::consts::PI / plate.width_m,
+            );
+            let omega2 = h3
+                * (plate.e1_pa / denom * kx.powi(4)
+                    + 2.0
+                        * (plate.nu12 * plate.e2_pa / denom + 2.0 * plate.g12_pa)
+                        * kx.powi(2)
+                        * ky.powi(2)
+                    + plate.e2_pa / denom * ky.powi(4))
+                / (plate.density_kg_m3 * plate.thickness_m);
+            assert!(
+                (omega / omega2.sqrt() - 1.0).abs() < 0.08,
+                "coarse DKT vs Navier"
+            );
+            frequencies.push(omega);
+            let mut assembly = plucked(20.0, 0.006, 1e-5);
+            assembly.duration_s = 0.02;
+            assembly.plate = Some(plate);
+            pressures.push(realize_assembly(&assembly).unwrap().pressure_pa);
+        }
+        assert!((frequencies[2] / frequencies[0] - 2.0).abs() < 1e-9);
+        assert!((frequencies[1] / frequencies[0] - 1.0).abs() > 0.1);
+        // At fixed mass, rho x4 makes h/4 and D/64. The translational mass
+        // stays fixed, so frequency falls by eight in the thin-plate limit.
+        // DKT's small h-dependent rotary-inertia correction remains included.
+        assert!((frequencies[3] / frequencies[0] - 0.125).abs() < 1e-4);
+        for other in &pressures[1..] {
+            let delta: Vec<_> = pressures[0].iter().zip(other).map(|(a, b)| a - b).collect();
+            assert!(
+                peak_abs(&delta) > 1e-7,
+                "material must reach physical pressure"
+            );
+        }
+        eprintln!(
+            "G3 bound plate aligned/swapped/stiffness x4/fixed mass rho x4 omega: {frequencies:?} rad/s"
+        );
+    }
+}
+
 #[test]
 fn taut_span_obstacle_changes_the_waveform() {
     let bare = plucked(80.0, 0.006, 0.008);

@@ -53,8 +53,16 @@ tensor, check whole-law instability and frame/identity refusals, and retain
 the existing orthotropic tests. A G1 affine single-tet test compares actual
 nodal forces and strain energy against direct tensor contraction. This is
 software evidence, not measured crystal/wood validation. The receipt has no
-portable codec yet, and full tensor transport through material cards remains
-separate unfinished work.
+portable codec yet. `from_resolved_elastic_tensor` now connects the complete
+`fs-material::state_point::ElasticTensorStatePoint` directly to this constructor.
+The shared basis descriptors are owned by L1 `fs-matdb` and re-exported here.
+Source compiler v6 and normalized-pack v5 preserve each coefficient context;
+the state resolver requires all 36 entries plus density. The transform binds
+the bundle identity, hence every selected receipt and the actual query point.
+The G1 tet regression also decodes a portable material card, resolves the
+complete tensor, and reproduces the independently checked assembled operator.
+Coefficient uncertainties remain in the upstream receipts; no independent
+coefficient assumption, propagated tensor bound or empirical authority is added.
 
 `TetThermalStrainState` and `assemble_thermal_load` add the matching generic
 small-strain thermomechanical load boundary. An upstream material law supplies
