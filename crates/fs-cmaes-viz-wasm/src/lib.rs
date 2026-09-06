@@ -58,7 +58,7 @@ use manipulation::{
 };
 
 /// Kernel identity returned by the browser capability probe.
-pub const KERNEL_VERSION: &str = "fs-cmaes-viz-wasm 0.6.22";
+pub const KERNEL_VERSION: &str = "fs-cmaes-viz-wasm 0.6.23";
 /// Commit of the clean owner source tree, supplied by the artifact build.
 /// Unbound development builds cannot satisfy browser artifact admission.
 pub const SOURCE_REVISION: &str = match option_env!("FSCMAES_SOURCE_REVISION") {
@@ -1578,6 +1578,62 @@ const fn split_u64(value: u64) -> (u32, u32) {
 mod schema_two_wasm {
     use super::{PackedCmaSession, PackedG1WalkingEvaluator, PackedManipulationEvaluator};
     use wasm_bindgen::prelude::wasm_bindgen;
+
+    /// Browser-side residual training against the real walking owner.
+    ///
+    /// The same LM-CMA search the native example runs, advanced one rollout per
+    /// `pump` so a tab stays responsive and the run can be stopped at any
+    /// point. The transformer is small enough that this needs no GPU and no
+    /// backprop — which is just as well, since there is nothing to
+    /// backpropagate through a contact solver.
+    #[cfg(feature = "g1-learned")]
+    #[wasm_bindgen]
+    pub struct G1TransformerTrainerSession {
+        inner: crate::g1_learned::G1TransformerTrainer,
+    }
+
+    #[cfg(feature = "g1-learned")]
+    #[wasm_bindgen]
+    impl G1TransformerTrainerSession {
+        /// `challenge`: 0 flat, 1 terrain-with-push, anything else averages both.
+        #[wasm_bindgen(constructor)]
+        #[must_use]
+        pub fn new(challenge: u32, duration_s: f64, sigma: f64, seed: f64) -> Self {
+            Self {
+                inner: crate::g1_learned::G1TransformerTrainer::new(
+                    challenge,
+                    duration_s,
+                    sigma,
+                    seed.abs() as u64,
+                ),
+            }
+        }
+
+        /// Advance the search by exactly one rollout and return a progress
+        /// packet.
+        #[must_use]
+        pub fn pump(&mut self) -> Vec<f64> {
+            self.inner.pump()
+        }
+
+        /// Current progress without advancing the search.
+        #[must_use]
+        pub fn progress(&self) -> Vec<f64> {
+            self.inner.progress()
+        }
+
+        /// The best policy head found so far.
+        #[must_use]
+        pub fn best_head(&self) -> Vec<f64> {
+            self.inner.best_head()
+        }
+
+        /// The best policy so far in the FSGT layout, ready to download.
+        #[must_use]
+        pub fn export_weights(&mut self) -> Vec<u8> {
+            self.inner.export_weights()
+        }
+    }
 
     /// Stateful schema-2 browser session. Construction never throws; inspect
     /// `receipt()` for admission or a typed refusal packet.
