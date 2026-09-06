@@ -292,17 +292,6 @@ fn main() {
         challenges.len()
     );
 
-    let mut optimizer = CmaOptimizer::new(CmaConfig {
-        family: CmaFamily::LmCma,
-        mean: start_point.clone(),
-        sigma,
-        max_evaluations: generations * population,
-        seed: 0x0905_2026_C1A5_5EA4,
-        population_size: Some(population),
-        memory: None,
-    })
-    .expect("optimizer builds");
-
     let mut best = start_point.clone();
     let mut best_obj = base_obj;
     let mut best_dist = base_dist;
@@ -310,9 +299,49 @@ fn main() {
     let mut evaluations = 0usize;
     let started = Instant::now();
 
-    for generation in 1..=generations {
-        let Ok(batch) = optimizer.ask() else { break };
-        let candidates = batch.candidates().to_vec();
+    // Budget in evaluations rather than generations, so restarts with different
+    // population sizes still cost the same and stay comparable to a single run.
+    let budget = env_usize("EVAL_BUDGET", generations * population);
+    let stall_limit = env_usize("STALL", 25);
+    let mut restarts = 0usize;
+    let mut population_now = population;
+    let mut generation = 0usize;
+
+    // IPOP restarts. A single LM-CMA run converges its step size and then
+    // spends the rest of the budget standing still: measured, the 400-
+    // generation head run found -92.85 by generation 110 and did not improve
+    // once across the remaining 290. Restarting from the best point with a
+    // doubled population re-opens the search instead of burning the budget.
+    'search: while evaluations < budget {
+        // A doubled population eventually exceeds what is left of the budget,
+        // and an optimizer that cannot complete one generation is rejected
+        // rather than constructed. Stop cleanly instead of panicking here: the
+        // best point found so far is still the result, and it still has to be
+        // written out.
+        let remaining = budget - evaluations;
+        if remaining < population_now {
+            break;
+        }
+        let Ok(mut optimizer) = CmaOptimizer::new(CmaConfig {
+            family: CmaFamily::LmCma,
+            mean: best.clone(),
+            sigma,
+            max_evaluations: remaining,
+            seed: 0x0905_2026_C1A5_5EA4 ^ (restarts as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15),
+            population_size: Some(population_now),
+            memory: None,
+        }) else {
+            break;
+        };
+        let mut since_improvement = 0usize;
+
+        loop {
+            if evaluations >= budget {
+                break 'search;
+            }
+            let Ok(batch) = optimizer.ask() else { break };
+            generation += 1;
+            let candidates = batch.candidates().to_vec();
 
         // Every candidate in a generation is independent, so the whole
         // generation is one parallel batch. Each worker builds its own policy
@@ -345,30 +374,44 @@ fn main() {
             handles.into_iter().map(|h| h.join().expect("worker")).collect()
         });
 
-        let mut objectives = vec![f64::INFINITY; candidates.len()];
-        for (index, objective, distance, steps) in results.into_iter().flatten() {
-            // A non-finite objective is a candidate that broke the rollout, not
-            // a good one; rank it last rather than letting it poison the update.
-            objectives[index] = if objective.is_finite() { objective } else { f64::MAX };
-            if objectives[index] < best_obj {
-                best_obj = objectives[index];
-                best_dist = distance;
-                best_steps = steps;
-                best.copy_from_slice(&candidates[index]);
+            let mut objectives = vec![f64::INFINITY; candidates.len()];
+            let mut improved = false;
+            for (index, objective, distance, steps) in results.into_iter().flatten() {
+                // A non-finite objective is a candidate that broke the rollout,
+                // not a good one; rank it last rather than letting it poison
+                // the update.
+                objectives[index] = if objective.is_finite() { objective } else { f64::MAX };
+                if objectives[index] < best_obj {
+                    best_obj = objectives[index];
+                    best_dist = distance;
+                    best_steps = steps;
+                    best.copy_from_slice(&candidates[index]);
+                    improved = true;
+                }
+            }
+            evaluations += candidates.len();
+            if optimizer.tell(&batch, &objectives).is_err() {
+                break;
+            }
+            since_improvement = if improved { 0 } else { since_improvement + 1 };
+
+            if generation % 10 == 0 {
+                let elapsed = started.elapsed().as_secs_f64();
+                println!(
+                    "gen {generation:>4}  best {best_obj:>12.4}  distance {best_dist:.4} m  steps {best_steps:>4}  (restart {restarts}, lambda {population_now}, {evaluations} evals, {elapsed:.0}s, {:.1} evals/s)",
+                    evaluations as f64 / elapsed.max(1e-9),
+                );
+            }
+            if since_improvement >= stall_limit {
+                break;
             }
         }
-        evaluations += candidates.len();
-        if optimizer.tell(&batch, &objectives).is_err() {
-            break;
-        }
 
-        if generation % 10 == 0 || generation == generations {
-            let elapsed = started.elapsed().as_secs_f64();
-            println!(
-                "gen {generation:>4}  best {best_obj:>12.4}  distance {best_dist:.4} m  steps {best_steps:>4}  ({evaluations} evals, {elapsed:.0}s, {:.1} evals/s)",
-                evaluations as f64 / elapsed.max(1e-9),
-            );
-        }
+        restarts += 1;
+        // IPOP: each restart doubles the population, trading more samples per
+        // generation for a better-conditioned estimate once the easy gains are
+        // gone. Capped so a long budget cannot allocate an absurd generation.
+        population_now = (population_now * 2).min(4096);
     }
 
     let mut final_policy = build_policy();
@@ -399,7 +442,7 @@ fn main() {
         let weights_path = format!("{out_dir}/g1-residual-head.bin");
         std::fs::write(&weights_path, &bytes).expect("write weights");
         let receipt = format!(
-            "{{\n  \"optimizer\": \"LM-CMA (fs-dfo)\",\n  \"scope\": \"{scope:?}\",\n  \"searchedParams\": {dim},\n  \"population\": {population},\n  \"evaluations\": {evaluations},\n  \"challenges\": {},\n  \"durationSeconds\": {duration_s},\n  \"tunedControllerObjective\": {base_obj},\n  \"tunedControllerDistanceMeters\": {base_dist},\n  \"residualObjective\": {final_obj},\n  \"residualDistanceMeters\": {final_dist},\n  \"residualCompletedSteps\": {final_steps},\n  \"wallclockSeconds\": {:.1}\n}}\n",
+            "{{\n  \"optimizer\": \"LM-CMA with IPOP restarts (fs-dfo)\",\n  \"scope\": \"{scope:?}\",\n  \"searchedParams\": {dim},\n  \"population\": {population},\n  \"restarts\": {restarts},\n  \"evaluations\": {evaluations},\n  \"challenges\": {},\n  \"durationSeconds\": {duration_s},\n  \"tunedControllerObjective\": {base_obj},\n  \"tunedControllerDistanceMeters\": {base_dist},\n  \"residualObjective\": {final_obj},\n  \"residualDistanceMeters\": {final_dist},\n  \"residualCompletedSteps\": {final_steps},\n  \"wallclockSeconds\": {:.1}\n}}\n",
             challenges.len(),
             started.elapsed().as_secs_f64()
         );
