@@ -24,6 +24,8 @@ pub const MATDB_TYPED_PACK_SCHEMA_VERSION: u32 = 2;
 pub const MATDB_TYPED_AXIS_PACK_SCHEMA_VERSION: u32 = 3;
 /// Exact hardness apparatus/loading/protocol and observation selectors.
 pub const MATDB_HARDNESS_PACK_SCHEMA_VERSION: u32 = 4;
+/// Elastic coefficient coordinates, including source tensor identity and basis.
+pub const MATDB_TENSOR_PACK_SCHEMA_VERSION: u32 = 5;
 /// Canonical coherent-SI target basis and its explicit six-base order.
 pub const MATDB_PACK_TARGET_BASIS: &str = "SI-six-base[m,kg,s,K,A,mol]";
 
@@ -538,6 +540,9 @@ impl NormalizedPack {
     /// silently reinterpreted as having quantity kinds.
     #[must_use]
     pub fn schema_version(&self) -> u32 {
+        if self.claims.claims_ordered().any(|(_, claim)| claim.key.elastic_component().is_some()) {
+            return MATDB_TENSOR_PACK_SCHEMA_VERSION;
+        }
         if self
             .claims
             .claims_ordered()
@@ -678,7 +683,7 @@ impl NormalizedPack {
         let mut reader = Reader::new(bytes);
         reader.expect(MAGIC, "normalized pack magic")?;
         let version = reader.u32()?;
-        if !(MATDB_PACK_SCHEMA_VERSION..=MATDB_HARDNESS_PACK_SCHEMA_VERSION).contains(&version) {
+        if !(MATDB_PACK_SCHEMA_VERSION..=MATDB_TENSOR_PACK_SCHEMA_VERSION).contains(&version) {
             return Err(reader.malformed(format!(
                 "unsupported schema version {version}; expected 1, 2, 3 (typed axes), or 4 (hardness test)"
             )));
@@ -796,7 +801,9 @@ impl NormalizedPack {
 }
 
 fn pack_hash_domain(version: u32) -> &'static str {
-    if version == MATDB_HARDNESS_PACK_SCHEMA_VERSION {
+    if version == MATDB_TENSOR_PACK_SCHEMA_VERSION {
+        "org.frankensim.fs-matdb.normalized-pack.v5"
+    } else if version == MATDB_HARDNESS_PACK_SCHEMA_VERSION {
         "org.frankensim.fs-matdb.normalized-pack.v4"
     } else if version == MATDB_TYPED_AXIS_PACK_SCHEMA_VERSION {
         "org.frankensim.fs-matdb.normalized-pack.v3"
@@ -2112,6 +2119,15 @@ fn encode_claim(writer: &mut Writer, claim: &PropertyClaim, version: u32) {
             }
         }
     }
+    if version >= MATDB_TENSOR_PACK_SCHEMA_VERSION {
+        match claim.key.elastic_component() {
+            None => writer.u8(0),
+            Some(component) => {
+                writer.u8(1);
+                writer.bytes.extend_from_slice(&component.canonical_bytes());
+            }
+        }
+    }
     match &claim.value {
         PropertyValue::Scalar { value, dims } => {
             writer.u8(0);
@@ -2222,6 +2238,18 @@ fn decode_claim(reader: &mut Reader<'_>, version: u32) -> Result<PropertyClaim, 
                 )?)?;
             }
             tag => return Err(reader.malformed(format!("unknown hardness test tag {tag}"))),
+        }
+    }
+    if version >= MATDB_TENSOR_PACK_SCHEMA_VERSION {
+        match reader.u8()? {
+            0 => {},
+            1 => {
+                let component = crate::ElasticTensorComponent::from_canonical_bytes(
+                    reader.take(crate::ElasticTensorComponent::ENCODED_LEN)?,
+                )?;
+                key = key.with_elastic_component(component)?;
+            },
+            tag => return Err(reader.malformed(format!("unknown elastic component tag {tag}"))),
         }
     }
     let value = match reader.u8()? {

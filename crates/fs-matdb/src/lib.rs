@@ -41,6 +41,10 @@ mod pack;
 mod pcb;
 mod query;
 mod species_pack;
+mod tensor;
+
+pub use tensor::{ElasticTensorBasis, ElasticTensorComponent, ElasticTensorNotation,
+    ElasticTensorOrder, ElasticTensorSymmetry};
 
 pub use cards::{
     CANONICAL_PARAMETER_BLOCK_IDENTITY_DOMAIN,
@@ -65,6 +69,7 @@ pub use pack::{
     CorrelationUnknownReason, JOINT_USAGE_RECEIPT_IDENTITY_DOMAIN,
     JOINT_USAGE_RECEIPT_SCHEMA_VERSION, JointAnswer, JointCorrelation, JointStatistics,
     JointUsageReceipt, MATDB_HARDNESS_PACK_SCHEMA_VERSION, MATDB_PACK_SCHEMA_VERSION,
+    MATDB_TENSOR_PACK_SCHEMA_VERSION,
     MATDB_PACK_TARGET_BASIS, MATDB_TYPED_AXIS_PACK_SCHEMA_VERSION, MATDB_TYPED_PACK_SCHEMA_VERSION,
     NormalizationReceipt, NormalizationTarget, NormalizedPack, PackError, StatisticComponent,
     StatisticMember, ValidityBoundSide,
@@ -102,6 +107,16 @@ const OBSERVATION_HASH_DOMAIN: &str = "org.frankensim.fs-matdb.observation-datas
 /// typed: refusals teach, and nothing inserts partially.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MatDbError {
+    /// Missing or malformed source tensor coordinates.
+    InvalidTensorContext {
+        /// Required repair at the source/caller boundary.
+        reason: &'static str,
+    },
+    /// No claim matches the complete requested tensor coefficient context.
+    TensorContextMismatch {
+        /// Requested property; a context-free query cannot select tensor data.
+        property: String,
+    },
     /// An incomplete or dimensionally invalid source-declared hardness test.
     InvalidHardnessContext {
         /// Required repair at the source or caller boundary.
@@ -336,6 +351,9 @@ impl fmt::Display for MatDbError {
     #[allow(clippy::too_many_lines)] // one arm per refusal: the exhaustive catalog is the point
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            MatDbError::InvalidTensorContext { reason } => write!(f, "invalid tensor context: {reason}"),
+            MatDbError::TensorContextMismatch { property } => write!(f,
+                "property '{property}' requires a matching elastic tensor frame, convention, source identity and component"),
             MatDbError::DimsMismatch {
                 key,
                 expected,
@@ -519,6 +537,7 @@ pub struct PropertyKey {
     name: String,
     quantity: QuantitySpec,
     hardness_test: Option<Box<HardnessTestContext>>,
+    elastic_component: Option<ElasticTensorComponent>,
 }
 
 impl PropertyKey {
@@ -529,6 +548,7 @@ impl PropertyKey {
             name: name.into(),
             quantity: QuantitySpec::dimensional(dims),
             hardness_test: None,
+            elastic_component: None,
         }
     }
 
@@ -540,6 +560,7 @@ impl PropertyKey {
             name: name.into(),
             quantity,
             hardness_test: None,
+            elastic_component: None,
         }
     }
 
@@ -559,6 +580,25 @@ impl PropertyKey {
     #[must_use]
     pub fn hardness_test(&self) -> Option<&HardnessTestContext> {
         self.hardness_test.as_deref()
+    }
+
+    /// Bind a stiffness coefficient to its complete source tensor coordinates.
+    /// The tensor descriptor supplies meaning; the scalar must have pressure
+    /// dimensions and no competing scalar quantity kind.
+    pub fn with_elastic_component(mut self, component: ElasticTensorComponent) -> Result<Self, MatDbError> {
+        if self.quantity != QuantitySpec::dimensional(fs_qty::Pressure::DIMS) {
+            return Err(MatDbError::InvalidTensorContext {
+                reason: "elastic coefficients require dimensional pressure values",
+            });
+        }
+        self.elastic_component = Some(component);
+        Ok(self)
+    }
+
+    /// Exact elastic coefficient context; absence is not a wildcard.
+    #[must_use]
+    pub const fn elastic_component(&self) -> Option<ElasticTensorComponent> {
+        self.elastic_component
     }
 
     pub(crate) fn is_hardness(&self) -> bool {
@@ -926,14 +966,18 @@ impl PropertyClaim {
         if let Some(artifact) = &self.provenance.artifact {
             push(&artifact.0);
         }
-        if self.validity.has_typed_axes() || self.key.hardness_test().is_some() {
+        if self.validity.has_typed_axes() || self.key.hardness_test().is_some()
+            || self.key.elastic_component().is_some() {
             push(&self.key.quantity().canonical_bytes());
             push(&(self.validity.axis_quantities().len() as u64).to_le_bytes());
             for (axis, quantity) in self.validity.axis_quantities() {
                 push(axis.as_bytes());
                 push(&quantity.canonical_bytes());
             }
-            if let Some(context) = self.key.hardness_test() {
+            if let Some(component) = self.key.elastic_component() {
+                push(&component.canonical_bytes());
+                hash_domain("org.frankensim.fs-matdb.property-claim.v5", &payload)
+            } else if let Some(context) = self.key.hardness_test() {
                 push(&context.canonical_bytes());
                 hash_domain("org.frankensim.fs-matdb.property-claim.v4", &payload)
             } else {

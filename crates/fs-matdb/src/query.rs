@@ -1355,7 +1355,7 @@ impl ClaimSet {
         self.require_quantity(property)?;
         self.query_selected(
             property.name(),
-            property.hardness_test(),
+            Some(property),
             point,
             ClaimSelection::Policy(policy),
         )
@@ -1372,7 +1372,7 @@ impl ClaimSet {
         self.require_quantity(property)?;
         self.query_selected(
             property.name(),
-            property.hardness_test(),
+            Some(property),
             point,
             ClaimSelection::Pinned(pinned),
         )
@@ -1434,7 +1434,7 @@ impl ClaimSet {
     fn query_selected(
         &self,
         property: &str,
-        hardness_test: Option<&crate::HardnessTestContext>,
+        context_key: Option<&PropertyKey>,
         point: &QueryPoint,
         selection: ClaimSelection,
     ) -> Result<MaterialAnswer, MatDbError> {
@@ -1445,6 +1445,14 @@ impl ClaimSet {
             });
         }
         let considered: Vec<ClaimId> = considered_pairs.iter().map(|(id, _)| *id).collect();
+        let hardness_test = context_key.and_then(PropertyKey::hardness_test);
+        let elastic_component = context_key.and_then(PropertyKey::elastic_component);
+        if (elastic_component.is_none()
+            && considered_pairs.iter().any(|(_, claim)| claim.key.elastic_component().is_some()))
+            || !considered_pairs.iter().any(|(_, claim)| claim.key.elastic_component() == elastic_component)
+        {
+            return Err(MatDbError::TensorContextMismatch { property: property.to_owned() });
+        }
         if considered_pairs[0].1.key.is_hardness() && hardness_test.is_none() {
             return Err(MatDbError::MissingHardnessContext {
                 property: property.to_owned(),
@@ -1461,6 +1469,7 @@ impl ClaimSet {
         let in_domain_pairs: Vec<_> = considered_pairs
             .iter()
             .filter(|(_, claim)| claim.key.hardness_test() == hardness_test)
+            .filter(|(_, claim)| claim.key.elastic_component() == elastic_component)
             .filter(|(_, claim)| {
                 claim
                     .validity
@@ -1472,6 +1481,7 @@ impl ClaimSet {
             if let Some((claim, axis)) = considered_pairs
                 .iter()
                 .filter(|(_, claim)| claim.key.hardness_test() == hardness_test)
+                .filter(|(_, claim)| claim.key.elastic_component() == elastic_component)
                 .find_map(|(_, claim)| claim_axis_mismatch(claim, point).map(|axis| (*claim, axis)))
             {
                 return Err(MatDbError::AxisQuantityMismatch {
@@ -1621,10 +1631,10 @@ impl ClaimSet {
         // The selected content identity binds the exact measurement context,
         // just as it binds the quantity schema. Caller intent still requires
         // comparing the requested key/pin externally to this selected claim.
-        let hardness_test = self
+        let context_key = self
             .claim(receipt.selected)
-            .and_then(|claim| claim.key.hardness_test());
-        let replayed = self.query_selected(&receipt.property, hardness_test, &point, selection)?;
+            .map(|claim| &claim.key);
+        let replayed = self.query_selected(&receipt.property, context_key, &point, selection)?;
         let fresh = &replayed.receipt;
         for (field, matches) in [
             (
