@@ -1123,7 +1123,7 @@ fn source_profile(manifest: &Manifest) -> Result<SourceProfile, CompileError> {
         return Err(CompileError::new(
             "unsupported_manifest_profile",
             "manifest",
-            "v2/v3/v4 declarations apply only to material and interface sources",
+            "v2/v3/v4/v5 declarations apply only to material and interface sources",
         ));
     }
     match first.profile.as_str() {
@@ -1627,7 +1627,8 @@ fn parse_source(
                 // triples. Bound before allocating support or normalizations.
                 if fields.len() < 12 || fields.len() > 6 + 3 * 64 || (fields.len() - 6) % 3 != 0 {
                     return Err(CompileError::new(
-                        "invalid_sample", &subject,
+                        "invalid_sample",
+                        &subject,
                         "sample requires id, observations, property, value, unit and 2..64 axis/value/unit triples",
                     ));
                 }
@@ -1637,38 +1638,53 @@ fn parse_source(
                     let axis = require_identifier(triple[0], "sample axis", &subject)?;
                     if !manifest.axis_kinds.contains_key(&axis) {
                         return Err(CompileError::new(
-                            "undeclared_sample_axis", &subject,
+                            "undeclared_sample_axis",
+                            &subject,
                             format!("sample axis {axis:?} requires an explicit manifest axis kind"),
                         ));
                     }
-                    let coordinate = require_number_token(triple[1], "sample coordinate", &subject)?;
+                    let coordinate =
+                        require_number_token(triple[1], "sample coordinate", &subject)?;
                     let validity = RawValidity {
-                        axis: axis.clone(), lower: coordinate.clone(), upper: coordinate,
+                        axis: axis.clone(),
+                        lower: coordinate.clone(),
+                        upper: coordinate,
                         unit: require_unit(triple[2], "sample coordinate unit", &subject)?,
                         source_hash: record_hash,
                     };
                     if coordinates.insert(axis, validity).is_some() {
                         return Err(CompileError::new(
-                            "duplicate_sample_axis", &subject, "sample axes must be unique",
+                            "duplicate_sample_axis",
+                            &subject,
+                            "sample axes must be unique",
                         ));
                     }
                 }
                 let claim = RawClaim {
                     id: id.clone(),
-                    observations: parse_identifier_list(fields[2], "observation references", &subject)?,
+                    observations: parse_identifier_list(
+                        fields[2],
+                        "observation references",
+                        &subject,
+                    )?,
                     property: require_identifier(fields[3], "property", &subject)?,
                     value: RawClaimValue::Scalar {
                         number: require_number_token(fields[4], "sample value", &subject)?,
                         unit: require_unit(fields[5], "sample unit", &subject)?,
                     },
                     interpolation: InterpolationPolicy::TabulatedOnly,
-                    source_id: source.spec.id.clone(), source_hash: source.hash, record_hash,
+                    source_id: source.spec.id.clone(),
+                    source_hash: source.hash,
+                    record_hash,
                 };
                 insert_claim(raw, id.clone(), claim)?;
-                raw.sample_axes.insert(id.clone(), coordinates.keys().cloned().collect());
+                raw.sample_axes
+                    .insert(id.clone(), coordinates.keys().cloned().collect());
                 if raw.validities.insert(id, coordinates).is_some() {
                     return Err(CompileError::new(
-                        "invalid_sample", &subject, "sample coordinates replace no existing validity declaration",
+                        "invalid_sample",
+                        &subject,
+                        "sample coordinates replace no existing validity declaration",
                     ));
                 }
             }
@@ -4476,11 +4492,14 @@ fn validate_raw_references(raw: &RawDatabase) -> Result<(), CompileError> {
     let mut sample_properties = BTreeMap::new();
     for (id, axes) in &raw.sample_axes {
         let property = &raw.claims[id].property;
-        if sample_properties.insert(property, axes).is_some_and(|previous| previous != axes)
+        if sample_properties
+            .insert(property, axes)
+            .is_some_and(|previous| previous != axes)
             || raw.validities[id].keys().ne(axes.iter())
         {
             return Err(CompileError::new(
-                "inconsistent_sample_axes", format!("claim:{id}"),
+                "inconsistent_sample_axes",
+                format!("claim:{id}"),
                 "each sample of one property must declare the same complete coordinate tuple and no additional validity axes",
             ));
         }
@@ -4488,7 +4507,8 @@ fn validate_raw_references(raw: &RawDatabase) -> Result<(), CompileError> {
     for (id, claim) in &raw.claims {
         if sample_properties.contains_key(&claim.property) && !raw.sample_axes.contains_key(id) {
             return Err(CompileError::new(
-                "mixed_sample_support", format!("claim:{id}"),
+                "mixed_sample_support",
+                format!("claim:{id}"),
                 "a sampled property cannot also declare scalar/curve support in the same import",
             ));
         }
@@ -5535,6 +5555,310 @@ mod tests {
     fn mapped_manifest(records: &str) -> String {
         manifest(MATERIAL_PROFILE, true).replacen(MANIFEST_HEADER, MAPPED_MANIFEST_HEADER, 1)
             + records
+    }
+
+    const SPARSE_SAMPLES: &str = concat!(
+        "frankensim.matdb-source.v2\n",
+        "observation\ttest\tsynthetic specimen\tsynthetic sparse sweep\tno empirical claim\n",
+        "sample\tp1\ttest\tresponse\t10\t1\ttemperature\t300\tK\tfrequency\t2\tHz\n",
+        "uncertainty\tp1\tunstated\t-\t-\t-\t-\n",
+        "sample\tp2\ttest\tresponse\t20\t1\ttemperature\t400\tK\tfrequency\t4\tHz\n",
+        "uncertainty\tp2\tunstated\t-\t-\t-\t-\n",
+        "sample\tq1\ttest\tloss\t1\t1\ttemperature\t300\tK\tfrequency\t2\tHz\n",
+        "uncertainty\tq1\tunstated\t-\t-\t-\t-\n",
+    );
+
+    fn sample_manifest(profile: &str) -> String {
+        manifest(profile, true).replacen(MANIFEST_HEADER, SAMPLE_MANIFEST_HEADER, 1)
+            + "axis\ttemperature\tT\tabsolute-temperature\naxis\tfrequency\tf\tcyclic-frequency\n"
+    }
+
+    #[test]
+    fn g3_sparse_samples_reach_material_interface_state_and_replay_without_filling_holes() {
+        use fs_matdb::{EvaluationDecision, MatDbError, QueryPoint, SelectionPolicy};
+        use fs_material::state_point::{
+            MaterialPropertySelection, ScalarAdmissibility, ScalarPropertyRequirement,
+            resolve_interface_state_point, resolve_material_state_point,
+        };
+        let quantity = |kind| QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static));
+        let point = |t, f| {
+            QueryPoint::new()
+                .with_quantity("T", quantity(QuantityKind::AbsoluteTemperature), t)
+                .unwrap()
+                .with_quantity(
+                    "f",
+                    quantity(QuantityKind::Frequency(FrequencyConvention::Cyclic)),
+                    f,
+                )
+                .unwrap()
+        };
+        let key = PropertyKey::new("response", Dims::NONE);
+        let requirement =
+            ScalarPropertyRequirement::try_with_key(&key, ScalarAdmissibility::Finite).unwrap();
+        for profile in [MATERIAL_PROFILE, INTERFACE_PROFILE] {
+            let source = if profile == INTERFACE_PROFILE {
+                SPARSE_SAMPLES.to_owned()
+                    + concat!(
+                        "surface_a\tsynthetic-a\tsolid\tfixture\t1\tframe-a\n",
+                        "surface_b\tsynthetic-b\tsolid\tfixture\t1\tframe-b\n",
+                        "context\tdry\t-\tsynthetic environment\tsynthetic history\n",
+                    )
+            } else {
+                SPARSE_SAMPLES.to_owned()
+            };
+            let (path, _) = write_fixture(&sample_manifest(profile), &source);
+            let output = compile_manifest(&path).unwrap();
+            let interface = (profile == INTERFACE_PROFILE)
+                .then(|| NormalizedInterfacePack::from_bytes(&output.bytes).unwrap());
+            let pack = match &interface {
+                Some(interface) => {
+                    assert_eq!(interface.to_bytes(), output.bytes);
+                    assert_eq!(interface.compiler(), SAMPLE_INTERFACE_COMPILER_ID);
+                    interface.claims_pack().clone()
+                }
+                None => {
+                    let pack = NormalizedPack::from_bytes(&output.bytes).unwrap();
+                    assert_eq!(pack.to_bytes(), output.bytes);
+                    assert_eq!(pack.compiler(), SAMPLE_COMPILER_ID);
+                    pack
+                }
+            };
+            assert_eq!(
+                pack.schema_version(),
+                3,
+                "existing typed point domains need no new wire shape"
+            );
+            assert_eq!(pack.claims().claims_for("response").len(), 2);
+            let card = fs_matdb::MaterialCard::assemble(
+                MaterialStateId {
+                    chemistry: "synthetic".into(),
+                    phase: "solid".into(),
+                    process: "sparse test".into(),
+                    revision: 0,
+                },
+                pack.claims().clone(),
+                Vec::new(),
+            )
+            .unwrap();
+            for (t, f, expected) in [(300.0, 2.0, 10.0), (400.0, 4.0, 20.0)] {
+                let query = point(t, f);
+                let answer = pack
+                    .claims()
+                    .query_typed(&key, &query, SelectionPolicy::SingleClaimOnly)
+                    .unwrap();
+                assert_eq!(answer.evidence.value.value, expected);
+                assert_eq!(
+                    answer.evidence.value.uncertainty,
+                    UncertaintyModel::Unstated
+                );
+                assert_eq!(answer.receipt.decision, EvaluationDecision::ExactScalar);
+                let bytes = answer.receipt.to_bytes().unwrap();
+                let receipt = fs_matdb::PropertyUsageReceipt::from_bytes_verified(
+                    &bytes,
+                    answer.receipt.content_hash(),
+                )
+                .unwrap();
+                pack.claims().verify_receipt(&receipt).unwrap();
+                let state = resolve_material_state_point(
+                    &card,
+                    &query,
+                    std::slice::from_ref(&requirement),
+                    MaterialPropertySelection::SingleClaimOnly,
+                )
+                .unwrap();
+                assert_eq!(state.properties()[0].value_si(), expected);
+                assert_eq!(state.properties()[0].answer().receipt, receipt);
+                if let Some(interface) = &interface {
+                    let state = resolve_interface_state_point(
+                        interface.card(),
+                        &query,
+                        std::slice::from_ref(&requirement),
+                        MaterialPropertySelection::SingleClaimOnly,
+                    )
+                    .unwrap();
+                    assert_eq!(state.properties()[0].value_si(), expected);
+                    assert_eq!(state.properties()[0].answer().receipt, receipt);
+                }
+                for missing in [
+                    point(300.0, 4.0),
+                    point(400.0, 2.0),
+                    point(350.0, 3.0),
+                    point(500.0, 5.0),
+                ] {
+                    assert!(matches!(
+                        pack.claims()
+                            .query_typed(&key, &missing, SelectionPolicy::SingleClaimOnly),
+                        Err(MatDbError::NoClaimInDomain { .. })
+                    ));
+                    assert!(matches!(
+                        pack.claims()
+                            .query_pinned_typed(&key, &missing, receipt.selected),
+                        Err(MatDbError::NoClaimInDomain { .. })
+                    ));
+                    assert!(
+                        resolve_material_state_point(
+                            &card,
+                            &missing,
+                            std::slice::from_ref(&requirement),
+                            MaterialPropertySelection::SingleClaimOnly
+                        )
+                        .is_err()
+                    );
+                    if let Some(interface) = &interface {
+                        assert!(
+                            resolve_interface_state_point(
+                                interface.card(),
+                                &missing,
+                                std::slice::from_ref(&requirement),
+                                MaterialPropertySelection::SingleClaimOnly
+                            )
+                            .is_err()
+                        );
+                    }
+                }
+                let other_sample = if t == 300.0 {
+                    point(400.0, 4.0)
+                } else {
+                    point(300.0, 2.0)
+                };
+                assert!(matches!(
+                    pack.claims()
+                        .query_pinned_typed(&key, &other_sample, receipt.selected),
+                    Err(MatDbError::PinnedClaimOutOfDomain { .. })
+                ));
+                let mut forged = receipt;
+                forged.query_point = point(300.0, 4.0)
+                    .axes()
+                    .iter()
+                    .map(|(k, v)| (k.clone(), *v))
+                    .collect();
+                assert!(pack.claims().verify_receipt(&forged).is_err());
+            }
+            let joint = pack
+                .query_joint_typed(
+                    &[key.clone(), PropertyKey::new("loss", Dims::NONE)],
+                    &point(300.0, 2.0),
+                    SelectionPolicy::SingleClaimOnly,
+                )
+                .unwrap();
+            assert!(matches!(
+                joint.receipt.correlation,
+                fs_matdb::JointCorrelation::Unknown {
+                    reason: fs_matdb::CorrelationUnknownReason::NoBlock
+                }
+            ));
+            pack.verify_joint_receipt(&joint.receipt).unwrap();
+            assert!(matches!(
+                pack.claims().query(
+                    "absent",
+                    &point(300.0, 2.0),
+                    SelectionPolicy::SingleClaimOnly
+                ),
+                Err(MatDbError::UnknownProperty { .. })
+            ));
+            assert!(matches!(
+                pack.claims()
+                    .query("loss", &point(400.0, 4.0), SelectionPolicy::SingleClaimOnly),
+                Err(MatDbError::NoClaimInDomain { .. })
+            ));
+            let wrong_kind = point(300.0, 2.0)
+                .with_quantity("T", quantity(QuantityKind::TemperatureDifference), 300.0)
+                .unwrap();
+            assert!(matches!(
+                pack.claims()
+                    .query_typed(&key, &wrong_kind, SelectionPolicy::SingleClaimOnly),
+                Err(MatDbError::AxisQuantityMismatch { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn g3_sparse_sample_normalization_retains_complete_support_and_source_provenance() {
+        let manifest = sample_manifest(MATERIAL_PROFILE);
+        let mut packs = Vec::new();
+        for source in [
+            SPARSE_SAMPLES.to_owned(),
+            SPARSE_SAMPLES
+                .replace("300\tK", "26.85\tdegC")
+                .replace("400\tK", "126.85\tdegC")
+                .replace("2\tHz", "0.002\tkHz")
+                .replace("4\tHz", "0.004\tkHz"),
+        ] {
+            let (path, _) = write_fixture(&manifest, &source);
+            let output = compile_manifest(&path).unwrap();
+            packs.push(NormalizedPack::from_bytes(&output.bytes).unwrap());
+        }
+        assert_ne!(packs[0].content_hash(), packs[1].content_hash());
+        assert_ne!(packs[0].source_artifact(), packs[1].source_artifact());
+        for name in ["response", "loss"] {
+            let values = |pack: &NormalizedPack| {
+                let mut claims: Vec<_> = pack
+                    .claims()
+                    .claims_for(name)
+                    .into_iter()
+                    .map(|(_, c)| {
+                        assert_eq!(c.interpolation, InterpolationPolicy::TabulatedOnly);
+                        (
+                            c.validity.bound("T").unwrap().0.to_bits(),
+                            c.validity.clone(),
+                            c.value.clone(),
+                        )
+                    })
+                    .collect();
+                claims.sort_by_key(|c| c.0);
+                claims
+            };
+            assert_eq!(values(&packs[0]), values(&packs[1]));
+        }
+    }
+
+    #[test]
+    fn g0_sparse_import_refuses_incomplete_or_ambiguous_joint_support() {
+        let sample_manifest_text = sample_manifest(MATERIAL_PROFILE);
+        for source in [
+            SPARSE_SAMPLES.replace("\tfrequency\t2\tHz", ""),
+            SPARSE_SAMPLES.replacen("\tfrequency\t2\tHz", "\ttemperature\t2\tK", 1),
+            SPARSE_SAMPLES.replacen("\tfrequency\t2\tHz", "\tunknown\t2\tHz", 1),
+            SPARSE_SAMPLES.to_owned() + "validity\tp1\textra\t0\t1\t1\n",
+            SPARSE_SAMPLES.to_owned() + "validity\tp1\tfrequency\t2\t4\tHz\n",
+            SPARSE_SAMPLES.to_owned()
+                + "scalar\twide\ttest\tresponse\t10\t1\tconstant\nuncertainty\twide\tunstated\t-\t-\t-\t-\n",
+            SPARSE_SAMPLES.replacen("300\tK", "NaN\tK", 1),
+            SPARSE_SAMPLES.replacen("300\tK", "-1\tK", 1),
+            SPARSE_SAMPLES.replacen("2\tHz", "2\tkg", 1),
+            SPARSE_SAMPLES.replacen("sample\tp1\ttest", "sample\tp1\tmissing", 1),
+            SPARSE_SAMPLES.replace("uncertainty\tp1\tunstated\t-\t-\t-\t-\n", ""),
+            SPARSE_SAMPLES.replace(SAMPLE_SOURCE_HEADER, SOURCE_HEADER),
+        ] {
+            let (path, _) = write_fixture(&sample_manifest_text, &source);
+            let refusal = compile_manifest(&path).unwrap_err();
+            assert_eq!(refusal.compiler_id, SAMPLE_COMPILER_ID);
+        }
+        for version in [
+            MANIFEST_HEADER,
+            MAPPED_MANIFEST_HEADER,
+            TYPED_AXIS_MANIFEST_HEADER,
+            HARDNESS_MANIFEST_HEADER,
+        ] {
+            let legacy = manifest(MATERIAL_PROFILE, true).replacen(MANIFEST_HEADER, version, 1);
+            let (path, _) = write_fixture(&legacy, SPARSE_SAMPLES);
+            assert_eq!(
+                compile_manifest(&path).unwrap_err().code,
+                "unsupported_source_schema"
+            );
+        }
+        let changed_tuple = SPARSE_SAMPLES.replace(
+            "temperature\t400\tK\tfrequency\t4\tHz",
+            "temperature\t400\tK\tmoisture\t0.4\t1",
+        );
+        let (path, _) = write_fixture(
+            &(sample_manifest_text + "axis\tmoisture\tm\tdimensional\n"),
+            &changed_tuple,
+        );
+        assert_eq!(
+            compile_manifest(&path).unwrap_err().code,
+            "inconsistent_sample_axes"
+        );
     }
 
     #[test]

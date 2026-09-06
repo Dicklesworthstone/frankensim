@@ -308,6 +308,35 @@ binds every declaration and source-spelled unit. Equivalent N/kN and s/ms inputs
 can select the same physical claim while retaining distinct source envelopes.
 V1/v2/v3 manifests do not acquire these declarations implicitly.
 
+Manifest v5 permits `frankensim.matdb-source.v2` material/interface sources.
+Its tab-separated sparse-row grammar is
+`sample <claim> <observations> <property> <value> <unit> <axis> <coordinate> <unit> ...`,
+with two to 64 distinct axes, each explicitly declared by a manifest `axis`
+record. Observation references and the separate required `uncertainty` record
+use the existing source grammar. All samples of a property must name the same
+complete axis set; ordinary scalar/curve claims for that property and additional
+validity declarations are refused in this import.
+
+Each sample lowers to one existing `TabulatedOnly` scalar claim with typed
+point validity on every coordinate. Two rows at `(300 K, 2 Hz)` and
+`(400 K, 4 Hz)` therefore support only those two tuples: neither crossed corner,
+their midpoint, nor a point beyond their ranges is supported. The query engine
+selects the corresponding claim and its observation/uncertainty, and existing
+material/interface state resolution and usage replay retain that selection.
+Source-unit conversion and normalization receipts use the same path as typed
+validity endpoints. Compiler identities and source-envelope hashing advance
+to v5; the lowered claims use the existing portable schema appropriate to their
+fields (v3 for typed axes, v4 when hardness context is present). Existing source
+v1 and manifests v1 through v4 do not accept `sample` rows.
+
+This is finite sampled support, with no inferred interpolation, extrapolation,
+covariance, or uncertainty between samples. Existing `NoClaimInDomain`,
+`UnknownProperty`, and joint correlation-unknown outcomes remain distinct.
+G0/G3 compiler tests exercise sparse holes, exact material/interface solver
+queries and replay, malformed tuples, semantic mismatches, and equivalent
+Celsius/kelvin and Hz/kHz input. Their fixtures are synthetic software proof;
+continuous nonrectangular domains and full tensor payloads remain unimplemented.
+
 The offline compiler now admits a v2 manifest for material/interface sources:
 `property <source> <target> <kind|dimensional>` and `axis <source> <target>`
 are explicit tab-separated declarations. Undeclared names retain their source
