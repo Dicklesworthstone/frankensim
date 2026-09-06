@@ -44,6 +44,12 @@ homogenization, the P2 milestone.
   that context, and selected claim/usage-receipt identities bind it into the
   existing bundle identity. The focused synthetic G0 regression proves this
   adapter behavior, not measured hardness accuracy or standards compliance.
+  Distinct complete keys may share a name. Duplicate keys refuse, and same-name
+  pins must identify distinct claims matching the required contexts. Bundles
+  order same-name answers by selected claim identity; reversed requirement/pin
+  order cannot alter the result. `property(name)` returns `None` for an ambiguous
+  name; `property_by_key` requires the complete quantity/test/tensor context.
+  The elastic resolver uses that exact lookup for all 36 matrix coefficients.
 - `resolve_isotropic_elastic_state_point` requests only density, Young's
   modulus, and Poisson ratio for linear vibration/elasticity. The distinct
   `resolve_isotropic_solid_state_point` additionally requires yield stress for

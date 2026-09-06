@@ -2022,6 +2022,31 @@ mod tests {
         property.key = key.clone();
         property.observations = vec![observation];
         let pin = claims.insert_claim(property).unwrap();
+        let other_key = PropertyKey::with_quantity("hardness", scale)
+            .with_hardness_test(
+                HardnessTestContext::new(
+                    "synthetic diamond pyramid geometry B",
+                    vec![
+                        HardnessLoadStep::new(
+                            QtyAny::new(40.0, Dims([1, 1, -2, 0, 0, 0])),
+                            QtyAny::new(10.0, Dims([0, 0, 1, 0, 0, 0])),
+                        )
+                        .unwrap(),
+                    ],
+                    "synthetic protocol revision 1",
+                    observation,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let mut other_property = claims.claim(pin).unwrap().clone();
+        other_property.key = other_key.clone();
+        other_property.value = PropertyValue::Scalar {
+            value: 310.0,
+            dims: Dims::NONE,
+        };
+        other_property.interpolation = InterpolationPolicy::ConstantWithinValidity;
+        let other_pin = claims.insert_claim(other_property).unwrap();
         let interface_base = interface_card("synthetic hardness requirement");
         let material = MaterialCard::assemble(
             interface_base.surface_a().material.clone(),
@@ -2101,6 +2126,69 @@ mod tests {
                     })
                 ));
             }
+        }
+        let requirements = [
+            exact,
+            ScalarPropertyRequirement::try_with_key(
+                &other_key,
+                ScalarAdmissibility::StrictlyPositive,
+            )
+            .unwrap(),
+        ];
+        for selection in [
+            MaterialPropertySelection::SingleClaimOnly,
+            MaterialPropertySelection::PreferObservationBacked,
+            MaterialPropertySelection::PinnedByProperty(vec![
+                ("hardness".into(), other_pin),
+                ("hardness".into(), pin),
+            ]),
+        ] {
+            let bulk = resolve_material_state_point(
+                &material,
+                &point(300.0),
+                &requirements,
+                selection.clone(),
+            )
+            .unwrap();
+            let surface = resolve_interface_state_point(
+                &interface,
+                &point(300.0),
+                &requirements,
+                selection.clone(),
+            )
+            .unwrap();
+            assert!(bulk.property("hardness").is_none());
+            assert!(surface.property("hardness").is_none());
+            for (required_key, expected) in [(&key, 210.0), (&other_key, 310.0)] {
+                for value in [
+                    bulk.property_by_key(required_key).unwrap(),
+                    surface.property_by_key(required_key).unwrap(),
+                ] {
+                    assert_eq!(value.value_si(), expected);
+                    material
+                        .claims()
+                        .verify_receipt(&value.answer().receipt)
+                        .unwrap();
+                }
+            }
+            let reversed = [requirements[1].clone(), requirements[0].clone()];
+            assert_eq!(
+                bulk.identity(),
+                resolve_material_state_point(
+                    &material,
+                    &point(300.0),
+                    &reversed,
+                    selection.clone()
+                )
+                .unwrap()
+                .identity()
+            );
+            assert_eq!(
+                surface.identity(),
+                resolve_interface_state_point(&interface, &point(300.0), &reversed, selection)
+                    .unwrap()
+                    .identity()
+            );
         }
     }
 
