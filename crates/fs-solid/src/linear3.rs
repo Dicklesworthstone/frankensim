@@ -79,6 +79,93 @@ impl Default for TetAssemblyBudget {
 /// rotations.
 pub type MandelStiffness6 = [[f64; 6]; 6];
 
+/// Stress/strain vector convention for a supplied elastic matrix [Pa].
+/// Every matrix maps its declared strain vector to its declared stress vector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ElasticTensorNotation {
+    /// Both stress and strain store physical off-diagonal tensor components.
+    /// Shear columns therefore include the factor two from tensor contraction.
+    Tensor,
+    /// Stress stores tensor shear; strain stores engineering shear `2 epsilon_ij`.
+    Engineering,
+    /// Both stress and strain store `sqrt(2)` times their tensor shear.
+    Mandel,
+}
+
+/// Ordering shared by the rows and columns of a supplied elastic matrix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ElasticTensorOrder {
+    /// `[xx, yy, zz, xy, yz, zx]`, the existing operator order.
+    XxYyZzXyYzZx,
+    /// `[xx, yy, zz, yz, zx, xy]`, a common engineering table order.
+    XxYyZzYzZxXy,
+}
+
+/// Explicit source basis of a full small-strain elastic tensor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ElasticTensorBasis {
+    /// Stress/strain shear scaling; never inferred from matrix symmetry.
+    pub notation: ElasticTensorNotation,
+    /// Component ordering in the supplied matrix.
+    pub order: ElasticTensorOrder,
+    /// Nonzero identity of the source coordinate frame.
+    pub frame: ContentHash,
+}
+
+/// Retained numerical transform and its executable, admitted material.
+///
+/// This records a major/minor-symmetric, positive-definite elasticity law,
+/// not an arbitrary coupled operator. It does not certify observations or
+/// frame calibration, and currently has no portable byte codec.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ElasticTensorTransformReceipt {
+    source_stiffness_pa: [[f64; 6]; 6],
+    source_basis: ElasticTensorBasis,
+    target_frame: ContentHash,
+    source_to_target: [[f64; 3]; 3],
+    source_material_identity: ContentHash,
+    material: TetElasticMaterial,
+}
+
+impl ElasticTensorTransformReceipt {
+    /// Complete source matrix, preserving its declared order and shear scaling.
+    #[must_use]
+    pub const fn source_stiffness_pa(&self) -> &[[f64; 6]; 6] {
+        &self.source_stiffness_pa
+    }
+
+    /// Declared source notation, component ordering and frame identity.
+    #[must_use]
+    pub const fn source_basis(&self) -> ElasticTensorBasis {
+        self.source_basis
+    }
+
+    /// Target coordinate-frame identity.
+    #[must_use]
+    pub const fn target_frame(&self) -> ContentHash {
+        self.target_frame
+    }
+
+    /// Proper rotation: columns are source axes expressed in the target frame.
+    #[must_use]
+    pub const fn source_to_target(&self) -> &[[f64; 3]; 3] {
+        &self.source_to_target
+    }
+
+    /// Upstream identity supplied for the admitted material data.
+    #[must_use]
+    pub const fn source_material_identity(&self) -> ContentHash {
+        self.source_material_identity
+    }
+
+    /// Target-frame material consumed directly by the existing tet operator.
+    /// Its identity binds all source/transform fields, density and output bits.
+    #[must_use]
+    pub const fn material(&self) -> &TetElasticMaterial {
+        &self.material
+    }
+}
+
 /// One uniform linear-elastic state carried into the element operator.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TetElasticMaterial {
@@ -151,6 +238,72 @@ impl TetElasticMaterial {
         Ok(material)
     }
 
+    /// Admit a full anisotropic elastic matrix with explicit basis and frames.
+    ///
+    /// Converts notation/order before applying the fourth-order rotation
+    /// `C'_{ijkl} = Q_{ip} Q_{jq} Q_{kr} Q_{ls} C_{pqrs}` through its Mandel
+    /// representation. Major symmetry is checked in work-conjugate coordinates,
+    /// not by assuming a tensor-shear matrix is ordinarily symmetric. Both the
+    /// complete source law and transformed law must be positive definite.
+    /// No noisy-data projection or missing-coefficient completion is performed.
+    pub fn try_new_oriented_tensor(
+        density_kg_m3: f64,
+        stiffness_pa: [[f64; 6]; 6],
+        source_basis: ElasticTensorBasis,
+        target_frame: ContentHash,
+        source_to_target: [[f64; 3]; 3],
+        source_material_identity: ContentHash,
+    ) -> Result<ElasticTensorTransformReceipt, TetElasticError> {
+        validate_rotation(source_to_target)?;
+        if source_basis.frame == ContentHash([0; 32]) || target_frame == ContentHash([0; 32]) {
+            return Err(TetElasticError::InvalidMaterial {
+                what: "source and target tensor frame identities must be nonzero",
+            });
+        }
+        if source_basis.frame == target_frame
+            && source_to_target != [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+        {
+            return Err(TetElasticError::InvalidMaterial {
+                what: "a frame mapped to itself requires the identity rotation",
+            });
+        }
+        let principal = normalize_elastic_tensor(stiffness_pa, source_basis)?;
+        Self::try_new_mandel(density_kg_m3, principal, source_material_identity.0)?;
+        let world = rotate_mandel_stiffness(principal, source_to_target);
+        let mut identity =
+            DomainHasher::new("org.frankensim.fs-solid.elastic-tensor-frame-transform.v1");
+        identity.update(source_material_identity.as_bytes());
+        identity.update(source_basis.frame.as_bytes());
+        identity.update(target_frame.as_bytes());
+        identity.update(&[match source_basis.notation {
+            ElasticTensorNotation::Tensor => 0,
+            ElasticTensorNotation::Engineering => 1,
+            ElasticTensorNotation::Mandel => 2,
+        }]);
+        identity.update(&[match source_basis.order {
+            ElasticTensorOrder::XxYyZzXyYzZx => 0,
+            ElasticTensorOrder::XxYyZzYzZxXy => 1,
+        }]);
+        identity.update(&density_kg_m3.to_bits().to_le_bytes());
+        for value in stiffness_pa
+            .iter()
+            .flatten()
+            .chain(source_to_target.iter().flatten())
+            .chain(world.iter().flatten())
+        {
+            identity.update(&value.to_bits().to_le_bytes());
+        }
+        let material = Self::try_new_mandel(density_kg_m3, world, identity.finalize().0)?;
+        Ok(ElasticTensorTransformReceipt {
+            source_stiffness_pa: stiffness_pa,
+            source_basis,
+            target_frame,
+            source_to_target,
+            source_material_identity,
+            material,
+        })
+    }
+
     /// Construct an oriented orthotropic state.
     ///
     /// `principal_to_world` is a proper orthonormal rotation whose columns are
@@ -171,26 +324,7 @@ impl TetElasticMaterial {
             });
         }
         let principal = law.stiffness();
-        let transform = mandel_rotation(principal_to_world);
-        let mut world = [[0.0; 6]; 6];
-        for a in 0..6 {
-            for b in 0..6 {
-                for p in 0..6 {
-                    for q in 0..6 {
-                        world[a][b] =
-                            transform[a][p].mul_add(principal[p][q] * transform[b][q], world[a][b]);
-                    }
-                }
-            }
-        }
-        // The operation tree above is symmetric mathematically, but separate
-        // floating-point accumulation paths can differ by a final bit. Use one
-        // deterministic triangle as the exact stored constitutive tensor.
-        for row in 0..6 {
-            for column in 0..row {
-                world[row][column] = world[column][row];
-            }
-        }
+        let world = rotate_mandel_stiffness(principal, principal_to_world);
         let mut identity =
             DomainHasher::new("org.frankensim.fs-solid.oriented-orthotropic-constitutive-state.v1");
         identity.update(&material_state_identity);
@@ -1696,6 +1830,92 @@ fn validate_rotation(rotation: [[f64; 3]; 3]) -> Result<(), TetElasticError> {
     Ok(())
 }
 
+fn normalize_elastic_tensor(
+    source: [[f64; 6]; 6],
+    basis: ElasticTensorBasis,
+) -> Result<MandelStiffness6, TetElasticError> {
+    if source.iter().flatten().any(|value| !value.is_finite()) {
+        return Err(TetElasticError::InvalidMaterial {
+            what: "source elastic tensor must be finite",
+        });
+    }
+    let order = match basis.order {
+        ElasticTensorOrder::XxYyZzXyYzZx => [0, 1, 2, 3, 4, 5],
+        ElasticTensorOrder::XxYyZzYzZxXy => [0, 1, 2, 5, 3, 4],
+    };
+    let mut conjugate = [[0.0; 6]; 6];
+    for i in 0..6 {
+        for j in 0..6 {
+            let value = source[order[i]][order[j]];
+            // Tensor stress = C_tensor * epsilon_tensor. Engineering strain
+            // is W epsilon_tensor, so C_engineering = C_tensor W^-1.
+            let normalized = if basis.notation == ElasticTensorNotation::Tensor && j >= 3 {
+                value * 0.5
+            } else {
+                value
+            };
+            if value != 0.0 && normalized == 0.0 {
+                return Err(TetElasticError::InvalidMaterial {
+                    what: "elastic tensor shear conversion underflows",
+                });
+            }
+            conjugate[i][j] = normalized;
+        }
+    }
+    let mut mandel = [[0.0; 6]; 6];
+    for i in 0..6 {
+        for j in i..6 {
+            if conjugate[i][j].to_bits() != conjugate[j][i].to_bits() {
+                return Err(TetElasticError::InvalidMaterial {
+                    what: "elastic tensor must have exact major symmetry in its declared notation",
+                });
+            }
+            // C_mandel = S C_engineering S, S=diag(1,1,1,sqrt(2),...).
+            // One product per pair avoids manufacturing a final-bit asymmetry.
+            let scale = if basis.notation == ElasticTensorNotation::Mandel {
+                1.0
+            } else {
+                match (i >= 3, j >= 3) {
+                    (false, false) => 1.0,
+                    (true, true) => 2.0,
+                    _ => core::f64::consts::SQRT_2,
+                }
+            };
+            let value = conjugate[i][j] * scale;
+            mandel[i][j] = value;
+            mandel[j][i] = value;
+        }
+    }
+    Ok(mandel)
+}
+
+fn rotate_mandel_stiffness(
+    principal: MandelStiffness6,
+    rotation: [[f64; 3]; 3],
+) -> MandelStiffness6 {
+    let transform = mandel_rotation(rotation);
+    let mut world = [[0.0; 6]; 6];
+    for a in 0..6 {
+        for b in 0..6 {
+            for p in 0..6 {
+                for q in 0..6 {
+                    world[a][b] =
+                        transform[a][p].mul_add(principal[p][q] * transform[b][q], world[a][b]);
+                }
+            }
+        }
+    }
+    // Rotation is mathematically symmetric; retain the original orthotropic
+    // operation tree and its deterministic triangle convention. Input symmetry
+    // is checked before this step; this is not a projection of noisy source data.
+    for row in 0..6 {
+        for column in 0..row {
+            world[row][column] = world[column][row];
+        }
+    }
+    world
+}
+
 fn mandel_rotation(rotation: [[f64; 3]; 3]) -> [[f64; 6]; 6] {
     let basis = mandel_basis();
     let mut transform = [[0.0; 6]; 6];
@@ -2178,6 +2398,370 @@ mod tests {
                 .abs()
                 < 1.0e-12
         );
+    }
+
+    fn coupled_engineering_stiffness() -> [[f64; 6]; 6] {
+        // Synthetic, strictly diagonally dominant SPD law with normal/shear
+        // coupling and signed off-diagonal coefficients; no material preset.
+        [
+            [120.0, 20.0, 10.0, 4.0, -3.0, 2.0],
+            [20.0, 110.0, 15.0, -2.0, 5.0, -1.0],
+            [10.0, 15.0, 100.0, 3.0, -4.0, 6.0],
+            [4.0, -2.0, 3.0, 50.0, 2.0, -1.0],
+            [-3.0, 5.0, -4.0, 2.0, 40.0, 3.0],
+            [2.0, -1.0, 6.0, -1.0, 3.0, 30.0],
+        ]
+    }
+
+    // Independent oracle: expand C_ijkl directly from engineering coefficients
+    // and contract all four rotation indices. No Mandel rotation helper or
+    // production notation converter is used here.
+    fn four_index_rotated_stiffness(q: [[f64; 3]; 3]) -> [[[[f64; 3]; 3]; 3]; 3] {
+        let engineering = coupled_engineering_stiffness();
+        let component = |i, j| match (i, j) {
+            (0, 0) => 0,
+            (1, 1) => 1,
+            (2, 2) => 2,
+            (0, 1) | (1, 0) => 3,
+            (1, 2) | (2, 1) => 4,
+            (0, 2) | (2, 0) => 5,
+            _ => unreachable!(),
+        };
+        let mut out = [[[[0.0; 3]; 3]; 3]; 3];
+        for i in 0..3 {
+            for j in 0..3 {
+                for k in 0..3 {
+                    for l in 0..3 {
+                        for p in 0..3 {
+                            for r in 0..3 {
+                                for s in 0..3 {
+                                    for t in 0..3 {
+                                        out[i][j][k][l] += q[i][p]
+                                            * q[j][r]
+                                            * q[k][s]
+                                            * q[l][t]
+                                            * engineering[component(p, r)][component(s, t)];
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn g3_full_tensor_notations_orders_and_four_index_rotation_agree() {
+        let q = fs_material::tensor::rotation([2.0 / 3.0, 2.0 / 3.0, 1.0 / 3.0], 0.73);
+        let expected = four_index_rotated_stiffness(q);
+        let pairs = [(0, 0), (1, 1), (2, 2), (0, 1), (1, 2), (2, 0)];
+        let engineering = coupled_engineering_stiffness();
+        let mut identities = BTreeSet::new();
+        for notation in [
+            ElasticTensorNotation::Engineering,
+            ElasticTensorNotation::Tensor,
+            ElasticTensorNotation::Mandel,
+        ] {
+            for order in [
+                ElasticTensorOrder::XxYyZzXyYzZx,
+                ElasticTensorOrder::XxYyZzYzZxXy,
+            ] {
+                let permutation = if order == ElasticTensorOrder::XxYyZzXyYzZx {
+                    [0, 1, 2, 3, 4, 5]
+                } else {
+                    [0, 1, 2, 4, 5, 3]
+                };
+                let source = core::array::from_fn(|i| {
+                    core::array::from_fn(|j| {
+                        let (a, b) = (permutation[i], permutation[j]);
+                        let scale = match notation {
+                            ElasticTensorNotation::Engineering => 1.0,
+                            ElasticTensorNotation::Tensor => {
+                                if b >= 3 {
+                                    2.0
+                                } else {
+                                    1.0
+                                }
+                            }
+                            ElasticTensorNotation::Mandel => match (a >= 3, b >= 3) {
+                                (false, false) => 1.0,
+                                (true, true) => 2.0,
+                                _ => core::f64::consts::SQRT_2,
+                            },
+                        };
+                        engineering[a][b] * scale
+                    })
+                });
+                let basis = ElasticTensorBasis {
+                    notation,
+                    order,
+                    frame: ContentHash([1; 32]),
+                };
+                let receipt = TetElasticMaterial::try_new_oriented_tensor(
+                    6.0,
+                    source,
+                    basis,
+                    ContentHash([2; 32]),
+                    q,
+                    ContentHash([3; 32]),
+                )
+                .unwrap();
+                assert_eq!(receipt.source_stiffness_pa(), &source);
+                assert_eq!(receipt.source_basis(), basis);
+                assert_eq!(receipt.target_frame(), ContentHash([2; 32]));
+                assert_eq!(receipt.source_to_target(), &q);
+                assert_eq!(receipt.source_material_identity(), ContentHash([3; 32]));
+                assert!(identities.insert(receipt.material().material_state_identity));
+                for (a, &(i, j)) in pairs.iter().enumerate() {
+                    for (b, &(k, l)) in pairs.iter().enumerate() {
+                        let scale = match (a >= 3, b >= 3) {
+                            (false, false) => 1.0,
+                            (true, true) => 2.0,
+                            _ => core::f64::consts::SQRT_2,
+                        };
+                        let oracle = expected[i][j][k][l] * scale;
+                        assert!(
+                            (receipt.material().stiffness_mandel_pa()[a][b] - oracle).abs()
+                                < 2.0e-12,
+                            "{notation:?} {order:?} coefficient {a},{b}"
+                        );
+                    }
+                }
+                assert_eq!(
+                    receipt,
+                    TetElasticMaterial::try_new_oriented_tensor(
+                        6.0,
+                        source,
+                        basis,
+                        ContentHash([2; 32]),
+                        q,
+                        ContentHash([3; 32]),
+                    )
+                    .unwrap()
+                );
+            }
+        }
+        assert_eq!(
+            identities.len(),
+            6,
+            "equivalent responses retain distinct source conventions"
+        );
+    }
+
+    #[test]
+    fn g1_full_tensor_drives_tet_forces_and_energy_in_the_target_frame() {
+        let q = fs_material::tensor::rotation([2.0 / 3.0, 2.0 / 3.0, 1.0 / 3.0], 0.73);
+        let receipt = TetElasticMaterial::try_new_oriented_tensor(
+            6.0,
+            coupled_engineering_stiffness(),
+            ElasticTensorBasis {
+                notation: ElasticTensorNotation::Engineering,
+                order: ElasticTensorOrder::XxYyZzXyYzZx,
+                frame: ContentHash([1; 32]),
+            },
+            ContentHash([2; 32]),
+            q,
+            ContentHash([3; 32]),
+        )
+        .unwrap();
+        let nodes = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ];
+        let tets = [[0, 1, 2, 3]];
+        let assembly =
+            with_cx(|cx| reference_problem(&nodes, &tets, receipt.material(), &[]).assemble(cx))
+                .unwrap();
+        assert_eq!(assembly.total_mass_kg, 1.0);
+        let epsilon = [
+            [0.001, 0.0002, -0.0003],
+            [0.0002, -0.0008, 0.0004],
+            [-0.0003, 0.0004, 0.0005],
+        ];
+        let c = four_index_rotated_stiffness(q);
+        let mut stress = [[0.0; 3]; 3];
+        for i in 0..3 {
+            for j in 0..3 {
+                for k in 0..3 {
+                    for l in 0..3 {
+                        stress[i][j] += c[i][j][k][l] * epsilon[k][l];
+                    }
+                }
+            }
+        }
+        let displacement: Vec<f64> = nodes
+            .iter()
+            .flat_map(|x| epsilon.map(|row| row.iter().zip(x).map(|(a, b)| a * b).sum::<f64>()))
+            .collect();
+        let k = assembly.stiffness.to_dense();
+        let gradients = [
+            [-1.0, -1.0, -1.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ];
+        for (node, gradient) in gradients.iter().enumerate() {
+            for (a, row) in stress.iter().enumerate() {
+                let actual: f64 = (0..12)
+                    .map(|dof| k[(3 * node + a) * 12 + dof] * displacement[dof])
+                    .sum();
+                let expected: f64 = row.iter().zip(gradient).map(|(s, g)| s * g / 6.0).sum();
+                assert!((actual - expected).abs() < 2.0e-14);
+            }
+        }
+        let expected_energy: f64 = epsilon
+            .iter()
+            .flatten()
+            .zip(stress.iter().flatten())
+            .map(|(e, s)| e * s / 12.0)
+            .sum();
+        assert!((0.5 * quadratic(&k, &displacement) - expected_energy).abs() < 2.0e-16);
+    }
+
+    #[test]
+    fn g0_full_tensor_admission_checks_whole_law_frames_and_transform_identity() {
+        let source = coupled_engineering_stiffness();
+        let basis = ElasticTensorBasis {
+            notation: ElasticTensorNotation::Engineering,
+            order: ElasticTensorOrder::XxYyZzXyYzZx,
+            frame: ContentHash([1; 32]),
+        };
+        let identity = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        let admit = |matrix, basis, frame, rotation, state| {
+            TetElasticMaterial::try_new_oriented_tensor(6.0, matrix, basis, frame, rotation, state)
+        };
+        let receipt = admit(
+            source,
+            basis,
+            ContentHash([2; 32]),
+            identity,
+            ContentHash([3; 32]),
+        )
+        .unwrap();
+        // Misdeclaring engineering data as tensor shear breaks reciprocity;
+        // do not accept it merely because its raw array is symmetric.
+        assert!(
+            admit(
+                source,
+                ElasticTensorBasis {
+                    notation: ElasticTensorNotation::Tensor,
+                    ..basis
+                },
+                ContentHash([2; 32]),
+                identity,
+                ContentHash([3; 32])
+            )
+            .is_err()
+        );
+        let mut asymmetric = source;
+        asymmetric[0][3] += 1.0;
+        let mut unstable = source;
+        unstable[0][3] = 1000.0;
+        unstable[3][0] = 1000.0; // positive diagonal blocks, indefinite whole law
+        let mut nonfinite = source;
+        nonfinite[0][0] = f64::NAN;
+        let mut overflow = source;
+        overflow[3][3] = f64::MAX;
+        for matrix in [asymmetric, unstable, nonfinite, overflow] {
+            assert!(
+                admit(
+                    matrix,
+                    basis,
+                    ContentHash([2; 32]),
+                    identity,
+                    ContentHash([3; 32])
+                )
+                .is_err()
+            );
+        }
+        for (source_frame, target_frame, state) in [(0, 2, 3), (1, 0, 3), (1, 2, 0)] {
+            assert!(
+                admit(
+                    source,
+                    ElasticTensorBasis {
+                        frame: ContentHash([source_frame; 32]),
+                        ..basis
+                    },
+                    ContentHash([target_frame; 32]),
+                    identity,
+                    ContentHash([state; 32])
+                )
+                .is_err()
+            );
+        }
+        let quarter_turn = [[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]];
+        assert!(
+            admit(
+                source,
+                basis,
+                basis.frame,
+                quarter_turn,
+                ContentHash([3; 32])
+            )
+            .is_err()
+        );
+        for q in [
+            [[-1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            [[2.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        ] {
+            assert!(admit(source, basis, ContentHash([2; 32]), q, ContentHash([3; 32])).is_err());
+        }
+        let mut changed = source;
+        changed[0][0] += 1.0;
+        for different in [
+            admit(
+                changed,
+                basis,
+                ContentHash([2; 32]),
+                identity,
+                ContentHash([3; 32]),
+            )
+            .unwrap(),
+            admit(
+                source,
+                basis,
+                ContentHash([4; 32]),
+                identity,
+                ContentHash([3; 32]),
+            )
+            .unwrap(),
+            admit(
+                source,
+                ElasticTensorBasis {
+                    frame: ContentHash([4; 32]),
+                    ..basis
+                },
+                ContentHash([2; 32]),
+                identity,
+                ContentHash([3; 32]),
+            )
+            .unwrap(),
+            admit(
+                source,
+                basis,
+                ContentHash([2; 32]),
+                identity,
+                ContentHash([4; 32]),
+            )
+            .unwrap(),
+            admit(
+                source,
+                basis,
+                ContentHash([2; 32]),
+                quarter_turn,
+                ContentHash([3; 32]),
+            )
+            .unwrap(),
+        ] {
+            assert_ne!(
+                receipt.material().material_state_identity,
+                different.material().material_state_identity
+            );
+        }
     }
 
     #[test]

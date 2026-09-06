@@ -24,6 +24,38 @@ operator level, but material-card resolution of engineering/crystal constants
 and texture/orientation fields remains a separate evidence-bearing admission
 step; absence of that data is not permission to assume isotropy.
 
+`TetElasticMaterial::try_new_oriented_tensor` admits complete anisotropic
+stiffness data into that same operator. `ElasticTensorBasis` requires explicit
+tensor-shear, engineering-shear or Mandel notation, one of the documented
+`xx,yy,zz,xy,yz,zx` / `xx,yy,zz,yz,zx,xy` orders, and a nonzero source-frame
+identity. The caller also supplies a target-frame identity, a proper rotation
+whose columns are source axes in the target frame, density and an upstream
+material-state identity. A frame mapped to itself requires identity rotation.
+The constructor checks full major symmetry in work-conjugate coordinates and
+positive definiteness of the entire source and target law. Tensor-shear
+matrices with normal/shear coupling are generally not ordinarily symmetric;
+engineering matrices transform as `C_M = S C_E S`, with
+`S = diag(1,1,1,sqrt(2),sqrt(2),sqrt(2))`. Negative off-diagonal coefficients
+are admissible when the whole law is stable. This does not apply a stiffness
+positivity rule to arbitrary off-diagonal blocks of coupled constitutive laws.
+
+`ElasticTensorTransformReceipt` retains the exact source matrix and descriptor,
+both frame identities, rotation and upstream material identity alongside the
+executable target-frame material. The material's identity binds those fields,
+density and every output coefficient under
+`org.frankensim.fs-solid.elastic-tensor-frame-transform.v1`. Rotation reuses the
+existing Mandel basis transform (equivalent to the four-index tensor law) and
+its deterministic triangle storage; source asymmetry is refused before that
+step. No missing coefficient, noisy-source symmetry projection or frame
+calibration is inferred. G0/G3 tests compare all three notations and both
+orders against a separate four-index rotation with a fully coupled synthetic
+tensor, check whole-law instability and frame/identity refusals, and retain
+the existing orthotropic tests. A G1 affine single-tet test compares actual
+nodal forces and strain energy against direct tensor contraction. This is
+software evidence, not measured crystal/wood validation. The receipt has no
+portable codec yet, and full tensor transport through material cards remains
+separate unfinished work.
+
 `TetThermalStrainState` and `assemble_thermal_load` add the matching generic
 small-strain thermomechanical load boundary. An upstream material law supplies
 the already-integrated, possibly anisotropic Mandel thermal strain between an
