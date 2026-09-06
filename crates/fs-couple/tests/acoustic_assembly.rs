@@ -1304,15 +1304,81 @@ fn g1_resolved_thermoelastic_material_reaches_both_assembly_plate_paths() {
 }
 
 #[test]
+fn g3_plate_density_changes_actual_force_to_pressure_response() {
+    // Two samples bypass block absorption; the first step begins with zero
+    // plate velocity and zero radiation-filter state. The fixed-fixed string
+    // supplies the same bridge force to both independent material specimens.
+    let mut bare = plucked(20.0, 0.006, 1.0e-5);
+    bare.sample_rate_hz = 128_000;
+    bare.duration_s = 2.0 / 128_000.0;
+    let direct = realize_assembly(&bare).unwrap().pressure_pa[0];
+    let mut panel = steel_panel();
+    panel.n_modes = 1;
+    let mut modal_pressure = Vec::new();
+    let mut frequencies = Vec::new();
+    for density_scale in [1.0, 4.0] {
+        panel.density_kg_m3 = 7800.0 * density_scale;
+        frequencies.push(fs_couple::thin_plate::certified_radiators(panel).unwrap()[0].omega);
+        let mut scene = bare.clone();
+        scene.plate = Some(panel);
+        modal_pressure.push(realize_assembly(&scene).unwrap().pressure_pa[0] - direct);
+    }
+    assert!(
+        modal_pressure[0].abs() > 1.0e-10,
+        "actual plate contribution required"
+    );
+    assert!((frequencies[1] / frequencies[0] - 0.5).abs() < 1.0e-8);
+    assert!(
+        (modal_pressure[1] / modal_pressure[0] - 0.25).abs() < 1.0e-8,
+        "fixed-force plate pressure must follow inverse density: {modal_pressure:?}"
+    );
+    eprintln!(
+        "G3 plate density x4: first pressure {modal_pressure:?} Pa; modal omega {frequencies:?} rad/s"
+    );
+}
+
+#[test]
 fn certified_plate_radiates_without_named_hertz() {
     let bare = plucked(80.0, 0.006, 0.003);
     let mut with = bare.clone();
     with.plate = Some(steel_panel());
     let a = realize_assembly(&bare).expect("bare");
     let b = realize_assembly(&with).expect("plate");
+    let plate_pressure: Vec<_> = b
+        .pressure_pa
+        .iter()
+        .zip(&a.pressure_pa)
+        .map(|(total, direct)| total - direct)
+        .collect();
+    // Signed fields can interfere destructively: adding a physical radiator
+    // need not raise the total peak. Require its actual pressure contribution.
     assert!(
-        peak_abs(&b.pressure_pa) > peak_abs(&a.pressure_pa),
-        "a certified plate must add observer pressure"
+        peak_abs(&plate_pressure) > 1.0e-6,
+        "a certified plate must contribute observer pressure"
+    );
+    let mut doubled_bare = bare.clone();
+    doubled_bare.pluck.as_mut().unwrap().height_m *= 2.0;
+    let mut doubled_with = doubled_bare.clone();
+    doubled_with.plate = with.plate;
+    let a2 = realize_assembly(&doubled_bare).expect("double pluck, bare");
+    let b2 = realize_assembly(&doubled_with).expect("double pluck, plate");
+    let relative_error = b2
+        .pressure_pa
+        .iter()
+        .zip(&a2.pressure_pa)
+        .zip(&plate_pressure)
+        .map(|((total, direct), plate)| (total - direct - 2.0 * plate).abs())
+        .fold(0.0_f64, f64::max)
+        / peak_abs(&plate_pressure);
+    assert!(
+        relative_error < 1.0e-11,
+        "linear plate pressure must scale with the applied excitation: {relative_error}"
+    );
+    eprintln!(
+        "G3 plate contribution peak {} Pa; total peak {} -> {} Pa; doubling error {relative_error}",
+        peak_abs(&plate_pressure),
+        peak_abs(&a.pressure_pa),
+        peak_abs(&b.pressure_pa)
     );
 }
 

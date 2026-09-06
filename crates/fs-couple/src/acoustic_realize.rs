@@ -575,7 +575,7 @@ fn plate_chain_radiation(
         let acc = (x1.get(2 * k + 1).copied().unwrap_or(0.0)
             - x0.get(2 * k + 1).copied().unwrap_or(0.0))
             / dt;
-        p += body.radiate(acc, gas.density, listener_m);
+        p += body.radiate_mass_normalized(acc, gas.density, listener_m);
     }
     p
 }
@@ -1461,7 +1461,7 @@ fn realize_dirac_join(
             let base = n_string;
             for (i, body) in plates.linear.iter().enumerate() {
                 let acc = (rec_x[base + 2 * i + 1] - x[base + 2 * i + 1]) / dt;
-                p += body.radiate(acc, gas.density, listener_m);
+                p += body.radiate_mass_normalized(acc, gas.density, listener_m);
             }
         }
         if let Some(vk) = plates.vk.as_ref() {
@@ -1726,10 +1726,14 @@ fn plate_modal_ports(
     let drives: Vec<f64> = plates
         .linear
         .iter()
-        .map(|b| 1.0 / b.mass_kg.sqrt().max(1.0e-18))
+        .map(|b| b.drive_participation / b.mass_kg.sqrt())
         .collect();
     let sys = if with_area_port {
-        let areas: Vec<f64> = plates.linear.iter().map(|b| b.area_m2).collect();
+        let areas: Vec<f64> = plates
+            .linear
+            .iter()
+            .map(|b| b.area_m2 / b.mass_kg.sqrt())
+            .collect();
         modal_bank_ports(&omegas, &zetas, &[&drives, &areas])
     } else {
         modal_bank(&omegas, &zetas, &drives)
@@ -2617,7 +2621,7 @@ fn realize_blown_ode(
         let mut p = rec.y[0];
         for (k, body) in plates.linear.iter().enumerate() {
             let acc = (rec.x[2 * k + 1] - x[2 * k + 1]) / dt;
-            p += body.radiate(acc, gas.density, listener_m);
+            p += body.radiate_mass_normalized(acc, gas.density, listener_m);
         }
         debug_assert!(rec.x.len() >= n_plate);
         out.push(p);
@@ -2748,7 +2752,7 @@ fn realize_reed_ode(
         if !plates.linear.is_empty() {
             for (k, body) in plates.linear.iter().enumerate() {
                 let acc = (rec.x[2 * k + 1] - x[2 * k + 1]) / dt;
-                p += body.radiate(acc, gas.density, listener_m);
+                p += body.radiate_mass_normalized(acc, gas.density, listener_m);
             }
         }
         if !p.is_finite() {
@@ -2976,6 +2980,47 @@ fn add_in_place(acc: &mut [f64], addend: &[f64]) {
 #[cfg(test)]
 mod string_observer_tests {
     use super::*;
+
+    #[test]
+    fn g1_plate_ports_and_observer_use_the_same_modal_mass() {
+        let gas = gas_state(AmbientGas::sea_level()).unwrap();
+        let mut base = crate::thin_plate::CompactBody::from_radiator(RadiatingPlate {
+            area_m2: 0.3,
+            mass_kg: 4.0,
+            frequency_hz: 100.0,
+            damping_ratio: 0.0,
+        })
+        .unwrap();
+        base.area_m2 = -0.12;
+        base.drive_participation = 0.25;
+        let (force, face_pressure, dt) = (2.0, 3.0, 1.0e-5);
+        let expected = gas.density * -0.12 / (2.0 * core::f64::consts::PI)
+            * (0.25 * force - 0.12 * face_pressure)
+            / 4.0
+            / (1.0 + (base.omega * dt / 2.0).powi(2));
+        for scale in [1.0, -4.0, 0.125] {
+            let mut body = base.clone();
+            body.mass_kg *= scale * scale;
+            body.area_m2 *= scale;
+            body.drive_participation *= scale;
+            let mut plates = PlateBank::default();
+            plates.linear.push(body);
+            let sys = plate_modal_ports(&plates, true).unwrap().unwrap();
+            let zero = vec![0.0; sys.state_dim()];
+            let rec = step(&sys, &zero, &[force, face_pressure], dt).unwrap();
+            let p = plate_chain_radiation(&plates, &rec.x, &zero, 2, &gas, 1.0, dt);
+            assert!(
+                (p / expected - 1.0).abs() < 1.0e-10,
+                "mass-normalized pressure {p} vs {expected}"
+            );
+            let physical_v = rec.x[1] / plates.linear[0].mass_kg.sqrt();
+            let output = sys.output(&rec.x);
+            assert!(
+                (output[0] - plates.linear[0].drive_participation * physical_v).abs() < 1.0e-14
+            );
+            assert!((output[1] - plates.linear[0].area_m2 * physical_v).abs() < 1.0e-14);
+        }
+    }
 
     #[test]
     fn g1_string_observer_held_static_load_is_silent() {

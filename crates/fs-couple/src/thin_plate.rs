@@ -497,7 +497,10 @@ impl PlateBank {
         for body in &mut self.linear {
             let f_cav = p_cav * body.area_m2;
             p += body.drive_and_radiate(
-                force_n * body.drive_participation + f_cav, dt, rho, listener_m,
+                force_n * body.drive_participation + f_cav,
+                dt,
+                rho,
+                listener_m,
             )?;
         }
         if let Some(vk) = &mut self.vk {
@@ -670,13 +673,23 @@ impl PlateProjection {
             let driven = (a.0 + b.0 + c.0) / 3.0 < drive_strip_width;
             for node in [i, j, k] {
                 nodal_area[node] += area / 3.0;
-                if driven { unit_force[node] += area / 3.0; }
+                if driven {
+                    unit_force[node] += area / 3.0;
+                }
             }
-            if driven { drive_area += area; }
+            if driven {
+                drive_area += area;
+            }
         }
-        for weight in &mut unit_force { *weight /= drive_area; }
+        for weight in &mut unit_force {
+            *weight /= drive_area;
+        }
         let area = nodal_area.iter().sum();
-        Self { nodal_area, unit_force, area }
+        Self {
+            nodal_area,
+            unit_force,
+            area,
+        }
     }
 
     fn mode(
@@ -702,13 +715,25 @@ impl PlateProjection {
                 drive += self.unit_force[node] * phi[r];
             }
         }
-        if !(mass > 0.0 && mass.is_finite() && area.is_finite() && drive.is_finite()
-            && self.area > 0.0 && self.area.is_finite()) {
+        if !(mass > 0.0
+            && mass.is_finite()
+            && area.is_finite()
+            && drive.is_finite()
+            && self.area > 0.0
+            && self.area.is_finite())
+        {
             return Err(refuse());
         }
         Ok(CompactBody {
-            area_m2: area, mass_kg: mass, drive_participation: drive, omega, zeta,
-            y: 0.0, v: 0.0, piston_area_m2: self.area, rad: None,
+            area_m2: area,
+            mass_kg: mass,
+            drive_participation: drive,
+            omega,
+            zeta,
+            y: 0.0,
+            v: 0.0,
+            piston_area_m2: self.area,
+            rad: None,
         })
     }
 }
@@ -923,6 +948,127 @@ fn map_plate(_err: PlateError) -> AcousticRealizeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn projection_fixture() -> (PlateMesh, fs_plate::PlateModel, PlateProjection) {
+        let mesh = PlateMesh::rectangle(2.0, 1.0, 2, 1);
+        let section = PlateSection::isotropic(70e9, 0.3, 0.01, 1000.0).unwrap();
+        let model = assemble(
+            &mesh,
+            &section,
+            &[],
+            &[],
+            &AssemblyOptions {
+                pretension: 0.0,
+                support: EdgeSupport::SimplySupported,
+            },
+        )
+        .unwrap();
+        let projection = PlateProjection::new(&mesh, 1.0);
+        (mesh, model, projection)
+    }
+
+    #[test]
+    fn g1_plate_projection_integrates_mass_area_and_unit_force_footprint() {
+        let (mesh, model, projection) = projection_fixture();
+        let mut phi = vec![0.0; model.free];
+        for (node, &(x, _)) in mesh.nodes.iter().enumerate() {
+            // Manufactured affine trace w=x, wx=1, wy=0, not an eigenmode.
+            phi[model.dof_map[3 * node].unwrap()] = x;
+            phi[model.dof_map[3 * node + 1].unwrap()] = 1.0;
+        }
+        let body = projection.mode(&model, &phi, 100.0, 0.0).unwrap();
+        // Translation uses the owner's lumped nodal mass: sum(w_i² A_i)=3.
+        // The constant x slope also carries the owner's rotary inertia.
+        let expected_mass = 1000.0 * 0.01 * 3.0 + 1000.0 * 0.01_f64.powi(3) / 12.0 * 2.0;
+        assert!((body.mass_kg / expected_mass - 1.0).abs() < 1.0e-14);
+        assert!((body.area_m2 - 2.0).abs() < 1.0e-14); // integral x over [0,2]×[0,1]
+        assert!((body.drive_participation - 0.5).abs() < 1.0e-14); // mean x on [0,1]×[0,1]
+        assert!((projection.unit_force.iter().sum::<f64>() - 1.0).abs() < 1.0e-14);
+        assert!(
+            projection
+                .mode(&model, &vec![0.0; model.free], 100.0, 0.0)
+                .is_err()
+        );
+        assert!(
+            projection
+                .mode(&model, &phi[..phi.len() - 1], 100.0, 0.0)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn g3_plate_projection_retains_monopole_cancellation() {
+        let (mesh, model, projection) = projection_fixture();
+        let mut phi = vec![0.0; model.free];
+        for (node, &(x, _)) in mesh.nodes.iter().enumerate() {
+            phi[model.dof_map[3 * node].unwrap()] = x - 1.0;
+        }
+        let mut body = projection.mode(&model, &phi, 100.0, 0.0).unwrap();
+        assert!(
+            body.area_m2.abs() < 1.0e-15,
+            "opposite lobes cancel, without an area floor"
+        );
+        assert!((body.drive_participation + 0.5).abs() < 1.0e-14);
+        let acc = body.drive(body.drive_participation, 1.0e-4).unwrap();
+        assert!(acc.abs() > 0.01, "this mode is mechanically excited");
+        assert!(body.radiate(acc, 1.2, 1.0).abs() < 1.0e-15);
+    }
+
+    #[test]
+    fn g3_plate_projection_sign_and_scale_preserve_pressure_energy_and_self_load() {
+        let (mesh, model, projection) = projection_fixture();
+        let mut phi = vec![0.0; model.free];
+        for (node, &(x, _)) in mesh.nodes.iter().enumerate() {
+            phi[model.dof_map[3 * node].unwrap()] = 1.0 - 1.5 * x;
+        }
+        let gas = GasState::try_new(
+            &fs_material::gas::GasSpec::dry_air_ussa1976(),
+            293.15,
+            101_325.0,
+        )
+        .unwrap();
+        let base = projection.mode(&model, &phi, 100.0, 0.01).unwrap();
+        assert!(
+            base.area_m2 < 0.0 && base.drive_participation > 0.0,
+            "signed transfer falsifier"
+        );
+        for loaded in [false, true] {
+            let mut histories = Vec::new();
+            for scale in [1.0, -4.0, 0.125] {
+                let scaled: Vec<_> = phi.iter().map(|v| scale * v).collect();
+                let mut body = projection.mode(&model, &scaled, 100.0, 0.01).unwrap();
+                if loaded {
+                    body.attach_piston_load(&gas, 48_000);
+                    assert!(body.rad.is_some());
+                }
+                let mut history = Vec::new();
+                for j in 0..256 {
+                    let force = (j as f64 * 0.03).cos();
+                    let acc = body
+                        .drive(force * body.drive_participation, 1.0 / 48_000.0)
+                        .unwrap();
+                    let energy =
+                        0.5 * body.mass_kg * (body.v.powi(2) + (body.omega * body.y).powi(2));
+                    history.push([
+                        body.radiate(acc, gas.density, 1.0),
+                        body.volume_velocity(),
+                        energy,
+                    ]);
+                }
+                histories.push(history);
+            }
+            for other in &histories[1..] {
+                for (a, b) in histories[0].iter().zip(other) {
+                    for k in 0..3 {
+                        assert!(
+                            (a[k] - b[k]).abs() <= 1.0e-10 * a[k].abs().max(1.0e-20),
+                            "loaded={loaded}, quantity={k}: {a:?} vs {b:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     fn thermal_plate() -> ThinPlate {
         ThinPlate {

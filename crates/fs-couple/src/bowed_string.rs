@@ -476,7 +476,7 @@ pub fn run_bowed(config: &BowedRunConfig) -> Result<BowedRunLog, BowedRunError> 
 
         if let Some((body, ambient_density_kg_m3)) = plate.as_mut() {
             let acc = body
-                .drive(bridge_force, dt)
+                .drive(bridge_force * body.drive_participation, dt)
                 .map_err(|error| BowedRunError::Radiation(error.to_string()))?;
             log.body_velocity_m_s.push(body.volume_velocity());
             log.radiated_pressure_pa.push(body.radiate(

@@ -587,6 +587,27 @@ clarinet is one filling of those objects.
   type. There is no one-pole `TravelingWaveLine` fallback on those
   paths. Unflanged-open Nyquist `ka > 1` is refused; a
   flanged mouth uses the Rayleigh piston and is not.
+- Linear plate projection: the eigenvector, its modal mass `phi^T M phi`,
+  signed radiating area `integral(phi dA)`, and signed bridge-force projection
+  remain in one basis. Surface integrals use triangle-area P1 nodal quadrature;
+  the declared drive footprint is uniform traction over the generated
+  rectangle's first cell strip, normalized to one unit of total force.
+  There is no mass inferred from drive amplitude, absolute-value radiation,
+  or artificial area floor for cancelling modes. Generalized modal force is
+  `b_drive F + A_mode p_face`. The pHS ports divide both coefficients by
+  `sqrt(modal_mass)`, and its observers convert acceleration back by the same
+  factor. Thus eigenvector sign/scale cannot change physical pressure or work.
+  This follows modal virtual work and the compact limit of the
+  [Rayleigh integral](https://euphonics.org/4-3-2-the-rayleigh-integral-and-the-baffled-piston/).
+  The optional diagonal piston self-load uses the physical panel area to set
+  its equivalent circular radius; input velocity is `A_mode q_dot/A_panel`
+  and generalized reaction is `-A_mode p_face`. Modal normalization cannot
+  change that geometry. The approximation omits mutual radiation impedances,
+  higher multipoles and higher-order DKT trace reconstruction; eigenvalue
+  certification does not certify radiation accuracy. G1/G3 check manufactured
+  quadrature/mass, zero-monopole cancellation, mode sign/scale invariance with
+  and without the actual fitted self-load, conjugate pHS ports, and density
+  scaling through the actual assembly pressure output.
 - Plate damping: a single authored viscous ratio is the two-point
   Rayleigh fit (`fs-material::visco`) through that ratio at ω₀ and
   4ω₀ so higher certified modes sit on the stiffness limb. Both linear and
