@@ -338,21 +338,21 @@ pub struct IsotropicPlateThermal {
 /// certified eigenpairs and radiates those. Music is not a special case.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ThinPlate {
-    /// Side length along material axis 1 [m].
+    /// Side length along the rectangle's local x axis [m].
     pub length_m: f64,
-    /// Side length along material axis 2 [m].
+    /// Side length along the rectangle's local y axis [m].
     pub width_m: f64,
     /// Thickness [m].
     pub thickness_m: f64,
     /// Density [kg/m³].
     pub density_kg_m3: f64,
-    /// Young's modulus along axis 1 [Pa].
+    /// Young's modulus along local x [Pa], a principal material axis.
     pub e1_pa: f64,
-    /// Young's modulus along axis 2 [Pa].
+    /// Young's modulus along local y [Pa], the other in-plane principal axis.
     pub e2_pa: f64,
-    /// Poisson ratio ν12.
+    /// Poisson ratio νxy in the rectangle's frame (transverse y strain under x load).
     pub nu12: f64,
-    /// In-plane shear modulus G12 [Pa].
+    /// In-plane shear modulus Gxy [Pa]. Off-axis normal/shear coupling is not represented.
     pub g12_pa: f64,
     /// Viscous modal damping ratio.
     pub damping_ratio: f64,

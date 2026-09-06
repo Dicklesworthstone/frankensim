@@ -32,8 +32,9 @@ use fs_exec::Cx;
 use fs_material::OrthotropicElastic;
 use fs_material::state_point::{
     IntegratedIsotropicThermalExpansion, IsotropicElasticStatePoint, IsotropicSolidStatePoint,
-    OrthotropicElasticStatePoint,
+    OrthotropicElasticStatePoint, ElasticTensorStatePoint,
 };
+pub use fs_material::state_point::{ElasticTensorBasis, ElasticTensorNotation, ElasticTensorOrder};
 use fs_solver::krylov::CgState;
 use fs_solver::op::{CsrOp, LinearOp};
 use fs_sparse::{Coo, Csr};
@@ -78,39 +79,6 @@ impl Default for TetAssemblyBudget {
 /// definite in the usual Euclidean sense, including after material-frame
 /// rotations.
 pub type MandelStiffness6 = [[f64; 6]; 6];
-
-/// Stress/strain vector convention for a supplied elastic matrix [Pa].
-/// Every matrix maps its declared strain vector to its declared stress vector.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ElasticTensorNotation {
-    /// Both stress and strain store physical off-diagonal tensor components.
-    /// Shear columns therefore include the factor two from tensor contraction.
-    Tensor,
-    /// Stress stores tensor shear; strain stores engineering shear `2 epsilon_ij`.
-    Engineering,
-    /// Both stress and strain store `sqrt(2)` times their tensor shear.
-    Mandel,
-}
-
-/// Ordering shared by the rows and columns of a supplied elastic matrix.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ElasticTensorOrder {
-    /// `[xx, yy, zz, xy, yz, zx]`, the existing operator order.
-    XxYyZzXyYzZx,
-    /// `[xx, yy, zz, yz, zx, xy]`, a common engineering table order.
-    XxYyZzYzZxXy,
-}
-
-/// Explicit source basis of a full small-strain elastic tensor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ElasticTensorBasis {
-    /// Stress/strain shear scaling; never inferred from matrix symmetry.
-    pub notation: ElasticTensorNotation,
-    /// Component ordering in the supplied matrix.
-    pub order: ElasticTensorOrder,
-    /// Nonzero identity of the source coordinate frame.
-    pub frame: ContentHash,
-}
 
 /// Retained numerical transform and its executable, admitted material.
 ///
@@ -302,6 +270,22 @@ impl TetElasticMaterial {
             source_material_identity,
             material,
         })
+    }
+
+    /// Admit a complete material-card tensor and rotate it into the solver frame.
+    /// The upstream bundle identity binds all selected coefficient receipts,
+    /// density and the exact physical query point. Numerical admission checks
+    /// the whole law; component uncertainty is retained upstream, not promoted
+    /// to a certified rotated uncertainty bound.
+    pub fn from_resolved_elastic_tensor(
+        state: &ElasticTensorStatePoint,
+        target_frame: ContentHash,
+        source_to_target: [[f64; 3]; 3],
+    ) -> Result<ElasticTensorTransformReceipt, TetElasticError> {
+        Self::try_new_oriented_tensor(
+            state.density_kg_m3(), *state.stiffness_pa(), state.basis(),
+            target_frame, source_to_target, state.resolved().identity(),
+        )
     }
 
     /// Construct an oriented orthotropic state.

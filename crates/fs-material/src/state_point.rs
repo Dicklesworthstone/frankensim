@@ -21,6 +21,9 @@ use fs_qty::{Density, Dims, Pressure, QuantitySpec};
 
 use crate::elastic::OrthotropicElastic;
 
+pub use fs_matdb::{ElasticTensorBasis, ElasticTensorComponent, ElasticTensorNotation,
+    ElasticTensorOrder, ElasticTensorSymmetry};
+
 /// Identity domain for a complete resolved material state-point bundle.
 pub const MATERIAL_STATE_POINT_IDENTITY_DOMAIN: &str = "org.frankensim.fs-material.state-point.v1";
 /// Identity domain for a complete resolved ordered-interface property bundle.
@@ -176,6 +179,7 @@ pub struct ScalarPropertyRequirement {
     name: String,
     quantity: QuantitySpec,
     hardness_test: Option<Box<fs_matdb::HardnessTestContext>>,
+    elastic_component: Option<ElasticTensorComponent>,
     admissibility: ScalarAdmissibility,
 }
 
@@ -214,6 +218,7 @@ impl ScalarPropertyRequirement {
             name,
             quantity,
             hardness_test: None,
+            elastic_component: None,
             admissibility,
         })
     }
@@ -226,6 +231,7 @@ impl ScalarPropertyRequirement {
     ) -> Result<Self, MaterialStatePointError> {
         let mut requirement = Self::try_with_quantity(key.name(), key.quantity(), admissibility)?;
         requirement.hardness_test = key.hardness_test().cloned().map(Box::new);
+        requirement.elastic_component = key.elastic_component();
         Ok(requirement)
     }
 
@@ -233,6 +239,12 @@ impl ScalarPropertyRequirement {
     #[must_use]
     pub fn hardness_test(&self) -> Option<&fs_matdb::HardnessTestContext> {
         self.hardness_test.as_deref()
+    }
+
+    /// Exact source tensor coordinates required by the consumer.
+    #[must_use]
+    pub const fn elastic_component(&self) -> Option<ElasticTensorComponent> {
+        self.elastic_component
     }
 
     /// Exact property key queried from the material card.
@@ -548,6 +560,11 @@ fn resolve_scalar_property_set(
                     property: requirement.name.clone(),
                     source,
                 }
+            })?;
+        }
+        if let Some(component) = requirement.elastic_component() {
+            key = key.with_elastic_component(component).map_err(|source| MaterialStatePointError::Query {
+                property: requirement.name.clone(), source,
             })?;
         }
         let answer = match selection {
@@ -1088,6 +1105,90 @@ pub fn resolve_isotropic_elastic_state_point(
         young_modulus_pa: value(YOUNG_MODULUS_PROPERTY),
         poisson_ratio: value(POISSON_RATIO_PROPERTY),
         resolved,
+    })
+}
+
+/// Complete source-frame elastic matrix resolved from one immutable material
+/// card and one physical query point. Individual usage receipts retain their
+/// uncertainty; this nominal matrix is not a joint uncertainty propagation or
+/// stability certificate. The solid operator must admit the complete law.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ElasticTensorStatePoint {
+    resolved: ResolvedMaterialStatePoint,
+    density_kg_m3: f64,
+    stiffness_pa: [[f64; 6]; 6],
+    descriptor: ElasticTensorComponent,
+}
+
+impl ElasticTensorStatePoint {
+    /// Complete density/coefficient evidence, including all 37 usage receipts.
+    #[must_use]
+    pub const fn resolved(&self) -> &ResolvedMaterialStatePoint { &self.resolved }
+
+    /// Density at the queried point [kg/m3].
+    #[must_use]
+    pub const fn density_kg_m3(&self) -> f64 { self.density_kg_m3 }
+
+    /// Matrix in the declared source order and shear convention [Pa].
+    #[must_use]
+    pub const fn stiffness_pa(&self) -> &[[f64; 6]; 6] { &self.stiffness_pa }
+
+    /// Basis shared by all selected coefficients.
+    #[must_use]
+    pub const fn basis(&self) -> ElasticTensorBasis { self.descriptor.basis() }
+
+    /// Source-declared complete tensor identity shared by all coefficients.
+    #[must_use]
+    pub const fn source_tensor_identity(&self) -> ContentHash { self.descriptor.source_tensor() }
+
+    /// Declared symmetry class; numerical admission remains the consumer's job.
+    #[must_use]
+    pub const fn symmetry(&self) -> ElasticTensorSymmetry { self.descriptor.symmetry() }
+}
+
+/// Resolve density and all 36 explicitly addressed elastic coefficients.
+/// Requirements must share one basis, frame, symmetry and source tensor id.
+/// Zero coefficients are required data; neither triangle nor missing entries
+/// are inferred. Every scalar query rechecks its full physical support domain.
+pub fn resolve_elastic_tensor_state_point(
+    card: &MaterialCard,
+    point: &QueryPoint,
+    components: &[[PropertyKey; 6]; 6],
+    selection: MaterialPropertySelection,
+) -> Result<ElasticTensorStatePoint, MaterialStatePointError> {
+    let descriptor = components[0][0].elastic_component().ok_or_else(|| MaterialStatePointError::InvalidRequirement {
+        property: components[0][0].name().to_owned(),
+        reason: "every elastic coefficient requires explicit tensor coordinates",
+    })?;
+    let mut requirements = Vec::with_capacity(37);
+    requirements.push(ScalarPropertyRequirement::try_new(
+        DENSITY_PROPERTY, Density::DIMS, ScalarAdmissibility::StrictlyPositive,
+    )?);
+    for (row, keys) in components.iter().enumerate() {
+        for (column, key) in keys.iter().enumerate() {
+            if !key.elastic_component().is_some_and(|component| {
+                component.indices() == (row, column)
+                    && component.basis() == descriptor.basis()
+                    && component.symmetry() == descriptor.symmetry()
+                    && component.source_tensor() == descriptor.source_tensor()
+            }) {
+                return Err(MaterialStatePointError::InvalidRequirement {
+                    property: key.name().to_owned(),
+                    reason: "elastic coefficients must address one complete tensor in one source basis",
+                });
+            }
+            requirements.push(ScalarPropertyRequirement::try_with_key(key, ScalarAdmissibility::Finite)?);
+        }
+    }
+    let resolved = resolve_material_state_point(card, point, &requirements, selection)?;
+    let stiffness_pa = core::array::from_fn(|row| core::array::from_fn(|column| {
+        resolved.property(components[row][column].name())
+            .expect("all elastic coefficient requirements were resolved").value_si()
+    }));
+    Ok(ElasticTensorStatePoint {
+        density_kg_m3: resolved.property(DENSITY_PROPERTY)
+            .expect("density requirement was resolved").value_si(),
+        resolved, stiffness_pa, descriptor,
     })
 }
 
