@@ -33,7 +33,8 @@ use fs_material::OrthotropicElastic;
 use fs_material::state_point::{
     CorrelationUnknownReason, ElasticTensorStatePoint, IntegratedIsotropicThermalExpansion,
     IsotropicElasticStatePoint, IsotropicSolidStatePoint, JointCorrelation,
-    JointStrainTensorStatePoint, OrthotropicElasticStatePoint, StrainTensorStatePoint,
+    JointStrainTensorStatePoint, JointStressTensorStatePoint, OrthotropicElasticStatePoint,
+    StrainTensorStatePoint,
 };
 pub use fs_material::state_point::{ElasticTensorBasis, ElasticTensorNotation, ElasticTensorOrder};
 pub use fs_material::tensor::{
@@ -1346,6 +1347,204 @@ impl StressTensorTransformReceipt {
         &self.stress_pa
     }
     /// Identity binding the source element, transform and output stress.
+    #[must_use]
+    pub const fn identity(&self) -> ContentHash {
+        self.identity
+    }
+}
+
+/// Source stress covariance expressed in target Mandel coordinates [Pa^2].
+/// Rotation is fixed; this is not a confidence band or material-domain bound.
+#[derive(Debug, Clone, PartialEq)]
+pub enum StressTensorUncertainty {
+    /// Full covariance, including off-diagonal correlations.
+    Covariance {
+        /// Pa squared, in canonical target Mandel order.
+        stress_mandel_pa2: [[f64; 6]; 6],
+    },
+    /// Source correlation is unavailable; it is not replaced by independence.
+    Unknown {
+        /// Exact missing-correlation classification retained from the source.
+        reason: CorrelationUnknownReason,
+    },
+}
+
+/// Source-backed nominal stress and joint uncertainty in one target frame.
+/// This transforms source data, not the covariance of a displacement solve.
+#[derive(Debug, Clone, PartialEq)]
+pub struct JointStressTensorTransformReceipt {
+    source_joint_identity: ContentHash,
+    source_basis: StressTensorBasis,
+    source_stress_pa: [f64; 6],
+    target_frame: ContentHash,
+    source_to_target: [[f64; 3]; 3],
+    stress_mandel_pa: [f64; 6],
+    uncertainty: StressTensorUncertainty,
+    identity: ContentHash,
+}
+
+impl JointStressTensorTransformReceipt {
+    /// Apply sigma' = Q sigma Q^T and Sigma' = A Sigma A^T to the same
+    /// source state. A includes stress-specific shear scaling and ordering.
+    /// Tensor and engineering stress both store physical shear, unlike strain.
+    /// The work is a bounded 6x6 tile; no covariance or frame authority is inferred.
+    pub fn try_from_resolved(
+        stress: &JointStressTensorStatePoint,
+        target_frame: ContentHash,
+        source_to_target: [[f64; 3]; 3],
+    ) -> Result<Self, TetElasticError> {
+        if target_frame == ContentHash([0; 32]) {
+            return Err(TetElasticError::InvalidStressObservation {
+                what: "target stress frame must not be zero",
+            });
+        }
+        validate_rotation(source_to_target)?;
+        let source_basis = stress.nominal().basis();
+        let identity_rotation =
+            source_to_target == [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        if source_basis.frame == target_frame && !identity_rotation {
+            return Err(TetElasticError::InvalidStressObservation {
+                what: "a stress frame mapped to itself requires identity rotation",
+            });
+        }
+        let source_stress_pa = *stress.nominal().stress_pa();
+        let order = match source_basis.order {
+            ElasticTensorOrder::XxYyZzXyYzZx => [0, 1, 2, 3, 4, 5],
+            ElasticTensorOrder::XxYyZzYzZxXy => [0, 1, 2, 5, 3, 4],
+        };
+        let shear = match source_basis.notation {
+            StressTensorNotation::Tensor | StressTensorNotation::Engineering => {
+                core::f64::consts::SQRT_2
+            }
+            StressTensorNotation::Mandel => 1.0,
+        };
+        let normalized: [f64; 6] =
+            core::array::from_fn(|i| source_stress_pa[order[i]] * if i < 3 { 1.0 } else { shear });
+        if normalized.iter().any(|v| !v.is_finite()) {
+            return Err(TetElasticError::InvalidStressObservation {
+                what: "stress shear normalization is nonfinite",
+            });
+        }
+        let rotation = if identity_rotation {
+            core::array::from_fn(|i| core::array::from_fn(|j| if i == j { 1.0 } else { 0.0 }))
+        } else {
+            mandel_rotation(source_to_target)
+        };
+        let stress_mandel_pa = if identity_rotation {
+            normalized
+        } else {
+            core::array::from_fn(|i| {
+                (0..6).fold(0.0, |sum, j| rotation[i][j].mul_add(normalized[j], sum))
+            })
+        };
+        if stress_mandel_pa.iter().any(|v| !v.is_finite())
+            || (source_stress_pa.iter().any(|v| *v != 0.0)
+                && stress_mandel_pa.iter().all(|v| *v == 0.0))
+        {
+            return Err(TetElasticError::InvalidStressObservation {
+                what: "stress rotation is nonfinite or loses the complete nonzero stress",
+            });
+        }
+        let uncertainty = match &stress.joint_receipt().correlation {
+            JointCorrelation::Unknown { reason } => {
+                StressTensorUncertainty::Unknown { reason: *reason }
+            }
+            JointCorrelation::Covariance { covariance, .. } => {
+                let source = core::array::from_fn(|i| {
+                    core::array::from_fn(|j| {
+                        let hi = i.max(j);
+                        covariance[hi * (hi + 1) / 2 + i.min(j)]
+                    })
+                });
+                let mut map = [[0.0; 6]; 6];
+                for row in 0..6 {
+                    for column in 0..6 {
+                        map[row][order[column]] =
+                            rotation[row][column] * if column < 3 { 1.0 } else { shear };
+                    }
+                }
+                let stress_mandel_pa2 =
+                    transform_covariance6(&map, &source).map_err(|error| match error {
+                        TetElasticError::InvalidThermalStrain { what } => {
+                            TetElasticError::InvalidStressObservation { what }
+                        }
+                        other => other,
+                    })?;
+                StressTensorUncertainty::Covariance { stress_mandel_pa2 }
+            }
+        };
+        let source_joint_identity = stress.identity();
+        let mut identity =
+            DomainHasher::new("org.frankensim.fs-solid.joint-stress-frame-transform.v1");
+        identity.update(source_joint_identity.as_bytes());
+        identity.update(target_frame.as_bytes());
+        for value in source_to_target
+            .iter()
+            .flatten()
+            .chain(stress_mandel_pa.iter())
+        {
+            identity.update(&value.to_bits().to_le_bytes());
+        }
+        match &uncertainty {
+            StressTensorUncertainty::Unknown { reason } => {
+                identity.update(&[0]);
+                identity.update(reason.tag().as_bytes());
+            }
+            StressTensorUncertainty::Covariance { stress_mandel_pa2 } => {
+                identity.update(&[1]);
+                for value in stress_mandel_pa2.iter().flatten() {
+                    identity.update(&value.to_bits().to_le_bytes());
+                }
+            }
+        }
+        Ok(Self {
+            source_joint_identity,
+            source_basis,
+            source_stress_pa,
+            target_frame,
+            source_to_target,
+            stress_mandel_pa,
+            uncertainty,
+            identity: identity.finalize(),
+        })
+    }
+
+    /// Bound identity of nominal and joint source evidence.
+    #[must_use]
+    pub const fn source_joint_identity(&self) -> ContentHash {
+        self.source_joint_identity
+    }
+    /// Original stress convention, order and frame.
+    #[must_use]
+    pub const fn source_basis(&self) -> StressTensorBasis {
+        self.source_basis
+    }
+    /// Nominal pascal values before normalization and rotation.
+    #[must_use]
+    pub const fn source_stress_pa(&self) -> &[f64; 6] {
+        &self.source_stress_pa
+    }
+    /// Declared target frame; output always uses canonical Mandel order.
+    #[must_use]
+    pub const fn target_frame(&self) -> ContentHash {
+        self.target_frame
+    }
+    /// Fixed proper rotation, with source axes as columns in the target frame.
+    #[must_use]
+    pub const fn source_to_target(&self) -> &[[f64; 3]; 3] {
+        &self.source_to_target
+    }
+    /// Nominal stress in target Mandel coordinates [Pa].
+    #[must_use]
+    pub const fn stress_mandel_pa(&self) -> &[f64; 6] {
+        &self.stress_mandel_pa
+    }
+    /// Transformed full covariance, or unchanged source unknown reason.
+    #[must_use]
+    pub const fn uncertainty(&self) -> &StressTensorUncertainty {
+        &self.uncertainty
+    }
+    /// Identity binding the source, rotation, nominal output and uncertainty.
     #[must_use]
     pub const fn identity(&self) -> ContentHash {
         self.identity
@@ -2952,6 +3151,430 @@ mod tests {
             NormalizedMaterialCardPack::from_bytes_verified(pack.content_hash(), &pack.to_bytes())
                 .unwrap();
         (portable, keys)
+    }
+
+    fn portable_stress_pack(
+        basis: StressTensorBasis,
+        stress: [f64; 6],
+        uncertainty: fs_matdb::UncertaintyModel,
+        covariance: Option<([[f64; 6]; 6], usize)>,
+    ) -> (
+        fs_matdb::NormalizedMaterialCardPack,
+        [fs_matdb::PropertyKey; 6],
+    ) {
+        use fs_matdb::{
+            ClaimSet, InterpolationPolicy, MaterialStateId, NormalizedMaterialCardPack,
+            NormalizedPack, ObservationDataset, PropertyClaim, PropertyKey, PropertyValue,
+            Provenance, StressTensorComponent,
+        };
+        let mut claims = ClaimSet::new();
+        let provenance = Provenance {
+            source: "synthetic correlated stress".into(),
+            license: "synthetic test data".into(),
+            artifact: Some(ContentHash([5; 32])),
+        };
+        let observation = claims
+            .register_observation(ObservationDataset {
+                specimen: "synthetic".into(),
+                method: "finite stress ensemble".into(),
+                artifact: ContentHash([5; 32]),
+                caveats: "no empirical calibration claim".into(),
+                provenance: provenance.clone(),
+            })
+            .unwrap();
+        let mut claim_indices = Vec::new();
+        let keys = core::array::from_fn(|index| {
+            let key = PropertyKey::new("stress", fs_qty::Pressure::DIMS)
+                .with_stress_component(
+                    StressTensorComponent::new(basis, ContentHash([4; 32]), index as u8).unwrap(),
+                )
+                .unwrap();
+            let id = claims
+                .insert_claim(PropertyClaim {
+                    key: key.clone(),
+                    value: PropertyValue::Scalar {
+                        value: stress[index],
+                        dims: fs_qty::Pressure::DIMS,
+                    },
+                    validity: fs_evidence::ValidityDomain::unconstrained()
+                        .with("T", 400.0, 400.0)
+                        .with("Tref", 293.15, 293.15),
+                    uncertainty: uncertainty.clone(),
+                    interpolation: InterpolationPolicy::TabulatedOnly,
+                    observations: vec![observation],
+                    provenance: provenance.clone(),
+                })
+                .unwrap();
+            claim_indices.push((id, index));
+            key
+        });
+        let mut blocks = Vec::new();
+        if let Some((covariance, count)) = covariance {
+            claim_indices.truncate(count);
+            claim_indices.sort_by_key(|(id, _)| *id);
+            let mut packed = Vec::new();
+            for (row, (_, i)) in claim_indices.iter().enumerate() {
+                for (_, j) in &claim_indices[..=row] {
+                    packed.push(covariance[*i][*j]);
+                }
+            }
+            blocks.push(fs_matdb::JointStatistics::new(
+                observation,
+                "synthetic correlated stresses",
+                claim_indices
+                    .iter()
+                    .map(|(id, _)| fs_matdb::StatisticMember::scalar(*id))
+                    .collect(),
+                packed,
+                None,
+            ));
+        }
+        let pack = NormalizedMaterialCardPack::new(
+            MaterialStateId {
+                chemistry: "synthetic".into(),
+                phase: "solid".into(),
+                process: "stress ensemble".into(),
+                revision: 0,
+            },
+            NormalizedPack::new(
+                "synthetic-stress",
+                "fixture-v7",
+                ContentHash([5; 32]),
+                "synthetic redistribution permitted",
+                claims,
+                blocks,
+                Vec::new(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        (
+            NormalizedMaterialCardPack::from_bytes_verified(pack.content_hash(), &pack.to_bytes())
+                .unwrap(),
+            keys,
+        )
+    }
+
+    #[test]
+    fn g3_joint_stress_rotation_matches_correlated_thermal_response_ensemble() {
+        use fs_matdb::{QueryPoint, SelectionPolicy, UncertaintyModel};
+        use fs_material::state_point::resolve_joint_stress_tensor_state_point;
+        let q = fs_material::tensor::rotation([2.0 / 3.0, 2.0 / 3.0, 1.0 / 3.0], 0.73);
+        let mean = [10.0, -4.0, 2.0, 3.0, -1.0, 2.0];
+        let factors = [
+            [1.0, 0.5, -0.25, 0.125, 0.0, 0.25],
+            [-0.25, 0.25, 1.0, -0.25, 0.5, 0.0],
+            [0.0, 0.0, 0.5, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.5, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0, 0.5, 0.0],
+            [0.0, 0.0, 0.0, 0.0, 0.0, 0.5],
+        ];
+        let scale = 0.25;
+        let nodes = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ];
+        let tets = [[0, 1, 2, 3]];
+        let mat = material(1200.0, 6.0);
+        let fixed: Vec<_> = (0..12).collect();
+        let problem = reference_problem(&nodes, &tets, &mat, &fixed);
+        let frame = ContentHash([3; 32]);
+        let recover = |physical: [f64; 6]| {
+            // Independent isotropic compliance, E=1200 Pa, nu=1/4.
+            // With every DOF fixed, free strain is minus elastic strain.
+            let free = core::array::from_fn(|i| {
+                if i < 3 {
+                    -(physical[i] - 0.25 * (physical[(i + 1) % 3] + physical[(i + 2) % 3])) / 1200.0
+                } else {
+                    -physical[i] * core::f64::consts::SQRT_2 / 960.0
+                }
+            });
+            let thermal = TetThermalStrainState::try_new(
+                400.0,
+                293.15,
+                free,
+                mat.material_state_identity,
+                ContentHash([8; 32]),
+                0.05,
+            )
+            .unwrap();
+            let field = TetThermalStrainField::Uniform(&thermal);
+            let solution = with_cx(|cx| {
+                problem.solve_thermal_displacement(field, TetStaticSolveConfig::default(), cx)
+            })
+            .unwrap();
+            assert_eq!(solution.displacement_m(), &[[0.0; 3]; 4]);
+            with_cx(|cx| problem.recover_thermal_stress(&solution, field, frame, 0.05, cx)).unwrap()
+        };
+        let nominal = recover(fs_material::tensor::rotate(&mean, &q));
+        // Twelve equally likely realizations with full-rank covariance L L^T.
+        // Each is rotated as a full tensor and recovered through the real solid
+        // operator; the covariance transform under test supplies no oracle values.
+        let mut atoms = Vec::new();
+        for factor in factors {
+            for sign in [-1.0, 1.0] {
+                let physical =
+                    core::array::from_fn(|i| mean[i] + sign * 6.0_f64.sqrt() * scale * factor[i]);
+                let report = recover(fs_material::tensor::rotate(&physical, &q));
+                atoms.push(*report.elements()[0].stress_mandel_pa());
+            }
+        }
+        let atom_mean: [f64; 6] =
+            core::array::from_fn(|i| atoms.iter().map(|a| a[i]).sum::<f64>() / 12.0);
+        let expected: [[f64; 6]; 6] = core::array::from_fn(|i| {
+            core::array::from_fn(|j| {
+                atoms
+                    .iter()
+                    .map(|a| (a[i] - atom_mean[i]) * (a[j] - atom_mean[j]))
+                    .sum::<f64>()
+                    / 12.0
+            })
+        });
+        let point = QueryPoint::new()
+            .with("T", 400.0)
+            .unwrap()
+            .with("Tref", 293.15)
+            .unwrap();
+        let mut identities = BTreeSet::new();
+        for notation in [
+            StressTensorNotation::Tensor,
+            StressTensorNotation::Engineering,
+            StressTensorNotation::Mandel,
+        ] {
+            for order in [
+                ElasticTensorOrder::XxYyZzXyYzZx,
+                ElasticTensorOrder::XxYyZzYzZxXy,
+            ] {
+                let indices = if order == ElasticTensorOrder::XxYyZzXyYzZx {
+                    [0, 1, 2, 3, 4, 5]
+                } else {
+                    [0, 1, 2, 4, 5, 3]
+                };
+                let multipliers: [f64; 6] = core::array::from_fn(|i| {
+                    if i >= 3 && notation == StressTensorNotation::Mandel {
+                        core::f64::consts::SQRT_2
+                    } else {
+                        1.0
+                    }
+                });
+                let input = core::array::from_fn(|i| mean[indices[i]] * multipliers[i]);
+                let covariance = core::array::from_fn(|i| {
+                    core::array::from_fn(|j| {
+                        factors
+                            .iter()
+                            .map(|l| l[indices[i]] * l[indices[j]])
+                            .sum::<f64>()
+                            * scale
+                            * scale
+                            * multipliers[i]
+                            * multipliers[j]
+                    })
+                });
+                let basis = StressTensorBasis {
+                    notation,
+                    order,
+                    frame: ContentHash([1; 32]),
+                };
+                let (pack, keys) = portable_stress_pack(
+                    basis,
+                    input,
+                    UncertaintyModel::HalfWidth {
+                        half_width: 2.0,
+                        confidence: 0.95,
+                    },
+                    Some((covariance, 6)),
+                );
+                for policy in [
+                    SelectionPolicy::SingleClaimOnly,
+                    SelectionPolicy::PreferObservationBacked,
+                ] {
+                    let state =
+                        resolve_joint_stress_tensor_state_point(&pack, &point, &keys, policy)
+                            .unwrap();
+                    pack.claims_pack()
+                        .verify_joint_receipt(state.joint_receipt())
+                        .unwrap();
+                    let result =
+                        JointStressTensorTransformReceipt::try_from_resolved(&state, frame, q)
+                            .unwrap();
+                    assert_eq!(
+                        result,
+                        JointStressTensorTransformReceipt::try_from_resolved(&state, frame, q)
+                            .unwrap()
+                    );
+                    assert!(identities.insert(result.identity()));
+                    assert_eq!(result.source_joint_identity(), state.identity());
+                    assert_eq!(result.source_basis(), basis);
+                    assert_eq!(result.source_stress_pa(), &input);
+                    assert_eq!(result.target_frame(), frame);
+                    assert_eq!(result.source_to_target(), &q);
+                    let StressTensorUncertainty::Covariance { stress_mandel_pa2 } =
+                        result.uncertainty()
+                    else {
+                        panic!("full covariance must survive");
+                    };
+                    for i in 0..6 {
+                        assert!(
+                            (result.stress_mandel_pa()[i]
+                                - nominal.elements()[0].stress_mandel_pa()[i])
+                                .abs()
+                                < 1e-11
+                        );
+                        for j in 0..6 {
+                            assert!(
+                                (stress_mandel_pa2[i][j] - expected[i][j]).abs() < 1e-12,
+                                "{notation:?}/{order:?} ({i},{j})"
+                            );
+                            assert_eq!(
+                                stress_mandel_pa2[i][j].to_bits(),
+                                stress_mandel_pa2[j][i].to_bits()
+                            );
+                        }
+                    }
+                    let mut tampered = state.joint_receipt().clone();
+                    if let JointCorrelation::Covariance { covariance, .. } =
+                        &mut tampered.correlation
+                    {
+                        covariance[0] *= 2.0;
+                    }
+                    assert!(pack.claims_pack().verify_joint_receipt(&tampered).is_err());
+                }
+            }
+        }
+        assert_eq!(identities.len(), 12);
+    }
+
+    #[test]
+    fn g0_joint_stress_retains_unknown_reasons_and_refuses_frames_and_numeric_loss() {
+        use fs_matdb::{QueryPoint, SelectionPolicy, UncertaintyModel};
+        use fs_material::state_point::resolve_joint_stress_tensor_state_point;
+        let basis = StressTensorBasis {
+            notation: StressTensorNotation::Mandel,
+            order: ElasticTensorOrder::XxYyZzXyYzZx,
+            frame: ContentHash([1; 32]),
+        };
+        let q = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        let point = QueryPoint::new()
+            .with("T", 400.0)
+            .unwrap()
+            .with("Tref", 293.15)
+            .unwrap();
+        let covariance =
+            core::array::from_fn(|i| core::array::from_fn(|j| if i == j { 0.25 } else { 0.0 }));
+        let stated = UncertaintyModel::HalfWidth {
+            half_width: 2.0,
+            confidence: 0.95,
+        };
+        for (uncertainty, block, reason) in [
+            (stated.clone(), None, CorrelationUnknownReason::NoBlock),
+            (
+                stated,
+                Some((covariance, 5)),
+                CorrelationUnknownReason::PartialMembership,
+            ),
+            (
+                UncertaintyModel::Unstated,
+                Some((covariance, 6)),
+                CorrelationUnknownReason::UnstatedMarginal,
+            ),
+        ] {
+            let (pack, keys) =
+                portable_stress_pack(basis, [1.0, -2.0, 3.0, -0.0, 0.0, 0.0], uncertainty, block);
+            let state = resolve_joint_stress_tensor_state_point(
+                &pack,
+                &point,
+                &keys,
+                SelectionPolicy::SingleClaimOnly,
+            )
+            .unwrap();
+            let result =
+                JointStressTensorTransformReceipt::try_from_resolved(&state, basis.frame, q)
+                    .unwrap();
+            assert_eq!(
+                result.uncertainty(),
+                &StressTensorUncertainty::Unknown { reason }
+            );
+            for i in 0..6 {
+                assert_eq!(
+                    result.stress_mandel_pa()[i].to_bits(),
+                    state.nominal().stress_pa()[i].to_bits()
+                );
+            }
+            let other = JointStressTensorTransformReceipt::try_from_resolved(
+                &state,
+                ContentHash([9; 32]),
+                q,
+            )
+            .unwrap();
+            assert_ne!(other.identity(), result.identity());
+            assert_eq!(other.stress_mandel_pa(), result.stress_mandel_pa());
+            for (target, rotation) in [
+                (ContentHash([0; 32]), q),
+                (ContentHash([9; 32]), [[0.0; 3]; 3]),
+                (
+                    ContentHash([9; 32]),
+                    [[-1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+                ),
+                (
+                    basis.frame,
+                    [[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]],
+                ),
+            ] {
+                assert!(
+                    JointStressTensorTransformReceipt::try_from_resolved(&state, target, rotation)
+                        .is_err()
+                );
+            }
+        }
+        let (pack, keys) = portable_stress_pack(
+            StressTensorBasis {
+                notation: StressTensorNotation::Tensor,
+                ..basis
+            },
+            [0.0, 0.0, 0.0, f64::MAX, 0.0, 0.0],
+            UncertaintyModel::Unstated,
+            None,
+        );
+        let state = resolve_joint_stress_tensor_state_point(
+            &pack,
+            &point,
+            &keys,
+            SelectionPolicy::SingleClaimOnly,
+        )
+        .unwrap();
+        assert!(matches!(
+            JointStressTensorTransformReceipt::try_from_resolved(&state, ContentHash([9; 32]), q),
+            Err(TetElasticError::InvalidStressObservation { .. })
+        ));
+        // A normal stress spread equally over three axes has every Mandel
+        // coefficient below 1/2, so the minimum subnormal would vanish entirely.
+        let h = 1.0 / 3.0_f64.sqrt();
+        let a = core::f64::consts::FRAC_1_SQRT_2;
+        let b = 1.0 / 6.0_f64.sqrt();
+        let spread = [[h, a, b], [h, -a, b], [h, 0.0, -2.0 * b]];
+        let (pack, keys) = portable_stress_pack(
+            basis,
+            [f64::from_bits(1), 0.0, 0.0, 0.0, 0.0, 0.0],
+            UncertaintyModel::Unstated,
+            None,
+        );
+        let state = resolve_joint_stress_tensor_state_point(
+            &pack,
+            &point,
+            &keys,
+            SelectionPolicy::SingleClaimOnly,
+        )
+        .unwrap();
+        assert!(matches!(
+            JointStressTensorTransformReceipt::try_from_resolved(
+                &state,
+                ContentHash([9; 32]),
+                spread
+            ),
+            Err(TetElasticError::InvalidStressObservation { .. })
+        ));
     }
 
     fn portable_strain_state(basis: StrainTensorBasis, strain: [f64; 6]) -> StrainTensorStatePoint {
