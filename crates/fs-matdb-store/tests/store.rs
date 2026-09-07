@@ -13,7 +13,10 @@ use fs_matdb::{
     SpeciesAssociation, SpeciesNormalizationReceipt, SpeciesNormalizationTarget, SurfaceSpec,
     SystemContext, UncertaintyModel,
 };
-use fs_matdb_store::{CatalogPack, MaterialStore, PackKind, STORE_SCHEMA_VERSION, StoreError};
+use fs_matdb_store::{
+    CatalogPack, DiscoveryDomain, DiscoveryGap, DiscoveryRequest, DiscoveryStatus, DiscoveryTarget,
+    MaterialStore, PackKind, STORE_SCHEMA_VERSION, StoreError,
+};
 use fs_qty::Dims;
 use fsqlite::{AsyncConnection, SqliteValue};
 
@@ -145,6 +148,364 @@ fn discovery_surfaces_answer_the_owner_questions() {
         Err(StoreError::UnknownPack { .. })
     ));
     println!("{{\"suite\":\"fs-matdb-store\",\"case\":\"discovery\",\"verdict\":\"pass\"}}");
+}
+
+fn discovery_request(names: &[&str], lo: f64, hi: f64) -> DiscoveryRequest {
+    DiscoveryRequest {
+        target: DiscoveryTarget::Materials,
+        properties: names
+            .iter()
+            .map(|name| PropertyKey::new(*name, Dims::NONE))
+            .collect(),
+        domain: DiscoveryDomain::Envelope {
+            lower: QueryPoint::new().with("temperature", lo).unwrap(),
+            upper: QueryPoint::new().with("temperature", hi).unwrap(),
+        },
+        selection: SelectionPolicy::SingleClaimOnly,
+    }
+}
+
+fn discovery_pack(id: &str, claims: ClaimSet) -> NormalizedPack {
+    NormalizedPack::new(
+        id,
+        "store-discovery-synthetic-v1",
+        fs_blake3_hash(id.as_bytes()),
+        "synthetic redistribution permitted for tests",
+        claims,
+        Vec::new(),
+        Vec::new(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn g0_compound_discovery_reports_all_heating_gaps_and_distinguishes_local_support() {
+    let store = MaterialStore::open(":memory:").unwrap();
+    // Synthetic dimensionless software fixtures: these are not lead datasets.
+    for (id, properties) in [
+        (
+            "lead-room-synth",
+            vec![("density", 11.34), ("conductivity", 35.0)],
+        ),
+        ("lead-incomplete-synth", vec![("density", 11.34)]),
+        ("unrelated-synth", vec![("optical-index", 1.5)]),
+    ] {
+        let pack =
+            NormalizedMaterialCardPack::new(named_state(id), test_pack(id, &properties)).unwrap();
+        store
+            .ingest_bundle(&[CatalogPack::MaterialCard(pack)])
+            .unwrap();
+    }
+    store.seal_corpus().unwrap();
+    let mut request = discovery_request(&["density", "conductivity"], 300.0, 350.0);
+    let report = store.discover(&request).unwrap();
+    assert!(report.unknown_properties.is_empty());
+    assert_eq!(
+        report
+            .candidates
+            .iter()
+            .map(|c| c.status)
+            .collect::<Vec<_>>(),
+        vec![
+            DiscoveryStatus::Partial,
+            DiscoveryStatus::Complete,
+            DiscoveryStatus::Unavailable,
+        ]
+    );
+    let complete = &report.candidates[1];
+    for result in &complete.properties {
+        let support = result.support.as_ref().unwrap();
+        let direct = store
+            .evaluate_typed(
+                &complete.pack.pack_id,
+                &result.property,
+                &QueryPoint::new().with("temperature", 300.0).unwrap(),
+                request.selection,
+            )
+            .unwrap();
+        assert_eq!(support.lower, direct);
+        assert!(support.upper.is_some());
+    }
+    request.properties.extend([
+        PropertyKey::new("specific-heat", Dims::NONE),
+        PropertyKey::new("latent-heat", Dims::NONE),
+    ]);
+    request.domain = discovery_request(&["unused"], 300.0, 650.0).domain;
+    let heating = store.discover(&request).unwrap();
+    assert_eq!(
+        heating
+            .unknown_properties
+            .iter()
+            .map(PropertyKey::name)
+            .collect::<Vec<_>>(),
+        vec!["specific-heat", "latent-heat"]
+    );
+    let lead = &heating.candidates[1];
+    assert_eq!(lead.status, DiscoveryStatus::Unavailable);
+    assert_eq!(lead.properties.len(), 4);
+    for p in &lead.properties[..2] {
+        assert!(matches!(
+            &p.support,
+            Err(DiscoveryGap::Evaluation {
+                error: MatDbError::NoClaimInDomain { .. },
+                ..
+            })
+        ));
+    }
+    for p in &lead.properties[2..] {
+        assert!(matches!(&p.support, Err(DiscoveryGap::Evaluation {
+            error: MatDbError::UnknownProperty { property }, ..
+        }) if property == p.property.name()));
+    }
+    request.properties.truncate(2);
+    request.domain =
+        DiscoveryDomain::LocalState(QueryPoint::new().with("temperature", 300.0).unwrap());
+    let local = store.discover(&request).unwrap();
+    assert_eq!(local.candidates[1].status, DiscoveryStatus::Complete);
+    assert!(
+        local.candidates[1]
+            .properties
+            .iter()
+            .all(|p| p.support.as_ref().unwrap().upper.is_none())
+    );
+    // A known property with no matching target is distinct from an unknown name.
+    request.target = DiscoveryTarget::Interfaces {
+        surface_a: named_state("lead"),
+        surface_b: named_state("air"),
+    };
+    let empty = store.discover(&request).unwrap();
+    assert!(empty.candidates.is_empty());
+    assert!(empty.unknown_properties.is_empty());
+    store
+        .ingest_pack(&test_pack("later", &[("density", 1.0)]))
+        .unwrap();
+    assert!(matches!(
+        store.discover(&request),
+        Err(StoreError::CorpusChanged { .. })
+    ));
+}
+
+#[test]
+fn g0_envelope_discovery_refuses_sparse_holes_and_interior_selection_changes() {
+    let store = MaterialStore::open(":memory:").unwrap();
+    let base = test_pack("base", &[("density", 1.0)]);
+    for (id, interpolation) in [
+        ("linear", InterpolationPolicy::LinearInside),
+        ("samples", InterpolationPolicy::TabulatedOnly),
+    ] {
+        let mut claims = base.claims().clone();
+        claims
+            .insert_claim(PropertyClaim {
+                key: PropertyKey::new("conductivity", Dims::NONE),
+                value: PropertyValue::Curve {
+                    abscissa: "temperature".into(),
+                    abscissa_dims: Dims([0, 0, 0, 1, 0, 0]),
+                    knots: vec![(300.0, 1.0), (350.0, 3.0), (400.0, 2.0)],
+                    dims: Dims::NONE,
+                },
+                validity: ValidityDomain::unconstrained().with("temperature", 200.0, 500.0),
+                uncertainty: UncertaintyModel::Unstated,
+                interpolation,
+                observations: Vec::new(),
+                provenance: provenance(),
+            })
+            .unwrap();
+        store
+            .ingest_pack(&discovery_pack(id, claims.clone()))
+            .unwrap();
+        if id == "linear" {
+            let mut weak = base.claims().claims_for("density")[0].1.clone();
+            weak.key = PropertyKey::new("unrelated-weak-property", Dims::NONE);
+            weak.observations.clear();
+            claims.insert_claim(weak).unwrap();
+            store
+                .ingest_pack(&discovery_pack("z-weak-extra", claims))
+                .unwrap();
+        }
+    }
+    let mut conflicts = base.claims().clone();
+    let mut competitor = conflicts.claims_for("density")[0].1.clone();
+    competitor.value = PropertyValue::Scalar {
+        value: 2.0,
+        dims: Dims::NONE,
+    };
+    competitor.validity = ValidityDomain::unconstrained().with("temperature", 325.0, 375.0);
+    competitor.observations.clear();
+    conflicts.insert_claim(competitor).unwrap();
+    store
+        .ingest_pack(&discovery_pack("conflict", conflicts))
+        .unwrap();
+    store.seal_corpus().unwrap();
+    let mut request = discovery_request(&["conductivity"], 300.0, 400.0);
+    request.target = DiscoveryTarget::Properties;
+    let report = store.discover(&request).unwrap();
+    assert_eq!(report.candidates[1].status, DiscoveryStatus::Complete);
+    // G3: adding unrelated weak evidence changes neither queried receipts nor
+    // support. The catalog artifact identity changes, as it must.
+    assert_eq!(
+        report.candidates[1].properties,
+        report.candidates[3].properties
+    );
+    assert_eq!(report.candidates[3].status, DiscoveryStatus::Complete);
+    assert!(matches!(&report.candidates[2].properties[0].support,
+        Err(DiscoveryGap::DiscreteSupport { axis, lower: 300.0, upper: 400.0, .. }) if axis == "temperature"));
+    // A single supported knot is a degenerate envelope, not a filled gap.
+    request.domain = discovery_request(&["unused"], 350.0, 350.0).domain;
+    assert_eq!(
+        store.discover(&request).unwrap().candidates[2].status,
+        DiscoveryStatus::Complete
+    );
+    request.domain = discovery_request(&["unused"], 250.0, 400.0).domain;
+    assert!(matches!(
+        &store.discover(&request).unwrap().candidates[1].properties[0].support,
+        Err(DiscoveryGap::Evaluation {
+            error: MatDbError::OutsideKnotSpan { .. },
+            ..
+        })
+    ));
+    request.properties = vec![PropertyKey::new("density", Dims::NONE)];
+    request.domain = discovery_request(&["unused"], 300.0, 400.0).domain;
+    let conflict = store.discover(&request).unwrap();
+    assert!(matches!(&conflict.candidates[0].properties[0].support,
+        Err(DiscoveryGap::Evaluation { point, error: MatDbError::AmbiguousSelection { .. } })
+        if point.axes()["temperature"] == 325.0));
+    // Existing observation precedence still decides; a weaker competing claim
+    // does not demote this supported bundle under the declared policy (G3).
+    request.selection = SelectionPolicy::PreferObservationBacked;
+    assert_eq!(
+        store.discover(&request).unwrap().candidates[0].status,
+        DiscoveryStatus::Complete
+    );
+}
+
+#[test]
+fn g0_compound_discovery_preserves_typed_axes_ordered_interfaces_and_request_errors() {
+    use fs_qty::{
+        QuantitySpec,
+        semantic::{QuantityKind, SemanticType, ValueForm},
+    };
+    let quantity = |kind| QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static));
+    let temp = quantity(QuantityKind::AbsoluteTemperature);
+    let key = PropertyKey::with_quantity("work", quantity(QuantityKind::Energy));
+    let mut claims = ClaimSet::new();
+    let observation = claims
+        .register_observation(ObservationDataset {
+            specimen: "compound-interface synthetic specimen".into(),
+            method: "authored typed scalar for discovery regression".into(),
+            artifact: fs_blake3_hash(b"compound-interface synthetic observation"),
+            caveats: "software fixture, not measured interface data".into(),
+            provenance: provenance(),
+        })
+        .unwrap();
+    claims
+        .insert_claim(PropertyClaim {
+            key: key.clone(),
+            value: PropertyValue::Scalar {
+                value: 12.0,
+                dims: key.dims(),
+            },
+            validity: ValidityDomain::unconstrained().with_quantity(
+                "temperature",
+                temp,
+                300.0,
+                400.0,
+            ),
+            uncertainty: UncertaintyModel::Unstated,
+            interpolation: InterpolationPolicy::ConstantWithinValidity,
+            observations: vec![observation],
+            provenance: provenance(),
+        })
+        .unwrap();
+    let a = named_state("body");
+    let b = named_state("counter");
+    let store = MaterialStore::open(":memory:").unwrap();
+    for (id, first, second) in [("ab", a.clone(), b.clone()), ("ba", b.clone(), a.clone())] {
+        store
+            .ingest_bundle(&[CatalogPack::Interface(
+                NormalizedInterfacePack::new(
+                    SurfaceSpec {
+                        material: first,
+                        texture_frame: "a/frame".into(),
+                    },
+                    SurfaceSpec {
+                        material: second,
+                        texture_frame: "b/frame".into(),
+                    },
+                    SystemContext {
+                        medium: "dry".into(),
+                        third_body: None,
+                        environment: "air".into(),
+                        history: "virgin".into(),
+                    },
+                    discovery_pack(id, claims.clone()),
+                )
+                .unwrap(),
+            )])
+            .unwrap();
+    }
+    store.seal_corpus().unwrap();
+    let mut request = discovery_request(&["unused"], 300.0, 400.0);
+    request.properties = vec![key];
+    request.target = DiscoveryTarget::Interfaces {
+        surface_a: a,
+        surface_b: b,
+    };
+    let wrong_axes = store.discover(&request).unwrap();
+    assert_eq!(wrong_axes.candidates.len(), 1);
+    assert_eq!(wrong_axes.candidates[0].pack.pack_id, "ab");
+    assert!(matches!(
+        &wrong_axes.candidates[0].properties[0].support,
+        Err(DiscoveryGap::Evaluation {
+            error: MatDbError::AxisQuantityMismatch { .. },
+            ..
+        })
+    ));
+    request.domain = DiscoveryDomain::Envelope {
+        lower: QueryPoint::new()
+            .with_quantity("temperature", temp, 300.0)
+            .unwrap(),
+        upper: QueryPoint::new()
+            .with_quantity("temperature", temp, 400.0)
+            .unwrap(),
+    };
+    assert_eq!(
+        store.discover(&request).unwrap().candidates[0].status,
+        DiscoveryStatus::Complete
+    );
+    request.properties[0] = PropertyKey::with_quantity("work", quantity(QuantityKind::Torque));
+    assert!(matches!(
+        &store.discover(&request).unwrap().candidates[0].properties[0].support,
+        Err(DiscoveryGap::Evaluation {
+            error: MatDbError::QuantityMismatch { .. },
+            ..
+        })
+    ));
+    request.domain = discovery_request(&["unused"], 400.0, 300.0).domain;
+    assert!(matches!(
+        store.discover(&request),
+        Err(StoreError::InvalidDiscoveryRequest { .. })
+    ));
+    request.domain = DiscoveryDomain::Envelope {
+        lower: QueryPoint::new()
+            .with_quantity("temperature", temp, 300.0)
+            .unwrap(),
+        upper: QueryPoint::new().with("temperature", 400.0).unwrap(),
+    };
+    assert!(matches!(
+        store.discover(&request),
+        Err(StoreError::InvalidDiscoveryRequest { .. })
+    ));
+    request.domain = discovery_request(&["unused"], 300.0, 400.0).domain;
+    request.properties.push(request.properties[0].clone());
+    assert!(matches!(
+        store.discover(&request),
+        Err(StoreError::InvalidDiscoveryRequest { .. })
+    ));
+    request.properties.clear();
+    assert!(matches!(
+        store.discover(&request),
+        Err(StoreError::InvalidDiscoveryRequest { .. })
+    ));
 }
 
 #[test]

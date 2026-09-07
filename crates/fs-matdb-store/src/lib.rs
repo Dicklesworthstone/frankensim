@@ -34,11 +34,15 @@
 
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_matdb::{
-    ClaimId, ClaimSet, InterpolationPolicy, MatDbError, MaterialAnswer, NormalizedInterfacePack,
-    NormalizedMaterialCardPack, NormalizedModelPack, NormalizedPack, NormalizedSpeciesPack,
-    PackError, PropertyClaim, PropertyKey, PropertyValue, QueryPoint, SelectionPolicy,
+    ClaimId, ClaimSelection, ClaimSet, InterpolationPolicy, MatDbError, MaterialAnswer,
+    MaterialStateId, NormalizedInterfacePack, NormalizedMaterialCardPack, NormalizedModelPack,
+    NormalizedPack, NormalizedSpeciesPack, PackError, PropertyClaim, PropertyKey, PropertyValue,
+    QueryPoint, SelectionPolicy,
 };
 use fsqlite::{AsyncConnection, FrankenError, Row, SqliteValue};
+
+/// Material-owned support refusals, shared with exact project binding.
+pub use fs_matdb::PropertySupportError as DiscoveryGap;
 
 /// Domain string for the corpus-staleness digest.
 const CORPUS_DIGEST_DOMAIN: &str = "org.frankensim.fs-matdb-store.corpus.v2";
@@ -236,9 +240,118 @@ pub struct PackRow {
     pub content_hash: ContentHash,
 }
 
+/// A local query is conditional on this state. An envelope is the caller's
+/// conservative box of possible states, not a predicted future trajectory.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DiscoveryDomain {
+    /// Only this state is checked; success makes no claim about later states.
+    LocalState(QueryPoint),
+    /// Both corners must carry the same axes and exact quantity descriptors.
+    /// Every lower coordinate must be at most its upper coordinate.
+    Envelope {
+        /// Inclusive lower coordinates, in canonical declared quantities.
+        lower: QueryPoint,
+        /// Inclusive upper coordinates with identical coordinate schemas.
+        upper: QueryPoint,
+    },
+}
+
+/// The physical identity being searched. Interface order is significant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiscoveryTarget {
+    /// Named material conditions only; unbound property packs are excluded.
+    Materials,
+    /// Unbound property packs, for callers that explicitly need these.
+    Properties,
+    /// Ordered bulk states. Texture, medium and history remain on each returned
+    /// card and must still be matched when binding an interface to a simulation.
+    Interfaces {
+        /// Material condition on the first surface.
+        surface_a: MaterialStateId,
+        /// Material condition on the counter-surface.
+        surface_b: MaterialStateId,
+    },
+}
+
+/// A compound data-coverage request. Property keys retain quantity kinds,
+/// tensor frames/conventions and hardness protocols without name-only coercion.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DiscoveryRequest {
+    /// Material, unbound property, or ordered interface identity filter.
+    pub target: DiscoveryTarget,
+    /// Nonempty, duplicate-free bundle; results preserve this order.
+    pub properties: Vec<PropertyKey>,
+    /// State support the caller needs before solving.
+    pub domain: DiscoveryDomain,
+    /// Existing evaluator policy; discovery never invents source selection.
+    pub selection: SelectionPolicy,
+}
+
+/// Coverage of the requested property bundle, independent of evidence strength.
+/// `Complete` is relative to the report's local-state or envelope domain. It
+/// does not assert that an executable constitutive law or solver is available.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiscoveryStatus {
+    /// Every requested property has declared support over the requested domain.
+    Complete,
+    /// Some requested properties have support and others have named gaps.
+    Partial,
+    /// No requested property has support over the requested domain.
+    Unavailable,
+}
+
+/// Exact evaluated evidence at a local state or at both envelope corners.
+/// Envelope coverage additionally checks continuous support and every competing
+/// claim's intersection with the box; corners alone do not establish coverage.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DiscoverySupport {
+    /// Evaluated evidence at the local point or envelope's lower corner.
+    pub lower: MaterialAnswer,
+    /// `None` identifies a conditional local-state result.
+    pub upper: Option<MaterialAnswer>,
+}
+
+/// One requested property, in caller order. All gaps are retained, even when
+/// several requirements are absent from the entire corpus.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DiscoveredProperty {
+    /// Complete property semantics supplied by the caller.
+    pub property: PropertyKey,
+    /// Evaluated support or the precise missing support/selection requirement.
+    pub support: Result<DiscoverySupport, DiscoveryGap>,
+}
+
+/// One candidate, with a whole-artifact identity for subsequent exact binding.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DiscoveryCandidate {
+    /// Immutable artifact to load for subsequent physical binding.
+    pub pack: PackRow,
+    /// Aggregate data coverage, not physical model qualification.
+    pub status: DiscoveryStatus,
+    /// One result for every requested property, including all missing ones.
+    pub properties: Vec<DiscoveredProperty>,
+}
+
+/// Deterministic discovery results, never a substitute for solve-time queries.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DiscoveryReport {
+    /// Exact request, retaining conditional-local versus envelope semantics.
+    pub request: DiscoveryRequest,
+    /// Names absent from every claims-bearing pack, distinct from known names
+    /// that have no candidate for this target, quantity or state envelope.
+    pub unknown_properties: Vec<PropertyKey>,
+    /// Canonical pack-id order, including partial and unavailable candidates.
+    pub candidates: Vec<DiscoveryCandidate>,
+}
+
 /// Typed store errors with stable `FS-MATDB-STORE-*` codes.
 #[derive(Debug)]
 pub enum StoreError {
+    /// Empty/duplicate requirements or mismatched/reversed envelope corners.
+    InvalidDiscoveryRequest {
+        /// Concrete correction required in the caller's request.
+        reason: &'static str,
+    },
     /// A failed transaction could not complete its rollback.
     Rollback {
         /// The original operation or commit failure.
@@ -344,6 +457,9 @@ pub enum StoreError {
 impl core::fmt::Display for StoreError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            StoreError::InvalidDiscoveryRequest { reason } => {
+                write!(f, "FS-MATDB-STORE-DISCOVERY-REQUEST: {reason}")
+            }
             StoreError::Rollback { operation, error } => write!(
                 f,
                 "FS-MATDB-STORE-ROLLBACK: {operation}; rollback failed: {error:?}"
@@ -532,6 +648,35 @@ fn claim_attains_range(
                 InterpolationPolicy::ConstantWithinValidity => false,
             }
         }
+    }
+}
+
+fn discover_property(
+    claims: &ClaimSet,
+    key: &PropertyKey,
+    domain: &DiscoveryDomain,
+    policy: SelectionPolicy,
+) -> Result<DiscoverySupport, DiscoveryGap> {
+    match domain {
+        DiscoveryDomain::LocalState(point) => claims
+            .query_typed(key, point, policy)
+            .and_then(|answer| {
+                claims.verify_receipt(&answer.receipt)?;
+                Ok(DiscoverySupport {
+                    lower: answer,
+                    upper: None,
+                })
+            })
+            .map_err(|error| DiscoveryGap::Evaluation {
+                point: point.clone(),
+                error,
+            }),
+        DiscoveryDomain::Envelope { lower, upper } => claims
+            .query_envelope_typed(key, lower, upper, ClaimSelection::Policy(policy))
+            .map(|answer| DiscoverySupport {
+                lower: answer.lower,
+                upper: Some(answer.upper),
+            }),
     }
 }
 
@@ -1195,6 +1340,106 @@ impl MaterialStore {
         let answer = claims.query_typed(property, point, policy)?;
         claims.verify_receipt(&answer.receipt)?;
         Ok(answer)
+    }
+
+    /// Find packs that supply a complete typed property bundle at the same
+    /// state or throughout a caller-declared conservative envelope. Each pack
+    /// is decoded once; no requirements are fused across material conditions.
+    ///
+    /// All requested gaps are returned, including globally unknown names. The
+    /// existing single-property discovery methods retain their unknown-name
+    /// error. Evidence weakness in an unrelated property cannot demote a bundle.
+    ///
+    /// # Errors
+    /// Store integrity/SQL refusals, or [`StoreError::InvalidDiscoveryRequest`].
+    /// Per-candidate evaluation refusals are retained in the report instead.
+    pub fn discover(&self, request: &DiscoveryRequest) -> Result<DiscoveryReport, StoreError> {
+        if request.properties.is_empty() {
+            return Err(StoreError::InvalidDiscoveryRequest {
+                reason: "at least one property is required",
+            });
+        }
+        for (i, property) in request.properties.iter().enumerate() {
+            if request.properties[..i].contains(property) {
+                return Err(StoreError::InvalidDiscoveryRequest {
+                    reason: "duplicate property requirement",
+                });
+            }
+        }
+        if let DiscoveryDomain::Envelope { lower, upper } = &request.domain
+            && (!lower.axes().keys().eq(upper.axes().keys())
+                || lower.axis_quantities() != upper.axis_quantities()
+                || lower
+                    .axes()
+                    .iter()
+                    .any(|(axis, lo)| lo > &upper.axes()[axis]))
+        {
+            return Err(StoreError::InvalidDiscoveryRequest {
+                reason: "envelope corners must have identical axes and quantities with lower <= upper",
+            });
+        }
+        let mut known = vec![false; request.properties.len()];
+        let mut candidates = Vec::new();
+        // packs() enforces the seal before any canonical bytes are evaluated.
+        for row in self.packs(None)? {
+            let pack = self.load_catalog_pack_unchecked(&row.pack_id)?;
+            let Some(claims) = pack.claims_pack().map(NormalizedPack::claims) else {
+                continue;
+            };
+            for (i, key) in request.properties.iter().enumerate() {
+                known[i] |= !claims.claims_for(key.name()).is_empty();
+            }
+            let matches_target = match (&request.target, &pack) {
+                (DiscoveryTarget::Materials, CatalogPack::MaterialCard(_))
+                | (DiscoveryTarget::Properties, CatalogPack::Properties(_)) => true,
+                (
+                    DiscoveryTarget::Interfaces {
+                        surface_a,
+                        surface_b,
+                    },
+                    CatalogPack::Interface(p),
+                ) => {
+                    &p.card().surface_a().material == surface_a
+                        && &p.card().surface_b().material == surface_b
+                }
+                _ => false,
+            };
+            if !matches_target {
+                continue;
+            }
+            let properties: Vec<_> = request
+                .properties
+                .iter()
+                .map(|key| DiscoveredProperty {
+                    property: key.clone(),
+                    support: discover_property(claims, key, &request.domain, request.selection),
+                })
+                .collect();
+            let supported = properties.iter().filter(|p| p.support.is_ok()).count();
+            let status = if supported == properties.len() {
+                DiscoveryStatus::Complete
+            } else if supported == 0 {
+                DiscoveryStatus::Unavailable
+            } else {
+                DiscoveryStatus::Partial
+            };
+            candidates.push(DiscoveryCandidate {
+                pack: row,
+                status,
+                properties,
+            });
+        }
+        Ok(DiscoveryReport {
+            request: request.clone(),
+            unknown_properties: request
+                .properties
+                .iter()
+                .zip(known)
+                .filter(|(_, found)| !found)
+                .map(|(key, _)| key.clone())
+                .collect(),
+            candidates,
+        })
     }
 
     /// Cross-check every index row of a pack against its decoded

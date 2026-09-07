@@ -67,6 +67,25 @@ plus a canonical-bytes vault.
   the same canonical decoder and `ClaimSet::query_typed`, then verifies the
   receipt. It retains complete quantity, hardness/tensor context and typed
   axis requirements; no property name or equal dimensions can erase them.
+- `discover(&DiscoveryRequest)` evaluates a complete typed property bundle
+  separately on each canonical candidate. Targets distinguish named materials,
+  explicitly unbound property packs, and interfaces filtered by ordered A/B
+  material-state identities. An interface hit still requires exact texture,
+  medium, environment and history matching when bound to a simulation.
+  Results include every requested property and its evaluated evidence or named
+  gap; all globally unknown property names are retained together. Known names
+  with no matching target remain distinguishable from unknown names.
+  `Complete`/`Partial`/`Unavailable` describe requested data coverage only.
+  The report retains the request: `LocalState` success is conditional on that
+  one state, while `Envelope` requires finite ordered corners with identical
+  axes and quantity descriptors. The selected claim must remain the same over
+  the box, with continuous support. Exact-only curve knots never fill an
+  interval; linear curves cannot extend past their knot span. Every competing
+  same-key claim's box intersection is queried under the original selection
+  policy, detecting conflicts or source changes confined to the interior.
+  Queries and receipt replay use the canonical evaluator. No property is borrowed
+  from a different material condition to make a candidate complete. Unrelated
+  weak evidence does not alter the requested property's status or receipts.
 - `verify_index(pack_id)` — cross-checks every derived row against the
   decoded pack, claims table AND validity table (claim hash, axis,
   bitwise bounds); `FS-MATDB-STORE-INDEX-MISMATCH` names the first
@@ -147,6 +166,13 @@ and direct/store evaluation receipt parity. Additional G0/G4/G5 tests cover
 wrong family/hash/wire version, atomic bundle rollback with a preserved seal,
 ingest-order-independent rebuilds, and v1 migration with deliberate resealing.
 Synthetic fixtures prove storage semantics, not physical dataset accuracy.
+G0 compound-discovery tests cover all missing heating requirements in one
+report, room-temperature versus high-temperature support, local versus envelope
+meaning, sparse curve holes, clipped knot spans, interior-only conflicts, typed
+axis/quantity refusals, ordered counter-material filtering, request validation,
+and stale corpus refusal. G3 adds unrelated weak evidence and checks unchanged
+requested-property support and receipts; existing observation precedence is
+also exercised over a competing claim's interior intersection.
 
 ## No-claim boundaries
 
@@ -157,13 +183,16 @@ Synthetic fixtures prove storage semantics, not physical dataset accuracy.
   xtask tests where the compiler binary exists — recorded follow-up.
 - Existing family wire versions are preserved. Material/interface v1 packs
   do not embed model cards, and the store does not infer model/species
-  associations from similar names. Compound discovery and new cross-pack
+  associations from similar names. Executable-model discovery and new cross-pack
   binding formats remain separate work; callers can already resolve exact
   whole-artifact identities with `load_by_hash`.
-- Value-range discovery covers the existing scalar and one-dimensional curve
-  payloads. Compound requirement envelopes, model availability and ordered
-  counter-material discovery remain separate work; the exact state query is
-  still required before a physical claim can consume a candidate.
+- Value-range and compound discovery cover the existing scalar and
+  one-dimensional curve payloads. Compound envelopes prove declared data
+  support and stable source selection, not a physical trajectory, numeric
+  admissibility at every future solver state, or executable model availability.
+  Scenario/CLI material selection and model availability remain MR13 work.
+  Exact state queries are still required when physics consumes a candidate;
+  evolving-state domain exits and rollback belong to the runtime coupling.
 - The seal is an integrity mechanism, not authentication: it detects
   drift and tampering against the sealed identity, but a hostile party
   who can rewrite BOTH packs and seal defeats it — authenticity needs
