@@ -99,6 +99,84 @@ maximum with a smaller nominal margin, both verdicts `indeterminate`, and five
 of seven stages changed (`import-verify` and `assign` differ only by binding
 keys); a merely renamed project shows the hash change and a bit-identical QoI.
 
+### Material discovery
+
+`frankensim [--json] discover <request.json> <pack>...` reads the five existing
+canonical material-data pack families and queries the real in-memory
+FrankenSQLite `MaterialStore`. It writes no input file or persistent database.
+Duplicate exact packs collapse; conflicting pack IDs refuse transactionally.
+Candidate order follows the store's canonical order, independent of file paths.
+
+Request schema `frankensim.discovery.v1` requires these fields:
+
+- `target`: `materials`, explicitly unbound `properties`, or an object with
+  ordered `surface_a` and `surface_b` material-state objects. Each state has
+  nonempty `chemistry`, `phase`, `process`, and unsigned `revision`.
+- `properties`: scalar `{name, unit, kind}` requirements. Units use the
+  existing fs-qty grammar; output values use coherent SI. `dimensional` is
+  explicit and is never a wildcard for semantic kinds. Supported real-scalar
+  kind names include `absolute-temperature`, `temperature-difference`,
+  `energy`, `torque`, `pressure`, `stress`, `heat-capacity`, `entropy`, and
+  fs-qty's material-convention names. Unsupported kinds, tensor/test-context
+  fields, and all other unknown fields refuse. Full tensor/hardness-test
+  requirements remain available through the typed store API.
+- `models`: `{law, version, pin?}` requirements; version is a positive exact
+  integer, and an optional pin is a member-card content hash. No implementation
+  or material association is inferred from a name.
+- `domain`: `{mode, axes}`. `local-state` axes have `{name, kind, value}`;
+  `envelope` axes have `{name, kind, lower, upper}`. Coordinates are quantity
+  strings such as `293 K` or `26.85 degC`, normalized by fs-qty. Equal endpoint
+  dimensions and ordered values are required; duplicate axes refuse. An
+  explicit axis kind of `legacy` requests the source's untyped coordinate
+  profile; this cannot prove source-axis units or satisfy a typed coordinate.
+  `dimensional` and semantic kinds preserve their exact descriptors.
+- `selection`: `single-claim-only` or `prefer-observation-backed`, delegating
+  unchanged to the owner. Duplicate property/model requirements refuse, and
+  at least one property or model is required.
+
+`discover_paths` accepts an actual `LawRegistry` for embedders. The binary
+currently has no registered constitutive graph factories, so associated model
+requirements retain `UnknownLaw` implementation gaps; merely loading model
+data never enables a law. Model membership, source selection, card and node
+domains, and factory admission use the existing store implementation. A
+successful report does not initialize state or bind a connected solver graph.
+
+JSON output (`frankensim.discovery-result.v1`) carries complete/partial/
+unavailable candidates, exact pack hashes and named identities, the requested
+state profile, property descriptors, selected claims and SI endpoint values,
+all property/model gaps, and globally unknown requirements. Gap details retain
+the owner's diagnostic and witness; their Debug rendering is explanatory text,
+not a stable serialized Rust error type. Text output reports the same candidate
+and requirement outcomes. Exit0 means discovery completed, including a report
+with gaps or zero candidates. It does not mean the requested simulation is
+admitted. Read/encoding/size failures exit3; request, canonical-pack, and store
+refusals exit4; malformed CLI grammar exits2.
+
+Admission caps:64KiB request,32 packs,16MiB each and64MiB aggregate,64 entries
+per requirement/axis array. Reads enforce actual byte counts as well as file
+metadata. Processing is synchronous and bounded by these caps; it has no OS
+signal/cancellation integration or peak-memory guarantee. No source TSV parser,
+source acquisition, model evaluator, or new catalog schema lives in the CLI.
+
+The actual lead example uses the existing source compiler:
+
+```sh
+cargo run -p xtask -- matdb-pack --manifest data/matdb/seed-v1/lead-pure-nbs-c447/manifest.tsv --out /tmp/lead.fsmatpk
+cargo run -p fs-cli -- --json discover examples/material-discovery/lead-heating.json /tmp/lead.fsmatpk
+```
+
+That request explicitly searches unbound properties: the source pack combines
+point-specific physical values with distinct processed hardness conditions,
+so naming it lead does not define a coherent specimen. The requested293–650K
+envelope exceeds density's declared293K point; conductivity, specific heat and
+latent heat are absent under the requested names. A local density request at
+293K returns the original11340kg/m³ with its selected claim. These checks
+verify source transport and declared coverage, not measurements or an operating
+heating/melting solver. `tests/discover.rs` exercises the actual binary's
+positive named-material result plus domain/semantic/input/model gaps;
+`xtask/tests/matdb_pack_cli.rs::g0_cli_lead_heating_discovery_explains_actual_missing_inputs`
+uses the real source compiler and the same example request through CLI dispatch.
+
 ### Euler cinematic static admission
 
 The `cinematic` command is the stable user membrane for bead
@@ -779,7 +857,8 @@ publication.
   experimental validation or a maturity level for the exchange.
 - `material-resolve` proves that every declared region and interface resolves
   to an admitted card whose selected claim answers the required property at
-  both endpoints of the declared temperature range, and it retains that
+  every point of the declared temperature range under the owner's continuous
+  support and source-selection checks, and it retains that
   claim's replayable usage receipt. It does **not** authenticate the pack
   producer, validate a claim against any external corpus, narrow or replace a
   claim's stated uncertainty, or turn an `Unstated` uncertainty into a bound.

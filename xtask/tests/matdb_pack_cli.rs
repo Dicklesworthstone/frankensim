@@ -7505,6 +7505,78 @@ const BREADTH_TRANCHE_PACKS: [&str; 15] = [
     "teak-fpl-gtr190",
 ];
 
+/// G0 actual source compiler -> canonical pack -> user-facing discovery.
+/// This verifies declared source coverage, not the physical measurements.
+#[test]
+fn g0_cli_lead_heating_discovery_explains_actual_missing_inputs() {
+    let dir = fixture_dir();
+    let manifest = workspace_path("data/matdb/seed-v1/lead-pure-nbs-c447/manifest.tsv");
+    let pack = dir.join("lead.fsmatpk");
+    let compiled = run_compiler(&manifest, &pack);
+    assert!(
+        compiled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let request = dir.join("lead-heating.json");
+    fs::write(
+        &request,
+        include_str!("../../examples/material-discovery/lead-heating.json"),
+    )
+    .unwrap();
+    let invoke = || {
+        fs_cli::run(vec![
+            "--json".into(),
+            "discover".into(),
+            request.to_str().unwrap().into(),
+            pack.to_str().unwrap().into(),
+        ])
+    };
+    let heating = invoke();
+    assert_eq!(
+        heating.exit_code,
+        fs_cli::exit::SUCCESS,
+        "{}",
+        heating.stderr
+    );
+    assert!(heating.stdout.contains("\"pack\":\"lead-pure-nbs-c447\""));
+    assert!(heating.stdout.contains("\"kind\":\"properties\""));
+    assert!(heating.stdout.contains("\"status\":\"unavailable\""));
+    assert!(heating.stdout.contains("\"unknown_properties\":[\"thermal-conductivity\",\"specific-heat-capacity\",\"latent-heat\"]"));
+    assert!(
+        heating
+            .stdout
+            .contains(r#"NoClaimInDomain { property: \"density\", considered: 1 }"#),
+        "{}",
+        heating.stdout
+    );
+    assert!(
+        heating
+            .stdout
+            .contains(r#"point: QueryPoint { axes: {\"temperature\": 650.0}"#)
+    );
+    // Positive existing data stays usable at its actual declared point. The
+    // mixed-condition source is still explicitly an unbound property pack.
+    fs::write(
+        &request,
+        r#"{
+      "schema":"frankensim.discovery.v1", "target":"properties",
+      "properties":[{"name":"density","unit":"kg/m3","kind":"dimensional"}],
+      "models":[], "selection":"single-claim-only",
+      "domain":{"mode":"local-state","axes":[
+        {"name":"temperature","kind":"legacy","value":"293 K"}
+      ]}
+    }"#,
+    )
+    .unwrap();
+    let local = invoke();
+    assert_eq!(local.exit_code, fs_cli::exit::SUCCESS, "{}", local.stderr);
+    assert!(local.stdout.contains("\"status\":\"complete\""));
+    assert!(local.stdout.contains("\"lower_si\":11340"));
+    assert!(local.stdout.contains("\"claim\":"));
+    println!("{}{}", heating.stdout, local.stdout);
+}
+
 /// G2: the common-materials breadth tranches (bead frankensim-0er85) —
 /// MIL-HDBK-5J structural metals, NBS/MIL melting + scale-typed
 /// hardness, FPL tropical woods — compile fail-closed and pass their

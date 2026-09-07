@@ -28,6 +28,8 @@ fs-io = { path = "../fs-io" }
 fs-ledger = { path = "../fs-ledger" }
 fs-marquee = { path = "../fs-marquee" }
 fs-matdb = { path = "../fs-matdb" }
+fs-matdb-store = { path = "../fs-matdb-store" }
+fs-material = { path = "../fs-material" }
 fs-math = { path = "../fs-math" }
 fs-mesh = { path = "../fs-mesh" }
 fs-opt = { path = "../fs-opt" }

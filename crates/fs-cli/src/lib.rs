@@ -10,6 +10,7 @@
 mod cards;
 mod cinematic;
 mod compare;
+mod discover;
 mod import;
 mod json_read;
 mod package;
@@ -32,6 +33,7 @@ pub use cinematic::{
     MAX_CINEMATIC_ASSET_BYTES, MAX_CINEMATIC_CONFIG_BYTES, MAX_CINEMATIC_TOTAL_ASSET_BYTES,
     MAX_CINEMATIC_TRAJECTORY_BYTES, run_cinematic_with_gate,
 };
+pub use discover::discover_paths;
 pub use import::{
     GeometryImportLimits, GeometryImportRefusal, GeometryImportRun, RawGeometryLibrary,
     RecordedImportRefusal, RetainedGeometryImport, import_project_geometry,
@@ -70,7 +72,7 @@ const DIAGNOSTIC_SCHEMA: &str = "frankensim.cli.diagnostic.v1";
 const VALIDATION_AUTHORITY: &str = "structural-project-admission";
 const VALIDATION_NO_CLAIM: &str =
     "does not prove artifact existence, capability availability, solvability, or physical validity";
-const USAGE: &str = "frankensim [--json] validate <project.fsim|project.json> | import <project> <source> <ledger.db> --unit <unit> (--max-hole-edges <n> | --step-root <id> --target-h <spacing>) | solve <project> <ledger.db> [--materials <pack>]... [--interfaces <pack>]... | solve --resume <run-id> <ledger.db> | report <run-id> [<ledger.db>] | package <run-id> [<ledger.db>] | run <project> <ledger.db> [--materials <pack>]... [--interfaces <pack>]... | compare <left-run> <right-run> [<ledger.db>] | study <study.fsim|study.json> <ledger.db> [--budget <N>] | study --resume <study-run-id> <ledger.db> [--budget <N>] | cinematic <mode> <config.fscine> <trajectory-source> [cinematic options] (verify/mux require --trajectory <artifact>; other cinematic modes also allow --run-reduced)";
+const USAGE: &str = "frankensim [--json] validate <project.fsim|project.json> | discover <request.json> <pack>... | import <project> <source> <ledger.db> --unit <unit> (--max-hole-edges <n> | --step-root <id> --target-h <spacing>) | solve <project> <ledger.db> [--materials <pack>]... [--interfaces <pack>]... | solve --resume <run-id> <ledger.db> | report <run-id> [<ledger.db>] | package <run-id> [<ledger.db>] | run <project> <ledger.db> [--materials <pack>]... [--interfaces <pack>]... | compare <left-run> <right-run> [<ledger.db>] | study <study.fsim|study.json> <ledger.db> [--budget <N>] | study --resume <study-run-id> <ledger.db> [--budget <N>] | cinematic <mode> <config.fscine> <trajectory-source> [cinematic options] (verify/mux require --trajectory <artifact>; other cinematic modes also allow --run-reduced)";
 
 /// Captured command output. Final result records are on stdout; diagnostics
 /// are on stderr.
@@ -95,6 +97,10 @@ enum Command {
     Help,
     Cinematic(Vec<String>),
     Validate(PathBuf),
+    Discover {
+        request: PathBuf,
+        packs: Vec<PathBuf>,
+    },
     Import(ImportCommand),
     SolveProject {
         project: PathBuf,
@@ -204,6 +210,12 @@ pub fn run(args: impl IntoIterator<Item = String>) -> CommandOutput {
         Command::Help => help(mode),
         Command::Cinematic(arguments) => cinematic::run(arguments, mode == OutputMode::Json),
         Command::Validate(path) => validate_path(&path, mode),
+        Command::Discover { request, packs } => discover_paths(
+            &request,
+            &packs,
+            mode == OutputMode::Json,
+            &fs_material::graph::LawRegistry::new(),
+        ),
         Command::Import(command) => import_path(&command, mode),
         Command::SolveProject {
             project,
@@ -329,6 +341,17 @@ fn parse_args(
     let command = match positional.as_slice() {
         [flag] if flag == "--help" || flag == "help" => Command::Help,
         [verb, rest @ ..] if verb == "cinematic" => Command::Cinematic(rest.to_vec()),
+        [verb, request, packs @ ..]
+            if verb == "discover"
+                && is_operand(request)
+                && !packs.is_empty()
+                && packs.iter().all(|pack| is_operand(pack)) =>
+        {
+            Command::Discover {
+                request: PathBuf::from(request),
+                packs: packs.iter().map(PathBuf::from).collect(),
+            }
+        }
         [verb, project] if verb == "validate" && is_operand(project) => {
             Command::Validate(PathBuf::from(project))
         }
