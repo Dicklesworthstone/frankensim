@@ -14,13 +14,10 @@
 //! only through the explicit `claim` pin recorded in the project file —
 //! there is no auto-pick path.
 //!
-//! Coverage logic: a claim's `ValidityDomain` bounds are per-axis
-//! intervals, so a domain that contains both endpoints of the admitted
-//! range contains the whole range. The resolver therefore queries each
-//! property at BOTH endpoints and additionally requires the SAME claim
-//! to be selected at both — two different claims covering one endpoint
-//! each would leave the interior ambiguous or stitched, which is a
-//! refusal, not a resolution.
+//! Coverage uses matdb's shared envelope query: the same claim must cover
+//! both endpoints, the continuous interval, and every interior intersection
+//! with competing claims. Exact samples do not establish interval support;
+//! a recorded pin resolves selection but never bypasses missing support.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -29,8 +26,9 @@ use fs_conduction::{
     ConductionMesh, InterfaceResistance, InterfaceSurface, ThermalBoundary, ThermalInterfaces,
 };
 use fs_matdb::{
-    ClaimId, ClaimSet, InterfaceSystemCard, MatDbError, MaterialAnswer, MaterialCard,
-    PropertyUsageReceipt, QueryPoint, SelectionPolicy, UncertaintyModel,
+    ClaimId, ClaimSelection, ClaimSet, EnvelopeAnswer, InterfaceSystemCard, MatDbError,
+    MaterialAnswer, MaterialCard, PropertySupportError, PropertyUsageReceipt, QueryPoint,
+    SelectionPolicy, UncertaintyModel,
 };
 use fs_qty::Dims;
 use fs_regime::RegimeAuditCard;
@@ -936,25 +934,10 @@ fn resolve_property(
     axis: &str,
     property: &RequiredProperty,
 ) -> Option<ResolvedProperty> {
-    let low = query_endpoint(resolution, target, claims, axis, range.lo, pin, property)?;
-    let high = query_endpoint(resolution, target, claims, axis, range.hi, pin, property)?;
-
-    if low.receipt.selected != high.receipt.selected {
-        resolution.violations.push(violation(
-            "project-binding-domain-split",
-            format!(
-                "{}: no single `{}` claim covers [{}, {}] K — claim {} answers the low end and claim {} the high end",
-                target.describe(),
-                property.property,
-                range.lo,
-                range.hi,
-                low.receipt.selected.0.to_hex(),
-                high.receipt.selected.0.to_hex()
-            ),
-            "bind a card revision whose claim covers the whole admitted range, or pin one claim that does; stitching two claims across the range is not a resolution",
-        ));
-        return None;
-    }
+    let EnvelopeAnswer {
+        lower: low,
+        upper: high,
+    } = query_range(resolution, target, claims, axis, range, pin, property)?;
     let sample = &low.evidence.value;
     if sample.dims != property.dims {
         resolution.violations.push(violation(
@@ -1026,22 +1009,27 @@ fn resolve_property(
     })
 }
 
-fn query_endpoint(
+fn query_range(
     resolution: &mut MaterialResolution,
     target: &BindingTarget,
     claims: &ClaimSet,
     axis: &str,
-    at: f64,
+    range: &RequiredRange,
     pin: Option<ClaimId>,
     property: &RequiredProperty,
-) -> Option<MaterialAnswer> {
-    let point = match QueryPoint::new().with(axis, at) {
-        Ok(point) => point,
+) -> Option<EnvelopeAnswer> {
+    let corners = QueryPoint::new().with(axis, range.lo).and_then(|lower| {
+        QueryPoint::new()
+            .with(axis, range.hi)
+            .map(|upper| (lower, upper))
+    });
+    let (lower, upper) = match corners {
+        Ok(corners) => corners,
         Err(error) => {
             resolution.violations.push(violation(
                 "project-binding-query",
                 format!(
-                    "{}: cannot form the query point {axis} = {at}: {error}",
+                    "{}: cannot form the admitted query range on {axis}: {error}",
                     target.describe()
                 ),
                 "the admitted range must be finite; fix the binding's range",
@@ -1049,16 +1037,58 @@ fn query_endpoint(
             return None;
         }
     };
-    let answer = match pin {
-        Some(pinned) => claims.query_pinned(&property.property, &point, pinned),
-        None => claims.query(&property.property, &point, SelectionPolicy::SingleClaimOnly),
-    };
+    let selection = pin.map_or(
+        ClaimSelection::Policy(SelectionPolicy::SingleClaimOnly),
+        ClaimSelection::Pinned,
+    );
+    let answer = claims.query_envelope(&property.property, &lower, &upper, selection);
     match answer {
         Ok(answer) => Some(answer),
         Err(error) => {
-            resolution
-                .violations
-                .push(query_violation(target, property, axis, at, &error));
+            let finding = match error {
+                PropertySupportError::Evaluation { point, error } => {
+                    query_violation(target, property, axis, point.axes()[axis], &error)
+                }
+                PropertySupportError::ClaimChanges {
+                    point,
+                    selected,
+                    other,
+                } => violation(
+                    "project-binding-domain-split",
+                    format!(
+                        "{}: no single `{}` claim covers [{}, {}] K — claim {} answers the low end but claim {} is selected at {axis} = {} K",
+                        target.describe(),
+                        property.property,
+                        range.lo,
+                        range.hi,
+                        selected.0.to_hex(),
+                        other.0.to_hex(),
+                        point.axes()[axis]
+                    ),
+                    "bind a card revision whose claim covers the whole admitted range, or pin one claim that does; stitching claims is not a resolution",
+                ),
+                PropertySupportError::DiscreteSupport {
+                    axis,
+                    lower,
+                    upper,
+                    claim,
+                } => violation(
+                    "project-binding-domain-uncovered",
+                    format!(
+                        "{}: `{}` claim {} has only exact samples on {axis}, which do not cover [{lower}, {upper}] K",
+                        target.describe(),
+                        property.property,
+                        claim.0.to_hex()
+                    ),
+                    "bind a claim with an admitted continuous response over the whole range; a claim pin does not authorize interpolation between exact samples",
+                ),
+                PropertySupportError::InvalidEnvelope { reason } => violation(
+                    "project-binding-query",
+                    format!("{}: {reason}", target.describe()),
+                    "declare a finite ordered admitted range on the same temperature axis",
+                ),
+            };
+            resolution.violations.push(finding);
             None
         }
     }
