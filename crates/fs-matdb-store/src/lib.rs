@@ -34,9 +34,9 @@
 
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_matdb::{
-    ClaimSet, MatDbError, MaterialAnswer, NormalizedInterfacePack, NormalizedMaterialCardPack,
-    NormalizedModelPack, NormalizedPack, NormalizedSpeciesPack, PackError, QueryPoint,
-    SelectionPolicy,
+    ClaimId, ClaimSet, InterpolationPolicy, MatDbError, MaterialAnswer, NormalizedInterfacePack,
+    NormalizedMaterialCardPack, NormalizedModelPack, NormalizedPack, NormalizedSpeciesPack,
+    PackError, PropertyClaim, PropertyKey, PropertyValue, QueryPoint, SelectionPolicy,
 };
 use fsqlite::{AsyncConnection, FrankenError, Row, SqliteValue};
 
@@ -327,6 +327,13 @@ pub enum StoreError {
         /// Requested property.
         property: String,
     },
+    /// A discovery value range is reversed or has a nonfinite endpoint.
+    InvalidValueRange {
+        /// Requested inclusive lower value in SI units.
+        lo: f64,
+        /// Requested inclusive upper value in SI units.
+        hi: f64,
+    },
     /// A stored value could not be decoded as the expected SQL type.
     Malformed {
         /// Where.
@@ -393,6 +400,10 @@ impl core::fmt::Display for StoreError {
             StoreError::UnknownProperty { property } => {
                 write!(f, "FS-MATDB-STORE-UNKNOWN-PROPERTY: {property}")
             }
+            StoreError::InvalidValueRange { lo, hi } => write!(
+                f,
+                "FS-MATDB-STORE-VALUE-RANGE: expected finite lo <= hi, got [{lo}, {hi}]"
+            ),
             StoreError::Malformed { context } => {
                 write!(f, "FS-MATDB-STORE-MALFORMED: {context}")
             }
@@ -438,6 +449,90 @@ pub struct ValidityRow {
     pub lo: f64,
     /// Upper bound.
     pub hi: f64,
+}
+
+/// Search the admitted scalar/one-dimensional model, using the authoritative
+/// pinned evaluator for values and typed support checks. A curve segment is
+/// continuous only when its source explicitly admits linear interpolation.
+fn claim_attains_range(
+    claims: &ClaimSet,
+    id: ClaimId,
+    claim: &PropertyClaim,
+    lo: f64,
+    hi: f64,
+) -> bool {
+    if claim.validity.is_empty() {
+        return false;
+    }
+    let mut point = QueryPoint::new();
+    for (axis, &(lower, upper)) in claim.validity.bounds() {
+        let value = 0.0_f64.max(lower).min(upper);
+        let next = if let Some(quantity) = claim.validity.axis_quantities().get(axis) {
+            point.with_quantity(axis, *quantity, value)
+        } else {
+            point.with(axis, value)
+        };
+        let Ok(next) = next else {
+            return false;
+        };
+        point = next;
+    }
+    let evaluate = |point: &QueryPoint| {
+        claims
+            .query_pinned_typed(&claim.key, point, id)
+            .ok()
+            .map(|answer| answer.evidence.value.value)
+            .filter(|value| value.is_finite())
+    };
+    match &claim.value {
+        PropertyValue::Scalar { .. } => {
+            evaluate(&point).is_some_and(|value| lo <= value && value <= hi)
+        }
+        PropertyValue::Curve {
+            abscissa, knots, ..
+        } => {
+            let at = |x| {
+                point
+                    .clone()
+                    .with(abscissa, x)
+                    .ok()
+                    .and_then(|p| evaluate(&p))
+            };
+            let (lower, upper) = claim
+                .validity
+                .bounds()
+                .get(abscissa)
+                .copied()
+                .unwrap_or((f64::NEG_INFINITY, f64::INFINITY));
+            match claim.interpolation {
+                InterpolationPolicy::TabulatedOnly => knots
+                    .iter()
+                    .find(|&&(x, y)| lower <= x && x <= upper && lo <= y && y <= hi)
+                    .is_some_and(|&(x, _)| at(x).is_some_and(|y| lo <= y && y <= hi)),
+                InterpolationPolicy::LinearInside => {
+                    let x0 = knots[0].0.max(lower);
+                    let x1 = knots[knots.len() - 1].0.min(upper);
+                    if x0 > x1 {
+                        return false;
+                    }
+                    let (Some(y0), Some(y1)) = (at(x0), at(x1)) else {
+                        return false;
+                    };
+                    // A continuous piecewise-linear curve attains every value
+                    // between its extrema. Evaluate only the two clipped ends;
+                    // interior extrema are admitted knots, keeping the scan O(n).
+                    let (minimum, maximum) = knots
+                        .iter()
+                        .filter(|&&(x, _)| x0 <= x && x <= x1)
+                        .fold((y0.min(y1), y0.max(y1)), |(min, max), &(_, y)| {
+                            (min.min(y), max.max(y))
+                        });
+                    minimum <= hi && lo <= maximum
+                }
+                InterpolationPolicy::ConstantWithinValidity => false,
+            }
+        }
+    }
 }
 
 /// The queryable store.
@@ -788,19 +883,65 @@ impl MaterialStore {
         rows.iter().map(property_row).collect()
     }
 
-    /// Discovery: every material carrying `property`, optionally
-    /// filtered to claims whose scalar value lies in `[lo, hi]`.
+    /// Discovery: every material carrying `property`, optionally filtered to
+    /// claims attaining a value in the inclusive SI range `[lo, hi]` somewhere
+    /// in their admitted support. Curves retain their interpolation policy:
+    /// exact-only samples do not fill the gaps between their values.
+    ///
+    /// This is an existential candidate search, not admission over a requested
+    /// state envelope. The caller must still select and evaluate exact claims.
     ///
     /// # Errors
     /// Staleness refusals plus driver failures.
     pub fn materials_with(
         &self,
         property: &str,
-        scalar_range: Option<(f64, f64)>,
+        value_range: Option<(f64, f64)>,
     ) -> Result<Vec<PropertyRow>, StoreError> {
         self.require_sealed()?;
-        let rows = match scalar_range {
-            None => self
+        if let Some((lo, hi)) = value_range {
+            if !lo.is_finite() || !hi.is_finite() || lo > hi {
+                return Err(StoreError::InvalidValueRange { lo, hi });
+            }
+            self.require_known_property(property)?;
+            let rows = self
+                .conn
+                .query_with_params_sync(
+                    "SELECT DISTINCT pack_id FROM claims WHERE property = ?1 ORDER BY pack_id",
+                    &[text_param(property)],
+                )
+                .map_err(sql_err("materials_with range candidates"))?;
+            let mut matches = Vec::new();
+            for row in &rows {
+                let pack_id = row_text(row, 0, "claims.pack_id")?;
+                let pack = self.load_catalog_pack_unchecked(&pack_id)?;
+                let Some(claims_pack) = pack.claims_pack() else {
+                    continue;
+                };
+                let claims = claims_pack.claims();
+                for (id, claim) in claims
+                    .claims_ordered()
+                    .filter(|(_, claim)| claim.key.name() == property)
+                {
+                    if claim_attains_range(claims, id, claim, lo, hi) {
+                        let (scalar_value, kind) = match &claim.value {
+                            PropertyValue::Scalar { value, .. } => (Some(*value), "scalar"),
+                            PropertyValue::Curve { .. } => (None, "curve"),
+                        };
+                        matches.push(PropertyRow {
+                            pack_id: pack_id.clone(),
+                            pack_kind: pack.kind(),
+                            property: property.to_owned(),
+                            scalar_value,
+                            kind: kind.to_owned(),
+                            observation_backed: !claim.observations.is_empty(),
+                        });
+                    }
+                }
+            }
+            return Ok(matches);
+        }
+        let rows = self
                 .conn
                 .query_with_params_sync(
                     "SELECT c.pack_id, c.property, c.scalar_value, c.kind, c.observation_backed, p.kind \
@@ -808,22 +949,7 @@ impl MaterialStore {
                      WHERE c.property = ?1 ORDER BY c.pack_id, c.claim_hash",
                     &[text_param(property)],
                 )
-                .map_err(sql_err("materials_with"))?,
-            Some((lo, hi)) => self
-                .conn
-                .query_with_params_sync(
-                    "SELECT c.pack_id, c.property, c.scalar_value, c.kind, c.observation_backed, p.kind \
-                     FROM claims c JOIN packs p ON p.pack_id = c.pack_id \
-                     WHERE c.property = ?1 AND c.scalar_value IS NOT NULL \
-                     AND c.scalar_value >= ?2 AND c.scalar_value <= ?3 ORDER BY c.pack_id, c.claim_hash",
-                    &[
-                        text_param(property),
-                        SqliteValue::Float(lo),
-                        SqliteValue::Float(hi),
-                    ],
-                )
-                .map_err(sql_err("materials_with range"))?,
-        };
+                .map_err(sql_err("materials_with"))?;
         if rows.is_empty() {
             self.require_known_property(property)?;
         }
@@ -1039,6 +1165,34 @@ impl MaterialStore {
             })?
             .claims();
         let answer = claims.query(property, point, policy)?;
+        claims.verify_receipt(&answer.receipt)?;
+        Ok(answer)
+    }
+
+    /// Evaluate an explicit quantity and complete property context through the
+    /// canonical pack. This retains typed axes, hardness protocols and tensor
+    /// conventions; a dimensionally equal but semantically different key refuses.
+    ///
+    /// # Errors
+    /// The same store integrity refusals as [`Self::evaluate`], followed by the
+    /// unchanged [`ClaimSet::query_typed`] and receipt-verification refusals.
+    pub fn evaluate_typed(
+        &self,
+        pack_id: &str,
+        property: &PropertyKey,
+        point: &QueryPoint,
+        policy: SelectionPolicy,
+    ) -> Result<MaterialAnswer, StoreError> {
+        self.require_sealed()?;
+        let pack = self.load_catalog_pack_unchecked(pack_id)?;
+        let claims = pack
+            .claims_pack()
+            .ok_or_else(|| StoreError::NoPropertyClaims {
+                pack_id: pack_id.to_owned(),
+                kind: pack.kind(),
+            })?
+            .claims();
+        let answer = claims.query_typed(property, point, policy)?;
         claims.verify_receipt(&answer.receipt)?;
         Ok(answer)
     }

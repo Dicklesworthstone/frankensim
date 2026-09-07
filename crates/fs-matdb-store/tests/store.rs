@@ -148,6 +148,153 @@ fn discovery_surfaces_answer_the_owner_questions() {
 }
 
 #[test]
+fn g0_value_range_discovery_respects_curve_support_and_interpolation() {
+    let temperature = fs_qty::QuantitySpec::semantic(fs_qty::semantic::SemanticType::new(
+        fs_qty::semantic::QuantityKind::AbsoluteTemperature,
+        fs_qty::semantic::ValueForm::Static,
+    ));
+    let curve_pack = |name: &str, interpolation, lower, upper| {
+        let mut claims = ClaimSet::new();
+        let observation = claims
+            .register_observation(ObservationDataset {
+                specimen: format!("{name} synthetic specimen"),
+                method: "authored curve for range discovery".into(),
+                artifact: fs_blake3_hash(name.as_bytes()),
+                caveats: "synthetic software regression; no measured material claim".into(),
+                provenance: provenance(),
+            })
+            .unwrap();
+        claims
+            .insert_claim(PropertyClaim {
+                key: PropertyKey::new("response", Dims::NONE),
+                value: PropertyValue::Curve {
+                    abscissa: "T".into(),
+                    abscissa_dims: temperature.dims(),
+                    knots: vec![(200.0, 10.0), (300.0, 30.0), (400.0, 10.0)],
+                    dims: Dims::NONE,
+                },
+                validity: ValidityDomain::unconstrained().with_quantity(
+                    "T",
+                    temperature,
+                    lower,
+                    upper,
+                ),
+                uncertainty: UncertaintyModel::Unstated,
+                interpolation,
+                observations: vec![observation],
+                provenance: provenance(),
+            })
+            .unwrap();
+        NormalizedPack::new(
+            name,
+            "store-range-test",
+            fs_blake3_hash(name.as_bytes()),
+            "synthetic redistribution permitted for tests",
+            claims,
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap()
+    };
+    let linear = NormalizedMaterialCardPack::new(
+        named_state("curve-body"),
+        curve_pack("a-linear", InterpolationPolicy::LinearInside, 250.0, 350.0),
+    )
+    .unwrap();
+    let store = MaterialStore::open(&scratch_path("curve-range")).unwrap();
+    store
+        .ingest_bundle(&[
+            CatalogPack::MaterialCard(linear),
+            CatalogPack::Properties(curve_pack(
+                "b-exact",
+                InterpolationPolicy::TabulatedOnly,
+                250.0,
+                350.0,
+            )),
+            CatalogPack::Properties(curve_pack(
+                "c-no-support",
+                InterpolationPolicy::LinearInside,
+                500.0,
+                600.0,
+            )),
+            CatalogPack::Properties(curve_pack(
+                "d-wrong-policy",
+                InterpolationPolicy::ConstantWithinValidity,
+                250.0,
+                350.0,
+            )),
+        ])
+        .unwrap();
+    let seal = store.seal_corpus().unwrap();
+    assert_eq!(store.materials_with("response", None).unwrap().len(), 4);
+
+    // Neither the first knot nor any other stored knot has a value in this
+    // band. Only the admitted linear model attains it, at T=275 and 325 K.
+    let interior = store
+        .materials_with("response", Some((24.0, 26.0)))
+        .unwrap();
+    assert_eq!(interior.len(), 1);
+    assert_eq!(interior[0].pack_id, "a-linear");
+    assert_eq!(interior[0].pack_kind, PackKind::MaterialCard);
+    assert_eq!(interior[0].kind, "curve");
+    assert_eq!(interior[0].scalar_value, None);
+    assert!(interior[0].observation_backed);
+    let answer = store
+        .evaluate(
+            "a-linear",
+            "response",
+            &QueryPoint::new()
+                .with_quantity("T", temperature, 275.0)
+                .unwrap(),
+            SelectionPolicy::SingleClaimOnly,
+        )
+        .unwrap();
+    assert_eq!(answer.evidence.value.value, 25.0);
+    // Inclusive endpoint and exact sample support, without inventing the
+    // unsupported low-temperature/high-temperature parts of the curve.
+    assert_eq!(
+        store
+            .materials_with("response", Some((20.0, 20.0)))
+            .unwrap()
+            .len(),
+        1
+    );
+    let exact = store
+        .materials_with("response", Some((30.0, 30.0)))
+        .unwrap();
+    assert_eq!(
+        exact
+            .iter()
+            .map(|row| row.pack_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["a-linear", "b-exact"]
+    );
+    assert!(
+        store
+            .materials_with("response", Some((10.0, 19.0)))
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        store
+            .materials_with("response", Some((31.0, 100.0)))
+            .unwrap()
+            .is_empty()
+    );
+    assert!(matches!(
+        store.materials_with("missing-response", Some((0.0, 100.0))),
+        Err(StoreError::UnknownProperty { .. })
+    ));
+    for range in [(2.0, 1.0), (f64::NAN, 1.0), (0.0, f64::INFINITY)] {
+        assert!(matches!(
+            store.materials_with("response", Some(range)),
+            Err(StoreError::InvalidValueRange { .. })
+        ));
+    }
+    assert_eq!(store.seal_corpus().unwrap(), seal);
+}
+
+#[test]
 fn evaluation_is_the_same_answer_as_direct_pack_use() {
     // Parity by construction, ASSERTED: the store's answer must be
     // bitwise the in-memory answer, receipt hash included.
@@ -204,6 +351,118 @@ fn evaluation_is_the_same_answer_as_direct_pack_use() {
     println!(
         "{{\"suite\":\"fs-matdb-store\",\"case\":\"evaluation-parity\",\"verdict\":\"pass\"}}"
     );
+}
+
+#[test]
+fn g0_typed_store_evaluation_preserves_quantity_axes_and_receipts() {
+    use fs_qty::{
+        QuantitySpec,
+        semantic::{QuantityKind, SemanticType, ValueForm},
+    };
+    let quantity = |kind| QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static));
+    let temperature = quantity(QuantityKind::AbsoluteTemperature);
+    let key = PropertyKey::with_quantity("work", quantity(QuantityKind::Energy));
+    let mut claims = ClaimSet::new();
+    let observation = claims
+        .register_observation(ObservationDataset {
+            specimen: "typed-work synthetic specimen".into(),
+            method: "authored scalar for typed store evaluation".into(),
+            artifact: fs_blake3_hash(b"typed-work observation"),
+            caveats: "synthetic software regression; no measured material claim".into(),
+            provenance: provenance(),
+        })
+        .unwrap();
+    claims
+        .insert_claim(PropertyClaim {
+            key: key.clone(),
+            value: PropertyValue::Scalar {
+                value: 12.0,
+                dims: key.dims(),
+            },
+            validity: ValidityDomain::unconstrained().with_quantity("T", temperature, 300.0, 400.0),
+            uncertainty: UncertaintyModel::Unstated,
+            interpolation: InterpolationPolicy::ConstantWithinValidity,
+            observations: vec![observation],
+            provenance: provenance(),
+        })
+        .unwrap();
+    let pack = NormalizedPack::new(
+        "typed-work",
+        "store-typed-test",
+        fs_blake3_hash(b"typed"),
+        "synthetic redistribution permitted for tests",
+        claims,
+        Vec::new(),
+        Vec::new(),
+    )
+    .unwrap();
+    let families = [
+        CatalogPack::Properties(pack.clone()),
+        CatalogPack::MaterialCard(
+            NormalizedMaterialCardPack::new(named_state("body"), pack.clone()).unwrap(),
+        ),
+        CatalogPack::Interface(
+            NormalizedInterfacePack::new(
+                SurfaceSpec {
+                    material: named_state("body"),
+                    texture_frame: "body/frame".into(),
+                },
+                SurfaceSpec {
+                    material: named_state("base"),
+                    texture_frame: "base/frame".into(),
+                },
+                SystemContext {
+                    medium: "dry".into(),
+                    third_body: None,
+                    environment: "air".into(),
+                    history: "virgin".into(),
+                },
+                pack.clone(),
+            )
+            .unwrap(),
+        ),
+    ];
+    let point = QueryPoint::new()
+        .with_quantity("T", temperature, 350.0)
+        .unwrap();
+    let wrong_key = PropertyKey::with_quantity("work", quantity(QuantityKind::Torque));
+    let wrong_axis = QueryPoint::new()
+        .with_quantity("T", quantity(QuantityKind::TemperatureDifference), 350.0)
+        .unwrap();
+    for family in families {
+        let store = MaterialStore::open(":memory:").unwrap();
+        store.ingest_bundle(&[family]).unwrap();
+        store.seal_corpus().unwrap();
+        for policy in [
+            SelectionPolicy::SingleClaimOnly,
+            SelectionPolicy::PreferObservationBacked,
+        ] {
+            let direct = pack.claims().query_typed(&key, &point, policy).unwrap();
+            let stored = store
+                .evaluate_typed("typed-work", &key, &point, policy)
+                .unwrap();
+            assert_eq!(
+                stored.evidence.value.value.to_bits(),
+                direct.evidence.value.value.to_bits()
+            );
+            assert_eq!(stored.receipt, direct.receipt);
+            assert!(matches!(
+                store.evaluate_typed("typed-work", &wrong_key, &point, policy),
+                Err(StoreError::MatDb(MatDbError::QuantityMismatch { .. }))
+            ));
+            assert!(matches!(
+                store.evaluate_typed("typed-work", &key, &wrong_axis, policy),
+                Err(StoreError::MatDb(MatDbError::AxisQuantityMismatch { .. }))
+            ));
+        }
+        store
+            .ingest_pack(&test_pack("post-seal", &[("density", 1.0)]))
+            .unwrap();
+        assert!(matches!(
+            store.evaluate_typed("typed-work", &key, &point, SelectionPolicy::SingleClaimOnly),
+            Err(StoreError::CorpusChanged { .. })
+        ));
+    }
 }
 
 #[test]

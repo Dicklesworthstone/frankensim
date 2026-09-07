@@ -45,10 +45,16 @@ plus a canonical-bytes vault.
   (`FS-MATDB-STORE-NOT-SEALED`) before the first seal.
 - Discovery: `packs(optional_kind)` returns family/name/content identities;
   `properties_of(pack_id)`, `materials_with(property,
-  scalar_range)`, `valid_at(property, axis, value)` (missing axis =
+  value_range)`, `valid_at(property, axis, value)` (missing axis =
   unconstrained, matching `ValidityDomain` semantics). Every `PropertyRow`
   includes `pack_kind`, so an interface claim is not mislabeled as a bulk
   property. Equal-property rows use claim hash as a deterministic tie-break.
+  Value-range discovery inspects canonical claims and uses the pinned evaluator
+  at admitted scalar/sample points and clipped linear-segment endpoints. It
+  includes curves with overlapping supported values, without filling exact-only
+  sample gaps or extending beyond validity/knot support. Range endpoints must
+  be finite and ordered (`InvalidValueRange`). This asks whether some supported
+  state matches; it does not admit a complete state envelope or select a claim.
 - `evaluate(pack_id, property, &QueryPoint, policy)` — decodes the
   stored bytes via the family's hash-verified decoder and delegates
   to `ClaimSet::query` + `verify_receipt`: the SAME evaluator,
@@ -57,6 +63,10 @@ plus a canonical-bytes vault.
   Named material and ordered-interface packs expose their original nested
   claims; model parameters and species metadata never become synthetic scalar
   claims (`NoPropertyClaims` on property evaluation).
+- `evaluate_typed(pack_id, &PropertyKey, &QueryPoint, policy)` delegates to
+  the same canonical decoder and `ClaimSet::query_typed`, then verifies the
+  receipt. It retains complete quantity, hardness/tensor context and typed
+  axis requirements; no property name or equal dimensions can erase them.
 - `verify_index(pack_id)` — cross-checks every derived row against the
   decoded pack, claims table AND validity table (claim hash, axis,
   bitwise bounds); `FS-MATDB-STORE-INDEX-MISMATCH` names the first
@@ -150,9 +160,10 @@ Synthetic fixtures prove storage semantics, not physical dataset accuracy.
   associations from similar names. Compound discovery and new cross-pack
   binding formats remain separate work; callers can already resolve exact
   whole-artifact identities with `load_by_hash`.
-- Discovery indexes scalar claims' values; curve claims are listed
-  (kind = "curve") but range-filtered discovery over curve knots is a
-  follow-up.
+- Value-range discovery covers the existing scalar and one-dimensional curve
+  payloads. Compound requirement envelopes, model availability and ordered
+  counter-material discovery remain separate work; the exact state query is
+  still required before a physical claim can consume a candidate.
 - The seal is an integrity mechanism, not authentication: it detects
   drift and tampering against the sealed identity, but a hostile party
   who can rewrite BOTH packs and seal defeats it — authenticity needs

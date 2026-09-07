@@ -274,8 +274,9 @@ refuses typed domains. Intersections preserve compatible descriptors and
 become empty for a shared axis with incompatible declarations. Invalid typed
 scalar endpoints refuse admission. Curve abscissa dimensions must agree with
 the typed domain. These remain explicitly declared boxes, not inferred joint
-support from independent observations. General tensor transformation context
-and actual multiaxis support domains remain MR09 work.
+support from independent observations. Tensor transformation context and exact
+sparse sample support are described below; continuous multiaxis response models
+remain MR10 work.
 Typed axes use claim/normalized-pack v3, property-use receipt v3 (distinct
 `FSMATU3` wire header), and joint receipt v2. Every axis descriptor is bound
 into identity and replay; v1/v2 normalized packs and v2 property receipts
@@ -345,6 +346,13 @@ validity endpoints. Compiler identities and source-envelope hashing advance
 to v5; the lowered claims use the existing portable schema appropriate to their
 fields (v3 for typed axes, v4 when hardness context is present). Existing source
 v1 and manifests v1 through v4 do not accept `sample` rows.
+
+Evaluator version 2 requires every declared bound of a `TabulatedOnly` scalar
+to be a point. Interval support requires `ConstantWithinValidity`; an
+unconstrained scalar remains supported. Unsupported intervals return
+`UnsupportedEvaluation` for ordinary and pinned queries. Old receipts remain
+decodable, but evaluator-v1 replay refuses pending a fresh query. G0 covers
+endpoints/interiors, point tuples, explicit plateaus, and stale receipts.
 
 This is finite sampled support, with no inferred interpolation, extrapolation,
 covariance, or uncertainty between samples. Existing `NoClaimInDomain`,
