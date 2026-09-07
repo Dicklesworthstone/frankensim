@@ -1555,6 +1555,87 @@ pub fn resolve_joint_strain_tensor_state_point(
     })
 }
 
+/// Nominal source stress and its joint statistics selected from the same
+/// immutable pack. Private fields prevent unrelated covariance from borrowing
+/// the nominal components' source evidence.
+#[derive(Clone, Debug, PartialEq)]
+pub struct JointStressTensorStatePoint {
+    nominal: StressTensorStatePoint,
+    joint: JointUsageReceipt,
+    identity: ContentHash,
+}
+
+impl JointStressTensorStatePoint {
+    /// Six nominal source stress coordinates and their scalar evidence.
+    #[must_use]
+    pub const fn nominal(&self) -> &StressTensorStatePoint {
+        &self.nominal
+    }
+
+    /// Covariance in source coordinate order, or the exact unknown reason.
+    #[must_use]
+    pub const fn joint_receipt(&self) -> &JointUsageReceipt {
+        &self.joint
+    }
+
+    /// Identity binding the nominal state and admitted joint source receipt.
+    #[must_use]
+    pub const fn identity(&self) -> ContentHash {
+        self.identity
+    }
+}
+
+/// Resolve nominal stress and its joint receipt at one exact material point.
+/// This retains source correlations; marginal widths never imply covariance,
+/// and nominal values are not asserted to be distribution means.
+pub fn resolve_joint_stress_tensor_state_point(
+    pack: &fs_matdb::NormalizedMaterialCardPack,
+    point: &QueryPoint,
+    components: &[PropertyKey; 6],
+    selection: SelectionPolicy,
+) -> Result<JointStressTensorStatePoint, MaterialStatePointError> {
+    let nominal = resolve_stress_tensor_state_point(
+        pack.card(),
+        point,
+        components,
+        match selection {
+            SelectionPolicy::SingleClaimOnly => MaterialPropertySelection::SingleClaimOnly,
+            SelectionPolicy::PreferObservationBacked => {
+                MaterialPropertySelection::PreferObservationBacked
+            }
+        },
+    )?;
+    let answer = pack
+        .claims_pack()
+        .query_joint_typed(components, point, selection)
+        .map_err(|source| MaterialStatePointError::Query {
+            property: "stress tensor joint statistics".into(),
+            source,
+        })?;
+    for (key, member) in components.iter().zip(&answer.members) {
+        let scalar = nominal
+            .resolved()
+            .property_by_key(key)
+            .expect("all nominal stress components were resolved");
+        if scalar.answer().receipt != member.receipt {
+            return Err(MaterialStatePointError::Query {
+                property: key.name().to_owned(),
+                source: MatDbError::ReceiptMismatch {
+                    field: "joint stress member",
+                },
+            });
+        }
+    }
+    let mut identity = DomainHasher::new("org.frankensim.fs-material.joint-stress-state-point.v1");
+    identity.update(nominal.resolved().identity().as_bytes());
+    identity.update(answer.receipt.content_hash().as_bytes());
+    Ok(JointStressTensorStatePoint {
+        nominal,
+        joint: answer.receipt,
+        identity: identity.finalize(),
+    })
+}
+
 /// Evidence-bearing orthotropic tangent elasticity in its material frame.
 ///
 /// Orientation is intentionally not part of this bulk property bundle. A

@@ -111,6 +111,28 @@ homogenization, the P2 milestone.
   can consume this bundle with a caller-declared integrated stress-free strain
   interpretation. Neither point support nor a source tensor name proves that
   temperature integration was performed or that a complete path is supported.
+  `resolve_stress_tensor_state_point` likewise resolves six explicit symmetric
+  Cauchy stress coordinates from one material card and supported query point.
+  Complete scalar requirements retain the stress descriptor through all bulk
+  and interface selection policies; equal pressure dimensions do not alias
+  stiffness. `StressTensorStatePoint` exposes pascal values in the declared
+  notation/order/frame, source tensor identity and the selected evidence bundle.
+  Missing entries, mixed tensors/bases and context-free requirements refuse.
+  Signed stress is admitted; engineering stress shear is physical sigma_ij.
+  Source compiler v8 and normalized-pack v7 feed this path. The synthetic
+  Pa/kPa import test compares it with the existing rotated isotropic law's
+  constrained thermal response. It adds no solved field, initial-stress load,
+  inferred covariance, finite-deformation stress or experimental validation.
+  `resolve_joint_stress_tensor_state_point` resolves the same six nominal
+  stress coordinates and their joint receipt from one immutable material-card
+  pack, point and selection policy. Each nominal member receipt must match the
+  joint answer. Private `JointStressTensorStatePoint` fields bind both under
+  `joint-stress-state-point.v1`; a caller cannot substitute unrelated covariance.
+  The source-coordinate covariance or exact unknown-correlation reason is
+  retained. Nominal values are not asserted to be distribution means, marginal
+  widths are not converted to covariance, and no orientation uncertainty is
+  inferred. The existing two joint-query policies are supported. The fixed-frame
+  numerical transform is owned by fs-solid, with no new pack schema or dependency.
   `resolve_joint_strain_tensor_state_point` binds that nominal state to the
   existing joint query on the same `NormalizedMaterialCardPack`, component
   requirements, physical point and selection policy. It compares all member
@@ -167,8 +189,9 @@ homogenization, the P2 milestone.
   Shared `StressTensorBasis` / `StressTensorNotation` descriptors distinguish
   physical/engineering stress shear (both `sigma_ij`) from Mandel stress shear.
   They are re-exported from fs-matdb for fs-solid's recovered thermal-stress
-  outputs; they do not reuse engineering-strain factor two or imply Piola stress,
-  source-pack stress transport or material/frame calibration.
+  outputs; they do not reuse engineering-strain factor two or imply Piola stress
+  or material/frame calibration. Source-pack stress transport uses the separate
+  StressTensorComponent context described above.
 
 ### `gas` — first-principles ambient gas state (zdmm1 slice 1)
 
