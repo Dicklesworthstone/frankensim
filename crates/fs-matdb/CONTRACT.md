@@ -153,6 +153,20 @@ persistence.
   resolves and evaluates identically, while WHO pinned it must be
   cross-checked against the external record (e.g. the project file),
   exactly like the query point.
+- `ClaimSet::{query_envelope, query_envelope_typed}` own conservative-box
+  support for discovery and project binding. `ClaimSelection` retains either
+  the existing policy or an exact pin. `EnvelopeAnswer` keeps both corner
+  answers unchanged; `PropertySupportError` names malformed corners, original
+  evaluator refusals, exact-sample holes, and source changes with witness
+  coordinates. Corners have identical axes/quantity descriptors and ordered
+  finite coordinates. Every competing validity-box intersection is queried by
+  the original selection path; a pin bypasses competing selection, never the
+  selected claim's support. This proves declared scalar/linear-curve coverage,
+  not numerical finiteness at every future solver state, physical trajectory,
+  multiaxis measured support beyond the admitted model, or experimental truth.
+  G0 tests in `tests/query.rs` cover malformed corners, degenerate boxes and
+  typed pin/ordinary-query receipt parity; store and project tests exercise the
+  same owner through their actual consumers.
 - `MatDbError` — total, typed refusals: `DimsMismatch`,
   `MissingLicense`, `MissingSource`, `NonFinite` (with exact bits),
   `UnusableValidity`, `InvalidUncertainty`, `MalformedCurve`,
