@@ -40,6 +40,24 @@ differentiable lift). Pure Rust throughout.
   stainless-steel tables are explicitly representative look-development data;
   table/source/material identities prove replay binding, not specimen fidelity.
 
+- `material_state` (opt-in `material-state`, including `tracer` and L3
+  `fs-material`): `MaterialOpticalBinding` converts resolved visible conductor
+  or dielectric data directly to the existing tracer `Material`. Mechanics and
+  optics must share one exact card and query point; mechanical requirements
+  remain consumer-owned. Surface identity and roughness are independent inputs.
+  Cauchy coefficients convert from SI to micrometre powers, while wavelength
+  evaluation uses nanometres and absorption distance uses metres. No fallback
+  preset or chemistry-name dispatch is used. Admission is synchronous, bounded
+  to nine optical knots, safe Rust, and does not mutate accepted physical or
+  scene state. Underlying optical model refusals remain structured errors.
+  Binding identities establish replay consistency, not measurement authority;
+  conductor source status remains a caller assertion and dielectric RGB lifting
+  remains an approximation. No thermal emission, birefringence, phase evolution,
+  or measured-spectrum validation is added. Focused G0/G1 regressions in the
+  existing Euler scene-adapter unit seam exercise both generic optical families,
+  minimal string versus disc mechanical requirements, Fresnel and absorption
+  formulas, SI conversion, material replacement, and mismatch refusals.
+
 - `charts` module (plan §10.2, beads qfx.2 + 8ll9; [S], default-on through
   `chart-backends`): render charts that opt into a typed trace theorem, WITHOUT
   conversion; other chart types remain explicit no-claim previews until they

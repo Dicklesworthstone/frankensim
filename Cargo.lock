@@ -2203,6 +2203,7 @@ dependencies = [
  "fs-geom",
  "fs-img",
  "fs-lbm",
+ "fs-material",
  "fs-math",
  "fs-propcheck",
  "fs-rand",

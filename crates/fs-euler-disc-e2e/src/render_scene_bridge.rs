@@ -24,16 +24,13 @@ use fs_render::animated_instances::{
 };
 use fs_render::camera::{AnimatedCamera, CameraError, CutSide, KeyframeFocus};
 use fs_render::charts::TriMesh;
-use fs_render::conductor::{
-    ConductorDataStatus, ConductorError, ConductorIorSample, ConductorOptics, ConductorSource,
-    ConductorSurface,
-};
+use fs_render::conductor::{ConductorError, ConductorOptics, ConductorSurface};
 use fs_render::dielectric::{
-    BeerLambertAbsorption, BeerLambertParameters, CauchyIor, DielectricError, DielectricGlass,
-    DielectricSurface, GlassProvenance,
+    BeerLambertParameters, DielectricError, DielectricGlass, DielectricSurface, GlassProvenance,
 };
 use fs_render::instances::{GeometryInstance, InstanceError, RigidTransform, SharedGeometry};
 use fs_render::lighting::{EnvironmentMap, LightingError};
+use fs_render::material_state::{MaterialOpticalBinding, MaterialOpticalError, OpticalAppearance};
 use fs_render::motion::{ShotTimeBounds, ShutterConvention, ShutterDistribution, ShutterInterval};
 use fs_render::motion_bounds::{
     FiniteLocalAabb, MotionBoundsError, conservative_trajectory_swept_aabb,
@@ -323,39 +320,14 @@ impl EulerDiscMaterialStateBinding {
         surface_state_identity: ContentHash,
     ) -> Result<Self, EulerSceneError> {
         let optical_resolved = optical.resolved();
-        if mechanical.material() != optical_resolved.material()
-            || mechanical.card_identity() != optical_resolved.card_identity()
-            || mechanical.query_point() != optical_resolved.query_point()
-        {
-            return Err(EulerSceneError::MaterialStateMismatch(
-                "mechanical and optical properties must resolve from one card and state point",
-            ));
-        }
-        if surface_state_identity == ContentHash([0; 32]) {
-            return Err(EulerSceneError::MaterialStateMismatch(
-                "surface-state identity must not be zero",
-            ));
-        }
-        let samples: [Result<ConductorIorSample, ConductorError>; 9] =
-            core::array::from_fn(|index| {
-                let sample = optical.samples()[index];
-                ConductorIorSample::try_new(sample.wavelength_nm, sample.eta, sample.k)
-            });
-        // This value is only an initialization sentinel and every slot is
-        // replaced below. Keep it inside the conductor contract (`k > 0`) so
-        // valid caller-supplied optical tables are not rejected before copy.
-        let mut admitted = [ConductorIorSample::try_new(380.0, 1.0, 1.0)?; 9];
-        for (slot, sample) in admitted.iter_mut().zip(samples) {
-            *slot = sample?;
-        }
-        let source = ConductorSource::try_new(
-            optical_resolved.identity(),
-            ConductorDataStatus::CallerAssertedMeasured,
-        )?;
-        let appearance = EulerMaterialStyle::Conductor {
-            optics: ConductorOptics::try_new(admitted, source)?,
-            surface: ConductorSurface::try_rough(roughness_alpha)?,
-        };
+        let appearance = MaterialOpticalBinding::try_conductor(
+            mechanical,
+            optical,
+            roughness_alpha,
+            surface_state_identity,
+        )?
+        .appearance()
+        .into();
         let mechanical_state_identity = mechanical.identity();
         let optical_state_identity = optical_resolved.identity();
         let material_card_identity = mechanical.card_identity();
@@ -423,33 +395,14 @@ impl EulerDiscMaterialStateBinding {
         surface_state_identity: ContentHash,
     ) -> Result<Self, EulerSceneError> {
         let optical_resolved = optical.resolved();
-        if mechanical.material() != optical_resolved.material()
-            || mechanical.card_identity() != optical_resolved.card_identity()
-            || mechanical.query_point() != optical_resolved.query_point()
-        {
-            return Err(EulerSceneError::MaterialStateMismatch(
-                "mechanical and optical properties must resolve from one card and state point",
-            ));
-        }
-        if surface_state_identity == ContentHash([0; 32]) {
-            return Err(EulerSceneError::MaterialStateMismatch(
-                "surface-state identity must not be zero",
-            ));
-        }
-        let [a, b_m2, c_m4] = optical.cauchy_coefficients_si();
-        let glass = DielectricGlass::new(
-            CauchyIor::try_new(a, b_m2 * 1.0e12, c_m4 * 1.0e24)?,
-            BeerLambertAbsorption::try_from_rgb_transmittance(
-                optical.reference_transmittance_linear_rgb(),
-                optical.reference_distance_m(),
-            )?,
-            GlassProvenance::Custom,
-        );
-        let surface = match roughness_alpha {
-            Some(alpha) => DielectricSurface::try_rough(alpha)?,
-            None => DielectricSurface::POLISHED,
-        };
-        let appearance = EulerMaterialStyle::Dielectric { glass, surface };
+        let appearance = MaterialOpticalBinding::try_dielectric(
+            mechanical,
+            optical,
+            roughness_alpha,
+            surface_state_identity,
+        )?
+        .appearance()
+        .into();
         let mechanical_state_identity = mechanical.identity();
         let optical_state_identity = optical_resolved.identity();
         let material_card_identity = mechanical.card_identity();
@@ -484,6 +437,15 @@ impl EulerDiscMaterialStateBinding {
     #[must_use]
     pub const fn identity(self) -> ContentHash {
         self.identity
+    }
+}
+
+impl From<OpticalAppearance> for EulerMaterialStyle {
+    fn from(appearance: OpticalAppearance) -> Self {
+        match appearance {
+            OpticalAppearance::Conductor { optics, surface } => Self::Conductor { optics, surface },
+            OpticalAppearance::Dielectric { glass, surface } => Self::Dielectric { glass, surface },
+        }
     }
 }
 
@@ -1889,6 +1851,21 @@ impl From<MotionBoundsError> for EulerSceneError {
 impl From<ConductorError> for EulerSceneError {
     fn from(error: ConductorError) -> Self {
         Self::Conductor(error)
+    }
+}
+
+impl From<MaterialOpticalError> for EulerSceneError {
+    fn from(error: MaterialOpticalError) -> Self {
+        match error {
+            MaterialOpticalError::StateMismatch => Self::MaterialStateMismatch(
+                "mechanical and optical properties must resolve from one card and state point",
+            ),
+            MaterialOpticalError::MissingSurfaceIdentity => {
+                Self::MaterialStateMismatch("surface-state identity must not be zero")
+            }
+            MaterialOpticalError::Conductor(error) => Self::Conductor(error),
+            MaterialOpticalError::Dielectric(error) => Self::Dielectric(error),
+        }
     }
 }
 
@@ -3648,19 +3625,18 @@ mod material_binding_tests {
         PropertyValue, Provenance, QueryPoint, UncertaintyModel,
     };
     use fs_material::state_point::{
-        MaterialPropertySelection, VISIBLE_DIELECTRIC_CAUCHY_A_PROPERTY,
-        VISIBLE_DIELECTRIC_CAUCHY_B_M2_PROPERTY, VISIBLE_DIELECTRIC_CAUCHY_C_M4_PROPERTY,
-        VISIBLE_DIELECTRIC_REFERENCE_DISTANCE_M_PROPERTY,
+        MaterialPropertySelection, ScalarAdmissibility, ScalarPropertyRequirement,
+        VISIBLE_COMPLEX_IOR_ETA_PROPERTIES, VISIBLE_COMPLEX_IOR_K_PROPERTIES,
+        VISIBLE_DIELECTRIC_CAUCHY_A_PROPERTY, VISIBLE_DIELECTRIC_CAUCHY_B_M2_PROPERTY,
+        VISIBLE_DIELECTRIC_CAUCHY_C_M4_PROPERTY, VISIBLE_DIELECTRIC_REFERENCE_DISTANCE_M_PROPERTY,
         VISIBLE_DIELECTRIC_TRANSMITTANCE_PROPERTIES, resolve_isotropic_elastic_state_point,
-        resolve_visible_optical_state_point,
+        resolve_material_state_point, resolve_visible_optical_state_point,
     };
     use fs_qty::{Density, Dims, Pressure};
 
     use super::*;
 
     fn dielectric_card(process: &str, red_transmittance: f64) -> MaterialCard {
-        let validity = ValidityDomain::unconstrained().with("T", 293.15, 293.15);
-        let mut claims = ClaimSet::new();
         let properties = [
             ("density", Density::DIMS, 3_980.0),
             ("young_modulus", Pressure::DIMS, 345.0e9),
@@ -3697,7 +3673,13 @@ mod material_binding_tests {
                 0.004,
             ),
         ];
-        for (name, dims, value) in properties {
+        test_card(process, &properties, 293.15)
+    }
+
+    fn test_card(process: &str, properties: &[(&str, Dims, f64)], upper_t: f64) -> MaterialCard {
+        let validity = ValidityDomain::unconstrained().with("T", 293.15, upper_t);
+        let mut claims = ClaimSet::new();
+        for &(name, dims, value) in properties {
             claims
                 .insert_claim(PropertyClaim {
                     key: PropertyKey::new(name, dims),
@@ -3725,6 +3707,213 @@ mod material_binding_tests {
             Vec::new(),
         )
         .expect("complete dielectric test card")
+    }
+
+    fn string_material(card: &MaterialCard, point: &QueryPoint) -> ResolvedMaterialStatePoint {
+        let requirements = [
+            ("density", Density::DIMS),
+            ("young_modulus", Pressure::DIMS),
+        ]
+        .map(|(name, dims)| {
+            ScalarPropertyRequirement::try_new(name, dims, ScalarAdmissibility::StrictlyPositive)
+                .unwrap()
+        });
+        resolve_material_state_point(
+            card,
+            point,
+            &requirements,
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .unwrap()
+    }
+
+    fn conductor_card(extinction: f64) -> MaterialCard {
+        let mut properties = vec![
+            ("density", Density::DIMS, 8_960.0),
+            ("young_modulus", Pressure::DIMS, 110.0e9),
+        ];
+        properties.extend(VISIBLE_COMPLEX_IOR_ETA_PROPERTIES.map(|name| (name, Dims::NONE, 1.5)));
+        properties
+            .extend(VISIBLE_COMPLEX_IOR_K_PROPERTIES.map(|name| (name, Dims::NONE, extinction)));
+        test_card("synthetic-conductor", &properties, 400.0)
+    }
+
+    #[test]
+    fn g1_shared_optical_ingress_preserves_cauchy_units_and_beer_lambert_distance() {
+        let card = dielectric_card("polished", 0.85);
+        let point = QueryPoint::new().with("T", 293.15).unwrap();
+        let string = string_material(&card, &point);
+        let disc = resolve_isotropic_elastic_state_point(
+            &card,
+            &point,
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .unwrap();
+        let optical = resolve_visible_optical_state_point(
+            &card,
+            &point,
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .unwrap();
+        let surface_id = ContentHash([7; 32]);
+        let string_binding =
+            MaterialOpticalBinding::try_visible(&string, &optical, 0.08, surface_id).unwrap();
+        let disc_binding =
+            MaterialOpticalBinding::try_visible(disc.resolved(), &optical, 0.08, surface_id)
+                .unwrap();
+        let adapter = EulerDiscMaterialStateBinding::try_visible_optical_elastic(
+            &disc, &optical, 0.08, surface_id,
+        )
+        .unwrap();
+        assert_eq!(string_binding.material(), disc_binding.material());
+        assert_eq!(
+            EulerMaterialStyle::from(disc_binding.appearance()),
+            adapter.appearance()
+        );
+        assert_ne!(
+            string_binding.identity(),
+            disc_binding.identity(),
+            "different mechanical requirements remain bound"
+        );
+        let Material::Dielectric { glass, surface } = string_binding.material() else {
+            panic!("dielectric expected")
+        };
+        let wavelength_m: f64 = 530.0e-9;
+        let expected_ior = 1.75 + 5.0e-15 / wavelength_m.powi(2);
+        assert!((glass.ior().eval(530.0).unwrap() - expected_ior).abs() < 1.0e-14);
+        assert_eq!(surface.roughness_alpha(), Some(0.08));
+        let at_reference = glass.absorption().transmittance(530.0, 0.004).unwrap();
+        let at_double = glass.absorption().transmittance(530.0, 0.008).unwrap();
+        assert!(at_reference > 0.0 && at_reference < 1.0);
+        assert!((at_double - at_reference * at_reference).abs() < 1.0e-14);
+        let VisibleOpticalStatePoint::Dielectric(optical) = optical else {
+            unreachable!()
+        };
+        let polished =
+            MaterialOpticalBinding::try_dielectric(&string, &optical, None, surface_id).unwrap();
+        let Material::Dielectric {
+            glass: polished_glass,
+            surface,
+        } = polished.material()
+        else {
+            unreachable!()
+        };
+        assert_eq!(polished_glass, glass);
+        assert!(surface.is_delta());
+        assert_ne!(polished.identity(), string_binding.identity());
+    }
+
+    #[test]
+    fn g1_shared_conductor_ingress_needs_only_string_mechanics_and_matches_fresnel() {
+        let point = QueryPoint::new().with("T", 293.15).unwrap();
+        let mut reflectances = Vec::new();
+        let mut identities = Vec::new();
+        for extinction in [2.0_f64, 4.0] {
+            let card = conductor_card(extinction);
+            // No Poisson-ratio/yield property exists on this card.
+            let mechanical = string_material(&card, &point);
+            let optical = resolve_visible_optical_state_point(
+                &card,
+                &point,
+                MaterialPropertySelection::SingleClaimOnly,
+            )
+            .unwrap();
+            let binding = MaterialOpticalBinding::try_visible(
+                &mechanical,
+                &optical,
+                0.12,
+                ContentHash([5; 32]),
+            )
+            .unwrap();
+            let Material::Conductor { optics, surface } = binding.material() else {
+                panic!("conductor expected")
+            };
+            for (sample, source) in optics.samples().iter().zip(match &optical {
+                VisibleOpticalStatePoint::Conductor(state) => state.samples(),
+                _ => unreachable!(),
+            }) {
+                assert_eq!(sample.wavelength_nm(), source.wavelength_nm);
+                assert_eq!(sample.eta(), source.eta);
+                assert_eq!(sample.k(), source.k);
+            }
+            assert_eq!(surface.roughness_alpha(), 0.12);
+            let reflectance = optics.fresnel(530.0, 1.0, 1.0).unwrap();
+            let expected =
+                (0.5_f64.powi(2) + extinction.powi(2)) / (2.5_f64.powi(2) + extinction.powi(2));
+            assert!((reflectance - expected).abs() < 1.0e-14);
+            let adapter = EulerDiscMaterialStateBinding::try_visible_optical_resolved(
+                &mechanical,
+                &optical,
+                0.12,
+                ContentHash([5; 32]),
+            )
+            .unwrap();
+            assert_eq!(adapter.appearance(), binding.appearance().into());
+            reflectances.push(reflectance);
+            identities.push(binding.identity());
+        }
+        assert!(
+            reflectances[1] > reflectances[0],
+            "optical substitution changes reflected light"
+        );
+        assert_ne!(identities[0], identities[1]);
+    }
+
+    #[test]
+    fn g0_shared_optical_ingress_refuses_cross_card_cross_state_and_invalid_finish() {
+        let card = conductor_card(2.0);
+        let point = QueryPoint::new().with("T", 293.15).unwrap();
+        let warm_point = QueryPoint::new().with("T", 350.0).unwrap();
+        let mechanical = string_material(&card, &point);
+        let optical = resolve_visible_optical_state_point(
+            &card,
+            &point,
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .unwrap();
+        let warm_optical = resolve_visible_optical_state_point(
+            &card,
+            &warm_point,
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .unwrap();
+        let other_optical = resolve_visible_optical_state_point(
+            &conductor_card(4.0),
+            &point,
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .unwrap();
+        let bind = |state: &VisibleOpticalStatePoint, alpha, id| {
+            MaterialOpticalBinding::try_visible(&mechanical, state, alpha, ContentHash([id; 32]))
+        };
+        let accepted = bind(&optical, 0.1, 7).unwrap();
+        for mismatched in [&warm_optical, &other_optical] {
+            assert_eq!(
+                bind(mismatched, 0.1, 7),
+                Err(MaterialOpticalError::StateMismatch)
+            );
+        }
+        assert_eq!(
+            bind(&optical, 0.1, 0),
+            Err(MaterialOpticalError::MissingSurfaceIdentity)
+        );
+        assert!(matches!(
+            bind(&optical, f64::NAN, 7),
+            Err(MaterialOpticalError::Conductor(_))
+        ));
+        assert_eq!(
+            accepted,
+            bind(&optical, 0.1, 7).unwrap(),
+            "refusal leaves accepted state unchanged"
+        );
+        assert_eq!(
+            accepted.material(),
+            bind(&optical, 0.1, 8).unwrap().material()
+        );
+        assert_ne!(
+            accepted.identity(),
+            bind(&optical, 0.1, 8).unwrap().identity()
+        );
     }
 
     #[test]

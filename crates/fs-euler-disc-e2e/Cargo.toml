@@ -16,7 +16,7 @@ scientific-contract = ["dep:fs-ir"]
 # [F] The spectral tracer remains opt-in. The scene bridge is real product
 # code, but enabling it must not silently promote fs-render's frontier tracer
 # into the default scientific-contract path.
-cinematic-render = ["fs-render/tracer"]
+cinematic-render = ["fs-render/material-state"]
 # [F] Durable renderer checkpoints remain explicitly opt-in because they bind
 # the frontier tracer to the L6 Design Ledger. This feature implies the scene
 # bridge and keeps fs-ledger out of the default scientific-contract graph.

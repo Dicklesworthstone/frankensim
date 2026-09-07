@@ -841,6 +841,11 @@ The cinematic specimen accepts both symmetry families as numerical data and
 binds the resolved mechanical and visible-optical bundles from one immutable
 material card and thermodynamic query point. Thus anisotropy changes the real
 modal/acoustic solve, while its chemistry label remains identity metadata only.
+The conversion to conductor/dielectric tracer parameters and cross-state
+admission now belongs to `fs-render::material_state`, available to every
+specimen owner through the opt-in `material-state` feature. The Euler adapter
+retains its scene-specific receipt and existing identity encoding while using
+that shared conversion; it owns no separate optical law.
 
 The normal-contact ingress accepts a `BoundNormalContactModel`: both ordered
 bulk states, the complete `InterfaceSystemCard`, its resolved adhesion datum,
