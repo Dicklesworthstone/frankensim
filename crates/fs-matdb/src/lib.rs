@@ -62,7 +62,8 @@ pub use interface_pack::{
     INTERFACE_PACK_SCHEMA_VERSION, INTERFACE_PACK_TARGET_BASIS, NormalizedInterfacePack,
 };
 pub use material_pack::{
-    MATERIAL_CARD_PACK_SCHEMA_VERSION, MATERIAL_CARD_PACK_TARGET_BASIS, NormalizedMaterialCardPack,
+    MATERIAL_CARD_MODEL_PACK_SCHEMA_VERSION, MATERIAL_CARD_PACK_SCHEMA_VERSION,
+    MATERIAL_CARD_PACK_TARGET_BASIS, NormalizedMaterialCardPack,
 };
 pub use model_pack::{
     MODEL_PACK_SCHEMA_VERSION, MODEL_PACK_TARGET_BASIS, ModelNormalizationReceipt,
