@@ -190,6 +190,23 @@ persistence.
   (`org.frankensim.fs-matdb.material-card.v1`) binds the id, schema
   version, lineage link, every claim/observation content id, and every
   model-card hash — so it binds the full transitive content.
+- `MaterialCard::with_authored_scalar_overrides` derives a research successor
+  from 1..=256 distinct, existing, complete context-free keys and SI values.
+  The caller supplies the new constant-value validity domain and authored
+  provenance; the source text is explicitly marked as an authored override.
+  Replaced claims do not retain source uncertainty or observation links, and
+  no calibrated model cards are copied. Unchanged claims and their linked
+  observations retain exact identities. The predecessor stays immutable and
+  the existing successor hash binds all changes and lineage, independently of
+  input order. No schema or query-policy change is needed. Existing consumers
+  still check property domains and constitutive admissibility. Hardness and
+  tensor-coordinate replacement is outside this scalar API; a fabricated scalar
+  cannot inherit their experimental context. This is a synchronous card copy,
+  not measured validation, thermal evolution, a new catalog revision endorsed
+  by the original source, or a certification of the unchanged claims under the
+  counterfactual material. `tests/cards.rs` checks evidence separation and
+  transactional refusals; the existing fs-couple acoustic-assembly seam checks
+  derived mass/stiffness and changed emitted pressure.
 - `PcbConductivityDatum` / `CopperCoverage` / `PcbLayer` / `PcbStackup`
   (f85xj.5.6) — an immutable PCB laminate declaration. Every copper and
   matrix conductivity is selected from a `MaterialCard` and retains the exact

@@ -20,7 +20,10 @@ use fs_blake3::{ContentHash, hash_domain};
 use fs_evidence::ValidityDomain;
 use fs_qty::Dims;
 
-use crate::{ClaimId, ClaimSet, MatDbError, PropertyClaim, Provenance};
+use crate::{
+    ClaimId, ClaimSet, InterpolationPolicy, MatDbError, PropertyClaim, PropertyKey, PropertyValue,
+    Provenance, UncertaintyModel,
+};
 
 /// Hash domain for constitutive-model-card canonical identity.
 const MODEL_HASH_DOMAIN: &str = "org.frankensim.fs-matdb.constitutive-model-card.v1";
@@ -459,6 +462,104 @@ pub struct MaterialCard {
 }
 
 impl MaterialCard {
+    /// Derive a research card with explicitly authored, constant SI scalars.
+    ///
+    /// Each complete context-free key must already exist. All competing claims
+    /// for an overridden key are replaced in the NEW card; the predecessor is
+    /// untouched. The caller supplies the replacement validity domain and its
+    /// own provenance. Replacements carry unstated uncertainty and no observation
+    /// links, so existing query policy cannot promote them to measured evidence.
+    /// Unchanged claims retain their exact content and linked observations.
+    ///
+    /// No calibrated model cards are copied: their parameters have not been
+    /// revalidated against the authored material. The ordinary successor hash
+    /// binds the predecessor, authored values, validity and provenance. This is
+    /// not a source-backed correction, new measured material, or evolving state.
+    ///
+    /// # Errors
+    /// Requires 1..=256 distinct context-free keys with their registered quantity
+    /// schemas. Hardness and tensor-coordinate overrides require a separate
+    /// physical-context treatment. Existing scalar/provenance/validity admission
+    /// and revision-overflow refusals propagate before publishing any card.
+    pub fn with_authored_scalar_overrides(
+        &self,
+        overrides: &[(PropertyKey, f64)],
+        validity: ValidityDomain,
+        mut provenance: Provenance,
+    ) -> Result<Self, MatDbError> {
+        if overrides.is_empty() || overrides.len() > 256 {
+            return Err(MatDbError::InvalidAuthoredOverride {
+                reason: "supply between one and 256 scalar replacements",
+            });
+        }
+        if validity.is_empty() {
+            return Err(MatDbError::InvalidAuthoredOverride {
+                reason: "authored validity must contain usable physical states",
+            });
+        }
+        provenance.validate()?;
+        provenance.source = format!("authored scalar override: {}", provenance.source);
+        let mut replacements = BTreeMap::new();
+        for (key, value) in overrides {
+            if key.hardness_test().is_some()
+                || key.elastic_component().is_some()
+                || key.strain_component().is_some()
+                || key.stress_component().is_some()
+            {
+                return Err(MatDbError::InvalidAuthoredOverride {
+                    reason: "hardness and tensor contexts cannot inherit authored scalar values",
+                });
+            }
+            if replacements.insert(key.name(), (key, *value)).is_some() {
+                return Err(MatDbError::InvalidAuthoredOverride {
+                    reason: "each overridden property must be specified exactly once",
+                });
+            }
+            if !self
+                .claims_for(key.name())
+                .iter()
+                .any(|(_, claim)| claim.key == *key)
+            {
+                return Err(MatDbError::InvalidAuthoredOverride {
+                    reason: "each replacement must match an existing complete property key",
+                });
+            }
+        }
+        let mut claims = ClaimSet::new();
+        for (key, value) in replacements.values() {
+            claims.insert_claim(PropertyClaim {
+                key: (*key).clone(),
+                value: PropertyValue::Scalar {
+                    value: *value,
+                    dims: key.dims(),
+                },
+                validity: validity.clone(),
+                uncertainty: UncertaintyModel::Unstated,
+                interpolation: InterpolationPolicy::ConstantWithinValidity,
+                observations: Vec::new(),
+                provenance: provenance.clone(),
+            })?;
+        }
+        for (_, claim) in self.claims.claims_ordered() {
+            if replacements
+                .get(claim.key.name())
+                .is_some_and(|(key, _)| **key == claim.key)
+            {
+                continue;
+            }
+            for observation in &claim.observations {
+                let dataset = self.claims.observation(*observation).ok_or(
+                    MatDbError::UnknownObservation {
+                        observation: *observation,
+                    },
+                )?;
+                claims.register_observation(dataset.clone())?;
+            }
+            claims.insert_claim(claim.clone())?;
+        }
+        Self::supersede(self, claims, Vec::new())
+    }
+
     /// Assemble a REVISION-0 card from a claim set and model cards.
     ///
     /// # Errors

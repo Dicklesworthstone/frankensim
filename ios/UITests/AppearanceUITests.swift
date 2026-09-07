@@ -56,8 +56,10 @@ final class FrankenSimAppearanceUITests: XCTestCase {
         keepScreenshot(of: app, named: "Phone studio after explicit run")
 
         chooser.tap()
-        XCTAssertTrue(app.otherElements["compact-simulation-catalog"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.textFields["catalog-search-field"].exists)
+        XCTAssertTrue(app.staticTexts["Simulation catalog"].waitForExistence(timeout: 5))
+        let catalogSearch = catalogSearchField(in: app)
+        XCTAssertTrue(catalogSearch.waitForExistence(timeout: 5))
+        XCTAssertTrue([.textField, .searchField].contains(catalogSearch.elementType))
         XCTAssertEqual(app.staticTexts["catalog-result-count"].label, "44 of 44 on-device kernels")
         XCTAssertTrue(app.buttons["catalog-scope-all"].exists)
         XCTAssertTrue(app.buttons["catalog-scope-Foundations"].exists)
@@ -78,11 +80,12 @@ final class FrankenSimAppearanceUITests: XCTestCase {
         app.launchEnvironment["FSIM_SHOW_CATALOG"] = "1"
         app.launch()
 
-        let catalog = app.otherElements["compact-simulation-catalog"]
+        let catalog = app.staticTexts["Simulation catalog"]
         XCTAssertTrue(catalog.waitForExistence(timeout: 12))
 
-        let search = app.textFields["catalog-search-field"]
-        XCTAssertTrue(search.exists)
+        let search = catalogSearchField(in: app)
+        XCTAssertTrue(search.waitForExistence(timeout: 5))
+        XCTAssertTrue([.textField, .searchField].contains(search.elementType))
         search.tap()
         search.typeText("reed")
         XCTAssertTrue(app.staticTexts["Reed bore"].waitForExistence(timeout: 5))
@@ -91,7 +94,7 @@ final class FrankenSimAppearanceUITests: XCTestCase {
         app.buttons["catalog-clear-search"].tap()
         let scopes = app.scrollViews["catalog-tier-scopes"]
         let flagships = app.buttons["catalog-scope-Flagships"]
-        if !flagships.isHittable { scopes.swipeLeft() }
+        scopes.swipeLeft()
         XCTAssertTrue(flagships.isHittable)
         flagships.tap()
         XCTAssertEqual(app.staticTexts["catalog-result-count"].label, "3 of 44 on-device kernels")
@@ -101,7 +104,7 @@ final class FrankenSimAppearanceUITests: XCTestCase {
         XCTAssertFalse(app.staticTexts["Heat diffusion"].exists)
 
         let all = app.buttons["catalog-scope-all"]
-        if !all.isHittable { scopes.swipeRight() }
+        scopes.swipeRight()
         XCTAssertTrue(all.isHittable)
         all.tap()
         XCTAssertEqual(app.staticTexts["catalog-result-count"].label, "44 of 44 on-device kernels")
@@ -139,5 +142,11 @@ final class FrankenSimAppearanceUITests: XCTestCase {
         attachment.name = name
         attachment.lifetime = .keepAlways
         add(attachment)
+    }
+
+    private func catalogSearchField(in app: XCUIApplication) -> XCUIElement {
+        app.descendants(matching: .any)
+            .matching(identifier: "catalog-search-field")
+            .firstMatch
     }
 }

@@ -153,7 +153,6 @@ struct SimulationStudioView: View {
                 compactCatalogFooter
             }
         }
-        .accessibilityIdentifier("compact-simulation-catalog")
         .sheet(isPresented: $showsCatalogAtlas) {
             EpistemicAtlasView()
                 .presentationDetents([.large])
@@ -184,11 +183,13 @@ struct SimulationStudioView: View {
             HStack(spacing: 9) {
                 Image(systemName: "magnifyingglass")
                     .foregroundStyle(ForgeTheme.secondary)
+                    .accessibilityHidden(true)
                 TextField("Search kernel, method, evidence, or study", text: $search)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     .submitLabel(.search)
                     .foregroundStyle(ForgeTheme.text)
+                    .accessibilityLabel("Search simulation catalog")
                     .accessibilityIdentifier("catalog-search-field")
                 if !search.isEmpty {
                     Button {

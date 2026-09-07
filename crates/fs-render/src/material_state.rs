@@ -135,7 +135,7 @@ impl MaterialOpticalBinding {
         );
         let surface = match roughness_alpha {
             Some(alpha) => DielectricSurface::try_rough(alpha)?,
-            None => DielectricSurface::POLISHED,
+            None => DielectricSurface::SMOOTH,
         };
         Ok(Self::new(
             mechanical,

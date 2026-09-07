@@ -1598,6 +1598,83 @@ mod material_plate_tests {
     }
 
     #[test]
+    fn g3_authored_material_override_changes_coupled_pressure_without_source_promotion() {
+        let base = isotropic_card(450.0);
+        let point = QueryPoint::new().with("T", 293.15).unwrap();
+        let derived = base
+            .with_authored_scalar_overrides(
+                &[(PropertyKey::new("density", Density::DIMS), 1800.0)],
+                ValidityDomain::unconstrained().with("T", 293.15, 293.15),
+                Provenance {
+                    source: "authored density sensitivity, fixed geometry and tension".into(),
+                    license: "CC0-1.0".into(),
+                    artifact: None,
+                },
+            )
+            .unwrap();
+        let mut input = plucked(20.0, 0.006, 1e-5);
+        input.duration_s = 0.02;
+        input.plate = Some(template());
+        let original = input.clone();
+        let compile = |card| {
+            compile_material_assembly(
+                &input,
+                &AcousticMaterialBindings {
+                    string: Some(StringMaterialBinding {
+                        source: source(card, &point),
+                        geometry: StringGeometryConstraint::FixedRadius(0.0008),
+                        prestress: StringPrestress::FixedTension(20.0),
+                    }),
+                    plate: Some(PlateMaterialBinding::Uniform {
+                        source: source(card, &point),
+                        model: Model::Isotropic,
+                        thickness: Thickness::FixedThickness(0.003),
+                    }),
+                },
+            )
+            .unwrap()
+        };
+        let a = compile(&base);
+        let b = compile(&derived);
+        let sa = a.string().unwrap();
+        let sb = b.string().unwrap();
+        assert!((sb.mass_kg() / sa.mass_kg() - 4.0).abs() < 1e-13);
+        assert_eq!(
+            sb.string().bending_stiffness_n_m2,
+            sa.string().bending_stiffness_n_m2
+        );
+        let (Some(CompiledMaterialPlate::Uniform(pa)), Some(CompiledMaterialPlate::Uniform(pb))) =
+            (a.plate(), b.plate())
+        else {
+            panic!("uniform plates");
+        };
+        assert!((pb.mass_kg() / pa.mass_kg() - 4.0).abs() < 1e-13);
+        assert_eq!(pb.section().unwrap().d, pa.section().unwrap().d);
+        assert_eq!(sb.material().card_identity(), pb.material().card_identity());
+        assert_eq!(sb.material().card_identity(), derived.content_hash());
+        let authored = sb.material().property("density").unwrap().answer();
+        assert!(!authored.receipt.observation_backed);
+        let replacement_claim = derived.claims().claim(authored.receipt.selected).unwrap();
+        assert_eq!(replacement_claim.uncertainty, UncertaintyModel::Unstated);
+        assert!(
+            replacement_claim
+                .provenance
+                .source
+                .starts_with("authored scalar override:")
+        );
+        let p = a.realize().unwrap().pressure_pa;
+        let q = b.realize().unwrap().pressure_pa;
+        assert!(peak_abs(&p) > 1e-7 && peak_abs(&q) > 1e-7);
+        let difference: Vec<_> = p.iter().zip(q).map(|(x, y)| x - y).collect();
+        assert!(
+            peak_abs(&difference) > 1e-7,
+            "authored density reaches actual coupled pressure"
+        );
+        assert_eq!(input, original);
+        assert_eq!(base.content_hash(), isotropic_card(450.0).content_hash());
+    }
+
+    #[test]
     fn g3_card_compiler_replaces_string_and_plate_material_at_fixed_mass() {
         let cards = [isotropic_card(450.0), isotropic_card(1800.0)];
         let point = QueryPoint::new().with("T", 293.15).unwrap();
