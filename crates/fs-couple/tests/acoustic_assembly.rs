@@ -1205,6 +1205,7 @@ fn steel_panel() -> ThinPlate {
         material_angle_rad: 0.0,
         damping_ratio: 0.02,
         thermoelastic: None,
+        kelvin_voigt_bending: None,
         n_modes: 2,
         geometric_nonlinearity: false,
         pretension_n_m: 0.0,
@@ -1410,7 +1411,8 @@ mod material_plate_tests {
     };
     use fs_plate::{AssemblyOptions, EdgeSupport, PlateChart, PlateMesh, PlateRegion};
     use fs_qty::semantic::{CompositionBasis, QuantityKind, SemanticType, ValueForm};
-    use fs_qty::{Density, Dims, Pressure, QuantitySpec};
+    use fs_qty::{Density, Dims, DynViscosity, Pressure, QuantitySpec};
+    use fs_scenario::IsotropicPlateBendingViscosity;
 
     fn material_card(
         properties: &[(&str, QuantitySpec, f64)],
@@ -1528,6 +1530,160 @@ mod material_plate_tests {
             ],
             ValidityDomain::unconstrained().with("T", 293.15, 293.15),
         )
+    }
+
+    fn viscous_card(eta: f64, band: Option<(f64, f64)>) -> MaterialCard {
+        let mut domain = ValidityDomain::unconstrained().with("T", 293.15, 293.15);
+        if let Some((lo, hi)) = band {
+            domain = domain.with("omega", lo, hi);
+        }
+        material_card(
+            &[
+                ("density", QuantitySpec::dimensional(Density::DIMS), 450.0),
+                (
+                    "young_modulus",
+                    QuantitySpec::dimensional(Pressure::DIMS),
+                    12e9,
+                ),
+                ("poisson_ratio", QuantitySpec::dimensional(Dims::NONE), 0.3),
+                (
+                    "kelvin_voigt_bending_viscosity",
+                    QuantitySpec::dimensional(DynViscosity::DIMS),
+                    eta,
+                ),
+            ],
+            domain,
+        )
+    }
+
+    #[test]
+    fn g3_material_plate_viscosity_rebind_changes_pressure_without_changing_elastic_modes() {
+        let point = QueryPoint::new()
+            .with("T", 293.15)
+            .unwrap()
+            .with("omega", 100.0)
+            .unwrap();
+        let mut input = plucked(20.0, 0.006, 1e-5);
+        input.duration_s = 0.06;
+        input.plate = Some(ThinPlate {
+            damping_ratio: 0.0,
+            kelvin_voigt_bending: Some(IsotropicPlateBendingViscosity {
+                viscosity_pa_s: 9e9, // old material: must be replaced, not retained
+                omega_band_rad_s: (1.0, 10_000.0),
+                material_state_identity: None,
+            }),
+            ..template()
+        });
+        let original = input.clone();
+        for (nonlinear, clamped) in [(false, false), (true, false), (true, true)] {
+            let mut spectra = Vec::new();
+            let mut pressures = Vec::new();
+            let mut ids = Vec::new();
+            let mut current = input.clone();
+            current.plate.as_mut().unwrap().geometric_nonlinearity = nonlinear;
+            current.plate.as_mut().unwrap().clamped = clamped;
+            for eta in [0.0, 3e6] {
+                let card = viscous_card(eta, Some((1.0, 10_000.0)));
+                let compiled = compile_material_assembly(
+                    &current,
+                    &AcousticMaterialBindings {
+                        string: None,
+                        plate: Some(PlateMaterialBinding::Uniform {
+                            source: source(&card, &point),
+                            model: Model::Isotropic,
+                            thickness: Thickness::FixedThickness(0.002),
+                        }),
+                    },
+                )
+                .unwrap();
+                let Some(CompiledMaterialPlate::Uniform(specimen)) = compiled.plate() else {
+                    panic!("uniform specimen");
+                };
+                let law = specimen.plate().kelvin_voigt_bending.unwrap();
+                assert_eq!(law.viscosity_pa_s, eta);
+                assert_eq!(
+                    law.material_state_identity,
+                    Some(specimen.material().identity())
+                );
+                assert_eq!(
+                    specimen
+                        .material()
+                        .property("kelvin_voigt_bending_viscosity")
+                        .unwrap()
+                        .value_si(),
+                    eta
+                );
+                ids.push(law.material_state_identity);
+                spectra.push(certified_radiators(specimen.plate()).unwrap()[0].omega);
+                pressures.push(compiled.realize().unwrap().pressure_pa);
+                // Feed the resolved old specimen into the next card substitution.
+                current = compiled.assembly().clone();
+            }
+            assert_eq!(
+                spectra[0], spectra[1],
+                "loss-only substitution must preserve elastic frequency"
+            );
+            assert_ne!(ids[0], ids[1]);
+            let difference: Vec<_> = pressures[0]
+                .iter()
+                .zip(&pressures[1])
+                .map(|(a, b)| a - b)
+                .collect();
+            assert!(
+                peak_abs(&difference) > 1e-7,
+                "viscosity must change actual pressure, nonlinear={nonlinear}, clamped={clamped}"
+            );
+        }
+        assert_eq!(input, original, "compilation must not mutate its template");
+    }
+
+    #[test]
+    fn g0_material_plate_viscosity_requires_source_band_and_excludes_duplicate_loss() {
+        let point = QueryPoint::new()
+            .with("T", 293.15)
+            .unwrap()
+            .with("omega", 100.0)
+            .unwrap();
+        let mut input = plucked(20.0, 0.006, 1e-5);
+        input.plate = Some(ThinPlate {
+            damping_ratio: 0.0,
+            kelvin_voigt_bending: Some(IsotropicPlateBendingViscosity {
+                viscosity_pa_s: 1.0,
+                omega_band_rad_s: (0.0, 1e6),
+                material_state_identity: None,
+            }),
+            ..template()
+        });
+        for (card, damping, expected) in [
+            (isotropic_card(450.0), 0.0, "kelvin_voigt_bending_viscosity"),
+            (viscous_card(1e6, None), 0.0, "explicit omega band"),
+            (
+                viscous_card(-1.0, Some((1.0, 10_000.0))),
+                0.0,
+                "kelvin_voigt_bending_viscosity",
+            ),
+            (
+                viscous_card(1e6, Some((1.0, 10_000.0))),
+                0.002,
+                "zero authored damping",
+            ),
+        ] {
+            input.plate.as_mut().unwrap().damping_ratio = damping;
+            let error = compile_material_assembly(
+                &input,
+                &AcousticMaterialBindings {
+                    string: None,
+                    plate: Some(PlateMaterialBinding::Uniform {
+                        source: source(&card, &point),
+                        model: Model::Isotropic,
+                        thickness: Thickness::FixedThickness(0.002),
+                    }),
+                },
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains(expected), "expected {expected}: {error}");
+        }
     }
 
     #[test]
