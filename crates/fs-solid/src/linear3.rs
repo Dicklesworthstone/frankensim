@@ -1066,8 +1066,9 @@ pub struct TetElasticAssembly {
 ///
 /// The sign convention is `K u = f_external + equivalent_force`: an
 /// unconstrained affine displacement matching a uniform free strain satisfies
-/// `K u = equivalent_force`.  The full vector retains reactions at constrained
-/// DOFs; `reduced_force_n` follows the elastic assembly's free-DOF order.
+/// `K u = equivalent_force`. The full vector retains load contributions at
+/// constrained DOFs; actual support reactions follow from the solved stress.
+/// `reduced_force_n` follows the elastic assembly's free-DOF order.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TetThermalLoad {
     /// Full nodal force vector in node-major xyz order [N].
@@ -1158,6 +1159,7 @@ impl TetElementThermalStress {
     pub const fn stress_mandel_pa(&self) -> &[f64; 6] {
         &self.stress_mandel_pa
     }
+    /// Stored energy `V/2 epsilon_elastic:sigma` for this element [J].
     #[must_use]
     pub const fn elastic_energy_j(&self) -> f64 {
         self.elastic_energy_j
@@ -1177,6 +1179,7 @@ pub struct TetThermalStressReport {
 }
 
 impl TetThermalStressReport {
+    /// Per-element response in connectivity order.
     #[must_use]
     pub fn elements(&self) -> &[TetElementThermalStress] {
         &self.elements
@@ -1187,18 +1190,22 @@ impl TetThermalStressReport {
     pub fn nodal_internal_force_n(&self) -> &[[f64; 3]] {
         &self.nodal_internal_force_n
     }
+    /// Sum of element stored elastic energies [J].
     #[must_use]
     pub const fn elastic_energy_j(&self) -> f64 {
         self.elastic_energy_j
     }
+    /// Caller-declared coordinate frame of the reference mesh.
     #[must_use]
     pub const fn mesh_frame(&self) -> ContentHash {
         self.mesh_frame
     }
+    /// Accepted displacement solution supplying this response.
     #[must_use]
     pub const fn solution_identity(&self) -> ContentHash {
         self.solution_identity
     }
+    /// Identity of the complete input-bound recovered response.
     #[must_use]
     pub const fn identity(&self) -> ContentHash {
         self.identity
@@ -1303,34 +1310,42 @@ pub struct StressTensorTransformReceipt {
 }
 
 impl StressTensorTransformReceipt {
+    /// Identity of the recovered stress field supplying this element.
     #[must_use]
     pub const fn source_report_identity(&self) -> ContentHash {
         self.source_report_identity
     }
+    /// Element index in the source report's connectivity order.
     #[must_use]
     pub const fn element(&self) -> usize {
         self.element
     }
+    /// Declared reference-mesh coordinate frame.
     #[must_use]
     pub const fn source_frame(&self) -> ContentHash {
         self.source_frame
     }
+    /// Source stress before rotation, in canonical Mandel coordinates.
     #[must_use]
     pub const fn source_stress_mandel_pa(&self) -> &[f64; 6] {
         &self.source_stress_mandel_pa
     }
+    /// Output stress convention, component order and coordinate frame.
     #[must_use]
     pub const fn target_basis(&self) -> StressTensorBasis {
         self.target_basis
     }
+    /// Proper rotation; columns are source axes in the target frame.
     #[must_use]
     pub const fn source_to_target(&self) -> &[[f64; 3]; 3] {
         &self.source_to_target
     }
+    /// Transformed stress [Pa] in the declared target coordinates.
     #[must_use]
     pub const fn stress_pa(&self) -> &[f64; 6] {
         &self.stress_pa
     }
+    /// Identity binding the source element, transform and output stress.
     #[must_use]
     pub const fn identity(&self) -> ContentHash {
         self.identity
@@ -1440,7 +1455,10 @@ pub enum TetElasticError {
     /// Expansion path and elastic tangent were resolved at different state points.
     ThermalElasticStatePointMismatch,
     /// Stress recovery controls, transformed values or applicability failed.
-    InvalidStressObservation { what: &'static str },
+    InvalidStressObservation {
+        /// Failed recovery, frame or numerical invariant.
+        what: &'static str,
+    },
     /// Recovery was requested with a different mesh/material/thermal/load state.
     StressRecoveryInputMismatch,
     /// Finite inputs produced a non-finite stress or nodal force.
@@ -1493,7 +1511,7 @@ pub enum TetElasticError {
         /// Repeated full displacement DOF.
         dof: usize,
     },
-    /// Every displacement DOF was constrained.
+    /// Matrix/modal assembly has no free displacement DOFs.
     NoFreeDofs,
     /// A checked integer size operation overflowed.
     SizeOverflow,
@@ -1633,6 +1651,9 @@ impl TetLinearElasticProblem<'_> {
             self.fixed_dofs,
             self.budget.maximum_free_dofs,
         )?;
+        if free_dofs.is_empty() {
+            return Err(TetElasticError::NoFreeDofs);
+        }
 
         let mut incident = vec![false; self.nodes_m.len()];
         let n = free_dofs.len();
@@ -1815,6 +1836,9 @@ impl TetLinearElasticProblem<'_> {
     /// long solve. Acceptance uses a freshly recomputed `||f-Ku||/||f||`, not
     /// the recursively updated Krylov estimate. Geometry update or remeshing is
     /// deliberately a separate admitted operation.
+    /// A fully fixed mesh has the exact prescribed zero displacement and an
+    /// empty reduced system: zero iterations/residual, with full thermal forces
+    /// retained for subsequent stress and support-reaction recovery.
     pub fn solve_thermal_displacement(
         &self,
         thermal_strains: TetThermalStrainField<'_>,
@@ -1834,44 +1858,52 @@ impl TetLinearElasticProblem<'_> {
                 what: "maximum_iterations must be positive",
             });
         }
-        let assembly = self.assemble(cx)?;
-        validate_rigid_mode_constraints(self.nodes_m, self.tetrahedra, self.fixed_dofs)?;
         let load = self.assemble_thermal_load(thermal_strains, cx)?;
-        let preconditioner = Jacobi::new(&assembly.stiffness);
-        let operator = CsrOp::symmetric(assembly.stiffness);
-        let mut state = CgState::new(&operator, &preconditioner, &load.reduced_force_n);
-        while state.iters < config.maximum_iterations
-            && state.rel_residual() >= config.relative_residual_tolerance
-        {
-            cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
-            let remaining = config.maximum_iterations - state.iters;
-            let _ = state.run(
-                &operator,
-                &preconditioner,
-                config.relative_residual_tolerance,
-                remaining.min(64),
-            );
-        }
-        let mut applied = vec![0.0; state.x.len()];
-        operator.apply(&state.x, &mut applied);
-        let residual_norm = euclidean_norm(
-            load.reduced_force_n
-                .iter()
-                .zip(&applied)
-                .map(|(force, ku)| force - ku),
-        );
-        let force_norm = euclidean_norm(load.reduced_force_n.iter().copied());
-        let true_relative_residual = residual_norm / force_norm.max(f64::MIN_POSITIVE);
-        if !true_relative_residual.is_finite()
-            || true_relative_residual > config.relative_residual_tolerance
-        {
-            return Err(TetElasticError::StaticSolveFailed {
-                iterations: state.iters,
-                true_relative_residual,
-            });
-        }
+        let (reduced_displacement, iterations, true_relative_residual) =
+            if load.free_dofs.is_empty() {
+                // Every displacement is prescribed zero. The empty reduced system
+                // is solved exactly; nonzero full forces remain support reactions.
+                (Vec::new(), 0, 0.0)
+            } else {
+                let assembly = self.assemble(cx)?;
+                validate_rigid_mode_constraints(self.nodes_m, self.tetrahedra, self.fixed_dofs)?;
+                let preconditioner = Jacobi::new(&assembly.stiffness);
+                let operator = CsrOp::symmetric(assembly.stiffness);
+                let mut state = CgState::new(&operator, &preconditioner, &load.reduced_force_n);
+                while state.iters < config.maximum_iterations
+                    && state.rel_residual() >= config.relative_residual_tolerance
+                {
+                    cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
+                    let remaining = config.maximum_iterations - state.iters;
+                    let _ = state.run(
+                        &operator,
+                        &preconditioner,
+                        config.relative_residual_tolerance,
+                        remaining.min(64),
+                    );
+                }
+                let mut applied = vec![0.0; state.x.len()];
+                operator.apply(&state.x, &mut applied);
+                let residual_norm = euclidean_norm(
+                    load.reduced_force_n
+                        .iter()
+                        .zip(&applied)
+                        .map(|(force, ku)| force - ku),
+                );
+                let force_norm = euclidean_norm(load.reduced_force_n.iter().copied());
+                let true_relative_residual = residual_norm / force_norm.max(f64::MIN_POSITIVE);
+                if !true_relative_residual.is_finite()
+                    || true_relative_residual > config.relative_residual_tolerance
+                {
+                    return Err(TetElasticError::StaticSolveFailed {
+                        iterations: state.iters,
+                        true_relative_residual,
+                    });
+                }
+                (state.x, state.iters, true_relative_residual)
+            };
         let mut flat = vec![0.0; self.nodes_m.len() * 3];
-        for (&full_dof, &value) in load.free_dofs.iter().zip(&state.x) {
+        for (&full_dof, &value) in load.free_dofs.iter().zip(&reduced_displacement) {
             flat[full_dof] = value;
         }
         let displacement_m = flat
@@ -1882,7 +1914,7 @@ impl TetLinearElasticProblem<'_> {
         identity.update(load.identity.as_bytes());
         identity.update(&config.relative_residual_tolerance.to_bits().to_le_bytes());
         hash_usize(&mut identity, config.maximum_iterations)?;
-        hash_usize(&mut identity, state.iters)?;
+        hash_usize(&mut identity, iterations)?;
         identity.update(&true_relative_residual.to_bits().to_le_bytes());
         for displacement in &displacement_m {
             for value in displacement {
@@ -1892,7 +1924,7 @@ impl TetLinearElasticProblem<'_> {
         cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
         Ok(TetThermalDisplacementSolution {
             displacement_m,
-            iterations: state.iters,
+            iterations,
             true_relative_residual,
             identity: identity.finalize(),
             reference_geometry_identity: tet_geometry_identity(self.nodes_m, self.tetrahedra)?,
@@ -2027,13 +2059,15 @@ impl TetLinearElasticProblem<'_> {
                 elastic_energy_j: energy,
             });
         }
-        for value in nodal_internal_force_n
-            .iter()
-            .flatten()
-            .chain(core::iter::once(&elastic_energy_j))
-        {
-            identity.update(&value.to_bits().to_le_bytes());
+        for (node, force) in nodal_internal_force_n.iter().enumerate() {
+            if node % 4096 == 0 {
+                cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
+            }
+            for value in force {
+                identity.update(&value.to_bits().to_le_bytes());
+            }
         }
+        identity.update(&elastic_energy_j.to_bits().to_le_bytes());
         cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
         Ok(TetThermalStressReport {
             elements,
@@ -2187,9 +2221,6 @@ fn free_dof_map(
         }
     }
     let free_dofs: Vec<usize> = (0..full_dofs).filter(|dof| !fixed.contains(dof)).collect();
-    if free_dofs.is_empty() {
-        return Err(TetElasticError::NoFreeDofs);
-    }
     if free_dofs.len() > maximum_free_dofs {
         return Err(TetElasticError::BudgetExceeded {
             what: "free_dofs",
@@ -3981,6 +4012,94 @@ mod tests {
         }
         assert_eq!(identities.len(), 12);
         assert!((report.elastic_energy_j() - expected_energy).abs() < 1.0e-13);
+    }
+
+    #[test]
+    fn g1_fully_clamped_heating_has_zero_motion_and_physical_stress_reactions() {
+        let nodes = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ];
+        let tets = [[0, 1, 2, 3]];
+        let mat = material(1200.0, 6.0);
+        let fixed: Vec<_> = (0..12).collect();
+        let problem = reference_problem(&nodes, &tets, &mat, &fixed);
+        let thermal = TetThermalStrainState::try_new(
+            400.0,
+            293.15,
+            [0.01, 0.01, 0.01, 0.0, 0.0, 0.0],
+            mat.material_state_identity,
+            ContentHash([0x41; 32]),
+            0.05,
+        )
+        .unwrap();
+        let field = TetThermalStrainField::Uniform(&thermal);
+        // Empty modal/matrix spaces remain inadmissible. Thermal equilibrium
+        // instead has prescribed u=0 and the nonzero clamp force -f_thermal.
+        assert!(matches!(
+            with_cx(|cx| problem.assemble(cx)),
+            Err(TetElasticError::NoFreeDofs)
+        ));
+        let load = with_cx(|cx| problem.assemble_thermal_load(field, cx)).unwrap();
+        assert!(load.free_dofs.is_empty());
+        assert!(load.reduced_force_n.is_empty());
+        let solution = with_cx(|cx| {
+            problem.solve_thermal_displacement(field, TetStaticSolveConfig::default(), cx)
+        })
+        .unwrap();
+        assert_eq!(solution.displacement_m(), &[[0.0; 3]; 4]);
+        assert_eq!(solution.iterations(), 0);
+        assert_eq!(solution.true_relative_residual(), 0.0);
+        let report = with_cx(|cx| {
+            problem.recover_thermal_stress(&solution, field, ContentHash([0x51; 32]), 0.05, cx)
+        })
+        .unwrap();
+        // sigma=-E alpha/(1-2 nu) I=-24 I Pa, and V=1/6 m^3.
+        for i in 0..6 {
+            let expected = if i < 3 { -24.0 } else { 0.0 };
+            assert!((report.elements()[0].stress_mandel_pa()[i] - expected).abs() < 1.0e-12);
+        }
+        let forces = [
+            [4.0, 4.0, 4.0],
+            [-4.0, 0.0, 0.0],
+            [0.0, -4.0, 0.0],
+            [0.0, 0.0, -4.0],
+        ];
+        for node in 0..4 {
+            for d in 0..3 {
+                let actual = report.nodal_internal_force_n()[node][d];
+                assert!((actual - forces[node][d]).abs() < 1.0e-12);
+                assert!((actual + load.full_equivalent_force_n[3 * node + d]).abs() < 1.0e-12);
+            }
+        }
+        assert!((report.elastic_energy_j() - 0.06).abs() < 1.0e-14);
+        assert_eq!(
+            with_cx(|cx| problem.update_geometry_from_displacement(&solution, 0.1, cx))
+                .unwrap()
+                .nodes_m(),
+            &nodes
+        );
+        // The empty solve still admits geometry, materials and thermal states.
+        assert!(matches!(
+            with_cx(|cx| problem.solve_thermal_displacement(
+                TetThermalStrainField::PerElement(&[]),
+                TetStaticSolveConfig::default(),
+                cx
+            )),
+            Err(TetElasticError::ThermalStrainCountMismatch { .. })
+        ));
+        let collapsed = [[0.0; 3]; 4];
+        let bad = reference_problem(&collapsed, &tets, &mat, &fixed);
+        assert!(
+            with_cx(|cx| bad.solve_thermal_displacement(
+                field,
+                TetStaticSolveConfig::default(),
+                cx
+            ))
+            .is_err()
+        );
     }
 
     #[test]

@@ -83,6 +83,14 @@ explicit later geometry-update transaction. That transaction is
 enforces a caller displacement ceiling, preserves connectivity, and refuses
 every degenerate or orientation-flipped tetrahedron before publishing the
 updated fixed-topology chart.
+Fully fixed homogeneous-Dirichlet meshes now admit their exact zero-displacement
+thermal response with zero iterations and zero reduced residual. The thermal
+load still validates all geometry/material/state inputs and retains its full
+force vector; recovered stress, support reactions and stored elastic energy
+can be nonzero. Matrix/modal `assemble` continues to refuse `NoFreeDofs`.
+A G1 fully clamped isotropic heating test checks hydrostatic compression,
+reactions, energy and unchanged geometry against closed-form values; invalid
+thermal counts and degenerate geometry still refuse before the empty solve.
 No material name, constant-alpha assumption, or Euler-disc geometry appears in
 this layer.
 
