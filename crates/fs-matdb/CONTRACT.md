@@ -81,7 +81,7 @@ persistence.
   and `context` record. V1 carries no constitutive model cards; model-law
   transport requires a separately versioned binding and cannot be smuggled
   through this wrapper.
-- `NormalizedMaterialCardPack` — the `FSMCDPK\0` v1 wrapper for one
+- `NormalizedMaterialCardPack` — the `FSMCDPK\0` wrapper for one
   revision-0 `MaterialCard`. FSMATPK itself carries no material identity
   (its `pack_id` is a free-text name, not a `MaterialStateId`), so this
   wrapper binds a caller-declared named state (chemistry/phase/process at
@@ -92,9 +92,19 @@ persistence.
   card a project binding references by content hash. Claim selection is
   deliberately NOT performed at compile time: the card transports its
   complete claim set and requirement-driven selection happens at binding
-  time, where it leaves a replayable usage receipt. V1 carries no
-  constitutive model cards; model-law transport requires a separately
-  versioned binding and cannot be smuggled through this wrapper.
+  time, where it leaves a replayable usage receipt. `new` retains the frozen
+  model-free v1 bytes and identity. `new_with_models` explicitly associates
+  every card in one admitted `NormalizedModelPack` with the declared state.
+  V2 appends the nested model-pack hash and length-prefixed canonical bytes;
+  identity uses `normalized-material-card-pack.v2`. Decode verifies that nested
+  artifact before reconstructing the material's exact model membership and card
+  hash. `model_pack()` exposes the complete source/normalization artifact and
+  `schema_version()` identifies the lowest capable schema. No names infer
+  membership; changing model parameters changes the material identity, while
+  changing only nested compiler/normalization metadata changes the outer pack
+  identity. Relabeling versions or stripping models cannot preserve a card that
+  declared those members. The existing aggregate 256 MiB bound covers both
+  nested artifacts. No executable closures enter L1.
 - `NormalizedModelPack` — a separate bounded `FSMODPK` v1 transport for
   immutable `ConstitutiveModelCard`s. Model cards are not laundered into
   scalar property claims: the pack retains each law/version, dimensioned
@@ -694,6 +704,16 @@ declared-state identity movement; magic/version/truncation/trailing-byte and
 pinned-hash-mismatch refusals; blank-state and nonzero-revision admission
 refusals.
 
+MR13 adds G0 material-model association round trips, complete normalization
+retention, model-order invariance, metadata/parameter identity separation and
+nested tamper/downgrade refusals in `tests/material_pack.rs`. The existing
+fs-matdb-store test reopens a file-backed catalog and verifies exact associated
+membership, ordinary property evaluation and absence of name-based association.
+The fs-material graph test admits a decoded member through `LawRegistry`,
+checks a synthetic Fourier output/tangent, and proves that transport without a
+registered implementation still refuses. These are software integration checks,
+not measured calibration, physical applicability or complete model discovery.
+
 `tests/pcb.rs` (f85xj.5.6): G0 hand calculations for parallel in-plane and
 series through-plane rules; exact Reuss/Voigt ordering; single-layer and
 zero-coverage degeneracies; bounded material/coverage corner containment;
@@ -792,10 +812,12 @@ migration equivalence lives in fs-dcontact's battery.
   and certification live in fs-evidence and are assigned at the PR-4
   query boundary, never at insertion.
 - `Unstated` uncertainty is a marked absence, not zero uncertainty.
-- A `NormalizedMaterialCardPack` binds already-admitted claims to a
+- A `NormalizedMaterialCardPack` binds already-admitted claims and explicitly
+  associated model cards to a
   caller-declared material state and reproduces identities. It does not
   authenticate the declared state, does not claim the nested claim set is
-  complete or even relevant for that state, and does not re-evaluate
+  complete or even relevant for that state, does not admit an executable law
+  or extend its operating domain, and does not re-evaluate
   redistribution terms; those remain offline-compiler and caller
   responsibilities.
 - Interface/system properties (friction, wetting, contact conductance)

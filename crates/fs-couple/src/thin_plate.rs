@@ -1529,6 +1529,40 @@ pub fn with_uniform_plate_material_state(
     }
 }
 
+/// Bind uniform isotropic plate mechanics and thermal loss to one resolved state.
+///
+/// Recomputes thickness/mass, elasticity and all thermal inputs. Existing thermal
+/// coefficients are replaced; their presence is a law selection, not reusable
+/// material data. If bending viscosity is selected, the same resolved bundle must
+/// include its claim, and it too is rebound. The result retains the shared state
+/// identity and original receipts for both mechanisms. Temperature is the explicit
+/// specimen query coordinate, not inferred from the surrounding gas.
+///
+/// # Errors
+/// Invalid geometry, missing viscosity data or inadmissible loss coefficients
+/// refuse without modifying the input. This is a frozen isotropic specimen,
+/// not a thermal history, anisotropic loss law or phase-change model.
+pub fn with_uniform_isotropic_thermoelastic_material_state(
+    mut plate: ThinPlate,
+    state: &IsotropicThermoelasticStatePoint,
+    thickness_constraint: PlateThicknessConstraint,
+) -> Result<ResolvedPlateSpecimen, AcousticRealizeError> {
+    let bind_viscosity = plate.kelvin_voigt_bending.take().is_some();
+    plate.thermoelastic = None;
+    let mut specimen = with_uniform_plate_material_state(
+        plate,
+        state.resolved(),
+        PlateMaterialModel::Isotropic,
+        thickness_constraint,
+    )?;
+    specimen.plate = with_isotropic_thermoelastic_state(specimen.plate, state)?;
+    if bind_viscosity {
+        specimen.with_kelvin_voigt_bending_loss()
+    } else {
+        Ok(specimen)
+    }
+}
+
 fn bind_plate_elasticity(
     plate: &mut ThinPlate,
     state: &ResolvedMaterialStatePoint,

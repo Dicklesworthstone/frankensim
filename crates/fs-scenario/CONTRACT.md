@@ -43,11 +43,21 @@ flagships.
   state identity is a citation, not an authority upgrade. A guitar or clarinet is a
   filled assembly, not a crate and not a type. Realization lives
   in `fs-couple`.
+  `ThinPlate::kelvin_voigt_bending` declares proportional isotropic bending
+  viscosity through `IsotropicPlateBendingViscosity`: uniaxial eta [Pa s], an
+  angular-frequency applicability band and an optional material-state citation.
+  The assumed viscous plane-stress tensor is `(eta/E)` times the elastic
+  tensor, with the same Poisson ratio. This selects bending strain-rate loss
+  and requires zero authored modal damping. Thermoelastic and radiation losses
+  remain separate; callers must avoid counting an already included mechanism
+  twice. Material resolution, modal projection and band checks live in
+  `fs-couple`. No general anisotropic viscosity, finite-amplitude membrane
+  viscosity, evolving temperature or phase transition is implied.
   `PrestressedString::kelvin_voigt_bending` optionally carries a
   `KelvinVoigtBending` descriptor: viscous flexural stiffness `eta I` [N m² s],
   an angular-frequency applicability band, and an optional material-state citation.
-  It selects bending strain-rate dissipation instead of the legacy internal and
-  bending approximations, retaining separate air drag; authored Rayleigh or
+  It selects bending strain-rate dissipation instead of authored modal internal
+  loss, retaining separate air drag; authored Rayleigh or
   nonzero internal damping alongside it refuses during realization. This remains
   data only. Material resolution, band admission and modal projection live in
   `fs-couple`; no instrument-specific or second viscoelastic solver is introduced.
@@ -61,6 +71,13 @@ flagships.
   material loss laws, and retains separate air drag. The first realizer assumes
   a fully relaxed held pluck and fixed material state; axial relaxation and
   arbitrary pre-release loading histories are not represented by this descriptor.
+  Without a selected constitutive loss law, `damping_ratio` explicitly declares
+  a finite nonnegative constant modal ratio in addition to air drag. Zero is a
+  no-internal-loss assumption, not evidence that a material is lossless. Elastic
+  stiffness does not imply a hidden damping coefficient, and a single authored
+  ratio does not select a Maxwell spectrum. Rayleigh remains an explicit override
+  of the complete modal loss sum. These authored choices are reduced models,
+  not source-backed material measurements.
 - `signal::TimeSignal` — `Constant`, `Ramp` (finite strict interval, clamped;
   stable convex interpolation; the vessel tilt
   `(ramp 0deg 65deg 3s)`), `Table` (strictly increasing times + declared

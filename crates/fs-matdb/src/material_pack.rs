@@ -6,9 +6,10 @@
 //! [`MaterialStateId`]. This wrapper binds a caller-declared named material
 //! state around an already-admitted claim pack so a runtime consumer can
 //! reconstruct the exact [`MaterialCard`] a project binding references by
-//! content hash — without inventing a second claim codec. V1 deliberately
-//! carries no constitutive model cards; a material law needs a separately
-//! versioned model-pack binding rather than an opaque executable payload.
+//! content hash — without inventing a second claim codec. V1 carries no
+//! constitutive model cards. V2 explicitly associates a complete, independently
+//! verified [`NormalizedModelPack`] with that state; it transports data, never
+//! executable code or a claim of physical applicability.
 //!
 //! Claim selection is NOT performed here. A card transports its complete
 //! claim set; requirement-driven selection (which claim answers
@@ -17,16 +18,23 @@
 
 use fs_blake3::{ContentHash, hash_domain};
 
-use crate::{MATDB_PACK_TARGET_BASIS, MaterialCard, MaterialStateId, NormalizedPack, PackError};
+use crate::{
+    MATDB_PACK_TARGET_BASIS, MaterialCard, MaterialStateId, NormalizedModelPack, NormalizedPack,
+    PackError,
+};
 
-/// Current normalized material-card-pack wire schema.
+/// Frozen model-free material-card-pack wire schema.
 pub const MATERIAL_CARD_PACK_SCHEMA_VERSION: u32 = 1;
+/// Material-card-pack wire schema with an explicit nested model association.
+pub const MATERIAL_CARD_MODEL_PACK_SCHEMA_VERSION: u32 = 2;
 /// Coherent numeric basis inherited by the nested claim pack.
 pub const MATERIAL_CARD_PACK_TARGET_BASIS: &str = MATDB_PACK_TARGET_BASIS;
 
 const MAGIC: &[u8; 8] = b"FSMCDPK\0";
 const MATERIAL_CARD_PACK_HASH_DOMAIN: &str =
     "org.frankensim.fs-matdb.normalized-material-card-pack.v1";
+const MATERIAL_CARD_MODEL_PACK_HASH_DOMAIN: &str =
+    "org.frankensim.fs-matdb.normalized-material-card-pack.v2";
 const MAX_MATERIAL_CARD_PACK_BYTES: usize = 256 * 1024 * 1024;
 const MAX_STRING_BYTES: usize = 1_048_576;
 
@@ -39,6 +47,7 @@ const MAX_STRING_BYTES: usize = 1_048_576;
 pub struct NormalizedMaterialCardPack {
     card: MaterialCard,
     claims_pack: NormalizedPack,
+    model_pack: Option<NormalizedModelPack>,
 }
 
 impl NormalizedMaterialCardPack {
@@ -55,9 +64,42 @@ impl NormalizedMaterialCardPack {
     /// string, a nonzero revision (via [`MaterialCard::assemble`]), and an
     /// encoded artifact beyond the byte cap.
     pub fn new(state: MaterialStateId, claims_pack: NormalizedPack) -> Result<Self, PackError> {
+        Self::assemble(state, claims_pack, None)
+    }
+
+    /// Associate every card in an admitted model pack with the declared state.
+    ///
+    /// This explicit caller declaration uses v2 transport. Names never infer
+    /// membership, and neither material applicability nor executable-law
+    /// availability is established here. The consumer must validate the exact
+    /// law, parameters, state convention and operating domain before execution.
+    /// The complete model pack retains its own source and normalization records.
+    ///
+    /// # Errors
+    /// The same state, revision and aggregate byte-limit refusals as [`Self::new`].
+    pub fn new_with_models(
+        state: MaterialStateId,
+        claims_pack: NormalizedPack,
+        model_pack: NormalizedModelPack,
+    ) -> Result<Self, PackError> {
+        Self::assemble(state, claims_pack, Some(model_pack))
+    }
+
+    fn assemble(
+        state: MaterialStateId,
+        claims_pack: NormalizedPack,
+        model_pack: Option<NormalizedModelPack>,
+    ) -> Result<Self, PackError> {
         validate_state(&state)?;
-        let card = MaterialCard::assemble(state, claims_pack.claims().clone(), Vec::new())?;
-        let pack = Self { card, claims_pack };
+        let models = model_pack
+            .as_ref()
+            .map_or_else(Vec::new, |pack| pack.models().to_vec());
+        let card = MaterialCard::assemble(state, claims_pack.claims().clone(), models)?;
+        let pack = Self {
+            card,
+            claims_pack,
+            model_pack,
+        };
         let encoded_bytes = pack.to_bytes().len();
         if encoded_bytes > MAX_MATERIAL_CARD_PACK_BYTES {
             return Err(limit(
@@ -79,6 +121,22 @@ impl NormalizedMaterialCardPack {
     #[must_use]
     pub fn claims_pack(&self) -> &NormalizedPack {
         &self.claims_pack
+    }
+
+    /// Complete explicitly associated model artifact, absent in v1.
+    #[must_use]
+    pub fn model_pack(&self) -> Option<&NormalizedModelPack> {
+        self.model_pack.as_ref()
+    }
+
+    /// Lowest capable wire schema; model-free artifacts retain frozen v1 bytes.
+    #[must_use]
+    pub fn schema_version(&self) -> u32 {
+        if self.model_pack.is_some() {
+            MATERIAL_CARD_MODEL_PACK_SCHEMA_VERSION
+        } else {
+            MATERIAL_CARD_PACK_SCHEMA_VERSION
+        }
     }
 
     /// Stable pack name supplied by the source manifest.
@@ -110,18 +168,27 @@ impl NormalizedMaterialCardPack {
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut writer = Writer::default();
         writer.bytes.extend_from_slice(MAGIC);
-        writer.u32(MATERIAL_CARD_PACK_SCHEMA_VERSION);
+        writer.u32(self.schema_version());
         encode_state(&mut writer, self.card.id());
         writer.hash(self.card.content_hash());
         writer.hash(self.claims_pack.content_hash());
         writer.blob(&self.claims_pack.to_bytes());
+        if let Some(models) = &self.model_pack {
+            writer.hash(models.content_hash());
+            writer.blob(&models.to_bytes());
+        }
         writer.bytes
     }
 
     /// Domain-separated identity of the canonical material-card-pack bytes.
     #[must_use]
     pub fn content_hash(&self) -> ContentHash {
-        hash_domain(MATERIAL_CARD_PACK_HASH_DOMAIN, &self.to_bytes())
+        let domain = if self.model_pack.is_some() {
+            MATERIAL_CARD_MODEL_PACK_HASH_DOMAIN
+        } else {
+            MATERIAL_CARD_PACK_HASH_DOMAIN
+        };
+        hash_domain(domain, &self.to_bytes())
     }
 
     /// Verify an externally pinned whole-artifact identity before decoding.
@@ -133,7 +200,16 @@ impl NormalizedMaterialCardPack {
                 bytes.len(),
             ));
         }
-        let actual = hash_domain(MATERIAL_CARD_PACK_HASH_DOMAIN, bytes);
+        let mut reader = Reader::new(bytes);
+        reader.expect(MAGIC, "normalized material-card-pack magic")?;
+        let domain = match reader.u32()? {
+            MATERIAL_CARD_PACK_SCHEMA_VERSION => MATERIAL_CARD_PACK_HASH_DOMAIN,
+            MATERIAL_CARD_MODEL_PACK_SCHEMA_VERSION => MATERIAL_CARD_MODEL_PACK_HASH_DOMAIN,
+            version => {
+                return Err(reader.malformed(format!("unsupported schema version {version}")));
+            }
+        };
+        let actual = hash_domain(domain, bytes);
         if actual != expected {
             return Err(PackError::IdentityMismatch {
                 kind: "material_card_pack",
@@ -156,19 +232,32 @@ impl NormalizedMaterialCardPack {
         let mut reader = Reader::new(bytes);
         reader.expect(MAGIC, "normalized material-card-pack magic")?;
         let version = reader.u32()?;
-        if version != MATERIAL_CARD_PACK_SCHEMA_VERSION {
+        if !matches!(
+            version,
+            MATERIAL_CARD_PACK_SCHEMA_VERSION | MATERIAL_CARD_MODEL_PACK_SCHEMA_VERSION
+        ) {
             return Err(reader.malformed(format!(
-                "unsupported schema version {version}; expected {MATERIAL_CARD_PACK_SCHEMA_VERSION}"
+                "unsupported schema version {version}; expected 1 or 2"
             )));
         }
         let state = decode_state(&mut reader)?;
         let expected_card = reader.hash()?;
         let expected_claims_pack = reader.hash()?;
         let claims_bytes = reader.blob("nested_claims_pack", MAX_MATERIAL_CARD_PACK_BYTES)?;
+        let models = if version == MATERIAL_CARD_MODEL_PACK_SCHEMA_VERSION {
+            let expected_models = reader.hash()?;
+            let model_bytes = reader.blob("nested_model_pack", MAX_MATERIAL_CARD_PACK_BYTES)?;
+            Some((expected_models, model_bytes))
+        } else {
+            None
+        };
         reader.finish()?;
 
         let claims_pack = NormalizedPack::from_bytes_verified(expected_claims_pack, claims_bytes)?;
-        let pack = Self::new(state, claims_pack)?;
+        let model_pack = models
+            .map(|(hash, bytes)| NormalizedModelPack::from_bytes_verified(hash, bytes))
+            .transpose()?;
+        let pack = Self::assemble(state, claims_pack, model_pack)?;
         let actual_card = pack.card.content_hash();
         if actual_card != expected_card {
             return Err(PackError::IdentityMismatch {

@@ -24,6 +24,11 @@ plus a canonical-bytes vault.
   property claims, named material cards, ordered interfaces, constitutive
   models, and species associations. `from_bytes_verified` dispatches to
   the exact L1 decoder, including its hash, version, and canonicality checks.
+  Material-card v2 carries an explicitly associated, verified model pack;
+  ordinary ingest/reopen/content lookup preserves its exact member cards and
+  normalization records without changing the SQL schema. Its parameters remain
+  models, not indexed scalar properties. A same-state v1 card gains no implicit
+  membership from a separately stored model pack.
 - `ingest_bundle(&[CatalogPack])` — store related artifacts in one transaction.
   A failure in any member rolls back every earlier member and its index rows;
   commit failures also attempt rollback and report rollback failure explicitly.
@@ -67,7 +72,8 @@ plus a canonical-bytes vault.
   the same canonical decoder and `ClaimSet::query_typed`, then verifies the
   receipt. It retains complete quantity, hardness/tensor context and typed
   axis requirements; no property name or equal dimensions can erase them.
-- `discover(&DiscoveryRequest)` evaluates a complete typed property bundle
+- `discover(&DiscoveryRequest, &LawRegistry)` evaluates a complete typed
+  property/model bundle
   separately on each canonical candidate. Targets distinguish named materials,
   explicitly unbound property packs, and interfaces filtered by ordered A/B
   material-state identities. An interface hit still requires exact texture,
@@ -75,7 +81,8 @@ plus a canonical-bytes vault.
   Results include every requested property and its evaluated evidence or named
   gap; all globally unknown property names are retained together. Known names
   with no matching target remain distinguishable from unknown names.
-  `Complete`/`Partial`/`Unavailable` describe requested data coverage only.
+  `Complete`/`Partial`/`Unavailable` describe requested property support and
+  model admission, without promoting evidence strength or solver qualification.
   The report retains the request: `LocalState` success is conditional on that
   one state, while `Envelope` requires finite ordered corners with identical
   axes and quantity descriptors. The selected claim must remain the same over
@@ -86,6 +93,26 @@ plus a canonical-bytes vault.
   Queries and receipt replay use the canonical evaluator. No property is borrowed
   from a different material condition to make a candidate complete. Unrelated
   weak evidence does not alter the requested property's status or receipts.
+  `ModelRequirement` names an exact law/version and optional model-card pin.
+  Only models explicitly associated with that candidate may satisfy it; a
+  separately stored model makes the identity known, never associated by name.
+  `unknown_models` retains all globally absent law/version requests, distinct
+  from candidate-local `Missing` gaps listing actually associated versions.
+  Model-only requests are permitted; empty bundles, duplicate requirements,
+  blank law names and zero implementation versions refuse before discovery.
+  Each returned `DiscoveredModel` retains either the complete original card
+  or a `ModelDiscoveryGap`: absent/mismatched pin, missing version, unsupported
+  domain, competing calibration, original registry refusal, or narrower built-
+  node support. Both card and implementation boxes must contain the local point
+  or both envelope corners with exact axis semantics. Overlapping model sources,
+  including interior-only overlaps, require an explicit pin; pins never grant
+  missing support. Disjoint irrelevant models cannot create ambiguity. No
+  parameters are fused or models stitched together across an unsupported range.
+  Successful selection calls the supplied registry's real factory through
+  `LawRegistry::instantiate`, preserving card/law/state-schema/admission checks.
+  Merely having metadata in the store or an implementation registered is
+  insufficient. Returned cards preserve `RequiresDeclaredState` when applicable;
+  discovery neither invents initial state nor connects or executes a solver graph.
 - `verify_index(pack_id)` — cross-checks every derived row against the
   decoded pack, claims table AND validity table (claim hash, axis,
   bitwise bounds); `FS-MATDB-STORE-INDEX-MISMATCH` names the first
@@ -135,12 +162,17 @@ driver failures carry their context. No silent degradation anywhere.
 
 Deterministic ingest order (ClaimSet canonical iteration), fixed DDL,
 canonical digest fold; bitwise-identical rebuild asserted.
+Model discovery additionally depends on the caller's exact registry and its
+factory determinism. Reports do not serialize or authenticate that registry;
+consumers must repeat admission when binding the selected content-pinned card.
 
 ## Cancellation behavior
 
 Synchronous short-running statements via the fsqlite sync API; bulk
 ingest is caller-chunkable per pack or atomic bundle. No `Cx` integration (workspace
 `frankensim-ccmn` effort).
+Model discovery uses synchronous law construction/admission under the existing
+law-node contract, not a time-stepping workload or a new parallel executor.
 
 ## Unsafe boundary
 
@@ -173,6 +205,14 @@ axis/quantity refusals, ordered counter-material filtering, request validation,
 and stale corpus refusal. G3 adds unrelated weak evidence and checks unchanged
 requested-property support and receipts; existing observation precedence is
 also exercised over a competing claim's interior intersection.
+G0 model-discovery cases use real canonical stores and the public executable
+registry with an explicitly synthetic spring adapter. They check mixed/model-
+only bundles, all unknown and candidate-local gaps, exact member provenance,
+required-initial-state retention, consumer force evaluation after explicit
+initialization, unknown implementations, factory parameter refusal, exact
+versions/pins, interior ambiguity, irrelevant disjoint models, typed-axis
+refusal and narrower implementation domains. Existing property-only checks use
+an explicitly empty registry and retain their assertions.
 
 ## No-claim boundaries
 
@@ -183,14 +223,18 @@ also exercised over a competing claim's interior intersection.
   xtask tests where the compiler binary exists — recorded follow-up.
 - Existing family wire versions are preserved. Material/interface v1 packs
   do not embed model cards, and the store does not infer model/species
-  associations from similar names. Executable-model discovery and new cross-pack
-  binding formats remain separate work; callers can already resolve exact
-  whole-artifact identities with `load_by_hash`.
+  associations from similar names. Material-card v2 uses the L1-owned explicit
+  association described above. Model discovery uses only actual associated
+  cards and the caller's executable registry; interface v1 still has no model
+  association payload. Exact whole-artifact identities resolve through `load_by_hash`.
 - Value-range and compound discovery cover the existing scalar and
   one-dimensional curve payloads. Compound envelopes prove declared data
   support and stable source selection, not a physical trajectory, numeric
-  admissibility at every future solver state, or executable model availability.
-  Scenario/CLI material selection and model availability remain MR13 work.
+  admissibility at every future solver state, or physical validity. Model results
+  prove only the stated registry admission and declared card/node box support;
+  factory correctness, graph wiring, initialization and future execution remain
+  separate obligations. Scenario/CLI material selection and actual lead-heating
+  missing-input acceptance remain MR13 work.
   Exact state queries are still required when physics consumes a candidate;
   evolving-state domain exits and rollback belong to the runtime coupling.
 - The seal is an integrity mechanism, not authentication: it detects

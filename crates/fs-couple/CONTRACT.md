@@ -440,8 +440,8 @@ The shared linear/Kirchhoff–Carrier/moving-end modal path projects
 `zeta_k = eta I k^4/(2 mu omega_k)`. Thus tension contributes stiffness but no
 viscous loss. This is the constant-coefficient Kelvin–Voigt term in
 [Sakthivel et al. (2023)](https://arxiv.org/abs/2301.07931), with tension added
-and projected onto the existing sine/cosine bases. The explicit law excludes
-the legacy bending heuristic and authored internal floor; simultaneous Rayleigh
+and projected onto the existing sine/cosine bases. The explicit law replaces
+the authored constant modal ratio; simultaneous Rayleigh
 or nonzero authored damping refuses. Air resistance is still added separately.
 Every retained reference frequency, including the secondary polarization, must
 lie in the descriptor band. G1 checks `eta I` and rebinding; G3 checks actual
@@ -549,7 +549,7 @@ clarinet is one filling of those objects.
   pressure against a damped oscillator, even-mode jerk and refinement, nonlinear
   stretching-force pressure, and silence under a held static load. Fletcher
   inharmonicity `ω_n = n ω_1 √(1+B n²)` when `EI > 0`. Stokes air
-  drag from `GasState` plus the authored internal floor. The reusable
+  drag from `GasState` plus the authored constant modal ratio. The reusable
   `air_path::oscillating_cylinder_air_resistance_per_length` computes the
   Desvages (2018) section 3.2.2 cylinder resistance approximation
   `R=2 pi mu (1+r sqrt(2 rho omega/mu))` [N s/m²]; both string paths use
@@ -559,9 +559,15 @@ clarinet is one filling of those objects.
   fluid drag remain unclaimed. Explicit Rayleigh damping still replaces the
   complete loss sum when no material bending law is selected. The explicit
   Kelvin–Voigt path above instead combines only bending viscosity and air drag.
-  Without that descriptor the existing `2e-7*omega` bending addend remains a
-  heuristic and the fitted internal floor is caller-authored. Neither is a material
-  measurement. General loss-spectrum integration remains MR03 work.
+  Without a selected constitutive law, `damping_ratio` is a finite nonnegative
+  constant per-mode reduced-model input. Zero explicitly assumes no internal
+  loss; elastic EI does not create dissipation. No hidden `2e-7*omega` addend
+  or relaxation spectrum inferred from a single ratio remains. The authored
+  ratio is not a material measurement; physical loss requires admitted data
+  and a selected Kelvin–Voigt or causal Prony law. G1 checks the third mode's
+  actual SI pressure against the independently damped oscillator, and G3 checks
+  equivalence to explicitly zero bending viscosity across linear, KC and Dirac
+  paths. Invalid authored ratios refuse instead of being clamped.
   G1/G3 tests check the resistance formula and
   pressure ring-down under changed gas pressure. A second
   polarization at `1+detune` is a second member on the same clock
@@ -614,7 +620,8 @@ clarinet is one filling of those objects.
   specimen binders. Only consumer-needed scalar properties are resolved: rho/E
   for elastic strings, the selected in-plane plate constants, and additional
   viscosity or equilibrium/modulus/time fields for explicitly selected sourced
-  string bending loss. Inactive property families are not queried. Loss selectors
+  string/plate bending loss and explicitly selected isotropic plate thermal loss.
+  Inactive property families are not queried. Loss selectors
   are retained; old numerical loss coefficients and citations are rebuilt.
   `CompiledMaterialAssembly` keeps the numeric assembly and source-bound specimens
   immutable, and its `realize` method calls the existing ordinary/chart dispatcher.
@@ -623,8 +630,14 @@ clarinet is one filling of those objects.
   upgrade the authority of the whole assembly. Geometry, constraints, forcing,
   supports, damping choices and solver controls retain their existing meanings.
   Resolution/binding errors preserve component context and the owning diagnostic;
-  failure leaves the input and prior compiled specimens intact. Unsupported plate
-  thermal-loss rebinding still refuses through its existing owner. Compilation is
+  failure leaves the input and prior compiled specimens intact. A thermal plate
+  selects the existing six-property thermoelastic resolver; optional bending
+  viscosity is requested in that same atomic bundle, including exact claim pins.
+  The resulting state rebuilds the fixed-mass/thickness specimen and both loss
+  mechanisms. Stale numerical coefficients and citations are replaced together.
+  An orthotropic material selection with this isotropic thermal law refuses.
+  Specimen temperature must be an explicit positive absolute T coordinate; the
+  surrounding gas does not supply it implicitly. Compilation is
   synchronous with no cancellation guarantee; ordinary runtime admission runs at
   realization. This is a Rust description API, without a new wire format, global
   scenario identity, optical binding or conservative material evolution.
@@ -632,6 +645,13 @@ clarinet is one filling of those objects.
   retention, simultaneous string/plate card substitution at fixed mass, regional
   chart substitution through moving-end string/cavity pressure, active Kelvin–Voigt
   and Prony coefficient rebuilding, and missing-member/property/domain/law refusals.
+  Thermal compiler tests vary specimen temperature through source curves and
+  check changed pressure in linear, sine von Karman and sampled-FE plate paths,
+  with and without separately selected viscosity. A fixed-mass card swap checks
+  rebuilt thickness and both damping addends against independent Zener and
+  Kelvin–Voigt arithmetic; conflicting heat-capacity claims require the selected
+  pin to survive compilation. These fixtures validate implementation, not an
+  experiment or a transient heating simulation.
 - Uniform plate material binding: `with_uniform_plate_material_state` consumes
   the same `ResolvedMaterialStatePoint` carrier as the circular-string and
   disc adapters. Isotropic elasticity requires rho/E/nu; principal-axis
@@ -646,8 +666,11 @@ clarinet is one filling of those objects.
   fixed-mass prescription derives thickness and mass coherently; geometry and
   material/model identity are retained separately from supports, pretension,
   authored damping and solver controls. These are independent frozen specimens,
-  not a conservative thermal evolution. Stale thermoelastic addends refuse on
-  elastic rebinding. The source-bound orthotropic adapter also refuses geometric
+  not a conservative thermal evolution. The purely elastic binder refuses stale
+  thermoelastic addends. `with_uniform_isotropic_thermoelastic_material_state`
+  instead rebuilds the mechanics and loss inputs from the existing resolved
+  thermal bundle, retaining its complete receipts and optional viscosity data.
+  The source-bound orthotropic adapter also refuses geometric
   nonlinearity: the existing sampled nonlinear plate's isotropic membrane
   approximation is not a resolved orthotropic membrane law. Anisotropic thermal
   loss and phase changes remain unavailable here. The raw
@@ -660,6 +683,41 @@ clarinet is one filling of those objects.
   and axis swaps, with aligned eigenfrequencies checked against Navier theory.
   An arbitrary angle changes actual assembly pressure; a quarter-turn recovers
   the pressure and eigenfrequency of reciprocal axis exchange.
+- Uniform material-bound plate viscosity: `ResolvedPlateSpecimen::with_kelvin_voigt_bending_loss`
+  selects proportional isotropic Kelvin–Voigt bending. The dimension-only
+  `kelvin_voigt_bending_viscosity` [Pa s] claim must be nonnegative and carry an
+  explicit omega band [rad/s]. Rho, E, nu and eta must be validity-wide scalar
+  constants; their frequency bands intersect. Temperature, moisture and other
+  coordinates remain at the admitted state point, with original uncertainty
+  and observation status retained. The assumed viscous plane-stress tensor has
+  the same Poisson ratio as the elastic tensor: the moment law is
+  `M = D (curvature + (eta/E) curvature_rate)`, giving `C_b = (eta/E) K_b`.
+  This is a proportional constitutive specialization of
+  [Kelvin–Voigt strain-rate damping](https://doc.comsol.com/6.3/doc/com.comsol.help.sme/sme_ug_theory.06.029.html#3441080),
+  not a measured general bulk/shear viscosity tensor.
+  The ordinary linear, sine von Karman and sampled-FE plate paths consume it.
+  Each retained reference-mode frequency must lie in the admitted band, even
+  for a zero-strength viscosity claim. Only bending energy receives this loss;
+  geometric prestress does not. For FE modes the diagonal coefficient is
+  `(eta/E) phi^T K_b phi / (phi^T M phi)`. Off-diagonal damping coupling is
+  omitted, a modal approximation when prestress makes damping nonproportional.
+  The nonlinear path retains bending-rate damping but supplies no nonlinear
+  membrane viscosity or guarantee that finite-amplitude frequency shifts and
+  generated harmonics remain in band. Authored scalar damping alongside this
+  law refuses. Explicit thermal loss remains separately additive; its inputs
+  must exclude this viscosity's contribution to avoid double counting.
+  `compile_material_assembly` resolves the selected viscosity with the plate's
+  elasticity and density. A material rebind recomputes its coefficients and
+  source identity rather than carrying the old material's viscosity forward;
+  missing source data refuses. Thermal rebinding of an already viscous raw
+  plate refuses because it would otherwise retain stale viscosity inputs.
+  G1 checks the actual sine-mode damping operator and ringdown against the
+  analytic Kelvin–Voigt plate equation with timestep refinement. Independent
+  geometric-energy integration checks prestressed DKT and sampled-FE damping,
+  including additive thermal loss. G3 changes only viscosity through the card
+  compiler, retaining elastic eigenfrequencies while changing actual assembly
+  pressure in all three plate paths. These synthetic implementation fixtures
+  are not experimental material/ringdown validation.
 - Regional linear plates: `ResolvedPlateSpecimen::section` exposes the rotated
   numerical section for assignment to `PlateChart` elements. The caller retains
   the resolved specimens for source receipts; a numerical chart does not mint
@@ -771,8 +829,8 @@ clarinet is one filling of those objects.
   The finished pressure history is passed through ISO 9613-1
   absorption (`air_path`) with the assembly's explicit humidity;
   Stokes–Kirchhoff is only the fallback outside the ISO window.
-  Authored string `ζ` at the fundamental becomes a Prony branch
-  (`GeneralizedMaxwell::matching_loss`); higher modes see `η(ω)/2`.
+  Authored string `ζ` stays a constant modal ratio; a relaxation spectrum
+  is present only when the caller explicitly selects `PronyBending`.
   An optional `HelmholtzCavity` faces the plate monopoles as a
   flow-driven pHS whose damper is compact-mouth `Re Z_rad(ω₀)`.
 - Bow roughness: an optional `ContactTexture` is a declared

@@ -3,9 +3,12 @@
 use fs_blake3::hash_domain;
 use fs_evidence::ValidityDomain;
 use fs_matdb::{
-    ClaimSet, InterpolationPolicy, MATERIAL_CARD_PACK_SCHEMA_VERSION, MaterialStateId,
-    NormalizedMaterialCardPack, NormalizedPack, ObservationDataset, PackError, PropertyClaim,
-    PropertyKey, PropertyValue, Provenance, QueryPoint, SelectionPolicy, UncertaintyModel,
+    ClaimSet, ConstitutiveModelCard, InitialStatePolicy, InterpolationPolicy, LawId, LawParameter,
+    MATERIAL_CARD_MODEL_PACK_SCHEMA_VERSION, MATERIAL_CARD_PACK_SCHEMA_VERSION,
+    MODEL_PACK_TARGET_BASIS, MaterialStateId, ModelNormalizationReceipt, ModelNormalizationTarget,
+    NormalizedMaterialCardPack, NormalizedModelPack, NormalizedPack, ObservationDataset, PackError,
+    PropertyClaim, PropertyKey, PropertyValue, Provenance, QueryPoint, SelectionPolicy,
+    UncertaintyModel, ValidityBoundSide,
 };
 use fs_qty::Dims;
 
@@ -71,11 +74,234 @@ fn sample_pack() -> NormalizedMaterialCardPack {
         .expect("material-card pack admits")
 }
 
+fn model_pack(conductivities: &[f64], compiler: &str) -> NormalizedModelPack {
+    let mut models = Vec::new();
+    let mut receipts = Vec::new();
+    for &value in conductivities {
+        let model = ConstitutiveModelCard {
+            law: LawId("synthetic-fourier".into()),
+            law_version: 3,
+            parameters: std::collections::BTreeMap::from([(
+                "conductivity".into(),
+                LawParameter {
+                    value,
+                    dims: THERMAL_CONDUCTIVITY_DIMS,
+                },
+            )]),
+            state_schema_version: 0,
+            initial_state: InitialStatePolicy::ZeroInternalState,
+            validity: ValidityDomain::unconstrained().with("T", 273.15, 373.15),
+            sources: vec![hash_domain(SOURCE_DOMAIN, b"synthetic-model-source")],
+            provenance: Provenance {
+                source: "synthetic transport fixture; no measured calibration".into(),
+                ..provenance()
+            },
+        };
+        let hash = model.content_hash();
+        for (target, dims, literal) in [
+            (
+                ModelNormalizationTarget::Parameter {
+                    model: hash,
+                    parameter: "conductivity".into(),
+                },
+                THERMAL_CONDUCTIVITY_DIMS,
+                format!("{value} W/(m K)"),
+            ),
+            (
+                ModelNormalizationTarget::ValidityBound {
+                    model: hash,
+                    axis: "T".into(),
+                    side: ValidityBoundSide::Lower,
+                },
+                Dims([0, 0, 0, 1, 0, 0]),
+                "273.15 K".into(),
+            ),
+            (
+                ModelNormalizationTarget::ValidityBound {
+                    model: hash,
+                    axis: "T".into(),
+                    side: ValidityBoundSide::Upper,
+                },
+                Dims([0, 0, 0, 1, 0, 0]),
+                "373.15 K".into(),
+            ),
+        ] {
+            receipts.push(ModelNormalizationReceipt::new(
+                target,
+                hash_domain(SOURCE_DOMAIN, literal.as_bytes()),
+                dims,
+                1.0,
+                0.0,
+                "authored SI",
+                MODEL_PACK_TARGET_BASIS,
+                None,
+                None,
+            ));
+        }
+        models.push(model);
+    }
+    NormalizedModelPack::new(
+        "explicitly-associated-models",
+        compiler,
+        hash_domain(SOURCE_DOMAIN, b"model-envelope"),
+        "synthetic fixture redistribution",
+        models,
+        receipts,
+    )
+    .unwrap()
+}
+
+#[test]
+fn g0_model_association_preserves_membership_and_complete_nested_evidence() {
+    let models = model_pack(&[167.0, 170.0], "test-v1");
+    let pack = NormalizedMaterialCardPack::new_with_models(
+        aluminum_state(),
+        claims_pack(),
+        models.clone(),
+    )
+    .unwrap();
+    assert_eq!(
+        pack.schema_version(),
+        MATERIAL_CARD_MODEL_PACK_SCHEMA_VERSION
+    );
+    let bytes = pack.to_bytes();
+    let decoded =
+        NormalizedMaterialCardPack::from_bytes_verified(pack.content_hash(), &bytes).unwrap();
+    assert_eq!(decoded, pack);
+    assert_eq!(decoded.model_pack(), Some(&models));
+    assert_eq!(decoded.card().models(), models.models());
+    assert_eq!(
+        decoded
+            .card()
+            .models_for(&LawId("synthetic-fourier".into()))
+            .len(),
+        2
+    );
+    assert_eq!(decoded.model_pack().unwrap().normalizations().len(), 6);
+    assert_eq!(decoded.claims_pack(), &claims_pack());
+    let reversed = NormalizedMaterialCardPack::new_with_models(
+        aluminum_state(),
+        claims_pack(),
+        model_pack(&[170.0, 167.0], "test-v1"),
+    )
+    .unwrap();
+    assert_eq!(reversed.to_bytes(), bytes);
+
+    let changed_source = NormalizedMaterialCardPack::new_with_models(
+        aluminum_state(),
+        claims_pack(),
+        model_pack(&[167.0, 170.0], "test-v2"),
+    )
+    .unwrap();
+    assert_eq!(
+        changed_source.card().content_hash(),
+        pack.card().content_hash()
+    );
+    assert_ne!(changed_source.content_hash(), pack.content_hash());
+    let changed_law = NormalizedMaterialCardPack::new_with_models(
+        aluminum_state(),
+        claims_pack(),
+        model_pack(&[168.0, 170.0], "test-v1"),
+    )
+    .unwrap();
+    assert_ne!(
+        changed_law.card().content_hash(),
+        pack.card().content_hash()
+    );
+}
+
+#[test]
+fn g0_model_association_refuses_substitution_and_silent_downgrade() {
+    let plain = sample_pack();
+    assert_eq!(plain.schema_version(), 1);
+    assert_eq!(plain.model_pack(), None);
+    assert_eq!(
+        plain.content_hash(),
+        hash_domain(
+            "org.frankensim.fs-matdb.normalized-material-card-pack.v1",
+            &plain.to_bytes()
+        )
+    );
+    let models = model_pack(&[167.0], "test-v1");
+    let pack = NormalizedMaterialCardPack::new_with_models(
+        aluminum_state(),
+        claims_pack(),
+        models.clone(),
+    )
+    .unwrap();
+    let bytes = pack.to_bytes();
+    let model_offset = plain.to_bytes().len();
+    assert_eq!(
+        &bytes[model_offset..model_offset + 32],
+        &models.content_hash().0
+    );
+    assert_eq!(
+        pack.content_hash(),
+        hash_domain(
+            "org.frankensim.fs-matdb.normalized-material-card-pack.v2",
+            &bytes
+        )
+    );
+    let mut changed = bytes.clone();
+    changed[model_offset + 36] ^= 1;
+    assert!(matches!(
+        NormalizedMaterialCardPack::from_bytes(&changed),
+        Err(PackError::IdentityMismatch {
+            kind: "model pack",
+            ..
+        })
+    ));
+    assert!(matches!(
+        NormalizedMaterialCardPack::from_bytes_verified(pack.content_hash(), &changed),
+        Err(PackError::IdentityMismatch {
+            kind: "material_card_pack",
+            ..
+        })
+    ));
+
+    // Removing the nested models and relabeling as v1 cannot retain the card
+    // identity that declared those members, even with a recomputed outer hash.
+    let mut downgraded = bytes[..model_offset].to_vec();
+    downgraded[8..12].copy_from_slice(&1_u32.to_le_bytes());
+    assert!(matches!(
+        NormalizedMaterialCardPack::from_bytes(&downgraded),
+        Err(PackError::IdentityMismatch {
+            kind: "material_card",
+            ..
+        })
+    ));
+    let mut upgraded = plain.to_bytes();
+    upgraded[8..12].copy_from_slice(&2_u32.to_le_bytes());
+    assert!(matches!(
+        NormalizedMaterialCardPack::from_bytes(&upgraded),
+        Err(PackError::Malformed { .. })
+    ));
+}
+
 #[test]
 fn material_card_pack_round_trips_deterministically() {
     let pack = sample_pack();
     let first = pack.to_bytes();
     let second = sample_pack().to_bytes();
+    // Independent frozen v1 grammar: no optional-model marker or extra field
+    // may enter an existing model-free artifact.
+    let claims = claims_pack();
+    let card =
+        fs_matdb::MaterialCard::assemble(aluminum_state(), claims.claims().clone(), Vec::new())
+            .unwrap();
+    let mut legacy = b"FSMCDPK\0".to_vec();
+    legacy.extend_from_slice(&1_u32.to_le_bytes());
+    for text in ["AA6061", "wrought", "T6"] {
+        legacy.extend_from_slice(&(text.len() as u32).to_le_bytes());
+        legacy.extend_from_slice(text.as_bytes());
+    }
+    legacy.extend_from_slice(&0_u32.to_le_bytes());
+    legacy.extend_from_slice(&card.content_hash().0);
+    legacy.extend_from_slice(&claims.content_hash().0);
+    let payload = claims.to_bytes();
+    legacy.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    legacy.extend_from_slice(&payload);
+    assert_eq!(first, legacy, "model-free v1 wire layout is frozen");
     assert_eq!(first, second, "canonical material-card bytes moved");
     assert_eq!(&first[..8], b"FSMCDPK\0");
     assert_eq!(
@@ -163,7 +389,7 @@ fn malformed_or_unpinned_material_artifacts_refuse() {
     ));
 
     let mut bad_version = bytes.clone();
-    bad_version[8..12].copy_from_slice(&(MATERIAL_CARD_PACK_SCHEMA_VERSION + 1).to_le_bytes());
+    bad_version[8..12].copy_from_slice(&99_u32.to_le_bytes());
     assert!(matches!(
         NormalizedMaterialCardPack::from_bytes(&bad_version),
         Err(PackError::Malformed { .. })

@@ -796,7 +796,8 @@ pub struct IsotropicThermoelasticStatePoint {
 }
 
 impl IsotropicThermoelasticStatePoint {
-    /// All six property-use receipts at the same explicit state point.
+    /// The six thermal/elastic property-use receipts and any explicitly requested
+    /// auxiliary properties, all at the same state point and original authority.
     #[must_use]
     pub const fn resolved(&self) -> &ResolvedMaterialStatePoint {
         &self.resolved
@@ -825,6 +826,34 @@ pub fn resolve_isotropic_thermoelastic_state_point(
     point: &QueryPoint,
     selection: MaterialPropertySelection,
 ) -> Result<IsotropicThermoelasticStatePoint, MaterialStatePointError> {
+    resolve_isotropic_thermoelastic_state_point_with_requirements(card, point, selection, &[])
+}
+
+/// Resolve the mandatory thermoelastic bundle and additional consumer properties
+/// atomically, using one card, state point and claim-selection policy.
+///
+/// Extra properties can supply a separate physical mechanism, such as bending
+/// viscosity. They cannot replace, weaken or make ambiguous any mandatory
+/// thermal/elastic requirement. Their names must be distinct from each other
+/// and from the six required names. All receipts participate in the resolved
+/// state's identity; no authority or thermal-evolution claim is added.
+///
+/// # Errors
+/// Duplicate names, missing properties, invalid quantities/domains and selection
+/// errors refuse through the existing material resolver.
+pub fn resolve_isotropic_thermoelastic_state_point_with_requirements(
+    card: &MaterialCard,
+    point: &QueryPoint,
+    selection: MaterialPropertySelection,
+    additional: &[ScalarPropertyRequirement],
+) -> Result<IsotropicThermoelasticStatePoint, MaterialStatePointError> {
+    let property_count = 6usize.saturating_add(additional.len());
+    if property_count > MAX_MATERIAL_STATE_PROPERTIES {
+        return Err(MaterialStatePointError::RequirementCount {
+            observed: property_count,
+            maximum: MAX_MATERIAL_STATE_PROPERTIES,
+        });
+    }
     let absolute = QuantitySpec::semantic(SemanticType::new(
         QuantityKind::AbsoluteTemperature,
         ValueForm::Static,
@@ -843,7 +872,7 @@ pub fn resolve_isotropic_thermoelastic_state_point(
             quantity: "thermoelastic positive absolute T coordinate",
         },
     )?;
-    let requirements = [
+    let mut requirements = [
         (
             DENSITY_PROPERTY,
             Density::DIMS,
@@ -902,6 +931,18 @@ pub fn resolve_isotropic_thermoelastic_state_point(
         }
     })
     .collect::<Result<Vec<_>, _>>()?;
+    for extra in additional {
+        if requirements
+            .iter()
+            .any(|required| required.name == extra.name)
+        {
+            return Err(MaterialStatePointError::InvalidRequirement {
+                property: extra.name.clone(),
+                reason: "auxiliary thermoelastic property must have a distinct name; required properties cannot be shadowed",
+            });
+        }
+        requirements.push(extra.clone());
+    }
     let resolved = resolve_material_state_point(card, point, &requirements, selection)?;
     let value = |name: &str| {
         resolved
