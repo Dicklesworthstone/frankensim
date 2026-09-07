@@ -6,7 +6,12 @@ use std::collections::BTreeMap;
 
 use fs_blake3::hash_bytes;
 use fs_evidence::ValidityDomain;
-use fs_matdb::{ConstitutiveModelCard, InitialStatePolicy, LawId, LawParameter, Provenance};
+use fs_matdb::{
+    ClaimSet, ConstitutiveModelCard, InitialStatePolicy, InterpolationPolicy, LawId, LawParameter,
+    MODEL_PACK_TARGET_BASIS, MaterialStateId, ModelNormalizationReceipt, ModelNormalizationTarget,
+    NormalizedMaterialCardPack, NormalizedModelPack, NormalizedPack, ObservationDataset,
+    PropertyClaim, PropertyKey, PropertyValue, Provenance, UncertaintyModel,
+};
 use fs_material::graph::{
     AggregateStateSchema, Differentiability, EnergyBehavior, GraphError, LawNode, LawRegistry,
     NodeDeclaration, NodeOutput, NodeRole, Port, TimeParity, admit_node, check_consistent_tangent,
@@ -259,6 +264,99 @@ fn registry_instantiates_from_validated_cards_and_refuses_drift() {
         "{{\"suite\":\"fs-material\",\"case\":\"registry\",\"verdict\":\"pass\",\
          \"detail\":\"cards instantiate through validation; version/parameter/card drift refuses\"}}"
     );
+}
+
+#[test]
+fn g0_portable_material_member_reaches_executable_registry() {
+    // Synthetic software fixture: the production registry must consume the
+    // exact transported member. This does not calibrate a physical material.
+    let source = hash_bytes(b"authored portable Fourier fixture");
+    let mut model = fourier_card(40.0);
+    model.validity = ValidityDomain::unconstrained();
+    model.provenance.artifact = Some(source);
+    model.provenance.source = "synthetic Fourier transport fixture".into();
+    let models = NormalizedModelPack::new(
+        "fixture-models",
+        "test-v1",
+        source,
+        "test redistribution",
+        vec![model.clone()],
+        vec![ModelNormalizationReceipt::new(
+            ModelNormalizationTarget::Parameter {
+                model: model.content_hash(),
+                parameter: "conductivity".into(),
+            },
+            hash_bytes(b"40 W/(m K)"),
+            CONDUCTIVITY_DIMS,
+            1.0,
+            0.0,
+            "W/(m K)",
+            MODEL_PACK_TARGET_BASIS,
+            None,
+            None,
+        )],
+    )
+    .unwrap();
+    let mut claims = ClaimSet::new();
+    let observation = claims
+        .register_observation(ObservationDataset {
+            specimen: "synthetic body".into(),
+            method: "authored scalar".into(),
+            artifact: source,
+            caveats: "no measured evidence".into(),
+            provenance: model.provenance.clone(),
+        })
+        .unwrap();
+    claims
+        .insert_claim(PropertyClaim {
+            key: PropertyKey::new("thermal-conductivity", CONDUCTIVITY_DIMS),
+            value: PropertyValue::Scalar {
+                value: 40.0,
+                dims: CONDUCTIVITY_DIMS,
+            },
+            validity: ValidityDomain::unconstrained(),
+            uncertainty: UncertaintyModel::Unstated,
+            interpolation: InterpolationPolicy::ConstantWithinValidity,
+            observations: vec![observation],
+            provenance: model.provenance.clone(),
+        })
+        .unwrap();
+    let claims = NormalizedPack::new(
+        "fixture-body",
+        "test-v1",
+        source,
+        "test redistribution",
+        claims,
+        Vec::new(),
+        Vec::new(),
+    )
+    .unwrap();
+    let pack = NormalizedMaterialCardPack::new_with_models(
+        MaterialStateId {
+            chemistry: "synthetic".into(),
+            phase: "solid".into(),
+            process: "authored".into(),
+            revision: 0,
+        },
+        claims,
+        models,
+    )
+    .unwrap();
+    let decoded =
+        NormalizedMaterialCardPack::from_bytes_verified(pack.content_hash(), &pack.to_bytes())
+            .unwrap();
+    let members = decoded.card().models_for(&model.law);
+    assert_eq!(members.len(), 1);
+    assert_eq!(members[0], &model);
+    let mut registry = LawRegistry::new();
+    assert!(matches!(
+        registry.instantiate("body", members[0]),
+        Err(GraphError::UnknownLaw { version: 1, .. })
+    ));
+    registry.register(&model.law, model.law_version, FourierNode::from_card);
+    let node = registry.instantiate("body", members[0]).unwrap();
+    assert_eq!(node.evaluate(&[], &[5.0]).unwrap().outputs, vec![-200.0]);
+    assert_eq!(node.tangent(&[], &[5.0]), Some(vec![-40.0]));
 }
 
 #[test]

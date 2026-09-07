@@ -76,7 +76,19 @@ homogenization, the P2 milestone.
   resolved thermomechanical energy balance. Its synthetic temperature curves
   and independent Zener checks establish numerical behavior, not experimental
   validation.
-  `resolve_isotropic_thermal_expansion_state_point` independently resolves the
+- `resolve_isotropic_thermoelastic_state_point_with_requirements` resolves the
+  same mandatory six-property bundle together with explicitly requested auxiliary
+  properties. One card, state point, exact pin plan and resolved identity cover
+  the complete bundle; auxiliary values cannot replace or ambiguate required
+  thermal/elastic names. The existing 64-property cap is checked before cloning
+  auxiliary requirements. The original convenience resolver uses an empty
+  auxiliary set and retains its prior requirements and identities.
+  The material-driven plate compiler consumes this API to bind thermal loss and
+  independently selected bending viscosity to the same physical state. G0/G1/G3
+  integration tests in fs-couple cover required-name shadowing, count limits,
+  exact claim pins in the presence of conflicting heat-capacity claims, typed
+  conductivity, temperature-dependent input curves and actual emitted pressure.
+- `resolve_isotropic_thermal_expansion_state_point` independently resolves the
   instantaneous isotropic linear expansion coefficient, including its exact
   state-point validity and property-use receipt. Negative expansion is
   admissible; material names imply neither its sign nor its value. This result
