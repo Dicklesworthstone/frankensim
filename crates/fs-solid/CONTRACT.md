@@ -192,6 +192,31 @@ elastic recovery in the reference geometry, not stress-source pack import,
 finite-deformation/Piola stress, yield/buckling admission, evolved-state
 recoupling, propagated solved-stress uncertainty or measured validation.
 
+`JointStressTensorTransformReceipt::try_from_resolved` consumes the immutable
+joint stress state from fs-material. It transforms source stress and full
+covariance through stress-specific order/shear normalization and a fixed proper
+rotation into canonical target Mandel coordinates. Tensor and engineering stress
+both store physical shear; the transform never applies engineering strain's
+factor two. The existing bounded 6x6 covariance kernel computes `A Sigma A^T`
+and preserves output symmetry without clipping or assuming independence.
+Nonfinite normalization/rotation/covariance, negative variance and complete
+nonzero-to-zero numeric loss refuse. Nonzero target frames and identity rotation
+for a frame mapped to itself are required; identity rotation retains normalized
+nominal bits. The work is one bounded tile and allocates no growing buffers.
+
+The receipt retains source joint identity, original coordinates and nominal
+stress, target frame, rotation and both numerical outputs under
+`joint-stress-frame-transform.v1`. `StressTensorUncertainty` holds the complete
+target covariance [Pa^2] or the unchanged source unknown reason. G3 compares
+all six source conventions and both joint policies against a full-rank
+twelve-realization ensemble transformed as full tensors and passed through
+actual clamped thermal displacement/stress recovery. G0 retains NoBlock,
+PartialMembership and UnstatedMarginal, checks receipt tampering, frame errors,
+shear overflow and complete subnormal loss. These are synthetic numerical tests.
+This is source-data covariance conditional on fixed orientation, not solved-field
+uncertainty, a confidence/domain bound, material/frame calibration, propagation
+of uncertain temperature/stiffness/orientation, or experimental validation.
+
 ## Public types and semantics
 
 - `Mesh2` / `Patch`: structured body-fitted meshes — P1 triangles, Q1
