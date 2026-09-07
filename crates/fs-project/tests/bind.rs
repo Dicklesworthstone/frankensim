@@ -719,6 +719,118 @@ fn a_range_stitched_from_two_claims_is_not_a_resolution() {
 }
 
 #[test]
+fn g0_material_envelope_requires_continuous_support_even_with_a_pin() {
+    let (mut library, _, spreader, tim) = reference_library();
+    let mut curve = conductivity_claim(0.25, 200.0, 450.0, "synthetic curve", stated());
+    curve.value = PropertyValue::Curve {
+        abscissa: TEMPERATURE_AXIS.into(),
+        abscissa_dims: KELVIN,
+        knots: vec![(233.15, 0.25), (398.15, 0.35)],
+        dims: THERMAL_CONDUCTIVITY_DIMS,
+    };
+    curve.interpolation = InterpolationPolicy::TabulatedOnly;
+    let pin = curve.content_hash().to_hex();
+    let exact_card = material_card(fr4_state(), vec![curve.clone()]);
+    // Both endpoints answer under the old check; neither establishes support
+    // between these two synthetic samples.
+    for t in [233.15, 398.15] {
+        exact_card
+            .claims()
+            .query(
+                THERMAL_CONDUCTIVITY_PROPERTY,
+                &QueryPoint::new().with(TEMPERATURE_AXIS, t).unwrap(),
+                fs_matdb::SelectionPolicy::SingleClaimOnly,
+            )
+            .unwrap();
+    }
+    let exact = library.insert_material(exact_card);
+    for requested_pin in [None, Some(pin)] {
+        let mut spec = reference_spec(&exact, &spreader, &tim);
+        spec.materials.as_mut().unwrap()[0].claim = requested_pin;
+        let resolution =
+            resolve_bindings(&spec, &library, &BindingRequirements::thermal_steady_v1());
+        assert_code(
+            &resolution,
+            "project-binding-domain-uncovered",
+            "exact samples",
+            "continuous response",
+        );
+        assert!(
+            !resolution.bindings.iter().any(|binding| {
+                binding.target == fs_project::BindingTarget::Region("board".into())
+            }),
+            "unsupported data must publish no board binding or receipts"
+        );
+    }
+
+    // Explicitly admitted interpolation supplies the missing interval; the
+    // resolver retains the original evaluated values and replayable receipts.
+    curve.interpolation = InterpolationPolicy::LinearInside;
+    let continuous_card = material_card(fr4_state(), vec![curve]);
+    let claims = continuous_card.claims().clone();
+    let continuous = library.insert_material(continuous_card);
+    let spec = reference_spec(&continuous, &spreader, &tim);
+    let resolution = resolve_bindings(&spec, &library, &BindingRequirements::thermal_steady_v1());
+    assert!(resolution.admissible(), "{:?}", resolution.violations);
+    let property = &resolution.bindings[0].properties[0];
+    assert_eq!((property.value_lo, property.value_hi), (0.25, 0.35));
+    claims.verify_receipt(&property.receipt_lo.receipt).unwrap();
+    claims.verify_receipt(&property.receipt_hi.receipt).unwrap();
+}
+
+#[test]
+fn g0_interface_envelope_detects_interior_conflicts_and_honors_explicit_pins() {
+    let (mut library, board, spreader, _) = reference_library();
+    let wide = resistance_claim(2.0e-5, 200.0, 450.0, "synthetic full-range source");
+    let pin = wide.content_hash().to_hex();
+    let interior = resistance_claim(3.0e-5, 300.0, 320.0, "synthetic interior source");
+    let interior_pin = interior.content_hash().to_hex();
+    let card = interface_card(vec![wide, interior]);
+    let claims = card.claims().clone();
+    for t in [263.15, 371.15] {
+        let answer = claims
+            .query(
+                CONTACT_RESISTANCE_PROPERTY,
+                &QueryPoint::new().with(TEMPERATURE_AXIS, t).unwrap(),
+                fs_matdb::SelectionPolicy::SingleClaimOnly,
+            )
+            .unwrap();
+        assert_eq!(answer.receipt.selected.0.to_hex(), pin);
+    }
+    let tim = library.insert_interface(card);
+    let mut spec = reference_spec(&board, &spreader, &tim);
+    let resolution = resolve_bindings(&spec, &library, &BindingRequirements::thermal_steady_v1());
+    let conflict = assert_code(
+        &resolution,
+        "project-binding-claims-conflict",
+        "T = 300",
+        ":claim <hex>",
+    );
+    assert!(conflict.fix.contains(&pin) && conflict.fix.contains(&interior_pin));
+    assert!(
+        !resolution.bindings.iter().any(|binding| {
+            binding.target == fs_project::BindingTarget::Interface("tim".into())
+        }),
+        "interior ambiguity must publish no interface binding or receipts"
+    );
+
+    spec.interface_cards.as_mut().unwrap()[0].claim = Some(pin.clone());
+    let pinned = resolve_bindings(&spec, &library, &BindingRequirements::thermal_steady_v1());
+    assert!(pinned.admissible(), "{:?}", pinned.violations);
+    let property = &pinned
+        .bindings
+        .iter()
+        .find(|binding| binding.target == fs_project::BindingTarget::Interface("tim".into()))
+        .unwrap()
+        .properties[0];
+    assert_eq!(property.selected_claim, pin);
+    for receipt in [&property.receipt_lo.receipt, &property.receipt_hi.receipt] {
+        assert_eq!(receipt.policy, PINNED_CLAIM_POLICY_TAG);
+        claims.verify_receipt(receipt).unwrap();
+    }
+}
+
+#[test]
 fn structural_refusals_cover_cards_states_targets_and_coverage() {
     let (mut library, board, spreader, tim) = reference_library();
 

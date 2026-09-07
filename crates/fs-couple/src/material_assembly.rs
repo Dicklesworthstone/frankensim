@@ -265,7 +265,12 @@ fn compile_plate(
                     "uniform material binding requires a plate description",
                 )
             })?;
-            let state = resolve_plate(source, *model, "plate")?;
+            let state = resolve_plate(
+                source,
+                *model,
+                input.kelvin_voigt_bending.is_some(),
+                "plate",
+            )?;
             let specimen = with_uniform_plate_material_state(input, &state, *model, *thickness)
                 .map_err(|source| physical("plate", source))?;
             assembly.plate = Some(specimen.plate());
@@ -291,6 +296,7 @@ fn compile_plate(
                         material: resolve_plate(
                             &region.source,
                             region.model,
+                            false,
                             &format!("plate/{}", region.region.name),
                         )?,
                         model: region.model,
@@ -361,6 +367,7 @@ fn string_requirements(
 fn resolve_plate(
     source: &MaterialSource<'_>,
     model: PlateMaterialModel,
+    bending_viscosity: bool,
     component: &str,
 ) -> Result<ResolvedMaterialStatePoint, MaterialAssemblyError> {
     use ScalarAdmissibility::{Finite, OpenInterval, StrictlyPositive};
@@ -395,6 +402,13 @@ fn resolve_plate(
                 StrictlyPositive,
             ),
         ]),
+    }
+    if bending_viscosity {
+        fields.push((
+            KELVIN_VOIGT_BENDING_VISCOSITY_PROPERTY,
+            DynViscosity::DIMS,
+            ScalarAdmissibility::NonNegative,
+        ));
     }
     let requirements = fields
         .into_iter()

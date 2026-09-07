@@ -34,11 +34,15 @@
 
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_matdb::{
-    ClaimSet, MatDbError, MaterialAnswer, NormalizedInterfacePack, NormalizedMaterialCardPack,
-    NormalizedModelPack, NormalizedPack, NormalizedSpeciesPack, PackError, QueryPoint,
-    SelectionPolicy,
+    ClaimId, ClaimSelection, ClaimSet, InterpolationPolicy, MatDbError, MaterialAnswer,
+    MaterialStateId, NormalizedInterfacePack, NormalizedMaterialCardPack, NormalizedModelPack,
+    NormalizedPack, NormalizedSpeciesPack, PackError, PropertyClaim, PropertyKey, PropertyValue,
+    QueryPoint, SelectionPolicy,
 };
 use fsqlite::{AsyncConnection, FrankenError, Row, SqliteValue};
+
+/// Material-owned support refusals, shared with exact project binding.
+pub use fs_matdb::PropertySupportError as DiscoveryGap;
 
 /// Domain string for the corpus-staleness digest.
 const CORPUS_DIGEST_DOMAIN: &str = "org.frankensim.fs-matdb-store.corpus.v2";
@@ -236,9 +240,118 @@ pub struct PackRow {
     pub content_hash: ContentHash,
 }
 
+/// A local query is conditional on this state. An envelope is the caller's
+/// conservative box of possible states, not a predicted future trajectory.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DiscoveryDomain {
+    /// Only this state is checked; success makes no claim about later states.
+    LocalState(QueryPoint),
+    /// Both corners must carry the same axes and exact quantity descriptors.
+    /// Every lower coordinate must be at most its upper coordinate.
+    Envelope {
+        /// Inclusive lower coordinates, in canonical declared quantities.
+        lower: QueryPoint,
+        /// Inclusive upper coordinates with identical coordinate schemas.
+        upper: QueryPoint,
+    },
+}
+
+/// The physical identity being searched. Interface order is significant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiscoveryTarget {
+    /// Named material conditions only; unbound property packs are excluded.
+    Materials,
+    /// Unbound property packs, for callers that explicitly need these.
+    Properties,
+    /// Ordered bulk states. Texture, medium and history remain on each returned
+    /// card and must still be matched when binding an interface to a simulation.
+    Interfaces {
+        /// Material condition on the first surface.
+        surface_a: MaterialStateId,
+        /// Material condition on the counter-surface.
+        surface_b: MaterialStateId,
+    },
+}
+
+/// A compound data-coverage request. Property keys retain quantity kinds,
+/// tensor frames/conventions and hardness protocols without name-only coercion.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DiscoveryRequest {
+    /// Material, unbound property, or ordered interface identity filter.
+    pub target: DiscoveryTarget,
+    /// Nonempty, duplicate-free bundle; results preserve this order.
+    pub properties: Vec<PropertyKey>,
+    /// State support the caller needs before solving.
+    pub domain: DiscoveryDomain,
+    /// Existing evaluator policy; discovery never invents source selection.
+    pub selection: SelectionPolicy,
+}
+
+/// Coverage of the requested property bundle, independent of evidence strength.
+/// `Complete` is relative to the report's local-state or envelope domain. It
+/// does not assert that an executable constitutive law or solver is available.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiscoveryStatus {
+    /// Every requested property has declared support over the requested domain.
+    Complete,
+    /// Some requested properties have support and others have named gaps.
+    Partial,
+    /// No requested property has support over the requested domain.
+    Unavailable,
+}
+
+/// Exact evaluated evidence at a local state or at both envelope corners.
+/// Envelope coverage additionally checks continuous support and every competing
+/// claim's intersection with the box; corners alone do not establish coverage.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DiscoverySupport {
+    /// Evaluated evidence at the local point or envelope's lower corner.
+    pub lower: MaterialAnswer,
+    /// `None` identifies a conditional local-state result.
+    pub upper: Option<MaterialAnswer>,
+}
+
+/// One requested property, in caller order. All gaps are retained, even when
+/// several requirements are absent from the entire corpus.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DiscoveredProperty {
+    /// Complete property semantics supplied by the caller.
+    pub property: PropertyKey,
+    /// Evaluated support or the precise missing support/selection requirement.
+    pub support: Result<DiscoverySupport, DiscoveryGap>,
+}
+
+/// One candidate, with a whole-artifact identity for subsequent exact binding.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DiscoveryCandidate {
+    /// Immutable artifact to load for subsequent physical binding.
+    pub pack: PackRow,
+    /// Aggregate data coverage, not physical model qualification.
+    pub status: DiscoveryStatus,
+    /// One result for every requested property, including all missing ones.
+    pub properties: Vec<DiscoveredProperty>,
+}
+
+/// Deterministic discovery results, never a substitute for solve-time queries.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DiscoveryReport {
+    /// Exact request, retaining conditional-local versus envelope semantics.
+    pub request: DiscoveryRequest,
+    /// Names absent from every claims-bearing pack, distinct from known names
+    /// that have no candidate for this target, quantity or state envelope.
+    pub unknown_properties: Vec<PropertyKey>,
+    /// Canonical pack-id order, including partial and unavailable candidates.
+    pub candidates: Vec<DiscoveryCandidate>,
+}
+
 /// Typed store errors with stable `FS-MATDB-STORE-*` codes.
 #[derive(Debug)]
 pub enum StoreError {
+    /// Empty/duplicate requirements or mismatched/reversed envelope corners.
+    InvalidDiscoveryRequest {
+        /// Concrete correction required in the caller's request.
+        reason: &'static str,
+    },
     /// A failed transaction could not complete its rollback.
     Rollback {
         /// The original operation or commit failure.
@@ -327,6 +440,13 @@ pub enum StoreError {
         /// Requested property.
         property: String,
     },
+    /// A discovery value range is reversed or has a nonfinite endpoint.
+    InvalidValueRange {
+        /// Requested inclusive lower value in SI units.
+        lo: f64,
+        /// Requested inclusive upper value in SI units.
+        hi: f64,
+    },
     /// A stored value could not be decoded as the expected SQL type.
     Malformed {
         /// Where.
@@ -337,6 +457,9 @@ pub enum StoreError {
 impl core::fmt::Display for StoreError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            StoreError::InvalidDiscoveryRequest { reason } => {
+                write!(f, "FS-MATDB-STORE-DISCOVERY-REQUEST: {reason}")
+            }
             StoreError::Rollback { operation, error } => write!(
                 f,
                 "FS-MATDB-STORE-ROLLBACK: {operation}; rollback failed: {error:?}"
@@ -393,6 +516,10 @@ impl core::fmt::Display for StoreError {
             StoreError::UnknownProperty { property } => {
                 write!(f, "FS-MATDB-STORE-UNKNOWN-PROPERTY: {property}")
             }
+            StoreError::InvalidValueRange { lo, hi } => write!(
+                f,
+                "FS-MATDB-STORE-VALUE-RANGE: expected finite lo <= hi, got [{lo}, {hi}]"
+            ),
             StoreError::Malformed { context } => {
                 write!(f, "FS-MATDB-STORE-MALFORMED: {context}")
             }
@@ -438,6 +565,119 @@ pub struct ValidityRow {
     pub lo: f64,
     /// Upper bound.
     pub hi: f64,
+}
+
+/// Search the admitted scalar/one-dimensional model, using the authoritative
+/// pinned evaluator for values and typed support checks. A curve segment is
+/// continuous only when its source explicitly admits linear interpolation.
+fn claim_attains_range(
+    claims: &ClaimSet,
+    id: ClaimId,
+    claim: &PropertyClaim,
+    lo: f64,
+    hi: f64,
+) -> bool {
+    if claim.validity.is_empty() {
+        return false;
+    }
+    let mut point = QueryPoint::new();
+    for (axis, &(lower, upper)) in claim.validity.bounds() {
+        let value = 0.0_f64.max(lower).min(upper);
+        let next = if let Some(quantity) = claim.validity.axis_quantities().get(axis) {
+            point.with_quantity(axis, *quantity, value)
+        } else {
+            point.with(axis, value)
+        };
+        let Ok(next) = next else {
+            return false;
+        };
+        point = next;
+    }
+    let evaluate = |point: &QueryPoint| {
+        claims
+            .query_pinned_typed(&claim.key, point, id)
+            .ok()
+            .map(|answer| answer.evidence.value.value)
+            .filter(|value| value.is_finite())
+    };
+    match &claim.value {
+        PropertyValue::Scalar { .. } => {
+            evaluate(&point).is_some_and(|value| lo <= value && value <= hi)
+        }
+        PropertyValue::Curve {
+            abscissa, knots, ..
+        } => {
+            let at = |x| {
+                point
+                    .clone()
+                    .with(abscissa, x)
+                    .ok()
+                    .and_then(|p| evaluate(&p))
+            };
+            let (lower, upper) = claim
+                .validity
+                .bounds()
+                .get(abscissa)
+                .copied()
+                .unwrap_or((f64::NEG_INFINITY, f64::INFINITY));
+            match claim.interpolation {
+                InterpolationPolicy::TabulatedOnly => knots
+                    .iter()
+                    .find(|&&(x, y)| lower <= x && x <= upper && lo <= y && y <= hi)
+                    .is_some_and(|&(x, _)| at(x).is_some_and(|y| lo <= y && y <= hi)),
+                InterpolationPolicy::LinearInside => {
+                    let x0 = knots[0].0.max(lower);
+                    let x1 = knots[knots.len() - 1].0.min(upper);
+                    if x0 > x1 {
+                        return false;
+                    }
+                    let (Some(y0), Some(y1)) = (at(x0), at(x1)) else {
+                        return false;
+                    };
+                    // A continuous piecewise-linear curve attains every value
+                    // between its extrema. Evaluate only the two clipped ends;
+                    // interior extrema are admitted knots, keeping the scan O(n).
+                    let (minimum, maximum) = knots
+                        .iter()
+                        .filter(|&&(x, _)| x0 <= x && x <= x1)
+                        .fold((y0.min(y1), y0.max(y1)), |(min, max), &(_, y)| {
+                            (min.min(y), max.max(y))
+                        });
+                    minimum <= hi && lo <= maximum
+                }
+                InterpolationPolicy::ConstantWithinValidity => false,
+            }
+        }
+    }
+}
+
+fn discover_property(
+    claims: &ClaimSet,
+    key: &PropertyKey,
+    domain: &DiscoveryDomain,
+    policy: SelectionPolicy,
+) -> Result<DiscoverySupport, DiscoveryGap> {
+    match domain {
+        DiscoveryDomain::LocalState(point) => claims
+            .query_typed(key, point, policy)
+            .and_then(|answer| {
+                claims.verify_receipt(&answer.receipt)?;
+                Ok(DiscoverySupport {
+                    lower: answer,
+                    upper: None,
+                })
+            })
+            .map_err(|error| DiscoveryGap::Evaluation {
+                point: point.clone(),
+                error,
+            }),
+        DiscoveryDomain::Envelope { lower, upper } => claims
+            .query_envelope_typed(key, lower, upper, ClaimSelection::Policy(policy))
+            .map(|answer| DiscoverySupport {
+                lower: answer.lower,
+                upper: Some(answer.upper),
+            }),
+    }
 }
 
 /// The queryable store.
@@ -788,19 +1028,65 @@ impl MaterialStore {
         rows.iter().map(property_row).collect()
     }
 
-    /// Discovery: every material carrying `property`, optionally
-    /// filtered to claims whose scalar value lies in `[lo, hi]`.
+    /// Discovery: every material carrying `property`, optionally filtered to
+    /// claims attaining a value in the inclusive SI range `[lo, hi]` somewhere
+    /// in their admitted support. Curves retain their interpolation policy:
+    /// exact-only samples do not fill the gaps between their values.
+    ///
+    /// This is an existential candidate search, not admission over a requested
+    /// state envelope. The caller must still select and evaluate exact claims.
     ///
     /// # Errors
     /// Staleness refusals plus driver failures.
     pub fn materials_with(
         &self,
         property: &str,
-        scalar_range: Option<(f64, f64)>,
+        value_range: Option<(f64, f64)>,
     ) -> Result<Vec<PropertyRow>, StoreError> {
         self.require_sealed()?;
-        let rows = match scalar_range {
-            None => self
+        if let Some((lo, hi)) = value_range {
+            if !lo.is_finite() || !hi.is_finite() || lo > hi {
+                return Err(StoreError::InvalidValueRange { lo, hi });
+            }
+            self.require_known_property(property)?;
+            let rows = self
+                .conn
+                .query_with_params_sync(
+                    "SELECT DISTINCT pack_id FROM claims WHERE property = ?1 ORDER BY pack_id",
+                    &[text_param(property)],
+                )
+                .map_err(sql_err("materials_with range candidates"))?;
+            let mut matches = Vec::new();
+            for row in &rows {
+                let pack_id = row_text(row, 0, "claims.pack_id")?;
+                let pack = self.load_catalog_pack_unchecked(&pack_id)?;
+                let Some(claims_pack) = pack.claims_pack() else {
+                    continue;
+                };
+                let claims = claims_pack.claims();
+                for (id, claim) in claims
+                    .claims_ordered()
+                    .filter(|(_, claim)| claim.key.name() == property)
+                {
+                    if claim_attains_range(claims, id, claim, lo, hi) {
+                        let (scalar_value, kind) = match &claim.value {
+                            PropertyValue::Scalar { value, .. } => (Some(*value), "scalar"),
+                            PropertyValue::Curve { .. } => (None, "curve"),
+                        };
+                        matches.push(PropertyRow {
+                            pack_id: pack_id.clone(),
+                            pack_kind: pack.kind(),
+                            property: property.to_owned(),
+                            scalar_value,
+                            kind: kind.to_owned(),
+                            observation_backed: !claim.observations.is_empty(),
+                        });
+                    }
+                }
+            }
+            return Ok(matches);
+        }
+        let rows = self
                 .conn
                 .query_with_params_sync(
                     "SELECT c.pack_id, c.property, c.scalar_value, c.kind, c.observation_backed, p.kind \
@@ -808,22 +1094,7 @@ impl MaterialStore {
                      WHERE c.property = ?1 ORDER BY c.pack_id, c.claim_hash",
                     &[text_param(property)],
                 )
-                .map_err(sql_err("materials_with"))?,
-            Some((lo, hi)) => self
-                .conn
-                .query_with_params_sync(
-                    "SELECT c.pack_id, c.property, c.scalar_value, c.kind, c.observation_backed, p.kind \
-                     FROM claims c JOIN packs p ON p.pack_id = c.pack_id \
-                     WHERE c.property = ?1 AND c.scalar_value IS NOT NULL \
-                     AND c.scalar_value >= ?2 AND c.scalar_value <= ?3 ORDER BY c.pack_id, c.claim_hash",
-                    &[
-                        text_param(property),
-                        SqliteValue::Float(lo),
-                        SqliteValue::Float(hi),
-                    ],
-                )
-                .map_err(sql_err("materials_with range"))?,
-        };
+                .map_err(sql_err("materials_with"))?;
         if rows.is_empty() {
             self.require_known_property(property)?;
         }
@@ -1041,6 +1312,134 @@ impl MaterialStore {
         let answer = claims.query(property, point, policy)?;
         claims.verify_receipt(&answer.receipt)?;
         Ok(answer)
+    }
+
+    /// Evaluate an explicit quantity and complete property context through the
+    /// canonical pack. This retains typed axes, hardness protocols and tensor
+    /// conventions; a dimensionally equal but semantically different key refuses.
+    ///
+    /// # Errors
+    /// The same store integrity refusals as [`Self::evaluate`], followed by the
+    /// unchanged [`ClaimSet::query_typed`] and receipt-verification refusals.
+    pub fn evaluate_typed(
+        &self,
+        pack_id: &str,
+        property: &PropertyKey,
+        point: &QueryPoint,
+        policy: SelectionPolicy,
+    ) -> Result<MaterialAnswer, StoreError> {
+        self.require_sealed()?;
+        let pack = self.load_catalog_pack_unchecked(pack_id)?;
+        let claims = pack
+            .claims_pack()
+            .ok_or_else(|| StoreError::NoPropertyClaims {
+                pack_id: pack_id.to_owned(),
+                kind: pack.kind(),
+            })?
+            .claims();
+        let answer = claims.query_typed(property, point, policy)?;
+        claims.verify_receipt(&answer.receipt)?;
+        Ok(answer)
+    }
+
+    /// Find packs that supply a complete typed property bundle at the same
+    /// state or throughout a caller-declared conservative envelope. Each pack
+    /// is decoded once; no requirements are fused across material conditions.
+    ///
+    /// All requested gaps are returned, including globally unknown names. The
+    /// existing single-property discovery methods retain their unknown-name
+    /// error. Evidence weakness in an unrelated property cannot demote a bundle.
+    ///
+    /// # Errors
+    /// Store integrity/SQL refusals, or [`StoreError::InvalidDiscoveryRequest`].
+    /// Per-candidate evaluation refusals are retained in the report instead.
+    pub fn discover(&self, request: &DiscoveryRequest) -> Result<DiscoveryReport, StoreError> {
+        if request.properties.is_empty() {
+            return Err(StoreError::InvalidDiscoveryRequest {
+                reason: "at least one property is required",
+            });
+        }
+        for (i, property) in request.properties.iter().enumerate() {
+            if request.properties[..i].contains(property) {
+                return Err(StoreError::InvalidDiscoveryRequest {
+                    reason: "duplicate property requirement",
+                });
+            }
+        }
+        if let DiscoveryDomain::Envelope { lower, upper } = &request.domain
+            && (!lower.axes().keys().eq(upper.axes().keys())
+                || lower.axis_quantities() != upper.axis_quantities()
+                || lower
+                    .axes()
+                    .iter()
+                    .any(|(axis, lo)| lo > &upper.axes()[axis]))
+        {
+            return Err(StoreError::InvalidDiscoveryRequest {
+                reason: "envelope corners must have identical axes and quantities with lower <= upper",
+            });
+        }
+        let mut known = vec![false; request.properties.len()];
+        let mut candidates = Vec::new();
+        // packs() enforces the seal before any canonical bytes are evaluated.
+        for row in self.packs(None)? {
+            let pack = self.load_catalog_pack_unchecked(&row.pack_id)?;
+            let Some(claims) = pack.claims_pack().map(NormalizedPack::claims) else {
+                continue;
+            };
+            for (i, key) in request.properties.iter().enumerate() {
+                known[i] |= !claims.claims_for(key.name()).is_empty();
+            }
+            let matches_target = match (&request.target, &pack) {
+                (DiscoveryTarget::Materials, CatalogPack::MaterialCard(_))
+                | (DiscoveryTarget::Properties, CatalogPack::Properties(_)) => true,
+                (
+                    DiscoveryTarget::Interfaces {
+                        surface_a,
+                        surface_b,
+                    },
+                    CatalogPack::Interface(p),
+                ) => {
+                    &p.card().surface_a().material == surface_a
+                        && &p.card().surface_b().material == surface_b
+                }
+                _ => false,
+            };
+            if !matches_target {
+                continue;
+            }
+            let properties: Vec<_> = request
+                .properties
+                .iter()
+                .map(|key| DiscoveredProperty {
+                    property: key.clone(),
+                    support: discover_property(claims, key, &request.domain, request.selection),
+                })
+                .collect();
+            let supported = properties.iter().filter(|p| p.support.is_ok()).count();
+            let status = if supported == properties.len() {
+                DiscoveryStatus::Complete
+            } else if supported == 0 {
+                DiscoveryStatus::Unavailable
+            } else {
+                DiscoveryStatus::Partial
+            };
+            candidates.push(DiscoveryCandidate {
+                pack: row,
+                status,
+                properties,
+            });
+        }
+        Ok(DiscoveryReport {
+            request: request.clone(),
+            unknown_properties: request
+                .properties
+                .iter()
+                .zip(known)
+                .filter(|(_, found)| !found)
+                .map(|(key, _)| key.clone())
+                .collect(),
+            candidates,
+        })
     }
 
     /// Cross-check every index row of a pack against its decoded

@@ -176,10 +176,12 @@ bindings; it runs no solves and admits no scenarios itself.
   slot but returns `project-perfect-contact-unsupported`, publishes no
   interface row or receipt, and cannot proceed to a solve until
   `fs-conduction` supplies a verified explicit operator. Per required
-  property, the resolver queries matdb at
-  BOTH endpoints of the binding's admitted range (validity boxes are per-axis
-  intervals, so endpoint containment implies range containment) and requires
-  the SAME claim selected at both. Every value arrives as matdb
+  property, the resolver uses matdb's shared `query_envelope`: it checks both
+  endpoints, continuous curve support and every competing claim's intersection
+  with the admitted range, requiring one selected claim throughout. Exact-only
+  curve samples cannot cover a nondegenerate range, even with a pin. A conflict
+  confined to interior temperatures still refuses and names the candidates.
+  Every value arrives as matdb
   `Evidence` + `PropertyUsageReceipt`; receipts are retained
   (`RetainedReceipt`: receipt, canonical bytes, content hash, context) for
   ledger retention and later `verify_receipt` replay. `render_table()` is the
@@ -342,6 +344,10 @@ from two claims refuses; card-unknown, state-mismatch, non-region target,
 duplicate, unbound-region/interface, wrong-dims, and missing-property each
 carry their named code with a fix; missing sections name the precondition;
 and the property constants drift-test against `fs-conduction`.
+MR13 G0 cases additionally exercise the real material and interface resolver:
+endpoint-only curve samples refuse with or without a pin, explicitly admitted
+linear interpolation succeeds with replayable receipts, and an interior-only
+interface conflict refuses until an explicit full-range claim is pinned.
 The f85xj.17.2 closeout assertions additionally prove that empty,
 whitespace-padded, or control-bearing manufactured-state/source fields refuse;
 direct resolver callers cannot bypass source validation; the resolved

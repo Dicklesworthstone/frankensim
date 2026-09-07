@@ -54,6 +54,53 @@ fn room() -> QueryPoint {
 }
 
 #[test]
+fn g0_envelope_validates_corners_and_preserves_typed_pin_receipts() {
+    use fs_matdb::{ClaimSelection, PropertySupportError};
+    let mut claims = ClaimSet::new();
+    let claim = density(2700.0, "synthetic envelope fixture", stated());
+    let key = claim.key.clone();
+    let pin = claims.insert_claim(claim).unwrap();
+    let lower = QueryPoint::new().with("T", 250.0).unwrap();
+    let upper = QueryPoint::new().with("T", 400.0).unwrap();
+    let selection = ClaimSelection::Pinned(pin);
+    let answer = claims
+        .query_envelope_typed(&key, &lower, &upper, selection)
+        .unwrap();
+    assert_eq!(
+        answer.lower,
+        claims.query_pinned_typed(&key, &lower, pin).unwrap()
+    );
+    assert_eq!(
+        answer.upper,
+        claims.query_pinned_typed(&key, &upper, pin).unwrap()
+    );
+    for (lo, hi) in [
+        (upper.clone(), lower.clone()),
+        (lower.clone(), QueryPoint::new()),
+        (
+            lower.clone(),
+            upper
+                .clone()
+                .with_quantity(
+                    "T",
+                    fs_qty::QuantitySpec::dimensional(Dims([0, 0, 0, 1, 0, 0])),
+                    400.0,
+                )
+                .unwrap(),
+        ),
+    ] {
+        assert!(matches!(
+            claims.query_envelope_typed(&key, &lo, &hi, selection),
+            Err(PropertySupportError::InvalidEnvelope { .. })
+        ));
+    }
+    let point = claims
+        .query_envelope_typed(&key, &lower, &lower, selection)
+        .unwrap();
+    assert_eq!(point.lower, point.upper);
+}
+
+#[test]
 fn g0_exact_only_scalar_refuses_interval_support_and_preserves_point_samples() {
     let mut claim = density(2700.0, "synthetic exact-support fixture", stated());
     claim.interpolation = InterpolationPolicy::TabulatedOnly;

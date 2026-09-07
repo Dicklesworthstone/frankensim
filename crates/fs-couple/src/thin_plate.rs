@@ -7,7 +7,9 @@
 //! `fs-vfit`, not a named instrument radiator.
 
 use crate::acoustic_realize::AcousticRealizeError;
+use crate::string_specimen::KELVIN_VOIGT_BENDING_VISCOSITY_PROPERTY;
 use fs_blake3::{ContentHash, DomainHasher};
+use fs_matdb::EvaluationDecision;
 use fs_material::gas::GasState;
 use fs_material::state_point::{
     DENSITY_PROPERTY, IsotropicThermoelasticStatePoint, ORTHOTROPIC_POISSON_RATIO_PROPERTIES,
@@ -21,8 +23,10 @@ use fs_plate::{
     AssemblyOptions, EdgeSupport, PlateChart, PlateError, PlateMesh, PlateModel, PlateRegion,
     PlateSection, assemble, modes,
 };
-use fs_qty::{Density, Dims, Pressure, QuantitySpec};
-use fs_scenario::{IsotropicPlateThermal, RadiatingPlate, ThinPlate};
+use fs_qty::{Density, Dims, DynViscosity, Pressure, QuantitySpec};
+use fs_scenario::{
+    IsotropicPlateBendingViscosity, IsotropicPlateThermal, RadiatingPlate, ThinPlate,
+};
 use fs_vfit::FitOptions;
 use fs_vfit::discretize::{DigitalFilter, DigitalFilterState, realize_tabulated_impedance};
 
@@ -170,7 +174,7 @@ impl VkBody {
 
     fn from_plate_ports(plate: ThinPlate, with_area: bool) -> Result<Self, AcousticRealizeError> {
         plane_stress_section(plate)?;
-        admitted_thermoelastic(&plate)?;
+        PlateBendingLaw::new(&plate)?;
         let isotropic = has_isotropic_elasticity(&plate);
         if isotropic && !plate.clamped {
             Self::from_ss_sine(plate, with_area)
@@ -200,7 +204,17 @@ impl VkBody {
             &stress,
         )
         .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
-        let zetas = vk_zetas(plate, &model.storage.omegas)?;
+        let mut zetas = vec![plate.damping_ratio; disp.len()];
+        let loss = PlateBendingLaw::new(&plate)?;
+        if loss.is_active() {
+            let d = plane_stress_section(plate)?.d[0];
+            for ((z, md), &omega) in zetas.iter_mut().zip(&disp).zip(&model.storage.omegas) {
+                let k2 = (md.m as f64 * core::f64::consts::PI / plate.length_m).powi(2)
+                    + (md.n as f64 * core::f64::consts::PI / plate.width_m).powi(2);
+                let fraction = bending_energy_fraction(d * k2, d * k2 + plate.pretension_n_m)?;
+                *z += fraction * loss.zeta(omega)?;
+            }
+        }
         let mut areas = Vec::with_capacity(disp.len());
         let mut drive = Vec::with_capacity(disp.len());
         let norm = (2.0
@@ -259,9 +273,11 @@ impl VkBody {
             });
         }
         let n_keep = plate.n_modes.min(report.modes.len()).min(3);
+        let bending_loss = PlateBendingLoss::new(plate, &mesh, &section, &boundary)?;
         let nx = nx_c + 1;
         let ny = ny_c + 1;
         let mut disp = Vec::with_capacity(n_keep);
+        let mut zetas = Vec::with_capacity(n_keep);
         for pair in report.modes.iter().take(n_keep) {
             let omega = pair.lambda.max(0.0).sqrt();
             if !(omega > 0.0) {
@@ -278,6 +294,13 @@ impl VkBody {
                 }
             }
             disp.push(fs_nlmodal::SampledPlateMode { omega, w, nx, ny });
+            zetas.push(
+                plate.damping_ratio
+                    + match &bending_loss {
+                        Some(loss) => loss.modal_zeta(&model, &pair.phi, omega)?,
+                        None => 0.0,
+                    },
+            );
         }
         if disp.is_empty() {
             return Err(AcousticRealizeError::InvalidDescription {
@@ -322,7 +345,6 @@ impl VkBody {
                 bilinear_sample(&mode.w, nx, ny, plate.length_m, plate.width_m, sx, sy) * scale,
             );
         }
-        let zetas = vk_zetas(plate, &vk.storage.omegas)?;
         finish_vk(vk.storage, &zetas, &drive, areas, with_area)
     }
 
@@ -360,16 +382,6 @@ impl VkBody {
             .map(|k| self.areas[k] * self.x[2 * k + 1])
             .sum()
     }
-}
-
-fn vk_zetas(plate: ThinPlate, omegas: &[f64]) -> Result<Vec<f64>, AcousticRealizeError> {
-    let mut zetas = vec![plate.damping_ratio; omegas.len()];
-    if let Some(te) = admitted_thermoelastic(&plate)? {
-        for (z, &w) in zetas.iter_mut().zip(omegas) {
-            *z += thermoelastic_zeta(te, w, plate.thickness_m)?;
-        }
-    }
-    Ok(zetas)
 }
 
 fn finish_vk(
@@ -568,7 +580,7 @@ impl PlateBank {
 /// Section, mesh, or modal-window refusals.
 #[allow(clippy::too_many_lines)] // one coherent certification stage
 pub fn certified_radiators(plate: ThinPlate) -> Result<Vec<CompactBody>, AcousticRealizeError> {
-    let thermoelastic = admitted_thermoelastic(&plate)?;
+    PlateBendingLaw::new(&plate)?;
     if plate.n_modes == 0 {
         return Err(AcousticRealizeError::InvalidDescription {
             what: "thin plate needs at least one mode",
@@ -597,19 +609,15 @@ pub fn certified_radiators(plate: ThinPlate) -> Result<Vec<CompactBody>, Acousti
     let lo = (0.25 * omega11).powi(2);
     let hi = (omega11 * (plate.n_modes as f64 + 2.0) * 4.0).powi(2);
     let projection = PlateProjection::new(&mesh, plate.length_m / nx as f64);
-    let mut out = harvest_radiators(
+    let bending_loss = PlateBendingLoss::new(plate, &mesh, &section, &boundary)?;
+    harvest_radiators(
         &model,
         &projection,
         (lo, hi),
         plate.n_modes,
         plate.damping_ratio,
-    )?;
-    if let Some(te) = thermoelastic {
-        for body in &mut out {
-            body.zeta += thermoelastic_zeta(te, body.omega, plate.thickness_m)?;
-        }
-    }
-    Ok(out)
+        bending_loss.as_ref(),
+    )
 }
 
 /// Mechanical and modal controls for an arbitrary, possibly heterogeneous chart.
@@ -651,6 +659,7 @@ pub fn certified_chart_radiators(
         options.eigenvalue_window,
         options.n_modes,
         options.damping_ratio,
+        None,
     )
 }
 
@@ -660,6 +669,7 @@ fn harvest_radiators(
     window: (f64, f64),
     n_modes: usize,
     damping_ratio: f64,
+    bending_loss: Option<&PlateBendingLoss>,
 ) -> Result<Vec<CompactBody>, AcousticRealizeError> {
     if n_modes == 0
         || !damping_ratio.is_finite()
@@ -681,12 +691,17 @@ fn harvest_radiators(
     }
     let n_keep = n_modes.min(report.modes.len());
     let mut out = Vec::with_capacity(n_keep);
+    let mut bending_zetas = Vec::with_capacity(n_keep);
     for pair in report.modes.iter().take(n_keep) {
         let omega = pair.lambda.max(0.0).sqrt();
         if !(omega > 0.0) {
             continue;
         }
         out.push(projection.mode(model, &pair.phi, omega, damping_ratio)?);
+        bending_zetas.push(match bending_loss {
+            Some(loss) => loss.modal_zeta(model, &pair.phi, omega)?,
+            None => 0.0,
+        });
     }
     if out.len() >= 2 {
         let w0 = out[0].omega;
@@ -706,7 +721,161 @@ fn harvest_radiators(
             what: "no usable plate radiators after harvesting",
         });
     }
+    for (body, bending_zeta) in out.iter_mut().zip(bending_zetas) {
+        body.zeta += bending_zeta;
+    }
     Ok(out)
+}
+
+// Weak-loss modal projection: only bending stores the strain energy associated
+// with the material bending laws. Static geometric stiffness changes
+// the mode and its total energy, but must not acquire that loss angle.
+// See Fedorov et al., https://arxiv.org/abs/1807.07086, Eq. (1), Sec. II.
+struct PlateBendingLaw {
+    thermal: Option<ThermoelasticZener>,
+    viscous: Option<IsotropicPlateBendingViscosity>,
+    viscous_time_s: f64,
+    thickness: f64,
+}
+
+impl PlateBendingLaw {
+    fn new(plate: &ThinPlate) -> Result<Self, AcousticRealizeError> {
+        let thermal = admitted_thermoelastic(plate)?;
+        let mut viscous_time_s = 0.0;
+        if let Some(viscous) = plate.kelvin_voigt_bending {
+            let (lo, hi) = viscous.omega_band_rad_s;
+            viscous_time_s = viscous.viscosity_pa_s / plate.e1_pa;
+            if !has_isotropic_elasticity(plate) || plate.damping_ratio != 0.0 {
+                return Err(AcousticRealizeError::InvalidDescription {
+                    what: "Kelvin-Voigt plate loss requires isotropic elasticity and zero authored damping",
+                });
+            }
+            if !viscous.viscosity_pa_s.is_finite()
+                || viscous.viscosity_pa_s < 0.0
+                || !viscous_time_s.is_finite()
+                || (viscous.viscosity_pa_s > 0.0 && viscous_time_s == 0.0)
+                || !lo.is_finite()
+                || !hi.is_finite()
+                || lo < 0.0
+                || hi < lo
+            {
+                return Err(AcousticRealizeError::InvalidDescription {
+                    what: "plate viscosity and angular-frequency applicability must be finite and nonnegative with an ordered band",
+                });
+            }
+        }
+        Ok(Self {
+            thermal,
+            viscous: plate.kelvin_voigt_bending,
+            viscous_time_s,
+            thickness: plate.thickness_m,
+        })
+    }
+
+    fn is_active(&self) -> bool {
+        self.thermal.is_some() || self.viscous.is_some()
+    }
+
+    fn zeta(&self, omega: f64) -> Result<f64, AcousticRealizeError> {
+        let mut zeta = match self.thermal {
+            Some(law) => thermoelastic_zeta(law, omega, self.thickness)?,
+            None => 0.0,
+        };
+        if let Some(viscous) = self.viscous {
+            let (lo, hi) = viscous.omega_band_rad_s;
+            if !omega.is_finite() || omega < lo || omega > hi {
+                return Err(AcousticRealizeError::InvalidDescription {
+                    what: "retained plate frequency lies outside material bending-loss applicability",
+                });
+            }
+            // Moment = D (curvature + (eta/E) curvature_rate), hence
+            // C_b = (eta/E) K_b. The caller projects the bending/total energy
+            // ratio, so this does not damp conservative geometric stiffness.
+            zeta += 0.5 * self.viscous_time_s * omega;
+        }
+        if !zeta.is_finite() {
+            return Err(AcousticRealizeError::InvalidDescription {
+                what: "plate bending loss is unrepresentable",
+            });
+        }
+        Ok(zeta)
+    }
+}
+
+struct PlateBendingLoss {
+    law: PlateBendingLaw,
+    bending: Option<PlateModel>,
+}
+
+impl PlateBendingLoss {
+    fn new(
+        plate: ThinPlate,
+        mesh: &PlateMesh,
+        section: &PlateSection,
+        boundary: &[usize],
+    ) -> Result<Option<Self>, AcousticRealizeError> {
+        let law = PlateBendingLaw::new(&plate)?;
+        if !law.is_active() {
+            return Ok(None);
+        }
+        let bending = if plate.pretension_n_m == 0.0 {
+            None
+        } else {
+            Some(
+                assemble(
+                    mesh,
+                    section,
+                    boundary,
+                    &[],
+                    &AssemblyOptions {
+                        pretension: 0.0,
+                        support: if plate.clamped {
+                            EdgeSupport::Clamped
+                        } else {
+                            EdgeSupport::SimplySupported
+                        },
+                    },
+                )
+                .map_err(map_plate)?,
+            )
+        };
+        Ok(Some(Self { law, bending }))
+    }
+
+    fn modal_zeta(
+        &self,
+        total: &PlateModel,
+        phi: &[f64],
+        omega: f64,
+    ) -> Result<f64, AcousticRealizeError> {
+        let fraction = if let Some(bending) = &self.bending {
+            let mut k_phi = vec![0.0; phi.len()];
+            bending.k.spmv(phi, &mut k_phi);
+            let bending_energy = phi.iter().zip(&k_phi).map(|(p, k)| p * k).sum();
+            total.k.spmv(phi, &mut k_phi);
+            let total_energy = phi.iter().zip(&k_phi).map(|(p, k)| p * k).sum();
+            bending_energy_fraction(bending_energy, total_energy)?
+        } else {
+            1.0
+        };
+        Ok(fraction * self.law.zeta(omega)?)
+    }
+}
+
+fn bending_energy_fraction(bending: f64, total: f64) -> Result<f64, AcousticRealizeError> {
+    let fraction = bending / total;
+    if !bending.is_finite()
+        || bending < 0.0
+        || !total.is_finite()
+        || total <= 0.0
+        || !fraction.is_finite()
+    {
+        return Err(AcousticRealizeError::InvalidDescription {
+            what: "bending-loss participation requires finite nonnegative bending and positive total modal energy",
+        });
+    }
+    // Stable compressive prestress may produce a ratio above one; do not clamp it.
+    Ok(fraction)
 }
 
 // P1 surface quadrature on the DKT nodal displacement trace. The production
@@ -1154,6 +1323,72 @@ pub struct ResolvedPlateSpecimen {
 }
 
 impl ResolvedPlateSpecimen {
+    /// Select proportional isotropic Kelvin–Voigt bending at the resolved state.
+    /// Requires `kelvin_voigt_bending_viscosity` [Pa s] and constant rho/E/nu
+    /// claims. The viscosity claim must declare an omega band [rad/s], intersected
+    /// with every coefficient's band. Other state coordinates remain frozen.
+    /// The viscous tensor shares the elastic Poisson ratio; separate bulk/shear
+    /// relaxation, nonlinear membrane viscosity and thermal evolution are absent.
+    /// Original property receipts remain available through [`Self::material`].
+    ///
+    /// # Errors
+    /// Missing/nonconstant coefficients, wrong dimensions, anisotropy, authored
+    /// damping, or invalid viscosity/applicability refuse. Actual equilibrium
+    /// modal frequencies are checked by realization, including zero viscosity.
+    pub fn with_kelvin_voigt_bending_loss(mut self) -> Result<Self, AcousticRealizeError> {
+        let refuse = |what| AcousticRealizeError::InvalidDescription { what };
+        if self.model != PlateMaterialModel::Isotropic {
+            return Err(refuse(
+                "material plate bending viscosity requires isotropic elasticity",
+            ));
+        }
+        let property = self
+            .material
+            .property(KELVIN_VOIGT_BENDING_VISCOSITY_PROPERTY)
+            .ok_or_else(|| refuse("material plate loss needs kelvin_voigt_bending_viscosity"))?;
+        let viscosity_pa_s = plate_property(
+            &self.material,
+            KELVIN_VOIGT_BENDING_VISCOSITY_PROPERTY,
+            DynViscosity::DIMS,
+        )?;
+        let mut band = property
+            .answer()
+            .evidence
+            .model
+            .validity
+            .bound("omega")
+            .ok_or_else(|| {
+                refuse("material plate viscosity needs an explicit omega band in rad/s")
+            })?;
+        for key in [
+            DENSITY_PROPERTY,
+            YOUNG_MODULUS_PROPERTY,
+            POISSON_RATIO_PROPERTY,
+            KELVIN_VOIGT_BENDING_VISCOSITY_PROPERTY,
+        ] {
+            let answer = self
+                .material
+                .property(key)
+                .ok_or_else(|| refuse("material plate loss needs density, E, nu and viscosity"))?
+                .answer();
+            if answer.receipt.decision != EvaluationDecision::ConstantWithinValidity {
+                return Err(refuse(
+                    "Kelvin-Voigt plate coefficients must be validity-wide scalar constants",
+                ));
+            }
+            if let Some((lo, hi)) = answer.evidence.model.validity.bound("omega") {
+                band = (band.0.max(lo), band.1.min(hi));
+            }
+        }
+        self.plate.kelvin_voigt_bending = Some(IsotropicPlateBendingViscosity {
+            viscosity_pa_s,
+            omega_band_rad_s: band,
+            material_state_identity: Some(self.material.identity()),
+        });
+        PlateBendingLaw::new(&self.plate)?;
+        Ok(self)
+    }
+
     /// Rotated constitutive section for an element or region of a plate chart.
     /// This projection carries numeric operator inputs; retain this specimen
     /// alongside the chart to retain its material receipts. Its full-rectangle
@@ -1226,6 +1461,9 @@ pub fn with_uniform_plate_material_state(
     thickness_constraint: PlateThicknessConstraint,
 ) -> Result<ResolvedPlateSpecimen, AcousticRealizeError> {
     let refuse = |what| AcousticRealizeError::InvalidDescription { what };
+    // A selected viscosity law survives a material swap, its numeric inputs do
+    // not. Re-resolve below from this exact state's property receipts.
+    let bind_viscosity = plate.kelvin_voigt_bending.take().is_some();
     if plate.thermoelastic.is_some() {
         return Err(refuse(
             "elastic plate rebind requires a fresh thermal-loss binding",
@@ -1276,14 +1514,19 @@ pub fn with_uniform_plate_material_state(
     ] {
         identity.update(&value.to_bits().to_le_bytes());
     }
-    Ok(ResolvedPlateSpecimen {
+    let specimen = ResolvedPlateSpecimen {
         plate,
         material: state.clone(),
         model,
         thickness_constraint,
         mass_kg,
         identity: identity.finalize(),
-    })
+    };
+    if bind_viscosity {
+        specimen.with_kelvin_voigt_bending_loss()
+    } else {
+        Ok(specimen)
+    }
 }
 
 fn bind_plate_elasticity(
@@ -1367,6 +1610,11 @@ pub fn with_isotropic_thermoelastic_state(
     state: &IsotropicThermoelasticStatePoint,
 ) -> Result<ThinPlate, AcousticRealizeError> {
     require_isotropic_thermoelastic(&plate)?;
+    if plate.kelvin_voigt_bending.is_some() {
+        return Err(AcousticRealizeError::InvalidDescription {
+            what: "thermal plate rebind requires a fresh material bending-loss binding",
+        });
+    }
     let law = state.law();
     plate.density_kg_m3 = law.rho;
     plate.e1_pa = law.e;
@@ -1717,6 +1965,7 @@ mod tests {
                 conductivity_w_m_k: 100.0,
                 state_identity: None, // authored numerical fixture, not measured material data
             }),
+            kelvin_voigt_bending: None,
             n_modes: 1,
             geometric_nonlinearity: false,
             pretension_n_m: 0.0,
@@ -1817,6 +2066,268 @@ mod tests {
     }
 
     #[test]
+    fn g1_thermoelastic_pretension_dilution_and_ringdown_match_sine_solution() {
+        let mut plate = thermal_plate();
+        plate.pretension_n_m = 50_000.0;
+        plate.thermoelastic.as_mut().unwrap().linear_expansion_per_k = 2e-4;
+        let k2 = core::f64::consts::PI.powi(2)
+            * (plate.length_m.recip().powi(2) + plate.width_m.recip().powi(2));
+        let d = plate.e1_pa * plate.thickness_m.powi(3) / (12.0 * (1.0 - plate.nu12.powi(2)));
+        let fraction = d * k2 / (d * k2 + plate.pretension_n_m);
+        let omega = ((d * k2.powi(2) + plate.pretension_n_m * k2)
+            / (plate.density_kg_m3 * plate.thickness_m))
+            .sqrt();
+        let zeta = fraction * independent_zener_zeta(plate, omega);
+        assert!(fraction < 0.5, "fixture must distinguish undiluted loss");
+        let body = VkBody::from_plate(plate).unwrap();
+        let (_, r, _) = body.sys.structure();
+        assert!((r[3] / (2.0 * omega * zeta) - 1.0).abs() < 1e-12);
+
+        // Infinitesimal free vibration removes quartic membrane effects. Check
+        // the actual stepped state against the independent damped oscillator,
+        // including its phase; a post-hoc amplitude envelope cannot pass this.
+        let q0 = 1e-10;
+        let duration = 0.01;
+        let wd = omega * (1.0 - zeta * zeta).sqrt();
+        let envelope = (-zeta * omega * duration).exp();
+        let q_exact =
+            q0 * envelope * ((wd * duration).cos() + zeta * omega / wd * (wd * duration).sin());
+        let v_exact = -q0 * envelope * omega * omega / wd * (wd * duration).sin();
+        let mut errors = Vec::new();
+        for steps in [1000, 2000] {
+            let dt = duration / steps as f64;
+            let mut x = vec![q0, 0.0];
+            for _ in 0..steps {
+                x = fs_phs::step(&body.sys, &x, &[0.0], dt).unwrap().x;
+            }
+            errors
+                .push(((x[0] - q_exact).powi(2) + ((x[1] - v_exact) / omega).powi(2)).sqrt() / q0);
+        }
+        assert!(
+            errors[1] < errors[0] / 3.5,
+            "order-two ringdown: {errors:?}"
+        );
+        assert!(
+            errors[1] < 5e-4,
+            "absolute phase/state accuracy: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn g1_kelvin_voigt_sine_ringdown_matches_constitutive_equation() {
+        for pretension in [0.0, 50_000.0] {
+            let mut plate = thermal_plate();
+            plate.thermoelastic = None;
+            plate.pretension_n_m = pretension;
+            plate.kelvin_voigt_bending = Some(IsotropicPlateBendingViscosity {
+                viscosity_pa_s: 2e6,
+                omega_band_rad_s: (0.0, 1e6),
+                material_state_identity: None,
+            });
+            let k2 = core::f64::consts::PI.powi(2)
+                * (plate.length_m.recip().powi(2) + plate.width_m.recip().powi(2));
+            let section_factor = plate.thickness_m.powi(3) / (12.0 * (1.0 - plate.nu12.powi(2)));
+            let mass_per_area = plate.density_kg_m3 * plate.thickness_m;
+            let omega2 =
+                (plate.e1_pa * section_factor * k2.powi(2) + pretension * k2) / mass_per_area;
+            // Direct plane-stress Kelvin-Voigt equation: rho*h*w_tt +
+            // eta*h^3/[12(1-nu^2)] Laplacian^2(w_t) + D Laplacian^2(w) - T Laplacian(w) = 0.
+            let c = 2e6 * section_factor * k2.powi(2) / mass_per_area;
+            let body = VkBody::from_plate(plate).unwrap();
+            assert!((body.sys.structure().1[3] / c - 1.0).abs() < 1e-12);
+            let q0 = 1e-10;
+            let duration = 0.01;
+            let wd = (omega2 - 0.25 * c * c).sqrt();
+            let envelope = (-0.5 * c * duration).exp();
+            let q_exact =
+                q0 * envelope * ((wd * duration).cos() + c / (2.0 * wd) * (wd * duration).sin());
+            let v_exact = -q0 * envelope * omega2 / wd * (wd * duration).sin();
+            let mut errors = Vec::new();
+            for steps in [1000, 2000] {
+                let mut x = vec![q0, 0.0];
+                let initial_energy = body.sys.hamiltonian(&x);
+                for _ in 0..steps {
+                    x = fs_phs::step(&body.sys, &x, &[0.0], duration / steps as f64)
+                        .unwrap()
+                        .x;
+                }
+                assert!(body.sys.hamiltonian(&x) < initial_energy);
+                errors.push(
+                    ((x[0] - q_exact).powi(2) + (x[1] - v_exact).powi(2) / omega2).sqrt() / q0,
+                );
+            }
+            assert!(
+                errors[1] < errors[0] / 3.5,
+                "order-two state/phase convergence: {errors:?}"
+            );
+            assert!(errors[1] < 5e-4, "analytic ringdown: {errors:?}");
+        }
+    }
+
+    #[test]
+    fn g0_kelvin_voigt_plate_checks_all_retained_frequencies_and_inputs() {
+        let mut plate = thermal_plate();
+        plate.thermoelastic = None;
+        plate.kelvin_voigt_bending = Some(IsotropicPlateBendingViscosity {
+            viscosity_pa_s: 0.0, // zero strength still retains physical applicability
+            omega_band_rad_s: (0.0, 1e6),
+            material_state_identity: None,
+        });
+        for defect in 0..6 {
+            let mut invalid = plate;
+            match defect {
+                0 => {
+                    invalid
+                        .kelvin_voigt_bending
+                        .as_mut()
+                        .unwrap()
+                        .viscosity_pa_s = -1.0
+                }
+                1 => {
+                    invalid
+                        .kelvin_voigt_bending
+                        .as_mut()
+                        .unwrap()
+                        .viscosity_pa_s = f64::NAN
+                }
+                2 => {
+                    invalid
+                        .kelvin_voigt_bending
+                        .as_mut()
+                        .unwrap()
+                        .omega_band_rad_s = (10.0, 1.0)
+                }
+                3 => invalid.e2_pa *= 0.5,
+                4 => invalid.g12_pa *= 0.5,
+                _ => invalid.damping_ratio = 0.002,
+            }
+            assert!(certified_radiators(invalid).is_err());
+            assert!(VkBody::from_plate(invalid).is_err());
+        }
+        for clamped in [false, true] {
+            plate.clamped = clamped;
+            let mut narrow = plate;
+            let linear = certified_radiators(plate).unwrap();
+            narrow
+                .kelvin_voigt_bending
+                .as_mut()
+                .unwrap()
+                .omega_band_rad_s
+                .1 = linear[0].omega * 1.01;
+            assert!(certified_radiators(narrow).is_ok());
+            narrow.n_modes = 2;
+            assert!(
+                certified_radiators(narrow).is_err(),
+                "higher linear mode must be checked"
+            );
+
+            let vk = VkBody::from_plate(plate).unwrap();
+            let omega = (vk.sys.effort(&[1e-12, 0.0])[0] / 1e-12).sqrt();
+            narrow.n_modes = 1;
+            narrow
+                .kelvin_voigt_bending
+                .as_mut()
+                .unwrap()
+                .omega_band_rad_s
+                .1 = omega * 1.01;
+            assert!(VkBody::from_plate(narrow).is_ok());
+            narrow.n_modes = 2;
+            assert!(
+                VkBody::from_plate(narrow).is_err(),
+                "higher nonlinear reference mode must be checked"
+            );
+        }
+    }
+
+    #[test]
+    fn g1_thermoelastic_fe_dilution_uses_actual_prestressed_mode_energy() {
+        for (clamped, sampled_vk) in [(false, false), (true, false), (true, true)] {
+            let mut plate = thermal_plate();
+            plate.clamped = clamped;
+            plate.pretension_n_m = 50_000.0;
+            plate.damping_ratio = 0.003; // must not be diluted with thermal loss
+            let (nx, ny) = if sampled_vk { (8, 8) } else { (5, 4) };
+            let mesh = PlateMesh::rectangle(plate.length_m, plate.width_m, nx, ny);
+            let section = plane_stress_section(plate).unwrap();
+            let model = assemble(
+                &mesh,
+                &section,
+                &PlateMesh::rectangle_boundary(nx, ny),
+                &[],
+                &AssemblyOptions {
+                    pretension: plate.pretension_n_m,
+                    support: if clamped {
+                        EdgeSupport::Clamped
+                    } else {
+                        EdgeSupport::SimplySupported
+                    },
+                },
+            )
+            .unwrap();
+            let w11 = ss_omega11(&section, plate.length_m, plate.width_m);
+            let report = modes(
+                &model,
+                ((0.25 * w11).powi(2), (12.0 * w11).powi(2)),
+                &fs_modal::SliceOptions::default(),
+            )
+            .unwrap();
+            let pair = &report.modes[0];
+            let omega = pair.lambda.sqrt();
+            // Independent geometric-energy integral of the P1 displacement
+            // gradient. Subtract it from total energy; do not call the new
+            // bending-matrix projection or infer a fraction from frequency alone.
+            for scale in [1.0, -3.0] {
+                let phi: Vec<_> = pair.phi.iter().map(|p| scale * p).collect();
+                let mut kp = vec![0.0; phi.len()];
+                model.k.spmv(&phi, &mut kp);
+                let total: f64 = phi.iter().zip(kp).map(|(p, k)| p * k).sum();
+                let mut geometric = 0.0;
+                for tri in &mesh.tris {
+                    let [a, b, c] = tri.map(|i| mesh.nodes[i]);
+                    let twice_area = (b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0);
+                    let [wa, wb, wc] = tri.map(|i| model.dof_map[3 * i].map_or(0.0, |r| phi[r]));
+                    let gx = (wa * (b.1 - c.1) + wb * (c.1 - a.1) + wc * (a.1 - b.1)) / twice_area;
+                    let gy = (wa * (c.0 - b.0) + wb * (a.0 - c.0) + wc * (b.0 - a.0)) / twice_area;
+                    geometric += plate.pretension_n_m * 0.5 * twice_area * (gx * gx + gy * gy);
+                }
+                assert!(geometric / total > 0.1);
+                for (thermal, viscous) in [(true, false), (false, true), (true, true)] {
+                    let mut input = plate;
+                    let mut undiluted = if thermal {
+                        independent_zener_zeta(plate, omega)
+                    } else {
+                        0.0
+                    };
+                    if !thermal {
+                        input.thermoelastic = None;
+                    }
+                    if viscous {
+                        input.damping_ratio = 0.0;
+                        input.kelvin_voigt_bending = Some(IsotropicPlateBendingViscosity {
+                            viscosity_pa_s: 2e6,
+                            omega_band_rad_s: (0.0, 1e6),
+                            material_state_identity: None,
+                        });
+                        undiluted += 0.5 * 2e6 / plate.e1_pa * omega;
+                    }
+                    let expected = (1.0 - geometric / total) * undiluted;
+                    let actual = if sampled_vk {
+                        let body = VkBody::from_plate(input).unwrap();
+                        let (_, r, _) = body.sys.structure();
+                        r[3] / (2.0 * omega) - input.damping_ratio
+                    } else {
+                        certified_radiators(input).unwrap()[0].zeta - input.damping_ratio
+                    };
+                    assert!(
+                        (actual / expected - 1.0).abs() < 1e-9,
+                        "clamped={clamped}, sampled={sampled_vk}, scale={scale}, thermal={thermal}, viscous={viscous}: {actual} vs {expected}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn g1_shear_anisotropy_reaches_nonlinear_bending_and_bad_angles_refuse() {
         let mut plate = thermal_plate();
         plate.thermoelastic = None;
@@ -1851,6 +2362,7 @@ mod tests {
             material_angle_rad: 0.0,
             damping_ratio: 0.01,
             thermoelastic: None,
+            kelvin_voigt_bending: None,
             n_modes: 2,
             geometric_nonlinearity: false,
             pretension_n_m: 0.0,
@@ -1884,6 +2396,7 @@ mod tests {
             material_angle_rad: 0.0,
             damping_ratio: 0.01,
             thermoelastic: None,
+            kelvin_voigt_bending: None,
             n_modes: 1,
             geometric_nonlinearity: false,
             pretension_n_m: 0.0,
@@ -1930,6 +2443,7 @@ mod tests {
             material_angle_rad: 0.0,
             damping_ratio: 0.01,
             thermoelastic: None,
+            kelvin_voigt_bending: None,
             n_modes: 1,
             geometric_nonlinearity: true,
             pretension_n_m: 0.0,

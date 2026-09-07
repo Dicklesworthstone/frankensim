@@ -332,6 +332,20 @@ pub struct IsotropicPlateThermal {
     pub state_identity: Option<fs_blake3::ContentHash>,
 }
 
+/// Proportional isotropic Kelvin–Voigt bending: the viscous plane-stress
+/// tensor is `(eta / E)` times the elastic tensor, with the same Poisson ratio.
+/// This is an explicit constitutive assumption, not a general viscosity tensor.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct IsotropicPlateBendingViscosity {
+    /// Uniaxial bending viscosity eta [Pa s], finite and nonnegative.
+    pub viscosity_pa_s: f64,
+    /// Applicability of the frozen coefficients in angular frequency [rad/s].
+    /// Realization checks every retained equilibrium-mode frequency.
+    pub omega_band_rad_s: (f64, f64),
+    /// Optional material-state citation, without upgrading source authority.
+    pub material_state_identity: Option<fs_blake3::ContentHash>,
+}
+
 /// A thin orthotropic plate (a panel, a soundboard, a bulkhead).
 ///
 /// Modes are not data. Realization asks `fs-plate` + `fs-modal` for
@@ -365,6 +379,10 @@ pub struct ThinPlate {
     /// cannot use this scalar law. Do not add it when thermal transport is
     /// already resolved or the authored damping already includes this loss.
     pub thermoelastic: Option<IsotropicPlateThermal>,
+    /// Material bending strain-rate loss, separate from thermal and radiation
+    /// losses. Requires isotropic elasticity and zero authored `damping_ratio`.
+    /// No nonlinear membrane viscosity or evolving thermal state is implied.
+    pub kelvin_voigt_bending: Option<IsotropicPlateBendingViscosity>,
     /// How many certified modes to keep.
     pub n_modes: usize,
     /// If true the plate is a von Karman modal pHS (`fs-nlmodal`),
