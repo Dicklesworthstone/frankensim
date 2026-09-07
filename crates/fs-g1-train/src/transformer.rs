@@ -120,6 +120,16 @@ impl Default for Config {
 /// `libm` is the same Rust source on every target, so routing through it makes
 /// a trained policy mean the same thing everywhere it runs. `sqrt` is exempt:
 /// IEEE-754 requires it to be correctly rounded, so it already agrees.
+///
+/// The workspace's own answer to this is `fs_math::det`, which is stricter —
+/// built from correctly-rounded operations only, with a cross-ISA golden hash
+/// behind it — and it is what the walking owner uses. It is deliberately not
+/// used here: `det` is f64 throughout and this is the f32 hot path, called for
+/// every attention score and every MLP element of every step, so routing it
+/// through `det` would mean a widen/narrow round trip in the innermost loop of
+/// a search that runs thousands of rollouts. `libm` gives the same
+/// cross-target determinism at f32 width. Anything here that moves to f64
+/// should use `det` instead.
 mod portable {
     #[inline]
     pub fn exp(x: f32) -> f32 {
