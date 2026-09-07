@@ -1634,9 +1634,10 @@ mod schema_two_wasm {
             self.inner.export_weights()
         }
 
-        /// Resume from a head saved earlier. Returns false if the width is
-        /// wrong or the head does not beat the tuned controller.
-        pub fn seed_head(&mut self, head: &[f64]) -> bool {
+        /// Resume from a head saved earlier. Returns the objective it scored
+        /// here; `f64::MAX` means the width was wrong or it did not complete.
+        /// It is adopted only if it beats this machine's tuned controller.
+        pub fn seed_head(&mut self, head: &[f64]) -> f64 {
             self.inner.seed_head(head)
         }
 

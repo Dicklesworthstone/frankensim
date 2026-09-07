@@ -105,6 +105,54 @@ impl Default for Config {
 
 // ─── Deterministic RNG (splitmix64) ───
 
+/// Transcendentals routed through `libm` instead of the host's.
+///
+/// `f32::exp`, `tanh`, `sin`, `cos` and `powf` in std call the platform libm,
+/// and those are different implementations on macOS and in the wasm build —
+/// neither is required to be correctly rounded, so they disagree in the last
+/// bits. The articulated-body owner is bit-identical across both targets
+/// (a zero-head rollout returns -63.463932777690914 on each), so this
+/// transformer was the ENTIRE divergence, and it was enough: a residual
+/// policy trained natively scored -114.82 there and fell over in a browser,
+/// because 720 steps of contact-rich dynamics amplifies a last-bit difference
+/// into a different trajectory.
+///
+/// `libm` is the same Rust source on every target, so routing through it makes
+/// a trained policy mean the same thing everywhere it runs. `sqrt` is exempt:
+/// IEEE-754 requires it to be correctly rounded, so it already agrees.
+///
+/// The workspace's own answer to this is `fs_math::det`, which is stricter —
+/// built from correctly-rounded operations only, with a cross-ISA golden hash
+/// behind it — and it is what the walking owner uses. It is deliberately not
+/// used here: `det` is f64 throughout and this is the f32 hot path, called for
+/// every attention score and every MLP element of every step, so routing it
+/// through `det` would mean a widen/narrow round trip in the innermost loop of
+/// a search that runs thousands of rollouts. `libm` gives the same
+/// cross-target determinism at f32 width. Anything here that moves to f64
+/// should use `det` instead.
+mod portable {
+    #[inline]
+    pub fn exp(x: f32) -> f32 {
+        libm::expf(x)
+    }
+    #[inline]
+    pub fn tanh(x: f32) -> f32 {
+        libm::tanhf(x)
+    }
+    #[inline]
+    pub fn sin(x: f32) -> f32 {
+        libm::sinf(x)
+    }
+    #[inline]
+    pub fn cos(x: f32) -> f32 {
+        libm::cosf(x)
+    }
+    #[inline]
+    pub fn powf(x: f32, y: f32) -> f32 {
+        libm::powf(x, y)
+    }
+}
+
 fn splitmix_uniform(state: &mut u64) -> f64 {
     *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
     let mut z = *state;
@@ -199,9 +247,9 @@ pub fn rope_in_place(x: &mut [f32], head_dim: usize, position: usize) {
     for h in 0..x.len() / head_dim {
         let base = h * head_dim;
         for i in 0..half {
-            let freq = 10000.0f32.powf(-2.0 * i as f32 / half as f32);
+            let freq = portable::powf(10000.0, -2.0 * i as f32 / half as f32);
             let angle = position as f32 * freq;
-            let (c, s) = (angle.cos(), angle.sin());
+            let (c, s) = (portable::cos(angle), portable::sin(angle));
             let x0 = x[base + i];
             let x1 = x[base + i + half];
             x[base + i] = x0 * c - x1 * s;
@@ -217,9 +265,9 @@ pub fn rope_backward(head_dim: usize, position: usize, dy: &[f32], dx: &mut [f32
     for h in 0..dy.len() / head_dim {
         let base = h * head_dim;
         for i in 0..half {
-            let freq = 10000.0f32.powf(-2.0 * i as f32 / half as f32);
+            let freq = portable::powf(10000.0, -2.0 * i as f32 / half as f32);
             let angle = position as f32 * freq;
-            let (c, s) = (angle.cos(), angle.sin());
+            let (c, s) = (portable::cos(angle), portable::sin(angle));
             let y0 = dy[base + i];
             let y1 = dy[base + i + half];
             dx[base + i] += y0 * c + y1 * s;
@@ -230,7 +278,7 @@ pub fn rope_backward(head_dim: usize, position: usize, dy: &[f32], dx: &mut [f32
 
 pub fn swiglu(gate: &[f32], value: &[f32], out: &mut [f32]) {
     for i in 0..out.len() {
-        out[i] = gate[i] / (1.0 + (-gate[i]).exp()) * value[i];
+        out[i] = gate[i] / (1.0 + portable::exp(-gate[i])) * value[i];
     }
 }
 
@@ -244,7 +292,7 @@ pub fn swiglu_backward(
 ) {
     for i in 0..dout.len() {
         let g = gate[i];
-        let sigmoid = 1.0 / (1.0 + (-g).exp());
+        let sigmoid = 1.0 / (1.0 + portable::exp(-g));
         let silu = g * sigmoid;
         dgate[i] += dout[i] * value[i] * sigmoid * (1.0 + g * (1.0 - sigmoid));
         dvalue[i] += dout[i] * silu;
@@ -890,7 +938,7 @@ fn head_policy(w: &[f32], h: &[f32], n_out: usize) -> Vec<f32> {
         for (c, hf) in h.iter().enumerate() {
             sum += w[r + c] * hf;
         }
-        *o = sum.tanh();
+        *o = portable::tanh(sum);
     }
     out
 }
@@ -927,7 +975,7 @@ fn attention_causal(
         }
         let mut sum = 0.0f32;
         for j in 0..count {
-            let e = (scores[j] - maxs).exp();
+            let e = portable::exp(scores[j] - maxs);
             scores[j] = e;
             sum += e;
         }
@@ -987,7 +1035,7 @@ fn attention_causal_backward_slot(
         }
         let mut sum = 0.0f32;
         for j in 0..count {
-            let e = (scores[j] - maxs).exp();
+            let e = portable::exp(scores[j] - maxs);
             scores[j] = e;
             sum += e;
         }

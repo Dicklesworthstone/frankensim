@@ -579,7 +579,11 @@ pub fn sphere_box_penetration(
     let dx = p[0] - center_m[0];
     let dy = p[1] - center_m[1];
     let dz = p[2] - center_m[2];
-    let (c, s) = (yaw_rad.cos(), yaw_rad.sin());
+    // det, not the host libm: this runs inside the obstacle guard, so it is on
+    // the trajectory whenever a roster is loaded, and a platform-dependent
+    // rotation would make the same scene resolve differently on different
+    // targets.
+    let (s, c) = det::sin_cos(yaw_rad);
     // world -> box frame: rotate by -yaw about Z
     let lx = c * dx + s * dy;
     let ly = -s * dx + c * dy;
@@ -1490,7 +1494,7 @@ impl G1WalkingEvaluator {
             return Err(G1WalkingError::NonFiniteObjective);
         }
         let bounded_shaping_score =
-            SHAPING_SCORE_LIMIT * (raw_shaping_score / SHAPING_SCORE_SCALE).tanh();
+            SHAPING_SCORE_LIMIT * det::tanh(raw_shaping_score / SHAPING_SCORE_SCALE);
         // Per-step survival bonus (cmaes-pvz, v068): the optimizer cannot game
         // a single shaping rollup by collapsing early, because longer survival
         // is visibly cheaper (bounded by SURVIVAL_BONUS_LIMIT = 0.4 * 720 = 288,
