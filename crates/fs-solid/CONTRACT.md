@@ -210,9 +210,9 @@ stress, target frame, rotation and both numerical outputs under
 target covariance [Pa^2] or the unchanged source unknown reason. G3 compares
 all six source conventions and both joint policies against a full-rank
 twelve-realization ensemble transformed as full tensors and passed through
-actual clamped thermal displacement/stress recovery. G0 retains NoBlock,
-PartialMembership and UnstatedMarginal, checks receipt tampering, frame errors,
-shear overflow and complete subnormal loss. These are synthetic numerical tests.
+actual clamped thermal displacement/stress recovery and checks receipt tampering.
+G0 retains NoBlock, PartialMembership and UnstatedMarginal and checks frame
+errors, shear overflow and complete subnormal loss. These are synthetic numerical tests.
 This is source-data covariance conditional on fixed orientation, not solved-field
 uncertainty, a confidence/domain bound, material/frame calibration, propagation
 of uncertain temperature/stiffness/orientation, or experimental validation.
